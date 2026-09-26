@@ -522,14 +522,36 @@ async def worktree_remove(
             unmerged=has_unmerged,
             dirty=len(dirty or []),
         )
+        wt_path = st.get("worktreePath") or t.get("worktreePath")
+        branch = st.get("branchName") or t.get("worktreeBranch")
+        # BAT's worktree:remove silently "succeeds" when its worktree manager has no record for the session
+        # (e.g. a failover session that reused an existing worktree, or after a host restart). Register first.
+        if not isinstance(await c.invoke("worktree:status", {"sessionId": sid}), dict) and wt_path and branch:
+            e = registry.get(host, sid) or {}
+            await c.invoke(
+                "worktree:rehydrate",
+                {
+                    "sessionId": sid,
+                    "cwd": e.get("origin_cwd") or t.get("_origin_cwd") or t.get("cwd"),
+                    "worktreePath": wt_path,
+                    "branchName": branch,
+                },
+            )
+            rehydrated = True
         r = await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": bool(delete_branch)})
         ok = isinstance(r, dict) and r.get("success") is True
-        audit.record(**base, channel="worktree:remove", phase="result", ok=ok)
+        still_there = False
+        if ok and wt_path:
+            root = await c.invoke("git:getRoot", {"cwd": wt_path})
+            still_there = bool(root) and str(root).rstrip("/") == str(wt_path).rstrip("/")
+            ok = not still_there
+        audit.record(**base, channel="worktree:remove", phase="result", ok=ok, still_there=still_there)
         if registry.get(host, sid):
             registry.update(host, sid, status="removed" if ok else "active")
     return {
         **report,
         "removed": ok,
+        **({"reason": "host reported success but the worktree folder is still there"} if still_there else {}),
         "branch_deleted": bool(delete_branch and ok),
         "rehydrated": rehydrated,
         "note": "the agent session itself is not stopped (the connector never exposes stop/reset)",

@@ -164,3 +164,15 @@ def test_fanout_plan():
     r = orchestrate.fanout_plan(plan)
     assert [t["title"] for t in r["tasks"]] == ["Add login API", "Fix CSS"]
     assert "with tests" in r["tasks"][0]["prompt"] and "Do not merge" in r["tasks"][0]["prompt"]
+
+
+async def test_remove_registers_worktree_first(fleet_factory, mock):
+    """BAT's worktree:remove silently succeeds without a record for the session: register it first, then verify."""
+    f = fleet_factory(writes=True, orchestrate=True)
+    r = await orchestrate.session_start(f, "h1", "demo-project", "codex", confirm=True)
+    sid = r["session_id"]
+    mock.codex_worktrees[sid] = mock.worktrees.pop(sid)  # only the Codex runtime knows the worktree
+    out = await orchestrate.worktree_remove(f, "h1", sid, confirm=True)
+    assert out["removed"] is True and out["rehydrated"] is True
+    assert "worktree:rehydrate" in mock.channels()
+    await f.close()

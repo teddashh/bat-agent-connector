@@ -6,6 +6,9 @@
 - Per-host `codex_model`: default model for Codex sessions started or failed over on that host.
 - `session_failover(instructions=..., archive_only=...)`: custom handoff steps, and successors whose branch cleanup
   keeps but never merges (to preserve superseded work).
+- Fix: `worktree_remove` (and cleanup) re-registers the worktree with BAT before removing it and verifies the folder
+  is gone. BAT's `worktree:remove` reports success without doing anything when its worktree manager has no record
+  for the session (e.g. a failover session that reused an existing worktree).
 
 ## 0.2.0 (unreleased)
 

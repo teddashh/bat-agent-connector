@@ -71,6 +71,8 @@ class MockBat:
                 },
             ],
         }
+        self.removed_paths: set[str] = set()
+        self.codex_worktrees: dict[str, dict] = {}
         self.metas: dict[str, dict | None] = {
             "sess-claude-0001": {
                 "cwd": "/srv/demo",
@@ -301,8 +303,19 @@ class MockBat:
         if ch == "worktree:status":
             return copy.deepcopy(self.worktrees.get(sid))
         if ch == "claude:get-worktree-status":
-            return None
+            return copy.deepcopy(self.codex_worktrees.get(sid))
         if ch == "worktree:rehydrate":
+            self.worktrees.setdefault(
+                sid,
+                {
+                    "diff": "",
+                    "branchName": p["branchName"],
+                    "worktreePath": p["worktreePath"],
+                    "sourceBranch": "main",
+                    "merged": False,
+                    "mergedKind": "unknown",
+                },
+            )
             return {"success": True}
         if ch == "worktree:merge":
             wt = self.worktrees[sid]
@@ -310,10 +323,12 @@ class MockBat:
             wt["merged"] = True
             return {"success": True, "strategy": p.get("strategy"), "branchName": wt["branchName"]}
         if ch == "worktree:remove":
-            self.worktrees.pop(sid, None)
+            wt = self.worktrees.pop(sid, None)
+            if wt:  # like BAT: without a record for the session nothing is removed, yet it reports success
+                self.removed_paths.add(wt["worktreePath"])
             return {"success": True}
         if ch == "git:getRoot":
-            return p["cwd"]
+            return None if p["cwd"] in self.removed_paths else p["cwd"]
         if ch == "git:status":
             return self.git_status.get(p["cwd"], [])
         if ch == "git:branch":
