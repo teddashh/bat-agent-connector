@@ -3,6 +3,8 @@
 
 [client]
 label = "BAT Agent Connector"          # how this client appears on the host
+human_name = "the user"                # name used in relayed messages and NEED-<NAME> status markers
+relay_name = "the assistant"           # who relays (labels the brief as its interpretation)
 
 [safety]
 audit_preview_chars = 0                # 0 = audit log stores only sha256 prefix + length of prompts

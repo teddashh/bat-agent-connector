@@ -142,6 +142,9 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 | `session_set_permissions(host, session_id, mode, confirm)` | `allow_all` (host must allow it) or `default`. Claude sessions are only switched while idle (switching mid-turn would end the turn); Codex applies it from its next turn. |
 | `approve_pending(host, confirm, dry_run?)` | Approves every pending permission prompt (not questions) with "don't ask again" and raises the session to allow-all. Only on `default_permission_mode = "allow_all"` hosts. |
 | `session_failover(host, session_id? \| all_exhausted, confirm, dry_run?, model?, force?, instructions?, archive_only?)` | Starts a Codex session that continues a quota-stopped Claude session: same worktree when there is one, handoff prompt with the original task, latest instruction, recent output and git state (credentials redacted). Idempotent. `model` defaults to the host's `codex_model`. `instructions` replaces the default "continue the task" steps (for example "only commit the work in progress"); `archive_only` makes cleanup keep that branch unmerged. |
+| `session_relay(host, message, confirm, workspace? \| session_id?, brief?, earlier?, channel?, thread?, request_fanout=0, dry_run?)` | Relays a human's message verbatim to the workspace's main session (or a given one), plus an optional brief labeled as the relayer's interpretation and the BAT-STATUS footer. `request_fanout=N` asks the session for a `bat-fanout` plan. Returns the rendered text. |
+| `fanout_plan_session(host, workspace, message, confirm, max_items=4, brief?)` | Starts a read-only Codex planner in the main checkout (for when the main session is busy or quota-stopped) that answers with a `bat-fanout` plan. |
+| `fanout_from_plan(host, session_id, confirm, dry_run?, agent="codex", model?, max_items=4)` | Starts one worktree session per task of the last `bat-fanout` block of that session, prompts unchanged, then cleans up a planner session. |
 | `session_cleanup(host, confirm, dry_run=true, session_id?)` | Decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE per orchestrated session behind hard gates, then acts (needs `auto_cleanup = true`). See docs/ORCHESTRATE.md. |
 
 ## CLI
@@ -174,6 +177,21 @@ batc cleanup box1                                     # dry run table; --apply -
 ```
 
 Every command accepts `--json`.
+
+## Relay, fan-out and status markers
+
+An assistant that relays a human's orders (e.g. from chat) should not rewrite or plan them. `session_relay` sends
+the message verbatim with an optional labeled brief; the coding session, which has the repo context, interprets
+it, fixes unclear asks and states its interpretation in one line. For parallel work the session (or a read-only
+planner) writes a `bat-fanout` block:
+
+```bat-fanout
+[{"title": "short title", "prompt": "self-contained task prompt", "area": "files/modules touched"}]
+```
+
+and `fanout_from_plan` starts exactly those tasks. Every stop ends with one line: `BAT-STATUS: MILESTONE <name>`,
+`BAT-STATUS: CONTINUE <next step>` or `BAT-STATUS: NEED-<HUMAN> <reason>`; triage and cleanup prefer it over
+heuristics.
 
 ## Safety model (short)
 

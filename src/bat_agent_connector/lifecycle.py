@@ -38,6 +38,7 @@ from .orchestrate import (
 from .orchestrate import (
     _guard as _orch_guard,
 )
+from .relay import build_relay, parse_fanout, parse_status, status_footer
 from .safety import Audit
 from .service import (
     _err,
@@ -810,6 +811,12 @@ def _apply_markers(g: dict | None, final: str) -> dict | None:
         return None
     mk = completion_markers(final)
     g["markers"] = mk
+    st = parse_status(final)
+    if st and st["kind"] == "MILESTONE" and g["claims_done"] < 0.9:
+        g["bat_status"] = st
+        g["claims_done_jev"] = g["claims_done"]
+        g["claims_done"] = 0.9
+        return g
     if mk["claims_done"] and g["claims_done"] < 0.9:
         g["claims_done_jev"] = g["claims_done"]
         g["claims_done"] = 0.9
@@ -868,6 +875,9 @@ async def _evaluate(
         )
     if e.get("status") == "superseded":
         return decide("KEEP", "superseded; successor not found in registry")
+    if cls.get("source") == "marker" and (cls.get("bat_status") or {}).get("kind") == "NEED_HUMAN" and not snap["streaming"]:
+        bs = cls["bat_status"]
+        return decide("ESCALATE", f"session needs a human: {bs['detail'] or bs['label']}"[:200])
     if cls["state"] in ("waiting_permission", "waiting_question"):
         return decide("KEEP", f"mid-turn, {cls['state'].replace('_', ' ')}: {cls.get('evidence') or ''}"[:160])
     if cls["state"] == "working" or snap["streaming"]:
@@ -893,6 +903,15 @@ async def _evaluate(
             return decide("CLEAN_ONLY", "not loaded and nothing to remove (registry only)")
         if e.get("status") == "removed":
             return decide("CLEAN_ONLY", "worktree already removed; agent idle", stop=True)
+        if e.get("role") == "planner":
+            return decide("CLEAN_ONLY", "fan-out planning session finished (read-only, main checkout)", stop=True)
+        st = parse_status(final)
+        if st and st["kind"] == "CONTINUE":
+            return decide("KEEP", f"session reports BAT-STATUS: CONTINUE {st['detail']}"[:160])
+        if st and st["kind"] == "NEED_HUMAN":
+            return decide("ESCALATE", f"session needs a human: {st['detail'] or st['label']}"[:200])
+        if st and st["kind"] == "MILESTONE":
+            return decide("CLEAN_ONLY", f"idle in main checkout, BAT-STATUS: MILESTONE {st['detail']}"[:160], stop=True)
         g = _apply_markers(
             await jev.merge_gate(task, final, "(no diff: session works in the main checkout)", str(tests)),
             final,
@@ -964,6 +983,11 @@ async def _evaluate(
         return decide("ESCALATE", "main checkout has uncommitted changes")
     if tests["last_failed"]:
         return decide("ESCALATE", f"last test run failed: {tests['last'].get('command')}")
+    st = parse_status(final)
+    if st and st["kind"] == "CONTINUE":
+        return decide("KEEP", f"session reports BAT-STATUS: CONTINUE {st['detail']}"[:160])
+    if st and st["kind"] == "NEED_HUMAN":
+        return decide("ESCALATE", f"session needs a human: {st['detail'] or st['label']}"[:200])
     g = _apply_markers(await jev.merge_gate(task, final, diff, str(tests)), final)
     row["jev"] = g
     if g is None:
@@ -1125,7 +1149,7 @@ async def session_cleanup(
     esc = [r for r in rows if r.get("decision") == "ESCALATE"]
     summary = None
     if esc:
-        summary = f"{len(esc)} item(s) need Ted on {host}: " + "; ".join(
+        summary = f"{len(esc)} item(s) need {getattr(getattr(fleet, 'config', None), 'human_name', None) or 'a human'} on {host}: " + "; ".join(
             f"{r['session_id'][:8]} {r.get('workspace') or ''} {r.get('branch') or ''}: {' / '.join(r.get('reasons') or [])}"
             for r in esc
         )
@@ -1142,3 +1166,183 @@ async def session_cleanup(
         "push": "not performed: BAT's remote protocol has no push/PR channel; merges are local to the host's "
         "main checkout (push or open a PR from the host if the repo needs it)",
     }
+
+
+# --------------------------------------------------------------------------- verbatim relay + seat-planned fan-out
+def _retired(host: str) -> set[str]:
+    out = set()
+    for e in registry.list_entries(host):
+        if e.get("status") not in ("active", None) or e.get("superseded_by"):
+            out.add(e["session_id"])
+        if e.get("failover_of"):
+            out.add(e["failover_of"])
+    return out
+
+
+async def main_session(fleet: Fleet, host: str, workspace: str) -> dict | None:
+    """The workspace's main session: the most recently active Claude/Codex session in the main checkout that
+    the connector has not retired (falls back to the most recent worktree session)."""
+    from .service import sessions_list
+
+    rows = (await sessions_list(fleet, host, workspace=workspace, limit=200, check_pending="none"))["sessions"]
+    gone = _retired(host)
+    planners = {e["session_id"] for e in registry.list_entries(host) if e.get("role") == "planner"}
+    rows = [
+        r for r in rows
+        if r["session_id"] not in gone and r["session_id"] not in planners and r.get("agent_kind") in ("claude", "codex")
+    ]
+    main = [r for r in rows if not r.get("worktree_branch")] or rows
+    return main[0] if main else None
+
+
+async def _quota_stopped(fleet: Fleet, host: str, sid: str) -> bool:
+    from .service import session_read
+    from .triage import QUOTA_PATTERNS, match_any
+
+    msgs = (await session_read(fleet, host, sid, last_n=2))["messages"]
+    last = next((m for m in reversed(msgs) if m.get("role") not in ("user", "system")), None)
+    return bool(last and match_any(QUOTA_PATTERNS, last.get("text") or ""))
+
+
+async def session_relay(
+    fleet: Fleet,
+    host: str,
+    message: str,
+    workspace: str | None = None,
+    session_id: str | None = None,
+    channel: str | None = None,
+    thread: str | None = None,
+    earlier: list[str] | None = None,
+    brief: dict | str | None = None,
+    request_fanout: bool = False,
+    max_items: int | None = None,
+    confirm: bool = False,
+    dry_run: bool = False,
+    queue: bool = False,
+) -> dict:
+    """Send "original + brief" to a session (default: the workspace's main session): the person's message
+    VERBATIM, then the relay's labeled brief (its interpretation: goal/context/constraints/acceptance), a context
+    header, the seat instructions and the BAT-STATUS request; optionally ask for a ```bat-fanout plan instead
+    of doing the work. Never rewrites the message. dry_run renders the text without sending."""
+    from .service import session_send
+
+    if not (workspace or session_id):
+        raise WriteRefused("pass workspace (main session) or session_id")
+    cap = fleet.config.safety.max_start_per_call
+    n = max(1, min(cap, int(max_items or cap)))
+    target = None
+    if session_id:
+        target = {"session_id": session_id}
+    else:
+        target = await main_session(fleet, host, workspace)  # type: ignore[arg-type]
+        if target is None:
+            raise WriteRefused(f"no Claude/Codex session in workspace {workspace!r} on {host}")
+    sid = target["session_id"]
+    ws_name = workspace or target.get("workspace")
+    text = build_relay(
+        message, host=host, workspace=ws_name, channel=channel, thread=thread, earlier=earlier, brief=brief,
+        human_name=fleet.config.human_name, relay_name=fleet.config.relay_name,
+        request_fanout=request_fanout, max_items=n,
+    )
+    out: dict[str, Any] = {"host": host, "session_id": sid, "workspace": ws_name, "text": text,
+                           "request_fanout": request_fanout, "max_items": n}
+    if dry_run:
+        return {**out, "sent": False, "dry_run": True}
+    if await _quota_stopped(fleet, host, sid):
+        return {**out, "sent": False, "quota_stopped": True,
+                "next": "fail over (session_failover) or, for a fan-out plan, fanout_plan_session"}
+    try:
+        r = await session_send(fleet, host, sid, text, confirm, None, True, queue, tool="session_relay")
+    except TurnInFlight:
+        return {**out, "sent": False, "busy": True,
+                "next": "retry with queue=true, or for a fan-out plan use fanout_plan_session"}
+    return {**out, "sent": True, "result": r}
+
+
+PLANNER_PREFACE = (
+    "You are a read-only PLANNING session in the main checkout. Read the repository, its plan/docs and git "
+    "history as needed, but do not modify files, do not run commands that write, and do not commit or push. "
+    "Your only output is the fan-out plan requested below.\n\n"
+)
+
+
+async def fanout_plan_session(
+    fleet: Fleet,
+    host: str,
+    workspace: str,
+    message: str,
+    max_items: int | None = None,
+    channel: str | None = None,
+    thread: str | None = None,
+    earlier: list[str] | None = None,
+    brief: dict | str | None = None,
+    confirm: bool = False,
+) -> dict:
+    """Start a fresh Codex planning session (host codex_model, main checkout, read-only instructions) that
+    returns a ```bat-fanout plan for the person's verbatim message. Use when the main session is busy or
+    quota-stopped. After it answers, fanout_from_plan(session_id) starts the tasks and cleans the planner up."""
+    from .orchestrate import session_start
+
+    cap = fleet.config.safety.max_start_per_call
+    n = max(1, min(cap, int(max_items or cap)))
+    text = PLANNER_PREFACE + build_relay(
+        message, host=host, workspace=workspace, channel=channel, thread=thread, earlier=earlier, brief=brief,
+        human_name=fleet.config.human_name, relay_name=fleet.config.relay_name, request_fanout=True, max_items=n,
+    )
+    r = await session_start(fleet, host, workspace, "codex", confirm, text, None, False, "fan-out planner", "default")
+    if registry.get(host, r["session_id"]):
+        registry.update(host, r["session_id"], role="planner")
+    return {**r, "role": "planner", "max_items": n,
+            "next": "session_wait(session_id), then fanout_from_plan(host, session_id, confirm=true)"}
+
+
+async def fanout_from_plan(
+    fleet: Fleet,
+    host: str,
+    session_id: str,
+    confirm: bool = False,
+    dry_run: bool = False,
+    agent: str = "codex",
+    model: str | None = None,
+    max_items: int | None = None,
+    workspace: str | None = None,
+) -> dict:
+    """Start one worktree session per item of the latest ```bat-fanout block in a session's replies, with the
+    item's prompt verbatim (plus the BAT-STATUS request). Nothing is re-planned. A planner session made by
+    fanout_plan_session is cleaned up afterwards."""
+    from .orchestrate import session_start
+    from .service import session_read
+
+    r = await session_read(fleet, host, session_id, last_n=6, max_chars=60_000, max_message_chars=40_000)
+    ws_name = workspace or r.get("workspace")
+    replies = [m.get("text") or "" for m in reversed(r["messages"]) if m.get("role") not in ("user", "system")]
+    src = next((t for t in replies if "bat-fanout" in t.lower()), None)
+    if src is None:
+        raise WriteRefused("no ```bat-fanout block in the session's recent replies (not finished yet?)")
+    cap = fleet.config.safety.max_start_per_call
+    plan = parse_fanout(src, min(cap, int(max_items or cap)))
+    out: dict[str, Any] = {"host": host, "source_session": session_id, "workspace": ws_name, "plan": plan["tasks"]}
+    if dry_run:
+        return {**out, "dry_run": True}
+    footer = status_footer(fleet.config.human_name)
+    started = []
+    for tk in plan["tasks"]:
+        try:
+            s = await session_start(
+                fleet, host, ws_name, agent, confirm, f"{tk['prompt']}\n\n{footer}", model, True,
+                f"fanout {tk['index']}: {tk['title'][:40]}",
+            )
+            started.append({"task": tk["index"], "title": tk["title"], "session_id": s["session_id"],
+                            "branch": s.get("worktree_branch") or s.get("branch")})
+        except BatError as e:
+            started.append({"task": tk["index"], "title": tk["title"], "error": _err(e)})
+            break
+    out["started"] = started
+    e = registry.get(host, session_id)
+    if e and e.get("role") == "planner":
+        try:
+            d = await session_cleanup(fleet, host, confirm=True, dry_run=False, session_id=session_id, min_idle_s=0)
+            out["planner_cleanup"] = [x.get("actions") or x.get("decision") for x in d.get("decisions", [])]
+        except BatError as ex:
+            out["planner_cleanup"] = f"not cleaned: {_err(ex)}"
+    return out

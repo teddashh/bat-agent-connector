@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.3 (unreleased)
+
+- Relay mode: `session_relay` (CLI `batc relay`) forwards the human's message verbatim, followed by an optional
+  brief clearly labeled as the relaying assistant's interpretation (goal, context, constraints, acceptance
+  criteria). The session is told that the original is the source of truth, to fix unclear or suboptimal asks using
+  its own judgment and the project plan, to state its interpretation in one line, and to ask only when the ambiguity
+  is genuine and consequential. Earlier thread messages can be included verbatim. `[client] human_name` /
+  `relay_name` set the names used.
+- Session-planned fan-out: `session_relay(request_fanout=N)` asks the session for a ```` ```bat-fanout ```` JSON
+  plan; `fanout_plan_session` starts a read-only Codex planner in the main checkout when the main session is busy
+  or quota-stopped; `fanout_from_plan` starts one worktree per planned task with the prompt unchanged and cleans up
+  the planner. The relaying assistant never writes the plan.
+- Status markers: sessions are asked to end every stop with `BAT-STATUS: MILESTONE <name>`, `CONTINUE <next step>`
+  or `NEED-<HUMAN> <reason>`. Triage and cleanup prefer the marker over heuristics (MILESTONE counts as a completion
+  claim, CONTINUE keeps the session, NEED escalates).
+
 ## 0.2.2 (unreleased)
 
 - Merge gate is language-independent: Jev's "claims completion" question says the final output may be in any

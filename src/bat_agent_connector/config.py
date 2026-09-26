@@ -202,6 +202,8 @@ class Config:
     jev: JevConfig = field(default_factory=JevConfig)
     client_label: str = "BAT Agent Connector"
     path: Path | None = None
+    human_name: str | None = None  # [client] human_name: who relayed messages come from (NEED-<NAME> marker)
+    relay_name: str | None = None  # [client] relay_name: the relaying bot, named in relay headers
 
     def host(self, name: str) -> HostConfig:
         if name not in self.hosts:
@@ -296,8 +298,16 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
         base_url=base,
         api_key_env=str(j.get("api_key_env") or "TYPESAFE_API_KEY"),
     )
-    label = str((data.get("client") or {}).get("label") or "BAT Agent Connector")
-    return Config(hosts=hosts, safety=safety, jev=jev, client_label=label, path=path)
+    cl = data.get("client") or {}
+    label = str(cl.get("label") or "BAT Agent Connector")
+    human = str(cl.get("human_name") or "").strip() or None
+    if human and not re.fullmatch(r"[A-Za-z0-9 ._-]{1,40}", human):
+        raise ConfigError("[client] human_name must be 1-40 letters/digits/spaces")
+    relay_name = str(cl.get("relay_name") or "").strip() or None
+    if relay_name and not re.fullmatch(r"[A-Za-z0-9 ._-]{1,40}", relay_name):
+        raise ConfigError("[client] relay_name must be 1-40 letters/digits/spaces")
+    return Config(hosts=hosts, safety=safety, jev=jev, client_label=label, path=path, human_name=human,
+                  relay_name=relay_name)
 
 
 def load_config(path: str | Path | None = None) -> Config:

@@ -1,7 +1,7 @@
 ---
 name: bat-agent-connector
 description: Use this when you need to check on, read, wait for, or (only when explicitly enabled and asked) nudge Claude Code / Codex agent sessions running in Better Agent Terminal (BAT), or fan a project plan out into parallel BAT worktree sessions.
-version: 0.2.2
+version: 0.2.3
 license: MIT
 author: bat-agent-connector contributors (unofficial companion to github.com/tony1223/better-agent-terminal)
 metadata:
@@ -73,6 +73,16 @@ back in history.
 4. Only if write tools exist **and** the user asked (or pre-approved this kind of nudge): send one short message with
    `confirm=true`. Never loop sends; respect rate-limit errors instead of retrying around them.
 5. Report back: per session one line (host, workspace, state, what you did).
+
+## Relay workflow (forwarding a human's order)
+
+Do not paraphrase, rewrite or plan the order. Call `session_relay(host, workspace=..., message=<the exact text>,
+brief={goal, context, constraints, acceptance}, earlier=[<earlier thread messages, verbatim>], confirm=true)`.
+The brief is labeled as your interpretation; the session treats the original as the source of truth, fixes unclear
+asks with its repo context and states its interpretation in one line. For parallel or large work add
+`request_fanout=N`, `session_wait`, then `fanout_from_plan(host, sid, confirm=true)`. If the main session is busy or
+quota-stopped use `fanout_plan_session` instead, wait, then `fanout_from_plan` on the planner. Read the session's
+last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_continue`), NEED-<HUMAN> → ask the human.
 
 ## Plan fan-out workflow (orchestrate tier)
 

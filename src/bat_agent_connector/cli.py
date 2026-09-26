@@ -237,6 +237,22 @@ async def _run(args) -> Any:
             return await lifecycle.session_set_permissions(
                 fleet, args.host, args.session, args.mode, args.confirm
             ), None
+        if c in ("relay", "fanout-plan"):
+            msg = sys.stdin.read() if args.message == "-" else args.message
+            brief = json.loads(args.brief) if args.brief and args.brief.lstrip().startswith("{") else args.brief
+            if c == "relay":
+                return await lifecycle.session_relay(
+                    fleet, args.host, msg, args.workspace, args.session, args.channel, args.thread,
+                    args.earlier, brief, args.fanout is not None, args.fanout, args.confirm, args.dry_run, args.queue,
+                ), None
+            return await lifecycle.fanout_plan_session(
+                fleet, args.host, args.workspace, msg, args.max_items, args.channel, args.thread, args.earlier,
+                brief, args.confirm,
+            ), None
+        if c == "fanout-start":
+            return await lifecycle.fanout_from_plan(
+                fleet, args.host, args.session, args.confirm, args.dry_run, args.agent, None, args.max_items
+            ), None
         if c == "approve-pending":
             return await lifecycle.approve_pending(
                 fleet, args.host, args.confirm, args.dry_run, args.workspace
@@ -432,6 +448,37 @@ def build_parser() -> argparse.ArgumentParser:
     p = sp.add_parser("approve-pending", help="WRITE: approve all pending permission prompts on a host")
     p.add_argument("host")
     p.add_argument("--workspace")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--confirm", action="store_true")
+
+    p = sp.add_parser("relay", help="WRITE: send a task verbatim + a labeled brief to a session (default: main)")
+    p.add_argument("host")
+    p.add_argument("--workspace")
+    p.add_argument("--session")
+    p.add_argument("--message", required=True, help="the person's exact words, or - for stdin")
+    p.add_argument("--brief", help="relay's interpretation: text or JSON {goal, context, constraints, acceptance}")
+    p.add_argument("--channel")
+    p.add_argument("--thread")
+    p.add_argument("--earlier", action="append", help="earlier message in the thread, verbatim (repeatable)")
+    p.add_argument("--fanout", type=int, metavar="N", help="ask for a bat-fanout plan of at most N items")
+    p.add_argument("--queue", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--confirm", action="store_true")
+    p = sp.add_parser("fanout-plan", help="ORCHESTRATE: start a read-only Codex planner for a bat-fanout plan")
+    p.add_argument("host")
+    p.add_argument("workspace")
+    p.add_argument("--message", required=True)
+    p.add_argument("--brief")
+    p.add_argument("--max-items", type=int)
+    p.add_argument("--channel")
+    p.add_argument("--thread")
+    p.add_argument("--earlier", action="append")
+    p.add_argument("--confirm", action="store_true")
+    p = sp.add_parser("fanout-start", help="ORCHESTRATE: start worktrees exactly per a session's bat-fanout block")
+    p.add_argument("host")
+    p.add_argument("session")
+    p.add_argument("--agent", choices=["claude", "codex"], default="codex")
+    p.add_argument("--max-items", type=int)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--confirm", action="store_true")
 

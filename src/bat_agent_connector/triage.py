@@ -20,6 +20,7 @@ from .client import BatClient
 from .fleet import Fleet
 from .jev import Jev
 from .redact import redact_secrets
+from .relay import parse_status
 from .service import (
     _agent_terminals,
     _err,
@@ -162,6 +163,12 @@ def classify_messages(
         if last_user >= 0:
             out.update(state="unknown", confidence=0.3, evidence=_evidence_line(texts[last_user][1]))
             out["ambiguous"] = True
+        return out
+    st = parse_status(newest)
+    if st:  # the session's own BAT-STATUS line wins over the heuristics below
+        state = "waiting_question" if st["kind"] == "NEED_HUMAN" else "done_idle"
+        out.update(state=state, source="marker", confidence=0.95, bat_status=st,
+                   evidence=clip(f"BAT-STATUS: {st['label']} {st['detail']}", 240))
         return out
     rx = match_any(TRANSIENT_PATTERNS, newest)
     if rx and len(newest) <= WEAK_MAX_CHARS:

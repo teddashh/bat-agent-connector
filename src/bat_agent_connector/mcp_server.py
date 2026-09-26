@@ -45,8 +45,17 @@ WRITE_TOOLS = [
     "session_answer",
     "session_set_permissions",
     "approve_pending",
+    "session_relay",
 ]
-ORCHESTRATE_TOOLS = ["session_start", "worktree_merge", "worktree_remove", "session_failover", "session_cleanup"]
+ORCHESTRATE_TOOLS = [
+    "session_start",
+    "worktree_merge",
+    "worktree_remove",
+    "session_failover",
+    "session_cleanup",
+    "fanout_plan_session",
+    "fanout_from_plan",
+]
 
 INSTRUCTIONS = """\
 Tools for Better Agent Terminal (BAT): a terminal app whose hosts run Claude Code / Codex agent
@@ -277,6 +286,34 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             Requires confirm=true (or dry_run=true to list)."""
             return await lifecycle.approve_pending(fleet, host, confirm, dry_run, workspace)
 
+        async def session_relay(
+            host: str,
+            message: str,
+            workspace: str | None = None,
+            session_id: str | None = None,
+            brief: dict[str, Any] | str | None = None,
+            channel: str | None = None,
+            thread: str | None = None,
+            earlier: list[str] | None = None,
+            request_fanout: bool = False,
+            max_items: int | None = None,
+            confirm: bool = False,
+            dry_run: bool = False,
+            queue: bool = False,
+        ) -> dict[str, Any]:
+            """WRITE. Relay a person's task to an agent session as "original + brief": `message` is sent
+            VERBATIM (pass the person's exact words, never a paraphrase), followed by your labeled `brief`
+            {goal, context, constraints, acceptance} = your interpretation, plus a context header, instructions
+            (original is the source of truth; the seat fixes unclear asks and states its interpretation) and a
+            BAT-STATUS request. Target: session_id, or the workspace's main session. `earlier` = the person's
+            earlier messages in the thread, verbatim. request_fanout=true asks the session for a ```bat-fanout
+            plan (max_items, capped) instead of doing the work; then call fanout_from_plan. Busy/quota-stopped
+            targets are reported (sent=false). dry_run=true renders only. Requires confirm=true to send."""
+            return await lifecycle.session_relay(
+                fleet, host, message, workspace, session_id, channel, thread, earlier, brief, request_fanout,
+                max_items, confirm, dry_run, queue,
+            )
+
         for fn in (
             session_send,
             session_continue,
@@ -284,6 +321,7 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             session_answer,
             session_set_permissions,
             approve_pending,
+            session_relay,
         ):
             fn.__doc__ = (fn.__doc__ or "") + f" Writes are enabled for: {enabled}."
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=wr)
@@ -369,7 +407,48 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             real runs need confirm=true and auto_cleanup = true on the host. Returns one escalation_summary."""
             return await lifecycle.session_cleanup(fleet, host, confirm, dry_run, session_id)
 
-        for fn in (session_start, worktree_merge, worktree_remove, session_failover, session_cleanup):
+        async def fanout_plan_session(
+            host: str,
+            workspace: str,
+            message: str,
+            brief: dict[str, Any] | str | None = None,
+            max_items: int | None = None,
+            channel: str | None = None,
+            thread: str | None = None,
+            earlier: list[str] | None = None,
+            confirm: bool = False,
+        ) -> dict[str, Any]:
+            """ORCHESTRATE. When the workspace's main session is busy or quota-stopped: start a fresh Codex
+            planning session (host codex_model, main checkout, read-only instructions) that gets the person's
+            message verbatim + your brief and returns a ```bat-fanout plan. Then session_wait(session_id) and
+            fanout_from_plan(host, session_id). Requires confirm=true."""
+            return await lifecycle.fanout_plan_session(
+                fleet, host, workspace, message, max_items, channel, thread, earlier, brief, confirm
+            )
+
+        async def fanout_from_plan(
+            host: str,
+            session_id: str,
+            confirm: bool = False,
+            dry_run: bool = False,
+            agent: Literal["claude", "codex"] = "codex",
+            max_items: int | None = None,
+        ) -> dict[str, Any]:
+            """ORCHESTRATE. Start one worktree session per item of the latest ```bat-fanout block in that
+            session's replies, each with the item's prompt VERBATIM (plus the BAT-STATUS request). You do not
+            split or rewrite anything. Capped by max_start_per_call and the host cap. A planner session from
+            fanout_plan_session is cleaned up afterwards. dry_run=true only parses. Requires confirm=true."""
+            return await lifecycle.fanout_from_plan(fleet, host, session_id, confirm, dry_run, agent, None, max_items)
+
+        for fn in (
+            session_start,
+            worktree_merge,
+            worktree_remove,
+            session_failover,
+            session_cleanup,
+            fanout_plan_session,
+            fanout_from_plan,
+        ):
             fn.__doc__ = (fn.__doc__ or "") + f" Orchestrate is enabled for: {oenabled}."
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=orc)
 
