@@ -62,9 +62,16 @@ instruction, recent output, git state (branch, dirty files, commits, diff stats)
 | Decision | When |
 |---|---|
 | `KEEP` | Streaming, waiting for a permission/answer, quota or transient limit, idle for less than `min_idle_s`, worktree shared by another active session. **Never stops a session that is mid-work.** |
-| `CLEAN_ONLY` | Superseded by a failover successor that is running; worktree already merged or removed; no new commits and no diff; main-checkout session whose final output Jev confirms as finished. Stops the agent, removes the worktree with the branch **kept**. |
+| `CLEAN_ONLY` | Superseded by a failover successor that is running; archive-only successor (see below) that is idle and clean; worktree already merged or removed; no new commits and no diff; main-checkout session whose final output Jev confirms as finished. Stops the agent, removes the worktree with the branch **kept**. |
 | `MERGE_AND_CLEAN` | All hard gates pass: idle, worktree clean, `mergedKind == ahead` (conflict-free, via `worktree_merge` never-force semantics), main checkout clean and on the source branch, last test run not failed, deterministic risk checks clean (no credential-looking additions, no secrets/infra paths, no large deletions or huge diffs); **then** Jev must confirm the final output claims completion (≥ 0.8), the diff is `safe_complete` (≥ 0.7), and, if no test run was seen, that tests passed. Merges locally, removes the worktree (branch kept), stops the agent. |
-| `ESCALATE_TO_TED` | Uncommitted changes, diverged branch, dirty main checkout, failing tests, risk-check hit, Jev unavailable/unsure. Collected into one `escalation_summary` line per call. |
+| `ESCALATE` | Uncommitted changes, diverged branch, dirty main checkout, failing tests, risk-check hit, Jev unavailable/unsure. Collected into one `escalation_summary` line per call. |
+
+`ESCALATE_TO_TED` (the 0.2.0 name of `ESCALATE`) is still accepted as an alias by `normalize_decision`.
+
+**Preserving superseded work.** When a session's work is superseded but its uncommitted changes should not be lost,
+fail it over with `force`, `archive_only=true` and `instructions` such as "only commit everything on the current
+branch with message …; do not build, test, push or merge". The Codex helper commits in the same worktree; cleanup
+then stops the old session, removes the worktree and keeps the branch, and never merges it.
 
 Every decision and action is appended to the audit log with its reasons. Branches are never deleted by cleanup, so a
 merge or removal can be undone from the branch. BAT's remote protocol has no push, tag or PR channel: merges stay in

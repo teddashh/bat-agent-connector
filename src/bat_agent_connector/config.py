@@ -23,6 +23,7 @@ Config file (default ``~/.config/bat-agent-connector/hosts.toml``)::
     orchestrate_register_tabs = false  # append a tab to the host workspace (workspace:save, append-only)
     default_permission_mode = "default" # "default" (agent asks) or "allow_all" (like BAT's bypass setting)
     auto_cleanup = false               # allow session_cleanup to merge/remove/stop on this host
+    codex_model = ""                   # default model for Codex sessions started/failed over here ("" = BAT default)
     profile_id = "default"             # workspace profile on the host
 
     [jev]                              # optional judgment layer (TypeSafe Jev); off without an API key
@@ -102,6 +103,7 @@ class HostConfig:
     orchestrate_register_tabs: bool = False
     default_permission_mode: str = "default"
     auto_cleanup: bool = False
+    codex_model: str | None = None
     profile_id: str = "default"
     bat_profiles_dir: str = DEFAULT_BAT_PROFILES_DIR
     labels: list[str] = field(default_factory=list)
@@ -253,6 +255,9 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
             raise ConfigError(f"host {name!r}: auto_cleanup must be true or false")
         if cleanup and not orch:
             raise ConfigError(f"host {name!r}: auto_cleanup = true requires orchestrate = true")
+        cmodel = str(h.get("codex_model") or "").strip() or None
+        if cmodel and not re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", cmodel):
+            raise ConfigError(f"host {name!r}: codex_model {cmodel!r} is not a valid model id")
         hosts[name] = HostConfig(
             name=name,
             url=url,
@@ -264,6 +269,7 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
             orchestrate_register_tabs=tabs,
             default_permission_mode=pmode,
             auto_cleanup=cleanup,
+            codex_model=cmodel,
             profile_id=str(h.get("profile_id") or "default"),
             bat_profiles_dir=str(h.get("bat_profiles_dir") or pdir),
             labels=list(h.get("labels") or []),

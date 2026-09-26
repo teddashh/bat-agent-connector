@@ -245,6 +245,8 @@ async def session_start(
     if not folder:
         raise WriteRefused("workspace has no folderPath")
     preset = PRESETS[(agent, bool(use_worktree))]
+    if agent == "codex" and not model and hc.codex_model:
+        model = hc.codex_model
     sid = str(uuid.uuid4())
     async with _write_lock():
         audit.check_rate(host, "#orchestrate-start-" + sid)

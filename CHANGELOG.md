@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 (unreleased)
+
+- Cleanup decision `ESCALATE_TO_TED` is now `ESCALATE` (the old name is accepted as an alias).
+- Per-host `codex_model`: default model for Codex sessions started or failed over on that host.
+- `session_failover(instructions=..., archive_only=...)`: custom handoff steps, and successors whose branch cleanup
+  keeps but never merges (to preserve superseded work).
+
 ## 0.2.0 (unreleased)
 
 - **Triage**: `sessions_triage` / `quota_sessions` / `batc triage` / `batc quota` classify sessions (quota exhausted,

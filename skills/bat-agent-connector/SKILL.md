@@ -1,7 +1,7 @@
 ---
 name: bat-agent-connector
 description: Use this when you need to check on, read, wait for, or (only when explicitly enabled and asked) nudge Claude Code / Codex agent sessions running in Better Agent Terminal (BAT), or fan a project plan out into parallel BAT worktree sessions.
-version: 0.2.0
+version: 0.2.1
 license: MIT
 ---
 
@@ -79,8 +79,10 @@ back in history.
 
 - **Quota failover**: `quota_sessions` lists Claude sessions stopped by a usage limit (with the reset time). Before a
   failover, check that no other session in the same workspace already carries that task on (duplicate work). Dry run
-  first, then `session_failover(confirm=true)`. The Codex successor reuses the same worktree when there is one. Report
-  old → new session id, then track the new one.
+  first, then `session_failover(confirm=true)`. The Codex successor reuses the same worktree when there is one and
+  uses the host's `codex_model`. Report old → new session id, then track the new one. To keep a superseded
+  session's uncommitted work without continuing it, fail it over with `force`, `archive_only=true` and
+  `instructions` that say to only commit it; cleanup then keeps that branch and never merges it.
 - **Permissions**: on hosts with `default_permission_mode = "allow_all"`, `approve_pending` answers permission prompts
   (not questions) with "don't ask again" and raises the session to allow-all. Claude sessions are raised only when
   idle; Codex from its next turn, so repeat `approve_pending` while a turn is still asking.
@@ -101,5 +103,5 @@ back in history.
 - Do not interrupt a streaming session unless the user asked; prefer `soft`.
 - Never use override flags (`discard_uncommitted`, `allow_unmerged`, `delete_branch`, failover `force`) without the
   user's explicit approval for that specific session.
-- Treat an ESCALATE_TO_TED cleanup decision as final for that run: never force the merge another way.
+- Treat an ESCALATE cleanup decision as final for that run: never force the merge another way.
 - If a host is unreachable, report it; do not try other ways to reach it.

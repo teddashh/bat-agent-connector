@@ -253,6 +253,8 @@ async def _run(args) -> Any:
                 args.force,
                 args.tail,
                 args.workspace,
+                args.instructions,
+                args.archive_only,
             ), None
         if c == "cleanup":
             return await lifecycle.session_cleanup(
@@ -469,6 +471,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model")
     p.add_argument("--tail", type=int, default=12, help="recent messages to include in the handoff")
     p.add_argument("--force", action="store_true", help="fail over even if not detected as exhausted")
+    p.add_argument("--instructions", help="replace the default 'continue the task' steps (single session)")
+    p.add_argument("--archive-only", action="store_true", help="cleanup never merges this successor's branch")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--confirm", action="store_true")
     p = sp.add_parser("cleanup", help="ORCHESTRATE: gated merge/clean/stop of finished sessions (dry run by default)")

@@ -293,7 +293,7 @@ async def test_cleanup_merge_needs_jev(fleet_factory, mock, monkeypatch):
     f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0})
     await _finished_wt(f, mock, "ahead", diff)
     d = await lifecycle.session_cleanup(f, "h1", dry_run=True)
-    assert d["decisions"][0]["decision"] == "ESCALATE_TO_TED" and "Jev unavailable" in d["escalation_summary"]
+    assert d["decisions"][0]["decision"] == "ESCALATE" and "Jev unavailable" in d["escalation_summary"]
 
     async def fake_gate(self, task, final, diff_excerpt, tests):
         return {"claims_done": 0.95, "diff_verdict": "safe_complete", "diff_confidence": 0.9, "tests_ok": 0.9}
@@ -315,7 +315,7 @@ async def test_cleanup_escalates_risky_and_keeps_working(fleet_factory, mock, mo
     d = await lifecycle.session_cleanup(f, "h1", dry_run=True)
     by = {x["session_id"]: x for x in d["decisions"]}
     assert by[r2["session_id"]]["decision"] == "KEEP"
-    esc = [x for x in d["decisions"] if x["decision"] == "ESCALATE_TO_TED"]
+    esc = [x for x in d["decisions"] if x["decision"] == "ESCALATE"]
     assert esc and "secret" in esc[0]["reasons"][0]
     await f.close()
 
@@ -328,7 +328,7 @@ async def test_cleanup_stops_superseded_claude_after_failover(fleet_factory, moc
     by = {x["session_id"]: x for x in d["decisions"]}
     assert by[sid]["decision"] == "CLEAN_ONLY" and by[sid]["stop"] and not by[sid]["remove_worktree"]
     new = by[fo["new_session_id"]]
-    assert new["decision"] in ("KEEP", "ESCALATE_TO_TED")  # dirty shared worktree is never removed
+    assert new["decision"] in ("KEEP", "ESCALATE")  # dirty shared worktree is never removed
     d = await lifecycle.session_cleanup(f, "h1", confirm=True, dry_run=False, session_id=sid)
     assert "agent stopped" in d["decisions"][0]["actions"]
     assert "worktree:remove" not in mock.channels()
@@ -347,3 +347,54 @@ def test_redact_secrets_in_handoff():
         first_prompt=f"post to {hook}", last_prompt=None, recent=[], git={}, evidence="limit",
     )
     assert "AAAA" not in p and "[REDACTED]" in p
+
+
+def test_decision_alias():
+    assert lifecycle.normalize_decision("escalate_to_ted") == "ESCALATE"
+    assert "ESCALATE" in lifecycle.DECISIONS
+
+
+def test_handoff_custom_instructions():
+    p = lifecycle.build_handoff_prompt(
+        old_sid="s", workspace="w", cwd="/srv/w", same_worktree=True, branch="b",
+        first_prompt="task", last_prompt=None, recent=[], git={}, evidence="limit",
+        instructions="Only commit the work in progress.",
+    )
+    assert "Only commit the work in progress." in p and "How to proceed" not in p
+    assert "Continue the work" not in p
+
+
+async def test_codex_model_default_and_archive_cleanup(fleet_factory, mock, monkeypatch):
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, codex_model="gpt-x-test", orchestrate_max_sessions=8,
+                      safety={"write_min_interval_s": 0})
+    await orchestrate.session_start(f, "h1", "demo-project", "codex", confirm=True)
+    o = next(i for i in mock.invokes if i["channel"] == "claude:start-session")["params"]["options"]
+    assert o["model"] == "gpt-x-test"
+    mock.invokes.clear()
+    await orchestrate.session_start(f, "h1", "demo-project", "claude", confirm=True)
+    o = next(i for i in mock.invokes if i["channel"] == "claude:start-session")["params"]["options"]
+    assert o.get("model") != "gpt-x-test"
+    # an ahead branch marked archive-only is cleaned (branch kept), never merged
+    r = await _finished_wt(f, mock, kind="ahead", diff="diff --git a/x b/x\n+++ b/x\n+wip\n")
+    registry.update("h1", r["session_id"], cleanup_policy="archive")
+    d = await lifecycle.session_cleanup(f, "h1", session_id=r["session_id"], confirm=True, dry_run=False)
+    row = d["decisions"][0]
+    assert row["decision"] == "CLEAN_ONLY" and "archive" in row["reasons"][0]
+    assert "worktree:merge" not in mock.channels()
+    rm = next(i for i in mock.invokes if i["channel"] == "worktree:remove")
+    assert rm["params"]["deleteBranch"] is False
+    await f.close()
+
+
+async def test_failover_codex_model_and_instructions(fleet_factory, mock):
+    sid = _add_wt_claude(mock)
+    f = fleet_factory(writes=True, orchestrate=True, codex_model="gpt-x-test")
+    r = await lifecycle.session_failover(f, "h1", sid, confirm=True, instructions="Only commit the WIP.",
+                                         archive_only=True)
+    start = next(i for i in mock.invokes if i["channel"] == "claude:start-session")["params"]["options"]
+    assert start["model"] == "gpt-x-test" and r["archive_only"]
+    sent = next(i for i in mock.invokes if i["channel"] == "claude:send-message")["params"]["prompt"]
+    assert "Only commit the WIP." in sent
+    assert registry.get("h1", r["new_session_id"])["cleanup_policy"] == "archive"
+    await f.close()

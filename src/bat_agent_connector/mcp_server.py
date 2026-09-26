@@ -340,22 +340,29 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             model: str | None = None,
             force: bool = False,
             workspace: str | None = None,
+            instructions: str | None = None,
+            archive_only: bool = False,
         ) -> dict[str, Any]:
             """ORCHESTRATE. Continue a Claude session that is stuck on its usage quota with a NEW Codex session
             in the same folder (same git worktree and branch for worktree sessions), sending a handoff prompt
             (original task, latest instruction, recent output, git state). The old session is not touched.
             Pass session_id, or all_exhausted=true for every quota-exhausted Claude session on the host
             (max_start_per_call). Refuses sessions that do not look exhausted unless force=true. Idempotent per
-            old session. Returns old/new session ids, cwd, branch, same_worktree. Requires confirm=true."""
+            old session. model defaults to the host's codex_model. instructions (single session only) replace the
+            default "continue the task" steps, e.g. "only commit the work in progress"; archive_only=true means
+            session_cleanup will never merge that session's branch (it removes the worktree, keeping the branch,
+            once the session is idle and clean). Returns old/new session ids, cwd, branch, same_worktree.
+            Requires confirm=true."""
             return await lifecycle.session_failover(
-                fleet, host, session_id, confirm, all_exhausted, dry_run, model, force, 12, workspace
+                fleet, host, session_id, confirm, all_exhausted, dry_run, model, force, 12, workspace,
+                instructions, archive_only,
             )
 
         async def session_cleanup(
             host: str, confirm: bool = False, dry_run: bool = True, session_id: str | None = None
         ) -> dict[str, Any]:
             """ORCHESTRATE. Evaluate orchestrated sessions (and Claude sessions superseded by a failover) and
-            decide MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE_TO_TED. Merges only when idle, committed,
+            decide MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE. Merges only when idle, committed,
             strictly ahead (conflict-free), main checkout clean on the base branch, no failing tests, no
             secret/infra/huge-deletion risk, AND the Jev gate agrees (Jev unavailable => escalate). Branches are
             always kept. Finished agents are stopped (unloaded; resumable). dry_run=true (default) only reports;
