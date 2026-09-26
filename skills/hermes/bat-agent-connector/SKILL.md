@@ -1,7 +1,7 @@
 ---
 name: bat-agent-connector
 description: Use this when you need to check on, read, wait for, or (only when explicitly enabled and asked) nudge Claude Code / Codex agent sessions running in Better Agent Terminal (BAT), or fan a project plan out into parallel BAT worktree sessions.
-version: 0.2.1
+version: 0.2.2
 license: MIT
 author: bat-agent-connector contributors (unofficial companion to github.com/tony1223/better-agent-terminal)
 metadata:

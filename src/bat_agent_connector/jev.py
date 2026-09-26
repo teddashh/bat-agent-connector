@@ -140,8 +140,11 @@ class Jev:
         q = {
             "claims_done": {
                 "type": "noul",
-                "instructions": "In `final_output` the agent states that the task in `task` is complete "
-                "(not partially done, not asking for a decision, not reporting a blocker).",
+                "instructions": "In `final_output` the coding agent reports that its work is finished "
+                "(for the task in `task` when given; `task` may be empty): e.g. it says the change is done, "
+                "committed or all checks passed, and it is not partially done, not asking for a decision and "
+                "not reporting a blocker. `final_output` may be written in any language (often Traditional "
+                "Chinese, e.g. 「已完成並提交」 = done and committed); judge the meaning, never the language.",
             },
             "diff_verdict": {
                 "type": "choice",
@@ -157,7 +160,8 @@ class Jev:
             },
             "tests_ok": {
                 "type": "noul",
-                "instructions": "`tests` and `final_output` show the relevant tests/checks were run and passed.",
+                "instructions": "`tests` and `final_output` show the relevant tests/checks were run and passed "
+                "(`final_output` may be in any language, e.g. 「驗證全部通過」 = all checks passed).",
             },
         }
         state = {

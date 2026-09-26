@@ -691,11 +691,54 @@ def test_evidence(msgs: list[dict]) -> dict:
 
 
 def _final_output(msgs: list[dict]) -> str:
+    """Last message written by the agent (skips user turns and BAT's own system notices)."""
     for m in reversed(msgs):
         t = _msg_text(m)
-        if t and _role(m) != "user":
+        if t and _role(m) not in ("user", "system"):
             return t
     return ""
+
+
+# Deterministic, language-independent backstop for Jev's "claims completion" score (en + zh-TW/zh-CN).
+DONE_RE = re.compile(
+    r"\b(?:completed|done|finished|committed|all (?:checks|tests|gates) (?:pass(?:ed)?|green))\b"
+    r"|已完成|完成並提交|已提交|提交至|已提交至|已經完成|全部通過|驗證全部通過|验证全部通过|已经完成",
+    re.IGNORECASE,
+)
+NOT_DONE_RE = re.compile(
+    r"\b(?:not (?:yet )?(?:done|complete|finished|committed)|blocked|blocker|waiting for|need(?:s)? your"
+    r"|should i|do you want|which (?:option|one)|TODO|failing|still fails?)\b"
+    r"|未完成|尚未(?!\s*(?:push|推送|推上|推到))|阻塞|卡住|需要你|需要您|請確認|请确认|是否要|要不要|待確認|待确认|仍失敗|仍然失敗|失敗了|无法完成|無法完成",
+    re.IGNORECASE,
+)
+COMMIT_SHA_RE = re.compile(r"(?:commit|提交|`)\s*[:：]?\s*`?([0-9a-f]{7,40})\b", re.IGNORECASE)
+
+
+def completion_markers(final: str) -> dict:
+    """Whether the final output deterministically reports finished, committed work."""
+    text = final or ""
+    tail = text[-3000:]
+    done = bool(DONE_RE.search(tail))
+    blocker = NOT_DONE_RE.search(tail)
+    sha = COMMIT_SHA_RE.search(tail)
+    return {
+        "done_phrase": done,
+        "blocker": blocker.group(0) if blocker else None,
+        "commit": sha.group(1) if sha else None,
+        "claims_done": bool(done and sha and not blocker),
+    }
+
+
+def _apply_markers(g: dict | None, final: str) -> dict | None:
+    """Lift Jev's claims_done when the final output deterministically says done + names a commit."""
+    if g is None:
+        return None
+    mk = completion_markers(final)
+    g["markers"] = mk
+    if mk["claims_done"] and g["claims_done"] < 0.9:
+        g["claims_done_jev"] = g["claims_done"]
+        g["claims_done"] = 0.9
+    return g
 
 
 async def _evaluate(
@@ -775,7 +818,10 @@ async def _evaluate(
             return decide("CLEAN_ONLY", "not loaded and nothing to remove (registry only)")
         if e.get("status") == "removed":
             return decide("CLEAN_ONLY", "worktree already removed; agent idle", stop=True)
-        g = await jev.merge_gate(task, final, "(no diff: session works in the main checkout)", str(tests))
+        g = _apply_markers(
+            await jev.merge_gate(task, final, "(no diff: session works in the main checkout)", str(tests)),
+            final,
+        )
         row["jev"] = g
         if g is None:
             return decide("KEEP", "idle in main checkout; Jev unavailable to confirm it is finished")
@@ -841,7 +887,7 @@ async def _evaluate(
         return decide("ESCALATE", "main checkout has uncommitted changes")
     if tests["last_failed"]:
         return decide("ESCALATE", f"last test run failed: {tests['last'].get('command')}")
-    g = await jev.merge_gate(task, final, diff, str(tests))
+    g = _apply_markers(await jev.merge_gate(task, final, diff, str(tests)), final)
     row["jev"] = g
     if g is None:
         return decide("ESCALATE", "Jev unavailable: a merge needs the judgment gate")

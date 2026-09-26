@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2 (unreleased)
+
+- Merge gate is language-independent: Jev's "claims completion" question says the final output may be in any
+  language (e.g. Traditional Chinese) and that `task` may be empty, and a deterministic backstop lifts the score to
+  0.9 when the final output has a done/committed phrase (en or zh-TW/zh-CN, e.g. 已完成 / 已提交 / 全部通過), names a
+  commit SHA and reports no blocker (尚未 / 需要你 / should I ...). Jev's diff verdict is still required.
+- The final output used by the gate skips BAT's own system notices.
+
 ## 0.2.1 (unreleased)
 
 - Cleanup decision `ESCALATE_TO_TED` is now `ESCALATE` (the old name is accepted as an alias).

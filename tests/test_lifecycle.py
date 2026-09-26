@@ -398,3 +398,71 @@ async def test_failover_codex_model_and_instructions(fleet_factory, mock):
     assert "Only commit the WIP." in sent
     assert registry.get("h1", r["new_session_id"])["cleanup_policy"] == "archive"
     await f.close()
+
+
+ZH_DONE = (
+    "已完成並提交至分支 `bat/worktree-df43e6d3`。\n\nCommit：`6e15a05 phase7: add guarded watch reports`\n\n"
+    "驗證全部通過：\n- `cargo test --workspace`\n\n工作目錄乾淨。測試未向真實 Discord webhook 發送請求。"
+)
+
+
+@pytest.mark.parametrize(
+    "text,done",
+    [
+        (ZH_DONE, True),
+        ("完成，已提交 commit a1b2c3d，全部通過。", True),
+        ("Done: implemented X, all tests pass. Commit `deadbee` on bat/wt-1.", True),
+        ("已完成大部分，但尚未提交；需要你確認要用哪個 API。", False),
+        ("實作完成 80%，仍失敗 2 個測試，commit 1234abcd 為暫存。", False),
+        ("已完成並提交。", False),  # no commit named: Jev decides alone
+        ("Committed `abc1234`, but should I also migrate the DB?", False),
+        ("I will commit next.", False),
+        ("已完成並提交 commit `9f8e7d6`，驗證全部通過。尚未 push。", True),  # not pushed is the normal BAT flow
+    ],
+)
+def test_completion_markers_language_independent(text, done):
+    assert lifecycle.completion_markers(text)["claims_done"] is done
+
+
+def test_apply_markers_lifts_low_jev_score_only_with_markers():
+    g = lifecycle._apply_markers({"claims_done": 0.53}, ZH_DONE)
+    assert g["claims_done"] == 0.9 and g["claims_done_jev"] == 0.53 and g["markers"]["commit"] == "6e15a05"
+    g = lifecycle._apply_markers({"claims_done": 0.53}, "已完成大部分，但尚未提交。commit 1234abc")
+    assert g["claims_done"] == 0.53
+    assert lifecycle._apply_markers(None, ZH_DONE) is None
+
+
+def test_final_output_skips_bat_system_notices():
+    msgs = [msg(0, "assistant", ZH_DONE), msg(1, "system", "BAT ignored 1 late event from an older Codex turn.")]
+    assert lifecycle._final_output(msgs).startswith("已完成")
+
+
+async def test_jev_merge_gate_prompt_is_language_neutral(monkeypatch):
+    seen = {}
+
+    async def fake_ask(self, state, questions):
+        seen.update(questions=questions, state=state)
+        return None
+
+    monkeypatch.setattr(Jev, "ask", fake_ask)
+    await Jev(JevConfig()).merge_gate("", ZH_DONE, "diff", "{}")
+    ins = seen["questions"]["claims_done"]["instructions"]
+    assert "any language" in ins and "Chinese" in ins and "may be empty" in ins
+    assert seen["state"]["final_output"].startswith("已完成")
+
+
+async def test_cleanup_merges_zh_tw_completion(fleet_factory, mock, monkeypatch):
+    diff = "diff --git a/x.rs b/x.rs\n+++ b/x.rs\n+fn x() {}\n"
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0})
+    r = await _finished_wt(f, mock, "ahead", diff)
+    mock.states[r["session_id"]]["messages"][-1] = msg(3, "assistant", ZH_DONE)
+
+    async def zh_blind_gate(self, task, final, diff_excerpt, tests):
+        return {"claims_done": 0.53, "diff_verdict": "safe_complete", "diff_confidence": 0.95, "tests_ok": 0.9}
+
+    monkeypatch.setattr(Jev, "merge_gate", zh_blind_gate)
+    d = await lifecycle.session_cleanup(f, "h1", dry_run=True)
+    row = d["decisions"][0]
+    assert row["decision"] == "MERGE_AND_CLEAN", row
+    assert row["jev"]["claims_done_jev"] == 0.53
+    await f.close()
