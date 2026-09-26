@@ -7,6 +7,9 @@
   0.9 when the final output has a done/committed phrase (en or zh-TW/zh-CN, e.g. 已完成 / 已提交 / 全部通過), names a
   commit SHA and reports no blocker (尚未 / 需要你 / should I ...). Jev's diff verdict is still required.
 - The final output used by the gate skips BAT's own system notices.
+- Cleanup rebuilds an empty branch diff commit by commit and file by file (new read channel `git:diff-files`).
+  BAT's `worktree:status` / `git:diff` return an empty diff when git prints more than a pipe buffer (~64 KB),
+  because the host reads the child's stdout only after it exits; large branches then reached Jev with no diff.
 
 ## 0.2.1 (unreleased)
 

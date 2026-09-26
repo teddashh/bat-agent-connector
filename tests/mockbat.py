@@ -334,9 +334,16 @@ class MockBat:
         if ch == "git:branch":
             return self.git_branch.get(p["cwd"], "main")
         if ch == "git:log":
+            logs = getattr(self, "git_logs", {})
+            if p["cwd"] in logs:
+                return logs[p["cwd"]][: p.get("count") or 50]
             return [{"hash": "abc1234", "author": "dev", "date": "2026-01-01", "message": "wip"}]
         if ch == "git:diff":
+            if p.get("commitHash"):
+                return getattr(self, "commit_diffs", {}).get((p["commitHash"], p.get("filePath")), "")
             return self.git_diff.get(p["cwd"], "")
+        if ch == "git:diff-files":
+            return getattr(self, "commit_files", {}).get(p.get("commitHash"), [])
         if ch == "claude:stop-session":
             self.metas[sid] = None
             return {"ok": True, "existed": True}

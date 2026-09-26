@@ -47,6 +47,7 @@ READ_CHANNELS = frozenset(
         "git:getRoot",
         "git:log",
         "git:diff",
+        "git:diff-files",
     }
 )
 
@@ -137,6 +138,7 @@ TIMEOUTS = {
     "claude:stop-session": 30.0,
     "git:log": 15.0,
     "git:diff": 20.0,
+    "git:diff-files": 15.0,
     "workspace:save": 30.0,
 }
 DEFAULT_TIMEOUT = 15.0

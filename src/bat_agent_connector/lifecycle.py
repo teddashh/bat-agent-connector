@@ -690,6 +690,63 @@ def test_evidence(msgs: list[dict]) -> dict:
     return {"found": bool(runs), "runs": len(runs), "last": last, "last_failed": failed}
 
 
+BRANCH_DIFF_MAX_COMMITS = 30
+BRANCH_DIFF_MAX_FILES = 80
+
+
+async def _branch_diff(c: Any, wt: str, origin: str | None) -> tuple[str, dict]:
+    """Rebuild a worktree branch diff commit by commit and file by file.
+
+    BAT's `worktree:status` (and `git:diff`) return an empty diff once `git diff` prints more than a pipe
+    buffer (~64 KB): the host only reads the child's stdout after it exits, so git blocks until the timeout.
+    Only for branches strictly ahead of the main checkout's HEAD; files whose own diff is still too large are
+    listed (by name, so path risk checks still apply) under `unavailable`.
+    """
+    info: dict[str, Any] = {"commits": [], "files": 0, "unavailable": [], "complete": False}
+    if not origin:
+        return "", info
+    try:
+        wl = await c.invoke("git:log", {"cwd": wt, "count": BRANCH_DIFF_MAX_COMMITS + 1}) or []
+        ml = await c.invoke("git:log", {"cwd": origin, "count": 1}) or []
+    except BatError:
+        return "", info
+    base = (ml[0] or {}).get("hash") if ml else None
+    commits = []
+    for x in wl:
+        h = (x or {}).get("hash")
+        if not h or h == base:
+            break
+        commits.append(h)
+    else:
+        return "", info  # main's HEAD not found on the branch: not a plain "ahead" branch
+    parts: list[str] = []
+    for h in reversed(commits):
+        info["commits"].append(h[:12])
+        try:
+            files = await c.invoke("git:diff-files", {"cwd": wt, "commitHash": h}) or []
+        except BatError:
+            return "", info
+        for fe in files:
+            path = (fe or {}).get("file") or ""
+            if not path:
+                continue
+            info["files"] += 1
+            if info["files"] > BRANCH_DIFF_MAX_FILES:
+                parts.append(f"diff --git a/{path} b/{path}\n# (not fetched: file limit)\n")
+                continue
+            try:
+                d = await c.invoke("git:diff", {"cwd": wt, "commitHash": h, "filePath": path}) or ""
+            except BatError:
+                d = ""
+            if d.strip():
+                parts.append(d if d.endswith("\n") else d + "\n")
+            else:
+                info["unavailable"].append(path)
+                parts.append(f"diff --git a/{path} b/{path}\n# ({fe.get('status') or '?'}; diff unavailable from host)\n")
+    info["complete"] = not info["unavailable"] and info["files"] <= BRANCH_DIFF_MAX_FILES
+    return "".join(parts), info
+
+
 def _final_output(msgs: list[dict]) -> str:
     """Last message written by the agent (skips user turns and BAT's own system notices)."""
     for m in reversed(msgs):
@@ -843,6 +900,8 @@ async def _evaluate(
     if not st:
         return decide("ESCALATE", "host has no worktree state (cannot judge merge safety)")
     diff = st.get("diff") or ""
+    if not diff.strip() and st.get("mergedKind") == "ahead":
+        diff, row["diff_fallback"] = await _branch_diff(c, wt, _origin_cwd(t, ws))
     stats = diff_stats(diff)
     row["diff_stats"] = stats
     row["merged_kind"] = st.get("mergedKind")

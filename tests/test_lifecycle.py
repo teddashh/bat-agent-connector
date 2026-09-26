@@ -466,3 +466,35 @@ async def test_cleanup_merges_zh_tw_completion(fleet_factory, mock, monkeypatch)
     assert row["decision"] == "MERGE_AND_CLEAN", row
     assert row["jev"]["claims_done_jev"] == 0.53
     await f.close()
+
+
+async def test_cleanup_rebuilds_empty_branch_diff(fleet_factory, mock, monkeypatch):
+    """BAT returns an empty worktree diff when git's output exceeds a pipe buffer; rebuild it per commit/file."""
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0})
+    r = await _finished_wt(f, mock, "ahead", "")
+    wt = mock.worktrees[r["session_id"]]["worktreePath"]
+    mock.git_logs = {wt: [{"hash": "c2c2c2c2"}, {"hash": "c1c1c1c1"}, {"hash": "abc1234"}]}
+    mock.commit_files = {
+        "c1c1c1c1": [{"status": "M", "file": "src/x.rs"}],
+        "c2c2c2c2": [{"status": "A", "file": "assets/big.json"}],
+    }
+    mock.commit_diffs = {("c1c1c1c1", "src/x.rs"): "diff --git a/src/x.rs b/src/x.rs\n+++ b/src/x.rs\n+fn x() {}\n"}
+    seen = {}
+
+    async def gate(self, task, final, diff_excerpt, tests):
+        seen["diff"] = diff_excerpt
+        return {"claims_done": 0.95, "diff_verdict": "safe_complete", "diff_confidence": 0.9, "tests_ok": 0.9}
+
+    monkeypatch.setattr(Jev, "merge_gate", gate)
+    d = await lifecycle.session_cleanup(f, "h1", dry_run=True)
+    row = d["decisions"][0]
+    assert row["decision"] == "MERGE_AND_CLEAN", row
+    assert "+fn x() {}" in seen["diff"] and "assets/big.json" in seen["diff"]
+    fb = row["diff_fallback"]
+    assert fb["commits"] == ["c1c1c1c1", "c2c2c2c2"] and fb["unavailable"] == ["assets/big.json"]
+    assert row["diff_stats"]["files"] == 2
+    # main's HEAD not on the branch: no rebuild, Jev sees nothing and stays unsure
+    mock.git_logs = {wt: [{"hash": "c2c2c2c2"}]}
+    d = await lifecycle.session_cleanup(f, "h1", dry_run=True)
+    assert d["decisions"][0]["diff_fallback"]["commits"] == [] and seen["diff"] == ""
+    await f.close()
