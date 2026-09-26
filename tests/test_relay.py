@@ -92,6 +92,21 @@ async def test_relay_dry_run_targets_main_session(fleet_factory, mock):
     await f.close()
 
 
+async def test_relay_without_session(fleet_factory, mock, monkeypatch):
+    async def none(*a, **k):
+        return None
+
+    monkeypatch.setattr(lifecycle, "main_session", none)
+    f = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})
+    d = await lifecycle.session_relay(f, "h1", TED, workspace="other", dry_run=True)
+    assert d["no_session"] and d["session_id"] is None and TED in d["text"]
+    n = await lifecycle.session_relay(f, "h1", TED, workspace="other", confirm=True)
+    assert n["sent"] is False and n["no_session"]
+    s = await lifecycle.session_relay(f, "h1", TED, workspace="other", confirm=True, start_if_missing=True)
+    assert s["sent"] and s["started"] and s["session_id"]
+    await f.close()
+
+
 async def test_fanout_from_planner_starts_verbatim_and_cleans_planner(fleet_factory, mock):
     f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, orchestrate_max_sessions=4,
                       safety={"write_min_interval_s": 0})

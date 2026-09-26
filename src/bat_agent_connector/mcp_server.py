@@ -300,6 +300,7 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             confirm: bool = False,
             dry_run: bool = False,
             queue: bool = False,
+            start_if_missing: bool = False,
         ) -> dict[str, Any]:
             """WRITE. Relay a person's task to an agent session as "original + brief": `message` is sent
             VERBATIM (pass the person's exact words, never a paraphrase), followed by your labeled `brief`
@@ -308,10 +309,12 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             BAT-STATUS request. Target: session_id, or the workspace's main session. `earlier` = the person's
             earlier messages in the thread, verbatim. request_fanout=true asks the session for a ```bat-fanout
             plan (max_items, capped) instead of doing the work; then call fanout_from_plan. Busy/quota-stopped
-            targets are reported (sent=false). dry_run=true renders only. Requires confirm=true to send."""
+            targets are reported (sent=false). No session in the workspace: no_session=true, or with
+            start_if_missing=true a Codex session is started in the main checkout with the relay text (needs the
+            orchestrate tier). dry_run=true renders only. Requires confirm=true to send."""
             return await lifecycle.session_relay(
                 fleet, host, message, workspace, session_id, channel, thread, earlier, brief, request_fanout,
-                max_items, confirm, dry_run, queue,
+                max_items, confirm, dry_run, queue, start_if_missing,
             )
 
         for fn in (

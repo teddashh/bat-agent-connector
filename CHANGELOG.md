@@ -7,7 +7,8 @@
   criteria). The session is told that the original is the source of truth, to fix unclear or suboptimal asks using
   its own judgment and the project plan, to state its interpretation in one line, and to ask only when the ambiguity
   is genuine and consequential. Earlier thread messages can be included verbatim. `[client] human_name` /
-  `relay_name` set the names used.
+  `relay_name` set the names used. With no session in the workspace it reports `no_session`, or starts a Codex
+  session in the main checkout when `start_if_missing=true`.
 - Session-planned fan-out: `session_relay(request_fanout=N)` asks the session for a ```` ```bat-fanout ```` JSON
   plan; `fanout_plan_session` starts a read-only Codex planner in the main checkout when the main session is busy
   or quota-stopped; `fanout_from_plan` starts one worktree per planned task with the prompt unchanged and cleans up

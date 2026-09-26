@@ -1219,6 +1219,7 @@ async def session_relay(
     confirm: bool = False,
     dry_run: bool = False,
     queue: bool = False,
+    start_if_missing: bool = False,
 ) -> dict:
     """Send "original + brief" to a session (default: the workspace's main session): the person's message
     VERBATIM, then the relay's labeled brief (its interpretation: goal/context/constraints/acceptance), a context
@@ -1236,7 +1237,7 @@ async def session_relay(
     else:
         target = await main_session(fleet, host, workspace)  # type: ignore[arg-type]
         if target is None:
-            raise WriteRefused(f"no Claude/Codex session in workspace {workspace!r} on {host}")
+            target = {"session_id": None}
     sid = target["session_id"]
     ws_name = workspace or target.get("workspace")
     text = build_relay(
@@ -1247,7 +1248,15 @@ async def session_relay(
     out: dict[str, Any] = {"host": host, "session_id": sid, "workspace": ws_name, "text": text,
                            "request_fanout": request_fanout, "max_items": n}
     if dry_run:
-        return {**out, "sent": False, "dry_run": True}
+        return {**out, "sent": False, "dry_run": True, **({"no_session": True} if sid is None else {})}
+    if sid is None:
+        if not start_if_missing:
+            return {**out, "sent": False, "no_session": True,
+                    "next": "retry with start_if_missing=true (starts a Codex session in the main checkout)"}
+        from .orchestrate import session_start
+
+        r = await session_start(fleet, host, workspace, "codex", confirm, text, None, False, "relayed task", None)
+        return {**out, "session_id": r.get("session_id"), "sent": True, "started": True, "result": r}
     if await _quota_stopped(fleet, host, sid):
         return {**out, "sent": False, "quota_stopped": True,
                 "next": "fail over (session_failover) or, for a fan-out plan, fanout_plan_session"}

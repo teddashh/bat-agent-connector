@@ -244,6 +244,7 @@ async def _run(args) -> Any:
                 return await lifecycle.session_relay(
                     fleet, args.host, msg, args.workspace, args.session, args.channel, args.thread,
                     args.earlier, brief, args.fanout is not None, args.fanout, args.confirm, args.dry_run, args.queue,
+                    args.start_if_missing,
                 ), None
             return await lifecycle.fanout_plan_session(
                 fleet, args.host, args.workspace, msg, args.max_items, args.channel, args.thread, args.earlier,
@@ -462,6 +463,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--earlier", action="append", help="earlier message in the thread, verbatim (repeatable)")
     p.add_argument("--fanout", type=int, metavar="N", help="ask for a bat-fanout plan of at most N items")
     p.add_argument("--queue", action="store_true")
+    p.add_argument("--start-if-missing", action="store_true", help="no session yet: start Codex in the main checkout")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--confirm", action="store_true")
     p = sp.add_parser("fanout-plan", help="ORCHESTRATE: start a read-only Codex planner for a bat-fanout plan")
