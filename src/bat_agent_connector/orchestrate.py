@@ -179,6 +179,31 @@ def _guard(fleet: Fleet, host: str, confirm: bool) -> None:
         raise WriteRefused("orchestrate tools require confirm=true")
 
 
+def permission_options(agent: str, mode: str, claude_mode: str | None = None) -> dict:
+    """Start/resume options that mirror BAT's GUI permission setting.
+
+    ``allow_all`` = what BAT does with "allow bypass permissions" on: Claude runs in
+    ``bypassPermissions``; Codex starts with sandbox ``danger-full-access`` and approval ``never``.
+    ``default`` sends nothing (the agent asks before tools, BAT's conservative default).
+    """
+    if agent == "claude":
+        if claude_mode:
+            return {"permissionMode": claude_mode}
+        return {"permissionMode": "bypassPermissions"} if mode == "allow_all" else {}
+    if mode == "allow_all":
+        return {"codexSandboxMode": "danger-full-access", "codexApprovalPolicy": "never"}
+    return {}
+
+
+def registry_permission_fields(opts: dict) -> dict:
+    ap = {}
+    if opts.get("codexSandboxMode"):
+        ap["sandboxMode"] = opts["codexSandboxMode"]
+    if opts.get("codexApprovalPolicy"):
+        ap["approvalPolicy"] = opts["codexApprovalPolicy"]
+    return {"permission_mode_claude": opts.get("permissionMode"), "agent_params": ap or None}
+
+
 PRESETS = {
     ("claude", True): "claude-code-worktree",
     ("claude", False): "claude-code",
@@ -260,8 +285,7 @@ async def session_start(
             }
             if model:
                 opts["model"] = model
-            if permission_mode:
-                opts["permissionMode"] = permission_mode
+            opts.update(permission_options(agent, hc.default_permission_mode, permission_mode))
             if use_worktree:
                 opts.update(
                     useWorktree=True, worktreePath=wt["worktreePath"], worktreeBranch=wt.get("branchName")
@@ -286,6 +310,7 @@ async def session_start(
             cwd=cwd,
             worktree_path=wt.get("worktreePath"),
             branch=wt.get("branchName"),
+            **registry_permission_fields(opts),
         )
         tab = None
         if hc.orchestrate_register_tabs:
@@ -299,6 +324,11 @@ async def session_start(
             }
             if model:
                 term["model"] = model
+            pf = registry_permission_fields(opts)
+            if pf["permission_mode_claude"]:
+                term["permissionMode"] = pf["permission_mode_claude"]
+            if pf["agent_params"]:
+                term["agentParams"] = pf["agent_params"]
             if use_worktree:
                 term.update(worktreePath=wt["worktreePath"], worktreeBranch=wt.get("branchName"))
             try:
@@ -345,6 +375,7 @@ async def session_start(
         "tab": tab,
         "prompt_sent": bool(prompt),
         "message_id": mid,
+        "permissions": hc.default_permission_mode if not permission_mode else permission_mode,
         "note": None
         if tab and tab.get("appended")
         else "no GUI tab registered (orchestrate_register_tabs=false); tracked in the local registry",

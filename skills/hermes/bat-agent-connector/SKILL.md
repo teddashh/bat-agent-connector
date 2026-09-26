@@ -1,7 +1,7 @@
 ---
 name: bat-agent-connector
 description: Use this when you need to check on, read, wait for, or (only when explicitly enabled and asked) nudge Claude Code / Codex agent sessions running in Better Agent Terminal (BAT), or fan a project plan out into parallel BAT worktree sessions.
-version: 0.1.0
+version: 0.2.0
 license: MIT
 author: bat-agent-connector contributors (unofficial companion to github.com/tony1223/better-agent-terminal)
 metadata:
@@ -16,6 +16,11 @@ metadata:
 > Hermes note: with the MCP server registered under the name `bat`, the tools appear as
 > `mcp__bat__hosts_list`, `mcp__bat__sessions_list`, `mcp__bat__session_read`, and so on. If they are missing, run
 > `hermes mcp test bat`. The `batc` CLI (same operations, `--json`) works from the terminal tool as a fallback.
+> For the connector's optional Jev layer, pass `TYPESAFE_API_KEY` to the `bat` server (`env:` in its MCP config).
+> If a separate Jev MCP server is mounted, its `jev_classify` tool is handy for ad-hoc judgment of an excerpt
+> (e.g. "is this session done or stuck?") when `sessions_triage` reports `unknown`.
+> Cron watchers: `session_wait` on started sessions; when one finishes, run `session_cleanup` (dry run unless the user
+> enabled automatic cleanup) and report its one-line outcome; an hourly `session_cleanup` sweep is cheap.
 
 ## Concept
 
@@ -45,6 +50,11 @@ metadata:
 | Answer a question (write) | `session_answer(answers=[...] or permission=allow/deny, confirm=true)` | `batc answer HOST SID --answer "Q=A" --confirm` |
 | Start worktree session (orchestrate) | `session_start(host, workspace, agent, prompt, confirm=true)` | `batc start HOST WORKSPACE --prompt ... --confirm` |
 | Merge / remove worktree (orchestrate) | `worktree_merge`, `worktree_remove` | `batc merge ...`, `batc remove-worktree ...` |
+| Classify sessions (quota, waiting, working, done) | `sessions_triage(host?, states?)`, `quota_sessions(host?)` | `batc triage [HOST] --state ...`, `batc quota` |
+| Approve pending permission prompts (write) | `approve_pending(host, confirm=true, dry_run?)` | `batc approve-pending HOST --confirm` |
+| Change a session's permissions (write) | `session_set_permissions(host, sid, mode, confirm=true)` | `batc permissions HOST SID --mode allow_all --confirm` |
+| Move a quota-stopped Claude session to Codex (orchestrate) | `session_failover(host, session_id \| all_exhausted=true, confirm=true, dry_run?)` | `batc failover HOST [SID] --all-exhausted --confirm` |
+| Gated cleanup of finished sessions (orchestrate) | `session_cleanup(host, confirm=true, dry_run=false)` | `batc cleanup HOST --apply --confirm` |
 
 `session_id` accepts a unique prefix (8 characters is usually enough). Use `next_offset` from `session_read` to page
 back in history.
@@ -80,6 +90,20 @@ back in history.
 7. Clean up: `worktree_remove(host, sid, confirm=true)` after merging (branch kept unless `delete_branch=true`).
 8. Report: tasks, branches, merged or not (and why), follow-ups.
 
+## Lifecycle workflows (only where the user enabled them)
+
+- **Quota failover**: `quota_sessions` lists Claude sessions stopped by a usage limit (with the reset time). Before a
+  failover, check that no other session in the same workspace already carries that task on (duplicate work). Dry run
+  first, then `session_failover(confirm=true)`. The Codex successor reuses the same worktree when there is one. Report
+  old → new session id, then track the new one.
+- **Permissions**: on hosts with `default_permission_mode = "allow_all"`, `approve_pending` answers permission prompts
+  (not questions) with "don't ask again" and raises the session to allow-all. Claude sessions are raised only when
+  idle; Codex from its next turn, so repeat `approve_pending` while a turn is still asking.
+- **Cleanup**: `session_cleanup` (dry run first) decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE per
+  session behind hard gates (idle, clean, conflict-free, tests, risk checks, then the optional Jev judgment). It keeps
+  branches, never stops a working session, and returns one `escalation_summary`: report that once, not per item.
+- `sessions_triage` shows `source` (pattern or jev) and an evidence line for every state; quote the evidence.
+
 ## Safety rules
 
 - Default to reading. Write or orchestrate only when the user explicitly asked, and pass `confirm=true` deliberately,
@@ -90,6 +114,7 @@ back in history.
 - Never retry a refused write by changing parameters to get around a guard (rate limit, streaming, dirty worktree,
   unmerged branch, disabled tier). Report the refusal.
 - Do not interrupt a streaming session unless the user asked; prefer `soft`.
-- Never use override flags (`discard_uncommitted`, `allow_unmerged`, `delete_branch`) without the user's explicit
-  approval for that specific worktree.
+- Never use override flags (`discard_uncommitted`, `allow_unmerged`, `delete_branch`, failover `force`) without the
+  user's explicit approval for that specific session.
+- Treat an ESCALATE_TO_TED cleanup decision as final for that run: never force the merge another way.
 - If a host is unreachable, report it; do not try other ways to reach it.

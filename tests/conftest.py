@@ -24,7 +24,9 @@ async def mock():
     await m.stop()
 
 
-def make_config(mock: MockBat, *, writes=False, orchestrate=False, tabs=False, fingerprint=None, safety=None):
+def make_config(
+    mock: MockBat, *, writes=False, orchestrate=False, tabs=False, fingerprint=None, safety=None, **host_extra
+):
     host = {
         "url": mock.url,
         "fingerprint": fingerprint or mock.fingerprint,
@@ -33,6 +35,7 @@ def make_config(mock: MockBat, *, writes=False, orchestrate=False, tabs=False, f
         "orchestrate": orchestrate,
         "orchestrate_register_tabs": tabs,
         "orchestrate_max_sessions": 2,
+        **host_extra,
     }
     return parse_config({"hosts": {"h1": host}, "safety": safety or {"write_min_interval_s": 60}})
 

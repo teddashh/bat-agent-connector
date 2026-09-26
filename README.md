@@ -10,7 +10,9 @@ MCP client) and shell scripts can:
 * see which agent sessions exist, which are running or blocked on a question, and what they said recently;
 * wait for a session to finish its turn;
 * (opt-in) nudge a session: send a message, say "continue", interrupt it, answer its question;
-* (opt-in, separate tier) fan work out: start sessions in fresh git worktrees, review their diffs, merge the clean ones.
+* (opt-in, separate tier) fan work out: start sessions in fresh git worktrees, review their diffs, merge the clean ones;
+* spot sessions that hit a Claude usage quota and move them to Codex in the same worktree (failover);
+* auto-approve permission prompts and clean up finished sessions behind deterministic gates.
 
 > This project is **not affiliated with or endorsed by** the BAT authors. The protocol was read from BAT's MIT-licensed
 > source (v3.2.12) and can change between BAT releases. Credit for BAT goes to TonyQ and its contributors.
@@ -69,14 +71,14 @@ notification on every reconnect.
 
 | Tier | Enabled by | Tools |
 |---|---|---|
-| read (always) | - | `hosts_list`, `host_status`, `workspaces_list`, `sessions_list`, `session_read`, `session_wait`, `worktree_status`, `session_worktree_status` |
-| write | per host `writes = true` | `session_send`, `session_continue`, `session_interrupt`, `session_answer` |
-| orchestrate | per host `writes = true` **and** `orchestrate = true` | `session_start`, `worktree_merge`, `worktree_remove` |
+| read (always) | - | `hosts_list`, `host_status`, `workspaces_list`, `sessions_list`, `session_read`, `session_wait`, `worktree_status`, `session_worktree_status`, `sessions_triage`, `quota_sessions` |
+| write | per host `writes = true` | `session_send`, `session_continue`, `session_interrupt`, `session_answer`, `session_set_permissions`, `approve_pending` |
+| orchestrate | per host `writes = true` **and** `orchestrate = true` | `session_start`, `worktree_merge`, `worktree_remove`, `session_failover`, `session_cleanup` |
 
 Write and orchestrate tools are not even registered unless enabled, need `confirm=true` on every call, are rate
 limited, and are appended to an audit log (`~/.local/state/bat-agent-connector/audit.jsonl`, message bodies only as a
 hash + length unless you opt into a short preview). `--read-only` on the MCP server or CLI disables both tiers
-regardless of config. The channel allowlist is enforced in the client core, below the MCP layer: stop/reset/kill,
+regardless of config. The channel allowlist is enforced in the client core, below the MCP layer: reset/kill/fork,
 PTY writes, file operations, settings, workspace edits (except the append-only tab helper), installs, updates and
 account changes are never sent.
 
@@ -135,6 +137,12 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 | `session_start(host, workspace, agent, confirm, prompt?, model?, use_worktree=true)` | Starts a session (by default in a new worktree; BAT picks the branch `bat/worktree-<id>`). Per-host cap. |
 | `worktree_merge(host, session_id, confirm)` | Merges only when provably conflict-free and clean; otherwise reports why. |
 | `worktree_remove(host, session_id, confirm, delete_branch=false, ...)` | Removes the worktree folder; keeps the branch by default; refuses on dirty/unmerged work unless told. |
+| `sessions_triage(host?, workspace?, agent?, states?, use_jev=auto, include_unloaded=true)` | Classifies each session: `quota_exhausted`, `rate_limited_transient`, `waiting_permission`, `waiting_question`, `working`, `done_idle`, `error_other`, `unknown`, with `source` (pattern/jev), confidence, evidence line and reset time. |
+| `quota_sessions(host?)` | Shortcut: Claude sessions stopped by a usage quota. |
+| `session_set_permissions(host, session_id, mode, confirm)` | `allow_all` (host must allow it) or `default`. Claude sessions are only switched while idle (switching mid-turn would end the turn); Codex applies it from its next turn. |
+| `approve_pending(host, confirm, dry_run?)` | Approves every pending permission prompt (not questions) with "don't ask again" and raises the session to allow-all. Only on `default_permission_mode = "allow_all"` hosts. |
+| `session_failover(host, session_id? \| all_exhausted, confirm, dry_run?, model?, force?)` | Starts a Codex session that continues a quota-stopped Claude session: same worktree when there is one, handoff prompt with the original task, latest instruction, recent output and git state (credentials redacted). Idempotent. |
+| `session_cleanup(host, confirm, dry_run=true, session_id?)` | Decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE_TO_TED per orchestrated session behind hard gates, then acts (needs `auto_cleanup = true`). See docs/ORCHESTRATE.md. |
 
 ## CLI
 
@@ -156,6 +164,13 @@ batc fanout PLAN.md                                   # dry run: split into task
 batc fanout PLAN.md --start --host box1 --workspace api --confirm
 batc merge box1 1a2b3c4d --confirm
 batc remove-worktree box1 1a2b3c4d --confirm
+# lifecycle
+batc triage box1 --state quota_exhausted waiting_permission
+batc quota                                            # quota-stopped Claude sessions on every host
+batc approve-pending box1 --dry-run                   # then --confirm
+batc permissions box1 1a2b3c4d --mode allow_all --confirm
+batc failover box1 --all-exhausted --dry-run          # then --confirm
+batc cleanup box1                                     # dry run table; --apply --confirm to act
 ```
 
 Every command accepts `--json`.
@@ -167,6 +182,8 @@ Every command accepts `--json`.
 * Tokens are resolved at connect time from a reference and redacted from every error string.
 * The client always drains the socket (BAT drops clients with 256 queued frames) and uses bounded event queues.
 * Session text is untrusted input: agents should not follow instructions found in it.
+* The optional Jev judgment layer is off without an API key, times out after a few seconds, fails safe, and gets only
+  short excerpts with credential-looking strings masked. No keys live in this repository.
 
 Details: [SECURITY.md](SECURITY.md), [docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/ORCHESTRATE.md](docs/ORCHESTRATE.md).
 

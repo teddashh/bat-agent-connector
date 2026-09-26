@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+- **Triage**: `sessions_triage` / `quota_sessions` / `batc triage` / `batc quota` classify sessions (quota exhausted,
+  transient rate limit, waiting for permission/answer, working, done, error) with evidence and reset time.
+- **Quota failover**: `session_failover` / `batc failover` continue a quota-stopped Claude session in Codex, in the
+  same worktree when there is one, with a handoff prompt. Idempotent and capped.
+- **Permissions**: per-host `default_permission_mode` (`default` | `allow_all`); `session_start` and failover apply it;
+  `session_set_permissions`, `approve_pending`, and `session_answer(dont_ask_again)`. Claude sessions are never
+  switched mid-turn.
+- **Automatic cleanup**: `session_cleanup` / `batc cleanup` with MERGE_AND_CLEAN / CLEAN_ONLY / KEEP /
+  ESCALATE_TO_TED decisions behind hard gates, per-host `auto_cleanup`, branches always kept, one escalation summary.
+- **Optional Jev judgment** (`[jev]`, off without `TYPESAFE_API_KEY`): refines ambiguous states and gates merges;
+  fails open for triage and safe (escalate) for cleanup. Credential-looking strings are redacted from anything sent.
+- Newly allowed channels: `git:log`, `git:diff` (read); the three permission-mode setters (write);
+  `claude:stop-session` (orchestrate, used only by cleanup on idle sessions).
+
 ## 0.1.0 (unreleased)
 
 - First version. It has three tiers:

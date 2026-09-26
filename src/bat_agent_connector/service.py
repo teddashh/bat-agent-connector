@@ -124,6 +124,8 @@ def registry_terminal(e: dict) -> dict:
         "model": e.get("model"),
         "worktreePath": e.get("worktree_path"),
         "worktreeBranch": e.get("branch"),
+        "permissionMode": e.get("permission_mode_claude"),
+        "agentParams": e.get("agent_params"),
         "_orchestrated": True,
         "_origin_cwd": e.get("origin_cwd"),
     }
@@ -645,6 +647,10 @@ def _resume_params(t: dict, ws: dict) -> dict:
         "workspaceId": t.get("workspaceId"),
         "workspaceName": w.get("name"),
     }
+    ap = t.get("agentParams") if isinstance(t.get("agentParams"), dict) else {}
+    if agent_kind(t.get("agentPreset")) == "codex":
+        opts["codexSandboxMode"] = ap.get("sandboxMode")
+        opts["codexApprovalPolicy"] = ap.get("approvalPolicy")
     return {
         "sessionId": t["id"],
         "sdkSessionId": t.get("sdkSessionId"),
@@ -843,6 +849,7 @@ async def session_answer(
     permission: str | None = None,
     deny_message: str | None = None,
     tool_use_id: str | None = None,
+    dont_ask_again: bool = False,
 ) -> dict:
     _guard(fleet, host, confirm)
     if (answers is None) == (permission is None):
@@ -898,6 +905,8 @@ async def session_answer(
                 raise WriteRefused("tool_use_id does not match the pending permission request")
             if permission == "allow":
                 result = {"behavior": "allow", "updatedInput": pend.get("input")}
+                if dont_ask_again:
+                    result["dontAskAgain"] = True  # Codex: accept for the rest of the session
             elif permission == "deny":
                 result = {
                     "behavior": "deny",

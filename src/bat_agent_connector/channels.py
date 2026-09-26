@@ -45,6 +45,8 @@ READ_CHANNELS = frozenset(
         "git:status",
         "git:branch",
         "git:getRoot",
+        "git:log",
+        "git:diff",
     }
 )
 
@@ -56,6 +58,11 @@ WRITE_CHANNELS = frozenset(
         "claude:abort-session",
         "claude:resolve-ask-user",
         "claude:resolve-permission",
+        # permission mode of an existing session (used by session_set_permissions; the connector
+        # only allows raising to allow-all when the host's default_permission_mode is allow_all)
+        "claude:set-permission-mode",
+        "claude:set-codex-sandbox-mode",
+        "claude:set-codex-approval-policy",
     }
 )
 
@@ -67,6 +74,9 @@ ORCHESTRATE_CHANNELS = frozenset(
         "worktree:merge",
         "worktree:remove",
         "worktree:rehydrate",
+        # unloads a finished agent from the host runtime (transcript and tab stay; resumable).
+        # Only session_cleanup uses it, after its gates.
+        "claude:stop-session",
     }
 )
 
@@ -77,7 +87,6 @@ GUARDED_CHANNELS = frozenset({"workspace:save"})
 # Documented for tests and humans. Anything not in READ/WRITE is denied anyway.
 NEVER_EXPOSED_EXAMPLES = frozenset(
     {
-        "claude:stop-session",
         "claude:reset-session",
         "claude:rest-session",
         "claude:stop-task",
@@ -86,7 +95,6 @@ NEVER_EXPOSED_EXAMPLES = frozenset(
         "claude:clear-archive",
         "claude:archive-messages",
         "claude:set-model",
-        "claude:set-permission-mode",
         "claude:account-switch",
         "claude:account-remove",
         "claude:auth-login-start",
@@ -126,6 +134,9 @@ TIMEOUTS = {
     "worktree:merge": 120.0,
     "worktree:remove": 60.0,
     "worktree:status": 30.0,
+    "claude:stop-session": 30.0,
+    "git:log": 15.0,
+    "git:diff": 20.0,
     "workspace:save": 30.0,
 }
 DEFAULT_TIMEOUT = 15.0

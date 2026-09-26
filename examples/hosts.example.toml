@@ -23,8 +23,23 @@ writes = false                         # tier 2: send/continue/interrupt/answer
 orchestrate = false                    # tier 3: start worktree sessions, merge, remove (needs writes)
 orchestrate_max_sessions = 4
 orchestrate_register_tabs = false      # append a GUI tab via workspace:save (append-only; see SECURITY.md)
+default_permission_mode = "default"    # "allow_all" = sessions the connector starts/fails over run like BAT's GUI
+                                       # default (Claude bypassPermissions, Codex danger-full-access + never ask),
+                                       # and approve_pending / session_set_permissions may raise sessions (needs writes)
+auto_cleanup = false                   # let session_cleanup actually merge/clean/stop (needs orchestrate)
 
 [hosts.buildbox]
 url = "wss://127.0.0.2:9876/"
 fingerprint = "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF"
 token_ref = "bat-profile:buildbox"     # read from BAT's own client token store at connect time
+
+# Optional judgment layer (TypeSafe Jev). OFF unless an API key is in the environment variable below.
+# It only refines ambiguous session-state classifications and gates cleanup merges; any error or
+# timeout falls back to the deterministic result (for cleanup: escalate instead of merge).
+# Only short, secret-redacted excerpts are sent.
+[jev]
+enabled = "auto"                       # auto = on when the key is set; true / false to force
+timeout_s = 3.0
+# model = "jev-latest"
+# base_url = "https://api.typesafe.ai"
+# api_key_env = "TYPESAFE_API_KEY"

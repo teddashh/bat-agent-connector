@@ -63,7 +63,7 @@ async def test_legacy_downgrade_refused(mock):
 @pytest.mark.parametrize(
     "channel",
     [
-        "claude:stop-session",
+        "claude:rest-session",
         "claude:reset-session",
         "pty:kill",
         "pty:write",
@@ -74,7 +74,7 @@ async def test_legacy_downgrade_refused(mock):
         "runtime:install",
         "app:install-update",
         "claude:account-switch",
-        "agent:stop-session",
+        "agent:fork-session",
         "claude:cleanup-worktree",
         "made:up",
     ],

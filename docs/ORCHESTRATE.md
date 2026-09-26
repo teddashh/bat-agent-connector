@@ -13,6 +13,9 @@ Off by default. Enable per host with `writes = true` **and** `orchestrate = true
 | `worktree:remove {sessionId, deleteBranch=true}` | `git worktree remove --force` (falls back to `rm -rf` + prune) and `git branch -D` when `deleteBranch`. | `remove_worktree_native`, `force_remove_worktree` |
 | `worktree:rehydrate {sessionId, cwd, worktreePath, branchName}` | Re-registers a worktree in host memory (also re-copies local env files into it). | `rehydrate_worktree_native` |
 | `claude:cleanup-worktree` | Deletes the branch by default. **Not exposed.** | `remote_server.rs` |
+| `claude:start-session` with `options.worktreePath` of an existing worktree (codex preset) | The host **reuses** that worktree for the new session (no new folder), keeps its branch, copies env files without overwriting. Used by failover. | `ensure_worktree_for_session_native` |
+| `claude:stop-session {sessionId}` | Unloads the runtime session; the transcript stays and it can be resumed. | `remote_server.rs` |
+| `claude:set-permission-mode`, `claude:set-codex-sandbox-mode`, `claude:set-codex-approval-policy` | Change a live session's permissions. A Claude query not launched with bypass cannot be raised mid-turn: the sidecar then closes the live query, ending the turn. Codex applies it via `thread/resume` for the next turn. | `claude-session.mjs`, `codex_app_server.rs` |
 
 ### Does a started session appear as a GUI tab?
 
@@ -40,6 +43,33 @@ The connector therefore:
 | `worktree_remove(host, session_id, confirm, delete_branch=false, allow_unmerged=false, discard_uncommitted=false)` | orchestrate | Refuses if the session is streaming, if the worktree has uncommitted changes (unless `discard_uncommitted`), or if `delete_branch` and the branch has unmerged commits (unless `allow_unmerged`). The session itself is not stopped. |
 | `batc fanout PLAN.md [--start ...]` | CLI helper | Splits a markdown plan (`- [ ]` items, numbered items, `##` headings) into task prompts; `--start` needs `--confirm` and is capped by `max_start_per_call`. |
 
+| `session_failover(...)` | orchestrate | Only for sessions classified `quota_exhausted` (unless `force`), never while streaming; one successor per session (registry `failover_of`); `max_start_per_call` for `all_exhausted`; the old registry entry becomes `superseded`. |
+| `session_cleanup(...)` | orchestrate | Dry run by default; acting needs `confirm` **and** host `auto_cleanup = true`. Gates below. |
+
+## Quota failover
+
+BAT has no "quota exhausted" field. The connector detects it from the limit text Claude writes into the transcript
+("You've hit your … limit", "usage limit reached|<epoch>", "… resets <time>") and treats 429/overloaded messages
+as transient. Only ambiguous cases are sent to Jev when it is configured. The Codex successor is started with the
+`codex-agent-worktree` preset and the old `worktreePath`/`worktreeBranch` (same folder, same branch) or, for a
+main-checkout session, `codex-agent` in the same folder. Its first message is a handoff prompt: original task, latest
+instruction, recent output, git state (branch, dirty files, commits, diff stats) and the quota evidence.
+
+## Automatic cleanup gates
+
+`session_cleanup` evaluates every orchestrated session (and failed-over Claude sessions) and decides:
+
+| Decision | When |
+|---|---|
+| `KEEP` | Streaming, waiting for a permission/answer, quota or transient limit, idle for less than `min_idle_s`, worktree shared by another active session. **Never stops a session that is mid-work.** |
+| `CLEAN_ONLY` | Superseded by a failover successor that is running; worktree already merged or removed; no new commits and no diff; main-checkout session whose final output Jev confirms as finished. Stops the agent, removes the worktree with the branch **kept**. |
+| `MERGE_AND_CLEAN` | All hard gates pass: idle, worktree clean, `mergedKind == ahead` (conflict-free, via `worktree_merge` never-force semantics), main checkout clean and on the source branch, last test run not failed, deterministic risk checks clean (no credential-looking additions, no secrets/infra paths, no large deletions or huge diffs); **then** Jev must confirm the final output claims completion (≥ 0.8), the diff is `safe_complete` (≥ 0.7), and, if no test run was seen, that tests passed. Merges locally, removes the worktree (branch kept), stops the agent. |
+| `ESCALATE_TO_TED` | Uncommitted changes, diverged branch, dirty main checkout, failing tests, risk-check hit, Jev unavailable/unsure. Collected into one `escalation_summary` line per call. |
+
+Every decision and action is appended to the audit log with its reasons. Branches are never deleted by cleanup, so a
+merge or removal can be undone from the branch. BAT's remote protocol has no push, tag or PR channel: merges stay in
+the host's main checkout, and pushing or opening a PR is left to the host's own workflow.
+
 ## Suggested workflow
 
 1. Read the plan; split it into independent tasks (`batc fanout PLAN.md` gives a first cut; edit it).
@@ -47,4 +77,5 @@ The connector therefore:
 3. Monitor with `sessions_list` and `session_wait`; answer questions only when you are sure.
 4. Review each branch: `session_worktree_status(include_diff=true)`, `session_read`.
 5. Merge the clean ones with `worktree_merge`; for `diverged` branches ask the session to rebase first.
-6. `worktree_remove` merged worktrees (branch kept unless you ask). Report results to the user.
+6. `worktree_remove` merged worktrees (branch kept unless you ask), or let `session_cleanup` do steps 5-6 behind its
+   gates. Report results to the user.

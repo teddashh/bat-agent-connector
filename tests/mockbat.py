@@ -130,6 +130,8 @@ class MockBat:
         self.worktrees: dict[str, dict] = {}
         self.git_status: dict[str, list] = {}
         self.git_branch: dict[str, str] = {"/srv/demo": "main"}
+        self.git_diff: dict[str, str] = {}
+        self.perm_calls: list = []
         self.sent: dict[str, dict] = {}
         self.save_hook: Callable[[], None] | None = None
         ca = trustme.CA()
@@ -316,4 +318,14 @@ class MockBat:
             return self.git_status.get(p["cwd"], [])
         if ch == "git:branch":
             return self.git_branch.get(p["cwd"], "main")
+        if ch == "git:log":
+            return [{"hash": "abc1234", "author": "dev", "date": "2026-01-01", "message": "wip"}]
+        if ch == "git:diff":
+            return self.git_diff.get(p["cwd"], "")
+        if ch == "claude:stop-session":
+            self.metas[sid] = None
+            return {"ok": True, "existed": True}
+        if ch in ("claude:set-permission-mode", "claude:set-codex-sandbox-mode", "claude:set-codex-approval-policy"):
+            self.perm_calls.append((ch, p))
+            return True
         raise RuntimeError(f"mock: unhandled channel {ch}")

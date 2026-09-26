@@ -113,8 +113,10 @@ and auth-login calls allow 300 s. `runtime:get-status` allows 30 s.
 | Soft interrupt (1× Esc) | `claude:interrupt-turn {sessionId}` | Claude SDK: ends the current turn but keeps the subprocess and background subagents. Not intercepted for Codex, so use abort there. |
 | Hard stop (2× Esc / `/abort`) | `claude:abort-session {sessionId}` | Claude: kills the running query loop, session stays. Codex: turn interrupt, session stays. |
 | Stop a background task | `claude:stop-task {sessionId, taskId}` | Subagent/background task only. |
-| Answer blocked prompts | `claude:resolve-ask-user {sessionId, toolUseId, answers}`, `claude:resolve-permission {sessionId, toolUseId, result}` | Unblocks `pendingAskUser` / `pendingPermission`. |
-| ⚠ Tear down | `claude:stop-session`, `claude:reset-session`, `claude:rest-session`, `pty:kill`, `worktree:remove/merge`, `fs:delete-path`, `settings:save`, `workspace:save`, `runtime:install`, `app:install-update`/`app:relaunch` (desktop hosts only) | **Never expose these** in a connector, except behind an explicit "admin" flag. |
+| Answer blocked prompts | `claude:resolve-ask-user {sessionId, toolUseId, answers}`, `claude:resolve-permission {sessionId, toolUseId, result}` | Unblocks `pendingAskUser` / `pendingPermission`. `result.dontAskAgain = true`: Codex → accept for the session (that command); Claude `ExitPlanMode` → acceptEdits. |
+| Permission mode | `claude:set-permission-mode {sessionId, mode}` (Claude; returns `false` for Codex), `claude:set-codex-sandbox-mode {sessionId, mode}`, `claude:set-codex-approval-policy {sessionId, policy}` | The GUI's "allow bypass" default starts Claude with `permissionMode: bypassPermissions` and Codex with `codexSandboxMode: danger-full-access`, `codexApprovalPolicy: never`; a session started without them asks. Raising a Claude query that was not launched with bypass fails in the SDK and the sidecar closes the live query, **ending a running turn**; switch only while idle. Codex re-applies via `thread/resume` on its next turn. |
+| Unload a session | `claude:stop-session {sessionId}` | Unloads the runtime session; the transcript and tab stay and it can be resumed. The connector exposes it only in the orchestrate tier, used by `session_cleanup` on idle, finished sessions. |
+| ⚠ Tear down | `claude:reset-session`, `claude:rest-session`, `pty:kill`, `worktree:remove/merge`, `fs:delete-path`, `settings:save`, `workspace:save`, `runtime:install`, `app:install-update`/`app:relaunch` (desktop hosts only) | **Never expose these** in a connector, except behind an explicit "admin" flag. |
 
 ## 5. Events (S→C, `type:"event"`)
 `agent:message`, `agent:stream` (`{sessionId,data:{text|thinking}}`), `agent:status` (`{sessionId,meta}`),
@@ -134,6 +136,10 @@ Stream events are coalesced per session on the host. Filter by `params.sessionId
 * **Session write (explicit opt-in)**: `claude:send-message`, `claude:client-resume`/`resume-session`/`start-session`,
   `claude:interrupt-turn`, `claude:abort-session`, `claude:stop-task`, `claude:resolve-ask-user`,
   `claude:resolve-permission`, `claude:set-model|effort|permission-mode`, `pty:write`.
+* **Usage / quota**: BAT has no "quota exhausted" status. Claude's limit text arrives as an assistant message
+  (e.g. "You've hit your … limit · … resets <time>"); the SDK `rate_limit_event` is forwarded as `claude:rate-limit`
+  (`rateLimitType`, `resetsAt`, `utilization`) and host-wide usage as `agent:usage` / `agent:usage-snapshot`.
+* **No push / tag / PR-create channel** exists in v3.2.12 (`github:pr-list|pr-view|pr-comment` only).
 * **Destructive / admin (do not expose)**: see the ⚠ row in §4, plus `fs:upload-*`, `github:*-comment`,
   `claude:account-switch|remove`, auth-login flows, `snippet:*` writes, `notification:clear`.
 

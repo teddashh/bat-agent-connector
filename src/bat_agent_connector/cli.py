@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import __version__, orchestrate, service
+from . import __version__, lifecycle, orchestrate, service, triage
 from .config import DEFAULT_BAT_PROFILES_DIR, default_config_path, load_config
 from .errors import BatError
 from .fleet import Fleet
@@ -116,6 +116,48 @@ def r_read(o):
         print(f"\n(older: --offset {o['next_offset']})")
 
 
+def r_triage(o):
+    rows = [
+        [
+            s["host"],
+            s["session_id"][:8],
+            s.get("workspace"),
+            s.get("agent_kind"),
+            s.get("state"),
+            s.get("source"),
+            s.get("confidence"),
+            s.get("resets") or "",
+            s.get("evidence") or "",
+        ]
+        for s in o["sessions"]
+    ]
+    _table(rows, ["host", "session", "workspace", "agent", "state", "source", "conf", "resets", "evidence"])
+    print(f"({o['count']} rows; by state: {o['counts_by_state']}; jev: {o['jev']}; {o['elapsed_s']}s)")
+    for h, e in o["errors"].items():
+        print(f"! {h}: {e}", file=sys.stderr)
+
+
+def r_cleanup(o):
+    rows = [
+        [
+            (d.get("session_id") or "")[:8],
+            d.get("workspace"),
+            d.get("agent_kind"),
+            d.get("branch") or "",
+            d.get("state") or "",
+            d.get("decision"),
+            "; ".join(d.get("reasons") or []),
+            "; ".join(d.get("actions") or []),
+        ]
+        for d in o["decisions"]
+        if not d.get("noop")
+    ]
+    _table(rows, ["session", "workspace", "agent", "branch", "state", "decision", "reasons", "actions"])
+    print(f"{'DRY RUN ' if o['dry_run'] else ''}{o['host']}: {o['counts']} (jev: {o['jev']})")
+    if o.get("escalation_summary"):
+        print(o["escalation_summary"])
+
+
 def _parse_answers(items: list[str] | None):
     if not items:
         return None
@@ -184,7 +226,38 @@ async def _run(args) -> Any:
                 args.permission,
                 args.deny_message,
                 args.tool_use_id,
+                args.dont_ask_again,
             ), None
+        if c in ("triage", "quota"):
+            states = ["quota_exhausted"] if c == "quota" else args.state
+            return await triage.sessions_triage(
+                fleet, args.host, args.workspace, args.agent, states, args.jev, not args.loaded_only
+            ), r_triage
+        if c == "permissions":
+            return await lifecycle.session_set_permissions(
+                fleet, args.host, args.session, args.mode, args.confirm
+            ), None
+        if c == "approve-pending":
+            return await lifecycle.approve_pending(
+                fleet, args.host, args.confirm, args.dry_run, args.workspace
+            ), None
+        if c == "failover":
+            return await lifecycle.session_failover(
+                fleet,
+                args.host,
+                args.session,
+                args.confirm,
+                args.all_exhausted,
+                args.dry_run,
+                args.model,
+                args.force,
+                args.tail,
+                args.workspace,
+            ), None
+        if c == "cleanup":
+            return await lifecycle.session_cleanup(
+                fleet, args.host, args.confirm, not args.apply, args.session
+            ), r_cleanup
         if c == "worktrees":
             return await orchestrate.worktree_status(fleet, args.host, args.workspace), None
         if c == "wt-status":
@@ -334,6 +407,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--permission", choices=["allow", "deny"])
     p.add_argument("--deny-message")
     p.add_argument("--tool-use-id")
+    p.add_argument("--dont-ask-again", action="store_true", help="Codex: accept for the rest of the session")
+    p.add_argument("--confirm", action="store_true")
+    p = sp.add_parser("triage", help="classify sessions (quota / waiting / working / done), pattern + optional Jev")
+    p.add_argument("host", nargs="?")
+    p.add_argument("--workspace")
+    p.add_argument("--agent", choices=["claude", "codex"])
+    p.add_argument("--state", action="append", choices=list(triage.STATES))
+    p.add_argument("--jev", choices=["auto", "always", "never"], default="auto")
+    p.add_argument("--loaded-only", action="store_true")
+    p = sp.add_parser("quota", help="list sessions stuck on a quota / usage limit (with evidence)")
+    p.add_argument("host", nargs="?")
+    p.add_argument("--workspace")
+    p.add_argument("--agent", choices=["claude", "codex"])
+    p.add_argument("--jev", choices=["auto", "always", "never"], default="auto")
+    p.add_argument("--loaded-only", action="store_true")
+    p = sp.add_parser("permissions", help="WRITE: set a live session's permission mode (allow_all|default)")
+    p.add_argument("host")
+    p.add_argument("session")
+    p.add_argument("--mode", choices=["allow_all", "default"], default="allow_all")
+    p.add_argument("--confirm", action="store_true")
+    p = sp.add_parser("approve-pending", help="WRITE: approve all pending permission prompts on a host")
+    p.add_argument("host")
+    p.add_argument("--workspace")
+    p.add_argument("--dry-run", action="store_true")
     p.add_argument("--confirm", action="store_true")
 
     p = sp.add_parser("worktrees", help="list worktree sessions on a host")
@@ -363,6 +460,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--delete-branch", action="store_true")
     p.add_argument("--allow-unmerged", action="store_true")
     p.add_argument("--discard-uncommitted", action="store_true")
+    p.add_argument("--confirm", action="store_true")
+    p = sp.add_parser("failover", help="ORCHESTRATE: continue a quota-exhausted Claude session with Codex")
+    p.add_argument("host")
+    p.add_argument("session", nargs="?")
+    p.add_argument("--all-exhausted", action="store_true")
+    p.add_argument("--workspace", help="with --all-exhausted: limit to one workspace")
+    p.add_argument("--model")
+    p.add_argument("--tail", type=int, default=12, help="recent messages to include in the handoff")
+    p.add_argument("--force", action="store_true", help="fail over even if not detected as exhausted")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--confirm", action="store_true")
+    p = sp.add_parser("cleanup", help="ORCHESTRATE: gated merge/clean/stop of finished sessions (dry run by default)")
+    p.add_argument("host")
+    p.add_argument("session", nargs="?")
+    p.add_argument("--apply", action="store_true", help="act (needs --confirm and auto_cleanup = true)")
+    p.add_argument("--dry-run", action="store_true", help="report only (default)")
     p.add_argument("--confirm", action="store_true")
     p = sp.add_parser("fanout", help="split a plan into worktree task prompts (and optionally start them)")
     p.add_argument("plan", help="markdown plan file")

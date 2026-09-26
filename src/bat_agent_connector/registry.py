@@ -74,13 +74,21 @@ def find_prefix(host: str, prefix: str) -> list[dict]:
     ]
 
 
-def reserve(host: str, entry: dict, max_active: int) -> None:
-    """Atomically check the per-host cap and add an entry (status=starting)."""
+def reserve(host: str, entry: dict, max_active: int, replaces: str | None = None) -> None:
+    """Atomically check the per-host cap and add an entry (status=starting).
+
+    ``replaces``: session id of an active entry this one takes over (failover in the same
+    worktree). It is marked ``superseded`` in the same transaction, so the pair counts once.
+    """
     from .errors import WriteRefused
 
     p = registry_path()
     with _locked(p):
         items = _read(p)
+        if replaces:
+            for e in items:
+                if e.get("host") == host and e.get("session_id") == replaces and e.get("status") == "active":
+                    e.update(status="superseded", superseded_by=entry.get("session_id"), updated_at=time.time())
         active = [e for e in items if e.get("host") == host and e.get("status") in ("active", "starting")]
         if len(active) >= max_active:
             raise WriteRefused(

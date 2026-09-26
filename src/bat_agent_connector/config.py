@@ -21,7 +21,13 @@ Config file (default ``~/.config/bat-agent-connector/hosts.toml``)::
     orchestrate = false                # 3rd tier: start worktree sessions, merge, remove (needs writes)
     orchestrate_max_sessions = 4       # cap on concurrently orchestrated sessions on this host
     orchestrate_register_tabs = false  # append a tab to the host workspace (workspace:save, append-only)
+    default_permission_mode = "default" # "default" (agent asks) or "allow_all" (like BAT's bypass setting)
+    auto_cleanup = false               # allow session_cleanup to merge/remove/stop on this host
     profile_id = "default"             # workspace profile on the host
+
+    [jev]                              # optional judgment layer (TypeSafe Jev); off without an API key
+    enabled = "auto"                   # "auto" = on when TYPESAFE_API_KEY is set; true / false
+    timeout_s = 3.0
 
 Token values never live in this file.
 """
@@ -94,6 +100,8 @@ class HostConfig:
     orchestrate: bool = False
     orchestrate_max_sessions: int = 4
     orchestrate_register_tabs: bool = False
+    default_permission_mode: str = "default"
+    auto_cleanup: bool = False
     profile_id: str = "default"
     bat_profiles_dir: str = DEFAULT_BAT_PROFILES_DIR
     labels: list[str] = field(default_factory=list)
@@ -173,10 +181,23 @@ class SafetyConfig:
     max_start_per_call: int = 4
 
 
+PERMISSION_MODES = ("default", "allow_all")
+
+
+@dataclass
+class JevConfig:
+    enabled: str = "auto"  # auto | true | false
+    timeout_s: float = 3.0
+    model: str = "jev-latest"
+    base_url: str = "https://api.typesafe.ai"
+    api_key_env: str = "TYPESAFE_API_KEY"
+
+
 @dataclass
 class Config:
     hosts: dict[str, HostConfig]
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    jev: JevConfig = field(default_factory=JevConfig)
     client_label: str = "BAT Agent Connector"
     path: Path | None = None
 
@@ -222,6 +243,16 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
             raise ConfigError(f"host {name!r}: orchestrate/orchestrate_register_tabs must be true or false")
         if orch and not writes:
             raise ConfigError(f"host {name!r}: orchestrate = true requires writes = true")
+        pmode = str(h.get("default_permission_mode", "default"))
+        if pmode not in PERMISSION_MODES:
+            raise ConfigError(f"host {name!r}: default_permission_mode must be one of {', '.join(PERMISSION_MODES)}")
+        if pmode != "default" and not writes:
+            raise ConfigError(f"host {name!r}: default_permission_mode = {pmode!r} requires writes = true")
+        cleanup = h.get("auto_cleanup", False)
+        if not isinstance(cleanup, bool):
+            raise ConfigError(f"host {name!r}: auto_cleanup must be true or false")
+        if cleanup and not orch:
+            raise ConfigError(f"host {name!r}: auto_cleanup = true requires orchestrate = true")
         hosts[name] = HostConfig(
             name=name,
             url=url,
@@ -231,6 +262,8 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
             orchestrate=orch,
             orchestrate_max_sessions=max(1, min(32, int(h.get("orchestrate_max_sessions", 4)))),
             orchestrate_register_tabs=tabs,
+            default_permission_mode=pmode,
+            auto_cleanup=cleanup,
             profile_id=str(h.get("profile_id") or "default"),
             bat_profiles_dir=str(h.get("bat_profiles_dir") or pdir),
             labels=list(h.get("labels") or []),
@@ -242,8 +275,23 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
         max_writes_per_hour=int(s.get("max_writes_per_hour", 30)),
         max_start_per_call=max(1, min(16, int(s.get("max_start_per_call", 4)))),
     )
+    j = data.get("jev") or {}
+    en = j.get("enabled", "auto")
+    en = "true" if en is True else "false" if en is False else str(en).lower()
+    if en not in ("auto", "true", "false"):
+        raise ConfigError('[jev] enabled must be "auto", true or false')
+    base = str(j.get("base_url") or "https://api.typesafe.ai").rstrip("/")
+    if not base.startswith("https://"):
+        raise ConfigError("[jev] base_url must be https://")
+    jev = JevConfig(
+        enabled=en,
+        timeout_s=max(0.5, min(30.0, float(j.get("timeout_s", 3.0)))),
+        model=str(j.get("model") or "jev-latest"),
+        base_url=base,
+        api_key_env=str(j.get("api_key_env") or "TYPESAFE_API_KEY"),
+    )
     label = str((data.get("client") or {}).get("label") or "BAT Agent Connector")
-    return Config(hosts=hosts, safety=safety, client_label=label, path=path)
+    return Config(hosts=hosts, safety=safety, jev=jev, client_label=label, path=path)
 
 
 def load_config(path: str | Path | None = None) -> Config:
