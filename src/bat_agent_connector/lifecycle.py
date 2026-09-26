@@ -21,7 +21,7 @@ import uuid
 from typing import Any
 
 from . import registry
-from .errors import BatError, WriteRefused
+from .errors import BatError, InvokeTimeout, WriteRefused
 from .fleet import Fleet
 from .jev import Jev
 from .orchestrate import (
@@ -931,9 +931,17 @@ async def session_cleanup(
     for e in cands:
         try:
             r = await _evaluate(fleet, host, e, ws, jev, min_idle_s, successors)
+        except InvokeTimeout as ex:  # host busy (e.g. diffing a large branch): try again on the next sweep
+            r = {
+                "session_id": e.get("session_id"),
+                "workspace": e.get("workspace_name"),
+                "decision": "KEEP",
+                "reasons": [f"host timed out, retry next sweep: {_err(ex)}"],
+            }
         except BatError as ex:
             r = {
                 "session_id": e.get("session_id"),
+                "workspace": e.get("workspace_name"),
                 "decision": "ESCALATE",
                 "reasons": [f"evaluation error: {_err(ex)}"],
             }

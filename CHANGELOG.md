@@ -9,6 +9,7 @@
 - Fix: `worktree_remove` (and cleanup) re-registers the worktree with BAT before removing it and verifies the folder
   is gone. BAT's `worktree:remove` reports success without doing anything when its worktree manager has no record
   for the session (e.g. a failover session that reused an existing worktree).
+- Cleanup treats a host timeout as KEEP (retry on the next sweep) instead of ESCALATE; `worktree:status` gets 90 s.
 
 ## 0.2.0 (unreleased)
 

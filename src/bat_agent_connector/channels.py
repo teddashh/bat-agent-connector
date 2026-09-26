@@ -133,7 +133,7 @@ TIMEOUTS = {
     "worktree:create": 120.0,
     "worktree:merge": 120.0,
     "worktree:remove": 60.0,
-    "worktree:status": 30.0,
+    "worktree:status": 90.0,  # computes the branch diff; large branches take a while
     "claude:stop-session": 30.0,
     "git:log": 15.0,
     "git:diff": 20.0,
