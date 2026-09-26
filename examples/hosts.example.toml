@@ -1,0 +1,30 @@
+# bat-agent-connector host config. Copy to ~/.config/bat-agent-connector/hosts.toml
+# (or generate it with `batc import-bat`). Never put token VALUES in this file.
+
+[client]
+label = "BAT Agent Connector"          # how this client appears on the host
+
+[safety]
+audit_preview_chars = 0                # 0 = audit log stores only sha256 prefix + length of prompts
+write_min_interval_s = 60              # min seconds between sends to the same session
+max_writes_per_hour = 30               # across all hosts (each write step counts)
+max_start_per_call = 4                 # fan-out: max sessions started by one `batc fanout --start`
+
+[bat]
+# Where BAT keeps its client profiles (used by token_ref = "bat-profile:<id>")
+profiles_dir = "~/.local/share/org.tonyq.better-agent-terminal/profiles"
+
+[hosts.workstation]
+url = "wss://127.0.0.1:9876/"          # e.g. an ssh -L tunnel to the host's bat-server
+fingerprint = "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99"
+token_ref = "env:BAT_TOKEN_WORKSTATION" # or "file:~/.config/bat-agent-connector/workstation.token"
+profile_id = "default"
+writes = false                         # tier 2: send/continue/interrupt/answer
+orchestrate = false                    # tier 3: start worktree sessions, merge, remove (needs writes)
+orchestrate_max_sessions = 4
+orchestrate_register_tabs = false      # append a GUI tab via workspace:save (append-only; see SECURITY.md)
+
+[hosts.buildbox]
+url = "wss://127.0.0.2:9876/"
+fingerprint = "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF"
+token_ref = "bat-profile:buildbox"     # read from BAT's own client token store at connect time

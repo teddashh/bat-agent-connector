@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+# never commit real configs or tokens
+hosts.toml
+*.token
+*.enc.json
+.env

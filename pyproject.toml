@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling>=1.25,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bat-agent-connector"
+version = "0.1.0"
+description = "Unofficial connector that lets AI agents (MCP clients, CLIs) read and, when explicitly enabled, nudge Better Agent Terminal (BAT) sessions over BAT's remote protocol."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "bat-agent-connector contributors" }]
+keywords = ["better-agent-terminal", "bat", "mcp", "agents", "claude-code", "codex"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: POSIX",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+# Direct dependencies are bounded; exact versions are pinned in uv.lock.
+dependencies = [
+  "websockets>=16.0,<17",
+  "mcp>=2.2.0,<3",
+  "tomli>=2.0.1,<3; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=9.1,<10",
+  "pytest-asyncio>=1.4,<2",
+  "trustme>=1.2.1,<2",
+  "ruff>=0.16,<0.17",
+]
+
+[project.scripts]
+batc = "bat_agent_connector.cli:main"
+bat-agent-connector-mcp = "bat_agent_connector.mcp_server:main"
+
+[project.urls]
+Upstream-BAT = "https://github.com/tony1223/better-agent-terminal"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bat_agent_connector"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"skills/bat-agent-connector/SKILL.md" = "bat_agent_connector/skill/SKILL.md"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = ["live: read-only integration tests against real BAT hosts (set BATC_LIVE=1)"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+ignore = ["S101", "S311", "B008", "UP007", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B"]

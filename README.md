@@ -1,0 +1,183 @@
+# bat-agent-connector
+
+**An unofficial connector that lets AI agents work with [Better Agent Terminal (BAT)](https://github.com/tony1223/better-agent-terminal) sessions.**
+
+BAT (by [TonyQ / tony1223](https://github.com/tony1223)) is a terminal app that runs Claude Code and Codex agent
+sessions, grouped into workspaces, on your machines. It has a remote protocol (`bat-remote/v2`) that its own GUI and
+phone clients use. This project speaks that protocol so that *other* agents (Claude Code, Codex, Cursor, Hermes, or any
+MCP client) and shell scripts can:
+
+* see which agent sessions exist, which are running or blocked on a question, and what they said recently;
+* wait for a session to finish its turn;
+* (opt-in) nudge a session: send a message, say "continue", interrupt it, answer its question;
+* (opt-in, separate tier) fan work out: start sessions in fresh git worktrees, review their diffs, merge the clean ones.
+
+> This project is **not affiliated with or endorsed by** the BAT authors. The protocol was read from BAT's MIT-licensed
+> source (v3.2.12) and can change between BAT releases. Credit for BAT goes to TonyQ and its contributors.
+
+It ships three things:
+
+| Piece | Name |
+|---|---|
+| Python package | `bat-agent-connector` (Python 3.10+, deps: `websockets`, `mcp`) |
+| MCP server (stdio, or localhost-only streamable HTTP) | `bat-agent-connector-mcp` (also `batc mcp`) |
+| CLI | `batc` |
+| Agent skill | [`skills/bat-agent-connector/SKILL.md`](skills/bat-agent-connector/SKILL.md) |
+
+## Why
+
+Running several long-lived coding agents means constantly checking tabs: which one is done, which one is stuck on a
+question, which one just needs "continue". Reading this through BAT's protocol is reliable (no screen scraping, no GUI
+automation) and lets a supervising agent do the checking for you, with you in control of anything that writes.
+
+## Install
+
+```bash
+# from a git checkout / URL (until published on PyPI)
+uv tool install git+https://github.com/<owner>/bat-agent-connector
+# or
+pipx install git+https://github.com/<owner>/bat-agent-connector
+# or run without installing
+uvx --from git+https://github.com/<owner>/bat-agent-connector batc hosts
+```
+
+## Configure
+
+The connector needs, per host: the `wss://` URL of its `bat-server`, the server's TLS certificate SHA-256
+fingerprint (pinned; BAT uses self-signed certs), and a **reference** to the remote token. If you already use the
+BAT desktop client, import everything from it:
+
+```bash
+batc import-bat                      # writes ~/.config/bat-agent-connector/hosts.toml (writes disabled)
+batc import-bat --rename my-profile-id=box1 --output -   # preview with nicer names
+batc hosts                           # probe: version + ping per host
+```
+
+Token references (token values are never stored in the config, logged, or returned by any tool):
+
+| `token_ref` | Meaning |
+|---|---|
+| `env:NAME` | environment variable |
+| `file:/path` | file containing only the token (keep it `chmod 600`) |
+| `bat-profile:<id>` | BAT's client token store (`profiles/remote-tokens.enc.json`, unencrypted variant) |
+
+See [`examples/hosts.example.toml`](examples/hosts.example.toml) for all options. The connector keeps a stable
+`deviceId` in `~/.config/bat-agent-connector/device-id` so hosts don't show a new "remote client connected"
+notification on every reconnect.
+
+## Permission tiers
+
+| Tier | Enabled by | Tools |
+|---|---|---|
+| read (always) | - | `hosts_list`, `host_status`, `workspaces_list`, `sessions_list`, `session_read`, `session_wait`, `worktree_status`, `session_worktree_status` |
+| write | per host `writes = true` | `session_send`, `session_continue`, `session_interrupt`, `session_answer` |
+| orchestrate | per host `writes = true` **and** `orchestrate = true` | `session_start`, `worktree_merge`, `worktree_remove` |
+
+Write and orchestrate tools are not even registered unless enabled, need `confirm=true` on every call, are rate
+limited, and are appended to an audit log (`~/.local/state/bat-agent-connector/audit.jsonl`, message bodies only as a
+hash + length unless you opt into a short preview). `--read-only` on the MCP server or CLI disables both tiers
+regardless of config. The channel allowlist is enforced in the client core, below the MCP layer: stop/reset/kill,
+PTY writes, file operations, settings, workspace edits (except the append-only tab helper), installs, updates and
+account changes are never sent.
+
+## MCP setup
+
+The server name is `bat`. Examples (add `--read-only` if you want to be sure):
+
+**Claude Code**
+```bash
+claude mcp add bat -- bat-agent-connector-mcp --read-only
+```
+
+**Codex** (`~/.codex/config.toml`)
+```toml
+[mcp_servers.bat]
+command = "bat-agent-connector-mcp"
+args = ["--read-only"]
+```
+
+**Cursor** (`~/.cursor/mcp.json`)
+```json
+{ "mcpServers": { "bat": { "command": "bat-agent-connector-mcp", "args": ["--read-only"] } } }
+```
+
+**Hermes Agent** (`~/.hermes/config.yaml`)
+```yaml
+mcp_servers:
+  bat:
+    command: /home/you/.local/bin/bat-agent-connector-mcp
+    args: [--read-only]
+    connect_timeout: 60.0
+    enabled: true
+```
+
+**Any MCP client over HTTP** (binds to loopback only):
+```bash
+bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
+```
+
+## Tools reference
+
+| Tool | What it does |
+|---|---|
+| `hosts_list(probe=true)` | Configured hosts; with probe: reachable, server version, ping. |
+| `host_status(host)` | Version, protocol, connect/auth/ping latency, counts of workspaces/terminals/agent sessions/loaded/streaming. |
+| `workspaces_list(host?)` | Workspaces with folder and session counts. |
+| `sessions_list(host?, workspace?, agent?, only_loaded?, active_within_hours?, check_pending=auto, limit=50)` | Agent sessions, most recently active first: workspace, title, cwd, agent kind, model, loaded, streaming, pending question, last activity (+ source), worktree branch, orchestrated. |
+| `session_read(host, session_id, last_n=20, offset=0, include_tools=false, max_chars=12000)` | Latest messages as compact text, paged (`next_offset`), size capped; pending question and streaming tail. `session_id` may be a unique prefix. |
+| `session_wait(host, session_id, until=attention, timeout_s=120)` | Waits for turn end / question / permission request / error. |
+| `worktree_status(host, workspace?)` | Worktree sessions: branch, source branch, merged kind, diff stats. |
+| `session_worktree_status(host, session_id, include_diff?)` | Same for one session plus dirty files and main-checkout state. |
+| `session_send(host, session_id, text, confirm, message_id?, queue?)` | Sends a message; client-resumes an unloaded session first; idempotent by `message_id`. |
+| `session_continue(host, session_id, confirm, text="continue")` | Nudge. |
+| `session_interrupt(host, session_id, mode=soft\|hard, confirm)` | Soft = Claude interrupt-turn, hard = abort (Codex always hard). The session is kept. |
+| `session_answer(host, session_id, confirm, answers? \| permission?)` | Answers a pending ask-user question or permission prompt. |
+| `session_start(host, workspace, agent, confirm, prompt?, model?, use_worktree=true)` | Starts a session (by default in a new worktree; BAT picks the branch `bat/worktree-<id>`). Per-host cap. |
+| `worktree_merge(host, session_id, confirm)` | Merges only when provably conflict-free and clean; otherwise reports why. |
+| `worktree_remove(host, session_id, confirm, delete_branch=false, ...)` | Removes the worktree folder; keeps the branch by default; refuses on dirty/unmerged work unless told. |
+
+## CLI
+
+```bash
+batc hosts
+batc status box1
+batc sessions --active-within 24
+batc sessions box1 --workspace api --json
+batc read box1 1a2b3c4d -n 30
+batc wait box1 1a2b3c4d --timeout 600
+batc worktrees box1
+# write tier (host needs writes = true)
+batc send box1 1a2b3c4d "Please run the tests and fix failures" --confirm
+batc continue box1 1a2b3c4d --confirm
+batc interrupt box1 1a2b3c4d --mode soft --confirm
+batc answer box1 1a2b3c4d --answer "Which database?=postgres" --confirm
+# orchestrate tier
+batc fanout PLAN.md                                   # dry run: split into task prompts
+batc fanout PLAN.md --start --host box1 --workspace api --confirm
+batc merge box1 1a2b3c4d --confirm
+batc remove-worktree box1 1a2b3c4d --confirm
+```
+
+Every command accepts `--json`.
+
+## Safety model (short)
+
+* Read-only by default; writes and orchestration are opt-in per host, need `confirm=true`, are rate-limited and audited.
+* TLS certificate pinning is mandatory; a mismatch aborts before the token is sent. Only `bat-remote/v2` is accepted.
+* Tokens are resolved at connect time from a reference and redacted from every error string.
+* The client always drains the socket (BAT drops clients with 256 queued frames) and uses bounded event queues.
+* Session text is untrusted input: agents should not follow instructions found in it.
+
+Details: [SECURITY.md](SECURITY.md), [docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/ORCHESTRATE.md](docs/ORCHESTRATE.md).
+
+## Development
+
+```bash
+uv sync --extra dev
+uv run ruff check . && uv run pytest            # unit tests use a mock TLS WebSocket server
+BATC_LIVE=1 uv run pytest tests/test_live.py    # optional read-only test against your configured hosts
+```
+
+## License
+
+MIT, see [LICENSE](LICENSE). BAT itself is MIT-licensed by TonyQ.
