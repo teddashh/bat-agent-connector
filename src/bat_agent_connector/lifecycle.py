@@ -629,6 +629,24 @@ SECRET_RE = re.compile(
     r"|discord(?:app)?\.com/api/webhooks/\d+/[\w-]{20,}|github_pat_[A-Za-z0-9_]{30,}"
     r"|sk-[A-Za-z0-9_-]{24,}|AIza[0-9A-Za-z_-]{35}|(?i:(?:password|secret|api[_-]?key|token)\s*[:=]\s*['\"][^'\"]{12,}['\"]))"
 )
+PLACEHOLDER_RE = re.compile(
+    r"abcdefgh|bcdefghi|01234567|12345678|example|placeholder|dummy|fake|changeme|your[-_]|<[^>]+>|xxxxxx|redacted",
+    re.I,
+)
+
+
+def is_placeholder_secret(value: str) -> bool:
+    """Test/demo values (e.g. an alphabet run or 'example') that only look like credentials."""
+    if PLACEHOLDER_RE.search(value):
+        return True
+    body = re.sub(r"[^A-Za-z0-9]", "", value.split("=", 1)[-1].split(":", 1)[-1])
+    return bool(body) and max(body.count(ch) for ch in set(body)) >= 0.8 * len(body)
+
+
+def secret_hits(added: str) -> list[str]:
+    return [m.group(0) for m in SECRET_RE.finditer(added or "") if not is_placeholder_secret(m.group(0))]
+
+
 SENSITIVE_PATH_RE = re.compile(
     r"(^|/)(\.env(\..*)?|.*\.pem|.*\.key|id_rsa.*|id_ed25519.*|secrets?(/|\.|$)|credentials?(/|\.|$)|\.github/workflows/"
     r"|.*\.tf$|.*\.tfvars$|k8s/|kubernetes/|helm/|.*\.service$|nginx.*\.conf$|sudoers|authorized_keys)",
@@ -663,7 +681,7 @@ def risk_checks(diff: str) -> list[str]:
     added = "\n".join(
         ln for ln in (diff or "").splitlines() if ln.startswith("+") and not ln.startswith("+++")
     )
-    if SECRET_RE.search(added):
+    if secret_hits(added):
         reasons.append("diff adds something that looks like a secret/credential")
     sens = [f for f in _diff_files(diff) if SENSITIVE_PATH_RE.search(f)]
     if sens:

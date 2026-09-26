@@ -307,7 +307,7 @@ async def test_cleanup_merge_needs_jev(fleet_factory, mock, monkeypatch):
 
 
 async def test_cleanup_escalates_risky_and_keeps_working(fleet_factory, mock, monkeypatch):
-    secret = "diff --git a/cfg.py b/cfg.py\n+++ b/cfg.py\n+AWS = 'AKIA" + "ABCDEFGHIJKLMNOP'\n"
+    secret = "diff --git a/cfg.py b/cfg.py\n+++ b/cfg.py\n+AWS = 'AKIA" + "QX7ZK2LMN4PR8TVW'\n"
     f = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})
     await _finished_wt(f, mock, "ahead", secret)
     r2 = await orchestrate.session_start(f, "h1", "demo-project", "codex", confirm=True)
@@ -498,3 +498,13 @@ async def test_cleanup_rebuilds_empty_branch_diff(fleet_factory, mock, monkeypat
     d = await lifecycle.session_cleanup(f, "h1", dry_run=True)
     assert d["decisions"][0]["diff_fallback"]["commits"] == [] and seen["diff"] == ""
     await f.close()
+
+
+def test_placeholder_secrets_do_not_trip_risk_check():
+    fake = 'let tok' + 'en = "' + "abcdefghijklmnopqrstuvwxyz" + '0123456789.ABC_def-ghi";\n'
+    hook = '"https://discord.com/api/webhooks/123456/{token}"\n'
+    diff = "diff --git a/t.rs b/t.rs\n+++ b/t.rs\n+" + fake + "+" + hook + '+api_key = "your-api-key-here"\n'
+    assert lifecycle.risk_checks(diff) == []
+    real = "diff --git a/c.py b/c.py\n+++ b/c.py\n+tok" + "en = 'Qm9vN3kLp2" + "XzR7tVw4Yh8JdS'\n"
+    assert "secret" in lifecycle.risk_checks(real)[0]
+    assert "secret" in lifecycle.risk_checks("+AWS = 'AKIA" + "QX7ZK2LMN4PR8TVW'\n")[0]

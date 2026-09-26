@@ -10,6 +10,8 @@
 - Cleanup rebuilds an empty branch diff commit by commit and file by file (new read channel `git:diff-files`).
   BAT's `worktree:status` / `git:diff` return an empty diff when git prints more than a pipe buffer (~64 KB),
   because the host reads the child's stdout only after it exits; large branches then reached Jev with no diff.
+- The diff secret check ignores obvious placeholders (alphabet/digit runs, `example`, `your-...`, repeated chars),
+  e.g. fake webhook tokens in unit tests.
 
 ## 0.2.1 (unreleased)
 
