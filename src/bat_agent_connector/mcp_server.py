@@ -53,6 +53,7 @@ ORCHESTRATE_TOOLS = [
     "worktree_remove",
     "session_failover",
     "session_cleanup",
+    "session_record_verification",
     "fanout_plan_session",
     "fanout_from_plan",
 ]
@@ -420,6 +421,17 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             real runs need confirm=true and auto_cleanup = true on the host. Returns one escalation_summary."""
             return await lifecycle.session_cleanup(fleet, host, confirm, dry_run, session_id)
 
+        async def session_record_verification(
+            host: str, session_id: str, candidate_commit: str, command: str, exit_code: int,
+            environment: str, log_ref: str, confirm: bool = False,
+        ) -> dict[str, Any]:
+            """ORCHESTRATE. Record a trusted external test run for the host's current clean Git HEAD.
+            Requires command, integer exit code, execution environment and durable log reference.
+            A later commit or dirty working tree invalidates this evidence. Requires confirm=true."""
+            return await lifecycle.session_record_verification(
+                fleet, host, session_id, candidate_commit, command, exit_code, environment, log_ref, confirm
+            )
+
         async def fanout_plan_session(
             host: str,
             workspace: str,
@@ -459,6 +471,7 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             worktree_remove,
             session_failover,
             session_cleanup,
+            session_record_verification,
             fanout_plan_session,
             fanout_from_plan,
         ):

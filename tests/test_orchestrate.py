@@ -111,6 +111,17 @@ async def test_tab_registration_backs_off_on_concurrent_change(fleet_factory, mo
     await f.close()
 
 
+async def test_gui_save_between_reload_and_save_remains_a_host_race(fleet_factory, mock):
+    f = fleet_factory(writes=True, orchestrate=True, tabs=True)
+    c = f.client("h1")
+    gui_tab = {"id": "gui-concurrent", "workspaceId": "ws-1"}
+    mock.save_hook = lambda: mock.ws_doc["terminals"].append(gui_tab)
+    r = await c.append_workspace_terminal("default", {"id": "connector-tab", "workspaceId": "ws-1"})
+    assert r["appended"] is True
+    assert gui_tab not in mock.ws_doc["terminals"]  # BAT offers no compare-and-swap save
+    await f.close()
+
+
 async def _wt_session(f, mock, kind="ahead"):
     r = await orchestrate.session_start(f, "h1", "demo-project", confirm=True)
     mock.worktrees[r["session_id"]]["mergedKind"] = kind
