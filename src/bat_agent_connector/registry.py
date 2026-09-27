@@ -74,7 +74,7 @@ def find_prefix(host: str, prefix: str) -> list[dict]:
     ]
 
 
-def reserve(host: str, entry: dict, max_active: int, replaces: str | None = None) -> None:
+def reserve(host: str, entry: dict, max_active: int, replaces: str | None = None) -> dict | None:
     """Atomically check the per-host cap and add an entry (status=starting).
 
     ``replaces``: session id of an active entry this one takes over (failover in the same
@@ -85,6 +85,19 @@ def reserve(host: str, entry: dict, max_active: int, replaces: str | None = None
     p = registry_path()
     with _locked(p):
         items = _read(p)
+        # The earlier caller-side lookup is only a hint. This check and the reservation
+        # must share the flock, including when two independent MCP processes race.
+        old = entry.get("failover_of")
+        if old:
+            existing = next((e for e in items if e.get("host") == host and
+                             e.get("failover_of") == old and e.get("status") in ("starting", "active")), None)
+            if existing:
+                return existing
+            worktree = entry.get("worktree_path")
+            if worktree and any(e.get("host") == host and e.get("worktree_path") == worktree and
+                                e.get("failover_of") and e.get("status") in ("starting", "active")
+                                for e in items):
+                raise WriteRefused("another active failover successor already owns this worktree")
         if replaces:
             for e in items:
                 if e.get("host") == host and e.get("session_id") == replaces and e.get("status") == "active":
@@ -98,6 +111,21 @@ def reserve(host: str, entry: dict, max_active: int, replaces: str | None = None
         entry = {**entry, "host": host, "status": "starting", "created_at": time.time()}
         items.append(entry)
         _write(p, items)
+    return None
+
+
+def fail_reservation(host: str, session_id: str, replaces: str | None = None) -> None:
+    """Fail a successor and undo only the predecessor handoff owned by it."""
+    p = registry_path()
+    with _locked(p):
+        items = _read(p)
+        for e in items:
+            if e.get("host") == host and e.get("session_id") == session_id:
+                e.update(status="failed", updated_at=time.time())
+            if (replaces and e.get("host") == host and e.get("session_id") == replaces
+                    and e.get("superseded_by") == session_id):
+                e.update(status="active", superseded_by=None, updated_at=time.time())
+        _write(p, items)
 
 
 def update(host: str, session_id: str, **fields) -> None:
@@ -109,3 +137,51 @@ def update(host: str, session_id: str, **fields) -> None:
                 e.update(fields)
                 e["updated_at"] = time.time()
         _write(p, items)
+
+
+def turn_path() -> Path:
+    return state_dir() / "turns.json"
+
+
+def record_turn(host: str, session_id: str, message_id: str, *, queued: bool, baseline_turns: int | None) -> None:
+    """Keep the accepted command identity across separate batc/MCP calls on this machine."""
+    p = turn_path()
+    with _locked(p):
+        try:
+            items = json.loads(p.read_text()).get("turns", [])
+        except (OSError, ValueError):
+            items = []
+        if any(e.get("host") == host and e.get("session_id") == session_id and
+               e.get("message_id") == message_id for e in items):
+            return  # preserve the original queue fence on an idempotent retry
+        items.append({"host": host, "session_id": session_id, "message_id": message_id,
+                      "queued": queued, "baseline_turns": baseline_turns, "accepted_at": time.time()})
+        fd = os.open(p.with_suffix(".tmp"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"turns": items[-1000:]}, fh)
+        os.replace(p.with_suffix(".tmp"), p)
+
+
+def get_turn(host: str, session_id: str, message_id: str) -> dict | None:
+    try:
+        items = json.loads(turn_path().read_text()).get("turns", [])
+    except (OSError, ValueError):
+        return None
+    return next((e for e in reversed(items) if e.get("host") == host and
+                 e.get("session_id") == session_id and e.get("message_id") == message_id), None)
+
+
+def update_turn_boundary(host: str, session_id: str, message_id: str, boundary_ms: int) -> None:
+    p = turn_path()
+    with _locked(p):
+        try:
+            items = json.loads(p.read_text()).get("turns", [])
+        except (OSError, ValueError):
+            return
+        for e in items:
+            if e.get("host") == host and e.get("session_id") == session_id and e.get("message_id") == message_id:
+                e.setdefault("boundary_ms", boundary_ms)
+        fd = os.open(p.with_suffix(".tmp"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"turns": items}, fh)
+        os.replace(p.with_suffix(".tmp"), p)

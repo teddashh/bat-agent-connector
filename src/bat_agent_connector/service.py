@@ -24,14 +24,17 @@ from .summarize import clip, iso_local, summarize_message, summarize_pending, ts
 MAX_LAST_N = 100
 MAX_READ_CHARS = 60_000
 MAX_PROMPT_CHARS = 20_000
-_write_locks: dict[int, asyncio.Lock] = {}
+_write_locks: dict[tuple[int, str], asyncio.Lock] = {}
 
 
-def _write_lock() -> asyncio.Lock:
-    loop_id = id(asyncio.get_running_loop())
-    lock = _write_locks.get(loop_id)
+def _write_lock(host: str) -> asyncio.Lock:
+    # Host-scoped: unrelated hosts need not wait for each other's RPCs. BAT
+    # still has no cross-process/GUI ownership fence, so keep same-host writes
+    # serialized within this event loop.
+    key = (id(asyncio.get_running_loop()), host)
+    lock = _write_locks.get(key)
     if lock is None:
-        lock = _write_locks[loop_id] = asyncio.Lock()
+        lock = _write_locks[key] = asyncio.Lock()
     return lock
 
 
@@ -429,9 +432,9 @@ async def sessions_list(
 
 
 # --------------------------------------------------------------------------- turn markers
-# A relay/send returns ``turn_marker`` (the host-side id of the message it just sent, e.g. "user-<ms>") and
-# ``after_ms`` (that message's host timestamp). session_wait/session_read take ``after=<turn_marker>`` and only
-# count output newer than it, so a caller can never mistake the previous turn's last reply for the answer.
+# ``turn_marker`` is the exact clientMessageId echoed by BAT, independent of
+# ``after_ms`` (a host-clock cursor for older callers). Never infer a timestamp
+# from a UUID-shaped message id.
 
 
 def marker_ms(after: Any) -> int | None:
@@ -460,17 +463,28 @@ def _msg_ms(m: dict) -> int:
     return ts_to_ms(m.get("timestamp") or m.get("completedAt")) or 0
 
 
+def _cursor(after: Any, messages: list[dict], *, exact_id: bool = False) -> dict | None:
+    if after is None or after == "":
+        return None
+    if isinstance(after, str) and (after.startswith("batc-") or exact_id):
+        echo = next((m for m in messages if m.get("id") == after and _is_user(m)), None)
+        ms = _msg_ms(echo) if echo else None
+        return {"message_id": after, "after_ms": ms, "iso": iso_local(ms), "echo_found": echo is not None}
+    ms = marker_ms(after)
+    return {"message_id": None, "after_ms": ms, "iso": iso_local(ms), "echo_found": True}
+
+
+def _messages_after(messages: list[dict], cursor: dict) -> list[dict]:
+    if cursor["message_id"]:
+        if not cursor["echo_found"]:
+            return []
+        pos = next(i for i, m in enumerate(messages) if m.get("id") == cursor["message_id"] and _is_user(m))
+        return messages[pos + 1:]
+    return [m for m in messages if _msg_ms(m) > cursor["after_ms"]]
+
+
 def _is_user(m: dict) -> bool:
     return m.get("role") == "user" or m.get("type") == "user"
-
-
-def _text_of(m: dict) -> str:
-    c = m.get("content")
-    if isinstance(c, str):
-        return c
-    if isinstance(c, list):
-        return "".join(x.get("text", "") for x in c if isinstance(x, dict))
-    return ""
 
 
 async def _live_state(c: BatClient, sid: str, kind: str | None, meta: dict | None) -> dict | None:
@@ -480,26 +494,59 @@ async def _live_state(c: BatClient, sid: str, kind: str | None, meta: dict | Non
     return st if isinstance(st, dict) else None
 
 
-def _progress_after(state: dict | None, meta: dict | None, after_ms: int) -> dict:
+def _progress_after(state: dict | None, meta: dict | None, cursor: dict, turn: dict | None = None) -> dict:
     """What the session has produced since the marker (live messages only)."""
     msgs = [m for m in (state or {}).get("messages") or [] if isinstance(m, dict)]
-    new = [m for m in msgs if _msg_ms(m) > after_ms]
+    new = _messages_after(msgs, cursor)
     replies = [m for m in new if not _is_user(m)]
     streaming = bool((state or {}).get("isStreaming") or (meta or {}).get("isStreaming"))
+    if cursor["message_id"]:
+        attribution = "correlated" if cursor["echo_found"] else "echo_not_visible"
+    else:
+        attribution = "timestamp_cursor"
+    if turn and turn.get("queued"):
+        baseline = turn.get("baseline_turns")
+        turns = (meta or {}).get("numTurns")
+        boundary = turn.get("boundary_ms")
+        if isinstance(baseline, int) and isinstance(turns, int) and turns >= baseline + 1:
+            if not boundary and turns == baseline + 1:
+                boundary = max((_msg_ms(m) for m in new), default=cursor["after_ms"] or 0)
+                registry.update_turn_boundary(turn["host"], turn["session_id"], turn["message_id"], boundary)
+            if boundary and turns >= baseline + 2:
+                replies = [m for m in replies if _msg_ms(m) > boundary]
+                attribution = "correlated_after_prior_turn"
+            elif boundary and turns == baseline + 1 and turn.get("boundary_ms"):
+                replies = [m for m in replies if _msg_ms(m) > boundary]
+                attribution = "correlated_after_prior_turn" if replies else "queued_unconfirmed"
+            else:
+                replies = []
+                attribution = "queued_unconfirmed"
+        else:
+            replies = []
+            attribution = "queued_unconfirmed"
+    started = bool(replies)
+    done = (not streaming) and started and attribution == "correlated_after_prior_turn" if turn and turn.get("queued") else (not streaming) and started
     return {
         "streaming": streaming,
         "new_items": len(new),
         # streaming alone proves nothing: a queued send waits behind the previous turn, which also streams
-        "started": bool(replies),
-        "done": (not streaming) and bool(replies),
+        "started": started,
+        "done": done,
+        "phase": "terminal" if done else "running" if started else "accepted",
+        "attribution": attribution,
     }
 
 
 async def _find_turn_marker(
-    c: BatClient, sid: str, kind: str | None, text: str, baseline_ms: int | None, tries: int = 6
+    c: BatClient, sid: str, kind: str | None, message_id: str, baseline_ms: int | None, tries: int = 6
 ) -> dict:
-    """Locate the message we just sent (host clock). Fallback: the newest host timestamp seen before the send."""
-    head = " ".join(text.split())[:160]
+    """Locate BAT's exact user echo; keep the message id even if the echo is delayed."""
+    if kind == "codex":
+        # BAT 5a61d43's Codex router ignores clientMessageId and emits user-<time>.
+        # Preserve the old cursor contract, explicitly marked as weaker.
+        return {"turn_marker": str(baseline_ms) if baseline_ms else None,
+                "after_ms": baseline_ms, "after": iso_local(baseline_ms),
+                "marker_source": "codex_timestamp_fallback"}
     for i in range(tries):
         try:
             meta = await _meta(c, sid)
@@ -507,18 +554,14 @@ async def _find_turn_marker(
         except BatError:
             st = None
         for m in reversed([m for m in (st or {}).get("messages") or [] if isinstance(m, dict)]):
-            if _msg_ms(m) <= (baseline_ms or 0):
-                break
-            if _is_user(m) and " ".join(_text_of(m).split())[:160] == head:
+            if _is_user(m) and m.get("id") == message_id:
                 ms = _msg_ms(m)
-                return {"turn_marker": m.get("id") or str(ms), "after_ms": ms, "after": iso_local(ms),
+                return {"turn_marker": message_id, "after_ms": ms, "after": iso_local(ms),
                         "marker_source": "sent_message"}
         if i + 1 < tries:
             await asyncio.sleep(0.25)
-    if baseline_ms:
-        return {"turn_marker": str(baseline_ms), "after_ms": baseline_ms, "after": iso_local(baseline_ms),
-                "marker_source": "last_message_before_send"}
-    return {"turn_marker": None, "after_ms": None, "after": None, "marker_source": None}
+    return {"turn_marker": message_id, "after_ms": baseline_ms, "after": iso_local(baseline_ms),
+            "marker_source": "pending_echo"}
 
 
 async def session_read(
@@ -532,7 +575,6 @@ async def session_read(
     max_message_chars: int = 2_000,
     after: Any = None,
 ) -> dict:
-    after_ms = marker_ms(after)
     last_n = max(1, min(MAX_LAST_N, int(last_n)))
     offset = max(0, int(offset))
     max_chars = max(500, min(MAX_READ_CHARS, int(max_chars)))
@@ -540,6 +582,8 @@ async def session_read(
     c = fleet.client(host)
     t, ws = await _resolve_session(c, session_id)
     sid = t["id"]
+    turn = registry.get_turn(host, sid, after) if isinstance(after, str) else None
+    after_ms = None if isinstance(after, str) and (after.startswith("batc-") or turn) else marker_ms(after)
     kind = agent_kind(t.get("agentPreset"))
     meta = await _meta(c, sid)
     state = None
@@ -549,20 +593,20 @@ async def session_read(
     live = [m for m in (state or {}).get("messages") or [] if isinstance(m, dict)]
     live_ids = {m.get("id") for m in live}
 
-    def shown(m: dict) -> bool:
-        if after_ms is not None and _msg_ms(m) <= after_ms:
-            return False
-        return summarize_message(m, include_tools=include_tools, max_chars=50) is not None
-
-    def reached_marker() -> bool:
-        return after_ms is not None and bool(newest_first) and _msg_ms(newest_first[-1]) <= after_ms
-
     newest_first = list(reversed(live))
     want = offset + last_n
     archive_total = None
     arch_off = 0
     raw_budget = 3000
-    while sum(1 for m in newest_first if shown(m)) < want and raw_budget > 0 and not reached_marker():
+    def need_archive() -> bool:
+        if isinstance(after, str) and (after.startswith("batc-") or turn):
+            return not any(m.get("id") == after and _is_user(m) for m in newest_first)
+        visible = [m for m in newest_first if after_ms is None or _msg_ms(m) > after_ms]
+        return (sum(summarize_message(m, include_tools=include_tools, max_chars=50) is not None
+                    for m in visible) < want and
+                not (after_ms is not None and newest_first and _msg_ms(newest_first[-1]) <= after_ms))
+
+    while need_archive() and raw_budget > 0:
         chunk = min(200, raw_budget)
         r = await c.invoke("claude:load-archived", {"sessionId": sid, "offset": arch_off, "limit": chunk})
         if not isinstance(r, dict):
@@ -579,7 +623,17 @@ async def session_read(
         if not r.get("hasMore"):
             break
 
-    visible = [m for m in newest_first if shown(m)]
+    chronological = list(reversed(newest_first))
+    cursor = _cursor(after, chronological, exact_id=turn is not None)
+    selected = _messages_after(chronological, cursor) if cursor else chronological
+    turn = registry.get_turn(host, sid, after) if cursor and cursor["message_id"] else None
+    if turn and turn.get("queued"):
+        progress = _progress_after({"messages": chronological, "isStreaming": (state or {}).get("isStreaming")}, meta, cursor, turn)
+        if progress["attribution"] != "correlated_after_prior_turn":
+            selected = []
+        else:
+            selected = [m for m in selected if _msg_ms(m) > turn.get("boundary_ms", 0)]
+    visible = [m for m in reversed(selected) if summarize_message(m, include_tools=include_tools, max_chars=50) is not None]
     page = visible[offset : offset + last_n]
     out_msgs: list[dict] = []
     used = 0
@@ -604,21 +658,23 @@ async def session_read(
     w = next((x for x in ws.get("workspaces") or [] if x.get("id") == t.get("workspaceId")), {})
     m = meta or {}
     since: dict[str, Any] = {}
-    if after_ms is not None:
-        prog = _progress_after(state, meta, after_ms)
+    if cursor is not None:
+        prog = _progress_after({"messages": chronological, "isStreaming": (state or {}).get("isStreaming")}, meta, cursor, turn)
         since = {
-            "after": {"after_ms": after_ms, "iso": iso_local(after_ms)},
+            "after": cursor,
             "turn_started": prog["started"],
             "turn_done": prog["done"],
+            "turn_attribution": prog["attribution"],
+            "turn_phase": prog["phase"],
             "note": (
                 "only output newer than the marker is shown"
                 if out_msgs
-                else "no session output after the marker yet: the relayed turn has not answered; do NOT report "
-                "older messages as its result"
+                else "no confirmed output for this turn yet; do NOT report older messages as its result"
             ),
         }
         if not prog["started"]:
             since["streaming_text_tail_hidden"] = True  # the live tail may still be the previous turn
+            pending = None  # a blocked prompt may also belong to the previous turn
     return {
         **since,
         "host": host,
@@ -668,7 +724,6 @@ async def session_wait(
 ) -> dict:
     if until not in WAIT_SETS:
         raise BatError(f"until must be one of {', '.join(WAIT_SETS)}")
-    after_ms = marker_ms(after)
     timeout_s = max(1.0, min(1800.0, float(timeout_s)))
     c = fleet.client(host)
     t, _ = await _resolve_session(c, session_id)
@@ -679,8 +734,8 @@ async def session_wait(
     t0 = time.monotonic()
     try:
         meta = await _meta(c, sid)
-        if after_ms is not None:
-            return await _wait_after(c, sid, kind, host, until, after_ms, timeout_s, sub, t0)
+        if after is not None and after != "":
+            return await _wait_after(c, sid, kind, host, until, after, timeout_s, sub, t0)
         if not require_new:
             if until in ("attention", "turn-end") and not (meta or {}).get("isStreaming"):
                 return {
@@ -744,19 +799,25 @@ async def session_wait(
 
 
 async def _wait_after(
-    c: BatClient, sid: str, kind: str | None, host: str, until: str, after_ms: int, timeout_s: float, sub, t0: float
+    c: BatClient, sid: str, kind: str | None, host: str, until: str, after: Any, timeout_s: float, sub, t0: float
 ) -> dict:
-    """Wait for the turn that started after ``after_ms``: an idle session only counts as done when it has replied
-    after the marker; a turn-end that still leaves the session streaming (a queued turn started) keeps waiting."""
-    marker = {"after_ms": after_ms, "iso": iso_local(after_ms)}
+    """Wait for output correlated with an exact echo or a legacy timestamp cursor."""
+    turn = registry.get_turn(host, sid, after) if isinstance(after, str) else None
+    marker: dict = {}
 
     async def check() -> dict:
         meta = await _meta(c, sid)
-        return _progress_after(await _live_state(c, sid, kind, meta), meta, after_ms)
+        state = await _live_state(c, sid, kind, meta)
+        cursor = _cursor(after, [m for m in (state or {}).get("messages") or [] if isinstance(m, dict)],
+                         exact_id=turn is not None)
+        marker.update(cursor or {})
+        return _progress_after(state, meta, cursor, registry.get_turn(host, sid, after) if turn else None)
 
     def out(status: str, prog: dict, event: str | None = None, **extra: Any) -> dict:
         return {"host": host, "session_id": sid, "status": status, "event": event, "after": marker,
                 "turn_started": prog["started"], "turn_done": prog["done"],
+                "turn_attribution": prog["attribution"],
+                "turn_phase": prog["phase"],
                 "elapsed_s": round(time.monotonic() - t0, 1), **extra}
 
     prog = await check()
@@ -768,7 +829,7 @@ async def _wait_after(
             p = summarize_pending(st.get("pendingAskUser"), "ask_user") or summarize_pending(
                 st.get("pendingPermission"), "permission"
             )
-            if p:
+            if p and prog["started"]:
                 return out("pending", prog, pending=p)
     while True:
         remaining = timeout_s - (time.monotonic() - t0)
@@ -785,7 +846,10 @@ async def _wait_after(
         if ev is not None:
             ch = ev.get("channel")
             if ch in ("agent:ask-user", "agent:permission-request", "agent:error"):
-                return out("event", await check(), ch)
+                prog = await check()
+                if prog["started"]:
+                    return out("event", prog, ch)
+                continue
             prog = await check()
             if prog["done"]:
                 return out("event", prog, ch)
@@ -854,10 +918,18 @@ async def session_send(
         raise WriteRefused(f"text is longer than {MAX_PROMPT_CHARS} characters")
     c = fleet.client(host)
     audit = _audit(fleet)
-    async with _write_lock():
+    async with _write_lock(host):
         t, ws = await _resolve_session(c, session_id)
         sid = t["id"]
-        audit.check_rate(host, sid)
+        successor = next((e for e in registry.list_entries(host) if e.get("failover_of") == sid
+                          and e.get("status") in ("starting", "active")
+                          and e.get("handoff_status") == "sent"), None)
+        if successor:
+            raise WriteRefused(f"session was handed off to {successor['session_id']}; send there instead")
+        kind = agent_kind(t.get("agentPreset"))
+        mid = message_id or f"batc-{uuid.uuid4()}"
+        if not (kind == "claude" and message_id and audit.same_send_retry(host, sid, mid, text)):
+            audit.check_rate(host, sid)
         meta = await _meta(c, sid)
         resumed = False
         if meta is None:
@@ -894,7 +966,6 @@ async def session_send(
             raise WriteRefused(
                 "session is currently streaming a turn; pass queue=true to queue the message behind it"
             )
-        mid = message_id or f"batc-{uuid.uuid4()}"
         baseline_ms: int | None = None
         try:
             st0 = await _live_state(c, sid, agent_kind(t.get("agentPreset")), meta)
@@ -914,7 +985,8 @@ async def session_send(
         )
         try:
             r = await c.invoke(
-                "claude:send-message", {"sessionId": sid, "prompt": text, "clientMessageId": mid}
+                "claude:send-message", {"sessionId": sid, "prompt": text, "clientMessageId": mid},
+                retry_on_disconnect=agent_kind(t.get("agentPreset")) == "claude",
             )
         except BatError as e:
             audit.record(
@@ -941,17 +1013,30 @@ async def session_send(
             ok=bool(r.get("ok", True)),
             queued=r.get("queued"),
         )
-        marker = await _find_turn_marker(c, sid, agent_kind(t.get("agentPreset")), text, baseline_ms)
+        accepted = bool(r.get("accepted", r.get("ok")))
+        if accepted and agent_kind(t.get("agentPreset")) == "claude":
+            registry.record_turn(host, sid, mid, queued=bool(r.get("queued")),
+                                 baseline_turns=(meta or {}).get("numTurns"))
+        turn_record = registry.get_turn(host, sid, mid) if accepted else None
+        marker = await _find_turn_marker(c, sid, agent_kind(t.get("agentPreset")), mid, baseline_ms) if accepted else {
+            "turn_marker": None, "after_ms": baseline_ms, "after": iso_local(baseline_ms),
+            "marker_source": None,
+        }
     return {
         "host": host,
         "session_id": sid,
         "message_id": mid,
         "accepted": r.get("accepted", r.get("ok")),
-        "queued": r.get("queued"),
+        "queued": r.get("queued") if r.get("queued") is not None else (turn_record or {}).get("queued"),
+        "turn_phase": "accepted" if accepted else "rejected",
+        "turn_attribution": "exact_echo" if marker["marker_source"] == "sent_message" else marker["marker_source"],
         "resumed": resumed,
         **marker,
-        "note": "reuse message_id to retry safely; the host de-duplicates by it. Pass turn_marker as after= to "
-        "session_wait/session_read so only output of this turn counts",
+        "note": (
+            "BAT Codex ignores clientMessageId; this timestamp cursor is best effort and cannot prove turn ownership"
+            if agent_kind(t.get("agentPreset")) == "codex" else
+            "reuse message_id to retry safely; pass turn_marker as after= to session_wait/session_read"
+        ),
     }
 
 
@@ -984,7 +1069,7 @@ async def session_interrupt(
         raise WriteRefused("mode must be soft or hard")
     c = fleet.client(host)
     audit = _audit(fleet)
-    async with _write_lock():
+    async with _write_lock(host):
         t, _ = await _resolve_session(c, session_id)
         sid = t["id"]
         kind = agent_kind(t.get("agentPreset"))
@@ -1044,7 +1129,7 @@ async def session_answer(
         raise WriteRefused("pass exactly one of answers (for ask-user) or permission (allow|deny)")
     c = fleet.client(host)
     audit = _audit(fleet)
-    async with _write_lock():
+    async with _write_lock(host):
         t, _ = await _resolve_session(c, session_id)
         sid = t["id"]
         kind = agent_kind(t.get("agentPreset"))

@@ -60,6 +60,18 @@ class Audit:
                     f"(write_min_interval_s={self.safety.write_min_interval_s:.0f})"
                 )
 
+    def same_send_retry(self, host: str, session_id: str, message_id: str, text: str) -> bool:
+        """A Claude retry may bypass the interval only for the same recorded payload."""
+        attempts = [e for e in self._tail() if e.get("phase") == "attempt" and
+                    e.get("channel") == "claude:send-message" and e.get("host") == host and
+                    e.get("session_id") == session_id and e.get("message_id") == message_id]
+        if not attempts:
+            return False
+        if any(e.get("text_sha256_16") != text_fingerprint(text) or e.get("text_len") != len(text)
+               for e in attempts):
+            raise WriteRefused("message_id was previously used with different text")
+        return True
+
     def record(self, **fields: Any) -> None:
         text = fields.pop("text", None)
         if text is not None:

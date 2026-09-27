@@ -277,7 +277,7 @@ class MockBat:
 
                 ts = max([int(_t.time() * 1000)] + [int(m.get("timestamp") or 0) + 1 for m in self.states[sid]["messages"]])
                 self.states[sid]["messages"].append(
-                    {"id": f"user-{ts}", "role": "user", "content": p.get("prompt"), "timestamp": ts}
+                    {"id": mid, "role": "user", "content": p.get("prompt"), "timestamp": ts}
                 )
             return r
         if ch in ("claude:interrupt-turn", "claude:abort-session"):
