@@ -1265,7 +1265,14 @@ async def session_relay(
     except TurnInFlight:
         return {**out, "sent": False, "busy": True,
                 "next": "retry with queue=true, or for a fan-out plan use fanout_plan_session"}
-    return {**out, "sent": True, "result": r}
+    mark = {k: r.get(k) for k in ("turn_marker", "after_ms", "after", "marker_source")}
+    nxt = (
+        f'session_wait(host="{host}", session_id="{sid}", after="{mark["turn_marker"]}") then '
+        f'session_read(..., after="{mark["turn_marker"]}"); older output belongs to the previous task'
+        if mark.get("turn_marker")
+        else "session_wait(require_new=true); check message timestamps against the send time"
+    )
+    return {**out, "sent": True, **mark, "next": nxt, "result": r}
 
 
 PLANNER_PREFACE = (

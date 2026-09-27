@@ -135,6 +135,7 @@ class MockBat:
         self.git_diff: dict[str, str] = {}
         self.perm_calls: list = []
         self.sent: dict[str, dict] = {}
+        self.echo_sends = False
         self.save_hook: Callable[[], None] | None = None
         ca = trustme.CA()
         cert = ca.issue_cert("localhost", "127.0.0.1")
@@ -271,6 +272,13 @@ class MockBat:
                 return self.sent[mid]
             r = {"ok": True, "accepted": True, "queued": bool((self.metas.get(sid) or {}).get("isStreaming"))}
             self.sent[mid] = r
+            if self.echo_sends and sid in self.states:  # BAT appends the prompt as a user message
+                import time as _t
+
+                ts = max([int(_t.time() * 1000)] + [int(m.get("timestamp") or 0) + 1 for m in self.states[sid]["messages"]])
+                self.states[sid]["messages"].append(
+                    {"id": f"user-{ts}", "role": "user", "content": p.get("prompt"), "timestamp": ts}
+                )
             return r
         if ch in ("claude:interrupt-turn", "claude:abort-session"):
             return True

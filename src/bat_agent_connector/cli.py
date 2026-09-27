@@ -107,6 +107,10 @@ def r_read(o):
         f"# {o['host']} {o['session_id']} [{o['workspace']}] {o['agent_kind']} "
         f"loaded={o['loaded']} streaming={o['streaming']}"
     )
+    if o.get("after"):
+        print(f"# after {o['after']['iso']}: turn_started={o.get('turn_started')} turn_done={o.get('turn_done')}")
+        if not o["messages"]:
+            print(f"# {o.get('note')}")
     for m in o["messages"]:
         tag = m["role"] if m["role"] != "tool" else f"tool:{m.get('tool')}"
         print(f"\n--- {m.get('ts')} {tag}\n{m.get('text')}")
@@ -197,11 +201,11 @@ async def _run(args) -> Any:
             ), r_sessions
         if c == "read":
             return await service.session_read(
-                fleet, args.host, args.session, args.n, args.offset, args.tools, args.max_chars
+                fleet, args.host, args.session, args.n, args.offset, args.tools, args.max_chars, after=args.after
             ), r_read
         if c == "wait":
             return await service.session_wait(
-                fleet, args.host, args.session, args.until, args.timeout, args.require_new
+                fleet, args.host, args.session, args.until, args.timeout, args.require_new, after=args.after
             ), None
         if c == "send":
             text = sys.stdin.read() if args.text == "-" else args.text
@@ -394,12 +398,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--offset", type=int, default=0)
     p.add_argument("--tools", action="store_true", help="include tool calls")
     p.add_argument("--max-chars", type=int, default=12000)
+    p.add_argument("--after", help="turn_marker from relay/send: show only newer messages")
     p = sp.add_parser("wait", help="wait for turn-end / ask-user")
     p.add_argument("host")
     p.add_argument("session")
     p.add_argument("--until", choices=["attention", "turn-end", "ask-user"], default="attention")
     p.add_argument("--timeout", type=float, default=120)
     p.add_argument("--require-new", action="store_true")
+    p.add_argument("--after", help="turn_marker from relay/send: wait for the reply to that send")
 
     p = sp.add_parser("send", help="WRITE: send a message (needs --confirm and writes=true)")
     p.add_argument("host")

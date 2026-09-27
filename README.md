@@ -126,8 +126,8 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 | `host_status(host)` | Version, protocol, connect/auth/ping latency, counts of workspaces/terminals/agent sessions/loaded/streaming. |
 | `workspaces_list(host?)` | Workspaces with folder and session counts. |
 | `sessions_list(host?, workspace?, agent?, only_loaded?, active_within_hours?, check_pending=auto, limit=50)` | Agent sessions, most recently active first: workspace, title, cwd, agent kind, model, loaded, streaming, pending question, last activity (+ source), worktree branch, orchestrated. |
-| `session_read(host, session_id, last_n=20, offset=0, include_tools=false, max_chars=12000)` | Latest messages as compact text, paged (`next_offset`), size capped; pending question and streaming tail. `session_id` may be a unique prefix. |
-| `session_wait(host, session_id, until=attention, timeout_s=120)` | Waits for turn end / question / permission request / error. |
+| `session_read(host, session_id, last_n=20, offset=0, include_tools=false, max_chars=12000, after=null)` | Latest messages as compact text, paged (`next_offset`), size capped; pending question and streaming tail. `session_id` may be a unique prefix. `after=<turn_marker>` shows only messages newer than that send. |
+| `session_wait(host, session_id, until=attention, timeout_s=120, require_new=false, after=null)` | Waits for turn end / question / permission request / error. `after=<turn_marker>` (from `session_send` / `session_relay`) waits for the reply to that send; a stale idle state does not count. |
 | `worktree_status(host, workspace?)` | Worktree sessions: branch, source branch, merged kind, diff stats. |
 | `session_worktree_status(host, session_id, include_diff?)` | Same for one session plus dirty files and main-checkout state. |
 | `session_send(host, session_id, text, confirm, message_id?, queue?)` | Sends a message; client-resumes an unloaded session first; idempotent by `message_id`. |

@@ -141,12 +141,18 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         offset: int = 0,
         include_tools: bool = False,
         max_chars: int = 12000,
+        after: str | None = None,
     ) -> dict[str, Any]:
         """Read the latest messages of a session as compact text (newest page by default). Paging:
         pass next_offset from the previous result as offset to go further back. Output is size-capped
         (max_chars, hard cap 60000). session_id may be a unique prefix (>= 6 chars). Also returns
-        streaming state and any pending question the agent is blocked on."""
-        return await service.session_read(fleet, host, session_id, last_n, offset, include_tools, max_chars)
+        streaming state and any pending question the agent is blocked on. after=<turn_marker from
+        session_relay/session_send> shows ONLY messages newer than that send (turn_started/turn_done
+        say whether the relayed turn has answered); without it the newest messages may be the
+        previous task's result."""
+        return await service.session_read(
+            fleet, host, session_id, last_n, offset, include_tools, max_chars, after=after
+        )
 
     async def session_wait(
         host: str,
@@ -154,11 +160,15 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         until: Literal["attention", "turn-end", "ask-user"] = "attention",
         timeout_s: float = 120,
         require_new: bool = False,
+        after: str | None = None,
     ) -> dict[str, Any]:
         """Wait until a session needs attention: attention = turn-end, ask-user, permission request or
         error; turn-end = only turn end; ask-user = only a question/permission prompt. Returns at once
-        if the session is already idle or blocked (unless require_new=true). timeout_s max 1800."""
-        return await service.session_wait(fleet, host, session_id, until, timeout_s, require_new)
+        if the session is already idle or blocked (unless require_new=true). timeout_s max 1800.
+        After a relay/send pass after=<its turn_marker>: then idle only counts once the session has
+        replied after that send (status done/event, turn_done=true); a stale idle state or the previous
+        turn's end never satisfies it, and a timeout says whether the turn started at all."""
+        return await service.session_wait(fleet, host, session_id, until, timeout_s, require_new, after=after)
 
     async def worktree_status(host: str, workspace: str | None = None) -> dict[str, Any]:
         """List worktree agent sessions on a host (tabs with a git worktree plus sessions started by the

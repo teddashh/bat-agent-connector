@@ -1,7 +1,7 @@
 ---
 name: bat-agent-connector
 description: Use this when you need to check on, read, wait for, or (only when explicitly enabled and asked) nudge Claude Code / Codex agent sessions running in Better Agent Terminal (BAT), or fan a project plan out into parallel BAT worktree sessions.
-version: 0.2.3
+version: 0.2.4
 license: MIT
 author: bat-agent-connector contributors (unofficial companion to github.com/tony1223/better-agent-terminal)
 metadata:
@@ -41,8 +41,8 @@ metadata:
 | Host health and counts | `host_status(host)` | `batc status HOST` |
 | Workspaces | `workspaces_list(host?)` | `batc workspaces [HOST]` |
 | Sessions, newest activity first | `sessions_list(host?, workspace?, agent?, active_within_hours?)` | `batc sessions [HOST] --active-within 24` |
-| Read recent messages | `session_read(host, session_id, last_n, offset)` | `batc read HOST SID -n 20` |
-| Wait for turn end / question | `session_wait(host, session_id, timeout_s)` | `batc wait HOST SID --timeout 600` |
+| Read recent messages | `session_read(host, session_id, last_n, offset, after?)` | `batc read HOST SID -n 20 [--after MARKER]` |
+| Wait for turn end / question | `session_wait(host, session_id, timeout_s, after?)` | `batc wait HOST SID --timeout 600 [--after MARKER]` |
 | Worktree state / diff | `worktree_status(host)`, `session_worktree_status(host, sid, include_diff)` | `batc worktrees HOST`, `batc wt-status HOST SID --diff` |
 | Send a message (write) | `session_send(..., confirm=true)` | `batc send HOST SID "text" --confirm` |
 | Nudge "continue" (write) | `session_continue(..., confirm=true)` | `batc continue HOST SID --confirm` |
@@ -81,7 +81,8 @@ brief={goal, context, constraints, acceptance}, earlier=[<earlier thread message
 The brief is labeled as your interpretation; the session treats the original as the source of truth, fixes unclear
 asks with its repo context and states its interpretation in one line. For parallel or large work add
 `request_fanout=N`, `session_wait`, then `fanout_from_plan(host, sid, confirm=true)`. If the main session is busy or
-quota-stopped use `fanout_plan_session` instead, wait, then `fanout_from_plan` on the planner. Read the session's
+quota-stopped use `fanout_plan_session` instead, wait, then `fanout_from_plan` on the planner. After a relay or send, pass its `turn_marker` as `after=` to `session_wait` and `session_read`: they then count only output newer than that send, so the previous task's last reply is never reported as the answer (`turn_started` / `turn_done` say whether the session has answered yet; a timeout with `turn_started=false` means the turn has not begun: queued or not delivered).
+Read the session's
 last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_continue`), NEED-<HUMAN> → ask the human.
 
 ## Plan fan-out workflow (orchestrate tier)

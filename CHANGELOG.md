@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.4 (unreleased)
+
+- Turn markers: `session_send` and `session_relay` return `turn_marker` / `after_ms` (the host-side id and
+  timestamp of the message just sent; fallback: the newest host timestamp before the send). `session_wait` and
+  `session_read` take `after=<turn_marker>` (CLI `--after`). With it, `session_wait` returns only once the
+  session has replied after that send (`done` / `event`, `turn_done=true`): a stale idle state, or the end of an
+  older turn that the send was queued behind, no longer counts, and a timeout reports whether the turn started.
+  `session_read` shows only messages newer than the marker and hides the live streaming tail until the new turn
+  has produced output, with a note not to report older messages as the result. Callers that read right after
+  relaying could otherwise pick up the previous task's last reply.
+
 ## 0.2.3 (unreleased)
 
 - Relay mode: `session_relay` (CLI `batc relay`) forwards the human's message verbatim, followed by an optional
