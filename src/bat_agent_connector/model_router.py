@@ -129,7 +129,7 @@ class RouterConfig:
     secondary_provider: str = "agy-claude"
     fallback_provider: str = "codex"
     allow_gemini_status: bool = True
-    minimal_review_confidence_threshold: float = 0.85
+    minimal_review_confidence_threshold: float = 0.50
     minimal_review_max_diff_chars: int = 3500
     minimal_review_sensitive_paths: tuple[str, ...] = (
         "*auth*", "*secret*", ".github/**", "*deploy*", "*migration*", "*migrate*",
