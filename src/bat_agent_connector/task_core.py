@@ -350,6 +350,10 @@ class TaskCoordinator:
             result = await self.adapter.failover(task, task["session_id"], successor,
                                                  handoff_message_id=handoff["message_id"],
                                                  handoff_command_id=handoff["command_id"])
+        except TaskDispatchCancelled:
+            self.journal.command_operator_only(cmd["command_id"], "paused_before_handoff_send")
+            self.journal.command_status(handoff["command_id"], "uncertain")
+            return self.journal.change(task["task_id"], "uncertain")
         except TaskIdentityMismatch:
             self.journal.command_operator_only(cmd["command_id"], "successor_identity")
             self.journal.command_status(handoff["command_id"], "uncertain")
