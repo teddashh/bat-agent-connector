@@ -15,6 +15,7 @@ class DiscordAdapter(Protocol):
     async def post(self, channel_id: str, text: str) -> str: ...
     async def edit(self, channel_id: str, message_id: str, text: str) -> None: ...
     async def find_marker(self, channel_id: str, marker: str) -> str | None: ...
+    async def message_matches(self, channel_id: str, message_id: str, marker: str) -> bool: ...
 
 
 class DiscordHTTP:
@@ -46,6 +47,15 @@ class DiscordHTTP:
         return next((str(r["id"]) for r in rows if r.get("author", {}).get("id") == me.get("id")
                      and marker in str(r.get("content") or "")), None)
 
+    async def message_matches(self, channel_id: str, message_id: str, marker: str) -> bool:
+        if not channel_id.isdecimal() or not message_id.isdecimal():
+            raise ValueError("Discord channel and message IDs must be numeric")
+        me = await asyncio.to_thread(self._request, "GET", "/users/@me")
+        row = await asyncio.to_thread(self._request, "GET",
+                                      f"/channels/{channel_id}/messages/{message_id}")
+        return (str(row.get("author", {}).get("id")) == str(me.get("id"))
+                and marker in str(row.get("content") or ""))
+
 
 class DiscordPublisher:
     def __init__(self, journal: Journal, adapter: DiscordAdapter, board_channel_id: str | None = None):
@@ -67,6 +77,29 @@ class DiscordPublisher:
             self.journal.mark_discord_event(eid, message_id)
         if self.board_channel_id:
             await self.update_board()
+
+    async def confirm_found(self, *, event_id: int | None = None,
+                            board_channel_id: str | None = None, message_id: str) -> dict:
+        if bool(event_id is not None) == bool(board_channel_id):
+            raise ValueError("specify one Discord event or board channel")
+        if event_id is not None:
+            event = self.journal.discord_event_get(event_id)
+            task = self.journal.get(event["task_id"])
+            channel = task["discord_thread_id"]
+            if not channel or event["discord_status"] not in {"sending", "unresolved"}:
+                raise ValueError("event is not awaiting Discord reconciliation")
+            if not await self.adapter.message_matches(channel, message_id, f"BATC-EVENT:{event_id}"):
+                raise ValueError("Discord message does not match event marker and bot author")
+            self.journal.discord_confirm_found(event_id, message_id)
+            return {"event_id": event_id, "message_id": message_id, "status": "sent"}
+        row = self.journal.board_get(board_channel_id)
+        if not row or row["status"] not in {"sending", "unresolved"}:
+            raise ValueError("board is not awaiting Discord reconciliation")
+        if not await self.adapter.message_matches(board_channel_id, message_id,
+                                                  "BATC-BOARD:" + board_channel_id):
+            raise ValueError("Discord message does not match board marker and bot author")
+        self.journal.board_confirm_found(board_channel_id, message_id)
+        return {"board_channel_id": board_channel_id, "message_id": message_id, "status": "sent"}
 
     async def reconcile(self):
         for event in self.journal.discord_inflight():

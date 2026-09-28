@@ -7,16 +7,18 @@ import os
 import stat
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import mcp_server
+from bat_agent_connector import mcp_server, task_bat
 from bat_agent_connector.goose_acp import GooseACP, GooseConfig
 from bat_agent_connector.model_router import ModelRouter, RouterConfig
 from bat_agent_connector.pm_providers import (
     AgyShimAdapter,
     ProviderCatalog,
     ProviderEntry,
+    ProviderSetupError,
     ProviderSwitcher,
     UncertainPrompt,
     classify_provider_error,
@@ -82,10 +84,12 @@ class FakeBAT:
         if self.send_error:
             raise TimeoutError("lost response after possible acceptance")
         return {"accepted": True, "turn_marker": message_id if self.prepare_kind == "claude"
-                else "2026-09-27T00:00:00+00:00"}
+                else "2026-09-27T00:00:00+00:00",
+                "turn_attribution": "exact_echo" if self.prepare_kind == "claude" else "timestamp_cursor"}
 
     async def read(self, task, session_id, marker):
         read = self.reads.get(session_id, {"turn_started": False, "turn_done": False}).copy()
+        read.setdefault("streaming", False)
         if read.get("turn_started") and "turn_attribution" not in read:
             read["turn_attribution"] = "correlated"
         return read
@@ -162,6 +166,194 @@ async def test_timeout_no_resend_and_reconcile(tmp_path):
                        "turn_attribution": "correlated"}
     assert (await core.tick(task["task_id"]))["state"] == "running"
     assert len(fake.sends) == 1
+    j.close()
+
+
+async def test_codex_timestamp_never_proves_lost_send_or_review(tmp_path):
+    j = Journal(tmp_path / "tasks.db")
+    task = submit(j)
+    fake = FakeBAT()
+    fake.prepare_kind = "codex"
+    fake.send_error = True
+    core = TaskCoordinator(j, fake)
+    assert (await core.tick(task["task_id"]))["state"] == "uncertain"
+    sid = j.get(task["task_id"])["session_id"]
+    fake.reads[sid] = {"turn_started": True, "turn_done": True,
+                       "turn_attribution": "timestamp_cursor",
+                       "messages": [{"role": "assistant", "text": "REVIEW: PASS\nBAT-STATUS: MILESTONE"}]}
+    assert (await core.tick(task["task_id"]))["state"] == "uncertain"
+    assert not j.get(task["task_id"])["delivered"] and len(fake.sends) == 1
+    j.close()
+
+    j = Journal(tmp_path / "review.db")
+    task = submit(j)
+    fake = FakeBAT()
+    core = TaskCoordinator(j, fake)
+    await core.tick(task["task_id"])
+    lead = j.get(task["task_id"])["session_id"]
+    fake.reads[lead] = {"turn_started": True, "turn_done": True, "turn_attribution": "correlated",
+                        "messages": [{"role": "assistant", "text": "BAT-STATUS: MILESTONE"}]}
+    await core.tick(task["task_id"])
+    fake.prepare_kind = "codex"
+    await core.tick(task["task_id"])
+    reviewer = j.get(task["task_id"])["reviewer_session_id"]
+    assert j.get(task["task_id"])["state"] == "uncertain"
+    fake.reads[reviewer] = {"turn_started": True, "turn_done": True, "streaming": False,
+                            "turn_attribution": "timestamp_cursor", "first_turn_proven": True,
+                            "messages": [{"role": "assistant", "text": "REVIEW: PASS"}]}
+    assert (await core.tick(task["task_id"]))["state"] == "uncertain"
+    assert not j.get(task["task_id"])["delivered"]
+    assert len([x for x in fake.sends if x[0] == reviewer]) == 1
+    j.close()
+
+
+async def test_operator_reconcile_is_command_scoped_and_dispatches_new_prompt(mock, tmp_path):
+    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    fake = FakeBAT()
+    fake.send_error = True
+    daemon.adapter = fake
+    daemon.coordinator = TaskCoordinator(daemon.journal, fake)
+    task = submit(daemon.journal)
+    await daemon.coordinator.tick(task["task_id"])
+    command = next(c for c in daemon.journal.commands(task["task_id"]) if c["kind"] == "send")
+    assert command["status"] == "uncertain"
+    server = await asyncio.start_server(daemon._handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+
+    async def rpc(token, method, params):
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        body = json.dumps({"method": method, "params": params}).encode()
+        writer.write(b"POST /rpc HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer " +
+                     token.encode() + b"\r\nContent-Length: " + str(len(body)).encode() +
+                     b"\r\n\r\n" + body)
+        await writer.drain()
+        raw = await reader.read()
+        writer.close()
+        await writer.wait_closed()
+        return raw.split(b"\r\n\r\n", 1)[0], json.loads(raw.split(b"\r\n\r\n", 1)[1])
+
+    params = {"task_id": task["task_id"], "command_id": command["command_id"],
+              "outcome": "not_delivered", "actor": "operator", "source": "ticket:123",
+              "evidence": "inspected BAT turn list and found no matching user prompt",
+              "next_prompt": "Inspect the repo and report current state for this task."}
+    try:
+        status, result = await rpc(daemon._admin_token, "work_reconcile", params)
+        assert b"400 Bad Request" in status and result["error"] == "ValueError"
+        status, result = await rpc(daemon._admin_token, "work_reconcile_capability",
+                                   {"task_id": task["task_id"], "command_id": command["command_id"]})
+        assert b"200 OK" in status
+        cap = result["result"]["capability"]
+        status, result = await rpc(cap, "work_reconcile", {**params, "task_id": "other-task"})
+        assert b"400 Bad Request" in status
+        fake.send_error = False
+        status, result = await rpc(cap, "work_reconcile", params)
+        assert b"200 OK" in status and result["result"]["state"] == "running"
+        assert len(fake.sends) == 2 and fake.sends[1][1] == params["next_prompt"]
+        assert fake.sends[0][1] != fake.sends[1][1]
+        assert daemon.journal.command_get(command["command_id"])["status"] == "resolved_not_delivered"
+        rec = daemon.journal.reconciliations(task["task_id"])[0]
+        assert (rec["actor"], rec["source"], rec["outcome"]) == ("operator", "ticket:123", "not_delivered")
+        status, _ = await rpc(cap, "work_reconcile", params)
+        assert b"400 Bad Request" in status
+        assert len(fake.sends) == 2
+    finally:
+        server.close()
+        await server.wait_closed()
+        await daemon.fleet.close()
+        daemon.journal.close()
+
+
+async def test_operator_followup_intent_survives_crash_without_automatic_send(tmp_path):
+    path = tmp_path / "tasks.db"
+    j = Journal(path)
+    task = submit(j)
+    fake = FakeBAT()
+    fake.send_error = True
+    core = TaskCoordinator(j, fake)
+    await core.tick(task["task_id"])
+    old = next(c for c in j.commands(task["task_id"]) if c["kind"] == "send")
+    cap = j.issue_reconcile_capability(task["task_id"], old["command_id"])
+    followup = "New explicit operator instruction"
+    result = j.resolve_send(task["task_id"], old["command_id"], token=cap, outcome="superseded",
+                            actor="operator", source="ticket:456", evidence="previous turn superseded",
+                            next_prompt_sha256=hashlib.sha256(followup.encode()).hexdigest(),
+                            next_before={"agent_kind": "claude"})
+    new_command = j.command_get(result["_next_command_id"])
+    assert new_command["status"] == "needs_review"
+    j.close()
+    j = Journal(path)
+    assert (await TaskCoordinator(j, fake).tick(task["task_id"]))["state"] == "uncertain"
+    assert len(fake.sends) == 1
+    assert j.command_get(new_command["command_id"])["status"] == "uncertain"
+    j.close()
+
+
+async def test_task_bat_adapter_contract_with_mock_host(fleet_factory, mock, tmp_path):
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=True,
+                          safety={"write_min_interval_s": 0})
+    j = Journal(tmp_path / "tasks.db")
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="adapter-contract")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
+    lead = "task-lead-contract"
+    assert await adapter.start(task, role="lead", agent="codex", session_id=lead) == lead
+    start = next(i for i in mock.invokes if i["channel"] == "claude:start-session"
+                 and i["params"]["sessionId"] == lead)
+    assert start["params"]["options"]["agentPreset"] == "codex-agent-worktree"
+    assert not any(t.get("id") == lead for t in mock.ws_doc["terminals"])
+    assert await adapter.recover_start(task, role="lead", session_id=lead)
+    task = {**task, "session_id": lead}
+    before = await adapter.prepare_send(task, lead)
+    assert before["agent_kind"] == "codex" and before["before_cursor"]
+    send = await adapter.send(task, lead, "synthetic contract prompt", "batc-contract-1")
+    assert send["accepted"]
+    reviewer = "task-review-contract"
+    assert await adapter.start(task, role="reviewer", agent="codex", session_id=reviewer) == reviewer
+    review_start = next(i for i in mock.invokes if i["channel"] == "claude:start-session"
+                        and i["params"]["sessionId"] == reviewer)
+    opts = review_start["params"]["options"]
+    assert opts["codexSandboxMode"] == "read-only" and opts["codexApprovalPolicy"] == "never"
+    assert opts["cwd"] == start["params"]["options"]["cwd"]
+    assert not any(t.get("id") == reviewer for t in mock.ws_doc["terminals"])
+    j.close()
+
+
+async def test_operator_review_pass_requires_current_candidate_and_turn_reference(tmp_path):
+    j = Journal(tmp_path / "tasks.db")
+    task = submit(j)
+    fake = FakeBAT()
+    core = TaskCoordinator(j, fake)
+    await core.tick(task["task_id"])
+    lead = j.get(task["task_id"])["session_id"]
+    fake.reads[lead] = {"turn_started": True, "turn_done": True, "turn_attribution": "correlated",
+                        "messages": [{"role": "assistant", "text": "BAT-STATUS: MILESTONE"}]}
+    await core.tick(task["task_id"])
+    fake.prepare_kind = "codex"
+    await core.tick(task["task_id"])
+    reviewer = j.get(task["task_id"])["reviewer_session_id"]
+    command = next(c for c in reversed(j.commands(task["task_id"])) if c["kind"] == "send")
+    assert command["session_id"] == reviewer and command["status"] == "uncertain"
+    cap = j.issue_reconcile_capability(task["task_id"], command["command_id"])
+    identity = fake.identity
+    with pytest.raises(ValueError, match="turn reference"):
+        await core.resolve_command(task["task_id"], command["command_id"], token=cap,
+                                   outcome="delivered", actor="operator", source="ticket:review",
+                                   evidence="inspected reviewer turn", observed_result="review_pass",
+                                   candidate_commit=identity["candidate_commit"], tree_hash=identity["tree_hash"])
+    with pytest.raises(ValueError, match="candidate changed"):
+        await core.resolve_command(task["task_id"], command["command_id"], token=cap,
+                                   outcome="delivered", actor="operator", source="ticket:review",
+                                   evidence="inspected reviewer turn", observed_result="review_pass",
+                                   turn_ref="bat-message:77", candidate_commit="d" * 40,
+                                   tree_hash=identity["tree_hash"])
+    done = await core.resolve_command(task["task_id"], command["command_id"], token=cap,
+                                      outcome="delivered", actor="operator", source="ticket:review",
+                                      evidence="BAT reviewer message 77 explicitly passed candidate",
+                                      observed_result="review_pass", turn_ref="bat-message:77",
+                                      candidate_commit=identity["candidate_commit"],
+                                      tree_hash=identity["tree_hash"])
+    assert done["state"] == "done" and done["delivered"]
+    assert j.reconciliations(task["task_id"])[0]["turn_ref"] == "bat-message:77"
     j.close()
 
 
@@ -254,6 +446,11 @@ class FakeDiscord:
     async def find_marker(self, channel_id, marker):
         return next((str(i) for i, (channel, text) in enumerate(self.posts, 1)
                      if channel == channel_id and marker in text), None)
+
+    async def message_matches(self, channel_id, message_id, marker):
+        index = int(message_id) - 1
+        return (0 <= index < len(self.posts) and self.posts[index][0] == channel_id
+                and marker in self.posts[index][1])
 
 
 async def test_discord_dedup_and_one_board(tmp_path):
@@ -353,7 +550,7 @@ def reply(req, result):
 for line in sys.stdin:
     req=json.loads(line)
     if req["method"] == "initialize":
-        reply(req,{"protocolVersion":2,"agentCapabilities":{}})
+        reply(req,{"protocolVersion":1,"agentCapabilities":{}})
     elif req["method"] == "session/new":
         scoped=req["params"]["mcpServers"]
         assert len(scoped)==1 and scoped[0]["name"]=="bat-task"
@@ -488,9 +685,69 @@ def test_ledger_handoff_archive_and_permissions(tmp_path):
     assert result["excerpt"].count("H") >= 12_000
     assert result["excerpt"].count("T") >= 148_000
     assert os.stat(result["archive_path"]).st_mode & 0o777 == stat.S_IRUSR | stat.S_IWUSR
+    assert os.stat(result["excerpt_path"]).st_mode & 0o777 == stat.S_IRUSR | stat.S_IWUSR
+    assert Path(result["excerpt_path"]).read_text() == result["excerpt"]
     assert (tmp_path / "private").stat().st_mode & 0o777 == 0o700
     assert open(result["archive_path"]).read() == data
     j.close()
+
+
+async def test_live_failover_uses_private_history_fallback_when_ledger_unavailable(mock, tmp_path, monkeypatch):
+    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    task = submit(daemon.journal, lead_agent="claude")
+    monkeypatch.setenv("BATC_TASK_LOCAL_HOST_ALIAS", "h1")
+    monkeypatch.setattr(task_bat.registry, "get", lambda host, sid: {"agent_preset": "claude-agent"})
+
+    def broken_summary(journal, task_id):
+        raise ValueError("ledger unavailable")
+
+    monkeypatch.setattr(task_bat, "ledger_summary", broken_summary)
+    history = "H" * 12_000 + "M" * 50_000 + "T" * 148_001
+
+    async def fake_read(*args, **kwargs):
+        return {"messages": [{"role": "assistant", "text": history}], "next_offset": None}
+
+    observed = {}
+
+    async def fake_failover(*args, **kwargs):
+        observed.update(kwargs)
+        return {"new_session_id": "successor", "prompt_sent": True, "message_id": "handoff"}
+
+    monkeypatch.setattr(task_bat.service, "session_read", fake_read)
+    monkeypatch.setattr(task_bat.lifecycle, "session_failover", fake_failover)
+    try:
+        result = await daemon.adapter.failover(task, "old", "successor")
+        assert result["session_id"] == "successor"
+        assert observed["ledger_only"] is True
+        files = list((tmp_path / "handoff-archive").glob("*.txt"))
+        full = next(p for p in files if not p.name.endswith(".excerpt.txt"))
+        excerpt = next(p for p in files if p.name.endswith(".excerpt.txt"))
+        assert full.stat().st_mode & 0o777 == 0o600
+        assert excerpt.stat().st_mode & 0o777 == 0o600
+        assert "H" * 11_980 in excerpt.read_text() and "T" * 148_000 in excerpt.read_text()
+        assert str(excerpt) in observed["instructions"] and str(full) in observed["instructions"]
+    finally:
+        await daemon.fleet.close()
+        daemon.journal.close()
+
+
+async def test_history_fallback_preserves_chronological_page_order(mock, tmp_path, monkeypatch):
+    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    task = submit(daemon.journal, lead_agent="claude")
+
+    async def fake_read(*args, **kwargs):
+        if kwargs["offset"] == 0:
+            return {"messages": [{"role": "user", "text": "middle"},
+                                 {"role": "assistant", "text": "latest"}], "next_offset": 2}
+        return {"messages": [{"role": "user", "text": "earliest"}], "next_offset": None}
+
+    monkeypatch.setattr(task_bat.service, "session_read", fake_read)
+    try:
+        assert await daemon.adapter._history_for_fallback(task, "old") == (
+            "user: earliest\nuser: middle\nassistant: latest")
+    finally:
+        await daemon.fleet.close()
+        daemon.journal.close()
 
 
 def test_provider_switches_branch_and_uncertain_never_replays(tmp_path):
@@ -531,6 +788,9 @@ async def test_agy_provider_contract_with_fake_endpoint():
         entry = ProviderEntry("agy-claude", "agy-shim", f"http://127.0.0.1:{port}/v1", "claude", 2)
         adapter = AgyShimAdapter()
         assert await adapter.contract_probe(entry, {"BATC_AGY_SHIM_TOKEN": "fake-local-token"})
+        wrong_model = ProviderEntry("other", "openai-compatible", f"http://127.0.0.1:{port}/v1",
+                                    "missing-model", 2)
+        assert not await adapter.contract_probe(wrong_model, {"BATC_AGY_SHIM_TOKEN": "fake-local-token"})
         assert seen and b"GET /v1/models" in seen[0]
     finally:
         server.close()
@@ -551,7 +811,7 @@ for line in sys.stdin:
     elif req["method"]=="session/prompt":
         result={"jsonrpc":"2.0","id":req["id"],"result":{"stopReason":"end_turn"}}
     else:
-        result={"jsonrpc":"2.0","id":req["id"],"result":{"protocolVersion":2}}
+        result={"jsonrpc":"2.0","id":req["id"],"result":{"protocolVersion":1}}
     print(json.dumps(result),flush=True)
 ''')
     log = tmp_path / "calls.txt"
@@ -587,7 +847,7 @@ for line in sys.stdin:
     elif req["method"]=="session/new":
         result={"jsonrpc":"2.0","id":req["id"],"result":{"sessionId":"s"}}
     else:
-        result={"jsonrpc":"2.0","id":req["id"],"result":{"protocolVersion":2}}
+        result={"jsonrpc":"2.0","id":req["id"],"result":{"protocolVersion":1}}
     print(json.dumps(result),flush=True)
 ''')
     log = tmp_path / "prompts.txt"
@@ -605,6 +865,19 @@ for line in sys.stdin:
     assert log.read_text().splitlines() == ["openai"]
     assert [b["provider"] for b in j.branches(task["task_id"])] == ["agy-claude"]
     j.close()
+
+
+async def test_goose_pinned_protocol_rejects_unknown_version(tmp_path):
+    script = tmp_path / "wrong_version.py"
+    script.write_text('''import json, sys
+for line in sys.stdin:
+    req=json.loads(line)
+    print(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{"protocolVersion":2}}),flush=True)
+''')
+    goose = GooseACP(GooseConfig(enabled=True, provider="codex", timeout_s=5))
+    with pytest.raises(RuntimeError, match="pinned version 1"):
+        await goose.run("synthetic", str(tmp_path), "hello", capability="synthetic",
+                        command=(sys.executable, "-u", str(script)))
 
 
 async def test_failover_recovers_reserved_successor_without_reuse(tmp_path):
@@ -645,6 +918,27 @@ async def test_discord_claim_recovery_after_restart(tmp_path):
     assert len(fake.posts) == 2
     assert not j.discord_inflight() and not j.discord_unresolved()
     assert j.board_get("board")["message_id"] == "2"
+    j.close()
+
+
+async def test_discord_confirm_found_id_checks_marker(tmp_path):
+    j = Journal(tmp_path / "tasks.db")
+    submit(j, discord_thread_id="thread")
+    event = j.discord_events()[0]
+    assert j.claim_discord_event(event["event_id"])
+    j.discord_mark_unresolved(event["event_id"])
+    fake = FakeDiscord()
+    wrong = await fake.post("thread", "unrelated message")
+    found = await fake.post("thread", f"BATC-EVENT:{event['event_id']}\nposted earlier")
+    publisher = DiscordPublisher(j, fake, "board")
+    with pytest.raises(ValueError, match="does not match"):
+        await publisher.confirm_found(event_id=event["event_id"], message_id=wrong)
+    assert (await publisher.confirm_found(event_id=event["event_id"], message_id=found))["status"] == "sent"
+    assert j.discord_event_get(event["event_id"])["discord_message_id"] == found
+    assert j.board_claim("board", "BATC-BOARD:board\n任務看板")
+    j.board_mark_unresolved("board")
+    board_mid = await fake.post("board", "BATC-BOARD:board\n任務看板")
+    assert (await publisher.confirm_found(board_channel_id="board", message_id=board_mid))["status"] == "sent"
     j.close()
 
 
@@ -736,6 +1030,10 @@ kind = "claude-acp"
     assert catalog.order == ("agy-claude", "codex", "claude")
     assert catalog.environment("codex", {})["GOOSE_PROVIDER"] == "chatgpt_codex"
     assert catalog.environment("claude", {})["GOOSE_PROVIDER"] == "claude-acp"
+    gemini = ProviderCatalog([ProviderEntry("gemini", "gemini", model="gemini-flash")], ("gemini",))
+    assert gemini.environment("gemini", {}) == {"GOOSE_PROVIDER": "gemini", "GOOSE_MODEL": "gemini-flash"}
+    with pytest.raises(ProviderSetupError, match="Gemini model"):
+        ProviderCatalog([ProviderEntry("gemini", "gemini")], ("gemini",)).environment("gemini", {})
     assert classify_provider_error(status=429) == "rate_limited"
     assert classify_provider_error(code="insufficient_quota") == "quota_error"
     assert classify_provider_error(status=401) == "auth_error"

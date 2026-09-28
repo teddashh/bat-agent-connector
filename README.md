@@ -100,6 +100,9 @@ The daemon currently rejects live Goose tasks. Goose ACP, provider fallback, the
 posting have adapter/test coverage; real Goose contract checks, Discord credentials, deployment and cron replacement
 are deferred. The task API requires a local admin token or scoped capability and binds only to loopback. See
 [the task-service design](docs/design/task-service.md) for states, recovery, private configuration and rollout.
+Codex timestamp cursors do not prove command ownership. An uncertain send remains stopped until a command-scoped,
+one-time operator reconciliation (`batc task-reconcile`); it is never replayed automatically. Discord delivery
+that falls outside the recent-message scan also requires an explicit found-ID or absent confirmation.
 No paid API key is required.
 
 The server name is `bat`. Examples (add `--read-only` if you want to be sure):

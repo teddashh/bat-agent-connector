@@ -32,7 +32,7 @@ ALLOWED = {
     "human_owned": {"running", "needs_ted", "failed"},
     "needs_ted": {"running", "accepted", "failed", "uncertain"},
     "verifying": {"dispatching", "accepted", "running", "done", "needs_ted", "uncertain", "failed"},
-    "uncertain": {"running", "accepted", "needs_ted", "failed"},
+    "uncertain": {"running", "accepted", "verifying", "human_owned", "done", "needs_ted", "failed"},
     "done": set(), "failed": set(),
 }
 
@@ -94,7 +94,14 @@ class Journal:
             );
             CREATE TABLE IF NOT EXISTS capabilities (
                 token_hash TEXT PRIMARY KEY, task_id TEXT REFERENCES tasks(task_id),
-                scope TEXT NOT NULL, expires_at REAL NOT NULL
+                scope TEXT NOT NULL, command_id TEXT, expires_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS command_reconciliations (
+                command_id TEXT PRIMARY KEY REFERENCES commands(command_id),
+                task_id TEXT NOT NULL REFERENCES tasks(task_id), outcome TEXT NOT NULL,
+                actor TEXT NOT NULL, source TEXT NOT NULL, evidence TEXT NOT NULL,
+                observed_result TEXT NOT NULL, turn_ref TEXT, candidate_commit TEXT,
+                tree_hash TEXT, next_prompt_sha256 TEXT, created_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS observed_verifications (
                 verification_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,6 +133,9 @@ class Journal:
                                ("pm_provider", "TEXT")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {sql_type}")  # noqa: S608 - fixed local identifiers
+        cap_columns = {r[1] for r in self.db.execute("PRAGMA table_info(capabilities)")}
+        if "command_id" not in cap_columns:
+            self.db.execute("ALTER TABLE capabilities ADD COLUMN command_id TEXT")
 
     @contextmanager
     def tx(self):
@@ -153,6 +163,123 @@ class Journal:
         row = self.db.execute("SELECT task_id,expires_at FROM capabilities WHERE token_hash=? AND scope='task'",
                               (digest,)).fetchone()
         return bool(row and row["task_id"] == task_id and row["expires_at"] > time.time())
+
+    def issue_reconcile_capability(self, task_id: str, command_id: str, *, ttl_s: int = 600) -> str:
+        task = self.get(task_id)
+        command = self.command_get(command_id)
+        if (command["task_id"] != task_id or command["kind"] != "send"
+                or command["status"] != "uncertain" or task["state"] != "uncertain"):
+            raise ValueError("only an uncertain send can be reconciled")
+        token = secrets.token_urlsafe(32)
+        self.db.execute("""INSERT INTO capabilities(token_hash,task_id,scope,command_id,expires_at)
+            VALUES(?,?,?,?,?)""", (hashlib.sha256(token.encode()).hexdigest(), task_id,
+                                  "reconcile", command_id, time.time() + ttl_s))
+        return token
+
+    def authorize_reconcile_capability(self, token: str, task_id: str, command_id: str) -> bool:
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        row = self.db.execute("""SELECT expires_at FROM capabilities WHERE token_hash=?
+            AND task_id=? AND command_id=? AND scope='reconcile'""",
+            (digest, task_id, command_id)).fetchone()
+        return bool(row and row["expires_at"] > time.time())
+
+    def command_get(self, command_id: str) -> dict:
+        row = self.db.execute("SELECT * FROM commands WHERE command_id=?", (command_id,)).fetchone()
+        if row is None:
+            raise KeyError(command_id)
+        return dict(row)
+
+    def resolve_send(self, task_id: str, command_id: str, *, token: str, outcome: str,
+                     actor: str, source: str, evidence: str, observed_result: str = "none",
+                     turn_ref: str | None = None, candidate_commit: str | None = None,
+                     tree_hash: str | None = None, next_prompt_sha256: str | None = None,
+                     next_before: dict | None = None) -> dict:
+        if outcome not in {"delivered", "not_delivered", "superseded"}:
+            raise ValueError("invalid reconciliation outcome")
+        if observed_result not in {"none", "milestone", "review_pass"}:
+            raise ValueError("invalid observed result")
+        if (actor not in {"operator", "ted"} or not isinstance(source, str) or not source.strip()
+                or len(source) > 256 or not isinstance(evidence, str) or not evidence.strip()
+                or len(evidence) > 2000 or (turn_ref is not None and len(turn_ref) > 256)):
+            raise ValueError("operator provenance and evidence are required")
+        if observed_result != "none" and (outcome != "delivered" or not turn_ref):
+            raise ValueError("observed result requires delivered prompt and exact turn reference")
+        if next_prompt_sha256 and (outcome not in {"not_delivered", "superseded"}
+                                   or observed_result != "none"):
+            raise ValueError("new prompt requires not_delivered or superseded outcome")
+        if next_prompt_sha256 and not isinstance(next_before, dict):
+            raise ValueError("new prompt needs a recorded pre-send baseline")
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        with self.tx():
+            task = self.get(task_id)
+            command = self.command_get(command_id)
+            if (task["state"] != "uncertain" or command["task_id"] != task_id
+                    or command["kind"] != "send" or command["status"] != "uncertain"):
+                raise ValueError("command is not an uncertain send for this task")
+            cap = self.db.execute("""SELECT expires_at FROM capabilities WHERE token_hash=?
+                AND task_id=? AND command_id=? AND scope='reconcile'""",
+                (digest, task_id, command_id)).fetchone()
+            if not cap or cap["expires_at"] <= time.time():
+                raise ValueError("reconciliation capability is invalid")
+            payload = json.loads(command["payload"])
+            if next_prompt_sha256 and next_prompt_sha256 == payload.get("prompt_sha256"):
+                raise ValueError("next prompt must be a new command, not replay of uncertain text")
+            reviewer = command["session_id"] == task["reviewer_session_id"]
+            if observed_result == "milestone" and (reviewer or command["session_id"] != task["session_id"]):
+                raise ValueError("milestone must belong to lead command")
+            if observed_result == "review_pass":
+                observed = self.observed_verification(task_id)
+                if (not reviewer or payload.get("purpose") != "reviewer:initial"
+                        or not candidate_commit or not tree_hash
+                        or (task["review_commit"], task["review_tree"]) != (candidate_commit, tree_hash)
+                        or not observed or observed["exit_code"] != 0
+                        or (observed["candidate_commit"], observed["tree_hash"]) != (candidate_commit, tree_hash)):
+                    raise ValueError("review PASS is not bound to verified candidate")
+            if next_prompt_sha256 and (task["paused"] or reviewer or
+                                       command["session_id"] != task["session_id"]):
+                raise ValueError("next prompt requires the lead session")
+            now = time.time()
+            target = ("done" if observed_result == "review_pass" else
+                      "verifying" if observed_result == "milestone" else
+                      "accepted" if next_prompt_sha256 else "human_owned")
+            self.db.execute("""INSERT INTO command_reconciliations(command_id,task_id,outcome,actor,source,
+                evidence,observed_result,turn_ref,candidate_commit,tree_hash,next_prompt_sha256,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (command_id, task_id, outcome, actor, source, evidence, observed_result,
+                 turn_ref, candidate_commit, tree_hash, next_prompt_sha256, now))
+            self.db.execute("DELETE FROM capabilities WHERE token_hash=?", (digest,))
+            self.db.execute("UPDATE commands SET status=?,updated_at=? WHERE command_id=?",
+                            ("resolved_" + outcome, now, command_id))
+            next_command_id = None
+            if next_prompt_sha256:
+                next_command_id = str(uuid.uuid4())
+                self.db.execute("""INSERT INTO commands(command_id,task_id,idem_key,session_id,kind,status,
+                    message_id,payload,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (next_command_id, task_id, f"{task_id}:operator:{command_id}", command["session_id"],
+                     "send", "needs_review", f"batc-{next_command_id}",
+                     json.dumps({"purpose": "operator:" + command_id, "before": next_before,
+                                 "prompt_sha256": next_prompt_sha256}), now, now))
+                self._event(task_id, "command_intent", {"command_id": next_command_id, "kind": "send",
+                                                         "needs_review": True, "operator_followup": command_id})
+            if actor == "ted":
+                action = self.db.execute("""INSERT OR IGNORE INTO ted_actions(task_id,source_message_id,action,created_at)
+                    VALUES(?,?,?,?)""", (task_id, source, "reconcile", now))
+                if action.rowcount:
+                    self.db.execute("UPDATE tasks SET ted_interventions=ted_interventions+1 WHERE task_id=?",
+                                    (task_id,))
+            if target == "done":
+                self.db.execute("""UPDATE tasks SET state='done',review_passed=1,delivered=1,
+                    delivered_at=?,updated_at=?,result=? WHERE task_id=?""",
+                    (now, now, evidence[:1000], task_id))
+            else:
+                self.db.execute("UPDATE tasks SET state=?,updated_at=? WHERE task_id=?", (target, now, task_id))
+            self._event(task_id, "command_reconciled", {"command_id": command_id, "outcome": outcome,
+                                                       "actor": actor, "source": source,
+                                                       "observed_result": observed_result, "state": target})
+        result = self.get(task_id)
+        if next_command_id:
+            result["_next_command_id"] = next_command_id
+        return result
 
     def record_observed_verification(self, task_id: str, evidence: dict) -> dict:
         required = {"candidate_commit", "tree_hash", "command", "exit_code", "log_ref", "output_sha256"}
@@ -317,10 +444,7 @@ class Journal:
             self.db.execute("UPDATE tasks SET paused=0,control_version=control_version+1,updated_at=? WHERE task_id=?",
                             (time.time(), task_id))
             self._event(task_id, "resumed")
-        task = self.get(task_id)
-        if task["state"] in {"needs_ted", "human_owned"} and task["session_id"]:
-            return self.change(task_id, "running")
-        return task
+        return self.get(task_id)
 
     def ted_action(self, task_id: str, *, action: str, source_message_id: str):
         if not action or not source_message_id:
@@ -331,7 +455,8 @@ class Journal:
             if not cur.rowcount:
                 return
             self.db.execute("UPDATE tasks SET ted_interventions=ted_interventions+1 WHERE task_id=?", (task_id,))
-            self._event(task_id, "ted_intervention", {"action": action, "source_message_id": source_message_id})
+            self._event(task_id, "caller_reported_ted_intervention",
+                        {"action": action, "source_message_id": source_message_id})
 
     def request_ted(self, task_id: str, reason: str):
         with self.tx():
@@ -384,6 +509,10 @@ class Journal:
     def commands(self, task_id: str) -> list[dict]:
         return [dict(r) for r in self.db.execute("SELECT * FROM commands WHERE task_id=? ORDER BY created_at", (task_id,))]
 
+    def reconciliations(self, task_id: str) -> list[dict]:
+        return [dict(r) for r in self.db.execute(
+            "SELECT * FROM command_reconciliations WHERE task_id=? ORDER BY created_at", (task_id,))]
+
     def events(self, task_id: str | None = None) -> list[dict]:
         if task_id:
             rows = self.db.execute("SELECT * FROM events WHERE task_id=? ORDER BY event_id", (task_id,))
@@ -424,6 +553,12 @@ class Journal:
             JOIN tasks t USING(task_id) WHERE e.discord_status='pending' AND t.discord_thread_id IS NOT NULL
             ORDER BY e.event_id""")]
 
+    def discord_event_get(self, event_id: int) -> dict:
+        row = self.db.execute("SELECT * FROM events WHERE event_id=?", (event_id,)).fetchone()
+        if row is None:
+            raise KeyError(event_id)
+        return dict(row)
+
     def discord_inflight(self) -> list[dict]:
         return [dict(r) for r in self.db.execute("""SELECT e.*,t.discord_thread_id FROM events e
             JOIN tasks t USING(task_id) WHERE e.discord_status='sending' AND t.discord_thread_id IS NOT NULL
@@ -453,6 +588,10 @@ class Journal:
         self.db.execute("UPDATE events SET discord_status='pending' WHERE event_id=? AND discord_status='unresolved'",
                         (event_id,))
 
+    def discord_confirm_found(self, event_id: int, message_id: str):
+        self.db.execute("""UPDATE events SET discord_status='sent',discord_message_id=?
+            WHERE event_id=? AND discord_status IN ('sending','unresolved')""", (message_id, event_id))
+
     def board_get(self, key: str) -> dict | None:
         row = self.db.execute("SELECT * FROM board WHERE board_key=?", (key,)).fetchone()
         return dict(row) if row else None
@@ -481,3 +620,7 @@ class Journal:
 
     def board_confirm_absent(self, key: str):
         self.db.execute("UPDATE board SET status='pending' WHERE board_key=? AND status='unresolved'", (key,))
+
+    def board_confirm_found(self, key: str, message_id: str):
+        self.db.execute("UPDATE board SET status='sent',message_id=? WHERE board_key=? AND status IN ('sending','unresolved')",
+                        (message_id, key))
