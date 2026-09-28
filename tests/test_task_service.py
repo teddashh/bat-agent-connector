@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import mcp_server, orchestrate, service, task_bat
+from bat_agent_connector import mcp_server, orchestrate, registry, service, task_bat
 from bat_agent_connector.errors import WriteRefused
 from bat_agent_connector.goose_acp import PINNED_GOOSE_VERSION, GooseACP, GooseConfig
 from bat_agent_connector.model_router import ModelRouter, RouterConfig
@@ -786,7 +786,8 @@ async def test_bat_adapter_recovers_codex_successor_without_handoff_turn_proof(
     journal.change(task["task_id"], "running")
     task = journal.change(task["task_id"], "quota_limited")
     _, handoff = journal.reserve_failover(task["task_id"], "old-contract", "successor-contract")
-    journal.command_prompt_hash(handoff["command_id"], hashlib.sha256(b"contract handoff").hexdigest())
+    frame_hash = hashlib.sha256(b"contract handoff").hexdigest()
+    journal.command_prompt_hash(handoff["command_id"], frame_hash)
     fleet = fleet_factory(writes=True, orchestrate=True)
     path, branch = "/srv/demo/.bat-worktrees/contract", "bat/worktree-contract"
     mock.metas["successor-contract"] = {"cwd": path, "isStreaming": False}
@@ -797,7 +798,7 @@ async def test_bat_adapter_recovers_codex_successor_without_handoff_turn_proof(
                  "shares_worktree_with": "old-contract", "status": "active",
                  "worktree_path": path, "branch": branch,
                  "handoff_status": "sent", "handoff_message_id": handoff["message_id"],
-                 "handoff_command_id": handoff["command_id"]}
+                 "handoff_command_id": handoff["command_id"], "handoff_frame_sha256": frame_hash}
     monkeypatch.setattr(task_bat.registry, "get", lambda host, sid: {
         "old-contract": old, "successor-contract": successor}.get(sid))
     adapter = task_bat.BatTaskAdapter(fleet, journal=journal)
@@ -806,6 +807,11 @@ async def test_bat_adapter_recovers_codex_successor_without_handoff_turn_proof(
                                               handoff_message_id=handoff["message_id"],
                                               handoff_command_id=handoff["command_id"])
         assert found == {"session_id": "successor-contract", "marker": handoff["message_id"]}
+        successor["handoff_frame_sha256"] = hashlib.sha256(b"different frame").hexdigest()
+        assert (await adapter.recover_failover(task, successor_id="successor-contract",
+                handoff_message_id=handoff["message_id"], handoff_command_id=handoff["command_id"])) == {
+                    "identity_mismatch": True}
+        successor["handoff_frame_sha256"] = frame_hash
         mock.worktrees["successor-contract"]["branchName"] = "bat/other"
         assert (await adapter.recover_failover(task, successor_id="successor-contract",
                 handoff_message_id=handoff["message_id"], handoff_command_id=handoff["command_id"])) == {
@@ -1498,7 +1504,7 @@ async def test_recovery_conflict_stays_operator_only_after_registry_changes(tmp_
     j.close()
 
 
-@pytest.mark.parametrize("wait_stage", ["start_ack", "send_transport"])
+@pytest.mark.parametrize("wait_stage", ["start_ack", "identity_lookup", "send_transport"])
 async def test_pause_during_failover_wait_never_submits_handoff(
         fleet_factory, mock, tmp_path, monkeypatch, wait_stage):
     fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
@@ -1520,12 +1526,15 @@ async def test_pause_during_failover_wait_never_submits_handoff(
     core = TaskCoordinator(j, adapter)
     client = fleet.client("h1")
     entered, release = asyncio.Event(), asyncio.Event()
-    if wait_stage == "start_ack":
+    if wait_stage in {"start_ack", "identity_lookup"}:
         original_invoke = client.invoke
 
         async def held_invoke(channel, params=None, **kwargs):
             reply = await original_invoke(channel, params, **kwargs)
-            if channel == "claude:start-session" and params["sessionId"] != old_sid:
+            if ((wait_stage == "start_ack" and channel == "claude:start-session"
+                 and params["sessionId"] != old_sid)
+                    or (wait_stage == "identity_lookup" and channel == "worktree:status"
+                        and params["sessionId"] != old_sid)):
                 entered.set()
                 await release.wait()
             return reply
@@ -1561,6 +1570,106 @@ async def test_pause_during_failover_wait_never_submits_handoff(
         release.set()
         await fleet.close()
         j.close()
+
+
+@pytest.mark.parametrize("mismatch", ["successor_cwd", "successor_branch",
+                                      "actual_frame_prompt", "late_registry_branch"])
+async def test_failover_rejects_wrong_successor_or_frame_before_handoff(
+        fleet_factory, mock, tmp_path, monkeypatch, mismatch):
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
+                          safety={"write_min_interval_s": 0})
+    started = await orchestrate.session_start(fleet, "h1", "demo-project", "claude",
+                                              confirm=True, prompt=None, use_worktree=True)
+    old_sid = started["session_id"]
+    mock.states[old_sid]["messages"] = [{"role": "assistant", "content": "You've hit your usage limit",
+                                          "timestamp": 1_790_000_000_000}]
+    j = Journal(tmp_path / "tasks.db")
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="wrong-failover:" + mismatch, lead_agent="claude")
+    j.change(task["task_id"], "dispatching")
+    j.change(task["task_id"], "accepted", fields={"session_id": old_sid})
+    j.add_branch(task["task_id"], session_id=old_sid, provider="claude", role="lead", reason="test")
+    j.change(task["task_id"], "running")
+    j.change(task["task_id"], "quota_limited")
+    core = TaskCoordinator(j, task_bat.BatTaskAdapter(
+        fleet, ObservedVerifier(VerificationSettings()), j))
+    client = fleet.client("h1")
+    original_invoke = client.invoke
+
+    async def changed_invoke(channel, params=None, **kwargs):
+        if channel == "claude:send-message" and mismatch == "actual_frame_prompt":
+            return await original_invoke(channel, {**params, "prompt": params["prompt"] + " ALTERED"}, **kwargs)
+        if channel == "claude:send-message" and mismatch == "late_registry_branch":
+            registry.update("h1", params["sessionId"], branch="bat/wrong-branch")
+        result = await original_invoke(channel, params, **kwargs)
+        if channel == "claude:start-session" and params["sessionId"] != old_sid:
+            sid = params["sessionId"]
+            if mismatch == "successor_cwd":
+                mock.metas[sid]["cwd"] = "/srv/other"
+            elif mismatch == "successor_branch":
+                mock.worktrees[sid]["branchName"] = "bat/wrong-branch"
+        return result
+
+    monkeypatch.setattr(client, "invoke", changed_invoke)
+    try:
+        result = await core.tick(task["task_id"])
+        assert result["state"] == "uncertain" and result["session_id"] == old_sid
+        assert len(result["branches"]) == 1
+        assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
+        failover = next(c for c in j.commands(task["task_id"]) if c["kind"] == "failover")
+        handoff = j.command_get(json.loads(failover["payload"])["handoff_command_id"])
+        assert json.loads(failover["payload"])["operator_only"] is True
+        assert handoff["status"] == "uncertain"
+        assert json.loads(handoff["payload"])["prompt_sha256"]
+        assert (await core.tick(task["task_id"]))["session_id"] == old_sid
+        assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
+    finally:
+        await fleet.close()
+        j.close()
+
+
+async def test_verified_successor_handoff_frame_hash_survives_restart(fleet_factory, mock, tmp_path):
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
+                          safety={"write_min_interval_s": 0})
+    started = await orchestrate.session_start(fleet, "h1", "demo-project", "claude",
+                                              confirm=True, prompt=None, use_worktree=True)
+    old_sid = started["session_id"]
+    mock.states[old_sid]["messages"] = [{"role": "assistant", "content": "You've hit your usage limit",
+                                          "timestamp": 1_790_000_000_000}]
+    path = tmp_path / "tasks.db"
+    j = Journal(path)
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="verified-handoff", lead_agent="claude")
+    j.change(task["task_id"], "dispatching")
+    j.change(task["task_id"], "accepted", fields={"session_id": old_sid})
+    j.add_branch(task["task_id"], session_id=old_sid, provider="claude", role="lead", reason="test")
+    j.change(task["task_id"], "running")
+    old_task = j.change(task["task_id"], "quota_limited")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
+    try:
+        result = await TaskCoordinator(j, adapter).tick(task["task_id"])
+        assert result["state"] == "uncertain" and result["session_id"] != old_sid
+        assert len(result["branches"]) == 2
+        sends = [i for i in mock.invokes if i["channel"] == "claude:send-message"]
+        assert len(sends) == 1 and sends[0]["params"]["sessionId"] == result["session_id"]
+        failover = next(c for c in j.commands(task["task_id"]) if c["kind"] == "failover")
+        handoff = j.command_get(json.loads(failover["payload"])["handoff_command_id"])
+        actual_hash = hashlib.sha256(sends[0]["params"]["prompt"].encode()).hexdigest()
+        assert json.loads(handoff["payload"])["prompt_sha256"] == actual_hash
+        assert registry.get("h1", result["session_id"])["handoff_frame_sha256"] == actual_hash
+        j.close()
+        reopened = Journal(path)
+        adapter.journal = reopened
+        try:
+            assert await adapter.recover_failover(old_task, successor_id=result["session_id"],
+                                                  handoff_message_id=handoff["message_id"],
+                                                  handoff_command_id=handoff["command_id"]) == {
+                                                      "session_id": result["session_id"],
+                                                      "marker": handoff["message_id"]}
+        finally:
+            reopened.close()
+    finally:
+        await fleet.close()
 
 
 async def test_lost_codex_handoff_stays_scoped_uncertain_across_restart(tmp_path):

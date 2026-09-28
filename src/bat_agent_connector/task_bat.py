@@ -255,6 +255,7 @@ class BatTaskAdapter:
         entry = registry.get(task["host"], session_id)
         if not entry or not str(entry.get("agent_preset") or "").startswith("claude"):
             raise ValueError("only a quota-limited Claude session can fail over to Codex")
+        expected_path, expected_branch = entry.get("worktree_path"), entry.get("branch")
         words = task["original_words"]
         original_archive = None
         if len(words) > 3000:
@@ -310,13 +311,54 @@ class BatTaskAdapter:
                     or not re.fullmatch(r"[0-9a-f]{64}", str(json.loads(command["payload"]).get("prompt_sha256") or ""))):
                 raise TaskDispatchCancelled("task control changed before BAT handoff invoke")
 
+        async def verify_handoff_successor():
+            identity = await self._verified_failover_successor(
+                task, successor_id, handoff_message_id, handoff_command_id, before_send=True)
+            if identity is False:
+                raise TaskIdentityMismatch("successor BAT worktree differs from reserved task identity")
+            if identity is None:
+                raise RuntimeError("successor BAT worktree identity is not yet provable")
+            current_lead = registry.get(task["host"], session_id)
+            if (not expected_path or not expected_branch or not current_lead
+                    or current_lead.get("worktree_path") != expected_path
+                    or current_lead.get("branch") != expected_branch):
+                raise TaskIdentityMismatch("lead worktree changed during successor verification")
+
+        def handoff_frame_guard(frame: dict):
+            before_handoff_invoke()
+            params = frame.get("params") or {}
+            prompt = params.get("prompt")
+            command = self.journal.command_get(handoff_command_id)
+            intended = json.loads(command["payload"]).get("prompt_sha256")
+            lead = registry.get(task["host"], session_id)
+            successor = registry.get(task["host"], successor_id)
+            if (frame.get("channel") != "claude:send-message" or not isinstance(prompt, str)
+                    or params.get("sessionId") != successor_id
+                    or params.get("clientMessageId") != handoff_message_id
+                    or hashlib.sha256(prompt.encode()).hexdigest() != intended
+                    or not lead or lead.get("worktree_path") != expected_path
+                    or lead.get("branch") != expected_branch
+                    or not successor or successor.get("worktree_path") != expected_path
+                    or successor.get("branch") != expected_branch
+                    or successor.get("shares_worktree_with") != session_id
+                    or successor.get("handoff_status") != "pending"
+                    or successor.get("handoff_command_id") != handoff_command_id
+                    or successor.get("handoff_message_id") != handoff_message_id):
+                raise TaskIdentityMismatch("actual BAT handoff frame differs from journal intent")
+            registry.update(task["host"], successor_id, handoff_frame_sha256=intended)
+            recorded = registry.get(task["host"], successor_id)
+            if not recorded or recorded.get("handoff_frame_sha256") != intended:
+                raise TaskIdentityMismatch("handoff frame hash was not durably recorded")
+
         r = await lifecycle.session_failover(self.fleet, task["host"], session_id, confirm=True,
                                              successor_session_id=successor_id, instructions=instructions,
                                              ledger_only=bool(self.journal),
                                              handoff_message_id=handoff_message_id,
                                              handoff_command_id=handoff_command_id,
                                              before_handoff_send=before_send,
+                                             verify_handoff_successor=verify_handoff_successor,
                                              before_handoff_invoke=before_handoff_invoke,
+                                             handoff_frame_guard=handoff_frame_guard,
                                              authoritative_original=True)
         if not r.get("prompt_sent") and not r.get("skipped"):
             raise RuntimeError("failover handoff outcome is uncertain")
@@ -366,7 +408,8 @@ class BatTaskAdapter:
         return "\n".join(message for page in reversed(pages) for message in page)
 
     async def _verified_failover_successor(self, task: dict, successor_id: str,
-                                           handoff_message_id: str, handoff_command_id: str) -> bool | None:
+                                           handoff_message_id: str, handoff_command_id: str, *,
+                                           before_send: bool = False) -> bool | None:
         """Require exact journal, registry and BAT host identity; null host data is unknown."""
         if not self.journal:
             return None
@@ -397,7 +440,8 @@ class BatTaskAdapter:
                     or entry.get("worktree_path") != path or entry.get("branch") != branch
                     or entry.get("handoff_message_id") != handoff_message_id
                     or entry.get("handoff_command_id") != handoff_command_id
-                    or entry.get("handoff_status") not in {"sent", "uncertain"}):
+                    or entry.get("handoff_status") not in ({"pending"} if before_send else {"sent", "uncertain"})
+                    or (not before_send and entry.get("handoff_frame_sha256") != hp.get("prompt_sha256"))):
                 return False
             client = self.fleet.client(task["host"])
             meta = await client.invoke(

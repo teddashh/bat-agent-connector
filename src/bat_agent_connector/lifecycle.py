@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from . import registry, verification
@@ -413,7 +413,9 @@ async def _failover_one(
     handoff_message_id: str | None = None,
     handoff_command_id: str | None = None,
     before_handoff_send: Callable[[str], None] | None = None,
+    verify_handoff_successor: Callable[[], Awaitable[None]] | None = None,
     before_handoff_invoke: Callable[[], None] | None = None,
+    handoff_frame_guard: Callable[[dict], None] | None = None,
     authoritative_original: bool = False,
 ) -> dict:
     hc = fleet.config.host(host)
@@ -601,6 +603,8 @@ async def _failover_one(
         registry.update(host, new_sid, handoff_message_id=mid)
         if before_handoff_send:
             before_handoff_send(prompt)
+        if verify_handoff_successor:
+            await verify_handoff_successor()
         if before_handoff_invoke:
             before_handoff_invoke()
         audit.record(**base, channel="claude:send-message", phase="attempt", message_id=mid, text=prompt)
@@ -610,6 +614,7 @@ async def _failover_one(
                 "claude:send-message", {"sessionId": new_sid, "prompt": prompt, "clientMessageId": mid},
                 retry_on_disconnect=False,
                 before_send=before_handoff_invoke,
+                frame_guard=handoff_frame_guard,
             )
             if not isinstance(ack, dict) or not (ack.get("accepted") or ack.get("ok")):
                 raise WriteRefused("handoff prompt was not accepted by BAT")
@@ -619,6 +624,11 @@ async def _failover_one(
             registry.update(host, new_sid, handoff_status="uncertain")
             audit.record(**base, channel="claude:send-message", phase="result", ok=False,
                          error="task control changed before handoff submission")
+            raise
+        except TaskIdentityMismatch:
+            registry.update(host, new_sid, handoff_status="uncertain")
+            audit.record(**base, channel="claude:send-message", phase="result", ok=False,
+                         error="handoff frame does not match reserved task identity")
             raise
         except BatError as e:
             sent, err = False, _err(e)
@@ -653,7 +663,9 @@ async def session_failover(
     handoff_message_id: str | None = None,
     handoff_command_id: str | None = None,
     before_handoff_send: Callable[[str], None] | None = None,
+    verify_handoff_successor: Callable[[], Awaitable[None]] | None = None,
     before_handoff_invoke: Callable[[], None] | None = None,
+    handoff_frame_guard: Callable[[dict], None] | None = None,
     authoritative_original: bool = False,
 ) -> dict:
     """Continue quota-exhausted Claude session(s) with Codex in the same folder/worktree.
@@ -691,7 +703,9 @@ async def session_failover(
             handoff_message_id=handoff_message_id,
             handoff_command_id=handoff_command_id,
             before_handoff_send=before_handoff_send,
+            verify_handoff_successor=verify_handoff_successor,
             before_handoff_invoke=before_handoff_invoke,
+            handoff_frame_guard=handoff_frame_guard,
             authoritative_original=authoritative_original,
         )
     from .triage import sessions_triage
