@@ -10,6 +10,7 @@ import uuid
 from typing import Protocol
 
 from .errors import TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
+from .model_router import ModelRouter
 from .task_journal import Journal
 from .task_recipes import limits
 
@@ -71,16 +72,23 @@ def classify_read(read: dict) -> str:
 
 class TaskCoordinator:
     def __init__(self, journal: Journal, adapter: TaskAdapter, *, max_continuations: int = 5,
-                 max_review_rejections: int = 2):
+                 max_review_rejections: int = 2, router: ModelRouter | None = None):
         self.journal = journal
         self.adapter = adapter
         self.max_continuations = max_continuations
         self.max_review_rejections = max_review_rejections
+        self.router = router
         self._writers: dict[tuple[str, str], asyncio.Lock] = {}
         self._task_locks: dict[str, asyncio.Lock] = {}
 
     def _lock(self, host: str, sid: str) -> asyncio.Lock:
         return self._writers.setdefault((host, sid), asyncio.Lock())
+
+    async def _route(self, task: dict, step: str, step_type: str, *, high_stakes: bool = False) -> None:
+        if self.router:
+            await self.router.choose(task["task_id"], step,
+                                     f"{step_type} phase for project {task['project']}",
+                                     expected_type=step_type, high_stakes=high_stakes)
 
     async def pause(self, task_id: str, *, abort_current: bool = False) -> dict:
         task = self.journal.pause(task_id, abort_current=abort_current)
@@ -135,6 +143,13 @@ class TaskCoordinator:
         return task
 
     async def _start(self, task: dict, *, role: str, agent: str) -> dict:
+        stage = "review" if role == "reviewer" else "planning"
+        await self._route(task, f"{stage}:start:{task.get('review_commit') or 'lead'}:"
+                          f"{task['control_version']}:{task['review_rejections']}:"
+                          f"{task['session_replacements']}", stage, high_stakes=True)
+        task = self.journal.get(task["task_id"])
+        if task["paused"]:
+            return task
         candidate_key = task.get("review_commit") if role == "reviewer" else "lead"
         key = (f"{task['task_id']}:{role}:start:{candidate_key}:{task['review_rejections']}:"
                f"{task['control_version']}:{task['session_replacements']}")
@@ -168,6 +183,14 @@ class TaskCoordinator:
     async def _send(self, task: dict, sid: str, text: str, purpose: str,
                     *, prepared_command: dict | None = None) -> dict:
         async with self._lock(task["host"], sid):
+            task = self.journal.get(task["task_id"])
+            if task["paused"]:
+                return task
+            send_type = "review" if purpose.startswith("reviewer:") else "implementation"
+            await self._route(task, f"{send_type}:send:{purpose}:{sid}:"
+                              f"{task['control_version']}:{task['continuations']}:"
+                              f"{task['review_rejections']}", send_type,
+                              high_stakes=send_type == "review")
             task = self.journal.get(task["task_id"])
             if task["paused"]:
                 return task
@@ -288,6 +311,9 @@ class TaskCoordinator:
         if not sid:
             return self.journal.change(task["task_id"], "uncertain")
         read = await self.adapter.read(task, sid, task["turn_marker"])
+        if read.get("turn_done") or read.get("pending"):
+            await self._route(task, f"status:{sid}:{task['turn_marker']}:"
+                              f"{task['continuations']}:{task['state']}", "status_relay")
         if read.get("turn_attribution") in {"unknown", "uncertain", "echo_not_visible",
                                             "queued_unconfirmed", "timestamp_cursor"}:
             self._mark_unproven_send(task["task_id"], sid)
@@ -444,6 +470,15 @@ class TaskCoordinator:
         if not candidate or not candidate.get("clean"):
             return task
         commit, tree = candidate["candidate_commit"], candidate["tree_hash"]
+        await self._route(task, f"verification:{commit}:{tree}", "verification", high_stakes=True)
+        task = self.journal.get(task["task_id"])
+        if task["paused"]:
+            return task
+        if self.router:
+            fresh = await self.adapter.candidate_identity(task)
+            if (not fresh or not fresh.get("clean")
+                    or (fresh["candidate_commit"], fresh["tree_hash"]) != (commit, tree)):
+                return task
         if (task["verification_commit"], task["verification_tree"]) != (commit, tree):
             task = self.journal.change(task["task_id"], "verifying", fields={
                 "verification_commit": None, "verification_tree": None, "reviewer_session_id": None,
@@ -465,6 +500,24 @@ class TaskCoordinator:
             lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
             if lead_read.get("streaming") is not False or lead_read.get("pending"):
                 return task
+            if self.router and not self.journal.jev_prescreen_for_candidate(task["task_id"], commit, tree):
+                diff_reader = getattr(self.adapter, "candidate_diff_excerpt", None)
+                try:
+                    diff = await diff_reader(task) if callable(diff_reader) else None
+                except Exception:  # noqa: BLE001 - advisory pre-screen cannot block review
+                    diff = None
+                if diff:
+                    final = "\n".join(str(m.get("text") or "") for m in lead_read.get("messages") or []
+                                      if m.get("role") == "assistant")[-3000:]
+                    await self.router.prescreen(task["task_id"], commit=commit, tree=tree,
+                                                request=task["original_words"], final_output=final,
+                                                diff_excerpt=diff,
+                                                tests=f"{evidence['command']} exit={evidence['exit_code']}")
+                task = self.journal.get(task["task_id"])
+                fresh = await self.adapter.candidate_identity(task)
+                if (task["paused"] or not fresh or not fresh.get("clean")
+                        or (fresh["candidate_commit"], fresh["tree_hash"]) != (commit, tree)):
+                    return task
             task = self.journal.change(task["task_id"], "verifying", fields={
                 "review_commit": commit, "review_tree": tree, "review_marker": None,
             })

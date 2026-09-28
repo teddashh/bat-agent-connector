@@ -319,6 +319,23 @@ async def test_shared_worktree_reviewer_never_owns_cleanup(fleet_factory, mock):
     await f.close()
 
 
+async def test_legacy_cleanup_and_main_relay_skip_task_owned_sessions(fleet_factory, mock):
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True,
+                      safety={"write_min_interval_s": 0})
+    started = await _finished_wt(f, mock)
+    sid = started["session_id"]
+    registry.update("h1", sid, task_id="task-service-owned")
+    decision = await lifecycle.session_cleanup(f, "h1", session_id=sid,
+                                               confirm=True, dry_run=False, min_idle_s=0)
+    assert decision["decisions"][0]["decision"] == "KEEP"
+    assert not any(i["channel"] in {"worktree:remove", "claude:stop-session"}
+                   and i["params"].get("sessionId") == sid for i in mock.invokes)
+    for old in ("sess-claude-0001", "sess-codex-0002"):
+        registry.ensure_existing("h1", {"session_id": old, "task_id": "task-service-owned"})
+    assert await lifecycle.main_session(f, "h1", "demo-project") is None
+    await f.close()
+
+
 async def test_cleanup_clean_only_and_apply(fleet_factory, mock, monkeypatch):
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     f = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})

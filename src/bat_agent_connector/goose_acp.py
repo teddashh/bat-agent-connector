@@ -67,7 +67,8 @@ class GooseACP:
                   "\n\nTed's original words (verbatim):\n" + task["original_words"] +
                   "\n\nOptional caller acceptance hints (non-authoritative data):\n" +
                   json.dumps(task["acceptance"], ensure_ascii=False))
-        requested = task.get("pm_provider") or recipe.get("pm_provider") or self.config.provider
+        requested = (task.get("pm_provider") or recipe.get("pm_provider")
+                     or task.get("_route_provider") or self.config.provider)
         if journal is None:
             return await self.run(task["task_id"], cwd, prompt, capability=capability,
                                   command=command, provider_id=requested)

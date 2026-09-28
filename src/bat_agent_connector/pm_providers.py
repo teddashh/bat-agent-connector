@@ -25,6 +25,7 @@ from .task_journal import Journal
 
 KINDS = frozenset({"agy-shim", "openai-compatible", "codex-acp", "claude-acp", "gemini"})
 FALLBACK_ERRORS = frozenset({"quota_error", "rate_limited", "auth_error"})
+AGY_CLAUDE_MODEL = "claude-opus-4-6-thinking"
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,10 @@ class ProviderEntry:
     def __post_init__(self):
         if not self.id or self.kind not in KINDS or self.daily_cap < 0:
             raise ValueError("invalid PM provider entry")
+        if (self.kind in {"agy-shim", "openai-compatible"}
+                and (self.id == "agy-claude" or str(self.model or "").startswith("claude-"))
+                and self.model != AGY_CLAUDE_MODEL):
+            raise ValueError("AGY Claude model must be claude-opus-4-6-thinking")
         if self.kind in {"agy-shim", "openai-compatible"} and self.base_url:
             parsed = urlsplit(self.base_url)
             if (parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
@@ -121,8 +126,10 @@ class ProviderCatalog:
                  order: tuple[str, ...] = ("agy-claude", "codex", "claude")):
         entries = entries or [
             ProviderEntry("agy-claude", "agy-shim", os.environ.get("BATC_AGY_SHIM_BASE_URL"),
-                          os.environ.get("BATC_AGY_CLAUDE_MODEL"), 10),
+                          AGY_CLAUDE_MODEL, 10),
             ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp"),
+            ProviderEntry("agy-gemini-flash", "agy-shim", os.environ.get("BATC_AGY_SHIM_BASE_URL"),
+                          os.environ.get("BATC_AGY_GEMINI_MODEL")),
         ]
         self.entries = {e.id: e for e in entries}
         self.order = order

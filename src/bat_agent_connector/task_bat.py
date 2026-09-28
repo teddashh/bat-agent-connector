@@ -58,11 +58,11 @@ class BatTaskAdapter:
         qroot, qpath, qbranch, qbase = map(shlex.quote, (root, path, branch, base))
         script = (f"mkdir -p {shlex.quote(root + '/.bat-worktrees')} && "
                   f"if git -C {qroot} worktree list --porcelain | "
-                  f"grep -Fxq 'worktree {path}'; then exit 0; fi; "
+                  f"grep -Fxq {shlex.quote('worktree ' + path)}; then exit 0; fi; "
                   f"if git -C {qroot} show-ref --verify --quiet refs/heads/{qbranch}; then "
                   f"git -C {qroot} worktree add {qpath} {qbranch}; "
                   f"else if git -C {qroot} fetch origin {qbase}; then ref=FETCH_HEAD; else ref={qbase}; fi; "
-                  f"git -C {qroot} worktree add -b {qbranch} {qpath} $ref; fi")
+                  f"git -C {qroot} worktree add -b {qbranch} {qpath} \"$ref\"; fi")
         await self._ssh_script(task, script)
         identity = await self.verifier.identity(task, path)
         if not identity or not identity.get("clean"):
@@ -631,6 +631,19 @@ class BatTaskAdapter:
     async def candidate_identity(self, task: dict) -> dict | None:
         cwd = self._cwd(task)
         return await self.verifier.identity(task, cwd) if cwd else None
+
+    async def candidate_diff_excerpt(self, task: dict) -> str | None:
+        """Small, read-only candidate diff for advisory Jev pre-screening."""
+        cwd, base = self._cwd(task), task.get("base_commit")
+        if not cwd or not isinstance(base, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", base):
+            return None
+        try:
+            rc, diff = await self.verifier._run(
+                task["host"], cwd, ("git", "diff", "--no-ext-diff", "--unified=1", base, "HEAD", "--"),
+                timeout=15)
+        except (OSError, ValueError, asyncio.TimeoutError):
+            return None
+        return diff if rc == 0 and diff else None
 
     async def run_verification(self, task: dict) -> dict | None:
         cwd = self._cwd(task)

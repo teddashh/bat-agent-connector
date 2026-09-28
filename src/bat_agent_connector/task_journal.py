@@ -658,6 +658,9 @@ class Journal:
     def route(self, task_id: str, *, step: str, step_type: str, provider: str,
               confidence: float | None, stakes: str, reason: str) -> dict:
         with self.tx():
+            existing = self.route_for_step(task_id, step)
+            if existing:
+                return existing
             now = time.time()
             cur = self.db.execute("""INSERT INTO routing(task_id,step,step_type,provider,confidence,stakes,reason,created_at)
                 VALUES(?,?,?,?,?,?,?,?)""", (task_id, step, step_type, provider, confidence, stakes, reason, now))
@@ -667,6 +670,28 @@ class Journal:
 
     def routes(self, task_id: str) -> list[dict]:
         return [dict(r) for r in self.db.execute("SELECT * FROM routing WHERE task_id=? ORDER BY route_id", (task_id,))]
+
+    def route_for_step(self, task_id: str, step: str) -> dict | None:
+        row = self.db.execute("SELECT * FROM routing WHERE task_id=? AND step=? ORDER BY route_id LIMIT 1",
+                              (task_id, step)).fetchone()
+        return dict(row) if row else None
+
+    def record_jev_prescreen(self, task_id: str, *, commit: str, tree: str, verdict: str,
+                             confidence: float, tests_ok: float) -> None:
+        if verdict not in {"safe_complete", "incomplete", "unsafe", "unsure"}:
+            raise ValueError("invalid Jev pre-screen verdict")
+        with self.tx():
+            if self.jev_prescreen_for_candidate(task_id, commit, tree):
+                return
+            self._event(task_id, "jev_prescreen", {"candidate_commit": commit, "tree_hash": tree,
+                                                  "verdict": verdict, "confidence": confidence,
+                                                  "tests_ok": tests_ok, "advisory_only": True})
+
+    def jev_prescreen_for_candidate(self, task_id: str, commit: str, tree: str) -> bool:
+        rows = self.db.execute("SELECT body FROM events WHERE task_id=? AND kind='jev_prescreen'",
+                               (task_id,))
+        return any((body.get("candidate_commit"), body.get("tree_hash")) == (commit, tree)
+                   for body in (json.loads(row[0]) for row in rows))
 
     def provider_use(self, provider: str, outcome: str):
         if outcome not in {"success", "quota_error", "rate_limited", "auth_error"}:
