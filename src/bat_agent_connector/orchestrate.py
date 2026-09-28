@@ -223,6 +223,9 @@ async def session_start(
     use_worktree: bool = True,
     title: str | None = None,
     permission_mode: str | None = None,
+    session_id: str | None = None,
+    retain_on_error: bool = False,
+    register_tab: bool | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
     if agent not in ("claude", "codex"):
@@ -247,7 +250,7 @@ async def session_start(
     preset = PRESETS[(agent, bool(use_worktree))]
     if agent == "codex" and not model and hc.codex_model:
         model = hc.codex_model
-    sid = str(uuid.uuid4())
+    sid = session_id or str(uuid.uuid4())
     async with _write_lock(host):
         audit.check_rate(host, "#orchestrate-start-" + sid)
         registry.reserve(
@@ -297,13 +300,13 @@ async def session_start(
                 await c.invoke("claude:start-session", {"sessionId": sid, "options": opts})
             except BatError as e:
                 audit.record(**base, channel="claude:start-session", phase="result", ok=False, error=_err(e))
-                if use_worktree:  # fresh worktree with no commits: safe to roll back
+                if use_worktree and not retain_on_error:  # may have reached BAT on timeout
                     await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": True})
                     audit.record(**base, channel="worktree:remove", phase="rollback", ok=True)
                 raise
             audit.record(**base, channel="claude:start-session", phase="result", ok=True)
         except BaseException:
-            registry.update(host, sid, status="failed")
+            registry.update(host, sid, status="uncertain" if retain_on_error else "failed")
             raise
         registry.update(
             host,
@@ -315,7 +318,7 @@ async def session_start(
             **registry_permission_fields(opts),
         )
         tab = None
-        if hc.orchestrate_register_tabs:
+        if hc.orchestrate_register_tabs and register_tab is not False:
             term = {
                 "id": sid,
                 "workspaceId": w.get("id"),

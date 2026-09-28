@@ -573,6 +573,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=18796)
     p.add_argument("--db", help="SQLite task journal path")
+    p = sp.add_parser("task-delivery", help="inspect or reconcile unresolved Discord deliveries")
+    p.add_argument("--confirm-absent-event", type=int)
+    p.add_argument("--confirm-absent-board")
     sp.add_parser("config-path", help="print the config path")
     return ap
 
@@ -590,6 +593,16 @@ def main(argv: list[str] | None = None) -> int:
             from .task_daemon import TaskDaemon
 
             asyncio.run(TaskDaemon(load_config(args.config), args.db).serve(args.host, args.port))
+            return 0
+        if args.cmd == "task-delivery":
+            from .task_daemon import request
+
+            if args.confirm_absent_event is not None or args.confirm_absent_board:
+                result = request("work_delivery_confirm_absent", event_id=args.confirm_absent_event,
+                                 board_channel_id=args.confirm_absent_board)
+            else:
+                result = request("work_delivery_status")
+            _print(result, args.json)
             return 0
         if args.cmd == "import-bat":
             return cmd_import(args)

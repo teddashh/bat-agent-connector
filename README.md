@@ -94,11 +94,13 @@ waiting for BAT. Hermes must not reinterpret or split the request. The lead Code
 Task writes require the host's existing `writes=true` and `orchestrate=true` settings. Existing low-level tools
 and `batc` commands remain available.
 
-The rules engine is the default. It requires an external trusted test run recorded through the existing
-`batc record-verification` mechanism before an independent reviewer can approve delivery. Goose ACP, the
-per-step Jev model router, and Discord posting have adapter/test coverage; real Goose model login, Discord
-credentials, service deployment and cron replacement are deferred. See [the task-service design](docs/design/task-service.md)
-for states, recovery limits, metrics and rollout steps. No paid API key is required.
+The rules engine is the default. A trusted test command must be configured locally; the service observes its
+exit status on the clean candidate commit and records verification before opening a fresh reviewer session.
+The daemon currently rejects live Goose tasks. Goose ACP, provider fallback, the per-step Jev router, and Discord
+posting have adapter/test coverage; real Goose contract checks, Discord credentials, deployment and cron replacement
+are deferred. The task API requires a local admin token or scoped capability and binds only to loopback. See
+[the task-service design](docs/design/task-service.md) for states, recovery, private configuration and rollout.
+No paid API key is required.
 
 The server name is `bat`. Examples (add `--read-only` if you want to be sure):
 

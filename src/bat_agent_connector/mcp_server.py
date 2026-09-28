@@ -253,7 +253,8 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             project: str, host: str, workspace: str, original_words: str, idempotency_key: str,
             discord_thread_id: str | None = None, recipe: str = "feature-to-staging",
             acceptance: str = "", engine: Literal["rules", "goose"] = "rules",
-            interpretation: str | None = None,
+            interpretation: str | None = None, lead_agent: Literal["codex", "claude"] = "codex",
+            pm_provider: str | None = None,
         ) -> dict[str, Any]:
             """Queue Ted's exact words and return task_id immediately. Hermes must not rewrite or decompose them.
             interpretation is a non-authoritative archival note and never enters the coding prompt."""
@@ -261,16 +262,22 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
                                            workspace=workspace, original_words=original_words,
                                            idempotency_key=idempotency_key, discord_thread_id=discord_thread_id,
                                            recipe=recipe, acceptance=acceptance, engine=engine,
-                                           interpretation=interpretation)
+                                           interpretation=interpretation, lead_agent=lead_agent,
+                                           pm_provider=pm_provider)
 
-        async def work_pause(task_id: str, abort_current: bool = False) -> dict[str, Any]:
+        async def work_pause(task_id: str, abort_current: bool = False,
+                             actor: Literal["service", "ted"] = "service",
+                             source_message_id: str | None = None) -> dict[str, Any]:
             """Stop new dispatch; optionally abort the current turn. Persisted before returning."""
             return await asyncio.to_thread(task_request, "work_pause", task_id=task_id,
-                                           abort_current=abort_current)
+                                           abort_current=abort_current, actor=actor,
+                                           source_message_id=source_message_id)
 
-        async def work_resume(task_id: str) -> dict[str, Any]:
+        async def work_resume(task_id: str, actor: Literal["service", "ted"] = "service",
+                              source_message_id: str | None = None) -> dict[str, Any]:
             """Allow dispatch after the daemon reconciles any uncertain command."""
-            return await asyncio.to_thread(task_request, "work_resume", task_id=task_id)
+            return await asyncio.to_thread(task_request, "work_resume", task_id=task_id,
+                                           actor=actor, source_message_id=source_message_id)
 
         for fn in (work_submit, work_pause, work_resume):
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=task_write)
