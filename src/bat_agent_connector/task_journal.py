@@ -68,7 +68,7 @@ class Journal:
                 review_passed INTEGER NOT NULL DEFAULT 0, verification_commit TEXT,
                 verification_tree TEXT, review_commit TEXT, review_tree TEXT, review_marker TEXT,
                 lead_agent TEXT NOT NULL DEFAULT 'codex', pm_provider TEXT, result TEXT,
-                base_branch TEXT, base_commit TEXT
+                base_branch TEXT, base_commit TEXT, external_worktree_path TEXT, external_branch TEXT
             );
             CREATE TABLE IF NOT EXISTS commands (
                 command_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id),
@@ -133,6 +133,7 @@ class Journal:
                                ("review_tree", "TEXT"), ("review_marker", "TEXT"),
                                ("lead_agent", "TEXT NOT NULL DEFAULT 'codex'"),
                                ("pm_provider", "TEXT"), ("base_branch", "TEXT"), ("base_commit", "TEXT"),
+                               ("external_worktree_path", "TEXT"), ("external_branch", "TEXT"),
                                ("session_replacements", "INTEGER NOT NULL DEFAULT 0")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {sql_type}")  # noqa: S608 - fixed local identifiers
@@ -411,7 +412,7 @@ class Journal:
         allowed = {"session_id", "reviewer_session_id", "turn_marker", "result", "continuations",
                    "review_rejections", "review_passed", "verification_commit", "verification_tree",
                    "review_commit", "review_tree", "review_marker", "ted_interventions", "lead_agent",
-                   "base_branch", "base_commit"}
+                   "base_branch", "base_commit", "external_worktree_path", "external_branch"}
         if fields.keys() - allowed:
             raise ValueError("invalid task fields")
         with self.tx():
@@ -433,13 +434,13 @@ class Journal:
             self.db.execute("""UPDATE tasks SET state=?,updated_at=?,session_id=?,reviewer_session_id=?,
                 turn_marker=?,result=?,continuations=?,review_rejections=?,review_passed=?,
                 verification_commit=?,verification_tree=?,review_commit=?,review_tree=?,review_marker=?,
-                lead_agent=?,ted_interventions=?,base_branch=?,base_commit=?,delivered=?,delivered_at=? WHERE task_id=?""",
+                lead_agent=?,ted_interventions=?,base_branch=?,base_commit=?,external_worktree_path=?,external_branch=?,delivered=?,delivered_at=? WHERE task_id=?""",
                 (values["state"], values["updated_at"], values["session_id"], values["reviewer_session_id"],
                  values["turn_marker"], values["result"], values["continuations"], values["review_rejections"],
                  values["review_passed"], values["verification_commit"], values["verification_tree"],
                  values["review_commit"], values["review_tree"], values["review_marker"], values["lead_agent"],
                  values["ted_interventions"], values["base_branch"], values["base_commit"],
-                 values["delivered"], values["delivered_at"], task_id))
+                 values["external_worktree_path"], values["external_branch"], values["delivered"], values["delivered_at"], task_id))
             if old["state"] != state or event:
                 self._event(task_id, event or "state", {"from": old["state"], "to": state})
         return self.get(task_id)

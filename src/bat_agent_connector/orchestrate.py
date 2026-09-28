@@ -227,6 +227,8 @@ async def session_start(
     retain_on_error: bool = False,
     register_tab: bool | None = None,
     base_branch: str | None = None,
+    cwd_override: str | None = None,
+    external_branch: str | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
     if agent not in ("claude", "codex"):
@@ -290,7 +292,7 @@ async def session_start(
                     **base, channel="worktree:create", phase="result", ok=True, branch=wt.get("branchName"),
                     source_branch=wt.get("sourceBranch"), requested_base_branch=base_branch
                 )
-            cwd = wt.get("worktreePath") or folder
+            cwd = cwd_override or wt.get("worktreePath") or folder
             if use_worktree:
                 rows = await c.invoke("git:log", {"cwd": cwd, "count": 1})
                 if isinstance(rows, list) and rows and isinstance(rows[0], dict):
@@ -329,8 +331,8 @@ async def session_start(
             sid,
             status="active",
             cwd=cwd,
-            worktree_path=wt.get("worktreePath"),
-            branch=wt.get("branchName"),
+            worktree_path=cwd if cwd_override else wt.get("worktreePath"),
+            branch=external_branch if cwd_override else wt.get("branchName"),
             **registry_permission_fields(opts),
         )
         tab = None
@@ -394,8 +396,8 @@ async def session_start(
         "started": True,
         "agent_preset": preset,
         "workspace": w.get("name"),
-        "worktree_path": wt.get("worktreePath"),
-        "branch": wt.get("branchName"),
+        "worktree_path": cwd if cwd_override else wt.get("worktreePath"),
+        "branch": external_branch if cwd_override else wt.get("branchName"),
         "source_branch": wt.get("sourceBranch"),
         "base_branch": base_branch,
         "base_commit": base_commit,
