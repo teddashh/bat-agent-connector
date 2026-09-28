@@ -2279,3 +2279,74 @@ def test_agy_adapter_model_effort_policy(monkeypatch):
                            "gemini-3.8-flash", 1)
     assert adapter.environment(claude, {"BATC_AGY_SHIM_TOKEN": "local-token"})["BATC_AGY_REQUEST_POLICY"] == "omit_reasoning_effort"
     assert adapter.environment(gemini, {"BATC_AGY_SHIM_TOKEN": "local-token"})["BATC_AGY_REQUEST_POLICY"] == "pass_reasoning_effort"
+
+@pytest.mark.asyncio
+async def test_session_presence_retries_transient_workspace_timeout(fleet_factory, tmp_path, monkeypatch):
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
+                          safety={"write_min_interval_s": 0})
+    j = Journal(tmp_path / "tasks.db")
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="presence-retry")
+    sid = "presence-retry-session"
+    j.add_branch(task["task_id"], session_id=sid, provider="codex", role="lead", reason="start")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
+    calls = 0
+    client = fleet.client("h1")
+    async def invoke(channel, params, **kwargs):
+        nonlocal calls
+        if channel == "claude:get-session-meta":
+            calls += 1
+            if calls < 3:
+                raise TimeoutError("workspace:load transient timeout")
+            return {"cwd": "/srv/demo", "isStreaming": False}
+        return {}
+    monkeypatch.setattr(client, "invoke", invoke)
+    async def restore(*args, **kwargs):
+        return None
+    monkeypatch.setattr(adapter, "_restore_headless_lookup", restore)
+    try:
+        assert await adapter.session_presence(task, sid) == "present"
+        assert calls == 3
+    finally:
+        await fleet.close()
+        j.close()
+
+
+@pytest.mark.asyncio
+async def test_reviewer_start_polls_existing_session_after_start_timeout(
+        fleet_factory, tmp_path, monkeypatch):
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
+                          safety={"write_min_interval_s": 0})
+    j = Journal(tmp_path / "tasks.db")
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="reviewer-start-retry")
+    lead = "reviewer-start-lead"
+    j.add_branch(task["task_id"], session_id=lead, provider="codex", role="lead", reason="start")
+    task = {**task, "session_id": lead}
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
+    lead_entry = {"session_id": lead, "workspace_id": "ws-1", "workspace_name": "demo-project",
+                  "origin_cwd": "/srv/demo", "cwd": "/srv/demo", "worktree_path": "/srv/demo",
+                  "branch": "branch", "agent_preset": "codex-agent"}
+    monkeypatch.setattr(task_bat.registry, "get", lambda _h, sid: lead_entry if sid == lead else None)
+    monkeypatch.setattr(task_bat.registry, "reserve", lambda *a, **k: None)
+    monkeypatch.setattr(task_bat.registry, "update", lambda *a, **k: None)
+    monkeypatch.setattr(adapter, "session_presence", lambda *a, **k: asyncio.sleep(0, result="present"))
+    calls = []
+    client = fleet.client("h1")
+    async def invoke(channel, params, **kwargs):
+        calls.append(channel)
+        if channel == "claude:start-session":
+            raise TimeoutError("castle workspace load timeout")
+        if channel == "claude:get-session-meta":
+            return {"cwd": "/srv/demo", "isStreaming": False}
+        return {}
+    monkeypatch.setattr(client, "invoke", invoke)
+    try:
+        result = await adapter.start({**task, "branches": [{"session_id": lead, "role": "lead"}]},
+                                     role="reviewer", agent="codex", session_id="reviewer-retry")
+        assert result == "reviewer-retry"
+        assert calls.count("claude:start-session") == 1
+        assert "claude:get-session-meta" in calls
+    finally:
+        await fleet.close()
+        j.close()
