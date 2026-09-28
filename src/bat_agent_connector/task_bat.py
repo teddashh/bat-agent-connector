@@ -296,12 +296,27 @@ class BatTaskAdapter:
             if self.journal:
                 self.journal.command_prompt_hash(handoff_command_id, hashlib.sha256(prompt.encode()).hexdigest())
 
+        def before_handoff_invoke():
+            if not self.journal:
+                raise TaskDispatchCancelled("handoff journal unavailable before BAT invoke")
+            current = self.journal.get(task["task_id"])
+            command = self.journal.command_get(handoff_command_id)
+            if (current["paused"] or current["control_version"] != task["control_version"]
+                    or current["session_id"] != session_id
+                    or command["task_id"] != task["task_id"] or command["kind"] != "send"
+                    or command["session_id"] != successor_id
+                    or command["message_id"] != handoff_message_id
+                    or command["status"] != "needs_review"
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(json.loads(command["payload"]).get("prompt_sha256") or ""))):
+                raise TaskDispatchCancelled("task control changed before BAT handoff invoke")
+
         r = await lifecycle.session_failover(self.fleet, task["host"], session_id, confirm=True,
                                              successor_session_id=successor_id, instructions=instructions,
                                              ledger_only=bool(self.journal),
                                              handoff_message_id=handoff_message_id,
                                              handoff_command_id=handoff_command_id,
                                              before_handoff_send=before_send,
+                                             before_handoff_invoke=before_handoff_invoke,
                                              authoritative_original=True)
         if not r.get("prompt_sent") and not r.get("skipped"):
             raise RuntimeError("failover handoff outcome is uncertain")

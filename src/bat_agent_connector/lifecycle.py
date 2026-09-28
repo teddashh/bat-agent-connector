@@ -22,7 +22,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import registry, verification
-from .errors import BatError, InvokeTimeout, TaskIdentityMismatch, WriteRefused
+from .errors import BatError, InvokeTimeout, TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .fleet import Fleet
 from .jev import Jev
 from .orchestrate import (
@@ -413,6 +413,7 @@ async def _failover_one(
     handoff_message_id: str | None = None,
     handoff_command_id: str | None = None,
     before_handoff_send: Callable[[str], None] | None = None,
+    before_handoff_invoke: Callable[[], None] | None = None,
     authoritative_original: bool = False,
 ) -> dict:
     hc = fleet.config.host(host)
@@ -600,17 +601,25 @@ async def _failover_one(
         registry.update(host, new_sid, handoff_message_id=mid)
         if before_handoff_send:
             before_handoff_send(prompt)
+        if before_handoff_invoke:
+            before_handoff_invoke()
         audit.record(**base, channel="claude:send-message", phase="attempt", message_id=mid, text=prompt)
         sent, err = True, None
         try:
             ack = await c.invoke(
                 "claude:send-message", {"sessionId": new_sid, "prompt": prompt, "clientMessageId": mid},
                 retry_on_disconnect=False,
+                before_send=before_handoff_invoke,
             )
             if not isinstance(ack, dict) or not (ack.get("accepted") or ack.get("ok")):
                 raise WriteRefused("handoff prompt was not accepted by BAT")
             registry.update(host, new_sid, handoff_status="sent")
             audit.record(**base, channel="claude:send-message", phase="result", ok=True, message_id=mid)
+        except TaskDispatchCancelled:
+            registry.update(host, new_sid, handoff_status="uncertain")
+            audit.record(**base, channel="claude:send-message", phase="result", ok=False,
+                         error="task control changed before handoff submission")
+            raise
         except BatError as e:
             sent, err = False, _err(e)
             registry.update(host, new_sid, handoff_status="uncertain")
@@ -644,6 +653,7 @@ async def session_failover(
     handoff_message_id: str | None = None,
     handoff_command_id: str | None = None,
     before_handoff_send: Callable[[str], None] | None = None,
+    before_handoff_invoke: Callable[[], None] | None = None,
     authoritative_original: bool = False,
 ) -> dict:
     """Continue quota-exhausted Claude session(s) with Codex in the same folder/worktree.
@@ -681,6 +691,7 @@ async def session_failover(
             handoff_message_id=handoff_message_id,
             handoff_command_id=handoff_command_id,
             before_handoff_send=before_handoff_send,
+            before_handoff_invoke=before_handoff_invoke,
             authoritative_original=authoritative_original,
         )
     from .triage import sessions_triage

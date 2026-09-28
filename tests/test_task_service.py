@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import mcp_server, service, task_bat
+from bat_agent_connector import mcp_server, orchestrate, service, task_bat
 from bat_agent_connector.errors import WriteRefused
 from bat_agent_connector.goose_acp import PINNED_GOOSE_VERSION, GooseACP, GooseConfig
 from bat_agent_connector.model_router import ModelRouter, RouterConfig
@@ -1496,6 +1496,71 @@ async def test_recovery_conflict_stays_operator_only_after_registry_changes(tmp_
     assert j.command_get(handoff["command_id"])["status"] == "resolved_superseded"
     assert len(j.get(task["task_id"])["branches"]) == 1
     j.close()
+
+
+@pytest.mark.parametrize("wait_stage", ["start_ack", "send_transport"])
+async def test_pause_during_failover_wait_never_submits_handoff(
+        fleet_factory, mock, tmp_path, monkeypatch, wait_stage):
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
+                          safety={"write_min_interval_s": 0})
+    started = await orchestrate.session_start(fleet, "h1", "demo-project", "claude",
+                                              confirm=True, prompt=None, use_worktree=True)
+    old_sid = started["session_id"]
+    mock.states[old_sid]["messages"] = [{"role": "assistant", "content": "You've hit your usage limit",
+                                          "timestamp": 1_790_000_000_000}]
+    j = Journal(tmp_path / "tasks.db")
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="pause-failover:" + wait_stage, lead_agent="claude")
+    j.change(task["task_id"], "dispatching")
+    j.change(task["task_id"], "accepted", fields={"session_id": old_sid})
+    j.add_branch(task["task_id"], session_id=old_sid, provider="claude", role="lead", reason="test")
+    j.change(task["task_id"], "running")
+    j.change(task["task_id"], "quota_limited")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
+    core = TaskCoordinator(j, adapter)
+    client = fleet.client("h1")
+    entered, release = asyncio.Event(), asyncio.Event()
+    if wait_stage == "start_ack":
+        original_invoke = client.invoke
+
+        async def held_invoke(channel, params=None, **kwargs):
+            reply = await original_invoke(channel, params, **kwargs)
+            if channel == "claude:start-session" and params["sessionId"] != old_sid:
+                entered.set()
+                await release.wait()
+            return reply
+
+        monkeypatch.setattr(client, "invoke", held_invoke)
+    else:
+        original_checked = client._invoke_checked
+
+        async def held_checked(channel, params, timeout, **kwargs):
+            if channel == "claude:send-message" and params["sessionId"] != old_sid:
+                entered.set()
+                await release.wait()
+            return await original_checked(channel, params, timeout, **kwargs)
+
+        monkeypatch.setattr(client, "_invoke_checked", held_checked)
+    try:
+        tick = asyncio.create_task(core.tick(task["task_id"]))
+        await asyncio.wait_for(entered.wait(), 5)
+        assert (await core.pause(task["task_id"]))["paused"]
+        release.set()
+        paused = await asyncio.wait_for(tick, 5)
+        assert paused["state"] == "uncertain" and paused["paused"]
+        assert paused["session_id"] == old_sid and len(paused["branches"]) == 1
+        assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
+        failover = next(c for c in j.commands(task["task_id"]) if c["kind"] == "failover")
+        handoff = j.command_get(json.loads(failover["payload"])["handoff_command_id"])
+        assert json.loads(failover["payload"])["operator_only"] is True
+        assert handoff["status"] == "uncertain"
+        j.resume(task["task_id"])
+        assert (await core.tick(task["task_id"]))["state"] == "uncertain"
+        assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
+    finally:
+        release.set()
+        await fleet.close()
+        j.close()
 
 
 async def test_lost_codex_handoff_stays_scoped_uncertain_across_restart(tmp_path):
