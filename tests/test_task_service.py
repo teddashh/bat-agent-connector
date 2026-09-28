@@ -2169,6 +2169,16 @@ kind = "claude-acp"
         ProviderCatalog.from_file(path)
 
 
+def test_observed_verifier_ssh_command_keeps_remote_script_quoted():
+    from bat_agent_connector.task_verifier import _remote_command
+
+    cmd = _remote_command("castle", "/srv/work tree", ("pytest", "-q", "tests/test_task_service.py"))
+    assert cmd[:4] == ("ssh", "-o", "BatchMode=yes", "castle")
+    import shlex
+    script = "cd -- " + shlex.quote("/srv/work tree") + " && pytest -q tests/test_task_service.py"
+    assert cmd[4] == "sh -lc " + shlex.quote(script)
+
+
 async def test_observed_verification_artifact_bound_to_clean_commit(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

@@ -18,6 +18,15 @@ from pathlib import Path
 
 from .config import state_dir
 
+
+def _remote_command(alias: str, cwd: str, argv: tuple[str, ...]) -> tuple[str, ...]:
+    """Build one SSH remote-command argument so the login shell preserves quoting."""
+    script = "cd -- " + shlex.quote(cwd) + " && " + shlex.join(argv)
+    # ssh concatenates all command arguments before handing them to the remote
+    # shell.  Passing ``sh``, ``-lc`` and a separately quoted script therefore
+    # loses the quote boundaries (and can run from the wrong directory).
+    return ("ssh", "-o", "BatchMode=yes", alias, "sh -lc " + shlex.quote(script))
+
 try:
     import tomllib
 except ImportError:  # pragma: no cover
@@ -63,7 +72,7 @@ class ObservedVerifier:
         alias = self.settings.ssh_hosts.get(host)
         if alias:
             script = "cd -- " + shlex.quote(cwd) + " && " + shlex.join(argv)
-            cmd = ("ssh", "-o", "BatchMode=yes", alias, "sh", "-lc", shlex.quote(script))
+            cmd = _remote_command(alias, cwd, argv)
             working_dir = None
         else:
             cmd = argv
@@ -104,7 +113,7 @@ class ObservedVerifier:
         alias = self.settings.ssh_hosts.get(task["host"])
         if alias:
             script = "cd -- " + shlex.quote(cwd) + " && " + shlex.join(argv)
-            cmd = ("ssh", "-o", "BatchMode=yes", alias, "sh", "-lc", shlex.quote(script))
+            cmd = _remote_command(alias, cwd, argv)
             working_dir = None
         else:
             cmd = argv
