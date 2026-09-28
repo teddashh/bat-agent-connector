@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import hashlib
 import json
 import re
