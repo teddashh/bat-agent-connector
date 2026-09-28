@@ -137,8 +137,38 @@ def _add_wt_claude(mock, sid="wt-claude-0007"):
         ],
     }
     mock.git_branch["/srv/demo/.bat-worktrees/abc"] = "bat/worktree-abc"
+    mock.worktrees[sid] = {"worktreePath": "/srv/demo/.bat-worktrees/abc",
+                           "branchName": "bat/worktree-abc", "sourceBranch": "main",
+                           "diff": "", "merged": False, "mergedKind": "unknown"}
     mock.git_status["/srv/demo/.bat-worktrees/abc"] = [{"status": "M", "file": "api.py"}]
     return sid
+
+
+@pytest.mark.parametrize("reply", [
+    {"ok": True, "sessionId": "wrong-successor"}, {"ok": True},
+])
+async def test_failover_rejects_missing_or_mismatched_successor_ack(fleet_factory, mock, reply):
+    sid = _add_wt_claude(mock)
+    fleet = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})
+    mock.handlers["claude:start-session"] = lambda params: reply
+    try:
+        with pytest.raises(WriteRefused, match="reserved session ID"):
+            await lifecycle.session_failover(fleet, "h1", sid, confirm=True)
+        assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
+    finally:
+        await fleet.close()
+
+
+async def test_failover_rejects_host_worktree_branch_change(fleet_factory, mock):
+    sid = _add_wt_claude(mock)
+    fleet = fleet_factory(writes=True, orchestrate=True)
+    mock.worktrees[sid]["branchName"] = "bat/worktree-different"
+    try:
+        with pytest.raises(WriteRefused, match="worktree branch"):
+            await lifecycle.session_failover(fleet, "h1", sid, confirm=True)
+        assert not any(i["channel"] == "claude:start-session" for i in mock.invokes)
+    finally:
+        await fleet.close()
 
 
 async def test_failover_same_worktree(fleet_factory, mock):

@@ -295,6 +295,7 @@ class MockBat:
                 "branchName": f"bat/worktree-0000000{n}",
                 "sourceBranch": "main",
             }
+            self.git_branch[info["worktreePath"]] = info["branchName"]
             self.worktrees[sid] = {
                 "diff": "",
                 "branchName": info["branchName"],

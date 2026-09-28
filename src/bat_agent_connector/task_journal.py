@@ -192,6 +192,11 @@ class Journal:
             raise KeyError(command_id)
         return dict(row)
 
+    def send_for_message(self, task_id: str, session_id: str, message_id: str) -> dict | None:
+        row = self.db.execute("""SELECT * FROM commands WHERE task_id=? AND session_id=?
+            AND message_id=? AND kind='send'""", (task_id, session_id, message_id)).fetchone()
+        return dict(row) if row else None
+
     def resolve_send(self, task_id: str, command_id: str, *, token: str, outcome: str,
                      actor: str, source: str, evidence: str, observed_result: str = "none",
                      turn_ref: str | None = None, candidate_commit: str | None = None,

@@ -429,6 +429,11 @@ async def _failover_one(
     ]
     if prior:
         e = prior[-1]
+        if e.get("worktree_path") and e.get("branch"):
+            current = await c.invoke("worktree:status", {"sessionId": sid})
+            if (not isinstance(current, dict) or current.get("worktreePath") != e["worktree_path"]
+                    or current.get("branchName") != e["branch"]):
+                raise WriteRefused("registered failover branch no longer matches BAT worktree")
         return {
             "old_session_id": sid,
             "new_session_id": e.get("session_id"),
@@ -468,6 +473,13 @@ async def _failover_one(
         raise WriteRefused("cannot determine the session's folder")
     git = await _git_state(c, cwd)
     branch = git.get("branch") or t.get("worktreeBranch")
+    old_reg = registry.get(host, sid)
+    if same_worktree:
+        current = await c.invoke("worktree:status", {"sessionId": sid})
+        if (not isinstance(current, dict) or current.get("worktreePath") != wt_path
+                or current.get("branchName") != branch
+                or (old_reg and old_reg.get("branch") not in {None, branch})):
+            raise WriteRefused("BAT worktree branch does not match the failover source")
     first = None if ledger_only else await _first_user_prompt(c, sid, snap["messages"])
     texts = ([] if ledger_only else
              [(r, x) for r, x in _texts(snap["messages"]) if not match_any(QUOTA_PATTERNS, x)])
@@ -509,7 +521,6 @@ async def _failover_one(
         plan["note"] = note
     if dry_run:
         return {**plan, "dry_run": True, "handoff_preview": prompt[:1500]}
-    old_reg = registry.get(host, sid)
     replaces = sid if (old_reg and old_reg.get("status") == "active" and same_worktree) else None
     new_sid = successor_session_id or str(uuid.uuid4())
     opts: dict[str, Any] = {
@@ -556,7 +567,10 @@ async def _failover_one(
             }
         audit.record(**base, channel="claude:start-session", phase="attempt", preset=preset, failover_of=sid)
         try:
-            await c.invoke("claude:start-session", {"sessionId": new_sid, "options": opts})
+            started = await c.invoke("claude:start-session", {"sessionId": new_sid, "options": opts})
+            if (not isinstance(started, dict) or started.get("ok") is False or
+                    started.get("sessionId") != new_sid):
+                raise WriteRefused("BAT failover start did not confirm the reserved session ID")
         except BaseException as e:
             audit.record(**base, channel="claude:start-session", phase="result", ok=False, error=_err(e))
             registry.fail_reservation(host, new_sid, replaces)
