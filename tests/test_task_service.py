@@ -2236,3 +2236,46 @@ async def test_external_worktree_creation_is_restart_idempotent(tmp_path, fleet_
     second = await adapter._ensure_external_worktree(journal.get(task["task_id"]))
     assert first == second
     assert len(scripts) == 2 and all("worktree list --porcelain" in script for script in scripts)
+
+@pytest.mark.asyncio
+async def test_goose_acp_error_settles_from_bat_readback(mock, tmp_path, monkeypatch):
+    """A lost ACP terminal reply must not discard a committed, idle BAT turn."""
+    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    task = submit(daemon.journal, engine="goose")
+    daemon.journal.change(task["task_id"], "dispatching")
+    daemon.journal.change(task["task_id"], "accepted", fields={"session_id": "lead-readback"})
+    monkeypatch.setattr(registry, "get", lambda _host, _sid: {"cwd": "/remote/not-on-box"})
+
+    async def fail_run(*args, **kwargs):
+        raise RuntimeError("ACP session/prompt terminal response lost")
+
+    async def identity(_task):
+        return {"candidate_commit": "a" * 40, "tree_hash": "b" * 40, "clean": True}
+
+    async def read(_task, _sid, _marker):
+        return {"streaming": False, "pending": None}
+
+    class FakeGoose:
+        config = GooseConfig(enabled=True)
+        run_task = fail_run
+    monkeypatch.setattr(daemon, "goose", FakeGoose())
+    monkeypatch.setattr(daemon.adapter, "candidate_identity", identity)
+    monkeypatch.setattr(daemon.adapter, "read", read)
+    await daemon._tick_task(task["task_id"])
+    settled = daemon.journal.get(task["task_id"])
+    command = next(c for c in daemon.journal.commands(task["task_id"]) if c["kind"] == "goose_run")
+    assert settled["state"] == "verifying"
+    assert command["status"] == "settled"
+    assert any(e["kind"] == "goose_readback_settled" for e in daemon.journal.events(task["task_id"]))
+    await daemon.fleet.close()
+    daemon.journal.close()
+
+def test_agy_adapter_model_effort_policy(monkeypatch):
+    monkeypatch.setenv("BATC_AGY_SHIM_TOKEN", "local-token")
+    adapter = AgyShimAdapter()
+    claude = ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18797/v1",
+                           "claude-sonnet-4-6", 1)
+    gemini = ProviderEntry("agy-gemini", "agy-shim", "http://127.0.0.1:18797/v1",
+                           "gemini-3.8-flash", 1)
+    assert adapter.environment(claude, {"BATC_AGY_SHIM_TOKEN": "local-token"})["BATC_AGY_REQUEST_POLICY"] == "omit_reasoning_effort"
+    assert adapter.environment(gemini, {"BATC_AGY_SHIM_TOKEN": "local-token"})["BATC_AGY_REQUEST_POLICY"] == "pass_reasoning_effort"

@@ -289,17 +289,35 @@ class TaskDaemon:
                 capability = self.journal.issue_capability(task_id)
                 await self.goose.run_task(task, goose_cwd, capability=capability,
                                           journal=self.journal)
-            except Exception as exc:  # noqa: BLE001 - record uncertainty; no blind ACP rerun
+            except Exception as exc:  # noqa: BLE001 - reconcile before uncertainty
                 logging.warning("Goose ACP task %s failed before settlement: %s", task_id[:8], exc)
-                self.journal.command_status(cmd["command_id"], "uncertain")
+                current = self.journal.get(task_id)
+                try:
+                    identity = await self.adapter.candidate_identity(current)
+                    lead = await self.adapter.read(current, current["session_id"], current.get("turn_marker"))
+                except Exception:  # noqa: BLE001 - failed readback remains uncertain
+                    identity, lead = None, {}
+                if (identity and identity.get("clean") and lead.get("streaming") is False
+                        and not lead.get("pending")):
+                    self.journal.command_status(cmd["command_id"], "settled")
+                    self.journal.change(task_id, "verifying", fields={
+                        "verification_commit": None, "verification_tree": None,
+                        "reviewer_session_id": None, "review_commit": None,
+                        "review_tree": None, "review_marker": None, "review_passed": 0,
+                    }, event="goose_readback_settled")
+                else:
+                    self.journal.command_status(cmd["command_id"], "uncertain")
+            else:
+                self.journal.command_status(cmd["command_id"], "settled")
+                if self.journal.get(task_id)["state"] == "running":
+                    self.journal.change(task_id, "verifying", fields={
+                        "verification_commit": None, "verification_tree": None,
+                        "reviewer_session_id": None, "review_commit": None,
+                        "review_tree": None, "review_marker": None, "review_passed": 0,
+                    }, event="goose_settled")
             finally:
                 if temporary_cwd:
                     shutil.rmtree(temporary_cwd, ignore_errors=True)
-                self.journal.change(task_id, "uncertain")
-                return
-            self.journal.command_status(cmd["command_id"], "settled")
-            if self.journal.get(task_id)["state"] == "running":
-                self.journal.change(task_id, "needs_ted")
         except Exception as exc:  # noqa: BLE001 - one task cannot kill worker
             logging.warning("Task %s needs reconciliation after %s", task_id[:8], type(exc).__name__)
             try:
