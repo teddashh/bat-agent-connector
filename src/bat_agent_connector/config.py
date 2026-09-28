@@ -27,7 +27,7 @@ Config file (default ``~/.config/bat-agent-connector/hosts.toml``)::
     profile_id = "default"             # workspace profile on the host
 
     [jev]                              # optional judgment layer (TypeSafe Jev); off without an API key
-    enabled = "auto"                   # "auto" = on when TYPESAFE_API_KEY is set; true / false
+    enabled = "auto"                   # on when TYPESAFE_API_KEY or OPENROUTER_API_KEY is set
     timeout_s = 3.0
 
 Token values never live in this file.

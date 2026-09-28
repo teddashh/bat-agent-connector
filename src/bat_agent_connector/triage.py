@@ -217,6 +217,7 @@ async def refine_with_jev(jev: Jev | None, cls: dict, msgs: list[dict], use_jev:
         "state": r["state"],
         "source": "jev",
         "confidence": r["confidence"],
+        "jev_backend": r.get("jev_backend"),
     }
     if cls["state"] == "done_idle" and cls.get("pattern_state") == "done_idle":
         cls["source"] = "pattern+jev"

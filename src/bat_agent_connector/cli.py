@@ -569,6 +569,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--only", action="append", metavar="PROFILE_ID")
     p.add_argument("--force", action="store_true")
     sp.add_parser("mcp", help="run the MCP server on stdio (see bat-agent-connector-mcp --help)")
+    p = sp.add_parser("serve", help="run the loopback task daemon and worker (no deployment is made)")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=18796)
+    p.add_argument("--db", help="SQLite task journal path")
+    p = sp.add_parser("task-delivery", help="inspect or reconcile unresolved Discord deliveries")
+    p.add_argument("--confirm-absent-event", type=int)
+    p.add_argument("--confirm-absent-board")
+    p.add_argument("--confirm-found-event", type=int)
+    p.add_argument("--confirm-found-board")
+    p.add_argument("--message-id", help="Discord message ID for found-event/board reconciliation")
+    p = sp.add_parser("task-reconcile", help="attest one uncertain task command and optionally send a new prompt")
+    p.add_argument("--task-id", required=True)
+    p.add_argument("--command-id", required=True)
+    p.add_argument("--outcome", required=True, choices=["delivered", "not_delivered", "superseded"])
+    p.add_argument("--actor", required=True, choices=["operator", "ted"])
+    p.add_argument("--source", required=True, help="operator ticket or Ted message reference")
+    p.add_argument("--evidence", required=True, help="what was inspected; never a guessed result")
+    p.add_argument("--observed-result", default="none", choices=["none", "milestone", "review_pass"])
+    p.add_argument("--turn-ref", help="BAT turn/message reference required for observed result")
+    p.add_argument("--candidate-commit")
+    p.add_argument("--tree-hash")
+    p.add_argument("--next-prompt-file", help="explicit new prompt file; never reuses uncertain text")
     sp.add_parser("config-path", help="print the config path")
     return ap
 
@@ -582,6 +604,40 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     args = build_parser().parse_args(argv)
     try:
+        if args.cmd == "serve":
+            from .task_daemon import TaskDaemon
+
+            asyncio.run(TaskDaemon(load_config(args.config), args.db).serve(args.host, args.port))
+            return 0
+        if args.cmd == "task-delivery":
+            from .task_daemon import request
+
+            if args.confirm_found_event is not None or args.confirm_found_board:
+                if not args.message_id:
+                    raise ValueError("--message-id is required for found Discord message")
+                result = request("work_delivery_confirm_found", event_id=args.confirm_found_event,
+                                 board_channel_id=args.confirm_found_board, message_id=args.message_id)
+            elif args.confirm_absent_event is not None or args.confirm_absent_board:
+                result = request("work_delivery_confirm_absent", event_id=args.confirm_absent_event,
+                                 board_channel_id=args.confirm_absent_board)
+            else:
+                result = request("work_delivery_status")
+            _print(result, args.json)
+            return 0
+        if args.cmd == "task-reconcile":
+            from .task_daemon import request
+
+            cap = request("work_reconcile_capability", task_id=args.task_id,
+                          command_id=args.command_id)["capability"]
+            next_prompt = Path(args.next_prompt_file).read_text() if args.next_prompt_file else None
+            result = request("work_reconcile", _auth_token=cap, task_id=args.task_id,
+                             command_id=args.command_id, outcome=args.outcome, actor=args.actor,
+                             source=args.source, evidence=args.evidence,
+                             observed_result=args.observed_result, turn_ref=args.turn_ref,
+                             candidate_commit=args.candidate_commit, tree_hash=args.tree_hash,
+                             next_prompt=next_prompt)
+            _print(result, args.json)
+            return 0
         if args.cmd == "import-bat":
             return cmd_import(args)
         if args.cmd == "config-path":

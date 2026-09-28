@@ -293,19 +293,25 @@ class MockBat:
                 "success": True,
                 "worktreePath": f"{p['cwd']}/.bat-worktrees/0000000{n}",
                 "branchName": f"bat/worktree-0000000{n}",
-                "sourceBranch": "main",
+                "sourceBranch": p.get("baseBranch") or "main",
             }
+            self.git_branch[info["worktreePath"]] = info["branchName"]
             self.worktrees[sid] = {
                 "diff": "",
                 "branchName": info["branchName"],
                 "worktreePath": info["worktreePath"],
-                "sourceBranch": "main",
+                "sourceBranch": p.get("baseBranch") or "main",
                 "merged": False,
                 "mergedKind": "unknown",
             }
             return info
         if ch == "claude:start-session":
-            self.metas[sid] = {"cwd": p["options"]["cwd"], "isStreaming": False}
+            opts = p["options"]
+            cwd = opts.get("worktreePath") if opts.get("useWorktree") else opts["cwd"]
+            self.metas[sid] = {"cwd": cwd, "isStreaming": False}
+            if opts.get("useWorktree"):
+                self.worktrees.setdefault(sid, {"worktreePath": opts["worktreePath"],
+                                            "branchName": opts["worktreeBranch"]})
             self.states[sid] = {"isStreaming": False, "messages": []}
             return {"ok": True, "sessionId": sid}
         if ch == "worktree:status":

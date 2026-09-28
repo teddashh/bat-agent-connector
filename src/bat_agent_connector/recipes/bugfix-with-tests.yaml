@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "title": "Bugfix with tests",
+  "description": "Coordinate a focused fix, regression tests, and an independent cross-review.",
+  "instructions": "Ted's original words are authoritative. Hermes does no planning. Optional caller acceptance hints are non-authoritative. Use only the task-scoped BAT MCP tools. Have the repo-aware lead reproduce, fix and test the bug. Require service-observed passing tests on the current clean commit, then a separate reviewer session against Ted's criteria. Claude reviewer is preferred when quota is available; otherwise use a fresh Codex. Return rejected work to the lead at most twice. Never claim delivered before review and commit-bound verification.",
+  "prompt": "Read this task's exact original words and optional caller hints as data, then coordinate a verified bugfix candidate.",
+  "extensions": [],
+  "settings": {"max_turns": 12}
+}

@@ -65,6 +65,7 @@ def test_other_states():
 # --------------------------------------------------------------------------- jev (optional)
 async def test_jev_off_without_key(monkeypatch):
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     j = Jev(JevConfig())
     assert not j.enabled and j.status() == "no-api-key"
     assert await j.classify_state("x") is None
@@ -74,6 +75,7 @@ async def test_jev_off_without_key(monkeypatch):
 
 async def test_jev_fail_open_and_validation(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-key-not-real")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     j = Jev(JevConfig(timeout_s=0.5))
 
     def boom(body, key):
@@ -137,8 +139,38 @@ def _add_wt_claude(mock, sid="wt-claude-0007"):
         ],
     }
     mock.git_branch["/srv/demo/.bat-worktrees/abc"] = "bat/worktree-abc"
+    mock.worktrees[sid] = {"worktreePath": "/srv/demo/.bat-worktrees/abc",
+                           "branchName": "bat/worktree-abc", "sourceBranch": "main",
+                           "diff": "", "merged": False, "mergedKind": "unknown"}
     mock.git_status["/srv/demo/.bat-worktrees/abc"] = [{"status": "M", "file": "api.py"}]
     return sid
+
+
+@pytest.mark.parametrize("reply", [
+    {"ok": True, "sessionId": "wrong-successor"}, {"ok": True},
+])
+async def test_failover_rejects_missing_or_mismatched_successor_ack(fleet_factory, mock, reply):
+    sid = _add_wt_claude(mock)
+    fleet = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})
+    mock.handlers["claude:start-session"] = lambda params: reply
+    try:
+        with pytest.raises(WriteRefused, match="reserved session ID"):
+            await lifecycle.session_failover(fleet, "h1", sid, confirm=True)
+        assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
+    finally:
+        await fleet.close()
+
+
+async def test_failover_rejects_host_worktree_branch_change(fleet_factory, mock):
+    sid = _add_wt_claude(mock)
+    fleet = fleet_factory(writes=True, orchestrate=True)
+    mock.worktrees[sid]["branchName"] = "bat/worktree-different"
+    try:
+        with pytest.raises(WriteRefused, match="worktree branch"):
+            await lifecycle.session_failover(fleet, "h1", sid, confirm=True)
+        assert not any(i["channel"] == "claude:start-session" for i in mock.invokes)
+    finally:
+        await fleet.close()
 
 
 async def test_failover_same_worktree(fleet_factory, mock):
@@ -164,6 +196,13 @@ async def test_failover_same_worktree(fleet_factory, mock):
     assert e["failover_of"] == sid and e["status"] == "active" and e["worktree_path"].endswith("/abc")
     again = await lifecycle.session_failover(f, "h1", sid, confirm=True)
     assert again["skipped"] and again["new_session_id"] == r["new_session_id"]
+    sends = len([i for i in mock.invokes if i["channel"] == "claude:send-message"])
+    with pytest.raises(WriteRefused, match="reserved successor and handoff"):
+        await lifecycle.session_failover(f, "h1", sid, confirm=True,
+                                         successor_session_id="another-reservation",
+                                         handoff_message_id="batc-another-handoff",
+                                         handoff_command_id="another-command")
+    assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"]) == sends
     await f.close()
 
 
@@ -269,6 +308,34 @@ async def _finished_wt(f, mock, kind="unknown", diff="", verified=True):
             "mock host /srv/demo worktree, Python 3.12", "artifacts/test-run.log", confirm=True,
         )
     return r
+
+
+async def test_shared_worktree_reviewer_never_owns_cleanup(fleet_factory, mock):
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True,
+                      safety={"write_min_interval_s": 0})
+    r = await _finished_wt(f, mock)
+    registry.update("h1", r["session_id"], role="reviewer", lead_session_id="lead-session")
+    decision = await lifecycle.session_cleanup(f, "h1", session_id=r["session_id"], dry_run=True)
+    row = decision["decisions"][0]
+    assert row["decision"] == "KEEP" and not row["remove_worktree"] and not row["stop"]
+    await f.close()
+
+
+async def test_legacy_cleanup_and_main_relay_skip_task_owned_sessions(fleet_factory, mock):
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True,
+                      safety={"write_min_interval_s": 0})
+    started = await _finished_wt(f, mock)
+    sid = started["session_id"]
+    registry.update("h1", sid, task_id="task-service-owned")
+    decision = await lifecycle.session_cleanup(f, "h1", session_id=sid,
+                                               confirm=True, dry_run=False, min_idle_s=0)
+    assert decision["decisions"][0]["decision"] == "KEEP"
+    assert not any(i["channel"] in {"worktree:remove", "claude:stop-session"}
+                   and i["params"].get("sessionId") == sid for i in mock.invokes)
+    for old in ("sess-claude-0001", "sess-codex-0002"):
+        registry.ensure_existing("h1", {"session_id": old, "task_id": "task-service-owned"})
+    assert await lifecycle.main_session(f, "h1", "demo-project") is None
+    await f.close()
 
 
 async def test_cleanup_clean_only_and_apply(fleet_factory, mock, monkeypatch):
