@@ -43,7 +43,8 @@ class Audit:
                 continue
         return out
 
-    def check_rate(self, host: str, session_id: str, now: float | None = None) -> None:
+    def check_rate(self, host: str, session_id: str, now: float | None = None,
+                   *, initial_task_send: bool = False) -> None:
         now = now or time.time()
         entries = [e for e in self._tail() if e.get("phase") == "attempt"]
         hour = [e for e in entries if now - float(e.get("at", 0)) < 3600]
@@ -53,6 +54,12 @@ class Audit:
             )
         same = [e for e in hour if e.get("host") == host and e.get("session_id") == session_id]
         if same:
+            # A task's first prompt follows its reserved start on the same
+            # session. Start attempts still consume the hourly budget, but
+            # are not an earlier prompt for the per-session send interval.
+            start_channels = {"worktree:create", "claude:start-session", "workspace:save"}
+            if initial_task_send and all(e.get("channel") in start_channels for e in same):
+                return
             age = now - max(float(e.get("at", 0)) for e in same)
             if age < self.safety.write_min_interval_s:
                 raise WriteRefused(

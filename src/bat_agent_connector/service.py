@@ -913,6 +913,7 @@ async def session_send(
     tool: str = "session_send",
     retry_on_disconnect: bool = True,
     before_invoke: Callable[[], None] | None = None,
+    initial_task_send: bool = False,
 ) -> dict:
     _guard(fleet, host, confirm)
     if not isinstance(text, str) or not text.strip():
@@ -931,8 +932,13 @@ async def session_send(
             raise WriteRefused(f"session was handed off to {successor['session_id']}; send there instead")
         kind = agent_kind(t.get("agentPreset"))
         mid = message_id or f"batc-{uuid.uuid4()}"
+        if initial_task_send:
+            owner = registry.get(host, sid)
+            if (not owner or not owner.get("task_id")
+                    or owner.get("role") not in {"lead", "reviewer"}):
+                raise WriteRefused("initial task send requires a task-owned session")
         if not (kind == "claude" and message_id and audit.same_send_retry(host, sid, mid, text)):
-            audit.check_rate(host, sid)
+            audit.check_rate(host, sid, initial_task_send=initial_task_send)
         meta = await _meta(c, sid)
         resumed = False
         if meta is None:

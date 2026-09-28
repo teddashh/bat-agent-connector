@@ -8,9 +8,19 @@ import json
 import pytest
 
 from bat_agent_connector import service
+from bat_agent_connector.config import SafetyConfig
 from bat_agent_connector.errors import WriteRefused
-from bat_agent_connector.safety import audit_path
+from bat_agent_connector.safety import Audit, audit_path
 from tests.mockbat import TOKEN
+
+
+def test_initial_task_send_still_obeys_hourly_cap(tmp_path):
+    audit = Audit(SafetyConfig(write_min_interval_s=60, max_writes_per_hour=1),
+                  tmp_path / "audit.jsonl")
+    audit.record(host="h1", session_id="task-session", channel="claude:start-session",
+                 phase="attempt")
+    with pytest.raises(WriteRefused, match="max_writes_per_hour"):
+        audit.check_rate("h1", "task-session", initial_task_send=True)
 
 
 async def test_hosts_list_and_status(fleet_factory):
