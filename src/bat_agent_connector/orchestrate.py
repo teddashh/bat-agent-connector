@@ -297,7 +297,10 @@ async def session_start(
                 )
             audit.record(**base, channel="claude:start-session", phase="attempt", preset=preset)
             try:
-                await c.invoke("claude:start-session", {"sessionId": sid, "options": opts})
+                started = await c.invoke("claude:start-session", {"sessionId": sid, "options": opts})
+                if (not isinstance(started, dict) or started.get("ok") is False or
+                        started.get("sessionId", sid) != sid):
+                    raise WriteRefused("BAT start reply did not confirm the reserved session ID")
             except BatError as e:
                 audit.record(**base, channel="claude:start-session", phase="result", ok=False, error=_err(e))
                 if use_worktree and not retain_on_error:  # may have reached BAT on timeout

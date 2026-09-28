@@ -66,6 +66,18 @@ def get(host: str, session_id: str) -> dict | None:
     return None
 
 
+def ensure_existing(host: str, entry: dict) -> None:
+    """Restore local lookup for a BAT session verified by task journal and host meta."""
+    p = registry_path()
+    with _locked(p):
+        items = _read(p)
+        if any(e.get("host") == host and e.get("session_id") == entry.get("session_id") for e in items):
+            return
+        items.append({**entry, "host": host, "status": "active", "created_at": time.time(),
+                      "recovered_from": "task_journal"})
+        _write(p, items)
+
+
 def find_prefix(host: str, prefix: str) -> list[dict]:
     return [
         e

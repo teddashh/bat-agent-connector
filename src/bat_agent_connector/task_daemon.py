@@ -126,6 +126,7 @@ class TaskDaemon:
                     "delivered_at": task["delivered_at"], "time_to_deliver_s": task["time_to_deliver_s"],
                     "result": task["result"], "verification_commit": task["verification_commit"],
                     "review_rejections": task["review_rejections"], "ted_interventions": task["ted_interventions"],
+                    "session_replacements": task["session_replacements"],
                     "ted_interventions_basis": "caller_reported"}
         if method == "work_pause":
             if params.get("actor", "service") not in {"service", "ted"}:
