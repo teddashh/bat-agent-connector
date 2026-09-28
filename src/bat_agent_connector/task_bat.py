@@ -222,11 +222,14 @@ class BatTaskAdapter:
         if existing and (existing.get("task_id") not in {None, task["task_id"]}
                          or existing.get("role") not in {None, role}):
             raise ValueError("local session entry belongs to another task or role")
-        try:
-            worktree = await client.invoke(
-                "worktree:status", {"sessionId": session_id}, retry_on_disconnect=False)
-        except Exception as exc:  # noqa: BLE001 - no worktree proof on transport failure
-            raise ValueError("BAT worktree identity is unavailable") from exc
+        if task.get("external_worktree_path"):
+            worktree = None
+        else:
+            try:
+                worktree = await client.invoke(
+                    "worktree:status", {"sessionId": session_id}, retry_on_disconnect=False)
+            except Exception as exc:  # noqa: BLE001 - no worktree proof on transport failure
+                raise ValueError("BAT worktree identity is unavailable") from exc
         lead_id = task.get("session_id") if role == "reviewer" else None
         if role == "reviewer":
             if not lead_id or not any(b["session_id"] == lead_id and b["role"] == "lead"
