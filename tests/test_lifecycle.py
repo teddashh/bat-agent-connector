@@ -65,6 +65,7 @@ def test_other_states():
 # --------------------------------------------------------------------------- jev (optional)
 async def test_jev_off_without_key(monkeypatch):
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     j = Jev(JevConfig())
     assert not j.enabled and j.status() == "no-api-key"
     assert await j.classify_state("x") is None
@@ -74,6 +75,7 @@ async def test_jev_off_without_key(monkeypatch):
 
 async def test_jev_fail_open_and_validation(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-key-not-real")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     j = Jev(JevConfig(timeout_s=0.5))
 
     def boom(body, key):

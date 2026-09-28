@@ -26,6 +26,8 @@ from .task_journal import Journal
 KINDS = frozenset({"agy-shim", "openai-compatible", "codex-acp", "claude-acp", "gemini"})
 FALLBACK_ERRORS = frozenset({"quota_error", "rate_limited", "auth_error"})
 AGY_CLAUDE_MODEL = "claude-opus-4-6-thinking"
+CLAUDE_OPUS_55_MODEL = "claude-opus-5-5"
+DEFAULT_ORDER = ("claude", "agy-claude", "codex")
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,8 @@ class ProviderEntry:
                 and (self.id == "agy-claude" or str(self.model or "").startswith("claude-"))
                 and self.model != AGY_CLAUDE_MODEL):
             raise ValueError("AGY Claude model must be claude-opus-4-6-thinking")
+        if self.id == "claude" and (self.kind != "claude-acp" or self.model != CLAUDE_OPUS_55_MODEL):
+            raise ValueError("default Claude ACP provider must select claude-opus-5-5")
         if self.kind in {"agy-shim", "openai-compatible"} and self.base_url:
             parsed = urlsplit(self.base_url)
             if (parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
@@ -123,11 +127,12 @@ ADAPTERS: dict[str, ProviderAdapter] = {
 
 class ProviderCatalog:
     def __init__(self, entries: list[ProviderEntry] | None = None,
-                 order: tuple[str, ...] = ("agy-claude", "codex", "claude")):
+                 order: tuple[str, ...] = DEFAULT_ORDER):
         entries = entries or [
+            ProviderEntry("claude", "claude-acp", model=CLAUDE_OPUS_55_MODEL),
             ProviderEntry("agy-claude", "agy-shim", os.environ.get("BATC_AGY_SHIM_BASE_URL"),
                           AGY_CLAUDE_MODEL, 10),
-            ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp"),
+            ProviderEntry("codex", "codex-acp"),
             ProviderEntry("agy-gemini-flash", "agy-shim", os.environ.get("BATC_AGY_SHIM_BASE_URL"),
                           os.environ.get("BATC_AGY_GEMINI_MODEL")),
         ]
@@ -143,7 +148,7 @@ class ProviderCatalog:
             raise ValueError("PM provider config must be mode 0600")
         raw = tomllib.loads(p.read_text())
         entries = [ProviderEntry(**e) for e in raw.get("providers", [])]
-        return cls(entries, tuple(raw.get("fallback_order", ("agy-claude", "codex", "claude"))))
+        return cls(entries, tuple(raw.get("fallback_order", DEFAULT_ORDER)))
 
     def entry(self, provider_id: str) -> ProviderEntry:
         return self.entries[provider_id]
@@ -154,11 +159,9 @@ class ProviderCatalog:
 
     def available(self, journal: Journal, provider_id: str) -> bool:
         entry = self.entry(provider_id)
-        if not entry.daily_cap:
-            return True
         since = int(time.time() // 86400) * 86400
-        return (journal.provider_daily_count(provider_id, since=since) < entry.daily_cap
-                and not journal.provider_unavailable(provider_id, since=since))
+        return (not journal.provider_unavailable(provider_id, since=since)
+                and (not entry.daily_cap or journal.provider_daily_count(provider_id, since=since) < entry.daily_cap))
 
     def next(self, journal: Journal, current: str | None = None) -> str | None:
         order = self.order

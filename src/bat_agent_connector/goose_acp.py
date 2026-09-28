@@ -33,7 +33,7 @@ class ProviderRequestError(ProviderSetupError):
 class GooseConfig:
     command: tuple[str, ...] = ("goose", "acp")
     expected_version: str = PINNED_GOOSE_VERSION
-    provider: str = "agy-claude"
+    provider: str = "claude"
     timeout_s: float = 300
     enabled: bool = False  # one-turn smoke only; no durable ACP recovery yet
 
@@ -151,6 +151,10 @@ class GooseACP:
                             raise ProviderRequestError(outcome)
                         if method == "session/prompt":
                             raise UncertainPrompt("Goose prompt outcome requires reconciliation")
+                        if method in {"initialize", "session/new"}:
+                            # Setup failed before any prompt; the next configured
+                            # provider may safely take this task on a new branch.
+                            raise ProviderSetupError("Goose provider setup failed before prompt")
                         detail = error.get("message") or error.get("data") or error.get("code") or "unknown error"
                         raise RuntimeError(f"Goose ACP {method} failed: {detail}")
                     return reply["result"]

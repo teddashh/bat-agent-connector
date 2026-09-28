@@ -89,7 +89,8 @@ class Journal:
             CREATE TABLE IF NOT EXISTS routing (
                 route_id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(task_id),
                 step TEXT NOT NULL, step_type TEXT NOT NULL, provider TEXT NOT NULL,
-                confidence REAL, stakes TEXT NOT NULL, reason TEXT NOT NULL, created_at REAL NOT NULL
+                confidence REAL, stakes TEXT NOT NULL, reason TEXT NOT NULL,
+                jev_backend TEXT, created_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS provider_usage (
                 usage_id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL,
@@ -141,6 +142,9 @@ class Journal:
         cap_columns = {r[1] for r in self.db.execute("PRAGMA table_info(capabilities)")}
         if "command_id" not in cap_columns:
             self.db.execute("ALTER TABLE capabilities ADD COLUMN command_id TEXT")
+        route_columns = {r[1] for r in self.db.execute("PRAGMA table_info(routing)")}
+        if "jev_backend" not in route_columns:
+            self.db.execute("ALTER TABLE routing ADD COLUMN jev_backend TEXT")
 
     @contextmanager
     def tx(self):
@@ -681,16 +685,19 @@ class Journal:
         return [dict(r) for r in rows]
 
     def route(self, task_id: str, *, step: str, step_type: str, provider: str,
-              confidence: float | None, stakes: str, reason: str) -> dict:
+              confidence: float | None, stakes: str, reason: str,
+              jev_backend: str | None = None) -> dict:
         with self.tx():
             existing = self.route_for_step(task_id, step)
             if existing:
                 return existing
             now = time.time()
-            cur = self.db.execute("""INSERT INTO routing(task_id,step,step_type,provider,confidence,stakes,reason,created_at)
-                VALUES(?,?,?,?,?,?,?,?)""", (task_id, step, step_type, provider, confidence, stakes, reason, now))
+            cur = self.db.execute("""INSERT INTO routing(task_id,step,step_type,provider,confidence,stakes,reason,
+                jev_backend,created_at) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (task_id, step, step_type, provider, confidence, stakes, reason, jev_backend, now))
             self._event(task_id, "model_route", {"route_id": cur.lastrowid, "step_type": step_type,
-                                                  "provider": provider, "confidence": confidence, "stakes": stakes})
+                                                  "provider": provider, "confidence": confidence,
+                                                  "stakes": stakes, "jev_backend": jev_backend})
         return dict(self.db.execute("SELECT * FROM routing WHERE route_id=?", (cur.lastrowid,)).fetchone())
 
     def routes(self, task_id: str) -> list[dict]:
@@ -702,7 +709,8 @@ class Journal:
         return dict(row) if row else None
 
     def record_jev_prescreen(self, task_id: str, *, commit: str, tree: str, verdict: str,
-                             confidence: float, tests_ok: float) -> None:
+                             confidence: float, tests_ok: float,
+                             jev_backend: str | None = None) -> None:
         if verdict not in {"safe_complete", "incomplete", "unsafe", "unsure"}:
             raise ValueError("invalid Jev pre-screen verdict")
         with self.tx():
@@ -710,7 +718,8 @@ class Journal:
                 return
             self._event(task_id, "jev_prescreen", {"candidate_commit": commit, "tree_hash": tree,
                                                   "verdict": verdict, "confidence": confidence,
-                                                  "tests_ok": tests_ok, "advisory_only": True})
+                                                  "tests_ok": tests_ok, "jev_backend": jev_backend,
+                                                  "advisory_only": True})
 
     def jev_prescreen_for_candidate(self, task_id: str, commit: str, tree: str) -> bool:
         rows = self.db.execute("SELECT body FROM events WHERE task_id=? AND kind='jev_prescreen'",
