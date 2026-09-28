@@ -323,7 +323,7 @@ class TaskDaemon:
             try:
                 current = self.journal.get(task_id)
                 if verifying and current["state"] == "verifying":
-                    kind = "verification_timeout" if isinstance(exc, TimeoutError) else "verification_error"
+                    kind = "verification_timeout" if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) else "verification_error"
                     self.journal.change(task_id, "needs_ted", event=kind,
                                         fields={"result": type(exc).__name__})
                 elif current["state"] not in {"needs_ted", "done", "failed"}:
