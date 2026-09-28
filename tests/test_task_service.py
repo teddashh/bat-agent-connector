@@ -490,6 +490,32 @@ async def test_task_bat_adapter_contract_with_mock_host(fleet_factory, mock, tmp
     j.close()
 
 
+async def test_task_initial_send_after_start_ignores_only_start_spacing(fleet_factory, mock, tmp_path):
+    fleet = fleet_factory(writes=True, orchestrate=True,
+                          safety={"write_min_interval_s": 60, "max_writes_per_hour": 100})
+    journal = Journal(tmp_path / "initial-spacing.db")
+    task = journal.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                          idempotency_key="initial-spacing")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), journal)
+    session_id = "task-initial-spacing"
+    assert await adapter.start(task, role="lead", agent="claude", session_id=session_id) == session_id
+    task = journal.change(task["task_id"], "dispatching")
+    task = journal.change(task["task_id"], "accepted", fields={"session_id": session_id})
+    prompt = "first lead prompt"
+    command, _ = journal.command(task["task_id"], "send", session_id,
+                                 {"purpose": "lead:initial",
+                                  "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()},
+                                 "initial-spacing:send")
+    sent = await adapter.send(task, session_id, prompt, command["message_id"])
+    assert sent["accepted"]
+    assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"
+                and i["params"]["sessionId"] == session_id]) == 1
+    with pytest.raises(WriteRefused, match="rate limit"):
+        await service.session_send(fleet, "h1", session_id, "later prompt", confirm=True)
+    journal.close()
+    await fleet.close()
+
+
 async def test_task_reservation_excludes_paused_lead_from_legacy_cleanup(
         fleet_factory, mock, tmp_path, monkeypatch):
     fleet = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True,
