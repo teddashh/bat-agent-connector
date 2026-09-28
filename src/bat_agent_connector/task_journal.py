@@ -64,6 +64,7 @@ class Journal:
                 submitted_at REAL NOT NULL, updated_at REAL NOT NULL, delivered_at REAL,
                 delivered INTEGER NOT NULL DEFAULT 0, review_rejections INTEGER NOT NULL DEFAULT 0,
                 ted_interventions INTEGER NOT NULL DEFAULT 0, continuations INTEGER NOT NULL DEFAULT 0,
+                session_replacements INTEGER NOT NULL DEFAULT 0,
                 review_passed INTEGER NOT NULL DEFAULT 0, verification_commit TEXT,
                 verification_tree TEXT, review_commit TEXT, review_tree TEXT, review_marker TEXT,
                 lead_agent TEXT NOT NULL DEFAULT 'codex', pm_provider TEXT, result TEXT
@@ -130,7 +131,8 @@ class Journal:
         for name, sql_type in (("verification_tree", "TEXT"), ("review_commit", "TEXT"),
                                ("review_tree", "TEXT"), ("review_marker", "TEXT"),
                                ("lead_agent", "TEXT NOT NULL DEFAULT 'codex'"),
-                               ("pm_provider", "TEXT")):
+                               ("pm_provider", "TEXT"),
+                               ("session_replacements", "INTEGER NOT NULL DEFAULT 0")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {sql_type}")  # noqa: S608 - fixed local identifiers
         cap_columns = {r[1] for r in self.db.execute("PRAGMA table_info(capabilities)")}
@@ -427,6 +429,31 @@ class Journal:
                  values["delivered"], values["delivered_at"], task_id))
             if old["state"] != state or event:
                 self._event(task_id, event or "state", {"from": old["state"], "to": state})
+        return self.get(task_id)
+
+    def mark_initial_session_vanished(self, task_id: str, session_id: str) -> dict:
+        """One replacement at most; an unresolved prompt always blocks replacement."""
+        with self.tx():
+            task = self.get(task_id)
+            if (task["session_id"] != session_id or task["state"] != "accepted"
+                    or task["paused"]):
+                raise ValueError("vanished session is not the active initial lead")
+            unsafe = self.db.execute("""SELECT 1 FROM commands WHERE task_id=? AND session_id=?
+                AND kind='send' AND status NOT IN ('rejected','cancelled') LIMIT 1""",
+                (task_id, session_id)).fetchone()
+            if unsafe:
+                target, outcome = "uncertain", "prompt_requires_reconciliation"
+            elif task["session_replacements"] >= 1:
+                target, outcome = "needs_ted", "replacement_limit_reached"
+            else:
+                target, outcome = "queued", "replacement_reserved"
+            count = task["session_replacements"] + (target == "queued")
+            self.db.execute("""UPDATE tasks SET state=?,session_id=?,turn_marker=NULL,
+                session_replacements=?,updated_at=? WHERE task_id=?""",
+                (target, None if target == "queued" else session_id, count, time.time(), task_id))
+            self._event(task_id, "initial_session_vanished", {"session_id": session_id,
+                                                              "outcome": outcome,
+                                                              "session_replacements": count})
         return self.get(task_id)
 
     def pause(self, task_id: str, *, abort_current: bool = False):

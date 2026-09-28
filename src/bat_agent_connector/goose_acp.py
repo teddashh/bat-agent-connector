@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -19,6 +20,8 @@ from .pm_providers import (
 )
 from .task_recipes import load
 
+PINNED_GOOSE_VERSION = "1.52.0"
+
 
 class ProviderRequestError(ProviderSetupError):
     def __init__(self, outcome: str):
@@ -29,6 +32,7 @@ class ProviderRequestError(ProviderSetupError):
 @dataclass(frozen=True)
 class GooseConfig:
     command: tuple[str, ...] = ("goose", "acp")
+    expected_version: str = PINNED_GOOSE_VERSION
     provider: str = "agy-claude"
     timeout_s: float = 300
     enabled: bool = False  # one-turn smoke only; no durable ACP recovery yet
@@ -39,6 +43,22 @@ class GooseACP:
         self.config = config or GooseConfig()
         config_path = os.environ.get("BATC_PM_PROVIDER_CONFIG")
         self.catalog = catalog or (ProviderCatalog.from_file(config_path) if config_path else ProviderCatalog())
+
+    async def check_pinned_version(self) -> str:
+        """Contract preflight for the configured stock Goose executable."""
+        proc = await asyncio.create_subprocess_exec(self.config.command[0], "--version",
+                                                    stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.DEVNULL)
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), 10)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise RuntimeError("Goose executable version check timed out") from None
+        version = re.search(r"(?<![\d.])(\d+\.\d+\.\d+)(?![\d.])", out.decode(errors="replace"))
+        if proc.returncode != 0 or not version or version.group(1) != self.config.expected_version:
+            raise RuntimeError("Goose executable does not match the pinned ACP contract version")
+        return version.group(1)
 
     async def run_task(self, task: dict, cwd: str, *, capability: str,
                        command: tuple[str, ...] | None = None, journal=None) -> dict:
@@ -72,6 +92,8 @@ class GooseACP:
         cfg = self.config
         if not cfg.enabled:
             raise RuntimeError("Goose ACP is a smoke adapter only; live PM recovery is disabled")
+        if command is None:
+            await self.check_pinned_version()
         provider_id = provider_id or cfg.provider
         allowed = {"PATH", "LANG", "PYTHONPATH", "BATC_TASK_URL"}
         env = {k: v for k, v in os.environ.items() if k in allowed}

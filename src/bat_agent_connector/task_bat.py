@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -73,15 +74,89 @@ class BatTaskAdapter:
 
     async def recover_start(self, task: dict, *, role: str, session_id: str) -> bool:
         row = registry.get(task["host"], session_id)
-        if not row:
-            return False
         meta = await self.fleet.client(task["host"]).invoke(
             "claude:get-session-meta", {"sessionId": session_id}, retry_on_disconnect=False,
         )
         if not isinstance(meta, dict):
             return False
-        registry.update(task["host"], session_id, status="active")
+        if not row:
+            if not self.journal:
+                return False
+            intent = next((c for c in self.journal.commands(task["task_id"])
+                           if c["kind"] == "start_" + role and c["session_id"] == session_id), None)
+            if not intent:
+                return False
+            await self._restore_headless_lookup(task, session_id, meta, role=role,
+                                                agent=json.loads(intent["payload"])["agent"])
+        else:
+            registry.update(task["host"], session_id, status="active")
         return True
+
+    async def session_presence(self, task: dict, session_id: str) -> str:
+        """Confirm BAT identity, restoring only journal-owned headless lookups.
+
+        A missing workspace tab is expected when registration is off. Repeated
+        BAT meta reads and a worktree check must all find nothing before the
+        coordinator may reserve a replacement.
+        """
+        if not self.journal or not any(
+            b["session_id"] == session_id and b["role"] in {"lead", "reviewer"}
+            for b in self.journal.branches(task["task_id"])
+        ):
+            return "uncertain"
+        client = self.fleet.client(task["host"])
+        for attempt in range(3):
+            try:
+                meta = await client.invoke("claude:get-session-meta", {"sessionId": session_id},
+                                           retry_on_disconnect=False)
+            except Exception:  # noqa: BLE001 - transport failure is not proof of absence
+                return "uncertain"
+            if isinstance(meta, dict):
+                if not registry.get(task["host"], session_id):
+                    await self._restore_headless_lookup(task, session_id, meta)
+                return "present"
+            if attempt < 2:
+                await asyncio.sleep(0.25)
+        try:
+            worktree = await client.invoke("worktree:status", {"sessionId": session_id},
+                                           retry_on_disconnect=False)
+        except Exception:  # noqa: BLE001 - transport failure is not proof of absence
+            return "uncertain"
+        if isinstance(worktree, dict) and worktree.get("worktreePath"):
+            return "uncertain"
+        registry.update(task["host"], session_id, status="vanished")
+        return "vanished"
+
+    async def _restore_headless_lookup(self, task: dict, session_id: str, meta: dict,
+                                       *, role: str | None = None, agent: str | None = None) -> None:
+        branch = next((b for b in self.journal.branches(task["task_id"])
+                       if b["session_id"] == session_id and b["role"] in {"lead", "reviewer"}), None)
+        if not (branch or role) or not meta.get("cwd"):
+            raise ValueError("journal-owned BAT session has no verified folder")
+        workspace_doc = await service._workspace(self.fleet.client(task["host"]))
+        workspace = next((w for w in workspace_doc.get("workspaces") or []
+                          if task["workspace"] in {w.get("id"), w.get("name")}), None)
+        if not workspace:
+            raise ValueError("task workspace no longer exists on BAT host")
+        try:
+            worktree = await self.fleet.client(task["host"]).invoke(
+                "worktree:status", {"sessionId": session_id}, retry_on_disconnect=False)
+        except Exception:  # noqa: BLE001 - meta still proves session identity
+            worktree = None
+        expected_cwd = (worktree.get("worktreePath") if isinstance(worktree, dict)
+                        else workspace.get("folderPath"))
+        if meta["cwd"] != expected_cwd:
+            raise ValueError("BAT session folder does not match the journal-owned workspace")
+        agent = agent or (branch["provider"] if branch and branch["provider"] in {"codex", "claude"}
+                          else task["lead_agent"])
+        registry.ensure_existing(task["host"], {
+            "session_id": session_id, "workspace_id": workspace.get("id"),
+            "workspace_name": workspace.get("name"), "agent_preset": orchestrate.PRESETS[(agent, bool(worktree))],
+            "origin_cwd": workspace.get("folderPath"), "cwd": meta["cwd"],
+            "worktree_path": worktree.get("worktreePath") if isinstance(worktree, dict) else None,
+            "branch": worktree.get("branchName") if isinstance(worktree, dict) else None,
+            "title": "task " + task["task_id"][:8],
+        })
 
     async def send(self, task: dict, session_id: str, text: str, message_id: str) -> dict:
         return await service.session_send(self.fleet, task["host"], session_id, text, confirm=True,

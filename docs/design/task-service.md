@@ -20,19 +20,23 @@ Goose adapter 限用 stock `goose acp`，以 ACP JSON-RPC 操控，任務 recipe
 
 每個 PM step 的 model router 先用既有 TypeSafe Jev 分類 `status_relay`、`verification`、`planning`、`review`，記錄校準 confidence 與 stakes。一般狀態／逐字轉述可走 agy Gemini Flash；規劃、查證、review 在低信心或高風險時優先用 agy shim 的 Antigravity Claude，受每日成功使用次數上限與 quota/rate-limit 訊號限制，超限即用 Codex 訂閱。Jev 不可用則直接用 Codex。第一階段只交付決策介面、設定物件、使用量／錯誤及 routing journal，**沒有讓 router 呼叫真實模型**；實際模型提供者切換、每日 cap 的配額對應和信心閾值調校屬第二階段。
 
-模型端點檢查：castle1 曾觀察到 `127.0.0.1:18795`，不能推定 grok-bot-01 也有相同端點。本 worktree 試著透過 `ssh grok-bot-01` 對其 loopback `/v1/models` 作無憑證可達性檢查，但本機 DNS 回報 hostname 無法解析；**grok-bot-01 shim 尚未確認可達**，也未讀取或揭露金鑰。用 fake loopback OpenAI 相容端點測 adapter。Goose 預設 agy Claude 的端點、model、token 都須從私有環境／0600 設定提供；缺設定時只能在未送 prompt 前備援至 Codex。`goose --version` 在本工作樹環境無可執行檔；正式 smoke 須於部署主機補跑。
+Goose 執行檔固定版本 **v1.52.0**，只在 grok-bot-01 的 `/home/box/.local/bin/goose` 安裝；Ted 從官方 `aaif-goose/goose` v1.52.0 Linux x86_64 release 安裝，並核對 archive SHA-256 `4aee1f770b405c44194c0e9407df1fb06bda4c50eee935f0d8fd10731821cc5e`。connector `GooseConfig.expected_version` 及執行前檢查也固定為 `1.52.0`。本 worktree 沒有該 binary；Goose 與 connector 分別版本化，不能修改 Goose bundle。升版須重新跑下方契約門檻。
 
-每個 task 保存 `submitted_at`、`delivered_at`、`delivered`、`review_rejections`、`ted_interventions`；可計算交付／未交付、review 駁回次數及交付秒數。目前 `ted_interventions` 是**呼叫者聲稱 Ted 介入**的次數，來源 ID 去重，但尚未綁定受信 Discord 事件，不能作已驗證的 Ted 實際介入數。事件帶時間戳供稽核，不能把 coding agent 的自述當成 delivered。
+端點現況：`castleridge-ai1` 上既有 agy-openai-shim 位於其**本機** `127.0.0.1:18795`；公開 `/v1/models` 只列 Gemini ID。Claude 請求失敗，因該 shim 給 Claude 加了不支援的 `--effort medium`。Ted 確認直接 agy 的 `claude-sonnet-4-6` 回應 `AGY_OK`；用只修正 Claude effort 對應的**隔離暫時 shim**，在遠端 loopback `18796`、本地轉送後，Claude model 請求成功，紀錄顯示帳號池 acct1／acct2／acct3。既有 Hermes shim 未更動；正式 shim 修正／model list 合約尚未交付，不能把 18795 當可用 Claude 端點，也不能把轉送埠當永久配置。Goose 的 base URL、model、token 仍須從私有 0600 設定／環境提供，不寫進 repo。沒有讀取或提交金鑰，也未使用付費 API key。
+
+隔離 live smoke 已以 **Goose v1.52.0 + 暫時 Claude-capable shim + PR 的 GooseACP + task-scoped MCP** 跑通；未開 Goose 內建 developer／shell 工具。Goose ACP 回 `end_turn`，fake task/BAT 帳本只有**一次** `task_send`，文字 `SMOKE_TASK_SENT`，provider branch 記為 `agy-claude`。耗時約 41.7 秒；provider log 顯示五次 streamed completions，未提供 token 用量。這證明一條隔離路徑可連通，**不是**真 BAT、正式 daemon、重啟恢復、provider switch 或生產部署證據；live Goose gate 仍關閉。
+
+每個 task 保存 `submitted_at`、`delivered_at`、`delivered`、`review_rejections`、`ted_interventions`、`session_replacements`；可計算交付／未交付、review 駁回次數、消失 session 的替代次數及交付秒數。目前 `ted_interventions` 是**呼叫者聲稱 Ted 介入**的次數，來源 ID 去重，但尚未綁定受信 Discord 事件，不能作已驗證的 Ted 實際介入數。事件帶時間戳供稽核，不能把 coding agent 的自述當成 delivered。
 
 ### 本 PR 的啟動與限制
 
-`batc serve --host 127.0.0.1 --port 18796` 僅在明確啟動時運行；需要主機 `writes=true`、`orchestrate=true`。既有 `bat-agent-connector-mcp` 新增五個 work 工具，透過 `BATC_TASK_URL`（預設 `http://127.0.0.1:18796/rpc`）連同機 daemon；它本身不擁有第二份帳本。服務尚未部署。Rules 可建立 lead、續推、停派、從不明 BAT 回應對帳、執行**管理員預先設定**的測試命令並將觀察結果連同 commit/tree 寫入 PR #1 驗證紀錄，再啟獨立 reviewer。未設定受信測試命令時停在 verifying。Goose ACP adapter 和 task-scoped MCP 已可用 fake BAT 走通一個 tool call；真 Goose 尚未在此主機安裝，goose 選項屬 smoke／試驗用途。Discord adapter 可用 fake 測；正式憑證和看板 channel 尚未配置。未關閉既有 Hermes cron，也未修改 BAT／Hermes 設定。
+`batc serve --host 127.0.0.1 --port 18796` 僅在明確啟動時運行；需要主機 `writes=true`、`orchestrate=true`。既有 `bat-agent-connector-mcp` 新增五個 work 工具，透過 `BATC_TASK_URL`（預設 `http://127.0.0.1:18796/rpc`）連同機 daemon；它本身不擁有第二份帳本。服務尚未部署。Rules 可建立 lead、續推、停派、從不明 BAT 回應對帳、執行**管理員預先設定**的測試命令並將觀察結果連同 commit/tree 寫入 PR #1 驗證紀錄，再啟獨立 reviewer。未設定受信測試命令時停在 verifying。Goose ACP adapter 和 task-scoped MCP 有 fake BAT 與上述隔離 live smoke 證據；goose 選項仍屬 smoke／試驗用途。Discord adapter 可用 fake 測；正式憑證和看板 channel 尚未配置。未關閉既有 Hermes cron，也未修改 BAT／Hermes 設定。
 
 castle1 OpenClaw 應透過到 grok-bot-01 loopback 服務的受控轉接（例如 SSH socket forwarding）呼叫同一 task MCP，不在 castle1 啟第二個 daemon 或 SQLite。HTTP 維持 loopback；不直接向 LAN 開放 BAT token 或 task 控制端點。
 
 ## 第二階段：計畫，尚未交付
 
-1. 在 grok-bot-01 安裝與 pin Goose 版本，驗證 stock ACP resume、MCP 工具注入與 agy shim 的端到端模型呼叫。用相同真實任務比較 rules、Goose、Hermes 的完成品質、續推次數、額度、人工介入與恢復時間，再決定預設引擎。
+1. grok-bot-01 已安裝並 pin Goose v1.52.0；接著須驗證 stock ACP resume、持久恢復、provider 選擇與正式 agy shim Claude 相容性。用相同真實任務比較 rules、Goose、Hermes 的完成品質、續推次數、額度、人工介入與恢復時間，再決定預設引擎。
 2. 第一階段已有預設 OFF 的 service-only GUI tab 註冊開關；第二階段在 grok-bot-01 小範圍開啟、跑 revision recheck／GUI 競態測試。`workspace:save` 是整份覆寫，與 GUI 同時存檔仍可能互蓋；Ted 已接受文件化風險，但無 BAT host-side 原子 append 就不能保證沒有 race。
 3. 配正式 Discord token／thread／看板 channel、持久化 message id、部署 service unit、備份 SQLite、健康檢查與重啟 runbook。確認對帳後停用 Hermes 的 `bat-watch-*`、idle keep-pushing；實測 castle1 OpenClaw 轉接。沒有在本 PR 啟動服務或更動 Hermes／BAT。
 
@@ -42,11 +46,17 @@ castle1 OpenClaw 應透過到 grok-bot-01 loopback 服務的受控轉接（例�
 
 單一 task ID 永不更換。`branches` 表另記每次 BAT lead／reviewer session 與 PM provider 選擇，包含 `branch_id`、`session_id`、provider、角色、上游 branch ID、原因、時間；`work_status` 回傳完整 branch 歷史。這裡的 branch 是任務執行分支，與 Git branch 名稱不同。`tasks` 保存原話、工作空間、recipe、狀態、pause/control_version、lead/reviewer session、turn marker、commit/tree、review marker、提交／交付時間與四項指標。`commands` 有唯一 idempotency key、預留 session ID、BAT message ID、kind、送出前游標和狀態。`events`、`routing`、`provider_usage`、`observed_verifications`、`capabilities`、`ted_actions`、Discord `board` 與 owner lease 各自保存可稽核資料。所有網路呼叫前先提交命令意圖；同一 key 不會生第二條命令。
 
+### 2026-09-27 22:51:52–22:51:58 ET shadow task 診斷及恢復界線
+
+Task `9a8c8579-b0cc-4e0b-aa69-71d79eabfe0e` 的 BAT start 回 `aec7b468-deb2-4166-b662-3d8f79529e66`，audit 中 `worktree:create` 成功、branch `bat/worktree-e5ed1603`，`claude:start-session` 回成功，但初次送 prompt 被拒，進入 `needs_ted`。唯讀檢查 castle1 的 BAT 現況時，**同一 session ID 的** `claude:get-session-meta` 與 `claude:get-session-state` 都存在、`numTurns=0`；`worktree:status` 有該 branch/path，工作樹目錄仍在；BAT user service 自 19:00:37 ET 運作，沒有 22:51 重啟證據。GUI workspace terminals 沒有這個 headless session，符合 tab registration OFF。castle1 本機 connector registry 也沒有它，所以 `service._resolve_session` 對同 ID 回「session not found」。BAT 的舊 sidecar log 和該時段 user journal 沒有足夠事件細節；grok-bot-01 daemon 的當時 registry/log 未能唯讀取得，故**不能證明** grok 端當次拒絕的唯一原因或宣稱 BAT GC 刪了 session。可確認的是 connector 查找設計存在 registry/GUI 可見性裂縫；BAT meta 本身證明 session ID 沒錯，worktree 並未消失。
+
+修正後，每次初始 lead prompt 前以該 task 的 durable branch／start intent、BAT 精確 session ID metadata 及 workspace/worktree path 核對；若 BAT session 存在但本地 registry 遺失，就以受驗證資料補回 headless lookup，**不新建 BAT session**。BAT 回 start 的 session ID 若與預留 ID 不同則拒絕。若多次 BAT meta 查詢都確定不存在、且沒有 worktree 紀錄，才把舊 session 記為 `initial_session_vanished`，預留**最多一次**新的 task branch，下一 tick 才 start。`session_replacements` 計數與 branch history 在重啟後保留；第二次消失進 `needs_ted`。任何 transport 不明、殘留 worktree、已存在未解送出命令，皆停在 `uncertain`，不可把原 prompt 自動重播。若明確 rejected/busy，只有再次確認 session 已消失且送出命令被 BAT 明確拒絕，才使用一次替代分支；不明送出仍需命令級人工對帳。這是安全上限；不能從「GUI 無 tab」推論 BAT session 消失。
+
 | 原狀態 | 可自動進入 | 條件 |
 | --- | --- | --- |
 | `queued` | `dispatching` | 預留 lead session ID、寫 start intent 後啟動 |
 | `dispatching` | `accepted`／`verifying`／`uncertain` | BAT start 明確成功／reviewer start 成功／回覆不明 |
-| `accepted` | `running`／`uncertain` | 已先記 `needs_review` 送出標記；BAT 回覆可歸因／不明 |
+| `accepted` | `running`／`uncertain`／`queued`／`needs_ted` | 已先記 `needs_review` 送出標記；BAT 回覆可歸因／不明；初始 session 確認消失且無未解 prompt 時最多替代一次，第二次請 Ted 處理 |
 | `running` | `accepted`／`verifying`／`waiting_permission`／`quota_limited`／`needs_ted` | 回合結束續推／里程碑／權限／額度／人為阻塞 |
 | `quota_limited` | `uncertain`／`needs_ted` | Claude→Codex 原子預留 successor 與獨立 handoff send；Codex 送出後等命令證據或人工對帳 |
 | `verifying` | `done`／`accepted`／`needs_ted` | 乾淨候選 commit/tree 的觀察測試與 fresh reviewer PASS／REJECT／測試失敗 |
@@ -74,7 +84,7 @@ Jev router 仍可按每個 PM step 分類 `status_relay`／`verification`／`pla
 
 ## Pinned Goose 啟用門檻（M2 contract-test checklist）
 
-此清單取自 Ted 提供的 `/workspace/goose-acp-handoff/docs/UPGRADES.md` 概念文字；本環境沒有該 clone，未複製其 Node/MIT 程式碼。Goose 與 connector 分開 pin 版本，不改簽署的 Goose bundle；私有 integration config 與 handoff state 先備份，不能提交。每次升版在**隔離 synthetic session** 完成下列檢查後才可能開 live Goose：
+此清單取自 Ted 提供的 `/workspace/goose-acp-handoff/docs/UPGRADES.md` 概念文字；本環境沒有該 clone，未複製其 Node/MIT 程式碼。目前 pin **Goose v1.52.0**；`goose --version` 必須符合此版，archive checksum 依上文核對。Goose 與 connector 分開 pin 版本，不改簽署的 Goose bundle；私有 integration config 與 handoff state 先備份，不能提交。每次升版在**隔離 synthetic session** 完成下列檢查後才可能開 live Goose：
 
 1. 跑 connector repo tests／syntax，對安裝的 Goose 驗證 `initialize`、`load/new`、`configOptions`、`session/set_config_option` 的真實 schema 與回覆。
 2. 檢查 host UI 真的顯示 handoff 與 target-model 選擇；target setup 必須驗證回覆的 provider choice 與 approval-mode setup。wrapper 對 protocol version 非 1 必須拒絕。這些檢查仍非完整相容性保證，未知 protocol/UI 變更可能破壞流程。

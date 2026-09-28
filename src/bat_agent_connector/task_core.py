@@ -18,6 +18,7 @@ class TaskAdapter(Protocol):
     async def start(self, task: dict, *, role: str, agent: str, session_id: str) -> str: ...
     async def recover_start(self, task: dict, *, role: str, session_id: str) -> bool: ...
     async def prepare_send(self, task: dict, session_id: str) -> dict: ...
+    async def session_presence(self, task: dict, session_id: str) -> str: ...
     async def send(self, task: dict, session_id: str, text: str, message_id: str) -> dict: ...
     async def read(self, task: dict, session_id: str, marker: str | None) -> dict: ...
     async def interrupt(self, task: dict, session_id: str) -> None: ...
@@ -123,7 +124,8 @@ class TaskCoordinator:
 
     async def _start(self, task: dict, *, role: str, agent: str) -> dict:
         candidate_key = task.get("review_commit") if role == "reviewer" else "lead"
-        key = f"{task['task_id']}:{role}:start:{candidate_key}:{task['review_rejections']}:{task['control_version']}"
+        key = (f"{task['task_id']}:{role}:start:{candidate_key}:{task['review_rejections']}:"
+               f"{task['control_version']}:{task['session_replacements']}")
         sid = str(uuid.uuid4())
         command, fresh = self.journal.command(task["task_id"], "start_" + role, sid,
                                                {"role": role, "agent": agent}, key)
@@ -140,7 +142,8 @@ class TaskCoordinator:
             return self.journal.change(task["task_id"], "uncertain")
         self.journal.command_status(command["command_id"], "settled")
         self.journal.add_branch(task["task_id"], session_id=sid, provider=agent, role=role,
-                                reason="start", parent_branch_id=(task["branches"][-1]["branch_id"]
+                                reason="vanished_replacement" if role == "lead" and task["session_replacements"] else "start",
+                                parent_branch_id=(task["branches"][-1]["branch_id"]
                                                                    if task["branches"] else None))
         field = "reviewer_session_id" if role == "reviewer" else "session_id"
         self.journal.change(task["task_id"], "verifying" if role == "reviewer" else "accepted", fields={field: sid})
@@ -156,6 +159,13 @@ class TaskCoordinator:
             task = self.journal.get(task["task_id"])
             if task["paused"]:
                 return task
+            initial_lead = purpose == "lead:initial" and prepared_command is None and sid == task["session_id"]
+            if initial_lead:
+                presence = await self.adapter.session_presence(task, sid)
+                if presence == "vanished":
+                    return self.journal.mark_initial_session_vanished(task["task_id"], sid)
+                if presence != "present":
+                    return self.journal.change(task["task_id"], "uncertain", event="initial_session_unproven")
             if prepared_command:
                 cmd = self.journal.command_get(prepared_command["command_id"])
                 payload = json.loads(cmd["payload"])
@@ -174,17 +184,29 @@ class TaskCoordinator:
                                                     "prompt_sha256": hashlib.sha256(text.encode()).hexdigest()}, key)
                 if not fresh:
                     return self.journal.change(task["task_id"], "uncertain")
+            if initial_lead:
+                presence = await self.adapter.session_presence(task, sid)
+                if presence != "present":
+                    self.journal.command_status(cmd["command_id"],
+                                                "rejected" if presence == "vanished" else "uncertain")
+                    if presence == "vanished":
+                        return self.journal.mark_initial_session_vanished(task["task_id"], sid)
+                    return self.journal.change(task["task_id"], "uncertain", event="initial_session_unproven")
             try:
                 r = await self.adapter.send(task, sid, text, cmd["message_id"])
             except WriteRefused:
                 # Local streaming/rate guard rejected before BAT send-message.
                 self.journal.command_status(cmd["command_id"], "rejected")
+                if initial_lead and await self.adapter.session_presence(task, sid) == "vanished":
+                    return self.journal.mark_initial_session_vanished(task["task_id"], sid)
                 return self.journal.change(task["task_id"], "needs_ted")
             except Exception:
                 self.journal.command_status(cmd["command_id"], "uncertain")
                 return self.journal.change(task["task_id"], "uncertain")
             if not r.get("accepted"):
                 self.journal.command_status(cmd["command_id"], "rejected")
+                if initial_lead and await self.adapter.session_presence(task, sid) == "vanished":
+                    return self.journal.mark_initial_session_vanished(task["task_id"], sid)
                 return self.journal.change(task["task_id"], "needs_ted")
             marker = r.get("turn_marker") or (before.get("before_cursor") if before.get("agent_kind") == "codex"
                                                else cmd["message_id"])

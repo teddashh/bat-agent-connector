@@ -12,7 +12,8 @@ from pathlib import Path
 import pytest
 
 from bat_agent_connector import mcp_server, task_bat
-from bat_agent_connector.goose_acp import GooseACP, GooseConfig
+from bat_agent_connector.errors import WriteRefused
+from bat_agent_connector.goose_acp import PINNED_GOOSE_VERSION, GooseACP, GooseConfig
 from bat_agent_connector.model_router import ModelRouter, RouterConfig
 from bat_agent_connector.pm_providers import (
     AgyShimAdapter,
@@ -34,6 +35,17 @@ from tests.conftest import make_config
 WORDS = "請保留 `原文`，不要改成英文。\n第二行：修好它。"
 
 
+async def test_goose_executable_version_is_pinned(tmp_path):
+    binary = tmp_path / "goose"
+    binary.write_text("#!/bin/sh\necho 'goose 1.52.0'\n")
+    binary.chmod(0o700)
+    goose = GooseACP(GooseConfig(command=(str(binary), "acp")))
+    assert await goose.check_pinned_version() == PINNED_GOOSE_VERSION
+    binary.write_text("#!/bin/sh\necho 'goose 1.53.0'\n")
+    with pytest.raises(RuntimeError, match="pinned ACP contract version"):
+        await goose.check_pinned_version()
+
+
 def submit(journal, **kw):
     return journal.submit(project="p", host="h1", workspace="w", original_words=WORDS,
                           acceptance="tests pass", idempotency_key="discord:message:1", **kw)
@@ -48,6 +60,8 @@ class FakeBAT:
         self.verifier_available = True
         self.reviewer_kind = "codex"
         self.started_ids = set()
+        self.vanished_ids = set()
+        self.presence_override = None
         self.successors = {}
         self.failover_allowed = False
         self.start_error = False
@@ -74,6 +88,11 @@ class FakeBAT:
     async def prepare_send(self, task, session_id):
         return {"agent_kind": self.prepare_kind,
                 "before_cursor": "2026-09-27T00:00:00+00:00" if self.prepare_kind == "codex" else None}
+
+    async def session_presence(self, task, session_id):
+        if self.presence_override:
+            return self.presence_override
+        return "vanished" if session_id in self.vanished_ids else "present"
 
     async def send(self, task, session_id, text, message_id):
         self.active_sends += 1
@@ -316,6 +335,168 @@ async def test_task_bat_adapter_contract_with_mock_host(fleet_factory, mock, tmp
     assert opts["codexSandboxMode"] == "read-only" and opts["codexApprovalPolicy"] == "never"
     assert opts["cwd"] == start["params"]["options"]["cwd"]
     assert not any(t.get("id") == reviewer for t in mock.ws_doc["terminals"])
+    j.close()
+
+
+async def test_headless_session_lookup_restored_from_task_branch_and_bat_meta(
+        fleet_factory, mock, tmp_path):
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
+                          safety={"write_min_interval_s": 0})
+    j = Journal(tmp_path / "tasks.db")
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="headless-lookup")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
+    sid = "headless-started-session"
+    try:
+        await adapter.start(task, role="lead", agent="claude", session_id=sid)
+        j.add_branch(task["task_id"], session_id=sid, provider="claude", role="lead", reason="start")
+        j.change(task["task_id"], "dispatching")
+        task = j.change(task["task_id"], "accepted", fields={"session_id": sid})
+        assert not any(t.get("id") == sid for t in mock.ws_doc["terminals"])
+        task_bat.registry.registry_path().unlink()
+        assert task_bat.registry.get("h1", sid) is None
+        assert await adapter.session_presence(task, sid) == "present"
+        assert task_bat.registry.get("h1", sid)["recovered_from"] == "task_journal"
+        assert (await adapter.prepare_send(task, sid))["agent_kind"] == "claude"
+        assert (await adapter.send(task, sid, "first prompt", "batc-headless-1"))["accepted"]
+        assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"
+                    and i["params"]["sessionId"] == sid]) == 1
+    finally:
+        await fleet.close()
+        j.close()
+
+
+async def test_bat_presence_distinguishes_orphan_worktree_from_vanished_session(
+        fleet_factory, mock, tmp_path):
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
+                          safety={"write_min_interval_s": 0})
+    j = Journal(tmp_path / "tasks.db")
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="presence-contract")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
+    sid = "presence-session"
+    try:
+        await adapter.start(task, role="lead", agent="claude", session_id=sid)
+        j.add_branch(task["task_id"], session_id=sid, provider="claude", role="lead", reason="start")
+        mock.metas[sid] = None
+        assert await adapter.session_presence(task, sid) == "uncertain"
+        assert task_bat.registry.get("h1", sid)["status"] == "active"
+        mock.worktrees.pop(sid)
+        assert await adapter.session_presence(task, sid) == "vanished"
+        assert task_bat.registry.get("h1", sid)["status"] == "vanished"
+    finally:
+        await fleet.close()
+        j.close()
+
+
+async def test_start_ack_recovery_uses_reserved_id_when_local_registry_lost(
+        fleet_factory, mock, tmp_path):
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
+                          safety={"write_min_interval_s": 0})
+    j = Journal(tmp_path / "tasks.db")
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="recover-start-lookup")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
+    sid = "reserved-start-session"
+    try:
+        j.command(task["task_id"], "start_lead", sid, {"role": "lead", "agent": "claude"},
+                  "start-intent-test")
+        await adapter.start(task, role="lead", agent="claude", session_id=sid)
+        task_bat.registry.registry_path().unlink()
+        assert await adapter.recover_start(task, role="lead", session_id=sid)
+        assert task_bat.registry.get("h1", sid)["recovered_from"] == "task_journal"
+        assert not any(t.get("id") == sid for t in mock.ws_doc["terminals"])
+    finally:
+        await fleet.close()
+        j.close()
+
+
+async def test_bat_start_rejects_mismatched_session_id(fleet_factory, mock):
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
+                          safety={"write_min_interval_s": 0})
+    mock.handlers["claude:start-session"] = lambda p: {"ok": True, "sessionId": "different-session"}
+    try:
+        with pytest.raises(WriteRefused, match="reserved session ID"):
+            await task_bat.orchestrate.session_start(
+                fleet, "h1", "demo-project", "claude", confirm=True, prompt=None,
+                session_id="reserved-session", retain_on_error=True)
+        assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
+    finally:
+        await fleet.close()
+
+
+async def test_vanished_initial_session_one_replacement_and_restart(tmp_path):
+    class VanishesOnStart(FakeBAT):
+        async def start(self, task, *, role, agent, session_id):
+            sid = await super().start(task, role=role, agent=agent, session_id=session_id)
+            self.vanished_ids.add(sid)
+            return sid
+
+    path = tmp_path / "tasks.db"
+    j = Journal(path)
+    task = submit(j)
+    fake = VanishesOnStart()
+    core = TaskCoordinator(j, fake)
+    result = await core.tick(task["task_id"])
+    assert result["state"] == "queued" and result["session_replacements"] == 1
+    assert result["task_id"] == task["task_id"] and result["original_words"] == WORDS
+    assert fake.sends == []
+    first = result["branches"][0]["session_id"]
+    j.close()
+    j = Journal(path)
+    core = TaskCoordinator(j, fake)
+    result = await core.tick(task["task_id"])
+    assert result["state"] == "needs_ted" and result["session_replacements"] == 1
+    assert [b["session_id"] for b in result["branches"]] == [first, fake.starts[1][2]]
+    assert result["branches"][1]["reason"] == "vanished_replacement"
+    assert fake.sends == [] and len(fake.starts) == 2
+    await core.tick(task["task_id"])
+    assert len(fake.starts) == 2
+    j.close()
+
+
+async def test_vanished_after_uncertain_initial_send_never_replaced(tmp_path):
+    path = tmp_path / "tasks.db"
+    j = Journal(path)
+    task = submit(j)
+    fake = FakeBAT()
+    fake.send_error = True
+    core = TaskCoordinator(j, fake)
+    assert (await core.tick(task["task_id"]))["state"] == "uncertain"
+    fake.vanished_ids.add(j.get(task["task_id"])["session_id"])
+    j.close()
+    j = Journal(path)
+    core = TaskCoordinator(j, fake)
+    await core.tick(task["task_id"])
+    assert j.get(task["task_id"])["state"] == "uncertain"
+    assert j.get(task["task_id"])["session_replacements"] == 0
+    assert len(fake.sends) == 1 and len(fake.starts) == 1
+    j.close()
+
+
+async def test_start_then_rejected_send_with_vanished_session_replaces_once(tmp_path):
+    class RejectedAfterStart(FakeBAT):
+        async def send(self, task, session_id, text, message_id):
+            self.vanished_ids.add(session_id)
+            self.sends.append((session_id, text, message_id))
+            return {"accepted": False, "reason": "session absent"}
+
+    path = tmp_path / "tasks.db"
+    j = Journal(path)
+    task = submit(j)
+    fake = RejectedAfterStart()
+    core = TaskCoordinator(j, fake)
+    result = await core.tick(task["task_id"])
+    assert result["state"] == "queued" and result["session_replacements"] == 1
+    assert j.commands(task["task_id"])[-1]["status"] == "rejected"
+    assert len(fake.sends) == 1
+    j.close()
+    j = Journal(path)
+    result = await TaskCoordinator(j, fake).tick(task["task_id"])
+    assert result["state"] == "needs_ted" and result["session_replacements"] == 1
+    assert len(fake.sends) == 2 and fake.sends[0][0] != fake.sends[1][0]
+    assert fake.sends[0][1] == fake.sends[1][1]  # one fresh command for the new branch
+    assert fake.sends[0][2] != fake.sends[1][2]
     j.close()
 
 
