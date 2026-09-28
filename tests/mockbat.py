@@ -306,7 +306,12 @@ class MockBat:
             }
             return info
         if ch == "claude:start-session":
-            self.metas[sid] = {"cwd": p["options"]["cwd"], "isStreaming": False}
+            opts = p["options"]
+            cwd = opts.get("worktreePath") if opts.get("useWorktree") else opts["cwd"]
+            self.metas[sid] = {"cwd": cwd, "isStreaming": False}
+            if opts.get("useWorktree"):
+                self.worktrees.setdefault(sid, {"worktreePath": opts["worktreePath"],
+                                            "branchName": opts["worktreeBranch"]})
             self.states[sid] = {"isStreaming": False, "messages": []}
             return {"ok": True, "sessionId": sid}
         if ch == "worktree:status":

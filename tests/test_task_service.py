@@ -124,7 +124,7 @@ class FakeBAT:
         self.successors[session_id] = {"session_id": successor_id, "marker": handoff_message_id}
         return self.successors[session_id]
 
-    async def recover_failover(self, task, *, successor_id):
+    async def recover_failover(self, task, *, successor_id, handoff_message_id, handoff_command_id):
         return self.successors.get(task["session_id"])
 
     async def candidate_identity(self, task):
@@ -778,21 +778,51 @@ async def test_settled_reviewer_start_requires_presence_before_prompt(tmp_path):
 
 
 async def test_bat_adapter_recovers_codex_successor_without_handoff_turn_proof(
-        fleet_factory, mock, monkeypatch):
+        fleet_factory, mock, monkeypatch, tmp_path):
+    journal = Journal(tmp_path / "tasks.db")
+    task = submit(journal, lead_agent="claude")
+    journal.change(task["task_id"], "dispatching")
+    journal.change(task["task_id"], "accepted", fields={"session_id": "old-contract"})
+    journal.change(task["task_id"], "running")
+    task = journal.change(task["task_id"], "quota_limited")
+    _, handoff = journal.reserve_failover(task["task_id"], "old-contract", "successor-contract")
+    journal.command_prompt_hash(handoff["command_id"], hashlib.sha256(b"contract handoff").hexdigest())
     fleet = fleet_factory(writes=True, orchestrate=True)
-    mock.metas["successor-contract"] = {"cwd": "/tmp/synthetic", "isStreaming": False}
+    path, branch = "/srv/demo/.bat-worktrees/contract", "bat/worktree-contract"
+    mock.metas["successor-contract"] = {"cwd": path, "isStreaming": False}
+    mock.worktrees["old-contract"] = {"worktreePath": path, "branchName": branch}
+    mock.worktrees["successor-contract"] = {"worktreePath": path, "branchName": branch}
+    old = {"session_id": "old-contract", "worktree_path": path, "branch": branch}
+    successor = {"session_id": "successor-contract", "failover_of": "old-contract",
+                 "shares_worktree_with": "old-contract", "status": "active",
+                 "worktree_path": path, "branch": branch,
+                 "handoff_status": "sent", "handoff_message_id": handoff["message_id"],
+                 "handoff_command_id": handoff["command_id"]}
     monkeypatch.setattr(task_bat.registry, "get", lambda host, sid: {
-        "session_id": sid, "failover_of": "old-contract", "status": "active",
-        "handoff_status": "sent", "handoff_message_id": "batc-handoff-contract",
-    })
-    adapter = task_bat.BatTaskAdapter(fleet)
+        "old-contract": old, "successor-contract": successor}.get(sid))
+    adapter = task_bat.BatTaskAdapter(fleet, journal=journal)
     try:
-        found = await adapter.recover_failover({"host": "h1", "session_id": "old-contract"},
-                                              successor_id="successor-contract")
-        assert found == {"session_id": "successor-contract", "marker": "batc-handoff-contract"}
+        found = await adapter.recover_failover(task, successor_id="successor-contract",
+                                              handoff_message_id=handoff["message_id"],
+                                              handoff_command_id=handoff["command_id"])
+        assert found == {"session_id": "successor-contract", "marker": handoff["message_id"]}
+        mock.worktrees["successor-contract"]["branchName"] = "bat/other"
+        assert (await adapter.recover_failover(task, successor_id="successor-contract",
+                handoff_message_id=handoff["message_id"], handoff_command_id=handoff["command_id"])) == {
+                    "identity_mismatch": True}
+        mock.worktrees["successor-contract"]["branchName"] = branch
+        successor["handoff_command_id"] = "old-handoff"
+        assert (await adapter.recover_failover(task, successor_id="successor-contract",
+                handoff_message_id=handoff["message_id"], handoff_command_id=handoff["command_id"])) == {
+                    "identity_mismatch": True}
+        successor["handoff_command_id"] = handoff["command_id"]
+        mock.worktrees["successor-contract"] = None
+        assert await adapter.recover_failover(task, successor_id="successor-contract",
+                handoff_message_id=handoff["message_id"], handoff_command_id=handoff["command_id"]) is None
         assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
     finally:
         await fleet.close()
+        journal.close()
 
 
 async def test_operator_review_pass_requires_current_candidate_and_turn_reference(tmp_path):
@@ -1206,6 +1236,9 @@ async def test_live_failover_uses_private_history_fallback_when_ledger_unavailab
 
     monkeypatch.setattr(task_bat.service, "session_read", fake_read)
     monkeypatch.setattr(task_bat.lifecycle, "session_failover", fake_failover)
+    async def verified(*args):
+        return True
+    monkeypatch.setattr(daemon.adapter, "_verified_failover_successor", verified)
     try:
         result = await daemon.adapter.failover(task, "old", "successor",
                                                handoff_message_id=handoff["message_id"],
@@ -1398,6 +1431,73 @@ async def test_failover_recovers_reserved_successor_without_reuse(tmp_path):
     j.close()
 
 
+async def test_normal_failover_refuses_different_successor_response(tmp_path):
+    class WrongReplyBAT(FakeBAT):
+        async def failover(self, task, session_id, successor_id, **kwargs):
+            result = await super().failover(task, session_id, successor_id, **kwargs)
+            return {**result, "session_id": "previous-successor"}
+
+    j = Journal(tmp_path / "tasks.db")
+    task = submit(j, lead_agent="claude")
+    fake = WrongReplyBAT()
+    fake.failover_allowed = True
+    core = TaskCoordinator(j, fake)
+    await core.tick(task["task_id"])
+    old_sid = j.get(task["task_id"])["session_id"]
+    j.change(task["task_id"], "quota_limited")
+    result = await core.tick(task["task_id"])
+    cmds = j.commands(task["task_id"])
+    failover = next(c for c in cmds if c["kind"] == "failover")
+    handoff = next(c for c in cmds if json.loads(c["payload"]).get("purpose") == "failover_handoff")
+    assert result["state"] == "uncertain" and result["session_id"] == old_sid
+    assert [b["session_id"] for b in result["branches"]] == [old_sid]
+    assert failover["session_id"] == handoff["session_id"] != "previous-successor"
+    assert json.loads(failover["payload"])["operator_only"] is True
+    sends = len(fake.sends)
+    await core.tick(task["task_id"])
+    assert len(fake.sends) == sends and fake.failover_calls == 1
+    j.close()
+
+
+async def test_recovery_conflict_stays_operator_only_after_registry_changes(tmp_path):
+    class LostReplyBAT(FakeBAT):
+        async def failover(self, task, session_id, successor_id, **kwargs):
+            await super().failover(task, session_id, successor_id, **kwargs)
+            raise TimeoutError("accepted successor, lost response")
+
+    path = tmp_path / "tasks.db"
+    j = Journal(path)
+    task = submit(j, lead_agent="claude")
+    fake = LostReplyBAT()
+    fake.failover_allowed = True
+    core = TaskCoordinator(j, fake)
+    await core.tick(task["task_id"])
+    old_sid = j.get(task["task_id"])["session_id"]
+    j.change(task["task_id"], "quota_limited")
+    assert (await core.tick(task["task_id"]))["state"] == "uncertain"
+    failover = next(c for c in j.commands(task["task_id"]) if c["kind"] == "failover")
+    handoff = j.command_get(json.loads(failover["payload"])["handoff_command_id"])
+    reserved = failover["session_id"]
+    fake.successors[old_sid] = {"session_id": "previous-successor", "marker": handoff["message_id"]}
+    assert (await core.tick(task["task_id"]))["session_id"] == old_sid
+    assert json.loads(j.command_get(failover["command_id"])["payload"])["operator_only"] is True
+    fake.successors[old_sid] = {"session_id": reserved, "marker": handoff["message_id"]}
+    j.close()
+    j = Journal(path)
+    core = TaskCoordinator(j, fake)
+    assert (await core.tick(task["task_id"]))["session_id"] == old_sid
+    assert len(j.get(task["task_id"])["branches"]) == 1 and fake.failover_calls == 1
+    cap = j.issue_reconcile_capability(task["task_id"], failover["command_id"])
+    reconciled = await core.resolve_command(task["task_id"], failover["command_id"], token=cap,
+                                            outcome="superseded", actor="operator", source="incident:42",
+                                            evidence="reserved successor identity cannot be verified")
+    assert reconciled["state"] == "human_owned" and reconciled["session_id"] == old_sid
+    assert j.command_get(failover["command_id"])["status"] == "resolved_superseded"
+    assert j.command_get(handoff["command_id"])["status"] == "resolved_superseded"
+    assert len(j.get(task["task_id"])["branches"]) == 1
+    j.close()
+
+
 async def test_lost_codex_handoff_stays_scoped_uncertain_across_restart(tmp_path):
     path = tmp_path / "tasks.db"
     j = Journal(path)
@@ -1494,6 +1594,9 @@ async def test_failover_full_original_archive_verified_and_restart(mock, tmp_pat
                 "message_id": kwargs["handoff_message_id"]}
 
     monkeypatch.setattr(task_bat.lifecycle, "session_failover", fake_failover)
+    async def verified(*args):
+        return True
+    monkeypatch.setattr(daemon.adapter, "_verified_failover_successor", verified)
     try:
         with pytest.raises(ValueError, match="host verifier is unset"):
             await daemon.adapter.failover(task, "old", "successor",

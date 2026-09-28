@@ -9,7 +9,7 @@ import re
 import uuid
 from typing import Protocol
 
-from .errors import TaskDispatchCancelled, WriteRefused
+from .errors import TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .task_journal import Journal
 from .task_recipes import limits
 
@@ -24,7 +24,8 @@ class TaskAdapter(Protocol):
     async def interrupt(self, task: dict, session_id: str) -> None: ...
     async def failover(self, task: dict, session_id: str, successor_id: str, *,
                        handoff_message_id: str, handoff_command_id: str) -> dict: ...
-    async def recover_failover(self, task: dict, *, successor_id: str) -> dict | None: ...
+    async def recover_failover(self, task: dict, *, successor_id: str,
+                               handoff_message_id: str, handoff_command_id: str) -> dict | None: ...
     async def candidate_identity(self, task: dict) -> dict | None: ...
     async def run_verification(self, task: dict) -> dict | None: ...
     def reviewer_agent(self, task: dict) -> str: ...
@@ -295,15 +296,22 @@ class TaskCoordinator:
                                            fields={field: sid})
             return self.journal.change(task["task_id"], "uncertain")
         if kind == "failover":
-            found = await self.adapter.recover_failover(task, successor_id=sid)
-            if found and found.get("session_id"):
-                if found["session_id"] != sid:
-                    self.journal.command_bind_session(cmd["command_id"], found["session_id"])
-                    handoff_id = json.loads(cmd["payload"])["handoff_command_id"]
-                    self.journal.command_bind_session(handoff_id, found["session_id"])
+            if json.loads(cmd["payload"]).get("operator_only"):
+                return self.journal.change(task["task_id"], "uncertain")
+            handoff = self._bound_handoff(task, cmd)
+            if not handoff:
+                self.journal.command_operator_only(cmd["command_id"], "handoff_command_binding")
+                return self.journal.change(task["task_id"], "uncertain")
+            found = await self.adapter.recover_failover(
+                task, successor_id=sid, handoff_message_id=handoff["message_id"],
+                handoff_command_id=handoff["command_id"])
+            if found and (found.get("identity_mismatch") or found.get("session_id") != sid
+                          or found.get("marker") != handoff["message_id"]):
+                self.journal.command_operator_only(cmd["command_id"], "successor_identity")
+                return self.journal.change(task["task_id"], "uncertain")
+            if found:
                 self.journal.command_status(cmd["command_id"], "settled", marker=found.get("marker"))
-                handoff_id = json.loads(cmd["payload"])["handoff_command_id"]
-                self.journal.command_status(handoff_id, "uncertain", marker=found.get("marker"))
+                self.journal.command_status(handoff["command_id"], "uncertain", marker=found.get("marker"))
                 self.journal.add_branch(task["task_id"], session_id=found["session_id"],
                                         provider="codex", role="lead", reason="recovered_failover",
                                         parent_branch_id=(task["branches"][-1]["branch_id"]
@@ -342,13 +350,19 @@ class TaskCoordinator:
             result = await self.adapter.failover(task, task["session_id"], successor,
                                                  handoff_message_id=handoff["message_id"],
                                                  handoff_command_id=handoff["command_id"])
+        except TaskIdentityMismatch:
+            self.journal.command_operator_only(cmd["command_id"], "successor_identity")
+            self.journal.command_status(handoff["command_id"], "uncertain")
+            return self.journal.change(task["task_id"], "uncertain")
         except Exception:
             self.journal.command_status(cmd["command_id"], "uncertain")
             self.journal.command_status(handoff["command_id"], "uncertain")
             return self.journal.change(task["task_id"], "uncertain")
-        if result["session_id"] != successor:
-            self.journal.command_bind_session(cmd["command_id"], result["session_id"])
-            self.journal.command_bind_session(handoff["command_id"], result["session_id"])
+        if (not self._bound_handoff(task, cmd) or result.get("session_id") != successor
+                or result.get("marker") != handoff["message_id"]):
+            self.journal.command_operator_only(cmd["command_id"], "successor_or_handoff_response")
+            self.journal.command_status(handoff["command_id"], "uncertain")
+            return self.journal.change(task["task_id"], "uncertain")
         self.journal.command_status(cmd["command_id"], "settled", marker=result.get("marker"))
         self.journal.command_status(handoff["command_id"], "uncertain", marker=result.get("marker"))
         self.journal.add_branch(task["task_id"], session_id=result["session_id"], provider="codex",
@@ -358,6 +372,25 @@ class TaskCoordinator:
         return self.journal.change(task["task_id"], "uncertain",
                                    fields={"session_id": result["session_id"], "turn_marker": None,
                                            "lead_agent": "codex"})
+
+    def _bound_handoff(self, task: dict, failover: dict) -> dict | None:
+        """Only the journal's reserved successor and handoff command may advance failover."""
+        try:
+            payload = json.loads(failover["payload"])
+            handoff = self.journal.command_get(payload["handoff_command_id"])
+            hp = json.loads(handoff["payload"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if (failover["task_id"] != task["task_id"] or failover["kind"] != "failover"
+                or payload.get("old_session_id") != task["session_id"]
+                or handoff["task_id"] != task["task_id"] or handoff["kind"] != "send"
+                or handoff["session_id"] != failover["session_id"]
+                or handoff["status"] not in {"needs_review", "uncertain"}
+                or hp.get("purpose") != "failover_handoff"
+                or hp.get("old_session_id") != task["session_id"]
+                or not handoff.get("message_id")):
+            return None
+        return handoff
 
     async def _verify_and_review(self, task: dict) -> dict:
         candidate = await self.adapter.candidate_identity(task)
@@ -439,12 +472,21 @@ class TaskCoordinator:
                               observed_result: str = "none", turn_ref: str | None = None,
                               candidate_commit: str | None = None, tree_hash: str | None = None,
                               next_prompt: str | None = None) -> dict:
-        """An explicit operator attestation for one uncertain send, never a replay."""
+        """An explicit operator attestation for one uncertain command, never a replay."""
         async with self._task_locks.setdefault(task_id, asyncio.Lock()):
             task = self.journal.get(task_id)
             command = self.journal.command_get(command_id)
             if command["task_id"] != task_id or command["status"] != "uncertain":
                 raise ValueError("command is not uncertain for this task")
+            if command["kind"] == "failover":
+                if next_prompt is not None or observed_result != "none" or turn_ref:
+                    raise ValueError("failover reconciliation cannot send or attest a turn")
+                handoff = self._bound_handoff(task, command)
+                if not handoff:
+                    raise ValueError("failover handoff command binding is invalid")
+                return self.journal.resolve_failover(task_id, command_id, handoff["command_id"],
+                                                     token=token, outcome=outcome, actor=actor,
+                                                     source=source, evidence=evidence)
             if next_prompt is not None:
                 if not isinstance(next_prompt, str) or not next_prompt.strip() or len(next_prompt) > 18_000:
                     raise ValueError("invalid new prompt")

@@ -194,6 +194,13 @@ async def test_failover_same_worktree(fleet_factory, mock):
     assert e["failover_of"] == sid and e["status"] == "active" and e["worktree_path"].endswith("/abc")
     again = await lifecycle.session_failover(f, "h1", sid, confirm=True)
     assert again["skipped"] and again["new_session_id"] == r["new_session_id"]
+    sends = len([i for i in mock.invokes if i["channel"] == "claude:send-message"])
+    with pytest.raises(WriteRefused, match="reserved successor and handoff"):
+        await lifecycle.session_failover(f, "h1", sid, confirm=True,
+                                         successor_session_id="another-reservation",
+                                         handoff_message_id="batc-another-handoff",
+                                         handoff_command_id="another-command")
+    assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"]) == sends
     await f.close()
 
 
@@ -299,6 +306,17 @@ async def _finished_wt(f, mock, kind="unknown", diff="", verified=True):
             "mock host /srv/demo worktree, Python 3.12", "artifacts/test-run.log", confirm=True,
         )
     return r
+
+
+async def test_shared_worktree_reviewer_never_owns_cleanup(fleet_factory, mock):
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True,
+                      safety={"write_min_interval_s": 0})
+    r = await _finished_wt(f, mock)
+    registry.update("h1", r["session_id"], role="reviewer", lead_session_id="lead-session")
+    decision = await lifecycle.session_cleanup(f, "h1", session_id=r["session_id"], dry_run=True)
+    row = decision["decisions"][0]
+    assert row["decision"] == "KEEP" and not row["remove_worktree"] and not row["stop"]
+    await f.close()
 
 
 async def test_cleanup_clean_only_and_apply(fleet_factory, mock, monkeypatch):
