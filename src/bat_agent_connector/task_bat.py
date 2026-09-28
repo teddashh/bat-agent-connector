@@ -29,18 +29,76 @@ class BatTaskAdapter:
         self.register_tabs = self.verifier.settings.register_tabs
         self.journal = journal
 
+    async def _ssh_script(self, task: dict, script: str) -> str:
+        alias = self.verifier.settings.ssh_hosts.get(task["host"])
+        if not alias:
+            raise ValueError("base_branch requires a configured SSH verification host")
+        cmd = ("ssh", "-o", "BatchMode=yes", alias, "sh -lc " + shlex.quote(script))
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.PIPE)
+        out, err = await proc.communicate()
+        if proc.returncode != 0:
+            raise ValueError((err or out).decode(errors="replace")[-1000:] or "remote git command failed")
+        return out.decode(errors="replace").strip()
+
+    async def _workspace_folder(self, task: dict) -> str:
+        doc = await service._workspace(self.fleet.client(task["host"]))
+        matches = [w for w in doc.get("workspaces") or []
+                   if task["workspace"] in {w.get("id"), w.get("name")} ]
+        if len(matches) != 1 or not matches[0].get("folderPath"):
+            raise ValueError("task workspace has no unique folder")
+        return str(matches[0]["folderPath"])
+
+    async def _ensure_external_worktree(self, task: dict) -> dict:
+        root = await self._workspace_folder(task)
+        suffix = task["task_id"].replace("-", "")[:12]
+        path = f"{root}/.bat-worktrees/batc-task-{suffix}"
+        branch = f"batc/task-{suffix}"
+        base = task["base_branch"]
+        qroot, qpath, qbranch, qbase = map(shlex.quote, (root, path, branch, base))
+        script = (f"mkdir -p {shlex.quote(root + '/.bat-worktrees')} && "
+                  f"if git -C {qroot} worktree list --porcelain | "
+                  f"grep -Fxq 'worktree {path}'; then exit 0; fi; "
+                  f"if git -C {qroot} show-ref --verify --quiet refs/heads/{qbranch}; then "
+                  f"git -C {qroot} worktree add {qpath} {qbranch}; "
+                  f"else (git -C {qroot} fetch origin {qbase} && ref=FETCH_HEAD) || ref={qbase}; "
+                  f"git -C {qroot} worktree add -b {qbranch} {qpath} $ref; fi")
+        await self._ssh_script(task, script)
+        identity = await self.verifier.identity(task, path)
+        if not identity or not identity.get("clean"):
+            raise ValueError("connector-created worktree identity is unavailable or dirty")
+        result = {"path": path, "branch": branch, "base_commit": identity["candidate_commit"],
+                  "base_branch": base}
+        if self.journal:
+            self.journal.change(task["task_id"], "dispatching", fields={
+                "external_worktree_path": path, "external_branch": branch,
+                "base_commit": identity["candidate_commit"]}, event="external_worktree_created")
+        return result
+
+    async def cleanup_external_worktree(self, task: dict) -> None:
+        path, branch = task.get("external_worktree_path"), task.get("external_branch")
+        if not path or not branch:
+            return
+        root = await self._workspace_folder(task)
+        qroot, qpath, qbranch = map(shlex.quote, (root, path, branch))
+        await self._ssh_script(task, f"git -C {qroot} worktree remove --force {qpath} || true; "
+                                      f"git -C {qroot} branch -D {qbranch} || true")
+
     async def start(self, task: dict, *, role: str, agent: str, session_id: str) -> str:
         host = task["host"]
         if role == "lead":
-            r = await orchestrate.session_start(self.fleet, host, task["workspace"], agent,
-                                                confirm=True, prompt=None, use_worktree=True,
-                                                title="task " + task["task_id"][:8],
-                                                session_id=session_id, retain_on_error=True,
-                                                register_tab=self.register_tabs, base_branch=task.get("base_branch"))
+            external = await self._ensure_external_worktree(task) if task.get("base_branch") else None
+            r = await orchestrate.session_start(
+                self.fleet, host, task["workspace"], agent, confirm=True, prompt=None,
+                use_worktree=external is None, title="task " + task["task_id"][:8],
+                session_id=session_id, retain_on_error=True, register_tab=self.register_tabs,
+                base_branch=task.get("base_branch") if external is None else None,
+                cwd_override=external["path"] if external else None,
+                external_branch=external["branch"] if external else None)
             if self.journal and (r.get("base_branch") or r.get("base_commit")):
                 self.journal.change(task["task_id"], "dispatching", fields={
                     "base_branch": r.get("source_branch") or r.get("base_branch") or task.get("base_branch"),
-                    "base_commit": r.get("base_commit"),
+                    "base_commit": r.get("base_commit") or (external or {}).get("base_commit"),
                 }, event="base_recorded")
             return r["session_id"]
         # An independent reviewer must inspect the same candidate worktree while
@@ -88,6 +146,11 @@ class BatTaskAdapter:
         return sid
 
     async def recover_start(self, task: dict, *, role: str, session_id: str) -> bool:
+        if role == "lead" and task.get("base_branch"):
+            try:
+                await self._ensure_external_worktree(task)
+            except Exception:
+                return False
         meta = await self.fleet.client(task["host"]).invoke(
             "claude:get-session-meta", {"sessionId": session_id}, retry_on_disconnect=False,
         )
@@ -183,20 +246,25 @@ class BatTaskAdapter:
                     or not lead.get("worktree_path") or lead.get("cwd") != lead["worktree_path"]):
                 raise ValueError("reviewer lead worktree identity does not match task")
             expected_cwd = lead["worktree_path"]
-            lead_status = await client.invoke("worktree:status", {"sessionId": lead_id},
-                                              retry_on_disconnect=False)
-            if (not isinstance(lead_status, dict) or lead_status.get("worktreePath") != expected_cwd
-                    or lead_status.get("branchName") != lead.get("branch")):
-                raise ValueError("lead worktree changed before reviewer lookup")
+            if not task.get("external_worktree_path"):
+                lead_status = await client.invoke("worktree:status", {"sessionId": lead_id},
+                                                  retry_on_disconnect=False)
+                if (not isinstance(lead_status, dict) or lead_status.get("worktreePath") != expected_cwd
+                        or lead_status.get("branchName") != lead.get("branch")):
+                    raise ValueError("lead worktree changed before reviewer lookup")
             if isinstance(worktree, dict) and worktree.get("worktreePath") != expected_cwd:
                 raise ValueError("reviewer worktree differs from lead")
             branch_name = lead.get("branch")
         else:
-            if (not isinstance(worktree, dict) or not worktree.get("worktreePath")
-                    or not worktree.get("branchName")):
-                raise ValueError("lead worktree is not registered on BAT host")
-            expected_cwd = worktree["worktreePath"]
-            branch_name = worktree["branchName"]
+            if task.get("external_worktree_path"):
+                expected_cwd = task["external_worktree_path"]
+                branch_name = task.get("external_branch")
+            else:
+                if (not isinstance(worktree, dict) or not worktree.get("worktreePath")
+                        or not worktree.get("branchName")):
+                    raise ValueError("lead worktree is not registered on BAT host")
+                expected_cwd = worktree["worktreePath"]
+                branch_name = worktree["branchName"]
         if (meta["cwd"] != expected_cwd or
                 await client.invoke("git:getRoot", {"cwd": expected_cwd}, retry_on_disconnect=False)
                 != expected_cwd):

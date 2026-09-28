@@ -297,6 +297,16 @@ class TaskDaemon:
                     self.journal.change(task_id, "uncertain")
             except ValueError:
                 pass
+        finally:
+            try:
+                current = self.journal.get(task_id)
+                if current["state"] in {"done", "failed"} and current.get("external_worktree_path"):
+                    await self.adapter.cleanup_external_worktree(current)
+                    self.journal.change(task_id, current["state"], fields={
+                        "external_worktree_path": None, "external_branch": None})
+            except Exception as cleanup_exc:  # noqa: BLE001 - cleanup is retried by operator
+                logging.warning("Task %s external worktree cleanup failed: %s",
+                                task_id[:8], type(cleanup_exc).__name__)
 
     async def serve(self, host: str = "127.0.0.1", port: int = 18796):
         if host not in {"127.0.0.1", "::1", "localhost"}:
