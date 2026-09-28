@@ -1613,8 +1613,23 @@ async def test_minimal_small_task_uses_observed_tests_without_reviewer_or_step_j
     journal.close()
 
 
+async def test_minimal_review_threshold_accepts_calibrated_floor():
+    class BorderlineJev:
+        backend = "typesafe"
+
+        async def ask(self, _state, _questions):
+            return {"review_gate": {"type": "choice", "choice": "pass", "confidence": 0.50,
+                                    "probabilities": {"pass": 0.65, "fail": 0.25,
+                                                      "risk": 0.05, "unsure": 0.05}}}
+
+    result = await MinimalReviewGate(BorderlineJev(), RouterConfig()).judge(
+        original_words="small README task", diff="diff --git a/README.md b/README.md\n+one line\n",
+        paths=["README.md"])
+    assert result == {"verdict": "pass", "confidence": 0.50, "jev_backend": "typesafe", "reason": "jev_pass"}
+
+
 @pytest.mark.parametrize(("choice", "confidence", "paths", "answer", "reason"), [
-    ("pass", 0.6, ["README.md"], True, "low_confidence"),
+    ("pass", 0.49, ["README.md"], True, "low_confidence"),
     ("fail", 0.95, ["README.md"], True, "jev_fail"),
     ("pass", 0.95, ["src/auth/login.py"], True, "sensitive_path"),
     ("pass", 0.95, ["README.md"], False, "jev_unavailable_or_invalid"),
