@@ -57,8 +57,13 @@ class AgyShimAdapter(ProviderAdapter):
         token = source.get("BATC_AGY_SHIM_TOKEN")
         if not token:
             raise ProviderSetupError("agy shim token unavailable")
+        policy = ("omit_reasoning_effort" if entry.model.startswith("claude-")
+                  else "pass_reasoning_effort")
         return {"GOOSE_PROVIDER": "openai", "GOOSE_MODEL": entry.model,
-                "OPENAI_BASE_URL": entry.base_url, "OPENAI_API_KEY": token}
+                "OPENAI_BASE_URL": entry.base_url, "OPENAI_API_KEY": token,
+                # Consumed by compatible AGY shims; Claude thinking models
+                # select thinking from the model id and reject --effort.
+                "BATC_AGY_REQUEST_POLICY": policy}
 
     async def contract_probe(self, entry: ProviderEntry, source: dict[str, str]) -> bool:
         """Read a fake or local shim's model list; never submit a paid prompt."""
