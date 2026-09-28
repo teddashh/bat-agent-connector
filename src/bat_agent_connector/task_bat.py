@@ -88,13 +88,24 @@ class BatTaskAdapter:
         host = task["host"]
         if role == "lead":
             external = await self._ensure_external_worktree(task) if task.get("base_branch") else None
-            r = await orchestrate.session_start(
-                self.fleet, host, task["workspace"], agent, confirm=True, prompt=None,
-                use_worktree=external is None, title="task " + task["task_id"][:8],
-                session_id=session_id, retain_on_error=True, register_tab=self.register_tabs,
-                base_branch=task.get("base_branch") if external is None else None,
-                cwd_override=external["path"] if external else None,
-                external_branch=external["branch"] if external else None)
+            last_error = None
+            for attempt in range(3):
+                try:
+                    r = await orchestrate.session_start(
+                        self.fleet, host, task["workspace"], agent, confirm=True, prompt=None,
+                        use_worktree=external is None, title="task " + task["task_id"][:8],
+                        session_id=session_id, retain_on_error=True, register_tab=self.register_tabs,
+                        base_branch=task.get("base_branch") if external is None else None,
+                        cwd_override=external["path"] if external else None,
+                        external_branch=external["branch"] if external else None)
+                    break
+                except Exception as exc:  # noqa: BLE001 - same reserved start is idempotent
+                    last_error = exc
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(0.25 * (2 ** attempt))
+            else:  # pragma: no cover
+                raise last_error or RuntimeError("session start failed")
             if self.journal and (r.get("base_branch") or r.get("base_commit")):
                 self.journal.change(task["task_id"], "dispatching", fields={
                     "base_branch": r.get("source_branch") or r.get("base_branch") or task.get("base_branch"),
@@ -124,15 +135,31 @@ class BatTaskAdapter:
             opts.update(codexSandboxMode="read-only", codexApprovalPolicy="never")
         else:
             opts["permissionMode"] = "plan"
-        try:
-            started = await self.fleet.client(host).invoke(
-                "claude:start-session", {"sessionId": sid, "options": opts}, retry_on_disconnect=False)
-            if (not isinstance(started, dict) or started.get("ok") is False or
-                    started.get("sessionId") != sid):
+        client = self.fleet.client(host)
+        started = None
+        last_error = None
+        for attempt in range(3):
+            try:
+                started = await client.invoke(
+                    "claude:start-session", {"sessionId": sid, "options": opts}, retry_on_disconnect=False)
+                if isinstance(started, dict) and started.get("ok") is not False and started.get("sessionId") == sid:
+                    break
                 raise WriteRefused("BAT reviewer start did not confirm the reserved session ID")
-        except BaseException:
+            except Exception as exc:  # noqa: BLE001 - poll identity before retrying
+                last_error = exc
+                try:
+                    meta = await client.invoke("claude:get-session-meta", {"sessionId": sid},
+                                               retry_on_disconnect=False)
+                    if isinstance(meta, dict) and meta.get("cwd") == lead["cwd"]:
+                        started = {"ok": True, "sessionId": sid}
+                        break
+                except Exception:
+                    pass
+                if attempt < 2:
+                    await asyncio.sleep(0.25 * (2 ** attempt))
+        if not started or started.get("sessionId") != sid:
             registry.update(host, sid, status="uncertain")
-            raise
+            raise last_error or WriteRefused("BAT reviewer start did not settle")
         registry.update(host, sid, status="active", cwd=lead["cwd"])
         if self.register_tabs and hc.orchestrate_register_tabs:
             try:
@@ -182,11 +209,14 @@ class BatTaskAdapter:
         ):
             return "uncertain"
         client = self.fleet.client(task["host"])
-        for attempt in range(3):
+        for attempt in range(4):
             try:
                 meta = await client.invoke("claude:get-session-meta", {"sessionId": session_id},
                                            retry_on_disconnect=False)
             except Exception:  # noqa: BLE001 - transport failure is not proof of absence
+                if attempt < 3:
+                    await asyncio.sleep(0.25 * (2 ** attempt))
+                    continue
                 return "uncertain"
             if isinstance(meta, dict):
                 try:
@@ -194,8 +224,8 @@ class BatTaskAdapter:
                 except Exception:  # noqa: BLE001 - no verified lookup, so no prompt
                     return "uncertain"
                 return "present"
-            if attempt < 2:
-                await asyncio.sleep(0.25)
+            if attempt < 3:
+                await asyncio.sleep(0.25 * (2 ** attempt))
         # Worktree status may also be null after a BAT restart while its disk
         # directory persists. Only a future host-side explicit absence proof
         # may return "vanished"; journal replacement remains fail closed today.
