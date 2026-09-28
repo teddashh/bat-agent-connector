@@ -40,6 +40,7 @@ class VerificationSettings:
     timeout_s: int = 600
     register_tabs: bool = False
     artifact_dir: str | None = None
+    base_branches: dict[str, str] = field(default_factory=dict)
 
 
 def load_settings(path: str | None = None) -> VerificationSettings:
@@ -60,8 +61,14 @@ def load_settings(path: str | None = None) -> VerificationSettings:
     register_tabs = raw.get("task_service", {}).get("register_tabs", False)
     if not isinstance(register_tabs, bool):
         raise ValueError("task_service.register_tabs must be boolean")
+    base_branches = raw.get("task_service", {}).get("base_branches", {})
+    if not isinstance(base_branches, dict) or any(
+        not isinstance(k, str) or not k or not isinstance(v, str) or not v or v.startswith("-")
+        for k, v in base_branches.items()
+    ):
+        raise ValueError("task_service.base_branches must map project names to branch names")
     return VerificationSettings(commands, aliases, int(section.get("timeout_s", 600)), register_tabs,
-                                section.get("artifact_dir"))
+                                section.get("artifact_dir"), dict(base_branches))
 
 
 class ObservedVerifier:
@@ -71,7 +78,6 @@ class ObservedVerifier:
     async def _run(self, host: str, cwd: str, argv: tuple[str, ...], timeout: int = 30) -> tuple[int, str]:
         alias = self.settings.ssh_hosts.get(host)
         if alias:
-            script = "cd -- " + shlex.quote(cwd) + " && " + shlex.join(argv)
             cmd = _remote_command(alias, cwd, argv)
             working_dir = None
         else:
@@ -112,7 +118,6 @@ class ObservedVerifier:
             return None
         alias = self.settings.ssh_hosts.get(task["host"])
         if alias:
-            script = "cd -- " + shlex.quote(cwd) + " && " + shlex.join(argv)
             cmd = _remote_command(alias, cwd, argv)
             working_dir = None
         else:

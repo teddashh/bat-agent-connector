@@ -254,7 +254,7 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             discord_thread_id: str | None = None, recipe: str = "feature-to-staging",
             acceptance: str = "", engine: Literal["rules", "goose"] = "rules",
             interpretation: str | None = None, lead_agent: Literal["codex", "claude"] = "codex",
-            pm_provider: str | None = None,
+            pm_provider: str | None = None, base_branch: str | None = None,
         ) -> dict[str, Any]:
             """Queue Ted's exact words and return task_id immediately. Hermes must not rewrite or decompose them.
             interpretation is a non-authoritative archival note and never enters the coding prompt."""
@@ -263,7 +263,7 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
                                            idempotency_key=idempotency_key, discord_thread_id=discord_thread_id,
                                            recipe=recipe, acceptance=acceptance, engine=engine,
                                            interpretation=interpretation, lead_agent=lead_agent,
-                                           pm_provider=pm_provider)
+                                           pm_provider=pm_provider, base_branch=base_branch)
 
         async def work_pause(task_id: str, abort_current: bool = False,
                              actor: Literal["service", "ted"] = "service",

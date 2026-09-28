@@ -226,6 +226,7 @@ async def session_start(
     session_id: str | None = None,
     retain_on_error: bool = False,
     register_tab: bool | None = None,
+    base_branch: str | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
     if agent not in ("claude", "codex"):
@@ -268,20 +269,32 @@ async def session_start(
         )
         base = {"actor": fleet.actor, "tool": "session_start", "host": host, "session_id": sid}
         wt: dict = {}
+        base_commit = None
         try:
             if use_worktree:
                 audit.record(**base, channel="worktree:create", phase="attempt")
                 wt = await c.invoke(
-                    "worktree:create", {"sessionId": sid, "cwd": folder, "installPnpm": False}
+                    "worktree:create", {"sessionId": sid, "cwd": folder, "installPnpm": False,
+                                         **({"baseBranch": base_branch} if base_branch else {})}
                 )
                 if not isinstance(wt, dict) or wt.get("success") is False or not wt.get("worktreePath"):
                     err = (wt or {}).get("error") if isinstance(wt, dict) else "unexpected reply"
                     audit.record(**base, channel="worktree:create", phase="result", ok=False, error=str(err))
                     raise WriteRefused(f"worktree:create failed: {err}")
+                if base_branch and wt.get("sourceBranch") != base_branch:
+                    audit.record(**base, channel="worktree:create", phase="result", ok=False,
+                                 error="host ignored requested base branch", requested_base_branch=base_branch,
+                                 source_branch=wt.get("sourceBranch"))
+                    raise WriteRefused("worktree:create did not honor requested base branch")
                 audit.record(
-                    **base, channel="worktree:create", phase="result", ok=True, branch=wt.get("branchName")
+                    **base, channel="worktree:create", phase="result", ok=True, branch=wt.get("branchName"),
+                    source_branch=wt.get("sourceBranch"), requested_base_branch=base_branch
                 )
             cwd = wt.get("worktreePath") or folder
+            if use_worktree:
+                rows = await c.invoke("git:log", {"cwd": cwd, "count": 1})
+                if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                    base_commit = rows[0].get("hash")
             opts = {
                 "cwd": cwd,
                 "agentPreset": preset,
@@ -383,6 +396,9 @@ async def session_start(
         "workspace": w.get("name"),
         "worktree_path": wt.get("worktreePath"),
         "branch": wt.get("branchName"),
+        "source_branch": wt.get("sourceBranch"),
+        "base_branch": base_branch,
+        "base_commit": base_commit,
         "tab": tab,
         "prompt_sent": bool(prompt),
         "message_id": mid,

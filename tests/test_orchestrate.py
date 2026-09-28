@@ -187,3 +187,14 @@ async def test_remove_registers_worktree_first(fleet_factory, mock):
     assert out["removed"] is True and out["rehydrated"] is True
     assert "worktree:rehydrate" in mock.channels()
     await f.close()
+
+@pytest.mark.asyncio
+async def test_session_start_honors_and_reports_base_branch(fleet_factory, mock):
+    f = fleet_factory(writes=True, orchestrate=True)
+    result = await orchestrate.session_start(
+        f, "h1", "demo-project", "codex", confirm=True, base_branch="feat/task-service"
+    )
+    create = [i for i in mock.invokes if i["channel"] == "worktree:create"][-1]
+    assert create["params"]["baseBranch"] == "feat/task-service"
+    assert result["source_branch"] == "feat/task-service"
+    assert result["base_commit"] == "abc1234"
