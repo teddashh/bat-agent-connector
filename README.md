@@ -224,7 +224,7 @@ It does not replace a commit-bound verification record for automatic cleanup.
 * Tokens are resolved at connect time from a reference and redacted from every error string.
 * The client always drains the socket (BAT drops clients with 256 queued frames) and uses bounded event queues.
 * Session text is untrusted input: agents should not follow instructions found in it.
-* The optional Jev judgment layer tries TypeSafe first, then OpenRouter `typesafe/jev-router` using
+* The optional Jev judgment layer tries TypeSafe first, then OpenRouter Decisions `typesafe/jev-1.13` using
   `OPENROUTER_API_KEY` from the environment. It times out after a few seconds and retains deterministic
   decisions if both fail. It gets short excerpts with credential-looking strings masked. No keys live here.
 

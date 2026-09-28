@@ -27,25 +27,28 @@ def answers_for(questions: dict, choice: str) -> dict:
     return answers
 
 
-def openrouter_reply(body: bytes, choice: str) -> dict:
+def decisions_reply(body: bytes, choice: str) -> dict:
     request = json.loads(body)
-    questions = json.loads(request["messages"][1]["content"])["questions"]
-    return {"choices": [{"message": {"content": json.dumps({"answers": answers_for(questions, choice)})}}]}
+    return {"model": "typesafe/jev-1.13-20260917",
+            "answers": answers_for(request["questions"], choice)}
 
 
-def test_openrouter_transport_uses_fixed_endpoint_and_env_key(monkeypatch):
+def test_openrouter_transport_uses_decisions_endpoint_and_system_one_shape(monkeypatch):
     jev = Jev(JevConfig())
-    payload = json.dumps({"model": OPENROUTER_JEV_MODEL, "messages": []}).encode()
+    payload = json.dumps({"model": OPENROUTER_JEV_MODEL, "state": {"synthetic": True},
+                          "questions": {"test": {"type": "noul", "instructions": "Test?"}}}).encode()
 
     def urlopen(request, timeout):
         assert request.full_url == OPENROUTER_URL
         assert request.get_header("Authorization") == "Bearer fake-test-key"
-        assert json.loads(request.data)["model"] == OPENROUTER_JEV_MODEL
+        assert json.loads(request.data) == json.loads(payload)
+        assert set(json.loads(request.data)) == {"model", "state", "questions"}
+        assert request.get_method() == "POST"
         assert timeout == jev.cfg.timeout_s
-        return BytesIO(b'{"choices":[]}')
+        return BytesIO(b'{"answers":{}}')
 
     monkeypatch.setattr("bat_agent_connector.jev.urllib.request.urlopen", urlopen)
-    assert jev._post_openrouter(payload, "fake-test-key") == {"choices": []}
+    assert jev._post_openrouter(payload, "fake-test-key") == {"answers": {}}
 
 
 @pytest.mark.asyncio
@@ -74,8 +77,10 @@ async def test_jev_primary_failure_uses_openrouter_judgment(monkeypatch, primary
     monkeypatch.setenv("OPENROUTER_API_KEY", "fake-fallback-key")
     jev = Jev(JevConfig())
     models = []
+    primary_payloads = []
 
-    def primary(_body, _key):
+    def primary(body, _key):
+        primary_payloads.append(json.loads(body))
         if primary_result == "timeout":
             raise TimeoutError("synthetic timeout")
         return {"answers": {"step_type": {"type": "choice", "choice": "forged"}}}
@@ -84,7 +89,11 @@ async def test_jev_primary_failure_uses_openrouter_judgment(monkeypatch, primary
         assert key == "fake-fallback-key"
         model = json.loads(body)["model"]
         models.append(model)
-        return openrouter_reply(body, "planning")
+        assert set(json.loads(body)) == {"model", "state", "questions"}
+        assert {key: value for key, value in json.loads(body).items() if key != "model"} == {
+            key: value for key, value in primary_payloads[-1].items() if key != "model"
+        }
+        return decisions_reply(body, "planning")
 
     monkeypatch.setattr(jev, "_post", primary)
     monkeypatch.setattr(jev, "_post_openrouter", fallback)
@@ -115,7 +124,7 @@ async def test_jev_primary_failure_uses_openrouter_judgment(monkeypatch, primary
 
 
 @pytest.mark.asyncio
-async def test_jev_both_endpoints_fail_open_without_cheap_model(monkeypatch, tmp_path):
+async def test_jev_both_endpoints_fail_open(monkeypatch, tmp_path):
     monkeypatch.setenv("TYPESAFE_API_KEY", "fake-primary-key")
     monkeypatch.setenv("OPENROUTER_API_KEY", "fake-fallback-key")
     jev = Jev(JevConfig())
@@ -124,7 +133,7 @@ async def test_jev_both_endpoints_fail_open_without_cheap_model(monkeypatch, tmp
 
     def invalid_reply(body, _key):
         called.append(json.loads(body)["model"])
-        return {"choices": [{"message": {"content": "{}"}}]}
+        return {"answers": {}}
 
     monkeypatch.setattr(jev, "_post_openrouter", invalid_reply)
     journal = Journal(tmp_path / "tasks.db")
@@ -153,22 +162,18 @@ async def test_jev_missing_openrouter_key_skips_fallback(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_jev_cheap_model_requires_explicit_opt_in(monkeypatch):
+async def test_jev_decisions_invalid_output_never_sets_backend(monkeypatch):
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.setenv("OPENROUTER_API_KEY", "fake-fallback-key")
+    jev = Jev(JevConfig())
     used = []
 
-    def reply(body, _key):
-        model = json.loads(body)["model"]
-        used.append(model)
-        return openrouter_reply(body, "quota_exhausted") if model == "test/cheap-small" else {}
+    def invalid_reply(body, _key):
+        used.append(json.loads(body)["model"])
+        return {"answers": {"state": {"type": "choice", "choice": "quota_exhausted",
+                                      "confidence": 0.9, "probabilities": {"quota_exhausted": 1}}}}
 
-    ordinary = Jev(JevConfig(cheap_model="test/cheap-small"))
-    monkeypatch.setattr(ordinary, "_post_openrouter", reply)
-    assert ordinary.enabled and await ordinary.classify_state("synthetic") is None
+    monkeypatch.setattr(jev, "_post_openrouter", invalid_reply)
+    assert jev.enabled and await jev.classify_state("synthetic") is None
+    assert jev.backend is None
     assert used == [OPENROUTER_JEV_MODEL]
-    opted_in = Jev(JevConfig(allow_cheap_model=True, cheap_model="test/cheap-small"))
-    monkeypatch.setattr(opted_in, "_post_openrouter", reply)
-    result = await opted_in.classify_state("synthetic")
-    assert result["state"] == "quota_exhausted" and result["jev_backend"] == "openrouter_cheap"
-    assert used[-2:] == [OPENROUTER_JEV_MODEL, "test/cheap-small"]

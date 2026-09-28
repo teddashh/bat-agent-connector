@@ -29,7 +29,6 @@ Config file (default ``~/.config/bat-agent-connector/hosts.toml``)::
     [jev]                              # optional judgment layer (TypeSafe Jev); off without an API key
     enabled = "auto"                   # on when TYPESAFE_API_KEY or OPENROUTER_API_KEY is set
     timeout_s = 3.0
-    allow_cheap_model = false          # third fallback requires explicit cheap_model; no key in TOML
 
 Token values never live in this file.
 """
@@ -194,8 +193,6 @@ class JevConfig:
     model: str = "jev-latest"
     base_url: str = "https://api.typesafe.ai"
     api_key_env: str = "TYPESAFE_API_KEY"
-    allow_cheap_model: bool = False
-    cheap_model: str | None = None
 
 
 @dataclass
@@ -300,13 +297,7 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
         model=str(j.get("model") or "jev-latest"),
         base_url=base,
         api_key_env=str(j.get("api_key_env") or "TYPESAFE_API_KEY"),
-        allow_cheap_model=j.get("allow_cheap_model", False),
-        cheap_model=str(j.get("cheap_model") or "").strip() or None,
     )
-    if not isinstance(jev.allow_cheap_model, bool):
-        raise ConfigError("[jev] allow_cheap_model must be boolean")
-    if jev.allow_cheap_model and not jev.cheap_model:
-        raise ConfigError("[jev] cheap_model is required when allow_cheap_model is true")
     cl = data.get("client") or {}
     label = str(cl.get("label") or "BAT Agent Connector")
     human = str(cl.get("human_name") or "").strip() or None
