@@ -2,6 +2,7 @@
 
 ## Next release (unreleased)
 
+- The minimal task path is now the configurable production default (`BATC_TASK_DEFAULT_PATH=minimal`), with a typed Jev candidate review gate; `task_path="standard"` remains the explicit full-review opt-out.
 - Claude turn markers now use BAT's exact `clientMessageId` echo (`batc-<uuid>`), with an explicit
   timestamp cursor and conservative queued-turn phases. Codex is labeled as a timestamp fallback
   because BAT does not echo that ID; Codex sends are not automatically retried after a disconnect.

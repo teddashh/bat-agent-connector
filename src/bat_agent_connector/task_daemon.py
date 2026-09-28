@@ -76,6 +76,9 @@ class TaskDaemon:
         jev = Jev(config.jev)
         self.router = ModelRouter(self.journal, jev, router_config, self.goose.catalog)
         self.minimal_router = MinimalTaskRouter(jev)
+        self.default_task_path = os.environ.get("BATC_TASK_DEFAULT_PATH", "standard").strip().lower()
+        if self.default_task_path not in {"standard", "minimal"}:
+            raise ValueError("BATC_TASK_DEFAULT_PATH must be standard or minimal")
         self.minimal_review_gate = MinimalReviewGate(jev, router_config)
         self.coordinator = TaskCoordinator(self.journal, self.adapter, router=self.router,
                                            minimal_review_gate=self.minimal_review_gate)
@@ -117,7 +120,8 @@ class TaskDaemon:
             if params.get("base_branch") is None:
                 params["base_branch"] = self.adapter.verifier.settings.base_branches.get(params.get("project"))
             async with self._submit_lock:
-                path = params.get("task_path", "standard")
+                path = params.get("task_path") or self.default_task_path
+                params["task_path"] = path
                 if path == "minimal":
                     if params.get("engine", "rules") == "goose":
                         raise ValueError("minimal path chooses its engine with Jev")
