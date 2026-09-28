@@ -102,6 +102,18 @@ class GooseACP:
             Path(isolated_home).chmod(0o700)
             env.update(HOME=isolated_home, XDG_CONFIG_HOME=isolated_home,
                        XDG_DATA_HOME=isolated_home)
+            # Keep ACP task runs MCP-only. Stock Goose otherwise enables its
+            # developer/platform helpers in a fresh HOME, causing native tool
+            # calls (and host-side execution) outside the scoped server.
+            goose_config = Path(isolated_home) / "goose"
+            goose_config.mkdir(mode=0o700)
+            (goose_config / "config.yaml").write_text(
+                "extensions:\n"
+                "  developer:\n    enabled: false\n"
+                "  computercontroller:\n    enabled: false\n"
+                "  memory:\n    enabled: false\n"
+                "  todo:\n    enabled: false\n"
+            )
             return await self._run_process(task_id, cwd, prompt, capability, command or cfg.command,
                                            env, cfg.timeout_s)
 
