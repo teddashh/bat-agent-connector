@@ -168,6 +168,7 @@ class Journal:
         task = self.get(task_id)
         command = self.command_get(command_id)
         if (command["task_id"] != task_id or command["kind"] != "send"
+                or command["session_id"] not in {task["session_id"], task["reviewer_session_id"]}
                 or command["status"] != "uncertain" or task["state"] != "uncertain"):
             raise ValueError("only an uncertain send can be reconciled")
         token = secrets.token_urlsafe(32)
@@ -204,9 +205,8 @@ class Journal:
             raise ValueError("operator provenance and evidence are required")
         if observed_result != "none" and (outcome != "delivered" or not turn_ref):
             raise ValueError("observed result requires delivered prompt and exact turn reference")
-        if next_prompt_sha256 and (outcome not in {"not_delivered", "superseded"}
-                                   or observed_result != "none"):
-            raise ValueError("new prompt requires not_delivered or superseded outcome")
+        if next_prompt_sha256 and observed_result != "none":
+            raise ValueError("new prompt cannot also attest an observed result")
         if next_prompt_sha256 and not isinstance(next_before, dict):
             raise ValueError("new prompt needs a recorded pre-send baseline")
         digest = hashlib.sha256(token.encode()).hexdigest()
@@ -314,7 +314,10 @@ class Journal:
                idempotency_key: str) -> dict:
         if not all(isinstance(x, str) and x.strip() for x in (project, host, workspace, original_words, idempotency_key)):
             raise ValueError("project, host, workspace, original_words and idempotency_key are required")
-        if len(original_words) > 18_000 or len(idempotency_key) > 256 or len(acceptance) > 4000:
+        # The initial lead prompt adds a short wrapper under BAT's 20k limit.
+        # Longer accepted requests would need the same verified archive path as
+        # failover before their first send; reject them instead of truncating.
+        if len(original_words) > 19_000 or len(idempotency_key) > 256 or len(acceptance) > 4000:
             raise ValueError("task input is too long")
         if interpretation is not None and len(interpretation) > 4000:
             raise ValueError("interpretation note is too long")
@@ -489,6 +492,47 @@ class Journal:
             self._event(task_id, "command_intent", {"command_id": command_id, "kind": kind,
                                                      "needs_review": kind == "send"})
         return dict(self.db.execute("SELECT * FROM commands WHERE command_id=?", (command_id,)).fetchone()), True
+
+    def reserve_failover(self, task_id: str, old_session_id: str, successor_id: str) -> tuple[dict, dict]:
+        """Reserve a successor and its separate, reconcilable handoff send atomically."""
+        with self.tx():
+            task = self.get(task_id)
+            if task["state"] != "quota_limited" or task["paused"] or task["session_id"] != old_session_id:
+                raise ValueError("task does not allow failover")
+            pending = self.db.execute("""SELECT 1 FROM commands WHERE task_id=?
+                AND status IN ('intent','needs_review','uncertain')
+                AND (kind='send' OR kind='failover' OR kind LIKE 'start_%') LIMIT 1""", (task_id,)).fetchone()
+            if pending:
+                raise ValueError("task has a command requiring reconciliation")
+            now = time.time()
+            failover_id, send_id = str(uuid.uuid4()), str(uuid.uuid4())
+            rows = (
+                (failover_id, f"{task_id}:failover:{old_session_id}:{task['control_version']}",
+                 "failover", "intent", {"old_session_id": old_session_id, "handoff_command_id": send_id}),
+                (send_id, f"{task_id}:handoff:{successor_id}", "send", "needs_review",
+                 {"purpose": "failover_handoff", "old_session_id": old_session_id,
+                  "before": {"agent_kind": "codex"}, "prompt_sha256": None}),
+            )
+            for command_id, key, kind, status, payload in rows:
+                self.db.execute("""INSERT INTO commands(command_id,task_id,idem_key,session_id,kind,status,
+                    message_id,payload,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (command_id, task_id, key, successor_id, kind, status, f"batc-{command_id}",
+                     json.dumps(payload), now, now))
+                self._event(task_id, "command_intent", {"command_id": command_id, "kind": kind,
+                                                         "needs_review": status == "needs_review"})
+        return self.command_get(failover_id), self.command_get(send_id)
+
+    def command_prompt_hash(self, command_id: str, digest: str):
+        with self.tx():
+            cmd = self.command_get(command_id)
+            if cmd["kind"] != "send" or cmd["status"] != "needs_review":
+                raise ValueError("handoff prompt intent is no longer pending")
+            payload = json.loads(cmd["payload"])
+            if payload.get("purpose") != "failover_handoff":
+                raise ValueError("not a failover handoff command")
+            payload["prompt_sha256"] = digest
+            self.db.execute("UPDATE commands SET payload=?,updated_at=? WHERE command_id=?",
+                            (json.dumps(payload), time.time(), command_id))
 
     def command_status(self, command_id: str, status: str, *, marker: str | None = None):
         if status not in {"intent", "needs_review", "accepted", "running", "settled", "uncertain",

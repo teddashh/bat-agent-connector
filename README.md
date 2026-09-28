@@ -103,6 +103,8 @@ are deferred. The task API requires a local admin token or scoped capability and
 Codex timestamp cursors do not prove command ownership. An uncertain send remains stopped until a command-scoped,
 one-time operator reconciliation (`batc task-reconcile`); it is never replayed automatically. Discord delivery
 that falls outside the recent-message scan also requires an explicit found-ID or absent confirmation.
+Claude-to-Codex failover journals its handoff as a separate uncertain send. Long original requests use a complete
+private archive verified from the successor host before dispatch; the service fails closed if access cannot be proved.
 No paid API key is required.
 
 The server name is `bat`. Examples (add `--read-only` if you want to be sure):

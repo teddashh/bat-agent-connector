@@ -97,11 +97,12 @@ class FakeBAT:
     async def interrupt(self, task, session_id):
         self.interrupts += 1
 
-    async def failover(self, task, session_id, successor_id):
+    async def failover(self, task, session_id, successor_id, *, handoff_message_id, handoff_command_id):
         self.failover_calls += 1
         if not self.failover_allowed:
             raise ValueError("Codex cannot Claude-to-Codex fail over")
-        self.successors[session_id] = {"session_id": successor_id, "marker": "handoff-" + successor_id}
+        self.sends.append((successor_id, "handoff for task " + task["task_id"], handoff_message_id))
+        self.successors[session_id] = {"session_id": successor_id, "marker": handoff_message_id}
         return self.successors[session_id]
 
     async def recover_failover(self, task, *, successor_id):
@@ -318,6 +319,24 @@ async def test_task_bat_adapter_contract_with_mock_host(fleet_factory, mock, tmp
     j.close()
 
 
+async def test_bat_adapter_recovers_codex_successor_without_handoff_turn_proof(
+        fleet_factory, mock, monkeypatch):
+    fleet = fleet_factory(writes=True, orchestrate=True)
+    mock.metas["successor-contract"] = {"cwd": "/tmp/synthetic", "isStreaming": False}
+    monkeypatch.setattr(task_bat.registry, "get", lambda host, sid: {
+        "session_id": sid, "failover_of": "old-contract", "status": "active",
+        "handoff_status": "sent", "handoff_message_id": "batc-handoff-contract",
+    })
+    adapter = task_bat.BatTaskAdapter(fleet)
+    try:
+        found = await adapter.recover_failover({"host": "h1", "session_id": "old-contract"},
+                                              successor_id="successor-contract")
+        assert found == {"session_id": "successor-contract", "marker": "batc-handoff-contract"}
+        assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
+    finally:
+        await fleet.close()
+
+
 async def test_operator_review_pass_requires_current_candidate_and_turn_reference(tmp_path):
     j = Journal(tmp_path / "tasks.db")
     task = submit(j)
@@ -420,9 +439,17 @@ async def test_failover_and_single_writer(tmp_path):
     core = TaskCoordinator(j, fake)
     await core.tick(task["task_id"])
     j.change(task["task_id"], "quota_limited")
-    successor = (await core.tick(task["task_id"]))["session_id"]
+    successor_task = await core.tick(task["task_id"])
+    successor = successor_task["session_id"]
     assert successor != task["session_id"]
+    assert successor_task["state"] == "uncertain"
     assert fake.failover_calls == 1
+    handoff = next(c for c in j.commands(task["task_id"]) if c["kind"] == "send"
+                   and json.loads(c["payload"]).get("purpose") == "failover_handoff")
+    cap = j.issue_reconcile_capability(task["task_id"], handoff["command_id"])
+    await core.resolve_command(task["task_id"], handoff["command_id"], token=cap,
+                               outcome="superseded", actor="operator", source="test:handoff",
+                               evidence="synthetic handoff turn inspected", next_prompt="Inspect task state")
     # Two sends to the same BAT session serialize in the daemon.
     current = j.get(task["task_id"])
     await asyncio.gather(core._send(current, successor, "a", "a"),
@@ -695,10 +722,15 @@ def test_ledger_handoff_archive_and_permissions(tmp_path):
 async def test_live_failover_uses_private_history_fallback_when_ledger_unavailable(mock, tmp_path, monkeypatch):
     daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
     task = submit(daemon.journal, lead_agent="claude")
+    daemon.journal.change(task["task_id"], "dispatching")
+    daemon.journal.change(task["task_id"], "accepted", fields={"session_id": "old"})
+    daemon.journal.change(task["task_id"], "running")
+    task = daemon.journal.change(task["task_id"], "quota_limited")
+    _, handoff = daemon.journal.reserve_failover(task["task_id"], "old", "successor")
     monkeypatch.setenv("BATC_TASK_LOCAL_HOST_ALIAS", "h1")
     monkeypatch.setattr(task_bat.registry, "get", lambda host, sid: {"agent_preset": "claude-agent"})
 
-    def broken_summary(journal, task_id):
+    def broken_summary(journal, task_id, **kwargs):
         raise ValueError("ledger unavailable")
 
     monkeypatch.setattr(task_bat, "ledger_summary", broken_summary)
@@ -711,12 +743,15 @@ async def test_live_failover_uses_private_history_fallback_when_ledger_unavailab
 
     async def fake_failover(*args, **kwargs):
         observed.update(kwargs)
+        kwargs["before_handoff_send"]("synthetic BAT handoff\n" + kwargs["instructions"])
         return {"new_session_id": "successor", "prompt_sent": True, "message_id": "handoff"}
 
     monkeypatch.setattr(task_bat.service, "session_read", fake_read)
     monkeypatch.setattr(task_bat.lifecycle, "session_failover", fake_failover)
     try:
-        result = await daemon.adapter.failover(task, "old", "successor")
+        result = await daemon.adapter.failover(task, "old", "successor",
+                                               handoff_message_id=handoff["message_id"],
+                                               handoff_command_id=handoff["command_id"])
         assert result["session_id"] == "successor"
         assert observed["ledger_only"] is True
         files = list((tmp_path / "handoff-archive").glob("*.txt"))
@@ -882,8 +917,8 @@ for line in sys.stdin:
 
 async def test_failover_recovers_reserved_successor_without_reuse(tmp_path):
     class LostReplyBAT(FakeBAT):
-        async def failover(self, task, session_id, successor_id):
-            await super().failover(task, session_id, successor_id)
+        async def failover(self, task, session_id, successor_id, **kwargs):
+            await super().failover(task, session_id, successor_id, **kwargs)
             raise TimeoutError("successor accepted but reply lost")
 
     j = Journal(tmp_path / "tasks.db")
@@ -896,10 +931,150 @@ async def test_failover_recovers_reserved_successor_without_reuse(tmp_path):
     j.change(task["task_id"], "quota_limited")
     assert (await core.tick(task["task_id"]))["state"] == "uncertain"
     recovered = await core.tick(task["task_id"])
-    assert recovered["state"] == "running" and recovered["session_id"] != old_sid
+    assert recovered["state"] == "uncertain" and recovered["session_id"] != old_sid
     assert fake.failover_calls == 1
+    handoff = next(c for c in j.commands(task["task_id"]) if c["kind"] == "send"
+                   and json.loads(c["payload"]).get("purpose") == "failover_handoff")
+    assert handoff["status"] == "uncertain"
     assert [b["provider"] for b in recovered["branches"]] == ["claude", "codex"]
     j.close()
+
+
+async def test_lost_codex_handoff_stays_scoped_uncertain_across_restart(tmp_path):
+    path = tmp_path / "tasks.db"
+    j = Journal(path)
+    task = submit(j, lead_agent="claude")
+    fake = FakeBAT()
+    fake.failover_allowed = True
+    core = TaskCoordinator(j, fake)
+    await core.tick(task["task_id"])
+    j.change(task["task_id"], "quota_limited")
+    result = await core.tick(task["task_id"])
+    successor = result["session_id"]
+    assert result["state"] == "uncertain"
+    handoff = next(c for c in j.commands(task["task_id"]) if c["kind"] == "send"
+                   and json.loads(c["payload"]).get("purpose") == "failover_handoff")
+    assert handoff["status"] == "uncertain" and handoff["session_id"] == successor
+    assert fake.sends[-1][2] == handoff["message_id"]
+    fake.reads[successor] = {"turn_started": True, "turn_done": True,
+                             "turn_attribution": "echo_not_visible", "streaming": False,
+                             "messages": [{"role": "assistant", "text": "REVIEW: PASS"}]}
+    sends = len(fake.sends)
+    assert (await core.tick(task["task_id"]))["state"] == "uncertain"
+    assert len(fake.sends) == sends and fake.failover_calls == 1 and not j.get(task["task_id"])["delivered"]
+    j.close()
+    j = Journal(path)
+    core = TaskCoordinator(j, fake)
+    assert (await core.tick(task["task_id"]))["state"] == "uncertain"
+    assert len(fake.sends) == sends
+    cap = j.issue_reconcile_capability(task["task_id"], handoff["command_id"])
+    fake.reads[successor]["streaming"] = True
+    with pytest.raises(ValueError, match="confirmed idle"):
+        await core.resolve_command(task["task_id"], handoff["command_id"], token=cap,
+                                   outcome="delivered", actor="operator", source="ticket:handoff",
+                                   evidence="inspected exact successor and handoff command",
+                                   next_prompt="Inspect task state after the handoff")
+    fake.reads[successor]["streaming"] = False
+    fake.prepare_kind = "codex"
+    result = await core.resolve_command(task["task_id"], handoff["command_id"], token=cap,
+                                        outcome="delivered", actor="operator", source="ticket:handoff",
+                                        evidence="inspected exact successor and handoff command",
+                                        next_prompt="Inspect task state after the handoff")
+    assert result["state"] == "uncertain" and len(fake.sends) == sends + 1
+    assert fake.sends[-1][1] != fake.sends[-2][1]
+    assert fake.failover_calls == 1
+    assert j.command_get(handoff["command_id"])["status"] == "resolved_delivered"
+    assert not j.get(task["task_id"])["delivered"]
+    assert (await core.tick(task["task_id"]))["state"] == "uncertain"
+    assert len(fake.sends) == sends + 1
+    j.close()
+
+
+def test_handoff_ledger_preserves_words_beyond_old_2200_limit(tmp_path):
+    path = tmp_path / "tasks.db"
+    j = Journal(path)
+    words = "前" * 2201 + "完整結尾"
+    task = j.submit(project="p", host="h1", workspace="w", original_words=words,
+                    idempotency_key="long-request")
+    assert words in ledger_summary(j, task["task_id"])
+    prompt = task_bat.lifecycle.build_handoff_prompt(
+        old_sid="old", workspace="w", cwd="/tmp/synthetic", same_worktree=True,
+        branch="feat/test", first_prompt=None, last_prompt=None, recent=[], git={},
+        evidence="quota", instructions=ledger_summary(j, task["task_id"]),
+        authoritative_original=True)
+    assert words in prompt and "overrides the original task's scope" not in prompt
+    j.close()
+    j = Journal(path)
+    assert j.get(task["task_id"])["original_words"] == words
+    assert words in ledger_summary(j, task["task_id"])
+    with pytest.raises(ValueError, match="too long"):
+        j.submit(project="p", host="h1", workspace="w", original_words="x" * 19_001,
+                 idempotency_key="over-bat-limit")
+    j.close()
+
+
+@pytest.mark.parametrize("word_count", [17_950, 18_050])
+async def test_failover_full_original_archive_verified_and_restart(mock, tmp_path, monkeypatch, word_count):
+    path = tmp_path / "tasks.db"
+    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), path)
+    words = "Ted 原話。" + "字" * word_count + "END-VERBATIM"
+    task = daemon.journal.submit(project="p", host="h1", workspace="w", original_words=words,
+                                 idempotency_key=f"long:{word_count}", lead_agent="claude")
+    daemon.journal.change(task["task_id"], "dispatching")
+    daemon.journal.change(task["task_id"], "accepted", fields={"session_id": "old"})
+    daemon.journal.change(task["task_id"], "running")
+    task = daemon.journal.change(task["task_id"], "quota_limited")
+    _, handoff = daemon.journal.reserve_failover(task["task_id"], "old", "successor")
+    monkeypatch.setenv("BATC_TASK_LOCAL_HOST_ALIAS", "h1")
+    monkeypatch.setattr(task_bat.registry, "get", lambda host, sid: {"agent_preset": "claude-agent"})
+    called = []
+
+    async def fake_failover(*args, **kwargs):
+        called.append(kwargs)
+        kwargs["before_handoff_send"]("synthetic BAT handoff\n" + kwargs["instructions"])
+        return {"new_session_id": "successor", "prompt_sent": True,
+                "message_id": kwargs["handoff_message_id"]}
+
+    monkeypatch.setattr(task_bat.lifecycle, "session_failover", fake_failover)
+    try:
+        with pytest.raises(ValueError, match="host verifier is unset"):
+            await daemon.adapter.failover(task, "old", "successor",
+                                          handoff_message_id=handoff["message_id"],
+                                          handoff_command_id=handoff["command_id"])
+        assert not called
+        monkeypatch.setenv("BATC_TASK_ARCHIVE_VERIFY_SSH_HOST", "bat-local-user")
+
+        monkeypatch.setattr(task_bat.subprocess, "run", lambda command, **kwargs:
+                            subprocess.CompletedProcess(command, 1, "", "unreadable"))
+        with pytest.raises(ValueError, match="cannot verify"):
+            await daemon.adapter.failover(task, "old", "successor",
+                                          handoff_message_id=handoff["message_id"],
+                                          handoff_command_id=handoff["command_id"])
+        assert not called
+
+        def fake_ssh(command, **kwargs):
+            archive = next(p for p in (tmp_path / "handoff-archive").glob("*.original.txt")
+                           if str(p) in command[-1])
+            return subprocess.CompletedProcess(command, 0,
+                                               hashlib.sha256(archive.read_bytes()).hexdigest() + "  file\n", "")
+
+        monkeypatch.setattr(task_bat.subprocess, "run", fake_ssh)
+        result = await daemon.adapter.failover(task, "old", "successor",
+                                               handoff_message_id=handoff["message_id"],
+                                               handoff_command_id=handoff["command_id"])
+        assert result["marker"] == handoff["message_id"] and len(called) == 1
+        archives = list((tmp_path / "handoff-archive").glob("*.original.txt"))
+        referenced = next(p for p in archives if str(p) in called[0]["instructions"])
+        assert referenced.stat().st_mode & 0o777 == 0o600
+        assert referenced.read_text() == words
+        assert hashlib.sha256(words.encode()).hexdigest() in called[0]["instructions"]
+        assert json.loads(daemon.journal.command_get(handoff["command_id"])["payload"])["prompt_sha256"]
+        daemon.journal.close()
+        reopened = Journal(path)
+        assert reopened.get(task["task_id"])["original_words"] == referenced.read_text()
+        reopened.close()
+    finally:
+        await daemon.fleet.close()
 
 
 async def test_discord_claim_recovery_after_restart(tmp_path):

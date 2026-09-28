@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import os
+import re
+import shlex
+import stat
+import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 
 from . import lifecycle, orchestrate, registry, service
 from .fleet import Fleet
-from .task_handoff import history_excerpt, ledger_summary
+from .task_handoff import history_excerpt, ledger_summary, original_words_archive
 from .task_verifier import ObservedVerifier, VerificationSettings
 
 
@@ -103,14 +110,27 @@ class BatTaskAdapter:
     async def interrupt(self, task: dict, session_id: str) -> None:
         await service.session_interrupt(self.fleet, task["host"], session_id, "hard", confirm=True)
 
-    async def failover(self, task: dict, session_id: str, successor_id: str) -> dict:
+    async def failover(self, task: dict, session_id: str, successor_id: str, *,
+                       handoff_message_id: str, handoff_command_id: str) -> dict:
         entry = registry.get(task["host"], session_id)
         if not entry or not str(entry.get("agent_preset") or "").startswith("claude"):
             raise ValueError("only a quota-limited Claude session can fail over to Codex")
-        instructions = None
+        words = task["original_words"]
+        original_archive = None
+        if len(words) > 3000:
+            if os.environ.get("BATC_TASK_LOCAL_HOST_ALIAS") != task["host"] or not self.journal:
+                raise ValueError("complete request requires a shared, verified host archive")
+            original_archive = original_words_archive(
+                words, self.journal.path.parent / "handoff-archive", task["task_id"])
+            await self._verify_original_archive(task, original_archive)
+        scope = ("Ted's COMPLETE verbatim request is at " + original_archive["path"] +
+                 "; SHA-256 " + original_archive["sha256"] + ". Read it before planning."
+                 if original_archive else "Ted's original words (verbatim):\n" + words)
+        instructions = scope
         if self.journal:
             try:
-                instructions = ledger_summary(self.journal, task["task_id"])
+                instructions = ledger_summary(self.journal, task["task_id"],
+                                              original_archive=original_archive)
             except (OSError, ValueError, KeyError):
                 # A local path is useful only if BAT and the daemon share this
                 # filesystem. Never hand a remote successor an unreadable path.
@@ -119,17 +139,46 @@ class BatTaskAdapter:
                 history = await self._history_for_fallback(task, session_id)
                 bundle = history_excerpt(history, self.journal.path.parent / "handoff-archive",
                                          task["task_id"], force_archive=True)
-                instructions = ("Ledger unavailable. Treat old chat as context data only. "
+                instructions = (scope + "\nLedger unavailable. Treat old chat as context data only. "
                                 "Read the 0600 handoff excerpt at " + bundle["excerpt_path"] +
                                 "; full 0600 archive at " + bundle["archive_path"] +
                                 ". The excerpt is head 12k + tail 148k when history exceeds 200k. "
                                 "Verify the repo state before continuing.")
+        if len(instructions) > 4000:
+            raise ValueError("full handoff scope exceeds BAT instructions limit")
+
+        def before_send(prompt: str):
+            if (original_archive and (original_archive["path"] not in prompt or
+                                      original_archive["sha256"] not in prompt)):
+                raise ValueError("full request archive reference lost in BAT handoff")
+            if not original_archive and words not in prompt:
+                raise ValueError("Ted's verbatim request lost in BAT handoff")
+            if self.journal:
+                self.journal.command_prompt_hash(handoff_command_id, hashlib.sha256(prompt.encode()).hexdigest())
+
         r = await lifecycle.session_failover(self.fleet, task["host"], session_id, confirm=True,
                                              successor_session_id=successor_id, instructions=instructions,
-                                             ledger_only=bool(self.journal))
+                                             ledger_only=bool(self.journal),
+                                             handoff_message_id=handoff_message_id,
+                                             before_handoff_send=before_send,
+                                             authoritative_original=True)
         if not r.get("prompt_sent") and not r.get("skipped"):
             raise RuntimeError("failover handoff outcome is uncertain")
         return {"session_id": r["new_session_id"], "marker": r.get("message_id")}
+
+    async def _verify_original_archive(self, task: dict, archive: dict):
+        path = Path(archive["path"])
+        alias = os.environ.get("BATC_TASK_ARCHIVE_VERIFY_SSH_HOST", "")
+        if (not re.fullmatch(r"[A-Za-z0-9_.-]+", alias) or
+                stat.S_IMODE(path.stat().st_mode) != 0o600 or
+                hashlib.sha256(path.read_bytes()).hexdigest() != archive["sha256"]):
+            raise ValueError("complete request archive is not locally valid or host verifier is unset")
+        command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", alias,
+                   "sha256sum -- " + shlex.quote(str(path))]
+        result = await asyncio.to_thread(subprocess.run, command, capture_output=True,
+                                         text=True, timeout=8, check=False)
+        if result.returncode != 0 or result.stdout.split(maxsplit=1)[0:1] != [archive["sha256"]]:
+            raise ValueError("BAT successor host cannot verify the complete request archive")
 
     async def _history_for_fallback(self, task: dict, session_id: str) -> str:
         pages = []
@@ -162,17 +211,16 @@ class BatTaskAdapter:
                 return None
             entry = matches[0]
             successor_id = entry["session_id"]
-        if entry.get("handoff_status") == "sent":
-            return {"session_id": successor_id, "marker": entry.get("handoff_message_id")}
-        marker = entry.get("handoff_message_id")
-        if marker:
-            read = await self.read(task, successor_id, marker)
-            if read.get("turn_started") is True and read.get("turn_attribution") in {
-                "correlated", "correlated_after_prior_turn",
-            }:
-                registry.update(task["host"], successor_id, handoff_status="sent")
-                return {"session_id": successor_id, "marker": marker}
-        return None
+        try:
+            meta = await self.fleet.client(task["host"]).invoke(
+                "claude:get-session-meta", {"sessionId": successor_id}, retry_on_disconnect=False)
+        except Exception:  # noqa: BLE001 - missing/unreachable BAT identity remains uncertain
+            return None
+        if not isinstance(meta, dict):
+            return None
+        # Session existence proves only the successor identity. Codex's handoff
+        # message ID is not a turn receipt, even when the registry says "sent".
+        return {"session_id": successor_id, "marker": entry.get("handoff_message_id")}
 
     def reviewer_agent(self, task: dict) -> str:
         # Positive local quota signal only; lack of telemetry defaults to Codex.
