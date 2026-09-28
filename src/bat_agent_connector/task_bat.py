@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import lifecycle, orchestrate, registry, service
+from .errors import WriteRefused
 from .fleet import Fleet
 from .task_handoff import history_excerpt, ledger_summary, original_words_archive
 from .task_verifier import ObservedVerifier, VerificationSettings
@@ -37,6 +38,8 @@ class BatTaskAdapter:
             return r["session_id"]
         # An independent reviewer must inspect the same candidate worktree while
         # the lead has stopped writing. A new BAT session gets no write permission.
+        if await self.session_presence(task, task["session_id"]) != "present":
+            raise ValueError("lead worktree identity is unproven for reviewer")
         lead = registry.get(host, task["session_id"])
         if not lead or not lead.get("cwd"):
             raise ValueError("lead worktree unavailable for reviewer")
@@ -46,6 +49,8 @@ class BatTaskAdapter:
         entry = {"session_id": sid, "workspace_id": lead["workspace_id"],
                  "workspace_name": lead["workspace_name"], "agent_preset": preset,
                  "origin_cwd": lead["origin_cwd"], "cwd": lead["cwd"],
+                 "worktree_path": lead.get("worktree_path"), "branch": lead.get("branch"),
+                 "lead_session_id": task["session_id"], "task_id": task["task_id"],
                  "title": "review " + task["task_id"][:8], "role": "reviewer"}
         registry.reserve(host, entry, hc.orchestrate_max_sessions)
         opts = {"cwd": lead["cwd"], "agentPreset": preset,
@@ -55,8 +60,11 @@ class BatTaskAdapter:
         else:
             opts["permissionMode"] = "plan"
         try:
-            await self.fleet.client(host).invoke("claude:start-session", {"sessionId": sid, "options": opts},
-                                                retry_on_disconnect=False)
+            started = await self.fleet.client(host).invoke(
+                "claude:start-session", {"sessionId": sid, "options": opts}, retry_on_disconnect=False)
+            if (not isinstance(started, dict) or started.get("ok") is False or
+                    started.get("sessionId") != sid):
+                raise WriteRefused("BAT reviewer start did not confirm the reserved session ID")
         except BaseException:
             registry.update(host, sid, status="uncertain")
             raise
@@ -73,31 +81,30 @@ class BatTaskAdapter:
         return sid
 
     async def recover_start(self, task: dict, *, role: str, session_id: str) -> bool:
-        row = registry.get(task["host"], session_id)
         meta = await self.fleet.client(task["host"]).invoke(
             "claude:get-session-meta", {"sessionId": session_id}, retry_on_disconnect=False,
         )
         if not isinstance(meta, dict):
             return False
-        if not row:
-            if not self.journal:
-                return False
-            intent = next((c for c in self.journal.commands(task["task_id"])
-                           if c["kind"] == "start_" + role and c["session_id"] == session_id), None)
-            if not intent:
-                return False
+        if not self.journal:
+            return False
+        intent = next((c for c in self.journal.commands(task["task_id"])
+                       if c["kind"] == "start_" + role and c["session_id"] == session_id), None)
+        if not intent:
+            return False
+        try:
             await self._restore_headless_lookup(task, session_id, meta, role=role,
                                                 agent=json.loads(intent["payload"])["agent"])
-        else:
-            registry.update(task["host"], session_id, status="active")
+        except Exception:  # noqa: BLE001 - recovery must fail closed on host/identity errors
+            return False
         return True
 
     async def session_presence(self, task: dict, session_id: str) -> str:
         """Confirm BAT identity, restoring only journal-owned headless lookups.
 
-        A missing workspace tab is expected when registration is off. Repeated
-        BAT meta reads and a worktree check must all find nothing before the
-        coordinator may reserve a replacement.
+        A missing workspace tab is expected when registration is off. BAT null
+        metadata or worktree status can also mean an unloaded/restarting host;
+        these replies never prove a session vanished.
         """
         if not self.journal or not any(
             b["session_id"] == session_id and b["role"] in {"lead", "reviewer"}
@@ -112,50 +119,98 @@ class BatTaskAdapter:
             except Exception:  # noqa: BLE001 - transport failure is not proof of absence
                 return "uncertain"
             if isinstance(meta, dict):
-                if not registry.get(task["host"], session_id):
+                try:
                     await self._restore_headless_lookup(task, session_id, meta)
+                except Exception:  # noqa: BLE001 - no verified lookup, so no prompt
+                    return "uncertain"
                 return "present"
             if attempt < 2:
                 await asyncio.sleep(0.25)
-        try:
-            worktree = await client.invoke("worktree:status", {"sessionId": session_id},
-                                           retry_on_disconnect=False)
-        except Exception:  # noqa: BLE001 - transport failure is not proof of absence
-            return "uncertain"
-        if isinstance(worktree, dict) and worktree.get("worktreePath"):
-            return "uncertain"
-        registry.update(task["host"], session_id, status="vanished")
-        return "vanished"
+        # Worktree status may also be null after a BAT restart while its disk
+        # directory persists. Only a future host-side explicit absence proof
+        # may return "vanished"; journal replacement remains fail closed today.
+        return "uncertain"
 
     async def _restore_headless_lookup(self, task: dict, session_id: str, meta: dict,
                                        *, role: str | None = None, agent: str | None = None) -> None:
         branch = next((b for b in self.journal.branches(task["task_id"])
                        if b["session_id"] == session_id and b["role"] in {"lead", "reviewer"}), None)
-        if not (branch or role) or not meta.get("cwd"):
+        if (not (branch or role) or (branch and role and branch["role"] != role)
+                or not meta.get("cwd")):
             raise ValueError("journal-owned BAT session has no verified folder")
-        workspace_doc = await service._workspace(self.fleet.client(task["host"]))
+        role = role or branch["role"]
+        agent = agent or (branch["provider"] if branch else task["lead_agent"])
+        if agent not in {"codex", "claude"}:
+            raise ValueError("journal-owned BAT session has an invalid agent")
+        client = self.fleet.client(task["host"])
+        workspace_doc = await service._workspace(client)
         workspace = next((w for w in workspace_doc.get("workspaces") or []
                           if task["workspace"] in {w.get("id"), w.get("name")}), None)
         if not workspace:
             raise ValueError("task workspace no longer exists on BAT host")
+        existing = registry.get(task["host"], session_id)
+        if existing and (existing.get("task_id") not in {None, task["task_id"]}
+                         or existing.get("role") not in {None, role}):
+            raise ValueError("local session entry belongs to another task or role")
         try:
-            worktree = await self.fleet.client(task["host"]).invoke(
+            worktree = await client.invoke(
                 "worktree:status", {"sessionId": session_id}, retry_on_disconnect=False)
-        except Exception:  # noqa: BLE001 - meta still proves session identity
-            worktree = None
-        expected_cwd = (worktree.get("worktreePath") if isinstance(worktree, dict)
-                        else workspace.get("folderPath"))
-        if meta["cwd"] != expected_cwd:
+        except Exception as exc:  # noqa: BLE001 - no worktree proof on transport failure
+            raise ValueError("BAT worktree identity is unavailable") from exc
+        lead_id = task.get("session_id") if role == "reviewer" else None
+        if role == "reviewer":
+            if not lead_id or not any(b["session_id"] == lead_id and b["role"] == "lead"
+                                      for b in self.journal.branches(task["task_id"])):
+                raise ValueError("reviewer has no journal-owned lead")
+            lead = registry.get(task["host"], lead_id)
+            if not lead:
+                lead_meta = await client.invoke("claude:get-session-meta", {"sessionId": lead_id},
+                                                retry_on_disconnect=False)
+                if not isinstance(lead_meta, dict):
+                    raise ValueError("lead worktree identity is unavailable")
+                await self._restore_headless_lookup(task, lead_id, lead_meta)
+                lead = registry.get(task["host"], lead_id)
+            if (not lead or lead.get("task_id") not in {None, task["task_id"]}
+                    or lead.get("workspace_id") != workspace.get("id")
+                    or lead.get("origin_cwd") != workspace.get("folderPath")
+                    or not lead.get("worktree_path") or lead.get("cwd") != lead["worktree_path"]):
+                raise ValueError("reviewer lead worktree identity does not match task")
+            expected_cwd = lead["worktree_path"]
+            lead_status = await client.invoke("worktree:status", {"sessionId": lead_id},
+                                              retry_on_disconnect=False)
+            if isinstance(lead_status, dict) and lead_status.get("worktreePath") != expected_cwd:
+                raise ValueError("lead worktree changed before reviewer lookup")
+            if isinstance(worktree, dict) and worktree.get("worktreePath") != expected_cwd:
+                raise ValueError("reviewer worktree differs from lead")
+            branch_name = lead.get("branch")
+        else:
+            if isinstance(worktree, dict) and worktree.get("worktreePath"):
+                expected_cwd = worktree["worktreePath"]
+                branch_name = worktree.get("branchName")
+            elif existing and existing.get("worktree_path") and existing.get("branch"):
+                expected_cwd = existing["worktree_path"]
+                branch_name = existing["branch"]
+            else:
+                raise ValueError("lead worktree identity is unavailable after BAT restart")
+        if (meta["cwd"] != expected_cwd or
+                await client.invoke("git:getRoot", {"cwd": expected_cwd}, retry_on_disconnect=False)
+                != expected_cwd):
             raise ValueError("BAT session folder does not match the journal-owned workspace")
-        agent = agent or (branch["provider"] if branch and branch["provider"] in {"codex", "claude"}
-                          else task["lead_agent"])
+        preset = orchestrate.PRESETS[(agent, role == "lead")]
+        if existing and any(existing.get(key) not in {None, expected}
+                            for key, expected in (
+                                ("workspace_id", workspace.get("id")),
+                                ("origin_cwd", workspace.get("folderPath")),
+                                ("cwd", expected_cwd), ("worktree_path", expected_cwd),
+                                ("agent_preset", preset))):
+            raise ValueError("local session entry conflicts with BAT and task identity")
         registry.ensure_existing(task["host"], {
             "session_id": session_id, "workspace_id": workspace.get("id"),
-            "workspace_name": workspace.get("name"), "agent_preset": orchestrate.PRESETS[(agent, bool(worktree))],
-            "origin_cwd": workspace.get("folderPath"), "cwd": meta["cwd"],
-            "worktree_path": worktree.get("worktreePath") if isinstance(worktree, dict) else None,
-            "branch": worktree.get("branchName") if isinstance(worktree, dict) else None,
-            "title": "task " + task["task_id"][:8],
+            "workspace_name": workspace.get("name"), "agent_preset": preset,
+            "origin_cwd": workspace.get("folderPath"), "cwd": expected_cwd,
+            "worktree_path": expected_cwd, "branch": branch_name,
+            "role": role, "task_id": task["task_id"], "lead_session_id": lead_id,
+            "title": ("review " if role == "reviewer" else "task ") + task["task_id"][:8],
         })
 
     async def send(self, task: dict, session_id: str, text: str, message_id: str) -> dict:

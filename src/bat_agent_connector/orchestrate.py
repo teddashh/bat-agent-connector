@@ -299,7 +299,7 @@ async def session_start(
             try:
                 started = await c.invoke("claude:start-session", {"sessionId": sid, "options": opts})
                 if (not isinstance(started, dict) or started.get("ok") is False or
-                        started.get("sessionId", sid) != sid):
+                        started.get("sessionId") != sid):
                     raise WriteRefused("BAT start reply did not confirm the reserved session ID")
             except BatError as e:
                 audit.record(**base, channel="claude:start-session", phase="result", ok=False, error=_err(e))

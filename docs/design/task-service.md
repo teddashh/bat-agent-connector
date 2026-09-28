@@ -44,25 +44,29 @@ castle1 OpenClaw 應透過到 grok-bot-01 loopback 服務的受控轉接（例�
 
 ## 可恢復的狀態機與帳本
 
-單一 task ID 永不更換。`branches` 表另記每次 BAT lead／reviewer session 與 PM provider 選擇，包含 `branch_id`、`session_id`、provider、角色、上游 branch ID、原因、時間；`work_status` 回傳完整 branch 歷史。這裡的 branch 是任務執行分支，與 Git branch 名稱不同。`tasks` 保存原話、工作空間、recipe、狀態、pause/control_version、lead/reviewer session、turn marker、commit/tree、review marker、提交／交付時間與四項指標。`commands` 有唯一 idempotency key、預留 session ID、BAT message ID、kind、送出前游標和狀態。`events`、`routing`、`provider_usage`、`observed_verifications`、`capabilities`、`ted_actions`、Discord `board` 與 owner lease 各自保存可稽核資料。所有網路呼叫前先提交命令意圖；同一 key 不會生第二條命令。
+單一 task ID 永不更換。`branches` 表另記每次 BAT lead／reviewer session 與 PM provider 選擇，包含 `branch_id`、`session_id`、provider、角色、上游 branch ID、原因、時間；`work_status` 回傳完整 branch 歷史。這裡的 branch 是任務執行分支，與 Git branch 名稱不同。`tasks` 保存原話、工作空間、recipe、狀態、pause/control_version、lead/reviewer session、turn marker、commit/tree、review marker、提交／交付時間與指標。`commands` 有唯一 idempotency key、預留 session ID、BAT message ID、kind、送出前游標和狀態。`events`、`routing`、`provider_usage`、`observed_verifications`、`capabilities`、`ted_actions`、Discord `board` 與 owner lease 各自保存可稽核資料。所有網路呼叫前先提交命令意圖；同一 key 不會生第二條命令。
 
 ### 2026-09-27 22:51:52–22:51:58 ET shadow task 診斷及恢復界線
 
 Task `9a8c8579-b0cc-4e0b-aa69-71d79eabfe0e` 的 BAT start 回 `aec7b468-deb2-4166-b662-3d8f79529e66`，audit 中 `worktree:create` 成功、branch `bat/worktree-e5ed1603`，`claude:start-session` 回成功，但初次送 prompt 被拒，進入 `needs_ted`。唯讀檢查 castle1 的 BAT 現況時，**同一 session ID 的** `claude:get-session-meta` 與 `claude:get-session-state` 都存在、`numTurns=0`；`worktree:status` 有該 branch/path，工作樹目錄仍在；BAT user service 自 19:00:37 ET 運作，沒有 22:51 重啟證據。GUI workspace terminals 沒有這個 headless session，符合 tab registration OFF。castle1 本機 connector registry 也沒有它，所以 `service._resolve_session` 對同 ID 回「session not found」。BAT 的舊 sidecar log 和該時段 user journal 沒有足夠事件細節；grok-bot-01 daemon 的當時 registry/log 未能唯讀取得，故**不能證明** grok 端當次拒絕的唯一原因或宣稱 BAT GC 刪了 session。可確認的是 connector 查找設計存在 registry/GUI 可見性裂縫；BAT meta 本身證明 session ID 沒錯，worktree 並未消失。
 
-修正後，每次初始 lead prompt 前以該 task 的 durable branch／start intent、BAT 精確 session ID metadata 及 workspace/worktree path 核對；若 BAT session 存在但本地 registry 遺失，就以受驗證資料補回 headless lookup，**不新建 BAT session**。BAT 回 start 的 session ID 若與預留 ID 不同則拒絕。若多次 BAT meta 查詢都確定不存在、且沒有 worktree 紀錄，才把舊 session 記為 `initial_session_vanished`，預留**最多一次**新的 task branch，下一 tick 才 start。`session_replacements` 計數與 branch history 在重啟後保留；第二次消失進 `needs_ted`。任何 transport 不明、殘留 worktree、已存在未解送出命令，皆停在 `uncertain`，不可把原 prompt 自動重播。若明確 rejected/busy，只有再次確認 session 已消失且送出命令被 BAT 明確拒絕，才使用一次替代分支；不明送出仍需命令級人工對帳。這是安全上限；不能從「GUI 無 tab」推論 BAT session 消失。
+修正後，每次初始 lead **和 reviewer** prompt 前，以該 task 的 durable branch／start intent、BAT 精確 session ID metadata、workspace/worktree path 和唯讀 Git root 核對；既有 registry row 也要比對，不再因 row 存在就略過驗證。Headless reviewer 的 BAT `worktree:status` 常為 null，因 reviewer 沿用 lead worktree；以 journal 的 lead session、lead registry／BAT worktree 身分和 reviewer metadata `cwd` 精確相等來恢復 reviewer lookup。BAT lead/reviewer start 回覆都必須含與預留 ID 相同的 `sessionId`，缺失或不同都不能視為成功。若 BAT session 存在但本地 registry 遺失，就以受驗證資料補回 headless lookup，**不新建 BAT session**。
+
+**null 不是消失證據。** BAT protocol 說 `claude:get-session-meta` 可在重啟後、session 尚未 resume 時回 null；`worktree:status` 也可在 host 記憶狀態消失但磁碟 worktree 仍在時回 null。三次 meta 都為 null 時，BAT adapter 只回 `uncertain`，不標 `vanished`、不釋放原 registry 名額、不建替代分支；就算 worktree status 也為 null，結論仍然相同。若尚未建立 send intent，下一 worker tick 可重新驗證身分；若已建立 intent，仍須按命令對帳，不能重播。現有 `session_replacements`／最多一次 branch 機制只供日後有**明確、強於 null 的 host absence proof** 的 adapter 使用；真 BAT 目前沒有這種證據，故自動替代保持停用。原 shadow 送出拒絕的精確原因仍未證明。無 GUI tab 不代表 BAT session 消失。
+
+Pause 在任何等待的 presence lookup 後重查；已寫但確定尚未呼叫 BAT send 的 intent 標 `cancelled`，resume 用新 control version 建新的 send command。對已呼叫 BAT 的不明送出仍維持 `uncertain`，不能因 pause／resume 自動重送。
 
 | 原狀態 | 可自動進入 | 條件 |
 | --- | --- | --- |
 | `queued` | `dispatching` | 預留 lead session ID、寫 start intent 後啟動 |
 | `dispatching` | `accepted`／`verifying`／`uncertain` | BAT start 明確成功／reviewer start 成功／回覆不明 |
-| `accepted` | `running`／`uncertain`／`queued`／`needs_ted` | 已先記 `needs_review` 送出標記；BAT 回覆可歸因／不明；初始 session 確認消失且無未解 prompt 時最多替代一次，第二次請 Ted 處理 |
+| `accepted` | `running`／`uncertain`／`queued`／`needs_ted` | 已先記 `needs_review` 送出標記；BAT 回覆可歸因／不明；`queued` 替代只供日後有明確 host absence proof 的 adapter，BAT null 訊號不能啟用 |
 | `running` | `accepted`／`verifying`／`waiting_permission`／`quota_limited`／`needs_ted` | 回合結束續推／里程碑／權限／額度／人為阻塞 |
 | `quota_limited` | `uncertain`／`needs_ted` | Claude→Codex 原子預留 successor 與獨立 handoff send；Codex 送出後等命令證據或人工對帳 |
 | `verifying` | `done`／`accepted`／`needs_ted` | 乾淨候選 commit/tree 的觀察測試與 fresh reviewer PASS／REJECT／測試失敗 |
 | `uncertain` | `accepted`／`running`／`verifying`／`human_owned`／`done`／`needs_ted` | 可歸因的 BAT 證據或有權操作者針對特定命令明確處理；絕不自動重送 |
 
-`pause` 先持久化控制版本，停止新派送；可選擇 interrupt 當前 turn。start 等待期間發生 pause 時，已接受的 session 保存為 `accepted` 但不送初始 prompt。`resume` 清除 pause，下一 tick 先查 pending 命令；若無待對帳且 session 尚未收到 prompt，才送第一次 prompt。每個 host/session 在單 daemon 內有 writer lock；程序間以 0600 lock file 的排他 `flock` 與 owner heartbeat 限制為一個 daemon。外部 BAT GUI／舊低階工具不受此鎖控制，故遇無法歸因的 turn 保留 uncertain。
+`pause` 先持久化控制版本，停止新派送；可選擇 interrupt 當前 turn。start 等待期間發生 pause 時，已接受的 session 保存為 `accepted` 但不送初始 prompt。若 pause 在 send 前的 presence lookup 期間發生，服務在 BAT send 呼叫前再次讀 pause，取消尚未送出的命令。`resume` 清除 pause，下一 tick 先查 pending 命令；若無待對帳且 session 尚未收到 prompt，才以新的 control version 送第一次 prompt。每個 host/session 在單 daemon 內有 writer lock；程序間以 0600 lock file 的排他 `flock` 與 owner heartbeat 限制為一個 daemon。外部 BAT GUI／舊低階工具不受此鎖控制，故遇無法歸因的 turn 保留 uncertain。
 
 送 prompt 前先持久記 `needs_review`，包含 message ID、prompt SHA-256 與送出前游標；即使 crash 發生在實際送出前，也按**可能已送出**處理。逾時、斷線或回覆遺失後保持 `uncertain`。Claude `session_read` 的 `correlated`／`correlated_after_prior_turn` 可用於對帳；Codex 的 `timestamp_cursor` **只是時間位置，不能證明回覆屬於本命令**，連同後來出現的 `REVIEW: PASS` 都不能用來結案或自動重送。Codex 只有明確的命令／turn 綁定證據才可自動歸因，否則走下述人工對帳。Reviewer PASS 同時要求獨立 reviewer prompt／turn 歸因、lead 已停筆、乾淨的當前 commit/tree 和受信測試 exit 0。BAT 明確回 busy/rejected 時標 rejected、請 Ted 處理，不假設可安全重送。start 對帳使用預留 session ID 和 BAT meta；failover 的 registry＋BAT meta **只證實 successor session 存在**，handoff `batc-*` ID、registry `sent` 和後來不相關的回覆都不能證明 prompt 所屬 turn。handoff `send` 維持 uncertain，可用獨立一次性命令 capability 人工對帳；確認 session 閒置後才可送文字不同的新 prompt。遇 candidate commit 或 tree 改變，清除舊 verification/reviewer/PASS，建立新 reviewer session。
 
