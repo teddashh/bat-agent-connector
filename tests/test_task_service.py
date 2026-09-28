@@ -226,6 +226,40 @@ async def test_send_timeout_after_acceptance_read_back_exact_prompt(tmp_path):
     journal.close()
 
 
+async def test_codex_accepted_timestamp_requires_exact_read_back(tmp_path):
+    class AcceptedTimestampBAT(FakeBAT):
+        async def send(self, task, session_id, text, message_id):
+            self.reconcile_echo = {"session_id": session_id, "message_id": message_id,
+                                   "text": text, "turn_id": "user-codex-exact"}
+            return await super().send(task, session_id, text, message_id)
+
+    journal = Journal(tmp_path / "accepted.db")
+    task = submit(journal)
+    fake = AcceptedTimestampBAT()
+    fake.prepare_kind = "codex"
+    result = await TaskCoordinator(journal, fake).tick(task["task_id"])
+    assert result["state"] == "running" and result["turn_marker"] == "user-codex-exact"
+    send = next(c for c in journal.commands(task["task_id"]) if c["kind"] == "send")
+    assert send["status"] == "accepted" and send["marker"] == "user-codex-exact"
+    assert len(fake.sends) == 1
+    assert "send_reconciled_delivered" in [e["kind"] for e in journal.events(task["task_id"])]
+    journal.close()
+
+    journal = Journal(tmp_path / "unproven.db")
+    task = submit(journal)
+    fake = FakeBAT()
+    fake.prepare_kind = "codex"
+    core = TaskCoordinator(journal, fake)
+    result = await core.tick(task["task_id"])
+    assert result["state"] == "uncertain" and not result["delivered"]
+    fake.reads[result["session_id"]] = {"turn_started": True, "turn_done": True,
+                                         "turn_attribution": "timestamp_cursor",
+                                         "messages": [{"role": "assistant", "text": "REVIEW: PASS"}]}
+    assert (await core.tick(task["task_id"]))["state"] == "uncertain"
+    assert len(fake.sends) == 1
+    journal.close()
+
+
 async def test_bat_read_back_requires_exact_new_user_echo(fleet_factory, mock):
     fleet = fleet_factory()
     adapter = task_bat.BatTaskAdapter(fleet)

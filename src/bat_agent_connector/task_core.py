@@ -244,7 +244,8 @@ class TaskCoordinator:
                         cmd["message_id"]), timeout=5)
                 except Exception:  # noqa: BLE001 - missing proof stays uncertain
                     r = None
-                if not r or not r.get("accepted"):
+                if (not r or not r.get("accepted") or r.get("turn_attribution") != "exact_echo"
+                        or not r.get("turn_marker")):
                     self.journal.command_status(cmd["command_id"], "uncertain")
                     return self.journal.change(task["task_id"], "uncertain")
                 reconciled = True
@@ -253,15 +254,28 @@ class TaskCoordinator:
                 if initial_lead and await self.adapter.session_presence(task, sid) == "vanished":
                     return self.journal.mark_initial_session_vanished(task["task_id"], sid)
                 return self.journal.change(task["task_id"], "needs_ted")
+            if before.get("agent_kind") == "codex" and r.get("turn_attribution") != "exact_echo":
+                # An accepted Codex ACK can still carry only a timestamp. Read
+                # back the exact user echo before deciding it is unproven.
+                try:
+                    proof = await asyncio.wait_for(self.adapter.reconcile_send(
+                        task, sid, hashlib.sha256(text.encode()).hexdigest(), before,
+                        cmd["message_id"]), timeout=5)
+                except Exception:  # noqa: BLE001 - absent proof stays uncertain
+                    proof = None
+                if (proof and proof.get("accepted") and proof.get("turn_attribution") == "exact_echo"
+                        and proof.get("turn_marker")):
+                    r = proof
+                    reconciled = True
+                else:
+                    # A later timestamped assistant reply cannot own this turn.
+                    marker = r.get("turn_marker") or before.get("before_cursor")
+                    self.journal.command_status(cmd["command_id"], "uncertain", marker=marker)
+                    return self.journal.change(task["task_id"], "uncertain")
             marker = r.get("turn_marker") or (before.get("before_cursor") if before.get("agent_kind") == "codex"
                                                else cmd["message_id"])
             if not marker:
                 self.journal.command_status(cmd["command_id"], "uncertain")
-                return self.journal.change(task["task_id"], "uncertain")
-            if before.get("agent_kind") == "codex" and r.get("turn_attribution") != "exact_echo":
-                # Codex may ignore clientMessageId. A later timestamped reply is
-                # not evidence that this command owns the turn.
-                self.journal.command_status(cmd["command_id"], "uncertain", marker=marker)
                 return self.journal.change(task["task_id"], "uncertain")
             self.journal.command_status(cmd["command_id"], "accepted", marker=marker)
             state = "verifying" if sid == task.get("reviewer_session_id") else "running"
