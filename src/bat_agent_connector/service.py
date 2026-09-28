@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import statistics
 import time
 import uuid
@@ -16,6 +17,7 @@ from typing import Any
 
 from . import registry
 from .client import BatClient, event_session_id
+from .config import state_dir
 from .errors import BatError, InvokeError, WriteRefused
 from .fleet import Fleet
 from .redact import redact
@@ -26,6 +28,21 @@ MAX_LAST_N = 100
 MAX_READ_CHARS = 60_000
 MAX_PROMPT_CHARS = 20_000
 _write_locks: dict[tuple[int, str], asyncio.Lock] = {}
+
+
+def _task_session_verifying(host: str, session_id: str) -> bool:
+    """Return whether a task-service-owned BAT session is in verification."""
+    owner = registry.get(host, session_id)
+    task_id = owner.get("task_id") if owner else None
+    if not task_id:
+        return False
+    db = state_dir() / "tasks.sqlite3"
+    try:
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.2) as conn:
+            row = conn.execute("SELECT state FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+        return bool(row and row[0] == "verifying")
+    except (OSError, sqlite3.Error):
+        return False
 
 
 def _write_lock(host: str) -> asyncio.Lock:
@@ -925,6 +942,8 @@ async def session_send(
     async with _write_lock(host):
         t, ws = await _resolve_session(c, session_id)
         sid = t["id"]
+        if before_invoke is None and not initial_task_send and _task_session_verifying(host, sid):
+            raise WriteRefused("task-owned session is verifying; direct sends are blocked")
         successor = next((e for e in registry.list_entries(host) if e.get("failover_of") == sid
                           and e.get("status") in ("starting", "active")
                           and e.get("handoff_status") == "sent"), None)

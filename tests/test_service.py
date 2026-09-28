@@ -114,6 +114,15 @@ async def test_write_refused_when_disabled_or_unconfirmed(fleet_factory, mock):
     assert "claude:send-message" not in mock.channels()
 
 
+async def test_direct_send_is_blocked_for_verifying_task_session(fleet_factory, mock, monkeypatch):
+    f = fleet_factory(writes=True)
+    monkeypatch.setattr(service, "_task_session_verifying", lambda host, session_id: True)
+    with pytest.raises(WriteRefused, match="task-owned session is verifying"):
+        await service.session_send(f, "h1", "sess-claude-0001", "outside task service", confirm=True)
+    assert "claude:send-message" not in mock.channels()
+    await f.close()
+
+
 async def test_send_resume_idempotent_rate_limit_audit(fleet_factory, mock):
     f = fleet_factory(writes=True)
     body = "please continue with step 3 SECRET-BODY"

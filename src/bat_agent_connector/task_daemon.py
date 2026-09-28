@@ -81,11 +81,20 @@ class TaskDaemon:
             raise ValueError("BATC_TASK_DEFAULT_PATH must be standard or minimal")
         self.minimal_review_gate = MinimalReviewGate(jev, router_config)
         self.coordinator = TaskCoordinator(self.journal, self.adapter, router=self.router,
-                                           minimal_review_gate=self.minimal_review_gate)
+                                           minimal_review_gate=self.minimal_review_gate,
+                                           verification_quiet_s=15.0)
         self._submit_lock = asyncio.Lock()
         # Covers the whole verifying state, including BAT/SSH lookups before
-        # and after the subprocess. A restart retains the journal timestamp.
-        self.verification_timeout_s = min(300, max(1, self.adapter.verifier.settings.timeout_s))
+        # and after the subprocess. Heavy recipes get a larger task-level budget;
+        # the verifier's own command timeout remains separately configurable.
+        # A restart retains the journal timestamp.
+        self.verification_timeout_default_s = max(1, self.adapter.verifier.settings.timeout_s)
+        self.verification_timeout_s = self.verification_timeout_default_s
+        self.verification_timeout_by_recipe = {
+            "small-task-with-tests": 900,
+            "bugfix-with-tests": 1800,
+            "feature-to-staging": 3600,
+        }
         self._active_ticks: dict[str, asyncio.Task] = {}
         self._cleanup_retry_after: dict[str, float] = {}
         self._lease_fd: int | None = None
@@ -94,6 +103,11 @@ class TaskDaemon:
         self.publisher = DiscordPublisher(self.journal, discord or DiscordHTTP(), board) if (
             discord or os.environ.get("BATC_DISCORD_BOT_TOKEN")
         ) else None
+
+    def verification_budget(self, recipe: str) -> int:
+        if self.verification_timeout_s != self.verification_timeout_default_s:
+            return self.verification_timeout_s
+        return max(self.verification_timeout_s, self.verification_timeout_by_recipe.get(recipe, self.verification_timeout_s))
 
     async def call(self, method: str, params: dict, *, auth_token: str | None = None) -> dict:
         if method == "work_delivery_status":
@@ -321,7 +335,8 @@ class TaskDaemon:
             task = self.journal.get(task_id)
             verifying = task["state"] == "verifying"
             if verifying and not task["paused"]:
-                remaining = self.verification_timeout_s - (time.time() - task["updated_at"])
+                budget = self.verification_budget(task["recipe"])
+                remaining = budget - (time.time() - task["updated_at"])
                 if remaining <= 0:
                     self.journal.change(task_id, "needs_ted", event="verification_deadline",
                                         fields={"result": "VerificationDeadlineExceeded"})
