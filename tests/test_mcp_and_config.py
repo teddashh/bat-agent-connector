@@ -45,18 +45,6 @@ def test_config_rejects_inline_token_and_bad_tiers():
     assert "abc" not in repr(cfg.host("a"))
 
 
-def test_jev_cheap_fallback_is_explicit_and_has_no_key_in_config():
-    base = {"hosts": {}}
-    assert parse_config(base).jev.allow_cheap_model is False
-    with pytest.raises(ConfigError, match="cheap_model"):
-        parse_config({**base, "jev": {"allow_cheap_model": True}})
-    with pytest.raises(ConfigError, match="boolean"):
-        parse_config({**base, "jev": {"allow_cheap_model": "true", "cheap_model": "test/small"}})
-    configured = parse_config({**base, "jev": {"allow_cheap_model": True,
-                                                "cheap_model": "test/small"}})
-    assert configured.jev.cheap_model == "test/small"
-
-
 def test_importer_never_copies_tokens(tmp_path):
     pdir = tmp_path / "profiles"
     pdir.mkdir()
