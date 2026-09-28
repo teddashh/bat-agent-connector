@@ -569,6 +569,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--only", action="append", metavar="PROFILE_ID")
     p.add_argument("--force", action="store_true")
     sp.add_parser("mcp", help="run the MCP server on stdio (see bat-agent-connector-mcp --help)")
+    p = sp.add_parser("serve", help="run the loopback task daemon and worker (no deployment is made)")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=18796)
+    p.add_argument("--db", help="SQLite task journal path")
     sp.add_parser("config-path", help="print the config path")
     return ap
 
@@ -582,6 +586,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     args = build_parser().parse_args(argv)
     try:
+        if args.cmd == "serve":
+            from .task_daemon import TaskDaemon
+
+            asyncio.run(TaskDaemon(load_config(args.config), args.db).serve(args.host, args.port))
+            return 0
         if args.cmd == "import-bat":
             return cmd_import(args)
         if args.cmd == "config-path":

@@ -84,6 +84,22 @@ account changes are never sent.
 
 ## MCP setup
 
+### Task service milestone (opt-in)
+
+`batc serve` runs the SQLite WAL task coordinator on `127.0.0.1:18796`. The existing MCP server adds
+`work_submit`, `work_status`, `work_pause`, `work_resume`, and `work_result`; its stdio process calls that daemon
+at `BATC_TASK_URL` (default `http://127.0.0.1:18796/rpc`). `work_submit` takes Ted's **exact** words in
+`original_words` and an idempotency key such as the Discord message ID, then returns a `task_id` without
+waiting for BAT. Hermes must not reinterpret or split the request. The lead Codex/Claude session plans in the repo.
+Task writes require the host's existing `writes=true` and `orchestrate=true` settings. Existing low-level tools
+and `batc` commands remain available.
+
+The rules engine is the default. It requires an external trusted test run recorded through the existing
+`batc record-verification` mechanism before an independent reviewer can approve delivery. Goose ACP, the
+per-step Jev model router, and Discord posting have adapter/test coverage; real Goose model login, Discord
+credentials, service deployment and cron replacement are deferred. See [the task-service design](docs/design/task-service.md)
+for states, recovery limits, metrics and rollout steps. No paid API key is required.
+
 The server name is `bat`. Examples (add `--read-only` if you want to be sure):
 
 **Claude Code**

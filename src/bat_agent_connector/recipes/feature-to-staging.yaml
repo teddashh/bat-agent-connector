@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "title": "Feature to staging",
+  "description": "Coordinate a repo-aware BAT lead, tests, and an independent cross-review before candidate delivery.",
+  "instructions": "Ted's original words are authoritative. Hermes does no planning. Use only the task-scoped BAT MCP tools. Have the repo-aware lead plan and implement. Require externally recorded passing tests on the current clean commit, then a separate reviewer session. Claude reviewer is preferred when quota is available; otherwise use a fresh Codex. Return rejected work to the lead at most twice. Never call work_submit or claim delivered before review and commit-bound verification.",
+  "prompt": "Read this task's exact original words and acceptance criteria through the task-scoped tools, then coordinate the lead toward a staging candidate.",
+  "extensions": [],
+  "settings": {"max_turns": 12}
+}
