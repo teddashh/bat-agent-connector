@@ -79,6 +79,7 @@ class TaskDaemon:
         # and after the subprocess. A restart retains the journal timestamp.
         self.verification_timeout_s = min(300, max(1, self.adapter.verifier.settings.timeout_s))
         self._active_ticks: dict[str, asyncio.Task] = {}
+        self._cleanup_retry_after: dict[str, float] = {}
         self._lease_fd: int | None = None
         self._owner_id = secrets.token_hex(16)
         board = os.environ.get("BATC_DISCORD_BOARD_CHANNEL_ID")
@@ -253,8 +254,10 @@ class TaskDaemon:
         while True:
             self.journal.db.execute("UPDATE daemon_owner SET heartbeat_at=? WHERE singleton=1 AND owner_id=?",
                                     (time.time(), self._owner_id))
-            for task in self.journal.list_active():
+            for task in self.journal.list_active() + self.journal.list_cleanup_pending():
                 tid = task["task_id"]
+                if time.monotonic() < self._cleanup_retry_after.get(tid, 0):
+                    continue
                 active = self._active_ticks.get(tid)
                 if active is None or active.done():
                     self._active_ticks[tid] = asyncio.create_task(self._tick_task(tid))
@@ -361,10 +364,11 @@ class TaskDaemon:
             try:
                 current = self.journal.get(task_id)
                 if current["state"] in {"done", "failed"} and current.get("external_worktree_path"):
-                    await self.adapter.cleanup_external_worktree(current)
-                    self.journal.change(task_id, current["state"], fields={
-                        "external_worktree_path": None, "external_branch": None})
-            except Exception as cleanup_exc:  # noqa: BLE001 - cleanup is retried by operator
+                    proof = await self.adapter.cleanup_external_worktree(current)
+                    self.journal.complete_external_cleanup(task_id, proof)
+                    self._cleanup_retry_after.pop(task_id, None)
+            except Exception as cleanup_exc:  # noqa: BLE001 - retain pointer and retry after backoff
+                self._cleanup_retry_after[task_id] = time.monotonic() + 60
                 logging.warning("Task %s external worktree cleanup failed: %s",
                                 task_id[:8], type(cleanup_exc).__name__)
 

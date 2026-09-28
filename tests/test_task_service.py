@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import goose_acp, mcp_server, orchestrate, registry, service, task_bat
+from bat_agent_connector import goose_acp, lifecycle, mcp_server, orchestrate, registry, service, task_bat
 from bat_agent_connector.errors import WriteRefused
 from bat_agent_connector.goose_acp import PINNED_GOOSE_VERSION, GooseACP, GooseConfig
 from bat_agent_connector.model_router import ModelRouter, RouterConfig
@@ -488,6 +488,50 @@ async def test_task_bat_adapter_contract_with_mock_host(fleet_factory, mock, tmp
     assert opts["cwd"] == start["params"]["options"]["cwd"]
     assert not any(t.get("id") == reviewer for t in mock.ws_doc["terminals"])
     j.close()
+
+
+async def test_task_reservation_excludes_paused_lead_from_legacy_cleanup(
+        fleet_factory, mock, tmp_path, monkeypatch):
+    fleet = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True,
+                          safety={"write_min_interval_s": 0})
+    journal = Journal(tmp_path / "tasks.db")
+    task = journal.submit(project="p", host="h1", workspace="demo-project",
+                          original_words=WORDS, idempotency_key="paused-reserved-lead")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), journal)
+    core = TaskCoordinator(journal, adapter)
+    original_start = adapter.start
+    started = {}
+    original_reserve = registry.reserve
+    reserved = []
+
+    def tagged_reservation(host, entry, max_active, replaces=None):
+        result = original_reserve(host, entry, max_active, replaces=replaces)
+        reserved.append(registry.get(host, entry["session_id"]))
+        return result
+
+    async def pause_after_start(*args, **kwargs):
+        sid = await original_start(*args, **kwargs)
+        started["sid"] = sid
+        assert registry.get("h1", sid)["task_id"] == task["task_id"]
+        journal.pause(task["task_id"])
+        return sid
+
+    monkeypatch.setattr(registry, "reserve", tagged_reservation)
+    monkeypatch.setattr(adapter, "start", pause_after_start)
+    result = await core.tick(task["task_id"])
+    sid = started["sid"]
+    assert result["paused"] and result["state"] == "accepted"
+    assert reserved and reserved[0]["task_id"] == task["task_id"]
+    assert not any(i["channel"] == "claude:send-message" and
+                   i["params"].get("sessionId") == sid for i in mock.invokes)
+    decision = await lifecycle.session_cleanup(fleet, "h1", session_id=sid,
+                                               confirm=True, dry_run=False, min_idle_s=0)
+    assert decision["decisions"][0]["decision"] == "KEEP"
+    main = await lifecycle.main_session(fleet, "h1", "demo-project")
+    assert not main or main["session_id"] != sid
+    assert registry.get("h1", sid)["task_id"] == task["task_id"]
+    journal.close()
+    await fleet.close()
 
 
 async def test_headless_session_lookup_restored_from_task_branch_and_bat_meta(
@@ -2444,6 +2488,112 @@ async def test_external_worktree_script_quotes_workspace_path(tmp_path, fleet_fa
     await adapter._ensure_external_worktree(task)
     assert subprocess.run(["bash", "-n", "-c", scripts[0]], check=False).returncode == 0
     assert '"$ref"' in scripts[0]
+
+
+@pytest.mark.asyncio
+async def test_external_cleanup_retains_unmerged_commit_and_recovers_after_restart(
+        tmp_path, fleet_factory, monkeypatch):
+    root = tmp_path / "Ted's repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "code.txt").write_text("base")
+    subprocess.run(["git", "-C", str(root), "add", "code.txt"], check=True)
+    commit = ["git", "-C", str(root), "-c", "user.name=Test",
+              "-c", "user.email=test@example.invalid", "commit", "-qm"]
+    subprocess.run([*commit, "base"], check=True)
+    journal_path = tmp_path / "tasks.db"
+    journal = Journal(journal_path)
+    task = journal.submit(project="p", host="h1", workspace="w", original_words="keep work",
+                          idempotency_key="cleanup-retain")
+    suffix = task["task_id"].replace("-", "")[:12]
+    branch = f"batc/task-{suffix}"
+    path = root / ".bat-worktrees" / f"batc-task-{suffix}"
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b",
+                    branch, str(path), "HEAD"], check=True)
+    (path / "code.txt").write_text("unmerged candidate")
+    subprocess.run(["git", "-C", str(path), "add", "code.txt"], check=True)
+    subprocess.run(["git", "-C", str(path), "-c", "user.name=Test",
+                    "-c", "user.email=test@example.invalid", "commit", "-qm", "candidate"], check=True)
+    candidate = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"],
+                               check=True, capture_output=True, text=True).stdout.strip()
+    journal.change(task["task_id"], "dispatching", fields={
+        "external_worktree_path": str(path), "external_branch": branch})
+    journal.change(task["task_id"], "failed")
+    adapter = task_bat.BatTaskAdapter(fleet_factory(),
+        ObservedVerifier(VerificationSettings(ssh_hosts={"h1": "unused"})), journal)
+
+    async def folder(_task):
+        return str(root)
+
+    async def local_shell(_task, script):
+        result = subprocess.run(["sh", "-lc", script], capture_output=True, text=True, check=False)
+        if result.returncode:
+            raise ValueError(result.stderr or result.stdout or "cleanup failed")
+        return result.stdout.strip()
+
+    monkeypatch.setattr(adapter, "_workspace_folder", folder)
+    monkeypatch.setattr(adapter, "_ssh_script", local_shell)
+    (path / "untracked.txt").write_text("do not discard")
+    with pytest.raises(ValueError):
+        await adapter.cleanup_external_worktree(journal.get(task["task_id"]))
+    assert path.exists()
+    (path / "untracked.txt").unlink()
+    with pytest.raises(ValueError):
+        await adapter.cleanup_external_worktree({**journal.get(task["task_id"]),
+                                                 "state": "done", "verification_commit": "0" * 40})
+    assert path.exists()
+    first = await adapter.cleanup_external_worktree(journal.get(task["task_id"]))
+    assert first == {"path": str(path), "branch": branch,
+                     "retained_ref": f"refs/batc/tasks/{suffix}",
+                     "commit": candidate, "mode": "removed"}
+    assert not path.exists()
+    journal.close()  # Crash after Git removal but before journal settlement.
+    journal = Journal(journal_path)
+    assert [t["task_id"] for t in journal.list_cleanup_pending()] == [task["task_id"]]
+    second = await adapter.cleanup_external_worktree(journal.get(task["task_id"]))
+    assert second["mode"] == "already_removed" and second["commit"] == candidate
+    journal.complete_external_cleanup(task["task_id"], second)
+    assert not journal.list_cleanup_pending()
+    assert journal.get(task["task_id"])["external_worktree_path"] is None
+    assert any(e["kind"] == "external_worktree_retained" for e in journal.events(task["task_id"]))
+    for ref in (f"refs/heads/{branch}", f"refs/batc/tasks/{suffix}"):
+        value = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", ref],
+                               check=True, capture_output=True, text=True).stdout.strip()
+        assert value == candidate
+    journal.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_cleanup_requires_proof_before_journal_path_is_cleared(mock, tmp_path, monkeypatch):
+    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    task = submit(daemon.journal)
+    suffix = task["task_id"].replace("-", "")[:12]
+    path = f"/srv/project/.bat-worktrees/batc-task-{suffix}"
+    branch = f"batc/task-{suffix}"
+    daemon.journal.change(task["task_id"], "dispatching", fields={
+        "external_worktree_path": path, "external_branch": branch})
+    daemon.journal.change(task["task_id"], "failed")
+    proof = {"path": path, "branch": branch, "retained_ref": f"refs/batc/tasks/{suffix}",
+             "commit": "a" * 40, "mode": "removed"}
+
+    async def no_proof(_task):
+        return None
+
+    monkeypatch.setattr(daemon.adapter, "cleanup_external_worktree", no_proof)
+    await daemon._tick_task(task["task_id"])
+    assert daemon.journal.get(task["task_id"])["external_worktree_path"] == path
+    assert task["task_id"] in daemon._cleanup_retry_after
+
+    async def retained(_task):
+        return proof
+
+    monkeypatch.setattr(daemon.adapter, "cleanup_external_worktree", retained)
+    await daemon._tick_task(task["task_id"])
+    assert daemon.journal.get(task["task_id"])["external_worktree_path"] is None
+    assert task["task_id"] not in daemon._cleanup_retry_after
+    assert any(e["kind"] == "external_worktree_retained"
+               for e in daemon.journal.events(task["task_id"]))
+    daemon.journal.close()
 
 @pytest.mark.asyncio
 async def test_goose_acp_error_settles_from_bat_readback(mock, tmp_path, monkeypatch, caplog):

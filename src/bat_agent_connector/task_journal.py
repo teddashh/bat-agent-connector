@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -405,6 +406,11 @@ class Journal:
         ids = self.db.execute("SELECT task_id FROM tasks WHERE state NOT IN ('done','failed') ORDER BY submitted_at").fetchall()
         return [self.get(r[0]) for r in ids]
 
+    def list_cleanup_pending(self) -> list[dict]:
+        ids = self.db.execute("""SELECT task_id FROM tasks WHERE state IN ('done','failed')
+            AND external_worktree_path IS NOT NULL ORDER BY updated_at""").fetchall()
+        return [self.get(r[0]) for r in ids]
+
     def change(self, task_id: str, state: str, *, fields: dict | None = None, event: str | None = None):
         if state not in STATES:
             raise ValueError("invalid task state")
@@ -443,6 +449,25 @@ class Journal:
                  values["external_worktree_path"], values["external_branch"], values["delivered"], values["delivered_at"], task_id))
             if old["state"] != state or event:
                 self._event(task_id, event or "state", {"from": old["state"], "to": state})
+        return self.get(task_id)
+
+    def complete_external_cleanup(self, task_id: str, proof: dict) -> dict:
+        """Clear a terminal worktree pointer only with proof of a retained Git ref."""
+        with self.tx():
+            task = self.get(task_id)
+            suffix = task_id.replace("-", "")[:12]
+            if (task["state"] not in TERMINAL or not task["external_worktree_path"]
+                    or proof.get("path") != task["external_worktree_path"]
+                    or proof.get("branch") != task["external_branch"]
+                    or proof.get("retained_ref") != f"refs/batc/tasks/{suffix}"
+                    or not isinstance(proof.get("commit"), str)
+                    or not re.fullmatch(r"[0-9a-f]{40}", proof["commit"])
+                    or proof.get("mode") not in {"removed", "already_removed"}
+                    or (task["state"] == "done" and proof["commit"] != task["verification_commit"])):
+                raise ValueError("external cleanup proof does not match terminal task")
+            self.db.execute("""UPDATE tasks SET external_worktree_path=NULL,external_branch=NULL,
+                updated_at=? WHERE task_id=?""", (time.time(), task_id))
+            self._event(task_id, "external_worktree_retained", proof)
         return self.get(task_id)
 
     def mark_initial_session_vanished(self, task_id: str, session_id: str) -> dict:
