@@ -293,6 +293,37 @@ async def test_bat_read_back_requires_exact_new_user_echo(fleet_factory, mock):
     await fleet.close()
 
 
+async def test_verification_waits_for_quiet_candidate_window(tmp_path):
+    journal = Journal(tmp_path / "quiet.db")
+    task = submit(journal)
+    fake = FakeBAT()
+    core = TaskCoordinator(journal, fake, verification_quiet_s=0.05)
+    await core.tick(task["task_id"])
+    lead = journal.get(task["task_id"])["session_id"]
+    fake.reads[lead] = {"turn_started": True, "turn_done": True,
+                        "turn_attribution": "correlated",
+                        "messages": [{"role": "assistant", "text": "BAT-STATUS: MILESTONE"}]}
+    first = await core.tick(task["task_id"])
+    assert first["state"] == "verifying"
+    second = await core.tick(task["task_id"])
+    assert not any(e["kind"] == "verification_observed" for e in journal.events(task["task_id"]))
+    await asyncio.sleep(0.06)
+    third = await core.tick(task["task_id"])
+    assert any(e["kind"] == "verification_observed" for e in journal.events(task["task_id"]))
+    assert third["state"] == "verifying"
+    journal.close()
+
+
+async def test_verification_budget_is_recipe_aware(tmp_path, mock):
+    daemon = TaskDaemon(make_config(mock), db_path=tmp_path / "budget.db")
+    assert daemon.verification_budget("feature-to-staging") >= 3600
+    assert daemon.verification_budget("small-task-with-tests") >= 900
+    daemon.verification_timeout_s = 7
+    assert daemon.verification_budget("feature-to-staging") == 7
+    await daemon.fleet.close()
+    daemon.journal.close()
+
+
 async def test_verification_deadline_and_failure_do_not_stall_worker(tmp_path, mock):
     daemon = TaskDaemon(make_config(mock), db_path=tmp_path / "tasks.db")
     daemon.verification_timeout_s = 1
