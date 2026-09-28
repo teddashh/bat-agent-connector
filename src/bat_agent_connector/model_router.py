@@ -36,7 +36,8 @@ class RouterConfig:
     confidence_threshold: float = 0.8
     agy_claude_daily_cap: int = 10
     status_provider: str = "agy-gemini-flash"
-    scarce_provider: str = "agy-claude"
+    scarce_provider: str = "claude"
+    secondary_provider: str = "agy-claude"
     fallback_provider: str = "codex"
     allow_gemini_status: bool = True
 
@@ -58,7 +59,8 @@ class RouterConfig:
                 or config.agy_claude_daily_cap < 0
                 or not isinstance(config.allow_gemini_status, bool)
                 or not all(isinstance(getattr(config, key), str) and getattr(config, key)
-                           for key in ("status_provider", "scarce_provider", "fallback_provider"))):
+                           for key in ("status_provider", "scarce_provider", "secondary_provider",
+                                       "fallback_provider"))):
             raise ValueError("invalid PM router settings")
         return config
 
@@ -101,10 +103,11 @@ class ModelRouter:
             reason = "jev_type_mismatch" if valid else "jev_unavailable"
         else:
             step_type, confidence = parsed["choice"], float(parsed["confidence"])
+            strongest = self._strongest_available()
             if step_type in {"planning", "implementation", "verification", "review"} and (
                 high_stakes or confidence < self.config.confidence_threshold
-            ) and self._claude_available():
-                provider, reason = self.config.scarce_provider, "high_stakes_or_low_confidence"
+            ) and strongest:
+                provider, reason = strongest, "high_stakes_or_low_confidence"
             elif (step_type in {"status_relay", "implementation"} and not high_stakes
                     and confidence >= self.config.confidence_threshold
                     and self.config.allow_gemini_status and self._ready(self.config.status_provider)):
@@ -114,14 +117,23 @@ class ModelRouter:
         if provider_override is not None:
             provider, reason = provider_override, "task_or_recipe_override"
         return self.journal.route(task_id, step=step, step_type=step_type, provider=provider,
-                                  confidence=confidence, stakes="high" if high_stakes else "normal", reason=reason)
+                                  confidence=confidence, stakes="high" if high_stakes else "normal", reason=reason,
+                                  jev_backend=getattr(self.classifier, "backend", None) if valid else None)
 
-    def _claude_available(self) -> bool:
+    def _strongest_available(self) -> str | None:
         start = int(time.time() // 86400) * 86400
-        return (self._ready(self.config.scarce_provider)
-                and self.config.agy_claude_daily_cap > self.journal.provider_daily_count(
-            self.config.scarce_provider, since=start
-        ) and not self.journal.provider_unavailable(self.config.scarce_provider, since=start))
+        if self._ready_for_high_stakes(self.config.scarce_provider, start):
+            return self.config.scarce_provider
+        secondary = self.config.secondary_provider
+        if self._ready_for_high_stakes(secondary, start):
+            return secondary
+        return None
+
+    def _ready_for_high_stakes(self, provider: str, since: int) -> bool:
+        if not self._ready(provider):
+            return False
+        return (provider != "agy-claude" or self.config.agy_claude_daily_cap >
+                self.journal.provider_daily_count(provider, since=since))
 
     def _ready(self, provider: str) -> bool:
         entry = self.catalog.entries.get(provider)
@@ -155,5 +167,6 @@ class ModelRouter:
             return None
         self.journal.record_jev_prescreen(
             task_id, commit=commit, tree=tree, verdict=result["diff_verdict"],
-            confidence=float(confidence), tests_ok=float(tests_ok))
+            confidence=float(confidence), tests_ok=float(tests_ok),
+            jev_backend=result.get("jev_backend") or getattr(self.classifier, "backend", None))
         return result

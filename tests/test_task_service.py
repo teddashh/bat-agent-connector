@@ -1195,20 +1195,22 @@ async def test_router_cap_quota_and_fail_open(tmp_path):
     tid = task["task_id"]
     catalog = ProviderCatalog([
         ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18795/v1", "claude-opus-4-6-thinking", 10),
-        ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp"),
+        ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp", model="claude-opus-5-5"),
         ProviderEntry("agy-gemini-flash", "agy-shim", "http://127.0.0.1:18795/v1", "gemini", 0),
     ])
     router = ModelRouter(j, FakeJev("status_relay", 0.9),
                          RouterConfig(allow_gemini_status=True), catalog)
     assert (await router.choose(tid, "update", "status"))["provider"] == "agy-gemini-flash"
     router = ModelRouter(j, FakeJev("review", 0.4), RouterConfig(agy_claude_daily_cap=1), catalog)
-    assert (await router.choose(tid, "review", "candidate"))["provider"] == "agy-claude"
+    assert (await router.choose(tid, "review", "candidate"))["provider"] == "claude"
+    router.record_provider_result("claude", "quota_error")
+    assert (await router.choose(tid, "review2", "candidate"))["provider"] == "agy-claude"
     router.record_provider_result("agy-claude", "success")
-    assert (await router.choose(tid, "review2", "candidate"))["provider"] == "codex"
+    assert (await router.choose(tid, "review3", "candidate"))["provider"] == "codex"
     router = ModelRouter(j, FakeJev(None))
     assert (await router.choose(tid, "unknown", "?"))["provider"] == "codex"
-    assert len(j.routes(tid)) == 4
-    assert all(e["kind"] == "model_route" for e in j.events(tid)[-4:])
+    assert len(j.routes(tid)) == 5
+    assert all(e["kind"] == "model_route" for e in j.events(tid)[-5:])
     j.close()
 
 
@@ -1218,7 +1220,7 @@ async def test_router_rejects_invalid_confidence_and_prescreen_scores(tmp_path):
     catalog = ProviderCatalog([
         ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18796/v1",
                       "claude-opus-4-6-thinking", 10),
-        ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp"),
+        ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp", model="claude-opus-5-5"),
     ])
 
     class InvalidJev:
@@ -1331,7 +1333,7 @@ async def test_rules_route_each_pm_phase_and_jev_prescreen_is_advisory(tmp_path)
     catalog = ProviderCatalog([
         ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18796/v1",
                       "claude-opus-4-6-thinking", 10),
-        ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp"),
+        ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp", model="claude-opus-5-5"),
         ProviderEntry("agy-gemini-flash", "agy-shim", "http://127.0.0.1:18796/v1",
                       "gemini-flash-test"),
     ])
@@ -1356,7 +1358,7 @@ async def test_rules_route_each_pm_phase_and_jev_prescreen_is_advisory(tmp_path)
     routes = journal.routes(task["task_id"])
     assert {r["step_type"] for r in routes} == {
         "planning", "implementation", "status_relay", "verification", "review"}
-    assert all(r["provider"] == "agy-claude" for r in routes
+    assert all(r["provider"] == "claude" for r in routes
                if r["step_type"] in {"planning", "verification", "review"})
     assert all(r["provider"] == "agy-gemini-flash" for r in routes
                if r["step_type"] in {"status_relay", "implementation"})
@@ -1649,20 +1651,32 @@ def test_provider_switches_branch_and_uncertain_never_replays(tmp_path):
     j = Journal(tmp_path / "tasks.db")
     task = submit(j)
     entries = [ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:9999/v1", "claude-opus-4-6-thinking", 1),
-               ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp")]
+               ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp", model="claude-opus-5-5")]
     catalog = ProviderCatalog(entries)
     switcher = ProviderSwitcher(j, catalog)
-    assert switcher.initial(task["task_id"]) == "agy-claude"
-    assert switcher.fallback(task["task_id"], "agy-claude", outcome="quota_error",
+    assert switcher.initial(task["task_id"]) == "claude"
+    assert switcher.fallback(task["task_id"], "claude", outcome="quota_error",
+                             prompt_status="not_sent") == "agy-claude"
+    assert switcher.fallback(task["task_id"], "agy-claude", outcome="rate_limited",
                              prompt_status="not_sent") == "codex"
     branches = j.get(task["task_id"])["branches"]
-    assert [b["provider"] for b in branches] == ["agy-claude", "codex"]
+    assert [b["provider"] for b in branches] == ["claude", "agy-claude", "codex"]
     assert j.get(task["task_id"])["branch_ids"] == [b["branch_id"] for b in branches]
     assert branches[1]["parent_branch_id"] == branches[0]["branch_id"]
     with pytest.raises(UncertainPrompt):
         switcher.fallback(task["task_id"], "codex", outcome="auth_error", prompt_status="uncertain")
-    assert len(j.get(task["task_id"])["branches"]) == 2
+    assert len(j.get(task["task_id"])["branches"]) == 3
     j.close()
+
+
+def test_provider_starts_on_agy_after_primary_quota_recorded(tmp_path):
+    journal = Journal(tmp_path / "tasks.db")
+    task = submit(journal)
+    journal.provider_use("claude", "quota_error")
+    switcher = ProviderSwitcher(journal, ProviderCatalog())
+    assert switcher.initial(task["task_id"]) == "agy-claude"
+    assert [branch["provider"] for branch in journal.branches(task["task_id"])] == ["agy-claude"]
+    journal.close()
 
 
 async def test_agy_provider_contract_with_fake_endpoint():
@@ -1693,17 +1707,20 @@ async def test_agy_provider_contract_with_fake_endpoint():
         await server.wait_closed()
 
 
-async def test_goose_provider_fallback_before_prompt_only(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["quota", "setup"])
+async def test_goose_provider_fallback_before_prompt_only(tmp_path, monkeypatch, failure):
     script = tmp_path / "fake_acp.py"
     script.write_text('''import json, os, sys
 log=sys.argv[1]
 for line in sys.stdin:
     req=json.loads(line)
-    with open(log,"a") as f: f.write(os.environ["GOOSE_PROVIDER"]+":"+req["method"]+":"+str("BATC_PRIVATE_TEST_SECRET" in os.environ)+"\\n")
+    with open(log,"a") as f: f.write(os.environ["GOOSE_PROVIDER"]+":"+os.environ["GOOSE_MODEL"]+":"+req["method"]+":"+str("BATC_PRIVATE_TEST_SECRET" in os.environ)+"\\n")
     if req["method"]=="notifications/initialized":
         continue
-    if req["method"]=="initialize" and os.environ["GOOSE_PROVIDER"]=="openai":
+    if req["method"]=="initialize" and os.environ["GOOSE_PROVIDER"]=="claude-acp" and sys.argv[2]=="quota":
         result={"jsonrpc":"2.0","id":req["id"],"error":{"status":429}}
+    elif req["method"]=="session/new" and os.environ["GOOSE_PROVIDER"]=="claude-acp" and sys.argv[2]=="setup":
+        result={"jsonrpc":"2.0","id":req["id"],"error":{"code":"unsupported_model"}}
     elif req["method"]=="session/new":
         result={"jsonrpc":"2.0","id":req["id"],"result":{"sessionId":"s"}}
     elif req["method"]=="session/prompt":
@@ -1717,20 +1734,20 @@ for line in sys.stdin:
     monkeypatch.setenv("BATC_PRIVATE_TEST_SECRET", "must-not-enter-Goose")
     catalog = ProviderCatalog([
         ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18795/v1", "claude-opus-4-6-thinking", 1),
-        ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp"),
+        ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp", model="claude-opus-5-5"),
     ])
     j = Journal(tmp_path / "tasks.db")
     task = submit(j, engine="goose")
     goose = GooseACP(GooseConfig(enabled=True, timeout_s=5), catalog)
     result = await goose.run_task(task, str(tmp_path), capability="synthetic",
-                                  command=(sys.executable, "-u", str(script), str(log)), journal=j)
+                                  command=(sys.executable, "-u", str(script), str(log), failure), journal=j)
     assert result["stop_reason"] == "end_turn"
     lines = log.read_text().splitlines()
-    assert lines.count("openai:session/prompt:False") == 0
-    assert lines.count("chatgpt_codex:session/prompt:False") == 1
+    assert lines.count("claude-acp:claude-opus-5-5:session/prompt:False") == 0
+    assert lines.count("openai:claude-opus-4-6-thinking:session/prompt:False") == 1
     assert all(line.endswith(":False") for line in lines)
-    assert [b["provider"] for b in j.branches(task["task_id"])] == ["agy-claude", "codex"]
-    assert j.provider_unavailable("agy-claude", since=0)
+    assert [b["provider"] for b in j.branches(task["task_id"])] == ["claude", "agy-claude"]
+    assert j.provider_unavailable("claude", since=0)
     j.close()
 
 
@@ -1754,7 +1771,7 @@ for line in sys.stdin:
     monkeypatch.setenv("BATC_AGY_SHIM_TOKEN", "fake-local-token")
     catalog = ProviderCatalog([
         ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18795/v1", "claude-opus-4-6-thinking", 1),
-        ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp"),
+        ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp", model="claude-opus-5-5"),
     ])
     j = Journal(tmp_path / "tasks.db")
     task = submit(j, engine="goose")
@@ -1762,8 +1779,8 @@ for line in sys.stdin:
     with pytest.raises(UncertainPrompt):
         await goose.run_task(task, str(tmp_path), capability="synthetic",
                              command=(sys.executable, "-u", str(script), str(log)), journal=j)
-    assert log.read_text().splitlines() == ["openai"]
-    assert [b["provider"] for b in j.branches(task["task_id"])] == ["agy-claude"]
+    assert log.read_text().splitlines() == ["claude-acp"]
+    assert [b["provider"] for b in j.branches(task["task_id"])] == ["claude"]
     j.close()
 
 
@@ -2363,12 +2380,21 @@ async def test_live_goose_remains_disabled_after_restart(mock, tmp_path):
 
 
 def test_provider_config_contract_and_structured_errors(tmp_path):
+    assert GooseConfig().provider == "claude"
+    assert ProviderCatalog().order == ("claude", "agy-claude", "codex")
+    assert ProviderCatalog().entry("claude").model == "claude-opus-5-5"
     assert ProviderCatalog().entry("agy-claude").model == "claude-opus-4-6-thinking"
+    with pytest.raises(ValueError, match="claude-opus-5-5"):
+        ProviderEntry("claude", "claude-acp", model="claude-sonnet-5")
     with pytest.raises(ValueError, match="Opus|opus"):
         ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18796/v1",
                       "claude-sonnet-4-6", 2)
     path = tmp_path / "providers.toml"
-    path.write_text('''fallback_order = ["agy-claude", "codex", "claude"]
+    path.write_text('''fallback_order = ["claude", "agy-claude", "codex"]
+[[providers]]
+id = "claude"
+kind = "claude-acp"
+model = "claude-opus-5-5"
 [[providers]]
 id = "agy-claude"
 kind = "agy-shim"
@@ -2378,15 +2404,13 @@ daily_cap = 2
 [[providers]]
 id = "codex"
 kind = "codex-acp"
-[[providers]]
-id = "claude"
-kind = "claude-acp"
 ''')
     path.chmod(0o600)
     catalog = ProviderCatalog.from_file(path)
-    assert catalog.order == ("agy-claude", "codex", "claude")
+    assert catalog.order == ("claude", "agy-claude", "codex")
     assert catalog.environment("codex", {})["GOOSE_PROVIDER"] == "chatgpt_codex"
-    assert catalog.environment("claude", {})["GOOSE_PROVIDER"] == "claude-acp"
+    assert catalog.environment("claude", {}) == {"GOOSE_PROVIDER": "claude-acp",
+                                                   "GOOSE_MODEL": "claude-opus-5-5"}
     gemini = ProviderCatalog([ProviderEntry("gemini", "gemini", model="gemini-flash")], ("gemini",))
     assert gemini.environment("gemini", {}) == {"GOOSE_PROVIDER": "gemini", "GOOSE_MODEL": "gemini-flash"}
     with pytest.raises(ProviderSetupError, match="Gemini model"):
