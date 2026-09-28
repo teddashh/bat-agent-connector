@@ -21,7 +21,8 @@ class TaskAdapter(Protocol):
     async def send(self, task: dict, session_id: str, text: str, message_id: str) -> dict: ...
     async def read(self, task: dict, session_id: str, marker: str | None) -> dict: ...
     async def interrupt(self, task: dict, session_id: str) -> None: ...
-    async def failover(self, task: dict, session_id: str, successor_id: str) -> dict: ...
+    async def failover(self, task: dict, session_id: str, successor_id: str, *,
+                       handoff_message_id: str, handoff_command_id: str) -> dict: ...
     async def recover_failover(self, task: dict, *, successor_id: str) -> dict | None: ...
     async def candidate_identity(self, task: dict) -> dict | None: ...
     async def run_verification(self, task: dict) -> dict | None: ...
@@ -93,7 +94,11 @@ class TaskCoordinator:
         if task["paused"] or task["state"] in {"done", "failed", "human_owned", "needs_ted"}:
             return task
         cmds = self.journal.commands(task_id)
-        pending = next((c for c in reversed(cmds) if c["status"] in {"intent", "needs_review", "uncertain"}), None)
+        pending = next((c for c in cmds if c["kind"] == "failover" and
+                        c["status"] in {"intent", "uncertain"}), None)
+        if pending is None:
+            pending = next((c for c in reversed(cmds)
+                            if c["status"] in {"intent", "needs_review", "uncertain"}), None)
         if pending:
             # An intent may have reached BAT before a crash. Never dispatch it again.
             if pending["status"] in {"intent", "needs_review"}:
@@ -238,16 +243,21 @@ class TaskCoordinator:
             return self.journal.change(task["task_id"], "uncertain")
         if kind == "failover":
             found = await self.adapter.recover_failover(task, successor_id=sid)
-            if found and found.get("marker"):
+            if found and found.get("session_id"):
                 if found["session_id"] != sid:
                     self.journal.command_bind_session(cmd["command_id"], found["session_id"])
-                self.journal.command_status(cmd["command_id"], "settled", marker=found["marker"])
+                    handoff_id = json.loads(cmd["payload"])["handoff_command_id"]
+                    self.journal.command_bind_session(handoff_id, found["session_id"])
+                self.journal.command_status(cmd["command_id"], "settled", marker=found.get("marker"))
+                handoff_id = json.loads(cmd["payload"])["handoff_command_id"]
+                self.journal.command_status(handoff_id, "uncertain", marker=found.get("marker"))
                 self.journal.add_branch(task["task_id"], session_id=found["session_id"],
                                         provider="codex", role="lead", reason="recovered_failover",
                                         parent_branch_id=(task["branches"][-1]["branch_id"]
                                                           if task["branches"] else None))
-                return self.journal.change(task["task_id"], "running",
-                                           fields={"session_id": found["session_id"], "turn_marker": found["marker"]})
+                return self.journal.change(task["task_id"], "uncertain",
+                                           fields={"session_id": found["session_id"],
+                                                   "turn_marker": None, "lead_agent": "codex"})
             return self.journal.change(task["task_id"], "uncertain")
         if kind != "send":
             return self.journal.change(task["task_id"], "uncertain")
@@ -269,35 +279,31 @@ class TaskCoordinator:
 
     async def _failover(self, task: dict) -> dict:
         successor = str(uuid.uuid4())
-        cmd, fresh = self.journal.command(task["task_id"], "failover", successor,
-                                          {"old_session_id": task["session_id"]},
-                                          f"{task['task_id']}:failover:{task['session_id']}:{task['control_version']}")
-        if not fresh:
-            return self.journal.change(task["task_id"], "uncertain")
+        cmd, handoff = self.journal.reserve_failover(task["task_id"], task["session_id"], successor)
         if self.journal.get(task["task_id"])["paused"]:
+            # No BAT call has started; both durable intents can be cancelled.
             self.journal.command_status(cmd["command_id"], "cancelled")
+            self.journal.command_status(handoff["command_id"], "cancelled")
             return self.journal.get(task["task_id"])
         try:
-            result = await self.adapter.failover(task, task["session_id"], successor)
-        except ValueError:
-            self.journal.command_status(cmd["command_id"], "rejected")
-            return self.journal.change(task["task_id"], "needs_ted")
+            result = await self.adapter.failover(task, task["session_id"], successor,
+                                                 handoff_message_id=handoff["message_id"],
+                                                 handoff_command_id=handoff["command_id"])
         except Exception:
             self.journal.command_status(cmd["command_id"], "uncertain")
-            return self.journal.change(task["task_id"], "uncertain")
-        marker = result.get("marker")
-        if not marker:
-            self.journal.command_status(cmd["command_id"], "uncertain")
+            self.journal.command_status(handoff["command_id"], "uncertain")
             return self.journal.change(task["task_id"], "uncertain")
         if result["session_id"] != successor:
             self.journal.command_bind_session(cmd["command_id"], result["session_id"])
-        self.journal.command_status(cmd["command_id"], "settled", marker=marker)
+            self.journal.command_bind_session(handoff["command_id"], result["session_id"])
+        self.journal.command_status(cmd["command_id"], "settled", marker=result.get("marker"))
+        self.journal.command_status(handoff["command_id"], "uncertain", marker=result.get("marker"))
         self.journal.add_branch(task["task_id"], session_id=result["session_id"], provider="codex",
                                 role="lead", reason="quota_failover",
                                 parent_branch_id=(task["branches"][-1]["branch_id"]
                                                   if task["branches"] else None))
-        return self.journal.change(task["task_id"], "running",
-                                   fields={"session_id": result["session_id"], "turn_marker": marker,
+        return self.journal.change(task["task_id"], "uncertain",
+                                   fields={"session_id": result["session_id"], "turn_marker": None,
                                            "lead_agent": "codex"})
 
     async def _verify_and_review(self, task: dict) -> dict:
