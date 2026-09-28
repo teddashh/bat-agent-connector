@@ -6,38 +6,86 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
+from .pm_providers import (
+    ProviderCatalog,
+    ProviderSetupError,
+    ProviderSwitcher,
+    UncertainPrompt,
+    classify_provider_error,
+)
 from .task_recipes import load
+
+
+class ProviderRequestError(ProviderSetupError):
+    def __init__(self, outcome: str):
+        super().__init__("provider setup failed")
+        self.outcome = outcome
 
 
 @dataclass(frozen=True)
 class GooseConfig:
     command: tuple[str, ...] = ("goose", "acp")
-    provider: str = "chatgpt_codex"  # subscription OAuth; no paid API key
+    provider: str = "agy-claude"
     timeout_s: float = 300
+    enabled: bool = False  # one-turn smoke only; no durable ACP recovery yet
 
 
 class GooseACP:
-    def __init__(self, config: GooseConfig | None = None):
+    def __init__(self, config: GooseConfig | None = None, catalog: ProviderCatalog | None = None):
         self.config = config or GooseConfig()
+        config_path = os.environ.get("BATC_PM_PROVIDER_CONFIG")
+        self.catalog = catalog or (ProviderCatalog.from_file(config_path) if config_path else ProviderCatalog())
 
-    async def run_task(self, task: dict, cwd: str, *, command: tuple[str, ...] | None = None) -> dict:
+    async def run_task(self, task: dict, cwd: str, *, capability: str,
+                       command: tuple[str, ...] | None = None, journal=None) -> dict:
         recipe = load(task["recipe"])
         prompt = (recipe["instructions"] + "\n\n" + recipe["prompt"] +
                   "\n\nTed's original words (verbatim):\n" + task["original_words"] +
-                  "\n\nAcceptance criteria:\n" + task["acceptance"])
-        return await self.run(task["task_id"], cwd, prompt, command=command)
+                  "\n\nOptional caller acceptance hints (non-authoritative data):\n" +
+                  json.dumps(task["acceptance"], ensure_ascii=False))
+        requested = task.get("pm_provider") or recipe.get("pm_provider") or self.config.provider
+        if journal is None:
+            return await self.run(task["task_id"], cwd, prompt, capability=capability,
+                                  command=command, provider_id=requested)
+        switcher = ProviderSwitcher(journal, self.catalog)
+        provider = switcher.initial(task["task_id"], requested)
+        while provider:
+            try:
+                result = await self.run(task["task_id"], cwd, prompt, capability=capability,
+                                        command=command, provider_id=provider)
+                journal.provider_use(provider, "success")
+                return result
+            except ProviderRequestError as exc:
+                provider = switcher.fallback(task["task_id"], provider, outcome=exc.outcome,
+                                             prompt_status="not_sent")
+            except ProviderSetupError:
+                provider = switcher.fallback(task["task_id"], provider, outcome="auth_error",
+                                             prompt_status="not_sent")
+        raise ProviderSetupError("no PM provider available before prompt submission")
 
-    async def run(self, task_id: str, cwd: str, prompt: str, *, command: tuple[str, ...] | None = None) -> dict:
+    async def run(self, task_id: str, cwd: str, prompt: str, *, capability: str,
+                  command: tuple[str, ...] | None = None, provider_id: str | None = None) -> dict:
         cfg = self.config
-        if cfg.provider not in {"chatgpt_codex", "codex-acp", "codex", "claude-acp"}:
-            raise ValueError("Goose PM provider must be a configured subscription provider")
-        env = {k: v for k, v in os.environ.items() if k not in {
-            "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOSE_API_KEY", "GOOGLE_API_KEY",
-        }}
-        env["GOOSE_PROVIDER"] = cfg.provider
-        proc = await asyncio.create_subprocess_exec(*(command or cfg.command), stdin=asyncio.subprocess.PIPE,
+        if not cfg.enabled:
+            raise RuntimeError("Goose ACP is a smoke adapter only; live PM recovery is disabled")
+        provider_id = provider_id or cfg.provider
+        allowed = {"PATH", "LANG", "PYTHONPATH", "BATC_TASK_URL"}
+        env = {k: v for k, v in os.environ.items() if k in allowed}
+        env.update(self.catalog.environment(provider_id, os.environ))
+        with tempfile.TemporaryDirectory(prefix="batc-goose-") as isolated_home:
+            Path(isolated_home).chmod(0o700)
+            env.update(HOME=isolated_home, XDG_CONFIG_HOME=isolated_home,
+                       XDG_DATA_HOME=isolated_home)
+            return await self._run_process(task_id, cwd, prompt, capability, command or cfg.command,
+                                           env, cfg.timeout_s)
+
+    async def _run_process(self, task_id: str, cwd: str, prompt: str, capability: str,
+                           command: tuple[str, ...], env: dict[str, str], timeout_s: float) -> dict:
+        proc = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE,
                                                      stdout=asyncio.subprocess.PIPE,
                                                      stderr=asyncio.subprocess.DEVNULL, env=env)
         assert proc.stdin and proc.stdout
@@ -51,12 +99,18 @@ class GooseACP:
                                           "params": params}) + "\n").encode())
             await proc.stdin.drain()
             while True:
-                line = await asyncio.wait_for(proc.stdout.readline(), cfg.timeout_s)
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout_s)
                 if not line or len(line) > 2_000_000:
                     raise RuntimeError("Goose ACP stopped or sent an oversized message")
                 reply = json.loads(line)
                 if reply.get("id") == ident:
                     if "error" in reply:
+                        error = reply["error"] if isinstance(reply["error"], dict) else {}
+                        outcome = classify_provider_error(status=error.get("status"), code=error.get("code"))
+                        if method != "session/prompt" and outcome:
+                            raise ProviderRequestError(outcome)
+                        if method == "session/prompt":
+                            raise UncertainPrompt("Goose prompt outcome requires reconciliation")
                         raise RuntimeError("Goose ACP request failed")
                     return reply["result"]
                 if "method" in reply and "id" in reply:
@@ -69,13 +123,15 @@ class GooseACP:
             await rpc("initialize", {"protocolVersion": 2, "clientCapabilities": {},
                                      "clientInfo": {"name": "bat-task-service", "version": "0.1"}})
             scoped = {"name": "bat-task", "command": sys.executable,
-                      "args": ["-m", "bat_agent_connector.task_scoped_mcp", task_id], "env": []}
+                      "args": ["-m", "bat_agent_connector.task_scoped_mcp", task_id],
+                      "env": [{"name": "BATC_TASK_CAPABILITY", "value": capability}]}
             session = await rpc("session/new", {"cwd": cwd, "mcpServers": [scoped]})
             result = await rpc("session/prompt", {"sessionId": session["sessionId"],
                                                   "prompt": [{"type": "text", "text": prompt}]})
             return {"session_id": session["sessionId"], "stop_reason": result.get("stopReason")}
         finally:
-            proc.terminate()
+            if proc.returncode is None:
+                proc.terminate()
             try:
                 await asyncio.wait_for(proc.wait(), 5)
             except asyncio.TimeoutError:

@@ -16,24 +16,70 @@ Rules 引擎在回合確定完成、尚未達驗收、沒有 blocker／額度／
 
 Discord 發文者只讀事件。每個 thread 事件以 event id 去重；看板只有一則可編輯的「任務看板」，訊息 id 持久保存。adapter 可用 fake 測試；正式 token、channel id 只由環境／grok-bot-01 設定。Discord API 不提供以本地交易包住網路發文的 exactly once：送出成功但本地記錄前斷線時，先對帳或人工處理，不盲目重貼。第一階段不啟用正式發文，也不移除現有 cron；部署時才用此服務取代 `bat-watch-*` 與 idle keep-pushing。
 
-Goose adapter 限用 stock `goose acp`，以 ACP JSON-RPC 操控，任務 recipe YAML 設定指示、工具、參數、驗收和重試上限。服務只給 Goose 該 task 的 `send`、`read`、`record_verification`、`request_ted`，不暴露 `work_submit`，避免遞迴與跨任務寫入。Goose provider 可設定，**預設 Codex 訂閱／Codex CLI provider**，Claude 額度可用時可選 Claude；Gemini 僅供明確 opt-in 的低成本狀態分類，不能預設作 PM。設定應採 Goose 官方訂閱登入或既有本機相容端點；禁止付費 API key。Codex 訂閱額度、Claude 限額、Gemini 便宜但規劃品質的差異須在真實 A/B 量測。第一階段有 fake BAT 的 ACP smoke；真 Goose PM、provider 認證及實機穩定性仍待第二階段驗證。預設保持 rules。
+Goose adapter 限用 stock `goose acp`，以 ACP JSON-RPC 操控，任務 recipe YAML 設定指示、工具、參數、驗收和重試上限。服務只給 Goose 該 task 的 `send`、`read`、`run_verification`、`request_ted`，不暴露 `work_submit`。驗證命令由本機受信設定選定並由服務觀察 exit code、commit/tree；Goose 無法提供自己的 exit code 作證。Goose PM 的**首選預設改為 agy-openai-shim 的 Antigravity Claude**；順序為 `agy-claude → codex → claude`。Codex 使用 ChatGPT 訂閱登入作備援；Claude ACP 須有可用額度。Gemini 只在明確設定時做低成本狀態分類。禁止付費 API key。第一階段有 fake BAT 的 ACP smoke 與 provider adapter／fallback 測試；真 Goose PM、provider 認證、ACP 恢復及實機穩定性仍待第二階段驗證。正式 task 仍預設 rules，daemon 拒絕 live Goose 提交。
 
 每個 PM step 的 model router 先用既有 TypeSafe Jev 分類 `status_relay`、`verification`、`planning`、`review`，記錄校準 confidence 與 stakes。一般狀態／逐字轉述可走 agy Gemini Flash；規劃、查證、review 在低信心或高風險時優先用 agy shim 的 Antigravity Claude，受每日成功使用次數上限與 quota/rate-limit 訊號限制，超限即用 Codex 訂閱。Jev 不可用則直接用 Codex。第一階段只交付決策介面、設定物件、使用量／錯誤及 routing journal，**沒有讓 router 呼叫真實模型**；實際模型提供者切換、每日 cap 的配額對應和信心閾值調校屬第二階段。
 
-模型端點檢查：本機 `agy-openai-shim` 設定有 `127.0.0.1:18795`，程式提供 OpenAI 相容 `/v1/models` 和 `/v1/chat/completions`；此為檢查到的**本機**設定，未確認 grok-bot-01 相同或 Goose 可成功認證。僅在明確選 Gemini 分類時檢查該端點；Goose PM 預設 Codex 訂閱登入，不配置付費 API key。`goose --version` 在本工作樹環境無可執行檔；正式 smoke 須於部署主機補跑。
+模型端點檢查：castle1 曾觀察到 `127.0.0.1:18795`，不能推定 grok-bot-01 也有相同端點。本 worktree 試著透過 `ssh grok-bot-01` 對其 loopback `/v1/models` 作無憑證可達性檢查，但本機 DNS 回報 hostname 無法解析；**grok-bot-01 shim 尚未確認可達**，也未讀取或揭露金鑰。用 fake loopback OpenAI 相容端點測 adapter。Goose 預設 agy Claude 的端點、model、token 都須從私有環境／0600 設定提供；缺設定時只能在未送 prompt 前備援至 Codex。`goose --version` 在本工作樹環境無可執行檔；正式 smoke 須於部署主機補跑。
 
 每個 task 保存 `submitted_at`、`delivered_at`、`delivered`、`review_rejections`、`ted_interventions`；可計算交付／未交付、review 駁回次數、Ted 介入次數及從提交到交付的秒數。事件帶時間戳供稽核，不能把 coding agent 的自述當成 delivered。
 
 ### 本 PR 的啟動與限制
 
-`batc serve --host 127.0.0.1 --port 18796` 僅在明確啟動時運行；需要主機 `writes=true`、`orchestrate=true`。既有 `bat-agent-connector-mcp` 新增四個 work 工具，透過 `BATC_TASK_URL`（預設 `http://127.0.0.1:18796/rpc`）連同機 daemon；它本身不擁有第二份帳本。服務尚未部署。Rules 可建立 lead、續推、停派、從不明 BAT 回應對帳、讀取現有 `batc record-verification` 紀錄並在通過後啟獨立 reviewer。若沒有外部可信測試執行者寫入 PR #1 驗證紀錄，任務停在 verifying，不會假裝已交付。Goose ACP adapter 和 task-scoped MCP 已可用 fake BAT 走通一個 tool call；真 Goose 尚未在此主機安裝，goose 選項屬 smoke／試驗用途。Discord adapter 可用 fake 測；正式憑證和看板 channel 尚未配置。未關閉既有 Hermes cron，也未修改 BAT／Hermes 設定。
+`batc serve --host 127.0.0.1 --port 18796` 僅在明確啟動時運行；需要主機 `writes=true`、`orchestrate=true`。既有 `bat-agent-connector-mcp` 新增四個 work 工具，透過 `BATC_TASK_URL`（預設 `http://127.0.0.1:18796/rpc`）連同機 daemon；它本身不擁有第二份帳本。服務尚未部署。Rules 可建立 lead、續推、停派、從不明 BAT 回應對帳、執行**管理員預先設定**的測試命令並將觀察結果連同 commit/tree 寫入 PR #1 驗證紀錄，再啟獨立 reviewer。未設定受信測試命令時停在 verifying。Goose ACP adapter 和 task-scoped MCP 已可用 fake BAT 走通一個 tool call；真 Goose 尚未在此主機安裝，goose 選項屬 smoke／試驗用途。Discord adapter 可用 fake 測；正式憑證和看板 channel 尚未配置。未關閉既有 Hermes cron，也未修改 BAT／Hermes 設定。
 
 castle1 OpenClaw 應透過到 grok-bot-01 loopback 服務的受控轉接（例如 SSH socket forwarding）呼叫同一 task MCP，不在 castle1 啟第二個 daemon 或 SQLite。HTTP 維持 loopback；不直接向 LAN 開放 BAT token 或 task 控制端點。
 
 ## 第二階段：計畫，尚未交付
 
 1. 在 grok-bot-01 安裝與 pin Goose 版本，驗證 stock ACP resume、MCP 工具注入與 agy shim 的端到端模型呼叫。用相同真實任務比較 rules、Goose、Hermes 的完成品質、續推次數、額度、人工介入與恢復時間，再決定預設引擎。
-2. 讓自動 session 可選擇註冊 BAT 遠端 GUI 頁籤；保留 revision recheck、加競態測試與受控 rollout。`workspace:save` 是整份覆寫，與 GUI 同時存檔仍可能互蓋；Ted 已接受文件化風險，但無 BAT host-side 原子 append 就不能保證沒有 race。
+2. 第一階段已有預設 OFF 的 service-only GUI tab 註冊開關；第二階段在 grok-bot-01 小範圍開啟、跑 revision recheck／GUI 競態測試。`workspace:save` 是整份覆寫，與 GUI 同時存檔仍可能互蓋；Ted 已接受文件化風險，但無 BAT host-side 原子 append 就不能保證沒有 race。
 3. 配正式 Discord token／thread／看板 channel、持久化 message id、部署 service unit、備份 SQLite、健康檢查與重啟 runbook。確認對帳後停用 Hermes 的 `bat-watch-*`、idle keep-pushing；實測 castle1 OpenClaw 轉接。沒有在本 PR 啟動服務或更動 Hermes／BAT。
 
 參考：[研究 Part 1／2](../research/2026-09-27-review.md)、[先前評估](no-bat-change-evaluation.md)、[下一代設計](next-gen-connector.md)。`chatgpt-full-discussion.md` 僅研究使用，不能提交。
+
+## 可恢復的狀態機與帳本
+
+單一 task ID 永不更換。`branches` 表另記每次 BAT lead／reviewer session 與 PM provider 選擇，包含 `branch_id`、`session_id`、provider、角色、上游 branch ID、原因、時間；`work_status` 回傳完整 branch 歷史。這裡的 branch 是任務執行分支，與 Git branch 名稱不同。`tasks` 保存原話、工作空間、recipe、狀態、pause/control_version、lead/reviewer session、turn marker、commit/tree、review marker、提交／交付時間與四項指標。`commands` 有唯一 idempotency key、預留 session ID、BAT message ID、kind、送出前游標和狀態。`events`、`routing`、`provider_usage`、`observed_verifications`、`capabilities`、`ted_actions`、Discord `board` 與 owner lease 各自保存可稽核資料。所有網路呼叫前先提交命令意圖；同一 key 不會生第二條命令。
+
+| 原狀態 | 可自動進入 | 條件 |
+| --- | --- | --- |
+| `queued` | `dispatching` | 預留 lead session ID、寫 start intent 後啟動 |
+| `dispatching` | `accepted`／`verifying`／`uncertain` | BAT start 明確成功／reviewer start 成功／回覆不明 |
+| `accepted` | `running`／`uncertain` | 已先記 `needs_review` 送出標記；BAT 回覆可歸因／不明 |
+| `running` | `accepted`／`verifying`／`waiting_permission`／`quota_limited`／`needs_ted` | 回合結束續推／里程碑／權限／額度／人為阻塞 |
+| `quota_limited` | `running`／`uncertain`／`needs_ted` | Claude→Codex 原子 successor 預留及 handoff 可證實／不明／不適用 |
+| `verifying` | `done`／`accepted`／`needs_ted` | 乾淨候選 commit/tree 的觀察測試與 fresh reviewer PASS／REJECT／測試失敗 |
+| `uncertain` | `accepted`／`running`／`verifying`／`needs_ted` | 只靠讀取 BAT 狀態對帳或 Ted 明確處理；絕不自動重送 |
+
+`pause` 先持久化控制版本，停止新派送；可選擇 interrupt 當前 turn。start 等待期間發生 pause 時，已接受的 session 保存為 `accepted` 但不送初始 prompt。`resume` 清除 pause，下一 tick 先查 pending 命令；若無待對帳且 session 尚未收到 prompt，才送第一次 prompt。每個 host/session 在單 daemon 內有 writer lock；程序間以 0600 lock file 的排他 `flock` 與 owner heartbeat 限制為一個 daemon。外部 BAT GUI／舊低階工具不受此鎖控制，故遇無法歸因的 turn 保留 uncertain。
+
+送 prompt 前先持久記 `needs_review`，包含 message ID 與前一個 Codex 時間游標；即使 crash 發生在實際送出前，也按**可能已送出**處理。逾時、斷線或回覆遺失後保持 `uncertain`。Claude `session_read` 用 `correlated`／`correlated_after_prior_turn`；Codex 可用較弱的 `timestamp_cursor` 對帳執行進度，但 reviewer PASS 另要求全新 reviewer session 的唯一 user prompt 確實含當前 `REVIEW-CANDIDATE: commit tree`。BAT 明確回 busy/rejected 時標 rejected、請 Ted 處理，不假設可安全重送。start 對帳使用預留 session ID 和 BAT meta；failover 對帳使用預留 successor、PR #1 registry、handoff message ID。若無法證明，保留 uncertain。遇 candidate commit 或 tree 改變，清除舊 verification/reviewer/PASS，建立新 reviewer session；`done` 需當前 commit/tree 的受信 runner exit 0 與 fresh PASS。
+
+Failover 預設把 task ledger 摘要交給 successor：Ted 原話、狀態、候選 commit、近期命令／事件，避免以可能極長或過時的聊天全文作權威。若人工選擇需要歷史，超過 200,000 字時保留前 12,000＋後 148,000 字並標明中段省略，完整內容寫入私有目錄的 0600 archive。BAT prompt 有 20,000 字上限，長摘要必須逐段記錄／送出；第一階段不自動走此歷史退路。archive 絕不能放進 Git。
+
+## 權限、設定與操作恢復
+
+HTTP 僅聽 loopback 並檢查 peer。一般 work RPC 需本機 0600 admin bearer token；Goose 只取得 1 小時的 task-scoped capability，不能呼叫 `work_submit`、操作另一 task 或直接提供測試 exit code。狀態目錄 0700；SQLite、token、lock、私有 handoff archive 0600。不要將 token、shim 金鑰、原始聊天或 provider 錯誤全文寫入日志。castle1 OpenClaw 需透過受控 SSH loopback forward 加 admin bearer 呼叫同一 grok-bot-01 daemon；若要允許 castle1 寫入，應配置限定權限的轉接身分，不能把 loopback HTTP 直接開到 LAN。此轉接與主機授權尚未部署。
+
+私有 `BATC_TASK_SETTINGS` TOML 必須 0600，例如 `[verification.commands]` 的 `project = ["uv", "run", "pytest", "-q"]`；remote host 可用 `[verification.ssh_hosts]` 指定既有 SSH alias。測試 stdout/stderr 只存本機 `task-artifacts` 的 0600 檔案（至多保留前 2 MB，另存完整輸出 SHA-256）；可在 `[verification]` 設 `artifact_dir` 到私有路徑。`[task_service] register_tabs = true` 是額外的 service-only 顯式開關，預設 false；主機既有 `orchestrate_register_tabs=true` 也必須同時成立。lead 和 reviewer tab 都用 connector 的 append/revision recheck；不改 BAT。Ted 很少開 GUI，仍需知道 `workspace:save` 整份覆寫的 race。
+
+Discord thread 發文含固定 `BATC-EVENT:<event_id>` marker，發文前 claim；若 crash，重啟先尋找 marker／message ID，找到即標 sent。找不到時標 unresolved，需管理員查完整 Discord history 後用 `batc task-delivery --confirm-absent-event` 明確重試。看板 `BATC-BOARD:<channel>` 只有一則：已知 message ID 時重試 edit 安全；未知 ID 的 create 同樣須尋找或人工確認，不能盲目重貼。Fake adapter 覆蓋重啟；真 Discord token 和 channel ID 只從環境注入。`work_delivery_status` 與 `batc task-delivery` 可查看未解事件。尚未取代 Hermes cron。
+
+## PM provider 設定與限額
+
+私有 `BATC_PM_PROVIDER_CONFIG` TOML (0600) 有多個 `[[providers]]`：`id`、`kind`（`agy-shim`、`openai-compatible`、`codex-acp`、`claude-acp`、`gemini`）、`base_url`、`model`、`daily_cap`；頂層 `fallback_order = ["agy-claude", "codex", "claude"]`。`base_url` 僅允許無 credential 的 loopback HTTP；`BATC_AGY_SHIM_TOKEN` 從環境供本機 agy shim adapter 使用，不能提交設定或使用付費 API key。每 task 可給 `pm_provider`，recipe 可給預設；未給則首選 agy Claude。新 provider 只需一個小 adapter class、設定 entry 及自己的 fake endpoint／ACP contract test。設定日上限按 UTC 日計成功使用次數；`quota_error`、`rate_limited`、`auth_error` 只能在**確認未送 prompt**時切換至下一 provider，寫 `provider_usage` 與新的 task PM branch。已送、`needs_review` 或 uncertain prompt 必須先對帳，禁止切換時重播同一內容。錯誤以結構化 HTTP status/code 分類，不以可能含敏感內容的錯誤字串猜測。
+
+Jev router 仍可按每個 PM step 分類 `status_relay`／`verification`／`planning`／`review`，每次記 confidence、stakes、選擇與原因；Jev 不可用時 fail open 選 Codex。Routine status 可明確選 agy Gemini Flash；高風險／低信心規劃、查證、review 優先 scarce agy Claude，額度不足選 Codex。**M1 只有 router 決策／帳本介面；daemon 還未讓 router 驅動 live PM 步驟。**它與 Goose provider switcher 是兩層：Jev 決定一步適合誰，switcher 只處理該 provider 在未送 prompt 前的故障。額度 cap 是服務的保守計數，不代表第三方真實剩餘額度。真 provider 執行、成本與品質 A/B 屬 M2。
+
+## Pinned Goose 啟用門檻（M2 contract-test checklist）
+
+此清單取自 Ted 提供的 `/workspace/goose-acp-handoff/docs/UPGRADES.md` 概念文字；本環境沒有該 clone，未複製其 Node/MIT 程式碼。Goose 與 connector 分開 pin 版本，不改簽署的 Goose bundle；私有 integration config 與 handoff state 先備份，不能提交。每次升版在**隔離 synthetic session** 完成下列檢查後才可能開 live Goose：
+
+1. 跑 connector repo tests／syntax，對安裝的 Goose 驗證 `initialize`、`load/new`、`configOptions`、`session/set_config_option` 的真實 schema 與回覆。
+2. 檢查 host UI 真的顯示 handoff 與 target-model 選擇；target setup 必須驗證回覆的 provider choice 與 approval-mode setup。wrapper 對 protocol version 非 1 必須拒絕。這些檢查仍非完整相容性保證，未知 protocol/UI 變更可能破壞流程。
+3. 切換 provider、記 synthetic marker、reload 後確認 history 與 identity；強制 provider 失敗，確認原 session／內容保留。工具 approval 要保留為 approval，不能自動變成 granted permission。
+4. 失敗時保持 handoff 停用，保留舊 session／私有 state，把 adapter/config 回退至 last known good。略過 wrapper 只會回原 agent，不會合併 target branch messages。
+5. 替換 relay 之前要讓 in-flight prompt 結束或明確取消，不能為安裝功能殺掉 active writer。
+
+此外還要證明 task-scoped MCP capability、subprocess env/process 隔離、ACP session 在 daemon 重啟後可恢復、provider auth/quota 分類、no-resend 及 pinned 版本在 grok-bot-01 的實機行為。**上述尚未全數通過，live Goose 保持停用，也不得進入真實 shadow trial。**獨立 reviewer 對本 PR 的 P1/P2 修正重新 sign-off 後，才討論 shadow trial；本 PR 不部署。

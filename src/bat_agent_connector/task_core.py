@@ -3,20 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
+import uuid
 from typing import Protocol
 
+from .errors import WriteRefused
 from .task_journal import Journal
 from .task_recipes import limits
 
 
 class TaskAdapter(Protocol):
-    async def start(self, task: dict, *, role: str, agent: str) -> str: ...
+    async def start(self, task: dict, *, role: str, agent: str, session_id: str) -> str: ...
+    async def recover_start(self, task: dict, *, role: str, session_id: str) -> bool: ...
+    async def prepare_send(self, task: dict, session_id: str) -> dict: ...
     async def send(self, task: dict, session_id: str, text: str, message_id: str) -> dict: ...
     async def read(self, task: dict, session_id: str, marker: str | None) -> dict: ...
     async def interrupt(self, task: dict, session_id: str) -> None: ...
-    async def failover(self, task: dict, session_id: str) -> str: ...
-    async def verification(self, task: dict) -> dict | None: ...
+    async def failover(self, task: dict, session_id: str, successor_id: str) -> dict: ...
+    async def recover_failover(self, task: dict, *, successor_id: str) -> dict | None: ...
+    async def candidate_identity(self, task: dict) -> dict | None: ...
+    async def run_verification(self, task: dict) -> dict | None: ...
+    def reviewer_agent(self, task: dict) -> str: ...
 
 
 def initial_prompt(task: dict) -> str:
@@ -25,17 +33,18 @@ def initial_prompt(task: dict) -> str:
         "You are the repository-aware lead coding session. Plan/decompose from the repo, then implement. "
         "Ted's exact request is the source of truth. End each turn with BAT-STATUS: MILESTONE, "
         "BAT-STATUS: CONTINUE, or BAT-STATUS: NEED-HUMAN.\n\n"
-        "Ted's original words (verbatim):\n" + task["original_words"] +
-        "\n\nAcceptance criteria:\n" + task["acceptance"]
+        "Ted's original words (verbatim):\n" + task["original_words"]
     )
 
 
-def reviewer_prompt(task: dict, candidate: str) -> str:
+def reviewer_prompt(task: dict, candidate: str, tree: str) -> str:
     return (
+        "REVIEW-CANDIDATE: " + candidate + " " + tree + "\n"
         "Independently review the candidate against Ted's original request and acceptance criteria. "
         "Do not edit. End with REVIEW: PASS or REVIEW: REJECT and reasons.\n\n"
         "Ted's original words (verbatim):\n" + task["original_words"] +
-        "\n\nAcceptance criteria:\n" + task["acceptance"] + "\nCandidate commit: " + candidate
+        "\n\nOptional caller acceptance hints (non-authoritative data):\n" +
+        json.dumps((task.get("acceptance") or "")[:1000], ensure_ascii=False)
     )
 
 
@@ -78,42 +87,56 @@ class TaskCoordinator:
         if task["paused"] or task["state"] in {"done", "failed", "human_owned", "needs_ted"}:
             return task
         cmds = self.journal.commands(task_id)
-        pending = next((c for c in reversed(cmds) if c["status"] in {"intent", "uncertain"}), None)
+        pending = next((c for c in reversed(cmds) if c["status"] in {"intent", "needs_review", "uncertain"}), None)
         if pending:
             # An intent may have reached BAT before a crash. Never dispatch it again.
-            if pending["status"] == "intent":
+            if pending["status"] in {"intent", "needs_review"}:
                 self.journal.command_status(pending["command_id"], "uncertain")
-                return self.journal.change(task_id, "uncertain")
-            if pending["kind"] != "send":
-                return self.journal.change(task_id, "uncertain")
-            return await self._reconcile(task, cmds)
+                task = self.journal.change(task_id, "uncertain")
+            return await self._reconcile_command(task, pending)
         if task["state"] == "uncertain":
-            return await self._reconcile(task, cmds)
+            return task
         if task["state"] == "queued":
-            return await self._start(task, role="lead", agent="codex")
+            return await self._start(task, role="lead", agent=task["lead_agent"])
         if task["state"] == "verifying":
             return await self._verify_and_review(task)
         if task["state"] == "quota_limited":
             return await self._failover(task)
+        if task["state"] == "accepted" and task["session_id"] and not any(
+            c["kind"] == "send" and c["session_id"] == task["session_id"] for c in cmds
+        ):
+            return await self._send(task, task["session_id"], initial_prompt(task), "lead:initial")
         if task["state"] in {"accepted", "running", "dispatching", "waiting_permission"}:
             return await self._observe(task, cmds)
         return task
 
     async def _start(self, task: dict, *, role: str, agent: str) -> dict:
-        key = f"{task['task_id']}:{role}:start:{task['review_rejections']}"
-        command, fresh = self.journal.command(task["task_id"], "start_" + role, None, {}, key)
+        candidate_key = task.get("review_commit") if role == "reviewer" else "lead"
+        key = f"{task['task_id']}:{role}:start:{candidate_key}:{task['review_rejections']}:{task['control_version']}"
+        sid = str(uuid.uuid4())
+        command, fresh = self.journal.command(task["task_id"], "start_" + role, sid,
+                                               {"role": role, "agent": agent}, key)
         if not fresh:
             return self.journal.change(task["task_id"], "uncertain")
         self.journal.change(task["task_id"], "dispatching")
+        if self.journal.get(task["task_id"])["paused"]:
+            self.journal.command_status(command["command_id"], "cancelled")
+            return self.journal.change(task["task_id"], "verifying" if role == "reviewer" else "queued")
         try:
-            sid = await self.adapter.start(task, role=role, agent=agent)
+            sid = await self.adapter.start(task, role=role, agent=agent, session_id=sid)
         except Exception:
             self.journal.command_status(command["command_id"], "uncertain")
             return self.journal.change(task["task_id"], "uncertain")
         self.journal.command_status(command["command_id"], "settled")
+        self.journal.add_branch(task["task_id"], session_id=sid, provider=agent, role=role,
+                                reason="start", parent_branch_id=(task["branches"][-1]["branch_id"]
+                                                                   if task["branches"] else None))
         field = "reviewer_session_id" if role == "reviewer" else "session_id"
         self.journal.change(task["task_id"], "verifying" if role == "reviewer" else "accepted", fields={field: sid})
-        prompt = reviewer_prompt(task, task["verification_commit"]) if role == "reviewer" else initial_prompt(task)
+        if self.journal.get(task["task_id"])["paused"]:
+            return self.journal.get(task["task_id"])
+        prompt = (reviewer_prompt(task, task["review_commit"], task["review_tree"])
+                  if role == "reviewer" else initial_prompt(task))
         return await self._send(self.journal.get(task["task_id"]), sid, prompt, role + ":initial")
 
     async def _send(self, task: dict, sid: str, text: str, purpose: str) -> dict:
@@ -121,29 +144,48 @@ class TaskCoordinator:
             task = self.journal.get(task["task_id"])
             if task["paused"]:
                 return task
-            key = f"{task['task_id']}:{purpose}:{task['review_rejections']}:{task['continuations']}"
-            cmd, fresh = self.journal.command(task["task_id"], "send", sid, {"text": text}, key)
+            key = (f"{task['task_id']}:{purpose}:{task['review_rejections']}:{task['continuations']}:"
+                   f"{task.get('review_commit') if sid == task.get('reviewer_session_id') else sid}")
+            before = await self.adapter.prepare_send(task, sid)
+            if self.journal.get(task["task_id"])["paused"]:
+                return self.journal.get(task["task_id"])
+            cmd, fresh = self.journal.command(task["task_id"], "send", sid,
+                                               {"purpose": purpose, "before": before}, key)
             if not fresh:
                 return self.journal.change(task["task_id"], "uncertain")
             try:
                 r = await self.adapter.send(task, sid, text, cmd["message_id"])
+            except WriteRefused:
+                # Local streaming/rate guard rejected before BAT send-message.
+                self.journal.command_status(cmd["command_id"], "rejected")
+                return self.journal.change(task["task_id"], "needs_ted")
             except Exception:
                 self.journal.command_status(cmd["command_id"], "uncertain")
                 return self.journal.change(task["task_id"], "uncertain")
             if not r.get("accepted"):
                 self.journal.command_status(cmd["command_id"], "rejected")
                 return self.journal.change(task["task_id"], "needs_ted")
-            marker = r.get("turn_marker") or cmd["message_id"]
+            marker = r.get("turn_marker") or (before.get("before_cursor") if before.get("agent_kind") == "codex"
+                                               else cmd["message_id"])
+            if not marker:
+                self.journal.command_status(cmd["command_id"], "uncertain")
+                return self.journal.change(task["task_id"], "uncertain")
             self.journal.command_status(cmd["command_id"], "accepted", marker=marker)
             state = "verifying" if sid == task.get("reviewer_session_id") else "running"
-            return self.journal.change(task["task_id"], state, fields={"turn_marker": marker})
+            field = "review_marker" if state == "verifying" else "turn_marker"
+            return self.journal.change(task["task_id"], state, fields={field: marker})
 
     async def _observe(self, task: dict, cmds: list[dict]) -> dict:
         sid = task["session_id"]
         if not sid:
             return self.journal.change(task["task_id"], "uncertain")
         read = await self.adapter.read(task, sid, task["turn_marker"])
-        if read.get("turn_attribution") in {"unknown", "uncertain"}:
+        if read.get("turn_attribution") in {"unknown", "uncertain", "echo_not_visible", "queued_unconfirmed"}:
+            return self.journal.change(task["task_id"], "uncertain")
+        if read.get("turn_done") and (read.get("turn_started") is not True or
+                                      read.get("turn_attribution") not in {
+                                          "correlated", "correlated_after_prior_turn", "timestamp_cursor",
+                                      }):
             return self.journal.change(task["task_id"], "uncertain")
         decision = classify_read(read)
         if decision == "continue":
@@ -157,49 +199,132 @@ class TaskCoordinator:
             return self.journal.change(task["task_id"], "verifying")
         return self.journal.change(task["task_id"], decision)
 
-    async def _reconcile(self, task: dict, cmds: list[dict]) -> dict:
-        latest = next((c for c in reversed(cmds) if c["kind"] == "send"), None)
-        if not latest or not task["session_id"]:
-            return task
-        read = await self.adapter.read(task, latest["session_id"], latest["marker"] or latest["message_id"])
-        if read.get("turn_started") is True and read.get("turn_attribution") == "exact_echo":
-            self.journal.command_status(latest["command_id"], "accepted",
-                                        marker=latest["marker"] or latest["message_id"])
-            return self.journal.change(task["task_id"], "running", fields={"turn_marker": latest["marker"] or latest["message_id"]})
-        return task  # unknown is not permission to resend
+    async def _reconcile_command(self, task: dict, cmd: dict) -> dict:
+        kind, sid = cmd["kind"], cmd["session_id"]
+        if kind.startswith("start_"):
+            role = kind.removeprefix("start_")
+            if await self.adapter.recover_start(task, role=role, session_id=sid):
+                self.journal.command_status(cmd["command_id"], "settled")
+                self.journal.add_branch(task["task_id"], session_id=sid,
+                                        provider=json.loads(cmd["payload"])["agent"], role=role,
+                                        reason="recovered_start")
+                field = "reviewer_session_id" if role == "reviewer" else "session_id"
+                return self.journal.change(task["task_id"], "verifying" if role == "reviewer" else "accepted",
+                                           fields={field: sid})
+            return self.journal.change(task["task_id"], "uncertain")
+        if kind == "failover":
+            found = await self.adapter.recover_failover(task, successor_id=sid)
+            if found and found.get("marker"):
+                if found["session_id"] != sid:
+                    self.journal.command_bind_session(cmd["command_id"], found["session_id"])
+                self.journal.command_status(cmd["command_id"], "settled", marker=found["marker"])
+                self.journal.add_branch(task["task_id"], session_id=found["session_id"],
+                                        provider="codex", role="lead", reason="recovered_failover",
+                                        parent_branch_id=(task["branches"][-1]["branch_id"]
+                                                          if task["branches"] else None))
+                return self.journal.change(task["task_id"], "running",
+                                           fields={"session_id": found["session_id"], "turn_marker": found["marker"]})
+            return self.journal.change(task["task_id"], "uncertain")
+        if kind != "send":
+            return self.journal.change(task["task_id"], "uncertain")
+        before = json.loads(cmd["payload"]).get("before") or {}
+        marker = cmd["marker"] or (before.get("before_cursor") if before.get("agent_kind") == "codex"
+                                   else cmd["message_id"])
+        if not marker:
+            return self.journal.change(task["task_id"], "uncertain")
+        read = await self.adapter.read(task, sid, marker)
+        attribution = read.get("turn_attribution")
+        if read.get("turn_started") is True and attribution in {"correlated", "correlated_after_prior_turn"}:
+            pass
+        elif read.get("turn_started") is True and attribution == "timestamp_cursor" and (
+            before.get("agent_kind") == "codex" and before.get("before_cursor")
+        ):
+            pass  # weaker attribution; never used alone to approve review
+        else:
+            return self.journal.change(task["task_id"], "uncertain")
+        self.journal.command_status(cmd["command_id"], "accepted", marker=marker)
+        reviewer = sid == task.get("reviewer_session_id")
+        return self.journal.change(task["task_id"], "verifying" if reviewer else "running",
+                                   fields={"review_marker" if reviewer else "turn_marker": marker})
 
     async def _failover(self, task: dict) -> dict:
-        cmd, fresh = self.journal.command(task["task_id"], "failover", task["session_id"], {},
-                                          f"{task['task_id']}:failover:{task['session_id']}")
+        successor = str(uuid.uuid4())
+        cmd, fresh = self.journal.command(task["task_id"], "failover", successor,
+                                          {"old_session_id": task["session_id"]},
+                                          f"{task['task_id']}:failover:{task['session_id']}:{task['control_version']}")
         if not fresh:
             return self.journal.change(task["task_id"], "uncertain")
+        if self.journal.get(task["task_id"])["paused"]:
+            self.journal.command_status(cmd["command_id"], "cancelled")
+            return self.journal.get(task["task_id"])
         try:
-            sid = await self.adapter.failover(task, task["session_id"])
+            result = await self.adapter.failover(task, task["session_id"], successor)
+        except ValueError:
+            self.journal.command_status(cmd["command_id"], "rejected")
+            return self.journal.change(task["task_id"], "needs_ted")
         except Exception:
             self.journal.command_status(cmd["command_id"], "uncertain")
             return self.journal.change(task["task_id"], "uncertain")
-        self.journal.command_status(cmd["command_id"], "settled")
-        return self.journal.change(task["task_id"], "running", fields={"session_id": sid, "turn_marker": None})
+        marker = result.get("marker")
+        if not marker:
+            self.journal.command_status(cmd["command_id"], "uncertain")
+            return self.journal.change(task["task_id"], "uncertain")
+        if result["session_id"] != successor:
+            self.journal.command_bind_session(cmd["command_id"], result["session_id"])
+        self.journal.command_status(cmd["command_id"], "settled", marker=marker)
+        self.journal.add_branch(task["task_id"], session_id=result["session_id"], provider="codex",
+                                role="lead", reason="quota_failover",
+                                parent_branch_id=(task["branches"][-1]["branch_id"]
+                                                  if task["branches"] else None))
+        return self.journal.change(task["task_id"], "running",
+                                   fields={"session_id": result["session_id"], "turn_marker": marker,
+                                           "lead_agent": "codex"})
 
     async def _verify_and_review(self, task: dict) -> dict:
-        evidence = await self.adapter.verification(task)
-        if not evidence or evidence.get("exit_code") != 0 or not evidence.get("current"):
+        candidate = await self.adapter.candidate_identity(task)
+        if not candidate or not candidate.get("clean"):
             return task
-        commit = evidence["candidate_commit"]
-        if task["verification_commit"] != commit:
-            task = self.journal.change(task["task_id"], "verifying", fields={"verification_commit": commit})
+        commit, tree = candidate["candidate_commit"], candidate["tree_hash"]
+        if (task["verification_commit"], task["verification_tree"]) != (commit, tree):
+            task = self.journal.change(task["task_id"], "verifying", fields={
+                "verification_commit": None, "verification_tree": None, "reviewer_session_id": None,
+                "review_commit": None, "review_tree": None, "review_marker": None, "review_passed": 0,
+            }, event="candidate_changed")
+        evidence = self.journal.observed_verification(task["task_id"])
+        if not evidence or (evidence["candidate_commit"], evidence["tree_hash"]) != (commit, tree):
+            observed = await self.adapter.run_verification(task)
+            if not observed:
+                return task  # no configured trusted runner; no caller-supplied evidence accepted
+            evidence = self.journal.record_observed_verification(task["task_id"], observed)
+        if evidence["exit_code"] != 0:
+            return self.journal.change(task["task_id"], "needs_ted", event="verification_failed")
+        if not task["verification_commit"]:
+            task = self.journal.change(task["task_id"], "verifying", fields={
+                "verification_commit": commit, "verification_tree": tree,
+            })
         if not task["reviewer_session_id"]:
-            agent = "claude" if evidence.get("claude_quota_available") else "codex"
+            task = self.journal.change(task["task_id"], "verifying", fields={
+                "review_commit": commit, "review_tree": tree, "review_marker": None,
+            })
+            agent = self.adapter.reviewer_agent(task)
             return await self._start(task, role="reviewer", agent=agent)
-        read = await self.adapter.read(task, task["reviewer_session_id"], task["turn_marker"])
-        if read.get("turn_done") is not True:
+        if not task["review_marker"]:
+            return await self._send(task, task["reviewer_session_id"],
+                                    reviewer_prompt(task, commit, tree), "reviewer:initial")
+        read = await self.adapter.read(task, task["reviewer_session_id"], task["review_marker"])
+        attributed = read.get("first_turn_proven") is True and read.get("turn_attribution") in {
+            "correlated", "correlated_after_prior_turn", "timestamp_cursor",
+        }
+        if not (read.get("turn_started") is True and read.get("turn_done") is True and attributed):
             return task
         output = "\n".join(str(m.get("text") or "") for m in read.get("messages") or [] if m.get("role") != "user")
         if "REVIEW: PASS" in output:
-            # Check commit again: review and tests must refer to the current candidate.
-            fresh = await self.adapter.verification(task)
-            if not fresh or not fresh.get("current") or fresh.get("candidate_commit") != commit:
-                return self.journal.change(task["task_id"], "needs_ted")
+            fresh = await self.adapter.candidate_identity(task)
+            if not fresh or not fresh.get("clean") or (fresh["candidate_commit"], fresh["tree_hash"]) != (commit, tree):
+                return self.journal.change(task["task_id"], "verifying", fields={
+                    "reviewer_session_id": None, "review_marker": None,
+                    "review_commit": None, "review_tree": None, "review_passed": 0,
+                }, event="candidate_changed_during_review")
             return self.journal.change(task["task_id"], "done", fields={"review_passed": 1,
                                        "result": output[-3000:]}, event="delivered")
         if "REVIEW: REJECT" in output:
@@ -207,7 +332,9 @@ class TaskCoordinator:
             if n > min(self.max_review_rejections, limits(task["recipe"])[1]):
                 return self.journal.change(task["task_id"], "needs_ted", fields={"review_rejections": n})
             self.journal.change(task["task_id"], "accepted", fields={"review_rejections": n,
-                                      "reviewer_session_id": None, "verification_commit": None})
+                                      "reviewer_session_id": None, "review_marker": None,
+                                      "review_commit": None, "review_tree": None,
+                                      "verification_commit": None, "verification_tree": None})
             return await self._send(self.journal.get(task["task_id"]), task["session_id"],
                                     "Independent review rejected the candidate. Address the review findings, rerun tests, "
                                     "and report a new milestone.\n" + output[-3000:], "review_rework")

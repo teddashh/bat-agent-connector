@@ -405,6 +405,8 @@ async def _failover_one(
     tail_messages: int,
     instructions: str | None = None,
     archive_only: bool = False,
+    successor_session_id: str | None = None,
+    ledger_only: bool = False,
 ) -> dict:
     hc = fleet.config.host(host)
     model = model or hc.codex_model
@@ -460,8 +462,9 @@ async def _failover_one(
         raise WriteRefused("cannot determine the session's folder")
     git = await _git_state(c, cwd)
     branch = git.get("branch") or t.get("worktreeBranch")
-    first = await _first_user_prompt(c, sid, snap["messages"])
-    texts = [(r, x) for r, x in _texts(snap["messages"]) if not match_any(QUOTA_PATTERNS, x)]
+    first = None if ledger_only else await _first_user_prompt(c, sid, snap["messages"])
+    texts = ([] if ledger_only else
+             [(r, x) for r, x in _texts(snap["messages"]) if not match_any(QUOTA_PATTERNS, x)])
     last_user = next((x for r, x in reversed(texts) if r == "user"), None)
     prompt = build_handoff_prompt(
         old_sid=sid,
@@ -501,7 +504,7 @@ async def _failover_one(
         return {**plan, "dry_run": True, "handoff_preview": prompt[:1500]}
     old_reg = registry.get(host, sid)
     replaces = sid if (old_reg and old_reg.get("status") == "active" and same_worktree) else None
-    new_sid = str(uuid.uuid4())
+    new_sid = successor_session_id or str(uuid.uuid4())
     opts: dict[str, Any] = {
         "cwd": origin if same_worktree else cwd,
         "agentPreset": preset,
@@ -602,6 +605,8 @@ async def session_failover(
     workspace: str | None = None,
     instructions: str | None = None,
     archive_only: bool = False,
+    successor_session_id: str | None = None,
+    ledger_only: bool = False,
 ) -> dict:
     """Continue quota-exhausted Claude session(s) with Codex in the same folder/worktree.
 
@@ -620,6 +625,8 @@ async def session_failover(
         raise WriteRefused("instructions are longer than 4000 characters")
     if (instructions or archive_only) and not session_id:
         raise WriteRefused("instructions/archive_only need a single session_id")
+    if successor_session_id and not session_id:
+        raise WriteRefused("successor_session_id needs a single session_id")
     if session_id:
         return await _failover_one(
             fleet,
@@ -631,6 +638,8 @@ async def session_failover(
             tail_messages=tail_messages,
             instructions=instructions,
             archive_only=archive_only,
+            successor_session_id=successor_session_id,
+            ledger_only=ledger_only,
         )
     from .triage import sessions_triage
 

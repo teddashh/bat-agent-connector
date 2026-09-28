@@ -24,18 +24,15 @@ def build(task_id: str) -> MCPServer:
         """Send one instruction to this task's BAT session. Reuse step_id on retries."""
         return await asyncio.to_thread(request, "task_send", task_id=task_id, text=text, step_id=step_id)
 
-    async def task_record_verification(candidate_commit: str, command: str, exit_code: int,
-                                       environment: str, log_ref: str) -> dict:
-        """Record an externally executed test on the current clean candidate commit."""
-        return await asyncio.to_thread(request, "task_record_verification", task_id=task_id,
-                                       candidate_commit=candidate_commit, command=command,
-                                       exit_code=exit_code, environment=environment, log_ref=log_ref)
+    async def task_run_verification() -> dict:
+        """Run the administrator-configured verifier; no caller-supplied exit code or command."""
+        return await asyncio.to_thread(request, "task_run_verification", task_id=task_id)
 
     async def task_request_ted(reason: str) -> dict:
         """Stop automatic dispatch and ask Ted for a concrete decision."""
         return await asyncio.to_thread(request, "task_request_ted", task_id=task_id, reason=reason)
 
-    for fn, ann in ((task_read, ro), (task_send, wr), (task_record_verification, wr), (task_request_ted, wr)):
+    for fn, ann in ((task_read, ro), (task_send, wr), (task_run_verification, wr), (task_request_ted, wr)):
         mcp.add_tool(fn, name=fn.__name__, annotations=ann)
     return mcp
 
