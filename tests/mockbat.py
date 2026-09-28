@@ -293,14 +293,14 @@ class MockBat:
                 "success": True,
                 "worktreePath": f"{p['cwd']}/.bat-worktrees/0000000{n}",
                 "branchName": f"bat/worktree-0000000{n}",
-                "sourceBranch": "main",
+                "sourceBranch": p.get("baseBranch") or "main",
             }
             self.git_branch[info["worktreePath"]] = info["branchName"]
             self.worktrees[sid] = {
                 "diff": "",
                 "branchName": info["branchName"],
                 "worktreePath": info["worktreePath"],
-                "sourceBranch": "main",
+                "sourceBranch": p.get("baseBranch") or "main",
                 "merged": False,
                 "mergedKind": "unknown",
             }

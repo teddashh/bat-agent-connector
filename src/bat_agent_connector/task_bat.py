@@ -36,7 +36,12 @@ class BatTaskAdapter:
                                                 confirm=True, prompt=None, use_worktree=True,
                                                 title="task " + task["task_id"][:8],
                                                 session_id=session_id, retain_on_error=True,
-                                                register_tab=self.register_tabs)
+                                                register_tab=self.register_tabs, base_branch=task.get("base_branch"))
+            if self.journal and (r.get("base_branch") or r.get("base_commit")):
+                self.journal.change(task["task_id"], "dispatching", fields={
+                    "base_branch": r.get("source_branch") or r.get("base_branch") or task.get("base_branch"),
+                    "base_commit": r.get("base_commit"),
+                }, event="base_recorded")
             return r["session_id"]
         # An independent reviewer must inspect the same candidate worktree while
         # the lead has stopped writing. A new BAT session gets no write permission.

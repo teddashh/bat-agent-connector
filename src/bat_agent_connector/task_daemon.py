@@ -101,6 +101,9 @@ class TaskDaemon:
                 raise ValueError("Goose live tasks are disabled until ACP recovery and provider validation")
             if not self.fleet.orchestrate_enabled(params.get("host", "")):
                 raise ValueError("task host needs writes=true and orchestrate=true")
+            params = dict(params)
+            if params.get("base_branch") is None:
+                params["base_branch"] = self.adapter.verifier.settings.base_branches.get(params.get("project"))
             task = self.journal.submit(**params)
             return {"task_id": task["task_id"], "state": task["state"], "submitted_at": task["submitted_at"]}
         task_id = params["task_id"]
