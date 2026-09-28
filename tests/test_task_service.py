@@ -106,12 +106,13 @@ async def test_timeout_no_resend_and_reconcile(tmp_path):
 
 async def test_rules_review_verification_failover_pause_and_writer(tmp_path):
     j = Journal(tmp_path / "tasks.db")
-    task = submit(j)
+    task = submit(j, interpretation="Hermes guessed the wrong feature")
     fake = FakeBAT()
     core = TaskCoordinator(j, fake)
     await core.tick(task["task_id"])
     assert fake.sends[0][1].count(WORDS) == 1
-    assert "interpretation" not in fake.sends[0][1]
+    assert "Hermes guessed the wrong feature" not in fake.sends[0][1]
+    assert j.get(task["task_id"])["interpretation"] == "Hermes guessed the wrong feature"
     fake.reads["lead-0001"] = {"turn_started": True, "turn_done": True,
                                 "messages": [{"role": "assistant", "text": "working"}]}
     await core.tick(task["task_id"])
@@ -237,6 +238,19 @@ async def test_mcp_work_submit_returns_without_bat(mock, monkeypatch):
     assert "task-1" in json.dumps(result.model_dump(), default=str)
     assert seen["original_words"] == WORDS and seen["method"] == "work_submit"
     await fleet.close()
+
+
+async def test_daemon_submit_is_journal_only(mock, tmp_path):
+    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    try:
+        result = await asyncio.wait_for(daemon.call("work_submit", {
+            "project": "p", "host": "h1", "workspace": "w", "original_words": WORDS,
+            "idempotency_key": "discord:message:1"}), timeout=0.5)
+        assert result["state"] == "queued"
+        assert daemon.journal.get(result["task_id"])["original_words"] == WORDS
+    finally:
+        await daemon.fleet.close()
+        daemon.journal.close()
 
 
 async def test_goose_acp_scoped_tool_smoke(mock, tmp_path, monkeypatch):
