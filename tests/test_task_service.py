@@ -305,7 +305,7 @@ async def test_verification_waits_for_quiet_candidate_window(tmp_path):
                         "messages": [{"role": "assistant", "text": "BAT-STATUS: MILESTONE"}]}
     first = await core.tick(task["task_id"])
     assert first["state"] == "verifying"
-    second = await core.tick(task["task_id"])
+    await core.tick(task["task_id"])
     assert not any(e["kind"] == "verification_observed" for e in journal.events(task["task_id"]))
     await asyncio.sleep(0.06)
     third = await core.tick(task["task_id"])
