@@ -18,6 +18,7 @@ from typing import Any
 from . import lifecycle, orchestrate, registry, service
 from .errors import TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .fleet import Fleet
+from .safety import Audit
 from .task_handoff import history_excerpt, ledger_summary, original_words_archive
 from .task_verifier import ObservedVerifier, VerificationSettings
 
@@ -127,9 +128,63 @@ class BatTaskAdapter:
         return {"path": path, "branch": branch, "retained_ref": retained_ref,
                 "commit": lines[0], "mode": lines[1]}
 
+    async def _warm_identity(self, task: dict, previous: dict) -> dict | None:
+        sid = previous.get("session_id")
+        if (not sid or previous.get("state") != "done" or previous.get("external_worktree_path")
+                or previous.get("reviewer_session_id")
+                or task.get("base_branch")):
+            return None
+        entry = registry.get(task["host"], sid)
+        if (not entry or entry.get("task_id") != previous["task_id"]
+                or entry.get("role") != "lead" or entry.get("status") != "active"
+                or task["workspace"] not in {entry.get("workspace_id"), entry.get("workspace_name")}
+                or entry.get("agent_preset") != orchestrate.PRESETS[(task["lead_agent"], True)]
+                or not entry.get("worktree_path") or entry.get("cwd") != entry["worktree_path"]
+                or not entry.get("branch") or entry.get("origin_cwd") != await self._workspace_folder(task)):
+            return None
+        Audit(self.fleet.config.safety).check_rate(task["host"], sid)
+        client = self.fleet.client(task["host"])
+        meta = await client.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
+        status = await client.invoke("worktree:status", {"sessionId": sid}, retry_on_disconnect=False)
+        if (not isinstance(meta, dict) or meta.get("cwd") != entry["cwd"]
+                or not isinstance(status, dict) or status.get("worktreePath") != entry["cwd"]
+                or status.get("branchName") != entry["branch"]
+                or await client.invoke("git:getRoot", {"cwd": entry["cwd"]}, retry_on_disconnect=False)
+                != entry["cwd"]):
+            return None
+        read = await service.session_read(self.fleet, task["host"], sid, last_n=1)
+        identity = await self.verifier.identity(task, entry["cwd"])
+        if (read.get("streaming") is not False or read.get("pending")
+                or not identity or not identity.get("clean")):
+            return None
+        return entry
+
+    async def find_warm(self, task: dict) -> str | None:
+        """Prefer a clean, idle service-owned branch from a completed task."""
+        if not self.journal or task.get("task_path") != "minimal" or task.get("base_branch"):
+            return None
+        for previous in self.journal.warm_candidates(task):
+            try:
+                if await self._warm_identity(task, previous):
+                    return previous["session_id"]
+            except Exception:  # noqa: BLE001, S112 - an unproven warm branch is skipped
+                continue
+        return None
+
     async def start(self, task: dict, *, role: str, agent: str, session_id: str) -> str:
         host = task["host"]
         if role == "lead":
+            if task.get("_warm_session_id") == session_id:
+                previous = next((item for item in self.journal.warm_candidates(task)
+                                 if item["session_id"] == session_id), None) if self.journal else None
+                identity = await self._warm_identity(task, previous) if previous else None
+                if not identity:
+                    raise TaskIdentityMismatch("warm session identity is unproven")
+                self.journal.revoke_task_capabilities(previous["task_id"])
+                registry.claim_warm(host, session_id, previous_task_id=previous["task_id"],
+                                    task_id=task["task_id"], workspace_id=identity["workspace_id"],
+                                    cwd=identity["cwd"], branch=identity["branch"])
+                return session_id
             external = await self._ensure_external_worktree(task) if task.get("base_branch") else None
             last_error = None
             for attempt in range(3):

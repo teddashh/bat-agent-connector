@@ -21,7 +21,7 @@ from .config import Config, state_dir
 from .fleet import Fleet
 from .goose_acp import GooseACP
 from .jev import Jev
-from .model_router import ModelRouter, RouterConfig
+from .model_router import MinimalTaskRouter, ModelRouter, RouterConfig
 from .task_bat import BatTaskAdapter
 from .task_core import TaskCoordinator
 from .task_discord import DiscordHTTP, DiscordPublisher
@@ -73,8 +73,11 @@ class TaskDaemon:
         self.goose = GooseACP()
         provider_config = os.environ.get("BATC_PM_PROVIDER_CONFIG")
         router_config = RouterConfig.from_provider_file(provider_config) if provider_config else RouterConfig()
-        self.router = ModelRouter(self.journal, Jev(config.jev), router_config, self.goose.catalog)
+        jev = Jev(config.jev)
+        self.router = ModelRouter(self.journal, jev, router_config, self.goose.catalog)
+        self.minimal_router = MinimalTaskRouter(jev)
         self.coordinator = TaskCoordinator(self.journal, self.adapter, router=self.router)
+        self._submit_lock = asyncio.Lock()
         # Covers the whole verifying state, including BAT/SSH lookups before
         # and after the subprocess. A restart retains the journal timestamp.
         self.verification_timeout_s = min(300, max(1, self.adapter.verifier.settings.timeout_s))
@@ -106,15 +109,42 @@ class TaskDaemon:
                                                       board_channel_id=params.get("board_channel_id"),
                                                       message_id=params["message_id"])
         if method == "work_submit":
-            if params.get("engine", "rules") == "goose":
-                raise ValueError("Goose live tasks are disabled until ACP recovery and provider validation")
             if not self.fleet.orchestrate_enabled(params.get("host", "")):
                 raise ValueError("task host needs writes=true and orchestrate=true")
             params = dict(params)
             if params.get("base_branch") is None:
                 params["base_branch"] = self.adapter.verifier.settings.base_branches.get(params.get("project"))
-            task = self.journal.submit(**params)
-            return {"task_id": task["task_id"], "state": task["state"], "submitted_at": task["submitted_at"]}
+            async with self._submit_lock:
+                path = params.get("task_path", "standard")
+                if path == "minimal":
+                    if params.get("engine", "rules") == "goose":
+                        raise ValueError("minimal path chooses its engine with Jev")
+                    if (not all(isinstance(params.get(key), str) and params[key].strip()
+                                for key in ("project", "host", "workspace", "original_words",
+                                            "idempotency_key"))
+                            or len(params["original_words"]) > 19_000):
+                        raise ValueError("invalid minimal task submission")
+                    load_recipe(params.get("recipe", "feature-to-staging"))
+                    old = self.journal.by_idempotency_key(params["idempotency_key"])
+                    if old:
+                        decision = self.journal.engine_decision(old["task_id"])
+                        params["engine"] = old["engine"]
+                    else:
+                        decision = await self.minimal_router.choose(
+                            project=params["project"], recipe=params.get("recipe", "feature-to-staging"),
+                            original_words=params["original_words"])
+                        decision["effective"] = ("goose" if decision["selected"] == "goose"
+                                                 and self.goose.config.enabled else "rules")
+                        if decision["selected"] == "goose" and decision["effective"] == "rules":
+                            decision["reason"] = "goose_live_gate_closed"
+                        params["engine"] = decision["effective"]
+                    params["engine_decision"] = decision
+                elif params.get("engine", "rules") == "goose":
+                    raise ValueError("Goose live tasks are disabled until ACP recovery and provider validation")
+                task = self.journal.submit(**params)
+            return {"task_id": task["task_id"], "state": task["state"],
+                    "submitted_at": task["submitted_at"], "engine": task["engine"],
+                    "task_path": task["task_path"]}
         task_id = params["task_id"]
         if method == "work_reconcile_capability":
             token = self.journal.issue_reconcile_capability(task_id, params["command_id"])
@@ -132,11 +162,13 @@ class TaskDaemon:
             )
         if method == "work_status":
             task = self.journal.get(task_id)
-            await self.router.choose(task_id, f"status:rpc:{task['state']}:{task['updated_at']}",
-                                     "Report the current task state without changing Ted's request",
-                                     expected_type="status_relay")
+            if task["task_path"] != "minimal":
+                await self.router.choose(task_id, f"status:rpc:{task['state']}:{task['updated_at']}",
+                                         "Report the current task state without changing Ted's request",
+                                         expected_type="status_relay")
             routes = self.journal.routes(task_id)
-            return {**task, "commands": self.journal.commands(task_id)[-5:],
+            return {**task, "engine_decision": self.journal.engine_decision(task_id),
+                    "commands": self.journal.commands(task_id)[-5:],
                     "events": self.journal.events(task_id)[-10:],
                     "reconciliations": self.journal.reconciliations(task_id),
                     "routing_decisions": routes[-50:],
@@ -145,8 +177,9 @@ class TaskDaemon:
                                                         for provider in {r["provider"] for r in routes}}}}
         if method == "work_result":
             task = self.journal.get(task_id)
-            await self.router.choose(task_id, f"status:result:{task['state']}:{task['updated_at']}",
-                                     "Relay the final task result verbatim", expected_type="status_relay")
+            if task["task_path"] != "minimal":
+                await self.router.choose(task_id, f"status:result:{task['state']}:{task['updated_at']}",
+                                         "Relay the final task result verbatim", expected_type="status_relay")
             return {"task_id": task_id, "state": task["state"], "delivered": task["delivered"],
                     "delivered_at": task["delivered_at"], "time_to_deliver_s": task["time_to_deliver_s"],
                     "result": task["result"], "verification_commit": task["verification_commit"],
@@ -175,6 +208,10 @@ class TaskDaemon:
             task = self.journal.get(task_id)
             if task["engine"] != "goose":
                 raise ValueError("task-scoped tools require goose engine")
+            if task.get("session_id"):
+                owner = registry.get(task["host"], task["session_id"])
+                if owner and owner.get("task_id") not in {None, task_id}:
+                    raise ValueError("BAT session now belongs to another task")
             if method == "task_read":
                 return await self.adapter.read(task, task["session_id"], params.get("marker"))
             if method == "task_send":
@@ -189,10 +226,11 @@ class TaskDaemon:
             if method == "task_run_verification":
                 if set(params) != {"task_id"}:
                     raise ValueError("caller-supplied verification evidence is forbidden")
-                await self.router.choose(task_id, f"verification:scoped:{task['control_version']}:"
-                                         f"{task.get('verification_commit')}",
-                                         "Check a clean candidate with the trusted runner",
-                                         expected_type="verification", high_stakes=True)
+                if task["task_path"] != "minimal":
+                    await self.router.choose(task_id, f"verification:scoped:{task['control_version']}:"
+                                             f"{task.get('verification_commit')}",
+                                             "Check a clean candidate with the trusted runner",
+                                             expected_type="verification", high_stakes=True)
                 evidence = await self.adapter.run_verification(task)
                 if not evidence:
                     raise ValueError("trusted verifier unavailable or candidate changed")
@@ -311,11 +349,14 @@ class TaskDaemon:
             try:
                 capability = self.journal.issue_capability(task_id)
                 explicit_provider = task.get("pm_provider") or load_recipe(task["recipe"]).get("pm_provider")
-                choice = await self.router.choose(task_id, f"planning:goose:{cmd['command_id']}",
-                                                  "Coordinate the repo-aware lead for this task",
-                                                  expected_type="planning", high_stakes=True,
-                                                  provider_override=explicit_provider)
-                goose_task = {**task, "_route_provider": choice["provider"]}
+                if task["task_path"] == "minimal":
+                    goose_task = {**task, "_route_provider": explicit_provider or self.goose.config.provider}
+                else:
+                    choice = await self.router.choose(task_id, f"planning:goose:{cmd['command_id']}",
+                                                      "Coordinate the repo-aware lead for this task",
+                                                      expected_type="planning", high_stakes=True,
+                                                      provider_override=explicit_provider)
+                    goose_task = {**task, "_route_provider": choice["provider"]}
                 await self.goose.run_task(goose_task, goose_cwd, capability=capability,
                                           journal=self.journal)
             except Exception as exc:  # noqa: BLE001 - reconcile before uncertainty

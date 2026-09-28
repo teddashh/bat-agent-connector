@@ -60,6 +60,7 @@ class Journal:
                 project TEXT NOT NULL, host TEXT NOT NULL, workspace TEXT NOT NULL,
                 original_words TEXT NOT NULL, interpretation TEXT, discord_thread_id TEXT,
                 recipe TEXT NOT NULL, acceptance TEXT NOT NULL, engine TEXT NOT NULL,
+                task_path TEXT NOT NULL DEFAULT 'standard',
                 state TEXT NOT NULL, paused INTEGER NOT NULL DEFAULT 0, control_version INTEGER NOT NULL DEFAULT 0,
                 session_id TEXT, reviewer_session_id TEXT, turn_marker TEXT,
                 submitted_at REAL NOT NULL, updated_at REAL NOT NULL, delivered_at REAL,
@@ -136,7 +137,8 @@ class Journal:
                                ("lead_agent", "TEXT NOT NULL DEFAULT 'codex'"),
                                ("pm_provider", "TEXT"), ("base_branch", "TEXT"), ("base_commit", "TEXT"),
                                ("external_worktree_path", "TEXT"), ("external_branch", "TEXT"),
-                               ("session_replacements", "INTEGER NOT NULL DEFAULT 0")):
+                               ("session_replacements", "INTEGER NOT NULL DEFAULT 0"),
+                               ("task_path", "TEXT NOT NULL DEFAULT 'standard'")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {sql_type}")  # noqa: S608 - fixed local identifiers
         cap_columns = {r[1] for r in self.db.execute("PRAGMA table_info(capabilities)")}
@@ -172,6 +174,11 @@ class Journal:
         row = self.db.execute("SELECT task_id,expires_at FROM capabilities WHERE token_hash=? AND scope='task'",
                               (digest,)).fetchone()
         return bool(row and row["task_id"] == task_id and row["expires_at"] > time.time())
+
+    def revoke_task_capabilities(self, task_id: str) -> None:
+        with self.tx():
+            self.db.execute("DELETE FROM capabilities WHERE task_id=? AND scope='task'", (task_id,))
+            self._event(task_id, "task_capabilities_revoked", {"reason": "warm_session_transfer"})
 
     def issue_reconcile_capability(self, task_id: str, command_id: str, *, ttl_s: int = 600) -> str:
         task = self.get(task_id)
@@ -328,7 +335,8 @@ class Journal:
                discord_thread_id: str | None = None, recipe: str = "feature-to-staging",
                acceptance: str = "", engine: str = "rules", interpretation: str | None = None,
                lead_agent: str = "codex", pm_provider: str | None = None,
-               base_branch: str | None = None, idempotency_key: str) -> dict:
+               base_branch: str | None = None, idempotency_key: str,
+               task_path: str = "standard", engine_decision: dict | None = None) -> dict:
         if not all(isinstance(x, str) and x.strip() for x in (project, host, workspace, original_words, idempotency_key)):
             raise ValueError("project, host, workspace, original_words and idempotency_key are required")
         # The initial lead prompt adds a short wrapper under BAT's 20k limit.
@@ -340,6 +348,14 @@ class Journal:
             raise ValueError("interpretation note is too long")
         if engine not in {"rules", "goose"}:
             raise ValueError("unknown engine")
+        if task_path not in {"standard", "minimal"}:
+            raise ValueError("unknown task path")
+        if task_path == "standard" and engine_decision is not None:
+            raise ValueError("engine decision requires minimal task path")
+        if task_path == "minimal" and (not isinstance(engine_decision, dict)
+                                        or engine_decision.get("selected") not in {"rules_engine", "goose"}
+                                        or engine_decision.get("effective") != engine):
+            raise ValueError("minimal path requires a bound engine decision")
         if lead_agent not in {"codex", "claude"}:
             raise ValueError("lead_agent must be codex or claude")
         if pm_provider is not None and (not isinstance(pm_provider, str) or not pm_provider
@@ -355,6 +371,8 @@ class Journal:
                        discord_thread_id=discord_thread_id, recipe=recipe, acceptance=acceptance,
                        engine=engine, interpretation=interpretation, lead_agent=lead_agent,
                        pm_provider=pm_provider, base_branch=base_branch)
+        if task_path == "minimal":
+            payload["task_path"] = task_path
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         with self.tx():
             old = self.db.execute("SELECT * FROM tasks WHERE idem_key=?", (idempotency_key,)).fetchone()
@@ -366,13 +384,32 @@ class Journal:
             task_id = str(uuid.uuid4())
             self.db.execute("""INSERT INTO tasks(task_id,idem_key,payload_hash,project,host,workspace,
                 original_words,interpretation,discord_thread_id,recipe,acceptance,engine,lead_agent,
-                pm_provider,base_branch,state,submitted_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                pm_provider,base_branch,task_path,state,submitted_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (task_id, idempotency_key, digest, project, host, workspace, original_words,
                  interpretation, discord_thread_id, recipe, acceptance, engine, lead_agent,
-                 pm_provider, base_branch, "queued", now, now))
+                 pm_provider, base_branch, task_path, "queued", now, now))
             self._event(task_id, "submitted", {"state": "queued"})
+            if engine_decision is not None:
+                self._event(task_id, "engine_decision", engine_decision)
         return self.get(task_id)
+
+    def by_idempotency_key(self, key: str) -> dict | None:
+        row = self.db.execute("SELECT task_id FROM tasks WHERE idem_key=?", (key,)).fetchone()
+        return self.get(row["task_id"]) if row else None
+
+    def engine_decision(self, task_id: str) -> dict | None:
+        row = self.db.execute("SELECT body FROM events WHERE task_id=? AND kind='engine_decision'",
+                              (task_id,)).fetchone()
+        return json.loads(row["body"]) if row else None
+
+    def warm_candidates(self, task: dict) -> list[dict]:
+        rows = self.db.execute("""SELECT task_id FROM tasks WHERE project=? AND host=? AND workspace=?
+            AND lead_agent=? AND state='done' AND session_id IS NOT NULL
+            AND external_worktree_path IS NULL AND reviewer_session_id IS NULL AND task_id<>?
+            ORDER BY delivered_at DESC LIMIT 5""",
+            (task["project"], task["host"], task["workspace"], task["lead_agent"], task["task_id"])).fetchall()
+        return [self.get(row["task_id"]) for row in rows]
 
     def get(self, task_id: str) -> dict:
         row = self.db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
@@ -434,11 +471,14 @@ class Journal:
             values = {**old, **fields, "state": state, "updated_at": time.time()}
             if state == "done":
                 observed = self.observed_verification(task_id)
-                if (not values["review_passed"] or not observed or observed["exit_code"] != 0
+                small_tests_only = values["task_path"] == "minimal" and values["recipe"] == "small-task-with-tests"
+                if ((not values["review_passed"] and not small_tests_only)
+                        or not observed or observed["exit_code"] != 0
                         or values["verification_commit"] != observed["candidate_commit"]
                         or values["verification_tree"] != observed["tree_hash"]
-                        or values["review_commit"] != observed["candidate_commit"]
-                        or values["review_tree"] != observed["tree_hash"]):
+                        or (not small_tests_only and values["review_commit"] != observed["candidate_commit"])
+                        or (not small_tests_only and values["review_tree"] != observed["tree_hash"])
+                        or (small_tests_only and values["reviewer_session_id"] is not None)):
                     raise ValueError("fresh review and observed commit/tree verification required")
                 values.update(delivered=1, delivered_at=time.time())
             self.db.execute("""UPDATE tasks SET state=?,updated_at=?,session_id=?,reviewer_session_id=?,
