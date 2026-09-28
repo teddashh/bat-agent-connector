@@ -1429,6 +1429,23 @@ async def test_mcp_work_submit_returns_without_bat(mock, monkeypatch):
     await fleet.close()
 
 
+async def test_daemon_uses_configured_minimal_default_and_standard_opt_out(mock, tmp_path, monkeypatch):
+    monkeypatch.setenv("BATC_TASK_DEFAULT_PATH", "minimal")
+    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    try:
+        minimal = await daemon.call("work_submit", {
+            "project": "p", "host": "h1", "workspace": "w", "original_words": WORDS,
+            "idempotency_key": "default:minimal"})
+        assert daemon.journal.get(minimal["task_id"])["task_path"] == "minimal"
+        standard = await daemon.call("work_submit", {
+            "project": "p", "host": "h1", "workspace": "w", "original_words": WORDS,
+            "idempotency_key": "default:standard", "task_path": "standard"})
+        assert daemon.journal.get(standard["task_id"])["task_path"] == "standard"
+    finally:
+        await daemon.fleet.close()
+        daemon.journal.close()
+
+
 async def test_daemon_submit_is_journal_only(mock, tmp_path):
     daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
     try:

@@ -94,13 +94,15 @@ waiting for BAT. Hermes must not reinterpret or split the request. The lead Code
 Task writes require the host's existing `writes=true` and `orchestrate=true` settings. Existing low-level tools
 and `batc` commands remain available.
 
-The rules engine is the default. A trusted test command must be configured locally; the service observes its
+Minimal flow with its one-question Jev choice and post-test Jev review gate is now the production default when `BATC_TASK_DEFAULT_PATH=minimal` is set. Use explicit `task_path="standard"` to opt out to the full cross-agent review path.
+
+A trusted test command must be configured locally; the service observes its
 exit status on the clean candidate commit and records verification before opening a fresh reviewer session.
 The daemon currently rejects live Goose tasks. Goose ACP, provider fallback, the per-step Jev router, and Discord
 posting have adapter/test coverage; real Goose contract checks, Discord credentials, deployment and cron replacement
 are deferred. The task API requires a local admin token or scoped capability and binds only to loopback. See
 [the task-service design](docs/design/task-service.md) for states, recovery, private configuration and rollout.
-Set `task_path="minimal"` on `work_submit` to ask Jev one typed engine question at submission; invalid or unavailable
+The default minimal path asks Jev one typed engine question at submission; explicit `task_path="standard"` selects the full path. Invalid or unavailable
 Jev chooses rules. This path skips per-step Jev and advisory candidate pre-screen. The `small-task-with-tests`
 recipe delivers directly only after trusted tests on a clean commit and one typed Jev review of the candidate diff
 against Ted's original words passes at the configured confidence threshold. A risky, uncertain, sensitive, large
