@@ -638,7 +638,15 @@ class TaskCoordinator:
                 }, event="candidate_changed_during_review")
             return self.journal.change(task["task_id"], "done", fields={"review_passed": 1,
                                        "result": output[-3000:]}, event="delivered")
-        if "REVIEW: REJECT" in output:
+        # A reviewer that clearly reports high-severity defects but omits the
+        # required marker is still a rejection.  Do not leave verification
+        # hanging on an otherwise actionable review.
+        high_defects_without_marker = (
+            "REVIEW: PASS" not in output
+            and "REVIEW: REJECT" not in output
+            and bool(re.search(r"(?im)^\s*(?:[-*]\s*)?high(?:[- ]severity)?\s*:", output))
+        )
+        if "REVIEW: REJECT" in output or high_defects_without_marker:
             n = task["review_rejections"] + 1
             if n > min(self.max_review_rejections, limits(task["recipe"])[1]):
                 return self.journal.change(task["task_id"], "needs_ted", fields={"review_rejections": n})

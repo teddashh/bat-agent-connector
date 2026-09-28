@@ -1175,6 +1175,30 @@ async def test_rules_review_verification_failover_pause_and_writer(tmp_path):
     j.close()
 
 
+async def test_review_with_high_defect_findings_without_marker_reworks(tmp_path):
+    j = Journal(tmp_path / "tasks.db")
+    task = submit(j, interpretation="review fallback")
+    fake = FakeBAT()
+    core = TaskCoordinator(j, fake)
+    await core.tick(task["task_id"])
+    lead = j.get(task["task_id"])["session_id"]
+    fake.reads[lead] = {"turn_started": True, "turn_done": True,
+                        "messages": [{"role": "assistant", "text": "BAT-STATUS: MILESTONE"}]}
+    await core.tick(task["task_id"])
+    fake.verifier_available = True
+    await core.tick(task["task_id"])
+    reviewer = j.get(task["task_id"])["reviewer_session_id"]
+    fake.reads[reviewer] = {"turn_started": True, "turn_done": True,
+                            "turn_attribution": "correlated", "first_turn_proven": True,
+                            "messages": [{"role": "assistant", "text":
+                                "Findings\n- High: native data bypasses the fix\n- Medium: CTA is misleading"}]}
+    result = await core.tick(task["task_id"])
+    assert result["state"] == "running"
+    assert result["review_rejections"] == 1
+    assert any("Independent review rejected" in text for _, text, _ in fake.sends)
+    j.close()
+
+
 async def test_failover_and_single_writer(tmp_path):
     j = Journal(tmp_path / "tasks.db")
     task = submit(j, lead_agent="claude")
