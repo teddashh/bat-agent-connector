@@ -2199,3 +2199,31 @@ async def test_observed_verification_artifact_bound_to_clean_commit(tmp_path):
     assert artifacts.stat().st_mode & 0o777 == 0o700
     (repo / "code.txt").write_text("dirty")
     assert await runner.observe(task, str(repo)) is None
+
+@pytest.mark.asyncio
+async def test_external_worktree_creation_is_restart_idempotent(tmp_path, fleet_factory, monkeypatch):
+    journal = Journal(tmp_path / "tasks.sqlite3")
+    task = journal.submit(project="p", host="h1", workspace="w", original_words="x",
+                          base_branch="feat/task-service", idempotency_key="external-restart")
+    adapter = task_bat.BatTaskAdapter(
+        fleet_factory(), ObservedVerifier(VerificationSettings(ssh_hosts={"h1": "castle"})), journal
+    )
+    scripts = []
+
+    async def folder(_task):
+        return "/srv/repo"
+
+    async def ssh(_task, script):
+        scripts.append(script)
+        return ""
+
+    async def identity(_task, _cwd):
+        return {"candidate_commit": "a" * 40, "tree_hash": "b" * 40, "clean": True}
+
+    monkeypatch.setattr(adapter, "_workspace_folder", folder)
+    monkeypatch.setattr(adapter, "_ssh_script", ssh)
+    monkeypatch.setattr(adapter.verifier, "identity", identity)
+    first = await adapter._ensure_external_worktree(task)
+    second = await adapter._ensure_external_worktree(journal.get(task["task_id"]))
+    assert first == second
+    assert len(scripts) == 2 and all("worktree list --porcelain" in script for script in scripts)
