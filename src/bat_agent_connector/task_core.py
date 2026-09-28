@@ -74,7 +74,8 @@ def classify_read(read: dict) -> str:
 class TaskCoordinator:
     def __init__(self, journal: Journal, adapter: TaskAdapter, *, max_continuations: int = 5,
                  max_review_rejections: int = 2, router: ModelRouter | None = None,
-                 minimal_review_gate: MinimalReviewGate | None = None):
+                 minimal_review_gate: MinimalReviewGate | None = None,
+                 verification_quiet_s: float = 0.0):
         self.journal = journal
         self.adapter = adapter
         self.max_continuations = max_continuations
@@ -83,6 +84,9 @@ class TaskCoordinator:
         self.minimal_review_gate = minimal_review_gate
         self._writers: dict[tuple[str, str], asyncio.Lock] = {}
         self._task_locks: dict[str, asyncio.Lock] = {}
+        self.verification_quiet_s = max(0.0, verification_quiet_s)
+        self._verification_stability: dict[str, tuple[tuple[str, str] | None, float]] = {}
+        self._verification_activity: dict[str, float] = {}
 
     def _lock(self, host: str, sid: str) -> asyncio.Lock:
         return self._writers.setdefault((host, sid), asyncio.Lock())
@@ -481,11 +485,38 @@ class TaskCoordinator:
             return None
         return handoff
 
+    def _verification_wait(self, task: dict, fingerprint: tuple[str, str] | None,
+                           reason: str) -> tuple[dict, bool]:
+        """Keep the task deadline alive while the lead/candidate is still active."""
+        now = asyncio.get_running_loop().time()
+        previous = self._verification_stability.get(task["task_id"])
+        if fingerprint is not None and (previous is None or previous[0] != fingerprint):
+            self._verification_stability[task["task_id"]] = (fingerprint, now)
+            self._verification_activity[task["task_id"]] = now
+            changed = self.journal.change(task["task_id"], "verifying", event="verification_stability_started")
+            return changed, self.verification_quiet_s <= 0
+        if fingerprint is None:
+            self._verification_stability[task["task_id"]] = (None, now)
+            last = self._verification_activity.get(task["task_id"], 0.0)
+            if now - last >= min(5.0, max(1.0, self.verification_quiet_s / 3)):
+                self._verification_activity[task["task_id"]] = now
+                return self.journal.change(task["task_id"], "verifying", event="verification_stability_wait"), False
+            return task, False
+        if previous and now - previous[1] < self.verification_quiet_s:
+            return task, False
+        return task, True
+
     async def _verify_and_review(self, task: dict) -> dict:
+        lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
+        if lead_read.get("streaming") is True or lead_read.get("pending"):
+            return self._verification_wait(task, None, "lead_not_idle")[0]
         candidate = await self.adapter.candidate_identity(task)
         if not candidate or not candidate.get("clean"):
-            return task
+            return self._verification_wait(task, None, "candidate_not_stable")[0]
         commit, tree = candidate["candidate_commit"], candidate["tree_hash"]
+        task, stable = self._verification_wait(task, (commit, tree), "candidate_changed")
+        if not stable:
+            return task
         await self._route(task, f"verification:{commit}:{tree}", "verification", high_stakes=True)
         task = self.journal.get(task["task_id"])
         if task["paused"]:
@@ -508,15 +539,15 @@ class TaskCoordinator:
             evidence = self.journal.record_observed_verification(task["task_id"], observed)
         if evidence["exit_code"] != 0:
             return self.journal.change(task["task_id"], "needs_ted", event="verification_failed")
+        lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
+        if lead_read.get("streaming") is True or lead_read.get("pending"):
+            return self._verification_wait(task, None, "lead_not_idle_after_tests")[0]
         if not task["verification_commit"]:
             task = self.journal.change(task["task_id"], "verifying", fields={
                 "verification_commit": commit, "verification_tree": tree,
             })
         small = task.get("task_path") == "minimal" and task["recipe"] == "small-task-with-tests"
         if small and not task["reviewer_session_id"]:
-            lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
-            if lead_read.get("streaming") is not False or lead_read.get("pending"):
-                return task
             existing = self.journal.minimal_review_gate(task["task_id"], commit, tree)
             if existing and existing["verdict"] == "pending":
                 existing = self.journal.finish_minimal_review(task["task_id"], commit, tree, {
