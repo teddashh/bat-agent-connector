@@ -153,7 +153,7 @@ class BatTaskAdapter:
                     if isinstance(meta, dict) and meta.get("cwd") == lead["cwd"]:
                         started = {"ok": True, "sessionId": sid}
                         break
-                except Exception:
+                except Exception:  # noqa: S110 - readback is best-effort; retry below
                     pass
                 if attempt < 2:
                     await asyncio.sleep(0.25 * (2 ** attempt))
