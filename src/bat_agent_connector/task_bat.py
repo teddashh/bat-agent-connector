@@ -364,6 +364,14 @@ class BatTaskAdapter:
         })
 
     async def send(self, task: dict, session_id: str, text: str, message_id: str) -> dict:
+        command = (self.journal.send_for_message(task["task_id"], session_id, message_id)
+                   if self.journal else None)
+        purpose = json.loads(command["payload"]).get("purpose") if command else None
+        initial_task_send = bool(command and command["status"] == "needs_review" and (
+            (purpose == "lead:initial" and session_id == task.get("session_id")) or
+            (purpose == "reviewer:initial" and session_id == task.get("reviewer_session_id"))
+        ))
+
         def before_invoke() -> None:
             if not self.journal:
                 return
@@ -377,7 +385,8 @@ class BatTaskAdapter:
 
         return await service.session_send(self.fleet, task["host"], session_id, text, confirm=True,
                                           message_id=message_id, retry_on_disconnect=False,
-                                          before_invoke=before_invoke)
+                                          before_invoke=before_invoke,
+                                          initial_task_send=initial_task_send)
 
     async def prepare_send(self, task: dict, session_id: str) -> dict:
         entry = registry.get(task["host"], session_id)
