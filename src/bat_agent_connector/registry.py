@@ -162,6 +162,35 @@ def update(host: str, session_id: str, **fields) -> None:
         _write(p, items)
 
 
+def record_handoff_frame(host: str, *, old_session_id: str, successor_id: str, task_id: str,
+                         worktree_path: str, branch: str, command_id: str,
+                         message_id: str, prompt_sha256: str) -> None:
+    """Atomically bind an actual BAT frame to the still-owned successor registry row."""
+    from .errors import TaskIdentityMismatch
+
+    p = registry_path()
+    with _locked(p):
+        items = _read(p)
+        old = next((e for e in items if e.get("host") == host and
+                    e.get("session_id") == old_session_id), None)
+        successor = next((e for e in items if e.get("host") == host and
+                          e.get("session_id") == successor_id), None)
+        if (not old or old.get("worktree_path") != worktree_path or old.get("branch") != branch
+                or not successor or successor.get("session_id") != successor_id
+                or successor.get("failover_of") != old_session_id
+                or successor.get("shares_worktree_with") != old_session_id
+                or successor.get("task_id") != task_id
+                or successor.get("worktree_path") != worktree_path
+                or successor.get("cwd") != worktree_path or successor.get("branch") != branch
+                or successor.get("status") != "active" or successor.get("handoff_status") != "pending"
+                or successor.get("handoff_command_id") != command_id
+                or successor.get("handoff_message_id") != message_id):
+            raise TaskIdentityMismatch("successor registry ownership changed before BAT handoff frame")
+        successor["handoff_frame_sha256"] = prompt_sha256
+        successor["updated_at"] = time.time()
+        _write(p, items)
+
+
 def turn_path() -> Path:
     return state_dir() / "turns.json"
 

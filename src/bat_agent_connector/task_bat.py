@@ -330,31 +330,24 @@ class BatTaskAdapter:
             prompt = params.get("prompt")
             command = self.journal.command_get(handoff_command_id)
             intended = json.loads(command["payload"]).get("prompt_sha256")
-            lead = registry.get(task["host"], session_id)
-            successor = registry.get(task["host"], successor_id)
             if (frame.get("channel") != "claude:send-message" or not isinstance(prompt, str)
                     or params.get("sessionId") != successor_id
                     or params.get("clientMessageId") != handoff_message_id
-                    or hashlib.sha256(prompt.encode()).hexdigest() != intended
-                    or not lead or lead.get("worktree_path") != expected_path
-                    or lead.get("branch") != expected_branch
-                    or not successor or successor.get("worktree_path") != expected_path
-                    or successor.get("branch") != expected_branch
-                    or successor.get("shares_worktree_with") != session_id
-                    or successor.get("handoff_status") != "pending"
-                    or successor.get("handoff_command_id") != handoff_command_id
-                    or successor.get("handoff_message_id") != handoff_message_id):
+                    or hashlib.sha256(prompt.encode()).hexdigest() != intended):
                 raise TaskIdentityMismatch("actual BAT handoff frame differs from journal intent")
-            registry.update(task["host"], successor_id, handoff_frame_sha256=intended)
-            recorded = registry.get(task["host"], successor_id)
-            if not recorded or recorded.get("handoff_frame_sha256") != intended:
-                raise TaskIdentityMismatch("handoff frame hash was not durably recorded")
+            registry.record_handoff_frame(
+                task["host"], old_session_id=session_id, successor_id=successor_id,
+                task_id=task["task_id"], worktree_path=expected_path, branch=expected_branch,
+                command_id=handoff_command_id, message_id=handoff_message_id,
+                prompt_sha256=intended)
+            before_handoff_invoke()
 
         r = await lifecycle.session_failover(self.fleet, task["host"], session_id, confirm=True,
                                              successor_session_id=successor_id, instructions=instructions,
                                              ledger_only=bool(self.journal),
                                              handoff_message_id=handoff_message_id,
                                              handoff_command_id=handoff_command_id,
+                                             task_id=task["task_id"],
                                              before_handoff_send=before_send,
                                              verify_handoff_successor=verify_handoff_successor,
                                              before_handoff_invoke=before_handoff_invoke,
@@ -435,6 +428,7 @@ class BatTaskAdapter:
                     or fp.get("old_session_id") != task["session_id"]
                     or not path or not branch
                     or entry.get("session_id") != successor_id
+                    or entry.get("task_id") != task["task_id"]
                     or entry.get("failover_of") != task["session_id"]
                     or entry.get("shares_worktree_with") != task["session_id"]
                     or entry.get("worktree_path") != path or entry.get("branch") != branch

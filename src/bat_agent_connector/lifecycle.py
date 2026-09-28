@@ -412,6 +412,7 @@ async def _failover_one(
     ledger_only: bool = False,
     handoff_message_id: str | None = None,
     handoff_command_id: str | None = None,
+    task_id: str | None = None,
     before_handoff_send: Callable[[str], None] | None = None,
     verify_handoff_successor: Callable[[], Awaitable[None]] | None = None,
     before_handoff_invoke: Callable[[], None] | None = None,
@@ -435,7 +436,8 @@ async def _failover_one(
         e = prior[-1]
         if (successor_session_id and e.get("session_id") != successor_session_id
                 or handoff_message_id and e.get("handoff_message_id") != handoff_message_id
-                or handoff_command_id and e.get("handoff_command_id") != handoff_command_id):
+                or handoff_command_id and e.get("handoff_command_id") != handoff_command_id
+                or task_id and e.get("task_id") != task_id):
             raise TaskIdentityMismatch("existing failover does not match reserved successor and handoff")
         if e.get("worktree_path") and e.get("branch"):
             current = await c.invoke("worktree:status", {"sessionId": sid})
@@ -563,6 +565,7 @@ async def _failover_one(
                 "handoff_status": "pending",
                 "handoff_message_id": handoff_message_id,
                 "handoff_command_id": handoff_command_id,
+                "task_id": task_id,
             },
             hc.orchestrate_max_sessions,
             replaces=replaces,
@@ -570,7 +573,8 @@ async def _failover_one(
         if existing:
             if (successor_session_id and existing.get("session_id") != successor_session_id
                     or handoff_message_id and existing.get("handoff_message_id") != handoff_message_id
-                    or handoff_command_id and existing.get("handoff_command_id") != handoff_command_id):
+                    or handoff_command_id and existing.get("handoff_command_id") != handoff_command_id
+                    or task_id and existing.get("task_id") != task_id):
                 raise TaskIdentityMismatch("existing failover does not match reserved successor and handoff")
             return {
                 "old_session_id": sid,
@@ -614,6 +618,7 @@ async def _failover_one(
                 "claude:send-message", {"sessionId": new_sid, "prompt": prompt, "clientMessageId": mid},
                 retry_on_disconnect=False,
                 before_send=before_handoff_invoke,
+                before_frame=verify_handoff_successor,
                 frame_guard=handoff_frame_guard,
             )
             if not isinstance(ack, dict) or not (ack.get("accepted") or ack.get("ok")):
@@ -662,6 +667,7 @@ async def session_failover(
     ledger_only: bool = False,
     handoff_message_id: str | None = None,
     handoff_command_id: str | None = None,
+    task_id: str | None = None,
     before_handoff_send: Callable[[str], None] | None = None,
     verify_handoff_successor: Callable[[], Awaitable[None]] | None = None,
     before_handoff_invoke: Callable[[], None] | None = None,
@@ -702,6 +708,7 @@ async def session_failover(
             ledger_only=ledger_only,
             handoff_message_id=handoff_message_id,
             handoff_command_id=handoff_command_id,
+            task_id=task_id,
             before_handoff_send=before_handoff_send,
             verify_handoff_successor=verify_handoff_successor,
             before_handoff_invoke=before_handoff_invoke,

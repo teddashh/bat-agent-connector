@@ -21,7 +21,7 @@ import logging
 import ssl
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -328,6 +328,7 @@ class BatClient:
     async def invoke(self, channel: str, params: dict | None = None, *, timeout: float | None = None,
                      retry_on_disconnect: bool = False,
                      before_send: Callable[[], None] | None = None,
+                     before_frame: Callable[[], Awaitable[None]] | None = None,
                      frame_guard: Callable[[dict], None] | None = None) -> Any:
         """Invoke an allow-listed channel. Raises ChannelNotAllowed before sending anything otherwise."""
         canonical = check_allowed(
@@ -335,11 +336,13 @@ class BatClient:
         )
         return await self._invoke_checked(canonical, params, timeout,
                                           retry_on_disconnect=retry_on_disconnect,
-                                          before_send=before_send, frame_guard=frame_guard)
+                                          before_send=before_send, before_frame=before_frame,
+                                          frame_guard=frame_guard)
 
     async def _invoke_checked(self, canonical: str, params: dict | None, timeout: float | None,
                               *, retry_on_disconnect: bool = False,
                               before_send: Callable[[], None] | None = None,
+                              before_frame: Callable[[], Awaitable[None]] | None = None,
                               frame_guard: Callable[[dict], None] | None = None) -> Any:
         write = is_write(canonical)
         timeout = timeout or timeout_for(canonical)
@@ -348,6 +351,8 @@ class BatClient:
         for attempt in range(attempts):
             try:
                 await self.connect()
+                if before_frame:
+                    await before_frame()
                 async with self._sem:
                     frame = {
                         "type": "invoke",

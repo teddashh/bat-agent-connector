@@ -796,6 +796,7 @@ async def test_bat_adapter_recovers_codex_successor_without_handoff_turn_proof(
     old = {"session_id": "old-contract", "worktree_path": path, "branch": branch}
     successor = {"session_id": "successor-contract", "failover_of": "old-contract",
                  "shares_worktree_with": "old-contract", "status": "active",
+                 "task_id": task["task_id"],
                  "worktree_path": path, "branch": branch,
                  "handoff_status": "sent", "handoff_message_id": handoff["message_id"],
                  "handoff_command_id": handoff["command_id"], "handoff_frame_sha256": frame_hash}
@@ -1573,7 +1574,8 @@ async def test_pause_during_failover_wait_never_submits_handoff(
 
 
 @pytest.mark.parametrize("mismatch", ["successor_cwd", "successor_branch",
-                                      "actual_frame_prompt", "late_registry_branch"])
+                                      "actual_frame_prompt", "late_registry_branch",
+                                      "late_registry_owner", "late_git_root"])
 async def test_failover_rejects_wrong_successor_or_frame_before_handoff(
         fleet_factory, mock, tmp_path, monkeypatch, mismatch):
     fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
@@ -1601,6 +1603,16 @@ async def test_failover_rejects_wrong_successor_or_frame_before_handoff(
             return await original_invoke(channel, {**params, "prompt": params["prompt"] + " ALTERED"}, **kwargs)
         if channel == "claude:send-message" and mismatch == "late_registry_branch":
             registry.update("h1", params["sessionId"], branch="bat/wrong-branch")
+        if channel == "claude:send-message" and mismatch == "late_git_root":
+            mock.handlers["git:getRoot"] = lambda _: "/srv/other"
+        if channel == "claude:send-message" and mismatch == "late_registry_owner":
+            original_guard = kwargs["frame_guard"]
+
+            def changed_guard(frame):
+                registry.update("h1", params["sessionId"], failover_of="unrelated-session")
+                original_guard(frame)
+
+            kwargs["frame_guard"] = changed_guard
         result = await original_invoke(channel, params, **kwargs)
         if channel == "claude:start-session" and params["sessionId"] != old_sid:
             sid = params["sessionId"]
