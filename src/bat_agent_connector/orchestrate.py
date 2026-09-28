@@ -248,7 +248,7 @@ async def session_start(
     if agent == "codex" and not model and hc.codex_model:
         model = hc.codex_model
     sid = str(uuid.uuid4())
-    async with _write_lock():
+    async with _write_lock(host):
         audit.check_rate(host, "#orchestrate-start-" + sid)
         registry.reserve(
             host,
@@ -350,9 +350,12 @@ async def session_start(
             mid = f"batc-{uuid.uuid4()}"
             audit.record(**base, channel="claude:send-message", phase="attempt", message_id=mid, text=prompt)
             try:
-                await c.invoke(
-                    "claude:send-message", {"sessionId": sid, "prompt": prompt, "clientMessageId": mid}
+                ack = await c.invoke(
+                    "claude:send-message", {"sessionId": sid, "prompt": prompt, "clientMessageId": mid},
+                    retry_on_disconnect=agent == "claude",
                 )
+                if not isinstance(ack, dict) or not (ack.get("accepted") or ack.get("ok")):
+                    raise WriteRefused("initial prompt was not accepted by BAT")
                 audit.record(**base, channel="claude:send-message", phase="result", ok=True, message_id=mid)
             except BatError as e:
                 audit.record(**base, channel="claude:send-message", phase="result", ok=False, error=_err(e))
@@ -388,7 +391,7 @@ async def worktree_merge(fleet: Fleet, host: str, session_id: str, confirm: bool
     _guard(fleet, host, confirm)
     c = fleet.client(host)
     audit = Audit(fleet.config.safety)
-    async with _write_lock():
+    async with _write_lock(host):
         t, ws = await _resolve_session(c, session_id)
         sid = t["id"]
         audit.check_rate(host, sid + "#merge")
@@ -476,7 +479,7 @@ async def worktree_remove(
     _guard(fleet, host, confirm)
     c = fleet.client(host)
     audit = Audit(fleet.config.safety)
-    async with _write_lock():
+    async with _write_lock(host):
         t, _ = await _resolve_session(c, session_id)
         sid = t["id"]
         audit.check_rate(host, sid + "#remove")

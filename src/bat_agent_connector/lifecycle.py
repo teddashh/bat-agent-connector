@@ -20,7 +20,7 @@ import time
 import uuid
 from typing import Any
 
-from . import registry
+from . import registry, verification
 from .errors import BatError, InvokeTimeout, WriteRefused
 from .fleet import Fleet
 from .jev import Jev
@@ -67,6 +67,37 @@ from .triage import (
 MAX_HANDOFF_CHARS = 18_000
 
 
+async def _candidate_head(c, cwd: str | None) -> str | None:
+    if not cwd:
+        return None
+    rows = await c.invoke("git:log", {"cwd": cwd, "count": 1})
+    return str(rows[0].get("hash") or "").lower() if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
+
+
+async def session_record_verification(
+    fleet: Fleet, host: str, session_id: str, candidate_commit: str, command: str,
+    exit_code: int, environment: str, log_ref: str, confirm: bool = False,
+) -> dict:
+    """Record a trusted external test run for the current clean candidate commit."""
+    _orch_guard(fleet, host, confirm)
+    c = fleet.client(host)
+    t, _ = await _resolve_session(c, session_id)
+    sid = t["id"]
+    cwd = t.get("worktreePath") or t.get("cwd")
+    head = await _candidate_head(c, cwd)
+    if not head or head != candidate_commit.lower():
+        raise WriteRefused("candidate_commit is not the host's current HEAD")
+    dirty = await _git_dirty(c, cwd)
+    if dirty is None or dirty:
+        raise WriteRefused("candidate working tree must be clean when recording verification")
+    row = verification.record(host, sid, candidate_commit=head, command=command, exit_code=exit_code,
+                              environment=environment, log_ref=log_ref, actor=fleet.actor)
+    Audit(fleet.config.safety).record(actor=fleet.actor, tool="session_record_verification", host=host,
+                                      session_id=sid, phase="record", candidate_commit=head,
+                                      command=command, exit_code=exit_code, log_ref=log_ref)
+    return {**row, "verified_candidate": exit_code == 0}
+
+
 # --------------------------------------------------------------------------- permissions
 class TurnInFlight(WriteRefused):
     """Raising a Claude session's mode mid-turn would abort the turn (see session_set_permissions)."""
@@ -96,7 +127,7 @@ async def session_set_permissions(
         )
     c = fleet.client(host)
     audit = Audit(fleet.config.safety)
-    async with _write_lock():
+    async with _write_lock(host):
         t, _ = await _resolve_session(c, session_id)
         sid = t["id"]
         kind = agent_kind(t.get("agentPreset"))
@@ -483,9 +514,9 @@ async def _failover_one(
     if same_worktree:
         opts.update(useWorktree=True, worktreePath=wt_path, worktreeBranch=branch)
     base = {"actor": fleet.actor, "tool": "session_failover", "host": host, "session_id": new_sid}
-    async with _write_lock():
+    async with _write_lock(host):
         audit.check_rate(host, "#failover-" + sid)
-        registry.reserve(
+        existing = registry.reserve(
             host,
             {
                 "session_id": new_sid,
@@ -498,18 +529,27 @@ async def _failover_one(
                 "failover_of": sid,
                 "cleanup_policy": "archive" if archive_only else None,
                 "shares_worktree_with": sid if same_worktree else None,
+                "worktree_path": wt_path if same_worktree else None,
+                "cwd": cwd,
+                "handoff_status": "pending",
             },
             hc.orchestrate_max_sessions,
             replaces=replaces,
         )
+        if existing:
+            return {
+                "old_session_id": sid,
+                "new_session_id": existing.get("session_id"),
+                "branch": existing.get("branch"),
+                "cwd": existing.get("cwd"),
+                "skipped": "already failed over (the Codex session is tracked in the registry)",
+            }
         audit.record(**base, channel="claude:start-session", phase="attempt", preset=preset, failover_of=sid)
         try:
             await c.invoke("claude:start-session", {"sessionId": new_sid, "options": opts})
         except BaseException as e:
             audit.record(**base, channel="claude:start-session", phase="result", ok=False, error=_err(e))
-            registry.update(host, new_sid, status="failed")
-            if replaces:
-                registry.update(host, sid, status="active", superseded_by=None)
+            registry.fail_reservation(host, new_sid, replaces)
             raise
         audit.record(**base, channel="claude:start-session", phase="result", ok=True)
         registry.update(
@@ -522,15 +562,21 @@ async def _failover_one(
             **registry_permission_fields(opts),
         )
         mid = f"batc-{uuid.uuid4()}"
+        registry.update(host, new_sid, handoff_message_id=mid)
         audit.record(**base, channel="claude:send-message", phase="attempt", message_id=mid, text=prompt)
         sent, err = True, None
         try:
-            await c.invoke(
-                "claude:send-message", {"sessionId": new_sid, "prompt": prompt, "clientMessageId": mid}
+            ack = await c.invoke(
+                "claude:send-message", {"sessionId": new_sid, "prompt": prompt, "clientMessageId": mid},
+                retry_on_disconnect=False,
             )
+            if not isinstance(ack, dict) or not (ack.get("accepted") or ack.get("ok")):
+                raise WriteRefused("handoff prompt was not accepted by BAT")
+            registry.update(host, new_sid, handoff_status="sent")
             audit.record(**base, channel="claude:send-message", phase="result", ok=True, message_id=mid)
         except BatError as e:
             sent, err = False, _err(e)
+            registry.update(host, new_sid, handoff_status="uncertain")
             audit.record(**base, channel="claude:send-message", phase="result", ok=False, error=err)
     return {
         **plan,
@@ -840,6 +886,8 @@ async def _evaluate(
         "reasons": [],
         "remove_worktree": False,
         "stop": False,
+        "gates": {"turn_finished": False, "agent_claims_complete": False,
+                  "verified_candidate": False, "approved_for_merge": False},
     }
 
     def decide(d: str, *reasons: str, remove: bool = False, stop: bool = False) -> dict:
@@ -863,7 +911,7 @@ async def _evaluate(
     if succ:  # superseded by a failover session
         row["superseded_by"] = succ["session_id"]
         smeta = await _meta(c, succ["session_id"])
-        running = smeta is not None and succ.get("status") == "active"
+        running = smeta is not None and succ.get("status") == "active" and succ.get("handoff_status") == "sent"
         if snap["streaming"]:
             return decide("KEEP", "superseded but still streaming")
         if not running:
@@ -894,8 +942,20 @@ async def _evaluate(
     wt = row["worktree_path"]
     task = await _first_user_prompt(c, sid, snap["messages"]) or ""
     final = _final_output(snap["messages"])
+    row["gates"]["turn_finished"] = bool(final) and not snap["streaming"]
     tests = test_evidence(snap["messages"])
     row["tests"] = tests
+    claim_markers = completion_markers(final)
+    row["gates"]["agent_claims_complete"] = (claim_markers["done_phrase"] and not claim_markers["blocker"]) or bool(
+        (parse_status(final) or {}).get("kind") == "MILESTONE"
+    )
+    final_status = parse_status(final)
+    if final_status and final_status["kind"] == "CONTINUE":
+        return decide("KEEP", f"session reports BAT-STATUS: CONTINUE {final_status['detail']}"[:160])
+    if final_status and final_status["kind"] == "NEED_HUMAN":
+        return decide("ESCALATE", f"session needs a human: {final_status['detail'] or final_status['label']}"[:200])
+    if not row["gates"]["turn_finished"]:
+        return decide("KEEP", "idle but no final agent output confirms a finished turn")
 
     if not wt or e.get("status") == "removed":
         # no worktree of its own (main checkout) or worktree already removed: only stopping is left
@@ -910,13 +970,25 @@ async def _evaluate(
             return decide("KEEP", f"session reports BAT-STATUS: CONTINUE {st['detail']}"[:160])
         if st and st["kind"] == "NEED_HUMAN":
             return decide("ESCALATE", f"session needs a human: {st['detail'] or st['label']}"[:200])
-        if st and st["kind"] == "MILESTONE":
-            return decide("CLEAN_ONLY", f"idle in main checkout, BAT-STATUS: MILESTONE {st['detail']}"[:160], stop=True)
+        if e.get("role") != "planner":
+            cwd = t.get("cwd") or _origin_cwd(t, ws)
+            row["candidate_cwd"] = cwd
+            head = await _candidate_head(c, cwd)
+            v = verification.get(host, sid)
+            row["candidate_commit"] = head
+            row["verification"] = v
+            current_dirty = await _git_dirty(c, cwd)
+            row["gates"]["verified_candidate"] = verification.matches(v, head) and current_dirty == []
+            if not row["gates"]["verified_candidate"]:
+                return decide("ESCALATE", "no passing verification record for the current clean commit")
         g = _apply_markers(
             await jev.merge_gate(task, final, "(no diff: session works in the main checkout)", str(tests)),
             final,
         )
         row["jev"] = g
+        row["gates"]["agent_claims_complete"] = row["gates"]["agent_claims_complete"] or bool(
+            g and g["claims_done"] >= 0.8
+        )
         if g is None:
             return decide("KEEP", "idle in main checkout; Jev unavailable to confirm it is finished")
         if g["claims_done"] >= 0.8:
@@ -955,7 +1027,15 @@ async def _evaluate(
         return decide("ESCALATE", "cannot read worktree git status")
     if dirty:
         return decide("ESCALATE", f"uncommitted changes in worktree ({len(dirty)} files)")
+    head = await _candidate_head(c, wt)
+    row["candidate_cwd"] = wt
+    v = verification.get(host, sid)
+    row["candidate_commit"] = head
+    row["verification"] = v
+    row["gates"]["verified_candidate"] = verification.matches(v, head)
     if e.get("cleanup_policy") == "archive":
+        if not row["gates"]["verified_candidate"]:
+            return decide("ESCALATE", "archive cleanup needs passing verification for the current commit")
         return decide(
             "CLEAN_ONLY",
             f"archive-only session: work committed on {row['branch']} (kept, not merged)",
@@ -981,6 +1061,8 @@ async def _evaluate(
     md = await _git_dirty(c, origin)
     if md is None or md:
         return decide("ESCALATE", "main checkout has uncommitted changes")
+    if not row["gates"]["verified_candidate"]:
+        return decide("ESCALATE", "no passing verification record for the current clean commit")
     if tests["last_failed"]:
         return decide("ESCALATE", f"last test run failed: {tests['last'].get('command')}")
     st = parse_status(final)
@@ -990,6 +1072,9 @@ async def _evaluate(
         return decide("ESCALATE", f"session needs a human: {st['detail'] or st['label']}"[:200])
     g = _apply_markers(await jev.merge_gate(task, final, diff, str(tests)), final)
     row["jev"] = g
+    row["gates"]["agent_claims_complete"] = row["gates"]["agent_claims_complete"] or bool(
+        g and g["claims_done"] >= 0.8
+    )
     if g is None:
         return decide("ESCALATE", "Jev unavailable: a merge needs the judgment gate")
     if g["claims_done"] < 0.8:
@@ -998,11 +1083,9 @@ async def _evaluate(
         )
     if g["diff_verdict"] != "safe_complete" or g["diff_confidence"] < 0.8:
         return decide("ESCALATE", f"Jev diff verdict {g['diff_verdict']} ({g['diff_confidence']})")
-    if not tests["found"] and g["tests_ok"] < 0.7:
-        return decide("ESCALATE", f"no test evidence (Jev tests_ok {g['tests_ok']})")
     return decide(
         "MERGE_AND_CLEAN",
-        f"ahead, clean, tests {'seen' if tests['found'] else 'per Jev'}, Jev done={g['claims_done']} "
+        f"ahead, clean, verified {head}, Jev done={g['claims_done']} "
         f"diff={g['diff_verdict']}",
         remove=True,
         stop=loaded,
@@ -1111,7 +1194,21 @@ async def session_cleanup(
             acts: list[str] = []
             d = r.get("decision")
             try:
+                if d in ("MERGE_AND_CLEAN", "CLEAN_ONLY") and r["gates"]["verified_candidate"]:
+                    cwd = r.get("candidate_cwd")
+                    current_head = await _candidate_head(c, cwd)
+                    current_dirty = await _git_dirty(c, cwd)
+                    if (current_head != r.get("candidate_commit") or current_dirty != [] or
+                            not verification.matches(verification.get(host, sid), current_head)):
+                        r["decision"] = "ESCALATE"
+                        r["reasons"].append("candidate changed after evaluation; verification invalid")
+                        audit.record(actor=fleet.actor, tool="session_cleanup", host=host,
+                                     session_id=sid + "#cleanup", phase="candidate_changed",
+                                     decision="ESCALATE", expected_commit=r.get("candidate_commit"),
+                                     current_commit=current_head)
+                        continue
                 if d == "MERGE_AND_CLEAN":
+                    r["gates"]["approved_for_merge"] = True
                     m = await worktree_merge(fleet, host, sid, confirm=True)
                     if not m.get("merged_now"):
                         r["decision"] = "ESCALATE"
@@ -1265,10 +1362,10 @@ async def session_relay(
     except TurnInFlight:
         return {**out, "sent": False, "busy": True,
                 "next": "retry with queue=true, or for a fan-out plan use fanout_plan_session"}
-    mark = {k: r.get(k) for k in ("turn_marker", "after_ms", "after", "marker_source")}
+    mark = {k: r.get(k) for k in ("turn_marker", "after_ms", "after", "marker_source", "turn_phase", "turn_attribution")}
     nxt = (
         f'session_wait(host="{host}", session_id="{sid}", after="{mark["turn_marker"]}") then '
-        f'session_read(..., after="{mark["turn_marker"]}"); older output belongs to the previous task'
+        f'session_read(..., after="{mark["turn_marker"]}"); check turn_attribution before reporting output'
         if mark.get("turn_marker")
         else "session_wait(require_new=true); check message timestamps against the send time"
     )

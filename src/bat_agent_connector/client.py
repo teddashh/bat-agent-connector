@@ -325,17 +325,19 @@ class BatClient:
         self.last_used = time.monotonic()
         return (time.monotonic() - t) * 1000
 
-    async def invoke(self, channel: str, params: dict | None = None, *, timeout: float | None = None) -> Any:
+    async def invoke(self, channel: str, params: dict | None = None, *, timeout: float | None = None,
+                     retry_on_disconnect: bool = False) -> Any:
         """Invoke an allow-listed channel. Raises ChannelNotAllowed before sending anything otherwise."""
         canonical = check_allowed(
             channel, allow_writes=self.allow_writes, allow_orchestrate=self.allow_orchestrate
         )
-        return await self._invoke_checked(canonical, params, timeout)
+        return await self._invoke_checked(canonical, params, timeout, retry_on_disconnect=retry_on_disconnect)
 
-    async def _invoke_checked(self, canonical: str, params: dict | None, timeout: float | None) -> Any:
+    async def _invoke_checked(self, canonical: str, params: dict | None, timeout: float | None,
+                              *, retry_on_disconnect: bool = False) -> Any:
         write = is_write(canonical)
         timeout = timeout or timeout_for(canonical)
-        attempts = 1 if write and canonical != "claude:send-message" else 3
+        attempts = 1 if write and (canonical != "claude:send-message" or not retry_on_disconnect) else 3
         last_exc: Exception | None = None
         for attempt in range(attempts):
             try:
@@ -357,7 +359,8 @@ class BatClient:
                     raise InvokeError(f"{self.host.name}: {canonical}: {err}")
                 return reply.get("result")
             except ConnectionLost as e:
-                # send-message is idempotent by clientMessageId, reads are side-effect free.
+                # Only Claude's send-message is idempotent by clientMessageId;
+                # Codex ignores that field and callers disable this retry.
                 last_exc = e
                 await self.close()
                 if attempt + 1 < attempts:
