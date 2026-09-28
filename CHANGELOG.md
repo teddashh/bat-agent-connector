@@ -1,5 +1,18 @@
 # Changelog
 
+## Next release (unreleased)
+
+- Claude turn markers now use BAT's exact `clientMessageId` echo (`batc-<uuid>`), with an explicit
+  timestamp cursor and conservative queued-turn phases. Codex is labeled as a timestamp fallback
+  because BAT does not echo that ID; Codex sends are not automatically retried after a disconnect.
+- Failover successor reservation is atomic per source session and worktree. The old session is
+  cleaned only after the new handoff is acknowledged.
+- Automatic cleanup requires an explicit passing verification record for the current clean commit.
+  `session_record_verification` / `batc record-verification` capture command, exit code, environment
+  and log reference. Jev and `BAT-STATUS` remain completion claims, not test evidence.
+- In-process writes now serialize per host. The remaining GUI workspace-save race and cross-process
+  ownership limits are documented in `docs/design/next-gen-connector.md`.
+
 ## 0.2.4 (unreleased)
 
 - Turn markers: `session_send` and `session_relay` return `turn_marker` / `after_ms` (the host-side id and

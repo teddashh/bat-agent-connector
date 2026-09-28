@@ -73,7 +73,7 @@ notification on every reconnect.
 |---|---|---|
 | read (always) | - | `hosts_list`, `host_status`, `workspaces_list`, `sessions_list`, `session_read`, `session_wait`, `worktree_status`, `session_worktree_status`, `sessions_triage`, `quota_sessions` |
 | write | per host `writes = true` | `session_send`, `session_continue`, `session_interrupt`, `session_answer`, `session_set_permissions`, `approve_pending` |
-| orchestrate | per host `writes = true` **and** `orchestrate = true` | `session_start`, `worktree_merge`, `worktree_remove`, `session_failover`, `session_cleanup` |
+| orchestrate | per host `writes = true` **and** `orchestrate = true` | `session_start`, `worktree_merge`, `worktree_remove`, `session_failover`, `session_record_verification`, `session_cleanup` |
 
 Write and orchestrate tools are not even registered unless enabled, need `confirm=true` on every call, are rate
 limited, and are appended to an audit log (`~/.local/state/bat-agent-connector/audit.jsonl`, message bodies only as a
@@ -126,8 +126,8 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 | `host_status(host)` | Version, protocol, connect/auth/ping latency, counts of workspaces/terminals/agent sessions/loaded/streaming. |
 | `workspaces_list(host?)` | Workspaces with folder and session counts. |
 | `sessions_list(host?, workspace?, agent?, only_loaded?, active_within_hours?, check_pending=auto, limit=50)` | Agent sessions, most recently active first: workspace, title, cwd, agent kind, model, loaded, streaming, pending question, last activity (+ source), worktree branch, orchestrated. |
-| `session_read(host, session_id, last_n=20, offset=0, include_tools=false, max_chars=12000, after=null)` | Latest messages as compact text, paged (`next_offset`), size capped; pending question and streaming tail. `session_id` may be a unique prefix. `after=<turn_marker>` shows only messages newer than that send. |
-| `session_wait(host, session_id, until=attention, timeout_s=120, require_new=false, after=null)` | Waits for turn end / question / permission request / error. `after=<turn_marker>` (from `session_send` / `session_relay`) waits for the reply to that send; a stale idle state does not count. |
+| `session_read(host, session_id, last_n=20, offset=0, include_tools=false, max_chars=12000, after=null)` | Latest messages as compact text, paged (`next_offset`), size capped; pending question and streaming tail. `session_id` may be a unique prefix. For Claude, `after=<turn_marker>` matches the exact BAT echo ID and hides unconfirmed queued output. |
+| `session_wait(host, session_id, until=attention, timeout_s=120, require_new=false, after=null)` | Waits for turn end / question / permission request / error. `after=<turn_marker>` (from `session_send` / `session_relay`) correlates Claude's echo and reports accepted/running/terminal phase; a stale idle state does not count. BAT Codex uses a weaker timestamp fallback because it does not echo `clientMessageId`. |
 | `worktree_status(host, workspace?)` | Worktree sessions: branch, source branch, merged kind, diff stats. |
 | `session_worktree_status(host, session_id, include_diff?)` | Same for one session plus dirty files and main-checkout state. |
 | `session_send(host, session_id, text, confirm, message_id?, queue?)` | Sends a message; client-resumes an unloaded session first; idempotent by `message_id`. |
@@ -146,6 +146,7 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 | `fanout_plan_session(host, workspace, message, confirm, max_items=4, brief?)` | Starts a read-only Codex planner in the main checkout (for when the main session is busy or quota-stopped) that answers with a `bat-fanout` plan. |
 | `fanout_from_plan(host, session_id, confirm, dry_run?, agent="codex", model?, max_items=4)` | Starts one worktree session per task of the last `bat-fanout` block of that session, prompts unchanged, then cleans up a planner session. |
 | `session_cleanup(host, confirm, dry_run=true, session_id?)` | Decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE per orchestrated session behind hard gates, then acts (needs `auto_cleanup = true`). See docs/ORCHESTRATE.md. |
+| `session_record_verification(host, session_id, candidate_commit, command, exit_code, environment, log_ref, confirm)` | Records an externally run verification for the host's current clean commit; automatic cleanup checks it again before merging. CLI: `batc record-verification`. |
 
 ## CLI
 
@@ -190,8 +191,8 @@ planner) writes a `bat-fanout` block:
 ```
 
 and `fanout_from_plan` starts exactly those tasks. Every stop ends with one line: `BAT-STATUS: MILESTONE <name>`,
-`BAT-STATUS: CONTINUE <next step>` or `BAT-STATUS: NEED-<HUMAN> <reason>`; triage and cleanup prefer it over
-heuristics.
+`BAT-STATUS: CONTINUE <next step>` or `BAT-STATUS: NEED-<HUMAN> <reason>`; triage uses it as a completion claim.
+It does not replace a commit-bound verification record for automatic cleanup.
 
 ## Safety model (short)
 

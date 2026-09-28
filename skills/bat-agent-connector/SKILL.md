@@ -66,7 +66,7 @@ brief={goal, context, constraints, acceptance}, earlier=[<earlier thread message
 The brief is labeled as your interpretation; the session treats the original as the source of truth, fixes unclear
 asks with its repo context and states its interpretation in one line. For parallel or large work add
 `request_fanout=N`, `session_wait`, then `fanout_from_plan(host, sid, confirm=true)`. If the main session is busy or
-quota-stopped use `fanout_plan_session` instead, wait, then `fanout_from_plan` on the planner. After a relay or send, pass its `turn_marker` as `after=` to `session_wait` and `session_read`: they then count only output newer than that send, so the previous task's last reply is never reported as the answer (`turn_started` / `turn_done` say whether the session has answered yet; a timeout with `turn_started=false` means the turn has not begun: queued or not delivered).
+quota-stopped use `fanout_plan_session` instead, wait, then `fanout_from_plan` on the planner. After a relay or send, pass its `turn_marker` as `after=` to `session_wait` and `session_read`. For Claude, this matches BAT's exact echo ID. Check `turn_phase` and `turn_attribution`; queued output stays unconfirmed until the previous-turn boundary is observed. BAT Codex currently uses a weaker timestamp fallback, so do not claim its output is definitively tied to the send.
 Read the session's
 last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_continue`), NEED-<HUMAN> → ask the human.
 
@@ -97,8 +97,8 @@ last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_cont
 - **Permissions**: on hosts with `default_permission_mode = "allow_all"`, `approve_pending` answers permission prompts
   (not questions) with "don't ask again" and raises the session to allow-all. Claude sessions are raised only when
   idle; Codex from its next turn, so repeat `approve_pending` while a turn is still asking.
-- **Cleanup**: `session_cleanup` (dry run first) decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE per
-  session behind hard gates (idle, clean, conflict-free, tests, risk checks, then the optional Jev judgment). It keeps
+- **Cleanup**: run verification in the candidate environment, retain its log, and call `session_record_verification` with the current commit, command, exit code, environment and log reference. `session_cleanup` (dry run first) decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE per
+  session behind hard gates (idle, clean, conflict-free, commit-bound verification, risk checks, then the optional Jev judgment). It keeps
   branches, never stops a working session, and returns one `escalation_summary`: report that once, not per item.
 - `sessions_triage` shows `source` (pattern or jev) and an evidence line for every state; quote the evidence.
 

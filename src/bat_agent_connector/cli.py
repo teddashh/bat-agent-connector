@@ -281,6 +281,11 @@ async def _run(args) -> Any:
             return await lifecycle.session_cleanup(
                 fleet, args.host, args.confirm, not args.apply, args.session
             ), r_cleanup
+        if c == "record-verification":
+            return await lifecycle.session_record_verification(
+                fleet, args.host, args.session, args.commit, args.command, args.exit_code,
+                args.environment, args.log_ref, args.confirm,
+            ), None
         if c == "worktrees":
             return await orchestrate.worktree_status(fleet, args.host, args.workspace), None
         if c == "wt-status":
@@ -535,6 +540,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("session", nargs="?")
     p.add_argument("--apply", action="store_true", help="act (needs --confirm and auto_cleanup = true)")
     p.add_argument("--dry-run", action="store_true", help="report only (default)")
+    p.add_argument("--confirm", action="store_true")
+    p = sp.add_parser("record-verification", help="ORCHESTRATE: bind a test run to the current clean commit")
+    p.add_argument("host")
+    p.add_argument("session")
+    p.add_argument("--commit", required=True, help="full current candidate commit hash")
+    p.add_argument("--command", required=True, help="exact verification command")
+    p.add_argument("--exit-code", required=True, type=int)
+    p.add_argument("--environment", required=True, help="where and with which runtime the command ran")
+    p.add_argument("--log-ref", required=True, help="durable verification log path or URL")
     p.add_argument("--confirm", action="store_true")
     p = sp.add_parser("fanout", help="split a plan into worktree task prompts (and optionally start them)")
     p.add_argument("plan", help="markdown plan file")

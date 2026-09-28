@@ -43,7 +43,8 @@ The connector therefore:
 | `worktree_remove(host, session_id, confirm, delete_branch=false, allow_unmerged=false, discard_uncommitted=false)` | orchestrate | Refuses if the session is streaming, if the worktree has uncommitted changes (unless `discard_uncommitted`), or if `delete_branch` and the branch has unmerged commits (unless `allow_unmerged`). The session itself is not stopped. |
 | `batc fanout PLAN.md [--start ...]` | CLI helper | Splits a markdown plan (`- [ ]` items, numbered items, `##` headings) into task prompts; `--start` needs `--confirm` and is capped by `max_start_per_call`. |
 
-| `session_failover(...)` | orchestrate | Only for sessions classified `quota_exhausted` (unless `force`), never while streaming; one successor per session (registry `failover_of`); `max_start_per_call` for `all_exhausted`; the old registry entry becomes `superseded`. |
+| `session_failover(...)` | orchestrate | Only for sessions classified `quota_exhausted` (unless `force`), never while streaming; one successor per session and worktree (atomic registry reservation); `max_start_per_call` for `all_exhausted`; the old registry entry becomes `superseded` and is stopped only after the handoff is acknowledged. |
+| `session_record_verification(...)` | orchestrate | Records a trusted external command, exit code, environment and log reference for the host's current clean commit. A later commit or dirty tree invalidates it. CLI: `batc record-verification`. |
 | `session_cleanup(...)` | orchestrate | Dry run by default; acting needs `confirm` **and** host `auto_cleanup = true`. Gates below. |
 
 ## Quota failover
@@ -62,9 +63,9 @@ instruction, recent output, git state (branch, dirty files, commits, diff stats)
 | Decision | When |
 |---|---|
 | `KEEP` | Streaming, waiting for a permission/answer, quota or transient limit, idle for less than `min_idle_s`, worktree shared by another active session. **Never stops a session that is mid-work.** |
-| `CLEAN_ONLY` | Superseded by a failover successor that is running; archive-only successor (see below) that is idle and clean; worktree already merged or removed; no new commits and no diff; main-checkout session whose final output Jev confirms as finished. Stops the agent, removes the worktree with the branch **kept**. |
-| `MERGE_AND_CLEAN` | All hard gates pass: idle, worktree clean, `mergedKind == ahead` (conflict-free, via `worktree_merge` never-force semantics), main checkout clean and on the source branch, last test run not failed, deterministic risk checks clean (no credential-looking additions, no secrets/infra paths, no large deletions or huge diffs); **then** Jev must confirm the final output claims completion (≥ 0.8), the diff is `safe_complete` (≥ 0.7), and, if no test run was seen, that tests passed. Merges locally, removes the worktree (branch kept), stops the agent. |
-| `ESCALATE` | Uncommitted changes, diverged branch, dirty main checkout, failing tests, risk-check hit, Jev unavailable/unsure. Collected into one `escalation_summary` line per call. |
+| `CLEAN_ONLY` | Superseded by a failover successor whose handoff was acknowledged; archive-only successor (see below) that is idle, clean and verified; worktree already merged or removed; no new commits and no diff; main-checkout coding session with a passing verification record whose final output Jev confirms as finished. Stops the agent, removes the worktree with the branch **kept**. |
+| `MERGE_AND_CLEAN` | All hard gates pass: idle, worktree clean, `mergedKind == ahead` (conflict-free, via `worktree_merge` never-force semantics), main checkout clean and on the source branch, a passing `session_record_verification` record for the current commit, last test run not failed, deterministic risk checks clean (no credential-looking additions, no secrets/infra paths, no large deletions or huge diffs); **then** Jev must confirm the final output claims completion (≥ 0.8) and the diff is `safe_complete` (≥ 0.8). HEAD and cleanliness are rechecked immediately before acting. Merges locally, removes the worktree (branch kept), stops the agent. |
+| `ESCALATE` | Uncommitted changes, diverged branch, dirty main checkout, missing/stale/failed verification, failing tests, risk-check hit, Jev unavailable/unsure. Collected into one `escalation_summary` line per call. |
 
 `ESCALATE_TO_TED` (the 0.2.0 name of `ESCALATE`) is still accepted as an alias by `normalize_decision`.
 

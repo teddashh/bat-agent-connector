@@ -250,7 +250,7 @@ async def test_claude_mode_not_switched_mid_turn(fleet_factory, mock):
 
 
 # --------------------------------------------------------------------------- cleanup
-async def _finished_wt(f, mock, kind="unknown", diff=""):
+async def _finished_wt(f, mock, kind="unknown", diff="", verified=True):
     r = await orchestrate.session_start(f, "h1", "demo-project", "codex", confirm=True)
     sid = r["session_id"]
     mock.worktrees[sid].update(mergedKind=kind, diff=diff)
@@ -263,6 +263,11 @@ async def _finished_wt(f, mock, kind="unknown", diff=""):
             msg(3, "assistant", "Done: feature X implemented, 12 tests pass, committed on the branch."),
         ],
     }
+    if verified:
+        await lifecycle.session_record_verification(
+            f, "h1", sid, "abc1234", "uv run pytest -q", 0,
+            "mock host /srv/demo worktree, Python 3.12", "artifacts/test-run.log", confirm=True,
+        )
     return r
 
 
@@ -303,6 +308,61 @@ async def test_cleanup_merge_needs_jev(fleet_factory, mock, monkeypatch):
     row = d["decisions"][0]
     assert row["decision"] == "MERGE_AND_CLEAN" and row["actions"][0].startswith("merged")
     assert "worktree:merge" in mock.channels() and "claude:stop-session" in mock.channels()
+    await f.close()
+
+
+async def test_cleanup_requires_commit_bound_execution_not_jev(fleet_factory, mock, monkeypatch):
+    diff = "diff --git a/x.py b/x.py\n+++ b/x.py\n+print('x')\n"
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0})
+    r = await _finished_wt(f, mock, "ahead", diff, verified=False)
+
+    async def optimistic_gate(self, task, final, diff_excerpt, tests):
+        return {"claims_done": 0.99, "diff_verdict": "safe_complete", "diff_confidence": 0.99, "tests_ok": 0.99}
+
+    monkeypatch.setattr(Jev, "merge_gate", optimistic_gate)
+    d = await lifecycle.session_cleanup(f, "h1", session_id=r["session_id"], dry_run=True)
+    assert d["decisions"][0]["decision"] == "ESCALATE"
+    assert not d["decisions"][0]["gates"]["verified_candidate"]
+    mock.states[r["session_id"]]["messages"][-1] = msg(3, "assistant", "BAT-STATUS: MILESTONE finished")
+    d = await lifecycle.session_cleanup(f, "h1", session_id=r["session_id"], dry_run=True)
+    assert d["decisions"][0]["decision"] == "ESCALATE"
+    assert d["decisions"][0]["gates"]["agent_claims_complete"]
+
+    await lifecycle.session_record_verification(
+        f, "h1", r["session_id"], "abc1234", "uv run pytest -q", 0,
+        "mock host, Python 3.12", "artifacts/pytest.log", confirm=True,
+    )
+    d = await lifecycle.session_cleanup(f, "h1", session_id=r["session_id"], dry_run=True)
+    assert d["decisions"][0]["decision"] == "MERGE_AND_CLEAN"
+    assert d["decisions"][0]["gates"]["verified_candidate"]
+
+    wt = r["worktree_path"]
+    mock.git_logs = {wt: [{"hash": "def5678"}]}
+    d = await lifecycle.session_cleanup(f, "h1", session_id=r["session_id"], dry_run=True)
+    assert d["decisions"][0]["decision"] == "ESCALATE"
+    assert not d["decisions"][0]["gates"]["verified_candidate"]
+    await f.close()
+
+
+async def test_cleanup_rechecks_candidate_before_merge(fleet_factory, mock, monkeypatch):
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0})
+    r = await _finished_wt(f, mock, "ahead", "diff --git a/x b/x\n+++ b/x\n+code\n")
+
+    async def confident_gate(self, task, final, diff_excerpt, tests):
+        return {"claims_done": 0.95, "diff_verdict": "safe_complete", "diff_confidence": 0.95, "tests_ok": 0.95}
+
+    monkeypatch.setattr(Jev, "merge_gate", confident_gate)
+    original = lifecycle._evaluate
+
+    async def change_after_evaluation(*args, **kwargs):
+        row = await original(*args, **kwargs)
+        mock.git_logs = {r["worktree_path"]: [{"hash": "def5678"}]}
+        return row
+
+    monkeypatch.setattr(lifecycle, "_evaluate", change_after_evaluation)
+    d = await lifecycle.session_cleanup(f, "h1", session_id=r["session_id"], dry_run=False, confirm=True)
+    assert d["decisions"][0]["decision"] == "ESCALATE"
+    assert "worktree:merge" not in mock.channels()
     await f.close()
 
 
@@ -474,6 +534,10 @@ async def test_cleanup_rebuilds_empty_branch_diff(fleet_factory, mock, monkeypat
     r = await _finished_wt(f, mock, "ahead", "")
     wt = mock.worktrees[r["session_id"]]["worktreePath"]
     mock.git_logs = {wt: [{"hash": "c2c2c2c2"}, {"hash": "c1c1c1c1"}, {"hash": "abc1234"}]}
+    await lifecycle.session_record_verification(
+        f, "h1", r["session_id"], "c2c2c2c2", "uv run pytest -q", 0,
+        "mock host /srv/demo worktree, Python 3.12", "artifacts/test-run-2.log", confirm=True,
+    )
     mock.commit_files = {
         "c1c1c1c1": [{"status": "M", "file": "src/x.rs"}],
         "c2c2c2c2": [{"status": "A", "file": "assets/big.json"}],
