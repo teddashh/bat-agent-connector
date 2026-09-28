@@ -327,18 +327,20 @@ class BatClient:
 
     async def invoke(self, channel: str, params: dict | None = None, *, timeout: float | None = None,
                      retry_on_disconnect: bool = False,
-                     before_send: Callable[[], None] | None = None) -> Any:
+                     before_send: Callable[[], None] | None = None,
+                     frame_guard: Callable[[dict], None] | None = None) -> Any:
         """Invoke an allow-listed channel. Raises ChannelNotAllowed before sending anything otherwise."""
         canonical = check_allowed(
             channel, allow_writes=self.allow_writes, allow_orchestrate=self.allow_orchestrate
         )
         return await self._invoke_checked(canonical, params, timeout,
                                           retry_on_disconnect=retry_on_disconnect,
-                                          before_send=before_send)
+                                          before_send=before_send, frame_guard=frame_guard)
 
     async def _invoke_checked(self, canonical: str, params: dict | None, timeout: float | None,
                               *, retry_on_disconnect: bool = False,
-                              before_send: Callable[[], None] | None = None) -> Any:
+                              before_send: Callable[[], None] | None = None,
+                              frame_guard: Callable[[dict], None] | None = None) -> Any:
         write = is_write(canonical)
         timeout = timeout or timeout_for(canonical)
         attempts = 1 if write and (canonical != "claude:send-message" or not retry_on_disconnect) else 3
@@ -355,6 +357,8 @@ class BatClient:
                     }
                     if before_send:
                         before_send()
+                    if frame_guard:
+                        frame_guard(frame)
                     reply = await self._roundtrip(frame, timeout)
                 self.last_used = time.monotonic()
                 if reply.get("type") == "invoke-error":

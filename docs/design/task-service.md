@@ -76,6 +76,8 @@ Failover 恢復只接受帳本預留的**同一個 successor session ID**。`fai
 
 Failover handoff 在舊 Claude 狀態查詢、新 Codex session start、BAT 連線等等待之間可能遇到 pause。服務在 handoff intent／prompt hash 已入帳後，送出前重查 task `paused`、`control_version`、原 lead／預留 successor 與 handoff command；BAT client 在真正寫入 `claude:send-message` frame 前再做一次相同檢查。若 pause 已提交，handoff `send` 留在 uncertain、failover 標 `operator_only`，恢復派工也不會重送，須由有權操作者對帳。
 
+BAT 確認預留 successor start ID 後，**handoff 送出前**先查 successor metadata `cwd`、舊／新 session 的 worktree path／branch、Git root，與 task 舊 lead registry、預留 ID 和 handoff command 綁定；任何具體不符都不送 handoff，轉 `operator_only`。BAT client 在提交實際 handoff frame 前計算該 frame 的 prompt SHA-256，與 journal intent **逐字 hash 相等**才寫入 frame，並將該 frame hash 記入私有 registry。正常回覆與重啟恢復都要求 registry frame hash 等於 journal prompt hash；只有 64 位 hash 的外形並不足夠。null host 身分仍是 uncertain，不用猜測或重送。
+
 ## 權限、設定與操作恢復
 
 HTTP 僅聽 loopback 並檢查 peer。一般 work RPC 需本機 0600 admin bearer token；Goose 只取得 1 小時的 task-scoped capability，不能呼叫 `work_submit`、操作另一 task 或直接提供測試 exit code。對不明一般 send 或 failover handoff send，管理員用 `work_reconcile_capability` 為**一個 task／command** 發 10 分鐘一次性 capability，再用該 token 呼叫 `work_reconcile`，提供 `delivered`／`not_delivered`／`superseded`、操作者、來源和證據。admin token 本身不能直接解決命令。`batc task-reconcile` 在本機完成這兩步；若要接續，必須提交**不同文字**的新 prompt，先記新 intent，並確認 BAT session 閒置；新 prompt 不重播舊命令。人工聲稱 review PASS 還要提供當前 commit/tree、exact turn reference，服務重查乾淨候選、reviewer 已停筆及當前觀察測試。無證據的 resolve 留在 `human_owned`，`work_resume` 不會偷偷續推。這是有權操作者的可稽核證詞，並非 BAT 自動證明。狀態目錄 0700；SQLite、token、lock、私有 handoff archive 0600。不要將 token、shim 金鑰、原始聊天或 provider 錯誤全文寫入日志。castle1 OpenClaw 需透過受控 SSH loopback forward 加 admin bearer 呼叫同一 grok-bot-01 daemon；若要允許 castle1 寫入，應配置限定權限的轉接身分，不能把 loopback HTTP 直接開到 LAN。此轉接與主機授權尚未部署。
