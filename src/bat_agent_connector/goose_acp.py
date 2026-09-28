@@ -123,7 +123,12 @@ class GooseACP:
             while True:
                 line = await asyncio.wait_for(proc.stdout.readline(), timeout_s)
                 if not line or len(line) > 2_000_000:
-                    raise RuntimeError("Goose ACP stopped or sent an oversized message")
+                    detail = b""
+                    if proc.stderr is not None:
+                        detail = await proc.stderr.read()
+                    suffix = detail.decode(errors="replace")[-1000:].strip()
+                    raise RuntimeError("Goose ACP stopped or sent an oversized message"
+                                       + ((": " + suffix) if suffix else ""))
                 reply = json.loads(line)
                 if reply.get("id") == ident:
                     if "error" in reply:
@@ -133,7 +138,8 @@ class GooseACP:
                             raise ProviderRequestError(outcome)
                         if method == "session/prompt":
                             raise UncertainPrompt("Goose prompt outcome requires reconciliation")
-                        raise RuntimeError("Goose ACP request failed")
+                        detail = error.get("message") or error.get("data") or error.get("code") or "unknown error"
+                        raise RuntimeError(f"Goose ACP {method} failed: {detail}")
                     return reply["result"]
                 if "method" in reply and "id" in reply:
                     # No implicit approval of Goose's own permission requests.
@@ -146,6 +152,12 @@ class GooseACP:
                                                     "clientInfo": {"name": "bat-task-service", "version": "0.1"}})
             if not isinstance(initialized, dict) or initialized.get("protocolVersion") != 1:
                 raise RuntimeError("Goose ACP protocol version is not the pinned version 1")
+            # ACP requires the initialized notification before the agent will
+            # accept session/new. Without it stock Goose exits cleanly after
+            # initialize, which used to make the first task turn uncertain.
+            proc.stdin.write((json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized",
+                                          "params": {}}) + "\n").encode())
+            await proc.stdin.drain()
             scoped = {"name": "bat-task", "command": sys.executable,
                       "args": ["-m", "bat_agent_connector.task_scoped_mcp", task_id],
                       "env": [{"name": "BATC_TASK_CAPABILITY", "value": capability}]}

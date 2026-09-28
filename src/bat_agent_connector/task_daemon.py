@@ -9,6 +9,8 @@ import json
 import logging
 import os
 import secrets
+import tempfile
+import shutil
 import time
 import urllib.request
 from pathlib import Path
@@ -274,12 +276,25 @@ class TaskDaemon:
                 return
             cmd, _ = self.journal.command(task_id, "goose_run", task["session_id"], {},
                                           f"{task_id}:goose:run")
+            goose_cwd = entry["cwd"]
+            temporary_cwd = None
+            # External BAT worktrees live on the host, while Goose ACP runs in
+            # the connector process. Goose still requires an existing cwd for
+            # session/new even though this recipe is MCP-only, so give it a
+            # disposable local cwd rather than the remote SSH path.
+            if not Path(goose_cwd).is_dir():
+                temporary_cwd = tempfile.mkdtemp(prefix="batc-goose-")
+                goose_cwd = temporary_cwd
             try:
                 capability = self.journal.issue_capability(task_id)
-                await self.goose.run_task(task, entry["cwd"], capability=capability,
+                await self.goose.run_task(task, goose_cwd, capability=capability,
                                           journal=self.journal)
-            except Exception:  # noqa: BLE001 - record uncertainty; no blind ACP rerun
+            except Exception as exc:  # noqa: BLE001 - record uncertainty; no blind ACP rerun
+                logging.warning("Goose ACP task %s failed before settlement: %s", task_id[:8], exc)
                 self.journal.command_status(cmd["command_id"], "uncertain")
+            finally:
+                if temporary_cwd:
+                    shutil.rmtree(temporary_cwd, ignore_errors=True)
                 self.journal.change(task_id, "uncertain")
                 return
             self.journal.command_status(cmd["command_id"], "settled")

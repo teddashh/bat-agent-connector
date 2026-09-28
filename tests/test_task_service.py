@@ -1209,11 +1209,16 @@ async def test_goose_acp_scoped_tool_smoke(mock, tmp_path, monkeypatch):
     script.write_text('''import json, os, subprocess, sys
 def reply(req, result):
     print(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":result}), flush=True)
+initialized = False
 for line in sys.stdin:
     req=json.loads(line)
     if req["method"] == "initialize":
         reply(req,{"protocolVersion":1,"agentCapabilities":{}})
+    elif req["method"] == "notifications/initialized":
+        initialized = True
     elif req["method"] == "session/new":
+        assert initialized
+
         scoped=req["params"]["mcpServers"]
         assert len(scoped)==1 and scoped[0]["name"]=="bat-task"
         reply(req,{"sessionId":"fake-goose-session"})
@@ -1477,6 +1482,8 @@ log=sys.argv[1]
 for line in sys.stdin:
     req=json.loads(line)
     with open(log,"a") as f: f.write(os.environ["GOOSE_PROVIDER"]+":"+req["method"]+":"+str("BATC_PRIVATE_TEST_SECRET" in os.environ)+"\\n")
+    if req["method"]=="notifications/initialized":
+        continue
     if req["method"]=="initialize" and os.environ["GOOSE_PROVIDER"]=="openai":
         result={"jsonrpc":"2.0","id":req["id"],"error":{"status":429}}
     elif req["method"]=="session/new":
@@ -1514,6 +1521,8 @@ async def test_goose_uncertain_prompt_does_not_switch(tmp_path, monkeypatch):
     script.write_text('''import json, os, sys
 for line in sys.stdin:
     req=json.loads(line)
+    if req["method"]=="notifications/initialized":
+        continue
     if req["method"]=="session/prompt":
         with open(sys.argv[1],"a") as f: f.write(os.environ["GOOSE_PROVIDER"]+"\\n")
         result={"jsonrpc":"2.0","id":req["id"],"error":{"status":429}}
