@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -92,6 +93,13 @@ class Journal:
                 step TEXT NOT NULL, step_type TEXT NOT NULL, provider TEXT NOT NULL,
                 confidence REAL, stakes TEXT NOT NULL, reason TEXT NOT NULL,
                 jev_backend TEXT, created_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS minimal_review_gates (
+                task_id TEXT NOT NULL REFERENCES tasks(task_id), candidate_commit TEXT NOT NULL,
+                tree_hash TEXT NOT NULL, diff_sha256 TEXT NOT NULL,
+                verdict TEXT NOT NULL, confidence REAL, jev_backend TEXT,
+                reason TEXT, threshold REAL NOT NULL, created_at REAL NOT NULL,
+                PRIMARY KEY(task_id,candidate_commit,tree_hash)
             );
             CREATE TABLE IF NOT EXISTS provider_usage (
                 usage_id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL,
@@ -403,6 +411,54 @@ class Journal:
                               (task_id,)).fetchone()
         return json.loads(row["body"]) if row else None
 
+    def minimal_review_gate(self, task_id: str, commit: str, tree: str) -> dict | None:
+        row = self.db.execute("""SELECT * FROM minimal_review_gates WHERE task_id=?
+            AND candidate_commit=? AND tree_hash=?""", (task_id, commit, tree)).fetchone()
+        return dict(row) if row else None
+
+    def reserve_minimal_review(self, task_id: str, commit: str, tree: str,
+                               diff_sha256: str, threshold: float) -> dict:
+        with self.tx():
+            old = self.minimal_review_gate(task_id, commit, tree)
+            if old:
+                if old["diff_sha256"] != diff_sha256:
+                    raise ValueError("candidate diff changed under review gate")
+                return old
+            self.db.execute("""INSERT INTO minimal_review_gates(task_id,candidate_commit,tree_hash,
+                diff_sha256,verdict,threshold,created_at) VALUES(?,?,?,?,?,?,?)""",
+                (task_id, commit, tree, diff_sha256, "pending", threshold, time.time()))
+            self._event(task_id, "minimal_review_reserved", {"candidate_commit": commit,
+                                                               "tree_hash": tree,
+                                                               "diff_sha256": diff_sha256})
+        return self.minimal_review_gate(task_id, commit, tree)
+
+    def finish_minimal_review(self, task_id: str, commit: str, tree: str,
+                              decision: dict) -> dict:
+        if (decision.get("verdict") not in {"pass", "escalate"}
+                or decision.get("reason") is None):
+            raise ValueError("invalid minimal review decision")
+        with self.tx():
+            old = self.minimal_review_gate(task_id, commit, tree)
+            if not old or old["verdict"] != "pending":
+                raise ValueError("minimal review has no pending intent")
+            if decision["verdict"] == "pass" and (
+                    decision.get("jev_backend") not in {"typesafe", "openrouter_jev"}
+                    or not isinstance(decision.get("confidence"), (int, float))
+                    or isinstance(decision["confidence"], bool)
+                    or not math.isfinite(decision["confidence"])
+                    or decision["confidence"] > 1
+                    or decision["confidence"] < old["threshold"]):
+                raise ValueError("unproven Jev PASS")
+            self.db.execute("""UPDATE minimal_review_gates SET verdict=?,confidence=?,
+                jev_backend=?,reason=? WHERE task_id=? AND candidate_commit=? AND tree_hash=?""",
+                (decision["verdict"], decision.get("confidence"), decision.get("jev_backend"),
+                 decision["reason"], task_id, commit, tree))
+            self._event(task_id, "minimal_review_decision", {
+                "candidate_commit": commit, "tree_hash": tree, "verdict": decision["verdict"],
+                "confidence": decision.get("confidence"), "jev_backend": decision.get("jev_backend"),
+                "reason": decision["reason"]})
+        return self.minimal_review_gate(task_id, commit, tree)
+
     def warm_candidates(self, task: dict) -> list[dict]:
         rows = self.db.execute("""SELECT task_id FROM tasks WHERE project=? AND host=? AND workspace=?
             AND lead_agent=? AND state='done' AND session_id IS NOT NULL
@@ -471,14 +527,20 @@ class Journal:
             values = {**old, **fields, "state": state, "updated_at": time.time()}
             if state == "done":
                 observed = self.observed_verification(task_id)
-                small_tests_only = values["task_path"] == "minimal" and values["recipe"] == "small-task-with-tests"
-                if ((not values["review_passed"] and not small_tests_only)
+                small = values["task_path"] == "minimal" and values["recipe"] == "small-task-with-tests"
+                gate = self.minimal_review_gate(task_id, observed["candidate_commit"],
+                                                observed["tree_hash"]) if observed and small else None
+                direct = (small and not values["review_passed"] and values["reviewer_session_id"] is None
+                          and gate is not None and gate["verdict"] == "pass"
+                          and gate["jev_backend"] in {"typesafe", "openrouter_jev"}
+                          and gate["confidence"] is not None and gate["confidence"] >= gate["threshold"])
+                reviewed = (values["review_passed"] and (not small or values["reviewer_session_id"] is not None)
+                            and values["review_commit"] == observed["candidate_commit"]
+                            and values["review_tree"] == observed["tree_hash"]) if observed else False
+                if (not (direct or reviewed)
                         or not observed or observed["exit_code"] != 0
                         or values["verification_commit"] != observed["candidate_commit"]
-                        or values["verification_tree"] != observed["tree_hash"]
-                        or (not small_tests_only and values["review_commit"] != observed["candidate_commit"])
-                        or (not small_tests_only and values["review_tree"] != observed["tree_hash"])
-                        or (small_tests_only and values["reviewer_session_id"] is not None)):
+                        or values["verification_tree"] != observed["tree_hash"]):
                     raise ValueError("fresh review and observed commit/tree verification required")
                 values.update(delivered=1, delivered_at=time.time())
             self.db.execute("""UPDATE tasks SET state=?,updated_at=?,session_id=?,reviewer_session_id=?,

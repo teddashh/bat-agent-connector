@@ -184,6 +184,9 @@ class BatTaskAdapter:
                 registry.claim_warm(host, session_id, previous_task_id=previous["task_id"],
                                     task_id=task["task_id"], workspace_id=identity["workspace_id"],
                                     cwd=identity["cwd"], branch=identity["branch"])
+                # The reused branch's verified HEAD is the next task's diff baseline.
+                self.journal.change(task["task_id"], "dispatching", fields={
+                    "base_commit": previous["verification_commit"]}, event="warm_base_recorded")
                 return session_id
             external = await self._ensure_external_worktree(task) if task.get("base_branch") else None
             last_error = None
@@ -752,6 +755,28 @@ class BatTaskAdapter:
         except (OSError, ValueError, asyncio.TimeoutError):
             return None
         return diff if rc == 0 and diff else None
+
+    async def candidate_review_diff(self, task: dict) -> dict | None:
+        """Read the complete small diff and changed paths; missing/large output escalates."""
+        cwd, base = self._cwd(task), task.get("base_commit")
+        if not cwd or not isinstance(base, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", base):
+            return None
+        try:
+            path_rc, names = await self.verifier._run(
+                task["host"], cwd, ("git", "diff", "--no-ext-diff", "--no-renames", "--name-only", "-z",
+                                    base, "HEAD", "--"),
+                timeout=15)
+            diff_rc, diff = await self.verifier._run(
+                task["host"], cwd, ("git", "diff", "--no-ext-diff", "--no-renames", "--unified=1",
+                                    base, "HEAD", "--"),
+                timeout=15)
+        except (OSError, ValueError, asyncio.TimeoutError):
+            return None
+        if (path_rc or diff_rc or not names or not diff or "\ufffd" in names
+                or "Binary files " in diff or "GIT binary patch" in diff):
+            return None
+        paths = [name for name in names.split("\0") if name]
+        return {"diff": diff, "paths": paths} if paths else None
 
     async def run_verification(self, task: dict) -> dict | None:
         cwd = self._cwd(task)

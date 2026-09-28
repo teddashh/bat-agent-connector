@@ -101,13 +101,17 @@ posting have adapter/test coverage; real Goose contract checks, Discord credenti
 are deferred. The task API requires a local admin token or scoped capability and binds only to loopback. See
 [the task-service design](docs/design/task-service.md) for states, recovery, private configuration and rollout.
 Set `task_path="minimal"` on `work_submit` to ask Jev one typed engine question at submission; invalid or unavailable
-Jev chooses rules. This path skips per-step Jev and candidate pre-screen. The `small-task-with-tests` recipe
-delivers only after trusted tests on a clean commit and skips the separate reviewer. It prefers a verified, idle,
+Jev chooses rules. This path skips per-step Jev and advisory candidate pre-screen. The `small-task-with-tests`
+recipe delivers directly only after trusted tests on a clean commit and one typed Jev review of the candidate diff
+against Ted's original words passes at the configured confidence threshold. A risky, uncertain, sensitive, large
+or unavailable diff goes to the separate reviewer; Jev backend failure also requires full review. It prefers a verified,
+idle,
 service-owned session from a completed task in the same workspace; otherwise it starts a fresh branch. Goose remains
 behind its live contract gate, with provider order Claude Opus 5.5 → AGY Opus 4.6-thinking → Codex.
 
-One-line README request A/B, local fake BAT and disabled Jev network, 10 completed tasks per path: current
-`bugfix-with-tests` median **48.44 ms**, minimal `small-task-with-tests` median **22.73 ms**. This measures local
+Earlier one-line README request A/B, before the minimal Jev review gate, used local fake BAT and disabled Jev
+network. Across 10 completed tasks per path, standard `bugfix-with-tests` median was **48.44 ms** and minimal
+`small-task-with-tests` median was **22.73 ms**. This measures local
 coordination only; it excludes real BAT, model, test-runner and network time and does not predict live delivery time.
 Codex timestamp cursors do not prove command ownership. An uncertain send remains stopped until a command-scoped,
 one-time operator reconciliation (`batc task-reconcile`); it is never replayed automatically. Discord delivery
