@@ -415,6 +415,7 @@ async def _failover_one(
     task_id: str | None = None,
     before_handoff_send: Callable[[str], None] | None = None,
     verify_handoff_successor: Callable[[], Awaitable[None]] | None = None,
+    verify_handoff_at_frame: Callable[[], Awaitable[None]] | None = None,
     before_handoff_invoke: Callable[[], None] | None = None,
     handoff_frame_guard: Callable[[dict], None] | None = None,
     authoritative_original: bool = False,
@@ -618,7 +619,7 @@ async def _failover_one(
                 "claude:send-message", {"sessionId": new_sid, "prompt": prompt, "clientMessageId": mid},
                 retry_on_disconnect=False,
                 before_send=before_handoff_invoke,
-                before_frame=verify_handoff_successor,
+                before_frame=verify_handoff_at_frame,
                 frame_guard=handoff_frame_guard,
             )
             if not isinstance(ack, dict) or not (ack.get("accepted") or ack.get("ok")):
@@ -670,6 +671,7 @@ async def session_failover(
     task_id: str | None = None,
     before_handoff_send: Callable[[str], None] | None = None,
     verify_handoff_successor: Callable[[], Awaitable[None]] | None = None,
+    verify_handoff_at_frame: Callable[[], Awaitable[None]] | None = None,
     before_handoff_invoke: Callable[[], None] | None = None,
     handoff_frame_guard: Callable[[dict], None] | None = None,
     authoritative_original: bool = False,
@@ -711,6 +713,7 @@ async def session_failover(
             task_id=task_id,
             before_handoff_send=before_handoff_send,
             verify_handoff_successor=verify_handoff_successor,
+            verify_handoff_at_frame=verify_handoff_at_frame,
             before_handoff_invoke=before_handoff_invoke,
             handoff_frame_guard=handoff_frame_guard,
             authoritative_original=authoritative_original,
