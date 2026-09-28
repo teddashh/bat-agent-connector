@@ -983,6 +983,9 @@ async def _evaluate(
         row["stop"] = stop
         return row
 
+    if e.get("task_id"):
+        return decide("KEEP", "task-service owns this session; lifecycle cleanup is not its writer")
+
     if e.get("role") == "reviewer" and e.get("lead_session_id") and e.get("worktree_path"):
         return decide("KEEP", "reviewer shares the lead worktree and cannot own cleanup")
 
@@ -1373,9 +1376,11 @@ async def main_session(fleet: Fleet, host: str, workspace: str) -> dict | None:
     rows = (await sessions_list(fleet, host, workspace=workspace, limit=200, check_pending="none"))["sessions"]
     gone = _retired(host)
     planners = {e["session_id"] for e in registry.list_entries(host) if e.get("role") == "planner"}
+    task_owned = {e["session_id"] for e in registry.list_entries(host) if e.get("task_id")}
     rows = [
         r for r in rows
-        if r["session_id"] not in gone and r["session_id"] not in planners and r.get("agent_kind") in ("claude", "codex")
+        if r["session_id"] not in gone and r["session_id"] not in planners
+        and r["session_id"] not in task_owned and r.get("agent_kind") in ("claude", "codex")
     ]
     main = [r for r in rows if not r.get("worktree_branch")] or rows
     return main[0] if main else None

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import mcp_server, orchestrate, registry, service, task_bat
+from bat_agent_connector import goose_acp, mcp_server, orchestrate, registry, service, task_bat
 from bat_agent_connector.errors import WriteRefused
 from bat_agent_connector.goose_acp import PINNED_GOOSE_VERSION, GooseACP, GooseConfig
 from bat_agent_connector.model_router import ModelRouter, RouterConfig
@@ -58,6 +58,7 @@ class FakeBAT:
         self.sends = []
         self.reads = {}
         self.identity = {"candidate_commit": "a" * 40, "tree_hash": "b" * 40, "clean": True}
+        self.diff_excerpt = None
         self.verifier_available = True
         self.reviewer_kind = "codex"
         self.started_ids = set()
@@ -139,6 +140,9 @@ class FakeBAT:
 
     async def candidate_identity(self, task):
         return self.identity
+
+    async def candidate_diff_excerpt(self, task):
+        return self.diff_excerpt
 
     async def run_verification(self, task):
         if not self.verifier_available:
@@ -287,7 +291,7 @@ async def test_bat_read_back_requires_exact_new_user_echo(fleet_factory, mock):
 
 async def test_verification_deadline_and_failure_do_not_stall_worker(tmp_path, mock):
     daemon = TaskDaemon(make_config(mock), db_path=tmp_path / "tasks.db")
-    daemon.verification_timeout_s = 0.05
+    daemon.verification_timeout_s = 1
     hung = daemon.journal.submit(project="p", host="h1", workspace="w", original_words="hung",
                                  idempotency_key="hung")
     failed = daemon.journal.submit(project="p", host="h1", workspace="w", original_words="failed",
@@ -319,7 +323,7 @@ async def test_verification_deadline_and_failure_do_not_stall_worker(tmp_path, m
     assert "verification_error" in [e["kind"] for e in daemon.journal.events(failed["task_id"])]
     assert "private verifier detail" not in json.dumps(daemon.journal.events(failed["task_id"]))
     daemon.journal.db.execute("UPDATE tasks SET updated_at=? WHERE task_id=?",
-                              (time.time() - 1, healthy["task_id"]))
+                              (time.time() - 2, healthy["task_id"]))
     before = len(calls)
     await daemon._tick_task(healthy["task_id"])
     assert len(calls) == before
@@ -1146,7 +1150,7 @@ async def test_router_cap_quota_and_fail_open(tmp_path):
     task = submit(j)
     tid = task["task_id"]
     catalog = ProviderCatalog([
-        ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18795/v1", "claude", 10),
+        ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18795/v1", "claude-opus-4-6-thinking", 10),
         ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp"),
         ProviderEntry("agy-gemini-flash", "agy-shim", "http://127.0.0.1:18795/v1", "gemini", 0),
     ])
@@ -1162,6 +1166,175 @@ async def test_router_cap_quota_and_fail_open(tmp_path):
     assert len(j.routes(tid)) == 4
     assert all(e["kind"] == "model_route" for e in j.events(tid)[-4:])
     j.close()
+
+
+async def test_router_rejects_invalid_confidence_and_prescreen_scores(tmp_path):
+    journal = Journal(tmp_path / "tasks.db")
+    task = submit(journal)
+    catalog = ProviderCatalog([
+        ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18796/v1",
+                      "claude-opus-4-6-thinking", 10),
+        ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp"),
+    ])
+
+    class InvalidJev:
+        async def ask(self, state, questions):
+            return {"step_type": {"choice": "review", "confidence": float("nan")}}
+
+        async def merge_gate(self, *args):
+            return {"diff_verdict": "unsafe", "diff_confidence": float("nan"), "tests_ok": 1}
+
+    router = ModelRouter(journal, InvalidJev(), catalog=catalog)
+    routed = await router.choose(task["task_id"], "review:invalid", "review",
+                                 expected_type="review", high_stakes=True)
+    assert routed["provider"] == "codex" and routed["reason"] == "jev_unavailable"
+    assert await router.prescreen(task["task_id"], commit="a" * 40, tree="b" * 40,
+                                  request="x", final_output="done", diff_excerpt="diff --git", tests="ok") is None
+    assert not any(e["kind"] == "jev_prescreen" for e in journal.events(task["task_id"]))
+    journal.close()
+
+
+async def test_router_provider_override_and_recipe_precedence(tmp_path, monkeypatch):
+    journal = Journal(tmp_path / "tasks.db")
+    task = submit(journal, engine="goose")
+    router = ModelRouter(journal, FakeJev("planning", 0.9))
+    choice = await router.choose(task["task_id"], "planning:recipe", "plan",
+                                 expected_type="planning", provider_override="claude")
+    assert choice["provider"] == "claude" and choice["reason"] == "task_or_recipe_override"
+    assert (await router.choose(task["task_id"], "planning:recipe", "plan")) == choice
+    monkeypatch.setattr(goose_acp, "load", lambda _name: {
+        "instructions": "plan", "prompt": "do it", "pm_provider": "claude"})
+    seen = []
+
+    async def fake_run(*args, **kwargs):
+        seen.append(kwargs["provider_id"])
+        return {"stop_reason": "end_turn"}
+
+    goose = GooseACP()
+    monkeypatch.setattr(goose, "run", fake_run)
+    await goose.run_task({**task, "_route_provider": "codex"}, str(tmp_path), capability="synthetic")
+    assert seen == ["claude"]
+    journal.close()
+
+
+async def test_pause_while_jev_routes_start_does_not_start_bat(tmp_path):
+    class SlowRouter:
+        def __init__(self):
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def choose(self, *args, **kwargs):
+            self.entered.set()
+            await self.release.wait()
+            return {"provider": "codex"}
+
+    journal = Journal(tmp_path / "tasks.db")
+    task = submit(journal)
+    fake = FakeBAT()
+    router = SlowRouter()
+    core = TaskCoordinator(journal, fake, router=router)
+    tick = asyncio.create_task(core.tick(task["task_id"]))
+    await asyncio.wait_for(router.entered.wait(), 2)
+    assert (await core.pause(task["task_id"]))["paused"]
+    router.release.set()
+    assert (await asyncio.wait_for(tick, 2))["paused"]
+    assert fake.starts == [] and fake.sends == []
+    journal.close()
+
+
+async def test_candidate_change_during_jev_route_does_not_start_review(tmp_path):
+    fake = FakeBAT()
+
+    class MutatingRouter:
+        changed = False
+
+        async def choose(self, *args, **kwargs):
+            if kwargs.get("expected_type") == "verification" and not self.changed:
+                self.changed = True
+                fake.identity = {"candidate_commit": "c" * 40, "tree_hash": "d" * 40, "clean": True}
+            return {"provider": "codex"}
+
+    journal = Journal(tmp_path / "tasks.db")
+    task = submit(journal)
+    router = MutatingRouter()
+    core = TaskCoordinator(journal, fake, router=router)
+    await core.tick(task["task_id"])
+    lead = journal.get(task["task_id"])["session_id"]
+    fake.reads[lead] = {"turn_started": True, "turn_done": True, "turn_attribution": "correlated",
+                        "messages": [{"role": "assistant", "text": "BAT-STATUS: MILESTONE"}]}
+    await core.tick(task["task_id"])
+    await core.tick(task["task_id"])
+    current = journal.get(task["task_id"])
+    assert router.changed and current["reviewer_session_id"] is None
+    assert current["verification_commit"] is None
+    journal.close()
+
+
+async def test_rules_route_each_pm_phase_and_jev_prescreen_is_advisory(tmp_path):
+    class PhaseJev:
+        async def ask(self, state, questions):
+            step_type = state["step"].split(" ", 1)[0]
+            confidence = 0.95 if step_type in {"status_relay", "implementation"} else 0.35
+            return {"step_type": {"choice": step_type, "confidence": confidence}}
+
+        async def merge_gate(self, task, final_output, diff_excerpt, tests):
+            assert "diff --git" in diff_excerpt and "exit=0" in tests
+            return {"diff_verdict": "unsafe", "diff_confidence": 0.9,
+                    "tests_ok": 0.9, "claims_done": 0.9}
+
+    journal = Journal(tmp_path / "tasks.db")
+    task = submit(journal)
+    catalog = ProviderCatalog([
+        ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18796/v1",
+                      "claude-opus-4-6-thinking", 10),
+        ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp"),
+        ProviderEntry("agy-gemini-flash", "agy-shim", "http://127.0.0.1:18796/v1",
+                      "gemini-flash-test"),
+    ])
+    router = ModelRouter(journal, PhaseJev(), RouterConfig(), catalog)
+    fake = FakeBAT()
+    fake.reviewer_kind = "claude"
+    fake.diff_excerpt = "diff --git a/a.py b/a.py\n+safe change"
+    core = TaskCoordinator(journal, fake, router=router)
+    await core.tick(task["task_id"])
+    lead = journal.get(task["task_id"])["session_id"]
+    fake.reads[lead] = {"turn_started": True, "turn_done": True,
+                        "turn_attribution": "correlated", "streaming": False,
+                        "messages": [{"role": "assistant", "text": "BAT-STATUS: MILESTONE"}]}
+    await core.tick(task["task_id"])
+    await core.tick(task["task_id"])
+    reviewer = journal.get(task["task_id"])["reviewer_session_id"]
+    assert reviewer and reviewer != lead
+    fake.reads[reviewer] = {"turn_started": True, "turn_done": True,
+                            "turn_attribution": "correlated", "first_turn_proven": True,
+                            "messages": [{"role": "assistant", "text": "REVIEW: PASS"}]}
+    assert (await core.tick(task["task_id"]))["state"] == "done"
+    routes = journal.routes(task["task_id"])
+    assert {r["step_type"] for r in routes} == {
+        "planning", "implementation", "status_relay", "verification", "review"}
+    assert all(r["provider"] == "agy-claude" for r in routes
+               if r["step_type"] in {"planning", "verification", "review"})
+    assert all(r["provider"] == "agy-gemini-flash" for r in routes
+               if r["step_type"] in {"status_relay", "implementation"})
+    prescreen = [e for e in journal.events(task["task_id"]) if e["kind"] == "jev_prescreen"]
+    assert len(prescreen) == 1 and json.loads(prescreen[0]["body"])["verdict"] == "unsafe"
+    assert journal.get(task["task_id"])["delivered"]  # advisory signal cannot replace reviewer PASS
+    journal.close()
+
+
+async def test_work_status_exposes_router_metrics_and_jev_fails_open(mock, tmp_path):
+    daemon = TaskDaemon(make_config(mock), db_path=tmp_path / "tasks.db")
+    task = submit(daemon.journal)
+    daemon.router.classifier = FakeJev(None)
+    first = await daemon.call("work_status", {"task_id": task["task_id"]})
+    second = await daemon.call("work_status", {"task_id": task["task_id"]})
+    assert first["routing_metrics"] == second["routing_metrics"]
+    assert first["routing_metrics"]["count"] == 1
+    assert first["routing_decisions"][0]["step_type"] == "status_relay"
+    assert first["routing_decisions"][0]["provider"] == "codex"
+    assert first["routing_decisions"][0]["reason"] == "jev_unavailable"
+    await daemon.fleet.close()
+    daemon.journal.close()
 
 
 async def test_mcp_work_submit_returns_without_bat(mock, monkeypatch):
@@ -1431,7 +1604,7 @@ async def test_history_fallback_preserves_chronological_page_order(mock, tmp_pat
 def test_provider_switches_branch_and_uncertain_never_replays(tmp_path):
     j = Journal(tmp_path / "tasks.db")
     task = submit(j)
-    entries = [ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:9999/v1", "claude", 1),
+    entries = [ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:9999/v1", "claude-opus-4-6-thinking", 1),
                ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp")]
     catalog = ProviderCatalog(entries)
     switcher = ProviderSwitcher(j, catalog)
@@ -1454,7 +1627,7 @@ async def test_agy_provider_contract_with_fake_endpoint():
     async def handle(reader, writer):
         request = await reader.readuntil(b"\r\n\r\n")
         seen.append(request)
-        body = b'{"data":[{"id":"claude"}]}'
+        body = b'{"data":[{"id":"claude-opus-4-6-thinking"}]}'
         writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
                      str(len(body)).encode() + b"\r\n\r\n" + body)
         await writer.drain()
@@ -1463,7 +1636,8 @@ async def test_agy_provider_contract_with_fake_endpoint():
     server = await asyncio.start_server(handle, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     try:
-        entry = ProviderEntry("agy-claude", "agy-shim", f"http://127.0.0.1:{port}/v1", "claude", 2)
+        entry = ProviderEntry("agy-claude", "agy-shim", f"http://127.0.0.1:{port}/v1",
+                              "claude-opus-4-6-thinking", 2)
         adapter = AgyShimAdapter()
         assert await adapter.contract_probe(entry, {"BATC_AGY_SHIM_TOKEN": "fake-local-token"})
         wrong_model = ProviderEntry("other", "openai-compatible", f"http://127.0.0.1:{port}/v1",
@@ -1498,7 +1672,7 @@ for line in sys.stdin:
     monkeypatch.setenv("BATC_AGY_SHIM_TOKEN", "fake-local-token")
     monkeypatch.setenv("BATC_PRIVATE_TEST_SECRET", "must-not-enter-Goose")
     catalog = ProviderCatalog([
-        ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18795/v1", "claude", 1),
+        ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18795/v1", "claude-opus-4-6-thinking", 1),
         ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp"),
     ])
     j = Journal(tmp_path / "tasks.db")
@@ -1535,7 +1709,7 @@ for line in sys.stdin:
     log = tmp_path / "prompts.txt"
     monkeypatch.setenv("BATC_AGY_SHIM_TOKEN", "fake-local-token")
     catalog = ProviderCatalog([
-        ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18795/v1", "claude", 1),
+        ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18795/v1", "claude-opus-4-6-thinking", 1),
         ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp"),
     ])
     j = Journal(tmp_path / "tasks.db")
@@ -2145,13 +2319,17 @@ async def test_live_goose_remains_disabled_after_restart(mock, tmp_path):
 
 
 def test_provider_config_contract_and_structured_errors(tmp_path):
+    assert ProviderCatalog().entry("agy-claude").model == "claude-opus-4-6-thinking"
+    with pytest.raises(ValueError, match="Opus|opus"):
+        ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18796/v1",
+                      "claude-sonnet-4-6", 2)
     path = tmp_path / "providers.toml"
     path.write_text('''fallback_order = ["agy-claude", "codex", "claude"]
 [[providers]]
 id = "agy-claude"
 kind = "agy-shim"
 base_url = "http://127.0.0.1:18795/v1"
-model = "claude"
+model = "claude-opus-4-6-thinking"
 daily_cap = 2
 [[providers]]
 id = "codex"
@@ -2198,12 +2376,15 @@ async def test_observed_verification_artifact_bound_to_clean_commit(tmp_path):
                     "-c", "user.email=test@example.invalid", "commit", "-qm", "candidate"], check=True)
     artifacts = tmp_path / "artifacts"
     runner = ObservedVerifier(VerificationSettings(
-        commands={"p": (sys.executable, "-c", "print('proof')")}, artifact_dir=str(artifacts)))
+        commands={"p": (sys.executable, "-c", "print('proof')", "fake-private-argument")},
+        artifact_dir=str(artifacts)))
     task = {"task_id": "synthetic", "host": "local", "project": "p"}
     result = await runner.observe(task, str(repo))
     assert result and result["exit_code"] == 0
     assert result["output_sha256"] == hashlib.sha256(b"proof\n").hexdigest()
     assert result["candidate_commit"] == (await runner.identity(task, str(repo)))["candidate_commit"]
+    assert result["command"].startswith("argv_sha256:")
+    assert "fake-private-argument" not in json.dumps(result)
     assert os.stat(result["log_ref"]).st_mode & 0o777 == 0o600
     assert artifacts.stat().st_mode & 0o777 == 0o700
     (repo / "code.txt").write_text("dirty")
@@ -2237,8 +2418,35 @@ async def test_external_worktree_creation_is_restart_idempotent(tmp_path, fleet_
     assert first == second
     assert len(scripts) == 2 and all("worktree list --porcelain" in script for script in scripts)
 
+
 @pytest.mark.asyncio
-async def test_goose_acp_error_settles_from_bat_readback(mock, tmp_path, monkeypatch):
+async def test_external_worktree_script_quotes_workspace_path(tmp_path, fleet_factory, monkeypatch):
+    journal = Journal(tmp_path / "tasks.sqlite3")
+    task = journal.submit(project="p", host="h1", workspace="w", original_words="x",
+                          base_branch="feat/task-service", idempotency_key="quoted-root")
+    adapter = task_bat.BatTaskAdapter(
+        fleet_factory(), ObservedVerifier(VerificationSettings(ssh_hosts={"h1": "castle"})), journal)
+    scripts = []
+
+    async def capture(_task, script):
+        scripts.append(script)
+        return ""
+
+    async def identity(_task, _cwd):
+        return {"candidate_commit": "a" * 40, "tree_hash": "b" * 40, "clean": True}
+
+    async def folder(_task):
+        return "/srv/Ted's repo"
+
+    monkeypatch.setattr(adapter, "_workspace_folder", folder)
+    monkeypatch.setattr(adapter, "_ssh_script", capture)
+    monkeypatch.setattr(adapter.verifier, "identity", identity)
+    await adapter._ensure_external_worktree(task)
+    assert subprocess.run(["bash", "-n", "-c", scripts[0]], check=False).returncode == 0
+    assert '"$ref"' in scripts[0]
+
+@pytest.mark.asyncio
+async def test_goose_acp_error_settles_from_bat_readback(mock, tmp_path, monkeypatch, caplog):
     """A lost ACP terminal reply must not discard a committed, idle BAT turn."""
     daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
     task = submit(daemon.journal, engine="goose")
@@ -2247,7 +2455,7 @@ async def test_goose_acp_error_settles_from_bat_readback(mock, tmp_path, monkeyp
     monkeypatch.setattr(registry, "get", lambda _host, _sid: {"cwd": "/remote/not-on-box"})
 
     async def fail_run(*args, **kwargs):
-        raise RuntimeError("ACP session/prompt terminal response lost")
+        raise RuntimeError("PRIVATE_PROVIDER_ERROR_DO_NOT_LOG")
 
     async def identity(_task):
         return {"candidate_commit": "a" * 40, "tree_hash": "b" * 40, "clean": True}
@@ -2267,6 +2475,7 @@ async def test_goose_acp_error_settles_from_bat_readback(mock, tmp_path, monkeyp
     assert settled["state"] == "verifying"
     assert command["status"] == "settled"
     assert any(e["kind"] == "goose_readback_settled" for e in daemon.journal.events(task["task_id"]))
+    assert "PRIVATE_PROVIDER_ERROR_DO_NOT_LOG" not in caplog.text
     await daemon.fleet.close()
     daemon.journal.close()
 
@@ -2274,7 +2483,7 @@ def test_agy_adapter_model_effort_policy(monkeypatch):
     monkeypatch.setenv("BATC_AGY_SHIM_TOKEN", "local-token")
     adapter = AgyShimAdapter()
     claude = ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18797/v1",
-                           "claude-sonnet-4-6", 1)
+                           "claude-opus-4-6-thinking", 1)
     gemini = ProviderEntry("agy-gemini", "agy-shim", "http://127.0.0.1:18797/v1",
                            "gemini-3.8-flash", 1)
     assert adapter.environment(claude, {"BATC_AGY_SHIM_TOKEN": "local-token"})["BATC_AGY_REQUEST_POLICY"] == "omit_reasoning_effort"

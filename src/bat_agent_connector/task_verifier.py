@@ -167,6 +167,10 @@ class ObservedVerifier:
         if not after or not after["clean"] or after != before:
             return None
         return {"source": "observed_runner", "candidate_commit": before["candidate_commit"],
-                "tree_hash": before["tree_hash"], "command": shlex.join(argv),
+                "tree_hash": before["tree_hash"],
+                # Administrator argv may itself contain credentials. The private
+                # config remains the authority; the journal records its stable
+                # fingerprint without copying arguments into status/Discord.
+                "command": "argv_sha256:" + hashlib.sha256("\0".join(argv).encode()).hexdigest(),
                 "exit_code": exit_code, "log_ref": str(log_path),
                 "output_sha256": digest.hexdigest()}

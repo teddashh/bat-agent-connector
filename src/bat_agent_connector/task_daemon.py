@@ -20,10 +20,13 @@ from . import registry
 from .config import Config, state_dir
 from .fleet import Fleet
 from .goose_acp import GooseACP
+from .jev import Jev
+from .model_router import ModelRouter, RouterConfig
 from .task_bat import BatTaskAdapter
 from .task_core import TaskCoordinator
 from .task_discord import DiscordHTTP, DiscordPublisher
 from .task_journal import Journal
+from .task_recipes import load as load_recipe
 from .task_verifier import ObservedVerifier, load_settings
 
 DEFAULT_URL = "http://127.0.0.1:18796/rpc"
@@ -67,11 +70,14 @@ class TaskDaemon:
             raise ValueError("task admin token is invalid")
         self.fleet = Fleet(config, actor="task-service")
         self.adapter = BatTaskAdapter(self.fleet, ObservedVerifier(load_settings()), self.journal)
-        self.coordinator = TaskCoordinator(self.journal, self.adapter)
+        self.goose = GooseACP()
+        provider_config = os.environ.get("BATC_PM_PROVIDER_CONFIG")
+        router_config = RouterConfig.from_provider_file(provider_config) if provider_config else RouterConfig()
+        self.router = ModelRouter(self.journal, Jev(config.jev), router_config, self.goose.catalog)
+        self.coordinator = TaskCoordinator(self.journal, self.adapter, router=self.router)
         # Covers the whole verifying state, including BAT/SSH lookups before
         # and after the subprocess. A restart retains the journal timestamp.
         self.verification_timeout_s = min(300, max(1, self.adapter.verifier.settings.timeout_s))
-        self.goose = GooseACP()
         self._active_ticks: dict[str, asyncio.Task] = {}
         self._lease_fd: int | None = None
         self._owner_id = secrets.token_hex(16)
@@ -125,11 +131,21 @@ class TaskDaemon:
             )
         if method == "work_status":
             task = self.journal.get(task_id)
+            await self.router.choose(task_id, f"status:rpc:{task['state']}:{task['updated_at']}",
+                                     "Report the current task state without changing Ted's request",
+                                     expected_type="status_relay")
+            routes = self.journal.routes(task_id)
             return {**task, "commands": self.journal.commands(task_id)[-5:],
                     "events": self.journal.events(task_id)[-10:],
-                    "reconciliations": self.journal.reconciliations(task_id)}
+                    "reconciliations": self.journal.reconciliations(task_id),
+                    "routing_decisions": routes[-50:],
+                    "routing_metrics": {"count": len(routes),
+                                        "by_provider": {provider: sum(r["provider"] == provider for r in routes)
+                                                        for provider in {r["provider"] for r in routes}}}}
         if method == "work_result":
             task = self.journal.get(task_id)
+            await self.router.choose(task_id, f"status:result:{task['state']}:{task['updated_at']}",
+                                     "Relay the final task result verbatim", expected_type="status_relay")
             return {"task_id": task_id, "state": task["state"], "delivered": task["delivered"],
                     "delivered_at": task["delivered_at"], "time_to_deliver_s": task["time_to_deliver_s"],
                     "result": task["result"], "verification_commit": task["verification_commit"],
@@ -172,6 +188,10 @@ class TaskDaemon:
             if method == "task_run_verification":
                 if set(params) != {"task_id"}:
                     raise ValueError("caller-supplied verification evidence is forbidden")
+                await self.router.choose(task_id, f"verification:scoped:{task['control_version']}:"
+                                         f"{task.get('verification_commit')}",
+                                         "Check a clean candidate with the trusted runner",
+                                         expected_type="verification", high_stakes=True)
                 evidence = await self.adapter.run_verification(task)
                 if not evidence:
                     raise ValueError("trusted verifier unavailable or candidate changed")
@@ -287,10 +307,17 @@ class TaskDaemon:
                 goose_cwd = temporary_cwd
             try:
                 capability = self.journal.issue_capability(task_id)
-                await self.goose.run_task(task, goose_cwd, capability=capability,
+                explicit_provider = task.get("pm_provider") or load_recipe(task["recipe"]).get("pm_provider")
+                choice = await self.router.choose(task_id, f"planning:goose:{cmd['command_id']}",
+                                                  "Coordinate the repo-aware lead for this task",
+                                                  expected_type="planning", high_stakes=True,
+                                                  provider_override=explicit_provider)
+                goose_task = {**task, "_route_provider": choice["provider"]}
+                await self.goose.run_task(goose_task, goose_cwd, capability=capability,
                                           journal=self.journal)
             except Exception as exc:  # noqa: BLE001 - reconcile before uncertainty
-                logging.warning("Goose ACP task %s failed before settlement: %s", task_id[:8], exc)
+                logging.warning("Goose ACP task %s failed before settlement: %s",
+                                task_id[:8], type(exc).__name__)
                 current = self.journal.get(task_id)
                 try:
                     identity = await self.adapter.candidate_identity(current)
