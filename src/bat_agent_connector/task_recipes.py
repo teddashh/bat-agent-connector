@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).parent / "recipes"
-CAPS = {"feature-to-staging": (5, 2), "bugfix-with-tests": (5, 2)}
+CAPS = {"feature-to-staging": (5, 2), "bugfix-with-tests": (5, 2),
+        "small-task-with-tests": (2, 0)}
 
 
 def load(name: str) -> dict:

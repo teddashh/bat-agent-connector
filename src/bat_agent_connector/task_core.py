@@ -85,7 +85,7 @@ class TaskCoordinator:
         return self._writers.setdefault((host, sid), asyncio.Lock())
 
     async def _route(self, task: dict, step: str, step_type: str, *, high_stakes: bool = False) -> None:
-        if self.router:
+        if self.router and task.get("task_path") != "minimal":
             await self.router.choose(task["task_id"], step,
                                      f"{step_type} phase for project {task['project']}",
                                      expected_type=step_type, high_stakes=high_stakes)
@@ -153,9 +153,18 @@ class TaskCoordinator:
         candidate_key = task.get("review_commit") if role == "reviewer" else "lead"
         key = (f"{task['task_id']}:{role}:start:{candidate_key}:{task['review_rejections']}:"
                f"{task['control_version']}:{task['session_replacements']}")
-        sid = str(uuid.uuid4())
+        warm_id = None
+        if role == "lead" and task.get("task_path") == "minimal" and not task.get("base_branch"):
+            finder = getattr(self.adapter, "find_warm", None)
+            if callable(finder):
+                try:
+                    warm_id = await finder(task)
+                except Exception:  # noqa: BLE001 - an unproven warm session is never adopted
+                    warm_id = None
+        sid = warm_id or str(uuid.uuid4())
         command, fresh = self.journal.command(task["task_id"], "start_" + role, sid,
-                                               {"role": role, "agent": agent}, key)
+                                               {"role": role, "agent": agent,
+                                                "warm_session_id": warm_id}, key)
         if not fresh:
             return self.journal.change(task["task_id"], "uncertain")
         self.journal.change(task["task_id"], "dispatching")
@@ -163,13 +172,17 @@ class TaskCoordinator:
             self.journal.command_status(command["command_id"], "cancelled")
             return self.journal.change(task["task_id"], "verifying" if role == "reviewer" else "queued")
         try:
-            sid = await self.adapter.start(task, role=role, agent=agent, session_id=sid)
+            started_sid = await self.adapter.start({**task, "_warm_session_id": warm_id},
+                                                   role=role, agent=agent, session_id=sid)
+            if started_sid != sid:
+                raise TaskIdentityMismatch("BAT start changed the reserved task session ID")
         except Exception:
             self.journal.command_status(command["command_id"], "uncertain")
             return self.journal.change(task["task_id"], "uncertain")
         self.journal.command_status(command["command_id"], "settled")
         self.journal.add_branch(task["task_id"], session_id=sid, provider=agent, role=role,
-                                reason="vanished_replacement" if role == "lead" and task["session_replacements"] else "start",
+                                reason=("warm_reuse" if warm_id else "vanished_replacement"
+                                        if role == "lead" and task["session_replacements"] else "start"),
                                 parent_branch_id=(task["branches"][-1]["branch_id"]
                                                                    if task["branches"] else None))
         field = "reviewer_session_id" if role == "reviewer" else "session_id"
@@ -496,11 +509,23 @@ class TaskCoordinator:
             task = self.journal.change(task["task_id"], "verifying", fields={
                 "verification_commit": commit, "verification_tree": tree,
             })
+        if task.get("task_path") == "minimal" and task["recipe"] == "small-task-with-tests":
+            lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
+            if lead_read.get("streaming") is not False or lead_read.get("pending"):
+                return task
+            fresh = await self.adapter.candidate_identity(task)
+            if not fresh or not fresh.get("clean") or (
+                    fresh["candidate_commit"], fresh["tree_hash"]) != (commit, tree):
+                return task
+            return self.journal.change(task["task_id"], "done", fields={
+                "result": "Trusted tests passed on the clean candidate; small-task review skipped",
+            }, event="delivered_tests_only")
         if not task["reviewer_session_id"]:
             lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
             if lead_read.get("streaming") is not False or lead_read.get("pending"):
                 return task
-            if self.router and not self.journal.jev_prescreen_for_candidate(task["task_id"], commit, tree):
+            if (self.router and task.get("task_path") != "minimal"
+                    and not self.journal.jev_prescreen_for_candidate(task["task_id"], commit, tree)):
                 diff_reader = getattr(self.adapter, "candidate_diff_excerpt", None)
                 try:
                     diff = await diff_reader(task) if callable(diff_reader) else None

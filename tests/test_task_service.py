@@ -13,9 +13,9 @@ from pathlib import Path
 import pytest
 
 from bat_agent_connector import goose_acp, lifecycle, mcp_server, orchestrate, registry, service, task_bat
-from bat_agent_connector.errors import WriteRefused
+from bat_agent_connector.errors import TaskIdentityMismatch, WriteRefused
 from bat_agent_connector.goose_acp import PINNED_GOOSE_VERSION, GooseACP, GooseConfig
-from bat_agent_connector.model_router import ModelRouter, RouterConfig
+from bat_agent_connector.model_router import MinimalTaskRouter, ModelRouter, RouterConfig
 from bat_agent_connector.pm_providers import (
     AgyShimAdapter,
     ProviderCatalog,
@@ -1436,6 +1436,241 @@ async def test_daemon_submit_is_journal_only(mock, tmp_path):
     finally:
         await daemon.fleet.close()
         daemon.journal.close()
+
+
+async def test_minimal_submit_asks_one_engine_question_and_journals_once(mock, tmp_path):
+    class Classifier:
+        backend = "typesafe"
+
+        def __init__(self):
+            self.calls = []
+
+        async def ask(self, state, questions):
+            self.calls.append((state, questions))
+            return {"engine": {"type": "choice", "choice": "goose", "confidence": 0.91,
+                               "probabilities": {"rules_engine": 0.09, "goose": 0.91}}}
+
+    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    classifier = Classifier()
+    daemon.minimal_router = MinimalTaskRouter(classifier)
+    params = {"project": "p", "host": "h1", "workspace": "w", "original_words": WORDS,
+              "idempotency_key": "minimal:one-question", "task_path": "minimal"}
+    try:
+        first = await daemon.call("work_submit", params)
+        second = await daemon.call("work_submit", params)
+        assert first["task_id"] == second["task_id"]
+        assert len(classifier.calls) == 1
+        state, questions = classifier.calls[0]
+        assert state["original_words"] == WORDS and set(questions) == {"engine"}
+        assert set(questions["engine"]["criteria"]) == {"rules_engine", "goose"}
+        decision = daemon.journal.engine_decision(first["task_id"])
+        assert decision == {"selected": "goose", "confidence": 0.91, "jev_backend": "typesafe",
+                            "reason": "goose_live_gate_closed", "effective": "rules"}
+        status = await daemon.call("work_status", {"task_id": first["task_id"]})
+        assert status["engine_decision"] == decision and status["routing_decisions"] == []
+        assert len(classifier.calls) == 1  # status does not ask Jev again
+        assert sum(e["kind"] == "engine_decision" for e in daemon.journal.events(first["task_id"])) == 1
+        reopened = Journal(tmp_path / "tasks.db")
+        assert reopened.get(first["task_id"])["task_path"] == "minimal"
+        assert reopened.engine_decision(first["task_id"]) == decision
+        reopened.close()
+    finally:
+        await daemon.fleet.close()
+        daemon.journal.close()
+
+
+async def test_minimal_submit_fails_open_to_rules_without_backend(mock, tmp_path):
+    class Unavailable:
+        backend = None
+
+        async def ask(self, _state, questions):
+            assert set(questions) == {"engine"}
+            raise TimeoutError("synthetic Jev outage")
+
+    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    daemon.minimal_router = MinimalTaskRouter(Unavailable())
+    try:
+        result = await daemon.call("work_submit", {
+            "project": "p", "host": "h1", "workspace": "w", "original_words": WORDS,
+            "idempotency_key": "minimal:unavailable", "task_path": "minimal"})
+        decision = daemon.journal.engine_decision(result["task_id"])
+        assert result["engine"] == "rules" and decision["selected"] == "rules_engine"
+        assert decision["jev_backend"] is None and decision["reason"] == "jev_unavailable_or_invalid"
+    finally:
+        await daemon.fleet.close()
+        daemon.journal.close()
+
+
+async def test_minimal_rejects_invalid_typed_engine_answer():
+    class Invalid:
+        backend = "typesafe"
+
+        async def ask(self, _state, questions):
+            assert set(questions) == {"engine"}
+            return {"engine": {"type": "choice", "choice": "goose", "confidence": 0.9,
+                               "probabilities": {"goose": 0.9}}}
+
+    choice = await MinimalTaskRouter(Invalid()).choose(project="p", recipe="feature-to-staging",
+                                                        original_words=WORDS)
+    assert choice["selected"] == "rules_engine" and choice["jev_backend"] is None
+
+
+async def test_minimal_goose_choice_is_pluggable_only_after_explicit_live_gate(mock, tmp_path):
+    class GooseChoice:
+        backend = "openrouter_jev"
+
+        async def ask(self, _state, questions):
+            assert set(questions) == {"engine"}
+            return {"engine": {"type": "choice", "choice": "goose", "confidence": 1.0,
+                               "probabilities": {"rules_engine": 0.0, "goose": 1.0}}}
+
+    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    daemon.goose = GooseACP(GooseConfig(enabled=True))  # synthetic contract; no live process launched
+    daemon.minimal_router = MinimalTaskRouter(GooseChoice())
+    try:
+        result = await daemon.call("work_submit", {
+            "project": "p", "host": "h1", "workspace": "w", "original_words": WORDS,
+            "idempotency_key": "minimal:goose-gated", "task_path": "minimal"})
+        assert result["engine"] == "goose"
+        assert daemon.journal.engine_decision(result["task_id"])["jev_backend"] == "openrouter_jev"
+        assert daemon.goose.catalog.order == ("claude", "agy-claude", "codex")
+    finally:
+        await daemon.fleet.close()
+        daemon.journal.close()
+
+
+async def test_minimal_small_task_uses_observed_tests_without_reviewer_or_step_jev(tmp_path):
+    class NoStepRouter:
+        async def choose(self, *_args, **_kwargs):
+            raise AssertionError("minimal path must not route PM steps")
+
+        async def prescreen(self, *_args, **_kwargs):
+            raise AssertionError("minimal path must not prescreen")
+
+    journal = Journal(tmp_path / "tasks.db")
+    task = journal.submit(project="p", host="h1", workspace="w", original_words=WORDS,
+                          recipe="small-task-with-tests", task_path="minimal",
+                          engine_decision={"selected": "rules_engine", "effective": "rules",
+                                           "confidence": 0.9, "jev_backend": "typesafe"},
+                          idempotency_key="minimal:small")
+    fake = FakeBAT()
+    core = TaskCoordinator(journal, fake, router=NoStepRouter())
+    await core.tick(task["task_id"])
+    session_id = journal.get(task["task_id"])["session_id"]
+    fake.reads[session_id] = {"turn_started": True, "turn_done": True,
+                              "turn_attribution": "correlated", "streaming": False,
+                              "messages": [{"role": "assistant", "text": "BAT-STATUS: MILESTONE"}]}
+    assert (await core.tick(task["task_id"]))["state"] == "verifying"
+    result = await core.tick(task["task_id"])
+    assert result["state"] == "done" and result["delivered"]
+    assert result["review_passed"] is False and result["reviewer_session_id"] is None
+    assert [role for role, _agent, _sid in fake.starts] == ["lead"]
+    assert journal.observed_verification(task["task_id"])["exit_code"] == 0
+    assert journal.routes(task["task_id"]) == []
+    assert not any(e["kind"] == "jev_prescreen" for e in journal.events(task["task_id"]))
+    journal.close()
+
+
+async def test_minimal_prefers_warm_session_id_and_goose_provider_order(tmp_path):
+    class WarmBAT(FakeBAT):
+        async def find_warm(self, task):
+            assert task["task_path"] == "minimal"
+            return "existing-clean-idle-session"
+
+    journal = Journal(tmp_path / "tasks.db")
+    task = journal.submit(project="p", host="h1", workspace="w", original_words=WORDS,
+                          task_path="minimal", engine_decision={"selected": "rules_engine",
+                          "effective": "rules"}, idempotency_key="minimal:warm")
+    fake = WarmBAT()
+    result = await TaskCoordinator(journal, fake).tick(task["task_id"])
+    assert result["session_id"] == "existing-clean-idle-session"
+    assert fake.starts[0][2] == "existing-clean-idle-session"
+    assert result["branches"][0]["reason"] == "warm_reuse"
+    assert ProviderCatalog().order == ("claude", "agy-claude", "codex")
+    assert ProviderCatalog().entry("claude").model == "claude-opus-5-5"
+    assert ProviderCatalog().entry("agy-claude").model == "claude-opus-4-6-thinking"
+    journal.close()
+
+
+async def test_warm_start_mismatched_ack_remains_uncertain(tmp_path):
+    class WrongAck(FakeBAT):
+        async def find_warm(self, _task):
+            return "reserved-warm-session"
+
+        async def start(self, task, *, role, agent, session_id):
+            await super().start(task, role=role, agent=agent, session_id=session_id)
+            return "unrelated-session"
+
+    journal = Journal(tmp_path / "mismatch.db")
+    task = journal.submit(project="p", host="h1", workspace="w", original_words=WORDS,
+                          task_path="minimal", engine_decision={"selected": "rules_engine",
+                          "effective": "rules"}, idempotency_key="minimal:warm-mismatch")
+    result = await TaskCoordinator(journal, WrongAck()).tick(task["task_id"])
+    assert result["state"] == "uncertain" and result["branch_ids"] == []
+    command = journal.commands(task["task_id"])[0]
+    assert command["session_id"] == "reserved-warm-session" and command["status"] == "uncertain"
+    journal.close()
+
+
+async def test_bat_warm_reuse_claims_only_clean_completed_service_session(fleet_factory, mock, tmp_path):
+    class CleanVerifier:
+        settings = VerificationSettings()
+
+        async def identity(self, _task, _cwd):
+            return {"candidate_commit": "a" * 40, "tree_hash": "b" * 40, "clean": True}
+
+    fleet = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})
+    journal = Journal(tmp_path / "warm.db")
+    adapter = task_bat.BatTaskAdapter(fleet, CleanVerifier(), journal)
+    previous = journal.submit(project="p", host="h1", workspace="demo-project",
+                              original_words="Previous completed request", idempotency_key="warm:previous",
+                              task_path="minimal", recipe="small-task-with-tests",
+                              engine_decision={"selected": "rules_engine", "effective": "rules"})
+    old_sid = "warm-session-001"
+    await adapter.start(previous, role="lead", agent="codex", session_id=old_sid)
+    journal.change(previous["task_id"], "dispatching")
+    journal.change(previous["task_id"], "accepted", fields={"session_id": old_sid})
+    journal.change(previous["task_id"], "verifying")
+    journal.record_observed_verification(previous["task_id"], {
+        "source": "observed_runner", "candidate_commit": "a" * 40, "tree_hash": "b" * 40,
+        "command": "pytest -q", "exit_code": 0, "log_ref": "fake:old",
+        "output_sha256": "c" * 64})
+    journal.change(previous["task_id"], "done", fields={
+        "verification_commit": "a" * 40, "verification_tree": "b" * 40})
+    old_capability = journal.issue_capability(previous["task_id"])
+    current = journal.submit(project="p", host="h1", workspace="demo-project",
+                             original_words="New focused request", task_path="minimal",
+                             engine_decision={"selected": "rules_engine", "effective": "rules"},
+                             idempotency_key="warm:current")
+    assert await adapter.find_warm(current) == old_sid
+    starts_before = len([i for i in mock.invokes if i["channel"] == "claude:start-session"])
+    assert await adapter.start({**current, "_warm_session_id": old_sid},
+                               role="lead", agent="codex", session_id=old_sid) == old_sid
+    assert len([i for i in mock.invokes if i["channel"] == "claude:start-session"]) == starts_before
+    assert registry.get("h1", old_sid)["task_id"] == current["task_id"]
+    assert not journal.authorize_capability(old_capability, previous["task_id"])
+    assert await adapter.find_warm(current) is None  # already claimed, never offered twice
+    entry = registry.get("h1", old_sid)
+    with pytest.raises(TaskIdentityMismatch, match="ownership changed"):
+        registry.claim_warm("h1", old_sid, previous_task_id=previous["task_id"],
+                            task_id="another-task", workspace_id=entry["workspace_id"],
+                            cwd=entry["cwd"], branch=entry["branch"])
+    journal.close()
+    await fleet.close()
+
+
+def test_minimal_small_completion_still_requires_observed_clean_tests(tmp_path):
+    journal = Journal(tmp_path / "gate.db")
+    task = journal.submit(project="p", host="h1", workspace="w", original_words="Small edit",
+                          recipe="small-task-with-tests", task_path="minimal",
+                          engine_decision={"selected": "rules_engine", "effective": "rules"},
+                          idempotency_key="small:gate")
+    journal.change(task["task_id"], "dispatching")
+    journal.change(task["task_id"], "verifying")
+    with pytest.raises(ValueError, match="observed commit/tree verification"):
+        journal.change(task["task_id"], "done", fields={
+            "verification_commit": "a" * 40, "verification_tree": "b" * 40})
+    journal.close()
 
 
 async def test_goose_acp_scoped_tool_smoke(mock, tmp_path, monkeypatch):
