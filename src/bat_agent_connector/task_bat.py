@@ -272,7 +272,7 @@ class BatTaskAdapter:
                 await client.invoke("git:getRoot", {"cwd": expected_cwd}, retry_on_disconnect=False)
                 != expected_cwd):
             raise ValueError("BAT session folder does not match the journal-owned workspace")
-        preset = orchestrate.PRESETS[(agent, role == "lead")]
+        preset = orchestrate.PRESETS[(agent, role == "lead" and not task.get("external_worktree_path"))]
         if existing and any(existing.get(key) not in {None, expected}
                             for key, expected in (
                                 ("workspace_id", workspace.get("id")),
