@@ -40,6 +40,8 @@ Shadow task `11a41bf2` 暴露 send 已在 BAT 接受／完成，但 transport �
 
 Shadow task `d87868ac` 停在 `verifying` 超過八分鐘，顯示先前只有測試 subprocess 的逾時計時，BAT／SSH lookup、候選檢查、review 等整個 worker tick 和連續多次無進展 tick 都沒有截止。現在 `verifying` 自最近一次 task 狀態更新起有明確截止時間：預設最多 300 秒，若私有驗證設定的 `timeout_s` 更短則使用較短值；pause 不耗費計時，resume 重設時間。單次 verifying tick 也受剩餘時間約束；超時記 `verification_timeout` 或 `verification_deadline`，其他例外記 `verification_error`，只寫例外**類型**而不寫可能含私密資訊的錯誤全文，轉 `needs_ted`。不自動重跑測試、不重送 prompt，也不跳過 commit/tree 或 reviewer 證據門檻。Discord flush 另有十秒上限，避免卡住 worker 排程。此工作樹無法解析 `grok-bot-01` SSH 名稱，未取得該兩項 real shadow task 的遠端 journal；根因依 connector 的可重現控制流程和 fake/MockBAT 測試界定，既有 shadow daemon/task 未被碰觸。
 
+同一 exact read-back 也用於 BAT 回 `accepted`、但 Codex 只附 `timestamp_cursor` 的情況；這正是 real shadow 初次 send 走到的分支。只有找到 fence 後逐字相同的 user turn 才把該 ACK 升為可歸因的 `accepted`，否則仍為 `uncertain`。單靠 ACK、時間戳或後續 assistant/review 文字都不算證明。
+
 ## 第二階段：計畫，尚未交付
 
 1. grok-bot-01 已安裝並 pin Goose v1.52.0；接著須驗證 stock ACP resume、持久恢復、provider 選擇與正式 agy shim Claude 相容性。用相同真實任務比較 rules、Goose、Hermes 的完成品質、續推次數、額度、人工介入與恢復時間，再決定預設引擎。
