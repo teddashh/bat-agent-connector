@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -60,6 +61,7 @@ class Journal:
                 project TEXT NOT NULL, host TEXT NOT NULL, workspace TEXT NOT NULL,
                 original_words TEXT NOT NULL, interpretation TEXT, discord_thread_id TEXT,
                 recipe TEXT NOT NULL, acceptance TEXT NOT NULL, engine TEXT NOT NULL,
+                task_path TEXT NOT NULL DEFAULT 'standard',
                 state TEXT NOT NULL, paused INTEGER NOT NULL DEFAULT 0, control_version INTEGER NOT NULL DEFAULT 0,
                 session_id TEXT, reviewer_session_id TEXT, turn_marker TEXT,
                 submitted_at REAL NOT NULL, updated_at REAL NOT NULL, delivered_at REAL,
@@ -91,6 +93,13 @@ class Journal:
                 step TEXT NOT NULL, step_type TEXT NOT NULL, provider TEXT NOT NULL,
                 confidence REAL, stakes TEXT NOT NULL, reason TEXT NOT NULL,
                 jev_backend TEXT, created_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS minimal_review_gates (
+                task_id TEXT NOT NULL REFERENCES tasks(task_id), candidate_commit TEXT NOT NULL,
+                tree_hash TEXT NOT NULL, diff_sha256 TEXT NOT NULL,
+                verdict TEXT NOT NULL, confidence REAL, jev_backend TEXT,
+                reason TEXT, threshold REAL NOT NULL, created_at REAL NOT NULL,
+                PRIMARY KEY(task_id,candidate_commit,tree_hash)
             );
             CREATE TABLE IF NOT EXISTS provider_usage (
                 usage_id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL,
@@ -136,7 +145,8 @@ class Journal:
                                ("lead_agent", "TEXT NOT NULL DEFAULT 'codex'"),
                                ("pm_provider", "TEXT"), ("base_branch", "TEXT"), ("base_commit", "TEXT"),
                                ("external_worktree_path", "TEXT"), ("external_branch", "TEXT"),
-                               ("session_replacements", "INTEGER NOT NULL DEFAULT 0")):
+                               ("session_replacements", "INTEGER NOT NULL DEFAULT 0"),
+                               ("task_path", "TEXT NOT NULL DEFAULT 'standard'")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {sql_type}")  # noqa: S608 - fixed local identifiers
         cap_columns = {r[1] for r in self.db.execute("PRAGMA table_info(capabilities)")}
@@ -172,6 +182,11 @@ class Journal:
         row = self.db.execute("SELECT task_id,expires_at FROM capabilities WHERE token_hash=? AND scope='task'",
                               (digest,)).fetchone()
         return bool(row and row["task_id"] == task_id and row["expires_at"] > time.time())
+
+    def revoke_task_capabilities(self, task_id: str) -> None:
+        with self.tx():
+            self.db.execute("DELETE FROM capabilities WHERE task_id=? AND scope='task'", (task_id,))
+            self._event(task_id, "task_capabilities_revoked", {"reason": "warm_session_transfer"})
 
     def issue_reconcile_capability(self, task_id: str, command_id: str, *, ttl_s: int = 600) -> str:
         task = self.get(task_id)
@@ -328,7 +343,8 @@ class Journal:
                discord_thread_id: str | None = None, recipe: str = "feature-to-staging",
                acceptance: str = "", engine: str = "rules", interpretation: str | None = None,
                lead_agent: str = "codex", pm_provider: str | None = None,
-               base_branch: str | None = None, idempotency_key: str) -> dict:
+               base_branch: str | None = None, idempotency_key: str,
+               task_path: str = "standard", engine_decision: dict | None = None) -> dict:
         if not all(isinstance(x, str) and x.strip() for x in (project, host, workspace, original_words, idempotency_key)):
             raise ValueError("project, host, workspace, original_words and idempotency_key are required")
         # The initial lead prompt adds a short wrapper under BAT's 20k limit.
@@ -340,6 +356,14 @@ class Journal:
             raise ValueError("interpretation note is too long")
         if engine not in {"rules", "goose"}:
             raise ValueError("unknown engine")
+        if task_path not in {"standard", "minimal"}:
+            raise ValueError("unknown task path")
+        if task_path == "standard" and engine_decision is not None:
+            raise ValueError("engine decision requires minimal task path")
+        if task_path == "minimal" and (not isinstance(engine_decision, dict)
+                                        or engine_decision.get("selected") not in {"rules_engine", "goose"}
+                                        or engine_decision.get("effective") != engine):
+            raise ValueError("minimal path requires a bound engine decision")
         if lead_agent not in {"codex", "claude"}:
             raise ValueError("lead_agent must be codex or claude")
         if pm_provider is not None and (not isinstance(pm_provider, str) or not pm_provider
@@ -355,6 +379,8 @@ class Journal:
                        discord_thread_id=discord_thread_id, recipe=recipe, acceptance=acceptance,
                        engine=engine, interpretation=interpretation, lead_agent=lead_agent,
                        pm_provider=pm_provider, base_branch=base_branch)
+        if task_path == "minimal":
+            payload["task_path"] = task_path
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         with self.tx():
             old = self.db.execute("SELECT * FROM tasks WHERE idem_key=?", (idempotency_key,)).fetchone()
@@ -366,13 +392,80 @@ class Journal:
             task_id = str(uuid.uuid4())
             self.db.execute("""INSERT INTO tasks(task_id,idem_key,payload_hash,project,host,workspace,
                 original_words,interpretation,discord_thread_id,recipe,acceptance,engine,lead_agent,
-                pm_provider,base_branch,state,submitted_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                pm_provider,base_branch,task_path,state,submitted_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (task_id, idempotency_key, digest, project, host, workspace, original_words,
                  interpretation, discord_thread_id, recipe, acceptance, engine, lead_agent,
-                 pm_provider, base_branch, "queued", now, now))
+                 pm_provider, base_branch, task_path, "queued", now, now))
             self._event(task_id, "submitted", {"state": "queued"})
+            if engine_decision is not None:
+                self._event(task_id, "engine_decision", engine_decision)
         return self.get(task_id)
+
+    def by_idempotency_key(self, key: str) -> dict | None:
+        row = self.db.execute("SELECT task_id FROM tasks WHERE idem_key=?", (key,)).fetchone()
+        return self.get(row["task_id"]) if row else None
+
+    def engine_decision(self, task_id: str) -> dict | None:
+        row = self.db.execute("SELECT body FROM events WHERE task_id=? AND kind='engine_decision'",
+                              (task_id,)).fetchone()
+        return json.loads(row["body"]) if row else None
+
+    def minimal_review_gate(self, task_id: str, commit: str, tree: str) -> dict | None:
+        row = self.db.execute("""SELECT * FROM minimal_review_gates WHERE task_id=?
+            AND candidate_commit=? AND tree_hash=?""", (task_id, commit, tree)).fetchone()
+        return dict(row) if row else None
+
+    def reserve_minimal_review(self, task_id: str, commit: str, tree: str,
+                               diff_sha256: str, threshold: float) -> dict:
+        with self.tx():
+            old = self.minimal_review_gate(task_id, commit, tree)
+            if old:
+                if old["diff_sha256"] != diff_sha256:
+                    raise ValueError("candidate diff changed under review gate")
+                return old
+            self.db.execute("""INSERT INTO minimal_review_gates(task_id,candidate_commit,tree_hash,
+                diff_sha256,verdict,threshold,created_at) VALUES(?,?,?,?,?,?,?)""",
+                (task_id, commit, tree, diff_sha256, "pending", threshold, time.time()))
+            self._event(task_id, "minimal_review_reserved", {"candidate_commit": commit,
+                                                               "tree_hash": tree,
+                                                               "diff_sha256": diff_sha256})
+        return self.minimal_review_gate(task_id, commit, tree)
+
+    def finish_minimal_review(self, task_id: str, commit: str, tree: str,
+                              decision: dict) -> dict:
+        if (decision.get("verdict") not in {"pass", "escalate"}
+                or decision.get("reason") is None):
+            raise ValueError("invalid minimal review decision")
+        with self.tx():
+            old = self.minimal_review_gate(task_id, commit, tree)
+            if not old or old["verdict"] != "pending":
+                raise ValueError("minimal review has no pending intent")
+            if decision["verdict"] == "pass" and (
+                    decision.get("jev_backend") not in {"typesafe", "openrouter_jev"}
+                    or not isinstance(decision.get("confidence"), (int, float))
+                    or isinstance(decision["confidence"], bool)
+                    or not math.isfinite(decision["confidence"])
+                    or decision["confidence"] > 1
+                    or decision["confidence"] < old["threshold"]):
+                raise ValueError("unproven Jev PASS")
+            self.db.execute("""UPDATE minimal_review_gates SET verdict=?,confidence=?,
+                jev_backend=?,reason=? WHERE task_id=? AND candidate_commit=? AND tree_hash=?""",
+                (decision["verdict"], decision.get("confidence"), decision.get("jev_backend"),
+                 decision["reason"], task_id, commit, tree))
+            self._event(task_id, "minimal_review_decision", {
+                "candidate_commit": commit, "tree_hash": tree, "verdict": decision["verdict"],
+                "confidence": decision.get("confidence"), "jev_backend": decision.get("jev_backend"),
+                "reason": decision["reason"]})
+        return self.minimal_review_gate(task_id, commit, tree)
+
+    def warm_candidates(self, task: dict) -> list[dict]:
+        rows = self.db.execute("""SELECT task_id FROM tasks WHERE project=? AND host=? AND workspace=?
+            AND lead_agent=? AND state='done' AND session_id IS NOT NULL
+            AND external_worktree_path IS NULL AND reviewer_session_id IS NULL AND task_id<>?
+            ORDER BY delivered_at DESC LIMIT 5""",
+            (task["project"], task["host"], task["workspace"], task["lead_agent"], task["task_id"])).fetchall()
+        return [self.get(row["task_id"]) for row in rows]
 
     def get(self, task_id: str) -> dict:
         row = self.db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
@@ -434,11 +527,20 @@ class Journal:
             values = {**old, **fields, "state": state, "updated_at": time.time()}
             if state == "done":
                 observed = self.observed_verification(task_id)
-                if (not values["review_passed"] or not observed or observed["exit_code"] != 0
+                small = values["task_path"] == "minimal" and values["recipe"] == "small-task-with-tests"
+                gate = self.minimal_review_gate(task_id, observed["candidate_commit"],
+                                                observed["tree_hash"]) if observed and small else None
+                direct = (small and not values["review_passed"] and values["reviewer_session_id"] is None
+                          and gate is not None and gate["verdict"] == "pass"
+                          and gate["jev_backend"] in {"typesafe", "openrouter_jev"}
+                          and gate["confidence"] is not None and gate["confidence"] >= gate["threshold"])
+                reviewed = (values["review_passed"] and (not small or values["reviewer_session_id"] is not None)
+                            and values["review_commit"] == observed["candidate_commit"]
+                            and values["review_tree"] == observed["tree_hash"]) if observed else False
+                if (not (direct or reviewed)
+                        or not observed or observed["exit_code"] != 0
                         or values["verification_commit"] != observed["candidate_commit"]
-                        or values["verification_tree"] != observed["tree_hash"]
-                        or values["review_commit"] != observed["candidate_commit"]
-                        or values["review_tree"] != observed["tree_hash"]):
+                        or values["verification_tree"] != observed["tree_hash"]):
                     raise ValueError("fresh review and observed commit/tree verification required")
                 values.update(delivered=1, delivered_at=time.time())
             self.db.execute("""UPDATE tasks SET state=?,updated_at=?,session_id=?,reviewer_session_id=?,

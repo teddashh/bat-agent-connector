@@ -162,6 +162,28 @@ def update(host: str, session_id: str, **fields) -> None:
         _write(p, items)
 
 
+def claim_warm(host: str, session_id: str, *, previous_task_id: str, task_id: str,
+               workspace_id: str, cwd: str, branch: str) -> None:
+    """Transfer one completed task's lead session under the registry flock."""
+    from .errors import TaskIdentityMismatch
+
+    p = registry_path()
+    with _locked(p):
+        items = _read(p)
+        matches = [e for e in items if e.get("host") == host and e.get("session_id") == session_id]
+        if (len(matches) != 1 or matches[0].get("task_id") != previous_task_id
+                or matches[0].get("role") != "lead" or matches[0].get("status") != "active"
+                or matches[0].get("workspace_id") != workspace_id
+                or matches[0].get("cwd") != cwd or matches[0].get("worktree_path") != cwd
+                or matches[0].get("branch") != branch
+                or any(e.get("host") == host and e.get("failover_of") == session_id
+                       and e.get("status") in {"active", "starting"} for e in items)):
+            raise TaskIdentityMismatch("warm session ownership changed before claim")
+        matches[0].update(task_id=task_id, title="task " + task_id[:8],
+                          warm_from_task_id=previous_task_id, updated_at=time.time())
+        _write(p, items)
+
+
 def record_handoff_frame(host: str, *, old_session_id: str, successor_id: str, task_id: str,
                          worktree_path: str, branch: str, command_id: str,
                          message_id: str, prompt_sha256: str) -> None:

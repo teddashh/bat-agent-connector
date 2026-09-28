@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "title": "Small task with tests",
+  "description": "A focused task requiring service-observed passing tests on the clean candidate.",
+  "instructions": "Ted's original words are authoritative. Use the task-scoped BAT tools only. Have the repo-aware lead make the focused change. Delivery requires the trusted test runner's zero exit status bound to the current clean commit and tree. The minimal path skips an independent reviewer only after its typed Jev review gate passes; uncertainty, risk, sensitive paths, large diffs and backend failure require independent review. Never claim delivered from an agent's own test report.",
+  "prompt": "Relay Ted's exact words to the lead and verify the finished candidate with the trusted runner.",
+  "extensions": [],
+  "settings": {"max_turns": 4}
+}

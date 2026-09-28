@@ -253,6 +253,7 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             project: str, host: str, workspace: str, original_words: str, idempotency_key: str,
             discord_thread_id: str | None = None, recipe: str = "feature-to-staging",
             acceptance: str = "", engine: Literal["rules", "goose"] = "rules",
+            task_path: Literal["standard", "minimal"] = "standard",
             interpretation: str | None = None, lead_agent: Literal["codex", "claude"] = "codex",
             pm_provider: str | None = None, base_branch: str | None = None,
         ) -> dict[str, Any]:
@@ -262,6 +263,7 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
                                            workspace=workspace, original_words=original_words,
                                            idempotency_key=idempotency_key, discord_thread_id=discord_thread_id,
                                            recipe=recipe, acceptance=acceptance, engine=engine,
+                                           task_path=task_path,
                                            interpretation=interpretation, lead_agent=lead_agent,
                                            pm_provider=pm_provider, base_branch=base_branch)
 
