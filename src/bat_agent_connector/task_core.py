@@ -20,6 +20,8 @@ class TaskAdapter(Protocol):
     async def prepare_send(self, task: dict, session_id: str) -> dict: ...
     async def session_presence(self, task: dict, session_id: str) -> str: ...
     async def send(self, task: dict, session_id: str, text: str, message_id: str) -> dict: ...
+    async def reconcile_send(self, task: dict, session_id: str, prompt_sha256: str,
+                             before: dict, message_id: str) -> dict | None: ...
     async def read(self, task: dict, session_id: str, marker: str | None) -> dict: ...
     async def interrupt(self, task: dict, session_id: str) -> None: ...
     async def failover(self, task: dict, session_id: str, successor_id: str, *,
@@ -217,6 +219,7 @@ class TaskCoordinator:
             if task["paused"]:
                 self.journal.command_status(cmd["command_id"], "cancelled")
                 return task
+            reconciled = False
             try:
                 r = await self.adapter.send(task, sid, text, cmd["message_id"])
             except TaskDispatchCancelled:
@@ -233,8 +236,18 @@ class TaskCoordinator:
                     return self.journal.mark_initial_session_vanished(task["task_id"], sid)
                 return self.journal.change(task["task_id"], "needs_ted")
             except Exception:
-                self.journal.command_status(cmd["command_id"], "uncertain")
-                return self.journal.change(task["task_id"], "uncertain")
+                # The BAT frame may have been accepted before its reply was lost.
+                # Read only; the durable send intent is never dispatched again.
+                try:
+                    r = await asyncio.wait_for(self.adapter.reconcile_send(
+                        task, sid, hashlib.sha256(text.encode()).hexdigest(), before,
+                        cmd["message_id"]), timeout=5)
+                except Exception:  # noqa: BLE001 - missing proof stays uncertain
+                    r = None
+                if not r or not r.get("accepted"):
+                    self.journal.command_status(cmd["command_id"], "uncertain")
+                    return self.journal.change(task["task_id"], "uncertain")
+                reconciled = True
             if not r.get("accepted"):
                 self.journal.command_status(cmd["command_id"], "rejected")
                 if initial_lead and await self.adapter.session_presence(task, sid) == "vanished":
@@ -253,7 +266,8 @@ class TaskCoordinator:
             self.journal.command_status(cmd["command_id"], "accepted", marker=marker)
             state = "verifying" if sid == task.get("reviewer_session_id") else "running"
             field = "review_marker" if state == "verifying" else "turn_marker"
-            return self.journal.change(task["task_id"], state, fields={field: marker})
+            return self.journal.change(task["task_id"], state, fields={field: marker},
+                                       event="send_reconciled_delivered" if reconciled else None)
 
     async def _observe(self, task: dict, cmds: list[dict]) -> dict:
         sid = task["session_id"]
@@ -323,6 +337,21 @@ class TaskCoordinator:
         if kind != "send":
             return self.journal.change(task["task_id"], "uncertain")
         before = json.loads(cmd["payload"]).get("before") or {}
+        proof = None
+        try:
+            proof = await asyncio.wait_for(self.adapter.reconcile_send(
+                task, sid, json.loads(cmd["payload"])["prompt_sha256"], before,
+                cmd["message_id"]), timeout=5)
+        except Exception:  # noqa: BLE001 - recovery must fail closed
+            proof = None
+        if proof and proof.get("accepted") and proof.get("turn_attribution") == "exact_echo":
+            marker = proof.get("turn_marker")
+            if marker:
+                self.journal.command_status(cmd["command_id"], "accepted", marker=marker)
+                reviewer = sid == task.get("reviewer_session_id")
+                return self.journal.change(task["task_id"], "verifying" if reviewer else "running",
+                                           fields={"review_marker" if reviewer else "turn_marker": marker},
+                                           event="send_reconciled_delivered")
         marker = cmd["marker"] or (before.get("before_cursor") if before.get("agent_kind") == "codex"
                                    else cmd["message_id"])
         if not marker:

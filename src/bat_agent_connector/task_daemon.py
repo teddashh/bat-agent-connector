@@ -66,6 +66,9 @@ class TaskDaemon:
         self.fleet = Fleet(config, actor="task-service")
         self.adapter = BatTaskAdapter(self.fleet, ObservedVerifier(load_settings()), self.journal)
         self.coordinator = TaskCoordinator(self.journal, self.adapter)
+        # Covers the whole verifying state, including BAT/SSH lookups before
+        # and after the subprocess. A restart retains the journal timestamp.
+        self.verification_timeout_s = min(300, max(1, self.adapter.verifier.settings.timeout_s))
         self.goose = GooseACP()
         self._active_ticks: dict[str, asyncio.Task] = {}
         self._lease_fd: int | None = None
@@ -232,20 +235,31 @@ class TaskDaemon:
                     self._active_ticks[tid] = asyncio.create_task(self._tick_task(tid))
             if self.publisher:
                 try:
-                    await self.publisher.flush()
+                    await asyncio.wait_for(self.publisher.flush(), timeout=10)
                 except Exception as exc:  # noqa: BLE001 - sending remains pending/uncertain for reconciliation
                     logging.warning("Discord event flush needs reconciliation: %s", type(exc).__name__)
             await asyncio.sleep(2)
 
     async def _tick_task(self, task_id: str):
+        verifying = False
         try:
             task = self.journal.get(task_id)
+            verifying = task["state"] == "verifying"
+            if verifying and not task["paused"]:
+                remaining = self.verification_timeout_s - (time.time() - task["updated_at"])
+                if remaining <= 0:
+                    self.journal.change(task_id, "needs_ted", event="verification_deadline",
+                                        fields={"result": "VerificationDeadlineExceeded"})
+                    return
             if task["engine"] == "goose" and not self.goose.config.enabled:
                 if task["state"] not in {"uncertain", "done", "failed"}:
                     self.journal.change(task_id, "uncertain", event="goose_disabled")
                 return
             if task["engine"] != "goose" or task["state"] in {"queued", "verifying", "quota_limited", "uncertain"}:
-                await self.coordinator.tick(task_id)
+                if verifying and not task["paused"]:
+                    await asyncio.wait_for(self.coordinator.tick(task_id), timeout=remaining)
+                else:
+                    await self.coordinator.tick(task_id)
                 return
             if task["paused"] or task["state"] in {"needs_ted", "human_owned", "failed", "done"}:
                 return
@@ -271,7 +285,13 @@ class TaskDaemon:
         except Exception as exc:  # noqa: BLE001 - one task cannot kill worker
             logging.warning("Task %s needs reconciliation after %s", task_id[:8], type(exc).__name__)
             try:
-                self.journal.change(task_id, "uncertain")
+                current = self.journal.get(task_id)
+                if verifying and current["state"] == "verifying":
+                    kind = "verification_timeout" if isinstance(exc, TimeoutError) else "verification_error"
+                    self.journal.change(task_id, "needs_ted", event=kind,
+                                        fields={"result": type(exc).__name__})
+                elif current["state"] not in {"needs_ted", "done", "failed"}:
+                    self.journal.change(task_id, "uncertain")
             except ValueError:
                 pass
 

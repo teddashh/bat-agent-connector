@@ -73,9 +73,10 @@ class ObservedVerifier:
                                                     stderr=asyncio.subprocess.DEVNULL)
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+        except BaseException:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
             raise
         if len(stdout) > 4096:
             raise ValueError("verification metadata output too large")
@@ -141,6 +142,11 @@ class ObservedVerifier:
             proc.kill()
             await proc.wait()
             exit_code = 124
+        except BaseException:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            raise
         finally:
             os.close(fd)
         after = await self.identity(task, cwd)

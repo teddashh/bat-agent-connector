@@ -7,6 +7,7 @@ import os
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -70,6 +71,7 @@ class FakeBAT:
         self.failover_calls = 0
         self.interrupts = 0
         self.send_error = False
+        self.reconcile_echo = None
         self.active_sends = 0
         self.max_active_sends = 0
 
@@ -112,6 +114,14 @@ class FakeBAT:
         if read.get("turn_started") and "turn_attribution" not in read:
             read["turn_attribution"] = "correlated"
         return read
+
+    async def reconcile_send(self, task, session_id, prompt_sha256, before, message_id):
+        echo = self.reconcile_echo
+        if (echo and echo["session_id"] == session_id and echo["message_id"] == message_id
+                and hashlib.sha256(echo["text"].encode()).hexdigest() == prompt_sha256):
+            return {"accepted": True, "turn_marker": echo["turn_id"],
+                    "turn_attribution": "exact_echo"}
+        return None
 
     async def interrupt(self, task, session_id):
         self.interrupts += 1
@@ -187,6 +197,102 @@ async def test_timeout_no_resend_and_reconcile(tmp_path):
     assert (await core.tick(task["task_id"]))["state"] == "running"
     assert len(fake.sends) == 1
     j.close()
+
+
+async def test_send_timeout_after_acceptance_read_back_exact_prompt(tmp_path):
+    class AcceptedThenLost(FakeBAT):
+        async def send(self, task, session_id, text, message_id):
+            self.reconcile_echo = {"session_id": session_id, "message_id": message_id,
+                                   "text": text, "turn_id": "user-confirmed-1"}
+            await super().send(task, session_id, text, message_id)
+
+    path = tmp_path / "tasks.db"
+    journal = Journal(path)
+    task = submit(journal)
+    fake = AcceptedThenLost()
+    fake.prepare_kind = "codex"
+    fake.send_error = True
+    core = TaskCoordinator(journal, fake)
+    result = await core.tick(task["task_id"])
+    assert result["state"] == "running" and result["turn_marker"] == "user-confirmed-1"
+    assert len(fake.sends) == 1
+    send = next(c for c in journal.commands(task["task_id"]) if c["kind"] == "send")
+    assert send["status"] == "accepted" and send["marker"] == "user-confirmed-1"
+    assert "send_reconciled_delivered" in [e["kind"] for e in journal.events(task["task_id"])]
+    journal.close()
+    journal = Journal(path)
+    await TaskCoordinator(journal, fake).tick(task["task_id"])
+    assert len(fake.sends) == 1
+    journal.close()
+
+
+async def test_bat_read_back_requires_exact_new_user_echo(fleet_factory, mock):
+    fleet = fleet_factory()
+    adapter = task_bat.BatTaskAdapter(fleet)
+    sid = "sess-codex-0002"
+    mock.states[sid]["isStreaming"] = False
+    prompt = "Ted's exact original request\nBAT-STATUS: MILESTONE"
+    before = await adapter.prepare_send({"host": "h1"}, sid)
+    mock.states[sid]["messages"].append({"id": "assistant-unrelated", "role": "assistant",
+                                          "content": "REVIEW: PASS", "timestamp": 1_900_000_000_000})
+    digest = hashlib.sha256(prompt.encode()).hexdigest()
+    assert await adapter.reconcile_send({"host": "h1"}, sid, digest, before, "batc-lost") is None
+    mock.states[sid]["messages"].append({"id": "user-exact", "role": "user",
+                                          "content": prompt, "timestamp": 1_900_000_000_001})
+    proof = await adapter.reconcile_send({"host": "h1"}, sid, digest, before, "batc-lost")
+    assert proof["turn_marker"] == "user-exact"
+    read = await service.session_read(fleet, "h1", sid, after=proof["turn_marker"])
+    assert read["turn_attribution"] == "correlated"
+    assert await adapter.reconcile_send({"host": "h1"}, sid, "0" * 64, before, "batc-lost") is None
+    later_before = await adapter.prepare_send({"host": "h1"}, sid)
+    mock.states[sid]["messages"].append({"id": "assistant-later", "role": "assistant",
+                                          "content": "REVIEW: PASS", "timestamp": 1_900_000_000_002})
+    assert await adapter.reconcile_send({"host": "h1"}, sid, digest, later_before, "batc-later") is None
+    await fleet.close()
+
+
+async def test_verification_deadline_and_failure_do_not_stall_worker(tmp_path, mock):
+    daemon = TaskDaemon(make_config(mock), db_path=tmp_path / "tasks.db")
+    daemon.verification_timeout_s = 0.05
+    hung = daemon.journal.submit(project="p", host="h1", workspace="w", original_words="hung",
+                                 idempotency_key="hung")
+    failed = daemon.journal.submit(project="p", host="h1", workspace="w", original_words="failed",
+                                   idempotency_key="failed")
+    healthy = daemon.journal.submit(project="p", host="h1", workspace="w", original_words="healthy",
+                                    idempotency_key="healthy")
+    for item in (hung, failed, healthy):
+        daemon.journal.change(item["task_id"], "dispatching")
+        daemon.journal.change(item["task_id"], "verifying")
+    calls = []
+
+    async def tick(task_id):
+        calls.append(task_id)
+        if task_id == hung["task_id"]:
+            await asyncio.Event().wait()
+        if task_id == failed["task_id"]:
+            raise RuntimeError("private verifier detail must stay out of journal")
+
+    daemon.coordinator.tick = tick
+    for item in (hung, failed, healthy):
+        daemon.journal.db.execute("UPDATE tasks SET updated_at=? WHERE task_id=?",
+                                  (time.time(), item["task_id"]))
+        await daemon._tick_task(item["task_id"])
+    assert all(item["task_id"] in calls for item in (hung, failed, healthy))
+    assert daemon.journal.get(hung["task_id"])["state"] == "needs_ted"
+    assert daemon.journal.get(failed["task_id"])["state"] == "needs_ted"
+    assert daemon.journal.get(healthy["task_id"])["state"] == "verifying"
+    assert "verification_timeout" in [e["kind"] for e in daemon.journal.events(hung["task_id"])]
+    assert "verification_error" in [e["kind"] for e in daemon.journal.events(failed["task_id"])]
+    assert "private verifier detail" not in json.dumps(daemon.journal.events(failed["task_id"]))
+    daemon.journal.db.execute("UPDATE tasks SET updated_at=? WHERE task_id=?",
+                              (time.time() - 1, healthy["task_id"]))
+    before = len(calls)
+    await daemon._tick_task(healthy["task_id"])
+    assert len(calls) == before
+    assert daemon.journal.get(healthy["task_id"])["state"] == "needs_ted"
+    assert "verification_deadline" in [e["kind"] for e in daemon.journal.events(healthy["task_id"])]
+    await daemon.fleet.close()
+    daemon.journal.close()
 
 
 async def test_codex_timestamp_never_proves_lost_send_or_review(tmp_path):
