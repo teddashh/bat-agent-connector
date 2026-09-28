@@ -1,0 +1,51 @@
+"""Four task-local MCP tools passed to Goose via ACP session/new."""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+
+from mcp.server.mcpserver import MCPServer
+from mcp_types import ToolAnnotations
+
+from .task_daemon import request
+
+
+def build(task_id: str) -> MCPServer:
+    mcp = MCPServer(name="bat-task", instructions="Only operate on this one task and its BAT session.")
+    ro = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+    wr = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)
+
+    async def task_read(marker: str | None = None) -> dict:
+        """Read this task's BAT session output and turn correlation."""
+        return await asyncio.to_thread(request, "task_read", task_id=task_id, marker=marker)
+
+    async def task_send(text: str, step_id: str) -> dict:
+        """Send one instruction to this task's BAT session. Reuse step_id on retries."""
+        return await asyncio.to_thread(request, "task_send", task_id=task_id, text=text, step_id=step_id)
+
+    async def task_record_verification(candidate_commit: str, command: str, exit_code: int,
+                                       environment: str, log_ref: str) -> dict:
+        """Record an externally executed test on the current clean candidate commit."""
+        return await asyncio.to_thread(request, "task_record_verification", task_id=task_id,
+                                       candidate_commit=candidate_commit, command=command,
+                                       exit_code=exit_code, environment=environment, log_ref=log_ref)
+
+    async def task_request_ted(reason: str) -> dict:
+        """Stop automatic dispatch and ask Ted for a concrete decision."""
+        return await asyncio.to_thread(request, "task_request_ted", task_id=task_id, reason=reason)
+
+    for fn, ann in ((task_read, ro), (task_send, wr), (task_record_verification, wr), (task_request_ted, wr)):
+        mcp.add_tool(fn, name=fn.__name__, annotations=ann)
+    return mcp
+
+
+def main(argv: list[str] | None = None):
+    args = argv if argv is not None else sys.argv[1:]
+    if len(args) != 1:
+        raise SystemExit("usage: bat-task-scoped-mcp TASK_ID")
+    build(args[0]).run("stdio")
+
+
+if __name__ == "__main__":
+    main()

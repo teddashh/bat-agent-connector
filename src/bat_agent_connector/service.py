@@ -910,6 +910,7 @@ async def session_send(
     ensure_loaded: bool = True,
     queue: bool = False,
     tool: str = "session_send",
+    retry_on_disconnect: bool = True,
 ) -> dict:
     _guard(fleet, host, confirm)
     if not isinstance(text, str) or not text.strip():
@@ -986,7 +987,7 @@ async def session_send(
         try:
             r = await c.invoke(
                 "claude:send-message", {"sessionId": sid, "prompt": text, "clientMessageId": mid},
-                retry_on_disconnect=agent_kind(t.get("agentPreset")) == "claude",
+                retry_on_disconnect=retry_on_disconnect and agent_kind(t.get("agentPreset")) == "claude",
             )
         except BatError as e:
             audit.record(
