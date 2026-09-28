@@ -43,3 +43,7 @@ class WriteRefused(BatError):
 
 class TaskDispatchCancelled(WriteRefused):
     """A journaled task send was cancelled before its BAT frame was submitted."""
+
+
+class TaskIdentityMismatch(WriteRefused):
+    """A durable task reservation conflicts with registry or BAT host identity."""

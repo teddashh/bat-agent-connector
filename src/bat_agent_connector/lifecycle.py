@@ -22,7 +22,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import registry, verification
-from .errors import BatError, InvokeTimeout, WriteRefused
+from .errors import BatError, InvokeTimeout, TaskIdentityMismatch, WriteRefused
 from .fleet import Fleet
 from .jev import Jev
 from .orchestrate import (
@@ -411,6 +411,7 @@ async def _failover_one(
     successor_session_id: str | None = None,
     ledger_only: bool = False,
     handoff_message_id: str | None = None,
+    handoff_command_id: str | None = None,
     before_handoff_send: Callable[[str], None] | None = None,
     authoritative_original: bool = False,
 ) -> dict:
@@ -429,6 +430,10 @@ async def _failover_one(
     ]
     if prior:
         e = prior[-1]
+        if (successor_session_id and e.get("session_id") != successor_session_id
+                or handoff_message_id and e.get("handoff_message_id") != handoff_message_id
+                or handoff_command_id and e.get("handoff_command_id") != handoff_command_id):
+            raise TaskIdentityMismatch("existing failover does not match reserved successor and handoff")
         if e.get("worktree_path") and e.get("branch"):
             current = await c.invoke("worktree:status", {"sessionId": sid})
             if (not isinstance(current, dict) or current.get("worktreePath") != e["worktree_path"]
@@ -553,11 +558,17 @@ async def _failover_one(
                 "worktree_path": wt_path if same_worktree else None,
                 "cwd": cwd,
                 "handoff_status": "pending",
+                "handoff_message_id": handoff_message_id,
+                "handoff_command_id": handoff_command_id,
             },
             hc.orchestrate_max_sessions,
             replaces=replaces,
         )
         if existing:
+            if (successor_session_id and existing.get("session_id") != successor_session_id
+                    or handoff_message_id and existing.get("handoff_message_id") != handoff_message_id
+                    or handoff_command_id and existing.get("handoff_command_id") != handoff_command_id):
+                raise TaskIdentityMismatch("existing failover does not match reserved successor and handoff")
             return {
                 "old_session_id": sid,
                 "new_session_id": existing.get("session_id"),
@@ -631,6 +642,7 @@ async def session_failover(
     successor_session_id: str | None = None,
     ledger_only: bool = False,
     handoff_message_id: str | None = None,
+    handoff_command_id: str | None = None,
     before_handoff_send: Callable[[str], None] | None = None,
     authoritative_original: bool = False,
 ) -> dict:
@@ -667,6 +679,7 @@ async def session_failover(
             successor_session_id=successor_session_id,
             ledger_only=ledger_only,
             handoff_message_id=handoff_message_id,
+            handoff_command_id=handoff_command_id,
             before_handoff_send=before_handoff_send,
             authoritative_original=authoritative_original,
         )
@@ -934,6 +947,9 @@ async def _evaluate(
         row["remove_worktree"] = remove
         row["stop"] = stop
         return row
+
+    if e.get("role") == "reviewer" and e.get("lead_session_id") and e.get("worktree_path"):
+        return decide("KEEP", "reviewer shares the lead worktree and cannot own cleanup")
 
     meta = await _meta(c, sid)
     loaded = meta is not None

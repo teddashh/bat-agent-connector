@@ -169,10 +169,13 @@ class Journal:
     def issue_reconcile_capability(self, task_id: str, command_id: str, *, ttl_s: int = 600) -> str:
         task = self.get(task_id)
         command = self.command_get(command_id)
-        if (command["task_id"] != task_id or command["kind"] != "send"
-                or command["session_id"] not in {task["session_id"], task["reviewer_session_id"]}
+        send = (command["kind"] == "send" and
+                command["session_id"] in {task["session_id"], task["reviewer_session_id"]})
+        failover = (command["kind"] == "failover" and
+                    json.loads(command["payload"]).get("old_session_id") == task["session_id"])
+        if (command["task_id"] != task_id or not (send or failover)
                 or command["status"] != "uncertain" or task["state"] != "uncertain"):
-            raise ValueError("only an uncertain send can be reconciled")
+            raise ValueError("only an uncertain task command can be reconciled")
         token = secrets.token_urlsafe(32)
         self.db.execute("""INSERT INTO capabilities(token_hash,task_id,scope,command_id,expires_at)
             VALUES(?,?,?,?,?)""", (hashlib.sha256(token.encode()).hexdigest(), task_id,
@@ -565,6 +568,56 @@ class Journal:
             payload["prompt_sha256"] = digest
             self.db.execute("UPDATE commands SET payload=?,updated_at=? WHERE command_id=?",
                             (json.dumps(payload), time.time(), command_id))
+
+    def command_operator_only(self, command_id: str, reason: str):
+        """A concrete identity conflict must not become auto-recoverable on a later tick."""
+        with self.tx():
+            cmd = self.command_get(command_id)
+            payload = json.loads(cmd["payload"])
+            payload["operator_only"] = True
+            self.db.execute("UPDATE commands SET payload=?,status='uncertain',updated_at=? WHERE command_id=?",
+                            (json.dumps(payload), time.time(), command_id))
+            self._event(cmd["task_id"], "command_identity_conflict",
+                        {"command_id": command_id, "reason": reason})
+
+    def resolve_failover(self, task_id: str, command_id: str, handoff_command_id: str, *,
+                         token: str, outcome: str, actor: str, source: str, evidence: str) -> dict:
+        """Close a conflicted failover by operator attestation without adopting a successor."""
+        if (outcome not in {"delivered", "not_delivered", "superseded"}
+                or actor not in {"operator", "ted"} or not source.strip() or len(source) > 256
+                or not evidence.strip() or len(evidence) > 2000):
+            raise ValueError("valid operator outcome and provenance are required")
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        with self.tx():
+            task = self.get(task_id)
+            cmd = self.command_get(command_id)
+            handoff = self.command_get(handoff_command_id)
+            cap = self.db.execute("""SELECT expires_at FROM capabilities WHERE token_hash=?
+                AND task_id=? AND command_id=? AND scope='reconcile'""",
+                (digest, task_id, command_id)).fetchone()
+            if (task["state"] != "uncertain" or cmd["task_id"] != task_id or cmd["kind"] != "failover"
+                    or cmd["status"] != "uncertain" or handoff["task_id"] != task_id
+                    or handoff["kind"] != "send" or handoff["session_id"] != cmd["session_id"]
+                    or json.loads(cmd["payload"]).get("handoff_command_id") != handoff_command_id
+                    or not cap or cap["expires_at"] <= time.time()):
+                raise ValueError("failover reconciliation identity or capability is invalid")
+            now = time.time()
+            self.db.execute("""INSERT INTO command_reconciliations(command_id,task_id,outcome,actor,source,
+                evidence,observed_result,created_at) VALUES(?,?,?,?,?,?,?,?)""",
+                (command_id, task_id, outcome, actor, source, evidence, "none", now))
+            self.db.execute("DELETE FROM capabilities WHERE token_hash=?", (digest,))
+            self.db.execute("UPDATE commands SET status=?,updated_at=? WHERE command_id IN (?,?)",
+                            ("resolved_" + outcome, now, command_id, handoff_command_id))
+            self.db.execute("UPDATE tasks SET state='human_owned',updated_at=? WHERE task_id=?", (now, task_id))
+            if actor == "ted":
+                action = self.db.execute("""INSERT OR IGNORE INTO ted_actions(task_id,source_message_id,action,created_at)
+                    VALUES(?,?,?,?)""", (task_id, source, "reconcile_failover", now))
+                if action.rowcount:
+                    self.db.execute("UPDATE tasks SET ted_interventions=ted_interventions+1 WHERE task_id=?",
+                                    (task_id,))
+            self._event(task_id, "failover_operator_reconciled", {"command_id": command_id,
+                        "outcome": outcome, "actor": actor, "source": source, "state": "human_owned"})
+        return self.get(task_id)
 
     def command_status(self, command_id: str, status: str, *, marker: str | None = None):
         if status not in {"intent", "needs_review", "accepted", "running", "settled", "uncertain",

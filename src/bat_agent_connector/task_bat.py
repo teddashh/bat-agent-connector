@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import lifecycle, orchestrate, registry, service
-from .errors import TaskDispatchCancelled, WriteRefused
+from .errors import TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .fleet import Fleet
 from .task_handoff import history_excerpt, ledger_summary, original_words_archive
 from .task_verifier import ObservedVerifier, VerificationSettings
@@ -300,11 +300,20 @@ class BatTaskAdapter:
                                              successor_session_id=successor_id, instructions=instructions,
                                              ledger_only=bool(self.journal),
                                              handoff_message_id=handoff_message_id,
+                                             handoff_command_id=handoff_command_id,
                                              before_handoff_send=before_send,
                                              authoritative_original=True)
         if not r.get("prompt_sent") and not r.get("skipped"):
             raise RuntimeError("failover handoff outcome is uncertain")
-        return {"session_id": r["new_session_id"], "marker": r.get("message_id")}
+        if r.get("new_session_id") != successor_id:
+            raise TaskIdentityMismatch("BAT returned a different failover successor")
+        identity = await self._verified_failover_successor(
+            task, successor_id, handoff_message_id, handoff_command_id)
+        if identity is False:
+            raise TaskIdentityMismatch("reserved failover successor conflicts with BAT identity")
+        if identity is None:
+            raise RuntimeError("reserved failover successor and handoff identity are unproven")
+        return {"session_id": successor_id, "marker": handoff_message_id}
 
     async def _verify_original_archive(self, task: dict, archive: dict):
         path = Path(archive["path"])
@@ -341,26 +350,69 @@ class BatTaskAdapter:
             raise RuntimeError("ledger and BAT history are unavailable for failover")
         return "\n".join(message for page in reversed(pages) for message in page)
 
-    async def recover_failover(self, task: dict, *, successor_id: str) -> dict | None:
-        entry = registry.get(task["host"], successor_id)
-        if not entry or entry.get("failover_of") != task["session_id"]:
-            matches = [e for e in registry.list_entries(task["host"])
-                       if e.get("failover_of") == task["session_id"]
-                       and e.get("status") in {"active", "starting", "uncertain"}]
-            if len(matches) != 1:
-                return None
-            entry = matches[0]
-            successor_id = entry["session_id"]
+    async def _verified_failover_successor(self, task: dict, successor_id: str,
+                                           handoff_message_id: str, handoff_command_id: str) -> bool | None:
+        """Require exact journal, registry and BAT host identity; null host data is unknown."""
+        if not self.journal:
+            return None
         try:
-            meta = await self.fleet.client(task["host"]).invoke(
+            handoff = self.journal.command_get(handoff_command_id)
+            hp = json.loads(handoff["payload"])
+            failover = next(c for c in self.journal.commands(task["task_id"])
+                            if c["kind"] == "failover" and c["session_id"] == successor_id
+                            and json.loads(c["payload"]).get("handoff_command_id") == handoff_command_id)
+            fp = json.loads(failover["payload"])
+            old = registry.get(task["host"], task["session_id"])
+            entry = registry.get(task["host"], successor_id)
+            if not old or not entry:
+                return (False if any(e.get("failover_of") == task["session_id"] and
+                                     e.get("status") in {"active", "starting", "uncertain"}
+                                     for e in registry.list_entries(task["host"])) else None)
+            path, branch = old["worktree_path"], old["branch"]
+            if (handoff["task_id"] != task["task_id"] or handoff["kind"] != "send"
+                    or handoff["session_id"] != successor_id or handoff["message_id"] != handoff_message_id
+                    or hp.get("purpose") != "failover_handoff"
+                    or hp.get("old_session_id") != task["session_id"]
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(hp.get("prompt_sha256") or ""))
+                    or fp.get("old_session_id") != task["session_id"]
+                    or not path or not branch
+                    or entry.get("session_id") != successor_id
+                    or entry.get("failover_of") != task["session_id"]
+                    or entry.get("shares_worktree_with") != task["session_id"]
+                    or entry.get("worktree_path") != path or entry.get("branch") != branch
+                    or entry.get("handoff_message_id") != handoff_message_id
+                    or entry.get("handoff_command_id") != handoff_command_id
+                    or entry.get("handoff_status") not in {"sent", "uncertain"}):
+                return False
+            client = self.fleet.client(task["host"])
+            meta = await client.invoke(
                 "claude:get-session-meta", {"sessionId": successor_id}, retry_on_disconnect=False)
+            old_status = await client.invoke(
+                "worktree:status", {"sessionId": task["session_id"]}, retry_on_disconnect=False)
+            new_status = await client.invoke(
+                "worktree:status", {"sessionId": successor_id}, retry_on_disconnect=False)
+            root = await client.invoke("git:getRoot", {"cwd": path}, retry_on_disconnect=False)
+        except (KeyError, StopIteration, TypeError, ValueError, json.JSONDecodeError):
+            return False
         except Exception:  # noqa: BLE001 - missing/unreachable BAT identity remains uncertain
             return None
-        if not isinstance(meta, dict):
+        if (not isinstance(meta, dict) or not isinstance(old_status, dict)
+                or not isinstance(new_status, dict) or root is None):
             return None
-        # Session existence proves only the successor identity. Codex's handoff
-        # message ID is not a turn receipt, even when the registry says "sent".
-        return {"session_id": successor_id, "marker": entry.get("handoff_message_id")}
+        return (meta.get("cwd") == path and root == path
+                and all(st.get("worktreePath") == path and st.get("branchName") == branch
+                        for st in (old_status, new_status)))
+
+    async def recover_failover(self, task: dict, *, successor_id: str,
+                               handoff_message_id: str, handoff_command_id: str) -> dict | None:
+        identity = await self._verified_failover_successor(task, successor_id, handoff_message_id,
+                                                           handoff_command_id)
+        if identity is False:
+            return {"identity_mismatch": True}
+        if identity is None:
+            return None
+        # This proves a successor exists, not that Codex accepted its prompt.
+        return {"session_id": successor_id, "marker": handoff_message_id}
 
     def reviewer_agent(self, task: dict) -> str:
         # Positive local quota signal only; lack of telemetry defaults to Codex.
