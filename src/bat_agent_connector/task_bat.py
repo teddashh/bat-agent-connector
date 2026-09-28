@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import lifecycle, orchestrate, registry, service
-from .errors import WriteRefused
+from .errors import TaskDispatchCancelled, WriteRefused
 from .fleet import Fleet
 from .task_handoff import history_excerpt, ledger_summary, original_words_archive
 from .task_verifier import ObservedVerifier, VerificationSettings
@@ -178,20 +178,18 @@ class BatTaskAdapter:
             expected_cwd = lead["worktree_path"]
             lead_status = await client.invoke("worktree:status", {"sessionId": lead_id},
                                               retry_on_disconnect=False)
-            if isinstance(lead_status, dict) and lead_status.get("worktreePath") != expected_cwd:
+            if (not isinstance(lead_status, dict) or lead_status.get("worktreePath") != expected_cwd
+                    or lead_status.get("branchName") != lead.get("branch")):
                 raise ValueError("lead worktree changed before reviewer lookup")
             if isinstance(worktree, dict) and worktree.get("worktreePath") != expected_cwd:
                 raise ValueError("reviewer worktree differs from lead")
             branch_name = lead.get("branch")
         else:
-            if isinstance(worktree, dict) and worktree.get("worktreePath"):
-                expected_cwd = worktree["worktreePath"]
-                branch_name = worktree.get("branchName")
-            elif existing and existing.get("worktree_path") and existing.get("branch"):
-                expected_cwd = existing["worktree_path"]
-                branch_name = existing["branch"]
-            else:
-                raise ValueError("lead worktree identity is unavailable after BAT restart")
+            if (not isinstance(worktree, dict) or not worktree.get("worktreePath")
+                    or not worktree.get("branchName")):
+                raise ValueError("lead worktree is not registered on BAT host")
+            expected_cwd = worktree["worktreePath"]
+            branch_name = worktree["branchName"]
         if (meta["cwd"] != expected_cwd or
                 await client.invoke("git:getRoot", {"cwd": expected_cwd}, retry_on_disconnect=False)
                 != expected_cwd):
@@ -202,7 +200,7 @@ class BatTaskAdapter:
                                 ("workspace_id", workspace.get("id")),
                                 ("origin_cwd", workspace.get("folderPath")),
                                 ("cwd", expected_cwd), ("worktree_path", expected_cwd),
-                                ("agent_preset", preset))):
+                                ("branch", branch_name), ("agent_preset", preset))):
             raise ValueError("local session entry conflicts with BAT and task identity")
         registry.ensure_existing(task["host"], {
             "session_id": session_id, "workspace_id": workspace.get("id"),
@@ -214,8 +212,20 @@ class BatTaskAdapter:
         })
 
     async def send(self, task: dict, session_id: str, text: str, message_id: str) -> dict:
+        def before_invoke() -> None:
+            if not self.journal:
+                return
+            current = self.journal.get(task["task_id"])
+            command = self.journal.send_for_message(task["task_id"], session_id, message_id)
+            if (current["paused"] or current["control_version"] != task["control_version"]
+                    or session_id not in {current.get("session_id"), current.get("reviewer_session_id")}
+                    or not command or command["status"] != "needs_review"
+                    or json.loads(command["payload"]).get("prompt_sha256") != hashlib.sha256(text.encode()).hexdigest()):
+                raise TaskDispatchCancelled("task send was cancelled before BAT invoke")
+
         return await service.session_send(self.fleet, task["host"], session_id, text, confirm=True,
-                                          message_id=message_id, retry_on_disconnect=False)
+                                          message_id=message_id, retry_on_disconnect=False,
+                                          before_invoke=before_invoke)
 
     async def prepare_send(self, task: dict, session_id: str) -> dict:
         entry = registry.get(task["host"], session_id)

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import mcp_server, task_bat
+from bat_agent_connector import mcp_server, service, task_bat
 from bat_agent_connector.errors import WriteRefused
 from bat_agent_connector.goose_acp import PINNED_GOOSE_VERSION, GooseACP, GooseConfig
 from bat_agent_connector.model_router import ModelRouter, RouterConfig
@@ -316,19 +316,24 @@ async def test_task_bat_adapter_contract_with_mock_host(fleet_factory, mock, tmp
                     idempotency_key="adapter-contract")
     adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
     lead = "task-lead-contract"
-    j.command(task["task_id"], "start_lead", lead, {"role": "lead", "agent": "codex"},
-              "adapter-contract-start")
+    start_command, _ = j.command(task["task_id"], "start_lead", lead,
+                                 {"role": "lead", "agent": "codex"}, "adapter-contract-start")
     assert await adapter.start(task, role="lead", agent="codex", session_id=lead) == lead
     start = next(i for i in mock.invokes if i["channel"] == "claude:start-session"
                  and i["params"]["sessionId"] == lead)
     assert start["params"]["options"]["agentPreset"] == "codex-agent-worktree"
     assert not any(t.get("id") == lead for t in mock.ws_doc["terminals"])
     assert await adapter.recover_start(task, role="lead", session_id=lead)
+    j.command_status(start_command["command_id"], "settled")
     j.add_branch(task["task_id"], session_id=lead, provider="codex", role="lead", reason="start")
-    task = {**task, "session_id": lead}
+    j.change(task["task_id"], "dispatching")
+    task = j.change(task["task_id"], "accepted", fields={"session_id": lead})
     before = await adapter.prepare_send(task, lead)
     assert before["agent_kind"] == "codex" and before["before_cursor"]
-    send = await adapter.send(task, lead, "synthetic contract prompt", "batc-contract-1")
+    prompt = "synthetic contract prompt"
+    command, _ = j.command(task["task_id"], "send", lead,
+                           {"prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()}, "contract-send")
+    send = await adapter.send(task, lead, prompt, command["message_id"])
     assert send["accepted"]
     reviewer = "task-review-contract"
     assert await adapter.start(task, role="reviewer", agent="codex", session_id=reviewer) == reviewer
@@ -361,7 +366,10 @@ async def test_headless_session_lookup_restored_from_task_branch_and_bat_meta(
         assert await adapter.session_presence(task, sid) == "present"
         assert task_bat.registry.get("h1", sid)["recovered_from"] == "task_journal"
         assert (await adapter.prepare_send(task, sid))["agent_kind"] == "claude"
-        assert (await adapter.send(task, sid, "first prompt", "batc-headless-1"))["accepted"]
+        prompt = "first prompt"
+        command, _ = j.command(task["task_id"], "send", sid,
+                               {"prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()}, "headless-send")
+        assert (await adapter.send(task, sid, prompt, command["message_id"]))["accepted"]
         assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"
                     and i["params"]["sessionId"] == sid]) == 1
     finally:
@@ -431,6 +439,33 @@ async def test_bat_restart_null_meta_and_worktree_never_creates_replacement(
         j.close()
 
 
+async def test_lead_meta_present_but_bat_worktree_null_blocks_initial_send(
+        fleet_factory, mock, tmp_path):
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
+                          safety={"write_min_interval_s": 0})
+    j = Journal(tmp_path / "tasks.db")
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="null-worktree-loaded-meta")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
+    sid = "loaded-meta-null-worktree"
+    try:
+        await adapter.start(task, role="lead", agent="claude", session_id=sid)
+        j.add_branch(task["task_id"], session_id=sid, provider="claude", role="lead", reason="start")
+        j.change(task["task_id"], "dispatching")
+        task = j.change(task["task_id"], "accepted", fields={"session_id": sid})
+        saved = task_bat.registry.get("h1", sid)
+        assert saved["worktree_path"] and saved["branch"] and mock.metas[sid]
+        assert mock.dispatch("git:getRoot", {"cwd": saved["worktree_path"]}) == saved["worktree_path"]
+        mock.worktrees.pop(sid)
+        assert await adapter.session_presence(task, sid) == "uncertain"
+        assert (await TaskCoordinator(j, adapter).tick(task["task_id"]))["state"] == "uncertain"
+        assert j.get(task["task_id"])["session_replacements"] == 0
+        assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
+    finally:
+        await fleet.close()
+        j.close()
+
+
 async def test_headless_reviewer_restores_from_lead_worktree_when_own_status_null(
         fleet_factory, mock, tmp_path):
     fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
@@ -463,7 +498,13 @@ async def test_headless_reviewer_restores_from_lead_worktree_when_own_status_nul
         assert reviewer["cwd"] == reviewer["worktree_path"] == lead_path
         assert reviewer["lead_session_id"] == lead_sid and reviewer["role"] == "reviewer"
         assert reviewer["agent_preset"] == "codex-agent"
-        assert (await adapter.send(task, reviewer_sid, "review candidate", "batc-reviewer-1"))["accepted"]
+        start = next(c for c in j.commands(task["task_id"]) if c["kind"] == "start_reviewer")
+        j.command_status(start["command_id"], "settled")
+        task = j.change(task["task_id"], "verifying", fields={"reviewer_session_id": reviewer_sid})
+        prompt = "review candidate"
+        command, _ = j.command(task["task_id"], "send", reviewer_sid,
+                               {"prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()}, "reviewer-send")
+        assert (await adapter.send(task, reviewer_sid, prompt, command["message_id"]))["accepted"]
     finally:
         await fleet.close()
         j.close()
@@ -667,6 +708,49 @@ async def test_pause_during_final_presence_check_cancels_unsent_command(tmp_path
     assert (await core.tick(task["task_id"]))["state"] == "running"
     assert len(fake.sends) == 1 and fake.sends[0][2] != sends[0]["message_id"]
     j.close()
+
+
+async def test_pause_during_late_session_send_lookup_blocks_bat_frame(
+        fleet_factory, mock, tmp_path, monkeypatch):
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
+                          safety={"write_min_interval_s": 0})
+    mock.echo_sends = True
+    j = Journal(tmp_path / "tasks.db")
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="late-send-pause")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
+    core = TaskCoordinator(j, adapter)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = service._live_state
+    gated = False
+
+    async def late_lookup(*args):
+        nonlocal gated
+        if (not gated and any(c["kind"] == "send" and c["status"] == "needs_review"
+                              for c in j.commands(task["task_id"]))):
+            gated = True
+            entered.set()
+            await release.wait()
+        return await original(*args)
+
+    monkeypatch.setattr(service, "_live_state", late_lookup)
+    try:
+        tick = asyncio.create_task(core.tick(task["task_id"]))
+        await asyncio.wait_for(entered.wait(), 5)
+        assert j.pause(task["task_id"])["paused"]
+        release.set()
+        assert (await asyncio.wait_for(tick, 5))["paused"]
+        assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
+        sends = [c for c in j.commands(task["task_id"]) if c["kind"] == "send"]
+        assert len(sends) == 1 and sends[0]["status"] == "cancelled"
+        j.resume(task["task_id"])
+        await core.tick(task["task_id"])
+        sent = [i for i in mock.invokes if i["channel"] == "claude:send-message"]
+        assert len(sent) == 1 and sent[0]["params"]["clientMessageId"] != sends[0]["message_id"]
+    finally:
+        release.set()
+        await fleet.close()
+        j.close()
 
 
 async def test_settled_reviewer_start_requires_presence_before_prompt(tmp_path):

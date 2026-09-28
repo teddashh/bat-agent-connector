@@ -10,7 +10,12 @@ import pytest
 from bat_agent_connector import channels
 from bat_agent_connector.client import BatClient
 from bat_agent_connector.config import device_id
-from bat_agent_connector.errors import AuthError, ChannelNotAllowed, FingerprintMismatch
+from bat_agent_connector.errors import (
+    AuthError,
+    ChannelNotAllowed,
+    FingerprintMismatch,
+    TaskDispatchCancelled,
+)
 from tests.conftest import make_config
 from tests.mockbat import TOKEN
 
@@ -30,6 +35,37 @@ async def test_auth_v2_and_ping(mock):
     auth = mock.auth_frames[0]
     assert auth["protocols"] == ["bat-remote/v2"]
     assert auth["clientInfo"]["deviceId"] == "dev-test"
+
+
+async def test_transport_guard_runs_after_awaited_connect_before_send_frame(mock):
+    c = client_for(mock, writes=True)
+    original_connect = c.connect
+    entered, release = asyncio.Event(), asyncio.Event()
+    allowed = True
+
+    async def delayed_connect():
+        entered.set()
+        await release.wait()
+        await original_connect()
+
+    def guard():
+        if not allowed:
+            raise TaskDispatchCancelled("paused before BAT frame")
+
+    c.connect = delayed_connect
+    try:
+        send = asyncio.create_task(c.invoke("claude:send-message",
+                                            {"sessionId": "sess-claude-0001", "prompt": "test"},
+                                            before_send=guard))
+        await asyncio.wait_for(entered.wait(), 2)
+        allowed = False
+        release.set()
+        with pytest.raises(TaskDispatchCancelled):
+            await asyncio.wait_for(send, 5)
+        assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
+    finally:
+        release.set()
+        await c.close()
 
 
 async def test_stable_device_id(isolated_dirs):

@@ -9,7 +9,7 @@ import re
 import uuid
 from typing import Protocol
 
-from .errors import WriteRefused
+from .errors import TaskDispatchCancelled, WriteRefused
 from .task_journal import Journal
 from .task_recipes import limits
 
@@ -218,8 +218,15 @@ class TaskCoordinator:
                 return task
             try:
                 r = await self.adapter.send(task, sid, text, cmd["message_id"])
+            except TaskDispatchCancelled:
+                self.journal.command_status(cmd["command_id"], "cancelled")
+                return self.journal.get(task["task_id"])
             except WriteRefused:
                 # Local streaming/rate guard rejected before BAT send-message.
+                current = self.journal.get(task["task_id"])
+                if current["paused"] or current["control_version"] != task["control_version"]:
+                    self.journal.command_status(cmd["command_id"], "cancelled")
+                    return current
                 self.journal.command_status(cmd["command_id"], "rejected")
                 if initial_lead and await self.adapter.session_presence(task, sid) == "vanished":
                     return self.journal.mark_initial_session_vanished(task["task_id"], sid)

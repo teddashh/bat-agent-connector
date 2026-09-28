@@ -76,7 +76,8 @@ def ensure_existing(host: str, entry: dict) -> None:
                 if (old.get("task_id") not in {None, entry.get("task_id")}
                         or old.get("role") not in {None, entry.get("role")}
                         or any(old.get(key) not in {None, entry.get(key)} for key in (
-                            "workspace_id", "origin_cwd", "cwd", "worktree_path", "agent_preset"))):
+                            "workspace_id", "origin_cwd", "cwd", "worktree_path", "branch",
+                            "agent_preset"))):
                     raise ValueError("local session entry changed during BAT identity verification")
                 old.update(entry)
                 old["status"] = "active"

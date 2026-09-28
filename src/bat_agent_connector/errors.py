@@ -39,3 +39,7 @@ class ConnectionLost(BatError):
 
 class WriteRefused(BatError):
     """A write tool refused to run (missing confirm, rate limit, writes disabled, streaming...)."""
+
+
+class TaskDispatchCancelled(WriteRefused):
+    """A journaled task send was cancelled before its BAT frame was submitted."""
