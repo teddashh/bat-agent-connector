@@ -9,7 +9,7 @@ import pytest
 
 from bat_agent_connector.config import JevConfig
 from bat_agent_connector.jev import OPENROUTER_JEV_MODEL, OPENROUTER_URL, Jev
-from bat_agent_connector.model_router import ModelRouter
+from bat_agent_connector.model_router import MinimalReviewGate, ModelRouter, RouterConfig
 from bat_agent_connector.task_journal import Journal
 from bat_agent_connector.triage import refine_with_jev
 
@@ -177,3 +177,32 @@ async def test_jev_decisions_invalid_output_never_sets_backend(monkeypatch):
     assert jev.enabled and await jev.classify_state("synthetic") is None
     assert jev.backend is None
     assert used == [OPENROUTER_JEV_MODEL]
+
+
+@pytest.mark.asyncio
+async def test_minimal_review_uses_one_typed_question_and_decisions_fallback(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "fake-primary-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fake-fallback-key")
+    jev = Jev(JevConfig())
+    calls = []
+
+    def primary(body, _key):
+        calls.append(("typesafe", json.loads(body)))
+        raise TimeoutError("synthetic primary outage")
+
+    def fallback(body, _key):
+        request = json.loads(body)
+        calls.append(("openrouter_jev", request))
+        return {"answers": answers_for(request["questions"], "pass")}
+
+    monkeypatch.setattr(jev, "_post", primary)
+    monkeypatch.setattr(jev, "_post_openrouter", fallback)
+    result = await MinimalReviewGate(jev, RouterConfig()).judge(
+        original_words="Ted's exact request", diff="diff --git a/README.md b/README.md\n+line",
+        paths=["README.md"])
+    assert result["verdict"] == "pass" and result["jev_backend"] == "openrouter_jev"
+    assert [name for name, _ in calls] == ["typesafe", "openrouter_jev"]
+    assert len(calls[0][1]["questions"]) == 1
+    assert calls[0][1]["state"] == calls[1][1]["state"]
+    assert calls[0][1]["questions"] == calls[1][1]["questions"]
+    assert calls[1][1]["model"] == "typesafe/jev-1.13"

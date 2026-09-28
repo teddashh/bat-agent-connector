@@ -21,7 +21,7 @@ from .config import Config, state_dir
 from .fleet import Fleet
 from .goose_acp import GooseACP
 from .jev import Jev
-from .model_router import MinimalTaskRouter, ModelRouter, RouterConfig
+from .model_router import MinimalReviewGate, MinimalTaskRouter, ModelRouter, RouterConfig
 from .task_bat import BatTaskAdapter
 from .task_core import TaskCoordinator
 from .task_discord import DiscordHTTP, DiscordPublisher
@@ -76,7 +76,9 @@ class TaskDaemon:
         jev = Jev(config.jev)
         self.router = ModelRouter(self.journal, jev, router_config, self.goose.catalog)
         self.minimal_router = MinimalTaskRouter(jev)
-        self.coordinator = TaskCoordinator(self.journal, self.adapter, router=self.router)
+        self.minimal_review_gate = MinimalReviewGate(jev, router_config)
+        self.coordinator = TaskCoordinator(self.journal, self.adapter, router=self.router,
+                                           minimal_review_gate=self.minimal_review_gate)
         self._submit_lock = asyncio.Lock()
         # Covers the whole verifying state, including BAT/SSH lookups before
         # and after the subprocess. A restart retains the journal timestamp.
@@ -168,6 +170,9 @@ class TaskDaemon:
                                          expected_type="status_relay")
             routes = self.journal.routes(task_id)
             return {**task, "engine_decision": self.journal.engine_decision(task_id),
+                    "minimal_review_gate": (self.journal.minimal_review_gate(
+                        task_id, task["verification_commit"], task["verification_tree"])
+                        if task["verification_commit"] and task["verification_tree"] else None),
                     "commands": self.journal.commands(task_id)[-5:],
                     "events": self.journal.events(task_id)[-10:],
                     "reconciliations": self.journal.reconciliations(task_id),
