@@ -10,8 +10,10 @@ import re
 import shlex
 import stat
 import subprocess
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from . import lifecycle, orchestrate, registry, service
 from .errors import TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
@@ -311,9 +313,11 @@ class BatTaskAdapter:
                     or not re.fullmatch(r"[0-9a-f]{64}", str(json.loads(command["payload"]).get("prompt_sha256") or ""))):
                 raise TaskDispatchCancelled("task control changed before BAT handoff invoke")
 
-        async def verify_handoff_successor():
+        async def verify_handoff_successor(
+                reader: Callable[[str, dict], Awaitable[Any]] | None = None):
             identity = await self._verified_failover_successor(
-                task, successor_id, handoff_message_id, handoff_command_id, before_send=True)
+                task, successor_id, handoff_message_id, handoff_command_id,
+                before_send=True, reader=reader)
             if identity is False:
                 raise TaskIdentityMismatch("successor BAT worktree differs from reserved task identity")
             if identity is None:
@@ -323,6 +327,9 @@ class BatTaskAdapter:
                     or current_lead.get("worktree_path") != expected_path
                     or current_lead.get("branch") != expected_branch):
                 raise TaskIdentityMismatch("lead worktree changed during successor verification")
+
+        async def verify_handoff_at_frame():
+            await verify_handoff_successor(self.fleet.client(task["host"]).guard_read)
 
         def handoff_frame_guard(frame: dict):
             before_handoff_invoke()
@@ -350,6 +357,7 @@ class BatTaskAdapter:
                                              task_id=task["task_id"],
                                              before_handoff_send=before_send,
                                              verify_handoff_successor=verify_handoff_successor,
+                                             verify_handoff_at_frame=verify_handoff_at_frame,
                                              before_handoff_invoke=before_handoff_invoke,
                                              handoff_frame_guard=handoff_frame_guard,
                                              authoritative_original=True)
@@ -402,7 +410,8 @@ class BatTaskAdapter:
 
     async def _verified_failover_successor(self, task: dict, successor_id: str,
                                            handoff_message_id: str, handoff_command_id: str, *,
-                                           before_send: bool = False) -> bool | None:
+                                           before_send: bool = False,
+                                           reader: Callable[[str, dict], Awaitable[Any]] | None = None) -> bool | None:
         """Require exact journal, registry and BAT host identity; null host data is unknown."""
         if not self.journal:
             return None
@@ -438,13 +447,13 @@ class BatTaskAdapter:
                     or (not before_send and entry.get("handoff_frame_sha256") != hp.get("prompt_sha256"))):
                 return False
             client = self.fleet.client(task["host"])
-            meta = await client.invoke(
-                "claude:get-session-meta", {"sessionId": successor_id}, retry_on_disconnect=False)
-            old_status = await client.invoke(
-                "worktree:status", {"sessionId": task["session_id"]}, retry_on_disconnect=False)
-            new_status = await client.invoke(
-                "worktree:status", {"sessionId": successor_id}, retry_on_disconnect=False)
-            root = await client.invoke("git:getRoot", {"cwd": path}, retry_on_disconnect=False)
+            if reader is None:
+                async def reader(channel: str, params: dict) -> Any:
+                    return await client.invoke(channel, params, retry_on_disconnect=False)
+            meta = await reader("claude:get-session-meta", {"sessionId": successor_id})
+            old_status = await reader("worktree:status", {"sessionId": task["session_id"]})
+            new_status = await reader("worktree:status", {"sessionId": successor_id})
+            root = await reader("git:getRoot", {"cwd": path})
         except (KeyError, StopIteration, TypeError, ValueError, json.JSONDecodeError):
             return False
         except Exception:  # noqa: BLE001 - missing/unreachable BAT identity remains uncertain

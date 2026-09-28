@@ -33,6 +33,7 @@ from .channels import check_allowed, is_write, timeout_for
 from .config import HostConfig
 from .errors import (
     AuthError,
+    ChannelNotAllowed,
     ConnectionLost,
     FingerprintMismatch,
     InvokeError,
@@ -325,6 +326,22 @@ class BatClient:
         self.last_used = time.monotonic()
         return (time.monotonic() - t) * 1000
 
+    async def guard_read(self, channel: str, params: dict) -> Any:
+        """Read BAT identity while an outer write holds the client semaphore.
+
+        This intentionally skips connect, retries, and semaphore acquisition;
+        the outer guarded invoke already owns the connection and semaphore.
+        """
+        if channel not in {"claude:get-session-meta", "worktree:status", "git:getRoot"}:
+            raise ChannelNotAllowed("guard read channel is not an identity read")
+        canonical = check_allowed(channel, allow_writes=False, allow_orchestrate=False)
+        frame = {"type": "invoke", "id": f"batc-{next(self._ids)}",
+                 "channel": canonical, "params": params}
+        reply = await self._roundtrip(frame, timeout_for(canonical))
+        if reply.get("type") == "invoke-error":
+            raise InvokeError(f"{self.host.name}: {canonical}: {redact(reply.get('error'))}")
+        return reply.get("result")
+
     async def invoke(self, channel: str, params: dict | None = None, *, timeout: float | None = None,
                      retry_on_disconnect: bool = False,
                      before_send: Callable[[], None] | None = None,
@@ -351,9 +368,9 @@ class BatClient:
         for attempt in range(attempts):
             try:
                 await self.connect()
-                if before_frame:
-                    await before_frame()
                 async with self._sem:
+                    if before_frame:
+                        await before_frame()
                     frame = {
                         "type": "invoke",
                         "id": f"batc-{next(self._ids)}",

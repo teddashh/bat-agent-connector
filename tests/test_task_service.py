@@ -1640,6 +1640,70 @@ async def test_failover_rejects_wrong_successor_or_frame_before_handoff(
         j.close()
 
 
+@pytest.mark.parametrize("change", ["git_root", "branch", "failover_of"])
+async def test_failover_rechecks_identity_after_semaphore_wait(
+        fleet_factory, mock, tmp_path, monkeypatch, change):
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
+                          safety={"write_min_interval_s": 0})
+    started = await orchestrate.session_start(fleet, "h1", "demo-project", "claude",
+                                              confirm=True, prompt=None, use_worktree=True)
+    old_sid = started["session_id"]
+    mock.states[old_sid]["messages"] = [{"role": "assistant", "content": "You've hit your usage limit",
+                                          "timestamp": 1_790_000_000_000}]
+    j = Journal(tmp_path / "tasks.db")
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="sem-wait:" + change, lead_agent="claude")
+    j.change(task["task_id"], "dispatching")
+    j.change(task["task_id"], "accepted", fields={"session_id": old_sid})
+    j.add_branch(task["task_id"], session_id=old_sid, provider="claude", role="lead", reason="test")
+    j.change(task["task_id"], "running")
+    j.change(task["task_id"], "quota_limited")
+    core = TaskCoordinator(j, task_bat.BatTaskAdapter(
+        fleet, ObservedVerifier(VerificationSettings()), j))
+    client = fleet.client("h1")
+    original_checked = client._invoke_checked
+    entered = asyncio.Event()
+    blocked_sem = asyncio.Semaphore(1)
+    await blocked_sem.acquire()
+
+    async def waiting_checked(channel, params, timeout, **kwargs):
+        if channel != "claude:send-message":
+            return await original_checked(channel, params, timeout, **kwargs)
+        old_sem = client._sem
+        client._sem = blocked_sem
+        entered.set()
+        try:
+            return await original_checked(channel, params, timeout, **kwargs)
+        finally:
+            client._sem = old_sem
+
+    monkeypatch.setattr(client, "_invoke_checked", waiting_checked)
+    try:
+        tick = asyncio.create_task(core.tick(task["task_id"]))
+        await asyncio.wait_for(entered.wait(), 5)
+        failover = next(c for c in j.commands(task["task_id"]) if c["kind"] == "failover")
+        successor = failover["session_id"]
+        if change == "git_root":
+            mock.handlers["git:getRoot"] = lambda _: "/srv/other"
+        elif change == "branch":
+            mock.worktrees[successor]["branchName"] = "bat/wrong-branch"
+        else:
+            registry.update("h1", successor, failover_of="unrelated-session")
+        blocked_sem.release()
+        result = await asyncio.wait_for(tick, 5)
+        handoff = j.command_get(json.loads(failover["payload"])["handoff_command_id"])
+        assert result["state"] == "uncertain" and result["session_id"] == old_sid
+        assert len(result["branches"]) == 1 and handoff["status"] == "uncertain"
+        assert json.loads(j.command_get(failover["command_id"])["payload"])["operator_only"] is True
+        assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
+        await core.tick(task["task_id"])
+        assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
+    finally:
+        blocked_sem.release()
+        await fleet.close()
+        j.close()
+
+
 async def test_verified_successor_handoff_frame_hash_survives_restart(fleet_factory, mock, tmp_path):
     fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
                           safety={"write_min_interval_s": 0})
