@@ -74,7 +74,9 @@ class AgyShimAdapter(ProviderAdapter):
                 return json.load(response)
 
         result = await asyncio.to_thread(fetch)
-        return isinstance(result, dict) and isinstance(result.get("data"), list)
+        return (isinstance(result, dict) and isinstance(result.get("data"), list)
+                and any(isinstance(row, dict) and row.get("id") == entry.model
+                        for row in result["data"]))
 
 
 class CodexACPAdapter(ProviderAdapter):

@@ -22,11 +22,11 @@ Goose adapter 限用 stock `goose acp`，以 ACP JSON-RPC 操控，任務 recipe
 
 模型端點檢查：castle1 曾觀察到 `127.0.0.1:18795`，不能推定 grok-bot-01 也有相同端點。本 worktree 試著透過 `ssh grok-bot-01` 對其 loopback `/v1/models` 作無憑證可達性檢查，但本機 DNS 回報 hostname 無法解析；**grok-bot-01 shim 尚未確認可達**，也未讀取或揭露金鑰。用 fake loopback OpenAI 相容端點測 adapter。Goose 預設 agy Claude 的端點、model、token 都須從私有環境／0600 設定提供；缺設定時只能在未送 prompt 前備援至 Codex。`goose --version` 在本工作樹環境無可執行檔；正式 smoke 須於部署主機補跑。
 
-每個 task 保存 `submitted_at`、`delivered_at`、`delivered`、`review_rejections`、`ted_interventions`；可計算交付／未交付、review 駁回次數、Ted 介入次數及從提交到交付的秒數。事件帶時間戳供稽核，不能把 coding agent 的自述當成 delivered。
+每個 task 保存 `submitted_at`、`delivered_at`、`delivered`、`review_rejections`、`ted_interventions`；可計算交付／未交付、review 駁回次數及交付秒數。目前 `ted_interventions` 是**呼叫者聲稱 Ted 介入**的次數，來源 ID 去重，但尚未綁定受信 Discord 事件，不能作已驗證的 Ted 實際介入數。事件帶時間戳供稽核，不能把 coding agent 的自述當成 delivered。
 
 ### 本 PR 的啟動與限制
 
-`batc serve --host 127.0.0.1 --port 18796` 僅在明確啟動時運行；需要主機 `writes=true`、`orchestrate=true`。既有 `bat-agent-connector-mcp` 新增四個 work 工具，透過 `BATC_TASK_URL`（預設 `http://127.0.0.1:18796/rpc`）連同機 daemon；它本身不擁有第二份帳本。服務尚未部署。Rules 可建立 lead、續推、停派、從不明 BAT 回應對帳、執行**管理員預先設定**的測試命令並將觀察結果連同 commit/tree 寫入 PR #1 驗證紀錄，再啟獨立 reviewer。未設定受信測試命令時停在 verifying。Goose ACP adapter 和 task-scoped MCP 已可用 fake BAT 走通一個 tool call；真 Goose 尚未在此主機安裝，goose 選項屬 smoke／試驗用途。Discord adapter 可用 fake 測；正式憑證和看板 channel 尚未配置。未關閉既有 Hermes cron，也未修改 BAT／Hermes 設定。
+`batc serve --host 127.0.0.1 --port 18796` 僅在明確啟動時運行；需要主機 `writes=true`、`orchestrate=true`。既有 `bat-agent-connector-mcp` 新增五個 work 工具，透過 `BATC_TASK_URL`（預設 `http://127.0.0.1:18796/rpc`）連同機 daemon；它本身不擁有第二份帳本。服務尚未部署。Rules 可建立 lead、續推、停派、從不明 BAT 回應對帳、執行**管理員預先設定**的測試命令並將觀察結果連同 commit/tree 寫入 PR #1 驗證紀錄，再啟獨立 reviewer。未設定受信測試命令時停在 verifying。Goose ACP adapter 和 task-scoped MCP 已可用 fake BAT 走通一個 tool call；真 Goose 尚未在此主機安裝，goose 選項屬 smoke／試驗用途。Discord adapter 可用 fake 測；正式憑證和看板 channel 尚未配置。未關閉既有 Hermes cron，也未修改 BAT／Hermes 設定。
 
 castle1 OpenClaw 應透過到 grok-bot-01 loopback 服務的受控轉接（例如 SSH socket forwarding）呼叫同一 task MCP，不在 castle1 啟第二個 daemon 或 SQLite。HTTP 維持 loopback；不直接向 LAN 開放 BAT token 或 task 控制端點。
 
@@ -50,27 +50,27 @@ castle1 OpenClaw 應透過到 grok-bot-01 loopback 服務的受控轉接（例�
 | `running` | `accepted`／`verifying`／`waiting_permission`／`quota_limited`／`needs_ted` | 回合結束續推／里程碑／權限／額度／人為阻塞 |
 | `quota_limited` | `running`／`uncertain`／`needs_ted` | Claude→Codex 原子 successor 預留及 handoff 可證實／不明／不適用 |
 | `verifying` | `done`／`accepted`／`needs_ted` | 乾淨候選 commit/tree 的觀察測試與 fresh reviewer PASS／REJECT／測試失敗 |
-| `uncertain` | `accepted`／`running`／`verifying`／`needs_ted` | 只靠讀取 BAT 狀態對帳或 Ted 明確處理；絕不自動重送 |
+| `uncertain` | `accepted`／`running`／`verifying`／`human_owned`／`done`／`needs_ted` | 可歸因的 BAT 證據或有權操作者針對特定命令明確處理；絕不自動重送 |
 
 `pause` 先持久化控制版本，停止新派送；可選擇 interrupt 當前 turn。start 等待期間發生 pause 時，已接受的 session 保存為 `accepted` 但不送初始 prompt。`resume` 清除 pause，下一 tick 先查 pending 命令；若無待對帳且 session 尚未收到 prompt，才送第一次 prompt。每個 host/session 在單 daemon 內有 writer lock；程序間以 0600 lock file 的排他 `flock` 與 owner heartbeat 限制為一個 daemon。外部 BAT GUI／舊低階工具不受此鎖控制，故遇無法歸因的 turn 保留 uncertain。
 
-送 prompt 前先持久記 `needs_review`，包含 message ID 與前一個 Codex 時間游標；即使 crash 發生在實際送出前，也按**可能已送出**處理。逾時、斷線或回覆遺失後保持 `uncertain`。Claude `session_read` 用 `correlated`／`correlated_after_prior_turn`；Codex 可用較弱的 `timestamp_cursor` 對帳執行進度，但 reviewer PASS 另要求全新 reviewer session 的唯一 user prompt 確實含當前 `REVIEW-CANDIDATE: commit tree`。BAT 明確回 busy/rejected 時標 rejected、請 Ted 處理，不假設可安全重送。start 對帳使用預留 session ID 和 BAT meta；failover 對帳使用預留 successor、PR #1 registry、handoff message ID。若無法證明，保留 uncertain。遇 candidate commit 或 tree 改變，清除舊 verification/reviewer/PASS，建立新 reviewer session；`done` 需當前 commit/tree 的受信 runner exit 0 與 fresh PASS。
+送 prompt 前先持久記 `needs_review`，包含 message ID、prompt SHA-256 與送出前游標；即使 crash 發生在實際送出前，也按**可能已送出**處理。逾時、斷線或回覆遺失後保持 `uncertain`。Claude `session_read` 的 `correlated`／`correlated_after_prior_turn` 可用於對帳；Codex 的 `timestamp_cursor` **只是時間位置，不能證明回覆屬於本命令**，連同後來出現的 `REVIEW: PASS` 都不能用來結案或自動重送。Codex 只有明確的命令／turn 綁定證據才可自動歸因，否則走下述人工對帳。Reviewer PASS 同時要求獨立 reviewer prompt／turn 歸因、lead 已停筆、乾淨的當前 commit/tree 和受信測試 exit 0。BAT 明確回 busy/rejected 時標 rejected、請 Ted 處理，不假設可安全重送。start 對帳使用預留 session ID 和 BAT meta；failover 對帳使用預留 successor、PR #1 registry、handoff message ID。若無法證明，保留 uncertain。遇 candidate commit 或 tree 改變，清除舊 verification/reviewer/PASS，建立新 reviewer session。
 
-Failover 預設把 task ledger 摘要交給 successor：Ted 原話、狀態、候選 commit、近期命令／事件，避免以可能極長或過時的聊天全文作權威。若人工選擇需要歷史，超過 200,000 字時保留前 12,000＋後 148,000 字並標明中段省略，完整內容寫入私有目錄的 0600 archive。BAT prompt 有 20,000 字上限，長摘要必須逐段記錄／送出；第一階段不自動走此歷史退路。archive 絕不能放進 Git。
+Failover 預設把 task ledger 摘要交給 successor：Ted 原話、狀態、候選 commit、近期命令／事件，避免以可能極長或過時的聊天全文作權威。若 ledger 摘要失敗，且 `BATC_TASK_LOCAL_HOST_ALIAS` 明確等於 BAT host，服務才讀 BAT history 並建立同機可讀的 0600 archive／excerpt；遠端無法共享路徑時 failover 保持 uncertain。超過 200,000 字時 excerpt 保留前 12,000＋後 148,000 字並標明中段省略，完整內容另存 archive。BAT prompt 有 20,000 字上限，handoff 只送檔案路徑及閱讀指示，不把長歷史塞入 prompt。archive 絕不能放進 Git。
 
 ## 權限、設定與操作恢復
 
-HTTP 僅聽 loopback 並檢查 peer。一般 work RPC 需本機 0600 admin bearer token；Goose 只取得 1 小時的 task-scoped capability，不能呼叫 `work_submit`、操作另一 task 或直接提供測試 exit code。狀態目錄 0700；SQLite、token、lock、私有 handoff archive 0600。不要將 token、shim 金鑰、原始聊天或 provider 錯誤全文寫入日志。castle1 OpenClaw 需透過受控 SSH loopback forward 加 admin bearer 呼叫同一 grok-bot-01 daemon；若要允許 castle1 寫入，應配置限定權限的轉接身分，不能把 loopback HTTP 直接開到 LAN。此轉接與主機授權尚未部署。
+HTTP 僅聽 loopback 並檢查 peer。一般 work RPC 需本機 0600 admin bearer token；Goose 只取得 1 小時的 task-scoped capability，不能呼叫 `work_submit`、操作另一 task 或直接提供測試 exit code。對不明 send，管理員用 `work_reconcile_capability` 為**一個 task／command** 發 10 分鐘一次性 capability，再用該 token 呼叫 `work_reconcile`，提供 `delivered`／`not_delivered`／`superseded`、操作者、來源和證據。admin token 本身不能直接解決命令。`batc task-reconcile` 在本機完成這兩步；若要接續，必須提交**不同文字**的新 prompt，先記新 intent，並確認 BAT session 閒置；新 prompt 不重播舊命令。人工聲稱 review PASS 還要提供當前 commit/tree、exact turn reference，服務重查乾淨候選、reviewer 已停筆及當前觀察測試。無證據的 resolve 留在 `human_owned`，`work_resume` 不會偷偷續推。這是有權操作者的可稽核證詞，並非 BAT 自動證明。狀態目錄 0700；SQLite、token、lock、私有 handoff archive 0600。不要將 token、shim 金鑰、原始聊天或 provider 錯誤全文寫入日志。castle1 OpenClaw 需透過受控 SSH loopback forward 加 admin bearer 呼叫同一 grok-bot-01 daemon；若要允許 castle1 寫入，應配置限定權限的轉接身分，不能把 loopback HTTP 直接開到 LAN。此轉接與主機授權尚未部署。
 
 私有 `BATC_TASK_SETTINGS` TOML 必須 0600，例如 `[verification.commands]` 的 `project = ["uv", "run", "pytest", "-q"]`；remote host 可用 `[verification.ssh_hosts]` 指定既有 SSH alias。測試 stdout/stderr 只存本機 `task-artifacts` 的 0600 檔案（至多保留前 2 MB，另存完整輸出 SHA-256）；可在 `[verification]` 設 `artifact_dir` 到私有路徑。`[task_service] register_tabs = true` 是額外的 service-only 顯式開關，預設 false；主機既有 `orchestrate_register_tabs=true` 也必須同時成立。lead 和 reviewer tab 都用 connector 的 append/revision recheck；不改 BAT。Ted 很少開 GUI，仍需知道 `workspace:save` 整份覆寫的 race。
 
-Discord thread 發文含固定 `BATC-EVENT:<event_id>` marker，發文前 claim；若 crash，重啟先尋找 marker／message ID，找到即標 sent。找不到時標 unresolved，需管理員查完整 Discord history 後用 `batc task-delivery --confirm-absent-event` 明確重試。看板 `BATC-BOARD:<channel>` 只有一則：已知 message ID 時重試 edit 安全；未知 ID 的 create 同樣須尋找或人工確認，不能盲目重貼。Fake adapter 覆蓋重啟；真 Discord token 和 channel ID 只從環境注入。`work_delivery_status` 與 `batc task-delivery` 可查看未解事件。尚未取代 Hermes cron。
+Discord thread 發文含固定 `BATC-EVENT:<event_id>` marker，發文前 claim；若 crash，重啟先找最近 100 則的 marker／message ID，找到即標 sent。超過這個範圍時需管理員查完整 Discord history；若找到了舊訊息，可用 `batc task-delivery --confirm-found-event <id> --message-id <discord-id>`，服務再用 Discord GET 驗證 bot 作者和 marker 後標 sent；確認不存在才用 `--confirm-absent-event` 明確重試。看板 `BATC-BOARD:<channel>` 只有一則：已知 message ID 時重試 edit 安全；未知 ID 的 create 同樣須尋找或人工確認，可用 `--confirm-found-board`／`--message-id`。Fake adapter 覆蓋重啟及 found-ID；真 Discord token 和 channel ID 只從環境注入。`work_delivery_status` 與 `batc task-delivery` 可查看未解事件。尚未取代 Hermes cron。
 
 ## PM provider 設定與限額
 
 私有 `BATC_PM_PROVIDER_CONFIG` TOML (0600) 有多個 `[[providers]]`：`id`、`kind`（`agy-shim`、`openai-compatible`、`codex-acp`、`claude-acp`、`gemini`）、`base_url`、`model`、`daily_cap`；頂層 `fallback_order = ["agy-claude", "codex", "claude"]`。`base_url` 僅允許無 credential 的 loopback HTTP；`BATC_AGY_SHIM_TOKEN` 從環境供本機 agy shim adapter 使用，不能提交設定或使用付費 API key。每 task 可給 `pm_provider`，recipe 可給預設；未給則首選 agy Claude。新 provider 只需一個小 adapter class、設定 entry 及自己的 fake endpoint／ACP contract test。設定日上限按 UTC 日計成功使用次數；`quota_error`、`rate_limited`、`auth_error` 只能在**確認未送 prompt**時切換至下一 provider，寫 `provider_usage` 與新的 task PM branch。已送、`needs_review` 或 uncertain prompt 必須先對帳，禁止切換時重播同一內容。錯誤以結構化 HTTP status/code 分類，不以可能含敏感內容的錯誤字串猜測。
 
-Jev router 仍可按每個 PM step 分類 `status_relay`／`verification`／`planning`／`review`，每次記 confidence、stakes、選擇與原因；Jev 不可用時 fail open 選 Codex。Routine status 可明確選 agy Gemini Flash；高風險／低信心規劃、查證、review 優先 scarce agy Claude，額度不足選 Codex。**M1 只有 router 決策／帳本介面；daemon 還未讓 router 驅動 live PM 步驟。**它與 Goose provider switcher 是兩層：Jev 決定一步適合誰，switcher 只處理該 provider 在未送 prompt 前的故障。額度 cap 是服務的保守計數，不代表第三方真實剩餘額度。真 provider 執行、成本與品質 A/B 屬 M2。
+Jev router 仍可按每個 PM step 分類 `status_relay`／`verification`／`planning`／`review`，每次記 confidence、stakes、選擇與原因；Jev 不可用時 fail open 選 Codex。Routine status 可明確選 agy Gemini Flash；高風險／低信心規劃、查證、review 優先 scarce agy Claude，額度不足選 Codex。**M1 只有 router 決策／帳本介面；daemon 還未讓 router 驅動 live PM 步驟。**規則引擎是 deterministic，不會偷偷呼叫模型；Goose live gate 仍關閉。它與 Goose provider switcher 是兩層：Jev 決定一步適合誰，switcher 只處理該 provider 在未送 prompt 前的故障。額度 cap 是服務的保守計數，不代表第三方真實剩餘額度。OpenAI 相容 adapter 的探針現在要求 `/v1/models` 含設定的 model ID；各種 ACP/provider 的實際模型驗證仍需 pinned Goose contract test。真 provider 執行、成本與品質 A/B 屬 M2。
 
 ## Pinned Goose 啟用門檻（M2 contract-test checklist）
 
@@ -82,4 +82,4 @@ Jev router 仍可按每個 PM step 分類 `status_relay`／`verification`／`pla
 4. 失敗時保持 handoff 停用，保留舊 session／私有 state，把 adapter/config 回退至 last known good。略過 wrapper 只會回原 agent，不會合併 target branch messages。
 5. 替換 relay 之前要讓 in-flight prompt 結束或明確取消，不能為安裝功能殺掉 active writer。
 
-此外還要證明 task-scoped MCP capability、subprocess env/process 隔離、ACP session 在 daemon 重啟後可恢復、provider auth/quota 分類、no-resend 及 pinned 版本在 grok-bot-01 的實機行為。**上述尚未全數通過，live Goose 保持停用，也不得進入真實 shadow trial。**獨立 reviewer 對本 PR 的 P1/P2 修正重新 sign-off 後，才討論 shadow trial；本 PR 不部署。
+目前 ACP adapter 的 fake smoke 使用 protocol 1，遇非 1 或沒有 session ID 即拒絕；上述 `load/new`、`configOptions`、`session/set_config_option`、真 provider choice／approval UI、故障保留、rollback 及 active-writer 項目尚**不是可執行 gate**。此外還要證明 task-scoped MCP capability、subprocess env/process 隔離、ACP session 在 daemon 重啟後可恢復、provider auth/quota 分類、no-resend 及 pinned 版本在 grok-bot-01 的實機行為。現有 BAT adapter contract tests 使用 mock host，涵蓋 start／recover／Codex send／reviewer 唯讀；真 BAT timeout、busy、failover、reload 和 tab revision race 仍未實機驗證。**live Goose 保持停用，也不得進入真實 shadow trial。**獨立 reviewer 對本 PR 的 P1/P2 修正重新 sign-off 後，才討論 smoke 範圍及後續實機 gate；本 PR 不部署。

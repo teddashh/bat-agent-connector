@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import uuid
@@ -71,6 +72,7 @@ class TaskCoordinator:
         self.max_continuations = max_continuations
         self.max_review_rejections = max_review_rejections
         self._writers: dict[tuple[str, str], asyncio.Lock] = {}
+        self._task_locks: dict[str, asyncio.Lock] = {}
 
     def _lock(self, host: str, sid: str) -> asyncio.Lock:
         return self._writers.setdefault((host, sid), asyncio.Lock())
@@ -83,6 +85,10 @@ class TaskCoordinator:
         return self.journal.get(task_id)
 
     async def tick(self, task_id: str) -> dict:
+        async with self._task_locks.setdefault(task_id, asyncio.Lock()):
+            return await self._tick(task_id)
+
+    async def _tick(self, task_id: str) -> dict:
         task = self.journal.get(task_id)
         if task["paused"] or task["state"] in {"done", "failed", "human_owned", "needs_ted"}:
             return task
@@ -139,20 +145,30 @@ class TaskCoordinator:
                   if role == "reviewer" else initial_prompt(task))
         return await self._send(self.journal.get(task["task_id"]), sid, prompt, role + ":initial")
 
-    async def _send(self, task: dict, sid: str, text: str, purpose: str) -> dict:
+    async def _send(self, task: dict, sid: str, text: str, purpose: str,
+                    *, prepared_command: dict | None = None) -> dict:
         async with self._lock(task["host"], sid):
             task = self.journal.get(task["task_id"])
             if task["paused"]:
                 return task
-            key = (f"{task['task_id']}:{purpose}:{task['review_rejections']}:{task['continuations']}:"
-                   f"{task.get('review_commit') if sid == task.get('reviewer_session_id') else sid}")
-            before = await self.adapter.prepare_send(task, sid)
-            if self.journal.get(task["task_id"])["paused"]:
-                return self.journal.get(task["task_id"])
-            cmd, fresh = self.journal.command(task["task_id"], "send", sid,
-                                               {"purpose": purpose, "before": before}, key)
-            if not fresh:
-                return self.journal.change(task["task_id"], "uncertain")
+            if prepared_command:
+                cmd = self.journal.command_get(prepared_command["command_id"])
+                payload = json.loads(cmd["payload"])
+                if (cmd["status"] != "needs_review" or cmd["session_id"] != sid or
+                        payload.get("prompt_sha256") != hashlib.sha256(text.encode()).hexdigest()):
+                    raise ValueError("prepared operator prompt does not match journal intent")
+                before = payload["before"]
+            else:
+                key = (f"{task['task_id']}:{purpose}:{task['review_rejections']}:{task['continuations']}:"
+                       f"{task.get('review_commit') if sid == task.get('reviewer_session_id') else sid}")
+                before = await self.adapter.prepare_send(task, sid)
+                if self.journal.get(task["task_id"])["paused"]:
+                    return self.journal.get(task["task_id"])
+                cmd, fresh = self.journal.command(task["task_id"], "send", sid,
+                                                   {"purpose": purpose, "before": before,
+                                                    "prompt_sha256": hashlib.sha256(text.encode()).hexdigest()}, key)
+                if not fresh:
+                    return self.journal.change(task["task_id"], "uncertain")
             try:
                 r = await self.adapter.send(task, sid, text, cmd["message_id"])
             except WriteRefused:
@@ -170,6 +186,11 @@ class TaskCoordinator:
             if not marker:
                 self.journal.command_status(cmd["command_id"], "uncertain")
                 return self.journal.change(task["task_id"], "uncertain")
+            if before.get("agent_kind") == "codex" and r.get("turn_attribution") != "exact_echo":
+                # Codex may ignore clientMessageId. A later timestamped reply is
+                # not evidence that this command owns the turn.
+                self.journal.command_status(cmd["command_id"], "uncertain", marker=marker)
+                return self.journal.change(task["task_id"], "uncertain")
             self.journal.command_status(cmd["command_id"], "accepted", marker=marker)
             state = "verifying" if sid == task.get("reviewer_session_id") else "running"
             field = "review_marker" if state == "verifying" else "turn_marker"
@@ -180,12 +201,15 @@ class TaskCoordinator:
         if not sid:
             return self.journal.change(task["task_id"], "uncertain")
         read = await self.adapter.read(task, sid, task["turn_marker"])
-        if read.get("turn_attribution") in {"unknown", "uncertain", "echo_not_visible", "queued_unconfirmed"}:
+        if read.get("turn_attribution") in {"unknown", "uncertain", "echo_not_visible",
+                                            "queued_unconfirmed", "timestamp_cursor"}:
+            self._mark_unproven_send(task["task_id"], sid)
             return self.journal.change(task["task_id"], "uncertain")
         if read.get("turn_done") and (read.get("turn_started") is not True or
                                       read.get("turn_attribution") not in {
-                                          "correlated", "correlated_after_prior_turn", "timestamp_cursor",
+                                          "correlated", "correlated_after_prior_turn",
                                       }):
+            self._mark_unproven_send(task["task_id"], sid)
             return self.journal.change(task["task_id"], "uncertain")
         decision = classify_read(read)
         if decision == "continue":
@@ -236,10 +260,6 @@ class TaskCoordinator:
         attribution = read.get("turn_attribution")
         if read.get("turn_started") is True and attribution in {"correlated", "correlated_after_prior_turn"}:
             pass
-        elif read.get("turn_started") is True and attribution == "timestamp_cursor" and (
-            before.get("agent_kind") == "codex" and before.get("before_cursor")
-        ):
-            pass  # weaker attribution; never used alone to approve review
         else:
             return self.journal.change(task["task_id"], "uncertain")
         self.journal.command_status(cmd["command_id"], "accepted", marker=marker)
@@ -303,6 +323,9 @@ class TaskCoordinator:
                 "verification_commit": commit, "verification_tree": tree,
             })
         if not task["reviewer_session_id"]:
+            lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
+            if lead_read.get("streaming") is not False or lead_read.get("pending"):
+                return task
             task = self.journal.change(task["task_id"], "verifying", fields={
                 "review_commit": commit, "review_tree": tree, "review_marker": None,
             })
@@ -313,12 +336,18 @@ class TaskCoordinator:
                                     reviewer_prompt(task, commit, tree), "reviewer:initial")
         read = await self.adapter.read(task, task["reviewer_session_id"], task["review_marker"])
         attributed = read.get("first_turn_proven") is True and read.get("turn_attribution") in {
-            "correlated", "correlated_after_prior_turn", "timestamp_cursor",
+            "correlated", "correlated_after_prior_turn",
         }
+        if read.get("turn_attribution") == "timestamp_cursor" and read.get("turn_started"):
+            self._mark_unproven_send(task["task_id"], task["reviewer_session_id"])
+            return self.journal.change(task["task_id"], "uncertain")
         if not (read.get("turn_started") is True and read.get("turn_done") is True and attributed):
             return task
         output = "\n".join(str(m.get("text") or "") for m in read.get("messages") or [] if m.get("role") != "user")
         if "REVIEW: PASS" in output:
+            lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
+            if lead_read.get("streaming") is not False or lead_read.get("pending"):
+                return task
             fresh = await self.adapter.candidate_identity(task)
             if not fresh or not fresh.get("clean") or (fresh["candidate_commit"], fresh["tree_hash"]) != (commit, tree):
                 return self.journal.change(task["task_id"], "verifying", fields={
@@ -339,3 +368,54 @@ class TaskCoordinator:
                                     "Independent review rejected the candidate. Address the review findings, rerun tests, "
                                     "and report a new milestone.\n" + output[-3000:], "review_rework")
         return task
+
+    def _mark_unproven_send(self, task_id: str, session_id: str):
+        for cmd in reversed(self.journal.commands(task_id)):
+            if cmd["kind"] == "send" and cmd["session_id"] == session_id and cmd["status"] == "accepted":
+                self.journal.command_status(cmd["command_id"], "uncertain")
+                break
+
+    async def resolve_command(self, task_id: str, command_id: str, *, token: str, outcome: str,
+                              actor: str, source: str, evidence: str,
+                              observed_result: str = "none", turn_ref: str | None = None,
+                              candidate_commit: str | None = None, tree_hash: str | None = None,
+                              next_prompt: str | None = None) -> dict:
+        """An explicit operator attestation for one uncertain send, never a replay."""
+        async with self._task_locks.setdefault(task_id, asyncio.Lock()):
+            task = self.journal.get(task_id)
+            command = self.journal.command_get(command_id)
+            if command["task_id"] != task_id or command["status"] != "uncertain":
+                raise ValueError("command is not uncertain for this task")
+            if next_prompt is not None:
+                if not isinstance(next_prompt, str) or not next_prompt.strip() or len(next_prompt) > 18_000:
+                    raise ValueError("invalid new prompt")
+                read = await self.adapter.read(task, command["session_id"], command["marker"])
+                if read.get("streaming") is not False or read.get("pending"):
+                    raise ValueError("BAT session must be confirmed idle before new prompt")
+                next_before = await self.adapter.prepare_send(task, command["session_id"])
+            else:
+                next_before = None
+            if observed_result == "review_pass":
+                lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
+                if lead_read.get("streaming") is not False or lead_read.get("pending"):
+                    raise ValueError("lead session must be settled before review resolution")
+                identity = await self.adapter.candidate_identity(task)
+                if (not identity or not identity.get("clean") or
+                        (identity["candidate_commit"], identity["tree_hash"]) !=
+                        (candidate_commit, tree_hash)):
+                    raise ValueError("candidate changed before operator review resolution")
+                read = await self.adapter.read(task, command["session_id"], command["marker"])
+                if read.get("streaming") is not False:
+                    raise ValueError("reviewer turn is still active")
+            result = self.journal.resolve_send(
+                task_id, command_id, token=token, outcome=outcome, actor=actor,
+                source=source, evidence=evidence, observed_result=observed_result,
+                turn_ref=turn_ref, candidate_commit=candidate_commit, tree_hash=tree_hash,
+                next_prompt_sha256=hashlib.sha256(next_prompt.encode()).hexdigest()
+                if next_prompt is not None else None, next_before=next_before,
+            )
+            if next_prompt is not None:
+                return await self._send(result, command["session_id"], next_prompt,
+                                        "operator:" + command_id,
+                                        prepared_command={"command_id": result["_next_command_id"]})
+            return result

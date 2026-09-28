@@ -27,7 +27,7 @@ from .task_verifier import ObservedVerifier, load_settings
 DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 
 
-def request(method: str, **params) -> dict:
+def request(method: str, *, _auth_token: str | None = None, **params) -> dict:
     """Small stdio-MCP client to the local daemon; no BAT token crosses this API."""
     url = os.environ.get("BATC_TASK_URL", DEFAULT_URL)
     parsed = urlsplit(url)
@@ -36,7 +36,7 @@ def request(method: str, **params) -> dict:
         raise ValueError("task daemon URL must be loopback (use SSH forwarding on castle1)")
     cap = os.environ.get("BATC_TASK_CAPABILITY")
     token_file = Path(os.environ.get("BATC_TASK_ADMIN_TOKEN_FILE", state_dir() / "task-admin.token"))
-    token = cap or token_file.read_text().strip()
+    token = _auth_token or cap or token_file.read_text().strip()
     req = urllib.request.Request(  # noqa: S310 - validated loopback URL
         url, method="POST", data=json.dumps({"method": method, "params": params}).encode(),
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})
@@ -75,7 +75,7 @@ class TaskDaemon:
             discord or os.environ.get("BATC_DISCORD_BOT_TOKEN")
         ) else None
 
-    async def call(self, method: str, params: dict) -> dict:
+    async def call(self, method: str, params: dict, *, auth_token: str | None = None) -> dict:
         if method == "work_delivery_status":
             return {"unresolved_events": self.journal.discord_unresolved(),
                     "board": self.journal.board_get(os.environ.get("BATC_DISCORD_BOARD_CHANNEL_ID", ""))}
@@ -87,6 +87,12 @@ class TaskDaemon:
             else:
                 raise ValueError("event_id or board_channel_id required")
             return {"confirmed_absent": True}
+        if method == "work_delivery_confirm_found":
+            if not self.publisher:
+                raise ValueError("Discord publisher is not configured")
+            return await self.publisher.confirm_found(event_id=params.get("event_id"),
+                                                      board_channel_id=params.get("board_channel_id"),
+                                                      message_id=params["message_id"])
         if method == "work_submit":
             if params.get("engine", "rules") == "goose":
                 raise ValueError("Goose live tasks are disabled until ACP recovery and provider validation")
@@ -95,16 +101,32 @@ class TaskDaemon:
             task = self.journal.submit(**params)
             return {"task_id": task["task_id"], "state": task["state"], "submitted_at": task["submitted_at"]}
         task_id = params["task_id"]
+        if method == "work_reconcile_capability":
+            token = self.journal.issue_reconcile_capability(task_id, params["command_id"])
+            return {"task_id": task_id, "command_id": params["command_id"], "capability": token,
+                    "expires_in_s": 600}
+        if method == "work_reconcile":
+            if not auth_token:
+                raise ValueError("command-scoped reconciliation capability required")
+            return await self.coordinator.resolve_command(
+                task_id, params["command_id"], token=auth_token, outcome=params["outcome"],
+                actor=params["actor"], source=params["source"], evidence=params["evidence"],
+                observed_result=params.get("observed_result", "none"), turn_ref=params.get("turn_ref"),
+                candidate_commit=params.get("candidate_commit"), tree_hash=params.get("tree_hash"),
+                next_prompt=params.get("next_prompt"),
+            )
         if method == "work_status":
             task = self.journal.get(task_id)
             return {**task, "commands": self.journal.commands(task_id)[-5:],
-                    "events": self.journal.events(task_id)[-10:]}
+                    "events": self.journal.events(task_id)[-10:],
+                    "reconciliations": self.journal.reconciliations(task_id)}
         if method == "work_result":
             task = self.journal.get(task_id)
             return {"task_id": task_id, "state": task["state"], "delivered": task["delivered"],
                     "delivered_at": task["delivered_at"], "time_to_deliver_s": task["time_to_deliver_s"],
                     "result": task["result"], "verification_commit": task["verification_commit"],
-                    "review_rejections": task["review_rejections"], "ted_interventions": task["ted_interventions"]}
+                    "review_rejections": task["review_rejections"], "ted_interventions": task["ted_interventions"],
+                    "ted_interventions_basis": "caller_reported"}
         if method == "work_pause":
             if params.get("actor", "service") not in {"service", "ted"}:
                 raise ValueError("invalid actor")
@@ -173,11 +195,20 @@ class TaskDaemon:
             admin = hmac.compare_digest(token, self._admin_token)
             scoped = (method.startswith("task_") and bool(params.get("task_id"))
                       and self.journal.authorize_capability(token, params["task_id"]))
-            if not (admin or scoped):
+            reconcile = (method == "work_reconcile" and bool(params.get("task_id"))
+                         and bool(params.get("command_id"))
+                         and self.journal.authorize_reconcile_capability(
+                             token, params["task_id"], params["command_id"]))
+            if method == "work_reconcile" and not reconcile:
+                raise ValueError("command-scoped reconciliation capability required")
+            if method == "work_reconcile_capability" and not admin:
+                raise ValueError("admin authorization required")
+            if not (admin or scoped or reconcile):
                 raise ValueError("task API authorization failed")
             if scoped and not method.startswith("task_"):
                 raise ValueError("capability scope violation")
-            result = {"result": await self.call(method, params)}
+            result = {"result": await self.call(method, params,
+                                                auth_token=token if reconcile else None)}
             status = "200 OK"
         except Exception as exc:  # noqa: BLE001
             # Do not echo task text, tokens, or provider exceptions over RPC.

@@ -120,12 +120,16 @@ class GooseACP:
                     await proc.stdin.drain()
 
         try:
-            await rpc("initialize", {"protocolVersion": 2, "clientCapabilities": {},
-                                     "clientInfo": {"name": "bat-task-service", "version": "0.1"}})
+            initialized = await rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {},
+                                                    "clientInfo": {"name": "bat-task-service", "version": "0.1"}})
+            if not isinstance(initialized, dict) or initialized.get("protocolVersion") != 1:
+                raise RuntimeError("Goose ACP protocol version is not the pinned version 1")
             scoped = {"name": "bat-task", "command": sys.executable,
                       "args": ["-m", "bat_agent_connector.task_scoped_mcp", task_id],
                       "env": [{"name": "BATC_TASK_CAPABILITY", "value": capability}]}
             session = await rpc("session/new", {"cwd": cwd, "mcpServers": [scoped]})
+            if not isinstance(session, dict) or not isinstance(session.get("sessionId"), str):
+                raise RuntimeError("Goose ACP did not return a session identity")
             result = await rpc("session/prompt", {"sessionId": session["sessionId"],
                                                   "prompt": [{"type": "text", "text": prompt}]})
             return {"session_id": session["sessionId"], "stop_reason": result.get("stopReason")}

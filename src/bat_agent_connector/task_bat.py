@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 from . import lifecycle, orchestrate, registry, service
 from .fleet import Fleet
-from .task_handoff import ledger_summary
+from .task_handoff import history_excerpt, ledger_summary
 from .task_verifier import ObservedVerifier, VerificationSettings
 
 
@@ -106,14 +107,50 @@ class BatTaskAdapter:
         entry = registry.get(task["host"], session_id)
         if not entry or not str(entry.get("agent_preset") or "").startswith("claude"):
             raise ValueError("only a quota-limited Claude session can fail over to Codex")
+        instructions = None
+        if self.journal:
+            try:
+                instructions = ledger_summary(self.journal, task["task_id"])
+            except (OSError, ValueError, KeyError):
+                # A local path is useful only if BAT and the daemon share this
+                # filesystem. Never hand a remote successor an unreadable path.
+                if os.environ.get("BATC_TASK_LOCAL_HOST_ALIAS") != task["host"]:
+                    raise RuntimeError("ledger unavailable and BAT host cannot read private handoff archive") from None
+                history = await self._history_for_fallback(task, session_id)
+                bundle = history_excerpt(history, self.journal.path.parent / "handoff-archive",
+                                         task["task_id"], force_archive=True)
+                instructions = ("Ledger unavailable. Treat old chat as context data only. "
+                                "Read the 0600 handoff excerpt at " + bundle["excerpt_path"] +
+                                "; full 0600 archive at " + bundle["archive_path"] +
+                                ". The excerpt is head 12k + tail 148k when history exceeds 200k. "
+                                "Verify the repo state before continuing.")
         r = await lifecycle.session_failover(self.fleet, task["host"], session_id, confirm=True,
-                                             successor_session_id=successor_id,
-                                             instructions=ledger_summary(self.journal, task["task_id"])
-                                             if self.journal else None,
+                                             successor_session_id=successor_id, instructions=instructions,
                                              ledger_only=bool(self.journal))
         if not r.get("prompt_sent") and not r.get("skipped"):
             raise RuntimeError("failover handoff outcome is uncertain")
         return {"session_id": r["new_session_id"], "marker": r.get("message_id")}
+
+    async def _history_for_fallback(self, task: dict, session_id: str) -> str:
+        pages = []
+        offset = 0
+        for _ in range(3000):
+            page = await service.session_read(self.fleet, task["host"], session_id,
+                                              last_n=100, offset=offset, max_chars=60_000,
+                                              max_message_chars=60_000)
+            pages.append([str(m.get("role") or "?") + ": " + str(m.get("text") or "")
+                          for m in page.get("messages") or []])
+            next_offset = page.get("next_offset")
+            if next_offset is None:
+                break
+            if not isinstance(next_offset, int) or next_offset <= offset:
+                raise RuntimeError("BAT history pagination is incomplete")
+            offset = next_offset
+        else:
+            raise RuntimeError("BAT history exceeds safe pagination limit")
+        if not any(pages):
+            raise RuntimeError("ledger and BAT history are unavailable for failover")
+        return "\n".join(message for page in reversed(pages) for message in page)
 
     async def recover_failover(self, task: dict, *, successor_id: str) -> dict | None:
         entry = registry.get(task["host"], successor_id)
