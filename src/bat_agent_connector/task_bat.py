@@ -61,7 +61,7 @@ class BatTaskAdapter:
                   f"grep -Fxq 'worktree {path}'; then exit 0; fi; "
                   f"if git -C {qroot} show-ref --verify --quiet refs/heads/{qbranch}; then "
                   f"git -C {qroot} worktree add {qpath} {qbranch}; "
-                  f"else (git -C {qroot} fetch origin {qbase} && ref=FETCH_HEAD) || ref={qbase}; "
+                  f"else if git -C {qroot} fetch origin {qbase}; then ref=FETCH_HEAD; else ref={qbase}; fi; "
                   f"git -C {qroot} worktree add -b {qbranch} {qpath} $ref; fi")
         await self._ssh_script(task, script)
         identity = await self.verifier.identity(task, path)
