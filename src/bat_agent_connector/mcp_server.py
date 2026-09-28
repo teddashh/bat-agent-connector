@@ -9,6 +9,7 @@ rate-limited and is appended to the audit log.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import functools
 import ipaddress
 import logging
@@ -25,8 +26,10 @@ from .config import Config, load_config
 from .errors import BatError
 from .fleet import Fleet
 from .redact import redact
+from .task_daemon import request as task_request
 
 READ_TOOLS = [
+    "work_status", "work_result",
     "hosts_list",
     "host_status",
     "workspaces_list",
@@ -48,6 +51,7 @@ WRITE_TOOLS = [
     "session_relay",
 ]
 ORCHESTRATE_TOOLS = [
+    "work_submit", "work_pause", "work_resume",
     "session_start",
     "worktree_merge",
     "worktree_remove",
@@ -230,6 +234,53 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         quota_sessions,
     ):
         mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
+
+    async def work_status(task_id: str) -> dict[str, Any]:
+        """Read a durable task state, recent commands and events from the local task daemon."""
+        return await asyncio.to_thread(task_request, "work_status", task_id=task_id)
+
+    async def work_result(task_id: str) -> dict[str, Any]:
+        """Read delivery outcome, review count, verification and elapsed time without waiting."""
+        return await asyncio.to_thread(task_request, "work_result", task_id=task_id)
+
+    for fn in (work_status, work_result):
+        mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
+
+    if fleet.any_orchestrate:
+        task_write = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)
+
+        async def work_submit(
+            project: str, host: str, workspace: str, original_words: str, idempotency_key: str,
+            discord_thread_id: str | None = None, recipe: str = "feature-to-staging",
+            acceptance: str = "", engine: Literal["rules", "goose"] = "rules",
+            interpretation: str | None = None, lead_agent: Literal["codex", "claude"] = "codex",
+            pm_provider: str | None = None, base_branch: str | None = None,
+        ) -> dict[str, Any]:
+            """Queue Ted's exact words and return task_id immediately. Hermes must not rewrite or decompose them.
+            interpretation is a non-authoritative archival note and never enters the coding prompt."""
+            return await asyncio.to_thread(task_request, "work_submit", project=project, host=host,
+                                           workspace=workspace, original_words=original_words,
+                                           idempotency_key=idempotency_key, discord_thread_id=discord_thread_id,
+                                           recipe=recipe, acceptance=acceptance, engine=engine,
+                                           interpretation=interpretation, lead_agent=lead_agent,
+                                           pm_provider=pm_provider, base_branch=base_branch)
+
+        async def work_pause(task_id: str, abort_current: bool = False,
+                             actor: Literal["service", "ted"] = "service",
+                             source_message_id: str | None = None) -> dict[str, Any]:
+            """Stop new dispatch; optionally abort the current turn. Persisted before returning."""
+            return await asyncio.to_thread(task_request, "work_pause", task_id=task_id,
+                                           abort_current=abort_current, actor=actor,
+                                           source_message_id=source_message_id)
+
+        async def work_resume(task_id: str, actor: Literal["service", "ted"] = "service",
+                              source_message_id: str | None = None) -> dict[str, Any]:
+            """Allow dispatch after the daemon reconciles any uncertain command."""
+            return await asyncio.to_thread(task_request, "work_resume", task_id=task_id,
+                                           actor=actor, source_message_id=source_message_id)
+
+        for fn in (work_submit, work_pause, work_resume):
+            mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=task_write)
 
     if fleet.any_writes:
         enabled = ", ".join(sorted(h for h in config.hosts if fleet.writes_enabled(h)))

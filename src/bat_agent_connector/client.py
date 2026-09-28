@@ -21,7 +21,7 @@ import logging
 import ssl
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,6 +33,7 @@ from .channels import check_allowed, is_write, timeout_for
 from .config import HostConfig
 from .errors import (
     AuthError,
+    ChannelNotAllowed,
     ConnectionLost,
     FingerprintMismatch,
     InvokeError,
@@ -325,16 +326,41 @@ class BatClient:
         self.last_used = time.monotonic()
         return (time.monotonic() - t) * 1000
 
+    async def guard_read(self, channel: str, params: dict) -> Any:
+        """Read BAT identity while an outer write holds the client semaphore.
+
+        This intentionally skips connect, retries, and semaphore acquisition;
+        the outer guarded invoke already owns the connection and semaphore.
+        """
+        if channel not in {"claude:get-session-meta", "worktree:status", "git:getRoot"}:
+            raise ChannelNotAllowed("guard read channel is not an identity read")
+        canonical = check_allowed(channel, allow_writes=False, allow_orchestrate=False)
+        frame = {"type": "invoke", "id": f"batc-{next(self._ids)}",
+                 "channel": canonical, "params": params}
+        reply = await self._roundtrip(frame, timeout_for(canonical))
+        if reply.get("type") == "invoke-error":
+            raise InvokeError(f"{self.host.name}: {canonical}: {redact(reply.get('error'))}")
+        return reply.get("result")
+
     async def invoke(self, channel: str, params: dict | None = None, *, timeout: float | None = None,
-                     retry_on_disconnect: bool = False) -> Any:
+                     retry_on_disconnect: bool = False,
+                     before_send: Callable[[], None] | None = None,
+                     before_frame: Callable[[], Awaitable[None]] | None = None,
+                     frame_guard: Callable[[dict], None] | None = None) -> Any:
         """Invoke an allow-listed channel. Raises ChannelNotAllowed before sending anything otherwise."""
         canonical = check_allowed(
             channel, allow_writes=self.allow_writes, allow_orchestrate=self.allow_orchestrate
         )
-        return await self._invoke_checked(canonical, params, timeout, retry_on_disconnect=retry_on_disconnect)
+        return await self._invoke_checked(canonical, params, timeout,
+                                          retry_on_disconnect=retry_on_disconnect,
+                                          before_send=before_send, before_frame=before_frame,
+                                          frame_guard=frame_guard)
 
     async def _invoke_checked(self, canonical: str, params: dict | None, timeout: float | None,
-                              *, retry_on_disconnect: bool = False) -> Any:
+                              *, retry_on_disconnect: bool = False,
+                              before_send: Callable[[], None] | None = None,
+                              before_frame: Callable[[], Awaitable[None]] | None = None,
+                              frame_guard: Callable[[dict], None] | None = None) -> Any:
         write = is_write(canonical)
         timeout = timeout or timeout_for(canonical)
         attempts = 1 if write and (canonical != "claude:send-message" or not retry_on_disconnect) else 3
@@ -343,12 +369,18 @@ class BatClient:
             try:
                 await self.connect()
                 async with self._sem:
+                    if before_frame:
+                        await before_frame()
                     frame = {
                         "type": "invoke",
                         "id": f"batc-{next(self._ids)}",
                         "channel": canonical,
                         "params": params or {},
                     }
+                    if before_send:
+                        before_send()
+                    if frame_guard:
+                        frame_guard(frame)
                     reply = await self._roundtrip(frame, timeout)
                 self.last_used = time.monotonic()
                 if reply.get("type") == "invoke-error":

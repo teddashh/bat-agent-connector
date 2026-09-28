@@ -1,8 +1,9 @@
 """Optional judgment layer: TypeSafe Jev (System One API).
 
-Off unless an API key is present in the environment (``TYPESAFE_API_KEY`` by default)
-or ``[jev] enabled = true``. Every call is short (default 3 s timeout), validated, and
-never raises: callers get ``None`` on any error and fall back to their deterministic
+Off unless a TypeSafe or OpenRouter key is present in the environment. TypeSafe
+is tried first; OpenRouter Decisions uses only ``typesafe/jev-1.13``. Every
+call is short (default 3 s timeout), validated, and never raises: callers get
+``None`` if both transports fail and fall back to their deterministic
 result (fail-open for classification, fail-SAFE for merge decisions: the cleanup code
 escalates instead of merging when Jev is unavailable).
 
@@ -16,8 +17,8 @@ import asyncio
 import json
 import math
 import os
-import urllib.error
 import urllib.request
+from contextvars import ContextVar
 from typing import Any
 
 from .config import JevConfig
@@ -34,6 +35,8 @@ STATE_CLASSES = {
     "and is idle.",
     "error_other": "The agent stopped because of some other error (crash, API error unrelated to quota, tool failure).",
 }
+OPENROUTER_URL = "https://openrouter.ai/api/alpha/decisions"
+OPENROUTER_JEV_MODEL = "typesafe/jev-1.13"
 
 
 def _prob(v: Any) -> bool:
@@ -71,6 +74,7 @@ def validate(questions: dict, answers: Any) -> list[str]:
 class Jev:
     def __init__(self, cfg: JevConfig) -> None:
         self.cfg = cfg
+        self._answered_by: ContextVar[str | None] = ContextVar("jev_answered_by", default=None)
 
     def _key(self) -> str:
         key = os.environ.get(self.cfg.api_key_env, "").strip()
@@ -78,16 +82,26 @@ class Jev:
             register_secret(key)
         return key
 
+    def _openrouter_key(self) -> str:
+        key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+        if key:
+            register_secret(key)
+        return key
+
+    @property
+    def backend(self) -> str | None:
+        return self._answered_by.get()
+
     @property
     def enabled(self) -> bool:
         if self.cfg.enabled == "false":
             return False
-        return bool(self._key())
+        return bool(self._key() or self._openrouter_key())
 
     def status(self) -> str:
         if self.cfg.enabled == "false":
             return "disabled"
-        return "enabled" if self._key() else "no-api-key"
+        return "enabled" if (self._key() or self._openrouter_key()) else "no-api-key"
 
     def _post(self, body: bytes, key: str) -> Any:
         req = urllib.request.Request(  # noqa: S310 - base_url is validated to be https
@@ -99,26 +113,45 @@ class Jev:
         with urllib.request.urlopen(req, timeout=self.cfg.timeout_s) as resp:  # noqa: S310
             return json.load(resp)
 
+    def _post_openrouter(self, body: bytes, key: str) -> Any:
+        req = urllib.request.Request(  # noqa: S310 - fixed HTTPS OpenRouter endpoint
+            OPENROUTER_URL, data=body, method="POST",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=self.cfg.timeout_s) as resp:  # noqa: S310
+            return json.load(resp)
+
+    async def _attempt(self, post, body: bytes, key: str) -> Any:
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(post, body, key),
+                                          timeout=self.cfg.timeout_s + 0.5)
+        except Exception:  # noqa: BLE001 - optional judgment must never break the caller
+            return None
+
     async def ask(self, state: Any, questions: dict) -> dict | None:
-        """Return validated answers, or None on any problem (disabled, timeout, HTTP error, invalid)."""
+        """Use TypeSafe first, then OpenRouter Jev; invalid answers never reach callers."""
+        self._answered_by.set(None)
         if self.cfg.enabled == "false":
             return None
         key = self._key()
-        if not key:
+        if key:
+            body = json.dumps({"model": self.cfg.model, "state": state, "questions": questions}).encode()
+            data = await self._attempt(self._post, body, key)
+            answers = data.get("answers") if isinstance(data, dict) else None
+            if not validate(questions, answers):
+                self._answered_by.set("typesafe")
+                return answers
+        fallback_key = self._openrouter_key()
+        if not fallback_key:
             return None
-        body = json.dumps({"model": self.cfg.model, "state": state, "questions": questions}).encode()
-        try:
-            data = await asyncio.wait_for(
-                asyncio.to_thread(self._post, body, key), timeout=self.cfg.timeout_s + 0.5
-            )
-        except (urllib.error.URLError, OSError, ValueError, asyncio.TimeoutError, TimeoutError):
-            return None
-        except Exception:  # noqa: BLE001 - optional layer must never break the caller
-            return None
-        answers = (data or {}).get("answers") if isinstance(data, dict) else None
-        if validate(questions, answers):
-            return None
-        return answers
+        body = json.dumps({"model": OPENROUTER_JEV_MODEL, "state": state,
+                           "questions": questions}).encode()
+        data = await self._attempt(self._post_openrouter, body, fallback_key)
+        answers = data.get("answers") if isinstance(data, dict) else None
+        if not validate(questions, answers):
+            self._answered_by.set("openrouter_jev")
+            return answers
+        return None
 
     async def classify_state(self, excerpt: str) -> dict | None:
         q = {
@@ -133,7 +166,8 @@ class Jev:
         if not a:
             return None
         s = a["state"]
-        return {"state": s["choice"], "confidence": round(float(s["confidence"]), 3)}
+        return {"state": s["choice"], "confidence": round(float(s["confidence"]), 3),
+                "jev_backend": self.backend}
 
     async def merge_gate(self, task: str, final_output: str, diff_excerpt: str, tests: str) -> dict | None:
         """Judge whether an idle worktree session's work looks complete and safe to merge."""
@@ -179,6 +213,7 @@ class Jev:
             "diff_verdict": d["choice"],
             "diff_confidence": round(float(d["confidence"]), 3),
             "tests_ok": round(float(a["tests_ok"]["noul"]), 3),
+            "jev_backend": self.backend,
         }
 
 

@@ -11,6 +11,7 @@ import json
 import statistics
 import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 from . import registry
@@ -910,6 +911,8 @@ async def session_send(
     ensure_loaded: bool = True,
     queue: bool = False,
     tool: str = "session_send",
+    retry_on_disconnect: bool = True,
+    before_invoke: Callable[[], None] | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
     if not isinstance(text, str) or not text.strip():
@@ -984,9 +987,12 @@ async def session_send(
             text=text,
         )
         try:
+            if before_invoke:
+                before_invoke()
             r = await c.invoke(
                 "claude:send-message", {"sessionId": sid, "prompt": text, "clientMessageId": mid},
-                retry_on_disconnect=agent_kind(t.get("agentPreset")) == "claude",
+                retry_on_disconnect=retry_on_disconnect and agent_kind(t.get("agentPreset")) == "claude",
+                before_send=before_invoke,
             )
         except BatError as e:
             audit.record(

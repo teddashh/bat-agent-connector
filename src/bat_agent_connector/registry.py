@@ -66,6 +66,29 @@ def get(host: str, session_id: str) -> dict | None:
     return None
 
 
+def ensure_existing(host: str, entry: dict) -> None:
+    """Restore local lookup for a BAT session verified by task journal and host meta."""
+    p = registry_path()
+    with _locked(p):
+        items = _read(p)
+        for old in items:
+            if old.get("host") == host and old.get("session_id") == entry.get("session_id"):
+                if (old.get("task_id") not in {None, entry.get("task_id")}
+                        or old.get("role") not in {None, entry.get("role")}
+                        or any(old.get(key) not in {None, entry.get(key)} for key in (
+                            "workspace_id", "origin_cwd", "cwd", "worktree_path", "branch",
+                            "agent_preset"))):
+                    raise ValueError("local session entry changed during BAT identity verification")
+                old.update(entry)
+                old["status"] = "active"
+                old["updated_at"] = time.time()
+                _write(p, items)
+                return
+        items.append({**entry, "host": host, "status": "active", "created_at": time.time(),
+                      "recovered_from": "task_journal"})
+        _write(p, items)
+
+
 def find_prefix(host: str, prefix: str) -> list[dict]:
     return [
         e
@@ -136,6 +159,35 @@ def update(host: str, session_id: str, **fields) -> None:
             if e.get("host") == host and e.get("session_id") == session_id:
                 e.update(fields)
                 e["updated_at"] = time.time()
+        _write(p, items)
+
+
+def record_handoff_frame(host: str, *, old_session_id: str, successor_id: str, task_id: str,
+                         worktree_path: str, branch: str, command_id: str,
+                         message_id: str, prompt_sha256: str) -> None:
+    """Atomically bind an actual BAT frame to the still-owned successor registry row."""
+    from .errors import TaskIdentityMismatch
+
+    p = registry_path()
+    with _locked(p):
+        items = _read(p)
+        old = next((e for e in items if e.get("host") == host and
+                    e.get("session_id") == old_session_id), None)
+        successor = next((e for e in items if e.get("host") == host and
+                          e.get("session_id") == successor_id), None)
+        if (not old or old.get("worktree_path") != worktree_path or old.get("branch") != branch
+                or not successor or successor.get("session_id") != successor_id
+                or successor.get("failover_of") != old_session_id
+                or successor.get("shares_worktree_with") != old_session_id
+                or successor.get("task_id") != task_id
+                or successor.get("worktree_path") != worktree_path
+                or successor.get("cwd") != worktree_path or successor.get("branch") != branch
+                or successor.get("status") != "active" or successor.get("handoff_status") != "pending"
+                or successor.get("handoff_command_id") != command_id
+                or successor.get("handoff_message_id") != message_id):
+            raise TaskIdentityMismatch("successor registry ownership changed before BAT handoff frame")
+        successor["handoff_frame_sha256"] = prompt_sha256
+        successor["updated_at"] = time.time()
         _write(p, items)
 
 

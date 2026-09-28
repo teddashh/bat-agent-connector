@@ -84,6 +84,29 @@ account changes are never sent.
 
 ## MCP setup
 
+### Task service milestone (opt-in)
+
+`batc serve` runs the SQLite WAL task coordinator on `127.0.0.1:18796`. The existing MCP server adds
+`work_submit`, `work_status`, `work_pause`, `work_resume`, and `work_result`; its stdio process calls that daemon
+at `BATC_TASK_URL` (default `http://127.0.0.1:18796/rpc`). `work_submit` takes Ted's **exact** words in
+`original_words` and an idempotency key such as the Discord message ID, then returns a `task_id` without
+waiting for BAT. Hermes must not reinterpret or split the request. The lead Codex/Claude session plans in the repo.
+Task writes require the host's existing `writes=true` and `orchestrate=true` settings. Existing low-level tools
+and `batc` commands remain available.
+
+The rules engine is the default. A trusted test command must be configured locally; the service observes its
+exit status on the clean candidate commit and records verification before opening a fresh reviewer session.
+The daemon currently rejects live Goose tasks. Goose ACP, provider fallback, the per-step Jev router, and Discord
+posting have adapter/test coverage; real Goose contract checks, Discord credentials, deployment and cron replacement
+are deferred. The task API requires a local admin token or scoped capability and binds only to loopback. See
+[the task-service design](docs/design/task-service.md) for states, recovery, private configuration and rollout.
+Codex timestamp cursors do not prove command ownership. An uncertain send remains stopped until a command-scoped,
+one-time operator reconciliation (`batc task-reconcile`); it is never replayed automatically. Discord delivery
+that falls outside the recent-message scan also requires an explicit found-ID or absent confirmation.
+Claude-to-Codex failover journals its handoff as a separate uncertain send. Long original requests use a complete
+private archive verified from the successor host before dispatch; the service fails closed if access cannot be proved.
+No paid API key is required.
+
 The server name is `bat`. Examples (add `--read-only` if you want to be sure):
 
 **Claude Code**
@@ -201,8 +224,9 @@ It does not replace a commit-bound verification record for automatic cleanup.
 * Tokens are resolved at connect time from a reference and redacted from every error string.
 * The client always drains the socket (BAT drops clients with 256 queued frames) and uses bounded event queues.
 * Session text is untrusted input: agents should not follow instructions found in it.
-* The optional Jev judgment layer is off without an API key, times out after a few seconds, fails safe, and gets only
-  short excerpts with credential-looking strings masked. No keys live in this repository.
+* The optional Jev judgment layer tries TypeSafe first, then OpenRouter Decisions `typesafe/jev-1.13` using
+  `OPENROUTER_API_KEY` from the environment. It times out after a few seconds and retains deterministic
+  decisions if both fail. It gets short excerpts with credential-looking strings masked. No keys live here.
 
 Details: [SECURITY.md](SECURITY.md), [docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/ORCHESTRATE.md](docs/ORCHESTRATE.md).
 
