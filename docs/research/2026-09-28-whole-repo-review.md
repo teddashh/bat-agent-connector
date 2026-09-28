@@ -11,6 +11,8 @@
 | 嚴重度／狀態 | 位置與證據 | 處理 |
 |---|---|---|
 | High，已修 | `src/bat_agent_connector/lifecycle.py:987`：舊 `session_cleanup` 原可把 task-service 擁有的 session 當閒置 worktree 清理；`lifecycle.py:1379` 的 `main_session` 原可選 headless task lead 做舊 relay。 | registry 帶 `task_id` 的 session 排除 cleanup 與 main relay；`tests/test_lifecycle.py` 覆蓋兩路。 |
+| High，已修（獨立 BAT 審查） | `src/bat_agent_connector/orchestrate.py:259`、`task_bat.py:143`：task lead 原在 BAT start 完成後才補 `task_id`；若 start 後、初次 send 前 pause，舊 cleanup／main relay 可把它當一般 session。 | `session_start` 在原子的 registry reservation 時即寫入 `task_id`／lead 角色；真 MockBAT start→pause 回歸測試執行 cleanup 和 main-session 選擇，均排除該 lead。 |
+| High，已修（獨立 BAT 審查） | `src/bat_agent_connector/task_bat.py:78`、`task_daemon.py:360`：終態外部 worktree 原以 force remove 與 `git branch -D` 刪除，且忽略失敗，未合併 commit 可能失去可達 ref。 | 僅清潔且 HEAD／branch 一致時移除 worktree；先保存 `refs/batc/tasks/<task-id-prefix>`，同時保留原 branch。成功或重啟對帳均需 Git ref／commit 證據才清 journal 指標並記事件；失敗保留路徑，以 60 秒退避重試。真 Git 測試驗證未合併 commit、dirty 拒絕、錯誤 done hash 拒絕、刪除後重啟對帳。 |
 | Medium，已修 | `src/bat_agent_connector/task_verifier.py:174`：管理員設定的驗證 argv 原本逐字進 journal／status，若參數含 credential 就會外洩。 | journal 只存完整 argv 的 SHA-256；0600 私有設定供管理員對照；測試用假私有參數確認 evidence 不含原值。 |
 | Medium，已修 | `src/bat_agent_connector/task_bat.py:61`：外部 worktree 建立命令把 BAT workspace 路徑直接插入單引號 grep 表達式；名稱含 `'` 時 shell 語法破裂；`$ref` 也未加雙引號。 | 使用 `shlex.quote` 處理整行 `worktree <path>`，並引用 `"$ref"`；以含 apostrophe 的 root 做 shell syntax 回歸測試。 |
 | Medium，已修 | `src/bat_agent_connector/task_daemon.py:316`：Goose 例外全文可能含 provider prompt／token，原先寫入服務 log。 | 只記例外類型；測試檢查假私密錯誤文字不出現在 log。 |
@@ -27,4 +29,4 @@ Goose v1.52.0 官方 archive 的 SHA-256 再驗為 `4aee1f770b405c44194c0e9407df
 
 ## 檢查結果
 
-最終全庫 pytest 在 Python 3.10.20、3.11.15、3.12.13、3.13.13 各為 **232 passed、1 skipped**；每次均使用隔離 venv、300 秒上限。`ruff check .` 與 `git diff --check` 通過。曾把三個 Python suite 同時執行，舊驗證 deadline 測試用 50 ms 人工期限而在排程壓力下提前截止；改為 1 秒並以 2 秒舊時間戳測 deadline 後，四個版本全庫重跑通過。BAT Codex reviewer 的結果在 push 後補記。
+`fe56575` 的全庫 pytest 在 Python 3.10.20、3.11.15、3.12.13、3.13.13 各為 **232 passed、1 skipped**。獨立 BAT reviewer 隨後發現上述兩項 High，已加修與回歸測試；本輪四個 Python 版本各為 **235 passed、1 skipped**，`ruff check .` 與 `git diff --check` 通過。舊驗證 deadline 測試曾用 50 ms 人工期限而在併行排程壓力下提前截止；調整成 1 秒並以 2 秒舊時間戳測試後，四版本全庫重跑通過。

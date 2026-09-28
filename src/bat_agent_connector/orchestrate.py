@@ -229,6 +229,7 @@ async def session_start(
     base_branch: str | None = None,
     cwd_override: str | None = None,
     external_branch: str | None = None,
+    task_id: str | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
     if agent not in ("claude", "codex"):
@@ -266,6 +267,7 @@ async def session_start(
                 "origin_cwd": folder,
                 "model": model,
                 "title": title,
+                **({"task_id": task_id, "role": "lead"} if task_id else {}),
             },
             hc.orchestrate_max_sessions,
         )

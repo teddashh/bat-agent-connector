@@ -75,14 +75,57 @@ class BatTaskAdapter:
                 "base_commit": identity["candidate_commit"]}, event="external_worktree_created")
         return result
 
-    async def cleanup_external_worktree(self, task: dict) -> None:
+    async def cleanup_external_worktree(self, task: dict) -> dict | None:
         path, branch = task.get("external_worktree_path"), task.get("external_branch")
         if not path or not branch:
-            return
+            return None
         root = await self._workspace_folder(task)
-        qroot, qpath, qbranch = map(shlex.quote, (root, path, branch))
-        await self._ssh_script(task, f"git -C {qroot} worktree remove --force {qpath} || true; "
-                                      f"git -C {qroot} branch -D {qbranch} || true")
+        suffix = task["task_id"].replace("-", "")[:12]
+        if (not re.fullmatch(r"[0-9a-f]{12}", suffix)
+                or path != f"{root}/.bat-worktrees/batc-task-{suffix}"
+                or branch != f"batc/task-{suffix}"):
+            raise ValueError("external worktree cleanup identity mismatch")
+        branch_ref = f"refs/heads/{branch}"
+        retained_ref = f"refs/batc/tasks/{suffix}"
+        qroot, qpath, qbranch_ref, qretained_ref = map(
+            shlex.quote, (root, path, branch_ref, retained_ref))
+        worktree_line = shlex.quote("worktree " + path)
+        expected = task.get("verification_commit") if task.get("state") == "done" else None
+        if task.get("state") == "done" and (
+                not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{40}", expected)):
+            raise ValueError("done task has no verified cleanup commit")
+        expected_check = f"test \"$head\" = {shlex.quote(expected)}; " if expected else ""
+        script = (
+            "set -eu; "
+            f"if test -d {qpath}; then "
+            f"git -C {qroot} worktree list --porcelain | grep -Fxq {worktree_line}; "
+            f"head=$(git -C {qpath} rev-parse HEAD); "
+            f"branch_head=$(git -C {qroot} rev-parse --verify {qbranch_ref}); "
+            "test \"$head\" = \"$branch_head\"; "
+            f"{expected_check}"
+            f"status=$(git -C {qpath} status --porcelain); test -z \"$status\"; "
+            f"if git -C {qroot} show-ref --verify --quiet {qretained_ref}; then "
+            f"kept=$(git -C {qroot} rev-parse --verify {qretained_ref}); "
+            "test \"$kept\" = \"$head\"; "
+            f"else git -C {qroot} update-ref {qretained_ref} \"$head\" \"\"; fi; "
+            f"git -C {qroot} worktree remove {qpath}; mode=removed; "
+            "else "
+            f"head=$(git -C {qroot} rev-parse --verify {qretained_ref}); "
+            f"branch_head=$(git -C {qroot} rev-parse --verify {qbranch_ref}); "
+            "test \"$head\" = \"$branch_head\"; "
+            f"{expected_check}"
+            f"if git -C {qroot} worktree list --porcelain | grep -Fxq {worktree_line}; then exit 1; fi; "
+            "mode=already_removed; fi; "
+            f"test \"$(git -C {qroot} rev-parse --verify {qretained_ref})\" = \"$head\"; "
+            f"test \"$(git -C {qroot} rev-parse --verify {qbranch_ref})\" = \"$head\"; "
+            "printf '%s\\n%s\\n' \"$head\" \"$mode\""
+        )
+        lines = (await self._ssh_script(task, script)).splitlines()
+        if (len(lines) != 2 or not re.fullmatch(r"[0-9a-f]{40}", lines[0])
+                or lines[1] not in {"removed", "already_removed"}):
+            raise ValueError("external worktree cleanup proof unavailable")
+        return {"path": path, "branch": branch, "retained_ref": retained_ref,
+                "commit": lines[0], "mode": lines[1]}
 
     async def start(self, task: dict, *, role: str, agent: str, session_id: str) -> str:
         host = task["host"]
@@ -97,7 +140,8 @@ class BatTaskAdapter:
                         session_id=session_id, retain_on_error=True, register_tab=self.register_tabs,
                         base_branch=task.get("base_branch") if external is None else None,
                         cwd_override=external["path"] if external else None,
-                        external_branch=external["branch"] if external else None)
+                        external_branch=external["branch"] if external else None,
+                        task_id=task["task_id"])
                     break
                 except Exception as exc:  # noqa: BLE001 - same reserved start is idempotent
                     last_error = exc
