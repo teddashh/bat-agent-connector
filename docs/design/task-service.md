@@ -34,6 +34,12 @@ Goose 執行檔固定版本 **v1.52.0**，只在 grok-bot-01 的 `/home/box/.loc
 
 castle1 OpenClaw 應透過到 grok-bot-01 loopback 服務的受控轉接（例如 SSH socket forwarding）呼叫同一 task MCP，不在 castle1 啟第二個 daemon 或 SQLite。HTTP 維持 loopback；不直接向 LAN 開放 BAT token 或 task 控制端點。
 
+### Shadow send 與 verification 卡住的修正界線
+
+Shadow task `11a41bf2` 暴露 send 已在 BAT 接受／完成，但 transport 回覆遺失使 connector 誤標 `uncertain`。新 send intent 除 prompt SHA-256 外，也保存送出前最後一筆 BAT message ID，或空 session 證據。回覆不明時，服務只在**同一 session** 唯讀查最多 100 筆、最多兩次且總共五秒；須見到 fence 之後**恰一筆**完整 user prompt，其 SHA-256 等於 journal 命令，且有 BAT user message ID，才標 `accepted` 並記 `send_reconciled_delivered`。這只證明 prompt 送達，不代表測試、review 或 task 完成。缺 fence、訊息被分頁排除、文字不符、只有後來不相關的 `REVIEW: PASS` 都保持 `uncertain`；從不重送。重啟後對有新 fence 的 command 可做同樣唯讀對帳；舊 command 缺 fence 則仍須人工處理。
+
+Shadow task `d87868ac` 停在 `verifying` 超過八分鐘，顯示先前只有測試 subprocess 的逾時計時，BAT／SSH lookup、候選檢查、review 等整個 worker tick 和連續多次無進展 tick 都沒有截止。現在 `verifying` 自最近一次 task 狀態更新起有明確截止時間：預設最多 300 秒，若私有驗證設定的 `timeout_s` 更短則使用較短值；pause 不耗費計時，resume 重設時間。單次 verifying tick 也受剩餘時間約束；超時記 `verification_timeout` 或 `verification_deadline`，其他例外記 `verification_error`，只寫例外**類型**而不寫可能含私密資訊的錯誤全文，轉 `needs_ted`。不自動重跑測試、不重送 prompt，也不跳過 commit/tree 或 reviewer 證據門檻。Discord flush 另有十秒上限，避免卡住 worker 排程。此工作樹無法解析 `grok-bot-01` SSH 名稱，未取得該兩項 real shadow task 的遠端 journal；根因依 connector 的可重現控制流程和 fake/MockBAT 測試界定，既有 shadow daemon/task 未被碰觸。
+
 ## 第二階段：計畫，尚未交付
 
 1. grok-bot-01 已安裝並 pin Goose v1.52.0；接著須驗證 stock ACP resume、持久恢復、provider 選擇與正式 agy shim Claude 相容性。用相同真實任務比較 rules、Goose、Hermes 的完成品質、續推次數、額度、人工介入與恢復時間，再決定預設引擎。

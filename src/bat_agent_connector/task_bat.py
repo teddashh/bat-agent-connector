@@ -237,7 +237,43 @@ class BatTaskAdapter:
         cursor = last[0].get("ts") if last else None
         if kind == "codex" and not cursor:
             cursor = datetime.now(timezone.utc).isoformat()
-        return {"agent_kind": kind, "before_cursor": cursor}
+        return {"agent_kind": kind, "before_cursor": cursor,
+                "before_message_id": last[0].get("id") if last else None,
+                "before_was_empty": not bool(last)}
+
+    async def reconcile_send(self, task: dict, session_id: str, prompt_sha256: str,
+                             before: dict, message_id: str) -> dict | None:
+        """Prove delivery from the exact BAT user echo after the pre-send fence.
+
+        A timestamped assistant reply, message ID supplied by the caller, or
+        a previous identical prompt is insufficient. This never sends a frame.
+        """
+        for attempt in range(2):
+            snapshot = await service.session_read(
+                self.fleet, task["host"], session_id, last_n=100,
+                max_chars=60_000, max_message_chars=20_050)
+            messages = snapshot.get("messages") or []
+            baseline_id = before.get("before_message_id")
+            if baseline_id:
+                positions = [i for i, item in enumerate(messages) if item.get("id") == baseline_id]
+                if not positions:
+                    return None  # the pre-send fence fell outside the bounded read
+                newer = messages[positions[-1] + 1:]
+            elif before.get("before_was_empty") and snapshot.get("next_offset") is None:
+                newer = messages
+            else:
+                return None
+            users = [item for item in newer if item.get("role") == "user"]
+            if (len(users) == 1 and isinstance(users[0].get("id"), str)
+                    and hashlib.sha256((users[0].get("text") or "").encode()).hexdigest() == prompt_sha256):
+                marker = users[0]["id"]
+                registry.record_turn(task["host"], session_id, marker,
+                                     queued=False, baseline_turns=None)
+                return {"accepted": True, "turn_marker": marker,
+                        "turn_attribution": "exact_echo", "reconciled": True}
+            if attempt == 0:
+                await asyncio.sleep(0.2)
+        return None
 
     async def read(self, task: dict, session_id: str, marker: str | None) -> dict:
         result = await service.session_read(self.fleet, task["host"], session_id, after=marker)
