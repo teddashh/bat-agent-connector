@@ -71,8 +71,18 @@ def ensure_existing(host: str, entry: dict) -> None:
     p = registry_path()
     with _locked(p):
         items = _read(p)
-        if any(e.get("host") == host and e.get("session_id") == entry.get("session_id") for e in items):
-            return
+        for old in items:
+            if old.get("host") == host and old.get("session_id") == entry.get("session_id"):
+                if (old.get("task_id") not in {None, entry.get("task_id")}
+                        or old.get("role") not in {None, entry.get("role")}
+                        or any(old.get(key) not in {None, entry.get(key)} for key in (
+                            "workspace_id", "origin_cwd", "cwd", "worktree_path", "agent_preset"))):
+                    raise ValueError("local session entry changed during BAT identity verification")
+                old.update(entry)
+                old["status"] = "active"
+                old["updated_at"] = time.time()
+                _write(p, items)
+                return
         items.append({**entry, "host": host, "status": "active", "created_at": time.time(),
                       "recovered_from": "task_journal"})
         _write(p, items)

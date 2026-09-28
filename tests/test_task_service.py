@@ -316,12 +316,15 @@ async def test_task_bat_adapter_contract_with_mock_host(fleet_factory, mock, tmp
                     idempotency_key="adapter-contract")
     adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
     lead = "task-lead-contract"
+    j.command(task["task_id"], "start_lead", lead, {"role": "lead", "agent": "codex"},
+              "adapter-contract-start")
     assert await adapter.start(task, role="lead", agent="codex", session_id=lead) == lead
     start = next(i for i in mock.invokes if i["channel"] == "claude:start-session"
                  and i["params"]["sessionId"] == lead)
     assert start["params"]["options"]["agentPreset"] == "codex-agent-worktree"
     assert not any(t.get("id") == lead for t in mock.ws_doc["terminals"])
     assert await adapter.recover_start(task, role="lead", session_id=lead)
+    j.add_branch(task["task_id"], session_id=lead, provider="codex", role="lead", reason="start")
     task = {**task, "session_id": lead}
     before = await adapter.prepare_send(task, lead)
     assert before["agent_kind"] == "codex" and before["before_cursor"]
@@ -382,8 +385,111 @@ async def test_bat_presence_distinguishes_orphan_worktree_from_vanished_session(
         assert await adapter.session_presence(task, sid) == "uncertain"
         assert task_bat.registry.get("h1", sid)["status"] == "active"
         mock.worktrees.pop(sid)
-        assert await adapter.session_presence(task, sid) == "vanished"
-        assert task_bat.registry.get("h1", sid)["status"] == "vanished"
+        assert await adapter.session_presence(task, sid) == "uncertain"
+        assert task_bat.registry.get("h1", sid)["status"] == "active"
+    finally:
+        await fleet.close()
+        j.close()
+
+
+async def test_bat_restart_null_meta_and_worktree_never_creates_replacement(
+        fleet_factory, mock, tmp_path):
+    path = tmp_path / "tasks.db"
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
+                          safety={"write_min_interval_s": 0})
+    j = Journal(path)
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="restart-null-presence")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
+    sid = "restart-unloaded-session"
+    try:
+        await adapter.start(task, role="lead", agent="claude", session_id=sid)
+        j.add_branch(task["task_id"], session_id=sid, provider="claude", role="lead", reason="start")
+        j.change(task["task_id"], "dispatching")
+        j.change(task["task_id"], "accepted", fields={"session_id": sid})
+        disk_worktree = mock.worktrees.pop(sid)
+        loaded_meta = mock.metas[sid]
+        mock.metas[sid] = None  # BAT restart unloads runtime; disk worktree remains.
+        assert (await TaskCoordinator(j, adapter).tick(task["task_id"]))["state"] == "uncertain"
+        assert j.get(task["task_id"])["session_replacements"] == 0
+        assert not any(c["kind"] == "send" for c in j.commands(task["task_id"]))
+        j.close()
+        j = Journal(path)
+        adapter.journal = j
+        core = TaskCoordinator(j, adapter)
+        assert (await core.tick(task["task_id"]))["state"] == "uncertain"
+        assert len(j.get(task["task_id"])["branches"]) == 1
+        mock.worktrees[sid] = disk_worktree
+        mock.metas[sid] = loaded_meta
+        assert (await core.tick(task["task_id"]))["state"] == "accepted"
+        assert (await core.tick(task["task_id"]))["state"] == "running"
+        assert j.get(task["task_id"])["session_replacements"] == 0
+        assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"
+                    and i["params"]["sessionId"] == sid]) == 1
+    finally:
+        await fleet.close()
+        j.close()
+
+
+async def test_headless_reviewer_restores_from_lead_worktree_when_own_status_null(
+        fleet_factory, mock, tmp_path):
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
+                          safety={"write_min_interval_s": 0})
+    j = Journal(tmp_path / "tasks.db")
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="reviewer-lookup")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
+    lead_sid, reviewer_sid = "review-lead", "review-headless"
+    try:
+        await adapter.start(task, role="lead", agent="claude", session_id=lead_sid)
+        j.add_branch(task["task_id"], session_id=lead_sid, provider="claude", role="lead", reason="start")
+        j.change(task["task_id"], "dispatching")
+        task = j.change(task["task_id"], "accepted", fields={"session_id": lead_sid})
+        lead_path = task_bat.registry.get("h1", lead_sid)["worktree_path"]
+        j.command(task["task_id"], "start_reviewer", reviewer_sid,
+                  {"role": "reviewer", "agent": "codex"}, "reviewer-recovery-intent")
+        assert await adapter.start(task, role="reviewer", agent="codex", session_id=reviewer_sid) == reviewer_sid
+        path = task_bat.registry.registry_path()
+        task_bat.registry._write(path, [e for e in task_bat.registry.list_entries()
+                                        if e.get("session_id") != reviewer_sid])
+        assert task_bat.registry.get("h1", reviewer_sid) is None
+        assert await adapter.recover_start(task, role="reviewer", session_id=reviewer_sid)
+        task_bat.registry._write(path, [e for e in task_bat.registry.list_entries()
+                                        if e.get("session_id") != reviewer_sid])
+        j.add_branch(task["task_id"], session_id=reviewer_sid, provider="codex", role="reviewer",
+                     reason="start")
+        assert await adapter.session_presence(task, reviewer_sid) == "present"
+        reviewer = task_bat.registry.get("h1", reviewer_sid)
+        assert reviewer["cwd"] == reviewer["worktree_path"] == lead_path
+        assert reviewer["lead_session_id"] == lead_sid and reviewer["role"] == "reviewer"
+        assert reviewer["agent_preset"] == "codex-agent"
+        assert (await adapter.send(task, reviewer_sid, "review candidate", "batc-reviewer-1"))["accepted"]
+    finally:
+        await fleet.close()
+        j.close()
+
+
+async def test_existing_registry_row_requires_matching_bat_metadata_and_worktree(
+        fleet_factory, mock, tmp_path):
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
+                          safety={"write_min_interval_s": 0})
+    j = Journal(tmp_path / "tasks.db")
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="stale-row")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
+    sid = "stale-registry-row"
+    try:
+        await adapter.start(task, role="lead", agent="claude", session_id=sid)
+        j.add_branch(task["task_id"], session_id=sid, provider="claude", role="lead", reason="start")
+        good_cwd = mock.metas[sid]["cwd"]
+        mock.metas[sid]["cwd"] = "/srv/other"
+        assert await adapter.session_presence(task, sid) == "uncertain"
+        mock.metas[sid]["cwd"] = good_cwd
+        task_bat.registry.update("h1", sid, cwd="/srv/other")
+        assert await adapter.session_presence(task, sid) == "uncertain"
+        task_bat.registry.update("h1", sid, cwd=good_cwd, worktree_path="/srv/other")
+        assert await adapter.session_presence(task, sid) == "uncertain"
+        assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
     finally:
         await fleet.close()
         j.close()
@@ -411,10 +517,13 @@ async def test_start_ack_recovery_uses_reserved_id_when_local_registry_lost(
         j.close()
 
 
-async def test_bat_start_rejects_mismatched_session_id(fleet_factory, mock):
+@pytest.mark.parametrize("reply", [
+    {"ok": True, "sessionId": "different-session"}, {"ok": True},
+])
+async def test_bat_start_rejects_missing_or_mismatched_session_id(fleet_factory, mock, reply):
     fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
                           safety={"write_min_interval_s": 0})
-    mock.handlers["claude:start-session"] = lambda p: {"ok": True, "sessionId": "different-session"}
+    mock.handlers["claude:start-session"] = lambda p: reply
     try:
         with pytest.raises(WriteRefused, match="reserved session ID"):
             await task_bat.orchestrate.session_start(
@@ -423,6 +532,32 @@ async def test_bat_start_rejects_mismatched_session_id(fleet_factory, mock):
         assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
     finally:
         await fleet.close()
+
+
+@pytest.mark.parametrize("reply", [
+    {"ok": True, "sessionId": "different-reviewer"}, {"ok": True},
+])
+async def test_reviewer_start_rejects_missing_or_mismatched_session_id(
+        fleet_factory, mock, tmp_path, reply):
+    fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
+                          safety={"write_min_interval_s": 0})
+    j = Journal(tmp_path / "tasks.db")
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="review-ack")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
+    try:
+        await adapter.start(task, role="lead", agent="claude", session_id="review-ack-lead")
+        j.add_branch(task["task_id"], session_id="review-ack-lead", provider="claude",
+                     role="lead", reason="start")
+        task = {**task, "session_id": "review-ack-lead"}
+        mock.handlers["claude:start-session"] = lambda p: reply
+        with pytest.raises(WriteRefused, match="reviewer start"):
+            await adapter.start(task, role="reviewer", agent="codex", session_id="review-ack-reviewer")
+        assert task_bat.registry.get("h1", "review-ack-reviewer")["status"] == "uncertain"
+        assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)
+    finally:
+        await fleet.close()
+        j.close()
 
 
 async def test_vanished_initial_session_one_replacement_and_restart(tmp_path):
@@ -497,6 +632,64 @@ async def test_start_then_rejected_send_with_vanished_session_replaces_once(tmp_
     assert len(fake.sends) == 2 and fake.sends[0][0] != fake.sends[1][0]
     assert fake.sends[0][1] == fake.sends[1][1]  # one fresh command for the new branch
     assert fake.sends[0][2] != fake.sends[1][2]
+    j.close()
+
+
+async def test_pause_during_final_presence_check_cancels_unsent_command(tmp_path):
+    class PresenceGateBAT(FakeBAT):
+        def __init__(self):
+            super().__init__()
+            self.probes = 0
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def session_presence(self, task, session_id):
+            self.probes += 1
+            if self.probes == 2:
+                self.entered.set()
+                await self.release.wait()
+            return "present"
+
+    j = Journal(tmp_path / "tasks.db")
+    task = submit(j)
+    fake = PresenceGateBAT()
+    core = TaskCoordinator(j, fake)
+    tick = asyncio.create_task(core.tick(task["task_id"]))
+    await asyncio.wait_for(fake.entered.wait(), 2)
+    paused = await core.pause(task["task_id"])
+    assert paused["paused"]
+    fake.release.set()
+    result = await asyncio.wait_for(tick, 2)
+    assert result["paused"] and fake.sends == []
+    sends = [c for c in j.commands(task["task_id"]) if c["kind"] == "send"]
+    assert len(sends) == 1 and sends[0]["status"] == "cancelled"
+    j.resume(task["task_id"])
+    assert (await core.tick(task["task_id"]))["state"] == "running"
+    assert len(fake.sends) == 1 and fake.sends[0][2] != sends[0]["message_id"]
+    j.close()
+
+
+async def test_settled_reviewer_start_requires_presence_before_prompt(tmp_path):
+    j = Journal(tmp_path / "tasks.db")
+    task = submit(j)
+    fake = FakeBAT()
+    core = TaskCoordinator(j, fake)
+    await core.tick(task["task_id"])
+    lead = j.get(task["task_id"])["session_id"]
+    fake.reads[lead] = {"turn_started": True, "turn_done": True, "turn_attribution": "correlated",
+                        "messages": [{"role": "assistant", "text": "BAT-STATUS: MILESTONE"}]}
+    await core.tick(task["task_id"])
+    fake.presence_override = "uncertain"
+    result = await core.tick(task["task_id"])
+    reviewer = result["reviewer_session_id"]
+    assert reviewer and result["state"] == "uncertain"
+    assert not any(sid == reviewer for sid, _, _ in fake.sends)
+    assert any(c["kind"] == "start_reviewer" and c["status"] == "settled"
+               for c in j.commands(task["task_id"]))
+    fake.presence_override = None
+    assert (await core.tick(task["task_id"]))["state"] == "verifying"
+    assert (await core.tick(task["task_id"]))["state"] == "verifying"
+    assert len([sid for sid, _, _ in fake.sends if sid == reviewer]) == 1
     j.close()
 
 

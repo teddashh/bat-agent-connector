@@ -107,6 +107,14 @@ class TaskCoordinator:
                 task = self.journal.change(task_id, "uncertain")
             return await self._reconcile_command(task, pending)
         if task["state"] == "uncertain":
+            # A presence probe before any prompt may have been inconclusive
+            # during BAT restart. No send intent exists, so checking again is
+            # safe; a prompt is still created only after positive identity.
+            sid = task.get("reviewer_session_id") or task.get("session_id")
+            if sid and not any(c["kind"] == "send" and c["session_id"] == sid for c in cmds):
+                if await self.adapter.session_presence(task, sid) == "present":
+                    return self.journal.change(task_id, "verifying" if task.get("reviewer_session_id")
+                                               else "accepted", event="session_presence_restored")
             return task
         if task["state"] == "queued":
             return await self._start(task, role="lead", agent=task["lead_agent"])
@@ -115,7 +123,8 @@ class TaskCoordinator:
         if task["state"] == "quota_limited":
             return await self._failover(task)
         if task["state"] == "accepted" and task["session_id"] and not any(
-            c["kind"] == "send" and c["session_id"] == task["session_id"] for c in cmds
+            c["kind"] == "send" and c["session_id"] == task["session_id"]
+            and c["status"] != "cancelled" for c in cmds
         ):
             return await self._send(task, task["session_id"], initial_prompt(task), "lead:initial")
         if task["state"] in {"accepted", "running", "dispatching", "waiting_permission"}:
@@ -160,12 +169,18 @@ class TaskCoordinator:
             if task["paused"]:
                 return task
             initial_lead = purpose == "lead:initial" and prepared_command is None and sid == task["session_id"]
-            if initial_lead:
+            initial_reviewer = (purpose == "reviewer:initial" and prepared_command is None
+                                and sid == task.get("reviewer_session_id"))
+            if initial_lead or initial_reviewer:
                 presence = await self.adapter.session_presence(task, sid)
-                if presence == "vanished":
+                task = self.journal.get(task["task_id"])
+                if task["paused"]:
+                    return task
+                if initial_lead and presence == "vanished":
                     return self.journal.mark_initial_session_vanished(task["task_id"], sid)
                 if presence != "present":
-                    return self.journal.change(task["task_id"], "uncertain", event="initial_session_unproven")
+                    return self.journal.change(task["task_id"], "uncertain",
+                                               event="initial_session_unproven")
             if prepared_command:
                 cmd = self.journal.command_get(prepared_command["command_id"])
                 payload = json.loads(cmd["payload"])
@@ -175,6 +190,7 @@ class TaskCoordinator:
                 before = payload["before"]
             else:
                 key = (f"{task['task_id']}:{purpose}:{task['review_rejections']}:{task['continuations']}:"
+                       f"{task['control_version']}:"
                        f"{task.get('review_commit') if sid == task.get('reviewer_session_id') else sid}")
                 before = await self.adapter.prepare_send(task, sid)
                 if self.journal.get(task["task_id"])["paused"]:
@@ -184,14 +200,22 @@ class TaskCoordinator:
                                                     "prompt_sha256": hashlib.sha256(text.encode()).hexdigest()}, key)
                 if not fresh:
                     return self.journal.change(task["task_id"], "uncertain")
-            if initial_lead:
+            if initial_lead or initial_reviewer:
                 presence = await self.adapter.session_presence(task, sid)
+                task = self.journal.get(task["task_id"])
+                if task["paused"]:
+                    self.journal.command_status(cmd["command_id"], "cancelled")
+                    return task
                 if presence != "present":
                     self.journal.command_status(cmd["command_id"],
                                                 "rejected" if presence == "vanished" else "uncertain")
-                    if presence == "vanished":
+                    if initial_lead and presence == "vanished":
                         return self.journal.mark_initial_session_vanished(task["task_id"], sid)
                     return self.journal.change(task["task_id"], "uncertain", event="initial_session_unproven")
+            task = self.journal.get(task["task_id"])
+            if task["paused"]:
+                self.journal.command_status(cmd["command_id"], "cancelled")
+                return task
             try:
                 r = await self.adapter.send(task, sid, text, cmd["message_id"])
             except WriteRefused:
