@@ -18,9 +18,10 @@ from typing import Any
 from . import lifecycle, orchestrate, registry, service
 from .errors import TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .fleet import Fleet
+from .redact import redact_secrets
 from .safety import Audit
 from .task_handoff import history_excerpt, ledger_summary, original_words_archive
-from .task_verifier import ObservedVerifier, VerificationSettings
+from .task_verifier import ObservedVerifier, VerificationSettings, classify_failure, failure_tail
 
 
 class BatTaskAdapter:
@@ -780,6 +781,17 @@ class BatTaskAdapter:
             return None
         paths = [name for name in names.split("\0") if name]
         return {"diff": diff, "paths": paths} if paths else None
+
+    async def verification_failure(self, task: dict, evidence: dict) -> dict:
+        kind = classify_failure(evidence)
+        summary = redact_secrets(failure_tail(str(evidence.get("log_ref") or ""))) if kind == "code" else ""
+        return {"kind": kind, "summary": summary}
+
+    async def install_dependencies(self, task: dict) -> dict:
+        cwd = self._cwd(task)
+        if not cwd:
+            return {"ok": False, "reason": "worktree_unavailable"}
+        return await self.verifier.install_dependencies(task, cwd)
 
     async def run_verification(self, task: dict) -> dict | None:
         cwd = self._cwd(task)

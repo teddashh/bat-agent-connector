@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- Trusted verification runs under one deadline (start, drain, exit) in its own process group; a
+  timeout kills the group and, over SSH, the remote `setsid` group, and must confirm it is gone.
+- Verification has two clocks: last meaningful progress (idle budget per recipe) and an absolute cap
+  (3x) from the start of the verifying phase; `updated_at` heartbeats no longer extend it.
+- A trusted-test code failure goes back to the lead with a redacted output tail for bounded rework;
+  missing dependencies get one lockfile install and a retry; environment problems go to Ted.
 - The task service no longer knows about chat delivery. The Discord publisher, its per-event outbox columns,
   the board table and `batc task-delivery` / `work_delivery_*` are removed; opening an older journal drops the
   outbox (`events.discord_status`, `events.discord_message_id`, `board`) so the old backlog can never be posted.

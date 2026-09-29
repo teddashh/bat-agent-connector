@@ -13,7 +13,7 @@ from .errors import TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .model_router import MinimalReviewGate, ModelRouter
 from .relay import parse_status
 from .task_journal import Journal
-from .task_recipes import limits
+from .task_recipes import limits, verification_reworks
 
 
 class TaskAdapter(Protocol):
@@ -305,7 +305,8 @@ class TaskCoordinator:
             else:
                 key = (f"{task['task_id']}:{purpose}:{task['review_rejections']}:{task['continuations']}:"
                        f"{task['control_version']}:"
-                       f"{task.get('review_commit') if sid == task.get('reviewer_session_id') else sid}")
+                       f"{task.get('review_commit') if sid == task.get('reviewer_session_id') else sid}"
+                       + (f":vf{task['verification_failures']}" if task.get("verification_failures") else ""))
                 before = await self.adapter.prepare_send(task, sid)
                 if self.journal.get(task["task_id"])["paused"]:
                     return self.journal.get(task["task_id"])
@@ -554,21 +555,23 @@ class TaskCoordinator:
         return handoff
 
     def _verification_wait(self, task: dict, fingerprint: tuple[str, str] | None,
-                           reason: str) -> tuple[dict, bool]:
-        """Keep the task deadline alive while the lead/candidate is still active."""
+                           reason: str, *, working: bool = False) -> tuple[dict, bool]:
+        """Wait for a stable candidate; only real activity counts as progress.
+
+        The daemon enforces two clocks: time since the last meaningful progress
+        and an absolute per-recipe cap since the verifying phase began.
+        """
         now = asyncio.get_running_loop().time()
         previous = self._verification_stability.get(task["task_id"])
         if fingerprint is not None and (previous is None or previous[0] != fingerprint):
             self._verification_stability[task["task_id"]] = (fingerprint, now)
-            self._verification_activity[task["task_id"]] = now
+            self.journal.progress(task["task_id"])
             changed = self.journal.change(task["task_id"], "verifying", event="verification_stability_started")
             return changed, self.verification_quiet_s <= 0
         if fingerprint is None:
             self._verification_stability[task["task_id"]] = (None, now)
-            last = self._verification_activity.get(task["task_id"], 0.0)
-            if now - last >= min(5.0, max(1.0, self.verification_quiet_s / 3)):
-                self._verification_activity[task["task_id"]] = now
-                return self.journal.change(task["task_id"], "verifying", event="verification_stability_wait"), False
+            if working:
+                self.journal.progress(task["task_id"])
             return task, False
         if previous and now - previous[1] < self.verification_quiet_s:
             return task, False
@@ -577,7 +580,8 @@ class TaskCoordinator:
     async def _verify_and_review(self, task: dict) -> dict:
         lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
         if lead_read.get("streaming") is True or lead_read.get("pending"):
-            return self._verification_wait(task, None, "lead_not_idle")[0]
+            return self._verification_wait(task, None, "lead_not_idle",
+                                           working=lead_read.get("streaming") is True)[0]
         candidate = await self.adapter.candidate_identity(task)
         if not candidate or not candidate.get("clean"):
             return self._verification_wait(task, None, "candidate_not_stable")[0]
@@ -605,11 +609,13 @@ class TaskCoordinator:
             if not observed:
                 return task  # no configured trusted runner; no caller-supplied evidence accepted
             evidence = self.journal.record_observed_verification(task["task_id"], observed)
+            self.journal.progress(task["task_id"])
         if evidence["exit_code"] != 0:
-            return self.journal.change(task["task_id"], "needs_ted", event="verification_failed")
+            return await self._verification_failed(task, evidence, commit, tree)
         lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
         if lead_read.get("streaming") is True or lead_read.get("pending"):
-            return self._verification_wait(task, None, "lead_not_idle_after_tests")[0]
+            return self._verification_wait(task, None, "lead_not_idle_after_tests",
+                                           working=lead_read.get("streaming") is True)[0]
         if not task["verification_commit"]:
             task = self.journal.change(task["task_id"], "verifying", fields={
                 "verification_commit": commit, "verification_tree": tree,
@@ -692,6 +698,8 @@ class TaskCoordinator:
             self._mark_unproven_send(task["task_id"], task["reviewer_session_id"])
             return self.journal.change(task["task_id"], "uncertain")
         if not (read.get("turn_started") is True and read.get("turn_done") is True and attributed):
+            if read.get("streaming") is True and attributed:
+                self.journal.progress(task["task_id"])  # the reviewer is still working
             return task
         verdict = review_verdict(read, commit, tree)
         output = verdict["text"]
@@ -723,6 +731,68 @@ class TaskCoordinator:
                                 "Independent review rejected the candidate (" + verdict["reason"] + "). "
                                 "Address the review findings, rerun tests, and report a new milestone.\n"
                                 + output[-3000:], "review_rework")
+
+    async def _verification_failed(self, task: dict, evidence: dict, commit: str, tree: str) -> dict:
+        """Stuck handler for a failed trusted run.
+
+        Missing dependencies get one lockfile install per candidate and a
+        retry; code/test failures go back to the lead within a bounded budget;
+        permission, login and unclear environment problems go to Ted.
+        """
+        task_id = task["task_id"]
+        classify = getattr(self.adapter, "verification_failure", None)
+
+        async def failure_of(ev: dict) -> dict:
+            try:
+                found = await classify(task, ev) if callable(classify) else None
+            except Exception:  # noqa: BLE001 - unknown failure class is escalated
+                found = None
+            return found if isinstance(found, dict) else {"kind": "environment", "summary": ""}
+
+        failure = await failure_of(evidence)
+        if failure.get("kind") == "missing_dependencies":
+            if self.journal.has_note(task_id, "dependency_install", commit):
+                failure["kind"] = "code"  # the one install did not help; the candidate must fix it
+            else:
+                self.journal.note(task_id, "dependency_install", {"candidate_commit": commit, "tree_hash": tree})
+                installer = getattr(self.adapter, "install_dependencies", None)
+                try:
+                    result = await installer(task) if callable(installer) else {"ok": False, "reason": "unsupported"}
+                except Exception as exc:  # noqa: BLE001 - install failure is an environment issue
+                    result = {"ok": False, "reason": type(exc).__name__}
+                self.journal.note(task_id, "dependency_install_result", {
+                    "candidate_commit": commit, "ok": bool(result.get("ok")),
+                    "reason": str(result.get("reason"))[:200], "lockfile": result.get("lockfile")})
+                if not result.get("ok"):
+                    return self.journal.change(task_id, "needs_ted", event="verification_failed", fields={
+                        "result": "Trusted tests need dependencies; lockfile install failed: "
+                                  + str(result.get("reason"))[:200]})
+                observed = await self.adapter.run_verification(self.journal.get(task_id))
+                if not observed:
+                    return self.journal.get(task_id)
+                evidence = self.journal.record_observed_verification(task_id, observed)
+                self.journal.progress(task_id)
+                if evidence["exit_code"] == 0:
+                    return self.journal.get(task_id)
+                failure = await failure_of(evidence)
+                if failure.get("kind") == "missing_dependencies":
+                    failure["kind"] = "code"
+        if failure.get("kind") != "code":
+            return self.journal.change(task_id, "needs_ted", event="verification_failed", fields={
+                "result": "Trusted tests could not run cleanly (" + str(failure.get("kind")) + ")"})
+        n = task["verification_failures"] + 1
+        if n > verification_reworks(task["recipe"]):
+            return self.journal.change(task_id, "needs_ted", event="verification_failed", fields={
+                "verification_failures": n, "result": "Trusted tests failed; rework budget exhausted"})
+        self.journal.change(task_id, "accepted", fields={
+            "verification_failures": n, "reviewer_session_id": None, "review_marker": None,
+            "review_commit": None, "review_tree": None,
+            "verification_commit": None, "verification_tree": None}, event="verification_rework")
+        return await self._send(self.journal.get(task_id), task["session_id"],
+                                "The service's trusted test run failed on candidate " + commit[:12]
+                                + " (exit " + str(evidence["exit_code"]) + "). Fix the failure, commit, "
+                                "rerun the tests, and report a new milestone. Output tail (redacted):\n"
+                                + str(failure.get("summary") or "")[-2500:], "verification_rework")
 
     def _mark_unproven_send(self, task_id: str, session_id: str):
         for cmd in reversed(self.journal.commands(task_id)):

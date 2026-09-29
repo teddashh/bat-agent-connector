@@ -8,6 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).parent / "recipes"
 CAPS = {"feature-to-staging": (5, 2), "bugfix-with-tests": (5, 2),
         "small-task-with-tests": (2, 0)}
+# Controlled lead rework after a code/test failure in the trusted runner.
+VERIFICATION_REWORKS = {"feature-to-staging": 2, "bugfix-with-tests": 2, "small-task-with-tests": 1}
 
 
 def load(name: str) -> dict:
@@ -22,3 +24,8 @@ def load(name: str) -> dict:
 def limits(name: str) -> tuple[int, int]:
     load(name)
     return CAPS[name]
+
+
+def verification_reworks(name: str) -> int:
+    load(name)
+    return VERIFICATION_REWORKS[name]
