@@ -16,7 +16,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import registry
+from . import registry, service
 from .config import Config, state_dir
 from .fleet import Fleet
 from .goose_acp import GooseACP
@@ -477,6 +477,14 @@ class TaskDaemon:
             os.close(fd)
             raise RuntimeError("another task daemon owns this journal") from None
         self._lease_fd = fd
+        # Direct-send fences in other connector processes read the journal
+        # this daemon actually owns, not a guessed default path.
+        pointer = registry.registry_path().parent / service.TASK_SERVICE_POINTER
+        pointer.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp = pointer.with_suffix(".tmp")
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+            json.dump({"db_path": str(self.journal.path.resolve()), "pid": os.getpid()}, fh)
+        os.replace(tmp, pointer)
         self.journal.db.execute("""INSERT INTO daemon_owner(singleton,owner_id,pid,heartbeat_at)
             VALUES(1,?,?,?) ON CONFLICT(singleton) DO UPDATE SET owner_id=excluded.owner_id,
             pid=excluded.pid,heartbeat_at=excluded.heartbeat_at""", (self._owner_id, os.getpid(), time.time()))
