@@ -95,11 +95,11 @@ waiting for BAT. Hermes must not reinterpret or split the request. The lead Code
 Task writes require the host's existing `writes=true` and `orchestrate=true` settings. Existing low-level tools
 and `batc` commands remain available.
 
-Minimal flow with its one-question Jev choice and post-test Jev review gate is now the production default when `BATC_TASK_DEFAULT_PATH=minimal` is set. Use explicit `task_path="standard"` to opt out to the full cross-agent review path.
+Minimal flow with its post-test Jev review gate is now the production default when `BATC_TASK_DEFAULT_PATH=minimal` is set. Use explicit `task_path="standard"` to opt out to the full cross-agent review path.
 
 A trusted test command must be configured locally; the service observes its
 exit status on the clean candidate commit and records verification before opening a fresh reviewer session.
-The daemon currently rejects live Goose tasks. Goose ACP, provider fallback and the per-step Jev router have
+The daemon currently rejects live Goose tasks. Goose ACP, provider fallback and the rule-based PM provider router have
 adapter/test coverage; real Goose contract checks are deferred. The service never posts to chat. `work_events(since_cursor, limit)`
 (CLI `batc task-events --since N`) returns only milestones (`started`, `needs_ted` with its reason, `done` with commit/PR
 link, `failed`), each with a monotonic `cursor`, `task_id`, `project`, `workspace`, the opaque `origin_thread_id` passed at
@@ -110,8 +110,12 @@ and `secret_file` (mode 0600) in the private settings, each committed milestone 
 failures retry with capped exponential backoff (max 300 s). `work_events` is the receiver's catch-up path after an
 outage; `limit=0` returns `head_cursor`. Optional `[task_service] repo_urls` adds `commit_url`. The task API requires a local admin token or scoped capability and binds only to loopback. See
 [the task-service design](docs/design/task-service.md) for states, recovery, private configuration and rollout.
-The default minimal path asks Jev one typed engine question at submission; explicit `task_path="standard"` selects the full path. Invalid or unavailable
-Jev chooses rules. This path skips per-step Jev and advisory candidate pre-screen. The `small-task-with-tests`
+The default minimal path lists only runnable engines at submission: while the Goose live gate is closed, rules is the
+only one and is used without asking Jev. Only when both are runnable does Jev get one typed engine question (invalid
+or unavailable Jev chooses rules). Explicit `task_path="standard"` selects the full path. PM provider choice on the
+standard path is explicit rules (planning/verification/review and high-stakes work: Claude Opus 5.5 → AGY Opus
+4.6-thinking → Codex; routine implementation: Codex; status relay: Gemini Flash when configured), with no model call;
+`work_status`/`work_result` are plain journal reads. There is no advisory candidate pre-screen. The `small-task-with-tests`
 recipe delivers directly only after trusted tests on a clean commit and one typed Jev review of the candidate diff
 against Ted's original words passes at the configured confidence threshold. A risky, uncertain, sensitive, large
 or unavailable diff goes to the separate reviewer; Jev backend failure also requires full review. It prefers a verified,

@@ -747,19 +747,6 @@ class BatTaskAdapter:
         cwd = self._cwd(task)
         return await self.verifier.identity(task, cwd) if cwd else None
 
-    async def candidate_diff_excerpt(self, task: dict) -> str | None:
-        """Small, read-only candidate diff for advisory Jev pre-screening."""
-        cwd, base = self._cwd(task), task.get("base_commit")
-        if not cwd or not isinstance(base, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", base):
-            return None
-        try:
-            rc, diff = await self.verifier._run(
-                task["host"], cwd, ("git", "diff", "--no-ext-diff", "--unified=1", base, "HEAD", "--"),
-                timeout=15)
-        except (OSError, ValueError, asyncio.TimeoutError):
-            return None
-        return diff if rc == 0 and diff else None
-
     async def candidate_review_diff(self, task: dict) -> dict | None:
         """Read the complete small diff and changed paths; missing/large output escalates."""
         cwd, base = self._cwd(task), task.get("base_commit")

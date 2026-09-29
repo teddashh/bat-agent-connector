@@ -74,7 +74,7 @@ class TaskDaemon:
         provider_config = os.environ.get("BATC_PM_PROVIDER_CONFIG")
         router_config = RouterConfig.from_provider_file(provider_config) if provider_config else RouterConfig()
         jev = Jev(config.jev)
-        self.router = ModelRouter(self.journal, jev, router_config, self.goose.catalog)
+        self.router = ModelRouter(self.journal, router_config, self.goose.catalog)
         self.minimal_router = MinimalTaskRouter(jev)
         self.default_task_path = os.environ.get("BATC_TASK_DEFAULT_PATH", "standard").strip().lower()
         if self.default_task_path not in {"standard", "minimal"}:
@@ -166,14 +166,16 @@ class TaskDaemon:
                     if old:
                         decision = self.journal.engine_decision(old["task_id"])
                         params["engine"] = old["engine"]
+                    elif not self.goose.config.enabled:
+                        # Rules is the only runnable engine; there is nothing for Jev to choose.
+                        decision = {"selected": "rules_engine", "confidence": None, "jev_backend": None,
+                                    "reason": "only_runnable_engine", "effective": "rules"}
+                        params["engine"] = "rules"
                     else:
                         decision = await self.minimal_router.choose(
                             project=params["project"], recipe=params.get("recipe", "feature-to-staging"),
                             original_words=params["original_words"])
-                        decision["effective"] = ("goose" if decision["selected"] == "goose"
-                                                 and self.goose.config.enabled else "rules")
-                        if decision["selected"] == "goose" and decision["effective"] == "rules":
-                            decision["reason"] = "goose_live_gate_closed"
+                        decision["effective"] = "goose" if decision["selected"] == "goose" else "rules"
                         params["engine"] = decision["effective"]
                     params["engine_decision"] = decision
                 elif params.get("engine", "rules") == "goose":
@@ -199,10 +201,6 @@ class TaskDaemon:
             )
         if method == "work_status":
             task = self.journal.get(task_id)
-            if task["task_path"] != "minimal":
-                await self.router.choose(task_id, f"status:rpc:{task['state']}:{task['updated_at']}",
-                                         "Report the current task state without changing Ted's request",
-                                         expected_type="status_relay")
             routes = self.journal.routes(task_id)
             return {**task, "engine_decision": self.journal.engine_decision(task_id),
                     "minimal_review_gate": (self.journal.minimal_review_gate(
@@ -217,9 +215,6 @@ class TaskDaemon:
                                                         for provider in {r["provider"] for r in routes}}}}
         if method == "work_result":
             task = self.journal.get(task_id)
-            if task["task_path"] != "minimal":
-                await self.router.choose(task_id, f"status:result:{task['state']}:{task['updated_at']}",
-                                         "Relay the final task result verbatim", expected_type="status_relay")
             return {"task_id": task_id, "state": task["state"], "delivered": task["delivered"],
                     "delivered_at": task["delivered_at"], "time_to_deliver_s": task["time_to_deliver_s"],
                     "result": task["result"], "verification_commit": task["verification_commit"],
