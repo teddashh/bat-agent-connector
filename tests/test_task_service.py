@@ -2184,13 +2184,15 @@ async def test_warm_start_mismatched_ack_remains_uncertain(tmp_path):
 async def test_bat_warm_reuse_claims_only_clean_completed_service_session(fleet_factory, mock, tmp_path):
     class CleanVerifier:
         settings = VerificationSettings()
+        head = "a" * 40
 
         async def identity(self, _task, _cwd):
-            return {"candidate_commit": "a" * 40, "tree_hash": "b" * 40, "clean": True}
+            return {"candidate_commit": self.head, "tree_hash": "b" * 40, "clean": True}
 
     fleet = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})
     journal = Journal(tmp_path / "warm.db")
-    adapter = task_bat.BatTaskAdapter(fleet, CleanVerifier(), journal)
+    verifier = CleanVerifier()
+    adapter = task_bat.BatTaskAdapter(fleet, verifier, journal)
     previous = journal.submit(project="p", host="h1", workspace="demo-project",
                               original_words="Previous completed request", idempotency_key="warm:previous",
                               task_path="minimal", recipe="small-task-with-tests",
@@ -2210,10 +2212,18 @@ async def test_bat_warm_reuse_claims_only_clean_completed_service_session(fleet_
     journal.change(previous["task_id"], "done", fields={
         "verification_commit": "a" * 40, "verification_tree": "b" * 40})
     old_capability = journal.issue_capability(previous["task_id"])
+    independent = journal.submit(project="p", host="h1", workspace="demo-project",
+                                 original_words="Unrelated request", task_path="minimal",
+                                 engine_decision={"selected": "rules_engine", "effective": "rules"},
+                                 idempotency_key="warm:independent")
+    assert await adapter.find_warm(independent) is None  # independent work starts fresh from base
     current = journal.submit(project="p", host="h1", workspace="demo-project",
                              original_words="New focused request", task_path="minimal",
                              engine_decision={"selected": "rules_engine", "effective": "rules"},
-                             idempotency_key="warm:current")
+                             idempotency_key="warm:current", parent_task_id=previous["task_id"])
+    verifier.head = "e" * 40
+    assert await adapter.find_warm(current) is None  # HEAD moved past the verified commit
+    verifier.head = "a" * 40
     assert await adapter.find_warm(current) == old_sid
     starts_before = len([i for i in mock.invokes if i["channel"] == "claude:start-session"])
     assert await adapter.start({**current, "_warm_session_id": old_sid},
@@ -2230,6 +2240,111 @@ async def test_bat_warm_reuse_claims_only_clean_completed_service_session(fleet_
                             cwd=entry["cwd"], branch=entry["branch"])
     journal.close()
     await fleet.close()
+
+
+def test_warm_candidates_are_limited_to_the_same_workstream(tmp_path):
+    journal = Journal(tmp_path / "ws.db")
+    decision = {"selected": "rules_engine", "effective": "rules"}
+
+    def done(key, **kw):
+        task = journal.submit(project="p", host="h1", workspace="w", original_words="req " + key,
+                              task_path="minimal", engine_decision=decision, idempotency_key=key, **kw)
+        journal.db.execute("""UPDATE tasks SET state='done',session_id=?,verification_commit=?,
+            delivered_at=? WHERE task_id=?""", ("s-" + key, "a" * 40, time.time(), task["task_id"]))
+        return journal.get(task["task_id"])
+
+    root = done("root", discord_thread_id="thread-1")
+    other = done("other", discord_thread_id="thread-2")
+    sibling = done("sibling", parent_task_id=root["task_id"])
+
+    def ids(key, **kw):
+        task = journal.submit(project="p", host="h1", workspace="w", original_words="next " + key,
+                              task_path="minimal", engine_decision=decision, idempotency_key=key, **kw)
+        return {t["task_id"] for t in journal.warm_candidates(task)}
+
+    assert ids("fresh") == set()
+    assert ids("same-thread-no-continuation", discord_thread_id="thread-1") == set()
+    assert ids("continuation", discord_thread_id="thread-1", continuation=True) == {root["task_id"]}
+    assert ids("child", parent_task_id=root["task_id"]) == {root["task_id"], sibling["task_id"]}
+    assert other["task_id"] not in ids("child-2", parent_task_id=root["task_id"])
+    with pytest.raises(ValueError, match="parent task"):
+        journal.submit(project="p", host="h1", workspace="other", original_words="x", task_path="minimal",
+                       engine_decision=decision, idempotency_key="bad-parent", parent_task_id=root["task_id"])
+    journal.close()
+
+
+def test_context_refs_are_validated_stored_and_keep_old_idempotency(tmp_path):
+    journal = Journal(tmp_path / "refs.db")
+    refs = {"attachments": ["https://cdn.example/a.png"], "previous_message_id": "m-41",
+            "plan": "docs/plan.md", "commit": "ABCDEF1"}
+    task = journal.submit(project="p", host="h1", workspace="w", original_words=WORDS,
+                          idempotency_key="refs:1", context_refs=refs)
+    assert journal.get(task["task_id"])["context_refs"] == {**refs, "commit": "abcdef1"}
+    plain = journal.submit(project="p", host="h1", workspace="w", original_words=WORDS, idempotency_key="refs:2")
+    assert plain["payload_hash"] == hashlib.sha256(json.dumps(dict(
+        project="p", host="h1", workspace="w", original_words=WORDS, discord_thread_id=None,
+        recipe="feature-to-staging", acceptance="", engine="rules", interpretation=None, lead_agent="codex",
+        pm_provider=None, base_branch=None), sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    for bad in ({"unknown": "x"}, {"commit": "not-hex"}, {"attachments": "one"}, {"plan": ""}):
+        with pytest.raises(ValueError):
+            journal.submit(project="p", host="h1", workspace="w", original_words=WORDS,
+                           idempotency_key="refs:bad", context_refs=bad)
+    journal.close()
+
+
+def test_delivery_distinguishes_verified_adopted_merged_deployed(tmp_path):
+    journal = Journal(tmp_path / "stages.db")
+    task = submit(journal)
+    tid = task["task_id"]
+    assert journal.delivery(tid)["stage"] is None
+    with pytest.raises(ValueError, match="verified"):
+        journal.mark_stage(tid, stage="merged", ref="abc", actor="hermes")
+    journal.db.execute("""UPDATE tasks SET state='done',verification_commit=?,verification_tree=?,review_passed=1,
+        delivered_at=? WHERE task_id=?""", ("a" * 40, "b" * 40, time.time(), tid))
+    delivery = journal.delivery(tid)
+    assert delivery["stage"] == "verified" and delivery["verified"]["basis"] == "independent_review"
+    assert delivery["adopted"] is None and delivery["merged"] is None and delivery["deployed"] is None
+    journal.mark_stage(tid, stage="merged", ref="https://github.com/o/r/pull/9", actor="hermes")
+    assert journal.mark_stage(tid, stage="merged", ref="other", actor="ted")["merged"]["ref"].endswith("/pull/9")
+    assert journal.delivery(tid)["stage"] == "merged"
+    assert journal.mark_stage(tid, stage="deployed", ref="serve pid 42", actor="executor")["stage"] == "deployed"
+    with pytest.raises(ValueError):
+        journal.mark_stage(tid, stage="verified", ref="x", actor="hermes")
+    journal.close()
+
+
+def test_gate_eval_counts_false_pass_and_false_escalate(tmp_path):
+    from bat_agent_connector.gate_eval import evaluate
+
+    journal = Journal(tmp_path / "eval.db")
+    decision = {"selected": "rules_engine", "effective": "rules"}
+
+    def gate(key, conf, reason, verdict, *, reviewed=None, chars=200):
+        task = journal.submit(project="p", host="h1", workspace="w", original_words=key, task_path="minimal",
+                              recipe="small-task-with-tests", engine_decision=decision, idempotency_key=key)
+        commit = hashlib.sha1(key.encode()).hexdigest()
+        journal.reserve_minimal_review(task["task_id"], commit, "b" * 40, "d" * 64, 0.5,
+                                       diff_chars=chars, paths=["README.md"])
+        journal.finish_minimal_review(task["task_id"], commit, "b" * 40, {
+            "verdict": verdict, "confidence": conf, "jev_backend": "typesafe", "reason": reason})
+        if reviewed == "pass":
+            journal.db.execute("UPDATE tasks SET review_passed=1,verification_commit=? WHERE task_id=?",
+                               (commit, task["task_id"]))
+        elif reviewed == "reject":
+            journal.note(task["task_id"], "review_verdict_rejected", {"candidate_commit": commit})
+
+    gate("a", 0.48, "low_confidence", "escalate", reviewed="pass")
+    gate("b", 0.46, "low_confidence", "escalate", reviewed="reject", chars=3000)
+    gate("c", 0.9, "jev_risk", "escalate", reviewed="pass")
+    gate("d", 0.7, "jev_pass", "pass")
+    journal.close()
+    result = evaluate(tmp_path / "eval.db")
+    s = result["summary"]
+    assert s["threshold_0.50"] == {"pass": 1, "escalate": 3, "false_pass": 0, "false_escalate": 2,
+                                   "undecidable": 1}
+    assert s["threshold_0.45"]["false_pass"] == 1 and s["threshold_0.45"]["false_escalate"] == 1
+    assert s["pass_and_tiny"]["false_pass"] == 0 and s["pass_and_tiny"]["false_escalate"] == 1
+    assert [r["jev_choice"] for r in result["rows"]] == ["pass", "pass", "risk", "pass"]
 
 
 def test_minimal_small_completion_still_requires_observed_clean_tests(tmp_path):

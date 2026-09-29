@@ -118,9 +118,15 @@ standard path is explicit rules (planning/verification/review and high-stakes wo
 `work_status`/`work_result` are plain journal reads. There is no advisory candidate pre-screen. The `small-task-with-tests`
 recipe delivers directly only after trusted tests on a clean commit and one typed Jev review of the candidate diff
 against Ted's original words passes at the configured confidence threshold. A risky, uncertain, sensitive, large
-or unavailable diff goes to the separate reviewer; Jev backend failure also requires full review. It prefers a verified,
-idle,
-service-owned session from a completed task in the same workspace; otherwise it starts a fresh branch. Goose remains
+or unavailable diff goes to the separate reviewer; Jev backend failure also requires full review. It reuses a verified,
+idle, service-owned lead session only for a follow-up in the same workstream (`parent_task_id` naming the
+previous task or a sibling, or `continuation=true` in the same `discord_thread_id`) and only while its HEAD is still
+the previous task's verified commit; independent requests start a fresh branch from base. `work_status` and
+`work_result` carry a `delivery` block that separates `verified` (trusted tests + review/gate on the commit) from
+`adopted`, `merged` and `deployed`, which are shown only when recorded with `work_mark_stage` (the service never
+merges or deploys). `context_refs` (attachments, previous_message_id, plan, commit) stores references that came
+with Ted's words. `python -m bat_agent_connector.gate_eval --db <journal>` prints a read-only calibration table
+for the minimal gate (Jev choice/confidence vs the independent reviewer's outcome, per policy). Goose remains
 behind its live contract gate, with provider order Claude Opus 5.5 → AGY Opus 4.6-thinking → Codex.
 
 Earlier one-line README request A/B, before the minimal Jev review gate, used local fake BAT and disabled Jev

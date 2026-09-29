@@ -41,6 +41,37 @@ ALLOWED = {
 }
 
 
+
+_CONTEXT_REF_KEYS = {"attachments", "previous_message_id", "plan", "commit"}
+
+
+def _context_refs(refs: dict | None) -> dict | None:
+    """References that came with Ted's words: stored as data, never interpreted."""
+    if refs is None:
+        return None
+    if not isinstance(refs, dict) or set(refs) - _CONTEXT_REF_KEYS:
+        raise ValueError("context_refs keys: attachments, previous_message_id, plan, commit")
+    out: dict = {}
+    attachments = refs.get("attachments")
+    if attachments is not None:
+        if (not isinstance(attachments, list) or len(attachments) > 20
+                or not all(isinstance(a, str) and a.strip() and len(a) <= 500 for a in attachments)):
+            raise ValueError("attachments must be up to 20 reference strings")
+        if attachments:
+            out["attachments"] = [a.strip() for a in attachments]
+    for key in ("previous_message_id", "plan"):
+        value = refs.get(key)
+        if value is not None:
+            if not isinstance(value, str) or not value.strip() or len(value) > 500:
+                raise ValueError(f"{key} must be a short reference string")
+            out[key] = value.strip()
+    commit = refs.get("commit")
+    if commit is not None:
+        if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-fA-F]{7,40}", commit):
+            raise ValueError("commit must be a 7-40 character hex id")
+        out["commit"] = commit.lower()
+    return out or None
+
 class Journal:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -150,6 +181,8 @@ class Journal:
                                ("session_replacements", "INTEGER NOT NULL DEFAULT 0"),
                                ("verification_failures", "INTEGER NOT NULL DEFAULT 0"),
                                ("verifying_started_at", "REAL"), ("progress_at", "REAL"),
+                               ("parent_task_id", "TEXT"), ("continuation", "INTEGER NOT NULL DEFAULT 0"),
+                               ("context_refs", "TEXT"),
                                ("task_path", "TEXT NOT NULL DEFAULT 'standard'")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {sql_type}")  # noqa: S608 - fixed local identifiers
@@ -369,7 +402,9 @@ class Journal:
                acceptance: str = "", engine: str = "rules", interpretation: str | None = None,
                lead_agent: str = "codex", pm_provider: str | None = None,
                base_branch: str | None = None, idempotency_key: str,
-               task_path: str = "standard", engine_decision: dict | None = None) -> dict:
+               task_path: str = "standard", engine_decision: dict | None = None,
+               parent_task_id: str | None = None, continuation: bool = False,
+               context_refs: dict | None = None) -> dict:
         if not all(isinstance(x, str) and x.strip() for x in (project, host, workspace, original_words, idempotency_key)):
             raise ValueError("project, host, workspace, original_words and idempotency_key are required")
         # The initial lead prompt adds a short wrapper under BAT's 20k limit.
@@ -397,6 +432,14 @@ class Journal:
         if base_branch is not None and (not isinstance(base_branch, str) or not base_branch
                                         or len(base_branch) > 256 or base_branch.startswith("-")):
             raise ValueError("invalid base branch")
+        if not isinstance(continuation, bool):
+            raise ValueError("continuation must be a boolean")
+        refs = _context_refs(context_refs)
+        if parent_task_id is not None:
+            parent = self.db.execute("SELECT project,host,workspace FROM tasks WHERE task_id=?",
+                                     (parent_task_id,)).fetchone() if isinstance(parent_task_id, str) else None
+            if not parent or (parent["project"], parent["host"], parent["workspace"]) != (project, host, workspace):
+                raise ValueError("parent task must exist in the same project, host and workspace")
         from .task_recipes import load
 
         load(recipe)
@@ -406,6 +449,13 @@ class Journal:
                        pm_provider=pm_provider, base_branch=base_branch)
         if task_path == "minimal":
             payload["task_path"] = task_path
+        # Optional workstream/context fields join the digest only when set, so older keys still match.
+        if parent_task_id is not None:
+            payload["parent_task_id"] = parent_task_id
+        if continuation:
+            payload["continuation"] = True
+        if refs:
+            payload["context_refs"] = refs
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         with self.tx():
             old = self.db.execute("SELECT * FROM tasks WHERE idem_key=?", (idempotency_key,)).fetchone()
@@ -417,11 +467,13 @@ class Journal:
             task_id = str(uuid.uuid4())
             self.db.execute("""INSERT INTO tasks(task_id,idem_key,payload_hash,project,host,workspace,
                 original_words,interpretation,discord_thread_id,recipe,acceptance,engine,lead_agent,
-                pm_provider,base_branch,task_path,state,submitted_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                pm_provider,base_branch,task_path,state,submitted_at,updated_at,
+                parent_task_id,continuation,context_refs)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (task_id, idempotency_key, digest, project, host, workspace, original_words,
                  interpretation, discord_thread_id, recipe, acceptance, engine, lead_agent,
-                 pm_provider, base_branch, task_path, "queued", now, now))
+                 pm_provider, base_branch, task_path, "queued", now, now,
+                 parent_task_id, int(continuation), json.dumps(refs, sort_keys=True) if refs else None))
             self._event(task_id, "submitted", {"state": "queued"})
             if engine_decision is not None:
                 self._event(task_id, "engine_decision", engine_decision)
@@ -442,7 +494,8 @@ class Journal:
         return dict(row) if row else None
 
     def reserve_minimal_review(self, task_id: str, commit: str, tree: str,
-                               diff_sha256: str, threshold: float) -> dict:
+                               diff_sha256: str, threshold: float, *, diff_chars: int | None = None,
+                               paths: list[str] | None = None) -> dict:
         with self.tx():
             old = self.minimal_review_gate(task_id, commit, tree)
             if old:
@@ -454,7 +507,9 @@ class Journal:
                 (task_id, commit, tree, diff_sha256, "pending", threshold, time.time()))
             self._event(task_id, "minimal_review_reserved", {"candidate_commit": commit,
                                                                "tree_hash": tree,
-                                                               "diff_sha256": diff_sha256})
+                                                               "diff_sha256": diff_sha256,
+                                                               "diff_chars": diff_chars,
+                                                               "paths": (paths or [])[:20]})
         return self.minimal_review_gate(task_id, commit, tree)
 
     def finish_minimal_review(self, task_id: str, commit: str, tree: str,
@@ -485,18 +540,76 @@ class Journal:
         return self.minimal_review_gate(task_id, commit, tree)
 
     def warm_candidates(self, task: dict) -> list[dict]:
-        rows = self.db.execute("""SELECT task_id FROM tasks WHERE project=? AND host=? AND workspace=?
-            AND lead_agent=? AND state='done' AND session_id IS NOT NULL
-            AND external_worktree_path IS NULL AND reviewer_session_id IS NULL AND task_id<>?
-            ORDER BY delivered_at DESC LIMIT 5""",
-            (task["project"], task["host"], task["workspace"], task["lead_agent"], task["task_id"])).fetchall()
+        """Completed tasks in the same workstream whose lead session may be reused.
+
+        Same workstream means an explicit parent (the parent itself or a sibling
+        with the same parent) or an explicit continuation in the same origin
+        thread. Independent requests get no candidates and start fresh.
+        """
+        parent, thread = task.get("parent_task_id"), task.get("discord_thread_id")
+        if parent:
+            scope, args = "(task_id=? OR parent_task_id=?)", (parent, parent)
+        elif task.get("continuation") and thread:
+            scope, args = "discord_thread_id=?", (thread,)
+        else:
+            return []
+        rows = self.db.execute(f"""SELECT task_id FROM tasks WHERE project=? AND host=? AND workspace=?
+            AND lead_agent=? AND state='done' AND session_id IS NOT NULL AND verification_commit IS NOT NULL
+            AND external_worktree_path IS NULL AND reviewer_session_id IS NULL AND task_id<>? AND {scope}
+            ORDER BY delivered_at DESC LIMIT 5""",  # noqa: S608 - fixed local SQL fragments
+            (task["project"], task["host"], task["workspace"], task["lead_agent"], task["task_id"],
+             *args)).fetchall()
         return [self.get(row["task_id"]) for row in rows]
+
+    DELIVERY_STAGES = ("verified", "adopted", "merged", "deployed")
+
+    def mark_stage(self, task_id: str, *, stage: str, ref: str, actor: str) -> dict:
+        """Record that a verified task was adopted, merged or deployed (the service does none of these)."""
+        if stage not in self.DELIVERY_STAGES[1:]:
+            raise ValueError("stage must be adopted, merged or deployed")
+        if not isinstance(ref, str) or not ref.strip() or len(ref) > 300:
+            raise ValueError("stage ref is required (commit, PR or deploy reference, max 300 chars)")
+        if actor not in {"service", "ted", "hermes", "executor"}:
+            raise ValueError("invalid actor")
+        with self.tx():
+            task = self.get(task_id)
+            if task["state"] != "done" or not task["verification_commit"]:
+                raise ValueError("only a verified (done) task can be marked adopted, merged or deployed")
+            if not self.db.execute("SELECT 1 FROM events WHERE task_id=? AND kind=?",
+                                   (task_id, "stage_" + stage)).fetchone():
+                self._event(task_id, "stage_" + stage, {"stage": stage, "ref": ref.strip(), "actor": actor,
+                                                       "verification_commit": task["verification_commit"]})
+        return self.delivery(task_id)
+
+    def delivery(self, task_id: str) -> dict:
+        """Distinguish verified / adopted / merged / deployed from recorded facts only."""
+        task = self.get(task_id)
+        verified = None
+        if task["state"] == "done" and task["verification_commit"]:
+            gate = (self.minimal_review_gate(task_id, task["verification_commit"], task["verification_tree"])
+                    if task["verification_tree"] else None)
+            basis = ("independent_review" if task["review_passed"] else
+                     "jev_review_gate" if gate and gate["verdict"] == "pass" else "reconciled")
+            verified = {"commit": task["verification_commit"], "tree": task["verification_tree"],
+                        "basis": basis, "at": task["delivered_at"]}
+        stages: dict = {"verified": verified}
+        for stage in self.DELIVERY_STAGES[1:]:
+            row = self.db.execute("SELECT body,created_at FROM events WHERE task_id=? AND kind=?",
+                                  (task_id, "stage_" + stage)).fetchone()
+            body = self._body(row["body"]) if row else None
+            stages[stage] = ({"ref": body.get("ref"), "actor": body.get("actor"), "at": row["created_at"]}
+                             if body else None)
+        reached = [stage for stage in self.DELIVERY_STAGES if stages[stage]]
+        return {"stage": reached[-1] if reached else None, **stages,
+                "note": "merged/deployed are reported only when recorded; the task service never merges or deploys"}
 
     def get(self, task_id: str) -> dict:
         row = self.db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
         if row is None:
             raise KeyError(task_id)
         d = dict(row)
+        d["continuation"] = bool(d.get("continuation"))
+        d["context_refs"] = json.loads(d["context_refs"]) if d.get("context_refs") else None
         d["paused"] = bool(d["paused"])
         d["delivered"] = bool(d["delivered"])
         d["review_passed"] = bool(d["review_passed"])
