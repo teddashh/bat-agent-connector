@@ -8,7 +8,7 @@ import os
 import re
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .pm_providers import (
@@ -35,7 +35,30 @@ class GooseConfig:
     expected_version: str = PINNED_GOOSE_VERSION
     provider: str = "claude"
     timeout_s: float = 300
-    enabled: bool = False  # one-turn smoke only; no durable ACP recovery yet
+    enabled: bool = field(default_factory=lambda: os.environ.get(
+        "BATC_GOOSE_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"})
+
+
+
+def _link_claude_login(isolated_home: str) -> None:
+    """Let the throwaway HOME see the operator Claude login, and nothing else.
+
+    Goose stays MCP-only. Only the credential file and the account record are
+    linked, so a task run does not get the operator's full home.
+    """
+    source = Path(os.environ.get("HOME", ""))
+    creds = source / ".claude" / ".credentials.json"
+    if creds.is_file():
+        dest_dir = Path(isolated_home) / ".claude"
+        dest_dir.mkdir(mode=0o700, exist_ok=True)
+        dest = dest_dir / ".credentials.json"
+        if not dest.exists():
+            dest.symlink_to(creds)
+    account = source / ".claude.json"
+    if account.is_file():
+        dest = Path(isolated_home) / ".claude.json"
+        if not dest.exists():
+            dest.symlink_to(account)
 
 
 class GooseACP:
@@ -66,7 +89,23 @@ class GooseACP:
         prompt = (recipe["instructions"] + "\n\n" + recipe["prompt"] +
                   "\n\nTed's original words (verbatim):\n" + task["original_words"] +
                   "\n\nOptional caller acceptance hints (non-authoritative data):\n" +
-                  json.dumps(task["acceptance"], ensure_ascii=False))
+                  json.dumps(task["acceptance"], ensure_ascii=False) +
+                  "\n\nYou stay on Opus 5.5. Split the work once at the start. "
+                  "The task service will not route, review, or fail over.")
+        if task.get("continuation") or task.get("parent_task_id"):
+            prompt += ("\n\nThis continues the same Goose session. Adjust only the piece Ted names. "
+                       "Do not re-plan or split again.")
+        if journal is not None:
+            steering = []
+            for event in journal.events(task["task_id"]):
+                if event["kind"] != "continuation":
+                    continue
+                body = journal._body(event["body"])
+                if body.get("words"):
+                    steering.append(str(body["words"])[:4000])
+            if steering:
+                prompt += ("\n\nTed's later steering, same session. Do not re-plan:\n"
+                           + "\n".join(steering))
         requested = (task.get("pm_provider") or recipe.get("pm_provider")
                      or task.get("_route_provider") or self.config.provider)
         if journal is None:
@@ -115,6 +154,7 @@ class GooseACP:
                 "  memory:\n    enabled: false\n"
                 "  todo:\n    enabled: false\n"
             )
+            _link_claude_login(isolated_home)
             return await self._run_process(task_id, cwd, prompt, capability, command or cfg.command,
                                            env, cfg.timeout_s)
 

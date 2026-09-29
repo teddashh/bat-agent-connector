@@ -10,6 +10,7 @@ import re
 import shlex
 import stat
 import subprocess
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,15 @@ from .safety import Audit
 from .task_handoff import history_excerpt, ledger_summary, original_words_archive
 from .task_verifier import ObservedVerifier, VerificationSettings, classify_failure, failure_tail
 
+# BAT's model id for Opus 5.5 (from claude:get-supported-models). Claude sessions
+# always pin it, so a BAT default can never silently pick Sonnet.
+CLAUDE_BAT_MODEL = "claude-opus-5-5:auto-compact-300k"
+# Claude is offered only while the host's own usage snapshot is fresh and below
+# these utilizations; anything unknown falls back to Codex.
+CLAUDE_MAX_UTILIZATION = {"fiveHour": 0.85, "sevenDay": 0.90}
+USAGE_SNAPSHOT_MAX_AGE_S = 1800
+PROVIDER_ERROR_LATCH_S = 3600
+
 
 class BatTaskAdapter:
     def __init__(self, fleet: Fleet, verifier: ObservedVerifier | None = None, journal=None):
@@ -30,6 +40,40 @@ class BatTaskAdapter:
         self.verifier = verifier or ObservedVerifier(VerificationSettings())
         self.register_tabs = self.verifier.settings.register_tabs
         self.journal = journal
+        self._agents_cache: dict[str, tuple[float, frozenset[str]]] = {}
+
+    async def available_agents(self, task: dict) -> frozenset[str]:
+        """BAT agents this host can run now. Codex is the always-available default.
+
+        AGY claude-opus-4-6-thinking is not a BAT runtime (BAT runs only Claude
+        Code and Codex), so it is never offered for BAT sessions.
+        """
+        host = task["host"]
+        cached = self._agents_cache.get(host)
+        if cached and time.time() - cached[0] < 60:
+            return cached[1]
+        agents = {"codex"}
+        try:
+            snap = await self.fleet.client(host).invoke("agent:usage-snapshot", {}, retry_on_disconnect=False)
+        except Exception:  # noqa: BLE001 - unknown usage means Codex only
+            snap = None
+        claude = snap.get("claude") if isinstance(snap, dict) else None
+        if isinstance(claude, dict):
+            fetched = claude.get("fetchedAt")
+            fresh = (isinstance(fetched, (int, float)) and not isinstance(fetched, bool)
+                     and 0 <= time.time() - fetched / 1000 <= USAGE_SNAPSHOT_MAX_AGE_S)
+            under = all(isinstance(w := claude.get(name), dict)
+                        and isinstance(w.get("utilization"), (int, float))
+                        and not isinstance(w.get("utilization"), bool)
+                        and 0 <= w["utilization"] < limit
+                        for name, limit in CLAUDE_MAX_UTILIZATION.items())
+            latched = bool(self.journal) and self.journal.provider_unavailable(
+                "claude", since=time.time() - PROVIDER_ERROR_LATCH_S)
+            if fresh and under and not latched:
+                agents.add("claude")
+        result = frozenset(agents)
+        self._agents_cache[host] = (time.time(), result)
+        return result
 
     async def _ssh_script(self, task: dict, script: str) -> str:
         alias = self.verifier.settings.ssh_hosts.get(task["host"])
@@ -198,6 +242,7 @@ class BatTaskAdapter:
                 try:
                     r = await orchestrate.session_start(
                         self.fleet, host, task["workspace"], agent, confirm=True, prompt=None,
+                        model=CLAUDE_BAT_MODEL if agent == "claude" else None,
                         use_worktree=external is None, title="task " + task["task_id"][:8],
                         session_id=session_id, retain_on_error=True, register_tab=self.register_tabs,
                         base_branch=task.get("base_branch") if external is None else None,
@@ -240,7 +285,7 @@ class BatTaskAdapter:
         if agent == "codex":
             opts.update(codexSandboxMode="read-only", codexApprovalPolicy="never")
         else:
-            opts["permissionMode"] = "plan"
+            opts.update(permissionMode="plan", model=CLAUDE_BAT_MODEL)
         client = self.fleet.client(host)
         started = None
         last_error = None
@@ -735,12 +780,6 @@ class BatTaskAdapter:
             return None
         # This proves a successor exists, not that Codex accepted its prompt.
         return {"session_id": successor_id, "marker": handoff_message_id}
-
-    def reviewer_agent(self, task: dict) -> str:
-        # Positive local quota signal only; lack of telemetry defaults to Codex.
-        import os
-
-        return "claude" if os.environ.get("BATC_REVIEW_CLAUDE_AVAILABLE") == "1" else "codex"
 
     def _cwd(self, task: dict) -> str | None:
         row = registry.get(task["host"], task["session_id"])
