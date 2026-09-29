@@ -22,7 +22,7 @@ Ted 只對 Discord 裡的 Hermes 說話。Hermes 只能逐字保存原話、交�
 
 Rules 引擎在回合確定完成、尚未達驗收、沒有 blocker／額度／人工接管且未達 recipe 續推上限時，派一次短 `continue`；模糊語意才請 Jev 分類。狀態包括 queued、dispatching、accepted、running、waiting_permission、quota_limited、human_owned、needs_ted、verifying、done、failed、uncertain。Pause 停止新派送，可選擇 abort 當前回合或讓其結束；resume 先對帳再續推。額度 failover 呼叫 PR #1 的原子 successor reservation 路徑，記下新舊 session。開發者自稱完成、測試通過後，starter recipe 預設開**另一個** reviewer session：Claude 額度可用時用 Claude，否則用全新 Codex。Reviewer 依驗收條件回報；拒絕時送回開發者並計數，達 retry cap 即請 Ted 處理。通過後才以 PR #1 的 commit 綁定驗證紀錄進入 VERIFIED_CANDIDATE。`done` 仍需驗證與 review 都通過。代理自稱 MILESTONE 只進 verifying。
 
-Discord 發文者只讀事件。每個 thread 事件以 event id 去重；看板只有一則可編輯的「任務看板」，訊息 id 持久保存。adapter 可用 fake 測試；正式 token、channel id 只由環境／grok-bot-01 設定。Discord API 不提供以本地交易包住網路發文的 exactly once：送出成功但本地記錄前斷線時，先對帳或人工處理，不盲目重貼。第一階段不啟用正式發文，也不移除現有 cron；部署時才用此服務取代 `bat-watch-*` 與 idle keep-pushing。
+里程碑事件流（2026-09-29 取代 Discord 發文者）：服務不再知道 Discord 存在，也不發任何聊天訊息。唯讀 MCP 工具 `work_events(since_cursor, limit)`（RPC `work_events`、CLI `batc task-events`）只回傳四種里程碑：`started`（首次 accepted/running，或 needs_ted 後恢復）、`needs_ted`（附具體原因）、`done`（附 commit／PR 連結）、`failed`。每筆含單調遞增的 `cursor`（event id）、`task_id`、`project`、`workspace`、`origin_thread_id`（提交時的不透明來源參照，欄位仍名為 `discord_thread_id`）、`kind`、簡短 `summary`。`next_cursor` 會越過非里程碑事件；讀取端（Hermes）發文成功後才保存游標；`limit=0` 只回 `head_cursor`，新讀取端可從「現在」開始、不補發歷史。舊帳本開啟時移除 `events.discord_status`、`events.discord_message_id` 與 `board` 表，舊積壓永遠不會被發出。
 
 Goose adapter 限用 stock `goose acp`，以 ACP JSON-RPC 操控，任務 recipe YAML 設定指示、工具、參數、驗收和重試上限。服務只給 Goose 該 task 的 `send`、`read`、`run_verification`、`request_ted`，不暴露 `work_submit`。驗證命令由本機受信設定選定並由服務觀察 exit code、commit/tree；Goose 無法提供自己的 exit code 作證。Goose PM 預設順序為 **Claude ACP `claude-opus-5-5` → AGY shim `claude-opus-4-6-thinking` → Codex ACP**。Claude ACP 需 Claude Code 訂閱登入；AGY Claude 不允許 Sonnet；Codex 使用 ChatGPT 訂閱登入作備援。只有確認 prompt 尚未送出時才因 quota／rate limit／auth／setup 失敗切換，並記新的 task PM branch。Gemini Flash 只供信心足夠的例行狀態／relay 步驟，必須配置可用端點。禁止付費 API key。第一階段有 fake BAT 的 ACP smoke 與 provider adapter／fallback 測試；真 Goose PM、provider 認證、ACP 恢復及實機穩定性仍待第二階段驗證。正式 task 仍預設 rules，daemon 拒絕 live Goose 提交。
 
@@ -60,7 +60,7 @@ Shadow task `d87868ac` 停在 `verifying` 超過八分鐘，顯示先前只有�
 
 ## 可恢復的狀態機與帳本
 
-單一 task ID 永不更換。`branches` 表另記每次 BAT lead／reviewer session 與 PM provider 選擇，包含 `branch_id`、`session_id`、provider、角色、上游 branch ID、原因、時間；`work_status` 回傳完整 branch 歷史。這裡的 branch 是任務執行分支，與 Git branch 名稱不同。`tasks` 保存原話、工作空間、recipe、狀態、pause/control_version、lead/reviewer session、turn marker、commit/tree、review marker、提交／交付時間與指標。`commands` 有唯一 idempotency key、預留 session ID、BAT message ID、kind、送出前游標和狀態。`events`、`routing`、`provider_usage`、`observed_verifications`、`capabilities`、`ted_actions`、Discord `board` 與 owner lease 各自保存可稽核資料。所有網路呼叫前先提交命令意圖；同一 key 不會生第二條命令。
+單一 task ID 永不更換。`branches` 表另記每次 BAT lead／reviewer session 與 PM provider 選擇，包含 `branch_id`、`session_id`、provider、角色、上游 branch ID、原因、時間；`work_status` 回傳完整 branch 歷史。這裡的 branch 是任務執行分支，與 Git branch 名稱不同。`tasks` 保存原話、工作空間、recipe、狀態、pause/control_version、lead/reviewer session、turn marker、commit/tree、review marker、提交／交付時間與指標。`commands` 有唯一 idempotency key、預留 session ID、BAT message ID、kind、送出前游標和狀態。`events`、`routing`、`provider_usage`、`observed_verifications`、`capabilities`、`ted_actions` 與 owner lease 各自保存可稽核資料。所有網路呼叫前先提交命令意圖；同一 key 不會生第二條命令。
 
 ### 2026-09-27 22:51:52–22:51:58 ET shadow task 診斷及恢復界線
 
@@ -106,7 +106,7 @@ HTTP 僅聽 loopback 並檢查 peer。一般 work RPC 需本機 0600 admin beare
 
 私有 `BATC_TASK_SETTINGS` TOML 必須 0600，例如 `[verification.commands]` 的 `project = ["uv", "run", "pytest", "-q"]`；remote host 可用 `[verification.ssh_hosts]` 指定既有 SSH alias。測試 stdout/stderr 只存本機 `task-artifacts` 的 0600 檔案（至多保留前 2 MB，另存完整輸出 SHA-256）；可在 `[verification]` 設 `artifact_dir` 到私有路徑。`[task_service] register_tabs = true` 是額外的 service-only 顯式開關，預設 false；主機既有 `orchestrate_register_tabs=true` 也必須同時成立。lead 和 reviewer tab 都用 connector 的 append/revision recheck；不改 BAT。Ted 很少開 GUI，仍需知道 `workspace:save` 整份覆寫的 race。
 
-Discord thread 發文含固定 `BATC-EVENT:<event_id>` marker，發文前 claim；若 crash，重啟先找最近 100 則的 marker／message ID，找到即標 sent。超過這個範圍時需管理員查完整 Discord history；若找到了舊訊息，可用 `batc task-delivery --confirm-found-event <id> --message-id <discord-id>`，服務再用 Discord GET 驗證 bot 作者和 marker 後標 sent；確認不存在才用 `--confirm-absent-event` 明確重試。看板 `BATC-BOARD:<channel>` 只有一則：已知 message ID 時重試 edit 安全；未知 ID 的 create 同樣須尋找或人工確認，可用 `--confirm-found-board`／`--message-id`。Fake adapter 覆蓋重啟及 found-ID；真 Discord token 和 channel ID 只從環境注入。`work_delivery_status` 與 `batc task-delivery` 可查看未解事件。尚未取代 Hermes cron。
+（已移除）舊的 `BATC-EVENT`／`BATC-BOARD` 發文、`batc task-delivery` 與 `work_delivery_*` 對帳流程已刪除；聊天投遞由擁有 Discord 的 Hermes 依 `work_events` 游標負責。
 
 若 failover 身分有明確衝突，管理員也可對 `failover` command 取得一次性 capability 並對帳；此動作同時結清它綁定的 handoff command、留下 actor／source／evidence，task 進入 `human_owned`，**不**把未知 successor 變成 lead，也不能在同一次對帳送新 prompt。若 handoff command 本身的帳本綁定已損壞，必須先由管理員修復帳本，服務拒絕自動採用或猜測。
 

@@ -24,7 +24,6 @@ from .jev import Jev
 from .model_router import MinimalReviewGate, MinimalTaskRouter, ModelRouter, RouterConfig
 from .task_bat import BatTaskAdapter
 from .task_core import TaskCoordinator
-from .task_discord import DiscordHTTP, DiscordPublisher
 from .task_journal import Journal
 from .task_recipes import load as load_recipe
 from .task_verifier import ObservedVerifier, load_settings
@@ -54,7 +53,7 @@ def request(method: str, *, _auth_token: str | None = None, **params) -> dict:
 
 
 class TaskDaemon:
-    def __init__(self, config: Config, db_path: str | Path | None = None, *, discord=None):
+    def __init__(self, config: Config, db_path: str | Path | None = None):
         self.journal = Journal(db_path or state_dir() / "tasks.sqlite3")
         self.admin_token_path = self.journal.path.parent / "task-admin.token"
         try:
@@ -99,10 +98,6 @@ class TaskDaemon:
         self._cleanup_retry_after: dict[str, float] = {}
         self._lease_fd: int | None = None
         self._owner_id = secrets.token_hex(16)
-        board = os.environ.get("BATC_DISCORD_BOARD_CHANNEL_ID")
-        self.publisher = DiscordPublisher(self.journal, discord or DiscordHTTP(), board) if (
-            discord or os.environ.get("BATC_DISCORD_BOT_TOKEN")
-        ) else None
 
     def verification_budget(self, recipe: str) -> int:
         if self.verification_timeout_s != self.verification_timeout_default_s:
@@ -110,23 +105,11 @@ class TaskDaemon:
         return max(self.verification_timeout_s, self.verification_timeout_by_recipe.get(recipe, self.verification_timeout_s))
 
     async def call(self, method: str, params: dict, *, auth_token: str | None = None) -> dict:
-        if method == "work_delivery_status":
-            return {"unresolved_events": self.journal.discord_unresolved(),
-                    "board": self.journal.board_get(os.environ.get("BATC_DISCORD_BOARD_CHANNEL_ID", ""))}
-        if method == "work_delivery_confirm_absent":
-            if params.get("event_id") is not None:
-                self.journal.discord_confirm_absent(int(params["event_id"]))
-            elif params.get("board_channel_id"):
-                self.journal.board_confirm_absent(params["board_channel_id"])
-            else:
-                raise ValueError("event_id or board_channel_id required")
-            return {"confirmed_absent": True}
-        if method == "work_delivery_confirm_found":
-            if not self.publisher:
-                raise ValueError("Discord publisher is not configured")
-            return await self.publisher.confirm_found(event_id=params.get("event_id"),
-                                                      board_channel_id=params.get("board_channel_id"),
-                                                      message_id=params["message_id"])
+        if method == "work_events":
+            # Read-only milestone feed. Chat delivery belongs to the caller.
+            return self.journal.milestones(
+                params.get("since_cursor", 0), params.get("limit", 50),
+                repo_urls=self.adapter.verifier.settings.repo_urls)
         if method == "work_submit":
             if not self.fleet.orchestrate_enabled(params.get("host", "")):
                 raise ValueError("task host needs writes=true and orchestrate=true")
@@ -322,11 +305,6 @@ class TaskDaemon:
                 active = self._active_ticks.get(tid)
                 if active is None or active.done():
                     self._active_ticks[tid] = asyncio.create_task(self._tick_task(tid))
-            if self.publisher:
-                try:
-                    await asyncio.wait_for(self.publisher.flush(), timeout=10)
-                except Exception as exc:  # noqa: BLE001 - sending remains pending/uncertain for reconciliation
-                    logging.warning("Discord event flush needs reconciliation: %s", type(exc).__name__)
             await asyncio.sleep(2)
 
     async def _tick_task(self, task_id: str):
