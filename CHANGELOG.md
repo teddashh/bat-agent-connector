@@ -2,6 +2,10 @@
 
 ## Next release (unreleased)
 
+- No model calls where code already knows the answer: `work_status`/`work_result` are plain journal reads;
+  PM provider choice is explicit rules by step type and stakes (no Jev classification or confidence); the
+  advisory candidate pre-screen is removed; minimal submit uses rules directly when it is the only runnable
+  engine (Goose live gate closed) and asks Jev only when both engines can run.
 - Trusted verification runs under one deadline (start, drain, exit) in its own process group; a
   timeout kills the group and, over SSH, the remote `setsid` group, and must confirm it is gone.
 - Verification has two clocks: last meaningful progress (idle budget per recipe) and an absolute cap

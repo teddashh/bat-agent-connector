@@ -663,25 +663,6 @@ class TaskCoordinator:
             lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
             if lead_read.get("streaming") is not False or lead_read.get("pending"):
                 return task
-            if (self.router and task.get("task_path") != "minimal"
-                    and not self.journal.jev_prescreen_for_candidate(task["task_id"], commit, tree)):
-                diff_reader = getattr(self.adapter, "candidate_diff_excerpt", None)
-                try:
-                    diff = await diff_reader(task) if callable(diff_reader) else None
-                except Exception:  # noqa: BLE001 - advisory pre-screen cannot block review
-                    diff = None
-                if diff:
-                    final = "\n".join(str(m.get("text") or "") for m in lead_read.get("messages") or []
-                                      if m.get("role") == "assistant")[-3000:]
-                    await self.router.prescreen(task["task_id"], commit=commit, tree=tree,
-                                                request=task["original_words"], final_output=final,
-                                                diff_excerpt=diff,
-                                                tests=f"{evidence['command']} exit={evidence['exit_code']}")
-                task = self.journal.get(task["task_id"])
-                fresh = await self.adapter.candidate_identity(task)
-                if (task["paused"] or not fresh or not fresh.get("clean")
-                        or (fresh["candidate_commit"], fresh["tree_hash"]) != (commit, tree)):
-                    return task
             task = self.journal.change(task["task_id"], "verifying", fields={
                 "review_commit": commit, "review_tree": tree, "review_marker": None,
             })
