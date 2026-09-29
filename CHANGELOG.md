@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- The task service no longer knows about chat delivery. The Discord publisher, its per-event outbox columns,
+  the board table and `batc task-delivery` / `work_delivery_*` are removed; opening an older journal drops the
+  outbox (`events.discord_status`, `events.discord_message_id`, `board`) so the old backlog can never be posted.
+  New read-only milestone feed: MCP `work_events(since_cursor, limit)`, RPC `work_events`, CLI `batc task-events`.
+  Transitions into `needs_ted`/`failed` now store the reason on the event.
 - The minimal task path is now the configurable production default (`BATC_TASK_DEFAULT_PATH=minimal`), with a typed Jev candidate review gate; `task_path="standard"` remains the explicit full-review opt-out.
 - Claude turn markers now use BAT's exact `clientMessageId` echo (`batc-<uuid>`), with an explicit
   timestamp cursor and conservative queued-turn phases. Codex is labeled as a timestamp fallback

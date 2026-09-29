@@ -1,7 +1,9 @@
-"""SQLite authority for task, command, event and delivery state.
+"""SQLite authority for task, command and event state.
 
 The service process is the only writer. Each short operation is a transaction;
 network calls happen after committing an intent, never inside a transaction.
+The service never delivers chat messages itself: callers read the milestone
+feed (``Journal.milestones``) and publish wherever they own a channel.
 """
 
 from __future__ import annotations
@@ -81,12 +83,7 @@ class Journal:
             );
             CREATE TABLE IF NOT EXISTS events (
                 event_id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(task_id),
-                kind TEXT NOT NULL, body TEXT NOT NULL, created_at REAL NOT NULL,
-                discord_message_id TEXT, discord_status TEXT NOT NULL DEFAULT 'pending'
-            );
-            CREATE TABLE IF NOT EXISTS board (
-                board_key TEXT PRIMARY KEY, message_id TEXT, rendered TEXT,
-                status TEXT NOT NULL DEFAULT 'pending'
+                kind TEXT NOT NULL, body TEXT NOT NULL, created_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS routing (
                 route_id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(task_id),
@@ -155,6 +152,24 @@ class Journal:
         route_columns = {r[1] for r in self.db.execute("PRAGMA table_info(routing)")}
         if "jev_backend" not in route_columns:
             self.db.execute("ALTER TABLE routing ADD COLUMN jev_backend TEXT")
+        self._drop_legacy_outbox()
+
+    def _drop_legacy_outbox(self):
+        """Remove the retired chat outbox so no historical event can ever be published.
+
+        Older journals carried per-event delivery columns and a board table.
+        Delivery now belongs to whichever caller reads ``milestones``.
+        """
+        event_columns = {r[1] for r in self.db.execute("PRAGMA table_info(events)")}
+        legacy = [c for c in ("discord_status", "discord_message_id") if c in event_columns]
+        has_board = self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='board'").fetchone()
+        if not legacy and not has_board:
+            return
+        with self.tx():
+            for column in legacy:
+                self.db.execute(f"ALTER TABLE events DROP COLUMN {column}")  # noqa: S608 - fixed local identifiers
+            self.db.execute("DROP TABLE IF EXISTS board")
 
     @contextmanager
     def tx(self):
@@ -554,7 +569,10 @@ class Journal:
                  values["ted_interventions"], values["base_branch"], values["base_commit"],
                  values["external_worktree_path"], values["external_branch"], values["delivered"], values["delivered_at"], task_id))
             if old["state"] != state or event:
-                self._event(task_id, event or "state", {"from": old["state"], "to": state})
+                body = {"from": old["state"], "to": state}
+                if state in {"needs_ted", "failed"} and old["state"] != state and values["result"]:
+                    body["reason"] = str(values["result"])[:1000]
+                self._event(task_id, event or "state", body)
         return self.get(task_id)
 
     def complete_external_cleanup(self, task_id: str, proof: dict) -> dict:
@@ -844,79 +862,120 @@ class Journal:
             ORDER BY usage_id DESC LIMIT 1""", (provider, since)).fetchone()
         return bool(row and row[0] in {"quota_error", "rate_limited", "auth_error"})
 
-    def discord_events(self) -> list[dict]:
-        return [dict(r) for r in self.db.execute("""SELECT e.*,t.discord_thread_id FROM events e
-            JOIN tasks t USING(task_id) WHERE e.discord_status='pending' AND t.discord_thread_id IS NOT NULL
-            ORDER BY e.event_id""")]
+    MILESTONE_KINDS = ("started", "needs_ted", "done", "failed")
+    _PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 
-    def discord_event_get(self, event_id: int) -> dict:
-        row = self.db.execute("SELECT * FROM events WHERE event_id=?", (event_id,)).fetchone()
-        if row is None:
-            raise KeyError(event_id)
-        return dict(row)
+    def head_cursor(self) -> int:
+        """Newest event cursor; a new feed reader starts here to skip history."""
+        return int(self.db.execute("SELECT COALESCE(MAX(event_id),0) FROM events").fetchone()[0])
 
-    def discord_inflight(self) -> list[dict]:
-        return [dict(r) for r in self.db.execute("""SELECT e.*,t.discord_thread_id FROM events e
-            JOIN tasks t USING(task_id) WHERE e.discord_status='sending' AND t.discord_thread_id IS NOT NULL
-            ORDER BY e.event_id""")]
+    @staticmethod
+    def _body(raw: str) -> dict:
+        try:
+            body = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        return body if isinstance(body, dict) else {}
 
-    def discord_unresolved(self) -> list[dict]:
-        return [dict(r) for r in self.db.execute("""SELECT e.*,t.discord_thread_id FROM events e
-            JOIN tasks t USING(task_id) WHERE e.discord_status='unresolved' AND t.discord_thread_id IS NOT NULL
-            ORDER BY e.event_id""")]
+    def _transition_before(self, task_id: str, event_id: int, targets: tuple[str, ...]) -> bool:
+        marks = ",".join("?" * len(targets))
+        return self.db.execute(f"""SELECT 1 FROM events WHERE task_id=? AND event_id<?
+            AND json_valid(body) AND json_extract(body,'$.to') IN ({marks})
+            AND json_extract(body,'$.to') IS NOT COALESCE(json_extract(body,'$.from'),'')
+            LIMIT 1""", (task_id, event_id, *targets)).fetchone() is not None  # noqa: S608 - placeholders only
 
-    def claim_discord_event(self, event_id: int) -> bool:
-        with self.tx():
-            cur = self.db.execute("UPDATE events SET discord_status='sending' WHERE event_id=? AND discord_status='pending'",
-                                  (event_id,))
-            return cur.rowcount == 1
+    def _milestone_reason(self, task: dict, event_id: int, body: dict, to: str) -> str | None:
+        if isinstance(body.get("reason"), str) and body["reason"].strip():
+            return body["reason"]
+        # The last event before this transition may be an explicit Ted request.
+        row = self.db.execute("""SELECT kind,body FROM events WHERE task_id=? AND event_id<?
+            AND (kind='ted_requested' OR (json_valid(body) AND json_extract(body,'$.to') IS NOT NULL))
+            ORDER BY event_id DESC LIMIT 1""", (task["task_id"], event_id)).fetchone()
+        if row and row["kind"] == "ted_requested":
+            reason = self._body(row["body"]).get("reason")
+            if isinstance(reason, str) and reason.strip():
+                return reason
+        # Older journals did not store the reason on the transition; the task
+        # result still describes it while this is the task's latest transition.
+        later = self.db.execute("""SELECT 1 FROM events WHERE task_id=? AND event_id>?
+            AND json_valid(body) AND json_extract(body,'$.to') IS NOT NULL
+            AND json_extract(body,'$.to') IS NOT COALESCE(json_extract(body,'$.from'),'') LIMIT 1""",
+            (task["task_id"], event_id)).fetchone()
+        if not later and task["state"] == to and task["result"]:
+            return str(task["result"])
+        return None
 
-    def mark_discord_event(self, event_id: int, message_id: str):
-        self.db.execute("UPDATE events SET discord_status='sent',discord_message_id=? WHERE event_id=? AND discord_status='sending'",
-                        (message_id, event_id))
+    def milestones(self, since_cursor: int = 0, limit: int = 50, *, scan_limit: int = 5000,
+                   repo_urls: dict[str, str] | None = None) -> dict:
+        """Read-only milestone feed: started, needs_ted, done and failed transitions.
 
-    def discord_mark_unresolved(self, event_id: int):
-        self.db.execute("UPDATE events SET discord_status='unresolved' WHERE event_id=? AND discord_status='sending'",
-                        (event_id,))
-
-    def discord_confirm_absent(self, event_id: int):
-        """Operator-confirmed retry after inspecting Discord history; never automatic."""
-        self.db.execute("UPDATE events SET discord_status='pending' WHERE event_id=? AND discord_status='unresolved'",
-                        (event_id,))
-
-    def discord_confirm_found(self, event_id: int, message_id: str):
-        self.db.execute("""UPDATE events SET discord_status='sent',discord_message_id=?
-            WHERE event_id=? AND discord_status IN ('sending','unresolved')""", (message_id, event_id))
-
-    def board_get(self, key: str) -> dict | None:
-        row = self.db.execute("SELECT * FROM board WHERE board_key=?", (key,)).fetchone()
-        return dict(row) if row else None
-
-    def board_claim(self, key: str, rendered: str) -> bool:
-        with self.tx():
-            row = self.board_get(key)
-            if row and (row["status"] in {"sending", "unresolved"} or
-                        (row["rendered"] == rendered and row["status"] == "sent")):
-                return False
-            self.db.execute("""INSERT INTO board(board_key,message_id,rendered,status) VALUES(?,?,?,'sending')
-                ON CONFLICT(board_key) DO UPDATE SET rendered=excluded.rendered,status='sending'""",
-                (key, row["message_id"] if row else None, rendered))
-            return True
-
-    def board_sent(self, key: str, message_id: str):
-        self.db.execute("UPDATE board SET message_id=?,status='sent' WHERE board_key=? AND status='sending'",
-                        (message_id, key))
-
-    def board_mark_unresolved(self, key: str):
-        self.db.execute("UPDATE board SET status='unresolved' WHERE board_key=? AND status='sending'", (key,))
-
-    def board_retry_edit(self, key: str):
-        self.db.execute("UPDATE board SET status='pending' WHERE board_key=? AND status='sending' AND message_id IS NOT NULL",
-                        (key,))
-
-    def board_confirm_absent(self, key: str):
-        self.db.execute("UPDATE board SET status='pending' WHERE board_key=? AND status='unresolved'", (key,))
-
-    def board_confirm_found(self, key: str, message_id: str):
-        self.db.execute("UPDATE board SET status='sent',message_id=? WHERE board_key=? AND status IN ('sending','unresolved')",
-                        (message_id, key))
+        ``cursor`` is the journal event id, so it is monotonic. ``next_cursor``
+        also advances past scanned non-milestone events; a reader persists it
+        only after it has published every returned event.
+        """
+        if (isinstance(since_cursor, bool) or not isinstance(since_cursor, int) or since_cursor < 0
+                or isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 200):
+            raise ValueError("since_cursor must be >= 0 and limit between 0 and 200")
+        head = self.head_cursor()
+        result = {"events": [], "next_cursor": since_cursor, "head_cursor": head, "has_more": False}
+        if limit == 0:
+            result["has_more"] = since_cursor < head
+            return result
+        rows = self.db.execute("""SELECT event_id,task_id,kind,body,created_at FROM events
+            WHERE event_id>? ORDER BY event_id LIMIT ?""", (since_cursor, scan_limit)).fetchall()
+        tasks: dict[str, dict] = {}
+        for row in rows:
+            result["next_cursor"] = row["event_id"]
+            body = self._body(row["body"])
+            to, frm = body.get("to"), body.get("from")
+            if not isinstance(to, str) or to == frm:
+                continue
+            resumed = False
+            if to in {"done", "failed", "needs_ted"}:
+                kind = to
+            elif to in {"accepted", "running", "verifying"} and frm == "needs_ted":
+                kind, resumed = "started", True
+            elif to in {"accepted", "running"} and not self._transition_before(
+                    row["task_id"], row["event_id"], ("accepted", "running")):
+                kind = "started"
+            else:
+                continue
+            if row["task_id"] not in tasks:
+                task_row = self.db.execute("""SELECT task_id,project,host,workspace,discord_thread_id,
+                    original_words,state,result,verification_commit FROM tasks WHERE task_id=?""",
+                    (row["task_id"],)).fetchone()
+                tasks[row["task_id"]] = dict(task_row) if task_row else None
+            task = tasks[row["task_id"]]
+            if task is None:
+                continue
+            reason = (self._milestone_reason(task, row["event_id"], body, to)
+                      if kind in {"needs_ted", "failed"} else None)
+            reason = reason.strip()[:500] if reason else None
+            commit = task["verification_commit"] if kind == "done" else None
+            pr = self._PR_URL.search((task["result"] or "") if kind == "done" else (reason or ""))
+            pr_url = pr.group(0) if pr else None
+            repo = (repo_urls or {}).get(task["project"])
+            commit_url = f"{repo.rstrip('/')}/commit/{commit}" if repo and commit else None
+            code = row["kind"] if row["kind"] != "state" else None
+            detail = reason or (code.replace("_", " ") if code else None)
+            if kind == "started":
+                summary = "Resumed after needs_ted" if resumed else "Task started"
+            elif kind == "done":
+                summary = "Done" + (f": verified commit {commit[:10]}" if commit else "")
+            else:
+                summary = ("Needs Ted" if kind == "needs_ted" else "Failed") + (f": {detail}" if detail else "")
+            title = next((line.strip() for line in task["original_words"].splitlines() if line.strip()), "")
+            result["events"].append({
+                "cursor": row["event_id"], "task_id": task["task_id"], "project": task["project"],
+                "workspace": task["workspace"], "host": task["host"],
+                "origin_thread_id": task["discord_thread_id"], "kind": kind,
+                "summary": summary[:300], "reason": reason, "reason_code": code,
+                "from_state": frm, "to_state": to, "resumed": resumed,
+                "commit": commit, "pr_url": pr_url, "commit_url": commit_url,
+                "link": pr_url or commit_url, "title": title[:120], "task_state": task["state"],
+                "at": row["created_at"],
+            })
+            if len(result["events"]) >= limit:
+                break
+        result["has_more"] = result["next_cursor"] < head
+        return result

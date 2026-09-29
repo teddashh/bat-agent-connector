@@ -27,10 +27,9 @@ from bat_agent_connector.pm_providers import (
 )
 from bat_agent_connector.task_core import TaskCoordinator
 from bat_agent_connector.task_daemon import TaskDaemon
-from bat_agent_connector.task_discord import DiscordPublisher
 from bat_agent_connector.task_handoff import history_excerpt, ledger_summary
 from bat_agent_connector.task_journal import Journal
-from bat_agent_connector.task_verifier import ObservedVerifier, VerificationSettings
+from bat_agent_connector.task_verifier import ObservedVerifier, VerificationSettings, load_settings
 from tests.conftest import make_config
 
 WORDS = "請保留 `原文`，不要改成英文。\n第二行：修好它。"
@@ -1226,41 +1225,156 @@ async def test_failover_and_single_writer(tmp_path):
     j.close()
 
 
-class FakeDiscord:
-    def __init__(self):
-        self.posts = []
-        self.edits = []
-
-    async def post(self, channel_id, text):
-        self.posts.append((channel_id, text))
-        return str(len(self.posts))
-
-    async def edit(self, channel_id, message_id, text):
-        self.edits.append((channel_id, message_id, text))
-
-    async def find_marker(self, channel_id, marker):
-        return next((str(i) for i, (channel, text) in enumerate(self.posts, 1)
-                     if channel == channel_id and marker in text), None)
-
-    async def message_matches(self, channel_id, message_id, marker):
-        index = int(message_id) - 1
-        return (0 <= index < len(self.posts) and self.posts[index][0] == channel_id
-                and marker in self.posts[index][1])
+def _kinds(feed):
+    return [e["kind"] for e in feed["events"]]
 
 
-async def test_discord_dedup_and_one_board(tmp_path):
+def _force_done(j, task_id, commit="c" * 40, result="Merged https://github.com/o/r/pull/7 after review"):
+    with j.tx():
+        j.db.execute("UPDATE tasks SET state='done',verification_commit=?,result=? WHERE task_id=?",
+                     (commit, result, task_id))
+        j._event(task_id, "delivered", {"from": "verifying", "to": "done"})
+
+
+async def test_event_feed_returns_only_milestones_with_monotonic_cursor(tmp_path):
     j = Journal(tmp_path / "tasks.db")
-    task = submit(j, discord_thread_id="thread")
-    fake = FakeDiscord()
-    p = DiscordPublisher(j, fake, "board")
-    await p.flush()
-    await p.flush()
-    assert [x[0] for x in fake.posts] == ["thread", "board"]
-    j.change(task["task_id"], "dispatching")
-    await p.flush()
-    assert [x[0] for x in fake.posts] == ["thread", "board", "thread"]
-    assert len(fake.edits) == 1
+    task = submit(j, discord_thread_id="origin-1")
+    tid = task["task_id"]
+    j.change(tid, "dispatching")
+    j.change(tid, "accepted")
+    j.change(tid, "running")
+    j.change(tid, "verifying")
+    j.change(tid, "verifying", event="verification_stability_wait")
+    j.change(tid, "needs_ted", fields={"result": "Which license should the package use?"})
+    j.change(tid, "running", event="ted_answered")
+    j.change(tid, "verifying")
+    j.change(tid, "accepted")  # rework is not a new start
+    j.change(tid, "verifying")
+    _force_done(j, tid)
+    feed = j.milestones(0, 50)
+    assert _kinds(feed) == ["started", "needs_ted", "started", "done"]
+    cursors = [e["cursor"] for e in feed["events"]]
+    assert cursors == sorted(cursors) and len(set(cursors)) == 4
+    started, needs, resumed, done = feed["events"]
+    assert started["origin_thread_id"] == "origin-1" and started["project"] == "p"
+    assert started["workspace"] == "w" and started["task_id"] == tid and not started["resumed"]
+    assert needs["reason"] == "Which license should the package use?"
+    assert needs["summary"].startswith("Needs Ted: Which license")
+    assert resumed["resumed"] and resumed["reason_code"] == "ted_answered"
+    assert done["commit"] == "c" * 40 and done["pr_url"] == "https://github.com/o/r/pull/7"
+    assert done["link"] == done["pr_url"] and done["title"] == WORDS.splitlines()[0]
+    assert feed["next_cursor"] == feed["head_cursor"] == j.head_cursor() and not feed["has_more"]
+    # Paging: a persisted cursor never repeats an event.
+    first = j.milestones(0, 1)
+    assert _kinds(first) == ["started"] and first["has_more"]
+    rest = j.milestones(first["next_cursor"], 50)
+    assert _kinds(rest) == ["needs_ted", "started", "done"]
+    assert j.milestones(rest["next_cursor"], 50)["events"] == []
+    # limit=0 lets a new reader start from now without reading history.
+    empty = j.milestones(0, 0)
+    assert empty["events"] == [] and empty["head_cursor"] == j.head_cursor()
+    with pytest.raises(ValueError):
+        j.milestones(-1, 10)
+    with pytest.raises(ValueError):
+        j.milestones(0, 201)
     j.close()
+
+
+async def test_event_feed_failed_and_needs_ted_reasons(tmp_path):
+    j = Journal(tmp_path / "tasks.db")
+    task = submit(j)
+    tid = task["task_id"]
+    j.change(tid, "dispatching")
+    j.change(tid, "accepted")
+    j.change(tid, "running")
+    j.request_ted(tid, "Need production credentials decision")
+    j.change(tid, "needs_ted")
+    j.change(tid, "failed", fields={"result": "Ted cancelled the task"})
+    feed = j.milestones(0, 50)
+    assert _kinds(feed) == ["started", "needs_ted", "failed"]
+    assert feed["events"][1]["reason"] == "Need production credentials decision"
+    assert feed["events"][2]["reason"] == "Ted cancelled the task"
+    assert feed["events"][2]["summary"] == "Failed: Ted cancelled the task"
+    assert feed["events"][0]["origin_thread_id"] is None
+    j.close()
+
+
+async def test_event_feed_uses_task_result_for_legacy_transition_without_reason(tmp_path):
+    j = Journal(tmp_path / "tasks.db")
+    tid = submit(j)["task_id"]
+    with j.tx():
+        j.db.execute("UPDATE tasks SET state='needs_ted',result='Legacy blocker text' WHERE task_id=?", (tid,))
+        j._event(tid, "verification_timeout", {"from": "verifying", "to": "needs_ted"})
+    [event] = j.milestones(0, 50)["events"]
+    assert event["kind"] == "needs_ted" and event["reason"] == "Legacy blocker text"
+    assert event["reason_code"] == "verification_timeout"
+    j.close()
+
+
+async def test_legacy_chat_outbox_is_dropped_on_open(tmp_path):
+    path = tmp_path / "tasks.db"
+    j = Journal(path)
+    submit(j, discord_thread_id="origin-1")
+    j.db.execute("ALTER TABLE events ADD COLUMN discord_message_id TEXT")
+    j.db.execute("ALTER TABLE events ADD COLUMN discord_status TEXT NOT NULL DEFAULT 'pending'")
+    j.db.execute("CREATE TABLE board (board_key TEXT PRIMARY KEY, message_id TEXT, rendered TEXT, "
+                 "status TEXT NOT NULL DEFAULT 'pending')")
+    before = j.head_cursor()
+    j.close()
+    j = Journal(path)
+    columns = {r[1] for r in j.db.execute("PRAGMA table_info(events)")}
+    assert not {"discord_message_id", "discord_status"} & columns
+    assert not j.db.execute("SELECT 1 FROM sqlite_master WHERE name='board'").fetchone()
+    assert j.head_cursor() == before and j.events()[0]["kind"] == "submitted"
+    j.close()
+    # Reopening an already-migrated journal is a no-op.
+    Journal(path).close()
+
+
+async def test_daemon_and_mcp_expose_read_only_event_feed(mock, tmp_path, monkeypatch):
+    settings = tmp_path / "task-settings.toml"
+    settings.write_text('[task_service]\nrepo_urls = { p = "https://github.com/o/p" }\n')
+    settings.chmod(0o600)
+    monkeypatch.setenv("BATC_TASK_SETTINGS", str(settings))
+    assert load_settings().repo_urls == {"p": "https://github.com/o/p"}
+    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    try:
+        tid = submit(daemon.journal, discord_thread_id="origin-9")["task_id"]
+        daemon.journal.change(tid, "dispatching")
+        daemon.journal.change(tid, "accepted")
+        _force_done(daemon.journal, tid, result="verified")
+        feed = await daemon.call("work_events", {"since_cursor": 0, "limit": 10})
+        assert _kinds(feed) == ["started", "done"]
+        assert feed["events"][1]["commit_url"] == "https://github.com/o/p/commit/" + "c" * 40
+        assert feed["events"][1]["link"] == feed["events"][1]["commit_url"]
+        assert (await daemon.call("work_events", {"since_cursor": feed["next_cursor"]}))["events"] == []
+        assert not hasattr(daemon, "publisher")
+    finally:
+        await daemon.fleet.close()
+        daemon.journal.close()
+    seen = {}
+
+    def fake_request(method, **params):
+        seen.update(method=method, **params)
+        return {"events": [], "next_cursor": 5, "head_cursor": 5, "has_more": False}
+
+    monkeypatch.setattr(mcp_server, "task_request", fake_request)
+    server, fleet = mcp_server.build_server(make_config(mock))
+    tools = {t.name: t for t in await server.list_tools()}
+    assert tools["work_events"].annotations.read_only_hint
+    await server.call_tool("work_events", {"since_cursor": 3, "limit": 7})
+    assert seen == {"method": "work_events", "since_cursor": 3, "limit": 7}
+    await fleet.close()
+
+
+async def test_service_has_no_chat_publisher():
+    import importlib.util
+
+    assert importlib.util.find_spec("bat_agent_connector.task_discord") is None
+    src = Path(mcp_server.__file__).parent
+    for name in ("task_daemon.py", "task_journal.py", "task_core.py", "cli.py"):
+        text = (src / name).read_text()
+        assert "BATC_DISCORD" not in text and "discord.com" not in text
 
 
 class FakeJev:
@@ -2760,46 +2874,6 @@ async def test_failover_full_original_archive_verified_and_restart(mock, tmp_pat
         reopened.close()
     finally:
         await daemon.fleet.close()
-
-
-async def test_discord_claim_recovery_after_restart(tmp_path):
-    path = tmp_path / "tasks.db"
-    j = Journal(path)
-    submit(j, discord_thread_id="thread")
-    event = j.discord_events()[0]
-    assert j.claim_discord_event(event["event_id"])
-    fake = FakeDiscord()
-    await fake.post("thread", f"BATC-EVENT:{event['event_id']}\nposted before crash")
-    assert j.board_claim("board", "BATC-BOARD:board\n任務看板")
-    await fake.post("board", "BATC-BOARD:board\n任務看板")
-    j.close()
-    j = Journal(path)
-    await DiscordPublisher(j, fake, "board").flush()
-    assert len(fake.posts) == 2
-    assert not j.discord_inflight() and not j.discord_unresolved()
-    assert j.board_get("board")["message_id"] == "2"
-    j.close()
-
-
-async def test_discord_confirm_found_id_checks_marker(tmp_path):
-    j = Journal(tmp_path / "tasks.db")
-    submit(j, discord_thread_id="thread")
-    event = j.discord_events()[0]
-    assert j.claim_discord_event(event["event_id"])
-    j.discord_mark_unresolved(event["event_id"])
-    fake = FakeDiscord()
-    wrong = await fake.post("thread", "unrelated message")
-    found = await fake.post("thread", f"BATC-EVENT:{event['event_id']}\nposted earlier")
-    publisher = DiscordPublisher(j, fake, "board")
-    with pytest.raises(ValueError, match="does not match"):
-        await publisher.confirm_found(event_id=event["event_id"], message_id=wrong)
-    assert (await publisher.confirm_found(event_id=event["event_id"], message_id=found))["status"] == "sent"
-    assert j.discord_event_get(event["event_id"])["discord_message_id"] == found
-    assert j.board_claim("board", "BATC-BOARD:board\n任務看板")
-    j.board_mark_unresolved("board")
-    board_mid = await fake.post("board", "BATC-BOARD:board\n任務看板")
-    assert (await publisher.confirm_found(board_channel_id="board", message_id=board_mid))["status"] == "sent"
-    j.close()
 
 
 async def test_daemon_lock_and_rpc_task_scope(mock, tmp_path):
