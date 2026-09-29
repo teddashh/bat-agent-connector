@@ -1,4 +1,4 @@
-"""Deterministic task coordinator; BAT and Discord are replaceable adapters."""
+"""Deterministic task coordinator; BAT is a replaceable adapter and chat stays outside."""
 
 from __future__ import annotations
 
