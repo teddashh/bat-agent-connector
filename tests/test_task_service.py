@@ -161,8 +161,8 @@ class FakeBAT:
         return {"source": "observed_runner", **{k: self.identity[k] for k in ("candidate_commit", "tree_hash")},
                 "command": "pytest -q", "exit_code": 0, "log_ref": "journal:fake", "output_sha256": "c" * 64}
 
-    def reviewer_agent(self, task):
-        return self.reviewer_kind
+    async def available_agents(self, task):
+        return frozenset({self.reviewer_kind, "codex"})
 
 
 def test_journal_idempotency_restart_and_metrics(tmp_path):
@@ -668,6 +668,123 @@ async def test_task_bat_adapter_contract_with_mock_host(fleet_factory, mock, tmp
     assert opts["cwd"] == start["params"]["options"]["cwd"]
     assert not any(t.get("id") == reviewer for t in mock.ws_doc["terminals"])
     j.close()
+
+
+async def test_claude_sessions_pin_opus_55_for_lead_and_reviewer(fleet_factory, mock, tmp_path):
+    fleet = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})
+    j = Journal(tmp_path / "tasks.db")
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="claude-pin", lead_agent="claude")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
+    lead = "task-lead-claude"
+    start_command, _ = j.command(task["task_id"], "start_lead", lead,
+                                 {"role": "lead", "agent": "claude"}, "claude-pin-start")
+    assert await adapter.start(task, role="lead", agent="claude", session_id=lead) == lead
+    assert await adapter.recover_start(task, role="lead", session_id=lead)
+    j.command_status(start_command["command_id"], "settled")
+    j.add_branch(task["task_id"], session_id=lead, provider="claude", role="lead", reason="start")
+    j.change(task["task_id"], "dispatching")
+    task = j.change(task["task_id"], "accepted", fields={"session_id": lead})
+    reviewer = "task-review-claude"
+    assert await adapter.start(task, role="reviewer", agent="claude", session_id=reviewer) == reviewer
+    for sid, preset in ((lead, "claude-code-worktree"), (reviewer, "claude-code")):
+        opts = next(i for i in mock.invokes if i["channel"] == "claude:start-session"
+                    and i["params"]["sessionId"] == sid)["params"]["options"]
+        assert opts["agentPreset"] == preset and opts["model"] == task_bat.CLAUDE_BAT_MODEL
+        assert opts["model"].startswith("claude-opus-5-5")
+    j.close()
+
+
+async def test_available_agents_uses_host_usage_snapshot_and_quota_latch(tmp_path):
+    class Client:
+        def __init__(self):
+            self.reply = None
+
+        async def invoke(self, channel, params, retry_on_disconnect=True):
+            assert channel == "agent:usage-snapshot" and params == {}
+            if isinstance(self.reply, Exception):
+                raise self.reply
+            return self.reply
+
+    class Fleet:
+        client_obj = Client()
+
+        def client(self, _host):
+            return self.client_obj
+
+    j = Journal(tmp_path / "tasks.db")
+    fleet = Fleet()
+    adapter = task_bat.BatTaskAdapter(fleet, None, j)
+    now_ms = time.time() * 1000
+
+    def snap(five, seven, age_s=0):
+        return {"claude": {"fetchedAt": now_ms - age_s * 1000, "fiveHour": {"utilization": five},
+                           "sevenDay": {"utilization": seven}}}
+
+    async def agents(reply):
+        adapter._agents_cache.clear()
+        fleet.client_obj.reply = reply
+        return await adapter.available_agents({"host": "h1"})
+
+    assert await agents(snap(0.12, 0.05)) == {"claude", "codex"}
+    assert await agents(snap(0.9, 0.05)) == {"codex"}
+    assert await agents(snap(0.1, 0.95)) == {"codex"}
+    assert await agents(snap(0.1, 0.1, age_s=7200)) == {"codex"}  # stale snapshot is unknown
+    assert await agents({"codex": {}}) == {"codex"}
+    assert await agents(TimeoutError("host down")) == {"codex"}
+    j.provider_use("claude", "quota_error")
+    assert await agents(snap(0.12, 0.05)) == {"codex"}
+    j.close()
+
+
+async def test_real_agents_follow_ted_order_and_record_provider_usage(tmp_path):
+    journal = Journal(tmp_path / "tasks.db")
+    fake = FakeBAT()
+    fake.reviewer_kind = "claude"  # Claude available on the host
+    task = submit(journal)  # Codex lead
+    core = TaskCoordinator(journal, fake)
+    await core.tick(task["task_id"])
+    lead = journal.get(task["task_id"])["session_id"]
+    fake.reads[lead] = {"turn_started": True, "turn_done": True, "turn_attribution": "correlated",
+                        "streaming": False, "messages": [{"role": "assistant", "text": "BAT-STATUS: MILESTONE"}]}
+    await core.tick(task["task_id"])
+    await core.tick(task["task_id"])
+    reviewer = journal.get(task["task_id"])["reviewer_session_id"]
+    assert fake.starts[-1][:2] == ("reviewer", "claude")  # other family, Opus first
+    # A Claude reviewer at its usage limit is not a review outcome: fall back to Codex.
+    fake.reads[reviewer] = {"turn_started": True, "turn_done": True, "turn_attribution": "correlated",
+                            "first_turn_proven": True,
+                            "messages": [{"role": "assistant", "text": "Claude usage limit reached."}]}
+    fake.reviewer_kind = "codex"
+    after = await core.tick(task["task_id"])
+    assert after["state"] == "verifying" and after["reviewer_session_id"] is None
+    assert after["review_rejections"] == 0
+    await core.tick(task["task_id"])
+    assert fake.starts[-1][:2] == ("reviewer", "codex")
+    usage = journal.db.execute("SELECT provider,outcome FROM provider_usage ORDER BY usage_id").fetchall()
+    assert [tuple(r) for r in usage] == [("codex", "success"), ("claude", "success"),
+                                         ("claude", "quota_error"), ("codex", "success")]
+    journal.close()
+
+
+async def test_claude_lead_falls_back_to_codex_and_reviewer_uses_other_family(tmp_path):
+    journal = Journal(tmp_path / "tasks.db")
+    fake = FakeBAT()  # only Codex available
+    task = submit(journal, lead_agent="claude")
+    await TaskCoordinator(journal, fake).tick(task["task_id"])
+    assert fake.starts[0][:2] == ("lead", "codex")
+    assert journal.get(task["task_id"])["lead_agent"] == "codex"
+    route = journal.routes(task["task_id"])
+    assert route == [] or route[0]["reason"] == "lead_fallback_unavailable"
+    available = frozenset({"claude", "codex"})
+    assert TaskCoordinator._pick_agent("reviewer", {"lead_agent": "claude"}, available) == (
+        "codex", "review_other_family")
+    assert TaskCoordinator._pick_agent("reviewer", {"lead_agent": "codex"}, available) == (
+        "claude", "review_other_family")
+    assert TaskCoordinator._pick_agent("reviewer", {"lead_agent": "codex"}, frozenset({"codex"})) == (
+        "codex", "review_same_family_only")
+    assert TaskCoordinator._pick_agent("lead", {"lead_agent": "claude"}, available) == ("claude", "lead_agent")
+    journal.close()
 
 
 async def test_task_initial_send_after_start_ignores_only_start_spacing(fleet_factory, mock, tmp_path):
@@ -1703,34 +1820,6 @@ async def test_pause_while_jev_routes_start_does_not_start_bat(tmp_path):
     journal.close()
 
 
-async def test_candidate_change_during_jev_route_does_not_start_review(tmp_path):
-    fake = FakeBAT()
-
-    class MutatingRouter:
-        changed = False
-
-        async def choose(self, *args, **kwargs):
-            if kwargs.get("expected_type") == "verification" and not self.changed:
-                self.changed = True
-                fake.identity = {"candidate_commit": "c" * 40, "tree_hash": "d" * 40, "clean": True}
-            return {"provider": "codex"}
-
-    journal = Journal(tmp_path / "tasks.db")
-    task = submit(journal)
-    router = MutatingRouter()
-    core = TaskCoordinator(journal, fake, router=router)
-    await core.tick(task["task_id"])
-    lead = journal.get(task["task_id"])["session_id"]
-    fake.reads[lead] = {"turn_started": True, "turn_done": True, "turn_attribution": "correlated",
-                        "messages": [{"role": "assistant", "text": "BAT-STATUS: MILESTONE"}]}
-    await core.tick(task["task_id"])
-    await core.tick(task["task_id"])
-    current = journal.get(task["task_id"])
-    assert router.changed and current["reviewer_session_id"] is None
-    assert current["verification_commit"] is None
-    journal.close()
-
-
 async def test_rules_route_each_pm_phase_by_rule_without_prescreen(tmp_path):
     journal = Journal(tmp_path / "tasks.db")
     task = submit(journal)
@@ -1759,12 +1848,13 @@ async def test_rules_route_each_pm_phase_by_rule_without_prescreen(tmp_path):
                             "messages": [{"role": "assistant", "text": REVIEW_PASS}]}
     assert (await core.tick(task["task_id"]))["state"] == "done"
     routes = journal.routes(task["task_id"])
-    assert {r["step_type"] for r in routes} == {
-        "planning", "implementation", "status_relay", "verification", "review"}
-    expected = {"planning": "claude", "verification": "claude", "review": "claude",
-                "status_relay": "agy-gemini-flash", "implementation": "codex"}
-    assert all(r["provider"] == expected[r["step_type"]] and r["reason"].startswith("rule_")
-               for r in routes)
+    # Session starts record the agent that really runs: the Codex lead and a
+    # Claude reviewer from the other family; the rest are explicit rules.
+    assert {(r["step_type"], r["provider"], r["reason"]) for r in routes} == {
+        ("planning", "codex", "lead_agent"), ("review", "claude", "review_other_family"),
+        ("review", "claude", "session_agent"), ("implementation", "codex", "session_agent")}
+    starts = [(b["role"], b["provider"]) for b in journal.get(task["task_id"])["branches"]]
+    assert starts == [("lead", "codex"), ("reviewer", "claude")]
     assert not any(e["kind"] == "jev_prescreen" for e in journal.events(task["task_id"]))
     journal.close()
 
@@ -2755,6 +2845,7 @@ async def test_failover_recovers_reserved_successor_without_reuse(tmp_path):
     j = Journal(tmp_path / "tasks.db")
     task = submit(j, lead_agent="claude")
     fake = LostReplyBAT()
+    fake.reviewer_kind = "claude"  # Claude is available for the lead
     fake.failover_allowed = True
     core = TaskCoordinator(j, fake)
     await core.tick(task["task_id"])
@@ -2809,6 +2900,7 @@ async def test_recovery_conflict_stays_operator_only_after_registry_changes(tmp_
     j = Journal(path)
     task = submit(j, lead_agent="claude")
     fake = LostReplyBAT()
+    fake.reviewer_kind = "claude"  # Claude is available for the lead
     fake.failover_allowed = True
     core = TaskCoordinator(j, fake)
     await core.tick(task["task_id"])

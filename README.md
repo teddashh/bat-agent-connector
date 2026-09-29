@@ -112,10 +112,11 @@ outage; `limit=0` returns `head_cursor`. Optional `[task_service] repo_urls` add
 [the task-service design](docs/design/task-service.md) for states, recovery, private configuration and rollout.
 The default minimal path lists only runnable engines at submission: while the Goose live gate is closed, rules is the
 only one and is used without asking Jev. Only when both are runnable does Jev get one typed engine question (invalid
-or unavailable Jev chooses rules). Explicit `task_path="standard"` selects the full path. PM provider choice on the
-standard path is explicit rules (planning/verification/review and high-stakes work: Claude Opus 5.5 → AGY Opus
-4.6-thinking → Codex; routine implementation: Codex; status relay: Gemini Flash when configured), with no model call;
-`work_status`/`work_result` are plain journal reads. There is no advisory candidate pre-screen. The `small-task-with-tests`
+or unavailable Jev chooses rules). Explicit `task_path="standard"` selects the full path. The BAT agent a task really starts is chosen by explicit rules from the agents the host can run now:
+Claude Opus 5.5 (pinned, and only while the host usage snapshot is fresh and under its limits) then Codex, with
+the reviewer from the other model family when both are available. AGY `claude-opus-4-6-thinking` is not a BAT
+runtime and is not started. `provider_usage` records real session starts and quota hits. `work_status`/`work_result`
+are plain journal reads. There is no advisory candidate pre-screen. The `small-task-with-tests`
 recipe delivers directly only after trusted tests on a clean commit and one typed Jev review of the candidate diff
 against Ted's original words passes at the configured confidence threshold. A risky, uncertain, sensitive, large
 or unavailable diff goes to the separate reviewer; Jev backend failure also requires full review. It reuses a verified,
