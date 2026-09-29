@@ -493,7 +493,10 @@ class BatTaskAdapter:
         return None
 
     async def read(self, task: dict, session_id: str, marker: str | None) -> dict:
-        result = await service.session_read(self.fleet, task["host"], session_id, after=marker)
+        # Control flow reads the tail of the final agent message, so do not let
+        # the default 2k per-message clip drop a status line or verdict.
+        result = await service.session_read(self.fleet, task["host"], session_id, after=marker,
+                                            max_chars=40_000, max_message_chars=20_000)
         if session_id == task.get("reviewer_session_id") and task.get("review_commit"):
             all_turns = await service.session_read(self.fleet, task["host"], session_id,
                                                    last_n=30, max_message_chars=5000)
