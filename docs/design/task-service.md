@@ -135,3 +135,12 @@ Jev 共用客戶端先用 TypeSafe `/v1/systemone`；主端逾時、錯誤或回
 Reviewer 只以**最後一則 agent 訊息**中的 JSON verdict 決定：`{"verdict":"pass|reject","candidate_commit","tree_hash","findings":[]}`。缺少、格式無效、同一訊息內互相矛盾（含舊式 `REVIEW: PASS`／`REVIEW: REJECT` 文字與 JSON 不一致）、commit/tree 與 review candidate 不符、訊息被讀取截斷、或 PASS 但含 high／critical finding（含 PR #8 的未標記 `High:` 行），一律視為 reject，走有上限的 rework（`review_verdict_rejected` 事件記原因），超過 recipe 上限才 `needs_ted`。Lead 的 `BAT-STATUS` 也只取最後一則 agent 訊息的最後一個 marker；前面引用的 marker 不會推動狀態。Task adapter 讀取時每則訊息上限提高到 20k 字，避免尾端 marker 被預設 2k 截斷。
 
 直接 send／answer 的 fence 改讀 daemon 啟動時寫在 registry 旁的 `task-service.json`（實際 `--db` 路徑）。Session 在 registry 標為 task-owned，但 pointer、DB 或 task row 讀不到時，一律拒絕低階 send／answer（fail closed）；狀態可讀且為 `verifying` 時也拒絕。Daemon 自己的 send 仍透過 journal-bound `before_invoke` 通過。
+
+## Verification lifecycle（2026-09-29 hardening）
+
+受信測試的啟動、輸出讀取與程序結束共用**一個 deadline**。命令在自己的 session／process group 執行；逾時或取消時整個 group 被 SIGKILL，確認沒有非 zombie 成員才算結束。SSH 主機上以 `setsid -w` 執行並把 pgid 寫入遠端 `$HOME/.batc-verify-<marker>.pid`；逾時先殺本地 ssh，再以另一條 ssh 對該 pgid `pkill -KILL -g` 並輪詢直到空，輸出 `gone` 才算確認。無法確認即 `VerificationProcessStuck`，task 進 `needs_ted`（fail closed）。超過 2MB 的輸出保留開頭與真正的結尾。
+
+驗證期有兩個時鐘：`progress_at`（候選 commit/tree 變動、lead 或 reviewer 仍在 streaming、測試結果寫入）延長等待，上限為 recipe 的閒置預算（900/1800/3600 秒）；`verifying_started_at` 從進入新一輪 verifying 起算，絕對上限為閒置預算的三倍。Reviewer 啟動（經 dispatching）與 uncertain 回復不會重置；`updated_at` 心跳不再延長驗證。Ted resume 會重置兩個時鐘。
+
+受信測試失敗不再直接 `needs_ted`（stuck handler）：以 log 尾端做決定性分類。缺依賴時，每個候選 commit 只跑一次 repo 追蹤中的 lockfile 安裝（pnpm／yarn／npm ci／uv sync／cargo fetch），工作樹須保持乾淨，再重測；安裝後仍缺即視為程式問題。程式／測試失敗時把遮蔽後的輸出尾端（≤2500 字）送回 lead 做有上限的 rework（`verification_failures`；small 1 次、其他 2 次），再驗證新 commit；超過上限才 `needs_ted`。逾時、權限、登入、網路、磁碟等環境問題直接 `needs_ted`。
+

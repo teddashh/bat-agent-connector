@@ -117,9 +117,21 @@ class TaskDaemon:
         return EventWebhook(settings.event_webhook_url, secret)
 
     def verification_budget(self, recipe: str) -> int:
+        """Allowed time without meaningful verification progress."""
         if self.verification_timeout_s != self.verification_timeout_default_s:
             return self.verification_timeout_s
         return max(self.verification_timeout_s, self.verification_timeout_by_recipe.get(recipe, self.verification_timeout_s))
+
+    def verification_cap(self, recipe: str) -> int:
+        """Absolute cap for one verifying phase, however active it looks."""
+        return 3 * self.verification_budget(recipe)
+
+    def verification_remaining(self, task: dict) -> float:
+        now = time.time()
+        started = task.get("verifying_started_at") or task["updated_at"]
+        progress = max(task.get("progress_at") or 0.0, started)
+        return min(self.verification_budget(task["recipe"]) - (now - progress),
+                   self.verification_cap(task["recipe"]) - (now - started))
 
     async def call(self, method: str, params: dict, *, auth_token: str | None = None) -> dict:
         if method == "work_events":
@@ -344,8 +356,7 @@ class TaskDaemon:
             task = self.journal.get(task_id)
             verifying = task["state"] == "verifying"
             if verifying and not task["paused"]:
-                budget = self.verification_budget(task["recipe"])
-                remaining = budget - (time.time() - task["updated_at"])
+                remaining = self.verification_remaining(task)
                 if remaining <= 0:
                     self.journal.change(task_id, "needs_ted", event="verification_deadline",
                                         fields={"result": "VerificationDeadlineExceeded"})
