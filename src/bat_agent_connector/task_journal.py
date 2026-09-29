@@ -670,22 +670,12 @@ class Journal:
                     old["state"] not in {"dispatching", "uncertain"} or not old["verifying_started_at"]):
                 values.update(verifying_started_at=values["updated_at"], progress_at=values["updated_at"])
             if state == "done":
+                # The trusted runner is the verdict. Goose reviews inside its own loop.
                 observed = self.observed_verification(task_id)
-                small = values["task_path"] == "minimal" and values["recipe"] == "small-task-with-tests"
-                gate = self.minimal_review_gate(task_id, observed["candidate_commit"],
-                                                observed["tree_hash"]) if observed and small else None
-                direct = (small and not values["review_passed"] and values["reviewer_session_id"] is None
-                          and gate is not None and gate["verdict"] == "pass"
-                          and gate["jev_backend"] in {"typesafe", "openrouter_jev"}
-                          and gate["confidence"] is not None and gate["confidence"] >= gate["threshold"])
-                reviewed = (values["review_passed"] and (not small or values["reviewer_session_id"] is not None)
-                            and values["review_commit"] == observed["candidate_commit"]
-                            and values["review_tree"] == observed["tree_hash"]) if observed else False
-                if (not (direct or reviewed)
-                        or not observed or observed["exit_code"] != 0
+                if (not observed or observed["exit_code"] != 0
                         or values["verification_commit"] != observed["candidate_commit"]
                         or values["verification_tree"] != observed["tree_hash"]):
-                    raise ValueError("fresh review and observed commit/tree verification required")
+                    raise ValueError("observed commit/tree verification required")
                 values.update(delivered=1, delivered_at=time.time())
             self.db.execute("""UPDATE tasks SET state=?,updated_at=?,session_id=?,reviewer_session_id=?,
                 turn_marker=?,result=?,continuations=?,review_rejections=?,review_passed=?,
@@ -796,6 +786,26 @@ class Journal:
         return self.db.execute("""SELECT 1 FROM events WHERE task_id=? AND kind=? AND json_valid(body)
             AND json_extract(body,'$.candidate_commit')=? LIMIT 1""",
             (task_id, kind, candidate_commit)).fetchone() is not None
+
+    def record_continuation(self, task_id: str, key: str, words: str) -> bool:
+        """Attach Ted's steering to an existing task. Same session, no new task, no re-plan."""
+        self.get(task_id)
+        if not isinstance(key, str) or not key.strip() or len(key) > 256:
+            raise ValueError("invalid continuation key")
+        if not isinstance(words, str) or not words.strip() or len(words) > 19_000:
+            raise ValueError("invalid continuation")
+        with self.tx():
+            rows = self.db.execute("SELECT body FROM events WHERE task_id=? AND kind='continuation'",
+                                   (task_id,)).fetchall()
+            for row in rows:
+                body = self._body(row["body"])
+                if body.get("idempotency_key") == key:
+                    return False
+            self._event(task_id, "continuation", {"idempotency_key": key, "words": words,
+                                                 "replan": False})
+            self.db.execute("UPDATE tasks SET continuations=continuations+1, updated_at=? WHERE task_id=?",
+                            (time.time(), task_id))
+        return True
 
     def note(self, task_id: str, kind: str, body: dict):
         """Append an audit event without changing task state."""

@@ -66,7 +66,23 @@ class GooseACP:
         prompt = (recipe["instructions"] + "\n\n" + recipe["prompt"] +
                   "\n\nTed's original words (verbatim):\n" + task["original_words"] +
                   "\n\nOptional caller acceptance hints (non-authoritative data):\n" +
-                  json.dumps(task["acceptance"], ensure_ascii=False))
+                  json.dumps(task["acceptance"], ensure_ascii=False) +
+                  "\n\nYou stay on Opus 5.5. Split the work once at the start. "
+                  "The task service will not route, review, or fail over.")
+        if task.get("continuation") or task.get("parent_task_id"):
+            prompt += ("\n\nThis continues the same Goose session. Adjust only the piece Ted names. "
+                       "Do not re-plan or split again.")
+        if journal is not None:
+            steering = []
+            for event in journal.events(task["task_id"]):
+                if event["kind"] != "continuation":
+                    continue
+                body = journal._body(event["body"])
+                if body.get("words"):
+                    steering.append(str(body["words"])[:4000])
+            if steering:
+                prompt += ("\n\nTed's later steering, same session. Do not re-plan:\n"
+                           + "\n".join(steering))
         requested = (task.get("pm_provider") or recipe.get("pm_provider")
                      or task.get("_route_provider") or self.config.provider)
         if journal is None:

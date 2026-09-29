@@ -91,16 +91,21 @@ account changes are never sent.
 stdio process calls that daemon
 at `BATC_TASK_URL` (default `http://127.0.0.1:18796/rpc`). `work_submit` takes Ted's **exact** words in
 `original_words` and an idempotency key such as the Discord message ID, then returns a `task_id` without
-waiting for BAT. Hermes must not reinterpret or split the request. The lead Codex/Claude session plans in the repo.
+waiting for BAT. Hermes must not reinterpret or split the request. Goose, on Opus 5.5, plans in the repo.
 Task writes require the host's existing `writes=true` and `orchestrate=true` settings. Existing low-level tools
 and `batc` commands remain available.
 
-Minimal flow with its post-test Jev review gate is now the production default when `BATC_TASK_DEFAULT_PATH=minimal` is set. Use explicit `task_path="standard"` to opt out to the full cross-agent review path.
+Every task is one Goose session on Opus 5.5. Goose splits the work once, then assigns executors
+Grok 4.7 : Codex : Opus 5.5 = 4:2:1, and does not use a model whose weekly quota remaining is at or below 15%.
+The service does not route, review, or fail over. Trusted tests are the verification verdict; a code failure
+goes back to that same session for bounded rework, and an exhausted budget is `needs_ted`. Ted's later steering
+is a continuation on the same task (same session, no re-plan, no new task). Jev is not on that path. It is used
+only when an orchestrator submits already-split tasks and passes `executor_model` (`grok`, `codex`, or `claude`),
+which skips the Opus planner. Goose itself stays behind one switch, off by default (`GooseConfig.enabled`);
+while it is off, tasks stay queued and nothing is started.
 
-A trusted test command must be configured locally; the service observes its
-exit status on the clean candidate commit and records verification before opening a fresh reviewer session.
-The daemon currently rejects live Goose tasks. Goose ACP, provider fallback and the rule-based PM provider router have
-adapter/test coverage; real Goose contract checks are deferred. The service never posts to chat. `work_events(since_cursor, limit)`
+A trusted test command must be configured locally; the service observes its exit status on the clean candidate
+commit. The service never posts to chat. `work_events(since_cursor, limit)`
 (CLI `batc task-events --since N`) returns only milestones (`started`, `needs_ted` with its reason, `done` with commit/PR
 link, `failed`), each with a monotonic `cursor`, `task_id`, `project`, `workspace`, the opaque `origin_thread_id` passed at
 submit, `kind` and a short `summary`. Push is the primary path: with `[task_service.event_webhook] url` (loopback only)
@@ -110,25 +115,10 @@ and `secret_file` (mode 0600) in the private settings, each committed milestone 
 failures retry with capped exponential backoff (max 300 s). `work_events` is the receiver's catch-up path after an
 outage; `limit=0` returns `head_cursor`. Optional `[task_service] repo_urls` adds `commit_url`. The task API requires a local admin token or scoped capability and binds only to loopback. See
 [the task-service design](docs/design/task-service.md) for states, recovery, private configuration and rollout.
-The default minimal path lists only runnable engines at submission: while the Goose live gate is closed, rules is the
-only one and is used without asking Jev. Only when both are runnable does Jev get one typed engine question (invalid
-or unavailable Jev chooses rules). Explicit `task_path="standard"` selects the full path. The BAT agent a task really starts is chosen by explicit rules from the agents the host can run now:
-Claude Opus 5.5 (pinned, and only while the host usage snapshot is fresh and under its limits) then Codex, with
-the reviewer from the other model family when both are available. AGY `claude-opus-4-6-thinking` is not a BAT
-runtime and is not started. `provider_usage` records real session starts and quota hits. `work_status`/`work_result`
-are plain journal reads. There is no advisory candidate pre-screen. The `small-task-with-tests`
-recipe delivers directly only after trusted tests on a clean commit and one typed Jev review of the candidate diff
-against Ted's original words passes at the configured confidence threshold. A risky, uncertain, sensitive, large
-or unavailable diff goes to the separate reviewer; Jev backend failure also requires full review. It reuses a verified,
-idle, service-owned lead session only for a follow-up in the same workstream (`parent_task_id` naming the
-previous task or a sibling, or `continuation=true` in the same `discord_thread_id`) and only while its HEAD is still
-the previous task's verified commit; independent requests start a fresh branch from base. `work_status` and
-`work_result` carry a `delivery` block that separates `verified` (trusted tests + review/gate on the commit) from
-`adopted`, `merged` and `deployed`, which are shown only when recorded with `work_mark_stage` (the service never
-merges or deploys). `context_refs` (attachments, previous_message_id, plan, commit) stores references that came
-with Ted's words. `python -m bat_agent_connector.gate_eval --db <journal>` prints a read-only calibration table
-for the minimal gate (Jev choice/confidence vs the independent reviewer's outcome, per policy). Goose remains
-behind its live contract gate, with provider order Claude Opus 5.5 → AGY Opus 4.6-thinking → Codex.
+`work_status` and `work_result` are plain journal reads and carry a `delivery` block that separates
+`verified` from `adopted`, `merged` and `deployed` (the last three come only from `work_mark_stage`).
+`context_refs` stores attachments, previous_message_id, plan and commit that came with Ted's words.
+A warm lead session is reused only for a follow-up whose HEAD is still the previous verified commit.
 
 Earlier one-line README request A/B, before the minimal Jev review gate, used local fake BAT and disabled Jev
 network. Across 10 completed tasks per path, standard `bugfix-with-tests` median was **48.44 ms** and minimal

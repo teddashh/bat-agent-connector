@@ -164,11 +164,8 @@ class TaskCoordinator:
 
     async def _route(self, task: dict, step: str, step_type: str, *, high_stakes: bool = False,
                      provider: str | None = None, reason: str | None = None) -> None:
-        if self.router and task.get("task_path") != "minimal":
-            await self.router.choose(task["task_id"], step,
-                                     f"{step_type} phase for project {task['project']}",
-                                     expected_type=step_type, high_stakes=high_stakes,
-                                     provider_override=provider, reason=reason)
+        """Model choice belongs to Goose. The service records no per-step route."""
+        return None
 
     async def _available_agents(self, task: dict) -> frozenset[str]:
         reader = getattr(self.adapter, "available_agents", None)
@@ -235,7 +232,9 @@ class TaskCoordinator:
         if task["state"] == "verifying":
             return await self._verify_and_review(task)
         if task["state"] == "quota_limited":
-            return await self._failover(task)
+            # No mid-task failover. Goose (or Ted) picks another model; the service stops.
+            return self.journal.change(task["task_id"], "needs_ted", fields={
+                "result": "Provider quota exhausted; not failing over inside the service"})
         if task["state"] == "accepted" and task["session_id"] and not any(
             c["kind"] == "send" and c["session_id"] == task["session_id"]
             and c["status"] != "cancelled" for c in cmds
@@ -650,109 +649,9 @@ class TaskCoordinator:
             task = self.journal.change(task["task_id"], "verifying", fields={
                 "verification_commit": commit, "verification_tree": tree,
             })
-        small = task.get("task_path") == "minimal" and task["recipe"] == "small-task-with-tests"
-        if small and not task["reviewer_session_id"]:
-            existing = self.journal.minimal_review_gate(task["task_id"], commit, tree)
-            if existing and existing["verdict"] == "pending":
-                existing = self.journal.finish_minimal_review(task["task_id"], commit, tree, {
-                    "verdict": "escalate", "confidence": None, "jev_backend": None,
-                    "reason": "pending_after_restart"})
-            if not existing:
-                reader = getattr(self.adapter, "candidate_review_diff", None)
-                try:
-                    candidate_diff = await reader(task) if callable(reader) else None
-                except Exception:  # noqa: BLE001 - unavailable diff requires full review
-                    candidate_diff = None
-                diff = candidate_diff.get("diff", "") if isinstance(candidate_diff, dict) else ""
-                paths = candidate_diff.get("paths", []) if isinstance(candidate_diff, dict) else []
-                if not isinstance(diff, str) or not isinstance(paths, list):
-                    diff, paths = "", []
-                digest = hashlib.sha256(diff.encode()).hexdigest()
-                threshold = (self.minimal_review_gate.config.minimal_review_confidence_threshold
-                             if self.minimal_review_gate else 1.0)
-                try:
-                    self.journal.reserve_minimal_review(task["task_id"], commit, tree, digest, threshold,
-                                                        diff_chars=len(diff), paths=paths)
-                except ValueError:
-                    return self.journal.change(task["task_id"], "needs_ted", event="review_diff_changed")
-                decision = (await self.minimal_review_gate.judge(
-                    original_words=task["original_words"], diff=diff, paths=paths)
-                    if self.minimal_review_gate else
-                    {"verdict": "escalate", "confidence": None, "jev_backend": None,
-                     "reason": "jev_unavailable_or_invalid"})
-                existing = self.journal.finish_minimal_review(task["task_id"], commit, tree, decision)
-            task = self.journal.get(task["task_id"])
-            fresh = await self.adapter.candidate_identity(task)
-            if task["paused"] or not fresh or not fresh.get("clean") or (
-                    fresh["candidate_commit"], fresh["tree_hash"]) != (commit, tree):
-                return task
-            if existing["verdict"] == "pass":
-                return self.journal.change(task["task_id"], "done", fields={
-                    "result": "Trusted tests and Jev review gate passed on the clean candidate",
-                }, event="delivered_jev_review_gate")
-        if not task["reviewer_session_id"]:
-            lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
-            if lead_read.get("streaming") is not False or lead_read.get("pending"):
-                return task
-            task = self.journal.change(task["task_id"], "verifying", fields={
-                "review_commit": commit, "review_tree": tree, "review_marker": None,
-            })
-            return await self._start(task, role="reviewer")
-        if not task["review_marker"]:
-            return await self._send(task, task["reviewer_session_id"],
-                                    reviewer_prompt(task, commit, tree), "reviewer:initial")
-        read = await self.adapter.read(task, task["reviewer_session_id"], task["review_marker"])
-        attributed = read.get("first_turn_proven") is True and read.get("turn_attribution") in {
-            "correlated", "correlated_after_prior_turn",
-        }
-        if read.get("turn_attribution") == "timestamp_cursor" and read.get("turn_started"):
-            self._mark_unproven_send(task["task_id"], task["reviewer_session_id"])
-            return self.journal.change(task["task_id"], "uncertain")
-        if not (read.get("turn_started") is True and read.get("turn_done") is True and attributed):
-            if read.get("streaming") is True and attributed:
-                self.journal.progress(task["task_id"])  # the reviewer is still working
-            return task
-        if _QUOTA.search(final_agent_text(read) or ""):
-            reviewer = next((b["provider"] for b in reversed(task["branches"])
-                             if b["role"] == "reviewer" and b["session_id"] == task["reviewer_session_id"]), None)
-            if reviewer:
-                self.journal.provider_use(reviewer, "quota_error")
-            if reviewer != "claude":
-                return self.journal.change(task["task_id"], "needs_ted", fields={
-                    "result": f"Reviewer ({reviewer or 'unknown'}) hit its usage limit"})
-            # Not a review outcome: retry this candidate with the next provider (Codex).
-            return self.journal.change(task["task_id"], "verifying", fields={
-                "reviewer_session_id": None, "review_marker": None}, event="reviewer_quota_fallback")
-        verdict = review_verdict(read, commit, tree)
-        output = verdict["text"]
-        if verdict["verdict"] == "pass":
-            lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
-            if lead_read.get("streaming") is not False or lead_read.get("pending"):
-                return task
-            fresh = await self.adapter.candidate_identity(task)
-            if not fresh or not fresh.get("clean") or (fresh["candidate_commit"], fresh["tree_hash"]) != (commit, tree):
-                return self.journal.change(task["task_id"], "verifying", fields={
-                    "reviewer_session_id": None, "review_marker": None,
-                    "review_commit": None, "review_tree": None, "review_passed": 0,
-                }, event="candidate_changed_during_review")
-            return self.journal.change(task["task_id"], "done", fields={"review_passed": 1,
-                                       "result": output[-3000:]}, event="delivered")
-        # Missing, invalid, conflicting or mismatched verdicts and PASS with
-        # high-severity findings are all rejections: bounded rework, never a hang.
-        self.journal.note(task["task_id"], "review_verdict_rejected", {
-            "reason": verdict["reason"], "candidate_commit": commit, "tree_hash": tree})
-        n = task["review_rejections"] + 1
-        if n > min(self.max_review_rejections, limits(task["recipe"])[1]):
-            return self.journal.change(task["task_id"], "needs_ted", fields={
-                "review_rejections": n, "result": "Review rejected: " + verdict["reason"]})
-        self.journal.change(task["task_id"], "accepted", fields={"review_rejections": n,
-                                  "reviewer_session_id": None, "review_marker": None,
-                                  "review_commit": None, "review_tree": None,
-                                  "verification_commit": None, "verification_tree": None})
-        return await self._send(self.journal.get(task["task_id"]), task["session_id"],
-                                "Independent review rejected the candidate (" + verdict["reason"] + "). "
-                                "Address the review findings, rerun tests, and report a new milestone.\n"
-                                + output[-3000:], "review_rework")
+        return self.journal.change(task["task_id"], "done", fields={
+            "result": "Trusted tests passed on the clean candidate",
+        }, event="delivered")
 
     async def _verification_failed(self, task: dict, evidence: dict, commit: str, tree: str) -> dict:
         """Stuck handler for a failed trusted run.
@@ -806,6 +705,7 @@ class TaskCoordinator:
         if n > verification_reworks(task["recipe"]):
             return self.journal.change(task_id, "needs_ted", event="verification_failed", fields={
                 "verification_failures": n, "result": "Trusted tests failed; rework budget exhausted"})
+        # Same session. No new task, no reviewer, no failover.
         self.journal.change(task_id, "accepted", fields={
             "verification_failures": n, "reviewer_session_id": None, "review_marker": None,
             "review_commit": None, "review_tree": None,
@@ -813,7 +713,8 @@ class TaskCoordinator:
         return await self._send(self.journal.get(task_id), task["session_id"],
                                 "The service's trusted test run failed on candidate " + commit[:12]
                                 + " (exit " + str(evidence["exit_code"]) + "). Fix the failure, commit, "
-                                "rerun the tests, and report a new milestone. Output tail (redacted):\n"
+                                "rerun the tests, and report a new milestone. Do not re-plan. "
+                                "Output tail (redacted):\n"
                                 + str(failure.get("summary") or "")[-2500:], "verification_rework")
 
     def _mark_unproven_send(self, task_id: str, session_id: str):
