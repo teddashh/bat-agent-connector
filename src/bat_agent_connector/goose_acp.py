@@ -8,7 +8,7 @@ import os
 import re
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .pm_providers import (
@@ -35,7 +35,30 @@ class GooseConfig:
     expected_version: str = PINNED_GOOSE_VERSION
     provider: str = "claude"
     timeout_s: float = 300
-    enabled: bool = False  # one-turn smoke only; no durable ACP recovery yet
+    enabled: bool = field(default_factory=lambda: os.environ.get(
+        "BATC_GOOSE_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"})
+
+
+
+def _link_claude_login(isolated_home: str) -> None:
+    """Let the throwaway HOME see the operator Claude login, and nothing else.
+
+    Goose stays MCP-only. Only the credential file and the account record are
+    linked, so a task run does not get the operator's full home.
+    """
+    source = Path(os.environ.get("HOME", ""))
+    creds = source / ".claude" / ".credentials.json"
+    if creds.is_file():
+        dest_dir = Path(isolated_home) / ".claude"
+        dest_dir.mkdir(mode=0o700, exist_ok=True)
+        dest = dest_dir / ".credentials.json"
+        if not dest.exists():
+            dest.symlink_to(creds)
+    account = source / ".claude.json"
+    if account.is_file():
+        dest = Path(isolated_home) / ".claude.json"
+        if not dest.exists():
+            dest.symlink_to(account)
 
 
 class GooseACP:
@@ -131,6 +154,7 @@ class GooseACP:
                 "  memory:\n    enabled: false\n"
                 "  todo:\n    enabled: false\n"
             )
+            _link_claude_login(isolated_home)
             return await self._run_process(task_id, cwd, prompt, capability, command or cfg.command,
                                            env, cfg.timeout_s)
 
