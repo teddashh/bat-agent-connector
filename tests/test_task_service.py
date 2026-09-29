@@ -3297,3 +3297,123 @@ async def test_reviewer_start_polls_existing_session_after_start_timeout(
     finally:
         await fleet.close()
         j.close()
+
+
+class _Receiver:
+    """Loopback JSON webhook that records requests and replies with scripted statuses."""
+
+    def __init__(self, statuses=None):
+        import http.server
+        import threading
+
+        self.requests = []
+        self.statuses = list(statuses or [])
+        receiver = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                receiver.requests.append(({k.lower(): v for k, v in self.headers.items()}, body))
+                status = receiver.statuses.pop(0) if receiver.statuses else 200
+                self.send_response(status)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/webhooks/task-events"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+
+
+def _advance(j, tid, *states):
+    for state in states:
+        j.change(tid, state)
+
+
+async def test_event_push_starts_at_now_signs_and_advances_in_order(tmp_path):
+    from bat_agent_connector.task_push import EventPusher, EventWebhook, sign
+
+    j = Journal(tmp_path / "tasks.db")
+    old = submit(j, discord_thread_id="origin-old")["task_id"]
+    _advance(j, old, "dispatching", "accepted")  # history before push is configured
+    receiver = _Receiver()
+    secret = "s" * 40
+    pusher = EventPusher(j, EventWebhook(receiver.url, secret))
+    try:
+        assert await pusher.run_once() == 0 and receiver.requests == []  # backlog never pushed
+        tid = j.submit(project="p", host="h1", workspace="w", original_words=WORDS,
+                       idempotency_key="k2", discord_thread_id="origin-2")["task_id"]
+        _advance(j, tid, "dispatching", "accepted", "running")
+        j.change(tid, "needs_ted", fields={"result": "Pick a license"})
+        assert await pusher.run_once() == 2
+        payloads = [json.loads(body) for _, body in receiver.requests]
+        assert [p["kind"] for p in payloads] == ["started", "needs_ted"]
+        assert payloads[0]["type"] == "task.milestone" and payloads[0]["origin_thread_id"] == "origin-2"
+        assert payloads[1]["delivered_through"] == payloads[0]["cursor"]
+        headers, body = receiver.requests[0]
+        assert headers["x-webhook-signature-v2"] == sign(secret, headers["x-webhook-timestamp"], body)
+        assert headers["x-request-id"] == f"batc-milestone-{payloads[0]['cursor']}-0"
+        assert j.push_state()["cursor"] == j.head_cursor()
+        assert await pusher.run_once() == 0 and len(receiver.requests) == 2  # no re-push
+    finally:
+        receiver.close()
+        j.close()
+
+
+async def test_event_push_failure_backs_off_and_retries_without_skipping(tmp_path):
+    from bat_agent_connector.task_push import EventPusher, EventWebhook
+
+    now = [1000.0]
+    j = Journal(tmp_path / "tasks.db")
+    receiver = _Receiver(statuses=[502])
+    pusher = EventPusher(j, EventWebhook(receiver.url), clock=lambda: now[0])
+    try:
+        await pusher.run_once()  # initialise at head
+        tid = submit(j, discord_thread_id="origin")["task_id"]
+        _advance(j, tid, "dispatching", "accepted")
+        before = j.push_state()["cursor"]
+        assert await pusher.run_once() == 0
+        state = j.push_state()
+        assert state["cursor"] == before and state["failures"] == 1 and state["last_error"] == "HTTP 502"
+        assert await pusher.run_once() == 0 and len(receiver.requests) == 1  # still backing off
+        now[0] += 3
+        assert await pusher.run_once() == 1
+        ids = [h["x-request-id"] for h, _ in receiver.requests]
+        assert ids[0].endswith("-0") and ids[1].endswith("-1")  # retry is not a receiver-side duplicate
+        assert j.push_state()["failures"] == 0 and j.push_state()["cursor"] == j.head_cursor()
+    finally:
+        receiver.close()
+        j.close()
+
+
+async def test_event_webhook_settings_require_loopback_and_private_secret(mock, tmp_path, monkeypatch):
+    from bat_agent_connector.task_push import validate_callback_url
+
+    for bad in ("http://example.com/hook", "http://user:pw@127.0.0.1/x", "ftp://127.0.0.1/x"):
+        with pytest.raises(ValueError):
+            validate_callback_url(bad)
+    secret = tmp_path / "hook.secret"
+    secret.write_text("x" * 40)
+    secret.chmod(0o644)
+    settings = tmp_path / "task-settings.toml"
+    settings.write_text('[task_service.event_webhook]\nurl = "http://127.0.0.1:8644/webhooks/task-events"\n'
+                        f'secret_file = "{secret}"\n')
+    settings.chmod(0o600)
+    monkeypatch.setenv("BATC_TASK_SETTINGS", str(settings))
+    with pytest.raises(ValueError, match="0600"):
+        TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    secret.chmod(0o600)
+    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks2.db")
+    try:
+        assert daemon.pusher.webhook.url.endswith("/webhooks/task-events")
+        assert daemon.pusher.webhook.secret == "x" * 40
+        feed = await daemon.call("work_events", {"limit": 0})
+        assert feed["push"] == {"configured": True}
+    finally:
+        await daemon.fleet.close()
+        daemon.journal.close()
