@@ -573,12 +573,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=18796)
     p.add_argument("--db", help="SQLite task journal path")
-    p = sp.add_parser("task-delivery", help="inspect or reconcile unresolved Discord deliveries")
-    p.add_argument("--confirm-absent-event", type=int)
-    p.add_argument("--confirm-absent-board")
-    p.add_argument("--confirm-found-event", type=int)
-    p.add_argument("--confirm-found-board")
-    p.add_argument("--message-id", help="Discord message ID for found-event/board reconciliation")
+    p = sp.add_parser("task-events", help="read the task milestone feed (started/needs_ted/done/failed)")
+    p.add_argument("--since", type=int, default=0, help="cursor from a previous read (0 = from the beginning)")
+    p.add_argument("--limit", type=int, default=50, help="max milestones (0 = only report head_cursor)")
     p = sp.add_parser("task-reconcile", help="attest one uncertain task command and optionally send a new prompt")
     p.add_argument("--task-id", required=True)
     p.add_argument("--command-id", required=True)
@@ -609,20 +606,10 @@ def main(argv: list[str] | None = None) -> int:
 
             asyncio.run(TaskDaemon(load_config(args.config), args.db).serve(args.host, args.port))
             return 0
-        if args.cmd == "task-delivery":
+        if args.cmd == "task-events":
             from .task_daemon import request
 
-            if args.confirm_found_event is not None or args.confirm_found_board:
-                if not args.message_id:
-                    raise ValueError("--message-id is required for found Discord message")
-                result = request("work_delivery_confirm_found", event_id=args.confirm_found_event,
-                                 board_channel_id=args.confirm_found_board, message_id=args.message_id)
-            elif args.confirm_absent_event is not None or args.confirm_absent_board:
-                result = request("work_delivery_confirm_absent", event_id=args.confirm_absent_event,
-                                 board_channel_id=args.confirm_absent_board)
-            else:
-                result = request("work_delivery_status")
-            _print(result, args.json)
+            _print(request("work_events", since_cursor=args.since, limit=args.limit), args.json)
             return 0
         if args.cmd == "task-reconcile":
             from .task_daemon import request
