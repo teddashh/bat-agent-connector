@@ -29,7 +29,7 @@ from .redact import redact
 from .task_daemon import request as task_request
 
 READ_TOOLS = [
-    "work_status", "work_result",
+    "work_status", "work_result", "work_events",
     "hosts_list",
     "host_status",
     "workspaces_list",
@@ -243,7 +243,15 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         """Read delivery outcome, review count, verification and elapsed time without waiting."""
         return await asyncio.to_thread(task_request, "work_result", task_id=task_id)
 
-    for fn in (work_status, work_result):
+    async def work_events(since_cursor: int = 0, limit: int = 50) -> dict[str, Any]:
+        """Read-only milestone feed across all tasks: started, needs_ted (with reason), done (with
+        commit/PR link) and failed. Each event has a monotonic cursor, task_id, project, workspace,
+        origin_thread_id (the opaque reference passed at submit), kind and a short summary. Persist
+        next_cursor only after handling every returned event; limit=0 returns head_cursor so a new
+        reader can start from now. The service itself never posts anywhere."""
+        return await asyncio.to_thread(task_request, "work_events", since_cursor=since_cursor, limit=limit)
+
+    for fn in (work_status, work_result, work_events):
         mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
 
     if fleet.any_orchestrate:
@@ -258,7 +266,8 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             pm_provider: str | None = None, base_branch: str | None = None,
         ) -> dict[str, Any]:
             """Queue Ted's exact words and return task_id immediately. Hermes must not rewrite or decompose them.
-            interpretation is a non-authoritative archival note and never enters the coding prompt."""
+            interpretation is a non-authoritative archival note and never enters the coding prompt.
+            discord_thread_id is an opaque origin/reply-to reference echoed as origin_thread_id in work_events."""
             return await asyncio.to_thread(task_request, "work_submit", project=project, host=host,
                                            workspace=workspace, original_words=original_words,
                                            idempotency_key=idempotency_key, discord_thread_id=discord_thread_id,
