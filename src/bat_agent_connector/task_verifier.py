@@ -2,7 +2,7 @@
 
 Only administrator-configured argv is executed. A task caller cannot supply a
 command, exit status or candidate hash. Output is kept in a private 0600 log
-and never placed in the service journal or Discord messages.
+and never placed in the service journal or the event feed.
 """
 
 from __future__ import annotations
@@ -41,6 +41,9 @@ class VerificationSettings:
     register_tabs: bool = False
     artifact_dir: str | None = None
     base_branches: dict[str, str] = field(default_factory=dict)
+    repo_urls: dict[str, str] = field(default_factory=dict)
+    event_webhook_url: str | None = None
+    event_webhook_secret_file: str | None = None
 
 
 def load_settings(path: str | None = None) -> VerificationSettings:
@@ -67,8 +70,24 @@ def load_settings(path: str | None = None) -> VerificationSettings:
         for k, v in base_branches.items()
     ):
         raise ValueError("task_service.base_branches must map project names to branch names")
+    repo_urls = raw.get("task_service", {}).get("repo_urls", {})
+    if not isinstance(repo_urls, dict) or any(
+        not isinstance(k, str) or not k or not isinstance(v, str) or not v.startswith("https://")
+        or any(c.isspace() for c in v)
+        for k, v in repo_urls.items()
+    ):
+        raise ValueError("task_service.repo_urls must map project names to https URLs")
+    hook = raw.get("task_service", {}).get("event_webhook", {})
+    if not isinstance(hook, dict) or any(
+            k not in {"url", "secret_file"} or not isinstance(v, str) or not v for k, v in hook.items()):
+        raise ValueError("task_service.event_webhook takes url and secret_file strings")
+    if hook.get("url"):
+        from .task_push import validate_callback_url
+
+        validate_callback_url(hook["url"])
     return VerificationSettings(commands, aliases, int(section.get("timeout_s", 600)), register_tabs,
-                                section.get("artifact_dir"), dict(base_branches))
+                                section.get("artifact_dir"), dict(base_branches), dict(repo_urls),
+                                hook.get("url"), hook.get("secret_file"))
 
 
 class ObservedVerifier:
@@ -170,7 +189,7 @@ class ObservedVerifier:
                 "tree_hash": before["tree_hash"],
                 # Administrator argv may itself contain credentials. The private
                 # config remains the authority; the journal records its stable
-                # fingerprint without copying arguments into status/Discord.
+                # fingerprint without copying arguments into status/feed output.
                 "command": "argv_sha256:" + hashlib.sha256("\0".join(argv).encode()).hexdigest(),
                 "exit_code": exit_code, "log_ref": str(log_path),
                 "output_sha256": digest.hexdigest()}

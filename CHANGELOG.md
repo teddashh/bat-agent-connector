@@ -2,6 +2,13 @@
 
 ## Next release (unreleased)
 
+- The task service no longer knows about chat delivery. The Discord publisher, its per-event outbox columns,
+  the board table and `batc task-delivery` / `work_delivery_*` are removed; opening an older journal drops the
+  outbox (`events.discord_status`, `events.discord_message_id`, `board`) so the old backlog can never be posted.
+  New read-only milestone feed: MCP `work_events(since_cursor, limit)`, RPC `work_events`, CLI `batc task-events`.
+  Transitions into `needs_ted`/`failed` now store the reason on the event.
+- Milestones are pushed to an optional generic loopback JSON webhook (`[task_service.event_webhook]`), signed with
+  HMAC-SHA256, in order, retried with backoff; `work_events` stays as catch-up.
 - Task review verdicts are structured: only the reviewer's final message counts, and it must carry
   `{"verdict","candidate_commit","tree_hash","findings"}` for the exact candidate. Missing, invalid,
   conflicting or mismatched verdicts, and PASS with high-severity findings, become bounded rework.

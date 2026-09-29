@@ -87,7 +87,8 @@ account changes are never sent.
 ### Task service milestone (opt-in)
 
 `batc serve` runs the SQLite WAL task coordinator on `127.0.0.1:18796`. The existing MCP server adds
-`work_submit`, `work_status`, `work_pause`, `work_resume`, and `work_result`; its stdio process calls that daemon
+`work_submit`, `work_status`, `work_pause`, `work_resume`, `work_result` and the read-only `work_events` feed; its
+stdio process calls that daemon
 at `BATC_TASK_URL` (default `http://127.0.0.1:18796/rpc`). `work_submit` takes Ted's **exact** words in
 `original_words` and an idempotency key such as the Discord message ID, then returns a `task_id` without
 waiting for BAT. Hermes must not reinterpret or split the request. The lead Codex/Claude session plans in the repo.
@@ -98,9 +99,16 @@ Minimal flow with its one-question Jev choice and post-test Jev review gate is n
 
 A trusted test command must be configured locally; the service observes its
 exit status on the clean candidate commit and records verification before opening a fresh reviewer session.
-The daemon currently rejects live Goose tasks. Goose ACP, provider fallback, the per-step Jev router, and Discord
-posting have adapter/test coverage; real Goose contract checks, Discord credentials, deployment and cron replacement
-are deferred. The task API requires a local admin token or scoped capability and binds only to loopback. See
+The daemon currently rejects live Goose tasks. Goose ACP, provider fallback and the per-step Jev router have
+adapter/test coverage; real Goose contract checks are deferred. The service never posts to chat. `work_events(since_cursor, limit)`
+(CLI `batc task-events --since N`) returns only milestones (`started`, `needs_ted` with its reason, `done` with commit/PR
+link, `failed`), each with a monotonic `cursor`, `task_id`, `project`, `workspace`, the opaque `origin_thread_id` passed at
+submit, `kind` and a short `summary`. Push is the primary path: with `[task_service.event_webhook] url` (loopback only)
+and `secret_file` (mode 0600) in the private settings, each committed milestone is POSTed in cursor order as plain JSON
+(`type="task.milestone"`, `delivered_through`, `X-Request-ID`, HMAC-SHA256 `X-Webhook-Signature-V2` over
+`<X-Webhook-Timestamp>.<body>`). The push cursor starts at "now" when first configured and advances only on 2xx;
+failures retry with capped exponential backoff (max 300 s). `work_events` is the receiver's catch-up path after an
+outage; `limit=0` returns `head_cursor`. Optional `[task_service] repo_urls` adds `commit_url`. The task API requires a local admin token or scoped capability and binds only to loopback. See
 [the task-service design](docs/design/task-service.md) for states, recovery, private configuration and rollout.
 The default minimal path asks Jev one typed engine question at submission; explicit `task_path="standard"` selects the full path. Invalid or unavailable
 Jev chooses rules. This path skips per-step Jev and advisory candidate pre-screen. The `small-task-with-tests`
@@ -116,8 +124,7 @@ network. Across 10 completed tasks per path, standard `bugfix-with-tests` median
 `small-task-with-tests` median was **22.73 ms**. This measures local
 coordination only; it excludes real BAT, model, test-runner and network time and does not predict live delivery time.
 Codex timestamp cursors do not prove command ownership. An uncertain send remains stopped until a command-scoped,
-one-time operator reconciliation (`batc task-reconcile`); it is never replayed automatically. Discord delivery
-that falls outside the recent-message scan also requires an explicit found-ID or absent confirmation.
+one-time operator reconciliation (`batc task-reconcile`); it is never replayed automatically.
 Claude-to-Codex failover journals its handoff as a separate uncertain send. Long original requests use a complete
 private archive verified from the successor host before dispatch; the service fails closed if access cannot be proved.
 No paid API key is required.
