@@ -633,6 +633,11 @@ class Journal:
             self._event(task_id, "caller_reported_ted_intervention",
                         {"action": action, "source_message_id": source_message_id})
 
+    def note(self, task_id: str, kind: str, body: dict):
+        """Append an audit event without changing task state."""
+        with self.tx():
+            self._event(task_id, kind, body)
+
     def request_ted(self, task_id: str, reason: str):
         with self.tx():
             self._event(task_id, "ted_requested", {"reason": reason[:1000]})

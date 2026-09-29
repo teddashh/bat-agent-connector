@@ -7,17 +7,18 @@ results; errors are redacted.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sqlite3
 import statistics
 import time
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from . import registry
 from .client import BatClient, event_session_id
-from .config import state_dir
 from .errors import BatError, InvokeError, WriteRefused
 from .fleet import Fleet
 from .redact import redact
@@ -30,19 +31,42 @@ MAX_PROMPT_CHARS = 20_000
 _write_locks: dict[tuple[int, str], asyncio.Lock] = {}
 
 
-def _task_session_verifying(host: str, session_id: str) -> bool:
-    """Return whether a task-service-owned BAT session is in verification."""
+TASK_SERVICE_POINTER = "task-service.json"
+
+
+def task_service_db() -> Path | None:
+    """The running task daemon's journal, as recorded next to the session registry."""
+    try:
+        data = json.loads((registry.registry_path().parent / TASK_SERVICE_POINTER).read_text())
+        db = Path(data["db_path"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return db if db.is_absolute() else None
+
+
+def _task_send_block(host: str, session_id: str) -> str | None:
+    """Why a direct send to a task-service-owned session is refused, or None.
+
+    Unknown task state fails closed: a task-owned session whose journal row
+    cannot be read is treated as controlled by the service.
+    """
     owner = registry.get(host, session_id)
     task_id = owner.get("task_id") if owner else None
     if not task_id:
-        return False
-    db = state_dir() / "tasks.sqlite3"
+        return None
+    db = task_service_db()
+    if db is None:
+        return "task-owned session state is unavailable; direct sends are blocked"
     try:
-        with sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.2) as conn:
+        with contextlib.closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.2)) as conn:
             row = conn.execute("SELECT state FROM tasks WHERE task_id=?", (task_id,)).fetchone()
-        return bool(row and row[0] == "verifying")
     except (OSError, sqlite3.Error):
-        return False
+        row = None
+    if not row:
+        return "task-owned session state is unavailable; direct sends are blocked"
+    if row[0] == "verifying":
+        return "task-owned session is verifying; direct sends are blocked"
+    return None
 
 
 def _write_lock(host: str) -> asyncio.Lock:
@@ -942,8 +966,9 @@ async def session_send(
     async with _write_lock(host):
         t, ws = await _resolve_session(c, session_id)
         sid = t["id"]
-        if before_invoke is None and not initial_task_send and _task_session_verifying(host, sid):
-            raise WriteRefused("task-owned session is verifying; direct sends are blocked")
+        blocked = None if before_invoke is not None or initial_task_send else _task_send_block(host, sid)
+        if blocked:
+            raise WriteRefused(blocked)
         successor = next((e for e in registry.list_entries(host) if e.get("failover_of") == sid
                           and e.get("status") in ("starting", "active")
                           and e.get("handoff_status") == "sent"), None)
@@ -1163,6 +1188,9 @@ async def session_answer(
     async with _write_lock(host):
         t, _ = await _resolve_session(c, session_id)
         sid = t["id"]
+        blocked = _task_send_block(host, sid)
+        if blocked:
+            raise WriteRefused(blocked.replace("direct sends", "direct answers"))
         kind = agent_kind(t.get("agentPreset"))
         meta = await _meta(c, sid)
         if not _state_safe(kind, meta):

@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- Task review verdicts are structured: only the reviewer's final message counts, and it must carry
+  `{"verdict","candidate_commit","tree_hash","findings"}` for the exact candidate. Missing, invalid,
+  conflicting or mismatched verdicts, and PASS with high-severity findings, become bounded rework.
+  Lead `BAT-STATUS` is read from the last marker of the final agent message only.
+- The direct-send fence reads the running daemon's actual journal (`task-service.json` pointer) and
+  refuses sends/answers to task-owned sessions whose state cannot be read.
 - The minimal task path is now the configurable production default (`BATC_TASK_DEFAULT_PATH=minimal`), with a typed Jev candidate review gate; `task_path="standard"` remains the explicit full-review opt-out.
 - Claude turn markers now use BAT's exact `clientMessageId` echo (`batc-<uuid>`), with an explicit
   timestamp cursor and conservative queued-turn phases. Codex is labeled as a timestamp fallback

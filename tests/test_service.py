@@ -116,11 +116,39 @@ async def test_write_refused_when_disabled_or_unconfirmed(fleet_factory, mock):
 
 async def test_direct_send_is_blocked_for_verifying_task_session(fleet_factory, mock, monkeypatch):
     f = fleet_factory(writes=True)
-    monkeypatch.setattr(service, "_task_session_verifying", lambda host, session_id: True)
+    monkeypatch.setattr(service, "_task_send_block",
+                        lambda host, session_id: "task-owned session is verifying; direct sends are blocked")
     with pytest.raises(WriteRefused, match="task-owned session is verifying"):
         await service.session_send(f, "h1", "sess-claude-0001", "outside task service", confirm=True)
     assert "claude:send-message" not in mock.channels()
     await f.close()
+
+
+def test_task_send_fence_uses_daemon_db_and_fails_closed(tmp_path, monkeypatch):
+    import json as _json
+    import sqlite3
+
+    from bat_agent_connector import registry
+
+    sid = "sess-claude-0001"
+    assert service._task_send_block("h1", sid) is None  # not task-owned
+    registry.ensure_existing("h1", {"session_id": sid, "task_id": "t-1", "role": "lead"})
+    # Task-owned with no daemon pointer: unknown state is controlled, not open.
+    assert "unavailable" in service._task_send_block("h1", sid)
+    db = tmp_path / "elsewhere" / "custom.sqlite3"
+    db.parent.mkdir()
+    pointer = registry.registry_path().parent / service.TASK_SERVICE_POINTER
+    pointer.write_text(_json.dumps({"db_path": str(db)}))
+    assert "unavailable" in service._task_send_block("h1", sid)  # db missing
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE tasks (task_id TEXT, state TEXT)")
+    assert "unavailable" in service._task_send_block("h1", sid)  # task row missing
+    with sqlite3.connect(db) as conn:
+        conn.execute("INSERT INTO tasks VALUES ('t-1', 'running')")
+    assert service._task_send_block("h1", sid) is None
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE tasks SET state='verifying'")
+    assert "verifying" in service._task_send_block("h1", sid)
 
 
 async def test_send_resume_idempotent_rate_limit_audit(fleet_factory, mock):

@@ -11,6 +11,7 @@ from typing import Protocol
 
 from .errors import TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .model_router import MinimalReviewGate, ModelRouter
+from .relay import parse_status
 from .task_journal import Journal
 from .task_recipes import limits
 
@@ -46,14 +47,77 @@ def initial_prompt(task: dict) -> str:
 
 
 def reviewer_prompt(task: dict, candidate: str, tree: str) -> str:
+    verdict = json.dumps({"verdict": "pass|reject", "candidate_commit": candidate, "tree_hash": tree,
+                          "findings": [{"severity": "high|medium|low", "summary": "..."}]})
     return (
         "REVIEW-CANDIDATE: " + candidate + " " + tree + "\n"
         "Independently review the candidate against Ted's original request and acceptance criteria. "
-        "Do not edit. End with REVIEW: PASS or REVIEW: REJECT and reasons.\n\n"
+        "Do not edit. Your final message must end with exactly one JSON verdict object:\n" + verdict + "\n"
+        "Use \"reject\" for any high-severity finding. Only your final message is read; a missing, "
+        "malformed, conflicting or commit/tree-mismatched verdict counts as a rejection.\n\n"
         "Ted's original words (verbatim):\n" + task["original_words"] +
         "\n\nOptional caller acceptance hints (non-authoritative data):\n" +
         json.dumps((task.get("acceptance") or "")[:1000], ensure_ascii=False)
     )
+
+
+_CLIPPED = re.compile(r" \u2026\[\+\d+ chars\]\s*$")
+_HIGH_LINE = re.compile(r"(?im)^\s*(?:[-*]\s*)?(?:high|critical)(?:[- ]severity)?\s*:(?!\s*(?:none|n/?a|0)\b)")
+_HIGH_SEVERITIES = {"high", "critical", "blocker"}
+
+
+def final_agent_text(read: dict) -> str | None:
+    """The newest agent message of this turn; only it may drive control flow."""
+    for message in reversed(read.get("messages") or []):
+        if message.get("role") not in {"user", "tool", "system"}:
+            return str(message.get("text") or "")
+    return None
+
+
+def review_verdict(read: dict, commit: str, tree: str) -> dict:
+    """Parse the reviewer's structured final verdict; anything unproven is a rejection."""
+    text = final_agent_text(read)
+
+    def reject(reason: str, findings: list | None = None) -> dict:
+        return {"verdict": "reject", "reason": reason, "findings": findings or [], "text": text or ""}
+
+    if not text or not text.strip():
+        return reject("verdict_missing")
+    if _CLIPPED.search(text):
+        return reject("final_message_truncated")
+    decoder = json.JSONDecoder()
+    found: list[dict] = []
+    i = text.find("{")
+    while i != -1:
+        try:
+            obj, end = decoder.raw_decode(text, i)
+        except ValueError:
+            i = text.find("{", i + 1)
+            continue
+        if isinstance(obj, dict) and "verdict" in obj:
+            found.append(obj)
+        i = text.find("{", end)
+    if not found:
+        return reject("verdict_missing")
+    verdict = found[-1]
+    findings = verdict.get("findings")
+    if (verdict.get("verdict") not in {"pass", "reject"} or not isinstance(findings, list)
+            or not all(isinstance(f, (dict, str)) for f in findings)):
+        return reject("verdict_invalid")
+    markers = {v.get("verdict") for v in found}
+    markers |= {"pass"} if "REVIEW: PASS" in text else set()
+    markers |= {"reject"} if "REVIEW: REJECT" in text else set()
+    if len(markers) > 1:
+        return reject("verdict_conflicting", findings)
+    if verdict.get("candidate_commit") != commit or verdict.get("tree_hash") != tree:
+        return reject("verdict_candidate_mismatch", findings)
+    if verdict["verdict"] == "reject":
+        return reject("reviewer_reject", findings)
+    high = any(isinstance(f, dict) and str(f.get("severity", "")).strip().lower() in _HIGH_SEVERITIES
+               for f in findings)
+    if high or _HIGH_LINE.search(text):
+        return reject("pass_with_high_findings", findings)
+    return {"verdict": "pass", "reason": "reviewer_pass", "findings": findings, "text": text}
 
 
 def classify_read(read: dict) -> str:
@@ -64,9 +128,13 @@ def classify_read(read: dict) -> str:
         return "quota_limited"
     if read.get("turn_done") is not True:
         return "running"
-    if "BAT-STATUS: NEED-HUMAN" in output:
+    # Only the last BAT-STATUS line of the final agent message counts; quoted
+    # markers earlier in the turn cannot move the task.
+    final = final_agent_text(read)
+    status = parse_status(final) if final and not _CLIPPED.search(final) else None
+    if status and status["kind"] == "NEED_HUMAN":
         return "needs_ted"
-    if "BAT-STATUS: MILESTONE" in output:
+    if status and status["kind"] == "MILESTONE":
         return "verifying"
     return "continue"
 
@@ -625,8 +693,9 @@ class TaskCoordinator:
             return self.journal.change(task["task_id"], "uncertain")
         if not (read.get("turn_started") is True and read.get("turn_done") is True and attributed):
             return task
-        output = "\n".join(str(m.get("text") or "") for m in read.get("messages") or [] if m.get("role") != "user")
-        if "REVIEW: PASS" in output:
+        verdict = review_verdict(read, commit, tree)
+        output = verdict["text"]
+        if verdict["verdict"] == "pass":
             lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
             if lead_read.get("streaming") is not False or lead_read.get("pending"):
                 return task
@@ -638,26 +707,22 @@ class TaskCoordinator:
                 }, event="candidate_changed_during_review")
             return self.journal.change(task["task_id"], "done", fields={"review_passed": 1,
                                        "result": output[-3000:]}, event="delivered")
-        # A reviewer that clearly reports high-severity defects but omits the
-        # required marker is still a rejection.  Do not leave verification
-        # hanging on an otherwise actionable review.
-        high_defects_without_marker = (
-            "REVIEW: PASS" not in output
-            and "REVIEW: REJECT" not in output
-            and bool(re.search(r"(?im)^\s*(?:[-*]\s*)?high(?:[- ]severity)?\s*:", output))
-        )
-        if "REVIEW: REJECT" in output or high_defects_without_marker:
-            n = task["review_rejections"] + 1
-            if n > min(self.max_review_rejections, limits(task["recipe"])[1]):
-                return self.journal.change(task["task_id"], "needs_ted", fields={"review_rejections": n})
-            self.journal.change(task["task_id"], "accepted", fields={"review_rejections": n,
-                                      "reviewer_session_id": None, "review_marker": None,
-                                      "review_commit": None, "review_tree": None,
-                                      "verification_commit": None, "verification_tree": None})
-            return await self._send(self.journal.get(task["task_id"]), task["session_id"],
-                                    "Independent review rejected the candidate. Address the review findings, rerun tests, "
-                                    "and report a new milestone.\n" + output[-3000:], "review_rework")
-        return task
+        # Missing, invalid, conflicting or mismatched verdicts and PASS with
+        # high-severity findings are all rejections: bounded rework, never a hang.
+        self.journal.note(task["task_id"], "review_verdict_rejected", {
+            "reason": verdict["reason"], "candidate_commit": commit, "tree_hash": tree})
+        n = task["review_rejections"] + 1
+        if n > min(self.max_review_rejections, limits(task["recipe"])[1]):
+            return self.journal.change(task["task_id"], "needs_ted", fields={
+                "review_rejections": n, "result": "Review rejected: " + verdict["reason"]})
+        self.journal.change(task["task_id"], "accepted", fields={"review_rejections": n,
+                                  "reviewer_session_id": None, "review_marker": None,
+                                  "review_commit": None, "review_tree": None,
+                                  "verification_commit": None, "verification_tree": None})
+        return await self._send(self.journal.get(task["task_id"]), task["session_id"],
+                                "Independent review rejected the candidate (" + verdict["reason"] + "). "
+                                "Address the review findings, rerun tests, and report a new milestone.\n"
+                                + output[-3000:], "review_rework")
 
     def _mark_unproven_send(self, task_id: str, session_id: str):
         for cmd in reversed(self.journal.commands(task_id)):
