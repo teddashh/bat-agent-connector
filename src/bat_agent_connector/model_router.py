@@ -183,7 +183,7 @@ class ModelRouter:
 
     async def choose(self, task_id: str, step: str, description: str, *,
                      expected_type: str, high_stakes: bool = False,
-                     provider_override: str | None = None) -> dict:
+                     provider_override: str | None = None, reason: str | None = None) -> dict:
         if expected_type not in STEP_TYPES:
             raise ValueError("unknown PM step type")
         if provider_override is not None and provider_override not in self.catalog.entries:
@@ -192,7 +192,7 @@ class ModelRouter:
         if previous:
             return previous
         if provider_override is not None:
-            provider, reason = provider_override, "task_or_recipe_override"
+            provider, reason = provider_override, reason or "task_or_recipe_override"
         elif expected_type == "status_relay":
             if self.config.allow_gemini_status and self._ready(self.config.status_provider):
                 provider, reason = self.config.status_provider, "rule_status_relay"

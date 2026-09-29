@@ -161,8 +161,8 @@ class FakeBAT:
         return {"source": "observed_runner", **{k: self.identity[k] for k in ("candidate_commit", "tree_hash")},
                 "command": "pytest -q", "exit_code": 0, "log_ref": "journal:fake", "output_sha256": "c" * 64}
 
-    def reviewer_agent(self, task):
-        return self.reviewer_kind
+    async def available_agents(self, task):
+        return frozenset({self.reviewer_kind, "codex"})
 
 
 def test_journal_idempotency_restart_and_metrics(tmp_path):
@@ -317,7 +317,7 @@ async def test_verification_waits_for_quiet_candidate_window(tmp_path):
     await asyncio.sleep(0.06)
     third = await core.tick(task["task_id"])
     assert any(e["kind"] == "verification_observed" for e in journal.events(task["task_id"]))
-    assert third["state"] == "verifying"
+    assert third["state"] == "done"  # trusted tests are the verdict; no reviewer
     journal.close()
 
 
@@ -460,15 +460,14 @@ async def test_code_test_failure_reworks_lead_then_escalates_after_budget(tmp_pa
     lead = await _to_verifying(core, j, fake, task)
     result = await core.tick(task["task_id"])
     assert result["state"] == "running" and result["verification_failures"] == 1
-    assert "trusted test run failed" in fake.sends[-1][1] and "assert 1 == 2" in fake.sends[-1][1]
-    assert fake.sends[-1][0] == lead
+    assert result["session_id"] == lead
+    assert "Do not re-plan" in fake.sends[-1][1]
     fake.identity = {"candidate_commit": "d" * 40, "tree_hash": "e" * 40, "clean": True}
     fake.reads[lead] = {"turn_started": True, "turn_done": True,
                         "messages": [{"role": "assistant", "text": "fixed\nBAT-STATUS: MILESTONE"}]}
     await core.tick(task["task_id"])
     result = await core.tick(task["task_id"])
-    assert result["state"] == "needs_ted" and result["verification_failures"] == 2
-    assert "rework budget exhausted" in result["result"]
+    assert result["state"] == "needs_ted" and "rework budget exhausted" in result["result"]
     j.close()
 
 
@@ -495,7 +494,8 @@ async def test_missing_dependencies_install_once_then_retest(tmp_path):
     assert fake.installs == 1 and fake.runs == 2
     assert result["state"] == "verifying" and result["verification_failures"] == 0
     await core.tick(task["task_id"])
-    assert j.get(task["task_id"])["reviewer_session_id"]  # proceeds to review
+    assert j.get(task["task_id"])["state"] == "done"
+    assert j.get(task["task_id"])["reviewer_session_id"] is None
     kinds = [e["kind"] for e in j.events(task["task_id"])]
     assert kinds.count("dependency_install") == 1 and "dependency_install_result" in kinds
     j.close()
@@ -537,17 +537,8 @@ async def test_codex_timestamp_never_proves_lost_send_or_review(tmp_path):
     lead = j.get(task["task_id"])["session_id"]
     fake.reads[lead] = {"turn_started": True, "turn_done": True, "turn_attribution": "correlated",
                         "messages": [{"role": "assistant", "text": "BAT-STATUS: MILESTONE"}]}
-    await core.tick(task["task_id"])
-    fake.prepare_kind = "codex"
-    await core.tick(task["task_id"])
-    reviewer = j.get(task["task_id"])["reviewer_session_id"]
-    assert j.get(task["task_id"])["state"] == "uncertain"
-    fake.reads[reviewer] = {"turn_started": True, "turn_done": True, "streaming": False,
-                            "turn_attribution": "timestamp_cursor", "first_turn_proven": True,
-                            "messages": [{"role": "assistant", "text": REVIEW_PASS}]}
-    assert (await core.tick(task["task_id"]))["state"] == "uncertain"
-    assert not j.get(task["task_id"])["delivered"]
-    assert len([x for x in fake.sends if x[0] == reviewer]) == 1
+    held = await core.tick(task["task_id"])
+    assert held["state"] == "verifying" and held["reviewer_session_id"] is None
     j.close()
 
 
@@ -668,6 +659,124 @@ async def test_task_bat_adapter_contract_with_mock_host(fleet_factory, mock, tmp
     assert opts["cwd"] == start["params"]["options"]["cwd"]
     assert not any(t.get("id") == reviewer for t in mock.ws_doc["terminals"])
     j.close()
+
+
+async def test_claude_sessions_pin_opus_55_for_lead_and_reviewer(fleet_factory, mock, tmp_path):
+    fleet = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})
+    j = Journal(tmp_path / "tasks.db")
+    task = j.submit(project="p", host="h1", workspace="demo-project", original_words=WORDS,
+                    idempotency_key="claude-pin", lead_agent="claude")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
+    lead = "task-lead-claude"
+    start_command, _ = j.command(task["task_id"], "start_lead", lead,
+                                 {"role": "lead", "agent": "claude"}, "claude-pin-start")
+    assert await adapter.start(task, role="lead", agent="claude", session_id=lead) == lead
+    assert await adapter.recover_start(task, role="lead", session_id=lead)
+    j.command_status(start_command["command_id"], "settled")
+    j.add_branch(task["task_id"], session_id=lead, provider="claude", role="lead", reason="start")
+    j.change(task["task_id"], "dispatching")
+    task = j.change(task["task_id"], "accepted", fields={"session_id": lead})
+    reviewer = "task-review-claude"
+    assert await adapter.start(task, role="reviewer", agent="claude", session_id=reviewer) == reviewer
+    for sid, preset in ((lead, "claude-code-worktree"), (reviewer, "claude-code")):
+        opts = next(i for i in mock.invokes if i["channel"] == "claude:start-session"
+                    and i["params"]["sessionId"] == sid)["params"]["options"]
+        assert opts["agentPreset"] == preset and opts["model"] == task_bat.CLAUDE_BAT_MODEL
+        assert opts["model"].startswith("claude-opus-5-5")
+    j.close()
+
+
+async def test_available_agents_uses_host_usage_snapshot_and_quota_latch(tmp_path):
+    class Client:
+        def __init__(self):
+            self.reply = None
+
+        async def invoke(self, channel, params, retry_on_disconnect=True):
+            assert channel == "agent:usage-snapshot" and params == {}
+            if isinstance(self.reply, Exception):
+                raise self.reply
+            return self.reply
+
+    class Fleet:
+        client_obj = Client()
+
+        def client(self, _host):
+            return self.client_obj
+
+    j = Journal(tmp_path / "tasks.db")
+    fleet = Fleet()
+    adapter = task_bat.BatTaskAdapter(fleet, None, j)
+    now_ms = time.time() * 1000
+
+    def snap(five, seven, age_s=0):
+        return {"claude": {"fetchedAt": now_ms - age_s * 1000, "fiveHour": {"utilization": five},
+                           "sevenDay": {"utilization": seven}}}
+
+    async def agents(reply):
+        adapter._agents_cache.clear()
+        fleet.client_obj.reply = reply
+        return await adapter.available_agents({"host": "h1"})
+
+    assert await agents(snap(0.12, 0.05)) == {"claude", "codex"}
+    assert await agents(snap(0.9, 0.05)) == {"codex"}
+    assert await agents(snap(0.1, 0.95)) == {"codex"}
+    assert await agents(snap(0.1, 0.1, age_s=7200)) == {"codex"}  # stale snapshot is unknown
+    assert await agents({"codex": {}}) == {"codex"}
+    assert await agents(TimeoutError("host down")) == {"codex"}
+    j.provider_use("claude", "quota_error")
+    assert await agents(snap(0.12, 0.05)) == {"codex"}
+    j.close()
+
+
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
+async def test_real_agents_follow_ted_order_and_record_provider_usage(tmp_path):
+    journal = Journal(tmp_path / "tasks.db")
+    fake = FakeBAT()
+    fake.reviewer_kind = "claude"  # Claude available on the host
+    task = submit(journal)  # Codex lead
+    core = TaskCoordinator(journal, fake)
+    await core.tick(task["task_id"])
+    lead = journal.get(task["task_id"])["session_id"]
+    fake.reads[lead] = {"turn_started": True, "turn_done": True, "turn_attribution": "correlated",
+                        "streaming": False, "messages": [{"role": "assistant", "text": "BAT-STATUS: MILESTONE"}]}
+    await core.tick(task["task_id"])
+    await core.tick(task["task_id"])
+    reviewer = journal.get(task["task_id"])["reviewer_session_id"]
+    assert fake.starts[-1][:2] == ("reviewer", "claude")  # other family, Opus first
+    # A Claude reviewer at its usage limit is not a review outcome: fall back to Codex.
+    fake.reads[reviewer] = {"turn_started": True, "turn_done": True, "turn_attribution": "correlated",
+                            "first_turn_proven": True,
+                            "messages": [{"role": "assistant", "text": "Claude usage limit reached."}]}
+    fake.reviewer_kind = "codex"
+    after = await core.tick(task["task_id"])
+    assert after["state"] == "verifying" and after["reviewer_session_id"] is None
+    assert after["review_rejections"] == 0
+    await core.tick(task["task_id"])
+    assert fake.starts[-1][:2] == ("reviewer", "codex")
+    usage = journal.db.execute("SELECT provider,outcome FROM provider_usage ORDER BY usage_id").fetchall()
+    assert [tuple(r) for r in usage] == [("codex", "success"), ("claude", "success"),
+                                         ("claude", "quota_error"), ("codex", "success")]
+    journal.close()
+
+
+async def test_claude_lead_falls_back_to_codex_and_reviewer_uses_other_family(tmp_path):
+    journal = Journal(tmp_path / "tasks.db")
+    fake = FakeBAT()  # only Codex available
+    task = submit(journal, lead_agent="claude")
+    await TaskCoordinator(journal, fake).tick(task["task_id"])
+    assert fake.starts[0][:2] == ("lead", "codex")
+    assert journal.get(task["task_id"])["lead_agent"] == "codex"
+    route = journal.routes(task["task_id"])
+    assert route == [] or route[0]["reason"] == "lead_fallback_unavailable"
+    available = frozenset({"claude", "codex"})
+    assert TaskCoordinator._pick_agent("reviewer", {"lead_agent": "claude"}, available) == (
+        "codex", "review_other_family")
+    assert TaskCoordinator._pick_agent("reviewer", {"lead_agent": "codex"}, available) == (
+        "claude", "review_other_family")
+    assert TaskCoordinator._pick_agent("reviewer", {"lead_agent": "codex"}, frozenset({"codex"})) == (
+        "codex", "review_same_family_only")
+    assert TaskCoordinator._pick_agent("lead", {"lead_agent": "claude"}, available) == ("claude", "lead_agent")
+    journal.close()
 
 
 async def test_task_initial_send_after_start_ignores_only_start_spacing(fleet_factory, mock, tmp_path):
@@ -1151,6 +1260,7 @@ async def test_pause_during_late_session_send_lookup_blocks_bat_frame(
         j.close()
 
 
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_settled_reviewer_start_requires_presence_before_prompt(tmp_path):
     j = Journal(tmp_path / "tasks.db")
     task = submit(j)
@@ -1230,6 +1340,7 @@ async def test_bat_adapter_recovers_codex_successor_without_handoff_turn_proof(
         journal.close()
 
 
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_operator_review_pass_requires_current_candidate_and_turn_reference(tmp_path):
     j = Journal(tmp_path / "tasks.db")
     task = submit(j)
@@ -1269,6 +1380,7 @@ async def test_operator_review_pass_requires_current_candidate_and_turn_referenc
     j.close()
 
 
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_rules_review_verification_failover_pause_and_writer(tmp_path):
     j = Journal(tmp_path / "tasks.db")
     task = submit(j, interpretation="Hermes guessed the wrong feature")
@@ -1326,6 +1438,7 @@ async def test_rules_review_verification_failover_pause_and_writer(tmp_path):
     j.close()
 
 
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_review_with_high_defect_findings_without_marker_reworks(tmp_path):
     j = Journal(tmp_path / "tasks.db")
     task = submit(j, interpretation="review fallback")
@@ -1403,6 +1516,7 @@ def test_bat_status_uses_last_line_of_final_message():
     assert classify_read(read("BAT-STATUS: MILESTONE \u2026[+900 chars]")) == "continue"
 
 
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_quoted_pass_followed_by_reject_reworks_not_delivers(tmp_path):
     j = Journal(tmp_path / "tasks.db")
     task = submit(j)
@@ -1425,6 +1539,7 @@ async def test_quoted_pass_followed_by_reject_reworks_not_delivers(tmp_path):
     j.close()
 
 
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_failover_and_single_writer(tmp_path):
     j = Journal(tmp_path / "tasks.db")
     task = submit(j, lead_agent="claude")
@@ -1678,6 +1793,7 @@ async def test_router_provider_override_and_recipe_precedence(tmp_path, monkeypa
     journal.close()
 
 
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_pause_while_jev_routes_start_does_not_start_bat(tmp_path):
     class SlowRouter:
         def __init__(self):
@@ -1703,34 +1819,7 @@ async def test_pause_while_jev_routes_start_does_not_start_bat(tmp_path):
     journal.close()
 
 
-async def test_candidate_change_during_jev_route_does_not_start_review(tmp_path):
-    fake = FakeBAT()
-
-    class MutatingRouter:
-        changed = False
-
-        async def choose(self, *args, **kwargs):
-            if kwargs.get("expected_type") == "verification" and not self.changed:
-                self.changed = True
-                fake.identity = {"candidate_commit": "c" * 40, "tree_hash": "d" * 40, "clean": True}
-            return {"provider": "codex"}
-
-    journal = Journal(tmp_path / "tasks.db")
-    task = submit(journal)
-    router = MutatingRouter()
-    core = TaskCoordinator(journal, fake, router=router)
-    await core.tick(task["task_id"])
-    lead = journal.get(task["task_id"])["session_id"]
-    fake.reads[lead] = {"turn_started": True, "turn_done": True, "turn_attribution": "correlated",
-                        "messages": [{"role": "assistant", "text": "BAT-STATUS: MILESTONE"}]}
-    await core.tick(task["task_id"])
-    await core.tick(task["task_id"])
-    current = journal.get(task["task_id"])
-    assert router.changed and current["reviewer_session_id"] is None
-    assert current["verification_commit"] is None
-    journal.close()
-
-
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_rules_route_each_pm_phase_by_rule_without_prescreen(tmp_path):
     journal = Journal(tmp_path / "tasks.db")
     task = submit(journal)
@@ -1759,12 +1848,13 @@ async def test_rules_route_each_pm_phase_by_rule_without_prescreen(tmp_path):
                             "messages": [{"role": "assistant", "text": REVIEW_PASS}]}
     assert (await core.tick(task["task_id"]))["state"] == "done"
     routes = journal.routes(task["task_id"])
-    assert {r["step_type"] for r in routes} == {
-        "planning", "implementation", "status_relay", "verification", "review"}
-    expected = {"planning": "claude", "verification": "claude", "review": "claude",
-                "status_relay": "agy-gemini-flash", "implementation": "codex"}
-    assert all(r["provider"] == expected[r["step_type"]] and r["reason"].startswith("rule_")
-               for r in routes)
+    # Session starts record the agent that really runs: the Codex lead and a
+    # Claude reviewer from the other family; the rest are explicit rules.
+    assert {(r["step_type"], r["provider"], r["reason"]) for r in routes} == {
+        ("planning", "codex", "lead_agent"), ("review", "claude", "review_other_family"),
+        ("review", "claude", "session_agent"), ("implementation", "codex", "session_agent")}
+    starts = [(b["role"], b["provider"]) for b in journal.get(task["task_id"])["branches"]]
+    assert starts == [("lead", "codex"), ("reviewer", "claude")]
     assert not any(e["kind"] == "jev_prescreen" for e in journal.events(task["task_id"]))
     journal.close()
 
@@ -1833,92 +1923,79 @@ async def test_daemon_submit_is_journal_only(mock, tmp_path):
         daemon.journal.close()
 
 
-async def test_minimal_submit_asks_one_engine_question_and_journals_once(mock, tmp_path):
-    class Classifier:
-        backend = "typesafe"
+async def test_submit_enters_one_goose_session_without_jev(mock, tmp_path):
+    class NoJev:
+        async def ask(self, *_args, **_kwargs):
+            raise AssertionError("submit makes no model call")
+        async def ask_with_model(self, *_args, **_kwargs):
+            raise AssertionError("submit makes no model call")
 
-        def __init__(self):
-            self.calls = []
+    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    daemon.recipe_chooser = NoJev()  # ignored; nothing calls it
+    daemon.minimal_router = NoJev()
+    parent = await daemon.call("work_submit", {
+        "project": "p", "host": "h1", "workspace": "w", "original_words": WORDS,
+        "idempotency_key": "goose:parent", "task_path": "minimal"})
+    try:
+        assert parent["engine"] == "goose" and parent["goose"] == "disabled" and parent["state"] == "queued"
+        assert daemon.journal.get(parent["task_id"])["recipe"] == "goose-session"
+        assert daemon.journal.engine_decision(parent["task_id"])["reason"] == "goose_session"
+        follow = await daemon.call("work_submit", {
+            "project": "p", "host": "h1", "workspace": "w", "original_words": "adjust the button only",
+            "idempotency_key": "goose:follow", "task_path": "minimal",
+            "parent_task_id": parent["task_id"], "continuation": True})
+        repeat = await daemon.call("work_submit", {
+            "project": "p", "host": "h1", "workspace": "w", "original_words": "adjust the button only",
+            "idempotency_key": "goose:follow", "task_path": "minimal",
+            "parent_task_id": parent["task_id"], "continuation": True})
+        assert follow["task_id"] == parent["task_id"] and follow["continuation"] is True
+        assert repeat["task_id"] == parent["task_id"]
+        assert sum(e["kind"] == "continuation" for e in daemon.journal.events(parent["task_id"])) == 1
+        assert daemon.journal.routes(parent["task_id"]) == []
+    finally:
+        await daemon.fleet.close()
+        daemon.journal.close()
 
+
+async def test_presplit_executor_is_the_only_jev_call_and_skips_opus(mock, tmp_path):
+    class OnlyHere:
+        calls = 0
         async def ask(self, state, questions):
-            self.calls.append((state, questions))
-            return {"engine": {"type": "choice", "choice": "goose", "confidence": 0.91,
-                               "probabilities": {"rules_engine": 0.09, "goose": 0.91}}}
+            self.calls += 1
+            assert state["executor_model"] == "grok"
+            assert set(questions) == {"executor"}
+            return {"executor": {"type": "choice", "choice": "accept", "confidence": 1.0,
+                                 "probabilities": {"accept": 1.0, "reject": 0.0}}}
 
     daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
-    daemon.goose = GooseACP(GooseConfig(enabled=True))  # two runnable engines: the ambiguous case
-    classifier = Classifier()
-    daemon.minimal_router = MinimalTaskRouter(classifier)
-    params = {"project": "p", "host": "h1", "workspace": "w", "original_words": WORDS,
-              "idempotency_key": "minimal:one-question", "task_path": "minimal"}
+    jev = OnlyHere()
+    daemon.jev = jev
     try:
-        first = await daemon.call("work_submit", params)
-        second = await daemon.call("work_submit", params)
-        assert first["task_id"] == second["task_id"]
-        assert len(classifier.calls) == 1
-        state, questions = classifier.calls[0]
-        assert state["original_words"] == WORDS and set(questions) == {"engine"}
-        assert set(questions["engine"]["criteria"]) == {"rules_engine", "goose"}
-        decision = daemon.journal.engine_decision(first["task_id"])
-        assert decision == {"selected": "goose", "confidence": 0.91, "jev_backend": "typesafe",
-                            "reason": "jev_choice", "effective": "goose"}
-        status = await daemon.call("work_status", {"task_id": first["task_id"]})
-        assert status["engine_decision"] == decision and status["routing_decisions"] == []
-        assert len(classifier.calls) == 1  # status does not ask Jev again
-        assert sum(e["kind"] == "engine_decision" for e in daemon.journal.events(first["task_id"])) == 1
-        reopened = Journal(tmp_path / "tasks.db")
-        assert reopened.get(first["task_id"])["task_path"] == "minimal"
-        assert reopened.engine_decision(first["task_id"]) == decision
-        reopened.close()
-    finally:
-        await daemon.fleet.close()
-        daemon.journal.close()
-
-
-async def test_minimal_submit_fails_open_to_rules_without_backend(mock, tmp_path):
-    class Unavailable:
-        backend = None
-
-        async def ask(self, _state, questions):
-            assert set(questions) == {"engine"}
-            raise TimeoutError("synthetic Jev outage")
-
-    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
-    daemon.goose = GooseACP(GooseConfig(enabled=True))
-    daemon.minimal_router = MinimalTaskRouter(Unavailable())
-    try:
-        result = await daemon.call("work_submit", {
+        normal = await daemon.call("work_submit", {
             "project": "p", "host": "h1", "workspace": "w", "original_words": WORDS,
-            "idempotency_key": "minimal:unavailable", "task_path": "minimal"})
-        decision = daemon.journal.engine_decision(result["task_id"])
-        assert result["engine"] == "rules" and decision["selected"] == "rules_engine"
-        assert decision["jev_backend"] is None and decision["reason"] == "jev_unavailable_or_invalid"
-    finally:
-        await daemon.fleet.close()
-        daemon.journal.close()
-
-
-async def test_minimal_submit_skips_jev_when_only_rules_is_runnable(mock, tmp_path):
-    class Forbidden:
-        backend = "typesafe"
-
-        async def ask(self, *_args):
-            raise AssertionError("one runnable engine needs no Jev question")
-
-    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
-    assert not daemon.goose.config.enabled
-    daemon.minimal_router = MinimalTaskRouter(Forbidden())
-    try:
-        result = await daemon.call("work_submit", {
+            "idempotency_key": "plain", "task_path": "minimal"})
+        assert jev.calls == 0 and daemon.journal.get(normal["task_id"])["pm_provider"] is None
+        split = await daemon.call("work_submit", {
             "project": "p", "host": "h1", "workspace": "w", "original_words": WORDS,
-            "idempotency_key": "minimal:only-rules", "task_path": "minimal"})
-        assert result["engine"] == "rules"
-        assert daemon.journal.engine_decision(result["task_id"]) == {
-            "selected": "rules_engine", "confidence": None, "jev_backend": None,
-            "reason": "only_runnable_engine", "effective": "rules"}
+            "idempotency_key": "split", "task_path": "minimal", "executor_model": "grok"})
+        assert jev.calls == 1
+        row = daemon.journal.get(split["task_id"])
+        assert row["pm_provider"] == "grok" and row["engine"] == "goose"
+        assert daemon.journal.engine_decision(split["task_id"])["reason"] == "presplit_grok"
     finally:
         await daemon.fleet.close()
         daemon.journal.close()
+
+
+async def test_quota_limited_stops_at_needs_ted(tmp_path):
+    j = Journal(tmp_path / "quota.db")
+    task = submit(j)
+    for state in ("dispatching", "accepted", "running", "quota_limited"):
+        j.change(task["task_id"], state)
+    result = await TaskCoordinator(j, FakeBAT()).tick(task["task_id"])
+    assert result["state"] == "needs_ted"
+    assert "not failing over" in result["result"]
+    j.close()
 
 
 async def test_minimal_rejects_invalid_typed_engine_answer():
@@ -1952,7 +2029,8 @@ async def test_minimal_goose_choice_is_pluggable_only_after_explicit_live_gate(m
             "project": "p", "host": "h1", "workspace": "w", "original_words": WORDS,
             "idempotency_key": "minimal:goose-gated", "task_path": "minimal"})
         assert result["engine"] == "goose"
-        assert daemon.journal.engine_decision(result["task_id"])["jev_backend"] == "openrouter_jev"
+        decision = daemon.journal.engine_decision(result["task_id"])
+        assert decision["jev_backend"] is None and decision["reason"] == "goose_session"
         assert daemon.goose.catalog.order == ("claude", "agy-claude", "codex")
     finally:
         await daemon.fleet.close()
@@ -2002,9 +2080,9 @@ async def test_minimal_small_task_uses_observed_tests_without_reviewer_or_step_j
     result = await core.tick(task["task_id"])
     assert result["state"] == "done" and result["delivered"]
     assert result["review_passed"] is False and result["reviewer_session_id"] is None
-    assert jev.calls == 1
-    assert journal.minimal_review_gate(task["task_id"], "a" * 40, "b" * 40)["jev_backend"] == "typesafe"
-    assert any(e["kind"] == "minimal_review_decision" for e in journal.events(task["task_id"]))
+    assert jev.calls == 0  # the review gate is not on the normal path
+    assert journal.minimal_review_gate(task["task_id"], "a" * 40, "b" * 40) is None
+    assert not any(e["kind"] == "minimal_review_decision" for e in journal.events(task["task_id"]))
     assert [role for role, _agent, _sid in fake.starts] == ["lead"]
     assert journal.observed_verification(task["task_id"])["exit_code"] == 0
     assert journal.routes(task["task_id"]) == []
@@ -2033,6 +2111,7 @@ async def test_minimal_review_threshold_accepts_calibrated_floor():
     ("pass", 0.95, ["src/auth/login.py"], True, "sensitive_path"),
     ("pass", 0.95, ["README.md"], False, "jev_unavailable_or_invalid"),
 ])
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_minimal_review_escalates_to_cross_agent(tmp_path, choice, confidence, paths, answer, reason):
     class ReviewJev:
         backend = "openrouter_jev" if answer else None
@@ -2080,6 +2159,7 @@ async def test_minimal_review_escalates_to_cross_agent(tmp_path, choice, confide
     journal.close()
 
 
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_minimal_review_large_diff_and_pending_restart_escalate_without_jev(tmp_path):
     class NoJev:
         backend = None
@@ -2484,6 +2564,7 @@ async def test_start_recovery_pause_during_start_and_branch_history(tmp_path):
     j.close()
 
 
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_candidate_change_requires_fresh_review_and_attribution(tmp_path):
     j = Journal(tmp_path / "tasks.db")
     task = submit(j)
@@ -2746,6 +2827,7 @@ for line in sys.stdin:
                         command=(sys.executable, "-u", str(script)))
 
 
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_failover_recovers_reserved_successor_without_reuse(tmp_path):
     class LostReplyBAT(FakeBAT):
         async def failover(self, task, session_id, successor_id, **kwargs):
@@ -2755,6 +2837,7 @@ async def test_failover_recovers_reserved_successor_without_reuse(tmp_path):
     j = Journal(tmp_path / "tasks.db")
     task = submit(j, lead_agent="claude")
     fake = LostReplyBAT()
+    fake.reviewer_kind = "claude"  # Claude is available for the lead
     fake.failover_allowed = True
     core = TaskCoordinator(j, fake)
     await core.tick(task["task_id"])
@@ -2771,6 +2854,7 @@ async def test_failover_recovers_reserved_successor_without_reuse(tmp_path):
     j.close()
 
 
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_normal_failover_refuses_different_successor_response(tmp_path):
     class WrongReplyBAT(FakeBAT):
         async def failover(self, task, session_id, successor_id, **kwargs):
@@ -2799,6 +2883,7 @@ async def test_normal_failover_refuses_different_successor_response(tmp_path):
     j.close()
 
 
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_recovery_conflict_stays_operator_only_after_registry_changes(tmp_path):
     class LostReplyBAT(FakeBAT):
         async def failover(self, task, session_id, successor_id, **kwargs):
@@ -2809,6 +2894,7 @@ async def test_recovery_conflict_stays_operator_only_after_registry_changes(tmp_
     j = Journal(path)
     task = submit(j, lead_agent="claude")
     fake = LostReplyBAT()
+    fake.reviewer_kind = "claude"  # Claude is available for the lead
     fake.failover_allowed = True
     core = TaskCoordinator(j, fake)
     await core.tick(task["task_id"])
@@ -2839,6 +2925,7 @@ async def test_recovery_conflict_stays_operator_only_after_registry_changes(tmp_
 
 
 @pytest.mark.parametrize("wait_stage", ["start_ack", "identity_lookup", "send_transport"])
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_pause_during_failover_wait_never_submits_handoff(
         fleet_factory, mock, tmp_path, monkeypatch, wait_stage):
     fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
@@ -2909,6 +2996,7 @@ async def test_pause_during_failover_wait_never_submits_handoff(
 @pytest.mark.parametrize("mismatch", ["successor_cwd", "successor_branch",
                                       "actual_frame_prompt", "late_registry_branch",
                                       "late_registry_owner", "late_git_root"])
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_failover_rejects_wrong_successor_or_frame_before_handoff(
         fleet_factory, mock, tmp_path, monkeypatch, mismatch):
     fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
@@ -2974,6 +3062,7 @@ async def test_failover_rejects_wrong_successor_or_frame_before_handoff(
 
 
 @pytest.mark.parametrize("change", ["git_root", "branch", "failover_of"])
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_failover_rechecks_identity_after_semaphore_wait(
         fleet_factory, mock, tmp_path, monkeypatch, change):
     fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
@@ -3037,6 +3126,7 @@ async def test_failover_rechecks_identity_after_semaphore_wait(
         j.close()
 
 
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_verified_successor_handoff_frame_hash_survives_restart(fleet_factory, mock, tmp_path):
     fleet = fleet_factory(writes=True, orchestrate=True, tabs=False,
                           safety={"write_min_interval_s": 0})
@@ -3081,6 +3171,7 @@ async def test_verified_successor_handoff_frame_hash_survives_restart(fleet_fact
         await fleet.close()
 
 
+@pytest.mark.skip(reason="removed: independent reviewer, per-step routing, and mid-task failover")
 async def test_lost_codex_handoff_stays_scoped_uncertain_across_restart(tmp_path):
     path = tmp_path / "tasks.db"
     j = Journal(path)
@@ -3271,18 +3362,18 @@ async def test_live_goose_remains_disabled_after_restart(mock, tmp_path):
     daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), path)
     task = submit(daemon.journal, engine="goose")
     await daemon._tick_task(task["task_id"])
-    assert daemon.journal.get(task["task_id"])["state"] == "uncertain"
+    assert daemon.journal.get(task["task_id"])["state"] == "queued"  # switch off: start nothing
     await daemon.fleet.close()
     daemon.journal.close()
     again = TaskDaemon(make_config(mock, writes=True, orchestrate=True), path)
     try:
         await again._tick_task(task["task_id"])
-        assert again.journal.get(task["task_id"])["state"] == "uncertain"
+        assert again.journal.get(task["task_id"])["state"] == "queued"
         assert not again.journal.commands(task["task_id"])
-        with pytest.raises(ValueError, match="disabled"):
-            await again.call("work_submit", {"project": "p", "host": "h1", "workspace": "w",
-                                              "original_words": WORDS, "idempotency_key": "new",
-                                              "engine": "goose"})
+        submitted = await again.call("work_submit", {"project": "p", "host": "h1", "workspace": "w",
+                                                     "original_words": WORDS, "idempotency_key": "new"})
+        assert submitted["engine"] == "goose" and submitted["goose"] == "disabled"
+        assert again.journal.get(submitted["task_id"])["state"] == "queued"
     finally:
         await again.fleet.close()
         again.journal.close()
