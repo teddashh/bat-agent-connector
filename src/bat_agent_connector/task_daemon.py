@@ -202,7 +202,8 @@ class TaskDaemon:
         if method == "work_status":
             task = self.journal.get(task_id)
             routes = self.journal.routes(task_id)
-            return {**task, "engine_decision": self.journal.engine_decision(task_id),
+            return {**task, "delivery": self.journal.delivery(task_id),
+                    "engine_decision": self.journal.engine_decision(task_id),
                     "minimal_review_gate": (self.journal.minimal_review_gate(
                         task_id, task["verification_commit"], task["verification_tree"])
                         if task["verification_commit"] and task["verification_tree"] else None),
@@ -220,7 +221,11 @@ class TaskDaemon:
                     "result": task["result"], "verification_commit": task["verification_commit"],
                     "review_rejections": task["review_rejections"], "ted_interventions": task["ted_interventions"],
                     "session_replacements": task["session_replacements"],
-                    "ted_interventions_basis": "caller_reported"}
+                    "ted_interventions_basis": "caller_reported",
+                    "delivery": self.journal.delivery(task_id)}
+        if method == "work_mark_stage":
+            return self.journal.mark_stage(task_id, stage=params.get("stage"), ref=params.get("ref"),
+                                           actor=params.get("actor", "service"))
         if method == "work_pause":
             if params.get("actor", "service") not in {"service", "ted"}:
                 raise ValueError("invalid actor")

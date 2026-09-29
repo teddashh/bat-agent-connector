@@ -2,6 +2,13 @@
 
 ## Next release (unreleased)
 
+- Warm session reuse requires the current HEAD to equal the previous task's verified commit and is limited to
+  follow-ups in the same workstream (`parent_task_id`, or `continuation=true` in the same origin thread);
+  independent requests start fresh from base.
+- Status separates `verified` / `adopted` / `merged` / `deployed` (`delivery` block); the last three come only
+  from `work_mark_stage` records. `work_submit` stores optional `context_refs` (attachments, previous message
+  id, plan, commit). New read-only `python -m bat_agent_connector.gate_eval` calibration table for the minimal
+  Jev gate; gate reservations now record diff size and paths. The 0.50 threshold is unchanged.
 - No model calls where code already knows the answer: `work_status`/`work_result` are plain journal reads;
   PM provider choice is explicit rules by step type and stakes (no Jev classification or confidence); the
   advisory candidate pre-screen is removed; minimal submit uses rules directly when it is the only runnable

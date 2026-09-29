@@ -155,13 +155,16 @@ class BatTaskAdapter:
             return None
         read = await service.session_read(self.fleet, task["host"], sid, last_n=1)
         identity = await self.verifier.identity(task, entry["cwd"])
+        # Reuse only the exact verified state: HEAD must still be the previous task's verified commit.
         if (read.get("streaming") is not False or read.get("pending")
-                or not identity or not identity.get("clean")):
+                or not identity or not identity.get("clean")
+                or not previous.get("verification_commit")
+                or identity.get("candidate_commit") != previous["verification_commit"]):
             return None
         return entry
 
     async def find_warm(self, task: dict) -> str | None:
-        """Prefer a clean, idle service-owned branch from a completed task."""
+        """Reuse a clean, idle lead branch only for a follow-up in the same workstream."""
         if not self.journal or task.get("task_path") != "minimal" or task.get("base_branch"):
             return None
         for previous in self.journal.warm_candidates(task):

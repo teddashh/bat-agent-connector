@@ -641,7 +641,8 @@ class TaskCoordinator:
                 threshold = (self.minimal_review_gate.config.minimal_review_confidence_threshold
                              if self.minimal_review_gate else 1.0)
                 try:
-                    self.journal.reserve_minimal_review(task["task_id"], commit, tree, digest, threshold)
+                    self.journal.reserve_minimal_review(task["task_id"], commit, tree, digest, threshold,
+                                                        diff_chars=len(diff), paths=paths)
                 except ValueError:
                     return self.journal.change(task["task_id"], "needs_ted", event="review_diff_changed")
                 decision = (await self.minimal_review_gate.judge(
