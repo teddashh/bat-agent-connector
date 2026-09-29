@@ -1615,7 +1615,7 @@ class FakeJev:
         return {"step_type": {"choice": self.choice, "confidence": self.confidence}}
 
 
-async def test_router_cap_quota_and_fail_open(tmp_path):
+async def test_router_cap_quota_and_explicit_rules(tmp_path):
     j = Journal(tmp_path / "tasks.db")
     task = submit(j)
     tid = task["task_id"]
@@ -1624,56 +1624,45 @@ async def test_router_cap_quota_and_fail_open(tmp_path):
         ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp", model="claude-opus-5-5"),
         ProviderEntry("agy-gemini-flash", "agy-shim", "http://127.0.0.1:18795/v1", "gemini", 0),
     ])
-    router = ModelRouter(j, FakeJev("status_relay", 0.9),
-                         RouterConfig(allow_gemini_status=True), catalog)
-    assert (await router.choose(tid, "update", "status"))["provider"] == "agy-gemini-flash"
-    router = ModelRouter(j, FakeJev("review", 0.4), RouterConfig(agy_claude_daily_cap=1), catalog)
-    assert (await router.choose(tid, "review", "candidate"))["provider"] == "claude"
+    router = ModelRouter(j, RouterConfig(allow_gemini_status=True), catalog)
+    assert (await router.choose(tid, "update", "status", expected_type="status_relay"))["provider"] == \
+        "agy-gemini-flash"
+    router = ModelRouter(j, RouterConfig(agy_claude_daily_cap=1), catalog)
+    assert (await router.choose(tid, "review", "candidate", expected_type="review"))["provider"] == "claude"
     router.record_provider_result("claude", "quota_error")
-    assert (await router.choose(tid, "review2", "candidate"))["provider"] == "agy-claude"
+    assert (await router.choose(tid, "review2", "candidate", expected_type="review"))["provider"] == "agy-claude"
     router.record_provider_result("agy-claude", "success")
-    assert (await router.choose(tid, "review3", "candidate"))["provider"] == "codex"
-    router = ModelRouter(j, FakeJev(None))
-    assert (await router.choose(tid, "unknown", "?"))["provider"] == "codex"
+    third = await router.choose(tid, "review3", "candidate", expected_type="review")
+    assert third["provider"] == "codex" and third["reason"] == "rule_high_stakes_claude_exhausted"
+    routine = await ModelRouter(j).choose(tid, "impl", "edit", expected_type="implementation")
+    assert routine["provider"] == "codex" and routine["reason"] == "rule_implementation_default"
     assert len(j.routes(tid)) == 5
+    assert all(r["confidence"] is None and r["jev_backend"] is None for r in j.routes(tid))
     assert all(e["kind"] == "model_route" for e in j.events(tid)[-5:])
     j.close()
 
 
-async def test_router_rejects_invalid_confidence_and_prescreen_scores(tmp_path):
+async def test_router_has_no_classifier_and_requires_known_step_type(tmp_path):
     journal = Journal(tmp_path / "tasks.db")
     task = submit(journal)
-    catalog = ProviderCatalog([
-        ProviderEntry("agy-claude", "agy-shim", "http://127.0.0.1:18796/v1",
-                      "claude-opus-4-6-thinking", 10),
-        ProviderEntry("codex", "codex-acp"), ProviderEntry("claude", "claude-acp", model="claude-opus-5-5"),
-    ])
-
-    class InvalidJev:
-        async def ask(self, state, questions):
-            return {"step_type": {"choice": "review", "confidence": float("nan")}}
-
-        async def merge_gate(self, *args):
-            return {"diff_verdict": "unsafe", "diff_confidence": float("nan"), "tests_ok": 1}
-
-    router = ModelRouter(journal, InvalidJev(), catalog=catalog)
-    routed = await router.choose(task["task_id"], "review:invalid", "review",
-                                 expected_type="review", high_stakes=True)
-    assert routed["provider"] == "codex" and routed["reason"] == "jev_unavailable"
-    assert await router.prescreen(task["task_id"], commit="a" * 40, tree="b" * 40,
-                                  request="x", final_output="done", diff_excerpt="diff --git", tests="ok") is None
-    assert not any(e["kind"] == "jev_prescreen" for e in journal.events(task["task_id"]))
+    router = ModelRouter(journal)
+    assert not hasattr(router, "classifier") and not hasattr(router, "prescreen")
+    with pytest.raises(ValueError, match="unknown PM step type"):
+        await router.choose(task["task_id"], "x", "x", expected_type="unclassified")
+    with pytest.raises(TypeError):
+        await router.choose(task["task_id"], "x", "x")
     journal.close()
 
 
 async def test_router_provider_override_and_recipe_precedence(tmp_path, monkeypatch):
     journal = Journal(tmp_path / "tasks.db")
     task = submit(journal, engine="goose")
-    router = ModelRouter(journal, FakeJev("planning", 0.9))
+    router = ModelRouter(journal)
     choice = await router.choose(task["task_id"], "planning:recipe", "plan",
                                  expected_type="planning", provider_override="claude")
     assert choice["provider"] == "claude" and choice["reason"] == "task_or_recipe_override"
-    assert (await router.choose(task["task_id"], "planning:recipe", "plan")) == choice
+    assert (await router.choose(task["task_id"], "planning:recipe", "plan",
+                                expected_type="planning")) == choice
     monkeypatch.setattr(goose_acp, "load", lambda _name: {
         "instructions": "plan", "prompt": "do it", "pm_provider": "claude"})
     seen = []
@@ -1742,18 +1731,7 @@ async def test_candidate_change_during_jev_route_does_not_start_review(tmp_path)
     journal.close()
 
 
-async def test_rules_route_each_pm_phase_and_jev_prescreen_is_advisory(tmp_path):
-    class PhaseJev:
-        async def ask(self, state, questions):
-            step_type = state["step"].split(" ", 1)[0]
-            confidence = 0.95 if step_type in {"status_relay", "implementation"} else 0.35
-            return {"step_type": {"choice": step_type, "confidence": confidence}}
-
-        async def merge_gate(self, task, final_output, diff_excerpt, tests):
-            assert "diff --git" in diff_excerpt and "exit=0" in tests
-            return {"diff_verdict": "unsafe", "diff_confidence": 0.9,
-                    "tests_ok": 0.9, "claims_done": 0.9}
-
+async def test_rules_route_each_pm_phase_by_rule_without_prescreen(tmp_path):
     journal = Journal(tmp_path / "tasks.db")
     task = submit(journal)
     catalog = ProviderCatalog([
@@ -1763,10 +1741,9 @@ async def test_rules_route_each_pm_phase_and_jev_prescreen_is_advisory(tmp_path)
         ProviderEntry("agy-gemini-flash", "agy-shim", "http://127.0.0.1:18796/v1",
                       "gemini-flash-test"),
     ])
-    router = ModelRouter(journal, PhaseJev(), RouterConfig(), catalog)
+    router = ModelRouter(journal, RouterConfig(), catalog)
     fake = FakeBAT()
     fake.reviewer_kind = "claude"
-    fake.diff_excerpt = "diff --git a/a.py b/a.py\n+safe change"
     core = TaskCoordinator(journal, fake, router=router)
     await core.tick(task["task_id"])
     lead = journal.get(task["task_id"])["session_id"]
@@ -1784,27 +1761,28 @@ async def test_rules_route_each_pm_phase_and_jev_prescreen_is_advisory(tmp_path)
     routes = journal.routes(task["task_id"])
     assert {r["step_type"] for r in routes} == {
         "planning", "implementation", "status_relay", "verification", "review"}
-    assert all(r["provider"] == "claude" for r in routes
-               if r["step_type"] in {"planning", "verification", "review"})
-    assert all(r["provider"] == "agy-gemini-flash" for r in routes
-               if r["step_type"] in {"status_relay", "implementation"})
-    prescreen = [e for e in journal.events(task["task_id"]) if e["kind"] == "jev_prescreen"]
-    assert len(prescreen) == 1 and json.loads(prescreen[0]["body"])["verdict"] == "unsafe"
-    assert journal.get(task["task_id"])["delivered"]  # advisory signal cannot replace reviewer PASS
+    expected = {"planning": "claude", "verification": "claude", "review": "claude",
+                "status_relay": "agy-gemini-flash", "implementation": "codex"}
+    assert all(r["provider"] == expected[r["step_type"]] and r["reason"].startswith("rule_")
+               for r in routes)
+    assert not any(e["kind"] == "jev_prescreen" for e in journal.events(task["task_id"]))
     journal.close()
 
 
-async def test_work_status_exposes_router_metrics_and_jev_fails_open(mock, tmp_path):
+async def test_work_status_and_result_make_no_routing_call(mock, tmp_path):
     daemon = TaskDaemon(make_config(mock), db_path=tmp_path / "tasks.db")
     task = submit(daemon.journal)
-    daemon.router.classifier = FakeJev(None)
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("status reads must not route or classify")
+
+    daemon.router.choose = forbidden
+    daemon.minimal_router.choose = forbidden
     first = await daemon.call("work_status", {"task_id": task["task_id"]})
+    await daemon.call("work_result", {"task_id": task["task_id"]})
     second = await daemon.call("work_status", {"task_id": task["task_id"]})
-    assert first["routing_metrics"] == second["routing_metrics"]
-    assert first["routing_metrics"]["count"] == 1
-    assert first["routing_decisions"][0]["step_type"] == "status_relay"
-    assert first["routing_decisions"][0]["provider"] == "codex"
-    assert first["routing_decisions"][0]["reason"] == "jev_unavailable"
+    assert first["routing_metrics"] == second["routing_metrics"] == {"count": 0, "by_provider": {}}
+    assert daemon.journal.routes(task["task_id"]) == []
     await daemon.fleet.close()
     daemon.journal.close()
 
@@ -1868,6 +1846,7 @@ async def test_minimal_submit_asks_one_engine_question_and_journals_once(mock, t
                                "probabilities": {"rules_engine": 0.09, "goose": 0.91}}}
 
     daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    daemon.goose = GooseACP(GooseConfig(enabled=True))  # two runnable engines: the ambiguous case
     classifier = Classifier()
     daemon.minimal_router = MinimalTaskRouter(classifier)
     params = {"project": "p", "host": "h1", "workspace": "w", "original_words": WORDS,
@@ -1882,7 +1861,7 @@ async def test_minimal_submit_asks_one_engine_question_and_journals_once(mock, t
         assert set(questions["engine"]["criteria"]) == {"rules_engine", "goose"}
         decision = daemon.journal.engine_decision(first["task_id"])
         assert decision == {"selected": "goose", "confidence": 0.91, "jev_backend": "typesafe",
-                            "reason": "goose_live_gate_closed", "effective": "rules"}
+                            "reason": "jev_choice", "effective": "goose"}
         status = await daemon.call("work_status", {"task_id": first["task_id"]})
         assert status["engine_decision"] == decision and status["routing_decisions"] == []
         assert len(classifier.calls) == 1  # status does not ask Jev again
@@ -1905,6 +1884,7 @@ async def test_minimal_submit_fails_open_to_rules_without_backend(mock, tmp_path
             raise TimeoutError("synthetic Jev outage")
 
     daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    daemon.goose = GooseACP(GooseConfig(enabled=True))
     daemon.minimal_router = MinimalTaskRouter(Unavailable())
     try:
         result = await daemon.call("work_submit", {
@@ -1913,6 +1893,29 @@ async def test_minimal_submit_fails_open_to_rules_without_backend(mock, tmp_path
         decision = daemon.journal.engine_decision(result["task_id"])
         assert result["engine"] == "rules" and decision["selected"] == "rules_engine"
         assert decision["jev_backend"] is None and decision["reason"] == "jev_unavailable_or_invalid"
+    finally:
+        await daemon.fleet.close()
+        daemon.journal.close()
+
+
+async def test_minimal_submit_skips_jev_when_only_rules_is_runnable(mock, tmp_path):
+    class Forbidden:
+        backend = "typesafe"
+
+        async def ask(self, *_args):
+            raise AssertionError("one runnable engine needs no Jev question")
+
+    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    assert not daemon.goose.config.enabled
+    daemon.minimal_router = MinimalTaskRouter(Forbidden())
+    try:
+        result = await daemon.call("work_submit", {
+            "project": "p", "host": "h1", "workspace": "w", "original_words": WORDS,
+            "idempotency_key": "minimal:only-rules", "task_path": "minimal"})
+        assert result["engine"] == "rules"
+        assert daemon.journal.engine_decision(result["task_id"]) == {
+            "selected": "rules_engine", "confidence": None, "jev_backend": None,
+            "reason": "only_runnable_engine", "effective": "rules"}
     finally:
         await daemon.fleet.close()
         daemon.journal.close()
