@@ -36,6 +36,14 @@ from tests.conftest import make_config
 WORDS = "請保留 `原文`，不要改成英文。\n第二行：修好它。"
 
 
+def review_json(verdict="pass", commit="a" * 40, tree="b" * 40, findings=()):
+    return "Checked the diff and tests.\n" + json.dumps(
+        {"verdict": verdict, "candidate_commit": commit, "tree_hash": tree, "findings": list(findings)})
+
+
+REVIEW_PASS = review_json()
+
+
 async def test_goose_executable_version_is_pinned(tmp_path):
     binary = tmp_path / "goose"
     binary.write_text("#!/bin/sh\necho 'goose 1.52.0'\n")
@@ -262,7 +270,7 @@ async def test_codex_accepted_timestamp_requires_exact_read_back(tmp_path):
     assert result["state"] == "uncertain" and not result["delivered"]
     fake.reads[result["session_id"]] = {"turn_started": True, "turn_done": True,
                                          "turn_attribution": "timestamp_cursor",
-                                         "messages": [{"role": "assistant", "text": "REVIEW: PASS"}]}
+                                         "messages": [{"role": "assistant", "text": REVIEW_PASS}]}
     assert (await core.tick(task["task_id"]))["state"] == "uncertain"
     assert len(fake.sends) == 1
     journal.close()
@@ -312,6 +320,16 @@ async def test_verification_waits_for_quiet_candidate_window(tmp_path):
     assert any(e["kind"] == "verification_observed" for e in journal.events(task["task_id"]))
     assert third["state"] == "verifying"
     journal.close()
+
+
+async def test_daemon_records_actual_journal_for_send_fence(tmp_path, mock):
+    daemon = TaskDaemon(make_config(mock), db_path=tmp_path / "custom" / "jobs.db")
+    daemon.acquire_owner()
+    try:
+        assert service.task_service_db() == (tmp_path / "custom" / "jobs.db").resolve()
+    finally:
+        daemon.release_owner()
+        daemon.journal.close()
 
 
 async def test_verification_budget_is_recipe_aware(tmp_path, mock):
@@ -399,7 +417,7 @@ async def test_codex_timestamp_never_proves_lost_send_or_review(tmp_path):
     assert j.get(task["task_id"])["state"] == "uncertain"
     fake.reads[reviewer] = {"turn_started": True, "turn_done": True, "streaming": False,
                             "turn_attribution": "timestamp_cursor", "first_turn_proven": True,
-                            "messages": [{"role": "assistant", "text": "REVIEW: PASS"}]}
+                            "messages": [{"role": "assistant", "text": REVIEW_PASS}]}
     assert (await core.tick(task["task_id"]))["state"] == "uncertain"
     assert not j.get(task["task_id"])["delivered"]
     assert len([x for x in fake.sends if x[0] == reviewer]) == 1
@@ -545,6 +563,10 @@ async def test_task_initial_send_after_start_ignores_only_start_spacing(fleet_fa
     assert sent["accepted"]
     assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"
                 and i["params"]["sessionId"] == session_id]) == 1
+    with pytest.raises(WriteRefused, match="state is unavailable"):
+        await service.session_send(fleet, "h1", session_id, "later prompt", confirm=True)
+    (registry.registry_path().parent / service.TASK_SERVICE_POINTER).write_text(
+        json.dumps({"db_path": str(journal.path.resolve())}))
     with pytest.raises(WriteRefused, match="rate limit"):
         await service.session_send(fleet, "h1", session_id, "later prompt", confirm=True)
     journal.close()
@@ -1154,7 +1176,8 @@ async def test_rules_review_verification_failover_pause_and_writer(tmp_path):
     reviewer = j.get(task["task_id"])["reviewer_session_id"]
     fake.reads[reviewer] = {"turn_started": True, "turn_done": True, "turn_attribution": "correlated",
                             "first_turn_proven": True,
-                            "messages": [{"role": "assistant", "text": "REVIEW: REJECT needs tests"}]}
+                            "messages": [{"role": "assistant", "text": review_json(
+                                "reject", findings=[{"severity": "medium", "summary": "needs tests"}])}]}
     await core.tick(task["task_id"])
     assert j.get(task["task_id"])["review_rejections"] == 1
     fake.reads[lead] = {"turn_started": True, "turn_done": True,
@@ -1168,7 +1191,8 @@ async def test_rules_review_verification_failover_pause_and_writer(tmp_path):
     assert reviewer2 != reviewer
     fake.reads[reviewer2] = {"turn_started": True, "turn_done": True, "turn_attribution": "correlated",
                              "first_turn_proven": True,
-                             "messages": [{"role": "assistant", "text": "REVIEW: PASS"}]}
+                             "messages": [{"role": "assistant",
+                                           "text": review_json(commit="d" * 40, tree="e" * 40)}]}
     done = await core.tick(task["task_id"])
     assert done["state"] == "done" and done["delivered"]
     assert done["time_to_deliver_s"] is not None
@@ -1196,6 +1220,81 @@ async def test_review_with_high_defect_findings_without_marker_reworks(tmp_path)
     assert result["state"] == "running"
     assert result["review_rejections"] == 1
     assert any("Independent review rejected" in text for _, text, _ in fake.sends)
+    j.close()
+
+
+QUOTED_PASS_THEN_REJECT = ("The template says REVIEW: PASS when everything is fine.\n"
+                           + review_json("reject", findings=[{"severity": "high", "summary": "bug"}]))
+
+
+@pytest.mark.parametrize("messages, reason", [
+    ([{"role": "assistant", "text": QUOTED_PASS_THEN_REJECT}], "verdict_conflicting"),
+    ([{"role": "assistant", "text": "REVIEW: PASS"}], "verdict_missing"),
+    ([{"role": "assistant", "text": REVIEW_PASS}, {"role": "assistant", "text": "done, see above"}],
+     "verdict_missing"),
+    ([{"role": "assistant", "text": review_json() + "\n" + review_json("reject")}], "verdict_conflicting"),
+    ([{"role": "assistant", "text": review_json(commit="f" * 40)}], "verdict_candidate_mismatch"),
+    ([{"role": "assistant", "text": review_json(tree="f" * 40)}], "verdict_candidate_mismatch"),
+    ([{"role": "assistant", "text": review_json(findings=[{"severity": "High", "summary": "x"}])}],
+     "pass_with_high_findings"),
+    ([{"role": "assistant", "text": REVIEW_PASS + "\n- High: data loss on retry"}], "pass_with_high_findings"),
+    ([{"role": "assistant", "text": '{"verdict": "maybe", "candidate_commit": "' + "a" * 40
+       + '", "tree_hash": "' + "b" * 40 + '", "findings": []}'}], "verdict_invalid"),
+    ([{"role": "assistant", "text": REVIEW_PASS + " \u2026[+5000 chars]"}], "final_message_truncated"),
+])
+def test_review_verdict_is_structured_final_message_only(messages, reason):
+    from bat_agent_connector.task_core import review_verdict
+
+    verdict = review_verdict({"messages": [{"role": "user", "text": REVIEW_PASS}, *messages]},
+                             "a" * 40, "b" * 40)
+    assert verdict["verdict"] == "reject" and verdict["reason"] == reason
+
+
+def test_review_verdict_pass_and_low_findings():
+    from bat_agent_connector.task_core import review_verdict
+
+    text = review_json(findings=[{"severity": "low", "summary": "nit"}]) + "\nHigh: none"
+    verdict = review_verdict({"messages": [{"role": "assistant", "text": "thinking"},
+                                           {"role": "assistant", "text": text}]}, "a" * 40, "b" * 40)
+    assert verdict["verdict"] == "pass"
+    assert "Independently review" in __import__(
+        "bat_agent_connector.task_core", fromlist=["x"]).reviewer_prompt(
+        {"original_words": WORDS}, "a" * 40, "b" * 40)
+
+
+def test_bat_status_uses_last_line_of_final_message():
+    from bat_agent_connector.task_core import classify_read
+
+    def read(*texts):
+        return {"turn_done": True, "messages": [{"role": "assistant", "text": t} for t in texts]}
+
+    assert classify_read(read("BAT-STATUS: MILESTONE", "still working\nBAT-STATUS: CONTINUE")) == "continue"
+    assert classify_read(read("Protocol: end with BAT-STATUS: NEED-HUMAN if blocked.\n"
+                              "Implemented.\nBAT-STATUS: MILESTONE")) == "verifying"
+    assert classify_read(read("Earlier I wrote BAT-STATUS: MILESTONE\nBAT-STATUS: NEED-HUMAN login")) == "needs_ted"
+    assert classify_read(read("BAT-STATUS: MILESTONE", "no marker now")) == "continue"
+    assert classify_read(read("BAT-STATUS: MILESTONE \u2026[+900 chars]")) == "continue"
+
+
+async def test_quoted_pass_followed_by_reject_reworks_not_delivers(tmp_path):
+    j = Journal(tmp_path / "tasks.db")
+    task = submit(j)
+    fake = FakeBAT()
+    core = TaskCoordinator(j, fake)
+    await core.tick(task["task_id"])
+    lead = j.get(task["task_id"])["session_id"]
+    fake.reads[lead] = {"turn_started": True, "turn_done": True,
+                        "messages": [{"role": "assistant", "text": "BAT-STATUS: MILESTONE"}]}
+    await core.tick(task["task_id"])
+    await core.tick(task["task_id"])
+    reviewer = j.get(task["task_id"])["reviewer_session_id"]
+    fake.reads[reviewer] = {"turn_started": True, "turn_done": True, "turn_attribution": "correlated",
+                            "first_turn_proven": True,
+                            "messages": [{"role": "assistant", "text": QUOTED_PASS_THEN_REJECT}]}
+    result = await core.tick(task["task_id"])
+    assert result["state"] == "running" and not result["delivered"]
+    assert result["review_rejections"] == 1
+    assert any(e["kind"] == "review_verdict_rejected" for e in j.events(task["task_id"]))
     j.close()
 
 
@@ -1438,7 +1537,7 @@ async def test_rules_route_each_pm_phase_and_jev_prescreen_is_advisory(tmp_path)
     assert reviewer and reviewer != lead
     fake.reads[reviewer] = {"turn_started": True, "turn_done": True,
                             "turn_attribution": "correlated", "first_turn_proven": True,
-                            "messages": [{"role": "assistant", "text": "REVIEW: PASS"}]}
+                            "messages": [{"role": "assistant", "text": REVIEW_PASS}]}
     assert (await core.tick(task["task_id"]))["state"] == "done"
     routes = journal.routes(task["task_id"])
     assert {r["step_type"] for r in routes} == {
@@ -1731,7 +1830,7 @@ async def test_minimal_review_escalates_to_cross_agent(tmp_path, choice, confide
     fake.reads[reviewer_id] = {"turn_started": True, "turn_done": True,
                                "first_turn_proven": True, "turn_attribution": "correlated",
                                "streaming": False,
-                               "messages": [{"role": "assistant", "text": "REVIEW: PASS"}]}
+                               "messages": [{"role": "assistant", "text": REVIEW_PASS}]}
     assert (await core.tick(task["task_id"]))["state"] == "done"
     journal.close()
 
@@ -2038,7 +2137,7 @@ async def test_candidate_change_requires_fresh_review_and_attribution(tmp_path):
     await core.tick(task["task_id"])
     old = j.get(task["task_id"])["reviewer_session_id"]
     fake.reads[old] = {"turn_started": True, "turn_done": True, "turn_attribution": "correlated",
-                       "messages": [{"role": "assistant", "text": "REVIEW: PASS"}]}
+                       "messages": [{"role": "assistant", "text": REVIEW_PASS}]}
     assert (await core.tick(task["task_id"]))["state"] == "verifying"
     fake.reads[old]["first_turn_proven"] = True
     fake.identity = {"candidate_commit": "d" * 40, "tree_hash": "e" * 40, "clean": True}
@@ -2640,7 +2739,7 @@ async def test_lost_codex_handoff_stays_scoped_uncertain_across_restart(tmp_path
     assert fake.sends[-1][2] == handoff["message_id"]
     fake.reads[successor] = {"turn_started": True, "turn_done": True,
                              "turn_attribution": "echo_not_visible", "streaming": False,
-                             "messages": [{"role": "assistant", "text": "REVIEW: PASS"}]}
+                             "messages": [{"role": "assistant", "text": REVIEW_PASS}]}
     sends = len(fake.sends)
     assert (await core.tick(task["task_id"]))["state"] == "uncertain"
     assert len(fake.sends) == sends and fake.failover_calls == 1 and not j.get(task["task_id"])["delivered"]
