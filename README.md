@@ -103,9 +103,12 @@ The daemon currently rejects live Goose tasks. Goose ACP, provider fallback and 
 adapter/test coverage; real Goose contract checks are deferred. The service never posts to chat. `work_events(since_cursor, limit)`
 (CLI `batc task-events --since N`) returns only milestones (`started`, `needs_ted` with its reason, `done` with commit/PR
 link, `failed`), each with a monotonic `cursor`, `task_id`, `project`, `workspace`, the opaque `origin_thread_id` passed at
-submit, `kind` and a short `summary`. The caller that owns the chat (Hermes) polls it and persists `next_cursor` only after
-posting; `limit=0` returns `head_cursor` so a new reader starts from now. Optional `[task_service] repo_urls` in the
-private settings adds `commit_url`. The task API requires a local admin token or scoped capability and binds only to loopback. See
+submit, `kind` and a short `summary`. Push is the primary path: with `[task_service.event_webhook] url` (loopback only)
+and `secret_file` (mode 0600) in the private settings, each committed milestone is POSTed in cursor order as plain JSON
+(`type="task.milestone"`, `delivered_through`, `X-Request-ID`, HMAC-SHA256 `X-Webhook-Signature-V2` over
+`<X-Webhook-Timestamp>.<body>`). The push cursor starts at "now" when first configured and advances only on 2xx;
+failures retry with capped exponential backoff (max 300 s). `work_events` is the receiver's catch-up path after an
+outage; `limit=0` returns `head_cursor`. Optional `[task_service] repo_urls` adds `commit_url`. The task API requires a local admin token or scoped capability and binds only to loopback. See
 [the task-service design](docs/design/task-service.md) for states, recovery, private configuration and rollout.
 The default minimal path asks Jev one typed engine question at submission; explicit `task_path="standard"` selects the full path. Invalid or unavailable
 Jev chooses rules. This path skips per-step Jev and advisory candidate pre-screen. The `small-task-with-tests`

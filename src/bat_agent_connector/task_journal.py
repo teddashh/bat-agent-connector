@@ -128,6 +128,11 @@ class Journal:
                 action TEXT NOT NULL, created_at REAL NOT NULL,
                 PRIMARY KEY(task_id,source_message_id)
             );
+            CREATE TABLE IF NOT EXISTS feed_push (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1), cursor INTEGER NOT NULL,
+                failures INTEGER NOT NULL DEFAULT 0, next_attempt_at REAL NOT NULL DEFAULT 0,
+                last_error TEXT, updated_at REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS branches (
                 branch_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id),
                 session_id TEXT, provider TEXT NOT NULL, role TEXT NOT NULL,
@@ -864,6 +869,23 @@ class Journal:
 
     MILESTONE_KINDS = ("started", "needs_ted", "done", "failed")
     _PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
+
+    def push_state(self) -> dict | None:
+        row = self.db.execute("SELECT * FROM feed_push WHERE singleton=1").fetchone()
+        return dict(row) if row else None
+
+    def push_init(self, cursor: int) -> dict:
+        self.db.execute("INSERT OR IGNORE INTO feed_push(singleton,cursor,updated_at) VALUES(1,?,?)",
+                        (cursor, time.time()))
+        return self.push_state()
+
+    def push_advance(self, cursor: int) -> None:
+        self.db.execute("""UPDATE feed_push SET cursor=MAX(cursor,?),failures=0,next_attempt_at=0,
+            last_error=NULL,updated_at=? WHERE singleton=1""", (cursor, time.time()))
+
+    def push_failed(self, error: str, next_attempt_at: float) -> None:
+        self.db.execute("""UPDATE feed_push SET failures=failures+1,next_attempt_at=?,last_error=?,
+            updated_at=? WHERE singleton=1""", (next_attempt_at, error[:200], time.time()))
 
     def head_cursor(self) -> int:
         """Newest event cursor; a new feed reader starts here to skip history."""

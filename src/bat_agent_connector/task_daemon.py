@@ -25,6 +25,7 @@ from .model_router import MinimalReviewGate, MinimalTaskRouter, ModelRouter, Rou
 from .task_bat import BatTaskAdapter
 from .task_core import TaskCoordinator
 from .task_journal import Journal
+from .task_push import EventPusher, EventWebhook
 from .task_recipes import load as load_recipe
 from .task_verifier import ObservedVerifier, load_settings
 
@@ -98,6 +99,22 @@ class TaskDaemon:
         self._cleanup_retry_after: dict[str, float] = {}
         self._lease_fd: int | None = None
         self._owner_id = secrets.token_hex(16)
+        self.pusher = EventPusher(self.journal, self._event_webhook(self.adapter.verifier.settings),
+                                  repo_urls=self.adapter.verifier.settings.repo_urls)
+
+    @staticmethod
+    def _event_webhook(settings) -> EventWebhook | None:
+        if not settings.event_webhook_url:
+            return None
+        secret = ""
+        if settings.event_webhook_secret_file:
+            path = Path(settings.event_webhook_secret_file).expanduser()
+            if path.stat().st_mode & 0o077:
+                raise ValueError("event webhook secret file must be mode 0600")
+            secret = path.read_text().strip()
+            if len(secret) < 32:
+                raise ValueError("event webhook secret is too short")
+        return EventWebhook(settings.event_webhook_url, secret)
 
     def verification_budget(self, recipe: str) -> int:
         if self.verification_timeout_s != self.verification_timeout_default_s:
@@ -107,9 +124,14 @@ class TaskDaemon:
     async def call(self, method: str, params: dict, *, auth_token: str | None = None) -> dict:
         if method == "work_events":
             # Read-only milestone feed. Chat delivery belongs to the caller.
-            return self.journal.milestones(
+            feed = self.journal.milestones(
                 params.get("since_cursor", 0), params.get("limit", 50),
                 repo_urls=self.adapter.verifier.settings.repo_urls)
+            push = self.journal.push_state()
+            feed["push"] = ({"configured": self.pusher.webhook is not None, "cursor": push["cursor"],
+                             "failures": push["failures"], "last_error": push["last_error"]}
+                            if push else {"configured": self.pusher.webhook is not None})
+            return feed
         if method == "work_submit":
             if not self.fleet.orchestrate_enabled(params.get("host", "")):
                 raise ValueError("task host needs writes=true and orchestrate=true")
@@ -307,6 +329,15 @@ class TaskDaemon:
                     self._active_ticks[tid] = asyncio.create_task(self._tick_task(tid))
             await asyncio.sleep(2)
 
+    async def _push_loop(self):
+        """Separate from task ticks so a slow callback never delays coordination."""
+        while True:
+            try:
+                await asyncio.wait_for(self.pusher.run_once(), timeout=60)
+            except Exception as exc:  # noqa: BLE001 - the push cursor stays put and is retried
+                logging.warning("Milestone push loop error: %s", type(exc).__name__)
+            await asyncio.sleep(1)
+
     async def _tick_task(self, task_id: str):
         verifying = False
         try:
@@ -419,16 +450,18 @@ class TaskDaemon:
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("task service only binds loopback")
         self.acquire_owner()
-        worker = None
+        worker = pusher = None
         try:
             server = await asyncio.start_server(self._handle, host, port)
             worker = asyncio.create_task(self._worker())
+            pusher = asyncio.create_task(self._push_loop())
             async with server:
                 await server.serve_forever()
         finally:
-            if worker is not None:
-                worker.cancel()
-                await asyncio.gather(worker, return_exceptions=True)
+            for background in (worker, pusher):
+                if background is not None:
+                    background.cancel()
+                    await asyncio.gather(background, return_exceptions=True)
             await self.fleet.close()
             self.journal.close()
             self.release_owner()
