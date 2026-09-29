@@ -148,6 +148,8 @@ class Journal:
                                ("pm_provider", "TEXT"), ("base_branch", "TEXT"), ("base_commit", "TEXT"),
                                ("external_worktree_path", "TEXT"), ("external_branch", "TEXT"),
                                ("session_replacements", "INTEGER NOT NULL DEFAULT 0"),
+                               ("verification_failures", "INTEGER NOT NULL DEFAULT 0"),
+                               ("verifying_started_at", "REAL"), ("progress_at", "REAL"),
                                ("task_path", "TEXT NOT NULL DEFAULT 'standard'")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {sql_type}")  # noqa: S608 - fixed local identifiers
@@ -323,6 +325,9 @@ class Journal:
                 self.db.execute("""UPDATE tasks SET state='done',review_passed=1,delivered=1,
                     delivered_at=?,updated_at=?,result=? WHERE task_id=?""",
                     (now, now, evidence[:1000], task_id))
+            elif target == "verifying":
+                self.db.execute("""UPDATE tasks SET state=?,updated_at=?,verifying_started_at=?,
+                    progress_at=? WHERE task_id=?""", (target, now, now, now, task_id))
             else:
                 self.db.execute("UPDATE tasks SET state=?,updated_at=? WHERE task_id=?", (target, now, task_id))
             self._event(task_id, "command_reconciled", {"command_id": command_id, "outcome": outcome,
@@ -535,7 +540,8 @@ class Journal:
         allowed = {"session_id", "reviewer_session_id", "turn_marker", "result", "continuations",
                    "review_rejections", "review_passed", "verification_commit", "verification_tree",
                    "review_commit", "review_tree", "review_marker", "ted_interventions", "lead_agent",
-                   "base_branch", "base_commit", "external_worktree_path", "external_branch"}
+                   "base_branch", "base_commit", "external_worktree_path", "external_branch",
+                   "verification_failures"}
         if fields.keys() - allowed:
             raise ValueError("invalid task fields")
         with self.tx():
@@ -545,6 +551,11 @@ class Journal:
             if old["state"] != state and state not in ALLOWED[old["state"]]:
                 raise ValueError(f"invalid transition {old['state']} -> {state}")
             values = {**old, **fields, "state": state, "updated_at": time.time()}
+            # A new verifying phase starts the absolute clock. Reviewer start
+            # (via dispatching) and uncertainty recovery continue the same phase.
+            if state == "verifying" and old["state"] != "verifying" and (
+                    old["state"] not in {"dispatching", "uncertain"} or not old["verifying_started_at"]):
+                values.update(verifying_started_at=values["updated_at"], progress_at=values["updated_at"])
             if state == "done":
                 observed = self.observed_verification(task_id)
                 small = values["task_path"] == "minimal" and values["recipe"] == "small-task-with-tests"
@@ -566,13 +577,15 @@ class Journal:
             self.db.execute("""UPDATE tasks SET state=?,updated_at=?,session_id=?,reviewer_session_id=?,
                 turn_marker=?,result=?,continuations=?,review_rejections=?,review_passed=?,
                 verification_commit=?,verification_tree=?,review_commit=?,review_tree=?,review_marker=?,
-                lead_agent=?,ted_interventions=?,base_branch=?,base_commit=?,external_worktree_path=?,external_branch=?,delivered=?,delivered_at=? WHERE task_id=?""",
+                lead_agent=?,ted_interventions=?,base_branch=?,base_commit=?,external_worktree_path=?,external_branch=?,delivered=?,delivered_at=?,
+                verification_failures=?,verifying_started_at=?,progress_at=? WHERE task_id=?""",
                 (values["state"], values["updated_at"], values["session_id"], values["reviewer_session_id"],
                  values["turn_marker"], values["result"], values["continuations"], values["review_rejections"],
                  values["review_passed"], values["verification_commit"], values["verification_tree"],
                  values["review_commit"], values["review_tree"], values["review_marker"], values["lead_agent"],
                  values["ted_interventions"], values["base_branch"], values["base_commit"],
-                 values["external_worktree_path"], values["external_branch"], values["delivered"], values["delivered_at"], task_id))
+                 values["external_worktree_path"], values["external_branch"], values["delivered"], values["delivered_at"],
+                 values["verification_failures"], values["verifying_started_at"], values["progress_at"], task_id))
             if old["state"] != state or event:
                 body = {"from": old["state"], "to": state}
                 if state in {"needs_ted", "failed"} and old["state"] != state and values["result"]:
@@ -639,8 +652,13 @@ class Journal:
             old = self.get(task_id)
             if old["state"] in TERMINAL:
                 return old
+            now = time.time()
             self.db.execute("UPDATE tasks SET paused=0,control_version=control_version+1,updated_at=? WHERE task_id=?",
-                            (time.time(), task_id))
+                            (now, task_id))
+            if old["state"] == "verifying":
+                # Ted's resume restarts the verification clocks; paused time is not stall time.
+                self.db.execute("UPDATE tasks SET verifying_started_at=?,progress_at=? WHERE task_id=?",
+                                (now, now, task_id))
             self._event(task_id, "resumed")
         return self.get(task_id)
 
@@ -655,6 +673,16 @@ class Journal:
             self.db.execute("UPDATE tasks SET ted_interventions=ted_interventions+1 WHERE task_id=?", (task_id,))
             self._event(task_id, "caller_reported_ted_intervention",
                         {"action": action, "source_message_id": source_message_id})
+
+    def progress(self, task_id: str) -> None:
+        """Record meaningful verification progress without an event or updated_at bump."""
+        self.db.execute("UPDATE tasks SET progress_at=? WHERE task_id=? AND state='verifying'",
+                        (time.time(), task_id))
+
+    def has_note(self, task_id: str, kind: str, candidate_commit: str) -> bool:
+        return self.db.execute("""SELECT 1 FROM events WHERE task_id=? AND kind=? AND json_valid(body)
+            AND json_extract(body,'$.candidate_commit')=? LIMIT 1""",
+            (task_id, kind, candidate_commit)).fetchone() is not None
 
     def note(self, task_id: str, kind: str, body: dict):
         """Append an audit event without changing task state."""

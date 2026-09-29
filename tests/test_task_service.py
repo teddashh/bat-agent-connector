@@ -364,8 +364,8 @@ async def test_verification_deadline_and_failure_do_not_stall_worker(tmp_path, m
 
     daemon.coordinator.tick = tick
     for item in (hung, failed, healthy):
-        daemon.journal.db.execute("UPDATE tasks SET updated_at=? WHERE task_id=?",
-                                  (time.time(), item["task_id"]))
+        daemon.journal.db.execute("UPDATE tasks SET verifying_started_at=?, progress_at=? WHERE task_id=?",
+                                  (time.time(), time.time(), item["task_id"]))
         await daemon._tick_task(item["task_id"])
     assert all(item["task_id"] in calls for item in (hung, failed, healthy))
     assert daemon.journal.get(hung["task_id"])["state"] == "needs_ted"
@@ -374,8 +374,8 @@ async def test_verification_deadline_and_failure_do_not_stall_worker(tmp_path, m
     assert "verification_timeout" in [e["kind"] for e in daemon.journal.events(hung["task_id"])]
     assert "verification_error" in [e["kind"] for e in daemon.journal.events(failed["task_id"])]
     assert "private verifier detail" not in json.dumps(daemon.journal.events(failed["task_id"]))
-    daemon.journal.db.execute("UPDATE tasks SET updated_at=? WHERE task_id=?",
-                              (time.time() - 2, healthy["task_id"]))
+    daemon.journal.db.execute("UPDATE tasks SET verifying_started_at=?, progress_at=? WHERE task_id=?",
+                              (time.time() - 2, time.time() - 2, healthy["task_id"]))
     before = len(calls)
     await daemon._tick_task(healthy["task_id"])
     assert len(calls) == before
@@ -383,6 +383,134 @@ async def test_verification_deadline_and_failure_do_not_stall_worker(tmp_path, m
     assert "verification_deadline" in [e["kind"] for e in daemon.journal.events(healthy["task_id"])]
     await daemon.fleet.close()
     daemon.journal.close()
+
+
+async def test_verification_clocks_ignore_heartbeats_and_cap_active_phase(tmp_path, mock):
+    daemon = TaskDaemon(make_config(mock), db_path=tmp_path / "clocks.db")
+    task = daemon.journal.submit(project="p", host="h1", workspace="w", original_words="x",
+                                 idempotency_key="clocks", recipe="small-task-with-tests")
+    daemon.journal.change(task["task_id"], "dispatching")
+    daemon.journal.change(task["task_id"], "accepted")
+    daemon.journal.change(task["task_id"], "running")
+    started = daemon.journal.change(task["task_id"], "verifying")
+    assert started["verifying_started_at"] and started["progress_at"]
+    # Reviewer start (verifying -> dispatching -> verifying) keeps the same phase clock.
+    daemon.journal.db.execute("UPDATE tasks SET verifying_started_at=? WHERE task_id=?",
+                              (started["verifying_started_at"] - 100, task["task_id"]))
+    daemon.journal.change(task["task_id"], "dispatching")
+    again = daemon.journal.change(task["task_id"], "verifying")
+    assert again["verifying_started_at"] == started["verifying_started_at"] - 100
+    budget = daemon.verification_budget("small-task-with-tests")
+    # A fresh updated_at heartbeat no longer extends a stalled phase.
+    daemon.journal.db.execute("UPDATE tasks SET verifying_started_at=?, progress_at=?, updated_at=? "
+                              "WHERE task_id=?", (time.time() - budget - 1, time.time() - budget - 1,
+                                                  time.time(), task["task_id"]))
+    assert daemon.verification_remaining(daemon.journal.get(task["task_id"])) <= 0
+    # Real progress extends the idle clock, but never past the absolute cap.
+    daemon.journal.progress(task["task_id"])
+    assert daemon.verification_remaining(daemon.journal.get(task["task_id"])) > 0
+    daemon.journal.db.execute("UPDATE tasks SET verifying_started_at=? WHERE task_id=?",
+                              (time.time() - daemon.verification_cap("small-task-with-tests") - 1,
+                               task["task_id"]))
+    daemon.journal.progress(task["task_id"])
+    assert daemon.verification_remaining(daemon.journal.get(task["task_id"])) <= 0
+    await daemon._tick_task(task["task_id"])
+    assert daemon.journal.get(task["task_id"])["state"] == "needs_ted"
+    await daemon.fleet.close()
+    daemon.journal.close()
+
+
+class FailingTestsBAT(FakeBAT):
+    def __init__(self, kinds):
+        super().__init__()
+        self.kinds = list(kinds)
+        self.runs = 0
+        self.installs = 0
+
+    async def run_verification(self, task):
+        self.runs += 1
+        evidence = await super().run_verification(task)
+        if evidence:
+            evidence["exit_code"] = 0 if not self.kinds or self.kinds[0] == "pass" else 1
+        return evidence
+
+    async def verification_failure(self, task, evidence):
+        kind = self.kinds.pop(0) if self.kinds else "code"
+        return {"kind": kind, "summary": "FAILED test_x - assert 1 == 2"}
+
+    async def install_dependencies(self, task):
+        self.installs += 1
+        return {"ok": True, "reason": "installed", "lockfile": "package-lock.json"}
+
+
+async def _to_verifying(core, journal, fake, task):
+    await core.tick(task["task_id"])
+    lead = journal.get(task["task_id"])["session_id"]
+    fake.reads[lead] = {"turn_started": True, "turn_done": True,
+                        "messages": [{"role": "assistant", "text": "BAT-STATUS: MILESTONE"}]}
+    await core.tick(task["task_id"])
+    return lead
+
+
+async def test_code_test_failure_reworks_lead_then_escalates_after_budget(tmp_path):
+    j = Journal(tmp_path / "rework.db")
+    task = submit(j, recipe="small-task-with-tests")
+    fake = FailingTestsBAT(["code", "code"])
+    core = TaskCoordinator(j, fake)
+    lead = await _to_verifying(core, j, fake, task)
+    result = await core.tick(task["task_id"])
+    assert result["state"] == "running" and result["verification_failures"] == 1
+    assert "trusted test run failed" in fake.sends[-1][1] and "assert 1 == 2" in fake.sends[-1][1]
+    assert fake.sends[-1][0] == lead
+    fake.identity = {"candidate_commit": "d" * 40, "tree_hash": "e" * 40, "clean": True}
+    fake.reads[lead] = {"turn_started": True, "turn_done": True,
+                        "messages": [{"role": "assistant", "text": "fixed\nBAT-STATUS: MILESTONE"}]}
+    await core.tick(task["task_id"])
+    result = await core.tick(task["task_id"])
+    assert result["state"] == "needs_ted" and result["verification_failures"] == 2
+    assert "rework budget exhausted" in result["result"]
+    j.close()
+
+
+async def test_environment_test_failure_escalates_without_rework(tmp_path):
+    j = Journal(tmp_path / "env.db")
+    task = submit(j)
+    fake = FailingTestsBAT(["environment"])
+    core = TaskCoordinator(j, fake)
+    await _to_verifying(core, j, fake, task)
+    sends = len(fake.sends)
+    result = await core.tick(task["task_id"])
+    assert result["state"] == "needs_ted" and "environment" in result["result"]
+    assert len(fake.sends) == sends
+    j.close()
+
+
+async def test_missing_dependencies_install_once_then_retest(tmp_path):
+    j = Journal(tmp_path / "deps.db")
+    task = submit(j)
+    fake = FailingTestsBAT(["missing_dependencies", "pass"])
+    core = TaskCoordinator(j, fake)
+    await _to_verifying(core, j, fake, task)
+    result = await core.tick(task["task_id"])
+    assert fake.installs == 1 and fake.runs == 2
+    assert result["state"] == "verifying" and result["verification_failures"] == 0
+    await core.tick(task["task_id"])
+    assert j.get(task["task_id"])["reviewer_session_id"]  # proceeds to review
+    kinds = [e["kind"] for e in j.events(task["task_id"])]
+    assert kinds.count("dependency_install") == 1 and "dependency_install_result" in kinds
+    j.close()
+
+
+async def test_missing_dependencies_after_install_becomes_code_rework(tmp_path):
+    j = Journal(tmp_path / "deps2.db")
+    task = submit(j)
+    fake = FailingTestsBAT(["missing_dependencies", "missing_dependencies"])
+    core = TaskCoordinator(j, fake)
+    await _to_verifying(core, j, fake, task)
+    result = await core.tick(task["task_id"])
+    assert fake.installs == 1
+    assert result["state"] == "running" and result["verification_failures"] == 1
+    j.close()
 
 
 async def test_codex_timestamp_never_proves_lost_send_or_review(tmp_path):
@@ -3120,6 +3248,112 @@ async def test_observed_verification_artifact_bound_to_clean_commit(tmp_path):
     assert artifacts.stat().st_mode & 0o777 == 0o700
     (repo / "code.txt").write_text("dirty")
     assert await runner.observe(task, str(repo)) is None
+
+
+def _committed_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "code.txt").write_text("candidate")
+    subprocess.run(["git", "-C", str(repo), "add", "code.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test",
+                    "-c", "user.email=test@example.invalid", "commit", "-qm", "candidate"], check=True)
+    return repo
+
+
+def _pid_alive(pid):
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return False
+    return state != "Z"
+
+
+# The child closes its output but keeps running, and leaves a background
+# grandchild: drain() finishes early and an unbounded proc.wait() would hang.
+HANGING = ("sh", "-c", 'sleep 60 & echo $! > "$0"; exec >/dev/null 2>&1; sleep 60')
+
+
+async def test_observed_verifier_one_deadline_kills_local_group(tmp_path):
+    repo = _committed_repo(tmp_path)
+    pidfile = tmp_path / "grandchild.pid"
+    runner = ObservedVerifier(VerificationSettings(
+        commands={"p": (*HANGING, str(pidfile))}, timeout_s=1,
+        artifact_dir=str(tmp_path / "artifacts")))
+    started = time.monotonic()
+    result = await runner.observe({"task_id": "hang", "host": "local", "project": "p"}, str(repo))
+    assert time.monotonic() - started < 10
+    assert result["exit_code"] == 124
+    assert not _pid_alive(int(pidfile.read_text()))
+
+
+async def test_observed_verifier_ssh_timeout_kills_remote_tree(tmp_path, monkeypatch):
+    repo = _committed_repo(tmp_path)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake_ssh = bindir / "ssh"
+    # Stand-in for ssh: run the final remote-command argument with a local shell.
+    fake_ssh.write_text('#!/bin/sh\neval "last=\\${$#}"\nexec sh -c "$last"\n')
+    fake_ssh.chmod(0o700)
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    pidfile = tmp_path / "remote-grandchild.pid"
+    runner = ObservedVerifier(VerificationSettings(
+        commands={"p": (*HANGING, str(pidfile))}, timeout_s=1,
+        ssh_hosts={"example-host-1": "castle"}, artifact_dir=str(tmp_path / "artifacts")))
+    task = {"task_id": "hang-ssh", "host": "example-host-1", "project": "p"}
+    started = time.monotonic()
+    result = await runner.observe(task, str(repo))
+    assert time.monotonic() - started < 15
+    assert result["exit_code"] == 124
+    assert not _pid_alive(int(pidfile.read_text()))
+    assert not list((tmp_path / "home").glob(".batc-verify-*.pid"))
+    # A normal remote run removes its pgid file and keeps the exit status.
+    ok = ObservedVerifier(VerificationSettings(
+        commands={"p": ("sh", "-c", "echo ok; exit 3")}, ssh_hosts={"example-host-1": "castle"},
+        artifact_dir=str(tmp_path / "artifacts")))
+    done = await ok.observe(task, str(repo))
+    assert done["exit_code"] == 3
+    assert not list((tmp_path / "home").glob(".batc-verify-*.pid"))
+
+
+def test_verification_failure_classes(tmp_path):
+    from bat_agent_connector.task_verifier import classify_failure
+
+    def evidence(text, code=1):
+        log = tmp_path / f"log-{abs(hash(text))}.log"
+        log.write_text(text)
+        return {"exit_code": code, "log_ref": str(log)}
+
+    assert classify_failure(evidence("FAILED tests/test_x.py::test_a - assert 1 == 2")) == "code"
+    assert classify_failure(evidence("sh: 1: vitest: not found")) == "missing_dependencies"
+    assert classify_failure(evidence("Error: Cannot find module 'zod'")) == "missing_dependencies"
+    assert classify_failure(evidence("fatal: could not read Username for 'https://github.com'")) == "environment"
+    assert classify_failure(evidence("npm ERR! code EACCES")) == "environment"
+    assert classify_failure(evidence("anything", code=124)) == "environment"
+    assert classify_failure({"exit_code": 1, "log_ref": str(tmp_path / "missing.log")}) == "environment"
+
+
+async def test_install_dependencies_uses_tracked_lockfile_once_and_stays_clean(tmp_path, monkeypatch):
+    from bat_agent_connector import task_verifier
+
+    repo = _committed_repo(tmp_path)
+    (repo / "package-lock.json").write_text("{}")
+    (repo / ".gitignore").write_text("node_modules/\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test",
+                    "-c", "user.email=test@example.invalid", "commit", "-qm", "lock"], check=True)
+    monkeypatch.setitem(task_verifier.LOCKFILE_INSTALLS, "package-lock.json",
+                        ("sh", "-c", "mkdir -p node_modules && echo installed"))
+    runner = ObservedVerifier(VerificationSettings(artifact_dir=str(tmp_path / "artifacts")))
+    result = await runner.install_dependencies({"task_id": "deps", "host": "local", "project": "p"}, str(repo))
+    assert result["ok"] and result["lockfile"] == "package-lock.json"
+    monkeypatch.setitem(task_verifier.LOCKFILE_INSTALLS, "package-lock.json",
+                        ("sh", "-c", "echo dirty > package-lock.json"))
+    dirty = await runner.install_dependencies({"task_id": "deps", "host": "local", "project": "p"}, str(repo))
+    assert not dirty["ok"] and dirty["reason"] == "install_dirtied_worktree"
+
 
 @pytest.mark.asyncio
 async def test_external_worktree_creation_is_restart_idempotent(tmp_path, fleet_factory, monkeypatch):
