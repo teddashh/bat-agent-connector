@@ -1,8 +1,10 @@
 """Trusted, observed verification on an isolated worktree.
 
-Only administrator-configured argv is executed. A task caller cannot supply a
-command, exit status or candidate hash. Output is kept in a private 0600 log
-and never placed in the service journal or the event feed.
+Only administrator-configured argv (plus a code-owned lockfile install after a
+missing-dependency failure) is executed. A task caller cannot supply a command,
+exit status or candidate hash. Output is kept in a private 0600 log and never
+placed in the service journal or the event feed; only a short redacted tail of
+a code/test failure is sent back to the task's own lead for bounded rework.
 """
 
 from __future__ import annotations
@@ -10,7 +12,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 import shlex
+import signal
 import stat
 import uuid
 from dataclasses import dataclass, field
@@ -26,6 +30,64 @@ def _remote_command(alias: str, cwd: str, argv: tuple[str, ...]) -> tuple[str, .
     # shell.  Passing ``sh``, ``-lc`` and a separately quoted script therefore
     # loses the quote boundaries (and can run from the wrong directory).
     return ("ssh", "-o", "BatchMode=yes", alias, "sh -lc " + shlex.quote(script))
+
+
+def _remote_pidfile(marker: str) -> str:
+    """Shell word (expanded remotely) for the private pgid file; marker is hex only."""
+    if not re.fullmatch(r"[0-9a-f]{32}", marker):
+        raise ValueError("invalid verification marker")
+    return '"$HOME/.batc-verify-' + marker + '.pid"'
+
+
+def _remote_group_command(alias: str, cwd: str, argv: tuple[str, ...], marker: str) -> tuple[str, ...]:
+    """Run argv remotely in its own session/process group and record its pgid.
+
+    SSH disconnects do not reliably reach a remote process tree, so a timeout
+    kills the recorded group explicitly (see ``_remote_kill_command``).
+    """
+    pidfile = _remote_pidfile(marker)
+    inner = 'echo "$$" >"$0" && cd -- "$1" && shift && exec "$@"'
+    script = (shlex.join(("setsid", "-w", "sh", "-c", inner)) + " " + pidfile + " "
+              + shlex.join((cwd, *argv)) + "; rc=$?; rm -f " + pidfile + "; exit $rc")
+    return ("ssh", "-o", "BatchMode=yes", alias, "sh -lc " + shlex.quote(script))
+
+
+def _remote_kill_command(alias: str, marker: str) -> tuple[str, ...]:
+    """Kill the recorded remote process group and print ``gone`` only once it is empty."""
+    pidfile = _remote_pidfile(marker)
+    script = (f"i=0; while ! test -f {pidfile} && test $i -lt 30; do i=$((i+1)); sleep 0.1; done; "
+              f"if ! test -f {pidfile}; then echo gone; exit 0; fi; "
+              f"pg=$(cat {pidfile}); case \"$pg\" in ''|*[!0-9]*) exit 3;; esac; "
+              "pkill -KILL -g \"$pg\" 2>/dev/null; i=0; "
+              "while ps -eo pgid=,stat= | awk -v g=\"$pg\" '$1==g && $2 !~ /^Z/ {f=1} END {exit !f}'; "
+              "do i=$((i+1)); test $i -gt 50 && exit 4; "
+              "pkill -KILL -g \"$pg\" 2>/dev/null; sleep 0.1; done; "
+              f"rm -f {pidfile}; echo gone")
+    return ("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", alias, "sh -c " + shlex.quote(script))
+
+
+def _group_alive(pgid: int) -> bool:
+    """Whether any non-zombie process remains in a local process group."""
+    proc = Path("/proc")
+    if not proc.is_dir():
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+    for stat_file in proc.glob("[0-9]*/stat"):
+        try:
+            fields = stat_file.read_text().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if len(fields) > 2 and fields[0] != "Z" and fields[2] == str(pgid):
+            return True
+    return False
+
+
+class VerificationProcessStuck(RuntimeError):
+    """A timed-out verification process tree could not be proven gone."""
+
 
 try:
     import tomllib
@@ -128,6 +190,96 @@ class ObservedVerifier:
             return None
         return {"candidate_commit": head, "tree_hash": tree, "clean": not bool(dirty)}
 
+    async def _group_run(self, host: str, cwd: str, argv: tuple[str, ...], timeout: float,
+                         fd: int, digest) -> int:
+        """Run argv under one deadline covering start, output drain and exit.
+
+        On timeout or cancellation the whole process group is killed; over SSH
+        the remote group is killed too and must be confirmed gone.
+        """
+        alias = self.settings.ssh_hosts.get(host)
+        marker = uuid.uuid4().hex
+        if alias:
+            cmd, working_dir = _remote_group_command(alias, cwd, argv, marker), None
+        else:
+            cmd, working_dir = argv, cwd
+        proc = None
+        captured = 0
+        tail = bytearray()
+        limit = 2_000_000
+
+        async def run() -> int:
+            nonlocal proc, captured, tail
+            proc = await asyncio.create_subprocess_exec(*cmd, cwd=working_dir, start_new_session=True,
+                                                        stdout=asyncio.subprocess.PIPE,
+                                                        stderr=asyncio.subprocess.STDOUT)
+            assert proc.stdout
+            while chunk := await proc.stdout.read(65_536):
+                digest.update(chunk)
+                if captured < limit:
+                    kept = chunk[:limit - captured]
+                    os.write(fd, kept)
+                    captured += len(kept)
+                tail = (tail + chunk)[-65_536:]
+            return await proc.wait()
+
+        try:
+            exit_code = await asyncio.wait_for(run(), timeout)
+        except BaseException as exc:
+            await self._kill_tree(proc, alias, marker)
+            if not isinstance(exc, asyncio.TimeoutError):
+                raise
+            exit_code = 124
+        if captured >= limit:
+            # Keep the real end of the output for failure summaries.
+            os.write(fd, b"\n[... output truncated ...]\n" + bytes(tail))
+        return exit_code
+
+    async def _kill_tree(self, proc, alias: str | None, marker: str) -> None:
+        if proc is not None and proc.returncode is None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if alias:
+            # The remote group may still hold the SSH output pipe; kill it first.
+            killer = await asyncio.create_subprocess_exec(*_remote_kill_command(alias, marker),
+                                                          stdout=asyncio.subprocess.PIPE,
+                                                          stderr=asyncio.subprocess.DEVNULL)
+            try:
+                out, _ = await asyncio.wait_for(killer.communicate(), 30)
+            except asyncio.TimeoutError:
+                killer.kill()
+                await killer.wait()
+                out = b""
+            if killer.returncode != 0 or out.strip() != b"gone":
+                raise VerificationProcessStuck("remote verification process tree is not confirmed gone")
+        elif proc is not None:
+            for _ in range(50):
+                if not _group_alive(proc.pid):
+                    break
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                raise VerificationProcessStuck("local verification process group is still alive")
+        if proc is not None:
+            try:
+                # asyncio also waits for the output pipe; a holder outside the
+                # group is a process we cannot prove gone.
+                await asyncio.wait_for(proc.wait(), 10)
+            except asyncio.TimeoutError:
+                raise VerificationProcessStuck("verification output pipe is still held open") from None
+
+    def _log(self, task: dict, kind: str = "") -> tuple[Path, int]:
+        artifacts = Path(self.settings.artifact_dir or state_dir() / "task-artifacts")
+        artifacts.mkdir(parents=True, exist_ok=True, mode=0o700)
+        artifacts.chmod(0o700)
+        log_path = artifacts / (str(task["task_id"]) + kind + "-" + uuid.uuid4().hex + ".log")
+        return log_path, os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+
     async def observe(self, task: dict, cwd: str) -> dict | None:
         argv = self.settings.commands.get(task["project"])
         if not argv:
@@ -135,51 +287,10 @@ class ObservedVerifier:
         before = await self.identity(task, cwd)
         if not before or not before["clean"]:
             return None
-        alias = self.settings.ssh_hosts.get(task["host"])
-        if alias:
-            cmd = _remote_command(alias, cwd, argv)
-            working_dir = None
-        else:
-            cmd = argv
-            working_dir = cwd
-        artifacts = Path(self.settings.artifact_dir or state_dir() / "task-artifacts")
-        artifacts.mkdir(parents=True, exist_ok=True, mode=0o700)
-        artifacts.chmod(0o700)
-        log_path = artifacts / (str(task["task_id"]) + "-" + uuid.uuid4().hex + ".log")
-        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        log_path, fd = self._log(task)
         digest = hashlib.sha256()
-        captured = 0
         try:
-            proc = await asyncio.create_subprocess_exec(*cmd, cwd=working_dir,
-                                                        stdout=asyncio.subprocess.PIPE,
-                                                        stderr=asyncio.subprocess.STDOUT)
-        except BaseException:
-            os.close(fd)
-            log_path.unlink(missing_ok=True)
-            raise
-
-        async def drain():
-            nonlocal captured
-            assert proc.stdout
-            while chunk := await proc.stdout.read(65_536):
-                digest.update(chunk)
-                if captured < 2_000_000:
-                    kept = chunk[:2_000_000 - captured]
-                    os.write(fd, kept)
-                    captured += len(kept)
-        try:
-            await asyncio.wait_for(drain(), self.settings.timeout_s)
-            await proc.wait()
-            exit_code = proc.returncode
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            exit_code = 124
-        except BaseException:
-            if proc.returncode is None:
-                proc.kill()
-                await proc.wait()
-            raise
+            exit_code = await self._group_run(task["host"], cwd, argv, self.settings.timeout_s, fd, digest)
         finally:
             os.close(fd)
         after = await self.identity(task, cwd)
@@ -193,3 +304,68 @@ class ObservedVerifier:
                 "command": "argv_sha256:" + hashlib.sha256("\0".join(argv).encode()).hexdigest(),
                 "exit_code": exit_code, "log_ref": str(log_path),
                 "output_sha256": digest.hexdigest()}
+
+    async def install_dependencies(self, task: dict, cwd: str) -> dict:
+        """Run the repo's tracked lockfile install once; the worktree must stay clean."""
+        rc, tracked = await self._run(task["host"], cwd, ("git", "ls-files", "--", *LOCKFILE_INSTALLS))
+        present = set(tracked.splitlines()) if rc == 0 else set()
+        lockfile = next((name for name in LOCKFILE_INSTALLS if name in present), None)
+        if not lockfile:
+            return {"ok": False, "reason": "no_supported_lockfile"}
+        before = await self.identity(task, cwd)
+        if not before or not before["clean"]:
+            return {"ok": False, "reason": "candidate_not_clean", "lockfile": lockfile}
+        log_path, fd = self._log(task, "-install")
+        try:
+            exit_code = await self._group_run(task["host"], cwd, LOCKFILE_INSTALLS[lockfile],
+                                              self.settings.timeout_s, fd, hashlib.sha256())
+        finally:
+            os.close(fd)
+        after = await self.identity(task, cwd)
+        ok = exit_code == 0 and after == before
+        return {"ok": ok, "lockfile": lockfile, "exit_code": exit_code, "log_ref": str(log_path),
+                "reason": "installed" if ok else ("install_failed" if exit_code else "install_dirtied_worktree")}
+
+
+# Code-owned install commands, keyed by tracked lockfile in priority order.
+LOCKFILE_INSTALLS: dict[str, tuple[str, ...]] = {
+    "pnpm-lock.yaml": ("pnpm", "install", "--frozen-lockfile"),
+    "yarn.lock": ("yarn", "install", "--frozen-lockfile"),
+    "package-lock.json": ("npm", "ci"),
+    "uv.lock": ("uv", "sync", "--frozen"),
+    "Cargo.lock": ("cargo", "fetch", "--locked"),
+}
+
+_MISSING_DEPS = re.compile(
+    r"Cannot find module|ERR_MODULE_NOT_FOUND|Cannot find package|ModuleNotFoundError|No module named"
+    r"|node_modules/\.bin|: not found\s*$|command not found|error\[E0463\]|npm ERR! missing", re.I | re.M)
+_ENVIRONMENT = re.compile(
+    r"permission denied|EACCES|EPERM|authenticat|not logged in|login required|could not read Username"
+    r"|401 Unauthorized|403 Forbidden|Host key verification failed|No space left on device|ENOSPC"
+    r"|Could not resolve host|Temporary failure in name resolution|Connection refused|Read-only file system",
+    re.I)
+
+
+def failure_tail(log_ref: str, *, max_chars: int = 2500, max_lines: int = 40) -> str:
+    try:
+        with open(log_ref, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 65_536))
+            raw = fh.read().decode(errors="replace")
+    except OSError:
+        return ""
+    return "\n".join(raw.splitlines()[-max_lines:])[-max_chars:]
+
+
+def classify_failure(evidence: dict) -> str:
+    """Deterministic failure class: code, missing_dependencies or environment."""
+    if evidence.get("exit_code") in {124, 126, 255}:
+        return "environment"  # timeout, not executable, or SSH transport failure
+    tail = failure_tail(str(evidence.get("log_ref") or ""), max_chars=20_000, max_lines=400)
+    if not tail:
+        return "environment"
+    if _MISSING_DEPS.search(tail):
+        return "missing_dependencies"
+    if _ENVIRONMENT.search(tail):
+        return "environment"
+    return "code"
