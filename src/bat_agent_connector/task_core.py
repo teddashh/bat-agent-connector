@@ -33,7 +33,7 @@ class TaskAdapter(Protocol):
     async def candidate_identity(self, task: dict) -> dict | None: ...
     async def candidate_review_diff(self, task: dict) -> dict | None: ...
     async def run_verification(self, task: dict) -> dict | None: ...
-    def reviewer_agent(self, task: dict) -> str: ...
+    async def available_agents(self, task: dict) -> frozenset[str]: ...
 
 
 def initial_prompt(task: dict) -> str:
@@ -120,11 +120,14 @@ def review_verdict(read: dict, commit: str, tree: str) -> dict:
     return {"verdict": "pass", "reason": "reviewer_pass", "findings": findings, "text": text}
 
 
+_QUOTA = re.compile(r"quota (?:exhausted|exceeded)|usage limit reached|out of credits", re.I)
+
+
 def classify_read(read: dict) -> str:
     if read.get("pending"):
         return "waiting_permission" if read["pending"].get("kind") == "permission" else "needs_ted"
     output = "\n".join(str(m.get("text") or "") for m in read.get("messages") or [] if m.get("role") != "user")
-    if re.search(r"quota (?:exhausted|exceeded)|usage limit reached|out of credits", output, re.I):
+    if _QUOTA.search(output):
         return "quota_limited"
     if read.get("turn_done") is not True:
         return "running"
@@ -159,11 +162,36 @@ class TaskCoordinator:
     def _lock(self, host: str, sid: str) -> asyncio.Lock:
         return self._writers.setdefault((host, sid), asyncio.Lock())
 
-    async def _route(self, task: dict, step: str, step_type: str, *, high_stakes: bool = False) -> None:
+    async def _route(self, task: dict, step: str, step_type: str, *, high_stakes: bool = False,
+                     provider: str | None = None, reason: str | None = None) -> None:
         if self.router and task.get("task_path") != "minimal":
             await self.router.choose(task["task_id"], step,
                                      f"{step_type} phase for project {task['project']}",
-                                     expected_type=step_type, high_stakes=high_stakes)
+                                     expected_type=step_type, high_stakes=high_stakes,
+                                     provider_override=provider, reason=reason)
+
+    async def _available_agents(self, task: dict) -> frozenset[str]:
+        reader = getattr(self.adapter, "available_agents", None)
+        try:
+            found = await reader(task) if callable(reader) else None
+        except Exception:  # noqa: BLE001 - unknown availability means Codex only
+            found = None
+        return frozenset(a for a in (found or ()) if a in {"claude", "codex"}) | {"codex"}
+
+    @staticmethod
+    def _pick_agent(role: str, task: dict, available: frozenset[str]) -> tuple[str, str]:
+        """The BAT agent a session really runs, by Ted's order.
+
+        Review: Claude Opus 5.5, then Codex (AGY is not a BAT runtime), from a
+        different family than the lead when possible. Lead: the task's
+        lead_agent while it is available, else Codex.
+        """
+        if role == "lead":
+            lead = task["lead_agent"]
+            return (lead, "lead_agent") if lead in available else ("codex", "lead_fallback_unavailable")
+        order = [a for a in ("claude", "codex") if a in available]
+        other = [a for a in order if a != task["lead_agent"]]
+        return (other[0], "review_other_family") if other else (order[0], "review_same_family_only")
 
     async def pause(self, task_id: str, *, abort_current: bool = False) -> dict:
         task = self.journal.pause(task_id, abort_current=abort_current)
@@ -203,7 +231,7 @@ class TaskCoordinator:
                                                else "accepted", event="session_presence_restored")
             return task
         if task["state"] == "queued":
-            return await self._start(task, role="lead", agent=task["lead_agent"])
+            return await self._start(task, role="lead")
         if task["state"] == "verifying":
             return await self._verify_and_review(task)
         if task["state"] == "quota_limited":
@@ -217,23 +245,28 @@ class TaskCoordinator:
             return await self._observe(task, cmds)
         return task
 
-    async def _start(self, task: dict, *, role: str, agent: str) -> dict:
+    async def _start(self, task: dict, *, role: str) -> dict:
         stage = "review" if role == "reviewer" else "planning"
+        agent, reason = self._pick_agent(role, task, await self._available_agents(task))
         await self._route(task, f"{stage}:start:{task.get('review_commit') or 'lead'}:"
                           f"{task['control_version']}:{task['review_rejections']}:"
-                          f"{task['session_replacements']}", stage, high_stakes=True)
+                          f"{task['session_replacements']}", stage, high_stakes=True,
+                          provider=agent, reason=reason)
         task = self.journal.get(task["task_id"])
         if task["paused"]:
             return task
         candidate_key = task.get("review_commit") if role == "reviewer" else "lead"
+        # A Claude reviewer that hits quota is replaced by Codex for the same
+        # candidate, so the agent is part of that start's idempotency key.
         key = (f"{task['task_id']}:{role}:start:{candidate_key}:{task['review_rejections']}:"
-               f"{task['control_version']}:{task['session_replacements']}")
+               f"{task['control_version']}:{task['session_replacements']}"
+               + (":claude" if role == "reviewer" and agent == "claude" else ""))
         warm_id = None
         if role == "lead" and task.get("task_path") == "minimal" and not task.get("base_branch"):
             finder = getattr(self.adapter, "find_warm", None)
             if callable(finder):
                 try:
-                    warm_id = await finder(task)
+                    warm_id = await finder({**task, "lead_agent": agent})
                 except Exception:  # noqa: BLE001 - an unproven warm session is never adopted
                     warm_id = None
         sid = warm_id or str(uuid.uuid4())
@@ -242,8 +275,10 @@ class TaskCoordinator:
                                                 "warm_session_id": warm_id}, key)
         if not fresh:
             return self.journal.change(task["task_id"], "uncertain")
-        self.journal.change(task["task_id"], "dispatching")
-        if self.journal.get(task["task_id"])["paused"]:
+        self.journal.change(task["task_id"], "dispatching",
+                            fields={"lead_agent": agent} if role == "lead" and agent != task["lead_agent"] else None)
+        task = self.journal.get(task["task_id"])
+        if task["paused"]:
             self.journal.command_status(command["command_id"], "cancelled")
             return self.journal.change(task["task_id"], "verifying" if role == "reviewer" else "queued")
         try:
@@ -255,6 +290,7 @@ class TaskCoordinator:
             self.journal.command_status(command["command_id"], "uncertain")
             return self.journal.change(task["task_id"], "uncertain")
         self.journal.command_status(command["command_id"], "settled")
+        self.journal.provider_use(agent, "success")  # a real session on this provider
         self.journal.add_branch(task["task_id"], session_id=sid, provider=agent, role=role,
                                 reason=("warm_reuse" if warm_id else "vanished_replacement"
                                         if role == "lead" and task["session_replacements"] else "start"),
@@ -275,10 +311,13 @@ class TaskCoordinator:
             if task["paused"]:
                 return task
             send_type = "review" if purpose.startswith("reviewer:") else "implementation"
+            # Record the agent that really receives this prompt (the session's branch).
+            agent = next((b["provider"] for b in reversed(task["branches"]) if b["session_id"] == sid), None)
             await self._route(task, f"{send_type}:send:{purpose}:{sid}:"
                               f"{task['control_version']}:{task['continuations']}:"
                               f"{task['review_rejections']}", send_type,
-                              high_stakes=send_type == "review")
+                              high_stakes=send_type == "review",
+                              provider=agent, reason="session_agent" if agent else None)
             task = self.journal.get(task["task_id"])
             if task["paused"]:
                 return task
@@ -400,9 +439,6 @@ class TaskCoordinator:
         if not sid:
             return self.journal.change(task["task_id"], "uncertain")
         read = await self.adapter.read(task, sid, task["turn_marker"])
-        if read.get("turn_done") or read.get("pending"):
-            await self._route(task, f"status:{sid}:{task['turn_marker']}:"
-                              f"{task['continuations']}:{task['state']}", "status_relay")
         if read.get("turn_attribution") in {"unknown", "uncertain", "echo_not_visible",
                                             "queued_unconfirmed", "timestamp_cursor"}:
             self._mark_unproven_send(task["task_id"], sid)
@@ -414,6 +450,8 @@ class TaskCoordinator:
             self._mark_unproven_send(task["task_id"], sid)
             return self.journal.change(task["task_id"], "uncertain")
         decision = classify_read(read)
+        if decision == "quota_limited":
+            self.journal.provider_use(task["lead_agent"], "quota_error")
         if decision == "continue":
             if task["continuations"] >= min(self.max_continuations, limits(task["recipe"])[0]):
                 return self.journal.change(task["task_id"], "needs_ted")
@@ -589,15 +627,7 @@ class TaskCoordinator:
         task, stable = self._verification_wait(task, (commit, tree), "candidate_changed")
         if not stable:
             return task
-        await self._route(task, f"verification:{commit}:{tree}", "verification", high_stakes=True)
-        task = self.journal.get(task["task_id"])
-        if task["paused"]:
-            return task
-        if self.router:
-            fresh = await self.adapter.candidate_identity(task)
-            if (not fresh or not fresh.get("clean")
-                    or (fresh["candidate_commit"], fresh["tree_hash"]) != (commit, tree)):
-                return task
+        # The trusted runner, not a model, verifies; no routing row is recorded for it.
         if (task["verification_commit"], task["verification_tree"]) != (commit, tree):
             task = self.journal.change(task["task_id"], "verifying", fields={
                 "verification_commit": None, "verification_tree": None, "reviewer_session_id": None,
@@ -667,8 +697,7 @@ class TaskCoordinator:
             task = self.journal.change(task["task_id"], "verifying", fields={
                 "review_commit": commit, "review_tree": tree, "review_marker": None,
             })
-            agent = self.adapter.reviewer_agent(task)
-            return await self._start(task, role="reviewer", agent=agent)
+            return await self._start(task, role="reviewer")
         if not task["review_marker"]:
             return await self._send(task, task["reviewer_session_id"],
                                     reviewer_prompt(task, commit, tree), "reviewer:initial")
@@ -683,6 +712,17 @@ class TaskCoordinator:
             if read.get("streaming") is True and attributed:
                 self.journal.progress(task["task_id"])  # the reviewer is still working
             return task
+        if _QUOTA.search(final_agent_text(read) or ""):
+            reviewer = next((b["provider"] for b in reversed(task["branches"])
+                             if b["role"] == "reviewer" and b["session_id"] == task["reviewer_session_id"]), None)
+            if reviewer:
+                self.journal.provider_use(reviewer, "quota_error")
+            if reviewer != "claude":
+                return self.journal.change(task["task_id"], "needs_ted", fields={
+                    "result": f"Reviewer ({reviewer or 'unknown'}) hit its usage limit"})
+            # Not a review outcome: retry this candidate with the next provider (Codex).
+            return self.journal.change(task["task_id"], "verifying", fields={
+                "reviewer_session_id": None, "review_marker": None}, event="reviewer_quota_fallback")
         verdict = review_verdict(read, commit, tree)
         output = verdict["text"]
         if verdict["verdict"] == "pass":

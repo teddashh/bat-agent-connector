@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- Routing decisions now start the BAT agent they name. Sessions use the host's actually available
+  agents in Ted's order: Claude Opus 5.5 (pinned `claude-opus-5-5:auto-compact-300k`, offered only
+  while the host usage snapshot is fresh and under 85%/90%), then Codex. The reviewer is the other
+  model family from the lead when possible; a reviewer that hits its usage limit falls back to the
+  next provider instead of counting as a review. `provider_usage` records real session starts and
+  quota hits. AGY `claude-opus-4-6-thinking` is not a BAT runtime and is not started.
 - Warm session reuse requires the current HEAD to equal the previous task's verified commit and is limited to
   follow-ups in the same workstream (`parent_task_id`, or `continuation=true` in the same origin thread);
   independent requests start fresh from base.
