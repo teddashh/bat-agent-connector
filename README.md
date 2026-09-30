@@ -1,6 +1,10 @@
 # bat-agent-connector
 
+**English** · [繁體中文](README.zh-TW.md)
+
 **An unofficial connector that lets AI agents work with [Better Agent Terminal (BAT)](https://github.com/tony1223/better-agent-terminal) sessions.**
+
+**Project page:** https://teddashh.github.io/bat-agent-connector/
 
 BAT (by [TonyQ / tony1223](https://github.com/tony1223)) is a terminal app that runs Claude Code and Codex agent
 sessions, grouped into workspaces, on your machines. It has a remote protocol (`bat-remote/v2`) that its own GUI and

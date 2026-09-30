@@ -1,0 +1,222 @@
+{
+  "repo": "teddashh/bat-agent-connector",
+  "slug": "bat-agent-connector",
+  "name": "bat-agent-connector",
+  "mark": "BA",
+  "palette": "blue",
+  "default_branch": "main",
+  "verified": "2026-09-30",
+  "language": "Python",
+  "license": {"spdx": "MIT", "label": {"en": "MIT License", "zh": "MIT 授權"}, "href": "LICENSE"},
+  "title": {"en": "An unofficial connector for Better Agent Terminal sessions", "zh": "Better Agent Terminal session 的非官方連接器"},
+  "description": {
+    "en": "An unofficial MCP server and CLI that let AI agents and scripts read and wait on Better Agent Terminal sessions over BAT's remote protocol, and nudge or orchestrate them only on hosts where you enable it. Not affiliated with BAT's authors.",
+    "zh": "非官方的 MCP 伺服器與 CLI，讓 AI agent 和腳本透過 BAT 的遠端協定讀取、等待 Better Agent Terminal 的 session；只有在你開啟的主機上，才能推動或調度它們。與 BAT 作者沒有關係。"
+  },
+  "hero": {
+    "eyebrow": {"en": "Unofficial · MCP server + CLI for BAT", "zh": "非官方 · BAT 的 MCP 伺服器與 CLI"},
+    "headline": {"en": "Let one agent <em>watch</em> the others.", "zh": "派一個 agent <em>盯場</em>就好。"},
+    "lede": {
+      "en": "It speaks BAT's own remote protocol, so Claude Code, Codex, Cursor, Hermes, or a shell script can see which sessions are done, blocked on a question, or out of quota. Nothing writes until you enable it per host.",
+      "zh": "它直接走 BAT 自己的遠端協定，讓 Claude Code、Codex、Cursor、Hermes 或一支 shell 腳本，都看得出哪些 session 做完了、卡在問題上，或是額度用完了。在你逐台主機開啟之前，它不會寫入任何東西。"
+    },
+    "primary": {"href": "#start", "label": {"en": "Start read-only", "zh": "從唯讀開始"}},
+    "secondary": {"href": "https://github.com/teddashh/bat-agent-connector", "label": {"en": "View source", "zh": "查看原始碼"}},
+    "notes": [
+      "MIT",
+      "Python 3.10+",
+      {"en": "Not affiliated with BAT", "zh": "與 BAT 官方無關"}
+    ],
+    "visual": {
+      "type": "report",
+      "top": "batc triage box1",
+      "badge": {"en": "Read tier", "zh": "唯讀層"},
+      "title": {"en": "Session triage", "zh": "Session 分類"},
+      "meta": {"en": "Rules over recent output · Jev off", "zh": "依最近輸出套用規則 · 未啟用 Jev"},
+      "rows": [
+        {"title": "api · 1a2b3c4d", "meta": "claude · resets 3pm", "level": "high", "label": "quota_exhausted"},
+        {"title": "web · 5e6f7a8b", "meta": "claude · permission: Bash", "level": "medium", "label": "waiting_permission"},
+        {"title": "docs · 9c0d1e2f", "meta": "codex · streaming", "level": "info", "label": "working"},
+        {"title": "api · 3a4b5c6d", "meta": "codex · BAT-STATUS: MILESTONE", "level": "ok", "label": "done_idle"}
+      ],
+      "footer": {"left": {"en": "1 session can fail over to Codex", "zh": "1 個 session 可轉給 Codex"}, "right": {"en": "Nothing sent", "zh": "未送出任何指令"}}
+    }
+  },
+  "stats": [
+    {"value": "0.2.4", "label": {"en": "Current version, alpha, not on PyPI", "zh": "目前版本，alpha，尚未上架 PyPI"}},
+    {"value": "32", "label": {"en": "MCP tools: 13 read, 7 write, 12 orchestrate", "zh": "MCP 工具：唯讀 13、寫入 7、調度 12"}},
+    {"value": "32", "label": {"en": "batc subcommands", "zh": "batc 子指令"}},
+    {"value": "0", "label": {"en": "Write tools registered by default", "zh": "預設註冊的寫入工具"}}
+  ],
+  "problem": {
+    "kicker": {"en": "The problem", "zh": "問題在哪裡"},
+    "title": {"en": "Several agents, several tabs, nobody watching.", "zh": "開了一堆 agent，卻沒人在看。"},
+    "body": {
+      "en": "Long-running coding agents finish, stall on a question, hit a usage quota, or just need \"continue\", and finding out means clicking through tabs. Screen scraping and GUI automation are brittle. BAT already has a remote protocol for its own desktop and phone clients, so the connector reads that, and a supervising agent does the checking.",
+      "zh": "長時間執行的 coding agent 會做完、會卡在問題上、會撞到用量額度，有時只差一句「continue」，而你只能一個個分頁點進去看。抓畫面、模擬 GUI 操作都很脆弱。BAT 本來就有一套給自家桌面與手機客戶端用的遠端協定，連接器直接讀這套協定，讓負責監督的 agent 替你去看。"
+    },
+    "quote": {
+      "en": "Reading is always on. Anything that writes is opt-in per host, confirmed per call, rate-limited, and written to an audit log.",
+      "zh": "讀取預設開放；寫入要逐台授權、逐次確認，並有限速與稽核。"
+    }
+  },
+  "flow": {
+    "kicker": {"en": "How it works", "zh": "運作方式"},
+    "title": {"en": "Read first. Opt in to act.", "zh": "先讀，要動手再開啟。"},
+    "intro": {
+      "en": "Each host has its own switches in hosts.toml, and they stack: orchestrate needs writes, allow_all needs writes, and auto_cleanup needs orchestrate.",
+      "zh": "每台主機在 hosts.toml 裡有各自的開關，而且是一層疊一層：orchestrate 要先開 writes，allow_all 也要先開 writes，auto_cleanup 則要先開 orchestrate。"
+    },
+    "steps": [
+      {"title": {"en": "Import hosts from BAT", "zh": "從 BAT 匯入主機"},
+       "body": {"en": "batc import-bat reads the BAT desktop client's profiles and writes hosts.toml with writes off: the wss:// URL, the pinned certificate fingerprint, and a token reference, never the token itself.",
+                "zh": "batc import-bat 讀取 BAT 桌面客戶端的 profile，寫出寫入功能關閉的 hosts.toml：wss:// 網址、固定的憑證指紋，以及 token 的參照，不會存 token 本身。"}},
+      {"title": {"en": "Connect an agent read-only", "zh": "以唯讀接上 agent"},
+       "body": {"en": "Register the MCP server as \"bat\" in Claude Code, Codex, Cursor, Hermes, or any MCP client. Started read-only, it has only the 13 read tools, whatever the config says.",
+                "zh": "在 Claude Code、Codex、Cursor、Hermes 或任何 MCP 客戶端裡，把 MCP 伺服器註冊成「bat」。以唯讀模式啟動時，不管設定檔怎麼寫，都只會有 13 個唯讀工具。"}},
+      {"title": {"en": "Triage and wait", "zh": "分類與等待"},
+       "body": {"en": "sessions_triage labels every session (quota exhausted, waiting on a permission or a question, working, done) with an evidence line. session_wait blocks until a turn ends or a question appears.",
+                "zh": "sessions_triage 替每個 session 標上狀態（額度用完、等權限或等回答、工作中、已完成），並附上判斷依據。session_wait 會一直等到回合結束或出現提問。"}},
+      {"title": {"en": "Opt in, host by host", "zh": "逐台主機開啟"},
+       "body": {"en": "writes = true adds nudging, answering, and relaying. orchestrate = true adds worktree sessions, Codex failover, merges, and gated cleanup.",
+                "zh": "writes = true 會加上推動、回答與轉達；orchestrate = true 再加上 worktree session、轉給 Codex 接手、merge，以及有關卡把關的清理。"}}
+    ]
+  },
+  "capabilities": {
+    "kicker": {"en": "What you get", "zh": "你會得到什麼"},
+    "title": {"en": "Three tiers, and gates on anything that writes.", "zh": "三層權限，寫入有關卡。"},
+    "intro": {
+      "en": "32 MCP tools and 32 batc subcommands. Only the read tier is on by default, and the tools of a disabled tier are never registered.",
+      "zh": "共 32 個 MCP 工具、32 個 batc 子指令。預設只開唯讀層；沒開啟的權限層，工具根本不會註冊。"
+    },
+    "items": [
+      {"title": {"en": "Read tier, always on", "zh": "唯讀層，永遠開啟"},
+       "body": {"en": "13 tools list hosts, workspaces, and sessions, read transcripts in pages, wait for a turn to end, and show worktree diffs. The turn marker returned by a send keeps an older reply from being reported as the new result.",
+                "zh": "13 個工具可以列出主機、工作區與 session，分頁讀取對話，等待回合結束，並顯示 worktree 的 diff。送出訊息時拿到的 turn marker，可以避免把上一輪的回覆誤當成新結果。"},
+       "tag": "session_read · session_wait"},
+      {"title": {"en": "Opt-in nudge tier", "zh": "選擇性開啟的推動層"},
+       "body": {"en": "With writes = true, 7 tools send a message, say continue, interrupt, answer a question or permission prompt, switch permission mode, or relay a person's words verbatim. Every call needs confirm=true.",
+                "zh": "開啟 writes = true 後多 7 個工具：送訊息、說 continue、中斷、回答提問或權限請求、切換權限模式，或逐字轉達某個人的原話。每次呼叫都要帶 confirm=true。"},
+       "tag": "writes = true"},
+      {"title": {"en": "Separate fan-out tier", "zh": "獨立的分派層"},
+       "body": {"en": "orchestrate = true, which needs writes, adds 12 tools: start sessions in fresh git worktrees, fan a bat-fanout plan out to parallel sessions, merge only clean, conflict-free branches, and remove worktrees. The default cap is 4 orchestrated sessions per host.",
+                "zh": "orchestrate = true（必須先開 writes）再加 12 個工具：在新的 git worktree 開 session、把 bat-fanout 計畫分派給平行的 session、只 merge 乾淨且沒有衝突的分支，以及移除 worktree。預設每台主機最多同時調度 4 個 session。"},
+       "tag": "orchestrate = true"},
+      {"title": {"en": "Quota failover to Codex", "zh": "額度用完，轉給 Codex"},
+       "body": {"en": "Triage spots Claude sessions stopped by a usage quota from the limit text in the transcript. session_failover starts Codex in the same worktree and branch, with a handoff prompt that carries the original task, the latest instruction, recent output, and git state.",
+                "zh": "Triage 從對話裡的額度提示文字，找出因為用量額度停下來的 Claude session。session_failover 會在同一個 worktree、同一個分支開 Codex 接手，交接 prompt 帶著原始任務、最新指示、最近的輸出與 git 狀態。"},
+       "tag": "session_failover"},
+      {"title": {"en": "Gated auto-approve", "zh": "有門檻的自動核准"},
+       "body": {"en": "approve_pending answers permission prompts, never questions, with \"don't ask again\", then raises the session to allow-all. It only runs on hosts whose default_permission_mode is allow_all, and it never switches a Claude session mid-turn.",
+                "zh": "approve_pending 只核准權限請求、不回答提問，核准時勾選「不再詢問」，再把 session 提升為 allow-all。它只在 default_permission_mode 設為 allow_all 的主機上執行，也絕不在 Claude 回合進行中切換權限。"},
+       "tag": "approve_pending"},
+      {"title": {"en": "Cleanup behind hard gates", "zh": "有硬性關卡的清理"},
+       "body": {"en": "session_cleanup is a dry run by default, and acting needs auto_cleanup = true on the host. It merges only when the worktree is clean, the branch is ahead, a passing verification record matches the commit, risk checks pass, and Jev agrees at 0.8 or higher. Branches are always kept.",
+                "zh": "session_cleanup 預設只做 dry run，要真的動手，主機必須開啟 auto_cleanup = true。只有在 worktree 乾淨、分支領先、有對應同一個 commit 的通過驗證紀錄、風險檢查沒問題，而且 Jev 信心達 0.8 以上時，才會 merge。分支一律保留。"},
+       "tag": "session_cleanup"}
+    ]
+  },
+  "architecture": {
+    "kicker": {"en": "Architecture", "zh": "系統架構"},
+    "title": {"en": "A client of BAT, not a part of it.", "zh": "是 BAT 的客戶端，不是 BAT 的一部分。"},
+    "intro": {
+      "en": "The connector is one more remote client of a BAT host, next to BAT's own apps. Its checks live in the client core, below the MCP layer, so the CLI and every MCP client get the same rules.",
+      "zh": "連接器只是 BAT 主機的另一個遠端客戶端，和 BAT 自己的 app 並列。檢查都放在客戶端核心、MCP 層之下，所以 CLI 與每個 MCP 客戶端套用的是同一套規則。"
+    },
+    "label": {"en": "Agent → connector → BAT host", "zh": "Agent → 連接器 → BAT 主機"},
+    "nodes": [
+      {"name": {"en": "Your agent", "zh": "你的 agent"}, "lines": ["Claude Code · Codex", "Cursor · Hermes", {"en": "or a script using batc", "zh": "或用 batc 的腳本"}]},
+      {"name": {"en": "Connector", "zh": "連接器"}, "core": true, "lines": [{"en": "MCP server \"bat\" + batc CLI", "zh": "MCP 伺服器「bat」與 batc CLI"}, {"en": "Tiers, confirm, rate limits", "zh": "權限層、確認、速率限制"}, {"en": "Channel allowlist, audit log", "zh": "通道白名單、稽核紀錄"}]},
+      {"name": {"en": "BAT host", "zh": "BAT 主機"}, "lines": ["bat-server · wss://", "bat-remote/v2", {"en": "Claude Code and Codex sessions", "zh": "Claude Code 與 Codex session"}]}
+    ],
+    "return": "hosts.toml · audit.jsonl · orchestrated.json",
+    "principles": {
+      "title": {"en": "Read freely. Write on purpose.", "zh": "放心讀，小心寫。"},
+      "items": [
+        {"en": "Unofficial: not affiliated with or endorsed by BAT's authors", "zh": "非官方：與 BAT 作者沒有關係，也未經其背書"},
+        {"en": "A TLS pin mismatch aborts before the token is sent", "zh": "憑證指紋不符，就在送出 token 之前中止"},
+        {"en": "Tokens come from env:, file:, or bat-profile: references and are redacted from errors", "zh": "Token 只從 env:、file:、bat-profile: 參照讀取，錯誤訊息一律遮蔽"},
+        {"en": "Never sends reset, kill, PTY writes, file operations, settings, or installs", "zh": "絕不送出 reset、kill、PTY 寫入、檔案操作、設定與安裝"},
+        {"en": "No push, tag, or PR channel: merges stay in the host's main checkout", "zh": "沒有 push、tag 或 PR 通道：merge 只留在主機的主要 checkout"}
+      ]
+    }
+  },
+  "decisions": {
+    "kicker": {"en": "Design decisions", "zh": "設計取捨"},
+    "title": {"en": "Why it is shaped this way.", "zh": "為什麼長這個樣子。"},
+    "items": [
+      {"title": {"en": "The protocol, not the screen", "zh": "走協定，不抓畫面"},
+       "body": {"en": "BAT's own clients already use bat-remote/v2, so the connector does too: no screen scraping, no GUI automation. The cost is coupling to a protocol read from BAT's source (v3.2.12) that can change between releases.",
+                "zh": "BAT 自己的客戶端本來就用 bat-remote/v2，連接器也走同一套：不抓畫面、不模擬 GUI 操作。代價是綁在一套從 BAT 原始碼（v3.2.12）讀出來的協定上，而它可能隨版本改變。"}},
+      {"title": {"en": "Unregistered beats refused", "zh": "不註冊，比拒絕更可靠"},
+       "body": {"en": "A tool that does not exist cannot be talked into running. Write and orchestrate tools are registered only when some host enables them, and even then each call needs confirm=true.",
+                "zh": "不存在的工具，就不可能被說服去執行。寫入與調度工具只有在某台主機開啟時才會註冊，就算註冊了，每次呼叫也都要帶 confirm=true。"}},
+      {"title": {"en": "Code decides first, a model last", "zh": "先由程式判斷，模型最後才上場"},
+       "body": {"en": "Cleanup checks git state, a verification record for the exact commit, and risk rules in code before it asks Jev anything. If Jev is unavailable, a merge escalates instead of going through.",
+                "zh": "清理流程先用程式檢查 git 狀態、對應同一個 commit 的驗證紀錄與風險規則，最後才問 Jev。Jev 不在時，merge 一律升級給人處理，不會直接放行。"}},
+      {"title": {"en": "Branches are never deleted", "zh": "分支永遠不刪"},
+       "body": {"en": "Cleanup removes worktree folders but keeps every branch, so a merge or removal can be undone from the branch. Failover reuses the same worktree instead of copying work around.",
+                "zh": "清理會移除 worktree 資料夾，但每個分支都保留，merge 或移除之後都還能從分支救回來。Failover 直接沿用同一個 worktree，不把工作搬來搬去。"}}
+    ]
+  },
+  "quickstart": {
+    "kicker": {"en": "Start here", "zh": "從這裡開始"},
+    "title": {"en": "Install, then connect.", "zh": "先安裝，再接上。"},
+    "intro": {
+      "en": "You need Python 3.10 or newer on Linux or macOS, and a reachable BAT host with its remote server on. The package is not on PyPI yet, so install it from GitHub.",
+      "zh": "需要 Linux 或 macOS 上的 Python 3.10 以上版本，以及一台連得到、已開啟遠端伺服器的 BAT 主機。套件還沒上架 PyPI，請直接從 GitHub 安裝。"
+    },
+    "primary": {"href": "https://github.com/teddashh/bat-agent-connector/blob/main/SECURITY.md", "label": {"en": "Security model", "zh": "安全模型"}},
+    "secondary": {"href": "https://github.com/teddashh/bat-agent-connector/blob/main/docs/ORCHESTRATE.md", "label": {"en": "Orchestrate tier", "zh": "調度層說明"}},
+    "steps": [
+      {"title": {"en": "Install", "zh": "安裝"},
+       "body": {"en": "Either command puts batc and bat-agent-connector-mcp on your PATH.",
+                "zh": "兩個指令擇一，都會把 batc 與 bat-agent-connector-mcp 放進 PATH。"},
+       "code": "uv tool install git+https://github.com/teddashh/bat-agent-connector\n# or\npipx install git+https://github.com/teddashh/bat-agent-connector"},
+      {"title": {"en": "Import hosts and probe them", "zh": "匯入主機並測試連線"},
+       "body": {"en": "Writes ~/.config/bat-agent-connector/hosts.toml with writes off, then reports version and ping per host. No BAT client on this machine? Start from examples/hosts.example.toml.",
+                "zh": "寫出寫入功能關閉的 ~/.config/bat-agent-connector/hosts.toml，再回報每台主機的版本與 ping。這台機器沒有 BAT 客戶端的話，就從 examples/hosts.example.toml 開始改。"},
+       "code": "batc import-bat\nbatc hosts"},
+      {"title": {"en": "Add the MCP server read-only", "zh": "以唯讀模式加入 MCP 伺服器"},
+       "body": {"en": "Claude Code is shown; the README has Codex, Cursor, Hermes, and HTTP setups. Then ask your agent which sessions are waiting for you.",
+                "zh": "這裡以 Claude Code 為例，Codex、Cursor、Hermes 與 HTTP 的設定寫在 README。接著就可以問你的 agent：哪些 session 在等我？"},
+       "code": "claude mcp add bat -- bat-agent-connector-mcp --read-only"}
+    ]
+  },
+  "status": {
+    "kicker": {"en": "Honest status", "zh": "誠實的現況"},
+    "title": {"en": "Where it stands.", "zh": "目前的樣子。"},
+    "intro": {
+      "en": "Alpha, started in late September 2026 and changing daily. Every changelog entry is marked unreleased: no version tags, no GitHub releases, no PyPI package. BAT is by TonyQ; this project is not affiliated with or endorsed by BAT's authors, and a BAT update can break it.",
+      "zh": "Alpha 階段，2026 年 9 月下旬才開始寫，目前幾乎每天都在改。CHANGELOG 每一版都標著 unreleased：沒有版本 tag、沒有 GitHub release，也沒有 PyPI 套件。BAT 的作者是 TonyQ；本專案與 BAT 作者沒有關係、未經其背書，BAT 一更新就可能讓它失效。"
+    },
+    "works": [
+      {"en": "Read tier: 13 MCP tools, plus the batc CLI with batc --json for scripts", "zh": "唯讀層：13 個 MCP 工具，加上 batc CLI，腳本可用 batc --json"},
+      {"en": "Per-host write and orchestrate tiers with confirm=true, rate limits (by default one write per session per minute, 30 per hour), and an append-only audit log", "zh": "逐台主機開啟的寫入層與調度層：每次呼叫要 confirm=true，有速率限制（預設同一 session 每分鐘一次、每小時總共 30 次），並寫入只能附加的稽核紀錄"},
+      {"en": "Triage from transcript patterns and BAT-STATUS markers, and quota failover to Codex in the same worktree", "zh": "依對話內容規則與 BAT-STATUS 標記分類 session，額度用完時在同一個 worktree 轉給 Codex 接手"},
+      {"en": "approve_pending and gated session_cleanup; cleanup never deletes a branch", "zh": "approve_pending 與有關卡把關的 session_cleanup；清理絕不刪除分支"},
+      {"en": "A pytest suite against a mock TLS BAT server: 278 passed, 33 skipped in a local run on 2026-09-30", "zh": "以模擬的 TLS BAT 伺服器測試的 pytest 套件：2026-09-30 本機執行，278 個通過、33 個略過"}
+    ],
+    "limits": [
+      {"en": "The protocol was read from BAT's source (v3.2.12) and can change between BAT releases", "zh": "協定是從 BAT 原始碼（v3.2.12）讀出來的，BAT 改版時可能跟著變"},
+      {"en": "Linux and macOS only (it uses fcntl file locks)", "zh": "只支援 Linux 與 macOS（用到 fcntl 檔案鎖）"},
+      {"en": "Automatic merges need the optional Jev layer (a TypeSafe or OpenRouter key). Without it, cleanup keeps, cleans, or escalates, but never merges", "zh": "自動 merge 需要選用的 Jev 判斷層（TypeSafe 或 OpenRouter 的 key）。沒有它，清理只會保留、清掉或升級給人處理，不會 merge"},
+      {"en": "BAT's Codex sessions do not echo message IDs, so Codex turn tracking falls back to timestamps and Codex sends are not retried after a disconnect", "zh": "BAT 的 Codex session 不會回傳訊息 ID，所以 Codex 的回合追蹤只能退回用時間戳，斷線後也不會自動重送"},
+      {"en": "The task service (batc serve and the work_* tools) is experimental: its Goose planner is off by default, so submitted tasks stay queued", "zh": "任務服務（batc serve 與 work_* 工具）還在實驗階段：Goose 規劃器預設關閉，送出的任務會一直排隊"}
+    ]
+  },
+  "facts": [
+    {"label": {"en": "Version", "zh": "版本"}, "value": {"en": "0.2.4 (unreleased)", "zh": "0.2.4（未發行）"}},
+    {"label": {"en": "License", "zh": "授權"}, "value": "MIT"},
+    {"label": {"en": "Stack", "zh": "技術"}, "value": "Python · MCP"},
+    {"label": {"en": "Platform", "zh": "平台"}, "value": "Linux · macOS"},
+    {"label": {"en": "Protocol", "zh": "協定"}, "value": "bat-remote/v2"},
+    {"label": {"en": "Verified", "zh": "查核日期"}, "value": "2026-09-30"}
+  ],
+  "links": [
+    {"href": "https://github.com/tony1223/better-agent-terminal", "label": {"en": "Better Agent Terminal by TonyQ", "zh": "Better Agent Terminal（作者 TonyQ）"}},
+    {"href": "https://github.com/teddashh/bat-agent-connector/blob/main/CHANGELOG.md", "label": {"en": "Changelog", "zh": "更新紀錄"}},
+    {"href": "https://github.com/teddashh/bat-agent-connector/blob/main/README.zh-TW.md", "label": {"en": "中文 README", "zh": "中文 README"}},
+    {"href": "https://teddashh.github.io/bat-cowork/", "label": {"en": "Related: bat-cowork", "zh": "相關專案：bat-cowork"}}
+  ]
+}
