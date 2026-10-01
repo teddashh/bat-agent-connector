@@ -1327,7 +1327,8 @@ h2.lang-zh {
 
 .footer-inner {
   display: grid;
-  grid-template-columns: 1fr auto;
+  /* a long row of links wraps instead of squeezing the brand column */
+  grid-template-columns: minmax(16rem, 1fr) auto;
   align-items: end;
   gap: 30px;
   padding: 48px 0;
