@@ -37,7 +37,7 @@ def request(method: str, *, _auth_token: str | None = None, **params) -> dict:
     parsed = urlsplit(url)
     if (parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
             or parsed.username or parsed.password or parsed.path != "/rpc" or parsed.query or parsed.fragment):
-        raise ValueError("task daemon URL must be loopback (use SSH forwarding on example-host-1)")
+        raise ValueError("task daemon URL must be loopback (reach a remote daemon through SSH forwarding)")
     cap = os.environ.get("BATC_TASK_CAPABILITY")
     token_file = Path(os.environ.get("BATC_TASK_ADMIN_TOKEN_FILE", state_dir() / "task-admin.token"))
     token = _auth_token or cap or token_file.read_text().strip()

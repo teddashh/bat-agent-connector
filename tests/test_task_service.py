@@ -3427,8 +3427,8 @@ kind = "codex-acp"
 def test_observed_verifier_ssh_command_keeps_remote_script_quoted():
     from bat_agent_connector.task_verifier import _remote_command
 
-    cmd = _remote_command("castle", "/srv/work tree", ("pytest", "-q", "tests/test_task_service.py"))
-    assert cmd[:4] == ("ssh", "-o", "BatchMode=yes", "castle")
+    cmd = _remote_command("worker-1", "/srv/work tree", ("pytest", "-q", "tests/test_task_service.py"))
+    assert cmd[:4] == ("ssh", "-o", "BatchMode=yes", "worker-1")
     import shlex
     script = "cd -- " + shlex.quote("/srv/work tree") + " && pytest -q tests/test_task_service.py"
     assert cmd[4] == "sh -lc " + shlex.quote(script)
@@ -3510,8 +3510,8 @@ async def test_observed_verifier_ssh_timeout_kills_remote_tree(tmp_path, monkeyp
     pidfile = tmp_path / "remote-grandchild.pid"
     runner = ObservedVerifier(VerificationSettings(
         commands={"p": (*HANGING, str(pidfile))}, timeout_s=1,
-        ssh_hosts={"example-host-1": "castle"}, artifact_dir=str(tmp_path / "artifacts")))
-    task = {"task_id": "hang-ssh", "host": "example-host-1", "project": "p"}
+        ssh_hosts={"host-a": "worker-1"}, artifact_dir=str(tmp_path / "artifacts")))
+    task = {"task_id": "hang-ssh", "host": "host-a", "project": "p"}
     started = time.monotonic()
     result = await runner.observe(task, str(repo))
     assert time.monotonic() - started < 15
@@ -3520,7 +3520,7 @@ async def test_observed_verifier_ssh_timeout_kills_remote_tree(tmp_path, monkeyp
     assert not list((tmp_path / "home").glob(".batc-verify-*.pid"))
     # A normal remote run removes its pgid file and keeps the exit status.
     ok = ObservedVerifier(VerificationSettings(
-        commands={"p": ("sh", "-c", "echo ok; exit 3")}, ssh_hosts={"example-host-1": "castle"},
+        commands={"p": ("sh", "-c", "echo ok; exit 3")}, ssh_hosts={"host-a": "worker-1"},
         artifact_dir=str(tmp_path / "artifacts")))
     done = await ok.observe(task, str(repo))
     assert done["exit_code"] == 3
@@ -3570,7 +3570,7 @@ async def test_external_worktree_creation_is_restart_idempotent(tmp_path, fleet_
     task = journal.submit(project="p", host="h1", workspace="w", original_words="x",
                           base_branch="feat/task-service", idempotency_key="external-restart")
     adapter = task_bat.BatTaskAdapter(
-        fleet_factory(), ObservedVerifier(VerificationSettings(ssh_hosts={"h1": "castle"})), journal
+        fleet_factory(), ObservedVerifier(VerificationSettings(ssh_hosts={"h1": "worker-1"})), journal
     )
     scripts = []
 
@@ -3599,7 +3599,7 @@ async def test_external_worktree_script_quotes_workspace_path(tmp_path, fleet_fa
     task = journal.submit(project="p", host="h1", workspace="w", original_words="x",
                           base_branch="feat/task-service", idempotency_key="quoted-root")
     adapter = task_bat.BatTaskAdapter(
-        fleet_factory(), ObservedVerifier(VerificationSettings(ssh_hosts={"h1": "castle"})), journal)
+        fleet_factory(), ObservedVerifier(VerificationSettings(ssh_hosts={"h1": "worker-1"})), journal)
     scripts = []
 
     async def capture(_task, script):
@@ -3825,7 +3825,7 @@ async def test_reviewer_start_polls_existing_session_after_start_timeout(
     async def invoke(channel, params, **kwargs):
         calls.append(channel)
         if channel == "claude:start-session":
-            raise TimeoutError("castle workspace load timeout")
+            raise TimeoutError("host-a workspace load timeout")
         if channel == "claude:get-session-meta":
             return {"cwd": "/srv/demo", "isStreaming": False}
         return {}
