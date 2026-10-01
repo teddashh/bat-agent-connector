@@ -12,17 +12,18 @@ operator's workstation (`host-a`) reaches the service through an SSH forward,
 for example `ssh -N -L 127.0.0.1:18796:127.0.0.1:18796 control-host`, with the
 forward restricted to the intended operator account and host key.
 
-The rules engine remains the default. Goose 1.52.0 is opt-in per task via the
-submit engine/provider fields, with the task-scoped MCP server as its only
-extension. Discord publishing remains disabled for the canary unless explicitly
-enabled for Ted's board.
+Every new task is one Goose 1.52.0 session, with the task-scoped MCP server as
+its only extension; since 2026-09-29 `work_submit` no longer takes an engine
+choice. Goose stays behind one switch, `BATC_GOOSE_ENABLED`, off by default;
+while it is off, tasks are accepted but stay queued. Discord publishing remains
+disabled for the canary unless explicitly enabled for Ted's board.
 
 ## Hermes tool contract
 
 Hermes switches from ad-hoc BAT/crons to these task-scoped calls:
 
 - `work_submit`: create a durable task with project, acceptance, base branch,
-  engine, and idempotency key.
+  and idempotency key.
 - `work_status`: inspect state, verification/review evidence, and metrics.
 - `work_pause` / `work_resume`: stop or resume automatic dispatch without
   losing journal state.
@@ -41,9 +42,10 @@ chooses it.
 3. Store host/profile references and provider configuration mode `0600`; keep
    BAT tokens outside TOML. Run `systemctl --user daemon-reload` and start the
    service manually for preflight.
-4. Verify `work_submit → work_status → work_result` on a no-op repository task,
-   then enable Hermes' rules-engine route. Goose remains an explicit per-task
-   opt-in until its ACP/reconciliation metrics meet the canary gate.
+4. Set `BATC_GOOSE_ENABLED=1`, verify `work_submit → work_status → work_result`
+   on a no-op repository task, then enable Hermes' task-service route. Every
+   task is a Goose session, so the canary gate below also judges Goose's
+   ACP/reconciliation metrics.
 5. Enable the 24-hour canary at 10% of eligible low-risk tasks, then 50%, then
    100% only if the gates below hold.
 
