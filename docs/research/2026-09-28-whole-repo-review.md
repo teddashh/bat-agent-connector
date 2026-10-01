@@ -4,7 +4,7 @@
 
 ## 方法與可用性
 
-依便宜先行的順序：讀 README／設計及 task、lifecycle、MCP、BAT、verifier、Goose、provider 原始碼與測試；用 `rg` 搜尋 shell 執行、token／錯誤輸出、跨 task 操作、舊 watcher／relay 重疊；跑 Ruff、`git diff --check`、focused 與全庫 pytest。`/home/box/agent-data/workflows/jev-code-review/SKILL.md` 在這台 `castleridge-ai1` 不存在，已搜尋本機可用 skill；也沒有可呼叫的 user-jev MCP，`TYPESAFE_API_KEY` 不在本機環境，故本輪未聲稱執行 TypeSafe Jev 的線上審查。這不影響 service 中 Jev fail-open 的 fake／contract 測試。BAT Codex reviewer 的讀取結果另記於下方；獨立 release sign-off 仍由 Ted 指定的 reviewer 處理。
+依便宜先行的順序：讀 README／設計及 task、lifecycle、MCP、BAT、verifier、Goose、provider 原始碼與測試；用 `rg` 搜尋 shell 執行、token／錯誤輸出、跨 task 操作、舊 watcher／relay 重疊；跑 Ruff、`git diff --check`、focused 與全庫 pytest。指定的 Jev 程式審查 skill（`jev-code-review/SKILL.md`）在這台開發主機（`host-a`，操作者的工作站）不存在，已搜尋本機可用 skill；也沒有可呼叫的 user-jev MCP，`TYPESAFE_API_KEY` 不在本機環境，故本輪未聲稱執行 TypeSafe Jev 的線上審查。這不影響 service 中 Jev fail-open 的 fake／contract 測試。BAT Codex reviewer 的讀取結果另記於下方；獨立 release sign-off 仍由 Ted 指定的 reviewer 處理。
 
 後續 executor 對 `f59e359` 依既定 Jev 全庫流程完成第一輪：32 檔、47 次呼叫，結論 `request_changes`。唯一項目是 `task_handoff.py` 的 `original_words_archive`／`ledger_summary` 缺直接測試（testGap、嚴重度 2.03、機制信心低）。人工檢查未找到執行時缺陷；下表與新回歸測試記錄這項測試缺口的處理，沒有重跑模型探針。
 

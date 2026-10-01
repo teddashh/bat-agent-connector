@@ -4,12 +4,13 @@ Status: design only; this document does not enable the cutover.
 
 ## Target topology
 
-Run `batc serve` as a `systemd --user` service on `grok-bot-01`, bound only to
-`127.0.0.1` (the task API and MCP endpoint). Hermes talks to the loopback task
-API; it does not receive BAT credentials or call BAT directly. Castle1/OpenClaw
-traffic reaches the service through an SSH forward, for example
-`ssh -N -L 127.0.0.1:18796:127.0.0.1:18796 grok-bot-01`, with the forward
-restricted to the intended operator account and host key.
+Run `batc serve` as a `systemd --user` service on the control host that also
+runs Hermes (called `control-host` here), bound only to `127.0.0.1` (the task
+API and MCP endpoint). Hermes talks to the loopback task API; it does not
+receive BAT credentials or call BAT directly. OpenClaw traffic from the
+operator's workstation (`host-a`) reaches the service through an SSH forward,
+for example `ssh -N -L 127.0.0.1:18796:127.0.0.1:18796 control-host`, with the
+forward restricted to the intended operator account and host key.
 
 The rules engine remains the default. Goose 1.52.0 is opt-in per task via the
 submit engine/provider fields, with the task-scoped MCP server as its only
@@ -34,7 +35,7 @@ chooses it.
 
 ## Installation and staged enablement
 
-1. Install the pinned connector and dependencies on grok-bot-01.
+1. Install the pinned connector and dependencies on `control-host`.
 2. Install a user unit such as `batc-task.service` with `Restart=on-failure`,
    a private `StateDirectory`, `NoNewPrivileges=yes`, and loopback-only bind.
 3. Store host/profile references and provider configuration mode `0600`; keep
@@ -77,7 +78,7 @@ MCP access, or Discord/journal disagreement.
 1. Stop Hermes' task-service route and `systemctl --user stop batc-task.service`.
 2. Re-enable the previously disabled `bat-watch-*` units and `idle-push` cron,
    then verify their health/status output.
-3. Repoint castle1/OpenClaw to the old local route or remove the SSH forward.
+3. Repoint OpenClaw on `host-a` to the old local route or remove the SSH forward.
 4. Leave the WAL journal and canary worktrees intact; do not replay uncertain
    prompts. Export the journal/metrics and reconcile only with Ted's approval.
 5. Confirm one legacy dry run and announce the rollback; investigate before a
@@ -85,7 +86,7 @@ MCP access, or Discord/journal disagreement.
 
 ## Ted prerequisites
 
-None for the planned installation if the existing grok-bot-01 systemd user,
-castle1 SSH identity, BAT profile, and Discord board credentials remain valid.
+None for the planned installation if the existing `control-host` systemd user,
+`host-a` SSH identity, BAT profile, and Discord board credentials remain valid.
 Ted is only needed for an explicit uncertain-command reconciliation, a canary
 gate override, or a rollback decision after a policy/security alert.

@@ -2,8 +2,10 @@
 
 The service does not choose a model per step and does not keep a rules-versus-Goose fork.
 
-- One task is one Goose session on Opus 5.5. Goose splits once at the start, then assigns work
-  Grok 4.7 : Codex : Opus 5.5 = 4:2:1. A model at or below 15% weekly remaining gets no new work.
+- One task is one Goose session on Opus 5.5. The `goose-session` recipe prompt tells Goose to split
+  once at the start, to aim for an executor mix of Grok 4.7 : Codex : Opus 5.5 = 4:2:1, and to give
+  no new work to a model at or below 15% weekly remaining. This is guidance in the prompt: the
+  service does not count assignments or read quota.
 - Verification is the trusted test runner. A code failure returns to the same session for bounded
   rework. When the budget is exhausted the task is `needs_ted`. There is no independent reviewer
   and no mid-task failover; a provider quota error is `needs_ted`.
@@ -11,8 +13,9 @@ The service does not choose a model per step and does not keep a rules-versus-Go
   The words are stored on the original task and, when Goose runs, are handed to that same session
   with an instruction not to re-plan.
 - Jev is not on the normal path. The only call is when an orchestrator submits already-split work
-  and passes `executor_model` (`grok`, `codex`, or `claude`). That skips Opus. A Jev `reject`
-  (the named model is at or below the 15% floor) refuses the submit; no answer keeps the named model.
+  and passes `executor_model` (`grok`, `codex`, or `claude`). That skips Opus. The question text
+  asks Jev to reject the named model when it is at or below 15% weekly remaining (the service does
+  not check quota itself); a valid `reject` refuses the submit, and no answer keeps the named model.
 - Ted hears four milestones: `started`, `needs_ted`, `done`, `failed`.
 
 Goose runs only when `GooseConfig.enabled` is true. It is off by default, so submitted tasks stay

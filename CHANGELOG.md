@@ -2,11 +2,13 @@
 
 ## Next release (unreleased)
 
-- Every task is one Goose session on Opus 5.5 (switch off by default). Goose splits once and
-  assigns Grok 4.7 : Codex : Opus 5.5 = 4:2:1, skipping any model at or below 15% weekly remaining.
-  The service no longer routes per step, starts an independent reviewer, or fails over mid-task.
-  Trusted-test failures return to the same session for bounded rework. A continuation does not
-  create a task. Jev runs only when an orchestrator passes `executor_model` for already-split work.
+- Every task is one Goose session on Opus 5.5 (switch off by default). The `goose-session` recipe
+  prompt tells Goose to split once, aim for Grok 4.7 : Codex : Opus 5.5 = 4:2:1, and give no new work
+  to a model at or below 15% weekly remaining; that is prompt guidance, not something the service
+  enforces or measures. The service no longer routes per step, starts an independent reviewer, or
+  fails over mid-task. Trusted-test failures return to the same session for bounded rework. A
+  continuation does not create a task. Jev runs only when an orchestrator passes `executor_model`
+  for already-split work.
 - Routing decisions now start the BAT agent they name. Sessions use the host's actually available
   agents in Ted's order: Claude Opus 5.5 (pinned `claude-opus-5-5:auto-compact-300k`, offered only
   while the host usage snapshot is fresh and under 85%/90%), then Codex. The reviewer is the other
@@ -43,7 +45,9 @@
   Lead `BAT-STATUS` is read from the last marker of the final agent message only.
 - The direct-send fence reads the running daemon's actual journal (`task-service.json` pointer) and
   refuses sends/answers to task-owned sessions whose state cannot be read.
-- The minimal task path is now the configurable production default (`BATC_TASK_DEFAULT_PATH=minimal`), with a typed Jev candidate review gate; `task_path="standard"` remains the explicit full-review opt-out.
+- The minimal task path, with a typed Jev candidate review gate, can be made the daemon's default by
+  setting `BATC_TASK_DEFAULT_PATH=minimal`; without it the default stays `standard`. An explicit
+  `task_path` on `work_submit` (`"standard"` for the full-review path) overrides either default.
 - Claude turn markers now use BAT's exact `clientMessageId` echo (`batc-<uuid>`), with an explicit
   timestamp cursor and conservative queued-turn phases. Codex is labeled as a timestamp fallback
   because BAT does not echo that ID; Codex sends are not automatically retried after a disconnect.
