@@ -1,6 +1,10 @@
 # bat-agent-connector
 
+**English** · [繁體中文](README.zh-TW.md)
+
 **An unofficial connector that lets AI agents work with [Better Agent Terminal (BAT)](https://github.com/tony1223/better-agent-terminal) sessions.**
+
+**Project page:** https://teddashh.github.io/bat-agent-connector/
 
 BAT (by [TonyQ / tony1223](https://github.com/tony1223)) is a terminal app that runs Claude Code and Codex agent
 sessions, grouped into workspaces, on your machines. It has a remote protocol (`bat-remote/v2`) that its own GUI and
@@ -17,7 +21,7 @@ MCP client) and shell scripts can:
 > This project is **not affiliated with or endorsed by** the BAT authors. The protocol was read from BAT's MIT-licensed
 > source (v3.2.12) and can change between BAT releases. Credit for BAT goes to TonyQ and its contributors.
 
-It ships three things:
+It ships four things:
 
 | Piece | Name |
 |---|---|
@@ -36,11 +40,11 @@ automation) and lets a supervising agent do the checking for you, with you in co
 
 ```bash
 # from a git checkout / URL (until published on PyPI)
-uv tool install git+https://github.com/<owner>/bat-agent-connector
+uv tool install git+https://github.com/teddashh/bat-agent-connector
 # or
-pipx install git+https://github.com/<owner>/bat-agent-connector
+pipx install git+https://github.com/teddashh/bat-agent-connector
 # or run without installing
-uvx --from git+https://github.com/<owner>/bat-agent-connector batc hosts
+uvx --from git+https://github.com/teddashh/bat-agent-connector batc hosts
 ```
 
 ## Configure
@@ -71,9 +75,9 @@ notification on every reconnect.
 
 | Tier | Enabled by | Tools |
 |---|---|---|
-| read (always) | - | `hosts_list`, `host_status`, `workspaces_list`, `sessions_list`, `session_read`, `session_wait`, `worktree_status`, `session_worktree_status`, `sessions_triage`, `quota_sessions` |
-| write | per host `writes = true` | `session_send`, `session_continue`, `session_interrupt`, `session_answer`, `session_set_permissions`, `approve_pending` |
-| orchestrate | per host `writes = true` **and** `orchestrate = true` | `session_start`, `worktree_merge`, `worktree_remove`, `session_failover`, `session_record_verification`, `session_cleanup` |
+| read (always) | - | `hosts_list`, `host_status`, `workspaces_list`, `sessions_list`, `session_read`, `session_wait`, `worktree_status`, `session_worktree_status`, `sessions_triage`, `quota_sessions`, `work_status`, `work_result`, `work_events` |
+| write | per host `writes = true` | `session_send`, `session_continue`, `session_interrupt`, `session_answer`, `session_set_permissions`, `approve_pending`, `session_relay` |
+| orchestrate | per host `writes = true` **and** `orchestrate = true` | `session_start`, `worktree_merge`, `worktree_remove`, `session_failover`, `session_record_verification`, `session_cleanup`, `fanout_plan_session`, `fanout_from_plan`, `work_submit`, `work_pause`, `work_resume`, `work_mark_stage` |
 
 Write and orchestrate tools are not even registered unless enabled, need `confirm=true` on every call, are rate
 limited, and are appended to an audit log (`~/.local/state/bat-agent-connector/audit.jsonl`, message bodies only as a
@@ -200,7 +204,7 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 batc hosts
 batc status box1
 batc sessions --active-within 24
-batc sessions box1 --workspace api --json
+batc --json sessions box1 --workspace api
 batc read box1 1a2b3c4d -n 30
 batc wait box1 1a2b3c4d --timeout 600
 batc worktrees box1
@@ -215,7 +219,7 @@ batc fanout PLAN.md --start --host box1 --workspace api --confirm
 batc merge box1 1a2b3c4d --confirm
 batc remove-worktree box1 1a2b3c4d --confirm
 # lifecycle
-batc triage box1 --state quota_exhausted waiting_permission
+batc triage box1 --state quota_exhausted --state waiting_permission
 batc quota                                            # quota-stopped Claude sessions on every host
 batc approve-pending box1 --dry-run                   # then --confirm
 batc permissions box1 1a2b3c4d --mode allow_all --confirm
@@ -223,7 +227,7 @@ batc failover box1 --all-exhausted --dry-run          # then --confirm
 batc cleanup box1                                     # dry run table; --apply --confirm to act
 ```
 
-Every command accepts `--json`.
+Every command accepts the global `--json` flag, placed before the command: `batc --json hosts`.
 
 ## Relay, fan-out and status markers
 
