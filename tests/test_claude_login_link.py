@@ -1,6 +1,5 @@
-import os
-from pathlib import Path
 from bat_agent_connector.goose_acp import _link_claude_login
+
 
 def test_links_only_login_files(tmp_path, monkeypatch):
     home = tmp_path / "op"
@@ -18,6 +17,7 @@ def test_links_only_login_files(tmp_path, monkeypatch):
     assert (iso / ".claude" / ".credentials.json").resolve() == creds.resolve()
     assert (iso / ".claude.json").resolve() == account.resolve()
     assert not (iso / "notes.txt").exists()
+
 
 def test_missing_login_is_a_noop(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "empty"))

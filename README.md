@@ -99,9 +99,11 @@ waiting for BAT. Hermes must not reinterpret or split the request. Goose, on Opu
 Task writes require the host's existing `writes=true` and `orchestrate=true` settings. Existing low-level tools
 and `batc` commands remain available.
 
-Every task is one Goose session on Opus 5.5. Goose splits the work once, then assigns executors
-Grok 4.7 : Codex : Opus 5.5 = 4:2:1, and does not use a model whose weekly quota remaining is at or below 15%.
-The service does not route, review, or fail over. Trusted tests are the verification verdict; a code failure
+Every task is one Goose session on Opus 5.5. The `goose-session` recipe prompt tells Goose to split the work
+once, to aim for an executor mix of Grok 4.7 : Codex : Opus 5.5 = 4:2:1, and to give no new work to a model
+whose weekly quota remaining is at or below 15%. These are instructions in the prompt, not rules the service
+enforces: it does not count assignments or read quota. The service does not route, review, or fail over.
+Trusted tests are the verification verdict; a code failure
 goes back to that same session for bounded rework, and an exhausted budget is `needs_ted`. Ted's later steering
 is a continuation on the same task (same session, no re-plan, no new task). Jev is not on that path. It is used
 only when an orchestrator submits already-split tasks and passes `executor_model` (`grok`, `codex`, or `claude`),
@@ -122,7 +124,9 @@ outage; `limit=0` returns `head_cursor`. Optional `[task_service] repo_urls` add
 `work_status` and `work_result` are plain journal reads and carry a `delivery` block that separates
 `verified` from `adopted`, `merged` and `deployed` (the last three come only from `work_mark_stage`).
 `context_refs` stores attachments, previous_message_id, plan and commit that came with Ted's words.
-A warm lead session is reused only for a follow-up whose HEAD is still the previous verified commit.
+`work_submit` takes an optional `task_path` (`standard` or `minimal`); without it the daemon uses `standard`, or
+`minimal` when it runs with `BATC_TASK_DEFAULT_PATH=minimal`. A warm lead session is reused only on the minimal
+path and only for a follow-up whose HEAD is still the previous verified commit.
 
 Earlier one-line README request A/B, before the minimal Jev review gate, used local fake BAT and disabled Jev
 network. Across 10 completed tasks per path, standard `bugfix-with-tests` median was **48.44 ms** and minimal

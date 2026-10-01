@@ -1,4 +1,4 @@
-# Next generation Hermes–BAT connector
+# Next generation Hermes-BAT connector
 
 Date: 2026-09-27. Source snapshots inspected read-only: connector `e72e5e4`, BAT
 `5a61d43`, Goose `04ed836`, Buzz `b0d6fb8`. The copied static review is in
@@ -43,8 +43,8 @@ batc record-verification HOST SESSION --commit FULL_HEAD --command 'uv run pytes
 
 ## Why Hermes can appear to lose a session
 
-Code-backed likely paths, not a diagnosis of grok-bot-01: (1) the old
-`session_wait(after=batc-<uuid>)` raised a parse error even though BAT accepted
+Code-backed likely paths, not a diagnosis of the host that runs Hermes: (1) the
+old `session_wait(after=batc-<uuid>)` raised a parse error even though BAT accepted
 the Claude send; a Discord agent could then stop tracking the turn. (2) A
 queued send's immediate user echo preceded the old turn's final output, which
 the old `_progress_after` could mistake for the new answer. (3) headless
@@ -53,8 +53,8 @@ Hermes on another machine with a different state directory will not discover
 those via `sessions_list`. (4) WebSocket events are ephemeral; the client
 reconnects and rereads state, but a transient disconnect can lose an event.
 The source does not prove which path occurred in Discord. No accessible local
-connector audit log was found in the default state directory, and the
-grok-bot-01 Hermes/BAT logs were unavailable here.
+connector audit log was found in the default state directory, and that host's
+Hermes/BAT logs were unavailable here.
 
 To confirm, correlate a single Discord thread/request ID with Hermes MCP tool
 call and result IDs, `host`/`session_id`, `clientMessageId`, connector
