@@ -53,7 +53,7 @@
     "title": {"en": "Several agents, several tabs, nobody watching.", "zh": "開了一堆 agent，卻沒人在看。"},
     "body": {
       "en": "Long-running coding agents finish, stall on a question, hit a usage quota, or just need \"continue\", and finding out means clicking through tabs. Screen scraping and GUI automation are brittle. BAT already has a remote protocol for its own desktop and phone clients, so the connector reads that, and a supervising agent does the checking.",
-      "zh": "長時間執行的 coding agent 會做完、會卡在問題上、會撞到用量額度，有時只差一句「continue」，而你只能一個個分頁點進去看。抓畫面、模擬 GUI 操作都很脆弱。BAT 本來就有一套給自家桌面與手機客戶端用的遠端協定，連接器直接讀這套協定，讓負責監督的 agent 替你去看。"
+      "zh": "長時間執行的 coding agent 會做完、會卡在問題上、會撞到用量額度，有時只差一句「continue」，而你只能一個個分頁點進去看。抓畫面、模擬 GUI 操作都很脆弱。BAT 本來就有一套給自家桌面與手機客戶端用的遠端協定，連接器直接透過這套協定讀取，讓負責監督的 agent 替你去看。"
     },
     "quote": {
       "en": "Reading is always on. Anything that writes is opt-in per host, confirmed per call, rate-limited, and written to an audit log.",
@@ -98,7 +98,7 @@
        "body": {"en": "With writes = true, 7 tools send a message, say continue, interrupt, answer a question or permission prompt, switch permission mode, or relay a person's words verbatim. Every call needs confirm=true.",
                 "zh": "開啟 writes = true 後多 7 個工具：送訊息、說 continue、中斷、回答提問或權限請求、切換權限模式，或逐字轉達某個人的原話。每次呼叫都要帶 confirm=true。"},
        "tag": "writes = true"},
-      {"title": {"en": "Separate fan-out tier", "zh": "獨立的分派層"},
+      {"title": {"en": "Separate fan-out tier", "zh": "獨立的調度層"},
        "body": {"en": "orchestrate = true, which needs writes, adds 12 tools: start sessions in fresh git worktrees, fan a bat-fanout plan out to parallel sessions, merge only clean, conflict-free branches, and remove worktrees. The default cap is 4 orchestrated sessions per host.",
                 "zh": "orchestrate = true（必須先開 writes）再加 12 個工具：在新的 git worktree 開 session、把 bat-fanout 計畫分派給平行的 session、只 merge 乾淨且沒有衝突的分支，以及移除 worktree。預設每台主機最多同時調度 4 個 session。"},
        "tag": "orchestrate = true"},
@@ -121,7 +121,7 @@
     "title": {"en": "A client of BAT, not a part of it.", "zh": "是 BAT 的客戶端，不是 BAT 的一部分。"},
     "intro": {
       "en": "The connector is one more remote client of a BAT host, next to BAT's own apps. Its checks live in the client core, below the MCP layer, so the CLI and every MCP client get the same rules.",
-      "zh": "連接器只是 BAT 主機的另一個遠端客戶端，和 BAT 自己的 app 並列。檢查都放在客戶端核心、MCP 層之下，所以 CLI 與每個 MCP 客戶端套用的是同一套規則。"
+      "zh": "連接器只是 BAT 主機的另一個遠端客戶端，和 BAT 自己的 app 並列。檢查都放在客戶端核心，位於 MCP 層之下，所以 CLI 與每個 MCP 客戶端套用的是同一套規則。"
     },
     "label": {"en": "Agent → connector → BAT host", "zh": "Agent → 連接器 → BAT 主機"},
     "nodes": [
@@ -201,7 +201,7 @@
       {"en": "The protocol was read from BAT's source (v3.2.12) and can change between BAT releases", "zh": "協定是從 BAT 原始碼（v3.2.12）讀出來的，BAT 改版時可能跟著變"},
       {"en": "Linux and macOS only (it uses fcntl file locks)", "zh": "只支援 Linux 與 macOS（用到 fcntl 檔案鎖）"},
       {"en": "Automatic merges need the optional Jev layer (a TypeSafe or OpenRouter key). Without it, cleanup keeps, cleans, or escalates, but never merges", "zh": "自動 merge 需要選用的 Jev 判斷層（TypeSafe 或 OpenRouter 的 key）。沒有它，清理只會保留、清掉或升級給人處理，不會 merge"},
-      {"en": "BAT's Codex sessions do not echo message IDs, so Codex turn tracking falls back to timestamps and Codex sends are not retried after a disconnect", "zh": "BAT 的 Codex session 不會回傳訊息 ID，所以 Codex 的回合追蹤只能退回用時間戳，斷線後也不會自動重送"},
+      {"en": "BAT's Codex sessions do not echo message IDs, so Codex turn tracking falls back to timestamps and Codex sends are not retried after a disconnect", "zh": "BAT 的 Codex session 不會回傳訊息 ID，所以 Codex 的回合追蹤只能改用時間戳，斷線後也不會自動重送"},
       {"en": "The task service (batc serve and the work_* tools) is experimental: its Goose planner is off by default, so submitted tasks stay queued", "zh": "任務服務（batc serve 與 work_* 工具）還在實驗階段：Goose 規劃器預設關閉，送出的任務會一直排隊"}
     ]
   },
