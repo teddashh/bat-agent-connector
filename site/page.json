@@ -386,7 +386,7 @@
           },
           "note": {
             "en": "Seven tools send, continue, interrupt, answer, set permissions, approve, or relay. Each call needs confirm=true.",
-            "zh": "7 個工具負責送出、續做、中斷、回答、改權限、核准或轉達。每次要帶 confirm=true。"
+            "zh": "7 個工具負責送出、續做、中斷、回答、改權限、核准或轉達。每次要帶 confirm=true。"
           },
           "tone": "warn",
           "icon": "chat"
