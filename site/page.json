@@ -222,15 +222,15 @@
   "flows": [
     {
       "id": "pin-then-auth",
-      "after": "architecture",
       "heading": {
-        "en": "The pin is checked before auth",
-        "zh": "先核對指紋再驗證"
+        "en": "Pin first, token second",
+        "zh": "先對指紋，再送 token"
       },
       "intro": {
-        "en": "The connector is another remote client of a BAT host. A certificate mismatch stops the handshake.",
-        "zh": "連接器是 BAT 主機的另一個遠端客戶端。憑證不符就停止交握。"
+        "en": "The token is loaded before the handshake. It is not sent until the certificate matches.",
+        "zh": "token 會先讀進來。憑證沒對上之前，不會送出去。"
       },
+      "after": "architecture",
       "spec": {
         "columns": [
           [
@@ -246,18 +246,6 @@
         "core": 1,
         "boundaryAfter": 1
       },
-      "zones": {
-        "en": [
-          "Your side",
-          "Cert pin",
-          "BAT host"
-        ],
-        "zh": [
-          "你這一側",
-          "憑證指紋",
-          "BAT 主機"
-        ]
-      },
       "steps": [
         {
           "title": {
@@ -265,8 +253,8 @@
             "zh": "呼叫工具"
           },
           "note": {
-            "en": "An agent or batc asks the connector, which loads the token and does not send it yet.",
-            "zh": "agent 或 batc 呼叫連接器時會讀入 token，但這時候還不送出。"
+            "en": "An agent or batc loads the host token from an env var, a file, or a bat-profile reference.",
+            "zh": "agent 或 batc 呼叫時，從 env、檔案或 bat-profile 把 token 讀進來。"
           },
           "tone": "neutral",
           "icon": "terminal"
@@ -277,8 +265,8 @@
             "zh": "核對指紋"
           },
           "note": {
-            "en": "The connector hashes the server certificate and closes the socket when it differs from hosts.toml.",
-            "zh": "連接器計算伺服器憑證的雜湊，和 hosts.toml 不同就關閉連線。"
+            "en": "The connector hashes the server certificate and closes the socket if that SHA-256 differs from hosts.toml.",
+            "zh": "它算出伺服器憑證的 SHA-256，和 hosts.toml 裡記的不同，就關掉連線。"
           },
           "tone": "accent",
           "icon": "shield"
@@ -289,8 +277,8 @@
             "zh": "BAT 主機"
           },
           "note": {
-            "en": "Only a matching pin is followed by the auth frame on bat-remote/v2.",
-            "zh": "只有指紋相符，才會接著送出 bat-remote/v2 的驗證訊框。"
+            "en": "Only after the fingerprint matches does it send the login, with the token inside.",
+            "zh": "指紋相符以後，才送出登入，token 就放在裡面。"
           },
           "tone": "info",
           "icon": "cloud"
@@ -298,34 +286,46 @@
       ],
       "ticks": [
         {
-          "en": "cert hash is compared first",
-          "zh": "先比對憑證雜湊"
+          "en": "token loaded, not sent yet",
+          "zh": "token 讀了還沒送"
         },
         {
-          "en": "mismatch closes the socket",
-          "zh": "不符就關閉連線"
+          "en": "a mismatch closes the socket",
+          "zh": "不符就關掉連線"
         },
         {
-          "en": "auth waits for a match",
-          "zh": "相符才送出驗證"
+          "en": "auth waits for the pin",
+          "zh": "對上才送驗證"
         }
       ],
       "caption": {
-        "en": "On connect, the connector loads the host token from an env, file, or bat-profile reference. It then opens the WebSocket, hashes the server certificate, and closes the socket if that SHA-256 differs from the fingerprint in hosts.toml. The auth frame, which carries the token, is sent only after the pin matches. The protocol is bat-remote/v2.",
-        "zh": "連線時，連接器先從 env、file 或 bat-profile 參照讀入主機 token，再開 WebSocket，計算伺服器憑證的 SHA-256。和 hosts.toml 裡的指紋不同，就關閉連線。帶著 token 的驗證訊框，只有在指紋相符之後才送出。協定是 bat-remote/v2。"
+        "en": "The pin stands in for the usual CA and hostname check.",
+        "zh": "這裡用指紋代替一般的 CA 和主機名稱檢查。"
+      },
+      "zones": {
+        "en": [
+          "Your tool",
+          "The pin",
+          "BAT host"
+        ],
+        "zh": [
+          "你的工具",
+          "對指紋",
+          "BAT 主機"
+        ]
       }
     },
     {
       "id": "tool-tiers",
-      "after": "how",
       "heading": {
-        "en": "Which tools get registered",
-        "zh": "哪些工具會註冊"
+        "en": "Read tools are always there",
+        "zh": "唯讀工具一定在"
       },
       "intro": {
-        "en": "A tool that is not registered cannot be called. The tiers stack, and read-only mode strips the rest.",
-        "zh": "沒註冊的工具就不能呼叫。權限一層疊一層，唯讀模式會拿掉其餘的工具。"
+        "en": "Write and orchestrate tools show up only when a host turns them on.",
+        "zh": "寫入和調度要等某台主機打開，才會出現。"
       },
+      "after": "how",
       "spec": {
         "columns": [
           [
@@ -349,8 +349,8 @@
             "zh": "主機設定"
           },
           "note": {
-            "en": "Each host in hosts.toml has its own writes and orchestrate switches, and both start off.",
-            "zh": "hosts.toml 裡每台主機有自己的 writes 與 orchestrate 開關，兩個預設都關。"
+            "en": "In hosts.toml, writes and orchestrate both start off, and each host has its own switches.",
+            "zh": "hosts.toml 裡，每台主機的 writes 和 orchestrate 預設都是關的。"
           },
           "tone": "neutral",
           "icon": "doc"
@@ -361,8 +361,8 @@
             "zh": "註冊工具"
           },
           "note": {
-            "en": "Read tools always register, write tools need writes, and orchestrate tools need both, unless --read-only is set.",
-            "zh": "唯讀工具一定註冊，寫入要開 writes，調度要兩個都開，除非加上 --read-only。"
+            "en": "Read tools register every time. Write tools need writes. Orchestrate tools need both switches.",
+            "zh": "唯讀一定掛上。寫入要開 writes。調度則是兩個開關都要開。"
           },
           "tone": "accent",
           "icon": "gear"
@@ -373,8 +373,8 @@
             "zh": "唯讀工具"
           },
           "note": {
-            "en": "13 tools list hosts and sessions, read transcripts, wait, triage, and show worktree status.",
-            "zh": "13 個工具列出主機與 session、讀對話、等待、分類，並顯示 worktree 狀態。"
+            "en": "Thirteen tools list hosts and sessions, read transcripts, wait, triage, and show worktree status.",
+            "zh": "13 個工具：列主機和 session、讀對話、等待、分類、看 worktree。"
           },
           "tone": "info",
           "icon": "eye"
@@ -385,8 +385,8 @@
             "zh": "寫入工具"
           },
           "note": {
-            "en": "7 tools send, continue, interrupt, answer, set permissions, approve, or relay, and each call needs confirm=true.",
-            "zh": "7 個工具負責送出、繼續、中斷、回答、改權限、核准或轉達，每次都要 confirm=true。"
+            "en": "Seven tools send, continue, interrupt, answer, set permissions, approve, or relay. Each call needs confirm=true.",
+            "zh": "7 個工具負責送出、續做、中斷、回答、改權限、核准或轉達。每次要帶 confirm=true。"
           },
           "tone": "warn",
           "icon": "chat"
@@ -397,8 +397,8 @@
             "zh": "調度工具"
           },
           "note": {
-            "en": "12 tools start worktree sessions, fail over, merge, and clean up, with a default cap of 4 sessions on a host.",
-            "zh": "12 個工具開 worktree session、接手、merge 與清理，每台主機預設最多 4 個。"
+            "en": "Twelve tools open worktree sessions, fail over, merge, and clean up. One host defaults to 4 at a time.",
+            "zh": "12 個工具開 worktree、接手、merge、清理。每台主機預設最多同時 4 個。"
           },
           "tone": "neutral",
           "icon": "route"
@@ -406,34 +406,34 @@
       ],
       "ticks": [
         {
-          "en": "13 read tools always register",
-          "zh": "13 個唯讀工具必註冊"
+          "en": "13 read tools on every start",
+          "zh": "13 個唯讀一定有"
         },
         {
           "en": "writes adds 7 tools",
           "zh": "writes 再加 7 個"
         },
         {
-          "en": "orchestrate needs writes",
-          "zh": "調度要先開 writes"
+          "en": "orchestrate needs writes too",
+          "zh": "調度也要先開 writes"
         }
       ],
       "caption": {
-        "en": "The MCP server named bat registers 13 read tools on every start. The 7 write tools register only when some host has writes, and the 12 orchestrate tools register only when some host has both writes and orchestrate. Starting with --read-only registers none of those write tools, whatever hosts.toml says. Orchestrate sessions on one host default to a cap of 4.",
-        "zh": "名為 bat 的 MCP 伺服器每次啟動都註冊 13 個唯讀工具。7 個寫入工具只有某台主機開了 writes 才註冊。12 個調度工具要某台主機同時開 writes 和 orchestrate 才註冊。以 --read-only 啟動時，不管 hosts.toml 怎麼寫，那些寫入工具都不會註冊。一台主機的調度 session 預設最多 4 個。"
+        "en": "Start with --read-only and none of the write tools register, whatever hosts.toml says.",
+        "zh": "用 --read-only 啟動的話，hosts.toml 寫什麼都沒用，寫入工具不會註冊。"
       }
     },
     {
       "id": "triage-labels",
-      "after": "features",
       "heading": {
-        "en": "How a session gets its label",
-        "zh": "session 怎麼被分類"
+        "en": "Patterns decide the label",
+        "zh": "先看文字，再貼標籤"
       },
       "intro": {
-        "en": "Triage reads recent transcript text. Known patterns decide before the optional Jev layer.",
-        "zh": "分類看的是最近的對話文字。已知的文字樣式先決定，選用的 Jev 排在後面。"
+        "en": "Jev is asked only when a short error does not match a known pattern.",
+        "zh": "只有短錯誤對不上已知文字時，才會去問 Jev。"
       },
+      "after": "features",
       "spec": {
         "columns": [
           [
@@ -457,8 +457,8 @@
             "zh": "對話內容"
           },
           "note": {
-            "en": "The connector reads recent session output and any BAT-STATUS marker in it.",
-            "zh": "連接器讀取 session 最近的輸出，以及其中的 BAT-STATUS 標記。"
+            "en": "Recent session output is read, including any BAT-STATUS marker in it.",
+            "zh": "讀的是 session 最近的輸出，BAT-STATUS 標記也算在裡面。"
           },
           "tone": "neutral",
           "icon": "doc"
@@ -469,8 +469,8 @@
             "zh": "規則分類"
           },
           "note": {
-            "en": "Known quota, permission, question, and status strings decide before Jev is asked.",
-            "zh": "已知的額度、權限、提問與狀態文字先決定，之後才可能問 Jev。"
+            "en": "Quota, permission, question, and status strings are matched before Jev runs.",
+            "zh": "額度、權限、提問、狀態這些固定文字先對。Jev 排在後面。"
           },
           "tone": "accent",
           "icon": "search"
@@ -481,8 +481,8 @@
             "zh": "額度用完"
           },
           "note": {
-            "en": "Account-limit text is labeled quota_exhausted, which is the signal for Codex failover.",
-            "zh": "帳號額度文字會標成 quota_exhausted，這就是轉給 Codex 的訊號。"
+            "en": "Account-limit text becomes quota_exhausted. That label is the signal for a Codex handoff.",
+            "zh": "帳號額度的文字標成 quota_exhausted。這就是可以交給 Codex 的訊號。"
           },
           "tone": "warn",
           "icon": "bolt"
@@ -493,8 +493,8 @@
             "zh": "等待回覆"
           },
           "note": {
-            "en": "A permission prompt or a question is waiting, and cleanup keeps that session.",
-            "zh": "權限提示或提問會標成等待，清理流程會把這個 session 留著。"
+            "en": "A permission prompt or a question stays waiting, and cleanup leaves that session in place.",
+            "zh": "權限提示或提問會停在等待。清理時，這個 session 留著。"
           },
           "tone": "info",
           "icon": "clock"
@@ -505,8 +505,8 @@
             "zh": "工作或完成"
           },
           "note": {
-            "en": "A streaming session stays working, and a finished idle one can carry a milestone marker.",
-            "zh": "還在串流的 session 算工作中，閒置且做完的可以帶里程碑標記。"
+            "en": "A session that is still streaming stays working. A finished idle one can carry a milestone marker.",
+            "zh": "還在串流的算工作中。做完且閒置的，可以帶一個里程碑標記。"
           },
           "tone": "neutral",
           "icon": "check"
@@ -514,34 +514,34 @@
       ],
       "ticks": [
         {
-          "en": "patterns decide first",
-          "zh": "先由文字樣式決定"
+          "en": "known text wins",
+          "zh": "固定文字先贏"
         },
         {
-          "en": "quota text can fail over",
-          "zh": "額度文字可轉交"
+          "en": "quota text can hand off",
+          "zh": "額度文字可以轉交"
         },
         {
-          "en": "Jev is only for ambiguity",
-          "zh": "Jev 只處理模糊情況"
+          "en": "Jev can fail, label stays",
+          "zh": "Jev 失敗，標籤還在"
         }
       ],
       "caption": {
-        "en": "sessions_triage labels a session quota_exhausted, rate_limited_transient, waiting_permission, waiting_question, working, done_idle, error_other, or unknown. Deterministic transcript patterns and BAT-STATUS markers decide first, and each label keeps an evidence line. Jev is asked only for an ambiguous short error. If Jev is off or fails, the pattern result stands.",
-        "zh": "sessions_triage 會把 session 標成 quota_exhausted、rate_limited_transient、waiting_permission、waiting_question、working、done_idle、error_other 或 unknown。對話裡的固定樣式和 BAT-STATUS 標記先決定，每個標籤都留一行判斷依據。只有模糊的短錯誤才會問 Jev。Jev 沒開或失敗時，就維持樣式判斷的結果。"
+        "en": "Every session ends up with one label, such as quota used up, waiting for you, or done.",
+        "zh": "每個 session 最後都有一個標籤，像是額度用完、在等你，或是做完了。"
       }
     },
     {
       "id": "write-budget",
-      "after": "features",
       "heading": {
-        "en": "What limits a write",
-        "zh": "寫入受到什麼限制"
+        "en": "Writes wait on purpose",
+        "zh": "寫入故意要等"
       },
       "intro": {
-        "en": "A write needs confirm=true, then the audit log enforces the default rate limits.",
-        "zh": "寫入要帶 confirm=true，接著由稽核紀錄執行預設的速率限制。"
+        "en": "Nothing is sent without confirm=true. After that, the audit log sets the pace.",
+        "zh": "沒有 confirm=true 就送不出去。過了這關，快慢看稽核紀錄。"
       },
+      "after": "features",
       "spec": {
         "columns": [
           [
@@ -549,13 +549,13 @@
           ],
           [
             1
+          ],
+          [
+            2
           ]
         ],
         "core": 1,
-        "meter": true,
-        "sinks": [
-          2
-        ]
+        "meter": true
       },
       "steps": [
         {
@@ -564,8 +564,8 @@
             "zh": "先確認"
           },
           "note": {
-            "en": "Every write tool call needs confirm=true, or the connector refuses it.",
-            "zh": "每個寫入工具都要帶 confirm=true，否則連接器會拒絕。"
+            "en": "A write without confirm=true is refused before the rate check runs.",
+            "zh": "沒帶 confirm=true，速率關卡還沒跑就會拒絕。"
           },
           "tone": "neutral",
           "icon": "lock"
@@ -576,8 +576,8 @@
             "zh": "速率關卡"
           },
           "note": {
-            "en": "The default gap is 60 seconds for one session, and 30 writes an hour across hosts.",
-            "zh": "預設同一 session 要間隔 60 秒，所有主機一小時最多 30 次寫入。"
+            "en": "The same host and session must wait 60 seconds. All hosts together stop at 30 writes an hour.",
+            "zh": "同一台主機、同一個 session 要隔 60 秒。所有主機加起來，一小時 30 次。"
           },
           "tone": "accent",
           "icon": "clock"
@@ -588,8 +588,8 @@
             "zh": "稽核紀錄"
           },
           "note": {
-            "en": "Each attempt is appended to audit.jsonl, and with preview at 0 the line stores a hash and a length.",
-            "zh": "每次嘗試都附加到 audit.jsonl，預覽長度是 0 時只存雜湊與長度。"
+            "en": "Every attempt is appended to audit.jsonl. By default it keeps a short hash and the length, not the prompt text.",
+            "zh": "每次嘗試都會記進 audit.jsonl。預設不存 prompt 原文，只存短雜湊和長度。"
           },
           "tone": "info",
           "icon": "ledger"
@@ -597,34 +597,34 @@
       ],
       "ticks": [
         {
-          "en": "confirm=true is required",
-          "zh": "必須帶 confirm=true"
+          "en": "no confirm, no write",
+          "zh": "沒確認就不能寫"
         },
         {
-          "en": "60 seconds per session",
-          "zh": "同一 session 隔 60 秒"
+          "en": "60 seconds, then 30 an hour",
+          "zh": "60 秒，一小時 30 次"
         },
         {
-          "en": "30 writes an hour",
-          "zh": "一小時最多 30 次"
+          "en": "the prompt text is not stored",
+          "zh": "prompt 原文不存"
         }
       ],
       "caption": {
-        "en": "Write calls record an attempt in the append-only audit.jsonl and refuse when that log already shows 30 attempts in the last hour, or a newer attempt to the same session inside 60 seconds. A task's first prompt after its start channels can skip the 60 second gap, and it still counts toward the hourly cap. With the default preview length of 0, the line stores a short hash and the text length, not the prompt.",
-        "zh": "寫入會在只能附加的 audit.jsonl 記一筆嘗試。過去一小時已經有 30 筆，或同一個 session 在 60 秒內有更新的嘗試，就會拒絕。任務在啟動通道之後的第一則 prompt 可以跳過 60 秒間隔，但仍計入每小時上限。預覽長度預設是 0，所以那一行存的是短雜湊和文字長度，不是 prompt 本身。"
+        "en": "A new task's first prompt, right after its setup steps, can skip the 60 second wait. It still counts toward the hourly cap.",
+        "zh": "新任務開好之後的第一則 prompt，可以不等那 60 秒，但還是算進一小時 30 次。"
       }
     },
     {
       "id": "quota-failover",
-      "after": "features",
       "heading": {
-        "en": "Where a quota stall goes",
-        "zh": "額度停住時交給誰"
+        "en": "Same folder, new Codex",
+        "zh": "同一個資料夾換 Codex"
       },
       "intro": {
-        "en": "A Claude session stopped by its account quota can be continued by Codex in the same folder.",
-        "zh": "Claude session 因為帳號額度停住時，可以由 Codex 在同一個資料夾接著做。"
+        "en": "A Claude session that is not actually out of quota is refused, unless you pass force.",
+        "zh": "Claude session 看起來不像額度用完，就會拒絕。除非你另外帶 force。"
       },
+      "after": "features",
       "spec": {
         "columns": [
           [
@@ -648,8 +648,8 @@
             "zh": "額度文字"
           },
           "note": {
-            "en": "Triage marks the Claude session quota_exhausted from limit text in the transcript.",
-            "zh": "分類從對話裡的額度文字，把 Claude session 標成 quota_exhausted。"
+            "en": "Triage reads the transcript and marks that session quota_exhausted.",
+            "zh": "分類讀對話，把這個 session 標成 quota_exhausted。"
           },
           "tone": "warn",
           "icon": "search"
@@ -660,8 +660,8 @@
             "zh": "交給 Codex"
           },
           "note": {
-            "en": "session_failover starts Codex in the same worktree and branch and leaves the Claude session in place.",
-            "zh": "session_failover 在同一個 worktree 與分支啟動 Codex，原來的 Claude session 留在原地。"
+            "en": "session_failover starts Codex on the same worktree and branch, and leaves the Claude session where it is.",
+            "zh": "session_failover 用同一個 worktree 和分支，開一個新的 Codex。"
           },
           "tone": "accent",
           "icon": "forward"
@@ -669,34 +669,34 @@
       ],
       "ticks": [
         {
-          "en": "Claude quota text is the signal",
-          "zh": "Claude 額度文字是訊號"
+          "en": "quota text is the signal",
+          "zh": "額度文字才是訊號"
         },
         {
           "en": "Codex joins the same folder",
           "zh": "Codex 接同一個資料夾"
         },
         {
-          "en": "the old session stays",
-          "zh": "舊 session 留在原地"
+          "en": "the old session stays put",
+          "zh": "舊的 session 留在原地"
         }
       ],
       "caption": {
-        "en": "session_failover is an orchestrate tool. It refuses a session that does not look quota-exhausted unless force is set. The new Codex session uses the same worktree and branch when the Claude session had one, and the handoff prompt carries the original task, the latest instruction, recent output, and git state. The Claude session is not touched. This needs confirm=true.",
-        "zh": "session_failover 是調度工具。session 看起來不像額度用完時會拒絕，除非另外指定 force。Claude session 如果本來就有 worktree，新的 Codex session 會用同一個 worktree 與分支。交接 prompt 帶著原始任務、最新指示、最近輸出與 git 狀態。原來的 Claude session 不會被動到。這需要 confirm=true。"
+        "en": "The handoff prompt carries the original task, the latest instruction, recent output, and git state.",
+        "zh": "交接的 prompt 帶著原始任務、最新指示、最近輸出和 git 狀態。"
       }
     },
     {
       "id": "cleanup-gates",
-      "after": "decisions",
       "heading": {
-        "en": "What has to pass before a merge",
-        "zh": "merge 之前要過哪些關"
+        "en": "Merge comes last",
+        "zh": "merge 排在最後"
       },
       "intro": {
-        "en": "session_cleanup decides in code first. Jev is last, and a missing Jev escalates instead of merging.",
-        "zh": "session_cleanup 先由程式決定。Jev 排在最後，Jev 不在就升級給人，不會 merge。"
+        "en": "The program decides first. If Jev is missing, a person decides, and it does not merge.",
+        "zh": "程式先做判斷。Jev 不在，結果是交給人，不會 merge。"
       },
+      "after": "decisions",
       "spec": {
         "columns": [
           [
@@ -718,7 +718,7 @@
           },
           "note": {
             "en": "The worktree must be clean, the branch strictly ahead, and the main checkout clean on the base branch.",
-            "zh": "worktree 必須乾淨、分支必須嚴格領先，主要 checkout 也要在基底分支上且乾淨。"
+            "zh": "worktree 和主要 checkout 都要乾淨，分支要比基底多出 commit、沒有落後。"
           },
           "tone": "neutral",
           "icon": "check"
@@ -729,8 +729,8 @@
             "zh": "驗證紀錄"
           },
           "note": {
-            "en": "A passing verification record must match the current commit, and the last recorded test must not have failed.",
-            "zh": "通過的驗證紀錄必須對上目前的 commit，最後一筆測試紀錄也不能是失敗。"
+            "en": "A passing verification must match this commit, and the last recorded test must not be a failure.",
+            "zh": "通過的驗證要對上這個 commit。最後一筆測試紀錄不能是失敗。"
           },
           "tone": "info",
           "icon": "doc"
@@ -741,8 +741,8 @@
             "zh": "Jev 判斷"
           },
           "note": {
-            "en": "A merge needs a completion claim and a safe diff, both at confidence 0.8 or higher.",
-            "zh": "要 merge，完成宣告和 diff 判定都得是安全的，信心還要達到 0.8。"
+            "en": "Jev has to be at least 80 percent sure the work is done and the diff is safe.",
+            "zh": "Jev 至少要有 80% 的把握，工作做完了，而且 diff 是安全的。"
           },
           "tone": "warn",
           "icon": "spark"
@@ -753,8 +753,8 @@
             "zh": "清理決定"
           },
           "note": {
-            "en": "The default run only reports, a real merge needs auto_cleanup on the host, and the branch is kept.",
-            "zh": "預設只回報結果，真的 merge 要主機開 auto_cleanup，而且分支會留下。"
+            "en": "It only reports unless you turn cleanup on and confirm the call.",
+            "zh": "預設只回報。你打開清理並確認這次呼叫，它才會動手。"
           },
           "tone": "accent",
           "icon": "shield"
@@ -762,21 +762,21 @@
       ],
       "ticks": [
         {
-          "en": "git and tests are checked first",
-          "zh": "先查 git 與測試"
+          "en": "git and tests come first",
+          "zh": "先看 git 和測試"
         },
         {
-          "en": "Jev must reach 0.8",
-          "zh": "Jev 信心要到 0.8"
+          "en": "Jev has to be sure",
+          "zh": "Jev 沒把握就停"
         },
         {
-          "en": "branches are always kept",
-          "zh": "分支一律保留"
+          "en": "the branch is kept",
+          "zh": "分支會留下"
         }
       ],
       "caption": {
-        "en": "session_cleanup returns MERGE_AND_CLEAN, CLEAN_ONLY, KEEP, or ESCALATE. A merge needs a clean worktree, a branch that is strictly ahead, a clean main checkout on the base branch, a passing verification record for that commit, no failed last test, and no risk hit in the diff. Jev must then report a completion claim and a safe_complete diff at confidence 0.8 or higher. If Jev is unavailable, the decision is escalate. dry_run is the default, acting needs auto_cleanup and confirm=true, and the branch is never deleted.",
-        "zh": "session_cleanup 會回傳 MERGE_AND_CLEAN、CLEAN_ONLY、KEEP 或 ESCALATE。要 merge，worktree 必須乾淨、分支嚴格領先、主要 checkout 在基底分支上且乾淨、有對上該 commit 的通過驗證紀錄、最後一筆測試沒有失敗，diff 也沒有風險命中。接著 Jev 必須給出完成宣告，以及信心達到 0.8 的 safe_complete diff。Jev 不在時，決定是升級給人。預設是 dry_run，真的執行動作要開 auto_cleanup 並帶 confirm=true，分支永遠不刪。"
+        "en": "A risky diff is never merged.",
+        "zh": "diff 有風險，就不會 merge。"
       }
     }
   ]
