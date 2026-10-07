@@ -18,7 +18,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import api_actions, api_auth, delivery, registry, service
-from .api_v1 import ApiV1
+from .api_v1 import ApiV1, is_dashboard_path
 from .config import Config, state_dir
 from .errors import ResourceReadOnly, TokenUnavailable
 from .fleet import Fleet
@@ -406,8 +406,10 @@ class TaskDaemon:
                 raise ValueError("request headers too large")
             lines = head.decode("ascii").split("\r\n")
             request_line = lines[0].split(" ")
+            path = request_line[1].split("?", 1)[0] if len(request_line) == 3 else ""
+            dashboard = is_dashboard_path(path)
             if (len(request_line) == 3 and request_line[2] == "HTTP/1.1"
-                    and request_line[1].split("?", 1)[0].rstrip("/").startswith("/api/v1")):
+                    and (dashboard or path.rstrip("/").startswith("/api/v1"))):
                 headers: dict[str, str] = {}
                 for line in lines[1:]:
                     name, sep, value = line.partition(":")
@@ -417,7 +419,10 @@ class TaskDaemon:
                     if key in headers and key in {"host", "authorization", "content-length", "origin"}:
                         raise ValueError("duplicate request header")
                     headers[key] = value.strip()
-                await self.api.handle(request_line[0], request_line[1], headers, reader, writer)
+                if dashboard:
+                    await self.api.dashboard(request_line[0], request_line[1], headers, writer)
+                else:
+                    await self.api.handle(request_line[0], request_line[1], headers, reader, writer)
                 writer.close()
                 await writer.wait_closed()
                 return

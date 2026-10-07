@@ -117,6 +117,10 @@ mcp_servers:
 bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 ```
 
+### Dashboard 與 `/api/v1`（選用）
+
+`batc serve` 也在同一個 loopback 埠提供 `/api/v1` 與瀏覽器 Dashboard（`http://127.0.0.1:18796/dashboard/`）：需要你處理的項目、所有 session 與其來源（人在 BAT 建立的 session 一律唯讀）、managed session 的操作、PR 合併與部署按鈕，以及操作紀錄。以 `batc api-token issue --actor ted-dashboard --scope observe --scope operate` 發行 token 後在 Dashboard 的「連線」輸入。設計見 [docs/design/api-v1.md](docs/design/api-v1.md)、[docs/design/delivery.md](docs/design/delivery.md)、[docs/design/dashboard.md](docs/design/dashboard.md)。
+
 ## 工具一覽
 
 | 工具 | 用途 |
