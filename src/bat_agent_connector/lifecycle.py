@@ -1488,10 +1488,10 @@ async def session_relay(
         t, _ = await _resolve_session(fleet.client(host), sid)
         sid = t["id"]
         start_ws = start_ws or t.get("workspaceId")
-        cls = resource_policy.classify(fleet.config.host(host), sid, terminal=t,
-                                       entries=registry.list_entries(host))
-        if cls.code:
-            read_only = ResourceReadOnly(cls.code, cls.reason or "read-only")
+        try:  # the same live check session_send runs, so a stale binding takes the start_if_missing path
+            await resource_policy.authorize_session(fleet, host, "session.send", t)
+        except ResourceReadOnly as e:
+            read_only = e
     text = build_relay(
         message, host=host, workspace=ws_name, channel=channel, thread=thread, earlier=earlier, brief=brief,
         human_name=fleet.config.human_name, relay_name=fleet.config.relay_name,
@@ -1513,7 +1513,10 @@ async def session_relay(
         if not start_ws:
             raise WriteRefused("pass workspace to start a new session")
         r = await session_start(fleet, host, start_ws, "codex", confirm, text, None, True, "relayed task", None)
-        return {**out, "session_id": r.get("session_id"), "sent": True, "started": True, "result": r}
+        started = {k: v for k, v in out.items() if k not in ("read_only", "read_only_code", "reason")}
+        if read_only is not None:  # the refused target, kept apart so read_only never describes the new session
+            started["replaced"] = {"session_id": sid, "read_only_code": read_only.code, "reason": str(read_only)}
+        return {**started, "session_id": r.get("session_id"), "sent": True, "started": True, "result": r}
     if await _quota_stopped(fleet, host, sid):
         return {**out, "sent": False, "quota_stopped": True,
                 "next": "fail over (session_failover) or, for a fan-out plan, fanout_plan_session"}
