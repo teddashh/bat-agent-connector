@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import lifecycle, orchestrate, registry, service
+from . import lifecycle, orchestrate, registry, resource_policy, service
 from .errors import TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .fleet import Fleet
 from .redact import redact_secrets
@@ -100,6 +100,7 @@ class BatTaskAdapter:
         suffix = task["task_id"].replace("-", "")[:12]
         path = f"{root}/.bat-worktrees/batc-task-{suffix}"
         branch = f"batc/task-{suffix}"
+        resource_policy.check_external_worktree(root, path, branch, task["task_id"])
         base = task["base_branch"]
         qroot, qpath, qbranch, qbase = map(shlex.quote, (root, path, branch, base))
         script = (f"mkdir -p {shlex.quote(root + '/.bat-worktrees')} && "
@@ -127,10 +128,10 @@ class BatTaskAdapter:
             return None
         root = await self._workspace_folder(task)
         suffix = task["task_id"].replace("-", "")[:12]
-        if (not re.fullmatch(r"[0-9a-f]{12}", suffix)
-                or path != f"{root}/.bat-worktrees/batc-task-{suffix}"
-                or branch != f"batc/task-{suffix}"):
-            raise ValueError("external worktree cleanup identity mismatch")
+        try:
+            resource_policy.check_external_worktree(root, path, branch, task["task_id"])
+        except WriteRefused:
+            raise ValueError("external worktree cleanup identity mismatch") from None
         branch_ref = f"refs/heads/{branch}"
         retained_ref = f"refs/batc/tasks/{suffix}"
         qroot, qpath, qbranch_ref, qretained_ref = map(
@@ -272,6 +273,8 @@ class BatTaskAdapter:
             raise ValueError("lead worktree unavailable for reviewer")
         hc = self.fleet.config.host(host)
         sid = session_id
+        grant = await resource_policy.authorize_shared_session(self.fleet, host, sid,
+                                                               service.registry_terminal(lead))
         preset = orchestrate.PRESETS[(agent, False)]
         entry = {"session_id": sid, "workspace_id": lead["workspace_id"],
                  "workspace_name": lead["workspace_name"], "agent_preset": preset,
@@ -292,7 +295,8 @@ class BatTaskAdapter:
         for attempt in range(3):
             try:
                 started = await client.invoke(
-                    "claude:start-session", {"sessionId": sid, "options": opts}, retry_on_disconnect=False)
+                    "claude:start-session", {"sessionId": sid, "options": opts}, retry_on_disconnect=False,
+                    grant=grant)
                 if isinstance(started, dict) and started.get("ok") is not False and started.get("sessionId") == sid:
                     break
                 raise WriteRefused("BAT reviewer start did not confirm the reserved session ID")
@@ -317,7 +321,7 @@ class BatTaskAdapter:
                 tab = await self.fleet.client(host).append_workspace_terminal(hc.profile_id, {
                     "id": sid, "workspaceId": lead["workspace_id"], "title": entry["title"],
                     "type": "terminal", "cwd": lead["cwd"], "agentPreset": preset,
-                })
+                }, grant=resource_policy.authorize_register_tab(host, sid))
                 registry.update(host, sid, tab_registered=bool(tab.get("appended")))
             except Exception:  # noqa: BLE001 - registration is visibility only
                 registry.update(host, sid, tab_registered=False)

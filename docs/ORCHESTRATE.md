@@ -2,6 +2,10 @@
 
 Off by default. Enable per host with `writes = true` **and** `orchestrate = true`.
 
+Every tool below only acts on sessions the connector started, in folders it owns; sessions created in BAT stay
+read-only. Merges only target a main checkout inside a configured managed root. See
+[design/resource-policy.md](design/resource-policy.md).
+
 ## What BAT 3.2.12 does (upstream source)
 
 | Channel | Behaviour | Source |
@@ -38,12 +42,12 @@ The connector therefore:
 | Tool | Tier | Guard rails |
 |---|---|---|
 | `worktree_status`, `session_worktree_status` | read | Only reads (`worktree:status`, `git:status/branch/getRoot`). |
-| `session_start(host, workspace, agent, confirm, prompt?, model?, use_worktree=true, title?)` | orchestrate | `confirm`, per-host cap `orchestrate_max_sessions` (default 4) counted from the registry, hourly write cap, audit. Rolls back the fresh worktree if the session fails to start. Custom branch names are not supported by BAT 3.2.12. |
-| `worktree_merge(host, session_id, confirm)` | orchestrate | Merges only if `mergedKind == ahead`, session idle, worktree clean, main checkout clean **and already on the source branch** (so BAT never switches branches there). Otherwise returns the reason and changes nothing. Never forced. |
+| `session_start(host, workspace, agent, confirm, prompt?, model?, use_worktree=true, title?)` | orchestrate | `use_worktree=false` only inside a managed root; a worktree in a human clone only while `shared_clone_worktrees = true`; the host-chosen worktree path must be under `.bat-worktrees`. `confirm`, per-host cap `orchestrate_max_sessions` (default 4) counted from the registry, hourly write cap, audit. Rolls back the fresh worktree if the session fails to start. Custom branch names are not supported by BAT 3.2.12. |
+| `worktree_merge(host, session_id, confirm)` | orchestrate | Refuses (`DESTINATION_MANUAL`) unless the main checkout is inside a managed root. Merges only if `mergedKind == ahead`, session idle, worktree clean, main checkout clean **and already on the source branch** (so BAT never switches branches there). Otherwise returns the reason and changes nothing. Never forced. |
 | `worktree_remove(host, session_id, confirm, delete_branch=false, allow_unmerged=false, discard_uncommitted=false)` | orchestrate | Refuses if the session is streaming, if the worktree has uncommitted changes (unless `discard_uncommitted`), or if `delete_branch` and the branch has unmerged commits (unless `allow_unmerged`). The session itself is not stopped. |
 | `batc fanout PLAN.md [--start ...]` | CLI helper | Splits a markdown plan (`- [ ]` items, numbered items, `##` headings) into task prompts; `--start` needs `--confirm` and is capped by `max_start_per_call`. |
 
-| `session_failover(...)` | orchestrate | Only for sessions classified `quota_exhausted` (unless `force`), never while streaming; one successor per session and worktree (atomic registry reservation); `max_start_per_call` for `all_exhausted`; the old registry entry becomes `superseded` and is stopped only after the handoff is acknowledged. |
+| `session_failover(...)` | orchestrate | Only for connector-managed sessions in a folder the connector owns, and only for sessions classified `quota_exhausted` (unless `force`), never while streaming; one successor per session and worktree (atomic registry reservation); `max_start_per_call` for `all_exhausted`; the old registry entry becomes `superseded` and is stopped only after the handoff is acknowledged. |
 | `session_record_verification(...)` | orchestrate | Records a trusted external command, exit code, environment and log reference for the host's current clean commit. A later commit or dirty tree invalidates it. CLI: `batc record-verification`. |
 | `session_cleanup(...)` | orchestrate | Dry run by default; acting needs `confirm` **and** host `auto_cleanup = true`. Gates below. |
 
@@ -53,19 +57,21 @@ BAT has no "quota exhausted" field. The connector detects it from the limit text
 ("You've hit your … limit", "usage limit reached|<epoch>", "… resets <time>") and treats 429/overloaded messages
 as transient. Only ambiguous cases are sent to Jev when it is configured. The Codex successor is started with the
 `codex-agent-worktree` preset and the old `worktreePath`/`worktreeBranch` (same folder, same branch) or, for a
-main-checkout session, `codex-agent` in the same folder. Its first message is a handoff prompt: original task, latest
+session in a managed root's main checkout, `codex-agent` in the same folder. A session created in BAT is never failed
+over: its successor would write into a human folder. Its first message is a handoff prompt: original task, latest
 instruction, recent output, git state (branch, dirty files, commits, diff stats) and the quota evidence.
 
 ## Automatic cleanup gates
 
-`session_cleanup` evaluates every orchestrated session (and failed-over Claude sessions) and decides:
+`session_cleanup` evaluates every orchestrated session (and failed-over Claude sessions) and decides. Sessions created
+in BAT and connector sessions in a human checkout are always `KEEP`: cleanup never stops, merges or removes them.
 
 | Decision | When |
 |---|---|
 | `KEEP` | Streaming, waiting for a permission/answer, quota or transient limit, idle for less than `min_idle_s`, worktree shared by another active session. **Never stops a session that is mid-work.** |
 | `CLEAN_ONLY` | Superseded by a failover successor whose handoff was acknowledged; archive-only successor (see below) that is idle, clean and verified; worktree already merged or removed; no new commits and no diff; main-checkout coding session with a passing verification record whose final output Jev confirms as finished. Stops the agent, removes the worktree with the branch **kept**. |
 | `MERGE_AND_CLEAN` | All hard gates pass: idle, worktree clean, `mergedKind == ahead` (conflict-free, via `worktree_merge` never-force semantics), main checkout clean and on the source branch, a passing `session_record_verification` record for the current commit, last test run not failed, deterministic risk checks clean (no credential-looking additions, no secrets/infra paths, no large deletions or huge diffs); **then** Jev must confirm the final output claims completion (≥ 0.8) and the diff is `safe_complete` (≥ 0.8). HEAD and cleanliness are rechecked immediately before acting. Merges locally, removes the worktree (branch kept), stops the agent. |
-| `ESCALATE` | Uncommitted changes, diverged branch, dirty main checkout, missing/stale/failed verification, failing tests, risk-check hit, Jev unavailable/unsure. Collected into one `escalation_summary` line per call. |
+| `ESCALATE` | Merge destination is a human checkout (not a managed root), uncommitted changes, diverged branch, dirty main checkout, missing/stale/failed verification, failing tests, risk-check hit, Jev unavailable/unsure. Collected into one `escalation_summary` line per call. |
 
 `ESCALATE_TO_TED` (the 0.2.0 name of `ESCALATE`) is still accepted as an alias by `normalize_decision`.
 
@@ -84,6 +90,7 @@ the host's main checkout, and pushing or opening a PR is left to the host's own 
 2. Start one worktree session per task (`session_start` / `batc fanout --start`), within the caps.
 3. Monitor with `sessions_list` and `session_wait`; answer questions only when you are sure.
 4. Review each branch: `session_worktree_status(include_diff=true)`, `session_read`.
-5. Merge the clean ones with `worktree_merge`; for `diverged` branches ask the session to rebase first.
+5. Merge the clean ones with `worktree_merge` when the workspace is a managed clone; otherwise leave the branch for a
+   pull request. For `diverged` branches ask the session to rebase first.
 6. `worktree_remove` merged worktrees (branch kept unless you ask), or let `session_cleanup` do steps 5-6 behind its
    gates. Report results to the user.

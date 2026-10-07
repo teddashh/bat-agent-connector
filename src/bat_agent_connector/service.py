@@ -17,7 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from . import registry
+from . import registry, resource_policy
 from .client import BatClient, event_session_id
 from .errors import BatError, InvokeError, WriteRefused
 from .fleet import Fleet
@@ -185,9 +185,10 @@ async def _resolve_session(c: BatClient, session_id: str, ws: dict | None = None
     exact = [t for t in terms if t.get("id") == sid]
     matches = exact or [t for t in terms if str(t.get("id", "")).startswith(sid)]
     if not matches:
-        regs = registry.find_prefix(c.host.name, sid)
+        # A retried start can leave several rows for one session; the newest row wins.
+        regs = {e.get("session_id"): e for e in registry.find_prefix(c.host.name, sid)}
         if len(regs) == 1:
-            return registry_terminal(regs[0]), ws
+            return registry_terminal(next(iter(regs.values()))), ws
         raise BatError(f"session {sid!r} not found on host {c.host.name}")
     if len(matches) > 1:
         raise BatError(f"session prefix {sid!r} is ambiguous on host {c.host.name}")
@@ -314,7 +315,8 @@ async def _host_sessions(
     ws_by_id = {w.get("id"): w for w in ws.get("workspaces") or []}
     terms = _agent_terminals(ws)
     known = {t.get("id") for t in terms}
-    orchestrated_ids = {e.get("session_id") for e in registry.list_entries(name)}
+    entries = registry.list_entries(name)
+    orchestrated_ids = {e.get("session_id") for e in entries}
     for e in registry.list_entries(name, active_only=True):
         if e.get("session_id") not in known:
             terms.append(registry_terminal(e))
@@ -357,6 +359,8 @@ async def _host_sessions(
             "worktree_branch": t.get("worktreeBranch"),
             "orchestrated": t.get("id") in orchestrated_ids,
             "has_tab": not t.get("_orchestrated", False),
+            **resource_policy.classify_row_for_read(c.host, t.get("id"), has_tab=not t.get("_orchestrated", False),
+                                                    entries=entries),
             "pending": None,
             "last_activity_ms": last_ms,
             "last_activity_source": "host" if last_ms else None,
@@ -966,6 +970,7 @@ async def session_send(
     async with _write_lock(host):
         t, ws = await _resolve_session(c, session_id)
         sid = t["id"]
+        grant = await resource_policy.authorize_session(fleet, host, "session.send", t)
         blocked = None if before_invoke is not None or initial_task_send else _task_send_block(host, sid)
         if blocked:
             raise WriteRefused(blocked)
@@ -1000,7 +1005,7 @@ async def session_send(
                 phase="attempt",
             )
             try:
-                await c.invoke("claude:client-resume", params)
+                await c.invoke("claude:client-resume", params, grant=grant)
             except BatError as e:
                 audit.record(
                     actor=fleet.actor,
@@ -1042,7 +1047,7 @@ async def session_send(
             r = await c.invoke(
                 "claude:send-message", {"sessionId": sid, "prompt": text, "clientMessageId": mid},
                 retry_on_disconnect=retry_on_disconnect and agent_kind(t.get("agentPreset")) == "claude",
-                before_send=before_invoke,
+                before_send=before_invoke, grant=grant,
             )
         except BatError as e:
             audit.record(
@@ -1128,6 +1133,7 @@ async def session_interrupt(
     async with _write_lock(host):
         t, _ = await _resolve_session(c, session_id)
         sid = t["id"]
+        grant = await resource_policy.authorize_session(fleet, host, "session.interrupt", t)
         kind = agent_kind(t.get("agentPreset"))
         audit.check_rate(host, sid + "#interrupt")
         channel = "claude:interrupt-turn" if (mode == "soft" and kind == "claude") else "claude:abort-session"
@@ -1141,7 +1147,7 @@ async def session_interrupt(
             phase="attempt",
         )
         try:
-            r = await c.invoke(channel, {"sessionId": sid})
+            r = await c.invoke(channel, {"sessionId": sid}, grant=grant)
         except BatError as e:
             audit.record(
                 actor=fleet.actor,
@@ -1188,6 +1194,7 @@ async def session_answer(
     async with _write_lock(host):
         t, _ = await _resolve_session(c, session_id)
         sid = t["id"]
+        grant = await resource_policy.authorize_session(fleet, host, "session.answer", t)
         blocked = _task_send_block(host, sid)
         if blocked:
             raise WriteRefused(blocked.replace("direct sends", "direct answers"))
@@ -1265,7 +1272,7 @@ async def session_answer(
             **detail,
         )
         try:
-            r = await c.invoke(channel, params)
+            r = await c.invoke(channel, params, grant=grant)
         except InvokeError as e:
             audit.record(
                 actor=fleet.actor,

@@ -11,7 +11,17 @@ from bat_agent_connector import service
 from bat_agent_connector.config import SafetyConfig
 from bat_agent_connector.errors import WriteRefused
 from bat_agent_connector.safety import Audit, audit_path
+from tests.conftest import adopt
 from tests.mockbat import TOKEN
+
+MANAGED = {"writes": True, "managed_roots": ["/srv"]}
+
+
+def adopt_all():
+    """Mark the mock agent sessions as connector-created in a managed root (write-mechanics tests)."""
+    adopt("sess-claude-0001")
+    adopt("sess-codex-0002")
+    adopt("sess-unload-0003", cwd="/srv/other")
 
 
 def test_initial_task_send_still_obeys_hourly_cap(tmp_path):
@@ -115,7 +125,8 @@ async def test_write_refused_when_disabled_or_unconfirmed(fleet_factory, mock):
 
 
 async def test_direct_send_is_blocked_for_verifying_task_session(fleet_factory, mock, monkeypatch):
-    f = fleet_factory(writes=True)
+    adopt_all()
+    f = fleet_factory(**MANAGED)
     monkeypatch.setattr(service, "_task_send_block",
                         lambda host, session_id: "task-owned session is verifying; direct sends are blocked")
     with pytest.raises(WriteRefused, match="task-owned session is verifying"):
@@ -152,7 +163,8 @@ def test_task_send_fence_uses_daemon_db_and_fails_closed(tmp_path, monkeypatch):
 
 
 async def test_send_resume_idempotent_rate_limit_audit(fleet_factory, mock):
-    f = fleet_factory(writes=True)
+    adopt_all()
+    f = fleet_factory(**MANAGED)
     body = "please continue with step 3 SECRET-BODY"
     r = await service.session_send(f, "h1", "sess-unload-0003", body, confirm=True, message_id="mid-1")
     assert r["resumed"] and r["accepted"] and r["message_id"] == "mid-1"
@@ -173,7 +185,8 @@ async def test_send_resume_idempotent_rate_limit_audit(fleet_factory, mock):
 
 
 async def test_interrupt_modes(fleet_factory, mock):
-    f = fleet_factory(writes=True)
+    adopt_all()
+    f = fleet_factory(**MANAGED)
     r = await service.session_interrupt(f, "h1", "sess-claude-0001", "soft", confirm=True)
     assert r["channel"] == "claude:interrupt-turn"
     r = await service.session_interrupt(f, "h1", "sess-codex-0002", "soft", confirm=True)
@@ -182,7 +195,8 @@ async def test_interrupt_modes(fleet_factory, mock):
 
 
 async def test_answer_ask_user_and_permission(fleet_factory, mock):
-    f = fleet_factory(writes=True)
+    adopt_all()
+    f = fleet_factory(**MANAGED)
     mock.states["sess-claude-0001"]["pendingAskUser"] = {
         "toolUseId": "tu9",
         "questions": [{"question": "Q1?"}],
