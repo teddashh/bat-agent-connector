@@ -2,6 +2,15 @@
 
 ## Next release (unreleased)
 
+- `/api/v1` on the task daemon (`batc serve`), sharing its loopback listener, journal and owner lock
+  (docs/design/api-v1.md). Durable operations (`session.send`, `session.answer`, `session.interrupt`) with
+  actor-scoped idempotency keys, steps whose intent is committed before the BAT call, and `uncertain` outcomes
+  settled by read-back instead of resending. API tokens per actor and scope (`batc api-token`); the actor always
+  comes from the token. A persisted session inventory refreshed through a read-only fleet, with keyset paging,
+  `stale` rows for unreachable hosts and `gone` after two misses. One persistent event cursor (`api_events`) for
+  tasks, operations, sessions and hosts, with SSE and `Last-Event-ID`. New MCP tools `operation_submit`,
+  `operation_get`, `operations_list`, `operation_cancel`, `inventory_sessions`, `inventory_hosts`,
+  `events_list`, `capabilities_get` (set `BATC_API_TOKEN` to act as your own principal) and CLI `batc op`.
 - Sessions a person created in BAT are read-only through every tool. A new resource policy
   (`resource_policy.py`, docs/design/resource-policy.md) classifies sessions as `manual`, `connector_managed` or
   `unknown`, checks that a managed session's folder is one the connector owns (a `managed_roots` folder or a

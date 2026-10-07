@@ -46,6 +46,10 @@ license: MIT
 | Move a quota-stopped Claude session to Codex (orchestrate) | `session_failover(host, session_id \| all_exhausted=true, confirm=true, dry_run?)` | `batc failover HOST [SID] --all-exhausted --confirm` |
 | Gated cleanup of finished sessions (orchestrate) | `session_cleanup(host, confirm=true, dry_run=false)` | `batc cleanup HOST --apply --confirm` |
 | Who may change what (read) | `session_policy(host, session_id?)` | `batc policy HOST [SID]` |
+| What this caller may do (read, daemon) | `capabilities_get()` | - |
+| Persisted inventory with staleness (read, daemon) | `inventory_sessions(host?, access?, attention?, cursor?)`, `inventory_hosts()` | - |
+| Shared event log (read, daemon) | `events_list(after, limit)` | - |
+| Durable operation (write, daemon) | `operation_submit(action, idempotency_key, target, params)`, `operation_get(id)` | `batc op [ID]` |
 
 `session_id` accepts a unique prefix (8 characters is usually enough). Use `next_offset` from `session_read` to page
 back in history.
@@ -116,6 +120,15 @@ last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_cont
   session behind hard gates (idle, clean, conflict-free, commit-bound verification, risk checks, then the optional Jev judgment). It keeps
   branches, never stops a working session, and returns one `escalation_summary`: report that once, not per item.
 - `sessions_triage` shows `source` (pattern or jev) and an evidence line for every state; quote the evidence.
+
+## Operations (when the task daemon is running)
+
+`operation_submit` records the action before anything reaches BAT and returns an `operation_id`. Keep the
+`idempotency_key` and reuse it on retry; after a timeout or an `uncertain` status, read the operation with
+`operation_get` instead of submitting again: the daemon settles `uncertain` by reading BAT back, never by resending.
+Prefer `inventory_sessions` over `sessions_list` for overviews: it does not dial every host, and `stale: true` means
+the row is the last known state of an unreachable host. Set `BATC_API_TOKEN` to your own token so your actions are
+recorded under your actor.
 
 ## Safety rules
 

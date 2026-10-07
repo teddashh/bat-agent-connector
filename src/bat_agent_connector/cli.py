@@ -610,6 +610,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--candidate-commit")
     p.add_argument("--tree-hash")
     p.add_argument("--next-prompt-file", help="explicit new prompt file; never reuses uncertain text")
+    p = sp.add_parser("api-token", help="manage /api/v1 tokens on the local task daemon (admin)")
+    tsp = p.add_subparsers(dest="api_token_cmd", required=True)
+    t = tsp.add_parser("issue", help="issue a token for an actor (printed once)")
+    t.add_argument("--actor", required=True, help="e.g. ted-dashboard, hermes, grokbot")
+    t.add_argument("--scope", action="append", required=True,
+                   choices=["observe", "operate", "manage", "merge", "deploy"])
+    t.add_argument("--ttl-days", type=float)
+    t.add_argument("--label")
+    tsp.add_parser("list", help="list actors, scopes and expiry (never tokens)")
+    t = tsp.add_parser("revoke", help="revoke every token of an actor")
+    t.add_argument("--actor", required=True)
+    p = sp.add_parser("op", help="show one operation, or list recent ones")
+    p.add_argument("operation_id", nargs="?")
+    p.add_argument("--status", action="append")
+    p.add_argument("--limit", type=int, default=20)
     sp.add_parser("config-path", help="print the config path")
     return ap
 
@@ -647,6 +662,27 @@ def main(argv: list[str] | None = None) -> int:
                              next_prompt=next_prompt)
             _print(result, args.json)
             return 0
+        if args.cmd == "api-token":
+            from .task_daemon import request
+
+            calls = {
+                "issue": lambda: request("api_token_issue", actor=args.actor, scopes=args.scope,
+                                         ttl_days=args.ttl_days, label=args.label),
+                "revoke": lambda: request("api_token_revoke", actor=args.actor),
+                "list": lambda: request("api_token_list"),
+            }
+            out = calls[args.api_token_cmd]()
+            _print(out, True)
+            return 0
+        if args.cmd == "op":
+            from .task_daemon import request
+
+            if args.operation_id:
+                out = request("op_get", operation_id=args.operation_id, entry="cli")
+            else:
+                out = request("op_list", statuses=args.status, limit=args.limit, entry="cli")
+            _print(out, True)
+            return 0
         if args.cmd == "import-bat":
             return cmd_import(args)
         if args.cmd == "config-path":
@@ -655,7 +691,7 @@ def main(argv: list[str] | None = None) -> int:
         obj, render = asyncio.run(_run(args))
         _print(obj, args.json, render)
         return 0
-    except BatError as e:
+    except (BatError, ValueError) as e:
         print(f"error: {redact(e)}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

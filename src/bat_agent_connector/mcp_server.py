@@ -13,6 +13,7 @@ import asyncio
 import functools
 import ipaddress
 import logging
+import os
 import sys
 from contextlib import asynccontextmanager
 from typing import Any, Literal
@@ -41,8 +42,16 @@ READ_TOOLS = [
     "sessions_triage",
     "quota_sessions",
     "session_policy",
+    "capabilities_get",
+    "inventory_sessions",
+    "inventory_hosts",
+    "events_list",
+    "operation_get",
+    "operations_list",
 ]
 WRITE_TOOLS = [
+    "operation_submit",
+    "operation_cancel",
     "session_send",
     "session_continue",
     "session_interrupt",
@@ -268,6 +277,52 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
     for fn in (work_status, work_result, work_events):
         mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
 
+    # Shared operations and inventory, served by the task daemon (`batc serve`) like /api/v1. With
+    # BATC_API_TOKEN set, calls carry that principal (e.g. hermes); otherwise the local admin token.
+    def daemon(method: str, **params):
+        return asyncio.to_thread(task_request, method, _auth_token=os.environ.get("BATC_API_TOKEN") or None,
+                                 timeout=40.0, entry="mcp", **params)
+
+    async def capabilities_get() -> dict[str, Any]:
+        """What this caller may do: its actor and scopes, per-host tiers and managed roots, and every operation
+        action with whether it is allowed. Read this before submitting operations."""
+        return await daemon("api_capabilities")
+
+    async def inventory_sessions(host: str | None = None, access: Literal["managed", "read_only"] | None = None,
+                                 provenance: Literal["manual", "connector_managed", "unknown"] | None = None,
+                                 attention: bool | None = None, include_gone: bool = False,
+                                 cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
+        """The daemon's persisted session inventory across hosts (no host round trip): provenance, api_access,
+        loaded/streaming/pending, observed_at and stale. Offline hosts keep their last rows marked stale. Page with
+        next_cursor; as_of is the events cursor to follow with events_list for changes."""
+        return await daemon("inventory_sessions", host=host, access=access, provenance=provenance,
+                            attention=attention, include_gone=include_gone, cursor=cursor, limit=limit)
+
+    async def inventory_hosts() -> dict[str, Any]:
+        """Per-host reachability as last observed by the daemon: reachable, error, last_success_at, stale."""
+        return await daemon("inventory_hosts")
+
+    async def events_list(after: int = 0, limit: int = 100, resource_type: str | None = None,
+                          resource_id: str | None = None) -> dict[str, Any]:
+        """The shared event log (tasks, operations, sessions, hosts) after a persistent cursor. Store next_cursor
+        only after handling the returned events; limit=0 returns head_cursor."""
+        return await daemon("api_events", after=after, limit=limit, resource_type=resource_type,
+                            resource_id=resource_id)
+
+    async def operation_get(operation_id: str) -> dict[str, Any]:
+        """One operation with its steps: status (accepted, running, waiting_checks, waiting_external,
+        needs_attention, uncertain, succeeded, failed, cancelled), error_code, result and external refs.
+        After a timeout, look the operation up here instead of submitting again."""
+        return await daemon("op_get", operation_id=operation_id)
+
+    async def operations_list(statuses: list[str] | None = None, action: str | None = None,
+                              limit: int = 50) -> dict[str, Any]:
+        """Recent operations, newest first, optionally filtered by status or action."""
+        return await daemon("op_list", statuses=statuses, action=action, limit=limit)
+
+    for fn in (capabilities_get, inventory_sessions, inventory_hosts, events_list, operation_get, operations_list):
+        mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
+
     if fleet.any_orchestrate:
         task_write = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)
 
@@ -423,7 +478,24 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
                 max_items, confirm, dry_run, queue, start_if_missing,
             )
 
+        async def operation_submit(action: str, idempotency_key: str, target: dict[str, Any],
+                                   params: dict[str, Any] | None = None,
+                                   preconditions: dict[str, Any] | None = None,
+                                   wait_s: float = 10) -> dict[str, Any]:
+            """WRITE. Submit an operation through the daemon's shared OperationService (same path as the
+            Dashboard): e.g. action="session.send", target={host, session_id}, params={text}. Keep the
+            idempotency_key and reuse it to retry; the same key with different content is refused. Returns the
+            operation (waits up to wait_s for an outcome). Sessions created in BAT are refused (403)."""
+            return await daemon("op_submit", action=action, idempotency_key=idempotency_key, target=target,
+                                params=params, preconditions=preconditions, wait_s=wait_s)
+
+        async def operation_cancel(operation_id: str) -> dict[str, Any]:
+            """WRITE. Ask an operation to stop before its next step. A step already sent is not undone."""
+            return await daemon("op_cancel", operation_id=operation_id)
+
         for fn in (
+            operation_submit,
+            operation_cancel,
             session_send,
             session_continue,
             session_interrupt,

@@ -170,6 +170,46 @@ class Journal:
                 parent_branch_id TEXT, reason TEXT NOT NULL, created_at REAL NOT NULL,
                 UNIQUE(task_id,session_id,role)
             );
+            -- /api/v1: one monotonic cursor for task, operation and inventory events.
+            CREATE TABLE IF NOT EXISTS api_events (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT, resource_type TEXT NOT NULL,
+                resource_id TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, actor TEXT,
+                task_event_id INTEGER UNIQUE, created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS api_events_resource ON api_events(resource_type, resource_id, seq);
+            CREATE TABLE IF NOT EXISTS api_principals (
+                token_hash TEXT PRIMARY KEY, actor TEXT NOT NULL, scopes TEXT NOT NULL, label TEXT,
+                created_at REAL NOT NULL, expires_at REAL, revoked_at REAL
+            );
+            CREATE TABLE IF NOT EXISTS operations (
+                operation_id TEXT PRIMARY KEY, actor TEXT NOT NULL, entry TEXT NOT NULL,
+                idem_key TEXT NOT NULL, request_hash TEXT NOT NULL, action TEXT NOT NULL,
+                target TEXT NOT NULL, params TEXT NOT NULL, preconditions TEXT NOT NULL,
+                status TEXT NOT NULL, status_reason TEXT, error_code TEXT, result TEXT,
+                external_refs TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0,
+                version INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
+                next_run_at REAL NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL, updated_at REAL NOT NULL, UNIQUE(actor, idem_key)
+            );
+            CREATE INDEX IF NOT EXISTS operations_due ON operations(status, next_run_at);
+            CREATE TABLE IF NOT EXISTS operation_steps (
+                operation_id TEXT NOT NULL REFERENCES operations(operation_id), seq INTEGER NOT NULL,
+                name TEXT NOT NULL, status TEXT NOT NULL, request TEXT NOT NULL, response TEXT,
+                external_ref TEXT, error TEXT, started_at REAL NOT NULL, finished_at REAL,
+                PRIMARY KEY(operation_id, seq), UNIQUE(operation_id, name)
+            );
+            CREATE TABLE IF NOT EXISTS hosts_observed (
+                host TEXT PRIMARY KEY, reachable INTEGER NOT NULL DEFAULT 0, error TEXT,
+                server_version TEXT, last_attempt_at REAL, last_success_at REAL,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0, session_count INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS sessions_observed (
+                host TEXT NOT NULL, session_id TEXT NOT NULL, body TEXT NOT NULL, digest TEXT NOT NULL,
+                provenance TEXT NOT NULL, api_access TEXT NOT NULL, attention INTEGER NOT NULL DEFAULT 0,
+                sort_key INTEGER NOT NULL DEFAULT 0, first_seen_at REAL NOT NULL, last_seen_at REAL NOT NULL,
+                missing_count INTEGER NOT NULL DEFAULT 0, gone_at REAL, PRIMARY KEY(host, session_id)
+            );
+            CREATE INDEX IF NOT EXISTS sessions_observed_activity ON sessions_observed(sort_key, host, session_id);
             COMMIT;
         """)
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(tasks)")}
@@ -193,6 +233,13 @@ class Journal:
         if "jev_backend" not in route_columns:
             self.db.execute("ALTER TABLE routing ADD COLUMN jev_backend TEXT")
         self._drop_legacy_outbox()
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 1:
+            # One-time projection of older task events into the /api/v1 cursor.
+            with self.tx():
+                self.db.execute("""INSERT OR IGNORE INTO api_events(resource_type,resource_id,kind,body,
+                    task_event_id,created_at) SELECT 'task',task_id,'task.'||kind,body,event_id,created_at
+                    FROM events ORDER BY event_id""")
+                self.db.execute("PRAGMA user_version=1")
 
     def _drop_legacy_outbox(self):
         """Remove the retired chat outbox so no historical event can ever be published.
@@ -392,10 +439,42 @@ class Journal:
         return dict(row) if row else None
 
     def _event(self, task_id: str, kind: str, body: dict | None = None):
-        self.db.execute(
-            "INSERT INTO events(task_id,kind,body,created_at) VALUES(?,?,?,?)",
-            (task_id, kind, json.dumps(body or {}, ensure_ascii=False), time.time()),
-        )
+        raw, now = json.dumps(body or {}, ensure_ascii=False), time.time()
+        cur = self.db.execute("INSERT INTO events(task_id,kind,body,created_at) VALUES(?,?,?,?)",
+                              (task_id, kind, raw, now))
+        self.db.execute("""INSERT INTO api_events(resource_type,resource_id,kind,body,task_event_id,created_at)
+            VALUES('task',?,?,?,?,?)""", (task_id, "task." + kind, raw, cur.lastrowid, now))
+
+    def api_event(self, resource_type: str, resource_id: str, kind: str, body: dict | None = None,
+                  actor: str | None = None) -> int:
+        """Append one /api/v1 event; call it inside the transaction that made the change."""
+        cur = self.db.execute("""INSERT INTO api_events(resource_type,resource_id,kind,body,actor,created_at)
+            VALUES(?,?,?,?,?,?)""", (resource_type, resource_id, kind,
+                                     json.dumps(body or {}, ensure_ascii=False, default=str), actor, time.time()))
+        return int(cur.lastrowid)
+
+    def api_head(self) -> int:
+        return int(self.db.execute("SELECT COALESCE(MAX(seq),0) FROM api_events").fetchone()[0])
+
+    def api_events(self, after: int = 0, limit: int = 100, *, resource_type: str | None = None,
+                   resource_id: str | None = None) -> dict:
+        """Page the /api/v1 event log by its persistent, monotonic ``seq`` cursor."""
+        if (isinstance(after, bool) or not isinstance(after, int) or after < 0
+                or isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500):
+            raise ValueError("after must be >= 0 and limit between 0 and 500")
+        head = self.api_head()
+        sql, args = "SELECT * FROM api_events WHERE seq>?", [after]
+        if resource_type:
+            sql, args = sql + " AND resource_type=?", [*args, resource_type]
+        if resource_id:
+            sql, args = sql + " AND resource_id=?", [*args, resource_id]
+        rows = self.db.execute(sql + " ORDER BY seq LIMIT ?", (*args, limit)).fetchall() if limit else []
+        events = [{"seq": r["seq"], "resource_type": r["resource_type"], "resource_id": r["resource_id"],
+                   "kind": r["kind"], "body": self._body(r["body"]), "actor": r["actor"],
+                   "created_at": r["created_at"]} for r in rows]
+        last = events[-1]["seq"] if events else after
+        return {"events": events, "next_cursor": last, "head_cursor": head,
+                "has_more": (len(events) == limit and last < head) if limit else after < head}
 
     def submit(self, *, project: str, host: str, workspace: str, original_words: str,
                discord_thread_id: str | None = None, recipe: str = "feature-to-staging",
