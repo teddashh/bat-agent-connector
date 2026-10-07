@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from bat_agent_connector import lifecycle, orchestrate, registry, triage
+from bat_agent_connector import channels, lifecycle, orchestrate, registry, triage
 from bat_agent_connector.config import JevConfig
-from bat_agent_connector.errors import WriteRefused
+from bat_agent_connector.errors import ResourceReadOnly, WriteRefused
 from bat_agent_connector.jev import Jev
+from tests.conftest import adopt
+
+# the demo checkout as the connector's own clone: merges into its main checkout are allowed
+MANAGED_CLONE = {"managed_roots": ["/srv/demo"]}
 
 QUOTA_MSG = (
     "You've hit your monthly spend limit · raise it at example.invalid/settings/usage · "
@@ -116,7 +120,8 @@ async def test_sessions_triage_quota(fleet_factory, mock, monkeypatch):
 
 
 # --------------------------------------------------------------------------- failover
-def _add_wt_claude(mock, sid="wt-claude-0007"):
+def _add_wt_claude(mock, sid="wt-claude-0007", managed=True):
+    """A quota-stopped Claude worktree session; managed=True: the connector started it (registry record)."""
     mock.ws_doc["terminals"].append(
         {
             "id": sid,
@@ -143,6 +148,10 @@ def _add_wt_claude(mock, sid="wt-claude-0007"):
                            "branchName": "bat/worktree-abc", "sourceBranch": "main",
                            "diff": "", "merged": False, "mergedKind": "unknown"}
     mock.git_status["/srv/demo/.bat-worktrees/abc"] = [{"status": "M", "file": "api.py"}]
+    if managed:
+        adopt(sid, cwd="/srv/demo/.bat-worktrees/abc", origin_cwd="/srv/demo",
+              worktree_path="/srv/demo/.bat-worktrees/abc", branch="bat/worktree-abc",
+              agent_preset="claude-code-worktree", workspace_id="ws-1")
     return sid
 
 
@@ -182,7 +191,8 @@ async def test_failover_same_worktree(fleet_factory, mock):
     assert dry["dry_run"] and dry["same_worktree"] and "claude:start-session" not in mock.channels()
     r = await lifecycle.session_failover(f, "h1", sid, confirm=True)
     assert r["old_session_id"] == sid and r["new_session_id"] != sid and r["same_worktree"]
-    assert r["branch"] == "bat/worktree-abc" and r["prompt_sent"] and r["counts_toward_cap"]
+    assert r["branch"] == "bat/worktree-abc" and r["prompt_sent"] and not r["counts_toward_cap"]
+    assert r["isolation"] == "legacy_shared_clone" and registry.get("h1", sid)["status"] == "superseded"
     assert "worktree:create" not in mock.channels()
     start = next(i for i in mock.invokes if i["channel"] == "claude:start-session")["params"]["options"]
     assert start["agentPreset"] == "codex-agent-worktree" and start["useWorktree"] is True
@@ -206,8 +216,22 @@ async def test_failover_same_worktree(fleet_factory, mock):
     await f.close()
 
 
-async def test_failover_refuses_non_exhausted_and_non_claude(fleet_factory, mock):
+async def test_failover_of_a_bat_session_is_refused_before_any_write(fleet_factory, mock):
+    sid = _add_wt_claude(mock, managed=False)  # Ted's own BAT worktree session
     f = fleet_factory(writes=True, orchestrate=True)
+    for kwargs in ({"dry_run": True}, {"confirm": True}, {"confirm": True, "force": True}):
+        with pytest.raises(ResourceReadOnly, match="MANUAL_READ_ONLY"):
+            await lifecycle.session_failover(f, "h1", sid, **kwargs)
+    r = await lifecycle.session_failover(f, "h1", all_exhausted=True, confirm=True)
+    assert r["exhausted_found"] == 1 and "MANUAL_READ_ONLY" in r["failovers"][0]["error"]
+    assert not any(i["channel"] in channels.WRITE_CHANNELS | channels.ORCHESTRATE_CHANNELS for i in mock.invokes)
+    assert registry.list_entries("h1") == []
+    await f.close()
+
+
+async def test_failover_refuses_non_exhausted_and_non_claude(fleet_factory, mock):
+    adopt("sess-claude-0001")
+    f = fleet_factory(writes=True, orchestrate=True, **MANAGED_CLONE)
     with pytest.raises(WriteRefused, match="does not look quota-exhausted"):
         await lifecycle.session_failover(f, "h1", "sess-claude-0001", confirm=True)
     with pytest.raises(WriteRefused, match="not a Claude"):
@@ -217,7 +241,13 @@ async def test_failover_refuses_non_exhausted_and_non_claude(fleet_factory, mock
 
 async def test_failover_main_checkout_and_all_exhausted(fleet_factory, mock):
     mock.states["sess-claude-0001"]["messages"].append(msg(99, "assistant", QUOTA_MSG))
+    adopt("sess-claude-0001")  # a connector session in the main checkout of a human clone
     f = fleet_factory(writes=True, orchestrate=True)
+    r = await lifecycle.session_failover(f, "h1", all_exhausted=True, confirm=True)
+    assert "WORKDIR_NOT_MANAGED" in r["failovers"][0]["error"]  # legacy boundary
+    assert "claude:start-session" not in mock.channels()
+    await f.close()
+    f = fleet_factory(writes=True, orchestrate=True, **MANAGED_CLONE)
     r = await lifecycle.session_failover(f, "h1", all_exhausted=True, confirm=True)
     assert r["count"] == 1 and r["exhausted_found"] == 1
     fo = r["failovers"][0]
@@ -264,6 +294,14 @@ async def test_set_permissions_and_approve_pending(fleet_factory, mock):
     mock.states["sess-codex-0002"]["pendingPermission"] = {"toolUseId": "tu1", "toolName": "Bash", "input": {"command": "pytest"}}
     mock.metas["sess-codex-0002"]["isStreaming"] = False
     f = fleet_factory(writes=True, default_permission_mode="allow_all")
+    r = await lifecycle.approve_pending(f, "h1", confirm=True)  # Ted's BAT session: skipped, never answered
+    assert r["sessions"][0]["skipped"] == "read_only" and "claude:resolve-permission" not in mock.channels()
+    with pytest.raises(ResourceReadOnly, match="MANUAL_READ_ONLY"):
+        await lifecycle.session_set_permissions(f, "h1", "sess-codex-0002", confirm=True, force=True)
+    assert mock.perm_calls == []
+    await f.close()
+    adopt("sess-codex-0002")
+    f = fleet_factory(writes=True, default_permission_mode="allow_all", **MANAGED_CLONE)
     dry = await lifecycle.approve_pending(f, "h1", dry_run=True)
     assert dry["count"] == 1 and "claude:resolve-permission" not in mock.channels()
     r = await lifecycle.approve_pending(f, "h1", confirm=True)
@@ -276,7 +314,8 @@ async def test_set_permissions_and_approve_pending(fleet_factory, mock):
 
 
 async def test_claude_mode_not_switched_mid_turn(fleet_factory, mock):
-    f = fleet_factory(writes=True, default_permission_mode="allow_all")
+    adopt("sess-claude-0001")
+    f = fleet_factory(writes=True, default_permission_mode="allow_all", **MANAGED_CLONE)
     mock.metas["sess-claude-0001"]["isStreaming"] = True
     with pytest.raises(lifecycle.TurnInFlight):
         await lifecycle.session_set_permissions(f, "h1", "sess-claude-0001", confirm=True)
@@ -362,7 +401,8 @@ async def test_cleanup_clean_only_and_apply(fleet_factory, mock, monkeypatch):
 async def test_cleanup_merge_needs_jev(fleet_factory, mock, monkeypatch):
     diff = "diff --git a/x.py b/x.py\n+++ b/x.py\n+print('x')\n"
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
-    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0})
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0},
+                      **MANAGED_CLONE)
     await _finished_wt(f, mock, "ahead", diff)
     d = await lifecycle.session_cleanup(f, "h1", dry_run=True)
     assert d["decisions"][0]["decision"] == "ESCALATE" and "Jev unavailable" in d["escalation_summary"]
@@ -380,7 +420,8 @@ async def test_cleanup_merge_needs_jev(fleet_factory, mock, monkeypatch):
 
 async def test_cleanup_requires_commit_bound_execution_not_jev(fleet_factory, mock, monkeypatch):
     diff = "diff --git a/x.py b/x.py\n+++ b/x.py\n+print('x')\n"
-    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0})
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0},
+                      **MANAGED_CLONE)
     r = await _finished_wt(f, mock, "ahead", diff, verified=False)
 
     async def optimistic_gate(self, task, final, diff_excerpt, tests):
@@ -412,7 +453,8 @@ async def test_cleanup_requires_commit_bound_execution_not_jev(fleet_factory, mo
 
 
 async def test_cleanup_rechecks_candidate_before_merge(fleet_factory, mock, monkeypatch):
-    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0})
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0},
+                      **MANAGED_CLONE)
     r = await _finished_wt(f, mock, "ahead", "diff --git a/x b/x\n+++ b/x\n+code\n")
 
     async def confident_gate(self, task, final, diff_excerpt, tests):
@@ -444,6 +486,38 @@ async def test_cleanup_escalates_risky_and_keeps_working(fleet_factory, mock, mo
     assert by[r2["session_id"]]["decision"] == "KEEP"
     esc = [x for x in d["decisions"] if x["decision"] == "ESCALATE"]
     assert esc and "secret" in esc[0]["reasons"][0]
+    await f.close()
+
+
+async def test_cleanup_never_merges_into_a_human_checkout(fleet_factory, mock, monkeypatch):
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0})
+    r = await _finished_wt(f, mock, "ahead", "diff --git a/x b/x\n+++ b/x\n+code\n")
+
+    async def confident_gate(self, task, final, diff_excerpt, tests):
+        return {"claims_done": 0.95, "diff_verdict": "safe_complete", "diff_confidence": 0.95, "tests_ok": 0.95}
+
+    monkeypatch.setattr(Jev, "merge_gate", confident_gate)
+    d = await lifecycle.session_cleanup(f, "h1", session_id=r["session_id"], dry_run=False, confirm=True)
+    row = d["decisions"][0]
+    assert row["decision"] == "ESCALATE" and "human checkout" in row["reasons"][-1]
+    assert "worktree:merge" not in mock.channels() and "claude:stop-session" not in mock.channels()
+    await f.close()
+
+
+async def test_cleanup_keeps_bat_sessions_and_legacy_boundaries(fleet_factory, mock):
+    # a legacy registry: a failover successor of Ted's BAT session, plus a connector session in his checkout
+    sid = _add_wt_claude(mock, managed=False)
+    adopt("succ-0001", cwd="/srv/demo/.bat-worktrees/abc", worktree_path="/srv/demo/.bat-worktrees/abc",
+          origin_cwd="/srv/demo", failover_of=sid, shares_worktree_with=sid, handoff_status="sent")
+    mock.metas["succ-0001"] = {"cwd": "/srv/demo/.bat-worktrees/abc", "isStreaming": False}
+    adopt("sess-codex-0002")
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0})
+    d = await lifecycle.session_cleanup(f, "h1", confirm=True, dry_run=False, min_idle_s=0)
+    by = {x["session_id"]: x for x in d["decisions"]}
+    assert by[sid]["decision"] == "KEEP" and "manual" in by[sid]["reasons"][0]
+    assert by["succ-0001"]["decision"] == "KEEP" and by["succ-0001"]["api_access"] == "read_only"
+    assert by["sess-codex-0002"]["decision"] == "KEEP" and "legacy boundary" in by["sess-codex-0002"]["reasons"][0]
+    assert not any(i["channel"] in channels.WRITE_CHANNELS | channels.ORCHESTRATE_CHANNELS for i in mock.invokes)
     await f.close()
 
 
@@ -580,7 +654,8 @@ async def test_jev_merge_gate_prompt_is_language_neutral(monkeypatch):
 
 async def test_cleanup_merges_zh_tw_completion(fleet_factory, mock, monkeypatch):
     diff = "diff --git a/x.rs b/x.rs\n+++ b/x.rs\n+fn x() {}\n"
-    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0})
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0},
+                      **MANAGED_CLONE)
     r = await _finished_wt(f, mock, "ahead", diff)
     mock.states[r["session_id"]]["messages"][-1] = msg(3, "assistant", ZH_DONE)
 
@@ -597,7 +672,8 @@ async def test_cleanup_merges_zh_tw_completion(fleet_factory, mock, monkeypatch)
 
 async def test_cleanup_rebuilds_empty_branch_diff(fleet_factory, mock, monkeypatch):
     """BAT returns an empty worktree diff when git's output exceeds a pipe buffer; rebuild it per commit/file."""
-    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0})
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0},
+                      **MANAGED_CLONE)
     r = await _finished_wt(f, mock, "ahead", "")
     wt = mock.worktrees[r["session_id"]]["worktreePath"]
     mock.git_logs = {wt: [{"hash": "c2c2c2c2"}, {"hash": "c1c1c1c1"}, {"hash": "abc1234"}]}

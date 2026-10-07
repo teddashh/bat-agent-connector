@@ -3820,6 +3820,13 @@ async def test_reviewer_start_polls_existing_session_after_start_timeout(
     monkeypatch.setattr(task_bat.registry, "reserve", lambda *a, **k: None)
     monkeypatch.setattr(task_bat.registry, "update", lambda *a, **k: None)
     monkeypatch.setattr(adapter, "session_presence", lambda *a, **k: asyncio.sleep(0, result="present"))
+
+    async def shared_grant(_fleet, host, sid, owner):
+        assert owner["id"] == lead
+        return task_bat.resource_policy.WriteGrant(
+            host, "session.create", sid, task_bat.resource_policy.BY_ACTION["session.create"].channels)
+
+    monkeypatch.setattr(task_bat.resource_policy, "authorize_shared_session", shared_grant)
     calls = []
     client = fleet.client("h1")
     async def invoke(channel, params, **kwargs):

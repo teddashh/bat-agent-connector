@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from bat_agent_connector import lifecycle, registry, triage
+from bat_agent_connector import channels, lifecycle, registry, triage
 from bat_agent_connector.errors import BatError
 from bat_agent_connector.relay import build_relay, parse_fanout, parse_status
 
@@ -80,15 +80,30 @@ def test_triage_prefers_marker():
     assert c["state"] == "done_idle" and c["source"] == "marker"
 
 
-async def test_relay_dry_run_targets_main_session(fleet_factory, mock):
+async def test_relay_dry_run_targets_managed_session_never_a_bat_session(fleet_factory, mock):
     from bat_agent_connector import orchestrate
 
     f = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})
-    r = await orchestrate.session_start(f, "h1", "demo-project", "codex", confirm=True, use_worktree=False)
+    d = await lifecycle.session_relay(f, "h1", TED, workspace="demo-project", dry_run=True)
+    assert d["no_session"] and d["session_id"] is None  # Ted's BAT sessions are not relay targets
+    r = await orchestrate.session_start(f, "h1", "demo-project", "codex", confirm=True)
     d = await lifecycle.session_relay(f, "h1", TED, workspace="demo-project", dry_run=True, brief="goal: x")
-    assert d["sent"] is False and TED in d["text"] and d["session_id"]
+    assert d["sent"] is False and TED in d["text"] and d["session_id"] == r["session_id"]
     s = await lifecycle.session_relay(f, "h1", TED, session_id=r["session_id"], confirm=True)
     assert s["sent"] is True
+    await f.close()
+
+
+async def test_relay_to_bat_session_starts_a_new_worktree_instead(fleet_factory, mock):
+    f = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})
+    n = await lifecycle.session_relay(f, "h1", TED, session_id="sess-claude-0001", confirm=True)
+    assert n["sent"] is False and n["read_only"] and n["read_only_code"] == "MANUAL_READ_ONLY"
+    s = await lifecycle.session_relay(f, "h1", TED, session_id="sess-claude-0001", confirm=True,
+                                      start_if_missing=True)
+    assert s["started"] and s["session_id"] != "sess-claude-0001"
+    assert s["result"]["worktree_path"].startswith("/srv/demo/.bat-worktrees/")
+    assert not any(i["params"].get("sessionId") == "sess-claude-0001" and i["channel"] in channels.WRITE_CHANNELS
+                   for i in mock.invokes)
     await f.close()
 
 

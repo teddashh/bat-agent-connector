@@ -21,8 +21,15 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from . import registry, verification
-from .errors import BatError, InvokeTimeout, TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
+from . import registry, resource_policy, verification
+from .errors import (
+    BatError,
+    InvokeTimeout,
+    ResourceReadOnly,
+    TaskDispatchCancelled,
+    TaskIdentityMismatch,
+    WriteRefused,
+)
 from .fleet import Fleet
 from .jev import Jev
 from .orchestrate import (
@@ -131,6 +138,7 @@ async def session_set_permissions(
     async with _write_lock(host):
         t, _ = await _resolve_session(c, session_id)
         sid = t["id"]
+        grant = await resource_policy.authorize_session(fleet, host, "session.permissions", t)
         kind = agent_kind(t.get("agentPreset"))
         meta = await _meta(c, sid)
         if meta is None:
@@ -164,7 +172,7 @@ async def session_set_permissions(
         for ch, params in calls:
             audit.record(**base, channel=ch, phase="attempt", mode=mode)
             try:
-                r = await c.invoke(ch, params)
+                r = await c.invoke(ch, params, grant=grant)
             except BatError as e:
                 audit.record(**base, channel=ch, phase="result", ok=False, error=_err(e))
                 raise
@@ -209,6 +217,11 @@ async def approve_pending(
             "agent_kind": row["agent_kind"],
             "prompt": row.get("evidence"),
         }
+        if row.get("api_access") != "managed":
+            item.update(approved=False, skipped="read_only", read_only_code=row.get("read_only_code"),
+                        provenance=row.get("provenance"))
+            out.append(item)
+            continue
         if dry_run:
             item["action"] = "would approve"
             out.append(item)
@@ -428,6 +441,12 @@ async def _failover_one(
     sid = t["id"]
     if agent_kind(t.get("agentPreset")) != "claude":
         raise WriteRefused("failover is for Claude sessions (this one is not a Claude session)")
+    source = resource_policy.classify(hc, sid, terminal=t, entries=registry.list_entries(host))
+    if source.code:
+        raise ResourceReadOnly(
+            source.code,
+            f"failover only continues connector-managed sessions; {sid[:8]}: {source.reason}. The source stays "
+            "untouched: start a new managed worktree session (session_start) from its committed work instead")
     prior = [
         e
         for e in registry.list_entries(host)
@@ -530,10 +549,15 @@ async def _failover_one(
     }
     if note:
         plan["note"] = note
+    new_sid = successor_session_id or str(uuid.uuid4())
+    if same_worktree:
+        grant = await resource_policy.authorize_shared_session(fleet, host, new_sid, t)
+    else:
+        grant = resource_policy.authorize_new_session(hc, new_sid, folder=cwd, use_worktree=False)
+    plan["isolation"] = grant.isolation
     if dry_run:
         return {**plan, "dry_run": True, "handoff_preview": prompt[:1500]}
     replaces = sid if (old_reg and old_reg.get("status") == "active" and same_worktree) else None
-    new_sid = successor_session_id or str(uuid.uuid4())
     opts: dict[str, Any] = {
         "cwd": origin if same_worktree else cwd,
         "agentPreset": preset,
@@ -563,6 +587,7 @@ async def _failover_one(
                 "shares_worktree_with": sid if same_worktree else None,
                 "worktree_path": wt_path if same_worktree else None,
                 "cwd": cwd,
+                "isolation": grant.isolation,
                 "handoff_status": "pending",
                 "handoff_message_id": handoff_message_id,
                 "handoff_command_id": handoff_command_id,
@@ -586,7 +611,8 @@ async def _failover_one(
             }
         audit.record(**base, channel="claude:start-session", phase="attempt", preset=preset, failover_of=sid)
         try:
-            started = await c.invoke("claude:start-session", {"sessionId": new_sid, "options": opts})
+            started = await c.invoke("claude:start-session", {"sessionId": new_sid, "options": opts},
+                                     grant=grant)
             if (not isinstance(started, dict) or started.get("ok") is False or
                     started.get("sessionId") != new_sid):
                 raise WriteRefused("BAT failover start did not confirm the reserved session ID")
@@ -621,6 +647,7 @@ async def _failover_one(
                 before_send=before_handoff_invoke,
                 before_frame=verify_handoff_at_frame,
                 frame_guard=handoff_frame_guard,
+                grant=grant,
             )
             if not isinstance(ack, dict) or not (ack.get("accepted") or ack.get("ok")):
                 raise WriteRefused("handoff prompt was not accepted by BAT")
@@ -989,6 +1016,18 @@ async def _evaluate(
     if e.get("role") == "reviewer" and e.get("lead_session_id") and e.get("worktree_path"):
         return decide("KEEP", "reviewer shares the lead worktree and cannot own cleanup")
 
+    hc = fleet.config.host(host)
+    pol, live = await resource_policy.classify_live(fleet, host, t)
+    row["provenance"] = pol.provenance
+    row["api_access"] = "managed" if pol.writable else "read_only"
+    if pol.code:
+        if pol.provenance == resource_policy.MANUAL:
+            return decide("KEEP", "manual session: the connector never stops or cleans it")
+        return decide("KEEP", f"read-only ({pol.code}): {pol.reason}")
+    if live and live.issue:
+        return decide("ESCALATE", f"{live.issue[0]}: {live.issue[1]}")
+    rehydrate = await resource_policy.authorize_session(fleet, host, "worktree.rehydrate", t, cls=pol, live=live)
+
     meta = await _meta(c, sid)
     loaded = meta is not None
     row["loaded"] = loaded
@@ -1093,7 +1132,7 @@ async def _evaluate(
             return decide("ESCALATE", f"idle but not finished: {clip(final, 160)}")
         return decide("KEEP", f"idle; completion unclear ({g['claims_done']})")
 
-    st, rehydrated = await _wt_status(c, t, allow_rehydrate=True)
+    st, rehydrated = await _wt_status(c, t, rehydrate=rehydrate)
     row["rehydrated"] = rehydrated
     root = await c.invoke("git:getRoot", {"cwd": wt})
     if not root:
@@ -1147,6 +1186,12 @@ async def _evaluate(
     if risks:
         return decide("ESCALATE", *risks)
     origin = _origin_cwd(t, ws)
+    if not resource_policy.in_managed_root(hc, origin):
+        return decide(
+            "ESCALATE",
+            f"work is ready on {row['branch']}, but the merge destination {origin} is a human checkout; the "
+            "connector never merges into it (integrate in a managed clone or a pull request)",
+        )
     cur = await c.invoke("git:branch", {"cwd": origin}) if origin else None
     if cur != st.get("sourceBranch"):
         return decide("ESCALATE", f"main checkout is on {cur!r}, not {st.get('sourceBranch')!r}")
@@ -1186,6 +1231,11 @@ async def _evaluate(
 
 async def _stop(fleet: Fleet, host: str, sid: str, audit: Audit) -> dict:
     c = fleet.client(host)
+    t, _ = await _resolve_session(c, sid)
+    try:
+        grant = await resource_policy.authorize_session(fleet, host, "session.stop", t)
+    except ResourceReadOnly as e:
+        return {"stopped": False, "reason": _err(e)}
     meta = await _meta(c, sid)
     if meta is None:
         return {"stopped": False, "reason": "not loaded"}
@@ -1195,7 +1245,7 @@ async def _stop(fleet: Fleet, host: str, sid: str, audit: Audit) -> dict:
     audit.check_rate(host, sid + "#stop")
     audit.record(**base, channel="claude:stop-session", phase="attempt")
     try:
-        r = await c.invoke("claude:stop-session", {"sessionId": sid})
+        r = await c.invoke("claude:stop-session", {"sessionId": sid}, grant=grant)
     except BatError as e:
         audit.record(**base, channel="claude:stop-session", phase="result", ok=False, error=_err(e))
         return {"stopped": False, "error": _err(e)}
@@ -1369,8 +1419,8 @@ def _retired(host: str) -> set[str]:
 
 
 async def main_session(fleet: Fleet, host: str, workspace: str) -> dict | None:
-    """The workspace's main session: the most recently active Claude/Codex session in the main checkout that
-    the connector has not retired (falls back to the most recent worktree session)."""
+    """The workspace's relay session: the most recently active connector-managed Claude/Codex session that the
+    API may drive and the connector has not retired. Sessions created in BAT are never relay targets."""
     from .service import sessions_list
 
     rows = (await sessions_list(fleet, host, workspace=workspace, limit=200, check_pending="none"))["sessions"]
@@ -1381,6 +1431,7 @@ async def main_session(fleet: Fleet, host: str, workspace: str) -> dict | None:
         r for r in rows
         if r["session_id"] not in gone and r["session_id"] not in planners
         and r["session_id"] not in task_owned and r.get("agent_kind") in ("claude", "codex")
+        and r.get("api_access") == "managed"
     ]
     main = [r for r in rows if not r.get("worktree_branch")] or rows
     return main[0] if main else None
@@ -1431,6 +1482,16 @@ async def session_relay(
             target = {"session_id": None}
     sid = target["session_id"]
     ws_name = workspace or target.get("workspace")
+    start_ws = ws_name
+    read_only: ResourceReadOnly | None = None
+    if sid is not None:
+        t, _ = await _resolve_session(fleet.client(host), sid)
+        sid = t["id"]
+        start_ws = start_ws or t.get("workspaceId")
+        cls = resource_policy.classify(fleet.config.host(host), sid, terminal=t,
+                                       entries=registry.list_entries(host))
+        if cls.code:
+            read_only = ResourceReadOnly(cls.code, cls.reason or "read-only")
     text = build_relay(
         message, host=host, workspace=ws_name, channel=channel, thread=thread, earlier=earlier, brief=brief,
         human_name=fleet.config.human_name, relay_name=fleet.config.relay_name,
@@ -1438,15 +1499,20 @@ async def session_relay(
     )
     out: dict[str, Any] = {"host": host, "session_id": sid, "workspace": ws_name, "text": text,
                            "request_fanout": request_fanout, "max_items": n}
+    if read_only is not None:
+        out.update(read_only=True, read_only_code=read_only.code, reason=str(read_only))
     if dry_run:
         return {**out, "sent": False, "dry_run": True, **({"no_session": True} if sid is None else {})}
-    if sid is None:
+    if sid is None or read_only is not None:
         if not start_if_missing:
-            return {**out, "sent": False, "no_session": True,
-                    "next": "retry with start_if_missing=true (starts a Codex session in the main checkout)"}
+            return {**out, "sent": False, **({"no_session": True} if sid is None else {}),
+                    "next": "retry with start_if_missing=true (starts a new Codex session in its own worktree; "
+                            "sessions created in BAT are never written to)"}
         from .orchestrate import session_start
 
-        r = await session_start(fleet, host, workspace, "codex", confirm, text, None, False, "relayed task", None)
+        if not start_ws:
+            raise WriteRefused("pass workspace to start a new session")
+        r = await session_start(fleet, host, start_ws, "codex", confirm, text, None, True, "relayed task", None)
         return {**out, "session_id": r.get("session_id"), "sent": True, "started": True, "result": r}
     if await _quota_stopped(fleet, host, sid):
         return {**out, "sent": False, "quota_stopped": True,
@@ -1467,7 +1533,7 @@ async def session_relay(
 
 
 PLANNER_PREFACE = (
-    "You are a read-only PLANNING session in the main checkout. Read the repository, its plan/docs and git "
+    "You are a read-only PLANNING session in your own worktree. Read the repository, its plan/docs and git "
     "history as needed, but do not modify files, do not run commands that write, and do not commit or push. "
     "Your only output is the fan-out plan requested below.\n\n"
 )
@@ -1485,7 +1551,7 @@ async def fanout_plan_session(
     brief: dict | str | None = None,
     confirm: bool = False,
 ) -> dict:
-    """Start a fresh Codex planning session (host codex_model, main checkout, read-only instructions) that
+    """Start a fresh Codex planning session (host codex_model, own worktree, read-only instructions) that
     returns a ```bat-fanout plan for the person's verbatim message. Use when the main session is busy or
     quota-stopped. After it answers, fanout_from_plan(session_id) starts the tasks and cleans the planner up."""
     from .orchestrate import session_start
@@ -1496,7 +1562,7 @@ async def fanout_plan_session(
         message, host=host, workspace=workspace, channel=channel, thread=thread, earlier=earlier, brief=brief,
         human_name=fleet.config.human_name, relay_name=fleet.config.relay_name, request_fanout=True, max_items=n,
     )
-    r = await session_start(fleet, host, workspace, "codex", confirm, text, None, False, "fan-out planner", "default")
+    r = await session_start(fleet, host, workspace, "codex", confirm, text, None, True, "fan-out planner", "default")
     if registry.get(host, r["session_id"]):
         registry.update(host, r["session_id"], role="planner")
     return {**r, "role": "planner", "max_items": n,

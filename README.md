@@ -75,7 +75,7 @@ notification on every reconnect.
 
 | Tier | Enabled by | Tools |
 |---|---|---|
-| read (always) | - | `hosts_list`, `host_status`, `workspaces_list`, `sessions_list`, `session_read`, `session_wait`, `worktree_status`, `session_worktree_status`, `sessions_triage`, `quota_sessions`, `work_status`, `work_result`, `work_events` |
+| read (always) | - | `hosts_list`, `host_status`, `workspaces_list`, `sessions_list`, `session_read`, `session_wait`, `worktree_status`, `session_worktree_status`, `sessions_triage`, `quota_sessions`, `session_policy`, `work_status`, `work_result`, `work_events` |
 | write | per host `writes = true` | `session_send`, `session_continue`, `session_interrupt`, `session_answer`, `session_set_permissions`, `approve_pending`, `session_relay` |
 | orchestrate | per host `writes = true` **and** `orchestrate = true` | `session_start`, `worktree_merge`, `worktree_remove`, `session_failover`, `session_record_verification`, `session_cleanup`, `fanout_plan_session`, `fanout_from_plan`, `work_submit`, `work_pause`, `work_resume`, `work_mark_stage` |
 
@@ -189,15 +189,16 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 | `session_interrupt(host, session_id, mode=soft\|hard, confirm)` | Soft = Claude interrupt-turn, hard = abort (Codex always hard). The session is kept. |
 | `session_answer(host, session_id, confirm, answers? \| permission?)` | Answers a pending ask-user question or permission prompt. |
 | `session_start(host, workspace, agent, confirm, prompt?, model?, use_worktree=true)` | Starts a session (by default in a new worktree; BAT picks the branch `bat/worktree-<id>`). Per-host cap. |
-| `worktree_merge(host, session_id, confirm)` | Merges only when provably conflict-free and clean; otherwise reports why. |
+| `worktree_merge(host, session_id, confirm)` | Merges only into a main checkout inside a managed root, and only when provably conflict-free and clean; otherwise reports why. |
 | `worktree_remove(host, session_id, confirm, delete_branch=false, ...)` | Removes the worktree folder; keeps the branch by default; refuses on dirty/unmerged work unless told. |
 | `sessions_triage(host?, workspace?, agent?, states?, use_jev=auto, include_unloaded=true)` | Classifies each session: `quota_exhausted`, `rate_limited_transient`, `waiting_permission`, `waiting_question`, `working`, `done_idle`, `error_other`, `unknown`, with `source` (pattern/jev), confidence, evidence line and reset time. |
 | `quota_sessions(host?)` | Shortcut: Claude sessions stopped by a usage quota. |
 | `session_set_permissions(host, session_id, mode, confirm)` | `allow_all` (host must allow it) or `default`. Claude sessions are only switched while idle (switching mid-turn would end the turn); Codex applies it from its next turn. |
 | `approve_pending(host, confirm, dry_run?)` | Approves every pending permission prompt (not questions) with "don't ask again" and raises the session to allow-all. Only on `default_permission_mode = "allow_all"` hosts. |
-| `session_failover(host, session_id? \| all_exhausted, confirm, dry_run?, model?, force?, instructions?, archive_only?)` | Starts a Codex session that continues a quota-stopped Claude session: same worktree when there is one, handoff prompt with the original task, latest instruction, recent output and git state (credentials redacted). Idempotent. `model` defaults to the host's `codex_model`. `instructions` replaces the default "continue the task" steps (for example "only commit the work in progress"); `archive_only` makes cleanup keep that branch unmerged. |
-| `session_relay(host, message, confirm, workspace? \| session_id?, brief?, earlier?, channel?, thread?, request_fanout=0, dry_run?)` | Relays a human's message verbatim to the workspace's main session (or a given one), plus an optional brief labeled as the relayer's interpretation and the BAT-STATUS footer. `request_fanout=N` asks the session for a `bat-fanout` plan. Returns the rendered text. |
-| `fanout_plan_session(host, workspace, message, confirm, max_items=4, brief?)` | Starts a read-only Codex planner in the main checkout (for when the main session is busy or quota-stopped) that answers with a `bat-fanout` plan. |
+| `session_failover(host, session_id? \| all_exhausted, confirm, dry_run?, model?, force?, instructions?, archive_only?)` | Starts a Codex session that continues a quota-stopped connector-managed Claude session: same worktree when there is one, handoff prompt with the original task, latest instruction, recent output and git state (credentials redacted). Idempotent. `model` defaults to the host's `codex_model`. `instructions` replaces the default "continue the task" steps (for example "only commit the work in progress"); `archive_only` makes cleanup keep that branch unmerged. |
+| `session_relay(host, message, confirm, workspace? \| session_id?, brief?, earlier?, channel?, thread?, request_fanout=0, dry_run?, start_if_missing?)` | Relays a human's message verbatim to the workspace's most recent connector-managed session (or a given one; sessions created in BAT are never written to, and `start_if_missing` starts a new worktree session instead), plus an optional brief labeled as the relayer's interpretation and the BAT-STATUS footer. `request_fanout=N` asks the session for a `bat-fanout` plan. Returns the rendered text. |
+| `fanout_plan_session(host, workspace, message, confirm, max_items=4, brief?)` | Starts a Codex planner in its own worktree (for when no managed session can plan) that answers with a `bat-fanout` plan. |
+| `session_policy(host, session_id?)` | Read. The host's mutation table and managed roots, or one session's provenance (`manual`, `connector_managed`, `unknown`), folder ownership and per-action verdicts with refusal codes. |
 | `fanout_from_plan(host, session_id, confirm, dry_run?, agent="codex", model?, max_items=4)` | Starts one worktree session per task of the last `bat-fanout` block of that session, prompts unchanged, then cleans up a planner session. |
 | `session_cleanup(host, confirm, dry_run=true, session_id?)` | Decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE per orchestrated session behind hard gates, then acts (needs `auto_cleanup = true`). See docs/ORCHESTRATE.md. |
 | `session_record_verification(host, session_id, candidate_commit, command, exit_code, environment, log_ref, confirm)` | Records an externally run verification for the host's current clean commit; automatic cleanup checks it again before merging. CLI: `batc record-verification`. |
@@ -223,6 +224,7 @@ batc fanout PLAN.md --start --host box1 --workspace api --confirm
 batc merge box1 1a2b3c4d --confirm
 batc remove-worktree box1 1a2b3c4d --confirm
 # lifecycle
+batc policy box1                                      # mutation table; `batc policy box1 1a2b3c4d` explains one session
 batc triage box1 --state quota_exhausted --state waiting_permission
 batc quota                                            # quota-stopped Claude sessions on every host
 batc approve-pending box1 --dry-run                   # then --confirm
@@ -251,6 +253,9 @@ It does not replace a commit-bound verification record for automatic cleanup.
 ## Safety model (short)
 
 * Read-only by default; writes and orchestration are opt-in per host, need `confirm=true`, are rate-limited and audited.
+* Sessions a person created in BAT are read-only through every tool. Writes only reach sessions the connector started,
+  in folders it owns; the client core refuses any write frame without a resource policy grant
+  ([docs/design/resource-policy.md](docs/design/resource-policy.md)).
 * TLS certificate pinning is mandatory; a mismatch aborts before the token is sent. Only `bat-remote/v2` is accepted.
 * Tokens are resolved at connect time from a reference and redacted from every error string.
 * The client always drains the socket (BAT drops clients with 256 queued frames) and uses bounded event queues.

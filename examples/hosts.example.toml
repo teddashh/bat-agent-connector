@@ -30,6 +30,10 @@ default_permission_mode = "default"    # "allow_all" = sessions the connector st
                                        # and approve_pending / session_set_permissions may raise sessions (needs writes)
 auto_cleanup = false                   # let session_cleanup actually merge/clean/stop (needs orchestrate)
 codex_model = ""                       # default model for Codex sessions started/failed over ("" = BAT's default)
+managed_roots = []                     # host folders that are the connector's own clones (real paths, no symlinks);
+                                       # only there may sessions work in the main checkout and worktree_merge merge
+shared_clone_worktrees = true          # legacy: new worktrees may live in a human clone's .bat-worktrees
+                                       # (shares its refs); false = only inside managed_roots
 
 [hosts.buildbox]
 url = "wss://127.0.0.2:9876/"

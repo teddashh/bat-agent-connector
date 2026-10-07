@@ -14,10 +14,14 @@ from bat_agent_connector.errors import (
     AuthError,
     ChannelNotAllowed,
     FingerprintMismatch,
+    ResourceReadOnly,
     TaskDispatchCancelled,
 )
+from bat_agent_connector.resource_policy import BY_ACTION, WriteGrant
 from tests.conftest import make_config
 from tests.mockbat import TOKEN
+
+SEND = BY_ACTION["session.send"].channels
 
 
 def client_for(mock, **kw):
@@ -56,7 +60,8 @@ async def test_transport_guard_runs_after_awaited_connect_before_send_frame(mock
     try:
         send = asyncio.create_task(c.invoke("claude:send-message",
                                             {"sessionId": "sess-claude-0001", "prompt": "test"},
-                                            before_send=guard))
+                                            before_send=guard,
+                                            grant=WriteGrant("h1", "session.send", "sess-claude-0001", SEND)))
         await asyncio.wait_for(entered.wait(), 2)
         allowed = False
         release.set()
@@ -141,10 +146,26 @@ async def test_orchestrate_channels_need_orchestrate_tier(mock, channel):
 async def test_write_allowed_when_enabled(mock):
     async with client_for(mock, writes=True) as c:
         r = await c.invoke(
-            "agent:send-message", {"sessionId": "sess-claude-0001", "prompt": "hi", "clientMessageId": "m1"}
+            "agent:send-message", {"sessionId": "sess-claude-0001", "prompt": "hi", "clientMessageId": "m1"},
+            grant=WriteGrant("h1", "session.send", "sess-claude-0001", SEND),
         )
     assert r["accepted"] is True
     assert mock.channels() == ["claude:send-message"]  # alias folded
+
+
+@pytest.mark.parametrize("grant", [
+    None,
+    WriteGrant("h1", "session.send", "sess-codex-0002", SEND),  # another session
+    WriteGrant("h2", "session.send", "sess-claude-0001", SEND),  # another host
+    WriteGrant("h1", "session.interrupt", "sess-claude-0001", BY_ACTION["session.interrupt"].channels),
+])
+async def test_write_frame_needs_matching_policy_grant(mock, grant):
+    async with client_for(mock, writes=True, orchestrate=True, tabs=True) as c:
+        with pytest.raises(ResourceReadOnly):
+            await c.invoke("claude:send-message", {"sessionId": "sess-claude-0001", "prompt": "hi"}, grant=grant)
+        with pytest.raises(ResourceReadOnly):
+            await c.append_workspace_terminal("default", {"id": "sess-claude-0001"}, grant=grant)
+    assert mock.invokes == []
 
 
 def test_never_exposed_examples_are_not_allowlisted():

@@ -7,7 +7,12 @@ import json
 import pytest
 
 from bat_agent_connector import orchestrate, registry, service
-from bat_agent_connector.errors import WriteRefused
+from bat_agent_connector.errors import ResourceReadOnly, WriteRefused
+from bat_agent_connector.resource_policy import BY_ACTION, WriteGrant
+
+
+def tab_grant(sid: str) -> WriteGrant:
+    return WriteGrant("h1", "workspace.register_tab", sid, BY_ACTION["workspace.register_tab"].channels)
 
 
 async def test_worktree_status_read_tier(fleet_factory, mock):
@@ -106,7 +111,8 @@ async def test_tab_registration_backs_off_on_concurrent_change(fleet_factory, mo
         return orig(ch, p)
 
     mock.dispatch = racing
-    r = await c.append_workspace_terminal("default", {"id": "new-1", "workspaceId": "ws-1"}, retries=2)
+    r = await c.append_workspace_terminal("default", {"id": "new-1", "workspaceId": "ws-1"}, retries=2,
+                                          grant=tab_grant("new-1"))
     assert r["appended"] is False and "workspace:save" not in mock.channels()
     await f.close()
 
@@ -116,7 +122,8 @@ async def test_gui_save_between_reload_and_save_remains_a_host_race(fleet_factor
     c = f.client("h1")
     gui_tab = {"id": "gui-concurrent", "workspaceId": "ws-1"}
     mock.save_hook = lambda: mock.ws_doc["terminals"].append(gui_tab)
-    r = await c.append_workspace_terminal("default", {"id": "connector-tab", "workspaceId": "ws-1"})
+    r = await c.append_workspace_terminal("default", {"id": "connector-tab", "workspaceId": "ws-1"},
+                                          grant=tab_grant("connector-tab"))
     assert r["appended"] is True
     assert gui_tab not in mock.ws_doc["terminals"]  # BAT offers no compare-and-swap save
     await f.close()
@@ -128,9 +135,22 @@ async def _wt_session(f, mock, kind="ahead"):
     return r
 
 
-async def test_merge_rules(fleet_factory, mock):
+async def test_merge_never_targets_a_human_checkout(fleet_factory, mock):
     f = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})
+    r = await _wt_session(f, mock, "ahead")
+    assert r["isolation"] == "legacy_shared_clone"
+    with pytest.raises(ResourceReadOnly, match="DESTINATION_MANUAL"):
+        await orchestrate.worktree_merge(f, "h1", r["session_id"], confirm=True)
+    assert "worktree:merge" not in mock.channels() and "worktree:rehydrate" not in mock.channels()
+    await f.close()
+
+
+async def test_merge_rules(fleet_factory, mock):
+    # /srv/demo is the connector's own clone here, so merging into its main checkout is allowed
+    f = fleet_factory(writes=True, orchestrate=True, managed_roots=["/srv/demo"],
+                      safety={"write_min_interval_s": 0})
     r = await _wt_session(f, mock, "diverged")
+    assert r["isolation"] == "managed_clone"
     m = await orchestrate.worktree_merge(f, "h1", r["session_id"], confirm=True)
     assert m["merged_now"] is False and "diverged" in m["reason"]
     mock.worktrees[r["session_id"]]["mergedKind"] = "ahead"
