@@ -230,12 +230,115 @@ class ApiConfig:
     allowed_origins: tuple[str, ...] = ()
 
 
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
+MERGE_METHODS = ("merge", "squash", "rebase")
+_INPUT_FIELDS = ("source_sha", "operation_id", "environment", "repository")
+
+
+@dataclass(frozen=True)
+class GitHubRepo:
+    repository: str  # owner/name
+    allow_merge: bool = True
+    merge_methods: tuple[str, ...] = MERGE_METHODS
+    default_merge_method: str = "squash"
+
+
+@dataclass(frozen=True)
+class DeployRecipe:
+    """One environment's deploy route. The Dashboard names a recipe; it never passes workflows or inputs."""
+
+    name: str
+    repository: str
+    environment: str
+    mode: str  # "workflow_dispatch" (connector starts it) or "on_merge" (the push already started it)
+    workflow: str  # workflow file name, e.g. deploy.yml
+    deploy_job: str  # this job must conclude success; skipped is not deployed
+    ref: str = "main"  # branch whose workflow file runs (workflow_dispatch)
+    inputs: tuple[tuple[str, str], ...] = ()  # workflow input -> one of _INPUT_FIELDS
+    run_name_contains: str | None = None  # "operation_id": the workflow's run-name carries it
+
+
+@dataclass
+class GitHubConfig:
+    token_ref: str | None = None
+    api_url: str = "https://api.github.com"
+    api_version: str = "2026-03-10"
+    timeout_s: float = 20.0
+    wait_max_s: float = 3600.0
+    repos: dict[str, GitHubRepo] = field(default_factory=dict)
+    recipes: dict[str, DeployRecipe] = field(default_factory=dict)
+
+    def token(self) -> str:
+        if not self.token_ref:
+            raise TokenUnavailable("[github] token_ref is not configured")
+        tok = _resolve_token_ref(self.token_ref, DEFAULT_BAT_PROFILES_DIR)
+        register_secret(tok)
+        return tok
+
+
+def parse_github(data: dict) -> GitHubConfig:
+    g = data.get("github") or {}
+    api_url = str(g.get("api_url") or "https://api.github.com").rstrip("/")
+    host = re.sub(r"^https?://", "", api_url).split("/", 1)[0].split(":", 1)[0]
+    if not (api_url.startswith("https://") or (api_url.startswith("http://")
+                                               and host in {"127.0.0.1", "localhost"})):
+        raise ConfigError("[github] api_url must be https:// (http only for a loopback test server)")
+    token_ref = g.get("token_ref")
+    if token_ref is not None and (not isinstance(token_ref, str) or token_ref.split(":", 1)[0] not in {"env", "file"}):
+        raise ConfigError("[github] token_ref must look like env:NAME or file:PATH")
+    repos: dict[str, GitHubRepo] = {}
+    for r in g.get("repos") or []:
+        name = str(r.get("repository") or "")
+        if not _REPO_RE.match(name):
+            raise ConfigError(f"[[github.repos]] repository {name!r} must be owner/name")
+        methods = tuple(r.get("merge_methods") or MERGE_METHODS)
+        if not methods or any(m not in MERGE_METHODS for m in methods):
+            raise ConfigError(f"[[github.repos]] {name}: merge_methods must be a subset of {MERGE_METHODS}")
+        default = str(r.get("default_merge_method") or methods[0])
+        if default not in methods:
+            raise ConfigError(f"[[github.repos]] {name}: default_merge_method must be one of merge_methods")
+        repos[name.lower()] = GitHubRepo(name, bool(r.get("allow_merge", True)), methods, default)
+    recipes: dict[str, DeployRecipe] = {}
+    for r in (data.get("deploy") or {}).get("recipes") or []:
+        name = str(r.get("name") or "")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name) or name in recipes:
+            raise ConfigError(f"[[deploy.recipes]] name {name!r} is invalid or repeated")
+        repo = str(r.get("repository") or "")
+        if repo.lower() not in repos:
+            raise ConfigError(f"[[deploy.recipes]] {name}: repository {repo!r} needs a [[github.repos]] entry")
+        mode = str(r.get("mode") or "")
+        if mode not in {"workflow_dispatch", "on_merge"}:
+            raise ConfigError(f"[[deploy.recipes]] {name}: mode must be workflow_dispatch or on_merge")
+        workflow, job = str(r.get("workflow") or ""), str(r.get("deploy_job") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+\.ya?ml", workflow) or not job:
+            raise ConfigError(f"[[deploy.recipes]] {name}: workflow must be a file name and deploy_job is required")
+        inputs = r.get("inputs") or {}
+        if not isinstance(inputs, dict) or len(inputs) > 10 or any(
+                not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(k)) or v not in _INPUT_FIELDS for k, v in inputs.items()):
+            raise ConfigError(f"[[deploy.recipes]] {name}: inputs map workflow inputs to one of {_INPUT_FIELDS}")
+        run_name = r.get("run_name_contains")
+        if run_name not in (None, "operation_id"):
+            raise ConfigError(f"[[deploy.recipes]] {name}: run_name_contains may only be \"operation_id\"")
+        if mode == "workflow_dispatch" and "operation_id" not in inputs.values():
+            raise ConfigError(f"[[deploy.recipes]] {name}: pass operation_id as a workflow input so a lost "
+                              "dispatch reply can be matched to its run")
+        recipes[name] = DeployRecipe(name, repos[repo.lower()].repository, str(r.get("environment") or name),
+                                     mode, workflow, job, str(r.get("ref") or "main"),
+                                     tuple(sorted((str(k), str(v)) for k, v in inputs.items())), run_name)
+    return GitHubConfig(
+        token_ref=token_ref, api_url=api_url, api_version=str(g.get("api_version") or "2026-03-10"),
+        timeout_s=max(2.0, min(120.0, float(g.get("timeout_s", 20)))),
+        wait_max_s=max(60.0, min(7 * 86400.0, float(g.get("wait_max_s", 3600)))),
+        repos=repos, recipes=recipes)
+
+
 @dataclass
 class Config:
     hosts: dict[str, HostConfig]
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     jev: JevConfig = field(default_factory=JevConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
+    github: GitHubConfig = field(default_factory=GitHubConfig)
     client_label: str = "BAT Agent Connector"
     path: Path | None = None
     human_name: str | None = None  # [client] human_name: who relayed messages come from (NEED-<NAME> marker)
@@ -358,8 +461,8 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
     relay_name = str(cl.get("relay_name") or "").strip() or None
     if relay_name and not re.fullmatch(r"[A-Za-z0-9 ._-]{1,40}", relay_name):
         raise ConfigError("[client] relay_name must be 1-40 letters/digits/spaces")
-    return Config(hosts=hosts, safety=safety, jev=jev, api=api, client_label=label, path=path, human_name=human,
-                  relay_name=relay_name)
+    return Config(hosts=hosts, safety=safety, jev=jev, api=api, github=parse_github(data), client_label=label,
+                  path=path, human_name=human, relay_name=relay_name)
 
 
 def load_config(path: str | Path | None = None) -> Config:

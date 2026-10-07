@@ -2,6 +2,13 @@
 
 ## Next release (unreleased)
 
+- GitHub delivery operations (docs/design/delivery.md): `github.pr.merge` merges at the reviewed head SHA through
+  the asynchronous merge API (waits on pending checks and merge queues, adopts a matching pending request,
+  records the real merged SHA by reading the PR back), `deployment.start` runs a configured `[[deploy.recipes]]`
+  workflow or tracks the run a merge started and only reports deployed when the recipe's deploy job succeeded,
+  and `delivery.merge_and_deploy` keeps the merge when the deploy fails so only the deploy is retried. Lost
+  replies are settled by reading GitHub back. New read `GET /api/v1/repositories/{owner}/{repo}/pulls/{n}` and
+  MCP `github_pr_preview`.
 - `/api/v1` on the task daemon (`batc serve`), sharing its loopback listener, journal and owner lock
   (docs/design/api-v1.md). Durable operations (`session.send`, `session.answer`, `session.interrupt`) with
   actor-scoped idempotency keys, steps whose intent is committed before the BAT call, and `uncertain` outcomes
