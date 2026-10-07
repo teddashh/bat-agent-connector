@@ -221,10 +221,21 @@ class JevConfig:
 
 
 @dataclass
+class ApiConfig:
+    """[api]: the task daemon's /api/v1 (inventory refresh and browser origins)."""
+
+    inventory_interval_s: float = 60.0
+    stale_after_s: float = 180.0
+    activity_every: int = 5
+    allowed_origins: tuple[str, ...] = ()
+
+
+@dataclass
 class Config:
     hosts: dict[str, HostConfig]
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     jev: JevConfig = field(default_factory=JevConfig)
+    api: ApiConfig = field(default_factory=ApiConfig)
     client_label: str = "BAT Agent Connector"
     path: Path | None = None
     human_name: str | None = None  # [client] human_name: who relayed messages come from (NEED-<NAME> marker)
@@ -328,6 +339,17 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
         base_url=base,
         api_key_env=str(j.get("api_key_env") or "TYPESAFE_API_KEY"),
     )
+    a = data.get("api") or {}
+    origins = a.get("allowed_origins") or []
+    if not isinstance(origins, list) or not all(
+            isinstance(o, str) and re.fullmatch(r"https?://[A-Za-z0-9.\-\[\]:]+", o) for o in origins):
+        raise ConfigError("[api] allowed_origins must be a list of scheme://host[:port] origins")
+    api = ApiConfig(
+        inventory_interval_s=max(10.0, min(3600.0, float(a.get("inventory_interval_s", 60)))),
+        stale_after_s=max(30.0, min(86400.0, float(a.get("stale_after_s", 180)))),
+        activity_every=max(1, min(100, int(a.get("activity_every", 5)))),
+        allowed_origins=tuple(origins),
+    )
     cl = data.get("client") or {}
     label = str(cl.get("label") or "BAT Agent Connector")
     human = str(cl.get("human_name") or "").strip() or None
@@ -336,7 +358,7 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
     relay_name = str(cl.get("relay_name") or "").strip() or None
     if relay_name and not re.fullmatch(r"[A-Za-z0-9 ._-]{1,40}", relay_name):
         raise ConfigError("[client] relay_name must be 1-40 letters/digits/spaces")
-    return Config(hosts=hosts, safety=safety, jev=jev, client_label=label, path=path, human_name=human,
+    return Config(hosts=hosts, safety=safety, jev=jev, api=api, client_label=label, path=path, human_name=human,
                   relay_name=relay_name)
 
 
