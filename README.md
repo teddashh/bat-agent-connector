@@ -146,6 +146,10 @@ staleness, durable operations, and one event cursor with SSE. Issue a token per 
 `Authorization: Bearer`. MCP clients reach the same operations with `operation_submit` (set `BATC_API_TOKEN` to
 act as their own principal). See [docs/design/api-v1.md](docs/design/api-v1.md).
 
+With `[github]` and `[[deploy.recipes]]` configured, the same operations merge pull requests at a reviewed head
+SHA and deploy the merged commit (`github.pr.merge`, `deployment.start`, `delivery.merge_and_deploy`). See
+[docs/design/delivery.md](docs/design/delivery.md).
+
 ### Connect an MCP client
 
 The server name is `bat`. Examples (add `--read-only` if you want to be sure):

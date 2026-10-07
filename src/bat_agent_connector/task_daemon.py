@@ -17,11 +17,12 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import api_actions, api_auth, registry, service
+from . import api_actions, api_auth, delivery, registry, service
 from .api_v1 import ApiV1
 from .config import Config, state_dir
-from .errors import ResourceReadOnly
+from .errors import ResourceReadOnly, TokenUnavailable
 from .fleet import Fleet
+from .github import GitHubClient
 from .goose_acp import GooseACP
 from .inventory import Inventory, InventorySettings
 from .jev import Jev
@@ -37,7 +38,7 @@ DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 # /rpc methods that share /api/v1's principals and OperationService (MCP and CLI enter here).
 API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_cancel": "?",
            "api_events": "observe", "inventory_sessions": "observe", "inventory_hosts": "observe",
-           "api_capabilities": "observe"}
+           "api_capabilities": "observe", "github_pr_preview": "observe"}
 ADMIN_RPC = {"api_token_issue", "api_token_revoke", "api_token_list", "work_reconcile_capability"}
 
 
@@ -116,11 +117,18 @@ class TaskDaemon:
                                   repo_urls=self.adapter.verifier.settings.repo_urls)
         # /api/v1: operations share this daemon's journal (one owner) and its write-capable fleet;
         # the inventory observes through its own read-only fleet.
-        self.ops = OperationService(self.journal, actions=api_actions.ACTIONS)
+        self.ops = OperationService(self.journal, actions=api_actions.ACTIONS + delivery.ACTIONS)
+        github = None
+        if config.github.token_ref:
+            try:
+                github = GitHubClient(config.github)
+            except TokenUnavailable as exc:  # delivery actions then answer GITHUB_NOT_CONFIGURED
+                logging.warning("GitHub delivery disabled: %s", exc)
         self.inventory = Inventory(self.journal, config, InventorySettings(
             interval_s=config.api.inventory_interval_s, stale_after_s=config.api.stale_after_s,
             activity_every=config.api.activity_every))
-        self.ops.context.update(fleet=self.fleet, inventory=self.inventory)
+        self.ops.context.update(fleet=self.fleet, inventory=self.inventory, github=github,
+                                github_config=config.github)
         self.api = ApiV1(self, allowed_origins=config.api.allowed_origins)
 
     @staticmethod
@@ -192,6 +200,9 @@ class TaskDaemon:
             return {"hosts": self.inventory.hosts()}
         if method == "api_capabilities":
             return (await self.api.capabilities(principal=principal))[1]
+        if method == "github_pr_preview":
+            return {"pull_request": await delivery.pr_preview(self.ops, str(params.get("repository")),
+                                                              int(params.get("pull_number") or 0))}
         raise ValueError("unknown api method")
 
     async def call(self, method: str, params: dict, *, auth_token: str | None = None) -> dict:
