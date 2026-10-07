@@ -150,6 +150,11 @@ With `[github]` and `[[deploy.recipes]]` configured, the same operations merge p
 SHA and deploy the merged commit (`github.pr.merge`, `deployment.start`, `delivery.merge_and_deploy`). See
 [docs/design/delivery.md](docs/design/delivery.md).
 
+The same daemon serves a browser Dashboard at `http://127.0.0.1:18796/dashboard/`: what needs you, every
+session with its provenance (sessions a person created in BAT stay read-only), managed-session controls, PR
+merge and deploy buttons, and the operation log. Connect it with an API token. See
+[docs/design/dashboard.md](docs/design/dashboard.md).
+
 ### Connect an MCP client
 
 The server name is `bat`. Examples (add `--read-only` if you want to be sure):
