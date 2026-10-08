@@ -1248,6 +1248,7 @@ def _progress(ctx):
     result = receipts(ctx.service, ctx.operation_id)
     summary = {"succeeded": sum(r["status"] == "succeeded" for r in result),
                "retained": sum(r["status"] == "retained" for r in result),
+               "already_absent": sum(r["status"] == "already_absent" for r in result),
                "partial": any(r["status"] in {"failed", "blocked_stale", "uncertain", "running", "pending", "cancelled"} for r in result)}
     ctx.service._transition(ctx.operation_id, "running", result={"preview_id": ctx.target["preview_id"],
         "items": result, "summary": summary, "next_action": "inspect receipts; resume or preview again"})
@@ -1305,7 +1306,44 @@ async def _phase_consumers(ctx, item):
         if acquired:
             lock.release()
 
+def _release_unstarted(ctx, error):
+    # Every external mutation has a durable step first. With no step at all, reservations have no effects.
+    db = ctx.service.db
+    if db.execute("SELECT 1 FROM operation_steps WHERE operation_id=?", (ctx.operation_id,)).fetchone():
+        return
+    path = registry.registry_path()
+    with registry._locked(path):
+        document = _registry_document()
+        guards = document.get("cleanup_guards", {})
+        owned = [rid for rid, g in guards.items() if g.get("operation_id") == ctx.operation_id and g.get("status") == "reserved"]
+        for rid in owned:
+            del guards[rid]
+        sessions = [s for s in document.get("sessions", []) if s.get("cleanup_reservation") == ctx.operation_id]
+        for session in sessions:
+            session["cleanup_reservation"] = None
+        if owned or sessions:
+            registry._write_document(path, document)
+    with ctx.service.journal.tx():
+        updated = db.execute("UPDATE cleanup_receipts SET status='failed',updated_at=?,error=?,after_state=? "
+            "WHERE operation_id=? AND status IN ('pending','running','uncertain')",
+            (time.time(), _canonical({"code": getattr(error, "code", "INTERNAL")}),
+             _canonical({"completed_phases": [], "guard_released": True}), ctx.operation_id)).rowcount
+    if updated:
+        _progress(ctx)
+
+
 async def _run(ctx):
+    try:
+        return await _run_plan(ctx)
+    except (Cancelled, Uncertain, AmbiguousOutcome):
+        raise
+    except Exception as error:
+        # Covers resumed validation and local/read-only refusals outside the per-item handlers too.
+        _release_unstarted(ctx, error)
+        raise
+
+
+async def _run_plan(ctx):
     ops, db = ctx.service, ctx.service.db
     existing = db.execute("SELECT * FROM cleanup_runs WHERE operation_id=?", (ctx.operation_id,)).fetchone()
     if existing:
@@ -1336,7 +1374,8 @@ async def _run(ctx):
             for order, item in enumerate(doc["items"]):
                 db.execute("INSERT INTO cleanup_receipts(operation_id,resource_id,item_order,plan,status,before_state,updated_at) "
                     "VALUES(?,?,?,?,?,?,?)", (ctx.operation_id, item["resource_id"], order, _canonical(item),
-                    "pending" if item["decision"] == "reclaim" else "retained", _canonical(item.get("observation", {})), time.time()))
+                    {"reclaim": "pending", "retain": "retained", "already_absent": "already_absent"}[item["decision"]],
+                    _canonical(item.get("observation", {})), time.time()))
     ctx.set_refs(preview_id=ctx.target["preview_id"], fingerprint=payload["fingerprint"])
     owner = _OWNER.set(ctx.operation_id)
     try:
@@ -1353,21 +1392,24 @@ async def _run(ctx):
             if not unresolved:
                 ctx.check_cancel()
             if any(db.execute("SELECT status FROM cleanup_receipts WHERE operation_id=? AND resource_id=?",
-                              (ctx.operation_id, dep)).fetchone()[0] != "succeeded" for dep in item["dependencies"]):
+                              (ctx.operation_id, dep)).fetchone()[0] not in {"succeeded", "already_absent"} for dep in item["dependencies"]):
                 history = _item_history(ctx, item)
-                if _has_irreversible(history):
+                if unresolved or _has_irreversible(history):
                     _mark(item, ctx.operation_id, "reserved")
                     _receipt(ctx, item, "uncertain", after={**history, "refused_phase": "dependencies", "refused_code": "DEPENDENCY_FAILED"},
-                             error={"code": "CLEANUP_PARTIAL_STATE", "refused_phase": "dependencies", "refused_code": "DEPENDENCY_FAILED"})
+                             error={"code": "CLEANUP_PARTIAL_STATE" if _has_irreversible(history) else "UNCERTAIN_UNRESOLVED",
+                                    "refused_phase": "dependencies", "refused_code": "DEPENDENCY_FAILED"})
                     _progress(ctx)
-                    raise NeedsAttention("CLEANUP_PARTIAL_STATE", "a completed prerequisite changed runtime/content; inspect receipts")
+                    raise NeedsAttention("CLEANUP_PARTIAL_STATE" if _has_irreversible(history) else "UNCERTAIN_UNRESOLVED",
+                                         "an unresolved call or completed prerequisite remains reserved; inspect receipts")
                 _receipt(ctx, item, "failed", error={"code": "DEPENDENCY_FAILED"})
+                _release(item, ctx.operation_id)
                 continue
             lock = _REPO_LOCKS.setdefault((item["host"], item.get("repository") or item.get("path")), asyncio.Lock())
             async with lock:
-                _mark(item, ctx.operation_id, "reserved")
-                _receipt(ctx, item, "running")
                 try:
+                    _mark(item, ctx.operation_id, "reserved")
+                    _receipt(ctx, item, "running")
                     await _execute_item(ctx, item, payload)
                 except (Uncertain, AmbiguousOutcome, OSError) as e:
                     _receipt(ctx, item, "uncertain")
@@ -1409,7 +1451,8 @@ async def _run(ctx):
             raise NeedsAttention("CLEANUP_PARTIAL", "some items failed; inspect receipts before resuming")
         return {"preview_id": ctx.target["preview_id"], "fingerprint": payload["fingerprint"], "items": result,
                 "summary": {"succeeded": sum(r["status"] == "succeeded" for r in result),
-                            "retained": sum(r["status"] == "retained" for r in result), "partial": False},
+                            "retained": sum(r["status"] == "retained" for r in result),
+                            "already_absent": sum(r["status"] == "already_absent" for r in result), "partial": False},
                 "tombstones": [r["resource_id"] for r in result if r["status"] == "succeeded"],
                 "next_action": "cleanup_retained"}
     except Cancelled:
@@ -1417,7 +1460,7 @@ async def _run(ctx):
         for item in doc["items"]:
             row = db.execute("SELECT status FROM cleanup_receipts WHERE operation_id=? AND resource_id=?",
                              (ctx.operation_id, item["resource_id"])).fetchone()
-            if row[0] in {"succeeded", "retained"}:
+            if row[0] in {"succeeded", "retained", "already_absent"}:
                 continue
             unresolved = _pending_item(ctx, item)
             history = _item_history(ctx, item)
