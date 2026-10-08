@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -188,6 +189,25 @@ async def test_legacy_codex_predecessor_uses_its_recorded_agent(fleet_factory):
             f, "h1", "codex", confined=True, predecessor=registry.get("h1", "legacy-codex"))
         assert options == {"codexSandboxMode": "read-only", "codexApprovalPolicy": "never"}
         assert scope == "confined"
+    finally:
+        await f.close()
+
+
+async def test_post_start_cancellation_keeps_acknowledged_reservation(fleet_factory, mock):
+    f = fleet_factory(writes=True, orchestrate=True, **MANAGED)
+    invoke = f.client("h1").invoke
+
+    async def cancelled(channel, params=None, **kwargs):
+        if channel == "claude:get-session-meta":
+            raise asyncio.CancelledError()
+        return await invoke(channel, params, **kwargs)
+
+    f.client("h1").invoke = cancelled
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await orchestrate.session_start(f, "h1", "demo-project", "claude", confirm=True)
+        assert registry.list_entries("h1")[0]["status"] == "uncertain"
+        assert "worktree:remove" not in mock.channels()
     finally:
         await f.close()
 
