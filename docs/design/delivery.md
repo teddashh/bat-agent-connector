@@ -16,7 +16,7 @@ Journal DDL follow-up 以 `3e038c5` 為固定來源；移除純 DDL 的 user_ver
 
 | 來源 | 固定版本與用途 |
 |---|---|
-| Connector | `5e8e41696ebc6a1a9d3ea92ddb7a1d338537ca1b`，Phase 1 原始起點；本輪 origin/main 為以上 #33 pin，分支 `feat/delivery-2`。依據 `delivery.py`、`github.py`、`config.py`、`operations.py`、`task_journal.py`、`api_auth.py`、`resource_policy.py`、`api_v1.py`、`task_daemon.py`、`integration.py`、Dashboard、`tests/test_delivery.py` 與 `tests/fakegithub.py` |
+| Connector | `5e8e41696ebc6a1a9d3ea92ddb7a1d338537ca1b`，Phase 1 原始起點；Part A rebase 採以上 #33 pin。ACK conflict follow-up 採 main `0c13601a7316a581fc6a4a504de37035b870ee4d`（#34），分支 `fix/metadata-conflict-settle`。依據 `delivery.py`、`github.py`、`config.py`、`operations.py`、`task_journal.py`、`api_auth.py`、`resource_policy.py`、`api_v1.py`、`task_daemon.py`、`integration.py`、Dashboard、`tests/test_delivery.py` 與 `tests/fakegithub.py` |
 | 計畫與交接 | 計畫 v1.0，2026-10-06；[前輪交接](../handoff/2026-10-08.md)。交接的 main pin 是前輪紀錄，本次以以上 Connector pin 為準；不將私有計畫複製進 repo |
 | BAT | `b7419892fbc9946799b64cca24c2ec8c7fa15c42`，[worktree.rs](https://github.com/tony1223/better-agent-terminal/blob/b7419892fbc9946799b64cca24c2ec8c7fa15c42/src-tauri/crates/bat-git/src/worktree.rs)。本包不新增 BAT channel、SSH Git 或 worktree mutation；人工／unknown 規則沿用 [resource-policy.md](resource-policy.md) |
 | GitHub REST | API version `2026-03-10`；2026-10-08 查核官方文件，adapter／fake 固定此版本。官方文件可變動，不宣稱是不變的 snapshot；未知 schema／無法證明的 scope 不放行 |
@@ -176,10 +176,10 @@ Title 是非空字串；body 是字串，空字串清空，省略保留。CLI bo
 
 | 步驟 | I/O／前置條件 | 實際副作用 | 失敗恢復 |
 |---|---|---|---|
-| admission | integrate、repo allow_pr_update、合法 fields／digest、正整數 PR number；同 PR 無未結束 update | 保存 operation 意圖 | 403／422／`PR_UPDATE_IN_PROGRESS`（409），換 key 不繞過 |
+| admission | integrate、repo allow_pr_update、合法 fields／digest、正整數 PR number；同 PR 無未 settlement 的進行中 update／unresolved write | 保存 operation 意圖 | 403／422／`PR_UPDATE_IN_PROGRESS`（409），換 key 不繞過 |
 | `pr.metadata.plan` | GET PR 比 digest；保存 before 與 intended after，省略欄取 before | journal snapshot | 不符為 `PR_METADATA_CHANGED`，保存差異；zero PATCH |
 | `pr.metadata.write` | step intent commit 後、PATCH 前再次 GET，核對 repo ID 與整對 before；PATCH `/pulls/{n}` 只送指定欄位 | 改遠端 title／body，可能觸發通知／事件 | 寫前變更停止；200 保存回執；失聯／429／5xx 為 uncertain，先回查 |
-| `pr.metadata.verify` | 寫後再 GET，整對內容必須等於 after | 保存 observed、digest、URL；相符才 succeeded | 不同為 `PR_METADATA_CONFLICT`／needs_attention；401／403／404 保存拒絕回執後在 step 外 needs_attention，resume 用 verify.retry.<seq> 只讀重查，不重 PATCH；含舊版非 200 receipt |
+| `pr.metadata.verify` | 寫後再 GET，整對內容必須等於 after | 保存 observed、digest、URL；相符才 succeeded | 已 ACK PATCH 的不同結果立即保存 conflict settlement、metadata_reconciliation=PR_METADATA_CONFLICT／metadata_difference／verification_pending=false，釋放 PR，再以 PR_METADATA_CONFLICT／needs_attention 保留 audit；401／403／404 仍 verification_pending=true、無 settlement 並保留 lock，保存拒絕回執後在 step 外 needs_attention，resume 用 verify.retry.<seq> 只讀重查，不重 PATCH；含舊版非 200 receipt |
 
 Write reconcile／重啟：after 是正向證據，`observed_intent=true`，不猜作者；before 在 write step 開始後未滿 10 分鐘仍維持 uncertain，沒有 RERUN；第三種內容為 conflict。Cancel／resume 不覆蓋或自動還原。處理方式是讀新內容、重新編輯、以新 digest／key 建操作；操作不能在 resume 換 precondition。
 
@@ -188,13 +188,14 @@ Write reconcile／重啟：after 是正向證據，`observed_intent=true`，不�
 | Recovery 讀回 | Settlement／下一步 |
 |---|---|
 | after | 正向觀測證據；沿用已批准的 step／refs 完成路徑，保留 private service calls 的介面回歸測試 |
+| 已 ACK PATCH，verify 讀回不同於 after | 寫入與 readback 均已結束，立即保存 status=conflict、code=PR_METADATA_CONFLICT、observed、settled_at 的 settlement 與差異 refs，不等 600 秒；釋放 admission lock，fresh-digest／新 key 更新可受理，舊操作保留 needs_attention 與 audit |
 | PATCH 後 readback／uncertain write reconcile 被拒（401／403／404） | GITHUB_401／403／404、needs_attention；不固化成 failed write／verify step，修復 token／權限後 resume。Plan 與 PATCH 前讀取被拒仍 failed、zero PATCH，即使已有 readonly plan／write intent |
 | before，step 開始未滿 600 秒 | 保留 uncertain／PR_UPDATE_IN_PROGRESS，等原請求讀回；取消不釋放 |
 | before，step 開始已滿 600 秒 | 客戶端 timeout 早已結束；delivery 自己的 `pr_metadata_settlements` 保存 `not_applied`／`PR_METADATA_NOT_APPLIED`／observed／時間，釋放 PR，之後不再週期 GET 此 row；不改另一操作的 steps／refs |
 | 第三種內容，unresolved step 開始未滿 600 秒 | 保留 uncertain／PR_UPDATE_IN_PROGRESS；不 PATCH、不 undo，等 settle window 結束 |
 | 第三種內容，unresolved step 開始已滿 600 秒 | 沿用 not_applied 的 timeout／settle 界線，先保存 metadata_reconciliation=PR_METADATA_CONFLICT／metadata_difference=before、intended、observed／verification_pending=false refs，再於 pr_metadata_settlements 保存 status=conflict、code=PR_METADATA_CONFLICT、observed、settled_at。Receipt 釋放 admission lock 並停止背景 GET；step 不冒充 applied，不 PATCH／undo，新操作仍需 fresh digest |
 | 已保存 not_applied 的非取消操作 reconcile／resume | 只讀保存結論，step 不再 PATCH；handler 以 PR_METADATA_NOT_APPLIED 明確 failed。原 UNCERTAIN_UNRESOLVED 操作保留 needs_attention，直到 caller resume；cancelled 仍 cancelled，不自動恢復 |
-| 已保存 conflict 的非取消操作 reconcile／resume | 只讀保存結論，不再查 GitHub 或 PATCH；handler 為 PR_METADATA_CONFLICT／needs_attention，不能誤報 not_applied。原 UNCERTAIN_UNRESOLVED audit 保留至 resume；cancelled 仍 cancelled，新的 fresh-digest update 已可受理 |
+| 已保存 conflict 的非取消操作 reconcile／resume | ACK／unresolved conflict 都只讀保存結論，不再查 GitHub 或 PATCH；handler 為 PR_METADATA_CONFLICT／needs_attention，不能誤報 not_applied。原 UNCERTAIN_UNRESOLVED audit 保留至 resume；ACK conflict 的 audit／steps 保留，cancelled 仍 cancelled，新的 fresh-digest update 已可受理 |
 | settlement 後舊寫入非常晚才落地 | 每個新操作仍在 plan 與 PATCH 前比較新 digest／整對 metadata，差異為 PR_METADATA_CHANGED、zero 新 PATCH；不偷偷覆蓋。仍受下段 GitHub 無 CAS 的最後讀寫窗口限制 |
 
 Journal 保存必要的 before／intended／observed；沿用 api_events 的 action／target／狀態／錯誤摘要，不複製 body；完整內容在 operation／steps 與必要 settlement receipt。
@@ -286,7 +287,7 @@ Artifact rollback 必須配置 artifact_id／digest inputs；一般 start 仍選
 | 新表 | 欄位／約束 |
 |---|---|
 | `pr_merge_previews` | immutable mpv ID、provider origin／repo ID／name、PR／method、snapshot／digest、created／expires |
-| `pr_metadata_settlements`（Part A） | operation ID PK、delivery 的 not_applied receipt；不改別的 operation steps／refs |
+| `pr_metadata_settlements`（Part A） | operation ID PK、delivery 的 not_applied／conflict receipt（status、code、observed、settled_at）；ACK readback conflict 立即保存，unresolved 依 settle window；不改別的 operation steps |
 | `pr_merge_scope_reads`（Part A） | PK(repository, PR, method)、preview ID、scope checked_at；與 immutable authority 分開 |
 | `deployment_environments` | PK(provider origin, repository ID, environment)；desired generation／deployment ID／identity、current ID／generation、observed identity／時間／health、attention、dispatch slot；name 是顯示／定位值 |
 | `deployments` | dep ID、operation ID UNIQUE、recipe name／digest／snapshot、env key、generation、source／artifact／release identity、rollback_of、run／attempt、workflow ID／SHA、state／evidence／times／URLs；UNIQUE(env key, generation) |
@@ -415,6 +416,7 @@ Review follow-up 的新增回歸：
 | 計畫／驗收 | Tests／負面證據 |
 |---|---|
 | C07、§10／§15 metadata recovery | `test_metadata_lost_before_write_settles_not_applied_after_window`（cancelled／UNCERTAIN_UNRESOLVED、新操作受理、停止 GET／zero 第二 PATCH）；`test_metadata_late_landing_after_settlement_is_caught_by_digest`；`test_metadata_positive_cancel_reconciliation_pins_private_service_calls` |
+| C07、§09／§10／§15 ACK conflict | `test_metadata_acknowledged_write_conflict_settles_and_releases_pr`（直接 readback／先被 401／403／404 拒絕後 resume：待驗證時仍鎖住，conflict 立即保存 receipt／refs、fresh-digest 更新成功；舊操作只送一 PATCH、重啟／resume／reconcile zero GitHub calls，cancel 保持 cancelled） |
 | C04／C07、§16 preview | `test_pr_card_reuses_identical_preview_and_prunes_expired`（摘要欄位、未過期重用、queued row 保留到 verify）；`test_event_reloads_do_not_recompute_scope_within_window`（GitHub calls、SHA 改變立即刷新、digest 重用後時計仍刷新）；`test_event_reload_throttle_is_shared_by_http_and_rpc` |
 | C04／C05、§16 submit／verify | `test_transient_scope_read_error_before_submit_is_resumable`（failed step 不存在、resume 僅一 PUT）；`test_checks_wait_only_rereads_head_and_base_before_final_scope`；`test_verify_accepts_affected_pr_merged_after_this_merge`；`test_verify_stops_updated_pr_pagination_at_admission`（排序與 pages） |
 

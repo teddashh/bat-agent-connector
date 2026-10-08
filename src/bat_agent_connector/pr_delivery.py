@@ -456,6 +456,9 @@ def admit_update(ops, principal, target, params, pre):
 
 async def run_update(ctx):
     from .delivery import _gh, _read, _read_result, _repo_or_403
+    settled = metadata_settlement(ctx.service, ctx.operation_id)
+    if settled and settled["status"] == "conflict":
+        raise NeedsAttention(settled["code"], "write readback differs; review before/intended/observed metadata")
     gh = _gh(ctx.service)
     repository, number = _repo_or_403(ctx.service, ctx.target["repository"]), ctx.target["pull_number"]
     async def plan():
@@ -535,6 +538,13 @@ async def run_update(ctx):
     observed = v["observed"]
     ctx.set_refs(metadata_difference={**p, "observed": observed}, verification_pending=False)
     if observed != p["after"] or v["repository_id"] != p["repository_id"]:
+        if w.get("write_acknowledged"):
+            ctx.set_refs(metadata_reconciliation="PR_METADATA_CONFLICT")
+            receipt = {"status": "conflict", "code": "PR_METADATA_CONFLICT", "observed": observed,
+                       "settled_at": time.time()}
+            with ctx.service.journal.tx():
+                ctx.service.db.execute("INSERT OR IGNORE INTO pr_metadata_settlements VALUES (?,?)",
+                                       (ctx.operation_id, json.dumps(receipt)))
         raise NeedsAttention("PR_METADATA_CONFLICT", "write readback differs; review before/intended/observed metadata")
     result = {"repository": repository, "repository_id": p["repository_id"], "pull_number": number,
               **observed, "before_digest": digest(p["before"]), "after_digest": digest(observed),
