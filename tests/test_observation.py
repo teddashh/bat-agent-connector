@@ -155,6 +155,98 @@ def replay_version_one(j, path):
     return Journal(path)
 
 
+@pytest.mark.parametrize("table", ["work_item_links", "integration_receipts", "operations", "operation_steps", "operation_task_link"])
+@pytest.mark.parametrize("when", ["during_a", "gap", "missing", "after_last"])
+def test_b01_b03_saved_task_facts_use_their_own_time_and_keep_execution(tmp_path, table, when):
+    """B01/B03, §08/§10/§11: eventless facts use historic participation, never backfill-time ownership."""
+    from bat_agent_connector import observation
+    path = tmp_path / "j.db"
+    j = Journal(path)
+    t = task(j, "saved-task-facts")
+    with j.tx():
+        old_wid = worktree(j, "h1", "registry", "a@1", "worktree", session_id="a")
+    bind(j, t, "a")
+    last_a = j.api_head()
+    with j.tx():
+        closed_a = j.api_event("task", t["task_id"], "task.paused", {})
+        close_relations(j, t["task_id"], closed_a)
+        new_wid = worktree(j, "h1", "registry", "a@2", "worktree", session_id="a")
+    gap = j.api_head()
+    bind(j, t, "b")
+    if when != "missing":
+        j.change(t["task_id"], "failed")
+    boundary = j.api_head() + 1
+    # Fixed journal timestamps, including a fact equal to the final A event (the map must use >).
+    j.db.execute("UPDATE api_events SET created_at=seq*10")
+    at = {"during_a": last_a * 10, "gap": gap * 10 + 1,
+          "missing": "", "after_last": boundary * 10}[when]
+    if table == "work_item_links":
+        j.db.execute("""INSERT INTO work_item_links(work_item_id,kind,ref,linked_by,linked_at,link_operation)
+            VALUES('wi_fixture','task',?,'fixture',?,'op_link')""", (t["task_id"], at))
+    elif table == "integration_receipts":
+        j.db.execute("""INSERT INTO integration_receipts(operation_id,seq,preview_id,repository,
+            pull_number,head_ref,source_kind,source_id,source_host,location_class,pinned_sha,mode,source_key,
+            status,actor,created_at,updated_at) VALUES('op_receipt',1,'preview','o/r',1,'feature','task',?,
+            'h1','connector',?,'merge','task-source','delivered','fixture',?,999999)""", (t["task_id"], "a" * 40, at))
+    else:
+        params = {"kind": "task", "ref": t["task_id"]} if table == "operation_task_link" else {
+            "sources": [{"kind": "task", "id": t["task_id"]}]}
+        j.db.execute("""INSERT INTO operations(operation_id,actor,entry,idem_key,request_hash,action,target,
+            params,preconditions,status,created_at,updated_at) VALUES('op_saved','fixture','cli','saved','hash',
+            'fixture.observe','{}',?,'{}','succeeded',?,999999)""",
+            (dump(params), at if table != "operation_steps" else gap * 10 + 1))
+        if when == "missing":
+            j.db.execute("UPDATE operations SET target=? WHERE operation_id='op_saved'",
+                         (dump({"host": "h1", "session_id": "b"}),))
+        if table == "operation_steps":
+            j.db.execute("""INSERT INTO operation_steps(operation_id,seq,name,status,request,started_at,finished_at)
+                VALUES('op_saved',1,'read','succeeded','{}',?,999999)""", (at,))
+    j = replay_version_one(j, path)
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == observation.MIGRATION_VERSION
+    facts = [e for e in Observation(j).history("execution", t["task_id"], limit=200)["events"]
+             if e["kind"] == "history.backfilled" and e["body"]["source_table"] == ("operations" if table == "operation_task_link" else table)]
+    assert len(facts) == 1
+    fact = facts[0]
+    assert fact["context"]["execution_id"] == t["task_id"]
+    assert fact["context"]["session_resource_ids"] == (["h1/a"] if when == "during_a" else [])
+    assert fact["context"]["worktree_ids"] == ([old_wid] if when == "during_a" else [])
+    assert fact["context"]["occurred_at_epoch"] == (None if when == "missing" else at)
+    assert fact["context"]["fact_at_seq"] == {"during_a": closed_a, "gap": gap + 1,
+                                              "missing": None, "after_last": boundary}[when]
+    for sid in ("a", "b"):
+        ids = {e["seq"] for e in Observation(j).history("session", f"h1/{sid}", limit=200)["events"]}
+        assert (fact["seq"] in ids) == (sid == "a" and when == "during_a")
+    assert fact["seq"] not in {e["seq"] for e in Observation(j).history("worktree", new_wid, limit=200)["events"]}
+    assert "projection_error" not in dump(j.api_events(kind="history.backfilled"))
+    head, changes = j.api_head(), j.db.total_changes
+    observation.backfill(j)
+    assert j.api_head() == head and j.db.total_changes == changes
+    j.close()
+    j = Journal(path)
+    assert j.api_head() == head and j.db.total_changes == 0
+    assert Observation(j).history("execution", t["task_id"], limit=200)["events"][0]["seq"] >= fact["seq"]
+    j.close()
+
+
+@pytest.mark.parametrize("value", [None, "", "unknown", True, float("inf"), float("nan"), 1e300])
+def test_b03_saved_fact_missing_or_unusable_timestamp_never_fails_backfill(tmp_path, value):
+    """B03, §08/§11: absent, invalid and out-of-range dates leave task sessions unknown."""
+    from bat_agent_connector.observation import fact_time
+    j = Journal(tmp_path / "j.db")
+    t = task(j, "unknown-time")
+    assert fact_time("work_item_links", {}) is None
+    assert fact_time("work_item_links", {"linked_at": value, "updated_at": 123}) is None
+    assert fact_time("work_item_links", {"linked_at": 0}) == 0
+    with j.tx():
+        seq = saved_fact(j, "work_item_links", "missing", {"linked_at": value}, [("execution", t["task_id"])])
+    fact = Observation(j).history("execution", t["task_id"])["events"][0]
+    assert fact["seq"] == seq and fact["context"]["occurred_at_epoch"] is None
+    assert fact["context"]["fact_at_seq"] is None and fact["context"]["session_resource_ids"] == []
+    assert fact["body"]["saved_snapshot"]["linked_at"] is None
+    assert "projection_error" not in fact["context"]
+    j.close()
+
+
 @pytest.mark.parametrize("backfilled", [False, True])
 def test_b01_b03_pending_replacement_closure_links_only_its_own_session(tmp_path, backfilled):
     """B01/B03, §08/§10/§11: a branchless replacement never lends its closure to an old session."""
