@@ -14,7 +14,7 @@ import pytest
 from bat_agent_connector import confinement, lifecycle, orchestrate, registry, service
 from bat_agent_connector.config import parse_config
 from bat_agent_connector.errors import ConfigError
-from bat_agent_connector.task_journal import Journal
+from bat_agent_connector.task_journal import LATEST_DATA_STEP, Journal
 from tests.conftest import adopt
 
 MANAGED = {"managed_roots": ["/srv/demo"], "legacy_shared_worktrees": True}
@@ -295,7 +295,7 @@ def test_a10_host_evidence_migration_is_idempotent_and_persists(tmp_path):
     journal.close()
     journal = Journal(tmp_path / "tasks.db")
     assert journal.db.execute("SELECT evidence FROM confinement_host_checks").fetchone()[0] == '{"status":"unknown"}'
-    assert journal.db.execute("PRAGMA user_version").fetchone()[0] == version
+    assert journal.db.execute("PRAGMA user_version").fetchone()[0] == max(version, LATEST_DATA_STEP)
     journal.close()
 
 
@@ -309,7 +309,7 @@ def test_host_check_table_is_created_without_consuming_schema_version(tmp_path, 
     journal.close()
     journal = Journal(path)
     assert journal.db.execute("SELECT count(*) FROM confinement_host_checks").fetchone()[0] == 0
-    assert journal.db.execute("PRAGMA user_version").fetchone()[0] == version
+    assert journal.db.execute("PRAGMA user_version").fetchone()[0] == max(version, LATEST_DATA_STEP)
     journal.close()
 
 

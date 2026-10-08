@@ -7,10 +7,36 @@
 ## 分段交付與審查決議
 
 - **Part A（本次）**：Task Service authority。共用 coordinator gate 先套到現有 ActionDefs 與低階 service/lifecycle 路徑（包括 client-resume、permissions、approve-pending／deferred raise、relay）；task 操作連到原 commands 與同交易回執；canonical owner lock、owner-first 初始化與 A07／A09／task A05 測試。
-- **Part B（後續分支）**：舊 session／orchestration MCP／CLI 的 operation 轉接、無 key sentinel 與讀取投影、完整結果與未知布林 null、外部 steps 拆分、A01／A05／A08 全入口測試。本文的舊工具映射、逐工具結果投影、外部步驟拆分與 standalone failover 正面停筆證據保留為第二步。
+- **Part B（分段交付）**：第一個切片是 legacy `session_interrupt`／CLI `interrupt` 的中央 operation 轉接、無 key sentinel／讀取投影、完整結果及未知值 null。其他 session／orchestration 轉接、外部 steps 拆分與 A01／A05／A08 全入口驗收仍待後續。
 - Part A 不改 `OperationService.create` 的 admission 順序或 operations schema。policy admission 拒絕仍 403、沒有 operation；執行中才發現的拒絕仍為 failed operation。
 - Part B 無 key 呼叫在原 NOT NULL 欄位保存 `batc:nokey:<operation_id>`：只作唯一的儲存值，絕不與另一要求去重。拒絕 client key 使用 `batc:nokey:` 前綴（422）；所有讀取投影 `idempotency_key: null`、`idempotency_enabled: false`。**不 rebuild operations，不需此項 schema migration**。
 - 舊 task control 沒有 key 的 RPC 在 Part A 使用每次呼叫獨立的 request key，不提供跨呼叫去重；Part B 才統一 no-key sentinel 與投影。明確給 key 的 task actions 現在即須符合 A05。
+
+### Part B 第一個切片：interrupt
+
+`session_interrupt` MCP 與 `batc interrupt` 現在只呼叫既有 owner 的 `/rpc session_interrupt`，
+由同一 `session.interrupt` ActionDef 執行。MCP 要求自己的 `BATC_API_TOKEN`；CLI 優先使用此 token，
+未設定才保留本機 admin token。兩者保留 confirm、client read-only／host write tier，daemon 再查 scope／tier／policy。
+daemon 不可用時回原連線錯誤，沒有 direct Fleet fallback，也不另啟 daemon。
+
+新增可選 `idempotency_key`／`--key`、`control_version`／`--control-version`。named key 先比原 hash，
+再於 daemon 唯讀解析 full ID 或至少六字元 unique prefix；literal target 不變，確切 ID 與 task incarnation
+在同交易保存於 `external_refs.resolved_target`／`admission_binding`。執行時仍要求確切 ID，不能把消失的
+ID 再當另一 session 的 prefix。只有本相容 RPC 可省 key；raw HTTP／op_submit body 不能開啟此模式。
+Observation 的 accepted／running／failed 等事件使用 admission 同交易保存的完整 session binding，
+包含歷史重建；literal prefix 只保留在原意圖／request hash，不另建立 prefix 的假 session 歷史。
+no-key storage sentinel 不出現在任何 operation GET/list、RPC、MCP、CLI 投影：原 `idem_key` 與
+`idempotency_key` 都為 null，`idempotency_enabled=false`；named key 原值保留。
+
+完整 interrupt 結果加 `operation_id`、`operation_status`、`operation_error_code` 與 key 投影。
+等候最多 30 秒；accepted／running／uncertain 不重送 handler，尚未證明的 `result`／`channel` 為 null。
+CLI failed／cancelled 回 exit 1 並保留 JSON operation ID；MCP 的錯誤同樣帶原 ID／code。
+lost ACK 只以同一 session 的明確 `isStreaming=false` 結清原 step，missing／空 metadata 仍未知。
+原 task command、FrameGuard、soft／hard／Codex abort 語意保留；沒有拆出另一 task authority。
+
+CLI 共用 read-only 分類在 daemon 呼叫與輸入檔讀取之前拒絕 mutations（含 integration preview 的 Git
+準備、operations cancel/resume、task reconcile、connector-data 修改與本機初始化寫入），保留純 read／preview。
+`tests/test_interrupt_operations.py` 驗證本切片；不宣稱其他 legacy tools 已轉接，task cleanup Part B 仍未實作。
 
 ## Part A 實作對照
 
@@ -92,7 +118,7 @@ Coordinator gate：`G`＝下面的 task-owned runtime gate；`TC`＝原 task 控
 | `session_send` | `send` | OP（已有） | `session.send` | operate | S；含 client-resume | G |
 | `session_continue` | `continue` | — → OP | `session.send`，預設 text=`continue` | operate | S；含 client-resume | G；queue 不是 task queue |
 | `session_answer` | `answer` | OP（已有） | `session.answer` | operate | S | G；鎖定 prompt ID |
-| `session_interrupt` | `interrupt` | OP（已有） | `session.interrupt` | operate | S | G；verifying／paused 時改用明確 task 控制 |
+| `session_interrupt` | `interrupt` | OP＋相容 RPC（已轉接） | `session.interrupt` | operate | S | G；verifying／paused 時改用明確 task 控制 |
 | `session_set_permissions` | `permissions` | — → OP | **新增** `session.permissions` | operate | S；confined 不升 allow-all | G；每個 permission channel 都查版本 |
 | `approve_pending`（非 dry run） | `approve-pending`（非 `--dry-run`） | — → OP | **新增** `session.approve_pending` | operate | 每項 S；跳過 read-only／confined | 每項 G，含 `_raise_deferred` |
 | `session_relay`（非 dry run） | `relay`（非 `--dry-run`） | — → OP | **新增** `session.relay` | operate；實際建新 session 另需 start | S／N；來源只讀 | G；自動挑選仍排除 task-owned |
@@ -103,7 +129,7 @@ Coordinator gate：`G`＝下面的 task-owned runtime gate；`TC`＝原 task 控
 | `session_cleanup`（`dry_run=false`） | `cleanup --apply` | —；409 `LEGACY_CLEANUP_DISABLED` | 不新增 action；apply 由 cleanup package 封鎖，本包不包裝 | — | apply 不寫 BAT／Git；dry run 保持唯讀 | reviewed cleanup 交 cleanup package 的 `cleanup_preview`／`cleanup_apply`／`cleanup_restore` |
 | `session_record_verification` | `record-verification` | — → OP | **新增** `session.record_verification` | operate | 只寫 verification.json；讀乾淨候選，不授權外部 mutation | task-owned 拒絕外部證詞取代受信 verifier |
 | `fanout_plan_session` | `fanout-plan` | — → OP | **新增** `fanout.plan` | start | N；新 planner 自有 worktree | 不改來源 task；保持原 planner，不新增規劃機制 |
-| `fanout_from_plan`（非 dry run） | `fanout-start`（非 `--dry-run`） | — → OP | **新增** `fanout.start` | start | 來源只讀、逐項 N；不能經 legacy apply 清理 planner | 回報 `LEGACY_CLEANUP_DISABLED`，保留 planner 交 `cleanup_preview`；不插入來源 task commands |
+| `fanout_from_plan`（非 dry run） | `fanout-start`（非 `--dry-run`） | — → OP | **新增** `fanout.start` | start | 來源只讀、逐項 N；不能經 legacy apply 清理 planner | 保留 #38 的 confirmed all-success stop-only 與容量 retirement；planner worktree 留給 reviewed cleanup；不插入來源 task commands |
 | — | `fanout PLAN --start` | — → OP | `fanout.start`，params 帶檔案讀出的固定 plan | start | 逐項 N | 同上；client 不逐項直接 session_start |
 
 `integrate` 是既有成果整合 scope；在此也用於會改 managed Git 目的端的 worktree merge，與 GitHub `merge` 分開。worktree remove 用 operate 並保留 host orchestrate tier，不新增 scope。reviewed cleanup 的 scopes 與寫入路徑由 cleanup package 定義。組合 action 的額外 scopes 在寫入意圖前檢查；不能先做一部分才發現沒有權限。
@@ -203,7 +229,7 @@ Operation cancel/resume 保留原 endpoints、authorization 與 events；不新�
 | cleanup（只限 dry run） | host、dry_run、jev、decisions、counts、escalation_summary、push；保留唯讀的 MERGE_AND_CLEAN／CLEAN_ONLY／KEEP／ESCALATE 決策預覽。apply 維持 409 `LEGACY_CLEANUP_DISABLED`，沒有本包的 operation／effect 投影。 |
 | record-verification | verification.record 的完整證詞、verified_candidate；operation actor 取驗證身分。這是外部證詞，不能變成 Task Service 的 observed_verification。 |
 | fanout-plan | 原 start 結果＋role、max_items、next；保存 role=planner。 |
-| fanout-start | host、source_session、workspace、plan、started、planner_cleanup；原逐項 task/title/session/branch/error 保留。planner_cleanup 回報 legacy apply 拒絕，保留 planner session 供 `cleanup_preview`，不啟動第二個 cleanup writer。 |
+| fanout-start | host、source_session、workspace、plan、started、planner_cleanup；原逐項 task/title/session/branch/error 保留。保留 #38 行為：confirm 且全部項目成功才 stop planner，ACK＋unloaded readback 後 retire capacity；worktree 永遠保留。partial／未知 stop 不釋放容量，不啟動第二個 cleanup writer。 |
 | fanout --start | started、count；保留 task index／title 和原 start 結果。plan 的讀檔與純解析仍在 CLI；每項實際派送都在 daemon。 |
 | work_submit | task_id、state、submitted_at、engine、task_path、goose、continuation（適用時）；立即持久寫 task 的路徑保留。 |
 | work_pause／resume | 原 Journal.get 全部 task 欄位；paused、control_version、state 各自保留，不把 operation succeeded 解釋成 task done。 |
@@ -422,7 +448,7 @@ work_submit 原已要求 key，保留其最大 256 字相容長度；一般 oper
 | start／relay 新建／fanout 項目 | reserve IDs、worktree.create、start-session、選配 tab append、第一個 prompt | 核對預留 ID、creation evidence、cwd、branch。已存在只補回執；不能重新 random ID、刪已可能成功的 worktree，或回退人工 cwd。tab 整份 workspace save 的既有 race 不在此聲稱修好。 |
 | failover | 固定 source/successor、writer proof、start、獨立 handoff send | successor 存在不代表 handoff 成功；舊 writer 不明時不建第二 writer。registry starting／uncertain 不作「可再開」依據。 |
 | worktree merge／remove | 可選 rehydrate、merge、remove、選配 branch delete、stop、registry effect，每項分開 | 保存來源／目的 commit 與 path；merge 以目的 Git 證據核對，remove 以 exact worktree 身分／存在性核對。不能因資料夾不存在就順手刪別的 branch。無法唯一歸因就 uncertain。 |
-| fanout | 固定 plan digest、每項預留 ID／steps；planner cleanup 僅回報 legacy apply 拒絕 | per-item 已完成結果不重做；未證明項目維持 uncertain，不啟動更多可能重複的 writer。保留 planner session 交 `cleanup_preview`，不經 legacy apply 清理。partial items 與原 cap 行為保留。 |
+| fanout | 固定 plan digest、每項預留 ID／steps；保留既有 confirmed all-success planner stop-only／capacity bookkeeping，各自留回執 | per-item 已完成結果不重做；未證明項目維持 uncertain，不啟動更多可能重複的 writer。planner worktree 留給 `cleanup_preview`，不經 legacy apply 清理。partial items、未證明 stop、cap 與 retirement refusal 行為保留。 |
 | task submit／控制／證詞 | 原 task effect＋同交易 step response；command IDs 連結 | 本地 commit 回執即完成證據；沒有回執代表交易未完成，可以重新做本地交易，不能重播已存在 external command。 |
 | task.verify | 固定 candidate、原 runner invocation、output artifact、observed verification receipt | runner 失聯／重啟後無完成證據就 needs_attention／既有 task 恢復規則，不把 invocation 再當普通本地寫入重跑，不接受 caller 填 exit code。 |
 
@@ -567,7 +593,7 @@ Phase 1 與 Phase 2 報告都跑 `uv run ruff check .`、`uv run pytest -q`；�
 
 ## 尚未涵蓋
 
-- **Part B 尚未交付**：舊 session/orchestration tools 成為 operations、no-key sentinel/投影、未知布林 null、外部 step 拆分與完整 A01/A05/A08 全入口驗收。Part A 只聲稱 task A05、A07、A09。
+- **Part B 尚未全部交付**：interrupt 切片已轉接並加入 no-key／未知值投影；其他舊 session/orchestration tools、task controls 的 no-key 統一、外部 step 拆分與完整 A01/A05/A08 全入口驗收仍待完成。Part A 只聲稱 task A05、A07、A09。
 - `import-bat --output PATH --force` 保留 install-time local command；它在 owner 存在前執行、只寫本機 config，不是 fleet action，本包不改。
 - operation cancel/resume 自身的 control operations，以及 api-token issue/revoke operations 不在本包；原 endpoints/RPC 已授權、留事件或立即完成短 connector-data 修改，不觸及 BAT/Git/provider。
 - 不新增 task planner、recipe/model 政策、第二個 task database、分散式 owner lease 或人工資源接管；不恢復已停用的 task 中途 failover。

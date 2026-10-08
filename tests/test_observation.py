@@ -25,7 +25,7 @@ from bat_agent_connector.observation import (
 )
 from bat_agent_connector.operations import OperationError
 from bat_agent_connector.resource_ids import worktree_id
-from bat_agent_connector.task_journal import Journal
+from bat_agent_connector.task_journal import LATEST_DATA_STEP, Journal
 from tests.conftest import adopt, make_config
 from tests.test_api_v1 import (  # noqa: F401 - shared fixtures
     MANUAL,
@@ -489,7 +489,7 @@ def test_b01_b03_saved_task_facts_use_their_own_time_and_keep_execution(tmp_path
             j.db.execute("""INSERT INTO operation_steps(operation_id,seq,name,status,request,started_at,finished_at)
                 VALUES('op_saved',1,'read','succeeded','{}',?,999999)""", (at,))
     j = replay_version_one(j, path)
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == observation.MIGRATION_VERSION
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == LATEST_DATA_STEP
     facts = [e for e in Observation(j).history("execution", t["task_id"], limit=200)["events"]
              if e["kind"] == "history.backfilled" and e["body"]["source_table"] == ("operations" if table == "operation_task_link" else table)]
     assert len(facts) == 1
@@ -658,7 +658,7 @@ def test_b01_b03_relation_history_keeps_roles_and_strips_free_text(tmp_path, bac
         j.db.execute("PRAGMA user_version=1")
         j.close()
         j = Journal(path)
-        assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert j.db.execute("PRAGMA user_version").fetchone()[0] == LATEST_DATA_STEP
     obs = Observation(j)
     expected = {(kind, role) for kind in kinds for role in ("lead", "reviewer")}
     for resource_type, resource_id in (("execution", t["task_id"]), ("session", "h1/shared")):
@@ -876,7 +876,7 @@ def test_b03_worktree_binding_backfill_matches_live_and_reopens_without_writes(t
 
     monkeypatch.setattr(observation, "backfill", capture)
     j = Journal(path)
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == LATEST_DATA_STEP
     binding = j.db.execute("SELECT * FROM session_worktree_bindings").fetchone()
     assert binding["start_seq"] == binding["linked_at_seq"] == seq
     assert binding["evidence_ref"] == f"api_events:{seq}"
@@ -1028,7 +1028,7 @@ def test_b01_b03_legacy_connector_branch_keeps_journaled_slot_and_history(tmp_pa
         for table in ("session_worktree_bindings", "observation_resources", "observation_backfill"):
             j.db.execute(f"DELETE FROM {table}")
         j = replay_version_one(j, path)
-        assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert j.db.execute("PRAGMA user_version").fetchone()[0] == LATEST_DATA_STEP
         registry_bindings(j, "h1", entries)
     obs = Observation(j)
     worktree_events = {e["seq"] for e in obs.history("worktree", wid)["events"]}
@@ -1110,7 +1110,7 @@ def test_b01_b03_nonsharing_failover_never_links_old_worktree(tmp_path, parent_m
         for table in ("session_worktree_bindings", "observation_resources", "observation_backfill"):
             j.db.execute(f"DELETE FROM {table}")
         j = replay_version_one(j, path)
-        assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert j.db.execute("PRAGMA user_version").fetchone()[0] == LATEST_DATA_STEP
         registry_bindings(j, "h1", entries)
     obs = Observation(j)
     assert obs.resource("session", "h1/child").get("worktree_id") is None
@@ -1155,9 +1155,11 @@ def test_b01_relation_scope_and_cross_project_link_history(mock, tmp_path):
     bind(j, t, "sid")
     # Use the existing work-item operation writer, with no provider call.
     from bat_agent_connector import work_items
+    from bat_agent_connector.artifacts import ArtifactSettings, ArtifactStore
     from bat_agent_connector.operations import OperationService
     ops = OperationService(j, actions=work_items.ACTIONS)
     ops.context["fleet"] = inv.fleet
+    ops.context["artifact_store"] = ArtifactStore(ops, ArtifactSettings(store_root=str(tmp_path / "artifacts")))
     principal = api_auth.Principal("agent", frozenset({"observe", "manage"}))
     async def create():
         p, _ = ops.create(principal, action="project.create", params={"name": "P"}, idempotency_key="p")
@@ -1915,7 +1917,7 @@ def test_b03_migration_failure_rolls_back_and_restart_recovers(tmp_path, monkeyp
     monkeypatch.setattr(observation, "backfill", original)
     j = Journal(path)
     assert j.api_head() == before
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == observation.MIGRATION_VERSION
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == LATEST_DATA_STEP
     assert j.db.execute("SELECT COUNT(*) FROM observation_resources WHERE resource_id='h1/sid'").fetchone()[0] == 0
     j.close()
 
@@ -1943,7 +1945,8 @@ def test_b03_version_one_journal_runs_observation_backfill_once(tmp_path, monkey
     monkeypatch.setattr(observation, "backfill", capture)
     j.close()
     j = Journal(path)
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == observation.MIGRATION_VERSION == 2
+    assert observation.MIGRATION_VERSION == 2
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == LATEST_DATA_STEP
     assert calls == ["backfill"]
     saved = Observation(j).history("session", "h1/saved")["events"]
     assert len(saved) == 1 and saved[0]["kind"] == "history.backfilled"
@@ -1968,7 +1971,7 @@ def test_b03_version_one_journal_runs_observation_backfill_once(tmp_path, monkey
     j.db.execute("PRAGMA user_version=2")
     j.close()
     j = Journal(already_path)
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == LATEST_DATA_STEP
     assert j.api_head() == head and calls == ["backfill"]
     assert j.db.execute("SELECT COUNT(*) FROM observation_backfill").fetchone()[0] == 0
     assert j.db.execute("SELECT COUNT(*) FROM api_event_context").fetchone()[0] == 0
@@ -1976,12 +1979,12 @@ def test_b03_version_one_journal_runs_observation_backfill_once(tmp_path, monkey
 
     fresh_path = tmp_path / "fresh.db"
     j = Journal(fresh_path)
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == LATEST_DATA_STEP
     assert calls == ["backfill", "backfill"]
     assert j.api_head() == 0 and j.db.execute("SELECT COUNT(*) FROM observation_backfill").fetchone()[0] == 0
     j.close()
     j = Journal(fresh_path)
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == LATEST_DATA_STEP
     assert j.api_head() == 0 and calls == ["backfill", "backfill"]
     assert j.db.execute("SELECT COUNT(*) FROM observation_backfill").fetchone()[0] == 0
     j.close()

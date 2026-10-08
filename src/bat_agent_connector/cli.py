@@ -237,9 +237,21 @@ async def _run(args) -> Any:
                 fleet, args.host, args.session, args.confirm, args.text, args.queue
             ), None
         if c == "interrupt":
-            return await service.session_interrupt(
-                fleet, args.host, args.session, args.mode, args.confirm
-            ), None
+            from .task_daemon import request
+
+            if not args.confirm or not fleet.writes_enabled(args.host):
+                raise WriteRefused("interrupt needs --confirm and an enabled local write tier")
+            params = {"host": args.host, "session_id": args.session, "mode": args.mode,
+                      "confirm": True, "idempotency_key": args.key}
+            if args.control_version is not None:
+                params["control_version"] = args.control_version
+            try:
+                out = await asyncio.to_thread(request, "session_interrupt", entry="cli", timeout=40,
+                                              _auth_token=os.environ.get("BATC_API_TOKEN") or None, **params)
+            except OSError:
+                raise WriteRefused("central interrupt request failed; its outcome may be unknown. "
+                                   "Read the saved operation or retry with the same explicit key") from None
+            return out, None
         if c == "answer":
             return await service.session_answer(
                 fleet,
@@ -453,6 +465,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("session")
     p.add_argument("--mode", choices=["soft", "hard"], default="soft")
     p.add_argument("--confirm", action="store_true")
+    p.add_argument("--key", help="reuse for retries; omitted means no cross-call deduplication")
+    p.add_argument("--control-version", type=int, help="expected owning task control version")
     p = sp.add_parser("answer", help="WRITE: answer a pending question / permission")
     p.add_argument("host")
     p.add_argument("session")
@@ -777,7 +791,25 @@ def build_parser() -> argparse.ArgumentParser:
     c = dsp.add_parser("merge", help="merge a reviewed immutable mpv_ preview (merge; deploy for --recipe)")
     c.add_argument("--preview", required=True)
     c.add_argument("--recipe")
+    c.add_argument("--generation", type=int, help="deployment preview's generation (with --recipe)")
+    c.add_argument("--recipe-digest", help="deployment preview's digest (with --recipe)")
     c.add_argument("--key", required=True)
+    for name in ("preview", "history", "show"):
+        c = dsp.add_parser(name, help=f"read deployment {name}")
+        c.add_argument("deployment_id" if name == "show" else "recipe")
+        if name == "history":
+            c.add_argument("--cursor")
+            c.add_argument("--limit", type=int, default=50)
+    for name in ("deploy", "rollback", "retry"):
+        c = dsp.add_parser(name, help=f"{name} through the reviewed configured recipe (deploy scope)")
+        c.add_argument("recipe")
+        if name == "deploy":
+            c.add_argument("--sha", required=True)
+        else:
+            c.add_argument("deployment_id")
+        c.add_argument("--generation", type=int, required=True)
+        c.add_argument("--recipe-digest", required=True)
+        c.add_argument("--key", required=True)
     p = sp.add_parser("integrate", help="put results into an existing PR's head branch (one normal push)")
     isp = p.add_subparsers(dest="integrate_cmd", required=True)
     c = isp.add_parser("candidates", help="agent results and checkpoints on a host, and where they went")
@@ -1007,6 +1039,7 @@ def integrate_sources(sources: list[str], picks: list[str]) -> list[dict]:
 
 
 def cmd_delivery(args) -> int:
+    from .deployment import retry_envelope
     from .pr_delivery import merge_envelope
     from .task_daemon import request
 
@@ -1014,12 +1047,33 @@ def cmd_delivery(args) -> int:
     if args.delivery_cmd == "pr":
         out = request("github_pr_preview", repository=args.repository, pull_number=args.number,
                       method=args.method, entry="cli", _auth_token=token or None)
+    elif args.delivery_cmd == "preview":
+        out = request("deployment_preview", recipe=args.recipe, entry="cli", _auth_token=token or None)
+    elif args.delivery_cmd == "history":
+        out = request("deployments_list", recipe=args.recipe, cursor=args.cursor, limit=args.limit,
+                      entry="cli", _auth_token=token or None)
+    elif args.delivery_cmd == "show":
+        out = request("deployment_status", deployment_id=args.deployment_id, entry="cli", _auth_token=token or None)
     else:
         if not token:
-            raise ValueError("delivery writes need this client's BATC_API_TOKEN (integrate or merge scope)")
+            raise ValueError("delivery writes need this client's BATC_API_TOKEN (integrate, merge or deploy scope)")
         if args.delivery_cmd == "merge":
             doc = request("github_merge_preview_get", preview_id=args.preview, entry="cli", _auth_token=token)["preview"]
             envelope = merge_envelope(doc, recipe=args.recipe)
+            if args.recipe:
+                envelope["preconditions"].update(expected_environment_generation=args.generation,
+                                                  expected_recipe_digest=args.recipe_digest)
+        elif args.delivery_cmd in {"deploy", "rollback", "retry"}:
+            pre = {"expected_environment_generation": args.generation, "expected_recipe_digest": args.recipe_digest}
+            if args.delivery_cmd == "retry":
+                saved = request("deployment_status", deployment_id=args.deployment_id, entry="cli", _auth_token=token)["deployment"]
+                if saved["recipe"] != args.recipe:
+                    raise ValueError("retry selects a deployment of this recipe")
+                envelope = retry_envelope(saved, pre)
+            else:
+                envelope = {"action": "deployment.start" if args.delivery_cmd == "deploy" else "deployment.rollback",
+                            "target": {"recipe": args.recipe}, "preconditions": pre,
+                            "params": {"source_sha": args.sha} if args.delivery_cmd == "deploy" else {"deployment_id": args.deployment_id}}
         else:
             params = {"title": args.title} if args.title is not None else {}
             if args.body_file is not None:
@@ -1180,6 +1234,34 @@ def cmd_observation(args) -> int:
     return 0
 
 
+def _mutation_requested(args) -> bool:
+    """Classify before daemon calls or input-file reads, including commands that do not build a Fleet."""
+    command = args.cmd
+    if command in {"send", "continue", "interrupt", "answer", "permissions", "start", "merge",
+                   "remove-worktree", "record-verification", "fanout-plan", "task-reconcile", "serve"}:
+        return True
+    if command in {"approve-pending", "relay", "failover", "fanout-start"}:
+        return not args.dry_run
+    if command == "fanout":
+        return args.start
+    if command == "cleanup":
+        return args.apply
+    if command == "op":
+        return args.cancel or args.resume
+    if command == "import-bat":
+        return args.output != "-"
+    mutating = {"artifact": ("artifact_cmd", {"upload", "capture"}),
+                "resource-cleanup": ("cleanup_cmd", {"apply"}),
+                "checkpoint": ("checkpoint_cmd", {"create", "continue", "revalidate"}),
+                "delivery": ("delivery_cmd", {"update-pr", "merge", "deploy", "rollback", "retry"}),
+                "integrate": ("integrate_cmd", {"preview", "apply", "handoff"}),
+                "project": ("project_cmd", {"create", "update"}),
+                "item": ("item_cmd", {"create", "update", "approve", "continue", "link"}),
+                "api-token": ("api_token_cmd", {"issue", "revoke"})}
+    field, values = mutating.get(command, ("cmd", set()))
+    return getattr(args, field) in values
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["mcp"]:
@@ -1189,6 +1271,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     args = build_parser().parse_args(argv)
     try:
+        if args.read_only and _mutation_requested(args):
+            raise WriteRefused("--read-only refuses this mutation")
         if args.cmd in {"inventory", "history", "relations"}:
             return cmd_observation(args)
         if args.cmd == "serve":
@@ -1202,8 +1286,6 @@ def main(argv: list[str] | None = None) -> int:
             _print(request("work_events", since_cursor=args.since, limit=args.limit), args.json)
             return 0
         if args.cmd == "task-reconcile":
-            if args.read_only:
-                raise WriteRefused("--read-only refuses task reconciliation")
             from .task_daemon import request
 
             cap = request("work_reconcile_capability", task_id=args.task_id,
@@ -1250,16 +1332,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "op":
             from .task_daemon import request
 
+            auth = {"_auth_token": os.environ.get("BATC_API_TOKEN") or None}
             if (args.cancel or args.resume) and not args.operation_id:
                 raise ValueError("--cancel and --resume need an operation ID")
             if args.cancel:
-                out = request("op_cancel", operation_id=args.operation_id, entry="cli")
+                out = request("op_cancel", operation_id=args.operation_id, entry="cli", **auth)
             elif args.resume:
-                out = request("op_resume", operation_id=args.operation_id, entry="cli")
+                out = request("op_resume", operation_id=args.operation_id, entry="cli", **auth)
             elif args.operation_id:
-                out = request("op_get", operation_id=args.operation_id, entry="cli")
+                out = request("op_get", operation_id=args.operation_id, entry="cli", **auth)
             else:
-                out = request("op_list", statuses=args.status, limit=args.limit, entry="cli")
+                out = request("op_list", statuses=args.status, limit=args.limit, entry="cli", **auth)
             _print(out, True)
             return 0
         if args.cmd == "import-bat":
@@ -1269,7 +1352,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         obj, render = asyncio.run(_run(args))
         _print(obj, args.json, render)
-        return 0
+        return 1 if args.cmd == "interrupt" and obj["operation_status"] in {"failed", "cancelled"} else 0
     except (BatError, ValueError, OperationError) as e:
         print(f"error: {redact(e)}", file=sys.stderr)
         return 1

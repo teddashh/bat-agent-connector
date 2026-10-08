@@ -162,7 +162,7 @@ def normalize_refs(db, values, settings: ArtifactSettings, *, roles=False) -> li
         row = get(db, value["artifact_id"], value["revision"])
         if row["state"] != "ready" or row["digest"] != value["digest"]:
             raise OperationError("INVALID_ARTIFACT_REF", "revision is not ready or digest differs", 409)
-        if roles and value["role"] not in {"input", "result"}:
+        if roles and (not isinstance(value["role"], str) or value["role"] not in {"input", "result"}):
             raise OperationError("INVALID_ARTIFACT_REF", "attachment role must be input or result", 422)
         key = (value["artifact_id"], value["revision"], value.get("role", "input"))
         if key in seen:
@@ -272,7 +272,9 @@ class ArtifactStore:
         media = params.get("media_type", "application/octet-stream")
         if not isinstance(media, str) or not re.fullmatch(r"[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+", media) or len(media) > 100:
             raise OperationError("INVALID_PARAMS", "media_type must be a MIME type", 422)
-        if target.get("artifact_id"):
+        if "artifact_id" in target:
+            if not isinstance(target["artifact_id"], str) or not ARTIFACT_ID.fullmatch(target["artifact_id"]):
+                raise OperationError("INVALID_ARTIFACT_REF", "target.artifact_id must be an artifact ID", 422)
             row = self.db.execute("SELECT * FROM artifacts WHERE artifact_id=?", (target["artifact_id"],)).fetchone()
             if row is None:
                 raise OperationError("ARTIFACT_NOT_FOUND", "no such artifact", 404)
