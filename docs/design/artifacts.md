@@ -72,7 +72,7 @@ capabilities 回 limits／store readiness／host helper readiness。降低 quota
 
 | Action | Scope | 輸入 | 輸出 |
 |---|---|---|---|
-| artifact.upload | manage | target {} 或 artifact_id；name／media_type／size_bytes／expected_digest；新 revision expected_latest_revision | operation、content_url、預留 ID／revision；成功結果含 digest／size／type |
+| artifact.upload | manage | target {} 或 artifact_id；display_name／media_type／size_bytes／expected_digest；新 revision expected_latest_revision | operation、content_url、預留 ID／revision；成功結果含 digest／size／type |
 | checkpoint.create（擴充） | operate | artifacts: ArtifactRef[] | 凍結的 artifacts |
 | work_item.create／update（擴充） | manage | attachments: refs 加 role=input/result；update expected_version | version／completion fingerprint |
 | checkpoint.continue（擴充） | start | params.artifacts 或 checkpoint 集合；instructions／agent／work_item_id；pre expected_source_head_sha、可選 expected_work_item_fingerprint | 原 session／worktree 結果，加 input_manifest_digest／materializations |
@@ -85,8 +85,8 @@ capabilities 回 limits／store readiness／host helper readiness。降低 quota
 | POST /artifacts，JSON metadata | artifact_upload（base64，小額限制） | batc artifact upload FILE --confirm |
 | POST /artifacts/uploads/{op}/content，octet-stream、固定 Content-Length | upload 工具薄轉接相同兩步流程 | FILE 只在 client 讀取，不傳絕對路徑 |
 | GET /artifacts?limit=&cursor= | artifacts_list | batc artifact list |
-| GET /artifacts/{id}/revisions/{revision} | artifact_get，含 materialization evidence | batc artifact show ID --revision N |
-| GET /artifacts/{id}/revisions/{revision}/content | metadata 提供下載 route，不回大型 bytes | batc artifact download ID --revision N --output FILE |
+| GET /artifacts/{id}/revisions/{revision} | artifact_get，含 materialization evidence | batc artifact show ID N |
+| GET /artifacts/{id}/revisions/{revision}/content | metadata 提供下載 route，不回大型 bytes | batc artifact download ID N --output FILE |
 | POST /operations，continue／revalidate | confirmation 用 operation_submit | batc checkpoint continue／revalidate；原 batc op ID --resume |
 
 GET observe；download 為 Content-Disposition attachment、nosniff、no-store，不 inline preview。列表 1–200，預設 50，有穩定游標。materializations 在 artifact_get 與 continue result，不新增 MCP 查詢／materialize tools。
@@ -179,7 +179,7 @@ reference rows只有work_item、checkpoint、operation的writer。未完成工�
 
 | 檔案 | Part A 修改 |
 |---|---|
-| artifacts.py（新）／artifact_host.py（新） | store、upload adapter／actions、refs、固定 Python helper／read-back |
+| artifacts.py（新）／artifact_host.py／artifact_host_helper.py／artifact_client.py（新） | store、upload adapter／actions、refs、固定 Python helper／read-back |
 | task_journal.py | next free user_version 的 idempotent additive DDL；舊附件空，舊字串不遷成 artifact |
 | resource_policy.py | storage／materialize mutation與 shared destination checks，配合cleanup guard |
 | operations.py | **只有 additive wake(operation_id)**；不改 create／resume／cancel／STATES／table／replay |

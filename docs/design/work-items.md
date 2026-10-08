@@ -104,9 +104,15 @@ Dashboard 的工作詳情可以從已連結的 checkpoint 直接派工：指示�
 | `hub/lib/completion.js` | `completion()`、`approve`／`continue` | 指紋含標題（Hub 的改名由人操作；這裡 agent 也能改名）；確認需要 `approve` scope |
 | `hub/lib/task-ids.js` | 隨機 ID、封存保留 | 不需要依日期編號與預約檔 |
 
+## Typed attachments（Part A；計畫 §08／§13，W05b）
+
+create／update 的 attachments 為 `{artifact_id, revision, digest, role: input|result}` 陣列；必為 ready 精確版本。GET 回同集合，CLI item create／update 的 --attachment 接 JSON。有附件才把它加入 fingerprint，空集合保持既有 hash；改 ref／role 會讓已接受內容重新等待確認。result role 只是工作項目附件用途，尚未實作 Part B 的 managed-result capture／artifact.accept。
+
+artifact_references 留每次 work_item 引用與釋放歷史，checkpoint 與 continuation operation 也有引用。本包不刪 artifacts，不另建 retention read model。Dashboard 編輯表單可 upload／選 role，refs 與需求原文保存於 localStorage 草稿；只有成功更新才清除那次提交。從 linked checkpoint 派工時，後端第一 step 記 work item 連結與 expected fingerprint，送出前再次查內容。見 [artifacts.md](artifacts.md)。
+
 ## 尚未涵蓋
 
-- 匯入 Project Hub 的資料（驗收 B05）與工作項目的附件（W05b）。
+- 匯入 Project Hub 的資料（驗收 B05）；manual／managed artifact capture 與 acceptance（Part B）。
 - 專案的階段與專案層級的完成確認。
 - 在專案之間移動工作項目。
 - `work_submit` 與 checkpoint 派工以外的入口自動建立連結。
