@@ -2,6 +2,14 @@
 
 ## Next release (unreleased)
 
+- Prove the full system Python closure before account-check interpreters execute ([design](docs/design/confinement.md),
+  計畫 §06/§07/§12, A10). A bounded absolute-tool gate checks every stdlib/platform-stdlib entry, bytecode and
+  extension, symlink hops/targets, zip and venv parents. Unknown layouts or incomplete scans report
+  check_executable_untrusted and confined Claude falls back to default. Gate and rechecks share one definition
+  and budget (default 50000 entries). Programs use -c argv with updated sudoers examples; ptrace_scope is recorded
+  and the no-hostile-same-UID trust assumption is explicit. Directory-only caches expire. W12 still must prove
+  real-host Debian/Ubuntu/RHEL behavior and A10.
+
 - Registry session identity is unique per host/session ID ([design](docs/design/confinement.md), 計畫 §06/§12, A10).
   Sent starts, including BAT invoke-error replies and legacy failed/sent rows, are fenced from same-ID reservation
   retries. The pinned Codex start path can retain a session after an error, so the connector keeps its reservation

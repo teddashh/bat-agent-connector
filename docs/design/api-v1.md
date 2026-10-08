@@ -108,7 +108,7 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 
 `GET /api/v1/capabilities` 的 `hosts[].confinement.host_account.start_effect` 描述新 start 的帳號查核流程，與 reason 一起回傳。MCP `capabilities_get`、CLI／MCP host reads 用同一後端 projection；GET 不觸發 live check。`start_account()` 在真正 start 時跑 live check，並用同一 `account_start_effect()` 規則決定拒絕。
 
-Host-account verdict 另含 `checked_uid` 與 `channel`：status、method=sudo_exec、ssh_alias、auditor_uid、bat_uid、bat_account 與 preflight evidence。Verified 須符合操作者宣告的 check_ssh_alias／check_uid／bat_account／expected_uid，auditor 與 BAT 的 UID 必須不同。無可信 alias 直接回 unknown／check_channel_untrusted，不跑 BAT 帳號的登入命令；此 reason 和其他 hardening gaps 一樣為 fallback_default，受限 Claude 用 default，不啟用 acceptEdits。舊同帳號 cache 不沿用，GET 仍只讀。
+Host-account verdict 另含 `checked_uid` 與 `channel`：status、method=sudo_exec、ssh_alias、auditor_uid、bat_uid、bat_account、closure（schema_version/status/interpreter/roots/entries_remaining）、ptrace_scope（不可讀為 null）與 preflight evidence。Verified 須符合操作者宣告的 check_ssh_alias／check_uid／bat_account／expected_uid，auditor 與 BAT 的 UID 必須不同。無可信 alias 直接回 unknown／check_channel_untrusted，不跑 BAT 帳號的登入命令；此 reason 和其他 hardening gaps 一樣為 fallback_default，受限 Claude 用 default，不啟用 acceptEdits。Verified 另需完整 pre-interpreter closure proof；unknown／check_executable_untrusted 包含未知 layout 或不完整 gate，仍 fallback_default。同 UID hostile process 不在此證明範圍。舊同帳號／directory-only cache 不沿用，GET 仍只讀。
 
 | start_effect | 意義 |
 |---|---|

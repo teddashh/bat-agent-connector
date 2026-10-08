@@ -13,7 +13,7 @@ import types
 import pytest
 
 from bat_agent_connector import confinement, orchestrate
-from tests.test_confinement import ACCOUNT, MANAGED, AccountRunner, account_observation
+from tests.test_confinement import ACCOUNT, MANAGED, AccountRunner, account_observation, closure_observation
 from tests.test_confinement_integrity import integrity_fixture
 
 
@@ -41,7 +41,7 @@ async def test_a10_same_account_forged_verdict_never_enables_accept_edits(fleet_
 
 @pytest.mark.parametrize("field,value", [("checked_uid", 2003), ("auditor_uid", 2001),
                                          ("ssh_alias", "wrong-auditor"), ("bat_account", "another-bat"),
-                                         ("method", "login_shell"), ("channel", None)])
+                                         ("method", "login_shell"), ("channel", None), ("closure", None)])
 async def test_a10_verified_channel_facts_must_match_declaration(fleet_factory, field, value):
     observation = account_observation("verified", "read_only_account_check")
     if field in {"checked_uid", "channel"}:
@@ -71,6 +71,11 @@ def test_a10_auditor_program_uses_exact_direct_exec_and_requires_preflight(monke
     calls = []
 
     class Path(pathlib.PurePosixPath):
+        def read_text(self):
+            if str(self) == '/proc/sys/kernel/yama/ptrace_scope':
+                return '1\n'
+            return '1-2 r-xp 0 0:0 1 /usr/lib/fixture-native.so\n'
+
         def resolve(self, strict=False):
             return self
 
@@ -85,10 +90,13 @@ def test_a10_auditor_program_uses_exact_direct_exec_and_requires_preflight(monke
             return b'fixture ACL: conservatively unproven'
         raise OSError(errno.ENODATA, "fixture no ACL")
 
-    def run(argv, *, input, **kwargs):
+    def run(argv, **kwargs):
+        if argv[0] == '/usr/bin/timeout':
+            return types.SimpleNamespace(returncode=0, stderr=b'',
+                                         stdout=json.dumps(closure_observation(int(argv[-1])-100)).encode())
         calls.append(argv)
-        # The child receives config on stdin, never as extra sudoers command arguments.
-        tree = ast.parse(input.decode())
+        assert kwargs['stdin'] == -3  # Program is immutable argv after exec, never a stdin pipe.
+        tree = ast.parse(argv[-1])
         payload = json.loads(ast.literal_eval(tree.body[1].value)[1])
         observed = {"status": "verified", "reason": "fixture", "checked_uid": ACCOUNT["expected_uid"],
                     "entries_remaining": 9000, "auditor_integrity": {"home": "/usr/fixture-auditor"},
@@ -110,14 +118,17 @@ def test_a10_auditor_program_uses_exact_direct_exec_and_requires_preflight(monke
         imports.setitem(sys.modules, "sys", types.SimpleNamespace(argv=["-", json.dumps(config)],
                                                                platform="linux", executable="/usr/bin/python3"))
         imports.setitem(sys.modules, "sysconfig", types.SimpleNamespace(get_path=lambda _: "/usr/lib/python3.10"))
-        imports.setitem(sys.modules, "subprocess", types.SimpleNamespace(run=run, PIPE=-1, TimeoutExpired=TimeoutError))
+        imports.setitem(sys.modules, "subprocess", types.SimpleNamespace(run=run, PIPE=-1, DEVNULL=-3, TimeoutExpired=TimeoutError))
         try:
+            imports.setitem(sys.modules, "sys", types.SimpleNamespace(
+                argv=["-", json.dumps(config), json.dumps(closure_observation())],
+                platform="linux", executable="/usr/bin/python3"))
             exec(confinement._ACCOUNT_CHANNEL_PROGRAM, {})
         except SystemExit:
             pass
     observed = json.loads(capsys.readouterr().out)
-    assert all(argv == ['/usr/bin/sudo', '-n', '-u', ACCOUNT['bat_account'], '--', '/usr/bin/env', '-i',
-                        'PATH=/usr/bin:/bin', 'LC_ALL=C', '/usr/bin/python3', '-I', '-S', '-B', '-'] for argv in calls)
+    assert all(argv[:-1] == ['/usr/bin/sudo', '-n', '-u', ACCOUNT['bat_account'], '--', '/usr/bin/env', '-i',
+                            'PATH=/usr/bin:/bin', 'LC_ALL=C', '/usr/bin/python3', '-I', '-S', '-B', '-c'] for argv in calls)
     if reason:
         assert observed["status"] == "unknown"
         assert observed["reason"] == ('check_executable_untrusted' if reason in {'check_executable_untrusted', 'auditor_shell_untrusted', 'bootstrap_acl_unproven'}
@@ -125,6 +136,7 @@ def test_a10_auditor_program_uses_exact_direct_exec_and_requires_preflight(monke
         assert calls == []  # Parent refuses the untrusted channel before any sudo drop.
     else:
         assert len(calls) == 2 and confinement.channel_matches(ACCOUNT, observed)
+        assert observed['channel']['ptrace_scope'] == 1
 
 
 @pytest.mark.parametrize("path", ["/usr/fixture-auditor", "/usr/fixture-auditor/.ssh/rc",
