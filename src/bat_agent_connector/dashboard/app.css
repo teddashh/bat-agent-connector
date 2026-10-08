@@ -147,3 +147,11 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
   .deployment-versions { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .environment-card details > summary { min-height: 44px; display: flex; align-items: center; }
 }
+.observation-panel > summary { font-weight: 600; cursor: pointer; }
+.observation-panel .filters { margin-top: 12px; }
+.observation-panel input { min-width: 0; max-width: 100%; }
+.observation-record { padding: 10px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.observation-record:last-child { border-bottom: 0; }
+.observation-record .actions { margin-top: 0; }
+.observation-evidence { margin-top: 10px; overflow-wrap: anywhere; }
+.observation-evidence .kv { grid-template-columns: minmax(80px, max-content) minmax(0, 1fr); }
