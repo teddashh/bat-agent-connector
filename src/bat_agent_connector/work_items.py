@@ -29,6 +29,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable
 
+from . import artifacts
 from .operations import ActionDef, OpContext, OperationError, OperationService
 
 PROJECT_ID = re.compile(r"prj_[0-9a-f]{20}")
@@ -51,7 +52,7 @@ _TASK = re.compile(r"[0-9a-f-]{8,64}")
 _NOT_ONE_LINE = re.compile(r"[\x00-\x1f\x7f  ]")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 PROJECT_FIELDS = ("name", "description", "parent_id", "repositories", "task_project")
-ITEM_FIELDS = ("title", "goal", "request", "acceptance", "steps", "state", "parent_id")
+ITEM_FIELDS = ("title", "goal", "request", "acceptance", "steps", "state", "parent_id", "attachments")
 CONTENT_FIELDS = ("title", "goal", "request", "acceptance", "steps")
 MAX_DEPTH = 32  # levels in a project or work item tree
 
@@ -73,7 +74,10 @@ def _bad(code: str, message: str, status: int = 422) -> OperationError:
 def fingerprint(item: dict) -> str:
     """What a person approves: the content they read, title included (anyone with manage can rename, so a rename
     asks again). Order, pins and links are not content."""
-    return _sha({k: item[k] for k in CONTENT_FIELDS})
+    content = {k: item[k] for k in CONTENT_FIELDS}
+    if item.get("attachments"):
+        content["attachments"] = item["attachments"]
+    return _sha(content)
 
 
 def steps_hash(steps: list[dict]) -> str:
@@ -195,6 +199,7 @@ def _item(row) -> dict:
     item = {"work_item_id": row["work_item_id"], "project_id": row["project_id"], "parent_id": row["parent_id"],
             "derived_from": row["derived_from"], "title": row["title"], "goal": row["goal"],
             "request": row["request"], "acceptance": row["acceptance"], "steps": json.loads(row["steps"]),
+            "attachments": json.loads(row["attachments"]),
             "state": row["state"], "done_by": row["done_by"], "done_at": row["done_at"],
             "approved_fingerprint": row["approved_fingerprint"], "approved_by": row["approved_by"],
             "approved_at": row["approved_at"], "continued_steps": row["continued_steps"],
@@ -661,7 +666,7 @@ async def _run_project_pin(ctx: OpContext) -> dict:
 
 # ------------------------------------------------------------------ work items
 def _check_item_create(ops: OperationService, target: dict, params: dict) -> dict:
-    _only(params, ("title", "goal", "request", "acceptance", "steps", "state", "parent_id", "derived_from"))
+    _only(params, ("title", "goal", "request", "acceptance", "steps", "state", "parent_id", "derived_from", "attachments"))
     db = ops.db
     project = _get_project(db, _target_id(target, "project_id", PROJECT_ID), active=True)
     state = params.get("state", "todo")
@@ -672,7 +677,8 @@ def _check_item_create(ops: OperationService, target: dict, params: dict) -> dic
         if not isinstance(derived, str) or not WORK_ITEM_ID.fullmatch(derived):
             raise _bad("INVALID_PARAMS", "params.derived_from is malformed")
         _get_item(db, derived)
-    return {"project_id": project["project_id"],
+    return {"attachments": artifacts.normalize_refs(db, params.get("attachments", []), ops.context["artifact_store"].settings, roles=True),
+            "project_id": project["project_id"],
             "title": _one_line(params.get("title"), "title", NAME_MAX["work_item"]),
             "goal": _text(params.get("goal"), "goal"), "request": _text(params.get("request"), "request"),
             "acceptance": _text(params.get("acceptance"), "acceptance"), "steps": _steps(params.get("steps")),
@@ -694,6 +700,8 @@ async def _run_item_create(ctx: OpContext) -> dict:
                    (wid, v["project_id"], v["parent_id"], v["derived_from"], v["title"], v["goal"], v["request"],
                     v["acceptance"], json.dumps(v["steps"], ensure_ascii=False), v["state"], ctx.op["actor"],
                     ctx.operation_id, now, now))
+        db.execute("UPDATE work_items SET attachments=? WHERE work_item_id=?", (artifacts.canonical(v["attachments"]), wid))
+        artifacts.reference(db, "work_item", wid, v["attachments"], ctx.operation_id)
         _event(ctx, "work_item", wid, "work_item.created",
                {"project_id": v["project_id"], "title": v["title"], "parent_id": v["parent_id"]})
         return {"work_item_id": wid, "project_id": v["project_id"], "version": 1}
@@ -722,6 +730,8 @@ def _check_item_update(ops: OperationService, target: dict, params: dict, pre: d
     for key in ("goal", "request", "acceptance"):
         if key in params:
             changes[key] = _text(params[key], key)
+    if "attachments" in params:
+        changes["attachments"] = artifacts.normalize_refs(db, params["attachments"], ops.context["artifact_store"].settings, roles=True)
     if "steps" in params:
         changes["steps"] = _steps(params["steps"])
     if "state" in params:
@@ -761,12 +771,15 @@ async def _run_item_update(ctx: OpContext) -> dict:
         elif "state" in changes and item["state"] == "done":
             claim = {"done_by": None, "done_at": None, "approved_fingerprint": None, "approved_by": None,
                      "approved_at": None}
-        elif item["state"] == "done" and any(k in changes for k in CONTENT_FIELDS):
+        elif item["state"] == "done" and any(k in changes for k in (*CONTENT_FIELDS, "attachments")):
             claim = {"done_by": actor, "done_at": now}  # whoever changes done content now presents it as done
         after.update(claim)
         cols = {**changes, **claim}
         if "steps" in cols:
             cols["steps"] = json.dumps(cols["steps"], ensure_ascii=False)
+        if "attachments" in cols:
+            artifacts.reference(db, "work_item", wid, changes["attachments"], ctx.operation_id)
+            cols["attachments"] = artifacts.canonical(cols["attachments"])
         sets = ",".join(f"{k}=?" for k in cols)
         db.execute(f"UPDATE work_items SET {sets},version=version+1,updated_at=? WHERE work_item_id=?",  # noqa: S608
                    (*cols.values(), now, wid))

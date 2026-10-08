@@ -14,9 +14,9 @@ import json
 import re
 import time
 from importlib import resources
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from . import __version__, api_auth, checkpoints, integration, resource_policy, service, work_items
+from . import __version__, api_auth, artifacts, checkpoints, integration, resource_policy, service, work_items
 from .errors import BatError, ResourceReadOnly
 from .operations import STATES, OperationError
 
@@ -87,6 +87,9 @@ class ApiV1:
         self.routes = [
             ("GET", r"/api/v1/version", self.version, None),
             ("GET", r"/api/v1/capabilities", self.capabilities, "observe"),
+            ("POST", r"/api/v1/artifacts", self.create_artifact, "manage"),
+            ("GET", r"/api/v1/artifacts", self.artifacts, "observe"),
+            ("GET", r"/api/v1/artifacts/(?P<aid>art_[0-9a-f]{32})/revisions/(?P<revision>[1-9][0-9]*)", self.artifact, "observe"),
             ("GET", r"/api/v1/hosts", self.hosts, "observe"),
             ("GET", r"/api/v1/sessions", self.sessions, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)", self.session, "observe"),
@@ -145,6 +148,35 @@ class ApiV1:
                 return
             parts = urlsplit(target)
             path, query = parts.path.rstrip("/") or "/", parse_qs(parts.query)
+            content = re.fullmatch(r"/api/v1/artifacts/uploads/(?P<op>op_[0-9a-f]{32})/content", path)
+            download = re.fullmatch(r"/api/v1/artifacts/(?P<aid>art_[0-9a-f]{32})/revisions/(?P<revision>[1-9][0-9]*)/content", path)
+            if content or download:
+                principal = api_auth.authenticate(self.daemon.journal.db, self._bearer(headers), self.daemon._admin_token)
+                if principal is None:
+                    raise ApiError(401, "UNAUTHORIZED", "a valid bearer token is required")
+                if content:
+                    if method != "POST":
+                        raise ApiError(405, "METHOD_NOT_ALLOWED", "upload content needs POST")
+                    if headers.get("transfer-encoding") or headers.get("content-type") != "application/octet-stream":
+                        raise ApiError(422, "INVALID_REQUEST", "use Content-Length and application/octet-stream; chunked transfer is refused")
+                    length = headers.get("content-length", "")
+                    if not length.isdigit():
+                        raise ApiError(400, "BAD_LENGTH", "declared Content-Length is required")
+                    op = await self.daemon.artifact_store.receive(principal, content["op"], reader, int(length))
+                    await self._send_json(writer, 202, {"operation": op}, cors)
+                else:
+                    if method != "GET":
+                        raise ApiError(405, "METHOD_NOT_ALLOWED", "download content needs GET")
+                    if not principal.allows("observe"):
+                        raise ApiError(403, "FORBIDDEN", "download needs observe scope")
+                    row = artifacts.get(self.daemon.journal.db, download["aid"], int(download["revision"]))
+                    data = self.daemon.artifact_store.read_content(row["artifact_id"], row["revision"])
+                    head = (f"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {len(data)}\r\n"
+                            f"Content-Disposition: attachment; filename*=UTF-8''{quote(row['display_name'], safe='')}\r\n"
+                            f"X-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\n{cors}Connection: close\r\n\r\n")
+                    writer.write(head.encode() + data)
+                    await writer.drain()
+                return
             body = await self._read_body(method, headers, reader)
             token = self._bearer(headers)
             principal = api_auth.authenticate(self.daemon.journal.db, token, self.daemon._admin_token)
@@ -293,6 +325,9 @@ class ApiV1:
                  for h in fleet.config.hosts]
         return 200, {"actor": principal.actor, "scopes": sorted(principal.scopes), "api_version": API_VERSION,
                      "contract_version": CONTRACT_VERSION, "connector": __version__, "hosts": hosts,
+                     "artifacts": {"limits": self.daemon.artifact_store.settings.limits(),
+                                   "hosts": [{"host": h, "configured": self.daemon.ops.context["artifact_host"].available(h),
+                                              "readiness": self.daemon.ops.context["artifact_host"].readiness.get(h)} for h in fleet.config.hosts]},
                      "actions": actions, "operation_statuses": list(STATES),
                      "features": {"inventory": True, "events_stream": True, "operations": True, "work_items": True,
                                   "github": self.daemon.ops.context.get("github") is not None,
@@ -376,7 +411,21 @@ class ApiV1:
                      "work_items": work_items.work_items_for(self.daemon.journal.db, "operation", op)}
 
     async def cancel_operation(self, principal, op, **_):
-        return 200, {"operation": self.daemon.ops.cancel(principal, op)}
+        result = self.daemon.ops.cancel(principal, op)
+        self.daemon.artifact_store.reap_terminal()
+        return 200, {"operation": result}
+
+    async def create_artifact(self, principal, query, body, headers, **_):
+        envelope = {"action": "artifact.upload", "target": body.get("target", {}),
+                    "params": body.get("params", {}), "preconditions": body.get("preconditions", {}),
+                    "idempotency_key": body.get("idempotency_key")}
+        return await self.create_operation(principal, query, envelope, headers)
+
+    async def artifacts(self, query, **_):
+        return 200, artifacts.list_artifacts(self.daemon.journal.db, limit=self._int(query, "limit", 50), cursor=self._q(query, "cursor"))
+
+    async def artifact(self, aid, revision, **_):
+        return 200, {"artifact": artifacts.get(self.daemon.journal.db, aid, int(revision))}
 
     async def resume_operation(self, principal, op, **_):
         return 200, {"operation": self.daemon.ops.resume(principal, op)}
