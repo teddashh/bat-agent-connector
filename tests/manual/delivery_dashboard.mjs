@@ -41,8 +41,11 @@ try {
     await context.addInitScript(token => sessionStorage.setItem('batc.dashboard.token', token), fixture.token);
     const page = await context.newPage();
     const errors = [], requests = [], historyRequests = [];
+    let losingReply = false;
     page.on('pageerror', err => errors.push(err.message));
-    page.on('console', msg => { if (msg.type() === 'error') errors.push(msg.text()); });
+    page.on('console', msg => {
+      if (msg.type() === 'error' && !(losingReply && msg.text().includes('net::ERR_FAILED'))) errors.push(msg.text());
+    });
     page.on('request', req => {
       if (req.method() === 'POST' && req.url().includes('/api/v1/operations?')) requests.push({ body: req.postDataJSON(), key: req.headers()['idempotency-key'] });
       if (req.url().includes('/deployment-environments/history?')) historyRequests.push(new URL(req.url()));
@@ -59,11 +62,23 @@ try {
     assert.match(await card.innerText(), new RegExp(label(lang, 'Needs attention', '需要處理')));
     assert.match(await card.innerText(), /database migrations/);
     assert.equal(await card.getByRole('link', { name: label(lang, 'View new selection', '查看新的選定部署'), exact: true }).count(), 1);
-    assert.equal(await card.getByRole('link', { name: label(lang, 'Original provider run', '原 provider run'), exact: true }).count(), 1);
+    assert.equal(await card.getByRole('link', { name: label(lang, 'Original provider run', '原始執行紀錄'), exact: true }).count(), 1);
+    if (lang === 'zh-TW') {
+      assert.match(await card.innerText(), /環境第 2 代/);
+      assert.doesNotMatch(await card.innerText(), /generation|Provider|provider run|runtime|Artifact/);
+    }
     const verified = card.locator('.deployment-last-verified');
     assert.match(await verified.innerText(), /9{40}/);
     // dashboard_history_cursor: five rows per page, an API cursor, no full-history fetch.
     const history = card.locator('[data-testid="deployment-history"]');
+    // A manual PR load must render while another card's receipt stays open.
+    const heldReceipt = history.locator('details').first();
+    await heldReceipt.locator(':scope > summary').click();
+    await page.getByPlaceholder('123', { exact: true }).fill('7');
+    await page.getByRole('button', { name: label(lang, 'Load PR', '讀取 PR'), exact: true }).click();
+    await page.locator('.delivery-card:not(.environment-card) h2 a').first().waitFor();
+    assert.equal(await heldReceipt.evaluate(el => el.open), true);
+    await heldReceipt.locator(':scope > summary').click();
     assert.equal(await history.locator(':scope > [data-deployment]').count(), 5);
     const first = await history.locator(':scope > [data-deployment]').first().getAttribute('data-deployment');
     await card.getByTestId('history-next').click();
@@ -134,6 +149,72 @@ try {
     assert.ok(requests.at(-1).body.params.retry_of);
     assert.ok(requests.at(-1).body.preconditions.expected_recipe_digest);
     await clean(page);
+    // Only absolute HTTPS provider URLs become links; malformed/relative/active schemes are omitted.
+    await control('reset');
+    const providerPattern = '**/api/v1/deployment-environments/history?*';
+    await page.route(providerPattern, async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      if (new URL(route.request().url()).searchParams.get('recipe') === 'prod') {
+        const template = body.items.find(dep => dep.state === 'superseded');
+        body.items = ['javascript:alert(1)', 'data:text/html,bad', 'http://github.example/run',
+          '/relative/run', '//github.example/run', 'https://', 'HTTPS://github.example/o/r/actions/runs/1001']
+          .map((provider_url, n) => ({ ...template, deployment_id: `provider-fixture-${n}`, provider_url }));
+      }
+      await route.fulfill({ response, json: body });
+    });
+    await page.reload();
+    await card.locator('[data-deployment="provider-fixture-6"]').waitFor();
+    const providerLinks = card.getByRole('link', { name: label(lang, 'Original provider run', '原始執行紀錄'), exact: true });
+    assert.equal(await providerLinks.count(), 1);
+    assert.equal(await providerLinks.first().getAttribute('href'), 'https://github.example/o/r/actions/runs/1001');
+    await page.unroute(providerPattern);
+    // Lost acknowledgement before execution: close, live refresh and reload keep the exact intent's key.
+    for (const kind of ['rollback', 'retry']) {
+      await control('reset');
+      await control('pause-operations');
+      await page.reload();
+      // Fixture reset rewinds generations; unrelated earlier scenarios must not share their draft storage.
+      await page.evaluate(() => {
+        for (const key of Object.keys(localStorage)) if (key.startsWith('batc.key.')) localStorage.removeItem(key);
+      });
+      const openIntent = async () => {
+        await card.getByTestId(`deployment-${kind}`).first().click();
+        const intent = card.locator('.drawer:not([hidden])');
+        await intent.getByTestId('deployment-preview-generation').waitFor();
+        return intent;
+      };
+      let intent = await openIntent();
+      const beforeCount = (await control('count')).browser_operations;
+      const beforeRequests = requests.length;
+      let originalOperation;
+      losingReply = true;
+      await page.route('**/api/v1/operations?*', async route => {
+        const response = await route.fetch();
+        const accepted = (await response.json()).operation;
+        assert.equal(accepted.status, 'accepted');
+        originalOperation = accepted.operation_id;
+        await route.abort('failed');
+      }, { times: 1 });
+      await intent.getByTestId(`deployment-${kind}-confirm`).click();
+      await waitFor(async () => (await intent.innerText()).includes(label(lang,
+        'The deployment request could not proceed', '部署請求未能繼續')), 'lost reply was not shown');
+      losingReply = false;
+      assert.equal((await control('count')).browser_operations, beforeCount + 1);
+      await intent.getByRole('button', { name: label(lang, 'Close', '關閉'), exact: true }).click();
+      await control('event');
+      await page.waitForTimeout(900);
+      await page.reload();
+      intent = await openIntent();
+      const replay = page.waitForResponse(response => response.request().method() === 'POST'
+        && response.url().includes('/api/v1/operations?'));
+      await intent.getByTestId(`deployment-${kind}-confirm`).click();
+      assert.equal((await (await replay).json()).operation.operation_id, originalOperation);
+      assert.equal((await control('count')).browser_operations, beforeCount + 1);
+      assert.equal(requests.length, beforeRequests + 2);
+      assert.deepEqual(requests.at(-1), requests.at(-2));
+      await intent.getByRole('button', { name: label(lang, 'Close', '關閉'), exact: true }).click();
+    }
     assert.deepEqual(errors, []);
     await context.close();
     // dashboard_scope_disabled: observe-only principal sees the same history with actionable reasons.
@@ -147,7 +228,7 @@ try {
     await readonly.getByTestId('deployment-rollback').first().waitFor();
     assert.ok(await readonly.getByTestId('deployment-rollback').first().isDisabled());
     assert.ok(await readonly.getByTestId('deployment-retry').first().isDisabled());
-    assert.match(await readonly.locator('[data-environment="production"]').innerText(), new RegExp(label(lang, 'Requires deploy scope', '需要 deploy scope')));
+    assert.match(await readonly.locator('[data-environment="production"]').innerText(), new RegExp(label(lang, 'Requires deploy scope', '需要 deploy 權限')));
     await clean(readonly);
     assert.deepEqual(errors, []);
     await viewer.close();
@@ -155,6 +236,7 @@ try {
       'dashboard_environment_versions', 'dashboard_history_cursor', 'dashboard_rollback_readiness',
       'dashboard_confirmation_sse', 'dashboard_stale_preview', 'dashboard_double_click',
       'dashboard_retry_fixed_identity', 'dashboard_scope_disabled', 'dashboard_dom_console_overflow',
+      'dashboard_load_pr_with_history_open', 'dashboard_https_provider_links', 'dashboard_lost_reply_reopen',
     ] });
     console.log(`${lang} ${width}: passed`);
   }

@@ -362,6 +362,8 @@ History 每頁 5 筆，前後頁保存 API cursor；SSE 重載保留頁碼，不
 
 按鈕開 confirmation drawer，先讀 deployment preview 的 generation／recipe digest，再送該 preconditions；drawer 上列固定 identity 與 rollback limits。同步 busy guard 與每個 intent 的 actor-scoped idempotency key 防止 double click；lost reply 重用原 key。DEPLOY_PREVIEW_REQUIRED／ENVIRONMENT_CHANGED／RECIPE_CHANGED 顯拒絕與新 preview，使用者另按才建立新操作，不自動重送；等待 local admission step 的結果仍只讀原 operation。沒有聊天批准或 managed task。Operation ID、provider run ID／attempt、step states／error codes 收在可展開 operation details，卡面只留有語意的操作連結。關閉 drawer 同時釋放巢狀 details 的 editing hold，SSE 不丟選定版本或確認框。
 
+Tauri v2 R07／§18 的環境卡修正：rollback／retry 的 draft scope 固定為 `deployment.<kind>.<deployment_id>`，不含 render 產生的亂數；`draftId` 仍雜湊完整 request（含 preview preconditions），`keyFor` 對已知 terminal operation 沿用原換 key 規則。相同意圖的回應遺失後，Close、SSE 重畫、page reload、重新開 drawer 均沿用原 key；環境／recipe 的新預覽形成不同意圖，必須重新確認。手動 Load PR 只受 PR 卡自己的 drawer 保護，不被其他環境的詳情／確認框擋住；自動 live reload 保留原全頁 editing／typing hold。Provider run 連結只有 `URL` 成功解析且 protocol 為 `https:` 才輸出，拒絕相對、無效與其他 scheme。zh-TW 的新部署 labels 使用「環境第 N 代」、產物、執行環境與服務商執行紀錄，保留 PR 與 deploy 權限代碼。
+
 沿用 `fill()`、`setEditing()`、`holdRender()`、`liveReload()`，開 drawer／focus 時不重畫，en／zh-TW、390 px 可操作，不印 null／undefined／[object]；CSP 不加 inline style，必要時 el.style.setProperty。技術回執在可展開 operation details。
 
 Part A 兩份 skills／README／CHANGELOG 同步教 integrate metadata／digest、完整 merge preview／前置條件、base moved evidence、lost reply 查原 operation；Part B 已交付 deploy generation／runtime evidence／rollback／superseded 文件。環境卡輪不改 agent workflow，所以不再改兩份 skills。
@@ -494,6 +496,9 @@ UI 用真實 daemon API＋FakeGitHub／MockBat／fake verifier 驗收 zh-TW、en
 | D06、§17 limits／unsupported／unverified／expired／unavailable | `dashboard_rollback_readiness` |
 | D05／D06、§09／§17 stale refusal＋fresh preview，無自動重送 | `dashboard_stale_preview` |
 | D02／D06、§09 actor-key／double click 一筆 operation | `dashboard_double_click` |
+| D02／D06；v2 R07／§18 相同 rollback／retry 的遺失回應、Close、SSE、reload、重開沿用 key 與原 operation | `dashboard_lost_reply_reopen`（真 daemon 接受後暫停處理；僅攔截 browser ACK） |
+| v2 R07／§18 環境 history 詳情保持開啟時，手動 Load PR 即時更新 PR 卡 | `dashboard_load_pr_with_history_open` |
+| v2 R07／§18 Provider link 僅限 HTTPS，無效／相對／script／data／HTTP 不建立可點連結 | `dashboard_https_provider_links` |
 | D04、§17 retry 固定 SHA＋retry_of，只 deploy 不 merge | `dashboard_retry_fixed_identity` |
 | C07、§10 scope disabled 與原因 | `dashboard_scope_disabled` |
 | §18 open confirmation＋SSE 保留 identity | `dashboard_confirmation_sse` |
