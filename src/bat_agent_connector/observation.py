@@ -635,9 +635,17 @@ class Observation:
             raise OperationError("INVALID_PARAMS", "since must not exceed until", 422)
         head = self.journal.api_head()
         f, as_of, last = cursor_read(cursor, [resource_type, resource_id, order, sorted(kinds), since, until], head)
-        sql = """SELECT e.* FROM api_events e JOIN api_event_resources r ON r.seq=e.seq
-            LEFT JOIN api_event_context c ON c.seq=e.seq WHERE r.resource_type=? AND r.resource_id=? AND r.linked_at_seq<=? AND e.seq<=?"""
-        args = [resource_type, resource_id, as_of, as_of]
+        sql = """SELECT e.* FROM api_events e
+            LEFT JOIN api_event_resources r ON r.seq=e.seq AND r.resource_type=? AND r.resource_id=? AND r.linked_at_seq<=?
+            LEFT JOIN api_event_context c ON c.seq=e.seq WHERE e.seq<=? AND (r.seq IS NOT NULL OR
+                (json_extract(c.context,'$.projection_error') IS NOT NULL AND (
+                    (e.resource_type=? AND e.resource_id=?) OR
+                    (?='execution' AND e.resource_type='task' AND e.resource_id=?) OR
+                    EXISTS(SELECT 1 FROM api_events source JOIN api_event_resources known ON known.seq=source.seq
+                        WHERE source.resource_type=e.resource_type AND source.resource_id=e.resource_id AND source.seq<=e.seq
+                        AND known.resource_type=? AND known.resource_id=? AND known.linked_at_seq<=?))))"""
+        args = [resource_type, resource_id, as_of, as_of, resource_type, resource_id,
+                resource_type, resource_id, resource_type, resource_id, as_of]
         if last is not None:
             if type(last) is not int:
                 raise OperationError("INVALID_CURSOR", "invalid history key", 422)

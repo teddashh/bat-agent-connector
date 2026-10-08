@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -551,8 +552,7 @@ class Journal:
         api_cur = self.db.execute("""INSERT INTO api_events(resource_type,resource_id,kind,body,task_event_id,created_at,actor)
             VALUES('task',?,?,?,?,?,?)""", (task_id, "task." + kind, raw, cur.lastrowid, now, context.get("actor")))
         if getattr(self, "_observation_ready", False):
-            from .observation import record_event
-            record_event(self, api_cur.lastrowid, extra=context)
+            self._project_event(api_cur.lastrowid, context)
 
     def api_event(self, resource_type: str, resource_id: str, kind: str, body: dict | None = None,
                   actor: str | None = None, *, context: dict | None = None) -> int:
@@ -566,9 +566,25 @@ class Journal:
             VALUES(?,?,?,?,?,?)""", (resource_type, resource_id, kind,
                                      json.dumps(body or {}, ensure_ascii=False, default=str), actor, time.time()))
         if getattr(self, "_observation_ready", False):
-            from .observation import record_event
-            record_event(self, cur.lastrowid, extra=context)
+            self._project_event(cur.lastrowid, context)
         return int(cur.lastrowid)
+
+    def _project_event(self, seq: int, context: dict | None) -> None:
+        # A projection bug must not roll back the authoritative writer's transaction.
+        savepoint = f"observation_{int(seq)}"
+        self.db.execute(f"SAVEPOINT {savepoint}")
+        try:
+            from .observation import record_event
+            record_event(self, seq, extra=context)
+        except Exception as exc:  # noqa: BLE001 - preserve the core write and expose the projection gap
+            self.db.execute(f"ROLLBACK TO {savepoint}")
+            self.db.execute(f"RELEASE {savepoint}")
+            error = type(exc).__name__
+            self.db.execute("INSERT INTO api_event_context VALUES(?,?) ON CONFLICT(seq) DO UPDATE SET context=excluded.context",
+                            (seq, json.dumps({"projection_error": error})))
+            logging.warning("observation projection failed for event %s: %s", seq, error)
+        else:
+            self.db.execute(f"RELEASE {savepoint}")
 
     def api_head(self) -> int:
         return int(self.db.execute("SELECT COALESCE(MAX(seq),0) FROM api_events").fetchone()[0])

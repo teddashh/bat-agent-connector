@@ -45,6 +45,59 @@ def bind(j, t, sid, role="lead", reason="start"):
     return c
 
 
+async def test_projection_failure_keeps_core_write_and_flags_event(tmp_path, monkeypatch, caplog):
+    """B01/B03, §08/§11: a broken read projection cannot fail a task or an operation step."""
+    from bat_agent_connector import observation
+    from bat_agent_connector.operations import ActionDef, OperationService
+
+    j = Journal(tmp_path / "j.db")
+    t = task(j, "projection")
+    original = observation.record_event
+    failed = []
+
+    def fail(journal, seq, **kwargs):
+        original(journal, seq, **kwargs)
+        kind = journal.db.execute("SELECT kind FROM api_events WHERE seq=?", (seq,)).fetchone()[0]
+        if kind in {"task.state", "operation.step.started"}:
+            # Include nested relation events and resource/revision rows in the partial projection.
+            observation.relation(journal, t, "partial", "lead", str(seq), seq)
+            failed.append(seq)
+            raise KeyError("private exception text")
+
+    monkeypatch.setattr(observation, "record_event", fail)
+    j.change(t["task_id"], "dispatching")
+    assert j.get(t["task_id"])["state"] == "dispatching"
+    calls = []
+
+    async def run(ctx):
+        async def call():
+            calls.append("ran")
+            return {"status": "succeeded"}
+        return await ctx.step("call", call)
+
+    ops = OperationService(j, actions=[ActionDef("fixture.projection", "observe", "Fixture only", run)])
+    principal = api_auth.Principal("agent", frozenset({"observe"}))
+    op, _ = ops.create(principal, action="fixture.projection", target={"host": "h1", "session_id": "sid"}, idempotency_key="projection")
+    await ops.drain()
+    assert calls == ["ran"] and ops.get(op["operation_id"])["status"] == "succeeded"
+    assert j.db.execute("SELECT status FROM operation_steps WHERE operation_id=?", (op["operation_id"],)).fetchone()[0] == "succeeded"
+    assert len(failed) == 2
+    for seq in failed:
+        assert j.db.execute("SELECT COUNT(*) FROM api_event_resources WHERE seq=?", (seq,)).fetchone()[0] == 0
+        assert j.db.execute("SELECT COUNT(*) FROM relation_revisions WHERE seq=?", (seq,)).fetchone()[0] == 0
+    assert j.db.execute("SELECT COUNT(*) FROM observation_relations WHERE session_resource_id='h1/partial'").fetchone()[0] == 0
+    assert j.db.execute("SELECT COUNT(*) FROM observation_resources WHERE resource_id='h1/partial'").fetchone()[0] == 0
+    events = {e["seq"]: e for e in j.api_events()["events"]}
+    obs = Observation(j)
+    history = obs.history("execution", t["task_id"])["events"] + obs.history("session", "h1/sid")["events"]
+    assert set(failed) <= {e["seq"] for e in history}
+    assert all(events[seq]["context"] == {"projection_error": "KeyError"} for seq in failed)
+    assert all(e["context"] == {"projection_error": "KeyError"} for e in history if e["seq"] in failed)
+    assert "private exception text" not in caplog.text
+    assert caplog.text.count("observation projection failed") == 2
+    j.close()
+
+
 def test_b01_warm_reuse_reviewer_followup_and_command_ranges(tmp_path):
     j = Journal(tmp_path / "j.db")
     obs = Observation(j)
