@@ -30,6 +30,7 @@ from .operations import (
     RERUN,
     ActionDef,
     AmbiguousOutcome,
+    Cancelled,
     NeedsAttention,
     OperationError,
     StepFailed,
@@ -82,8 +83,8 @@ def _hash(value):
 def migrate(journal):
     """Add only cleanup facts. Renumberable: claim the next version only on first installation."""
     db = journal.db
-    installed = db.execute("SELECT 1 FROM sqlite_master WHERE name='cleanup_runs'").fetchone()
     with journal.tx():
+        installed = db.execute("SELECT 1 FROM sqlite_master WHERE name='cleanup_runs'").fetchone()
         for ddl in (
             """CREATE TABLE IF NOT EXISTS cleanup_runs (operation_id TEXT PRIMARY KEY REFERENCES operations,
                 preview_id TEXT NOT NULL, token_hash TEXT NOT NULL, fingerprint TEXT NOT NULL,
@@ -340,6 +341,9 @@ def _all(ops):
                 item = add(_resource(cp["host"], "temporary", op["operation_id"], temp,
                     path=temp, repository=repo, source=cp["repo_root"], proven=True,
                     original_ids=[op["operation_id"], cp["checkpoint_id"]]))
+                add(_resource(cp["host"], "temporary", "container-lock:" + repo, repo + ".batc-lock",
+                    path=repo + ".batc-lock", repository=repo, proven=False,
+                    original_ids=[op["operation_id"], cp["checkpoint_id"]]))
     for op in op_rows:
         refs = op.get("external_refs") or {}
         host = refs.get("host") or op["target"].get("host")
@@ -403,6 +407,12 @@ def _all(ops):
             add(_resource(host, "temporary", op["operation_id"], temp, path=temp, repository=area,
                 source=container.get("source"), proven=bool(container.get("source")),
                 original_ids=[op["operation_id"], *(([pv["preview_id"]]) if pv else [])]))
+            for step_prefix, name in (("check.", "batc-check-"), ("push.", "batc-push-")):
+                if db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? AND name LIKE ?",
+                              (op["operation_id"], step_prefix + "%")).fetchone():
+                    path = area + "/repo.git/" + name + op["operation_id"][3:15]
+                    add(_resource(host, "temporary", op["operation_id"], path, path=path, repository=area,
+                                  proven=False, original_ids=[op["operation_id"], *(([pv["preview_id"]]) if pv else [])]))
     for task in db.execute("SELECT * FROM tasks ORDER BY submitted_at"):
         path = task["external_worktree_path"]
         if path:
@@ -542,9 +552,9 @@ async def _runtime(ops, item, deadline):
     try:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError()
+            raise asyncio.TimeoutError()
         return await asyncio.wait_for(read(), remaining)
-    except (BatError, OSError, TimeoutError):
+    except (BatError, OSError, asyncio.TimeoutError):
         return {"error": "OBSERVATION_UNAVAILABLE"}
 
 
@@ -655,6 +665,8 @@ def _plan(ops, item, choices, op_rows, pvs, own_op=None):
     if item.get("repository_error"):
         code = item["repository_error"]
         _reason(item, code if code in REASONS else "OBSERVATION_UNAVAILABLE")
+    if item.get("path_observation", {}).get("error") and obs.get("loaded"):
+        _reason(item, item["path_observation"]["error"])
     _consumers(ops, item, op_rows, pvs, own_op)
     if kind == "session":
         if obs.get("streaming") or (isinstance(obs.get("state"), dict) and obs["state"].get("isStreaming")):
@@ -745,7 +757,7 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
                     host_items.append(i)
                     if target["kind"] == "host" or w and w["resource_id"] in selected:
                         selected.add(i["resource_id"])
-            except (BatError, OSError, TimeoutError):
+            except (BatError, OSError, asyncio.TimeoutError):
                 for i in host_items:
                     if i["resource_id"] in selected:
                         i["live_host_unavailable"] = True
@@ -765,10 +777,10 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
                        "bases": {i["path"]: i["base"] for i in related if i["kind"] == "worktree" and i.get("base")}}
                 try:
                     if time.monotonic() >= deadline:
-                        raise TimeoutError()
+                        raise asyncio.TimeoutError()
                     read = await asyncio.wait_for(_host_call(ops, host, req, deadline - time.monotonic()),
                                                   max(.001, deadline - time.monotonic()))
-                except (BatError, OperationError, OSError, TimeoutError, AmbiguousOutcome, ValueError) as e:
+                except (BatError, OperationError, OSError, asyncio.TimeoutError, AmbiguousOutcome, ValueError) as e:
                     if getattr(e, "code", None) == "PREVIEW_TOO_LARGE":
                         raise OperationError("PREVIEW_TOO_LARGE", "repository observation exceeds cleanup limits", 413) from None
                     read = {"error": getattr(e, "code", "OBSERVATION_UNAVAILABLE")}
@@ -821,7 +833,18 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
                     if only and i["resource_id"] != only and i.get("repository") not in repos:
                         continue
                     i["observation"] = await _runtime(ops, i, deadline)
-        except TimeoutError:
+            sessions = [i for i in host_items if i["kind"] == "session" and i.get("proven") and i.get("path") and
+                        i["resource_id"] in selected and (not only or i["resource_id"] == only)]
+            if sessions:
+                try:
+                    paths = await asyncio.wait_for(_host_call(ops, host, {"canonical_paths": sorted({i["path"] for i in sessions}),
+                        "roots": list(ops.context["fleet"].config.host(host).managed_roots)}, max(.01, deadline - time.monotonic())),
+                        max(.001, deadline - time.monotonic()))
+                except (BatError, OperationError, OSError, asyncio.TimeoutError, AmbiguousOutcome, ValueError):
+                    paths = {}
+                for i in sessions:
+                    i["path_observation"] = paths.get(i["path"], {"error": "OBSERVATION_UNAVAILABLE"})
+        except asyncio.TimeoutError:
             for i in host_items:
                 if i["resource_id"] in selected:
                     i["observation"] = {"error": "OBSERVATION_UNAVAILABLE"}
@@ -994,7 +1017,7 @@ def _progress(ctx):
     result = receipts(ctx.service, ctx.operation_id)
     summary = {"succeeded": sum(r["status"] == "succeeded" for r in result),
                "retained": sum(r["status"] == "retained" for r in result),
-               "partial": any(r["status"] in {"failed", "blocked_stale", "uncertain", "running", "pending"} for r in result)}
+               "partial": any(r["status"] in {"failed", "blocked_stale", "uncertain", "running", "pending", "cancelled"} for r in result)}
     ctx.service._transition(ctx.operation_id, "running", result={"preview_id": ctx.target["preview_id"],
         "items": result, "summary": summary, "next_action": "inspect receipts; resume or preview again"})
 
@@ -1066,7 +1089,10 @@ async def _run(ctx):
             if row[0] == "succeeded":
                 _mark(item, ctx.operation_id, "cleaned")
                 continue
-            ctx.check_cancel()
+            unresolved = db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? AND name LIKE ? "
+                                    "AND status IN ('started','uncertain')", (ctx.operation_id, "item." + item["resource_id"] + ".%" )).fetchone()
+            if not unresolved:
+                ctx.check_cancel()
             if any(db.execute("SELECT status FROM cleanup_receipts WHERE operation_id=? AND resource_id=?",
                               (ctx.operation_id, dep)).fetchone()[0] != "succeeded" for dep in item["dependencies"]):
                 _receipt(ctx, item, "failed", error={"code": "DEPENDENCY_FAILED"})
@@ -1099,6 +1125,20 @@ async def _run(ctx):
                             "retained": sum(r["status"] == "retained" for r in result), "partial": False},
                 "tombstones": [r["resource_id"] for r in result if r["status"] == "succeeded"],
                 "next_action": "cleanup_retained"}
+    except Cancelled:
+        # Cancel cannot abandon an unknown external outcome. Confirmed or unstarted items release their guards.
+        for item in doc["items"]:
+            row = db.execute("SELECT status FROM cleanup_receipts WHERE operation_id=? AND resource_id=?",
+                             (ctx.operation_id, item["resource_id"])).fetchone()
+            if row[0] in {"succeeded", "retained"}:
+                continue
+            unresolved = db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? AND name LIKE ? "
+                                    "AND status IN ('started','uncertain')", (ctx.operation_id, "item." + item["resource_id"] + ".%" )).fetchone()
+            _receipt(ctx, item, "uncertain" if unresolved else "cancelled")
+            if not unresolved:
+                _release(item, ctx.operation_id)
+        _progress(ctx)
+        raise
     finally:
         _OWNER.reset(owner)
 
@@ -1123,6 +1163,10 @@ async def _execute_item(ctx, item, payload):
             now = await _runtime(ops, item, time.monotonic() + READ_DEADLINE_S)
             if now != item["observation"]:
                 raise OperationError("PREVIEW_STALE", "session changed before stop", 409)
+            path = await _host_call(ops, item["host"], {"canonical_paths": [item["path"]],
+                "roots": list(ops.context["fleet"].config.host(item["host"]).managed_roots)})
+            if path.get(item["path"]) != item.get("path_observation") or path[item["path"]].get("error"):
+                raise OperationError("PREVIEW_STALE", "session workdir changed before stop", 409)
             result = await lifecycle._stop(ops.context["fleet"], item["host"], item["session_id"],
                                           Audit(ops.context["fleet"].config.safety), cleanup=True)
             if not result.get("stopped"):

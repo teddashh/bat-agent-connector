@@ -189,9 +189,13 @@ def observe(req):
     for temp in req.get("temporaries", []):
         try:
             canonical(temp, roots)
-            d = {"exists": os.path.isdir(temp)}
+            d = {"exists": os.path.lexists(temp)}
             result["temporaries"][temp] = d
             if not d["exists"]:
+                continue
+            if not os.path.isdir(temp):
+                d.update(layout="file", manifest=[file_fact(temp, os.path.basename(temp))], git_only=False,
+                         content_available=False, head=None)
                 continue
             d["identity"] = identity(temp, roots)
             d["layout"] = "bare" if git(temp, "rev-parse", "--is-bare-repository").strip() == "true" else "clone"
@@ -327,7 +331,17 @@ def main():
     req = json.loads(base64.b64decode(sys.argv[1]))
     DEADLINE = time.monotonic() + min(60, req.get("deadline_s", 20))
     try:
-        if req.get("phase") == "verify.retained":
+        if "canonical_paths" in req:
+            out = {}
+            for path in req["canonical_paths"]:
+                try:
+                    real = canonical(path, req["roots"])
+                    if not os.path.isdir(real):
+                        raise ValueError("OBSERVATION_UNAVAILABLE")
+                    out[path] = {"canonical": real, "exists": True}
+                except (ValueError, OSError) as e:
+                    out[path] = {"error": str(e).split(":", 1)[0]}
+        elif req.get("phase") == "verify.retained":
             identity(req["repository"], req["roots"])
             out = []
             for r in req["retained"]:
