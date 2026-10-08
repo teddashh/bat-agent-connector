@@ -1535,7 +1535,7 @@ async def _run_handoff(ctx: OpContext) -> dict:
     wt = f"{area.path}/wt/batc-fix-{r12}"
     branch = f"batc/fix-{r12}"
     resource_policy.check_repair_worktree(area.hc, area.path, wt, branch)  # before any host write
-    ctx.set_refs(apply_operation_id=op["operation_id"], seq=seq, worktree_path=wt, branch=branch)
+    ctx.set_refs(apply_operation_id=op["operation_id"], seq=seq, host=host, worktree_path=wt, branch=branch)
 
     async def prepare() -> dict:
         return {"lines": await area.run(repair_script(area, r12, pv["head_ref"], wt, branch, prev, src["pin"]))}

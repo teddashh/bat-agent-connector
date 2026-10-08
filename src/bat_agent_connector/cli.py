@@ -621,6 +621,58 @@ def build_parser() -> argparse.ArgumentParser:
     tsp.add_parser("list", help="list actors, scopes and expiry (never tokens)")
     t = tsp.add_parser("revoke", help="revoke every token of an actor")
     t.add_argument("--actor", required=True)
+    p = sp.add_parser("inventory", help="read persisted observation; never polls or starts a session")
+    isp = p.add_subparsers(dest="inventory_cmd", required=True)
+    c = isp.add_parser("sessions")
+    for name in ("host", "profile-id", "work-item-id", "execution-id", "provider", "provenance", "access", "cursor"):
+        c.add_argument("--" + name)
+    c.add_argument("--project-id", action="append")
+    for name in ("has-tab", "loaded", "streaming", "stale", "attention"):
+        c.add_argument("--" + name, choices=["true", "false"])
+    c.add_argument("--lifecycle", choices=["active", "ended", "unknown"])
+    c.add_argument("--relation-scope", choices=["current", "history"], default="history")
+    c.add_argument("--include-gone", action="store_true")
+    c.add_argument("--order", choices=["id", "activity"], default="id")
+    c.add_argument("--limit", type=int, default=50)
+    c = isp.add_parser("session")
+    c.add_argument("host")
+    c.add_argument("session_id")
+    c = isp.add_parser("worktree")
+    c.add_argument("worktree_id")
+    c = isp.add_parser("hosts")
+    c.add_argument("--host")
+    c.add_argument("--discovery", action="store_true")
+    c = isp.add_parser("discovery")
+    c.add_argument("host")
+    c.add_argument("--after", type=int, default=0)
+    c.add_argument("--limit", type=int, default=20)
+    c = isp.add_parser("events", description="Read journal events after a durable cursor. Session updates include "
+                       "fields_stale/field_evidence changes; observation/activity timestamps alone emit no update.")
+    c.add_argument("--after", type=int, default=0)
+    c.add_argument("--limit", type=int, default=100)
+    c.add_argument("--kind")
+    c.add_argument("--related-resource-type", choices=["session", "worktree", "execution"])
+    c.add_argument("--related-resource-id")
+    for command in ("history", "relations"):
+        p = sp.add_parser(command, help="read resource journal " + command)
+        rsp = p.add_subparsers(dest="resource_type", required=True)
+        for resource_type in ("session", "worktree", "execution"):
+            c = rsp.add_parser(resource_type)
+            if resource_type == "session":
+                c.add_argument("host")
+                c.add_argument("session_id")
+            else:
+                c.add_argument("resource_id")
+            c.add_argument("--cursor")
+            c.add_argument("--limit", type=int, default=50)
+            if command == "history":
+                c.add_argument("--order", choices=["asc", "desc"], default="desc")
+                c.add_argument("--kind", action="append")
+                c.add_argument("--since", type=float, help="inclusive occurrence UTC epoch seconds; excludes unknown times")
+                c.add_argument("--until", type=float, help="inclusive occurrence UTC epoch seconds; excludes unknown times")
+            else:
+                c.add_argument("--execution-id")
+                c.add_argument("--include-closed", choices=["true", "false"], default="true")
     p = sp.add_parser("checkpoint", help="record a session's commit, then continue from it in a managed session")
     csp = p.add_subparsers(dest="checkpoint_cmd", required=True)
     c = csp.add_parser("create", help="record a checkpoint (reads only; works on sessions created in BAT)")
@@ -951,6 +1003,26 @@ def cmd_item(args) -> int:
     return 0
 
 
+def cmd_observation(args) -> int:
+    from .task_daemon import request
+    if args.cmd == "inventory":
+        sub = args.inventory_cmd
+        method = {"sessions": "inventory_sessions", "session": "inventory_session", "worktree": "inventory_worktree",
+                  "hosts": "inventory_hosts", "discovery": "inventory_hosts", "events": "api_events"}[sub]
+        params = {k: v for k, v in vars(args).items() if k not in {"cmd", "inventory_cmd", "config", "json", "read_only"} and v is not None}
+        if sub == "discovery":
+            params["discovery"] = True
+    else:
+        method = "resource_" + args.cmd
+        params = {k: getattr(args, k) for k in ("cursor", "limit", "order", "kind", "since", "until", "execution_id", "include_closed") if hasattr(args, k) and getattr(args, k) is not None}
+        params.update(resource_type=args.resource_type, resource_id=f"{args.host}/{args.session_id}" if args.resource_type == "session" else args.resource_id)
+    for key in ("has_tab", "loaded", "streaming", "stale", "attention", "include_closed"):
+        if key in params and isinstance(params[key], str):
+            params[key] = params[key] == "true"
+    _print(request(method, _auth_token=os.environ.get("BATC_API_TOKEN") or None, entry="cli", **params), True)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["mcp"]:
@@ -960,6 +1032,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     args = build_parser().parse_args(argv)
     try:
+        if args.cmd in {"inventory", "history", "relations"}:
+            return cmd_observation(args)
         if args.cmd == "serve":
             from .task_daemon import TaskDaemon
 
