@@ -146,6 +146,82 @@ def test_b01_pending_bind_and_snapshot_relations(tmp_path):
     j.close()
 
 
+@pytest.mark.parametrize("backfilled", [False, True])
+def test_b01_b03_relation_history_keeps_roles_and_strips_free_text(tmp_path, backfilled):
+    """B01/B03, §08/§10/§11: roles survive live reads and replay of saved version-1 relation facts."""
+    path = tmp_path / "j.db"
+    j = Journal(path)
+    t = task(j, "roles")
+    for role in ("lead", "reviewer"):
+        bind(j, t, "shared", role)
+    j.change(t["task_id"], "failed")
+    kinds = {"relation.opened", "relation.bound", "relation.closed"}
+    # These are persisted original facts, including text from an older writer we must not expose.
+    for row in j.db.execute("SELECT seq,body FROM api_events WHERE kind LIKE 'relation.%'").fetchall():
+        data = json.loads(row["body"])
+        data.update(note="private relation prose", instructions="private prompt",
+            source_versions=[{"kind": "git", "sha": "a" * 40, "role": "captured_head", "message": "private commit message"}],
+            result_versions=[{"kind": "git", "sha": "b" * 40, "role": "integrated_sha", "text": "private text"}])
+        j.db.execute("UPDATE api_events SET body=? WHERE seq=?", (dump(data), row["seq"]))
+    if backfilled:
+        for table in ("api_event_context", "api_event_resources", "command_relations", "relation_revisions", "observation_relations"):
+            j.db.execute(f"DELETE FROM {table}")
+        j.db.execute("PRAGMA user_version=1")
+        j.close()
+        j = Journal(path)
+        assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    obs = Observation(j)
+    expected = {(kind, role) for kind in kinds for role in ("lead", "reviewer")}
+    for resource_type, resource_id in (("execution", t["task_id"]), ("session", "h1/shared")):
+        events = obs.history(resource_type, resource_id, kind=sorted(kinds), limit=200)["events"]
+        assert {(e["kind"], e["body"]["role"]) for e in events} == expected
+        assert "private" not in dump(events)
+        for e in events:
+            assert e["body"]["source_versions"] == [{"kind": "git", "sha": "a" * 40, "role": "captured_head"}]
+            assert e["body"]["result_versions"] == [{"kind": "git", "sha": "b" * 40, "role": "integrated_sha"}]
+    if backfilled:
+        head = j.api_head()
+        j.close()
+        j = Journal(path)
+        assert j.api_head() == head and j.db.total_changes == 0
+    j.close()
+
+
+def test_b03_backfilled_summary_retains_bounded_metadata_and_nested_roles(tmp_path):
+    """B03, §08/§11: recursive snapshot filtering retains identities/flags without prose containers."""
+    j = Journal(tmp_path / "j.db")
+    snapshot = {
+        "role": "repair", "agent": "claude", "source_provenance": "connector_managed",
+        "resolver_operation_id": "op_repair", "resolver_session_id": "repair",
+        "apply_operation_id": "op_apply", "integration_operation_id": "op_apply", "integration_seq": 1,
+        "parent_id": "wi_parent", "verification_id": 1, "route_id": 2, "old_session_id": "old",
+        "handoff_command_id": "cmd_handoff", "operator_followup": "cmd_followup", "source_message_id": "message_source",
+        "linked_at_seq": 3, "evidence_ref": "api_events:3", "cancel_requested": 0,
+        "candidate_commit": "a" * 40, "start_commit": "a" * 40, "old_head": "a" * 40,
+        "new_head": "b" * 40, "pushed_sha": "b" * 40, "push_old_sha": "a" * 40,
+        "composed_tree": "c" * 40, "predicted_tree": "c" * 40,
+        "request_hash": "d" * 64, "excerpt_sha256": "e" * 64, "diff_sha256": "f" * 64,
+        "approved_fingerprint": "d" * 64, "outcome": "pushed", "verdict": "pass", "write_scope": "confined",
+        "advisory_only": True, "abort_current": False, "ready": True, "stale": False, "attention": 0,
+        "pushed": True, "local_checkouts_changed": False,
+        "request": {"expected_head_sha": "a" * 40, "expected_base_sha": "b" * 40, "preview_digest": "c" * 64},
+        "response": {"target": {"head_repo_id": 2}, "affected_prs": [{"number": 8, "would_merge": False, "effect": "dependency"}],
+            "files_may_be_truncated": False, "write_acknowledged": True, "observed_intent": False, "read_refused": False,
+            "conflict_before_write": False, "conflict_after_write": True, "before_digest": "d" * 64, "after_digest": "e" * 64},
+        "source_versions": [{"kind": "git", "sha": "a" * 40, "role": "pinned", "evidence_ref": "checkpoints:cp_fixture"}],
+        "result_versions": [{"kind": "git", "sha": "b" * 40, "role": "delivered"}],
+    }
+    with j.tx():
+        seq = saved_fact(j, "fixture", "metadata", {**snapshot, "prompt": "private prompt",
+            "note": "private note", "message": "private commit message", "description": "private prose",
+            "provider": "https://provider.example/private", "params": {"goal": "private requirements"},
+            "dirty": 12, "confidence": 0.9, "old": "private old text", "new": "private new text"}, [("session", "h1/fixture")])
+    event = Observation(j).history("session", "h1/fixture")["events"][0]
+    assert event["seq"] == seq and event["body"]["saved_snapshot"] == snapshot
+    assert "private" not in dump(event)
+    j.close()
+
+
 def relation_pages(obs, wid, first=None):
     page = first or obs.relations("worktree", wid, limit=1)
     rows, as_of = list(page["relations"]), page["as_of"]

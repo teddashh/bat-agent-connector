@@ -26,7 +26,7 @@ SUMMARY_FIELDS = set("""host profile_id workspace workspace_id title cwd agent_k
 runtime_status pending field_evidence field_observed_at loading activity tab enumeration lifecycle freshness fields_stale worktree_branch orchestrated has_tab provenance api_access read_only_code isolation
 provider_native_id first_seen_at last_seen_at observed_at gone_at misses changed_fields reason previous_reason
 session_id previous_session_id session_resource_id execution_id task_id relation_id branch_id parent_branch_id parent_relation_id
-follow_up_of_execution_id command_id command_ids start_command_id end_command_id kind status action from to
+follow_up_of_execution_id command_id command_ids start_command_id end_command_id kind status action from to role
 operation_id step step_seq request response refs target entry actor source evidence table id seq ref sha head
 path retained_ref channel commit_sha source_sha base_sha integrated_sha resolution_sha delivered_sha pinned_sha commit tree_hash branch
 worktree_path clone_path repo_root source_session_id checkpoint_id source_kind source_id source_host
@@ -43,6 +43,13 @@ count n attempt status_reason source_versions result_versions files conflict seq
 number method head_sha merged_sha merged_onto_base_sha merge_base_sha reviewed_head base_moved other_commits_count
 other_commits affected_prs merged independent merged_after merge_receipt metadata_settlement verification_pending
 verification_error read_refused_before_write blocking code state settled_at parents stacks members metadata_reconciliation
+agent source_provenance effect outcome verdict write_scope
+head_repo_id resolver_operation_id resolver_session_id apply_operation_id integration_operation_id integration_seq
+parent_id verification_id route_id old_session_id handoff_command_id operator_followup source_message_id linked_at_seq evidence_ref
+expected_head_sha expected_base_sha preview_digest request_hash excerpt_sha256 before_digest after_digest
+candidate_commit diff_sha256 start_commit old_head new_head pushed_sha push_old_sha composed_tree predicted_tree approved_fingerprint
+cancel_requested would_merge files_may_be_truncated write_acknowledged observed_intent read_refused
+conflict_before_write conflict_after_write pushed local_checkouts_changed advisory_only abort_current ready stale attention
 """.split())
 
 writer_context = ContextVar("observation_writer_context", default=None)
