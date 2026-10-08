@@ -2,6 +2,9 @@
 
 ## Next release (unreleased)
 
+- Reject malformed artifact IDs and attachment roles at HTTP admission with a structured error,
+  before recording an operation or reserving upload storage.
+
 - Add `--principal-only` for agent MCP installations: require the agent token for all calls,
   expose central operations and task adapters, and omit direct Fleet tools. Task status/result/events
   now accept principals with `observe`; missing agent credentials never borrow local admin authority.
