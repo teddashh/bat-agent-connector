@@ -450,3 +450,43 @@ async def test_B04_inputs_changed_after_start_keep_session_and_block_send(daemon
     done = daemon.ops.get(op["operation_id"])
     assert done["status"] == "succeeded", done
     assert len([x for x in mock.invokes if x["channel"] == "claude:start-session"]) == 1 and len(sends(mock)) == 1
+
+
+async def test_cancelled_unsettled_publish_keeps_original_and_its_quota(daemon, monkeypatch):
+    daemon.artifact_store.settings = replace(daemon.artifact_store.settings, max_store_bytes=16)
+    real = daemon.artifact_store.publish
+    def lost(row):
+        real(row)
+        raise AmbiguousOutcome("publish ACK lost")
+    monkeypatch.setattr(daemon.artifact_store, "publish", lost)
+    op = await reserve(daemon)
+    await daemon.artifact_store.receive(PERSON, op["operation_id"], reader(b"immutable input"), 15)
+    await daemon.ops.drain(30)
+    assert daemon.ops.get(op["operation_id"])["status"] == "uncertain"
+    daemon.journal.db.execute("UPDATE operations SET status='needs_attention' WHERE operation_id=?", (op["operation_id"],))
+    daemon.ops.cancel(PERSON, op["operation_id"])
+    daemon.artifact_store.reap_terminal()
+    ref = op["external_refs"]
+    formal = daemon.artifact_store.content_path(ref["artifact_id"], ref["revision"])
+    assert formal.read_bytes() == b"immutable input"
+    assert daemon.artifact_store.used_bytes() == 15
+    with pytest.raises(OperationError) as exc:
+        await reserve(daemon, b"two", key="no-free-quota")
+    assert exc.value.code == "ARTIFACT_STORE_FULL"
+
+
+async def test_B04_missing_original_blocks_then_resumes_same_parent(daemon, mock):
+    daemon.ops.context["artifact_host"] = LocalArtifactHost()
+    ref = await upload(daemon)
+    cp = await make_checkpoint(daemon)
+    formal = daemon.artifact_store.content_path(ref["artifact_id"], ref["revision"])
+    saved = formal.with_name("saved-input")
+    formal.rename(saved)  # simulate unavailable storage; Connector never deletes an original
+    op = await continuation(daemon, cp, [ref])
+    assert op["status"] == "needs_attention" and op["error_code"] == "ARTIFACT_CONTENT_UNAVAILABLE", op
+    assert not sends(mock)
+    saved.rename(formal)
+    daemon.ops.resume(PERSON, op["operation_id"])
+    await daemon.ops.drain(30)
+    done = daemon.ops.get(op["operation_id"])
+    assert done["status"] == "succeeded" and len(sends(mock)) == 1, done
