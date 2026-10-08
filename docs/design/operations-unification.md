@@ -34,6 +34,7 @@ Part A 的可執行測試在 `tests/test_operations_unification.py`，加上既�
 |---|---|---|
 | Connector | `0.2.4`；`feat/ops-unify` 起點與 `origin/main` 均為 `5e8e41696ebc6a1a9d3ea92ddb7a1d338537ca1b` | 本文入口清單、SQLite schema、coordinator 與 owner 行為均逐項對照此版。 |
 | 計畫 | v1.0，2026-10-06，§09、§10、§24、§26、§28 | 合約與驗收依據；不將私人計畫複製進 repository。 |
+| 本輪範圍校正 | Tauri 校正計畫 v2.0，2026-10-08，§02、§07、§10–12、§24；產品決策 `realignment-v2.md` | 保留 Python Connector／Task Service 唯一中央後端與本分支 task gate；不加入 Hub importer／dependency、不另建 Rust task authority。本輪僅完成已指派的兩個 Part A review finding。舊章節引用保留作原設計依據。 |
 | BAT 協定筆記 | [PROTOCOL.md](../PROTOCOL.md)：BAT **v3.2.12**、`bat-remote/v2`；上游 `src-tauri/src/remote_server.rs`、`remote_core.rs`、`node-sidecar/src/handlers/*` | 沿用既有 channel，沒有新增任意 RPC／shell 寫入通道。 |
 | BAT 對照基準 | 計畫 §03 固定 `b7419892fbc9946799b64cca24c2ec8c7fa15c42`；另見 [next-gen-connector.md](next-gen-connector.md) 記錄的 `5a61d43` 靜態檢查，`node-sidecar/src/handlers/claude-send.mjs`、`src-tauri/src/commands/claude.rs`、`codex_app_server.rs` | 區分 Claude 的 `clientMessageId` echo 與 Codex 的弱游標證據。兩個快照不混稱同版；本次未重新驗證上游或實機部署版本。 |
 | BAT preliminary-frame 補充核對 | 本機 source snapshot `f1a94ce3cd105f0e89afd72702c074b01aae470c`；`node-sidecar/src/handlers/claude-session.mjs` 的 clientResume／resumeClaudeSession、`src-tauri/src/commands/claude.rs` 的 client_resume、`src-tauri/src/codex_app_server.rs` 的 resume_session | 只靜態確認 resume 重接 runtime／讀取 history，不提交本次新 prompt／clientMessageId。不是上述計畫基準或實機部署版本的替代；未呼叫遠端 host。 |
@@ -270,6 +271,28 @@ operation 沒傳 control_version 時，admission 仍固定當時的 task incarna
 上述 RPC／MCP／CLI task doors 都進 `ops.create`，因此得到相同持久 binding。standalone managed session 沒有 task binding。升級前已受理、沒有 `external_refs.admission_binding` 的 operation 保留原 execution-time binding，不回填、不重算 hash。已成功 effect 的 receipt 或外部 uncertain step 的正面 readback 仍按原證據恢復；此檢查只擋新的 effect，不能以較新版本否定已發生的效果或重送未知 frame。
 
 只在 admission 查版本不夠。answer、兩個 Codex permission calls、interrupt、client-resume 都要使用 journal-bound 的內部 guard；public params 不提供 skip_gate／before_invoke／task_id 認領旗標。callback 存在本身不能作為 bypass 證據。所有 runtime writer 共享 coordinator 鎖的取得次序（task → session → host write lock → BAT semaphore），避免低階工具持有 host lock 再等 coordinator。
+
+### Task-owned failover 的內部 authority（Part A）
+
+`task_id` 是身分 metadata，不能授予 task-owned session 控制權。`lifecycle.session_failover`／`_failover_one` 的 task-owned 路徑只接受 `TaskFailoverAuthority`；原鬆散 callbacks 不再是輸入。只有原 TaskCoordinator 的 `_failover_authority` 能建立並登記此 object。它先核對當前 incarnation，以及 journal 已原子保留的 failover／handoff command 關係，再交給 BatTaskAdapter 使用。一般 constructor 拒絕參數建立，複製 object 也不在 issuer 的有效 capability 集合中。authority 不進 MCP、CLI、HTTP、operation params 或 journal；重啟由 coordinator 依原 durable reservation 重新建立，不新增 failover／handoff command。
+
+object 固定 task_id、host、source session、control_version、reserved successor、failover_command_id、handoff_command_id、handoff_message_id，且必須具有五個 callable：`before_handoff_send`、`verify_handoff_successor`、`verify_handoff_at_frame`、`before_handoff_invoke`、`handoff_frame_guard`。lifecycle 核對 type、原 fleet coordinator 的 issuance、owner task 與完整 callbacks；再查原 journal reservation。缺少、錯型、錯 task、未發行的複本或缺 callback，一律走既有 `refuse_owned`（`TASK_OWNED_CONTROL_REQUIRED`），在 registry reservation／BAT write 前拒絕。取 host writer lock 後重查 ownership／incarnation；start frame 也再核對 incarnation。handoff 仍使用原 prompt digest、successor identity 與 frame callback，沒有第二套 proof／settlement。
+
+standalone managed session 保留原 policy／結果、reserved-ID metadata 與 MCP／CLI 行為；force、confirm、bare task_id 不能繞過 task-owned gate。此補強不啟用已停用的中途自動 failover；coordinator.tick 的 quota 路徑仍轉 needs_ted。
+
+其他 lifecycle／orchestrate 入口的 authority 盤點：
+
+| 入口 | task-owned 寫入需要的 authority／邊界 |
+|---|---|
+| session_failover／_failover_one | 本節 coordinator-issued TaskFailoverAuthority；bare task_id、successor／command IDs 與 callback 參數不是 authority。 |
+| service.session_send／answer／interrupt／continue；lifecycle.session_relay 的 target | `guarded` 先交 owner session_control；runtime command＋FrameGuard 固定 task／session／version／action，send 另固定 prompt hash。relay 沒有 task_id bypass；main_session 排除 task-owned 預設 target。 |
+| session_set_permissions／approve_pending／deferred raises | 同一 owner session_control／permissions FrameGuard；每個設定 frame 檢查。pending answer 使用 answer guard，不靠 mode／prompt ID 取得 authority。 |
+| session_record_verification | verify/internal FrameGuard，type、host／session、action／internal 與當前 binding 全部匹配；record 前再查。task_id 不是驗證 evidence 的授權。 |
+| cleanup／stop | task-owned cleanup KEEP；stop helper 在 frame 前 refuse_owned。沒有 task_id override；reviewed cleanup 的獨立合約與 legacy apply 停用仍由 cleanup package 處理。 |
+| worktree_merge／worktree_remove | 原入口與 frame policy 保留 refuse_owned，公共 caller 不能用 task ID 認領寫權。 |
+| orchestrate.session_start；fanout planner／children；Task Service adapter.start | task_id 是新 resource 的 creation／path metadata，不用來解除既有 session 的 owned gate 或重綁 journal current lead。Task Service 自己的 start 使用 coordinator 保留的 start command／session ID；本包不增加公共 takeover 參數，也不改 start claim／transport fence package 的合約。fanout 後續送字經同一 service gate。 |
+
+上述入口沿用 resource policy；authority 不能把人工／unknown 資源變 managed。沒有新增 API scope、error code 或外部 failover 合約。
 
 只有 **這個 command 的 effect frame** 通過 `FrameGuard.__call__` 才記入 `frames`，表示該命令可能已送出。implicit client-resume 使用 `FrameGuard.check`，保留完整 owner／version／paused／binding／command 檢查，但不算 send command 的 frame。task-owned runtime send 在 resume 後因 streaming／版本／binding 拒絕，或 resume 本身發生 transport loss，send command 為 rejected，task 保持控制留下的原狀；resume 的 audit 仍保留，不聲稱零 BAT mutation，只聲稱零 send-message。Task Service 自己的非 operation send 則沿用下述本機拒絕／needs_ted 規則。
 
@@ -532,6 +555,7 @@ Phase 2 擴充原 owner 機制，沒有第二份 owner database／另一套 leas
 | A07；§09／§10（daemon 的非 operation send） | `test_a07_daemon_tick_handles_pre_frame_send_failure_without_uncertainty`、`test_a07_daemon_tick_cancels_pre_frame_send_after_task_control` | 真正 `_tick_task` 驅動 initial lead／follow-up；client-resume 接受後 ConnectionLost／InvokeTimeout／BAT error／OSError：rejected、needs_ted，result／event 可讀 code，從未 uncertain；只有一個 resume、零 send-message，下次 tick 零 mutation。resume frame 前 pause 由完整 guard 拒絕；resume loss 期間 pause／版本改變則 cancelled、task snapshot 不變，無例外逃出 tick。 |
 | A07；§10（initial lead 的晚到 presence） | `test_a07_daemon_initial_send_failure_preserves_presence_and_control_rules` | initial resume 失敗後：vanished 沿用一次 replacement／上限；不可讀回 needs_ted，不是 uncertain。presence await 時 pause／版本變化勝出，command cancelled、不套用 stale vanished 證據；所有情況零 send-message，原 failure code event 保留。 |
 | A07；§09／§10（verification control cancellation） | `test_a07_daemon_verification_control_cancellation_preserves_task_and_restarts`、`test_a07_genuine_verifier_error_still_needs_ted`、`test_a07_tick_start_control_refusal_preserves_task_control` | 真 daemon tick／adapter，阻塞 observe、dependency install 與第二次 run；pause／非 pause 版本／owner loss／binding change 後保留 state，取消的 run 不寫兩種 evidence。paused deadline 不執行；合法 resume 後重新跑 trusted verifier，沿原 done／failure 路徑。真 error 仍 needs_ted；lead／reviewer pre-frame start refusal 不進 uncertain。原 daemon send／resume loss tests 保留。 |
+| A07；原 §09／§10、v2 §02／§10–12（failover authority） | `test_a07_task_owned_failover_requires_coordinator_authority`、`test_a07_failover_authority_cannot_be_constructed_from_parameters`、`test_a07_failover_authority_rechecks_control_after_writer_lock`、`test_a07_coordinator_failover_uses_reserved_authority_end_to_end`、`test_a07_standalone_failover_transport_contract_is_unchanged` | bare task_id、wrong type／task、未發行複本、每個缺少 callback 都在 registry／journal mutation／BAT frame 前拒絕；writer lock 等待中的 pause／版本／owner loss 也在 reservation 前拒絕。coordinator 原 reservation 只建立一個 successor，handoff frame 綁原 command／message／digest；MCP／CLI standalone apply 保持恰一 start＋send 與原結果。既有 archive／fallback／same-worktree failover tests 保留，不啟用 skipped mid-task 流程。 |
 
 故障注入只用 `tests/mockbat.py`、`tests/fakegithub.py`、[test_checkpoints.py](../../tests/test_checkpoints.py) 的 LocalRunner／RealGitLog 與 temp Git repos。驗證 policy 時比較所有寫 channel 與目的端，不能只數 send-message。停用中的 `pytest.mark.skip` task 測試不算 A07／A08 證據；舊 engine／mid-task failover 的 skip 不因本包自動啟用。
 

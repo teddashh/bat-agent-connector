@@ -690,18 +690,17 @@ class BatTaskAdapter:
                 prompt_sha256=intended)
             before_handoff_invoke()
 
+        coordinator = getattr(self.fleet, "task_coordinator", None)
+        if coordinator is None or coordinator.adapter is not self or coordinator.journal is not self.journal:
+            raise TaskControlRefused("TASK_OWNED_CONTROL_REQUIRED", "failover requires the owning coordinator")
+        authority = coordinator._failover_authority(
+            task, successor_id, handoff_command_id, handoff_message_id,
+            before_handoff_send=before_send, verify_handoff_successor=verify_handoff_successor,
+            verify_handoff_at_frame=verify_handoff_at_frame, before_handoff_invoke=before_handoff_invoke,
+            handoff_frame_guard=handoff_frame_guard)
         r = await lifecycle.session_failover(self.fleet, task["host"], session_id, confirm=True,
-                                             successor_session_id=successor_id, instructions=instructions,
-                                             ledger_only=bool(self.journal),
-                                             handoff_message_id=handoff_message_id,
-                                             handoff_command_id=handoff_command_id,
-                                             task_id=task["task_id"],
-                                             before_handoff_send=before_send,
-                                             verify_handoff_successor=verify_handoff_successor,
-                                             verify_handoff_at_frame=verify_handoff_at_frame,
-                                             before_handoff_invoke=before_handoff_invoke,
-                                             handoff_frame_guard=handoff_frame_guard,
-                                             authoritative_original=True)
+                                             instructions=instructions, ledger_only=bool(self.journal),
+                                             task_authority=authority, authoritative_original=True)
         if not r.get("prompt_sent") and not r.get("skipped"):
             raise RuntimeError("failover handoff outcome is uncertain")
         if r.get("new_session_id") != successor_id:
