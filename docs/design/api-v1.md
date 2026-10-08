@@ -88,6 +88,10 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 - `GET /api/v1/events?after=N&limit=M` → `{events, next_cursor, head_cursor, has_more}`。
 - `GET /api/v1/events/stream`：SSE，支援 `Last-Event-ID`，15 秒 keepalive，最多 16 條同時連線（每個 actor 最多 8 條），單條最長 30 分鐘。串流每 5 秒重新驗一次 token，撤銷或過期後就結束。瀏覽器 `EventSource` 不能帶 Authorization，Dashboard 以 `fetch` 讀串流。
 
+資源 `…/history` 使用安全的遞迴摘要：reason／previous_reason 只保留已知固定 enum 或 null；caller 的 request_ted／task result／command conflict／operation diagnostic prose 移除，保留原已記錄的機器 reason_code／error_code。所有 title、status_reason、git_author claim、scalar body/request/response/evidence 等 prose 入口排除，含 history.resource 及 saved_snapshot；來源 evidence 只留結構化表／ID／enum／hash。Scalar source 只允許固定來源 enum，ref／external_ref 只允許無空白的 ID/Git ref/URL token；原 journal 與既有 work_events 的文字不改。完整 producer/value/shape 稽核見 [observation.md](observation.md)。
+
+History 的 since／until 是 inclusive UTC epoch seconds，按 occurrence 篩選，排序仍按 seq。Context 缺少 occurred_at_epoch 才以 api_events.created_at fallback；明確 JSON null 是未知發生時間，不符合任何單邊／雙邊界線。無界線仍顯示該 fact 且 occurred_at 為 null。Coverage.unknown_occurrence_times_excluded 在有時間界線時為 true（表示排除規則，非筆數）；無界線為 false。Coverage.first_recorded_at 仍是最早 journal 記錄時間，可為 migration 時間，不能當發生時間。
+
 ## 路由
 
 | 方法與路徑 | Scope | 說明 |

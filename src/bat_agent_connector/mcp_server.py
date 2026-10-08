@@ -337,7 +337,8 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
                                kind: list[str] | None = None, since: float | None = None, until: float | None = None) -> dict[str, Any]:
         """Paginated journal facts with actor evidence and a fixed as_of bound. Session ID is host/full-ID.
         Read every next_cursor for complete history; unknown actors remain unknown. Session added/updated/reappeared
-        facts retain fields_stale and fixed field_evidence values for meta failure/recovery."""
+        facts retain fields_stale and fixed field_evidence values for meta failure/recovery. Summaries omit prose
+        reasons; since/until exclude unknown occurrence times, as flagged in coverage."""
         return await daemon("resource_history", resource_type=resource_type, resource_id=resource_id,
                             cursor=cursor, limit=limit, order=order, kind=kind, since=since, until=until)
 

@@ -2,6 +2,13 @@
 
 ## Next release (unreleased)
 
+- Observation history privacy and occurrence bounds ([design](docs/design/observation.md), plan §08/§10/§11, B03):
+  keep reason/previous_reason only as fixed enums; omit task and operation diagnostics, titles, prose containers
+  and free-form refs recursively from history and saved snapshots while preserving recorded codes and identities.
+  Explicit unknown occurrence times never match since/until; only absent metadata uses event record time.
+  Report the exclusion rule in coverage, preserve unknown facts in unbounded reads, and document every producer
+  in the spec, API contract and both skills. Keep source journal rows and data step 2 unchanged.
+
 - Observation field freshness events ([design](docs/design/observation.md), plan §10/§11/§19, B02/B03):
   emit session updates when fields_stale or fixed field_evidence values change, including meta failure/recovery
   with unchanged retained values. Keep observation/activity timestamps and repeated identical polls quiet;

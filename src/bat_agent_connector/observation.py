@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -22,9 +23,29 @@ RELATION_EVENTS = {"relation.opened", "relation.bound", "relation.closed"}
 DELIVERY_ACTIONS = {"github.pr.update", "github.pr.merge", "delivery.merge_and_deploy"}
 PRIVATE_FIELDS = {"text", "words", "original_words", "instructions", "excerpt", "prompt", "payload",
                   "token", "authorization", "note", "error", "lines", "messages", "interpretation",
-                  "acceptance", "original_request", "requirements", "goal", "reason_text"}
+                  "acceptance", "original_request", "requirements", "goal", "reason_text",
+                  "title", "status_reason", "git_author"}
 
-SUMMARY_FIELDS = set("""host profile_id workspace workspace_id title cwd agent_kind agent_preset model loaded streaming
+# These keys also occur in caller/agent prose. Accept only the fixed values used by the producers.
+SUMMARY_REASONS = set("""not_enumerated gone scope_changed warm_session_transfer
+start warm_reuse vanished_replacement replacement recovered_start recovered_failover quota_failover
+initial quota_error rate_limited auth_error jev_choice jev_unavailable_or_invalid diff_unavailable diff_too_large
+sensitive_path jev_pass low_confidence jev_fail jev_risk jev_unsure
+no_supported_lockfile candidate_not_clean installed install_failed install_dirtied_worktree unsupported worktree_unavailable
+native_stack branch_chain indirect_merge not_configured not_enumerable only_known_claude_cwd scan_cost
+no_background_git_probing journal_facts_only""".split())
+SUMMARY_SOURCES = {"observed_runner", "workspace:load", "enrichment", "journal"}
+SUMMARY_OBJECTS = {"request", "response", "body", "evidence", "source", "errors", "blocking", "target", "refs",
+                   "before", "after", "saved_snapshot", "field_evidence", "field_observed_at", "coverage", "methods",
+                   "authority", "source_versions", "result_versions", "affected_prs", "stacks", "merge_receipt",
+                   "metadata_settlement", "metadata_reconciliation"}
+SUMMARY_OBJECT_LISTS = {"evidence", "errors", "blocking", "source_versions", "result_versions", "affected_prs", "stacks"}
+SUMMARY_REFERENCE = re.compile(r"[^\s\x00-\x1f\x7f]{1,512}\Z")
+SUMMARY_CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}\Z")
+OCCURRENCE_TIME_SQL = """CASE WHEN json_type(c.context,'$.occurred_at_epoch') IS NULL THEN e.created_at
+    ELSE json_extract(c.context,'$.occurred_at_epoch') END"""
+
+SUMMARY_FIELDS = set("""host profile_id workspace workspace_id cwd agent_kind agent_preset model loaded streaming
 runtime_status pending field_evidence field_observed_at loading activity tab enumeration lifecycle freshness fields_stale worktree_branch orchestrated has_tab provenance api_access read_only_code isolation
 provider_native_id first_seen_at last_seen_at observed_at gone_at misses changed_fields reason previous_reason
 session_id previous_session_id session_resource_id execution_id task_id relation_id branch_id parent_branch_id parent_relation_id
@@ -32,7 +53,7 @@ follow_up_of_execution_id command_id command_ids start_command_id end_command_id
 operation_id step step_seq request response refs target entry actor source evidence table id seq ref sha head
 path retained_ref channel commit_sha source_sha base_sha integrated_sha resolution_sha delivered_sha pinned_sha commit tree_hash branch
 worktree_path clone_path repo_root source_session_id checkpoint_id source_kind source_id source_host
-repository repository_id pull_number preview_id mode location_class error_code accepted reconciled external_ref
+repository repository_id pull_number preview_id mode location_class error_code reason_code accepted reconciled external_ref
 message_id turn_marker turn_ref marker prompt_sha256 digest hash sha256 start_seq end_seq started_at ended_at
 created_at updated_at submitted_at finished_at linked_at removed_at linked_by removed_by link_id link_operation
 remove_operation work_item_id project_id needs_review source_table source_key saved_snapshot body backfilled
@@ -40,12 +61,12 @@ legacy anchor_id identity_evidence worktree_id previous_worktree_id intent_type 
 scan_id binding_version attempted_binding_version last_success_at complete_enumeration errors outside_scan scope verified credential_ref
 server_version capabilities enrichment_failures workspace_document workspace_ids registry_entries session_count
 archive claude_transcripts session_meta safe_state journal workspace:load resource_id resource_type
-runtime end_scope git_author author version verification_commit base_commit verification_tree before after
-count n attempt status_reason source_versions result_versions files conflict seq pin commits source_key
+runtime end_scope author version verification_commit base_commit verification_tree before after
+count n attempt source_versions result_versions files conflict seq pin commits source_key
 number method head_sha merged_sha merged_onto_base_sha merge_base_sha reviewed_head base_moved other_commits_count
 other_commits affected_prs merged independent merged_after merge_receipt metadata_settlement verification_pending
 verification_error read_refused_before_write blocking code state settled_at parents stacks members metadata_reconciliation
-agent source_provenance effect outcome verdict write_scope
+agent source_provenance effect outcome verdict write_scope scope_status
 head_repo_id resolver_operation_id resolver_session_id apply_operation_id integration_operation_id integration_seq
 parent_id verification_id route_id old_session_id handoff_command_id operator_followup source_message_id linked_at_seq evidence_ref
 expected_head_sha expected_base_sha preview_digest request_hash excerpt_sha256 before_digest after_digest
@@ -82,9 +103,29 @@ def body(value):
 
 def summary(value, *, pr=False):
     if isinstance(value, dict):
-        return {k: summary(v, pr=pr) for k, v in value.items() if k in SUMMARY_FIELDS and k not in PRIVATE_FIELDS
-                and not (pr and k == "title")
-                and not (k in {"request", "response", "body"} and not isinstance(v, dict))}
+        out = {}
+        for k, v in value.items():
+            if k not in SUMMARY_FIELDS or k in PRIVATE_FIELDS:
+                continue
+            if k in {"reason", "previous_reason"} and v is not None:
+                if not isinstance(v, str) or v not in SUMMARY_REASONS:
+                    continue
+            if k in {"ref", "external_ref"} and isinstance(v, str) and not SUMMARY_REFERENCE.fullmatch(v):
+                continue
+            if k in {"code", "error_code", "reason_code", "verification_error", "read_only_code"} and v is not None:
+                if not isinstance(v, str) or not SUMMARY_CODE.fullmatch(v):
+                    continue
+            if k == "source" and isinstance(v, str):
+                if v in SUMMARY_SOURCES:
+                    out[k] = v
+                continue
+            if k in SUMMARY_OBJECTS and v is not None and not isinstance(v, dict):
+                if k in SUMMARY_OBJECT_LISTS and isinstance(v, list):
+                    v = [item for item in v if isinstance(item, dict)]
+                else:
+                    continue
+            out[k] = summary(v, pr=pr)
+        return out
     if isinstance(value, list):
         return [summary(v, pr=pr) for v in value]
     return redact(value) if isinstance(value, str) else value
@@ -912,7 +953,7 @@ class Observation:
         return data
 
     def history(self, resource_type, resource_id, *, cursor=None, limit=50, order="desc", kind=None, since=None, until=None):
-        resource = self.resource(resource_type, resource_id)
+        resource = summary(self.resource(resource_type, resource_id))
         page_limit(limit)
         if order not in {"asc", "desc"}:
             raise OperationError("INVALID_PARAMS", "order must be asc or desc", 422)
@@ -949,7 +990,7 @@ class Observation:
             args.extend(kinds)
         for sign, value in ((">=", since), ("<=", until)):
             if value is not None:
-                sql += f" AND COALESCE(json_extract(c.context,'$.occurred_at_epoch'),e.created_at) {sign} ?"
+                sql += f" AND ({OCCURRENCE_TIME_SQL}) {sign} ?"
                 args.append(value)
         sql += " ORDER BY e.seq " + order.upper() + " LIMIT ?"
         rows = self.db.execute(sql, (*args, limit + 1)).fetchall()
@@ -957,7 +998,8 @@ class Observation:
         earliest = self.db.execute("SELECT MIN(e.created_at) FROM api_events e JOIN api_event_resources r ON r.seq=e.seq WHERE r.resource_type=? AND r.resource_id=? AND e.seq<=? AND r.linked_at_seq<=?", (resource_type, resource_id, as_of, as_of)).fetchone()[0]
         return {"resource": resource, "events": events, "count": len(events), "as_of": as_of, "head_cursor": head,
                 "next_cursor": cursor_out(f, as_of, events[-1]["seq"]) if len(rows) > limit else None,
-                "has_more": len(rows) > limit, "coverage": {"source": "journal", "first_recorded_at": iso(earliest), "legacy_transitions": "may_be_incomplete"}}
+                "has_more": len(rows) > limit, "coverage": {"source": "journal", "first_recorded_at": iso(earliest), "legacy_transitions": "may_be_incomplete",
+                    "unknown_occurrence_times_excluded": since is not None or until is not None}}
 
     def relations(self, resource_type, resource_id, *, cursor=None, limit=50, execution_id=None, include_closed=True):
         resource = self.resource(resource_type, resource_id)

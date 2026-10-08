@@ -18,6 +18,7 @@ Phase 1 規格已審查。Phase 2 分兩步：Part A（本次）實作伺服器�
 | Relation closure body 修正 | `a48dba3`（#35 的審查基準），接續 saved-fact 修正 `ad4d668`。新 relation 事件與同 seq revision 使用同一完整 body；legacy closure 重建 command 終點，不猜關閉時間。 |
 | Operation refs position 修正 | `f415cfb`（#35 的審查基準）。Operation event seq 與 resource linked_at_seq 都受 caller 的位置限制；checkpoint runs 也需要當時已存在的證據。不 rebase、不新增資料步驟。 |
 | Field freshness 事件修正 | `96a0b1c`（#35 的審查基準）。Session 值相同但 meta freshness 改變仍寫 update；不 rebase、不新增 event kind 或資料步驟。 |
+| Summary／unknown occurrence 修正 | `70f9bff`（#35 的審查基準）。遞迴摘要限制 reason 為固定 enum、移除其他 prose 入口；顯式 unknown occurrence 不以 migration 時間符合查詢。不 rebase、不新增資料步驟。 |
 | 計畫 | v1.0（2026-10-06）；以章節及驗收編號引用，不複製私有計畫。 |
 | BAT | `b7419892fbc9946799b64cca24c2ec8c7fa15c42`；不代表每台主機都已安裝此版，實際 `serverVersion` 另存於掃描證據。 |
 
@@ -220,7 +221,9 @@ Delivery 的 merge envelope 目前只含 repository/PR，沒有 session/worktree
 
 Timeline 預設新到舊，`ORDER BY seq DESC`；`order=asc` 可逐筆回放。第一頁在 daemon 單一 journal owner 的同步讀取中捕捉 `as_of = api_head()`，查詢只含 `seq <= as_of`。Next cursor 為 versioned opaque token，內容為 `{v, f, a, k}`；f 是 resource/filters/order 的 hash，a 是 as_of，k 是 last_seq。DESC 下一頁 `seq < last_seq`，ASC 下一頁 `seq > last_seq`，一律限制 `seq <= as_of`。預設 limit 50，上限 200，非法值回 422；換 resource／kind／時間／順序不能沿用游標。`next_cursor=null` 表示這個 snapshot 讀完；回 `has_more`、`count`、`head_cursor`。
 
-`kind` 為精確種類集合，`since`／`until` 以 UTC occurred_at 篩選，但排序仍按 seq。歷史事件時間可以相同或晚補；晚補的舊事實按新 seq 顯示並標記原發生時間，不重排已讀頁面。GET 不因查詢而新增事件。
+`kind` 為精確種類集合，`since`／`until` 是 UTC epoch seconds，inclusive，以 occurrence 篩選，排序仍按 seq。只有 context 完全缺少 occurred_at_epoch（含舊 live／projection gap）才用 api_events.created_at；明確 JSON null 代表 unknown，有任一時間界線時永不匹配。不帶界線仍列出這些 facts，context.occurred_at／occurred_at_epoch 保持 null。Coverage 固定回 unknown_occurrence_times_excluded：有 since 或 until 為 true，無界線為 false；此 flag 表示排除規則生效，不是漏掉筆數。歷史時間可以相同或晚補；晚補的舊事實按新 seq 顯示並標記原時間，不重排已讀頁面。Coverage.first_recorded_at 是 linked/as_of 範圍內最早 api_events.created_at 的記錄時間，可保持 migration 時間，不能當 occurrence。GET 不新增事件。
+
+本輪稽核 occurred_at_epoch 的全部使用處：record_event 只從已知 occurred_at 建 epoch，saved_fact 的 fact_time 缺少／無效值產生 null；fact_position 用原 row 時間，無證據不推測 session。History 篩選使用上列缺 key／null 區別，keyset 及排序一律 seq，不以 occurrence 或 migration 時間補排序。現有 Part A 沒有 Dashboard timeline 分組；Part B 分組須保留 unknown，不以 recorded_at 假代發生時間。
 
 Relations 的 key 為 `(start_seq, relation_id)`，預設 ASC；未知開始的 legacy row 用排序值 0，但輸出 start_seq 仍是 null。Cursor 帶 resource/execution、filters、as_of 與 last key。關閉或綁定的新事實按 seq 保存 revision，因此下一頁仍返回 as_of 當時的 relation，重啟不改頁面邊界。
 
@@ -256,7 +259,47 @@ Operation／checkpoint／work item 新事件在現有交易中寫完整 context�
 | Git SHA／SHA-256 | `expected_head_sha`、`expected_base_sha`、`preview_digest`、`request_hash`、`excerpt_sha256`、`before_digest`、`after_digest`、`candidate_commit`、`diff_sha256`、`start_commit`、`old_head`、`new_head`、`pushed_sha`、`push_old_sha`、`composed_tree`、`predicted_tree`、`approved_fingerprint` |
 | 布林（journal flags 可為 0/1） | `cancel_requested`、`would_merge`、`files_may_be_truncated`、`write_acknowledged`、`observed_intent`、`read_refused`、`conflict_before_write`、`conflict_after_write`、`pushed`、`local_checkouts_changed`、`advisory_only`、`abort_current`、`ready`、`stale`、`attention` |
 
-稽核範圍包括 relation.*、session.worktree_bound、delivery.merge_previewed/metadata_settled、operation steps/refs、task/checkpoint/integration/work-item/inventory 事件與回填表的 snapshots。Session/worktree binding 的 worktree_id/previous_worktree_id 等欄位原已保留。原有 allowlist 欄位不擴大文字契約。Prompt／需求／聊天的 `prompt/words/original_words/instructions/payload/excerpt/text/messages/note`，以及 `message/subject/summary/description/warnings/lines/error` 等自由文字仍排除。PR `title` 在 pr=True 的整棵摘要排除；scalar `body` 不接受，PR title/body 不進事件。
+稽核範圍包括 relation.*、session.worktree_bound、delivery.merge_previewed/metadata_settled、operation steps/refs、task/checkpoint/integration/work-item/inventory 事件與回填表的 snapshots。Session/worktree binding 的 worktree_id/previous_worktree_id 等欄位原已保留。原有 allowlist 欄位不擴大文字契約。Prompt／需求／聊天的 `prompt/words/original_words/instructions/payload/excerpt/text/messages/note`，以及 `message/subject/summary/description/warnings/lines/error` 等自由文字仍排除。`title` 現在於全部摘要排除，包含 tab／work-item 標題與 history.resource；scalar `body/request/response` 不接受，PR title/body 不進事件。
+
+### Reason 與其他字串的安全摘要稽核
+
+採 value enum 驗證：任何深度的 reason／previous_reason 只保留 SUMMARY_REASONS 的精確固定值或 null，不能只因 key 在 SUMMARY_FIELDS 就保留字串。未知值（含 caller／agent prose、例外訊息、dict/list）移除，不編造替代 code。原已記錄的 reason_code／error_code／code／verification_error／read_only_code 保留為最多 128 字元的機器 code（字母開頭，後續僅字母、數字、底線、點、冒號、連字號）；不接受 prose。讀取時對既有 events 和 saved_snapshot 都套規則，不重寫舊 facts，不新增 data step。所有 writer 的原始 core rows、relation body/revision 同一性及控制流程保持原契約。
+
+| reason／previous_reason producer | 類型與摘要處理 |
+|---|---|
+| Journal.request_ted → task.ted_requested | caller reason[:1000] 是 prose；不符合固定 enum 就移除。 |
+| Journal.change → task.state（needs_ted／failed）及自訂 transition event | result 轉字串[:1000] 是 diagnostic prose；移除，保留 from/to 等機器狀態，已有 code 才顯示 code。 |
+| Journal.finish_minimal_review → task.minimal_review_decision | Journal 接受 caller reason，但 ModelRouter.MinimalReviewGate 只產生 diff_unavailable、diff_too_large、sensitive_path、jev_unavailable_or_invalid、jev_pass、low_confidence、jev_fail/risk/unsure；只保留這些精確 enum，其他 prose 移除。 |
+| Journal.submit → task.engine_decision | MinimalTaskRouter 的 jev_choice／jev_unavailable_or_invalid 保留；daemon 的 presplit_<provider> 是任意配置名稱組合，不追認 enum，移除。 |
+| Journal.command_operator_only → task.command_identity_conflict | caller diagnostic 是 prose；移除。Command reconciliation 的 source 是 caller attestation，不是 reason enum，按下表移除 scalar source。 |
+| Journal.add_branch → task.task_branch，Observation.relation/close_relations → relation.* | role 是機器角色；reason 常為 start、warm_reuse、vanished_replacement、replacement（既有 replacement 記錄）、recovered_start、recovered_failover、quota_failover、initial 或 PM fallback 的 quota_error/rate_limited/auth_error。這些保留；add_branch 未驗證的任意 reason 不因 role 有效而放行。Pending 的 null 保留，close 沿用同一 body。 |
+| Journal.revoke_task_capabilities → task.task_capabilities_revoked | 固定 warm_session_transfer 保留。 |
+| TaskService dependency_install_result（TaskVerifier／TaskBAT） | 保留 no_supported_lockfile、candidate_not_clean、installed、install_failed、install_dirtied_worktree、unsupported、worktree_unavailable；adapter 例外類名或任意 result.reason 不符合 set 就移除。 |
+| Inventory._specific_stale／_record_success → session.stale／session.fresh | 固定 not_enumerated、gone、scope_changed，含 previous_reason；保留，不套 host flap。 |
+| Inventory._discovery → discovery.changed.outside_scan | 固定 not_configured、not_enumerable、only_known_claude_cwd、scan_cost、no_background_git_probing、journal_facts_only；保留。 |
+| OperationService._transition → operation.*，step response/resource.bound | cancellation、resumption、waiting、NeedsAttention／OperationError／例外 reason 和 status_reason 是 prose；reason 不符合 set 就移除，status_reason 全部排除；既有 error_code 保留。 |
+| PR delivery scope → delivery.merge_previewed 及 step snapshots | native_stack、branch_chain、indirect_merge 是固定 enum，保留；blocking.message／warnings／PR title/body 排除。Metadata settlement 已用 code，保留。 |
+| Integration push read-back，以及 checkpoint/lifecycle/orchestrate 的舊回覆傳入 operation step | remote_rejected/remote_moved 的 reason 來自 Git stderr；snapshot／workspace／merge 等說明句也是 prose，移除；固定 outcome、status、code 保留。 |
+| Journal.route、work_events 的 summary/reason/reason_code record | route 把 reason 留在 routing 表，model_route event 沒有 reason；work_events 是另一個既有讀 feed，不插入 api_events。summary/title 為 prose，不納入本 history；若舊 fact 已記固定 reason_code，摘要保留 code，不從 summary 反推。 |
+| Journal.note／api_event 的通用入口及 history.backfilled | 任意 caller body 不擴大契約；每層套相同 value/shape 規則，saved_snapshot 不能繞過。 |
+
+其他所有可能為字串的 SUMMARY_FIELDS 依 producer 契約稽核如下；欄位長度有限並不等於 enum，會承接 prose 的 key 要移除或檢查值／結構：
+
+| 字串欄位／群組 | 來源與界線 |
+|---|---|
+| title、status_reason、git_author | title 可來自 BAT tab、work-item caller 或 task 需求第一行；status_reason 為 operation diagnostic；git_author 沒有正式 writer，generic note 可自報任意 prose。全部排除，含 resource header 與 snapshots。 |
+| body、request、response | 原資料可為 prompt／PR prose；只接受 dict（null 可保留），遞迴移除不安全 fields。Dict 不是放行文字的理由。 |
+| evidence、errors、blocking | evidence 可能是人工 attestation；errors 可為 redacted exception。只接受 dict 或 list 中的 dict，移除 scalar／list text；保留 table/ID、code、SHA、enum，移除 error/message/note。 |
+| source | reconciliation 的 caller source 可帶 prose。Scalar 僅保留 observed_runner、workspace:load、enrichment、journal；其他只接受 dict，遞迴同一規則。Source_kind/source_id 等具名資源欄位仍是種類／ID。 |
+| ref、external_ref | mark_stage 只檢查長度，可帶 deployment prose；summary 的 scalar ref 限無 whitespace／控制字元、最多 512 字元的 ID/Git ref/URL token。合法 PR URL／SHA／資源 ID 保留；例如操作描述句只在原 journal，不進 history。 |
+| host/profile_id/workspace/workspace_id、cwd/path/worktree_path/clone_path/repo_root、branch/worktree_branch/retained_ref、repository | 配置 alias、實際 workspace／路徑、Git ref 或 owner/repo 身分，來自 enumeration／creation intent／Git facts；不是 task 原文或 commit-message 欄位。路徑名稱可有空白，保留身分原值，不能把它當 reason 或 actor。 |
+| *_id、resource_id/resource_type、id、intent_type/intent_id/slot、anchor_id、source_key/source_table/table、channel、scan_id、binding_version/attempted_binding_version、credential_ref、evidence_ref、parent_id、operator_followup | Registry/journal/BAT/GitHub 資源 ID、建立 slot、固定表／channel 名、掃描或 binding digest；source_key 為來源表與 primary key 的序列化，不是 prompt。泛用容器不把 prompt 改名成 ID。 |
+| sha、head、commit、pin、*_sha/*_sha256、*_commit、*_head、*_tree、tree_hash、digest/hash/sha256、request_hash/preview_digest、approved_fingerprint | Checkpoint／Git step／receipt 的固定版本或內容 hash；不含 commit subject/message、PR title/body、prompt 原文。Code 群組依上文驗證。 |
+| kind/status/action/step/from/to/state、role、agent/agent_kind/agent_preset/model、runtime/runtime_status、entry/actor/observer、server_version/version、mode/method/location_class、source_kind/source_provenance、effect/outcome/verdict/write_scope、scope/scope_status、identity_evidence/provenance/api_access/isolation/end_scope、loading/activity/tab/enumeration/lifecycle/freshness | 正式 writer 的固定狀態、角色、action/step 或配置／BAT 的機器標籤；不用 diagnostic result 填值。API actor 是 Principal 識別，原 claim 仍獨立且不授權。Field_evidence 的 loaded/streaming/has_tab 值由 service 的固定 enum 建立，不取 meta_error。 |
+| author | 唯一正式 producer 為 integration 的 Git log parser，取一行 author header，subject 另欄且排除；僅為版本 identity metadata，不是 API actor 或 prompt 證據。Generic git_author claim 排除。 |
+| first_seen_at/last_seen_at/observed_at/gone_at、*_at | Inventory／journal 已保存的 UTC record/observation 時間；不是聊天文字。Saved fact 的無效 occurrence 先正規化為 null，不改成 migration 時間。 |
+| before/after、target/refs/saved_snapshot、pending、field_evidence/field_observed_at、coverage/methods/authority/capabilities、source_versions/result_versions、files/commits/parents/other_commits、affected_prs/stacks/members、merge_receipt/metadata_settlement/metadata_reconciliation | 已有 writer 以 dict/list 保存版本、ID、路徑、scope、固定狀態或布林；遞迴同一 allowlist/value 規則。before/after 的 PR title/body 被移除；files 只留檔案身分，commits 留 SHA/parent/author，不留 subject/message。Object 欄位拒絕 scalar prose；source_versions/result_versions/affected_prs/stacks 的 list 只留 dict，pending 等混合狀態沿用 writer 的 bool/dict，files/parents/members/capabilities 的 primitive 僅為路徑／SHA／PR number／協定 tag；新增 producer 不能改此結構契約。 |
+| changed_fields | Inventory.MATERIAL 固定 key 名稱的陣列，不是 caller 的變更敘述。其餘 SUMMARY_FIELDS 是 seq/count/boolean/nullable 值，writer 不以 prose 代替數值。 |
 
 `provider` 同時可能是 provider 名稱與 GitHub API URL，不能全域列為 enum。`head_ref/base_ref/html_url/remote_url/name/idem_key/purpose/step_type/field/fingerprint` 可帶任意名稱、位址或 caller 文字，保持排除；已明確命名的 ID/SHA 才新增。`old/new/tree` 的通用名稱及 `params/preconditions/result/external_refs/observed/reviewed/intended/picked/conflict_files/remerge_stat` 等混合容器不放寬，使用已保存的具名版本與 context。`dirty/missing_count/attempts/uncertain_tries/diff_chars/confidence/tests_ok` 是數量或評分，並非布林/ID/seq；新 timestamps 也不在本輪新增範圍。回填缺少的資料仍 unknown，不增加資料步驟重寫已保存的摘要。
 
@@ -383,6 +426,9 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B02；§11 | `test_b02_discovery_latest_no_poll_rows_and_no_host_fanout`、`test_b02_session_specific_stale_gone_fresh_and_get_no_writes`：每 profile 一筆 latest、相同 poll 不寫事件；host flap 不 fan-out；missing/gone/reappear/fresh 與 GET 零 writes。 |
 | B02；§11 | `test_b02_unchanged_poll_does_not_rewrite_observation_identities`：第二輪 registry 投影的 total_changes 不變；相同 BAT／registry 不重寫 observation tables。 |
 | B02、B03；§11、§19 | `test_b02_b03_field_freshness_swap_catches_up_through_events`：兩 sessions 的 meta 失敗互換，discovery 持續 partial／相同 coverage；inventory.as_of 後 HTTP events 分別通知恢復／失敗，最終 state evidence 一致。HTTP/MCP/CLI history 保留每次 freshness，原 error 與巢狀 note 被移除；零 BAT writes。 |
+| B03；§08、§10、§11 | `test_b03_history_drops_task_prose_and_keeps_codes_over_http_mcp_cli`：request_ted、needs_ted/failed result、minimal review 及 command conflict 的 distinctive prose 不在 HTTP/MCP/CLI execution history；原 core rows 不變，固定 code、relation reason 及 session stale/fresh enum 保留。Live 與版本 1 replay 都驗證。 |
+| B03；§08、§11 | `test_b03_history_summary_filters_prose_recursively_in_bodies_snapshots_and_resource`：title/status_reason/git_author、scalar body/request/response/source/evidence/errors/blocking、nested reason/code/ref 的 prose 全部移除；固定 code、enum、structured evidence 與合法 PR ref 保留。包含真實 mark_stage 的 free-form ref 及 history.resource header。 |
+| B03；§10、§11 | `test_b03_unknown_occurrence_times_never_match_bounds_and_live_absence_falls_back`：缺少／無效 saved timestamp 不符合 migration time 的 since/until（單邊與雙邊），unbounded 仍列出 null occurrence；valid fact 以原時間篩選，live 缺 key／整個 context 時才用 created_at。Coverage flag 表示排除規則，first_recorded_at 保持記錄時間。 |
 | B02；§11 | `test_b02_unchanged_field_freshness_polls_emit_no_events`：連續相同失敗／成功、僅 field_observed_at／last_activity_ms 前進都不寫事件。`test_b02_field_evidence_only_change_and_old_digest_upgrade`：僅 evidence enum 改變寫 update，fields_stale 保持 false；舊 digest 首輪相同 poll 不誤發。 |
 | B02；§10、§11 | `test_b02_cursor_catchup_sse_resume_and_hidden_backfill`：分頁 gap catch-up、Last-Event-ID resume 不重複、backfill 不進 live feed、超前 cursor 422。 |
 | B02；§11、§19（Part B） | `test_b02_dashboard_reopen_and_sse_gap_without_duplicates`（待第二步）：瀏覽器 baseline/reopen、frame 碎片/重疊/去重、token 更換、filters/草稿及 typing hold；Playwright 驗證。 |
