@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import shutil
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -173,7 +175,7 @@ async def test_B05_idempotent_reimport_and_source_update(daemon):
     assert len(summaries) == 3 and all(r["kind"] == "hub_import.completed" for r in summaries)
 
 
-@pytest.mark.parametrize("edit", ["content", "reverted", "pin", "link", "approval", "archive"])
+@pytest.mark.parametrize("edit", ["content", "reverted", "approval", "archive"])
 async def test_b05_source_updates_and_local_edits_conflict(daemon, edit):
     d, src = daemon
     await apply(d, await preview(d))
@@ -197,16 +199,6 @@ async def test_b05_source_updates_and_local_edits_conflict(daemon, edit):
                 {"title": row["title"]},
                 {"expected_version": get(d, wid)["version"]},
             )
-    elif edit == "pin":
-        await act(d, PERSON, "work_item.pin", {"work_item_id": wid}, {"pinned": True}, {"before": False})
-    elif edit == "link":
-        await act(
-            d,
-            PERSON,
-            "work_item.link",
-            {"work_item_id": wid},
-            {"kind": "external_url", "ref": "https://example.invalid/local"},
-        )
     elif edit == "approval":
         await act(
             d,
@@ -982,6 +974,177 @@ async def test_b05_local_description_still_conflicts_after_group_only_import(dae
     doc = await preview(d)
     assert not doc["can_apply"]
     assert next(r for r in doc["records"] if r["connector_id"] == alpha)["classification"] == "conflict"
+
+
+async def test_b05_local_session_and_pr_links_survive_source_update(daemon):
+    d, src = daemon
+    await apply(d, await preview(d))
+    wid = mapped(d, "alpha", "t")
+    d.ops.db.execute("""INSERT INTO sessions_observed(host,session_id,body,digest,provenance,api_access,
+        first_seen_at,last_seen_at) VALUES('h1','s1',?,'d','manual','read_only',1,1)""",
+                     (json.dumps({"title": "Synthetic session"}),))
+    local_links = [("session", "h1/s1"), ("pull_request", "fixture/repository#17"),
+                   ("external_url", "https://example.invalid/local")]
+    for kind, ref in local_links:
+        await act(d, PERSON, "work_item.link", {"work_item_id": wid}, {"kind": kind, "ref": ref})
+    await act(d, PERSON, "work_item.link", {"work_item_id": wid},
+              {"kind": "session", "ref": "h1/s1", "remove": True})
+    before = wi.work_item_get(d.ops.db, wid)
+    await clean_reapply(d)
+    path = src / "Product/alpha/.ai/tasks/t.md"
+    path.write_text(path.read_text().replace("Main request", "Source update"))
+    doc = await preview(d)
+    assert doc["can_apply"], doc["blockers"]
+    assert next(r for r in doc["records"] if r["connector_id"] == wid)["classification"] == "update"
+    await apply(d, doc)
+    after = wi.work_item_get(d.ops.db, wid)
+    assert after["links"] == before["links"] and after["removed_links"] == before["removed_links"]
+    assert get(d, wid)["title"] == "Source update"
+    await clean_reapply(d)
+
+
+async def test_b05_local_item_pin_is_group_state_and_survives_source_update(daemon):
+    d, src = daemon
+    await apply(d, await preview(d))
+    wid = mapped(d, "alpha", "waiting")
+    await act(d, PERSON, "work_item.pin", {"work_item_id": wid}, {"pinned": True}, {"before": False})
+    await clean_reapply(d)
+    path = src / "Product/alpha/.ai/tasks/waiting.md"
+    path.write_text(path.read_text().replace("Waiting", "Source update"))
+    doc = await preview(d)
+    assert doc["can_apply"], doc["blockers"]
+    assert next(r for r in doc["records"] if r["connector_id"] == wid)["classification"] == "update"
+    await apply(d, doc)
+    assert get(d, wid)["pinned"] and get(d, wid)["title"] == "Source update"
+    await clean_reapply(d)
+
+
+async def test_b05_local_removal_of_source_url_still_conflicts(daemon):
+    d, src = daemon
+    await apply(d, await preview(d))
+    wid = mapped(d, "alpha", "t")
+    await act(d, PERSON, "work_item.link", {"work_item_id": wid},
+              {"kind": "external_url", "ref": "https://example.invalid/reference", "remove": True})
+    path = src / "Product/alpha/.ai/tasks/t.md"
+    path.write_text(path.read_text().replace("Main request", "Source update"))
+    doc = await preview(d)
+    assert not doc["can_apply"]
+    assert {x["code"] for x in doc["blockers"]} == {"IMPORT_CONFLICT"}
+    assert next(r for r in doc["records"] if r["connector_id"] == wid)["classification"] == "conflict"
+
+
+async def test_b05_legacy_link_event_baseline_does_not_block_reimport(daemon):
+    d, src = daemon
+    await apply(d, await preview(d))
+    wid = mapped(d, "alpha", "t")
+    mapping = d.ops.db.execute("SELECT baseline FROM hub_import_map WHERE connector_id=?", (wid,)).fetchone()
+    baseline = json.loads(mapping[0])
+    # Previous releases counted the import's link events after its created event.
+    old_cursor = d.ops.db.execute("""SELECT MAX(seq) FROM api_events
+        WHERE resource_type='work_item' AND resource_id=?""", (wid,)).fetchone()[0]
+    assert old_cursor > baseline["event_seq"]
+    baseline["event_seq"] = old_cursor
+    d.ops.db.execute("UPDATE hub_import_map SET baseline=? WHERE connector_id=?", (json.dumps(baseline), wid))
+    await clean_reapply(d)
+    path = src / "Product/alpha/.ai/tasks/t.md"
+    path.write_text(path.read_text().replace("Main request", "Source update"))
+    doc = await preview(d)
+    assert doc["can_apply"], doc["blockers"]
+    assert next(r for r in doc["records"] if r["connector_id"] == wid)["classification"] == "update"
+    await apply(d, doc)
+    await clean_reapply(d)
+
+
+def test_b05_every_emitted_row_event_kind_is_explicitly_classified(tmp_path):
+    from bat_agent_connector.task_journal import Journal
+
+    emitted = set()
+    for module in (wi, hub):
+        for call in ast.walk(ast.parse(Path(module.__file__).read_text())):
+            if not isinstance(call, ast.Call):
+                continue
+            name = call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", None)
+            if name == "_event":
+                emitted.update(node.value for node in ast.walk(call.args[3])
+                               if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                               and node.value.startswith(("project.", "work_item.")))
+    classified = set().union(*hub.ROW_EDIT_EVENTS.values(), *hub.ROW_IGNORED_EVENTS.values())
+    assert emitted and emitted <= classified, f"unclassified events: {emitted - classified}"
+    # Item ordering is recorded on the project; both resource assignments ignore it.
+    assert "work_item.ordered" in hub.ROW_IGNORED_EVENTS["project"]
+    journal = Journal(tmp_path / "events.db")
+    try:
+        for resource in ("project", "work_item"):
+            counted, ignored = hub.ROW_EDIT_EVENTS[resource], hub.ROW_IGNORED_EVENTS[resource]
+            assert not counted & ignored
+            for kind in counted | ignored:
+                rid = "fixture-" + kind
+                seq = journal.api_event(resource, rid, kind,
+                                        {"operation_id": "other", "fields": ["name", "title"]})
+                assert hub._event_seq(journal.db, resource, rid) == (seq if kind in counted else 0)
+                assert hub._event_seq(journal.db, resource, rid, exclude="other") == 0
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize("resource", ["project", "work_item"])
+@pytest.mark.parametrize("suffix", ["unknown", "future.ordered", "future.updated"])
+def test_b05_unknown_row_event_kinds_fail_closed(tmp_path, resource, suffix):
+    from bat_agent_connector.task_journal import Journal
+
+    journal = Journal(tmp_path / "events.db")
+    try:
+        seq = journal.api_event(resource, "fixture", resource + "." + suffix, {"operation_id": "other"})
+        assert hub._event_seq(journal.db, resource, "fixture") == seq
+        assert hub._event_seq(journal.db, resource, "fixture", exclude="own") == seq
+        assert hub._event_seq(journal.db, resource, "fixture", exclude="other") == 0
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize("resource", ["project", "work_item"])
+def test_b05_row_marker_filters_in_sql_and_stops_at_newest_edit(tmp_path, monkeypatch, resource):
+    from bat_agent_connector.task_journal import Journal
+
+    journal = Journal(tmp_path / "events.db")
+    db = journal.db
+    mapped_field = "name" if resource == "project" else "title"
+    ignored_kind = "project.ordered" if resource == "project" else "work_item.linked"
+    counted_kind = "project.pinned" if resource == "project" else "work_item.state"
+    journal.api_event(resource, "fixture", resource + ".created", {"operation_id": "older"})
+    mapped_seq = journal.api_event(resource, "fixture", resource + ".updated",
+                                  {"operation_id": "other", "fields": [mapped_field]})
+    journal.api_event(resource, "fixture", resource + ".updated",
+                      {"operation_id": "other", "fields": ["unmapped"]})
+    own_seq = journal.api_event(resource, "fixture", counted_kind, {"operation_id": "own"})
+    ignored_seq = journal.api_event(resource, "fixture", ignored_kind)
+    db.execute("UPDATE api_events SET body='not JSON' WHERE seq=?", (ignored_seq,))
+    parsed, visited, statements = [], [], []
+    original_factory = db.row_factory
+
+    def loads(body):
+        parsed.append(body)
+        return json.loads(body)
+
+    def row_factory(cursor, row):
+        visited.append(row[0])
+        return original_factory(cursor, row)
+
+    # Patch only this module's JSON binding; no global stdlib mutation.
+    monkeypatch.setattr(hub, "json", SimpleNamespace(loads=loads))
+    db.row_factory = row_factory
+    db.set_trace_callback(statements.append)
+    try:
+        assert hub._event_seq(db, resource, "fixture") == own_seq
+        assert visited == [own_seq] and not parsed
+        visited.clear()
+        assert hub._event_seq(db, resource, "fixture", exclude="own") == mapped_seq
+        assert visited == [own_seq, mapped_seq + 1, mapped_seq] and len(parsed) == 3
+        assert all("kind NOT IN" in sql and "ORDER BY seq DESC" in sql for sql in statements)
+    finally:
+        db.set_trace_callback(None)
+        db.row_factory = original_factory
+        journal.close()
 
 
 @pytest.mark.parametrize("target", ["alpha", "fork", "rename"])

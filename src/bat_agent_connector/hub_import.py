@@ -44,6 +44,24 @@ PREVIEW_ID = re.compile(r"hip_[0-9a-f]{32}")
 ACCEPTANCE = {"驗收條件", "受け入れ条件", "受入条件", "Acceptance"}
 CLASSIFICATIONS = ("create", "update", "metadata_only", "unchanged", "local_only", "source_missing", "conflict")
 STRUCTURAL = ("parent_id", "derived_from", "pinned")
+ROW_EDIT_EVENTS = {
+    "project": frozenset({"project.created", "project.updated", "project.pinned", "project.unpinned",
+                          "project.archived", "project.restored"}),
+    "work_item": frozenset({"work_item.created", "work_item.updated", "work_item.state",
+                            "work_item.continued", "work_item.approved", "work_item.archived",
+                            "work_item.restored"}),
+}
+ROW_IGNORED_EVENTS = {
+    # Task ordering is emitted on its project, but remains group state.
+    "project": frozenset({"project.ordered", "work_item.ordered"}),
+    "work_item": frozenset({"work_item.ordered", "work_item.linked", "work_item.unlinked",
+                            "work_item.pinned", "work_item.unpinned"}),
+}
+MAPPED_FIELDS = {
+    "project": frozenset({"name", "description", "parent_id", "derived_from", "pinned"}),
+    "work_item": frozenset({"title", "goal", "request", "acceptance", "steps", "state",
+                           "continued_steps", "parent_id", "derived_from"}),
+}
 
 
 def _error(code: str, message: str, status: int = 422):
@@ -754,17 +772,20 @@ def _maps(db, sid: str) -> dict:
 
 
 def _event_seq(db, resource: str, rid: str, *, exclude: str | None = None) -> int:
-    mapped = {"name", "description", "parent_id", "derived_from", "pinned"} if resource == "project" else {
-        "title", "goal", "request", "acceptance", "steps", "state", "continued_steps", "parent_id", "derived_from"}
-    seq = 0
-    for row in db.execute("SELECT seq,kind,body FROM api_events WHERE resource_type=? AND resource_id=? ORDER BY seq", (resource, rid)):
-        body = json.loads(row["body"])
-        if row["kind"].endswith(".ordered") or (exclude and body.get("operation_id") == exclude):
+    ignored = sorted(ROW_IGNORED_EVENTS[resource])
+    placeholders = ",".join("?" for _ in ignored)
+    for row in db.execute(f"""SELECT seq,kind,body FROM api_events
+        WHERE resource_type=? AND resource_id=? AND kind NOT IN ({placeholders})
+        ORDER BY seq DESC""", (resource, rid, *ignored)):  # noqa: S608 - only parameter placeholders
+        updated = row["kind"] == resource + ".updated"
+        body = json.loads(row["body"]) if updated or exclude else None
+        if exclude and body.get("operation_id") == exclude:
             continue
-        if row["kind"].endswith(".updated") and not mapped.intersection(body.get("fields", [])):
+        if updated and not MAPPED_FIELDS[resource].intersection(body.get("fields", [])):
             continue
-        seq = row["seq"]
-    return seq
+        # Known edit kinds and every unlisted kind count (fail closed).
+        return row["seq"]
+    return 0
 
 
 def _group_order(db, scope, parent, table, pk, *, exclude=None):
@@ -793,6 +814,19 @@ def _destination(db, kind: str, cid: str | None, *, exclude: str | None = None) 
     value.update(wi.split_creation_reference(value.pop("operation_id")))
     links = [dict(r) for r in db.execute("SELECT * FROM work_item_links WHERE work_item_id=? ORDER BY link_id", (cid,))] if kind == "item" else []
     return {"row": value, "links": links, "event_seq": _event_seq(db, "work_item" if kind == "item" else "project", cid, exclude=exclude)}
+
+
+def _row_baseline(kind: str, destination: dict | None, previous_source: dict) -> dict | None:
+    """Compare imported facts; retain the full destination for preview/apply verification."""
+    if destination is None:
+        return None
+    facts = {k: v for k, v in destination.items() if k != "event_seq"}
+    if kind != "item":
+        return facts
+    urls = set(previous_source.get("links", []))
+    return {**facts,
+            "row": {k: v for k, v in destination["row"].items() if k not in ("pinned", "updated_at")},
+            "links": [link for link in destination["links"] if link["kind"] == "external_url" and link["ref"] in urls]}
 
 
 def _group_state(db, sid: str, gk: str, *, exclude: str | None = None, ignore_new: bool = False) -> dict | None:
@@ -889,7 +923,9 @@ def _plan(ops, snap: dict, normalized: dict) -> dict:
             classification, code = "conflict", "IMPORT_TARGET_MISSING"
         else:
             source_changed = record["source_digest"] != (pending or {}).get("source_digest", mapping["source_digest"])
-            local_changed = comparable != base
+            previous_source = pending or json.loads(mapping["snapshot"] or "{}")
+            local_changed = (_row_baseline(kind, comparable, previous_source) != _row_baseline(kind, base, previous_source)
+                             or comparable["event_seq"] > base["event_seq"])
             incomplete = mapping["import_state"] == "incomplete"
             classification = "conflict" if (source_changed or incomplete) and local_changed else (
                 "local_only" if local_changed else "update" if source_changed or incomplete else "unchanged")

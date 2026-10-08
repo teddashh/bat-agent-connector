@@ -2,6 +2,7 @@
 
 ## Next release (unreleased)
 
+- Hub re-import now classifies row events explicitly and reads the newest relevant event first ([docs/design/hub-import.md](docs/design/hub-import.md), plan §08/§09, B05). Local session/PR links and task pins no longer block Hub content updates and survive apply; project pins, archive/restore, approvals, mapped URL removals and unknown event kinds still protect local decisions. Preview-to-apply checks retain the full destination snapshot.
 - Delivery operations no longer end as `failed` while GitHub is still merging or deploying (#32). A refused GitHub
   read after a merge request or dispatch was sent (an expired token's 401, a 403, a 404) now waits for a person
   (`needs_attention`) and keeps the recipe's deploy lock; before any write it still fails. A rate-limited read (403),
