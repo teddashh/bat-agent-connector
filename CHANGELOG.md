@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- Reject Python import-path overrides before account-check interpreters run ([design](docs/design/confinement.md),
+  A10). The shared shell gate now refuses executable/shared-library `._pth` files and build markers, including
+  libpython symlink targets and standard multiarch directories. These can redirect startup imports despite
+  `-I -S`; even root-owned overrides are outside the supported system-package layout. Earlier closure caches
+  expire. Custom Python builds/loader paths and hostile same-UID processes remain outside the trust claim.
+
 - Keep unsent same-ID starts retryable after a confirmed worktree rollback ([design](docs/design/confinement.md),
   計畫 §06/§12/§28, A10; v2 A06). Clear the removed carrier's path/branch, restore the origin cwd and retain its
   rollback audit, so retry creates a new worktree. Failed, cancelled or unconfirmed removal keeps the original
