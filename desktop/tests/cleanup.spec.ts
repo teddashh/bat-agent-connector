@@ -153,7 +153,7 @@ for (const locale of ["en-US", "zh-TW"]) for (const width of [390, 768, 1440]) {
       await page.locator("button.secondary").filter({hasText: locale === "en-US" ? "Start agent work from this version" : "從此版本建立 agent 工作"}).click();
       const note = page.locator("[data-confinement-note]");
       await expect(note).toContainText("acceptEdits");
-      await page.locator("select[aria-label]:visible").selectOption("codex");
+      await page.getByRole("combobox", {name: "Agent", exact: true}).selectOption("codex");
       await expect(note).toContainText("workspace-write");
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.evaluate(() => scrollTo(0, 0));

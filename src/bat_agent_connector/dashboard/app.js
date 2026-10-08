@@ -2,6 +2,28 @@
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		attachment_file_changed: "請重新選擇相同檔案以查回原上傳；不同內容請先移除這一項。",
+		attachment_pending: "上傳結果仍待確認。請以相同檔案重試原操作。",
+		existing_artifact: "已上傳附件",
+		add_attachment: "加入附件",
+		attachments: "附件",
+		choose_attachments: "選擇附件",
+		upload_on_choose: "選擇檔案後立即上傳。成功上傳的版本會隨草稿保存。",
+		choose_again: "請重新選擇這個檔案。瀏覽器無法在重新載入後開啟本機檔案。",
+		uploading: "正在上傳…",
+		retry: "重試",
+		attachment_role: "附件用途",
+		attachment_input: "輸入",
+		attachment_result: "成果",
+		attachments_not_ready: "請先完成附件上傳或移除未完成的檔案。",
+		source_unavailable: "無法讀取來源 HEAD，保留草稿；恢復連線後再試。",
+		confirm_source: "確認保留原版本與附件，繼續同一派工",
+		materializations: "附件傳輸",
+		material_pending: "待傳輸",
+		material_transferring: "傳輸中",
+		material_uncertain: "待確認",
+		material_verified: "已驗證",
+		material_blocked: "受阻",
 		"nav_cleanup": "整理與復原",
 		"cleanup_target": "選擇整理範圍",
 		"cleanup_target_work_item": "工作項目",
@@ -426,6 +448,28 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		attachment_file_changed: "Choose the same file to recover this upload; remove this entry before choosing different content.",
+		attachment_pending: "Upload outcome is still pending. Retry the original operation with the same file.",
+		existing_artifact: "Uploaded attachment",
+		add_attachment: "Add attachment",
+		attachments: "Attachments",
+		choose_attachments: "Choose attachments",
+		upload_on_choose: "Files upload when chosen. Uploaded revisions are saved with your draft.",
+		choose_again: "Choose this file again. The browser cannot reopen local files after a reload.",
+		uploading: "Uploading…",
+		retry: "Retry",
+		attachment_role: "Attachment role",
+		attachment_input: "Input",
+		attachment_result: "Result",
+		attachments_not_ready: "Finish uploading or remove the unfinished files first.",
+		source_unavailable: "Source HEAD is unavailable. Your draft is kept; retry after reconnecting.",
+		confirm_source: "Keep the original commit and attachments; resume this run",
+		materializations: "Attachment transfer",
+		material_pending: "Pending",
+		material_transferring: "Transferring",
+		material_uncertain: "Checking",
+		material_verified: "Verified",
+		material_blocked: "Blocked",
 		"nav_cleanup": "Cleanup and retained work",
 		"cleanup_target": "Choose a scope",
 		"cleanup_target_work_item": "Work item",
@@ -887,6 +931,26 @@ async function connectorRequest(method, path, body, key, browserToken) {
 		data: await res.json().catch(() => ({}))
 	};
 }
+async function connectorUploadArtifact(operationId, bytes, browserToken) {
+	if (!/^op_[0-9a-f]{32}$/.test(operationId)) throw new Error("Invalid artifact upload operation ID");
+	if (nativeDesktop) {
+		if (bytes.byteLength > 16777216) throw new Error("Artifact exceeds the native 16 MiB upload limit");
+		return invoke("connector_upload_artifact", bytes, { headers: { "x-batc-upload-operation": operationId } });
+	}
+	const res = await fetch(`/api/v1/artifacts/uploads/${operationId}/content`, {
+		method: "POST",
+		redirect: "error",
+		headers: {
+			Authorization: `Bearer ${browserToken}`,
+			"Content-Type": "application/octet-stream"
+		},
+		body: bytes
+	});
+	return {
+		status: res.status,
+		data: await res.json().catch(() => ({}))
+	};
+}
 //#endregion
 //#region src/state/events.ts
 function consumePage(page, cursor, emit) {
@@ -1151,6 +1215,359 @@ async function submit(action, target, params, preconditions, scope) {
 		if (e.status && e.status < 500 && e.status !== 409) dropKey(scope, connection.namespace);
 		throw e;
 	}
+}
+function attachmentDraft(scope, text, initial = [], roles = false) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	const key = `batc.draft.${connection.namespace}.${scope}`;
+	let saved;
+	try {
+		saved = JSON.parse(localStorage.getItem(key));
+	} catch {}
+	saved = saved && typeof saved === "object" ? saved : {
+		text: text.value,
+		attachments: initial.map((ref) => ({
+			name: ref.artifact_id,
+			ref: { ...ref }
+		}))
+	};
+	saved.attachments ||= [];
+	for (const a of saved.attachments) delete a.busy;
+	if (typeof saved.text === "string") text.value = saved.text;
+	const files = new Map(), rows = h("div", { class: "attachment-list" });
+	const status = h("p", {
+		class: "muted",
+		role: "status"
+	});
+	const supported = Boolean(state.caps?.artifacts);
+	const choose = h("input", {
+		type: "file",
+		multiple: true,
+		disabled: !supported || !may("manage"),
+		"aria-label": t("choose_attachments")
+	});
+	const box = h("div", {
+		class: "attachments",
+		hidden: !supported
+	}, h("label", {}, t("attachments"), choose), h("p", { class: "muted" }, t("upload_on_choose")), rows, status);
+	const guard = (mounted = false) => {
+		assertView(connection);
+		if (mounted && !box.isConnected) throw new ApiError(0, "VIEW_CHANGED", "Attachment form changed during the request");
+	};
+	const persist = () => {
+		guard();
+		saved.text = text.value;
+		try {
+			localStorage.setItem(key, JSON.stringify(saved));
+		} catch {}
+	};
+	const removeStored = () => {
+		guard();
+		try {
+			localStorage.removeItem(key);
+		} catch {}
+	};
+	text.addEventListener("input", persist);
+	const refs = () => saved.attachments.filter((a) => a.ref).map((a) => roles ? {
+		...a.ref,
+		role: a.ref.role || "input"
+	} : {
+		artifact_id: a.ref.artifact_id,
+		revision: a.ref.revision,
+		digest: a.ref.digest
+	});
+	const snapshot = () => JSON.stringify({
+		text: text.value,
+		attachments: refs(),
+		fields: saved.fields
+	});
+	const ready = () => saved.attachments.every((a) => a.ref);
+	const render = () => fill(rows, ...saved.attachments.map((a) => h("div", { class: "row" }, h("div", { class: "grow" }, a.name, a.ref ? h("div", { class: "muted" }, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`) : h("div", { class: "muted" }, a.error || (files.has(a) ? t("uploading") : t("choose_again")))), a.ref && roles ? h("select", {
+		"aria-label": t("attachment_role"),
+		onchange: (e) => {
+			guard();
+			a.ref.role = e.target.value;
+			persist();
+		}
+	}, ...["input", "result"].map((role) => h("option", {
+		value: role,
+		selected: (a.ref.role || "input") === role
+	}, t(`attachment_${role}`)))) : null, !a.ref && files.has(a) && !a.busy ? h("button", {
+		class: "secondary",
+		onclick: () => upload(a)
+	}, t("retry")) : null, h("button", {
+		class: "secondary",
+		disabled: a.busy,
+		onclick: () => {
+			guard();
+			saved.attachments = saved.attachments.filter((x) => x !== a);
+			files.delete(a);
+			persist();
+			render();
+		}
+	}, t("remove")))));
+	const acceptUpload = (a, op) => {
+		if (op.status !== "succeeded") return;
+		a.ref = {
+			artifact_id: op.result.artifact_id,
+			revision: op.result.revision,
+			digest: op.result.digest,
+			...roles ? { role: "input" } : {}
+		};
+		delete a.operation_id;
+		delete a.key;
+		delete a.error;
+		delete a.request;
+		files.delete(a);
+		persist();
+		render();
+	};
+	const upload = async (a) => {
+		if (a.busy) return;
+		guard();
+		a.busy = true;
+		delete a.error;
+		render();
+		try {
+			const file = files.get(a), limit = Math.min(state.caps.artifacts.limits.max_file_bytes, nativeDesktop ? 16777216 : Number.MAX_SAFE_INTEGER);
+			if (file.size > limit) throw new Error(`ARTIFACT_TOO_LARGE (${limit})`);
+			const bytes = await file.arrayBuffer();
+			guard(true);
+			const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((x) => x.toString(16).padStart(2, "0")).join("");
+			guard(true);
+			const request = {
+				action: "artifact.upload",
+				target: {},
+				params: {
+					display_name: file.name,
+					media_type: file.type || "application/octet-stream",
+					size_bytes: file.size,
+					expected_digest: digest
+				},
+				preconditions: {}
+			};
+			if (a.request && JSON.stringify(a.request) !== JSON.stringify(request)) throw new Error(t("attachment_file_changed"));
+			a.request ||= request;
+			a.key ||= crypto.randomUUID();
+			persist();
+			let op = a.operation_id ? (await api("GET", `/operations/${a.operation_id}`)).operation : null;
+			guard(true);
+			if (op && ["failed", "cancelled"].includes(op.status)) {
+				op = null;
+				a.key = crypto.randomUUID();
+				delete a.operation_id;
+				persist();
+			}
+			if (!op) op = (await api("POST", "/operations?wait=3", a.request, a.key)).operation;
+			guard(true);
+			a.operation_id = op.operation_id;
+			persist();
+			const deadline = Date.now() + 6e4;
+			const readNext = async () => {
+				if (Date.now() > deadline) throw new Error(t("attachment_pending"));
+				await sleep(400);
+				guard(true);
+				const next = (await api("GET", `/operations/${op.operation_id}`)).operation;
+				guard(true);
+				return next;
+			};
+			while (["accepted", "running"].includes(op.status)) op = await readNext();
+			if (op.status === "waiting_external") {
+				if (!state.online || !state.viewReady) throw new ApiError(0, "CENTRAL_OFFLINE", t("offline_actions_paused"));
+				const epoch = state.epoch;
+				const response = await connectorUploadArtifact(op.operation_id, bytes, state.token);
+				guard(true);
+				if (epoch !== state.epoch) throw new ApiError(0, "CONNECTION_CHANGED", "Connection changed during upload");
+				if (response.status < 200 || response.status >= 300) throw new ApiError(response.status, response.data.error?.code, response.data.error?.message);
+				do
+					op = await readNext();
+				while ([
+					"accepted",
+					"running",
+					"waiting_external"
+				].includes(op.status));
+			}
+			if (op.status !== "succeeded") throw new Error(`${op.error_code || op.status}: ${op.status_reason || ""}`);
+			acceptUpload(a, op);
+		} catch (e) {
+			if (connection.epoch !== state.epoch || connection.generation !== generation || !box.isConnected) return;
+			a.error = e.message;
+		} finally {
+			delete a.busy;
+			if (connection.epoch === state.epoch && connection.generation === generation && box.isConnected) {
+				persist();
+				render();
+			}
+		}
+	};
+	choose.onchange = () => {
+		guard();
+		for (const file of choose.files) {
+			let a = saved.attachments.find((x) => !x.ref && !files.has(x) && x.name === file.name);
+			if (!a) {
+				a = { name: file.name };
+				saved.attachments.push(a);
+			}
+			files.set(a, file);
+			upload(a);
+		}
+		choose.value = "";
+		persist();
+		render();
+	};
+	const existing = h("select", { "aria-label": t("existing_artifact") }, h("option", { value: "" }, t("existing_artifact")));
+	box.append(h("div", { class: "actions" }, existing, h("button", {
+		class: "secondary",
+		onclick: async () => {
+			if (!existing.value) return;
+			const [artifactId, revision] = existing.value.split(":");
+			try {
+				guard();
+				const { artifact } = await api("GET", `/artifacts/${artifactId}/revisions/${revision}`);
+				guard(true);
+				if (artifact.state !== "ready") throw new Error(t("attachments_not_ready"));
+				if (!saved.attachments.some((a) => a.ref?.artifact_id === artifactId && a.ref?.revision === Number(revision))) saved.attachments.push({
+					name: artifact.display_name,
+					ref: {
+						artifact_id: artifactId,
+						revision: Number(revision),
+						digest: artifact.digest,
+						...roles ? { role: "input" } : {}
+					}
+				});
+				persist();
+				render();
+			} catch (e) {
+				if (connection.epoch === state.epoch) fill(status, errorBox(e));
+			}
+		}
+	}, t("add_attachment"))));
+	let catalogCursor = null;
+	const more = h("button", {
+		class: "secondary",
+		hidden: true,
+		onclick: async () => {
+			more.disabled = true;
+			try {
+				await loadCatalog(catalogCursor);
+			} catch (e) {
+				if (box.isConnected) fill(status, errorBox(e));
+			} finally {
+				more.disabled = false;
+			}
+		}
+	}, t("more"));
+	box.append(more);
+	const loadCatalog = async (cursor = "") => {
+		const page = await api("GET", `/artifacts?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+		guard(true);
+		const selected = existing.value, selectedOption = existing.selectedOptions[0];
+		if (!cursor) existing.replaceChildren(h("option", { value: "" }, t("existing_artifact")));
+		for (const { revision: r } of page.artifacts) if (r?.state === "ready" && ![...existing.options].some((o) => o.value === `${r.artifact_id}:${r.revision}`)) existing.append(h("option", { value: `${r.artifact_id}:${r.revision}` }, `${r.display_name} · r${r.revision} · ${r.artifact_id.slice(-8)}`));
+		if (selected && ![...existing.options].some((o) => o.value === selected)) existing.append(selectedOption);
+		existing.value = selected;
+		catalogCursor = page.next_cursor;
+		more.hidden = !catalogCursor;
+	};
+	const settleSubmission = (op) => {
+		guard(true);
+		if (!saved.submission || !TERMINAL.includes(op.status)) return;
+		const unchanged = saved.submission.snapshot === snapshot();
+		delete saved.submission;
+		if (op.status === "succeeded" && unchanged) {
+			text.value = "";
+			saved.attachments = [];
+			saved.fields = void 0;
+			removeStored();
+			render();
+		} else persist();
+	};
+	const perform = async (action, target, params, preconditions, requestScope) => {
+		guard(true);
+		const request = {
+			action,
+			target,
+			params,
+			preconditions
+		};
+		if (saved.submission?.refused && JSON.stringify(saved.submission.request) !== JSON.stringify(request)) delete saved.submission;
+		if (!saved.submission) {
+			saved.submission = {
+				request: structuredClone({
+					action,
+					target,
+					params,
+					preconditions
+				}),
+				key: crypto.randomUUID(),
+				snapshot: snapshot(),
+				scope: requestScope
+			};
+			persist();
+		}
+		const intent = saved.submission;
+		try {
+			const op = intent.operation_id ? (await api("GET", `/operations/${intent.operation_id}`)).operation : (await api("POST", "/operations?wait=3", intent.request, intent.key)).operation;
+			guard(true);
+			intent.operation_id = op.operation_id;
+			persist();
+			settleSubmission(op);
+			return op;
+		} catch (error) {
+			if (connection.epoch === state.epoch && connection.generation === generation && error.status >= 400 && error.status < 500 && error.code !== "IDEMPOTENCY_CONFLICT") {
+				intent.refused = true;
+				persist();
+			}
+			throw error;
+		}
+	};
+	const refresh = async () => {
+		guard(true);
+		await settleRefreshes([...saved.attachments.filter((a) => !a.ref && a.operation_id).map(async (a) => {
+			const { operation } = await api("GET", `/operations/${a.operation_id}`);
+			guard(true);
+			acceptUpload(a, operation);
+		}), ...saved.submission?.operation_id ? [(async () => {
+			const { operation } = await api("GET", `/operations/${saved.submission.operation_id}`);
+			guard(true);
+			settleSubmission(operation);
+		})()] : []]);
+	};
+	if (supported) {
+		const unsub = onEvents((ev) => {
+			if (!box.isConnected || connection.epoch !== state.epoch) {
+				unsub();
+				return;
+			}
+			if (ev.resource_type === "artifact") return settleRefreshes([refresh(), loadCatalog()]);
+			if (ev.resource_id === saved.submission?.operation_id || saved.attachments.some((a) => a.operation_id === ev.resource_id)) return refresh();
+		});
+		queueMicrotask(() => settleRefreshes([loadCatalog(), refresh()]).catch((e) => {
+			if (box.isConnected && connection.epoch === state.epoch) fill(status, errorBox(e));
+		}));
+	}
+	const bindFields = (fields) => {
+		for (const [name, field] of Object.entries(fields)) {
+			if (typeof saved.fields?.[name] === "string") field.value = saved.fields[name];
+			field.addEventListener("input", () => {
+				guard();
+				saved.fields = Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, value.value]));
+				persist();
+			});
+		}
+	};
+	render();
+	return {
+		box,
+		refs,
+		ready,
+		perform,
+		bindFields,
+		pending: () => Boolean(saved.submission)
+	};
 }
 function onEvents(fn) {
 	state.listeners.add(fn);
@@ -1563,16 +1980,22 @@ function checkpointPanel(host, sid) {
 		const instr = h("textarea", { placeholder: t("continue_placeholder") });
 		const agent = h("select", { "aria-label": t("agent") }, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
 		const out = h("div", { class: "muted" });
+		const draft = attachmentDraft(`continue.${cp.checkpoint_id}`, instr, cp.artifacts || []);
+		draft.bindFields({ agent });
+		let expectedHead = null;
 		const go = h("button", {
 			class: "primary",
 			onclick: async () => {
 				if (!instr.value.trim()) return;
 				go.disabled = true;
 				try {
-					const op = await submit("checkpoint.continue", { checkpoint_id: cp.checkpoint_id }, {
+					if (!draft.ready() && !draft.pending()) throw new Error(t("attachments_not_ready"));
+					if (state.caps?.artifacts && !expectedHead && !draft.pending()) throw new Error(t("source_unavailable"));
+					const op = await draft.perform("checkpoint.continue", { checkpoint_id: cp.checkpoint_id }, {
 						instructions: instr.value,
-						agent: agent.value
-					}, {}, `continue.${cp.checkpoint_id}`);
+						agent: agent.value,
+						...state.caps?.artifacts ? { artifacts: draft.refs() } : {}
+					}, state.caps?.artifacts ? { expected_source_head_sha: expectedHead } : {}, `continue.${cp.checkpoint_id}`);
 					out.replaceChildren(opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
 				} catch (e) {
 					out.replaceChildren(errorBox(e));
@@ -1580,7 +2003,7 @@ function checkpointPanel(host, sid) {
 				go.disabled = false;
 			}
 		}, t("start_agent_work"));
-		const form = h("div", { hidden: true }, confinementNote(host, agent), instr, h("div", { class: "actions" }, agent, go), out);
+		const form = h("div", { hidden: true }, confinementNote(host, agent), instr, draft.box, h("div", { class: "actions" }, agent, go), out);
 		return h("div", { class: "row" }, h("div", { class: "grow" }, h("div", { class: "title" }, h("code", {}, cp.commit_sha.slice(0, 12)), " ", cp.branch || ""), h("div", { class: "muted" }, [
 			when(epoch(cp.captured_at)),
 			cp.actor,
@@ -1589,8 +2012,14 @@ function checkpointPanel(host, sid) {
 			class: "secondary",
 			disabled: !can || !mayStart,
 			title: !can ? t("checkpoint_unavailable") : mayStart ? null : t("needs_start_scope"),
-			onclick: () => {
+			onclick: async () => {
 				form.hidden = !form.hidden;
+				if (state.caps?.artifacts && !form.hidden && !expectedHead) try {
+					expectedHead = (await api("GET", `/checkpoints/${cp.checkpoint_id}?live=true`)).source.head;
+					if (!expectedHead) fill(out, h("p", { class: "error" }, t("source_unavailable")));
+				} catch (e) {
+					fill(out, errorBox(e));
+				}
 			}
 		}, t("continue_from_checkpoint")));
 	};
@@ -2124,7 +2553,8 @@ async function viewOperation(main, id) {
 					}
 				}
 			}, t("retry_deploy")) : null;
-			const resume = op.status === "needs_attention" ? h("button", {
+			const needsConfirm = op.action === "checkpoint.continue" && ["SOURCE_MOVED", "SOURCE_UNAVAILABLE"].includes(op.error_code);
+			const resume = op.status === "needs_attention" && !needsConfirm ? h("button", {
 				class: "primary",
 				title: t("resume_help"),
 				onclick: async () => {
@@ -2136,6 +2566,26 @@ async function viewOperation(main, id) {
 					}
 				}
 			}, t("resume")) : null;
+			const confirmSource = op.status === "needs_attention" && needsConfirm ? h("button", {
+				class: "primary",
+				onclick: async () => {
+					const connection = {
+						epoch: state.epoch,
+						namespace: state.namespace,
+						generation
+					};
+					try {
+						const seen = (await api("GET", `/checkpoints/${op.target.checkpoint_id}?live=true`)).source.head;
+						assertView(connection);
+						if (!seen) throw new Error(t("source_unavailable"));
+						await submit("checkpoint.continue.revalidate", { operation_id: id }, { observed_source_head_sha: seen }, { expected_input_manifest_digest: refs.input_manifest_digest }, `revalidate.${id}.${seen}`);
+						render();
+					} catch (e) {
+						panel.append(errorBox(e));
+					}
+				}
+			}, t("confirm_source")) : null;
+			const materialized = refs.materializations || op.result?.materializations || [];
 			const opened = op.result?.session_id && op.result?.host ? h("a", {
 				class: "secondary",
 				href: `#/session/${encodeURIComponent(op.result.host)}/${encodeURIComponent(op.result.session_id)}`
@@ -2162,7 +2612,7 @@ async function viewOperation(main, id) {
 				return;
 			}
 			freshPage();
-			fill(panel, h("h1", {}, op.action), h("p", { class: "op-status" }, opStatus(op), " ", op.error_code ? chip(op.error_code, "bad") : null), ...linked?.length ? [linkedItems(linked)] : [], h("dl", { class: "kv" }, h("dt", {}, t("actor")), h("dd", {}, `${op.actor} (${op.entry})`), h("dt", {}, t("created")), h("dd", {}, when(epoch(op.created_at))), op.status_reason ? [h("dt", {}, t("reason")), h("dd", {}, op.status_reason)] : null, h("dt", {}, "Target"), h("dd", {}, h("code", {}, JSON.stringify(op.target))), Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null, op.result ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null), ...receipts || [], ...cleanupReceipts?.length ? [h("h2", {}, t("cleanup_open_receipts")), ...cleanupReceipts.map((r) => h("details", { class: "row-details" }, h("summary", {}, r.resource_id, " · ", t("cleanup_receipt_" + r.status)), h("pre", { class: "pre" }, JSON.stringify(r, null, 2))))] : [], ...op.action === "integration.apply" ? [repairControl(op)] : [], (op.result?.merge || op.result || refs.merge_receipt)?.base_moved ? h("p", { class: "note warn" }, t("merged_newer_base", { count: (op.result?.merge || op.result || refs.merge_receipt).other_commits_count })) : null, refs.write_acknowledged && refs.verification_pending ? h("p", { class: "note warn" }, t("metadata_pending")) : null, h("h2", {}, t("steps")), ...op.steps.map((s) => h("div", { class: "row" }, h("div", { class: "grow" }, s.name), h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)), h("div", { class: "actions" }, opened, resume, retry, cancel));
+			fill(panel, h("h1", {}, op.action), h("p", { class: "op-status" }, opStatus(op), " ", op.error_code ? chip(op.error_code, "bad") : null), ...linked?.length ? [linkedItems(linked)] : [], h("dl", { class: "kv" }, h("dt", {}, t("actor")), h("dd", {}, `${op.actor} (${op.entry})`), h("dt", {}, t("created")), h("dd", {}, when(epoch(op.created_at))), op.status_reason ? [h("dt", {}, t("reason")), h("dd", {}, op.status_reason)] : null, h("dt", {}, "Target"), h("dd", {}, h("code", {}, JSON.stringify(op.target))), Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null, op.result ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null), ...receipts || [], ...materialized.length ? [h("h2", {}, t("materializations")), ...materialized.map((m) => h("div", { class: "row" }, h("div", { class: "grow" }, `${m.artifact_id} · r${m.revision}`, h("div", { class: "muted" }, m.managed_path)), chip(t(`material_${m.state}`), m.state === "verified" ? "ok" : "")))] : [], ...cleanupReceipts?.length ? [h("h2", {}, t("cleanup_open_receipts")), ...cleanupReceipts.map((r) => h("details", { class: "row-details" }, h("summary", {}, r.resource_id, " · ", t("cleanup_receipt_" + r.status)), h("pre", { class: "pre" }, JSON.stringify(r, null, 2))))] : [], ...op.action === "integration.apply" ? [repairControl(op)] : [], (op.result?.merge || op.result || refs.merge_receipt)?.base_moved ? h("p", { class: "note warn" }, t("merged_newer_base", { count: (op.result?.merge || op.result || refs.merge_receipt).other_commits_count })) : null, refs.write_acknowledged && refs.verification_pending ? h("p", { class: "note warn" }, t("metadata_pending")) : null, h("h2", {}, t("steps")), ...op.steps.map((s) => h("div", { class: "row" }, h("div", { class: "grow" }, s.name), h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)), h("div", { class: "actions" }, opened, confirmSource, resume, retry, cancel));
 		} catch (e) {
 			fill(panel, errorBox(e));
 		}
@@ -2620,7 +3070,7 @@ async function viewProject(main, pid) {
 					task_project: f.task_project.value.trim()
 				};
 				const ok = await change(msg, "project.update", { project_id: pid }, params, { expected_version: p.version }, `project.edit.${pid}`);
-				if (!ok && STALE.includes(lastFailure)) draft = params;
+				if (!ok && STALE.includes(op.error_code)) draft = params;
 				if (ok || draft) render();
 			}
 		}, t("save"))));
@@ -2801,15 +3251,34 @@ async function viewWorkItem(main, wid) {
 			request: h("textarea", {}, v.request),
 			acceptance: h("textarea", {}, v.acceptance)
 		};
-		const d = drawer(h("label", {}, t("title")), f.title, h("label", {}, t("goal")), f.goal, h("label", {}, t("request")), f.request, h("label", {}, t("acceptance")), f.acceptance, h("div", { class: "actions" }, h("button", {
+		const attachment = attachmentDraft(`wi.edit.${wid}`, f.request, v.attachments || [], true);
+		attachment.bindFields(f);
+		const d = drawer(h("label", {}, t("title")), f.title, h("label", {}, t("goal")), f.goal, h("label", {}, t("request")), f.request, h("label", {}, t("acceptance")), f.acceptance, attachment.box, h("div", { class: "actions" }, h("button", {
 			class: "primary",
 			onclick: async () => {
 				const params = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, k === "title" ? el.value.trim() : el.value]).filter(([k, v]) => v !== w[k]));
-				if (!Object.keys(params).length) {
+				if (!attachment.ready()) {
+					fill(notice, h("p", { class: "error" }, t("attachments_not_ready")));
+					return;
+				}
+				if (JSON.stringify(attachment.refs()) !== JSON.stringify(w.attachments || [])) params.attachments = attachment.refs();
+				if (!Object.keys(params).length && !attachment.pending()) {
 					d.close();
 					return;
 				}
-				const ok = await update(params, `wi.edit.${wid}`);
+				let op;
+				try {
+					op = await attachment.perform("work_item.update", { work_item_id: wid }, params, pre, `wi.edit.${wid}`);
+				} catch (e) {
+					fill(notice, errorBox(e));
+					if (STALE.includes(e.code)) {
+						draft = params;
+						render();
+					}
+					return;
+				}
+				const ok = op.status === "succeeded";
+				if (!ok) fill(notice, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
 				if (!ok && STALE.includes(lastFailure)) draft = params;
 				if (ok || draft) render();
 			}
@@ -2881,6 +3350,11 @@ async function viewWorkItem(main, wid) {
 	return liveReload(render, ["work_item"]);
 }
 function continueFrom(w, checkpointId, notice) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
 	const instr = h("textarea", {}, [
 		w.title,
 		w.goal,
@@ -2890,38 +3364,60 @@ function continueFrom(w, checkpointId, notice) {
 	].filter(Boolean).join("\n\n"));
 	const agent = h("select", { "aria-label": t("agent") }, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
 	const out = h("div", {});
+	const draft = attachmentDraft(`continue.${checkpointId}.${w.work_item_id}`, instr, (w.attachments || []).filter((x) => x.role === "input"));
+	draft.bindFields({ agent });
+	let expectedHead = null;
 	const go = h("button", {
 		class: "primary",
 		onclick: async () => {
 			go.disabled = true;
 			let op;
 			try {
-				op = await submit("checkpoint.continue", { checkpoint_id: checkpointId }, {
+				if (!draft.ready() && !draft.pending()) throw new Error(t("attachments_not_ready"));
+				if (state.caps?.artifacts && !expectedHead && !draft.pending()) throw new Error(t("source_unavailable"));
+				op = await draft.perform("checkpoint.continue", { checkpoint_id: checkpointId }, {
 					instructions: instr.value,
-					agent: agent.value
-				}, {}, `continue.${checkpointId}`);
+					agent: agent.value,
+					...state.caps?.artifacts ? {
+						artifacts: draft.refs(),
+						work_item_id: w.work_item_id
+					} : {}
+				}, state.caps?.artifacts ? {
+					expected_source_head_sha: expectedHead,
+					expected_work_item_fingerprint: w.completion.fingerprint
+				} : {}, `continue.${checkpointId}`);
 			} catch (e) {
 				fill(out, errorBox(e));
 				go.disabled = false;
 				return;
 			}
+			assertView(connection);
 			fill(out, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
 			if (TERMINAL.includes(op.status) && op.status !== "succeeded") return;
-			if (await change(notice, "work_item.link", { work_item_id: w.work_item_id }, {
-				kind: "operation",
-				ref: op.operation_id
-			}, {}, `wi.link.${w.work_item_id}.${op.operation_id}`)) out.append(" · ", t("linked_back"));
+			if (!state.caps?.artifacts) {
+				if (await change(notice, "work_item.link", { work_item_id: w.work_item_id }, {
+					kind: "operation",
+					ref: op.operation_id
+				}, {}, `wi.link.${w.work_item_id}.${op.operation_id}`)) out.append(" · ", t("linked_back"));
+			} else out.append(" · ", t("linked_back"));
 		}
 	}, t("start_agent_work"));
 	const note = confinementNote(w.links?.find((l) => l.ref === checkpointId)?.target?.host, agent);
 	api("GET", `/checkpoints/${encodeURIComponent(checkpointId)}`).then((x) => note.setHost(x.checkpoint.host)).catch(() => {});
-	const d = drawer(note, instr, h("div", { class: "actions" }, agent, go), out);
+	const d = drawer(note, instr, draft.box, h("div", { class: "actions" }, agent, go), out);
 	const why = !may("start") ? t("needs_start_scope") : !may("manage") ? t("needs_manage_scope") : null;
 	return h("div", { class: "grow" }, h("button", {
 		class: "secondary",
 		disabled: Boolean(why),
 		title: why,
-		onclick: () => d.toggle.click()
+		onclick: async () => {
+			d.toggle.click();
+			if (state.caps?.artifacts && !expectedHead) try {
+				expectedHead = (await api("GET", `/checkpoints/${checkpointId}?live=true`)).source.head;
+			} catch (e) {
+				fill(out, errorBox(e));
+			}
+		}
 	}, t("start_from_checkpoint")), d.box);
 }
 function eventDetail(b) {

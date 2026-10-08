@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- Share artifact attachments across browser and desktop work-item/continuation forms. Preserve exact
+  identity-scoped operation intents through lost replies and source-head changes. Native binary upload
+  uses capped raw IPC to one operation-bound central route, with no credential or URL supplied by JavaScript.
+  Temporary real Git/MockBat fixtures verify immutable bytes and materialization; native file-picker and
+  complete live attachment acceptance remain pending.
+
 - Port confinement evidence and reviewed cleanup into the shared desktop/browser source. Retain cleanup
   requests within the original account across uncertain replies, preserve agent/form choices during updates,
   and validate native cleanup routes and typed previews. Real temporary Git/MockBat cleanup and UI fixtures

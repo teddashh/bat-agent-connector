@@ -69,6 +69,26 @@ async fn connector_request(
     state.request(input).await
 }
 
+#[tauri::command]
+async fn connector_upload_artifact(
+    window: WebviewWindow,
+    state: State<'_, Bridge>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<ConnectorResponse, String> {
+    local_main(&window)?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Artifact upload requires raw binary IPC bytes".into());
+    };
+    let operation_id = request
+        .headers()
+        .get("x-batc-upload-operation")
+        .and_then(|value| value.to_str().ok())
+        .ok_or("Upload operation ID is required")?;
+    // The one IPC metadata field is validated; no IPC header is forwarded to HTTP.
+    bridge::validate_artifact_upload(operation_id, bytes.len())?;
+    state.upload_artifact(operation_id, bytes).await
+}
+
 fn show(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -133,6 +153,7 @@ fn main() {
             connector_connect,
             connector_disconnect,
             connector_request,
+            connector_upload_artifact,
             open_external
         ])
         .run(tauri::generate_context!())
