@@ -803,6 +803,131 @@ function liveReload(fn, kinds) {
   return onEvents(ev => { if (kinds.includes(ev.resource_type)) later(); });
 }
 
+function hubSource(source, detail = false) {
+  if (!source) return null;
+  const badge = chip(t("hub_source", { id: source.source_id }), source.import_state === "incomplete" ? "warn" : "");
+  if (!detail) return badge;
+  return h("details", { class: "row-details" }, h("summary", {}, badge, " · ", t("hub_source_details")),
+    source.import_state === "incomplete" ? h("p", { class: "note warn" }, t("hub_incomplete")) : null,
+    h("p", { class: "muted" }, t("hub_completion_history")),
+    h("pre", { class: "pre" }, JSON.stringify(source.historical_completion, null, 2)),
+    h("p", {}, h("a", { href: `#/op/${source.import_operation_id}` }, t("hub_open_import"))),
+    h("div", { class: "pre" }, source.snapshot?.text || ""));
+}
+
+async function hubImportEntry(reload) {
+  const box = h("details", { class: "panel hub-import" }, h("summary", {}, t("hub_import")));
+  const sources = h("select", { "aria-label": t("hub_source_select") });
+  const output = h("div", { "aria-live": "polite" });
+  let doc = null, busy = false;
+  const preview = h("button", { class: "secondary", disabled: true }, t("hub_preview"));
+  const apply = h("button", { class: "primary", hidden: true }, t("hub_apply"));
+  const setBusy = value => { busy = value; preview.disabled = value || !may("manage") || !sources.value;
+    sources.disabled = value; apply.disabled = value || !doc?.can_apply || doc?.expired; };
+  const settle = async op => {
+    const end = Date.now() + 30000;
+    while (["accepted", "running"].includes(op.status) && Date.now() < end && box.isConnected) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      op = (await api("GET", `/operations/${op.operation_id}`)).operation;
+    }
+    return op;
+  };
+  const opLink = op => h("p", {}, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, t("hub_open_import")));
+  const show = () => {
+    const summary = h("div", { class: "hub-counts" });
+    for (const kind of ["projects", "work_items"]) {
+      const values = doc.counts[kind] || {};
+      summary.append(h("p", {}, h("strong", {}, t(kind === "projects" ? "nav_projects" : "work_items")), " · ",
+        Object.entries(values).filter(([, count]) => count).map(([key, count]) => `${t("hub_" + key)} ${count}`).join(" · ") || "0"));
+    }
+    const diagnostics = (label, entries) => {
+      if (!entries?.length) return null;
+      const detail = h("details", { class: "row-details" }, h("summary", {}, `${label} (${entries.length})`));
+      const list = h("ul", {}), info = h("span", { class: "muted" });
+      let page = 0;
+      const back = h("button", { class: "mini", "aria-label": t("hub_prev") }, "←");
+      const next = h("button", { class: "mini", "aria-label": t("hub_next") }, "→");
+      const render = () => {
+        fill(list, ...entries.slice(page * 100, page * 100 + 100).map(x =>
+          h("li", {}, h("code", {}, x.code), " ", x.message || x.path || x.record_key || x.group_key || "")));
+        info.textContent = `${page * 100 + 1}–${Math.min(page * 100 + 100, entries.length)} / ${entries.length}`;
+        back.disabled = !page; next.disabled = page * 100 + 100 >= entries.length;
+      };
+      back.onclick = () => { page--; render(); }; next.onclick = () => { page++; render(); };
+      detail.addEventListener("toggle", () => { if (detail.open) render(); });
+      detail.append(list, h("div", { class: "actions" }, back, info, next));
+      return detail;
+    };
+    const rows = h("div", {}), pageInfo = h("span", { class: "muted" });
+    let page = 0;
+    const back = h("button", { class: "mini", "aria-label": t("hub_prev") }, "←");
+    const next = h("button", { class: "mini", "aria-label": t("hub_next") }, "→");
+    const renderRows = () => {
+      const start = page * 100;
+      fill(rows, ...doc.records.slice(start, start + 100).map(row => {
+        const record = row.record;
+        const detail = h("details", { class: "row-details" }, h("summary", {},
+          `${row.hub_project_id}${row.hub_task_id ? "/" + row.hub_task_id : ""} · ${t("hub_" + row.classification)}`));
+        detail.addEventListener("toggle", () => {
+          if (detail.open && detail.childElementCount === 1) detail.append(h("pre", { class: "pre" },
+            JSON.stringify({ before: row.previous || undefined, after: record?.values, changed_fields: row.changed_fields,
+              source_before: row.previous_source?.snapshot?.data, source_after: record?.snapshot?.data,
+              links: record?.links, historical_completion: record?.snapshot?.historical_completion }, null, 2)));
+        });
+        return detail;
+      }));
+      pageInfo.textContent = `${doc.records.length ? start + 1 : 0}–${Math.min(start + 100, doc.records.length)} / ${doc.records.length}`;
+      back.disabled = !page; next.disabled = start + 100 >= doc.records.length;
+    };
+    back.onclick = () => { page--; renderRows(); }; next.onclick = () => { page++; renderRows(); }; renderRows();
+    fill(output, summary,
+      h("p", { class: "muted" }, t("hub_effects", { links: doc.counts.links?.add || 0,
+        removed: doc.counts.links?.remove || 0, groups: doc.counts.order_groups?.change || 0 })),
+      h("p", { class: doc.can_apply && !doc.expired ? "note ok" : "note warn" }, t(doc.can_apply && !doc.expired ? "hub_ready" : "hub_blocked")),
+      diagnostics(t("hub_blockers"), doc.blockers), diagnostics(t("hub_warnings"), doc.warnings),
+      rows, h("div", { class: "actions" }, back, pageInfo, next));
+    apply.hidden = false; setBusy(false);
+  };
+  sources.onchange = () => { if (busy) return; doc = null; apply.hidden = true; fill(output); setBusy(false); };
+  preview.onclick = async () => {
+    if (busy) return;
+    setBusy(true); doc = null; apply.hidden = true; fill(output);
+    try {
+      const op = await settle(await submit("hub.import.preview", { source_id: sources.value }, {}, {}, "hub.preview"));
+      if (!box.isConnected) return;
+      if (op.status !== "succeeded") { fill(output, opLink(op)); return; }
+      doc = (await api("GET", `/hub-import/previews/${op.result.preview.preview_id}`)).preview;
+      show();
+    } catch (e) { fill(output, errorBox(e)); }
+    finally { setBusy(false); }
+  };
+  apply.onclick = async () => {
+    if (busy || !doc?.can_apply || doc.expired) return;
+    setBusy(true);
+    try {
+      const op = await settle((await api("POST", "/operations?wait=3", {
+        action: "hub.import.apply", target: { source_id: doc.source_id }, params: { preview_id: doc.preview_id },
+        preconditions: { preview_digest: doc.digest },
+      }, `hub.import.apply.${doc.preview_id}`)).operation);
+      fill(output, opLink(op), op.status === "succeeded" ? h("p", { class: "note ok" }, t("hub_finished")) :
+        h("p", { class: "note warn" }, t("hub_incomplete")));
+      apply.hidden = true;
+      if (op.status === "succeeded") reload();
+    } catch (e) { fill(output, errorBox(e), h("p", { class: "muted" }, t("hub_refresh"))); }
+    finally { setBusy(false); }
+  };
+  box.append(h("p", { class: "muted" }, t("hub_help")), h("label", {}, t("hub_source_select")),
+    h("div", { class: "filters" }, sources, preview, apply), output);
+  try {
+    const data = await api("GET", "/hub-import/sources");
+    fill(sources, ...data.sources.map(s => h("option", { value: s.source_id, disabled: !s.can_preview },
+      `${s.source_id}${s.runtime_retired ? "" : " · " + t("hub_not_retired")}`)));
+    if (!data.sources.length) fill(output, h("p", { class: "muted" }, t("hub_no_sources")));
+  } catch (e) { fill(output, errorBox(e)); }
+  setBusy(false);
+  return box;
+}
+
 async function viewProjects(main) {
   freshPage();
   const out = h("div", {});
@@ -855,7 +980,7 @@ async function viewProjects(main) {
           } }, t("archive"))));
         rows.push(indent(h("div", { class: "row tree" },
           h("div", { class: "grow" }, h("a", { class: "title", href: `#/project/${p.project_id}` }, p.name),
-            p.description ? h("div", { class: "muted clamp" }, p.description) : null),
+            p.description ? h("div", { class: "muted clamp" }, p.description) : null, hubSource(p.source)),
           ...counts(p.counts),
           may("manage") ? h("span", { class: "tree-actions" }, ...orderButtons(sibs, i, "project_id", run), d.toggle) : null), depth),
         d.box);
@@ -874,7 +999,8 @@ async function viewProjects(main) {
   };
   showArchived.onchange = () => render();
   await render();
-  return liveReload(render, ["project", "work_item"]);
+  main.append(await hubImportEntry(render));
+  return liveReload(render, ["project", "work_item", "hub_import"]);
 }
 
 async function viewProject(main, pid) {
@@ -926,6 +1052,7 @@ async function viewProject(main, pid) {
       h("div", { class: "muted" }, h("a", { href: "#/projects" }, t("nav_projects")),
         ...data.path.flatMap(x => [" / ", h("a", { href: `#/project/${x.project_id}` }, x.name)])),
       h("h1", {}, p.name, " ", p.archived ? chip(t("archived"), "warn") : null),
+      hubSource(p.source, true),
       p.description ? h("p", { class: "pre" }, p.description) : null,
       h("div", { class: "actions" }, ...counts(p.counts), ...p.repositories.map(r => chip(r)),
         p.task_project ? chip(`Task Service: ${p.task_project}`) : null, may("manage") && !p.archived ? d.toggle : null),
@@ -959,7 +1086,7 @@ async function viewProject(main, pid) {
       const done = w.steps.filter(s => s.done).length;
       rows.push(indent(h("div", { class: "row tree" }, stateChip(w.completion),
         h("div", { class: "grow" }, h("a", { class: "title", href: `#/item/${w.work_item_id}` }, w.title),
-          w.derived_from ? h("span", { class: "muted" }, " ⑂") : null),
+          w.derived_from ? h("span", { class: "muted" }, " ⑂") : null, hubSource(w.source)),
         w.steps.length ? chip(`${done}/${w.steps.length}`) : null,
         w.completion.pending ? chip(t("needs_decision"), "warn") : null,
         may("manage") && !p.archived ? h("span", { class: "tree-actions" }, ...orderButtons(sibs, i, "work_item_id", run), dr.toggle) : null), depth),
@@ -985,6 +1112,7 @@ async function viewProject(main, pid) {
 function linkTarget(l) {
   const x = l.target || {};
   if (!x.found) return h("span", { class: "muted" }, l.ref, " · ", t("link_missing"));
+  if (l.kind === "external_url") return h("a", { href: x.url, target: "_blank", rel: "noopener noreferrer" }, l.ref);
   if (l.kind === "session") {
     const [host, ...rest] = l.ref.split("/");
     return h("span", {}, h("a", { href: `#/session/${encodeURIComponent(host)}/${encodeURIComponent(rest.join("/"))}` }, x.title || l.ref),
@@ -1011,7 +1139,7 @@ async function viewWorkItem(main, wid) {
   let draft = null; // the edit form's values after a stale save, put back into the reloaded form
   // Fields made once and moved into each render: a re-render never throws away what is being typed.
   const newStep = h("input", { placeholder: t("new_step"), maxlength: 300 });
-  const kind = h("select", {}, ...["session", "checkpoint", "operation", "task", "pull_request"].map(k =>
+  const kind = h("select", {}, ...["session", "checkpoint", "operation", "task", "pull_request", "external_url"].map(k =>
     h("option", { value: k }, t("link_" + k))));
   const ref = h("input", { placeholder: t("link_ref_hint") });
   kind.onchange = () => { ref.placeholder = t("link_ref_" + kind.value); };
@@ -1091,6 +1219,7 @@ async function viewWorkItem(main, wid) {
         h("a", { href: `#/project/${data.project.project_id}` }, data.project.name),
         ...data.path.flatMap(x => [" / ", h("a", { href: `#/item/${x.work_item_id}` }, x.title)])),
       h("h1", {}, w.title, " ", stateChip(c), w.archived ? [" ", chip(t("archived"), "warn")] : null),
+      hubSource(w.source, true),
       data.derived_from ? h("p", { class: "muted" }, t("derived_from"), " ",
         h("a", { href: `#/item/${data.derived_from.work_item_id}` }, data.derived_from.title)) : null,
       banner,

@@ -1,6 +1,17 @@
 // Display labels only. Logic and CSS never key on these strings (machine enums come from /api/v1).
 const STRINGS = {
   "zh-TW": {
+    hub_import: "從 Project Hub 匯入", hub_source_select: "已登記的來源", hub_preview: "預覽匯入", hub_apply: "套用此預覽",
+    hub_help: "先由人停用舊 Hub 與派工，備份資料並在 daemon 設定登記來源與退役聲明。預覽會列出數量、差異與衝突；套用後由 Connector 管理。",
+    hub_not_retired: "尚未宣告退役", hub_no_sources: "尚無登記來源。請由人在 daemon 設定 [[hub_import.sources]]。",
+    hub_source: "Hub · {id}", hub_source_details: "原始資料與完成歷史", hub_completion_history: "Hub 的完成確認僅為歷史事實。Connector 的簽核仍需由人確認。",
+    hub_incomplete: "匯入尚未完成；已提交的項目仍保留。請查看操作與逐項回執，再決定恢復或重新預覽。",
+    hub_open_import: "查看匯入操作", hub_effects: "新增連結 {links}、移除連結 {removed}；調整順序群組 {groups}。",
+    hub_ready: "預覽可套用。只會修改列出的資料；本機編輯有衝突時會停止。", hub_blocked: "有阻擋項目或預覽已失效。處理後請重新預覽。",
+    hub_blockers: "阻擋項目", hub_warnings: "提醒", hub_refresh: "請檢查來源與目的資料；變動時重新預覽。",
+    hub_finished: "匯入完成。Projects 已更新；原始來源保持唯讀。", hub_prev: "上一頁", hub_next: "下一頁",
+    hub_create: "新增", hub_update: "更新", hub_metadata_only: "僅來源資料改變", hub_unchanged: "未變更", hub_local_only: "僅本機編輯",
+    hub_source_missing: "來源已消失", hub_conflict: "衝突", link_external_url: "外部連結", link_ref_external_url: "https://…",
     nav_projects: "專案", projects_help: "專案與工作項目是 Connector 自己的紀錄：目標、需求原文、驗收、步驟，以及做這件事的 sessions、版本、操作與 PR。改名不會改 ID；排序與固定只影響顯示。",
     new_project_name: "新專案名稱", add_project: "新增", show_archived: "顯示已封存", no_projects: "還沒有專案。",
     new_sub_project: "子專案名稱", rename: "改名", archive: "封存", restore: "復原", more: "更多", move_up: "上移",
@@ -114,6 +125,17 @@ const STRINGS = {
     integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。",
   },
   en: {
+    hub_import: "Import from Project Hub", hub_source_select: "Configured source", hub_preview: "Preview import", hub_apply: "Apply this preview",
+    hub_help: "A person must retire Hub and its dispatch, back up the data, and configure the source and retirement declaration on the daemon. Preview counts, changes and conflicts before applying; Connector then manages the records.",
+    hub_not_retired: "retirement not declared", hub_no_sources: "No sources configured. A person must configure [[hub_import.sources]] on the daemon.",
+    hub_source: "Hub · {id}", hub_source_details: "Original data and completion history", hub_completion_history: "Hub completion approvals are historical facts. A person must still approve completion in Connector.",
+    hub_incomplete: "The import is incomplete; committed records remain. Check the operation and receipts before resuming or previewing again.",
+    hub_open_import: "View import operation", hub_effects: "Add {links} links, remove {removed}; change {groups} order groups.",
+    hub_ready: "This preview can be applied. Only the listed records change; conflicting local edits stop the import.", hub_blocked: "There are blockers or this preview has expired. Resolve them and preview again.",
+    hub_blockers: "Blockers", hub_warnings: "Warnings", hub_refresh: "Check the source and destination; preview again if they changed.",
+    hub_finished: "Import complete. Projects have been updated; the original source remains read-only.", hub_prev: "Previous page", hub_next: "Next page",
+    hub_create: "create", hub_update: "update", hub_metadata_only: "metadata only", hub_unchanged: "unchanged", hub_local_only: "local edits only",
+    hub_source_missing: "source missing", hub_conflict: "conflict", link_external_url: "External link", link_ref_external_url: "https://…",
     nav_projects: "Projects", projects_help: "Projects and work items are the connector's own records: goals, the " +
       "request verbatim, acceptance, steps, and the sessions, checkpoints, operations and PRs that carried them. A " +
       "rename never changes an ID; order and pins only change the display.",
