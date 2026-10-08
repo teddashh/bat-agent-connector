@@ -8,8 +8,17 @@ import pytest
 
 from bat_agent_connector import lifecycle, service
 from bat_agent_connector.errors import BatError, WriteRefused
+from tests.conftest import adopt
 
 SID = "sess-claude-0001"
+MANAGED = {"writes": True, "managed_roots": ["/srv"]}
+
+
+@pytest.fixture(autouse=True)
+def connector_sessions():
+    """Turn-marker mechanics run on sessions the connector created in a managed root."""
+    adopt(SID)
+    adopt("sess-codex-0002")
 
 
 def test_marker_ms_parsing():
@@ -24,7 +33,7 @@ def test_marker_ms_parsing():
 
 async def test_send_returns_marker_and_read_hides_previous_turn(fleet_factory, mock):
     mock.echo_sends = True
-    f = fleet_factory(writes=True)
+    f = fleet_factory(**MANAGED)
     r = await service.session_send(f, "h1", SID, "four new requests", confirm=True)
     assert r["marker_source"] == "sent_message"
     assert r["turn_marker"].startswith("batc-") and r["turn_marker"] == r["message_id"] and r["after_ms"]
@@ -48,7 +57,7 @@ async def test_send_returns_marker_and_read_hides_previous_turn(fleet_factory, m
 
 async def test_wait_after_ignores_stale_idle_then_returns_on_reply(fleet_factory, mock):
     mock.echo_sends = True
-    f = fleet_factory(writes=True)
+    f = fleet_factory(**MANAGED)
     r = await service.session_send(f, "h1", SID, "new task", confirm=True)
     marker = r["turn_marker"]
 
@@ -79,7 +88,7 @@ async def test_wait_after_ignores_stale_idle_then_returns_on_reply(fleet_factory
 
 
 async def test_marker_fallback_without_echo(fleet_factory, mock):
-    f = fleet_factory(writes=True)  # mock does not echo the prompt
+    f = fleet_factory(**MANAGED)  # mock does not echo the prompt
     r = await service.session_send(f, "h1", SID, "x", confirm=True)
     assert r["marker_source"] == "pending_echo"
     assert r["turn_marker"] == r["message_id"]
@@ -91,7 +100,7 @@ async def test_marker_fallback_without_echo(fleet_factory, mock):
 
 async def test_custom_message_id_is_still_an_exact_echo_marker(fleet_factory, mock):
     mock.echo_sends = True
-    f = fleet_factory(writes=True)
+    f = fleet_factory(**MANAGED)
     sent = await service.session_send(f, "h1", SID, "custom id", confirm=True, message_id="caller-id-A")
     assert sent["turn_marker"] == "caller-id-A"
     rd = await service.session_read(f, "h1", SID, after=sent["turn_marker"])
@@ -101,7 +110,7 @@ async def test_custom_message_id_is_still_an_exact_echo_marker(fleet_factory, mo
 
 async def test_same_claude_message_id_can_retry_without_rate_interval(fleet_factory, mock):
     mock.echo_sends = True
-    f = fleet_factory(writes=True)
+    f = fleet_factory(**MANAGED)
     first = await service.session_send(f, "h1", SID, "retry me", confirm=True, message_id="retry-id-A")
     again = await service.session_send(f, "h1", SID, "retry me", confirm=True, message_id="retry-id-A")
     assert again["turn_marker"] == first["turn_marker"]
@@ -112,7 +121,7 @@ async def test_same_claude_message_id_can_retry_without_rate_interval(fleet_fact
 
 
 async def test_codex_marker_is_labeled_timestamp_fallback(fleet_factory, mock):
-    f = fleet_factory(writes=True)
+    f = fleet_factory(**MANAGED)
     c = f.client("h1")
     original_invoke = c.invoke
     retries = []
@@ -139,7 +148,7 @@ async def test_codex_marker_is_labeled_timestamp_fallback(fleet_factory, mock):
 
 async def test_relay_surfaces_marker(fleet_factory, mock):
     mock.echo_sends = True
-    f = fleet_factory(writes=True)
+    f = fleet_factory(**MANAGED)
     r = await lifecycle.session_relay(f, "h1", session_id=SID, message="1. fix chat\n2. mobile", confirm=True)
     assert r["sent"] is True and r["turn_marker"].startswith("batc-")
     assert f'after="{r["turn_marker"]}"' in r["next"]
@@ -148,7 +157,7 @@ async def test_relay_surfaces_marker(fleet_factory, mock):
 
 async def test_exact_id_ignores_same_prompt_from_another_send(fleet_factory, mock):
     mock.echo_sends = True
-    f = fleet_factory(writes=True, safety={"write_min_interval_s": 0})
+    f = fleet_factory(**MANAGED, safety={"write_min_interval_s": 0})
     first = await service.session_send(f, "h1", SID, "identical prompt", confirm=True)
     second = await service.session_send(f, "h1", SID, "identical prompt", confirm=True)
     assert first["turn_marker"] != second["turn_marker"]
@@ -163,7 +172,7 @@ async def test_queued_old_turn_output_is_unconfirmed(fleet_factory, mock):
     mock.echo_sends = True
     mock.metas[SID]["isStreaming"] = True
     mock.metas[SID]["numTurns"] = 3
-    f = fleet_factory(writes=True)
+    f = fleet_factory(**MANAGED)
     sent = await service.session_send(f, "h1", SID, "queued work", confirm=True, queue=True)
     assert sent["queued"] is True and sent["turn_marker"].startswith("batc-")
     mock.states[SID]["messages"].append({"id": "older-reply", "role": "assistant",
@@ -183,7 +192,7 @@ async def test_queued_old_turn_output_is_unconfirmed(fleet_factory, mock):
 
 async def test_disconnect_after_acceptance_reconciles_by_echo(fleet_factory, mock):
     mock.echo_sends = True
-    f = fleet_factory(writes=True)
+    f = fleet_factory(**MANAGED)
     sent = await service.session_send(f, "h1", SID, "work after reconnect", confirm=True)
     await mock.drop_all()
     mock.states[SID]["messages"].append({"id": "answer-after-drop", "role": "assistant",

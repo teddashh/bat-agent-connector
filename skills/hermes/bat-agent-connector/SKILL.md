@@ -32,6 +32,11 @@ metadata:
 - Permission tiers are set by the user per host: **read** (always), **write** (send / continue / interrupt / answer),
   **orchestrate** (start worktree sessions, merge, remove). Tools for a disabled tier do not exist; do not try to
   work around that.
+- Every session has a **provenance** (`sessions_list` shows it): `manual` = a person created it in BAT,
+  `connector_managed` = the connector started it, `unknown` = not proven. Manual and unknown sessions are
+  **read-only** through every tool (`api_access: read_only`). Write tools only drive connector-managed sessions in
+  folders the connector owns. To build on a person's work, start a **new** managed worktree session; never try to
+  write into theirs. `session_policy(host, session_id)` explains any refusal.
 
 ## Tools (MCP) and CLI equivalents
 
@@ -55,6 +60,7 @@ metadata:
 | Change a session's permissions (write) | `session_set_permissions(host, sid, mode, confirm=true)` | `batc permissions HOST SID --mode allow_all --confirm` |
 | Move a quota-stopped Claude session to Codex (orchestrate) | `session_failover(host, session_id \| all_exhausted=true, confirm=true, dry_run?)` | `batc failover HOST [SID] --all-exhausted --confirm` |
 | Gated cleanup of finished sessions (orchestrate) | `session_cleanup(host, confirm=true, dry_run=false)` | `batc cleanup HOST --apply --confirm` |
+| Who may change what (read) | `session_policy(host, session_id?)` | `batc policy HOST [SID]` |
 
 `session_id` accepts a unique prefix (8 characters is usually enough). Use `next_offset` from `session_read` to page
 back in history.
@@ -70,8 +76,11 @@ back in history.
      instruction that clearly covers it);
    - idle and clearly mid-task (e.g. it stopped at a limit, or asked "shall I continue?"): propose a short nudge;
    - idle and done: report the result.
-4. Only if write tools exist **and** the user asked (or pre-approved this kind of nudge): send one short message with
-   `confirm=true`. Never loop sends; respect rate-limit errors instead of retrying around them.
+   - `api_access: read_only` (a person's BAT session): report only. The person answers or nudges it in BAT; if they
+     want an agent to carry the work on, propose a new managed worktree session (`session_start`) instead.
+4. Only if write tools exist **and** the user asked (or pre-approved this kind of nudge) **and** the session is
+   `api_access: managed`: send one short message with `confirm=true`. Never loop sends; respect rate-limit errors
+   instead of retrying around them.
 5. Report back: per session one line (host, workspace, state, what you did).
 
 ## Relay workflow (forwarding a human's order)
@@ -80,8 +89,11 @@ Do not paraphrase, rewrite or plan the order. Call `session_relay(host, workspac
 brief={goal, context, constraints, acceptance}, earlier=[<earlier thread messages, verbatim>], confirm=true)`.
 The brief is labeled as your interpretation; the session treats the original as the source of truth, fixes unclear
 asks with its repo context and states its interpretation in one line. For parallel or large work add
-`request_fanout=N`, `session_wait`, then `fanout_from_plan(host, sid, confirm=true)`. If the main session is busy or
-quota-stopped use `fanout_plan_session` instead, wait, then `fanout_from_plan` on the planner. After a relay or send, pass its `turn_marker` as `after=` to `session_wait` and `session_read`. For Claude, this matches BAT's exact echo ID. Check `turn_phase` and `turn_attribution`; queued output stays unconfirmed until the previous-turn boundary is observed. BAT Codex currently uses a weaker timestamp fallback, so do not claim its output is definitively tied to the send.
+`request_fanout=N`, `session_wait`, then `fanout_from_plan(host, sid, confirm=true)`. The relay target is the
+workspace's most recent connector-managed session; a person's BAT sessions are never written to. When there is none,
+or the target is read-only (`no_session` / `read_only`), retry with `start_if_missing=true`: that starts a new Codex
+session in its own worktree with the same text. If the target is busy or quota-stopped use `fanout_plan_session`
+instead, wait, then `fanout_from_plan` on the planner. After a relay or send, pass its `turn_marker` as `after=` to `session_wait` and `session_read`. For Claude, this matches BAT's exact echo ID. Check `turn_phase` and `turn_attribution`; queued output stays unconfirmed until the previous-turn boundary is observed. BAT Codex currently uses a weaker timestamp fallback, so do not claim its output is definitively tied to the send.
 Read the session's
 last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_continue`), NEED-<HUMAN> → ask the human.
 
@@ -96,15 +108,18 @@ last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_cont
    vibe-partner workflow.
 5. Review: `session_worktree_status(host, sid, include_diff=true)` and `session_read`. Check tests were run and the
    change stays in scope.
-6. Merge clean ones: `worktree_merge(host, sid, confirm=true)`. It only merges when conflict-free and clean and
-   otherwise explains why (e.g. `diverged`: ask that session to rebase onto the source branch, then retry).
+6. Merge clean ones: `worktree_merge(host, sid, confirm=true)`. It only merges into a main checkout inside a managed
+   root (the connector's own clone); in a person's checkout it refuses with `DESTINATION_MANUAL`, so leave the branch
+   for a pull request and report it. It also only merges when conflict-free and clean and otherwise explains why
+   (e.g. `diverged`: ask that session to rebase onto the source branch, then retry).
 7. Clean up: `worktree_remove(host, sid, confirm=true)` after merging (branch kept unless `delete_branch=true`).
 8. Report: tasks, branches, merged or not (and why), follow-ups.
 
 ## Lifecycle workflows (only where the user enabled them)
 
-- **Quota failover**: `quota_sessions` lists Claude sessions stopped by a usage limit (with the reset time). Before a
-  failover, check that no other session in the same workspace already carries that task on (duplicate work). Dry run
+- **Quota failover**: `quota_sessions` lists Claude sessions stopped by a usage limit (with the reset time). Only
+  connector-managed sessions can be failed over; for a person's BAT session report the limit and, if asked, start a
+  new managed worktree session for the remaining work. Before a failover, check that no other session in the same workspace already carries that task on (duplicate work). Dry run
   first, then `session_failover(confirm=true)`. The Codex successor reuses the same worktree when there is one and
   uses the host's `codex_model`. Report old → new session id, then track the new one. To keep a superseded
   session's uncommitted work without continuing it, fail it over with `force`, `archive_only=true` and
@@ -126,6 +141,9 @@ last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_cont
 - Never put secrets, credentials or personal data into messages you send to sessions.
 - Never retry a refused write by changing parameters to get around a guard (rate limit, streaming, dirty worktree,
   unmerged branch, disabled tier). Report the refusal.
+- A read-only refusal (`MANUAL_READ_ONLY`, `UNKNOWN_READ_ONLY`, `WORKDIR_NOT_MANAGED`, `BINDING_MISMATCH`,
+  `DESTINATION_MANUAL`) is final. Never reach the session another way (raw BAT calls, shell, another tool); report the
+  code and offer a new managed session instead.
 - Do not interrupt a streaming session unless the user asked; prefer `soft`.
 - Never use override flags (`discard_uncommitted`, `allow_unmerged`, `delete_branch`, failover `force`) without the
   user's explicit approval for that specific session.

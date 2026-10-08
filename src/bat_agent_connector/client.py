@@ -40,6 +40,7 @@ from .errors import (
     InvokeTimeout,
 )
 from .redact import redact
+from .resource_policy import WriteGrant, check_grant
 
 log = logging.getLogger("bat_agent_connector.client")
 
@@ -346,11 +347,16 @@ class BatClient:
                      retry_on_disconnect: bool = False,
                      before_send: Callable[[], None] | None = None,
                      before_frame: Callable[[], Awaitable[None]] | None = None,
-                     frame_guard: Callable[[dict], None] | None = None) -> Any:
-        """Invoke an allow-listed channel. Raises ChannelNotAllowed before sending anything otherwise."""
+                     frame_guard: Callable[[dict], None] | None = None,
+                     grant: WriteGrant | None = None) -> Any:
+        """Invoke an allow-listed channel. Raises ChannelNotAllowed before sending anything otherwise.
+
+        Write channels also need a resource policy grant for this host, channel and session."""
         canonical = check_allowed(
             channel, allow_writes=self.allow_writes, allow_orchestrate=self.allow_orchestrate
         )
+        if is_write(canonical):
+            check_grant(grant, self.host.name, canonical, params)
         return await self._invoke_checked(canonical, params, timeout,
                                           retry_on_disconnect=retry_on_disconnect,
                                           before_send=before_send, before_frame=before_frame,
@@ -401,7 +407,8 @@ class BatClient:
                 raise
         raise last_exc or ConnectionLost(f"{self.host.name}: failed")  # pragma: no cover
 
-    async def append_workspace_terminal(self, profile_id: str, terminal: dict, *, retries: int = 3) -> dict:
+    async def append_workspace_terminal(self, profile_id: str, terminal: dict, *, grant: WriteGrant | None,
+                                        retries: int = 3) -> dict:
         """Append ONE terminal (tab) to the host's workspace document, append-only.
 
         BAT only offers a whole-document ``workspace:save``. To stay append-only we:
@@ -417,6 +424,7 @@ class BatClient:
         tid = terminal.get("id")
         if not isinstance(tid, str) or not tid:
             raise InvokeError("terminal needs an id")
+        check_grant(grant, self.host.name, "workspace:save", {"sessionId": tid})
 
         async def load() -> tuple[str | None, dict]:
             raw = await self._invoke_checked("workspace:load", {"profileId": profile_id}, None)

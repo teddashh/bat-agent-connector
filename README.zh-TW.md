@@ -65,7 +65,7 @@ Token 參照（token 值本身永遠不會存進設定檔、寫進記錄，或�
 
 | 層級 | 開啟方式 | 工具 |
 |---|---|---|
-| read（永遠開啟） | - | `hosts_list`、`host_status`、`workspaces_list`、`sessions_list`、`session_read`、`session_wait`、`worktree_status`、`session_worktree_status`、`sessions_triage`、`quota_sessions`、`work_status`、`work_result`、`work_events` |
+| read（永遠開啟） | - | `hosts_list`、`host_status`、`workspaces_list`、`sessions_list`、`session_read`、`session_wait`、`worktree_status`、`session_worktree_status`、`sessions_triage`、`quota_sessions`、`session_policy`、`work_status`、`work_result`、`work_events` |
 | write | 每台主機設 `writes = true` | `session_send`、`session_continue`、`session_interrupt`、`session_answer`、`session_set_permissions`、`approve_pending`、`session_relay` |
 | orchestrate | 每台主機設 `writes = true` **且** `orchestrate = true` | `session_start`、`worktree_merge`、`worktree_remove`、`session_failover`、`session_record_verification`、`session_cleanup`、`fanout_plan_session`、`fanout_from_plan`、`work_submit`、`work_pause`、`work_resume`、`work_mark_stage` |
 
@@ -134,15 +134,16 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 | `session_interrupt(host, session_id, mode=soft\|hard, confirm)` | soft 是 Claude 的 interrupt-turn，hard 是 abort（Codex 一律 hard）。session 會保留。 |
 | `session_answer(host, session_id, confirm, answers? \| permission?)` | 回答待處理的 ask-user 問題或權限請求。 |
 | `session_start(host, workspace, agent, confirm, prompt?, model?, use_worktree=true)` | 啟動 session（預設開在新的 worktree；分支由 BAT 命名為 `bat/worktree-<id>`）。每台主機有數量上限。 |
-| `worktree_merge(host, session_id, confirm)` | 只有能證明沒有衝突、而且乾淨時才 merge；否則回報原因。 |
+| `worktree_merge(host, session_id, confirm)` | 只 merge 到位於 managed root 內的主 checkout，而且要能證明沒有衝突、乾淨；否則回報原因。 |
 | `worktree_remove(host, session_id, confirm, delete_branch=false, ...)` | 移除 worktree 資料夾；預設保留分支；遇到未提交或未 merge 的工作會拒絕，除非明確指示。 |
 | `sessions_triage(host?, workspace?, agent?, states?, use_jev=auto, include_unloaded=true)` | 把每個 session 分類為 `quota_exhausted`、`rate_limited_transient`、`waiting_permission`、`waiting_question`、`working`、`done_idle`、`error_other`、`unknown`，並附上 `source`（pattern／jev）、信心值、判斷依據的那一行，以及額度重置時間。 |
 | `quota_sessions(host?)` | 捷徑：因用量額度而停下的 Claude session。 |
 | `session_set_permissions(host, session_id, mode, confirm)` | `allow_all`（主機必須允許）或 `default`。Claude session 只在閒置時切換（這一輪進行中切換會讓這一輪結束）；Codex 從下一輪開始套用。 |
 | `approve_pending(host, confirm, dry_run?)` | 以「不再詢問」核准所有待處理的權限請求（不含問題），並把 session 提升為 allow-all。只能用在 `default_permission_mode = "allow_all"` 的主機。 |
-| `session_failover(host, session_id? \| all_exhausted, confirm, dry_run?, model?, force?, instructions?, archive_only?)` | 啟動一個 Codex session，接續因額度停下的 Claude session：有 worktree 時沿用同一個 worktree，交接 prompt 帶著原始任務、最新指示、最近的輸出與 git 狀態（憑證已遮蔽）。具冪等性。`model` 預設為主機的 `codex_model`。`instructions` 會取代預設的「繼續完成任務」步驟（例如「只 commit 進行中的工作」）；`archive_only` 讓清理時保留該分支、不 merge。 |
-| `session_relay(host, message, confirm, workspace? \| session_id?, brief?, earlier?, channel?, thread?, request_fanout=0, dry_run?)` | 把人的訊息原封不動轉給工作區的主 session（或指定的 session），可附一段標明是轉達者詮釋的摘要，以及 BAT-STATUS 結尾說明。`request_fanout=N` 會請 session 產出 `bat-fanout` 計畫。回傳組好的文字。 |
-| `fanout_plan_session(host, workspace, message, confirm, max_items=4, brief?)` | 在主要 checkout 啟動一個唯讀的 Codex 規劃 session（適用於主 session 忙碌或額度用完時），由它回覆一份 `bat-fanout` 計畫。 |
+| `session_failover(host, session_id? \| all_exhausted, confirm, dry_run?, model?, force?, instructions?, archive_only?)` | 啟動一個 Codex session，接續因額度停下、由 connector 建立的 Claude session：有 worktree 時沿用同一個 worktree，交接 prompt 帶著原始任務、最新指示、最近的輸出與 git 狀態（憑證已遮蔽）。具冪等性。`model` 預設為主機的 `codex_model`。`instructions` 會取代預設的「繼續完成任務」步驟（例如「只 commit 進行中的工作」）；`archive_only` 讓清理時保留該分支、不 merge。 |
+| `session_relay(host, message, confirm, workspace? \| session_id?, brief?, earlier?, channel?, thread?, request_fanout=0, dry_run?, start_if_missing?)` | 把人的訊息原封不動轉給工作區最近一個由 connector 建立的 session（或指定的 session；在 BAT 建立的 session 一律不寫入，`start_if_missing` 改在新 worktree 開 session），可附一段標明是轉達者詮釋的摘要，以及 BAT-STATUS 結尾說明。`request_fanout=N` 會請 session 產出 `bat-fanout` 計畫。回傳組好的文字。 |
+| `fanout_plan_session(host, workspace, message, confirm, max_items=4, brief?)` | 在獨立 worktree 啟動一個 Codex 規劃 session（適用於沒有 managed session 可規劃時），由它回覆一份 `bat-fanout` 計畫。 |
+| `session_policy(host, session_id?)` | 唯讀。主機的 mutation 清單與 managed roots，或單一 session 的來源（`manual`、`connector_managed`、`unknown`）、資料夾歸屬與每個寫入動作的判定與拒絕代碼。 |
 | `fanout_from_plan(host, session_id, confirm, dry_run?, agent="codex", model?, max_items=4)` | 依該 session 最後一個 `bat-fanout` 區塊，每個任務各開一個 worktree session，prompt 原封不動，接著清掉規劃 session。 |
 | `session_cleanup(host, confirm, dry_run=true, session_id?)` | 在硬性關卡後面，為每個受調度的 session 決定 MERGE_AND_CLEAN／CLEAN_ONLY／KEEP／ESCALATE，然後執行（需要 `auto_cleanup = true`）。詳見 docs/ORCHESTRATE.md。 |
 | `session_record_verification(host, session_id, candidate_commit, command, exit_code, environment, log_ref, confirm)` | 為主機目前乾淨的 commit 記錄一筆在外部執行的驗證；自動清理在 merge 前會再檢查一次。CLI：`batc record-verification`。 |
@@ -191,6 +192,7 @@ batc cleanup box1                                     # dry run 表格；要執�
 ## 安全模型（精簡版）
 
 * 預設唯讀；寫入與調度要逐台主機開啟，需要 `confirm=true`，有速率限制，並留有稽核記錄。
+* 人在 BAT 建立的 session 對所有工具永久唯讀。寫入只會送到 connector 自己建立、且位於它擁有之資料夾的 session；client 核心拒絕任何沒有資源政策 grant 的寫入 frame（見 [docs/design/resource-policy.md](docs/design/resource-policy.md)）。
 * TLS 憑證指紋比對是強制的；不符時會在送出 token 之前中止。只接受 `bat-remote/v2`。
 * Token 在連線時才從參照解析出來，並從所有錯誤訊息中遮蔽。
 * 客戶端會一直把 socket 讀空（BAT 會斷掉累積 256 個待送 frame 的客戶端），事件佇列也有上限。

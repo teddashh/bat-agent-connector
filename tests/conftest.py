@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from bat_agent_connector import registry
 from bat_agent_connector.config import parse_config
 from bat_agent_connector.fleet import Fleet
 from tests.mockbat import TOKEN, MockBat
@@ -51,3 +52,13 @@ def fleet_factory(mock):
         return f
 
     yield make
+
+
+def adopt(session_id: str, *, host: str = "h1", cwd: str = "/srv/demo", **fields) -> None:
+    """Record a mock session as one the connector created (registry creation record, start acknowledged).
+
+    Pair it with ``managed_roots`` covering ``cwd`` (or a connector worktree ``cwd``) so the policy lets
+    write tools drive it; without that the session stays a legacy boundary."""
+    registry.reserve(host, {"session_id": session_id, "cwd": cwd, "origin_cwd": fields.pop("origin_cwd", cwd),
+                            **fields}, 32)
+    registry.update(host, session_id, status="active")
