@@ -114,6 +114,13 @@ class FakeGitHub:
                     if pr:
                         fake._live_head(pr)
                     return self._send(200, pr) if pr else self._send(404, {"message": "Not Found"})
+                m = re.fullmatch(r"/repos/o/r/commits/([0-9a-f]{40})", path)
+                if m and method == "GET":  # a commit exists when any tracked bare remote has the object
+                    for bare in fake.pr_remotes.values():
+                        if subprocess.run(["git", "-C", bare, "cat-file", "-e", m.group(1) + "^{commit}"],
+                                          capture_output=True).returncode == 0:
+                            return self._send(200, {"sha": m.group(1)})
+                    return self._send(422, {"message": "No commit found for SHA: " + m.group(1)})
                 m = re.fullmatch(r"/repos/o/r/pulls/(\d+)/merge-async", path)
                 if m and method == "PUT":
                     return self._merge_async(int(m.group(1)), body or {})

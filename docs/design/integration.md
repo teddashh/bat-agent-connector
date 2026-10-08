@@ -29,7 +29,8 @@ Apply 只接受 `params.preview_id`，並要求 `preconditions.expected_head_sha
 每個（主機、repository、remote URL）一個 bare repository：`<第一個 managed root>/.batc-integration/<name>-<8 hex>/repo.git`。不沿用 checkpoint clone：那個 clone 的設定、refs 與 hooks 和在它 worktree 裡工作的 agent 共用，agent 可以改 `origin` 或 `insteadOf`。
 
 - 建立前先確認 managed root、`.batc-integration` 與整合區本身都是真實目錄（不是連結），所以連到人資料夾的 managed root 在寫入任何東西之前就被拒絕（`DESTINATION_MANUAL`）。
-- 每個腳本動手前核對身分：真實路徑、`batc.*` 標記、本地設定白名單（任何 `remote.*`、`url.*`、`core.hooksPath`、`include.*`、`credential.*` 都會被拒），以及沒有 grafts、shallow、alternates 或 `refs/replace`（`CLONE_NOT_OURS`、`CLONE_CONFIG_TAMPERED`）。
+- 每個腳本動手前核對身分：真實路徑、`batc.*` 標記、本地設定白名單（任何 `remote.*`、`url.*`、`core.hooksPath`、`include.*`、`credential.*` 都會被拒），沒有 grafts、shallow、alternates、`commondir` 或 `refs/replace`，以及 repository 裡沒有任何連結：連到別處的 `objects`、`refs` 或 `packed-refs` 會把寫入送到那裡（`CLONE_NOT_OURS`、`CLONE_CONFIG_TAMPERED`）。
+- `ls-remote` 以尾端比對 ref（`refs/heads/a/refs/heads/x` 也符合 `refs/heads/x`），所以腳本只取名稱完全相同的那一列。
 - 組合只用 git plumbing（`merge-tree --write-tree`、`commit-tree`、`update-ref`），不 checkout，所以 hooks、filters、fsmonitor 都不會在推送前執行；組合時隔離主機使用者的 global／system 設定，簽章、merge driver、rerere 不會改變結果。網路操作（ls-remote、fetch、push）用主機使用者的設定，才有 git 憑證。
 - Connector 的 commit 身分固定為 `BAT Connector <bat-connector@noreply.invalid>`，日期是 operation 建立時間，所以重算同一步會得到同一個 SHA；結果 ref 以 compare-and-swap 設定，已有不同的值就停下（`COMPOSE_NOT_DETERMINISTIC`）。Commit 訊息只有種類、ID、SHA 與 operation ID，沒有主機路徑或對話內容。
 
@@ -42,7 +43,7 @@ Apply 只接受 `params.preview_id`，並要求 `preconditions.expected_head_sha
 
 `blocking`（不能 apply）：`PR_CLOSED`、`PR_HEAD_IN_FORK`、`TARGET_REF_FORBIDDEN`、`INTEGRATION_IN_PROGRESS`、`MERGE_IN_PROGRESS`、`REMOTE_REF_MISSING`、`REMOTE_IDENTITY_MISMATCH`（主機的遠端與 GitHub 對 PR head 說法不同：`remote_url` 指到別的 repository，或 GitHub 還沒更新）、`PUSH_ACCESS_DENIED`、`SOURCE_MISSING_REF`、`SOURCE_UNAVAILABLE`、`SOURCE_UNRELATED`、`PICK_*`、`LFS_UNSUPPORTED`、`NOTHING_TO_INTEGRATE`。預計衝突不擋：apply 會停在那裡。
 
-`warnings`：`BRINGS_FOREIGN_COMMITS`、`UNCOMMITTED_NOT_INCLUDED`、`SESSION_STILL_WORKING`、`DEPENDS_ON_UNPICKED`、`REDUNDANT_SOURCE`、`DELIVERED_EARLIER`、`PR_DRAFT`、`PUSH_ACCESS_UNPROVEN`。
+`warnings`：`BRINGS_FOREIGN_COMMITS`、`UNCOMMITTED_NOT_INCLUDED`（人的 checkpoint 記錄時有未提交修改）、`SESSION_STILL_WORKING`、`DEPENDS_ON_UNPICKED`、`REDUNDANT_SOURCE`、`DELIVERED_EARLIER`、`PR_DRAFT`、`PUSH_ACCESS_UNPROVEN`。
 
 `digest` 是 host、repository、PR、head 分支與 SHA、remote URL、預測的 tree 與每個來源（kind、id、mode、commits、釘住的 SHA）的 SHA-256。
 
@@ -55,7 +56,7 @@ Apply 只接受 `params.preview_id`，並要求 `preconditions.expected_head_sha
 | `compose.<seq>` | 依序 fast-forward、merge commit 或 pick | 確定性加 compare-and-swap，重跑得到同一個 SHA |
 | `check.<12 hex>` | `base..head` 只含預覽的 commit 與 connector 的 merge／pick commit、所有來源都在、沒有衝突標記；沒有用到人工解衝突時 tree 必須等於預測 | 只讀，重跑 |
 | `push.<12 hex>#<n>` | 推送前一刻 `ls-remote` 必須仍是 base，然後 `git push --porcelain --no-verify <url> <sha>:refs/heads/<ref>` | 回覆遺失時先讀遠端，見下 |
-| 確認 | GitHub 顯示新 head；落後時等，遠端被改寫時 `needs_attention` | — |
+| 確認 | GitHub 顯示新 head；GitHub 落後於 git 時只加警告（`GITHUB_LAGGING`），不等待，所以取消不會把已落地的更新記成取消；遠端被改寫時 `needs_attention` | — |
 
 衝突：第 k 項衝突時，receipt 記 `conflict` 與檔案，前面的項目已在整合區完成，什麼都沒推送，operation 停在 `needs_attention`（`INTEGRATION_CONFLICT`）。出路是交給 agent 解（見下），或取消、不含它重新預覽。
 
@@ -67,12 +68,12 @@ Apply 只接受 `params.preview_id`，並要求 `preconditions.expected_head_sha
 
 Agent 可能在 worktree 設 `user.name`／`user.email`，所以整合區的設定白名單包含這兩個；組合時 connector 一律用自己的身分。Codex 的 sandbox 只允許寫 worktree，commit 寫入整合區的物件時會請求核准，由人回答。
 
-推送回覆遺失（timeout、SSH 中斷、讀不懂的輸出）時，**不重推**，先讀遠端：
+推送回覆遺失（timeout、SSH 中斷、讀不懂的輸出）時，**不重推**，先讀遠端。SSH 中斷只結束本機的 ssh，主機上的 `git push` 可能還在跑：推送腳本執行期間在整合區留下自己的 PID，讀回時那個程序還在就繼續等。
 
 | 遠端顯示 | 結果 |
 |---|---|
 | 等於我們的 head | 已推送 |
-| 仍是 base | 證明沒到，可以再送同一個一般 push |
+| 仍是 base | 還不能算沒到：推送可能已落地、之後被設回 base。GitHub 說組合後的 commit 不存在才再送同一個一般 push；存在時停在 `PUSH_UNPROVEN`，不再推 |
 | 包含我們的 head（之後又有人推） | 已推送，警告 `REMOTE_MOVED_AFTER` |
 | 從 base 往前、但不含我們的 | `REMOTE_MOVED`，沒推送 |
 | 分支不見 | `REMOTE_REF_MISSING` |
@@ -82,7 +83,9 @@ Agent 可能在 worktree 設 `user.name`／`user.email`，所以整合區的設�
 
 ## 不重複接收、不清理人的來源
 
-`integration_receipts` 每個來源一列：`pending`、`composed`、`already_included`、`conflict`、`delivered`。只有在證明新狀態的步驟之後才改，用 `UPDATE … WHERE status IN (…)`，所以重播是 no-op，事件只在真的改變時發出。`delivered` 只在 git 讀回證明推送之後寫入，不會降級。讀取時才算 `effective_status`：失敗或取消的 operation 裡沒送達的列讀成 `not_delivered`（取消不會執行 handler，所以不能在 handler 裡改）。
+`integration_receipts` 每個來源一列：`pending`、`composed`、`already_included`、`conflict`、`delivered`。只有在證明新狀態的步驟之後才改，用 `UPDATE … WHERE status IN (…)`，所以重播是 no-op，事件只在真的改變時發出。`delivered` 只在 git 讀回證明推送之後寫入，不會降級。讀取時才算 `effective_status`：失敗或取消的 operation 裡沒送達的列讀成 `not_delivered`；推送步驟從未證實（`started`／`uncertain`）時讀成 `unknown`（取消不會執行 handler，所以不能在 handler 裡改）。
+
+一旦有推送步驟（不論狀態），apply 重跑時不再先讀 PR 狀態或做准入檢查，直接讀遠端：PR 被合併或 GitHub 出錯都不能讓一個可能已落地的推送被記成「沒推送」。OperationService 在讀回證明某步驟沒發生、準備再做一次之前，會先看有沒有取消，所以取消一個推送未證實的 apply 不會在取消後才把它推出去。
 
 同一個 operation 內，步驟重播加上 (operation, seq) 主鍵保證只接收一次；跨 operation 時，git 祖先關係讓已在 PR 的來源在預覽與組合時都是 `already_included`，`DELIVERED_EARLIER` 警告曾經送過。刻意不在 delivered 上加跨 operation 的唯一限制：分支被改寫後重新送同一個來源是真的新事件。
 

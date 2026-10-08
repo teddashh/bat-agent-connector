@@ -243,8 +243,11 @@ gi() {{ env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git --git-dir="$re
 gn() {{ git --git-dir="$repo" -c core.hooksPath=/dev/null -c gc.auto=0 -c maintenance.auto=false \\
   -c protocol.ext.allow=never -c fetch.recurseSubmodules=no -c core.fsmonitor=false "$@"; }}
 sha_ok() {{ printf '%s' "$1" | grep -Eqx '[0-9a-f]{{40}}'; }}
+# ls-remote matches ref patterns by their tail (refs/heads/a/refs/heads/x matches refs/heads/x): keep the exact one
+exact() {{ awk -F '\t' -v r="$1" '$2 == r {{ print $1 }}'; }}
 remote_head() {{ set +e; l=$(gn ls-remote --exit-code "$url" "refs/heads/$ref" 2>/dev/null); r=$?; set -e
-  case $r in 0) printf '%s' "$l" | cut -f1;; 2) printf -- '-';; *) printf unreadable;; esac; }}
+  case $r in 0) v=$(printf '%s\n' "$l" | exact "refs/heads/$ref"); printf '%s' "${{v:--}}";; 2) printf -- '-';;
+  *) printf unreadable;; esac; }}
 cas() {{ gi update-ref "$1" "$2" "" 2>/dev/null || [ "$(gi rev-parse --verify -q "$1" || true)" = "$2" ] \\
   || {{ echo "error COMPOSE_NOT_DETERMINISTIC $1"; exit 0; }}; }}
 ident() {{
@@ -255,7 +258,10 @@ ident() {{
    && [ "$(gi config --get batc.host || true)" = {_q(self.host)} ] \\
    && [ "$(gi config --get batc.remote-url || true)" = "$url" ] || {{ echo "error CLONE_NOT_OURS"; exit 0; }}
   [ ! -e "$repo/info/grafts" ] && [ ! -e "$repo/shallow" ] && [ ! -e "$repo/objects/info/alternates" ] \\
+   && [ ! -e "$repo/objects/info/http-alternates" ] && [ ! -e "$repo/commondir" ] \\
    && [ -z "$(gi for-each-ref refs/replace)" ] || {{ echo "error CLONE_CONFIG_TAMPERED integrity"; exit 0; }}
+  # a link inside the repository (objects, refs, packed-refs, config) would send its writes somewhere else
+  [ -z "$(find "$repo" -type l -print 2>/dev/null | head -n 1)" ] || {{ echo "error CLONE_CONFIG_TAMPERED links"; exit 0; }}
   bad=$(gi config --local --list --name-only | grep -vxE {_q(CONFIG_ALLOW)} || true)
   [ -z "$bad" ] || {{ echo "error CLONE_CONFIG_TAMPERED config"; exit 0; }}
 }}
@@ -314,9 +320,10 @@ def _live_tip(src: dict) -> str:
     if src["kind"] == "checkpoint":
         return f"live={_sha(src['pin'])}\n"
     where = '"$url"' if src["kind"] == "branch" else _q(src["location"])
-    return (f'set +e; l=$(gn ls-remote --exit-code {where} {_q("refs/heads/" + src["ref"])} 2>/dev/null); r=$?; '
-            f'set -e\ncase $r in 0) live=$(printf "%s" "$l" | cut -f1);; 2) echo "source {i} missing_ref"; return 0;; '
-            f'*) echo unreadable; exit 0;; esac\n'
+    ref = _q("refs/heads/" + src["ref"])
+    return (f'set +e; l=$(gn ls-remote --exit-code {where} {ref} 2>/dev/null); r=$?; '
+            f'set -e\ncase $r in 0) live=$(printf "%s\\n" "$l" | exact {ref});; 2) echo "source {i} missing_ref"; '
+            f'return 0;; *) echo unreadable; exit 0;; esac\n'
             f'sha_ok "$live" || {{ echo "source {i} missing_ref"; return 0; }}\n')
 
 
@@ -327,7 +334,8 @@ def _from(src: dict) -> str:
 def preview_prepare_script(area: Area, tag: str, head_ref: str, number: int, sources: list[dict]) -> str:
     parts = [area.prelude("preview-prepare", tag, head_ref), area.create(),
              'h=$(remote_head); [ "$h" = unreadable ] && { echo unreadable; exit 0; }; echo "remote_head $h"\n',
-             f'set +e; p=$(gn ls-remote "$url" {_q(f"refs/pull/{number}/head")} 2>/dev/null | cut -f1); set -e\n'
+             f'set +e; p=$(gn ls-remote "$url" {_q(f"refs/pull/{number}/head")} 2>/dev/null | exact '
+             f'{_q(f"refs/pull/{number}/head")}); set -e\n'
              'echo "pull_head ${p:--}"\n']
     for src in sources:
         i = src["seq"]
@@ -368,10 +376,6 @@ if gi show "$s:.gitattributes" 2>/dev/null | grep -q "filter=lfs"; then echo "lf
 """)
         if src["start"]:
             parts.append(f'gi rev-list -n 1000 {_sha(src["start"])}..$s 2>/dev/null | sed "s/^/own {i} /" || true\n')
-        if src.get("worktree"):  # an agent's managed worktree: uncommitted work is not included (warned)
-            parts.append(f'if [ -d {_q(src["worktree"])} ]; then echo "dirty {i} $(env GIT_CONFIG_NOSYSTEM=1 '
-                         f'GIT_CONFIG_GLOBAL=/dev/null git -C {_q(src["worktree"])} -c core.fsmonitor=false status '
-                         f'--porcelain --untracked-files=no 2>/dev/null | wc -l)"; fi\n')
         if src["mode"] == "merge":
             parts.append(f"""if [ -n "$mb" ]; then
   echo "total {i} $(gi rev-list --count "$T..$s")"
@@ -534,18 +538,22 @@ seen=$(remote_head); [ "$seen" = unreadable ] && { echo unreadable; exit 0; }
 [ "$seen" = "$base" ] || { echo "moved $seen"; exit 0; }
 # batc-int:before-push
 sha_ok "$head" || { echo "error GIT_FAILED bad sha"; exit 0; }
+echo $$ > "$repo/batc-push-$op"  # a read-back after a dropped connection can see this push is still running
 set +e
 out=$(gn -c core.abbrev=40 -c push.default=nothing -c push.followTags=false -c push.gpgSign=false \\
   -c push.negotiate=false -c push.recurseSubmodules=no push --porcelain --no-verify "$url" """ + _q(refspec) +
             """ 2>&1); rc=$?
 set -e
+rm -f "$repo/batc-push-$op"
 printf 'rc %s\\n%s\\n' "$rc" "$out" | tail -c 4000
 """)
 
 
 def readback_script(area: Area, tag: str, head_ref: str, base: str, head: str) -> str:
     return (area.prelude("readback", tag, head_ref) + "ident\n" + f"head={_sha(head)}; base={_sha(base)}\n" +
-            """seen=$(remote_head); echo "seen $seen"
+            """pf="$repo/batc-push-$op"
+if [ -f "$pf" ] && ps -o args= -p "$(cat "$pf")" 2>/dev/null | grep -q "batc-int:push $op"; then echo running; exit 0; fi
+seen=$(remote_head); echo "seen $seen"
 case $seen in unreadable|-) exit 0;; esac
 gi cat-file -e "$seen^{commit}" 2>/dev/null || gn fetch -q --no-tags --no-write-fetch-head "$url" "$seen" 2>/dev/null \\
   || { echo unreadable; exit 0; }
@@ -892,9 +900,6 @@ def _describe(ops, doc: dict, sources: list[dict], analysis: dict | None, pr: di
         if s["kind"] == "checkpoint" and (s.get("dirty") or 0) > 0:
             item["warnings"].append(_block("UNCOMMITTED_NOT_INCLUDED", f"{s['dirty']} uncommitted change(s) in the "
                                            "person's folder are not included"))
-        if a.get("dirty"):
-            item["warnings"].append(_block("UNCOMMITTED_NOT_INCLUDED", f"{a['dirty']} uncommitted change(s) in the "
-                                           "agent's folder are not included"))
         if s.get("session_id"):
             inv = ops.context.get("inventory")
             row = inv.get_session(doc["host"], s["session_id"]) if inv is not None else None
@@ -986,17 +991,31 @@ def _receipt_update(ctx: OpContext, seq: int, statuses: tuple[str, ...], kind: s
                                   actor=ctx.actor)
 
 
+def _push_attempted(ops: OperationService, operation_id: str) -> bool:
+    """A push step exists that did not fail: from then on only reading the remote back can say what happened."""
+    return ops.db.execute("""SELECT 1 FROM operation_steps WHERE operation_id=? AND name LIKE 'push.%'
+        AND status != 'failed'""", (operation_id,)).fetchone() is not None
+
+
 async def _run_apply(ctx: OpContext) -> dict:
     ops = ctx.service
-    repo, host, number = _admit_target(ops, ctx.target)
+    attempted = _push_attempted(ops, ctx.operation_id)
+    try:
+        repo, host, number = _admit_target(ops, ctx.target)
+        pv = get_preview(ops.db, ctx.params["preview_id"])
+        area = Area(ops, repo, host)
+        if resource_policy.norm(pv["area_path"]) != area.path or pv["remote_url"] != area.url:
+            raise OperationError("PREVIEW_MISMATCH", "the integration area or remote changed since the preview", 409)
+    except (OperationError, ResourceReadOnly) as e:
+        if not attempted:
+            raise
+        # Never "failed, nothing pushed" while a push may have landed: keep it resumable once fixed.
+        raise NeedsAttention(getattr(e, "code", "CONFIG_CHANGED"), f"{e}; a push may already have landed, so this "
+                             "stays open until the configuration is back and the remote can be read") from None
     gh = _gh(ops)
-    pv = get_preview(ops.db, ctx.params["preview_id"])
     sources = json.loads(pv["sources"])
     base = pv["head_sha"]
     head_ref = pv["head_ref"]
-    area = Area(ops, repo, host)
-    if resource_policy.norm(pv["area_path"]) != area.path or pv["remote_url"] != area.url:
-        raise OperationError("PREVIEW_MISMATCH", "the integration area or remote changed since the preview", 409)
     tag = ctx.operation_id[3:15]
     t0 = int(ctx.op["created_at"])
     date = f"@{t0} +0000"
@@ -1015,10 +1034,7 @@ async def _run_apply(ctx: OpContext) -> dict:
                      head_ref=head_ref)
         ctx.op["external_refs"] = {**(ctx.op.get("external_refs") or {}), "preview_id": pv["preview_id"],
                                    "repository": repo.repository, "pull_number": number}
-    pushed_before = any(json.loads(r["response"] or "{}").get("outcome", "").startswith("pushed")
-                        for r in ops.db.execute("""SELECT response FROM operation_steps WHERE operation_id=?
-                            AND name LIKE 'push.%' AND status='succeeded'""", (ctx.operation_id,)))
-    if not pushed_before:
+    if not attempted:  # once a push may have happened, only the read-back decides; PR state no longer stops it
         pr = _pr_facts(await _read(gh.pull(repo.repository, number), "read the pull request"))
         if pr["state"] != "open" or pr["merged"]:
             raise OperationError("PR_CLOSED", f"PR #{number} is {pr['state']}; nothing was pushed")
@@ -1210,6 +1226,8 @@ async def _push(ctx: OpContext, area: Area, tag: str, head_ref: str, base: str, 
 
         async def readback(_request: dict) -> dict | None:
             out = await area.run(readback_script(area, tag, head_ref, base, head))
+            if "running" in out:
+                return None  # the earlier push is still running on the host (its connection dropped): wait for it
             seen = next((x.split(" ", 1)[1] for x in out if x.startswith("seen ")), "unreadable")
             if seen == "unreadable" or "unreadable" in out:
                 try:  # the API is a positive-only second witness; never re-sent on API evidence alone
@@ -1222,7 +1240,15 @@ async def _push(ctx: OpContext, area: Area, tag: str, head_ref: str, base: str, 
             if seen == head:
                 return {"outcome": "pushed", "reconciled": True}
             if seen == base:
-                return RERUN  # proven not landed; the same normal push is safe to send again
+                # Not proof on its own: the push may have landed and the branch been set back since. Send it again
+                # only when GitHub says the composed commit does not exist there.
+                try:
+                    status, _ = await _gh(ops).commit(area.repo.repository, head)
+                except GitHubAmbiguous:
+                    return None
+                if status == 200:
+                    return {"outcome": "unproven_at_base"}
+                return RERUN if status in {404, 422} else None
             if seen == "-":
                 return {"outcome": "remote_missing"}
             if "contains_head" in out:
@@ -1262,6 +1288,9 @@ async def _push(ctx: OpContext, area: Area, tag: str, head_ref: str, base: str, 
         "auth_failed": ("PUSH_AUTH_FAILED", f"the host's git credentials cannot push to {area.repo.repository}; fix "
                         "them on the host, then Resume"),
         "push_shape": ("INTERNAL_PUSH_SHAPE", "the push answer had an impossible shape; stopped"),
+        "unproven_at_base": ("PUSH_UNPROVEN", "the PR branch is at its old head, but the composed commit exists on "
+                             "GitHub, so an earlier push may have landed and been set back; nothing is pushed again. "
+                             "Check the PR, then cancel and preview again"),
     }
     code, text = messages.get(outcome, ("UNCERTAIN_UNRESOLVED", f"unknown push outcome {outcome!r}"))
     raise NeedsAttention(code, text)
@@ -1269,11 +1298,12 @@ async def _push(ctx: OpContext, area: Area, tag: str, head_ref: str, base: str, 
 
 async def _confirm_and_finish(ctx: OpContext, area: Area, tag: str, pv: dict, sources: list, base: str, head: str,
                               tree: str | None) -> dict:
+    """The push is proven by git. GitHub's API may lag behind it; that is a warning, never a wait, so a cancel can
+    no longer catch a landed update half-way and record it as cancelled."""
     ops = ctx.service
-    gh = _gh(ops)
     warnings = []
     try:
-        status, pr = await gh.pull(area.repo.repository, pv["pull_number"])
+        status, pr = await _gh(ops).pull(area.repo.repository, pv["pull_number"])
     except GitHubAmbiguous:
         status, pr = 0, {}
     if not (status == 200 and (pr.get("head") or {}).get("sha") == head):
@@ -1282,10 +1312,11 @@ async def _confirm_and_finish(ctx: OpContext, area: Area, tag: str, pv: dict, so
         except (AmbiguousOutcome, StepFailed, OSError):
             out = ["seen unreadable"]
         seen = next((x.split(" ", 1)[1] for x in out if x.startswith("seen ")), "unreadable")
-        if seen in {head, "unreadable"}:  # GitHub lags behind git, or the remote could not be read right now
-            _check_wait(ctx, "confirm_wait_started_at")
-            raise Wait("waiting_external", "pushed; waiting for GitHub to show the new head", 5)
-        if "contains_head" in out:
+        if seen == head:
+            warnings.append("GITHUB_LAGGING")
+        elif seen == "unreadable" or "running" in out:
+            warnings.append("NOT_CONFIRMED_ON_GITHUB")
+        elif "contains_head" in out:
             warnings.append("REMOTE_MOVED_AFTER")
         else:
             raise NeedsAttention("REMOTE_REWRITTEN_AFTER_PUSH", f"the push landed, but the branch is now {seen[:12]} "
@@ -1316,15 +1347,19 @@ def _finish(ctx: OpContext, pv: dict, sources: list, base: str, head: str, *, pu
 # --------------------------------------------------------------------------- reads
 def receipts(db, operation_id: str) -> list[dict]:
     op = db.execute("SELECT status FROM operations WHERE operation_id=?", (operation_id,)).fetchone()
+    unproven = db.execute("""SELECT 1 FROM operation_steps WHERE operation_id=? AND name LIKE 'push.%'
+        AND status IN ('started', 'uncertain')""", (operation_id,)).fetchone() is not None
     out = []
     for r in db.execute("SELECT * FROM integration_receipts WHERE operation_id=? ORDER BY seq", (operation_id,)):
         d = dict(r)
         for k in ("commits", "picked", "conflict_files"):
             d[k] = json.loads(d[k]) if d[k] else None
         # Computed at read time: a cancel moves needs_attention to cancelled without running the handler.
-        d["effective_status"] = d["status"] if d["status"] == "delivered" or (op and op["status"] not in
-                                                                              {"failed", "cancelled"}) \
-            else "not_delivered"
+        # A push that was never proven reads as unknown, not as not delivered.
+        if d["status"] == "delivered" or not op or op["status"] not in {"failed", "cancelled"}:
+            d["effective_status"] = d["status"]
+        else:
+            d["effective_status"] = "unknown" if unproven else "not_delivered"
         out.append(d)
     return out
 
