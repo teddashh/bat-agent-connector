@@ -4,9 +4,10 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import vm from "node:vm";
 
-const root = new URL("../src/bat_agent_connector/dashboard/", import.meta.url);
+// Browser assets are generated bundles; exercise the shared canonical source directly.
+const root = new URL("../desktop/src/", import.meta.url);
 const app = readFileSync(new URL("app.js", root), "utf8")
-  .replace('import { t } from "./i18n.js";', "").replace(/\nstart\(\);\s*$/, "\n");
+  .replace(/^import .*;\n/gm, "").replace(/\nstart\(\);\s*$/, "\n");
 const i18n = readFileSync(new URL("i18n.js", root), "utf8").replace("export function t", "function t");
 
 class FixtureNode {
@@ -18,7 +19,7 @@ class FixtureNode {
 
 function render(language, effect, agent, declared = true) {
   const context = vm.createContext({
-    navigator: { language }, Node: FixtureNode,
+    navigator: { language }, Node: FixtureNode, nativeDesktop: false,
     document: { createElement: () => new FixtureNode(), createTextNode: () => new FixtureNode(), addEventListener() {} },
   });
   vm.runInContext(i18n + "\n" + app + "\nglobalThis.fixture = { state, confinementNote, t };", context);

@@ -56,7 +56,7 @@ Part A 無 restore 按鈕。Task-owned 資源由 Task Service 整理，本輪列
 Restore、reviewed task leftovers／coordinator 准入與 TaskDaemon 歷史投影在 Part B。Clone／area 與 pins 留存。
 ## 執行限制證據（A10）
 
-Session card 依 creation snapshot 顯示 level；OS sandbox 最多 options_confirmed，badge 明示尚未實機驗證。Detail 可展開建立選項、evidence／gap 及獨立 current verification；stale／mismatch 不改原 level。Checkpoint、work item 接續與 repair forms 隨所選 agent 顯示 options 的限制：未查核 account 的 Claude 用 default、既有規則與 shell 可允許外部寫入，並推薦 Codex；已宣告但未驗證 account 阻擋新 start。Codex 顯示 network／writable roots 不可設定與測試相容風險。所有字串有 en／zh-TW。Cwd 本身不稱為保護；A10 尚待 W12，見 [confinement](confinement.md)。
+Session card 依 creation snapshot 顯示 level；OS sandbox 最多 options_confirmed，badge 明示尚未實機驗證。Detail 可展開建立選項、evidence／gap 及獨立 current verification；stale／mismatch 不改原 level。Checkpoint、work item 接續與 repair forms 隨所選 agent 及中央 `host_account.start_effect` 顯示限制：`recheck` 要求 start 時重新查核；`fallback_default` 的 Claude 使用 plain default；`refused` 才顯示阻擋與原因；`verified` 顯示已驗證 account 邊界。Codex 顯示 network／writable roots 不可設定與測試相容風險。所有字串有 en／zh-TW。Cwd 本身不稱為保護；A10 尚待 W12，見 [confinement](confinement.md)。
 
 ## 尚未涵蓋
 
