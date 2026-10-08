@@ -132,7 +132,7 @@ materialization host/path/ref/size/digest、verified receipt 與實際 transfer 
 不猜 attempt range，不豁免其他內容。Store 正本也必須可讀且 hash 符合，否則副本維持一般內容，避免清掉唯一副本。
 Cleanup host helper 仍逐檔檢查 no-follow、single-link、目前 size/hash、tracked 狀態及多餘／缺少內容；
 edited、unknown、unverified 或跨 operation/host/path 的內容需要原本的保留／reviewed discard 規則。
-此投影尚待 shared cleanup 基底接線與整合測試；不代表清理能力已安裝或經實機驗收。
+此投影已接上 shared cleanup，精確副本與 resume 原件查核通過 mock／暫存 Git 整合測試；尚未安裝或實機驗收。
 
 helper 是固定、版本化 Python 3.9+ 程式，透過既有 alias 執行；raw bytes stdin、有界 JSON stdout，沒有 general script API。每個寫入先經 resource_policy.check_checkpoint_worktree 與 artifact destination 規則，檢查建立 intent、clone marker與真實 root。所有 worktree 以下 component 以 dirfd/no-follow 開啟；拒絕 symlink、unknown final、hardlink／非 regular file、traversal／prefix escape。不以 norm 字串當 canonical 證據。
 
@@ -240,7 +240,7 @@ BAT只用mockbat；git用temp repo／LocalRunner／RealGitLog。byte helper測�
 | test_attachment_change_invalidates_work_item_approval | 有附件才改fingerprint、version衝突 |
 | test_artifact_migration_preserves_existing_journal_and_empty_manifests | 舊IDs／approval／空附件、idempotent DDL |
 | test_replica_projection_*（test_artifact_cleanup.py） | 純讀 exact creation/materialization/transfer binding；原件 missing/corrupt 保留；不猜 attempt 缺號 |
-| test_replica_projection_drives_cleanup_content_contract | 真實暫存檔案 unchanged／edited／extra／missing／symlink／hardlink／tracked；shared cleanup module 尚未合入時明確 skip |
+| test_replica_projection_drives_cleanup_content_contract | 真實暫存檔案 unchanged／edited／extra／missing／symlink／hardlink／tracked；已接 shared cleanup module，所有 content-contract cases 正常執行 |
 | test_artifact_http_mcp_cli_contract_and_scopes | body前auth／actor／state／type／length、download headers、scope、same action |
 | test_artifact_policy_refuses_escape_before_any_host_write | worktree內no-follow／traversal／hardlink／unknown拒絕 |
 | test_materialized_inputs_are_git_excluded_and_inside_the_worktree | cwd內relative paths、dirty=0、exclude冪等 |
