@@ -2,6 +2,14 @@
 
 ## Next release (unreleased)
 
+- Task Service reviewer starts send one start frame per reservation ([design](docs/design/confinement.md),
+  計畫 §06/§12/§28, A10). Lost or unconfirmed replies, including `ok: false` or a different session ID, retry only
+  metadata reads with bounded backoff. Unproven starts keep their reservation and leave the command and task
+  uncertain with `CONFINEMENT_START_UNSETTLED`; a later tick settles by read-back without another dispatch.
+  Readable identity/permission mismatches still refuse, pre-transport failures still release, and valid ACKs retain
+  best-effort evidence reads. The lead retry loop and other start/recovery paths retain their transport fences.
+  A10 still awaits the W12 live run.
+
 - Dashboard start notes now follow the server's `host_account.start_effect` ([design](docs/design/confinement.md),
   計畫 §06/§10/§12, A10). Unchecked or stale evidence requires a live recheck at start; supported hardening gaps
   and undeclared accounts use confined Claude's plain default fallback. Only refusals show the blocked note and

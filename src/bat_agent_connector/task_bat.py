@@ -262,7 +262,7 @@ class BatTaskAdapter:
                         external_branch=external["branch"] if external else None,
                         task_id=task["task_id"])
                     break
-                except Exception as exc:  # noqa: BLE001 - same reserved start is idempotent
+                except Exception as exc:  # noqa: BLE001 - retained sent starts are fenced by guard_new_start
                     if getattr(exc, "sent", None) is False:
                         raise
                     last_error = exc
@@ -308,51 +308,40 @@ class BatTaskAdapter:
         confinement.record_task_start(self.journal, task["task_id"], sid, entry)
         client = self.fleet.client(host)
         with confinement.StartFrame(host, sid, journal=self.journal, task_id=task["task_id"]) as start_frame:
-            started = None
-            last_error = None
-            for attempt in range(3):
-                try:
-                    started = await client.invoke(
-                        "claude:start-session", {"sessionId": sid, "options": opts}, retry_on_disconnect=False,
-                        grant=grant, before_frame=lambda: confinement.guard_start_frame(self.fleet, host, record),
-                        on_transport=start_frame.on_transport)
-                    if isinstance(started, dict) and started.get("ok") is not False and started.get("sessionId") == sid:
-                        break
+            try:
+                started = await client.invoke(
+                    "claude:start-session", {"sessionId": sid, "options": opts}, retry_on_disconnect=False,
+                    grant=grant, before_frame=lambda: confinement.guard_start_frame(self.fleet, host, record),
+                    on_transport=start_frame.on_transport)
+                if (not isinstance(started, dict) or started.get("ok") is False
+                        or started.get("sessionId") != sid):
                     raise WriteRefused("BAT reviewer start did not confirm the reserved session ID")
-                except Exception as exc:  # noqa: BLE001 - poll identity before retrying
-                    if not start_frame.sent:
-                        registry.fail_reservation(host, sid)
-                        registry.update(host, sid, start_sent=False)
-                        raise
-                    last_error = exc
+            except Exception as exc:  # noqa: BLE001 - a sent start permits only read-back, never another frame
+                if not start_frame.sent:
+                    registry.fail_reservation(host, sid)
+                    registry.update(host, sid, start_sent=False)
+                    raise
+                for attempt in range(3):
                     try:
                         meta = await client.invoke("claude:get-session-meta", {"sessionId": sid},
                                                    retry_on_disconnect=False)
-                    except Exception:  # noqa: BLE001 - readback is best-effort; retry below
+                    except Exception:  # noqa: BLE001 - retry only the read of the reserved ID
                         meta = None
                     if isinstance(meta, dict):
-                        try:
-                            confinement.guard_start_record(registry.get(host, sid) or {})
-                            confinement.guard_start_cwd(entry, meta)
-                            confinement.ensure_confirmed(record, meta, allow_unknown=True)
-                        except confinement.ConfinementRefused as refusal:
-                            registry.update(host, sid, status="uncertain", error_code=refusal.code,
-                                            **({"confinement": confinement.confirm(record, meta)}
-                                               if refusal.code == "CONFINEMENT_MISMATCH" else {}))
-                            if refusal.code == "CONFINEMENT_MISMATCH":
-                                confinement.record_task_start(self.journal, task["task_id"], sid, registry.get(host, sid) or {})
-                            raise
-                        started = {"ok": True, "sessionId": sid}
                         break
                     if attempt < 2:
                         await asyncio.sleep(0.25 * (2 ** attempt))
-            if not started or started.get("sessionId") != sid:
-                registry.update(host, sid, status="uncertain")
-                raise last_error or WriteRefused("BAT reviewer start did not settle")
-            try:
-                meta = await client.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
-            except Exception:  # noqa: BLE001 - evidence reads must not fail an acknowledged reviewer start
-                meta = None
+                else:
+                    registry.update(host, sid, status="uncertain", error_code="CONFINEMENT_START_UNSETTLED")
+                    raise confinement.ConfinementRefused(
+                        "CONFINEMENT_START_UNSETTLED", "BAT reviewer start did not settle; use read-back recovery",
+                        sent=True) from exc
+            else:
+                try:
+                    meta = await client.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
+                except Exception:  # noqa: BLE001 - evidence reads must not fail an acknowledged reviewer start
+                    meta = None
+            confinement.guard_start_record(registry.get(host, sid) or {})
             if isinstance(meta, dict):
                 try:
                     confinement.guard_start_cwd(entry, meta)
@@ -563,7 +552,7 @@ class BatTaskAdapter:
             "workspace_name": workspace.get("name"), "agent_preset": preset,
             "origin_cwd": workspace.get("folderPath"), "cwd": expected_cwd,
             "worktree_path": expected_cwd, "branch": branch_name,
-            "role": role, "task_id": task["task_id"], "lead_session_id": lead_id,
+            "role": role, "task_id": task["task_id"], "lead_session_id": lead_id, "error_code": None,
             "title": ("review " if role == "reviewer" else "task ") + task["task_id"][:8],
             **({} if existing else {"confinement": record or {
                 **confinement.session_fields(task["host"], session_id)["confinement"],
