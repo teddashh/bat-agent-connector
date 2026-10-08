@@ -190,3 +190,43 @@ async def test_legacy_codex_predecessor_uses_its_recorded_agent(fleet_factory):
         assert scope == "confined"
     finally:
         await f.close()
+
+
+@pytest.mark.parametrize("outcome", ["confirmed", "mismatch", "unreadable", "null"])
+async def test_confined_failover_unsettled_successor_reads_back_before_new_attempt(fleet_factory, mock, outcome):
+    f = fleet_factory(writes=True, orchestrate=True, default_permission_mode="confined",
+                      safety={"write_min_interval_s": 0}, **MANAGED)
+    lead = _add_wt_claude(mock)
+    options = confinement.CONFINED_OPTIONS["codex"]
+    previous = registry.get("h1", lead)
+    registry.reserve("h1", {**previous, "session_id": "unsettled-successor", "failover_of": lead,
+                            "agent_preset": "codex-agent-worktree", "write_scope": "confined",
+                            "confinement": confinement.snapshot("codex", options), "start_uncertain": True}, 4)
+    if outcome in {"confirmed", "mismatch"}:
+        mock.metas["unsettled-successor"] = {"cwd": previous["cwd"], **options}
+        if outcome == "mismatch":
+            mock.metas["unsettled-successor"]["codexSandboxMode"] = "danger-full-access"
+    elif outcome == "unreadable":
+        invoke = f.client("h1").invoke
+
+        async def unreadable(channel, params=None, **kwargs):
+            if channel == "claude:get-session-meta" and params["sessionId"] == "unsettled-successor":
+                raise InvokeError("fixture metadata unavailable")
+            return await invoke(channel, params, **kwargs)
+
+        f.client("h1").invoke = unreadable
+    try:
+        if outcome == "confirmed":
+            result = await lifecycle.session_failover(f, "h1", lead, confirm=True)
+            assert result["new_session_id"] == "unsettled-successor" and result["skipped"]
+            entry = registry.get("h1", "unsettled-successor")
+            assert entry["status"] == "active" and not entry["start_uncertain"]
+            assert entry["confinement"]["verification"]["status"] == "options_confirmed"
+        else:
+            code = "CONFINEMENT_MISMATCH" if outcome == "mismatch" else "CONFINEMENT_START_UNSETTLED"
+            with pytest.raises(confinement.ConfinementRefused, match=code):
+                await lifecycle.session_failover(f, "h1", lead, confirm=True)
+            assert registry.get("h1", "unsettled-successor")["start_uncertain"]
+        assert "claude:start-session" not in mock.channels()
+    finally:
+        await f.close()

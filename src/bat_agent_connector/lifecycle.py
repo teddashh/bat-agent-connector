@@ -475,8 +475,21 @@ async def _failover_one(
     if prior:
         e = prior[-1]
         if e.get("start_uncertain"):
-            raise confinement.ConfinementRefused("CONFINEMENT_MISMATCH",
-                                                 "successor start is unsettled; keep its reservation for readback")
+            try:
+                meta = await c.invoke("claude:get-session-meta", {"sessionId": e["session_id"]},
+                                      retry_on_disconnect=False)
+            except Exception as exc:  # noqa: BLE001 - an unreadable successor must keep its reservation
+                raise confinement.ConfinementRefused("CONFINEMENT_START_UNSETTLED",
+                                                     "successor start cannot be read back") from exc
+            state = confinement.verify(e.get("confinement") or {}, meta)
+            if state["status"] == "mismatch":
+                raise confinement.ConfinementRefused("CONFINEMENT_MISMATCH", state["reason"])
+            if state["status"] not in {"options_confirmed", "verified"}:
+                raise confinement.ConfinementRefused("CONFINEMENT_START_UNSETTLED", state["reason"])
+            record = confinement.confirm(e["confinement"], meta)
+            registry.update(host, e["session_id"], status="active", start_uncertain=False,
+                            error_code=None, confinement=record)
+            e = {**e, "status": "active", "start_uncertain": False, "confinement": record}
         if (successor_session_id and e.get("session_id") != successor_session_id
                 or handoff_message_id and e.get("handoff_message_id") != handoff_message_id
                 or handoff_command_id and e.get("handoff_command_id") != handoff_command_id
