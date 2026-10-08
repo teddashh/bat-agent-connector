@@ -23,7 +23,7 @@ import shlex
 import time
 import uuid
 
-from . import orchestrate, registry, resource_policy, service
+from . import confinement, orchestrate, registry, resource_policy, service
 from .api_auth import Principal
 from .errors import BatError
 from .operations import (
@@ -68,6 +68,11 @@ class SshGitRunner:
         if not alias:
             raise GitCommandFailed(f"no SSH alias is configured for host {host}")
         return await _run(("ssh", "-o", "BatchMode=yes", alias, "sh -lc " + shlex.quote(script)), timeout_s)
+
+    async def run_account_check(self, host: str, command: str, timeout_s: float | None = None,
+                                *, ssh_alias: str) -> str:
+        """Use the explicitly trusted auditor alias; never fall back to the BAT login."""
+        return await _run(("ssh", "-o", "BatchMode=yes", ssh_alias, command), timeout_s)
 
 
 async def _run(argv: tuple[str, ...], timeout_s: float | None = None) -> str:
@@ -176,6 +181,7 @@ async def preview(ops: OperationService, host: str, session_id: str) -> dict:
             "commits": [{"hash": r["hash"], "message": str(r.get("message") or "")[:200], "date": r.get("date")}
                         for r in log],
             "dirty": None if state is None else state[1],
+            "confinement": confinement.host_capability(ops.context["fleet"], host),
             "snapshot": {"supported": False, "reason": "uncommitted changes are not carried over; commit first"}}
 
 
@@ -429,25 +435,68 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
     await ctx.step("verify.start", verify, reconcile=reverify)
 
     async def start() -> dict:
-        r = await orchestrate.session_start(
-            fleet, host, workspace, agent, confirm=True, prompt=None, use_worktree=False, title=title,
-            session_id=sid, retain_on_error=True, cwd_override=worktree, external_branch=branch,
-            write_scope="confined")
-        return {"session_id": r["session_id"], "cwd": r.get("cwd") or worktree}
+        try:
+            r = await orchestrate.session_start(
+                fleet, host, workspace, agent, confirm=True, prompt=None, use_worktree=False, title=title,
+                session_id=sid, retain_on_error=True, cwd_override=worktree, external_branch=branch,
+                write_scope="confined")
+        except confinement.ConfinementRefused as exc:
+            if (exc.sent is False or exc.code in confinement.START_IDENTITY_MISMATCH_CODES
+                    or exc.code in {"CONFINEMENT_MISMATCH", "CONFINEMENT_START_UNSETTLED", "START_IN_PROGRESS"}):
+                raise NeedsAttention(exc.code, str(exc)) from exc
+            raise
+        ctx.set_refs(confinement=r["confinement"])
+        return {"session_id": r["session_id"], "cwd": r.get("cwd") or worktree,
+                "confinement": r["confinement"]}
 
     async def restart(_request: dict) -> dict | None:
-        if not any(e.get("session_id") == sid for e in registry.list_entries(host)):
+        entry = registry.get(host, sid)
+        if not entry or entry.get("start_sent") is False:
             return RERUN  # never reserved in the registry, so no start frame left this process
+        if not entry.get("confinement"):
+            raise NeedsAttention("CONFINEMENT_EVIDENCE_MISSING", "reserved start has no confinement evidence")
+        try:
+            confinement.guard_start_record(entry)
+        except confinement.ConfinementRefused as exc:
+            raise NeedsAttention(exc.code, str(exc)) from exc
         try:
             meta = await c.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
         except Exception:  # noqa: BLE001 - unreadable: stay uncertain and read again later
             return None
-        if isinstance(meta, dict) and norm(meta.get("cwd")) == worktree:
-            registry.update(host, sid, status="active", cwd=worktree, worktree_path=worktree, branch=branch)
-            return {"session_id": sid, "cwd": worktree, "reconciled": True}
+        if isinstance(meta, dict):
+            try:
+                # Older in-flight rows omitted cwd; the durable start request
+                # still records the exact folder passed to BAT.
+                confinement.guard_start_cwd({"cwd": entry.get("cwd") or _request.get("cwd")}, meta)
+                confinement.guard_start_cwd({"cwd": worktree}, meta)
+            except confinement.ConfinementRefused as exc:
+                if exc.code in confinement.START_IDENTITY_MISMATCH_CODES:
+                    registry.update(host, sid, error_code=exc.code)
+                raise NeedsAttention(exc.code, str(exc)) from exc
+            record = (registry.get(host, sid) or {}).get("confinement")
+            if not record:
+                raise NeedsAttention("CONFINEMENT_EVIDENCE_MISSING", "reserved start has no confinement evidence")
+            try:
+                confinement.guard_start_record({"confinement": record})
+            except confinement.ConfinementRefused as exc:
+                raise NeedsAttention(exc.code, str(exc)) from exc
+            state = confinement.verify(record, meta)
+            if state["status"] == "mismatch":
+                registry.update(host, sid, error_code="CONFINEMENT_MISMATCH",
+                                confinement=confinement.confirm(record, meta))
+                raise NeedsAttention("CONFINEMENT_MISMATCH", state["reason"])
+            if state["status"] == "unknown":
+                return None
+            if record["verification"]["status"] == "pending":
+                record = confinement.confirm(record, meta)
+            registry.update(host, sid, status="active", cwd=worktree, worktree_path=worktree, branch=branch,
+                            confinement=record)
+            ctx.set_refs(confinement=record)
+            return {"session_id": sid, "cwd": worktree, "reconciled": True, "confinement": record}
         return None  # reserved and maybe sent: BAT may still be starting it, so read again later; never start twice
 
-    await ctx.step("session.start", start, request={"session_id": sid, "cwd": worktree, "agent": agent},
+    await ctx.step("session.start", start, request={"session_id": sid, "cwd": worktree, "agent": agent,
+                                                 "write_scope": "confined"},
                    reconcile=restart)
     registry.update(host, sid, **registry_fields)
     mid = "batc-" + ctx.operation_id
@@ -472,7 +521,16 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
                           reconcile=resend)
     if not sent.get("accepted"):
         raise NeedsAttention("NOT_ACCEPTED", "BAT did not accept the first instruction")
-    return {"session_id": sid, "message_id": mid}
+    readback_failed = False
+    try:
+        meta = await service._meta(c, sid)
+    except Exception:  # noqa: BLE001 - the durable send succeeded; evidence cannot fail the operation
+        meta, readback_failed = None, True
+    fields = confinement.session_fields(host, sid, meta, account=confinement.account_status(fleet, host))
+    if readback_failed:
+        fields["current_verification"].update(status="unknown", reason="readback_failed")
+    return {"session_id": sid, "message_id": mid,
+            **fields}
 
 
 async def _run_continue(ctx: OpContext) -> dict:
@@ -537,7 +595,8 @@ async def _run_continue(ctx: OpContext) -> dict:
         with contextlib.suppress(Exception):
             await inventory.refresh_host(host)
     return {"checkpoint_id": cp["checkpoint_id"], "host": host, "session_id": sid, "worktree_path": worktree,
-            "branch": branch, "base_commit": cp["commit_sha"], "message_id": mid, "write_scope": "confined"}
+            "branch": branch, "base_commit": cp["commit_sha"], "message_id": mid, "write_scope": "confined",
+            "confinement": started["confinement"], "current_verification": started["current_verification"]}
 
 
 ACTIONS = [

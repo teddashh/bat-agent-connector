@@ -131,8 +131,8 @@ async def test_a07_failure_before_any_frame_rejects_command_without_uncertain_ta
             raise error("session lookup failed")
         return await original_lookup(*args, **kwargs)
 
-    async def lose_reply(frame, timeout):
-        result = await original_roundtrip(frame, timeout)
+    async def lose_reply(frame, timeout, **kwargs):
+        result = await original_roundtrip(frame, timeout, **kwargs)
         if frame["channel"] in WRITE_CHANNELS | ORCHESTRATE_CHANNELS | GUARDED_CHANNELS:
             raise error("write reply lost")
         return result
@@ -471,8 +471,8 @@ async def test_a05_a07_failed_dispatch_receipt_survives_crash_before_command_rej
     op, _ = task_send_operation(d, tid, "dispatch-refusal-crash")
     saved_error = {}
 
-    async def lose_resume_reply(frame, timeout):
-        result = await original(frame, timeout)
+    async def lose_resume_reply(frame, timeout, **kwargs):
+        result = await original(frame, timeout, **kwargs)
         if frame["channel"] == "claude:client-resume":
             raise error("resume reply lost before prompt")
         return result
@@ -570,8 +570,8 @@ async def test_a07_post_frame_send_error_is_uncertain_and_settles_by_readback(
     original = client._roundtrip
     principal, request, op = admission_control(d, tid, mock, "send", scoped=scoped)
 
-    async def malformed_reply(frame, timeout):
-        result = await original(frame, timeout)
+    async def malformed_reply(frame, timeout, **kwargs):
+        result = await original(frame, timeout, **kwargs)
         return {"unexpected": "reply"} if frame["channel"] == "claude:send-message" else result
 
     def bookkeeping_failure(*args, **kwargs):
@@ -729,8 +729,8 @@ async def test_a05_a07_command_refs_commit_with_receipt_and_survive_restart(owne
                 raise asyncio.CancelledError("crash immediately after command/receipt/refs commit")
         return result
 
-    async def after_frame(frame, timeout):
-        result = await original_roundtrip(frame, timeout)
+    async def after_frame(frame, timeout, **kwargs):
+        result = await original_roundtrip(frame, timeout, **kwargs)
         if frame["channel"] == channel:
             assert_command_refs(d, op_id, step)
             if kind == "interrupt":
@@ -1660,8 +1660,8 @@ async def test_a07_operation_readback_and_coordinator_tick_settle_task_command(o
     client = d.fleet.client("h1")
     original_roundtrip = client._roundtrip
 
-    async def lose_reply(frame, timeout):
-        result = await original_roundtrip(frame, timeout)
+    async def lose_reply(frame, timeout, **kwargs):
+        result = await original_roundtrip(frame, timeout, **kwargs)
         if frame["channel"] == channel:
             if action == "session.interrupt":
                 mock.metas[SID]["isStreaming"] = mock.states[SID]["isStreaming"] = False
@@ -1692,8 +1692,8 @@ async def test_a07_operation_readback_and_coordinator_tick_settle_task_command(o
     async def no_dispatch(*args, **kwargs):
         raise AssertionError("read-back must not re-enter session_control")
 
-    async def unreadable(frame, timeout):
-        result = await original_roundtrip(frame, timeout)
+    async def unreadable(frame, timeout, **kwargs):
+        result = await original_roundtrip(frame, timeout, **kwargs)
         return {**result, "result": None} if frame["channel"] in {
             "claude:get-session-meta", "claude:get-session-state", "claude:load-archived"} else result
 
@@ -2139,8 +2139,8 @@ async def test_a07_readback_of_old_incarnation_does_not_dispatch_again(owned, mo
     _, _, op = admission_control(d, tid, mock, kind)
     client = d.fleet.client("h1")
     original = client._roundtrip
-    async def lose_reply(frame, timeout):
-        result = await original(frame, timeout)
+    async def lose_reply(frame, timeout, **kwargs):
+        result = await original(frame, timeout, **kwargs)
         if frame["channel"] in WRITE_CHANNELS:
             if kind == "interrupt":
                 mock.metas[SID]["isStreaming"] = mock.states[SID]["isStreaming"] = False
@@ -2176,14 +2176,14 @@ async def test_a07_legacy_answer_resolves_prompt_before_frame_and_reconciles_aft
     client = d.fleet.client("h1")
     original = client._roundtrip
 
-    async def lose_reply(frame, timeout):
+    async def lose_reply(frame, timeout, **kwargs):
         if frame["channel"] == channel:
             command = d.journal.commands(tid)[0]
             payload = json.loads(command["payload"])
             assert payload["tool_use_id"] == frame["params"]["toolUseId"] == prompt_id
             assert payload["tool_use_id_source"] == "service"
             assert not d.journal.db.in_transaction  # identity is committed before the BAT frame
-        result = await original(frame, timeout)
+        result = await original(frame, timeout, **kwargs)
         if frame["channel"] == channel:
             raise ConnectionLost("BAT accepted the answer, reply lost")
         return result
@@ -2200,8 +2200,8 @@ async def test_a07_legacy_answer_resolves_prompt_before_frame_and_reconciles_aft
         assert restarted.journal.command_get(command["command_id"])["payload"] == command["payload"]
         client = restarted.fleet.client("h1")
         original_read = client._roundtrip
-        async def unreadable(frame, timeout):
-            result = await original_read(frame, timeout)
+        async def unreadable(frame, timeout, **kwargs):
+            result = await original_read(frame, timeout, **kwargs)
             return {**result, "result": None} if frame["channel"] == "claude:get-session-state" else result
         with monkeypatch.context() as patch:
             patch.setattr(client, "_roundtrip", unreadable)
@@ -2250,8 +2250,8 @@ async def test_a07_legacy_answer_without_resolvable_prompt_creates_no_command(ow
     else:
         client = d.fleet.client("h1")
         original = client._roundtrip
-        async def unreadable(frame, timeout):
-            result = await original(frame, timeout)
+        async def unreadable(frame, timeout, **kwargs):
+            result = await original(frame, timeout, **kwargs)
             return {**result, "result": None} if frame["channel"] == "claude:get-session-state" else result
         monkeypatch.setattr(client, "_roundtrip", unreadable)
     snapshot = task_effect_snapshot(d, tid)
@@ -2312,8 +2312,8 @@ async def test_a07_permission_mode_identity_survives_lost_reply_without_replay(o
         d.journal.change(tid, "accepted", fields={"session_id": sid})
     client = d.fleet.client("h1")
     original = client._roundtrip
-    async def lose_reply(frame, timeout):
-        result = await original(frame, timeout)
+    async def lose_reply(frame, timeout, **kwargs):
+        result = await original(frame, timeout, **kwargs)
         if frame["channel"] in WRITE_CHANNELS:
             raise ConnectionLost("permission setting reply lost")
         return result
@@ -2337,8 +2337,8 @@ async def test_a07_answer_resolution_rechecks_task_gate_before_command(owned, mo
     client = d.fleet.client("h1")
     original = client._roundtrip
     paused = {}
-    async def pause_at_read(frame, timeout):
-        result = await original(frame, timeout)
+    async def pause_at_read(frame, timeout, **kwargs):
+        result = await original(frame, timeout, **kwargs)
         if frame["channel"] == "claude:get-session-state":
             d.journal.pause(tid)
             paused.update(task_effect_snapshot(d, tid))
@@ -2355,8 +2355,8 @@ async def test_a07_relay_runtime_command_has_original_send_readback_identity(own
     mock.echo_sends = True
     client = d.fleet.client("h1")
     original = client._roundtrip
-    async def lose_reply(frame, timeout):
-        result = await original(frame, timeout)
+    async def lose_reply(frame, timeout, **kwargs):
+        result = await original(frame, timeout, **kwargs)
         if frame["channel"] == "claude:send-message":
             raise ConnectionLost("relay reply lost")
         return result
@@ -2387,9 +2387,9 @@ async def test_a07_refusal_after_resume_rejects_only_the_unsent_command(owned, m
     client = d.fleet.client("h1")
     original = client._roundtrip
 
-    async def resume_then_refuse(frame, timeout):
+    async def resume_then_refuse(frame, timeout, **kwargs):
         nonlocal expected
-        result = await original(frame, timeout)
+        result = await original(frame, timeout, **kwargs)
         if frame["channel"] == "claude:client-resume":
             if refusal == "streaming":
                 mock.metas[SID]["isStreaming"] = True
@@ -2590,8 +2590,8 @@ async def test_a07_resume_transport_loss_rejects_command_without_uncertain_task(
     client = d.fleet.client("h1")
     original = client._roundtrip
 
-    async def lose_resume_reply(frame, timeout):
-        result = await original(frame, timeout)
+    async def lose_resume_reply(frame, timeout, **kwargs):
+        result = await original(frame, timeout, **kwargs)
         if frame["channel"] == "claude:client-resume":
             raise error("resume reply lost before send-message")
         return result
@@ -2641,8 +2641,8 @@ async def test_a07_send_reply_loss_after_resume_uses_original_readback(owned, mo
     client = d.fleet.client("h1")
     original = client._roundtrip
 
-    async def lose_send_reply(frame, timeout):
-        result = await original(frame, timeout)
+    async def lose_send_reply(frame, timeout, **kwargs):
+        result = await original(frame, timeout, **kwargs)
         if frame["channel"] == "claude:send-message":
             raise ConnectionLost("send reply lost after resume")
         return result
@@ -2734,8 +2734,8 @@ async def test_a07_daemon_tick_handles_pre_frame_send_failure_without_uncertaint
     client = d.fleet.client("h1")
     original = client._roundtrip
 
-    async def lose_resume_reply(frame, timeout):
-        result = await original(frame, timeout)
+    async def lose_resume_reply(frame, timeout, **kwargs):
+        result = await original(frame, timeout, **kwargs)
         if frame["channel"] == "claude:client-resume":
             raise error("resume failed before the command frame")
         return result
@@ -2773,8 +2773,8 @@ async def test_a07_daemon_tick_cancels_pre_frame_send_after_task_control(owned, 
             controlled.update(d.journal.pause(tid))
         return await original_checked(channel, *args, **kwargs)
 
-    async def change_then_lose_reply(frame, timeout):
-        result = await original_roundtrip(frame, timeout)
+    async def change_then_lose_reply(frame, timeout, **kwargs):
+        result = await original_roundtrip(frame, timeout, **kwargs)
         if frame["channel"] == "claude:client-resume":
             d.journal.pause(tid)
             if boundary == "version_changed":
@@ -2808,8 +2808,8 @@ async def test_a07_daemon_initial_send_failure_preserves_presence_and_control_ru
     client = d.fleet.client("h1")
     original = client._roundtrip
 
-    async def lose_resume_reply(frame, timeout):
-        result = await original(frame, timeout)
+    async def lose_resume_reply(frame, timeout, **kwargs):
+        result = await original(frame, timeout, **kwargs)
         if frame["channel"] == "claude:client-resume":
             raise ConnectionLost("resume reply lost before prompt")
         return result

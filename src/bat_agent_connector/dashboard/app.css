@@ -96,6 +96,11 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
   button.mini { min-width: 36px; height: 36px; }
 }
 
+.session-badges { margin-top: 0; min-width: 0; }
+.session-badges .chip { white-space: normal; }
+
+@media (max-width: 640px) { input, select, textarea { font-size: 16px; } }
+
 .delivery-card { overflow-wrap: anywhere; }
 .delivery-card label input { width: 100%; }
 .delivery-card .kv { grid-template-columns: max-content minmax(0, 1fr); }
