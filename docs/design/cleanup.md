@@ -198,6 +198,8 @@ per-host read lock／deadline 下重讀全部 terminals 的 live cwd／session s
 通過才用 stdin 明確許可 Git phase；stop 在 callback 中經既有 BAT stop path 執行，完成才釋放 host flock。
 拒絕／斷線／EOF／deadline 不許可後續 mutation，不寫新 lockfile。Lost reply 沿用既有 uncertain／reconcile
 規則，不能因 handshake 遺失重 stop。自己的已接受 idle stop items 可先後停止，worktree 仍依賴全數 stop 成功。
+拒絕／timeout 的 transport 明確關閉 stdin；Python 3.10 的 communicate(input=None) 不會自行關閉，
+不能讓 host helper 留到 deadline 才 abort。
 Connector locks 不能保證同帳號外部 writer；觀測不足即保留，非 force remove 最後拒絕 dirty race。
 
 ## Preview／apply 合約（Part A）
@@ -398,6 +400,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | preview 到 stop 間任何 waiting field 改變都不 stop／remove；E01 | test_e01_every_waiting_field_racing_with_stop_keeps_session_and_worktree（共用 set 全部九個 fields）、test_e01_preview_recheck_and_stop_share_waiting_fields |
 | registered live cwd／unknown consumer 阻止 stop 與 remove；E01/E02 | test_e01_registered_terminal_live_cwd_or_unknown_blocks_preview_and_apply（inside／missing cwd／missing meta／failed read）、test_e01_live_cwd_uses_path_components_not_string_prefix |
 | host flock 內、每個 phase 前再查全部 live consumers；E01 | test_e01_live_cwd_is_rechecked_under_host_flock_before_stop_and_removal（lock.session／preserve／remove.worktree，各測 live cwd race／read failure，實際驗證 flock 被持有） |
+| refused callback 的 EOF 立即結束 host helper；E01 | test_e01_refused_locked_check_closes_host_input_without_waiting_for_deadline（含 Python 3.10） |
 | 父子樹、manual/unknown/active/completed與exactplan；E01 | test_e01_tree_preview_apply_matches_and_read_only_resources_survive |
 | sharedID／全域consumer、history不擋；E02 | test_e02_shared_worktree_is_one_item_and_checks_out_of_scope_consumers、test_e01_tree_preview_apply_matches_and_read_only_resources_survive |
 | receipt而非ancestor，partialpick/newtip/uncertain；E02 | test_e02_squash_and_pick_use_exact_delivery_receipt_coverage |

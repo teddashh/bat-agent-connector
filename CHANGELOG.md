@@ -27,6 +27,8 @@
   Missing or failed live reads retain resources with OBSERVATION_UNAVAILABLE. Apply repeats consumer checks
   while holding the host directory flock before stop and each Git phase; a relocated or unknown consumer blocks
   mutation and keeps the worktree.
+  Locked checks explicitly close host stdin on refusal or timeout, including on Python 3.10, so a failed read
+  aborts immediately instead of leaving the helper waiting for its deadline.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
