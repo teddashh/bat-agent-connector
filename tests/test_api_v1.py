@@ -184,7 +184,8 @@ async def test_send_operation_runs_once_and_records_steps_and_events(daemon, moc
     sends = [i for i in mock.invokes if i["channel"] == "claude:send-message"]
     assert len(sends) == 1 and sends[0]["params"]["clientMessageId"] == "batc-" + op["operation_id"]
     kinds = [e["kind"] for e in daemon.journal.api_events(0, 100, resource_id=op["operation_id"])["events"]]
-    assert kinds == ["operation.accepted", "operation.running", "operation.succeeded"]
+    assert kinds == ["operation.accepted", "operation.running", "operation.step.started",
+                     "operation.step.succeeded", "operation.succeeded"]
     await settle_operations(daemon.ops)  # a finished operation never runs again
     assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"]) == 1
     await daemon.fleet.close()

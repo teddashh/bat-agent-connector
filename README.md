@@ -34,6 +34,12 @@ It ships four things:
 | CLI | `batc` |
 | Agent skill | [`skills/bat-agent-connector/SKILL.md`](skills/bat-agent-connector/SKILL.md) |
 
+Persisted observation is available through `batc inventory`, `batc history` and `batc relations`, or the matching
+HTTP/MCP reads. Session history uses journal facts; warm reuse keeps each task’s relation ranges. Discovery shows
+the latest host/profile scope and what was outside the scan. Unknown actors and states stay unknown; these reads
+do not start sessions or probe Git. See [observation](docs/design/observation.md). The Dashboard history and scope
+screens are Part B, to follow separately.
+
 ## Why
 
 Running several long-lived coding agents means constantly checking tabs: which one is done, which one is stuck on a
