@@ -389,6 +389,8 @@ def _decide(cls: Classification, m: Mutation, live: LiveCheck | None) -> tuple[s
     if m.action in BAT_WORKTREE_ACTIONS and cls.worktree_made_by == "connector":
         return ("NOT_A_BAT_WORKTREE", "the connector made this worktree over SSH and BAT has no record of it; "
                 "BAT's worktree actions would act on the workspace folder's repository")
+    if m.action in BAT_WORKTREE_ACTIONS and not cls.worktree_path:
+        return "NOT_A_BAT_WORKTREE", "the connector has no recorded worktree for this session"
     if live is not None:
         if live.issue:
             return live.issue

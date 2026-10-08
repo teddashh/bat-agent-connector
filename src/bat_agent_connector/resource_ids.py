@@ -16,11 +16,39 @@ def connector_made(entry):
                 or entry.get("integration_operation_id") or str(entry.get("branch") or "").startswith("batc/"))
 
 
+def registry_worktree_parent(entry, by_id, lead_of=None):
+    """Return only a parent whose worktree the child shares; ``by_id`` is scoped to one host."""
+    shared = entry.get("shares_worktree_with")
+    if shared:
+        return by_id.get(shared)
+    path = entry.get("worktree_path")
+    predecessor = entry.get("failover_of")
+    if predecessor:
+        parent = by_id.get(predecessor)
+        return parent if parent and path and path == parent.get("worktree_path") else None
+    lead = entry.get("lead_session_id")
+    task_lead = None
+    if (not lead and entry.get("role") == "reviewer" or lead and not path) and entry.get("task_id") and lead_of:
+        task_lead = lead_of(entry["task_id"])
+        if not lead:
+            lead = task_lead.get("session_id") if isinstance(task_lead, dict) else task_lead
+    parent = by_id.get(lead)
+    if not parent or not parent.get("worktree_path"):
+        return None
+    if path == parent["worktree_path"]:
+        return parent
+    if (not path and isinstance(task_lead, dict) and task_lead.get("session_id") == lead
+            and task_lead.get("worktree_path") == parent["worktree_path"]):
+        return parent
+    return None
+
+
 def registry_worktree_root(entries, host, session_id, lead_of=None):
     """Resolve the creation entry using registry facts only, without changing them.
 
     Missing parents stop at the last known entry. Cycles have no proven creation root.
-    ``lead_of(task_id)`` may supply a reviewer's lead from the caller's existing facts.
+    ``lead_of(task_id)`` may return a lead ID, or a dict with session_id/worktree_path.
+    A reviewer without its own path needs the latter as task carrier evidence.
     """
     by_id = {e["session_id"]: e for e in entries
              if isinstance(e, dict) and e.get("session_id") and e.get("host", host) == host}
@@ -31,12 +59,10 @@ def registry_worktree_root(entries, host, session_id, lead_of=None):
         if sid in seen:
             return None
         seen.add(sid)
-        parent = entry.get("failover_of") or entry.get("shared_worktree_from") or entry.get("lead_session_id")
-        if not parent and entry.get("role") == "reviewer" and entry.get("task_id") and lead_of:
-            parent = lead_of(entry["task_id"])
-        if not parent or parent not in by_id:
+        parent = registry_worktree_parent(entry, by_id, lead_of)
+        if parent is None:
             break
-        entry = by_id[parent]
+        entry = parent
     return entry
 
 

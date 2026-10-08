@@ -1073,6 +1073,80 @@ def test_b01_legacy_connector_branch_without_slot_has_no_worktree_identity(tmp_p
     j.close()
 
 
+@pytest.mark.parametrize("parent_maker", ["bat", "connector"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_b01_b03_nonsharing_failover_never_links_old_worktree(tmp_path, parent_maker, legacy):
+    """B01/B03, §08/§11: a main-checkout successor has no carrier binding, live or after step-2 replay."""
+    from bat_agent_connector.observation import registry_bindings
+    from bat_agent_connector.resource_ids import registry_worktree_intent
+
+    path = tmp_path / "j.db"
+    j = Journal(path)
+    past = task(j, "past")
+    root = {"host": "h1", "session_id": "root", "created_at": 123, "worktree_path": "/srv/wt",
+            "branch": "bat/worktree-fixture" if parent_maker == "bat" else "batc/task-fixture"}
+    if parent_maker == "connector":
+        j.change(past["task_id"], "dispatching", fields={"session_id": "root"})
+        with j.tx():
+            j.api_event("task", past["task_id"], "task.external_worktree_retained",
+                        {"path": root["worktree_path"], "branch": root["branch"]})
+    registry_bindings(j, "h1", [root])
+    wid = Observation(j).resource("session", "h1/root")["worktree_id"]
+    bind(j, past, "root")
+    j.change(past["task_id"], "failed")
+    cutoff = j.api_head()
+    child = {"host": "h1", "session_id": "child", "created_at": 124, "worktree_path": None,
+             "branch": None, "failover_of": "root", "shares_worktree_with": None, "cwd": "/srv/origin"}
+    entries = [child, root]
+    assert registry_worktree_intent(entries, "h1", "child") is None
+    registry_bindings(j, "h1", entries)
+    with j.tx():
+        j.api_event("session", "h1/child", "session.added", {"has_tab": False})
+    current = task(j, "after-failover")
+    bind(j, current, "child")
+    j.change(current["task_id"], "failed")
+    if legacy:
+        for table in ("session_worktree_bindings", "observation_resources", "observation_backfill"):
+            j.db.execute(f"DELETE FROM {table}")
+        j = replay_version_one(j, path)
+        assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+        registry_bindings(j, "h1", entries)
+    obs = Observation(j)
+    assert obs.resource("session", "h1/child").get("worktree_id") is None
+    assert j.db.execute("SELECT COUNT(*) FROM session_worktree_bindings WHERE session_resource_id='h1/child'").fetchone()[0] == 0
+    child_events = {e["seq"] for e in obs.history("session", "h1/child")["events"]}
+    assert child_events and min(child_events) > cutoff
+    old_events = obs.history("worktree", wid)["events"]
+    assert not child_events.intersection(e["seq"] for e in old_events)
+    assert all("h1/child" not in e["context"]["session_resource_ids"] for e in old_events)
+    assert {r["session_resource_id"] for r in obs.relations("worktree", wid)["relations"]} == {"h1/root"}
+    head = j.api_head()
+    j.close()
+    j = Journal(path)
+    assert j.api_head() == head and j.db.total_changes == 0
+    assert j.db.execute("SELECT COUNT(*) FROM session_worktree_bindings WHERE session_resource_id='h1/child'").fetchone()[0] == 0
+    j.close()
+
+
+@pytest.mark.parametrize("explicit_lead", [False, True])
+@pytest.mark.parametrize("task_path", ["/srv/wt", "/srv/other", None])
+def test_b01_registry_reviewer_without_path_requires_recorded_task_carrier(tmp_path, explicit_lead, task_path):
+    """B01, §08: the shared fallback uses task carrier evidence before inheriting a connector slot."""
+    from bat_agent_connector.observation import registry_bindings
+
+    j = Journal(tmp_path / "j.db")
+    t = task(j, "review")
+    with j.tx():
+        wid = worktree(j, "h1", "checkpoint.continue", "creation", "worktree", path="/srv/wt", session_id="root")
+        j.db.execute("UPDATE tasks SET session_id='root',external_worktree_path=? WHERE task_id=?", (task_path, t["task_id"]))
+    entries = [{"session_id": "root", "created_at": 123, "worktree_path": "/srv/wt", "branch": "batc/cp-fixture"},
+               {"session_id": "review", "created_at": 124, "worktree_path": None, "role": "reviewer",
+                "task_id": t["task_id"], "lead_session_id": "root" if explicit_lead else None}]
+    registry_bindings(j, "h1", entries)
+    assert Observation(j).resource("session", "h1/review").get("worktree_id") == (wid if task_path == "/srv/wt" else None)
+    j.close()
+
+
 def test_b01_relation_scope_and_cross_project_link_history(mock, tmp_path):
     j = Journal(tmp_path / "j.db")
     inv = Inventory(j, make_config(mock))

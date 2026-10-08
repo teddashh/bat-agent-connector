@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 from .operations import OperationError
 from .redact import redact
-from .resource_ids import registry_worktree_intent, worktree_id
+from .resource_ids import registry_worktree_intent, registry_worktree_parent, worktree_id
 
 MIGRATION_VERSION = 2  # One-time history backfill; data step allocated by the orchestrator.
 RESOURCE_TYPES = {"session", "worktree", "execution"}
@@ -253,14 +253,15 @@ def worktree(journal, host, intent_type, intent_id, slot, *, path=None, branch=N
 def registry_bindings(journal, host, entries):
     """Capture already-known creation slots, without claiming or modifying the registry."""
     db = journal.db
-    by_id = {e["session_id"]: e for e in entries if e.get("session_id")}
+    by_id = {e["session_id"]: e for e in entries if e.get("session_id") and e.get("host", host) == host}
     roots = {f"{sid}@{str(e['created_at'])}": e for sid, e in by_id.items() if e.get("created_at") is not None}
     seen = set()
     resolved = {}
 
     def lead_of(task_id):
-        t = db.execute("SELECT session_id FROM tasks WHERE task_id=?", (task_id,)).fetchone()
-        return t[0] if t else None
+        t = db.execute("SELECT session_id,external_worktree_path FROM tasks WHERE task_id=? AND host=?",
+                       (task_id, host)).fetchone()
+        return {"session_id": t[0], "worktree_path": t[1]} if t else None
 
     def one(sid):
         if sid in resolved:
@@ -278,11 +279,9 @@ def registry_bindings(journal, host, entries):
             r = db.execute("SELECT body FROM observation_resources WHERE resource_type='session' AND resource_id=?",
                            (f"{host}/{sid}",)).fetchone()
             wid = body(r[0]).get("worktree_id") if r else None
-            parent = e.get("failover_of") or e.get("shared_worktree_from") or e.get("lead_session_id")
-            if not parent and e.get("role") == "reviewer" and e.get("task_id"):
-                parent = lead_of(e["task_id"])
-            if not wid and parent in by_id:
-                wid = one(parent)
+            parent = registry_worktree_parent(e, by_id, lead_of)
+            if not wid and parent is not None:
+                wid = one(parent["session_id"])
         if wid:
             bind_worktree(journal, f"{host}/{sid}", wid)
         resolved[sid] = wid
