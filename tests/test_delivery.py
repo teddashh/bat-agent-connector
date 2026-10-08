@@ -247,6 +247,75 @@ async def test_merge_and_deploy_keeps_the_merge_when_the_deploy_fails(make_daemo
     assert gh.count("PUT", "merge-async") == 1
 
 
+# --------------------------------------------------------------------------- GitHub answers that are not outcomes
+async def test_token_is_read_per_request_and_a_refused_read_after_the_merge_request_waits(make_daemon, gh,
+                                                                                          monkeypatch):
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    gh.merge_mode = "enqueue"
+    op, _ = merge_op(d)
+    assert (await settle(d, op["operation_id"], rounds=2))["status"] == "waiting_external"
+    gh.token = "rotated-token-1"
+    monkeypatch.setenv("FAKE_GH_TOKEN", gh.token)  # a refresher rewrote the token; the daemon did not restart
+    assert (await settle(d, op["operation_id"], rounds=2))["status"] == "waiting_external"
+    gh.token = "rotated-token-2"  # this time nothing refreshed the connector's copy
+    held = await settle(d, op["operation_id"])
+    assert held["status"] == "needs_attention" and held["error_code"] == "GITHUB_401", held
+    monkeypatch.setenv("FAKE_GH_TOKEN", gh.token)
+    gh.merge(7)  # the queue merged it meanwhile
+    d.ops.resume(TED, op["operation_id"])
+    done = await settle(d, op["operation_id"])
+    assert done["status"] == "succeeded" and done["result"]["via"] == "merge_queue"
+    assert gh.count("PUT", "merge-async") == 1
+
+
+async def test_a_refused_read_before_any_write_still_fails_fast(make_daemon, gh):
+    d = make_daemon()
+    op, _ = merge_op(d, number=8)  # no such PR
+    done = await settle(d, op["operation_id"])
+    assert done["status"] == "failed" and done["error_code"] == "GITHUB_404"
+    assert gh.count("PUT", "merge-async") == 0
+
+
+async def test_a_rate_limited_poll_keeps_the_deploy_running_and_the_environment_locked(make_daemon, gh):
+    d = make_daemon()
+    op, _ = deploy_op(d)
+    run_id = (await settle(d, op["operation_id"], rounds=2))["external_refs"]["deploy_run_id"]
+    gh.script.append(("GET", rf"/actions/runs/{run_id}$", 403, {"x-ratelimit-remaining": "0"},
+                      {"message": "API rate limit exceeded for installation"}))
+    limited = await settle(d, op["operation_id"], rounds=1)
+    assert limited["status"] == "waiting_external" and "did not answer" in limited["status_reason"], limited
+    with pytest.raises(OperationError) as e:
+        deploy_op(d, key="d2")
+    assert e.value.code == "DEPLOY_IN_PROGRESS"
+    gh.runs[run_id].update(status="completed", conclusion="success")
+    gh.jobs[run_id][1]["conclusion"] = "success"
+    assert (await settle(d, op["operation_id"]))["status"] == "succeeded"
+
+
+async def test_an_unanswered_run_lookup_after_a_204_dispatch_keeps_looking(make_daemon, gh):
+    d = make_daemon()
+    gh.dispatch_mode = "no_content"
+    gh.script.append(("GET", r"/workflows/deploy\.yml/runs$", 502, {}, {"message": "Bad Gateway"}))
+    op, _ = deploy_op(d)
+    first = await settle(d, op["operation_id"], rounds=1)
+    assert first["status"] == "waiting_external", first
+    found = await settle(d, op["operation_id"], rounds=1)
+    assert found["status"] == "waiting_external" and found["external_refs"]["deploy_run_id"]
+    assert gh.count("POST", "dispatches") == 1
+
+
+async def test_a_dispatch_reply_cut_short_is_read_back_not_failed(make_daemon, gh):
+    d = make_daemon()
+    gh.truncate.append(("POST", r"/dispatches$"))
+    op, _ = deploy_op(d)
+    first = await settle(d, op["operation_id"], rounds=1)
+    assert first["status"] == "uncertain", first
+    found = await settle(d, op["operation_id"], rounds=2)
+    assert found["status"] == "waiting_external" and found["external_refs"]["deploy_run_id"]
+    assert gh.count("POST", "dispatches") == 1
+
+
 async def test_pr_preview_route(make_daemon, gh):
     d = make_daemon()
     gh.add_pr(7, HEAD)
