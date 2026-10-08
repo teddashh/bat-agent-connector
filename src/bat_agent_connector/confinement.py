@@ -71,7 +71,7 @@ def guard_start_record(entry: dict) -> None:
 
 def guard_new_start(entry: dict) -> None:
     guard_start_record(entry)
-    if entry.get("start_sent") is True and entry.get("status") in {"active", "starting", "uncertain"}:
+    if entry.get("start_sent") is True:
         raise ConfinementRefused("CONFINEMENT_START_UNSETTLED",
                                  "reserved start already reached transport; use read-back recovery")
 

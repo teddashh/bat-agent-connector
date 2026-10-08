@@ -25,7 +25,6 @@ from typing import Any
 from . import confinement, registry, resource_policy, verification
 from .errors import (
     BatError,
-    InvokeError,
     InvokeTimeout,
     ResourceReadOnly,
     TaskDispatchCancelled,
@@ -473,7 +472,7 @@ async def _failover_one(
         e
         for e in registry.list_entries(host)
         if e.get("failover_of") == sid and (e.get("status") in ("active", "starting") or e.get("start_uncertain")
-                                           or e.get("status") == "failed" and e.get("start_sent") is False)
+                                           or e.get("status") == "failed" and isinstance(e.get("start_sent"), bool))
     ]
     resume_entry = None
     unsent_entry = None
@@ -484,7 +483,7 @@ async def _failover_one(
             if not dry_run:
                 registry.claim_unsent(host, e["session_id"])
             unsent_entry = e  # Proven pre-transport failure: keep the reserved ID and handoff binding.
-        elif e.get("start_uncertain") or e.get("status") == "starting":
+        elif e.get("start_uncertain") or e.get("status") in {"starting", "failed"}:
             try:
                 meta = await c.invoke("claude:get-session-meta", {"sessionId": e["session_id"]},
                                       retry_on_disconnect=False)
@@ -745,11 +744,9 @@ async def _failover_one(
                     registry.fail_reservation(host, new_sid, replaces)
                     registry.update(host, new_sid, start_sent=False, start_uncertain=False,
                                     error_code=getattr(e, "code", None))
-                elif isinstance(e, InvokeError) and not start_confirmed:
-                    registry.fail_reservation(host, new_sid, replaces)
                 else:
                     registry.update(host, new_sid, status="uncertain" if start_confirmed else "starting",
-                                    start_uncertain=True, error_code=getattr(e, "code", "START_UNSETTLED"),
+                                    start_uncertain=True, error_code=getattr(e, "code", None) or "CONFINEMENT_START_UNSETTLED",
                                     **({"confinement": confinement.confirm(confinement_record, meta)}
                                        if start_confirmed else {}))
                 raise
