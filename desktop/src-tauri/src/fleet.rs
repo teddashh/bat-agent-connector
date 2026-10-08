@@ -855,7 +855,14 @@ mod tests {
         .unwrap();
         let bridge = FleetBridge::load(&temp.0);
         // Synthetic process fixture has no inventory, credentials or mutation implementation.
-        let result = bridge.request(FleetRequest::Contract {}).await.unwrap();
+        let result = bridge
+            .request(FleetRequest::Contract {})
+            .await
+            .unwrap_or_else(|error| {
+                let phase = std::fs::read_to_string(root.join("client/phase.txt"))
+                    .unwrap_or_else(|_| "not-started".into());
+                panic!("{error}; synthetic PowerShell fixture phase: {phase}")
+            });
         assert_eq!(result["implementation_version"], "desktop-facade-v1");
     }
     #[cfg(unix)]
