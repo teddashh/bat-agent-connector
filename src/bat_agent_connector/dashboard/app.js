@@ -712,6 +712,7 @@ async function connectorRequest(method, path, body, key, browserToken) {
 //#endregion
 //#region src/fleet.js
 async function mountFleet(main, { h, t }) {
+	if (!main.isConnected) return () => {};
 	const panel = h("section", {
 		class: "panel",
 		"aria-label": t("fleet_title")
@@ -885,6 +886,7 @@ async function mountFleet(main, { h, t }) {
 	return () => {
 		disposed = true;
 		clearTimeout(timer);
+		panel.remove();
 	};
 }
 //#endregion
@@ -2150,6 +2152,7 @@ function viewSettings(main) {
 async function viewNativeSettings(main) {
 	const info = h("p", { class: "muted" });
 	const endpoint = h("p", { class: "muted" });
+	const fleetRoot = h("div");
 	const connect = h("button", {
 		class: "primary",
 		onclick: async () => {
@@ -2176,7 +2179,7 @@ async function viewNativeSettings(main) {
 			disconnect();
 			route();
 		}
-	}, t("disconnect"))), info), h("div", { class: "panel" }, h("h2", {}, t("desktop_local")), h("p", { class: "note" }, t("desktop_dashboard_only"))));
+	}, t("disconnect"))), info), h("div", { class: "panel" }, h("h2", {}, t("desktop_local")), h("p", { class: "note" }, t("desktop_dashboard_only"))), fleetRoot);
 	if (state.caps) info.textContent = t("connected_as", {
 		actor: state.caps.actor,
 		scopes: state.caps.scopes.join(", ")
@@ -2191,7 +2194,7 @@ async function viewNativeSettings(main) {
 	} catch (e) {
 		info.replaceChildren(errorBox(e));
 	}
-	return mountFleet(main, {
+	return mountFleet(fleetRoot, {
 		h,
 		t
 	});
