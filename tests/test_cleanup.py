@@ -162,6 +162,17 @@ async def test_e01_previews_serialize_per_host_and_share_read_deadline(daemon, m
 
 
 async def test_e01_guard_refuses_legacy_writes_on_reserved_and_cleaned_resources(daemon, mock):
+    from bat_agent_connector import mcp_server
+    server, stdio_fleet = mcp_server.build_server(daemon.fleet.config)  # No daemon Journal in the legacy tool context.
+    async def stdio_refusal(code, sid):
+        before = len(mock.invokes)
+        try:
+            result = await server.call_tool("worktree_remove", {"host": "h1", "session_id": sid, "confirm": True})
+            message = json.dumps(result.model_dump() if hasattr(result, "model_dump") else result, default=str)
+        except Exception as e:  # noqa: BLE001 - MCP versions may return or raise the same tool refusal
+            message = str(e)
+        assert code in message
+        assert not any(i["channel"] == "worktree:remove" for i in mock.invokes[before:])
     cp, op = await setup_work(daemon, mock)
     sid = op["result"]["session_id"]
     doc = await cleanup.preview(daemon.ops, CLEANER, {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]})
@@ -170,11 +181,14 @@ async def test_e01_guard_refuses_legacy_writes_on_reserved_and_cleaned_resources
     from bat_agent_connector.errors import ResourceReadOnly
     with pytest.raises(ResourceReadOnly, match="CLEANUP_IN_PROGRESS"):
         await orchestrate.worktree_remove(daemon.fleet, "h1", sid, confirm=True)
+    await stdio_refusal("CLEANUP_IN_PROGRESS", sid)
     cleanup._release(item, "op-test")
     done = await apply(daemon, doc)
     assert done["status"] == "succeeded", done
     with pytest.raises(ResourceReadOnly, match="RESOURCE_CLEANED"):
         await orchestrate.worktree_remove(daemon.fleet, "h1", sid, confirm=True)
+    await stdio_refusal("RESOURCE_CLEANED", sid)
+    await stdio_fleet.close()
 
 
 async def test_e01_legacy_apply_is_disabled_and_auto_cleanup_still_loads(daemon, mock):
