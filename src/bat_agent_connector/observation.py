@@ -34,7 +34,7 @@ message_id turn_marker turn_ref marker prompt_sha256 digest hash sha256 start_se
 created_at updated_at submitted_at finished_at linked_at removed_at linked_by removed_by link_id link_operation
 remove_operation work_item_id project_id needs_review source_table source_key saved_snapshot body backfilled
 legacy anchor_id identity_evidence worktree_id intent_type intent_id slot coverage methods authority observer
-scan_id binding_version last_success_at complete_enumeration errors outside_scan scope verified credential_ref
+scan_id binding_version attempted_binding_version last_success_at complete_enumeration errors outside_scan scope verified credential_ref
 server_version capabilities enrichment_failures workspace_document workspace_ids registry_entries session_count
 archive claude_transcripts session_meta safe_state journal workspace:load resource_id resource_type
 runtime end_scope git_author author version verification_commit base_commit verification_tree before after

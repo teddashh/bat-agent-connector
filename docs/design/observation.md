@@ -103,7 +103,8 @@ Execution 終態／明確 replacement 可關閉該已確認使用區間；不能
 
 | 欄位 | 契約 |
 |---|---|
-| `scan_id`、`host`、`profile_id`、`binding_version` | 本次固定設定範圍。Journal ID 不含 token／真實指紋；API 不暴露 bearer 或 credential path。 |
+| `scan_id`、`host`、`profile_id`、`binding_version` | 固定掃描範圍；DISCOVERY_SCOPE_CHANGED 時 binding_version 沿用 journal 的 binding 欄位，拒絕改綁後的設定，不呈現為目前已掃範圍。Journal ID 不含 token／真實指紋；API 不暴露 bearer 或 credential path。 |
+| `attempted_binding_version` | 僅 DISCOVERY_SCOPE_CHANGED 時出現，記錄被拒絕的設定 digest；其餘成功／失敗不帶此欄位。同 profile 改 URL／fingerprint 後，每次 refresh 都保持拒絕、零 BAT frames，原 binding／身分／歷史保留。 |
 | `started_at`、`finished_at`、`last_success_at` | UTC；成功與嘗試時間分開。單 session 另回 `first_seen_at`、`last_seen_at`、`observed_at`，沿用原 timestamp，不把重新讀取時間當觀測時間。 |
 | `observer`、`authority` | 已知服務主體 `inventory`、`authority.kind=bat_authenticated_read`、非敏感 credential reference ID／設定版本、BAT 回覆的 protocol／capabilities。只有實際回覆的 authority 才算 verified；scope observe 是讀 Connector，並不證明 BAT token 能掃所有 profiles。 |
 | `methods`、`coverage` | 每來源的 attempted／succeeded／failed／skipped、workspace IDs、筆數、activity/pending 是否本輪查過。來源包括 `workspace:load`、meta、安全 state、archive、限定 cwd 的 Claude transcript、registry、journal。 |
@@ -280,6 +281,7 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B01、B03；§08、§11 | `test_b01_b03_checkpoint_source_run_steps_and_worktree_history`、`test_b01_b03_receipt_versions_are_fixed_at_the_writer_transition`：真實 temp Git checkpoint/run 及 steps 的多資源 timeline 去重；receipt 在既有 writer 轉換時保存各版本，不以新結果改舊事件。 |
 | B01、B02；§10、§11 | `test_b01_history_as_of_late_binding_and_invalid_cursors`：history as_of 同時限制 event/linked_at；晚 binding 不進已開 snapshot，kind/order/resource/time 游標契約。 |
 | B02；§11 | `test_b02_two_hosts_one_offline_and_scope_change`、`test_b02_null_workspace_preserves_missing_counts_even_with_registry`：另一 host 持續成功、離線保留舊值；scope 改綁不再 host I/O；移除 host 仍可讀 history；壞 workspace 不算完整列舉。 |
+| B02；§11 | `test_b02_scope_change_stays_blocked_on_later_refreshes`：同 profile 改 URL／fingerprint，連續兩輪零 BAT frames；binding 與 binding_version 固定原值，attempted_binding_version 記被拒絕值；原身分及 history 不變。 |
 | B02；§11 | `test_b02_discovery_latest_no_poll_rows_and_no_host_fanout`、`test_b02_session_specific_stale_gone_fresh_and_get_no_writes`：每 profile 一筆 latest、相同 poll 不寫事件；host flap 不 fan-out；missing/gone/reappear/fresh 與 GET 零 writes。 |
 | B02；§11 | `test_b02_unchanged_poll_does_not_rewrite_observation_identities`：第二輪 registry 投影的 total_changes 不變；相同 BAT／registry 不重寫 observation tables。 |
 | B02；§10、§11 | `test_b02_cursor_catchup_sse_resume_and_hidden_backfill`：分頁 gap catch-up、Last-Event-ID resume 不重複、backfill 不進 live feed、超前 cursor 422。 |
