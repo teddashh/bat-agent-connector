@@ -17,7 +17,17 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import api_actions, api_auth, checkpoints, delivery, integration, registry, service, work_items
+from . import (
+    api_actions,
+    api_auth,
+    checkpoints,
+    delivery,
+    integration,
+    pr_delivery,
+    registry,
+    service,
+    work_items,
+)
 from .api_v1 import ApiV1, is_dashboard_path
 from .config import Config, state_dir
 from .errors import BatError, ResourceReadOnly, TokenUnavailable
@@ -38,7 +48,9 @@ DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 # /rpc methods that share /api/v1's principals and OperationService (MCP and CLI enter here).
 API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
            "api_events": "observe", "inventory_sessions": "observe", "inventory_hosts": "observe",
-           "api_capabilities": "observe", "github_pr_preview": "observe", "checkpoints_list": "observe",
+           "inventory_session": "observe", "inventory_worktree": "observe", "resource_history": "observe", "resource_relations": "observe",
+           "api_capabilities": "observe", "github_pr_preview": "observe", "github_merge_preview_get": "observe",
+           "checkpoints_list": "observe",
            "checkpoint_get": "observe", "checkpoint_preview": "observe", "integration_candidates": "observe",
            "integration_preview_get": "observe", "integration_get": "observe", "integrations_list": "observe",
            "projects_list": "observe", "project_get": "observe", "work_items_list": "observe",
@@ -202,20 +214,32 @@ class TaskDaemon:
             limit = params.get("limit")
             return self.journal.api_events(int(params.get("after") or 0), 100 if limit is None else int(limit),
                                            resource_type=params.get("resource_type"),
-                                           resource_id=params.get("resource_id"))
+                                           resource_id=params.get("resource_id"), kind=params.get("kind"),
+                                           related_resource_type=params.get("related_resource_type"), related_resource_id=params.get("related_resource_id"))
         if method == "inventory_sessions":
             return self.inventory.list_sessions(
                 host=params.get("host"), provenance=params.get("provenance"), api_access=params.get("access"),
                 attention=params.get("attention"), include_gone=bool(params.get("include_gone")),
                 order=params.get("order") or "activity", cursor=params.get("cursor"),
-                limit=int(params.get("limit") or 50))
+                limit=int(params.get("limit") or 50), **{k: params[k] for k in ("profile_id", "project_id", "work_item_id", "execution_id", "provider", "has_tab", "loaded", "streaming", "lifecycle", "stale", "relation_scope") if k in params and params[k] is not None})
         if method == "inventory_hosts":
-            return {"hosts": self.inventory.hosts()}
+            return self.inventory.hosts_document(host=params.get("host"), discovery=params.get("discovery", False), after=params.get("after", 0), limit=params.get("limit", 20))
+        if method == "inventory_session":
+            return self.inventory.session_document(str(params.get("host")), str(params.get("session_id")))
+        if method == "inventory_worktree":
+            return {"worktree": self.inventory.observation.resource("worktree", params.get("worktree_id"))}
+        if method in {"resource_history", "resource_relations"}:
+            keys = ("cursor", "limit", "order", "kind", "since", "until") if method == "resource_history" else ("cursor", "limit", "execution_id", "include_closed")
+            read = self.inventory.observation.history if method == "resource_history" else self.inventory.observation.relations
+            return read(params.get("resource_type"), params.get("resource_id"), **{k: params[k] for k in keys if k in params and params[k] is not None})
         if method == "api_capabilities":
             return (await self.api.capabilities(principal=principal))[1]
         if method == "github_pr_preview":
             return {"pull_request": await integration.pr_card(self.ops, str(params.get("repository")),
-                                                              int(params.get("pull_number") or 0))}
+                                                              int(params.get("pull_number") or 0), params.get("method"),
+                                                              from_event=params.get("from_event") is True)}
+        if method == "github_merge_preview_get":
+            return {"preview": pr_delivery.get_preview(self.journal.db, str(params.get("preview_id")))}
         if method == "checkpoints_list":
             return checkpoints.list_checkpoints(self.journal.db, host=params.get("host"),
                                                 session_id=params.get("session_id"),
@@ -527,8 +551,11 @@ class TaskDaemon:
                 raise ValueError("task API authorization failed")
             if scoped and not method.startswith("task_"):
                 raise ValueError("capability scope violation")
-            result = {"result": await self.call(method, params,
-                                                auth_token=token if reconcile else None)}
+            from .observation import event_context
+            with event_context(actor="local-admin" if admin else None, entry_point="rpc",
+                               actor_evidence={"source": "rpc_admin_token" if admin else "command_capability"},
+                               actor_basis="authenticated_principal" if admin else "unknown"):
+                result = {"result": await self.call(method, params, auth_token=token if reconcile else None)}
             status = "200 OK"
         except Exception as exc:  # noqa: BLE001
             # Do not echo task text, tokens, or provider exceptions over RPC.
@@ -660,21 +687,30 @@ class TaskDaemon:
                 logging.warning("Task %s external worktree cleanup failed: %s",
                                 task_id[:8], type(cleanup_exc).__name__)
 
+    async def reconcile_metadata(self):
+        while True:
+            try:
+                await pr_delivery.reconcile_metadata(self.ops)
+            except Exception:  # keep periodic reads alive; operation evidence is retained
+                logging.getLogger(__name__).exception("metadata reconciliation failed")
+            await asyncio.sleep(10)
+
     async def serve(self, host: str = "127.0.0.1", port: int = 18796):
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("task service only binds loopback")
         self.acquire_owner()
-        worker = pusher = operations = inventory = None
+        worker = pusher = operations = metadata_reads = inventory = None
         try:
             server = await asyncio.start_server(self._handle, host, port)
             worker = asyncio.create_task(self._worker())
             pusher = asyncio.create_task(self._push_loop())
             operations = asyncio.create_task(self.ops.loop())
+            metadata_reads = asyncio.create_task(self.reconcile_metadata())
             inventory = asyncio.create_task(self.inventory.loop())
             async with server:
                 await server.serve_forever()
         finally:
-            for background in (worker, pusher, operations, inventory):
+            for background in (worker, pusher, operations, metadata_reads, inventory):
                 if background is not None:
                     background.cancel()
                     await asyncio.gather(background, return_exceptions=True)

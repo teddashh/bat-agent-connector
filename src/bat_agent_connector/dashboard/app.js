@@ -416,45 +416,67 @@ function checkpointPanel(host, sid) {
 }
 
 async function viewDelivery(main) {
+  freshPage();
   const repo = h("input", { placeholder: "owner/name", value: sessionStorage.getItem("batc.repo") || "" });
   const num = h("input", { placeholder: "123", inputmode: "numeric", size: 6, value: sessionStorage.getItem("batc.pr") || "" });
-  const card = h("div", { class: "panel" });
+  const card = h("div", { class: "panel delivery-card" });
+  let selectedMethod = "";
+  let reviewedPreview = null;
   main.append(h("h1", {}, t("nav_delivery")),
-    h("div", { class: "filters" }, repo, num, h("button", { class: "primary", onclick: () => load() }, t("load_pr"))), card);
-  const caps = state.caps || {};
-  if (!repo.value && caps.repositories?.length) repo.value = caps.repositories[0].repository;
-  const load = async flash => { // flash: a result to keep showing after the card reloads (e.g. "PR updated")
+    h("div", { class: "filters delivery-controls" }, repo, num,
+      h("button", { class: "secondary", onclick: () => load() }, t("load_pr"))), card);
+  if (!repo.value && state.caps?.repositories?.length) repo.value = state.caps.repositories[0].repository;
+  const load = async (flash = null, fromEvent = false) => {
+    const opens = drawerOpens;
     sessionStorage.setItem("batc.repo", repo.value); sessionStorage.setItem("batc.pr", num.value);
     if (!repo.value || !/^\d+$/.test(num.value)) return;
-    card.replaceChildren(h("p", { class: "muted" }, t("loading")));
     try {
-      const pr = (await api("GET", `/repositories/${repo.value}/pulls/${num.value}`)).pull_request;
-      const status = h("div", {});
+      const query = new URLSearchParams();
+      if (selectedMethod) query.set("method", selectedMethod);
+      if (fromEvent) query.set("from_event", "true");
+      const pr = (await api("GET", `/repositories/${repo.value}/pulls/${num.value}?${query}`)).pull_request;
+      if (holdRender(fromEvent, opens)) { idleReload = () => load(null, true); return; }
+      freshPage();
+      const status = h("div", { "aria-live": "polite" });
       const target = { repository: pr.repository, pull_number: Number(pr.pull_number) };
-      const pre = { expected_head_sha: pr.head_sha };
+      if (!fromEvent || !reviewedPreview) reviewedPreview = pr.merge_preview;
+      const pv = reviewedPreview;
+      const scopeChanged = pr.merge_preview.digest !== pv.digest;
+      const pre = { expected_head_sha: pv.target.head_sha, expected_base_sha: pv.target.base_sha, preview_digest: pv.digest };
+      const params = { method: pv.method, preview_id: pv.preview_id };
       const run = async (action, extra, scope) => {
         try {
-          const op = await submit(action, { ...target, ...extra.target }, extra.params || {}, extra.pre ?? pre, scope);
-          status.replaceChildren(opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
-        } catch (e) { status.replaceChildren(errorBox(e)); }
+          const op = await submit(action, { ...target, ...extra.target }, extra.params || params, extra.pre ?? pre, scope);
+          const receipt = op.result?.merge || op.result || op.external_refs?.merge_receipt;
+          fill(status, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id),
+            receipt?.base_moved ? h("p", { class: "note warn" }, t("merged_newer_base", { count: receipt.other_commits_count })) : null);
+        } catch (e) { fill(status, errorBox(e)); }
       };
-      const blocked = pr.state !== "open" || pr.draft || pr.merged;
-      const buttons = [h("button", { class: "primary", disabled: blocked || !pr.merge.allowed,
-        onclick: () => run("github.pr.merge", { params: { method: pr.merge.default_method } }, `merge.${pr.repository}.${pr.pull_number}.${pr.head_sha}`) }, t("merge"))];
+      const blocked = pr.state !== "open" || pr.draft || pr.merged || pv.blocking.length > 0 || scopeChanged;
+      const method = h("select", { "aria-label": t("merge_method"), onchange: () => { selectedMethod = method.value; load(); } },
+        ...pr.merge.methods.map(m => h("option", { value: m, selected: m === pv.method }, m)));
+      const buttons = [h("button", { class: "primary", "data-testid": "merge-submit",
+        disabled: blocked || !pr.merge.allowed || !may("merge"),
+        onclick: () => run("github.pr.merge", {}, `merge.${pv.preview_id}`) }, t("merge"))];
       for (const r of pr.recipes) {
-        buttons.push(h("button", { class: "secondary", disabled: blocked,
-          onclick: () => run("delivery.merge_and_deploy", { target: { recipe: r.name }, params: { method: pr.merge.default_method } },
-            `merge_deploy.${pr.repository}.${pr.pull_number}.${pr.head_sha}.${r.name}`) }, t("merge_and_deploy_to", { env: r.environment })));
-        if (pr.merged && pr.merge_commit_sha) buttons.push(h("button", { class: "secondary",
+        buttons.push(h("button", { class: "secondary", disabled: blocked || !pr.merge.allowed || !may("merge") || !may("deploy"),
+          onclick: () => run("delivery.merge_and_deploy", { target: { recipe: r.name } }, `merge_deploy.${pv.preview_id}.${r.name}`) },
+        t("merge_and_deploy_to", { env: r.environment })));
+        if (pr.merged && pr.merge_commit_sha) buttons.push(h("button", { class: "secondary", disabled: !may("deploy"),
           onclick: async () => {
             try {
-              const op = await submit("deployment.start", { recipe: r.name }, { source_sha: pr.merge_commit_sha }, {},
-                `deploy.${r.name}.${pr.merge_commit_sha}`);
-              status.replaceChildren(opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
-            } catch (e) { status.replaceChildren(errorBox(e)); }
+              const op = await submit("deployment.start", { recipe: r.name }, { source_sha: pr.merge_commit_sha }, {}, `deploy.${r.name}.${pr.merge_commit_sha}`);
+              fill(status, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
+            } catch (e) { fill(status, errorBox(e)); }
           } }, t("deploy_to", { env: r.environment })));
       }
-      card.replaceChildren(
+      const commitList = h("details", { class: "row-details" }, h("summary", {}, t("merge_commit_range", { count: pv.commits.length })),
+        h("ul", {}, ...pv.commits.map(c => h("li", {}, h("code", {}, c.sha), " ", c.message))));
+      const affected = pv.affected_prs.map(p => h("div", { class: "row" },
+        h("div", { class: "grow" }, h("a", { href: p.html_url, target: "_blank", rel: "noopener" }, `#${p.number} ${p.title || ""}`),
+          " · ", t("scope_" + p.reason), h("div", {}, h("code", {}, p.head_sha || ""))),
+        chip(t(p.effect === "branch_rebase" ? "scope_stack_rebase" : p.effect === "dependency" ? "scope_dependency" : p.would_merge ? "scope_would_merge" : "scope_candidate"), p.would_merge ? "warn" : "")));
+      fill(card,
         h("h2", {}, h("a", { href: pr.html_url, target: "_blank", rel: "noopener" }, `#${pr.pull_number} ${pr.title || ""}`)),
         h("dl", { class: "kv" },
           h("dt", {}, t("head")), h("dd", {}, h("code", {}, `${pr.head_ref} @ ${pr.head_sha}`)),
@@ -462,11 +484,54 @@ async function viewDelivery(main) {
           h("dt", {}, t("mergeable")), h("dd", {}, `${pr.state}${pr.draft ? " · draft" : ""} · ${pr.mergeable_state || "?"}`),
           h("dt", {}, t("checks")), h("dd", {}, t("checks_summary", pr.checks)),
           pr.merged ? [h("dt", {}, t("merged_sha")), h("dd", {}, h("code", {}, pr.merge_commit_sha))] : null),
-        ...[h("div", { class: "actions" }, ...buttons), status, flash instanceof Node ? flash : null,
-          pr.integration?.allowed ? integrationPanel(pr, load) : null].filter(Boolean));
-    } catch (e) { card.replaceChildren(errorBox(e)); }
+        metadataDrawer(pr, load),
+        scopeChanged ? h("p", { class: "note warn" }, t("merge_scope_reload")) : null,
+        h("h2", {}, t("merge_scope")), h("label", {}, t("merge_method"), " ", method),
+        h("p", { class: "muted" }, t("merge_preview_fixed"), " ", h("code", {}, pv.preview_id)), commitList,
+        affected.length ? h("div", {}, ...affected) : h("p", { class: "muted" }, t("scope_single_pr")),
+        ...pv.blocking.map(b => h("p", { class: "note warn" }, h("code", {}, b.code), " · ", b.message)),
+        ...pv.warnings.map(w => h("p", { class: "muted" }, w)),
+        h("div", { class: "actions" }, ...buttons), status, flash instanceof Node ? flash : null,
+        pr.integration?.allowed ? integrationPanel(pr, load) : null);
+    } catch (e) { if (!holdRender(fromEvent, opens)) fill(card, errorBox(e)); }
   };
   await load();
+  return liveReload(() => load(null, true), ["operation", "integration"]);
+}
+
+function metadataDrawer(pr, reload) {
+  const title = h("input", { value: pr.title || "", "data-testid": "metadata-title" });
+  const body = h("textarea", { "data-testid": "metadata-body" }, pr.body || "");
+  const initialBody = body.value; // textarea normalizes CRLF; an untouched body must still be omitted
+  const out = h("div", { "aria-live": "polite" });
+  let d;
+  const save = h("button", { class: "primary", "data-testid": "metadata-save", onclick: async () => {
+    const params = {};
+    if (title.value !== (pr.title || "")) params.title = title.value;
+    if (body.value !== initialBody) params.body = body.value;
+    if (!Object.keys(params).length) return;
+    save.disabled = true;
+    try {
+      const op = await submit("github.pr.update", { repository: pr.repository, pull_number: pr.pull_number }, params,
+        { expected_metadata_digest: pr.metadata_digest }, `pr_metadata.${pr.repository}.${pr.pull_number}.${pr.metadata_digest}`);
+      const diff = op.external_refs?.metadata_difference;
+      const contents = diff ? h("details", { class: "row-details", open: true }, h("summary", {}, t("metadata_diff")),
+        ...[["metadata_before", diff.observed ? diff.before : { title: pr.title, body: pr.body }],
+          ["metadata_intended", diff.after || diff.intended], ["metadata_observed", diff.observed || diff.before]]
+          .map(([label, value]) => h("div", {}, h("strong", {}, t(label)), h("pre", { class: "pre" }, JSON.stringify(value, null, 2))))) : null;
+      fill(out, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id),
+        op.error_code ? chip(op.error_code, "bad") : null, contents,
+        h("p", { class: "muted" }, t("metadata_result_help")));
+      idleReload = () => reload();
+    } catch (e) { fill(out, errorBox(e)); save.disabled = false; }
+  } }, t("save"));
+  const close = h("button", { class: "secondary", "data-testid": "metadata-close", onclick: () => d.close() }, t("close"));
+  d = drawer(h("label", {}, t("metadata_title"), title), h("label", {}, t("description"), body),
+    h("p", { class: "muted" }, t("metadata_race_limit")), h("div", { class: "actions" }, save, close), out);
+  return h("div", {}, h("button", { class: "secondary", "data-testid": "metadata-edit",
+    disabled: !pr.metadata_update.allowed || !may("integrate"),
+    title: !may("integrate") ? t("needs_integrate_scope") : !pr.metadata_update.allowed ? t("metadata_disabled") : null,
+    onclick: () => d.open() }, t("metadata_edit")), d.box);
 }
 
 // "Update PR results": put chosen results into this PR's head branch with one normal push (never forced; the
@@ -673,7 +738,7 @@ async function viewOperation(main, id) {
           try { await api("POST", `/operations/${id}/cancel`, {}); render(); } catch (e) { panel.append(errorBox(e)); }
         } }, t("cancel"))
         : null;
-      panel.replaceChildren(h("h1", {}, op.action),
+      fill(panel, h("h1", {}, op.action),
         h("p", { class: "op-status" }, opStatus(op), " ", op.error_code ? chip(op.error_code, "bad") : null),
         ...(linked?.length ? [linkedItems(linked)] : []),
         h("dl", { class: "kv" },
@@ -684,11 +749,14 @@ async function viewOperation(main, id) {
           Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null,
           op.result ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null),
         ...(receipts || []),
+        (op.result?.merge || op.result || refs.merge_receipt)?.base_moved
+          ? h("p", { class: "note warn" }, t("merged_newer_base", { count: (op.result?.merge || op.result || refs.merge_receipt).other_commits_count })) : null,
+        refs.write_acknowledged && refs.verification_pending ? h("p", { class: "note warn" }, t("metadata_pending")) : null,
         h("h2", {}, t("steps")),
         ...op.steps.map(s => h("div", { class: "row" }, h("div", { class: "grow" }, s.name),
           h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)),
         h("div", { class: "actions" }, opened, resume, retry, cancel));
-    } catch (e) { panel.replaceChildren(errorBox(e)); }
+    } catch (e) { fill(panel, errorBox(e)); }
   };
   await render();
   return onEvents(ev => { if (ev.resource_id === id) render(); });

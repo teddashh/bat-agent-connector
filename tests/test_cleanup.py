@@ -627,15 +627,17 @@ async def test_e01_original_ids_remain_searchable_with_location_reason_and_pr(da
 
 @pytest.mark.parametrize("version", [1, 3])
 def test_cleanup_migration_is_atomic_additive_and_preserves_history(tmp_path, version):
-    from bat_agent_connector.task_journal import Journal
+    from bat_agent_connector.task_journal import LATEST_DATA_STEP, Journal
     j = Journal(tmp_path / "journal.db")
     task = j.submit(project="p", host="h1", workspace="w", original_words="context", idempotency_key="original")
     for table in ("cleanup_aliases", "resource_tombstones", "cleanup_retained", "cleanup_receipts", "cleanup_runs"):
         j.db.execute("DROP TABLE " + table)  # noqa: S608 - fixed test names
     j.db.execute(f"PRAGMA user_version={version}")  # noqa: S608 - fixed test versions
+    cleanup.migrate(j)
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == version
     j.close()
     j = Journal(tmp_path / "journal.db")
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == version
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == max(version, LATEST_DATA_STEP)
     assert j.db.execute("SELECT name FROM sqlite_master WHERE name='cleanup_runs'").fetchone()
     assert j.get(task["task_id"])["original_words"] == "context"
     assert not j.db.execute("SELECT name FROM sqlite_master WHERE name='cleanup_consumers'").fetchone()
@@ -643,7 +645,7 @@ def test_cleanup_migration_is_atomic_additive_and_preserves_history(tmp_path, ve
     j.close()
     j = Journal(tmp_path / "journal.db")
     assert list(j.db.iterdump()) == before
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == version
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == max(version, LATEST_DATA_STEP)
     j.close()
 
 

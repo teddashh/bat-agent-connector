@@ -6,6 +6,10 @@
 
 **專案介紹頁：** https://teddashh.github.io/bat-agent-connector/?lang=zh-TW
 
+**開發方向：** [Tauri v2 產品決策](docs/product/realignment-v2.md)與
+[實作狀態](docs/product/implementation-status.md)。桌面版共用 Dashboard frontend 與既有 Python 後端。
+v2 不提供 Project Hub 匯入；保留既有專案與工作項目管理。
+
 BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端機 app，在你自己的機器上執行 Claude Code 與 Codex 的 agent session，並依工作區（workspace）分組。它有一套遠端協定 `bat-remote/v2`，BAT 自己的桌面介面和手機客戶端都走這套協定。本專案實作同一套協定，讓「其他」agent（Claude Code、Codex、Cursor、Hermes 或任何 MCP 客戶端）以及 shell 腳本可以：
 
 * 看到有哪些 agent session、哪些正在跑或卡在問題上，以及它們最近說了什麼；
@@ -25,6 +29,8 @@ BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端�
 | MCP 伺服器（stdio，或只綁 localhost 的 streamable HTTP） | `bat-agent-connector-mcp`（也可以用 `batc mcp`） |
 | CLI | `batc` |
 | Agent skill | [`skills/bat-agent-connector/SKILL.md`](skills/bat-agent-connector/SKILL.md) |
+
+`batc inventory`、`batc history`、`batc relations` 與對應 HTTP/MCP 讀取提供持久觀測。Session 歷史只讀 journal 事實；warm reuse 保留每個 task 的關係區間，discovery 顯示最近 host/profile 掃描範圍及未掃項目。未知 actor／狀態保持 unknown，讀取不啟動 session、不背景探測 Git。詳見 [observation](docs/design/observation.md)。Dashboard 的歷史與 scope 畫面屬後續 Part B。
 
 ## 為什麼要做
 
@@ -136,6 +142,10 @@ clones 與整合區，原 ID、位置、原因、回執與 PR 去向永久可查
 舊 `batc cleanup`／`session_cleanup` 只讀評估，不重登記 worktree；fanout 只有確認且每個 task 都啟動成功，
 才停止 planner。未確認、失敗或未全部啟動時保留 planner 供 retry，worktree 一律保留。
 設計見 [docs/design/cleanup.md](docs/design/cleanup.md)。
+
+PR metadata 使用獨立 action `github.pr.update`：既有 integrate scope，加 repository `allow_pr_update = true`（預設 false），不需要重新發 token。先以 `github_pr_preview`／`batc delivery pr` 讀 title/body digest 與保存的 merge scope；metadata 寫前比較、寫後讀回，但 GitHub 最後讀寫窗口仍有競爭限制。合併前檢視完整 commits／受影響 PR，再以 `github_pr_merge`／`batc delivery merge --preview mpv_... --key KEY` 送出；舊 head-only 請求會拒絕。提交前 base 變動停止，queue 受理後可合併到較新 base 並列出其他 commits；驗證 actual merged SHA，拒絕不支援的 stack／間接合併。MCP／CLI 寫入需要 caller 自己的 BATC_API_TOKEN。詳見 [交付設計](docs/design/delivery.md)。部署 history、environment generations、runtime verification 與 rollback 留待 Part B。
+
+未知 metadata 寫入滿 10 分鐘後讀回仍未變，會結案為 not_applied、釋放 PR，不重送 PATCH；新編輯仍須讀取新 digest。相同 merge preview 重用 ID；事件重載的完整 scope 讀取以 60 秒節流，head／base 變動立即刷新，送出合併前仍完整核對。
 
 ## 工具一覽
 

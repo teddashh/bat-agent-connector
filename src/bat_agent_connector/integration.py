@@ -1419,9 +1419,10 @@ def candidates(ops: OperationService, host: str, limit: int = 50) -> dict:
     return {"host": host, "agent_results": runs, "checkpoints": cps}
 
 
-async def pr_card(ops: OperationService, repository: str, number: int) -> dict:
+async def pr_card(ops: OperationService, repository: str, number: int, method: str | None = None,
+                  *, from_event: bool = False) -> dict:
     """The Delivery view's PR card: delivery's facts plus whether and how results can be integrated."""
-    card = await pr_preview(ops, repository, number)
+    card = await pr_preview(ops, repository, number, method, from_event=from_event)
     card["integration"] = pr_integration(ops, card["repository"], number)
     return card
 
@@ -1534,7 +1535,7 @@ async def _run_handoff(ctx: OpContext) -> dict:
     wt = f"{area.path}/wt/batc-fix-{r12}"
     branch = f"batc/fix-{r12}"
     resource_policy.check_repair_worktree(area.hc, area.path, wt, branch)  # before any host write
-    ctx.set_refs(apply_operation_id=op["operation_id"], seq=seq, worktree_path=wt, branch=branch)
+    ctx.set_refs(apply_operation_id=op["operation_id"], seq=seq, host=host, worktree_path=wt, branch=branch)
 
     async def prepare() -> dict:
         return {"lines": await area.run(repair_script(area, r12, pv["head_ref"], wt, branch, prev, src["pin"]))}
