@@ -116,7 +116,9 @@ def _canonical(value: Any) -> str:
 
 
 def _error_code(exc: BaseException) -> str:
-    if isinstance(exc, ResourceReadOnly | TaskControlRefused):
+    from .confinement import ConfinementRefused
+
+    if isinstance(exc, ConfinementRefused | ResourceReadOnly | TaskControlRefused):
         return exc.code
     if isinstance(exc, StepFailed | NeedsAttention | OperationError):
         return exc.code
@@ -246,6 +248,9 @@ class OpContext:
             self.service._step_start(self.operation_id, name, request or {})
         try:
             response = await fn()
+        except NeedsAttention:
+            self.service._step_status(self.operation_id, name, "uncertain")
+            raise
         except (*AMBIGUOUS, OSError) as exc:  # OSError: local bookkeeping may fail after the external call
             self.service._step_status(self.operation_id, name, "uncertain",
                                       error={"code": "UNCERTAIN", "message": redact(f"{type(exc).__name__}: {exc}")})
