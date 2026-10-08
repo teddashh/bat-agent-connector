@@ -81,6 +81,12 @@ changed evidence as an update even when loaded/streaming values stay the same. O
 alone emit no update. The separate session.stale/session.fresh pair tracks not_enumerated/gone/scope_changed;
 it does not clear stale field evidence. Resource history preserves the freshness booleans and fixed evidence values.
 History cursors retain their original as_of bound; new facts require a new first page. See docs/design/observation.md.
+History summaries keep only fixed enum reasons and recorded machine codes; task request/result diagnostics, titles,
+scalar prose containers and free-form refs are omitted, including nested saved snapshots. Use structured evidence
+and IDs; do not infer an omitted human reason. `since`/`until` are inclusive occurrence-time bounds: explicit unknown
+times match neither bound. Only absent occurrence metadata falls back to event record time. Unbounded history still
+lists unknown-time facts; `coverage.unknown_occurrence_times_excluded` flags the bounded-read rule, not a count.
+`coverage.first_recorded_at` is journal record time and can be migration time, not occurrence time.
 Dashboard timeline and reconnect flow are the later Part B.
 
 ## Vibe-partner workflow (supervising running sessions)

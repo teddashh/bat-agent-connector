@@ -668,8 +668,8 @@ def build_parser() -> argparse.ArgumentParser:
             if command == "history":
                 c.add_argument("--order", choices=["asc", "desc"], default="desc")
                 c.add_argument("--kind", action="append")
-                c.add_argument("--since", type=float)
-                c.add_argument("--until", type=float)
+                c.add_argument("--since", type=float, help="inclusive occurrence UTC epoch seconds; excludes unknown times")
+                c.add_argument("--until", type=float, help="inclusive occurrence UTC epoch seconds; excludes unknown times")
             else:
                 c.add_argument("--execution-id")
                 c.add_argument("--include-closed", choices=["true", "false"], default="true")

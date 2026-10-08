@@ -1367,6 +1367,110 @@ def test_b03_unknown_human_claim_is_not_api_actor_or_git_author(tmp_path):
     j.close()
 
 
+@pytest.mark.parametrize("backfilled", [False, True])
+async def test_b03_history_drops_task_prose_and_keeps_codes_over_http_mcp_cli(served, monkeypatch, capsys, backfilled):
+    """B03, §08/§10/§11: caller reasons stay in core rows, never in live/replayed resource history."""
+    from bat_agent_connector import observation
+
+    d, port = served
+    j = d.journal
+    t = task(j, "private-reasons")
+    command = bind(j, t, "lead")
+    requested = "Distinctive private request Ted reason"
+    diagnostic = "Distinctive private needs Ted diagnostic"
+    failure = "Distinctive private failed diagnostic"
+    decision = "Distinctive private verification decision"
+    conflict = "Distinctive private command conflict"
+    j.request_ted(t["task_id"], requested)
+    j.change(t["task_id"], "needs_ted", fields={"result": diagnostic})
+    j.reserve_minimal_review(t["task_id"], "a" * 40, "b" * 40, "c" * 64, threshold=0.8, diff_chars=10)
+    j.finish_minimal_review(t["task_id"], "a" * 40, "b" * 40, {"verdict": "escalate", "reason": decision})
+    j.command_operator_only(command["command_id"], conflict)
+    j.note(t["task_id"], "diagnostic_code", {"reason": diagnostic, "reason_code": "HUMAN_REVIEW_REQUIRED", "error_code": "CHECK_FAILED"})
+    j.change(t["task_id"], "failed", fields={"result": failure})
+    with j.tx():
+        j.api_event("session", "h1/lead", "session.stale", {"reason": "not_enumerated"}, context={"resources": [("execution", t["task_id"])]})
+        j.api_event("session", "h1/lead", "session.fresh", {"previous_reason": "not_enumerated"}, context={"resources": [("execution", t["task_id"])]})
+    if backfilled:
+        with j.tx():
+            for table in ("api_event_context", "api_event_resources", "command_relations", "relation_revisions", "observation_relations"):
+                j.db.execute(f"DELETE FROM {table}")
+            j.db.execute("PRAGMA user_version=1")
+        observation.install(j)
+    assert j.get(t["task_id"])["result"] == failure
+    core = dump(j.api_events(limit=200)["events"])
+    assert all(text in core for text in (requested, diagnostic, failure, decision, conflict))
+    viewer = token(d, "viewer", "observe")
+    monkeypatch.setenv("BATC_API_TOKEN", viewer)
+    monkeypatch.setenv("BATC_TASK_URL", f"http://127.0.0.1:{port}/rpc")
+    status, expected = await http(port, "GET", f"/api/v1/tasks/{t['task_id']}/history?order=asc&limit=200", tok=viewer)
+    assert status == 200
+    assert all(text not in dump(expected) for text in (requested, diagnostic, failure, decision, conflict))
+    codes = next(e for e in expected["events"] if e["kind"] == "task.diagnostic_code")["body"]
+    assert codes == {"reason_code": "HUMAN_REVIEW_REQUIRED", "error_code": "CHECK_FAILED"}
+    state = next(e for e in expected["events"] if e["kind"] == "task.state")["body"]
+    assert state["to"] == "needs_ted" and "reason" not in state
+    relations = [e for e in expected["events"] if e["kind"] == "relation.bound"]
+    assert {e["body"]["reason"] for e in relations} == {None, "start"}
+    events = Observation(j).history("session", "h1/lead", limit=200)["events"]
+    assert next(e for e in events if e["kind"] == "session.stale")["body"]["reason"] == "not_enumerated"
+    assert next(e for e in events if e["kind"] == "session.fresh")["body"]["previous_reason"] == "not_enumerated"
+    server, fleet = mcp_server.build_server(d.fleet.config, read_only=True)
+    try:
+        result = await server.call_tool("resource_history", {"resource_type": "execution", "resource_id": t["task_id"], "order": "asc", "limit": 200})
+        if isinstance(result, tuple):
+            content, structured = result
+            actual = structured if structured is not None else json.loads(content[0].text)
+        else:
+            content = result.content if hasattr(result, "content") else result
+            actual = json.loads(content[0].text)
+        assert actual == expected
+        assert await asyncio.to_thread(cli.main, ["--json", "history", "execution", t["task_id"], "--order", "asc", "--limit", "200"]) == 0
+        assert json.loads(capsys.readouterr().out) == expected
+    finally:
+        await fleet.close()
+
+
+def test_b03_history_summary_filters_prose_recursively_in_bodies_snapshots_and_resource(tmp_path):
+    """B03, §08/§11: prose cannot hide in a formerly allowed scalar or nested structure."""
+    j = Journal(tmp_path / "j.db")
+    private = "Distinctive private prose through a summary field"
+    prose = {key: private for key in ("reason", "previous_reason", "title", "status_reason", "git_author", "source", "evidence", "request", "response", "body", "errors", "blocking", "ref", "external_ref", "code", "error_code", "reason_code", "verification_error", "read_only_code",
+        "target", "refs", "before", "after", "saved_snapshot", "field_evidence", "field_observed_at", "coverage", "methods", "authority", "source_versions", "result_versions", "affected_prs", "stacks", "merge_receipt", "metadata_settlement", "metadata_reconciliation")}
+    with j.tx():
+        remember(j.db, "session", "h1/sid", host="h1", session_id="sid", title=private)
+        live = j.api_event("session", "h1/sid", "session.updated", {**prose,
+            "request": {**prose, "reason_code": "CHECK_FAILED"},
+            "response": {**prose, "source": {**prose, "session_id": "sid"}},
+            "evidence": [private, {**prose, "table": "api_events", "id": 1}],
+            "errors": [private, {"error_code": "OFFLINE", "error": private}],
+            "blocking": [private, {"code": "MERGE_SCOPE_UNPROVEN", "message": private}],
+            "source_versions": [{"kind": "git", "sha": "a" * 40, **prose}]})
+        snapshot = saved_fact(j, "legacy", "prose", {**prose, "body": {**prose, "reason": "gone"},
+            "source": "observed_runner", "created_at": 123}, [("session", "h1/sid")])
+    history = Observation(j).history("session", "h1/sid", order="asc")
+    assert private not in dump(history)
+    events = {e["seq"]: e["body"] for e in history["events"]}
+    assert events[live]["request"] == {"reason_code": "CHECK_FAILED"}
+    assert events[live]["response"] == {"source": {"session_id": "sid"}}
+    assert events[live]["evidence"] == [{"table": "api_events", "id": 1}]
+    assert events[live]["errors"] == [{"error_code": "OFFLINE"}]
+    assert events[live]["blocking"] == [{"code": "MERGE_SCOPE_UNPROVEN"}]
+    assert events[live]["source_versions"] == [{"kind": "git", "sha": "a" * 40}]
+    assert events[snapshot]["saved_snapshot"]["body"] == {"reason": "gone"}
+    assert events[snapshot]["saved_snapshot"]["source"] == "observed_runner"
+    t = task(j, "stage-prose")
+    with j.tx():
+        j.db.execute("UPDATE tasks SET state='done',verification_commit=? WHERE task_id=?", ("a" * 40, t["task_id"]))
+    j.mark_stage(t["task_id"], stage="deployed", ref=private, actor="executor")
+    deployed = next(e for e in Observation(j).history("execution", t["task_id"])["events"] if e["kind"] == "task.stage_deployed")
+    assert "ref" not in deployed["body"] and private not in dump(deployed)
+    j.mark_stage(t["task_id"], stage="merged", ref="https://github.com/o/r/pull/9", actor="executor")
+    merged = next(e for e in Observation(j).history("execution", t["task_id"])["events"] if e["kind"] == "task.stage_merged")
+    assert merged["body"]["ref"] == "https://github.com/o/r/pull/9"
+    j.close()
+
+
 def test_b03_backfill_hidden_idempotent_and_unknown_boundaries(tmp_path):
     path = tmp_path / "j.db"
     j = Journal(path)
@@ -1659,6 +1763,41 @@ def test_b03_backfilled_occurrence_time_filters_are_not_migration_time(tmp_path)
     obs = Observation(j)
     assert [e["seq"] for e in obs.history("session", "h1/sid", since=123, until=124)["events"]] == [seq]
     assert obs.history("session", "h1/sid", since=124)["count"] == 0
+    j.close()
+
+
+@pytest.mark.parametrize("absent_context", [False, True])
+def test_b03_unknown_occurrence_times_never_match_bounds_and_live_absence_falls_back(tmp_path, absent_context):
+    """B03, §10/§11: missing/invalid saved dates stay unknown; only absent live metadata uses record time."""
+    from bat_agent_connector.observation import iso
+
+    j = Journal(tmp_path / "j.db")
+    start = time.time() - 1
+    with j.tx():
+        missing = saved_fact(j, "legacy", "missing-date", {}, [("session", "h1/sid")])
+        invalid = saved_fact(j, "legacy", "invalid-date", {"created_at": "not-a-date"}, [("session", "h1/sid")])
+        valid = saved_fact(j, "legacy", "valid-date", {"created_at": 123.5}, [("session", "h1/sid")])
+        live = j.api_event("session", "h1/sid", "session.updated", {"fields_stale": False})
+        if absent_context:
+            j.db.execute("DELETE FROM api_event_context WHERE seq=?", (live,))
+        else:
+            context = json.loads(j.db.execute("SELECT context FROM api_event_context WHERE seq=?", (live,)).fetchone()[0])
+            context.pop("occurred_at_epoch")
+            j.db.execute("UPDATE api_event_context SET context=? WHERE seq=?", (dump(context), live))
+    end = time.time() + 1
+    obs = Observation(j)
+    unbounded = obs.history("session", "h1/sid", order="asc")
+    assert [e["seq"] for e in unbounded["events"]] == [missing, invalid, valid, live]
+    for event in unbounded["events"][:2]:
+        assert event["context"]["occurred_at"] is None and event["context"]["occurred_at_epoch"] is None
+    assert not unbounded["coverage"]["unknown_occurrence_times_excluded"]
+    for bounds, expected in (({"since": start, "until": end}, [live]), ({"since": start}, [live]),
+                             ({"until": end}, [valid, live]), ({"since": 123, "until": 124}, [valid])):
+        page = obs.history("session", "h1/sid", order="asc", **bounds)
+        assert [e["seq"] for e in page["events"]] == expected
+        assert page["coverage"]["unknown_occurrence_times_excluded"] is True
+        recorded = j.db.execute("SELECT MIN(created_at) FROM api_events").fetchone()[0]
+        assert page["coverage"]["first_recorded_at"] == iso(recorded)
     j.close()
 
 
