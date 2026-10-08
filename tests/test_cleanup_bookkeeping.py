@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import cleanup, lifecycle, registry
+from bat_agent_connector import cleanup, lifecycle, registry, task_control
 from bat_agent_connector.errors import ResourceReadOnly
 from bat_agent_connector.operations import OpContext
 from tests.operation_helpers import settle_operations
@@ -169,7 +169,7 @@ async def test_e01_capacity_changes_after_validation_do_not_degrade_reclaimed_wo
     assert not any(r["status"] == "uncertain" or r["error"] for r in rows.values())
 
 
-@pytest.mark.parametrize("error", ["refused", "io"])
+@pytest.mark.parametrize("error", ["refused", "duplicate", "io"])
 @pytest.mark.parametrize("at_finalize", [False, True])
 async def test_e01_capacity_registry_failure_never_fails_a_cleanup_run(daemon, mock, monkeypatch, error, at_finalize):
     doc, session, wt = await absent_checkpoint(daemon, mock)
@@ -177,6 +177,8 @@ async def test_e01_capacity_registry_failure_never_fails_a_cleanup_run(daemon, m
         git(wt["repository"], "worktree", "remove", wt["path"])
         doc = await cleanup.preview(daemon.ops, CLEANER, doc["target"])
     def refused(*args, **kwargs):
+        if error == "duplicate":
+            raise registry.RegistryInvariantError("duplicate session identity")
         raise ResourceReadOnly("BINDING_MISMATCH", "registry refused retirement") if error == "refused" else OSError("registry unavailable")
     monkeypatch.setattr(registry, "retire", refused)
     done = await apply(daemon, doc)
@@ -185,9 +187,53 @@ async def test_e01_capacity_registry_failure_never_fails_a_cleanup_run(daemon, m
         succeeded_worktree(daemon, done, wt)
     row = next(r for r in done["result"]["items"] if r["resource_id"] == session["resource_id"])
     assert row["status"] == "already_absent" and row["error"] is None
-    assert row["after_state"]["capacity_reason"] == ("registry_refused" if error == "refused" else "registry_io_failed")
-    assert row["after_state"]["capacity_error"]["code"] == ("BINDING_MISMATCH" if error == "refused" else "REGISTRY_IO_FAILED")
+    assert row["after_state"]["capacity_reason"] == ("registry_io_failed" if error == "io" else "registry_refused")
+    assert row["after_state"]["capacity_error"]["code"] == {
+        "refused": "BINDING_MISMATCH", "duplicate": "REGISTRY_DUPLICATE_SESSION", "io": "REGISTRY_IO_FAILED"}[error]
     assert registry.get("h1", session["session_id"])["status"] == "active"
+
+
+async def test_e01_capacity_owner_lookup_refusal_preserves_absence_receipt(daemon, mock, monkeypatch):
+    doc, session, wt = await absent_checkpoint(daemon, mock)
+    git(wt["repository"], "worktree", "remove", wt["path"])
+    doc = await cleanup.preview(daemon.ops, CLEANER, doc["target"])
+    original = cleanup._retire_absent_sessions
+    def refused(*args, **kwargs):
+        raise registry.RegistryInvariantError("duplicate session identity")
+    def project(ctx, carrier_id=None):
+        with monkeypatch.context() as patch:
+            patch.setattr(task_control, "owner_task", refused)
+            return original(ctx, carrier_id)
+    monkeypatch.setattr(cleanup, "_retire_absent_sessions", project)
+    done = await apply(daemon, doc)
+    assert done["status"] == "succeeded", done
+    row = next(r for r in done["result"]["items"] if r["resource_id"] == session["resource_id"])
+    assert row["status"] == "already_absent" and row["error"] is None
+    assert row["after_state"]["capacity_reason"] == "registry_refused"
+    assert row["after_state"]["capacity_error"]["code"] == "REGISTRY_DUPLICATE_SESSION"
+    assert registry.get("h1", session["session_id"])["status"] == "active"
+
+
+async def test_e01_duplicate_registry_after_planner_stop_does_not_hide_confirmed_stop(daemon, mock, human, tmp_path, monkeypatch):
+    _, start = await planner(daemon, mock, human, tmp_path)
+    retire, damaged = registry.retire, []
+    def duplicate(*args, **kwargs):
+        path = registry.registry_path()
+        document = json.loads(path.read_text())
+        row = next(e for e in document["sessions"] if e["session_id"] == start["session_id"])
+        document["sessions"].append(copy.deepcopy(row))  # Simulate an incompatible writer at retirement.
+        path.write_text(json.dumps(document))
+        damaged.append(path.read_bytes())
+        return retire(*args, **kwargs)
+    monkeypatch.setattr(registry, "retire", duplicate)
+    result = await lifecycle.fanout_from_plan(daemon.fleet, "h1", start["session_id"], confirm=True)
+    kept = result["planner_cleanup"]
+    assert kept["stopped"] is True and kept["capacity_released"] is False
+    assert kept["capacity_reason"] == "registry_refused"
+    assert kept["capacity_error"]["code"] == "REGISTRY_DUPLICATE_SESSION"
+    assert registry.registry_path().read_bytes() == damaged[0]
+    assert mock.metas[start["session_id"]] is None
+    assert sum(i["channel"] == "claude:stop-session" for i in mock.invokes) == 1
 
 
 @pytest.mark.parametrize("crash", ["before", "after"])

@@ -1789,9 +1789,9 @@ async def fanout_from_plan(
                         try:
                             kept.update(registry.retire(host, session_id, "stopped", created_at=e.get("created_at"),
                                         actor=fleet.actor, reason="confirmed fan-out planner stop"))
-                        except (BatError, OSError) as ex:
+                        except (BatError, registry.RegistryInvariantError, OSError) as ex:
                             kept.update(capacity_released=False, registry_status=None,
-                                capacity_reason="registry_refused" if isinstance(ex, BatError) else "registry_io_failed",
+                                capacity_reason="registry_io_failed" if isinstance(ex, OSError) else "registry_refused",
                                 capacity_error={"code": getattr(ex, "code", "REGISTRY_IO_FAILED")})
             except BatError as ex:
                 kept["stopped"] = False

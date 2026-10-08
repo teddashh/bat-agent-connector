@@ -1308,8 +1308,14 @@ def _retire_absent_sessions(ctx, carrier_id=None):
         carrier = item.get("worktree_id")
         if item["kind"] != "session" or carrier_id is not None and carrier != carrier_id:
             continue
+        if row["status"] not in {"retained", "already_absent"}:
+            continue
         entry = item.get("registry", {})
-        owner = task_control.owner_task(ctx.service.context["fleet"], item["host"], item["session_id"])
+        try:
+            owner = task_control.owner_task(ctx.service.context["fleet"], item["host"], item["session_id"])
+        except (ResourceReadOnly, registry.RegistryInvariantError, OSError) as error:
+            _receipt(ctx, item, row["status"], after=_capacity_failure(error))
+            continue
         if owner and row["status"] in {"retained", "already_absent"}:
             _receipt(ctx, item, row["status"], after={"capacity_released": False,
                 "registry_status": entry.get("status"), "capacity_reason": "task_owned"})
@@ -1331,11 +1337,15 @@ def _retire_absent_sessions(ctx, carrier_id=None):
             capacity = registry.retire(item["host"], item["session_id"], "absent_at_cleanup",
                 created_at=item["registry"].get("created_at"), actor=ctx.actor, operation_id=ctx.operation_id,
                 carrier_resource_id=carrier, reason="session observed absent; no worktree or carrier removed/already absent")
-        except (ResourceReadOnly, OSError) as e:
-            capacity = {"capacity_released": False, "registry_status": None,
-                        "capacity_reason": "registry_refused" if isinstance(e, ResourceReadOnly) else "registry_io_failed",
-                        "capacity_error": {"code": getattr(e, "code", "REGISTRY_IO_FAILED")}}
+        except (ResourceReadOnly, registry.RegistryInvariantError, OSError) as e:
+            capacity = _capacity_failure(e)
         _receipt(ctx, item, "already_absent", after={**capacity, "carrier_resource_id": carrier, "stopped_by_cleanup": False})
+
+
+def _capacity_failure(error):
+    return {"capacity_released": False, "registry_status": None,
+            "capacity_reason": "registry_io_failed" if isinstance(error, OSError) else "registry_refused",
+            "capacity_error": {"code": getattr(error, "code", "REGISTRY_IO_FAILED")}}
 
 
 def _progress(ctx):
