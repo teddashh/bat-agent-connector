@@ -272,6 +272,9 @@ Validation 成功後保存同 fingerprint 的完整 document、accepted authoriz
 每個 item 的 DAG：validate → preserve → stop（若列出 idle loaded session）→ discard（明選才有）→
 remove.worktree／remove.temporary → remove.branch（只有 delivered）→ finalize。Session、worktree、branch
 各有 item ID；worktree 依賴對應 session 已停止。steps 命名 item.<id>.<phase>.a<attempt>。
+Phase 分類：preserve 是 additive；stop 是 runtime；discard、remove.worktree、remove.temporary、remove.branch
+是 destructive。其他 phase：validate 是 read-only，lock.session 是 coordination（其 locked_action 執行 stop），
+verify.retained／canonical_paths／observation 是 read-only，finalize 是 journal／registry metadata，不改 Git／runtime。
 Local branch 的 only=resource_id snapshot 若無 repository projection，不重建 branch item，沿用 reviewed
 item（actual is None）；不把 worktree 已完成的 planned transition 誤判 stale。Host 在同一 flock 下、
 寫 branch retained ref 前核 exact branch SHA，移動即 PREVIEW_STALE、無 ref 寫入；刪除時仍核 checkout 與 CAS。
@@ -288,10 +291,31 @@ item（actual is None）；不把 worktree 已完成的 planned transition 誤�
 
 Result `{preview_id,fingerprint,summary,items,tombstones,next_action}`；retained IDs 在逐項 receipts，實物另由 retained read 核對。Receipts 包含 planned/actual steps、
 attempts、before/after、retained SHA/location、discard/release choices／authorization、error、settled_by、relations、PR。
+回執另有 completed_phases=[{resource_id,phase,effect,step,result}]、refused_phases（同欄位但 error）、
+cancel_requested。兩個 phases 欄位每次從 authoritative operation_steps 重建，含 approved DAG 的遞迴
+prerequisites：worktree 的 session stop、branch 的 worktree removal 都帶原 resource_id。不加重複的 journal
+欄位；step success 已 commit 後即使 receipt／finalize crash，成功 evidence 仍在，tombstone 也保存同一 projection。
 Item status：retained/pending/running/succeeded/already_absent/failed/uncertain/blocked_stale/cancelled。
 Operation 沿用原狀態；summary.partial=true，不新增 partial state。獨立 item確定失敗可繼續其他項；
 uncertain／stale 停後續。首輪 stale=failed、零 mutation；部分成功後 stale=needs_attention、須新 preview。
-暫時失敗且 unchanged plan可 Resume，新 .a2 只在 .a1 confirmed-no-effect 後執行；成功不重做。
+Definitive refusal 只證明**該次 phase**沒有未決效果，不代表 item／DAG 之前沒有更動。
+此前已有 runtime／destructive success 時，receipt=uncertain、error=CLEANUP_PARTIAL_STATE，保存
+completed_phases、refused_phase／refused_code；guard 保留，operation=needs_attention。只有 additive pins
+完成且無未知 phase 時可釋放 guard，receipt 仍列出 pins，不能宣稱零效果或內容全保留。
+Resume 不重做 success，對 definitive failed Git phase 先以 probe 證明程序結束、carrier identity、exact content
+一致，再建立 .aN+1，gate 重新查 consumer／policy。Definitive pre-stop refusal 也用新 attempt，
+readonly gate 再核同一 runtime／cwd／policy。多個 session prerequisite 只有部分 stop 完成時，
+worktree 的 dependencies refusal 也是 partial／guard 保留。Blocker 仍在則再拒絕且不重複 discard／stop／remove。
+Discard 的完整 after observation 在 host flock 下存入 succeeded step；後續 phase 與 retry 使用此 snapshot，
+不以 resume 當下的內容重新定義 post-discard precondition。舊 step 無此證據時留 needs_attention，不猜 after。
+新的內容／ref 移動仍 PREVIEW_STALE（partial receipt 的 refused_code），先查看原 evidence，不能擅自再 discard。
+
+Cancel 不 rollback。已有 runtime／destructive success 的未完成 item（含 prerequisites）保留 uncertain receipt、
+CLEANUP_PARTIAL_STATE、completed_phases 與 reservation；cancel_requested 由原 operation 讀出。
+取消 needs_attention 時 OperationService 可直接終止 parent，不改其規則，原 partial receipt／guard 仍保留。
+Operation cancelled 不代表內容保留或 runtime 還在；這些保留的 partial reservations 需人工檢視，
+本包不提供強制解除／takeover，不能 resume 已 cancelled operation。只有未送出或純 additive、全部已結清
+的 item 才 cancelled 並釋放 reservation，pins 仍列出。未知 phase 先 reconcile，cancel 不跳過證明。
 
 Host helper 在第一個 mutating call（update-ref、exact unlink／rmdir、git restore、git worktree remove）開始前
 設 marker。之前的拒絕仍是 `{error:code}`，沿用 definitive code；之後任一 ValueError／OSError／SubprocessError
@@ -313,6 +337,11 @@ Partial evidence 列 removed／changed（before/after facts）／added／remaini
 
 所有可能寫入的 host phase：lock.session（gate 內呼叫既有 BAT stop）、preserve、discard、remove.worktree、
 remove.temporary、remove.branch，必須提供 locked_check；_host_call 與 cleanup_host.mutate 都拒絕缺 gate。
+Stop 的 readonly locked_check 與 runtime locked_action 分開：checked=true 在前置核對完成後、BAT stop
+之前設定；BAT reply lost 也走 gate 後 uncertainty。明確 pre-stop SESSION_WAITING／ACTIVE_WRITER refusal
+仍 definitive，沒有送 stop；不把這種已知 refusal 當 transport failure。
+若 BAT stop ACK 已收到，但 lock.session helper 之後拒絕或回覆遺失，整個 step 仍 uncertain／guard 保留，
+receipt.error.effects 保存 completed stop ACK；helper 的 no-Git-effect refusal 不能宣稱 BAT 沒有停止。
 Helper 的 mutate 在 flock／identity 核對後輸出 locked，並以 select／readline 等待明確 `{proceed:true}`；
 EOF／refusal／deadline 不進入任何 mutation。checkpoints._run_locked 在 check 拒絕或 exchange 失敗時關閉 stdin，
 cleanup_host.mutate 的 proceed 分支保證此界線前失敗沒有寫入。
@@ -343,7 +372,7 @@ step definitive failed；canonical_paths／observation／verify.retained 是 rea
 | CLEANUP_MUTATION_UNCERTAIN | per-item uncertain，host 回 mutated=true；保存 host code／effects、保留 guard，讀回核對原 intent |
 | CLEANUP_HOST_PROTOCOL_UNCERTAIN | gate 已通過但 transport／process／decode／schema 無可靠回覆；同 uncertain／guard／reconcile 路徑 |
 | CLEANUP_HOST_REFUSED／CLEANUP_GATE_REQUIRED | 409，gate 前 exchange 失敗／mutation 缺 gate；helper 未獲 proceed，不會寫入 |
-| CLEANUP_PARTIAL_STATE | operation needs_attention、step／item uncertain；保存 removed／changed／remaining 等證據，guard 保留；不能把 partial 當 success |
+| CLEANUP_PARTIAL_STATE | operation needs_attention、item uncertain；未決 step uncertain，definitive refused step failed。保存 completed_phases、refused_phase／refused_code 或 removed／changed／remaining；guard 保留。cancel 仍保存 effects／reservation，不能把 partial 當 success／kept |
 | LEGACY_CLEANUP_DISABLED | 409，改用batc resource-cleanup |
 | IDEMPOTENCY_CONFLICT／IDEMPOTENCY_KEY_REQUIRED／NOT_RESUMABLE | 沿用OperationService |
 
@@ -364,7 +393,8 @@ parent cancelled/failed把它當成沒發生。遠端程序仍在／身份不明
 | branch CAS lost | ref absent且retained old SHA在即成功；still old且無writer可CAS retry；第三種SHA stale |
 | temporary partial／lost | 全部消失且pins仍在補成功；完整 before 可重跑；原 exact manifest／directories 的 unchanged subset、carrier identity 與全部 pins 重新核實才續刪。新增／改變內容或 missing pins 轉 CLEANUP_PARTIAL_STATE，保存證據，不掃剩餘檔案 |
 | finalize crash | steps讀回可補finalize；同tx／unique keys防重複event／aliases；registry同值對帳 |
-| cancel／Resume | 成功item留存，未送出cancel；uncertain先讀回。Confirmed未送出的reservation釋放，未知outcome不解鎖。OpContext.failed不自動retry；confirmed-no-effect才另建.a2 |
+| runtime／destructive success 後別的 phase 拒絕 | succeeded steps／prerequisite effects 永久列於 receipt；failed phase 已知無效果，item partial=uncertain、guard 保留、needs_attention。post-discard 原 after 一致且 gate 再通過才 .aN+1，success 不重做 |
+| cancel／Resume | 成功item留存；未送出或 additive-only、全部已結清才釋放 guard。runtime／destructive partial 或未知 phase 不解鎖，receipt 列 completed_phases、cancel_requested；parent cancelled 不是內容保留證據。Resume 只重試證明 no-effect 的 failed phase，新 .aN+1 核原 post-state |
 | Part B restore add lost | exact新worktree/branch/HEAD/tree對上intent才補成功，未知目的地不認領；不重建runtime |
 
 ## Journal／migration
@@ -378,7 +408,7 @@ Part A只有建表/index，不占版本號。
 | 表 | 固定事實／鍵 |
 |---|---|
 | cleanup_runs | operation_id PK/FK、preview_id、token_hash、fingerprint、immutable document、accepted_actor/scopes/choices、validated_at、supersedes_operation_id；validated snapshot是新事實；authorization沿用operation params接受時的固定metadata |
-| cleanup_receipts | (operation_id,resource_id) PK，item_order、plan、status、before/after、attempts、error、settled_by、retained IDs／timestamps；resumed_by從原api_events附加 |
+| cleanup_receipts | (operation_id,resource_id) PK，item_order、plan、status、before/after、attempts、error、settled_by、retained IDs／timestamps；resumed_by 從原 api_events 附加；completed_phases／refused_phases 從 durable steps（含 DAG prerequisites）投影，cancel_requested 從 operation 投影，不加重複欄位 |
 | cleanup_retained | retained_id PK、resource_id、preserve operation/step、revision_key、host/repository/ref/commit/tree/digest、creation evidence、created_at；每次read即時核實，不寫last_verified；unique preserve op/resource/revision |
 | resource_tombstones | resource_id PK、generation、original_ids、host/profile/workspace/path/ref、creation evidence、last observation、reason/choices、relations、receipt keys、retained IDs、PR destinations、cleaned_at |
 | cleanup_aliases | (kind,external_id,host,resource_id) PK；原session/run/task/checkpoint/op與generation path/ref的永久解引用 |
@@ -474,8 +504,11 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | crashedcheckpoint/handoff／未決start-stop；E01 | test_e01_crashed_continue_and_handoff_intents_are_discovered_without_adoption、test_e01_pending_start_stop_and_waiting_sessions_are_retained |
 | partsuccess/restart/lostreply；E01 | test_e01_partial_cleanup_resumes_only_unfinished_unchanged_items、test_e01_lost_replies_reconcile_each_cleanup_phase、test_e01_cancel_reconciles_sent_steps_and_releases_only_confirmed_reservations |
 | post-mutation error 保持 uncertain／guard；partial reconcile；E01 | test_e01_temporary_post_mutation_failure_keeps_guard_and_reconciles（第二次 unlink／root rmdir failure，原 subset 安全續刪）、test_e01_discard_restore_failure_after_unlink_reports_partial_evidence（needs_attention、removed／remaining）、test_e01_preserve_failure_after_a_pin_completes_missing_pins |
-| locked gate 後 process／protocol failure；E01／§23 lost-reply | test_e01_post_gate_transport_and_protocol_failures_reconcile（GitCommandFailed／timeout／OSError／disconnect／truncated／not JSON／{}／malformed result）、test_e01_eof_during_locked_check_refuses_without_mutation、test_e01_mutating_phase_requires_locked_gate |
-| mutation 前 refusal 仍 definitive；E01 | test_e01_refusal_before_host_mutation_stays_definitive（PREVIEW_STALE、failed step、零 ref write、guard 釋放） |
+| locked gate 後 process／protocol failure；E01／§23 lost-reply | test_e01_post_gate_transport_and_protocol_failures_reconcile（GitCommandFailed／timeout／OSError／disconnect／truncated／not JSON／{}／malformed result／error）、test_e01_eof_during_locked_check_refuses_without_mutation、test_e01_mutating_phase_requires_locked_gate、test_e01_stop_protocol_failure_after_gate_reads_back_without_repeat（stop ACK 後 process／{}／helper refusal；保存 ACK evidence） |
+| 已完成 destructive／runtime 後 refusal、無重複效果；E01/E02／§23 partial success | test_e01_completed_discard_survives_refusal_and_new_attempt、test_e01_completed_worktree_removal_survives_branch_refusal、test_e01_completed_stop_survives_first_git_refusal、test_e01_retry_uses_recorded_post_discard_state |
+| 共用 worktree 的 stops 只完成一部分；E02／§23 DAG receipts | test_e02_shared_worktree_partial_stop_dependency_stays_reserved（dependencies refusal 仍列已 stop、保留 guard；清 blocker 後 stop.a2，已成功 stop 不重做） |
+| cancel partial 保留證據／guard，additive-only 可釋放；E01／§23 receipts | test_e01_cancel_partial_keeps_completed_phases_and_guard（active cancel／needs_attention cancel、live API receipt）、test_e01_additive_only_refusal_lists_pins_and_releases_guard、test_e01_additive_only_cancel_records_pins_and_releases_guard；原 cancel 回歸測試也驗證已 stop 的 prerequisites |
+| mutation 前 refusal 仍 definitive；E01 | test_e01_refusal_before_host_mutation_stays_definitive（無 stop dependency，PREVIEW_STALE、failed step、零 ref write、guard 釋放） |
 | partial temporary 的新內容／missing pin 不能續刪；E01/E02 | test_e01_partial_temporary_unreviewed_changes_or_missing_pins_need_attention（exact removed／changed／added／remaining、缺 retained 證據、不再改檔、guard 保留） |
 | 原ID/位置/原因/relations/PR與真retained；E01/E02 | test_e01_original_ids_remain_searchable_with_location_reason_and_pr（同測試移除實際ref，確認列為unavailable） |
 | TASK_OWNED／原TaskDaemon不變 | test_e01_task_owned_resources_are_retained；原test_external_cleanup_retains_unmerged_commit_and_recovers_after_restart／test_terminal_cleanup_requires_proof_before_journal_path_is_cleared |
@@ -499,6 +532,7 @@ Rewrite舊legacyapplytests，不skip；保留mutation-table、connector-made BAT
 - **Part B**：coordinator准入／reviewed taskleftovers、TaskDaemon共用finalize與舊事件backfill、restore action/tool/CLI/button。
 - **Container退休／retained store**：不屬A或B。Clone／area全刪風險較高，§23本包只回收session/worktree/temporary；另spec。
 - **refs/batc/*刪除／GC／永久刪除／保留期限**：pins是evidence，無GC刪pins不回收容量。本包keep/forever/false。
+- **Cancelled partial reservation 的強制解除／takeover**：cancel 不抹除已 stop／discard／remove 的效果；本包保留 guard 與 evidence，需人工檢視，未提供強制解除 action。
 - **Artifacts/fulltranscript archive、taskintegration／外部squashreceipt匯入**：缺adapter就retain，不自造acceptance。
 - **大型host immutablepaging、跨hostrestore、remotebranch刪除**：另contract；本包不截斷preview、不掃磁碟。
 - **實機能力**：BAT終止證據、canonicalroots、SSH/Python/no-follow、外部writer隔離仍需部署驗證；測試不向實機write。

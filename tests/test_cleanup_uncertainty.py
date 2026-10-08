@@ -108,7 +108,7 @@ def assert_reserved(d, done, item, phase):
     step = next(s for s in done["steps"] if s["name"].startswith("item." + item["resource_id"] + "." + phase))
     assert step["status"] == "uncertain", step
     with pytest.raises(ResourceReadOnly, match="CLEANUP_IN_PROGRESS"):
-        cleanup.guard(item["host"], path=item["path"])
+        cleanup.guard(item["host"], session_id=item.get("session_id"), path=item["path"])
     return row
 
 
@@ -162,7 +162,9 @@ async def test_e01_discard_restore_failure_after_unlink_reports_partial_evidence
 
 
 async def test_e01_refusal_before_host_mutation_stays_definitive(daemon, mock):
-    cp, _ = await setup_work(daemon, mock)
+    cp, op = await setup_work(daemon, mock)
+    # No stop in this cleanup: only the new host refusal is under test.
+    mock.metas[op["result"]["session_id"]] = None
     doc = await cleanup.preview(daemon.ops, CLEANER, {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]})
     item = next(i for i in doc["items"] if i["kind"] == "worktree")
     runner = FaultRunner(daemon.ops.context["git_runner"], "preserve", "before_mutation", item["path"])

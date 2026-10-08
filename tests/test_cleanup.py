@@ -193,8 +193,10 @@ async def test_e01_branch_moved_after_worktree_removal_is_stale(daemon, mock):
     done = await apply(daemon, doc)
     rows = {r["resource_id"]: r for r in cleanup.receipts(daemon.ops, done["operation_id"])}
     assert rows[wt["resource_id"]]["status"] == "succeeded"
-    assert rows[branch["resource_id"]]["status"] == "blocked_stale"
-    assert rows[branch["resource_id"]]["error"]["code"] == "PREVIEW_STALE", rows[branch["resource_id"]]
+    assert rows[branch["resource_id"]]["status"] == "uncertain"
+    assert rows[branch["resource_id"]]["error"]["code"] == "CLEANUP_PARTIAL_STATE", rows[branch["resource_id"]]
+    assert rows[branch["resource_id"]]["error"]["refused_code"] == "PREVIEW_STALE"
+    assert any(p["phase"] == "remove.worktree" for p in rows[branch["resource_id"]]["completed_phases"])
     assert "remove.branch" not in runner.branch_phases
     assert git(wt["repository"], "for-each-ref") == runner.refs_after_move
     assert git(wt["repository"], "rev-parse", wt["branch"]) == runner.moved
@@ -458,7 +460,7 @@ async def test_e01_live_cwd_is_rechecked_under_host_flock_before_stop_and_remova
     doc = await cleanup.preview(daemon.ops, CLEANER, {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]})
     assert doc["ready"]
     original, gates = cleanup._host_call, []
-    async def race(ops, host, req, timeout=cleanup.READ_DEADLINE_S, *, locked_check=None):
+    async def race(ops, host, req, timeout=cleanup.READ_DEADLINE_S, *, locked_check=None, locked_action=None):
         if locked_check and req.get("phase") == phase:
             check = locked_check
             async def under_lock():
@@ -472,14 +474,14 @@ async def test_e01_live_cwd_is_rechecked_under_host_flock_before_stop_and_remova
                 change_live_cwd(mock, sid, path, mode)
                 await check()
             locked_check = under_lock
-        return await original(ops, host, req, timeout, locked_check=locked_check)
+        return await original(ops, host, req, timeout, locked_check=locked_check, locked_action=locked_action)
     monkeypatch.setattr(cleanup, "_host_call", race)
     before = len(mock.invokes)
     done = await apply(daemon, doc)
     assert gates == [phase]
     assert done["status"] == "needs_attention", done
     rows = cleanup.receipts(daemon.ops, done["operation_id"])
-    assert any(r["error"] and r["error"]["code"] == ("PREVIEW_STALE" if mode == "inside" else "OBSERVATION_UNAVAILABLE")
+    assert any(r["error"] and r["error"].get("refused_code", r["error"]["code"]) == ("PREVIEW_STALE" if mode == "inside" else "OBSERVATION_UNAVAILABLE")
                for r in rows), rows
     stops = [i for i in mock.invokes[before:] if i["channel"] == "claude:stop-session"]
     assert len(stops) == (0 if phase == "lock.session" else 1)
@@ -1056,7 +1058,13 @@ async def test_e01_cancel_reconciles_sent_steps_and_releases_only_confirmed_rese
     wt = next(i for i in doc["items"] if i["kind"] == "worktree" and i.get("proven"))
     assert Path(wt["path"]).exists()
     assert git(wt["repository"], "rev-parse", "refs/batc/retained/" + wt["resource_id"] + "/" + wt["observation"]["head"])
-    cleanup.guard("h1", path=wt["path"], branch=wt["branch"])
+    from bat_agent_connector.errors import ResourceReadOnly
+    with pytest.raises(ResourceReadOnly, match="CLEANUP_IN_PROGRESS"):
+        cleanup.guard("h1", path=wt["path"], branch=wt["branch"])
     rows = cleanup.receipts(daemon.ops, done["operation_id"])
-    assert next(r["status"] for r in rows if r["resource_id"] == wt["resource_id"]) == "cancelled"
-    assert (await cleanup.preview(daemon.ops, CLEANER, target))["ready"]
+    row = next(r for r in rows if r["resource_id"] == wt["resource_id"])
+    assert row["status"] == "uncertain" and row["cancel_requested"]
+    assert {p["phase"] for p in row["completed_phases"]} == {"stop", "preserve"}
+    assert row["after_state"]["guard_released"] is False
+    assert not any(i["decision"] == "reclaim" and i["resource_id"] == wt["resource_id"]
+                   for i in (await cleanup.preview(daemon.ops, CLEANER, target))["items"])

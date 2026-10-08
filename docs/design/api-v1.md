@@ -112,6 +112,17 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 Apply 只執行同一 reviewed fingerprint；16 KiB signed token，15 分鐘到期。release_undelivered 保留 commits 與
 branch，不需 cleanup_discard；只有 discard_uncommitted 摧毀內容。Accepted actor/scopes/choices 固定，resume
 沿用原 OperationService 規則，不再檢查 discard scope；回執記錄 resumer。保留設定 keep/forever/false。
+GET /operations/{id} 的 cleanup_receipts／tombstone 回執包含 completed_phases=[{resource_id,phase,effect,step,result}]、
+refused_phases（同形但 error）及 cancel_requested。它們投影 durable steps／operation，含 approved DAG 的
+prerequisites，不因後續失敗消失。result.items 是最後一次 progress snapshot；cancel 後以 live cleanup_receipts
+或 operation.cancel_requested 判斷取消，不以舊 result.items 的 flag 判斷。effect=additive（preserve）／runtime（stop）／destructive（discard、remove.*）。
+Gate 通過後的 process／transport／decode／schema failure 是 uncertain，保留 reservation、只回查。
+已完成 runtime／destructive phase 後 refusal，item=uncertain、error.code=CLEANUP_PARTIAL_STATE，
+另記 refused_phase／refused_code，operation=needs_attention；解除 blocker 後 resume 以新的 .aN attempt
+重核原 preconditions，完成步驟不重做。Discard after snapshot 存在 succeeded step，resume 不採納新內容。
+Cancel 已有 runtime／destructive partial 的 item 仍 uncertain、cancel_requested=true、reservation 保留；
+cancelled parent 不表示內容保留，也不能 resume。需人工檢視，本包無強制解鎖／takeover。只有未送出或
+pure additive、全部已結清的 item 可 cancelled／釋放 guard，回執仍列已建立的 pins。
 Legacy batc cleanup／session_cleanup 只評估，apply 回 LEGACY_CLEANUP_DISABLED (409)，指向 resource-cleanup；
 auto_cleanup deprecated，只保留解析，不啟用任何 writes。Fanout planner 只 stop，worktree 留給 reviewed cleanup。
 Restore、reviewed task cleanup、TaskDaemon tombstone backfill 在 Part B；clones/areas 退休與 refs/batc/* 刪除不在本包。

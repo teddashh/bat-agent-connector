@@ -47,6 +47,8 @@ READ_DEADLINE_S = 20.0
 MAX_ITEMS = 500
 MAX_TOKEN_BYTES = 16384
 MUTATING_PHASES = frozenset({"lock.session", "preserve", "discard", "remove.worktree", "remove.temporary", "remove.branch"})
+PHASE_EFFECTS = {"preserve": "additive", "stop": "runtime", "discard": "destructive",
+                 "remove.worktree": "destructive", "remove.temporary": "destructive", "remove.branch": "destructive"}
 _HOST_LOCKS: dict[str, asyncio.Lock] = {}
 _REPO_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
 _OWNER = contextvars.ContextVar("cleanup_operation", default=None)
@@ -546,7 +548,7 @@ def _host_config(ops, host):
     return hc
 
 
-async def _host_call(ops, host, req, timeout=READ_DEADLINE_S, *, locked_check=None):
+async def _host_call(ops, host, req, timeout=READ_DEADLINE_S, *, locked_check=None, locked_action=None):
     if req.get("phase") in MUTATING_PHASES and not req.get("probe") and locked_check is None:
         raise OperationError("CLEANUP_GATE_REQUIRED", "a mutating phase requires the locked consumer check", 409)
     _host_config(ops, host)
@@ -556,10 +558,18 @@ async def _host_call(ops, host, req, timeout=READ_DEADLINE_S, *, locked_check=No
     source = (resources.files(__package__) / "cleanup_host.py").read_text()
     arg = base64.b64encode(_canonical({**req, "deadline_s": timeout, **({"locked_check": True} if locked_check else {})}).encode()).decode()
     checked = False
+    action_refusal = None
     async def check():
-        nonlocal checked
+        nonlocal checked, action_refusal
         await locked_check()
         checked = True
+        if locked_action:
+            try:
+                await locked_action()
+            except OperationError as e:
+                # A local, explicit pre-stop refusal is different from losing the BAT stop reply.
+                action_refusal = e
+                raise
     token = checkpoints._LOCKED_CHECK.set(check if locked_check else None)
     try:
         try:
@@ -571,9 +581,15 @@ async def _host_call(ops, host, req, timeout=READ_DEADLINE_S, *, locked_check=No
                 if not isinstance(result["error"], str) or not result["error"] or (
                         "mutated" in result and not isinstance(result["mutated"], bool)):
                     raise ValueError("invalid host refusal")
+                if "effects" in result and (not isinstance(result["effects"], list) or any(not isinstance(e, dict) or
+                        not isinstance(e.get("action"), str) or not isinstance(e.get("target"), str) or
+                        not isinstance(e.get("completed"), bool) for e in result["effects"])):
+                    raise ValueError("invalid host mutation evidence")
             elif req.get("phase") in MUTATING_PHASES and not req.get("probe"):
                 _check_phase_result(req["phase"], result["result"])
         except (Exception, asyncio.CancelledError) as e:
+            if e is action_refusal:
+                raise
             if checked:
                 raise MutationUncertain({"error": "CLEANUP_HOST_PROTOCOL_UNCERTAIN", "mutated": True,
                                          "effects": [], "failure": type(e).__name__}) from e
@@ -609,6 +625,9 @@ def _check_phase_result(phase, result):
     if phase == "discard" and (not isinstance(result.get("acknowledged_missing_replicas", []), list) or
             any(not isinstance(p, str) for p in result.get("acknowledged_missing_replicas", []))):
         raise ValueError("invalid discard result")
+    if phase == "discard" and (not isinstance(result.get("after"), dict) or
+            not isinstance(result["after"].get("manifest"), list) or not isinstance(result["after"].get("status"), str)):
+        raise ValueError("missing post-discard state")
 
 
 def _inside(path, cwd):
@@ -1133,14 +1152,65 @@ def _resumed_by(ctx):
         json.loads(r["body"]).get("from") == "needs_attention"]
 
 
+def _phase_histories(plans, steps, *, only=None):
+    """Project durable step facts, including effects of the item's prerequisite resources."""
+    histories = {}
+    for rid in ([only] if only else plans):
+        related, todo = set(), [rid]
+        while todo:
+            dep = todo.pop()
+            if dep in related:
+                continue
+            related.add(dep)
+            todo.extend(plans.get(dep, {}).get("dependencies", []))
+        completed, refused = [], []
+        for step in steps:
+            parts = step["name"].split(".", 2)
+            if len(parts) != 3 or parts[0] != "item" or parts[1] not in related:
+                continue
+            phase = parts[2].rsplit(".a", 1)[0]
+            if phase not in PHASE_EFFECTS:
+                continue
+            fact = {"resource_id": parts[1], "phase": phase, "effect": PHASE_EFFECTS[phase], "step": step["name"]}
+            if step["status"] == "succeeded":
+                completed.append({**fact, "result": json.loads(step["response"] or "{}")})
+            elif step["status"] == "failed":
+                refused.append({**fact, "error": json.loads(step["error"] or "{}")})
+        histories[rid] = {"completed_phases": completed, "refused_phases": refused}
+    return histories
+
+
+def _item_history(ctx, item):
+    plans = {r["resource_id"]: json.loads(r["plan"]) for r in ctx.service.db.execute(
+        "SELECT resource_id,plan FROM cleanup_receipts WHERE operation_id=?", (ctx.operation_id,))}
+    steps = ctx.service.db.execute("SELECT * FROM operation_steps WHERE operation_id=? ORDER BY seq",
+                                   (ctx.operation_id,)).fetchall()
+    return _phase_histories(plans, steps, only=item["resource_id"])[item["resource_id"]]
+
+
+def _has_irreversible(history):
+    return any(p["effect"] in {"runtime", "destructive"} for p in history["completed_phases"])
+
+
+def _pending_item(ctx, item):
+    return ctx.service.db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? AND name LIKE ? "
+        "AND status IN ('started','uncertain')", (ctx.operation_id, "item." + item["resource_id"] + ".%" )).fetchone()
+
+
 def receipts(ops, op_id):
+    rows = ops.db.execute("SELECT * FROM cleanup_receipts WHERE operation_id=? ORDER BY item_order", (op_id,)).fetchall()
+    histories = _phase_histories({r["resource_id"]: json.loads(r["plan"]) for r in rows},
+        ops.db.execute("SELECT * FROM operation_steps WHERE operation_id=? ORDER BY seq", (op_id,)).fetchall())
+    operation = ops.db.execute("SELECT cancel_requested FROM operations WHERE operation_id=?", (op_id,)).fetchone()
     out = []
-    for r in ops.db.execute("SELECT * FROM cleanup_receipts WHERE operation_id=? ORDER BY item_order", (op_id,)):
+    for r in rows:
         d = dict(r)
         for k in ("plan", "before_state", "after_state", "error", "retained_ids"):
             d[k] = json.loads(d[k]) if d[k] else None
         d["resumed_by"] = [r["actor"] for r in ops.db.execute("SELECT actor,body FROM api_events WHERE resource_id=? "
             "AND kind='operation.running' ORDER BY seq", (op_id,)) if json.loads(r["body"]).get("from") == "needs_attention"]
+        d.update(histories[d["resource_id"]])
+        d["cancel_requested"] = bool(operation and operation[0])
         out.append(d)
     return out
 
@@ -1152,7 +1222,7 @@ def _finalize(ctx, item, after):
     doc = {**item, "operation_id": ctx.operation_id, "actor": ctx.actor, "reason": "reviewed_cleanup",
            "accepted_authorization": ctx.params["_accepted_authorization"], "last_observation": item.get("observation"),
            "after": after, "retained_ids": retained_ids, "receipt": {"operation_id": ctx.operation_id,
-           "resource_id": rid}, "resumed_by": _resumed_by(ctx), "cleaned_at": time.time(),
+           "resource_id": rid}, **_item_history(ctx, item), "resumed_by": _resumed_by(ctx), "cleaned_at": time.time(),
            "pull_requests": item.get("delivery", {}).get("pull_requests", []),
            "attachment_replicas": "removed with worktree; originals in artifact store" if
                item.get("observation", {}).get("exempted_replicas") else None}
@@ -1284,6 +1354,13 @@ async def _run(ctx):
                 ctx.check_cancel()
             if any(db.execute("SELECT status FROM cleanup_receipts WHERE operation_id=? AND resource_id=?",
                               (ctx.operation_id, dep)).fetchone()[0] != "succeeded" for dep in item["dependencies"]):
+                history = _item_history(ctx, item)
+                if _has_irreversible(history):
+                    _mark(item, ctx.operation_id, "reserved")
+                    _receipt(ctx, item, "uncertain", after={**history, "refused_phase": "dependencies", "refused_code": "DEPENDENCY_FAILED"},
+                             error={"code": "CLEANUP_PARTIAL_STATE", "refused_phase": "dependencies", "refused_code": "DEPENDENCY_FAILED"})
+                    _progress(ctx)
+                    raise NeedsAttention("CLEANUP_PARTIAL_STATE", "a completed prerequisite changed runtime/content; inspect receipts")
                 _receipt(ctx, item, "failed", error={"code": "DEPENDENCY_FAILED"})
                 continue
             lock = _REPO_LOCKS.setdefault((item["host"], item.get("repository") or item.get("path")), asyncio.Lock())
@@ -1292,10 +1369,12 @@ async def _run(ctx):
                 _receipt(ctx, item, "running")
                 try:
                     await _execute_item(ctx, item, payload)
-                except Uncertain:
+                except (Uncertain, AmbiguousOutcome, OSError) as e:
                     _receipt(ctx, item, "uncertain")
                     _progress(ctx)
-                    raise
+                    if isinstance(e, Uncertain):
+                        raise
+                    raise Uncertain("item." + item["resource_id"], "item read-back remains unproven") from e
                 except NeedsAttention:
                     _progress(ctx)
                     raise
@@ -1303,15 +1382,23 @@ async def _run(ctx):
                     code = getattr(e, "code", "CLEANUP_FAILED")
                     prior = db.execute("SELECT error FROM cleanup_receipts WHERE operation_id=? AND resource_id=?",
                                        (ctx.operation_id, item["resource_id"])).fetchone()
-                    if unresolved or prior[0] and json.loads(prior[0]).get("mutated"):
+                    history = _item_history(ctx, item)
+                    if _pending_item(ctx, item) or prior[0] and json.loads(prior[0]).get("mutated"):
                         saved = json.loads(prior[0]) if prior[0] else {"code": "UNCERTAIN"}
                         _receipt(ctx, item, "uncertain", error={**saved, "cause": code})
                         _progress(ctx)
                         raise NeedsAttention("CLEANUP_PARTIAL_STATE" if saved.get("mutated") else "UNCERTAIN_UNRESOLVED",
                                              "unresolved mutation remains reserved; inspect receipts") from None
+                    if _has_irreversible(history):
+                        refused = [p for p in history["refused_phases"] if p["resource_id"] == item["resource_id"]]
+                        phase = refused[-1]["phase"] if refused else "validate"
+                        _receipt(ctx, item, "uncertain", after={**history, "refused_phase": phase, "refused_code": code},
+                                 error={"code": "CLEANUP_PARTIAL_STATE", "refused_phase": phase, "refused_code": code})
+                        _progress(ctx)
+                        raise NeedsAttention("CLEANUP_PARTIAL_STATE", "completed runtime/destructive phases remain reserved; inspect receipts") from None
                     _receipt(ctx, item, "blocked_stale" if code == "PREVIEW_STALE" else "failed",
                              error={"code": code, "message": str(e)[:300]})
-                    # A definitive refusal made no pending external call; keep its content and release the guard.
+                    # No unresolved call or completed runtime/destructive phase. Additive pins remain in the receipt.
                     _release(item, ctx.operation_id)
                     _progress(ctx)
                     if code == "PREVIEW_STALE":
@@ -1326,16 +1413,22 @@ async def _run(ctx):
                 "tombstones": [r["resource_id"] for r in result if r["status"] == "succeeded"],
                 "next_action": "cleanup_retained"}
     except Cancelled:
-        # Cancel cannot abandon an unknown external outcome. Confirmed or unstarted items release their guards.
+        # Cancellation never rolls back a runtime/destructive effect or releases its partial reservation.
         for item in doc["items"]:
             row = db.execute("SELECT status FROM cleanup_receipts WHERE operation_id=? AND resource_id=?",
                              (ctx.operation_id, item["resource_id"])).fetchone()
             if row[0] in {"succeeded", "retained"}:
                 continue
-            unresolved = db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? AND name LIKE ? "
-                                    "AND status IN ('started','uncertain')", (ctx.operation_id, "item." + item["resource_id"] + ".%" )).fetchone()
-            _receipt(ctx, item, "uncertain" if unresolved else "cancelled")
-            if not unresolved:
+            unresolved = _pending_item(ctx, item)
+            history = _item_history(ctx, item)
+            partial = _has_irreversible(history)
+            keep = bool(unresolved) or partial
+            status = "uncertain" if keep else "cancelled"
+            _receipt(ctx, item, status, after={**history, "cancel_requested": True, "guard_released": not keep},
+                     **({"error": {"code": "CLEANUP_PARTIAL_STATE", "cancel_requested": True}} if partial else {}))
+            if partial:
+                _mark(item, ctx.operation_id, "reserved")
+            if not keep:
                 _release(item, ctx.operation_id)
         _progress(ctx)
         raise
@@ -1374,6 +1467,12 @@ def _record_partial(ctx, item, evidence):
                     "message": "state differs from both the reviewed before-state and the proven complete result"})
 
 
+def _mutation_receipt(ctx, item, phase, result):
+    _receipt(ctx, item, "uncertain", error={"code": "CLEANUP_MUTATION_UNCERTAIN", "mutated": True,
+        "host_error": result["error"], "phase": phase, "effects": result.get("effects", []),
+        "failure": result.get("failure")})
+
+
 def _partial_attention(ctx, item, evidence):
     _record_partial(ctx, item, evidence)
     raise NeedsAttention("CLEANUP_PARTIAL_STATE", "partial cleanup remains reserved; inspect removed/changed/remaining evidence")
@@ -1399,7 +1498,6 @@ async def _execute_item(ctx, item, payload):
         async def stop():
             result = None
             async def checked_stop():
-                nonlocal result
                 ctx.check_cancel()
                 await _phase_consumers(ctx, item)
                 now = await _runtime(ops, item, time.monotonic() + READ_DEADLINE_S)
@@ -1409,6 +1507,9 @@ async def _execute_item(ctx, item, payload):
                     "roots": list(_host_config(ops, item["host"]).managed_roots)})
                 if path.get(item["path"]) != item.get("path_observation") or path[item["path"]].get("error"):
                     raise OperationError("PREVIEW_STALE", "session workdir changed before stop", 409)
+
+            async def send_stop():
+                nonlocal result
                 _host_config(ops, item["host"])
                 result = await lifecycle._stop(ops.context["fleet"], item["host"], item["session_id"],
                                               Audit(ops.context["fleet"].config.safety), cleanup=True)
@@ -1416,8 +1517,18 @@ async def _execute_item(ctx, item, payload):
                     raise OperationError(result.get("code", "STOP_UNPROVEN"), result.get("reason", "stop was not confirmed"), 409)
                 if isinstance(result.get("result"), dict) and result["result"].get("ok") is False:
                     raise AmbiguousOutcome("stop acknowledgment did not confirm termination")
-            await _host_call(ops, item["host"], {"phase": "lock.session", "repository": item.get("repository") or item["path"],
-                "roots": list(hc.managed_roots)}, locked_check=checked_stop)
+            try:
+                await _host_call(ops, item["host"], {"phase": "lock.session", "repository": item.get("repository") or item["path"],
+                    "roots": list(hc.managed_roots)}, locked_check=checked_stop, locked_action=send_stop)
+            except (MutationUncertain, OperationError) as e:
+                if isinstance(e, OperationError) and not (result and result.get("stopped")):
+                    raise
+                uncertain = e.result if isinstance(e, MutationUncertain) else {"error": e.code, "mutated": True, "effects": []}
+                if result and result.get("stopped"):
+                    uncertain = {**uncertain, "effects": [*uncertain.get("effects", []),
+                        {"action": "stop", "target": item["session_id"], "completed": True, "result": result}]}
+                _mutation_receipt(ctx, item, "stop", uncertain)
+                raise MutationUncertain(uncertain) from e
             return result
 
         async def reconcile_stop(_):
@@ -1427,7 +1538,11 @@ async def _execute_item(ctx, item, payload):
             if isinstance(state, dict) and state.get("status") in {"stopped", "exited"} and state.get("sessionId") == item["session_id"]:
                 return {"stopped": True, "termination_evidence": state}
             return None
-        await ctx.step("item." + rid + ".stop.a1", stop, request={"session_id": item["session_id"],
+        previous = ops.db.execute("SELECT name,status FROM operation_steps WHERE operation_id=? AND name LIKE ? ORDER BY seq DESC LIMIT 1",
+                                  (ctx.operation_id, "item." + rid + ".stop.a%" )).fetchone()
+        attempt = int(previous["name"].rsplit(".a", 1)[1]) + 1 if previous and previous["status"] == "failed" else 1
+        name = "item." + rid + ".stop.a" + str(attempt) if not previous or previous["status"] == "failed" else previous["name"]
+        await ctx.step(name, stop, request={"session_id": item["session_id"],
                        "before": item["observation"]}, reconcile=reconcile_stop)
         _finalize(ctx, item, {"stopped": True, "runtime_restored": False})
         return
@@ -1485,8 +1600,7 @@ async def _execute_item(ctx, item, payload):
             try:
                 return await _host_call(ops, item["host"], request, locked_check=lambda: _phase_consumers(ctx, item))
             except MutationUncertain as e:
-                _receipt(ctx, item, "uncertain", error={"code": "CLEANUP_MUTATION_UNCERTAIN", "mutated": True,
-                    "host_error": e.result["error"], "phase": request["phase"], "effects": e.result.get("effects", [])})
+                _mutation_receipt(ctx, item, request["phase"], e.result)
                 raise
             except OperationError as e:
                 prior = ops.db.execute("SELECT error FROM cleanup_receipts WHERE operation_id=? AND resource_id=?",
@@ -1525,7 +1639,7 @@ async def _execute_item(ctx, item, payload):
                 settled = await read(probe=True, acknowledge_missing=True) if discarded_replicas else observed
                 wt = settled.get("worktrees", {}).get(item["path"], {})
                 if wt.get("head") == sha and wt.get("status") == "" and not wt.get("complex_state"):
-                    return {"discarded": True, "acknowledged_missing_replicas": discarded_replicas}
+                    return {"discarded": True, "acknowledged_missing_replicas": discarded_replicas, "after": wt}
             if observed.get("process_ended") and observed.get("common_dir") == req["identity"]["common_dir"]:
                 if phase == "preserve":
                     commits = set(item["observation"].get("refs", {}).values()) | {sha} if item["kind"] == "temporary" else {sha}
@@ -1568,16 +1682,27 @@ async def _execute_item(ctx, item, payload):
             return None  # never retry when the remote process's outcome is unproven
         previous = ops.db.execute("SELECT name,status,error FROM operation_steps WHERE operation_id=? AND name LIKE ? ORDER BY seq DESC LIMIT 1",
                                   (ctx.operation_id, "item." + rid + "." + phase + ".a%" )).fetchone()
-        if previous and previous["status"] == "failed" and json.loads(previous["error"] or "{}").get("code") == "WORKTREE_REMOVE_REFUSED":
+        if previous and previous["status"] == "failed":
             observed = await read(probe=True)
-            if observed.get("worktrees", {}).get(item["path"]) != request["before"]:
+            stable_identity = all(observed.get(k) == req["identity"].get(k) for k in ("common_dir", "markers", "config_digest"))
+            stable_content = (observed.get("temporaries", {}).get(item["path"]) == request["before"] if item["kind"] == "temporary" else
+                              observed.get("refs", {}).get("refs/heads/" + item["branch"]) == sha if item["kind"] == "local_branch" else
+                              observed.get("worktrees", {}).get(item["path"]) == request["before"])
+            if not observed.get("process_ended") or not stable_identity or not stable_content:
                 raise OperationError("PREVIEW_STALE", "failed removal no longer has its original binding", 409)
             n = int(previous["name"].rsplit(".a", 1)[1]) + 1
             name = "item." + rid + "." + phase + ".a" + str(n)
         elif previous:
             name = previous["name"]
         result = await ctx.step(name, execute, request=request, reconcile=reconcile)
-        _receipt(ctx, item, "running", error=None)
+        prior = ops.db.execute("SELECT error FROM cleanup_receipts WHERE operation_id=? AND resource_id=?",
+                               (ctx.operation_id, rid)).fetchone()
+        error = json.loads(prior[0]) if prior[0] else None
+        # Clear only a now-proven phase's uncertainty, never its durable completed-step evidence.
+        if error and error.get("mutated") and error.get("phase") == phase:
+            _receipt(ctx, item, "running", error=None)
+        else:
+            _receipt(ctx, item, "running")
         if phase == "preserve":
             for pin in result.get("pins", [result]):
                 commit = pin["sha"]
@@ -1589,8 +1714,10 @@ async def _execute_item(ctx, item, payload):
                      pin["tree"], _hash(fact), _canonical(item["creation_evidence"]), time.time()))
         if phase == "discard":
             req["acknowledged_missing_replicas"] = {item["path"]: result.get("acknowledged_missing_replicas", [])}
-            observed = await read()
-            before = observed["worktrees"][item["path"]]
+            if not isinstance(result.get("after"), dict):
+                _partial_attention(ctx, item, {**_item_history(ctx, item), "phase": phase,
+                                               "code": "POST_DISCARD_STATE_UNAVAILABLE"})
+            before = result["after"]
     after = await read()
     if item["kind"] == "temporary":
         if after.get("temporaries", {}).get(item["path"], {}).get("exists") is not False:
