@@ -12,7 +12,7 @@ from typing import Protocol
 from . import registry
 from .errors import TaskControlRefused, TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .model_router import MinimalReviewGate, ModelRouter
-from .operations import StepFailed
+from .operations import AMBIGUOUS, StepFailed, _error_code
 from .relay import parse_status
 from .task_journal import Journal
 from .task_recipes import limits, verification_reworks
@@ -245,10 +245,13 @@ class TaskCoordinator:
                     if guard.frames:
                         self.journal.change(task_id, "uncertain")
                     raise
-                except Exception:
+                except Exception as exc:
                     self.journal.command_status(command["command_id"], "uncertain" if guard.frames else "rejected")
                     if guard.frames:
                         self.journal.change(task_id, "uncertain")
+                    elif context and isinstance(exc, (*AMBIGUOUS, OSError)):
+                        # Transport loss before the effect frame has a definitive no-send outcome.
+                        raise StepFailed(_error_code(exc), str(exc)) from exc
                     raise
                 if action == "send" and not result.get("accepted"):
                     with self.journal.tx():

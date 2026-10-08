@@ -112,6 +112,7 @@ class FrameGuard:
     frames: list = field(default_factory=list, compare=False)
 
     def __call__(self):
+        # Only the command's effect frames count; preliminary writes use check() directly.
         self.check()
         self.frames.append(True)
 

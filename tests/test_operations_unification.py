@@ -79,7 +79,7 @@ from bat_agent_connector.errors import (  # noqa: E402
     TaskControlRefused,
     WriteRefused,
 )
-from bat_agent_connector.operations import OpContext, OperationError  # noqa: E402
+from bat_agent_connector.operations import OpContext, OperationError, StepFailed  # noqa: E402
 from tests.conftest import adopt  # noqa: E402
 
 SID = "sess-claude-0001"
@@ -1916,3 +1916,170 @@ async def test_a07_relay_runtime_command_has_original_send_readback_identity(own
         assert (await restarted.coordinator.tick(tid))["state"] == "running"
         assert restarted.journal.command_get(command["command_id"])["status"] == "accepted"
         assert len(writes(mock)) == len(restarted.journal.commands(tid)) == 1
+
+
+@pytest.mark.parametrize("door", ["legacy", "session_operation", "task_operation"])
+@pytest.mark.parametrize("refusal", ["streaming", "version_changed"])
+async def test_a07_refusal_after_resume_rejects_only_the_unsent_command(owned, mock, monkeypatch, door, refusal):
+    """A05/A07: a pre-send refusal is definitive, preserves the task and replays with the same key."""
+    d, tid = owned
+    mock.metas[SID] = None
+    expected = d.journal.get(tid)
+    code = "REFUSED" if refusal == "streaming" or door == "task_operation" else "CONTROL_VERSION_CONFLICT"
+    client = d.fleet.client("h1")
+    original = client._roundtrip
+
+    async def resume_then_refuse(frame, timeout):
+        nonlocal expected
+        result = await original(frame, timeout)
+        if frame["channel"] == "claude:client-resume":
+            if refusal == "streaming":
+                mock.metas[SID]["isStreaming"] = True
+            else:
+                d.journal.pause(tid)
+                d.journal.resume(tid)
+                expected = d.journal.get(tid)
+        return result
+
+    monkeypatch.setattr(client, "_roundtrip", resume_then_refuse)
+    if door == "legacy":
+        with pytest.raises(WriteRefused, match="currently streaming" if refusal == "streaming" else code):
+            await service.session_send(d.fleet, "h1", SID, "one instruction", confirm=True)
+    else:
+        principal, request, op = admission_control(d, tid, mock, "send", scoped=door == "task_operation")
+        await d.ops.drain()
+        result = d.ops.get(op["operation_id"])
+        assert result["status"] == "failed" and result["error_code"] == code
+        step = "task_dispatch" if door == "task_operation" else "send"
+        assert next(s for s in result["steps"] if s["name"] == step)["status"] == "failed"
+        replay, created = d.ops.create(principal, **request)
+        assert not created and replay["operation_id"] == op["operation_id"]
+        await d.ops.drain()
+        assert d.ops.get(op["operation_id"]) == result
+    commands = d.journal.commands(tid)
+    assert len(commands) == 1 and commands[0]["status"] == "rejected"
+    assert d.journal.get(tid) == expected
+    assert [r["channel"] for r in writes(mock)] == ["claude:client-resume"]
+
+
+@pytest.mark.parametrize("door", ["legacy", "session_operation", "task_operation", "coordinator"])
+@pytest.mark.parametrize("error", [ConnectionLost, InvokeTimeout])
+async def test_a07_resume_transport_loss_rejects_command_without_uncertain_task(owned, mock, monkeypatch, door, error):
+    """A05/A07: only resume reached BAT; the rejected send and its failed operation never replay a frame."""
+    d, tid = owned
+    mock.metas[SID] = None
+    prior = d.journal.get(tid)
+    client = d.fleet.client("h1")
+    original = client._roundtrip
+
+    async def lose_resume_reply(frame, timeout):
+        result = await original(frame, timeout)
+        if frame["channel"] == "claude:client-resume":
+            raise error("resume reply lost before send-message")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(client, "_roundtrip", lose_resume_reply)
+        if door == "legacy":
+            with pytest.raises(error):
+                await service.session_send(d.fleet, "h1", SID, "one instruction", confirm=True)
+        elif door == "coordinator":
+            with pytest.raises(StepFailed) as failed:
+                await d.coordinator._send(prior, SID, "one instruction", "lead:followup")
+            assert failed.value.code == "BAT_ERROR"
+        else:
+            principal, request, op = admission_control(d, tid, mock, "send", scoped=door == "task_operation")
+            await d.ops.drain()
+            result = d.ops.get(op["operation_id"])
+            assert result["status"] == "failed" and result["error_code"] == "BAT_ERROR"
+            step = "task_dispatch" if door == "task_operation" else "send"
+            assert next(s for s in result["steps"] if s["name"] == step)["status"] == "failed"
+            replay, created = d.ops.create(principal, **request)
+            assert not created and replay["operation_id"] == op["operation_id"]
+            await d.ops.drain()
+            assert d.ops.get(op["operation_id"]) == result
+    commands = d.journal.commands(tid)
+    assert len(commands) == 1 and commands[0]["status"] == "rejected"
+    assert d.journal.get(tid) == prior
+    assert [r["channel"] for r in writes(mock)] == ["claude:client-resume"]
+    # The failed resume must not leave a pending task command blocking later controls.
+    await service.session_interrupt(d.fleet, "h1", SID, confirm=True)
+    assert d.journal.commands(tid)[-1]["status"] == "settled"
+
+
+@pytest.mark.parametrize("operation", [False, True], ids=["legacy", "session_operation"])
+async def test_a07_send_reply_loss_after_resume_uses_original_readback(owned, mock, monkeypatch, operation):
+    d, tid = owned
+    prior = d.journal.change(tid, "running")
+    mock.metas[SID] = None
+    mock.echo_sends = True
+    # A real resume rehydrates the transcript the coordinator read before dispatch.
+    mock.states[SID]["messages"] = list(mock.archives[SID])
+    client = d.fleet.client("h1")
+    original = client._roundtrip
+
+    async def lose_send_reply(frame, timeout):
+        result = await original(frame, timeout)
+        if frame["channel"] == "claude:send-message":
+            raise ConnectionLost("send reply lost after resume")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(client, "_roundtrip", lose_send_reply)
+        if operation:
+            principal, request, op = admission_control(d, tid, mock, "send")
+            await d.ops.drain()
+            result = d.ops.get(op["operation_id"])
+            assert result["status"] == "uncertain"
+            assert next(s for s in result["steps"] if s["name"] == "send")["status"] == "uncertain"
+        else:
+            with pytest.raises(ConnectionLost):
+                await service.session_send(d.fleet, "h1", SID, "one instruction", confirm=True)
+    command = d.journal.commands(tid)[0]
+    assert command["status"] == d.journal.get(tid)["state"] == "uncertain"
+    if operation:
+        d.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+        await d.ops.drain()
+        assert d.ops.get(op["operation_id"])["status"] == "succeeded"
+        assert d.journal.command_get(command["command_id"])["status"] == "uncertain"
+    async with restarted_daemon(d) as restarted:
+        task = await restarted.coordinator.tick(tid)
+        assert task["state"] == prior["state"] and task["control_version"] == prior["control_version"]
+        assert restarted.journal.command_get(command["command_id"])["status"] == "accepted"
+        assert len(restarted.journal.commands(tid)) == 1
+        assert [r["channel"] for r in writes(mock)] == ["claude:client-resume", "claude:send-message"]
+
+
+@pytest.mark.parametrize("operation", [False, True], ids=["legacy", "session_operation"])
+@pytest.mark.parametrize("stale", ["paused", "version_changed"])
+async def test_a07_preliminary_resume_checks_task_binding_without_sending(owned, mock, monkeypatch, operation, stale):
+    d, tid = owned
+    mock.metas[SID] = None
+    client = d.fleet.client("h1")
+    original = client._invoke_checked
+    expected = {}
+    code = "TASK_PAUSED" if stale == "paused" else "CONTROL_VERSION_CONFLICT"
+
+    async def change_before_resume(channel, *args, **kwargs):
+        if channel == "claude:client-resume":
+            if stale == "paused":
+                d.journal.db.execute("UPDATE tasks SET paused=1 WHERE task_id=?", (tid,))
+            else:
+                d.journal.pause(tid)
+                d.journal.resume(tid)
+            expected.update(d.journal.get(tid))
+        return await original(channel, *args, **kwargs)
+
+    monkeypatch.setattr(client, "_invoke_checked", change_before_resume)
+    if operation:
+        _, _, op = admission_control(d, tid, mock, "send")
+        await d.ops.drain()
+        result = d.ops.get(op["operation_id"])
+        assert result["status"] == "failed" and result["error_code"] == code
+    else:
+        with pytest.raises(TaskControlRefused, match=code):
+            await service.session_send(d.fleet, "h1", SID, "one instruction", confirm=True)
+    assert d.journal.get(tid) == expected
+    commands = d.journal.commands(tid)
+    assert len(commands) == 1 and commands[0]["status"] == "rejected"
+    assert not writes(mock)

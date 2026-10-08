@@ -36,6 +36,7 @@ Part A 的可執行測試在 `tests/test_operations_unification.py`，加上既�
 | 計畫 | v1.0，2026-10-06，§09、§10、§24、§26、§28 | 合約與驗收依據；不將私人計畫複製進 repository。 |
 | BAT 協定筆記 | [PROTOCOL.md](../PROTOCOL.md)：BAT **v3.2.12**、`bat-remote/v2`；上游 `src-tauri/src/remote_server.rs`、`remote_core.rs`、`node-sidecar/src/handlers/*` | 沿用既有 channel，沒有新增任意 RPC／shell 寫入通道。 |
 | BAT 對照基準 | 計畫 §03 固定 `b7419892fbc9946799b64cca24c2ec8c7fa15c42`；另見 [next-gen-connector.md](next-gen-connector.md) 記錄的 `5a61d43` 靜態檢查，`node-sidecar/src/handlers/claude-send.mjs`、`src-tauri/src/commands/claude.rs`、`codex_app_server.rs` | 區分 Claude 的 `clientMessageId` echo 與 Codex 的弱游標證據。兩個快照不混稱同版；本次未重新驗證上游或實機部署版本。 |
+| BAT preliminary-frame 補充核對 | 本機 source snapshot `f1a94ce3cd105f0e89afd72702c074b01aae470c`；`node-sidecar/src/handlers/claude-session.mjs` 的 clientResume／resumeClaudeSession、`src-tauri/src/commands/claude.rs` 的 client_resume、`src-tauri/src/codex_app_server.rs` 的 resume_session | 只靜態確認 resume 重接 runtime／讀取 history，不提交本次新 prompt／clientMessageId。不是上述計畫基準或實機部署版本的替代；未呼叫遠端 host。 |
 | 既有設計 | [api-v1.md](api-v1.md)、[task-service.md](task-service.md)、[resource-policy.md](resource-policy.md)、[交接](../handoff/2026-10-08.md) | 沿用 OperationService、TaskCoordinator、journal、WriteGrant 與 owner lease。交接記錄的舊 head 不取代上述起點。 |
 
 ## 現有與新增行為差異
@@ -270,6 +271,12 @@ operation 沒傳 control_version 時，admission 仍固定當時的 task incarna
 
 只在 admission 查版本不夠。answer、兩個 Codex permission calls、interrupt、client-resume 都要使用 journal-bound 的內部 guard；public params 不提供 skip_gate／before_invoke／task_id 認領旗標。callback 存在本身不能作為 bypass 證據。所有 runtime writer 共享 coordinator 鎖的取得次序（task → session → host write lock → BAT semaphore），避免低階工具持有 host lock 再等 coordinator。
 
+只有 **這個 command 的 effect frame** 通過 `FrameGuard.__call__` 才記入 `frames`，表示該命令可能已送出。implicit client-resume 使用 `FrameGuard.check`，保留完整 owner／version／paused／binding／command 檢查，但不算 send command 的 frame。resume 後若 streaming／版本／binding 拒絕，或 resume 本身發生 transport loss，send command 為 rejected，task 保持控制留下的原狀；resume 的 audit 仍保留，不聲稱零 BAT mutation，只聲稱零 send-message。
+
+operation 的 step 規則不變。共用 coordinator／Task Service adapter 在自己的 guard 尚無 effect frame 時，把 transport loss 的「prompt 不可能送出」證據交給原 definitive failure 路徑：step 與 operation failed，BAT transport error 沿用 `BAT_ERROR`，policy／task／streaming 拒絕沿用原 code。legacy runtime caller 仍收到原 exception。原 Task Service adapter 的 WriteRefused／TaskDispatchCancelled 控制規則保留；其他 pre-frame failure 也不進 send reconciliation。send-message 的 guard 已跑後才遺失 reply，仍 uncertain、只讀回、不重送。
+
+補充 BAT snapshot 的 Claude clientResume 對既有 session 只重播 history，缺少 session 時沿用 resumeClaudeSession；重建後由下一個 sendMessage 才推入 prompt。Codex resume_session 使用 thread/resume，沒有本次新 prompt 的 turn/start。resume 可遇到既存活躍／queued work；該工作來自以前的 send，不是本 command 的新 message_id／prompt_sha256，不能把它當成本次 send 已發生的證據。故未找到 resume 把本次尚未傳入的 prompt 轉為 send 的例外。
+
 task.pause 是明確控制例外：先提交 pause、增版本，令未送 command 取消；abort step 只操作被綁定的 current session，即使 task 原先 verifying／pending 也能走 coordinator 停止目前回合。記下該 pause 的版本，若等待鎖期間 task 已 resume／換 session，拒絕遲到 interrupt。task.resume 只清 paused，不證明 writer 已停止；pending 命令仍先 reconcile。
 
 pause／resume 也遵守 admission version：已受理的 resume 不能清掉後來的新 pause；已受理的 pause 不能暫停後來 resume 的 incarnation。兩者在自己的 local effect 前以 CONTROL_VERSION_CONFLICT 拒絕，task 不變。pause 不等待其他 task lock 的既有語意保留；「先提交的 pause 阻止舊 send」不表示排隊中的 stale pause 可永遠覆寫新控制。取得有效 incarnation、通過 gate 並開始 `_send` 後才輸給 pause 的既有 send race，仍沿用下面的 TASK_PAUSED 規則。
@@ -293,7 +300,18 @@ task-owned legacy answer 省略 `tool_use_id` 時，`session_control` 在 task �
 | answer（ask-user／permission；含 approve-pending） | task/session/version＋固定 tool_use_id；省略 ID 時在 command 前解析並標 service source | 讀回原 ID 已清除才 settled；修掉 legacy ID 遺漏。permission answer 與修改 permission mode 是兩種 command。 |
 | interrupt（soft／hard） | command.session_id、payload.mode 與 control_version；default mode 已由 wrapper 固定 | 同 session 的 meta 明確 isStreaming=false 才 settled；已有所需身分，無省略後才選 target 的問題。 |
 | permissions／mode changes（含 deferred raise） | command.session_id＋payload.mode／control_version；Claude mode、Codex sandbox／approval 由既有 mode mapping 決定 | payload 已有固定 mode；Part A 的 `_reconcile_command` 沒有正面 mode 證明，尤其 Codex 兩個 frame 可部分完成，保持 uncertain。不能拿清除 permission prompt 的證據結清 mode change；本次不新增權限回查規則。 |
-| relay／continue／client-resume | 交原 send command，固定 session、message_id、before cursor／agent kind、最終 prompt_sha256 | 原 exact echo／回合歸因讀回；payload 已有原送字身分，未知結果不再生成 message ID 或重送 relay。client-resume 仍經原 FrameGuard。 |
+| relay／continue／client-resume | 交原 send command，固定 session、message_id、before cursor／agent kind、最終 prompt_sha256 | 原 exact echo／回合歸因讀回；payload 已有原送字身分，未知結果不再生成 message ID 或重送 relay。client-resume 只用原 FrameGuard.check；send-message 才記 command effect frame。 |
+
+所有接收 `_task_guard` 的 runtime 路徑已逐一盤點；read-only lookup／meta／state 不算 frame，也沒有另一個 preliminary writer：
+
+| 路徑 | command effect frame（`__call__`） | preliminary frame／hook |
+|---|---|---|
+| service.session_send；continue、relay target | `claude:send-message` | unloaded 時 `claude:client-resume` 用 `check`；target lookup、history／meta 為只讀。 |
+| Task Service adapter.send（lead／reviewer／Goose） | 交同一 service 的 `claude:send-message` | 同一 client-resume／check；adapter 的 pre-invoke fence 仍保留，未跑 effect guard 的 transport error 為 definitive failure。 |
+| service.session_answer；approve-pending | `claude:resolve-ask-user` 或 `claude:resolve-permission` | 無 preliminary write；只讀 pending state，固定 prompt ID。 |
+| service.session_interrupt；Task Service pause abort | soft Claude 為 `claude:interrupt-turn`；hard／Codex 為 `claude:abort-session` | 無 preliminary write；pause abort 綁定原 pause version。 |
+| lifecycle.session_set_permissions；deferred raise／approve-pending mode change | Claude：`claude:set-permission-mode`；Codex：`claude:set-codex-sandbox-mode` 與 `claude:set-codex-approval-policy` | 無 preliminary write。Codex 兩個都是 mode command 的 effect，第一個之後失敗仍可能部分完成，保持 uncertain。 |
+| lifecycle.session_record_verification；受信 Task Service verifier | 無 BAT frame；既有本機 verification evidence effect | `check` 在 runner／evidence 前重查；不以 runtime frame 計數代替原 effect receipt。 |
 
 ## Task operations 與 A05
 
@@ -329,6 +347,7 @@ work_submit 原已要求 key，保留其最大 256 字相容長度；一般 oper
 | permissions | Claude mode；Codex sandbox 與 approval 各一步 | 讀同 session meta 的實際 mode；證據不足時維持 uncertain。deferred raise 保存固定目標／版本；task gate 改變時拒絕，不盲目掃全 registry。 |
 | interrupt／pause abort | interrupt／abort 各一步；固定 task/session/version | 證明相同 session 不 streaming；查不到或 binding 不符不能算完成。已 pause 的意圖保留，不因 abort 不明而退回未 paused。 |
 | task-owned session.send／answer／interrupt | operation_id 連原 task command；保留原 payload／control_version | operation 讀回先結清自己的 step；下次 coordinator.tick 在 task lock 下以原 `_reconcile_command` 的證據結清 command（send 為 accepted，其餘為 settled），將 lead task 恢復 running。operation 的證據不代替 task 回執；command 未解仍擋控制，回查不明維持 uncertain、不重送。 |
+| task-owned send 的 preliminary resume | 原 command intent；resume 使用完整 guard.check，send-message 才記 effect frame | resume reply 遺失或 resume 後的 pre-frame 拒絕：command rejected、task 不變；operation failed 並重讀原 BAT_ERROR／拒絕碼。send reply 遺失即 uncertain，沿用原 operation readback＋coordinator tick；resume 本身不作為 prompt echo 證據。Part B 的獨立 resume step 拆分仍未交付。 |
 | task-owned legacy answer 省略 prompt ID | command 前只讀並固定 tool_use_id；payload.tool_use_id_source=service | 回覆遺失後 tick 可依原 prompt 清除規則 settled；prompt 在 resolution 後更換則 service mismatch、rejected／零 frame。無對應 prompt 時零 command。 |
 | task-scoped session.send 的 terminal command | `task_send_command` 回執、原 command status／payload、`task_dispatch` failure | command status 已提交，但 result／refusal 未提交即 crash：cancelled／rejected 沿用下表的本機結果，不進 uncertain、不建立新 command／BAT frame；舊 coordinator send 與 tick 共用這項處理。 |
 | start／relay 新建／fanout 項目 | reserve IDs、worktree.create、start-session、選配 tab append、第一個 prompt | 核對預留 ID、creation evidence、cwd、branch。已存在只補回執；不能重新 random ID、刪已可能成功的 worktree，或回退人工 cwd。tab 整份 workspace save 的既有 race 不在此聲稱修好。 |
@@ -441,6 +460,8 @@ Phase 2 擴充原 owner 機制，沒有第二份 owner database／另一套 leas
 | A05；§09（Part A receipt replay 與控制） | `test_a05_locked_task_action_replays_receipt_after_state_change`、`test_a05_task_controls_do_not_wait_for_task_lock_or_change_terminal_task`、`test_a05_reconcile_refuses_command_settled_while_waiting_for_task_lock`、`test_a05_verify_request_ted_and_stage_use_original_receipts` | succeeded receipt 優先於新 state／version；未競態要求仍成功。pause／resume 本機 effect 不等 task lock、保留 terminal task；原 command 在等鎖時已被 tick 接受，reconcile 不消耗 capability／不寫對帳回執。 |
 | A07；§09／§10（Part A legacy answer 身分） | `test_a07_legacy_answer_resolves_prompt_before_frame_and_reconciles_after_restart`、`test_a07_legacy_answer_prompt_change_rejects_command_before_frame`、`test_a07_legacy_answer_without_resolvable_prompt_creates_no_command`、`test_a07_answer_resolution_rechecks_task_gate_before_command` | ask-user／permission 都在 frame 前提交 ID；BAT 接受後遺失 reply，restart 先讀取失敗仍 uncertain，再讀回已清除才 settled／running，零第二 frame；下一個 control 可受理。prompt 更換為原 mismatch，command rejected、task 不變。只有另一類 prompt、缺 ID、unreadable／unloaded 時零 command；resolution await 時 pause，零 command／frame。 |
 | A07；§10（runtime control 盤點與相容） | `test_a07_explicit_answer_prompt_keeps_existing_behavior`、`test_a07_legacy_mcp_answer_without_prompt_id_uses_owner_resolution`、`test_a07_permission_mode_identity_survives_lost_reply_without_replay`、`test_a07_relay_runtime_command_has_original_send_readback_identity`、`test_a07_operation_readback_and_coordinator_tick_settle_task_command` | 明確 ID 的 match／mismatch 不變；legacy MCP 經原 owner 解析。permissions mode payload 完整，lost reply 保持未知、零第二設定 frame；relay 原 hash／message ID 可讀回，interrupt 沿用 idle 證明。caller contract／hash 不變。 |
+| A05／A07；§09／§10（command frame 與 preliminary resume） | `test_a07_refusal_after_resume_rejects_only_the_unsent_command`、`test_a07_resume_transport_loss_rejects_command_without_uncertain_task` | legacy、session operation、task-scoped operation：resume 成功後 streaming／版本拒絕，或 resume 接受但 transport reply 遺失，零 send-message、只有一個 rejected command、task snapshot 不變。operation step failed／原 code，相同 key 重讀拒絕；後續控制可受理。Task Service 自己的 adapter send 也不以 resume loss 製造 uncertain。 |
+| A07；§09／§10（resume guard 與 send readback） | `test_a07_preliminary_resume_checks_task_binding_without_sending`、`test_a07_send_reply_loss_after_resume_uses_original_readback`、`test_a07_client_resume_and_each_permission_channel_are_gated` | paused／版本在 resume frame 前改變，完整 guard 拒絕，零 resume／send frame。resume 後 send-message 接受、reply 遺失，command／operation uncertain；原 operation readback 與 restart tick 結清，只有一個 send-message／command，沒有第二 settlement 規則。 |
 
 故障注入只用 `tests/mockbat.py`、`tests/fakegithub.py`、[test_checkpoints.py](../../tests/test_checkpoints.py) 的 LocalRunner／RealGitLog 與 temp Git repos。驗證 policy 時比較所有寫 channel 與目的端，不能只數 send-message。停用中的 `pytest.mark.skip` task 測試不算 A07／A08 證據；舊 engine／mid-task failover 的 skip 不因本包自動啟用。
 

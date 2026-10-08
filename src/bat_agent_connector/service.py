@@ -980,7 +980,9 @@ async def session_send(
                 phase="attempt",
             )
             try:
-                await c.invoke("claude:client-resume", params, grant=grant, before_send=_task_guard)
+                # Reattach checks the same task binding but does not submit this command's prompt.
+                await c.invoke("claude:client-resume", params, grant=grant,
+                               before_send=_task_guard.check if _task_guard else None)
             except BatError as e:
                 audit.record(
                     actor=fleet.actor,
