@@ -28,7 +28,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import confinement, registry, resource_policy
+from . import confinement, registry, resource_policy, task_control
 from .errors import BatError, WriteRefused
 from .fleet import Fleet
 from .resource_policy import WriteGrant
@@ -534,6 +534,7 @@ async def worktree_merge(fleet: Fleet, host: str, session_id: str, confirm: bool
         t, ws = await _resolve_session(c, session_id)
         sid = t["id"]
         grant = await resource_policy.authorize_session(fleet, host, "worktree.merge", t)
+        task_control.refuse_owned(fleet, host, sid)
         origin = resource_policy.merge_origin(fleet.config.host(host), sid, t, ws)
         resource_policy.check_merge_destination(fleet.config.host(host), origin)
         audit.check_rate(host, sid + "#merge")
@@ -624,6 +625,7 @@ async def worktree_remove(
         t, _ = await _resolve_session(c, session_id)
         sid = t["id"]
         grant = await resource_policy.authorize_session(fleet, host, "worktree.remove", t)
+        task_control.refuse_owned(fleet, host, sid)
         audit.check_rate(host, sid + "#remove")
         st, rehydrated = await _wt_status(c, t, rehydrate=grant)
         if not st:

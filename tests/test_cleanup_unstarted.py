@@ -11,6 +11,7 @@ import pytest
 
 from bat_agent_connector import api_auth, cleanup, registry
 from bat_agent_connector.operations import OpContext, OperationError
+from tests.operation_helpers import settle_operations
 from tests.test_api_v1 import http
 from tests.test_cleanup_uncertainty import (  # noqa: F401 - shared real Git/MockBat fixtures
     CLEANER,
@@ -58,7 +59,7 @@ async def apply_after_refusal(d, target, refused_id):
     doc = await cleanup.preview(d.ops, CLEANER, target)
     assert doc["ready"]
     op, _ = d.ops.create(CLEANER, **cleanup.apply_request(doc, "after-refusal-" + refused_id))
-    await d.ops.drain(timeout=60)
+    await settle_operations(d.ops, timeout=60)
     return d.ops.get(op["operation_id"])
 
 
@@ -94,7 +95,7 @@ async def test_e01_resumed_unstarted_refusal_releases_all_reservations(daemon, m
             daemon.journal.db.execute("UPDATE operations SET params=? WHERE operation_id=?", (json.dumps(params), op_id))
         else:
             daemon.journal.db.execute("UPDATE cleanup_runs SET document='{' WHERE operation_id=?", (op_id,))
-        await daemon.ops.drain(timeout=60)
+        await settle_operations(daemon.ops, timeout=60)
     done = daemon.ops.get(op_id)
     assert done["status"] == "failed" and done["error_code"] == code, done
     assert reservations(op_id) == ([], [])
@@ -119,7 +120,7 @@ async def test_e01_resumed_expired_run_with_steps_keeps_reservations_and_finishe
         patch.setattr(cleanup, "time", SimpleNamespace(time=lambda: doc["expires_at"] + 1,
                                                       monotonic=time.monotonic))
         patch.setattr(cleanup, "_release_unstarted", no_release)
-        await daemon.ops.drain(timeout=60)
+        await settle_operations(daemon.ops, timeout=60)
     done = daemon.ops.get(crashed["operation_id"])
     assert done["status"] == "succeeded", done
     assert reservations(done["operation_id"]) == ([], [])
@@ -142,7 +143,7 @@ async def test_e01_expiry_after_read_only_failure_settles_unstarted_uncertainty(
     with monkeypatch.context() as patch:
         patch.setattr(cleanup, "time", SimpleNamespace(time=lambda: doc["expires_at"] + 1,
                                                       monotonic=time.monotonic))
-        await daemon.ops.drain(timeout=60)
+        await settle_operations(daemon.ops, timeout=60)
     failed = daemon.ops.get(done["operation_id"])
     assert failed["status"] == "failed" and failed["error_code"] == "PREVIEW_EXPIRED", failed
     assert reservations(done["operation_id"]) == ([], [])
@@ -159,7 +160,7 @@ async def test_e01_resumed_mismatch_with_steps_never_releases_guard(daemon, mock
     params = {**crashed["params"], "preview_token": crashed["params"]["preview_token"] + ".changed"}
     daemon.journal.db.execute("UPDATE operations SET params=? WHERE operation_id=?",
                               (json.dumps(params), crashed["operation_id"]))
-    await daemon.ops.drain(timeout=60)
+    await settle_operations(daemon.ops, timeout=60)
     done = daemon.ops.get(crashed["operation_id"])
     assert done["status"] == "failed" and done["error_code"] == "PREVIEW_MISMATCH"
     assert reservations(done["operation_id"]) == before
@@ -177,7 +178,7 @@ async def test_e01_dependency_refusal_keeps_unresolved_call_reserved(daemon, moc
         assert current["kind"] == "session"
 
     monkeypatch.setattr(cleanup, "_execute_item", unsettled_prerequisite)
-    await daemon.ops.drain(timeout=60)
+    await settle_operations(daemon.ops, timeout=60)
     done = daemon.ops.get(crashed["operation_id"])
     assert done["status"] == "needs_attention" and done["error_code"] == "UNCERTAIN_UNRESOLVED", done
     assert any(g["path"] == item["path"] for g in reservations(done["operation_id"])[0])

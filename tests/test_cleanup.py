@@ -11,6 +11,7 @@ import pytest
 
 from bat_agent_connector import api_auth, cleanup, lifecycle, orchestrate, registry, service
 from bat_agent_connector.operations import OperationError
+from tests.operation_helpers import settle_operations
 from tests.test_checkpoints import (  # noqa: F401 - pytest fixtures shared with real Git checkpoint tests
     LocalRunner,
     git,
@@ -51,7 +52,7 @@ async def setup_work(d, mock, **checkpoint_params):
 
 async def apply(d, doc, principal=CLEANER):
     op, _ = d.ops.create(principal, **copy.deepcopy(cleanup.apply_request(doc, "apply-" + doc["preview_id"])))
-    await d.ops.drain(timeout=60)
+    await settle_operations(d.ops, timeout=60)
     return d.ops.get(op["operation_id"])
 
 
@@ -124,7 +125,7 @@ async def test_e01_accepted_authorization_is_server_recorded(daemon, mock):
         assert status == 200 and not body["created"], body
         assert body["operation"]["operation_id"] == accepted["operation_id"]
         assert daemon.journal.db.execute("SELECT count(*) FROM operations WHERE action='cleanup.apply'").fetchone()[0] == 1
-        await daemon.ops.drain(timeout=60)
+        await settle_operations(daemon.ops, timeout=60)
         finished = daemon.ops.get(accepted["operation_id"])
         assert finished["status"] == "succeeded", (finished.get("error"), [(r["plan"]["kind"], r["status"], r["error"])
                                                     for r in cleanup.receipts(daemon.ops, accepted["operation_id"])])
@@ -574,7 +575,7 @@ async def test_e01_lost_replies_reconcile_each_cleanup_phase(daemon, mock, monke
     daemon.ops = OperationService(daemon.journal, actions=cleanup.ACTIONS)
     daemon.ops.context.update(context)
     daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (done["operation_id"],))
-    await daemon.ops.drain(timeout=60)
+    await settle_operations(daemon.ops, timeout=60)
     finished = daemon.ops.get(done["operation_id"])
     assert finished["status"] == "succeeded", finished
     assert any(json.loads(r[0] or "{}").get("reconciled") for r in daemon.journal.db.execute(
@@ -595,7 +596,7 @@ async def test_e01_lost_stop_reply_remains_uncertain_without_resending(daemon, m
     done = await apply(daemon, doc)
     assert done["status"] == "uncertain" and calls == [{"cleanup": True}]
     daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (done["operation_id"],))
-    await daemon.ops.drain(timeout=30)
+    await settle_operations(daemon.ops, timeout=30)
     assert len(calls) == 1
     assert Path(op["result"]["worktree_path"]).exists()
     assert daemon.ops.get(done["operation_id"])["status"] == "uncertain"
@@ -676,7 +677,7 @@ async def test_e01_partial_cleanup_resumes_only_unfinished_unchanged_items(daemo
     # The accepted person's discard choice remains authorized; the resumer has only cleanup.
     daemon.ops.context["cleanup_key"] = b"rotated-after-acceptance"
     daemon.ops.resume(CLEANER, done["operation_id"])
-    await daemon.ops.drain(timeout=60)
+    await settle_operations(daemon.ops, timeout=60)
     finished = daemon.ops.get(done["operation_id"])
     assert finished["status"] == "succeeded", finished
     assert len([i for i in mock.invokes if i["channel"] == "claude:stop-session"]) == count
@@ -826,7 +827,7 @@ async def test_e01_tree_preview_apply_matches_and_read_only_resources_survive(da
     person = api_auth.Principal("planner", frozenset({"manage"}))
     async def manage(action, target, params, key):
         op, _ = daemon.ops.create(person, action=action, target=target, params=params, idempotency_key=key)
-        await daemon.ops.drain(timeout=30)
+        await settle_operations(daemon.ops, timeout=30)
         done = daemon.ops.get(op["operation_id"])
         assert done["status"] == "succeeded", done
         return done["result"]
@@ -891,7 +892,7 @@ async def test_e01_cleanup_adapters_share_the_action_contract(daemon, mock, monk
         file.write_text(json.dumps(body))
         args = cli.build_parser().parse_args(["resource-cleanup", "apply", "--preview-file", str(file), "--key", "same-plan", "--confirm"])
         assert await asyncio.to_thread(cli.cmd_resource_cleanup, args) == 0
-        await daemon.ops.drain(timeout=60)
+        await settle_operations(daemon.ops, timeout=60)
         tool_server, fleet = mcp_server.build_server(daemon.fleet.config)
         tools = {t.name: t for t in await tool_server.list_tools()}
         assert {"cleanup_preview", "cleanup_apply", "cleanup_retained", "cleanup_tombstones"} <= tools.keys()
@@ -929,7 +930,7 @@ async def test_e01_accepted_authority_survives_key_rotation_and_carrier_stays_us
     doc = await cleanup.preview(daemon.ops, CLEANER, {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]})
     accepted, _ = daemon.ops.create(CLEANER, **cleanup.apply_request(doc, "accepted"))
     cleanup.install(daemon.ops, "rotated-local-key")
-    await daemon.ops.drain(timeout=60)
+    await settle_operations(daemon.ops, timeout=60)
     done = daemon.ops.get(accepted["operation_id"])
     assert done["status"] == "succeeded", done
     from bat_agent_connector import resource_policy
@@ -1055,7 +1056,7 @@ async def test_e01_cancel_reconciles_sent_steps_and_releases_only_confirmed_rese
     if lost_reply:
         assert done["status"] == "uncertain", done
         daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (done["operation_id"],))
-        await daemon.ops.drain(timeout=60)
+        await settle_operations(daemon.ops, timeout=60)
         done = daemon.ops.get(done["operation_id"])
     assert done["status"] == "cancelled", done
     wt = next(i for i in doc["items"] if i["kind"] == "worktree" and i.get("proven"))

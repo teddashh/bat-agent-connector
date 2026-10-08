@@ -10,6 +10,7 @@ import pytest
 from bat_agent_connector import cleanup, lifecycle, registry
 from bat_agent_connector.errors import ResourceReadOnly
 from bat_agent_connector.operations import OpContext
+from tests.operation_helpers import settle_operations
 from tests.test_cleanup import setup_work
 from tests.test_cleanup_capacity import (  # noqa: F401 - real Git/MockBat fixtures
     CLEANER,
@@ -212,7 +213,7 @@ async def test_e01_capacity_retirement_replays_once_after_finalize_crash(daemon,
             await cleanup._run(OpContext(daemon.ops, op))
     receipt = next(r for r in cleanup.receipts(daemon.ops, op["operation_id"]) if r["resource_id"] == wt["resource_id"])
     assert receipt["status"] == "succeeded" and cleanup.lookup(daemon.journal.db, wt["resource_id"])
-    await daemon.ops.drain(timeout=60)
+    await settle_operations(daemon.ops, timeout=60)
     done = daemon.ops.get(op["operation_id"])
     succeeded_worktree(daemon, done, wt)
     assert len(writes) == 1 and writes[0]["status"] == "absent_at_cleanup"

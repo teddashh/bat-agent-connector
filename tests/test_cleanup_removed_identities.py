@@ -8,6 +8,7 @@ import pytest
 
 from bat_agent_connector import api_auth, cleanup
 from bat_agent_connector.operations import OperationError
+from tests.operation_helpers import settle_operations
 from tests.test_cleanup import repair_facts, setup_work
 from tests.test_cleanup_standalone import (  # noqa: F401 - shared real Git/MockBat fixtures
     CLEANER,
@@ -30,7 +31,7 @@ async def work_item(d, links):
 
     async def manage(action, target, params, key):
         op, _ = d.ops.create(person, action=action, target=target, params=params, idempotency_key=key)
-        await d.ops.drain(timeout=30)
+        await settle_operations(d.ops, timeout=30)
         result = d.ops.get(op["operation_id"])
         assert result["status"] == "succeeded", result
         return result["result"]
