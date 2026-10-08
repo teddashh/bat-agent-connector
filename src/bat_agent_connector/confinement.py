@@ -69,6 +69,13 @@ def guard_start_record(entry: dict) -> None:
         raise ConfinementRefused(entry["error_code"], "reserved start already recorded a different session folder")
 
 
+def guard_new_start(entry: dict) -> None:
+    guard_start_record(entry)
+    if entry.get("start_sent") is True and entry.get("status") in {"active", "starting", "uncertain"}:
+        raise ConfinementRefused("CONFINEMENT_START_UNSETTLED",
+                                 "reserved start already reached transport; use read-back recovery")
+
+
 def guard_start_cwd(entry: dict, meta: dict | None, *, code: str = "START_SESSION_MISMATCH") -> None:
     from .resource_policy import norm
 

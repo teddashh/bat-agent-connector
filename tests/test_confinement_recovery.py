@@ -691,6 +691,9 @@ async def test_start_postframe_cancellation_keeps_uncertain_and_does_not_resend(
             assert await adapter.recover_start(task, role='reviewer', session_id=sid)
         elif path == 'failover':
             assert (await start())['new_session_id'] == sid
+        else:
+            with pytest.raises(confinement.ConfinementRefused, match='CONFINEMENT_START_UNSETTLED'):
+                await start()
         assert mock.channels().count('claude:start-session') == 1
     finally:
         if not pending.done():
@@ -853,5 +856,42 @@ async def test_task_preparation_cancellation_recovers_from_unsent_command_before
             pending.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await pending
+        await fleet.close()
+        journal.close()
+
+
+async def test_task_lead_lost_ack_keeps_sent_evidence_until_readback_recovery(fleet_factory, mock, tmp_path, monkeypatch):
+    """A10: an ordinary retry cannot replace a possibly-sent lead reservation with false unsent evidence."""
+    fleet = fleet_factory(writes=True, orchestrate=True, **MANAGED)
+    journal = Journal(tmp_path / 'sent-retry.db')
+    task = journal.submit(project='p', host='h1', workspace='demo-project', original_words='Continue fixture',
+                          idempotency_key='lead-lost-ack')
+    adapter = task_bat.BatTaskAdapter(fleet, journal=journal)
+    sid = 'lead-lost-ack'
+    command, _ = journal.command(task['task_id'], 'start_lead', sid,
+                                  {'agent': 'codex', 'role': 'lead', 'start_sent': False}, 'lead-lost-ack')
+    invoke = fleet.client('h1').invoke
+
+    async def lose_ack(channel, params=None, **kwargs):
+        result = await invoke(channel, params, **kwargs)
+        if channel == 'claude:start-session':
+            raise InvokeTimeout('fixture lead acknowledgement lost after transport')
+        return result
+
+    monkeypatch.setattr(fleet.client('h1'), 'invoke', lose_ack)
+    try:
+        with pytest.raises(confinement.ConfinementRefused, match='CONFINEMENT_START_UNSETTLED'):
+            await adapter.start(task, role='lead', agent='codex', session_id=sid)
+        row = registry.get('h1', sid)
+        assert row['start_sent'] is True and row['status'] == 'uncertain'
+        assert json.loads(journal.command_get(command['command_id'])['payload'])['start_sent'] is True
+        assert len(registry.list_entries('h1')) == 1
+        assert mock.channels().count('claude:start-session') == 1
+        assert 'worktree:remove' not in mock.channels() and 'claude:send-message' not in mock.channels()
+        monkeypatch.setattr(fleet.client('h1'), 'invoke', invoke)
+        assert await adapter.recover_start(task, role='lead', session_id=sid)
+        assert registry.get('h1', sid)['status'] == 'active'
+        assert mock.channels().count('claude:start-session') == 1
+    finally:
         await fleet.close()
         journal.close()
