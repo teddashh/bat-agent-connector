@@ -280,6 +280,12 @@ async fn call(
     request: &Value,
     deadline: Duration,
 ) -> Result<Value, String> {
+    let command = adapter_command(executable, script)?;
+    let bytes = run_command(command, request, deadline).await?;
+    parse_response(&bytes, request)
+}
+
+fn adapter_command(executable: &Path, script: &Path) -> Result<Command, String> {
     let mut command = Command::new(executable);
     command
         .args([
@@ -329,8 +335,7 @@ async fn call(
     }
     #[cfg(windows)]
     command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW; monitor bootstrap owns its own lifecycle.
-    let bytes = run_command(command, request, deadline).await?;
-    parse_response(&bytes, request)
+    Ok(command)
 }
 
 async fn run_command(
@@ -855,14 +860,63 @@ mod tests {
         .unwrap();
         let bridge = FleetBridge::load(&temp.0);
         // Synthetic process fixture has no inventory, credentials or mutation implementation.
-        let result = bridge
-            .request(FleetRequest::Contract {})
-            .await
-            .unwrap_or_else(|error| {
+        let result = bridge.request(FleetRequest::Contract {}).await;
+        if result.is_err() {
+            // Synthetic diagnostics only: distinguish pipe, console and environment startup.
+            // No inventory, credentials or controls are implemented by this script.
+            let executable = powershell().unwrap();
+            let script = bridge.script.as_ref().unwrap();
+            for probe in ["null-input", "console", "windows-environment"] {
+                let _ = std::fs::remove_file(root.join("client/phase.txt"));
+                let mut command = adapter_command(&executable, script).unwrap();
+                let outcome = if probe == "null-input" {
+                    command
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .kill_on_drop(true);
+                    let mut child = command.spawn().unwrap();
+                    format!(
+                        "{:?}",
+                        tokio::time::timeout(Duration::from_secs(5), child.wait()).await
+                    )
+                } else {
+                    if probe == "console" {
+                        command.creation_flags(0);
+                    } else {
+                        for name in [
+                            "PSModulePath",
+                            "ComSpec",
+                            "OS",
+                            "PATHEXT",
+                            "PROCESSOR_ARCHITECTURE",
+                            "NUMBER_OF_PROCESSORS",
+                            "ProgramW6432",
+                            "CommonProgramW6432",
+                            "ALLUSERSPROFILE",
+                        ] {
+                            if let Some(value) = std::env::var_os(name) {
+                                command.env(name, value);
+                            }
+                        }
+                    }
+                    format!(
+                        "{:?}",
+                        run_command(
+                            command,
+                            &request("contract", "fixture-diagnostic"),
+                            Duration::from_secs(5)
+                        )
+                        .await
+                        .map(|_| ())
+                    )
+                };
                 let phase = std::fs::read_to_string(root.join("client/phase.txt"))
                     .unwrap_or_else(|_| "not-started".into());
-                panic!("{error}; synthetic PowerShell fixture phase: {phase}")
-            });
+                eprintln!("synthetic startup probe {probe}: {outcome}; phase: {phase}");
+            }
+        }
+        let result = result.unwrap();
         assert_eq!(result["implementation_version"], "desktop-facade-v1");
     }
     #[cfg(unix)]
