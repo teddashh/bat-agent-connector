@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
+  connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
+  those sessions. BAT has no record of them: `batc remove-worktree` on a checkpoint session re-registered the
+  worktree under the session's workspace folder (a person's checkout in real use, copying its env files in) and
+  removed it from there, pruning that repository. New sessions record `worktree_made_by: "connector"`; older rows
+  are recognised by their `batc/` branch.
 - Checkpoints no longer call BAT's `git:status` on the person's checkout: BAT runs a plain `git status`, which can
   rewrite `.git/index`, and answers `[]` on failure. Uncommitted changes are counted over SSH with
   `git --no-optional-locks status`, or reported as not observed (`dirty: null`); `dirty` is a count, not a bool.
