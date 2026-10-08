@@ -26,6 +26,7 @@ OPTION_KEYS = ("permissionMode", "codexSandboxMode", "codexApprovalPolicy")
 START_IDENTITY_MISMATCH_CODES = {"START_SESSION_MISMATCH", "FAILOVER_SUCCESSOR_MISMATCH"}
 CLOSURE_VERSIONS = tuple(f"3.{minor}" for minor in range(6, 15))
 CLOSURE_TREE_PREFIXES = ("/usr/lib/python", "/usr/lib64/python")
+CLOSURE_NATIVE_PREFIXES = ("/usr/lib", "/usr/lib64", "/usr/local/lib", "/lib", "/lib64")
 ACCOUNT_CHECK_MAX_ENTRIES = 50000
 ACCOUNT_CHECK_TOOLS = ('/usr/bin/find', '/usr/bin/head', '/usr/bin/readlink', '/usr/bin/dirname',
                        '/usr/bin/printf', '/usr/bin/tr', '/usr/bin/env', '/usr/bin/timeout', '/bin/sh',
@@ -255,7 +256,7 @@ def account_status(fleet, host: str) -> dict:
     config = fleet.config.host(host).confinement
     result = getattr(fleet, "_confinement_checks", {}).get(host)
     # Same-account login checks cannot establish an authentic verdict.
-    signature = hashlib.sha256(json.dumps(["trusted-account-closure-v3", config], sort_keys=True).encode()).hexdigest()
+    signature = hashlib.sha256(json.dumps(["trusted-account-closure-v4", config], sort_keys=True).encode()).hexdigest()
     if config.get("host_account") and not config.get("check_ssh_alias"):
         return {"declared": True, "status": "unknown", "reason": "check_channel_untrusted",
                 "protected_roots": list(config.get("protected_roots") or []), "checked_at": None,
@@ -469,15 +470,18 @@ target() {
         next=$(/usr/bin/readlink -- "$path") || return 1
         case "$next" in /*) path=$next ;; *) path="$(/usr/bin/dirname -- "$path")/$next" ;; esac
     done
-    if [ -d "$path" ]; then tree "$path"; else [ -f "$path" ]; fi
+    if [ -d "$path" ]; then
+        [ -x "$path" ] && { [ "${2-}" = metadata ] || tree "$path"; }
+    else
+        [ -f "$path" ]
+    fi
 }
-tree() {
-    local records record complete
-    # The terminal marker proves find completed. head bounds captured records;
-    # find errors, truncation, special files and newline names never count as proof.
-    records=$({ /usr/bin/find -P "$1" \( ! -uid 0 -o \( ! -type l -a -perm /022 \) -o ! -readable -o -name "*$newline*" -o \( ! -type f -a ! -type d -a ! -type l \) \) -printf 'X\n' -quit -o -type l -printf 'L%p\n' -o -printf 'E\n' 2>&1
-                [ $? -eq 0 ] && /usr/bin/printf 'DONE\n' || /usr/bin/printf 'X\n'
-              } | /usr/bin/head -n "$((remaining + 2))") || return 1
+absent() {
+    parents "$1" || return 1
+    [ ! -e "$1" ] && [ ! -L "$1" ]
+}
+complete_records() {
+    local record complete
     complete=false
     while IFS= read -r record; do
         [ "$complete" = false ] || return 1
@@ -488,20 +492,52 @@ tree() {
             *) return 1 ;;
         esac
     done <<EOF
-$records
+$1
 EOF
     [ "$complete" = true ]
 }
+tree() {
+    local records
+    # The terminal marker proves find completed. head bounds captured records;
+    # find errors, truncation, special files and newline names never count as proof.
+    records=$({ /usr/bin/find -P "$1" \( ! -uid 0 -o \( ! -type l -a -perm /022 \) -o ! -readable -o -name "*$newline*" -o \( ! -type f -a ! -type d -a ! -type l \) \) -printf 'X\n' -quit -o -type l -printf 'L%p\n' -o -printf 'E\n' 2>&1
+                [ $? -eq 0 ] && /usr/bin/printf 'DONE\n' || /usr/bin/printf 'X\n'
+              } | /usr/bin/head -n "$((remaining + 2))") || return 1
+    complete_records "$records"
+}
 prove_closure() {
-    local interpreter version config roots prefix root zip
+    local interpreter version config roots prefix root zip library resolved hidden
     interpreter=$(/usr/bin/readlink -e /usr/bin/python3) || return 1
     case "$interpreter" in @INTERPRETERS@) ;; *) return 1 ;; esac
     version=${interpreter#/usr/bin/python}
     target /usr/bin/python3 && target "$interpreter" || return 1
-    # A venv can redirect the import closure; it is outside the supported layout.
-    for config in /usr/bin/pyvenv.cfg /usr/pyvenv.cfg; do
-        parents "$config" || return 1
-        [ ! -e "$config" ] && [ ! -L "$config" ] || return 1
+    # _pth overrides -I/-S; build markers and venvs also redirect path discovery.
+    # None is part of the supported system-package layout, even if root-owned.
+    for config in /usr/bin/pyvenv.cfg /usr/pyvenv.cfg /usr/bin/python3._pth \
+                  "$interpreter._pth" /usr/bin/pybuilddir.txt /usr/bin/Modules/Setup.local; do
+        absent "$config" || return 1
+    done
+    # Shared libpython can have its own _pth, with precedence over the executable.
+    # Inspect the standard loader directories and immediate multiarch children;
+    # prove library symlink chains and also reject overrides at their real targets.
+    for prefix in @NATIVE_PREFIXES@; do
+        parents "$prefix" || return 1
+        if [ ! -e "$prefix" ] && [ ! -L "$prefix" ]; then continue; fi
+        [ -d "$prefix" ] && target "$prefix" metadata || return 1
+        prefix=$(/usr/bin/readlink -e "$prefix") || return 1
+        # Shell globs silently omit inaccessible multiarch children. Such an
+        # incomplete search cannot establish that library overrides are absent.
+        hidden=$({ /usr/bin/find -L "$prefix" -mindepth 1 -maxdepth 1 -type d \( ! -readable -o ! -executable \) -printf 'X\n' -quit -o -printf 'E\n' 2>&1
+                   [ $? -eq 0 ] && /usr/bin/printf 'DONE\n' || /usr/bin/printf 'X\n'
+                 } | /usr/bin/head -n "$((remaining + 2))") || return 1
+        complete_records "$hidden" || return 1
+        for library in "$prefix"/libpython"$version"*.so* "$prefix"/*/libpython"$version"*.so*; do
+            if [ ! -e "$library" ] && [ ! -L "$library" ]; then continue; fi
+            case "$library" in *._pth) return 1 ;; esac
+            [ -f "$library" ] && target "$library" || return 1
+            resolved=$(/usr/bin/readlink -e "$library") || return 1
+            absent "$library._pth" && absent "$resolved._pth" || return 1
+        done
     done
     roots=''
     for prefix in @TREE_PREFIXES@; do
@@ -519,7 +555,8 @@ prove_closure() {
     /usr/bin/printf '{"schema_version":1,"status":"proven","interpreter":"%s","roots":[%s],"entries_remaining":%s}\n' "$interpreter" "$roots" "$remaining"
 }
 '''.replace('@INTERPRETERS@', '|'.join('/usr/bin/python' + v for v in CLOSURE_VERSIONS)).replace(
-    '@TREE_PREFIXES@', ' '.join(CLOSURE_TREE_PREFIXES))
+    '@TREE_PREFIXES@', ' '.join(CLOSURE_TREE_PREFIXES)).replace(
+    '@NATIVE_PREFIXES@', ' '.join(CLOSURE_NATIVE_PREFIXES))
 
 _ACCOUNT_CLOSURE_PROGRAM = r'''
 def check_closure():

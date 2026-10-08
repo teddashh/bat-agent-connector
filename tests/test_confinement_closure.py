@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -52,8 +53,11 @@ def closure_fixture(tmp_path, *, bad=None, failure=None):
     scanner.chmod(0o755)
     command = confinement.account_script(ACCOUNT)
     command = command.replace('/usr/bin/python', str(layout / 'usr/bin/python'))
-    command = command.replace('/usr/lib/python', str(layout / 'usr/lib/python'))
-    command = command.replace('/usr/lib64/python', str(layout / 'usr/lib64/python'))
+    mapped = ('/usr/bin/pyvenv.cfg', '/usr/bin/pybuilddir.txt',
+              '/usr/bin/Modules/Setup.local', '/usr/pyvenv.cfg', '/usr/local/lib',
+              '/usr/lib64', '/usr/lib', '/lib64', '/lib')
+    command = re.sub('(?:' + '|'.join(re.escape(path) for path in mapped) + ')(?![A-Za-z0-9_])',
+                     lambda match: str(layout) + match.group(), command)
     command = command.replace('/usr/bin/find', str(scanner))
     if failure == 'layout':
         (binary.parent / 'python3').unlink()
@@ -64,6 +68,72 @@ def closure_fixture(tmp_path, *, bad=None, failure=None):
     if failure == 'time':
         command = command.replace('/usr/bin/timeout 10 ', '/usr/bin/timeout 0.000001 ')
     return command, marker, tree
+
+
+@pytest.mark.parametrize('boundary', ['auditor', 'bat'])
+@pytest.mark.parametrize('redirect', ['python3._pth', 'python3.10._pth', 'pybuilddir.txt',
+                                    'Modules/Setup.local', 'native', 'multiarch', 'native_target'])
+def test_a10_both_closure_gates_reject_python_import_redirection(tmp_path, boundary, redirect):
+    command, marker, tree = closure_fixture(tmp_path)
+    layout = tree.parents[2]
+    if redirect in {'native', 'multiarch', 'native_target'}:
+        directory = tree.parent / ('fixture-linux-gnu' if redirect == 'multiarch' else '')
+        directory.mkdir(mode=0o755, exist_ok=True)
+        library = directory / 'libpython3.10.so.1.0'
+        library.write_text('trusted fixture library')
+        library.chmod(0o644)
+        if redirect == 'native_target':
+            target = layout / 'shared/libpython3.10.so.1.0'
+            target.parent.mkdir(mode=0o755)
+            library.rename(target)
+            library.symlink_to(target)
+            library = target
+        config = library.with_name(library.name + '._pth')
+    else:
+        config = layout / 'usr/bin' / redirect
+    config.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    config.write_text('/unproven/imports\n')
+    config.chmod(0o644)  # Even a root-owned redirect can select an unproven import tree.
+    if boundary == 'bat':
+        command = command[:command.index("proof=$(prove_closure)")] + 'prove_closure || exit 1\nBATC_CLOSURE\n'
+    result = subprocess.run(['/bin/sh', '-c', command], capture_output=True, text=True, timeout=10)
+    if boundary == 'auditor':
+        assert json.loads(result.stdout) == {'status': 'unknown', 'reason': 'check_executable_untrusted'}
+    else:
+        assert result.returncode != 0 and result.stdout == ''
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize('native_layout', ['direct', 'multiarch', 'alias', 'target'])
+def test_a10_closure_gate_accepts_proven_native_library_without_overrides(tmp_path, native_layout):
+    command, marker, tree = closure_fixture(tmp_path)
+    layout = tree.parents[2]
+    directory = tree.parent / ('fixture-linux-gnu' if native_layout == 'multiarch' else '')
+    directory.mkdir(mode=0o755, exist_ok=True)
+    library = directory / 'libpython3.10.so.1.0'
+    library.write_text('trusted fixture library')
+    library.chmod(0o644)
+    if native_layout == 'alias':
+        (layout / 'lib').symlink_to('usr/lib')
+    if native_layout == 'target':
+        target = layout / 'shared/libpython3.10.so.1.0'
+        target.parent.mkdir(mode=0o755)
+        library.rename(target)
+        library.symlink_to(target)
+    result = subprocess.run(['/bin/sh', '-c', command], capture_output=True, text=True, timeout=10)
+    assert json.loads(result.stdout)['status'] == 'verified'
+    assert marker.exists()
+
+
+def test_a10_closure_gate_rejects_incomplete_native_directory_search(tmp_path):
+    command, marker, tree = closure_fixture(tmp_path)
+    directory = tree.parent / 'fixture-linux-gnu'
+    directory.mkdir(mode=0o644)
+    if directory.stat().st_uid == 0:
+        pytest.skip('root bypasses the fixture directory search restriction')
+    result = subprocess.run(['/bin/sh', '-c', command], capture_output=True, text=True, timeout=10)
+    assert json.loads(result.stdout) == {'status': 'unknown', 'reason': 'check_executable_untrusted'}
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize('boundary', ['auditor', 'bat'])
