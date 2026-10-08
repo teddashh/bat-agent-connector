@@ -115,10 +115,10 @@ Session 物件（新增；下例 options 已核對但主機還沒做 sandbox 實
       "source": "start_intent_and_bat_meta",
       "bat_source_commit": "b7419892fbc9946799b64cca24c2ec8c7fa15c42",
       "observed_options": {"codexSandboxMode": "workspace-write", "codexApprovalPolicy": "on-request"},
-      "host_check_ref": null,
+      "host_check": null,
       "checked_at": null
     },
-    "verification": {"status": "options_confirmed", "reason": "sandbox_live_acceptance_missing"},
+    "verification": {"status": "options_confirmed", "reason": "sandbox_enforcement_unverified"},
     "limits": ["individual_approval_can_escape", "writable_roots_not_configurable", "network_not_configurable"],
     "gap": "sandbox_enforcement_unverified"
   }
@@ -139,7 +139,7 @@ Session 物件（新增；下例 options 已核對但主機還沒做 sandbox 實
 | checkpoint／repair | 固定受限 Claude default（帳號已查核才 acceptEdits）／Codex workspace-write/on-request；使用已記來源與 managed clone／integration area。 | 無已查核帳號用 Claude default，有帳號才 acceptEdits；Git 測試、commit 與 shell 仍可透過逐次詢問執行。不可失敗後退回人工 cwd。 |
 | fanout planner | Codex `read-only`＋`never`，記 options 與受限旗標。 | planner 的既有工作只讀；不需要 commit、安裝或測試。仍不宣稱新 planner／模型政策。若實機不支援，顯示不支援，不退回可寫 allow-all planner。 |
 | failover／archive successor | 新 session 用上述預設，並繼承 predecessor 的禁止 raise、受保護 roots 與證據關係。 | 受限 predecessor 不依 host allow-all 放寬；非受限 predecessor 保持 host 政策。對 predecessor 為 read-only／never，successor 保持該限制；對已有 host_account，不丟 account 邊界。無法維持時 blocked，保留前任。新 session 可有更強證據，但不能重標前任。 |
-| Task Service 新 lead／external worktree | **保留現有 engine／recipe 的權限行為**。Codex 本來的 default 若可證明等同 workspace-write/on-request，明確保存同值，不新增 sandbox roots／網路政策。Claude 本來 default 明確保存 default。 | allow-all 任務如無已查核的 host_account，level=none、`gap=task_recipe_compatibility`；不冒稱 confined，也不強制改成 sandbox/never 令測試失敗。Task Service 保持其 default／allow_all 行為；新增 confined 設定在 task 內仍沿用原 default 行為並記 task_recipe_compatibility，不另改 engine／recipe。 |
+| Task Service 新 lead／external worktree | **保留現有 engine／recipe 的權限行為**。default 不新增送出欄位；start 後由 BAT meta 保存實際 workspace-write/on-request 或 Claude default，不新增 sandbox roots／網路政策。 | allow-all 任務如無已查核的 host_account，level=none、`gap=task_recipe_compatibility`；不冒稱 confined，也不強制改成 sandbox/never 令測試失敗。Task Service 保持其 default／allow_all 行為；新增 confined 設定在 task 內仍沿用原 default 行為並記 task_recipe_compatibility，不另改 engine／recipe。 |
 | Task Service reviewer 相容分支 | 保存現有 Codex read-only/never 或 Claude plan，不改 recipe 是否會使用 reviewer。 | reserve、read-back 與 tab 都保存實際 options。 |
 | warm reuse、resume、rehydrate、start recovery | 保持該 session 原已記 options／level，不套新 start 預設。 | 恢復不得抹去 write_scope；缺證據顯示 unknown／none，不能按今日 host default 或 cwd 升級。 |
 
@@ -162,9 +162,12 @@ host_account = true
 expected_uid = 2001
 protected_roots = ["/srv/example-personal"]
 check_max_age_s = 300
+check_timeout_s = 10
+check_max_entries = 10000
+bat_port = 9876 # BAT 主機實際 listener port；SSH tunnel 本機 port 不是此值
 ```
 
-沿用 `BATC_TASK_SETTINGS` 的 `[verification].ssh_hosts`，不加另一套 SSH credentials／alias。`host_account=true` 須有正整數 expected_uid、非空絕對 protected_roots 與 alias；禁止 protected roots 和 managed roots 重疊，禁止 root UID。`check_max_age_s` 須為正整數，預設 300。讀取 claim 本身不授予 level。只讀 check 的結果參考同一 journal／inventory，新的 start 在副作用前重新查核，cache 不超過設定期限。
+沿用 `BATC_TASK_SETTINGS` 的 `[verification].ssh_hosts`，不加另一套 SSH credentials／alias。`host_account=true` 須有正整數 expected_uid、非空絕對 protected_roots 與 alias；禁止 protected roots 和 managed roots 重疊，禁止 root UID。`check_max_age_s` 須為正整數（最多 3600），預設 300。`check_timeout_s`（最多 30）、`check_max_entries`（最多 100000）及 `bat_port`（1–65535）也驗證為正整數；預設 10 秒、10000 entries、9876。讀取 claim 本身不授予 level。只讀 check 的結果參考同一 journal／inventory，新的 start 在副作用前重新查核，cache 不超過設定期限。
 
 第一版實作 Linux POSIX 查核。SSH alias 必須直接以預期 BAT UID 執行，且能觀測 BAT process 與該 agent runtime 的 UID／GID／supplementary groups。只讀指令使用既有 runner 的 `BatchMode` 與 timeout，不 `sudo -u` 模擬另一個人。alias 身分不符、看不到 BAT process、無法唯一對應該 BAT server、process namespace／群組不符，記 unknown，不能宣稱 host_account。
 
@@ -181,17 +184,17 @@ check_max_age_s = 300
 | 表面 | 新增輸出／既有入口 |
 |---|---|
 | Session reads | `service.sessions_list`／`session_read`、triage、`inventory`、`GET /api/v1/sessions` 與 `GET /api/v1/sessions/{host}/{id}` 的 session 列帶 write_scope、confinement、current_verification；MCP `sessions_list`／`session_read` 與 CLI `sessions`／`read` 同值。manual／unknown 不因加欄位取得寫權。 |
-| `GET /api/v1/capabilities` | `hosts[].confinement`：`agents.{claude,codex}` 的 reachable_options、requested_level、verified_level、limits／gap；`host_account` 的 declared、check_status、checked_at、protected_roots、evidence_ref、reason。supported／unknown／unsupported 分開；不把 host 的 capability level 直接套到既有 session。 |
+| `GET /api/v1/capabilities` | `hosts[].confinement`：`agents.{claude,codex}` 的 reachable_options、requested_level、verified_level、limits／gap；`host_account` 的 declared、status、checked_at、protected_roots、evidence_ref、reason。supported／unknown／unsupported 分開；不把 host 的 capability level 直接套到既有 session。 |
 | Host reads | 既有 `hosts_list`／`host_status`、`GET /api/v1/hosts` 帶同一 account check 摘要。只讀刷新不新增 mutation action；離線回最後證據與 stale，不因 capabilities 載入卡住 Dashboard。 |
 | Checkpoint／repair | `checkpoint-preview` 與 capabilities 提供所選 agent 的預計限制；`checkpoint.continue`／`integration.handoff` 的結果與 operation.external_refs 帶 confinement snapshot／evidence_ref。work item 的 `continueFrom` 也使用此摘要。 |
 | 權限與 bulk | operations-unification 的 `session.permissions`／`session.approve_pending`；現有 `session_set_permissions`／`approve_pending`、CLI `permissions`／`approve-pending`。結果沿用 per-item，新增 skipped=confined 與穩定 error code；dry-run 也不顯示「would raise」受限列。 |
-| Task Service | commands start payload／branch 回執保存 actual options 與 evidence_ref；`work_status`／task reads 顯示 session 限制與 task_recipe_compatibility gap，不改 engine_decision／recipe。 |
+| Task Service | commands start payload 與 registry 保存 actual options 與 snapshot；`work_status`／task reads 顯示 session 限制與 task_recipe_compatibility gap，不改 engine_decision／recipe。 |
 
 必要條件仍為 scopes、write／orchestrate tier、resource_policy 的來源與目的地檢查、穩定 session／worktree 身分。CLI sandbox 不把 legacy shared clone 變成 §07 的獨立 clone；本包不變更 shared_clone_worktrees 遷移政策，UI 仍同時列 isolation 與 confinement。
 
 ## 不可放寬與操作銜接
 
-新共用 confinement helper 只決定 options、證據與是否放寬；沿用原 `WriteGrant` 與 task coordinator gate。一般新 start 的選項在 reservation、operation step request、Task Service command payload 記下，不等 ACK 才記。`registry_permission_fields()` 由實際送出的 options 生成，不能用空 `permission_options(default)` 清掉有效值。
+新共用 confinement helper 只決定 options、證據與是否放寬；沿用原 `WriteGrant` 與 task coordinator gate。一般新 start 的選項在 registry reservation 與 Task Service command payload 記下，不等 ACK 才記。Checkpoint／repair step request 保存 session ID、cwd、agent、write_scope，完整選項以同 ID 的 registry intent 為準；核對成功後在 operation external_refs 保存 snapshot。`registry_permission_fields()` 由實際送出的 options 生成，不能用空 `permission_options(default)` 清掉有效值。
 
 - `write_scope=confined` 不可由 permission change 進 bypass／full-access、減少 protected_roots、開啟更寬的批准政策或移除其已記限制。`force`／confirm 不繞過；等價 default 要轉成該 session 原 options，只有真正不放寬的變更可送。
 - Bulk 與 deferred raises 在列項時及送 frame 前重查受限旗標、最新 registry 與 task gate；舊的 pending raise 保留 refused 回執後清除，不在重啟後執行。單一 session refused 不阻止其他可操作列回報結果。
@@ -260,20 +263,21 @@ Session card 與 detail 同時顯示 level、write_scope、Git isolation；可�
 
 Mock 只能證明 Connector 的 options、gate、evidence 與顯示；不假造 Claude／Codex 的檔案 sandbox。所有人路徑是 fixture，例如 `/srv/example-personal/source`；不送 real-host 寫入 channel。用 `tests/mockbat.py`、checkpoint 的 `LocalRunner`／`RealGitLog` 與 temp repos。
 
-| 驗收／計畫 | Phase 2 測試名稱（預定） | 要證明的結果 |
+| 驗收／計畫 | 實作測試 | 結果與邊界 |
 |---|---|---|
-| A10；§06、§12 | `test_a10_checkpoint_absolute_path_carries_confinement`（Claude／Codex 參數化） | checkpoint excerpt 含來源人的絕對路徑並要求寫回；另測沒有 verified account 絕不送 acceptEdits。managed start 在第一個 prompt 前帶選項／flag，reserve、step request 與 read-back 內容一致，來源零寫入 frame。Claude 新 default，不沿用不安全的 acceptEdits 保證。 |
-| A10；§06 | `test_a10_confined_refuses_raise_bulk_and_deferred` | host allow-all、force、dry-run、舊 pending raise、bulk 含 manual／unknown／confined／legacy 四種列；受限列 skipped，零 permission／resolve frame，不寫入 deferred raise。 |
-| A10；§06、§12 | `test_a10_level_requires_evidence_not_cwd` | 同 cwd 的 bypass、acceptEdits、default、已核對 Codex、未驗收 sandbox、已驗收 sandbox、已查核 account 給不同 level／verification；只有 options/meta 不能假裝 verified；OS level 最多 options_confirmed。 |
-| A10；§06、§07 | `test_a10_all_managed_start_paths_share_defaults` | 一般、relay missing、planner、fanout children、repair、failover 與 archive 的實際 start；證明每個入口保存 options／level，default／allow_all／confined 的 options／level 各自正確。planner read-only 是實際選項。 |
-| A10；§06、§12 | `test_a10_resume_recovery_and_warm_preserve_recorded_level` | lost ACK／daemon restart／registry 丟失／tab 舊資料／null meta；不重開、不按 cwd upgrade；loaded legacy send 成功，meta=null 的 resume 無原 policy 才 blocked。Task start／reviewer 與 successor reservation 的 options 不遺失。 |
-| A10；§06、§28 | `test_a10_task_test_workflow_keeps_permissions_and_reports_gap` | 現有 engine／recipe、verifier commands 與測試完成路徑不變；allow-all 無 account 時 none＋gap；default Codex 保存同義選項；warm task 不套新預設。 |
-| A10；§06 | `test_a10_host_account_check_is_read_only`、`test_a10_host_account_unknown_or_writable_is_not_verified` | 模擬 SSH UID 不符、可寫子檔／父目錄、ACL／symlink、root/capability、process 不明、timeout、scan 不完整／stale。只讀命令清單與 zero probe；新 start 未驗證 account 即 blocked。 |
-| A10；§06 | `test_a10_permission_partial_ack_and_policy_drift` | 每個 setter 失去 ACK、第二步失敗、idle 變 streaming、GUI mode drift／host 版本變更；原快照保留、current mismatch、不送下一 prompt。 |
-| A10；§06 | `test_a10_confined_answer_cannot_persist_wider_permissions` | `dont_ask_again`／ExitPlanMode mode raise 被拒絕；單次 allow 的限制如實呈現，deny／一般問題仍可處理。 |
-| A10；§10、§19 | `test_a10_session_and_capabilities_expose_same_evidence` | REST／MCP／CLI／inventory／triage 欄位一致；manual readonly 不變；host capability 不升級舊 session。Dashboard zh-TW／en、390 px、forms 切 agent、沒有 null／undefined／[object。 |
+| A10；§06、§12 | `test_a10_checkpoint_absolute_path_carries_confinement`（Claude／Codex） | 摘錄含人的絕對路徑；options／flag／level、拒絕 force raise、bulk skipped、來源零寫入。 |
+| A10；§06 | `test_a10_general_start_preserves_operator_policy_and_records_evidence`、`test_a10_level_requires_options_not_cwd` | default／allow_all／confined 的 options／level；相同 cwd 不決定 level；os 最多 options_confirmed。 |
+| A10；§06、§12 | `test_a10_accept_edits_requires_verified_account_and_checks_are_read_only`、`test_a10_declared_unverified_account_blocks_new_start` | 未查核 account 不送 acceptEdits；宣告失敗不降級 start，零 start／worktree frame。 |
+| A10；§06 | `test_a10_raise_and_deferred_raise_are_refused`、`test_confined_sessions_stay_confined_on_an_allow_all_host` | force、dry-run、舊 pending raise、bulk 與 failover 保持限制。 |
+| A10；§06、§12 | `test_a10_loaded_legacy_send_works_but_missing_evidence_resume_is_blocked`、`test_a10_resume_uses_original_options_not_stale_tab`、`test_a_lost_start_reply_is_read_back_not_started_again`、`test_a10_lost_confined_start_ack_retains_options_and_worktree` | loaded legacy send 不受缺舊證據阻擋；null meta 的 confined resume 須原 policy；lost ACK 不重開。 |
+| A10；§06、§07 | `test_a10_planner_is_read_only_never_and_successor_preserves_limits`、`test_relay_to_bat_session_starts_a_new_worktree_instead`、`test_fanout_from_planner_starts_verbatim_and_cleans_planner`、`test_c03_handoff_resolution_resumes_without_recomposing_or_receiving_twice` | 真正的 planner／relay／children／repair starts 保存 evidence；successor 不丟原限制。 |
+| A10；§06、§28 | `test_a10_task_service_keeps_engine_policy_and_reports_gap`、`test_claude_sessions_pin_opus_55_for_lead_and_reviewer`、`test_bat_warm_reuse_claims_only_clean_completed_service_session`、`test_headless_session_lookup_restored_from_task_branch_and_bat_meta` | Engine／recipe／verifier 行為不變；Task Service 的 gap 與原 snapshot、warm/recovery 證據。 |
+| A10；§06 | `test_a10_linux_read_only_scan_uses_find_and_process_identity`、`test_a10_host_account_cache_expires_without_upgrading_creation`、`test_a10_host_account_configuration_rejects_uncheckable_claims`、`test_a10_host_evidence_migration_is_idempotent_and_persists` | Linux /proc 身分、capability、實際 GNU find 的可寫 fixture／symlink、父目錄、budget／timeout／process 不明與 stale；不寫 probe。ACL 使用 find 的 access 判定，完整 ACL host matrix 留 W12。 |
+| A10；§06 | `test_a10_partial_permission_ack_preserves_creation_and_reports_drift`、`test_a10_start_mismatch_stays_uncertain_and_never_sends_prompt`、`test_a10_frame_guard_catches_drift_after_first_read`、`test_a10_creation_snapshot_survives_runtime_drift_and_send_refuses` | Partial setter ACK／GUI drift／start mismatch 保留快照並顯示 current；受限 drift 不送下一 prompt。 |
+| A10；§06 | `test_a10_persistent_and_exit_plan_approvals_are_refused` | dont_ask_again、ExitPlanMode mode raise 被拒絕；deny／一般問題仍走原流程。 |
+| A10；§10、§19 | `test_a10_session_capabilities_inventory_and_triage_share_evidence`、`test_a10_cached_legacy_inventory_exposes_unknown_evidence_without_rewriting` | REST／service／inventory／triage 一致；既有 MCP／CLI 直接轉出同 reads。manual readonly 不變。Dashboard Playwright fixture：en／zh-TW、390／768／1440 px、session card 與 checkpoint／repair forms 切 agent、無 null／undefined／[object／水平 overflow。 |
 
-已有 `test_confined_sessions_stay_confined_on_an_allow_all_host`（lifecycle）、`test_continue_starts_managed_work_at_the_checkpoint_and_leaves_the_source_alone`、`test_a_lost_start_reply_is_read_back_not_started_again`（checkpoints）只證明部分選項／gate／恢復，不能單獨宣布 A10 的實機阻擋已通過。Phase 2 完成須跑 `uv run ruff check .`、`uv run pytest -q`，Dashboard 另以 `.mjs` 語法檢查及雙語 Playwright 驗證。
+Mock 與只讀 fixture 只能證明 options／gate／證據，不能宣布 A10 的實機阻擋通過。完成須跑 `uv run ruff check .`、完整 `uv run pytest -q`、`.mjs` 的 `node --check` 與雙語 Playwright。Migration 在此 base 的下一個版本為 `user_version=2`、DDL idempotent；與平行包 rebase 時改用當時下一個空版本。
 
 ## 交給 W12 的實機驗收程序
 

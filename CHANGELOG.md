@@ -7,6 +7,15 @@
   (`needs_attention`) and keeps the recipe's deploy lock; before any write it still fails. A rate-limited read (403),
   a reply cut short or an unreadable body counts as no answer, and an unanswered run lookup after a 204 dispatch
   keeps looking. The GitHub token is resolved for every request, so a rotated or expiring token works without a restart.
+
+- Managed execution confinement ([design](docs/design/confinement.md), 計畫 §06/§07/§12, A10): preserve general
+  `default`/`allow_all`, add opt-in `confined`, record immutable creation evidence and separate current verification,
+  and refuse confined raises, persistent approvals and mode-widening ExitPlanMode answers. Claude uses default unless
+  a Linux read-only account check supports acceptEdits (BAT's acceptEdits file callback has no path check); Codex's
+  sandbox reaches at most options_confirmed. Planner is read-only/never; successors inherit limits. Task Service
+  behavior stays unchanged with its gap visible. Reads, bilingual forms and both skills explain the evidence.
+  **A10 is not proven until the W12 live run**; no sandbox evidence-file import is included here.
+
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
   those sessions. BAT has no record of them: `batc remove-worktree` on a checkpoint session re-registered the
@@ -64,7 +73,7 @@
   table). A checkpoint taken inside a managed clone continues in that clone. A session that is only in the
   registry keeps its workspace, and a checkpoint without one is refused up front (`NO_WORKSPACE`).
 - Checkpoint sessions are confined whatever the host's `default_permission_mode` (plan §06, A10): Claude starts in
-  `acceptEdits` and Codex in the `workspace-write` sandbox with `on-request` approval. The registry records
+  `default` (or `acceptEdits` with a verified host account) and Codex in the `workspace-write` sandbox with `on-request` approval. The registry records
   `write_scope: "confined"` and the permission fields from the reservation on, so a start proven by read-back, a
   resume and a Codex failover successor keep them. `session_set_permissions` refuses allow-all for these sessions
   and `approve_pending` skips them. The source conversation in the first instruction is marked as background.

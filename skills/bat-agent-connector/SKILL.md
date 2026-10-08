@@ -107,9 +107,14 @@ last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_cont
    token with the `start` scope; `FORBIDDEN` means ask the person to issue one, do not look for another way in.
 5. Track `result.session_id` like any managed session. The source session is only a reference: do not nudge, stop or
    clean it up. Take a new checkpoint to include the person's newer commits.
-6. The new session is confined (`write_scope: "confined"`): Claude asks before writing outside its folder or running
-   most commands, Codex's sandbox blocks such writes. Leave those prompts to the person; never approve a write to a
-   path outside the session's own folder, and do not try to raise its permissions (refused).
+6. Read `write_scope`, `confinement` and `current_verification`. Cwd alone offers no protection. Confined Claude
+   uses `default` unless a verified host account supports `acceptEdits`; BAT's acceptEdits file callback has no path
+   check. Existing approvals and shell commands may still permit outside writes. Codex `workspace-write/on-request`
+   records options, with live enforcement unverified until W12. A host account covers only its declared roots.
+   Never request raises for a confined session, call allow-all/bulk/deferred raises, or use `dont_ask_again` or an
+   ExitPlanMode allow to remove its limits. Never approve a write to a person's protected roots. If tests are blocked,
+   report the exact limitation; do not change host policy, Task Service engine or recipes. Existing running sessions
+   retain their recorded level; inspect current verification for drift.
 
 ## Updating a PR with results (scope integrate)
 
@@ -182,7 +187,8 @@ item is done.
   `instructions` that say to only commit it; cleanup then keeps that branch and never merges it.
 - **Permissions**: on hosts with `default_permission_mode = "allow_all"`, `approve_pending` answers permission prompts
   (not questions) with "don't ask again" and raises the session to allow-all. Claude sessions are raised only when
-  idle; Codex from its next turn, so repeat `approve_pending` while a turn is still asking.
+  idle; Codex from its next turn. Confined sessions are skipped: never request a raise, persistent approval or
+  mode-widening ExitPlanMode answer for them; report blocked tests with their confinement evidence.
 - **Cleanup**: run verification in the candidate environment, retain its log, and call `session_record_verification` with the current commit, command, exit code, environment and log reference. `session_cleanup` (dry run first) decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE per
   session behind hard gates (idle, clean, conflict-free, commit-bound verification, risk checks, then the optional Jev judgment). It keeps
   branches, never stops a working session, and returns one `escalation_summary`: report that once, not per item.

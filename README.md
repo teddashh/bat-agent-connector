@@ -21,6 +21,15 @@ MCP client) and shell scripts can:
 > This project is **not affiliated with or endorsed by** the BAT authors. The protocol was read from BAT's MIT-licensed
 > source (v3.2.12) and can change between BAT releases. Credit for BAT goes to TonyQ and its contributors.
 
+General managed starts keep the operator's `default_permission_mode`: `default` preserves BAT defaults and
+`allow_all` preserves bypass/full access (level `none`). Choose `confined` to restrict general starts too. Checkpoint
+and repair starts always use confined options: Claude `default`, or `acceptEdits` only with a verified BAT host
+account; Codex `workspace-write/on-request`. Cwd alone offers no protection, and acceptEdits has no path check.
+BAT cannot configure network or writable roots, so confined Codex may break installs and localhost test servers.
+Task Service engine/recipes stay unchanged and expose their compatibility gap. Session reads and the Dashboard
+show creation evidence separately from current verification. A10 is not proven until W12's live acceptance run.
+See [configuration, limits and the live procedure](docs/design/confinement.md).
+
 It ships four things:
 
 | Piece | Name |
