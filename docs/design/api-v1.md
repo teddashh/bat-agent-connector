@@ -111,6 +111,7 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 見 [cleanup.md](cleanup.md)：preview 只讀、一份 snapshot、每 host 序列化並限制讀取時間，500 resources 上限。
 Host target 接受 configured host 或有 resource history 的原 host。Host 移除後，各來源的 session／worktree／
 branch／carrier ID 保持不變，全部 retained／OBSERVATION_UNAVAILABLE，不送 BAT／SSH；同 preview 的其他 host 正常 apply。
+失敗 integration.preview 的 durable prepare intent 也算 creation history，不必先有 integration_previews row。
 Apply 只執行同一 reviewed fingerprint；16 KiB signed token，15 分鐘到期。release_undelivered 保留 commits 與
 branch，不需 cleanup_discard；只有 discard_uncommitted 摧毀內容。Accepted actor/scopes/choices 固定，resume
 沿用原 OperationService 規則，不再檢查 discard scope；回執記錄 resumer。保留設定 keep/forever/false。

@@ -239,6 +239,9 @@ def _target(ops, value):
                 ops.db.execute(f"SELECT 1 FROM {table} WHERE host=? LIMIT 1", (value[key],)).fetchone()  # noqa: S608 - fixed table names
                 for table in ("checkpoints", "checkpoint_runs", "integration_previews", "tasks", "sessions_observed"))
             if not known:
+                # A failed prepare can leave creation facts before a preview/history row exists.
+                known = any(i["host"] == value[key] for i in _all(ops)[0].values())
+            if not known:
                 raise OperationError("UNKNOWN_HOST", "host has no configuration or resource history", 404)
     else:
         table = {"work_item": "work_items", "checkpoint": "checkpoints", "integration": "operations"}[kind]
