@@ -448,7 +448,7 @@ def _all(ops):
         if e.get("worktree_path") and (host, e["worktree_path"]) not in worktrees:
             # A successful legacy BAT create/start records its origin root, branch and worktree path together.
             recorded = bool(e.get("created_at") and e.get("branch") and e.get("origin_root") and
-                            e.get("status") in {"active", "superseded", "removed", "cleaned", *registry.RETIRED} and
+                            e.get("status") in {"active", "starting", "uncertain", "superseded", "removed", "cleaned", *registry.RETIRED} and
                             not e.get("failover_of") and e.get("worktree_made_by") != "connector")
             hc = fleet.config.hosts.get(host)
             proven = bool(recorded and hc and resource_policy.in_managed_root(hc, e["origin_root"]) and
@@ -826,6 +826,8 @@ def _plan(ops, item, choices, op_rows, pvs, own_op=None):
         _reason(item, item["path_observation"]["error"])
     _consumers(ops, item, op_rows, pvs, own_op)
     if kind == "session":
+        if item.get("registry", {}).get("status") in {"starting", "uncertain"}:
+            _reason(item, "COMMAND_UNRESOLVED", registry_status=item["registry"]["status"])
         if obs.get("streaming") or (isinstance(obs.get("state"), dict) and obs["state"].get("isStreaming")):
             _reason(item, "ACTIVE_WRITER")
         state = obs.get("state") or {}
@@ -1279,21 +1281,38 @@ def _finalize(ctx, item, after):
 def _retire_absent_sessions(ctx, carrier_id=None):
     # Local receipt facts only; no history projection, BAT observation or new external effect.
     rows = [{**dict(r), "plan": json.loads(r["plan"])} for r in ctx.service.db.execute(
-        "SELECT resource_id,plan,status FROM cleanup_receipts WHERE operation_id=? "
-        "AND status IN ('succeeded','already_absent')", (ctx.operation_id,))]
+        "SELECT resource_id,plan,status FROM cleanup_receipts WHERE operation_id=?", (ctx.operation_id,))]
     carriers = {r["resource_id"] for r in rows if r["plan"]["kind"] == "worktree" and
+                r["status"] in {"succeeded", "already_absent"} and
                 (carrier_id is None or r["resource_id"] == carrier_id)}
     for row in rows:
         item = row["plan"]
         carrier = item.get("worktree_id")
-        if (item["kind"] != "session" or row["status"] != "already_absent" or
-                carrier not in carriers and (carrier is not None or item.get("registry", {}).get("worktree_path"))):
+        if item["kind"] != "session" or carrier_id is not None and carrier != carrier_id:
             continue
-        registry.retire(item["host"], item["session_id"], "absent_at_cleanup",
-                        created_at=item["registry"].get("created_at"), actor=ctx.actor, operation_id=ctx.operation_id,
-                        carrier_resource_id=carrier, reason="session observed absent; no worktree or carrier removed/already absent")
-        _receipt(ctx, item, "already_absent", after={"registry_status": "absent_at_cleanup", "capacity_released": True,
-                                                   "carrier_resource_id": carrier, "stopped_by_cleanup": False})
+        entry = item.get("registry", {})
+        if row["status"] == "retained" and entry and (entry.get("status") != "active" or entry.get("task_id")):
+            _receipt(ctx, item, "retained", after={"capacity_released": False, "registry_status": entry.get("status"),
+                "capacity_reason": "task_owned" if entry.get("task_id") else
+                    "start_unsettled" if entry.get("status") == "starting" else "not_counted"})
+            continue
+        if row["status"] != "already_absent":
+            continue
+        if carrier not in carriers and (carrier is not None or entry.get("worktree_path")):
+            _receipt(ctx, item, "already_absent", after={"capacity_released": False,
+                "registry_status": entry.get("status"), "capacity_reason":
+                    "carrier_retained" if entry.get("status") == "active" else "not_counted",
+                "carrier_resource_id": carrier, "stopped_by_cleanup": False})
+            continue
+        try:
+            capacity = registry.retire(item["host"], item["session_id"], "absent_at_cleanup",
+                created_at=item["registry"].get("created_at"), actor=ctx.actor, operation_id=ctx.operation_id,
+                carrier_resource_id=carrier, reason="session observed absent; no worktree or carrier removed/already absent")
+        except (ResourceReadOnly, OSError) as e:
+            capacity = {"capacity_released": False, "registry_status": None,
+                        "capacity_reason": "registry_refused" if isinstance(e, ResourceReadOnly) else "registry_io_failed",
+                        "capacity_error": {"code": getattr(e, "code", "REGISTRY_IO_FAILED")}}
+        _receipt(ctx, item, "already_absent", after={**capacity, "carrier_resource_id": carrier, "stopped_by_cleanup": False})
 
 
 def _progress(ctx):

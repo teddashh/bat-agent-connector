@@ -124,10 +124,14 @@ Item status=already_absent 是獨立 definitive receipt，result.items 與 summa
 沒有 reclaim item 但有可釋放 cap 的 already_absent active 非 task session（無自己的 worktree 或 carrier
 同樣 already_absent）時，preview.ready=true；同一 cleanup.apply 只結算本機 retirement／receipt。
 Preview 本身不改 registry；retained carrier、未決或已退休 row 不會單獨開啟 apply。
-Confirmed planner stop 的 registry status=stopped，已不占 host cap；ACK／read-back 未確認時不改。
-Already-absent session 的 worktree 本次 succeeded／already_absent，或沒有自己的 worktree時，status 改為
+Confirmed planner stop 只把 matching active row 改 registry status=stopped，已不占 host cap；ACK／read-back 未確認時不改。
+Already-absent session 的 worktree 本次 succeeded／already_absent，或沒有自己的 worktree時，matching active、非 task row 的 status 改為
 absent_at_cleanup，retirement 記 actor／operation_id／carrier_resource_id。回執 after_state 有
 capacity_released=true、registry_status、carrier_resource_id、stopped_by_cleanup=false；不建 session tombstone。
+其他 row 不改，capacity_released=false，capacity_reason=not_counted／generation_changed／task_owned／start_unsettled／
+carrier_retained／registry_refused／registry_io_failed；success／同 retirement replay 的 reason=null。Registry refusal／I/O
+只列 capacity_error={code}，不影響 cleanup succeeded／tombstone，也不轉 uncertain。Starting／uncertain sessions 及
+carrier 以 COMMAND_UNRESOLVED retained，不是 already_absent。Confirmed planner stop 若 capacity 拒絕，stopped 仍 true。
 Worktree retained 時 absent session 的 active slot 留著供 resume。已退休的 ID 的 drive／client-resume／
 same-ID start／registry recovery 回 SESSION_RETIRED (409)；人可用新 ID 經原 cap reserve，ownership 仍 connector_managed。
 GET /operations/{id} 的 cleanup_receipts／tombstone 回執包含 completed_phases=[{resource_id,phase,effect,step,result}]、
