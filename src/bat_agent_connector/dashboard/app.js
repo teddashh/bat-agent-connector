@@ -146,6 +146,7 @@ function sessionRow(s) {
     ...sessionBadges(s),
     h("span", { class: "muted" }, when(s.last_activity_at)));
 }
+const epoch = x => (x ? new Date(x * 1000).toISOString() : "");
 function opStatus(op) {
   return h("span", { class: `status-${op.status}` }, t("op_" + op.status));
 }
@@ -153,7 +154,7 @@ function opRow(op) {
   return h("div", { class: "row" },
     h("div", { class: "grow" },
       h("a", { class: "title", href: `#/op/${op.operation_id}` }, op.action),
-      h("div", { class: "muted" }, [op.actor, when(new Date(op.created_at * 1000).toISOString())].join(" · ")),
+      h("div", { class: "muted" }, [op.actor, when(epoch(op.created_at))].join(" · ")),
       op.status_reason ? h("div", { class: "muted" }, op.status_reason) : null),
     opStatus(op), op.error_code ? chip(op.error_code, "bad") : null);
 }
@@ -241,10 +242,10 @@ async function viewSession(main, host, sid) {
       h("dt", {}, "Provenance"), h("dd", {}, t("provenance_" + row.provenance)),
       h("dt", {}, t("observed")), h("dd", {}, when(row.observed_at))));
   const scope = `send.${host}.${sid}`;
+  const cps = checkpointPanel(host, sid);
+  main.insertBefore(cps.box, msgs.previousSibling);
   if (row.api_access !== "managed") {
-    controls.replaceChildren(h("p", { class: "note" }, t("read_only_note")),
-      h("div", { class: "actions" }, h("button", { class: "secondary", disabled: true,
-        title: t("not_available_yet") }, `${t("continue_from_checkpoint")} (${t("not_available_yet")})`)));
+    controls.replaceChildren(h("p", { class: "note" }, t("read_only_note")));
   } else {
     const box = h("textarea", { placeholder: t("send_placeholder") });
     try { box.value = localStorage.getItem(`batc.draft.${scope}`) || ""; } catch { /* ignore */ }
@@ -308,9 +309,69 @@ async function viewSession(main, host, sid) {
       msgs.replaceChildren(...(items.length ? items : [h("p", { class: "muted" }, t("no_messages"))]));
     } catch (e) { msgs.replaceChildren(errorBox(e)); }
   };
-  await loadMessages();
+  await Promise.all([loadMessages(), cps.load()]);
   const reload = debounce(loadMessages, 800);
-  return onEvents(ev => { if (ev.resource_id === `${host}/${sid}`) reload(); });
+  const reloadCps = debounce(cps.load, 800);
+  return onEvents(ev => {
+    if (ev.resource_id === `${host}/${sid}`) reload();
+    if (ev.resource_type === "checkpoint") reloadCps();
+  });
+}
+
+// A checkpoint records this session's commit and recent conversation (read-only); continuing starts a new
+// managed session at that commit in a connector clone. The person's session and folder are never written.
+function checkpointPanel(host, sid) {
+  const can = (state.caps?.features?.checkpoints || []).includes(host);
+  const list = h("div", {});
+  const status = h("div", { class: "muted" });
+  // A checkpoint never changes, so its row is built once: a reload on a new event keeps an open form and its draft.
+  const rows = new Map();
+  const row = cp => rows.get(cp.checkpoint_id) || rows.set(cp.checkpoint_id, buildRow(cp)).get(cp.checkpoint_id);
+  const buildRow = cp => {
+    const instr = h("textarea", { placeholder: t("continue_placeholder") });
+    const agent = h("select", {}, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
+    const out = h("div", { class: "muted" });
+    const go = h("button", { class: "primary", onclick: async () => {
+      if (!instr.value.trim()) return;
+      go.disabled = true;
+      try {
+        const op = await submit("checkpoint.continue", { checkpoint_id: cp.checkpoint_id },
+          { instructions: instr.value, agent: agent.value }, {}, `continue.${cp.checkpoint_id}`);
+        out.replaceChildren(opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
+      } catch (e) { out.replaceChildren(errorBox(e)); }
+      go.disabled = false;
+    } }, t("start_agent_work"));
+    const form = h("div", { hidden: true }, instr, h("div", { class: "actions" }, agent, go), out);
+    return h("div", { class: "row" },
+      h("div", { class: "grow" },
+        h("div", { class: "title" }, h("code", {}, cp.commit_sha.slice(0, 12)), " ", cp.branch || ""),
+        h("div", { class: "muted" }, [when(epoch(cp.captured_at)), cp.actor,
+          t("excerpt_count", { n: cp.excerpt_messages })].join(" · ")),
+        cp.dirty ? h("div", { class: "error" }, t("dirty_warning", { n: cp.dirty })) : null, form),
+      h("button", { class: "secondary", disabled: !can, title: can ? null : t("checkpoint_unavailable"),
+        onclick: () => { form.hidden = !form.hidden; } }, t("continue_from_checkpoint")));
+  };
+  const load = async () => {
+    try {
+      const p = new URLSearchParams({ host, session_id: sid, limit: "10" });
+      const page = await api("GET", `/checkpoints?${p}`);
+      list.replaceChildren(...(page.checkpoints.length ? page.checkpoints.map(row)
+        : [h("p", { class: "muted" }, t("no_checkpoints"))]));
+    } catch (e) { list.replaceChildren(errorBox(e)); }
+  };
+  const create = h("button", { class: "secondary", onclick: async () => {
+    create.disabled = true;
+    try {
+      const op = await submit("checkpoint.create", { host, session_id: sid }, { last_n: 20 }, {}, `checkpoint.${host}.${sid}`);
+      status.replaceChildren(...[opStatus(op), op.error_code ? chip(op.error_code, "bad") : null,
+        op.status_reason].filter(Boolean).flatMap(x => [x, " "]));
+      await load();
+    } catch (e) { status.replaceChildren(errorBox(e)); }
+    create.disabled = false;
+  } }, t("create_checkpoint"));
+  const box = h("div", { class: "panel" }, h("h2", {}, t("checkpoints")), h("p", { class: "muted" }, t("checkpoint_help")),
+    can ? null : h("p", { class: "muted" }, t("checkpoint_unavailable")), h("div", { class: "actions" }, create), status, list);
+  return { box, load };
 }
 
 async function viewDelivery(main) {
@@ -397,6 +458,9 @@ async function viewOperation(main, id) {
         ? h("button", { class: "primary", title: t("resume_help"), onclick: async () => {
           try { await api("POST", `/operations/${id}/resume`, {}); render(); } catch (e) { panel.append(errorBox(e)); }
         } }, t("resume")) : null;
+      const opened = op.result?.session_id && op.result?.host
+        ? h("a", { class: "secondary", href: `#/session/${encodeURIComponent(op.result.host)}/${encodeURIComponent(op.result.session_id)}` },
+          t("open_new_session")) : null;
       const cancel = !["succeeded", "failed", "cancelled"].includes(op.status)
         ? h("button", { class: "danger", onclick: async () => {
           try { await api("POST", `/operations/${id}/cancel`, {}); render(); } catch (e) { panel.append(errorBox(e)); }
@@ -404,10 +468,9 @@ async function viewOperation(main, id) {
         : null;
       panel.replaceChildren(h("h1", {}, op.action),
         h("p", { class: "op-status" }, opStatus(op), " ", op.error_code ? chip(op.error_code, "bad") : null),
-        op.error_message ? h("p", { class: "error" }, op.error_message) : null,
         h("dl", { class: "kv" },
           h("dt", {}, t("actor")), h("dd", {}, `${op.actor} (${op.entry})`),
-          h("dt", {}, t("created")), h("dd", {}, when(new Date(op.created_at * 1000).toISOString())),
+          h("dt", {}, t("created")), h("dd", {}, when(epoch(op.created_at))),
           op.status_reason ? [h("dt", {}, t("reason")), h("dd", {}, op.status_reason)] : null,
           h("dt", {}, "Target"), h("dd", {}, h("code", {}, JSON.stringify(op.target))),
           Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null,
@@ -415,7 +478,7 @@ async function viewOperation(main, id) {
         h("h2", {}, t("steps")),
         ...op.steps.map(s => h("div", { class: "row" }, h("div", { class: "grow" }, s.name),
           h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)),
-        h("div", { class: "actions" }, resume, retry, cancel));
+        h("div", { class: "actions" }, opened, resume, retry, cancel));
     } catch (e) { panel.replaceChildren(errorBox(e)); }
   };
   await render();
