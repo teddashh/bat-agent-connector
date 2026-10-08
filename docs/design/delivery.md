@@ -6,11 +6,13 @@
 
 Part A review follow-up 以 `85601e2f6a36517ba559705e9e360763e7c4d63b` 為固定來源：修正 metadata 無落地的期限、預覽成本／保留、submit 前檢查位置與最後合併歸因；保留已批准的 action／digest／scope 與 Part B 邊界。
 
+本輪 rebase 的固定來源為 main `22da8d8eaa1835724674f5e595995d81c12dde5c`（#33），Part A replay 後為 `de82a18`；合併 token 輪替、ambiguous transport／rate limit／204 run lookup 與 sent-write 讀取恢復。Part A 的唯讀 steps 不作為「已送出寫入」證據；migration 保持 2／3，DDL 可改號、不改資料。
+
 ## 固定來源版本
 
 | 來源 | 固定版本與用途 |
 |---|---|
-| Connector | `5e8e41696ebc6a1a9d3ea92ddb7a1d338537ca1b`，本次起點與 `origin/main` 相同，分支 `feat/delivery-2`。依據 `delivery.py`、`github.py`、`config.py`、`operations.py`、`task_journal.py`、`api_auth.py`、`resource_policy.py`、`api_v1.py`、`task_daemon.py`、`integration.py`、Dashboard、`tests/test_delivery.py` 與 `tests/fakegithub.py` |
+| Connector | `5e8e41696ebc6a1a9d3ea92ddb7a1d338537ca1b`，Phase 1 原始起點；本輪 origin/main 為以上 #33 pin，分支 `feat/delivery-2`。依據 `delivery.py`、`github.py`、`config.py`、`operations.py`、`task_journal.py`、`api_auth.py`、`resource_policy.py`、`api_v1.py`、`task_daemon.py`、`integration.py`、Dashboard、`tests/test_delivery.py` 與 `tests/fakegithub.py` |
 | 計畫與交接 | 計畫 v1.0，2026-10-06；[前輪交接](../handoff/2026-10-08.md)。交接的 main pin 是前輪紀錄，本次以以上 Connector pin 為準；不將私有計畫複製進 repo |
 | BAT | `b7419892fbc9946799b64cca24c2ec8c7fa15c42`，[worktree.rs](https://github.com/tony1223/better-agent-terminal/blob/b7419892fbc9946799b64cca24c2ec8c7fa15c42/src-tauri/crates/bat-git/src/worktree.rs)。本包不新增 BAT channel、SSH Git 或 worktree mutation；人工／unknown 規則沿用 [resource-policy.md](resource-policy.md) |
 | GitHub REST | API version `2026-03-10`；2026-10-08 查核官方文件，adapter／fake 固定此版本。官方文件可變動，不宣稱是不變的 snapshot；未知 schema／無法證明的 scope 不放行 |
@@ -173,7 +175,7 @@ Title 是非空字串；body 是字串，空字串清空，省略保留。CLI bo
 | admission | integrate、repo allow_pr_update、合法 fields／digest、正整數 PR number；同 PR 無未結束 update | 保存 operation 意圖 | 403／422／`PR_UPDATE_IN_PROGRESS`（409），換 key 不繞過 |
 | `pr.metadata.plan` | GET PR 比 digest；保存 before 與 intended after，省略欄取 before | journal snapshot | 不符為 `PR_METADATA_CHANGED`，保存差異；zero PATCH |
 | `pr.metadata.write` | step intent commit 後、PATCH 前再次 GET，核對 repo ID 與整對 before；PATCH `/pulls/{n}` 只送指定欄位 | 改遠端 title／body，可能觸發通知／事件 | 寫前變更停止；200 保存回執；失聯／429／5xx 為 uncertain，先回查 |
-| `pr.metadata.verify` | 寫後再 GET，整對內容必須等於 after | 保存 observed、digest、URL；相符才 succeeded | 不同為 `PR_METADATA_CONFLICT`／needs_attention；保存 before／intended／observed；讀不到等待，不重 PATCH |
+| `pr.metadata.verify` | 寫後再 GET，整對內容必須等於 after | 保存 observed、digest、URL；相符才 succeeded | 不同為 `PR_METADATA_CONFLICT`／needs_attention；401／403／404 保存拒絕回執後在 step 外 needs_attention，resume 用 verify.retry.<seq> 只讀重查，不重 PATCH；含舊版非 200 receipt |
 
 Write reconcile／重啟：after 是正向證據，`observed_intent=true`，不猜作者；before 在 write step 開始後未滿 10 分鐘仍維持 uncertain，沒有 RERUN；第三種內容為 conflict。Cancel／resume 不覆蓋或自動還原。處理方式是讀新內容、重新編輯、以新 digest／key 建操作；操作不能在 resume 換 precondition。
 
@@ -182,6 +184,7 @@ Write reconcile／重啟：after 是正向證據，`observed_intent=true`，不�
 | Recovery 讀回 | Settlement／下一步 |
 |---|---|
 | after | 正向觀測證據；沿用已批准的 step／refs 完成路徑，保留 private service calls 的介面回歸測試 |
+| PATCH 後 readback／uncertain write reconcile 被拒（401／403／404） | GITHUB_401／403／404、needs_attention；不固化成 failed write／verify step，修復 token／權限後 resume。Plan 與 PATCH 前讀取被拒仍 failed、zero PATCH，即使已有 readonly plan／write intent |
 | before，step 開始未滿 600 秒 | 保留 uncertain／PR_UPDATE_IN_PROGRESS，等原請求讀回；取消不釋放 |
 | before，step 開始已滿 600 秒 | 客戶端 timeout 早已結束；delivery 自己的 `pr_metadata_settlements` 保存 `not_applied`／`PR_METADATA_NOT_APPLIED`／observed／時間，釋放 PR，之後不再週期 GET 此 row；不改另一操作的 steps／refs |
 | 已保存 not_applied 的非取消操作 reconcile／resume | 只讀保存結論，step 不再 PATCH；handler 以 PR_METADATA_NOT_APPLIED 明確 failed。原 UNCERTAIN_UNRESOLVED 操作保留 needs_attention，直到 caller resume；cancelled 仍 cancelled，不自動恢復 |
@@ -226,8 +229,10 @@ Journal 保存必要的 before／intended／observed；沿用 api_events 的 act
 | 409 existing | 比 head、resolved method、merge_action=default，重查 repo／base／單 PR scope；缺證據或不同為 `EXISTING_MERGE_REQUEST`。default method 只有能證明解析成選定值才接受 |
 | 400／輪詢 failed | 沿用 PR_NOT_MERGEABLE／MERGE_FAILED，不能 bypass |
 | `merge.verify`（新增） | GET merged PR／commit parents、固定 base 到真正 merged SHA 的 comparison、受影響 PR 狀態；保存逐 PR 結果與 actual merged SHA |
+| submit 後 PR／commit／compare／stack／recent PR read 被拒（401／403／404） | GITHUB_401／403／404、needs_attention；保留 merge receipt／lock，修好 token／權限後 resume，不重 PUT。Verify 拒絕回執在 step 中保存、在 step 外轉 attention；uncertain submit reconcile 的拒絕亦可 resume |
+| UUID 404 | 保留已批准的 expired UUID 路徑：改查 PR／queue、不重 PUT；只有 PR 可讀才繼續觀測，PR 自身 401／403／404 仍 needs_attention |
 
-Merge.verify 查實際 merged PR／commit 與 base history：PR 必須 merged；merge method 的 merge commit 第二 parent 等於 reviewed head，squash／rebase 則 merged PR 的 head SHA 等於 reviewed head；結果在 base branch history 上，且 reviewed base 是其祖先。merge.verify 在讀取前保存 step intent；readback 尚未答覆則 waiting_external，重讀／resume 以 merge.verify.retry.<attempt> 保存另一次只讀證據，成功的 receipt 不再重驗或重送合併。保存 merged_onto_base_sha（merge／squash 的第一 parent，rebase 以實際 merged SHA 沿 reviewed commits 數量回溯的 base，證據不足時不猜）、base_moved、其他將一起發布的 commits／數量。
+Merge.verify 查實際 merged PR／commit 與 base history：PR 必須 merged；merge method 的 merge commit 第二 parent 等於 reviewed head，squash／rebase 則 merged PR 的 head SHA 等於 reviewed head；結果在 base branch history 上，且 reviewed base 是其祖先。merge.verify 在讀取前保存 step intent；readback 尚未答覆則 waiting_external，重讀／resume 以 merge.verify.retry.<seq> 保存另一次只讀證據，suffix 取前次 step seq，避免多次 resume 的 operation attempts 相同而重播舊拒絕回執。成功的 receipt 不再重驗或重送合併。若 PR 是別人事先合併、此 operation 沒有送寫入，唯讀驗證被拒仍 fail fast；readonly verify step 不冒充 write。保存 merged_onto_base_sha（merge／squash 的第一 parent，rebase 以實際 merged SHA 沿 reviewed commits 數量回溯的 base，證據不足時不猜）、base_moved、其他將一起發布的 commits／數量。
 
 提交被受理後 base 前進是正常行為，包括 queue 先合成其他 PR，不比預覽 tree、不做 rebase blob mapping。UI 顯示「合併到較新的 base：另有 N 個 commits 會一起發布」。Combined 驗證通過就部署 actual merged SHA；§17 pipeline pre-deploy check 與 Part B D03 runtime evidence 驗證最後版本。
 
@@ -343,6 +348,7 @@ Contract_version 保持 YYYY-MM-DD，以該部分變更日期更新（Part A 為
 | PR_METADATA_UNVERIFIABLE | needs_attention | 保留 write receipt，補足 readback；不重新 PATCH |
 | PR_METADATA_CONFLICT | needs_attention | 保留三份內容，不覆蓋／還原 |
 | PR_METADATA_NOT_APPLIED | failed（reconcile／resume） | 600 秒後仍 before 的寫入已結案；讀新 digest／key 開新操作，不重 PATCH |
+| GITHUB_401／GITHUB_403／GITHUB_404（read） | 無 sent write 為 failed；寫後為 needs_attention | 修復 token／權限再 resume；唯讀 plan／verify 不算 sent write；不重送已受理的 merge／PATCH |
 | STACKED_PR_UNSUPPORTED／MERGE_SCOPE_EXPANDED／MERGE_SCOPE_UNPROVEN | preview blocking；needs_attention | 檢視各 PR／commits，正常重整或補讀取證據後重新預覽 |
 | TARGET_HEAD_CHANGED／TARGET_BASE_CHANGED／MERGE_SCOPE_CHANGED | failed／409 | 重新預覽，zero PUT |
 | EXISTING_MERGE_REQUEST | needs_attention | 核對既有 intent，不借不同操作 |
@@ -397,6 +403,8 @@ Review follow-up 的新增回歸：
 | C07、§10／§15 metadata recovery | `test_metadata_lost_before_write_settles_not_applied_after_window`（cancelled／UNCERTAIN_UNRESOLVED、新操作受理、停止 GET／zero 第二 PATCH）；`test_metadata_late_landing_after_settlement_is_caught_by_digest`；`test_metadata_positive_cancel_reconciliation_pins_private_service_calls` |
 | C04／C07、§16 preview | `test_pr_card_reuses_identical_preview_and_prunes_expired`（摘要欄位、未過期重用、queued row 保留到 verify）；`test_event_reloads_do_not_recompute_scope_within_window`（GitHub calls、SHA 改變立即刷新、digest 重用後時計仍刷新）；`test_event_reload_throttle_is_shared_by_http_and_rpc` |
 | C04／C05、§16 submit／verify | `test_transient_scope_read_error_before_submit_is_resumable`（failed step 不存在、resume 僅一 PUT）；`test_checks_wait_only_rereads_head_and_base_before_final_scope`；`test_verify_accepts_affected_pr_merged_after_this_merge`；`test_verify_stops_updated_pr_pagination_at_admission`（排序與 pages） |
+
+#33 rebase 後新增：`test_refused_read_after_merge_submit_needs_attention_and_resumes`（PR／commit／compare／recent PR／stack／affected PR × 401／403／404，連續 resume、單一 PUT）；`test_refused_read_after_metadata_write_needs_attention_and_resumes`（ACK readback／lost PATCH reconcile × 三種拒絕，單一 PATCH）；`test_metadata_refused_read_before_patch_fails_fast`（plan／pre-PATCH × 三種拒絕）；`test_readonly_merge_verification_refusal_before_write_fails_fast`。對應 C04／C05／C07、計畫 §09／§10／§15／§16。
 
 以下均為 Part B（第二步）規劃，尚未聲稱完成：
 

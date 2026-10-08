@@ -44,7 +44,7 @@ def _cfg(ops: OperationService) -> GitHubConfig:
 
 
 async def _read(coro, what: str, ctx: OpContext | None = None):
-    """A read that GitHub could not answer just waits and retries; it never fails the operation.
+    """An unanswered read waits; a refused read is classified against this operation's sent writes.
 
     A refused read (401 expired token, 403, 404) fails the operation only while it has sent nothing. Once a merge
     request or dispatch is out, GitHub may still be merging or deploying, so the operation waits for a person
@@ -54,10 +54,21 @@ async def _read(coro, what: str, ctx: OpContext | None = None):
         status, body = await coro
     except GitHubAmbiguous:
         raise Wait("waiting_external", f"GitHub did not answer ({what}); retrying", 30) from None
+    return _read_result(status, body, what, ctx)
+
+
+def _sent_write(ctx: OpContext) -> bool:
+    # Part A also records read-only plan/verify steps; their presence does not mean a write was sent.
+    return ctx.service.db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? "
+                                  "AND (name LIKE '%.submit' OR name LIKE '%.dispatch' OR name='pr.metadata.write')",
+                                  (ctx.operation_id,)).fetchone() is not None
+
+
+def _read_result(status: int, body: dict, what: str, ctx: OpContext | None = None):
+    """Share refused-read classification with named read steps without swallowing ambiguous replies."""
     if status != 200:
         message = f"{what}: {str(body.get('message') or status)[:200]}"
-        if ctx is not None and ctx.service.db.execute("SELECT 1 FROM operation_steps WHERE operation_id=?",
-                                                      (ctx.operation_id,)).fetchone():
+        if ctx is not None and _sent_write(ctx):
             raise NeedsAttention(f"GITHUB_{status}", message + "; a write was already sent, so check GitHub, fix "
                                  "the token or permission, then resume")
         raise OperationError(f"GITHUB_{status}", message)
@@ -178,6 +189,7 @@ async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method:
             status, again = await gh.pull(repository, number)
         except GitHubAmbiguous:
             return None
+        _read_result(status, again, "read back the merge request", ctx)
         if status == 200 and again.get("merged"):
             return {"http_status": 200, "status": "merged", "details": {"sha": again.get("merge_commit_sha")},
                     "observed_only": True}
@@ -185,7 +197,11 @@ async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method:
         if status == 200 and again.get("state") == "open":
             try:
                 await pr_delivery.check_scope(ctx, preview, expiry=False)
-            except (OperationError, NeedsAttention, GitHubAmbiguous):
+            except NeedsAttention as exc:
+                if exc.code.startswith("GITHUB_"):
+                    raise
+                return None
+            except (OperationError, GitHubAmbiguous):
                 return None
             return RERUN
         return None

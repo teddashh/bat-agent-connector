@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Delivery Part A after #33 ([design](docs/design/delivery.md), plan §09/§10/§15/§16, C04/C05/C07): refused GitHub
+  reads after merge.submit or a metadata PATCH retain needs_attention and resume with fresh readonly verification,
+  including comparison and recent-PR pages. Readonly plan/verify steps do not count as sent writes; pre-write
+  refusals still fail fast. Repeated resumes do not reuse a stale refusal receipt or resend the accepted write.
+
 - Delivery operations no longer end as `failed` while GitHub is still merging or deploying (#32). A refused GitHub
   read after a merge request or dispatch was sent (an expired token's 401, a 403, a 404) now waits for a person
   (`needs_attention`) and keeps the recipe's deploy lock; before any write it still fails. A rate-limited read (403),
