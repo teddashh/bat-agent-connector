@@ -693,6 +693,17 @@ async def test_checkpoint_preframe_cancellation_restarts_unsent_reserved_session
     ready = pause.entered if stage == 'before' else asyncio.Event()
     client = daemon.fleet.client('h1')
     invoke = client.invoke
+    propagated = []
+    start_session = orchestrate.session_start
+
+    async def trace_start(*args, **kwargs):
+        try:
+            return await start_session(*args, **kwargs)
+        except asyncio.CancelledError as exc:
+            propagated.append(exc)
+            raise
+
+    monkeypatch.setattr(orchestrate, 'session_start', trace_start)
 
     async def after_frame(channel, params=None, **kwargs):
         result = await invoke(channel, params, **kwargs)
@@ -712,8 +723,11 @@ async def test_checkpoint_preframe_cancellation_restarts_unsent_reserved_session
         row = registry.list_entries('h1')[-1]
         sid, worktree = row['session_id'], row['cwd']
         pending.cancel('fixture operation cancellation')
-        with pytest.raises(asyncio.CancelledError, match='fixture operation cancellation'):
+        with pytest.raises(asyncio.CancelledError):
             await pending
+        assert len(propagated) == 1 and propagated[0].args == ('fixture operation cancellation',)
+        if stage == 'before':
+            assert propagated[0] is pause.cancelled
         row = registry.get('h1', sid)
         assert row['start_sent'] is (stage == 'after')
         assert row['status'] == ('failed' if stage == 'before' else 'uncertain')

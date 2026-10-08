@@ -38,6 +38,8 @@
   propagates without asynchronous rollback. Checkpoint/repair, failover and Task Service recover proven-unsent starts
   under their reserved IDs; a later new-start retry cannot overwrite sent evidence with false. Retained BAT worktrees are checked and reused, and Task command evidence covers early
   preparation. Starts already handed to transport remain uncertain and are read back without another start frame.
+  Cancellation tests check the original exception inside the coroutine, covering Python 3.10's loss of the message
+  when awaiting a cancelled task without weakening the propagation check.
   **A10 is not proven until the W12 live run**; no sandbox evidence-file import is included here.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the

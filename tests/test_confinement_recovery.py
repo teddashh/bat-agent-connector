@@ -569,12 +569,17 @@ class PauseAtFrame(AccountRunner):
     def __init__(self):
         super().__init__()
         self.entered, self.release = asyncio.Event(), asyncio.Event()
+        self.cancelled = None
 
     async def run_account_check(self, host, script, timeout_s=None):
         self.scripts.append(script)
         if len(self.scripts) == 2:
             self.entered.set()
-            await self.release.wait()
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError as exc:
+                self.cancelled = exc
+                raise
         return json.dumps({"status": "verified", "reason": "fixture_hardened_account"})
 
 
@@ -596,12 +601,18 @@ async def test_start_preframe_cancellation_is_unsent_and_reuses_reserved_id(
         role = 'reviewer' if path == 'reviewer' else 'lead'
         journal.command(task['task_id'], 'start_' + role, sid, {'agent': 'codex', 'role': role}, 'cancel-start')
 
+    propagated = []
+
     async def start():
-        if path == 'start':
-            return await orchestrate.session_start(fleet, 'h1', 'demo-project', 'claude', confirm=True, session_id=sid)
-        if path == 'failover':
-            return await lifecycle.session_failover(fleet, 'h1', lead, confirm=True)
-        return await adapter.start(task, role=role, agent='codex', session_id=sid)
+        try:
+            if path == 'start':
+                return await orchestrate.session_start(fleet, 'h1', 'demo-project', 'claude', confirm=True, session_id=sid)
+            if path == 'failover':
+                return await lifecycle.session_failover(fleet, 'h1', lead, confirm=True)
+            return await adapter.start(task, role=role, agent='codex', session_id=sid)
+        except asyncio.CancelledError as exc:
+            propagated.append(exc)
+            raise
 
     pending = asyncio.create_task(start())
     try:
@@ -610,8 +621,12 @@ async def test_start_preframe_cancellation_is_unsent_and_reuses_reserved_id(
         reserved_sid = row['session_id']
         assert row['start_sent'] is False
         pending.cancel('fixture pre-frame cancellation')
-        with pytest.raises(asyncio.CancelledError, match='fixture pre-frame cancellation'):
+        with pytest.raises(asyncio.CancelledError):
             await pending
+        # Python 3.10 drops cancel messages at Task.__await__; test the product
+        # stack's original exception directly, before that interpreter boundary.
+        assert propagated == [pause.cancelled]
+        assert propagated[0].args == ('fixture pre-frame cancellation',)
         row = registry.get('h1', reserved_sid)
         assert row['start_sent'] is False and row['status'] == 'failed'
         assert 'claude:start-session' not in mock.channels()
