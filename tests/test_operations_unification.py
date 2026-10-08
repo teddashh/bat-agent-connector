@@ -573,6 +573,99 @@ async def test_a07_uncertain_task_send_reads_back_after_restart_without_resendin
     assert len([c for c in d.journal.commands(tid) if c["kind"] == "send"]) == 1
 
 
+@pytest.mark.parametrize("action", ["session.send", "session.answer", "session.interrupt"])
+@pytest.mark.parametrize("proven", [True, False], ids=["proven", "unproven"])
+async def test_a07_operation_readback_and_coordinator_tick_settle_task_command(owned, mock, monkeypatch,
+                                                                            action, proven):
+    d, tid = owned
+    prior = d.journal.change(tid, "running")
+    mock.echo_sends = True
+    if action == "session.answer":
+        mock.states[SID]["pendingAskUser"] = {"toolUseId": "ask-1", "questions": [{"question": "Choice?"}]}
+    if action == "session.interrupt":
+        mock.metas[SID]["isStreaming"] = mock.states[SID]["isStreaming"] = True
+    params = {"session.send": {"text": "runtime instruction"},
+              "session.answer": {"answers": ["yes"], "tool_use_id": "ask-1"},
+              "session.interrupt": {"mode": "soft"}}[action]
+    channel = {"session.send": "claude:send-message", "session.answer": "claude:resolve-ask-user",
+               "session.interrupt": "claude:interrupt-turn"}[action]
+    principal = api_auth.Principal("operator", frozenset({"operate"}))
+    target = {"host": "h1", "session_id": SID}
+    op, _ = d.ops.create(principal, action=action, target=target, params=params,
+                         preconditions={"control_version": prior["control_version"]}, idempotency_key="lost")
+    op_id = op["operation_id"]
+    step_name = action.removeprefix("session.")
+    command_status = "accepted" if action == "session.send" else "settled"
+    client = d.fleet.client("h1")
+    original_roundtrip = client._roundtrip
+
+    async def lose_reply(frame, timeout):
+        result = await original_roundtrip(frame, timeout)
+        if frame["channel"] == channel:
+            if action == "session.interrupt":
+                mock.metas[SID]["isStreaming"] = mock.states[SID]["isStreaming"] = False
+            raise ConnectionLost("reply lost after BAT took the frame")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(client, "_roundtrip", lose_reply)
+        await d.ops.drain(timeout=30)
+    command = d.journal.commands(tid)[-1]
+    cid = command["command_id"]
+    row = d.ops.get(op_id)
+    assert row["status"] == "uncertain"
+    assert next(s for s in row["steps"] if s["name"] == step_name)["status"] == "uncertain"
+    assert row["external_refs"]["command_id"] == cid
+    assert json.loads(command["payload"])["operation_id"] == op_id
+    assert command["status"] == d.journal.get(tid)["state"] == "uncertain"
+    assert registry.get_turn("h1", SID, "batc-" + op_id) is None
+    assert len(writes(mock)) == 1 and writes(mock)[0]["channel"] == channel
+    original_reconcile = d.coordinator._reconcile_command
+    reconciled = []
+
+    async def reconcile(task, cmd):
+        assert d.coordinator._task_locks[tid].locked()
+        reconciled.append(cmd["command_id"])
+        return await original_reconcile(task, cmd)
+
+    async def no_dispatch(*args, **kwargs):
+        raise AssertionError("read-back must not re-enter session_control")
+
+    async def unreadable(frame, timeout):
+        result = await original_roundtrip(frame, timeout)
+        return {**result, "result": None} if frame["channel"] in {
+            "claude:get-session-meta", "claude:get-session-state", "claude:load-archived"} else result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(d.coordinator, "session_control", no_dispatch)
+        patch.setattr(d.coordinator, "_reconcile_command", reconcile)
+        if not proven:
+            patch.setattr(client, "_roundtrip", unreadable)
+        for attempt in range(1 if proven else 2):
+            d.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op_id,))
+            await d.ops.drain(timeout=30)
+            row = d.ops.get(op_id)
+            assert row["status"] == ("succeeded" if proven else "uncertain")
+            assert next(s for s in row["steps"] if s["name"] == step_name)["status"] == (
+                "succeeded" if proven else "uncertain")
+            # The operation's proof does not settle the coordinator's command or bypass its gate.
+            assert d.journal.command_get(cid)["status"] == d.journal.get(tid)["state"] == "uncertain"
+            assert len(reconciled) == attempt
+            with pytest.raises(OperationError, match="TASK_COMMAND_PENDING"):
+                d.ops.create(principal, action="session.interrupt", target=target, idempotency_key="later")
+            task = await d.coordinator.tick(tid)
+            assert reconciled == [cid] * (attempt + 1)
+            assert task["state"] == (prior["state"] if proven else "uncertain")
+            assert task["control_version"] == prior["control_version"]
+            assert d.journal.command_get(cid)["status"] == (command_status if proven else "uncertain")
+            assert len(writes(mock)) == len(d.journal.commands(tid)) == 1
+    if proven:
+        later, _ = d.ops.create(principal, action="session.interrupt", target=target, idempotency_key="later")
+        await d.ops.drain(timeout=30)
+        assert d.ops.get(later["operation_id"])["status"] == "succeeded"
+        assert len(writes(mock)) == len(d.journal.commands(tid)) == 2
+
+
 async def test_a09_live_owner_lease_loss_blocks_a_waiting_frame(owned, mock, monkeypatch):
     d, _ = owned
     original = d.fleet.client("h1")._invoke_checked
