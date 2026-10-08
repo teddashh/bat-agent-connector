@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Observation relation event links ([design](docs/design/observation.md), plan §08/§10/§11, B01/B03):
+  attach opened/bound/closed facts only to their named relation and session, including version-1 replay;
+  retain malformed-event evidence without guessed links. Task milestones and task-source projections use
+  relations proven open at the event sequence, excluding former participants and preserving execution paging.
+
 - Observation history roles ([design](docs/design/observation.md), plan §08/§10/§11/§15/§16, B01/B03):
   retain lead/reviewer and other fixed roles in relation events and nested version/backfill summaries.
   Audit the recursive whitelist to preserve bounded IDs, sequences, SHAs and boolean/state evidence, including
