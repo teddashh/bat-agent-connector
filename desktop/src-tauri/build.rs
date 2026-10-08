@@ -6,6 +6,8 @@ fn main() {
             "connector_disconnect",
             "connector_request",
             "open_external",
+            "fleet_availability",
+            "fleet_request",
         ]),
     ))
     .expect("desktop build configuration");
