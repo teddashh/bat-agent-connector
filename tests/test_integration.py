@@ -830,6 +830,9 @@ async def test_forbidden_targets_and_admission(world, mock):
                           "github": {"token_ref": "env:FAKE_GH_TOKEN", "api_url": w.gh.url,
                                      "repos": [{"repository": "o/r", "integrate": {
                                          "hosts": ["h1"], "remote_url": str(w.remote)}}]}})
+    # A09: finish the first owner before evaluating a different daemon configuration.
+    await w.d.fleet.close()
+    w.d.journal.close()
     off = TaskDaemon(plain, w.tmp / "off.db")
     off.ops.context["git_runner"] = w.runner
     w.daemons.append(off)

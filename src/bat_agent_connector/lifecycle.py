@@ -21,7 +21,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from . import registry, resource_policy, verification
+from . import registry, resource_policy, task_control, verification
 from .errors import (
     BatError,
     InvokeTimeout,
@@ -86,12 +86,18 @@ async def _candidate_head(c, cwd: str | None) -> str | None:
 async def session_record_verification(
     fleet: Fleet, host: str, session_id: str, candidate_commit: str, command: str,
     exit_code: int, environment: str, log_ref: str, confirm: bool = False,
+    _task_guard: task_control.FrameGuard | None = None,
 ) -> dict:
     """Record a trusted external test run for the current clean candidate commit."""
     _orch_guard(fleet, host, confirm)
     c = fleet.client(host)
     t, _ = await _resolve_session(c, session_id)
     sid = t["id"]
+    if task_control.owner_task(fleet, host, sid):
+        if (not isinstance(_task_guard, task_control.FrameGuard) or _task_guard.action != "verify"
+                or _task_guard.host != host or _task_guard.session_id != sid or not _task_guard.internal):
+            task_control.refuse_owned(fleet, host, sid)
+        _task_guard.check()
     cwd = t.get("worktreePath") or t.get("cwd")
     head = await _candidate_head(c, cwd)
     if not head or head != candidate_commit.lower():
@@ -99,6 +105,8 @@ async def session_record_verification(
     dirty = await _git_dirty(c, cwd)
     if dirty is None or dirty:
         raise WriteRefused("candidate working tree must be clean when recording verification")
+    if _task_guard:
+        _task_guard.check()
     row = verification.record(host, sid, candidate_commit=head, command=command, exit_code=exit_code,
                               environment=environment, log_ref=log_ref, actor=fleet.actor)
     Audit(fleet.config.safety).record(actor=fleet.actor, tool="session_record_verification", host=host,
@@ -112,6 +120,7 @@ class TurnInFlight(WriteRefused):
     """Raising a Claude session's mode mid-turn would abort the turn (see session_set_permissions)."""
 
 
+@task_control.guarded("permissions")
 async def session_set_permissions(
     fleet: Fleet,
     host: str,
@@ -119,6 +128,9 @@ async def session_set_permissions(
     mode: str = "allow_all",
     confirm: bool = False,
     force: bool = False,
+    _task_guard: task_control.FrameGuard | None = None,
+    control_version: int | None = None,
+    operation_id: str | None = None,
 ) -> dict:
     """Switch a live session's permission mode (Claude: permission mode; Codex: sandbox + approval).
 
@@ -176,7 +188,7 @@ async def session_set_permissions(
         for ch, params in calls:
             audit.record(**base, channel=ch, phase="attempt", mode=mode)
             try:
-                r = await c.invoke(ch, params, grant=grant)
+                r = await c.invoke(ch, params, grant=grant, before_send=_task_guard)
             except BatError as e:
                 audit.record(**base, channel=ch, phase="result", ok=False, error=_err(e))
                 raise
@@ -456,6 +468,9 @@ async def _failover_one(
             source.code,
             f"failover only continues connector-managed sessions; {sid[:8]}: {source.reason}. The source stays "
             "untouched: start a new managed worktree session (session_start) from its committed work instead")
+    owner_id = task_control.owner_task(fleet, host, sid)
+    if owner_id and owner_id != task_id:
+        task_control.refuse_owned(fleet, host, sid)
     prior = [
         e
         for e in registry.list_entries(host)
@@ -1028,7 +1043,7 @@ async def _evaluate(
         row["stop"] = stop
         return row
 
-    if e.get("task_id"):
+    if task_control.owner_task(fleet, host, sid):
         return decide("KEEP", "task-service owns this session; lifecycle cleanup is not its writer")
 
     if e.get("role") == "reviewer" and e.get("lead_session_id") and e.get("worktree_path"):
@@ -1277,7 +1292,8 @@ async def _stop(fleet: Fleet, host: str, sid: str, audit: Audit) -> dict:
     audit.check_rate(host, sid + "#stop")
     audit.record(**base, channel="claude:stop-session", phase="attempt")
     try:
-        r = await c.invoke("claude:stop-session", {"sessionId": sid}, grant=grant)
+        r = await c.invoke("claude:stop-session", {"sessionId": sid}, grant=grant,
+                           before_send=lambda: task_control.refuse_owned(fleet, host, sid))
     except BatError as e:
         audit.record(**base, channel="claude:stop-session", phase="result", ok=False, error=_err(e))
         return {"stopped": False, "error": _err(e)}
@@ -1463,7 +1479,8 @@ async def main_session(fleet: Fleet, host: str, workspace: str) -> dict | None:
     rows = [
         r for r in rows
         if r["session_id"] not in gone and r["session_id"] not in planners
-        and r["session_id"] not in task_owned and r.get("agent_kind") in ("claude", "codex")
+        and r["session_id"] not in task_owned and not task_control.owner_task(fleet, host, r["session_id"])
+        and r.get("agent_kind") in ("claude", "codex")
         and r.get("api_access") == "managed"
     ]
     main = [r for r in rows if not r.get("worktree_branch")] or rows

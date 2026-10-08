@@ -495,9 +495,14 @@ class BatTaskAdapter:
                     or json.loads(command["payload"]).get("prompt_sha256") != hashlib.sha256(text.encode()).hexdigest()):
                 raise TaskDispatchCancelled("task send was cancelled before BAT invoke")
 
+        from .task_control import FrameGuard
+        guard = FrameGuard(self.journal, task["task_id"], task["host"], session_id,
+                           task["control_version"], command["command_id"] if command else None,
+                           internal=not str(purpose).startswith("goose:"),
+                           prompt_sha256=hashlib.sha256(text.encode()).hexdigest())
         return await service.session_send(self.fleet, task["host"], session_id, text, confirm=True,
                                           message_id=message_id, retry_on_disconnect=False,
-                                          before_invoke=before_invoke,
+                                          before_invoke=before_invoke, _task_guard=guard,
                                           initial_task_send=initial_task_send)
 
     async def prepare_send(self, task: dict, session_id: str) -> dict:
@@ -560,7 +565,11 @@ class BatTaskAdapter:
         return result
 
     async def interrupt(self, task: dict, session_id: str) -> None:
-        await service.session_interrupt(self.fleet, task["host"], session_id, "hard", confirm=True)
+        from .task_control import FrameGuard
+        guard = FrameGuard(self.journal, task["task_id"], task["host"], session_id,
+                           task["control_version"], action="interrupt", abort=True)
+        await service.session_interrupt(self.fleet, task["host"], session_id, "hard", confirm=True,
+                                        _task_guard=guard)
 
     async def failover(self, task: dict, session_id: str, successor_id: str, *,
                        handoff_message_id: str, handoff_command_id: str) -> dict:
@@ -831,7 +840,15 @@ class BatTaskAdapter:
         cwd = self._cwd(task)
         if not cwd:
             return None
-        evidence = await self.verifier.observe(task, cwd)
+        from .task_control import FrameGuard
+        guard = (FrameGuard(self.journal, task["task_id"], task["host"], task["session_id"],
+                            task["control_version"], action="verify", internal=True) if self.journal else None)
+        if guard:
+            guard.check()
+        if isinstance(self.verifier, ObservedVerifier):
+            evidence = await self.verifier.observe(task, cwd, before_run=guard.check if guard else None)
+        else:
+            evidence = await self.verifier.observe(task, cwd)
         if not evidence:
             return None
         # The service, not Goose/Hermes, owns the PR #1 record after observing
@@ -839,6 +856,6 @@ class BatTaskAdapter:
         await lifecycle.session_record_verification(
             self.fleet, task["host"], task["session_id"], evidence["candidate_commit"],
             evidence["command"], evidence["exit_code"], "task-service:" + task["host"],
-            evidence["log_ref"], confirm=True,
+            evidence["log_ref"], confirm=True, _task_guard=guard,
         )
         return evidence
