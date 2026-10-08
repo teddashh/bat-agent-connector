@@ -108,6 +108,8 @@ worker 沒有完整 content 時用長 Wait，delay 為 upload window 剩餘時�
 
 deadline 無完整 content 就 failed/UPLOAD_EXPIRED；任一 terminal state 釋放 reservation並移除自己的 staging。若取消／失敗前已 publish，正本仍保留；未 ready 的正本記 unavailable，仍計入 store quota，不把它當空間釋放。marker／publish ACK 不明先讀回；staging partial 不可作 ready。正式檔案被改／遺失顯示 ARTIFACT_CONTENT_UNAVAILABLE，不從 client path 自行補抓。
 
+Scratch reaper 是獨立於 task worker／push 的背景 loop；檔案刪除在 thread，SQLite 更新在 daemon event loop。每個失敗記 operation ID 與 exception class，下一輪重試；未完成 reaping 的 rows 保留 reservation。cancel／receive／upload admission 的 reaping 為 best-effort，不能改已提交的回應或取代原 exception。
+
 ## 附件關聯與 work item（A）
 
 work item 附件在既有交易與 management_applied 一起寫，role／ID／revision／digest 納入有附件時的 fingerprint。空集合維持舊 fingerprint，migration 不令舊 approval 失效；新增／換 result revision 重新待確認。被移除 refs 保留釋放事實，不刪 bytes。
@@ -204,6 +206,8 @@ BAT只用mockbat；git用temp repo／LocalRunner／RealGitLog。byte helper測�
 | test_cancelled_unsettled_publish_keeps_original_and_its_quota | publish outcome 未結束後取消，保留正本且仍計 quota |
 | test_B04_missing_original_blocks_then_resumes_same_parent | store missing 的 proven error 先記 step，再 blocked；還原後續同 parent |
 | test_upload_window_expires_and_removes_only_its_own_staging | deadline、terminal scratch cleanup／reservation釋放 |
+| test_reaper_failure_never_stops_ticks_or_fails_cancel | cleanup 的 ValueError／policy／OSError 不改 cancel／receive／admission／ticks，reservation 保守保留 |
+| test_slow_reaper_never_delays_task_ticks | 慢速 rmtree 不阻塞 task worker，清理完成後才釋放 reservation |
 | test_operation_wake_only_moves_waiting_external | 其他狀態不變，不poll |
 | test_attachment_change_invalidates_work_item_approval | 有附件才改fingerprint、version衝突 |
 | test_artifact_migration_preserves_existing_journal_and_empty_manifests | 舊IDs／approval／空附件、idempotent DDL |

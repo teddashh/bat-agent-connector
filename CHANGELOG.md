@@ -11,6 +11,9 @@
   (Part B, A03 attachments) and cross-host commit fetch (Part C) remain deferred.
 - Artifact schema setup runs idempotently after numbered migrations without reading or advancing `user_version`,
   preserving delivery and observation data migrations ([design](docs/design/artifacts.md), plan §08/§13).
+- Artifact scratch reaping retries independently of task ticks, with filesystem deletion off the event loop.
+  Cleanup failures keep reservations and cannot fail a committed cancel, upload receive or unrelated admission
+  ([design](docs/design/artifacts.md), plan §09/§13, B04).
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps

@@ -412,7 +412,7 @@ class ApiV1:
 
     async def cancel_operation(self, principal, op, **_):
         result = self.daemon.ops.cancel(principal, op)
-        self.daemon.artifact_store.reap_terminal()
+        await self.daemon.artifact_store.reap_best_effort(op)
         return 200, {"operation": result}
 
     async def create_artifact(self, principal, query, body, headers, **_):

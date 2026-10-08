@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -210,6 +211,9 @@ class ArtifactStore:
         self.settings = settings or ArtifactSettings()
         self.root = Path(self.settings.store_root or self.journal.path.parent / "artifacts")
         self.receivers: set[str] = set()
+        self._reap_lock = asyncio.Lock()
+        self._reap_task = None
+        self._reaper_closed = False
         self._setup()
         # A receiver belongs to the daemon process, not a remote writer. After a restart it is gone.
         for row in self.db.execute("SELECT * FROM artifact_uploads WHERE receive_state='receiving'").fetchall():
@@ -220,7 +224,6 @@ class ArtifactStore:
                 size, digest = 0, hashlib.sha256(b"").hexdigest()
             self.db.execute("""UPDATE artifact_uploads SET receive_state='partial',received_size=?,received_digest=?
                 WHERE operation_id=?""", (size, digest, row["operation_id"]))
-        self.reap_terminal()
 
     def _setup(self):
         resource_policy.check_artifact_storage(self.root)
@@ -273,7 +276,8 @@ class ArtifactStore:
                 raise OperationError("ARTIFACT_NOT_FOUND", "no such artifact", 404)
             if type(pre.get("expected_latest_revision")) is not int or pre["expected_latest_revision"] != row["latest_revision"]:
                 raise OperationError("REVISION_CONFLICT", "the ready revision changed; read it again", 409)
-            if self.db.execute("SELECT 1 FROM artifact_uploads WHERE artifact_id=? AND released_at IS NULL",
+            if self.db.execute("""SELECT 1 FROM artifact_uploads u JOIN operations o USING(operation_id)
+                WHERE u.artifact_id=? AND u.released_at IS NULL AND o.status NOT IN ('succeeded','failed','cancelled')""",
                                (target["artifact_id"],)).fetchone():
                 raise OperationError("UPLOAD_IN_PROGRESS", "a revision is still reserved", 409)
         if self.used_bytes() + size > self.settings.max_store_bytes:
@@ -386,7 +390,7 @@ class ArtifactStore:
             self.receivers.discard(operation_id)
             if complete:
                 self.ops.wake(operation_id)
-            self.reap_terminal()
+            await self.reap_best_effort(operation_id)
         return self.ops.get(operation_id)
 
     def publish(self, row):
@@ -440,36 +444,72 @@ class ArtifactStore:
             pass
         return None
 
-    def reap_terminal(self):
-        rows = self.db.execute("""SELECT u.operation_id,u.artifact_id,u.revision FROM artifact_uploads u JOIN operations o USING(operation_id)
+    def _terminal_uploads(self):
+        return self.db.execute("""SELECT u.operation_id,u.artifact_id,u.revision FROM artifact_uploads u JOIN operations o USING(operation_id)
             WHERE o.status IN ('succeeded','failed','cancelled') AND u.released_at IS NULL""").fetchall()
-        for row in rows:
-            operation_id = row["operation_id"]
-            if operation_id in self.receivers:
-                continue
-            if not OPERATION_ID.fullmatch(operation_id):
-                raise ValueError("invalid upload scratch identity")
-            directory = self.root / "staging" / operation_id
-            resource_policy.check_artifact_storage(directory)
-            if directory.exists():
-                shutil.rmtree(directory)  # only this terminal operation's scratch; never revisions
-                parent_fd = _open_dir(directory.parent)
+
+    def schedule_reap(self, operation_id=None):
+        if self._reaper_closed:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # synchronous admission leaves conservative reservations for the daemon loop
+        if self._reap_task is None or self._reap_task.done():
+            self._reap_task = loop.create_task(self.reap_best_effort(operation_id))
+
+    async def close_reaper(self):
+        self._reaper_closed = True
+        if self._reap_task is not None:
+            self._reap_task.cancel()
+            await asyncio.gather(self._reap_task, return_exceptions=True)
+
+    async def reap_best_effort(self, operation_id=None):
+        try:
+            await self.reap_terminal()
+        except Exception as exc:  # noqa: BLE001 - scratch failure must not change a committed result
+            ids = [operation_id] if operation_id else []
+            if not ids:
+                with contextlib.suppress(Exception):
+                    ids = [row["operation_id"] for row in self._terminal_uploads()]
+            for identity in ids or ["unknown"]:
+                logging.warning("Artifact staging reap for operation %s failed: %s", identity, type(exc).__name__)
+
+    def _remove_staging(self, operation_id):
+        if not OPERATION_ID.fullmatch(operation_id):
+            raise ValueError("invalid upload scratch identity")
+        directory = self.root / "staging" / operation_id
+        resource_policy.check_artifact_storage(directory)
+        if directory.exists():
+            shutil.rmtree(directory)  # only this terminal operation's scratch; never revisions
+            parent_fd = _open_dir(directory.parent)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+
+    async def reap_terminal(self):
+        async with self._reap_lock:
+            for row in self._terminal_uploads():
+                operation_id = row["operation_id"]
+                if operation_id in self.receivers:
+                    continue
                 try:
-                    os.fsync(parent_fd)
-                finally:
-                    os.close(parent_fd)
-            # A publish may have happened before cancellation/record failure. The original stays charged.
-            formal = self.content_path(row["artifact_id"], row["revision"])
-            with self.journal.tx():
-                if formal.exists():
-                    self.db.execute("UPDATE artifact_revisions SET state='unavailable' WHERE operation_id=? AND state='receiving'",
-                                    (operation_id,))
-                self.db.execute("UPDATE artifact_uploads SET reserved_bytes=0,released_at=? WHERE operation_id=?",
-                                (time.time(), operation_id))
+                    # Filesystem work may stall; journal access remains on the daemon's event loop.
+                    await asyncio.to_thread(self._remove_staging, operation_id)
+                    formal = self.content_path(row["artifact_id"], row["revision"])
+                    with self.journal.tx():
+                        if formal.exists():
+                            self.db.execute("UPDATE artifact_revisions SET state='unavailable' WHERE operation_id=? AND state='receiving'",
+                                            (operation_id,))
+                        self.db.execute("UPDATE artifact_uploads SET reserved_bytes=0,released_at=? WHERE operation_id=?",
+                                        (time.time(), operation_id))
+                except Exception as exc:  # noqa: BLE001 - retain this reservation and retry on the next pass
+                    logging.warning("Artifact staging reap for operation %s failed: %s", operation_id, type(exc).__name__)
 
 
 def _admit_upload(ops, principal, target, params, pre):
-    ops.context["artifact_store"].reap_terminal()
+    ops.context["artifact_store"].schedule_reap()
     ops.context["artifact_store"].validate_upload(target, params, pre)
 
 
@@ -517,13 +557,12 @@ async def _run_upload(ctx):
                                        (ctx.operation_id,)).rowcount
             store.db.execute("UPDATE artifacts SET latest_revision=MAX(latest_revision,?) WHERE artifact_id=?",
                              (row["revision"], row["artifact_id"]))
-            store.db.execute("UPDATE artifact_uploads SET reserved_bytes=0 WHERE operation_id=?", (ctx.operation_id,))
             if changed:
                 store.journal.api_event("artifact", row["artifact_id"], "artifact.uploaded", document, actor=ctx.actor)
         return document
     finally:
         # _execute commits its terminal transition before this callback runs.
-        asyncio.get_running_loop().call_soon(store.reap_terminal)
+        asyncio.get_running_loop().call_soon(store.schedule_reap, ctx.operation_id)
 
 
 ACTIONS = [ActionDef("artifact.upload", "manage", "Upload an immutable artifact revision", _run_upload, _admit_upload)]
