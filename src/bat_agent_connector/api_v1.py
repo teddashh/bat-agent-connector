@@ -20,6 +20,7 @@ from . import (
     __version__,
     api_auth,
     checkpoints,
+    dashboard_sync,
     integration,
     pr_delivery,
     resource_policy,
@@ -96,6 +97,7 @@ class ApiV1:
         self.routes = [
             ("GET", r"/api/v1/version", self.version, None),
             ("GET", r"/api/v1/capabilities", self.capabilities, "observe"),
+            ("GET", r"/api/v1/bootstrap", self.bootstrap, "observe"),
             ("GET", r"/api/v1/hosts", self.hosts, "observe"),
             ("GET", r"/api/v1/sessions", self.sessions, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)", self.session, "observe"),
@@ -180,6 +182,8 @@ class ApiV1:
                 if scope and not principal.allows(scope):
                     raise ApiError(403, "FORBIDDEN", f"this route needs the {scope!r} scope")
             status, payload = await fn(principal=principal, query=query, body=body, headers=headers, **kwargs)
+        except dashboard_sync.ResetRequired as e:
+            status, payload = 409, e.document()
         except ApiError as e:
             status, payload = e.status, {"error": {"code": e.code, "message": e.message}}
         except OperationError as e:
@@ -312,8 +316,10 @@ class ApiV1:
                  for h in fleet.config.hosts]
         return 200, {"actor": principal.actor, "scopes": sorted(principal.scopes), "api_version": API_VERSION,
                      "contract_version": CONTRACT_VERSION, "connector": __version__, "hosts": hosts,
+                     "identity": dashboard_sync.identity(self.daemon.journal, principal),
                      "actions": actions, "operation_statuses": list(STATES),
-                     "features": {"inventory": True, "session_history": True, "resource_relations": True, "discovery_scope": True,
+                     "features": {"dashboard_sync": {"version": 1, "bootstrap": "/api/v1/bootstrap", "checkpoint_replay": True},
+                                  "inventory": True, "session_history": True, "resource_relations": True, "discovery_scope": True,
                                   "worktree_history": {"known_bindings_only": True}, "history": {"source": "journal", "legacy_transitions": "may_be_incomplete", "optional_adapters": ["delivery_part_a"],
                                       "observed_event_kinds": [r[0] for r in self.daemon.journal.db.execute("SELECT DISTINCT kind FROM api_events ORDER BY kind")]}, "events_stream": True, "operations": True, "work_items": True,
                                   "github": self.daemon.ops.context.get("github") is not None,
@@ -328,6 +334,19 @@ class ApiV1:
                                        "merge_methods": list(r.merge_methods)} for r in gh_cfg.repos.values()],
                      "deploy_recipes": [{"name": r.name, "repository": r.repository, "environment": r.environment,
                                          "mode": r.mode} for r in gh_cfg.recipes.values()]}
+
+    async def bootstrap(self, principal, **_):
+        # Cursor first. The following existing read models are live pages, not an atomic snapshot.
+        sync = dashboard_sync.checkpoint(self.daemon.journal, principal)
+        _, capabilities = await self.capabilities(principal)
+        db = self.daemon.journal.db
+        return 200, {"sync": sync, "capabilities": capabilities,
+                     "snapshot": {"hosts": self.daemon.inventory.hosts_document(),
+                         "sessions": self.daemon.inventory.list_sessions(order="id", include_gone=True, limit=50),
+                         "projects": work_items.projects_list(db, include_archived=True),
+                         "work_items": work_items.work_items_list(db, include_archived=True, limit=50),
+                         "operations": self.daemon.ops.list(limit=50)},
+                     "pagination": {"atomic": False, "session_order": "id"}}
 
     def _can_continue(self, host: str) -> bool:
         runner = self.daemon.ops.context.get("git_runner")
@@ -440,9 +459,10 @@ class ApiV1:
     async def resume_operation(self, principal, op, **_):
         return 200, {"operation": self.daemon.ops.resume(principal, op)}
 
-    async def events(self, query, **_):
-        return 200, self.daemon.journal.api_events(
-            self._int(query, "after", 0), self._int(query, "limit", 100),
+    async def events(self, query, principal, **_):
+        return 200, dashboard_sync.event_page(
+            self.daemon.journal, principal, self._int(query, "after", 0), self._int(query, "limit", 100),
+            token=self._q(query, "checkpoint"),
             resource_type=self._q(query, "resource_type"), resource_id=self._q(query, "resource_id"), kind=self._q(query, "kind"),
             related_resource_type=self._q(query, "related_resource_type"), related_resource_id=self._q(query, "related_resource_id"))
 
@@ -521,7 +541,8 @@ class ApiV1:
             after = int(headers.get("last-event-id") or self._q(query, "after", 0) or 0)
         except ValueError:
             raise ApiError(422, "INVALID_REQUEST", "after must be an integer") from None
-        self.daemon.journal.api_events(after, 0, kind=self._q(query, "kind"),
+        checkpoint_token = self._q(query, "checkpoint")
+        dashboard_sync.event_page(self.daemon.journal, principal, after, 0, token=checkpoint_token, kind=self._q(query, "kind"),
             related_resource_type=self._q(query, "related_resource_type"), related_resource_id=self._q(query, "related_resource_id"))  # validate before streaming headers
         self._streams += 1
         self._streams_by_actor[actor] = self._streams_by_actor.get(actor, 0) + 1
@@ -536,15 +557,22 @@ class ApiV1:
                     current = api_auth.authenticate(self.daemon.journal.db, token, self.daemon._admin_token)
                     if current is None or not current.allows("observe"):
                         return  # revoked or expired: stop sending; the client sees the stream end
+                    if current != principal:
+                        raise dashboard_sync.ResetRequired("principal_changed")
                     last_auth = time.monotonic()
-                page = self.daemon.journal.api_events(after, 100, kind=self._q(query, "kind"),
+                page = dashboard_sync.event_page(self.daemon.journal, principal, after, 100, token=checkpoint_token, kind=self._q(query, "kind"),
                     related_resource_type=self._q(query, "related_resource_type"), related_resource_id=self._q(query, "related_resource_id"))
+                previous = after
                 for ev in page["events"]:
                     data = json.dumps(ev, ensure_ascii=False, default=str)
                     writer.write(f"id: {ev['seq']}\nevent: {ev['kind']}\ndata: {data}\n\n".encode())
                     after = ev["seq"]
                 after = page["next_cursor"]
-                if page["events"]:
+                if checkpoint_token is not None and (page["events"] or after != previous):
+                    checkpoint_token = page["sync"]["checkpoint"]["token"]
+                    data = json.dumps(page["sync"], ensure_ascii=False)
+                    writer.write(f"event: sync.checkpoint\ndata: {data}\n\n".encode())
+                if page["events"] or after != previous:
                     await asyncio.wait_for(writer.drain(), 10)
                     last_write = time.monotonic()
                     if page["has_more"]:
@@ -556,6 +584,11 @@ class ApiV1:
                 if writer.is_closing() or hangup.done():
                     return
                 await asyncio.wait({hangup}, timeout=0.5)
+        except dashboard_sync.ResetRequired as e:
+            data = json.dumps(e.document())
+            with contextlib.suppress(ConnectionError, asyncio.TimeoutError):
+                writer.write(f"event: sync.reset\ndata: {data}\n\n".encode())
+                await asyncio.wait_for(writer.drain(), 10)
         except (ConnectionError, asyncio.TimeoutError):
             return
         finally:
