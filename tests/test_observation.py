@@ -16,6 +16,7 @@ from bat_agent_connector.observation import (
     Observation,
     bind_worktree,
     close_relations,
+    cursor_out,
     dump,
     index,
     remember,
@@ -1739,6 +1740,94 @@ async def test_b01_b02_b03_http_mcp_cli_contract_parity(served, mock, monkeypatc
     assert (await http(port, "GET", "/api/v1/sessions/h1/" + MANUAL + "/relations", tok=cannot_read))[0] == 403
     assert write_frames(mock) == []
     await fleet.close()
+
+
+@pytest.mark.parametrize(("method", "key"), [
+    ("relations", key) for key in ("x", [1], [True, "r"], [1, 2], [None, "r"], [1, None], None)
+] + [("history", key) for key in ("x", [1], True, None)])
+def test_b01_cursor_keys_are_rejected_before_any_journal_read(tmp_path, method, key):
+    """B01, §10/§11: even head/resource reads happen only after key validation."""
+    j = Journal(tmp_path / "j.db")
+    remember(j.db, "session", "h1/empty")
+    filters = ["session", "h1/empty", None, True] if method == "relations" else ["session", "h1/empty", "desc", [], None, None]
+    cursor = cursor_out(hashlib.sha256(dump(filters).encode()).hexdigest(), j.api_head(), key)
+    reads = []
+    j.db.set_trace_callback(reads.append)
+    with pytest.raises(OperationError) as error:
+        getattr(Observation(j), method)("session", "h1/empty", cursor=cursor)
+    assert error.value.code == "INVALID_CURSOR" and error.value.status == 422
+    assert reads == []
+    j.db.set_trace_callback(None)
+    j.close()
+
+
+@pytest.mark.parametrize("key", ["x", [1], [True, "r"], [1, 2], [None, "r"], [1, None], None])
+async def test_b01_b02_relation_cursor_key_contract_is_independent_of_rows(served, monkeypatch, capsys, key):
+    """B01/B02, §10/§11: HTTP/MCP/CLI reject keys for empty, filtered and populated reads."""
+    d, port = served
+    viewer = token(d, "viewer", "observe")
+    monkeypatch.setenv("BATC_API_TOKEN", viewer)
+    monkeypatch.setenv("BATC_TASK_URL", f"http://127.0.0.1:{port}/rpc")
+    remember(d.journal.db, "session", "h1/empty")
+    empty = task(d.journal, "cursor-empty")
+    empty_worktree = "wt_" + "0" * 32
+    remember(d.journal.db, "worktree", empty_worktree)
+    t = task(d.journal, "cursor-open")
+    bind(d.journal, t, "cursor-session")
+    closed = task(d.journal, "cursor-closed")
+    bind(d.journal, closed, "closed-cursor-session")
+    d.journal.change(closed["task_id"], "failed")
+    server, fleet = mcp_server.build_server(d.fleet.config, read_only=True)
+
+    async def check(path, tool, params, command):
+        status, error = await http(port, "GET", path, tok=viewer)
+        assert status == 422 and error["error"]["code"] == "INVALID_CURSOR", error
+        with pytest.raises(mcp_server.ToolError, match="INVALID_CURSOR"):
+            await server.call_tool(tool, params)
+        assert await asyncio.to_thread(cli.main, ["--json", *command]) == 1
+        output = capsys.readouterr()
+        assert output.out == "" and "INVALID_CURSOR" in output.err
+
+    try:
+        cases = [
+            ("session", "h1/empty", None, True),
+            ("execution", empty["task_id"], None, True),
+            ("worktree", empty_worktree, None, True),
+            ("session", "h1/cursor-session", "other-execution", True),
+            ("execution", closed["task_id"], None, False),
+            ("session", "h1/cursor-session", None, True),
+        ]
+        for resource_type, resource_id, execution_id, include_closed in cases:
+            params = {"resource_type": resource_type, "resource_id": resource_id,
+                      "execution_id": execution_id, "include_closed": include_closed}
+            baseline = d.inventory.observation.relations(**params)
+            assert baseline["count"] == (1 if resource_id == "h1/cursor-session" and execution_id is None else 0)
+            filters = [resource_type, resource_id, execution_id, include_closed]
+            cursor = cursor_out(hashlib.sha256(dump(filters).encode()).hexdigest(), baseline["as_of"], key)
+            params["cursor"] = cursor
+            if resource_type == "session":
+                host, sid = resource_id.split("/", 1)
+                path, command = f"/api/v1/sessions/{host}/{sid}/relations", ["relations", "session", host, sid]
+            elif resource_type == "execution":
+                path, command = f"/api/v1/tasks/{resource_id}/sessions", ["relations", "execution", resource_id]
+            else:
+                path, command = f"/api/v1/worktrees/{resource_id}/relations", ["relations", "worktree", resource_id]
+            query = f"?cursor={cursor}&include_closed={str(include_closed).lower()}"
+            command += ["--cursor", cursor, "--include-closed", str(include_closed).lower()]
+            if execution_id is not None:
+                query += f"&execution_id={execution_id}"
+                command += ["--execution-id", execution_id]
+            await check(path + query, "resource_relations", params, command)
+
+        # This identity has neither relations nor events, independently of the populated tasks.
+        filters = ["session", "h1/empty", "desc", [], None, None]
+        cursor = cursor_out(hashlib.sha256(dump(filters).encode()).hexdigest(), d.journal.api_head(), key)
+        assert d.inventory.observation.history("session", "h1/empty")["events"] == []
+        await check(f"/api/v1/sessions/h1/empty/history?cursor={cursor}", "resource_history",
+                    {"resource_type": "session", "resource_id": "h1/empty", "cursor": cursor},
+                    ["history", "session", "h1", "empty", "--cursor", cursor])
+    finally:
+        await fleet.close()
 
 
 async def test_b03_observation_never_starts_resumes_rehydrates_or_locks_git(mock, tmp_path, monkeypatch):

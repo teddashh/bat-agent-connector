@@ -98,6 +98,8 @@ sync.reset control events。沒有新增 retention job，api_head 保留 allocat
 
 History 的 since／until 是 inclusive UTC epoch seconds，按 occurrence 篩選，排序仍按 seq。Context 缺少 occurred_at_epoch 才以 api_events.created_at fallback；明確 JSON null 是未知發生時間，不符合任何單邊／雙邊界線。無界線仍顯示該 fact 且 occurred_at 為 null。Coverage.unknown_occurrence_times_excluded 在有時間界線時為 true（表示排除規則，非筆數）；無界線為 false。Coverage.first_recorded_at 仍是最早 journal 記錄時間，可為 migration 時間，不能當發生時間。
 
+History／relations 的 opaque cursor 在任何 journal read 前驗證 version、filter hash、as_of 型別與 key；之後才讀 head 驗上界並查資源／結果。History key 為 int，relations key 為恰兩元素的 [int, str]；bool 不是 int，null 不是有效 key 或元素。錯 key 一律 `INVALID_CURSOR`／422，包含資源沒有 rows 或 execution_id／include_closed 篩掉全部 rows 的情況；合法游標的分頁與 as_of 不變。
+
 ## 路由
 
 | 方法與路徑 | Scope | 說明 |
