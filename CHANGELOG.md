@@ -12,6 +12,13 @@
   `[[github.repos]]`, routes `/api/v1/integrations/...`, MCP `integration_candidates`, `integration_get`,
   `integrations_list`, CLI `batc integrate`, and an "Update PR results" panel in the Dashboard's Delivery view.
   Merging is refused while an integration of the same PR is open, and the other way round.
+- Integration review fixes: a cancel requested while a step is being read back now stops before the step is sent
+  again (OperationService, all actions); a lost push reply waits for a push still running on the host and re-sends
+  only when GitHub says the composed commit does not exist (`PUSH_UNPROVEN` otherwise); once a push may have
+  happened, a closed PR or a GitHub error no longer ends the apply as "nothing pushed"; GitHub lag after a proven push
+  is a warning, not a wait; receipts of an unproven push read `unknown`; exact ref matching for `ls-remote`; no links
+  inside the integration area; the preview no longer runs `git status` in an agent's folder (its config could run
+  commands).
 - `integration.handoff`: an apply stopped at a conflict gets a repair worktree in the integration area and a confined
   managed session that resolves it; Resume waits while the session works, accepts exactly one merge commit of the two
   sides with no uncommitted changes or conflict markers, pins it by SHA, and continues without composing earlier

@@ -76,6 +76,8 @@ const STRINGS = {
     cancel_and_preview: "取消並重新預覽", receipts: "各來源紀錄",
     receipt_pending: "待處理", receipt_composed: "已整合（未推送）", receipt_already_included: "已在 PR 中",
     receipt_conflict: "衝突", receipt_delivered: "已送達", receipt_not_delivered: "未送達",
+    receipt_unknown: "不確定（推送結果未證實）", receipt_resolved: "已解衝突（未推送）",
+    integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。",
   },
   en: {
     nav_home: "Pending", nav_sessions: "Sessions", nav_delivery: "Delivery", nav_operations: "Operations",
@@ -176,6 +178,10 @@ const STRINGS = {
     cancel_and_preview: "Cancel and preview again", receipts: "Per-source records",
     receipt_pending: "pending", receipt_composed: "composed (not pushed)", receipt_already_included: "already in PR",
     receipt_conflict: "conflict", receipt_delivered: "delivered", receipt_not_delivered: "not delivered",
+    receipt_unknown: "unknown (the push was never proven)", receipt_resolved: "resolved (not pushed)",
+    integration_PUSH_UNPROVEN: "The PR branch is at its old head, but the composed commit exists on GitHub: an " +
+      "earlier push may have landed and been set back. Nothing is pushed again; check the PR, then cancel and " +
+      "preview again.",
   },
 };
 

@@ -1049,3 +1049,118 @@ async def test_c03_a_resolution_that_is_not_a_merge_of_both_sides_is_refused(wor
     w.d.ops.resume(TED, op["operation_id"])
     out = await w.settle(op["operation_id"])
     assert out["error_code"] == "RESOLUTION_INVALID" and w.remote_head() == w.f1
+
+
+# --------------------------------------------------------------------------- review findings
+async def test_a_cancel_while_the_push_is_unproven_never_sends_it(world):
+    w = world
+    cp = await w.checkpoint()
+    doc = await w.preview([{"kind": "checkpoint", "id": cp["checkpoint_id"]}])
+    w.runner.lose_before.add("push")  # the reply is lost before git push ran
+    op, _ = w.d.ops.create(TED, action="integration.apply", target={"host": "h1", "repository": "o/r",
+                                                                     "pull_number": 1},
+                           params={"preview_id": doc["preview_id"]},
+                           preconditions={"expected_head_sha": doc["target"]["head_sha"],
+                                          "preview_digest": doc["digest"]}, idempotency_key="cancel-me")
+    await w.d.ops.drain(timeout=60)
+    assert w.d.ops.get(op["operation_id"])["status"] == "uncertain"
+    w.d.ops.cancel(TED, op["operation_id"])
+    done = await w.settle(op["operation_id"])
+    assert done["status"] == "cancelled", done
+    assert w.runner.ran["push"] == 0 and w.remote_head() == w.f1
+    assert [r["effective_status"] for r in w.receipts(op["operation_id"])] == ["not_delivered"]  # proven not sent
+
+
+async def test_a_push_that_landed_and_was_set_back_is_never_sent_again(world):
+    w = world
+    cp = await w.checkpoint()
+    doc = await w.preview([{"kind": "checkpoint", "id": cp["checkpoint_id"]}])
+    w.runner.after["push"] = lambda: git(w.remote, "update-ref", "refs/heads/feature-1", w.f1)  # the owner reverts
+    w.runner.lose_after.add("push")
+    op = await w.apply(doc)
+    assert op["status"] == "needs_attention" and op["error_code"] == "PUSH_UNPROVEN", op
+    assert w.runner.ran["push"] == 1 and w.remote_head() == w.f1
+
+
+async def test_a_push_still_running_on_the_host_is_waited_for(world):
+    w = world
+    cp = await w.checkpoint()
+    doc = await w.preview([{"kind": "checkpoint", "id": cp["checkpoint_id"]}])
+    w.runner.lose_before.add("push")
+    op, _ = w.d.ops.create(TED, action="integration.apply", target={"host": "h1", "repository": "o/r",
+                                                                     "pull_number": 1},
+                           params={"preview_id": doc["preview_id"]},
+                           preconditions={"expected_head_sha": doc["target"]["head_sha"],
+                                          "preview_digest": doc["digest"]}, idempotency_key="in-flight")
+    await w.d.ops.drain(timeout=60)
+    tag = op["operation_id"][3:15]
+    busy = subprocess.Popen(["sh", "-c", f"# batc-int:push {tag}\nsleep 60"])  # the push the dropped ssh left behind
+    try:
+        (w.area() / f"batc-push-{tag}").write_text(f"{busy.pid}\n")
+        w.d.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+        await w.d.ops.drain(timeout=60)
+        assert w.d.ops.get(op["operation_id"])["status"] == "uncertain" and w.runner.ran["push"] == 0
+    finally:
+        busy.kill()
+        busy.wait()
+    done = await w.settle(op["operation_id"])
+    assert done["status"] == "succeeded" and w.runner.ran["push"] == 1
+
+
+async def test_an_unproven_push_is_read_back_even_after_the_pr_closed(world):
+    w = world
+    cp = await w.checkpoint()
+    doc = await w.preview([{"kind": "checkpoint", "id": cp["checkpoint_id"]}])
+    w.runner.after["push"] = lambda: w.gh.merge(1)  # landed; auto-merge closes the PR before the read-back
+    w.runner.lose_after.add("push")
+    op = await w.apply(doc)
+    assert op["status"] == "succeeded", op
+    assert [r["status"] for r in w.receipts(op["operation_id"])] == ["delivered"]
+
+
+async def test_a_cancelled_apply_with_an_unproven_push_reports_unknown(world):
+    w = world
+    cp = await w.checkpoint()
+    doc = await w.preview([{"kind": "checkpoint", "id": cp["checkpoint_id"]}])
+    away = w.tmp / "remote-away.git"
+    w.runner.after["push"] = lambda: w.remote.rename(away)
+    w.runner.lose_after.add("push")
+    op = await w.apply(doc)
+    assert op["error_code"] == "UNCERTAIN_UNRESOLVED", op
+    w.d.ops.cancel(TED, op["operation_id"])
+    away.rename(w.remote)
+    assert [r["effective_status"] for r in w.receipts(op["operation_id"])] == ["unknown"]
+
+
+async def test_a_branch_whose_name_ends_like_the_pr_head_is_not_mistaken_for_it(world):
+    w = world
+    cp = await w.checkpoint()
+    git(w.remote, "update-ref", "refs/heads/a/refs/heads/feature-1", w.main)
+    doc = await w.preview([{"kind": "checkpoint", "id": cp["checkpoint_id"]}])
+    assert doc["ready"], doc["blocking"]
+    op = await w.apply(doc)
+    assert op["status"] == "succeeded", op
+
+
+async def test_a_link_inside_the_area_repository_is_refused(world):
+    w = world
+    cp = await w.checkpoint()
+    await w.preview([{"kind": "checkpoint", "id": cp["checkpoint_id"]}], key="first")
+    (w.area() / "objects" / "info").mkdir(parents=True, exist_ok=True)
+    (w.area() / "objects" / "info" / "packs-elsewhere").symlink_to(w.human / ".git" / "objects")
+    op = await w.run("integration.preview", {"host": "h1", "repository": "o/r", "pull_number": 1},
+                     {"sources": [{"kind": "checkpoint", "id": cp["checkpoint_id"]}]}, key="second")
+    assert op["status"] == "failed" and op["error_code"] == "CLONE_CONFIG_TAMPERED", op
+
+
+async def test_preview_runs_nothing_the_agent_configured_in_its_folder(world):
+    w = world
+    cp = await w.checkpoint()
+    sentinel = w.tmp / "filter-ran"
+    run_id, _, wt = await w.agent_result(cp, files=((".gitattributes", "* filter=evil\n"),))
+    clone = str(Path(wt).parent.parent)
+    git(clone, "config", "filter.evil.clean", f"sh -c 'touch {sentinel}; cat'")
+    (Path(wt) / "a.txt").touch()  # stale stat data: a status would run the clean filter
+    os.utime(Path(wt) / "a.txt", (1, 1))
+    await w.preview([{"kind": "checkpoint_run", "id": run_id}])
+    assert not sentinel.exists()
