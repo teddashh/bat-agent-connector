@@ -371,6 +371,8 @@ class Journal:
 
     def close(self):
         self.db.close()
+        if getattr(self, "on_close", None):
+            self.on_close()
 
     def issue_capability(self, task_id: str, *, ttl_s: int = 3600) -> str:
         self.get(task_id)
