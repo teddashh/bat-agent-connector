@@ -619,7 +619,23 @@ async def test_start_preframe_cancellation_is_unsent_and_reuses_reserved_id(
 
     pending = asyncio.create_task(start())
     try:
-        await asyncio.wait_for(pause.entered.wait(), 10)
+        entered = asyncio.create_task(pause.entered.wait())
+        try:
+            done, _ = await asyncio.wait({entered, pending}, timeout=10,
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if pending in done:
+                result = await pending  # Surface an early refusal with its original traceback.
+                pytest.fail(f"start completed before the account frame: {result!r}")
+            assert entered in done, (
+                f"start did not reach account frame: checks={len(pause.scripts)}, "
+                f"channels={mock.channels()}, stack="
+                f"{[(frame.f_code.co_name, frame.f_lineno) for frame in pending.get_stack()]}"
+            )
+        finally:
+            if not entered.done():
+                entered.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await entered
         row = registry.list_entries('h1')[-1]
         reserved_sid = row['session_id']
         assert row['start_sent'] is False
