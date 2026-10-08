@@ -472,6 +472,10 @@ async def test_e01_tree_preview_apply_matches_and_read_only_resources_survive(da
     assert len({i["resource_id"] for i in doc["items"]}) == len(doc["items"])
     unowned = next(i for i in doc["items"] if i.get("path") == str(unknown))
     assert unowned["decision"] == "retain" and "UNKNOWN_READ_ONLY" in {r["code"] for r in unowned["reasons"]}
+    # A direct API choice cannot override even the delivery reason of an unowned resource.
+    manual_choice = await cleanup.preview(daemon.ops, CLEANER, target, {"release_undelivered": [unowned["resource_id"]]})
+    kept = next(i for i in manual_choice["items"] if i["resource_id"] == unowned["resource_id"])
+    assert not kept["overridden_reasons"] and "RESULTS_NOT_DELIVERED" in {r["code"] for r in kept["reasons"]}
     planned = {i["resource_id"] for i in doc["items"] if i["decision"] == "reclaim"}
     done = await apply(daemon, doc)
     assert done["status"] == "succeeded", done
