@@ -226,7 +226,11 @@ class BatTaskAdapter:
 
     async def start(self, task: dict, *, role: str, agent: str, session_id: str) -> str:
         host = task["host"]
-        confinement.guard_start_record(registry.get(host, session_id) or {})
+        entry = registry.get(host, session_id) or {}
+        if task.get("_warm_session_id") == session_id:
+            confinement.guard_start_record(entry)
+        else:
+            confinement.guard_new_start(entry)
         if role == "lead":
             if task.get("_warm_session_id") == session_id:
                 previous = next((item for item in self.journal.warm_candidates(task)

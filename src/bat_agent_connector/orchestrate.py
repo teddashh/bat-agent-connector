@@ -270,7 +270,7 @@ async def session_start(
         model = hc.codex_model
     sid = session_id or str(uuid.uuid4())
     previous = registry.get(host, sid) or {}
-    confinement.guard_start_record(previous)
+    confinement.guard_new_start(previous)
     # Read-only: how the host resolves the destination, so links into a human checkout are caught up front.
     git_roots = {}
     for path in {folder, cwd_override} - {None}:

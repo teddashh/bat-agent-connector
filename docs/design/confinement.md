@@ -244,7 +244,7 @@ Phase 2 新增的副作用只有 Connector 記錄／projection、既有 managed 
 
 `BatClient._invoke_checked` 的順序是 connect → semaphore → await before_frame → before_send／frame_guard → _roundtrip。`_roundtrip` 在 connection 檢查及 JSON 編碼之後，同步呼叫 on_transport；registry／Task command 的 start_sent=true 落盤後立即呼叫 websocket.send，中間沒有 await。故 account check、connect、semaphore 或更早 await 的取消都是未送；websocket.send 內或等待 ACK／metadata 的取消均保守當成可能已送。Marker 不是「BAT 已接受」的證明；crash 在 marker 與 transport 之間仍保持未定，不能為此重送。
 
-Start reserve 一開始保存 start_sent=false；若 daemon 沒能 unwind，starting＋false 同樣能在 registry flock 內替換為同 ID 的 reservation，不重複 row／cap。不要只看例外種類判 sent；WriteRefused 可出現在 ACK 之後。同步記錄未送結果後，CancelledError 原樣傳出，取消期間不啟動 worktree:remove、read-back、SSH 或任何新 await。
+Start reserve 一開始保存 start_sent=false；若 daemon 沒能 unwind，starting＋false 同樣能在 registry flock 內替換為同 ID 的 reservation，不重複 row／cap。不要只看例外種類判 sent；WriteRefused 可出現在 ACK 之後。同步記錄未送結果後，CancelledError 原樣傳出，取消期間不啟動 worktree:remove、read-back、SSH 或任何新 await。`guard_new_start` 拒絕以 active／starting／uncertain＋start_sent=true 的原 ID 再 reserve／start；一般或 Task lead 的後次 start retry 不能把前次已送證據蓋成 false，必須走原 read-back recovery。Warm reuse 不是新 start，仍只核對原 session。
 
 | 路徑／函式 | Reservation 後的 await／before_frame 使用者 | 取消與恢復 |
 |---|---|---|
@@ -329,7 +329,7 @@ Mock 只能證明 Connector 的 options、gate、evidence 與顯示；不假造 
 
 | 驗收／計畫 | 實作測試 | 結果與邊界 |
 |---|---|---|
-| A10；§06、§07、§12 | `test_start_preframe_cancellation_is_unsent_and_reuses_reserved_id`、`test_start_cancellation_at_earlier_await_is_also_unsent`、`test_task_preparation_cancellation_recovers_from_unsent_command_before_registry`、`test_start_postframe_cancellation_keeps_uncertain_and_does_not_resend` | Account check／git log／connect／semaphore 取消：零 start／rollback frame、false＋failed、原 CancelledError；starting＋false 模擬未 unwind crash，原 ID／worktree 只 start 一次。已送後取消保留未定，read-back 不重送。 |
+| A10；§06、§07、§12 | `test_start_preframe_cancellation_is_unsent_and_reuses_reserved_id`、`test_start_cancellation_at_earlier_await_is_also_unsent`、`test_task_preparation_cancellation_recovers_from_unsent_command_before_registry`、`test_start_postframe_cancellation_keeps_uncertain_and_does_not_resend`、`test_task_lead_lost_ack_keeps_sent_evidence_until_readback_recovery` | Account check／git log／connect／semaphore 取消：零 start／rollback frame、false＋failed、原 CancelledError；starting＋false 模擬未 unwind crash，原 ID／worktree 只 start 一次。已送後取消保留未定，read-back 不重送。 |
 | A10；§06、§12；C03 | `test_checkpoint_preframe_cancellation_restarts_unsent_reserved_session_once`、`test_repair_preframe_cancellation_restarts_unsent_reserved_session_once`、`test_task_failover_preframe_cancellation_recovers_reserved_start_and_handoff` | 同 operation replay：未送不用 meta poll，已送只讀回；checkpoint／repair 原 worktree／ID，恰一個 start 與 instruction。Task failover 同原 reserved IDs／journal hash／guards，恰一個 handoff。 |
 | A10；§06、§07、§12 | `test_host_account_refusal_before_frame_releases_start`、`test_task_start_refused_before_frame_needs_ted_not_uncertain`、`test_checkpoint_continue_host_account_refusal_needs_attention_and_resumes` | 明確 unsent refusal：零 start frame、釋放 reservation、按 retain_on_error rollback；task rejected／needs_ted 與 code；同 operation resume。 |
 | A10；§06、§12 | `test_general_start_unreadable_meta_records_unknown_and_keeps_session`、`test_post_start_mismatch_keeps_reservation_and_worktree`、`test_reviewer_start_meta_failure_still_activates`、`test_post_start_cancellation_keeps_acknowledged_reservation` | ACK 後不釋放 session；non-confined unknown 可繼續、真 mismatch 保留 uncertain；reviewer best-effort。 |

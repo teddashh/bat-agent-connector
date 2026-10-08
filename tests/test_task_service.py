@@ -3843,6 +3843,7 @@ async def test_reviewer_start_polls_existing_session_after_start_timeout(
     async def invoke(channel, params, **kwargs):
         calls.append(channel)
         if channel == "claude:start-session":
+            kwargs["on_transport"]()  # Model a lost reply after the frame, not a pre-transport timeout.
             raise TimeoutError("host-a workspace load timeout")
         if channel == "claude:get-session-meta":
             return {"cwd": "/srv/demo", "isStreaming": False}
