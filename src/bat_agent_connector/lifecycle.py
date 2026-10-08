@@ -711,7 +711,7 @@ async def _failover_one(
             try:
                 started = await c.invoke("claude:start-session", {"sessionId": new_sid, "options": opts},
                                          grant=grant,
-                                         before_frame=lambda: confinement.guard_start_frame(fleet, host))
+                                         before_frame=lambda: confinement.guard_start_frame(fleet, host, confinement_record))
                 if (not isinstance(started, dict) or started.get("ok") is False or
                         started.get("sessionId") != new_sid):
                     raise WriteRefused("BAT failover start did not confirm the reserved session ID")

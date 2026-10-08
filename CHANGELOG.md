@@ -28,6 +28,12 @@
   evidence and the reservation, and leave the task and start command uncertain without a review prompt. Headless
   recovery, warm reuse and Task Service failover guards also reject readable permission drift; unreadable reviewer
   start metadata remains best-effort, and engine/recipe policy is unchanged.
+  Host-account checks now use a separate SSH command with a clean environment, fixed cwd, isolated absolute Python
+  and absolute find. Verification requires trusted root-owned checking executables/stdlib/parents and a hardened
+  passwd-derived login environment. Hosts missing these hardening preconditions report unknown: confined Claude
+  starts fall back to plain default, never acceptEdits; root/process failures still refuse starts. Old checker caches
+  are invalidated. Clean startup files must be installed from trusted copies before hardening; the same-UID check
+  cannot detect a payload planted before those files became protected.
   **A10 is not proven until the W12 live run**; no sandbox evidence-file import is included here.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the

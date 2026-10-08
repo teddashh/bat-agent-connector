@@ -48,7 +48,7 @@ class AccountRunner:
     def available(self, host):
         return True
 
-    async def run(self, host, script, timeout_s=None):
+    async def run_account_check(self, host, script, timeout_s=None):
         self.scripts.append(script)
         return json.dumps({"status": self.status, "reason": "read_only_account_check"})
 
@@ -279,22 +279,43 @@ def test_a10_linux_read_only_scan_uses_find_and_process_identity(tmp_path, monke
             return ([Proc("/proc", "1")] if case == "idle" else [Proc("/proc", "1"), Proc("/proc", "2")]) \
                 if self.parts == ("/proc",) else [Proc("fd")]
 
-    def path(*parts):
-        return Proc(*parts) if str(parts[0]).startswith("/proc") else real_path(*parts)
+    class TrustedPath(type(real_path("/"))):
+        def lstat(self):
+            values = list(super().lstat())
+            values[4] = 0  # Synthetic root-owned bootstrap layout, independent of the container image.
+            return os.stat_result(values)
 
-    monkeypatch.setattr(os, "readlink", lambda _: "socket:[101]")
-    monkeypatch.setattr(os, "access", lambda *a, **k: case == "ancestor")
+        def stat(self, **kwargs):
+            values = list(super().stat(**kwargs))
+            values[4] = 0
+            return os.stat_result(values)
+
+        def resolve(self, strict=False):
+            return self
+
+    def path(*parts):
+        if str(parts[0]).startswith("/proc"):
+            return Proc(*parts)
+        return (TrustedPath if str(parts[0]).startswith(("/usr", "/bin")) else real_path)(*parts)
+
+    real_readlink = os.readlink
+    monkeypatch.setattr(os, "readlink", lambda p, **k: "socket:[101]" if isinstance(p, Proc) else real_readlink(p, **k))
+    monkeypatch.setattr(os, "access", lambda p, *a, **k: case == "ancestor" and str(p) == str(tmp_path))
+    monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
     monkeypatch.setattr('sys.argv', ["check", json.dumps({"uid": uid + 1 if case == "identity" else uid,
-                                                        "roots": [str(root)], "entries": 1 if case == "budget" else 10,
+                                                        "roots": [str(root)], "entries": 1 if case == "budget" else 1000,
                                                         "seconds": .000001 if case == "time" else 5, "port": 9876})])
     # Isolate the program's import: replacing the real Path breaks Path.__new__
     # and pytest's failure reporting on Python 3.10/3.11.
     with monkeypatch.context() as program_imports:
         program_imports.setitem(sys.modules, "pathlib", types.SimpleNamespace(Path=path))
+        program_imports.setitem(sys.modules, "pwd", types.SimpleNamespace(getpwuid=lambda _: types.SimpleNamespace(
+            pw_dir="/usr", pw_shell="/bin/sh")))
+        program_imports.setitem(sys.modules, "sysconfig", types.SimpleNamespace(get_path=lambda _: "/usr/lib"))
         with pytest.raises(SystemExit):
             exec(confinement._ACCOUNT_PROGRAM, {})
     result = json.loads(capsys.readouterr().out)
-    assert result["status"] == expected
+    assert result["status"] == expected, result
     if case == "idle":
         assert result["runtimes"] == [] and result["limits"] == ["runtime_identity_inherited_unobserved"]
         record = confinement.snapshot("claude", {"permissionMode": "acceptEdits"}, account=result)
@@ -381,7 +402,7 @@ def test_a10_account_script_quotes_paths_without_shell_expansion():
     roots = ["/srv/space $(touch probe) 'root'"]
     script = confinement.account_script({**ACCOUNT, "protected_roots": roots})
     import shlex
-    assert json.loads(shlex.split(script.splitlines()[0])[3])["roots"] == roots
+    assert json.loads(shlex.split(script.splitlines()[0])[-2])["roots"] == roots
 
 
 async def test_a10_lost_confined_start_ack_retains_options_and_worktree(fleet_factory, mock):
