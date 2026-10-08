@@ -9,10 +9,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-from tests.test_artifacts import LocalArtifactHost, make_checkpoint
-
 from bat_agent_connector import api_auth
 from tests.mockbat import TOKEN, MockBat
+from tests.test_artifacts import LocalArtifactHost, make_checkpoint
 from tests.test_checkpoints import daemon as daemon_fixture
 from tests.test_checkpoints import human as human_fixture
 
