@@ -16,12 +16,21 @@ import time
 from importlib import resources
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import __version__, api_auth, checkpoints, integration, resource_policy, service, work_items
+from . import (
+    __version__,
+    api_auth,
+    checkpoints,
+    integration,
+    pr_delivery,
+    resource_policy,
+    service,
+    work_items,
+)
 from .errors import BatError, ResourceReadOnly
 from .operations import STATES, OperationError
 
 API_VERSION = 1
-CONTRACT_VERSION = "2026-10-08"
+CONTRACT_VERSION = "2026-10-08"  # delivery Part A shares this contract change date; keep an ISO date
 MAX_BODY = 200_000
 MAX_STREAMS = 16
 MAX_STREAMS_PER_ACTOR = 8  # several Dashboard tabs per person; reloads briefly overlap
@@ -105,6 +114,7 @@ class ApiV1:
             ("GET", r"/api/v1/checkpoints/(?P<cp>cp_[0-9a-f]{32})", self.checkpoint, "observe"),
             ("GET", r"/api/v1/repositories/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pulls/(?P<number>\d{1,9})",
              self.pull_preview, "observe"),
+            ("GET", r"/api/v1/delivery/previews/(?P<pv>mpv_[0-9a-f]{32})", self.merge_preview, "observe"),
             ("GET", r"/api/v1/integrations/candidates", self.integration_candidates, "observe"),
             ("GET", r"/api/v1/integrations/previews/(?P<pv>ipv_[0-9a-f]{32})", self.integration_preview, "observe"),
             ("GET", r"/api/v1/integrations", self.integrations, "observe"),
@@ -284,7 +294,8 @@ class ApiV1:
     async def capabilities(self, principal, **_):
         fleet = self.daemon.fleet
         gh_cfg = self.daemon.ops.context["github_config"]
-        actions = [{"action": a.name, "scope": a.scope, "summary": a.summary, "allowed": principal.allows(a.scope)}
+        actions = [{"action": a.name, "scope": a.scope, "summary": a.summary, "allowed": principal.allows(a.scope)
+                               and (a.name != "delivery.merge_and_deploy" or principal.allows("deploy"))}
                    for a in self.daemon.ops.actions.values()]
         hosts = [{"host": h, "observe": True, "writes": fleet.writes_enabled(h),
                   "orchestrate": fleet.orchestrate_enabled(h),
@@ -297,11 +308,13 @@ class ApiV1:
                      "features": {"inventory": True, "events_stream": True, "operations": True, "work_items": True,
                                   "github": self.daemon.ops.context.get("github") is not None,
                                   "deploy": bool(gh_cfg.recipes),
+                                  "metadata_update": self.daemon.ops.context.get("github") is not None,
+                                  "merge_scope_preview": self.daemon.ops.context.get("github") is not None,
                                   "checkpoints": [h for h in fleet.config.hosts if self._can_continue(h)],
                                   "integration": [{"repository": r.repository,
                                                    "hosts": integration.usable_hosts(self.daemon.ops, r)}
                                                   for r in gh_cfg.repos.values() if r.integrate]},
-                     "repositories": [{"repository": r.repository, "allow_merge": r.allow_merge,
+                     "repositories": [{"repository": r.repository, "allow_merge": r.allow_merge, "allow_pr_update": r.allow_pr_update,
                                        "merge_methods": list(r.merge_methods)} for r in gh_cfg.repos.values()],
                      "deploy_recipes": [{"name": r.name, "repository": r.repository, "environment": r.environment,
                                          "mode": r.mode} for r in gh_cfg.recipes.values()]}
@@ -386,8 +399,13 @@ class ApiV1:
             self._int(query, "after", 0), self._int(query, "limit", 100),
             resource_type=self._q(query, "resource_type"), resource_id=self._q(query, "resource_id"))
 
-    async def pull_preview(self, owner, repo, number, **_):
-        return 200, {"pull_request": await integration.pr_card(self.daemon.ops, f"{owner}/{repo}", int(number))}
+    async def pull_preview(self, owner, repo, number, query, **_):
+        return 200, {"pull_request": await integration.pr_card(
+            self.daemon.ops, f"{owner}/{repo}", int(number), self._q(query, "method"),
+            from_event=self._q(query, "from_event") == "true")}
+
+    async def merge_preview(self, pv, **_):
+        return 200, {"preview": pr_delivery.get_preview(self.daemon.journal.db, pv)}
 
     async def integration_candidates(self, query, **_):
         host = self._q(query, "host")

@@ -55,7 +55,7 @@ _UNCONFIRMED = {"starting": "BAT has not acknowledged its start", "uncertain": "
 @dataclass(frozen=True)
 class Mutation:
     action: str
-    via: str  # "bat" (remote protocol frame) or "ssh-git" (task service host git)
+    via: str  # "bat" (protocol frame), "ssh-git" (host git), or "github" (REST)
     scope: str  # "session" | "create" | "tab" | "path" | "remote"
     channels: frozenset[str]
     entry_points: tuple[str, ...]
@@ -117,6 +117,18 @@ MUTATIONS: tuple[Mutation, ...] = (
              "PR whose [[github.repos]] entry has integrate, sent to integrate.remote_url with the host's git "
              "credentials; never a +refspec, an empty source, --force, --force-with-lease, --mirror, --all, "
              "--tags, --delete or --prune; never the base, default or a protected branch"),
+    Mutation("github.pr.merge", "github", "remote", frozenset(),
+             ("github_pr_merge", "operation_submit", "batc delivery merge", "Delivery merge preview"),
+             "merge principal and configured repository/method; immutable reviewed head/base/scope checked "
+             "before merge-async; unsupported stacks refused; no bypass or local Git writes"),
+    Mutation("delivery.merge_and_deploy", "github", "remote", frozenset(),
+             ("github_pr_merge", "operation_submit", "batc delivery merge --recipe", "Delivery merge preview"),
+             "merge and deploy principal; verified actual merged SHA through the configured recipe; "
+             "no dispatch on unverified or expanded merge result"),
+    Mutation("github.pr.update", "github", "remote", frozenset(),
+             ("github_pr_update", "operation_submit", "batc delivery update-pr", "Delivery metadata drawer"),
+             "integrate principal and configured repository with allow_pr_update; title/body only, recorded "
+             "read-compare-write-readback; never a BAT session, local folder or PR head update"),
 )
 BY_ACTION = {m.action: m for m in MUTATIONS}
 # The only granted write channel whose frame names no session (its terminal carries the ID).
