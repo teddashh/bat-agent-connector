@@ -384,6 +384,10 @@ class TaskCoordinator:
     async def _send(self, task: dict, sid: str, text: str, purpose: str,
                     *, prepared_command: dict | None = None, operation=None) -> dict:
         expected_version = task["control_version"]
+        def paused_result(current):
+            if operation:
+                raise TaskControlRefused("TASK_PAUSED", "task paused before send dispatch")
+            return current
         async with self._lock(task["host"], sid):
             task = self.journal.get(task["task_id"])
             if operation:
@@ -404,7 +408,7 @@ class TaskCoordinator:
                         return operation.effect("task_send_result", lambda: self.journal.get(task["task_id"]))
                     return self.journal.change(task["task_id"], "uncertain")
             if task["paused"]:
-                return task
+                return paused_result(task)
             send_type = "review" if purpose.startswith("reviewer:") else "implementation"
             # Record the agent that really receives this prompt (the session's branch).
             agent = next((b["provider"] for b in reversed(task["branches"]) if b["session_id"] == sid), None)
@@ -415,7 +419,7 @@ class TaskCoordinator:
                               provider=agent, reason="session_agent" if agent else None)
             task = self.journal.get(task["task_id"])
             if task["paused"]:
-                return task
+                return paused_result(task)
             initial_lead = purpose == "lead:initial" and prepared_command is None and sid == task["session_id"]
             initial_reviewer = (purpose == "reviewer:initial" and prepared_command is None
                                 and sid == task.get("reviewer_session_id"))
@@ -423,7 +427,7 @@ class TaskCoordinator:
                 presence = await self.adapter.session_presence(task, sid)
                 task = self.journal.get(task["task_id"])
                 if task["paused"]:
-                    return task
+                    return paused_result(task)
                 if initial_lead and presence == "vanished":
                     return self.journal.mark_initial_session_vanished(task["task_id"], sid)
                 if presence != "present":
@@ -445,11 +449,12 @@ class TaskCoordinator:
                        f"{task.get('review_commit') if sid == task.get('reviewer_session_id') else sid}"
                        + (f":vf{task['verification_failures']}" if task.get("verification_failures") else ""))
                 before = await self.adapter.prepare_send(task, sid)
+                current = self.journal.get(task["task_id"])
+                if current["paused"]:
+                    return paused_result(current)
                 if operation:
                     from .task_control import check
                     check(self.journal, task["task_id"], task["host"], sid, "send", expected_version)
-                if self.journal.get(task["task_id"])["paused"]:
-                    return self.journal.get(task["task_id"])
                 def command_effect():
                     cmd, fresh = self.journal.command(task["task_id"], "send", sid,
                         {"purpose": purpose, "before": before, "control_version": task["control_version"],
@@ -469,7 +474,7 @@ class TaskCoordinator:
                 task = self.journal.get(task["task_id"])
                 if task["paused"]:
                     self.journal.command_status(cmd["command_id"], "cancelled")
-                    return task
+                    return paused_result(task)
                 if presence != "present":
                     self.journal.command_status(cmd["command_id"],
                                                 "rejected" if presence == "vanished" else "uncertain")
@@ -479,7 +484,7 @@ class TaskCoordinator:
             task = self.journal.get(task["task_id"])
             if task["paused"]:
                 self.journal.command_status(cmd["command_id"], "cancelled")
-                return task
+                return paused_result(task)
             reconciled = False
             try:
                 async def dispatch():

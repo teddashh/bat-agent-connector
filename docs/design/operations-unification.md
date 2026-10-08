@@ -253,6 +253,10 @@ pending command 指待確認派送的命令，不等同 BAT pendingPermission／
 
 task.pause 是明確控制例外：先提交 pause、增版本，令未送 command 取消；abort step 只操作被綁定的 current session，即使 task 原先 verifying／pending 也能走 coordinator 停止目前回合。記下該 pause 的版本，若等待鎖期間 task 已 resume／換 session，拒絕遲到 interrupt。task.resume 只清 paused，不證明 writer 已停止；pending 命令仍先 reconcile。
 
+task-scoped `session.send` 已通過 admission 後，pause 仍可在等待 session lock、`_route`、presence probe 或 `prepare_send` 時先提交。若 pause 在 command／frame 前勝出，send 以 `TASK_PAUSED`（409）明確拒絕，`task_send_refusal` step 與 operation 都是 failed，沒有 command／BAT write frame，task 保持 pause 留下的內容。相同 key 永遠重讀此拒絕；resume 後要用新 key 才是新派送。原 coordinator 自己的 `_send`（沒有 operation）仍回傳 paused task，paused tick 不派送。
+
+task send operation 的成功必要條件是：這個 operation 已保存 `task_send_command` 回執，連結的同 task／session send command 為 accepted 或 settled。原 readback 可證明 command 後成功；未解 command 保持 uncertain、不重送。沒有此回執的提早回傳不能算成功：沿用 task gate 的拒絕碼，無其他阻擋時為 `TASK_SEND_NOT_DISPATCHED`（409）；BAT 明確不接受則為 `NOT_ACCEPTED`。refusal intent 保存固定 code／message，只執行本機拒絕；started／failed refusal step 在 operation terminal status 尚未保存時遇到 crash，重啟仍先重讀拒絕，不因 task 已 resume 而派送。
+
 bulk approve、deferred raise、明確 relay target 與 implicit client-resume 都使用同一 gate。bulk 被擋的項目保留 skipped/code，不阻擋其他獨立 standalone 項目；不得把 refused task 項目帶到新 session 繼續。task-owned worktree merge/remove/failover 由 F 拒絕 `TASK_OWNED_CONTROL_REQUIRED`；legacy cleanup dry run 繼續 KEEP，apply 由 cleanup package 封鎖。Task Service 自己的 external_worktree cleanup 保留原命名／證據與 coordinator 生命週期，不交另一個 cleanup owner。
 
 ## Task operations 與 A05
@@ -309,6 +313,7 @@ A08 特別要求 standalone failover 取得 **正面的舊 writer 停筆證據**
 | `IDEMPOTENCY_CONFLICT` | 409 | 回原 key 的 operation；新的意圖用明確的新 key。 |
 | `CONTROL_VERSION_CONFLICT` | 409 | 讀同 owner 的 task，重新決定動作；不自動換版本重送。 |
 | `TASK_PAUSED`、`TASK_VERIFYING` | 409 | 查 task；有授權才用 task.resume／task.pause，不插隊。 |
+| `TASK_SEND_NOT_DISPATCHED`、`NOT_ACCEPTED`（task send） | 409，operation failed | 沒有這個 operation 的 accepted／settled command；查原 operation／task，新的派送使用新 key。 |
 | `TASK_COMMAND_PENDING`、`TASK_RECONCILIATION_REQUIRED` | 409 | 原 coordinator 回查／command-scoped reconcile。 |
 | `TASK_STATE_BLOCKED`、`TASK_OWNED_CONTROL_REQUIRED` | 409 | 使用既有 task 控制；不以 standalone 工具接管。 |
 | `TASK_OWNER_UNAVAILABLE`、`OWNER_UNAVAILABLE` | 503 | 恢復既有中央 owner 的連線／可讀 journal。 |
@@ -375,6 +380,9 @@ Phase 2 擴充原 owner 機制，沒有第二份 owner database／另一套 leas
 | A08；§09／§10／§24 | `test_continue_starts_managed_work_at_the_checkpoint_and_leaves_the_source_alone`、`test_a_lost_start_reply_is_read_back_not_started_again`（checkpoints）；`test_vanished_after_uncertain_initial_send_never_replaced`、`test_goose_uncertain_prompt_does_not_switch`（task_service） | `test_a08_failover_requires_positive_previous_writer_proof`：meta/offline/null、未確認 streaming、pending send/start/operation、force/bulk；零 successor write。`test_a08_failover_concurrent_keys_reserve_one_writer`、`test_a08_failover_restart_reconciles_successor_and_handoff_separately`、`test_a08_superseded_source_cannot_resume_a_second_writer`、`test_a08_manual_continuation_preserves_source`；證明 distinct 新 session/clone、不改來源、未知 Codex handoff 不重送。 |
 | A09；§24 | `test_daemon_lock_and_rpc_task_scope`、`test_daemon_records_actual_journal_for_send_fence`（task_service） | 延伸同名 owner test；`test_a09_same_fleet_different_journals_refuses_second_owner`：含不同父目錄、同時啟動、尚無 pointer。`test_a09_conflict_reports_owner_and_preserves_pointer`、`test_a09_second_client_uses_central_owner`、`test_a09_stale_heartbeat_never_steals_live_lock`、`test_a09_restart_releases_lease_and_reuses_journal`；斷言相同權威、可讀 owner/endpoint、無第二 worker/BAT frames、衝突前不改 DB/token。 |
 | 失敗恢復；A05／A07／A08 | `test_ambiguous_send_becomes_uncertain_and_settles_by_read_back`、`test_a_failed_read_back_keeps_the_operation_uncertain`、`test_needs_attention_can_be_cancelled_or_resumed`（api_v1） | `test_each_external_mutation_has_committed_intent`、`test_composite_partial_results_survive_lost_ack_and_restart`、既有 operation steering 不派送 task 的 regression；覆蓋 resume/start/tab/answer/兩個 permissions/merge/remove/stop/deferred 與本地記錄失敗，reconcile 無證據不發送。 |
+| A07；§09／§10（Part A pause 競態） | `test_a07_pause_while_send_waits_for_session_lock_refuses_operation`、`test_a07_pause_during_send_preparation_refuses_operation`、`test_a07_task_send_requires_its_accepted_command_receipt` | 等待 session lock、route／presence／prepare_send 時 pause 勝出：operation／step failed、TASK_PAUSED，零 command／frame，task snapshot 不變；同 key 重讀拒絕，resume＋新 key 恰一 frame。paused tick 不派送；缺少回執／rejected／cancelled 不能成功，未解 command 維持 uncertain。 |
+| A07；§10（Part A 其他控制） | `test_a07_other_controls_refuse_pause_while_waiting_for_session_lock` | answer／interrupt operations、legacy permissions／relay／deferred raise 等鎖時 pause：鎖後 gate 拒絕，零 command／frame；bulk deferred 項目 raised=false 與明確 code，不能回報成功。 |
+| A05；§09（Part A 拒絕恢復） | `test_a05_paused_send_refusal_survives_restart_before_operation_settlement` | refusal step 在 started／failed、operation terminal status 尚未提交即 crash；task resume 後重啟仍重讀 TASK_PAUSED，不建立 command 或補送。 |
 
 故障注入只用 `tests/mockbat.py`、`tests/fakegithub.py`、[test_checkpoints.py](../../tests/test_checkpoints.py) 的 LocalRunner／RealGitLog 與 temp Git repos。驗證 policy 時比較所有寫 channel 與目的端，不能只數 send-message。停用中的 `pytest.mark.skip` task 測試不算 A07／A08 證據；舊 engine／mid-task failover 的 skip 不因本包自動啟用。
 

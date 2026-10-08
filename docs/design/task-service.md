@@ -152,6 +152,8 @@ Reviewer 只以**最後一則 agent 訊息**中的 JSON verdict 決定：`{"verd
 
 `OpContext.effect` 以同一 journal transaction 保存原 task effect 與 operation_steps receipt。restart 讀到 receipt 就重用結果；只剩 started 意圖表示 effect transaction 沒提交，可安全重做本機 journal method。pause 的 local effect（含 Ted action 去重）先提交，abort_current 為獨立 intent／readback step，resume 後舊版本的 abort 無法送出。reconcile 的一次性 capability 消耗、原 command resolution、新 next_prompt command 與 receipt 同交易提交；跟進 prompt 仍走原 _send，未知結果只回查。
 
+task send 在等待 session lock／派送準備時被 pause 擋住，operation／refusal step 為 failed、code 為 `TASK_PAUSED`，不是成功或 uncertain；command／frame 尚未建立時也不改 pause 的 task snapshot。成功必須有該 operation 的 send command 回執與 accepted／settled 狀態；其他提早回傳明確拒絕。相同 key 重讀拒絕，resume 後新的派送使用新 key。
+
 owner lock 固定在 registry/state directory 的 `task-daemon.lock`，不同 --db 仍爭同一把 flock。TaskDaemon 在取得 owner 後才初始化 Journal、0600 admin token、providers、listener 與 worker。第二個 daemon 回 OWNER_CONFLICT 與既有 pointer metadata，不修改候選 journal／token／pointer。heartbeat 是觀測，不能用過期時間奪取 live lock；OS 釋放後才可重啟並沿用 journal。升級需先停舊版（舊版鎖在 DB 父目錄），不得混跑。
 
 Part A 沒有 schema migration、業務資料搬移或歷史 operations 回填。僅 local-admin work_submit 相容入口可按原 payload hash 連到既有 task；其 bridge receipt 與 operation intent 同交易提交，crash 不會造成重啟錯建 task。新提交使用 operation identity 作 task key，其他 actor 不認領歷史 key。

@@ -6,7 +6,8 @@ import asyncio
 import json
 
 from . import api_actions, api_auth, task_control
-from .operations import ActionDef, OperationError, Uncertain
+from .errors import TaskControlRefused
+from .operations import RERUN, ActionDef, OperationError, Uncertain
 
 METHODS = {"work_submit": "task.submit", "work_pause": "task.pause", "work_resume": "task.resume",
            "work_mark_stage": "task.mark_stage", "task_send": "session.send",
@@ -169,7 +170,22 @@ async def run(ctx):
 async def send(ctx):
     coordinator = ctx.service.context["coordinator"]
     tid = ctx.target["task_id"]
+    async def refuse(exc):
+        message = str(exc).removeprefix(f"[{exc.code}] ")
+        async def failed():
+            raise OperationError(exc.code, message, 409)
+        async def local_readback(_):
+            # This step only raises a saved refusal; replay cannot create a command or BAT frame.
+            return RERUN
+        return await ctx.step("task_send_refusal", failed, request={"code": exc.code, "message": message},
+                              reconcile=local_readback)
     async with coordinator._task_locks.setdefault(tid, asyncio.Lock()):
+        # The refusal intent itself binds the decision, even if the process died before its failed receipt.
+        refusal = ctx.service.db.execute("SELECT request FROM operation_steps WHERE operation_id=? AND name='task_send_refusal'",
+                                          (ctx.operation_id,)).fetchone()
+        if refusal:
+            decision = json.loads(refusal["request"])
+            return await refuse(OperationError(decision["code"], decision["message"], 409))
         def bind():
             task = coordinator.journal.get(tid)
             version = ctx.preconditions.get("control_version")
@@ -183,11 +199,30 @@ async def send(ctx):
             (ctx.operation_id,)).fetchone()
         task = coordinator.journal.get(tid) if recovering else task_control.check(
             coordinator.journal, tid, binding["host"], binding["session_id"], "send", binding["control_version"])
-        result = await coordinator._send(task, binding["session_id"], ctx.params["text"],
-                                          "goose:" + ctx.params["step_id"], operation=ctx)
-        if result["state"] == "uncertain":
+        try:
+            result = await coordinator._send(task, binding["session_id"], ctx.params["text"],
+                                              "goose:" + ctx.params["step_id"], operation=ctx)
+        except TaskControlRefused as exc:
+            return await refuse(exc)
+        receipt = ctx.service.db.execute(
+            "SELECT response FROM operation_steps WHERE operation_id=? AND name='task_send_command' AND status='succeeded'",
+            (ctx.operation_id,)).fetchone()
+        command = coordinator.journal.command_get(json.loads(receipt["response"])["command_id"]) if receipt else None
+        if command and (command["task_id"] != tid or command["session_id"] != binding["session_id"] or command["kind"] != "send"):
+            return await refuse(TaskControlRefused("TASK_BINDING_MISMATCH", "task send command binding does not match"))
+        if command and command["status"] in {"accepted", "settled"}:
+            return result
+        if command and command["status"] in {"intent", "needs_review", "uncertain"}:
             raise Uncertain("task_send", "original task send requires reconciliation")
-        return result
+        if result["paused"]:
+            return await refuse(TaskControlRefused("TASK_PAUSED", "task paused before send dispatch"))
+        if command and command["status"] == "rejected":
+            return await refuse(OperationError("NOT_ACCEPTED", "BAT did not accept the task send", 409))
+        try:
+            task_control.check(coordinator.journal, tid, binding["host"], binding["session_id"], "send", binding["control_version"])
+        except TaskControlRefused as exc:
+            return await refuse(exc)
+        return await refuse(OperationError("TASK_SEND_NOT_DISPATCHED", "operation has no accepted task send command", 409))
 
 
 ACTIONS = [

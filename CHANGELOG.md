@@ -59,6 +59,8 @@
   verifying or unreconciled tasks cannot be bypassed. The canonical fleet owner lock is acquired before journal,
   token or provider initialization; conflicts report the existing owner. No schema migration. Remaining legacy
   operations, no-key sentinel, null effect projections and A01/A05/A08 all-entry-point coverage remain Part B.
+  Task sends that lose a pre-frame race to pause now fail with `TASK_PAUSED` and replay that refusal; resume
+  requires a new send key. Success requires the operation's accepted/settled command receipt (A05/A07, §09/§10).
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
