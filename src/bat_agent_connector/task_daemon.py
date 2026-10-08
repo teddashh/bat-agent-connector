@@ -17,8 +17,19 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import api_actions, api_auth, checkpoints, delivery, integration, registry, service, work_items
+from . import (
+    api_actions,
+    api_auth,
+    artifacts,
+    checkpoints,
+    delivery,
+    integration,
+    registry,
+    service,
+    work_items,
+)
 from .api_v1 import ApiV1, is_dashboard_path
+from .artifact_host import ArtifactHost
 from .config import Config, state_dir
 from .errors import BatError, ResourceReadOnly, TokenUnavailable
 from .fleet import Fleet
@@ -42,7 +53,7 @@ API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_canc
            "checkpoint_get": "observe", "checkpoint_preview": "observe", "integration_candidates": "observe",
            "integration_preview_get": "observe", "integration_get": "observe", "integrations_list": "observe",
            "projects_list": "observe", "project_get": "observe", "work_items_list": "observe",
-           "work_item_get": "observe"}
+           "work_item_get": "observe", "artifacts_list": "observe", "artifact_get": "observe"}
 ADMIN_RPC = {"api_token_issue", "api_token_revoke", "api_token_list", "work_reconcile_capability"}
 
 
@@ -123,7 +134,7 @@ class TaskDaemon:
         # the inventory observes through its own read-only fleet.
         self.ops = OperationService(self.journal,
                                     actions=api_actions.ACTIONS + delivery.ACTIONS + checkpoints.ACTIONS
-                                    + integration.ACTIONS + work_items.ACTIONS)
+                                    + integration.ACTIONS + work_items.ACTIONS + artifacts.ACTIONS)
         github = None
         if config.github.token_ref:
             try:
@@ -136,6 +147,11 @@ class TaskDaemon:
         self.ops.context.update(fleet=self.fleet, inventory=self.inventory, github=github,
                                 github_config=config.github,
                                 git_runner=checkpoints.SshGitRunner(self.adapter.verifier.settings.ssh_hosts))
+        artifact_settings = artifacts.ArtifactSettings.from_dict(self.adapter.verifier.settings.artifacts)
+        self.artifact_store = artifacts.ArtifactStore(self.ops, artifact_settings)
+        self.ops.context.update(artifact_store=self.artifact_store,
+                                artifact_host=ArtifactHost(self.adapter.verifier.settings.ssh_hosts,
+                                                           artifact_settings.transfer_timeout_s))
         self.api = ApiV1(self, allowed_origins=config.api.allowed_origins)
 
     @staticmethod
@@ -195,7 +211,9 @@ class TaskDaemon:
                                  actor=params.get("actor"), action=params.get("action"),
                                  limit=int(params.get("limit") or 50))
         if method == "op_cancel":
-            return {"operation": self.ops.cancel(principal, str(params.get("operation_id")))}
+            op = self.ops.cancel(principal, str(params.get("operation_id")))
+            self.artifact_store.reap_terminal()
+            return {"operation": op}
         if method == "op_resume":
             return {"operation": self.ops.resume(principal, str(params.get("operation_id")))}
         if method == "api_events":
@@ -240,6 +258,10 @@ class TaskDaemon:
         if method == "integrations_list":
             return integration.integrations_list(self.ops, str(params.get("repository")),
                                                  int(params.get("pull_number") or 0), int(params.get("limit") or 20))
+        if method == "artifacts_list":
+            return artifacts.list_artifacts(self.journal.db, limit=int(params.get("limit", 50)), cursor=params.get("cursor"))
+        if method == "artifact_get":
+            return {"artifact": artifacts.get(self.journal.db, str(params.get("artifact_id")), int(params.get("revision", 0)))}
         if method == "projects_list":
             return work_items.projects_list(self.journal.db, include_archived=bool(params.get("include_archived")))
         if method == "project_get":
@@ -542,6 +564,7 @@ class TaskDaemon:
 
     async def _worker(self):
         while True:
+            self.artifact_store.reap_terminal()
             self.journal.db.execute("UPDATE daemon_owner SET heartbeat_at=? WHERE singleton=1 AND owner_id=?",
                                     (time.time(), self._owner_id))
             for task in self.journal.list_active() + self.journal.list_cleanup_pending():

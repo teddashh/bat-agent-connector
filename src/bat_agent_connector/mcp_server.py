@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import functools
 import ipaddress
 import logging
@@ -58,10 +59,11 @@ READ_TOOLS = [
     "project_get",
     "work_items_list",
     "work_item_get",
+    "artifacts_list", "artifact_get",
 ]
 # Registered unless --read-only: they act as BATC_API_TOKEN's principal, whose scopes decide what is allowed.
 OPERATION_TOOLS = ["operation_submit", "operation_cancel", "operation_resume", "checkpoint_create",
-                   "work_continue_from_checkpoint"]
+                   "work_continue_from_checkpoint", "artifact_upload"]
 WRITE_TOOLS = [
     "session_send",
     "session_continue",
@@ -398,9 +400,17 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         to sessions, checkpoints, operations, tasks and PRs (with what each points at now) and its history."""
         return await daemon("work_item_get", work_item_id=work_item_id)
 
+    async def artifacts_list(limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
+        """List Connector-owned artifact revisions. No content deletion or implicit latest input selection."""
+        return await daemon("artifacts_list", limit=limit, cursor=cursor)
+
+    async def artifact_get(artifact_id: str, revision: int) -> dict[str, Any]:
+        """One immutable revision, its digest/size, download URL and continuation materialization evidence."""
+        return await daemon("artifact_get", artifact_id=artifact_id, revision=revision)
+
     for fn in (capabilities_get, inventory_sessions, inventory_hosts, events_list, operation_get, operations_list,
                github_pr_preview, checkpoints_list, checkpoint_preview, integration_candidates, integration_get,
-               integrations_list, projects_list, project_get, work_items_list, work_item_get):
+               integrations_list, projects_list, project_get, work_items_list, work_item_get, artifacts_list, artifact_get):
         mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
 
     if fleet.any_orchestrate:
@@ -502,14 +512,36 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             return await principal_daemon("op_submit", confirm, action=action, idempotency_key=idempotency_key,
                                           target=target, params=params, preconditions=preconditions, wait_s=wait_s)
 
+        async def artifact_upload(display_name: str, content_base64: str, idempotency_key: str,
+                                  media_type: str = "application/octet-stream", artifact_id: str | None = None,
+                                  expected_latest_revision: int | None = None, confirm: bool = False) -> dict[str, Any]:
+            """WRITE (manage). Upload an immutable artifact using base64. Default decoded limit: 256 KiB;
+            the model must emit every byte. Use CLI or Dashboard for larger files. Retry the same key and bytes.
+            Attach {artifact_id, revision, digest} from the result; never pass a client's absolute file path."""
+            from .artifact_client import upload
+
+            if not confirm or not os.environ.get("BATC_API_TOKEN"):
+                raise WriteRefused("artifact_upload requires confirm=true and BATC_API_TOKEN")
+            limit = (await daemon("api_capabilities"))["artifacts"]["limits"]["mcp_max_file_bytes"]
+            if len(content_base64) > 4 * ((limit + 2) // 3):
+                raise ValueError("ARTIFACT_TOO_LARGE: use CLI or Dashboard")
+            data = base64.b64decode(content_base64, validate=True)
+            if len(data) > limit:
+                raise ValueError("ARTIFACT_TOO_LARGE: use CLI or Dashboard")
+            return await asyncio.to_thread(upload, data, display_name, idempotency_key, media_type=media_type,
+                                           artifact_id=artifact_id, expected_latest_revision=expected_latest_revision,
+                                           token=os.environ["BATC_API_TOKEN"], mcp=True)
+
         async def checkpoint_create(host: str, session_id: str, idempotency_key: str, commit: str | None = None,
                                     note: str | None = None, last_n: int = 20, wait_s: float = 20,
-                                    confirm: bool = False) -> dict[str, Any]:
+                                    confirm: bool = False, artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
             """WRITE (connector records only). Record a checkpoint of any session, including one a person created
             in BAT: its commit (default HEAD, or a full SHA from its history), branch, uncommitted-change count and
             the last last_n messages; `note` is the person's request, verbatim. The source is only read. Returns
             the operation; its result.checkpoint_id feeds work_continue_from_checkpoint. Requires confirm=true."""
             params = {"last_n": last_n, **({"commit": commit} if commit else {}), **({"note": note} if note else {})}
+            if artifacts is not None:
+                params["artifacts"] = artifacts
             return await principal_daemon("op_submit", confirm, action="checkpoint.create",
                                           idempotency_key=idempotency_key,
                                           target={"host": host, "session_id": session_id}, params=params,
@@ -517,7 +549,9 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
 
         async def work_continue_from_checkpoint(checkpoint_id: str, instructions: str, idempotency_key: str,
                                                 agent: Literal["claude", "codex"] = "claude",
-                                                wait_s: float = 30, confirm: bool = False) -> dict[str, Any]:
+                                                wait_s: float = 30, confirm: bool = False,
+                                                artifacts: list[dict[str, Any]] | None = None,
+                                                expected_source_head_sha: str | None = None) -> dict[str, Any]:
             """WRITE. Continue from a checkpoint in a NEW connector-managed session: a worktree is added in the
             connector's own clone at exactly the checkpoint commit, the session starts there, and only then are
             `instructions` sent (the person's words, verbatim). The source session is never written, stopped or
@@ -527,7 +561,9 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             same idempotency_key on retry; a new key starts a second session. Requires confirm=true."""
             return await principal_daemon("op_submit", confirm, action="checkpoint.continue",
                                           idempotency_key=idempotency_key, target={"checkpoint_id": checkpoint_id},
-                                          params={"instructions": instructions, "agent": agent}, wait_s=wait_s)
+                                          params={"instructions": instructions, "agent": agent,
+                                                  **({"artifacts": artifacts} if artifacts is not None else {})},
+                                          preconditions={"expected_source_head_sha": expected_source_head_sha} if expected_source_head_sha else {}, wait_s=wait_s)
 
         async def operation_cancel(operation_id: str, confirm: bool = False) -> dict[str, Any]:
             """WRITE. Ask an operation to stop before its next step. A step that may already have run is read
@@ -540,7 +576,7 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             return await principal_daemon("op_resume", confirm, operation_id=operation_id)
 
         for fn in (operation_submit, operation_cancel, operation_resume, checkpoint_create,
-                   work_continue_from_checkpoint):
+                   work_continue_from_checkpoint, artifact_upload):
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=op_write)
 
     if fleet.any_writes:

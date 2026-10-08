@@ -106,6 +106,7 @@ class VerificationSettings:
     repo_urls: dict[str, str] = field(default_factory=dict)
     event_webhook_url: str | None = None
     event_webhook_secret_file: str | None = None
+    artifacts: dict = field(default_factory=dict)
 
 
 def load_settings(path: str | None = None) -> VerificationSettings:
@@ -149,7 +150,7 @@ def load_settings(path: str | None = None) -> VerificationSettings:
         validate_callback_url(hook["url"])
     return VerificationSettings(commands, aliases, int(section.get("timeout_s", 600)), register_tabs,
                                 section.get("artifact_dir"), dict(base_branches), dict(repo_urls),
-                                hook.get("url"), hook.get("secret_file"))
+                                hook.get("url"), hook.get("secret_file"), raw.get("artifacts", {}))
 
 
 class ObservedVerifier:
