@@ -23,6 +23,8 @@ daemon 不可用時回原連線錯誤，沒有 direct Fleet fallback，也不另
 再於 daemon 唯讀解析 full ID 或至少六字元 unique prefix；literal target 不變，確切 ID 與 task incarnation
 在同交易保存於 `external_refs.resolved_target`／`admission_binding`。執行時仍要求確切 ID，不能把消失的
 ID 再當另一 session 的 prefix。只有本相容 RPC 可省 key；raw HTTP／op_submit body 不能開啟此模式。
+Observation 的 accepted／running／failed 等事件使用 admission 同交易保存的完整 session binding，
+包含歷史重建；literal prefix 只保留在原意圖／request hash，不另建立 prefix 的假 session 歷史。
 no-key storage sentinel 不出現在任何 operation GET/list、RPC、MCP、CLI 投影：原 `idem_key` 與
 `idempotency_key` 都為 null，`idempotency_enabled=false`；named key 原值保留。
 
