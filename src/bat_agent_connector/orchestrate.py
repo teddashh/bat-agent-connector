@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from . import confinement, registry, resource_policy
-from .errors import BatError, InvokeError, WriteRefused
+from .errors import BatError, WriteRefused
 from .fleet import Fleet
 from .resource_policy import WriteGrant
 from .safety import Audit
@@ -395,8 +395,8 @@ async def session_start(
                     audit.record(**base, channel="worktree:remove", phase="rollback", ok=True)
                 raise
             except BatError as e:
-                if start_confirmed or start_frame.sent and not isinstance(e, InvokeError):
-                    retain_on_error = True  # No ACK cannot justify removing a possibly running agent's worktree.
+                if start_confirmed or start_frame.sent:
+                    retain_on_error = True  # Even invoke-error may follow creation of the BAT session.
                 audit.record(**base, channel="claude:start-session", phase="result", ok=False, error=_err(e))
                 if worktree_created and not retain_on_error:  # may have reached BAT on timeout
                     await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": True}, grant=grant)
@@ -405,9 +405,10 @@ async def session_start(
             audit.record(**base, channel="claude:start-session", phase="result", ok=True)
         except BaseException as e:
             unsent = not start_frame.sent and not start_confirmed
-            retain_on_error = retain_on_error or start_confirmed or start_frame.sent and not isinstance(e, InvokeError)
+            retain_on_error = retain_on_error or start_confirmed or start_frame.sent
             registry.update(host, sid, status="failed" if unsent else
-                            "uncertain" if retain_on_error else "failed", error_code=getattr(e, "code", None),
+                            "uncertain" if retain_on_error else "failed",
+                            error_code=getattr(e, "code", None) or ("CONFINEMENT_START_UNSETTLED" if not unsent else None),
                             start_sent=not unsent,
                             **({"cwd": cwd, "worktree_path": cwd if cwd_override else wt.get("worktreePath"),
                                 "branch": external_branch if cwd_override else wt.get("branchName"),

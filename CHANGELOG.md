@@ -2,6 +2,15 @@
 
 ## Next release (unreleased)
 
+- Registry session identity is unique per host/session ID ([design](docs/design/confinement.md), 計畫 §06/§12, A10).
+  Sent starts, including BAT invoke-error replies and legacy failed/sent rows, are fenced from same-ID reservation
+  retries. The pinned Codex start path can retain a session after an error, so the connector keeps its reservation
+  and worktree for read-back; Task lead commands/tasks remain uncertain until recovery. Failover keeps the reserved
+  successor rather than releasing it. Shared registry read/write validation rejects duplicates explicitly with
+  REGISTRY_DUPLICATE_SESSION before writing; recovery and warm claims update the existing row. Cap and supersede
+  handoff rules remain intact; legacy failed/sent successors use the same failover binding for read-back recovery.
+  A10 still awaits W12.
+
 - Host-account verification now requires an operator-declared trusted auditor SSH channel ([design](docs/design/confinement.md),
   計畫 §06/§07/§12, A10). The auditor proves its different identity and protected login/bootstrap paths before
   directly executing isolated Python as the BAT account through a narrow sudo rule. Returned UID/channel facts

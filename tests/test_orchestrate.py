@@ -74,7 +74,7 @@ async def test_session_start_worktree_cap_and_registry(fleet_factory, mock):
     await f.close()
 
 
-async def test_session_start_rolls_back_worktree_on_failure(fleet_factory, mock):
+async def test_session_start_keeps_worktree_on_error_after_transport(fleet_factory, mock):
     def boom(p):
         raise RuntimeError("start failed")
 
@@ -82,8 +82,10 @@ async def test_session_start_rolls_back_worktree_on_failure(fleet_factory, mock)
     f = fleet_factory(writes=True, orchestrate=True)
     with pytest.raises(Exception, match="start failed"):
         await orchestrate.session_start(f, "h1", "demo-project", confirm=True)
-    assert mock.worktrees == {}
-    assert registry.list_entries("h1")[0]["status"] == "failed"
+    assert len(mock.worktrees) == 1
+    row = registry.list_entries("h1")[0]
+    assert row["status"] == "uncertain" and row["start_sent"] is True
+    assert row["error_code"] == "CONFINEMENT_START_UNSETTLED"
     await f.close()
 
 

@@ -201,12 +201,29 @@ def _locked(path: Path):
 def _read(path: Path) -> list[dict]:
     try:
         data = json.loads(path.read_text())
-        return [e for e in data.get("sessions", []) if isinstance(e, dict)]
+        items = [e for e in data.get("sessions", []) if isinstance(e, dict)]
     except (OSError, ValueError):
         return []
+    _validate_unique(items)
+    return items
+
+
+class RegistryInvariantError(RuntimeError):
+    code = "REGISTRY_DUPLICATE_SESSION"
+
+
+def _validate_unique(items: list[dict]) -> None:
+    seen = set()
+    for entry in items:
+        key = (entry.get("host"), entry.get("session_id"))
+        if key in seen:
+            raise RegistryInvariantError("[REGISTRY_DUPLICATE_SESSION] multiple rows for the same host/session ID; "
+                                         "repair the registry before continuing")
+        seen.add(key)
 
 
 def _write(path: Path, items: list[dict]) -> None:
+    _validate_unique(items)
     tmp = path.with_suffix(".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
@@ -299,6 +316,10 @@ def reserve(host: str, entry: dict, max_active: int, replaces: str | None = None
                                 and not (reclaim and e.get("session_id") == sid)
                                 for e in items):
                 raise WriteRefused("another active failover successor already owns this worktree")
+        if previous and not reclaim:
+            from .confinement import ConfinementRefused
+            raise ConfinementRefused("CONFINEMENT_START_UNSETTLED",
+                                     "session ID is already reserved; use read-back recovery")
         if replaces:
             for e in items:
                 if e.get("host") == host and e.get("session_id") == replaces and e.get("status") == "active":
