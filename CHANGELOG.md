@@ -65,6 +65,9 @@
 
 - The A10 Linux account-check fixture isolates its fake `pathlib` import, keeping pytest's real `Path` intact on
   Python 3.10 and 3.11; the product's read-only check is unchanged.
+- Bind task-effect observation history to the executing operation's persisted actor, entry point and ID.
+  An unrelated RPC caller waking the shared scheduler cannot relabel other users' task events; observation
+  context carries no authorization grants. Keep command/frame checks and transactional receipts unchanged.
 
 - Refuse BAT worktree mutations for legacy reviewers whose shared creation root is unproven in the registry,
   including paths under managed roots. Preserve proven carrier behavior and observation identity resolution;
