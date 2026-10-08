@@ -104,12 +104,16 @@ BAT tab 記的 `cwd`／`worktreePath` 和紀錄不同也是 `BINDING_MISMATCH`�
 - `session_cleanup` 對人工與 legacy session 一律 `KEEP`，不 stop、不 merge。
 - `sessions_list`、`sessions_triage`、`worktree_status` 每列多了 `provenance` 與 `api_access`。
 
+## Task authority（2026-10-08，Part A）
+
+task link 不授予 resource write grant。send／answer／interrupt／permissions（含 client-resume、approve-pending、deferred raises 與 relay target）先通過本政策，再交同一 owner 的 TaskCoordinator；paused／verifying／pending commands／stale control_version 皆拒絕。frame 邊界再次核對原 journal command、session ownership 與 owner lease。registry task 標記遺失時仍查原 journal 的 current session／start reservation／branch，不能因此變成 standalone。task-owned worktree／failover／外部 verification 不由低階工具接管，cleanup KEEP；原受信 verifier 仍可保存其 observed evidence。詳見 [operations-unification.md](operations-unification.md) 與 [api-v1.md](api-v1.md) 的穩定拒絕碼。
+
 ## 尚未涵蓋
 
 - **A10 執行環境限制**：[confinement](confinement.md) 已新增 options／creation snapshot／current_verification 及不可 raise 閘門。Claude acceptEdits 沒有 path check；未查核 account 時 confined Claude 用 default，僅 prompt_gated。Codex sandbox 最多 options_confirmed，A10 尚待 W12 live run。資源歸屬、cwd、legacy_shared_clone 都不證明 agent 執行隔離；Task Service 保留測試行為並顯示 gap。
 - **Managed clone 的建立與 checkpoint 接續**（P2）。目前 `managed_roots` 只描述已存在的 clone。
 - **`workspace:save` 與 GUI 同時存檔的 race**（既有，見 SECURITY.md）。
-- **HTTP API**：目前只有 MCP 與 CLI，兩者呼叫同一組 service 函式；之後的 HTTP 層也要走同一組函式。
+- **Part B legacy operations**：HTTP OperationService 已走同一 resource policy；其餘舊工具的 operation 轉接與外部 steps 拆分見 [operations-unification.md](operations-unification.md)。
 
 ## 設定
 

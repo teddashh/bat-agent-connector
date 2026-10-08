@@ -261,6 +261,41 @@ the row is the last known state of an unreachable host. Operation writes need `B
 pending prompt's `tool_use_id`. A `needs_attention` operation can be resumed with `operation_resume` once its cause is
 fixed; it reads unproven steps back and never resends them.
 
+Task controls (`work_submit`, `work_pause`, `work_resume`, `work_mark_stage`, the scoped task tools and
+`task-reconcile`) now share operations and the original task commands. Keep the returned `operation_id` and
+`operation_status`; succeeded means that control finished, not that the task is done. Reuse an explicit
+`idempotency_key` and the same params on retries. Keys are scoped to the authenticated actor; the work tools use
+`BATC_API_TOKEN` when set, with the old local-admin path retained for local callers. Old controls without a key
+are separate requests; Goose `step_id` remains its task-send retry identity. A long or uncertain result needs
+read-back, not another dispatch. CLI reconciliation accepts `--key` and `--control-version`.
+
+Task-bound operations capture the task version at admission even when you omit `control_version`; session
+controls also capture the current session and role. `external_refs.admission_binding` is server metadata,
+separate from your preconditions. A pause/resume or session replacement before the first effect refuses the
+old request with `CONTROL_VERSION_CONFLICT` / `TASK_BINDING_MISMATCH`, including stale task pause/resume.
+Keep the key to read that refusal or the original success; after reading `work_status`, use a new key for an
+authorized new decision. Never silently replace the binding. Older operations without this metadata keep their
+previous behaviour; succeeded receipts and uncertain frame read-back remain valid without another dispatch.
+
+For a task-owned session, low-level send/continue/answer/interrupt/permissions, relay, force and batch approval
+all pass the same TaskCoordinator. On `TASK_PAUSED` or `TASK_VERIFYING`, read `work_status` and leave control to
+the task service. A task send refused with `TASK_PAUSED` stays failed on the same key; after an authorized resume,
+use a new key for the new send. `TASK_SEND_NOT_DISPATCHED` means this operation has no accepted send command;
+read its result and task before issuing a new send. On `TASK_COMMAND_PENDING` or `TASK_RECONCILIATION_REQUIRED`, reconcile the original command;
+never resend uncertain text. On `CONTROL_VERSION_CONFLICT`, read the new state before making a new decision;
+do not silently replace the precondition. `TASK_BINDING_MISMATCH` / `TASK_STATE_BLOCKED` mean the session or task
+cannot accept that control. `TASK_OWNER_UNAVAILABLE` means contact the existing owner; `OWNER_CONFLICT` tells you
+which daemon already owns the fleet. Never start a second authority with another journal. Explicit task pause
+may request a journaled abort; low-level interrupt cannot bypass pause or verification. See
+[operations unification](../../../docs/design/operations-unification.md) (Part A); other legacy-tool operations,
+no-key sentinel and null effect projections remain Part B.
+
+A pause or control-version change during trusted verification cancels that run without saving its evidence.
+The task stays verifying with the user's pause; do not treat it as a verifier failure or escalate it yourself.
+After an authorized resume, the next tick runs verification again, including a cancelled dependency retry.
+Paused tasks have no verification deadline. Owner loss leaves state to the existing/new owner; a binding
+mismatch requires checking the current session before resume. Genuine verifier errors still need Ted.
+
 PR metadata is separate from head integration: read `github_pr_preview`, then use `github_pr_update` with
 its metadata_digest, a new idempotency_key and title and/or raw Markdown body (empty body clears; omitted stays).
 Requires integrate and repository allow_pr_update (default false); no new scope or token re-issue. Works on human-only
