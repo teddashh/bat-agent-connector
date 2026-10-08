@@ -307,7 +307,7 @@ class BatTaskAdapter:
             try:
                 started = await client.invoke(
                     "claude:start-session", {"sessionId": sid, "options": opts}, retry_on_disconnect=False,
-                    grant=grant, before_frame=lambda: confinement.guard_start_frame(self.fleet, host))
+                    grant=grant, before_frame=lambda: confinement.guard_start_frame(self.fleet, host, record))
                 if isinstance(started, dict) and started.get("ok") is not False and started.get("sessionId") == sid:
                     break
                 raise WriteRefused("BAT reviewer start did not confirm the reserved session ID")

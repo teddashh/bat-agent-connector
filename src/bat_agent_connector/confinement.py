@@ -101,7 +101,7 @@ def snapshot(agent: str, options: dict, *, account: dict | None = None, task: bo
            "prompt_rules_are_not_os_isolation" if level == "prompt_gated" else
            "execution_restriction_unverified" if level == "none" else None)
     return {"schema_version": 1, "level": level, "requested_level": level, "mechanisms": mechanisms,
-            "options": options, "protected_roots": list((account or {}).get("protected_roots") or []),
+            "options": options, "protected_roots": list(account.get("protected_roots") or []) if account_ok else [],
             "evidence": {"source": "start_intent", "bat_source_commit": BAT_SOURCE,
                          "host_check": copy.deepcopy(account), "inherited_from": inherited,
                          "agent": agent, "task_owned": task},
@@ -201,7 +201,8 @@ def guard_answer(host: str, sid: str, tool: str | None, *, dont_ask_again: bool,
 def account_status(fleet, host: str) -> dict:
     config = fleet.config.host(host).confinement
     result = getattr(fleet, "_confinement_checks", {}).get(host)
-    signature = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+    # Old checks did not establish integrity of the checking environment.
+    signature = hashlib.sha256(json.dumps(["isolated-account-check-v1", config], sort_keys=True).encode()).hexdigest()
     if config.get("host_account") and not result and getattr(fleet, "confinement_journal", None):
         try:
             row = fleet.confinement_journal.db.execute(
@@ -231,7 +232,8 @@ async def check_account(fleet, host: str) -> dict:
             runner = SshGitRunner(load_settings().ssh_hosts)
         if not runner.available(host):
             raise ValueError("ssh_alias_unavailable")
-        raw = await runner.run(host, account_script(config), timeout_s=config.get("check_timeout_s", 10) + 2)
+        raw = await runner.run_account_check(host, account_script(config),
+                                             timeout_s=config.get("check_timeout_s", 10) + 2)
         observation = json.loads(raw)
         if observation.get("status") not in {"verified", "unknown", "mismatch"}:
             raise ValueError("invalid_account_check")
@@ -252,7 +254,8 @@ async def check_account(fleet, host: str) -> dict:
 
 async def start_account(fleet, host: str) -> dict:
     result = await check_account(fleet, host)
-    if result["declared"] and result["status"] != "verified":
+    if (result["declared"] and result["status"] != "verified"
+            and not (result["status"] == "unknown" and result["reason"] in ACCOUNT_HARDENING_GAPS)):
         raise ConfinementRefused("HOST_ACCOUNT_UNVERIFIED", result["reason"], sent=False)
     return result
 
@@ -319,11 +322,90 @@ def account_script(config: dict) -> str:
     payload = json.dumps({"uid": config["expected_uid"], "roots": config["protected_roots"],
                           "entries": config.get("check_max_entries", 10000),
                           "seconds": config.get("check_timeout_s", 10), "port": config.get("bat_port", 9876)})
-    return "python3 -B - " + shlex.quote(payload) + " <<'BATC_CONFINEMENT'\n" + _ACCOUNT_PROGRAM + "\nBATC_CONFINEMENT"
+    return ("cd / && exec /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/python3 -I -S -B - "
+            + shlex.quote(payload) + " <<'BATC_CONFINEMENT'\n" + _ACCOUNT_PROGRAM + "\nBATC_CONFINEMENT")
+
+
+ACCOUNT_HARDENING_GAPS = {"check_executable_untrusted", "login_environment_writable", "login_shell_unsupported"}
+
+# Kept separately so synthetic fixtures can exercise the actual integrity checks
+# without altering stdlib classes or inspecting a developer's real account.
+_ACCOUNT_INTEGRITY_PROGRAM = r'''
+def check_integrity():
+    global remaining
+    account = pwd.getpwuid(c['uid'])
+    shell = pathlib.Path(account.pw_shell)
+    startup = {'sh': ['.profile'], 'dash': ['.profile'],
+               'bash': ['.bashrc', '.bash_profile', '.bash_login', '.profile'],
+               'zsh': ['.zshenv', '.zprofile', '.zshrc', '.zlogin']}.get(shell.name)
+    if startup is None: return 'login_shell_unsupported', {'login_shell': str(shell)}
+    executables = [pathlib.Path(sys.executable), pathlib.Path('/usr/bin/find'), shell,
+                   pathlib.Path(sysconfig.get_path('stdlib'))]
+    trusted = set()
+    for path in executables:
+        resolved = path.resolve(strict=True)
+        for target in (path, resolved):
+            for part in [target, *target.parents]:
+                budget()
+                if part.lstat().st_uid != 0 or os.access(part, os.W_OK, effective_ids=True):
+                    return 'check_executable_untrusted', {'paths': [str(part)]}
+                trusted.add(str(part))
+    # Bootstrap above rejects a replaceable find before running it. GNU find's
+    # access(2) checks below also evaluate ACLs using this account's effective IDs.
+    for target in sorted(trusted):
+        budget(); remaining -= 1
+        if remaining <= 0: finish('unknown', 'entry_budget_exhausted')
+        scan = subprocess.run(['/usr/bin/find', target, '-maxdepth', '0', '-writable', '-printf', 'W'],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=max(.01, deadline - time.monotonic()))
+        if scan.returncode or scan.stderr: finish('unknown', 'check_incomplete')
+        if scan.stdout: return 'check_executable_untrusted', {'paths': [target]}
+    home = pathlib.Path(account.pw_dir)
+    paths = [home, home/'.ssh', home/'.pam_environment', *[home/name for name in startup]]
+    # A writable ancestor could replace an otherwise protected home directory.
+    child = home
+    for parent in home.parents:
+        budget(); info = parent.stat(); victim = child.stat()
+        if (info.st_uid == c['uid'] or os.access(parent, os.W_OK | os.X_OK, effective_ids=True)
+                and (not info.st_mode & stat.S_ISVTX or c['uid'] in (info.st_uid, victim.st_uid))):
+            return 'login_environment_writable', {'paths': [str(parent)]}
+        child = parent
+    for path in paths:
+        budget()
+        if not path.exists() and not path.is_symlink():
+            path = path.parent  # Absence is safe only if it cannot be created.
+        if path.is_symlink(): return 'login_environment_writable', {'paths': [str(path)]}
+        args = ['/usr/bin/find', str(path)]
+        if path != home/'.ssh': args += ['-maxdepth', '0']
+        args += ['-printf', 'E\\0', '(', '-uid', str(c['uid']), '-o', '-writable', '-o', '-type', 'l',
+                 ')', '-printf', 'W:%p\\0', '-quit']
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        selector = selectors.DefaultSelector(); selector.register(proc.stdout, selectors.EVENT_READ)
+        try:
+            pending = b''
+            while True:
+                budget()
+                if not selector.select(max(0, deadline - time.monotonic())): finish('unknown', 'time_budget_exhausted')
+                chunk = os.read(proc.stdout.fileno(), 4096)
+                if not chunk: break
+                pending += chunk; lines = pending.split(b'\0'); pending = lines.pop()
+                for line in lines:
+                    if line.startswith(b'W:'):
+                        return 'login_environment_writable', {'paths': [os.fsdecode(line[2:])]}
+                    if line != b'E': finish('unknown', 'find_output_invalid')
+                    remaining -= 1
+                    if remaining <= 0: finish('unknown', 'entry_budget_exhausted')
+            _, errors = proc.communicate(timeout=max(.01, deadline - time.monotonic()))
+            if pending or proc.returncode or errors: finish('unknown', 'check_incomplete')
+        finally:
+            selector.close()
+            if proc.poll() is None: proc.kill(); proc.wait()
+    return None, {'home': str(home), 'login_shell': str(shell), 'trusted_paths': sorted(trusted)}
+'''
 
 
 _ACCOUNT_PROGRAM = r'''
-import json, os, pathlib, selectors, stat, subprocess, sys, time
+import json, os, pathlib, pwd, selectors, stat, subprocess, sys, sysconfig, time
 c = json.loads(sys.argv[1]); deadline = time.monotonic() + c['seconds']; remaining = c['entries']
 def finish(status, reason, **evidence):
     print(json.dumps(dict(status=status, reason=reason, **evidence))); raise SystemExit
@@ -332,6 +414,7 @@ def budget():
 if not sys.platform.startswith('linux'): finish('unknown', 'linux_only')
 if os.geteuid() != c['uid'] or os.getuid() != c['uid']: finish('unknown', 'ssh_uid_mismatch')
 groups = sorted(set(os.getgroups() + [os.getegid()]))
+''' + _ACCOUNT_INTEGRITY_PROGRAM + r'''
 def identity(pid):
     text = pathlib.Path('/proc', str(pid), 'status').read_text()
     values = dict(line.split(':', 1) for line in text.splitlines() if ':' in line)
@@ -341,6 +424,8 @@ def identity(pid):
                 capabilities_permitted=int(values['CapPrm'].strip(), 16),
                 capabilities_ambient=int(values['CapAmb'].strip(), 16))
 try:
+    reason, integrity = check_integrity()
+    if reason: finish('unknown', reason, **integrity)
     sockets = set()
     for table in ('tcp', 'tcp6'):
         for line in pathlib.Path('/proc/net', table).read_text().splitlines()[1:]:
@@ -382,7 +467,7 @@ try:
             if os.access(parent, os.W_OK | os.X_OK, effective_ids=True) and (not info.st_mode & stat.S_ISVTX or os.geteuid() in (info.st_uid, victim.st_uid)):
                 finish('mismatch', 'writable_ancestor')
             child = parent
-        proc = subprocess.Popen(['find', root, '-xdev', '-printf', 'E:%D\n', '-writable', '-printf', 'W\n', '-quit', '-o', '-uid', str(c['uid']), '-printf', 'O\n', '-quit', '-o', '-type', 'l', '-printf', 'L\n', '-quit'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.Popen(['/usr/bin/find', root, '-xdev', '-printf', 'E:%D\n', '-writable', '-printf', 'W\n', '-quit', '-o', '-uid', str(c['uid']), '-printf', 'O\n', '-quit', '-o', '-type', 'l', '-printf', 'L\n', '-quit'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         selector = selectors.DefaultSelector(); selector.register(proc.stdout, selectors.EVENT_READ)
         try:
             pending = b''
@@ -409,7 +494,7 @@ try:
             if proc.poll() is None: proc.kill(); proc.wait()
     if any((os.stat(p).st_dev, os.stat(p).st_ino) != (dev, ino) for p, dev, ino in before): finish('unknown', 'root_changed')
     if any(identity(i['pid']) != i for i in [bat] + runtimes): finish('unknown', 'runtime_changed')
-    finish('verified', 'read_only_account_check', alias_uid=os.geteuid(), bat=bat, runtimes=runtimes, roots=before,
+    finish('verified', 'read_only_account_check', integrity=integrity, alias_uid=os.geteuid(), bat=bat, runtimes=runtimes, roots=before,
            limits=[] if runtimes else ['runtime_identity_inherited_unobserved'])
 except (OSError, ValueError, KeyError, subprocess.TimeoutExpired): finish('unknown', 'check_incomplete')
 '''
@@ -443,7 +528,10 @@ def guard_resume_frame(host: str, sid: str, agent: str, frame: dict) -> None:
             raise ConfinementRefused("CONFINEMENT_MISMATCH", "resume frame differs from the recorded policy")
 
 
-async def guard_start_frame(fleet, host: str) -> None:
+async def guard_start_frame(fleet, host: str, record: dict | None = None) -> None:
     # Fresh identity/ACL evidence at the start boundary, after worktree preparation.
     if fleet.config.host(host).confinement.get("host_account"):
-        await start_account(fleet, host)
+        account = await start_account(fleet, host)
+        if record and record.get("evidence", {}).get("host_check", {}).get("status") == "verified":
+            if account["status"] != "verified":
+                raise ConfinementRefused("HOST_ACCOUNT_UNVERIFIED", account["reason"], sent=False)

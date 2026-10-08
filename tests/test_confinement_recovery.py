@@ -20,7 +20,7 @@ from tests.test_task_service import FakeBAT, submit
 
 
 class RefuseAtFrame(AccountRunner):
-    async def run(self, host, script, timeout_s=None):
+    async def run_account_check(self, host, script, timeout_s=None):
         self.scripts.append(script)
         return json.dumps({"status": "verified" if len(self.scripts) == 1 else "unknown",
                            "reason": "fixture_identity_unreadable"})

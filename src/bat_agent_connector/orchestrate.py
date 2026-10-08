@@ -359,7 +359,7 @@ async def session_start(
             audit.record(**base, channel="claude:start-session", phase="attempt", preset=preset)
             try:
                 started = await c.invoke("claude:start-session", {"sessionId": sid, "options": opts}, grant=grant,
-                                         before_frame=lambda: confinement.guard_start_frame(fleet, host))
+                                         before_frame=lambda: confinement.guard_start_frame(fleet, host, confinement_record))
                 if (not isinstance(started, dict) or started.get("ok") is False or
                         started.get("sessionId") != sid):
                     raise WriteRefused("BAT start reply did not confirm the reserved session ID")

@@ -24,7 +24,10 @@ MCP client) and shell scripts can:
 General managed starts keep the operator's `default_permission_mode`: `default` preserves BAT defaults and
 `allow_all` preserves bypass/full access (level `none`). Choose `confined` to restrict general starts too. Checkpoint
 and repair starts always use confined options: Claude `default`, or `acceptEdits` only with a verified BAT host
-account; Codex `workspace-write/on-request`. Cwd alone offers no protection, and acceptEdits has no path check.
+account; Codex `workspace-write/on-request`. Host-account verification requires a root-owned, non-writable home
+and trusted login startup files, plus system-owned Python/find. Install clean startup files before hardening; agent
+state may live in account-owned `.claude`, `.codex` and `.cache` subdirectories. Unhardened hosts report unknown and
+confined Claude uses plain `default`. Cwd alone offers no protection, and acceptEdits has no path check.
 BAT cannot configure network or writable roots, so confined Codex may break installs and localhost test servers.
 Task Service engine/recipes stay unchanged and expose their compatibility gap. Session reads and the Dashboard
 show creation evidence separately from current verification. A10 is not proven until W12's live acceptance run.
