@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Prepare a read-only projection of exact verified artifact replicas for reviewed cleanup.
+  Bind replicas to checkpoint creation and transfer intents; retain ordinary content when the
+  immutable original is unavailable. Cleanup wiring awaits the integrated base; correct the
+  artifact spec's data-step allocation and remove its obsolete Hub-import dependency.
+
 - Artifact attachments, Part A ([design](docs/design/artifacts.md), plan §08/§12/§13, W05b, B04): immutable
   Connector-owned revisions, quota reservations and operation staging; binary HTTP upload authenticates before
   reading content. Typed work item/checkpoint refs, restricted Python 3.9+ SSH materialization inside the continuation

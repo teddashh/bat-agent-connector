@@ -1,6 +1,8 @@
 # Artifacts：附件版本與派工前驗證
 
-日期：2026-10-08。對應計畫 §08 Artifact、§12 第 3–5 步、§13、§28「03 managed execution」，W05b、B04；A03 的檔案擷取部分另列 Part B。本文件依 spec review 分為 A／B／C；本輪只實作 Part A。
+日期：2026-10-08。依 Tauri v2 §16 附件／跨主機接續、§19 清理，R05／R08。
+歷史 spec 的 W05b、B04 與 A03 用於對照既有測試，不代表新範圍已完成。
+A03 的檔案擷取部分另列 Part B；本文件分為 A／B／C，本輪只實作 Part A。
 
 ## 固定來源版本（A／B／C）
 
@@ -120,7 +122,17 @@ Checkpoint create 凍結 refs；之後 immutable。continue 的 params.artifacts
 
 副本固定在 `<worktree>/.batc-inputs/<artifact_id>-r<revision>/<safe name>`。safe name 來自 validated display name，無 separator／control，不能是 .、..、.git。clone common info/exclude idempotent append `/.batc-inputs/`；沒有 template 時，以 common-dir fd／no-follow 補建 info（0755）與 exclude（0644、O_CREAT／O_EXCL）。既有 info 必須是 directory，exclude 必須是 single-link regular file；拒絕 symlink／shared file。worktree.prepare 的 clean check在 materialization 前。派工 prompt 只列 worktree-relative path、ref／digest；絕無 client-local absolute path。
 
-每個 materialization set 只屬一個 continuation operation。rows 是「T 時刻為 X verified」的派工證據，不是 live inventory。無跨 operation reuse、generation、removed state、shared cache、host flock 或 host quota reservation；傳輸前檢查 free space。dispatch 後副本是 agent 的工作副本，store immutable revision 仍是 reference。cleanup 的非 force worktree remove 帶走 ignored replicas；store 原件保留。
+每個 materialization set 只屬一個 continuation operation。rows 是「T 時刻為 X verified」的派工證據，不是 live inventory。無跨 operation reuse、generation、removed state、shared cache、host flock 或 host quota reservation；傳輸前檢查 free space。dispatch 後副本是 agent 的工作副本，store immutable revision 仍是 reference。
+
+Reviewed cleanup 只能豁免 exact verified replicas，不能把 ignored `.batc-inputs/` 全目錄視為可刪。
+`artifact_cleanup.replica_evidence(ops, item)` 是預備接入 cleanup `_replica_evidence` 的唯讀投影：
+只接受 proven checkpoint worktree 的 creation operation，核對 checkpoint host、prepare intent、external refs、
+materialization host/path/ref/size/digest、verified receipt 與實際 transfer attempt intents。
+輸出 `replica_manifest=[{path,bytes,digest}]` 與 exact `.owner`／`.attempt-N`／`.closed-N` names；
+不猜 attempt range，不豁免其他內容。Store 正本也必須可讀且 hash 符合，否則副本維持一般內容，避免清掉唯一副本。
+Cleanup host helper 仍逐檔檢查 no-follow、single-link、目前 size/hash、tracked 狀態及多餘／缺少內容；
+edited、unknown、unverified 或跨 operation/host/path 的內容需要原本的保留／reviewed discard 規則。
+此投影尚待 shared cleanup 基底接線與整合測試；不代表清理能力已安裝或經實機驗收。
 
 helper 是固定、版本化 Python 3.9+ 程式，透過既有 alias 執行；raw bytes stdin、有界 JSON stdout，沒有 general script API。每個寫入先經 resource_policy.check_checkpoint_worktree 與 artifact destination 規則，檢查建立 intent、clone marker與真實 root。所有 worktree 以下 component 以 dirfd/no-follow 開啟；拒絕 symlink、unknown final、hardlink／非 regular file、traversal／prefix escape。不以 norm 字串當 canonical 證據。
 
@@ -189,13 +201,16 @@ reference rows只有work_item、checkpoint、operation的writer。未完成工�
 | resource_policy.py | storage／materialize mutation與 shared destination checks，配合cleanup guard |
 | operations.py | **只有 additive wake(operation_id)**；不改 create／resume／cancel／STATES／table／replay |
 | checkpoints.py | frozen refs、handler第一step連結、共用 manifest helper 的 admission 長度檢查、materialize／guard、before_send callback／confirmation；保持其他包修改 |
-| work_items.py | typed attachments／指紋／transaction；保持hubimport／observation／cleanup修改 |
+| work_items.py | typed attachments／指紋／transaction；保持既有 Connector work-item／observation／cleanup 修改；無 Hub import 依賴 |
 | task_verifier.py／task_daemon.py／api_v1.py／mcp_server.py／cli.py | settings／setup／actions、獨立 reaper loop／best-effort cancel、受限content route／download／三MCP tools／CLI／capabilities |
 | dashboard/app.js／app.css／i18n.js | selection upload、localStorage草稿與pending提示、operation evidence，兩語系 |
 | tests/test_artifacts.py 等 | 下列接受情境、HTTP/MCP/CLI契約與policy失敗 |
 | api-v1.md／checkpoints.md／work-items.md／dashboard.md；README x2／CHANGELOG／兩skills | 完成部分與尚未涵蓋；計畫§08/§12/§13、B04、MCP 256KiB與大檔路徑 |
 
-Artifact DDL 只用 CREATE TABLE IF NOT EXISTS 與依 table_info 缺欄位才 ALTER；不讀寫 user_version。版本號屬一次性的 data migrations：delivery 佔 2–3、observation 佔 4。artifact 不能先標 2，否則合併後會跳過 delivery 的資料遷移。
+Artifact DDL 只用 CREATE TABLE IF NOT EXISTS 與依 table_info 缺欄位才 ALTER；不讀寫 user_version。
+版本號屬一次性的 data migrations：1 既有 event copy、2 observation history、3 deployment history。
+Artifacts 不佔號，也不以建表 stamp 跳過其他包的資料遷移。Migration 測試 stamp 3 只證明保留任意既有版本；
+不假裝本分支已執行 deployment history migration。
 
 ## 測試計畫（A；B04）
 
@@ -214,6 +229,8 @@ BAT只用mockbat；git用temp repo／LocalRunner／RealGitLog。byte helper測�
 | test_operation_wake_only_moves_waiting_external | 其他狀態不變，不poll |
 | test_attachment_change_invalidates_work_item_approval | 有附件才改fingerprint、version衝突 |
 | test_artifact_migration_preserves_existing_journal_and_empty_manifests | 舊IDs／approval／空附件、idempotent DDL |
+| test_replica_projection_*（test_artifact_cleanup.py） | 純讀 exact creation/materialization/transfer binding；原件 missing/corrupt 保留；不猜 attempt 缺號 |
+| test_replica_projection_drives_cleanup_content_contract | 真實暫存檔案 unchanged／edited／extra／missing／symlink／hardlink／tracked；shared cleanup module 尚未合入時明確 skip |
 | test_artifact_http_mcp_cli_contract_and_scopes | body前auth／actor／state／type／length、download headers、scope、same action |
 | test_artifact_policy_refuses_escape_before_any_host_write | worktree內no-follow／traversal／hardlink／unknown拒絕 |
 | test_materialized_inputs_are_git_excluded_and_inside_the_worktree | cwd內relative paths、dirty=0、exclude冪等 |
