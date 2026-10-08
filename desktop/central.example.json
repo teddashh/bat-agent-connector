@@ -1,0 +1,5 @@
+{
+  "endpoint": "http://127.0.0.1:18796/",
+  "expected_actor": "your-issued-api-actor",
+  "contract_version": "2026-10-08"
+}

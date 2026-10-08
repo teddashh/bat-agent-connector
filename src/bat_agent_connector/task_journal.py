@@ -354,6 +354,8 @@ class Journal:
         from .observation import install
         install(self)
         deployment_store.backfill(self)
+        from .dashboard_sync import install as install_sync
+        install_sync(self)
 
         from .cleanup import migrate
         migrate(self)
@@ -651,7 +653,9 @@ class Journal:
             self.db.execute(f"RELEASE {savepoint}")
 
     def api_head(self) -> int:
-        return int(self.db.execute("SELECT COALESCE(MAX(seq),0) FROM api_events").fetchone()[0])
+        # The durable allocator survives retained-event deletion; absence never rewinds a cursor.
+        return int(self.db.execute("SELECT MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='api_events'),0), "
+                                   "COALESCE((SELECT MAX(seq) FROM api_events),0))").fetchone()[0])
 
     def api_events(self, after: int = 0, limit: int = 100, *, resource_type: str | None = None,
                    resource_id: str | None = None, kind: str | None = None,
