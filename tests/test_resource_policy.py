@@ -226,6 +226,23 @@ async def test_connector_worktree_session_is_writable(fleet_factory, mock):
     await f.close()
 
 
+@pytest.mark.parametrize("marker", [{"worktree_made_by": "connector"}, {"checkpoint_id": "cp-fixture"},
+                                  {"integration_operation_id": "op-fixture"}, {"branch": "batc/task-fixture"}])
+@pytest.mark.parametrize("link", ["failover_of", "lead_session_id", "shared_worktree_from"])
+async def test_connector_creation_root_refuses_bat_actions_when_child_loses_markers(fleet_factory, mock, marker, link):
+    """B01/D05, §06/§08: a markerless successor/reviewer/shared row cannot reclassify an SSH worktree."""
+    root = add_managed_wt(mock, "root-0001", **marker)
+    sid = add_managed_wt(mock, "child-0002", **{link: root}, shares_worktree_with=root)
+    f = all_tiers(fleet_factory)
+    policy = await resource_policy.session_policy(f, "h1", sid)
+    assert policy["worktree_made_by"] == "connector"
+    assert policy["actions"]["worktree.remove"]["code"] == "NOT_A_BAT_WORKTREE"
+    with pytest.raises(ResourceReadOnly, match="NOT_A_BAT_WORKTREE"):
+        await orchestrate.worktree_remove(f, "h1", sid, confirm=True, delete_branch=True)
+    assert write_frames(mock) == []
+    await f.close()
+
+
 # --------------------------------------------------------------------------- destinations
 async def test_new_sessions_never_work_directly_in_a_human_checkout(fleet_factory, mock):
     f = all_tiers(fleet_factory)

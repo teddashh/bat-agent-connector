@@ -992,6 +992,87 @@ def test_b01_worktree_shared_creation_identity_and_reuse(mock, tmp_path):
     j.close()
 
 
+@pytest.mark.parametrize("slot", ["task", "checkpoint"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_b01_b03_legacy_connector_branch_keeps_journaled_slot_and_history(tmp_path, slot, legacy):
+    """B01/B03, §08/§11: legacy batc/ rows retain connector IDs, including step-2 replay."""
+    from bat_agent_connector.observation import registry_bindings
+    from bat_agent_connector.operations import ActionDef, OperationService
+
+    path = tmp_path / "j.db"
+    j = Journal(path)
+    t = task(j, "legacy-connector")
+    if slot == "task":
+        j.change(t["task_id"], "dispatching", fields={"session_id": "root"})
+        with j.tx():
+            j.api_event("task", t["task_id"], "task.external_worktree_retained",
+                        {"path": "/srv/wt", "branch": "batc/task-fixture"})
+        wid = worktree_id("h1", "task", t["task_id"], "external_worktree")
+    else:
+        async def never_run(ctx):
+            raise AssertionError("identity fixture must not execute operations")
+        ops = OperationService(j, actions=[ActionDef("checkpoint.continue", "observe", "Fixture only", never_run)])
+        op, _ = ops.create(api_auth.Principal("fixture", frozenset({"observe"})), action="checkpoint.continue",
+                           target={"host": "h1"}, idempotency_key="creation")
+        ops._merge_refs(op["operation_id"], {"host": "h1", "session_id": "root", "worktree_path": "/srv/wt"})
+        wid = worktree_id("h1", "checkpoint.continue", op["operation_id"], "worktree")
+    entries = [{"host": "h1", "session_id": "root", "created_at": 123, "worktree_path": "/srv/wt",
+                "branch": "batc/task-fixture"},
+               {"host": "h1", "session_id": "review", "created_at": 124, "worktree_path": "/srv/wt",
+                "role": "reviewer", "lead_session_id": "root", "branch": "batc/task-fixture"}]
+    registry_bindings(j, "h1", list(reversed(entries)))
+    bind(j, t, "root")
+    bind(j, t, "review", role="reviewer")
+    if legacy:
+        for table in ("session_worktree_bindings", "observation_resources", "observation_backfill"):
+            j.db.execute(f"DELETE FROM {table}")
+        j = replay_version_one(j, path)
+        assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+        registry_bindings(j, "h1", entries)
+    obs = Observation(j)
+    worktree_events = {e["seq"] for e in obs.history("worktree", wid)["events"]}
+    for sid in ("root", "review"):
+        assert obs.resource("session", f"h1/{sid}")["worktree_id"] == wid
+        relations = obs.relations("session", f"h1/{sid}")["relations"]
+        assert len(relations) == 1 and relations[0]["execution_id"] == t["task_id"]
+        session_events = obs.history("session", f"h1/{sid}")["events"]
+        own_events = {e["seq"] for e in session_events if e["kind"].startswith("relation.")}
+        assert own_events and own_events <= worktree_events
+    assert {r["session_resource_id"] for r in obs.relations("worktree", wid)["relations"]} == {"h1/root", "h1/review"}
+    assert {r["resource_id"] for r in j.db.execute("SELECT resource_id FROM observation_resources WHERE resource_type='worktree'")} == {wid}
+    head = j.api_head()
+    state = [tuple(r) for r in j.db.execute("SELECT * FROM session_worktree_bindings")]
+    j.close()
+    j = Journal(path)
+    assert j.api_head() == head and j.db.total_changes == 0
+    registry_bindings(j, "h1", entries)
+    assert j.db.total_changes == 0 and j.api_head() == head
+    assert [tuple(r) for r in j.db.execute("SELECT * FROM session_worktree_bindings")] == state
+    j.close()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_b01_legacy_connector_branch_without_slot_has_no_worktree_identity(tmp_path, legacy):
+    """B01, §08: a legacy connector branch alone is no BAT creation or ownership proof."""
+    from bat_agent_connector.observation import registry_bindings
+
+    path = tmp_path / "j.db"
+    j = Journal(path)
+    t = task(j, "unknown-slot")
+    bind(j, t, "root")
+    entries = [{"session_id": "root", "created_at": 123, "worktree_path": "/srv/wt", "branch": "batc/task-fixture"},
+               {"session_id": "child", "created_at": 124, "worktree_path": "/srv/wt", "failover_of": "root"}]
+    registry_bindings(j, "h1", entries)
+    if legacy:
+        j = replay_version_one(j, path)
+        registry_bindings(j, "h1", entries)
+    obs = Observation(j)
+    assert all(obs.resource("session", f"h1/{e['session_id']}").get("worktree_id") is None for e in entries)
+    assert j.db.execute("SELECT COUNT(*) FROM observation_resources WHERE resource_type='worktree'").fetchone()[0] == 0
+    assert j.db.execute("SELECT COUNT(*) FROM session_worktree_bindings").fetchone()[0] == 0
+    j.close()
+
+
 def test_b01_relation_scope_and_cross_project_link_history(mock, tmp_path):
     j = Journal(tmp_path / "j.db")
     inv = Inventory(j, make_config(mock))
