@@ -4,6 +4,8 @@
 
 沿用本文件，因為新功能延伸同一套 `delivery.py`／`github.py`、recipe 與恢復流程；另開文件會有兩份完成判定。以下「現有」各節記錄起點；metadata／merge 的 Phase 2 規格已由 Part A 取代相應合約，標為 Part B 的部署規格保留待第二步。PR head 更新仍見 [integration.md](integration.md)。Phase 1 規格為 `5f94ad7`，review 修訂為 `afac4e9`，兩筆均獨立提交。2026-10-08 review 後分成兩步：Part A（現在）metadata、merge preview／verify、C04／C05／C07、PR 卡與各入口文件；Part B（之後另開 branch）部署 runtime evidence、generations／ordering、history／rollback、D03／D05／D06 與環境卡。
 
+Part A review follow-up 以 `85601e2f6a36517ba559705e9e360763e7c4d63b` 為固定來源：修正 metadata 無落地的期限、預覽成本／保留、submit 前檢查位置與最後合併歸因；保留已批准的 action／digest／scope 與 Part B 邊界。
+
 ## 固定來源版本
 
 | 來源 | 固定版本與用途 |
@@ -173,9 +175,19 @@ Title 是非空字串；body 是字串，空字串清空，省略保留。CLI bo
 | `pr.metadata.write` | step intent commit 後、PATCH 前再次 GET，核對 repo ID 與整對 before；PATCH `/pulls/{n}` 只送指定欄位 | 改遠端 title／body，可能觸發通知／事件 | 寫前變更停止；200 保存回執；失聯／429／5xx 為 uncertain，先回查 |
 | `pr.metadata.verify` | 寫後再 GET，整對內容必須等於 after | 保存 observed、digest、URL；相符才 succeeded | 不同為 `PR_METADATA_CONFLICT`／needs_attention；保存 before／intended／observed；讀不到等待，不重 PATCH |
 
-Write reconcile／重啟：after 是正向證據，`observed_intent=true`，不猜作者；before 也不證明沒寫（可能已寫後被人改回），維持 uncertain，沒有 RERUN；第三種內容為 conflict。Cancel／resume 不覆蓋或自動還原。處理方式是讀新內容、重新編輯、以新 digest／key 建操作；操作不能在 resume 換 precondition。
+Write reconcile／重啟：after 是正向證據，`observed_intent=true`，不猜作者；before 在 write step 開始後未滿 10 分鐘仍維持 uncertain，沒有 RERUN；第三種內容為 conflict。Cancel／resume 不覆蓋或自動還原。處理方式是讀新內容、重新編輯、以新 digest／key 建操作；操作不能在 resume 換 precondition。
 
-取消不掩蓋已收到的 PATCH 回執；保存 `write_acknowledged`／`verification_pending`，UI 顯示已修改、待驗證。尚未證明的 started／uncertain write 即使 operation cancelled 仍阻擋另一個 metadata update，避免舊 PATCH 晚到再覆蓋新操作。Delivery 的只讀 reconciliation 也查這些 metadata steps，直到效果有證據；無證據不因取消釋放。Journal 保存必要的 before／intended／observed；沿用 api_events 的 action／target／狀態／錯誤摘要，不複製 body；完整三份內容只在 operation／steps。
+取消不掩蓋已收到的 PATCH 回執；保存 `write_acknowledged`／`verification_pending`，UI 顯示已修改、待驗證。尚未證明的 started／uncertain write 即使 operation cancelled，10 分鐘 settle window 內仍阻擋另一個 metadata update。Delivery 的只讀 reconciliation 亦處理 cancelled／cancel_requested 與 `UNCERTAIN_UNRESOLVED` rows，永不重 PATCH。
+
+| Recovery 讀回 | Settlement／下一步 |
+|---|---|
+| after | 正向觀測證據；沿用已批准的 step／refs 完成路徑，保留 private service calls 的介面回歸測試 |
+| before，step 開始未滿 600 秒 | 保留 uncertain／PR_UPDATE_IN_PROGRESS，等原請求讀回；取消不釋放 |
+| before，step 開始已滿 600 秒 | 客戶端 timeout 早已結束；delivery 自己的 `pr_metadata_settlements` 保存 `not_applied`／`PR_METADATA_NOT_APPLIED`／observed／時間，釋放 PR，之後不再週期 GET 此 row；不改另一操作的 steps／refs |
+| 已保存 not_applied 的非取消操作 reconcile／resume | 只讀保存結論，step 不再 PATCH；handler 以 PR_METADATA_NOT_APPLIED 明確 failed。原 UNCERTAIN_UNRESOLVED 操作保留 needs_attention，直到 caller resume；cancelled 仍 cancelled，不自動恢復 |
+| settlement 後舊寫入非常晚才落地 | 每個新操作仍在 plan 與 PATCH 前比較新 digest／整對 metadata，差異為 PR_METADATA_CHANGED、zero 新 PATCH；不偷偷覆蓋。仍受下段 GitHub 無 CAS 的最後讀寫窗口限制 |
+
+Journal 保存必要的 before／intended／observed；沿用 api_events 的 action／target／狀態／錯誤摘要，不複製 body；完整內容在 operation／steps 與必要 settlement receipt。
 
 [GitHub update PR](https://docs.github.com/en/rest/pulls/pulls?apiVersion=2026-03-10#update-a-pull-request) 沒有 body CAS。本規格是 read-compare-write 加寫後讀回，仍有最後 GET 與 PATCH 之間的窗口，也無法發現窗口內被覆蓋且沒留下不同結果的編輯。不宣稱零遺失更新；UI 在編輯區簡短說明限制。可編輯 open／closed／merged PR 的 metadata，依 GitHub 權限，不把 merge 狀態當本地寫入權。
 
@@ -189,14 +201,18 @@ Write reconcile／重啟：after 是正向證據，`observed_intent=true`，不�
 |---|---|---|
 | 目標 | GET repo／PR，provider origin、repo ID、head repo ID／ref／SHA、base ref／SHA、method | 身分不全為 `MERGE_SCOPE_UNPROVEN`；closed／draft／conflict 沿用代碼 |
 | 原生 stack | 查 membership／Stacks API，核對成員 PR；列 number／title／head SHA／base ref／URL／影響原因 | 無法讀取、缺欄或不一致為 unproven；403／404 不能當作沒有 stack |
-| Commit 範圍 | [compare](https://docs.github.com/en/rest/commits/commits?apiVersion=2026-03-10#compare-two-commits) 用兩個固定 SHA 分頁取完整 BASE..HEAD／parents／merge base／檔案摘要；重讀 PR 確認期間未前進 | 不用有 250 上限的 PR commit list 冒充完整資料；comparison 不完整／不相關 blocking；files 摘要有 300 上限，明示 truncated |
+| Commit 範圍 | [compare](https://docs.github.com/en/rest/commits/commits?apiVersion=2026-03-10#compare-two-commits) 用兩個固定 SHA 分頁取完整 BASE..HEAD／parents／merge base／檔案摘要；重讀 PR 確認期間未前進 | 不用有 250 上限的 PR commit list 冒充完整資料；comparison 不完整／不相關 blocking；files 摘要有 300 上限，明示 truncated；每檔只存 filename／status／additions／deletions／changes／previous_filename，SHA 固定內容，不存 patch／blob／contents URLs |
 | 其他 PR | 完整分頁讀 open PRs；查 base→另一 PR head 的 chain；查另一同 base PR 的 head 在 target head 可達但在 target base 不可達 | Chain 列 stack unsupported；可能間接合併列 `MERGE_SCOPE_EXPANDED`。純共用祖先不算，squash／rebase 不把 SHA 可達誤報成一定關 PR |
 
 | 保存 | `pr_merge_previews` immutable `mpv_…`，有效一小時；digest＝目標／method／commit set／觀測範圍／stack／受影響 PR 身分與內容 | 換 method／scope 必須重新預覽；不保存 credential／主機路徑 |
 
+保存前重用相同 repository／PR／method／digest 的未過期 row，不延長原 expires_at。每次保存清掉 expired 已超過 24 小時的 rows，但保留任何非 terminal merge／combined operation 的 params.preview_id；queue／resume／verify 仍讀原 snapshot。操作終態後，下次保存才可清除它的舊 row。
+
+事件驅動讀取用 `from_event=true`（HTTP query／daemon read 參數）；每個 repository／PR／method 的 scope 最多 60 秒重算一次，head 或 base SHA 改變立即重算。每次仍 GET PR／checks，title／body／metadata_digest 等便宜資訊保持即時；手動載入仍重新查 scope。獨立 `pr_merge_scope_reads` 保存最後 checked_at／preview_id，digest 相同而重用舊 row 亦刷新節流時計；不改 immutable 文件／expiry，同 key 的並行重載共用 lock。舊 cache pointer 隨保存清理。節流僅控制事件觀測成本，不取得 merge authority。
+
 [間接合併](https://docs.github.com/en/pull-requests/reference/pull-request-merges#indirect-merges) 與 native stack 分開列證據。其他 PR 沒有 metadata 關聯的 commits 仍按固定 BASE..HEAD 完整列出，不猜 task 所有權。PR／stack array response 要在 `github.py` 統一成 `{items}`；分頁讀到結束並核對總數，不把第一頁／錯誤視為空資料。
 
-`merge.submit` 前重讀完整 scope，與保存 snapshot 比對：head 變 `TARGET_HEAD_CHANGED`、base 變 `TARGET_BASE_CHANGED`、PR／commit 範圍變 `MERGE_SCOPE_CHANGED`，保存 added／removed 差異，zero PUT。不 retarget／update branch／加來源／force push。API 只有 expected head，沒有 expected base／scope CAS；提交瞬間仍可被別人改動，須以最後結果驗證處理。
+等待 required checks 時只比既有 PR read 的 head／base，不重算完整 scope。完整 scope 檢查在 ready 後、緊接 `ctx.step("merge.submit", …)` 之前執行一次，與保存 snapshot 比對：head 變 `TARGET_HEAD_CHANGED`、base 變 `TARGET_BASE_CHANGED`、PR／commit 範圍變 `MERGE_SCOPE_CHANGED`，保存差異，zero PUT。檢查放在 step function 外，暫時無法讀取為可 resume 的 MERGE_SCOPE_UNPROVEN／needs_attention，不產生 failed submit step；resume 再讀完整 scope。未知 submit 的 reconcile 仍在回 RERUN 前重查完整 scope。不 retarget／update branch／加來源／force push。API 只有 expected head，沒有 expected base／scope CAS；提交瞬間仍可被別人改動，須以最後結果驗證處理。
 
 ## Phase 2 規格：C04／C05 與 merge 恢復
 
@@ -216,6 +232,8 @@ Merge.verify 查實際 merged PR／commit 與 base history：PR 必須 merged；
 提交被受理後 base 前進是正常行為，包括 queue 先合成其他 PR，不比預覽 tree、不做 rebase blob mapping。UI 顯示「合併到較新的 base：另有 N 個 commits 會一起發布」。Combined 驗證通過就部署 actual merged SHA；§17 pipeline pre-deploy check 與 Part B D03 runtime evidence 驗證最後版本。
 
 重查預覽 affected list（stack／chain／indirect candidates）及提交時新出現的 stack 成員，沒有其他 PR 被本次 merge 掃入；若候選已 merged，須以其 head 在本次 head 的可達性、其 merge SHA／目標 merge parents／實際 base history 與時間等證據區分先前獨立合併，不能把合法 base 前進誤判。確定額外 PR 被掃入才 MERGE_RESULT_SCOPE_CHANGED；缺少證據才 MERGE_RESULT_UNVERIFIABLE。保存 merged_sha／merge_receipt／逐 PR 結果，scope changed 時 combined 不 dispatch。On_merge 可能已觸發，只觀測不假稱無副作用，不自動 revert。
+
+若本次 merged SHA 是候選 merge commit 的祖先，候選為之後獨立合併，保存 `merged_after=true`／`independent=true` 並接受；驗證延遲不將後來的合法 merge 誤判成缺證據。補查提交後出現的 PR 用 [list pulls](https://docs.github.com/en/rest/pulls/pulls?apiVersion=2026-03-10#list-pull-requests) 的 state=all、sort=updated、direction=desc，updated_at 早於 operation created_at 就停止分頁；保留 admission 整秒，避免 GitHub 秒級時間漏掉同秒 merge。預覽已列的 affected candidates 與當前 stack 成員仍逐筆驗證，不因 paging 截止略過。
 
 Lost reply／真正重啟：先 GET PR／已存 UUID，merged 時核對原 head／scope／結果。僅 readback 沒可歸因 request 證據時 merged_by_this_operation 不能 true。Open＋UUID 繼續查；UUID 24 小時過期／404 時改查 PR／queue，不當作 failed。保留 provider-specific deduplicated submit 的 RERUN：未知 UUID 時，必須重新證明完整固定 scope 未變、PR 仍 open，再送完全相同的 head／method／action；GitHub 的同 PR pending request 會回 409，再核對 options。只有 PR open 不足以重送；scope 讀不到或已變則 uncertain／needs_attention。這是經過回查的同 intent，不是換版本重試；Resume 不換 preview。
 
@@ -245,11 +263,13 @@ Artifact rollback 必須配置 artifact_id／digest inputs；一般 start 仍選
 
 ## Part B（第二步）：journal／desired version／順序（D05）
 
-同一 Journal 的 additive migration。Part A 只加 pr_merge_previews，起點 user_version=1，使用 2；DDL 冪等、column adds 先查存在，可在 rebase 時只重編 migration 編號、不改資料。Part B 開始時讀 origin/main 的 next free number，加入部署表；完成交易才升版，不回退 user_version。沒有新 tasks authority。
+同一 Journal 的 additive migration。Part A 初版加 pr_merge_previews，起點 user_version=1，使用 2；review follow-up 使用下一空號 3 加 pr_metadata_settlements／pr_merge_scope_reads。DDL 冪等、column adds 先查存在，可在 rebase 時只重編 migration 編號、不改資料。Part B 開始時讀 origin/main 的 next free number，加入部署表；完成交易才升版，不回退 user_version。沒有新 tasks authority。
 
 | 新表 | 欄位／約束 |
 |---|---|
 | `pr_merge_previews` | immutable mpv ID、provider origin／repo ID／name、PR／method、snapshot／digest、created／expires |
+| `pr_metadata_settlements`（Part A） | operation ID PK、delivery 的 not_applied receipt；不改別的 operation steps／refs |
+| `pr_merge_scope_reads`（Part A） | PK(repository, PR, method)、preview ID、scope checked_at；與 immutable authority 分開 |
 | `deployment_environments` | PK(provider origin, repository ID, environment)；desired generation／deployment ID／identity、current ID／generation、observed identity／時間／health、attention、dispatch slot；name 是顯示／定位值 |
 | `deployments` | dep ID、operation ID UNIQUE、recipe name／digest／snapshot、env key、generation、source／artifact／release identity、rollback_of、run／attempt、workflow ID／SHA、state／evidence／times／URLs；UNIQUE(env key, generation) |
 
@@ -322,6 +342,7 @@ Contract_version 保持 YYYY-MM-DD，以該部分變更日期更新（Part A 為
 | PR_METADATA_CHANGED | failed／409 | 讀差異，新 digest／key |
 | PR_METADATA_UNVERIFIABLE | needs_attention | 保留 write receipt，補足 readback；不重新 PATCH |
 | PR_METADATA_CONFLICT | needs_attention | 保留三份內容，不覆蓋／還原 |
+| PR_METADATA_NOT_APPLIED | failed（reconcile／resume） | 600 秒後仍 before 的寫入已結案；讀新 digest／key 開新操作，不重 PATCH |
 | STACKED_PR_UNSUPPORTED／MERGE_SCOPE_EXPANDED／MERGE_SCOPE_UNPROVEN | preview blocking；needs_attention | 檢視各 PR／commits，正常重整或補讀取證據後重新預覽 |
 | TARGET_HEAD_CHANGED／TARGET_BASE_CHANGED／MERGE_SCOPE_CHANGED | failed／409 | 重新預覽，zero PUT |
 | EXISTING_MERGE_REQUEST | needs_attention | 核對既有 intent，不借不同操作 |
@@ -367,7 +388,15 @@ Part A 已實作下列 tests；Part B 列為第二步的 test plan。既有負�
 | C05、§16 | `test_c05_base_changed_before_submit_has_diff_and_zero_put`；`test_c05_queue_newer_base_verifies_actual_merge`（merge／squash）；`test_c05_newer_base_combined_deploy_uses_actual_sha`；`test_c05_rebase_verifies_reviewed_head_and_actual_destination`；`test_c05_merge_restart_preserves_actual_sha_without_attribution`；`test_c05_wrong_merge_parent_keeps_receipt_and_stops_deploy`；`test_merge_preview_expiry_only_before_first_submit`；`test_c05_merge_verification_intent_precedes_reads_and_resume_is_read_only` |
 | §16 stack、C04／C05 | `test_c04_native_stack_and_branch_chain_are_listed_and_refused`、`test_c04_native_bottom_lists_upper_rebase_and_refuses`；`test_c04_indirect_merge_differs_by_method_and_shared_ancestor`；`test_c04_complete_compare_pagination_over_250_commits`、`test_c04_paginated_pr_list_finds_late_indirect_candidate`；`test_c04_scope_changes_or_missing_pages_never_submit`；`test_c04_stack_read_errors_are_not_empty_membership`；`test_c05_swept_downstack_fails_verification_and_never_dispatches`；`test_c05_new_stack_during_acceptance_never_dispatches`（list 的 merged_at／秒級時間、無 merged boolean）；`test_c05_independently_merged_candidate_on_new_base_is_allowed` |
 | C07、§09／§15 | `test_c07_metadata_integrate_scope_opt_in_and_fields`；`test_c07_delivery_transports_share_actions_and_principals`（真 HTTP／MCP／CLI，同 actor/key 回同 operation、scope 不借 Dashboard、combined capabilities）；`test_c07_delivery_wrappers_require_confirmation_and_token`（confirm／token／read_only）；既有 `test_merge_admission` |
-| §09／§28 migration | `test_part_a_preview_migration_reopens_without_data_change`：version 1／2／較高版本重開、資料保留；既有 task event backfill test 保留。Part A 不呼叫 BAT／SSH Git mutation |
+| §09／§28 migration | `test_part_a_preview_migration_reopens_without_data_change`：version 1／2／3／較高版本重開、資料保留；既有 task event backfill test 保留。Part A 不呼叫 BAT／SSH Git mutation |
+
+Review follow-up 的新增回歸：
+
+| 計畫／驗收 | Tests／負面證據 |
+|---|---|
+| C07、§10／§15 metadata recovery | `test_metadata_lost_before_write_settles_not_applied_after_window`（cancelled／UNCERTAIN_UNRESOLVED、新操作受理、停止 GET／zero 第二 PATCH）；`test_metadata_late_landing_after_settlement_is_caught_by_digest`；`test_metadata_positive_cancel_reconciliation_pins_private_service_calls` |
+| C04／C07、§16 preview | `test_pr_card_reuses_identical_preview_and_prunes_expired`（摘要欄位、未過期重用、queued row 保留到 verify）；`test_event_reloads_do_not_recompute_scope_within_window`（GitHub calls、SHA 改變立即刷新、digest 重用後時計仍刷新）；`test_event_reload_throttle_is_shared_by_http_and_rpc` |
+| C04／C05、§16 submit／verify | `test_transient_scope_read_error_before_submit_is_resumable`（failed step 不存在、resume 僅一 PUT）；`test_checks_wait_only_rereads_head_and_base_before_final_scope`；`test_verify_accepts_affected_pr_merged_after_this_merge`；`test_verify_stops_updated_pr_pagination_at_admission`（排序與 pages） |
 
 以下均為 Part B（第二步）規劃，尚未聲稱完成：
 
