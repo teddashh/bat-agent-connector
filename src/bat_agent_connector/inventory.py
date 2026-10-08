@@ -29,6 +29,35 @@ MATERIAL = ("workspace", "workspace_id", "title", "cwd", "agent_kind", "agent_pr
             "fields_stale", "field_evidence")
 GONE_AFTER_MISSES = 2
 MAX_PAGE = 200
+CURSOR_ERROR = "cursor does not match these filters; start again without it"
+
+
+def _session_cursor(cursor: str, fhash: str, order: str) -> tuple[list, int]:
+    """Validate the complete token before any inventory or resource query."""
+    try:
+        if not isinstance(cursor, str) or not cursor:
+            raise ValueError
+        decoded = json.loads(base64.b64decode(cursor.encode("ascii") + b"=" * (-len(cursor) % 4),
+                                             altchars=b"-_", validate=True))
+        if not isinstance(decoded, dict) or set(decoded) not in ({"f", "a", "k"}, {"v", "f", "a", "k"}):
+            raise ValueError
+        # Cursors issued before v1 had the same fields without a version marker.
+        if "v" in decoded and (type(decoded["v"]) is not int or decoded["v"] != 1):
+            raise ValueError
+        key, as_of = decoded["k"], decoded["a"]
+        if decoded["f"] != fhash or type(as_of) is not int or not 0 <= as_of <= 2**63 - 1:
+            raise ValueError
+        if not isinstance(key, list) or len(key) != (3 if order == "activity" else 2):
+            raise ValueError
+        if order == "activity" and (type(key[0]) is not int or not -(2**63) <= key[0] <= 2**63 - 1):
+            raise ValueError
+        for value in key[-2:]:
+            if not isinstance(value, str):
+                raise ValueError
+            value.encode("utf-8")  # SQLite cannot bind unpaired JSON surrogate escapes.
+        return key, as_of
+    except (ValueError, TypeError):
+        raise ValueError(CURSOR_ERROR) from None
 
 
 @dataclass
@@ -474,15 +503,12 @@ class Inventory:
                    "stale": stale, "relation_scope": relation_scope}
         fhash = hashlib.sha256(json.dumps(filters, sort_keys=True).encode()).hexdigest()[:16]
         key, as_of = None, None
-        if cursor:
-            try:
-                decoded = json.loads(base64.urlsafe_b64decode(cursor.encode() + b"=" * (-len(cursor) % 4)))
-                if decoded["f"] != fhash:
-                    raise ValueError
-                key, as_of = decoded["k"], int(decoded["a"])
-            except (ValueError, KeyError, TypeError):
-                raise ValueError("cursor does not match these filters; start again without it") from None
-        as_of = as_of if as_of is not None else self.journal.api_head()
+        if cursor is not None:
+            key, as_of = _session_cursor(cursor, fhash, order)
+        head = self.journal.api_head()
+        if as_of is not None and as_of > head:
+            raise ValueError(CURSOR_ERROR)
+        as_of = as_of if as_of is not None else head
         configured = list(self.config.hosts) or [""]  # rows of hosts removed from the config are not listed
         sql = f"SELECT * FROM sessions_observed WHERE host IN ({','.join('?' * len(configured))})"  # noqa: S608
         args = list(configured)
@@ -495,8 +521,6 @@ class Inventory:
             sql += " AND gone_at IS NULL"
         cols = ("sort_key", "host", "session_id") if order == "activity" else ("host", "session_id")
         if key is not None:
-            if len(key) != len(cols):
-                raise ValueError("cursor does not match these filters; start again without it")
             sql += f" AND ({','.join(cols)}) > ({','.join('?' * len(cols))})"
             args += list(key)
         rows = [dict(r) for r in self.db.execute(sql + f" ORDER BY {','.join(cols)}", args)]
@@ -543,7 +567,7 @@ class Inventory:
         next_cursor = None
         if len(rows) > limit:
             last = rows[limit - 1]
-            payload = {"f": fhash, "a": as_of, "k": [last[c] for c in cols]}
+            payload = {"v": 1, "f": fhash, "a": as_of, "k": [last[c] for c in cols]}
             next_cursor = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
         return {"sessions": items, "count": len(items), "next_cursor": next_cursor, "as_of": as_of,
                 "hosts": self.hosts(now), "coverage": {"source": "journal", "paging": "keyset", "relation_scope": relation_scope}}
