@@ -694,7 +694,8 @@ def _plan(ops, item, choices, op_rows, pvs, own_op=None):
             _reason(item, "RESULTS_NOT_DELIVERED", receipts=coverage["receipts"])
         for code, choice in (("UNCOMMITTED_CHANGES", "discard_uncommitted"),
                              ("RESULTS_NOT_DELIVERED", "release_undelivered")):
-            if item["resource_id"] in choices[choice] and kind == "worktree":
+            if (item["resource_id"] in choices[choice] and kind == "worktree" and
+                    item.get("proven") and not item.get("task_owned")):
                 matched = [r for r in item["reasons"] if r["code"] == code]
                 item["overridden_reasons"].extend(matched)
                 item["reasons"] = [r for r in item["reasons"] if r["code"] != code]
