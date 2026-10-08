@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import api_auth, checkpoints, registry, resource_policy
+from bat_agent_connector import api_auth, checkpoints, orchestrate, registry, resource_policy
 from bat_agent_connector.channels import GUARDED_CHANNELS, ORCHESTRATE_CHANNELS, WRITE_CHANNELS
 from bat_agent_connector.operations import OperationError
 from bat_agent_connector.task_daemon import TaskDaemon
@@ -176,6 +176,11 @@ async def test_continue_starts_managed_work_at_the_checkpoint_and_leaves_the_sou
     assert resource_policy.classify_row_for_read(hc, sid, has_tab=False, entries=entries)["api_access"] == "managed"
     follow = await run(daemon, "session.send", {"host": "h1", "session_id": sid}, {"text": "and a test"})
     assert follow["status"] == "succeeded", follow
+    # Inspecting the new session never runs BAT's git:status (a plain `git status`) in the person's folder.
+    mock.invokes.clear()
+    st = await orchestrate.session_worktree_status(daemon.fleet, "h1", sid)
+    assert "main_checkout_dirty_files" not in st and st["main_checkout_note"]
+    assert not [i for i in mock.invokes if i["channel"].startswith("git:") and i["params"].get("cwd") == str(human)]
 
     # A second continuation reuses the connector clone and gets its own worktree and branch.
     again = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]},
