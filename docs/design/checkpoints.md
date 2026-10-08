@@ -85,6 +85,13 @@ managed_roots = ["/srv/batc-managed"]   # 第一個是 Connector clone 的位置
 ssh_hosts = { workstation = "workstation-alias" }   # ~/.ssh/config 的 alias，BatchMode
 ```
 
+## 附件接續（Part A；計畫 §12／§13，B04）
+
+checkpoint.create 的 params.artifacts 凍結 ready `{artifact_id, revision, digest}`；continue 用 params.artifacts，省略才用 checkpoint 集合，永遠不取 latest。有附件須 expected_source_head_sha；Dashboard 一律帶。work_item_id 另帶 expected_work_item_fingerprint，handler 第一 step 建立 idempotent operation 連結。
+
+worktree.prepare clean 後，先 source guard，再 transfer 到 session cwd 內 `.batc-inputs/<artifact_id>-r<revision>/<safe name>`，寫入 clone common info/exclude；獨立 hash 讀回全部成功才 start。start_in_worktree 只增加 before_send callback；send 尚無 record 時再次即時 guard／read-back，拒絕復用舊的通過紀錄。start／send 回覆遺失仍走既有 UUID5／message ID reconcile。
+
+SOURCE_MOVED 保留原 commit、refs、parent；以 checkpoint.continue.revalidate 傳 observed_source_head_sha 與 expected_input_manifest_digest，透過既有 resume 續同 parent。失敗留 per-item evidence，部分已驗證不重傳。dispatch 後副本是 agent 工作副本；證據不是 live inventory，刪 worktree 不刪 Connector store 原件。原 client 無 guard 欄位且無附件仍保留原合約。CLI checkpoint revalidate 與操作頁提供確認；詳見 [artifacts.md](artifacts.md)。
 ## 整理與永久歷史（Part A）
 
 見 [cleanup.md](cleanup.md)：純讀 preview、signed token、逐項 operations／retained refs／tombstones，原 ID
@@ -96,5 +103,5 @@ Restore、reviewed task leftovers／coordinator 准入與 TaskDaemon 歷史投�
 
 - 未提交內容的唯讀 snapshot（計畫 §12「未提交修改」）：目前只顯示 `dirty` 提醒。
 - 跨主機接續：新工作固定在 checkpoint 所在的主機。
-- 附件與 artifact revisions、work item 關聯（W05）。
+- 檔案 capture／artifact.accept（Part B）與跨主機 commit fetch（Part C），見 [artifacts.md](artifacts.md)。
 - 復原 retained worktree 在 cleanup Part B；clone 退休、永久刪除另規格。

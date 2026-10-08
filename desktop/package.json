@@ -1,0 +1,31 @@
+{
+  "name": "better-agent-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "build:browser": "tsc --noEmit && vite build --mode browser && node scripts/browser-assets.mjs",
+    "build:all": "npm run build && npm run build:browser",
+    "check:browser": "node scripts/check-browser-assets.mjs",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test:ui": "playwright test",
+    "test:central": "node tests/central-integration.mjs",
+    "tauri": "tauri",
+    "test:cleanup": "node tests/cleanup-integration.mjs",
+    "test:artifacts": "node tests/artifact-integration.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0",
+    "@tauri-apps/cli": "2.12.1",
+    "typescript": "7.0.2",
+    "vite": "8.3.4"
+  }
+}

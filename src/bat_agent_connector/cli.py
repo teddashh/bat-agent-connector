@@ -652,6 +652,25 @@ def build_parser() -> argparse.ArgumentParser:
     tsp.add_parser("list", help="list actors, scopes and expiry (never tokens)")
     t = tsp.add_parser("revoke", help="revoke every token of an actor")
     t.add_argument("--actor", required=True)
+    p = sp.add_parser("artifact", help="Connector-owned immutable attachments")
+    asp = p.add_subparsers(dest="artifact_cmd", required=True)
+    c = asp.add_parser("upload", help="upload a file; local paths never enter prompts")
+    c.add_argument("file")
+    c.add_argument("--confirm", action="store_true")
+    c.add_argument("--key", required=True, help="reuse for retries of the same file")
+    c.add_argument("--artifact-id")
+    c.add_argument("--expected-latest-revision", type=int)
+    c.add_argument("--type", default="application/octet-stream")
+    c = asp.add_parser("list")
+    c.add_argument("--limit", type=int, default=50)
+    c.add_argument("--cursor")
+    for name in ("show", "download"):
+        c = asp.add_parser(name)
+        c.add_argument("artifact_id")
+        c.add_argument("revision", type=int)
+        if name == "download":
+            c.add_argument("--output", required=True, help="new local file; existing files are refused")
+
     p = sp.add_parser("inventory", help="read persisted observation; never polls or starts a session")
     isp = p.add_subparsers(dest="inventory_cmd", required=True)
     c = isp.add_parser("sessions")
@@ -711,6 +730,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("session_id")
     c.add_argument("--commit", help="full SHA from the session's history (default: HEAD)")
     c.add_argument("--note", help="the request this checkpoint is for, verbatim")
+    c.add_argument("--artifact", action="append", help="ArtifactRef JSON; repeat for each immutable input")
     c.add_argument("--last-n", type=int, default=20, help="conversation messages to keep (0-50)")
     c.add_argument("--key", help="idempotency key (default: a new one, printed with the result)")
     c = csp.add_parser("continue", help="start a new managed session at the checkpoint's commit")
@@ -719,7 +739,14 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--instructions")
     g.add_argument("--instructions-file")
     c.add_argument("--agent", choices=["claude", "codex"], default="claude")
+    c.add_argument("--artifact", action="append", help="ArtifactRef JSON; omitted uses the checkpoint set")
+    c.add_argument("--source-head", help="observed source HEAD SHA (required with attachments)")
     c.add_argument("--key", help="idempotency key (default: a new one, printed with the result)")
+    c = csp.add_parser("revalidate", help="confirm the original inputs and resume the same continuation")
+    c.add_argument("operation_id")
+    c.add_argument("--source-head", required=True)
+    c.add_argument("--manifest", required=True, help="external_refs.input_manifest_digest")
+    c.add_argument("--key", required=True)
     c = csp.add_parser("list", help="recent checkpoints")
     c.add_argument("--host")
     c.add_argument("--session")
@@ -810,6 +837,7 @@ def build_parser() -> argparse.ArgumentParser:
             g.add_argument("--archive", action="store_true", help="archive it and everything under it")
             g.add_argument("--restore", action="store_true")
         c.add_argument("--goal")
+        c.add_argument("--attachment", action="append", help="JSON ArtifactRef plus role: input|result; replaces the set")
         c.add_argument("--request-file", help="the request, verbatim, from a file")
         c.add_argument("--acceptance")
         c.add_argument("--step", action="append", help="a step (repeat; replaces the list on update)")
@@ -839,26 +867,61 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def cmd_artifact(args) -> int:
+    from .artifact_client import content_request, upload
+    from .task_daemon import request
+
+    token = os.environ.get("BATC_API_TOKEN") or None
+    if args.artifact_cmd == "upload":
+        if not args.confirm:
+            raise ValueError("artifact upload requires --confirm")
+        path = Path(args.file)
+        limit = request("api_capabilities", _auth_token=token)["artifacts"]["limits"]["max_file_bytes"]
+        with path.open("rb") as file:
+            data = file.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError("ARTIFACT_TOO_LARGE")
+        out = upload(data, path.name, args.key, media_type=args.type, artifact_id=args.artifact_id,
+                     expected_latest_revision=args.expected_latest_revision, token=token)
+    elif args.artifact_cmd == "list":
+        out = request("artifacts_list", _auth_token=token, limit=args.limit, cursor=args.cursor)
+    else:
+        out = request("artifact_get", _auth_token=token, artifact_id=args.artifact_id, revision=args.revision)
+        if args.artifact_cmd == "download":
+            data = content_request(out["artifact"]["content_url"], token=token)
+            with Path(args.output).open("xb") as file:
+                file.write(data)
+    _print(out, True)
+    return 0
+
+
 def cmd_checkpoint(args) -> int:
     import uuid
 
     from .task_daemon import request
 
-    def submit(action: str, target: dict, params: dict) -> dict:
+    def submit(action: str, target: dict, params: dict, pre=None) -> dict:
         key = args.key or f"cli-{uuid.uuid4()}"
         out = request("op_submit", action=action, idempotency_key=key, target=target, params=params, wait_s=30,
-                      entry="cli", timeout=40.0)
+                      entry="cli", timeout=40.0, preconditions=pre)
         return {**out, "idempotency_key": key}
 
     cmd = args.checkpoint_cmd
     if cmd == "create":
         params = {"last_n": args.last_n, **({"commit": args.commit} if args.commit else {}),
                   **({"note": args.note} if args.note else {})}
+        if args.artifact is not None:
+            params["artifacts"] = [json.loads(ref) for ref in args.artifact]
         out = submit("checkpoint.create", {"host": args.host, "session_id": args.session_id}, params)
     elif cmd == "continue":
         text = Path(args.instructions_file).read_text() if args.instructions_file else args.instructions
         out = submit("checkpoint.continue", {"checkpoint_id": args.checkpoint_id},
-                     {"instructions": text, "agent": args.agent})
+                     {"instructions": text, "agent": args.agent,
+                      **({"artifacts": [json.loads(ref) for ref in args.artifact]} if args.artifact is not None else {})},
+                     {"expected_source_head_sha": args.source_head} if args.source_head else {})
+    elif cmd == "revalidate":
+        out = submit("checkpoint.continue.revalidate", {"operation_id": args.operation_id},
+                     {"observed_source_head_sha": args.source_head}, {"expected_input_manifest_digest": args.manifest})
     elif cmd == "list":
         out = request("checkpoints_list", host=args.host, session_id=args.session, limit=args.limit, entry="cli")
     else:
@@ -1030,6 +1093,8 @@ def cmd_item(args) -> int:
     elif cmd in {"create", "update"}:
         params = {k: v for k, v in (("goal", args.goal), ("acceptance", args.acceptance), ("steps", args.step),
                                     ("parent_id", args.parent)) if v is not None}
+        if args.attachment is not None:
+            params["attachments"] = [json.loads(ref) for ref in args.attachment]
         if args.request_file:
             params["request"] = Path(args.request_file).read_text()
         if cmd == "create":
@@ -1144,6 +1209,9 @@ def main(argv: list[str] | None = None) -> int:
             out = calls[args.api_token_cmd]()
             _print(out, True)
             return 0
+        if args.cmd == "artifact":
+            return cmd_artifact(args)
+
         if args.cmd == "resource-cleanup":
             return cmd_resource_cleanup(args)
         if args.cmd == "checkpoint":

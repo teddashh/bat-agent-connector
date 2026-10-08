@@ -1,3 +1,4 @@
+/* Generated from desktop/src/app.css; npm run build:browser. Do not edit. */
 :root {
   --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6676; --line: #dfe3ea;
   --accent: #2f5bd3; --accent-text: #ffffff; --ok: #1f8a4c; --warn: #b26a00; --bad: #c0392b; --info: #3f6ad8;
@@ -112,6 +113,12 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
 .session-badges .chip { white-space: normal; }
 
 @media (max-width: 640px) { input, select, textarea { font-size: 16px; } }
+
+/* Attachment rows use the existing compact form and row styles. */
+.attachments { margin-block: 12px; }
+.attachments input[type="file"] { width: 100%; }
+.attachment-list .grow { overflow-wrap: anywhere; min-width: 0; }
+.attachment-list select { max-width: 100px; }
 
 .delivery-card { overflow-wrap: anywhere; }
 .delivery-card label input { width: 100%; }

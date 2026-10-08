@@ -90,6 +90,14 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 - `GET /api/v1/events?after=N&limit=M` → `{events, next_cursor, head_cursor, has_more}`。
 - `GET /api/v1/events/stream`：SSE，支援 `Last-Event-ID`，15 秒 keepalive，最多 16 條同時連線（每個 actor 最多 8 條），單條最長 30 分鐘。串流每 5 秒重新驗一次 token，撤銷或過期後就結束。瀏覽器 `EventSource` 不能帶 Authorization，Dashboard 以 `fetch` 讀串流。
 
+第二版 §14 的續接契約見 [dashboard-sync.md](dashboard-sync.md)：observe-only bootstrap 在 snapshot
+讀取前保存 signed checkpoint，回 journal authority／principal identity。Events 帶 checkpoint 才增加 sync
+metadata，整頁處理後一起保存 next cursor/token；舊事件回應 shape 不變。超前、retention 缺口或 anchor
+改變回 409 EVENT_CURSOR_RESET（resnapshot=true、preserve_drafts=true）；SSE 使用 sync.checkpoint／
+sync.reset control events。沒有新增 retention job，api_head 保留 allocator high-water。
+Checkpoint 續接限未篩選 feed；帶 checkpoint 同時指定任一 kind／直接或 related resource 篩選，
+JSON 與 SSE 均在事件讀取及 stream headers 前回 422 INVALID_REQUEST，不能簽發跳過非 matching 事件的 token。
+
 資源 `…/history` 使用安全的遞迴摘要：reason／previous_reason 只保留已知固定 enum 或 null；caller 的 request_ted／task result／command conflict／operation diagnostic prose 移除，保留原已記錄的機器 reason_code／error_code。所有 title、status_reason、git_author claim、scalar body/request/response/evidence 等 prose 入口排除，含 history.resource 及 saved_snapshot；來源 evidence 只留結構化表／ID／enum／hash。Scalar source 只允許固定來源 enum，ref／external_ref 只允許無空白的 ID/Git ref/URL token；原 journal 與既有 work_events 的文字不改。完整 producer/value/shape 稽核見 [observation.md](observation.md)。
 
 History 的 since／until 是 inclusive UTC epoch seconds，按 occurrence 篩選，排序仍按 seq。Context 缺少 occurred_at_epoch 才以 api_events.created_at fallback；明確 JSON null 是未知發生時間，不符合任何單邊／雙邊界線。無界線仍顯示該 fact 且 occurred_at 為 null。Coverage.unknown_occurrence_times_excluded 在有時間界線時為 true（表示排除規則，非筆數）；無界線為 false。Coverage.first_recorded_at 仍是最早 journal 記錄時間，可為 migration 時間，不能當發生時間。
@@ -100,8 +108,14 @@ History／relations 的 opaque cursor 在任何 journal read 前驗證 version�
 
 | 方法與路徑 | Scope | 說明 |
 |---|---|---|
+| `POST /api/v1/artifacts` | manage | artifact.upload intent；body 為 target／params／preconditions，Idempotency-Key，?wait |
+| `POST /api/v1/artifacts/uploads/{op_id}/content` | manage＋同 actor 或 admin | body 前驗證 action／state／Content-Length；只收 application/octet-stream，拒絕 chunked；operation 自己的 staging |
+| `GET /api/v1/artifacts?limit=&cursor=` | observe | 分頁 ID 與 latest ready 的展示 metadata；輸入選擇仍須精確 ref |
+| `GET /api/v1/artifacts/{art_id}/revisions/{revision}` | observe | immutable metadata 與 materialization evidence |
+| `GET /api/v1/artifacts/{art_id}/revisions/{revision}/content` | observe | attachment download，nosniff／no-store；無 inline preview |
 | `GET /api/v1/version` | 無 | connector、api_version、contract_version |
 | `GET /api/v1/capabilities` | observe | actor、scopes、主機 tiers、actions 與是否允許 |
+| `GET /api/v1/bootstrap` | observe | journal／principal identity、snapshot 讀取前的 checkpoint、既有 read models 首頁；非跨頁 atomic snapshot |
 | `GET /api/v1/hosts` | observe | 主機可達性、stale、最近 discovery；host/discovery/after/limit 可讀 scope |
 | `GET /api/v1/hosts/{host}/discovery` | observe | 每 profile 最新 scope、authority、outside_scan 及 discovery.changed 事件分頁 |
 | `GET /api/v1/sessions` | observe | Keyset；host/provenance/access/attention/include_gone/order/cursor/limit，加 profile_id/project_id（可多值）/work_item_id/execution_id/provider/has_tab/loaded/streaming/lifecycle/stale/relation_scope（current/history） |
@@ -128,6 +142,10 @@ History／relations 的 opaque cursor 在任何 journal read 前驗證 version�
 | `GET /api/v1/work-items`、`/work-items/{wi_id}` | observe | 跨專案的工作項目（`pending=true`：等人決定）；一個項目與它的完成狀態、連結、紀錄 |
 
 錯誤格式為 `{"error": {"code", "message"}}`：401 未驗證、403 權限或資源唯讀（代碼同 resource-policy）、404、405、409 冪等衝突、422 參數錯誤、502 BAT 錯誤。
+
+## 附件（Part A）
+
+`capabilities.artifacts` 公開 file／selection／store／MCP／upload window limits，以及 host helper 配置與已觀測 readiness。MCP 只有 artifact_upload、artifacts_list、artifact_get；confirmation 經 operation_submit 的 checkpoint.continue.revalidate。沒有 materialize action、store delete 或新 BAT channel。完整參數與錯誤見 [artifacts.md](artifacts.md)。
 
 ## 執行限制證據（A10）
 
@@ -233,6 +251,14 @@ task-owned session 的 send／answer／interrupt／permissions 都先經 resourc
 policy admission 仍 403、無 operation row；執行期拒絕保留 failed operation 與原 code。`OWNER_CONFLICT` 是 `batc serve` 啟動拒絕，附既有 owner_id、db_path、pid、endpoint、lease_path；不同 `--db` 也不能建立第二個 fleet authority。
 
 ## 尚未涵蓋
+
+Agent MCP 安裝使用 `--principal-only`：只註冊 central daemon reads、operations 與 task adapters，
+所有 calls 必須帶 `BATC_API_TOKEN`，不 fallback 本機 admin token／task capability。
+`work_status`／`work_result`／`work_events` 的 RPC 讀取亦要求 `observe`；沿用既有回傳格式。
+再加 `--read-only` 可完全隱藏寫入工具。預設 operator profile 保留舊 direct Fleet 工具，
+不代表 API principal scopes 可約束這些舊入口；agent 不使用它。詳見 [agent bundles](../agent-skills.md)。
+
+- Artifact 的 manual／managed capture 與 accept（Part B）、跨主機接續（Part C），見 [artifacts.md](artifacts.md)。Dashboard、GitHub 與 checkpoint 已有各自設計。
 
 - GitHub 部署 history／rollback／environment generation／runtime check 為 delivery Part B（第二步），尚未加入路由。Dashboard、merge、metadata、checkpoint 與 integration 入口已交付。
 - 既有 MCP 寫入工具（`session_send` 等）仍直接呼叫 service；它們受同一套資源政策約束，但不留 operation 紀錄。之後改為經 `operation_submit`。

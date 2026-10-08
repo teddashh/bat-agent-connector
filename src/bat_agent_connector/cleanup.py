@@ -901,8 +901,9 @@ def _plan(ops, item, choices, op_rows, pvs, own_op=None):
 
 
 def _replica_evidence(ops, item):
-    """Artifacts will project artifact_materializations here, keyed by this worktree's creation intent."""
-    return {"replica_manifest": [], "bookkeeping_names": []}
+    """Exact verified replicas with a readable immutable original; no directory exemptions."""
+    from .artifact_cleanup import replica_evidence
+    return replica_evidence(ops, item)
 
 
 async def snapshot(ops, target, choices, *, only=None, own_op=None):
@@ -1754,8 +1755,15 @@ async def _execute_item(ctx, item, payload):
 
         async def execute(request=request):
             ctx.check_cancel()
+            async def checked_inputs():
+                await _phase_consumers(ctx, item)
+                # A resumed item may already have preserved refs and skip snapshot.
+                # Before releasing the host lock gate, prove its accepted replica
+                # exemptions still have their immutable original in the store.
+                if "replica_evidence" in item and _replica_evidence(ops, item) != item["replica_evidence"]:
+                    raise OperationError("PREVIEW_STALE", "artifact replica evidence changed; original content must remain available", 409)
             try:
-                return await _host_call(ops, item["host"], request, locked_check=lambda: _phase_consumers(ctx, item))
+                return await _host_call(ops, item["host"], request, locked_check=checked_inputs)
             except MutationUncertain as e:
                 _mutation_receipt(ctx, item, request["phase"], e.result)
                 raise

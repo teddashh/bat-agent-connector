@@ -61,6 +61,9 @@ It ships four things:
 | CLI | `batc` |
 | Agent skill | [`skills/bat-agent-connector/SKILL.md`](skills/bat-agent-connector/SKILL.md) |
 
+Hermes and Grokbot adapters are [generated from the canonical skill](docs/agent-skills.md);
+regenerate them after workflow changes and install bundles from the matching Connector release.
+
 Persisted observation is available through `batc inventory`, `batc history` and `batc relations`, or the matching
 HTTP/MCP reads. Session history uses journal facts; warm reuse keeps each task’s relation ranges. Discovery shows
 the latest host/profile scope and what was outside the scan. Unknown actors and states stay unknown; these reads
@@ -72,6 +75,13 @@ screens are Part B, to follow separately.
 Running several long-lived coding agents means constantly checking tabs: which one is done, which one is stuck on a
 question, which one just needs "continue". Reading this through BAT's protocol is reliable (no screen scraping, no GUI
 automation) and lets a supervising agent do the checking for you, with you in control of anything that writes.
+
+Artifact attachments have immutable revisions in Connector-owned storage (SHA-256, size and explicit quotas).
+Upload with `batc artifact upload FILE --key KEY --confirm` or a Dashboard picker, attach an exact
+`{artifact_id, revision, digest}` to a work item or checkpoint, and continue on the checkpoint's host. Bytes are
+verified in the session's worktree before the first command; a moved source requires confirmation that resumes the
+same operation. Dashboard text and uploaded refs survive reloads and failures. Store content has no delete;
+manual/result capture and cross-host commit fetch are later parts. See [the artifact design](docs/design/artifacts.md).
 
 ## Install
 
