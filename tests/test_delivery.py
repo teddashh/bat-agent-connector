@@ -71,7 +71,8 @@ async def settle(d, op_id, rounds=10):
     """Run the operation, fast-forwarding its scheduled waits, until it stops changing."""
     for _ in range(rounds):
         d.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op_id,))
-        await d.ops.drain()
+        # Finish the worker before sampling; the default five seconds is shorter than GitHub's read timeout.
+        await d.ops.drain(timeout=60)
         op = d.ops.get(op_id)
         if op["status"] in {"succeeded", "failed", "cancelled", "needs_attention"}:
             return op
