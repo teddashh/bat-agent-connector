@@ -34,6 +34,9 @@ It ships four things:
 | CLI | `batc` |
 | Agent skill | [`skills/bat-agent-connector/SKILL.md`](skills/bat-agent-connector/SKILL.md) |
 
+Hermes and Grokbot adapters are [generated from the canonical skill](docs/agent-skills.md);
+regenerate them after workflow changes and install bundles from the matching Connector release.
+
 ## Why
 
 Running several long-lived coding agents means constantly checking tabs: which one is done, which one is stuck on a
