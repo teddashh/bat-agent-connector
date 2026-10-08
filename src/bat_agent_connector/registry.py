@@ -132,6 +132,8 @@ def reserve(host: str, entry: dict, max_active: int, replaces: str | None = None
                 f"(orchestrate_max_sessions={max_active}); remove finished worktrees first"
             )
         entry = {**entry, "host": host, "status": "starting", "created_at": time.time()}
+        items = [e for e in items if not (e.get("host") == host and e.get("session_id") == entry["session_id"]
+                                        and e.get("status") == "failed" and e.get("start_sent") is False)]
         items.append(entry)
         _write(p, items)
     return None

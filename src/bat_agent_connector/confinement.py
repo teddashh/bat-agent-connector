@@ -25,8 +25,8 @@ OPTION_KEYS = ("permissionMode", "codexSandboxMode", "codexApprovalPolicy")
 
 
 class ConfinementRefused(WriteRefused):
-    def __init__(self, code: str, message: str) -> None:
-        self.code = code
+    def __init__(self, code: str, message: str, *, sent: bool | None = None) -> None:
+        self.code, self.sent = code, sent
         super().__init__(f"[{code}] {message}")
 
 
@@ -63,6 +63,7 @@ def snapshot(agent: str, options: dict, *, account: dict | None = None, task: bo
         mechanisms.append("host_account")
         limits.extend(["host_account_declared_roots_only", "account_check_is_point_in_time",
                        "hardlinks_and_privilege_paths_unverified"])
+        limits.extend(account.get("limits", []))
     if agent == "codex" and options.get("codexSandboxMode") in {"workspace-write", "read-only"}:
         level = "os_sandbox"
         mechanisms.append("codex_" + options["codexSandboxMode"].replace("-", "_"))
@@ -117,9 +118,9 @@ def confirm(record: dict, meta: dict | None) -> dict:
     return result
 
 
-def ensure_confirmed(record: dict, meta: dict | None) -> None:
+def ensure_confirmed(record: dict, meta: dict | None, *, allow_unknown: bool = False) -> None:
     state = verify(record, meta)
-    if state["status"] in {"unknown", "mismatch"} and record.get("options"):
+    if (state["status"] == "mismatch" or state["status"] == "unknown" and not allow_unknown) and record.get("options"):
         raise ConfinementRefused("CONFINEMENT_MISMATCH", state["reason"])
 
 
@@ -228,7 +229,7 @@ async def check_account(fleet, host: str) -> dict:
 async def start_account(fleet, host: str) -> dict:
     result = await check_account(fleet, host)
     if result["declared"] and result["status"] != "verified":
-        raise ConfinementRefused("HOST_ACCOUNT_UNVERIFIED", result["reason"])
+        raise ConfinementRefused("HOST_ACCOUNT_UNVERIFIED", result["reason"], sent=False)
     return result
 
 
@@ -249,8 +250,10 @@ async def start_decision(fleet, host: str, agent: str, *, confined: bool = False
     if planner:
         options = {"codexSandboxMode": "read-only", "codexApprovalPolicy": "never"}
     if predecessor:
+        from .service import agent_kind
         previous = resume_options(host, predecessor["session_id"],
-                                  (predecessor.get("confinement") or {}).get("evidence", {}).get("agent", "claude"))
+                                  (predecessor.get("confinement") or {}).get("evidence", {}).get("agent")
+                                  or agent_kind(predecessor.get("agent_preset")) or "claude")
         protected = (predecessor.get("confinement") or {}).get("protected_roots") or []
         if protected and (account["status"] != "verified" or not set(protected) <= set(account["protected_roots"])):
             raise ConfinementRefused("CONFINEMENT_UNSUPPORTED", "successor cannot preserve protected roots")
@@ -310,7 +313,9 @@ def identity(pid):
     values = dict(line.split(':', 1) for line in text.splitlines() if ':' in line)
     return dict(pid=int(pid), ppid=int(values['PPid']), uid=[int(x) for x in values['Uid'].split()],
                 gid=[int(x) for x in values['Gid'].split()], groups=sorted(int(x) for x in values['Groups'].split()),
-                capabilities=int(values['CapEff'].strip(), 16))
+                capabilities=int(values['CapEff'].strip(), 16),
+                capabilities_permitted=int(values['CapPrm'].strip(), 16),
+                capabilities_ambient=int(values['CapAmb'].strip(), 16))
 try:
     sockets = set()
     for table in ('tcp', 'tcp6'):
@@ -336,11 +341,11 @@ try:
         descendants |= more
     runtimes = [procs[p] for p in descendants - {bat['pid']} if any(
         token in names[p] for token in ('claude', 'codex', 'node-sidecar', 'server.mjs'))]
-    if not runtimes: finish('unknown', 'runtime_process_unidentified')
     for i in [bat] + runtimes:
         if any(u != c['uid'] for u in i['uid']) or len(set(i['gid'])) != 1 or i['gid'][1] != os.getegid() or i['groups'] != sorted(os.getgroups()):
             finish('unknown', 'runtime_identity_mismatch')
-        if i['capabilities']: finish('mismatch', 'runtime_has_capabilities')
+        if any(i[k] for k in ('capabilities', 'capabilities_permitted', 'capabilities_ambient')):
+            finish('mismatch', 'runtime_has_capabilities')
     before = []
     for root in c['roots']:
         budget(); path = pathlib.Path(root)
@@ -380,7 +385,8 @@ try:
             if proc.poll() is None: proc.kill(); proc.wait()
     if any((os.stat(p).st_dev, os.stat(p).st_ino) != (dev, ino) for p, dev, ino in before): finish('unknown', 'root_changed')
     if any(identity(i['pid']) != i for i in [bat] + runtimes): finish('unknown', 'runtime_changed')
-    finish('verified', 'read_only_account_check', alias_uid=os.geteuid(), bat=bat, runtimes=runtimes, roots=before)
+    finish('verified', 'read_only_account_check', alias_uid=os.geteuid(), bat=bat, runtimes=runtimes, roots=before,
+           limits=[] if runtimes else ['runtime_identity_inherited_unobserved'])
 except (OSError, ValueError, KeyError, subprocess.TimeoutExpired): finish('unknown', 'check_incomplete')
 '''
 

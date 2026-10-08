@@ -255,6 +255,8 @@ class BatTaskAdapter:
                         task_id=task["task_id"])
                     break
                 except Exception as exc:  # noqa: BLE001 - same reserved start is idempotent
+                    if getattr(exc, "sent", None) is False:
+                        raise
                     last_error = exc
                     if attempt == 2:
                         raise
@@ -308,6 +310,10 @@ class BatTaskAdapter:
                     break
                 raise WriteRefused("BAT reviewer start did not confirm the reserved session ID")
             except Exception as exc:  # noqa: BLE001 - poll identity before retrying
+                if getattr(exc, "sent", None) is False:
+                    registry.fail_reservation(host, sid)
+                    registry.update(host, sid, start_sent=False)
+                    raise
                 last_error = exc
                 try:
                     meta = await client.invoke("claude:get-session-meta", {"sessionId": sid},
@@ -322,7 +328,10 @@ class BatTaskAdapter:
         if not started or started.get("sessionId") != sid:
             registry.update(host, sid, status="uncertain")
             raise last_error or WriteRefused("BAT reviewer start did not settle")
-        meta = await client.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
+        try:
+            meta = await client.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
+        except Exception:  # noqa: BLE001 - evidence reads must not fail an acknowledged reviewer start
+            meta = None
         registry.update(host, sid, status="active", cwd=lead["cwd"], confinement=confinement.confirm(record, meta))
         if self.register_tabs and hc.orchestrate_register_tabs:
             try:

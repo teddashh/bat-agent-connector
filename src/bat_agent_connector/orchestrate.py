@@ -307,6 +307,9 @@ async def session_start(
         base = {"actor": fleet.actor, "tool": "session_start", "host": host, "session_id": sid}
         wt: dict = {}
         base_commit = None
+        start_confirmed = False
+        unsent_refusal = False
+        meta = None
         try:
             if use_worktree:
                 audit.record(**base, channel="worktree:create", phase="attempt")
@@ -357,15 +360,23 @@ async def session_start(
                 if (not isinstance(started, dict) or started.get("ok") is False or
                         started.get("sessionId") != sid):
                     raise WriteRefused("BAT start reply did not confirm the reserved session ID")
-                meta = await _meta(c, sid)
-                if not task_id or write_scope == "confined":
-                    confinement.ensure_confirmed(confinement_record, meta)
+                start_confirmed = True
+                try:
+                    meta = await _meta(c, sid)
+                except Exception:  # noqa: BLE001 - an evidence read cannot undo an acknowledged start
+                    meta = None
+                confinement.ensure_confirmed(confinement_record, meta, allow_unknown=write_scope != "confined")
                 confinement_record = confinement.confirm(confinement_record, meta)
-            except confinement.ConfinementRefused:
-                retain_on_error = True  # The agent started; never remove its worktree on a policy mismatch.
+            except confinement.ConfinementRefused as e:
+                unsent_refusal = e.sent is False and not start_confirmed
+                if start_confirmed or not unsent_refusal:
+                    retain_on_error = True
+                elif use_worktree and not retain_on_error:
+                    await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": True}, grant=grant)
+                    audit.record(**base, channel="worktree:remove", phase="rollback", ok=True)
                 raise
             except BatError as e:
-                if write_scope == "confined" and isinstance(e, (InvokeTimeout, ConnectionLost)):
+                if start_confirmed or write_scope == "confined" and isinstance(e, (InvokeTimeout, ConnectionLost)):
                     retain_on_error = True  # No ACK cannot justify removing a possibly running agent's worktree.
                 audit.record(**base, channel="claude:start-session", phase="result", ok=False, error=_err(e))
                 if use_worktree and not retain_on_error:  # may have reached BAT on timeout
@@ -373,8 +384,14 @@ async def session_start(
                     audit.record(**base, channel="worktree:remove", phase="rollback", ok=True)
                 raise
             audit.record(**base, channel="claude:start-session", phase="result", ok=True)
-        except BaseException:
-            registry.update(host, sid, status="uncertain" if retain_on_error else "failed")
+        except BaseException as e:
+            registry.update(host, sid, status="failed" if unsent_refusal else
+                            "uncertain" if retain_on_error else "failed", error_code=getattr(e, "code", None),
+                            **({"start_sent": False} if unsent_refusal else {}),
+                            **({"cwd": cwd, "worktree_path": cwd if cwd_override else wt.get("worktreePath"),
+                                "branch": external_branch if cwd_override else wt.get("branchName"),
+                                "confinement": confinement.confirm(confinement_record, meta)}
+                               if start_confirmed else {}))
             raise
         registry.update(
             host,

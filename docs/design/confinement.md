@@ -169,9 +169,11 @@ bat_port = 9876 # BAT 主機實際 listener port；SSH tunnel 本機 port 不是
 
 沿用 `BATC_TASK_SETTINGS` 的 `[verification].ssh_hosts`，不加另一套 SSH credentials／alias。`host_account=true` 須有正整數 expected_uid、非空絕對 protected_roots 與 alias；禁止 protected roots 和 managed roots 重疊，禁止 root UID。`check_max_age_s` 須為正整數（最多 3600），預設 300。`check_timeout_s`（最多 30）、`check_max_entries`（最多 100000）及 `bat_port`（1–65535）也驗證為正整數；預設 10 秒、10000 entries、9876。讀取 claim 本身不授予 level。只讀 check 的結果參考同一 journal／inventory，新的 start 在副作用前重新查核，cache 不超過設定期限。
 
-第一版實作 Linux POSIX 查核。SSH alias 必須直接以預期 BAT UID 執行，且能觀測 BAT process 與該 agent runtime 的 UID／GID／supplementary groups。只讀指令使用既有 runner 的 `BatchMode` 與 timeout，不 `sudo -u` 模擬另一個人。alias 身分不符、看不到 BAT process、無法唯一對應該 BAT server、process namespace／群組不符，記 unknown，不能宣稱 host_account。
+第一版實作 Linux POSIX 查核。SSH alias 必須直接以預期 BAT UID 執行，且能唯一觀測 BAT process 與所有已觀測 runtime descendant 的 UID／GID／supplementary groups。尚無 runtime 的 idle host 可通過；證據保存 `runtimes: []`，並加 `runtime_identity_inherited_unobserved`，表示未來子程序預期繼承 BAT 身分但尚未觀測。只讀指令使用既有 runner 的 `BatchMode` 與 timeout，不 `sudo -u` 模擬另一個人。alias 身分不符、看不到 BAT process、無法唯一對應該 BAT server、process namespace／群組不符，記 unknown，不能宣稱 host_account。
 
-查核腳本只讀 Linux metadata，不讀人的檔案內容、不建立 probe、不寫入、不 sudo。以 `find <root> -xdev -writable`（GNU find 的 access(2) 判定，涵蓋 ACL）配 entry／time budget，首個可寫 entry 即失敗。用 -printf 計數；另用 find 的 -uid 拒絕 BAT 擁有的 entries／祖先（owner 可 chmod，不能因當下不可寫而 pass）。跨 mount／symlink、列舉錯誤或 budget 用盡回 unknown，不重實作 mode／ACL 判定。Root 的父目錄／祖先以同 UID 查 writable 與 search，並按 sticky bit／owner 決定是否可移除 child。讀 `/proc/<pid>/status` 的 Uid、Gid、Groups、CapEff；須能唯一識別該 BAT server 與 runtime、alias UID／groups 相符，不能只靠 process 名稱或 cwd。不同身分、無法識別或權限能力不明均 unknown；root／DAC override 為 mismatch。檢查前後的 canonical path／inode 與 process 身分須一致。讀取時有 entry/time 上限，cache 的上限不取代新 start 前核對。
+固定 BAT 的 [src-tauri/src/sidecar.rs:4](https://github.com/teddashh/better-agent-terminal/blob/b7419892fbc9946799b64cca24c2ec8c7fa15c42/src-tauri/src/sidecar.rs#L4) re-export bridge；實際 `SidecarState` 位於 [src-tauri/crates/bat-agent-bridge/src/lib.rs:291](https://github.com/teddashh/better-agent-terminal/blob/b7419892fbc9946799b64cca24c2ec8c7fa15c42/src-tauri/crates/bat-agent-bridge/src/lib.rs#L291)。`call()` 在 371–390 行進入 `ensure_spawned()`，344 行才 spawn；因此不以「尚無 lazy sidecar」拒絕第一個 start。
+
+查核腳本只讀 Linux metadata，不讀人的檔案內容、不建立 probe、不寫入、不 sudo。以 `find <root> -xdev -writable`（GNU find 的 access(2) 判定，涵蓋 ACL）配 entry／time budget，首個可寫 entry 即失敗。用 -printf 計數；另用 find 的 -uid 拒絕 BAT 擁有的 entries／祖先（owner 可 chmod，不能因當下不可寫而 pass）。跨 mount／symlink、列舉錯誤或 budget 用盡回 unknown，不重實作 mode／ACL 判定。Root 的父目錄／祖先以同 UID 查 writable 與 search，並按 sticky bit／owner 決定是否可移除 child。讀 `/proc/<pid>/status` 的 Uid、Gid、Groups、CapEff／CapPrm／CapAmb；三種 capability 任一非零均 mismatch。須能唯一識別該 BAT server 與已觀測 runtime、alias UID／groups 相符，不能只靠 process 名稱或 cwd。不同身分、無法識別或權限能力不明均 unknown；root／DAC override 為 mismatch。檢查前後的 canonical path／inode 與 process 身分須一致。讀取時有 entry/time 上限，cache 的上限不取代新 start 前核對。
 
 此查核是時間點、指定 roots、目前觀測到的執行身分的證據。既有 SSH／BAT 不能完整證明未列出的所有私人資料夾、其他帳號、未來 ACL 改變、所有 hardlink 別名、遠端可寫服務、setuid／sudo／credential 可取得的權限，或之後產生的子程序都不換身分。這些列在 `limits`；有已知繞過途徑不能回 verified。不得以跑提權命令來驗證「不能提權」。不可觀測的部分由主機操作者維持帳號配置，不能改寫成工具已證實。
 
@@ -214,8 +216,8 @@ Phase 2 新增的副作用只有 Connector 記錄／projection、既有 managed 
 |---|---|
 | `CONFINEMENT_RAISE_REFUSED` | 不送任何 permission frame；含 force／bulk／deferred／failover。回傳原 level、禁止放寬原因與 evidence_ref。 |
 | `CONFINEMENT_UNSUPPORTED` | 所需限制在 host／agent 不可達；planner 或需保留前任限制的 successor 不啟動。一般工作可用已定義的較低候選 options，但明示 gap，不能用未知欄位碰運氣。 |
-| `HOST_ACCOUNT_UNVERIFIED` | 宣告與只讀查核不一致或無法完成；新 start blocked。來源與既有工作不動；設定修正後重跑同 operation 的未送步驟。 |
-| `CONFINEMENT_MISMATCH` | start 讀回／resume／permission reconcile 的 options 與意圖不同。停止新 prompt 派送，needs_attention；不自動修改 live runtime 來掩飾。 |
+| `HOST_ACCOUNT_UNVERIFIED` | 宣告與只讀查核不一致或無法完成；新 start blocked。來源與既有工作不動；明確標記 sent=false，釋放 reservation，按 caller 的 retain_on_error 決定是否沿用原 rollback。Task start command 記 rejected、task 到 needs_ted 並記 code，不 retry／read-back。Checkpoint／repair 到 NeedsAttention，同 operation 在設定修正後重跑未送步驟。 |
+| `CONFINEMENT_MISMATCH` | start 讀回／resume／permission reconcile 的 options 與意圖不同。停止新 prompt 派送，needs_attention；已 ACK 的 session 一律保留 reservation 與 worktree、記 uncertain 與 code。非 confined 的未知 metadata 只記 unknown 並繼續；confined 的 unknown 仍拒絕。Reviewer post-start read 為 best-effort。不自動修改 live runtime 來掩飾。 |
 | `CONFINEMENT_EVIDENCE_MISSING` | 已記 confined 的 session 在 meta=null 且遺失原 mode／policy、無可信 intent／回執可恢復時，不送 client-resume／cold resume；不可觸發 BAT 的 omission／bypass fallback。保留既有 session 與讀取，由操作者核對原證據；不把它重新 start 成新預設。loaded live session 的 send 不改 mode，不因 legacy 證據缺失而阻擋。 |
 | Start／setter ACK 遺失 | uncertain；以同 session ID 讀 meta 和已記 intent。cwd 相同但 options 不明不能確認限制；不 start 第二次，不退回 allow-all。 |
 | Codex 第二個 setter 失敗 | 保留各 step 的回執與不明狀態，逐項讀回，不重送已證明的 step；完成後及下一 turn 邊界再核對。沒有原子 sandbox＋approval 保證。 |
@@ -224,7 +226,7 @@ Phase 2 新增的副作用只有 Connector 記錄／projection、既有 managed 
 
 升級不遍歷 running sessions 送 setter、resume 或 stop。既有有完整 start intent／實際 options 的紀錄可以只讀回填證據；只有 cwd／tab／事後 host default 的紀錄填 none、reason=legacy_evidence_missing。現有 confined flag 保留，即使其實際 level 為 none；人工／unknown 資源不回填成 managed。之後補到較強 host 證據只更新 current_verification，不把建立快照升級；要採新限制，開新的 managed session。Warm reuse 同樣不升級。
 
-Journal migration additive、versioned：利用原 commands／operation_steps／sessions_observed 的 JSON 與 evidence refs，必要的新增欄位或索引在既有 `Journal` migration 增下一版本，不重建 task tables。registry 增 schema_version／confinement 欄位，missing 值按上述保守規則解讀。operations-unification 若先改 migration version，依合併後的版本遞增，不共同占用同一版本號。
+Journal schema additive：confinement_host_checks 在每次 open 以 CREATE TABLE IF NOT EXISTS 建立，不占 user_version，不需要 data migration。其餘 migration 沿用各工作包版本。利用原 commands／operation_steps／sessions_observed 的 JSON 與 evidence refs，不重建 task tables。registry 增 schema_version／confinement 欄位，missing 值按上述保守規則解讀。不改 delivery 的 2／3 或 observation 的 4 migration。
 
 ## Dashboard、文件與預計修改檔案
 
@@ -277,7 +279,7 @@ Mock 只能證明 Connector 的 options、gate、evidence 與顯示；不假造 
 | A10；§06 | `test_a10_persistent_and_exit_plan_approvals_are_refused` | dont_ask_again、ExitPlanMode mode raise 被拒絕；deny／一般問題仍走原流程。 |
 | A10；§10、§19 | `test_a10_session_capabilities_inventory_and_triage_share_evidence`、`test_a10_cached_legacy_inventory_exposes_unknown_evidence_without_rewriting` | REST／service／inventory／triage 一致；既有 MCP／CLI 直接轉出同 reads。manual readonly 不變。Dashboard Playwright fixture：en／zh-TW、390／768／1440 px、session card 與 checkpoint／repair forms 切 agent、無 null／undefined／[object／水平 overflow。 |
 
-Mock 與只讀 fixture 只能證明 options／gate／證據，不能宣布 A10 的實機阻擋通過。完成須跑 `uv run ruff check .`、完整 `uv run pytest -q`、`.mjs` 的 `node --check` 與雙語 Playwright。Migration 在此 base 的下一個版本為 `user_version=2`、DDL idempotent；與平行包 rebase 時改用當時下一個空版本。
+Mock 與只讀 fixture 只能證明 options／gate／證據，不能宣布 A10 的實機阻擋通過。完成須跑 `uv run ruff check .`、完整 `uv run pytest -q`、`.mjs` 的 `node --check` 與雙語 Playwright。Host check table 的 DDL 每次 open 執行、idempotent，不更動 user_version；既有高版本 journal 缺 table 也可補齊。
 
 ## 交給 W12 的實機驗收程序
 

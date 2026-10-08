@@ -470,7 +470,7 @@ async def _failover_one(
     prior = [
         e
         for e in registry.list_entries(host)
-        if e.get("failover_of") == sid and e.get("status") in ("active", "starting")
+        if e.get("failover_of") == sid and (e.get("status") in ("active", "starting") or e.get("start_uncertain"))
     ]
     if prior:
         e = prior[-1]
@@ -641,6 +641,8 @@ async def _failover_one(
                 "skipped": "already failed over (the Codex session is tracked in the registry)",
             }
         audit.record(**base, channel="claude:start-session", phase="attempt", preset=preset, failover_of=sid)
+        start_confirmed = False
+        meta = None
         try:
             started = await c.invoke("claude:start-session", {"sessionId": new_sid, "options": opts},
                                      grant=grant,
@@ -648,14 +650,23 @@ async def _failover_one(
             if (not isinstance(started, dict) or started.get("ok") is False or
                     started.get("sessionId") != new_sid):
                 raise WriteRefused("BAT failover start did not confirm the reserved session ID")
-            meta = await _meta(c, new_sid)
-            if not task_id or confined:
-                confinement.ensure_confirmed(confinement_record, meta)
+            start_confirmed = True
+            try:
+                meta = await _meta(c, new_sid)
+            except Exception:  # noqa: BLE001 - missing evidence keeps an acknowledged successor managed
+                meta = None
+            confinement.ensure_confirmed(confinement_record, meta, allow_unknown=not confined)
             confinement_record = confinement.confirm(confinement_record, meta)
         except BaseException as e:
             audit.record(**base, channel="claude:start-session", phase="result", ok=False, error=_err(e))
-            if confined and isinstance(e, (confinement.ConfinementRefused, InvokeTimeout, ConnectionLost)):
-                registry.update(host, new_sid, status="starting", start_uncertain=True)
+            if getattr(e, "sent", None) is False and not start_confirmed:
+                registry.fail_reservation(host, new_sid, replaces)
+                registry.update(host, new_sid, start_sent=False)
+            elif start_confirmed or confined and isinstance(e, (confinement.ConfinementRefused, InvokeTimeout, ConnectionLost)):
+                registry.update(host, new_sid, status="uncertain" if start_confirmed else "starting",
+                                start_uncertain=True, error_code=getattr(e, "code", "START_UNSETTLED"),
+                                **({"confinement": confinement.confirm(confinement_record, meta)}
+                                   if start_confirmed else {}))
             else:
                 registry.fail_reservation(host, new_sid, replaces)
             raise
