@@ -21,7 +21,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .api_auth import Principal
-from .errors import BatError, ConnectionLost, InvokeTimeout, ResourceReadOnly, WriteRefused
+from .errors import (
+    BatError,
+    ConnectionLost,
+    InvokeTimeout,
+    ResourceReadOnly,
+    TaskControlRefused,
+    WriteRefused,
+)
 from .redact import redact
 
 STATES = ("accepted", "running", "waiting_checks", "waiting_external", "needs_attention", "uncertain",
@@ -109,7 +116,7 @@ def _canonical(value: Any) -> str:
 
 
 def _error_code(exc: BaseException) -> str:
-    if isinstance(exc, ResourceReadOnly):
+    if isinstance(exc, ResourceReadOnly | TaskControlRefused):
         return exc.code
     if isinstance(exc, StepFailed | NeedsAttention | OperationError):
         return exc.code
@@ -154,6 +161,25 @@ class OpContext:
 
     def set_refs(self, **refs: Any) -> None:
         self.service._merge_refs(self.operation_id, refs)
+
+    def effect(self, name: str, fn: Callable[[], dict], *, request: dict | None = None) -> dict:
+        """Commit a local task effect and its receipt in one journal transaction.
+
+        A started receipt without a result proves the effect transaction rolled back. Replaying the
+        original journal method is safe; no BAT/provider call may run inside this callback.
+        """
+        row = self.service.db.execute("SELECT * FROM operation_steps WHERE operation_id=? AND name=?",
+                                      (self.operation_id, name)).fetchone()
+        if row and row["status"] == "succeeded":
+            self.replayed.append(name)
+            return json.loads(row["response"] or "{}")
+        self.check_cancel()
+        if row is None:
+            self.service._step_start(self.operation_id, name, request or {})
+        with self.service.journal.tx():
+            result = fn()
+            self.service._step_done(self.operation_id, name, result or {})
+        return result or {}
 
     async def step(self, name: str, fn: Callable[[], Awaitable[dict]], *, request: dict | None = None,
                    reconcile: Callable[[dict], Awaitable[dict | None]] | None = None) -> dict:

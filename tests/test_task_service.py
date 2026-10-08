@@ -30,7 +30,7 @@ from bat_agent_connector.task_daemon import TaskDaemon
 from bat_agent_connector.task_handoff import history_excerpt, ledger_summary
 from bat_agent_connector.task_journal import Journal
 from bat_agent_connector.task_verifier import ObservedVerifier, VerificationSettings, load_settings
-from tests.conftest import make_config
+from tests.conftest import adopt, make_config
 
 WORDS = "請保留 `原文`，不要改成英文。\n第二行：修好它。"
 
@@ -803,7 +803,8 @@ async def test_task_initial_send_after_start_ignores_only_start_spacing(fleet_fa
         await service.session_send(fleet, "h1", session_id, "later prompt", confirm=True)
     (registry.registry_path().parent / service.TASK_SERVICE_POINTER).write_text(
         json.dumps({"db_path": str(journal.path.resolve())}))
-    with pytest.raises(WriteRefused, match="rate limit"):
+    # The raw adapter test has not settled its intent; the shared task gate now runs before rate limiting.
+    with pytest.raises(WriteRefused, match="TASK_COMMAND_PENDING"):
         await service.session_send(fleet, "h1", session_id, "later prompt", confirm=True)
     journal.close()
     await fleet.close()
@@ -1912,12 +1913,14 @@ async def test_daemon_uses_configured_minimal_default_and_standard_opt_out(mock,
 
 async def test_daemon_submit_is_journal_only(mock, tmp_path):
     daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    daemon.acquire_owner()  # owner-first initialization precedes the timed request, as in serve().
     try:
         result = await asyncio.wait_for(daemon.call("work_submit", {
             "project": "p", "host": "h1", "workspace": "w", "original_words": WORDS,
             "idempotency_key": "discord:message:1"}), timeout=0.5)
         assert result["state"] == "queued"
         assert daemon.journal.get(result["task_id"])["original_words"] == WORDS
+        assert not mock.invokes
     finally:
         await daemon.fleet.close()
         daemon.journal.close()
@@ -2443,13 +2446,15 @@ def test_minimal_small_completion_still_requires_observed_clean_tests(tmp_path):
 
 async def test_goose_acp_scoped_tool_smoke(mock, tmp_path, monkeypatch):
     """Fake ACP Goose invokes a real scoped MCP tool backed by fake BAT."""
-    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+    daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True, managed_roots=["/srv"]), tmp_path / "tasks.db")
     fake = FakeBAT()
     daemon.adapter = fake
     daemon.coordinator = TaskCoordinator(daemon.journal, fake)
     task = submit(daemon.journal, engine="goose")
     daemon.journal.change(task["task_id"], "dispatching")
     daemon.journal.change(task["task_id"], "accepted", fields={"session_id": "lead-0001"})
+    adopt("lead-0001", task_id=task["task_id"], role="lead")
+    daemon.ops.context["coordinator"] = daemon.coordinator
     server = await asyncio.start_server(daemon._handle, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     monkeypatch.setenv("BATC_TASK_URL", f"http://127.0.0.1:{port}/rpc")
@@ -3955,7 +3960,7 @@ async def test_event_webhook_settings_require_loopback_and_private_secret(mock, 
     settings.chmod(0o600)
     monkeypatch.setenv("BATC_TASK_SETTINGS", str(settings))
     with pytest.raises(ValueError, match="0600"):
-        TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
+        TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db").acquire_owner()
     secret.chmod(0o600)
     daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks2.db")
     try:

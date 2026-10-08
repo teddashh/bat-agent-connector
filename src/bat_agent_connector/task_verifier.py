@@ -280,7 +280,7 @@ class ObservedVerifier:
         log_path = artifacts / (str(task["task_id"]) + kind + "-" + uuid.uuid4().hex + ".log")
         return log_path, os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 
-    async def observe(self, task: dict, cwd: str) -> dict | None:
+    async def observe(self, task: dict, cwd: str, *, before_run=None) -> dict | None:
         argv = self.settings.commands.get(task["project"])
         if not argv:
             return None
@@ -290,6 +290,8 @@ class ObservedVerifier:
         log_path, fd = self._log(task)
         digest = hashlib.sha256()
         try:
+            if before_run:
+                before_run()
             exit_code = await self._group_run(task["host"], cwd, argv, self.settings.timeout_s, fd, digest)
         finally:
             os.close(fd)

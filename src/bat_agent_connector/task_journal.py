@@ -361,12 +361,15 @@ class Journal:
 
     @contextmanager
     def tx(self):
-        self.db.execute("BEGIN IMMEDIATE")
+        nested = self.db.in_transaction
+        self.db.execute("SAVEPOINT task_effect" if nested else "BEGIN IMMEDIATE")
         try:
             yield
-            self.db.execute("COMMIT")
+            self.db.execute("RELEASE task_effect" if nested else "COMMIT")
         except BaseException:
-            self.db.execute("ROLLBACK")
+            self.db.execute("ROLLBACK TO task_effect" if nested else "ROLLBACK")
+            if nested:
+                self.db.execute("RELEASE task_effect")
             raise
 
     def close(self):
@@ -393,19 +396,20 @@ class Journal:
             self.db.execute("DELETE FROM capabilities WHERE task_id=? AND scope='task'", (task_id,))
             self._event(task_id, "task_capabilities_revoked", {"reason": "warm_session_transfer"})
 
-    def issue_reconcile_capability(self, task_id: str, command_id: str, *, ttl_s: int = 600) -> str:
+    def issue_reconcile_capability(self, task_id: str, command_id: str, *, ttl_s: int = 600,
+                                   token: str | None = None) -> str:
         task = self.get(task_id)
         command = self.command_get(command_id)
-        send = (command["kind"] == "send" and
+        send = (command["kind"] in {"send", "answer", "interrupt", "permissions"} and
                 command["session_id"] in {task["session_id"], task["reviewer_session_id"]})
         failover = (command["kind"] == "failover" and
                     json.loads(command["payload"]).get("old_session_id") == task["session_id"])
         if (command["task_id"] != task_id or not (send or failover)
                 or command["status"] != "uncertain" or task["state"] != "uncertain"):
             raise ValueError("only an uncertain task command can be reconciled")
-        token = secrets.token_urlsafe(32)
+        token = token or secrets.token_urlsafe(32)
         self.db.execute("""INSERT INTO capabilities(token_hash,task_id,scope,command_id,expires_at)
-            VALUES(?,?,?,?,?)""", (hashlib.sha256(token.encode()).hexdigest(), task_id,
+            VALUES(?,?,?,?,?) ON CONFLICT(token_hash) DO UPDATE SET expires_at=excluded.expires_at""", (hashlib.sha256(token.encode()).hexdigest(), task_id,
                                   "reconcile", command_id, time.time() + ttl_s))
         return token
 
@@ -431,7 +435,8 @@ class Journal:
                      actor: str, source: str, evidence: str, observed_result: str = "none",
                      turn_ref: str | None = None, candidate_commit: str | None = None,
                      tree_hash: str | None = None, next_prompt_sha256: str | None = None,
-                     next_before: dict | None = None) -> dict:
+                     next_before: dict | None = None, token_hash: str | None = None,
+                     operation_id: str | None = None) -> dict:
         if outcome not in {"delivered", "not_delivered", "superseded"}:
             raise ValueError("invalid reconciliation outcome")
         if observed_result not in {"none", "milestone", "review_pass"}:
@@ -446,19 +451,21 @@ class Journal:
             raise ValueError("new prompt cannot also attest an observed result")
         if next_prompt_sha256 and not isinstance(next_before, dict):
             raise ValueError("new prompt needs a recorded pre-send baseline")
-        digest = hashlib.sha256(token.encode()).hexdigest()
+        digest = token_hash or hashlib.sha256(token.encode()).hexdigest()
         with self.tx():
             task = self.get(task_id)
             command = self.command_get(command_id)
             if (task["state"] != "uncertain" or command["task_id"] != task_id
-                    or command["kind"] != "send" or command["status"] != "uncertain"):
-                raise ValueError("command is not an uncertain send for this task")
+                    or command["kind"] not in {"send", "answer", "interrupt", "permissions"} or command["status"] != "uncertain"):
+                raise ValueError("command is not an uncertain runtime control for this task")
             cap = self.db.execute("""SELECT expires_at FROM capabilities WHERE token_hash=?
                 AND task_id=? AND command_id=? AND scope='reconcile'""",
                 (digest, task_id, command_id)).fetchone()
             if not cap or cap["expires_at"] <= time.time():
                 raise ValueError("reconciliation capability is invalid")
             payload = json.loads(command["payload"])
+            if command["kind"] != "send" and observed_result != "none":
+                raise ValueError("only a send command can attest an observed turn")
             if next_prompt_sha256 and next_prompt_sha256 == payload.get("prompt_sha256"):
                 raise ValueError("next prompt must be a new command, not replay of uncertain text")
             reviewer = command["session_id"] == task["reviewer_session_id"]
@@ -495,6 +502,7 @@ class Journal:
                     (next_command_id, task_id, f"{task_id}:operator:{command_id}", command["session_id"],
                      "send", "needs_review", f"batc-{next_command_id}",
                      json.dumps({"purpose": "operator:" + command_id, "before": next_before,
+                                 "control_version": task["control_version"], "operation_id": operation_id,
                                  "prompt_sha256": next_prompt_sha256}), now, now))
                 self._event(task_id, "command_intent", {"command_id": next_command_id, "kind": "send",
                                                          "needs_review": True, "operator_followup": command_id})
@@ -1011,7 +1019,7 @@ class Journal:
                 raise ValueError("task state does not allow a prompt")
             unresolved = self.db.execute("""SELECT 1 FROM commands WHERE task_id=?
                 AND status IN ('intent','needs_review','uncertain')
-                AND (kind='send' OR kind='failover' OR kind LIKE 'start_%') LIMIT 1""",
+                AND (kind IN ('send','answer','interrupt','permissions','failover') OR kind LIKE 'start_%') LIMIT 1""",
                 (task_id,)).fetchone()
             if unresolved:
                 raise ValueError("task has a command requiring reconciliation")
@@ -1034,7 +1042,7 @@ class Journal:
                 raise ValueError("task does not allow failover")
             pending = self.db.execute("""SELECT 1 FROM commands WHERE task_id=?
                 AND status IN ('intent','needs_review','uncertain')
-                AND (kind='send' OR kind='failover' OR kind LIKE 'start_%') LIMIT 1""", (task_id,)).fetchone()
+                AND (kind IN ('send','answer','interrupt','permissions','failover') OR kind LIKE 'start_%') LIMIT 1""", (task_id,)).fetchone()
             if pending:
                 raise ValueError("task has a command requiring reconciliation")
             now = time.time()
@@ -1079,13 +1087,14 @@ class Journal:
                         {"command_id": command_id, "reason": reason})
 
     def resolve_failover(self, task_id: str, command_id: str, handoff_command_id: str, *,
-                         token: str, outcome: str, actor: str, source: str, evidence: str) -> dict:
+                         token: str, outcome: str, actor: str, source: str, evidence: str,
+                         token_hash: str | None = None) -> dict:
         """Close a conflicted failover by operator attestation without adopting a successor."""
         if (outcome not in {"delivered", "not_delivered", "superseded"}
                 or actor not in {"operator", "ted"} or not source.strip() or len(source) > 256
                 or not evidence.strip() or len(evidence) > 2000):
             raise ValueError("valid operator outcome and provenance are required")
-        digest = hashlib.sha256(token.encode()).hexdigest()
+        digest = token_hash or hashlib.sha256(token.encode()).hexdigest()
         with self.tx():
             task = self.get(task_id)
             cmd = self.command_get(command_id)

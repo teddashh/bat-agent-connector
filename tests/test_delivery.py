@@ -177,6 +177,9 @@ async def test_merge_admission(make_daemon, gh, monkeypatch):
         d.ops.create(TED, action="github.pr.merge", target={"repository": "x/y", "pull_number": 1},
                      preconditions={"expected_head_sha": HEAD}, idempotency_key="k")
     assert e.value.code == "REPO_NOT_CONFIGURED"
+    # A09: configuration variants run sequentially; they cannot both own this fleet.
+    await d.fleet.close()
+    d.journal.close()
     monkeypatch.delenv("FAKE_GH_TOKEN")
     nogh = make_daemon()
     with pytest.raises(OperationError) as e:

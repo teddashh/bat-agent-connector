@@ -9,8 +9,10 @@ import re
 import uuid
 from typing import Protocol
 
-from .errors import TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
+from . import registry
+from .errors import TaskControlRefused, TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .model_router import MinimalReviewGate, ModelRouter
+from .operations import StepFailed
 from .relay import parse_status
 from .task_journal import Journal
 from .task_recipes import limits, verification_reworks
@@ -158,9 +160,84 @@ class TaskCoordinator:
         self.verification_quiet_s = max(0.0, verification_quiet_s)
         self._verification_stability: dict[str, tuple[tuple[str, str] | None, float]] = {}
         self._verification_activity: dict[str, float] = {}
+        if getattr(adapter, "fleet", None) is not None:
+            adapter.fleet.task_coordinator = self
 
     def _lock(self, host: str, sid: str) -> asyncio.Lock:
         return self._writers.setdefault((host, sid), asyncio.Lock())
+
+    async def session_control(self, task_id: str, host: str, sid: str, action: str,
+                              params: dict, fn) -> dict:
+        from .task_control import FrameGuard, check
+        # Admission never waits behind verification. Freeze the version before any lock/await.
+        admitted = check(self.journal, task_id, host, sid, action, params.get("control_version"))
+        params = {**params, "control_version": admitted["control_version"]}
+        # Pause commits independently of this lock, so it can invalidate an in-flight verifier/send.
+        async with self._task_locks.setdefault(task_id, asyncio.Lock()):
+            task = check(self.journal, task_id, host, sid, action, params["control_version"])
+            async with self._lock(host, sid):
+                task = check(self.journal, task_id, host, sid, action, task["control_version"])
+                before = await self.adapter.prepare_send(task, sid) if action == "send" else {}
+                check(self.journal, task_id, host, sid, action, task["control_version"])
+                key = params.get("operation_id") or "legacy:" + str(uuid.uuid4())
+                payload = {"purpose": "runtime:" + action, "control_version": task["control_version"],
+                           "before": before, "operation_id": params.get("operation_id"),
+                           "prompt_sha256": hashlib.sha256(str(params.get("text", "")).encode()).hexdigest(),
+                           "tool_use_id": params.get("tool_use_id"), "mode": params.get("mode")}
+                def intent():
+                    with self.journal.tx():
+                        command, fresh = self.journal.command(task_id, action, sid, payload, "runtime:" + key)
+                        if action == "send" and params.get("message_id"):
+                            self.journal.db.execute("UPDATE commands SET message_id=? WHERE command_id=?",
+                                                    (params["message_id"], command["command_id"]))
+                            command = self.journal.command_get(command["command_id"])
+                        return {**command, "fresh": fresh}
+                context = None
+                if params.get("operation_id") and getattr(self, "operations", None):
+                    from .operations import OpContext
+                    context = OpContext(self.operations, self.operations._row(params["operation_id"]))
+                command = context.effect("task_command", intent) if context else intent()
+                fresh = command["fresh"]
+                if context:
+                    context.set_refs(task_id=task_id, command_id=command["command_id"],
+                                     control_version=task["control_version"])
+                if not fresh:
+                    raise TaskControlRefused("TASK_RECONCILIATION_REQUIRED", "existing command must be read back")
+                guard = FrameGuard(self.journal, task_id, host, sid, task["control_version"],
+                                   command["command_id"], action, prompt_sha256=payload["prompt_sha256"] if action == "send" else None)
+                params = dict(params)
+                params["_task_guard"] = guard
+                if action == "send":
+                    params["message_id"] = command["message_id"]
+                    params["retry_on_disconnect"] = False
+                try:
+                    result = await fn(self.adapter.fleet, host, sid, **params)
+                except WriteRefused:
+                    self.journal.command_status(command["command_id"], "uncertain" if guard.frames else "rejected")
+                    if guard.frames:
+                        self.journal.change(task_id, "uncertain")
+                    raise
+                except Exception:
+                    self.journal.command_status(command["command_id"], "uncertain")
+                    self.journal.change(task_id, "uncertain")
+                    raise
+                if action == "send" and not result.get("accepted"):
+                    with self.journal.tx():
+                        self.journal.command_status(command["command_id"], "rejected")
+                        self.journal.change(task_id, "needs_ted")
+                    return result
+                if action == "send" and before.get("agent_kind") == "codex" and result.get("turn_attribution") != "exact_echo":
+                    # Preserve the legacy reply, but let the original command readback own task progress.
+                    self.journal.command_status(command["command_id"], "uncertain", marker=result.get("turn_marker"))
+                    await self._reconcile_command(self.journal.change(task_id, "uncertain"),
+                                                  self.journal.command_get(command["command_id"]))
+                    return result
+                with self.journal.tx():
+                    self.journal.command_status(command["command_id"], "accepted" if action == "send" else "settled",
+                                                marker=result.get("turn_marker"))
+                    if action == "send":
+                        self.journal.change(task_id, "running", fields={"turn_marker": result.get("turn_marker")})
+                return result
 
     async def _route(self, task: dict, step: str, step_type: str, *, high_stakes: bool = False,
                      provider: str | None = None, reason: str | None = None) -> None:
@@ -304,9 +381,27 @@ class TaskCoordinator:
         return await self._send(self.journal.get(task["task_id"]), sid, prompt, role + ":initial")
 
     async def _send(self, task: dict, sid: str, text: str, purpose: str,
-                    *, prepared_command: dict | None = None) -> dict:
+                    *, prepared_command: dict | None = None, operation=None) -> dict:
+        expected_version = task["control_version"]
         async with self._lock(task["host"], sid):
             task = self.journal.get(task["task_id"])
+            if operation:
+                receipt = operation.service.db.execute(
+                    "SELECT response FROM operation_steps WHERE operation_id=? AND name='task_send_result' AND status='succeeded'",
+                    (operation.operation_id,)).fetchone()
+                if receipt:
+                    return json.loads(receipt["response"])
+                receipt = operation.service.db.execute(
+                    "SELECT response FROM operation_steps WHERE operation_id=? AND name='task_send_command' AND status='succeeded'",
+                    (operation.operation_id,)).fetchone()
+                if receipt:
+                    cmd = self.journal.command_get(json.loads(receipt["response"])["command_id"])
+                    if cmd["status"] in {"intent", "needs_review", "uncertain"}:
+                        self.journal.command_status(cmd["command_id"], "uncertain")
+                        task = await self._reconcile_command(task, cmd)
+                    if self.journal.command_get(cmd["command_id"])["status"] in {"accepted", "settled"}:
+                        return operation.effect("task_send_result", lambda: self.journal.get(task["task_id"]))
+                    return self.journal.change(task["task_id"], "uncertain")
             if task["paused"]:
                 return task
             send_type = "review" if purpose.startswith("reviewer:") else "implementation"
@@ -340,17 +435,32 @@ class TaskCoordinator:
                         payload.get("prompt_sha256") != hashlib.sha256(text.encode()).hexdigest()):
                     raise ValueError("prepared operator prompt does not match journal intent")
                 before = payload["before"]
+                if operation:
+                    operation.effect("task_send_command", lambda: {**cmd, "fresh": True})
+                    operation.set_refs(task_id=task["task_id"], command_id=cmd["command_id"])
             else:
                 key = (f"{task['task_id']}:{purpose}:{task['review_rejections']}:{task['continuations']}:"
                        f"{task['control_version']}:"
                        f"{task.get('review_commit') if sid == task.get('reviewer_session_id') else sid}"
                        + (f":vf{task['verification_failures']}" if task.get("verification_failures") else ""))
                 before = await self.adapter.prepare_send(task, sid)
+                if operation:
+                    from .task_control import check
+                    check(self.journal, task["task_id"], task["host"], sid, "send", expected_version)
                 if self.journal.get(task["task_id"])["paused"]:
                     return self.journal.get(task["task_id"])
-                cmd, fresh = self.journal.command(task["task_id"], "send", sid,
-                                                   {"purpose": purpose, "before": before,
-                                                    "prompt_sha256": hashlib.sha256(text.encode()).hexdigest()}, key)
+                def command_effect():
+                    cmd, fresh = self.journal.command(task["task_id"], "send", sid,
+                        {"purpose": purpose, "before": before, "control_version": task["control_version"],
+                         "operation_id": operation.operation_id if operation else None,
+                         "prompt_sha256": hashlib.sha256(text.encode()).hexdigest()},
+                        "op:" + operation.operation_id if operation else key)
+                    return {**cmd, "fresh": fresh}
+                cmd = operation.effect("task_send_command", command_effect) if operation else command_effect()
+                fresh = cmd["fresh"]
+                if operation:
+                    operation.set_refs(task_id=task["task_id"], command_id=cmd["command_id"],
+                                       control_version=task["control_version"])
                 if not fresh:
                     return self.journal.change(task["task_id"], "uncertain")
             if initial_lead or initial_reviewer:
@@ -371,10 +481,21 @@ class TaskCoordinator:
                 return task
             reconciled = False
             try:
-                r = await self.adapter.send(task, sid, text, cmd["message_id"])
+                async def dispatch():
+                    return await self.adapter.send(task, sid, text, cmd["message_id"])
+                async def readback(_):
+                    proof = await self.adapter.reconcile_send(task, sid, hashlib.sha256(text.encode()).hexdigest(),
+                                                              before, cmd["message_id"])
+                    return proof if proof and proof.get("accepted") and proof.get("turn_attribution") == "exact_echo" else None
+                r = await operation.step("task_dispatch", dispatch, request={"command_id": cmd["command_id"]},
+                                         reconcile=readback) if operation else await dispatch()
             except TaskDispatchCancelled:
                 self.journal.command_status(cmd["command_id"], "cancelled")
                 return self.journal.get(task["task_id"])
+            except StepFailed:
+                # Operation steps preserve definitive policy/task refusals; no uncertain command was sent.
+                self.journal.command_status(cmd["command_id"], "rejected")
+                raise
             except WriteRefused:
                 # Local streaming/rate guard rejected before BAT send-message.
                 current = self.journal.get(task["task_id"])
@@ -427,11 +548,16 @@ class TaskCoordinator:
             if not marker:
                 self.journal.command_status(cmd["command_id"], "uncertain")
                 return self.journal.change(task["task_id"], "uncertain")
-            self.journal.command_status(cmd["command_id"], "accepted", marker=marker)
-            state = "verifying" if sid == task.get("reviewer_session_id") else "running"
-            field = "review_marker" if state == "verifying" else "turn_marker"
-            return self.journal.change(task["task_id"], state, fields={field: marker},
-                                       event="send_reconciled_delivered" if reconciled else None)
+            def delivered():
+                self.journal.command_status(cmd["command_id"], "accepted", marker=marker)
+                state = "verifying" if sid == task.get("reviewer_session_id") else "running"
+                field = "review_marker" if state == "verifying" else "turn_marker"
+                return self.journal.change(task["task_id"], state, fields={field: marker},
+                                           event="send_reconciled_delivered" if reconciled else None)
+            if operation:
+                return operation.effect("task_send_result", delivered)
+            with self.journal.tx():
+                return delivered()
 
     async def _observe(self, task: dict, cmds: list[dict]) -> dict:
         sid = task["session_id"]
@@ -499,6 +625,25 @@ class TaskCoordinator:
                 return self.journal.change(task["task_id"], "uncertain",
                                            fields={"session_id": found["session_id"],
                                                    "turn_marker": None, "lead_agent": "codex"})
+            return self.journal.change(task["task_id"], "uncertain")
+        if kind in {"answer", "interrupt", "permissions"}:
+            from . import service
+            client = self.adapter.fleet.client(task["host"])
+            meta = await service._meta(client, sid)
+            payload = json.loads(cmd["payload"])
+            proven = kind == "interrupt" and isinstance(meta, dict) and meta.get("isStreaming") is False
+            if kind == "answer" and payload.get("tool_use_id"):
+                state = await service._live_state(client, sid, service.agent_kind(
+                    (registry.get(task["host"], sid) or {}).get("agent_preset")), meta)
+                if isinstance(state, dict):
+                    prompts = [state.get("pendingAskUser"), state.get("pendingPermission")]
+                    proven = not any(isinstance(p, dict) and p.get("toolUseId") == payload["tool_use_id"] for p in prompts)
+            if proven:
+                with self.journal.tx():
+                    self.journal.command_status(cmd["command_id"], "settled")
+                    if task["state"] == "uncertain":
+                        return self.journal.change(task["task_id"], "running", event="runtime_control_reconciled")
+                    return self.journal.get(task["task_id"])
             return self.journal.change(task["task_id"], "uncertain")
         if kind != "send":
             return self.journal.change(task["task_id"], "uncertain")
@@ -727,11 +872,29 @@ class TaskCoordinator:
                               actor: str, source: str, evidence: str,
                               observed_result: str = "none", turn_ref: str | None = None,
                               candidate_commit: str | None = None, tree_hash: str | None = None,
-                              next_prompt: str | None = None) -> dict:
+                              next_prompt: str | None = None, token_hash: str | None = None, operation=None) -> dict:
         """An explicit operator attestation for one uncertain command, never a replay."""
         async with self._task_locks.setdefault(task_id, asyncio.Lock()):
             task = self.journal.get(task_id)
             command = self.journal.command_get(command_id)
+            if operation:
+                receipt = operation.service.db.execute(
+                    "SELECT response FROM operation_steps WHERE operation_id=? AND name='task_reconcile' AND status='succeeded'",
+                    (operation.operation_id,)).fetchone()
+                if receipt:
+                    result = json.loads(receipt["response"])
+                    if next_prompt is not None and result.get("_next_command_id"):
+                        return await self._send(result, command["session_id"], next_prompt,
+                                                "operator:" + command_id,
+                                                prepared_command={"command_id": result["_next_command_id"]},
+                                                operation=operation)
+                    return result
+            expected_version = operation.preconditions.get("control_version", task["control_version"]) if operation else None
+            if operation:
+                operation.set_refs(task_id=task_id, command_id=command_id, control_version=expected_version)
+            def check_version():
+                if expected_version is not None and self.journal.get(task_id)["control_version"] != expected_version:
+                    raise TaskControlRefused("CONTROL_VERSION_CONFLICT", "task control changed before command resolution")
             if command["task_id"] != task_id or command["status"] != "uncertain":
                 raise ValueError("command is not uncertain for this task")
             if command["kind"] == "failover":
@@ -740,9 +903,11 @@ class TaskCoordinator:
                 handoff = self._bound_handoff(task, command)
                 if not handoff:
                     raise ValueError("failover handoff command binding is invalid")
-                return self.journal.resolve_failover(task_id, command_id, handoff["command_id"],
-                                                     token=token, outcome=outcome, actor=actor,
-                                                     source=source, evidence=evidence)
+                def resolve_failover():
+                    check_version()
+                    return self.journal.resolve_failover(task_id, command_id, handoff["command_id"],
+                        token=token, token_hash=token_hash, outcome=outcome, actor=actor, source=source, evidence=evidence)
+                return operation.effect("task_reconcile", resolve_failover) if operation else resolve_failover()
             if next_prompt is not None:
                 if not isinstance(next_prompt, str) or not next_prompt.strip() or len(next_prompt) > 18_000:
                     raise ValueError("invalid new prompt")
@@ -764,15 +929,19 @@ class TaskCoordinator:
                 read = await self.adapter.read(task, command["session_id"], command["marker"])
                 if read.get("streaming") is not False:
                     raise ValueError("reviewer turn is still active")
-            result = self.journal.resolve_send(
-                task_id, command_id, token=token, outcome=outcome, actor=actor,
-                source=source, evidence=evidence, observed_result=observed_result,
-                turn_ref=turn_ref, candidate_commit=candidate_commit, tree_hash=tree_hash,
-                next_prompt_sha256=hashlib.sha256(next_prompt.encode()).hexdigest()
-                if next_prompt is not None else None, next_before=next_before,
-            )
+            def resolve():
+                check_version()
+                return self.journal.resolve_send(
+                    task_id, command_id, token=token, token_hash=token_hash, outcome=outcome, actor=actor,
+                    source=source, evidence=evidence, observed_result=observed_result,
+                    turn_ref=turn_ref, candidate_commit=candidate_commit, tree_hash=tree_hash,
+                    next_prompt_sha256=hashlib.sha256(next_prompt.encode()).hexdigest()
+                    if next_prompt is not None else None, next_before=next_before,
+                    operation_id=operation.operation_id if operation else None,
+                )
+            result = operation.effect("task_reconcile", resolve) if operation else resolve()
             if next_prompt is not None:
                 return await self._send(result, command["session_id"], next_prompt,
                                         "operator:" + command_id,
-                                        prepared_command={"command_id": result["_next_command_id"]})
+                                        prepared_command={"command_id": result["_next_command_id"]}, operation=operation)
             return result
