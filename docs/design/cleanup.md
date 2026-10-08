@@ -1,6 +1,6 @@
 # 整理與復原：回收 managed 資源，保留工作脈絡
 
-日期：2026-10-08。狀態：Phase 2a 核准規格。Part A 本輪實作；Part B 在 operations-unification
+日期：2026-10-08。狀態：Phase 2a Part A 實作與驗證。Part B 在 operations-unification
 Part A 合併後另開分支。對應計畫 §23 全節、§10、§19、§26 E01／E02、W06 cleanup。
 沿用 [OperationService](api-v1.md)、[resource policy](resource-policy.md) 與 [work items](work-items.md)。
 
@@ -88,6 +88,12 @@ integration.handoff／operation_id／repair；task external 為 task／task_id�
 | retained_ref | preserve intent＋實際 ref／cat-file | 永不刪 | exact commit/tree；Part A 只讀列表，Part B 可新建 worktree |
 | manual／unknown／remote／opaque artifact | inventory／links／human_checkout／remote receipt、已知 repo 中的未知 registration | 永不碰；remote branch 另有 GitHub action | 原 ID、位置、全部保留原因；artifact adapter 未完成不假裝可刪 |
 
+Temporary adapter 明列兩種可移除資源：continue prepare 的 exact clone init temp，以及 integration
+prepare 的 exact bare init temp。兩者需原intent、相符markers、完整Git-only manifest；所有ref commits
+在載體可讀時先一併pin。空bare temp不產生retained row，不宣稱可restore。載體未完成／內容不在載體就保留。
+`.batc-lock`、check intent的`repo.git/batc-check-<op>`與push intent的`batc-push-<op>`也按exact intent列出；
+舊writer未留下resource marker，不補認ownership、不unlink鎖，列UNKNOWN_READ_ONLY；未決writer另列COMMAND_UNRESOLVED。
+
 Checkpoint clone 檢查 batc.managed-clone／batc.source 與 creation intent，不能接管 managed root 中預先存在的 repo。
 Integration 沿用 Area.prelude 的 host/repository/URL markers、config allowlist、no links／alternates／replace／grafts。
 目的地、Git dir／commondir／objects／refs 都要在 managed roots。SSH adapter 可用 host Python 3 的
@@ -153,6 +159,7 @@ Guard marker 在 registry._locked 同一 flock 下寫，原 registry._write 保�
 附 cleanup_reservation／cleaned／tombstone_resource_id。每個 CLI／stdio MCP process 都讀同 state_dir 的
 registry，**不開 daemon Journal**。JSON atomic replace，guard 只讀不建立檔案；讀不到／格式毀損時 mutation
 fail closed。Mutation 前持久保存 operation/item intent，再寫 guard marker，再送外部 call。
+Session marker 只鎖該 session ID；local branch marker 只鎖該 repository 的 exact branch，不能把載體當 cleaned。
 同 cleanup operation 的 ContextVar 只讓本 handler 通過自己的 reservation；第三方不能 body 自報 operation ID。
 未決 guard 不按時間解鎖；restart 先 reconcile。Confirmed cleaned generation 回 RESOURCE_CLEANED，
 reservation 回 CLEANUP_IN_PROGRESS；舊 send/client-resume／merge/remove 也會拒絕。
@@ -174,6 +181,7 @@ record 的 get-session-state 副作用。不呼叫會寫整合區的 integration
 Input `{target, choices}`。Choices：discard_uncommitted[]、release_undelivered[]，預設空，皆為 resource ID；
 不能傳任意 path／ref／force。每 host serialize preview，一次一個，**包括排隊時間的共享 deadline**；
 每 repository/container 一個 batched SSH read script，一次枚舉 worktrees／refs／dirty manifests，不逐 ref SSH。
+每 host 另用一個 batch 解析所有選中 managed session 的 canonical workdirs；stop call 前再核該 path。
 單一 snapshot；沒有 double snapshot／PREVIEW_UNSTABLE。Deadline 未讀完的項目 OBSERVATION_UNAVAILABLE，
 不以缺失當乾淨。最多 500 resources、token payload 16 KiB；整份過大回 PREVIEW_TOO_LARGE，不截斷 apply。
 
@@ -181,7 +189,7 @@ Output `{preview_id,preview_token,fingerprint,contract_version,issued_at,expires
 ready,blocking}`。每 item：resource_id／generation／kind／host／original_ids／canonical binding／creation evidence、
 四狀態／HEAD／ref SHA／dirty manifest digest／last observation、完整 relations／consumers／receipt coverage／
 PR destinations、decision=retain/reclaim/already_absent、固定 steps 與 dependency IDs、全部 reasons／overridden_reasons。
-Impact 列保留／停止／移除數、受影響 work items、保留 commits／未送達、discard 檔案與 bytes、估計回收容量。
+Impact 列 reclaim／retain 數與 undelivered_commits_kept；items.steps、work_items、manifest 列具體停止／移除／丟棄影響。
 不可量測 bytes=null，不能把留下的 Git objects 算回收。沒有可執行 reclaim item 時 ready=false。
 
 ### Signed token／fingerprint
@@ -190,7 +198,9 @@ TTL **15 分鐘**（integration 是一小時）。Wire format `v1.<base64url(can
 Canonical JSON 用 operations._canonical；key 為 HMAC-SHA256(admin token bytes,"batc.cleanup.preview.v1")，
 signature 覆蓋 v1 與 payload bytes，constant-time compare。Payload 固定 actor／target／choices／fingerprint、
 policy/contract/config digest、iat/exp（UTC integer seconds，exp=iat+900）。preview_id 為 actor/target/choices/
-fingerprint/iat canonical hash 前 32 hex 加 clpv_。Admin token 輪替使 token 無效；token 不授予 scopes。
+fingerprint/iat canonical hash 前 32 hex 加 clpv_。Admin token 輪替使尚未接受的 token 無效；token 不授予 scopes。
+已接受的 operation params 有 server-only authorization；key 輪替不撤銷 accepted／resumed plan。
+尚未送任何 external step 就過期仍拒絕；已送 steps 先 reconcile，不重授權。
 
 Fingerprint 包含完整 resource 集合（包括 retain）、ownership/generation/path、content／dirty bytes/type、
 refs／registration／merge state、writer/pending、commands／global consumers、receipt coverage、retention rules、
@@ -221,7 +231,7 @@ remove.worktree／remove.temporary → remove.branch（只有 delivered）→ fi
 | remove temporary | exact intent／markers／完整 manifest，先 pin commit，no-follow exact deletion；未知內容不碰 |
 | finalize | receipt／tombstone／aliases／retained／api event 一個 SQLite tx；registry 同 flock標 cleaned，可由相同 tombstone ID重播 |
 
-Result `{preview_id,fingerprint,summary,items,tombstones,retained,next_action}`。Receipts 包含 planned/actual steps、
+Result `{preview_id,fingerprint,summary,items,tombstones,next_action}`；retained IDs 在逐項 receipts，實物另由 retained read 核對。Receipts 包含 planned/actual steps、
 attempts、before/after、retained SHA/location、discard/release choices／authorization、error、settled_by、relations、PR。
 Item status：retained/pending/running/succeeded/already_absent/failed/uncertain/blocked_stale/cancelled。
 Operation 沿用原狀態；summary.partial=true，不新增 partial state。獨立 item確定失敗可繼續其他項；
@@ -238,7 +248,7 @@ uncertain／stale 停後續。首輪 stale=failed、零 mutation；部分成功�
 | PREVIEW_TOKEN_INVALID | 409，格式／signature／rotated key不符，重preview |
 | PREVIEW_MISMATCH | 409，actor／target／choices／precondition與token不符，重preview |
 | PREVIEW_EXPIRED／PREVIEW_BLOCKED | 409，過期／ready=false |
-| PREVIEW_STALE | 409或operation error，live state changed；列changed IDs／fields，重preview |
+| PREVIEW_STALE | 409或operation error，live state changed；首輪回fingerprint已變，item階段回resource已變；重preview比較原預覽 |
 | PREVIEW_TOO_LARGE | 413，改較小scope，不截斷執行 |
 | RESOURCE_CLEANED／CLEANUP_IN_PROGRESS | 409／policy refusal，原generation已清理／reserved |
 | 共用ownership／destination／TIER_DISABLED／NO_MANAGED_ROOT／GIT_RUNNER_UNAVAILABLE | 沿用原code，保留不越界 |
@@ -263,9 +273,9 @@ parent cancelled/failed把它當成沒發生。遠端程序仍在／身份不明
 | discard partial／lost | 每entry核before／expected-after digest；已after不重丟，第三種state stale；同manifest且原程序结束才續 |
 | worktree remove lost | retained仍在，path與registration都消失即成功；只有path消失不prune；仍原binding/clean且前程序结束才非force重送 |
 | branch CAS lost | ref absent且retained old SHA在即成功；still old且無writer可CAS retry；第三種SHA stale |
-| temporary partial／lost | 原manifest剩餘entries與marker核對；不刪新檔、不追links；原程序结束才能續 |
+| temporary partial／lost | 全部消失且pins仍在即補成功；仍完整before且原程序結束才續。部分刪除／marker損壞留uncertain，不猜測或掃剩餘檔案 |
 | finalize crash | steps讀回可補finalize；同tx／unique keys防重複event／aliases；registry同值對帳 |
-| cancel／Resume | 成功item留存，未送出cancel；uncertain先讀回。OpContext.failed不自動retry；confirmed-no-effect才另建.a2 |
+| cancel／Resume | 成功item留存，未送出cancel；uncertain先讀回。Confirmed未送出的reservation釋放，未知outcome不解鎖。OpContext.failed不自動retry；confirmed-no-effect才另建.a2 |
 | Part B restore add lost | exact新worktree/branch/HEAD/tree對上intent才補成功，未知目的地不認領；不重建runtime |
 
 ## Journal／migration
@@ -276,9 +286,9 @@ parent cancelled/failed把它當成沒發生。遠端程序仍在／身份不明
 
 | 表 | 固定事實／鍵 |
 |---|---|
-| cleanup_runs | operation_id PK/FK、preview_id、token_hash、fingerprint、immutable document、accepted_actor/scopes/choices、validated_at、supersedes_operation_id；accepted authorization沒有其他持久來源 |
+| cleanup_runs | operation_id PK/FK、preview_id、token_hash、fingerprint、immutable document、accepted_actor/scopes/choices、validated_at、supersedes_operation_id；validated snapshot是新事實；authorization沿用operation params接受時的固定metadata |
 | cleanup_receipts | (operation_id,resource_id) PK，item_order、plan、status、before/after、attempts、error、settled_by、retained IDs／timestamps；resumed_by從原api_events附加 |
-| cleanup_retained | retained_id PK、resource_id、preserve operation/step、revision_key、host/repository/ref/commit/tree/digest、creation evidence、last_verified；unique preserve op/resource/revision |
+| cleanup_retained | retained_id PK、resource_id、preserve operation/step、revision_key、host/repository/ref/commit/tree/digest、creation evidence、created_at；每次read即時核實，不寫last_verified；unique preserve op/resource/revision |
 | resource_tombstones | resource_id PK、generation、original_ids、host/profile/workspace/path/ref、creation evidence、last observation、reason/choices、relations、receipt keys、retained IDs、PR destinations、cleaned_at |
 | cleanup_aliases | (kind,external_id,host,resource_id) PK；原session/run/task/checkpoint/op與generation path/ref的永久解引用 |
 
@@ -316,8 +326,8 @@ Fanout planner經原stop後回planner_cleanup={stopped,reason,worktree_kept:true
 
 Dashboard #/cleanup、#/cleanup/resource/ID：scope／子工作、真resource與all reasons／plan、保留commits與
 未送達標記、discard不可復原內容、一次apply、逐itemreceipt、tombstone搜尋、實際retained列表。
-工作detail有預填work_item的整理entry；沒有restorebutton。Stale顯示差異、留choices草稿、重preview；
-lostreply保留key查op。Reuse原tokens/components、兩語i18n、fill()、CSP、focus/live-updatehold；390px驗證。
+工作detail有預填work_item的整理entry；沒有restorebutton。Stale顯示拒絕原因、留choices草稿、重preview以比較差異；
+lostreply保留reviewed document與key，reload後用同token/key查回原op；未知回覆時不能另開preview。Reuse原tokens/components、兩語i18n、fill()、CSP、focus/live-updatehold；390px驗證。
 
 ## Part B：reviewed task cleanup與restore（第二步，尚未實作）
 
@@ -335,7 +345,7 @@ MCP cleanup_restore**只有mutation**，read保持cleanup_retained；CLI新增re
 
 ## 預計修改檔案
 
-Part A：新cleanup.py；task_journal.py（migration）、registry.py（guard metadata）、resource_policy.py（單一hooks
+Part A：新cleanup.py、cleanup_host.py、resource_ids.py；task_journal.py（migration）、registry.py（guard metadata）、resource_policy.py（單一hooks
 及cleanupSSHpolicy）、config.py/api_auth.py；api_v1.py（registration/routes/one-calllookup）、mcp_server.py/cli.py；
 lifecycle.py（legacy／stop option／planner）；dashboard/app.js/app.css/i18n.js；README兩語/CHANGELOG/兩份skills；
 api-v1/resource-policy/checkpoints/integration/work-items/dashboard設計的已完成／尚未涵蓋；tests/test_cleanup.py及必要回歸。
@@ -348,21 +358,23 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 
 | 計畫§23／驗收 | 測試名稱／證據 |
 |---|---|
-| 四狀態／inactive不足；E01 | test_e01_runtime_work_delivery_retention_are_separate |
+| 四狀態／inactive不足；E01 | test_e01_pending_start_stop_and_waiting_sessions_are_retained |
 | 父子樹、manual/unknown/active/completed與exactplan；E01 | test_e01_tree_preview_apply_matches_and_read_only_resources_survive |
-| sharedID／全域consumer、history不擋；E02 | test_e02_shared_worktree_is_one_item_and_checks_out_of_scope_consumers、test_e02_history_links_resolve_tombstones_and_artifact_refs_are_retained |
+| sharedID／全域consumer、history不擋；E02 | test_e02_shared_worktree_is_one_item_and_checks_out_of_scope_consumers、test_e01_tree_preview_apply_matches_and_read_only_resources_survive |
 | receipt而非ancestor，partialpick/newtip/uncertain；E02 | test_e02_squash_and_pick_use_exact_delivery_receipt_coverage |
 | release保留內容只需cleanup／discard需scope；E01 | test_e01_release_keeps_commits_with_cleanup_scope、test_e01_discard_requires_cleanup_discard |
 | purepreview/token/stale/expiry；E01 | test_e01_preview_is_pure_and_signed_plan_cannot_be_changed、test_e01_stale_any_item_stops_before_mutation_and_reports_changes |
 | canonical/policy/preserve/nonforce/CAS；E01 | test_e01_every_mutation_rechecks_policy_and_canonical_destination、test_e01_preserve_precedes_nonforced_remove_and_cas_checks_delivered_refs |
 | crashedcheckpoint/handoff／未決start-stop；E01 | test_e01_crashed_continue_and_handoff_intents_are_discovered_without_adoption、test_e01_pending_start_stop_and_waiting_sessions_are_retained |
-| partsuccess/restart/lostreply；E01 | test_e01_partial_cleanup_resumes_only_unfinished_unchanged_items、test_e01_lost_replies_reconcile_each_cleanup_phase |
-| 原ID/位置/原因/relations/PR與真retained；E01/E02 | test_e01_original_ids_remain_searchable_with_location_reason_and_pr、test_e01_retained_list_requires_real_ref_and_objects |
+| partsuccess/restart/lostreply；E01 | test_e01_partial_cleanup_resumes_only_unfinished_unchanged_items、test_e01_lost_replies_reconcile_each_cleanup_phase、test_e01_cancel_reconciles_sent_steps_and_releases_only_confirmed_reservations |
+| 原ID/位置/原因/relations/PR與真retained；E01/E02 | test_e01_original_ids_remain_searchable_with_location_reason_and_pr（同測試移除實際ref，確認列為unavailable） |
 | TASK_OWNED／原TaskDaemon不變 | test_e01_task_owned_resources_are_retained；原test_external_cleanup_retains_unmerged_commit_and_recovers_after_restart／test_terminal_cleanup_requires_proof_before_journal_path_is_cleared |
 | legacy只讀、config解析、planner只stop、跨processguard | test_e01_legacy_apply_is_disabled_and_auto_cleanup_still_loads、test_e01_fanout_stops_planner_and_keeps_worktree、test_e01_guard_refuses_legacy_writes_on_reserved_and_cleaned_resources |
 | boundedread／serialization／deadline | test_e01_previews_serialize_per_host_and_share_read_deadline |
+| attachmentreplicas／exacttemps | test_e01_attachment_replicas_are_removed_without_discard_scope、test_e01_exact_temporary_requires_creation_markers_and_never_sweeps、test_e01_empty_integration_temporary_has_exact_intent_and_no_restore_promise |
+| acceptedauthority／載體不被guard退休 | test_e01_accepted_authority_survives_key_rotation_and_carrier_stays_usable |
 | migration原histories／rebase可renumber／keep無sweep | test_cleanup_migration_is_atomic_additive_and_preserves_history、test_e01_keep_defaults_reject_purge_and_never_sweep_by_name |
-| §10三入口／§19Dashboard | test_e01_cleanup_adapters_share_the_action_contract；Playwright en/zh-TW/390px #/cleanup與workitementry／無restore／無null/undefined/[object文字 |
+| §10三入口／§19Dashboard | test_e01_cleanup_adapters_share_the_action_contract；Playwright（含lostreply/reload同key） en/zh-TW/390px #/cleanup與workitementry／無restore／無null/undefined/[object文字 |
 | Part B延期 | taskcoordinator/reservation、TaskDaemonbackfill、restore/lostadd新tests；**container不屬Part B**另規格 |
 
 Rewrite舊legacyapplytests，不skip；保留mutation-table、connector-made BAT worktree禁令、unprovenpush回歸。

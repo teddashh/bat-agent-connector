@@ -2,6 +2,16 @@
 
 ## Next release (unreleased)
 
+- Reviewed resource cleanup Part A ([design](docs/design/cleanup.md), plan §23/§10/§19, E01/E02): pure previews
+  for work items (including children), checkpoints, integrations and hosts; 15-minute signed plans; scoped apply
+  with retained refs before non-force removal, exact delivery receipt coverage, CAS local branch deletion,
+  item receipts, permanent tombstones/aliases/search and actual retained content. Shared registry guards protect
+  legacy tools too. HTTP/MCP/CLI and the English/zh-TW Dashboard share the contract. New cleanup scope;
+  cleanup_discard gates only uncommitted discard, release_undelivered keeps commits and branches. Legacy cleanup
+  only evaluates (LEGACY_CLEANUP_DISABLED on apply); auto_cleanup is deprecated; fanout stops its planner and
+  keeps its worktree. Clones/areas/all pins stay. TaskDaemon cleanup remains unchanged; reviewed task cleanup and
+  restore are Part B.
+
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
   those sessions. BAT has no record of them: `batc remove-worktree` on a checkpoint session re-registered the
