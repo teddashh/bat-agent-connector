@@ -175,7 +175,7 @@ PR preview 保留現有 fields，加 `{body, metadata_digest, metadata_update, m
 
 第一次 merge.submit 前才檢查預覽有效期；已送出／queued 的 operation 即使預覽過期也必須讀回原 request，不拿過期當作沒有合併。已成功的 metadata plan 與 combined merge receipt 重播其保存值，不重新套原始 stale 檢查而掩蓋已落地的副作用。
 
-Deployment preview 回 recipe digest／readiness、environment generation、desired、current／last verified／observed identity、ordering、rollback 支援與限制。History 使用 `(created_at, deployment_id)` keyset cursor（預設 50、上限 200），逐筆回 identity、generation、operation／provider URLs、state／evidence、is_current、rollback_eligible／拒絕原因。讀取不 dispatch。
+Deployment preview 回 recipe digest／readiness、environment generation、desired、current／last verified／observed identity、ordering、rollback 支援與限制。History 使用 `(created_at, deployment_id)` keyset cursor（預設 50、上限 200），逐筆回 identity、generation、operation／provider URLs、state／evidence、is_current、rollback_eligible／拒絕原因。Cursor timestamp 僅接受 signed 64-bit integer 或 finite float，保留 integer 比較精度；格式錯誤在 history query 前回 `INVALID_PARAMS`（HTTP 422）。讀取不 dispatch。
 
 ## Phase 2 規格：PR metadata update
 
