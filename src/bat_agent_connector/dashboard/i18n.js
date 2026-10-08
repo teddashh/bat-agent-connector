@@ -1,6 +1,14 @@
 // Display labels only. Logic and CSS never key on these strings (machine enums come from /api/v1).
 const STRINGS = {
   "zh-TW": {
+    existing_artifact: "已上傳附件", add_attachment: "加入附件",
+    attachments: "附件", choose_attachments: "選擇附件", upload_on_choose: "選擇檔案後立即上傳。成功上傳的版本會隨草稿保存。",
+    choose_again: "請重新選擇這個檔案。瀏覽器無法在重新載入後開啟本機檔案。", uploading: "正在上傳…", retry: "重試",
+    attachment_role: "附件用途", attachment_input: "輸入", attachment_result: "成果", attachments_not_ready: "請先完成附件上傳或移除未完成的檔案。",
+    source_unavailable: "無法讀取來源 HEAD，保留草稿；恢復連線後再試。", confirm_source: "確認保留原版本與附件，繼續同一派工",
+    materializations: "附件傳輸", material_pending: "待傳輸", material_transferring: "傳輸中", material_uncertain: "待確認",
+    material_verified: "已驗證", material_blocked: "受阻",
+
     nav_projects: "專案", projects_help: "專案與工作項目是 Connector 自己的紀錄：目標、需求原文、驗收、步驟，以及做這件事的 sessions、版本、操作與 PR。改名不會改 ID；排序與固定只影響顯示。",
     new_project_name: "新專案名稱", add_project: "新增", show_archived: "顯示已封存", no_projects: "還沒有專案。",
     new_sub_project: "子專案名稱", rename: "改名", archive: "封存", restore: "復原", more: "更多", move_up: "上移",
@@ -114,6 +122,14 @@ const STRINGS = {
     integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。",
   },
   en: {
+    existing_artifact: "Uploaded attachment", add_attachment: "Add attachment",
+    attachments: "Attachments", choose_attachments: "Choose attachments", upload_on_choose: "Files upload when chosen. Uploaded revisions are saved with your draft.",
+    choose_again: "Choose this file again. The browser cannot reopen local files after a reload.", uploading: "Uploading…", retry: "Retry",
+    attachment_role: "Attachment role", attachment_input: "Input", attachment_result: "Result", attachments_not_ready: "Finish uploading or remove the unfinished files first.",
+    source_unavailable: "Source HEAD is unavailable. Your draft is kept; retry after reconnecting.", confirm_source: "Keep the original commit and attachments; resume this run",
+    materializations: "Attachment transfer", material_pending: "Pending", material_transferring: "Transferring", material_uncertain: "Checking",
+    material_verified: "Verified", material_blocked: "Blocked",
+
     nav_projects: "Projects", projects_help: "Projects and work items are the connector's own records: goals, the " +
       "request verbatim, acceptance, steps, and the sessions, checkpoints, operations and PRs that carried them. A " +
       "rename never changes an ID; order and pins only change the display.",

@@ -2,6 +2,14 @@
 
 ## Next release (unreleased)
 
+- Artifact attachments, Part A ([design](docs/design/artifacts.md), plan §08/§12/§13, W05b, B04): immutable
+  Connector-owned revisions, quota reservations and operation staging; binary HTTP upload authenticates before
+  reading content. Typed work item/checkpoint refs, restricted Python 3.9+ SSH materialization inside the continuation
+  worktree, independent digest read-back and a fresh source/input guard before dispatch. Source confirmation resumes
+  the same parent; start/send lost replies use existing reconcile. HTTP, CLI, three MCP tools and bilingual Dashboard
+  pickers/drafts/materialization status. No store deletion or new BAT channel; manual/result capture and artifact.accept
+  (Part B, A03 attachments) and cross-host commit fetch (Part C) remain deferred.
+
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
   those sessions. BAT has no record of them: `batc remove-worktree` on a checkpoint session re-registered the

@@ -102,6 +102,124 @@ async function submit(action, target, params, preconditions, scope) {
   }
 }
 
+// Uploaded refs extend the existing localStorage draft; File objects never leave this page's memory.
+function attachmentDraft(scope, text, initial = [], roles = false) {
+  const key = `batc.draft.${scope}`;
+  let saved;
+  try { const raw = localStorage.getItem(key); saved = JSON.parse(raw); if (typeof saved === "string") saved = { text: saved }; }
+  catch { try { saved = { text: localStorage.getItem(key) }; } catch { /* unavailable */ } }
+  saved = saved && typeof saved === "object" ? saved : { text: text.value, attachments: initial.map(ref => ({ name: ref.artifact_id, ref })) };
+  saved.attachments ||= [];
+  for (const a of saved.attachments) delete a.busy;
+  if (saved.text !== null && saved.text !== undefined) text.value = saved.text;
+  const files = new Map(), rows = h("div", { class: "attachment-list" });
+  const status = h("p", { class: "muted", role: "status" });
+  const choose = h("input", { type: "file", multiple: true, disabled: !may("manage"), "aria-label": t("choose_attachments") });
+  const snapshot = () => JSON.stringify({ text: text.value, attachments: saved.attachments, fields: saved.fields });
+  const persist = () => { saved.text = text.value; try { localStorage.setItem(key, JSON.stringify(saved)); } catch { /* memory still works */ } };
+  text.addEventListener("input", persist);
+  const refs = () => saved.attachments.filter(a => a.ref).map(a => roles ? { ...a.ref, role: a.ref.role || "input" }
+    : { artifact_id: a.ref.artifact_id, revision: a.ref.revision, digest: a.ref.digest });
+  const ready = () => saved.attachments.every(a => a.ref);
+  const render = () => fill(rows, ...saved.attachments.map(a => h("div", { class: "row" },
+    h("div", { class: "grow" }, a.name, a.ref ? h("div", { class: "muted" }, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`)
+      : h("div", { class: "muted" }, files.has(a) ? (a.error || t("uploading")) : t("choose_again"))),
+    a.ref && roles ? h("select", { "aria-label": t("attachment_role"), onchange: e => { a.ref.role = e.target.value; persist(); } },
+      ...["input", "result"].map(role => h("option", { value: role, selected: (a.ref.role || "input") === role }, t(`attachment_${role}`)))) : null,
+    !a.ref && files.has(a) && !a.busy ? h("button", { class: "secondary", onclick: () => upload(a) }, t("retry")) : null,
+    h("button", { class: "secondary", disabled: a.busy, onclick: () => {
+      saved.attachments = saved.attachments.filter(x => x !== a); files.delete(a); persist(); render();
+    } }, t("remove")))));
+  const upload = async a => {
+    a.busy = true; delete a.error; render();
+    try {
+      const file = files.get(a), limit = state.caps.artifacts.limits.max_file_bytes;
+      if (file.size > limit) throw new Error(`ARTIFACT_TOO_LARGE (${limit})`);
+      const bytes = await file.arrayBuffer();
+      const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(x => x.toString(16).padStart(2, "0")).join("");
+      a.key ||= crypto.randomUUID();
+      let op = a.operation_id ? (await api("GET", `/operations/${a.operation_id}`)).operation : null;
+      if (op && ["failed", "cancelled"].includes(op.status)) { op = null; a.key = crypto.randomUUID(); }
+      if (!op) op = (await api("POST", "/artifacts?wait=3", { params: { display_name: file.name,
+        media_type: file.type || "application/octet-stream", size_bytes: file.size, expected_digest: digest } }, a.key)).operation;
+      a.operation_id = op.operation_id; persist();
+      while (["accepted", "running"].includes(op.status)) { await sleep(200); op = (await api("GET", `/operations/${op.operation_id}`)).operation; }
+      if (op.status === "waiting_external") {
+        const res = await fetch(op.external_refs.content_url, { method: "POST", body: file,
+          headers: { Authorization: `Bearer ${state.token}`, "Content-Type": "application/octet-stream" } });
+        const data = await res.json();
+        if (!res.ok) throw new Error(`${data.error.code}: ${data.error.message}`);
+        do { await sleep(200); op = (await api("GET", `/operations/${op.operation_id}`)).operation; }
+        while (["accepted", "running", "waiting_external"].includes(op.status));
+      }
+      if (op.status !== "succeeded") throw new Error(`${op.error_code || op.status}: ${op.status_reason || ""}`);
+      a.ref = { artifact_id: op.result.artifact_id, revision: op.result.revision, digest: op.result.digest,
+        ...(roles ? { role: "input" } : {}) };
+      delete a.operation_id; delete a.key; files.delete(a);
+    } catch (e) { a.error = e.message; }
+    delete a.busy; persist(); render();
+  };
+  choose.onchange = () => {
+    for (const file of choose.files) {
+      let a = saved.attachments.find(x => !x.ref && !files.has(x) && x.name === file.name);
+      if (!a) { a = { name: file.name }; saved.attachments.push(a); }
+      files.set(a, file); upload(a);
+    }
+    choose.value = ""; persist(); render();
+  };
+  const box = h("div", { class: "attachments" }, h("label", {}, t("attachments"), choose),
+    h("p", { class: "muted" }, t("upload_on_choose")), rows, status);
+  const existing = h("select", { "aria-label": t("existing_artifact") }, h("option", { value: "" }, t("existing_artifact")));
+  const addExisting = h("button", { class: "secondary", onclick: async () => {
+    if (!existing.value) return;
+    const [artifactId, revision] = existing.value.split(":");
+    try {
+      const { artifact } = await api("GET", `/artifacts/${artifactId}/revisions/${revision}`);
+      if (artifact.state !== "ready") throw new Error(t("attachments_not_ready"));
+      if (!saved.attachments.some(a => a.ref?.artifact_id === artifactId && a.ref?.revision === Number(revision)))
+        saved.attachments.push({ name: artifact.display_name, ref: { artifact_id: artifactId, revision: Number(revision),
+          digest: artifact.digest, ...(roles ? { role: "input" } : {}) } });
+      persist(); render();
+    } catch (e) { fill(status, errorBox(e)); }
+  } }, t("add_attachment"));
+  box.append(h("div", { class: "actions" }, existing, addExisting));
+  api("GET", "/artifacts?limit=200").then(page => {
+    for (const item of page.artifacts) if (item.revision?.state === "ready") {
+      const r = item.revision;
+      existing.append(h("option", { value: `${r.artifact_id}:${r.revision}` }, `${r.display_name} · r${r.revision} · ${r.artifact_id.slice(-8)}`));
+    }
+  }).catch(e => fill(status, errorBox(e)));
+  const clear = async op => {
+    if (op.status !== "succeeded" || !saved.submission) return;
+    const { snapshot: submitted } = saved.submission;
+    if (snapshot() === submitted) { text.value = ""; saved.attachments = []; delete saved.submission; try { localStorage.removeItem(key); } catch { /* memory still works */ } render(); }
+  };
+  const track = async (op, submitted) => { saved.submission = { operation_id: op.operation_id, snapshot: submitted }; persist(); await clear(op); };
+  if (saved.submission) api("GET", `/operations/${saved.submission.operation_id}`).then(x => clear(x.operation)).catch(() => {});
+  for (const a of saved.attachments) if (!a.ref && a.operation_id) {
+    api("GET", `/operations/${a.operation_id}`).then(({ operation: op }) => {
+      if (op.status === "succeeded") {
+        a.ref = { artifact_id: op.result.artifact_id, revision: op.result.revision, digest: op.result.digest,
+          ...(roles ? { role: "input" } : {}) };
+        delete a.operation_id; delete a.key; delete a.error; persist(); render();
+      }
+    }).catch(() => {});
+  }
+  const unsub = onEvents(ev => { if (ev.resource_id === saved.submission?.operation_id)
+    api("GET", `/operations/${ev.resource_id}`).then(x => clear(x.operation)).catch(() => {});
+    if (!box.isConnected) unsub(); });
+  render(); persist();
+  const bindFields = fields => {
+    for (const [name, field] of Object.entries(fields)) {
+      if (typeof saved.fields?.[name] === "string") field.value = saved.fields[name];
+      field.addEventListener("input", () => {
+        saved.fields = Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, value.value])); persist();
+      });
+    }
+  };
+  return { box, refs, ready, snapshot, track, bindFields, submission: () => saved.submission };
+}
+
 // ------------------------------------------------------------------ live events (fetch-based SSE: it can send Authorization)
 function onEvents(fn) { state.listeners.add(fn); return () => state.listeners.delete(fn); }
 async function streamEvents() {
@@ -354,17 +472,26 @@ function checkpointPanel(host, sid) {
     const instr = h("textarea", { placeholder: t("continue_placeholder") });
     const agent = h("select", {}, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
     const out = h("div", { class: "muted" });
+    const draft = attachmentDraft(`continue.${cp.checkpoint_id}`, instr, cp.artifacts || []);
+    let expectedHead = null;
     const go = h("button", { class: "primary", onclick: async () => {
       if (!instr.value.trim()) return;
       go.disabled = true;
       try {
-        const op = await submit("checkpoint.continue", { checkpoint_id: cp.checkpoint_id },
-          { instructions: instr.value, agent: agent.value }, {}, `continue.${cp.checkpoint_id}`);
+        if (!draft.ready()) throw new Error(t("attachments_not_ready"));
+        if (!expectedHead) throw new Error(t("source_unavailable"));
+        const submitted = draft.snapshot();
+        const prior = draft.submission();
+        const op = prior ? (await api("GET", `/operations/${prior.operation_id}`)).operation
+          : await submit("checkpoint.continue", { checkpoint_id: cp.checkpoint_id },
+            { instructions: instr.value, agent: agent.value, artifacts: draft.refs() },
+            { expected_source_head_sha: expectedHead }, `continue.${cp.checkpoint_id}`);
+        await draft.track(op, prior ? prior.snapshot : submitted);
         out.replaceChildren(opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
       } catch (e) { out.replaceChildren(errorBox(e)); }
       go.disabled = false;
     } }, t("start_agent_work"));
-    const form = h("div", { hidden: true }, h("p", { class: "muted" }, t("confined_note")), instr,
+    const form = h("div", { hidden: true }, h("p", { class: "muted" }, t("confined_note")), instr, draft.box,
       h("div", { class: "actions" }, agent, go), out);
     return h("div", { class: "row" },
       h("div", { class: "grow" },
@@ -376,7 +503,10 @@ function checkpointPanel(host, sid) {
         preview && preview.head !== cp.commit_sha ? h("div", { class: "muted" }, t("source_advanced")) : null, form),
       h("button", { class: "secondary", disabled: !can || !mayStart,
         title: !can ? t("checkpoint_unavailable") : mayStart ? null : t("needs_start_scope"),
-        onclick: () => { form.hidden = !form.hidden; } }, t("continue_from_checkpoint")));
+        onclick: async () => { form.hidden = !form.hidden;
+          if (!form.hidden && !expectedHead) { try { expectedHead = (await api("GET", `/checkpoints/${cp.checkpoint_id}?live=true`)).source.head;
+            if (!expectedHead) fill(out, h("p", { class: "error" }, t("source_unavailable"))); } catch (e) { fill(out, errorBox(e)); } }
+        } }, t("continue_from_checkpoint")));
   };
   const load = async () => {
     try {
@@ -652,10 +782,19 @@ async function viewOperation(main, id) {
             location.hash = `#/op/${o.operation_id}`;
           } catch (e) { panel.append(errorBox(e)); }
         } }, t("retry_deploy")) : null;
-      const resume = op.status === "needs_attention"
+      const needsConfirm = op.action === "checkpoint.continue" && ["SOURCE_MOVED", "SOURCE_UNAVAILABLE"].includes(op.error_code);
+      const resume = op.status === "needs_attention" && !needsConfirm
         ? h("button", { class: "primary", title: t("resume_help"), onclick: async () => {
           try { await api("POST", `/operations/${id}/resume`, {}); render(); } catch (e) { panel.append(errorBox(e)); }
         } }, t("resume")) : null;
+      const confirmSource = op.status === "needs_attention" && needsConfirm ? h("button", { class: "primary", onclick: async () => {
+        try { const seen = (await api("GET", `/checkpoints/${op.target.checkpoint_id}?live=true`)).source.head;
+          if (!seen) throw new Error(t("source_unavailable"));
+          await submit("checkpoint.continue.revalidate", { operation_id: id }, { observed_source_head_sha: seen },
+            { expected_input_manifest_digest: refs.input_manifest_digest }, `revalidate.${id}.${seen}`); render();
+        } catch (e) { panel.append(errorBox(e)); }
+      } }, t("confirm_source")) : null;
+      const materialized = refs.materializations || op.result?.materializations || [];
       const opened = op.result?.session_id && op.result?.host
         ? h("a", { class: "secondary", href: `#/session/${encodeURIComponent(op.result.host)}/${encodeURIComponent(op.result.session_id)}` },
           t("open_new_session")) : null;
@@ -684,10 +823,13 @@ async function viewOperation(main, id) {
           Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null,
           op.result ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null),
         ...(receipts || []),
+        ...(materialized.length ? [h("h2", {}, t("materializations")), ...materialized.map(m => h("div", { class: "row" },
+          h("div", { class: "grow" }, `${m.artifact_id} · r${m.revision}`, h("div", { class: "muted" }, m.managed_path)),
+          chip(t(`material_${m.state}`), m.state === "verified" ? "ok" : "")))] : []),
         h("h2", {}, t("steps")),
         ...op.steps.map(s => h("div", { class: "row" }, h("div", { class: "grow" }, s.name),
           h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)),
-        h("div", { class: "actions" }, opened, resume, retry, cancel));
+        h("div", { class: "actions" }, opened, confirmSource, resume, retry, cancel));
     } catch (e) { panel.replaceChildren(errorBox(e)); }
   };
   await render();
@@ -1048,12 +1190,21 @@ async function viewWorkItem(main, wid) {
     const v = { ...w, ...(draft || {}) };
     const f = { title: h("input", { value: v.title, maxlength: 120 }), goal: h("textarea", {}, v.goal),
       request: h("textarea", {}, v.request), acceptance: h("textarea", {}, v.acceptance) };
+    const attachment = attachmentDraft(`wi.edit.${wid}`, f.request, v.attachments || [], true);
+    attachment.bindFields(f);
     const d = drawer(h("label", {}, t("title")), f.title, h("label", {}, t("goal")), f.goal, h("label", {}, t("request")), f.request,
-      h("label", {}, t("acceptance")), f.acceptance, h("div", { class: "actions" }, h("button", { class: "primary", onclick: async () => {
+      h("label", {}, t("acceptance")), f.acceptance, attachment.box, h("div", { class: "actions" }, h("button", { class: "primary", onclick: async () => {
         const params = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, k === "title" ? el.value.trim() : el.value])
           .filter(([k, v]) => v !== w[k]));
+        if (!attachment.ready()) { fill(notice, h("p", { class: "error" }, t("attachments_not_ready"))); return; }
+        if (JSON.stringify(attachment.refs()) !== JSON.stringify(w.attachments || [])) params.attachments = attachment.refs();
         if (!Object.keys(params).length) { d.close(); return; }
-        const ok = await update(params, `wi.edit.${wid}`);
+        const submitted = attachment.snapshot();
+        let op;
+        try { op = await submit("work_item.update", { work_item_id: wid }, params, pre, `wi.edit.${wid}`);
+          await attachment.track(op, submitted); } catch (e) { fill(notice, errorBox(e)); return; }
+        const ok = op.status === "succeeded";
+        if (!ok) fill(notice, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
         if (!ok && STALE.includes(lastFailure)) draft = params;
         if (ok || draft) render();
       } }, t("save"))));
@@ -1125,25 +1276,34 @@ function continueFrom(w, checkpointId, notice) {
   const instr = h("textarea", {}, text);
   const agent = h("select", {}, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
   const out = h("div", {});
+  const draft = attachmentDraft(`continue.${checkpointId}.${w.work_item_id}`, instr, (w.attachments || []).filter(x => x.role === "input"));
+  let expectedHead = null;
   const go = h("button", { class: "primary", onclick: async () => {
     go.disabled = true;
     let op;
     try {
-      op = await submit("checkpoint.continue", { checkpoint_id: checkpointId }, { instructions: instr.value, agent: agent.value }, {},
-        `continue.${checkpointId}`);
+      if (!draft.ready()) throw new Error(t("attachments_not_ready"));
+      if (!expectedHead) throw new Error(t("source_unavailable"));
+      const prior = draft.submission(), submitted = draft.snapshot();
+      op = prior ? (await api("GET", `/operations/${prior.operation_id}`)).operation
+        : await submit("checkpoint.continue", { checkpoint_id: checkpointId },
+          { instructions: instr.value, agent: agent.value, artifacts: draft.refs(), work_item_id: w.work_item_id },
+          { expected_source_head_sha: expectedHead, expected_work_item_fingerprint: w.completion.fingerprint }, `continue.${checkpointId}`);
+      await draft.track(op, prior ? prior.snapshot : submitted);
     } catch (e) { fill(out, errorBox(e)); go.disabled = false; return; }
     // Started (or refused for good): this form never starts another agent. Its result stays here; the item lists
     // the run once the form closes and the page reloads.
     fill(out, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
     if (TERMINAL.includes(op.status) && op.status !== "succeeded") return;
-    const linked = await change(notice, "work_item.link", { work_item_id: w.work_item_id }, { kind: "operation", ref: op.operation_id }, {},
-      `wi.link.${w.work_item_id}.${op.operation_id}`);
-    if (linked) out.append(" · ", t("linked_back"));
+    out.append(" · ", t("linked_back"));
   } }, t("start_agent_work"));
-  const d = drawer(h("p", { class: "muted" }, t("confined_note")), instr, h("div", { class: "actions" }, agent, go), out);
+  const d = drawer(h("p", { class: "muted" }, t("confined_note")), instr, draft.box, h("div", { class: "actions" }, agent, go), out);
   // Starting needs start; linking the run back needs manage. Without both, nothing starts (an unlinked run is untracked).
   const why = !may("start") ? t("needs_start_scope") : !may("manage") ? t("needs_manage_scope") : null;
-  const open = h("button", { class: "secondary", disabled: Boolean(why), title: why, onclick: () => d.toggle.click() },
+  const open = h("button", { class: "secondary", disabled: Boolean(why), title: why, onclick: async () => { d.toggle.click();
+      if (!expectedHead) { try { expectedHead = (await api("GET", `/checkpoints/${checkpointId}?live=true`)).source.head; }
+        catch (e) { fill(out, errorBox(e)); } }
+    } },
     t("start_from_checkpoint"));
   return h("div", { class: "grow" }, open, d.box);
 }

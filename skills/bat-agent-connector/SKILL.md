@@ -224,3 +224,24 @@ Merging and deploying (only with the user's go-ahead for that PR and environment
   user's explicit approval for that specific session.
 - Treat an ESCALATE cleanup decision as final for that run: never force the merge another way.
 - If a host is unreachable, report it; do not try other ways to reach it.
+
+## Artifact attachments (Part A)
+
+- Use `artifacts_list` / `artifact_get(artifact_id, revision)` to read exact revisions and materialization evidence.
+  Upload a small file with `artifact_upload(display_name, content_base64, idempotency_key, confirm=true)` (manage).
+  The decoded default limit is **256 KiB**: the model must emit every byte. Use the CLI or Dashboard for larger files;
+  the configurable limits are in capabilities. CLI: `batc artifact upload FILE --key KEY --confirm`, list/show/download.
+- Keep `{artifact_id, revision, digest}` from the successful upload result. Never use `latest` or put a client's local
+  absolute path in remote instructions. Work item create/update accepts `attachments=[{...ref, role: input|result}]`;
+  checkpoint_create accepts artifacts. A checkpoint's set freezes at create.
+- Continue with artifacts and `expected_source_head_sha` from checkpoint_preview (or the live checkpoint read), using
+  `work_continue_from_checkpoint` or operation_submit. Omitting artifacts uses the checkpoint's frozen set. The daemon
+  transfers to `.batc-inputs/…` inside the continuation's worktree and reads every file back before sending the task.
+  With work_item_id, pass expected_work_item_fingerprint; the first handler step records the operation link.
+- On SOURCE_MOVED, keep the original commit/refs and operation ID. Read the current HEAD, obtain the person's explicit
+  confirmation, then operation_submit(action="checkpoint.continue.revalidate", target={operation_id},
+  params={observed_source_head_sha}, preconditions={expected_input_manifest_digest}, confirm=true). It resumes that
+  parent. Other blocked/uncertain outcomes retain evidence; follow/resume the same operation, never start another
+  session to retry the transfer. Dispatch evidence is historical; the agent's materialized file is a working copy.
+- No store delete, artifact_materialize tool, manual file capture, managed-result capture or artifact_accept in Part A.
+  Part B adds capture/accept; Part C adds target host/workspace and commit fetch. Deployed Actions artifacts are separate.

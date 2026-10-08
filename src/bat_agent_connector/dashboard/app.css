@@ -95,3 +95,9 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
   .row.tree { padding-left: calc(var(--depth, 0) * 12px); }
   button.mini { min-width: 36px; height: 36px; }
 }
+
+/* Attachment rows use the existing compact form and row styles. */
+.attachments { margin-block: 12px; }
+.attachments input[type="file"] { width: 100%; }
+.attachment-list .grow { overflow-wrap: anywhere; min-width: 0; }
+.attachment-list select { max-width: 100px; }

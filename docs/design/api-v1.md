@@ -83,6 +83,11 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 
 | 方法與路徑 | Scope | 說明 |
 |---|---|---|
+| `POST /api/v1/artifacts` | manage | artifact.upload intent；body 為 target／params／preconditions，Idempotency-Key，?wait |
+| `POST /api/v1/artifacts/uploads/{op_id}/content` | manage＋同 actor 或 admin | body 前驗證 action／state／Content-Length；只收 application/octet-stream，拒絕 chunked；operation 自己的 staging |
+| `GET /api/v1/artifacts?limit=&cursor=` | observe | 分頁 ID 與 latest ready 的展示 metadata；輸入選擇仍須精確 ref |
+| `GET /api/v1/artifacts/{art_id}/revisions/{revision}` | observe | immutable metadata 與 materialization evidence |
+| `GET /api/v1/artifacts/{art_id}/revisions/{revision}/content` | observe | attachment download，nosniff／no-store；無 inline preview |
 | `GET /api/v1/version` | 無 | connector、api_version、contract_version |
 | `GET /api/v1/capabilities` | observe | actor、scopes、主機 tiers、actions 與是否允許 |
 | `GET /api/v1/hosts` | observe | 主機可達性與 stale |
@@ -102,8 +107,12 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 
 錯誤格式為 `{"error": {"code", "message"}}`：401 未驗證、403 權限或資源唯讀（代碼同 resource-policy）、404、405、409 冪等衝突、422 參數錯誤、502 BAT 錯誤。
 
+## 附件（Part A）
+
+`capabilities.artifacts` 公開 file／selection／store／MCP／upload window limits，以及 host helper 配置與已觀測 readiness。MCP 只有 artifact_upload、artifacts_list、artifact_get；confirmation 經 operation_submit 的 checkpoint.continue.revalidate。沒有 materialize action、store delete 或新 BAT channel。完整參數與錯誤見 [artifacts.md](artifacts.md)。
+
 ## 尚未涵蓋
 
-- Dashboard 畫面（W09）、GitHub merge／部署（W07／W08）、checkpoint 接續（W04）。這些新增 action 與路由，不改這裡的合約。
+- Artifact 的 manual／managed capture 與 accept（Part B）、跨主機接續（Part C），見 [artifacts.md](artifacts.md)。Dashboard、GitHub 與 checkpoint 已有各自設計。
 - 既有 MCP 寫入工具（`session_send` 等）仍直接呼叫 service；它們受同一套資源政策約束，但不留 operation 紀錄。之後改為經 `operation_submit`。
 - `task.submit`／`pause`／`resume` 尚未包成 operation。
