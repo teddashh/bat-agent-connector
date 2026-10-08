@@ -68,6 +68,8 @@ snapshot（含 only=item）只觀測目前 configured hosts，其他選中資源
 host_configured=false，read-only／retain，沿用 OBSERVATION_UNAVAILABLE，不以 missing host 當 absent。
 依賴這些內容的 item 同樣保留；apply 不送 retained item 的任何 host call。同 preview 的 configured-host
 items 正常規劃。Host target 只有 config 與既有 resource history 都找不到時才回 UNKNOWN_HOST。
+歷史 host 判定同樣使用 _all 的 creation projection；integration.preview 的 prepare 已持久化但尚未寫出
+integration_previews 時，仍由該 intent 找回 area／temporary，不要求另一個成功 operation 或 registry row。
 Audit：_all 的 wt／registry loop 不再用 host 設定篩 identity；registry BAT ownership 的 HostConfig 查詢
 只決定目前能否證明 managed roots，不能隱藏 worktree／branch／carrier。Host 移除時不猜原 roots 或 live
 binding，仍列 OBSERVATION_UNAVAILABLE；selection 沒有 configured-host filter。
@@ -617,6 +619,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | multi-host apply 每 item 只讀自己的 host；E01/E02 | test_e01_multi_host_apply_observes_only_each_items_host（另一 host terminal read 永不回覆；healthy session／worktree／branch 均成功，unavailable 資源保留；只有初始 preview／全 plan 驗證付該 host deadline） |
 | removed host 的歷史仍可 preview／read，無 live call；E01/E02 | test_e01_removed_host_history_is_retained_without_live_calls（work-item initial／only snapshot、configured items apply 正常；SSH／terminal／runtime／guard audit；實際 retained rows 在 host 移除後列 unavailable） |
 | removed host 不漏 creation identities／branch／carrier；E01/E02／§23 inventory | test_e01_removed_host_keeps_every_creation_identity_and_apply_is_read_only（checkpoint／task／repair／registry 四種來源，work-item／checkpoint／integration／historical host targets，移除前後 ID 相同；每 item snapshot 與混合 host apply 無 removed-host client／SSH call，全部 retained；healthy session／worktree／branch 成功） |
+| 僅有失敗 prepare 的 removed host 仍可讀；E01/E02／§23 inventory | test_e01_removed_host_known_only_by_failed_prepare_remains_inspectable（真 Git area create 後中斷，無其他 history rows；host／integration target IDs 一致、全部 retain、零 BAT／SSH call，真正未知 host 仍 UNKNOWN_HOST） |
 | attachmentreplicas只豁免exact manifest／exacttemps | test_e01_attachment_replicas_are_removed_without_discard_scope、test_e01_edited_or_extra_replica_content_counts_as_uncommitted、test_e01_replicas_without_manifest_are_ordinary_content、test_e01_replica_anomalies_require_reviewed_discard（missing/link/hardlink/directory）、test_e01_replica_edit_after_preview_is_stale、test_e01_lost_replies_reconcile_each_cleanup_phase（discard.replica）、test_e01_exact_temporary_requires_creation_markers_and_never_sweeps、test_e01_empty_integration_temporary_has_exact_intent_and_no_restore_promise |
 | acceptedauthority由server記錄／public request retry／載體不被guard退休 | test_e01_accepted_authorization_is_server_recorded（HTTP 422、persisted actor/scopes/choices、同key retry）、test_e01_accepted_authority_survives_key_rotation_and_carrier_stays_usable |
 | migration原histories／DDL不占user_version／keep無sweep | test_cleanup_migration_is_atomic_additive_and_preserves_history（version 1與3、第二次open不變）、test_e01_keep_defaults_reject_purge_and_never_sweep_by_name |
