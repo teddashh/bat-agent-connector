@@ -6,6 +6,10 @@
 
 **Project page:** https://teddashh.github.io/bat-agent-connector/
 
+**Development direction:** [Tauri v2 product decisions](docs/product/realignment-v2.md) and
+[implementation status](docs/product/implementation-status.md). The desktop client will share the Dashboard
+frontend and the existing Python backend. Project Hub import is outside the v2 scope; project/work-item management remains.
+
 BAT (by [TonyQ / tony1223](https://github.com/tony1223)) is a terminal app that runs Claude Code and Codex agent
 sessions, grouped into workspaces, on your machines. It has a remote protocol (`bat-remote/v2`) that its own GUI and
 phone clients use. This project speaks that protocol so that *other* agents (Claude Code, Codex, Cursor, Hermes, or any
