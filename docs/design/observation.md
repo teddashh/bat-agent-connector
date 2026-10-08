@@ -20,6 +20,7 @@ Phase 1 規格已審查。Phase 2 分兩步：Part A（本次）實作伺服器�
 | Field freshness 事件修正 | `96a0b1c`（#35 的審查基準）。Session 值相同但 meta freshness 改變仍寫 update；不 rebase、不新增 event kind 或資料步驟。 |
 | Summary／unknown occurrence 修正 | `70f9bff`（#35 的審查基準）。遞迴摘要限制 reason 為固定 enum、移除其他 prose 入口；顯式 unknown occurrence 不以 migration 時間符合查詢。不 rebase、不新增資料步驟。 |
 | Worktree maker 一致性修正 | `e21d958`（#35 的審查基準）。Registry 身分與 ownership classifier 共用 connector predicate 與 creation-root walk，涵蓋 legacy batc/ branch；不 rebase、不新增資料步驟。 |
+| Creation-root carrier 修正 | `7cdf848`（#35 的審查基準）。Parent 只有在 child 共用 carrier 時才回溯；fallback 與 policy 共用同一 parent rule，main-checkout successor 不繼承舊 worktree。不 rebase、不新增資料步驟。 |
 | 計畫 | v1.0（2026-10-06）；以章節及驗收編號引用，不複製私有計畫。 |
 | BAT | `b7419892fbc9946799b64cca24c2ec8c7fa15c42`；不代表每台主機都已安裝此版，實際 `serverVersion` 另存於掃描證據。 |
 
@@ -59,21 +60,33 @@ Session 的 `resource_id` 沿用 `host/session_id`，`session_id` 是完整 BAT 
 
 Worktree 只有在 journal 或可信 registry 有明確建立 binding 時才建立讀模型。使用共享 `resource_ids.worktree_id(host, intent_type, intent_id, slot)`：將 `["worktree", host, intent_type, intent_id, slot]` 以 `json.dumps(sort_keys=True, ensure_ascii=False, separators=(",", ":"))` 編碼，再回 `wt_` 加 SHA-256 前 32 hex。Cleanup 使用同一個函式，先合併的包提供模組，另一包原樣引用。
 
-BAT-made worktree 的建立根節點由共用純函式 `resource_ids.registry_worktree_root(entries, host, session_id, lead_of=None)` 解析。依 failover_of／shared_worktree_from／lead_session_id 回溯；reviewer 缺 lead 時可用呼叫者已有的 lead_of(task_id) lookup，observation 使用 journal task 記錄。Registry 順序不影響不同 session 的回溯；缺 parent 停在最後已知 entry，cycle 為 unknown。`registry_worktree_intent()` 與 `resource_policy.worktree_maker()` 共用這個 walk；classifier 傳入同 host 的 registry entries，不發 host 呼叫。
+BAT-made worktree 的建立根節點由共用純函式 `resource_ids.registry_worktree_root(entries, host, session_id, lead_of=None)` 解析。每一跳先用 `registry_worktree_parent(entry, by_id, lead_of=None)` 確認共用 carrier，不能只憑 failover／reviewer 祖先就掛舊 worktree。`by_id` 限同 host；比對記錄的完整 path 字串，不用 cwd／branch 或相同目錄猜測。Registry 順序不影響不同 session 的回溯；缺 parent 停在最後已知 entry，cycle 為 unknown。`registry_worktree_intent()` 與 `resource_policy.worktree_maker()` 共用這個 walk；`registry_bindings()` 的 connector slot fallback 也用同一 parent rule，而非自己的 key list。不發 host 呼叫。
+
+| Parent 證據（依此順序） | 何時回溯 |
+|---|---|
+| `shares_worktree_with` | 明確共用的 carrier，直接找同 host 的 parent。若該 parent 缺失就停止，不改猜別的祖先。 |
+| `failover_of` | shares_worktree_with=failover_of 時已由上一列處理；否則只有 child 的非空 worktree_path 等於 parent 的 worktree_path 才回溯，兼容缺 sharing marker 的 row。Path 不同或 child 無 path 時，child 是自己的 root；不繼續改猜 lead。 |
+| `lead_session_id`／reviewer 的 task lead | 非空 child path 與 lead path 相等才回溯。Child 沒 path 時，必須由 task 記錄同時確認 lead session ID 與該 lead 的非空 path。Child 明存不同 path 就不回溯，即使 task path 符合也不覆蓋它。 |
+
+`lead_of(task_id)` 保持相容 ID-only callback；child 自有 path 時可用該 ID 找 lead 再比對 path。缺 child path 的例外需要 callback 回 `{session_id, worktree_path}`，且兩欄都吻合 parent。Observation 只讀同 host 的 tasks.session_id／external_worktree_path，沒有保存 task carrier 時保持 unknown，不把今天的 parent path 追認成 task 當年的 path。Production reviewer writer 本來會複製 lead path，這個例外只處理 task 已保存 carrier 的不完整 row。
+
+Git history 的 `bcf9745`（0.2.0）建立 lifecycle failover writer 時即加入 shares_worktree_with；此 repo 無更早「failover 已存在但尚未寫 marker」的 writer 證據，等 path 規則是對缺 marker 保存列的保守相容。已檢查全部可見 history：舊規格的非正式 parent key 只出現在 observation resolver／tests，沒有 production writer，因此移除這個 key，不再宣稱它是 legacy registry 契約。
 
 判定 maker 的唯一 predicate 是 `resource_ids.connector_made(entry)`：worktree_made_by=connector、checkpoint_id、integration_operation_id 任一存在，或 branch 以 batc/ 開頭，就屬 connector-made。兩個函式都在 creation root 判定，不能只讀 successor／reviewer 自己的新 row。若目前 row 另有 connector 證據但與 root 矛盾，也保留 connector 的保守判定：policy 不放寬既有 NOT_A_BAT_WORKTREE refusal，identity 不鑄 BAT ID。`resource_ids` 只 import 標準函式庫，不能 import registry／policy／其他套件模組，避免循環依賴。身分仍不是 ownership grant。
 
 | Registry 寫入形狀 | Marker 實際保留情形與規則 |
 |---|---|
 | `orchestrate.session_start` external worktree；`checkpoints.start_in_worktree` | Root 記 worktree_made_by=connector 與 branch；checkpoint／integration 再補各自 ID。 |
-| `lifecycle.session_failover` | 同 worktree successor 記 failover_of、shares_worktree_with，確認 start 後只複製 branch；不複製 maker／checkpoint／integration ID。須回溯 root。 |
-| `BatTaskAdapter.start` reviewer；`_restore_headless_lookup` | 記 lead_session_id 與 branch，未保證複製三個 explicit maker markers。缺明存 lead 的舊 reviewer 只有在 lead_of 證據可用時才繼續回溯。 |
+| `lifecycle.session_failover` | same_worktree=true 記 failover_of、shares_worktree_with，確認 start 後複製 worktree_path／branch；不複製 maker／checkpoint／integration ID。只有共用 carrier 才回溯 root。same_worktree=false 記 failover_of 但 sharing marker／worktree_path／branch 為 null，cwd 是 origin；沒有舊 worktree 身分。 |
+| `BatTaskAdapter.start` reviewer；`_restore_headless_lookup` | 複製 lead 的 worktree_path／branch，記 lead_session_id；未保證複製三個 explicit maker markers。缺明存 lead 的 reviewer 以 lead_of 找 lead，仍驗證 carrier。缺 path 時需要 task 的 lead/path 雙重證據。 |
 | `registry.claim_warm` | 更新 task_id／title／warm_from_task_id／updated_at；同 row 的 created_at、path、branch 與全部 maker markers 保留。 |
-| `shared_worktree_from` 舊／輸入 row | 讀模型支援此 parent，但目前 production writer 不保證 marker 複製；使用同一 root walk。 |
+| `shares_worktree_with` | 真正的 registry sharing key；lifecycle 寫入，registry／task_bat 驗證，folder_owner 也讀取它。身分解析使用同一 carrier 指標。 |
 
 修正前的兩種不一致：legacy batc/ root 的 policy 判為 connector，identity 卻鑄 registry ID；另有 explicit connector marker、branch 非 batc/ 的 root，其 markerless successor／reviewer 可被 policy 判為 BAT，而 identity 已排除 registry intent。修正後，已證明、有 created_at／worktree_path 且無 cycle 的 root 及上述後繼形狀都用同一 maker 證據。缺 created_at／path 或 cycle 不提供 BAT creation intent，不能把這個 None 當 connector ownership 證明。
 
 根節點屬 connector-made 或缺 created_at／path 時，`registry_worktree_intent()` 回 None；created_at 使用載入 JSON 值的 str()，不重新格式化。Legacy 只有 batc/ branch 的 row 也不鑄 registry ID。`registry_bindings()` 保留其已 journaled 的 checkpoint／integration／task slot，或繼承 parent 的 slot；沒有 slot 就沒有 wt_ ID，保持 unknown，不冒充 BAT 建立。Observation／cleanup 共用純函式解析，其他建立 intent 沿用既有 journal binding。
+
+不共用 carrier 的 child 使用自己的 creation root；有自己的 worktree_path／created_at 時可有自己的 registry intent，沒有 path 就沒有 worktree ID。政策 maker 同樣不繼承舊 carrier 的 maker；其既有預設 bat 值不是 BAT worktree 或寫入權限的證明。BAT worktree 三種 action 在沒有記錄 worktree_path 時明確回 NOT_A_BAT_WORKTREE，包含 cwd 位於 managed root 的非共用 successor；人工 checkout 仍先回 WORKDIR_NOT_MANAGED。這比修正前更嚴，沒有新的 rehydrate／merge／remove grant，也不限制原本可在 managed root 執行的 session actions。
 
 | 建立來源 | intent_type | intent_id | slot |
 |---|---|---|---|
@@ -82,7 +95,7 @@ BAT-made worktree 的建立根節點由共用純函式 `resource_ids.registry_wo
 | Task external worktree | `task` | task_id | `external_worktree` |
 | Connector session 的 BAT-made worktree | `registry` | `session_id@created_at`（created_at 完全沿用 registry 儲存值） | `worktree` |
 
-Warm reuse、reviewer、failover successor 或後續 continue 指回首次建立的 slot，取得相同 ID；同 path 的新 creation intent 取得新 ID。Worktree 身分表保存這個 ID 及 binding/path/branch 證據。只有 cwd／branch 或無法證明建立 slot 時不猜 ID，不發送 rehydrate；這是觀測身分，不是 ownership grant。
+Warm reuse、共用 carrier 的 reviewer／failover successor 或後續 continue 指回首次建立的 slot，取得相同 ID；同 path 的新 creation intent 取得新 ID。Worktree 身分表保存這個 ID 及 binding/path/branch 證據。只有 cwd／branch 或無法證明建立 slot 時不猜 ID，不發送 rehydrate；這是觀測身分，不是 ownership grant。
 
 未被 inventory 看過但已有 command／checkpoint／run 證據的 session 也可取得詳情、關係及 history：`observation: unknown`、`has_tab: null`，並保留真實 ID。未知完整 ID 回 404；已知而 gone 的 ID 仍回 200。Registry 所知但尚未成功列舉者也保留 journal identity，未觀測的欄位維持 null。人工無 tab session 若從未被 BAT 可讀介面或 journal 記錄過，列入 outside scan，不能宣稱已發現。
 
@@ -386,6 +399,8 @@ Registry identity 合併結果以 canonical JSON 比較，未變更不執行 ups
 
 Worktree maker 修正也沿用資料步驟 2：binding seed 重播同一套 connector slot／session binding 證據；後續 registry 掃描使用同一純 predicate／root walk，legacy batc/ 不覆寫 seed 的 connector slot。沒有 slot 不補 registry intent。#35 尚未合併，沒有已部署 journal 保存本輪修正前的錯誤 BAT IDs，因此不新增資料步驟、不重跑已完成的 backfill；正式 worktree_id hash 保持逐字不變。
 
+Carrier 修正同樣不占新的資料步驟：registry binding 的 live writes／fallback 先通過共用 parent rule；步驟 2 以同一 binding 投影重播已證明的 carrier 事實，之後的 registry refresh 也不為非共用 successor 補掛舊 ID。版本 1 regression 包含 BAT root 與 connector slot root；child 無 path 時，重播後仍無舊 worktree binding／history／relations。Branch 尚未合併，不需要修補已部署的錯誤 seed；projection failure 的 savepoint／gap flag 規則不變。
+
 Journal 的 `LATEST_DATA_STEP` 記整套 journal 最新配發的資料步驟，現在為 2；新增資料步驟時更新這個常數，個別 backfill 保持自己的版本 gate。整體 journal 開啟結果為 max(原版本, LATEST_DATA_STEP)，不降低較新版本；delivery DDL 的相容性測試使用這個常數判斷整體版本，不把其他包的資料步驟誤判為 delivery DDL 改版本。
 
 版本 1 journal 已有 delivery 的 DDL 與資料時，資料步驟 2 也涵蓋 pr_merge_previews／pr_metadata_settlements；沒有對應事件才補 history.backfilled，以表名/PK 作唯一來源 key。保留原 preview.created_at／settlement.settled_at、摘要及正式 operation refs；原 delivery tables/documents 不改寫。Scope-read throttle 表不是 immutable 歷史，不把 pr_merge_scope_reads 的覆寫列偽裝為每次讀取事件。回填仍不進預設 live feed。
@@ -437,9 +452,12 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B01、B03；§08、§10、§11 | `test_b01_worktree_relations_exclude_late_bindings_from_existing_cursor`、`test_b01_worktree_moves_preserve_relation_ranges_across_pages`：舊 cursor 不受晚 binding 或後續 move 影響；fresh read 看新 binding；A 保留舊 relations/commands，B 只收 move 後範圍，跨頁無重複。`test_b03_worktree_binding_backfill_matches_live_and_reopens_without_writes`：版本 1 以資料步驟 2 seed，明確原 seq 與 live projection 相同；重開不改 rows/head/version。`test_b03_worktree_binding_projection_failure_preserves_core_event`：move 投影失敗回滾新列與舊 end，core row/錯誤 flag 保留。 |
 | B03；§08、§11 | `test_b03_saved_worktree_binding_uses_backfill_link_seq_without_inventing_earlier_range`：僅有目前 binding 時，以同一 backfill event/link seq 作 start；排除其前的 closed relation/commands，不推測舊事件歸屬，重開零寫入。 |
 | B01；§08 | `tests/test_resource_ids.py`：共用 root resolver 的 failover chain、reviewer lookup、warm reuse、逆序 registry、缺 parent、cycle、其他建立 intent 及原 JSON created_at 格式。 |
-| B01；§06、§08 | `test_b01_registry_identity_and_policy_agree_on_creation_root`：BAT、maker flag、checkpoint、integration、legacy batc/ 五種 root，各配 failover、warm reuse、reviewer（明存 lead 或 lead_of）、shared row，身份與 maker 一致；root 在後的 registry 也一致。`test_b01_warm_claim_keeps_creation_markers_and_identity`：真正 claim_warm 保留全部 markers／created_at／path 與 intent。 |
+| B01；§06、§08 | `test_b01_registry_identity_and_policy_agree_on_creation_root`：BAT、maker flag、checkpoint、integration、legacy batc/ 五種 root，各配 explicit-sharing failover、缺 marker 的等 path legacy failover、非共用 failover、warm reuse、reviewer（明存 lead 或 lead_of）、shares_worktree_with row，身分與 maker 使用同一有效 root。無 path 的非共用 child 為自己的 root，沒有 intent，maker 不繼承舊值。`test_b01_warm_claim_keeps_creation_markers_and_identity`：真正 claim_warm 保留全部 markers／created_at／path 與 intent。 |
 | B01、B03；§08、§11 | `test_b01_b03_legacy_connector_branch_keeps_journaled_slot_and_history`：legacy batc/ lead／reviewer 保留 task 或 checkpoint slot，session history／relations 接同 worktree；live、版本 1 step 2 replay、重開／同資料 poll 零 writes。`test_b01_legacy_connector_branch_without_slot_has_no_worktree_identity`：兩條路徑均不鑄 BAT ID。 |
 | B01、D05；§06、§08 | `test_connector_creation_root_refuses_bat_actions_when_child_loses_markers`：markerless failover／reviewer／shared row 仍回 NOT_A_BAT_WORKTREE，無 BAT write frames。`test_b01_current_connector_evidence_preserves_policy_refusal_and_has_no_bat_identity`：目前 row 與 root 證據矛盾仍不放寬。既有 policy classification 與 checkpoint BAT action refusal 測試全部保留。 |
+| B01、B03；§08、§11 | `test_b01_b03_nonsharing_failover_never_links_old_worktree`：main-checkout successor 的 failover_of 保留，但無 sharing marker／path；BAT／connector root 各驗證 live 與版本 1 step 2 replay，無舊 binding、自己的事件不進舊 worktree history／relations，重開零 writes。`test_b01_nonsharing_failover_has_only_its_own_creation_intent`：不同 path 的 child 用自己的 root／intent；無 path 時不猜 ID。 |
+| B01；§08 | `test_b01_reviewer_root_requires_matching_carrier_or_recorded_task_path`、`test_b01_reviewer_task_path_must_name_the_same_lead`、`test_b01_registry_reviewer_without_path_requires_recorded_task_carrier`：明存／lookup lead、相等／不同／缺 path，僅 task 保存同 lead 同 path 才補缺 path 的 reviewer；ID-only callback 不足以補 path。純 walk 與 connector-slot fallback 一致。 |
+| B01、D05；§06、§08 | `test_nonsharing_failover_without_worktree_never_gets_bat_worktree_grant`：BAT／connector root 後的非共用 successor，即使 origin 在 managed root、force options 全開也拒 BAT actions；沒有 rehydrate／merge／remove frame。 |
 | B01、B03；§08、§11 | `test_b01_b03_checkpoint_source_run_steps_and_worktree_history`、`test_b01_b03_receipt_versions_are_fixed_at_the_writer_transition`：真實 temp Git checkpoint/run 及 steps 的多資源 timeline 去重；receipt 在既有 writer 轉換時保存各版本，不以新結果改舊事件。 |
 | B01、B02；§10、§11 | `test_b01_history_as_of_late_binding_and_invalid_cursors`：history as_of 同時限制 event/linked_at；晚 binding 不進已開 snapshot，kind/order/resource/time 游標契約。 |
 | B02；§11 | `test_b02_two_hosts_one_offline_and_scope_change`、`test_b02_null_workspace_preserves_missing_counts_even_with_registry`：另一 host 持續成功、離線保留舊值；scope 改綁不再 host I/O；移除 host 仍可讀 history；壞 workspace 不算完整列舉。 |

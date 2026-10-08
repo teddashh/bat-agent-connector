@@ -228,17 +228,40 @@ async def test_connector_worktree_session_is_writable(fleet_factory, mock):
 
 @pytest.mark.parametrize("marker", [{"worktree_made_by": "connector"}, {"checkpoint_id": "cp-fixture"},
                                   {"integration_operation_id": "op-fixture"}, {"branch": "batc/task-fixture"}])
-@pytest.mark.parametrize("link", ["failover_of", "lead_session_id", "shared_worktree_from"])
+@pytest.mark.parametrize("link", ["failover_of", "lead_session_id", "shares_worktree_with"])
 async def test_connector_creation_root_refuses_bat_actions_when_child_loses_markers(fleet_factory, mock, marker, link):
     """B01/D05, §06/§08: a markerless successor/reviewer/shared row cannot reclassify an SSH worktree."""
     root = add_managed_wt(mock, "root-0001", **marker)
-    sid = add_managed_wt(mock, "child-0002", **{link: root}, shares_worktree_with=root)
+    sid = add_managed_wt(mock, "child-0002", **{link: root})
     f = all_tiers(fleet_factory)
     policy = await resource_policy.session_policy(f, "h1", sid)
     assert policy["worktree_made_by"] == "connector"
     assert policy["actions"]["worktree.remove"]["code"] == "NOT_A_BAT_WORKTREE"
     with pytest.raises(ResourceReadOnly, match="NOT_A_BAT_WORKTREE"):
         await orchestrate.worktree_remove(f, "h1", sid, confirm=True, delete_branch=True)
+    assert write_frames(mock) == []
+    await f.close()
+
+
+@pytest.mark.parametrize("managed_checkout", [False, True])
+@pytest.mark.parametrize("parent_maker", ["bat", "connector"])
+async def test_nonsharing_failover_without_worktree_never_gets_bat_worktree_grant(
+        fleet_factory, mock, managed_checkout, parent_maker):
+    """B01/D05, §06/§08: losing the predecessor's carrier cannot authorize main-checkout worktree actions."""
+    root = add_managed_wt(mock, "root-0001", worktree_made_by=parent_maker)
+    sid = "child-0002"
+    adopt(sid, cwd="/srv/demo", origin_cwd="/srv/demo", workspace_id="ws-1", agent_preset="codex-agent",
+          failover_of=root, shares_worktree_with=None, worktree_path=None, branch=None)
+    mock.metas[sid] = {"cwd": "/srv/demo", "isStreaming": False}
+    f = all_tiers(fleet_factory, managed_roots=["/srv/demo"] if managed_checkout else [])
+    policy = await resource_policy.session_policy(f, "h1", sid)
+    assert policy["worktree_made_by"] == "bat"  # No longer inherits the old carrier's maker.
+    code = "NOT_A_BAT_WORKTREE" if managed_checkout else "WORKDIR_NOT_MANAGED"
+    for action in resource_policy.BAT_WORKTREE_ACTIONS:
+        assert policy["actions"][action]["code"] == code
+    with pytest.raises(ResourceReadOnly, match=code):
+        await orchestrate.worktree_remove(f, "h1", sid, confirm=True, delete_branch=True,
+                                          allow_unmerged=True, discard_uncommitted=True)
     assert write_frames(mock) == []
     await f.close()
 

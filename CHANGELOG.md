@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- Observation creation-root carriers ([design](docs/design/observation.md), plan §06/§08/§11, B01/B03/D05):
+  follow explicit shares_worktree_with, equal-path legacy failovers and proven reviewer carriers through one
+  parent rule. Remove the unwritten sharing key; non-sharing successors keep their own root and never inherit
+  old worktree identity/history, live or in step-2 replay. Require task lead/path evidence for pathless reviewers;
+  refuse BAT worktree actions without a recorded worktree even in managed roots. No new data step.
+
 - Observation worktree maker agreement ([design](docs/design/observation.md), plan §06/§08/§11, B01/B03/D05):
   share the connector creation predicate and registry root walk with the ownership classifier, including legacy
   batc/ branches. Retain journaled connector slots or parent slots instead of minting BAT registry IDs; missing
