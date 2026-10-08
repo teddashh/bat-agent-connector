@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import threading
 import uuid as uuidlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +21,8 @@ class FakeGitHub:
         self.runs: dict[int, dict] = {}
         self.jobs: dict[int, list[dict]] = {}
         self.next_run_id = 9000
+        # number -> path of a bare repository: the PR head follows that branch, as on GitHub after a push
+        self.pr_remotes: dict[int, str] = {}
         # behaviour switches
         self.merge_mode = "async"  # async | enqueue | fail_500 | fail_500_but_merged | conflict_409_same | conflict_409_other
         self.dispatch_mode = "run_id"  # run_id | no_content | fail_500_but_started
@@ -46,6 +49,18 @@ class FakeGitHub:
               "html_url": f"https://github.example/o/r/pull/{number}", **fields}
         self.pulls[number] = pr
         return pr
+
+    def track_remote(self, number: int, bare_repo: str) -> None:
+        """Make PR ``number``'s head follow its head ref in a local bare repository (a stand-in for the remote)."""
+        self.pr_remotes[number] = bare_repo
+
+    def _live_head(self, pr: dict) -> None:
+        bare = self.pr_remotes.get(pr["number"])
+        if bare:
+            out = subprocess.run(["git", "-C", bare, "rev-parse", "--verify", "-q", "refs/heads/" + pr["head"]["ref"]],
+                                 capture_output=True, text=True).stdout.strip()
+            if out:
+                pr["head"]["sha"] = out
 
     def merge(self, number: int, sha: str = "9" * 40) -> None:
         self.pulls[number].update(merged=True, state="closed", merge_commit_sha=sha)
@@ -92,6 +107,8 @@ class FakeGitHub:
                 m = re.fullmatch(r"/repos/o/r/pulls/(\d+)", path)
                 if m and method == "GET":
                     pr = fake.pulls.get(int(m.group(1)))
+                    if pr:
+                        fake._live_head(pr)
                     return self._send(200, pr) if pr else self._send(404, {"message": "Not Found"})
                 m = re.fullmatch(r"/repos/o/r/pulls/(\d+)/merge-async", path)
                 if m and method == "PUT":
