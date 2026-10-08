@@ -2,6 +2,8 @@
 
 ## Next release (unreleased)
 
+- Duplicate registry identities discovered during capacity bookkeeping now retain the confirmed stop or reclaim
+  result and report `REGISTRY_DUPLICATE_SESSION` as a capacity refusal, without changing the invalid registry.
 - Cleanup uses Task Service's shared ownership lookup for preview, locked mutation checks and capacity retirement.
   Historical task start/branch bindings remain protected when a registry tag is missing. Cleanup settlement tests
   now wait for persisted operation outcomes; existing atomic cleanup transactions and early-refusal release rules
