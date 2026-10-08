@@ -311,7 +311,7 @@ class ArtifactStore:
             finally:
                 os.close(fd)
             with os.fdopen(raw_fd, "rb") as file:
-                data = file.read(self.settings.max_file_bytes + 1)
+                data = file.read(row["size_bytes"] + 1)
         except (OSError, OperationError):
             raise OperationError("ARTIFACT_CONTENT_UNAVAILABLE", "artifact content is unavailable", 409) from None
         if row["state"] != "ready" or (size, digest) != (row["size_bytes"], row["digest"]) or hashlib.sha256(data).hexdigest() != digest:
