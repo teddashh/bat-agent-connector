@@ -116,7 +116,7 @@ Canonical workflow 是 `2026-10-08.4`；S 列 `.3` 僅描述獨立 PR 的歷史 
 | T09 Client 更新／睡眠／crash／切網路 | U `desktop/tests/recovery.spec.ts`／`account-switch.spec.ts`／`dashboard.spec.ts` 的 lost reply/drafts；M durable operations。 | 真 Windows suspend/network/crash 與安裝更新；原 ID 查回、中央 task 不停。簽章 updater 尚未提供。 |
 | T10 Tailscale 未登入、中央停止、固定 bootstrap | K 分層 readiness；U/F 顯示連線／配置失敗，native 不自動建中央 journal。 | **Tauri 登入/固定 ensure bootstrap 流程尚未交付**；先配置明確 recipe，有限恢復，零第二 owner／空 journal。 |
 | T11 帳號／backend 切換與 scope 隔離 | U `test_dashboard_sync.py` T11、`desktop/tests/account-switch.spec.ts`；F local DTO 不含中央 token；S principal-only。 | **OS 保護 credential enrollment/storage 尚未實作**；目前啟動環境變數→Rust memory 是暫時 adapter。真切換/重啟隔離與 Fleet observe 身分待驗。 |
-| T12 Canonical desktop/browser、build/update/signature | U `desktop/src`＋`build:all`／`check:browser`、locked dependencies；S generator/version checks；F packaging CI。 | 最終單一整合 source/pins、可重建產物、簽章與更新相容／回退；不能把 unsigned NSIS/deb 或兩個分支各綠當正式發行。 |
+| T12 Canonical desktop/browser、build/update/signature | U `desktop/src`＋`build:all`／`check:browser`、locked dependencies；S generator/version checks；F packaging CI。 | 最終單一整合 source/pins、可重建產物、簽章與更新相容／回退；不能把 unsigned NSIS/deb 或兩個分支各綠當正式發行。另有 [Linux GLib advisory gate #53](https://github.com/teddashh/bat-agent-connector/issues/53)，須已審修正後才作 Linux production distribution。 |
 
 ## 同一候選版本的可重現驗收
 

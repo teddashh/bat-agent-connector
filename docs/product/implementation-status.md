@@ -20,6 +20,7 @@
 - 獨立審查修正了 artifact scalar admission、deployment cursor bounds、interrupt history prefix binding、capture replay/control credential binding、installer YAML 與 concurrent config preservation。
   先前 full/CI failures 均保留；#48/#49/#50 的舊 fixture failures 已由 #51 的 canonical-source/data-step 修正及整組 CI 覆蓋，未把舊紅燈改稱綠燈。
 - #38 早期本機 3.10 full 曾為 1834 passed/33 skipped/1 個 60 秒 settlement timeout；journal 顯示持續進展，原碼單測 2.52 秒重跑通過。後續 exact-head 四版 CI 各 1835/33 通過；不把單測 retry 當 full。
+- 合併後新增 [Linux GLib release gate #53](https://github.com/teddashh/bat-agent-connector/issues/53)：鎖定的 `glib 0.18.5` 受 [RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429.html) 影響，目前 GTK/WebKit 0.18 相依沒有可直接更新的已發布修正版。Windows locked graph 不含該依賴；Linux production distribution 仍須已審修正。CI 綠燈不消除此 advisory，Dependabot 保持開啟。
 - GitHub Codex bot 後期額度用盡，後續使用獨立本機 Codex peer review，沒有冒稱新 bot verdict。
   **沒有 live host/provider writes、主機安裝或 Windows installed acceptance；M1/M2/M3 與正式 v1 尚未完成。**
 
