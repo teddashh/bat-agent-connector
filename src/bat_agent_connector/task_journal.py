@@ -323,7 +323,7 @@ class Journal:
                     task_event_id,created_at) SELECT 'task',task_id,'task.'||kind,body,event_id,created_at
                     FROM events ORDER BY event_id""")
                 self.db.execute("PRAGMA user_version=1")
-        # Delivery A. Idempotent DDL: renumber this step at rebase without changing stored previews.
+        # Delivery A. Idempotent DDL runs on every open and takes no data-migration version.
         with self.tx():
             self.db.execute("""CREATE TABLE IF NOT EXISTS pr_merge_previews (
                 preview_id TEXT PRIMARY KEY, repository TEXT NOT NULL, pull_number INTEGER NOT NULL,
@@ -331,9 +331,7 @@ class Journal:
             )""")
             self.db.execute("""CREATE INDEX IF NOT EXISTS pr_merge_previews_pr
                 ON pr_merge_previews(repository, pull_number, created_at)""")
-            if self.db.execute("PRAGMA user_version").fetchone()[0] < 2:
-                self.db.execute("PRAGMA user_version=2")
-        # Delivery A review fixes. Additive, idempotent; renumber only at rebase if needed.
+        # Delivery A review fixes. These tables follow the same idempotent DDL rule.
         with self.tx():
             self.db.execute("""CREATE TABLE IF NOT EXISTS pr_metadata_settlements (
                 operation_id TEXT PRIMARY KEY, document TEXT NOT NULL
@@ -343,8 +341,6 @@ class Journal:
                 preview_id TEXT NOT NULL, checked_at REAL NOT NULL,
                 PRIMARY KEY(repository, pull_number, method)
             )""")
-            if self.db.execute("PRAGMA user_version").fetchone()[0] < 3:
-                self.db.execute("PRAGMA user_version=3")
 
     def _drop_legacy_outbox(self):
         """Remove the retired chat outbox so no historical event can ever be published.

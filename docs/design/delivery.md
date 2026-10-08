@@ -6,9 +6,11 @@
 
 Part A review follow-up 以 `85601e2f6a36517ba559705e9e360763e7c4d63b` 為固定來源：修正 metadata 無落地的期限、預覽成本／保留、submit 前檢查位置與最後合併歸因；保留已批准的 action／digest／scope 與 Part B 邊界。
 
-本輪 rebase 的固定來源為 main `22da8d8eaa1835724674f5e595995d81c12dde5c`（#33），Part A replay 後為 `de82a18`；合併 token 輪替、ambiguous transport／rate limit／204 run lookup 與 sent-write 讀取恢復。Part A 的唯讀 steps 不作為「已送出寫入」證據；migration 保持 2／3，DDL 可改號、不改資料。
+本輪 rebase 的固定來源為 main `22da8d8eaa1835724674f5e595995d81c12dde5c`（#33），Part A replay 後為 `de82a18`；合併 token 輪替、ambiguous transport／rate limit／204 run lookup 與 sent-write 讀取恢復。Part A 的唯讀 steps 不作為「已送出寫入」證據；Delivery 建表／索引使用每次 open 都執行的冪等 DDL，不佔 user_version。
 
 PR #34 Codex review follow-up 以 `04bdb75` 為固定來源；補上 verify 時新 native stack 的拒絕與 unresolved metadata 第三種內容的 settlement，沿用已批准的 action／receipt／恢復路徑。
+
+Journal DDL follow-up 以 `3e038c5` 為固定來源；移除純 DDL 的 user_version stamp，保留交易與既有資料回填，依共用 journal 規則區分 schema 與一次性資料步驟。
 
 ## 固定來源版本
 
@@ -277,7 +279,7 @@ Artifact rollback 必須配置 artifact_id／digest inputs；一般 start 仍選
 
 ## Part B（第二步）：journal／desired version／順序（D05）
 
-同一 Journal 的 additive migration。Part A 初版加 pr_merge_previews，起點 user_version=1，使用 2；review follow-up 使用下一空號 3 加 pr_metadata_settlements／pr_merge_scope_reads。DDL 冪等、column adds 先查存在，可在 rebase 時只重編 migration 編號、不改資料。Part B 開始時讀 origin/main 的 next free number，加入部署表；完成交易才升版，不回退 user_version。沒有新 tasks authority。
+同一 Journal 的 schema 使用冪等 DDL：CREATE TABLE／INDEX IF NOT EXISTS；column adds 先以 PRAGMA table_info 查存在。每次 open 都執行，不讀取或寫入 PRAGMA user_version。Part A 的 pr_merge_previews、pr_metadata_settlements、pr_merge_scope_reads 與 preview index 沿用各自交易；Part B 的部署表／索引／欄位亦遵循同一規則，不取得版本號。user_version 只留給一次性資料回填／重寫；若之後確實需要資料步驟，先向 orchestrator 申請分配號碼，不自行選號。沒有新 tasks authority。
 
 | 新表 | 欄位／約束 |
 |---|---|
@@ -403,7 +405,7 @@ Part A 已實作下列 tests；Part B 列為第二步的 test plan。既有負�
 | C05、§16 | `test_c05_base_changed_before_submit_has_diff_and_zero_put`；`test_c05_queue_newer_base_verifies_actual_merge`（merge／squash）；`test_c05_newer_base_combined_deploy_uses_actual_sha`；`test_c05_rebase_verifies_reviewed_head_and_actual_destination`；`test_c05_merge_restart_preserves_actual_sha_without_attribution`；`test_c05_wrong_merge_parent_keeps_receipt_and_stops_deploy`；`test_merge_preview_expiry_only_before_first_submit`；`test_c05_merge_verification_intent_precedes_reads_and_resume_is_read_only` |
 | §16 stack、C04／C05 | `test_c04_native_stack_and_branch_chain_are_listed_and_refused`、`test_c04_native_bottom_lists_upper_rebase_and_refuses`；`test_c04_indirect_merge_differs_by_method_and_shared_ancestor`；`test_c04_complete_compare_pagination_over_250_commits`、`test_c04_paginated_pr_list_finds_late_indirect_candidate`；`test_c04_scope_changes_or_missing_pages_never_submit`；`test_c04_stack_read_errors_are_not_empty_membership`；`test_c05_swept_downstack_fails_verification_and_never_dispatches`；`test_c05_new_stack_during_acceptance_never_dispatches`（list 的 merged_at／秒級時間、無 merged boolean）；`test_c05_independently_merged_candidate_on_new_base_is_allowed` |
 | C07、§09／§15 | `test_c07_metadata_integrate_scope_opt_in_and_fields`；`test_c07_delivery_transports_share_actions_and_principals`（真 HTTP／MCP／CLI，同 actor/key 回同 operation、scope 不借 Dashboard、combined capabilities）；`test_c07_delivery_wrappers_require_confirmation_and_token`（confirm／token／read_only）；既有 `test_merge_admission` |
-| §09／§28 migration | `test_part_a_preview_migration_reopens_without_data_change`：version 1／2／3／較高版本重開、資料保留；既有 task event backfill test 保留。Part A 不呼叫 BAT／SSH Git mutation |
+| §09／§28 journal schema | `test_part_a_preview_migration_reopens_without_data_change`：version 1／8 缺表的 journal 都補齊三表／index 並保留原號碼；第二次 open 的 schema 不變、preview row 完整保留。既有 task event backfill test 保留。Part A 不呼叫 BAT／SSH Git mutation |
 
 Review follow-up 的新增回歸：
 
