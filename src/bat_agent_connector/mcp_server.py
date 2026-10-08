@@ -22,7 +22,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import ToolAnnotations
 
-from . import __version__, lifecycle, orchestrate, pr_delivery, resource_policy, service, triage
+from . import __version__, deployment, lifecycle, orchestrate, pr_delivery, resource_policy, service, triage
 from .config import Config, load_config
 from .errors import BatError, WriteRefused
 from .fleet import Fleet
@@ -51,6 +51,7 @@ READ_TOOLS = [
     "operations_list",
     "github_pr_preview",
     "github_merge_preview_get",
+    "deployment_preview", "deployment_status", "deployments_list", "deployment_environment_get",
     "checkpoints_list",
     "checkpoint_preview",
     "integration_candidates",
@@ -63,7 +64,8 @@ READ_TOOLS = [
 ]
 # Registered unless --read-only: they act as BATC_API_TOKEN's principal, whose scopes decide what is allowed.
 OPERATION_TOOLS = ["operation_submit", "operation_cancel", "operation_resume", "checkpoint_create",
-                   "work_continue_from_checkpoint", "artifact_upload", "cleanup_apply", "github_pr_update", "github_pr_merge"]
+                   "work_continue_from_checkpoint", "artifact_upload", "cleanup_apply", "github_pr_update", "github_pr_merge",
+                   "deployment_start", "deployment_retry", "deployment_rollback"]
 WRITE_TOOLS = [
     "session_send",
     "session_continue",
@@ -407,6 +409,24 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
         """Read a saved mpv_ merge preview without refreshing its fixed source versions or expiry."""
         return await daemon("github_merge_preview_get", preview_id=preview_id)
 
+    async def deployment_preview(recipe: str) -> dict[str, Any]:
+        """Read recipe digest, environment generation, desired/current evidence and rollback limits.
+        Missing verification disables deploys. Review these preconditions before a deployment write."""
+        return await daemon("deployment_preview", recipe=recipe)
+
+    async def deployment_status(deployment_id: str) -> dict[str, Any]:
+        """Read a saved deployment's identity, operation/run, evidence, state and rollback readiness.
+        History remains readable offline; deleting a record never rolls back the environment."""
+        return await daemon("deployment_status", deployment_id=deployment_id)
+
+    async def deployments_list(recipe: str, cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
+        """Saved deployment history, newest first, with a keyset cursor (limit 1..200). No provider write."""
+        return await daemon("deployments_list", recipe=recipe, cursor=cursor, limit=limit)
+
+    async def deployment_environment_get(recipe: str) -> dict[str, Any]:
+        """Read desired generation, verified current/last version, observed evidence, slot and drift attention."""
+        return await daemon("deployment_environment_get", recipe=recipe)
+
     async def checkpoints_list(host: str | None = None, session_id: str | None = None,
                                checkpoint_id: str | None = None, limit: int = 20) -> dict[str, Any]:
         """Checkpoints of a session (its commit, branch, uncommitted-change count) or one checkpoint with its
@@ -498,10 +518,11 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
         return await cleanup_read(read_path("tombstones", query=query, original_id=original_id,
             host=host, work_item_id=work_item_id, kind=kind, limit=limit, cursor=cursor))
 
-    for fn in (capabilities_get, inventory_sessions, inventory_hosts, inventory_session, inventory_worktree, resource_history, resource_relations, events_list, operation_get, operations_list,
-               github_pr_preview, github_merge_preview_get, checkpoints_list, checkpoint_preview, integration_candidates, integration_get,
-               integrations_list, projects_list, project_get, work_items_list, work_item_get,
-               cleanup_preview, cleanup_retained, cleanup_tombstones, artifacts_list, artifact_get):
+    for fn in (capabilities_get, inventory_sessions, inventory_hosts, inventory_session, inventory_worktree,
+               resource_history, resource_relations, events_list, operation_get, operations_list,
+               github_pr_preview, github_merge_preview_get, deployment_preview, deployment_status, deployments_list,
+               deployment_environment_get, checkpoints_list, checkpoint_preview, integration_candidates, integration_get,
+               integrations_list, projects_list, project_get, work_items_list, work_item_get, artifacts_list, artifact_get, cleanup_preview, cleanup_retained, cleanup_tombstones):
         mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
 
     if not read_only and (principal_only or fleet.any_orchestrate):
@@ -659,6 +680,7 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
                                           idempotency_key=idempotency_key, wait_s=wait_s)
 
         async def github_pr_merge(preview_id: str, idempotency_key: str, recipe: str | None = None,
+                                  expected_environment_generation: int | None = None, expected_recipe_digest: str | None = None,
                                   wait_s: float = 10, confirm: bool = False) -> dict[str, Any]:
             """WRITE (merge; deploy too for a recipe). Merge the immutable reviewed mpv_ preview. An old head
             alone is insufficient. Stacks/expanded scope are refused; queues wait, then verify the actual merged
@@ -666,8 +688,42 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             if not confirm or not os.environ.get("BATC_API_TOKEN"):
                 return await principal_daemon("op_submit", confirm)  # shared confirmation/token errors
             doc = (await daemon("github_merge_preview_get", preview_id=preview_id))["preview"]
-            return await principal_daemon("op_submit", confirm, **pr_delivery.merge_envelope(doc, recipe=recipe),
+            envelope = pr_delivery.merge_envelope(doc, recipe=recipe)
+            if recipe:
+                envelope["preconditions"].update(expected_environment_generation=expected_environment_generation,
+                                                  expected_recipe_digest=expected_recipe_digest)
+            return await principal_daemon("op_submit", confirm, **envelope,
                                           idempotency_key=idempotency_key, wait_s=wait_s)
+
+        async def deployment_start(recipe: str, source_sha: str, expected_environment_generation: int,
+                                    expected_recipe_digest: str, idempotency_key: str, wait_s: float = 10,
+                                    confirm: bool = False) -> dict[str, Any]:
+            """WRITE (deploy). Deploy a reviewed fixed source on the recipe ref; pass deployment_preview's
+            generation/digest. Job success alone is insufficient: the runtime check must pass. confirm=true."""
+            return await principal_daemon("op_submit", confirm, action="deployment.start", target={"recipe": recipe},
+                params={"source_sha": source_sha}, preconditions={"expected_environment_generation": expected_environment_generation,
+                "expected_recipe_digest": expected_recipe_digest}, idempotency_key=idempotency_key, wait_s=wait_s)
+
+        async def deployment_retry(deployment_id: str, expected_environment_generation: int,
+                                   expected_recipe_digest: str, idempotency_key: str, wait_s: float = 10,
+                                   confirm: bool = False) -> dict[str, Any]:
+            """WRITE (deploy). Start deployment.start with the saved identity, new key and latest reviewed
+            generation/digest. Never merges again or switches to main/latest. Requires confirm=true."""
+            if not confirm or not os.environ.get("BATC_API_TOKEN"):
+                return await principal_daemon("op_submit", confirm)
+            saved = (await daemon("deployment_status", deployment_id=deployment_id))["deployment"]
+            pre = {"expected_environment_generation": expected_environment_generation, "expected_recipe_digest": expected_recipe_digest}
+            return await principal_daemon("op_submit", confirm, **deployment.retry_envelope(saved, pre),
+                                          idempotency_key=idempotency_key, wait_s=wait_s)
+
+        async def deployment_rollback(recipe: str, deployment_id: str, expected_environment_generation: int,
+                                      expected_recipe_digest: str, idempotency_key: str, wait_s: float = 10,
+                                      confirm: bool = False) -> dict[str, Any]:
+            """WRITE (deploy). A new deployment of this recipe/environment's saved verified identity.
+            Review rollback.not_undone first; migrations and other listed effects are not undone. confirm=true."""
+            return await principal_daemon("op_submit", confirm, action="deployment.rollback", target={"recipe": recipe},
+                params={"deployment_id": deployment_id}, preconditions={"expected_environment_generation": expected_environment_generation,
+                "expected_recipe_digest": expected_recipe_digest}, idempotency_key=idempotency_key, wait_s=wait_s)
 
         async def checkpoint_create(host: str, session_id: str, idempotency_key: str, commit: str | None = None,
                                     note: str | None = None, last_n: int = 20, wait_s: float = 20,
@@ -714,7 +770,8 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             return await principal_daemon("op_resume", confirm, operation_id=operation_id)
 
         for fn in (operation_submit, operation_cancel, operation_resume, checkpoint_create,
-                   work_continue_from_checkpoint, artifact_upload, cleanup_apply, github_pr_update, github_pr_merge):
+                   work_continue_from_checkpoint, artifact_upload, cleanup_apply, github_pr_update, github_pr_merge,
+                   deployment_start, deployment_retry, deployment_rollback):
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=op_write)
 
     if fleet.any_writes and not principal_only:

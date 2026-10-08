@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 # Latest allocated data step; individual backfills retain their own version gates.
-LATEST_DATA_STEP = 2
+LATEST_DATA_STEP = 3
 
 STATES = frozenset({
     "queued", "dispatching", "accepted", "running", "waiting_permission",
@@ -348,9 +348,12 @@ class Journal:
                 preview_id TEXT NOT NULL, checked_at REAL NOT NULL,
                 PRIMARY KEY(repository, pull_number, method)
             )""")
+        from . import deployment_store
+        deployment_store.schema(self)
 
         from .observation import install
         install(self)
+        deployment_store.backfill(self)
         from .dashboard_sync import install as install_sync
         install_sync(self)
 

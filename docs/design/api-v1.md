@@ -38,7 +38,7 @@ MCP 的 `operation_submit`、`operation_cancel`、`operation_resume` 要 `confir
 
 每個外部呼叫是一個具名步驟（`operation_steps`）。步驟意圖在呼叫前先 commit。逾時、連線中斷或之後的本機記錄失敗（`OSError`）時步驟記為 `uncertain`，之後由該步驟的 `reconcile` 讀回外部狀態：證明已發生就補記成功，無法證明（包括回查本身連不上）就維持 `uncertain` 並退避重試回查，五次後轉 `needs_attention`。回查次數用自己的計數（`uncertain_tries`），等待 checks／workflow 的輪詢不會用掉它。已完成的步驟在重跑時直接回傳保存的結果。
 
-取消只在下一步之前生效，而且不跳過回查：`uncertain` 的操作收到取消時先立刻回查，證明那一步已發生就照常完成，所以 `cancelled` 不會掩蓋已送出的動作。`needs_attention` 可以取消（原因會註明哪一步從未證明），也可以 `resume`：已完成的步驟不重做，未證明的步驟再回查一次，不重送。操作的 actor、admin，或擁有該 action scope 的主體可以取消或 resume；事件記在實際操作的人名下。
+取消只在下一步之前生效，而且不跳過回查：`uncertain` 的操作收到取消時先立刻回查，證明那一步已發生就照常完成，所以 `cancelled` 不會掩蓋已送出的動作。`needs_attention` 可以取消（原因會註明哪一步從未證明），也可以 `resume`：已完成的步驟不重做，未證明的步驟再回查一次，不重送。操作的 actor、admin，或擁有該 action scope 的主體可以取消或 resume；事件記在實際操作的人名下。`delivery.merge_and_deploy` resume 另外要求目前 principal 同時有 merge/deploy（admin 沿用全權），與新建一致；缺少任一 scope 回 FORBIDDEN，連原 actor 也不能繞過。唯讀與背景 reconciliation 不依賴使用者在線或 resume 授權。
 
 `NeedsAttention` 從外部 `ctx.step` 傳出時，operation 停在 `needs_attention`，該 step 保留 `uncertain`。重啟或 resume 都先執行原 reconcile；沒有 reconcile 或回 None 時只讀回等待，不能再次呼叫 fn。回傳已知結果就補記成功；只有 reconcile 明確回 `RERUN`、證明原呼叫未生效時才可重新派送。這與 `ctx.effect` 的本地交易回執不同：effect 與 journal 變更在同一交易內，回滾後可安全重做本地變更。
 
@@ -52,7 +52,18 @@ MCP 的 `operation_submit`、`operation_cancel`、`operation_resume` 要 `confir
 
 Session action 在建立時先用 registry 與目錄判斷來源，人工、unknown、未啟用 write tier 的主機直接回 403，不寫入 operation；執行時 `service.py` 再做一次資源政策的即時檢查。新 action 以 `ActionDef` 註冊（`api_actions.py`），之後的 GitHub merge、部署、checkpoint 都用同一套步驟與回查規則。
 
-Part A delivery actions 仍由 `POST /api/v1/operations` 受理：`github.pr.update`（integrate，repo opt-in）帶 `params={title?,body?}`、`expected_metadata_digest`；`github.pr.merge` 帶 `params={preview_id,method}`、`preconditions={expected_head_sha,expected_base_sha,preview_digest}`。`delivery.merge_and_deploy` 使用同 merge envelope，加 recipe 與 deploy scope；只部署經驗證的 actual merged SHA。舊 head-only 請求回 PRECONDITION_REQUIRED，點名 preview read。MCP `github_pr_update`／`github_pr_merge` 是 caller-token operation wrappers；`github_merge_preview_get` 為 observe read。新 CLI mutation 也要求 BATC_API_TOKEN。Contract_version 保持 ISO date `2026-10-08`（既有 contract 和本次變更同一天）；capabilities 宣告 metadata_update／merge_scope_preview 與 per-repo allow_pr_update。Part B deployment history／rollback／generation routes 尚未交付。
+Part A delivery actions 仍由 `POST /api/v1/operations` 受理：`github.pr.update`（integrate，repo opt-in）帶 `params={title?,body?}`、`expected_metadata_digest`；`github.pr.merge` 帶 `params={preview_id,method}`、`preconditions={expected_head_sha,expected_base_sha,preview_digest}`。`delivery.merge_and_deploy` 使用同 merge envelope，加 recipe 與 deploy scope；只部署經驗證的 actual merged SHA。舊 head-only 請求回 PRECONDITION_REQUIRED，點名 preview read。MCP `github_pr_update`／`github_pr_merge` 是 caller-token operation wrappers；`github_merge_preview_get` 為 observe read。新 CLI mutation 也要求 BATC_API_TOKEN。Contract_version 保持 ISO date `2026-10-08`（既有 contract 和本次變更同一天）；capabilities 宣告 metadata_update／merge_scope_preview 與 per-repo allow_pr_update。Part B 宣告 deployment_history／environment_generation／runtime_check／rollback_readiness；缺 verification 的 recipe readiness 點名缺少設定，deploy feature=false（history 仍可讀）。
+
+
+Part B 的 `deployment.start` 帶 `{source_sha, retry_of?}`（40 hex、optional retry_of 只取 saved identity 且 SHA 相符）；`deployment.rollback` 帶 `{deployment_id}`。兩者及 combined 都需 `{expected_environment_generation, expected_recipe_digest}`，先讀 `deployment_preview`（`GET /api/v1/deployments/preview?recipe=NAME`）。舊 start 缺這兩欄回 DEPLOY_PREVIEW_REQUIRED，message 點名該 read。Generation CAS 在第一個 local deploy.select step，同交易保存 deployment／desired／event，stale operation 異步 failed／ENVIRONMENT_CHANGED；不改 core admission。Combined preview.base_ref 與 recipe.ref 不同為 DEPLOY_SOURCE_NOT_ON_REF（422、zero PUT／POST）；start／retry／SHA rollback 在 dispatch 前以 ref...sha identical／behind 證明可達，否則同 code、zero POST。
+
+MCP `deployment_start`／`deployment_retry`／`deployment_rollback` 為 caller-token operation wrappers，confirm=true、BATC_API_TOKEN 必填，read-only server 不註冊。Retry 從 `deployment_status` 的 saved identity 建新的 deployment.start，只換新 key／generation／digest，不重新 merge 或換 latest。讀取工具 `deployment_preview`／`deployment_status`／`deployments_list`／`deployment_environment_get` 需 observe。CLI `delivery preview NAME`、`history NAME --cursor CURSOR --limit 50`、`show DEP_ID` 讀同一 journal；`deploy NAME --sha SHA`、`rollback NAME DEP_ID`、`retry NAME DEP_ID` mutation 另必填 `--generation N --recipe-digest DIGEST --key KEY`。`delivery merge --recipe NAME`／MCP github_pr_merge 的 combined 也傳同一對 preconditions，不隱式代選最新。
+
+Deployment success 必須原固定 run attempt＋指定 job completed/success＋目標 environment 無 pending＋recipe runtime 的版本及／或健康證據（至少一種）。API 明示 version_checked／health_checked；job success 不替代 readback。Verifier 只存白名單 response fields；HTTPS（loopback HTTP 僅測試）、無 redirect、timeout／max_bytes 有界，Bearer 只用後端 token_ref。Dispatch 429 是 refusal：依 Retry-After 在 wait_max_s 內等待，每次再送前精確查 token，找到即採用；lost write 查不到仍 uncertain，不重新 POST。
+
+Cancel 不取消 provider run／queue：provider 未終態時仍持有環境 slot 與 recipe deploy lock，包含 cancelled combined merge、dispatch 與尚待定位的 on_merge。Combined on_merge 取消後若 merge 才落地，核對 reviewed head／實際 merge SHA 可達 recipe ref，再追 exact push run 至終態；legacy 未終態亦占用 repository（不分大小寫）／environment 的跨 recipe slot。Settled history 不再回查 provider／runtime；current run／runtime 與 unresolved locate 依 `[github] deployment_reconcile_interval_s`（預設 300、範圍 60–86400 秒）節流，cadence 跨 restart，相同證據不增 row version。Stopped provider run／legacy run／未決 merge 使用 per-deployment poll_due，初始 15 秒，provider state 不變每次倍增至設定上限，改變回 15 秒；interval／digest／checked_at 跨 restart。成功 read 清除 reconciliation_error；非預期單列例外記 RECONCILE_FAILED 並繼續下一列，只在內容變動時寫入。只讀 reconcile_deployments 以原 snapshot 查 provider facts，終態才釋放，不 dispatch／resume／改 cancelled operation。晚到舊代不升 current，記 superseded；runtime 舊版使 current=null、ENVIRONMENT_VERSION_DRIFT，保留 last_verified，無自動重派。Rollback 是同 recipe/environment saved verified SHA／artifact 的新 generation／operation／run；API 列 not_undone，刪／inactive record 不回退。
+
+Deployment tables 是每次 open 的冪等 DDL，不佔 user_version。Reviewer 分配 history data step 3：僅 version=2 時一交易回填舊 operations results／refs、設 3；crash rollback、重開 no-op。Old successes 為 unverified，never current／rollback；舊非終態已 dispatch 僅查原 run，未 dispatch 停 DEPLOY_PREVIEW_REQUIRED。Observation step 2 由 #35 提供，本包不代做。
 
 Metadata uncertain write 從 step.started_at 起滿 600 秒，GET 仍為 before 就在 delivery 表保存 not_applied／PR_METADATA_NOT_APPLIED，釋放同 PR 的 admission lock 並停止背景 GET，永不重 PATCH。Cancelled 保留 cancelled；UNCERTAIN_UNRESOLVED 保留原 needs_attention audit，resume 只讀 settlement 並以 PR_METADATA_NOT_APPLIED failed。新操作仍比較 metadata digest，晚到的舊寫入會在下次寫前被 PR_METADATA_CHANGED 擋下；GitHub 無 CAS 的窗口仍依 [delivery.md](delivery.md) 說明。
 
@@ -131,6 +142,11 @@ History／relations 的 opaque cursor 在任何 journal read 前驗證 version�
 | `GET /api/v1/tasks/{task_id}` | observe | 既有 `work_status` |
 | `GET /api/v1/repositories/{owner}/{repo}/pulls/{number}?method=&from_event=true` | observe | PR title/body 與 metadata_digest；重用／保存 immutable mpv merge_preview（完整 commits、檔案摘要、stacks／chains／indirect PRs、blocking）；事件 reload 60 秒 scope 節流，SHA 變立即刷新，省略 from_event 為手動預覽 |
 | `GET /api/v1/delivery/previews/{mpv_id}` | observe | 讀保存的 merge scope／digest／expiry，不刷新來源 |
+| `GET /api/v1/deployments/preview?recipe=NAME` | observe | repository ID、recipe digest／readiness、generation、desired／current／last_verified／observed、ordering／rollback limits |
+| `GET /api/v1/deployments?recipe=NAME&cursor=&limit=` | observe | keyset history（created_at／dep ID，預設 50、上限 200），offline 可讀，identity／evidence／rollback eligibility |
+| `GET /api/v1/deployments/{dep_id}` | observe | fixed identity、run／attempt、operation／provider URLs、state／is_current／evidence／已過濾 runtime_evidence／reconciliation_error；missing DEPLOYMENT_NOT_FOUND |
+| `GET /api/v1/deployment-environments/history?recipe=NAME&cursor=&limit=` | observe | 同 repository／environment 的跨 recipe keyset history，含 legacy；同既有 status／cursor，offline 不呼叫 GitHub，Dashboard 每頁 5 筆；invalid cursor 回 422 `INVALID_PARAMS` |
+| `GET /api/v1/deployment-environments?recipe=NAME` | observe | desired generation／current／last_verified／observed_at／slot／attention；已移除 recipe 仍可讀保存資料 |
 | `GET /api/v1/integrations/candidates?host=` | observe | 可放進 PR 的 agent 成果與 checkpoint，及送過的 PR |
 | `GET /api/v1/integrations/previews/{ipv_id}` | observe | 預覽文件與是否過期 |
 | `GET /api/v1/integrations?repository=&pull_number=`、`/integrations/{op_id}` | observe | 一個 PR 的整合紀錄、一次整合與各來源 receipts |
@@ -260,8 +276,15 @@ Agent MCP 安裝使用 `--principal-only`：只註冊 central daemon reads、ope
 
 - Artifact 的 manual／managed capture 與 accept（Part B）、跨主機接續（Part C），見 [artifacts.md](artifacts.md)。Dashboard、GitHub 與 checkpoint 已有各自設計。
 
-- GitHub 部署 history／rollback／environment generation／runtime check 為 delivery Part B（第二步），尚未加入路由。Dashboard、merge、metadata、checkpoint 與 integration 入口已交付。
 - 既有 MCP 寫入工具（`session_send` 等）仍直接呼叫 service；它們受同一套資源政策約束，但不留 operation 紀錄。之後改為經 `operation_submit`。
+
+
+Deployment Part B 的 observation adapter 使用同一 `/events` feed：
+`deployment.selected/updated/verified/superseded/backfilled`、`deployment.drift`，只含保存的 IDs、generation、
+state、SHA、run/attempt、固定 error code 與去除 query/fragment 的 HTTPS provider_url。
+透過明確 operation/source refs 索引 history，無 binding 時不猜 session/worktree。Step 3 接在 observation
+step 2 之後；backfilled snapshot 的 occurred_at=null，原事件不改寫。History capability 列 `delivery_part_b`。
+
 - Part B：其餘 legacy writes 的 operations、no-key sentinel／讀取投影、完整結果與外部 steps 拆分。Task controls 與 A07 共用 gate 已在 Part A 完成。
 - `import-bat --output PATH --force` 是 owner 啟動前的本機 config 安裝指令，僅寫指定設定檔，保留現有路徑。
 - operation cancel/resume 已授權且 evented，不新增其 control operations；api-token issue/revoke 只改 connector 資料、不觸及 BAT/Git/provider，也不新增 operation。

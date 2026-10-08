@@ -114,6 +114,73 @@ var STRINGS = {
 		"cleanup_receipt_uncertain": "待確認結果",
 		"cleanup_receipt_blocked_stale": "狀態改變",
 		"cleanup_receipt_cancelled": "已取消",
+		dep_pull_request: "合併請求（PR）",
+		dep_desired: "選定部署",
+		dep_observed: "目前觀測版本",
+		dep_last_verified: "最後驗證版本",
+		dep_history: "部署歷史",
+		dep_no_history: "尚無部署紀錄。",
+		dep_no_version: "尚無版本紀錄。",
+		dep_not_observed: "尚未觀測",
+		dep_observed_at: "觀測時間：{time}",
+		dep_verified_at: "驗證時間：{time}",
+		dep_artifact: "產物 {id}",
+		dep_not_undone: "回退不會撤銷",
+		dep_no_limits: "此部署設定未宣告無法撤銷的副作用。",
+		dep_rollback: "回退到此版本",
+		dep_retry: "重試部署 · {sha}",
+		dep_confirm_rollback: "開始回退",
+		dep_confirm_retry: "重試此部署",
+		dep_rollback_review: "檢視回退版本",
+		dep_retry_review: "檢視重試部署",
+		dep_retry_only: "重新部署此固定版本，不會再次合併 PR。",
+		dep_retry_unavailable: "此舊紀錄缺少可重試的固定版本，請重新預覽部署。",
+		dep_preview_generation: "{env} · 環境第 {generation} 代",
+		dep_stale_preview: "環境或部署設定已變更。請檢視下方最新預覽，再決定是否重新送出。不會自動重送。",
+		dep_refused: "部署請求未能繼續，請查看操作詳情。",
+		dep_open_operation: "查看操作",
+		dep_operation_details: "操作詳情",
+		dep_run: "服務商執行紀錄",
+		dep_attempt: "執行次數",
+		dep_error_code: "錯誤代碼",
+		dep_needs_scope: "需要 deploy 權限。",
+		dep_missing_recipe: "此部署設定已移除。",
+		dep_missing_verification: "部署已停用：缺少版本驗證設定。",
+		dep_disabled: "目前未開放部署。",
+		dep_provider_pending: "服務商的執行結果仍待確認，尚不能重試。",
+		dep_attention: "需要處理",
+		dep_attention_help: "請比較選定與觀測版本，並先查看操作詳情再決定下一步。",
+		dep_drift: "觀測版本與選定部署不同，不會自動啟動部署。",
+		dep_superseded: "已被新的選定部署取代。",
+		dep_new_desired: "查看新的選定部署",
+		dep_provider_run: "原始執行紀錄",
+		dep_previous: "上一頁",
+		dep_next: "下一頁",
+		dep_page: "第 {page} 頁",
+		dep_ROLLBACK_UNSUPPORTED: "此部署設定不支援回退。",
+		dep_ROLLBACK_TARGET_INVALID: "此版本未經驗證，或屬於不同部署設定／環境。",
+		dep_ROLLBACK_ARTIFACT_UNAVAILABLE: "保存的產物無法取得。",
+		dep_ROLLBACK_ARTIFACT_EXPIRED: "保存的產物已過期。",
+		dep_version_health: "已驗證執行環境版本與健康。",
+		dep_version_only: "已驗證執行環境版本；此部署設定不檢查健康。",
+		dep_health_only: "健康檢查通過；此部署設定不檢查執行環境版本。",
+		dep_state_selected: "已選定",
+		dep_state_waiting_order: "等待環境順序",
+		dep_state_queued: "已排程",
+		dep_state_building: "建置中",
+		dep_state_waiting_environment: "等待環境核准",
+		dep_state_deploying: "部署中",
+		dep_state_verifying: "驗證中",
+		dep_state_succeeded: "已驗證",
+		dep_state_failed: "失敗",
+		dep_state_cancelled: "已取消",
+		dep_state_uncertain: "結果未明",
+		dep_state_needs_attention: "需要處理",
+		dep_state_unverified: "未驗證",
+		dep_state_superseded: "已被取代",
+		dep_operation: "操作",
+		dep_status: "狀態",
+		dep_generation: "環境第 {generation} 代",
 		offline_actions_paused: "中央離線，暫停操作",
 		sync_waiting: "等待更新，草稿已保留",
 		desktop_connection: "桌面中央連線",
@@ -560,6 +627,73 @@ var STRINGS = {
 		"cleanup_receipt_uncertain": "uncertain",
 		"cleanup_receipt_blocked_stale": "blocked stale",
 		"cleanup_receipt_cancelled": "cancelled",
+		dep_pull_request: "Pull request",
+		dep_desired: "Selected deployment",
+		dep_observed: "Current observed version",
+		dep_last_verified: "Last verified version",
+		dep_history: "Deployment history",
+		dep_no_history: "No deployments yet.",
+		dep_no_version: "No version recorded.",
+		dep_not_observed: "not observed yet",
+		dep_observed_at: "Observed: {time}",
+		dep_verified_at: "Verified: {time}",
+		dep_artifact: "Artifact {id}",
+		dep_not_undone: "Rollback does not undo",
+		dep_no_limits: "This recipe declares no excluded side effects.",
+		dep_rollback: "Rollback to this version",
+		dep_retry: "Retry deploy · {sha}",
+		dep_confirm_rollback: "Start rollback",
+		dep_confirm_retry: "Retry this deployment",
+		dep_rollback_review: "Review rollback",
+		dep_retry_review: "Review deploy retry",
+		dep_retry_only: "Deploy this saved identity again. The PR is never merged again.",
+		dep_retry_unavailable: "This old record has no retryable fixed identity; preview a new deployment.",
+		dep_preview_generation: "{env} · environment generation {generation}",
+		dep_stale_preview: "The environment or recipe changed. Review the fresh preview below, then submit again if intended. Nothing is re-submitted automatically.",
+		dep_refused: "The deployment request could not proceed. See operation details.",
+		dep_open_operation: "View operation",
+		dep_operation_details: "Operation details",
+		dep_run: "Provider run",
+		dep_attempt: "Run attempt",
+		dep_error_code: "Error code",
+		dep_needs_scope: "Requires deploy scope.",
+		dep_missing_recipe: "This recipe is no longer configured.",
+		dep_missing_verification: "Deploy disabled: add recipe verification.",
+		dep_disabled: "Deployment is unavailable under the current capabilities.",
+		dep_provider_pending: "The provider outcome is still pending; retry is unavailable.",
+		dep_attention: "Needs attention",
+		dep_attention_help: "Compare the selected and observed versions. Check the operation details before taking action.",
+		dep_drift: "The observed version differs from the selected deployment. No deployment is started automatically.",
+		dep_superseded: "Superseded by a newer selection.",
+		dep_new_desired: "View new selection",
+		dep_provider_run: "Original provider run",
+		dep_previous: "Previous",
+		dep_next: "Next",
+		dep_page: "Page {page}",
+		dep_ROLLBACK_UNSUPPORTED: "This recipe does not support rollback.",
+		dep_ROLLBACK_TARGET_INVALID: "This version is unverified or belongs to another recipe or environment.",
+		dep_ROLLBACK_ARTIFACT_UNAVAILABLE: "The saved artifact is unavailable.",
+		dep_ROLLBACK_ARTIFACT_EXPIRED: "The saved artifact has expired.",
+		dep_version_health: "Runtime version and health verified.",
+		dep_version_only: "Runtime version verified; health is not checked by this recipe.",
+		dep_health_only: "Health passed; runtime version is not checked by this recipe.",
+		dep_state_selected: "Selected",
+		dep_state_waiting_order: "Waiting for environment",
+		dep_state_queued: "Queued",
+		dep_state_building: "Building",
+		dep_state_waiting_environment: "Waiting for approval",
+		dep_state_deploying: "Deploying",
+		dep_state_verifying: "Verifying",
+		dep_state_succeeded: "Verified",
+		dep_state_failed: "Failed",
+		dep_state_cancelled: "Cancelled",
+		dep_state_uncertain: "Outcome unknown",
+		dep_state_needs_attention: "Needs attention",
+		dep_state_unverified: "Unverified",
+		dep_state_superseded: "Superseded",
+		dep_operation: "Operation",
+		dep_status: "State",
+		dep_generation: "Environment generation {generation}",
 		offline_actions_paused: "Central offline · actions paused",
 		sync_waiting: "Waiting to refresh · draft preserved",
 		desktop_connection: "Desktop central connection",
@@ -2113,15 +2247,24 @@ async function viewDelivery(main) {
 		value: sessionStorage.getItem("batc.pr") || ""
 	});
 	const card = h("div", { class: "panel delivery-card" });
+	const groups = new Map();
+	for (const r of state.caps?.deploy_recipes || []) {
+		const key = JSON.stringify([r.repository.toLowerCase(), r.environment]);
+		if (!groups.has(key)) groups.set(key, []);
+		groups.get(key).push(r);
+	}
+	const environments = [...groups.values()].map(environmentCard);
+	main.append(h("h1", {}, t("nav_delivery")), ...environments.map((e) => e.card));
 	let selectedMethod = "";
 	let reviewedPreview = null;
-	main.append(h("h1", {}, t("nav_delivery")), h("div", { class: "filters delivery-controls" }, repo, num, h("button", {
+	main.append(h("h2", {}, t("dep_pull_request")), h("div", { class: "filters delivery-controls" }, repo, num, h("button", {
 		class: "secondary",
 		onclick: () => load()
 	}, t("load_pr"))), card);
 	if (!repo.value && state.caps?.repositories?.length) repo.value = state.caps.repositories[0].repository;
 	const load = async (flash = null, fromEvent = false) => {
 		const opens = drawerOpens;
+		const holdCard = () => card.querySelector(".drawer:not([hidden])") || fromEvent && holdRender(true, opens);
 		sessionStorage.setItem("batc.repo", repo.value);
 		sessionStorage.setItem("batc.pr", num.value);
 		if (!repo.value || !/^\d+$/.test(num.value)) return;
@@ -2130,11 +2273,10 @@ async function viewDelivery(main) {
 			if (selectedMethod) query.set("method", selectedMethod);
 			if (fromEvent) query.set("from_event", "true");
 			const pr = (await api("GET", `/repositories/${repo.value}/pulls/${num.value}?${query}`)).pull_request;
-			if (holdRender(fromEvent, opens)) {
+			if (holdCard()) {
 				idleReload = () => load(null, true);
 				return;
 			}
-			freshPage();
 			const status = h("div", { "aria-live": "polite" });
 			const target = {
 				repository: pr.repository,
@@ -2184,15 +2326,29 @@ async function viewDelivery(main) {
 			for (const r of pr.recipes) {
 				buttons.push(h("button", {
 					class: "secondary",
-					disabled: blocked || !pr.merge.allowed || !may("merge") || !may("deploy"),
-					onclick: () => run("delivery.merge_and_deploy", { target: { recipe: r.name } }, `merge_deploy.${pv.preview_id}.${r.name}`)
+					disabled: blocked || !pr.merge.allowed || !may("merge") || !may("deploy") || !state.caps?.deploy_recipes?.find((c) => c.name === r.name)?.readiness?.ready,
+					onclick: async () => {
+						try {
+							const deploymentPreview = (await api("GET", `/deployments/preview?recipe=${encodeURIComponent(r.name)}`)).preview;
+							await run("delivery.merge_and_deploy", {
+								target: { recipe: r.name },
+								pre: {
+									...pre,
+									...deploymentPreview.preconditions
+								}
+							}, `merge_deploy.${pv.preview_id}.${r.name}`);
+						} catch (e) {
+							fill(status, errorBox(e));
+						}
+					}
 				}, t("merge_and_deploy_to", { env: r.environment })));
 				if (pr.merged && pr.merge_commit_sha) buttons.push(h("button", {
 					class: "secondary",
-					disabled: !may("deploy"),
+					disabled: !may("deploy") || !state.caps?.deploy_recipes?.find((c) => c.name === r.name)?.readiness?.ready,
 					onclick: async () => {
 						try {
-							const op = await submit("deployment.start", { recipe: r.name }, { source_sha: pr.merge_commit_sha }, {}, `deploy.${r.name}.${pr.merge_commit_sha}`);
+							const deploymentPreview = (await api("GET", `/deployments/preview?recipe=${encodeURIComponent(r.name)}`)).preview;
+							const op = await submit("deployment.start", { recipe: r.name }, { source_sha: pr.merge_commit_sha }, deploymentPreview.preconditions, `deploy.${r.name}.${pr.merge_commit_sha}`);
 							fill(status, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
 						} catch (e) {
 							fill(status, errorBox(e));
@@ -2212,11 +2368,316 @@ async function viewDelivery(main) {
 				rel: "noopener"
 			}, `#${pr.pull_number} ${pr.title || ""}`)), h("dl", { class: "kv" }, h("dt", {}, t("head")), h("dd", {}, h("code", {}, `${pr.head_ref} @ ${pr.head_sha}`)), h("dt", {}, t("base")), h("dd", {}, h("code", {}, `${pr.base_ref} @ ${pr.base_sha}`)), h("dt", {}, t("mergeable")), h("dd", {}, `${pr.state}${pr.draft ? " · draft" : ""} · ${pr.mergeable_state || "?"}`), h("dt", {}, t("checks")), h("dd", {}, t("checks_summary", pr.checks)), pr.merged ? [h("dt", {}, t("merged_sha")), h("dd", {}, h("code", {}, pr.merge_commit_sha))] : null), metadataDrawer(pr, load), scopeChanged ? h("p", { class: "note warn" }, t("merge_scope_reload")) : null, h("h2", {}, t("merge_scope")), h("label", {}, t("merge_method"), " ", method), h("p", { class: "muted" }, t("merge_preview_fixed"), " ", h("code", {}, pv.preview_id)), commitList, affected.length ? h("div", {}, ...affected) : h("p", { class: "muted" }, t("scope_single_pr")), ...pv.blocking.map((b) => h("p", { class: "note warn" }, h("code", {}, b.code), " · ", b.message)), ...pv.warnings.map((w) => h("p", { class: "muted" }, w)), h("div", { class: "actions" }, ...buttons), status, flash instanceof Node ? flash : null, pr.integration?.allowed ? integrationPanel(pr, load) : null);
 		} catch (e) {
-			if (!holdRender(fromEvent, opens)) fill(card, errorBox(e));
+			if (!holdCard()) fill(card, errorBox(e));
 		}
 	};
-	await load();
-	return liveReload(() => load(null, true), ["operation", "integration"]);
+	const reload = async (fromEvent = true) => {
+		await settleRefreshes([...environments.map((e) => e.load(fromEvent)), load(null, fromEvent)]);
+	};
+	await reload(false);
+	return liveReload(reload, [
+		"operation",
+		"integration",
+		"deployment",
+		"deployment_environment"
+	]);
+}
+function deploymentIdentity(identity, empty = "dep_no_version") {
+	if (!identity?.source_sha && !identity?.artifact_id) return h("p", { class: "muted" }, t(empty));
+	return h("div", { class: "deployment-identity" }, identity.source_sha ? h("code", {}, identity.source_sha) : null, identity.artifact_id ? h("p", {}, t("dep_artifact", { id: identity.artifact_id }), identity.artifact_digest ? [" · ", h("code", {}, identity.artifact_digest)] : null) : null);
+}
+function deploymentState(value) {
+	return chip(t(`dep_state_${value || "unverified"}`), [
+		"failed",
+		"needs_attention",
+		"uncertain"
+	].includes(value) ? "bad" : value === "succeeded" ? "ok" : "warn");
+}
+function deploymentTime(value) {
+	return value ? when(Number(value) * 1e3) : t("dep_not_observed");
+}
+function heldDetails(title, children, onOpen) {
+	let counted = false;
+	const details = h("details", {
+		class: "row-details",
+		ontoggle: () => {
+			if (details.open !== counted) {
+				counted = details.open;
+				if (counted) {
+					drawerOpens += 1;
+					if (onOpen) onOpen();
+				}
+				setEditing(editing + (counted ? 1 : -1));
+			}
+		}
+	}, h("summary", {}, title), ...children);
+	details.closeHeld = () => {
+		if (counted) {
+			counted = false;
+			setEditing(editing - 1);
+		}
+		details.open = false;
+	};
+	return details;
+}
+function deploymentReceipt(dep) {
+	const body = h("div", {});
+	let read = false;
+	return heldDetails(t("dep_operation_details"), [body], async () => {
+		if (read) return;
+		read = true;
+		try {
+			const op = (await api("GET", `/operations/${dep.operation_id}`)).operation;
+			const saved = op.external_refs?.deployment_id && op.external_refs.deployment_id !== dep.deployment_id ? (await api("GET", `/deployments/${op.external_refs.deployment_id}`)).deployment : dep;
+			const values = [
+				[t("dep_operation"), h("a", { href: `#/op/${op.operation_id}` }, op.operation_id)],
+				[t("dep_status"), opStatus(op)],
+				[t("dep_run"), saved.run_id],
+				[t("dep_attempt"), saved.run_attempt],
+				[t("dep_error_code"), op.error_code || saved.error_code || saved.reconciliation_error]
+			];
+			fill(body, h("dl", { class: "kv" }, ...values.filter(([, v]) => v !== null && v !== void 0 && v !== "").flatMap(([label, value]) => [h("dt", {}, label), h("dd", {}, value)])), op.status_reason ? h("p", {}, op.status_reason) : null, ...(op.steps || []).map((s) => h("div", { class: "row" }, h("code", {}, s.name), h("code", {}, s.status))));
+		} catch (e) {
+			fill(body, errorBox(e));
+			read = false;
+		}
+	});
+}
+function deploymentLimits(limits) {
+	return h("div", { class: "deployment-limits" }, h("span", { class: "muted" }, t("dep_not_undone")), limits?.length ? h("ul", {}, ...limits.map((value) => h("li", {}, value))) : h("p", { class: "muted" }, t("dep_no_limits")));
+}
+function deploymentPreviewSummary(preview) {
+	return h("p", {
+		class: "muted",
+		"data-testid": "deployment-preview-generation"
+	}, t("dep_preview_generation", {
+		env: preview.environment,
+		generation: preview.environment_generation
+	}));
+}
+function deploymentIntent(dep, kind, reload) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace
+	};
+	const out = h("div", { "aria-live": "polite" });
+	const d = drawer();
+	let busy = false, accepted = false, preview = null;
+	const scope = `deployment.${kind}.${dep.deployment_id}`;
+	const confirm = h("button", {
+		class: kind === "rollback" ? "danger" : "primary",
+		disabled: true,
+		"data-testid": `deployment-${kind}-confirm`,
+		onclick: async () => {
+			if (busy || accepted || !preview) return;
+			busy = true;
+			confirm.disabled = true;
+			try {
+				assertConnection(connection);
+				const action = kind === "rollback" ? "deployment.rollback" : "deployment.start";
+				const params = kind === "rollback" ? { deployment_id: dep.deployment_id } : {
+					source_sha: dep.identity.source_sha,
+					retry_of: dep.deployment_id
+				};
+				let op = await submit(action, { recipe: dep.recipe }, params, preview.preconditions, scope);
+				while (["accepted", "running"].includes(op.status) && d.box.isConnected && !d.box.hidden) {
+					await sleep(1e3);
+					assertConnection(connection);
+					if (!d.box.isConnected || d.box.hidden) break;
+					op = (await api("GET", `/operations/${op.operation_id}`)).operation;
+				}
+				if ([
+					"DEPLOY_PREVIEW_REQUIRED",
+					"ENVIRONMENT_CHANGED",
+					"RECIPE_CHANGED"
+				].includes(op.error_code)) {
+					fill(out, h("p", { class: "note warn" }, t("dep_stale_preview")), deploymentReceipt({ operation_id: op.operation_id }));
+					await refreshPreview();
+				} else {
+					accepted = true;
+					fill(out, h("p", {}, opStatus(op), " · ", h("a", { href: `#/op/${op.operation_id}` }, t("dep_open_operation"))), deploymentReceipt({ operation_id: op.operation_id }));
+				}
+			} catch (e) {
+				fill(out, h("p", { class: "error" }, t("dep_refused")), heldDetails(t("dep_operation_details"), [errorBox(e)]));
+				if ([
+					"DEPLOY_PREVIEW_REQUIRED",
+					"ENVIRONMENT_CHANGED",
+					"RECIPE_CHANGED"
+				].includes(e.code)) {
+					out.prepend(h("p", { class: "note warn" }, t("dep_stale_preview")));
+					await refreshPreview();
+				}
+			} finally {
+				busy = false;
+				confirm.disabled = accepted || !preview?.readiness?.ready;
+			}
+		}
+	}, t(kind === "rollback" ? "dep_confirm_rollback" : "dep_confirm_retry"));
+	const previewBox = h("div", {});
+	async function refreshPreview() {
+		preview = null;
+		confirm.disabled = true;
+		try {
+			assertConnection(connection);
+			preview = (await api("GET", `/deployments/preview?recipe=${encodeURIComponent(dep.recipe)}`)).preview;
+			fill(previewBox, deploymentPreviewSummary(preview), preview.readiness?.ready ? null : h("p", { class: "note warn" }, t("dep_missing_verification")));
+			confirm.disabled = busy || accepted || !preview.readiness?.ready;
+		} catch (e) {
+			fill(previewBox, errorBox(e));
+		}
+	}
+	fill(d.box, h("h3", {}, t(kind === "rollback" ? "dep_rollback_review" : "dep_retry_review")), deploymentIdentity(dep.identity), h("p", {}, `${dep.repository} · ${dep.environment}`), kind === "rollback" ? deploymentLimits(dep.rollback?.not_undone) : h("p", { class: "muted" }, t("dep_retry_only")), previewBox, out, h("div", { class: "actions" }, confirm, h("button", {
+		class: "secondary",
+		onclick: () => {
+			d.box.querySelectorAll("details[open]").forEach((el) => el.closeHeld?.());
+			d.close();
+			reload();
+		}
+	}, t("close"))));
+	return {
+		button: h("button", {
+			class: "secondary",
+			"data-testid": `deployment-${kind}`,
+			onclick: () => {
+				if (!d.box.hidden) return;
+				d.open();
+				refreshPreview();
+			}
+		}, t(kind === "rollback" ? "dep_rollback" : "dep_retry", { sha: (dep.identity?.source_sha || "").slice(0, 8) })),
+		box: d.box
+	};
+}
+function deploymentRecord(dep, env, reload, compact = false) {
+	if (!dep) return h("p", { class: "muted" }, t("dep_no_version"));
+	const r = (state.caps?.deploy_recipes || []).find((r) => r.name === dep.recipe);
+	dep = {
+		...dep,
+		repository: dep.repository || r?.repository || "",
+		environment: dep.environment || r?.environment || env.environment || t("dep_no_version")
+	};
+	const canDeploy = Boolean(state.caps?.features?.deploy && r?.readiness?.ready && (state.caps?.actions || []).some((a) => a.action === "deployment.start" && a.allowed) && may("deploy"));
+	const disabledReason = !may("deploy") ? "dep_needs_scope" : !r ? "dep_missing_recipe" : !r.readiness?.ready ? "dep_missing_verification" : "dep_disabled";
+	const actions = [], drawers = [];
+	if (!compact && dep.rollback_eligible && !dep.is_current) {
+		const intent = deploymentIntent(dep, "rollback", reload);
+		intent.button.disabled = !canDeploy || !(state.caps?.actions || []).some((a) => a.action === "deployment.rollback" && a.allowed);
+		actions.push(intent.button);
+		drawers.push(intent.box);
+		if (intent.button.disabled) actions.push(h("span", { class: "muted" }, t(disabledReason)));
+	}
+	if (!compact && dep.state === "failed") {
+		if (dep.provider_terminal && !dep.legacy && dep.identity?.source_sha) {
+			const intent = deploymentIntent(dep, "retry", reload);
+			intent.button.disabled = !canDeploy;
+			actions.push(intent.button);
+			drawers.push(intent.box);
+			if (!canDeploy) actions.push(h("span", { class: "muted" }, t(disabledReason)));
+		} else actions.push(h("span", { class: "muted" }, t(dep.provider_terminal ? "dep_retry_unavailable" : "dep_provider_pending")));
+	}
+	let rollbackReason = dep.rollback_reason;
+	let providerUrl = null;
+	try {
+		const url = new URL(dep.provider_url);
+		if (url.protocol === "https:") providerUrl = url.href;
+	} catch {}
+	if (rollbackReason === "ROLLBACK_ARTIFACT_UNAVAILABLE" && dep.identity?.artifact_expires_at && Date.parse(dep.identity.artifact_expires_at) <= Date.now()) rollbackReason = "ROLLBACK_ARTIFACT_EXPIRED";
+	return h("div", {
+		class: "deployment-record",
+		"data-deployment": dep.deployment_id
+	}, h("div", { class: "deployment-record-heading" }, deploymentState(dep.state), h("span", { class: "muted" }, dep.recipe)), deploymentIdentity(dep.identity), compact ? h("p", {}, h("a", { href: `#/op/${dep.operation_id}` }, t("dep_open_operation"))) : h("p", { class: "muted" }, `${dep.environment} · ${deploymentTime(dep.created_at)}`), dep.state === "superseded" ? h("p", {}, t("dep_superseded"), " ", env.desired ? h("a", { href: `#/op/${env.desired.operation_id}` }, t("dep_new_desired")) : null, " · ", providerUrl ? h("a", {
+		href: providerUrl,
+		target: "_blank",
+		rel: "noopener"
+	}, t("dep_provider_run")) : null) : null, dep.state === "needs_attention" || dep.reconciliation_error ? h("p", { class: "note warn" }, t("dep_attention")) : null, !compact && rollbackReason ? h("p", { class: "muted" }, t(`dep_${rollbackReason}`)) : null, !compact && dep.rollback_eligible && !dep.is_current ? deploymentLimits(dep.rollback?.not_undone) : null, actions.length ? h("div", { class: "actions" }, ...actions) : null, deploymentReceipt(dep), ...drawers);
+}
+function environmentCard(group) {
+	const card = h("section", {
+		class: "panel delivery-card environment-card",
+		"data-environment": group[0].environment
+	});
+	const cursors = [null];
+	let page = 0, next = null, loading = false, inFlight = null;
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	async function load(fromEvent = false) {
+		if (inFlight) {
+			await inFlight;
+			if (fromEvent) return load(true);
+			return;
+		}
+		const opens = drawerOpens;
+		if (editing || fromEvent && typing()) {
+			idleReload = () => load(true);
+			return;
+		}
+		loading = true;
+		inFlight = (async () => {
+			try {
+				assertView(connection);
+				const query = new URLSearchParams({
+					recipe: group[0].name,
+					limit: "5"
+				});
+				if (cursors[page]) query.set("cursor", cursors[page]);
+				const reads = await Promise.allSettled([api("GET", `/deployment-environments?recipe=${encodeURIComponent(group[0].name)}`), api("GET", `/deployment-environments/history?${query}`)]);
+				assertView(connection);
+				for (const read of reads) if (read.status === "rejected") throw read.reason;
+				const [environment, history] = reads.map((read) => read.value);
+				if (holdRender(fromEvent, opens) || editing) {
+					idleReload = () => load(true);
+					return;
+				}
+				const env = environment.environment;
+				next = history.next_cursor;
+				const observed = env.observed || env.current?.evidence?.runtime?.observed;
+				const needs = env.attention || env.desired?.state === "needs_attention" || env.desired?.reconciliation_error || env.current?.state === "needs_attention" || env.current?.reconciliation_error;
+				const previous = h("button", {
+					class: "secondary",
+					disabled: page === 0,
+					"data-testid": "history-previous",
+					onclick: () => {
+						if (loading) return;
+						previous.disabled = more.disabled = true;
+						page -= 1;
+						load();
+					}
+				}, t("dep_previous"));
+				const more = h("button", {
+					class: "secondary",
+					disabled: !next,
+					"data-testid": "history-next",
+					onclick: () => {
+						if (loading) return;
+						previous.disabled = more.disabled = true;
+						cursors[++page] = next;
+						load();
+					}
+				}, t("dep_next"));
+				const verified = env.last_verified;
+				fill(card, h("div", { class: "deployment-card-heading" }, h("h2", {}, group[0].environment), needs ? chip(t("dep_attention"), "warn") : null), h("p", { class: "muted" }, group[0].repository, " · ", t("dep_generation", { generation: env.desired_generation })), needs ? h("p", { class: "note warn" }, t(env.attention === "ENVIRONMENT_VERSION_DRIFT" ? "dep_drift" : "dep_attention_help")) : null, h("div", { class: "deployment-versions" }, h("div", {}, h("h3", {}, t("dep_desired")), deploymentRecord(env.desired, env, load, true)), h("div", {}, h("h3", {}, t("dep_observed")), deploymentIdentity(observed), h("p", { class: "muted" }, t("dep_observed_at", { time: deploymentTime(observed?.observed_at || env.current?.evidence?.runtime?.checked_at) })), env.current?.evidence?.runtime?.summary ? h("p", { class: "muted" }, runtimeSummary(env.current.evidence.runtime)) : null)), h("div", { class: "deployment-last-verified" }, h("h3", {}, t("dep_last_verified")), deploymentIdentity(verified?.identity), h("p", { class: "muted" }, t("dep_verified_at", { time: deploymentTime(verified?.evidence?.runtime?.checked_at) })), verified?.evidence?.runtime?.summary ? h("p", { class: "muted" }, runtimeSummary(verified.evidence.runtime)) : null, verified ? deploymentReceipt(verified) : null), h("h3", {}, t("dep_history")), h("div", { "data-testid": "deployment-history" }, ...history.items.length ? history.items.map((dep) => deploymentRecord(dep, env, load)) : [h("p", { class: "muted" }, t("dep_no_history"))]), !history.items.length && group.every((r) => !r.rollback?.supported) ? h("p", { class: "muted" }, t("dep_ROLLBACK_UNSUPPORTED")) : null, h("div", { class: "actions deployment-pagination" }, previous, h("span", { class: "muted" }, t("dep_page", { page: page + 1 })), more));
+			} catch (e) {
+				if (["CONNECTION_CHANGED", "VIEW_CHANGED"].includes(e.code)) return;
+				const failure = errorBox(e);
+				if (!holdRender(fromEvent, opens) && !editing) fill(card, failure);
+			}
+		})();
+		try {
+			await inFlight;
+		} finally {
+			loading = false;
+			inFlight = null;
+		}
+	}
+	return {
+		card,
+		load
+	};
+}
+function runtimeSummary(evidence) {
+	return t(evidence.version_checked ? evidence.health_checked ? "dep_version_health" : "dep_version_only" : "dep_health_only");
 }
 function metadataDrawer(pr, reload) {
 	const title = h("input", {
@@ -2546,7 +3007,8 @@ async function viewOperation(main, id) {
 				class: "primary",
 				onclick: async () => {
 					try {
-						const o = await submit("deployment.start", { recipe: op.target.recipe }, { source_sha: refs.merged_sha }, {}, `deploy.${op.target.recipe}.${refs.merged_sha}`);
+						const preview = (await api("GET", `/deployments/preview?recipe=${encodeURIComponent(op.target.recipe)}`)).preview;
+						const o = await submit("deployment.start", { recipe: op.target.recipe }, { source_sha: refs.merged_sha }, preview.preconditions, `deploy.${op.target.recipe}.${refs.merged_sha}`);
 						location.hash = `#/op/${o.operation_id}`;
 					} catch (e) {
 						panel.append(errorBox(e));
