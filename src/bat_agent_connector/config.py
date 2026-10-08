@@ -22,7 +22,7 @@ Config file (default ``~/.config/bat-agent-connector/hosts.toml``)::
     orchestrate_max_sessions = 4       # cap on concurrently orchestrated sessions on this host
     orchestrate_register_tabs = false  # append a tab to the host workspace (workspace:save, append-only)
     default_permission_mode = "default" # "default" (agent asks) or "allow_all" (like BAT's bypass setting)
-    auto_cleanup = false               # allow session_cleanup to merge/remove/stop on this host
+    auto_cleanup = false               # deprecated: parses only; never enables cleanup writes
     codex_model = ""                   # default model for Codex sessions started/failed over here ("" = BAT default)
     profile_id = "default"             # workspace profile on the host
     managed_roots = []                 # host folders the connector owns (its own clones); see resource_policy.py

@@ -426,6 +426,8 @@ def _create_grant(host: str, session_id: str, workdir: str | None, isolation: st
 
 def _check_resolved(hc: HostConfig, path: str, git_roots: dict | None) -> None:
     """A managed-root path must also be managed after the host resolves it (a symlink can point anywhere)."""
+    from .cleanup import guard
+    guard(hc.name, path=path)
     real = norm((git_roots or {}).get(path))
     if real and not in_managed_root(hc, real):
         raise ResourceReadOnly("DESTINATION_MANUAL",
@@ -648,7 +650,7 @@ def check_cleanup_worktree(hc: HostConfig, repository: str, path: str | None, br
     if (not in_managed_root(hc, repository) or (path and (not in_managed_root(hc, path) or
             not path.startswith(repository.rstrip("/") + "/")))):
         raise ResourceReadOnly("WORKDIR_NOT_MANAGED", "cleanup requires a managed clone or integration area")
-    if not branch or not branch.startswith("batc/"):
+    if not branch or not branch.startswith(("batc/", "bat/")):
         raise ResourceReadOnly("UNKNOWN_READ_ONLY", "cleanup requires a proven connector branch")
 
 # --------------------------------------------------------------------------- read views

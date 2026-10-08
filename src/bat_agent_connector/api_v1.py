@@ -300,8 +300,14 @@ class ApiV1:
                      "contract_version": CONTRACT_VERSION, "connector": __version__, "hosts": hosts,
                      "actions": actions, "operation_statuses": list(STATES),
                      "cleanup": {"preview_ttl_s": cleanup.TTL_S, "max_items": cleanup.MAX_ITEMS, "restore": False,
-                                 "scopes": ["cleanup", "cleanup_discard"], "retention": vars(fleet.config.cleanup)},
-                     "features": {"inventory": True, "events_stream": True, "operations": True, "work_items": True,
+                                 "scopes": ["cleanup", "cleanup_discard"], "retention": vars(fleet.config.cleanup),
+                                 "read_deadline_s": cleanup.READ_DEADLINE_S, "serialize_previews": True,
+                                 "preview": principal.allows("observe"), "apply": principal.allows("cleanup"),
+                                 "discard": principal.allows("cleanup_discard"),
+                                 "hosts": [{"host": name, "available": self._can_continue(name),
+                                     "reasons": ([] if self._can_continue(name) else ["HOST_CLEANUP_UNAVAILABLE"])}
+                                     for name in fleet.config.hosts]},
+                     "features": {"cleanup": True, "inventory": True, "events_stream": True, "operations": True, "work_items": True,
                                   "github": self.daemon.ops.context.get("github") is not None,
                                   "deploy": bool(gh_cfg.recipes),
                                   "checkpoints": [h for h in fleet.config.hosts if self._can_continue(h)],
@@ -381,7 +387,8 @@ class ApiV1:
 
     async def operation(self, op, **_):
         return 200, {"operation": self.daemon.ops.get(op),
-                     "work_items": work_items.work_items_for(self.daemon.journal.db, "operation", op)}
+                     "work_items": work_items.work_items_for(self.daemon.journal.db, "operation", op),
+                     "cleanup_receipts": cleanup.receipts(self.daemon.ops, op)}
 
     async def cancel_operation(self, principal, op, **_):
         return 200, {"operation": self.daemon.ops.cancel(principal, op)}
