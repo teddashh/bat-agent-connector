@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Record the [Tauri v2 product scope](docs/product/realignment-v2.md) and
+  [integration status](docs/product/implementation-status.md) (R00). Keep the central Python backend and
+  share the browser/desktop UI; exclude Hub import and redefine B05 as Connector data preservation.
+  Desktop, Fleet parity and live acceptance remain tracked work, not completed capabilities.
+
 - Delivery acknowledged metadata conflicts ([design](docs/design/delivery.md), plan §09/§10/§15, C07): save a
   conflict settlement when an acknowledged PATCH reads back differently, releasing the PR for a fresh-digest update
   while retaining needs_attention and its audit. Resume and reconciliation use the saved conclusion without GitHub
