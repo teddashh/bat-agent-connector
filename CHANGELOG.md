@@ -7,6 +7,9 @@
   Optional keys explicitly report whether retries deduplicate; internal no-key sentinels never appear
   in operation reads. CLI read-only now guards daemon-backed mutations before dispatch as well.
 
+- Reject malformed deployment history cursors before querying, including integer overflow and
+  non-finite timestamps, while preserving valid integer ordering and saved page cursors.
+
 - Join in-flight deployment history reads before event acknowledgment, wait for every sibling read,
   and retain the selected history page through failed refreshes. Open reviewed confirmations keep their
   original generation while the event checkpoint waits for the form to close.

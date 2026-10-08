@@ -688,10 +688,17 @@ def history_page(ops, where, args, *, cursor=None, limit=50):
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
         raise OperationError("INVALID_PARAMS", "limit must be 1..200", 422)
     args = list(args)
-    if cursor:
+    if cursor is not None and cursor != "":
         try:
-            stamp, dep_id = json.loads(base64.urlsafe_b64decode(str(cursor) + "=" * (-len(str(cursor)) % 4)))
-            if (type(stamp) not in {int, float} or not math.isfinite(stamp) or not isinstance(dep_id, str)
+            if not isinstance(cursor, str):
+                raise ValueError()
+            decoded = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+            if not isinstance(decoded, list) or len(decoded) != 2:
+                raise ValueError()
+            stamp, dep_id = decoded
+            valid_stamp = ((type(stamp) is int and -(2**63) <= stamp <= 2**63 - 1)
+                           or (type(stamp) is float and math.isfinite(stamp)))
+            if (not valid_stamp or not isinstance(dep_id, str)
                     or not re.fullmatch(r"dep_[0-9a-f-]+", dep_id)):
                 raise ValueError()
         except (ValueError, TypeError, UnicodeError):
