@@ -1,4 +1,4 @@
-"""Session lifecycle helpers: permissions, quota failover, and gated cleanup.
+"""Session lifecycle helpers: permissions, quota failover, and read-only legacy evaluation.
 
 * ``session_set_permissions`` / ``approve_pending`` (write tier): make a session behave like
   a BAT GUI session with "allow bypass permissions" on. Raising to allow-all is only
@@ -7,10 +7,10 @@
   continued by a new Codex session in the SAME folder (same worktree + branch when the
   Claude session was a worktree session), with a handoff prompt (original task, latest
   instruction, recent output, git state). The old session is left untouched.
-* ``session_cleanup`` (orchestrate tier, ``auto_cleanup = true`` on the host): evaluates
+* ``session_cleanup`` (orchestrate tier; auto_cleanup deprecated): only evaluates
   orchestrated sessions and decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE with
   deterministic gates first and an optional Jev judgment last (Jev unavailable => escalate,
-  never merge). Branches are always kept, so a removed worktree can be recreated.
+  never merge). Apply is disabled; reviewed cleanup lives in cleanup.py.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import time
 import uuid
 from typing import Any
 
-from . import confinement, registry, resource_policy, task_control, verification
+from . import confinement, registry, resource_policy, service, task_control, verification
 from .errors import (
     BatError,
     InvokeTimeout,
@@ -41,8 +41,6 @@ from .orchestrate import (
     diff_stats,
     permission_options,
     registry_permission_fields,
-    worktree_merge,
-    worktree_remove,
 )
 from .orchestrate import (
     _guard as _orch_guard,
@@ -1323,8 +1321,7 @@ async def _evaluate(
     live = await resource_policy.live_check(c, pol)
     if live.issue:
         return decide("ESCALATE", f"{live.issue[0]}: {live.issue[1]}")
-    rehydrate = await resource_policy.authorize_session(fleet, host, "worktree.rehydrate", t, cls=pol, live=live)
-    st, rehydrated = await _wt_status(c, t, rehydrate=rehydrate)
+    st, rehydrated = await _wt_status(c, t)  # Legacy evaluation never re-registers BAT worktrees.
     row["rehydrated"] = rehydrated
     if not st:
         return decide("ESCALATE", "host has no worktree state (cannot judge merge safety)")
@@ -1427,7 +1424,7 @@ async def _evaluate(
     )
 
 
-async def _stop(fleet: Fleet, host: str, sid: str, audit: Audit) -> dict:
+async def _stop(fleet: Fleet, host: str, sid: str, audit: Audit, *, cleanup: bool = False) -> dict:
     c = fleet.client(host)
     t, _ = await _resolve_session(c, sid)
     try:
@@ -1438,14 +1435,23 @@ async def _stop(fleet: Fleet, host: str, sid: str, audit: Audit) -> dict:
     if meta is None:
         return {"stopped": False, "reason": "not loaded"}
     if meta.get("isStreaming"):
-        return {"stopped": False, "reason": "started streaming again; left running"}
+        return {"stopped": False, "reason": "started streaming again; left running",
+                **({"code": "ACTIVE_WRITER"} if cleanup else {})}
+    if cleanup and service._state_safe(service.agent_kind(t.get("agentPreset")), meta):
+        state = await c.invoke("claude:get-session-state", {"sessionId": sid})
+        if isinstance(state, dict) and state.get("isStreaming"):
+            return {"stopped": False, "code": "ACTIVE_WRITER", "reason": "session started streaming; preview again"}
+        if isinstance(state, dict) and any(state.get(k) for k in service.SESSION_WAITING_FIELDS):
+            return {"stopped": False, "code": "SESSION_WAITING", "reason": "session became waiting; preview again"}
     base = {"actor": fleet.actor, "tool": "session_cleanup", "host": host, "session_id": sid + "#stop"}
     audit.check_rate(host, sid + "#stop")
     audit.record(**base, channel="claude:stop-session", phase="attempt")
     try:
-        r = await c.invoke("claude:stop-session", {"sessionId": sid}, grant=grant,
+        r = await c.invoke("claude:stop-session", {"sessionId": sid}, grant=grant, retry_on_disconnect=not cleanup,
                            before_send=lambda: task_control.refuse_owned(fleet, host, sid))
     except BatError as e:
+        if cleanup:
+            raise
         audit.record(**base, channel="claude:stop-session", phase="result", ok=False, error=_err(e))
         return {"stopped": False, "error": _err(e)}
     audit.record(**base, channel="claude:stop-session", phase="result", ok=True)
@@ -1460,14 +1466,12 @@ async def session_cleanup(
     session_id: str | None = None,
     min_idle_s: float = 120,
 ) -> dict:
-    """Evaluate orchestrated sessions (and Claude sessions superseded by failover) and clean up."""
-    hc = fleet.config.host(host)
+    """Read-only legacy evaluation of orchestrated sessions and superseded Claude sessions."""
     if not fleet.orchestrate_enabled(host):
         raise WriteRefused(f"orchestrate tier is disabled for host {host!r}")
     if not dry_run:
-        _orch_guard(fleet, host, confirm)
-        if not hc.auto_cleanup:
-            raise WriteRefused(f"host {host!r}: auto_cleanup is not enabled in its config (dry_run works)")
+        from .operations import OperationError
+        raise OperationError("LEGACY_CLEANUP_DISABLED", "use batc resource-cleanup preview/apply", 409)
     c = fleet.client(host)
     ws = await _workspace(c)
     jev = Jev(fleet.config.jev)
@@ -1478,7 +1482,7 @@ async def session_cleanup(
         for e in entries
         if e.get("failover_of") and e.get("status") in ("active", "starting")
     }
-    live = {"active", "removed", "superseded"}
+    live = {"active", "removed", "superseded", *registry.RETIRED}
     cands = [e for e in entries if e.get("status") in live]
     # Claude GUI sessions that were failed over (not in the registry themselves)
     reg_ids = {e.get("session_id") for e in entries}
@@ -1529,62 +1533,6 @@ async def session_cleanup(
             dry_run=dry_run,
         )
         rows.append(r)
-    if not dry_run:
-        for r in rows:
-            sid = r["session_id"]
-            acts: list[str] = []
-            d = r.get("decision")
-            try:
-                if d in ("MERGE_AND_CLEAN", "CLEAN_ONLY") and r["gates"]["verified_candidate"]:
-                    cwd = r.get("candidate_cwd")
-                    current_head = await _candidate_head(c, cwd)
-                    current_dirty = await _git_dirty(c, cwd)
-                    if (current_head != r.get("candidate_commit") or current_dirty != [] or
-                            not verification.matches(verification.get(host, sid), current_head)):
-                        r["decision"] = "ESCALATE"
-                        r["reasons"].append("candidate changed after evaluation; verification invalid")
-                        audit.record(actor=fleet.actor, tool="session_cleanup", host=host,
-                                     session_id=sid + "#cleanup", phase="candidate_changed",
-                                     decision="ESCALATE", expected_commit=r.get("candidate_commit"),
-                                     current_commit=current_head)
-                        continue
-                if d == "MERGE_AND_CLEAN":
-                    r["gates"]["approved_for_merge"] = True
-                    m = await worktree_merge(fleet, host, sid, confirm=True)
-                    if not m.get("merged_now"):
-                        r["decision"] = "ESCALATE"
-                        r["reasons"].append(f"merge refused: {m.get('reason')}")
-                        continue
-                    acts.append(f"merged {r.get('branch')} -> {m.get('source_branch')}")
-                if r.get("decision") in ("MERGE_AND_CLEAN", "CLEAN_ONLY") and r.get("remove_worktree"):
-                    drop = bool(r.get("delete_branch"))
-                    x = await worktree_remove(fleet, host, sid, confirm=True, delete_branch=drop)
-                    if not x.get("removed"):
-                        r["reasons"].append(f"remove refused: {x.get('reason')}")
-                        r["stop"] = False
-                    else:
-                        acts.append(f"worktree removed (branch {r.get('branch')} {'deleted' if drop else 'kept'})")
-                if r.get("decision") in ("MERGE_AND_CLEAN", "CLEAN_ONLY") and r.get("stop"):
-                    s = await _stop(fleet, host, sid, audit)
-                    acts.append(
-                        "agent stopped"
-                        if s.get("stopped")
-                        else f"not stopped: {s.get('reason') or s.get('error')}"
-                    )
-                if r.get("decision") in ("MERGE_AND_CLEAN", "CLEAN_ONLY") and registry.get(host, sid):
-                    registry.update(host, sid, status="merged" if d == "MERGE_AND_CLEAN" else "cleaned")
-            except BatError as ex:
-                r["reasons"].append(f"action error: {_err(ex)}")
-            r["actions"] = acts
-            audit.record(
-                actor=fleet.actor,
-                tool="session_cleanup",
-                host=host,
-                session_id=sid + "#cleanup",
-                phase="done",
-                decision=r.get("decision"),
-                actions=acts,
-            )
     esc = [r for r in rows if r.get("decision") == "ESCALATE"]
     summary = None
     if esc:
@@ -1757,7 +1705,8 @@ async def fanout_plan_session(
 ) -> dict:
     """Start a fresh Codex planning session (host codex_model, own worktree, read-only instructions) that
     returns a ```bat-fanout plan for the person's verbatim message. Use when the main session is busy or
-    quota-stopped. After it answers, fanout_from_plan(session_id) starts the tasks and cleans the planner up."""
+    quota-stopped. After it answers, confirmed fanout_from_plan(session_id) stops the planner only when every
+    task starts; its worktree is kept for reviewed resource-cleanup."""
     from .orchestrate import session_start
 
     cap = fleet.config.safety.max_start_per_call
@@ -1787,7 +1736,7 @@ async def fanout_from_plan(
 ) -> dict:
     """Start one worktree session per item of the latest ```bat-fanout block in a session's replies, with the
     item's prompt verbatim (plus the BAT-STATUS request). Nothing is re-planned. A planner session made by
-    fanout_plan_session is cleaned up afterwards."""
+    fanout_plan_session is stopped only after confirmed, complete fan-out; its worktree is kept."""
     from .orchestrate import session_start
     from .service import session_read
 
@@ -1819,9 +1768,33 @@ async def fanout_from_plan(
     out["started"] = started
     e = registry.get(host, session_id)
     if e and e.get("role") == "planner":
-        try:
-            d = await session_cleanup(fleet, host, confirm=True, dry_run=False, session_id=session_id, min_idle_s=0)
-            out["planner_cleanup"] = [x.get("actions") or x.get("decision") for x in d.get("decisions", [])]
-        except BatError as ex:
-            out["planner_cleanup"] = f"not cleaned: {_err(ex)}"
+        kept = {"stopped": False, "worktree_kept": True, "next_action": "batc resource-cleanup"}
+        if confirm is not True:
+            kept["reason"] = "confirm=true is required; planner kept for retry"
+        elif any("error" in s for s in started):
+            count = sum("session_id" in s for s in started)
+            kept["reason"] = f"fan-out start failed; loop stopped after {count} of {len(plan['tasks'])} tasks; planner kept for retry"
+        elif len(started) != len(plan["tasks"]):
+            kept["reason"] = "fan-out loop stopped early; not every planned task started; planner kept for retry"
+        else:
+            try:
+                _orch_guard(fleet, host, confirm)
+                kept.update(await _stop(fleet, host, session_id, Audit(fleet.config.safety), cleanup=True))
+                reply = kept.get("result")
+                if kept["stopped"]:
+                    if (not isinstance(reply, dict) or reply.get("ok") is not True or
+                            await _meta(fleet.client(host), session_id) is not None):
+                        kept.update(stopped=False, code="STOP_UNPROVEN", reason="stop acknowledgement/read-back did not confirm termination")
+                    else:
+                        try:
+                            kept.update(registry.retire(host, session_id, "stopped", created_at=e.get("created_at"),
+                                        actor=fleet.actor, reason="confirmed fan-out planner stop"))
+                        except (BatError, registry.RegistryInvariantError, OSError) as ex:
+                            kept.update(capacity_released=False, registry_status=None,
+                                capacity_reason="registry_io_failed" if isinstance(ex, OSError) else "registry_refused",
+                                capacity_error={"code": getattr(ex, "code", "REGISTRY_IO_FAILED")})
+            except BatError as ex:
+                kept["stopped"] = False
+                kept["reason"] = _err(ex)
+        out["planner_cleanup"] = kept
     return out

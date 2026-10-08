@@ -23,7 +23,7 @@ Config file (default ``~/.config/bat-agent-connector/hosts.toml``)::
     orchestrate_register_tabs = false  # append a tab to the host workspace (workspace:save, append-only)
     default_permission_mode = "default" # default/allow_all preserve BAT policy; confined gates tools/sandboxes
     # confined Codex may block installs/network/local sockets; BAT cannot pass network or writable roots.
-    auto_cleanup = false               # allow session_cleanup to merge/remove/stop on this host
+    auto_cleanup = false               # deprecated: parses only; never enables cleanup writes
     codex_model = ""                   # default model for Codex sessions started/failed over here ("" = BAT default)
     profile_id = "default"             # workspace profile on the host
     managed_roots = []                 # host folders the connector owns (its own clones); see resource_policy.py
@@ -106,7 +106,7 @@ class HostConfig:
     orchestrate_max_sessions: int = 4
     orchestrate_register_tabs: bool = False
     default_permission_mode: str = "default"
-    auto_cleanup: bool = False
+    auto_cleanup: bool = False  # Deprecated: parses for compatibility; never enables cleanup writes.
     codex_model: str | None = None
     profile_id: str = "default"
     bat_profiles_dir: str = DEFAULT_BAT_PROFILES_DIR
@@ -230,6 +230,13 @@ class ApiConfig:
     stale_after_s: float = 180.0
     activity_every: int = 5
     allowed_origins: tuple[str, ...] = ()
+
+
+@dataclass
+class CleanupConfig:
+    retained_refs: str = "keep"
+    history_retention: str = "forever"
+    permanent_delete: bool = False
 
 
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
@@ -405,6 +412,7 @@ class Config:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     jev: JevConfig = field(default_factory=JevConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
     client_label: str = "BAT Agent Connector"
     path: Path | None = None
@@ -552,6 +560,12 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
         activity_every=max(1, min(100, int(a.get("activity_every", 5)))),
         allowed_origins=tuple(origins),
     )
+    cleanup_data = data.get("cleanup") or {}
+    if (set(cleanup_data) - {"retained_refs", "history_retention", "permanent_delete"} or
+            cleanup_data.get("retained_refs", "keep") != "keep" or
+            cleanup_data.get("history_retention", "forever") != "forever" or
+            cleanup_data.get("permanent_delete", False) is not False):
+        raise ConfigError('[cleanup] supports only retained_refs="keep", history_retention="forever", permanent_delete=false')
     cl = data.get("client") or {}
     label = str(cl.get("label") or "BAT Agent Connector")
     human = str(cl.get("human_name") or "").strip() or None

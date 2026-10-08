@@ -26,6 +26,10 @@ from .summarize import clip, iso_local, summarize_message, summarize_pending, ts
 MAX_LAST_N = 100
 MAX_READ_CHARS = 60_000
 MAX_PROMPT_CHARS = 20_000
+SESSION_WAITING_FIELDS = (
+    "pendingPermission", "pendingQuestion", "pendingPermissions", "pendingQuestions", "queuedMessages",
+    "pendingApproval", "pendingAskUser", "queuedMessageCount", "isWaitingForInput",
+)
 _write_locks: dict[tuple[int, str], asyncio.Lock] = {}
 
 

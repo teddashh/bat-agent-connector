@@ -87,6 +87,9 @@ def guard_start_record(entry: dict) -> None:
 
 
 def guard_new_start(entry: dict) -> None:
+    if entry.get("status") in registry.RETIRED:
+        from .errors import ResourceReadOnly
+        raise ResourceReadOnly("SESSION_RETIRED", "this session ID left the host cap; start a new session ID")
     guard_start_record(entry)
     if entry.get("start_sent") is True:
         raise ConfinementRefused("CONFINEMENT_START_UNSETTLED",

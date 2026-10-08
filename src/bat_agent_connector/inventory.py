@@ -463,15 +463,17 @@ class Inventory:
         return self._session_out(r, hosts, now or time.time())
 
     def session_document(self, host, session_id):
-        from . import checkpoints, work_items
+        from . import checkpoints, cleanup, work_items
         from .operations import OperationError
         row = self.get_session(host, session_id)
-        if row is None:
+        cleaned = cleanup.lookup(self.db, f"{host}/{session_id}", host)
+        if row is None and not cleaned:
             raise OperationError("NOT_FOUND", "session has no journal evidence", 404)
         discovery = [body(r[0]) for r in self.db.execute("SELECT body FROM discovery_latest WHERE host=?", (host,))]
         return {"session": row, "started_from": checkpoints.started_from(self.db, host, session_id),
                 "work_items": work_items.work_items_for(self.db, "session", f"{host}/{session_id}"),
-                "discovery": discovery, "relations_summary": row["relations"], "history_available": True}
+                "discovery": discovery, "relations_summary": row["relations"] if row else [],
+                "history_available": True, "cleanup": cleaned}
 
     def list_sessions(self, *, host: str | None = None, provenance: str | None = None,
                       api_access: str | None = None, attention: bool | None = None, include_gone: bool = False,
