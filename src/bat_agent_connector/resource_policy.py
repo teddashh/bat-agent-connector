@@ -371,6 +371,8 @@ async def live_check(c, cls: Classification, *, worktree: bool = True, folder: b
 def _decide(cls: Classification, m: Mutation, live: LiveCheck | None) -> tuple[str, str] | None:
     if cls.code:
         return cls.code, cls.reason or "read-only"
+    if cls.registry_status in registry.RETIRED and m.action.startswith("session.") and m.action != "session.stop":
+        return "SESSION_RETIRED", "this session ID left the host cap; start a new session ID"
     if m.action in BAT_WORKTREE_ACTIONS and cls.worktree_made_by == "connector":
         return ("NOT_A_BAT_WORKTREE", "the connector made this worktree over SSH and BAT has no record of it; "
                 "BAT's worktree actions would act on the workspace folder's repository")

@@ -16,6 +16,8 @@ from pathlib import Path
 
 from .config import state_dir
 
+RETIRED = frozenset({"stopped", "absent_at_cleanup"})
+
 
 def registry_path() -> Path:
     return state_dir() / "orchestrated.json"
@@ -88,6 +90,10 @@ def ensure_existing(host: str, entry: dict) -> None:
     p = registry_path()
     with _locked(p):
         items = _read(p)
+        if any(e.get("host") == host and e.get("session_id") == entry.get("session_id") and
+               e.get("status") in RETIRED for e in items):
+            from .errors import ResourceReadOnly
+            raise ResourceReadOnly("SESSION_RETIRED", "this session ID left the host cap; start a new session ID")
         for old in items:
             if old.get("host") == host and old.get("session_id") == entry.get("session_id"):
                 if (old.get("task_id") not in {None, entry.get("task_id")}
@@ -125,6 +131,10 @@ def reserve(host: str, entry: dict, max_active: int, replaces: str | None = None
     p = registry_path()
     with _locked(p):
         items = _read(p)
+        if any(e.get("host") == host and e.get("session_id") == entry.get("session_id") and
+               e.get("status") in RETIRED for e in items):
+            from .errors import ResourceReadOnly
+            raise ResourceReadOnly("SESSION_RETIRED", "this session ID left the host cap; start a new session ID")
         # The earlier caller-side lookup is only a hint. This check and the reservation
         # must share the flock, including when two independent MCP processes race.
         old = entry.get("failover_of")
@@ -177,6 +187,31 @@ def update(host: str, session_id: str, **fields) -> None:
                 e.update(fields)
                 e["updated_at"] = time.time()
         _write(p, items)
+
+
+def retire(host: str, session_id: str, status: str, *, created_at, actor: str, reason: str,
+           operation_id: str | None = None, carrier_resource_id: str | None = None) -> None:
+    """Release capacity for a confirmed runtime generation without retiring its worktree/history."""
+    if status not in RETIRED:
+        raise ValueError("invalid session retirement status")
+    p = registry_path()
+    with _locked(p):
+        items = _read(p)
+        for e in items:
+            if (e.get("host") != host or e.get("session_id") != session_id or e.get("created_at") != created_at
+                    or e.get("task_id") or e.get("status") not in {"active", "superseded", "removed", *RETIRED}):
+                continue
+            retirement = {"actor": actor, "reason": reason, "operation_id": operation_id,
+                          "carrier_resource_id": carrier_resource_id}
+            if e.get("status") == status and e.get("retirement") == retirement:
+                return
+            e.update(status=status, retired_at=time.time(), retirement=retirement, updated_at=time.time())
+            if status == "stopped":
+                e.update(stopped_at=e["retired_at"], stopped_by=actor)
+            _write(p, items)
+            return
+    from .errors import ResourceReadOnly
+    raise ResourceReadOnly("BINDING_MISMATCH", "registry generation/status changed before session retirement")
 
 
 def claim_warm(host: str, session_id: str, *, previous_task_id: str, task_id: str,

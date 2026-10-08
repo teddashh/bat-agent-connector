@@ -223,6 +223,11 @@ item is done.
   read-back rules. already_absent is a separate definitive receipt and summary count, satisfies dependencies,
   and causes no per-item host call, tombstone or registry cleaned mark: cleanup did not remove that resource.
   Read its original IDs and observation through the operation receipt.
+  Confirmed planner stops leave the host cap as stopped while their worktrees stay reclaimable. Reviewed
+  absence leaves the cap as absent_at_cleanup when its carrier is removed/already absent or it has no
+  own worktree; retained worktrees keep the resume slot. The receipt records capacity_released and
+  stopped_by_cleanup=false. Retired IDs refuse drive/resume/same-ID start with SESSION_RETIRED; start a
+  new ID through the normal cap check. Ownership and original creation IDs remain connector-managed.
   Use cleanup_tombstones to find original IDs, location, reasons and PR destinations,
   cleanup_retained to read actual retained refs. Restore comes in Part B; no tool can revive a runtime.
   Legacy session_cleanup is read-only evaluation; apply always returns LEGACY_CLEANUP_DISABLED. auto_cleanup is

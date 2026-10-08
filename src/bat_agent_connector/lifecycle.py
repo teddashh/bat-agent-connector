@@ -1315,7 +1315,7 @@ async def session_cleanup(
         for e in entries
         if e.get("failover_of") and e.get("status") in ("active", "starting")
     }
-    live = {"active", "removed", "superseded"}
+    live = {"active", "removed", "superseded", *registry.RETIRED}
     cands = [e for e in entries if e.get("status") in live]
     # Claude GUI sessions that were failed over (not in the registry themselves)
     reg_ids = {e.get("session_id") for e in entries}
@@ -1609,8 +1609,17 @@ async def fanout_from_plan(
         else:
             try:
                 _orch_guard(fleet, host, confirm)
-                kept.update(await _stop(fleet, host, session_id, Audit(fleet.config.safety)))
+                kept.update(await _stop(fleet, host, session_id, Audit(fleet.config.safety), cleanup=True))
+                reply = kept.get("result")
+                if kept["stopped"]:
+                    if (not isinstance(reply, dict) or reply.get("ok") is not True or
+                            await _meta(fleet.client(host), session_id) is not None):
+                        kept.update(stopped=False, code="STOP_UNPROVEN", reason="stop acknowledgement/read-back did not confirm termination")
+                    else:
+                        registry.retire(host, session_id, "stopped", created_at=e.get("created_at"), actor=fleet.actor,
+                                        reason="confirmed fan-out planner stop")
             except BatError as ex:
+                kept["stopped"] = False
                 kept["reason"] = _err(ex)
         out["planner_cleanup"] = kept
     return out

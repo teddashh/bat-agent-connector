@@ -118,6 +118,12 @@ guards／session markers、pending／running 回執改 failed 並保存 refusal 
 Item status=already_absent 是獨立 definitive receipt，result.items 與 summary.already_absent 分別列出，
 不算 retained。它只保存經全 plan 驗證的 absence／original IDs，沒有 per-item host call、tombstone／aliases
 或 registry cleaned mark；不是 cleanup 移除的證據。Dependencies 接受 succeeded 或 already_absent。
+Confirmed planner stop 的 registry status=stopped，已不占 host cap；ACK／read-back 未確認時不改。
+Already-absent session 的 worktree 本次 succeeded／already_absent，或沒有自己的 worktree時，status 改為
+absent_at_cleanup，retirement 記 actor／operation_id／carrier_resource_id。回執 after_state 有
+capacity_released=true、registry_status、carrier_resource_id、stopped_by_cleanup=false；不建 session tombstone。
+Worktree retained 時 absent session 的 active slot 留著供 resume。已退休的 ID 的 drive／client-resume／
+same-ID start／registry recovery 回 SESSION_RETIRED (409)；人可用新 ID 經原 cap reserve，ownership 仍 connector_managed。
 GET /operations/{id} 的 cleanup_receipts／tombstone 回執包含 completed_phases=[{resource_id,phase,effect,step,result}]、
 refused_phases（同形但 error）及 cancel_requested。它們投影 durable steps／operation，含 approved DAG 的
 prerequisites，不因後續失敗消失。result.items 是最後一次 progress snapshot；cancel 後以 live cleanup_receipts
