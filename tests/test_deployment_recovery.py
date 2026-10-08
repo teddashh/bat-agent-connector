@@ -11,7 +11,7 @@ from bat_agent_connector import deployment_store as store
 from bat_agent_connector.operations import ActionDef, OperationError, OperationService
 from tests import test_delivery as fixtures
 from tests.test_delivery import HEAD, MERGED, TED, settle
-from tests.test_deployments import completed, deployed, source_on_main, start
+from tests.test_deployments import completed, deployed, reconcile_due, source_on_main, start
 
 gh = fixtures.gh
 make_daemon = fixtures.make_daemon
@@ -46,7 +46,7 @@ async def test_legacy_terminal_states_release_unsent_or_definitively_failed_reci
     assert d.ops.db.execute("PRAGMA user_version").fetchone()[0] == 3
     new = await start(d, key="new")
     assert new["status"] == "accepted"
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert gh.count("GET", "/runs/") == gh.count("POST", "dispatches") == 0
     assert d.ops.get(old["operation_id"])["status"] == status
 
@@ -75,10 +75,10 @@ async def test_legacy_run_blocks_alias_of_real_environment_until_provider_termin
     waiting = await settle(d, pending["operation_id"], rounds=1)
     assert waiting["status"] == "waiting_external" and "waiting_order" in waiting["status_reason"]
     assert gh.count("POST", "dispatches") == 0
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert not deployment.get(d.ops, dep["deployment_id"])["provider_terminal"]
     completed(gh, run["id"])
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert deployment.get(d.ops, dep["deployment_id"])["provider_terminal"]
     assert d.ops.get(old["operation_id"])["status"] == "cancelled"
     await settle(d, pending["operation_id"], rounds=1)
@@ -106,10 +106,10 @@ async def test_cancelled_combined_on_merge_holds_slot_through_late_push_run(make
         dep_id = waiting["external_refs"]["deployment_id"]
         d.ops.cancel(TED, op["operation_id"])
     writes = gh.count("PUT", "merge-async")
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert not deployment.get(d.ops, dep_id)["provider_terminal"]
     gh.merge(7)
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     dep = deployment.get(d.ops, dep_id)
     assert not dep["provider_terminal"] and dep["identity"]["source_sha"] == MERGED
     assert dep["merge_binding"]["reviewed_head_sha"] == HEAD
@@ -118,11 +118,11 @@ async def test_cancelled_combined_on_merge_holds_slot_through_late_push_run(make
     assert e.value.code == "DEPLOY_IN_PROGRESS"
     run = gh.add_run(head_sha=MERGED, event="push")
     clock[0] += 300
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert deployment.get(d.ops, dep_id)["run_id"] == run["id"]
     assert not deployment.get(d.ops, dep_id)["provider_terminal"]
     completed(gh, run["id"])
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert deployment.get(d.ops, dep_id)["provider_terminal"]
     await start(d, key="unblocked")
     assert d.ops.get(op["operation_id"])["status"] == "cancelled"
@@ -134,7 +134,7 @@ async def test_legacy_cancelled_dispatch_merge_uses_config_mode_and_never_locate
     gh.add_pr(7, HEAD)
     op, dep = legacy_operation(d, merge=True)
     gh.merge(7)
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert deployment.get(d.ops, dep["deployment_id"])["provider_terminal"]
     assert deployment.get(d.ops, dep["deployment_id"])["recipe_snapshot"]["mode"] == "workflow_dispatch"
     assert gh.count("GET", "/runs") == gh.count("POST", "dispatches") == gh.count("PUT", "merge-async") == 0
@@ -154,7 +154,7 @@ async def test_cancelled_legacy_on_merge_requires_reviewed_head_and_ref_or_unmer
             pr["head"]["sha"] = "1" * 40
         else:
             gh.branches["main"] = "b" * 40
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert deployment.get(d.ops, dep["deployment_id"])["provider_terminal"] == (case == "closed")
     assert gh.count("GET", "/runs") == gh.count("POST", "dispatches") == gh.count("PUT", "merge-async") == 0
 
@@ -182,7 +182,7 @@ async def test_reconcile_budget_skips_twenty_settled_rows_and_polls_current_once
     gh.requests.clear()
     clock = [1000.0]
     monkeypatch.setattr(deployment, "reconcile_now", lambda: clock[0])
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     clock[0] += 10
     fresh = OperationService(d.journal, actions=delivery.ACTIONS)
     fresh.context.update(d.ops.context)
@@ -214,7 +214,7 @@ async def test_lost_dispatch_locate_is_throttled_across_restart_and_filters_save
     gh.requests.clear()
     clock = [1000.0]
     monkeypatch.setattr(deployment, "reconcile_now", lambda: clock[0])
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     version = deployment.get(d.ops, dep["deployment_id"])["version"]
     clock[0] += 10
     fresh = OperationService(d.journal, actions=delivery.ACTIONS)
@@ -254,15 +254,102 @@ async def test_current_reconcile_cadence_is_shared_when_current_changes(make_dae
     await deployed(d, gh)
     clock = [1000.0]
     monkeypatch.setattr(deployment, "reconcile_now", lambda: clock[0])
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     second = await deployed(d, gh, key="second")
     clock[0] = 1010
     gh.requests.clear()
     verifier = d.ops.context["deployment_verifier"]
     calls = verifier.calls
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert not gh.requests and verifier.calls == calls
     clock[0] = 1300
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert gh.count("GET", f"/runs/{second['result']['run_id']}$") == 1
     assert verifier.calls == calls + 1
+
+
+async def test_stopped_provider_cadence_bounds_hour_and_resets_on_state_change(make_daemon, gh, monkeypatch):
+    d = make_daemon()
+    source_on_main(gh)
+    op = await start(d)
+    waiting = await settle(d, op["operation_id"], rounds=1)
+    dep_id, rid = waiting["external_refs"]["deployment_id"], waiting["external_refs"]["deploy_run_id"]
+    completed(gh, rid)
+    gh.pending_deployments[rid] = [{"environment": {"name": "production"}}]
+    d.ops.cancel(TED, op["operation_id"])
+    clock = [1000.0]
+    monkeypatch.setattr(deployment, "reconcile_now", lambda: clock[0])
+    gh.requests.clear()
+    for second in range(0, 3601, 10):
+        clock[0] = 1000 + second
+        fresh = OperationService(d.journal, actions=delivery.ACTIONS)
+        fresh.context.update(d.ops.context)
+        await delivery.reconcile_deployments(fresh)
+    assert 12 <= gh.count("GET", f"/runs/{rid}$") <= 18
+    assert len(gh.requests) <= 54  # run + one jobs page + pending approvals, never every 10 seconds
+    assert deployment.get(d.ops, dep_id)["provider_terminal"] is False
+    row = d.ops.db.execute("SELECT * FROM deployment_reconcile_reads WHERE read_key=?", ("provider:" + dep_id,)).fetchone()
+    assert row["interval_s"] == 300
+    gh.runs[rid]["status"] = "in_progress"
+    clock[0] = row["checked_at"] + row["interval_s"]
+    await delivery.reconcile_deployments(d.ops)
+    assert d.ops.db.execute("SELECT interval_s FROM deployment_reconcile_reads WHERE read_key=?", ("provider:" + dep_id,)).fetchone()[0] == 15
+    completed(gh, rid)
+    gh.pending_deployments[rid] = []
+    clock[0] += 14
+    await delivery.reconcile_deployments(d.ops)
+    assert deployment.environment_status(d.ops, "prod")["slot_deployment_id"] == dep_id
+    clock[0] += 1
+    await delivery.reconcile_deployments(d.ops)
+    assert deployment.environment_status(d.ops, "prod")["slot_deployment_id"] is None
+    assert gh.count("POST", "dispatches") == 0
+
+
+async def test_reconcile_success_clears_error_once_without_unchanged_version_writes(make_daemon, gh, monkeypatch):
+    d = make_daemon()
+    source_on_main(gh)
+    op = await start(d)
+    waiting = await settle(d, op["operation_id"], rounds=1)
+    d.ops.cancel(TED, op["operation_id"])
+    dep_id, rid = waiting["external_refs"]["deployment_id"], waiting["external_refs"]["deploy_run_id"]
+    clock = [1000.0]
+    monkeypatch.setattr(deployment, "reconcile_now", lambda: clock[0])
+    gh.script.append(("GET", f"/runs/{rid}$", 403, {}, {}))
+    await delivery.reconcile_deployments(d.ops)
+    assert deployment.get(d.ops, dep_id)["reconciliation_error"] == "GITHUB_403"
+    clock[0] += 15
+    await delivery.reconcile_deployments(d.ops)
+    assert deployment.get(d.ops, dep_id)["reconciliation_error"] is None
+    version = deployment.get(d.ops, dep_id)["version"]
+    clock[0] += 15
+    await delivery.reconcile_deployments(d.ops)
+    assert deployment.get(d.ops, dep_id)["version"] == version
+
+
+async def test_reconcile_bad_row_logs_and_continues_without_repeated_version_writes(make_daemon, gh, monkeypatch, caplog):
+    d = make_daemon()
+    source_on_main(gh)
+    cfg = d.ops.context["github_config"]
+    cfg.recipes["staging"] = replace(cfg.recipes["prod"], name="staging", environment="staging")
+    a, b = await start(d), await start(d, name="staging", key="staging")
+    wa, wb = await settle(d, a["operation_id"], rounds=1), await settle(d, b["operation_id"], rounds=1)
+    for op in (a, b):
+        d.ops.cancel(TED, op["operation_id"])
+    bad = wa["external_refs"]["deployment_id"]
+    original = deployment.observe
+    async def observe(ops, dep, *args, **kwargs):
+        if dep["deployment_id"] == bad:
+            raise RuntimeError("synthetic failure")
+        return await original(ops, dep, *args, **kwargs)
+    monkeypatch.setattr(deployment, "observe", observe)
+    clock = [1000.0]
+    monkeypatch.setattr(deployment, "reconcile_now", lambda: clock[0])
+    gh.requests.clear()
+    await delivery.reconcile_deployments(d.ops)
+    assert deployment.get(d.ops, bad)["reconciliation_error"] == "RECONCILE_FAILED"
+    assert "RuntimeError" in caplog.text
+    assert gh.count("GET", f"/runs/{wb['external_refs']['deploy_run_id']}$") == 1
+    version = deployment.get(d.ops, bad)["version"]
+    clock[0] += 15
+    await delivery.reconcile_deployments(d.ops)
+    assert deployment.get(d.ops, bad)["version"] == version

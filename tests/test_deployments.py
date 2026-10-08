@@ -19,6 +19,12 @@ make_daemon = fixtures.make_daemon
 NEW = "1" * 40
 
 
+async def reconcile_due(ops):
+    """Existing recovery scenarios advance to the next provider read, retaining every negative assertion."""
+    ops.db.execute("UPDATE deployment_reconcile_reads SET checked_at=checked_at-300 WHERE read_key LIKE 'provider:%'")
+    await delivery.reconcile_deployments(ops)
+
+
 async def start(
     d, *, name="prod", sha=MERGED, key="deploy", action="deployment.start", params=None, pre=None
 ):
@@ -282,14 +288,14 @@ async def test_issue32_cancel_keeps_provider_slot_and_recipe_lock_until_terminal
     with pytest.raises(OperationError) as e:
         await start(d, key="blocked")
     assert e.value.code == "DEPLOY_IN_PROGRESS"
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert deployment.environment_status(d.ops, "prod")["slot_deployment_id"] == dep_id
     if combined:
         gh.merge(7)
     else:
         completed(gh, w["external_refs"]["deploy_run_id"])
     writes = gh.count("POST", "dispatches") + gh.count("PUT", "merge-async")
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert deployment.environment_status(d.ops, "prod")["slot_deployment_id"] is None
     assert d.ops.get(op["operation_id"])["status"] == "cancelled"
     assert gh.count("POST", "dispatches") + gh.count("PUT", "merge-async") == writes
@@ -370,7 +376,7 @@ async def test_d05_late_old_run_is_superseded_never_current(make_daemon, gh):
     completed(gh, wn["external_refs"]["deploy_run_id"])
     done = await settle(d, newer["operation_id"])
     assert done["status"] == "succeeded"
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert (
         deployment.environment_status(d.ops, "prod")["current"]["deployment_id"]
         == done["result"]["deployment_id"]
@@ -384,14 +390,14 @@ async def test_d05_runtime_drift_invalidates_current_without_redispatch(make_dae
     source_on_main(gh)
     done = await deployed(d, gh)
     gh.deployed_source = NEW
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     env = deployment.environment_status(d.ops, "prod")
     assert env["current"] is None and env["attention"] == "ENVIRONMENT_VERSION_DRIFT"
     assert env["last_verified"]["deployment_id"] == done["result"]["deployment_id"]
     before = d.journal.db.execute("SELECT count(*) FROM api_events WHERE kind='deployment.drift'").fetchone()[
         0
     ]
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert (
         d.journal.db.execute("SELECT count(*) FROM api_events WHERE kind='deployment.drift'").fetchone()[0]
         == before
@@ -409,11 +415,11 @@ async def test_d05_restart_and_cancel_keep_provider_slot_and_desired(make_daemon
     fresh = OperationService(d.journal, actions=delivery.ACTIONS)
     fresh.context.update(d.ops.context)
     d.ops = fresh
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     env = deployment.environment_status(d.ops, "prod")
     assert env["desired_generation"] == 1 and env["slot_deployment_id"] == w["external_refs"]["deployment_id"]
     completed(gh, w["external_refs"]["deploy_run_id"])
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     env = deployment.environment_status(d.ops, "prod")
     assert env["slot_deployment_id"] is None and env["desired_generation"] == 1
     assert d.ops.get(op["operation_id"])["status"] == "cancelled"
@@ -507,7 +513,7 @@ async def test_d05_current_survives_old_verification_that_arrives_after_new_reco
     # Provider is terminal, but the old operation has no runtime proof yet.
     await settle(d, old["operation_id"], rounds=1)
     d.ops.cancel(TED, old["operation_id"])
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     gh.commits[NEW] = {"sha": NEW, "parents": [{"sha": MERGED}]}
     gh.branches["main"] = NEW
     d.ops.context["deployment_verifier"].response = None
@@ -516,7 +522,7 @@ async def test_d05_current_survives_old_verification_that_arrives_after_new_reco
     completed(gh, n["external_refs"]["deploy_run_id"], source=NEW)
     new = await settle(d, newer["operation_id"])
     assert new["status"] == "succeeded"
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     env = deployment.environment_status(d.ops, "prod")
     assert env["current"]["deployment_id"] == new["result"]["deployment_id"]
     assert deployment.status(d.ops, w["external_refs"]["deployment_id"])["state"] == "superseded"
@@ -543,7 +549,7 @@ async def test_d03_external_rerun_invalidates_current_and_keeps_original_attempt
     done = await deployed(d, gh)
     dep_id, rid = done["result"]["deployment_id"], done["result"]["run_id"]
     gh.runs[rid].update(run_attempt=2, status="in_progress", conclusion=None)
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     env = deployment.environment_status(d.ops, "prod")
     assert env["current"] is None and env["attention"] == "DEPLOY_ATTEMPT_CHANGED"
     assert env["slot_deployment_id"] == dep_id
@@ -551,7 +557,7 @@ async def test_d03_external_rerun_invalidates_current_and_keeps_original_attempt
     assert d.ops.get(done["operation_id"])["status"] == "succeeded"
     assert gh.count("POST", "dispatches") == 1
     gh.runs[rid].update(status="completed", conclusion="success")
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert deployment.environment_status(d.ops, "prod")["slot_deployment_id"] is None
 
 
@@ -672,17 +678,17 @@ async def test_issue32_cancelled_on_merge_wait_keeps_slot_until_the_exact_run_fi
     op = await start(d)
     w = await settle(d, op["operation_id"], rounds=1)
     d.ops.cancel(TED, op["operation_id"])
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert (
         deployment.environment_status(d.ops, "prod")["slot_deployment_id"]
         == w["external_refs"]["deployment_id"]
     )
     run = gh.add_run(head_sha=MERGED, event="push")
     clock[0] += 300
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert deployment.environment_status(d.ops, "prod")["slot_deployment_id"]
     completed(gh, run["id"])
-    await delivery.reconcile_deployments(d.ops)
+    await reconcile_due(d.ops)
     assert deployment.environment_status(d.ops, "prod")["slot_deployment_id"] is None
     assert d.ops.get(op["operation_id"])["status"] == "cancelled" and gh.count("POST", "dispatches") == 0
 
