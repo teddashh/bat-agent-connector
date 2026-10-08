@@ -21,6 +21,7 @@ from .fleet import Fleet
 from .jev import Jev
 from .redact import redact_secrets
 from .relay import parse_status
+from .resource_policy import classify_row_for_read
 from .service import (
     _agent_terminals,
     _err,
@@ -259,6 +260,7 @@ async def _host_triage(
     ws_by_id = {w.get("id"): w for w in ws.get("workspaces") or []}
     terms = _agent_terminals(ws)
     known = {t.get("id") for t in terms}
+    entries = registry.list_entries(name)
     for e in registry.list_entries(name, active_only=True):
         if e.get("session_id") not in known:
             terms.append(registry_terminal(e))
@@ -288,6 +290,7 @@ async def _host_triage(
             "worktree_branch": t.get("worktreeBranch"),
             "loaded": meta is not None,
             "orchestrated": bool(t.get("_orchestrated")) or registry.get(name, t.get("id")) is not None,
+            **classify_row_for_read(c.host, t.get("id"), has_tab=not t.get("_orchestrated"), entries=entries),
         }
         try:
             snap = await session_snapshot(c, t, meta)

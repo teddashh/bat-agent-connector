@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import __version__, lifecycle, orchestrate, service, triage
+from . import __version__, lifecycle, orchestrate, resource_policy, service, triage
 from .config import DEFAULT_BAT_PROFILES_DIR, default_config_path, load_config
 from .errors import BatError
 from .fleet import Fleet
@@ -89,17 +89,34 @@ def r_sessions(o):
                 s["agent_kind"],
                 state,
                 pend,
+                "managed" if s.get("api_access") == "managed" else s.get("provenance", "?"),
                 s["last_activity_age"],
                 s["last_activity"],
                 s["title"],
             ]
         )
     _table(
-        rows, ["host", "session", "workspace", "agent", "state", "pending", "age", "last_activity", "title"]
+        rows,
+        ["host", "session", "workspace", "agent", "state", "pending", "access", "age", "last_activity", "title"],
     )
     print(f"({o['count']} of {o['total_matched']})")
     for h, e in o["errors"].items():
         print(f"! {h}: {e}", file=sys.stderr)
+
+
+def r_policy(o):
+    print(f"{o['host']}: managed_roots={o['managed_roots'] or '-'} "
+          f"shared_clone_worktrees={o['shared_clone_worktrees']}")
+    if "mutations" in o:
+        _table([[m["action"], m["via"], ", ".join(m["channels"]) or "-", m["rule"]] for m in o["mutations"]],
+               ["action", "via", "channels", "rule"])
+        return
+    print(f"{o['session_id']}: {o['provenance']} ({o['api_access']}) folder={o['workdir']} "
+          f"owner={o['workdir_owner']} isolation={o['isolation'] or '-'}")
+    for e in o["evidence"]:
+        print(f"  evidence: {e}")
+    _table([[a, "yes" if v["allowed"] else "no", v.get("code") or "", v.get("reason") or ""]
+            for a, v in o["actions"].items()], ["action", "allowed", "code", "reason"])
 
 
 def r_read(o):
@@ -199,6 +216,8 @@ async def _run(args) -> Any:
                 not args.fast,
                 args.limit,
             ), r_sessions
+        if c == "policy":
+            return await resource_policy.session_policy(fleet, args.host, args.session), r_policy
         if c == "read":
             return await service.session_read(
                 fleet, args.host, args.session, args.n, args.offset, args.tools, args.max_chars, after=args.after
@@ -396,6 +415,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pending", choices=["auto", "all", "none"], default="auto")
     p.add_argument("--fast", action="store_true", help="skip transcript/archive lookups for last activity")
     p.add_argument("--limit", type=int, default=50)
+    p = sp.add_parser("policy", help="who may change what: a host's mutation table, or one session's verdicts")
+    p.add_argument("host")
+    p.add_argument("session", nargs="?")
     p = sp.add_parser("read", help="read latest messages of a session")
     p.add_argument("host")
     p.add_argument("session")

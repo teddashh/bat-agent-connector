@@ -28,9 +28,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import registry
+from . import registry, resource_policy
 from .errors import BatError, WriteRefused
 from .fleet import Fleet
+from .resource_policy import WriteGrant
 from .safety import Audit
 from .service import _err, _meta, _resolve_session, _workspace, _write_lock, agent_kind
 
@@ -66,14 +67,15 @@ def _origin_cwd(t: dict, ws: dict) -> str | None:
     return w.get("folderPath")
 
 
-async def _wt_status(c, t: dict, *, allow_rehydrate: bool) -> tuple[dict | None, bool]:
+async def _wt_status(c, t: dict, *, rehydrate: WriteGrant | None = None) -> tuple[dict | None, bool]:
+    """Host worktree state; with a policy grant, re-register a tracked worktree BAT forgot."""
     st = await c.invoke("worktree:status", {"sessionId": t["id"]})
     if isinstance(st, dict):
         return st, False
     snap = await c.invoke("claude:get-worktree-status", {"sessionId": t["id"]})
     if isinstance(snap, dict) and snap:
         return snap, False
-    if allow_rehydrate and t.get("worktreePath") and t.get("worktreeBranch"):
+    if rehydrate is not None and t.get("worktreePath") and t.get("worktreeBranch"):
         await c.invoke(
             "worktree:rehydrate",
             {
@@ -82,6 +84,7 @@ async def _wt_status(c, t: dict, *, allow_rehydrate: bool) -> tuple[dict | None,
                 "worktreePath": t["worktreePath"],
                 "branchName": t["worktreeBranch"],
             },
+            grant=rehydrate,
         )
         st = await c.invoke("worktree:status", {"sessionId": t["id"]})
         return (st if isinstance(st, dict) else None), True
@@ -120,6 +123,7 @@ async def worktree_status(fleet: Fleet, host: str, workspace: str | None = None)
     ws_by_id = {w.get("id"): w for w in ws.get("workspaces") or []}
     terms = [t for t in ws.get("terminals") or [] if t.get("worktreePath")]
     known = {t.get("id") for t in terms}
+    entries = registry.list_entries(host)
     from .service import registry_terminal
 
     for e in registry.list_entries(host, active_only=True):
@@ -136,12 +140,14 @@ async def worktree_status(fleet: Fleet, host: str, workspace: str | None = None)
     out = []
     for t in terms:
         try:
-            st, _ = await _wt_status(c, t, allow_rehydrate=False)
+            st, _ = await _wt_status(c, t)
             row = _summ(host, t, st, False, 0)
         except BatError as e:
             row = {"host": host, "session_id": t.get("id"), "error": _err(e)}
         row["workspace"] = (ws_by_id.get(t.get("workspaceId")) or {}).get("name")
         row["orchestrated"] = registry.get(host, t.get("id")) is not None
+        row.update(resource_policy.classify_row_for_read(
+            c.host, t.get("id"), has_tab=not t.get("_orchestrated", False), entries=entries))
         out.append(row)
     return {"host": host, "worktrees": out, "count": len(out)}
 
@@ -152,7 +158,7 @@ async def session_worktree_status(
     c = fleet.client(host)
     t, ws = await _resolve_session(c, session_id)
     max_diff_chars = max(0, min(100_000, int(max_diff_chars)))
-    st, _ = await _wt_status(c, t, allow_rehydrate=False)
+    st, _ = await _wt_status(c, t)
     d = _summ(host, t, st, include_diff, max_diff_chars)
     wt = d["worktree_path"]
     dirty = await _git_dirty(c, wt) if wt else None
@@ -255,6 +261,14 @@ async def session_start(
     if agent == "codex" and not model and hc.codex_model:
         model = hc.codex_model
     sid = session_id or str(uuid.uuid4())
+    # Read-only: how the host resolves the destination, so links into a human checkout are caught up front.
+    git_roots = {}
+    for path in {folder, cwd_override} - {None}:
+        root = await c.invoke("git:getRoot", {"cwd": path})
+        git_roots[resource_policy.norm(path)] = root if isinstance(root, str) else None
+    grant = resource_policy.authorize_new_session(hc, sid, folder=folder, use_worktree=use_worktree,
+                                                  cwd_override=cwd_override, task_id=task_id,
+                                                  git_roots=git_roots)
     async with _write_lock(host):
         audit.check_rate(host, "#orchestrate-start-" + sid)
         registry.reserve(
@@ -267,6 +281,7 @@ async def session_start(
                 "origin_cwd": folder,
                 "model": model,
                 "title": title,
+                "isolation": grant.isolation,
                 **({"task_id": task_id, "role": "lead"} if task_id else {}),
             },
             hc.orchestrate_max_sessions,
@@ -279,7 +294,8 @@ async def session_start(
                 audit.record(**base, channel="worktree:create", phase="attempt")
                 wt = await c.invoke(
                     "worktree:create", {"sessionId": sid, "cwd": folder, "installPnpm": False,
-                                         **({"baseBranch": base_branch} if base_branch else {})}
+                                         **({"baseBranch": base_branch} if base_branch else {})},
+                    grant=grant,
                 )
                 if not isinstance(wt, dict) or wt.get("success") is False or not wt.get("worktreePath"):
                     err = (wt or {}).get("error") if isinstance(wt, dict) else "unexpected reply"
@@ -294,6 +310,10 @@ async def session_start(
                     **base, channel="worktree:create", phase="result", ok=True, branch=wt.get("branchName"),
                     source_branch=wt.get("sourceBranch"), requested_base_branch=base_branch
                 )
+                origin_root = git_roots.get(resource_policy.norm(folder))
+                # No rollback on refusal: a worktree at an unexpected path may be a person's checkout, and
+                # worktree:remove with deleteBranch could delete their branch. Fail closed and leave it.
+                grant = resource_policy.check_new_worktree(grant, hc, folder, wt.get("worktreePath"), origin_root)
             cwd = cwd_override or wt.get("worktreePath") or folder
             if use_worktree:
                 rows = await c.invoke("git:log", {"cwd": cwd, "count": 1})
@@ -314,14 +334,14 @@ async def session_start(
                 )
             audit.record(**base, channel="claude:start-session", phase="attempt", preset=preset)
             try:
-                started = await c.invoke("claude:start-session", {"sessionId": sid, "options": opts})
+                started = await c.invoke("claude:start-session", {"sessionId": sid, "options": opts}, grant=grant)
                 if (not isinstance(started, dict) or started.get("ok") is False or
                         started.get("sessionId") != sid):
                     raise WriteRefused("BAT start reply did not confirm the reserved session ID")
             except BatError as e:
                 audit.record(**base, channel="claude:start-session", phase="result", ok=False, error=_err(e))
                 if use_worktree and not retain_on_error:  # may have reached BAT on timeout
-                    await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": True})
+                    await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": True}, grant=grant)
                     audit.record(**base, channel="worktree:remove", phase="rollback", ok=True)
                 raise
             audit.record(**base, channel="claude:start-session", phase="result", ok=True)
@@ -335,6 +355,7 @@ async def session_start(
             cwd=cwd,
             worktree_path=cwd if cwd_override else wt.get("worktreePath"),
             branch=external_branch if cwd_override else wt.get("branchName"),
+            origin_root=git_roots.get(resource_policy.norm(folder)),
             **registry_permission_fields(opts),
         )
         tab = None
@@ -357,7 +378,8 @@ async def session_start(
             if use_worktree:
                 term.update(worktreePath=wt["worktreePath"], worktreeBranch=wt.get("branchName"))
             try:
-                tab = await c.append_workspace_terminal(hc.profile_id, term)
+                tab = await c.append_workspace_terminal(hc.profile_id, term,
+                                                        grant=resource_policy.authorize_register_tab(host, sid))
             except BatError as e:
                 tab = {"appended": False, "error": _err(e)}
             audit.record(
@@ -375,7 +397,7 @@ async def session_start(
             try:
                 ack = await c.invoke(
                     "claude:send-message", {"sessionId": sid, "prompt": prompt, "clientMessageId": mid},
-                    retry_on_disconnect=agent == "claude",
+                    retry_on_disconnect=agent == "claude", grant=grant,
                 )
                 if not isinstance(ack, dict) or not (ack.get("accepted") or ack.get("ok")):
                     raise WriteRefused("initial prompt was not accepted by BAT")
@@ -407,6 +429,7 @@ async def session_start(
         "prompt_sent": bool(prompt),
         "message_id": mid,
         "permissions": hc.default_permission_mode if not permission_mode else permission_mode,
+        "isolation": grant.isolation,
         "note": None
         if tab and tab.get("appended")
         else "no GUI tab registered (orchestrate_register_tabs=false); tracked in the local registry",
@@ -420,8 +443,11 @@ async def worktree_merge(fleet: Fleet, host: str, session_id: str, confirm: bool
     async with _write_lock(host):
         t, ws = await _resolve_session(c, session_id)
         sid = t["id"]
+        grant = await resource_policy.authorize_session(fleet, host, "worktree.merge", t)
+        origin = resource_policy.merge_origin(fleet.config.host(host), sid, t, ws)
+        resource_policy.check_merge_destination(fleet.config.host(host), origin)
         audit.check_rate(host, sid + "#merge")
-        st, rehydrated = await _wt_status(c, t, allow_rehydrate=True)
+        st, rehydrated = await _wt_status(c, t, rehydrate=grant)
         if not st:
             raise WriteRefused("host does not track a worktree for this session")
         kind = st.get("mergedKind")
@@ -455,7 +481,6 @@ async def worktree_merge(fleet: Fleet, host: str, session_id: str, confirm: bool
                 "worktree_dirty_files": len(dirty),
                 "reason": "worktree has uncommitted changes (they would not be merged); ask the session to commit",
             }
-        origin = _origin_cwd(t, ws)
         if not origin:
             return {**report, "merged_now": False, "reason": "cannot determine the main checkout folder"}
         cur = await c.invoke("git:branch", {"cwd": origin})
@@ -475,7 +500,7 @@ async def worktree_merge(fleet: Fleet, host: str, session_id: str, confirm: bool
             }
         base = {"actor": fleet.actor, "tool": "worktree_merge", "host": host, "session_id": sid + "#merge"}
         audit.record(**base, channel="worktree:merge", phase="attempt", branch=st.get("branchName"))
-        r = await c.invoke("worktree:merge", {"sessionId": sid, "strategy": "merge"})
+        r = await c.invoke("worktree:merge", {"sessionId": sid, "strategy": "merge"}, grant=grant)
         ok = isinstance(r, dict) and r.get("success") is True
         audit.record(
             **base,
@@ -508,8 +533,9 @@ async def worktree_remove(
     async with _write_lock(host):
         t, _ = await _resolve_session(c, session_id)
         sid = t["id"]
+        grant = await resource_policy.authorize_session(fleet, host, "worktree.remove", t)
         audit.check_rate(host, sid + "#remove")
-        st, rehydrated = await _wt_status(c, t, allow_rehydrate=True)
+        st, rehydrated = await _wt_status(c, t, rehydrate=grant)
         if not st:
             raise WriteRefused("host does not track a worktree for this session")
         report = _summ(host, t, st, False, 0)
@@ -565,9 +591,10 @@ async def worktree_remove(
                     "worktreePath": wt_path,
                     "branchName": branch,
                 },
+                grant=grant,
             )
             rehydrated = True
-        r = await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": bool(delete_branch)})
+        r = await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": bool(delete_branch)}, grant=grant)
         ok = isinstance(r, dict) and r.get("success") is True
         still_there = False
         if ok and wt_path:

@@ -2,6 +2,24 @@
 
 ## Next release (unreleased)
 
+- Sessions a person created in BAT are read-only through every tool. A new resource policy
+  (`resource_policy.py`, docs/design/resource-policy.md) classifies sessions as `manual`, `connector_managed` or
+  `unknown`, checks that a managed session's folder is one the connector owns (a `managed_roots` folder or a
+  worktree it created) and re-reads BAT's session folder, worktree and git root before each write. The client core
+  refuses any write frame without a policy grant, so send, continue, answer, interrupt, resume, permissions,
+  approve_pending, relay, failover, stop, rehydrate, merge, remove and cleanup are all covered; override flags do
+  not bypass it. Refusals carry a code (`MANUAL_READ_ONLY`, `WORKDIR_NOT_MANAGED`, `BINDING_MISMATCH`,
+  `DESTINATION_MANUAL`, ...).
+- Behaviour changes: `session_relay` targets the workspace's most recent connector-managed session and, with
+  `start_if_missing`, starts a new worktree session instead of writing to a person's session; failover only continues
+  connector-managed sessions (`all_exhausted` lists the others under `skipped_read_only`, outside the per-call cap);
+  `worktree_merge` and cleanup merges only target the main checkout recorded at start, inside `managed_roots`
+  (otherwise `DESTINATION_MANUAL` / `BINDING_MISMATCH` / ESCALATE); the fan-out planner runs in its own worktree;
+  `session_start` refuses `use_worktree=false` outside a managed root and any managed-root destination whose git
+  root resolves elsewhere; cleanup keeps (never stops) BAT sessions and connector sessions left in a human checkout.
+- New host settings `managed_roots` and `shared_clone_worktrees` (default true: worktrees may still be created
+  inside a human clone, which shares its refs). New read tool `session_policy` / `batc policy`; `sessions_list`,
+  `sessions_triage` and `worktree_status` rows carry `provenance` and `api_access`.
 - Every task is one Goose session on Opus 5.5 (switch off by default). The `goose-session` recipe
   prompt tells Goose to split once, aim for Grok 4.7 : Codex : Opus 5.5 = 4:2:1, and give no new work
   to a model at or below 15% weekly remaining; that is prompt guidance, not something the service

@@ -25,6 +25,8 @@ Config file (default ``~/.config/bat-agent-connector/hosts.toml``)::
     auto_cleanup = false               # allow session_cleanup to merge/remove/stop on this host
     codex_model = ""                   # default model for Codex sessions started/failed over here ("" = BAT default)
     profile_id = "default"             # workspace profile on the host
+    managed_roots = []                 # host folders the connector owns (its own clones); see resource_policy.py
+    shared_clone_worktrees = true      # legacy: new worktrees may live in a human checkout's .bat-worktrees
 
     [jev]                              # optional judgment layer (TypeSafe Jev); off without an API key
     enabled = "auto"                   # on when TYPESAFE_API_KEY or OPENROUTER_API_KEY is set
@@ -37,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import re
 import sys
 import uuid
@@ -107,6 +110,8 @@ class HostConfig:
     profile_id: str = "default"
     bat_profiles_dir: str = DEFAULT_BAT_PROFILES_DIR
     labels: list[str] = field(default_factory=list)
+    managed_roots: tuple[str, ...] = ()
+    shared_clone_worktrees: bool = True
 
     def __repr__(self) -> str:  # never include token material
         return f"HostConfig(name={self.name!r}, url={self.url!r}, writes={self.writes}, orchestrate={self.orchestrate})"
@@ -186,6 +191,26 @@ class SafetyConfig:
 PERMISSION_MODES = ("default", "allow_all")
 
 
+def normalize_host_path(raw: str) -> str:
+    """A host-side absolute POSIX path in canonical text form (no symlink resolution; that needs the host)."""
+    path = str(raw or "").strip()
+    if not path.startswith("/") or "\0" in path or ".." in path.split("/"):
+        raise ConfigError(f"host path {raw!r} must be absolute and must not contain '..'")
+    path = posixpath.normpath(path)
+    return "/" + path.lstrip("/") if path != "/" else "/"
+
+
+def _managed_roots(name: str, raw) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+        raise ConfigError(f"host {name!r}: managed_roots must be a list of absolute paths")
+    roots = tuple(dict.fromkeys(normalize_host_path(x) for x in raw))
+    if "/" in roots:
+        raise ConfigError(f"host {name!r}: managed_roots must not contain '/'")
+    return roots
+
+
 @dataclass
 class JevConfig:
     enabled: str = "auto"  # auto | true | false
@@ -257,6 +282,9 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
             raise ConfigError(f"host {name!r}: auto_cleanup must be true or false")
         if cleanup and not orch:
             raise ConfigError(f"host {name!r}: auto_cleanup = true requires orchestrate = true")
+        shared = h.get("shared_clone_worktrees", True)
+        if not isinstance(shared, bool):
+            raise ConfigError(f"host {name!r}: shared_clone_worktrees must be true or false")
         cmodel = str(h.get("codex_model") or "").strip() or None
         if cmodel and not re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", cmodel):
             raise ConfigError(f"host {name!r}: codex_model {cmodel!r} is not a valid model id")
@@ -275,6 +303,8 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
             profile_id=str(h.get("profile_id") or "default"),
             bat_profiles_dir=str(h.get("bat_profiles_dir") or pdir),
             labels=list(h.get("labels") or []),
+            managed_roots=_managed_roots(name, h.get("managed_roots")),
+            shared_clone_worktrees=shared,
         )
     s = data.get("safety") or {}
     safety = SafetyConfig(

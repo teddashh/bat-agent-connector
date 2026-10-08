@@ -47,3 +47,11 @@ class TaskDispatchCancelled(WriteRefused):
 
 class TaskIdentityMismatch(WriteRefused):
     """A durable task reservation conflicts with registry or BAT host identity."""
+
+
+class ResourceReadOnly(WriteRefused):
+    """The resource policy refused a mutation before any BAT frame was sent (see resource_policy.py)."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(f"[{code}] {message}")
