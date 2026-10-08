@@ -947,7 +947,7 @@ def save_provider(ops, dep, proof):
 
 
 async def check_current(ops, dep, env):
-    if not poll_due(ops, "current:" + env["environment_key"] + ":" + dep["deployment_id"]):
+    if not poll_due(ops, "current:" + env["environment_key"]):
         return
     s = dep["recipe_snapshot"]
     run = await background_read(gh_for(ops, dep).run(s["repository"], dep["run_id"]))

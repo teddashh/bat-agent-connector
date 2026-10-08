@@ -4,7 +4,7 @@
 
 - Deployment reconciliation skips settled history, polls each current run/runtime and unresolved run lookup at
   `[github] deployment_reconcile_interval_s = 300` (60–86400 seconds), and preserves row versions for unchanged
-  evidence. Run lookup narrows by saved send time; the cadence survives restart.
+  evidence. Run lookup narrows by saved send time; the environment cadence survives restart and current-version changes.
 
 - Cancelled combined on_merge operations, including legacy history, bind the reviewed merge result on the recipe
   ref and retain the environment slot until its exact push run is terminal; reconciliation never merges or dispatches.
