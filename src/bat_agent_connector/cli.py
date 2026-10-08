@@ -643,6 +643,23 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--limit", type=int, default=20)
     c = csp.add_parser("show", help="one checkpoint, its excerpt and the sessions started from it")
     c.add_argument("checkpoint_id")
+    p = sp.add_parser("delivery", help="review, edit metadata and merge a GitHub PR")
+    dsp = p.add_subparsers(dest="delivery_cmd", required=True)
+    c = dsp.add_parser("pr", help="read a PR and save a fixed merge scope preview")
+    c.add_argument("repository")
+    c.add_argument("number", type=int)
+    c.add_argument("--method", choices=["merge", "squash", "rebase"])
+    c = dsp.add_parser("update-pr", help="edit title/body at a reviewed metadata digest (integrate)")
+    c.add_argument("repository")
+    c.add_argument("number", type=int)
+    c.add_argument("--metadata-digest", required=True)
+    c.add_argument("--title")
+    c.add_argument("--body-file")
+    c.add_argument("--key", required=True)
+    c = dsp.add_parser("merge", help="merge a reviewed immutable mpv_ preview (merge; deploy for --recipe)")
+    c.add_argument("--preview", required=True)
+    c.add_argument("--recipe")
+    c.add_argument("--key", required=True)
     p = sp.add_parser("integrate", help="put results into an existing PR's head branch (one normal push)")
     isp = p.add_subparsers(dest="integrate_cmd", required=True)
     c = isp.add_parser("candidates", help="agent results and checkpoints on a host, and where they went")
@@ -780,6 +797,34 @@ def integrate_sources(sources: list[str], picks: list[str]) -> list[dict]:
             raise ValueError(f"--pick {p!r} must look like SEQ=SHA,SHA for one of the sources")
         out[int(seq) - 1].update(mode="pick", commits=[x for x in shas.split(",") if x])
     return out
+
+
+def cmd_delivery(args) -> int:
+    from .pr_delivery import merge_envelope
+    from .task_daemon import request
+
+    token = os.environ.get("BATC_API_TOKEN")
+    if args.delivery_cmd == "pr":
+        out = request("github_pr_preview", repository=args.repository, pull_number=args.number,
+                      method=args.method, entry="cli", _auth_token=token or None)
+    else:
+        if not token:
+            raise ValueError("delivery writes need this client's BATC_API_TOKEN (integrate or merge scope)")
+        if args.delivery_cmd == "merge":
+            doc = request("github_merge_preview_get", preview_id=args.preview, entry="cli", _auth_token=token)["preview"]
+            envelope = merge_envelope(doc, recipe=args.recipe)
+        else:
+            params = {"title": args.title} if args.title is not None else {}
+            if args.body_file is not None:
+                with Path(args.body_file).open(encoding="utf-8", newline="") as body_file:
+                    params["body"] = body_file.read()
+            envelope = {"action": "github.pr.update", "target": {"repository": args.repository,
+                        "pull_number": args.number}, "params": params,
+                        "preconditions": {"expected_metadata_digest": args.metadata_digest}}
+        out = request("op_submit", **envelope, idempotency_key=args.key, wait_s=10, entry="cli",
+                      timeout=40.0, _auth_token=token)
+    _print(out, True)
+    return 0
 
 
 def cmd_integrate(args) -> int:
@@ -953,6 +998,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.cmd == "checkpoint":
             return cmd_checkpoint(args)
+        if args.cmd == "delivery":
+            return cmd_delivery(args)
         if args.cmd == "integrate":
             return cmd_integrate(args)
         if args.cmd == "project":

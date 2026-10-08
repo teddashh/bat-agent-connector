@@ -13,6 +13,7 @@ import json
 import re
 import time
 
+from . import pr_delivery
 from .api_auth import Principal
 from .config import DeployRecipe, GitHubConfig
 from .github import GitHubAmbiguous, GitHubClient
@@ -107,34 +108,50 @@ def _admit_merge(ops: OperationService, principal: Principal, target: dict, para
     number = target.get("pull_number")
     if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
         raise OperationError("INVALID_TARGET", "target.pull_number must be a positive integer", 422)
-    if not HEX40.match(str(pre.get("expected_head_sha") or "")):
-        raise OperationError("PRECONDITION_REQUIRED",
-                             "preconditions.expected_head_sha must be the full 40-hex head SHA you reviewed", 422)
-    method = params.get("method", repo.default_merge_method)
-    if method not in repo.merge_methods:
-        raise OperationError("INVALID_PARAMS", f"method must be one of {', '.join(repo.merge_methods)}", 422)
     updating = open_operations(ops, ("integration.apply",), repository, number)
     if updating:
         raise OperationError("INTEGRATION_IN_PROGRESS", f"{updating[0]} is updating this PR's head; merge after it "
                              "finishes, at the new head", 409)
+    if (not HEX40.match(str(pre.get("expected_head_sha") or ""))
+            or not HEX40.match(str(pre.get("expected_base_sha") or ""))
+            or not pre.get("preview_digest") or not params.get("preview_id")):
+        raise OperationError("PRECONDITION_REQUIRED", "read github_pr_preview (GET /api/v1/repositories/"
+                             "{owner}/{repo}/pulls/{number}) and pass its saved merge_preview id, digest, "
+                             "reviewed head and base SHA", 422)
+    preview = pr_delivery.get_preview(ops.db, params["preview_id"])
+    if (preview["repository"].lower() != repository.lower() or preview["target"]["number"] != number
+            or preview["digest"] != pre["preview_digest"]
+            or preview["target"]["head_sha"] != pre["expected_head_sha"]
+            or preview["target"]["base_sha"] != pre["expected_base_sha"]
+            or preview["method"] != params.get("method", repo.default_merge_method)):
+        raise OperationError("PREVIEW_MISMATCH", "merge parameters differ from the saved preview", 409)
+    method = params.get("method", repo.default_merge_method)
+    if method not in repo.merge_methods:
+        raise OperationError("INVALID_PARAMS", f"method must be one of {', '.join(repo.merge_methods)}", 422)
 
 
 async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method: str, prefix: str = "merge") -> dict:
     gh = _gh(ctx.service)
     pr = await _read(gh.pull(repository, number), "read the pull request", ctx)
     submitted = _has_step(ctx, f"{prefix}.submit")
+    preview = pr_delivery.get_preview(ctx.service.db, ctx.params["preview_id"])
     if pr.get("merged"):
         if (pr.get("head") or {}).get("sha") != sha:
             raise NeedsAttention("MERGED_DIFFERENT_HEAD",
                                  f"PR #{number} was merged at head {str((pr.get('head') or {}).get('sha'))[:12]}, "
                                  f"not the reviewed {sha[:12]}")
-        return {"merged": True, "merged_sha": pr.get("merge_commit_sha"), "repository": repository,
-                "pull_number": number, "method": method, "html_url": pr.get("html_url"),
-                "via": "merge_queue" if (ctx.op.get("external_refs") or {}).get("merge_queue") else "direct",
-                "merged_by_this_operation": submitted}
+        acknowledged = False
+        if submitted:
+            async def observed():
+                return {"http_status": 200, "status": "merged", "observed_only": True,
+                        "details": {"sha": pr.get("merge_commit_sha")}}
+            saved = await ctx.step(f"{prefix}.submit", observed, reconcile=lambda _: observed())
+            acknowledged = saved.get("http_status") in {200, 202} and not saved.get("observed_only")
+        return await _merged_result(ctx, pr, preview, acknowledged, repository, number, method)
     if pr.get("state") != "open":
         raise OperationError("PR_CLOSED", f"PR #{number} is {pr.get('state')} and not merged")
     if not submitted:
+        await pr_delivery.check_scope(ctx, preview)
         head = (pr.get("head") or {}).get("sha")
         if head != sha:
             raise OperationError("TARGET_HEAD_CHANGED",
@@ -151,6 +168,7 @@ async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method:
                 raise Wait("waiting_checks", "required checks are still running", 30)
 
     async def submit() -> dict:
+        await pr_delivery.check_scope(ctx, preview, expiry=not submitted)
         status, body = await gh.merge_async(repository, number, sha, method)
         return {"http_status": status, "status": body.get("status"), "details": body.get("details") or {},
                 "message": str(body.get("message") or "")[:300]}
@@ -161,26 +179,41 @@ async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method:
         except GitHubAmbiguous:
             return None
         if status == 200 and again.get("merged"):
-            return {"http_status": 200, "status": "merged", "details": {"sha": again.get("merge_commit_sha")}}
+            return {"http_status": 200, "status": "merged", "details": {"sha": again.get("merge_commit_sha")},
+                    "observed_only": True}
         # Still open: asking again is safe; a pending request for this PR comes back as 409 with its UUID.
-        return RERUN if status == 200 else None
+        if status == 200 and again.get("state") == "open":
+            try:
+                await pr_delivery.check_scope(ctx, preview, expiry=False)
+            except (OperationError, NeedsAttention, GitHubAmbiguous):
+                return None
+            return RERUN
+        return None
 
     r = await ctx.step(f"{prefix}.submit", submit, request={"repository": repository, "pull_number": number,
                                                            "sha": sha, "method": method}, reconcile=reconcile)
     status, result, details = r["http_status"], r.get("status"), r.get("details") or {}
     if status == 409:
-        if details.get("expected_head_sha") != sha or details.get("merge_method") not in {method, "default"}:
+        if (details.get("expected_head_sha") != sha or details.get("merge_method") != method
+                or details.get("merge_action") != "default"):
             raise NeedsAttention("EXISTING_MERGE_REQUEST",
                                  "another merge request for this PR uses a different head or method")
+        await pr_delivery.check_scope(ctx, preview, expiry=False)
         result = "pending"
     elif status not in {200, 202}:
         code = "PR_NOT_MERGEABLE" if status == 400 else f"GITHUB_{status}"
         raise OperationError(code, (details.get("message") or r.get("message") or "merge refused")[:300])
+    ctx.set_refs(merge_write_acknowledged=status in {200, 202} and not r.get("observed_only", False))
     if details.get("uuid"):
         ctx.set_refs(merge_request_uuid=details["uuid"])
     uuid = details.get("uuid") or (ctx.op.get("external_refs") or {}).get("merge_request_uuid")
     if result == "pending" and uuid:
-        res = await _read(gh.merge_async_result(repository, number, uuid), "read the merge request", ctx)
+        try:
+            res = await _read(gh.merge_async_result(repository, number, uuid), "read the merge request", ctx)
+        except (OperationError, NeedsAttention) as exc:
+            if exc.code != "GITHUB_404":
+                raise
+            res = {"status": "enqueued"}  # expired UUID: observe the PR; never submit again
         result, details = res.get("status"), res.get("details") or {}
         if result == "pending":
             _check_wait(ctx, "merge_wait_started_at")
@@ -196,10 +229,16 @@ async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method:
         raise Wait("waiting_external", reason, 30 if result == "enqueued" else 5)
     if (pr.get("head") or {}).get("sha") != sha:
         raise NeedsAttention("MERGED_DIFFERENT_HEAD", f"PR #{number} merged at a different head")
-    return {"merged": True, "merged_sha": pr.get("merge_commit_sha"), "repository": repository,
-            "pull_number": number, "method": method, "html_url": pr.get("html_url"),
+    return await _merged_result(ctx, pr, preview, status in {200, 202} and not r.get("observed_only", False),
+                                repository, number, method)
+
+
+async def _merged_result(ctx, pr, preview, submitted, repository, number, method):
+    receipt = await pr_delivery.verify_merge(ctx, pr, preview)
+    return {"merged": True, "repository": repository, "pull_number": number, "method": method,
+            "html_url": pr.get("html_url"), **receipt,
             "via": "merge_queue" if (ctx.op.get("external_refs") or {}).get("merge_queue") else "direct",
-            "merged_by_this_operation": True}
+            "merged_by_this_operation": submitted}
 
 
 async def _run_merge(ctx: OpContext) -> dict:
@@ -338,7 +377,7 @@ async def _run_merge_and_deploy(ctx: OpContext) -> dict:
 
 
 # --------------------------------------------------------------------------- reads
-async def pr_preview(ops: OperationService, repository: str, number: int) -> dict:
+async def pr_preview(ops: OperationService, repository: str, number: int, method: str | None = None) -> dict:
     """What the Dashboard shows before the one-click button: head, base, mergeability, checks, recipes."""
     gh = _gh(ops)
     repository = _repo_or_403(ops, repository)
@@ -357,7 +396,16 @@ async def pr_preview(ops: OperationService, repository: str, number: int) -> dic
             elif c.get("conclusion") not in {"success", "neutral", "skipped"}:
                 checks["failed"] += 1
     repo = _cfg(ops).repos[repository.lower()]
-    return {"repository": repository, "pull_number": number, "title": pr.get("title"), "state": pr.get("state"),
+    method = method or repo.default_merge_method
+    if method not in repo.merge_methods:
+        raise OperationError("INVALID_PARAMS", "method is not enabled for this repository", 422)
+    document = await pr_delivery.scope(ops, repository, number, method)
+    if document["target"] != pr_delivery.identity(pr):
+        document["blocking"].append({"code": "MERGE_SCOPE_UNPROVEN", "message": "PR moved while loading its card; reload"})
+    preview = pr_delivery.save_preview(ops, document)
+    return {"repository": repository, "pull_number": number, "title": pr.get("title"),
+            "body": pr.get("body") or "", "metadata_digest": pr_delivery.digest(pr_delivery.metadata(pr)),
+            "metadata_update": {"allowed": repo.allow_pr_update}, "merge_preview": preview, "state": pr.get("state"),
             "draft": pr.get("draft"), "merged": pr.get("merged"), "merge_commit_sha": pr.get("merge_commit_sha"),
             "head_sha": head, "head_ref": (pr.get("head") or {}).get("ref"),
             "base_ref": (pr.get("base") or {}).get("ref"), "base_sha": (pr.get("base") or {}).get("sha"),
@@ -370,6 +418,8 @@ async def pr_preview(ops: OperationService, repository: str, number: int) -> dic
 
 
 ACTIONS = [
+    ActionDef("github.pr.update", "integrate", "Update PR title/body at a reviewed metadata digest",
+              pr_delivery.run_update, pr_delivery.admit_update, ("repository",)),
     ActionDef("github.pr.merge", "merge", "Merge a pull request at the reviewed head SHA",
               _run_merge, _admit_merge, ("repository",)),
     ActionDef("deployment.start", "deploy", "Deploy a fixed commit through a configured recipe",

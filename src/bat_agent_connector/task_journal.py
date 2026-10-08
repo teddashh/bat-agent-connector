@@ -323,6 +323,16 @@ class Journal:
                     task_event_id,created_at) SELECT 'task',task_id,'task.'||kind,body,event_id,created_at
                     FROM events ORDER BY event_id""")
                 self.db.execute("PRAGMA user_version=1")
+        # Delivery A. Idempotent DDL: renumber this step at rebase without changing stored previews.
+        with self.tx():
+            self.db.execute("""CREATE TABLE IF NOT EXISTS pr_merge_previews (
+                preview_id TEXT PRIMARY KEY, repository TEXT NOT NULL, pull_number INTEGER NOT NULL,
+                document TEXT NOT NULL, digest TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL
+            )""")
+            self.db.execute("""CREATE INDEX IF NOT EXISTS pr_merge_previews_pr
+                ON pr_merge_previews(repository, pull_number, created_at)""")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 2:
+                self.db.execute("PRAGMA user_version=2")
 
     def _drop_legacy_outbox(self):
         """Remove the retired chat outbox so no historical event can ever be published.
