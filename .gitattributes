@@ -1,0 +1,3 @@
+# Canonical frontend and generated browser assets must build identically on Windows and Linux.
+desktop/** text=auto eol=lf
+src/bat_agent_connector/dashboard/** text eol=lf

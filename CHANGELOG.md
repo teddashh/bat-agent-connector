@@ -201,6 +201,47 @@
 
 - The A10 Linux account-check fixture isolates its fake `pathlib` import, keeping pytest's real `Path` intact on
   Python 3.10 and 3.11; the product's read-only check is unchanged.
+- Share artifact attachments across browser and desktop work-item/continuation forms. Preserve exact
+  identity-scoped operation intents through lost replies and source-head changes. Native binary upload
+  uses capped raw IPC to one operation-bound central route, with no credential or URL supplied by JavaScript.
+  Temporary real Git/MockBat fixtures verify immutable bytes and materialization; native file-picker and
+  complete live attachment acceptance remain pending.
+
+- Port confinement evidence and reviewed cleanup into the shared desktop/browser source. Retain cleanup
+  requests within the original account across uncertain replies, preserve agent/form choices during updates,
+  and validate native cleanup routes and typed previews. Real temporary Git/MockBat cleanup and UI fixtures
+  verify the central flow; live confinement, restoration and full observation history UI remain pending.
+- Refuse filtered Dashboard checkpoint replay before reading events or opening SSE. Shared signed checkpoints
+  acknowledge only the complete public feed, so an empty or partial filtered page cannot skip other updates.
+  Legacy filtered event requests keep their existing response shape and numeric cursors.
+
+- Keep failed checkpoint-preview refreshes inside the event acknowledgment barrier. Preserve the original
+  commit selection and note, refuse stale checkpoint creation, and resume after a successful read; a failed
+  preview cannot silently change the request into a checkpoint of HEAD.
+
+- Wait for asynchronous Dashboard view refreshes before persisting event checkpoints. Failed or deferred
+  refreshes retain the original cursor and drafts. Failed reads pause mutations; deferred renders keep
+  version-checked form saves available. Delayed work cannot cross accounts or
+  mounted views. Existing pending-control and linked-history presentation gaps remain tracked under R04.
+
+- Add the shared Vite/TypeScript Dashboard source and initial packaged Tauri 2 shell with restricted native
+  central transport, native-memory credentials, tray hiding and same-session instance handoff. Browser and
+  desktop share bounded checkpoint polling, isolated draft/operation storage and offline write blocking;
+  account changes abort pending submissions. Generated assets and unsigned packaging are checked in CI.
+  Linux native and combined central fixtures pass; Windows, Fleet, protected credential enrollment and R04
+  per-view freshness remain pending ([desktop foundation](docs/design/desktop.md)).
+
+- Record the [Tauri v2 product scope](docs/product/realignment-v2.md) and
+  [integration status](docs/product/implementation-status.md) (R00). Keep the central Python backend and
+  share the browser/desktop UI; exclude Hub import and redefine B05 as Connector data preservation.
+  Desktop, Fleet parity and live acceptance remain tracked work, not completed capabilities.
+
+- Add an authenticated bootstrap checkpoint before persisted Dashboard snapshot reads, stable journal/principal
+  cache identities, and signed replay checkpoints refreshed after each event page. Cursor rollback, missing
+  retained history and changed event anchors explicitly require resnapshot while preserving drafts. SSE supports
+  checkpoint/reset control events; legacy event page shapes remain unchanged. Versionless metadata shares the
+  existing journal and adds no retention job (v2 §14, R04, B02/B05/T11; docs/design/dashboard-sync.md).
+
 - Validate the complete session inventory cursor before reading session rows: versioned payload schema,
   exact SQLite-compatible key types, and a non-coerced event boundary between zero and the journal head.
   Malformed cursors consistently return 422 for empty, filtered and populated inventories; previously issued
