@@ -1166,6 +1166,12 @@ async def _evaluate(
         return decide("ESCALATE", "cannot read worktree git status")
     if dirty:
         return decide("ESCALATE", f"uncommitted changes in worktree ({len(dirty)} files)")
+    if e.get("role") == "planner":
+        if st.get("mergedKind") in MERGED_KINDS or (st.get("mergedKind") == "unknown" and stats["files"] == 0):
+            row["delete_branch"] = True  # the planner's own branch, with nothing on it: do not leave it behind
+            return decide("CLEAN_ONLY", "fan-out planning session finished; its empty branch is removed",
+                          remove=True, stop=loaded)
+        return decide("ESCALATE", "the fan-out planner committed changes on its branch; review them")
     head = await _candidate_head(c, wt)
     row["candidate_cwd"] = wt
     v = verification.get(host, sid)
@@ -1369,12 +1375,13 @@ async def session_cleanup(
                         continue
                     acts.append(f"merged {r.get('branch')} -> {m.get('source_branch')}")
                 if r.get("decision") in ("MERGE_AND_CLEAN", "CLEAN_ONLY") and r.get("remove_worktree"):
-                    x = await worktree_remove(fleet, host, sid, confirm=True, delete_branch=False)
+                    drop = bool(r.get("delete_branch"))
+                    x = await worktree_remove(fleet, host, sid, confirm=True, delete_branch=drop)
                     if not x.get("removed"):
                         r["reasons"].append(f"remove refused: {x.get('reason')}")
                         r["stop"] = False
                     else:
-                        acts.append(f"worktree removed (branch {r.get('branch')} kept)")
+                        acts.append(f"worktree removed (branch {r.get('branch')} {'deleted' if drop else 'kept'})")
                 if r.get("decision") in ("MERGE_AND_CLEAN", "CLEAN_ONLY") and r.get("stop"):
                     s = await _stop(fleet, host, sid, audit)
                     acts.append(
