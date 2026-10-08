@@ -243,6 +243,45 @@ async def test_connector_creation_root_refuses_bat_actions_when_child_loses_mark
     await f.close()
 
 
+@pytest.mark.parametrize("root_maker", ["bat", "connector"])
+@pytest.mark.parametrize("link", [None, "lead_session_id", "shares_worktree_with", "failover_of"])
+async def test_legacy_reviewer_worktree_needs_a_proven_registry_carrier(fleet_factory, mock, root_maker, link):
+    """B01/D05: a journal-only reviewer link cannot authorize BAT writes in a managed root."""
+    from bat_agent_connector.resource_ids import registry_worktree_root
+
+    root = add_managed_wt(mock, "root-0001", role="lead", task_id="task-fixture", worktree_made_by=root_maker)
+    sid = add_managed_wt(mock, "review-0002", role="reviewer", task_id="task-fixture",
+                         **({link: root} if link else {}))
+    f = all_tiers(fleet_factory, managed_roots=["/srv/demo"])
+    entries = registry.list_entries("h1")
+    row = registry.get("h1", sid)
+    def lead_of(task_id):
+        return {"session_id": root, "worktree_path": WT} if task_id == "task-fixture" else None
+    # The observation resolver may know the lead from its journal. Policy must not guess that knowledge.
+    assert registry_worktree_root(entries, "h1", sid, lead_of)["session_id"] == root
+    assert resource_policy.worktree_maker(row, entries, lead_of, host="h1") == root_maker
+    cls = resource_policy.classify(f.config.host("h1"), sid, terminal=service.registry_terminal(row), entries=entries)
+    expected = root_maker if link else "unknown"
+    assert cls.worktree_made_by == expected and cls.writable
+    policy = await resource_policy.session_policy(f, "h1", sid)
+    assert policy["worktree_made_by"] == expected
+    assert policy["actions"]["session.send"]["allowed"]
+    for action in resource_policy.BAT_WORKTREE_ACTIONS:
+        assert policy["actions"][action]["allowed"] == (expected == "bat")
+        if expected != "bat":
+            assert policy["actions"][action]["code"] == "NOT_A_BAT_WORKTREE"
+    if expected != "bat":
+        if expected == "unknown":
+            assert "cannot be proven" in policy["actions"]["worktree.remove"]["reason"]
+        with pytest.raises(ResourceReadOnly, match="NOT_A_BAT_WORKTREE"):
+            await orchestrate.worktree_merge(f, "h1", sid, confirm=True)
+        with pytest.raises(ResourceReadOnly, match="NOT_A_BAT_WORKTREE"):
+            await orchestrate.worktree_remove(f, "h1", sid, confirm=True, delete_branch=True,
+                                              allow_unmerged=True, discard_uncommitted=True)
+    assert write_frames(mock) == []
+    await f.close()
+
+
 @pytest.mark.parametrize("managed_checkout", [False, True])
 @pytest.mark.parametrize("parent_maker", ["bat", "connector"])
 async def test_nonsharing_failover_without_worktree_never_gets_bat_worktree_grant(
