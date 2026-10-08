@@ -28,6 +28,8 @@ Session 歸屬與資料夾歸屬分開判斷。Managed session 只有在 connect
 | `connector_worktree` | 紀錄的 `worktree_path` 等於 `cwd`，位於 workspace 資料夾（或其上層 git root）的 `.bat-worktrees/<name>`，而且是 connector 自己建立的；失效接手的 successor 與 reviewer 共享的 worktree，要追溯到同樣條件的 managed session。 | `legacy_shared_clone` |
 | 人工 | 主 checkout、BAT GUI 建立的 worktree、共享人工 session 的 worktree。 | 無 |
 
+Connector 經 SSH git 自己建立的 worktree（checkpoint 的 `batc-cp-…`、解衝突的 `batc-fix-…`、Task Service 的 `batc-task-…`；registry 記 `worktree_made_by: "connector"`，舊紀錄以 `batc/` 開頭的分支辨認）BAT 沒有紀錄。BAT 的 `worktree:rehydrate` 會把它登記在 session 的 workspace 資料夾（實際使用時可能是人的 checkout）底下並把那裡的 env 檔案複製進去，`worktree:remove` 會在那個 repository 執行 prune，所以 rehydrate、merge、remove 對它一律回 `NOT_A_BAT_WORKTREE`，`session_cleanup` 也保留它。送字、停止等 session 動作不受影響。
+
 `legacy_shared_clone` 的 worktree 仍在人工 clone 內，共用它的 refs 與物件庫（見 git-worktree(1)），不是完整隔離。只有 `managed_clone` 符合計畫 §07 的獨立 clone。位於人工資料夾的 connector session 是 §24 說的 legacy boundary：保留觀測與歷史，全部唯讀（包括 stop），由 Ted 在 BAT 處理。
 
 ## 寫入前即時核對
@@ -83,6 +85,7 @@ BAT tab 記的 `cwd`／`worktreePath` 和紀錄不同也是 `BINDING_MISMATCH`�
 | `WORKDIR_NOT_MANAGED` | Managed session 但資料夾是人工的（legacy boundary）。 |
 | `BINDING_MISMATCH` | BAT 的實際狀態和 connector 紀錄不符。 |
 | `WORKDIR_MISSING` | 需要資料夾的動作，但資料夾讀不到。 |
+| `NOT_A_BAT_WORKTREE` | BAT 的 worktree 動作（rehydrate、merge、remove）用在 connector 經 SSH 建立的 worktree。 |
 | `DESTINATION_MANUAL` | 新 session 或 merge 的目的端是人工 checkout。 |
 | `DESTINATION_UNKNOWN` | 目的路徑不是絕對路徑，或 BAT 建在預期外的位置。 |
 | `TIER_DISABLED` | 只出現在 `session_policy`：主機沒開對應層級。 |

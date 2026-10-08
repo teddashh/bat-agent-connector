@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
+  connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
+  those sessions. BAT has no record of them: `batc remove-worktree` on a checkpoint session re-registered the
+  worktree under the session's workspace folder (a person's checkout in real use, copying its env files in) and
+  removed it from there, pruning that repository. New sessions record `worktree_made_by: "connector"`; older rows
+  are recognised by their `batc/` branch.
 - Integration into an existing PR (docs/design/integration.md, plan §14, C01-C03): `integration.preview` pins the
   PR head and chosen results (a person's checkpoint, an agent's checkpoint run, a GitHub branch) by SHA in a bare,
   identity-checked area under the host's first managed root, lists every commit and file that would enter, and
