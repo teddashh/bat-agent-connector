@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -243,6 +244,7 @@ async def session_start(
     task_id: str | None = None,
     write_scope: str | None = None,
     confinement_role: str | None = None,
+    _task_start_guard: Callable[[], None] | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
     if write_scope not in (None, "confined"):
@@ -282,9 +284,15 @@ async def session_start(
                                                   cwd_override=cwd_override, task_id=task_id,
                                                   git_roots=git_roots)
     async with _write_lock(host):
-        perm, write_scope, confinement_record = await confinement.start_decision(
-            fleet, host, agent, confined=write_scope == "confined", task=bool(task_id),
-            planner=confinement_role == "planner", claude_mode=permission_mode)
+        if _task_start_guard:
+            _task_start_guard()
+        try:
+            perm, write_scope, confinement_record = await confinement.start_decision(
+                fleet, host, agent, confined=write_scope == "confined", task=bool(task_id),
+                planner=confinement_role == "planner", claude_mode=permission_mode)
+        finally:
+            if _task_start_guard:
+                _task_start_guard()
         audit.check_rate(host, "#orchestrate-start-" + sid)
         registry.reserve(
             host,
@@ -349,7 +357,7 @@ async def session_start(
                     wt = await c.invoke(
                         "worktree:create", {"sessionId": sid, "cwd": folder, "installPnpm": False,
                                              **({"baseBranch": base_branch} if base_branch else {})},
-                        grant=grant,
+                        grant=grant, before_send=_task_start_guard,
                     )
                     worktree_created = True
                 if not isinstance(wt, dict) or wt.get("success") is False or not wt.get("worktreePath"):
@@ -391,9 +399,18 @@ async def session_start(
             registry.update(host, sid, cwd=cwd, worktree_path=cwd if cwd_override else wt.get("worktreePath"),
                             branch=external_branch if cwd_override else wt.get("branchName"))
             audit.record(**base, channel="claude:start-session", phase="attempt", preset=preset)
+            async def before_start_frame():
+                if _task_start_guard:
+                    _task_start_guard()
+                try:
+                    await confinement.guard_start_frame(fleet, host, confinement_record)
+                finally:
+                    if _task_start_guard:
+                        _task_start_guard()
+
             try:
                 started = await c.invoke("claude:start-session", {"sessionId": sid, "options": opts}, grant=grant,
-                                         before_frame=lambda: confinement.guard_start_frame(fleet, host, confinement_record),
+                                         before_frame=before_start_frame, before_send=_task_start_guard,
                                          on_transport=start_frame.on_transport)
                 if (not isinstance(started, dict) or started.get("ok") is False or
                         started.get("sessionId") != sid):

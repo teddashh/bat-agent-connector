@@ -749,10 +749,20 @@ async def _failover_one(
             start_confirmed = False
             start_frame = confinement.StartFrame(host, new_sid)
             meta = None
+
+            async def check_start_frame():
+                if owner_id:
+                    task_authority.check()
+                try:
+                    await confinement.guard_start_frame(fleet, host, confinement_record)
+                finally:
+                    if owner_id:
+                        task_authority.check()
+
             try:
                 started = await c.invoke("claude:start-session", {"sessionId": new_sid, "options": opts},
                                          grant=grant, before_send=task_authority.check if owner_id else None,
-                                         before_frame=lambda: confinement.guard_start_frame(fleet, host, confinement_record),
+                                         before_frame=check_start_frame,
                                          on_transport=start_frame.on_transport)
                 if (not isinstance(started, dict) or started.get("ok") is False or
                         started.get("sessionId") != new_sid):

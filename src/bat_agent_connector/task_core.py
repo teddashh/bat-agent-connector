@@ -416,6 +416,7 @@ class TaskCoordinator:
         command, fresh = self.journal.command(task["task_id"], "start_" + role, sid,
                                                {"role": role, "agent": agent,
                                                 "warm_session_id": warm_id,
+                                                "control_version": task["control_version"],
                                                 "start_sent": None if warm_id else False}, key)
         if not fresh:
             return self.journal.change(task["task_id"], "uncertain")

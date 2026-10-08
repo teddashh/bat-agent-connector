@@ -234,11 +234,14 @@ class BatTaskAdapter:
         else:
             confinement.guard_new_start(entry)
             registry.claim_unsent(host, session_id)
+        before_start = (task_control.start_guard(self.journal, task, session_id, role)
+                        if self.journal else None)
         if role == "lead":
             if task.get("_warm_session_id") == session_id:
                 previous = next((item for item in self.journal.warm_candidates(task)
                                  if item["session_id"] == session_id), None) if self.journal else None
                 identity = await self._warm_identity(task, previous) if previous else None
+                task_control.check_incarnation(self.journal, task)
                 if not identity:
                     raise TaskIdentityMismatch("warm session identity is unproven")
                 self.journal.revoke_task_capabilities(previous["task_id"])
@@ -261,7 +264,7 @@ class BatTaskAdapter:
                         base_branch=task.get("base_branch") if external is None else None,
                         cwd_override=external["path"] if external else None,
                         external_branch=external["branch"] if external else None,
-                        task_id=task["task_id"])
+                        task_id=task["task_id"], _task_start_guard=before_start)
                     break
                 except TaskControlRefused:
                     raise
@@ -304,20 +307,31 @@ class BatTaskAdapter:
             opts.update(codexSandboxMode="read-only", codexApprovalPolicy="never")
         else:
             opts.update(permissionMode="plan", model=CLAUDE_BAT_MODEL)
-        account = await confinement.start_account(self.fleet, host)
+        if before_start:
+            before_start()
+        try:
+            account = await confinement.start_account(self.fleet, host)
+        finally:
+            if before_start:
+                before_start()
         record = confinement.snapshot(agent, opts, account=account, task=True)
         entry.update(confinement=record, start_sent=False, **orchestrate.registry_permission_fields(opts))
         registry.reserve(host, entry, hc.orchestrate_max_sessions)
         confinement.record_task_start(self.journal, task["task_id"], sid, entry)
         client = self.fleet.client(host)
-        def before_start():
-            if self.journal:
-                task_control.check_incarnation(self.journal, task)
+        async def before_start_frame():
+            if before_start:
+                before_start()
+            try:
+                await confinement.guard_start_frame(self.fleet, host, record)
+            finally:
+                if before_start:
+                    before_start()
         with confinement.StartFrame(host, sid, journal=self.journal, task_id=task["task_id"]) as start_frame:
             try:
                 started = await client.invoke(
                     "claude:start-session", {"sessionId": sid, "options": opts}, retry_on_disconnect=False,
-                    grant=grant, before_send=before_start, before_frame=lambda: confinement.guard_start_frame(self.fleet, host, record),
+                    grant=grant, before_send=before_start, before_frame=before_start_frame,
                     on_transport=start_frame.on_transport)
                 if (not isinstance(started, dict) or started.get("ok") is False
                         or started.get("sessionId") != sid):
