@@ -295,7 +295,7 @@ class ApiV1:
                                   "deploy": bool(gh_cfg.recipes),
                                   "checkpoints": [h for h in fleet.config.hosts if self._can_continue(h)],
                                   "integration": [{"repository": r.repository,
-                                                   "hosts": [h for h in r.integrate.hosts if self._can_continue(h)]}
+                                                   "hosts": integration.usable_hosts(self.daemon.ops, r)}
                                                   for r in gh_cfg.repos.values() if r.integrate]},
                      "repositories": [{"repository": r.repository, "allow_merge": r.allow_merge,
                                        "merge_methods": list(r.merge_methods)} for r in gh_cfg.repos.values()],

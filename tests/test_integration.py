@@ -843,7 +843,9 @@ def test_integrate_config_validation(mock):
                       {"hosts": ["h1"], "remote_url": "git@github.com:o/other.git"},
                       {"hosts": ["h1"], "remote_url": "/srv/r.git"},  # a path only with a loopback test GitHub
                       {"hosts": ["nope"], "remote_url": "git@github.com:o/r.git"},
-                      {"hosts": ["h1"], "remote_url": "git@github.com:o/r.git", "fetch_timeout_s": 5}]:
+                      {"hosts": ["h1"], "remote_url": "git@github.com:o/r.git", "fetch_timeout_s": 5},
+                      {"hosts": ["h1"], "remote_url": "https://g\u0131thub.com/o/r.git"},  # dotless i folds to i
+                      {"hosts": ["h1"], "remote_url": "git@github.com:o/\u017fecrets.git"}]:
         with pytest.raises(ConfigError):
             parse_config({"hosts": {"h1": base}, "github": {"repos": [{"repository": "o/r",
                                                                         "integrate": integrate}]}})
@@ -1164,3 +1166,18 @@ async def test_preview_runs_nothing_the_agent_configured_in_its_folder(world):
     os.utime(Path(wt) / "a.txt", (1, 1))
     await w.preview([{"kind": "checkpoint_run", "id": run_id}])
     assert not sentinel.exists()
+
+
+async def test_only_hosts_that_can_integrate_are_offered(world):
+    w = world
+
+    class NoAlias(RaceRunner):
+        def available(self, host: str) -> bool:
+            return False
+
+    card = await w.d.call_api("github_pr_preview", {"repository": "o/r", "pull_number": 1}, TED)
+    assert card["pull_request"]["integration"]["hosts"] == ["h1"]
+    w.d.ops.context["git_runner"] = NoAlias()
+    card = await w.d.call_api("github_pr_preview", {"repository": "o/r", "pull_number": 1}, TED)
+    caps = await w.d.call_api("api_capabilities", {}, TED)
+    assert card["pull_request"]["integration"]["hosts"] == [] and caps["features"]["integration"][0]["hosts"] == []

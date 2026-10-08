@@ -1426,13 +1426,22 @@ async def pr_card(ops: OperationService, repository: str, number: int) -> dict:
     return card
 
 
+def usable_hosts(ops: OperationService, repo: GitHubRepo) -> list[str]:
+    """integrate.hosts that can run integrations now: an SSH alias, a managed root, writes and orchestrate."""
+    if not repo.integrate:
+        return []
+    fleet, runner = ops.context["fleet"], ops.context.get("git_runner")
+    return [h for h in repo.integrate.hosts if h in fleet.config.hosts and runner and runner.available(h)
+            and fleet.writes_enabled(h) and fleet.orchestrate_enabled(h) and fleet.config.host(h).managed_roots]
+
+
 def pr_integration(ops: OperationService, repository: str, number: int) -> dict:
     repo = ops.context["github_config"].repos.get(repository.lower())
     allowed = bool(repo and repo.integrate)
     last = [dict(r) for r in ops.db.execute("""SELECT operation_id, seq, source_kind, source_id, delivered_sha,
         delivered_at FROM integration_receipts WHERE lower(repository)=? AND pull_number=? AND status='delivered'
         ORDER BY delivered_at DESC LIMIT 10""", (repository.lower(), number))]
-    return {"allowed": allowed, "hosts": list(repo.integrate.hosts) if allowed else [],
+    return {"allowed": allowed, "hosts": usable_hosts(ops, repo) if allowed else [],
             "in_progress_operation_id": integration_in_progress(ops, repository, number), "last_delivered": last}
 
 

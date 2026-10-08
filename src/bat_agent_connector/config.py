@@ -295,7 +295,8 @@ class GitHubConfig:
 
 def _integrate_url(url, repository: str, api_url: str) -> str:
     """The push URL must name this repository on this GitHub, with no credentials or tricks in it."""
-    if not isinstance(url, str) or not url or url != url.strip() or url.startswith("-") or any(
+    # ASCII only: case-insensitive matching would otherwise fold lookalikes (U+0131 "ı" matches "i").
+    if not isinstance(url, str) or not url or not url.isascii() or url != url.strip() or url.startswith("-") or any(
             c.isspace() or c in "?#" for c in url):
         raise ConfigError(f"[[github.repos]] {repository}: integrate.remote_url is not a plain URL")
     api_host = re.sub(r"^https?://", "", api_url).split("/", 1)[0].split(":", 1)[0]
