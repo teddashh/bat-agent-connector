@@ -147,6 +147,69 @@ async def test_b03_metadata_settlement_history_has_codes_without_pr_text(make_da
     assert "private" not in " ".join(r[0] for r in d.ops.db.execute("SELECT body FROM api_events"))
 
 
+@pytest.mark.parametrize("backfilled", [False, True])
+async def test_b03_acknowledged_conflict_settlement_is_in_history_without_pr_text(make_daemon, gh, backfilled):
+    """B03/C07, §08/§10/§11/§15: ACK conflicts share first-insert history and the legacy backfill path."""
+    from bat_agent_connector.task_journal import LATEST_DATA_STEP, Journal
+
+    d = make_daemon()
+    gh.add_pr(7, delivery_tests.HEAD, body="private original body")
+    gh.pulls[7]["title"] = "private original title"
+    op = await delivery_tests.update_op(d, params={"title": "private intended title", "body": "private intended body"})
+    d.ops._merge_refs(op["operation_id"], {"host": "h1", "session_id": "source"})
+    gh.patch_after = lambda pr: pr.update(title="private concurrent title", body="private concurrent body")
+    done = await delivery_tests.settle(d, op["operation_id"])
+    assert done["status"] == "needs_attention" and done["error_code"] == "PR_METADATA_CONFLICT"
+    assert done["external_refs"]["write_acknowledged"] is True
+    assert done["external_refs"]["verification_pending"] is False
+    receipt = pr_delivery.metadata_settlement(d.ops, op["operation_id"])
+    assert receipt["observed"] == {"title": "private concurrent title", "body": "private concurrent body"}
+    original_row = tuple(d.ops.db.execute("SELECT * FROM pr_metadata_settlements WHERE operation_id=?", (op["operation_id"],)).fetchone())
+    head, changes = d.journal.api_head(), d.ops.db.total_changes
+    # A repeated insert cannot replace the conclusion or append another event.
+    assert pr_delivery.save_metadata_settlement(d.ops, op["operation_id"], {**receipt, "status": "not_applied"}) == receipt
+    assert d.journal.api_head() == head and d.ops.db.total_changes == changes
+    await pr_delivery.reconcile_metadata(d.ops)
+    assert d.journal.api_head() == head and gh.count("PATCH", ".") == 1
+    journal = d.journal
+    if backfilled:
+        # Main's legacy journal has the raw ACK receipt but no observation settlement event.
+        journal.db.execute("DELETE FROM api_events WHERE resource_type='operation' AND resource_id=? AND kind='delivery.metadata_settled'", (op["operation_id"],))
+        journal.db.execute("PRAGMA user_version=1")
+        path = journal.path
+        journal.close()
+        journal = Journal(path)
+        assert journal.db.execute("PRAGMA user_version").fetchone()[0] == LATEST_DATA_STEP
+        assert tuple(journal.db.execute("SELECT * FROM pr_metadata_settlements WHERE operation_id=?", (op["operation_id"],)).fetchone()) == original_row
+        assert journal.db.execute("SELECT status FROM operations WHERE operation_id=?", (op["operation_id"],)).fetchone()[0] == "needs_attention"
+        events = journal.api_events(kind="history.backfilled", related_resource_type="session", related_resource_id="h1/source")["events"]
+        settled = [e for e in events if e["body"]["source_table"] == "pr_metadata_settlements"]
+        assert settled[0]["body"]["saved_snapshot"]["code"] == "PR_METADATA_CONFLICT"
+        assert settled[0]["body"]["saved_snapshot"]["status"] == "conflict"
+        assert settled[0]["context"]["occurred_at_epoch"] == receipt["settled_at"]
+        assert not any(e["kind"] == "history.backfilled" for e in journal.api_events()["events"])
+    else:
+        events = journal.api_events(resource_type="operation", resource_id=op["operation_id"])["events"]
+        settled = [e for e in events if e["kind"] == "delivery.metadata_settled"]
+        assert settled[0]["body"]["code"] == "PR_METADATA_CONFLICT"
+        assert settled[0]["body"]["status"] == "conflict"
+    assert len(settled) == 1
+    event = settled[0]
+    assert event["context"]["operation_id"] == op["operation_id"]
+    assert event["context"]["observer"] == "delivery-service"
+    assert event["context"]["actor"] is None and event["context"]["actor_basis"] == "unknown"
+    assert "private" not in json.dumps(events)
+    history = Observation(journal).history("session", "h1/source", limit=200)["events"]
+    assert event["seq"] in {e["seq"] for e in history}
+    assert "private" not in json.dumps(history)
+    if backfilled:
+        head = journal.api_head()
+        journal.close()
+        journal = Journal(path)
+        assert journal.api_head() == head and journal.db.total_changes == 0
+        journal.close()
+
+
 async def test_b03_delivery_snapshot_backfill_preserves_version_chain_and_private_text(make_daemon, gh, monkeypatch):
     from bat_agent_connector import observation
     from bat_agent_connector.task_journal import Journal
