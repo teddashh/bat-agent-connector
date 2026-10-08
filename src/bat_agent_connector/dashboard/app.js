@@ -1614,18 +1614,30 @@ function checkpointPanel(host, sid) {
 		placeholder: t("checkpoint_note_placeholder"),
 		hidden: true
 	});
+	let previewFailed = false;
 	const loadPreview = async () => {
+		if (!can) return;
 		try {
-			preview = (await api("GET", `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sid)}/checkpoint-preview`)).preview;
+			const selectedCommit = pick.value;
+			const current = (await api("GET", `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sid)}/checkpoint-preview`)).preview;
+			if (!Array.isArray(current?.commits)) throw new Error("Invalid checkpoint preview");
+			preview = current;
 			pick.replaceChildren(...preview.commits.map((c) => h("option", { value: c.hash }, `${c.hash.slice(0, 10)} · ${c.message}`)));
+			if (preview.commits.some((c) => c.hash === selectedCommit)) pick.value = selectedCommit;
 			pick.hidden = note.hidden = false;
+			create.disabled = false;
+			if (previewFailed) status.replaceChildren();
+			previewFailed = false;
 			if (preview.dirty) status.replaceChildren(h("span", { class: "error" }, t("dirty_warning", { n: preview.dirty })));
-		} catch {
-			preview = null;
+		} catch (error) {
+			previewFailed = true;
+			create.disabled = true;
+			status.replaceChildren(errorBox(error));
 		}
 	};
 	const create = h("button", {
 		class: "secondary",
+		disabled: !can,
 		onclick: async () => {
 			create.disabled = true;
 			try {
@@ -1648,7 +1660,7 @@ function checkpointPanel(host, sid) {
 			} catch (e) {
 				status.replaceChildren(errorBox(e));
 			}
-			create.disabled = false;
+			create.disabled = !can || previewFailed;
 		}
 	}, t("create_checkpoint"));
 	return {

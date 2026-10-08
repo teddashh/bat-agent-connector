@@ -21,6 +21,7 @@ async function setup(page: Page, native: boolean, custom: (input: any, url: URL)
     return {status: 200, data: url.pathname === "/capabilities" ? caps : url.pathname === "/bootstrap" ? {
       capabilities: caps, sync: {version: 1, server_id: "cleanup-server", principal_id: "cleanup-principal", checkpoint: checkpoint(0)}}
       : url.pathname === "/events" ? {events: [], next_cursor: 0, head_cursor: 0, sync: {checkpoint: checkpoint(0)}}
+      : url.pathname.endsWith("/checkpoint-preview") ? {preview: {head: "c".repeat(40), commits: [{hash: "c".repeat(40), message: "Fixture"}], dirty: 0}}
       : url.pathname === "/cleanup-previews" ? {preview}
       : url.pathname === "/cleanup-tombstones" ? {tombstones: [], next_cursor: null}
       : url.pathname === "/cleanup-retained" ? {retained: [], unavailable: []}
