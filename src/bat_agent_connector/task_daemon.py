@@ -22,6 +22,7 @@ from . import (
     api_auth,
     checkpoints,
     delivery,
+    deployment,
     integration,
     pr_delivery,
     registry,
@@ -49,6 +50,8 @@ DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
            "api_events": "observe", "inventory_sessions": "observe", "inventory_hosts": "observe",
            "api_capabilities": "observe", "github_pr_preview": "observe", "github_merge_preview_get": "observe",
+           "deployment_preview": "observe", "deployment_status": "observe", "deployments_list": "observe",
+           "deployment_environment_get": "observe",
            "checkpoints_list": "observe",
            "checkpoint_get": "observe", "checkpoint_preview": "observe", "integration_candidates": "observe",
            "integration_preview_get": "observe", "integration_get": "observe", "integrations_list": "observe",
@@ -230,6 +233,14 @@ class TaskDaemon:
                                                               from_event=params.get("from_event") is True)}
         if method == "github_merge_preview_get":
             return {"preview": pr_delivery.get_preview(self.journal.db, str(params.get("preview_id")))}
+        if method == "deployment_preview":
+            return {"preview": await deployment.preview(self.ops, params.get("recipe"))}
+        if method == "deployment_status":
+            return {"deployment": deployment.status(self.ops, params.get("deployment_id"))}
+        if method == "deployments_list":
+            return deployment.history(self.ops, params.get("recipe"), cursor=params.get("cursor"), limit=params.get("limit", 50))
+        if method == "deployment_environment_get":
+            return {"environment": deployment.environment_status(self.ops, params.get("recipe"))}
         if method == "checkpoints_list":
             return checkpoints.list_checkpoints(self.journal.db, host=params.get("host"),
                                                 session_id=params.get("session_id"),
@@ -682,22 +693,31 @@ class TaskDaemon:
                 logging.getLogger(__name__).exception("metadata reconciliation failed")
             await asyncio.sleep(10)
 
+    async def reconcile_deployments(self):
+        while True:
+            try:
+                await delivery.reconcile_deployments(self.ops)
+            except Exception:  # preserve provider evidence and keep read-only recovery alive
+                logging.getLogger(__name__).exception("deployment reconciliation failed")
+            await asyncio.sleep(10)
+
     async def serve(self, host: str = "127.0.0.1", port: int = 18796):
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("task service only binds loopback")
         self.acquire_owner()
-        worker = pusher = operations = metadata_reads = inventory = None
+        worker = pusher = operations = metadata_reads = deployment_reads = inventory = None
         try:
             server = await asyncio.start_server(self._handle, host, port)
             worker = asyncio.create_task(self._worker())
             pusher = asyncio.create_task(self._push_loop())
             operations = asyncio.create_task(self.ops.loop())
             metadata_reads = asyncio.create_task(self.reconcile_metadata())
+            deployment_reads = asyncio.create_task(self.reconcile_deployments())
             inventory = asyncio.create_task(self.inventory.loop())
             async with server:
                 await server.serve_forever()
         finally:
-            for background in (worker, pusher, operations, metadata_reads, inventory):
+            for background in (worker, pusher, operations, metadata_reads, deployment_reads, inventory):
                 if background is not None:
                     background.cancel()
                     await asyncio.gather(background, return_exceptions=True)

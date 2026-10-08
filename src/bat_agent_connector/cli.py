@@ -659,7 +659,25 @@ def build_parser() -> argparse.ArgumentParser:
     c = dsp.add_parser("merge", help="merge a reviewed immutable mpv_ preview (merge; deploy for --recipe)")
     c.add_argument("--preview", required=True)
     c.add_argument("--recipe")
+    c.add_argument("--generation", type=int, help="deployment preview's generation (with --recipe)")
+    c.add_argument("--recipe-digest", help="deployment preview's digest (with --recipe)")
     c.add_argument("--key", required=True)
+    for name in ("preview", "history", "show"):
+        c = dsp.add_parser(name, help=f"read deployment {name}")
+        c.add_argument("deployment_id" if name == "show" else "recipe")
+        if name == "history":
+            c.add_argument("--cursor")
+            c.add_argument("--limit", type=int, default=50)
+    for name in ("deploy", "rollback", "retry"):
+        c = dsp.add_parser(name, help=f"{name} through the reviewed configured recipe (deploy scope)")
+        c.add_argument("recipe")
+        if name == "deploy":
+            c.add_argument("--sha", required=True)
+        else:
+            c.add_argument("deployment_id")
+        c.add_argument("--generation", type=int, required=True)
+        c.add_argument("--recipe-digest", required=True)
+        c.add_argument("--key", required=True)
     p = sp.add_parser("integrate", help="put results into an existing PR's head branch (one normal push)")
     isp = p.add_subparsers(dest="integrate_cmd", required=True)
     c = isp.add_parser("candidates", help="agent results and checkpoints on a host, and where they went")
@@ -800,6 +818,7 @@ def integrate_sources(sources: list[str], picks: list[str]) -> list[dict]:
 
 
 def cmd_delivery(args) -> int:
+    from .deployment import retry_envelope
     from .pr_delivery import merge_envelope
     from .task_daemon import request
 
@@ -807,12 +826,33 @@ def cmd_delivery(args) -> int:
     if args.delivery_cmd == "pr":
         out = request("github_pr_preview", repository=args.repository, pull_number=args.number,
                       method=args.method, entry="cli", _auth_token=token or None)
+    elif args.delivery_cmd == "preview":
+        out = request("deployment_preview", recipe=args.recipe, entry="cli", _auth_token=token or None)
+    elif args.delivery_cmd == "history":
+        out = request("deployments_list", recipe=args.recipe, cursor=args.cursor, limit=args.limit,
+                      entry="cli", _auth_token=token or None)
+    elif args.delivery_cmd == "show":
+        out = request("deployment_status", deployment_id=args.deployment_id, entry="cli", _auth_token=token or None)
     else:
         if not token:
-            raise ValueError("delivery writes need this client's BATC_API_TOKEN (integrate or merge scope)")
+            raise ValueError("delivery writes need this client's BATC_API_TOKEN (integrate, merge or deploy scope)")
         if args.delivery_cmd == "merge":
             doc = request("github_merge_preview_get", preview_id=args.preview, entry="cli", _auth_token=token)["preview"]
             envelope = merge_envelope(doc, recipe=args.recipe)
+            if args.recipe:
+                envelope["preconditions"].update(expected_environment_generation=args.generation,
+                                                  expected_recipe_digest=args.recipe_digest)
+        elif args.delivery_cmd in {"deploy", "rollback", "retry"}:
+            pre = {"expected_environment_generation": args.generation, "expected_recipe_digest": args.recipe_digest}
+            if args.delivery_cmd == "retry":
+                saved = request("deployment_status", deployment_id=args.deployment_id, entry="cli", _auth_token=token)["deployment"]
+                if saved["recipe"] != args.recipe:
+                    raise ValueError("retry selects a deployment of this recipe")
+                envelope = retry_envelope(saved, pre)
+            else:
+                envelope = {"action": "deployment.start" if args.delivery_cmd == "deploy" else "deployment.rollback",
+                            "target": {"recipe": args.recipe}, "preconditions": pre,
+                            "params": {"source_sha": args.sha} if args.delivery_cmd == "deploy" else {"deployment_id": args.deployment_id}}
         else:
             params = {"title": args.title} if args.title is not None else {}
             if args.body_file is not None:
