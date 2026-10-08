@@ -95,3 +95,60 @@ test("lost operation reply preserves draft and idempotency key across reopening"
   expect(bodies[1]).toEqual({action: "session.send", target: {host: "demo", session_id: "session-1"},
     params: {text: "Fixture task instructions", queue: false}, preconditions: {}});
 });
+
+
+for (const native of [false, true]) {
+  test(`integration previews retain the connected view write gate (${native ? "native" : "browser"})`, async ({page}) => {
+    const caps = {...capabilities, scopes: ["observe", "integrate"], repositories: [{repository: "example/repository"}]};
+    const boot = {...bootstrap, capabilities: caps};
+    const pr = {repository: "example/repository", pull_number: 1, title: "Fixture PR", state: "open",
+      head_ref: "feature", head_sha: "a".repeat(40), base_ref: "main", base_sha: "b".repeat(40),
+      html_url: "https://github.com/example/repository/pull/1", checks: {}, recipes: [],
+      merge: {methods: ["merge"], allowed: false}, metadata_update: {allowed: true},
+      integration: {allowed: true, hosts: ["fixture"]},
+      merge_preview: {preview_id: "mpv_" + "a".repeat(32), digest: "digest", method: "merge",
+        target: {head_sha: "a".repeat(40), base_sha: "b".repeat(40)}, blocking: [], commits: [], affected_prs: [], warnings: []}};
+    const data = {caps, boot, events, pr, candidates: {agent_results: [], checkpoints: []},
+      reply: {operation: {operation_id: "op_" + "c".repeat(32), status: "failed", error_code: "FIXTURE_STOP"}}};
+    const sent: any[] = [];
+    if (native) {
+      await page.addInitScript(data => {
+        Object.assign(window, {isTauri: true, __fixturePosts: [], __TAURI_INTERNALS__: {
+          invoke: async (command: string, args: any) => {
+            if (command === "native_status") return {endpoint: "https://central.example/", credential_available: true};
+            if (command === "connector_connect") return data.caps;
+            if (command === "connector_disconnect") return null;
+            const input = args.input;
+            if (input.method === "POST") (window as any).__fixturePosts.push(input.body);
+            const path = input.path.split("?")[0];
+            return {status: 200, data: input.method === "POST" ? data.reply : path === "/bootstrap" ? data.boot
+              : path === "/events" ? data.events : path === "/integrations/candidates" ? data.candidates
+              : path.startsWith("/repositories/") ? {pull_request: data.pr} : {sessions: [], operations: [], hosts: [], work_items: []}};
+          }
+        }});
+      }, data);
+    } else {
+      await page.addInitScript(() => sessionStorage.setItem("batc.dashboard.token", "fixture-token"));
+      await page.route("**/api/v1/**", route => {
+        const request = route.request(); const path = new URL(request.url()).pathname;
+        if (request.method() === "POST") {sent.push(request.postDataJSON()); return route.fulfill({json: data.reply});}
+        return route.fulfill({json: path.endsWith("/capabilities") ? caps : path.endsWith("/bootstrap") ? boot
+          : path.endsWith("/events") ? events : path.endsWith("/integrations/candidates") ? data.candidates
+          : path.includes("/repositories/") ? {pull_request: pr} : {sessions: [], operations: [], hosts: [], work_items: []}});
+      });
+    }
+    await page.goto("/dashboard/#/delivery");
+    await page.getByPlaceholder("123").fill("1");
+    await page.getByRole("button", {name: "Load PR", exact: true}).click();
+    for (const branch of ["first-source", "second-source"]) {
+      await page.getByPlaceholder("branch name on GitHub").fill(branch);
+      await page.getByRole("button", {name: "Add branch", exact: true}).click();
+      await expect.poll(async () => native ? (await page.evaluate(() => (window as any).__fixturePosts)).length : sent.length)
+        .toBe(branch === "first-source" ? 1 : 2);
+    }
+    const posts = native ? await page.evaluate(() => (window as any).__fixturePosts) : sent;
+    expect(posts.map((body: any) => body.action)).toEqual(["integration.preview", "integration.preview"]);
+    expect(posts[1].params.sources).toEqual([{kind: "branch", id: "first-source"}, {kind: "branch", id: "second-source"}]);
+    await expect(page.getByText("Connection lost", {exact: false})).toHaveCount(0);
+  });
+}

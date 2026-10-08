@@ -876,7 +876,6 @@ function integrationPanel(pr, reloadCard) {
   };
   const runPreview = async () => {
     const mine = ++generation;
-  state.viewReady = false;
     doc = null;
     if (!selected.length) { previewBox.replaceChildren(); return; }
     previewBox.replaceChildren(h("p", { class: "muted" }, t("previewing")));
