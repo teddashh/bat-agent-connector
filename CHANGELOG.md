@@ -12,10 +12,11 @@
   `DESTINATION_MANUAL`, ...).
 - Behaviour changes: `session_relay` targets the workspace's most recent connector-managed session and, with
   `start_if_missing`, starts a new worktree session instead of writing to a person's session; failover only continues
-  connector-managed sessions; `worktree_merge` and cleanup merges only target a main checkout inside `managed_roots`
-  (otherwise `DESTINATION_MANUAL` / ESCALATE); the fan-out planner runs in its own worktree; `session_start` refuses
-  `use_worktree=false` outside a managed root; cleanup keeps (never stops) BAT sessions and connector sessions left
-  in a human checkout.
+  connector-managed sessions (`all_exhausted` lists the others under `skipped_read_only`, outside the per-call cap);
+  `worktree_merge` and cleanup merges only target the main checkout recorded at start, inside `managed_roots`
+  (otherwise `DESTINATION_MANUAL` / `BINDING_MISMATCH` / ESCALATE); the fan-out planner runs in its own worktree;
+  `session_start` refuses `use_worktree=false` outside a managed root and any managed-root destination whose git
+  root resolves elsewhere; cleanup keeps (never stops) BAT sessions and connector sessions left in a human checkout.
 - New host settings `managed_roots` and `shared_clone_worktrees` (default true: worktrees may still be created
   inside a human clone, which shares its refs). New read tool `session_policy` / `batc policy`; `sessions_list`,
   `sessions_triage` and `worktree_status` rows carry `provenance` and `api_access`.

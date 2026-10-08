@@ -261,8 +261,14 @@ async def session_start(
     if agent == "codex" and not model and hc.codex_model:
         model = hc.codex_model
     sid = session_id or str(uuid.uuid4())
+    # Read-only: how the host resolves the destination, so links into a human checkout are caught up front.
+    git_roots = {}
+    for path in {folder, cwd_override} - {None}:
+        root = await c.invoke("git:getRoot", {"cwd": path})
+        git_roots[resource_policy.norm(path)] = root if isinstance(root, str) else None
     grant = resource_policy.authorize_new_session(hc, sid, folder=folder, use_worktree=use_worktree,
-                                                  cwd_override=cwd_override, task_id=task_id)
+                                                  cwd_override=cwd_override, task_id=task_id,
+                                                  git_roots=git_roots)
     async with _write_lock(host):
         audit.check_rate(host, "#orchestrate-start-" + sid)
         registry.reserve(
@@ -304,7 +310,10 @@ async def session_start(
                     **base, channel="worktree:create", phase="result", ok=True, branch=wt.get("branchName"),
                     source_branch=wt.get("sourceBranch"), requested_base_branch=base_branch
                 )
-                grant = resource_policy.check_new_worktree(grant, hc, folder, wt.get("worktreePath"))
+                origin_root = git_roots.get(resource_policy.norm(folder))
+                # No rollback on refusal: a worktree at an unexpected path may be a person's checkout, and
+                # worktree:remove with deleteBranch could delete their branch. Fail closed and leave it.
+                grant = resource_policy.check_new_worktree(grant, hc, folder, wt.get("worktreePath"), origin_root)
             cwd = cwd_override or wt.get("worktreePath") or folder
             if use_worktree:
                 rows = await c.invoke("git:log", {"cwd": cwd, "count": 1})
@@ -346,6 +355,7 @@ async def session_start(
             cwd=cwd,
             worktree_path=cwd if cwd_override else wt.get("worktreePath"),
             branch=external_branch if cwd_override else wt.get("branchName"),
+            origin_root=git_roots.get(resource_policy.norm(folder)),
             **registry_permission_fields(opts),
         )
         tab = None
@@ -434,7 +444,8 @@ async def worktree_merge(fleet: Fleet, host: str, session_id: str, confirm: bool
         t, ws = await _resolve_session(c, session_id)
         sid = t["id"]
         grant = await resource_policy.authorize_session(fleet, host, "worktree.merge", t)
-        resource_policy.check_merge_destination(fleet.config.host(host), _origin_cwd(t, ws))
+        origin = resource_policy.merge_origin(fleet.config.host(host), sid, t, ws)
+        resource_policy.check_merge_destination(fleet.config.host(host), origin)
         audit.check_rate(host, sid + "#merge")
         st, rehydrated = await _wt_status(c, t, rehydrate=grant)
         if not st:
@@ -470,7 +481,6 @@ async def worktree_merge(fleet: Fleet, host: str, session_id: str, confirm: bool
                 "worktree_dirty_files": len(dirty),
                 "reason": "worktree has uncommitted changes (they would not be merged); ask the session to commit",
             }
-        origin = _origin_cwd(t, ws)
         if not origin:
             return {**report, "merged_now": False, "reason": "cannot determine the main checkout folder"}
         cur = await c.invoke("git:branch", {"cwd": origin})

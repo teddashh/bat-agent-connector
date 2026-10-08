@@ -100,7 +100,8 @@ class BatTaskAdapter:
         suffix = task["task_id"].replace("-", "")[:12]
         path = f"{root}/.bat-worktrees/batc-task-{suffix}"
         branch = f"batc/task-{suffix}"
-        resource_policy.check_external_worktree(root, path, branch, task["task_id"])
+        resource_policy.authorize_external_worktree(self.fleet.config.host(task["host"]), root, path, branch,
+                                                    task["task_id"])
         base = task["base_branch"]
         qroot, qpath, qbranch, qbase = map(shlex.quote, (root, path, branch, base))
         script = (f"mkdir -p {shlex.quote(root + '/.bat-worktrees')} && "
