@@ -4,6 +4,9 @@
 [`2026-10-08-dispatch.md`](../handoff/2026-10-08-dispatch.md)。此表以 source evidence
 追蹤，不以測試數或 PR 數代替產品驗收。開工時 main 為 `2568520`（#41 已合併）。
 
+46 項驗收的 source／fixture／native／installed／live 證據與缺口，另見
+[R10 驗收矩陣](acceptance-v2.md)；各文件快照日期不同，不把接手基線當作最新 head。
+
 ## 接手基線
 
 | 來源 | 接手時 remote head | 狀態及下一步 |
