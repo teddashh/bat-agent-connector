@@ -11,6 +11,13 @@
   `checkpoints/{id}?live=true` (`source.advanced`), `started_from` on the session read, MCP `checkpoint_preview`,
   `checkpoint_create`, `work_continue_from_checkpoint`, CLI `batc checkpoint`, and a commit picker and note in the
   Dashboard. The Dashboard no longer requests `/favicon.ico`.
+- Checkpoint continuation (review fixes): BAT's start-point check is now the `verify.start` step before the
+  session starts, so a replay after the agent committed no longer ends in a false `START_MISMATCH`. Host scripts
+  for one clone are serialized with `flock`, so a re-run after a lost SSH reply waits instead of racing. The clone
+  keeps the source's origin only when it is a network URL, with credentials stripped. The clone and worktree
+  paths are checked against the managed roots before any write (`checkpoint.managed_worktree` in the mutation
+  table). A checkpoint taken inside a managed clone continues in that clone. A session that is only in the
+  registry keeps its workspace, and a checkpoint without one is refused up front (`NO_WORKSPACE`).
 
 - Checkpoints (docs/design/checkpoints.md): `checkpoint.create` records any session's commit, branch, uncommitted
   change count and a fixed conversation excerpt through read channels only; `checkpoint.continue` builds a
