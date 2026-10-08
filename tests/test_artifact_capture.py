@@ -9,6 +9,7 @@ import json
 import os
 import sys
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -176,6 +177,78 @@ async def test_preview_binds_actual_credential_even_with_same_actor_label(daemon
     assert refused.value.code == "PREVIEW_MISMATCH"
     assert not daemon.journal.db.execute("SELECT 1 FROM operations").fetchone()
     assert person.credential_id not in json.dumps(pv)
+
+
+@pytest.mark.parametrize("verb", ["replay", "resume", "cancel"])
+@pytest.mark.parametrize("authority", ["other_credential", "manage_only", "observe_only", "reduced", "admin"])
+async def test_existing_capture_requires_original_credential_and_current_combined_scopes(daemon, verb, authority):
+    person, token = principal(daemon)
+    pv = await preview(daemon, person)
+    op = submit(daemon, person, pv)
+    if authority == "reduced":
+        daemon.journal.db.execute("UPDATE api_principals SET scopes=? WHERE token_hash=?",
+                                 (json.dumps(["manage"]), person.credential_id))
+        other = api_auth.authenticate(daemon.journal.db, token, daemon._admin_token)
+        assert other.credential_id == person.credential_id
+    elif authority == "admin":
+        other = api_auth.authenticate(daemon.journal.db, daemon._admin_token, daemon._admin_token)
+    else:
+        scopes = {"other_credential": ("observe", "manage"), "manage_only": ("manage",),
+                  "observe_only": ("observe",)}[authority]
+        other, _ = principal(daemon, scopes=scopes)
+    daemon.journal.db.execute("UPDATE operations SET status='needs_attention' WHERE operation_id=?",
+                             (op["operation_id"],))
+    before = daemon.ops.get(op["operation_id"])
+    with pytest.raises(OperationError) as refused:
+        if verb == "replay":
+            submit(daemon, other, pv)
+        else:
+            getattr(daemon.ops, verb)(other, op["operation_id"])
+    # The admin actor has its own key namespace, so its create is a new, mismatched preview admission.
+    expected = ("PREVIEW_MISMATCH", 409) if authority == "admin" and verb == "replay" else ("FORBIDDEN", 403)
+    assert (refused.value.code, refused.value.status) == expected
+    assert daemon.ops.get(op["operation_id"]) == before
+    assert len(daemon.ops.list()["operations"]) == 1
+    assert not daemon.journal.db.execute("SELECT 1 FROM artifact_uploads").fetchone()
+    assert len(daemon.ops.context["artifact_host"].calls) == 1  # original preview only
+    assert person.credential_id not in json.dumps(before)
+
+
+@pytest.mark.parametrize("verb", ["replay", "resume", "cancel"])
+async def test_original_capture_controls_do_not_expire_or_readmit_accepted_preview(daemon, monkeypatch, verb):
+    person, _ = principal(daemon)
+    pv = await preview(daemon, person)
+    op = submit(daemon, person, pv)
+    daemon.journal.db.execute("UPDATE operations SET status='needs_attention' WHERE operation_id=?",
+                             (op["operation_id"],))
+    monkeypatch.setattr(capture, "time", SimpleNamespace(time=lambda: pv["expires_at"] + 1))
+    with pytest.raises(OperationError, match="PREVIEW_EXPIRED"):
+        capture._decode(daemon.ops, pv["preview_token"])
+    # Original admission is durable: changed current quota must not block receipt/control access.
+    daemon.artifact_store.settings = replace(daemon.artifact_store.settings, max_store_bytes=1)
+    result = submit(daemon, person, pv) if verb == "replay" else getattr(daemon.ops, verb)(person, op["operation_id"])
+    assert result["operation_id"] == op["operation_id"]
+    assert result["status"] == {"replay": "needs_attention", "resume": "running", "cancel": "cancelled"}[verb]
+    assert len(daemon.ops.list()["operations"]) == 1
+    assert not daemon.journal.db.execute("SELECT 1 FROM artifact_uploads").fetchone()
+    assert len(daemon.ops.context["artifact_host"].calls) == 1
+
+
+async def test_preview_refuses_oversized_signed_source_identity_before_returning_token(daemon, monkeypatch):
+    person, _ = principal(daemon)
+    original = await preview(daemon, person)
+    long_path = "/" + "a" * 4095
+    async def source(*_args):
+        return {**original["source"], "root": long_path, "repository_root": long_path,
+                "tab": {**original["source"]["tab"], "cwd": long_path, "worktreePath": long_path}}
+    async def read(*_args):
+        return original["evidence"], b""
+    monkeypatch.setattr(capture, "_source", source)
+    monkeypatch.setattr(capture, "_read", read)
+    with pytest.raises(OperationError, match="preview bound") as refused:
+        await preview(daemon, person, "a/" * 1900 + "notes.txt")
+    assert refused.value.code == "SOURCE_UNAVAILABLE"
+    assert not daemon.journal.db.execute("SELECT 1 FROM operations").fetchone()
 
 
 async def test_expired_tampered_preview_and_forged_lineage_reserve_nothing(daemon):
@@ -392,6 +465,15 @@ async def test_http_rpc_scope_credential_and_read_boundaries(served):
     assert status == 202, result
     op = await finish(d, result["operation"])
     assert op["status"] == "succeeded", op
+    for scopes in [("manage",), ("observe", "manage")]:
+        other = api.token(d, person.actor, *scopes)
+        status, refusal = await api.http(port, "POST", "/api/v1/operations", tok=other, body=body,
+                                         headers={"Idempotency-Key": "http-capture"})
+        assert status == 403 and "operation" not in refusal
+        for verb in ("cancel", "resume"):
+            status, refusal = await api.http(port, "POST", f"/api/v1/operations/{op['operation_id']}/{verb}", tok=other)
+            assert status == 403 and "operation" not in refusal
+    assert d.ops.get(op["operation_id"])["status"] == "succeeded"
     ref = op["result"]
     url = f"/api/v1/artifacts/{ref['artifact_id']}/revisions/1"
     assert (await api.http(port, "GET", url, tok=api.token(d, "reader", "observe")))[0] == 200

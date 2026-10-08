@@ -26,7 +26,7 @@ def install(ops, admin_token):
     ops.context.setdefault("capture_slots", asyncio.Semaphore(MAX_CONCURRENT_READS))
     if "artifact.capture" not in ops.actions:
         ops.register(ActionDef("artifact.capture", "manage", "Capture a reviewed manual-session file",
-                               _run, _admit, ("preview_id",)))
+                               _run, _admit, ("preview_id",), authorize_existing=_authorize_existing))
 
 
 def _bytes(value):
@@ -188,7 +188,17 @@ def _admit(ops, principal, target, params, pre):
             or target["preview_id"] != preview_id or pre["expected_fingerprint"] != claims["fingerprint"]):
         raise OperationError("PREVIEW_MISMATCH", "preview identity or reviewed fingerprint differs", 409)
     ops.context["artifact_store"].validate_upload({}, upload_params(claims["document"]), {})
-    return {"capture": claims["document"], "preview_id": preview_id, "fingerprint": claims["fingerprint"]}
+    return {"capture": claims["document"], "preview_id": preview_id, "fingerprint": claims["fingerprint"],
+            "principal": claims["principal"]}
+
+
+def _authorize_existing(ops, principal, op, verb):
+    """Check current authority against accepted evidence without re-expiring or re-admitting intent."""
+    if not principal.allows("manage") or not principal.allows("observe"):
+        raise OperationError("FORBIDDEN", f"capture {verb} requires manage and observe", 403)
+    binding = (op.get("external_refs") or {}).get("admission_binding") or {}
+    if op["actor"] != principal.actor or binding.get("principal") != _principal(ops, principal):
+        raise OperationError("FORBIDDEN", f"capture {verb} requires the original authenticated credential", 403)
 
 
 async def _run(ctx):

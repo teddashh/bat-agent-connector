@@ -3,6 +3,7 @@
 ## Next release (unreleased)
 
 - Capture one reviewed file from a positively classified manual BAT session as an immutable artifact.
+  Idempotent replay and resume/cancel keep the original credential and combined scopes without re-expiring accepted previews.
   HTTP, MCP and CLI use a short-lived credential-bound preview and the existing operation/store quota,
   staging and publication receipts. Reject symlinks, hardlinks, nonregular files, source changes and rebinding;
   preserve the manual checkout and recover completed captures without rereading or republishing their source.

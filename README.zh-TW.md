@@ -49,6 +49,9 @@ Hermes 與 Grokbot 配接皆[由 canonical skill 產生](docs/agent-skills.md)�
 
 附件以 immutable revision 存在 Connector 自有 store，記 SHA-256、size 與明確配額。用 `batc artifact upload FILE --key KEY --confirm` 或 Dashboard 選檔上傳，把精確 `{artifact_id, revision, digest}` 附到工作項目或 checkpoint。接續固定 checkpoint 的主機，第一指令前在 session worktree 驗證 bytes；來源前進時明確確認，續同一 operation。草稿文字與已上傳 refs 在 reload／失敗後保留。人工單檔用 `batc artifact capture-preview HOST SESSION_ID relative/file` 保存預覽 JSON，再以相同 credential 執行 `batc artifact capture --preview-file PREVIEW.json --key KEY --confirm`。需要 observe＋manage，來源變更即拒絕，不修改人工 checkout，也不是完整 dirty snapshot。Store 沒有 delete；managed-result capture／accept 與跨主機 commit fetch 留待 B2／C。見 [Artifacts 設計](docs/design/artifacts.md)。
 
+Capture 的同 key 查回、resume 與 cancel 也需原 credential 和目前的 observe＋manage；
+已接受的 operation 不因 preview 過期而失去恢復或查回能力。
+
 ## 安裝
 
 ```bash
