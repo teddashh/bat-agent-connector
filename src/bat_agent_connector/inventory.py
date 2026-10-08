@@ -175,11 +175,11 @@ class Inventory:
                                  -int(activity), at, at))
                 if prev is None:
                     added += 1
-                    self.journal.api_event("session", f"{host}/{sid}", "session.added", {**_material(row), "first_seen_at": _iso(at)}, actor="inventory", context=self._context(host))
+                    self.journal.api_event("session", f"{host}/{sid}", "session.added", {**_material(row), "first_seen_at": _iso(at), "field_evidence": row.get("field_evidence"), "field_observed_at": row.get("field_observed_at")}, actor="inventory", context=self._context(host))
                 elif prev["digest"] != digest or prev["gone_at"] is not None:
                     updated += 1
                     self.journal.api_event("session", f"{host}/{sid}", "session.reappeared" if prev["gone_at"] is not None else "session.updated",
-                                           {**_material(row), "changed_fields": [k for k in MATERIAL if prior.get(k) != row.get(k)]},
+                                           {**_material(row), "field_evidence": row.get("field_evidence"), "field_observed_at": row.get("field_observed_at"), "changed_fields": [k for k in MATERIAL if prior.get(k) != row.get(k)]},
                                            actor="inventory", context=self._context(host))
                 if old_reason:
                     self.journal.api_event("session", f"{host}/{sid}", "session.fresh", {"previous_reason": old_reason}, actor="inventory", context=self._context(host))
@@ -216,8 +216,11 @@ class Inventory:
         return hashlib.sha256(dump([hc.url, hc.fingerprint, hc.profile_id]).encode()).hexdigest()
 
     def _context(self, host):
+        scan = self._scans.get(host, {})
         return {"actor_basis": "service", "observer": "inventory", "entry_point": "daemon", "host": host,
-                "profile_id": self.config.host(host).profile_id}
+                "profile_id": self.config.host(host).profile_id,
+                "scan_id": f"scan_{int(scan['started_at'] * 1000000)}" if scan.get("started_at") else None,
+                "evidence": [{"source": "workspace:load", "profile_id": self.config.host(host).profile_id}]}
 
     def _specific_stale(self, host, sid, reason, at):
         r = self.db.execute("SELECT body FROM sessions_observed WHERE host=? AND session_id=?", (host, sid)).fetchone()
@@ -225,8 +228,11 @@ class Inventory:
         if data.get("specific_stale_reason") == reason:
             return
         data["specific_stale_reason"] = reason
-        self.db.execute("UPDATE sessions_observed SET body=? WHERE host=? AND session_id=?", (dump(data), host, sid))
-        self.journal.api_event("session", f"{host}/{sid}", "session.stale", {"reason": reason, "observed_at": _iso(at)},
+        if reason in {"not_enumerated", "gone"}:
+            data["has_tab"] = False  # complete workspace enumeration proves absence of the tab
+            data["field_observed_at"] = {**data.get("field_observed_at", {}), "tab": _iso(at), "enumeration": _iso(at)}
+        self.db.execute("UPDATE sessions_observed SET body=?,digest=? WHERE host=? AND session_id=?", (dump(data), _digest(data), host, sid))
+        self.journal.api_event("session", f"{host}/{sid}", "session.stale", {"reason": reason, "observed_at": _iso(at), "has_tab": data.get("has_tab")},
                                actor="inventory", context=self._context(host))
 
     def _discovery(self, host, at, *, failed=None, count=None):
@@ -349,7 +355,7 @@ class Inventory:
             stale, reason = True, "not_enumerated"
         if body.get("specific_stale_reason"):
             stale, reason = True, body["specific_stale_reason"]
-        state = self._state(body, r["host"], hosts.get(r["host"]) or {}, r, stale, reason)
+        state = self._state(body, r["host"], hosts.get(r["host"]) or {}, r, stale, reason, now)
         activity = body.pop("last_activity_ms", None)
         body.pop("last_activity", None)
         body.pop("last_activity_age", None)
@@ -360,7 +366,7 @@ class Inventory:
                 "state": state, "relations": self._relation_summary(f"{r['host']}/{r['session_id']}"),
                 "scope_status": "current" if r["host"] in self.config.hosts else "outside_current_config"}
 
-    def _state(self, data, host, host_row, row, stale, reason):
+    def _state(self, data, host, host_row, row, stale, reason, now=None):
         loaded, streaming, tab = data.get("loaded"), data.get("streaming"), data.get("has_tab")
         runtime = data.get("runtime_status")
         values = {"connection": "unknown" if not host_row else "connected" if host_row.get("reachable") else "not_connected",
@@ -375,6 +381,14 @@ class Inventory:
                            "source_ref": f"hosts_observed:{host}" if name == "connection" else f"sessions_observed:{host}/{data['session_id']}" if row else "journal_identity",
                            "stale": stale or (data.get("fields_stale", False) and name in {"loading", "activity"})} for name in values}
         evidence["connection"]["observed_at"] = _iso(host_row.get("last_attempt_at"))
+        host_stale = self._host_stale(host_row, now or time.time())[0]
+        evidence["connection"]["stale"] = host_stale
+        evidence["tab"]["stale"] = host_stale or reason == "scope_changed"
+        for axis in ("loading", "activity", "tab", "lifecycle", "enumeration"):
+            if values[axis] == "unknown":
+                evidence[axis]["observed_at"] = None
+        if row and row["missing_count"]:
+            evidence["enumeration"]["observed_at"] = times.get("enumeration")
         return {**values, "stale_reason": reason, "end_scope": None, "evidence": evidence}
 
     def _relation_summary(self, rid):
