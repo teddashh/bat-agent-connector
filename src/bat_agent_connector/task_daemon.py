@@ -12,16 +12,21 @@ import secrets
 import shutil
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import registry, service
+from . import api_actions, api_auth, registry, service
+from .api_v1 import ApiV1
 from .config import Config, state_dir
+from .errors import ResourceReadOnly
 from .fleet import Fleet
 from .goose_acp import GooseACP
+from .inventory import Inventory, InventorySettings
 from .jev import Jev
 from .model_router import MinimalReviewGate, MinimalTaskRouter, ModelRouter, RouterConfig
+from .operations import OperationError, OperationService
 from .task_bat import BatTaskAdapter
 from .task_core import TaskCoordinator
 from .task_journal import Journal
@@ -29,9 +34,14 @@ from .task_push import EventPusher, EventWebhook
 from .task_verifier import ObservedVerifier, load_settings
 
 DEFAULT_URL = "http://127.0.0.1:18796/rpc"
+# /rpc methods that share /api/v1's principals and OperationService (MCP and CLI enter here).
+API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
+           "api_events": "observe", "inventory_sessions": "observe", "inventory_hosts": "observe",
+           "api_capabilities": "observe"}
+ADMIN_RPC = {"api_token_issue", "api_token_revoke", "api_token_list", "work_reconcile_capability"}
 
 
-def request(method: str, *, _auth_token: str | None = None, **params) -> dict:
+def request(method: str, *, _auth_token: str | None = None, timeout: float = 5.0, **params) -> dict:
     """Small stdio-MCP client to the local daemon; no BAT token crosses this API."""
     url = os.environ.get("BATC_TASK_URL", DEFAULT_URL)
     parsed = urlsplit(url)
@@ -45,10 +55,13 @@ def request(method: str, *, _auth_token: str | None = None, **params) -> dict:
         url, method="POST", data=json.dumps({"method": method, "params": params}).encode(),
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(req, timeout=5) as resp:  # noqa: S310 - loopback checked above
-        result = json.load(resp)
+    try:
+        with opener.open(req, timeout=timeout) as resp:  # noqa: S310 - loopback checked above
+            result = json.load(resp)
+    except urllib.error.HTTPError as e:  # the daemon answers refusals with 400 and a JSON body
+        result = json.load(e)
     if "error" in result:
-        raise ValueError(result["error"])
+        raise ValueError(result["error"] + (": " + result["message"] if result.get("message") else ""))
     return result["result"]
 
 
@@ -101,6 +114,14 @@ class TaskDaemon:
         self._owner_id = secrets.token_hex(16)
         self.pusher = EventPusher(self.journal, self._event_webhook(self.adapter.verifier.settings),
                                   repo_urls=self.adapter.verifier.settings.repo_urls)
+        # /api/v1: operations share this daemon's journal (one owner) and its write-capable fleet;
+        # the inventory observes through its own read-only fleet.
+        self.ops = OperationService(self.journal, actions=api_actions.ACTIONS)
+        self.inventory = Inventory(self.journal, config, InventorySettings(
+            interval_s=config.api.inventory_interval_s, stale_after_s=config.api.stale_after_s,
+            activity_every=config.api.activity_every))
+        self.ops.context.update(fleet=self.fleet, inventory=self.inventory)
+        self.api = ApiV1(self, allowed_origins=config.api.allowed_origins)
 
     @staticmethod
     def _event_webhook(settings) -> EventWebhook | None:
@@ -133,7 +154,68 @@ class TaskDaemon:
         return min(self.verification_budget(task["recipe"]) - (now - progress),
                    self.verification_cap(task["recipe"]) - (now - started))
 
+    async def call_api(self, method: str, params: dict, principal: api_auth.Principal) -> dict:
+        """/rpc doors into OperationService and the inventory for MCP and CLI (same rules as /api/v1)."""
+        scope = API_RPC[method]
+        if scope != "?" and not principal.allows(scope):
+            raise OperationError("FORBIDDEN", f"{method} needs the {scope!r} scope", 403)
+        entry = params.pop("entry", None)
+        entry = entry if entry in {"mcp", "cli"} else "rpc"
+        if method == "op_submit":
+            try:  # validated before anything is stored, so an error means nothing happened
+                wait = min(max(float(params.get("wait_s") or 0), 0.0), 30.0)
+            except (TypeError, ValueError):
+                raise OperationError("INVALID_REQUEST", "wait_s must be a number of seconds", 422) from None
+            op, created = self.ops.create(principal, action=params.get("action"), target=params.get("target"),
+                                          params=params.get("params"), preconditions=params.get("preconditions"),
+                                          idempotency_key=params.get("idempotency_key"), entry=entry)
+            if wait > 0:
+                op = await self.ops.wait(op["operation_id"], wait)
+            return {"operation": op, "created": created}
+        if method == "op_get":
+            return {"operation": self.ops.get(str(params.get("operation_id")))}
+        if method == "op_list":
+            statuses = params.get("statuses")
+            return self.ops.list(statuses=statuses if isinstance(statuses, list) else None,
+                                 actor=params.get("actor"), action=params.get("action"),
+                                 limit=int(params.get("limit") or 50))
+        if method == "op_cancel":
+            return {"operation": self.ops.cancel(principal, str(params.get("operation_id")))}
+        if method == "op_resume":
+            return {"operation": self.ops.resume(principal, str(params.get("operation_id")))}
+        if method == "api_events":
+            limit = params.get("limit")
+            return self.journal.api_events(int(params.get("after") or 0), 100 if limit is None else int(limit),
+                                           resource_type=params.get("resource_type"),
+                                           resource_id=params.get("resource_id"))
+        if method == "inventory_sessions":
+            return self.inventory.list_sessions(
+                host=params.get("host"), provenance=params.get("provenance"), api_access=params.get("access"),
+                attention=params.get("attention"), include_gone=bool(params.get("include_gone")),
+                order=params.get("order") or "activity", cursor=params.get("cursor"),
+                limit=int(params.get("limit") or 50))
+        if method == "inventory_hosts":
+            return {"hosts": self.inventory.hosts()}
+        if method == "api_capabilities":
+            return (await self.api.capabilities(principal=principal))[1]
+        raise ValueError("unknown api method")
+
     async def call(self, method: str, params: dict, *, auth_token: str | None = None) -> dict:
+        if method == "api_token_issue":
+            ttl_days = params.get("ttl_days")
+            if ttl_days is not None and not float(ttl_days) > 0:
+                raise ValueError("ttl_days must be positive (omit it for a token that does not expire)")
+            with self.journal.tx():
+                token = api_auth.issue(self.journal.db, params.get("actor"), params.get("scopes") or [],
+                                       label=params.get("label"),
+                                       ttl_s=float(ttl_days) * 86400 if ttl_days else None)
+            return {"actor": params.get("actor"), "scopes": sorted(set(params.get("scopes") or [])),
+                    "token": token, "note": "shown once; only its SHA-256 is stored"}
+        if method == "api_token_revoke":
+            with self.journal.tx():
+                return {"actor": params.get("actor"), "revoked": api_auth.revoke(self.journal.db, params.get("actor"))}
+        if method == "api_token_list":
+            return {"principals": api_auth.list_principals(self.journal.db)}
         if method == "work_events":
             # Read-only milestone feed. Chat delivery belongs to the caller.
             feed = self.journal.milestones(
@@ -320,6 +402,22 @@ class TaskDaemon:
             if len(head) > 16_384:
                 raise ValueError("request headers too large")
             lines = head.decode("ascii").split("\r\n")
+            request_line = lines[0].split(" ")
+            if (len(request_line) == 3 and request_line[2] in {"HTTP/1.0", "HTTP/1.1"}
+                    and request_line[1].split("?", 1)[0].rstrip("/").startswith("/api/v1")):
+                headers: dict[str, str] = {}
+                for line in lines[1:]:
+                    name, sep, value = line.partition(":")
+                    key = name.strip().lower()
+                    if not sep:
+                        continue
+                    if key in headers and key in {"host", "authorization", "content-length", "origin"}:
+                        raise ValueError("duplicate request header")
+                    headers[key] = value.strip()
+                await self.api.handle(request_line[0], request_line[1], headers, reader, writer)
+                writer.close()
+                await writer.wait_closed()
+                return
             if lines[0] != "POST /rpc HTTP/1.1":
                 raise ValueError("POST /rpc required")
             lengths = [int(line.split(":", 1)[1].strip()) for line in lines[1:] if line.lower().startswith("content-length:")]
@@ -331,6 +429,26 @@ class TaskDaemon:
             token = auth[0][7:] if len(auth) == 1 and auth[0].startswith("Bearer ") else ""
             method = body["method"]
             params = body.get("params") or {}
+            if method in API_RPC:
+                principal = api_auth.authenticate(self.journal.db, token, self._admin_token)
+                if principal is None:
+                    raise ValueError("task API authorization failed")
+                try:
+                    api_result, api_status = {"result": await self.call_api(method, params, principal)}, "200 OK"
+                except OperationError as e:
+                    api_result, api_status = {"error": e.code, "message": e.message}, "400 Bad Request"
+                except ResourceReadOnly as e:
+                    api_result, api_status = {"error": e.code, "message": str(e)}, "400 Bad Request"
+                except (ValueError, TypeError, KeyError) as e:
+                    api_result = {"error": "INVALID_REQUEST", "message": str(e)[:300]}
+                    api_status = "400 Bad Request"
+                raw = json.dumps(api_result, ensure_ascii=False, default=str).encode()
+                writer.write(f"HTTP/1.1 {api_status}\r\nContent-Type: application/json\r\n"
+                             f"Content-Length: {len(raw)}\r\nConnection: close\r\n\r\n".encode() + raw)
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+                return
             admin = hmac.compare_digest(token, self._admin_token)
             scoped = (method.startswith("task_") and bool(params.get("task_id"))
                       and self.journal.authorize_capability(token, params["task_id"]))
@@ -340,7 +458,7 @@ class TaskDaemon:
                              token, params["task_id"], params["command_id"]))
             if method == "work_reconcile" and not reconcile:
                 raise ValueError("command-scoped reconciliation capability required")
-            if method == "work_reconcile_capability" and not admin:
+            if method in ADMIN_RPC and not admin:
                 raise ValueError("admin authorization required")
             if not (admin or scoped or reconcile):
                 raise ValueError("task API authorization failed")
@@ -483,18 +601,21 @@ class TaskDaemon:
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("task service only binds loopback")
         self.acquire_owner()
-        worker = pusher = None
+        worker = pusher = operations = inventory = None
         try:
             server = await asyncio.start_server(self._handle, host, port)
             worker = asyncio.create_task(self._worker())
             pusher = asyncio.create_task(self._push_loop())
+            operations = asyncio.create_task(self.ops.loop())
+            inventory = asyncio.create_task(self.inventory.loop())
             async with server:
                 await server.serve_forever()
         finally:
-            for background in (worker, pusher):
+            for background in (worker, pusher, operations, inventory):
                 if background is not None:
                     background.cancel()
                     await asyncio.gather(background, return_exceptions=True)
+            await self.inventory.close()
             await self.fleet.close()
             self.journal.close()
             self.release_owner()

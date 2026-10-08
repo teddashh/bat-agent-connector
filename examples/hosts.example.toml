@@ -40,6 +40,13 @@ url = "wss://127.0.0.2:9876/"
 fingerprint = "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF"
 token_ref = "bat-profile:buildbox"     # read from BAT's own client token store at connect time
 
+# /api/v1 on the task daemon (batc serve). See docs/design/api-v1.md.
+[api]
+inventory_interval_s = 60              # how often each host's sessions are observed (read-only)
+stale_after_s = 180                    # rows not observed for this long are marked stale
+activity_every = 5                     # transcript/archive activity lookups every Nth refresh
+allowed_origins = []                   # extra browser origins (loopback origins are always allowed)
+
 # Optional judgment layer (TypeSafe Jev). OFF unless an API key is in the environment variable below.
 # It only refines ambiguous session-state classifications and gates cleanup merges; any error or
 # timeout falls back to the deterministic result (for cleanup: escalate instead of merge).
