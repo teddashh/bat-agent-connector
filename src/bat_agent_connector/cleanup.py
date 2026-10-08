@@ -46,6 +46,7 @@ TTL_S = 900
 READ_DEADLINE_S = 20.0
 MAX_ITEMS = 500
 MAX_TOKEN_BYTES = 16384
+MUTATING_PHASES = frozenset({"lock.session", "preserve", "discard", "remove.worktree", "remove.temporary", "remove.branch"})
 _HOST_LOCKS: dict[str, asyncio.Lock] = {}
 _REPO_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
 _OWNER = contextvars.ContextVar("cleanup_operation", default=None)
@@ -546,6 +547,8 @@ def _host_config(ops, host):
 
 
 async def _host_call(ops, host, req, timeout=READ_DEADLINE_S, *, locked_check=None):
+    if req.get("phase") in MUTATING_PHASES and not req.get("probe") and locked_check is None:
+        raise OperationError("CLEANUP_GATE_REQUIRED", "a mutating phase requires the locked consumer check", 409)
     _host_config(ops, host)
     runner = ops.context.get("git_runner")
     if not runner or not runner.available(host):
@@ -559,8 +562,25 @@ async def _host_call(ops, host, req, timeout=READ_DEADLINE_S, *, locked_check=No
         checked = True
     token = checkpoints._LOCKED_CHECK.set(check if locked_check else None)
     try:
-        result = json.loads(await runner.run(host, "python3 -c " + shlex.quote(source) + " " + shlex.quote(arg),
-                                            timeout_s=max(0.01, timeout)))
+        try:
+            result = json.loads(await runner.run(host, "python3 -c " + shlex.quote(source) + " " + shlex.quote(arg),
+                                                timeout_s=max(0.01, timeout)))
+            if not isinstance(result, dict) or ("error" in result) == ("result" in result):
+                raise ValueError("invalid host reply envelope")
+            if "error" in result:
+                if not isinstance(result["error"], str) or not result["error"] or (
+                        "mutated" in result and not isinstance(result["mutated"], bool)):
+                    raise ValueError("invalid host refusal")
+            elif req.get("phase") in MUTATING_PHASES and not req.get("probe"):
+                _check_phase_result(req["phase"], result["result"])
+        except (Exception, asyncio.CancelledError) as e:
+            if checked:
+                raise MutationUncertain({"error": "CLEANUP_HOST_PROTOCOL_UNCERTAIN", "mutated": True,
+                                         "effects": [], "failure": type(e).__name__}) from e
+            if locked_check and not isinstance(e, (OperationError, ResourceReadOnly, Cancelled, asyncio.CancelledError)):
+                # _run_locked closes stdin on refusal; mutate waits for explicit proceed before any write.
+                raise OperationError("CLEANUP_HOST_REFUSED", "host exchange failed before permission: " + type(e).__name__, 409) from e
+            raise
     finally:
         checkpoints._LOCKED_CHECK.reset(token)
     if "error" in result:
@@ -568,8 +588,27 @@ async def _host_call(ops, host, req, timeout=READ_DEADLINE_S, *, locked_check=No
             raise MutationUncertain(result)
         raise OperationError(result["error"], "host cleanup check refused", 409)
     if locked_check and not checked:
-        raise AmbiguousOutcome("host reply without a confirmed locked consumer check")
+        raise OperationError("CLEANUP_HOST_REFUSED", "host did not receive permission to mutate", 409)
     return result["result"]
+
+
+def _check_phase_result(phase, result):
+    if not isinstance(result, dict):
+        raise ValueError("invalid host phase result")
+    flag = {"lock.session": "released", "discard": "discarded", "remove.worktree": "removed",
+            "remove.temporary": "removed", "remove.branch": "deleted"}.get(phase)
+    if flag and result.get(flag) is not True:
+        raise ValueError("missing host completion flag")
+    if phase == "preserve":
+        pins = result.get("pins", [result])
+        if not isinstance(pins, list) or not pins or any(not isinstance(p, dict) or
+                any(not isinstance(p.get(k), str) or not p[k] for k in ("ref", "sha", "tree")) for p in pins):
+            raise ValueError("invalid retained pin result")
+        if any(not isinstance(result.get(k), str) or not result[k] for k in ("ref", "sha", "tree")):
+            raise ValueError("missing retained result")
+    if phase == "discard" and (not isinstance(result.get("acknowledged_missing_replicas", []), list) or
+            any(not isinstance(p, str) for p in result.get("acknowledged_missing_replicas", []))):
+        raise ValueError("invalid discard result")
 
 
 def _inside(path, cwd):

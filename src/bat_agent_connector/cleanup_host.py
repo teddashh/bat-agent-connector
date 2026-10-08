@@ -342,6 +342,8 @@ def temporary_subset(original, current):
 
 
 def mutate(req):
+    if not req.get("locked_check"):
+        raise ValueError("CLEANUP_GATE_REQUIRED")
     repo = req["repository"]
     canonical(repo, req["roots"])
     fd = os.open(repo, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
