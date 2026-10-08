@@ -38,7 +38,7 @@ MCP 的 `operation_submit`、`operation_cancel`、`operation_resume` 要 `confir
 
 每個外部呼叫是一個具名步驟（`operation_steps`）。步驟意圖在呼叫前先 commit。逾時、連線中斷或之後的本機記錄失敗（`OSError`）時步驟記為 `uncertain`，之後由該步驟的 `reconcile` 讀回外部狀態：證明已發生就補記成功，無法證明（包括回查本身連不上）就維持 `uncertain` 並退避重試回查，五次後轉 `needs_attention`。回查次數用自己的計數（`uncertain_tries`），等待 checks／workflow 的輪詢不會用掉它。已完成的步驟在重跑時直接回傳保存的結果。
 
-取消只在下一步之前生效，而且不跳過回查：`uncertain` 的操作收到取消時先立刻回查，證明那一步已發生就照常完成，所以 `cancelled` 不會掩蓋已送出的動作。`needs_attention` 可以取消（原因會註明哪一步從未證明），也可以 `resume`：已完成的步驟不重做，未證明的步驟再回查一次，不重送。操作的 actor、admin，或擁有該 action scope 的主體可以取消或 resume；事件記在實際操作的人名下。
+取消只在下一步之前生效，而且不跳過回查：`uncertain` 的操作收到取消時先立刻回查，證明那一步已發生就照常完成，所以 `cancelled` 不會掩蓋已送出的動作。`needs_attention` 可以取消（原因會註明哪一步從未證明），也可以 `resume`：已完成的步驟不重做，未證明的步驟再回查一次，不重送。操作的 actor、admin，或擁有該 action scope 的主體可以取消或 resume；事件記在實際操作的人名下。`delivery.merge_and_deploy` resume 另外要求目前 principal 同時有 merge/deploy（admin 沿用全權），與新建一致；缺少任一 scope 回 FORBIDDEN，連原 actor 也不能繞過。唯讀與背景 reconciliation 不依賴使用者在線或 resume 授權。
 
 第一批 action：
 

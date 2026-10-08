@@ -2,6 +2,10 @@
 
 ## Next release (unreleased)
 
+- Require both current merge and deploy scopes when resuming a combined delivery operation (Tauri v2 §18,
+  C07), including its original actor. Refused resumes preserve receipts and do not contact the provider;
+  authorized recovery keeps the admitted merged SHA and never repeats completed writes.
+
 - Dashboard Delivery now groups configured recipes into repository/environment cards: selected, observed and last
   verified identities, cursor-paged history, rollback readiness and not_undone limits, fixed-identity deploy retry,
   superseded links and drift attention. Confirmations bind preview preconditions, refuse stale selections without

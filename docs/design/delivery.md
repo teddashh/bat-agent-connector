@@ -89,6 +89,12 @@ run-name: deploy ${{ inputs.source_sha }} (${{ inputs.operation_id }})
 
 需要 `merge` 與 `deploy` 兩個 scope。先依上面的合併流程取得實際合併版本，記入 `external_refs.merged_sha`，再以這個版本部署。部署失敗時操作為 `failed`，但合併結果保留；Dashboard 以 `merged_sha` 發起新的 `deployment.start` 重試，不會再合併。
 
+Tauri v2 §18／C07：`delivery.merge_and_deploy` 的人工 resume 也同時需要目前 principal 的
+`merge` 與 `deploy`，即使 actor 與原操作相同。縮減權限後回 `FORBIDDEN`，不改 operation、
+steps 或 events、不呼叫 provider；恢復完整權限後沿用已完成 receipts 與固定 merged SHA。
+Local admin 保留既有權限。唯讀查詢、背景 reconciliation、cancel 不增加這個 resume gate。
+`tests/test_delivery_resume_scopes.py` 驗證相同／不同 actor、縮權、admin 與已 merge 後續做。
+
 ## 現有讀取
 
 - `GET /api/v1/repositories/{owner}/{repo}/pulls/{n}`（MCP `github_pr_preview`）：head／base SHA、mergeable 狀態、check run 數量（總數、未完成、失敗）、允許的合併方法與該 repository 的 recipes。按鈕送出時以這裡的 `head_sha` 作為 `expected_head_sha`。

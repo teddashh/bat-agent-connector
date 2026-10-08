@@ -417,6 +417,9 @@ class OperationService:
         re-sent), and the handler's checks run afresh."""
         op = self.get(operation_id, steps=False)
         self._may_steer(principal, op, "resume")
+        if op["action"] == "delivery.merge_and_deploy" and not (
+                principal.allows("merge") and principal.allows("deploy")):
+            raise OperationError("FORBIDDEN", "resuming merge-and-deploy needs both merge and deploy scopes", 403)
         if op["status"] != "needs_attention":
             raise OperationError("NOT_RESUMABLE", f"only needs_attention operations resume (this one is "
                                  f"{op['status']})", 409)
