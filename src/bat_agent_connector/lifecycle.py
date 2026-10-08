@@ -1043,6 +1043,9 @@ async def _evaluate(
         if pol.provenance == resource_policy.MANUAL:
             return decide("KEEP", "manual session: the connector never stops or cleans it")
         return decide("KEEP", f"read-only ({pol.code}): {pol.reason}")
+    if pol.worktree_made_by == "connector":
+        return decide("KEEP", "the connector made this worktree over SSH (checkpoint, conflict repair or task); "
+                      "BAT's worktree actions do not apply to it")
 
     meta = await _meta(c, sid)
     loaded = meta is not None
