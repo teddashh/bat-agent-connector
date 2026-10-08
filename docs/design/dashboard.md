@@ -19,18 +19,24 @@
 
 | 畫面 | 內容 | 讀取 | 動作 |
 |---|---|---|---|
-| 待處理 | 「需要你處理」：等你回答或等權限的 session、`needs_attention`／`uncertain` 操作、連不上的主機。「待確認」：尚未結束的操作 | `sessions?attention=true`、`operations?status=…`、`hosts` | — |
+| 待處理 | 「需要你處理」：等你確認完成的工作項目、等你回答或等權限的 session、`needs_attention`／`uncertain` 操作、連不上的主機。「待確認」：尚未結束的操作 | `work-items?pending=true`、`sessions?attention=true`、`operations?status=…`、`hosts` | — |
+| 專案 | 專案樹與各專案的進度 | `projects` | 新增、改名、子專案、上下移、固定、封存與復原 |
+| 專案詳情 | 說明、repositories、子專案、工作項目樹（狀態、步驟進度、等你決定） | `projects/{id}` | 新增項目、子項目、分支；上下移、固定、封存（連同子項目）與復原；編輯專案 |
+| 工作項目 | 目標、需求原文、驗收、步驟、完成狀態、連結（附現況）、子項目與分支、紀錄 | `work-items/{id}` | 編輯、勾步驟、改狀態、確認完成或退回、連結與移除、從已連結的 checkpoint 派工（[work-items.md](work-items.md)） |
 | Sessions | 依主機與存取方式篩選；每列標出 Connector 管理或 API 唯讀、資料過期原因 | `sessions`（keyset 分頁） | — |
-| Session | 基本資料、來源、最近訊息、checkpoint | `sessions/{host}/{sid}`、`…/messages`、`checkpoints` | Managed：送出（session 執行中預設排隊）、中斷、回答問題或權限。人工建立：唯讀說明。任何 session：記下目前版本，從版本開始 agent 工作（[checkpoints.md](checkpoints.md)） |
+| Session | 基本資料、來源、相關工作項目、最近訊息、checkpoint | `sessions/{host}/{sid}`、`…/messages`、`checkpoints` | Managed：送出（session 執行中預設排隊）、中斷、回答問題或權限。人工建立：唯讀說明。任何 session：記下目前版本，從版本開始 agent 工作（[checkpoints.md](checkpoints.md)） |
 | 成果與 GitHub | PR 的 head／base、checks、可合併狀態 | `repositories/{o}/{r}/pulls/{n}` | 合併、合併並部署到各 recipe、已合併時部署合併版本 |
 | 操作紀錄／操作 | 狀態、原因、步驟、`external_refs`、結果 | `operations`、`operations/{id}` | 取消；`needs_attention` 時重新執行（resume）；合併並部署失敗時以 `merged_sha` 重試部署 |
 | 連線 | 輸入 API token，顯示 actor 與 scopes | `capabilities` | — |
 
-按鈕不會因為 scope 不足而隱藏：送出後由 API 回 403，畫面顯示「你的 token 沒有這個權限」。授權只在後端判斷。
+Token 缺少某個 scope（`start`、`integrate`、`manage`、`approve`）時，對應的按鈕停用並說明要用哪個 scope 重新發 token。這只是提示：授權只在後端判斷，送出的請求仍可能回 403。
 
 ## 冪等與即時更新
 
 - 每個草稿（例如「對這個 session 送字」「以這個 head 合併這個 PR」）在 `localStorage` 有一把 `Idempotency-Key`。回應遺失後重按，會拿回同一個 operation，不會做第二次。操作結束或請求被拒（4xx，409 除外）後才換新鑰匙。
+- 專案與工作項目的修改帶上頁面讀到的版本、指紋、兄弟順序或固定狀態；別人先改了就回 409，畫面說明並重新載入，不覆蓋對方。編輯欄的草稿留在重新載入後的表單裡。說明顯示在頁面上方，不會被重畫掉。
+- 開著任何編輯欄、或游標在頁面的輸入框裡時，即時更新先暫停，關閉或離開後再補上；在讀取途中才打開的編輯欄也不會被那次重畫關掉。新增步驟、連結的輸入框在重畫時保留內容。
+- 從 checkpoint 派工的表單送出後就不能再送：結果留在表單裡，關閉後頁面列出這次執行。
 - 即時更新用 fetch 讀 `GET /api/v1/events/stream`，因為 `EventSource` 不能帶 `Authorization`。斷線後從最後一個 `seq` 續接。事件只觸發重新讀取，畫面內容一律以 API 讀回為準。
 
 ## 語言

@@ -185,16 +185,16 @@ async function viewHome(main) {
     panel.replaceChildren(h("p", { class: "muted" }, t("loading")));
     try {
       if (tab === "needs") {
-        const [sessions, ops, hosts] = await Promise.all([
+        const [sessions, ops, hosts, decide] = await Promise.all([
           api("GET", "/sessions?attention=true&limit=50"),
           api("GET", "/operations?status=needs_attention,uncertain&limit=50"),
-          api("GET", "/hosts")]);
+          api("GET", "/hosts"), api("GET", "/work-items?pending=true&limit=50")]);
         const bad = hosts.hosts.filter(x => x.stale);
         const rows = [
           ...bad.map(x => h("div", { class: "row" }, h("span", { class: "light bad" }),
             h("div", { class: "grow" }, h("div", { class: "title" }, `${t("unreachable_hosts")}: ${x.host}`),
               h("div", { class: "muted" }, x.error || t("stale_reason_" + x.stale_reason))))),
-          ...sessions.sessions.map(sessionRow), ...ops.operations.map(opRow)];
+          ...decide.work_items.map(workItemRow), ...sessions.sessions.map(sessionRow), ...ops.operations.map(opRow)];
         panel.replaceChildren(...(rows.length ? rows : [h("p", { class: "muted" }, t("empty_needs_you"))]));
       } else {
         const ops = await api("GET", "/operations?status=accepted,running,waiting_checks,waiting_external&limit=50");
@@ -245,8 +245,8 @@ async function viewSession(main, host, sid) {
   const msgs = h("div", { class: "panel" });
   const controls = h("div", { class: "panel" });
   main.append(head, controls, h("h2", {}, t("messages")), msgs);
-  let row, from;
-  try { ({ session: row, started_from: from } = await api("GET", `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`)); }
+  let row, from, linked;
+  try { ({ session: row, started_from: from, work_items: linked } = await api("GET", `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`)); }
   catch (e) { head.replaceChildren(errorBox(e)); return; }
   if (!head.isConnected) return; // the user navigated away while this loaded; never add to the next page
   head.replaceChildren(h("h1", {}, row.title || sid), h("div", { class: "actions" }, ...sessionBadges(row)),
@@ -261,6 +261,7 @@ async function viewSession(main, host, sid) {
       h("a", { href: `#/session/${encodeURIComponent(from.source_host)}/${encodeURIComponent(from.source_session_id)}` },
         t("source_session")), " · ", h("a", { href: `#/op/${from.operation_id}` }, from.operation_id)));
   }
+  if (linked?.length) head.append(linkedItems(linked));
   const scope = `send.${host}.${sid}`;
   const cps = checkpointPanel(host, sid);
   main.insertBefore(cps.box, msgs.previousSibling);
@@ -641,7 +642,7 @@ async function viewOperation(main, id) {
   main.append(panel);
   const render = async () => {
     try {
-      const op = (await api("GET", `/operations/${id}`)).operation;
+      const { operation: op, work_items: linked } = await api("GET", `/operations/${id}`);
       const refs = op.external_refs || {};
       const retry = refs.merged_sha && op.action === "delivery.merge_and_deploy" && op.status === "failed"
         ? h("button", { class: "primary", onclick: async () => {
@@ -674,6 +675,7 @@ async function viewOperation(main, id) {
         : null;
       panel.replaceChildren(h("h1", {}, op.action),
         h("p", { class: "op-status" }, opStatus(op), " ", op.error_code ? chip(op.error_code, "bad") : null),
+        ...(linked?.length ? [linkedItems(linked)] : []),
         h("dl", { class: "kv" },
           h("dt", {}, t("actor")), h("dd", {}, `${op.actor} (${op.entry})`),
           h("dt", {}, t("created")), h("dd", {}, when(epoch(op.created_at))),
@@ -711,22 +713,475 @@ function viewSettings(main) {
     h("label", {}, remember, " ", t("remember")), h("p", { class: "muted" }, t("token_help")), info));
 }
 
+// ------------------------------------------------------------------ projects and work items
+// The connector's own records. A change names what the page read (version, fingerprint, sibling order or pin), so a
+// stale page is refused and reloads instead of overwriting someone else's edit.
+const may = scope => (state.caps?.scopes || []).includes(scope);
+function fill(el, ...kids) { el.replaceChildren(...kids.flat(2).filter(x => x !== null && x !== undefined && x !== false)); }
+const PROJECT_ERRORS = ["VERSION_CONFLICT", "ORDER_CHANGED", "PIN_CHANGED", "CONTENT_CHANGED", "NAME_TAKEN",
+  "HAS_CHILDREN", "PARENT_ARCHIVED", "PINNED_FIRST", "STEPS_OPEN", "CYCLE", "LINK_TARGET_NOT_FOUND", "NOTHING_TO_DECIDE"];
+function problem(code, message) {
+  return h("p", { class: "error" }, PROJECT_ERRORS.includes(code) ? t("wi_err_" + code) : `${code || ""} ${message || ""}`);
+}
+// The page read is stale: re-render, keep the message (and an edit form's draft) on screen.
+const STALE = ["VERSION_CONFLICT", "ORDER_CHANGED", "PIN_CHANGED", "CONTENT_CHANGED"];
+let lastFailure = null;
+// Run one management change; returns the finished operation, or shows why not in `out` and returns null
+// (lastFailure holds the error code). `out` should sit outside what the caller re-renders afterwards.
+async function change(out, action, target, params, pre, scope) {
+  lastFailure = null;
+  try {
+    const op = await submit(action, target, params, pre, scope);
+    if (op.status === "succeeded") { fill(out); return op; }
+    lastFailure = op.error_code || op.status;
+    if (TERMINAL.includes(op.status)) fill(out, problem(op.error_code, op.status_reason));
+    else fill(out, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
+  } catch (e) {
+    lastFailure = e.code || "ERROR";
+    fill(out, e.status === 403 ? errorBox(e) : problem(e.code, e.message));
+  }
+  return null;
+}
+function manageNote() { return may("manage") ? null : h("p", { class: "note" }, t("needs_manage_scope")); }
+function indent(el, depth) { el.style.setProperty("--depth", String(depth)); return el; } // CSP: no style attributes
+function stateChip(c) {
+  const cls = { done: "ok", awaiting_approval: "warn", doing: "info", waiting: "warn" }[c.display_state] || "";
+  return chip(t("wi_state_" + c.display_state), cls);
+}
+function counts(c) {
+  return [c.doing ? chip(`${t("wi_state_doing")} ${c.doing}`, "info") : null,
+    c.awaiting_approval ? chip(`${t("wi_state_awaiting_approval")} ${c.awaiting_approval}`, "warn") : null,
+    chip(t("wi_done_of", { done: c.done, total: c.total }), c.total && c.done === c.total ? "ok" : "")];
+}
+// ↑ ↓ and pin for one entry among its siblings; pinned entries never cross unpinned ones.
+function orderButtons(sibs, i, key, run) {
+  const me = sibs[i];
+  const swap = j => () => {
+    const before = sibs.map(x => x[key]);
+    const order = before.slice(); [order[i], order[j]] = [order[j], order[i]];
+    run("order", before, order);
+  };
+  const can = j => j >= 0 && j < sibs.length && sibs[j].pinned === me.pinned;
+  return [h("button", { class: "mini", title: t("move_up"), "aria-label": t("move_up"), disabled: !can(i - 1), onclick: swap(i - 1) }, "↑"),
+    h("button", { class: "mini", title: t("move_down"), "aria-label": t("move_down"), disabled: !can(i + 1), onclick: swap(i + 1) }, "↓"),
+    h("button", { class: `mini ${me.pinned ? "on" : ""}`, title: me.pinned ? t("unpin") : t("pin"),
+      "aria-label": me.pinned ? t("unpin") : t("pin"), onclick: () => run("pin", me.pinned) }, me.pinned ? "★" : "☆")];
+}
+// A row's "…" opens a small form under it. While any is open, live reloads wait (a draft is never lost) and run
+// once the last one closes.
+let editing = 0, idleReload = null, drawerOpens = 0;
+function setEditing(n) {
+  editing = Math.max(0, n);
+  if (!editing && idleReload) { const fn = idleReload; idleReload = null; fn(); }
+}
+function drawer(...children) {
+  const box = h("div", { class: "drawer", hidden: true }, ...children);
+  const toggle = h("button", { class: "mini", title: t("more"), "aria-label": t("more"), onclick: () => {
+    box.hidden = !box.hidden;
+    if (!box.hidden) drawerOpens += 1;
+    setEditing(editing + (box.hidden ? -1 : 1));
+  } }, "…");
+  const open = () => { if (box.hidden) toggle.click(); };
+  return { box, toggle, open, close: () => { if (!box.hidden) toggle.click(); } };
+}
+function freshPage() { editing = 0; idleReload = null; } // a render rebuilt every drawer closed
+// Views' render(fromEvent): a live reload never rebuilds under an open drawer, and no render rebuilds under a
+// drawer opened while it was fetching (the person started typing after the click that asked for it).
+function typing() { // a field in the page has focus: a live reload would throw away what is being typed
+  const a = document.activeElement;
+  return Boolean(a?.closest?.("#main")) && (a.tagName === "TEXTAREA" || a.tagName === "SELECT"
+    || (a.tagName === "INPUT" && !["checkbox", "radio", "button", "submit"].includes(a.type)));
+}
+function holdRender(fromEvent, opensAtStart) {
+  return (editing > 0 && (fromEvent || drawerOpens !== opensAtStart)) || (fromEvent && typing());
+}
+document.addEventListener("focusout", () => setTimeout(() => {
+  if (!editing && !typing() && idleReload) { const fn = idleReload; idleReload = null; fn(); }
+}, 0));
+function liveReload(fn, kinds) {
+  const later = debounce(() => { if (editing || typing()) idleReload = () => fn(true); else fn(true); }, 500);
+  return onEvents(ev => { if (kinds.includes(ev.resource_type)) later(); });
+}
+
+async function viewProjects(main) {
+  freshPage();
+  const out = h("div", {});
+  const tree = h("div", { class: "panel" });
+  const archived = h("div", {});
+  const name = h("input", { placeholder: t("new_project_name"), maxlength: 80 });
+  const add = h("button", { class: "primary", disabled: !may("manage"), onclick: async () => {
+    if (!name.value.trim()) return;
+    add.disabled = true;
+    const op = await change(out, "project.create", {}, { name: name.value.trim() }, {}, "project.create");
+    add.disabled = false;
+    if (op) { name.value = ""; location.hash = `#/project/${op.result.project_id}`; }
+  } }, t("add_project"));
+  const showArchived = h("input", { type: "checkbox" });
+  main.append(h("h1", {}, t("nav_projects")), h("p", { class: "muted" }, t("projects_help")), manageNote() || "",
+    h("div", { class: "filters" }, name, add), out, tree,
+    h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
+  const render = async (fromEvent = false) => {
+    const opens = drawerOpens;
+    try {
+      const data = await api("GET", `/projects${showArchived.checked ? "?include_archived=true" : ""}`);
+      if (!tree.isConnected) return;
+      if (holdRender(fromEvent, opens)) { idleReload = () => render(true); return; }
+      freshPage();
+      const rows = [];
+      const walk = (sibs, depth, parent) => sibs.forEach((p, i) => {
+        const msg = out; // outside the tree: it survives the re-render below
+        const run = async (what, before, order) => {
+          if (what === "order") await change(msg, "project.order", {}, { parent_id: parent, order }, { before }, `project.order.${parent}`);
+          else await change(msg, "project.pin", { project_id: p.project_id }, { pinned: !before }, { before }, `project.pin.${p.project_id}`);
+          render();
+        };
+        const rename = h("input", { value: p.name, maxlength: 80 });
+        const sub = h("input", { placeholder: t("new_sub_project"), maxlength: 80 });
+        const d = drawer(
+          h("div", { class: "filters" }, rename, h("button", { class: "secondary", onclick: async () => {
+            const ok = await change(msg, "project.update", { project_id: p.project_id }, { name: rename.value.trim() },
+              { expected_version: p.version }, `project.rename.${p.project_id}`);
+            if (ok || STALE.includes(lastFailure)) render();
+          } }, t("rename"))),
+          h("div", { class: "filters" }, sub, h("button", { class: "secondary", onclick: async () => {
+            if (!sub.value.trim()) return;
+            if (await change(msg, "project.create", {}, { name: sub.value.trim(), parent_id: p.project_id }, {},
+              `project.create.${p.project_id}`)) { d.close(); render(); }
+          } }, t("add_project"))),
+          h("div", { class: "actions" }, h("button", { class: "danger", onclick: async () => {
+            const ok = await change(msg, "project.update", { project_id: p.project_id }, { archived: true },
+              { expected_version: p.version }, `project.archive.${p.project_id}`);
+            if (ok || STALE.includes(lastFailure)) render();
+          } }, t("archive"))));
+        rows.push(indent(h("div", { class: "row tree" },
+          h("div", { class: "grow" }, h("a", { class: "title", href: `#/project/${p.project_id}` }, p.name),
+            p.description ? h("div", { class: "muted clamp" }, p.description) : null),
+          ...counts(p.counts),
+          may("manage") ? h("span", { class: "tree-actions" }, ...orderButtons(sibs, i, "project_id", run), d.toggle) : null), depth),
+        d.box);
+        walk(p.children, depth + 1, p.project_id);
+      });
+      walk(data.projects, 0, "");
+      fill(tree, ...(rows.length ? rows : [h("p", { class: "muted" }, t("no_projects"))]));
+      fill(archived, ...(data.archived || []).map(p => h("div", { class: "row" },
+        h("div", { class: "grow" }, h("span", { class: "muted" }, p.name)),
+        h("button", { class: "secondary", disabled: !may("manage"), onclick: async () => {
+          await change(out, "project.update", { project_id: p.project_id }, { archived: false },
+            { expected_version: p.version }, `project.restore.${p.project_id}`);
+          render();
+        } }, t("restore")))));
+    } catch (e) { fill(tree, errorBox(e)); }
+  };
+  showArchived.onchange = () => render();
+  await render();
+  return liveReload(render, ["project", "work_item"]);
+}
+
+async function viewProject(main, pid) {
+  freshPage();
+  let draft = null; // the project form's values after a stale save, put back into the reloaded form
+  const head = h("div", { class: "panel" });
+  const items = h("div", { class: "panel" });
+  const out = h("div", {});
+  const archived = h("div", {});
+  const showArchived = h("input", { type: "checkbox" });
+  const title = h("input", { placeholder: t("new_item_title"), maxlength: 120 });
+  const add = h("button", { class: "primary", disabled: !may("manage"), onclick: async () => {
+    if (!title.value.trim()) return;
+    add.disabled = true;
+    const op = await change(out, "work_item.create", { project_id: pid }, { title: title.value.trim() }, {}, `wi.create.${pid}`);
+    add.disabled = false;
+    if (op) { title.value = ""; render(); }
+  } }, t("add_item"));
+  main.append(manageNote() || "", out, head, h("h2", {}, t("work_items")), h("div", { class: "filters" }, title, add), items,
+    h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
+  const render = async (fromEvent = false) => {
+    const opens = drawerOpens;
+    let data;
+    try { data = await api("GET", `/projects/${pid}${showArchived.checked ? "?include_archived=true" : ""}`); }
+    catch (e) { fill(head, errorBox(e)); return; }
+    if (!head.isConnected) return;
+    if (holdRender(fromEvent, opens)) { idleReload = () => render(true); return; }
+    freshPage();
+    const p = data.project;
+    const msg = out;
+    const v = draft || { name: p.name, description: p.description, repositories: p.repositories, task_project: p.task_project || "" };
+    const f = {
+      name: h("input", { value: v.name, maxlength: 80 }),
+      description: h("textarea", {}, v.description),
+      repositories: h("input", { value: v.repositories.join(", "), placeholder: "owner/name, owner/name" }),
+      task_project: h("input", { value: v.task_project, placeholder: t("task_project") }),
+    };
+    const d = drawer(h("label", {}, t("name")), f.name, h("label", {}, t("description")), f.description,
+      h("label", {}, t("repositories")), f.repositories, h("label", {}, t("task_project")), f.task_project,
+      h("div", { class: "actions" }, h("button", { class: "primary", onclick: async () => {
+        const params = { name: f.name.value.trim(), description: f.description.value,
+          repositories: f.repositories.value.split(/[\s,]+/).filter(Boolean), task_project: f.task_project.value.trim() };
+        const ok = await change(msg, "project.update", { project_id: pid }, params, { expected_version: p.version },
+          `project.edit.${pid}`);
+        if (!ok && STALE.includes(lastFailure)) draft = params;
+        if (ok || draft) render();
+      } }, t("save"))));
+    fill(head, 
+      h("div", { class: "muted" }, h("a", { href: "#/projects" }, t("nav_projects")),
+        ...data.path.flatMap(x => [" / ", h("a", { href: `#/project/${x.project_id}` }, x.name)])),
+      h("h1", {}, p.name, " ", p.archived ? chip(t("archived"), "warn") : null),
+      p.description ? h("p", { class: "pre" }, p.description) : null,
+      h("div", { class: "actions" }, ...counts(p.counts), ...p.repositories.map(r => chip(r)),
+        p.task_project ? chip(`Task Service: ${p.task_project}`) : null, may("manage") && !p.archived ? d.toggle : null),
+      d.box,
+      data.sub_projects.length ? h("p", {}, t("sub_projects"), ": ",
+        ...data.sub_projects.flatMap((x, i) => [i ? " · " : "", h("a", { href: `#/project/${x.project_id}` }, x.name)])) : null);
+    if (draft) { draft = null; d.open(); }
+    const rows = [];
+    const walk = (sibs, depth, parent) => sibs.forEach((w, i) => {
+      const rowMsg = out; // outside the tree: it survives the re-render below
+      const run = async (what, before, order) => {
+        if (what === "order") await change(rowMsg, "work_item.order", { project_id: pid }, { parent_id: parent, order }, { before }, `wi.order.${pid}.${parent}`);
+        else await change(rowMsg, "work_item.pin", { work_item_id: w.work_item_id }, { pinned: !before }, { before }, `wi.pin.${w.work_item_id}`);
+        render();
+      };
+      const child = h("input", { placeholder: t("new_child_item"), maxlength: 120 });
+      const branch = h("input", { placeholder: t("new_branch_item"), maxlength: 120 });
+      const create = (input, params, scope) => h("button", { class: "secondary", onclick: async () => {
+        if (!input.value.trim()) return;
+        if (await change(rowMsg, "work_item.create", { project_id: pid }, { title: input.value.trim(), ...params }, {}, scope)) render();
+      } }, t("add_item"));
+      const dr = drawer(
+        h("div", { class: "filters" }, child, create(child, { parent_id: w.work_item_id }, `wi.child.${w.work_item_id}`)),
+        h("div", { class: "filters" }, branch, create(branch, { parent_id: parent || null, derived_from: w.work_item_id },
+          `wi.branch.${w.work_item_id}`)),
+        h("div", { class: "actions" }, h("button", { class: "danger", onclick: async () => {
+          const ok = await change(rowMsg, "work_item.update", { work_item_id: w.work_item_id }, { archived: true },
+            { expected_version: w.version }, `wi.archive.${w.work_item_id}`);
+          if (ok || STALE.includes(lastFailure)) render();
+        } }, t("archive_with_children"))));
+      const done = w.steps.filter(s => s.done).length;
+      rows.push(indent(h("div", { class: "row tree" }, stateChip(w.completion),
+        h("div", { class: "grow" }, h("a", { class: "title", href: `#/item/${w.work_item_id}` }, w.title),
+          w.derived_from ? h("span", { class: "muted" }, " ⑂") : null),
+        w.steps.length ? chip(`${done}/${w.steps.length}`) : null,
+        w.completion.pending ? chip(t("needs_decision"), "warn") : null,
+        may("manage") && !p.archived ? h("span", { class: "tree-actions" }, ...orderButtons(sibs, i, "work_item_id", run), dr.toggle) : null), depth),
+      dr.box);
+      walk(w.children, depth + 1, w.work_item_id);
+    });
+    walk(data.work_items, 0, "");
+    fill(items, ...(rows.length ? rows : [h("p", { class: "muted" }, t("no_items"))]));
+    fill(archived, ...(data.archived || []).map(w => h("div", { class: "row" },
+      h("div", { class: "grow" }, h("a", { class: "muted", href: `#/item/${w.work_item_id}` }, w.title)),
+      h("button", { class: "secondary", disabled: !may("manage") || p.archived, onclick: async () => {
+        await change(out, "work_item.update", { work_item_id: w.work_item_id }, { archived: false },
+          { expected_version: w.version }, `wi.restore.${w.work_item_id}`);
+        render();
+      } }, t("restore")))));
+    add.disabled = !may("manage") || p.archived;
+  };
+  showArchived.onchange = () => render();
+  await render();
+  return liveReload(render, ["project", "work_item"]);
+}
+
+function linkTarget(l) {
+  const x = l.target || {};
+  if (!x.found) return h("span", { class: "muted" }, l.ref, " · ", t("link_missing"));
+  if (l.kind === "session") {
+    const [host, ...rest] = l.ref.split("/");
+    return h("span", {}, h("a", { href: `#/session/${encodeURIComponent(host)}/${encodeURIComponent(rest.join("/"))}` }, x.title || l.ref),
+      " ", chip(x.api_access === "managed" ? t("managed") : t("read_only"), x.api_access === "managed" ? "managed" : "readonly"),
+      x.gone ? chip(t("stale_reason_gone"), "stale") : null);
+  }
+  if (l.kind === "operation") {
+    return h("span", {}, h("a", { href: `#/op/${l.ref}` }, x.action), " ", h("span", { class: `status-${x.status}` }, t("op_" + x.status)),
+      x.session ? [" · ", h("a", { href: `#/session/${encodeURIComponent(x.session.host)}/${encodeURIComponent(x.session.session_id)}` }, t("open_new_session"))] : null);
+  }
+  if (l.kind === "checkpoint") {
+    return h("span", {}, h("a", { href: `#/session/${encodeURIComponent(x.host)}/${encodeURIComponent(x.source_session_id)}` },
+      h("code", {}, x.commit_sha.slice(0, 12))), " ", x.branch || "", " · ", x.host);
+  }
+  if (l.kind === "task") return h("span", {}, h("code", {}, l.ref.slice(0, 12)), " ", x.project, " · ", x.state);
+  return h("a", { href: `https://github.com/${x.repository}/pull/${x.number}`, target: "_blank", rel: "noopener" },
+    `${x.repository}#${x.number}`);
+}
+
+async function viewWorkItem(main, wid) {
+  freshPage();
+  const notice = h("div", {}); // outside the panel: a refusal stays on screen after the panel re-renders
+  const panel = h("div", {});
+  let draft = null; // the edit form's values after a stale save, put back into the reloaded form
+  // Fields made once and moved into each render: a re-render never throws away what is being typed.
+  const newStep = h("input", { placeholder: t("new_step"), maxlength: 300 });
+  const kind = h("select", {}, ...["session", "checkpoint", "operation", "task", "pull_request"].map(k =>
+    h("option", { value: k }, t("link_" + k))));
+  const ref = h("input", { placeholder: t("link_ref_hint") });
+  kind.onchange = () => { ref.placeholder = t("link_ref_" + kind.value); };
+  kind.onchange();
+  main.append(manageNote() || "", notice, panel);
+  const render = async (fromEvent = false) => {
+    const opens = drawerOpens;
+    let data;
+    try { data = await api("GET", `/work-items/${wid}`); }
+    catch (e) { fill(panel, errorBox(e)); return; }
+    if (!panel.isConnected) return;
+    if (holdRender(fromEvent, opens)) { idleReload = () => render(true); return; }
+    freshPage();
+    const w = data.work_item, c = w.completion;
+    const live = !w.archived && !data.project.archived;
+    const pre = { expected_version: w.version };
+    const update = (params, scope) => change(notice, "work_item.update", { work_item_id: wid }, params, pre, scope);
+    const decide = async (action, scope) => { await change(notice, action, { work_item_id: wid }, {}, { expected_fingerprint: c.fingerprint }, scope); render(); };
+    // completion: an agent's "done" is a claim; a person accepts it for the content shown here
+    const approve = h("button", { class: "primary", disabled: !live || !may("approve"), title: may("approve") ? null : t("needs_approve_scope"),
+      onclick: () => decide("work_item.approve", `wi.approve.${wid}.${c.fingerprint}`) }, c.pending ? t("accept_done") : t("mark_done"));
+    const keepGoing = h("button", { class: "secondary", disabled: !live || !may("manage"),
+      onclick: () => decide("work_item.continue", `wi.continue.${wid}.${c.fingerprint}`) }, t("keep_working"));
+    let banner = null;
+    if (c.approved) banner = h("p", { class: "note ok" }, t("approved_by", { who: c.approved_by, time: when(epoch(c.approved_at)) }));
+    else if (c.pending && w.state === "done") banner = h("div", { class: "note warn" }, h("p", {}, t("claimed_done", { who: c.claimed_by || "?" })),
+      h("div", { class: "actions" }, approve, keepGoing), may("approve") ? null : h("p", { class: "muted" }, t("needs_approve_scope")));
+    else if (c.pending) banner = h("div", { class: "note warn" }, h("p", {}, t("steps_all_checked")), h("div", { class: "actions" }, approve, keepGoing));
+    const stateSel = h("select", { disabled: !live || !may("manage") }, ...["todo", "doing", "waiting"].map(s =>
+      h("option", { value: s, selected: w.state === s }, t("wi_state_" + s))));
+    if (w.state === "done") stateSel.prepend(h("option", { value: "done", selected: true }, t("wi_state_" + c.display_state)));
+    stateSel.onchange = async () => { await update({ state: stateSel.value }, `wi.state.${wid}`); render(); };
+    // content: goal, the request verbatim, acceptance
+    const v = { ...w, ...(draft || {}) };
+    const f = { title: h("input", { value: v.title, maxlength: 120 }), goal: h("textarea", {}, v.goal),
+      request: h("textarea", {}, v.request), acceptance: h("textarea", {}, v.acceptance) };
+    const d = drawer(h("label", {}, t("title")), f.title, h("label", {}, t("goal")), f.goal, h("label", {}, t("request")), f.request,
+      h("label", {}, t("acceptance")), f.acceptance, h("div", { class: "actions" }, h("button", { class: "primary", onclick: async () => {
+        const params = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, k === "title" ? el.value.trim() : el.value])
+          .filter(([k, v]) => v !== w[k]));
+        if (!Object.keys(params).length) { d.close(); return; }
+        const ok = await update(params, `wi.edit.${wid}`);
+        if (!ok && STALE.includes(lastFailure)) draft = params;
+        if (ok || draft) render();
+      } }, t("save"))));
+    const section = (label, text) => text ? [h("h2", {}, label), h("div", { class: "panel pre" }, text)] : [];
+    // steps: checking one is an edit like any other (an unchecked step reopens a done item)
+    const setSteps = async (steps, added) => {
+      if (await update({ steps }, `wi.steps.${wid}`) && added) newStep.value = "";
+      render();
+    };
+    const stepRows = w.steps.map((s, i) => h("div", { class: "step" },
+      h("label", {}, h("input", { type: "checkbox", checked: s.done, disabled: !live || !may("manage"),
+        onchange: () => setSteps(w.steps.map((x, j) => (j === i ? { ...x, done: !x.done } : x))) }), " ", s.text),
+      live && may("manage") ? h("button", { class: "mini", title: t("remove"), "aria-label": t("remove"),
+        onclick: () => setSteps(w.steps.filter((_, j) => j !== i)) }, "×") : null));
+    const addStep = h("button", { class: "secondary", disabled: !live || !may("manage"), onclick: () => {
+      if (newStep.value.trim()) setSteps([...w.steps, { text: newStep.value.trim(), done: false }], true);
+    } }, t("add"));
+    // links: the sessions, checkpoints, operations, tasks and PRs that carried this item
+    const link = async (params, scope, typed) => {
+      if (await change(notice, "work_item.link", { work_item_id: wid }, params, {}, scope)) {
+        if (typed) ref.value = "";
+        render();
+      }
+    };
+    const linkRows = data.links.map(l => h("div", { class: "row" }, chip(t("link_" + l.kind)),
+      h("div", { class: "grow" }, linkTarget(l), l.note ? h("div", { class: "muted" }, l.note) : null,
+        h("div", { class: "muted" }, `${l.linked_by} · ${when(epoch(l.linked_at))}`)),
+      l.kind === "checkpoint" && l.target?.found && live ? continueFrom(w, l.ref, notice) : null,
+      live && may("manage") ? h("button", { class: "mini", title: t("remove"), "aria-label": t("remove"),
+        onclick: () => link({ kind: l.kind, ref: l.ref, remove: true }, `wi.unlink.${wid}.${l.kind}.${l.ref}`) }, "×") : null));
+    const brief = x => h("div", { class: "row" }, chip(t("wi_state_" + x.display_state)),
+      h("a", { class: "grow", href: `#/item/${x.work_item_id}` }, x.title));
+    fill(panel, 
+      h("div", { class: "muted" }, h("a", { href: "#/projects" }, t("nav_projects")), " / ",
+        h("a", { href: `#/project/${data.project.project_id}` }, data.project.name),
+        ...data.path.flatMap(x => [" / ", h("a", { href: `#/item/${x.work_item_id}` }, x.title)])),
+      h("h1", {}, w.title, " ", stateChip(c), w.archived ? [" ", chip(t("archived"), "warn")] : null),
+      data.derived_from ? h("p", { class: "muted" }, t("derived_from"), " ",
+        h("a", { href: `#/item/${data.derived_from.work_item_id}` }, data.derived_from.title)) : null,
+      banner,
+      h("div", { class: "actions" }, h("label", {}, t("state"), " ", stateSel),
+        !c.pending && !c.approved && live ? approve : null, live && may("manage") ? d.toggle : null),
+      d.box,
+      ...section(t("goal"), w.goal), ...section(t("request"), w.request), ...section(t("acceptance"), w.acceptance),
+      h("h2", {}, t("steps_title")), h("div", { class: "panel" }, ...(stepRows.length ? stepRows : [h("p", { class: "muted" }, t("no_steps"))]),
+        live && may("manage") ? h("div", { class: "filters" }, newStep, addStep) : null),
+      h("h2", {}, t("links")), h("div", { class: "panel" },
+        ...(linkRows.length ? linkRows : [h("p", { class: "muted" }, t("no_links"))]),
+        live && may("manage") ? h("div", { class: "filters" }, kind, ref, h("button", { class: "secondary", onclick: () => {
+          if (ref.value.trim()) link({ kind: kind.value, ref: ref.value.trim() }, `wi.link.${wid}`, true);
+        } }, t("link"))) : null),
+      data.children.length ? [h("h2", {}, t("children")), h("div", { class: "panel" }, ...data.children.map(brief))] : null,
+      data.derived.length ? [h("h2", {}, t("derived")), h("div", { class: "panel" }, ...data.derived.map(brief))] : null,
+      h("h2", {}, t("history")), h("div", { class: "panel" }, ...data.events.map(ev => h("div", { class: "row" },
+        h("div", { class: "grow" }, t("ev_" + ev.kind.replace(".", "_")), h("div", { class: "muted" }, eventDetail(ev.body))),
+        h("span", { class: "muted" }, `${ev.actor || ""} · ${when(epoch(ev.created_at))}`)))));
+    if (draft) { draft = null; d.open(); }
+  };
+  await render();
+  return liveReload(render, ["work_item"]);
+}
+
+// Start agent work from a linked checkpoint, with this item's words as the instructions; the new operation is
+// linked back so the item lists the run.
+function continueFrom(w, checkpointId, notice) {
+  const text = [w.title, w.goal, w.request && `${t("request")}:\n${w.request}`, w.acceptance && `${t("acceptance")}:\n${w.acceptance}`,
+    w.steps.length ? `${t("steps_title")}:\n${w.steps.map(s => `- [${s.done ? "x" : " "}] ${s.text}`).join("\n")}` : ""]
+    .filter(Boolean).join("\n\n");
+  const instr = h("textarea", {}, text);
+  const agent = h("select", {}, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
+  const out = h("div", {});
+  const go = h("button", { class: "primary", onclick: async () => {
+    go.disabled = true;
+    let op;
+    try {
+      op = await submit("checkpoint.continue", { checkpoint_id: checkpointId }, { instructions: instr.value, agent: agent.value }, {},
+        `continue.${checkpointId}`);
+    } catch (e) { fill(out, errorBox(e)); go.disabled = false; return; }
+    // Started (or refused for good): this form never starts another agent. Its result stays here; the item lists
+    // the run once the form closes and the page reloads.
+    fill(out, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
+    if (TERMINAL.includes(op.status) && op.status !== "succeeded") return;
+    const linked = await change(notice, "work_item.link", { work_item_id: w.work_item_id }, { kind: "operation", ref: op.operation_id }, {},
+      `wi.link.${w.work_item_id}.${op.operation_id}`);
+    if (linked) out.append(" · ", t("linked_back"));
+  } }, t("start_agent_work"));
+  const d = drawer(h("p", { class: "muted" }, t("confined_note")), instr, h("div", { class: "actions" }, agent, go), out);
+  // Starting needs start; linking the run back needs manage. Without both, nothing starts (an unlinked run is untracked).
+  const why = !may("start") ? t("needs_start_scope") : !may("manage") ? t("needs_manage_scope") : null;
+  const open = h("button", { class: "secondary", disabled: Boolean(why), title: why, onclick: () => d.toggle.click() },
+    t("start_from_checkpoint"));
+  return h("div", { class: "grow" }, open, d.box);
+}
+function eventDetail(b) {
+  if (b.fields) return b.fields.map(f => t(f === "steps" ? "steps_title" : f)).join(", ");
+  if (b.from && b.to) return `${t("wi_state_" + b.from)} → ${t("wi_state_" + b.to)}${b.note ? ` · ${b.note}` : ""}`;
+  if (b.kind && b.ref) return `${t("link_" + b.kind)} ${b.ref}`;
+  return b.note || "";
+}
+function linkedItems(items) {
+  return h("p", { class: "muted" }, t("linked_items"), ": ",
+    ...items.flatMap((x, i) => [i ? " · " : "", h("a", { href: `#/item/${x.work_item_id}` }, x.title)]));
+}
+function workItemRow(w) {
+  return h("div", { class: "row" }, stateChip(w.completion),
+    h("div", { class: "grow" }, h("a", { class: "title", href: `#/item/${w.work_item_id}` }, w.title),
+      h("div", { class: "muted" }, [w.project_name, w.completion.claimed_by && t("claimed_by", { who: w.completion.claimed_by })]
+        .filter(Boolean).join(" · "))),
+    chip(t("needs_decision"), "warn"));
+}
+
 // ------------------------------------------------------------------ router
-const NAV = [["home", "nav_home"], ["sessions", "nav_sessions"], ["delivery", "nav_delivery"],
+const NAV = [["home", "nav_home"], ["projects", "nav_projects"], ["sessions", "nav_sessions"], ["delivery", "nav_delivery"],
   ["operations", "nav_operations"], ["settings", "nav_settings"]];
 let teardown = null;
 let generation = 0;
 async function route() {
   const mine = ++generation;
   if (teardown) { teardown(); teardown = null; }
+  freshPage();
   const [name, ...rest] = (location.hash.replace(/^#\//, "") || "home").split("/").map(decodeURIComponent);
   document.getElementById("nav").replaceChildren(...NAV.map(([k, label]) =>
     h("a", { href: `#/${k}`, class: name === k ? "on" : "" }, t(label))));
   const main = document.getElementById("main");
   main.replaceChildren();
   if (!state.token && name !== "settings") { main.append(h("p", { class: "note" }, t("need_token"))); viewSettings(main); return; }
-  const views = { home: viewHome, sessions: viewSessions, delivery: viewDelivery, operations: viewOperations,
-    session: viewSession, op: viewOperation, settings: viewSettings };
+  const views = { home: viewHome, projects: viewProjects, project: viewProject, item: viewWorkItem, sessions: viewSessions,
+    delivery: viewDelivery, operations: viewOperations, session: viewSession, op: viewOperation, settings: viewSettings };
   const off = await (views[name] || viewHome)(main, ...rest);
   if (mine !== generation) { if (off) off(); return; } // the user navigated away while this view loaded
   teardown = off || null;

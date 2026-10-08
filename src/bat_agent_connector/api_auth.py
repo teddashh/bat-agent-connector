@@ -19,10 +19,12 @@ from dataclasses import dataclass
 # operate: drive connector-managed sessions (send, answer, interrupt)
 # start: start new connector-managed agent sessions (checkpoint continue); a separate grant, because a new
 #   session runs an agent with the caller's instructions on a host
-# manage: change connector management data (work items, completion, tokens are admin-only)
+# manage: change connector management data (projects, work items, links; tokens are admin-only)
+# approve: accept a work item as done. Separate from manage, so an agent that edits work items and claims them
+#   done cannot also sign off its own claim
 # merge / deploy: GitHub delivery actions
 # integrate: push composed results to a PR's head branch (never merges; a merge token cannot push)
-SCOPES = ("observe", "operate", "start", "manage", "merge", "deploy", "integrate")
+SCOPES = ("observe", "operate", "start", "manage", "approve", "merge", "deploy", "integrate")
 ADMIN_ACTOR = "local-admin"
 _ACTOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 

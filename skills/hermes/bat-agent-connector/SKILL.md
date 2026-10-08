@@ -70,6 +70,8 @@ metadata:
 | Record a checkpoint (connector records only, daemon) | `checkpoint_create(host, session_id, idempotency_key, commit?, note?, confirm=true)` | `batc checkpoint create HOST SID --note ...` |
 | Continue from it in a new managed session (daemon) | `work_continue_from_checkpoint(checkpoint_id, instructions, idempotency_key, agent?, confirm=true)` | `batc checkpoint continue CP --instructions ...` |
 | Checkpoints and the sessions started from them (read, daemon) | `checkpoints_list(host?, session_id?, checkpoint_id?)` | `batc checkpoint list`, `batc checkpoint show CP` |
+| Projects and work items (read, daemon) | `projects_list()`, `project_get(project_id)`, `work_items_list(project_id?, state?, pending?)`, `work_item_get(work_item_id)` | `batc project list`, `batc item show WI` |
+| Change a work item (scope manage, daemon) | `operation_submit(action="work_item.update", ..., preconditions={expected_version})` | `batc item update WI --check 1 --state done` |
 
 `session_id` accepts a unique prefix (8 characters is usually enough). Use `next_offset` from `session_read` to page
 back in history.
@@ -145,6 +147,26 @@ nothing is ever forced, and the person's folders are never changed.
    `uncertain`: the daemon reads the remote back; never push or resubmit yourself.
 5. Never `git push` from a session prompt to do this, and never merge as part of it: merging is `github.pr.merge`, a
    separate action on the new head.
+
+## Work items (scope manage)
+
+Projects and work items are the connector's own records of what is being done and why; the person decides when an
+item is done.
+
+1. Read before you change: `project_get(project_id)` lists the work item tree; `work_item_get(work_item_id)` shows
+   the goal, the request verbatim, acceptance, steps, `completion` and links. Every change is
+   `operation_submit(action="work_item.update", target={work_item_id}, params={only what changes},
+   preconditions={expected_version: <version you read>})`. `VERSION_CONFLICT`: someone changed it; read it again and
+   redo your change on top, never resend the old values.
+2. Record the person's request verbatim in `request`; keep `acceptance` as they stated it. Check steps as you finish
+   them (`steps` with `done: true`).
+3. When the work is done, set `state: "done"`. That is a claim: the item waits for the person
+   (`completion.display_state: "awaiting_approval"`). Tell them what was done and where. Do not call
+   `work_item.approve` and do not ask for the `approve` scope; if they send it back (`work_item.continue`), keep
+   working.
+4. Link what carried the work: `operation_submit(action="work_item.link", target={work_item_id}, params={kind:
+   session|checkpoint|operation|task|pull_request, ref})`, e.g. the `checkpoint.continue` operation you started, or
+   `owner/name#123` for the PR.
 
 ## Plan fan-out workflow (orchestrate tier)
 

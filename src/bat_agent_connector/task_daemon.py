@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import api_actions, api_auth, checkpoints, delivery, integration, registry, service
+from . import api_actions, api_auth, checkpoints, delivery, integration, registry, service, work_items
 from .api_v1 import ApiV1, is_dashboard_path
 from .config import Config, state_dir
 from .errors import BatError, ResourceReadOnly, TokenUnavailable
@@ -40,7 +40,9 @@ API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_canc
            "api_events": "observe", "inventory_sessions": "observe", "inventory_hosts": "observe",
            "api_capabilities": "observe", "github_pr_preview": "observe", "checkpoints_list": "observe",
            "checkpoint_get": "observe", "checkpoint_preview": "observe", "integration_candidates": "observe",
-           "integration_preview_get": "observe", "integration_get": "observe", "integrations_list": "observe"}
+           "integration_preview_get": "observe", "integration_get": "observe", "integrations_list": "observe",
+           "projects_list": "observe", "project_get": "observe", "work_items_list": "observe",
+           "work_item_get": "observe"}
 ADMIN_RPC = {"api_token_issue", "api_token_revoke", "api_token_list", "work_reconcile_capability"}
 
 
@@ -121,7 +123,7 @@ class TaskDaemon:
         # the inventory observes through its own read-only fleet.
         self.ops = OperationService(self.journal,
                                     actions=api_actions.ACTIONS + delivery.ACTIONS + checkpoints.ACTIONS
-                                    + integration.ACTIONS)
+                                    + integration.ACTIONS + work_items.ACTIONS)
         github = None
         if config.github.token_ref:
             try:
@@ -238,6 +240,20 @@ class TaskDaemon:
         if method == "integrations_list":
             return integration.integrations_list(self.ops, str(params.get("repository")),
                                                  int(params.get("pull_number") or 0), int(params.get("limit") or 20))
+        if method == "projects_list":
+            return work_items.projects_list(self.journal.db, include_archived=bool(params.get("include_archived")))
+        if method == "project_get":
+            return work_items.project_get(self.journal.db, str(params.get("project_id")),
+                                          include_archived=bool(params.get("include_archived")))
+        if method == "work_items_list":
+            pending = params.get("pending")
+            return work_items.work_items_list(
+                self.journal.db, project_id=params.get("project_id"), state=params.get("state"),
+                pending=pending if isinstance(pending, bool) else None,
+                include_archived=bool(params.get("include_archived")), limit=int(params.get("limit") or 50),
+                cursor=params.get("cursor"))
+        if method == "work_item_get":
+            return work_items.work_item_get(self.journal.db, str(params.get("work_item_id")))
         raise ValueError("unknown api method")
 
     async def call(self, method: str, params: dict, *, auth_token: str | None = None) -> dict:
