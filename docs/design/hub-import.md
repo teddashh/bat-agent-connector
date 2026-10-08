@@ -44,9 +44,9 @@
 | `_hub/completion.migrated` | Hub 的首次遷移 marker | 保留是否存在及內容；不得因讀取而建立或更新 |
 | `Product/<project>/.ai/chat/<task>.jsonl` | 有 `at`、`role`、`text` 等欄位的逐行 JSON | 選取 `role == "user"` 的文字及來源行號，保留為需求歷史。不是匯入對話 runtime |
 
-列舉規則跟 `Store.listProjects()`／`readProject()` 相同：略過 `.`／`_` 開頭的 project 目錄與 task 檔名。不只檢查最上層：候選若包含 symlink、特殊檔案或不可讀檔案，必須回報，不能把讀取失敗當成沒有資料。來源有 project 目錄卻沒有 `PROJECT.md` 時，在預覽列出略過原因；已有 mapping 的 project 突然失去該檔則是 `SOURCE_MISSING`。
+列舉規則跟 `Store.listProjects()`／`readProject()` 相同：略過 `.`／`_` 開頭的 project 目錄與 task 檔名。不只檢查最上層：候選若包含 symlink、特殊檔案或不可讀檔案，必須回報，不能把讀取失敗當成沒有資料。Product 中普通非目錄檔與沒有 `PROJECT.md` 的目錄，以 `PROJECT_SKIPPED` 警告略過；symlink／特殊檔案仍拒絕。來源有 project 目錄卻沒有 `PROJECT.md` 時，在預覽列出略過原因；已有 mapping 的 project 突然失去該檔則是 `SOURCE_MISSING`。
 
-frontmatter 採與上游有限語法相容的 Python parser，支援 scalar、inline list／map、縮排 list／map、Hub 的註解與引號處理。不引入完整 YAML 的 tag、alias 或物件建構。無法解讀的結構、重複 key、非法 UTF-8、JSON duplicate key 等列為 `IMPORT_FORMAT_INVALID`，不仿照 Hub 的 catch-and-default 丟掉資料。正文與未知欄位另保留完整來源，不由 parser 重寫。
+frontmatter 採與上游有限語法相容的 Python parser，支援 scalar、inline list／map、縮排 list／map、Hub 的註解與引號處理。不引入完整 YAML 的 tag、alias 或物件建構。無法解讀的結構、重複 key、非法 UTF-8、JSON duplicate key 等列為 `IMPORT_FORMAT_INVALID`，不仿照 Hub 的 catch-and-default 丟掉資料。正文與未知欄位另保留完整來源，不由 parser 重寫。每筆 project／task 各自驗證，聚合所有可讀 record 的格式診斷，不遇第一筆就停止；空白 name／title 依 `store.js` 的 `data.name || id`／`data.title || id` 回退到 ID。控制字元或非單行名稱是格式問題，只有長度／數量超限才用 IMPORT_LIMIT_EXCEEDED。
 
 此版未發現獨立的可往返資料匯出格式。第一版的「export」是保留上述目錄布局的離線快照目錄；同一 parser 讀它。任意 API `/api/state` 的 JSON、zip／tar、單獨 `Product` 目錄或單張 PROJECT.md 都不當作完整匯出。缺少可選的 order／pins／completion／chat 檔可以匯入，但預覽明列事實缺失；格式損壞則阻擋，不能視為可選檔未存在。
 
@@ -119,7 +119,7 @@ project／work item 的讀取附 `source`：`kind: project_hub`、source_id、hu
 | `folders`、本機／相對路徑、非 HTTP(S) link | source.references | 原文與位置完整保留、預覽列未 materialize；不開啟、不下載、不認領資源 |
 | `updated`、owner、role、phase、via、workdir、workspaceMode 等 | source 原欄位 | Hub 的本機無時區日期不猜成 UTC；Connector created_at／updated_at 是匯入時間。沒有 repo provider identity 就不填 repositories／task_project |
 
-驗收標題白名單是本 adapter 的新規則，不宣稱它存在於 Hub。Markdown 文字與原檔都保留，擷取欄位不能造成原文遺失。URI 字面值與 label 保留原樣；task 的安全 HTTP(S) URL 去重後加入 `external_url`。禁止控制字元與 URL userinfo；其他 scheme 留 source references 並提示不能開啟。不以 substring／正則猜 PR 身分；此版不自動轉 `pull_request`。
+驗收標題白名單是本 adapter 的新規則，不宣稱它存在於 Hub。goal／acceptance 的 section 文字依 `store.js.sections()` 略過空白與 trim 後以 `<!--` 起頭的行；request／source 仍保留原文與註解。Markdown 文字與原檔都保留，擷取欄位不能造成原文遺失。URI 字面值與 label 保留原樣；task 的安全 HTTP(S) URL 去重後加入 `external_url`。禁止控制字元與 URL userinfo；其他 scheme 留 source references 並提示不能開啟。不以 substring／正則猜 PR 身分；此版不自動轉 `pull_request`。
 
 連結抽取支援 Markdown inline link、reference link、autolink、裸 HTTP(S) URL，忽略 code fence／inline code；重複 URL 保留各來源位置，但只建一個 active link。刪改匯入的 URL，僅移除 importer 建立且 baseline 未變的 link，沿用 removed_links 歷史。使用者另外建立的 links 一律保留。
 
@@ -129,7 +129,7 @@ project／work item 的讀取附 `source`：`kind: project_hub`、source_id、hu
 
 project 預覽順序依 `Store.listProjects()` 的 updated 降序、`ProjectOrder.siblings()` 的 saved group／未配置派生位置與 pins-first 算。task 順序依 `Store.readProject()` 的 updated 降序，再套 `taskItems()`、`displayParent()` 與 `taskTree()` 的 `nearSources()` 顯示規則；此版沒有持久 task order／pins，不能虛構來源檔。updated 相同時，以來源 ID 的 UTF-8 byte order 作穩定 tie-break，預覽註明此處 Hub 沒有固定順序。
 
-apply 把實際順序存 `tree_order`，所以 Connector「新項目放最後」的預設不會改掉首次匯入的排列。既有 Connector siblings 保持原相對順序；首次匯入的 siblings 追加到各自 pinned／unpinned 分區尾端。重匯只重排這個 source 的既有槽位，新來源項目追加到該 source 分區尾端；其他來源／本機項目與 archived 槽位留原處。任何順序、固定、parent 變更都在預覽列出實際 affected group。
+apply 把實際順序存 `tree_order`，所以 Connector「新項目放最後」的預設不會改掉首次匯入的排列。既有 Connector siblings 保持原相對順序；首次匯入的 siblings 追加到各自 pinned／unpinned 分區尾端。重匯只重排這個 source 的既有槽位，新來源項目追加到該 source 分區尾端；其他來源／本機項目與 archived／moved 槽位留原處。preview expected 與 apply verify 共用 `_group_order()` 正規化；ignore_new 只排除這次 apply creation reference 的新列，不把不在目前 group 的舊 ID 槽位濾掉。任何順序、固定、parent 變更都在預覽列出實際 affected group。
 
 來源 order 中不存在且從未匯入的 ID 只保留為 Hub 的原始槽位，不憑空建立空專案。若已有 mapping 卻來源消失，列 `source_missing`，不從目的 order 移除；復原來源後仍是原 ID。Connector 已封存的來源項目若需要修改，列衝突，不藉重匯復原它。
 
@@ -156,12 +156,12 @@ completion ledger 缺失但 marker 存在：歷史確認 unknown，完了仍待�
 
 以來源 identity 比較，使用三份資料：最近**成功套用**的 source snapshot（S0）、目前來源（S1）、最近匯入寫下的 destination baseline（D0）與目前目的地（D1）。來源 digest 包含原檔 bytes、需求歷史及該列相關的 completion／pins／關係；order group 有獨立 digest。改了未知欄位或 updated 也算來源變更，必須報告，不能只比 title。
 
-D0 包含 row version、所有可變欄位、完成欄位、archive、pin、active／removed link 摘要與相關 `api_events.seq` 游標；group baseline 包含完整 sibling ID 順序、pins、parent 與對應 ordered／移動事件。只用 row.version 不夠：現有 pin、order、link 不一定增加它。只用內容 hash 也不夠：先改再改回的編輯仍由版本／事件辨識。現有不在 journal 的直接 SQLite 手改不屬支援入口，但 digest 仍能查出當下差異。
+D0 包含 row version、所有可變欄位、完成欄位、archive、pin、active／removed link 摘要與相關 `api_events.seq` 游標。row 游標排除 *.ordered；updated 只計 import 映射欄位的事件，簽核／link／archive 等保護事實仍納入；resume 比對排除本 apply 自己的事件。group baseline 包含完整 sibling ID 順序、pins、parent 與對應 ordered／移動事件。只用 row.version 不夠：現有 pin、order、link 不一定增加它。只用內容 hash 也不夠：先改再改回的編輯仍由版本／事件辨識。現有不在 journal 的直接 SQLite 手改不屬支援入口，但 digest 仍能查出當下差異。
 
 | 比對 | 預覽分類 | apply 行為 |
 |---|---|---|
 | 沒有 mapping | create | 建新 ID；不認領同名本機列 |
-| S1 = S0，D1 = D0 | unchanged | 不 UPDATE row／mapping，不改 version、updated_at、link、order 或項目事件 |
+| S1 = S0，D1 = D0 | unchanged | 不 UPDATE 管理 row，不改 version、updated_at、link 或項目事件；僅本 apply 的 group 事件觸及時刷新 baseline，其餘 mapping 不變。order 另循 group 比對 |
 | S1 = S0，D1 曾被本機改 | local_only | 顯示差異並保持本機內容；不把 D0 移到新位置以掩蓋編輯 |
 | S1 ≠ S0，D1 = D0 | update／metadata_only | 列 Hub 差異；只修改真的改變的目的欄位。只有 source metadata 變時不 bump work item 的版本 |
 | S1 ≠ S0，D1 曾被本機改 | conflict | `IMPORT_CONFLICT`；不做逐欄位自動合併，即使兩邊改不同欄位或最後內容相同 |
@@ -170,9 +170,11 @@ D0 包含 row version、所有可變欄位、完成欄位、archive、pin、acti
 
 關係移動／順序變更也要檢查舊與新 group baseline。來源 group 沒變時，不重排本機順序；來源 group 改了而目的 group 自上次匯入後有編輯時，列 group conflict，包括新增本機 sibling。不得用本機 `local_only` 項目作為來源結構改動的可寫捷徑。
 
+project create／rename 在每筆交易內再用共用 `_name_free()` 檢查全部 active 名稱；preview 後在未匯入的 parent 下新增同名列也不能繞過。
+
 任何初始 conflict／blocker 都使整張 preview 的 `can_apply = false`，不提供 skip-conflicts 或 force-import。人可直接採 Connector 的內容為正式資料，保留衝突來源作歷史；若確實要人工合併，讀 preview 差異，以既有帶 expected_version 的管理 actions 手動修改。這不自動重設 import baseline；來源仍衝突時會繼續顯示，直到另行設計明確的 adopt-baseline 操作。單純重匯不能抹掉本機編輯。
 
-## Preview／apply 合約與入口
+## 輸入／輸出：preview／apply 合約與入口
 
 兩個 actions 為 `hub.import.preview`、`hub.import.apply`，scope 都是 `manage`，以 `ActionDef` 註冊。target 固定 `{source_id}`；拒絕額外欄位：
 
@@ -235,13 +237,14 @@ apply 直接寫管理資料，沒有子 operation、每列 step 或等待排程�
 1. `source.verify`：驗原 manifest、退役聲明、所有目的 preconditions 與最終樹。handler 每次進入（包括 resume）都重新驗 source；不能以已完成 step 跳過。
 2. `records`：先 projects 後 items，一列一交易；resume 跳過已有 receipt 的列，但仍檢查已提交列未被外部編輯。新列先不連 parent／derived_from，source.import_state 為 incomplete；既有列的結構暫不改。沒有每列 step。
 3. `structure.apply`：ID 已存在後，一個 management 交易套用 parent／derived_from／pins／order groups，驗最終樹，保留本機 siblings、archived 槽位。避免合法父子互換在中間狀態形成循環。
-4. `baseline.finalize`：同交易保存成功 baseline、source revision、complete 標記與 finalize receipt；unchanged／local_only 不更新 baseline。summary 另由 `_once()` 去重，避免 finalize 回覆遺失造成重複事件。
+4. `baseline.finalize`：同交易保存成功 baseline、source revision、complete 標記與 finalize receipt；更新本 apply 實際 touched 列的 baseline；group 事件觸及的 unchanged 專案也刷新。local_only 仍保留 D0，不 adopt 本機編輯。沒有 touched 的 unchanged 列不更新 mapping。summary 另由 `_once()` 去重，避免 finalize 回覆遺失造成重複事件。
 
 phase 用固定 management receipt key 去重，泛化同一 `_once()`；events 始終引用真實 apply op。`records` 的 reconcile 讀 receipts，若未全提交，證明是本機交易後回 RERUN 接續剩餘列。structure／finalize 以 management_applied 回查。來源與目的變動以 needs_attention 明確停止；不把未知的新內容納入原計畫。
 
 | 失敗位置 | 恢復與結果 |
 |---|---|
 | admission／首次 verify | admission 回 409／422；首次 verify 停在 needs_attention，零管理寫入，重新 preview |
+| 某筆 project 的 active name 在 preview 後被占用 | 該筆以 NAME_TAKEN 停在 needs_attention、交易 rollback；前面已提交的 receipts 保留。人處理同名列後可驗原 manifest／preconditions 再 resume，或取消後重新 preview |
 | 某列 commit 前停止／SQLite 錯誤 | row、mapping、snapshot、receipt 一起 rollback；resume 驗原 manifest 與剩餘目的 preconditions，再以相同 creation reference 接續 |
 | 某列 commit 後、records phase 回覆遺失 | 查 receipt／management_applied；已提交列跳過，IDs 不重建；phase uncertain 的 reconcile 接續剩餘本機交易 |
 | 已套用幾列後來源／目的變動 | partial = true、needs_attention；保留 applied／pending、incomplete。不宣稱整批原子提交 |
@@ -253,6 +256,8 @@ imports read model 由 receipts 推導 partial／pending；錯誤或 cancel 的�
 
 只有原 manifest 與目的 preconditions 仍成立，resume 才能續做。SOURCE_CHANGED／DESTINATION_CHANGED 須取消停住的 apply，重新 preview。incomplete mapping 以 pending snapshot 與 receipt 的實際 after 狀態作恢復基準；外部編輯仍 conflict。incomplete 不分類 unchanged，列剩餘 structure／finalize 工作。此基準不抹掉人的修改。
 
+Dashboard 的 `liveReload()` 以 500 ms debounce 合併 project／work_item／hub_import 事件 burst，再 `render(true)`；typing／editing 時保留到 idle。這是既有機制，沒有逐事件 fetch。ordered 游標查詢固定 resource_type=project，沿用 api_events_resource 的 (resource_type, resource_id, seq) index。
+
 同 source 同時只准一個非終態 apply，否則 IMPORT_BUSY；admission 與第一個管理交易再次檢查。使用同 journal／單一 daemon owner，沒有子操作生命週期或第二 scheduler。
 
 ### 穩定錯誤
@@ -262,8 +267,10 @@ imports read model 由 receipts 推導 partial／pending；錯誤或 cancel 的�
 | `IMPORT_SOURCE_NOT_CONFIGURED` | source_id 未登記；在 daemon 設定來源 |
 | `IMPORT_SOURCE_UNSAFE` | symlink、特殊檔案、越界或 root 身分不符；人準備安全的快照 |
 | `IMPORT_SOURCE_UNREADABLE` | 讀取失敗；保留舊 mapping，不當刪除 |
-| `IMPORT_FORMAT_INVALID`／`IMPORT_STATE_UNSUPPORTED` | 檔案／欄位不支援；提供相對路徑與位置，修正後 preview |
-| `IMPORT_LIMIT_EXCEEDED` | 超出檔案／資料／管理欄位上限；不截斷 |
+| `IMPORT_FORMAT_INVALID`／`IMPORT_STATE_UNSUPPORTED` | 檔案／欄位不支援、名稱含 tab／換行／控制字元；逐筆聚合相對路徑，修正後 preview |
+| `IMPORT_LIMIT_EXCEEDED` | 僅長度／數量／bytes 超出檔案或管理上限；不截斷，不把其他格式錯誤標成超限 |
+| `PROJECT_SKIPPED`（warning） | 普通 Product 檔或沒有 PROJECT.md 的目錄被略過；不是 fatal，也不等於刪除目的資料 |
+| `NAME_TAKEN` | active project 同名；preview 先檢查、每筆 create／rename 交易再檢查，後續衝突保留已提交 receipts |
 | `IMPORT_RELATION_INVALID` | missing、ambiguous、cycle、跨 project parent 或過深；列出相關 IDs |
 | `COMPLETION_STEPS_OPEN` | Hub 完成與步驟矛盾；修正或由人明確處理 |
 | `HUB_NOT_RETIRED` | 未有退役聲明；preview 可讀，apply 禁止 |
@@ -302,7 +309,7 @@ Phase 1 僅提交規格，審查修訂先獨立提交；Phase 2 實作如下：
 | `THIRD_PARTY_NOTICES.md` | parser／顯示階層／順序／completion 規則若移植，補固定 commit、上游檔案與 Python 位置，保留既有 MIT 聲明 |
 | 兩份 `skills/*/bat-agent-connector/SKILL.md` | 未修改：此包是人主導的一次遷移，未新增 agent 常態匯入流程；MCP action 說明要求人的授權，不替人宣告退役 |
 
-## B05 測試計畫
+## 對應驗收編號與測試（B05）
 
 `tests/fixtures/hub-import/` 是合成資料，來源檔案與刻意差異見其 README；basic 有四個 projects、八個 tasks，date-id 另涵蓋日期序號。損壞、競態、深樹與大量項目都在臨時副本產生，不執行上游 Store。
 
@@ -323,9 +330,26 @@ Phase 1 僅提交規格，審查修訂先獨立提交；Phase 2 實作如下：
 | `test_b05_http_rpc_and_mcp_share_the_same_actions`、`test_b05_cli_submits_preview_then_its_fixed_apply_key` | §09：CLI／HTTP／MCP 同 OperationService、reads 與 action、actor-bound preview 不由 generic operation read 洩漏 |
 | `test_b05_many_records_use_constant_steps_and_no_children` | §09／§24：1,008 work items 仍只有兩個 operations（preview／apply）、四個 phase steps、一個 shared snapshot／summary；沒有 child operations 或 per-record Hub events |
 
+### Review round 1 的回歸測試
+
+| Finding | 測試（同一 tests/test_hub_import.py） |
+|---|---|
+| 1：DDL 不占 data-step version | test_b05_import_ddl_preserves_data_step_version_and_is_idempotent：version 1／8 不變、DDL 沒有 user_version、第二次 open dump 相同 |
+| 2：moved slots／預覽可套用 | test_b05_moved_hub_child_keeps_order_slot_and_reapplies、test_b05_first_import_preserves_moved_local_project_slot |
+| 2／3：成功後與 apply 前不變量 | test_b05_unchanged_applicable_preview_never_fails_destination_preconditions：七種轉移，apply 後全部 unchanged、同 preview apply 不回 DESTINATION_CHANGED |
+| 3：排序與 row 編輯分開 | test_b05_import_order_events_do_not_poison_project_baseline、test_b05_local_task_reorder_is_group_state_not_a_project_edit、test_b05_local_description_still_conflicts_after_group_only_import |
+| 4：CLI 終態 | test_b05_cli_import_exit_code_requires_success：九種 statuses × preview／apply；test_b05_cli_successful_preview_with_blockers_is_nonzero |
+| 5：交易內 active names | test_b05_project_name_clash_is_rechecked_inside_record_transaction：create／rename、未匯入 parent、先前 receipts 保留 |
+| 6：模板空名稱／逐筆診斷 | test_b05_blank_display_names_fall_back_to_hub_ids、test_b05_all_bad_records_are_reported_with_correct_format_or_limit_code |
+| 7：Product stray files | test_b05_product_stray_files_are_skipped_but_unsafe_entries_are_refused：普通檔警告、symlink／FIFO 拒絕 |
+| 8：事件 index | test_b05_group_order_query_uses_the_event_resource_index：EXPLAIN QUERY PLAN 為 SEARCH，不 SCAN api_events |
+| 9：section 註解 | test_b05_section_comments_are_filtered_and_raw_request_is_preserved：goal／acceptance 濾掉註解，request／source 完整 |
+
 必跑 `uv run ruff check .`、完整 `uv run pytest -q`；Dashboard 另做 `.mjs` 的 node check 與 en／zh-TW、390／768／1440 px 的 Playwright 預覽、套用雙擊去重、console／overflow／錯誤 DOM 文字檢查。
 
 ## 尚未涵蓋
+
+- preview rows 的 TTL 只控制 apply admission，尚未清除過期列；與 integration previews 相同，pruning 另設計。
 
 - 任意新版 Hub、壓縮匯出、自訂 YAML 全語法、刪除／trash 紀錄的復原、附件 bytes／Git 成果／完整 assistant 對話遷移。需求文字和原始連結保留，但不 materialize 其指向內容。
 - 自動改名 identity、認領同名 Connector 列、雙向同步、watcher、Hub runtime 接管、重送 queue／delegate。第一版皆不做。
