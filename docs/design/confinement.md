@@ -1,6 +1,6 @@
 # Managed session 的執行限制
 
-日期：2026-10-08。Phase 1 規格；本文件的「新增」尚未實作。對應計畫 §06「執行環境的可寫範圍」、§07、§12、§28，W02／W04 remainder，驗收 A10。沿用 [資源政策](resource-policy.md)、[checkpoint](checkpoints.md)、[整合](integration.md) 與 [OperationService](api-v1.md)。
+日期：2026-10-08。審查後 Phase 2 規格；以下新增行為按本輪決議實作。對應計畫 §06「執行環境的可寫範圍」、§07、§12、§28，W02／W04 remainder，驗收 A10。沿用 [資源政策](resource-policy.md)、[checkpoint](checkpoints.md)、[整合](integration.md) 與 [OperationService](api-v1.md)。
 
 ## 固定來源版本
 
@@ -28,7 +28,15 @@ BAT 原始碼引用，均固定於上述 commit：
 
 **需要更正既有描述**：固定 BAT 的 S4 在 `acceptEdits` 下直接 allow `Write`、`Edit`、`NotebookEdit`、`Read`、`Glob`、`Grep`；callback 沒有核對 path。Claude CLI 把需要詢問的工具交給 callback 時，這條分支仍可能放行目錄外的編輯。因此目前 `CONFINED_OPTIONS["claude"]`、checkpoint 文件、skills 與 `i18n.confined_note` 所說「目錄外一定詢問」不是這版 BAT source 能證明的保證。Shell 仍有 permission 流程，也不等於 OS sandbox。
 
-新增一般 managed Claude start 用明確的 `permissionMode: default`，避免上述 callback 自動放行。這是工具詢問層級，仍受使用者／專案已授權規則與逐次批准影響。既有 `acceptEdits` session 不改 mode；如無其他證據，記 `none`，並列出「只有部分工具詢問」的限制。
+一般 start 保留操作者的 `default`／`allow_all` 選項。新增 `default_permission_mode=confined` 才套受限 options／旗標；checkpoint／repair 固定受限。無已查核 host_account 的受限 Claude 用明確 `permissionMode=default`；有帳號證據才可 acceptEdits。既有 acceptEdits session 不改 mode；如無其他證據，記 none、部分工具詢問缺口。
+
+## Claude worktree settings 的評估與決定
+
+固定 SDK `0.3.285` 的 [官方 npm metadata](https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk/0.3.285) 記 `claudeCodeVersion=2.1.285`；BAT S3 另會找主機安裝的 CLI，所以 SDK 版本不能證明 host 實際 CLI 版本。評估了在 managed worktree 寫 `.claude/settings.local.json`、canonical-path Edit／Read allow、settings 自身 deny、Bash sandbox 與 clone info/exclude。
+
+官方 [permissions 文件](https://code.claude.com/docs/en/permissions#read-and-edit) 說 Edit rules 涵蓋 file tools，但不涵蓋任意 Python／Node 子程序的間接寫入。[settings precedence](https://code.claude.com/docs/en/settings#lists-merge-instead-of-overriding) 說 allow lists 會合併，不能靠 local allow 清掉 user／project 的其他批准。文件沒有一個能由此檔完整封住所有外部寫入的 policy replacement。
+
+[Sandbox 文件](https://code.claude.com/docs/en/sandboxing#repository-settings-under-an-admin-required-sandbox) 明列 v2.1.285 的 admin-required 規則：需要 managed settings 或 `--settings` 的強制政策；local settings 本身不構成這個邊界。Sandboxed Bash 會保護 `.claude` 設定，但 inherited excludedCommands／已批准的 unsandboxed Python／Node 可以改 settings，file deny 不能擋其間接寫入。BAT 未轉送可信 per-session sandbox/settings override。這是保守判斷：無法證明此 local-file 方案在任意 host settings 下維持要求的邊界，故本包不寫該檔或 info/exclude。採用已核准 fallback：plain default，未預先授權的 edit／Bash 會詢問；表單提示並推薦無 account 證據時使用 Codex。已有規則／單次批准仍是明示缺口，不宣稱每次 edit 絕對必問。
 
 ## 全入口盤點：今天得到什麼
 
@@ -86,7 +94,7 @@ S1 的遠端 routing 會把 `options` 交給 native Codex 或 Node handler；不
 | `level` | 足夠的證據與阻擋範圍 | 不阻擋／保證界線 |
 |---|---|---|
 | `host_account` | 操作者宣告 BAT 的受限帳號與被保護 roots；同身分的只讀權限查核通過，已觀測 BAT／agent 身分吻合。保護的是這些 roots 的檔案改寫、建立、刪除與替換。 | 逐次批准不會提升 Unix 權限。但未列 roots、其他可寫 repos、讀取與網路不受保護；sudo／特權 helper、其他帳號的服務可繞過，查核限制須明列。不是整台主機已不可越界的證明。 |
-| `os_sandbox` | 明確傳送、讀回 CLI sandbox options，且有對應 host／BAT／CLI 版本與平台的實機阻擋證據。Codex `workspace-write` 或 reviewer `read-only` 是候選機制。 | 對 sandbox 內的 shell／檔案工具生效；on-request 的越界操作若被批准，可能離開 sandbox。實際 writable roots、暫存／cache、Git metadata、網路另列；不保護授權範圍內其他 repos。 |
+| `os_sandbox` | 明確傳送、讀回 CLI sandbox options。此包最多 options_confirmed，gap=sandbox_enforcement_unverified；實機 verified 留給 W12。Codex `workspace-write` 或 reviewer `read-only` 是候選機制。 | 對 sandbox 內的 shell／檔案工具生效；on-request 的越界操作若被批准，可能離開 sandbox。實際 writable roots、暫存／cache、Git metadata、網路另列；不保護授權範圍內其他 repos。 |
 | `prompt_gated` | 確認 Claude `default`／`plan` 的 permission 路徑；未被 CLI 既有規則預先 allow 的工具會詢問。 | 無 OS 寫入邊界。shell 可一次涵蓋多個路徑；allow／dontAskAgain、pre-approved rules、MCP／外部工具都會擴大範圍。不能說「所有目錄外寫入一定詢問」或完整達成 §06。 |
 | `none` | 無足夠證據、bypass／full-access，或只有 cwd／prompt／部分工具詢問（例如現有 Claude acceptEdits）。 | 沒有可宣稱的執行寫入保護；Connector 的人工資源 API 唯讀政策仍存在。 |
 
@@ -99,7 +107,7 @@ Session 物件（新增；下例 options 已核對但主機還沒做 sandbox 實
   "write_scope": "confined",
   "confinement": {
     "schema_version": 1,
-    "level": "none",
+    "level": "os_sandbox",
     "requested_level": "os_sandbox",
     "mechanisms": ["codex_workspace_write"],
     "options": {"codexSandboxMode": "workspace-write", "codexApprovalPolicy": "on-request"},
@@ -119,21 +127,19 @@ Session 物件（新增；下例 options 已核對但主機還沒做 sandbox 實
 
 `verification.status` 為 `pending`、`options_confirmed`、`verified`、`unknown` 或 `mismatch`。`level` 是建立時已具證據的限制；`requested_level` 是本次要求。只有 cwd、reserve 或 ACK 不填 `verified`。實機證據包含 run／log digest、檢查時間、BAT server version、CLI version、OS、runtime 身分與 policy；從既有 journal 的 evidence／operation refs 留存，不設第二個資料庫。W12 的證據須能連到同 host 與相同 runtime 設定。新的主機／CLI／BAT 版本不能沿用舊驗收通過狀態。
 
-Host 的可信設定可另帶 `sandbox_evidence_file`（Connector 本機的 W12 JSON 報告）與 `sandbox_evidence_sha256`。兩者須成對；檔案由主機操作者提供，mode 0600、owner 為 Connector 服務帳號、不能經 symlink 或被其他帳號寫入。只讀解析並核對 digest，不執行報告內容。必要欄位為 `schema_version=1`、`host`、`run_ref`、`checked_at`、`bat_version`／`bat_source_commit`、`cli_version`、`platform`、`runtime_identity`、`options`、`writable_roots`、`network`、`cases` 與 `log_sha256`；cases 必須包含實際 file／shell 拒絕、同 UID 正向控制及 managed 測試成功。拿不到目前 CLI／身分／設定指紋、報告不符或只有 agent 自述，都不能升為 verified。這是有來源的操作者驗收紀錄，仍非 BAT 提供的 sandbox attestation；限制文案保留此界線。API／MCP params 與 agent 自填的 `session_record_verification` 不得成為這個證據入口。
+保留建立快照與最新只讀 `current_verification` 分開顯示。現在的 meta 與已記 options 不同、帳號 check 失效或證據過期，顯示 mismatch／unknown，不改寫歷史 level，也不能以舊 level 繼續宣稱保護仍有效。未驗收的 sandbox level 可為 os_sandbox，但只能 options_confirmed，呈現缺口，不列為 A10 通過。
 
-保留建立快照與最新只讀 `current_verification` 分開顯示。現在的 meta 與已記 options 不同、帳號 check 失效或證據過期，顯示 mismatch／unknown，不改寫歷史 level，也不能以舊 level 繼續宣稱保護仍有效。未驗收的 sandbox 可帶最強 options 啟動，但呈現缺口，不列為 A10 通過。
-
-## 每個入口的新預設
+## 每個入口的新預設（審查決議）
 
 先做既有資源／目的地政策，再選 agent 可達且不改變任務的限制。正常 start 決策在第一個有副作用的 step 前保存；BAT start 後核對 meta，通過後才送第一個工作 prompt。對支持的同版本 host，優先沿用已查核的 host_account；一般 Codex 另保持 workspace-write，兩種機制可共存。
 
 | 入口 | 新 start options／限制政策 | 相容性與缺口 |
 |---|---|---|
-| 一般 `session_start`、relay missing、fanout children | Claude `permissionMode=default`；Codex `workspace-write`＋`on-request`；一律 `write_scope=confined`。 | host 的 allow-all 不蓋過新預設。使用者傳 bypass 類 mode 不接受。若 OS 未驗收，level 留 none 並提示 requested_level；Claude 有 prompt 層級但沒有永久檔案邊界。 |
-| checkpoint／repair | 同上；使用已記來源與 managed clone／integration area。 | 改正 Claude acceptEdits 選項；Git 測試、commit 與 shell 仍可透過逐次詢問執行。不可失敗後退回人工 cwd。 |
+| 一般 `session_start`、relay missing、fanout children | default／allow_all 保持今日選項；host policy=confined 才套 Claude default 或已查核帳號的 acceptEdits、Codex workspace-write/on-request，write_scope=confined。 | allow_all 記 none。一般 installs／localhost tests 可能需網路；不偷偷改成 Codex sandbox。confined 受限 options 不被 explicit bypass 覆蓋。 |
+| checkpoint／repair | 固定受限 Claude default（帳號已查核才 acceptEdits）／Codex workspace-write/on-request；使用已記來源與 managed clone／integration area。 | 無已查核帳號用 Claude default，有帳號才 acceptEdits；Git 測試、commit 與 shell 仍可透過逐次詢問執行。不可失敗後退回人工 cwd。 |
 | fanout planner | Codex `read-only`＋`never`，記 options 與受限旗標。 | planner 的既有工作只讀；不需要 commit、安裝或測試。仍不宣稱新 planner／模型政策。若實機不支援，顯示不支援，不退回可寫 allow-all planner。 |
-| failover／archive successor | 新 session 用上述預設，並繼承 predecessor 的禁止 raise、受保護 roots 與證據關係。 | 不依 host allow-all 放寬。對 predecessor 為 read-only／never，successor 保持該限制；對已有 host_account，不丟 account 邊界。無法維持時 blocked，保留前任。新 session 可有更強證據，但不能重標前任。 |
-| Task Service 新 lead／external worktree | **保留現有 engine／recipe 的權限行為**。Codex 本來的 default 若可證明等同 workspace-write/on-request，明確保存同值，不新增 sandbox roots／網路政策。Claude 本來 default 明確保存 default。 | allow-all 任務如無已查核的 host_account，level=none、`gap=task_recipe_compatibility`；不冒稱 confined，也不強制改成 sandbox/never 令測試失敗。一般 start 呼叫與 task 內部呼叫須區分，差異由 journal 已驗證 task 身分決定，外部 params 不能自報 task_id 取例外。 |
+| failover／archive successor | 新 session 用上述預設，並繼承 predecessor 的禁止 raise、受保護 roots 與證據關係。 | 受限 predecessor 不依 host allow-all 放寬；非受限 predecessor 保持 host 政策。對 predecessor 為 read-only／never，successor 保持該限制；對已有 host_account，不丟 account 邊界。無法維持時 blocked，保留前任。新 session 可有更強證據，但不能重標前任。 |
+| Task Service 新 lead／external worktree | **保留現有 engine／recipe 的權限行為**。Codex 本來的 default 若可證明等同 workspace-write/on-request，明確保存同值，不新增 sandbox roots／網路政策。Claude 本來 default 明確保存 default。 | allow-all 任務如無已查核的 host_account，level=none、`gap=task_recipe_compatibility`；不冒稱 confined，也不強制改成 sandbox/never 令測試失敗。Task Service 保持其 default／allow_all 行為；新增 confined 設定在 task 內仍沿用原 default 行為並記 task_recipe_compatibility，不另改 engine／recipe。 |
 | Task Service reviewer 相容分支 | 保存現有 Codex read-only/never 或 Claude plan，不改 recipe 是否會使用 reviewer。 | reserve、read-back 與 tab 都保存實際 options。 |
 | warm reuse、resume、rehydrate、start recovery | 保持該 session 原已記 options／level，不套新 start 預設。 | 恢復不得抹去 write_scope；缺證據顯示 unknown／none，不能按今日 host default 或 cwd 升級。 |
 
@@ -141,7 +147,7 @@ Codex `never` 不普遍取代 `on-request`：它可能禁止測試需要的外�
 
 Task Service 若不能在既有 engine／recipe 下保持測試，這一包記錄 gap，README／Dashboard 明示尚未達成該任務的 A10。後續 engine／recipe 調整由另一工作包決定；不偷偷改模型、路由、測試命令、cache／HOME、安裝位置或選另一個 host。
 
-Task Service 的新列若保留的是 default／read-only 選項，或有已查核的 host_account，保存 `write_scope=confined` 與原選項；不靠改成 allow-all 解決之後的測試問題。唯一相容例外是原 job 已需 allow-all 且沒有 account 邊界的列：不加受限旗標，保存 none＋task_recipe_compatibility，保持原既有權限，不提供一個讓一般 start 自選此例外的參數。這項不足是明示的 A10 gap，不是測試成功便可忽略的保護。
+Task Service 的新列保存既有 options／level；原 task 用 allow_all 就保持 none＋task_recipe_compatibility，不用改 policy 來讓測試過關。新 host confined 不悄悄改 task engine 的原行為；此例外只在既有 task-owned write point 內記證據，不新增外部 bypass 參數。
 
 ## Host account 宣告與只讀查核
 
@@ -162,13 +168,7 @@ check_max_age_s = 300
 
 第一版實作 Linux POSIX 查核。SSH alias 必須直接以預期 BAT UID 執行，且能觀測 BAT process 與該 agent runtime 的 UID／GID／supplementary groups。只讀指令使用既有 runner 的 `BatchMode` 與 timeout，不 `sudo -u` 模擬另一個人。alias 身分不符、看不到 BAT process、無法唯一對應該 BAT server、process namespace／群組不符，記 unknown，不能宣稱 host_account。
 
-查核只用 metadata、`realpath`、權限／ACL 資料、process 身分和有效權限判斷；不讀人的檔案內容。權限查核必須使用 effective IDs（不是只看 mode bits 或 real UID），腳本不載入會產生 cache／startup 寫入的程式。不得建立 probe、`touch`、寫入、chmod／chown、stash 或 git status 刷新人的 index。需檢查：
-
-1. 設定 roots 存在且 canonical path 明確；逐一記 lexical／canonical path 與 device／inode。不存在或中途改指向不算通過。
-2. 同 UID／群組下，檔案的 effective write，以及目錄的 write＋search（建立／移除／rename）。只檢查 root 的 `test -w` 不夠：子檔案、ACL 或子目錄可能可寫。
-3. Root 的父目錄及可替換它的祖先；納入 sticky bit／ownership 等 unlink／rename 規則。人目錄本身不可寫，但父目錄可讓 BAT 刪除／換掉它，也算失敗。
-4. 只讀列舉可達 descendant 與 symlink target，偵測可寫內容與路徑別名；scan 上限、permission denied、ACL／filesystem 語意無法解讀或 scan 期間身分變動都回 unknown，不能當 deny 證據。
-5. 觀測 BAT／CLI effective UID、groups、Linux capabilities；root／DAC override／可越過保護的能力回 mismatch。主機回報身分與 check 一致才可引用此結果。
+查核腳本只讀 Linux metadata，不讀人的檔案內容、不建立 probe、不寫入、不 sudo。以 `find <root> -xdev -writable`（GNU find 的 access(2) 判定，涵蓋 ACL）配 entry／time budget，首個可寫 entry 即失敗。用 -printf 計數；跨 mount／symlink、列舉錯誤或 budget 用盡回 unknown，不重實作 mode／ACL 判定。Root 的父目錄／祖先以同 UID 查 writable 與 search，並按 sticky bit／owner 決定是否可移除 child。讀 `/proc/<pid>/status` 的 Uid、Gid、Groups、CapEff；須能唯一識別該 BAT server 與 runtime、alias UID／groups 相符，不能只靠 process 名稱或 cwd。不同身分、無法識別或權限能力不明均 unknown；root／DAC override 為 mismatch。檢查前後的 canonical path／inode 與 process 身分須一致。讀取時有 entry/time 上限，cache 的上限不取代新 start 前核對。
 
 此查核是時間點、指定 roots、目前觀測到的執行身分的證據。既有 SSH／BAT 不能完整證明未列出的所有私人資料夾、其他帳號、未來 ACL 改變、所有 hardlink 別名、遠端可寫服務、setuid／sudo／credential 可取得的權限，或之後產生的子程序都不換身分。這些列在 `limits`；有已知繞過途徑不能回 verified。不得以跑提權命令來驗證「不能提權」。不可觀測的部分由主機操作者維持帳號配置，不能改寫成工具已證實。
 
@@ -213,7 +213,7 @@ Phase 2 新增的副作用只有 Connector 記錄／projection、既有 managed 
 | `CONFINEMENT_UNSUPPORTED` | 所需限制在 host／agent 不可達；planner 或需保留前任限制的 successor 不啟動。一般工作可用已定義的較低候選 options，但明示 gap，不能用未知欄位碰運氣。 |
 | `HOST_ACCOUNT_UNVERIFIED` | 宣告與只讀查核不一致或無法完成；新 start blocked。來源與既有工作不動；設定修正後重跑同 operation 的未送步驟。 |
 | `CONFINEMENT_MISMATCH` | start 讀回／resume／permission reconcile 的 options 與意圖不同。停止新 prompt 派送，needs_attention；不自動修改 live runtime 來掩飾。 |
-| `CONFINEMENT_EVIDENCE_MISSING` | 已記 confined 的 session 遺失原 mode／policy 且無可信 intent／回執可恢復時，不送 client-resume 或下一 prompt；不可觸發 BAT 的 omission／bypass fallback。保留既有 session 與讀取，由操作者核對原證據；不把它重新 start 成新預設。 |
+| `CONFINEMENT_EVIDENCE_MISSING` | 已記 confined 的 session 在 meta=null 且遺失原 mode／policy、無可信 intent／回執可恢復時，不送 client-resume／cold resume；不可觸發 BAT 的 omission／bypass fallback。保留既有 session 與讀取，由操作者核對原證據；不把它重新 start 成新預設。loaded live session 的 send 不改 mode，不因 legacy 證據缺失而阻擋。 |
 | Start／setter ACK 遺失 | uncertain；以同 session ID 讀 meta 和已記 intent。cwd 相同但 options 不明不能確認限制；不 start 第二次，不退回 allow-all。 |
 | Codex 第二個 setter 失敗 | 保留各 step 的回執與不明狀態，逐項讀回，不重送已證明的 step；完成後及下一 turn 邊界再核對。沒有原子 sandbox＋approval 保證。 |
 | Host offline／check stale | session read 回原快照＋current_verification=unknown；不偽裝 verified。不得用 stale account check 開新 session。 |
@@ -232,7 +232,7 @@ Session card 與 detail 同時顯示 level、write_scope、Git isolation；可�
 | key／語意 | zh-TW | en |
 |---|---|---|
 | level `host_account` | 主機帳號限制（指定目錄） | Host account restriction (listed roots) |
-| level `os_sandbox` | OS sandbox（有驗收證據） | OS sandbox (acceptance evidence recorded) |
+| level `os_sandbox` | OS sandbox 選項（尚未實機驗收） | OS sandbox options (live acceptance pending) |
 | level `prompt_gated` | 工具詢問；批准後可越界 | Tool approvals; an approval can allow access outside the folder |
 | level `none` | 無已證實的執行寫入限制 | No verified execution write restriction |
 | options confirmed／OS unverified | 已核對 sandbox 選項；OS 阻擋尚未驗收 | Sandbox options confirmed; OS enforcement not yet tested |
@@ -262,14 +262,13 @@ Mock 只能證明 Connector 的 options、gate、evidence 與顯示；不假造 
 
 | 驗收／計畫 | Phase 2 測試名稱（預定） | 要證明的結果 |
 |---|---|---|
-| A10；§06、§12 | `test_a10_checkpoint_absolute_path_carries_confinement`（Claude／Codex 參數化） | checkpoint excerpt 含來源人的絕對路徑並要求寫回；managed start 在第一個 prompt 前帶選項／flag，reserve、step request 與 read-back 內容一致，來源零寫入 frame。Claude 新 default，不沿用不安全的 acceptEdits 保證。 |
+| A10；§06、§12 | `test_a10_checkpoint_absolute_path_carries_confinement`（Claude／Codex 參數化） | checkpoint excerpt 含來源人的絕對路徑並要求寫回；另測沒有 verified account 絕不送 acceptEdits。managed start 在第一個 prompt 前帶選項／flag，reserve、step request 與 read-back 內容一致，來源零寫入 frame。Claude 新 default，不沿用不安全的 acceptEdits 保證。 |
 | A10；§06 | `test_a10_confined_refuses_raise_bulk_and_deferred` | host allow-all、force、dry-run、舊 pending raise、bulk 含 manual／unknown／confined／legacy 四種列；受限列 skipped，零 permission／resolve frame，不寫入 deferred raise。 |
-| A10；§06、§12 | `test_a10_level_requires_evidence_not_cwd` | 同 cwd 的 bypass、acceptEdits、default、已核對 Codex、未驗收 sandbox、已驗收 sandbox、已查核 account 給不同 level／verification；意圖、meta 與 enforcement 證據各自缺失不能假裝 verified。 |
-| A10；§06、§07 | `test_a10_all_managed_start_paths_share_defaults` | 一般、relay missing、planner、fanout children、repair、failover 與 archive 的實際 start；證明每個入口保存 options／level，不讓 permission_mode 或 host allow-all 覆蓋。planner read-only 是實際選項。 |
-| A10；§06、§12 | `test_a10_resume_recovery_and_warm_preserve_recorded_level` | lost ACK／daemon restart／registry 丟失／tab 舊資料／null meta；不重開、不按 cwd upgrade。Task start／reviewer 與 successor reservation 的 options 不遺失。 |
+| A10；§06、§12 | `test_a10_level_requires_evidence_not_cwd` | 同 cwd 的 bypass、acceptEdits、default、已核對 Codex、未驗收 sandbox、已驗收 sandbox、已查核 account 給不同 level／verification；只有 options/meta 不能假裝 verified；OS level 最多 options_confirmed。 |
+| A10；§06、§07 | `test_a10_all_managed_start_paths_share_defaults` | 一般、relay missing、planner、fanout children、repair、failover 與 archive 的實際 start；證明每個入口保存 options／level，default／allow_all／confined 的 options／level 各自正確。planner read-only 是實際選項。 |
+| A10；§06、§12 | `test_a10_resume_recovery_and_warm_preserve_recorded_level` | lost ACK／daemon restart／registry 丟失／tab 舊資料／null meta；不重開、不按 cwd upgrade；loaded legacy send 成功，meta=null 的 resume 無原 policy 才 blocked。Task start／reviewer 與 successor reservation 的 options 不遺失。 |
 | A10；§06、§28 | `test_a10_task_test_workflow_keeps_permissions_and_reports_gap` | 現有 engine／recipe、verifier commands 與測試完成路徑不變；allow-all 無 account 時 none＋gap；default Codex 保存同義選項；warm task 不套新預設。 |
 | A10；§06 | `test_a10_host_account_check_is_read_only`、`test_a10_host_account_unknown_or_writable_is_not_verified` | 模擬 SSH UID 不符、可寫子檔／父目錄、ACL／symlink、root/capability、process 不明、timeout、scan 不完整／stale。只讀命令清單與 zero probe；新 start 未驗證 account 即 blocked。 |
-| A10；§06 | `test_a10_sandbox_evidence_file_matches_runtime` | config 成對欄位、file owner／mode／symlink／digest、缺測試／log、runtime 版本／身分／options 不符都不得 verified；拒絕 API／agent 自填證據，不升級正在跑的 session。 |
 | A10；§06 | `test_a10_permission_partial_ack_and_policy_drift` | 每個 setter 失去 ACK、第二步失敗、idle 變 streaming、GUI mode drift／host 版本變更；原快照保留、current mismatch、不送下一 prompt。 |
 | A10；§06 | `test_a10_confined_answer_cannot_persist_wider_permissions` | `dont_ask_again`／ExitPlanMode mode raise 被拒絕；單次 allow 的限制如實呈現，deny／一般問題仍可處理。 |
 | A10；§10、§19 | `test_a10_session_and_capabilities_expose_same_evidence` | REST／MCP／CLI／inventory／triage 欄位一致；manual readonly 不變；host capability 不升級舊 session。Dashboard zh-TW／en、390 px、forms 切 agent、沒有 null／undefined／[object。 |
@@ -287,14 +286,14 @@ Mock 只能證明 Connector 的 options、gate、evidence 與顯示；不假造 
 5. Prompt-gated 不批准越界詢問；保存工具名稱、input、pending／deny 結果。os_sandbox 保存真正的拒絕錯誤／runtime log，不能以 agent 自稱「沒寫」代替；on-request 的批准出口未使用。測 host_account 時，在這個專用 fixture 的測試請求可由操作者逐次批准，仍須被帳號權限拒絕，證明批准不改 DAC。Claude file tools 與 shell 分開驗證，不能只測 shell 就掩蓋 acceptEdits 缺口。
 6. 對新的受限 session 測一次 allow-all／force、approve-pending dry-run／apply 與 deferred raises；應 refused／skipped，零 raise frame。驗證 failover successor 的 policy 不變；不靠切換 agent 逃出限制。resume／daemon restart 後讀回原 level 和 actual options；null／不明保持 uncertain，不自動再啟動。
 7. 操作者在同一測試目錄只讀比對 sentinel digest／inode、new.txt 不存在與目錄 entries；任何寫入、刪除、rename 成功都判該宣告失敗。若只看到待詢問，最多證明 prompt_gated，不能給 os_sandbox。若 CLI 不可觀测 sandbox 拒絕，記未證明。network 沒有測／不能設定時保持 unknown，這次檔案測試不升級成網路隔離。
-8. 留存帶 timestamp 的開始選項、meta、拒絕 log、讀回指紋、正向測試結果、批准／raise 拒絕與清理結果，連到 W12 的 A10 run；產生上節格式的 JSON 報告，由操作者放入可信設定所指的 evidence file，記下 digest。遮蔽真實 host／person paths 後才產生可公開報告。不同 BAT／CLI／account／policy 的證據不可混用；host-account 的 DAC 失敗不可代作 sandbox 的正向控制／拒絕證據。
+8. 留存帶 timestamp 的開始選項、meta、拒絕 log、讀回指紋、正向測試結果、批准／raise 拒絕與清理結果，連到 W12 的 A10 run；證據匯入格式及可信 evidence file 由 W12 工作包定義。遮蔽真實 host／person paths 後才產生可公開報告。不同 BAT／CLI／account／policy 的證據不可混用；host-account 的 DAC 失敗不可代作 sandbox 的正向控制／拒絕證據。
 9. 操作者停止測試 session，按既有 managed cleanup 流程整理測試 worktree。只移除第 2 步保存的專用目錄：先核對唯一命名、canonical parent、owner／inode 與無 mount／symlink 替換，再清理已知 fixture entries 與空目錄。不能對 prompt 回傳的任意路徑執行 recursive remove；個人 roots 全程沒有 probe，亦不做清理。
 
 A10 的通過紀錄必須注明 level／機制與批准限制。`none`、只有 options_confirmed、或 Task Service 相容缺口都不是實機驗收通過。prompt_gated 只證明未授權的工具請求被擋，不能宣布帳號或 OS 永久阻擋；完整保護須相符的 os_sandbox／host_account 測試證據與上列界線。
 
 ## 尚未涵蓋
 
-- Phase 2 程式、schema migrations、surfaces 與預定測試尚未交付；Phase 1 不變更其他文件的「尚未涵蓋」，不提前把 A10 列為完成。
+- W12 的 sandbox_evidence_file 設定、可信證據匯入、其檢查與測試延後；schema 保留 verified，但本包不把 OS sandbox 標為 verified。
 - 真 host 的 BAT／CLI 版本、OS sandbox 實際 roots／network 與實機阻擋尚未驗收。W12 要提供可核對同 runtime 的證據；沒有證據的主機保持 gap。
 - Task Service 的 allow-all engine／recipe 如何改成更強限制且保留測試，屬後續決策。這裡只保存現況與限制不足，不修改 §28 禁止增加的模型／recipe 政策。
 - 需主機操作者確認哪些 protected_roots 構成完整的私人寫入邊界、SSH alias 是否同 BAT UID。無法從現有 BAT protocol 取得完整身分或全域不可提權證明。
