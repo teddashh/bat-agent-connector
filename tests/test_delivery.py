@@ -1314,3 +1314,55 @@ async def test_readonly_merge_verification_refusal_before_write_fails_fast(make_
     done = await settle(d, op["operation_id"])
     assert done["status"] == "failed" and done["error_code"] == f"GITHUB_{status}", done
     assert gh.count("PUT", ".") == 0 and gh.count("POST", ".") == 0
+
+
+@pytest.mark.parametrize("outcome", ["open", "closed", "merged_reviewed", "merged_other_head"])
+async def test_merge_async_400_reads_pr_before_failing(make_daemon, gh, outcome):
+    """C04/C05, plan §16, #32: a definitive 400 still requires reading whether the reviewed PR already merged."""
+    d = make_daemon()
+    pr = gh.add_pr(7, HEAD)
+    _, op = await preview_op(d)
+    gh.script.append(("PUT", r"/merge-async$", 400, {}, {"message": "PR cannot be merged"}))
+    def concurrently_changed(method, path, _):
+        if method == "PUT" and path.endswith("/merge-async"):
+            if outcome == "closed":
+                pr["state"] = "closed"
+            elif outcome.startswith("merged"):
+                if outcome == "merged_other_head":
+                    pr["head"]["sha"] = "e" * 40
+                gh.merge(7)
+    gh.before_request = concurrently_changed
+    done = await settle(d, op["operation_id"])
+    if outcome == "merged_reviewed":
+        assert done["status"] == "succeeded" and done["result"]["verified"], done
+        assert done["result"]["merged_sha"] == MERGED and not done["result"]["merged_by_this_operation"]
+        assert not done["external_refs"]["merge_write_acknowledged"]
+        assert any(s["name"] == "merge.verify" for s in done["steps"])
+    else:
+        assert done["status"] == "failed" and done["error_code"] == "PR_NOT_MERGEABLE", done
+        assert not any(s["name"].startswith("merge.verify") for s in done["steps"])
+    put_index = next(i for i, (m, _, _) in enumerate(gh.requests) if m == "PUT")
+    assert gh.requests[put_index + 1][:2] == ("GET", "/repos/o/r/pulls/7")
+    assert gh.count("PUT", ".") == 1 and gh.count("POST", ".") == 0
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+async def test_merge_async_400_readback_refusal_remains_resumable(make_daemon, gh, status):
+    """C04/C05, plan §16: a refused read after the 400 is not a proven merge outcome."""
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    _, op = await preview_op(d)
+    gh.script.append(("PUT", r"/merge-async$", 400, {}, {"message": "PR cannot be merged"}))
+    def refuse_readback(method, path, _):
+        if method == "PUT" and path.endswith("/merge-async"):
+            gh.script.append(("GET", r"/pulls/7$", status, {}, {"message": "read permission unavailable"}))
+    gh.before_request = refuse_readback
+    held = await settle(d, op["operation_id"])
+    assert held["status"] == "needs_attention" and held["error_code"] == f"GITHUB_{status}", held
+    assert gh.count("PUT", ".") == 1
+    gh.merge(7)  # GitHub is readable again and another person has merged the reviewed head
+    d.ops.resume(TED, op["operation_id"])
+    done = await settle(d, op["operation_id"])
+    assert done["status"] == "succeeded" and done["result"]["verified"]
+    assert not done["result"]["merged_by_this_operation"]
+    assert gh.count("PUT", ".") == 1
