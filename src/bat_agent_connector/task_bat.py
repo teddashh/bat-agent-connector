@@ -225,6 +225,7 @@ class BatTaskAdapter:
 
     async def start(self, task: dict, *, role: str, agent: str, session_id: str) -> str:
         host = task["host"]
+        confinement.guard_start_record(registry.get(host, session_id) or {})
         if role == "lead":
             if task.get("_warm_session_id") == session_id:
                 previous = next((item for item in self.journal.warm_candidates(task)
@@ -318,11 +319,17 @@ class BatTaskAdapter:
                 try:
                     meta = await client.invoke("claude:get-session-meta", {"sessionId": sid},
                                                retry_on_disconnect=False)
-                    if isinstance(meta, dict) and meta.get("cwd") == lead["cwd"]:
-                        started = {"ok": True, "sessionId": sid}
-                        break
-                except Exception:  # noqa: S110 - readback is best-effort; retry below
-                    pass
+                except Exception:  # noqa: BLE001 - readback is best-effort; retry below
+                    meta = None
+                if isinstance(meta, dict):
+                    try:
+                        confinement.guard_start_record(registry.get(host, sid) or {})
+                        confinement.guard_start_cwd(entry, meta)
+                    except confinement.ConfinementRefused as refusal:
+                        registry.update(host, sid, status="uncertain", error_code=refusal.code)
+                        raise
+                    started = {"ok": True, "sessionId": sid}
+                    break
                 if attempt < 2:
                     await asyncio.sleep(0.25 * (2 ** attempt))
         if not started or started.get("sessionId") != sid:
@@ -332,6 +339,12 @@ class BatTaskAdapter:
             meta = await client.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
         except Exception:  # noqa: BLE001 - evidence reads must not fail an acknowledged reviewer start
             meta = None
+        if isinstance(meta, dict):
+            try:
+                confinement.guard_start_cwd(entry, meta)
+            except confinement.ConfinementRefused as refusal:
+                registry.update(host, sid, status="uncertain", error_code=refusal.code)
+                raise
         registry.update(host, sid, status="active", cwd=lead["cwd"], confinement=confinement.confirm(record, meta))
         if self.register_tabs and hc.orchestrate_register_tabs:
             try:
@@ -347,6 +360,10 @@ class BatTaskAdapter:
         return sid
 
     async def recover_start(self, task: dict, *, role: str, session_id: str) -> bool:
+        try:
+            confinement.guard_start_record(registry.get(task["host"], session_id) or {})
+        except confinement.ConfinementRefused:
+            return False
         if role == "lead" and task.get("base_branch"):
             try:
                 await self._ensure_external_worktree(task)
@@ -423,6 +440,7 @@ class BatTaskAdapter:
         if not workspace:
             raise ValueError("task workspace no longer exists on BAT host")
         existing = registry.get(task["host"], session_id)
+        confinement.guard_start_record(existing or {})
         if existing and (existing.get("task_id") not in {None, task["task_id"]}
                          or existing.get("role") not in {None, role}):
             raise ValueError("local session entry belongs to another task or role")
@@ -472,9 +490,14 @@ class BatTaskAdapter:
                     raise ValueError("lead worktree is not registered on BAT host")
                 expected_cwd = worktree["worktreePath"]
                 branch_name = worktree["branchName"]
-        if (meta["cwd"] != expected_cwd or
-                await client.invoke("git:getRoot", {"cwd": expected_cwd}, retry_on_disconnect=False)
-                != expected_cwd):
+        try:
+            confinement.guard_start_cwd({"cwd": (existing or {}).get("cwd") or expected_cwd}, meta)
+            confinement.guard_start_cwd({"cwd": expected_cwd}, meta)
+        except confinement.ConfinementRefused as refusal:
+            if existing and refusal.code in confinement.START_IDENTITY_MISMATCH_CODES:
+                registry.update(task["host"], session_id, error_code=refusal.code)
+            raise
+        if await client.invoke("git:getRoot", {"cwd": expected_cwd}, retry_on_disconnect=False) != expected_cwd:
             raise ValueError("BAT session folder does not match the journal-owned workspace")
         preset = orchestrate.PRESETS[(agent, role == "lead" and not task.get("external_worktree_path"))]
         if existing and any(existing.get(key) not in {None, expected}
@@ -489,6 +512,7 @@ class BatTaskAdapter:
         evidence = json.loads(intent["payload"]) if intent else {}
         record = (existing or {}).get("confinement") or evidence.get("confinement")
         if record:
+            confinement.guard_start_record({"confinement": record})
             if record.get("verification", {}).get("status") == "pending":
                 record = confinement.confirm(record, meta)
                 if existing:

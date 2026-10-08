@@ -436,7 +436,8 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
                 session_id=sid, retain_on_error=True, cwd_override=worktree, external_branch=branch,
                 write_scope="confined")
         except confinement.ConfinementRefused as exc:
-            if exc.sent is False:
+            if (exc.sent is False or exc.code in confinement.START_IDENTITY_MISMATCH_CODES
+                    or exc.code in {"CONFINEMENT_MISMATCH", "CONFINEMENT_START_UNSETTLED"}):
                 raise NeedsAttention(exc.code, str(exc)) from exc
             raise
         ctx.set_refs(confinement=r["confinement"])
@@ -450,15 +451,34 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
         if not entry.get("confinement"):
             raise NeedsAttention("CONFINEMENT_EVIDENCE_MISSING", "reserved start has no confinement evidence")
         try:
+            confinement.guard_start_record(entry)
+        except confinement.ConfinementRefused as exc:
+            raise NeedsAttention(exc.code, str(exc)) from exc
+        try:
             meta = await c.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
         except Exception:  # noqa: BLE001 - unreadable: stay uncertain and read again later
             return None
-        if isinstance(meta, dict) and norm(meta.get("cwd")) == worktree:
+        if isinstance(meta, dict):
+            try:
+                # Older in-flight rows omitted cwd; the durable start request
+                # still records the exact folder passed to BAT.
+                confinement.guard_start_cwd({"cwd": entry.get("cwd") or _request.get("cwd")}, meta)
+                confinement.guard_start_cwd({"cwd": worktree}, meta)
+            except confinement.ConfinementRefused as exc:
+                if exc.code in confinement.START_IDENTITY_MISMATCH_CODES:
+                    registry.update(host, sid, error_code=exc.code)
+                raise NeedsAttention(exc.code, str(exc)) from exc
             record = (registry.get(host, sid) or {}).get("confinement")
             if not record:
                 raise NeedsAttention("CONFINEMENT_EVIDENCE_MISSING", "reserved start has no confinement evidence")
+            try:
+                confinement.guard_start_record({"confinement": record})
+            except confinement.ConfinementRefused as exc:
+                raise NeedsAttention(exc.code, str(exc)) from exc
             state = confinement.verify(record, meta)
             if state["status"] == "mismatch":
+                registry.update(host, sid, error_code="CONFINEMENT_MISMATCH",
+                                confinement=confinement.confirm(record, meta))
                 raise NeedsAttention("CONFINEMENT_MISMATCH", state["reason"])
             if state["status"] == "unknown":
                 return None

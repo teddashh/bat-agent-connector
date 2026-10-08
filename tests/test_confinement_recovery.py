@@ -8,7 +8,7 @@ import json
 import pytest
 
 from bat_agent_connector import confinement, lifecycle, orchestrate, registry, task_bat
-from bat_agent_connector.errors import InvokeError
+from bat_agent_connector.errors import InvokeError, InvokeTimeout
 from bat_agent_connector.task_core import TaskCoordinator
 from bat_agent_connector.task_journal import Journal
 from bat_agent_connector.task_verifier import ObservedVerifier, VerificationSettings
@@ -177,6 +177,74 @@ async def test_reviewer_start_meta_failure_still_activates(fleet_factory, mock, 
         assert mock.channels().count("claude:start-session") == 1
     finally:
         await f.close()
+        journal.close()
+
+
+@pytest.mark.parametrize("observed", ["different", "missing"])
+async def test_acknowledged_start_checks_reserved_cwd_before_promotion(fleet_factory, mock, observed):
+    """A10: an ACK does not justify attaching a readable session in a different folder."""
+    fleet = fleet_factory(writes=True, orchestrate=True, default_permission_mode="confined", **MANAGED)
+    client = fleet.client("h1")
+    invoke = client.invoke
+
+    async def wrong_folder(channel, params=None, **kwargs):
+        result = await invoke(channel, params, **kwargs)
+        if channel == "claude:start-session":
+            meta = mock.metas[params["sessionId"]]
+            if observed == "different":
+                meta["cwd"] = "/srv/another-checkout"
+            else:
+                del meta["cwd"]
+        return result
+
+    client.invoke = wrong_folder
+    try:
+        code = "START_SESSION_MISMATCH" if observed == "different" else "CONFINEMENT_START_UNSETTLED"
+        with pytest.raises(confinement.ConfinementRefused, match=code):
+            await orchestrate.session_start(fleet, "h1", "demo-project", "claude", confirm=True, prompt="go")
+        row = registry.list_entries("h1")[-1]
+        assert row["status"] == "uncertain" and row["error_code"] == code
+        assert row["cwd"] == row["worktree_path"] and row["cwd"] != "/srv/another-checkout"
+        assert "worktree:remove" not in mock.channels() and "claude:send-message" not in mock.channels()
+    finally:
+        await fleet.close()
+
+
+@pytest.mark.parametrize("observed", ["different", "missing"])
+async def test_reviewer_readback_checks_reserved_cwd_without_retrying_start(fleet_factory, mock, tmp_path, monkeypatch, observed):
+    """A10: reviewer read-back cannot convert a foreign session into the task's reviewer."""
+    fleet = fleet_factory(writes=True, orchestrate=True, **MANAGED)
+    journal = Journal(tmp_path / "tasks.db")
+    adapter, task = reviewer_adapter(fleet, mock, journal, monkeypatch)
+    client = fleet.client("h1")
+    invoke = client.invoke
+
+    async def lost_ack(channel, params=None, **kwargs):
+        result = await invoke(channel, params, **kwargs)
+        if channel == "claude:start-session":
+            meta = mock.metas[params["sessionId"]]
+            if observed == "different":
+                meta["cwd"] = "/srv/another-checkout"
+            else:
+                del meta["cwd"]
+            raise InvokeTimeout("fixture lost reviewer start acknowledgement")
+        return result
+
+    client.invoke = lost_ack
+    try:
+        code = "START_SESSION_MISMATCH" if observed == "different" else "CONFINEMENT_START_UNSETTLED"
+        with pytest.raises(confinement.ConfinementRefused, match=code):
+            await adapter.start(task, role="reviewer", agent="codex", session_id="wrong-folder-reviewer")
+        row = registry.get("h1", "wrong-folder-reviewer")
+        assert row["status"] == "uncertain" and row["error_code"] == code
+        assert mock.channels().count("claude:start-session") == 1
+        assert "claude:send-message" not in mock.channels()
+        if observed == "different":
+            reads = mock.channels().count("claude:get-session-meta")
+            assert not await adapter.recover_start(task, role="reviewer", session_id=row["session_id"])
+            assert mock.channels().count("claude:get-session-meta") == reads
+    finally:
+        await fleet.close()
         journal.close()
 
 

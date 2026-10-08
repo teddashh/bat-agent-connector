@@ -269,6 +269,7 @@ async def session_start(
     if agent == "codex" and not model and hc.codex_model:
         model = hc.codex_model
     sid = session_id or str(uuid.uuid4())
+    confinement.guard_start_record(registry.get(host, sid) or {})
     # Read-only: how the host resolves the destination, so links into a human checkout are caught up front.
     git_roots = {}
     for path in {folder, cwd_override} - {None}:
@@ -353,6 +354,8 @@ async def session_start(
                 opts.update(
                     useWorktree=True, worktreePath=wt["worktreePath"], worktreeBranch=wt.get("branchName")
                 )
+            registry.update(host, sid, cwd=cwd, worktree_path=cwd if cwd_override else wt.get("worktreePath"),
+                            branch=external_branch if cwd_override else wt.get("branchName"))
             audit.record(**base, channel="claude:start-session", phase="attempt", preset=preset)
             try:
                 started = await c.invoke("claude:start-session", {"sessionId": sid, "options": opts}, grant=grant,
@@ -365,6 +368,8 @@ async def session_start(
                     meta = await _meta(c, sid)
                 except Exception:  # noqa: BLE001 - an evidence read cannot undo an acknowledged start
                     meta = None
+                if isinstance(meta, dict):
+                    confinement.guard_start_cwd({"cwd": cwd}, meta)
                 confinement.ensure_confirmed(confinement_record, meta, allow_unknown=write_scope != "confined")
                 confinement_record = confinement.confirm(confinement_record, meta)
             except confinement.ConfinementRefused as e:
