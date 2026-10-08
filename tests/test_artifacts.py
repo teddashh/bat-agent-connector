@@ -15,9 +15,9 @@ import pytest
 
 from bat_agent_connector import api_auth, artifacts, checkpoints, registry, resource_policy, service
 from bat_agent_connector.artifact_host import HELPER, ArtifactHost
-from bat_agent_connector.artifacts import ArtifactStore
 from bat_agent_connector.errors import InvokeTimeout, ResourceReadOnly
 from bat_agent_connector.operations import AmbiguousOutcome, OperationError
+from bat_agent_connector.task_daemon import TaskDaemon
 from bat_agent_connector.task_journal import Journal
 from tests.test_checkpoints import MANUAL, git
 from tests.test_checkpoints import daemon as checkpoint_daemon
@@ -140,15 +140,21 @@ async def test_upload_publish_lost_reply_and_restart_read_back(daemon, monkeypat
     await daemon.artifact_store.receive(PERSON, op["operation_id"], reader(b"immutable input"), 15)
     await daemon.ops.drain(30)
     assert daemon.ops.get(op["operation_id"])["status"] == "uncertain"
-    # A fresh store reopens the same durable intent, not a new upload.
-    reopened = ArtifactStore(daemon.ops, daemon.artifact_store.settings)
-    daemon.ops.context["artifact_store"] = reopened
-    daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
-    await daemon.ops.drain(30)
-    done = daemon.ops.get(op["operation_id"])
-    assert done["status"] == "succeeded", json.dumps(done, indent=2)
-    assert len(list(reopened.root.glob("revisions/*/*/content"))) == 1
-    assert not (reopened.root / "staging" / op["operation_id"]).exists()
+    # Close SQLite and construct a new daemon: memory contains no step or upload result.
+    path, config = daemon.journal.path, daemon.fleet.config
+    daemon.journal.close()
+    reopened = TaskDaemon(config, path)
+    try:
+        reopened.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+        await reopened.ops.drain(30)
+        done = reopened.ops.get(op["operation_id"])
+        assert done["status"] == "succeeded", json.dumps(done, indent=2)
+        assert len(list(reopened.artifact_store.root.glob("revisions/*/*/content"))) == 1
+        assert not (reopened.artifact_store.root / "staging" / op["operation_id"]).exists()
+    finally:
+        await reopened.fleet.close()
+        await reopened.inventory.close()
+        reopened.journal.close()
 
 
 async def test_attachment_change_invalidates_work_item_approval(daemon):
@@ -296,15 +302,37 @@ async def test_materialized_inputs_are_git_excluded_and_inside_the_worktree(daem
     assert cp["artifacts"] == [ref]
 
 
-async def test_artifact_policy_refuses_escape_before_any_host_write(daemon, mock):
+async def test_artifact_policy_refuses_escape_before_any_host_write(daemon, mock, tmp_path):
     hc = daemon.fleet.config.host("h1")
-    root = hc.managed_roots[0] + "/clones/checkpoint-example"
+    root = hc.managed_roots[0] + "/checkpoint-example"
     op = "op_" + "a" * 32
     wt = root + "/.bat-worktrees/batc-cp-" + op[3:15]
+    valid = ".batc-inputs/art_" + "a" * 32 + "-r1/notes.txt"
+    resource_policy.check_artifact_destination(hc, root, wt, "batc/cp-" + op[3:15], valid)
     for relative in ("../escape", ".batc-inputs/../../outside", ".batc-inputs/art_" + "a" * 32 + "-r1/../bad", ".batc-inputs/art_" + "a" * 32 + "-r1/.git"):
         with pytest.raises(ResourceReadOnly):
-            resource_policy.check_artifact_destination(hc, root, wt, "batc-cp-" + op[3:15], relative)
+            resource_policy.check_artifact_destination(hc, root, wt, "batc/cp-" + op[3:15], relative)
     assert not sends(mock)
+    adapter = LocalArtifactHost()
+    daemon.ops.context["artifact_host"] = adapter
+    ref = await upload(daemon)
+    cp = await make_checkpoint(daemon)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real = adapter.call
+    async def symlink(host, request, content=b""):
+        if request["mode"] == "receive":
+            exclude = Path(request["clone"]) / ".git/info/exclude"
+            before = exclude.read_bytes()
+            (Path(request["worktree"]) / ".batc-inputs").symlink_to(outside, target_is_directory=True)
+            result = await real(host, request, content)
+            assert exclude.read_bytes() == before  # refusal precedes even the exclude append
+            return result
+        return await real(host, request, content)
+    adapter.call = symlink
+    blocked = await continuation(daemon, cp, [ref])
+    assert blocked["status"] == "needs_attention" and blocked["error_code"] == "DESTINATION_UNKNOWN", blocked
+    assert not list(outside.iterdir()) and not sends(mock)
 
 
 async def test_B04_transfer_interrupted_before_dispatch(daemon, mock):
@@ -390,7 +418,8 @@ async def test_B04_resume_after_start_or_send_ack_loss_never_duplicates_executio
     assert len(sends(mock)) == 1
 
 
-async def test_B04_inputs_changed_after_start_keep_session_and_block_send(daemon, mock, monkeypatch):
+@pytest.mark.parametrize("change", ["file", "source"])
+async def test_B04_inputs_changed_after_start_keep_session_and_block_send(daemon, mock, monkeypatch, human, change):
     from bat_agent_connector import orchestrate
     adapter = LocalArtifactHost()
     daemon.ops.context["artifact_host"] = adapter
@@ -400,14 +429,23 @@ async def test_B04_inputs_changed_after_start_keep_session_and_block_send(daemon
     async def tamper(*args, **kw):
         result = await real(*args, **kw)
         path = next(Path(kw["cwd_override"]).glob(".batc-inputs/*/notes.txt"))
-        path.write_bytes(b"changed input")
+        if change == "file":
+            path.write_bytes(b"changed input")
+        else:
+            git(human, "commit", "-q", "--allow-empty", "-m", "source moved during start")
         return result
     monkeypatch.setattr(orchestrate, "session_start", tamper)
     op = await continuation(daemon, cp, [ref])
-    assert op["status"] == "needs_attention" and op["error_code"] == "ARTIFACT_SIZE_MISMATCH", op
+    expected = "ARTIFACT_SIZE_MISMATCH" if change == "file" else "SOURCE_MOVED"
+    assert op["status"] == "needs_attention" and op["error_code"] == expected, op
     assert not sends(mock) and len(registry.list_entries("h1")) == 1
-    Path(op["external_refs"]["materializations"][0]["managed_path"]).write_bytes(b"immutable input")
-    daemon.ops.resume(PERSON, op["operation_id"])
+    if change == "file":
+        Path(op["external_refs"]["materializations"][0]["managed_path"]).write_bytes(b"immutable input")
+        daemon.ops.resume(PERSON, op["operation_id"])
+    else:
+        await action(daemon, "checkpoint.continue.revalidate", {"operation_id": op["operation_id"]},
+                     {"observed_source_head_sha": git(human, "rev-parse", "HEAD")},
+                     {"expected_input_manifest_digest": op["external_refs"]["input_manifest_digest"]})
     await daemon.ops.drain(30)
     done = daemon.ops.get(op["operation_id"])
     assert done["status"] == "succeeded", done

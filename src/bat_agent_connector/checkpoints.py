@@ -572,16 +572,17 @@ async def _run_continue(ctx: OpContext) -> dict:
 
     agent = ctx.params.get("agent", "claude")
     marker = prompt_marker(cp, ctx.operation_id)
-    text = first_prompt(cp, worktree=worktree, branch=branch, instructions=ctx.params["instructions"], marker=marker)
+    instructions = ctx.params["instructions"]
     if refs:
         lines = ["", "Verified input files (relative to your working folder):"]
         for ref in refs:
             row = artifacts.get(ops.db, ref["artifact_id"], ref["revision"])
             lines.append(f".batc-inputs/{ref['artifact_id']}-r{ref['revision']}/{row['display_name']} "
                          f"[{ref['artifact_id']} revision {ref['revision']}, SHA-256 {ref['digest']}]")
-        text += "\n".join(lines)
-        if len(text) > service.MAX_PROMPT_CHARS:
+        instructions += "\n".join(lines)
+        if len(instructions) > service.MAX_PROMPT_CHARS - 1500:
             raise NeedsAttention("INVALID_PARAMS", "instructions and input manifest exceed the prompt limit")
+    text = first_prompt(cp, worktree=worktree, branch=branch, instructions=instructions, marker=marker)
     # origin_cwd stays the workspace folder session_start recorded: merges into it are refused
     # (DESTINATION_MANUAL), which is what a checkpoint session's work should get. Results reach a PR instead.
     started = await start_in_worktree(

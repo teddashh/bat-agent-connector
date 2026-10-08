@@ -121,6 +121,41 @@ def execute(request, stream):
         common = git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
         if common != clone + "/.git" or git(worktree, "rev-parse", "--show-toplevel") != worktree:
             raise Refusal("BINDING_MISMATCH", "worktree git binding differs")
+        try:
+            existing_inputs = os.open(".batc-inputs", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=work_fd)
+        except FileNotFoundError:
+            existing_inputs = None
+        if existing_inputs is not None:
+            try:
+                try:
+                    owner = read_json(existing_inputs, ".owner")
+                except FileNotFoundError:
+                    if os.listdir(existing_inputs):
+                        raise Refusal("BINDING_MISMATCH", "unknown input directory") from None
+                else:
+                    if owner != {"operation_id": operation, "helper_version": VERSION}:
+                        raise Refusal("BINDING_MISMATCH", "input owner differs")
+                cursor = os.dup(existing_inputs)
+                try:
+                    for part in (".attempts", ref["artifact_id"] + "-r" + str(ref["revision"])):
+                        try:
+                            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cursor)
+                        except FileNotFoundError:
+                            break
+                        os.close(cursor)
+                        cursor = nxt
+                    else:
+                        for name_to_check in (".attempt-" + str(attempt), ".closed-" + str(attempt)):
+                            try:
+                                info = os.stat(name_to_check, dir_fd=cursor, follow_symlinks=False)
+                                if not stat.S_ISREG(info.st_mode):
+                                    raise Refusal("DESTINATION_UNKNOWN", "invalid attempt file")
+                            except FileNotFoundError:
+                                pass
+                finally:
+                    os.close(cursor)
+            finally:
+                os.close(existing_inputs)
         # Inspect existing destination components before even appending the Git exclude.
         check_fd = os.dup(work_fd)
         try:
