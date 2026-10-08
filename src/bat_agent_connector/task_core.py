@@ -218,8 +218,9 @@ class TaskCoordinator:
                         self.journal.change(task_id, "uncertain")
                     raise
                 except Exception:
-                    self.journal.command_status(command["command_id"], "uncertain")
-                    self.journal.change(task_id, "uncertain")
+                    self.journal.command_status(command["command_id"], "uncertain" if guard.frames else "rejected")
+                    if guard.frames:
+                        self.journal.change(task_id, "uncertain")
                     raise
                 if action == "send" and not result.get("accepted"):
                     with self.journal.tx():
