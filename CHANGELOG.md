@@ -11,6 +11,8 @@
   only evaluates (LEGACY_CLEANUP_DISABLED on apply); auto_cleanup is deprecated; fanout stops its planner and
   keeps its worktree. Clones/areas/all pins stay. TaskDaemon cleanup remains unchanged; reviewed task cleanup and
   restore are Part B.
+- Cleanup review fixes ([design](docs/design/cleanup.md), plan §23, E01/E02): idempotent journal DDL runs on
+  every open without claiming a data migration version, preserving delivery and observation migration ordering.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps

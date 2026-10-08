@@ -280,8 +280,10 @@ parent cancelled/failed把它當成沒發生。遠端程序仍在／身份不明
 
 ## Journal／migration
 
-原Journal、WAL/FULL、single owner。新增idempotent DDL，使用rebase時**下一個未占用user_version**；
-本基準為1，本migration預計2。BEGIN IMMEDIATE一個tx建表/index，最後設version，中斷rollback可重跑。
+原Journal、WAL/FULL、single owner。新增idempotent DDL，每次open都以BEGIN IMMEDIATE一個tx建表/index；
+不讀、不寫user_version，中斷rollback可重跑。版本號只供跨package分配的一次性data steps使用：
+main為1、delivery為2–3、observation為4。DDL若相對遞增版本會跳過其他package的data steps；
+Part A只有建表/index，不占版本號。
 不改operations table，不host calls、不刪舊rows／registry／events，不重編cursor。
 
 | 表 | 固定事實／鍵 |
@@ -373,7 +375,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | boundedread／serialization／deadline | test_e01_previews_serialize_per_host_and_share_read_deadline |
 | attachmentreplicas／exacttemps | test_e01_attachment_replicas_are_removed_without_discard_scope、test_e01_exact_temporary_requires_creation_markers_and_never_sweeps、test_e01_empty_integration_temporary_has_exact_intent_and_no_restore_promise |
 | acceptedauthority／載體不被guard退休 | test_e01_accepted_authority_survives_key_rotation_and_carrier_stays_usable |
-| migration原histories／rebase可renumber／keep無sweep | test_cleanup_migration_is_atomic_additive_and_preserves_history、test_e01_keep_defaults_reject_purge_and_never_sweep_by_name |
+| migration原histories／DDL不占user_version／keep無sweep | test_cleanup_migration_is_atomic_additive_and_preserves_history（version 1與3、第二次open不變）、test_e01_keep_defaults_reject_purge_and_never_sweep_by_name |
 | §10三入口／§19Dashboard | test_e01_cleanup_adapters_share_the_action_contract；Playwright（含lostreply/reload同key） en/zh-TW/390px #/cleanup與workitementry／無restore／無null/undefined/[object文字 |
 | Part B延期 | taskcoordinator/reservation、TaskDaemonbackfill、restore/lostadd新tests；**container不屬Part B**另規格 |
 
