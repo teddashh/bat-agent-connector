@@ -16,6 +16,7 @@ from bat_agent_connector import api_auth, work_items
 from bat_agent_connector.operations import OperationError
 from bat_agent_connector.task_daemon import TaskDaemon
 from tests.conftest import make_config
+from tests.operation_helpers import settle_operations
 from tests.test_api_v1 import http, token
 
 PERSON = api_auth.Principal("ted-dashboard", frozenset({"observe", "manage", "approve"}))
@@ -46,7 +47,7 @@ async def served(daemon):
 async def act(d, who, action, target=None, params=None, pre=None, *, key=None, ok=True):
     op, _ = d.ops.create(who, action=action, target=target or {}, params=params or {}, preconditions=pre or {},
                          idempotency_key=key or str(uuid.uuid4()))
-    await d.ops.drain()
+    await settle_operations(d.ops)
     op = d.ops.get(op["operation_id"])
     if ok:
         assert op["status"] == "succeeded", (op["error_code"], op["status_reason"])
@@ -182,7 +183,7 @@ async def test_a_rename_keeps_ids_and_relations_and_needs_the_version_you_read(d
                             params={"goal": "one"}, preconditions={"expected_version": 1}, idempotency_key="k1")
     second, _ = d.ops.create(PERSON, action="work_item.update", target={"work_item_id": kid},
                              params={"goal": "two"}, preconditions={"expected_version": 1}, idempotency_key="k2")
-    await d.ops.drain()
+    await settle_operations(d.ops)
     ran = sorted(d.ops.get(x["operation_id"])["status"] for x in (first, second))
     assert ran == ["failed", "succeeded"] and get(d, kid)["version"] == 2
     assert {d.ops.get(x["operation_id"])["error_code"] for x in (first, second)} == {None, "VERSION_CONFLICT"}
@@ -338,7 +339,7 @@ async def test_a_change_is_applied_once_even_if_the_operation_runs_again(daemon)
     # the daemon stopped after the change committed but before the operation recorded its result
     d.journal.db.execute("UPDATE operations SET status='running',result=NULL WHERE operation_id=?",
                          (op["operation_id"],))
-    await d.ops.drain()
+    await settle_operations(d.ops)
     again = d.ops.get(op["operation_id"])
     assert again["status"] == "succeeded" and again["result"] == op["result"]
     assert d.journal.db.execute("SELECT COUNT(*) FROM work_items").fetchone()[0] == 1
