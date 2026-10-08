@@ -137,6 +137,8 @@ CLI `task-reconcile --key` 把 key 同時交原 admin-only capability issuer，�
 
 task-owned session 的 send／answer／interrupt／permissions 都先經 resource policy，再進 daemon 原 coordinator；舊直接 service tools 也經相同 gate。鎖順序為 task → session → host write lock → BAT semaphore；client-resume、answer、abort 與每個 permission channel 在 frame 前重查 journal 的版本與 ownership。任意 before_invoke callback 不授予插隊權限。standalone managed session 沿用原行為。
 
+背景 trusted verification 期間的 pause／版本改變為控制取消：task 保留 verifying／paused，取消的 run 不寫 evidence，不升級 needs_ted／uncertain。resume 後下一個 tick 從頭跑，包括 dependency retry；paused task 不計 verification_deadline。lease lost／binding mismatch 保留目前 state，交既有 owner／修復 binding 後再 resume；真正 verifier error 仍是 verification_error／needs_ted。沒有新增 event 或錯誤碼。
+
 | 409 task code | 處理 |
 |---|---|
 | `TASK_OWNER_UNAVAILABLE` | pointer／journal／row／owner lease 不可用；連既有 owner，不啟動第二個 daemon |

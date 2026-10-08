@@ -1098,7 +1098,8 @@ async def test_reviewer_start_rejects_missing_or_mismatched_session_id(
         await adapter.start(task, role="lead", agent="claude", session_id="review-ack-lead")
         j.add_branch(task["task_id"], session_id="review-ack-lead", provider="claude",
                      role="lead", reason="start")
-        task = {**task, "session_id": "review-ack-lead"}
+        j.change(task["task_id"], "dispatching", fields={"session_id": "review-ack-lead"})
+        task = j.change(task["task_id"], "accepted")
         mock.handlers["claude:start-session"] = lambda p: reply
         with pytest.raises(WriteRefused, match="reviewer start"):
             await adapter.start(task, role="reviewer", agent="codex", session_id="review-ack-reviewer")

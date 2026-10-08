@@ -768,8 +768,12 @@ class TaskDaemon:
 
     async def _tick_task(self, task_id: str):
         verifying = False
+        version = None
         try:
+            if not self.journal.owner_valid():
+                return
             task = self.journal.get(task_id)
+            version = task["control_version"]
             verifying = task["state"] == "verifying"
             if verifying and not task["paused"]:
                 remaining = self.verification_remaining(task)
@@ -810,6 +814,8 @@ class TaskDaemon:
                 goose_task = {**task, "_route_provider": self.goose.config.provider}
                 await self.goose.run_task(goose_task, goose_cwd, capability=capability,
                                           journal=self.journal)
+            except TaskControlRefused:
+                raise
             except Exception as exc:  # noqa: BLE001 - reconcile before uncertainty
                 logging.warning("Goose ACP task %s failed before settlement: %s",
                                 task_id[:8], type(exc).__name__)
@@ -840,10 +846,15 @@ class TaskDaemon:
             finally:
                 if temporary_cwd:
                     shutil.rmtree(temporary_cwd, ignore_errors=True)
+        except TaskControlRefused as exc:
+            logging.info("Task %s tick cancelled by %s", task_id[:8], exc.code)
         except Exception as exc:  # noqa: BLE001 - one task cannot kill worker
             logging.warning("Task %s needs reconciliation after %s", task_id[:8], type(exc).__name__)
             try:
                 current = self.journal.get(task_id)
+                if (not self.journal.owner_valid() or current["paused"]
+                        or version is not None and current["control_version"] != version):
+                    return
                 if verifying and current["state"] == "verifying":
                     kind = "verification_timeout" if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) else "verification_error"
                     self.journal.change(task_id, "needs_ted", event=kind,
@@ -855,7 +866,8 @@ class TaskDaemon:
         finally:
             try:
                 current = self.journal.get(task_id)
-                if current["state"] in {"done", "failed"} and current.get("external_worktree_path"):
+                if (self.journal.owner_valid() and current["state"] in {"done", "failed"}
+                        and current.get("external_worktree_path")):
                     proof = await self.adapter.cleanup_external_worktree(current)
                     self.journal.complete_external_cleanup(task_id, proof)
                     self._cleanup_retry_after.pop(task_id, None)

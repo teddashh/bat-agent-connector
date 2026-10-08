@@ -16,8 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import lifecycle, orchestrate, registry, resource_policy, service
-from .errors import BatError, TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
+from . import lifecycle, orchestrate, registry, resource_policy, service, task_control
+from .errors import BatError, TaskControlRefused, TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .fleet import Fleet
 from .operations import AMBIGUOUS, AmbiguousOutcome, StepFailed, _error_code
 from .redact import redact_secrets
@@ -253,6 +253,8 @@ class BatTaskAdapter:
                         external_branch=external["branch"] if external else None,
                         task_id=task["task_id"])
                     break
+                except TaskControlRefused:
+                    raise
                 except Exception as exc:  # noqa: BLE001 - same reserved start is idempotent
                     last_error = exc
                     if attempt == 2:
@@ -292,16 +294,23 @@ class BatTaskAdapter:
         else:
             opts.update(permissionMode="plan", model=CLAUDE_BAT_MODEL)
         client = self.fleet.client(host)
+        def before_start():
+            if self.journal:
+                task_control.check_incarnation(self.journal, task)
         started = None
         last_error = None
         for attempt in range(3):
             try:
                 started = await client.invoke(
                     "claude:start-session", {"sessionId": sid, "options": opts}, retry_on_disconnect=False,
-                    grant=grant)
+                    grant=grant, before_send=before_start)
                 if isinstance(started, dict) and started.get("ok") is not False and started.get("sessionId") == sid:
                     break
                 raise WriteRefused("BAT reviewer start did not confirm the reserved session ID")
+            except TaskControlRefused as exc:
+                if exc.code != "TASK_OWNER_UNAVAILABLE":
+                    registry.update(host, sid, status="cancelled")
+                raise
             except Exception as exc:  # noqa: BLE001 - poll identity before retrying
                 last_error = exc
                 try:
@@ -847,7 +856,17 @@ class BatTaskAdapter:
         cwd = self._cwd(task)
         if not cwd:
             return {"ok": False, "reason": "worktree_unavailable"}
-        return await self.verifier.install_dependencies(task, cwd)
+        guard = (task_control.FrameGuard(self.journal, task["task_id"], task["host"], task["session_id"],
+                                        task["control_version"], action="verify", internal=True) if self.journal else None)
+        if guard:
+            guard.check()
+        if isinstance(self.verifier, ObservedVerifier):
+            result = await self.verifier.install_dependencies(task, cwd, before_run=guard.check if guard else None)
+        else:
+            result = await self.verifier.install_dependencies(task, cwd)
+        if guard:
+            guard.check()
+        return result
 
     async def run_verification(self, task: dict) -> dict | None:
         cwd = self._cwd(task)
@@ -862,6 +881,8 @@ class BatTaskAdapter:
             evidence = await self.verifier.observe(task, cwd, before_run=guard.check if guard else None)
         else:
             evidence = await self.verifier.observe(task, cwd)
+        if guard:
+            guard.check()
         if not evidence:
             return None
         # The service, not Goose/Hermes, owns the PR #1 record after observing
