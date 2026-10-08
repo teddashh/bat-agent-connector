@@ -17,7 +17,12 @@ const STRINGS = {
     messages: "對話", send: "送出", send_placeholder: "給這個 managed session 的訊息…", interrupt: "中斷這一輪",
     answer: "回答", allow: "允許", deny: "拒絕", read_only_note:
       "這個 session 由人在 BAT 建立，API 永久唯讀：不送字、不回答、不中斷。要讓 agent 接續，請從它的 commit 另開 managed 工作。",
-    continue_from_checkpoint: "從此版本建立 agent 工作", not_available_yet: "尚未提供",
+    continue_from_checkpoint: "從此版本建立 agent 工作", checkpoints: "版本（checkpoint）",
+    checkpoint_help: "記下這個 session 目前的 commit 與最近對話（只讀，不改動原 session 或資料夾）。從版本開始的 agent 工作會在 Connector 自己的 clone 裡用新的 branch 與 session 進行。",
+    create_checkpoint: "記下目前版本", no_checkpoints: "還沒有記下的版本。", excerpt_count: "{n} 則對話",
+    dirty_warning: "記錄時有 {n} 個未提交的修改，不會帶入新工作。", continue_placeholder: "要 agent 接著做什麼…",
+    start_agent_work: "開始 agent 工作", open_new_session: "開啟新 session",
+    checkpoint_unavailable: "這台主機尚未設定 managed_roots、SSH alias 或 write／orchestrate 權限，不能從版本開工。",
     repository: "Repository", pull_number: "PR 編號", load_pr: "讀取 PR", head: "Head", base: "Base",
     checks: "Checks", checks_summary: "{total} 個，{pending} 個未完成，{failed} 個失敗", mergeable: "可合併狀態",
     merge: "合併 PR", deploy_to: "部署到 {env}", merge_and_deploy_to: "合併並部署到 {env}",
@@ -52,7 +57,16 @@ const STRINGS = {
     interrupt: "Interrupt turn", answer: "Answer", allow: "Allow", deny: "Deny",
     read_only_note: "A person created this session in BAT, so the API never writes to it. To have an agent " +
       "continue, start a new managed session from its commit.",
-    continue_from_checkpoint: "Start agent work from this version", not_available_yet: "not available yet",
+    continue_from_checkpoint: "Start agent work from this version", checkpoints: "Checkpoints",
+    checkpoint_help: "Records this session's current commit and recent conversation (read-only; the session and " +
+      "its folder are not changed). Agent work started from it runs in the connector's own clone on a new branch " +
+      "and session.",
+    create_checkpoint: "Record current version", no_checkpoints: "No checkpoints yet.", excerpt_count: "{n} messages",
+    dirty_warning: "{n} uncommitted change(s) at capture time are not carried over.",
+    continue_placeholder: "What should the agent do next…", start_agent_work: "Start agent work",
+    open_new_session: "Open the new session",
+    checkpoint_unavailable: "This host lacks managed_roots, an SSH alias or the write/orchestrate tiers, so work " +
+      "cannot start from a checkpoint here.",
     repository: "Repository", pull_number: "PR number", load_pr: "Load PR", head: "Head", base: "Base",
     checks: "Checks", checks_summary: "{total} total, {pending} pending, {failed} failed", mergeable: "Mergeable",
     merge: "Merge PR", deploy_to: "Deploy to {env}", merge_and_deploy_to: "Merge and deploy to {env}",
