@@ -21,7 +21,9 @@
 
 Scopes：`observe`（讀目錄、操作、事件、政策）、`operate`（驅動 managed session）、`manage`、`merge`、`deploy`。Journal 只存 token 的 SHA-256。操作的 actor 一律取自 token；request body 或 MCP 參數自報的名字沒有授權效果。冪等鍵的唯一性以 actor 為範圍：同 actor、同 key、同內容回原 operation；同 key 不同內容回 409。
 
-瀏覽器防護：Host 必須是 loopback（擋 DNS rebinding）；有 Origin 時須是 loopback 或 `[api] allowed_origins`；只接受 bearer token，不用 cookie，所以沒有 CSRF 面。
+瀏覽器防護：Host 必須是 loopback（擋 DNS rebinding）；有 Origin 時須是 loopback 或 `[api] allowed_origins`；只接受 bearer token，不用 cookie，所以沒有 CSRF 面。只有列在 `allowed_origins` 的 Origin 會收到 CORS 標頭（含 `OPTIONS` preflight）；Dashboard 與 API 同源，不需要它。
+
+MCP 的 `operation_submit`、`operation_cancel`、`operation_resume` 要 `confirm=true`，而且只以 `BATC_API_TOKEN` 的主體執行，不退回本機 admin token：這個 client 能做什麼由它自己的 token scopes 決定，不是由 MCP server 啟動時的主機 tier 決定。讀取工具沒有 token 時仍用 admin token。
 
 ## Operation
 
@@ -34,14 +36,16 @@ Scopes：`observe`（讀目錄、操作、事件、政策）、`operate`（驅�
 | `needs_attention` | 需要人處理（含回查多次仍無法證明） |
 | `succeeded`、`failed`、`cancelled` | 終態 |
 
-每個外部呼叫是一個具名步驟（`operation_steps`）。步驟意圖在呼叫前先 commit。逾時或連線中斷時步驟記為 `uncertain`，之後由該步驟的 `reconcile` 讀回外部狀態：證明已發生就補記成功，無法證明就維持 `uncertain` 並退避重試回查，五次後轉 `needs_attention`。已完成的步驟在重跑時直接回傳保存的結果。
+每個外部呼叫是一個具名步驟（`operation_steps`）。步驟意圖在呼叫前先 commit。逾時、連線中斷或之後的本機記錄失敗（`OSError`）時步驟記為 `uncertain`，之後由該步驟的 `reconcile` 讀回外部狀態：證明已發生就補記成功，無法證明（包括回查本身連不上）就維持 `uncertain` 並退避重試回查，五次後轉 `needs_attention`。回查次數用自己的計數（`uncertain_tries`），等待 checks／workflow 的輪詢不會用掉它。已完成的步驟在重跑時直接回傳保存的結果。
+
+取消只在下一步之前生效，而且不跳過回查：`uncertain` 的操作收到取消時先立刻回查，證明那一步已發生就照常完成，所以 `cancelled` 不會掩蓋已送出的動作。`needs_attention` 可以取消（原因會註明哪一步從未證明），也可以 `resume`：已完成的步驟不重做，未證明的步驟再回查一次，不重送。操作的 actor、admin，或擁有該 action scope 的主體可以取消或 resume；事件記在實際操作的人名下。
 
 第一批 action：
 
 | Action | Scope | 外部呼叫 | 回查依據 |
 |---|---|---|---|
-| `session.send` | operate | `claude:send-message`，`clientMessageId = batc-<operation_id>` | BAT 接受後寫入的 turn 紀錄 |
-| `session.answer` | operate | `claude:resolve-ask-user`／`resolve-permission` | 該 tool use 已不在 pending |
+| `session.send` | operate | `claude:send-message`，`clientMessageId = batc-<operation_id>` | BAT 接受後寫入的 turn 紀錄；沒有紀錄時讀 BAT 的對話，找 id 等於 `clientMessageId` 的 user 訊息。Codex 不保留這個 id，回覆遺失的 Codex 送字無法證明，會停在 `uncertain`／`needs_attention` |
+| `session.answer` | operate | `claude:resolve-ask-user`／`resolve-permission`；必須帶 `tool_use_id` | 那個 tool use 已不在 pending |
 | `session.interrupt` | operate | `claude:interrupt-turn`／`abort-session` | session 已不在 streaming |
 
 Session action 在建立時先用 registry 與目錄判斷來源，人工、unknown、未啟用 write tier 的主機直接回 403，不寫入 operation；執行時 `service.py` 再做一次資源政策的即時檢查。新 action 以 `ActionDef` 註冊（`api_actions.py`），之後的 GitHub merge、部署、checkpoint 都用同一套步驟與回查規則。
@@ -51,8 +55,11 @@ Session action 在建立時先用 registry 與目錄判斷來源，人工、unkn
 `inventory.py` 用自己的 read-only `Fleet` 輪詢每台主機：client 核心拒絕所有寫入 channel，所以觀測不可能改動 BAT。結果寫入 `hosts_observed` 與 `sessions_observed`。
 
 - 主機連不上時保留最後一次的列，標 `stale: true, stale_reason: host_unreachable`，不刪除。
-- 一列要連續兩次成功列舉都沒出現，才標 `gone`。
+- 一列要連續兩次成功列舉都沒出現，才標 `gone`。`workspace:load` 回 null 或格式不對時算失敗，不當成空清單。
+- 一次輪詢沒觀測到的欄位沿用上次的值：讀 meta 失敗的 session 保留上一列；這次沒重讀 state（`auto` 只在 session 執行中才讀）時保留上次的 pending；活動時間只會往後。
+- 每台主機各自排程輪詢，慢的主機不會拖住其他主機。已從設定移除的主機不出現在列表。
 - `last_activity` 以外的欄位有實質變化時，才寫 `session.added`／`session.updated`／`session.gone` 事件。
+- `order=activity` 的分頁鍵是活動時間；翻頁期間活動時間變動的列可能重複或漏掉，要完整清單用 `order=id`。
 - `GET /api/v1/sessions` 用 keyset 分頁（`order=activity` 或 `id`）。游標綁定篩選條件；第一頁回 `as_of`（當下事件游標），之後以 `/api/v1/events?after=as_of` 追變化，不必反覆重列。
 
 設定：
@@ -70,7 +77,7 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 `api_events` 是單一、持久、單調的游標，涵蓋 task、operation、session、host。Task 事件在同一個交易中寫入 `events` 與 `api_events`；舊 journal 開啟時以 `PRAGMA user_version` 一次性回填。`work_events`（Hermes 的里程碑 feed）與 webhook 推播仍用原本的 `events.event_id`，不受影響。
 
 - `GET /api/v1/events?after=N&limit=M` → `{events, next_cursor, head_cursor, has_more}`。
-- `GET /api/v1/events/stream`：SSE，支援 `Last-Event-ID`，15 秒 keepalive，最多 16 條同時連線，單條最長 30 分鐘。瀏覽器 `EventSource` 不能帶 Authorization，Dashboard 以 `fetch` 讀串流。
+- `GET /api/v1/events/stream`：SSE，支援 `Last-Event-ID`，15 秒 keepalive，最多 16 條同時連線（每個 actor 最多 4 條），單條最長 30 分鐘。串流每 5 秒重新驗一次 token，撤銷或過期後就結束。瀏覽器 `EventSource` 不能帶 Authorization，Dashboard 以 `fetch` 讀串流。
 
 ## 路由
 
@@ -83,8 +90,8 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 | `GET /api/v1/sessions/{host}/{id}` | observe | 一列；`live=true` 另附即時資源政策判定 |
 | `GET /api/v1/sessions/{host}/{id}/messages` | observe | 經 read-only fleet 讀對話 |
 | `GET /api/v1/policy` | observe | mutation 清單與各主機設定 |
-| `GET/POST /api/v1/operations` | observe／依 action | 列表；建立（`Idempotency-Key` 標頭或 `idempotency_key`，`?wait=秒`） |
-| `GET /api/v1/operations/{id}`、`POST …/cancel` | observe／actor | 含步驟；取消只在下一步之前生效 |
+| `GET/POST /api/v1/operations` | observe／依 action | 列表；建立（`Idempotency-Key` 標頭或 `idempotency_key`，`?wait=0-60` 秒，格式錯誤時在保存前回 422） |
+| `GET /api/v1/operations/{id}`、`POST …/cancel`、`POST …/resume` | observe／actor 或 action scope | 含步驟；取消見上；resume 只用於 `needs_attention` |
 | `GET /api/v1/events`、`/events/stream` | observe | 事件分頁、SSE |
 | `GET /api/v1/tasks/{task_id}` | observe | 既有 `work_status` |
 

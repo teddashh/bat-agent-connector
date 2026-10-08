@@ -757,8 +757,13 @@ async def session_failover(
         include_unloaded=False,
     )
     cap = fleet.config.safety.max_start_per_call
+    # Sessions a person created share the account quota but are never failed over; they must not use up the
+    # per-call start slots before the managed ones are reached.
+    managed = [r for r in tri["sessions"] if r.get("api_access") == "managed"]
+    skipped = [{"session_id": r["session_id"], "skipped": "read_only", "code": r.get("read_only_code")}
+               for r in tri["sessions"] if r.get("api_access") != "managed"]
     done = []
-    for row in tri["sessions"][:cap]:
+    for row in managed[:cap]:
         try:
             done.append(
                 await _failover_one(
@@ -779,7 +784,8 @@ async def session_failover(
         "failovers": done,
         "count": len(done),
         "exhausted_found": len(tri["sessions"]),
-        "truncated_by_max_start_per_call": len(tri["sessions"]) > cap,
+        "skipped_read_only": skipped,
+        "truncated_by_max_start_per_call": len(managed) > cap,
     }
 
 
@@ -1017,16 +1023,14 @@ async def _evaluate(
         return decide("KEEP", "reviewer shares the lead worktree and cannot own cleanup")
 
     hc = fleet.config.host(host)
-    pol, live = await resource_policy.classify_live(fleet, host, t)
+    # Registry and tab facts first (no host reads); the live check runs only where a worktree is touched.
+    pol = resource_policy.classify(hc, sid, terminal=t, entries=resource_policy._entries(host))
     row["provenance"] = pol.provenance
     row["api_access"] = "managed" if pol.writable else "read_only"
     if pol.code:
         if pol.provenance == resource_policy.MANUAL:
             return decide("KEEP", "manual session: the connector never stops or cleans it")
         return decide("KEEP", f"read-only ({pol.code}): {pol.reason}")
-    if live and live.issue:
-        return decide("ESCALATE", f"{live.issue[0]}: {live.issue[1]}")
-    rehydrate = await resource_policy.authorize_session(fleet, host, "worktree.rehydrate", t, cls=pol, live=live)
 
     meta = await _meta(c, sid)
     loaded = meta is not None
@@ -1132,11 +1136,15 @@ async def _evaluate(
             return decide("ESCALATE", f"idle but not finished: {clip(final, 160)}")
         return decide("KEEP", f"idle; completion unclear ({g['claims_done']})")
 
+    root = await c.invoke("git:getRoot", {"cwd": wt})
+    if not root:  # checked before any rehydrate frame: nothing is re-registered for a folder that is gone
+        return decide("CLEAN_ONLY", "worktree folder is gone; agent idle", stop=loaded)
+    live = await resource_policy.live_check(c, pol)
+    if live.issue:
+        return decide("ESCALATE", f"{live.issue[0]}: {live.issue[1]}")
+    rehydrate = await resource_policy.authorize_session(fleet, host, "worktree.rehydrate", t, cls=pol, live=live)
     st, rehydrated = await _wt_status(c, t, rehydrate=rehydrate)
     row["rehydrated"] = rehydrated
-    root = await c.invoke("git:getRoot", {"cwd": wt})
-    if not root:
-        return decide("CLEAN_ONLY", "worktree folder is gone; agent idle", stop=loaded)
     if not st:
         return decide("ESCALATE", "host has no worktree state (cannot judge merge safety)")
     diff = st.get("diff") or ""
@@ -1158,6 +1166,12 @@ async def _evaluate(
         return decide("ESCALATE", "cannot read worktree git status")
     if dirty:
         return decide("ESCALATE", f"uncommitted changes in worktree ({len(dirty)} files)")
+    if e.get("role") == "planner":
+        if st.get("mergedKind") in MERGED_KINDS or (st.get("mergedKind") == "unknown" and stats["files"] == 0):
+            row["delete_branch"] = True  # the planner's own branch, with nothing on it: do not leave it behind
+            return decide("CLEAN_ONLY", "fan-out planning session finished; its empty branch is removed",
+                          remove=True, stop=loaded)
+        return decide("ESCALATE", "the fan-out planner committed changes on its branch; review them")
     head = await _candidate_head(c, wt)
     row["candidate_cwd"] = wt
     v = verification.get(host, sid)
@@ -1185,7 +1199,10 @@ async def _evaluate(
     risks = risk_checks(diff)
     if risks:
         return decide("ESCALATE", *risks)
-    origin = _origin_cwd(t, ws)
+    try:
+        origin = resource_policy.merge_origin(hc, sid, t, ws)
+    except ResourceReadOnly as e:
+        return decide("ESCALATE", str(e))
     if not resource_policy.in_managed_root(hc, origin):
         return decide(
             "ESCALATE",
@@ -1358,12 +1375,13 @@ async def session_cleanup(
                         continue
                     acts.append(f"merged {r.get('branch')} -> {m.get('source_branch')}")
                 if r.get("decision") in ("MERGE_AND_CLEAN", "CLEAN_ONLY") and r.get("remove_worktree"):
-                    x = await worktree_remove(fleet, host, sid, confirm=True, delete_branch=False)
+                    drop = bool(r.get("delete_branch"))
+                    x = await worktree_remove(fleet, host, sid, confirm=True, delete_branch=drop)
                     if not x.get("removed"):
                         r["reasons"].append(f"remove refused: {x.get('reason')}")
                         r["stop"] = False
                     else:
-                        acts.append(f"worktree removed (branch {r.get('branch')} kept)")
+                        acts.append(f"worktree removed (branch {r.get('branch')} {'deleted' if drop else 'kept'})")
                 if r.get("decision") in ("MERGE_AND_CLEAN", "CLEAN_ONLY") and r.get("stop"):
                     s = await _stop(fleet, host, sid, audit)
                     acts.append(

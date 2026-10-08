@@ -143,8 +143,10 @@ last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_cont
 `idempotency_key` and reuse it on retry; after a timeout or an `uncertain` status, read the operation with
 `operation_get` instead of submitting again: the daemon settles `uncertain` by reading BAT back, never by resending.
 Prefer `inventory_sessions` over `sessions_list` for overviews: it does not dial every host, and `stale: true` means
-the row is the last known state of an unreachable host. Set `BATC_API_TOKEN` to your own token so your actions are
-recorded under your actor.
+the row is the last known state of an unreachable host. Operation writes need `BATC_API_TOKEN` set to your own token
+(your actions are recorded under your actor and limited to its scopes) and `confirm=true`. `session.answer` needs the
+pending prompt's `tool_use_id`. A `needs_attention` operation can be resumed with `operation_resume` once its cause is
+fixed; it reads unproven steps back and never resends them.
 
 Merging and deploying (only with the user's go-ahead for that PR and environment): read `github_pr_preview`, then
 `operation_submit(action="github.pr.merge", target={repository, pull_number}, preconditions={expected_head_sha:

@@ -72,10 +72,39 @@ class Inventory:
         started = time.time()
         try:
             rows = await service._host_sessions(self.fleet, host, None, None, "auto", activity)
+            if not rows and self._has_live_rows(host):
+                await self._confirm_empty(host)  # a null workspace document must not mark every session gone
             version = self.fleet.client(host).auth_info.get("serverVersion")
         except Exception as exc:  # noqa: BLE001 - recorded on the host row; rows stay and turn stale
             return self._record_failure(host, started, exc)
         return self._record_success(host, started, rows, version)
+
+    def _has_live_rows(self, host: str) -> bool:
+        return self.db.execute("SELECT 1 FROM sessions_observed WHERE host=? AND gone_at IS NULL LIMIT 1",
+                               (host,)).fetchone() is not None
+
+    async def _confirm_empty(self, host: str) -> None:
+        c = self.fleet.client(host)
+        raw = await c.invoke("workspace:load", {"profileId": c.host.profile_id})
+        if isinstance(raw, str):
+            with contextlib.suppress(ValueError):
+                raw = json.loads(raw)
+        if not (isinstance(raw, dict) and isinstance(raw.get("terminals"), list)):
+            raise ValueError("workspace:load returned no workspace document")
+
+    @staticmethod
+    def _merge_previous(row: dict, prev_body: dict, *, meta_failed: bool) -> dict:
+        """What one refresh did not observe stays as last observed; an unobserved field is not a new fact."""
+        if meta_failed:  # the session's meta read failed: keep the last good row
+            return {**prev_body, **{k: row[k] for k in ("provenance", "api_access", "read_only_code", "isolation")
+                                    if k in row}}
+        if not row.pop("pending_checked", False) and row.get("loaded") and prev_body.get("pending"):
+            row["pending"] = prev_body["pending"]  # not re-read this time (auto check): still pending
+        if (row.get("last_activity_ms") or 0) < (prev_body.get("last_activity_ms") or 0):
+            # Cheap refreshes see fewer activity sources; activity never moves backwards.
+            row["last_activity_ms"] = prev_body["last_activity_ms"]
+            row["last_activity_source"] = prev_body.get("last_activity_source")
+        return row
 
     def _record_failure(self, host: str, at: float, exc: BaseException) -> dict:
         error = redact(f"{type(exc).__name__}: {exc}")[:300]
@@ -100,11 +129,14 @@ class Inventory:
                 if not isinstance(sid, str) or not sid:
                     continue
                 seen.add(sid)
+                prev = self.db.execute("""SELECT digest,gone_at,body FROM sessions_observed
+                    WHERE host=? AND session_id=?""", (host, sid)).fetchone()
                 row = {k: v for k, v in raw.items() if k != "meta_error"}
+                if prev is not None:
+                    row = self._merge_previous(row, json.loads(prev["body"]), meta_failed="meta_error" in raw)
+                row.pop("pending_checked", None)
                 activity = row.get("last_activity_ms") or 0
                 digest = _digest(row)
-                prev = self.db.execute("SELECT digest,gone_at FROM sessions_observed WHERE host=? AND session_id=?",
-                                       (host, sid)).fetchone()
                 self.db.execute("""INSERT INTO sessions_observed(host,session_id,body,digest,provenance,api_access,
                     attention,sort_key,first_seen_at,last_seen_at,missing_count,gone_at)
                     VALUES(?,?,?,?,?,?,?,?,?,?,0,NULL) ON CONFLICT(host,session_id) DO UPDATE SET
@@ -148,20 +180,34 @@ class Inventory:
     async def refresh_all(self) -> list[dict]:
         return list(await asyncio.gather(*(self.refresh_host(h) for h in self.config.hosts)))
 
+    async def _refresh_scheduled(self, host: str) -> None:
+        try:
+            result = await self.refresh_host(host)
+        except Exception:  # noqa: BLE001 - refresh_host records its own failures; this is a last resort
+            result = {"consecutive_failures": 1}
+        failures = result.get("consecutive_failures", 0)
+        delay = (self.settings.interval_s if not failures
+                 else min(self.settings.max_backoff_s, self.settings.interval_s * 2 ** min(failures, 6)))
+        self._next_at[host] = time.time() + delay
+        with contextlib.suppress(Exception):
+            await self.fleet.client(host).close()  # do not hold an idle socket between refreshes
+
     async def loop(self) -> None:
-        """Refresh each host on its own schedule; failures back off up to max_backoff_s."""
-        while True:
-            now = time.time()
-            due = [h for h in self.config.hosts if self._next_at.get(h, 0) <= now]
-            for host, result in zip(due, await asyncio.gather(*(self.refresh_host(h) for h in due),
-                                                             return_exceptions=True), strict=True):
-                failures = result.get("consecutive_failures", 0) if isinstance(result, dict) else 1
-                delay = (self.settings.interval_s if not failures
-                         else min(self.settings.max_backoff_s, self.settings.interval_s * 2 ** min(failures, 6)))
-                self._next_at[host] = time.time() + delay
-            with contextlib.suppress(Exception):
-                await self.fleet.close()  # do not hold idle sockets between refreshes
-            await asyncio.sleep(max(1.0, min(self._next_at.values(), default=now + 5) - time.time()))
+        """Refresh each host on its own schedule, independently: a slow host never delays the others.
+        Failures back off up to max_backoff_s."""
+        running: dict[str, asyncio.Task] = {}
+        try:
+            while True:
+                now = time.time()
+                for host in self.config.hosts:
+                    task = running.get(host)
+                    if (task is None or task.done()) and self._next_at.get(host, 0) <= now:
+                        running[host] = asyncio.create_task(self._refresh_scheduled(host),
+                                                            name=f"inventory-{host}")
+                await asyncio.sleep(1.0)
+        finally:
+            for task in running.values():
+                task.cancel()
 
     async def close(self) -> None:
         await self.fleet.close()
@@ -236,7 +282,9 @@ class Inventory:
             except (ValueError, KeyError, TypeError):
                 raise ValueError("cursor does not match these filters; start again without it") from None
         as_of = as_of if as_of is not None else self.journal.api_head()
-        sql, args = "SELECT * FROM sessions_observed WHERE 1=1", []
+        configured = list(self.config.hosts) or [""]  # rows of hosts removed from the config are not listed
+        sql = f"SELECT * FROM sessions_observed WHERE host IN ({','.join('?' * len(configured))})"  # noqa: S608
+        args = list(configured)
         for column, value in (("host", host), ("provenance", provenance), ("api_access", api_access)):
             if value:
                 sql, args = sql + f" AND {column}=?", [*args, value]  # fixed identifiers only
