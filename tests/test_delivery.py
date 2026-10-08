@@ -8,12 +8,13 @@ from dataclasses import replace
 
 import pytest
 
-from bat_agent_connector import api_auth, delivery, pr_delivery
+from bat_agent_connector import api_auth, delivery, deployment, deployment_store, pr_delivery
 from bat_agent_connector.config import parse_config
 from bat_agent_connector.github import GitHubClient
 from bat_agent_connector.operations import OperationError, OperationService
 from bat_agent_connector.task_daemon import TaskDaemon
 from tests.fakegithub import TOKEN, FakeGitHub
+from tests.fakeverifier import FakeVerifier
 
 HEAD = "a" * 40
 MERGED = "9" * 40
@@ -38,6 +39,8 @@ def config(mock, gh, *, mode="workflow_dispatch"):
             {"name": "prod", "repository": "o/r", "environment": "production", "mode": mode,
              "workflow": "deploy.yml", "deploy_job": "deploy", "ref": "main",
              "inputs": {"source_sha": "source_sha", "operation_id": "operation_id"},
+             "verification": {"kind": "http_json", "url": "https://deployment.example/status",
+                              "version_required": True, "health_required": True},
              "run_name_contains": "operation_id"}]},
     })
 
@@ -49,6 +52,14 @@ def make_daemon(mock, gh, tmp_path, monkeypatch):
 
     def make(**kw):
         d = TaskDaemon(config(mock, gh, **kw), tmp_path / f"tasks{len(made)}.db")
+        d.ops.context["deployment_verifier"] = FakeVerifier(gh)
+        gh.commits.setdefault(MERGED, {"sha": MERGED, "parents": [{"sha": "b" * 40}]})
+        d.ops.context["deployment_test_github"] = gh
+        # Deploy-only tests previously assumed this fixed source was already on main.
+        key = deployment_store.environment_key(gh.url, gh.repository_id, "production")
+        d.journal.db.execute("INSERT INTO deployment_environments "
+                            "(environment_key,provider_origin,repository_id,repository,environment,updated_at) "
+                            "VALUES(?,?,?,'o/r','production',0)", (key, gh.url, gh.repository_id))
         made.append(d)
         return d
 
@@ -66,6 +77,8 @@ async def merge_op(d, key="m1", sha=HEAD, number=7, principal=TED, action="githu
     envelope = pr_delivery.merge_envelope(preview, recipe=target.get("recipe"))
     envelope["action"] = action
     envelope["target"].update(target)
+    if action == "delivery.merge_and_deploy":
+        envelope["preconditions"].update((await deployment.preview(d.ops, target["recipe"]))["preconditions"])
     return d.ops.create(principal, **envelope, idempotency_key=key)
 
 
@@ -186,7 +199,14 @@ async def test_merge_admission(make_daemon, gh, monkeypatch):
 
 # --------------------------------------------------------------------------- deploy
 def deploy_op(d, sha=MERGED, key="d1"):
+    fake = d.ops.context["deployment_test_github"]
+    if not fake.pulls:
+        fake.branches["main"] = MERGED
+    r = d.ops.context["github_config"].recipes["prod"]
+    env = deployment.bound_environment(d.ops, r)
     return d.ops.create(TED, action="deployment.start", target={"recipe": "prod"}, params={"source_sha": sha},
+                        preconditions={"expected_environment_generation": env["desired_generation"],
+                                       "expected_recipe_digest": deployment.recipe_digest(d.ops, r, env["repository_id"])},
                         idempotency_key=key)
 
 
@@ -365,6 +385,8 @@ async def preview_op(d, *, method="squash", key="preview-merge", action="github.
     doc = (await delivery.pr_preview(d.ops, "o/r", 7, method))["merge_preview"]
     envelope = pr_delivery.merge_envelope(doc, recipe=recipe)
     envelope["action"] = action
+    if recipe:
+        envelope["preconditions"].update((await deployment.preview(d.ops, recipe))["preconditions"])
     return doc, d.ops.create(TED, **envelope, idempotency_key=key)[0]
 
 
@@ -703,6 +725,8 @@ async def default_merge_op(d, *, combined=False):
     cfg.repos["o/r"] = replace(cfg.repos["o/r"], default_merge_method="merge")
     doc = (await delivery.pr_preview(d.ops, "o/r", 7))["merge_preview"]
     envelope = pr_delivery.merge_envelope(doc, recipe="prod" if combined else None)
+    if combined:
+        envelope["preconditions"].update((await deployment.preview(d.ops, "prod"))["preconditions"])
     envelope["params"].pop("method")
     op = d.ops.create(TED, **envelope, idempotency_key="default-method")[0]
     assert doc["method"] == "merge" and "method" not in op["params"]

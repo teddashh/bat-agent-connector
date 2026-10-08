@@ -4,6 +4,12 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from contextlib import nullcontext
+
+
+def tx(journal):
+    """Local helpers join their caller's transaction; no OperationService dependency."""
+    return nullcontext() if journal.db.in_transaction else journal.tx()
 
 
 def encode(value) -> str:
@@ -19,7 +25,7 @@ def environment_key(origin: str, repository_id: int, environment: str) -> str:
 
 
 def schema(journal) -> None:
-    with journal.tx():
+    with tx(journal):
         journal.db.execute("""CREATE TABLE IF NOT EXISTS deployment_environments (
             environment_key TEXT PRIMARY KEY, provider_origin TEXT NOT NULL, repository_id INTEGER NOT NULL,
             repository TEXT NOT NULL, environment TEXT NOT NULL, desired_generation INTEGER NOT NULL DEFAULT 0,
@@ -67,7 +73,7 @@ def update(journal, deployment_id: str, *, facts=None, expected_version=None, **
     allowed = {"identity", "state", "provider_terminal", "run_id", "run_attempt", "recipe_snapshot"}
     if set(columns) - allowed:
         raise ValueError("unsupported deployment columns")
-    with journal.tx():
+    with tx(journal):
         row = journal.db.execute("SELECT * FROM deployments WHERE deployment_id=?", (deployment_id,)).fetchone()
         if not row or (expected_version is not None and row["version"] != expected_version):
             return False
