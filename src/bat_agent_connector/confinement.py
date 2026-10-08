@@ -237,8 +237,12 @@ def guard_answer(host: str, sid: str, tool: str | None, *, dont_ask_again: bool,
 def account_status(fleet, host: str) -> dict:
     config = fleet.config.host(host).confinement
     result = getattr(fleet, "_confinement_checks", {}).get(host)
-    # Old checks did not establish integrity of the checking environment.
-    signature = hashlib.sha256(json.dumps(["isolated-account-check-v1", config], sort_keys=True).encode()).hexdigest()
+    # Same-account login checks cannot establish an authentic verdict.
+    signature = hashlib.sha256(json.dumps(["trusted-account-channel-v2", config], sort_keys=True).encode()).hexdigest()
+    if config.get("host_account") and not config.get("check_ssh_alias"):
+        return {"declared": True, "status": "unknown", "reason": "check_channel_untrusted",
+                "protected_roots": list(config.get("protected_roots") or []), "checked_at": None,
+                "config_sha256": signature}
     if config.get("host_account") and not result and getattr(fleet, "confinement_journal", None):
         try:
             row = fleet.confinement_journal.db.execute(
@@ -249,7 +253,8 @@ def account_status(fleet, host: str) -> dict:
     if isinstance(result, dict) and result.get("config_sha256") == signature:
         checked = result.get("checked_at")
         if isinstance(checked, (int, float)) and 0 <= time.time() - checked <= config.get("check_max_age_s", 300):
-            return copy.deepcopy(result)
+            if result.get("status") != "verified" or channel_matches(config, result):
+                return copy.deepcopy(result)
     return {"declared": bool(config.get("host_account")), "status": "unknown", "reason": "unchecked_or_stale",
             "protected_roots": list(config.get("protected_roots") or []), "checked_at": None,
             "config_sha256": signature}
@@ -258,7 +263,7 @@ def account_status(fleet, host: str) -> dict:
 async def check_account(fleet, host: str) -> dict:
     config = fleet.config.host(host).confinement
     result = account_status(fleet, host)
-    if not config.get("host_account"):
+    if not config.get("host_account") or not config.get("check_ssh_alias"):
         return result
     try:
         runner = getattr(fleet, "confinement_runner", None)
@@ -266,13 +271,14 @@ async def check_account(fleet, host: str) -> dict:
             from .checkpoints import SshGitRunner
             from .task_verifier import load_settings
             runner = SshGitRunner(load_settings().ssh_hosts)
-        if not runner.available(host):
-            raise ValueError("ssh_alias_unavailable")
         raw = await runner.run_account_check(host, account_script(config),
-                                             timeout_s=config.get("check_timeout_s", 10) + 2)
+                                             timeout_s=config.get("check_timeout_s", 10) + 2,
+                                             ssh_alias=config["check_ssh_alias"])
         observation = json.loads(raw)
         if observation.get("status") not in {"verified", "unknown", "mismatch"}:
             raise ValueError("invalid_account_check")
+        if observation["status"] == "verified" and not channel_matches(config, observation):
+            observation.update(status="unknown", reason="check_channel_untrusted")
         result.update(observation)
     except Exception as exc:  # noqa: BLE001 - absence of a check never proves protection
         result.update(status="unknown", reason=type(exc).__name__)
@@ -286,6 +292,18 @@ async def check_account(fleet, host: str) -> dict:
         journal.db.execute("INSERT OR REPLACE INTO confinement_host_checks(host,evidence) VALUES(?,?)",
                            (host, json.dumps(result, sort_keys=True)))
     return copy.deepcopy(result)
+
+
+def channel_matches(config: dict, result: dict) -> bool:
+    channel = result.get("channel") or {}
+    return (isinstance(channel, dict) and config.get("check_ssh_alias") is not None
+            and type(result.get("checked_uid")) is int and result.get("checked_uid") == config.get("expected_uid")
+            and config.get("check_uid") != config.get("expected_uid")
+            and channel.get("status") == "verified" and channel.get("method") == "sudo_exec"
+            and channel.get("ssh_alias") == config["check_ssh_alias"]
+            and channel.get("auditor_uid") == config.get("check_uid")
+            and channel.get("bat_uid") == config.get("expected_uid")
+            and channel.get("bat_account") == config.get("bat_account"))
 
 
 def account_start_effect(result: dict) -> str:
@@ -372,19 +390,23 @@ def account_script(config: dict) -> str:
     """Linux-only metadata scan. GNU find evaluates ACLs; no probe or hand-written ACL evaluator."""
     payload = json.dumps({"uid": config["expected_uid"], "roots": config["protected_roots"],
                           "entries": config.get("check_max_entries", 10000),
-                          "seconds": config.get("check_timeout_s", 10), "port": config.get("bat_port", 9876)})
+                          "seconds": config.get("check_timeout_s", 10), "port": config.get("bat_port", 9876),
+                          "auditor_uid": config["check_uid"], "bat_account": config["bat_account"],
+                          "ssh_alias": config["check_ssh_alias"]})
     return ("cd / && exec /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/python3 -I -S -B - "
-            + shlex.quote(payload) + " <<'BATC_CONFINEMENT'\n" + _ACCOUNT_PROGRAM + "\nBATC_CONFINEMENT")
+            + shlex.quote(payload) + " <<'BATC_CONFINEMENT'\n" + _ACCOUNT_CHANNEL_PROGRAM
+            + "\nBATC_CONFINEMENT")
 
 
-ACCOUNT_HARDENING_GAPS = {"check_executable_untrusted", "login_environment_writable", "login_shell_unsupported"}
+ACCOUNT_HARDENING_GAPS = {"check_executable_untrusted", "login_environment_writable", "login_shell_unsupported",
+                        "check_channel_untrusted"}
 
 # Kept separately so synthetic fixtures can exercise the actual integrity checks
 # without altering stdlib classes or inspecting a developer's real account.
 _ACCOUNT_INTEGRITY_PROGRAM = r'''
-def check_integrity():
+def check_integrity(account_uid=None):
     global remaining
-    account = pwd.getpwuid(c['uid'])
+    account = pwd.getpwuid(c['uid'] if account_uid is None else account_uid)
     shell = pathlib.Path(account.pw_shell)
     startup = {'sh': ['.profile'], 'dash': ['.profile'],
                'bash': ['.bashrc', '.bash_profile', '.bash_login', '.profile'],
@@ -459,11 +481,12 @@ _ACCOUNT_PROGRAM = r'''
 import json, os, pathlib, pwd, selectors, stat, subprocess, sys, sysconfig, time
 c = json.loads(sys.argv[1]); deadline = time.monotonic() + c['seconds']; remaining = c['entries']
 def finish(status, reason, **evidence):
-    print(json.dumps(dict(status=status, reason=reason, **evidence))); raise SystemExit
+    print(json.dumps(dict(status=status, reason=reason, checked_uid=os.geteuid(), channel=c.get('channel'), entries_remaining=remaining, **evidence))); raise SystemExit
 def budget():
     if time.monotonic() >= deadline: finish('unknown', 'time_budget_exhausted')
 if not sys.platform.startswith('linux'): finish('unknown', 'linux_only')
 if os.geteuid() != c['uid'] or os.getuid() != c['uid']: finish('unknown', 'ssh_uid_mismatch')
+if not c.get('channel'): finish('unknown', 'check_channel_untrusted')
 groups = sorted(set(os.getgroups() + [os.getegid()]))
 ''' + _ACCOUNT_INTEGRITY_PROGRAM + r'''
 def identity(pid):
@@ -477,6 +500,10 @@ def identity(pid):
 try:
     reason, integrity = check_integrity()
     if reason: finish('unknown', reason, **integrity)
+    reason, auditor_integrity = check_integrity(c['channel']['auditor_uid'])
+    if reason: finish('unknown', 'check_channel_untrusted', channel_reason=reason, **auditor_integrity)
+    if c.get('channel_only'): finish('verified', 'channel_preflight', integrity=integrity, auditor_integrity=auditor_integrity)
+    if c['channel'].get('status') != 'verified': finish('unknown', 'check_channel_untrusted')
     sockets = set()
     for table in ('tcp', 'tcp6'):
         for line in pathlib.Path('/proc/net', table).read_text().splitlines()[1:]:
@@ -549,6 +576,103 @@ try:
            limits=[] if runtimes else ['runtime_identity_inherited_unobserved'])
 except (OSError, ValueError, KeyError, subprocess.TimeoutExpired): finish('unknown', 'check_incomplete')
 '''
+
+
+# The auditor establishes a trusted bootstrap before the BAT-UID preflight.
+# ACL-bearing bootstrap paths are refused conservatively. The preflight uses
+# GNU find's effective-ID/ACL evaluation for both passwd-derived environments.
+_ACCOUNT_CHANNEL_INTEGRITY_PROGRAM = r'''
+def channel_preconditions():
+    global remaining
+    if os.getuid() != c['auditor_uid'] or os.geteuid() != c['auditor_uid'] or c['auditor_uid'] == c['uid']:
+        return 'check_channel_untrusted', {'channel_reason': 'auditor_identity_mismatch'}
+    bat_identity = pwd.getpwnam(c['bat_account'])
+    if bat_identity.pw_uid != c['uid']:
+        return 'check_channel_untrusted', {'channel_reason': 'bat_account_uid_mismatch'}
+    auditor = pwd.getpwuid(c['auditor_uid'])
+    trusted = set()
+    for path in [pathlib.Path(sys.executable), pathlib.Path(sysconfig.get_path('stdlib')),
+                 pathlib.Path('/usr/bin/sudo'), pathlib.Path('/usr/bin/env'), pathlib.Path('/usr/bin/find'),
+                 pathlib.Path(auditor.pw_shell)]:
+        for target in (path, path.resolve(strict=True)):
+            for part in [target, *target.parents]:
+                budget(); remaining -= 1
+                if remaining <= 0: finish('unknown', 'entry_budget_exhausted')
+                info = part.lstat()
+                if info.st_uid != 0 or not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o022:
+                    return 'check_executable_untrusted', {'paths': [str(part)]}
+                for attribute in ('system.posix_acl_access', 'system.posix_acl_default'):
+                    try: os.getxattr(part, attribute)
+                    except OSError as exc:
+                        if exc.errno not in (errno.ENODATA, errno.ENOTSUP): raise
+                    else: return 'check_executable_untrusted', {'paths': [str(part)], 'channel_reason': 'bootstrap_acl_unproven'}
+                trusted.add(str(part))
+    home = pathlib.Path(auditor.pw_dir)
+    startup = {'sh': ['.profile'], 'dash': ['.profile'],
+               'bash': ['.bashrc', '.bash_profile', '.bash_login', '.profile'],
+               'zsh': ['.zshenv', '.zprofile', '.zshrc', '.zlogin']}.get(pathlib.Path(auditor.pw_shell).name)
+    if startup is None: return 'check_channel_untrusted', {'channel_reason': 'auditor_login_shell_unsupported'}
+    groups = set(os.getgrouplist(c['bat_account'], bat_identity.pw_gid))
+    paths = [home, home/'.ssh', home/'.ssh/rc', home/'.ssh/environment', home/'.ssh/authorized_keys',
+             home/'.pam_environment', *[home/name for name in startup]]
+    for path in paths:
+        for part in [path, *path.parents]:
+            budget(); remaining -= 1
+            if remaining <= 0: finish('unknown', 'entry_budget_exhausted')
+            try: info = part.lstat()
+            except FileNotFoundError: continue  # Its parent must still pass before absence is safe.
+            if (info.st_uid == c['uid'] or stat.S_ISLNK(info.st_mode) or info.st_mode & 0o002
+                    or info.st_gid in groups and info.st_mode & 0o020):
+                return 'check_channel_untrusted', {'channel_reason': 'auditor_login_environment_writable', 'paths': [str(part)]}
+            for attribute in ('system.posix_acl_access', 'system.posix_acl_default'):
+                try: os.getxattr(part, attribute)
+                except OSError as exc:
+                    if exc.errno not in (errno.ENODATA, errno.ENOTSUP): raise
+                else: return 'check_channel_untrusted', {'channel_reason': 'auditor_login_acl_unproven', 'paths': [str(part)]}
+    return None, {'trusted_paths': sorted(trusted), 'auditor_home': str(home)}
+'''
+
+_ACCOUNT_CHANNEL_PROGRAM = r'''
+import errno, json, os, pathlib, pwd, stat, subprocess, sys, sysconfig, time
+c = json.loads(sys.argv[1]); deadline = time.monotonic() + c['seconds']; remaining = c['entries']
+channel = dict(status='pending', method='sudo_exec', ssh_alias=c['ssh_alias'], auditor_uid=os.geteuid(),
+               bat_uid=c['uid'], bat_account=c['bat_account'])
+def finish(status, reason, **evidence):
+    print(json.dumps(dict(status=status, reason=reason, checked_uid=os.geteuid(), channel=channel, **evidence))); raise SystemExit
+def budget():
+    if time.monotonic() >= deadline: finish('unknown', 'time_budget_exhausted')
+if not sys.platform.startswith('linux'): finish('unknown', 'linux_only')
+''' + _ACCOUNT_CHANNEL_INTEGRITY_PROGRAM + r'''
+try:
+    reason, integrity = channel_preconditions()
+    if reason: finish('unknown', reason, **integrity)
+    argv = ['/usr/bin/sudo', '-n', '-u', c['bat_account'], '--', '/usr/bin/env', '-i',
+            'PATH=/usr/bin:/bin', 'LC_ALL=C', '/usr/bin/python3', '-I', '-S', '-B', '-']
+    def run_stage(preflight):
+        budget()
+        payload = dict(c, entries=remaining, seconds=max(.01, deadline-time.monotonic()),
+                       channel=channel, channel_only=preflight)
+        program = 'import sys\nsys.argv = ["-", ' + repr(json.dumps(payload)) + ']\n' + CHILD_PROGRAM
+        result = subprocess.run(argv, input=program.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=max(.01, deadline-time.monotonic()))
+        if result.returncode or result.stderr: finish('unknown', 'check_channel_untrusted', channel_reason='direct_exec_failed')
+        observed = json.loads(result.stdout)
+        if observed.get('checked_uid') != c['uid']:
+            finish('unknown', 'check_channel_untrusted', channel_reason='checker_uid_mismatch')
+        return observed
+    preflight = run_stage(True)
+    if preflight.get('status') != 'verified':
+        if preflight.get('reason') not in ('check_executable_untrusted', 'login_environment_writable', 'login_shell_unsupported', 'check_channel_untrusted'):
+            preflight.update(channel_reason=preflight.get('reason'), status='unknown', reason='check_channel_untrusted')
+        print(json.dumps(preflight)); raise SystemExit
+    remaining = preflight['entries_remaining']
+    if remaining <= 0: finish('unknown', 'entry_budget_exhausted')
+    channel.update(status='verified', bootstrap=integrity, auditor_integrity=preflight['auditor_integrity'])
+    observed = run_stage(False)
+    print(json.dumps(observed))
+except (OSError, ValueError, KeyError, subprocess.TimeoutExpired): finish('unknown', 'check_channel_untrusted', channel_reason='channel_check_incomplete')
+'''
+_ACCOUNT_CHANNEL_PROGRAM = _ACCOUNT_CHANNEL_PROGRAM.replace('CHILD_PROGRAM', repr(_ACCOUNT_PROGRAM))
 
 
 def record_task_start(journal, task_id: str, sid: str, entry: dict) -> None:

@@ -14,16 +14,16 @@ from bat_agent_connector.task_core import TaskCoordinator
 from bat_agent_connector.task_journal import Journal
 from bat_agent_connector.task_verifier import ObservedVerifier, VerificationSettings
 from tests.conftest import adopt
-from tests.test_confinement import ACCOUNT, MANAGED, AccountRunner
+from tests.test_confinement import ACCOUNT, MANAGED, AccountRunner, account_observation
 from tests.test_lifecycle import _add_wt_claude
 from tests.test_task_service import FakeBAT, submit
 
 
 class RefuseAtFrame(AccountRunner):
-    async def run_account_check(self, host, script, timeout_s=None):
+    async def run_account_check(self, host, script, timeout_s=None, *, ssh_alias):
         self.scripts.append(script)
-        return json.dumps({"status": "verified" if len(self.scripts) == 1 else "unknown",
-                           "reason": "fixture_identity_unreadable"})
+        return json.dumps(account_observation("verified" if len(self.scripts) == 1 else "unknown",
+                                              "fixture_identity_unreadable"))
 
 
 def reviewer_adapter(fleet, mock, journal, monkeypatch):
@@ -571,7 +571,7 @@ class PauseAtFrame(AccountRunner):
         self.entered, self.release = asyncio.Event(), asyncio.Event()
         self.cancelled = None
 
-    async def run_account_check(self, host, script, timeout_s=None):
+    async def run_account_check(self, host, script, timeout_s=None, *, ssh_alias):
         self.scripts.append(script)
         if len(self.scripts) == 2:
             self.entered.set()
@@ -580,7 +580,7 @@ class PauseAtFrame(AccountRunner):
             except asyncio.CancelledError as exc:
                 self.cancelled = exc
                 raise
-        return json.dumps({"status": "verified", "reason": "fixture_hardened_account"})
+        return json.dumps(account_observation("verified", "fixture_hardened_account"))
 
 
 @pytest.mark.parametrize("path", ["start", "failover", "task_lead", "reviewer"])

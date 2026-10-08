@@ -9,10 +9,10 @@ import types
 import pytest
 
 from bat_agent_connector import checkpoints, confinement, orchestrate
-from tests.test_confinement import ACCOUNT, MANAGED, AccountRunner
+from tests.test_confinement import ACCOUNT, MANAGED, AccountRunner, account_observation
 
 
-def integrity_fixture(*, owned=(), writable=(), shell="/bin/bash", missing=()):
+def integrity_fixture(*, owned=(), writable=(), shell="/bin/bash", missing=(), account_uid=None):
     uid = 2001
     calls = []
     owned, writable, missing = set(owned), set(writable), set(missing)
@@ -65,8 +65,8 @@ def integrity_fixture(*, owned=(), writable=(), shell="/bin/bash", missing=()):
 
     selector = types.SimpleNamespace(register=lambda *a: None, select=lambda *a: [True], close=lambda: None)
     namespace = {"c": {"uid": uid}, "remaining": 1000, "deadline": 100., "budget": lambda: None,
-                 "pwd": types.SimpleNamespace(getpwuid=lambda _: types.SimpleNamespace(
-                     pw_dir="/usr/fixture-home", pw_shell=shell)),
+                 "pwd": types.SimpleNamespace(getpwuid=lambda account: types.SimpleNamespace(
+                     pw_dir="/usr/fixture-home" if account == uid else "/usr/fixture-auditor", pw_shell=shell)),
                  "pathlib": types.SimpleNamespace(Path=FixturePath),
                  "sys": types.SimpleNamespace(executable="/usr/bin/python3"),
                  "sysconfig": types.SimpleNamespace(get_path=lambda _: "/usr/lib/python3.10"),
@@ -76,7 +76,7 @@ def integrity_fixture(*, owned=(), writable=(), shell="/bin/bash", missing=()):
                  "subprocess": types.SimpleNamespace(run=run, Popen=popen, PIPE=-1),
                  "selectors": types.SimpleNamespace(DefaultSelector=lambda: selector, EVENT_READ=1)}
     exec(confinement._ACCOUNT_INTEGRITY_PROGRAM, namespace)
-    return namespace["check_integrity"](), calls
+    return namespace["check_integrity"](account_uid), calls
 
 
 @pytest.mark.parametrize("options,reason,path", [
@@ -116,8 +116,8 @@ async def test_account_check_remote_command_is_isolated_and_git_runner_unchanged
     monkeypatch.setattr(checkpoints, "_run", run)
     runner = checkpoints.SshGitRunner({"fixture": "synthetic-alias"})
     command = confinement.account_script(ACCOUNT)
-    await runner.run_account_check("fixture", command)
-    assert calls[0] == ("ssh", "-o", "BatchMode=yes", "synthetic-alias", command)
+    await runner.run_account_check("fixture", command, ssh_alias=ACCOUNT["check_ssh_alias"])
+    assert calls[0] == ("ssh", "-o", "BatchMode=yes", ACCOUNT["check_ssh_alias"], command)
     assert command.startswith("cd / && exec /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/python3 -I -S -B - ")
     assert "sh -l" not in command and "-lc" not in command
     assert "['find'" not in command and "['/usr/bin/find'" in command
@@ -150,8 +150,8 @@ async def test_account_integrity_gap_at_frame_never_sends_prepared_accept_edits(
     class Changed(AccountRunner):
         async def run_account_check(self, *args, **kwargs):
             self.scripts.append(args[1])
-            return json.dumps({"status": "verified" if len(self.scripts) == 1 else "unknown",
-                               "reason": "login_environment_writable"})
+            return json.dumps(account_observation("verified" if len(self.scripts) == 1 else "unknown",
+                                                  "login_environment_writable"))
 
     fleet = fleet_factory(writes=True, orchestrate=True, confinement=ACCOUNT, **MANAGED)
     fleet.confinement_runner = Changed()

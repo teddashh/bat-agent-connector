@@ -48,12 +48,21 @@ class AccountRunner:
     def available(self, host):
         return True
 
-    async def run_account_check(self, host, script, timeout_s=None):
+    async def run_account_check(self, host, script, timeout_s=None, *, ssh_alias):
         self.scripts.append(script)
-        return json.dumps({"status": self.status, "reason": "read_only_account_check"})
+        assert ssh_alias == ACCOUNT["check_ssh_alias"]
+        return json.dumps(account_observation(self.status, "read_only_account_check"))
 
 
-ACCOUNT = {"host_account": True, "expected_uid": 2001, "protected_roots": ["/srv/personal"]}
+ACCOUNT = {"host_account": True, "expected_uid": 2001, "protected_roots": ["/srv/personal"],
+           "check_ssh_alias": "fixture-auditor", "check_uid": 2002, "bat_account": "fixture-bat"}
+
+
+def account_observation(status, reason):
+    return {"status": status, "reason": reason, "checked_uid": ACCOUNT["expected_uid"],
+            "channel": {"status": "verified", "method": "sudo_exec", "ssh_alias": ACCOUNT["check_ssh_alias"],
+                        "auditor_uid": ACCOUNT["check_uid"], "bat_uid": ACCOUNT["expected_uid"],
+                        "bat_account": ACCOUNT["bat_account"]}}
 
 
 @pytest.mark.parametrize("status,reason,declared,effect", [
@@ -61,6 +70,7 @@ ACCOUNT = {"host_account": True, "expected_uid": 2001, "protected_roots": ["/srv
     ("unknown", "check_executable_untrusted", True, "fallback_default"),
     ("unknown", "login_environment_writable", True, "fallback_default"),
     ("unknown", "login_shell_unsupported", True, "fallback_default"),
+    ("unknown", "check_channel_untrusted", True, "fallback_default"),
     ("mismatch", "protected_root_writable", True, "refused"),
     ("unknown", "ssh_alias_unavailable", True, "refused"),
     ("unknown", "unchecked_or_stale", False, "fallback_default"),
@@ -69,9 +79,9 @@ async def test_a10_account_start_effect_and_gate_agree(fleet_factory, status, re
     f = fleet_factory(confinement=ACCOUNT if declared else {})
 
     class Runner(AccountRunner):
-        async def run_account_check(self, host, script, timeout_s=None):
+        async def run_account_check(self, host, script, timeout_s=None, *, ssh_alias):
             self.scripts.append(script)
-            return json.dumps({"status": status, "reason": reason})
+            return json.dumps(account_observation(status, reason))
 
     f.confinement_runner = Runner()
     try:
@@ -126,7 +136,8 @@ async def test_a10_accept_edits_requires_verified_account_and_checks_are_read_on
     assert r["confinement"]["verification"]["status"] == "verified"
     script = f.confinement_runner.scripts[0]
     assert "'-xdev'" in script and "'-writable'" in script and "'status'" in script
-    assert "sudo" not in script and "write_text" not in script
+    assert "'/usr/bin/sudo', '-n', '-u'" in script and "write_text" not in script
+    assert "'sudo', '-i'" not in script and "'sudo', '-s'" not in script
     await f.close()
 
 
@@ -264,7 +275,9 @@ async def test_a10_task_service_keeps_engine_policy_and_reports_gap(fleet_factor
 
 def test_a10_host_account_configuration_rejects_uncheckable_claims():
     for config in ({"host_account": True}, {**ACCOUNT, "expected_uid": 0},
-                   {**ACCOUNT, "protected_roots": ["/srv/demo"]}, {"sandbox_evidence_file": "/tmp/proof"}):
+                   {**ACCOUNT, "protected_roots": ["/srv/demo"]}, {"sandbox_evidence_file": "/tmp/proof"},
+                   {**ACCOUNT, "check_uid": 2001}, {**ACCOUNT, "check_ssh_alias": "-invalid"},
+                   {**ACCOUNT, "bat_account": "-invalid"}, {**ACCOUNT, "check_uid": None}):
         with pytest.raises(ConfigError):
             parse_config({"hosts": {"h1": {"url": "wss://example.invalid", "fingerprint": "a" * 64, "token_ref": "env:EXAMPLE", "managed_roots": ["/srv/demo"],
                                           "confinement": config}}})
@@ -365,7 +378,8 @@ def test_a10_linux_read_only_scan_uses_find_and_process_identity(tmp_path, monke
     monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
     monkeypatch.setattr('sys.argv', ["check", json.dumps({"uid": uid + 1 if case == "identity" else uid,
                                                         "roots": [str(root)], "entries": 1 if case == "budget" else 1000,
-                                                        "seconds": .000001 if case == "time" else 5, "port": 9876})])
+                                                        "seconds": .000001 if case == "time" else 5, "port": 9876,
+                                                        "channel": {"status": "verified", "auditor_uid": uid + 1}})])
     # Isolate the program's import: replacing the real Path breaks Path.__new__
     # and pytest's failure reporting on Python 3.10/3.11.
     with monkeypatch.context() as program_imports:

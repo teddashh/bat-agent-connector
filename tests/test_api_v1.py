@@ -284,13 +284,14 @@ async def test_inventory_keeps_offline_hosts_stale_and_marks_gone_after_two_miss
     ("fresh", "unknown", "check_executable_untrusted", "fallback_default"),
     ("fresh", "unknown", "login_environment_writable", "fallback_default"),
     ("fresh", "unknown", "login_shell_unsupported", "fallback_default"),
+    ("fresh", "unknown", "check_channel_untrusted", "fallback_default"),
     ("fresh", "mismatch", "protected_root_writable", "refused"),
     ("fresh", "unknown", "ssh_alias_unavailable", "refused"),
     ("fresh", "verified", "read_only_account_check", "verified"),
     ("undeclared", "unknown", "unchecked_or_stale", "fallback_default"),
 ])
 async def test_a10_capabilities_account_start_effect_is_cached_read_only(served, mock, case, status, reason, effect):
-    from tests.test_confinement import ACCOUNT, AccountRunner
+    from tests.test_confinement import ACCOUNT, AccountRunner, account_observation
 
     class ReadOnlyRunner(AccountRunner):
         def __init__(self):
@@ -310,8 +311,8 @@ async def test_a10_capabilities_account_start_effect_is_cached_read_only(served,
     d.fleet.confinement_runner = ReadOnlyRunner()
     if case in {"fresh", "stale"}:
         cached = confinement.account_status(d.fleet, "h1")
-        cached.update(status="verified" if case == "stale" else status,
-                      reason="read_only_account_check" if case == "stale" else reason,
+        cached.update(account_observation("verified" if case == "stale" else status,
+                                          "read_only_account_check" if case == "stale" else reason),
                       checked_at=time.time() - (46 if case == "stale" else 0))
         d.fleet._confinement_checks = {"h1": cached}
     tok = token(d, "test-observer", "observe")
