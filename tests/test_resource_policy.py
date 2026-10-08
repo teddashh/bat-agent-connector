@@ -132,7 +132,7 @@ async def test_bulk_and_relay_paths_skip_bat_sessions(fleet_factory, mock):
     assert relayed["sent"] is False and relayed["read_only_code"] == "MANUAL_READ_ONLY"
     main = await lifecycle.session_relay(f, "h1", "do it", workspace="demo-project", confirm=True)
     assert main["sent"] is False and main["no_session"]
-    swept = await lifecycle.session_cleanup(f, "h1", confirm=True, dry_run=False, min_idle_s=0)
+    swept = await lifecycle.session_cleanup(f, "h1", dry_run=True, min_idle_s=0)
     assert {d["decision"] for d in swept["decisions"]} <= {"KEEP"}
     assert write_frames(mock) == []
     await f.close()
