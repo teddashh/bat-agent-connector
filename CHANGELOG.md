@@ -20,6 +20,10 @@
   checkpoint/reset control events; legacy event page shapes remain unchanged. Versionless metadata shares the
   existing journal and adds no retention job (v2 §14, R04, B02/B05/T11; docs/design/dashboard-sync.md).
 
+- Bind task-effect observation history to the executing operation's persisted actor, entry point and ID.
+  An unrelated RPC caller waking the shared scheduler cannot relabel other users' task events; observation
+  context carries no authorization grants. Keep command/frame checks and transactional receipts unchanged.
+
 - Refuse BAT worktree mutations for legacy reviewers whose shared creation root is unproven in the registry,
   including paths under managed roots. Preserve proven carrier behavior and observation identity resolution;
   raw CLI policy does not require a task daemon or guess a journal location.
@@ -159,6 +163,61 @@
   New HTTP routes, four MCP reads (`inventory_session`, `inventory_worktree`, `resource_history`, `resource_relations`),
   discovery via `inventory_hosts`, and CLI `inventory/history/relations`. No background Git probing. Dashboard
   timeline, filters, scope card and browser reconnect checks remain Part B.
+
+- Operations unification Part A ([design](docs/design/operations-unification.md), plan §09/§10/§24,
+  A05/A07/A09): task submit/pause/resume/stage, scoped send/verification/request-Ted and command reconciliation
+  use OperationService with receipts committed alongside the original journal effects. Legacy task tools keep
+  their results and add operation ID/status, with optional keys and control versions. Shared coordinator gates
+  cover legacy session writes, client-resume, permission channels, approval/deferred raises and relay; paused,
+  verifying or unreconciled tasks cannot be bypassed. The canonical fleet owner lock is acquired before journal,
+  token or provider initialization; conflicts report the existing owner. No schema migration. Remaining legacy
+  operations, no-key sentinel, null effect projections and A01/A05/A08 all-entry-point coverage remain Part B.
+  Task sends that lose a pre-frame race to pause now fail with `TASK_PAUSED` and replay that refusal; resume
+  requires a new send key. Success requires the operation's accepted/settled command receipt (A05/A07, §09/§10).
+  Recovery after a cancelled/rejected command commits preserves the original refusal or local task outcome,
+  without inventing uncertainty, commands or frames; legacy coordinator sends and ticks use the same rule.
+  Locked verification, request-Ted and stage actions now recheck their state rules before the first effect,
+  preserving state refusal codes and succeeded receipt replay (A05/A07). Task-bound operations now persist
+  `external_refs.admission_binding` atomically with the operation: the admitted task version and targeted session
+  role remain fixed even when callers omit control_version. Stale execution, including pause/resume and task
+  continuation, fails CONTROL_VERSION_CONFLICT / TASK_BINDING_MISMATCH before any effect. Caller preconditions,
+  request hashes and same-key replay are unchanged; old unbound operations retain their behaviour (A05/A07,
+  §09/§10). Legacy task-owned answers without a prompt ID now resolve and journal the ask-user or permission
+  ID before dispatch, then pass it to the existing service check. Lost replies settle through the original
+  coordinator read-back after restart; a changed prompt is rejected before any frame, and a missing prompt
+  creates no command. Explicit IDs, caller params, hashes and result shapes are unchanged (A07, §09/§10).
+  Preliminary client-resume frames now check the full task guard without counting as a send command's effect.
+  Resume failures and later pre-send refusals reject the unsent command without making the task uncertain;
+  operations fail definitively with the existing code. Coordinator sends without an operation handle pre-frame
+  failures inside the tick: pause/version changes cancel the command; otherwise it is rejected and the task
+  stops at needs_ted with the code in its result/event, retaining the initial-lead disappearance rule. The next
+  daemon tick does not resend the rejected command. Lost send replies still use the original read-back,
+  including Task Service adapter sends; operation step semantics are unchanged (A05/A07, §09/§10).
+  Recovery now honors a failed task_dispatch receipt even if the process stopped before recording the command
+  rejection: it records rejected and replays the saved failure without a BAT read-back or task mutation. A
+  coordinator tick that runs first observes the same receipt. Saved successful dispatch replies use the original
+  result rules, and task/result receipts remain atomic. Unexpected errors after the prompt frame, including
+  malformed replies, stay uncertain until the original read-back proves the outcome; explicit BAT refusals are
+  failed steps with rejected commands (A05/A07/A08, §09/§10).
+  Command receipts now commit their task_id, command_id and dispatch control_version refs in the same journal
+  transaction, including prepared operator commands. Receipt replay repairs older missing links before outer
+  read-back or early result/refusal returns without repeating an effect or frame. The same mechanism protects
+  task submission, continuation and reconciliation reservation links; admission bindings and API shapes are
+  unchanged (A05/A07, §09/§10).
+
+- Trusted verification now treats a task pause, a control-version change, owner loss or a changed session binding
+  as cancellation. Cancelled runs write no evidence and keep the task's current control instead of escalating to
+  needs_ted or uncertain. Resume starts verification again, including a cancelled dependency retry; genuine
+  verifier errors retain the existing needs_ted path. Dependency and start handlers preserve control refusals,
+  and paused tasks retain their deadline exemption ([operations unification](docs/design/operations-unification.md),
+  計畫 §09/§10, A07).
+
+- Task-owned failover now requires an internal authority issued by the owning coordinator from its journaled
+  successor and handoff reservation, with all identity and frame callbacks. A public task ID, an unissued object
+  or missing callbacks cannot bypass TASK_OWNED_CONTROL_REQUIRED. Ownership and control are checked again after
+  waiting for the writer lock and before the start frame. Standalone MCP/CLI failover and the existing handoff
+  proof are unchanged; automatic mid-task failover remains disabled
+  ([operations unification](docs/design/operations-unification.md), v2 計畫 §02/§10–12, A07).
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps

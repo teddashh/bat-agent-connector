@@ -466,7 +466,7 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             sibling), or continuation=true in the same discord_thread_id; otherwise it starts fresh from base.
             context_refs stores references that came with the words: attachments (list), previous_message_id,
             plan, commit."""
-            return await asyncio.to_thread(task_request, "work_submit", project=project, host=host,
+            return await daemon("work_submit", project=project, host=host,
                                            workspace=workspace, original_words=original_words,
                                            idempotency_key=idempotency_key, discord_thread_id=discord_thread_id,
                                            recipe=recipe, acceptance=acceptance, engine=engine,
@@ -479,26 +479,35 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
 
         async def work_pause(task_id: str, abort_current: bool = False,
                              actor: Literal["service", "ted"] = "service",
-                             source_message_id: str | None = None) -> dict[str, Any]:
+                             source_message_id: str | None = None, idempotency_key: str | None = None,
+                             control_version: int | None = None) -> dict[str, Any]:
             """Stop new dispatch; optionally abort the current turn. Persisted before returning."""
-            return await asyncio.to_thread(task_request, "work_pause", task_id=task_id,
+            return await daemon("work_pause", task_id=task_id,
                                            abort_current=abort_current, actor=actor,
-                                           source_message_id=source_message_id)
+                                           source_message_id=source_message_id,
+                                           **({"idempotency_key": idempotency_key} if idempotency_key is not None else {}),
+                                           **({"control_version": control_version} if control_version is not None else {}))
 
         async def work_resume(task_id: str, actor: Literal["service", "ted"] = "service",
-                              source_message_id: str | None = None) -> dict[str, Any]:
+                              source_message_id: str | None = None, idempotency_key: str | None = None,
+                              control_version: int | None = None) -> dict[str, Any]:
             """Allow dispatch after the daemon reconciles any uncertain command."""
-            return await asyncio.to_thread(task_request, "work_resume", task_id=task_id,
-                                           actor=actor, source_message_id=source_message_id)
+            return await daemon("work_resume", task_id=task_id,
+                                           actor=actor, source_message_id=source_message_id,
+                                           **({"idempotency_key": idempotency_key} if idempotency_key is not None else {}),
+                                           **({"control_version": control_version} if control_version is not None else {}))
 
         async def work_mark_stage(task_id: str, stage: Literal["adopted", "merged", "deployed"], ref: str,
-                                  actor: Literal["service", "ted", "hermes", "executor"] = "hermes"
+                                  actor: Literal["service", "ted", "hermes", "executor"] = "hermes",
+                                  idempotency_key: str | None = None, control_version: int | None = None,
                                   ) -> dict[str, Any]:
             """Record that a verified (done) task's commit was adopted, merged or deployed, with a commit,
             PR or deploy reference. The task service itself never merges or deploys; status reports only
             what is recorded."""
-            return await asyncio.to_thread(task_request, "work_mark_stage", task_id=task_id, stage=stage,
-                                           ref=ref, actor=actor)
+            return await daemon("work_mark_stage", task_id=task_id, stage=stage,
+                                           ref=ref, actor=actor,
+                                           **({"idempotency_key": idempotency_key} if idempotency_key is not None else {}),
+                                           **({"control_version": control_version} if control_version is not None else {}))
 
         for fn in (work_submit, work_pause, work_resume, work_mark_stage):
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=task_write)
