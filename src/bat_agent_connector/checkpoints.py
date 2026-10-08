@@ -23,7 +23,7 @@ import shlex
 import time
 import uuid
 
-from . import orchestrate, registry, service
+from . import orchestrate, registry, resource_policy, service
 from .api_auth import Principal
 from .errors import BatError
 from .operations import (
@@ -257,15 +257,16 @@ async def _run_create(ctx: OpContext) -> dict:
     excerpt = json.dumps(src["excerpt"], ensure_ascii=False)
     now = time.time()
     journal = ops.journal
+    reg = registry.get(host, sid) or {}  # a headless managed session may not be in the inventory yet
     with journal.tx():
         cur = journal.db.execute(
             """INSERT OR IGNORE INTO checkpoints(checkpoint_id,host,source_session_id,source_provenance,workspace_id,
             workspace_name,cwd,repo_root,branch,commit_sha,head_sha,dirty,excerpt,excerpt_sha256,note,actor,
             operation_id,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (checkpoint_id, host, sid,
-             row.get("provenance") or ("connector_managed" if registry.get(host, sid) else "unknown"),
-             row.get("workspace_id"),
-             row.get("workspace"), src["cwd"], src["repo_root"], src["branch"], src["commit"], src["head"],
+             row.get("provenance") or ("connector_managed" if reg else "unknown"),
+             row.get("workspace_id") or reg.get("workspace_id"),
+             row.get("workspace") or reg.get("workspace_name"), src["cwd"], src["repo_root"], src["branch"], src["commit"], src["head"],
              src["dirty"], excerpt, hashlib.sha256(excerpt.encode()).hexdigest(), ctx.params.get("note"),
              ctx.actor, ctx.operation_id, now))
         if cur.rowcount:
@@ -298,6 +299,9 @@ def _admit_continue(ops: OperationService, principal: Principal, target: dict, p
         raise OperationError("INVALID_PARAMS", f"instructions must be 1-{MAX_INSTRUCTIONS} characters", 422)
     if params.get("agent", "claude") not in {"claude", "codex"}:
         raise OperationError("INVALID_PARAMS", "agent must be claude or codex", 422)
+    if not (cp["workspace_id"] or cp["workspace_name"]):
+        raise OperationError("NO_WORKSPACE", "the checkpoint's session has no BAT workspace to start the new "
+                             "session in", 409)
 
 
 def clone_path(managed_root: str, host: str, repo_root: str) -> str:
@@ -307,27 +311,51 @@ def clone_path(managed_root: str, host: str, repo_root: str) -> str:
     return posixpath.join(managed_root, f"{name}-{digest}")
 
 
-def prepare_script(src: str, dest: str, worktree: str, branch: str, commit: str, tmp: str) -> str:
+def target_clone(managed_roots, host: str, repo_root: str) -> tuple[str, bool]:
+    """(clone path, same_clone). A checkpoint taken inside a managed clone (for example of a managed session's
+    worktree) continues in that same clone, which already holds the commit; any other source gets its own clone
+    under the first managed root."""
+    root = norm(repo_root) or ""
+    for mr in managed_roots:
+        if root.startswith(mr.rstrip("/") + "/"):
+            return posixpath.join(mr, root[len(mr.rstrip("/")) + 1:].split("/", 1)[0]), True
+    return clone_path(managed_roots[0], host, root), False
+
+
+def prepare_script(src: str, dest: str, worktree: str, branch: str, commit: str, tmp: str,
+                   same_clone: bool = False) -> str:
     """Idempotent: clone (once), fetch the commit (if missing), add the worktree (once), print HEAD and dirt.
 
-    The person's repository is only read: ``git clone`` and ``git fetch`` read it, and the clone's origin is reset
-    to the source's own origin URL (or removed) so nothing pushed from the clone can land in the person's repo.
+    The person's repository is only read: ``git clone`` and ``git fetch`` read it. The clone's origin becomes the
+    source's own origin only when that is a network URL (credentials stripped); a local-path origin is removed, so
+    nothing pushed from the clone can land in a person's folder. One script runs per clone at a time (``flock`` on
+    the host): a re-run after a lost SSH reply waits for a first run that is still going instead of racing it.
+    ``same_clone``: the source is already inside this managed clone, so there is nothing to clone or fetch.
     """
     q = shlex.quote
-    return "\n".join([
-        "set -eu",
-        f"src={q(src)}; dest={q(dest)}; wt={q(worktree)}; br={q(branch)}; sha={q(commit)}; tmp={q(tmp)}",
+    clone_steps = [] if same_clone else [
         'if [ ! -e "$dest" ]; then',
-        '  rm -rf "$tmp"; mkdir -p "$(dirname "$dest")"',
+        '  rm -rf "$tmp"',
         '  git clone --quiet --no-checkout --no-hardlinks "$src" "$tmp"',
         '  url=$(git -C "$src" config --get remote.origin.url || true)',
+        '  case "$url" in https://*|http://*|ssh://*|git@*) url=$(printf %s "$url" | sed -E "s#^(https?://)[^/@]*@#\\1#");; *) url="";; esac',
         '  if [ -n "$url" ]; then git -C "$tmp" remote set-url origin "$url"; else git -C "$tmp" remote remove origin; fi',
         '  git -C "$tmp" config batc.managed-clone true',
         '  git -C "$tmp" config batc.source "$src"',
         '  if [ -e "$dest" ]; then rm -rf "$tmp"; else mv "$tmp" "$dest"; fi',
         "fi",
-        'test "$(git -C "$dest" config --get batc.managed-clone)" = true || { echo "not a connector clone: $dest" >&2; exit 3; }',
+    ]
+    source_check = [] if same_clone else [
         'test "$(git -C "$dest" config --get batc.source)" = "$src" || { echo "clone belongs to another source" >&2; exit 3; }',
+    ]
+    return "\n".join([
+        "set -eu",
+        f"src={q(src)}; dest={q(dest)}; wt={q(worktree)}; br={q(branch)}; sha={q(commit)}; tmp={q(tmp)}",
+        'mkdir -p "$(dirname "$dest")"',
+        'if command -v flock >/dev/null 2>&1; then exec 9>"$dest.batc-lock"; flock -w 600 9 || { echo "another prepare of $dest is still running" >&2; exit 75; }; fi',
+        *clone_steps,
+        'test "$(git -C "$dest" config --get batc.managed-clone)" = true || { echo "not a connector clone: $dest" >&2; exit 3; }',
+        *source_check,
         'if ! git -C "$dest" cat-file -e "$sha^{commit}" 2>/dev/null; then',
         '  git -C "$dest" fetch --quiet --no-tags "$src" "$sha" 2>/dev/null'
         " || git -C \"$dest\" fetch --quiet --no-tags \"$src\" '+refs/heads/*:refs/batc/source/*'",
@@ -380,9 +408,10 @@ async def _run_continue(ctx: OpContext) -> dict:
     host = cp["host"]
     hc = fleet.config.host(host)
     suffix = ctx.operation_id[3:15]
-    dest = clone_path(hc.managed_roots[0], host, cp["repo_root"])
+    dest, same_clone = target_clone(hc.managed_roots, host, cp["repo_root"])
     worktree = posixpath.join(dest, ".bat-worktrees", f"batc-cp-{suffix}")
     branch = f"batc/cp-{suffix}"
+    resource_policy.check_checkpoint_worktree(hc, dest, worktree, branch)  # before any host write
     sid = str(uuid.uuid5(_SESSION_NS, ctx.operation_id))
     ctx.set_refs(checkpoint_id=cp["checkpoint_id"], clone_path=dest, worktree_path=worktree, branch=branch,
                  session_id=sid)
@@ -391,7 +420,7 @@ async def _run_continue(ctx: OpContext) -> dict:
         lock = _clone_locks.setdefault((host, dest), asyncio.Lock())
         async with lock:
             out = await runner.run(host, prepare_script(cp["repo_root"], dest, worktree, branch, cp["commit_sha"],
-                                                        f"{dest}.batc-tmp-{suffix}"))
+                                                        f"{dest}.batc-tmp-{suffix}", same_clone=same_clone))
         lines = out.splitlines()
         if len(lines) < 2 or not SHA.fullmatch(lines[-2]):
             raise StepFailed("GIT_FAILED", "the worktree script did not report its HEAD")
@@ -409,6 +438,22 @@ async def _run_continue(ctx: OpContext) -> dict:
     c = fleet.client(host)
     agent = ctx.params.get("agent", "claude")
 
+    async def verify() -> dict:
+        # BAT itself must see the new folder at the checkpoint commit before a session starts there. A step, so a
+        # replay after the agent has committed returns this result instead of checking a moved HEAD again.
+        root = norm(await c.invoke("git:getRoot", {"cwd": worktree}))
+        log = await c.invoke("git:log", {"cwd": worktree, "count": 1})
+        seen = log[0].get("hash") if isinstance(log, list) and log and isinstance(log[0], dict) else None
+        if root != worktree or seen != cp["commit_sha"]:
+            raise StepFailed("START_MISMATCH", f"BAT sees {worktree} at {str(seen)[:12]} (git root {root}), not "
+                             f"{cp['commit_sha'][:12]}; managed_roots must be real paths")
+        return {"git_root": root, "head": seen}
+
+    async def reverify(_request: dict) -> dict:
+        return RERUN  # reads only
+
+    await ctx.step("verify.start", verify, reconcile=reverify)
+
     async def start() -> dict:
         r = await orchestrate.session_start(
             fleet, host, cp["workspace_id"] or cp["workspace_name"], agent, confirm=True, prompt=None,
@@ -424,19 +469,16 @@ async def _run_continue(ctx: OpContext) -> dict:
         except Exception:  # noqa: BLE001 - unreadable: stay uncertain and read again later
             return None
         if isinstance(meta, dict) and norm(meta.get("cwd")) == worktree:
-            registry.update(host, sid, status="active", cwd=worktree)
+            registry.update(host, sid, status="active", cwd=worktree, worktree_path=worktree, branch=branch)
             return {"session_id": sid, "cwd": worktree, "reconciled": True}
         return None  # reserved and maybe sent: BAT may still be starting it, so read again later; never start twice
 
     await ctx.step("session.start", start, request={"session_id": sid, "cwd": worktree, "agent": agent},
                    reconcile=restart)
+    # origin_cwd stays the workspace folder session_start recorded: merges into it are refused
+    # (DESTINATION_MANUAL), which is what a checkpoint session's work should get. Results reach a PR instead.
     registry.update(host, sid, checkpoint_id=cp["checkpoint_id"], source_session_id=cp["source_session_id"],
                     start_commit=cp["commit_sha"])
-    # Before the first instruction, BAT itself must see the session's folder at the checkpoint commit.
-    log = await c.invoke("git:log", {"cwd": worktree, "count": 1})
-    seen = (log or [{}])[0].get("hash") if isinstance(log, list) else None
-    if seen != cp["commit_sha"]:
-        raise NeedsAttention("START_MISMATCH", f"BAT reports {str(seen)[:12]} in the new session's folder")
     marker = prompt_marker(cp, ctx.operation_id)
     text = first_prompt(cp, worktree=worktree, branch=branch, instructions=ctx.params["instructions"], marker=marker)
     mid = "batc-" + ctx.operation_id

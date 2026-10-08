@@ -25,12 +25,14 @@ Checkpoint ID 由 operation ID 衍生（`cp_<32 hex>`），所以重跑同一個
 
 BAT 的 `worktree:create` 不能指定起點 commit，所以 clone 與 worktree 由 Connector 經主機的 SSH alias 以 git 建立（與 verification 共用 `[verification] ssh_hosts`）：
 
-1. `worktree.prepare`：在主機第一個 `managed_roots` 下的 `<repo>-<8 hex>`（同一主機、同一來源 repository 共用一個）準備 clone，再加 worktree `<clone>/.bat-worktrees/batc-cp-<12 hex>` 與分支 `batc/cp-<12 hex>`，起點是 checkpoint 的 commit。腳本可重跑：已存在的 clone 與 worktree 直接沿用。
-   - `git clone` 與 `git fetch` 只讀人的 repository。clone 的 `origin` 改成來源自己的 origin URL（沒有就移除），所以從 clone push 不會進到人的 repository。
+1. `worktree.prepare`：在主機第一個 `managed_roots` 下的 `<repo>-<8 hex>`（同一主機、同一來源 repository 共用一個）準備 clone，再加 worktree `<clone>/.bat-worktrees/batc-cp-<12 hex>` 與分支 `batc/cp-<12 hex>`，起點是 checkpoint 的 commit。腳本可重跑：已存在的 clone 與 worktree 直接沿用。寫入前先以 `resource_policy.check_checkpoint_worktree` 確認 clone 正好在 managed root 下一層、worktree 與分支是固定名稱（mutation 表的 `checkpoint.managed_worktree`）。
+   - 來源本身已在 managed clone 內（例如從 managed session 的 worktree 記下的 checkpoint），就沿用那個 clone，不再 clone 一份。
+   - `git clone` 與 `git fetch` 只讀人的 repository。來源的 origin 是網路 URL（https、ssh、`git@`）時，clone 的 `origin` 改成它並去掉帳密；是本機路徑或沒有時移除 `origin`，所以從 clone push 不會進到任何人的資料夾。
+   - 同一個 clone 的腳本在主機上以 `flock` 一次只跑一個：SSH 回應遺失後的重跑會等前一次跑完，不會同時改同一個 clone。
    - Clone 先建在暫存目錄，標上 `batc.managed-clone` 與 `batc.source` 後才搬到正式位置。目標路徑已存在但不是 Connector 的 clone（或屬於別的來源）時中止（`GIT_FAILED: not a connector clone`），不接管別人的資料夾。
 2. 腳本回報的 HEAD 必須等於 checkpoint commit 且乾淨，否則 `START_MISMATCH`。
-3. `session.start`：`session_start` 以 `cwd_override` 在 worktree 開新 session，session ID 由 operation ID 衍生；資源政策確認目的地在 managed root 內（`managed_clone`），並用 `git:getRoot` 確認沒有連結到 managed root 外。
-4. 送第一個指令前，BAT 自己的 `git:log` 必須在新 session 的資料夾看到 checkpoint commit（計畫 §12 第 5 步）。
+3. `verify.start`：BAT 的 `git:getRoot` 與 `git:log` 必須在新資料夾看到 worktree 本身與 checkpoint commit（計畫 §12 第 5 步），之後才啟動 session。這是一個 step：重跑時直接回傳記下的結果，不會因為 agent 已經 commit 而誤判起點不符。
+4. `session.start`：`session_start` 以 `cwd_override` 在 worktree 開新 session，session ID 由 operation ID 衍生；資源政策確認目的地在 managed root 內（`managed_clone`），並用 `git:getRoot` 確認沒有連結到 managed root 外。
 5. `send`：第一個指令的第一行是 `[batc checkpoint <checkpoint_id> · <operation_id>]`，接著是 repository、來源分支與 commit、新分支與資料夾、未提交修改的提醒、對話摘錄（超過長度時保留最新的），最後是使用者的指示原文。
 6. 記入 `checkpoint_runs`，並立刻更新該主機的目錄，讓新 session 馬上出現在 Dashboard。
 

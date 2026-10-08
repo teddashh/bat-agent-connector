@@ -89,7 +89,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation("session.create", "bat", "create",
              frozenset({"claude:start-session", "worktree:create", "worktree:remove", "claude:send-message"}),
              ("session_start", "session_failover", "session_relay(start_if_missing)", "fanout_plan_session",
-              "fanout_from_plan", "batc fanout --start", "task service lead/reviewer start"),
+              "fanout_from_plan", "batc fanout --start", "task service lead/reviewer start", "checkpoint.continue"),
              "new session ID reserved in the registry first; it works in a managed root, a worktree the "
              "connector creates, or a connector-owned worktree it shares; never in a human checkout"),
     Mutation("workspace.register_tab", "bat", "tab", frozenset({"workspace:save"}),
@@ -98,6 +98,10 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation("task.external_worktree", "ssh-git", "path", frozenset(),
              ("task service start with base_branch", "task service cleanup"),
              "only <workspace>/.bat-worktrees/batc-task-<12 hex> and branch batc/task-<12 hex>"),
+    Mutation("checkpoint.managed_worktree", "ssh-git", "path", frozenset(),
+             ("checkpoint.continue",),
+             "a connector clone <managed root>/<name> (marked batc.managed-clone) that only reads the person's "
+             "repository, and the worktree <clone>/.bat-worktrees/batc-cp-<12 hex> on branch batc/cp-<12 hex>"),
 )
 BY_ACTION = {m.action: m for m in MUTATIONS}
 # The only granted write channel whose frame names no session (its terminal carries the ID).
@@ -497,6 +501,18 @@ def authorize_external_worktree(hc: HostConfig, root: str, path: str, branch: st
     if not (hc.shared_clone_worktrees or in_managed_root(hc, root)):
         raise ResourceReadOnly("DESTINATION_MANUAL",
                                f"{root} is not inside a managed root and shared_clone_worktrees = false on this host")
+
+
+def check_checkpoint_worktree(hc: HostConfig, clone: str, path: str, branch: str) -> None:
+    """A checkpoint execution's clone and worktree: fixed names one level inside a managed root."""
+    c, p = norm(clone), norm(path)
+    root = next((r for r in hc.managed_roots if c and posixpath.dirname(c) == r.rstrip("/")), None)
+    name = posixpath.basename(p or "")
+    suffix = name[len("batc-cp-"):]
+    if (not root or ".." in (c or "").split("/") or p != posixpath.join(c, BAT_WORKTREES_DIR, name)
+            or not name.startswith("batc-cp-") or len(suffix) != 12
+            or any(ch not in "0123456789abcdef" for ch in suffix) or branch != f"batc/cp-{suffix}"):
+        raise ResourceReadOnly("DESTINATION_UNKNOWN", f"{path} is not a connector checkpoint worktree in a managed root")
 
 
 def check_external_worktree(root: str, path: str, branch: str, task_id: str) -> None:

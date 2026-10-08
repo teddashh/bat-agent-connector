@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -362,3 +363,97 @@ async def test_preview_source_moved_and_unobserved_changes(daemon, mock, human):
     assert "were not observed" in text
     await daemon.fleet.close()
     await daemon.inventory.close()
+
+
+async def test_a_replay_after_the_agent_committed_does_not_recheck_the_moved_head(daemon, mock, human, monkeypatch):
+    from bat_agent_connector import service
+    from bat_agent_connector.errors import InvokeTimeout
+
+    cp = await make_checkpoint(daemon)
+    real_send = service.session_send
+
+    async def lost(*a, **kw):
+        raise InvokeTimeout("claude:send-message timed out")  # the reply never came; nothing proves the send
+
+    monkeypatch.setattr(service, "session_send", lost)
+    op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"})
+    assert op["status"] == "uncertain"
+    wt = op["external_refs"]["worktree_path"]
+    git(wt, "-c", "user.email=a@example.invalid", "-c", "user.name=agent", "commit", "-q", "--allow-empty", "-m",
+        "the agent already works")  # HEAD has moved past the checkpoint
+    monkeypatch.setattr(service, "session_send", real_send)
+    daemon.journal.db.execute("UPDATE operations SET next_run_at=0, uncertain_tries=99 WHERE operation_id=?",
+                              (op["operation_id"],))
+    await daemon.ops.drain(timeout=30)
+    done = daemon.ops.get(op["operation_id"])
+    assert done["error_code"] != "START_MISMATCH", done
+    assert [s["name"] for s in done["steps"]][:3] == ["worktree.prepare", "verify.start", "session.start"]
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
+async def test_the_clone_never_keeps_a_local_or_credentialed_origin(daemon, mock, human):
+    git(human, "remote", "set-url", "origin", "https://ted:ghp_secret@github.example/o/r.git")
+    cp = await make_checkpoint(daemon)
+    op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"})
+    clone = op["external_refs"]["clone_path"]
+    assert git(clone, "config", "--get", "remote.origin.url") == "https://github.example/o/r.git"
+    assert "ghp_secret" not in (subprocess.run(["git", "-C", clone, "config", "--list"], capture_output=True,
+                                               text=True).stdout)
+    other = human.parent / "local-origin"
+    subprocess.run(["git", "clone", "-q", str(human), str(other)], check=True)
+    git(other, "remote", "set-url", "origin", str(human))  # its origin is a person's folder
+    mock.metas[MANUAL] = {"cwd": str(other), "isStreaming": False}
+    cp2 = await make_checkpoint(daemon, note="other")
+    op2 = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp2["checkpoint_id"]}, {"instructions": "go"},
+                    key="local")
+    assert op2["status"] == "succeeded", op2
+    remotes = git(op2["external_refs"]["clone_path"], "remote")
+    assert "origin" not in remotes.split()  # pushes cannot land in a person's folder
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
+async def test_a_managed_session_continues_in_its_own_clone(daemon, mock, human):
+    cp = await make_checkpoint(daemon)
+    first = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"})
+    wt, sid, clone = (first["result"]["worktree_path"], first["result"]["session_id"],
+                      first["external_refs"]["clone_path"])
+    Path(wt, "flag.txt").write_text("on\n")
+    git(wt, "add", "flag.txt")
+    git(wt, "-c", "user.email=a@example.invalid", "-c", "user.name=agent", "commit", "-qm", "flag")
+    agent_commit = git(wt, "rev-parse", "HEAD")
+    await daemon.inventory.refresh_host("h1")
+    op = await run(daemon, "checkpoint.create", {"host": "h1", "session_id": sid}, {"last_n": 0})
+    assert op["status"] == "succeeded", op
+    cp2 = checkpoints.get(daemon.journal.db, op["result"]["checkpoint_id"])
+    assert cp2["source_provenance"] == "connector_managed" and cp2["commit_sha"] == agent_commit
+    second = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp2["checkpoint_id"]},
+                       {"instructions": "review it", "agent": "codex"}, key="again")
+    assert second["status"] == "succeeded", second
+    assert second["external_refs"]["clone_path"] == clone  # no clone of a clone
+    assert git(second["result"]["worktree_path"], "rev-parse", "HEAD") == agent_commit
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
+def test_checkpoint_paths_are_fixed_names_inside_a_managed_root(tmp_path):
+    from bat_agent_connector.config import HostConfig
+    from bat_agent_connector.errors import ResourceReadOnly
+
+    hc = HostConfig(name="h1", url="wss://x/", fingerprint="0" * 64, token_ref="env:X",
+                    managed_roots=("/srv/managed",))
+    resource_policy.check_checkpoint_worktree(hc, "/srv/managed/app-1",
+                                              "/srv/managed/app-1/.bat-worktrees/batc-cp-0123456789ab",
+                                              "batc/cp-0123456789ab")
+    for clone, path, branch in [
+            ("/home/ted/app", "/home/ted/app/.bat-worktrees/batc-cp-0123456789ab", "batc/cp-0123456789ab"),
+            ("/srv/managed", "/srv/managed/.bat-worktrees/batc-cp-0123456789ab", "batc/cp-0123456789ab"),
+            ("/srv/managed/a/b", "/srv/managed/a/b/.bat-worktrees/batc-cp-0123456789ab", "batc/cp-0123456789ab"),
+            ("/srv/managed/app-1", "/srv/managed/app-1/x/batc-cp-0123456789ab", "batc/cp-0123456789ab"),
+            ("/srv/managed/app-1", "/srv/managed/app-1/.bat-worktrees/batc-cp-0123456789ab", "batc/cp-ffffffffffff")]:
+        with pytest.raises(ResourceReadOnly):
+            resource_policy.check_checkpoint_worktree(hc, clone, path, branch)
+    assert "checkpoint.continue" in resource_policy.BY_ACTION["checkpoint.managed_worktree"].entry_points
+    assert checkpoints.target_clone(("/srv/managed",), "h1", "/srv/managed/app-1/.bat-worktrees/batc-cp-1")[1]
+    assert not checkpoints.target_clone(("/srv/managed",), "h1", "/home/ted/app")[1]
