@@ -230,6 +230,8 @@ Phase 2 新增的副作用只有 Connector 記錄／projection、既有 managed 
 | `FAILOVER_SUCCESSOR_MISMATCH`／`START_SESSION_MISMATCH` | 讀回的 cwd 與 reservation 不同。用 resource_policy.norm 的絕對 POSIX 路徑正規化，先比 cwd 再比 permission options；不以 Connector 本機 realpath 解遠端 symlink。記 terminal error_code、保留原 reservation／worktree，不 promote、不送 prompt／handoff、不重新 start。後續即使 cwd 修正也不自動恢復。Failover 用前者，session_start、checkpoint continue／integration handoff 與 Task Service start recovery 用後者。 |
 | `CONFINEMENT_START_UNSETTLED` | 前次 successor start 未定，或 ACK 後尚未寫 active 就中斷，這次只讀回 reserved ID。須先證明 meta.cwd 和 reserved cwd 相符；cwd 缺失／無效時不 promote、不送 handoff，保留 reservation。cwd 相符且 options_confirmed／verified 時清 start_uncertain、active 並完成 confirm；保留 reserve 時的 cwd／worktree_path／branch／permission fields，與正常 ACK 路徑一致。若 handoff 的未送證據仍在，重建 prompt、沿用 message ID 與所有 Task Service callbacks／frame guards，走原 send 路徑並回 prompt_sent／message_id／error，不回 skipped。mismatch 用上列 code；unreadable／null 保留 reservation，不重送 start，也不把「未定」說成 options mismatch。Checkpoint／repair 的可讀 metadata 缺 cwd 時到 needs_attention；null／transport unreadable 沿用 step 的 uncertain retry。 |
 | `CONFINEMENT_EVIDENCE_MISSING` | 已記 confined 的 session 在 meta=null 且遺失原 mode／policy、無可信 intent／回執可恢復時，不送 client-resume／cold resume；不可觸發 BAT 的 omission／bypass fallback。保留既有 session 與讀取，由操作者核對原證據；不把它重新 start 成新預設。loaded live session 的 send 不改 mode，不因 legacy 證據缺失而阻擋。另對升級時 in-flight checkpoint／repair 的 reservation 缺 confinement record，回 NeedsAttention，不無限讀回。 |
+| Start reservation 後、transport 前取消／失敗 | `start_sent=false`、failed／釋放 reservation（failover 也撤回 predecessor 的 superseded）；CancelledError 原樣傳出，不 await rollback／SSH／BAT 新 I/O。下次同 reserved ID 安全重新 start，不輪詢不存在的 session；缺 flag 的 legacy row 不當成未送證據。 |
+| Start frame 已交 transport 後取消 | 保留 reservation／worktree、start_sent=true、uncertain（failover 的 ACK 尚未到時為 starting＋start_uncertain）。只讀回 cwd／options，不再 start；不能把 CancelledError 誤列 definitive refusal。BAT 明確 invoke-error 的既有 rollback 行為維持。 |
 | Start／setter ACK 遺失 | uncertain；以同 session ID 讀 meta 和已記 intent。cwd 相同但 options 不明不能確認限制；不 start 第二次，不退回 allow-all。 |
 | 首個 instruction 已 accepted，結果用的 evidence read timeout／disconnect | `start_in_worktree` 的 durable send step 保持 succeeded；回 registry 的原 creation evidence，current_verification=unknown、reason=readback_failed。Checkpoint continue／integration handoff operation 仍 succeeded，同 idempotency key 回同 operation；不重送 prompt、不重開 session。 |
 | Codex 第二個 setter 失敗 | 保留各 step 的回執與不明狀態，逐項讀回，不重送已證明的 step；完成後及下一 turn 邊界再核對。沒有原子 sandbox＋approval 保證。 |
@@ -237,6 +239,24 @@ Phase 2 新增的副作用只有 Connector 記錄／projection、既有 managed 
 | BAT／CLI 更新或原生 GUI 改 mode | 原快照不動；current_verification unknown／mismatch，新的證據需重新查核／驗收。Connector 無法禁止 GUI，亦無法追回已被批准的 shell 寫入。 |
 
 升級不遍歷 running sessions 送 setter、resume 或 stop。既有有完整 start intent／實際 options 的紀錄可以只讀回填證據；只有 cwd／tab／事後 host default 的紀錄填 none、reason=legacy_evidence_missing。現有 confined flag 保留，即使其實際 level 為 none；人工／unknown 資源不回填成 managed。之後補到較強 host 證據只更新 current_verification，不把建立快照升級；要採新限制，開新的 managed session。Warm reuse 同樣不升級。
+
+### Start frame 與取消邊界稽核
+
+`BatClient._invoke_checked` 的順序是 connect → semaphore → await before_frame → before_send／frame_guard → _roundtrip。`_roundtrip` 在 connection 檢查及 JSON 編碼之後，同步呼叫 on_transport；registry／Task command 的 start_sent=true 落盤後立即呼叫 websocket.send，中間沒有 await。故 account check、connect、semaphore 或更早 await 的取消都是未送；websocket.send 內或等待 ACK／metadata 的取消均保守當成可能已送。Marker 不是「BAT 已接受」的證明；crash 在 marker 與 transport 之間仍保持未定，不能為此重送。
+
+Start reserve 一開始保存 start_sent=false；若 daemon 沒能 unwind，starting＋false 同樣能在 registry flock 內替換為同 ID 的 reservation，不重複 row／cap。不要只看例外種類判 sent；WriteRefused 可出現在 ACK 之後。同步記錄未送結果後，CancelledError 原樣傳出，取消期間不啟動 worktree:remove、read-back、SSH 或任何新 await。
+
+| 路徑／函式 | Reservation 後的 await／before_frame 使用者 | 取消與恢復 |
+|---|---|---|
+| `orchestrate.session_start`（一般／relay／fanout／Task lead） | worktree:create（或未送重試的 worktree:status）、git:log、client connect／semaphore、guard_start_frame 的第二次 SSH check；frame 後 meta／tab reads | 用同一次 StartFrame 記實際 transport entry；未送 failed＋false，已送保留 uncertain。先記已知 worktree path／branch 再 await log。未送同 ID 重試時，只讀核對 BAT worktree path／branch 後重用；不再 create 另一個 worktree，也不在後次 refusal rollback 先前留下的 worktree。 |
+| `checkpoints.start_in_worktree.restart`（checkpoint.continue／integration.handoff 共用） | restart 自身先讀 registry；只有 sent 不為 false 才讀 BAT meta／cwd／options。真正 start 經 session_start | false 回 RERUN，同 operation／reserved ID，用前面已完成 step 的同一個 SSH-managed worktree／branch；沒有 start meta poll。已送則只讀 reconcile，保留所有 identity／terminal mismatch guard。 |
+| `lifecycle._failover_one` successor start | readonly source／shared-worktree checks、start_decision 在 reserve 前；reserve 後只 await start invoke 的 connect／semaphore／guard_start_frame（後續 meta 是已送） | 未送 fail_reservation 並回復 predecessor，start_uncertain=false。下次使用 failed／starting＋false 的同 reserved successor ID、原 options／handoff_message_id／command binding；不讀不存在的 successor。已送只讀回，不重送 start；原 handoff frame fence 仍控制只送一次。 |
+| `BatTaskAdapter.start` reviewer | journal command 比 registry 更早，含 lead presence／shared authorization／admission checks；registry reserve 後 invoke／frame account check、identity poll、retry sleep、ACK 後 meta／tab | StartFrame context 保留取消傳播、無 await rollback。已有 registry 的 false 或 registry 缺失但原 command 明確 false 才允許 recover_start 用原 role／agent／ID start；true／legacy missing 只讀 BAT。Readable mismatch 仍 terminal，未知 meta 仍 best-effort。 |
+| Task lead preparation／`TaskCoordinator._start` | command intent 在 adapter 的 warm identity、external worktree、workspace／git reads 與 registry reserve 前 | 原 command write point 先記 start_sent=false；實際 start transport callback 在原 evidence write point 記 true（無新表／ownership DB）。因此準備中取消且還無 registry row，可由 journal false 恢復同 ID；warm reuse 記 null，不能把正在跑的 warm session當未送。 |
+| `BatTaskAdapter.recover_failover` | Task journal 既有 failover／handoff IDs；實際恢復經原 adapter.failover／lifecycle frame boundary | successor false＋handoff pending＋明確 null frame fence 時，走原 callbacks／guards，再核對 journal hash。已可能送 start 或 handoff 的結果維持原 read-back／uncertain，不重送。 |
+| 其他 before_frame users：`service.session_send`、session_start 首 prompt、failover handoff | verify_at_frame／guard_frame／check_handoff_frame 是 send（含 resume）guard，沒有 start reservation | 不加 start_sent marker、不改原 send 去重／frame fence；受限 options 仍在 transport 前核對。 |
+
+本輪選 **未送 start 的既有恢復** 保留 worktree：checkpoint／repair replay 先前已完成的 worktree step，BAT worktree 則核對 path／branch 後重用。未恢復的 worktree 保持現狀，不把取消改成自動清理；本 branch 的 session_cleanup 不掃 failed reservations，不能假稱 cleanup 已處理。BAT worktree identity 不可讀時拒絕重試，交操作者按既有受控 cleanup 流程處理。若取消在 worktree:create 回執前，path 尚未知，沿用既有同-ID BAT worktree 準備；這不是重送 agent start frame。
 
 Failover reserve 先保存 branch、permission fields、handoff_message_id（Task Service 用 journal 已保留的 ID）、handoff_status=pending 與明確的 handoff_frame_sha256=null。只有 pending＋明確 null 才證明未進入 frame 派送；缺 key 的舊 active row 不算。升級前仍在 start block 的 unsettled／starting row 尚未嘗試 handoff，可在 readonly read-back 成功時，以 registry flock 補 null 與缺失的 ID／branch；不得覆寫另一個恢復程序已記的 hash 或 ID。
 
@@ -309,6 +329,8 @@ Mock 只能證明 Connector 的 options、gate、evidence 與顯示；不假造 
 
 | 驗收／計畫 | 實作測試 | 結果與邊界 |
 |---|---|---|
+| A10；§06、§07、§12 | `test_start_preframe_cancellation_is_unsent_and_reuses_reserved_id`、`test_start_cancellation_at_earlier_await_is_also_unsent`、`test_task_preparation_cancellation_recovers_from_unsent_command_before_registry`、`test_start_postframe_cancellation_keeps_uncertain_and_does_not_resend` | Account check／git log／connect／semaphore 取消：零 start／rollback frame、false＋failed、原 CancelledError；starting＋false 模擬未 unwind crash，原 ID／worktree 只 start 一次。已送後取消保留未定，read-back 不重送。 |
+| A10；§06、§12；C03 | `test_checkpoint_preframe_cancellation_restarts_unsent_reserved_session_once`、`test_repair_preframe_cancellation_restarts_unsent_reserved_session_once`、`test_task_failover_preframe_cancellation_recovers_reserved_start_and_handoff` | 同 operation replay：未送不用 meta poll，已送只讀回；checkpoint／repair 原 worktree／ID，恰一個 start 與 instruction。Task failover 同原 reserved IDs／journal hash／guards，恰一個 handoff。 |
 | A10；§06、§07、§12 | `test_host_account_refusal_before_frame_releases_start`、`test_task_start_refused_before_frame_needs_ted_not_uncertain`、`test_checkpoint_continue_host_account_refusal_needs_attention_and_resumes` | 明確 unsent refusal：零 start frame、釋放 reservation、按 retain_on_error rollback；task rejected／needs_ted 與 code；同 operation resume。 |
 | A10；§06、§12 | `test_general_start_unreadable_meta_records_unknown_and_keeps_session`、`test_post_start_mismatch_keeps_reservation_and_worktree`、`test_reviewer_start_meta_failure_still_activates`、`test_post_start_cancellation_keeps_acknowledged_reservation` | ACK 後不釋放 session；non-confined unknown 可繼續、真 mismatch 保留 uncertain；reviewer best-effort。 |
 | A10；§06 | `test_confined_failover_unsettled_successor_reads_back_before_new_attempt`、`test_host_check_table_is_created_without_consuming_schema_version`、`test_legacy_codex_predecessor_uses_its_recorded_agent`、`test_checkpoint_reconcile_legacy_reservation_requires_evidence` | Successor confirmed／mismatch／unreadable／null 的 readonly recovery；vanished 尚缺可信 absence signal。高版本 journal 補 table 不占版本；legacy agent 辨識與缺證據停在 needs_attention。 |
@@ -353,6 +375,7 @@ A10 的通過紀錄必須注明 level／機制與批准限制。`none`、只有 
 
 ## 尚未涵蓋
 
+- Start transport marker 落盤與 websocket.send 之間的 hard crash：保守保持可能已送，不以缺 meta 重送；仍需可信 absence signal／操作者確認。此 fence 只保證不重送，不保證 session 一定存在。
 - 更強的獨立 trusted account 查核：經 `sudo -n -u <bat> <python> -I -S -B -` 執行，可避開 BAT 帳號的 login startup。此包不新增 credentials／sudo 路徑。現有同 UID 查核不能偵測 hardening 前已植入、後變 root-owned 的 payload；可信替換與乾淨部署由主機操作者保證。
 
 - 舊 active successor 的 pending 若沒有明確 null frame fence，不能證明未送，保持原 prior-successor 行為；不回填成可重送。Reserved start 沒有可比對的 permission options 時，仍無法得到 options_confirmed，維持 CONFINEMENT_START_UNSETTLED；不為 handoff 恢復而假造證據。已記 frame hash 的 crash 結果只保證不重送，不證明 BAT 收到 prompt。

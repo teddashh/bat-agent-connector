@@ -562,3 +562,296 @@ async def test_confined_failover_unsettled_successor_reads_back_before_new_attem
         assert "claude:start-session" not in mock.channels()
     finally:
         await f.close()
+
+
+class PauseAtFrame(AccountRunner):
+    """Synthetic account check blocks only the frame-boundary verification."""
+    def __init__(self):
+        super().__init__()
+        self.entered, self.release = asyncio.Event(), asyncio.Event()
+
+    async def run_account_check(self, host, script, timeout_s=None):
+        self.scripts.append(script)
+        if len(self.scripts) == 2:
+            self.entered.set()
+            await self.release.wait()
+        return json.dumps({"status": "verified", "reason": "fixture_hardened_account"})
+
+
+@pytest.mark.parametrize("path", ["start", "failover", "task_lead", "reviewer"])
+@pytest.mark.parametrize("unsent_status", ["failed", "starting"], ids=["cancelled", "crash_without_unwind"])
+async def test_start_preframe_cancellation_is_unsent_and_reuses_reserved_id(
+        fleet_factory, mock, tmp_path, monkeypatch, path, unsent_status):
+    """A10: cancellation propagates, with no start or rollback frame; same-ID recovery starts once."""
+    fleet = fleet_factory(writes=True, orchestrate=True, confinement=ACCOUNT, default_permission_mode="confined",
+                          safety={"write_min_interval_s": 0}, **MANAGED)
+    pause = fleet.confinement_runner = PauseAtFrame()
+    journal = Journal(tmp_path / 'cancel.db')
+    sid = 'cancel-start'
+    adapter, task, lead = None, None, None
+    if path == 'failover':
+        lead = _add_wt_claude(mock)
+    elif path in {'reviewer', 'task_lead'}:
+        adapter, task = reviewer_adapter(fleet, mock, journal, monkeypatch)
+        role = 'reviewer' if path == 'reviewer' else 'lead'
+        journal.command(task['task_id'], 'start_' + role, sid, {'agent': 'codex', 'role': role}, 'cancel-start')
+
+    async def start():
+        if path == 'start':
+            return await orchestrate.session_start(fleet, 'h1', 'demo-project', 'claude', confirm=True, session_id=sid)
+        if path == 'failover':
+            return await lifecycle.session_failover(fleet, 'h1', lead, confirm=True)
+        return await adapter.start(task, role=role, agent='codex', session_id=sid)
+
+    pending = asyncio.create_task(start())
+    try:
+        await asyncio.wait_for(pause.entered.wait(), 10)
+        row = registry.list_entries('h1')[-1]
+        reserved_sid = row['session_id']
+        assert row['start_sent'] is False
+        pending.cancel('fixture pre-frame cancellation')
+        with pytest.raises(asyncio.CancelledError, match='fixture pre-frame cancellation'):
+            await pending
+        row = registry.get('h1', reserved_sid)
+        assert row['start_sent'] is False and row['status'] == 'failed'
+        assert 'claude:start-session' not in mock.channels()
+        assert 'worktree:remove' not in mock.channels()
+        assert not row.get('start_uncertain')
+        registry.update("h1", reserved_sid, status=unsent_status)
+        pause.release.set()
+        if adapter:
+            assert await adapter.recover_start(task, role=role, session_id=reserved_sid)
+        else:
+            result = await start()
+            assert (result.get('session_id') or result['new_session_id']) == reserved_sid
+        assert registry.get('h1', reserved_sid)['status'] == 'active'
+        assert registry.get('h1', reserved_sid)['worktree_path'] == row['worktree_path']
+        assert sum(e["session_id"] == reserved_sid for e in registry.list_entries("h1")) == 1
+        starts = [i for i in mock.invokes if i['channel'] == 'claude:start-session']
+        assert len(starts) == 1 and starts[0]['params']['sessionId'] == reserved_sid
+    finally:
+        if not pending.done():
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        await fleet.close()
+        journal.close()
+
+
+@pytest.mark.parametrize('path', ['start', 'failover', 'reviewer'])
+async def test_start_postframe_cancellation_keeps_uncertain_and_does_not_resend(
+        fleet_factory, mock, tmp_path, monkeypatch, path):
+    """A10: cancel after the actual frame; recovery reads BAT, never re-sends the start."""
+    fleet = fleet_factory(writes=True, orchestrate=True, confinement=ACCOUNT, default_permission_mode="confined",
+                          safety={'write_min_interval_s': 0}, **MANAGED)
+    fleet.confinement_runner = AccountRunner()
+    journal = Journal(tmp_path / 'after.db')
+    client = fleet.client('h1')
+    invoke = client.invoke
+    received = asyncio.Event()
+    adapter, task, lead = None, None, None
+    sid = 'cancel-after-frame'
+    if path == 'failover':
+        lead = _add_wt_claude(mock)
+    if path == 'reviewer':
+        adapter, task = reviewer_adapter(fleet, mock, journal, monkeypatch)
+        journal.command(task['task_id'], 'start_reviewer', sid, {'agent': 'codex', 'role': 'reviewer'}, 'after-frame')
+
+    async def lose_ack(channel, params=None, **kwargs):
+        result = await invoke(channel, params, **kwargs)
+        if channel == 'claude:start-session':
+            received.set()
+            await asyncio.Event().wait()
+        return result
+
+    monkeypatch.setattr(client, 'invoke', lose_ack)
+
+    async def start():
+        if path == 'start':
+            return await orchestrate.session_start(fleet, 'h1', 'demo-project', 'claude', confirm=True,
+                                                  session_id=sid, write_scope='confined')
+        if path == 'failover':
+            return await lifecycle.session_failover(fleet, 'h1', lead, confirm=True)
+        return await adapter.start(task, role='reviewer', agent='codex', session_id=sid)
+
+    pending = asyncio.create_task(start())
+    try:
+        await asyncio.wait_for(received.wait(), 10)
+        row = registry.list_entries('h1')[-1]
+        sid = row['session_id']
+        assert row['start_sent'] is True
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        row = registry.get('h1', sid)
+        assert row['start_sent'] is True and row['status'] in {'starting', 'uncertain'}
+        assert 'worktree:remove' not in mock.channels()
+        monkeypatch.setattr(client, 'invoke', invoke)
+        if path == 'reviewer':
+            assert await adapter.recover_start(task, role='reviewer', session_id=sid)
+        elif path == 'failover':
+            assert (await start())['new_session_id'] == sid
+        assert mock.channels().count('claude:start-session') == 1
+    finally:
+        if not pending.done():
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        await fleet.close()
+        journal.close()
+
+
+async def test_task_failover_preframe_cancellation_recovers_reserved_start_and_handoff(
+        fleet_factory, mock, tmp_path):
+    """A10: Task Service reconciliation restarts an unsent successor with its original handoff binding."""
+    import hashlib
+
+    fleet = fleet_factory(writes=True, orchestrate=True, confinement=ACCOUNT,
+                          safety={'write_min_interval_s': 0}, **MANAGED)
+    pause = fleet.confinement_runner = PauseAtFrame()
+    lead = _add_wt_claude(mock)
+    registry.update('h1', lead, write_scope='confined',
+                    confinement=confinement.snapshot('claude', {'permissionMode': 'default'}))
+    journal = Journal(tmp_path / 'failover-cancel.db')
+    task = journal.submit(project='p', host='h1', workspace='demo-project', original_words='Continue fixture',
+                          idempotency_key='failover-cancel', lead_agent='claude')
+    journal.change(task['task_id'], 'dispatching')
+    journal.change(task['task_id'], 'accepted', fields={'session_id': lead})
+    journal.add_branch(task['task_id'], session_id=lead, provider='claude', role='lead', reason='start')
+    journal.change(task['task_id'], 'running')
+    task = journal.change(task['task_id'], 'quota_limited')
+    command, handoff = journal.reserve_failover(task['task_id'], lead, 'cancel-task-successor')
+    adapter = task_bat.BatTaskAdapter(fleet, journal=journal)
+    args = {'handoff_message_id': handoff['message_id'], 'handoff_command_id': handoff['command_id']}
+    pending = asyncio.create_task(adapter.failover(task, lead, 'cancel-task-successor', **args))
+    try:
+        await asyncio.wait_for(pause.entered.wait(), 10)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        row = registry.get('h1', 'cancel-task-successor')
+        assert row['status'] == 'failed' and row['start_sent'] is False
+        assert not any(i['channel'] in {'claude:start-session', 'claude:send-message'} for i in mock.invokes)
+        pause.release.set()
+        result = await TaskCoordinator(journal, adapter)._reconcile_command(task, command)
+        assert result['state'] == 'uncertain' and result['session_id'] == 'cancel-task-successor'
+        assert journal.command_get(command['command_id'])['status'] == 'settled'
+        assert await adapter._verified_failover_successor(task, 'cancel-task-successor', **args) is True
+        starts = [i for i in mock.invokes if i['channel'] == 'claude:start-session']
+        sends = [i for i in mock.invokes if i['channel'] == 'claude:send-message']
+        assert len(starts) == len(sends) == 1
+        digest = json.loads(journal.command_get(handoff['command_id'])['payload'])['prompt_sha256']
+        assert hashlib.sha256(sends[0]['params']['prompt'].encode()).hexdigest() == digest
+        assert sends[0]['params']['clientMessageId'] == handoff['message_id']
+        assert await adapter.recover_failover(task, successor_id='cancel-task-successor', **args)
+        assert mock.channels().count('claude:start-session') == mock.channels().count('claude:send-message') == 1
+    finally:
+        if not pending.done():
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        await fleet.close()
+        journal.close()
+
+
+@pytest.mark.parametrize('boundary', ['git_log', 'connect', 'semaphore'])
+async def test_start_cancellation_at_earlier_await_is_also_unsent(fleet_factory, mock, monkeypatch, boundary):
+    """A10: all awaits after reservation, not just the account check, keep a pre-transport cancel unsent."""
+    fleet = fleet_factory(writes=True, orchestrate=True, **MANAGED)
+    client = fleet.client('h1')
+    ready = asyncio.Event()
+    invoke, connect = client.invoke, client.connect
+
+    async def block(channel, params=None, **kwargs):
+        if channel == ('git:log' if boundary == 'git_log' else 'claude:start-session'):
+            if boundary == 'semaphore':
+                await client._sem.acquire()
+                ready.set()
+            elif boundary == 'connect':
+                async def delayed_connect():
+                    ready.set()
+                    await asyncio.Event().wait()
+                monkeypatch.setattr(client, 'connect', delayed_connect)
+            else:
+                ready.set()
+                await asyncio.Event().wait()
+        return await invoke(channel, params, **kwargs)
+
+    # Occupy all permits at the actual pre-frame semaphore boundary.
+    if boundary == 'semaphore':
+        for _ in range(client._sem._value - 1):
+            await client._sem.acquire()
+    monkeypatch.setattr(client, 'invoke', block)
+    pending = asyncio.create_task(orchestrate.session_start(fleet, 'h1', 'demo-project', 'claude', confirm=True,
+                                                          session_id='earlier-cancel'))
+    try:
+        await asyncio.wait_for(ready.wait(), 10)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        row = registry.get('h1', 'earlier-cancel')
+        assert row['status'] == 'failed' and row['start_sent'] is False
+        assert row['worktree_path'] and 'claude:start-session' not in mock.channels()
+        assert 'worktree:remove' not in mock.channels()
+    finally:
+        monkeypatch.setattr(client, 'connect', connect)
+        await fleet.close()
+
+
+@pytest.mark.parametrize('role', ['lead', 'reviewer'])
+async def test_task_preparation_cancellation_recovers_from_unsent_command_before_registry(
+        fleet_factory, mock, tmp_path, monkeypatch, role):
+    """A10: start command evidence covers preparation awaits before a registry reservation exists."""
+    fleet = fleet_factory(writes=True, orchestrate=True, safety={'write_min_interval_s': 0}, **MANAGED)
+    journal = Journal(tmp_path / 'prepare-cancel.db')
+    adapter, task = reviewer_adapter(fleet, mock, journal, monkeypatch)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def available(_task):
+        return frozenset({'codex'})
+
+    monkeypatch.setattr(adapter, 'available_agents', available)
+    invoke = fleet.client('h1').invoke
+    present = adapter.session_presence
+
+    async def blocked_workspace(channel, params=None, **kwargs):
+        if channel == 'workspace:load':
+            entered.set()
+            await release.wait()
+        return await invoke(channel, params, **kwargs)
+
+    async def blocked_lead(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return 'present'
+
+    if role == 'lead':
+        monkeypatch.setattr(fleet.client('h1'), 'invoke', blocked_workspace)
+    else:
+        monkeypatch.setattr(adapter, 'session_presence', blocked_lead)
+    core = TaskCoordinator(journal, adapter)
+    pending = asyncio.create_task(core._start(task, role=role))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        command = next(c for c in journal.commands(task['task_id']) if c['kind'] == 'start_' + role)
+        sid = command['session_id']
+        assert registry.get('h1', sid) is None and json.loads(command['payload'])['start_sent'] is False
+        assert 'claude:start-session' not in mock.channels()
+        release.set()
+        monkeypatch.setattr(fleet.client('h1'), 'invoke', invoke)
+        monkeypatch.setattr(adapter, 'session_presence', present)
+        result = await core._reconcile_command(task, command)
+        assert result['state'] == ('accepted' if role == 'lead' else 'verifying')
+        assert registry.get('h1', sid)['status'] == 'active'
+        assert json.loads(journal.command_get(command['command_id'])['payload'])['start_sent'] is True
+        assert mock.channels().count('claude:start-session') == 1
+    finally:
+        if not pending.done():
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        await fleet.close()
+        journal.close()

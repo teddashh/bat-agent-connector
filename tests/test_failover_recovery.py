@@ -195,8 +195,8 @@ async def test_failover_attempted_handoff_is_never_resent(fleet_factory, mock, f
     client = fleet.client("h1")
     roundtrip = client._roundtrip
 
-    async def lost_reply(frame, timeout):
-        result = await roundtrip(frame, timeout)
+    async def lost_reply(frame, timeout, on_transport=None):
+        result = await roundtrip(frame, timeout, on_transport=on_transport)
         if frame.get("channel") == "claude:send-message":
             raise DaemonCrash() if failure == "crash" else InvokeTimeout("handoff acknowledgement lost")
         return result

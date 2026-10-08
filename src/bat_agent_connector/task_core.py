@@ -271,7 +271,8 @@ class TaskCoordinator:
         sid = warm_id or str(uuid.uuid4())
         command, fresh = self.journal.command(task["task_id"], "start_" + role, sid,
                                                {"role": role, "agent": agent,
-                                                "warm_session_id": warm_id}, key)
+                                                "warm_session_id": warm_id,
+                                                "start_sent": None if warm_id else False}, key)
         if not fresh:
             return self.journal.change(task["task_id"], "uncertain")
         self.journal.change(task["task_id"], "dispatching",
@@ -298,7 +299,7 @@ class TaskCoordinator:
         from . import registry
         entry = registry.get(task["host"], sid) or {}
         payload = json.loads(command["payload"])
-        payload.update({k: entry[k] for k in ("confinement", "write_scope", "permission_mode_claude", "agent_params")
+        payload.update({k: entry[k] for k in ("confinement", "write_scope", "permission_mode_claude", "agent_params", "start_sent")
                         if k in entry})
         self.journal.db.execute("UPDATE commands SET payload=? WHERE command_id=?",
                                 (json.dumps(payload), command["command_id"]))

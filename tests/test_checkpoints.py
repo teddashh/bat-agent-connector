@@ -676,3 +676,64 @@ async def test_bat_worktree_actions_never_touch_a_worktree_the_connector_made(da
     row.pop("worktree_made_by")
     assert resource_policy.worktree_maker(row) == "connector"
     assert resource_policy.worktree_maker({"branch": "bat/worktree-0000abcd"}) == "bat"
+
+
+@pytest.mark.parametrize('stage', ['before', 'after'])
+async def test_checkpoint_preframe_cancellation_restarts_unsent_reserved_session_once(daemon, mock, monkeypatch, stage):
+    """A10: pre-frame cancel leaves durable unsent proof; post-frame cancel reconciles without another start."""
+    from dataclasses import replace
+
+    from tests.test_confinement import ACCOUNT, AccountRunner
+    from tests.test_confinement_recovery import PauseAtFrame
+
+    cp = await make_checkpoint(daemon)
+    daemon.fleet.config.hosts['h1'] = replace(daemon.fleet.config.host('h1'), confinement=ACCOUNT)
+    pause = PauseAtFrame()
+    daemon.fleet.confinement_runner = pause if stage == 'before' else AccountRunner()
+    ready = pause.entered if stage == 'before' else asyncio.Event()
+    client = daemon.fleet.client('h1')
+    invoke = client.invoke
+
+    async def after_frame(channel, params=None, **kwargs):
+        result = await invoke(channel, params, **kwargs)
+        if channel == 'claude:start-session':
+            ready.set()
+            await asyncio.Event().wait()
+        return result
+
+    if stage == 'after':
+        monkeypatch.setattr(client, 'invoke', after_frame)
+    op, _ = daemon.ops.create(TED, action='checkpoint.continue', target={'checkpoint_id': cp['checkpoint_id']},
+                              params={'instructions': 'go'}, idempotency_key='preframe-checkpoint-cancel')
+    await daemon.ops.run_due()
+    pending = daemon.ops._active[op['operation_id']]
+    try:
+        await asyncio.wait_for(ready.wait(), 60)
+        row = registry.list_entries('h1')[-1]
+        sid, worktree = row['session_id'], row['cwd']
+        pending.cancel('fixture operation cancellation')
+        with pytest.raises(asyncio.CancelledError, match='fixture operation cancellation'):
+            await pending
+        row = registry.get('h1', sid)
+        assert row['start_sent'] is (stage == 'after')
+        assert row['status'] == ('failed' if stage == 'before' else 'uncertain')
+        assert mock.channels().count('claude:start-session') == (stage == 'after')
+        assert not bat_writes(mock, MANUAL) and 'worktree:remove' not in mock.channels()
+        pause.release.set()
+        monkeypatch.setattr(client, 'invoke', invoke)
+        await daemon.ops.drain(timeout=60)  # Process restart: replay the persisted started step.
+        result = daemon.ops.get(op['operation_id'])
+        assert result['status'] == 'succeeded', result
+        assert result['result']['session_id'] == sid
+        assert registry.get('h1', sid)['cwd'] == worktree
+        assert mock.channels().count('claude:start-session') == 1
+        assert mock.channels().count('claude:send-message') == 1
+        starts = [i for i in mock.invokes if i['channel'] == 'claude:start-session']
+        assert starts[0]['params']['sessionId'] == sid
+    finally:
+        if not pending.done():
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        await daemon.fleet.close()
+        await daemon.inventory.close()

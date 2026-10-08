@@ -25,7 +25,7 @@ from typing import Any
 from . import confinement, registry, resource_policy, verification
 from .errors import (
     BatError,
-    ConnectionLost,
+    InvokeError,
     InvokeTimeout,
     ResourceReadOnly,
     TaskDispatchCancelled,
@@ -471,13 +471,17 @@ async def _failover_one(
     prior = [
         e
         for e in registry.list_entries(host)
-        if e.get("failover_of") == sid and (e.get("status") in ("active", "starting") or e.get("start_uncertain"))
+        if e.get("failover_of") == sid and (e.get("status") in ("active", "starting") or e.get("start_uncertain")
+                                           or e.get("status") == "failed" and e.get("start_sent") is False)
     ]
     resume_entry = None
+    unsent_entry = None
     if prior:
         e = prior[-1]
         confinement.guard_start_record(e)
-        if e.get("start_uncertain") or e.get("status") == "starting":
+        if e.get("start_sent") is False:
+            unsent_entry = e  # Proven pre-transport failure: keep the reserved ID and handoff binding.
+        elif e.get("start_uncertain") or e.get("status") == "starting":
             try:
                 meta = await c.invoke("claude:get-session-meta", {"sessionId": e["session_id"]},
                                       retry_on_disconnect=False)
@@ -501,7 +505,7 @@ async def _failover_one(
             # These fields are reserved before the frame, just as for a confirmed
             # start. Older unsettled rows omitted branch and the handoff fence;
             # their start block ended before any handoff could be attempted.
-            fields = {"status": "active", "start_uncertain": False, "error_code": None,
+            fields = {"status": "active", "start_uncertain": False, "start_sent": True, "error_code": None,
                       "confinement": record, "cwd": e.get("cwd"), "worktree_path": e.get("worktree_path"),
                       "branch": e.get("branch") or (t.get("worktreeBranch")
                                 if e.get("worktree_path") == t.get("worktreePath") else None),
@@ -523,7 +527,8 @@ async def _failover_one(
                 and e["handoff_frame_sha256"] is None):
             if e.get("task_id") and e["task_id"] != task_id:
                 raise TaskIdentityMismatch("reserved task handoff requires its original task callbacks")
-            resume_entry = e
+            if not unsent_entry:
+                resume_entry = e
             model = e.get("model")
             archive_only = e.get("cleanup_policy") == "archive"
         else:
@@ -616,11 +621,12 @@ async def _failover_one(
     }
     if note:
         plan["note"] = note
-    if resume_entry and (resume_entry.get("cwd") != cwd
-                         or resume_entry.get("worktree_path") != (wt_path if same_worktree else None)
-                         or resume_entry.get("branch") != (branch if same_worktree else None)):
+    reserved = resume_entry or unsent_entry
+    if reserved and (reserved.get("cwd") != cwd
+                     or reserved.get("worktree_path") != (wt_path if same_worktree else None)
+                     or reserved.get("branch") != (branch if same_worktree else None)):
         raise TaskIdentityMismatch("reserved successor worktree changed before handoff recovery")
-    new_sid = resume_entry["session_id"] if resume_entry else successor_session_id or str(uuid.uuid4())
+    new_sid = reserved["session_id"] if reserved else successor_session_id or str(uuid.uuid4())
     if same_worktree:
         grant = await resource_policy.authorize_shared_session(fleet, host, new_sid, t)
     else:
@@ -640,10 +646,10 @@ async def _failover_one(
         opts["model"] = model
     # A successor of a confined session stays confined; it carries the same person's context.
     confined = (old_reg or {}).get("write_scope") == "confined"
-    if resume_entry:
+    if reserved:
         # Recovery must not reapply today's host policy to an already running session.
-        perm = confinement.recorded_options(resume_entry)
-        scope, confinement_record = resume_entry.get("write_scope"), resume_entry["confinement"]
+        perm = confinement.recorded_options(reserved)
+        scope, confinement_record = reserved.get("write_scope"), reserved["confinement"]
     else:
         perm, scope, confinement_record = await confinement.start_decision(
             fleet, host, "codex", confined=confined, task=bool(task_id), predecessor=old_reg if confined else None)
@@ -652,7 +658,7 @@ async def _failover_one(
     if same_worktree:
         opts.update(useWorktree=True, worktreePath=wt_path, worktreeBranch=branch)
     base = {"actor": fleet.actor, "tool": "session_failover", "host": host, "session_id": new_sid}
-    mid = resume_entry["handoff_message_id"] if resume_entry else handoff_message_id or f"batc-{uuid.uuid4()}"
+    mid = reserved["handoff_message_id"] if reserved else handoff_message_id or f"batc-{uuid.uuid4()}"
     async with _write_lock(host):
         audit.check_rate(host, "#failover-" + sid)
         if resume_entry:
@@ -662,6 +668,9 @@ async def _failover_one(
                 return {"old_session_id": sid, "new_session_id": new_sid, "branch": current.get("branch"),
                         "cwd": current.get("cwd"),
                         "skipped": "already failed over (the Codex session is tracked in the registry)"}
+        if unsent_entry:
+            # Release a crash-before-frame starting row before the same-ID reservation.
+            registry.fail_reservation(host, new_sid, sid)
         existing = None if resume_entry else registry.reserve(
             host,
             {
@@ -679,6 +688,7 @@ async def _failover_one(
                 "branch": branch if same_worktree else None,
                 "cwd": cwd,
                 "isolation": grant.isolation,
+                "start_sent": False,
                 "confinement": confinement_record,
                 **registry_permission_fields(opts),
                 **({"write_scope": "confined"} if confined else {}),
@@ -707,11 +717,13 @@ async def _failover_one(
         if not resume_entry:
             audit.record(**base, channel="claude:start-session", phase="attempt", preset=preset, failover_of=sid)
             start_confirmed = False
+            start_frame = confinement.StartFrame(host, new_sid)
             meta = None
             try:
                 started = await c.invoke("claude:start-session", {"sessionId": new_sid, "options": opts},
                                          grant=grant,
-                                         before_frame=lambda: confinement.guard_start_frame(fleet, host, confinement_record))
+                                         before_frame=lambda: confinement.guard_start_frame(fleet, host, confinement_record),
+                                         on_transport=start_frame.on_transport)
                 if (not isinstance(started, dict) or started.get("ok") is False or
                         started.get("sessionId") != new_sid):
                     raise WriteRefused("BAT failover start did not confirm the reserved session ID")
@@ -726,17 +738,17 @@ async def _failover_one(
                 confinement_record = confinement.confirm(confinement_record, meta)
             except BaseException as e:
                 audit.record(**base, channel="claude:start-session", phase="result", ok=False, error=_err(e))
-                if getattr(e, "sent", None) is False and not start_confirmed:
+                if not start_frame.sent and not start_confirmed:
                     registry.fail_reservation(host, new_sid, replaces)
-                    registry.update(host, new_sid, start_sent=False)
-                elif (start_confirmed or isinstance(e, (InvokeTimeout, ConnectionLost))
-                      or confined and isinstance(e, confinement.ConfinementRefused)):
+                    registry.update(host, new_sid, start_sent=False, start_uncertain=False,
+                                    error_code=getattr(e, "code", None))
+                elif isinstance(e, InvokeError) and not start_confirmed:
+                    registry.fail_reservation(host, new_sid, replaces)
+                else:
                     registry.update(host, new_sid, status="uncertain" if start_confirmed else "starting",
                                     start_uncertain=True, error_code=getattr(e, "code", "START_UNSETTLED"),
                                     **({"confinement": confinement.confirm(confinement_record, meta)}
                                        if start_confirmed else {}))
-                else:
-                    registry.fail_reservation(host, new_sid, replaces)
                 raise
             audit.record(**base, channel="claude:start-session", phase="result", ok=True)
             registry.update(
