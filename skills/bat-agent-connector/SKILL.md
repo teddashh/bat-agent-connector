@@ -91,7 +91,9 @@ asks with its repo context and states its interpretation in one line. For parall
 workspace's most recent connector-managed session; a person's BAT sessions are never written to. When there is none,
 or the target is read-only (`no_session` / `read_only`), retry with `start_if_missing=true`: that starts a new Codex
 session in its own worktree with the same text. If the target is busy or quota-stopped use `fanout_plan_session`
-instead, wait, then `fanout_from_plan` on the planner. After a relay or send, pass its `turn_marker` as `after=` to `session_wait` and `session_read`. For Claude, this matches BAT's exact echo ID. Check `turn_phase` and `turn_attribution`; queued output stays unconfirmed until the previous-turn boundary is observed. BAT Codex currently uses a weaker timestamp fallback, so do not claim its output is definitively tied to the send.
+instead, wait, then `fanout_from_plan` on the planner. It stops the managed planner only with `confirm=true`
+after every planned task starts. Refused or incomplete fan-out keeps the planner loaded for retry; its worktree
+always stays for `batc resource-cleanup`. After a relay or send, pass its `turn_marker` as `after=` to `session_wait` and `session_read`. For Claude, this matches BAT's exact echo ID. Check `turn_phase` and `turn_attribution`; queued output stays unconfirmed until the previous-turn boundary is observed. BAT Codex currently uses a weaker timestamp fallback, so do not claim its output is definitively tied to the send.
 Read the session's
 last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_continue`), NEED-<HUMAN> → ask the human.
 

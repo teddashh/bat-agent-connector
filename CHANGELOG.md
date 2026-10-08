@@ -29,6 +29,9 @@
   mutation and keeps the worktree.
   Locked checks explicitly close host stdin on refusal or timeout, including on Python 3.10, so a failed read
   aborts immediately instead of leaving the helper waiting for its deadline.
+  Fan-out stops its planner only with caller confirmation and every planned task successfully started. Refused
+  confirmation, a failed start or an incomplete loop keeps the planner and its plan for retry, with a reason and
+  a resource-cleanup next action; its worktree always stays.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
