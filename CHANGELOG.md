@@ -17,12 +17,15 @@
 - `/api/v1` on the task daemon (`batc serve`), sharing its loopback listener, journal and owner lock
   (docs/design/api-v1.md). Durable operations (`session.send`, `session.answer`, `session.interrupt`) with
   actor-scoped idempotency keys, steps whose intent is committed before the BAT call, and `uncertain` outcomes
-  settled by read-back instead of resending. API tokens per actor and scope (`batc api-token`); the actor always
+  settled by read-back instead of resending (a lost send reply is found in BAT's transcript; a cancel waits for the
+  read-back; `needs_attention` operations can be resumed with `POST …/resume`, `operation_resume` or
+  `batc op ID --resume`). API tokens per actor and scope (`batc api-token`); the actor always
   comes from the token. A persisted session inventory refreshed through a read-only fleet, with keyset paging,
   `stale` rows for unreachable hosts and `gone` after two misses. One persistent event cursor (`api_events`) for
   tasks, operations, sessions and hosts, with SSE and `Last-Event-ID`. New MCP tools `operation_submit`,
   `operation_get`, `operations_list`, `operation_cancel`, `inventory_sessions`, `inventory_hosts`,
-  `events_list`, `capabilities_get` (set `BATC_API_TOKEN` to act as your own principal) and CLI `batc op`.
+  `events_list`, `capabilities_get` and CLI `batc op`. MCP operation writes need `confirm=true` and the client's own
+  `BATC_API_TOKEN`; they never run as the local admin.
 - Sessions a person created in BAT are read-only through every tool. A new resource policy
   (`resource_policy.py`, docs/design/resource-policy.md) classifies sessions as `manual`, `connector_managed` or
   `unknown`, checks that a managed session's folder is one the connector owns (a `managed_roots` folder or a
@@ -33,10 +36,11 @@
   `DESTINATION_MANUAL`, ...).
 - Behaviour changes: `session_relay` targets the workspace's most recent connector-managed session and, with
   `start_if_missing`, starts a new worktree session instead of writing to a person's session; failover only continues
-  connector-managed sessions; `worktree_merge` and cleanup merges only target a main checkout inside `managed_roots`
-  (otherwise `DESTINATION_MANUAL` / ESCALATE); the fan-out planner runs in its own worktree; `session_start` refuses
-  `use_worktree=false` outside a managed root; cleanup keeps (never stops) BAT sessions and connector sessions left
-  in a human checkout.
+  connector-managed sessions (`all_exhausted` lists the others under `skipped_read_only`, outside the per-call cap);
+  `worktree_merge` and cleanup merges only target the main checkout recorded at start, inside `managed_roots`
+  (otherwise `DESTINATION_MANUAL` / `BINDING_MISMATCH` / ESCALATE); the fan-out planner runs in its own worktree;
+  `session_start` refuses `use_worktree=false` outside a managed root and any managed-root destination whose git
+  root resolves elsewhere; cleanup keeps (never stops) BAT sessions and connector sessions left in a human checkout.
 - New host settings `managed_roots` and `shared_clone_worktrees` (default true: worktrees may still be created
   inside a human clone, which shares its refs). New read tool `session_policy` / `batc policy`; `sessions_list`,
   `sessions_triage` and `worktree_status` rows carry `provenance` and `api_access`.

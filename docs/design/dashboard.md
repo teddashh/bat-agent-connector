@@ -23,7 +23,7 @@
 | Sessions | 依主機與存取方式篩選；每列標出 Connector 管理或 API 唯讀、資料過期原因 | `sessions`（keyset 分頁） | — |
 | Session | 基本資料、來源、最近訊息 | `sessions/{host}/{sid}`、`…/messages` | Managed：送出（session 執行中預設排隊）、中斷、回答問題或權限。人工建立：只顯示唯讀說明 |
 | 成果與 GitHub | PR 的 head／base、checks、可合併狀態 | `repositories/{o}/{r}/pulls/{n}` | 合併、合併並部署到各 recipe、已合併時部署合併版本 |
-| 操作紀錄／操作 | 狀態、原因、步驟、`external_refs`、結果 | `operations`、`operations/{id}` | 取消；合併並部署失敗時以 `merged_sha` 重試部署 |
+| 操作紀錄／操作 | 狀態、原因、步驟、`external_refs`、結果 | `operations`、`operations/{id}` | 取消；`needs_attention` 時重新執行（resume）；合併並部署失敗時以 `merged_sha` 重試部署 |
 | 連線 | 輸入 API token，顯示 actor 與 scopes | `capabilities` | — |
 
 按鈕不會因為 scope 不足而隱藏：送出後由 API 回 403，畫面顯示「你的 token 沒有這個權限」。授權只在後端判斷。

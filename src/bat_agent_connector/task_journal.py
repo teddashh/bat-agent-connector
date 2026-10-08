@@ -188,7 +188,7 @@ class Journal:
                 status TEXT NOT NULL, status_reason TEXT, error_code TEXT, result TEXT,
                 external_refs TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0,
                 version INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
-                next_run_at REAL NOT NULL DEFAULT 0,
+                uncertain_tries INTEGER NOT NULL DEFAULT 0, next_run_at REAL NOT NULL DEFAULT 0,
                 created_at REAL NOT NULL, updated_at REAL NOT NULL, UNIQUE(actor, idem_key)
             );
             CREATE INDEX IF NOT EXISTS operations_due ON operations(status, next_run_at);
@@ -226,6 +226,8 @@ class Journal:
                                ("task_path", "TEXT NOT NULL DEFAULT 'standard'")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {sql_type}")  # noqa: S608 - fixed local identifiers
+        if "uncertain_tries" not in {r[1] for r in self.db.execute("PRAGMA table_info(operations)")}:
+            self.db.execute("ALTER TABLE operations ADD COLUMN uncertain_tries INTEGER NOT NULL DEFAULT 0")
         cap_columns = {r[1] for r in self.db.execute("PRAGMA table_info(capabilities)")}
         if "command_id" not in cap_columns:
             self.db.execute("ALTER TABLE capabilities ADD COLUMN command_id TEXT")

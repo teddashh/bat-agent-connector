@@ -35,7 +35,8 @@ ALLOWED = {
                 "failed", "cancelled"},
     "waiting_checks": {"running", "cancelled"},
     "waiting_external": {"running", "cancelled"},
-    "uncertain": {"running", "needs_attention", "cancelled"},
+    # No uncertain -> cancelled: a cancel waits for the read-back, so "cancelled" never hides a step that ran.
+    "uncertain": {"running", "needs_attention"},
     "needs_attention": {"running", "cancelled", "failed"},
 }
 UNCERTAIN_RETRY_S = (30.0, 60.0, 120.0, 300.0, 600.0)
@@ -172,7 +173,10 @@ class OpContext:
             if row["status"] == "failed":
                 err = json.loads(row["error"] or "{}")
                 raise StepFailed(err.get("code", "STEP_FAILED"), err.get("message", "step failed earlier"))
-            recovered = await reconcile(json.loads(row["request"])) if reconcile else None
+            try:
+                recovered = await reconcile(json.loads(row["request"])) if reconcile else None
+            except (*AMBIGUOUS, BatError, OSError):  # the read-back itself failed: still unproven, try later
+                recovered = None
             if recovered is None:
                 self.service._step_status(self.operation_id, name, "uncertain")
                 raise Uncertain(name, f"outcome of step {name!r} is not proven; reading it back again later")
@@ -185,7 +189,7 @@ class OpContext:
             self.service._step_start(self.operation_id, name, request or {})
         try:
             response = await fn()
-        except AMBIGUOUS as exc:
+        except (*AMBIGUOUS, OSError) as exc:  # OSError: local bookkeeping may fail after the external call
             self.service._step_status(self.operation_id, name, "uncertain",
                                       error={"code": "UNCERTAIN", "message": redact(f"{type(exc).__name__}: {exc}")})
             raise Uncertain(name, f"step {name!r} may or may not have happened ({type(exc).__name__})") from None
@@ -265,7 +269,8 @@ class OperationService:
 
     def _transition(self, operation_id: str, status: str, *, reason: str | None = None,
                     error_code: str | None = None, result: dict | None = None, next_run_at: float = 0.0,
-                    attempts: int | None = None) -> dict:
+                    attempts: int | None = None, uncertain_tries: int | None = None,
+                    actor: str | None = None) -> dict:
         with self.journal.tx():
             row = self.db.execute("SELECT * FROM operations WHERE operation_id=?", (operation_id,)).fetchone()
             if row is None:
@@ -277,16 +282,16 @@ class OperationService:
                 raise ValueError(f"operation transition {old} -> {status} is not allowed")
             now = time.time()
             self.db.execute("""UPDATE operations SET status=?,status_reason=?,error_code=?,
-                result=COALESCE(?,result),next_run_at=?,attempts=COALESCE(?,attempts),version=version+1,
-                updated_at=? WHERE operation_id=?""",
+                result=COALESCE(?,result),next_run_at=?,attempts=COALESCE(?,attempts),
+                uncertain_tries=COALESCE(?,uncertain_tries),version=version+1,updated_at=? WHERE operation_id=?""",
                             (status, (reason or "")[:500] or None, error_code,
-                             _canonical(result) if result is not None else None, next_run_at, attempts, now,
-                             operation_id))
+                             _canonical(result) if result is not None else None, next_run_at, attempts,
+                             uncertain_tries, now, operation_id))
             if status != old:
                 self.journal.api_event("operation", operation_id, "operation." + status,
                                        {"action": row["action"], "from": old, "to": status,
                                         "error_code": error_code, "reason": (reason or "")[:200] or None},
-                                       actor=row["actor"])
+                                       actor=actor or row["actor"])
         return self._row(operation_id)
 
     def _merge_refs(self, operation_id: str, refs: dict) -> None:
@@ -366,19 +371,53 @@ class OperationService:
         self.kick()
         return self._row(operation_id), True
 
+    def _may_steer(self, principal: Principal, op: dict, verb: str) -> None:
+        adef = self.actions.get(op["action"])
+        if not (op["actor"] == principal.actor or principal.admin or (adef and principal.allows(adef.scope))):
+            raise OperationError("FORBIDDEN", f"{verb} needs the operation's own actor or its {op['action']} scope",
+                                 403)
+
+    def _running(self, operation_id: str) -> bool:
+        task = self._active.get(operation_id)
+        return task is not None and not task.done()
+
     def cancel(self, principal: Principal, operation_id: str) -> dict:
+        """Stop an operation before its next step. A step that may already have run is read back first, so a
+        cancelled operation never hides an action that happened."""
         op = self.get(operation_id, steps=False)
-        if op["actor"] != principal.actor and not principal.admin:
-            raise OperationError("FORBIDDEN", "only the operation's actor or the admin can cancel it", 403)
+        self._may_steer(principal, op, "cancel")
         if op["status"] in TERMINAL:
             return op
         self.db.execute("UPDATE operations SET cancel_requested=1,updated_at=? WHERE operation_id=?",
                         (time.time(), operation_id))
-        if op["status"] in {"accepted", "waiting_checks", "waiting_external", "uncertain", "needs_attention"} \
-                and operation_id not in self._active:
-            return self._transition(operation_id, "cancelled", reason="cancelled before the next step")
+        if not self._running(operation_id):
+            if op["status"] in {"accepted", "waiting_checks", "waiting_external"}:
+                return self._transition(operation_id, "cancelled", actor=principal.actor,
+                                        reason=f"cancelled by {principal.actor} before the next step")
+            if op["status"] == "needs_attention":
+                open_steps = [r["name"] for r in self.db.execute(
+                    "SELECT name FROM operation_steps WHERE operation_id=? AND status IN ('started','uncertain')",
+                    (operation_id,))]
+                note = f"; the outcome of {', '.join(open_steps)} was never proven" if open_steps else ""
+                return self._transition(operation_id, "cancelled", actor=principal.actor,
+                                        reason=f"cancelled by {principal.actor}{note}")
+            if op["status"] == "uncertain":  # read the step back now; the run stops before any new step
+                self.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (operation_id,))
         self.kick()
         return self.get(operation_id, steps=False)
+
+    def resume(self, principal: Principal, operation_id: str) -> dict:
+        """Run a needs_attention operation again: finished steps replay, an unproven step is read back (never
+        re-sent), and the handler's checks run afresh."""
+        op = self.get(operation_id, steps=False)
+        self._may_steer(principal, op, "resume")
+        if op["status"] != "needs_attention":
+            raise OperationError("NOT_RESUMABLE", f"only needs_attention operations resume (this one is "
+                                 f"{op['status']})", 409)
+        op = self._transition(operation_id, "running", reason=f"resumed by {principal.actor}", uncertain_tries=0,
+                              actor=principal.actor)
+        self.kick()
+        return op
 
     # ------------------------------------------------------------------ execution
     def kick(self) -> None:
@@ -392,9 +431,11 @@ class OperationService:
             AND next_run_at<=? ORDER BY created_at""", (*RUNNABLE, now)).fetchall()  # noqa: S608
         for row in rows:
             op_id = row["operation_id"]
-            task = self._active.get(op_id)
-            if task is None or task.done():
-                self._active[op_id] = asyncio.create_task(self._execute(op_id), name=f"op-{op_id[:11]}")
+            if not self._running(op_id):
+                task = asyncio.create_task(self._execute(op_id), name=f"op-{op_id[:11]}")
+                self._active[op_id] = task
+                task.add_done_callback(
+                    lambda t, k=op_id: self._active.pop(k, None) if self._active.get(k) is t else None)
 
     async def loop(self, interval_s: float = 1.0) -> None:
         self._wake = asyncio.Event()
@@ -435,7 +476,7 @@ class OperationService:
             self._transition(operation_id, "failed", error_code="UNKNOWN_ACTION",
                              reason=f"no handler for {op['action']} in this connector version")
             return
-        if op["cancel_requested"] and op["status"] != "running":
+        if op["cancel_requested"] and op["status"] not in {"running", "uncertain"}:
             self._transition(operation_id, "cancelled", reason="cancelled before the next step")
             return
         if op["status"] != "running":
@@ -448,18 +489,21 @@ class OperationService:
         except Wait as w:
             if w.refs:
                 self._merge_refs(operation_id, w.refs)
-            self._transition(operation_id, w.status, reason=w.reason, next_run_at=time.time() + w.delay_s)
+            self._transition(operation_id, w.status, reason=w.reason, next_run_at=time.time() + w.delay_s,
+                             uncertain_tries=0)
         except NeedsAttention as n:
             self._transition(operation_id, "needs_attention", error_code=n.code, reason=n.message)
         except Uncertain as u:
-            tries = op["attempts"]
+            # Its own budget: resumes from waiting_* do not use up the read-backs.
+            tries = op["uncertain_tries"] + 1
             if tries > len(UNCERTAIN_RETRY_S):
-                self._transition(operation_id, "uncertain", error_code="UNCERTAIN", reason=u.message)
+                self._transition(operation_id, "uncertain", error_code="UNCERTAIN", reason=u.message,
+                                 uncertain_tries=tries)
                 self._transition(operation_id, "needs_attention", error_code="UNCERTAIN_UNRESOLVED",
                                  reason=f"{u.message}; read-back did not settle it after {tries} attempts")
             else:
                 self._transition(operation_id, "uncertain", error_code="UNCERTAIN", reason=u.message,
-                                 next_run_at=time.time() + UNCERTAIN_RETRY_S[max(0, tries - 1)])
+                                 next_run_at=time.time() + UNCERTAIN_RETRY_S[tries - 1], uncertain_tries=tries)
         except StepFailed as f:
             self._transition(operation_id, "failed", error_code=f.code, reason=f.message)
         except (OperationError, ResourceReadOnly, WriteRefused, BatError) as e:

@@ -393,6 +393,10 @@ async function viewOperation(main, id) {
             location.hash = `#/op/${o.operation_id}`;
           } catch (e) { panel.append(errorBox(e)); }
         } }, t("retry_deploy")) : null;
+      const resume = op.status === "needs_attention"
+        ? h("button", { class: "primary", title: t("resume_help"), onclick: async () => {
+          try { await api("POST", `/operations/${id}/resume`, {}); render(); } catch (e) { panel.append(errorBox(e)); }
+        } }, t("resume")) : null;
       const cancel = !["succeeded", "failed", "cancelled"].includes(op.status)
         ? h("button", { class: "danger", onclick: async () => {
           try { await api("POST", `/operations/${id}/cancel`, {}); render(); } catch (e) { panel.append(errorBox(e)); }
@@ -411,7 +415,7 @@ async function viewOperation(main, id) {
         h("h2", {}, t("steps")),
         ...op.steps.map(s => h("div", { class: "row" }, h("div", { class: "grow" }, s.name),
           h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)),
-        h("div", { class: "actions" }, retry, cancel));
+        h("div", { class: "actions" }, resume, retry, cancel));
     } catch (e) { panel.replaceChildren(errorBox(e)); }
   };
   await render();

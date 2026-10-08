@@ -387,6 +387,7 @@ async def _host_sessions(
                 st.get("pendingPermission"), "permission"
             )
             row["pending"] = p
+            row["pending_checked"] = True  # "pending": None is a fact only when this is set
             msgs = st.get("messages") or []
             for mm in reversed(msgs):
                 ms = ts_to_ms(mm.get("timestamp") or mm.get("completedAt")) if isinstance(mm, dict) else None
