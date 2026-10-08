@@ -104,9 +104,17 @@ Dashboard 的工作詳情可以從已連結的 checkpoint 直接派工：指示�
 | `hub/lib/completion.js` | `completion()`、`approve`／`continue` | 指紋含標題（Hub 的改名由人操作；這裡 agent 也能改名）；確認需要 `approve` scope |
 | `hub/lib/task-ids.js` | 隨機 ID、封存保留 | 不需要依日期編號與預約檔 |
 
+## Hub 匯入的來源與連結
+
+[hub-import.md](hub-import.md) 已實作 B05 的離線匯入：`hub.import.preview`／`hub.import.apply` 都需 manage。四個 phase steps 共用一個 apply operation，每列用 `_once(..., key=creation_reference)` 作 SQLite 交易與回執去重，沒有子 operation。原有 projects／work_items 的 NOT NULL UNIQUE operation_id 保留；匯入新列用 `<apply operation_id>#<record id>` creation reference。`split_creation_reference()` 在每個讀取投影真正的 operation_id 與 import_record，composite 不當作 operation ID 連結。
+
+列表與詳情附 source 標記，詳情保留原文、歷史完成、原始 parent／derivedFrom 與 shared snapshot reference。來源的完成簽核只作歷史事實，仍須現有 approve 流程。Hub parent 不寫 Task Service continuation；execution branch ID 不當 Git branch 名稱。
+
+`work_item.link` 新增 external_url：只接受最多 300 字的 HTTP(S) URL，拒絕 userinfo、控制字元／空白與非法 authority。連結仍用 work_item_links 與 removed_links，讀取不連網或猜 PR 身分；project 來源連結則留 source snapshot。S0／S1／D0／D1 比對保護人修改的內容、簽核、pins、order、links 與 archive；source_missing 不刪除或復原目的項目。
+
 ## 尚未涵蓋
 
-- 匯入 Project Hub 的資料（驗收 B05）：[hub-import.md](hub-import.md) 已有 Phase 1 規格，尚待審核與實作。工作項目的附件（W05b）也尚未實作。
+- 工作項目的附件（W05b）尚未實作。Hub 新版／壓縮匯出／衝突後 adopt-baseline 等仍見 hub-import.md 的尚未涵蓋。
 - 專案的階段與專案層級的完成確認。
 - 在專案之間移動工作項目。
 - `work_submit` 與 checkpoint 派工以外的入口自動建立連結。

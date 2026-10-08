@@ -175,6 +175,26 @@ the sessions, checkpoints, operations and PRs that carried it. An agent with `ma
 a token with `approve` accepts it, for the content it read, and editing the content afterwards asks again. Order,
 pins, renames and archive follow Project Hub's rules. See [docs/design/work-items.md](docs/design/work-items.md).
 
+To migrate Project Hub v4.68.2 data, a person first retires Hub and its dispatch, backs up the data, and registers a daemon-local snapshot directory. The importer reads it without running Hub, BAT or Git. Project directory IDs and task filenames map to stable Connector IDs; requests, hierarchy, order, pins, historical completion and external links are preserved. Reimports leave unchanged rows untouched and block conflicting local edits. Hub approvals remain historical facts; a person still approves completion in Connector. This is a human migration workflow, not a recurring agent task. See the [import contract and retirement procedure](docs/design/hub-import.md).
+
+```toml
+[[hub_import.sources]]
+id = "hub-fixture"
+path = "/srv/import-fixtures/hub-snapshot"
+runtime_retired = true  # person's declaration, after retiring Hub
+```
+
+Restart the daemon after configuring it. Use an API principal with `manage` for both actions (`observe` for reads):
+
+```bash
+batc hub show
+batc hub import --source hub-fixture --preview
+batc hub import --source hub-fixture --apply --preview-id hip_...
+batc hub show op_...
+```
+
+Review the preview's counts, changes and blockers before applying. Previews are actor-bound and expire after 24 hours; stale sources or destinations stop the apply. CLI, HTTP `POST /api/v1/operations`, MCP `operation_submit` (`hub.import.preview` / `hub.import.apply`) and the Projects import entry use the same action. MCP reads are `hub_import_sources` / `hub_import_get`; HTTP reads are `/api/v1/hub-import/sources`, `/previews/{hip_id}`, `/imports/{op_id}`. Sources are selected by ID, with no browser paths. Apply receipts expose partial progress and can resume through the existing operation controls; source/destination changes require cancelling the stopped apply and previewing again.
+
 ### Connect an MCP client
 
 The server name is `bat`. Examples (add `--read-only` if you want to be sure):
@@ -215,6 +235,7 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 
 | Tool | What it does |
 |---|---|
+| `hub_import_sources()`, `hub_import_get(preview_id? \| operation_id?)` | Configured offline sources, an actor-bound preview or apply receipts; no source paths accepted. |
 | `hosts_list(probe=true)` | Configured hosts; with probe: reachable, server version, ping. |
 | `host_status(host)` | Version, protocol, connect/auth/ping latency, counts of workspaces/terminals/agent sessions/loaded/streaming. |
 | `workspaces_list(host?)` | Workspaces with folder and session counts. |
