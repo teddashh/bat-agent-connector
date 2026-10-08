@@ -34,13 +34,25 @@ defined here. Register the executable from that same installation through the
 runtime's standard MCP client settings; for clients using `mcpServers`:
 
 ```json
-{"mcpServers":{"bat":{"command":"bat-agent-connector-mcp","args":[]}}}
+{"mcpServers":{"bat":{"command":"bat-agent-connector-mcp","args":["--principal-only"]}}}
 ```
 
-This configuration exposes the workflow tools; existing host write/orchestration
-settings and the caller's action scopes still authorize each operation. For an
-observation-only installation, set `args` to `["--read-only"]`: that option omits
-write tools entirely, so adding token scopes cannot enable them.
+`--principal-only` exposes central reads, durable operations and task adapters.
+Every call requires `BATC_API_TOKEN`; missing credentials never fall back to the
+local admin file or a task capability. The daemon checks the caller's action
+scopes and its own host configuration. Direct Fleet tools such as `session_send`,
+`session_start`, relay, fan-out, permissions and legacy cleanup are omitted even
+when the MCP host configuration enables writes. Use advertised central actions
+through `operation_submit`; unavailable legacy behavior remains unavailable.
+Task status/result/events reads require `observe` and carry the same token.
+
+For an observation-only installation, use
+`["--principal-only", "--read-only"]`: write tools are omitted entirely, so adding
+token scopes cannot enable them. The default profile without `--principal-only`
+retains operator compatibility, including direct Fleet tools and local-admin read
+fallback. It is not a scope-isolated agent endpoint. A shared HTTP MCP endpoint
+must already run this profile with the intended agent's server-side token; clients
+cannot select another principal by passing tool arguments.
 
 The operator supplies this agent's `BATC_API_TOKEN` through the MCP server's
 environment/secret configuration, and `BATC_TASK_URL` when the daemon endpoint

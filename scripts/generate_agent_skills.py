@@ -20,7 +20,7 @@ GENERATOR = "scripts/generate_agent_skills.py"
 ADAPTERS = {
     "hermes": """## Hermes adapter
 
-Register `bat-agent-connector-mcp` as `bat` in Hermes's MCP configuration
+Register `bat-agent-connector-mcp --principal-only` as `bat` in Hermes's MCP configuration
 (`~/.hermes/config.yaml`, `mcp_servers.bat`). Tools may appear as
 `mcp__bat__capabilities_get`; use the names actually returned by tool discovery.
 Use the operator-configured stdio or streamable HTTP transport and supply this
@@ -31,8 +31,9 @@ operation with the same identity when available; a refusal still applies.
     "grokbot": """## Grokbot adapter
 
 Use the runtime's standard MCP client configuration to register
-`bat-agent-connector-mcp` (stdio), or the operator-configured streamable HTTP MCP
-endpoint. Discover the actual tool names; a runtime may add its own server prefix.
+`bat-agent-connector-mcp --principal-only` (stdio), or a principal-only streamable
+HTTP MCP endpoint configured for this agent. Discover the actual tool names;
+a runtime may add its own server prefix.
 Supply this agent's `BATC_API_TOKEN` through the server environment;
 `BATC_TASK_URL` selects the configured daemon RPC endpoint. This bundle assumes
 no Grokbot-specific installation path, command or Hermes dependency.
