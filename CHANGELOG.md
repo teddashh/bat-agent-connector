@@ -2,6 +2,13 @@
 
 ## Next release (unreleased)
 
+- Keep unsent same-ID starts retryable after a confirmed worktree rollback ([design](docs/design/confinement.md),
+  計畫 §06/§12/§28, A10; v2 A06). Clear the removed carrier's path/branch, restore the origin cwd and retain its
+  rollback audit, so retry creates a new worktree. Failed, cancelled or unconfirmed removal keeps the original
+  identity across repeated recovery attempts; only a matching read-back permits reuse. Task lead recovery uses
+  the same rule without changing its normal retain policy or task transitions. Sent starts remain fenced.
+  A10 still awaits W12 live acceptance.
+
 - Prove the full system Python closure before account-check interpreters execute ([design](docs/design/confinement.md),
   計畫 §06/§07/§12, A10). A bounded absolute-tool gate checks every stdlib/platform-stdlib entry, bytecode and
   extension, symlink hops/targets, zip and venv parents. Unknown layouts or incomplete scans report

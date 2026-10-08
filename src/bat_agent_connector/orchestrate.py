@@ -298,6 +298,10 @@ async def session_start(
                 "title": title,
                 "isolation": grant.isolation,
                 "start_sent": False,
+                # Preserve a retained carrier until its identity has been rechecked or removal confirmed.
+                **({k: previous[k] for k in ("cwd", "worktree_path", "branch", "worktree_rolled_back",
+                                             "rolled_back_worktree_path", "rolled_back_branch") if k in previous}
+                   if previous.get("start_sent") is False else {}),
                 # Recorded with the reservation, so a start proven later by read-back keeps them too.
                 **registry_permission_fields(perm),
                 "confinement": confinement_record,
@@ -317,6 +321,17 @@ async def session_start(
         start_frame = confinement.StartFrame(host, sid, journal=getattr(fleet, "confinement_journal", None),
                                              task_id=task_id)
         meta = None
+
+        async def rollback_worktree():
+            removed = await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": True}, grant=grant)
+            if not isinstance(removed, dict) or removed.get("success") is not True:
+                raise WriteRefused("unsent start's worktree rollback was not confirmed")
+            registry.update(host, sid, cwd=folder, worktree_path=None, branch=None,
+                            worktree_rolled_back=True, rolled_back_worktree_path=wt.get("worktreePath"),
+                            rolled_back_branch=wt.get("branchName"))
+            audit.record(**base, channel="worktree:remove", phase="rollback", ok=True,
+                         worktree_path=wt.get("worktreePath"), branch=wt.get("branchName"))
+
         try:
             if use_worktree:
                 if previous.get("start_sent") is False and previous.get("worktree_path"):
@@ -391,16 +406,14 @@ async def session_start(
                 if start_frame.sent or start_confirmed:
                     retain_on_error = True
                 elif worktree_created and not retain_on_error:
-                    await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": True}, grant=grant)
-                    audit.record(**base, channel="worktree:remove", phase="rollback", ok=True)
+                    await rollback_worktree()
                 raise
             except BatError as e:
                 if start_confirmed or start_frame.sent:
                     retain_on_error = True  # Even invoke-error may follow creation of the BAT session.
                 audit.record(**base, channel="claude:start-session", phase="result", ok=False, error=_err(e))
                 if worktree_created and not retain_on_error:  # may have reached BAT on timeout
-                    await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": True}, grant=grant)
-                    audit.record(**base, channel="worktree:remove", phase="rollback", ok=True)
+                    await rollback_worktree()
                 raise
             audit.record(**base, channel="claude:start-session", phase="result", ok=True)
         except BaseException as e:
