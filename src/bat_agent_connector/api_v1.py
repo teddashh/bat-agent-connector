@@ -23,6 +23,8 @@ API_VERSION = 1
 CONTRACT_VERSION = "2026-10-07"
 MAX_BODY = 200_000
 MAX_STREAMS = 16
+MAX_STREAMS_PER_ACTOR = 4
+REAUTH_S = 5.0  # an open event stream re-checks its token this often (revoked or expired tokens stop it)
 STREAM_MAX_S = 1800.0
 KEEPALIVE_S = 15.0
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -54,11 +56,24 @@ def _origin_ok(origin: str, allowed: tuple[str, ...]) -> bool:
     return parts.scheme in {"http", "https"} and _host_is_loopback(parts.netloc)
 
 
+def parse_wait(value) -> float:
+    if value in (None, ""):
+        return 0.0
+    try:
+        wait = float(value)
+    except (TypeError, ValueError):
+        raise ApiError(422, "INVALID_REQUEST", "wait must be a number of seconds") from None
+    if not 0 <= wait <= 60:
+        raise ApiError(422, "INVALID_REQUEST", "wait must be 0-60 seconds")
+    return wait
+
+
 class ApiV1:
     def __init__(self, daemon, *, allowed_origins: tuple[str, ...] = ()) -> None:
         self.daemon = daemon
         self.allowed_origins = allowed_origins
         self._streams = 0
+        self._streams_by_actor: dict[str, int] = {}
         self.routes = [
             ("GET", r"/api/v1/version", self.version, None),
             ("GET", r"/api/v1/capabilities", self.capabilities, "observe"),
@@ -71,26 +86,50 @@ class ApiV1:
             ("POST", r"/api/v1/operations", self.create_operation, None),
             ("GET", r"/api/v1/operations/(?P<op>op_[0-9a-f]{32})", self.operation, "observe"),
             ("POST", r"/api/v1/operations/(?P<op>op_[0-9a-f]{32})/cancel", self.cancel_operation, None),
+            ("POST", r"/api/v1/operations/(?P<op>op_[0-9a-f]{32})/resume", self.resume_operation, None),
             ("GET", r"/api/v1/events", self.events, "observe"),
             ("GET", r"/api/v1/tasks/(?P<task>[0-9a-f-]{8,64})", self.task, "observe"),
         ]
 
     # ------------------------------------------------------------------ plumbing
+    def _cors(self, headers: dict[str, str]) -> str:
+        """CORS headers only for an origin listed in [api] allowed_origins (the Dashboard itself is same-origin)."""
+        origin = headers.get("origin")
+        if not origin or origin not in self.allowed_origins:
+            return ""
+        return f"Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\n"
+
     async def handle(self, method: str, target: str, headers: dict[str, str], reader, writer) -> None:
+        cors = ""
         try:
             if not _host_is_loopback(headers.get("host", "")):
                 raise ApiError(400, "BAD_HOST", "Host must be a loopback address")
             origin = headers.get("origin")
             if origin and not _origin_ok(origin, self.allowed_origins):
                 raise ApiError(403, "BAD_ORIGIN", "origin is not allowed")
+            cors = self._cors(headers)
+            if method == "OPTIONS":  # preflight: no token is sent, so nothing is decided here but CORS
+                if not cors:
+                    raise ApiError(403, "BAD_ORIGIN", "cross-origin requests need [api] allowed_origins")
+                writer.write((
+                    "HTTP/1.1 204 No Content\r\n" + cors
+                    + "Access-Control-Allow-Methods: GET, POST\r\n"
+                    "Access-Control-Allow-Headers: Authorization, Content-Type, Idempotency-Key, Last-Event-ID\r\n"
+                    "Access-Control-Max-Age: 600\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").encode())
+                with contextlib.suppress(Exception):
+                    await writer.drain()
+                return
             parts = urlsplit(target)
             path, query = parts.path.rstrip("/") or "/", parse_qs(parts.query)
             body = await self._read_body(method, headers, reader)
-            principal = api_auth.authenticate(self.daemon.journal.db, self._bearer(headers), self.daemon._admin_token)
+            token = self._bearer(headers)
+            principal = api_auth.authenticate(self.daemon.journal.db, token, self.daemon._admin_token)
             if path == "/api/v1/events/stream" and method == "GET":
-                if principal is None or not principal.allows("observe"):
-                    raise ApiError(401, "UNAUTHORIZED", "a valid token with the observe scope is required")
-                await self._stream(query, headers, reader, writer)
+                if principal is None:
+                    raise ApiError(401, "UNAUTHORIZED", "a valid bearer token is required")
+                if not principal.allows("observe"):
+                    raise ApiError(403, "FORBIDDEN", "this route needs the 'observe' scope")
+                await self._stream(query, headers, reader, writer, token=token, principal=principal, cors=cors)
                 return
             fn, kwargs, scope = self._route(method, path)
             if fn != self.version:
@@ -113,7 +152,7 @@ class ApiV1:
             status, payload = 502, {"error": {"code": "BAT_ERROR", "message": service._err(e)[:300]}}
         except Exception as e:  # noqa: BLE001 - never echo internals
             status, payload = 500, {"error": {"code": "INTERNAL", "message": type(e).__name__}}
-        await self._send_json(writer, status, payload)
+        await self._send_json(writer, status, payload, cors)
 
     @staticmethod
     def _bearer(headers: dict[str, str]) -> str:
@@ -124,15 +163,18 @@ class ApiV1:
     async def _read_body(method: str, headers: dict[str, str], reader) -> dict:
         if method != "POST":
             return {}
-        try:
-            length = int(headers.get("content-length", "0"))
-        except ValueError:
-            raise ApiError(400, "BAD_LENGTH", "invalid Content-Length") from None
+        raw_length = headers.get("content-length", "0").strip()
+        if not raw_length.isdigit():
+            raise ApiError(400, "BAD_LENGTH", "invalid Content-Length")
+        length = int(raw_length)
         if length > MAX_BODY:
             raise ApiError(413, "TOO_LARGE", "request body is too large")
         if length == 0:
             return {}
-        raw = await asyncio.wait_for(reader.readexactly(length), 10)
+        try:
+            raw = await asyncio.wait_for(reader.readexactly(length), 10)
+        except (asyncio.TimeoutError, asyncio.IncompleteReadError):
+            raise ApiError(400, "BAD_LENGTH", "the body is shorter than its Content-Length") from None
         try:
             body = json.loads(raw)
         except ValueError:
@@ -154,11 +196,11 @@ class ApiV1:
         raise ApiError(404, "NOT_FOUND", "no such route")
 
     @staticmethod
-    async def _send_json(writer, status: int, payload: dict) -> None:
+    async def _send_json(writer, status: int, payload: dict, cors: str = "") -> None:
         raw = json.dumps(payload, ensure_ascii=False, default=str).encode()
         head = (f"HTTP/1.1 {status} {_REASONS.get(status, 'Error')}\r\nContent-Type: application/json\r\n"
                 f"Content-Length: {len(raw)}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
-                "Connection: close\r\n\r\n")
+                f"{cors}Connection: close\r\n\r\n")
         writer.write(head.encode() + raw)
         with contextlib.suppress(Exception):
             await writer.drain()
@@ -252,10 +294,10 @@ class ApiV1:
 
     async def create_operation(self, principal, query, body, headers, **_):
         key = headers.get("idempotency-key") or body.get("idempotency_key")
+        wait = parse_wait(self._q(query, "wait"))  # before anything is stored: a 422 must mean nothing happened
         op, created = self.daemon.ops.create(
             principal, action=body.get("action"), target=body.get("target"), params=body.get("params"),
             preconditions=body.get("preconditions"), idempotency_key=key, entry="http")
-        wait = float(self._q(query, "wait", 0) or 0)
         if wait > 0:
             op = await self.daemon.ops.wait(op["operation_id"], wait)
         return (202 if created else 200), {"operation": op, "created": created}
@@ -266,6 +308,9 @@ class ApiV1:
     async def cancel_operation(self, principal, op, **_):
         return 200, {"operation": self.daemon.ops.cancel(principal, op)}
 
+    async def resume_operation(self, principal, op, **_):
+        return 200, {"operation": self.daemon.ops.resume(principal, op)}
+
     async def events(self, query, **_):
         return 200, self.daemon.journal.api_events(
             self._int(query, "after", 0), self._int(query, "limit", 100),
@@ -275,21 +320,31 @@ class ApiV1:
         return 200, {"task": await self.daemon.call("work_status", {"task_id": task})}
 
     # ------------------------------------------------------------------ SSE
-    async def _stream(self, query: dict, headers: dict[str, str], reader, writer) -> None:
+    async def _stream(self, query: dict, headers: dict[str, str], reader, writer, *, token: str,
+                      principal, cors: str = "") -> None:
+        actor = principal.actor
         if self._streams >= MAX_STREAMS:
             raise ApiError(429, "TOO_MANY_STREAMS", "too many event streams are open")
+        if self._streams_by_actor.get(actor, 0) >= MAX_STREAMS_PER_ACTOR:
+            raise ApiError(429, "TOO_MANY_STREAMS", f"{actor} already has {MAX_STREAMS_PER_ACTOR} event streams open")
         try:
             after = int(headers.get("last-event-id") or self._q(query, "after", 0) or 0)
         except ValueError:
             raise ApiError(422, "INVALID_REQUEST", "after must be an integer") from None
         self._streams += 1
+        self._streams_by_actor[actor] = self._streams_by_actor.get(actor, 0) + 1
         hangup = asyncio.ensure_future(reader.read(1))  # a client never sends after the request: EOF = gone
         try:
-            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n"
-                         b"X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n")
+            writer.write(("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n"
+                          f"X-Content-Type-Options: nosniff\r\n{cors}Connection: close\r\n\r\n").encode())
             await asyncio.wait_for(writer.drain(), 10)
-            started = last_write = time.monotonic()
+            started = last_write = last_auth = time.monotonic()
             while time.monotonic() - started < STREAM_MAX_S:
+                if time.monotonic() - last_auth >= REAUTH_S:
+                    current = api_auth.authenticate(self.daemon.journal.db, token, self.daemon._admin_token)
+                    if current is None or not current.allows("observe"):
+                        return  # revoked or expired: stop sending; the client sees the stream end
+                    last_auth = time.monotonic()
                 page = self.daemon.journal.api_events(after, 100)
                 for ev in page["events"]:
                     data = json.dumps(ev, ensure_ascii=False, default=str)
@@ -312,3 +367,6 @@ class ApiV1:
         finally:
             hangup.cancel()
             self._streams -= 1
+            self._streams_by_actor[actor] -= 1
+            if not self._streams_by_actor[actor]:
+                del self._streams_by_actor[actor]

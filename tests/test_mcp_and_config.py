@@ -7,7 +7,13 @@ import pytest
 from bat_agent_connector.config import parse_config, tomllib
 from bat_agent_connector.errors import ConfigError
 from bat_agent_connector.importer import read_bat_profiles, render_hosts_toml
-from bat_agent_connector.mcp_server import ORCHESTRATE_TOOLS, READ_TOOLS, WRITE_TOOLS, build_server
+from bat_agent_connector.mcp_server import (
+    OPERATION_TOOLS,
+    ORCHESTRATE_TOOLS,
+    READ_TOOLS,
+    WRITE_TOOLS,
+    build_server,
+)
 from tests.conftest import make_config
 
 
@@ -17,12 +23,26 @@ async def _names(cfg, **kw):
 
 
 async def test_tool_registration_tiers(mock):
-    assert await _names(make_config(mock)) == set(READ_TOOLS)
-    assert await _names(make_config(mock, writes=True)) == set(READ_TOOLS + WRITE_TOOLS)
+    assert await _names(make_config(mock)) == set(READ_TOOLS + OPERATION_TOOLS)
+    assert await _names(make_config(mock, writes=True)) == set(READ_TOOLS + OPERATION_TOOLS + WRITE_TOOLS)
     assert await _names(make_config(mock, writes=True, orchestrate=True)) == set(
-        READ_TOOLS + WRITE_TOOLS + ORCHESTRATE_TOOLS
+        READ_TOOLS + OPERATION_TOOLS + WRITE_TOOLS + ORCHESTRATE_TOOLS
     )
     assert await _names(make_config(mock, writes=True, orchestrate=True), read_only=True) == set(READ_TOOLS)
+
+
+async def test_operation_tools_need_confirm_and_the_callers_own_token(mock, monkeypatch):
+    server, fleet = build_server(make_config(mock))
+    monkeypatch.delenv("BATC_API_TOKEN", raising=False)
+    for args, needle in (({"operation_id": "op_" + "0" * 32}, "confirm=true"),
+                         ({"operation_id": "op_" + "0" * 32, "confirm": True}, "BATC_API_TOKEN")):
+        try:
+            res = await server.call_tool("operation_cancel", args)
+            text = json.dumps(res.model_dump() if hasattr(res, "model_dump") else res, default=str)
+        except Exception as e:  # noqa: BLE001 - the server may raise the tool's refusal instead
+            text = str(e)
+        assert needle in text
+    await fleet.close()
 
 
 async def test_mcp_call_read_tool(mock):

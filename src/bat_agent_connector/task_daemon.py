@@ -35,7 +35,7 @@ from .task_verifier import ObservedVerifier, load_settings
 
 DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 # /rpc methods that share /api/v1's principals and OperationService (MCP and CLI enter here).
-API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_cancel": "?",
+API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
            "api_events": "observe", "inventory_sessions": "observe", "inventory_hosts": "observe",
            "api_capabilities": "observe"}
 ADMIN_RPC = {"api_token_issue", "api_token_revoke", "api_token_list", "work_reconcile_capability"}
@@ -162,12 +162,15 @@ class TaskDaemon:
         entry = params.pop("entry", None)
         entry = entry if entry in {"mcp", "cli"} else "rpc"
         if method == "op_submit":
+            try:  # validated before anything is stored, so an error means nothing happened
+                wait = min(max(float(params.get("wait_s") or 0), 0.0), 30.0)
+            except (TypeError, ValueError):
+                raise OperationError("INVALID_REQUEST", "wait_s must be a number of seconds", 422) from None
             op, created = self.ops.create(principal, action=params.get("action"), target=params.get("target"),
                                           params=params.get("params"), preconditions=params.get("preconditions"),
                                           idempotency_key=params.get("idempotency_key"), entry=entry)
-            wait = float(params.get("wait_s") or 0)
             if wait > 0:
-                op = await self.ops.wait(op["operation_id"], min(wait, 30.0))
+                op = await self.ops.wait(op["operation_id"], wait)
             return {"operation": op, "created": created}
         if method == "op_get":
             return {"operation": self.ops.get(str(params.get("operation_id")))}
@@ -178,8 +181,11 @@ class TaskDaemon:
                                  limit=int(params.get("limit") or 50))
         if method == "op_cancel":
             return {"operation": self.ops.cancel(principal, str(params.get("operation_id")))}
+        if method == "op_resume":
+            return {"operation": self.ops.resume(principal, str(params.get("operation_id")))}
         if method == "api_events":
-            return self.journal.api_events(int(params.get("after") or 0), int(params.get("limit") or 100),
+            limit = params.get("limit")
+            return self.journal.api_events(int(params.get("after") or 0), 100 if limit is None else int(limit),
                                            resource_type=params.get("resource_type"),
                                            resource_id=params.get("resource_id"))
         if method == "inventory_sessions":
@@ -197,6 +203,8 @@ class TaskDaemon:
     async def call(self, method: str, params: dict, *, auth_token: str | None = None) -> dict:
         if method == "api_token_issue":
             ttl_days = params.get("ttl_days")
+            if ttl_days is not None and not float(ttl_days) > 0:
+                raise ValueError("ttl_days must be positive (omit it for a token that does not expire)")
             with self.journal.tx():
                 token = api_auth.issue(self.journal.db, params.get("actor"), params.get("scopes") or [],
                                        label=params.get("label"),
@@ -395,7 +403,7 @@ class TaskDaemon:
                 raise ValueError("request headers too large")
             lines = head.decode("ascii").split("\r\n")
             request_line = lines[0].split(" ")
-            if (len(request_line) == 3 and request_line[2] == "HTTP/1.1"
+            if (len(request_line) == 3 and request_line[2] in {"HTTP/1.0", "HTTP/1.1"}
                     and request_line[1].split("?", 1)[0].rstrip("/").startswith("/api/v1")):
                 headers: dict[str, str] = {}
                 for line in lines[1:]:
