@@ -2,6 +2,9 @@
 
 ## Next release (unreleased)
 
+- Keep session subscriptions after an initial observation/message read failure. Retry failed reads,
+  disable session actions until recovery, and preserve pending answers and the original operation key.
+
 - Present central session state evidence and discovery coverage, plus fixed-snapshot history and relations
   for sessions, known worktrees and executions. Retain loaded inventory pages using stable-ID order and
   identity-scoped dependencies. Safety reads keep parent archive restrictions current while drafts defer

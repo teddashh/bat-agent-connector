@@ -59,6 +59,12 @@ Session text drafts, original operation keys/IDs and checkpoint state stay in br
 
 Event acknowledgment now waits for asynchronous and debounced view refreshes, including all sibling reads on a failed batch. A locally displayed refresh error retains the original cursor/checkpoint pair and pauses mutations; polling retries the same page. Open edits defer renders and acknowledgment until they can refresh without discarding input. A pending refresh alone does not disable connected, version-checked form saves; an actual failed read or continuity reset does. Delayed refreshes are bound to the original account and mounted view. Mounted session events now refresh the observation header, pending questions/permissions and messages without replacing the composer or checkpoint forms. Pending answers are stored per identity and pending ID. Before answering, the client rereads the persisted pending observation and refuses a changed/missing ID; central still validates the live BAT frame because inventory reads are not write authority. Work-item pages refresh for linked operation/session/execution/checkpoint and parent-project events. Parent archive restrictions update immediately while an open edit remains intact; full rerender and acknowledgment wait until editing ends. Resource history/relations and discovery presentation are described below; complete M1 acceptance remains pending.
 
+Initial session/message read failures retain the mounted event subscription. Session writes remain
+disabled until those reads succeed; a one-second read retry can recover even before another journal
+event arrives. Event-driven refreshes join any in-flight retry and then read fresh evidence before
+acknowledgment. Navigation disposes the retry, and recovery preserves answer/composer drafts and
+existing operation keys.
+
 ## Shared delivery controls
 
 Delivery's environment cards, paginated history, rollback/retry confirmations and English/Traditional Chinese

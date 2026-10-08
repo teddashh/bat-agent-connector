@@ -2443,8 +2443,8 @@ async function viewSession(main, host, sid) {
 		} catch {}
 	};
 	const queue = h("input", { type: "checkbox" });
-	let row, pendingIdentity, sending = false;
-	const allowed = (action) => row?.api_access === "managed" && may("operate") && state.caps?.hosts?.find((item) => item.host === host)?.writes !== false && state.caps?.actions?.find((item) => item.action === action)?.allowed !== false;
+	let row, pendingIdentity, sending = false, readReady = false, refreshInFlight = null, readError = null;
+	const allowed = (action) => readReady && row?.api_access === "managed" && may("operate") && state.caps?.hosts?.find((item) => item.host === host)?.writes !== false && state.caps?.actions?.find((item) => item.action === action)?.allowed !== false;
 	const identity = (pend) => pend ? JSON.stringify({
 		kind: pend.kind,
 		toolUseId: pend.toolUseId,
@@ -2454,6 +2454,7 @@ async function viewSession(main, host, sid) {
 	}) : "";
 	const send = h("button", {
 		class: "primary",
+		disabled: true,
 		onclick: async () => {
 			if (!box.value.trim()) return;
 			const submitted = box.value;
@@ -2486,6 +2487,7 @@ async function viewSession(main, host, sid) {
 	}, t("send"));
 	const stop = h("button", {
 		class: "danger",
+		disabled: true,
 		onclick: async () => {
 			try {
 				assertView(connection);
@@ -2500,7 +2502,7 @@ async function viewSession(main, host, sid) {
 			}
 		}
 	}, t("interrupt"));
-	const composer = h("div", {}, box, h("div", { class: "actions" }, send, stop, h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
+	const composer = h("div", { hidden: true }, box, h("div", { class: "actions" }, send, stop, h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
 	const readonly = h("p", { class: "note" }, t("read_only_note"));
 	const controls = h("div", { class: "panel" }, pending, readonly, composer, status);
 	const cps = checkpointPanel(host, sid);
@@ -2543,10 +2545,12 @@ async function viewSession(main, host, sid) {
 		const card = h("div", { class: "panel" }, h("div", { class: "title" }, t("pending_" + pend.kind)));
 		if (pend.kind === "permission") card.append(h("p", {}, h("code", {}, pend.toolName || "")), h("p", { class: "msg" }, pend.input_preview || ""), h("div", { class: "actions" }, h("button", {
 			class: "primary",
+			"data-answer-action": "",
 			disabled: !pend.toolUseId || !allowed("session.answer"),
 			onclick: () => answer({ permission: "allow" })
 		}, t("allow")), h("button", {
 			class: "danger",
+			"data-answer-action": "",
 			disabled: !pend.toolUseId || !allowed("session.answer"),
 			onclick: () => answer({ permission: "deny" })
 		}, t("deny"))));
@@ -2579,11 +2583,17 @@ async function viewSession(main, host, sid) {
 			}
 			card.append(h("div", { class: "actions" }, h("button", {
 				class: "primary",
+				"data-answer-action": "",
 				disabled: !pend.toolUseId || !allowed("session.answer"),
 				onclick: () => answer({ answers: fields.map((f) => f.value) })
 			}, t("answer"))));
 		}
 		pending.append(card);
+	};
+	const updateControls = () => {
+		send.disabled = !allowed("session.send") || sending;
+		stop.disabled = !allowed("session.interrupt");
+		for (const button of pending.querySelectorAll("[data-answer-action]")) button.disabled = !row?.pending?.toolUseId || !allowed("session.answer");
 	};
 	const applyObservation = (data) => {
 		const first = !row;
@@ -2605,9 +2615,8 @@ async function viewSession(main, host, sid) {
 		const managed = row.api_access === "managed";
 		composer.hidden = !managed;
 		readonly.hidden = managed;
-		send.disabled = !allowed("session.send") || sending;
-		stop.disabled = !allowed("session.interrupt");
 		renderPending();
+		updateControls();
 	};
 	const loadObservation = async () => {
 		const data = await api("GET", path);
@@ -2620,24 +2629,48 @@ async function viewSession(main, host, sid) {
 		const items = read.messages.map((m) => h("div", { class: `msg ${m.role === "user" ? "user" : ""}` }, h("span", { class: "who" }, `${m.role || ""} · ${when(m.ts)}`), m.text || ""));
 		msgs.replaceChildren(...items.length ? items : [h("p", { class: "muted" }, t("no_messages"))]);
 	};
-	const refresh = async () => {
+	const refresh = async (fromEvent = false) => {
+		if (refreshInFlight) {
+			await refreshInFlight;
+			if (fromEvent) return refresh(true);
+			return;
+		}
+		refreshInFlight = (async () => {
+			try {
+				await settleRefreshes([loadObservation(), loadMessages()]);
+				readReady = true;
+				updateControls();
+				readError?.remove();
+				readError = null;
+			} catch (error) {
+				readReady = false;
+				updateControls();
+				readError = errorBox(error);
+				status.replaceChildren(readError);
+				throw error;
+			}
+		})();
 		try {
-			await settleRefreshes([loadObservation(), loadMessages()]);
-		} catch (error) {
-			status.replaceChildren(errorBox(error));
-			throw error;
+			await refreshInFlight;
+		} finally {
+			refreshInFlight = null;
 		}
 	};
 	try {
 		await settleRefreshes([refresh(), cps.load()]);
-	} catch {
-		return;
-	}
-	const reload = debounceRefresh(refresh, 500), reloadCps = debounceRefresh(cps.load, 500);
-	return onEvents((ev) => {
+	} catch {}
+	const retry = setInterval(() => {
+		if (!readReady && !refreshInFlight) refresh().catch(() => {});
+	}, 1e3);
+	const reload = debounceRefresh(() => refresh(true), 500), reloadCps = debounceRefresh(cps.load, 500);
+	const off = onEvents((ev) => {
 		observations.changed(ev);
 		return settleRefreshes([observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "work_item" ? reload() : Promise.resolve(), ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve()]);
 	});
+	return () => {
+		clearInterval(retry);
+		off();
+	};
 }
 function checkpointPanel(host, sid) {
 	const can = (state.caps?.features?.checkpoints || []).includes(host);
