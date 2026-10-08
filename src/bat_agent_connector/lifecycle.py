@@ -19,10 +19,9 @@ import hashlib
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable
 from typing import Any
 
-from . import confinement, registry, resource_policy, service, verification
+from . import confinement, registry, resource_policy, service, task_control, verification
 from .errors import (
     BatError,
     InvokeTimeout,
@@ -85,12 +84,18 @@ async def _candidate_head(c, cwd: str | None) -> str | None:
 async def session_record_verification(
     fleet: Fleet, host: str, session_id: str, candidate_commit: str, command: str,
     exit_code: int, environment: str, log_ref: str, confirm: bool = False,
+    _task_guard: task_control.FrameGuard | None = None,
 ) -> dict:
     """Record a trusted external test run for the current clean candidate commit."""
     _orch_guard(fleet, host, confirm)
     c = fleet.client(host)
     t, _ = await _resolve_session(c, session_id)
     sid = t["id"]
+    if task_control.owner_task(fleet, host, sid):
+        if (not isinstance(_task_guard, task_control.FrameGuard) or _task_guard.action != "verify"
+                or _task_guard.host != host or _task_guard.session_id != sid or not _task_guard.internal):
+            task_control.refuse_owned(fleet, host, sid)
+        _task_guard.check()
     cwd = t.get("worktreePath") or t.get("cwd")
     head = await _candidate_head(c, cwd)
     if not head or head != candidate_commit.lower():
@@ -98,6 +103,8 @@ async def session_record_verification(
     dirty = await _git_dirty(c, cwd)
     if dirty is None or dirty:
         raise WriteRefused("candidate working tree must be clean when recording verification")
+    if _task_guard:
+        _task_guard.check()
     row = verification.record(host, sid, candidate_commit=head, command=command, exit_code=exit_code,
                               environment=environment, log_ref=log_ref, actor=fleet.actor)
     Audit(fleet.config.safety).record(actor=fleet.actor, tool="session_record_verification", host=host,
@@ -111,6 +118,7 @@ class TurnInFlight(WriteRefused):
     """Raising a Claude session's mode mid-turn would abort the turn (see session_set_permissions)."""
 
 
+@task_control.guarded("permissions")
 async def session_set_permissions(
     fleet: Fleet,
     host: str,
@@ -118,6 +126,9 @@ async def session_set_permissions(
     mode: str = "allow_all",
     confirm: bool = False,
     force: bool = False,
+    _task_guard: task_control.FrameGuard | None = None,
+    control_version: int | None = None,
+    operation_id: str | None = None,
 ) -> dict:
     """Switch a live session's permission mode (Claude: permission mode; Codex: sandbox + approval).
 
@@ -176,7 +187,7 @@ async def session_set_permissions(
         for ch, params in calls:
             audit.record(**base, channel=ch, phase="attempt", mode=mode)
             try:
-                r = await c.invoke(ch, params, grant=grant, frame_guard=lambda _: (
+                r = await c.invoke(ch, params, grant=grant, before_send=_task_guard, frame_guard=lambda _: (
                     confinement.guard_raise(host, sid) if mode == "allow_all" else
                     confinement.guard_permissions(host, sid, o)))
             except BatError as e:
@@ -445,11 +456,7 @@ async def _failover_one(
     handoff_message_id: str | None = None,
     handoff_command_id: str | None = None,
     task_id: str | None = None,
-    before_handoff_send: Callable[[str], None] | None = None,
-    verify_handoff_successor: Callable[[], Awaitable[None]] | None = None,
-    verify_handoff_at_frame: Callable[[], Awaitable[None]] | None = None,
-    before_handoff_invoke: Callable[[], None] | None = None,
-    handoff_frame_guard: Callable[[dict], None] | None = None,
+    task_authority: task_control.TaskFailoverAuthority | None = None,
     authoritative_original: bool = False,
 ) -> dict:
     hc = fleet.config.host(host)
@@ -466,6 +473,23 @@ async def _failover_one(
             source.code,
             f"failover only continues connector-managed sessions; {sid[:8]}: {source.reason}. The source stays "
             "untouched: start a new managed worktree session (session_start) from its committed work instead")
+    owner_id = task_control.owner_task(fleet, host, sid)
+    before_handoff_send = verify_handoff_successor = verify_handoff_at_frame = None
+    before_handoff_invoke = handoff_frame_guard = None
+    if owner_id:
+        if (not isinstance(task_authority, task_control.TaskFailoverAuthority)
+                or not task_authority.valid_for(fleet, host, sid, owner_id)):
+            task_control.refuse_owned(fleet, host, sid)
+        task_authority.check()
+        task_id = task_authority.task_id
+        successor_session_id = task_authority.successor_session_id
+        handoff_command_id = task_authority.handoff_command_id
+        handoff_message_id = task_authority.handoff_message_id
+        before_handoff_send = task_authority.before_handoff_send
+        verify_handoff_successor = task_authority.verify_handoff_successor
+        verify_handoff_at_frame = task_authority.verify_handoff_at_frame
+        before_handoff_invoke = task_authority.before_handoff_invoke
+        handoff_frame_guard = task_authority.handoff_frame_guard
     prior = [
         e
         for e in registry.list_entries(host)
@@ -660,6 +684,12 @@ async def _failover_one(
     base = {"actor": fleet.actor, "tool": "session_failover", "host": host, "session_id": new_sid}
     mid = reserved["handoff_message_id"] if reserved else handoff_message_id or f"batc-{uuid.uuid4()}"
     async with _write_lock(host):
+        owner_id = task_control.owner_task(fleet, host, sid)
+        if owner_id:
+            if (not isinstance(task_authority, task_control.TaskFailoverAuthority)
+                    or not task_authority.valid_for(fleet, host, sid, owner_id)):
+                task_control.refuse_owned(fleet, host, sid)
+            task_authority.check()
         audit.check_rate(host, "#failover-" + sid)
         if resume_entry:
             current = registry.get(host, new_sid) or {}
@@ -721,7 +751,7 @@ async def _failover_one(
             meta = None
             try:
                 started = await c.invoke("claude:start-session", {"sessionId": new_sid, "options": opts},
-                                         grant=grant,
+                                         grant=grant, before_send=task_authority.check if owner_id else None,
                                          before_frame=lambda: confinement.guard_start_frame(fleet, host, confinement_record),
                                          on_transport=start_frame.on_transport)
                 if (not isinstance(started, dict) or started.get("ok") is False or
@@ -840,11 +870,7 @@ async def session_failover(
     handoff_message_id: str | None = None,
     handoff_command_id: str | None = None,
     task_id: str | None = None,
-    before_handoff_send: Callable[[str], None] | None = None,
-    verify_handoff_successor: Callable[[], Awaitable[None]] | None = None,
-    verify_handoff_at_frame: Callable[[], Awaitable[None]] | None = None,
-    before_handoff_invoke: Callable[[], None] | None = None,
-    handoff_frame_guard: Callable[[dict], None] | None = None,
+    task_authority: task_control.TaskFailoverAuthority | None = None,
     authoritative_original: bool = False,
 ) -> dict:
     """Continue quota-exhausted Claude session(s) with Codex in the same folder/worktree.
@@ -882,11 +908,7 @@ async def session_failover(
             handoff_message_id=handoff_message_id,
             handoff_command_id=handoff_command_id,
             task_id=task_id,
-            before_handoff_send=before_handoff_send,
-            verify_handoff_successor=verify_handoff_successor,
-            verify_handoff_at_frame=verify_handoff_at_frame,
-            before_handoff_invoke=before_handoff_invoke,
-            handoff_frame_guard=handoff_frame_guard,
+            task_authority=task_authority,
             authoritative_original=authoritative_original,
         )
     from .triage import sessions_triage
@@ -1160,7 +1182,7 @@ async def _evaluate(
         row["stop"] = stop
         return row
 
-    if e.get("task_id"):
+    if task_control.owner_task(fleet, host, sid):
         return decide("KEEP", "task-service owns this session; lifecycle cleanup is not its writer")
 
     if e.get("role") == "reviewer" and e.get("lead_session_id") and e.get("worktree_path"):
@@ -1415,7 +1437,8 @@ async def _stop(fleet: Fleet, host: str, sid: str, audit: Audit, *, cleanup: boo
     audit.check_rate(host, sid + "#stop")
     audit.record(**base, channel="claude:stop-session", phase="attempt")
     try:
-        r = await c.invoke("claude:stop-session", {"sessionId": sid}, grant=grant, retry_on_disconnect=not cleanup)
+        r = await c.invoke("claude:stop-session", {"sessionId": sid}, grant=grant, retry_on_disconnect=not cleanup,
+                           before_send=lambda: task_control.refuse_owned(fleet, host, sid))
     except BatError as e:
         if cleanup:
             raise
@@ -1545,7 +1568,8 @@ async def main_session(fleet: Fleet, host: str, workspace: str) -> dict | None:
     rows = [
         r for r in rows
         if r["session_id"] not in gone and r["session_id"] not in planners
-        and r["session_id"] not in task_owned and r.get("agent_kind") in ("claude", "codex")
+        and r["session_id"] not in task_owned and not task_control.owner_task(fleet, host, r["session_id"])
+        and r.get("agent_kind") in ("claude", "codex")
         and r.get("api_access") == "managed"
     ]
     main = [r for r in rows if not r.get("worktree_branch")] or rows

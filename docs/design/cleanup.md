@@ -84,6 +84,10 @@ guard／mark／release 只讀寫 flock 下 registry，不開 Fleet client；host
 範圍外的 active execution／command／有效 integration preview／resumable apply 也檢查依賴。
 History link 不是實體需求；未完成工作若有 command／operation 真正需要內容，列 content-required
 consumer。所有 consumer 從 authoritative tasks、commands、operations、previews 算出，不另存 consumers 表。
+Session 的 task ownership 使用共用 `task_control.owner_task`：registry task tag、current lead／reviewer、
+歷史 start command／branch 都沿用 Task Service 的來源。缺 registry tag 不會把 task carrier 變成
+standalone；preview、host flock 內的 phase gate 與 capacity retirement 都重查，仍以 TASK_OWNED 保留。
+Task external worktree 的 creation facts 只用來列舉該 task 自己的 carrier，不另推定 session owner。
 不透明附件參照永遠保留，不能當作 remote path。
 
 原 session ID（host/session_id）、task／command／work item／checkpoint／operation ID 不改。
@@ -372,6 +376,12 @@ remove.worktree／remove.temporary → remove.branch（只有 delivered）→ fi
 Phase 分類：preserve 是 additive；stop 是 runtime；discard、remove.worktree、remove.temporary、remove.branch
 是 destructive。其他 phase：validate 是 read-only，lock.session 是 coordination（其 locked_action 執行 stop），
 verify.retained／canonical_paths／observation 是 read-only，finalize 是 journal／registry metadata，不改 Git／runtime。
+Operations 合併後保留 cleanup 原有 transaction 邊界：cleanup_runs／初始 receipts 同一 journal tx；
+finalize 的 tombstone／aliases／receipt／event 同一 tx。這些 local writes 不加 `ctx.effect` 的 step，
+因為「尚無 external step」是 expiry／early refusal 釋放 reservation 的既有判定，不能被 local receipt
+改變。Registry guard／retirement 是獨立 filesystem effect，以 flock、generation 與既有 receipt 重播；
+不能包進 SQLite 的 effect tx。Stop／Git mutation 繼續使用 `ctx.step` 與 read-back；測試以
+`settle_operations` 等待持久結果，不以 best-effort drain 期限代替 settlement。
 Local branch 的 only=resource_id snapshot 保留 creation identity，重新觀測 branch；只允許 dependencies
 刪去本 operation 已有 succeeded worktree receipt 的 IDs。增加 dependency、刪去未成功 prerequisite 或任何
 其他欄位改變仍是 PREVIEW_STALE。若無 repository projection，原 actual is None fallback 仍沿用 reviewed

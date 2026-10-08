@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from bat_agent_connector import api_auth, cleanup, orchestrate, registry
+from tests.operation_helpers import settle_operations
 from tests.test_cleanup import (  # noqa: F401 - shared real Git/MockBat fixtures
     CLEANER,
     add_receipt,
@@ -66,7 +67,7 @@ async def linked_work_item(d, *refs):
 
     async def manage(action, target, params, key):
         op, _ = d.ops.create(person, action=action, target=target, params=params, idempotency_key=key)
-        await d.ops.drain(timeout=30)
+        await settle_operations(d.ops, timeout=30)
         done = d.ops.get(op["operation_id"])
         assert done["status"] == "succeeded", done
         return done["result"]

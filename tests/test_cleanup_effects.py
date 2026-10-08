@@ -10,6 +10,7 @@ import pytest
 
 from bat_agent_connector import cleanup, lifecycle, registry
 from bat_agent_connector.errors import ResourceReadOnly
+from tests.operation_helpers import settle_operations
 from tests.test_cleanup import change_live_cwd, registered_terminal_elsewhere
 from tests.test_cleanup_uncertainty import (  # noqa: F401 - shared real Git/MockBat fixtures
     CLEANER,
@@ -74,7 +75,7 @@ def partial(d, done, item, phase):
 
 async def resume(d, done):
     d.ops.resume(CLEANER, done["operation_id"])
-    await d.ops.drain(timeout=60)
+    await settle_operations(d.ops, timeout=60)
     return d.ops.get(done["operation_id"])
 
 

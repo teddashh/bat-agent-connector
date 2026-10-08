@@ -22,7 +22,7 @@ from importlib import resources
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
-from . import checkpoints, integration, lifecycle, registry, resource_policy, service
+from . import checkpoints, integration, lifecycle, registry, resource_policy, service, task_control
 from .api_auth import SCOPES
 from .cleanup_host import temporary_subset as _temporary_subset
 from .config import state_dir
@@ -450,9 +450,10 @@ def _all(ops):
             continue
         creation = f"{sid}@{e.get('created_at')}"
         path = e.get("worktree_path") or e.get("cwd") or e.get("origin_cwd")
+        task_id = task_control.owner_task(fleet, host, sid)
         session = add(_resource(host, "session", creation, sid, session_id=sid, path=path, registry=e,
-                               proven=bool(e.get("created_at")), task_owned=bool(e.get("task_id"))))
-        alias(session, sid, host + "/" + sid, e.get("task_id"))
+                               proven=bool(e.get("created_at")), task_owned=bool(task_id)))
+        alias(session, sid, host + "/" + sid, task_id)
         def lead_of(task_id, host=host):
             row = db.execute("SELECT session_id,external_worktree_path FROM tasks WHERE task_id=? AND host=?",
                              (task_id, host)).fetchone()
@@ -473,13 +474,13 @@ def _all(ops):
             # Out-of-root or unexpected-layout records remain visible, but confer no cleanup ownership.
             if recorded or root.get("task_id"):
                 w = wt(host, root.get("origin_root") or root.get("origin_cwd"), root["worktree_path"], root.get("branch"),
-                       intent[1], "bat", root.get("start_commit") or root.get("base_commit"), [host + "/" + sid, e.get("task_id")])
+                       intent[1], "bat", root.get("start_commit") or root.get("base_commit"), [host + "/" + sid, task_id])
                 if w:
                     w["proven"] = proven
         w = worktrees.get((host, root["worktree_path"] if root else path))
         if w:
-            alias(w, sid, host + "/" + sid, e.get("task_id"))
-            w["task_owned"] = w.get("task_owned", False) or bool(e.get("task_id"))
+            alias(w, sid, host + "/" + sid, task_id)
+            w["task_owned"] = w.get("task_owned", False) or bool(task_id)
             session["worktree_id"] = w["resource_id"]
             session["repository"] = w["repository"]
     # Include manual/unknown inventory and task leftovers even when the registry is incomplete.
@@ -487,10 +488,11 @@ def _all(ops):
         body = json.loads(r["body"])
         if any(i.get("session_id") == r["session_id"] and i["host"] == r["host"] for i in items.values()):
             continue
+        task_id = task_control.owner_task(fleet, r["host"], r["session_id"])
         item = add(_resource(r["host"], "session", "observed:" + r["session_id"], r["session_id"],
                              session_id=r["session_id"], path=body.get("cwd"), proven=False,
-                             provenance=r["provenance"]))
-        alias(item, r["host"] + "/" + r["session_id"])
+                             provenance=r["provenance"], task_owned=bool(task_id)))
+        alias(item, r["host"] + "/" + r["session_id"], task_id)
     for task in db.execute("SELECT * FROM tasks"):
         host, path = task["host"], task["external_worktree_path"]
         if path and (host, path) not in worktrees:
@@ -500,8 +502,7 @@ def _all(ops):
             if w:
                 w["task_owned"] = True
         for i in items.values():
-            if i["host"] == host and (i.get("path") == path or i.get("session_id") in
-                                     {task["session_id"], task["reviewer_session_id"]} - {None}):
+            if path and i["host"] == host and i.get("path") == path:
                 i["task_owned"] = True
                 alias(i, task["task_id"])
     links = [dict(r) for r in db.execute("SELECT * FROM work_item_links")]
@@ -1128,7 +1129,7 @@ def _capacity_ready(items):
     for item in items:
         entry = item.get("registry", {})
         if (item["kind"] != "session" or item["decision"] != "already_absent" or
-                entry.get("status") != "active" or entry.get("task_id")):
+                entry.get("status") != "active" or item.get("task_owned")):
             continue
         carrier = item.get("worktree_id")
         if carrier in absent_carriers or carrier is None and not entry.get("worktree_path"):
@@ -1307,6 +1308,11 @@ def _retire_absent_sessions(ctx, carrier_id=None):
         if item["kind"] != "session" or carrier_id is not None and carrier != carrier_id:
             continue
         entry = item.get("registry", {})
+        owner = task_control.owner_task(ctx.service.context["fleet"], item["host"], item["session_id"])
+        if owner and row["status"] in {"retained", "already_absent"}:
+            _receipt(ctx, item, row["status"], after={"capacity_released": False,
+                "registry_status": entry.get("status"), "capacity_reason": "task_owned"})
+            continue
         if row["status"] == "retained" and entry and (entry.get("status") != "active" or entry.get("task_id")):
             _receipt(ctx, item, "retained", after={"capacity_released": False, "registry_status": entry.get("status"),
                 "capacity_reason": "task_owned" if entry.get("task_id") else
@@ -1378,7 +1384,8 @@ async def _phase_consumers(ctx, item):
             recorded = e.get("worktree_path") or e.get("cwd")
             if not _inside(path, runtime.get("cwd")) and not _inside(path, recorded):
                 continue
-            if e.get("task_id") or e.get("status") in {"starting", "uncertain"} or e.get("handoff_status") == "pending":
+            if (task_control.owner_task(ops.context["fleet"], host, sid)
+                    or e.get("status") in {"starting", "uncertain"} or e.get("handoff_status") == "pending"):
                 raise OperationError("PREVIEW_STALE", "a task or unresolved start needs this worktree", 409)
             state = runtime.get("state") or {}
             if runtime.get("streaming") or state.get("isStreaming"):
