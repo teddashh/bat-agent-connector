@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-connector-request"
+description = "Enables the connector_request command without any pre-configured scope."
+commands.allow = ["connector_request"]
+
+[[permission]]
+identifier = "deny-connector-request"
+description = "Denies the connector_request command without any pre-configured scope."
+commands.deny = ["connector_request"]
