@@ -278,6 +278,7 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             r"operations/op_[0-9a-f]{32}|tasks/[0-9a-f-]{8,64}(?:/(?:history|sessions))?|checkpoints/cp_[0-9a-f]{32}|",
             r"hosts/[A-Za-z0-9_.-]+/discovery|worktrees/wt_[0-9a-f]{32}(?:/(?:history|relations))?|",
             r"projects/prj_[0-9a-f]{20}|work-items/wi_[0-9a-f]{20}|repositories/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pulls/[0-9]{1,9}|",
+            r"deployments(?:/(?:preview|dep_[0-9a-f]{32}))?|deployment-environments(?:/history)?|",
             r"delivery/previews/mpv_[0-9a-f]{32}|integrations/previews/ipv_[0-9a-f]{32}|integrations/op_[0-9a-f]{32})$")).unwrap())
     } else if input.method == "POST" {
         POST.get_or_init(|| {
@@ -312,6 +313,7 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
                 | "resource_id"
                 | "session_id"
                 | "repository"
+                | "recipe"
                 | "checkpoint"
                 | "project_id"
                 | "state"
@@ -436,6 +438,29 @@ mod tests {
         format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)
     }
     const CAPS: &str = r#"{"actor":"fixture-operator","api_version":1,"contract_version":"2026-10-08","scopes":["observe","operate"]}"#;
+
+    #[test]
+    fn delivery_reads_are_scoped_to_known_routes() {
+        for path in [
+            "/deployments/preview?recipe=production",
+            "/deployments?recipe=production&limit=5&cursor=page-proof",
+            "/deployments/dep_0123456789abcdef0123456789abcdef",
+            "/deployment-environments?recipe=production",
+            "/deployment-environments/history?recipe=production&limit=5&cursor=page-proof",
+        ] {
+            assert!(validate_request(&request("GET", path)).is_ok(), "{path}");
+            assert!(validate_request(&request("POST", path)).is_err(), "{path}");
+        }
+        for path in [
+            "/deployments/dep_untrusted",
+            "/deployments/preview?recipe=prod&url=https://other.example",
+            "/deployments/%2e%2e/hosts",
+            "/deployments/preview?recipe=prod%0aAuthorization%3Abad",
+            "/deployment-environments/history/all",
+        ] {
+            assert!(validate_request(&request("GET", path)).is_err(), "{path}");
+        }
+    }
 
     #[test]
     fn endpoints_require_a_trusted_origin() {

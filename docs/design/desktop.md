@@ -59,6 +59,28 @@ Session text drafts, original operation keys/IDs and checkpoint state stay in br
 
 This extraction persists a page after synchronously dispatching its invalidations; existing async/debounced view refreshes are not awaited by that acknowledgment. A later refresh failure can therefore coexist with an advanced replay cursor. Reopening fetches fresh views, but successful replay alone does not prove every mounted view is fresh. R04 still owns per-view refresh recovery/freshness gates, pending-control refresh, relations/history presentation, and linked operation/parent-project events.
 
+## Shared delivery controls
+
+Delivery's environment cards, paginated history, rollback/retry confirmations and English/Traditional Chinese
+labels now live in the same canonical `desktop/src` files. Browser assets are generated; the delivery backend
+retains operation ownership. Deployment and deployment-environment journal events invalidate these cards through
+the shared polling reader. Open confirmations keep their fixed identity and preview; a stale generation requires
+a refreshed preview and another explicit click. Stable identity-scoped intent keys survive a lost reply and reload.
+These cards have the same documented asynchronous view-refresh limitations as other views.
+
+The native bridge explicitly allows the delivery preview, record, environment and history GET routes and `recipe`
+query parameter. Deployment writes still go through `/operations` with the same envelope and idempotency key.
+The restricted native GitHub opener is unchanged; arbitrary provider/enterprise origins are not supported by it.
+
+`npm run test:delivery` runs the real daemon's delivery fixture with fake GitHub/BAT/runtime providers and serves
+this worktree's generated assets. It requires the delivery backend and its dev dependencies; while the changes
+are on separate branches, set `BATC_DELIVERY_ROOT` to that backend worktree. It covers both languages at
+390/768/1440px, cursor paging, readiness/scope refusals, fixed confirmations during polling, stale previews,
+double clicks, deploy-only retries, provider URL filtering, and lost-reply keys across reopening/reloading.
+Only a legacy backend's expected `/bootstrap` 404 is excluded from console-error checks; this does not claim
+checkpoint support for that backend. The CI UI fixtures separately exercise paired checkpoint polling through
+browser HTTP and mocked native IPC. Neither fixture is a live deployment or Windows WebView acceptance test.
+
 ## Packaging and lifecycle
 
 ```sh
