@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Delivery acknowledged metadata conflicts ([design](docs/design/delivery.md), plan §09/§10/§15, C07): save a
+  conflict settlement when an acknowledged PATCH reads back differently, releasing the PR for a fresh-digest update
+  while retaining needs_attention and its audit. Resume and reconciliation use the saved conclusion without GitHub
+  calls; refused readback keeps verification pending and the update lock until a successful read.
+
 - Delivery merge method ([design](docs/design/delivery.md), plan §09/§16, C05): execution, recorded steps and
   verification use the admitted preview's method across checks waits and restarts; current policy can block a PUT
   with MERGE_DISABLED/INVALID_PARAMS, but changing the default never changes the reviewed method.
