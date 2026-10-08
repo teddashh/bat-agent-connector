@@ -271,7 +271,7 @@ History／relations 的 `cursor_read` 共用同一驗證流程，endpoint 傳入
 |---|---|
 | `Observation.history` | `history_cursor_key` 在 decoder 內先驗 int，再讀 head；事件、索引、coverage SQL 都在驗證後。空 history 仍回相同 422。 |
 | `Observation.relations` | `relations_cursor_key` 在 decoder 內先驗兩元素 list，再讀 head；resource、revision、worktree ranges、commands SQL 及所有 row filters 都在驗證後。 |
-| `Inventory.list_sessions` | 使用既有獨立 decoder：filter hash 與 payload 在 query 前讀取，非 null key 的欄位數在 SQL 執行前驗證；id 為 host/session_id，activity 加 sort_key。不在 row loop 驗 cursor。保留動態 keyset 與事件 catch-up 契約，不新增 snapshot。 |
+| `Inventory.list_sessions` | 獨立 decoder 先驗完整 object schema：新游標恰為 `{v:1,f,a,k}`，相容舊 `{f,a,k}`；未知版本、額外／缺少欄位均拒絕。id key 恰為 `[host,session_id]`（UTF-8 字串），activity 恰為 `[sort_key,host,session_id]`，sort_key 為 SQLite signed 64-bit int（schema 與 writer 均為 INTEGER；bool／float／非有限值不接受）。as_of 必須為非 bool 整數且 `0 <= a <= api_head()`，不可 coercion；key、schema、型別驗證先於所有 SQL，head 範圍驗證先於 sessions／resource query。空目錄、排光的 filters、有結果均回既有 `INVALID_REQUEST`／422。保留動態 keyset 與事件 catch-up 契約，不新增 snapshot。 |
 | `Inventory.discovery`／`hosts_document(discovery=true)` | 無 opaque key；transitions 的 after／next_cursor 是全域整數 seq。委派 `Journal.api_events` 在事件 query 前驗非 bool、非負及不超過 head；latest scope 的讀取不參與 cursor 判定。 |
 | `Journal.api_events`、HTTP events 與 SSE | after 在事件 query 前驗型別／範圍；HTTP adapter 先解析整數，SSE 在送串流 headers 前用 api_events(after, 0) 驗證。是否有 matching events 不影響效力。 |
 
@@ -482,6 +482,7 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B01、B03；§08、§11 | `test_b01_b03_checkpoint_source_run_steps_and_worktree_history`、`test_b01_b03_receipt_versions_are_fixed_at_the_writer_transition`：真實 temp Git checkpoint/run 及 steps 的多資源 timeline 去重；receipt 在既有 writer 轉換時保存各版本，不以新結果改舊事件。 |
 | B01、B02；§10、§11 | `test_b01_history_as_of_late_binding_and_invalid_cursors`：history as_of 同時限制 event/linked_at；晚 binding 不進已開 snapshot，kind/order/resource/time 游標契約。 |
 | B01、B02；v2 §14（原 §10、§11） | `test_b01_cursor_keys_are_rejected_before_any_journal_read`：SQL trace 證明 history／relations 錯 key 在任何 journal read 前即回 INVALID_CURSOR／422。`test_b01_b02_relation_cursor_key_contract_is_independent_of_rows`：HTTP／MCP／CLI 對空 session／execution／worktree、execution_id 排光、include_closed=false 排光及有 rows 的資源，同樣拒絕字串、短 list、bool、錯型別與 null key；空 history 也拒絕，合法分頁沿用原測試。 |
+| B01、B02；v2 §14 | `tests/test_inventory_cursors.py`：同 filter 的惡意 session token（object／null／bool／非有限值／超過 SQLite 整數範圍／無效 UTF-8／未知 version／負數或超前 as_of）在 session query 前被拒絕；HTTP／MCP／CLI 對空目錄、filter 排光、有 rows 一致回 cursor 錯誤。id／activity 的新舊合法游標重開 journal 後仍完整分頁、無重複、保留原 as_of 並捕捉後續事件。 |
 | B02；§11 | `test_b02_two_hosts_one_offline_and_scope_change`、`test_b02_null_workspace_preserves_missing_counts_even_with_registry`：另一 host 持續成功、離線保留舊值；scope 改綁不再 host I/O；移除 host 仍可讀 history；壞 workspace 不算完整列舉。 |
 | B02；§11 | `test_b02_scope_change_stays_blocked_on_later_refreshes`：同 profile 改 URL／fingerprint，連續兩輪零 BAT frames；binding 與 binding_version 固定原值，attempted_binding_version 記被拒絕值；原身分及 history 不變。 |
 | B02；§11 | `test_b02_discovery_latest_no_poll_rows_and_no_host_fanout`、`test_b02_session_specific_stale_gone_fresh_and_get_no_writes`：每 profile 一筆 latest、相同 poll 不寫事件；host flap 不 fan-out；missing/gone/reappear/fresh 與 GET 零 writes。 |

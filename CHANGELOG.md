@@ -201,6 +201,11 @@
 
 - The A10 Linux account-check fixture isolates its fake `pathlib` import, keeping pytest's real `Path` intact on
   Python 3.10 and 3.11; the product's read-only check is unchanged.
+- Validate the complete session inventory cursor before reading session rows: versioned payload schema,
+  exact SQLite-compatible key types, and a non-coerced event boundary between zero and the journal head.
+  Malformed cursors consistently return 422 for empty, filtered and populated inventories; previously issued
+  unversioned cursors remain valid, including paging after a restart and catching up from the original boundary.
+
 - Bind task-effect observation history to the executing operation's persisted actor, entry point and ID.
   An unrelated RPC caller waking the shared scheduler cannot relabel other users' task events; observation
   context carries no authorization grants. Keep command/frame checks and transactional receipts unchanged.
