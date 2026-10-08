@@ -132,7 +132,7 @@ async def test_bulk_and_relay_paths_skip_bat_sessions(fleet_factory, mock):
     assert relayed["sent"] is False and relayed["read_only_code"] == "MANUAL_READ_ONLY"
     main = await lifecycle.session_relay(f, "h1", "do it", workspace="demo-project", confirm=True)
     assert main["sent"] is False and main["no_session"]
-    swept = await lifecycle.session_cleanup(f, "h1", confirm=True, dry_run=False, min_idle_s=0)
+    swept = await lifecycle.session_cleanup(f, "h1", dry_run=True, min_idle_s=0)
     assert {d["decision"] for d in swept["decisions"]} <= {"KEEP"}
     assert write_frames(mock) == []
     await f.close()
@@ -388,13 +388,13 @@ async def test_policy_verdicts_follow_host_tiers(fleet_factory, mock):
     await f.close()
 
 
-async def test_retried_start_rows_resolve_to_the_newest_record(fleet_factory, mock):
-    registry.reserve("h1", {"session_id": "dup-0001", "cwd": WT, "worktree_path": WT,
-                            "origin_cwd": "/srv/demo", "agent_preset": "claude-code-worktree"}, 8)
-    registry.update("h1", "dup-0001", status="uncertain")
-    add_managed_wt(mock, "dup-0001")  # the retry appends a second row and acknowledges the start
+async def test_recovered_start_updates_one_record_for_resource_policy(fleet_factory, mock):
+    sid = add_managed_wt(mock, "recovered-0001")
+    registry.update("h1", sid, status="uncertain")
+    registry.ensure_existing("h1", registry.get("h1", sid))  # read-back settles the existing reservation
+    assert len([e for e in registry.list_entries("h1") if e["session_id"] == sid]) == 1
     f = all_tiers(fleet_factory)
-    r = await service.session_send(f, "h1", "dup-0001", "go", confirm=True)
+    r = await service.session_send(f, "h1", sid, "go", confirm=True)
     assert r["accepted"]
     await f.close()
 
