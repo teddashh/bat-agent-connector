@@ -16,6 +16,7 @@ from bat_agent_connector.operations import OperationError
 from bat_agent_connector.task_daemon import TaskDaemon
 from bat_agent_connector.task_journal import Journal
 from tests.conftest import adopt, make_config
+from tests.operation_helpers import settle_operations
 
 MANUAL = "sess-claude-0001"
 BAT_WRITES = WRITE_CHANNELS | ORCHESTRATE_CHANNELS | GUARDED_CHANNELS
@@ -151,11 +152,31 @@ async def test_operation_idempotency_scope_and_bat_sessions(daemon, mock):
     assert write_frames(mock) == []  # nothing ran yet
 
 
+@pytest.mark.parametrize("kind", ["send", "answer", "interrupt"])
+async def test_standalone_operation_records_no_task_refs(daemon, mock, kind):
+    adopt(MANUAL)
+    params = {"text": "hello"} if kind == "send" else {}
+    if kind == "answer":
+        mock.states[MANUAL]["pendingAskUser"] = {"toolUseId": "ask-1", "questions": [{"question": "Choice?"}]}
+        params = {"answers": ["yes"], "tool_use_id": "ask-1"}
+    op, _ = daemon.ops.create(ted(), action="session." + kind, target={"host": "h1", "session_id": MANUAL},
+                              params=params, idempotency_key="standalone")
+    try:
+        await settle_operations(daemon.ops)
+        done = daemon.ops.get(op["operation_id"])
+        assert done["status"] == "succeeded" and done["external_refs"] is None
+        assert len(write_frames(mock)) == 1
+        assert not daemon.journal.db.execute("SELECT 1 FROM commands").fetchone()
+    finally:
+        await daemon.fleet.close()
+        await daemon.inventory.close()
+
+
 async def test_send_operation_runs_once_and_records_steps_and_events(daemon, mock):
     adopt(MANUAL)
     mock.echo_sends = True
     op, _ = send_op(daemon)
-    await daemon.ops.drain()
+    await settle_operations(daemon.ops)
     done = daemon.ops.get(op["operation_id"])
     assert done["status"] == "succeeded" and done["result"]["accepted"] is True
     assert done["result"]["message_id"] == "batc-" + op["operation_id"]
@@ -163,8 +184,9 @@ async def test_send_operation_runs_once_and_records_steps_and_events(daemon, moc
     sends = [i for i in mock.invokes if i["channel"] == "claude:send-message"]
     assert len(sends) == 1 and sends[0]["params"]["clientMessageId"] == "batc-" + op["operation_id"]
     kinds = [e["kind"] for e in daemon.journal.api_events(0, 100, resource_id=op["operation_id"])["events"]]
-    assert kinds == ["operation.accepted", "operation.running", "operation.succeeded"]
-    await daemon.ops.drain()  # a finished operation never runs again
+    assert kinds == ["operation.accepted", "operation.running", "operation.step.started",
+                     "operation.step.succeeded", "operation.succeeded"]
+    await settle_operations(daemon.ops)  # a finished operation never runs again
     assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"]) == 1
     await daemon.fleet.close()
 
@@ -179,19 +201,56 @@ async def test_ambiguous_send_becomes_uncertain_and_settles_by_read_back(daemon,
 
     monkeypatch.setattr(service, "session_send", lost)
     op, _ = send_op(daemon)
-    await daemon.ops.drain()
+    await settle_operations(daemon.ops)
     row = daemon.ops.get(op["operation_id"])
     assert row["status"] == "uncertain" and row["steps"][0]["status"] == "uncertain"
     # Re-running without proof keeps it uncertain and never sends again.
     daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
-    await daemon.ops.drain()
+    await settle_operations(daemon.ops)
     assert daemon.ops.get(op["operation_id"])["status"] == "uncertain" and len(calls) == 1
     # BAT did accept it: the turn record proves it, and the read-back settles the operation.
     registry.record_turn("h1", MANUAL, "batc-" + op["operation_id"], queued=False, baseline_turns=3)
     daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
-    await daemon.ops.drain()
+    await settle_operations(daemon.ops)
     settled = daemon.ops.get(op["operation_id"])
     assert settled["status"] == "succeeded" and settled["result"]["accepted"] and len(calls) == 1
+
+
+async def test_operation_settling_waits_for_retry_status_instead_of_drain(daemon, mock, monkeypatch):
+    """A05: an old uncertain status is not completion of the newly scheduled read-back."""
+    adopt(MANUAL)
+
+    async def lost(*args, **kwargs):
+        raise InvokeTimeout("send reply lost")
+
+    monkeypatch.setattr(service, "session_send", lost)
+    op, _ = send_op(daemon)
+    await settle_operations(daemon.ops)
+    assert daemon.ops.get(op["operation_id"])["status"] == "uncertain"
+    daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_readback(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return {"messages": [{"id": "batc-" + op["operation_id"], "role": "user"}]}
+
+    async def unused_drain(*args, **kwargs):
+        pytest.fail("status assertions must not rely on drain returning by its deadline")
+
+    monkeypatch.setattr(service, "_live_state", slow_readback)
+    monkeypatch.setattr(daemon.ops, "drain", unused_drain)
+    worker = asyncio.create_task(settle_operations(daemon.ops))
+    try:
+        await asyncio.wait_for(entered.wait(), 60)
+        assert daemon.ops.get(op["operation_id"])["status"] == "running"
+        assert not worker.done()
+    finally:
+        release.set()
+        await worker
+    assert daemon.ops.get(op["operation_id"])["status"] == "succeeded"
+    assert not daemon.ops._running(op["operation_id"])
+    assert not write_frames(mock)
 
 
 async def test_restart_replays_finished_steps_and_reconciles_unfinished_ones(daemon, mock, tmp_path):
@@ -202,7 +261,7 @@ async def test_restart_replays_finished_steps_and_reconciles_unfinished_ones(dae
     daemon.ops._step_start(op["operation_id"], "send", {"message_id": "batc-" + op["operation_id"]})
     daemon.journal.close()
     d2 = TaskDaemon(make_config(mock, writes=True, orchestrate=True, managed_roots=["/srv"]), tmp_path / "tasks.db")
-    await d2.ops.drain()
+    await settle_operations(d2.ops)
     assert d2.ops.get(op["operation_id"])["status"] == "uncertain"
     assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)  # never re-sent
     d2.journal.close()
@@ -213,7 +272,7 @@ async def test_cancel_before_start_never_runs(daemon, mock):
     op, _ = send_op(daemon)
     cancelled = daemon.ops.cancel(ted(), op["operation_id"])
     assert cancelled["status"] == "cancelled"
-    await daemon.ops.drain()
+    await settle_operations(daemon.ops)
     assert write_frames(mock) == []
     with pytest.raises(OperationError) as e:  # cancelling needs the action's scope (or being its actor)
         daemon.ops.cancel(api_auth.Principal("someone-else", frozenset({"observe"})), op["operation_id"])
@@ -453,7 +512,7 @@ async def test_a_failed_read_back_keeps_the_operation_uncertain(daemon, mock, mo
 
     monkeypatch.setattr(service, "session_answer", delivered_then_dropped)
     op, _ = answer_op(daemon)
-    await daemon.ops.drain()
+    await settle_operations(daemon.ops)
     assert daemon.ops.get(op["operation_id"])["status"] == "uncertain"
 
     async def host_down(*a, **k):
@@ -461,7 +520,7 @@ async def test_a_failed_read_back_keeps_the_operation_uncertain(daemon, mock, mo
 
     monkeypatch.setattr(service, "_meta", host_down)
     due_now(daemon, op["operation_id"])
-    await daemon.ops.drain()
+    await settle_operations(daemon.ops)
     after = daemon.ops.get(op["operation_id"])
     assert after["status"] == "uncertain" and after["steps"][0]["status"] == "uncertain"
     assert after["uncertain_tries"] == 2
@@ -487,11 +546,11 @@ async def test_a_lost_send_reply_is_settled_from_the_bat_transcript(daemon, mock
     monkeypatch.setattr(service, "session_send", reply_lost)
     monkeypatch.setattr(registry, "get_turn", lambda *a, **k: None)  # the local turn record never happened
     op, _ = send_op(daemon)
-    await daemon.ops.drain()
+    await settle_operations(daemon.ops)
     assert daemon.ops.get(op["operation_id"])["status"] == "uncertain"
     # A cancel arriving now must not hide the delivered message: the read-back runs first.
     assert daemon.ops.cancel(ted(), op["operation_id"])["status"] == "uncertain"
-    await daemon.ops.drain()
+    await settle_operations(daemon.ops)
     done = daemon.ops.get(op["operation_id"])
     assert done["status"] == "succeeded" and done["result"]["settled_by"] == "bat_transcript"
     assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"]) == 1
@@ -507,17 +566,17 @@ async def test_needs_attention_can_be_cancelled_or_resumed(daemon, mock, monkeyp
     monkeypatch.setattr(registry, "get_turn", lambda *a, **k: None)
     ops = [send_op(daemon, key=k)[0] for k in ("n1", "n2")]
     for op in ops:
-        await daemon.ops.drain()
+        await settle_operations(daemon.ops)
         daemon.journal.db.execute("UPDATE operations SET uncertain_tries=5 WHERE operation_id=?",
                                   (op["operation_id"],))
         due_now(daemon, op["operation_id"])
-        await daemon.ops.drain()
+        await settle_operations(daemon.ops)
         assert daemon.ops.get(op["operation_id"])["status"] == "needs_attention"
     cancelled = daemon.ops.cancel(ted(), ops[0]["operation_id"])  # its worker already finished
     assert cancelled["status"] == "cancelled" and "never proven" in cancelled["status_reason"]
     resumed = daemon.ops.resume(ted(), ops[1]["operation_id"])
     assert resumed["status"] == "running" and resumed["uncertain_tries"] == 0
-    await daemon.ops.drain()
+    await settle_operations(daemon.ops)
     assert daemon.ops.get(ops[1]["operation_id"])["status"] == "uncertain"  # read back again, never re-sent
     with pytest.raises(OperationError) as e:
         daemon.ops.resume(ted(), ops[0]["operation_id"])
@@ -545,7 +604,7 @@ async def test_waiting_does_not_use_up_the_read_back_budget(daemon, monkeypatch)
     op, _ = daemon.ops.create(ted(), action="test.poll", idempotency_key="poll")
     for _ in range(7):
         due_now(daemon, op["operation_id"])
-        await daemon.ops.drain()
+        await settle_operations(daemon.ops)
     after = daemon.ops.get(op["operation_id"])
     assert after["status"] == "uncertain" and after["uncertain_tries"] == 1 and after["attempts"] == 7
 

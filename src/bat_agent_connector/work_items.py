@@ -965,13 +965,13 @@ async def _run_link(ctx: OpContext) -> dict:
                 raise _bad("NOT_LINKED", "this work item has no such link", 409)
             db.execute("""UPDATE work_item_links SET removed_at=?,removed_by=?,remove_operation=?
                 WHERE link_id=?""", (now, actor, ctx.operation_id, existing["link_id"]))
-            _event(ctx, "work_item", wid, "work_item.unlinked", {"kind": kind, "ref": ref})
+            _event(ctx, "work_item", wid, "work_item.unlinked", {"kind": kind, "ref": ref, "link_id": existing["link_id"]})
             return {"work_item_id": wid, "kind": kind, "ref": ref, "linked": False}
         if existing is not None:
             return {"work_item_id": wid, "kind": kind, "ref": ref, "linked": True, "already": True}
         db.execute("""INSERT INTO work_item_links(work_item_id,kind,ref,note,linked_by,linked_at,link_operation)
             VALUES(?,?,?,?,?,?,?)""", (wid, kind, ref, note or None, actor, now, ctx.operation_id))
-        _event(ctx, "work_item", wid, "work_item.linked", {"kind": kind, "ref": ref})
+        _event(ctx, "work_item", wid, "work_item.linked", {"kind": kind, "ref": ref, "link_id": _active_link(db, wid, kind, ref)["link_id"]})
         return {"work_item_id": wid, "kind": kind, "ref": ref, "linked": True}
     return _once(ctx, change)
 

@@ -12,11 +12,20 @@ from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import api_auth, checkpoints, cli, integration, resource_policy
+from bat_agent_connector import (
+    api_auth,
+    checkpoints,
+    cli,
+    delivery,
+    integration,
+    pr_delivery,
+    resource_policy,
+)
 from bat_agent_connector.config import ConfigError, parse_config
 from bat_agent_connector.operations import AmbiguousOutcome, OperationError
 from bat_agent_connector.task_daemon import TaskDaemon
 from tests.fakegithub import TOKEN, FakeGitHub
+from tests.operation_helpers import settle_operations
 from tests.test_checkpoints import MANUAL, LocalRunner, RealGitLog, bat_git_status, bat_writes, git
 
 TED = api_auth.Principal("ted-dashboard", frozenset({"observe", "operate", "start", "integrate", "merge"}))
@@ -155,7 +164,7 @@ class World:
     async def settle(self, op_id, rounds=8):
         for _ in range(rounds):
             self.d.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op_id,))
-            await self.d.ops.drain(timeout=60)
+            await settle_operations(self.d.ops)
             op = self.d.ops.get(op_id)
             if op["status"] in {"succeeded", "failed", "cancelled", "needs_attention"}:
                 return op
@@ -525,8 +534,9 @@ async def test_c02_one_update_per_pr_and_merge_exclusion(world):
     clean = await w.preview([{"kind": "checkpoint_run", "id": r1}])
     assert clean["ready"], clean["blocking"]
     w.gh.merge_mode = "enqueue"
-    merge = await w.run("github.pr.merge", {"repository": "o/r", "pull_number": 1}, {"method": "squash"},
-                        {"expected_head_sha": w.f1})
+    merge_doc = (await delivery.pr_preview(w.d.ops, "o/r", 1))["merge_preview"]
+    envelope = pr_delivery.merge_envelope(merge_doc)
+    merge = await w.run(envelope["action"], envelope["target"], envelope["params"], envelope["preconditions"])
     assert merge["status"] not in {"succeeded", "failed", "cancelled"}, merge
     with pytest.raises(OperationError) as e:
         w.d.ops.create(TED, action="integration.apply", target=target, params={"preview_id": clean["preview_id"]},
@@ -633,7 +643,7 @@ async def test_c03_restart_mid_compose_recomposes_identically(world):
                            params={"preview_id": doc["preview_id"]},
                            preconditions={"expected_head_sha": other, "preview_digest": doc["digest"]},
                            idempotency_key="restart")
-    await w.d.ops.drain(timeout=60)
+    await settle_operations(w.d.ops)
     assert w.d.ops.get(op["operation_id"])["status"] == "uncertain"
     composed = git(w.area(), "rev-parse", f"refs/batc/ops/{op['operation_id'][3:15]}/after/2")
     w.d.journal.close()
@@ -821,6 +831,9 @@ async def test_forbidden_targets_and_admission(world, mock):
                           "github": {"token_ref": "env:FAKE_GH_TOKEN", "api_url": w.gh.url,
                                      "repos": [{"repository": "o/r", "integrate": {
                                          "hosts": ["h1"], "remote_url": str(w.remote)}}]}})
+    # A09: finish the first owner before evaluating a different daemon configuration.
+    await w.d.fleet.close()
+    w.d.journal.close()
     off = TaskDaemon(plain, w.tmp / "off.db")
     off.ops.context["git_runner"] = w.runner
     w.daemons.append(off)
@@ -1033,7 +1046,7 @@ async def test_c03_a_pinned_resolution_is_never_read_again(world):
     resolution = resolve_in(wt)
     w.runner.lose_before.add("push")  # stops right after the resolution was pinned
     w.d.ops.resume(TED, op["operation_id"])
-    await w.d.ops.drain(timeout=60)
+    await settle_operations(w.d.ops)
     assert w.d.ops.get(op["operation_id"])["status"] == "uncertain"
     commit(wt, "late.txt", "the agent kept going\n", "after the pin")  # never picked up
     done = await w.settle(op["operation_id"])
@@ -1064,7 +1077,7 @@ async def test_a_cancel_while_the_push_is_unproven_never_sends_it(world):
                            params={"preview_id": doc["preview_id"]},
                            preconditions={"expected_head_sha": doc["target"]["head_sha"],
                                           "preview_digest": doc["digest"]}, idempotency_key="cancel-me")
-    await w.d.ops.drain(timeout=60)
+    await settle_operations(w.d.ops)
     assert w.d.ops.get(op["operation_id"])["status"] == "uncertain"
     w.d.ops.cancel(TED, op["operation_id"])
     done = await w.settle(op["operation_id"])
@@ -1094,13 +1107,13 @@ async def test_a_push_still_running_on_the_host_is_waited_for(world):
                            params={"preview_id": doc["preview_id"]},
                            preconditions={"expected_head_sha": doc["target"]["head_sha"],
                                           "preview_digest": doc["digest"]}, idempotency_key="in-flight")
-    await w.d.ops.drain(timeout=60)
+    await settle_operations(w.d.ops)
     tag = op["operation_id"][3:15]
     busy = subprocess.Popen(["sh", "-c", f"# batc-int:push {tag}\nsleep 60"])  # the push the dropped ssh left behind
     try:
         (w.area() / f"batc-push-{tag}").write_text(f"{busy.pid}\n")
         w.d.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
-        await w.d.ops.drain(timeout=60)
+        await settle_operations(w.d.ops)
         assert w.d.ops.get(op["operation_id"])["status"] == "uncertain" and w.runner.ran["push"] == 0
     finally:
         busy.kill()

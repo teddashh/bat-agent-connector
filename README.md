@@ -6,6 +6,10 @@
 
 **Project page:** https://teddashh.github.io/bat-agent-connector/
 
+**Development direction:** [Tauri v2 product decisions](docs/product/realignment-v2.md) and
+[implementation status](docs/product/implementation-status.md). The desktop client will share the Dashboard
+frontend and the existing Python backend. Project Hub import is outside the v2 scope; project/work-item management remains.
+
 BAT (by [TonyQ / tony1223](https://github.com/tony1223)) is a terminal app that runs Claude Code and Codex agent
 sessions, grouped into workspaces, on your machines. It has a remote protocol (`bat-remote/v2`) that its own GUI and
 phone clients use. This project speaks that protocol so that *other* agents (Claude Code, Codex, Cursor, Hermes, or any
@@ -29,6 +33,12 @@ It ships four things:
 | MCP server (stdio, or localhost-only streamable HTTP) | `bat-agent-connector-mcp` (also `batc mcp`) |
 | CLI | `batc` |
 | Agent skill | [`skills/bat-agent-connector/SKILL.md`](skills/bat-agent-connector/SKILL.md) |
+
+Persisted observation is available through `batc inventory`, `batc history` and `batc relations`, or the matching
+HTTP/MCP reads. Session history uses journal facts; warm reuse keeps each task’s relation ranges. Discovery shows
+the latest host/profile scope and what was outside the scan. Unknown actors and states stay unknown; these reads
+do not start sessions or probe Git. See [observation](docs/design/observation.md). The Dashboard history and scope
+screens are Part B, to follow separately.
 
 ## Why
 
@@ -106,6 +116,21 @@ waiting for BAT. Hermes must not reinterpret or split the request. Goose, on Opu
 Task writes require the host's existing `writes=true` and `orchestrate=true` settings. Existing low-level tools
 and `batc` commands remain available.
 
+Task mutations now record an operation and return `operation_id` / `operation_status` with the existing result.
+Keep a key for retries; keys belong to the authenticated actor. Unkeyed old task controls are separate requests.
+Task-bound operations capture the task version at admission, including when `control_version` is omitted;
+session controls also capture the current session. Read this server binding in `external_refs.admission_binding`,
+separate from caller preconditions. A pause/resume or session replacement before execution refuses the old request
+with `CONTROL_VERSION_CONFLICT` / `TASK_BINDING_MISMATCH`. The same key replays the refusal or original success;
+read the task and use a new key for an authorized new decision. Older operations without this binding retain
+their previous behaviour.
+Task-owned sends, answers, interrupts and permission changes pass the same coordinator, including legacy tools:
+`TASK_PAUSED`, `TASK_VERIFYING` and `TASK_COMMAND_PENDING` mean stop and read `work_status`, never jump the queue
+with force or continue. `CONTROL_VERSION_CONFLICT` requires reading the changed state. A second daemon, even with
+a different `--db`, returns `OWNER_CONFLICT` with the existing owner; clients use that owner. This is
+[operations unification Part A](docs/design/operations-unification.md); the remaining legacy operations and
+no-key/null result projection are Part B.
+
 Every task is one Goose session on Opus 5.5. The `goose-session` recipe prompt tells Goose to split the work
 once, to aim for an executor mix of Grok 4.7 : Codex : Opus 5.5 = 4:2:1, and to give no new work to a model
 whose weekly quota remaining is at or below 15%. These are instructions in the prompt, not rules the service
@@ -181,6 +206,17 @@ Projects and work items record what is being done and why: the request verbatim,
 the sessions, checkpoints, operations and PRs that carried it. An agent with `manage` can claim an item done; only
 a token with `approve` accepts it, for the content it read, and editing the content afterwards asks again. Order,
 pins, renames and archive follow Project Hub's rules. See [docs/design/work-items.md](docs/design/work-items.md).
+
+PR delivery now has a separate metadata action (`github.pr.update`, existing `integrate` scope, per-repository
+`allow_pr_update = true`; default false) and saved merge scope previews. Read `github_pr_preview` / `batc delivery pr`,
+review all commits and affected PRs, then `github_pr_merge` / `batc delivery merge --preview mpv_... --key KEY`.
+Unknown metadata writes still unchanged after ten minutes settle as not applied, freeing the PR without resending;
+review a fresh digest before a new edit. Identical previews reuse their ID, and event reloads throttle scope reads.
+Metadata edits compare the title/body digest before writing and read back afterward; GitHub's final read/write race
+still exists. Merge checks the reviewed head/base/scope before submit and verifies the actual merged SHA; queue merges
+onto a newer base report the extra commits. Unsupported stacks and indirect merges are refused. MCP/CLI writes need
+the caller's `BATC_API_TOKEN`. See [delivery design](docs/design/delivery.md) for envelopes, errors and recovery.
+Deployment history, environment generations, runtime verification and rollback remain Part B.
 
 ### Connect an MCP client
 

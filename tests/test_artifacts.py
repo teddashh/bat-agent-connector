@@ -20,7 +20,8 @@ from bat_agent_connector.artifact_host import HELPER, ArtifactHost
 from bat_agent_connector.errors import InvokeTimeout, ResourceReadOnly
 from bat_agent_connector.operations import AmbiguousOutcome, OperationError
 from bat_agent_connector.task_daemon import TaskDaemon
-from bat_agent_connector.task_journal import Journal
+from bat_agent_connector.task_journal import LATEST_DATA_STEP, Journal
+from tests.operation_helpers import settle_operations
 from tests.test_checkpoints import MANUAL, git
 from tests.test_checkpoints import daemon as checkpoint_daemon
 from tests.test_checkpoints import human as checkpoint_human
@@ -60,7 +61,7 @@ class LocalArtifactHost(ArtifactHost):
 async def action(d, name, target=None, params=None, pre=None, key=None):
     op, _ = d.ops.create(PERSON, action=name, target=target or {}, params=params or {},
                          preconditions=pre or {}, idempotency_key=key or "test." + os.urandom(8).hex())
-    await d.ops.drain(30)
+    await settle_operations(d.ops)
     return d.ops.get(op["operation_id"])
 
 
@@ -80,7 +81,7 @@ async def upload(d, data=b"immutable input", **kw):
     op = await reserve(d, data, **kw)
     if op["status"] == "waiting_external":
         await d.artifact_store.receive(PERSON, op["operation_id"], reader(data), len(data))
-        await d.ops.drain(30)
+        await settle_operations(d.ops)
         await d.artifact_store.reap_best_effort()
         op = d.ops.get(op["operation_id"])
     assert op["status"] == "succeeded", op
@@ -146,7 +147,7 @@ async def test_upload_publish_lost_reply_and_restart_read_back(daemon, monkeypat
     monkeypatch.setattr(daemon.artifact_store, "publish", lost)
     op = await reserve(daemon)
     await daemon.artifact_store.receive(PERSON, op["operation_id"], reader(b"immutable input"), 15)
-    await daemon.ops.drain(30)
+    await settle_operations(daemon.ops)
     assert daemon.ops.get(op["operation_id"])["status"] == "uncertain"
     # Close SQLite and construct a new daemon: memory contains no step or upload result.
     path, config = daemon.journal.path, daemon.fleet.config
@@ -155,7 +156,7 @@ async def test_upload_publish_lost_reply_and_restart_read_back(daemon, monkeypat
     reopened = TaskDaemon(config, path)
     try:
         reopened.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
-        await reopened.ops.drain(30)
+        await settle_operations(reopened.ops)
         await reopened.artifact_store.reap_best_effort()
         done = reopened.ops.get(op["operation_id"])
         assert done["status"] == "succeeded", json.dumps(done, indent=2)
@@ -184,7 +185,7 @@ async def test_attachment_change_invalidates_work_item_approval(daemon):
     assert daemon.journal.db.execute("SELECT owner_kind FROM artifact_references").fetchone()[0] == "work_item"
 
 
-@pytest.mark.parametrize("version", [1, 3])
+@pytest.mark.parametrize("version", [1, 2, 3, 17])
 def test_artifact_migration_preserves_existing_journal_and_empty_manifests(tmp_path, version):
     path = tmp_path / "legacy.db"
     j = Journal(path)
@@ -201,14 +202,14 @@ def test_artifact_migration_preserves_existing_journal_and_empty_manifests(tmp_p
     j = Journal(path)
     assert j.get(task["task_id"])["original_words"] == "keep"
     assert j.api_events(0, 10) == before
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == version
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == max(version, LATEST_DATA_STEP)
     assert set(tables) <= {x[0] for x in j.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for table in ("checkpoints", "work_items"):
         assert next(x for x in j.db.execute(f"PRAGMA table_info({table})") if x[1] == "attachments")[4] == "'[]'"
     snapshot = list(j.db.iterdump())
     j.close()
     j = Journal(path)
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == version
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == max(version, LATEST_DATA_STEP)
     assert list(j.db.iterdump()) == snapshot  # idempotent second open, including data
     j.close()
 
@@ -344,7 +345,7 @@ async def test_artifact_http_mcp_cli_contract_and_scopes(daemon, monkeypatch, tm
         args = cli.build_parser().parse_args(["artifact", "upload", str(tmp_path / "local.txt"), "--key", "cli", "--confirm"])
         (tmp_path / "local.txt").write_bytes(b"CLI content")
         assert await asyncio.to_thread(cli.cmd_artifact, args) == 0
-        await daemon.ops.drain(30)
+        await settle_operations(daemon.ops)
         mcp, fleet = mcp_server.build_server(daemon.fleet.config)
         tools = await mcp.list_tools()
         names = {x.name for x in tools}
@@ -354,7 +355,7 @@ async def test_artifact_http_mcp_cli_contract_and_scopes(daemon, monkeypatch, tm
         result = await mcp.call_tool("artifact_upload", {"display_name": "model.txt", "content_base64": "bW9kZWw=",
                                     "idempotency_key": "mcp", "confirm": True})
         assert result is not None
-        await daemon.ops.drain(30)
+        await settle_operations(daemon.ops)
         await fleet.close()
         refs = artifacts.list_artifacts(daemon.journal.db)["artifacts"]
         assert len(refs) == 3  # includes the pending HTTP admission reservation
@@ -378,7 +379,7 @@ async def test_upload_window_expires_and_removes_only_its_own_staging(daemon):
     active = await reserve(daemon, b"active", key="active")
     daemon.journal.db.execute("UPDATE artifact_uploads SET deadline=0 WHERE operation_id=?", (expired["operation_id"],))
     daemon.ops.wake(expired["operation_id"])
-    await daemon.ops.drain(30)
+    await settle_operations(daemon.ops)
     await daemon.artifact_store.reap_best_effort()
     failed = daemon.ops.get(expired["operation_id"])
     assert failed["status"] == "failed" and failed["error_code"] == "UPLOAD_EXPIRED"
@@ -588,7 +589,7 @@ async def test_B04_transfer_interrupted_before_dispatch(daemon, mock):
     assert op["status"] == "needs_attention" and op["error_code"] == "ARTIFACT_SIZE_MISMATCH", op
     assert not sends(mock) and not registry.list_entries("h1")
     daemon.ops.resume(PERSON, op["operation_id"])
-    await daemon.ops.drain(30)
+    await settle_operations(daemon.ops)
     done = daemon.ops.get(op["operation_id"])
     assert done["status"] == "succeeded" and len(sends(mock)) == 1, done
     assert done["result"]["materializations"][0]["attempt"] == 2
@@ -626,7 +627,7 @@ async def test_B04_source_advanced_after_preview_keeps_selection(daemon, mock, h
                              {"observed_source_head_sha": git(human, "rev-parse", "HEAD")},
                              {"expected_input_manifest_digest": op["external_refs"]["input_manifest_digest"]})
     assert confirmed["status"] == "succeeded", confirmed
-    await daemon.ops.drain(30)
+    await settle_operations(daemon.ops)
     done = daemon.ops.get(op["operation_id"])
     assert done["status"] == "succeeded" and done["params"]["artifacts"] == [ref]
     assert done["result"]["base_commit"] == cp["commit_sha"] and len(sends(mock)) == 1
@@ -649,7 +650,7 @@ async def test_B04_resume_after_start_or_send_ack_loss_never_duplicates_executio
     assert op["status"] == "uncertain", op
     monkeypatch.setattr(module, name, real)
     daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
-    await daemon.ops.drain(30)
+    await settle_operations(daemon.ops)
     done = daemon.ops.get(op["operation_id"])
     assert done["status"] == "succeeded", done
     assert len([x for x in mock.invokes if x["channel"] == "claude:start-session"]) == 1
@@ -684,7 +685,7 @@ async def test_B04_inputs_changed_after_start_keep_session_and_block_send(daemon
         await action(daemon, "checkpoint.continue.revalidate", {"operation_id": op["operation_id"]},
                      {"observed_source_head_sha": git(human, "rev-parse", "HEAD")},
                      {"expected_input_manifest_digest": op["external_refs"]["input_manifest_digest"]})
-    await daemon.ops.drain(30)
+    await settle_operations(daemon.ops)
     done = daemon.ops.get(op["operation_id"])
     assert done["status"] == "succeeded", done
     assert len([x for x in mock.invokes if x["channel"] == "claude:start-session"]) == 1 and len(sends(mock)) == 1
@@ -699,7 +700,7 @@ async def test_cancelled_unsettled_publish_keeps_original_and_its_quota(daemon, 
     monkeypatch.setattr(daemon.artifact_store, "publish", lost)
     op = await reserve(daemon)
     await daemon.artifact_store.receive(PERSON, op["operation_id"], reader(b"immutable input"), 15)
-    await daemon.ops.drain(30)
+    await settle_operations(daemon.ops)
     assert daemon.ops.get(op["operation_id"])["status"] == "uncertain"
     daemon.journal.db.execute("UPDATE operations SET status='needs_attention' WHERE operation_id=?", (op["operation_id"],))
     daemon.ops.cancel(PERSON, op["operation_id"])
@@ -725,6 +726,6 @@ async def test_B04_missing_original_blocks_then_resumes_same_parent(daemon, mock
     assert not sends(mock)
     saved.rename(formal)
     daemon.ops.resume(PERSON, op["operation_id"])
-    await daemon.ops.drain(30)
+    await settle_operations(daemon.ops)
     done = daemon.ops.get(op["operation_id"])
     assert done["status"] == "succeeded" and len(sends(mock)) == 1, done

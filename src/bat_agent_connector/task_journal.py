@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -19,6 +20,9 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+
+# Latest allocated data step; individual backfills retain their own version gates.
+LATEST_DATA_STEP = 2
 
 STATES = frozenset({
     "queued", "dispatching", "accepted", "running", "waiting_permission",
@@ -323,6 +327,27 @@ class Journal:
                     task_event_id,created_at) SELECT 'task',task_id,'task.'||kind,body,event_id,created_at
                     FROM events ORDER BY event_id""")
                 self.db.execute("PRAGMA user_version=1")
+        # Delivery A. Idempotent DDL runs on every open and takes no data-migration version.
+        with self.tx():
+            self.db.execute("""CREATE TABLE IF NOT EXISTS pr_merge_previews (
+                preview_id TEXT PRIMARY KEY, repository TEXT NOT NULL, pull_number INTEGER NOT NULL,
+                document TEXT NOT NULL, digest TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL
+            )""")
+            self.db.execute("""CREATE INDEX IF NOT EXISTS pr_merge_previews_pr
+                ON pr_merge_previews(repository, pull_number, created_at)""")
+        # Delivery A review fixes. These tables follow the same idempotent DDL rule.
+        with self.tx():
+            self.db.execute("""CREATE TABLE IF NOT EXISTS pr_metadata_settlements (
+                operation_id TEXT PRIMARY KEY, document TEXT NOT NULL
+            )""")
+            self.db.execute("""CREATE TABLE IF NOT EXISTS pr_merge_scope_reads (
+                repository TEXT NOT NULL, pull_number INTEGER NOT NULL, method TEXT NOT NULL,
+                preview_id TEXT NOT NULL, checked_at REAL NOT NULL,
+                PRIMARY KEY(repository, pull_number, method)
+            )""")
+
+        from .observation import install
+        install(self)
 
         self._migrate_artifacts()
 
@@ -386,16 +411,21 @@ class Journal:
 
     @contextmanager
     def tx(self):
-        self.db.execute("BEGIN IMMEDIATE")
+        nested = self.db.in_transaction
+        self.db.execute("SAVEPOINT task_effect" if nested else "BEGIN IMMEDIATE")
         try:
             yield
-            self.db.execute("COMMIT")
+            self.db.execute("RELEASE task_effect" if nested else "COMMIT")
         except BaseException:
-            self.db.execute("ROLLBACK")
+            self.db.execute("ROLLBACK TO task_effect" if nested else "ROLLBACK")
+            if nested:
+                self.db.execute("RELEASE task_effect")
             raise
 
     def close(self):
         self.db.close()
+        if getattr(self, "on_close", None):
+            self.on_close()
 
     def issue_capability(self, task_id: str, *, ttl_s: int = 3600) -> str:
         self.get(task_id)
@@ -416,19 +446,20 @@ class Journal:
             self.db.execute("DELETE FROM capabilities WHERE task_id=? AND scope='task'", (task_id,))
             self._event(task_id, "task_capabilities_revoked", {"reason": "warm_session_transfer"})
 
-    def issue_reconcile_capability(self, task_id: str, command_id: str, *, ttl_s: int = 600) -> str:
+    def issue_reconcile_capability(self, task_id: str, command_id: str, *, ttl_s: int = 600,
+                                   token: str | None = None) -> str:
         task = self.get(task_id)
         command = self.command_get(command_id)
-        send = (command["kind"] == "send" and
+        send = (command["kind"] in {"send", "answer", "interrupt", "permissions"} and
                 command["session_id"] in {task["session_id"], task["reviewer_session_id"]})
         failover = (command["kind"] == "failover" and
                     json.loads(command["payload"]).get("old_session_id") == task["session_id"])
         if (command["task_id"] != task_id or not (send or failover)
                 or command["status"] != "uncertain" or task["state"] != "uncertain"):
             raise ValueError("only an uncertain task command can be reconciled")
-        token = secrets.token_urlsafe(32)
+        token = token or secrets.token_urlsafe(32)
         self.db.execute("""INSERT INTO capabilities(token_hash,task_id,scope,command_id,expires_at)
-            VALUES(?,?,?,?,?)""", (hashlib.sha256(token.encode()).hexdigest(), task_id,
+            VALUES(?,?,?,?,?) ON CONFLICT(token_hash) DO UPDATE SET expires_at=excluded.expires_at""", (hashlib.sha256(token.encode()).hexdigest(), task_id,
                                   "reconcile", command_id, time.time() + ttl_s))
         return token
 
@@ -454,7 +485,8 @@ class Journal:
                      actor: str, source: str, evidence: str, observed_result: str = "none",
                      turn_ref: str | None = None, candidate_commit: str | None = None,
                      tree_hash: str | None = None, next_prompt_sha256: str | None = None,
-                     next_before: dict | None = None) -> dict:
+                     next_before: dict | None = None, token_hash: str | None = None,
+                     operation_id: str | None = None) -> dict:
         if outcome not in {"delivered", "not_delivered", "superseded"}:
             raise ValueError("invalid reconciliation outcome")
         if observed_result not in {"none", "milestone", "review_pass"}:
@@ -469,19 +501,21 @@ class Journal:
             raise ValueError("new prompt cannot also attest an observed result")
         if next_prompt_sha256 and not isinstance(next_before, dict):
             raise ValueError("new prompt needs a recorded pre-send baseline")
-        digest = hashlib.sha256(token.encode()).hexdigest()
+        digest = token_hash or hashlib.sha256(token.encode()).hexdigest()
         with self.tx():
             task = self.get(task_id)
             command = self.command_get(command_id)
             if (task["state"] != "uncertain" or command["task_id"] != task_id
-                    or command["kind"] != "send" or command["status"] != "uncertain"):
-                raise ValueError("command is not an uncertain send for this task")
+                    or command["kind"] not in {"send", "answer", "interrupt", "permissions"} or command["status"] != "uncertain"):
+                raise ValueError("command is not an uncertain runtime control for this task")
             cap = self.db.execute("""SELECT expires_at FROM capabilities WHERE token_hash=?
                 AND task_id=? AND command_id=? AND scope='reconcile'""",
                 (digest, task_id, command_id)).fetchone()
             if not cap or cap["expires_at"] <= time.time():
                 raise ValueError("reconciliation capability is invalid")
             payload = json.loads(command["payload"])
+            if command["kind"] != "send" and observed_result != "none":
+                raise ValueError("only a send command can attest an observed turn")
             if next_prompt_sha256 and next_prompt_sha256 == payload.get("prompt_sha256"):
                 raise ValueError("next prompt must be a new command, not replay of uncertain text")
             reviewer = command["session_id"] == task["reviewer_session_id"]
@@ -518,6 +552,7 @@ class Journal:
                     (next_command_id, task_id, f"{task_id}:operator:{command_id}", command["session_id"],
                      "send", "needs_review", f"batc-{next_command_id}",
                      json.dumps({"purpose": "operator:" + command_id, "before": next_before,
+                                 "control_version": task["control_version"], "operation_id": operation_id,
                                  "prompt_sha256": next_prompt_sha256}), now, now))
                 self._event(task_id, "command_intent", {"command_id": next_command_id, "kind": "send",
                                                          "needs_review": True, "operator_followup": command_id})
@@ -568,39 +603,77 @@ class Journal:
         raw, now = json.dumps(body or {}, ensure_ascii=False), time.time()
         cur = self.db.execute("INSERT INTO events(task_id,kind,body,created_at) VALUES(?,?,?,?)",
                               (task_id, kind, raw, now))
-        self.db.execute("""INSERT INTO api_events(resource_type,resource_id,kind,body,task_event_id,created_at)
-            VALUES('task',?,?,?,?,?)""", (task_id, "task." + kind, raw, cur.lastrowid, now))
+        from .observation import writer_context
+        context = writer_context.get() or {}
+        api_cur = self.db.execute("""INSERT INTO api_events(resource_type,resource_id,kind,body,task_event_id,created_at,actor)
+            VALUES('task',?,?,?,?,?,?)""", (task_id, "task." + kind, raw, cur.lastrowid, now, context.get("actor")))
+        if getattr(self, "_observation_ready", False):
+            self._project_event(api_cur.lastrowid, context)
 
     def api_event(self, resource_type: str, resource_id: str, kind: str, body: dict | None = None,
-                  actor: str | None = None) -> int:
+                  actor: str | None = None, *, context: dict | None = None) -> int:
         """Append one /api/v1 event; call it inside the transaction that made the change."""
+        if resource_type == "execution":
+            from .observation import writer_context
+            source = writer_context.get() or {}
+            actor = actor or source.get("actor")
+            context = {**source, **(context or {})}
         cur = self.db.execute("""INSERT INTO api_events(resource_type,resource_id,kind,body,actor,created_at)
             VALUES(?,?,?,?,?,?)""", (resource_type, resource_id, kind,
                                      json.dumps(body or {}, ensure_ascii=False, default=str), actor, time.time()))
+        if getattr(self, "_observation_ready", False):
+            self._project_event(cur.lastrowid, context)
         return int(cur.lastrowid)
+
+    def _project_event(self, seq: int, context: dict | None, *, legacy: bool = False) -> None:
+        # A projection bug must not roll back the authoritative writer's transaction.
+        savepoint = f"observation_{int(seq)}"
+        self.db.execute(f"SAVEPOINT {savepoint}")
+        try:
+            from .observation import record_event
+            record_event(self, seq, extra=context, legacy=legacy)
+        except Exception as exc:  # noqa: BLE001 - preserve the core write and expose the projection gap
+            self.db.execute(f"ROLLBACK TO {savepoint}")
+            self.db.execute(f"RELEASE {savepoint}")
+            error = type(exc).__name__
+            self.db.execute("INSERT INTO api_event_context VALUES(?,?) ON CONFLICT(seq) DO UPDATE SET context=excluded.context",
+                            (seq, json.dumps({"projection_error": error})))
+            logging.warning("observation projection failed for event %s: %s", seq, error)
+        else:
+            self.db.execute(f"RELEASE {savepoint}")
 
     def api_head(self) -> int:
         return int(self.db.execute("SELECT COALESCE(MAX(seq),0) FROM api_events").fetchone()[0])
 
     def api_events(self, after: int = 0, limit: int = 100, *, resource_type: str | None = None,
-                   resource_id: str | None = None) -> dict:
-        """Page the /api/v1 event log by its persistent, monotonic ``seq`` cursor."""
+                   resource_id: str | None = None, kind: str | None = None,
+                   related_resource_type: str | None = None, related_resource_id: str | None = None) -> dict:
+        """Persistent global cursor; hidden migration facts still advance it."""
+        from .observation import RESOURCE_TYPES, event_out
         if (isinstance(after, bool) or not isinstance(after, int) or after < 0
                 or isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500):
             raise ValueError("after must be >= 0 and limit between 0 and 500")
+        if bool(related_resource_type) != bool(related_resource_id) or (related_resource_type and related_resource_type not in RESOURCE_TYPES):
+            raise ValueError("related resource needs a type and full ID")
         head = self.api_head()
-        sql, args = "SELECT * FROM api_events WHERE seq>?", [after]
-        if resource_type:
-            sql, args = sql + " AND resource_type=?", [*args, resource_type]
-        if resource_id:
-            sql, args = sql + " AND resource_id=?", [*args, resource_id]
-        rows = self.db.execute(sql + " ORDER BY seq LIMIT ?", (*args, limit)).fetchall() if limit else []
-        events = [{"seq": r["seq"], "resource_type": r["resource_type"], "resource_id": r["resource_id"],
-                   "kind": r["kind"], "body": self._body(r["body"]), "actor": r["actor"],
-                   "created_at": r["created_at"]} for r in rows]
-        last = events[-1]["seq"] if events else after
-        return {"events": events, "next_cursor": last, "head_cursor": head,
-                "has_more": (len(events) == limit and last < head) if limit else after < head}
+        if after > head:
+            raise ValueError("after exceeds the journal head")
+        sql, args = "SELECT e.* FROM api_events e WHERE e.seq>? AND e.seq<=?", [after, head]
+        for column, value in (("resource_type", resource_type), ("resource_id", resource_id), ("kind", kind)):
+            if value:
+                sql += f" AND e.{column}=?"  # fixed identifiers
+                args.append(value)
+        if not kind:
+            sql += " AND e.kind!='history.backfilled'"
+        if related_resource_type:
+            sql += """ AND EXISTS(SELECT 1 FROM api_event_resources r WHERE r.seq=e.seq
+                AND r.resource_type=? AND r.resource_id=? AND r.linked_at_seq<=?)"""
+            args.extend([related_resource_type, related_resource_id, head])
+        rows = self.db.execute(sql + " ORDER BY e.seq LIMIT ?", (*args, limit + 1)).fetchall() if limit else []
+        events = [event_out(self.db, r) for r in rows[:limit]]
+        more = len(rows) > limit if limit else after < head
+        last = events[-1]["seq"] if more and events else (after if not limit else head)
+        return {"events": events, "next_cursor": last, "head_cursor": head, "has_more": more}
 
     def submit(self, *, project: str, host: str, workspace: str, original_words: str,
                discord_thread_id: str | None = None, recipe: str = "feature-to-staging",
@@ -1034,7 +1107,7 @@ class Journal:
                 raise ValueError("task state does not allow a prompt")
             unresolved = self.db.execute("""SELECT 1 FROM commands WHERE task_id=?
                 AND status IN ('intent','needs_review','uncertain')
-                AND (kind='send' OR kind='failover' OR kind LIKE 'start_%') LIMIT 1""",
+                AND (kind IN ('send','answer','interrupt','permissions','failover') OR kind LIKE 'start_%') LIMIT 1""",
                 (task_id,)).fetchone()
             if unresolved:
                 raise ValueError("task has a command requiring reconciliation")
@@ -1057,7 +1130,7 @@ class Journal:
                 raise ValueError("task does not allow failover")
             pending = self.db.execute("""SELECT 1 FROM commands WHERE task_id=?
                 AND status IN ('intent','needs_review','uncertain')
-                AND (kind='send' OR kind='failover' OR kind LIKE 'start_%') LIMIT 1""", (task_id,)).fetchone()
+                AND (kind IN ('send','answer','interrupt','permissions','failover') OR kind LIKE 'start_%') LIMIT 1""", (task_id,)).fetchone()
             if pending:
                 raise ValueError("task has a command requiring reconciliation")
             now = time.time()
@@ -1102,13 +1175,14 @@ class Journal:
                         {"command_id": command_id, "reason": reason})
 
     def resolve_failover(self, task_id: str, command_id: str, handoff_command_id: str, *,
-                         token: str, outcome: str, actor: str, source: str, evidence: str) -> dict:
+                         token: str, outcome: str, actor: str, source: str, evidence: str,
+                         token_hash: str | None = None) -> dict:
         """Close a conflicted failover by operator attestation without adopting a successor."""
         if (outcome not in {"delivered", "not_delivered", "superseded"}
                 or actor not in {"operator", "ted"} or not source.strip() or len(source) > 256
                 or not evidence.strip() or len(evidence) > 2000):
             raise ValueError("valid operator outcome and provenance are required")
-        digest = hashlib.sha256(token.encode()).hexdigest()
+        digest = token_hash or hashlib.sha256(token.encode()).hexdigest()
         with self.tx():
             task = self.get(task_id)
             cmd = self.command_get(command_id)
@@ -1153,8 +1227,12 @@ class Journal:
             self._event(row["task_id"], "command_" + status, {"command_id": command_id})
 
     def command_bind_session(self, command_id: str, session_id: str):
-        self.db.execute("UPDATE commands SET session_id=?,updated_at=? WHERE command_id=?",
-                        (session_id, time.time(), command_id))
+        with self.tx():
+            row = self.db.execute("SELECT task_id,session_id FROM commands WHERE command_id=?", (command_id,)).fetchone()
+            self.db.execute("UPDATE commands SET session_id=?,updated_at=? WHERE command_id=?",
+                            (session_id, time.time(), command_id))
+            if row and row["session_id"] != session_id:
+                self._event(row["task_id"], "command_bound", {"command_id": command_id, "session_id": session_id, "previous_session_id": row["session_id"]})
 
     def commands(self, task_id: str) -> list[dict]:
         return [dict(r) for r in self.db.execute("SELECT * FROM commands WHERE task_id=? ORDER BY created_at", (task_id,))]
