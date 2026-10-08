@@ -19,6 +19,8 @@
   An HTTP regression test pins server-recorded acceptance authority and retries of the same public request.
   Joint worktree/branch cleanup is covered by succeeded receipts for both items. A branch moved after its worktree
   removal now returns PREVIEW_STALE before writing its retained ref.
+  Integration cleanup targets resolve apply and handoff operations back to their preview using the snapshot's
+  operation rows, so preview/apply/handoff targets list the same sources, areas, pins, repairs and sessions.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
