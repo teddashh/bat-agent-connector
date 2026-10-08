@@ -5,9 +5,10 @@ import { connectorRequest, nativeDesktop, nativeStatus, nativeConnect, nativeDis
 import { consumePage, storageScope } from "./state/events.ts";
 
 const TOKEN_KEY = "batc.dashboard.token";
-const state = { token: null, caps: null, lastEvent: 0, listeners: new Set(), namespace: "", epoch: 0, online: false, viewReady: false, sync: null, endpoint: "" };
+const state = { token: null, caps: null, lastEvent: 0, listeners: new Set(), namespace: "", epoch: 0, online: false, viewReady: false, sync: null, endpoint: "", connectionError: null };
 async function activate(caps, endpoint = location.origin, reset = false) {
   state.epoch++;
+  state.connectionError = null;
   state.online = false; state.viewReady = false;
   state.caps = caps; state.endpoint = endpoint; state.sync = null;
   let bootstrap;
@@ -95,10 +96,15 @@ async function draftId(scope, request) {
   return `${scope}.${[...new Uint8Array(digest).slice(0, 12)].map(b => b.toString(16).padStart(2, "0")).join("")}`;
 }
 const TERMINAL = ["succeeded", "failed", "cancelled"];
-async function keyFor(scope) {
+function assertConnection(connection) {
+  if (connection.epoch !== state.epoch || connection.namespace !== state.namespace)
+    throw new ApiError(0, "CONNECTION_CHANGED", "Connection changed while preparing the operation");
+}
+async function keyFor(scope, connection) {
   // One idempotency key per draft: a retry of the same draft reuses it, so the action happens once. The server
   // keeps keys for good, so once the operation a key made has finished, the same draft is a new request.
-  const k = `batc.key.${state.namespace}.${scope}`;
+  assertConnection(connection);
+  const k = `batc.key.${connection.namespace}.${scope}`;
   let saved = null;
   try {
     const raw = localStorage.getItem(k);
@@ -107,18 +113,23 @@ async function keyFor(scope) {
   if (saved?.key && saved.op) {
     try {
       const op = (await api("GET", `/operations/${saved.op}`)).operation;
+      assertConnection(connection);
       if (TERMINAL.includes(op.status)) saved = null;
-    } catch (e) { if (e.status === 404) saved = null; } // unreachable: keep the key, a retry must not act twice
+    } catch (e) {
+      if (e.code === "CONNECTION_CHANGED") throw e;
+      if (e.status === 404) saved = null;
+    } // unreachable: keep the key, a retry must not act twice
   }
+  assertConnection(connection);
   if (saved?.key) return saved.key;
   const key = crypto.randomUUID();
   try { localStorage.setItem(k, JSON.stringify({ key })); } catch { /* ignore */ }
   return key;
 }
-function rememberOp(scope, key, op) {
-  try { localStorage.setItem(`batc.key.${state.namespace}.${scope}`, JSON.stringify({ key, op })); } catch { /* ignore */ }
+function rememberOp(scope, key, op, namespace) {
+  try { localStorage.setItem(`batc.key.${namespace}.${scope}`, JSON.stringify({ key, op })); } catch { /* ignore */ }
 }
-function dropKey(scope) { try { localStorage.removeItem(`batc.key.${state.namespace}.${scope}`); } catch { /* ignore */ } }
+function dropKey(scope, namespace) { try { localStorage.removeItem(`batc.key.${namespace}.${scope}`); } catch { /* ignore */ } }
 
 // ------------------------------------------------------------------ API
 class ApiError extends Error {
@@ -139,15 +150,20 @@ function errorBox(e) {
   return h("p", { class: "error" }, text);
 }
 async function submit(action, target, params, preconditions, scope) {
+  const connection = { epoch: state.epoch, namespace: state.namespace };
   const request = { action, target, params, preconditions };
   scope = await draftId(scope, request);
-  const key = await keyFor(scope);
+  assertConnection(connection);
+  const key = await keyFor(scope, connection);
+  assertConnection(connection);
   try {
     const out = await api("POST", "/operations?wait=3", request, key);
-    if (TERMINAL.includes(out.operation.status)) dropKey(scope); else rememberOp(scope, key, out.operation.operation_id);
+    assertConnection(connection);
+    if (TERMINAL.includes(out.operation.status)) dropKey(scope, connection.namespace);
+    else rememberOp(scope, key, out.operation.operation_id, connection.namespace);
     return out.operation;
   } catch (e) {
-    if (e.status && e.status < 500 && e.status !== 409) dropKey(scope); // a conflict retains its original intent key
+    if (e.status && e.status < 500 && e.status !== 409) dropKey(scope, connection.namespace); // a conflict retains its original intent key
     throw e;
   }
 }
@@ -325,14 +341,15 @@ async function viewSession(main, host, sid) {
   }
   if (linked?.length) head.append(linkedItems(linked));
   const scope = `send.${host}.${sid}`;
+  const draftNamespace = state.namespace;
   const cps = checkpointPanel(host, sid);
   main.insertBefore(cps.box, msgs.previousSibling);
   if (row.api_access !== "managed") {
     controls.replaceChildren(h("p", { class: "note" }, t("read_only_note")));
   } else {
     const box = h("textarea", { placeholder: t("send_placeholder") });
-    try { box.value = localStorage.getItem(`batc.draft.${state.namespace}.${scope}`) || ""; } catch { /* ignore */ }
-    box.oninput = () => { try { localStorage.setItem(`batc.draft.${state.namespace}.${scope}`, box.value); } catch { /* ignore */ } };
+    try { box.value = localStorage.getItem(`batc.draft.${draftNamespace}.${scope}`) || ""; } catch { /* ignore */ }
+    box.oninput = () => { try { localStorage.setItem(`batc.draft.${draftNamespace}.${scope}`, box.value); } catch { /* ignore */ } };
     const status = h("div", { class: "muted" });
     // BAT refuses a direct send while a turn runs; queueing puts the message behind it instead.
     const queue = h("input", { type: "checkbox", checked: row.streaming });
@@ -343,7 +360,7 @@ async function viewSession(main, host, sid) {
         const op = await submit("session.send", { host, session_id: sid }, { text: box.value, queue: queue.checked }, {},
           scope);
         status.replaceChildren(opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
-        if (op.status === "succeeded") { box.value = ""; try { localStorage.removeItem(`batc.draft.${state.namespace}.${scope}`); } catch { /* ignore */ } }
+        if (op.status === "succeeded") { box.value = ""; try { localStorage.removeItem(`batc.draft.${draftNamespace}.${scope}`); } catch { /* ignore */ } }
       } catch (e) { status.replaceChildren(errorBox(e)); }
       send.disabled = false;
     } }, t("send"));
@@ -831,6 +848,7 @@ function viewSettings(main) {
   const remember = h("input", { type: "checkbox" });
   const info = h("p", { class: "muted" });
   if (state.caps) info.textContent = t("connected_as", { actor: state.caps.actor, scopes: state.caps.scopes.join(", ") });
+  else if (state.connectionError) info.replaceChildren(errorBox(state.connectionError));
   main.append(h("h1", {}, t("nav_settings")), h("div", { class: "panel" },
     h("label", {}, t("token")), h("div", { class: "filters" }, input,
       h("button", { class: "primary", onclick: async () => {
@@ -873,6 +891,7 @@ async function viewNativeSettings(main) {
       h("p", { class: "note" }, t("desktop_dashboard_only"))));
   if (state.caps) info.textContent = t("connected_as", { actor: state.caps.actor, scopes: state.caps.scopes.join(", ") });
   try {
+    if (!state.caps && state.connectionError) info.replaceChildren(errorBox(state.connectionError));
     const status = await nativeStatus();
     endpoint.textContent = status.endpoint || t("desktop_config_needed");
     if (status.error) info.textContent = status.error;
@@ -1365,7 +1384,7 @@ async function start() {
       const caps = await nativeConnect();
       state.token = "native-credential";
       await activate(caps, status.endpoint);
-    } catch { /* settings explains unavailable configuration or native credential */ }
+    } catch (error) { disconnect(); state.connectionError = error; }
   } else {
     state.token = loadToken();
     if (state.token) {

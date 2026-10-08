@@ -2,6 +2,13 @@
 
 ## Next release (unreleased)
 
+- Add the shared Vite/TypeScript Dashboard source and initial packaged Tauri 2 shell with restricted native
+  central transport, native-memory credentials, tray hiding and same-session instance handoff. Browser and
+  desktop share bounded checkpoint polling, isolated draft/operation storage and offline write blocking;
+  account changes abort pending submissions. Generated assets and unsigned packaging are checked in CI.
+  Linux native and combined central fixtures pass; Windows, Fleet, protected credential enrollment and R04
+  per-view freshness remain pending ([desktop foundation](docs/design/desktop.md)).
+
 - Record the [Tauri v2 product scope](docs/product/realignment-v2.md) and
   [integration status](docs/product/implementation-status.md) (R00). Keep the central Python backend and
   share the browser/desktop UI; exclude Hub import and redefine B05 as Connector data preservation.
