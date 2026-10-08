@@ -169,6 +169,12 @@ policy admission 仍 403、無 operation row；執行期拒絕保留 failed oper
 
 ## 尚未涵蓋
 
+Agent MCP 安裝使用 `--principal-only`：只註冊 central daemon reads、operations 與 task adapters，
+所有 calls 必須帶 `BATC_API_TOKEN`，不 fallback 本機 admin token／task capability。
+`work_status`／`work_result`／`work_events` 的 RPC 讀取亦要求 `observe`；沿用既有回傳格式。
+再加 `--read-only` 可完全隱藏寫入工具。預設 operator profile 保留舊 direct Fleet 工具，
+不代表 API principal scopes 可約束這些舊入口；agent 不使用它。詳見 [agent bundles](../agent-skills.md)。
+
 - GitHub 部署 history／rollback／environment generation／runtime check 為 delivery Part B（第二步），尚未加入路由。Dashboard、merge、metadata、checkpoint 與 integration 入口已交付。
 - 既有 MCP 寫入工具（`session_send` 等）仍直接呼叫 service；它們受同一套資源政策約束，但不留 operation 紀錄。之後改為經 `operation_submit`。
 - Part B：其餘 legacy writes 的 operations、no-key sentinel／讀取投影、完整結果與外部 steps 拆分。Task controls 與 A07 共用 gate 已在 Part A 完成。

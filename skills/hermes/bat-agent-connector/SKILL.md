@@ -4,14 +4,14 @@ description: Use this when you need to check on, read, wait for, or (only when e
 version: 0.2.4
 license: MIT
 metadata:
-  workflow_version: "2026-10-08.1"
+  workflow_version: "2026-10-08.2"
   api_version: "1"
   contract_version: "2026-10-08"
   generated_by: "scripts/generate_agent_skills.py"
   generator_version: "1"
   adapter: "hermes"
   canonical_source: "skills/bat-agent-connector/SKILL.md"
-  canonical_sha256: "976106a66b5068f3cae84f4ab1c589b9b68a93b575930fa03b075a5fce9cab9f"
+  canonical_sha256: "9361e0ef5beef292107ba0fa44143016d6c57ca5b78ed2491638159f9495cd51"
   hermes:
     tags: [bat, better-agent-terminal, claude-code, codex, mcp, supervision, worktree, orchestration]
     category: autonomous-ai-agents
@@ -22,7 +22,7 @@ metadata:
 
 ## Hermes adapter
 
-Register `bat-agent-connector-mcp` as `bat` in Hermes's MCP configuration
+Register `bat-agent-connector-mcp --principal-only` as `bat` in Hermes's MCP configuration
 (`~/.hermes/config.yaml`, `mcp_servers.bat`). Tools may appear as
 `mcp__bat__capabilities_get`; use the names actually returned by tool discovery.
 Use the operator-configured stdio or streamable HTTP transport and supply this
@@ -35,6 +35,14 @@ operation with the same identity when available; a refusal still applies.
 # Better Agent Terminal (BAT) connector
 
 ## Connect or reconnect
+
+Agent installations use `bat-agent-connector-mcp --principal-only` (or an HTTP endpoint
+already running that profile with this agent's token). Add `--read-only` to omit all writes.
+The principal profile exposes central inventory/history, task reads/controls, checkpoints,
+work items and operations; every call requires the agent token. Direct Fleet tools in the
+legacy reference below are absent. Never remove this flag, use the operator profile or
+borrow CLI/admin authority to obtain an unavailable action. Existing default installations
+may still expose direct Fleet tools that do not enforce API principal scopes.
 
 1. Check the configured Connector endpoint and MCP initialization `serverInfo` (name/version). Read
    `capabilities_get()` before operations: it returns `connector`, `api_version`, `contract_version`, `actor`,
@@ -76,6 +84,15 @@ operation with the same identity when available; a refusal still applies.
   write into theirs. `session_policy(host, session_id)` explains any refusal.
 
 ## Tools (MCP) and CLI equivalents
+
+This is also a compatibility reference for operator installations. In the agent profile,
+only central daemon tools and task adapters are advertised; the direct Fleet rows are
+legacy references, not agent instructions. Use `inventory_hosts` / `inventory_sessions`
+and `inventory_session` for observation, `work_status` for task detail and central
+`operation_submit` actions such as `session.send`, `session.answer` and `session.interrupt`
+only when allowed in capabilities. Preserve their operation IDs and keys. Transcript/wait,
+raw start, relay, fan-out, permissions and legacy cleanup have no advertised agent adapter
+here; do not execute the corresponding legacy workflows or CLI commands.
 
 | Goal | MCP tool | CLI |
 |---|---|---|
@@ -141,7 +158,7 @@ lists unknown-time facts; `coverage.unknown_occurrence_times_excluded` flags the
 `coverage.first_recorded_at` is journal record time and can be migration time, not occurrence time.
 Dashboard timeline and reconnect flow are the later Part B.
 
-## Vibe-partner workflow (supervising running sessions)
+## Legacy operator reference: supervising running sessions
 
 1. `sessions_list` (optionally `active_within_hours=24`). Note sessions that are `streaming`, have `pending`, or went
    quiet recently.
@@ -159,7 +176,7 @@ Dashboard timeline and reconnect flow are the later Part B.
    instead of retrying around them.
 5. Report back: per session one line (host, workspace, state, what you did).
 
-## Relay workflow (forwarding a human's order)
+## Legacy operator reference: relay workflow
 
 Do not paraphrase, rewrite or plan the order. Call `session_relay(host, workspace=..., message=<the exact text>,
 brief={goal, context, constraints, acceptance}, earlier=[<earlier thread messages, verbatim>], confirm=true)`.
@@ -233,7 +250,7 @@ item is done.
    session|checkpoint|operation|task|pull_request, ref})`, e.g. the `checkpoint.continue` operation you started, or
    `owner/name#123` for the PR.
 
-## Plan fan-out workflow (orchestrate tier)
+## Legacy operator reference: plan fan-out
 
 1. Read the project plan. Split it into tasks that can run **independently** (different files/modules, no ordering
    dependency). `batc fanout PLAN.md` prints a first split with ready-made task prompts; edit it, keep tasks small.
@@ -251,7 +268,7 @@ item is done.
 7. Clean up: `worktree_remove(host, sid, confirm=true)` after merging (branch kept unless `delete_branch=true`).
 8. Report: tasks, branches, merged or not (and why), follow-ups.
 
-## Lifecycle workflows (only where the user enabled them)
+## Legacy operator reference: lifecycle workflows
 
 - **Quota failover**: `quota_sessions` lists Claude sessions stopped by a usage limit (with the reset time). Only
   connector-managed sessions can be failed over; for a person's BAT session report the limit and, if asked, start a
