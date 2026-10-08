@@ -2,6 +2,10 @@
 
 ## Next release (unreleased)
 
+- Integrate delivery history after observation data step 2: run deployment step 3 in the same journal open,
+  preserve original events, and append one saved snapshot per deployment. State changes publish bounded,
+  operation-linked facts without verifier bodies or configuration; unchanged reads stay quiet.
+
 - Refuse BAT worktree mutations for legacy reviewers whose shared creation root is unproven in the registry,
   including paths under managed roots. Preserve proven carrier behavior and observation identity resolution;
   raw CLI policy does not require a task daemon or guess a journal location.

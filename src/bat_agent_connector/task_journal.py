@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 # Latest allocated data step; individual backfills retain their own version gates.
-LATEST_DATA_STEP = 2
+LATEST_DATA_STEP = 3
 
 STATES = frozenset({
     "queued", "dispatching", "accepted", "running", "waiting_permission",
@@ -347,10 +347,10 @@ class Journal:
             )""")
         from . import deployment_store
         deployment_store.schema(self)
-        deployment_store.backfill(self)
 
         from .observation import install
         install(self)
+        deployment_store.backfill(self)
 
     def _drop_legacy_outbox(self):
         """Remove the retired chat outbox so no historical event can ever be published.

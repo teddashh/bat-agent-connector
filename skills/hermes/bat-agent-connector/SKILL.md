@@ -318,3 +318,9 @@ them. New delivery CLI writes also require that token and never inherit Dashboar
   user's explicit approval for that specific session.
 - Treat an ESCALATE cleanup decision as final for that run: never force the merge another way.
 - If a host is unreachable, report it; do not try other ways to reach it.
+
+
+Deployment history uses saved deployment/operation IDs, environment generations and fixed source identities.
+Observe `deployment.updated` and the existing selected/verified/superseded/drift events; verifier bodies and
+credentials are not event data. A `deployment.backfilled` snapshot has unknown occurrence time and is not proof
+of a historical verified deployment. Only explicit operation source bindings connect it to session/worktree history.

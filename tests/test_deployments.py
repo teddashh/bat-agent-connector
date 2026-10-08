@@ -495,6 +495,10 @@ async def test_d05_undispatched_selection_superseded_has_zero_post(make_daemon, 
     await settle(d, new["operation_id"], rounds=1)
     done = await settle(d, old["operation_id"])
     assert done["error_code"] == "DEPLOY_SUPERSEDED"
+    transitions = [e for e in d.journal.api_events(limit=200)["events"]
+                   if e["kind"] == "deployment.updated" and e["body"]["operation_id"] == old["operation_id"]
+                   and e["body"]["state"] == "superseded" and not e["body"].get("error_code")]
+    assert len(transitions) == 1 and transitions[0]["body"]["provider_terminal"]
     assert gh.count("POST", "dispatches") == 1
     assert not any(
         b["inputs"]["operation_id"] == old["operation_id"] for m, p, b in gh.requests if m == "POST"

@@ -145,3 +145,10 @@ History／relations 的 opaque cursor 在任何 journal read 前驗證 version�
 
 - 既有 MCP 寫入工具（`session_send` 等）仍直接呼叫 service；它們受同一套資源政策約束，但不留 operation 紀錄。之後改為經 `operation_submit`。
 - `task.submit`／`pause`／`resume` 尚未包成 operation。
+
+
+Deployment Part B 的 observation adapter 使用同一 `/events` feed：
+`deployment.selected/updated/verified/superseded/backfilled`、`deployment.drift`，只含保存的 IDs、generation、
+state、SHA、run/attempt、固定 error code 與去除 query/fragment 的 HTTPS provider_url。
+透過明確 operation/source refs 索引 history，無 binding 時不猜 session/worktree。Step 3 接在 observation
+step 2 之後；backfilled snapshot 的 occurred_at=null，原事件不改寫。History capability 列 `delivery_part_b`。
