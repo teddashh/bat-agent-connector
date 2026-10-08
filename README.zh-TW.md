@@ -6,6 +6,10 @@
 
 **專案介紹頁：** https://teddashh.github.io/bat-agent-connector/?lang=zh-TW
 
+**開發方向：** [Tauri v2 產品決策](docs/product/realignment-v2.md)與
+[實作狀態](docs/product/implementation-status.md)。桌面版共用 Dashboard frontend 與既有 Python 後端。
+v2 不提供 Project Hub 匯入；保留既有專案與工作項目管理。
+
 BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端機 app，在你自己的機器上執行 Claude Code 與 Codex 的 agent session，並依工作區（workspace）分組。它有一套遠端協定 `bat-remote/v2`，BAT 自己的桌面介面和手機客戶端都走這套協定。本專案實作同一套協定，讓「其他」agent（Claude Code、Codex、Cursor、Hermes 或任何 MCP 客戶端）以及 shell 腳本可以：
 
 * 看到有哪些 agent session、哪些正在跑或卡在問題上，以及它們最近說了什麼；
@@ -25,6 +29,8 @@ BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端�
 | MCP 伺服器（stdio，或只綁 localhost 的 streamable HTTP） | `bat-agent-connector-mcp`（也可以用 `batc mcp`） |
 | CLI | `batc` |
 | Agent skill | [`skills/bat-agent-connector/SKILL.md`](skills/bat-agent-connector/SKILL.md) |
+
+`batc inventory`、`batc history`、`batc relations` 與對應 HTTP/MCP 讀取提供持久觀測。Session 歷史只讀 journal 事實；warm reuse 保留每個 task 的關係區間，discovery 顯示最近 host/profile 掃描範圍及未掃項目。未知 actor／狀態保持 unknown，讀取不啟動 session、不背景探測 Git。詳見 [observation](docs/design/observation.md)。Dashboard 的歷史與 scope 畫面屬後續 Part B。
 
 ## 為什麼要做
 
@@ -79,6 +85,10 @@ write 與 orchestrate 的工具沒開啟時根本不會註冊；開啟後每次�
 
 `batc serve` 會在 `127.0.0.1:18796` 啟動以 SQLite WAL 為基礎的任務協調服務。原本的 MCP 伺服器因此多了 `work_submit`、`work_status`、`work_pause`、`work_resume`、`work_result`，以及唯讀的 `work_events` 事件流；它的 stdio 行程透過 `BATC_TASK_URL`（預設 `http://127.0.0.1:18796/rpc`）呼叫這個常駐服務。`work_submit` 在 `original_words` 收下 Ted 的**原話**，再加上一個冪等鍵（例如 Discord 訊息 ID），不等 BAT 就直接回傳 `task_id`。Hermes 不可以重新詮釋或拆分這個請求。規劃由跑在 Opus 5.5 上的 Goose 在 repo 裡進行。任務的寫入動作要求主機原本就設好 `writes=true` 與 `orchestrate=true`。原有的低階工具與 `batc` 指令照常可用。
 
+Task-bound operations 在 admission 固定 task 版本，省略 `control_version` 也一樣；session controls 另固定當時 session。`external_refs.admission_binding` 是 server binding，與 caller preconditions 分開。執行前 pause／resume 或換 session 會以 `CONTROL_VERSION_CONFLICT`／`TASK_BINDING_MISMATCH` 拒絕舊要求；同 key 重讀原拒絕或成功，先讀 task 再以新 key 提交有授權的新決定。升級前無 binding 的 operations 保留原行為。
+
+Task mutations 現在保存 operation，原結果新增 `operation_id`／`operation_status`。重試保留同一 key；key 以驗證 actor 為範圍，無 key 的舊 task controls 每次是獨立要求。task-owned 的 send／answer／interrupt／permissions，包括 legacy tools，都經同一 coordinator；`TASK_PAUSED`、`TASK_VERIFYING`、`TASK_COMMAND_PENDING` 表示停止並讀 work_status，不用 force／continue 插隊。`CONTROL_VERSION_CONFLICT` 要先讀變更後狀態。第二個 daemon 即使指定不同 --db，也回 `OWNER_CONFLICT` 與既有 owner 資訊；client 連原 owner。詳見[統一操作 Part A](docs/design/operations-unification.md)；其餘 legacy operations、no-key／null 結果投影留在 Part B。
+
 每個任務就是一個跑在 Opus 5.5 上的 Goose session。`goose-session` recipe 的 prompt 會指示 Goose 一開始拆一次工作，以 Grok 4.7 : Codex : Opus 5.5 = 4:2:1 的比例為目標分配執行者，而且不把新工作交給每週額度剩餘在 15% 以下（含）的模型。這些是寫在 prompt 裡的指示，不是服務會強制執行的規則：服務不會統計分派次數，也不會讀取額度。這個服務本身不做路由、不做審查，也不做 failover。驗證結果以可信任的測試為準；程式碼沒過，就退回同一個 session 在有限次數內重做，預算用完則標為 `needs_ted`。Ted 之後補充的指示，會接在同一個任務上繼續（同一個 session，不重新規劃，也不開新任務）。這條路徑不經過 Jev。只有當調度者送出已經拆好的任務，並指定 `executor_model`（`grok`、`codex` 或 `claude`）而跳過 Opus 規劃時，才會用到 Jev。Goose 本身有一個開關，預設關閉（`GooseConfig.enabled`）；關閉期間，任務會一直排隊，不會啟動任何東西。
 
 可信任的測試指令必須在本機設定好；服務會在乾淨的候選 commit 上觀察它的結束代碼。服務永遠不會自己在聊天室發訊息。`work_events(since_cursor, limit)`（CLI 為 `batc task-events --since N`）只回傳里程碑（`started`、附原因的 `needs_ted`、附 commit／PR 連結的 `done`、`failed`），每一筆都帶單調遞增的 `cursor`、`task_id`、`project`、`workspace`、送出時傳入的不透明 `origin_thread_id`、`kind`，以及一段簡短的 `summary`。主要的傳遞方式是推送：在私有設定裡設好 `[task_service.event_webhook] url`（只限 loopback）與 `secret_file`（權限 0600）後，每個已提交的里程碑都會依 cursor 順序以純 JSON POST 出去（`type="task.milestone"`、`delivered_through`、`X-Request-ID`，以及對 `<X-Webhook-Timestamp>.<body>` 計算的 HMAC-SHA256 `X-Webhook-Signature-V2`）。推送的 cursor 在第一次設定時從「現在」開始，只有收到 2xx 才會前進；失敗時以有上限的指數退避重試（最長 300 秒）。接收端斷線之後，用 `work_events` 補抓；`limit=0` 會回傳 `head_cursor`。選用的 `[task_service] repo_urls` 會多加上 `commit_url`。任務 API 需要本機管理 token 或限定範圍的 capability，而且只綁定 loopback。狀態、復原、私有設定與上線步驟，請見[任務服務設計文件](docs/design/task-service.md)。`work_status` 與 `work_result` 只是單純讀取 journal，回傳的 `delivery` 區塊會把 `verified` 與 `adopted`、`merged`、`deployed` 分開（後三者只來自 `work_mark_stage`）。`context_refs` 保存隨 Ted 的原話一起送來的附件、previous_message_id、計畫與 commit。`work_submit` 可以另外帶 `task_path`（`standard` 或 `minimal`）；沒有帶時，常駐服務使用 `standard`，若啟動時設了 `BATC_TASK_DEFAULT_PATH=minimal` 則改用 `minimal`。只有走 minimal 路徑，而且後續請求的 HEAD 仍是上一個已驗證的 commit，才會沿用已經暖機的主導 session。
@@ -122,6 +132,10 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 ### Dashboard 與 `/api/v1`（選用）
 
 `batc serve` 也在同一個 loopback 埠提供 `/api/v1` 與瀏覽器 Dashboard（`http://127.0.0.1:18796/dashboard/`）：需要你處理的項目、所有 session 與其來源（人在 BAT 建立的 session 一律唯讀）、managed session 的操作、PR 合併與部署按鈕，以及操作紀錄。以 `batc api-token issue --actor ted-dashboard --scope observe --scope operate --scope start --scope integrate --scope manage --scope approve --scope merge --scope deploy`（`merge`、`deploy` 給合併與部署按鈕）發行 token 後在 Dashboard 的「連線」輸入。專案與工作項目記下在做什麼、為什麼：需求原文、驗收、步驟，以及做這件事的 sessions、checkpoint、操作與 PR。有 `manage` 的 agent 可以回報完成；只有帶 `approve` 的 token 能確認完成，而且確認的是它讀到的內容，之後內容再改會重新等待確認。排序、固定、改名與封存沿用 Project Hub 的規則。要接續人的工作而不碰它的 session，先記下 checkpoint（`checkpoint.create`：commit 與最近對話，只讀），再從它開始 managed 工作（`checkpoint.continue`：在 Connector 自有的 clone、worktree、分支與 session 從那個 commit 開始）。需要 `managed_roots` 與主機的 SSH alias。要把成果放進既有 PR，先預覽（`integration.preview`：列出以 SHA 釘住、會進 PR 的每個 commit 與檔案），再套用預覽（`integration.apply`：以主機的 git 憑證，一般 push 組合後的 commit 到 PR 的 head 分支；不強推，也不改你的資料夾），需要在 repository 的 `[[github.repos]]` 設定 `integrate = {hosts, remote_url}`。設計見 [docs/design/api-v1.md](docs/design/api-v1.md)、[docs/design/delivery.md](docs/design/delivery.md)、[docs/design/dashboard.md](docs/design/dashboard.md)、[docs/design/checkpoints.md](docs/design/checkpoints.md)、[docs/design/integration.md](docs/design/integration.md)、[docs/design/work-items.md](docs/design/work-items.md)。
+
+PR metadata 使用獨立 action `github.pr.update`：既有 integrate scope，加 repository `allow_pr_update = true`（預設 false），不需要重新發 token。先以 `github_pr_preview`／`batc delivery pr` 讀 title/body digest 與保存的 merge scope；metadata 寫前比較、寫後讀回，但 GitHub 最後讀寫窗口仍有競爭限制。合併前檢視完整 commits／受影響 PR，再以 `github_pr_merge`／`batc delivery merge --preview mpv_... --key KEY` 送出；舊 head-only 請求會拒絕。提交前 base 變動停止，queue 受理後可合併到較新 base 並列出其他 commits；驗證 actual merged SHA，拒絕不支援的 stack／間接合併。MCP／CLI 寫入需要 caller 自己的 BATC_API_TOKEN。詳見 [交付設計](docs/design/delivery.md)。部署 history、environment generations、runtime verification 與 rollback 留待 Part B。
+
+未知 metadata 寫入滿 10 分鐘後讀回仍未變，會結案為 not_applied、釋放 PR，不重送 PATCH；新編輯仍須讀取新 digest。相同 merge preview 重用 ID；事件重載的完整 scope 讀取以 60 秒節流，head／base 變動立即刷新，送出合併前仍完整核對。
 
 ## 工具一覽
 

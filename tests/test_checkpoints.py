@@ -20,6 +20,7 @@ from bat_agent_connector.errors import ResourceReadOnly
 from bat_agent_connector.operations import OperationError
 from bat_agent_connector.task_daemon import TaskDaemon
 from tests.conftest import make_config
+from tests.operation_helpers import settle_operations
 
 MANUAL = "sess-claude-0001"
 TED = api_auth.Principal("ted-dashboard", frozenset({"observe", "operate", "start"}))
@@ -107,7 +108,7 @@ def bat_writes(mock, sid=None):
 async def run(d, action, target, params=None, key=None):
     op, _ = d.ops.create(TED, action=action, target=target, params=params or {},
                          idempotency_key=key or f"{action}-{json.dumps(target, sort_keys=True)}-{params}")
-    await d.ops.drain(timeout=60)
+    await settle_operations(d.ops)
     return d.ops.get(op["operation_id"])
 
 
@@ -306,7 +307,7 @@ async def test_a_lost_start_reply_is_read_back_not_started_again(daemon, mock, h
     # BAT has not loaded it yet: a null meta while the reservation exists is not proof of "never started".
     hidden = mock.metas.pop(sid)
     daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
-    await daemon.ops.drain(timeout=30)
+    await settle_operations(daemon.ops)
     assert daemon.ops.get(op["operation_id"])["status"] == "uncertain" and len(calls()) == 1
     mock.metas[sid] = hidden
     monkeypatch.setattr(client, "invoke", real_invoke)
@@ -318,7 +319,7 @@ async def test_a_lost_start_reply_is_read_back_not_started_again(daemon, mock, h
                                 safety={"write_min_interval_s": 0}), tmp_path / "tasks.db")  # the daemon restarts
     d2.ops.context["git_runner"] = LocalRunner()
     d2.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
-    await d2.ops.drain(timeout=60)
+    await settle_operations(d2.ops)
     done = d2.ops.get(op["operation_id"])
     assert done["status"] == "succeeded", done
     assert len(calls()) == 1
@@ -351,7 +352,7 @@ async def test_a_lost_codex_instruction_is_found_in_the_transcript(daemon, mock,
     assert op["status"] == "uncertain"
     monkeypatch.setattr(service, "session_send", real_send)
     daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
-    await daemon.ops.drain(timeout=30)
+    await settle_operations(daemon.ops)
     done = daemon.ops.get(op["operation_id"])
     assert done["status"] == "succeeded", done
     assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"]) == 1  # never sent twice
@@ -403,7 +404,7 @@ async def test_a_replay_after_the_agent_committed_does_not_recheck_the_moved_hea
     monkeypatch.setattr(service, "session_send", real_send)
     daemon.journal.db.execute("UPDATE operations SET next_run_at=0, uncertain_tries=99 WHERE operation_id=?",
                               (op["operation_id"],))
-    await daemon.ops.drain(timeout=30)
+    await settle_operations(daemon.ops)
     done = daemon.ops.get(op["operation_id"])
     assert done["error_code"] != "START_MISMATCH", done
     assert [s["name"] for s in done["steps"]][:3] == ["worktree.prepare", "verify.start", "session.start"]

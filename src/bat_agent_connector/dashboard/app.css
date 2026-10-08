@@ -101,3 +101,13 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
 .attachments input[type="file"] { width: 100%; }
 .attachment-list .grow { overflow-wrap: anywhere; min-width: 0; }
 .attachment-list select { max-width: 100px; }
+
+.delivery-card { overflow-wrap: anywhere; }
+.delivery-card label input { width: 100%; }
+.delivery-card .kv { grid-template-columns: max-content minmax(0, 1fr); }
+.delivery-card .row-details li { margin-bottom: 6px; }
+@media (max-width: 640px) {
+  .delivery-controls input { min-width: 0; max-width: 100%; }
+  .delivery-controls input, .delivery-card input, .delivery-card select, .delivery-card textarea { font-size: 16px; }
+  .delivery-controls button, .delivery-card button, .delivery-card select { min-height: 44px; }
+}

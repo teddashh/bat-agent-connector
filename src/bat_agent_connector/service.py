@@ -7,9 +7,7 @@ results; errors are redacted.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
-import sqlite3
 import statistics
 import time
 import uuid
@@ -17,7 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from . import registry, resource_policy
+from . import registry, resource_policy, task_control
 from .client import BatClient, event_session_id
 from .errors import BatError, InvokeError, WriteRefused
 from .fleet import Fleet
@@ -42,31 +40,6 @@ def task_service_db() -> Path | None:
     except (OSError, ValueError, KeyError, TypeError):
         return None
     return db if db.is_absolute() else None
-
-
-def _task_send_block(host: str, session_id: str) -> str | None:
-    """Why a direct send to a task-service-owned session is refused, or None.
-
-    Unknown task state fails closed: a task-owned session whose journal row
-    cannot be read is treated as controlled by the service.
-    """
-    owner = registry.get(host, session_id)
-    task_id = owner.get("task_id") if owner else None
-    if not task_id:
-        return None
-    db = task_service_db()
-    if db is None:
-        return "task-owned session state is unavailable; direct sends are blocked"
-    try:
-        with contextlib.closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.2)) as conn:
-            row = conn.execute("SELECT state FROM tasks WHERE task_id=?", (task_id,)).fetchone()
-    except (OSError, sqlite3.Error):
-        row = None
-    if not row:
-        return "task-owned session state is unavailable; direct sends are blocked"
-    if row[0] == "verifying":
-        return "task-owned session is verifying; direct sends are blocked"
-    return None
 
 
 def _write_lock(host: str) -> asyncio.Lock:
@@ -309,14 +282,38 @@ async def _host_sessions(
     agent: str | None,
     check_pending: str,
     activity_sources: bool,
+    discovery: dict | None = None,
 ) -> list[dict]:
     c = fleet.client(name)
+    methods = {source: {"status": "skipped", "attempted": 0, "succeeded": 0, "failed": 0} for source in
+               ("workspace:load", "session_meta", "safe_state", "archive", "claude_transcripts", "registry", "journal")}
+    if discovery is not None:
+        discovery["methods"] = methods
+    async def read_source(source, channel, params, **kw):
+        method = methods[source]
+        method["attempted"] += 1
+        try:
+            result = await c.invoke(channel, params, **kw)
+        except Exception:
+            method["failed"] += 1
+            method["status"] = "failed" if not method["succeeded"] else "partial"
+            raise
+        method["succeeded"] += 1
+        method["status"] = "partial" if method["failed"] else "succeeded"
+        return result
+    methods["workspace:load"]["attempted"] = 1
     ws = await _workspace(c)
+    if discovery is not None and not isinstance(ws.get("terminals"), list):
+        raise ValueError("workspace:load returned no workspace document")
+    methods["workspace:load"].update(status="succeeded", succeeded=1)
     ws_by_id = {w.get("id"): w for w in ws.get("workspaces") or []}
     terms = _agent_terminals(ws)
     known = {t.get("id") for t in terms}
     entries = registry.list_entries(name)
     orchestrated_ids = {e.get("session_id") for e in entries}
+    if discovery is not None:
+        discovery.update(workspace_ids=sorted(str(k) for k in ws_by_id if k),
+                         registry_entries=len(entries), workspace_document=True, enrichment_failures=0)
     for e in registry.list_entries(name, active_only=True):
         if e.get("session_id") not in known:
             terms.append(registry_terminal(e))
@@ -330,7 +327,12 @@ async def _host_sessions(
         ]
     if agent:
         terms = [t for t in terms if agent_kind(t.get("agentPreset")) == agent.lower()]
+    methods["registry"].update(status="succeeded", attempted=1, succeeded=1)
+    methods["journal"].update(status="succeeded", attempted=1, succeeded=1)
     metas = await _gather_limited([_meta(c, t["id"]) for t in terms])
+    failures = sum(isinstance(m, Exception) for m in metas)
+    methods["session_meta"].update(status="partial" if failures and failures < len(terms) else "failed" if failures else "succeeded",
+                                   attempted=len(terms), succeeded=len(terms) - failures, failed=failures)
     recent_attention = {
         e.get("sessionId")
         for e in c.recent_events
@@ -352,8 +354,12 @@ async def _host_sessions(
             "agent_preset": t.get("agentPreset"),
             "agent_kind": kind,
             "model": (meta or {}).get("model") or t.get("model"),
-            "loaded": meta is not None,
-            "streaming": (meta or {}).get("isStreaming") if meta else False,
+            "loaded": None if isinstance(m, Exception) else meta is not None,
+            "streaming": meta.get("isStreaming") if meta else None,
+            "provider_native_id": (meta or {}).get("sdkSessionId") or t.get("sdkSessionId"),
+            "field_evidence": {"loaded": "meta_failed" if isinstance(m, Exception) else "session_meta",
+                               "streaming": "session_meta" if meta else "not_observed",
+                               "has_tab": "workspace_document"},
             "runtime_status": (meta or {}).get("runtimeStatus"),
             "num_turns": (meta or {}).get("numTurns"),
             "worktree_branch": t.get("worktreeBranch"),
@@ -367,10 +373,12 @@ async def _host_sessions(
         }
         if isinstance(m, Exception):
             row["meta_error"] = _err(m)
+            if discovery is not None:
+                discovery["enrichment_failures"] += 1
         rows.append(row)
 
     async def fill_archive(row: dict) -> None:
-        r = await c.invoke("claude:load-archived", {"sessionId": row["session_id"], "offset": 0, "limit": 1})
+        r = await read_source("archive", "claude:load-archived", {"sessionId": row["session_id"], "offset": 0, "limit": 1})
         if isinstance(r, dict):
             row["archived_total"] = r.get("total")
             msgs = r.get("messages") or []
@@ -381,7 +389,7 @@ async def _host_sessions(
                     row["last_activity_source"] = "archive"
 
     async def fill_pending(row: dict, meta: dict) -> None:
-        st = await c.invoke("claude:get-session-state", {"sessionId": row["session_id"]})
+        st = await read_source("safe_state", "claude:get-session-state", {"sessionId": row["session_id"]})
         if isinstance(st, dict):
             p = summarize_pending(st.get("pendingAskUser"), "ask_user") or summarize_pending(
                 st.get("pendingPermission"), "permission"
@@ -400,7 +408,7 @@ async def _host_sessions(
     async def fill_transcripts(cwd: str, group: list[dict]) -> None:
         # Claude transcript files on the host: timestamp = file mtime (cheap, parsed host-side).
         # Not used for Codex: the host scans every rollout file for that, which can take minutes.
-        r = await c.invoke("claude:list-sessions", {"cwd": cwd, "agentKind": "claude"}, timeout=20)
+        r = await read_source("claude_transcripts", "claude:list-sessions", {"cwd": cwd, "agentKind": "claude"}, timeout=20)
         by_sdk = (
             {e.get("sdkSessionId"): e for e in r or [] if isinstance(e, dict)} if isinstance(r, list) else {}
         )
@@ -417,7 +425,9 @@ async def _host_sessions(
             if row["agent_kind"] == "claude" and row["cwd"] and t.get("sdkSessionId"):
                 row["_sdk"] = t.get("sdkSessionId")
                 groups.setdefault(row["cwd"], []).append(row)
-        await _gather_limited([fill_transcripts(cwd, g) for cwd, g in groups.items()], limit=3)
+        transcript_results = await _gather_limited([fill_transcripts(cwd, g) for cwd, g in groups.items()], limit=3)
+        if discovery is not None:
+            discovery["enrichment_failures"] += sum(isinstance(r, Exception) for r in transcript_results)
     for row in rows:
         row.pop("_sdk", None)
 
@@ -433,7 +443,9 @@ async def _host_sessions(
         )
         if want_pending and _state_safe(row["agent_kind"], meta):
             jobs.append(fill_pending(row, meta))
-    await _gather_limited(jobs, limit=4)
+    results = await _gather_limited(jobs, limit=4)
+    if discovery is not None:
+        discovery["enrichment_failures"] += sum(isinstance(r, Exception) for r in results)
     return rows
 
 
@@ -947,6 +959,7 @@ def _resume_params(t: dict, ws: dict) -> dict:
     }
 
 
+@task_control.guarded("send")
 async def session_send(
     fleet: Fleet,
     host: str,
@@ -960,6 +973,9 @@ async def session_send(
     retry_on_disconnect: bool = True,
     before_invoke: Callable[[], None] | None = None,
     initial_task_send: bool = False,
+    _task_guard: task_control.FrameGuard | None = None,
+    control_version: int | None = None,
+    operation_id: str | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
     if not isinstance(text, str) or not text.strip():
@@ -972,9 +988,6 @@ async def session_send(
         t, ws = await _resolve_session(c, session_id)
         sid = t["id"]
         grant = await resource_policy.authorize_session(fleet, host, "session.send", t)
-        blocked = None if before_invoke is not None or initial_task_send else _task_send_block(host, sid)
-        if blocked:
-            raise WriteRefused(blocked)
         successor = next((e for e in registry.list_entries(host) if e.get("failover_of") == sid
                           and e.get("status") in ("starting", "active")
                           and e.get("handoff_status") == "sent"), None)
@@ -1006,7 +1019,9 @@ async def session_send(
                 phase="attempt",
             )
             try:
-                await c.invoke("claude:client-resume", params, grant=grant)
+                # Reattach checks the same task binding but does not submit this command's prompt.
+                await c.invoke("claude:client-resume", params, grant=grant,
+                               before_send=_task_guard.check if _task_guard else None)
             except BatError as e:
                 audit.record(
                     actor=fleet.actor,
@@ -1048,7 +1063,7 @@ async def session_send(
             r = await c.invoke(
                 "claude:send-message", {"sessionId": sid, "prompt": text, "clientMessageId": mid},
                 retry_on_disconnect=retry_on_disconnect and agent_kind(t.get("agentPreset")) == "claude",
-                before_send=before_invoke, grant=grant,
+                before_send=_task_guard or before_invoke, grant=grant,
             )
         except BatError as e:
             audit.record(
@@ -1064,6 +1079,8 @@ async def session_send(
             )
             raise
         r = r if isinstance(r, dict) else {"result": r}
+        if _task_guard and not isinstance(r.get("accepted", r.get("ok")), bool):
+            raise ValueError("BAT send reply has no boolean acceptance result")
         audit.record(
             actor=fleet.actor,
             tool=tool,
@@ -1123,8 +1140,11 @@ async def session_continue(
     )
 
 
+@task_control.guarded("interrupt")
 async def session_interrupt(
-    fleet: Fleet, host: str, session_id: str, mode: str = "soft", confirm: bool = False
+    fleet: Fleet, host: str, session_id: str, mode: str = "soft", confirm: bool = False,
+    _task_guard: task_control.FrameGuard | None = None, control_version: int | None = None,
+    operation_id: str | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
     if mode not in ("soft", "hard"):
@@ -1148,7 +1168,7 @@ async def session_interrupt(
             phase="attempt",
         )
         try:
-            r = await c.invoke(channel, {"sessionId": sid}, grant=grant)
+            r = await c.invoke(channel, {"sessionId": sid}, grant=grant, before_send=_task_guard)
         except BatError as e:
             audit.record(
                 actor=fleet.actor,
@@ -1176,6 +1196,7 @@ async def session_interrupt(
     return {"host": host, "session_id": sid, "mode": mode, "channel": channel, "result": r, "note": note}
 
 
+@task_control.guarded("answer")
 async def session_answer(
     fleet: Fleet,
     host: str,
@@ -1186,6 +1207,9 @@ async def session_answer(
     deny_message: str | None = None,
     tool_use_id: str | None = None,
     dont_ask_again: bool = False,
+    _task_guard: task_control.FrameGuard | None = None,
+    control_version: int | None = None,
+    operation_id: str | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
     if (answers is None) == (permission is None):
@@ -1196,9 +1220,6 @@ async def session_answer(
         t, _ = await _resolve_session(c, session_id)
         sid = t["id"]
         grant = await resource_policy.authorize_session(fleet, host, "session.answer", t)
-        blocked = _task_send_block(host, sid)
-        if blocked:
-            raise WriteRefused(blocked.replace("direct sends", "direct answers"))
         kind = agent_kind(t.get("agentPreset"))
         meta = await _meta(c, sid)
         if not _state_safe(kind, meta):
@@ -1273,7 +1294,7 @@ async def session_answer(
             **detail,
         )
         try:
-            r = await c.invoke(channel, params, grant=grant)
+            r = await c.invoke(channel, params, grant=grant, before_send=_task_guard)
         except InvokeError as e:
             audit.record(
                 actor=fleet.actor,
