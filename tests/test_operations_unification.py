@@ -455,6 +455,228 @@ def stop_after_command_status(d, patch, status):
     patch.setattr(d.journal, "command_status", stop)
 
 
+@pytest.mark.parametrize("error", [ConnectionLost, InvokeTimeout])
+@pytest.mark.parametrize("command_status", ["intent", "needs_review", "uncertain"])
+@pytest.mark.parametrize("tick_first", [False, True], ids=["operation_first", "coordinator_first"])
+async def test_a05_a07_failed_dispatch_receipt_survives_crash_before_command_rejection(
+        owned, mock, monkeypatch, error, command_status, tick_first):
+    """A05/A07: the committed dispatch refusal proves no prompt, even before the command write."""
+    d, tid = owned
+    prior = d.journal.get(tid)
+    mock.metas[SID] = None
+    client = d.fleet.client("h1")
+    original = client._roundtrip
+    op, _ = task_send_operation(d, tid, "dispatch-refusal-crash")
+    saved_error = {}
+
+    async def lose_resume_reply(frame, timeout):
+        result = await original(frame, timeout)
+        if frame["channel"] == "claude:client-resume":
+            raise error("resume reply lost before prompt")
+        return result
+
+    def crash_before_rejected(command_id, status, **kwargs):
+        assert status == "rejected"
+        step = next(s for s in d.ops.get(op["operation_id"])["steps"] if s["name"] == "task_dispatch")
+        assert step["status"] == "failed"
+        saved_error.update(step["error"])
+        raise asyncio.CancelledError("crash after dispatch receipt, before command status")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(client, "_roundtrip", lose_resume_reply)
+        patch.setattr(d.journal, "command_status", crash_before_rejected)
+        with pytest.raises(asyncio.CancelledError):
+            await d.ops._execute(op["operation_id"])
+    command = d.journal.commands(tid)[0]
+    assert command["status"] == "needs_review" and d.journal.get(tid) == prior
+    d.journal.command_status(command["command_id"], command_status)
+    readbacks = []
+
+    async def unexpected_readback(*args, **kwargs):
+        readbacks.append(args)
+        raise AssertionError("failed receipt must not read BAT back")
+
+    async with restarted_daemon(d) as restarted:
+        monkeypatch.setattr(restarted.adapter, "reconcile_send", unexpected_readback)
+        if tick_first:
+            assert await restarted.coordinator.tick(tid) == prior
+        await restarted.ops.drain(timeout=30)
+        result = restarted.ops.get(op["operation_id"])
+        assert result["status"] == "failed" and result["error_code"] == saved_error["code"] == "BAT_ERROR"
+        assert result["status_reason"] == saved_error["message"]
+        commands = restarted.journal.commands(tid)
+        assert len(commands) == 1 and commands[0]["command_id"] == command["command_id"]
+        assert commands[0]["status"] == "rejected" and restarted.journal.get(tid) == prior
+        assert not readbacks
+        assert [r["channel"] for r in writes(mock)] == ["claude:client-resume"]
+        assert_terminal_send_replay(restarted, tid, op, "BAT_ERROR", commands, 1, mock)
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+async def test_a05_a07_succeeded_dispatch_receipt_survives_crash_before_task_result(
+        owned, mock, monkeypatch, accepted):
+    """A05/A07: replay the saved BAT reply through the live result rules, never dispatch/read again."""
+    d, tid = owned
+    mock.echo_sends = True
+    if not accepted:
+        mock.handlers["claude:send-message"] = lambda params: {"accepted": False}
+    op, _ = task_send_operation(d, tid, "dispatch-success-crash")
+
+    async def crash(*args, **kwargs):
+        step = d.ops.db.execute("SELECT status,response FROM operation_steps WHERE operation_id=? AND name='task_dispatch'",
+                                (op["operation_id"],)).fetchone()
+        assert step["status"] == "succeeded" and json.loads(step["response"])["accepted"] is accepted
+        raise asyncio.CancelledError("crash before processing the saved dispatch reply")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(d.coordinator, "_finish_send", crash)
+        with pytest.raises(asyncio.CancelledError):
+            await d.ops._execute(op["operation_id"])
+    assert d.journal.commands(tid)[0]["status"] == "needs_review"
+    assert d.journal.get(tid)["state"] == "accepted"
+    readbacks = []
+
+    async def no_readback(*args, **kwargs):
+        readbacks.append(args)
+        raise AssertionError("saved dispatch reply needs no read-back")
+
+    async with restarted_daemon(d) as restarted:
+        monkeypatch.setattr(restarted.adapter, "reconcile_send", no_readback)
+        await restarted.ops.drain(timeout=30)
+        result = restarted.ops.get(op["operation_id"])
+        assert result["status"] == ("succeeded" if accepted else "failed")
+        if not accepted:
+            assert result["error_code"] == "NOT_ACCEPTED"
+        assert restarted.journal.get(tid)["state"] == ("running" if accepted else "needs_ted")
+        assert restarted.journal.commands(tid)[0]["status"] == ("accepted" if accepted else "rejected")
+        assert len(restarted.journal.commands(tid)) == 1 and not readbacks
+        assert [r["channel"] for r in writes(mock)] == ["claude:send-message"]
+        replay, created = task_send_operation(restarted, tid, "dispatch-success-crash")
+        assert not created and restarted.ops.get(replay["operation_id"]) == result
+
+
+@pytest.mark.parametrize("scoped", [False, True], ids=["session_operation", "task_operation"])
+@pytest.mark.parametrize("failure", ["malformed_reply", "bookkeeping"])
+async def test_a07_post_frame_send_error_is_uncertain_and_settles_by_readback(
+        owned, mock, monkeypatch, scoped, failure):
+    """A07/A08: an unexpected exception after the prompt is never a definitive failed receipt."""
+    d, tid = owned
+    mock.metas[SID] = None
+    mock.echo_sends = True
+    mock.states[SID]["messages"] = list(mock.archives[SID])
+    client = d.fleet.client("h1")
+    original = client._roundtrip
+    principal, request, op = admission_control(d, tid, mock, "send", scoped=scoped)
+
+    async def malformed_reply(frame, timeout):
+        result = await original(frame, timeout)
+        return {"unexpected": "reply"} if frame["channel"] == "claude:send-message" else result
+
+    def bookkeeping_failure(*args, **kwargs):
+        raise ValueError("could not record send reply")
+
+    async def unproven(*args, **kwargs):
+        return None
+
+    with monkeypatch.context() as patch:
+        if failure == "malformed_reply":
+            patch.setattr(client, "_roundtrip", malformed_reply)
+        else:
+            patch.setattr(registry, "record_turn", bookkeeping_failure)
+        patch.setattr(d.adapter, "reconcile_send", unproven)
+        await d.ops.drain(timeout=30)
+    result = d.ops.get(op["operation_id"])
+    step_name = "task_dispatch" if scoped else "send"
+    assert result["status"] == "uncertain"
+    assert next(s for s in result["steps"] if s["name"] == step_name)["status"] == "uncertain"
+    command = d.journal.commands(tid)[0]
+    assert command["status"] == d.journal.get(tid)["state"] == "uncertain"
+    d.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+    async with restarted_daemon(d) as restarted:
+        await restarted.ops.drain(timeout=30)
+        result = restarted.ops.get(op["operation_id"])
+        assert result["status"] == "succeeded"
+        assert next(s for s in result["steps"] if s["name"] == step_name)["status"] == "succeeded"
+        if not scoped:
+            await restarted.coordinator.tick(tid)
+        assert restarted.journal.command_get(command["command_id"])["status"] == "accepted"
+        assert restarted.journal.get(tid)["state"] == "running"
+        assert len(restarted.journal.commands(tid)) == 1
+        assert [r["channel"] for r in writes(mock)] == ["claude:client-resume", "claude:send-message"]
+        replay, created = restarted.ops.create(principal, **request)
+        assert not created and restarted.ops.get(replay["operation_id"]) == result
+
+
+@pytest.mark.parametrize("window", ["before_receipt_commit", "after_result_commit"])
+async def test_a05_task_send_result_receipt_survives_crash_without_repeating_effect(
+        owned, mock, monkeypatch, window):
+    """A05: result and command acceptance commit together; both sides replay only saved evidence."""
+    d, tid = owned
+    mock.echo_sends = True
+    op, _ = task_send_operation(d, tid, "result-receipt-crash")
+    original_done = d.ops._step_done
+    original_send = d.coordinator._send
+
+    def crash_before_commit(operation_id, name, response, **kwargs):
+        if name == "task_send_result":
+            raise asyncio.CancelledError("crash inside task/result receipt transaction")
+        return original_done(operation_id, name, response, **kwargs)
+
+    async def crash_after_result(*args, **kwargs):
+        await original_send(*args, **kwargs)
+        raise asyncio.CancelledError("crash after task/result receipt commit")
+
+    with monkeypatch.context() as patch:
+        if window == "before_receipt_commit":
+            patch.setattr(d.ops, "_step_done", crash_before_commit)
+        else:
+            patch.setattr(d.coordinator, "_send", crash_after_result)
+        with pytest.raises(asyncio.CancelledError):
+            await d.ops._execute(op["operation_id"])
+    prior = d.journal.get(tid)
+    command = d.journal.commands(tid)[0]
+    committed = window == "after_result_commit"
+    assert command["status"] == ("accepted" if committed else "needs_review")
+    assert prior["state"] == ("running" if committed else "accepted")
+
+    async def no_readback(*args, **kwargs):
+        pytest.fail("result receipt recovery must not read BAT back")
+
+    async with restarted_daemon(d) as restarted:
+        monkeypatch.setattr(restarted.adapter, "reconcile_send", no_readback)
+        await restarted.ops.drain(timeout=30)
+        assert restarted.ops.get(op["operation_id"])["status"] == "succeeded"
+        if committed:
+            assert restarted.journal.get(tid) == prior
+        assert restarted.journal.commands(tid)[0]["status"] == "accepted"
+        assert restarted.journal.get(tid)["state"] == "running"
+        events = [e for e in restarted.journal.events(tid) if e["kind"] == "state"]
+        assert sum(json.loads(e["body"]).get("to") == "running" for e in events) == 1
+        assert len(restarted.journal.commands(tid)) == 1
+        assert [r["channel"] for r in writes(mock)] == ["claude:send-message"]
+
+
+@pytest.mark.parametrize("kind", ["send", "answer", "interrupt"])
+async def test_a07_bat_refusal_records_failed_runtime_step_and_rejected_command(owned, mock, kind):
+    """A07: a BAT error reply is an explicit refusal, not a lost command outcome."""
+    d, tid = owned
+    principal, request, op = admission_control(d, tid, mock, kind)
+    prior = d.journal.get(tid)
+    channel = {"send": "claude:send-message", "answer": "claude:resolve-ask-user", "interrupt": "claude:interrupt-turn"}[kind]
+
+    def refuse(params):
+        raise RuntimeError("BAT refused the control")
+
+    mock.handlers[channel] = refuse
+    await d.ops.drain(timeout=30)
+    result = d.ops.get(op["operation_id"])
+    assert result["status"] == "failed" and result["error_code"] == "BAT_ERROR"
+    assert next(s for s in result["steps"] if s["name"] == kind)["status"] == "failed"
+    assert d.journal.commands(tid)[0]["status"] == "rejected" and d.journal.get(tid) == prior
+    replay, created = d.ops.create(principal, **request)
+    assert not created and d.ops.get(replay["operation_id"]) == result
+
+
 def assert_terminal_send_replay(d, tid, op, code, commands, frames, mock):
     refused = d.ops.get(op["operation_id"])
     assert refused["status"] == "failed" and refused["error_code"] == code

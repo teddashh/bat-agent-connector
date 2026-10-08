@@ -1040,6 +1040,8 @@ async def session_send(
             )
             raise
         r = r if isinstance(r, dict) else {"result": r}
+        if _task_guard and not isinstance(r.get("accepted", r.get("ok")), bool):
+            raise ValueError("BAT send reply has no boolean acceptance result")
         audit.record(
             actor=fleet.actor,
             tool=tool,
