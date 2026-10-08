@@ -166,3 +166,28 @@ async def test_a07_standalone_failover_transport_contract_is_unchanged(mock, mon
     assert successors[0]["handoff_status"] == "sent"
     assert sum(r["channel"] == "claude:start-session" for r in mock.invokes) == 1
     assert sum(r["channel"] == "claude:send-message" for r in mock.invokes) == 1
+
+
+@pytest.mark.parametrize("refusal", [False, True])
+async def test_failover_confinement_await_preserves_changed_task_authority(
+        failover_owned, mock, monkeypatch, refusal):
+    from bat_agent_connector import confinement
+
+    daemon, task, sid = failover_owned
+    authority = reserved_authority(daemon, task, sid)
+    original = confinement.guard_start_frame
+
+    async def pause_during_check(*args, **kwargs):
+        await original(*args, **kwargs)
+        daemon.journal.pause(task["task_id"])
+        if refusal:
+            raise confinement.ConfinementRefused("HOST_ACCOUNT_UNVERIFIED", "fixture refusal", sent=False)
+
+    monkeypatch.setattr(confinement, "guard_start_frame", pause_during_check)
+    with pytest.raises(TaskControlRefused):
+        await lifecycle.session_failover(daemon.fleet, "h1", sid, confirm=True, task_authority=authority)
+    assert daemon.journal.get(task["task_id"])["paused"]
+    assert not any(r["channel"] in {"claude:start-session", "claude:send-message"} for r in mock.invokes)
+    successor = registry.get("h1", "reserved-successor")
+    assert successor["start_sent"] is False and successor["status"] == "failed"
+    assert successor["error_code"] == "CONTROL_VERSION_CONFLICT"

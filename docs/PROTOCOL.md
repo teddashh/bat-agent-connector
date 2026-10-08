@@ -114,7 +114,7 @@ and auth-login calls allow 300 s. `runtime:get-status` allows 30 s.
 | Hard stop (2× Esc / `/abort`) | `claude:abort-session {sessionId}` | Claude: kills the running query loop, session stays. Codex: turn interrupt, session stays. |
 | Stop a background task | `claude:stop-task {sessionId, taskId}` | Subagent/background task only. |
 | Answer blocked prompts | `claude:resolve-ask-user {sessionId, toolUseId, answers}`, `claude:resolve-permission {sessionId, toolUseId, result}` | Unblocks `pendingAskUser` / `pendingPermission`. `result.dontAskAgain = true`: Codex → accept for the session (that command); Claude `ExitPlanMode` → acceptEdits. |
-| Permission mode | `claude:set-permission-mode {sessionId, mode}` (Claude; returns `false` for Codex), `claude:set-codex-sandbox-mode {sessionId, mode}`, `claude:set-codex-approval-policy {sessionId, policy}` | The GUI's "allow bypass" default starts Claude with `permissionMode: bypassPermissions` and Codex with `codexSandboxMode: danger-full-access`, `codexApprovalPolicy: never`; a session started without them asks. Raising a Claude query that was not launched with bypass fails in the SDK and the sidecar closes the live query, **ending a running turn**; switch only while idle. Codex re-applies via `thread/resume` on its next turn. |
+| Permission mode | `claude:set-permission-mode {sessionId, mode}` (Claude; returns `false` for Codex), `claude:set-codex-sandbox-mode {sessionId, mode}`, `claude:set-codex-approval-policy {sessionId, policy}` | The GUI's "allow bypass" default starts Claude with `permissionMode: bypassPermissions` and Codex with `codexSandboxMode: danger-full-access`, `codexApprovalPolicy: never`; omitted options retain BAT/CLI defaults and inherited approval rules. Raising a Claude query that was not launched with bypass fails in the SDK and the sidecar closes the live query, **ending a running turn**; switch only while idle. Codex re-applies via `thread/resume` on its next turn. |
 | Unload a session | `claude:stop-session {sessionId}` | Unloads the runtime session; the transcript and tab stay and it can be resumed. The connector exposes it only in the orchestrate tier, used by `session_cleanup` on idle, finished sessions. |
 | ⚠ Tear down | `claude:reset-session`, `claude:rest-session`, `pty:kill`, `worktree:remove/merge`, `fs:delete-path`, `settings:save`, `workspace:save`, `runtime:install`, `app:install-update`/`app:relaunch` (desktop hosts only) | **Never expose these** in a connector, except behind an explicit "admin" flag. |
 
@@ -151,3 +151,22 @@ v2 only. The connector does not use profile contexts; it dials each host directl
 ## 8. Worktrees and orchestration
 
 See [ORCHESTRATE.md](ORCHESTRATE.md).
+
+### Managed execution limits (A10)
+
+Pinned BAT source `b7419892fbc9946799b64cca24c2ec8c7fa15c42` (v3.2.12 notes above):
+`node-sidecar/src/handlers/claude-permission.mjs` allows Write/Edit/NotebookEdit/Read/Glob/Grep under
+`acceptEdits` without checking paths. ExitPlanMode allow with dontAskAgain also sets acceptEdits (ordinary allow
+sets default). `claude-send.mjs` hardcodes `settingSources=['user','project','local']`; `claude-session.mjs` stores
+permissionMode but cold/client-resume without remembered mode can fall back to bypassPermissions. A loaded send
+preserves its live mode.
+
+`src-tauri/src/remote_server.rs` routes Codex to `src-tauri/src/codex_app_server.rs`. Start/resume and setters accept
+only `codexSandboxMode` and `codexApprovalPolicy`; the native turn policy has a sandbox type, with no connector
+pass-through for writable roots or network access. Claude SDK sandbox/settings overrides are also unreachable.
+See the [source table and limitations](design/confinement.md).
+
+General managed starts preserve `default`/`allow_all`; optional `confined` uses Claude default (acceptEdits only with
+a read-only verified host account), or Codex workspace-write/on-request. Permission modes do not prove OS enforcement;
+Codex is at most options_confirmed until W12. Confined sessions reject raises, persistent approvals and mode-widening
+ExitPlanMode answers. Cwd is not evidence of protection. A10 is not proven until the W12 live run.
