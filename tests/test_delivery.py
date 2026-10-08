@@ -285,6 +285,7 @@ async def test_token_is_read_per_request_and_a_refused_read_after_the_merge_requ
 async def test_a_token_missing_mid_rotation_still_sends_the_dispatch_with_the_last_good_one(make_daemon, gh,
                                                                                             monkeypatch):
     d = make_daemon()
+    d.acquire_owner()
     monkeypatch.delenv("FAKE_GH_TOKEN")  # the refresher is rewriting it
     op, _ = deploy_op(d)
     sent = await settle(d, op["operation_id"], rounds=1)
