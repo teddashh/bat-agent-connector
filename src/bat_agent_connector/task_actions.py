@@ -51,16 +51,19 @@ def admit_submit(ops, principal, target, params, pre):
         raise OperationError("INVALID_PARAMS", "project and original_words are required", 422)
     if params.get("continuation"):
         ops.journal.get(params.get("parent_task_id"))
+        task = admit_task(ops, principal, {"task_id": params["parent_task_id"]}, params, pre)
+        return task_control.admission_binding(task)
 
 
 def admit_control(ops, principal, target, params, pre):
-    admit_task(ops, principal, target, params, pre)
+    task = admit_task(ops, principal, target, params, pre)
     if params.get("actor", "service") not in {"service", "ted"}:
         raise OperationError("INVALID_PARAMS", "invalid actor", 422)
     if params.get("actor") == "ted" and not params.get("source_message_id"):
         raise OperationError("INVALID_PARAMS", "Ted action requires source_message_id", 422)
     if "abort_current" in params and type(params["abort_current"]) is not bool:
         raise OperationError("INVALID_PARAMS", "abort_current must be a boolean", 422)
+    return task_control.admission_binding(task, session=bool(params.get("abort_current")))
 
 
 def admit_stage(ops, principal, target, params, pre):
@@ -70,6 +73,7 @@ def admit_stage(ops, principal, target, params, pre):
             or params.get("actor", "service") not in {"service", "ted", "hermes", "executor"}):
         raise OperationError("INVALID_PARAMS", "stage, ref and actor must be valid", 422)
     check_stage_state(task)
+    return task_control.admission_binding(task)
 
 
 def check_stage_state(task):
@@ -78,9 +82,10 @@ def check_stage_state(task):
 
 
 def admit_request_ted(ops, principal, target, params, pre):
-    admit_scoped(ops, principal, target, params, pre)
+    binding = admit_scoped(ops, principal, target, params, pre)
     if not isinstance(params.get("reason"), str) or not params["reason"].strip():
         raise OperationError("INVALID_PARAMS", "reason is required", 422)
+    return binding
 
 
 def admit_send(ops, principal, target, params, pre):
@@ -93,15 +98,16 @@ def admit_send(ops, principal, target, params, pre):
         raise OperationError("INVALID_PARAMS", "Goose task, text and step_id are required", 422)
     if not task.get("session_id"):
         raise OperationError("TASK_STATE_BLOCKED", "task has no current BAT session", 409)
-    api_actions._admit_session(ops, principal, {"host": task["host"], "session_id": task["session_id"]},
-                               params, pre)
+    return api_actions._admit_session(ops, principal, {"host": task["host"], "session_id": task["session_id"]},
+                                      params, pre)
 
 
-def admit_scoped(ops, principal, target, params, pre):
+def admit_scoped(ops, principal, target, params, pre, *, session=False):
     task = admit_task(ops, principal, target, params, pre)
     if task["engine"] != "goose" or (not principal.admin and not _task_capability(ops, principal, task["task_id"])):
         raise OperationError("FORBIDDEN", "a Goose task capability is required", 403)
     check_scoped_state(task)
+    return task_control.admission_binding(task, session=session)
 
 
 def check_scoped_state(task):
@@ -112,13 +118,14 @@ def check_scoped_state(task):
 
 
 def admit_verify(ops, principal, target, params, pre):
-    admit_scoped(ops, principal, target, params, pre)
+    binding = admit_scoped(ops, principal, target, params, pre, session=True)
     if params:
         raise OperationError("INVALID_PARAMS", "caller-supplied verification evidence is forbidden", 422)
+    return binding
 
 
 def admit_reconcile(ops, principal, target, params, pre):
-    admit_task(ops, principal, target, params, pre)
+    task = admit_task(ops, principal, target, params, pre)
     cid = target.get("command_id")
     prefix = f"reconcile:{target['task_id']}:{cid}:"
     if not principal.actor.startswith(prefix):
@@ -129,6 +136,9 @@ def admit_reconcile(ops, principal, target, params, pre):
                          (digest, target["task_id"], cid)).fetchone()
     if not row:
         raise OperationError("FORBIDDEN", "reconciliation capability is invalid", 403)
+    command = ops.journal.command_get(cid)
+    role = "reviewer" if command["session_id"] == task.get("reviewer_session_id") else "lead"
+    return task_control.admission_binding(task, session=True, role=role)
 
 
 async def run(ctx):
@@ -153,7 +163,8 @@ async def run(ctx):
         if receipt and ctx.op["action"] in {"task.resume", "task.mark_stage", "task.verify", "task.request_ted"}:
             return json.loads(receipt["response"])
         if not receipt and ctx.op["action"] != "task.submit":
-            task = admit_task(ctx.service, None, ctx.target, ctx.params, ctx.preconditions)
+            task_control.check_binding(ctx)
+            task = admit_task(ctx.service, None, ctx.target, ctx.params, ctx.effective_preconditions)
             if ctx.op["action"] == "task.mark_stage":
                 check_stage_state(task)
             elif ctx.op["action"] in {"task.verify", "task.request_ted"}:
@@ -161,7 +172,7 @@ async def run(ctx):
         if ctx.op["action"] == "task.verify":
             task = ctx.service.journal.get(ctx.target["task_id"])
             task_control.check(ctx.service.journal, task["task_id"], task["host"], task["session_id"],
-                               "verify", ctx.preconditions.get("control_version"))
+                               "verify", ctx.effective_preconditions.get("control_version"))
         try:
             return await ctx.service.context["daemon"].call(method, params, _ctx=ctx)
         except ValueError as exc:
@@ -199,11 +210,15 @@ async def send(ctx):
             decision = json.loads(refusal["request"])
             return await refuse(OperationError(decision["code"], decision["message"], 409))
         def bind():
-            task = coordinator.journal.get(tid)
-            version = ctx.preconditions.get("control_version")
+            task = task_control.check_binding(ctx) or coordinator.journal.get(tid)
+            version = ctx.effective_preconditions.get("control_version")
             if version is not None and version != task["control_version"]:
                 raise OperationError("CONTROL_VERSION_CONFLICT", "task control_version changed", 409)
             return {"host": task["host"], "session_id": task["session_id"], "control_version": task["control_version"]}
+        # Refuse a stale admission before even recording the first local effect intent.
+        if not ctx.service.db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? AND name='task_binding'",
+                                      (ctx.operation_id,)).fetchone():
+            task_control.check_binding(ctx)
         binding = ctx.effect("task_binding", bind)
         ctx.set_refs(task_id=tid, **binding)
         recovering = ctx.service.db.execute(

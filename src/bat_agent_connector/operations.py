@@ -101,13 +101,13 @@ class Cancelled(Exception):
 
 @dataclass(frozen=True)
 class ActionDef:
-    """One action: its scope, its static admission check, and its handler."""
+    """One action: scope, admission (with an optional server binding), and handler."""
 
     name: str
     scope: str
     summary: str
     run: Callable[[OpContext], Awaitable[dict]]
-    admit: Callable[[OperationService, Principal, dict, dict, dict], None] | None = None
+    admit: Callable[[OperationService, Principal, dict, dict, dict], dict | None] | None = None
     target_keys: tuple[str, ...] = ()
 
 
@@ -148,6 +148,16 @@ class OpContext:
     @property
     def preconditions(self) -> dict:
         return self.op["preconditions"]
+
+    @property
+    def admission_binding(self) -> dict | None:
+        return (self.op.get("external_refs") or {}).get("admission_binding")
+
+    @property
+    def effective_preconditions(self) -> dict:
+        if self.admission_binding:
+            return {**self.preconditions, "control_version": self.admission_binding["control_version"]}
+        return self.preconditions
 
     @property
     def actor(self) -> str:
@@ -388,16 +398,15 @@ class OperationService:
                 raise OperationError("IDEMPOTENCY_CONFLICT",
                                      "this idempotency_key was already used for a different request", 409)
             return self._decode(existing), False
-        if adef.admit:
-            adef.admit(self, principal, target, params, preconditions)
+        binding = adef.admit(self, principal, target, params, preconditions) if adef.admit else None
         operation_id = "op_" + uuid.uuid4().hex
         now = time.time()
         with self.journal.tx():
             self.db.execute("""INSERT INTO operations(operation_id,actor,entry,idem_key,request_hash,action,target,
-                params,preconditions,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                params,preconditions,status,created_at,updated_at,external_refs) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                             (operation_id, principal.actor, entry[:20], key, request_hash, action,
                              _canonical(target), _canonical(params), _canonical(preconditions), "accepted", now,
-                             now))
+                             now, _canonical({"admission_binding": binding}) if binding else None))
             self.journal.api_event("operation", operation_id, "operation.accepted",
                                    {"action": action, "target": target, "entry": entry}, actor=principal.actor)
         self.kick()

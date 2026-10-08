@@ -209,6 +209,14 @@ Task controls (`work_submit`, `work_pause`, `work_resume`, `work_mark_stage`, th
 are separate requests; Goose `step_id` remains its task-send retry identity. A long or uncertain result needs
 read-back, not another dispatch. CLI reconciliation accepts `--key` and `--control-version`.
 
+Task-bound operations capture the task version at admission even when you omit `control_version`; session
+controls also capture the current session and role. `external_refs.admission_binding` is server metadata,
+separate from your preconditions. A pause/resume or session replacement before the first effect refuses the
+old request with `CONTROL_VERSION_CONFLICT` / `TASK_BINDING_MISMATCH`, including stale task pause/resume.
+Keep the key to read that refusal or the original success; after reading `work_status`, use a new key for an
+authorized new decision. Never silently replace the binding. Older operations without this metadata keep their
+previous behaviour; succeeded receipts and uncertain frame read-back remain valid without another dispatch.
+
 For a task-owned session, low-level send/continue/answer/interrupt/permissions, relay, force and batch approval
 all pass the same TaskCoordinator. On `TASK_PAUSED` or `TASK_VERIFYING`, read `work_status` and leave control to
 the task service. A task send refused with `TASK_PAUSED` stays failed on the same key; after an authorized resume,
