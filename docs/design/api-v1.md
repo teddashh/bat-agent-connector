@@ -152,7 +152,7 @@ History／relations 的 opaque cursor 在任何 journal read 前驗證 version�
 | `GET /api/v1/deployments/preview?recipe=NAME` | observe | repository ID、recipe digest／readiness、generation、desired／current／last_verified／observed、ordering／rollback limits |
 | `GET /api/v1/deployments?recipe=NAME&cursor=&limit=` | observe | keyset history（created_at／dep ID，預設 50、上限 200），offline 可讀，identity／evidence／rollback eligibility |
 | `GET /api/v1/deployments/{dep_id}` | observe | fixed identity、run／attempt、operation／provider URLs、state／is_current／evidence／已過濾 runtime_evidence／reconciliation_error；missing DEPLOYMENT_NOT_FOUND |
-| `GET /api/v1/deployment-environments/history?recipe=NAME&cursor=&limit=` | observe | 同 repository／environment 的跨 recipe keyset history，含 legacy；同既有 status／cursor，offline 不呼叫 GitHub，Dashboard 每頁 5 筆；invalid cursor 回 INVALID_CURSOR |
+| `GET /api/v1/deployment-environments/history?recipe=NAME&cursor=&limit=` | observe | 同 repository／environment 的跨 recipe keyset history，含 legacy；同既有 status／cursor，offline 不呼叫 GitHub，Dashboard 每頁 5 筆；invalid cursor 回 422 `INVALID_PARAMS` |
 | `GET /api/v1/deployment-environments?recipe=NAME` | observe | desired generation／current／last_verified／observed_at／slot／attention；已移除 recipe 仍可讀保存資料 |
 | `GET /api/v1/integrations/candidates?host=` | observe | 可放進 PR 的 agent 成果與 checkpoint，及送過的 PR |
 | `GET /api/v1/integrations/previews/{ipv_id}` | observe | 預覽文件與是否過期 |
