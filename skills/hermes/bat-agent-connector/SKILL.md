@@ -19,8 +19,8 @@ metadata:
 > For the connector's optional Jev layer, pass `TYPESAFE_API_KEY` to the `bat` server (`env:` in its MCP config).
 > If a separate Jev MCP server is mounted, its `jev_classify` tool is handy for ad-hoc judgment of an excerpt
 > (e.g. "is this session done or stuck?") when `sessions_triage` reports `unknown`.
-> Cron watchers: `session_wait` on started sessions; when one finishes, run `session_cleanup` (dry run unless the user
-> enabled automatic cleanup) and report its one-line outcome; an hourly `session_cleanup` sweep is cheap.
+> Watch started sessions with `session_wait` and report their outcome. Reclaim resources only through a requested,
+> reviewed cleanup_preview / cleanup_apply; do not schedule housekeeping sweeps.
 
 ## Concept
 
@@ -59,7 +59,9 @@ metadata:
 | Approve pending permission prompts (write) | `approve_pending(host, confirm=true, dry_run?)` | `batc approve-pending HOST --confirm` |
 | Change a session's permissions (write) | `session_set_permissions(host, sid, mode, confirm=true)` | `batc permissions HOST SID --mode allow_all --confirm` |
 | Move a quota-stopped Claude session to Codex (orchestrate) | `session_failover(host, session_id \| all_exhausted=true, confirm=true, dry_run?)` | `batc failover HOST [SID] --all-exhausted --confirm` |
-| Gated cleanup of finished sessions (orchestrate) | `session_cleanup(host, confirm=true, dry_run=false)` | `batc cleanup HOST --apply --confirm` |
+| Reviewed resource cleanup (daemon, cleanup scope) | `cleanup_preview` → `cleanup_apply(confirm=true)` | `batc resource-cleanup preview` → `apply --confirm` |
+| Retained content / permanent cleanup history (observe) | `cleanup_retained`, `cleanup_tombstones` | `batc resource-cleanup retained`, `history` |
+| Legacy evaluation only | `session_cleanup(host, dry_run=true)` | `batc cleanup HOST` |
 | Who may change what (read) | `session_policy(host, session_id?)` | `batc policy HOST [SID]` |
 | What this caller may do (read, daemon) | `capabilities_get()` | - |
 | Persisted inventory (read, daemon) | `inventory_sessions(order="id", project_id?, execution_id?, relation_scope?, cursor?)` | `batc inventory sessions --order id` |
@@ -132,7 +134,9 @@ asks with its repo context and states its interpretation in one line. For parall
 workspace's most recent connector-managed session; a person's BAT sessions are never written to. When there is none,
 or the target is read-only (`no_session` / `read_only`), retry with `start_if_missing=true`: that starts a new Codex
 session in its own worktree with the same text. If the target is busy or quota-stopped use `fanout_plan_session`
-instead, wait, then `fanout_from_plan` on the planner. After a relay or send, pass its `turn_marker` as `after=` to `session_wait` and `session_read`. For Claude, this matches BAT's exact echo ID. Check `turn_phase` and `turn_attribution`; queued output stays unconfirmed until the previous-turn boundary is observed. BAT Codex currently uses a weaker timestamp fallback, so do not claim its output is definitively tied to the send.
+instead, wait, then `fanout_from_plan` on the planner. It stops the managed planner only with `confirm=true`
+after every planned task starts. Refused or incomplete fan-out keeps the planner loaded for retry; its worktree
+always stays for `batc resource-cleanup`. After a relay or send, pass its `turn_marker` as `after=` to `session_wait` and `session_read`. For Claude, this matches BAT's exact echo ID. Check `turn_phase` and `turn_attribution`; queued output stays unconfirmed until the previous-turn boundary is observed. BAT Codex currently uses a weaker timestamp fallback, so do not claim its output is definitively tied to the send.
 Read the session's
 last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_continue`), NEED-<HUMAN> → ask the human.
 
@@ -150,9 +154,27 @@ last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_cont
    token with the `start` scope; `FORBIDDEN` means ask the person to issue one, do not look for another way in.
 5. Track `result.session_id` like any managed session. The source session is only a reference: do not nudge, stop or
    clean it up. Take a new checkpoint to include the person's newer commits.
-6. The new session is confined (`write_scope: "confined"`): Claude asks before writing outside its folder or running
-   most commands, Codex's sandbox blocks such writes. Leave those prompts to the person; never approve a write to a
-   path outside the session's own folder, and do not try to raise its permissions (refused).
+6. Read `write_scope`, `confinement` and `current_verification`. Cwd alone offers no protection. Confined Claude
+   uses `default` unless a verified host account supports `acceptEdits`; BAT's acceptEdits file callback has no path
+   check. Existing approvals and shell commands may still permit outside writes. Codex `workspace-write/on-request`
+   records options, with live enforcement unverified until W12. A host account covers only its declared roots.
+   Never request raises for a confined session, call allow-all/bulk/deferred raises, or use `dont_ask_again` or an
+   ExitPlanMode allow to remove its limits. Never approve a write to a person's protected roots. If tests are blocked,
+   report the exact limitation; do not change host policy, Task Service engine or recipes. Existing running sessions
+   retain their recorded level; inspect current verification for drift.
+   For a new start, read capabilities `hosts[].confinement.host_account.start_effect` and `reason`.
+   `recheck` runs a fresh check at start; `fallback_default` uses plain default for confined Claude (also the
+   undeclared-account path), and `refused` blocks Claude and Codex. Never treat every non-verified status as blocked.
+   Host-account verification requires an operator-declared trusted auditor `check_ssh_alias`, a different `check_uid`
+   and `bat_account`; the checker never logs in as BAT. `check_channel_untrusted` means fallback_default, not verified.
+   The pre-interpreter closure gate must pass; an unknown layout or incomplete proof uses default.
+   The verdict assumes no hostile BAT-UID process during the check; ptrace_scope is evidence, not isolation.
+   完整 closure gate 未通過就用 default；查核假設沒有同 UID 惡意程序，不把 ptrace_scope 說成隔離。
+   No trusted channel: use Claude default; do not ask to enable acceptEdits or create an auditor/sudo rule yourself.
+   沒有可信 auditor 通道時，受限 Claude 用 default；同帳號登入回報的 verified 不算證據，也不自行改 SSH／sudo 設定。
+7. `START_IN_PROGRESS`: another process is starting this session; read it back later, do not retry blindly.
+   `CONFINEMENT_START_UNSETTLED` requires read-back of a possibly sent start.
+   START_IN_PROGRESS 表示另一程序正在 start 此 session；稍後讀回，不盲目重試。CONFINEMENT_START_UNSETTLED 須讀回可能已送出的 start。
 
 ## Updating a PR with results (scope integrate)
 
@@ -222,13 +244,48 @@ item is done.
   first, then `session_failover(confirm=true)`. The Codex successor reuses the same worktree when there is one and
   uses the host's `codex_model`. Report old → new session id, then track the new one. To keep a superseded
   session's uncommitted work without continuing it, fail it over with `force`, `archive_only=true` and
-  `instructions` that say to only commit it; cleanup then keeps that branch and never merges it.
+  `instructions` that say to only commit it; reviewed cleanup can release it while keeping its commits and branch.
 - **Permissions**: on hosts with `default_permission_mode = "allow_all"`, `approve_pending` answers permission prompts
   (not questions) with "don't ask again" and raises the session to allow-all. Claude sessions are raised only when
-  idle; Codex from its next turn, so repeat `approve_pending` while a turn is still asking.
-- **Cleanup**: run verification in the candidate environment, retain its log, and call `session_record_verification` with the current commit, command, exit code, environment and log reference. `session_cleanup` (dry run first) decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE per
-  session behind hard gates (idle, clean, conflict-free, commit-bound verification, risk checks, then the optional Jev judgment). It keeps
-  branches, never stops a working session, and returns one `escalation_summary`: report that once, not per item.
+  idle; Codex from its next turn. Confined sessions are skipped: never request a raise, persistent approval or
+  mode-widening ExitPlanMode answer for them; report blocked tests with their confinement evidence.
+- **Cleanup**: use `cleanup_preview(target={kind: work_item|checkpoint|integration|host, ...})` and inspect every
+  resource, retention reason and planned step. Work item scope can include its children. With the person's
+  authorization and your own `cleanup` token, apply exactly that preview using `cleanup_apply(preview_id,
+  preview_token, fingerprint, idempotency_key, confirm=true)`. It pins HEAD before non-force worktree removal.
+  `release_undelivered` is an explicit per-item preview choice: commits and the branch stay, and results remain
+  undelivered. It needs only cleanup. **Never request cleanup_discard** or choose discard_uncommitted as an agent;
+  Hermes/Grokbot tokens have no cleanup_discard. Manual/unknown resources, writers, pending commands and task-owned
+  resources stay. Stale/mismatched/expired previews require a new preview (15-minute TTL); never change a reviewed
+  apply. After a lost reply, reuse the same key and read the operation. Resume follows the original accepted plan;
+  cancel stops unsent steps. Inspect receipt.completed_phases (including prerequisites), refused_phases and
+  operation.cancel_requested: a later refusal never hides an earlier stop, discard or removal. result.items is
+  the last progress snapshot; HTTP GET /api/v1/operations/{id} also returns live cleanup_receipts. CLEANUP_PARTIAL_STATE keeps
+  the item uncertain and reserved; clear the blocker before resuming the same operation. A new attempt checks the
+  original post-discard state and never repeats successful phases. Cancelling this partial operation keeps the
+  reservation for inspection; it cannot be resumed or force-unlocked here. Additive-only settled pins may release
+  the guard and remain in the receipt. Gate-passed transport/protocol failures stay uncertain and require read-back.
+  An expired/mismatched resumed run with no durable steps releases all its reservations and settles
+  pending/running receipts as failed with the refusal code; get a new preview. Runs with steps keep their
+  read-back rules. already_absent is a separate definitive receipt and summary count, satisfies dependencies,
+  and causes no per-item host call, tombstone or registry cleaned mark: cleanup did not remove that resource.
+  Read its original IDs and observation through the operation receipt.
+  Confirmed planner stops leave the host cap as stopped while their worktrees stay reclaimable. Reviewed
+  absence retires only matching active, non-task rows as absent_at_cleanup when their carrier is removed/
+  already absent or they have no own worktree; retained worktrees keep the resume slot. Capacity is bookkeeping:
+  receipts record capacity_released, registry_status and capacity_reason (not_counted, generation_changed,
+  task_owned, start_unsettled, carrier_retained, registry_refused, registry_io_failed; null on success), plus
+  capacity_error on refusal/I/O failure. These facts never degrade a completed reclaim or rewrite non-counted
+  history. Starting/uncertain sessions and carriers stay retained with COMMAND_UNRESOLVED. A confirmed planner
+  stop stays stopped=true even if capacity_released=false. Absence records stopped_by_cleanup=false.
+  A preview can be ready with no reclaim items when reviewed absence alone releases an active session's cap.
+  Apply that signed preview normally; it only settles local capacity and absence receipts.
+  Retired IDs refuse drive/resume/same-ID start with SESSION_RETIRED; start a
+  new ID through the normal cap check. Ownership and original creation IDs remain connector-managed.
+  Use cleanup_tombstones to find original IDs, location, reasons and PR destinations,
+  cleanup_retained to read actual retained refs. Restore comes in Part B; no tool can revive a runtime.
+  Legacy session_cleanup is read-only evaluation; apply always returns LEGACY_CLEANUP_DISABLED. auto_cleanup is
+  deprecated and cannot enable writes. Do not set up a housekeeping sweep. See [cleanup.md](../../../docs/design/cleanup.md).
 - `sessions_triage` shows `source` (pattern or jev) and an evidence line for every state; quote the evidence.
 
 ## Operations (when the task daemon is running)
