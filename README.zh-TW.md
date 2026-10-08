@@ -17,9 +17,17 @@ BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端�
 * （選擇性開啟）推動 session：送訊息、叫它「continue」、中斷它、回答它的問題；
 * （選擇性開啟，獨立的一層）分派工作：在新的 git worktree 開 session、檢查它們的 diff、merge 乾淨的分支；
 * 找出碰到 Claude 用量額度上限的 session，在同一個 worktree 改由 Codex 接手（failover）；
-* 在確定性的關卡後面，自動核准權限請求，並清理已完成的 session。
+* 在確定性的關卡後面自動核准權限請求，並透過經審閱的預覽回收 managed 資源。
 
 > 本專案與 BAT 作者**沒有任何關係，也未經其背書**。協定是從 BAT 以 MIT 授權公開的原始碼（v3.2.12）讀出來的，BAT 改版時可能跟著變。BAT 的功勞屬於 TonyQ 與其貢獻者。
+
+一般 managed start 保留操作者的 `default_permission_mode`：`default` 沿用 BAT 預設、`allow_all` 保留 bypass／full access（level=none）；新增 `confined` 才對一般 start 套限制。Checkpoint／repair 固定 confined：Claude 用 default，只有已查核 BAT 帳號才用 acceptEdits；Codex 用 workspace-write／on-request。帳號查核須有 root-owned、BAT 不可寫的 home／可信 startup files 與系統 Python/find；先從可信副本替換再 harden，.claude／.codex／.cache 等 state 子目錄仍可由 BAT 帳號擁有。未 harden 的 host 記 unknown，confined Claude 用 plain default。Cwd 本身不保護寫入，acceptEdits 沒有 path check。BAT 不能設定 network／writable roots，因此 confined Codex 可能影響安裝及 localhost 測試。Task Service engine／recipe 不變並顯示相容 gap。Session reads 與 Dashboard 分開列建立證據與目前核對；A10 尚待 W12 實機驗收。詳見[設定、限制與 live procedure](docs/design/confinement.md)。
+
+Dashboard 啟動提示依 capabilities 的 `hosts[].confinement.host_account.start_effect` 判斷：`verified` 表示帳號已查核；`recheck` 表示尚未查核或已過期，啟動時會重查；`fallback_default` 表示可降級處理的加固缺口或未宣告帳號，受限 Claude 使用 plain default；只有 `refused` 會拒絕 Claude 與 Codex 的新 start。讀取不觸發查核，reason 仍可見，不能只因 status 不是 verified 就認定無法啟動。
+
+帳號查核另需操作者設好的可信 auditor SSH alias（`check_ssh_alias`）、其 UID（`check_uid`）及目標 BAT 帳號名稱（`bat_account`）。Auditor 的登入環境不得受 BAT 帳號控制，先證明 system Python 的完整 closure，再透過限定 sudo 指令以 -c argv 執行隔離的 Python，不經 BAT 的 shell 或 startup files；回覆的 UID／channel facts 也須符合設定。沒有可信通道時回 `unknown/check_channel_untrusted`、`fallback_default`，受限 Claude 用 plain default，絕不啟用 acceptEdits。原本的 BAT home／startup 加固仍是額外檢查，單靠它不能證明通道可信。未知 layout 或不完整 gate 用 default；查核假設沒有同 BAT UID 的 hostile process，ptrace_scope 只留作證據，不宣稱額外隔離。設定與 sudoers 範例見[設計文件](docs/design/confinement.md)。
+
+`START_IN_PROGRESS` 表示另一程序正在 start 此 session：稍後讀回，不盲目重試；`CONFINEMENT_START_UNSETTLED` 則須讀回可能已送出的 start。
 
 內容包含四個部分：
 
@@ -129,7 +137,23 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 
 ### Dashboard 與 `/api/v1`（選用）
 
-`batc serve` 也在同一個 loopback 埠提供 `/api/v1` 與瀏覽器 Dashboard（`http://127.0.0.1:18796/dashboard/`）：需要你處理的項目、所有 session 與其來源（人在 BAT 建立的 session 一律唯讀）、managed session 的操作、PR 合併與部署按鈕，以及操作紀錄。以 `batc api-token issue --actor ted-dashboard --scope observe --scope operate --scope start --scope integrate --scope manage --scope approve --scope merge --scope deploy`（`merge`、`deploy` 給合併與部署按鈕）發行 token 後在 Dashboard 的「連線」輸入。專案與工作項目記下在做什麼、為什麼：需求原文、驗收、步驟，以及做這件事的 sessions、checkpoint、操作與 PR。有 `manage` 的 agent 可以回報完成；只有帶 `approve` 的 token 能確認完成，而且確認的是它讀到的內容，之後內容再改會重新等待確認。排序、固定、改名與封存沿用 Project Hub 的規則。要接續人的工作而不碰它的 session，先記下 checkpoint（`checkpoint.create`：commit 與最近對話，只讀），再從它開始 managed 工作（`checkpoint.continue`：在 Connector 自有的 clone、worktree、分支與 session 從那個 commit 開始）。需要 `managed_roots` 與主機的 SSH alias。要把成果放進既有 PR，先預覽（`integration.preview`：列出以 SHA 釘住、會進 PR 的每個 commit 與檔案），再套用預覽（`integration.apply`：以主機的 git 憑證，一般 push 組合後的 commit 到 PR 的 head 分支；不強推，也不改你的資料夾），需要在 repository 的 `[[github.repos]]` 設定 `integrate = {hosts, remote_url}`。設計見 [docs/design/api-v1.md](docs/design/api-v1.md)、[docs/design/delivery.md](docs/design/delivery.md)、[docs/design/dashboard.md](docs/design/dashboard.md)、[docs/design/checkpoints.md](docs/design/checkpoints.md)、[docs/design/integration.md](docs/design/integration.md)、[docs/design/work-items.md](docs/design/work-items.md)。
+`batc serve` 也在同一個 loopback 埠提供 `/api/v1` 與瀏覽器 Dashboard（`http://127.0.0.1:18796/dashboard/`）：需要你處理的項目、所有 session 與其來源（人在 BAT 建立的 session 一律唯讀）、managed session 的操作、PR 合併與部署按鈕，以及操作紀錄。以 `batc api-token issue --actor ted-dashboard --scope observe --scope operate --scope start --scope integrate --scope manage --scope approve --scope merge --scope deploy --scope cleanup`（`merge`、`deploy` 給合併與部署按鈕）發行 token 後在 Dashboard 的「連線」輸入。專案與工作項目記下在做什麼、為什麼：需求原文、驗收、步驟，以及做這件事的 sessions、checkpoint、操作與 PR。有 `manage` 的 agent 可以回報完成；只有帶 `approve` 的 token 能確認完成，而且確認的是它讀到的內容，之後內容再改會重新等待確認。排序、固定、改名與封存沿用 Project Hub 的規則。要接續人的工作而不碰它的 session，先記下 checkpoint（`checkpoint.create`：commit 與最近對話，只讀），再從它開始 managed 工作（`checkpoint.continue`：在 Connector 自有的 clone、worktree、分支與 session 從那個 commit 開始）。需要 `managed_roots` 與主機的 SSH alias。要把成果放進既有 PR，先預覽（`integration.preview`：列出以 SHA 釘住、會進 PR 的每個 commit 與檔案），再套用預覽（`integration.apply`：以主機的 git 憑證，一般 push 組合後的 commit 到 PR 的 head 分支；不強推，也不改你的資料夾），需要在 repository 的 `[[github.repos]]` 設定 `integrate = {hosts, remote_url}`。設計見 [docs/design/api-v1.md](docs/design/api-v1.md)、[docs/design/delivery.md](docs/design/delivery.md)、[docs/design/dashboard.md](docs/design/dashboard.md)、[docs/design/checkpoints.md](docs/design/checkpoints.md)、[docs/design/integration.md](docs/design/integration.md)、[docs/design/work-items.md](docs/design/work-items.md)。
+
+
+「整理與復原」與工作項目詳情的整理入口先列出實際資源、全部保留原因與執行計畫，再以 15 分鐘
+signed preview 套用同一份計畫；狀態改變必須重新預覽。HTTP `/cleanup-previews`、`cleanup.apply` operation，
+MCP `cleanup_preview`／`cleanup_apply`／`cleanup_retained`／`cleanup_tombstones`，CLI
+`batc resource-cleanup preview|apply|retained|history` 共用合約。`cleanup` 可回收 managed runtime、worktree
+與 exact temporary；明選 `release_undelivered` 仍保留 commits 與 branch，成果標為尚未送達。
+合格的 session 與 carrier 全部已 absent 時，仍可套用 reviewed preview 釋放占用的 host cap。
+只有 `discard_uncommitted` 需要人控制的 `cleanup_discard`；Hermes／Grokbot tokens 不給它，agents 不要求它。
+人工、未知、task-owned、writer、waiting 或未決指令一律保留。移除前 pin HEAD，保留所有 `refs/batc/*`、
+clones 與整合區，原 ID、位置、原因、回執與 PR 去向永久可查。設定僅支援
+`[cleanup] retained_refs="keep", history_retention="forever", permanent_delete=false`。本輪提供實際 retained
+內容列表；restore 與 reviewed task cleanup 在 Part B。`auto_cleanup` 保留解析但已 deprecated，不啟用任何寫入。
+舊 `batc cleanup`／`session_cleanup` 只讀評估，不重登記 worktree；fanout 只有確認且每個 task 都啟動成功，
+才停止 planner。未確認、失敗或未全部啟動時保留 planner 供 retry，worktree 一律保留。
+設計見 [docs/design/cleanup.md](docs/design/cleanup.md)。
 
 PR metadata 使用獨立 action `github.pr.update`：既有 integrate scope，加 repository `allow_pr_update = true`（預設 false），不需要重新發 token。先以 `github_pr_preview`／`batc delivery pr` 讀 title/body digest 與保存的 merge scope；metadata 寫前比較、寫後讀回，但 GitHub 最後讀寫窗口仍有競爭限制。合併前檢視完整 commits／受影響 PR，再以 `github_pr_merge`／`batc delivery merge --preview mpv_... --key KEY` 送出；舊 head-only 請求會拒絕。提交前 base 變動停止，queue 受理後可合併到較新 base 並列出其他 commits；驗證 actual merged SHA，拒絕不支援的 stack／間接合併。MCP／CLI 寫入需要 caller 自己的 BATC_API_TOKEN。詳見 [交付設計](docs/design/delivery.md)。部署 history、environment generations、runtime verification 與 rollback 留待 Part B。
 
@@ -162,9 +186,9 @@ PR metadata 使用獨立 action `github.pr.update`：既有 integrate scope，�
 | `session_relay(host, message, confirm, workspace? \| session_id?, brief?, earlier?, channel?, thread?, request_fanout=0, dry_run?, start_if_missing?)` | 把人的訊息原封不動轉給工作區最近一個由 connector 建立的 session（或指定的 session；在 BAT 建立的 session 一律不寫入，`start_if_missing` 改在新 worktree 開 session），可附一段標明是轉達者詮釋的摘要，以及 BAT-STATUS 結尾說明。`request_fanout=N` 會請 session 產出 `bat-fanout` 計畫。回傳組好的文字。 |
 | `fanout_plan_session(host, workspace, message, confirm, max_items=4, brief?)` | 在獨立 worktree 啟動一個 Codex 規劃 session（適用於沒有 managed session 可規劃時），由它回覆一份 `bat-fanout` 計畫。 |
 | `session_policy(host, session_id?)` | 唯讀。主機的 mutation 清單與 managed roots，或單一 session 的來源（`manual`、`connector_managed`、`unknown`）、資料夾歸屬與每個寫入動作的判定與拒絕代碼。 |
-| `fanout_from_plan(host, session_id, confirm, dry_run?, agent="codex", model?, max_items=4)` | 依該 session 最後一個 `bat-fanout` 區塊，每個任務各開一個 worktree session，prompt 原封不動，接著清掉規劃 session。 |
-| `session_cleanup(host, confirm, dry_run=true, session_id?)` | 在硬性關卡後面，為每個受調度的 session 決定 MERGE_AND_CLEAN／CLEAN_ONLY／KEEP／ESCALATE，然後執行（需要 `auto_cleanup = true`）。詳見 docs/ORCHESTRATE.md。 |
-| `session_record_verification(host, session_id, candidate_commit, command, exit_code, environment, log_ref, confirm)` | 為主機目前乾淨的 commit 記錄一筆在外部執行的驗證；自動清理在 merge 前會再檢查一次。CLI：`batc record-verification`。 |
+| `fanout_from_plan(host, session_id, confirm, dry_run?, agent="codex", model?, max_items=4)` | 依該 session 最後一個 `bat-fanout` 區塊，每個任務各開一個 worktree session，prompt 原封不動。只有確認且每個任務都啟動成功才停止規劃 session，否則保留供 retry；worktree 一律保留。 |
+| `session_cleanup(host, confirm, dry_run=true, session_id?)` | 在硬性關卡後面，為每個受調度的 session 決定 MERGE_AND_CLEAN／CLEAN_ONLY／KEEP／ESCALATE，只讀評估；apply 回 `LEGACY_CLEANUP_DISABLED`，`auto_cleanup` 已 deprecated。詳見 docs/ORCHESTRATE.md。 |
+| `session_record_verification(host, session_id, candidate_commit, command, exit_code, environment, log_ref, confirm)` | 為主機目前乾淨的 commit 記錄一筆在外部執行的驗證；舊清理評估用它判斷完成；reviewed cleanup 依送達回執判斷。CLI：`batc record-verification`。 |
 
 ## CLI
 
@@ -192,7 +216,7 @@ batc quota                                            # 所有主機上因額度
 batc approve-pending box1 --dry-run                   # 確認後改用 --confirm
 batc permissions box1 1a2b3c4d --mode allow_all --confirm
 batc failover box1 --all-exhausted --dry-run          # 確認後改用 --confirm
-batc cleanup box1                                     # dry run 表格；要執行請加 --apply --confirm
+batc cleanup box1                                     # 唯讀評估；--apply 回 LEGACY_CLEANUP_DISABLED
 ```
 
 每個指令都能用全域的 `--json` 旗標，但要放在指令前面：`batc --json hosts`。
@@ -205,7 +229,7 @@ batc cleanup box1                                     # dry run 表格；要執�
 [{"title": "short title", "prompt": "self-contained task prompt", "area": "files/modules touched"}]
 ```
 
-`fanout_from_plan` 就只啟動這幾個任務。每次停下來都以一行結尾：`BAT-STATUS: MILESTONE <name>`、`BAT-STATUS: CONTINUE <next step>` 或 `BAT-STATUS: NEED-<HUMAN> <reason>`；triage 會把它當成「已完成」的聲明。它不能取代自動清理需要的、綁定 commit 的驗證紀錄。
+`fanout_from_plan` 就只啟動這幾個任務。每次停下來都以一行結尾：`BAT-STATUS: MILESTONE <name>`、`BAT-STATUS: CONTINUE <next step>` 或 `BAT-STATUS: NEED-<HUMAN> <reason>`；triage 會把它當成「已完成」的聲明。它不能取代送達回執，也不會讓 reviewed cleanup 把未送達的結果當成已送達。
 
 ## 安全模型（精簡版）
 

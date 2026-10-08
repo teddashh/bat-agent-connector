@@ -20,6 +20,8 @@ from . import (
     __version__,
     api_auth,
     checkpoints,
+    cleanup,
+    confinement,
     dashboard_sync,
     integration,
     pr_delivery,
@@ -91,10 +93,15 @@ def parse_wait(value) -> float:
 class ApiV1:
     def __init__(self, daemon, *, allowed_origins: tuple[str, ...] = ()) -> None:
         self.daemon = daemon
+        cleanup.install(daemon.ops, daemon._admin_token)
         self.allowed_origins = allowed_origins
         self._streams = 0
         self._streams_by_actor: dict[str, int] = {}
         self.routes = [
+            ("POST", r"/api/v1/cleanup-previews", self.cleanup_preview, "observe"),
+            ("GET", r"/api/v1/cleanup-retained", self.cleanup_retained, "observe"),
+            ("GET", r"/api/v1/cleanup-tombstones", self.cleanup_tombstones, "observe"),
+            ("GET", r"/api/v1/cleanup-tombstones/(?P<rid>(?:cr|wt)_[0-9a-f]{32})", self.cleanup_tombstone, "observe"),
             ("GET", r"/api/v1/version", self.version, None),
             ("GET", r"/api/v1/capabilities", self.capabilities, "observe"),
             ("GET", r"/api/v1/bootstrap", self.bootstrap, "observe"),
@@ -316,14 +323,23 @@ class ApiV1:
         hosts = [{"host": h, "observe": True, "writes": fleet.writes_enabled(h),
                   "orchestrate": fleet.orchestrate_enabled(h),
                   "managed_roots": list(fleet.config.host(h).managed_roots),
-                  "shared_clone_worktrees": fleet.config.host(h).shared_clone_worktrees}
+                  "shared_clone_worktrees": fleet.config.host(h).shared_clone_worktrees,
+                  "confinement": confinement.host_capability(fleet, h)}
                  for h in fleet.config.hosts]
         return 200, {"actor": principal.actor, "scopes": sorted(principal.scopes), "api_version": API_VERSION,
                      "contract_version": CONTRACT_VERSION, "connector": __version__, "hosts": hosts,
                      "identity": dashboard_sync.identity(self.daemon.journal, principal),
                      "actions": actions, "operation_statuses": list(STATES),
+                     "cleanup": {"preview_ttl_s": cleanup.TTL_S, "max_items": cleanup.MAX_ITEMS, "restore": False,
+                                 "scopes": ["cleanup", "cleanup_discard"], "retention": vars(fleet.config.cleanup),
+                                 "read_deadline_s": cleanup.READ_DEADLINE_S, "serialize_previews": True,
+                                 "preview": principal.allows("observe"), "apply": principal.allows("cleanup"),
+                                 "discard": principal.allows("cleanup_discard"),
+                                 "hosts": [{"host": name, "available": self._can_continue(name),
+                                     "reasons": ([] if self._can_continue(name) else ["HOST_CLEANUP_UNAVAILABLE"])}
+                                     for name in fleet.config.hosts]},
                      "features": {"dashboard_sync": {"version": 1, "bootstrap": "/api/v1/bootstrap", "checkpoint_replay": True},
-                                  "inventory": True, "session_history": True, "resource_relations": True, "discovery_scope": True,
+                                  "cleanup": True, "inventory": True, "session_history": True, "resource_relations": True, "discovery_scope": True,
                                   "worktree_history": {"known_bindings_only": True}, "history": {"source": "journal", "legacy_transitions": "may_be_incomplete", "optional_adapters": ["delivery_part_a"],
                                       "observed_event_kinds": [r[0] for r in self.daemon.journal.db.execute("SELECT DISTINCT kind FROM api_events ORDER BY kind")]}, "events_stream": True, "operations": True, "work_items": True,
                                   "github": self.daemon.ops.context.get("github") is not None,
@@ -377,13 +393,22 @@ class ApiV1:
             raise ApiError(404, "UNKNOWN_HOST", f"unknown host {host!r}")
 
     async def session(self, query, host, sid, **_):
-        if self._bool(query, "live"):
+        live = self._bool(query, "live")
+        if live:
             self._known_host(host)
-            row = self.daemon.inventory.get_session(host, sid)
-            out = self.daemon.inventory.session_document(host, sid) if row else {"session": None}
+        try:
+            out = self.daemon.inventory.session_document(host, sid)
+        except OperationError as exc:
+            if not live or exc.code != "NOT_FOUND":
+                raise
+            out = {"session": None, "cleanup": []}
+        if live:
             out["policy"] = await resource_policy.session_policy(self.daemon.fleet, host, sid)
-            return 200, out
-        return 200, self.daemon.inventory.session_document(host, sid)
+            if out["session"]:
+                out["session"].update(confinement.session_fields(
+                    host, sid, await service._meta(self.daemon.fleet.client(host), sid),
+                    account=confinement.account_status(self.daemon.fleet, host)))
+        return 200, out
 
     def _history(self, query, resource_type, resource_id):
         return self.daemon.inventory.observation.history(resource_type, resource_id,
@@ -455,7 +480,8 @@ class ApiV1:
 
     async def operation(self, op, **_):
         return 200, {"operation": self.daemon.ops.get(op),
-                     "work_items": work_items.work_items_for(self.daemon.journal.db, "operation", op)}
+                     "work_items": work_items.work_items_for(self.daemon.journal.db, "operation", op),
+                     "cleanup_receipts": cleanup.receipts(self.daemon.ops, op)}
 
     async def cancel_operation(self, principal, op, **_):
         return 200, {"operation": self.daemon.ops.cancel(principal, op)}
@@ -494,7 +520,9 @@ class ApiV1:
                                                   self._int(query, "limit", 20))
 
     async def integration(self, op, **_):
-        return 200, integration.integration_get(self.daemon.ops, op)
+        out = integration.integration_get(self.daemon.ops, op)
+        out["cleanup"] = cleanup.lookup(self.daemon.journal.db, op)
+        return 200, out
 
     async def checkpoints(self, query, **_):
         return 200, checkpoints.list_checkpoints(self.daemon.journal.db, host=self._q(query, "host"),
@@ -503,7 +531,7 @@ class ApiV1:
 
     async def checkpoint(self, query, cp, **_):
         record = checkpoints.get(self.daemon.journal.db, cp)
-        out = {"checkpoint": record}
+        out = {"checkpoint": record, "cleanup": cleanup.lookup(self.daemon.journal.db, cp)}
         if self._bool(query, "live"):  # has the source moved on since? (the checkpoint itself never changes)
             out["source"] = await checkpoints.source_head(self.daemon.ops, record)
         return 200, out
@@ -527,7 +555,29 @@ class ApiV1:
             limit=self._int(query, "limit", 50), cursor=self._q(query, "cursor"))
 
     async def work_item(self, wi, **_):
-        return 200, work_items.work_item_get(self.daemon.journal.db, wi)
+        out = work_items.work_item_get(self.daemon.journal.db, wi)
+        out["cleanup"] = cleanup.lookup(self.daemon.journal.db, wi)
+        return 200, out
+
+    async def cleanup_preview(self, principal, body, **_):
+        if set(body) - {"target", "choices"}:
+            raise ApiError(422, "INVALID_PARAMS", "preview accepts target and choices")
+        return 200, {"preview": await cleanup.preview(self.daemon.ops, principal, body.get("target"), body.get("choices"))}
+
+    async def cleanup_retained(self, query, **_):
+        return 200, await cleanup.retained(self.daemon.ops, **{k: self._q(query, k) for k in
+            ("host", "resource_id", "query", "cursor")}, limit=self._int(query, "limit", 50))
+
+    async def cleanup_tombstones(self, query, **_):
+        return 200, cleanup.tombstones(self.daemon.ops, **{k: self._q(query, k) for k in
+            ("host", "kind", "query", "original_id", "work_item_id", "cursor")}, limit=self._int(query, "limit", 50))
+
+    async def cleanup_tombstone(self, rid, **_):
+        row = self.daemon.journal.db.execute("SELECT document FROM resource_tombstones WHERE resource_id=?", (rid,)).fetchone()
+        if not row:
+            raise ApiError(404, "NOT_FOUND", "tombstone not found")
+        doc = json.loads(row[0])
+        return 200, {"tombstone": doc, "receipts": cleanup.receipts(self.daemon.ops, doc["operation_id"])}
 
     async def task(self, task, **_):
         return 200, {"task": await self.daemon.call("work_status", {"task_id": task}), "execution_id": task,

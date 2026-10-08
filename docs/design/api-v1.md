@@ -19,7 +19,7 @@
 | `local-admin` | daemon 的 `task-admin.token`（0600） | 全部 |
 | API token | `batc api-token issue --actor ted-dashboard --scope observe --scope operate` | 發行時指定的 scopes |
 
-Scopes：`observe`（讀目錄、操作、事件、政策）、`operate`（驅動 managed session）、`start`（開新的 managed agent session，例如 `checkpoint.continue`）、`manage`（專案、工作項目與連結）、`approve`（確認工作項目完成；與 `manage` 分開，回報完成的 agent 不能自己簽核，見 [work-items.md](work-items.md)）、`merge`、`deploy`、`integrate`（PR metadata 更新與把成果推送到 head 分支；兩個 action 分開，metadata 另需 repo allow_pr_update，見 [delivery.md](delivery.md)／[integration.md](integration.md)）。Journal 只存 token 的 SHA-256。操作的 actor 一律取自 token；request body 或 MCP 參數自報的名字沒有授權效果。冪等鍵的唯一性以 actor 為範圍：同 actor、同 key、同內容回原 operation；同 key 不同內容回 409。
+Scopes：`observe`（讀目錄、操作、事件、政策）、`operate`（驅動 managed session）、`start`（開新的 managed agent session，例如 `checkpoint.continue`）、`manage`（專案、工作項目與連結）、`approve`（確認工作項目完成；與 `manage` 分開，回報完成的 agent 不能自己簽核，見 [work-items.md](work-items.md)）、`merge`、`deploy`、`integrate`（PR metadata 更新與把成果推送到 head 分支；兩個 action 分開，metadata 另需 repo allow_pr_update，見 [delivery.md](delivery.md)／[integration.md](integration.md)）、`cleanup`（reviewed resource cleanup／release）、`cleanup_discard`（只丟棄未提交內容；person-controlled，agents 不要求，Hermes／Grokbot tokens 不給）。Journal 只存 token 的 SHA-256。操作的 actor 一律取自 token；request body 或 MCP 參數自報的名字沒有授權效果。冪等鍵的唯一性以 actor 為範圍：同 actor、同 key、同內容回原 operation；同 key 不同內容回 409。
 
 瀏覽器防護：Host 必須是 loopback（擋 DNS rebinding）；有 Origin 時須是 loopback 或 `[api] allowed_origins`；只接受 bearer token，不用 cookie，所以沒有 CSRF 面。只有列在 `allowed_origins` 的 Origin 會收到 CORS 標頭（含 `OPTIONS` preflight）；Dashboard 與 API 同源，不需要它。
 
@@ -39,6 +39,8 @@ MCP 的 `operation_submit`、`operation_cancel`、`operation_resume` 要 `confir
 每個外部呼叫是一個具名步驟（`operation_steps`）。步驟意圖在呼叫前先 commit。逾時、連線中斷或之後的本機記錄失敗（`OSError`）時步驟記為 `uncertain`，之後由該步驟的 `reconcile` 讀回外部狀態：證明已發生就補記成功，無法證明（包括回查本身連不上）就維持 `uncertain` 並退避重試回查，五次後轉 `needs_attention`。回查次數用自己的計數（`uncertain_tries`），等待 checks／workflow 的輪詢不會用掉它。已完成的步驟在重跑時直接回傳保存的結果。
 
 取消只在下一步之前生效，而且不跳過回查：`uncertain` 的操作收到取消時先立刻回查，證明那一步已發生就照常完成，所以 `cancelled` 不會掩蓋已送出的動作。`needs_attention` 可以取消（原因會註明哪一步從未證明），也可以 `resume`：已完成的步驟不重做，未證明的步驟再回查一次，不重送。操作的 actor、admin，或擁有該 action scope 的主體可以取消或 resume；事件記在實際操作的人名下。
+
+`NeedsAttention` 從外部 `ctx.step` 傳出時，operation 停在 `needs_attention`，該 step 保留 `uncertain`。重啟或 resume 都先執行原 reconcile；沒有 reconcile 或回 None 時只讀回等待，不能再次呼叫 fn。回傳已知結果就補記成功；只有 reconcile 明確回 `RERUN`、證明原呼叫未生效時才可重新派送。這與 `ctx.effect` 的本地交易回執不同：effect 與 journal 變更在同一交易內，回滾後可安全重做本地變更。
 
 第一批 action：
 
@@ -127,13 +129,76 @@ History／relations 的 opaque cursor 在任何 journal read 前驗證 version�
 | `GET /api/v1/integrations/candidates?host=` | observe | 可放進 PR 的 agent 成果與 checkpoint，及送過的 PR |
 | `GET /api/v1/integrations/previews/{ipv_id}` | observe | 預覽文件與是否過期 |
 | `GET /api/v1/integrations?repository=&pull_number=`、`/integrations/{op_id}` | observe | 一個 PR 的整合紀錄、一次整合與各來源 receipts |
+| `POST /api/v1/cleanup-previews` | observe；discard 另需 cleanup_discard | target 四類與 per-item choices，純讀 signed preview；TTL **15 分鐘**（integration 一小時） |
+| `POST /api/v1/operations` action=cleanup.apply | cleanup；discard 另需 cleanup_discard | preview_token／preview_id／preview_fingerprint；PREVIEW_MISMATCH／EXPIRED／BLOCKED／STALE 必須重新 preview |
+| `GET /api/v1/cleanup-retained` | observe | 實際可讀 refs／objects 與 unavailable；host/resource_id/query/limit/cursor；Part A 無 restore |
+| `GET /api/v1/cleanup-tombstones`、`/{resource_id}` | observe | query/original_id/host/work_item_id/kind/limit/cursor；永久原 ID aliases、位置、原因、PR、receipts |
 | `GET /api/v1/projects`、`/projects/{prj_id}` | observe | 專案樹與統計；一個專案與它的工作項目樹（[work-items.md](work-items.md)） |
 | `GET /api/v1/work-items`、`/work-items/{wi_id}` | observe | 跨專案的工作項目（`pending=true`：等人決定）；一個項目與它的完成狀態、連結、紀錄 |
 
 錯誤格式為 `{"error": {"code", "message"}}`：401 未驗證、403 權限或資源唯讀（代碼同 resource-policy）、404、405、409 冪等衝突、422 參數錯誤、502 BAT 錯誤。
 
+## 執行限制證據（A10）
+
+既有 session reads 帶 `write_scope`、`confinement` creation snapshot 與 `current_verification`；`/hosts` 及 `capabilities.hosts[].confinement` 帶 account check 與 agent 可達選項。Cached 舊列補 unknown evidence，不改資料庫；stale 不宣稱目前已 verified。`/tasks/{id}` 的 `session_confinement` 顯示 Task Service 相容 gap。Checkpoint preview、continue／repair operation refs 與結果帶同一證據；無新增 route 或 MCP tools。權限與批准的穩定拒絕見 [confinement](confinement.md)，A10 尚待 W12 live run。
+
+`GET /api/v1/capabilities` 的 `hosts[].confinement.host_account.start_effect` 描述新 start 的帳號查核流程，與 reason 一起回傳。MCP `capabilities_get`、CLI／MCP host reads 用同一後端 projection；GET 不觸發 live check。`start_account()` 在真正 start 時跑 live check，並用同一 `account_start_effect()` 規則決定拒絕。
+
+Host-account verdict 另含 `checked_uid` 與 `channel`：status、method=sudo_exec、ssh_alias、auditor_uid、bat_uid、bat_account、closure（schema_version/status/interpreter/roots/entries_remaining）、ptrace_scope（不可讀為 null）與 preflight evidence。Verified 須符合操作者宣告的 check_ssh_alias／check_uid／bat_account／expected_uid，auditor 與 BAT 的 UID 必須不同。無可信 alias 直接回 unknown／check_channel_untrusted，不跑 BAT 帳號的登入命令；此 reason 和其他 hardening gaps 一樣為 fallback_default，受限 Claude 用 default，不啟用 acceptEdits。Verified 另需完整 pre-interpreter closure proof；unknown／check_executable_untrusted 包含未知 layout 或不完整 gate，仍 fallback_default。同 UID hostile process 不在此證明範圍。舊同帳號／directory-only cache 不沿用，GET 仍只讀。
+
+| start_effect | 意義 |
+|---|---|
+| `verified` | 帳號已查核。新的受限 Claude 可用 acceptEdits，啟動前仍會再查；不是既有 session 的升級。 |
+| `recheck` | 宣告帳號但尚無 fresh evidence，reason=unchecked_or_stale。啟動時再查；通過、支援的加固 fallback 或拒絕由 live 結果決定。 |
+| `fallback_default` | Unknown 的 reason 是支援的環境加固缺口；受限 Claude 用 plain default，不啟用 acceptEdits。未宣告帳號也用此 value，跳過帳號 check；一般 operator／Task policy 不變。 |
+| `refused` | Mismatch 或其他 unknown；HOST_ACCOUNT_UNVERIFIED 拒絕 Claude 與 Codex 的新 start。 |
+
+Dashboard 依 start_effect 選啟動提示，不把所有非 verified status 當成 blocked、不在 JS 複製 reason 清單。Fallback／refusal 保留 reason code；Codex 保留原 sandbox 提示，refused 時先顯示拒絕。
+
 觀測 Part A 使用同 journal 的讀服務：MCP 只新增 inventory_session、inventory_worktree、resource_history、resource_relations 四個 tools；discovery 是 inventory_hosts 的參數。CLI 為 batc inventory/history/relations。History、relations、scope 的 GET 不呼叫 host、不寫入 journal；inventory 只保存 latest rows，沒有每 poll revisions。Dashboard 的跨專案歷史、scope 卡及 reopen/SSE 去重是 [observation.md](observation.md) 的 Part B。
 
+## 整理合約（Part A）
+
+見 [cleanup.md](cleanup.md)：preview 只讀、一份 snapshot、每 host 序列化並限制讀取時間，500 resources 上限。
+Host target 接受 configured host 或有 resource history 的原 host。Host 移除後，各來源的 session／worktree／
+branch／carrier ID 保持不變，全部 retained／OBSERVATION_UNAVAILABLE，不送 BAT／SSH；同 preview 的其他 host 正常 apply。
+失敗 integration.preview 的 durable prepare intent 也算 creation history，不必先有 integration_previews row。
+Apply 只執行同一 reviewed fingerprint；16 KiB signed token，15 分鐘到期。release_undelivered 保留 commits 與
+branch，不需 cleanup_discard；只有 discard_uncommitted 摧毀內容。Accepted actor/scopes/choices 固定，resume
+沿用原 OperationService 規則，不再檢查 discard scope；回執記錄 resumer。保留設定 keep/forever/false。
+Resumed run 在沒有任何 operation_steps row 時若 expiry／mismatch／early refusal，先釋放全部 own reserved
+guards／session markers、pending／running 回執改 failed 並保存 refusal code；已有 step 不走此 release。
+完全無 step、只因 read-only failure 留下的 uncertain 回執也在 refusal 時結清為 failed。
+Item status=already_absent 是獨立 definitive receipt，result.items 與 summary.already_absent 分別列出，
+不算 retained。它只保存經全 plan 驗證的 absence／original IDs，沒有 per-item host call、tombstone／aliases
+或 registry cleaned mark；不是 cleanup 移除的證據。Dependencies 接受 succeeded 或 already_absent。
+沒有 reclaim item 但有可釋放 cap 的 already_absent active 非 task session（無自己的 worktree 或 carrier
+同樣 already_absent）時，preview.ready=true；同一 cleanup.apply 只結算本機 retirement／receipt。
+Preview 本身不改 registry；retained carrier、未決或已退休 row 不會單獨開啟 apply。
+Confirmed planner stop 只把 matching active row 改 registry status=stopped，已不占 host cap；ACK／read-back 未確認時不改。
+Already-absent session 的 worktree 本次 succeeded／already_absent，或沒有自己的 worktree時，matching active、非 task row 的 status 改為
+absent_at_cleanup，retirement 記 actor／operation_id／carrier_resource_id。回執 after_state 有
+capacity_released=true、registry_status、carrier_resource_id、stopped_by_cleanup=false；不建 session tombstone。
+其他 row 不改，capacity_released=false，capacity_reason=not_counted／generation_changed／task_owned／start_unsettled／
+carrier_retained／registry_refused／registry_io_failed；success／同 retirement replay 的 reason=null。Registry refusal／I/O
+只列 capacity_error={code}，不影響 cleanup succeeded／tombstone，也不轉 uncertain。Starting／uncertain sessions 及
+carrier 以 COMMAND_UNRESOLVED retained，不是 already_absent。Confirmed planner stop 若 capacity 拒絕，stopped 仍 true。
+Worktree retained 時 absent session 的 active slot 留著供 resume。已退休的 ID 的 drive／client-resume／
+same-ID start／registry recovery 回 SESSION_RETIRED (409)；人可用新 ID 經原 cap reserve，ownership 仍 connector_managed。
+GET /operations/{id} 的 cleanup_receipts／tombstone 回執包含 completed_phases=[{resource_id,phase,effect,step,result}]、
+refused_phases（同形但 error）及 cancel_requested。它們投影 durable steps／operation，含 approved DAG 的
+prerequisites，不因後續失敗消失。result.items 是最後一次 progress snapshot；cancel 後以 live cleanup_receipts
+或 operation.cancel_requested 判斷取消，不以舊 result.items 的 flag 判斷。effect=additive（preserve）／runtime（stop）／destructive（discard、remove.*）。
+Gate 通過後的 process／transport／decode／schema failure 是 uncertain，保留 reservation、只回查。
+已完成 runtime／destructive phase 後 refusal，item=uncertain、error.code=CLEANUP_PARTIAL_STATE，
+另記 refused_phase／refused_code，operation=needs_attention；解除 blocker 後 resume 以新的 .aN attempt
+重核原 preconditions，完成步驟不重做。Discard after snapshot 存在 succeeded step，resume 不採納新內容。
+Cancel 已有 runtime／destructive partial 的 item 仍 uncertain、cancel_requested=true、reservation 保留；
+cancelled parent 不表示內容保留，也不能 resume。需人工檢視，本包無強制解鎖／takeover。只有未送出或
+pure additive、全部已結清的 item 可 cancelled／釋放 guard，回執仍列已建立的 pins。
+Legacy batc cleanup／session_cleanup 只評估，apply 回 LEGACY_CLEANUP_DISABLED (409)，指向 resource-cleanup；
+auto_cleanup deprecated，只保留解析，不啟用任何 writes。Fanout planner 只 stop，worktree 留給 reviewed cleanup。
+Restore、reviewed task cleanup、TaskDaemon tombstone backfill 在 Part B；clones/areas 退休與 refs/batc/* 刪除不在本包。
 ## Task Service operations（2026-10-08，Part A）
 
 依[統一操作規格](operations-unification.md)的 Part A，以下能力經既有 `POST /api/v1/operations`／`/rpc op_submit`，不新增 task 寫入 URL。舊 RPC／MCP 保留原結果，增加 `operation_id`、`operation_status`；operation succeeded 只表示該次控制完成，不表示 task done。

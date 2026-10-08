@@ -15,7 +15,8 @@
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "test:ui": "playwright test",
     "test:central": "node tests/central-integration.mjs",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:cleanup": "node tests/cleanup-integration.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.1"

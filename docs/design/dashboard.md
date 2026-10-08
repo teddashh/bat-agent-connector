@@ -48,6 +48,16 @@ Token 缺少某個 scope（`start`、`integrate`、`manage`、`approve`）時，
 
 依瀏覽器語言選 zh-TW 或 en，預設 zh-TW。字串在 `desktop/src/i18n.js`；程式與 CSS 只用 API 的機器值（`status`、`api_access` 等），不比對顯示文字。
 
+## 整理與永久歷史（Part A）
+
+見 [cleanup.md](cleanup.md)：純讀 preview、signed token、逐項 operations／retained refs／tombstones，原 ID
+永久可查。Dashboard #/cleanup 與 work item 的整理入口，兩語預覽／逐項回執／歷史搜尋／實際 retained list；
+Part A 無 restore 按鈕。Task-owned 資源由 Task Service 整理，本輪列 TASK_OWNED；原 terminal cleanup 不變。
+Restore、reviewed task leftovers／coordinator 准入與 TaskDaemon 歷史投影在 Part B。Clone／area 與 pins 留存。
+## 執行限制證據（A10）
+
+Session card 依 creation snapshot 顯示 level；OS sandbox 最多 options_confirmed，badge 明示尚未實機驗證。Detail 可展開建立選項、evidence／gap 及獨立 current verification；stale／mismatch 不改原 level。Checkpoint、work item 接續與 repair forms 隨所選 agent 及中央 `host_account.start_effect` 顯示限制：`recheck` 要求 start 時重新查核；`fallback_default` 的 Claude 使用 plain default；`refused` 才顯示阻擋與原因；`verified` 顯示已驗證 account 邊界。Codex 顯示 network／writable roots 不可設定與測試相容風險。所有字串有 en／zh-TW。Cwd 本身不稱為保護；A10 尚待 W12，見 [confinement](confinement.md)。
+
 ## 尚未涵蓋
 
 - Worktree、diff、檔案瀏覽。Fleet Kit 的連線選擇已由 Windows [PS adapter](desktop-fleet.md) 與桌面設定頁提供；Rust parity 與實機驗收仍待完成。

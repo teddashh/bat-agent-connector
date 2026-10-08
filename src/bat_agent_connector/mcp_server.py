@@ -59,11 +59,11 @@ READ_TOOLS = [
     "projects_list",
     "project_get",
     "work_items_list",
-    "work_item_get",
+    "work_item_get", "cleanup_preview", "cleanup_retained", "cleanup_tombstones",
 ]
 # Registered unless --read-only: they act as BATC_API_TOKEN's principal, whose scopes decide what is allowed.
 OPERATION_TOOLS = ["operation_submit", "operation_cancel", "operation_resume", "checkpoint_create",
-                   "work_continue_from_checkpoint", "github_pr_update", "github_pr_merge"]
+                   "work_continue_from_checkpoint", "cleanup_apply", "github_pr_update", "github_pr_merge"]
 WRITE_TOOLS = [
     "session_send",
     "session_continue",
@@ -441,9 +441,34 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         to sessions, checkpoints, operations, tasks and PRs (with what each points at now) and its history."""
         return await daemon("work_item_get", work_item_id=work_item_id)
 
+    async def cleanup_preview(target: dict[str, Any], choices: dict[str, list[str]] | None = None) -> dict[str, Any]:
+        """Pure read preview of work_item (optional include_children), checkpoint, integration or host resources.
+        Lists all retention reasons, exact steps and a signed token valid for 15 minutes. Explicit per-item
+        release_undelivered keeps commits and branches, needing cleanup. Never request cleanup_discard as an agent."""
+        from .cleanup import http_request
+        return await asyncio.to_thread(http_request, "/api/v1/cleanup-previews", body={"target": target, "choices": choices or {}})
+
+    async def cleanup_retained(host: str | None = None, resource_id: str | None = None,
+                               query: str | None = None, limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
+        """Read actual retained refs and commit objects; unavailable observations are reported separately.
+        History stays forever. This does not restore a worktree or runtime (restore comes in Part B)."""
+        from .cleanup import http_request, read_path
+        return await asyncio.to_thread(http_request, read_path("retained", host=host, resource_id=resource_id,
+                                       query=query, limit=limit, cursor=cursor))
+
+    async def cleanup_tombstones(query: str | None = None, original_id: str | None = None,
+                                 host: str | None = None, work_item_id: str | None = None,
+                                 kind: str | None = None, limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
+        """Search permanent cleanup history by original ID, old location, work item or PR: where it was,
+        why it was cleaned, who approved it and where its results went. No live host is needed."""
+        from .cleanup import http_request, read_path
+        return await asyncio.to_thread(http_request, read_path("tombstones", query=query, original_id=original_id,
+            host=host, work_item_id=work_item_id, kind=kind, limit=limit, cursor=cursor))
+
     for fn in (capabilities_get, inventory_sessions, inventory_hosts, inventory_session, inventory_worktree, resource_history, resource_relations, events_list, operation_get, operations_list,
                github_pr_preview, github_merge_preview_get, checkpoints_list, checkpoint_preview, integration_candidates, integration_get,
-               integrations_list, projects_list, project_get, work_items_list, work_item_get):
+               integrations_list, projects_list, project_get, work_items_list, work_item_get,
+               cleanup_preview, cleanup_retained, cleanup_tombstones):
         mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
 
     if fleet.any_orchestrate:
@@ -554,6 +579,20 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             return await principal_daemon("op_submit", confirm, action=action, idempotency_key=idempotency_key,
                                           target=target, params=params, preconditions=preconditions, wait_s=wait_s)
 
+        async def cleanup_apply(preview_id: str, preview_token: str, fingerprint: str, idempotency_key: str,
+                                confirm: bool = False) -> dict[str, Any]:
+            """WRITE. Execute exactly the reviewed cleanup preview, using cleanup scope. On PREVIEW_STALE,
+            PREVIEW_EXPIRED or PREVIEW_MISMATCH preview again. Keeps undelivered commits when explicitly released.
+            Requires confirm=true and this agent's BATC_API_TOKEN; never falls back to the admin token."""
+            from .cleanup import apply_request, http_request
+            token = os.environ.get("BATC_API_TOKEN")
+            if not confirm or not token:
+                raise WriteRefused("cleanup_apply requires confirm=true and BATC_API_TOKEN with cleanup scope")
+            req = apply_request({"preview_id": preview_id, "preview_token": preview_token, "fingerprint": fingerprint},
+                                idempotency_key)
+            return await asyncio.to_thread(http_request, "/api/v1/operations?wait=3", body=req, token=token,
+                                           key=idempotency_key)
+
         async def github_pr_update(repository: str, pull_number: int, expected_metadata_digest: str,
                                    idempotency_key: str, title: str | None = None, body: str | None = None,
                                    wait_s: float = 10, confirm: bool = False) -> dict[str, Any]:
@@ -596,8 +635,9 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             """WRITE. Continue from a checkpoint in a NEW connector-managed session: a worktree is added in the
             connector's own clone at exactly the checkpoint commit, the session starts there, and only then are
             `instructions` sent (the person's words, verbatim). The source session is never written, stopped or
-            superseded. The new session is confined to its folder (Claude asks before writing elsewhere, Codex's
-            sandbox blocks it); leave those prompts to the person. Needs a BATC_API_TOKEN with the `start` scope.
+            superseded. Read confinement/current_verification: Claude uses default unless a verified host account
+            supports acceptEdits (which has no path check); Codex sandbox enforcement awaits W12. Cwd alone offers
+            no protection. Never request raises or persistent approvals on confined sessions. Needs a BATC_API_TOKEN with the `start` scope.
             Long-running: if the result is not final, follow operation_get(operation_id) and reuse the
             same idempotency_key on retry; a new key starts a second session. Requires confirm=true."""
             return await principal_daemon("op_submit", confirm, action="checkpoint.continue",
@@ -615,7 +655,7 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             return await principal_daemon("op_resume", confirm, operation_id=operation_id)
 
         for fn in (operation_submit, operation_cancel, operation_resume, checkpoint_create,
-                   work_continue_from_checkpoint, github_pr_update, github_pr_merge):
+                   work_continue_from_checkpoint, cleanup_apply, github_pr_update, github_pr_merge):
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=op_write)
 
     if fleet.any_writes:
@@ -791,8 +831,8 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             (max_start_per_call). Refuses sessions that do not look exhausted unless force=true. Idempotent per
             old session. model defaults to the host's codex_model. instructions (single session only) replace the
             default "continue the task" steps, e.g. "only commit the work in progress"; archive_only=true means
-            session_cleanup will never merge that session's branch (it removes the worktree, keeping the branch,
-            once the session is idle and clean). Returns old/new session ids, cwd, branch, same_worktree.
+            the session is marked archive-only. Reclaim its resources through cleanup_preview and cleanup_apply;
+            release_undelivered preserves its commits and branch. Returns old/new session ids, cwd, branch, same_worktree.
             Requires confirm=true."""
             return await lifecycle.session_failover(
                 fleet, host, session_id, confirm, all_exhausted, dry_run, model, force, 12, workspace,
@@ -802,13 +842,9 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         async def session_cleanup(
             host: str, confirm: bool = False, dry_run: bool = True, session_id: str | None = None
         ) -> dict[str, Any]:
-            """ORCHESTRATE. Evaluate connector-managed sessions and decide MERGE_AND_CLEAN / CLEAN_ONLY / KEEP /
-            ESCALATE. Sessions created in BAT and connector sessions in a human checkout are always KEEP.
-            Merges only into a main checkout inside a managed root, and only when idle, committed,
-            strictly ahead (conflict-free), main checkout clean on the base branch, no failing tests, no
-            secret/infra/huge-deletion risk, AND the Jev gate agrees (Jev unavailable => escalate). Branches are
-            always kept. Finished agents are stopped (unloaded; resumable). dry_run=true (default) only reports;
-            real runs need confirm=true and auto_cleanup = true on the host. Returns one escalation_summary."""
+            """Read-only legacy evaluation of connector sessions. dry_run=false returns
+            LEGACY_CLEANUP_DISABLED; auto_cleanup is deprecated and never enables writes.
+            Use cleanup_preview and cleanup_apply for reviewed reclamation."""
             return await lifecycle.session_cleanup(fleet, host, confirm, dry_run, session_id)
 
         async def session_record_verification(
@@ -852,7 +888,9 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             """ORCHESTRATE. Start one worktree session per item of the latest ```bat-fanout block in that
             session's replies, each with the item's prompt VERBATIM (plus the BAT-STATUS request). You do not
             split or rewrite anything. Capped by max_start_per_call and the host cap. A planner session from
-            fanout_plan_session is cleaned up afterwards. dry_run=true only parses. Requires confirm=true."""
+            fanout_plan_session is stopped only after confirmation and every task starting. A failed or
+            incomplete fan-out keeps the planner for retry; its worktree is always kept for resource-cleanup.
+            dry_run=true only parses. Requires confirm=true."""
             return await lifecycle.fanout_from_plan(fleet, host, session_id, confirm, dry_run, agent, None, max_items)
 
         for fn in (
@@ -866,7 +904,7 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             fanout_from_plan,
         ):
             fn.__doc__ = (fn.__doc__ or "") + f" Orchestrate is enabled for: {oenabled}."
-            mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=orc)
+            mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro if fn is session_cleanup else orc)
 
     return mcp, fleet
 
