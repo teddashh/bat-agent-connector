@@ -391,6 +391,24 @@ async def test_a01_legacy_interrupt_refused_before_operation_or_frame(served, mo
     assert not api.write_frames(mock)
 
 
+@pytest.mark.parametrize("mode", [[], {}, None, True, 0, "invalid"])
+@pytest.mark.parametrize("door", ["http", "rpc"])
+async def test_interrupt_rejects_malformed_mode_before_admission(served, mock, mode, door):
+    d, port = served
+    adopt(SID)
+    tok = api.token(d, "caller", "operate")
+    if door == "http":
+        status, out = await api.http(port, "POST", "/api/v1/operations", tok=tok, body={
+            "action": "session.interrupt", "target": {"host": "h1", "session_id": SID},
+            "params": {"mode": mode}, "idempotency_key": "invalid-interrupt-mode"})
+        assert status == 422 and out["error"]["code"] == "INVALID_PARAMS"
+    else:
+        status, out = await rpc(port, tok, "session_interrupt", arguments(mode=mode))
+        assert status == 400 and out["error"] == "INVALID_PARAMS"
+    assert not d.journal.db.execute("SELECT 1 FROM operations").fetchone()
+    assert not api.write_frames(mock)
+
+
 @pytest.mark.parametrize("argv", [
     ["interrupt", "h1", SID, "--confirm"], ["op", "op_saved", "--cancel"],
     ["project", "create", "new"], ["item", "create", "p", "new"],
