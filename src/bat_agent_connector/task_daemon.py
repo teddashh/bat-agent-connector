@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import api_actions, api_auth, checkpoints, delivery, registry, service
+from . import api_actions, api_auth, checkpoints, delivery, integration, registry, service
 from .api_v1 import ApiV1, is_dashboard_path
 from .config import Config, state_dir
 from .errors import BatError, ResourceReadOnly, TokenUnavailable
@@ -39,7 +39,8 @@ DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
            "api_events": "observe", "inventory_sessions": "observe", "inventory_hosts": "observe",
            "api_capabilities": "observe", "github_pr_preview": "observe", "checkpoints_list": "observe",
-           "checkpoint_get": "observe", "checkpoint_preview": "observe"}
+           "checkpoint_get": "observe", "checkpoint_preview": "observe", "integration_candidates": "observe",
+           "integration_preview_get": "observe", "integration_get": "observe", "integrations_list": "observe"}
 ADMIN_RPC = {"api_token_issue", "api_token_revoke", "api_token_list", "work_reconcile_capability"}
 
 
@@ -119,7 +120,8 @@ class TaskDaemon:
         # /api/v1: operations share this daemon's journal (one owner) and its write-capable fleet;
         # the inventory observes through its own read-only fleet.
         self.ops = OperationService(self.journal,
-                                    actions=api_actions.ACTIONS + delivery.ACTIONS + checkpoints.ACTIONS)
+                                    actions=api_actions.ACTIONS + delivery.ACTIONS + checkpoints.ACTIONS
+                                    + integration.ACTIONS)
         github = None
         if config.github.token_ref:
             try:
@@ -210,7 +212,7 @@ class TaskDaemon:
         if method == "api_capabilities":
             return (await self.api.capabilities(principal=principal))[1]
         if method == "github_pr_preview":
-            return {"pull_request": await delivery.pr_preview(self.ops, str(params.get("repository")),
+            return {"pull_request": await integration.pr_card(self.ops, str(params.get("repository")),
                                                               int(params.get("pull_number") or 0))}
         if method == "checkpoints_list":
             return checkpoints.list_checkpoints(self.journal.db, host=params.get("host"),
@@ -224,6 +226,18 @@ class TaskDaemon:
             if host not in self.fleet.config.hosts:
                 raise OperationError("UNKNOWN_HOST", f"unknown host {host!r}", 404)
             return {"preview": await checkpoints.preview(self.ops, host, str(params.get("session_id")))}
+        if method == "integration_candidates":
+            host = str(params.get("host"))
+            if host not in self.fleet.config.hosts:
+                raise OperationError("UNKNOWN_HOST", f"unknown host {host!r}", 404)
+            return integration.candidates(self.ops, host, int(params.get("limit") or 50))
+        if method == "integration_preview_get":
+            return {"preview": integration.preview_document(self.journal.db, str(params.get("preview_id")))}
+        if method == "integration_get":
+            return integration.integration_get(self.ops, str(params.get("operation_id")))
+        if method == "integrations_list":
+            return integration.integrations_list(self.ops, str(params.get("repository")),
+                                                 int(params.get("pull_number") or 0), int(params.get("limit") or 20))
         raise ValueError("unknown api method")
 
     async def call(self, method: str, params: dict, *, auth_token: str | None = None) -> dict:

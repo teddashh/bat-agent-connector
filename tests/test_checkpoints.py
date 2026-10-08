@@ -38,9 +38,9 @@ class LocalRunner:
     def available(self, host: str) -> bool:
         return True
 
-    async def run(self, host: str, script: str) -> str:
+    async def run(self, host: str, script: str, timeout_s: float | None = None) -> str:
         self.scripts.append(script)
-        return await checkpoints._run(("sh", "-c", script))
+        return await checkpoints._run(("sh", "-c", script), timeout_s)
 
 
 class RealGitLog(dict):

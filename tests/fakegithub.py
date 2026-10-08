@@ -42,10 +42,14 @@ class FakeGitHub:
         self._server.shutdown()
         self._server.server_close()
 
-    def add_pr(self, number: int, head: str, **fields) -> dict:
+    def add_pr(self, number: int, head: str, *, head_ref: str | None = None, fork: bool = False, repo_id: int = 4242,
+               **fields) -> dict:
+        repo = {"id": repo_id, "full_name": "o/r", "default_branch": "main"}
+        head_repo = {"id": repo_id + 1, "full_name": "someone/r"} if fork else {"id": repo_id, "full_name": "o/r"}
         pr = {"number": number, "state": "open", "draft": False, "merged": False, "merge_commit_sha": None,
               "mergeable": True, "mergeable_state": "clean", "title": f"PR {number}",
-              "head": {"sha": head, "ref": f"feature-{number}"}, "base": {"sha": "b" * 40, "ref": "main"},
+              "head": {"sha": head, "ref": head_ref or f"feature-{number}", "repo": head_repo},
+              "base": {"sha": "b" * 40, "ref": "main", "repo": repo},
               "html_url": f"https://github.example/o/r/pull/{number}", **fields}
         self.pulls[number] = pr
         return pr

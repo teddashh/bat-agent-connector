@@ -643,6 +643,22 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--limit", type=int, default=20)
     c = csp.add_parser("show", help="one checkpoint, its excerpt and the sessions started from it")
     c.add_argument("checkpoint_id")
+    p = sp.add_parser("integrate", help="put results into an existing PR's head branch (one normal push)")
+    isp = p.add_subparsers(dest="integrate_cmd", required=True)
+    c = isp.add_parser("candidates", help="agent results and checkpoints on a host, and where they went")
+    c.add_argument("--host", required=True)
+    c = isp.add_parser("preview", help="pin the PR head and sources; list every commit and file that would enter")
+    c.add_argument("--host", required=True)
+    c.add_argument("--repo", required=True, help="owner/name")
+    c.add_argument("--pr", type=int, required=True)
+    c.add_argument("--source", action="append", required=True,
+                   help="kind:id, in order (checkpoint:cp_..., checkpoint_run:op_..., branch:NAME)")
+    c.add_argument("--pick", action="append", default=[], help="SEQ=SHA,SHA: copy only these commits of source SEQ")
+    c.add_argument("--key", help="idempotency key (default: a new one; the same key returns the same preview)")
+    c = isp.add_parser("apply", help="compose a reviewed preview and push it to the PR head")
+    c.add_argument("preview_id")
+    c = isp.add_parser("show", help="one preview (ipv_...) or integration operation (op_...)")
+    c.add_argument("id")
     p = sp.add_parser("op", help="show one operation, or list recent ones; --cancel / --resume one")
     p.add_argument("operation_id", nargs="?")
     steer = p.add_mutually_exclusive_group()
@@ -678,6 +694,48 @@ def cmd_checkpoint(args) -> int:
         out = request("checkpoints_list", host=args.host, session_id=args.session, limit=args.limit, entry="cli")
     else:
         out = request("checkpoint_get", checkpoint_id=args.checkpoint_id, entry="cli", timeout=40.0)
+    _print(out, True)
+    return 0
+
+
+def integrate_sources(sources: list[str], picks: list[str]) -> list[dict]:
+    out = []
+    for s in sources:
+        kind, sep, ident = s.partition(":")
+        if not sep or not ident:
+            raise ValueError(f"--source {s!r} must look like kind:id")
+        out.append({"kind": kind, "id": ident})
+    for p in picks:
+        seq, sep, shas = p.partition("=")
+        if not sep or not seq.isdigit() or not 1 <= int(seq) <= len(out):
+            raise ValueError(f"--pick {p!r} must look like SEQ=SHA,SHA for one of the sources")
+        out[int(seq) - 1].update(mode="pick", commits=[x for x in shas.split(",") if x])
+    return out
+
+
+def cmd_integrate(args) -> int:
+    import uuid
+
+    from .integration import apply_request
+    from .task_daemon import request
+
+    cmd = args.integrate_cmd
+    if cmd == "candidates":
+        out = request("integration_candidates", host=args.host, entry="cli")
+    elif cmd == "preview":
+        key = args.key or f"cli-{uuid.uuid4()}"
+        out = request("op_submit", action="integration.preview", idempotency_key=key,
+                      target={"host": args.host, "repository": args.repo, "pull_number": args.pr},
+                      params={"sources": integrate_sources(args.source, args.pick)}, wait_s=30, entry="cli",
+                      timeout=40.0)
+        out["note"] = "your local folders are never updated; sync them in BAT after the PR changes"
+    elif cmd == "apply":
+        doc = request("integration_preview_get", preview_id=args.preview_id, entry="cli")["preview"]
+        out = request("op_submit", **apply_request(doc), wait_s=30, entry="cli", timeout=40.0)
+    elif args.id.startswith("ipv_"):
+        out = request("integration_preview_get", preview_id=args.id, entry="cli")
+    else:
+        out = request("integration_get", operation_id=args.id, entry="cli")
     _print(out, True)
     return 0
 
@@ -729,6 +787,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.cmd == "checkpoint":
             return cmd_checkpoint(args)
+        if args.cmd == "integrate":
+            return cmd_integrate(args)
         if args.cmd == "op":
             from .task_daemon import request
 

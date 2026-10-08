@@ -422,7 +422,7 @@ async function viewDelivery(main) {
     h("div", { class: "filters" }, repo, num, h("button", { class: "primary", onclick: () => load() }, t("load_pr"))), card);
   const caps = state.caps || {};
   if (!repo.value && caps.repositories?.length) repo.value = caps.repositories[0].repository;
-  const load = async () => {
+  const load = async flash => { // flash: a result to keep showing after the card reloads (e.g. "PR updated")
     sessionStorage.setItem("batc.repo", repo.value); sessionStorage.setItem("batc.pr", num.value);
     if (!repo.value || !/^\d+$/.test(num.value)) return;
     card.replaceChildren(h("p", { class: "muted" }, t("loading")));
@@ -461,10 +461,146 @@ async function viewDelivery(main) {
           h("dt", {}, t("mergeable")), h("dd", {}, `${pr.state}${pr.draft ? " · draft" : ""} · ${pr.mergeable_state || "?"}`),
           h("dt", {}, t("checks")), h("dd", {}, t("checks_summary", pr.checks)),
           pr.merged ? [h("dt", {}, t("merged_sha")), h("dd", {}, h("code", {}, pr.merge_commit_sha))] : null),
-        h("div", { class: "actions" }, ...buttons), status);
+        ...[h("div", { class: "actions" }, ...buttons), status, flash instanceof Node ? flash : null,
+          pr.integration?.allowed ? integrationPanel(pr, load) : null].filter(Boolean));
     } catch (e) { card.replaceChildren(errorBox(e)); }
   };
   await load();
+}
+
+// "Update PR results": put chosen results into this PR's head branch with one normal push (never forced; the
+// person's folders are never touched). Sources come only from a preview that lists every commit that would enter.
+function integrationPanel(pr, reloadCard) {
+  const box = h("div", { class: "panel" });
+  const may = (state.caps?.scopes || []).includes("integrate");
+  const hosts = pr.integration.hosts;
+  box.append(h("h2", {}, t("update_pr_results")), h("p", { class: "muted" }, t("update_pr_help")));
+  if (!may) { box.append(h("p", { class: "note" }, t("needs_integrate_scope"))); return box; }
+  if (!hosts.length) { box.append(h("p", { class: "note" }, t("integration_no_host"))); return box; }
+  const target = { host: hosts[0], repository: pr.repository, pull_number: Number(pr.pull_number) };
+  const selected = []; // [{kind, id, label}] in order
+  const pickList = h("div", {});
+  const order = h("div", {});
+  const previewBox = h("div", {});
+  const status = h("div", {});
+  let doc = null;
+  let generation = 0;
+  const rerender = () => {
+    order.replaceChildren(...selected.map((s, i) => h("div", { class: "row" },
+      h("div", { class: "grow" }, `${i + 1}. `, chip(t("kind_" + s.kind)), " ", h("code", {}, s.label)),
+      h("button", { class: "secondary", disabled: i === 0, onclick: () => { selected.splice(i - 1, 0, selected.splice(i, 1)[0]); changed(); } }, "↑"),
+      h("button", { class: "secondary", disabled: i === selected.length - 1, onclick: () => { selected.splice(i + 1, 0, selected.splice(i, 1)[0]); changed(); } }, "↓"),
+      h("button", { class: "secondary", onclick: () => { selected.splice(i, 1); changed(); } }, "×"))));
+  };
+  const runPreview = async () => {
+    const mine = ++generation;
+    doc = null;
+    if (!selected.length) { previewBox.replaceChildren(); return; }
+    previewBox.replaceChildren(h("p", { class: "muted" }, t("previewing")));
+    try {
+      let op = await submit("integration.preview", target, { sources: selected.map(({ kind, id }) => ({ kind, id })) },
+        { expected_head_sha: pr.head_sha }, `preview.${pr.repository}.${pr.pull_number}`);
+      while (!TERMINAL.includes(op.status) && op.status !== "needs_attention" && box.isConnected && mine === generation) {
+        await sleep(1000);
+        op = (await api("GET", `/operations/${op.operation_id}`)).operation;
+      }
+      if (mine !== generation || !box.isConnected) return;
+      if (op.status !== "succeeded") {
+        previewBox.replaceChildren(h("p", { class: "error" }, `${op.error_code || op.status} ${op.status_reason || ""}`));
+        return;
+      }
+      doc = op.result;
+      renderPreview();
+    } catch (e) { if (mine === generation) previewBox.replaceChildren(errorBox(e)); }
+  };
+  const changed = debounce(() => { rerender(); runPreview(); }, 600);
+  const add = (kind, id, label) => {
+    if (!selected.some(s => s.kind === kind && s.id === id)) selected.push({ kind, id, label });
+    changed();
+  };
+  const plain = w => h("li", {}, w.text);
+  const renderPreview = () => {
+    const expired = Date.now() / 1000 > doc.expires_at || doc.target.head_sha !== pr.head_sha;
+    const conflictAt = doc.sources.find(s => s.predicted === "conflict");
+    const go = h("button", { class: "primary", disabled: !doc.ready || expired, onclick: async () => {
+      go.disabled = true;
+      try {
+        const req = { action: "integration.apply", target, params: { preview_id: doc.preview_id },
+          preconditions: { expected_head_sha: doc.target.head_sha, preview_digest: doc.digest } };
+        follow((await api("POST", "/operations?wait=3", req, "integrate." + doc.preview_id)).operation);
+      } catch (e) { status.replaceChildren(errorBox(e)); go.disabled = false; }
+    } }, conflictAt ? t("start_integration_conflict", { n: conflictAt.seq }) : t("update_pr_results"));
+    previewBox.replaceChildren(...[
+      h("p", {}, h("code", {}, `${doc.repository} #${doc.pull_number} · ${doc.target.head_ref} @ ${doc.target.head_sha.slice(0, 12)}`),
+        " → ", t("normal_push"), " · ", t("push_access_" + doc.target.push_access)),
+      ...doc.sources.map(s => h("details", { class: "row-details" },
+        h("summary", {}, `${s.seq}. `, chip(t("plan_" + (s.predicted || "not_predicted")), s.predicted === "conflict" ? "bad" : ""),
+          " ", h("code", {}, s.label), " · ", t("n_commits", { n: s.commits_total }), " · ", t("n_files", { n: s.files_total }),
+          s.conflict_files.length ? h("span", { class: "error" }, " · ", s.conflict_files.join(", ")) : null),
+        h("ul", {}, ...s.commits.map(c => h("li", {}, h("code", {}, c.sha.slice(0, 10)), ` ${c.subject} — ${c.author}`,
+          c.origin === "foreign" ? h("span", { class: "error" }, " · ", t("foreign_commit")) : null))),
+        s.warnings.length ? h("ul", { class: "muted" }, ...s.warnings.map(plain)) : null)),
+      doc.overlaps.length ? h("p", { class: "muted" }, t("overlapping_files"), " ",
+        doc.overlaps.map(o => `${o.path} (${o.seqs.join(", ")}${o.also_changed_on_pr ? ", PR" : ""})`).join("; ")) : null,
+      doc.blocking.length ? h("ul", { class: "error" }, ...doc.blocking.map(plain)) : null,
+      doc.warnings.length ? h("ul", { class: "muted" }, ...doc.warnings.map(plain)) : null,
+      h("p", { class: "muted" }, expired ? t("preview_expired") : t("previewed_at", { time: when(epoch(doc.observed_at)) }),
+        " ", h("a", { href: "#", onclick: ev => { ev.preventDefault(); runPreview(); } }, t("preview_again"))),
+      h("div", { class: "actions" }, go)].filter(Boolean)); // replaceChildren would print a null as "null"
+  };
+  const follow = async op => {
+    for (;;) {
+      if (!box.isConnected) return;
+      status.replaceChildren(integrationStatus(op, { resume: () => api("POST", `/operations/${op.operation_id}/resume`, {}),
+        cancel: async () => { await api("POST", `/operations/${op.operation_id}/cancel`, {}); runPreview(); } }));
+      if (TERMINAL.includes(op.status) || op.status === "needs_attention") break;
+      await sleep(1500);
+      op = (await api("GET", `/operations/${op.operation_id}`)).operation;
+    }
+    if (op.status === "succeeded") reloadCard(integrationStatus(op, {})); // the card shows the new head
+    else if (["TARGET_HEAD_CHANGED", "SOURCE_CHANGED"].includes(op.error_code)) runPreview();
+  };
+  const branch = h("input", { placeholder: t("branch_on_github") });
+  (async () => {
+    try {
+      const c = await api("GET", `/integrations/candidates?host=${encodeURIComponent(target.host)}`);
+      const row = (kind, id, label, chips) => h("div", { class: "row" },
+        h("div", { class: "grow" }, h("code", {}, label), " ", ...chips),
+        h("button", { class: "secondary", onclick: () => add(kind, id, label) }, t("add")));
+      const delivered = x => x.delivered_to.length ? [chip(t("delivered_to", { n: x.delivered_to[0].pull_number }), "ok")] : [];
+      pickList.replaceChildren(
+        h("h3", {}, t("agent_results")),
+        ...(c.agent_results.length ? c.agent_results.map(r => row("checkpoint_run", r.id, r.branch,
+          [r.streaming ? chip(t("still_working"), "warn") : chip(t("done"), "ok"), ...delivered(r)]))
+          : [h("p", { class: "muted" }, t("none"))]),
+        h("h3", {}, t("your_checkpoints")),
+        ...(c.checkpoints.length ? c.checkpoints.map(r => row("checkpoint", r.id, `${r.branch || "?"} @ ${r.commit_sha.slice(0, 10)}`,
+          [r.note ? h("span", { class: "muted" }, r.note.slice(0, 60)) : null, ...delivered(r)]))
+          : [h("p", { class: "muted" }, t("none"))]),
+        h("div", { class: "actions" }, branch, h("button", { class: "secondary", onclick: () => {
+          if (branch.value.trim()) add("branch", branch.value.trim(), branch.value.trim());
+          branch.value = "";
+        } }, t("add_branch"))));
+    } catch (e) { pickList.replaceChildren(errorBox(e)); }
+  })();
+  box.append(pickList, h("h3", {}, t("selected_in_order")), order, previewBox, status);
+  return box;
+}
+
+function integrationStatus(op, act) {
+  const code = op.error_code;
+  const text = op.status === "succeeded"
+    ? t("integration_done", { old: op.result.old_head.slice(0, 7), new: op.result.new_head.slice(0, 7),
+      n: op.result.added_commits ?? "?" })
+    : op.status === "needs_attention" ? (t("integration_" + code) !== "integration_" + code ? t("integration_" + code) : op.status_reason)
+      : op.status === "uncertain" ? t("integration_uncertain")
+        : op.status === "waiting_external" ? t("integration_waiting")
+          : op.status === "failed" ? `${code}: ${op.status_reason || ""}` : t("integration_running");
+  const buttons = op.status === "needs_attention" ? [
+    h("button", { class: "primary", onclick: act.resume }, t("resume")),
+    h("button", { class: "danger", onclick: act.cancel }, t("cancel_and_preview"))] : [];
+  return h("div", {}, h("p", {}, opStatus(op), " ", text, " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id)),
+    h("div", { class: "actions" }, ...buttons));
 }
 
 async function viewOperations(main) {
@@ -501,6 +637,15 @@ async function viewOperation(main, id) {
       const opened = op.result?.session_id && op.result?.host
         ? h("a", { class: "secondary", href: `#/session/${encodeURIComponent(op.result.host)}/${encodeURIComponent(op.result.session_id)}` },
           t("open_new_session")) : null;
+      let receipts = null;
+      if (op.action === "integration.apply") {
+        const rows = (await api("GET", `/integrations/${id}`)).receipts;
+        receipts = [h("h2", {}, t("receipts")), ...rows.map(r => h("div", { class: "row" },
+          h("div", { class: "grow" }, `${r.seq}. ${t("kind_" + r.source_kind)} `, h("code", {}, r.source_id.slice(0, 15)), " ",
+            h("code", {}, `${r.pinned_sha.slice(0, 10)} → ${(r.integrated_sha || "").slice(0, 10)}`),
+            r.conflict_files ? h("span", { class: "error" }, " ", r.conflict_files.join(", ")) : null),
+          chip(r.method || "-"), chip(t("receipt_" + r.effective_status), r.effective_status === "delivered" ? "ok" : "")))];
+      }
       const cancel = !TERMINAL.includes(op.status)
         ? h("button", { class: "danger", onclick: async () => {
           try { await api("POST", `/operations/${id}/cancel`, {}); render(); } catch (e) { panel.append(errorBox(e)); }
@@ -515,6 +660,7 @@ async function viewOperation(main, id) {
           h("dt", {}, "Target"), h("dd", {}, h("code", {}, JSON.stringify(op.target))),
           Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null,
           op.result ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null),
+        ...(receipts || []),
         h("h2", {}, t("steps")),
         ...op.steps.map(s => h("div", { class: "row" }, h("div", { class: "grow" }, s.name),
           h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)),

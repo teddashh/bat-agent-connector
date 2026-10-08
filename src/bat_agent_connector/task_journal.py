@@ -224,6 +224,30 @@ class Journal:
                 worktree_path TEXT NOT NULL, branch TEXT NOT NULL, agent TEXT NOT NULL, actor TEXT NOT NULL,
                 created_at REAL NOT NULL
             );
+            -- integration.preview results; immutable once written. `sources` keeps host paths (journal only).
+            CREATE TABLE IF NOT EXISTS integration_previews (
+                preview_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE, actor TEXT NOT NULL,
+                host TEXT NOT NULL, repository TEXT NOT NULL, repository_id INTEGER NOT NULL,
+                pull_number INTEGER NOT NULL, head_ref TEXT NOT NULL, head_sha TEXT NOT NULL, base_ref TEXT NOT NULL,
+                base_sha TEXT NOT NULL, remote_url TEXT NOT NULL, area_path TEXT NOT NULL, sources TEXT NOT NULL,
+                document TEXT NOT NULL, predicted_tree TEXT, digest TEXT NOT NULL, ready INTEGER NOT NULL,
+                blocking TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS integration_previews_pr ON integration_previews(repository, pull_number,
+                created_at);
+            -- One row per source per integration.apply: its intent, progress and the "received" fact.
+            CREATE TABLE IF NOT EXISTS integration_receipts (
+                operation_id TEXT NOT NULL, seq INTEGER NOT NULL, preview_id TEXT NOT NULL,
+                repository TEXT NOT NULL, pull_number INTEGER NOT NULL, head_ref TEXT NOT NULL,
+                source_kind TEXT NOT NULL, source_id TEXT NOT NULL, source_host TEXT NOT NULL,
+                location_class TEXT NOT NULL, pinned_sha TEXT NOT NULL, mode TEXT NOT NULL, commits TEXT,
+                source_key TEXT NOT NULL, status TEXT NOT NULL, method TEXT, base_sha TEXT, integrated_sha TEXT,
+                picked TEXT, conflict_files TEXT, resolution_sha TEXT, delivered_sha TEXT, delivered_at REAL,
+                actor TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                PRIMARY KEY(operation_id, seq)
+            );
+            CREATE INDEX IF NOT EXISTS integration_receipts_source ON integration_receipts(repository, head_ref,
+                source_key, status);
             COMMIT;
         """)
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(tasks)")}
