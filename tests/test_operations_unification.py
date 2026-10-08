@@ -73,7 +73,12 @@ def test_a09_owner_lock_precedes_initialization_and_pointer(mock, tmp_path, monk
 
 from bat_agent_connector import api_auth, lifecycle  # noqa: E402
 from bat_agent_connector.channels import GUARDED_CHANNELS, ORCHESTRATE_CHANNELS, WRITE_CHANNELS  # noqa: E402
-from bat_agent_connector.errors import ConnectionLost, InvokeTimeout, TaskControlRefused  # noqa: E402
+from bat_agent_connector.errors import (  # noqa: E402
+    ConnectionLost,
+    InvokeTimeout,
+    TaskControlRefused,
+    WriteRefused,
+)
 from bat_agent_connector.operations import OpContext, OperationError  # noqa: E402
 from tests.conftest import adopt  # noqa: E402
 
@@ -1695,3 +1700,219 @@ async def test_a07_readback_of_old_incarnation_does_not_dispatch_again(owned, mo
     await d.coordinator.tick(tid)
     assert d.journal.commands(tid)[0]["status"] == ("accepted" if kind == "send" else "settled")
     assert len(writes(mock)) == len(d.journal.commands(tid)) == 1
+
+
+def pending_answer(mock, variant):
+    mock.states[SID]["pendingAskUser"] = {"toolUseId": "ask-1", "questions": [{"question": "Choice?"}]}
+    mock.states[SID]["pendingPermission"] = {"toolUseId": "permission-1", "toolName": "Bash", "input": {}}
+    if variant == "ask_user":
+        return {"answers": ["yes"]}, "pendingAskUser", "ask-1", "claude:resolve-ask-user"
+    return {"permission": "allow"}, "pendingPermission", "permission-1", "claude:resolve-permission"
+
+
+@pytest.mark.parametrize("variant", ["ask_user", "permission"])
+async def test_a07_legacy_answer_resolves_prompt_before_frame_and_reconciles_after_restart(owned, mock, monkeypatch, variant):
+    d, tid = owned
+    params, _, prompt_id, channel = pending_answer(mock, variant)
+    prior = d.journal.get(tid)
+    client = d.fleet.client("h1")
+    original = client._roundtrip
+
+    async def lose_reply(frame, timeout):
+        if frame["channel"] == channel:
+            command = d.journal.commands(tid)[0]
+            payload = json.loads(command["payload"])
+            assert payload["tool_use_id"] == frame["params"]["toolUseId"] == prompt_id
+            assert payload["tool_use_id_source"] == "service"
+            assert not d.journal.db.in_transaction  # identity is committed before the BAT frame
+        result = await original(frame, timeout)
+        if frame["channel"] == channel:
+            raise ConnectionLost("BAT accepted the answer, reply lost")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(client, "_roundtrip", lose_reply)
+        with pytest.raises(ConnectionLost):
+            await service.session_answer(d.fleet, "h1", SID, confirm=True, **params)
+    command = d.journal.commands(tid)[0]
+    assert command["status"] == d.journal.get(tid)["state"] == "uncertain"
+    assert "tool_use_id" not in params
+    assert len(writes(mock)) == 1
+    async with restarted_daemon(d) as restarted:
+        assert restarted.journal.command_get(command["command_id"])["payload"] == command["payload"]
+        client = restarted.fleet.client("h1")
+        original_read = client._roundtrip
+        async def unreadable(frame, timeout):
+            result = await original_read(frame, timeout)
+            return {**result, "result": None} if frame["channel"] == "claude:get-session-state" else result
+        with monkeypatch.context() as patch:
+            patch.setattr(client, "_roundtrip", unreadable)
+            assert (await restarted.coordinator.tick(tid))["state"] == "uncertain"
+        assert restarted.journal.command_get(command["command_id"])["status"] == "uncertain"
+        assert len(writes(mock)) == len(restarted.journal.commands(tid)) == 1
+        task = await restarted.coordinator.tick(tid)
+        assert task["state"] == "running" and task["control_version"] == prior["control_version"]
+        assert restarted.journal.command_get(command["command_id"])["status"] == "settled"
+        assert len(writes(mock)) == len(restarted.journal.commands(tid)) == 1
+        await service.session_interrupt(restarted.fleet, "h1", SID, confirm=True)
+        assert len(writes(mock)) == len(restarted.journal.commands(tid)) == 2
+
+
+@pytest.mark.parametrize("variant", ["ask_user", "permission"])
+async def test_a07_legacy_answer_prompt_change_rejects_command_before_frame(owned, mock, monkeypatch, variant):
+    d, tid = owned
+    params, field, prompt_id, _ = pending_answer(mock, variant)
+    prior = d.journal.get(tid)
+    original = d.journal.command
+    def replace_prompt(*args, **kwargs):
+        command = original(*args, **kwargs)
+        mock.states[SID][field] = {**mock.states[SID][field], "toolUseId": "replacement-prompt"}
+        return command
+    monkeypatch.setattr(d.journal, "command", replace_prompt)
+    message = "tool_use_id does not match the pending " + ("question" if variant == "ask_user" else "permission request")
+    with pytest.raises(WriteRefused, match=message):
+        await service.session_answer(d.fleet, "h1", SID, confirm=True, **params)
+    command = d.journal.commands(tid)[0]
+    assert command["status"] == "rejected" and json.loads(command["payload"])["tool_use_id"] == prompt_id
+    assert d.journal.get(tid) == prior and not writes(mock)
+    assert mock.states[SID][field]["toolUseId"] == "replacement-prompt"
+
+
+@pytest.mark.parametrize("variant", ["ask_user", "permission"])
+@pytest.mark.parametrize("state_kind", ["absent", "missing_id", "unreadable", "unloaded"])
+async def test_a07_legacy_answer_without_resolvable_prompt_creates_no_command(owned, mock, monkeypatch, variant, state_kind):
+    d, tid = owned
+    params, field, _, _ = pending_answer(mock, variant)
+    if state_kind == "absent":
+        mock.states[SID][field] = None  # the other kind is pending; never choose that prompt
+    elif state_kind == "missing_id":
+        del mock.states[SID][field]["toolUseId"]
+    elif state_kind == "unloaded":
+        mock.metas[SID] = None
+    else:
+        client = d.fleet.client("h1")
+        original = client._roundtrip
+        async def unreadable(frame, timeout):
+            result = await original(frame, timeout)
+            return {**result, "result": None} if frame["channel"] == "claude:get-session-state" else result
+        monkeypatch.setattr(client, "_roundtrip", unreadable)
+    snapshot = task_effect_snapshot(d, tid)
+    message = "session is not loaded on the host; nothing to answer" if state_kind == "unloaded" else (
+        "session has no pending " + ("ask-user question" if variant == "ask_user" else "permission request"))
+    with pytest.raises(WriteRefused, match=message):
+        await service.session_answer(d.fleet, "h1", SID, confirm=True, **params)
+    assert task_effect_snapshot(d, tid) == snapshot and not writes(mock)
+
+
+@pytest.mark.parametrize("variant", ["ask_user", "permission"])
+@pytest.mark.parametrize("matches", [False, True], ids=["explicit_mismatch", "explicit_match"])
+async def test_a07_explicit_answer_prompt_keeps_existing_behavior(owned, mock, variant, matches):
+    d, tid = owned
+    params, _, prompt_id, channel = pending_answer(mock, variant)
+    params["tool_use_id"] = prompt_id if matches else "other-prompt"
+    prior = d.journal.get(tid)
+    if matches:
+        result = await service.session_answer(d.fleet, "h1", SID, confirm=True, **params)
+        assert result["tool_use_id"] == prompt_id and result["channel"] == channel
+    else:
+        with pytest.raises(WriteRefused, match="tool_use_id does not match"):
+            await service.session_answer(d.fleet, "h1", SID, confirm=True, **params)
+    command = d.journal.commands(tid)[0]
+    payload = json.loads(command["payload"])
+    assert payload["tool_use_id"] == params["tool_use_id"] and "tool_use_id_source" not in payload
+    assert command["status"] == ("settled" if matches else "rejected")
+    assert d.journal.get(tid) == prior and len(writes(mock)) == int(matches)
+
+
+@pytest.mark.parametrize("variant", ["ask_user", "permission"])
+async def test_a07_legacy_mcp_answer_without_prompt_id_uses_owner_resolution(owned, mock, variant):
+    from bat_agent_connector.mcp_server import build_server
+    d, tid = owned
+    params, _, prompt_id, _ = pending_answer(mock, variant)
+    server = await asyncio.start_server(d._handle, "127.0.0.1", 0)
+    d._endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/rpc"
+    d._write_owner_pointer()
+    mcp, fleet = build_server(d.fleet.config)
+    try:
+        result = await mcp.call_tool("session_answer", {"host": "h1", "session_id": SID, "confirm": True, **params})
+        assert not result.is_error
+        assert json.loads(d.journal.commands(tid)[0]["payload"])["tool_use_id"] == prompt_id
+        assert d.journal.commands(tid)[0]["status"] == "settled"
+        assert len(writes(mock)) == 1
+    finally:
+        await fleet.close()
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.parametrize("kind", ["claude", "codex"])
+async def test_a07_permission_mode_identity_survives_lost_reply_without_replay(owned, mock, monkeypatch, kind):
+    d, tid = owned
+    sid = SID if kind == "claude" else "sess-codex-0002"
+    if kind == "codex":
+        adopt(sid, task_id=tid, role="lead", agent_preset="codex-agent")
+        d.journal.change(tid, "accepted", fields={"session_id": sid})
+    client = d.fleet.client("h1")
+    original = client._roundtrip
+    async def lose_reply(frame, timeout):
+        result = await original(frame, timeout)
+        if frame["channel"] in WRITE_CHANNELS:
+            raise ConnectionLost("permission setting reply lost")
+        return result
+    with monkeypatch.context() as patch:
+        patch.setattr(client, "_roundtrip", lose_reply)
+        with pytest.raises(ConnectionLost):
+            await lifecycle.session_set_permissions(d.fleet, "h1", sid, confirm=True)
+    command = d.journal.commands(tid)[0]
+    payload = json.loads(command["payload"])
+    assert command["session_id"] == sid and payload["mode"] == "allow_all" and payload["control_version"] == 0
+    async with restarted_daemon(d) as restarted:
+        assert (await restarted.coordinator.tick(tid))["state"] == "uncertain"
+        assert restarted.journal.command_get(command["command_id"])["status"] == "uncertain"
+        assert len(writes(mock)) == len(restarted.journal.commands(tid)) == 1
+
+
+@pytest.mark.parametrize("variant", ["ask_user", "permission"])
+async def test_a07_answer_resolution_rechecks_task_gate_before_command(owned, mock, monkeypatch, variant):
+    d, tid = owned
+    params, _, _, _ = pending_answer(mock, variant)
+    client = d.fleet.client("h1")
+    original = client._roundtrip
+    paused = {}
+    async def pause_at_read(frame, timeout):
+        result = await original(frame, timeout)
+        if frame["channel"] == "claude:get-session-state":
+            d.journal.pause(tid)
+            paused.update(task_effect_snapshot(d, tid))
+        return result
+    monkeypatch.setattr(client, "_roundtrip", pause_at_read)
+    with pytest.raises(TaskControlRefused, match="CONTROL_VERSION_CONFLICT"):
+        await service.session_answer(d.fleet, "h1", SID, confirm=True, **params)
+    assert task_effect_snapshot(d, tid) == paused and not writes(mock)
+
+
+async def test_a07_relay_runtime_command_has_original_send_readback_identity(owned, mock, monkeypatch):
+    import hashlib
+    d, tid = owned
+    mock.echo_sends = True
+    client = d.fleet.client("h1")
+    original = client._roundtrip
+    async def lose_reply(frame, timeout):
+        result = await original(frame, timeout)
+        if frame["channel"] == "claude:send-message":
+            raise ConnectionLost("relay reply lost")
+        return result
+    with monkeypatch.context() as patch:
+        patch.setattr(client, "_roundtrip", lose_reply)
+        with pytest.raises(ConnectionLost):
+            await lifecycle.session_relay(d.fleet, "h1", "exact request", session_id=SID, confirm=True)
+    command = d.journal.commands(tid)[0]
+    frame = writes(mock)[0]
+    payload = json.loads(command["payload"])
+    assert payload["prompt_sha256"] == hashlib.sha256(frame["params"]["prompt"].encode()).hexdigest()
+    assert payload["before"]["agent_kind"] == "claude"
+    assert command["message_id"] == frame["params"]["clientMessageId"]
+    async with restarted_daemon(d) as restarted:
+        assert (await restarted.coordinator.tick(tid))["state"] == "running"
+        assert restarted.journal.command_get(command["command_id"])["status"] == "accepted"
+        assert len(writes(mock)) == len(restarted.journal.commands(tid)) == 1
