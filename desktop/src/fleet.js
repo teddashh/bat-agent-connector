@@ -2,6 +2,7 @@ import {fleetAvailability, fleetRequest} from "./transport/index.ts";
 
 // Local Fleet state never shares the central event cursor, principal or operation journal.
 export async function mountFleet(main, {h, t}) {
+  if (!main.isConnected) return () => {};
   const panel = h("section", {class: "panel", "aria-label": t("fleet_title")});
   const content = h("div"), message = h("p", {class: "muted", role: "status"});
   panel.append(h("h2", {}, t("fleet_title")), h("p", {class: "muted"}, t("fleet_help")), content, message);
@@ -98,5 +99,5 @@ export async function mountFleet(main, {h, t}) {
       timer = setTimeout(poll, 5000);
     }
   } catch { message.textContent = t("fleet_unavailable"); }
-  return () => {disposed = true; clearTimeout(timer);};
+  return () => {disposed = true; clearTimeout(timer); panel.remove();};
 }

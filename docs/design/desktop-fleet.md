@@ -63,8 +63,10 @@ for the native contract tests. They contain no live configuration. Unit tests co
 forbidden IPC inputs, contract/reply mismatch, installation containment, output
 filtering, subprocess EOF/bounds, uncertain exits and cancellation. Linux process
 fixtures validate transport behavior; they do not prove Windows ownership or
-PowerShell startup behavior. Windows CI checks out that exact Kit revision and calls
-only its real contract endpoint through native PowerShell, with no inventory or host
-effects. Browser fixtures cover both languages at390/768/1440, read-back after lost
+PowerShell startup behavior. Windows CI calls a self-contained synthetic contract
+script through the actual system PowerShell, including installation paths with spaces.
+It requires no cross-repository credential. The Kit's own Windows CI exercises its real
+entry point separately; this is not a combined installed-Kit acceptance test.
+Browser fixtures cover both languages at 390/768/1440, read-back after lost
 reply, stale draft refusal and other-login controls. The Kit Windows matrix and actual same/cross-login
 session acceptance are required before claiming the R03/T04/T05 gates complete.

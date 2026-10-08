@@ -834,18 +834,27 @@ mod tests {
     }
     #[cfg(windows)]
     #[tokio::test]
-    async fn windows_installed_facade_contract_uses_actual_system_powershell() {
-        let Some(root) = std::env::var_os("BATC_FLEET_TEST_KIT") else {
-            return;
-        };
+    async fn windows_contract_fixture_uses_actual_system_powershell() {
         let temp = Temp::new();
+        let root = temp.0.join("kit with spaces");
+        std::fs::create_dir_all(root.join("client")).unwrap();
+        std::fs::write(
+            root.join("client/fleet-desktop.ps1"),
+            include_str!("../../tests/fixtures/fleet-contract.ps1"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("client/contract.json"),
+            include_str!("../../tests/fixtures/fleet-contract.json"),
+        )
+        .unwrap();
         std::fs::write(
             temp.0.join("fleet.json"),
-            serde_json::to_vec(&json!({"kit_root":PathBuf::from(root)})).unwrap(),
+            serde_json::to_vec(&json!({"kit_root":root})).unwrap(),
         )
         .unwrap();
         let bridge = FleetBridge::load(&temp.0);
-        // Contract exits before reading inventory, credentials, preferences or live processes.
+        // Synthetic process fixture has no inventory, credentials or mutation implementation.
         let result = bridge.request(FleetRequest::Contract {}).await.unwrap();
         assert_eq!(result["implementation_version"], "desktop-facade-v1");
     }

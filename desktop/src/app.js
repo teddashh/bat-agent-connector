@@ -910,6 +910,7 @@ function viewSettings(main) {
 async function viewNativeSettings(main) {
   const info = h("p", { class: "muted" });
   const endpoint = h("p", { class: "muted" });
+  const fleetRoot = h("div");
   const connect = h("button", { class: "primary", onclick: async () => {
     connect.disabled = true;
     try {
@@ -930,7 +931,7 @@ async function viewNativeSettings(main) {
         await nativeDisconnect(); disconnect(); route();
       } }, t("disconnect"))), info),
     h("div", { class: "panel" }, h("h2", {}, t("desktop_local")),
-      h("p", { class: "note" }, t("desktop_dashboard_only"))));
+      h("p", { class: "note" }, t("desktop_dashboard_only"))), fleetRoot);
   if (state.caps) info.textContent = t("connected_as", { actor: state.caps.actor, scopes: state.caps.scopes.join(", ") });
   try {
     if (!state.caps && state.connectionError) info.replaceChildren(errorBox(state.connectionError));
@@ -940,7 +941,7 @@ async function viewNativeSettings(main) {
     else if (!status.credential_available) info.textContent = t("desktop_credential_missing");
     connect.disabled = !!status.error || !status.credential_available;
   } catch (e) { info.replaceChildren(errorBox(e)); }
-  return mountFleet(main, {h, t});
+  return mountFleet(fleetRoot, {h, t});
 }
 
 // ------------------------------------------------------------------ projects and work items

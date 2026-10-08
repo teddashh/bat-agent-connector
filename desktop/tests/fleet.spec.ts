@@ -4,11 +4,22 @@ const fixture = JSON.parse(readFileSync(new URL("./fixtures/fleet-status.json", 
 
 async function setup(page: any, options: any = {}) {
   await page.addInitScript(({doc, options}: any) => {
-    const env = {doc, calls: [] as any[], lose: false, failReads: false, ...options};
+    const env = {doc, calls: [] as any[], lose: false, failReads: false, statusCalls: 0, availabilityReads: 0, releaseStatus: null as any, ...options};
+    const caps = {actor: "fleet-fixture", scopes: ["observe"], api_version: 1, contract_version: "2026-10-08", features: {}, hosts: [], actions: []};
+    const checkpoint = {cursor: 0, token: "fixture"};
     Object.assign(window, {__fleet: env, isTauri: true, __TAURI_INTERNALS__: {invoke: async (command: string, args: any) => {
-      if (command === "native_status") return {endpoint: null, error: "Fixture: central is offline", credential_available: false};
-      if (command === "connector_connect") throw new Error("Fixture: central is offline");
-      if (command === "fleet_availability") return {configured: true, platform_supported: options.supported !== false};
+      if (command === "native_status") {
+        env.statusCalls++;
+        if (options.delayStatus && env.statusCalls > 1) await new Promise(resolve => {env.releaseStatus = resolve;});
+        return options.connected ? {endpoint: "https://fixture.example", error: null, credential_available: true}
+          : {endpoint: null, error: "Fixture: central is offline", credential_available: false};
+      }
+      if (command === "connector_connect") {if (options.connected) return caps; throw new Error("Fixture: central is offline");}
+      if (command === "connector_request") return {status: 200, data: args.input.path.startsWith("/bootstrap")
+        ? {capabilities: caps, sync: {version: 1, server_id: "fixture", principal_id: "fixture", checkpoint}}
+        : args.input.path.startsWith("/events") ? {events: [], head_cursor: 0, next_cursor: 0, sync: {checkpoint}}
+        : {sessions: [], hosts: [], work_items: [], operations: []}};
+      if (command === "fleet_availability") {env.availabilityReads++; return {configured: true, platform_supported: options.supported !== false};}
       if (command !== "fleet_request") throw new Error("Unexpected command " + command);
       const input = structuredClone(args.input);
       if (input.action === "status") {
@@ -86,4 +97,14 @@ test("Fleet control unavailable on other platforms", async ({page}) => {
   await setup(page, {supported: false});
   await expect(page.getByText("Fleet connection management requires Windows.")).toBeVisible();
   await expect(page.locator("[data-fleet-name]")).toHaveCount(0);
+});
+
+test("delayed settings status cannot mount Fleet into a later route", async ({page}) => {
+  await setup(page, {connected: true, delayStatus: true});
+  await expect.poll(() => page.evaluate(() => typeof (window as any).__fleet.releaseStatus)).toBe("function");
+  await page.getByRole("link", {name: "Sessions", exact: true}).click();
+  await expect(page.getByRole("heading", {name: "Sessions", exact: true})).toBeVisible();
+  await page.evaluate(async () => {(window as any).__fleet.releaseStatus(); await new Promise(resolve => requestAnimationFrame(resolve));});
+  await expect(page.getByRole("region", {name: "Local Fleet connections"})).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).__fleet.availabilityReads)).toBe(0);
 });
