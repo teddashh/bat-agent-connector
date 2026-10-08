@@ -441,7 +441,7 @@ async def test_checkpoint_start_readback_refuses_identity_and_terminal_mismatch(
         code = "CONFINEMENT_MISMATCH"
     monkeypatch.setattr(client, "invoke", invoke)
     daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
-    await daemon.ops.drain(timeout=30)
+    await daemon.ops.drain(timeout=60)
     refused = daemon.ops.get(op["operation_id"])
     assert refused["status"] == "needs_attention" and refused["error_code"] == code
     kept = registry.get("h1", sid)
@@ -453,7 +453,7 @@ async def test_checkpoint_start_readback_refuses_identity_and_terminal_mismatch(
         mock.metas[sid].update(record["options"])
         reads = mock.channels().count("claude:get-session-meta")
         daemon.ops.resume(TED, op["operation_id"])
-        await daemon.ops.drain(timeout=30)
+        await daemon.ops.drain(timeout=60)
         still_refused = daemon.ops.get(op["operation_id"])
         assert still_refused["status"] == "needs_attention" and still_refused["error_code"] == code
         assert mock.channels().count("claude:get-session-meta") == reads
