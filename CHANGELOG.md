@@ -2,6 +2,10 @@
 
 ## Next release (unreleased)
 
+- Delivery merge method ([design](docs/design/delivery.md), plan §09/§16, C05): execution, recorded steps and
+  verification use the admitted preview's method across checks waits and restarts; current policy can block a PUT
+  with MERGE_DISABLED/INVALID_PARAMS, but changing the default never changes the reviewed method.
+
 - Delivery journal DDL ([design](docs/design/delivery.md), plan §09/§28, C04/C07 storage): create the preview,
   metadata-settlement and scope-read tables and preview index on every open with idempotent DDL, preserving
   user_version and saved previews. Version numbers belong to allocated one-time data steps; Part B follows this rule.

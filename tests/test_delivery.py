@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 
 import pytest
 
 from bat_agent_connector import api_auth, delivery, pr_delivery
 from bat_agent_connector.config import parse_config
-from bat_agent_connector.operations import OperationError
+from bat_agent_connector.github import GitHubClient
+from bat_agent_connector.operations import OperationError, OperationService
 from bat_agent_connector.task_daemon import TaskDaemon
 from tests.fakegithub import TOKEN, FakeGitHub
 
@@ -622,6 +624,116 @@ async def test_c05_merge_restart_preserves_actual_sha_without_attribution(make_d
     assert done["result"]["merged_by_this_operation"] is False
     assert all(s["status"] == "succeeded" for s in done["steps"])
     assert gh.count("PUT", "merge-async") == 1
+
+
+def restart_delivery_service(d, **policy):
+    cfg = d.ops.context["github_config"]
+    cfg = replace(cfg, repos={**cfg.repos, "o/r": replace(cfg.repos["o/r"], **policy)})
+    fresh = OperationService(d.journal, actions=delivery.ACTIONS)
+    fresh.context.update(d.ops.context)
+    fresh.context.update(github_config=cfg, github=GitHubClient(cfg))
+    d.ops = fresh
+
+
+async def default_merge_op(d, *, combined=False):
+    cfg = d.ops.context["github_config"]
+    cfg.repos["o/r"] = replace(cfg.repos["o/r"], default_merge_method="merge")
+    doc = (await delivery.pr_preview(d.ops, "o/r", 7))["merge_preview"]
+    envelope = pr_delivery.merge_envelope(doc, recipe="prod" if combined else None)
+    envelope["params"].pop("method")
+    op = d.ops.create(TED, **envelope, idempotency_key="default-method")[0]
+    assert doc["method"] == "merge" and "method" not in op["params"]
+    return doc, op
+
+
+@pytest.mark.parametrize("combined", [False, True])
+async def test_c05_merge_method_pinned_to_preview_across_default_change(make_daemon, gh, combined):
+    d = make_daemon()
+    gh.add_pr(7, HEAD, mergeable_state="blocked")
+    gh.check_runs[HEAD] = [{"status": "in_progress", "conclusion": None}]
+    doc, op = await default_merge_op(d, combined=combined)
+    assert (await settle(d, op["operation_id"], 1))["status"] == "waiting_checks"
+    assert gh.count("PUT", ".") == 0
+    restart_delivery_service(d, default_merge_method="squash")
+    gh.check_runs[HEAD] = [{"status": "completed", "conclusion": "success"}]
+    done = await settle(d, op["operation_id"], 1)
+    if combined:
+        assert done["status"] == "waiting_external"
+        run_id = done["external_refs"]["deploy_run_id"]
+        gh.runs[run_id].update(status="completed", conclusion="success")
+        gh.jobs[run_id][1]["conclusion"] = "success"
+        done = await settle(d, op["operation_id"])
+    assert done["status"] == "succeeded", done
+    result = done["result"]["merge"] if combined else done["result"]
+    assert result["method"] == "merge" and result["verified"] and result["merged_sha"] == MERGED
+    step = d.journal.db.execute("SELECT request FROM operation_steps WHERE operation_id=? AND name='merge.submit'",
+                                (op["operation_id"],)).fetchone()
+    assert json.loads(step["request"])["method"] == "merge"
+    assert [b for m, _, b in gh.requests if m == "PUT"] == [
+        {"sha": HEAD, "merge_method": "merge", "merge_action": "default"}]
+    assert pr_delivery.get_preview(d.journal.db, doc["preview_id"]) == doc
+
+
+@pytest.mark.parametrize("combined", [False, True])
+@pytest.mark.parametrize("policy,code", [({"merge_methods": ("squash",)}, "INVALID_PARAMS"),
+                                      ({"allow_merge": False}, "MERGE_DISABLED")])
+async def test_c05_merge_method_removed_from_policy_stops_before_put(make_daemon, gh, combined, policy, code):
+    d = make_daemon()
+    gh.add_pr(7, HEAD, mergeable_state="blocked")
+    gh.check_runs[HEAD] = [{"status": "in_progress", "conclusion": None}]
+    _, op = await default_merge_op(d, combined=combined)
+    assert (await settle(d, op["operation_id"], 1))["status"] == "waiting_checks"
+    restart_delivery_service(d, default_merge_method="squash", **policy)
+    gh.check_runs[HEAD] = [{"status": "completed", "conclusion": "success"}]
+    done = await settle(d, op["operation_id"])
+    assert done["status"] == "failed" and done["error_code"] == code
+    assert not done["steps"]  # Policy refusal precedes the write intent, so it cannot become uncertain.
+    assert gh.count("PUT", ".") == 0 and gh.count("POST", ".") == 0
+    assert not gh.pulls[7]["merged"]
+
+
+@pytest.mark.parametrize("combined", [False, True])
+async def test_c05_explicit_merge_method_must_match_preview_at_admission(make_daemon, gh, combined):
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    doc = (await delivery.pr_preview(d.ops, "o/r", 7, "merge"))["merge_preview"]
+    envelope = pr_delivery.merge_envelope(doc, recipe="prod" if combined else None)
+    envelope["params"]["method"] = "squash"
+    with pytest.raises(OperationError) as exc:
+        d.ops.create(TED, **envelope, idempotency_key="wrong-method")
+    assert exc.value.code == "PREVIEW_MISMATCH"
+    assert gh.count("PUT", ".") == 0 and gh.count("POST", ".") == 0
+
+
+@pytest.mark.parametrize("policy,code", [({"merge_methods": ("squash",)}, "INVALID_PARAMS"),
+                                      ({"allow_merge": False}, "MERGE_DISABLED")])
+async def test_c05_merge_policy_revoked_before_reconcile_never_resubmits(make_daemon, gh, policy, code):
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    gh.merge_mode = "fail_500"
+    _, op = await default_merge_op(d)
+    assert (await settle(d, op["operation_id"], 1))["status"] == "uncertain"
+    restart_delivery_service(d, default_merge_method="squash", **policy)
+    done = await settle(d, op["operation_id"])
+    assert done["status"] == "needs_attention" and done["error_code"] == code
+    assert gh.count("PUT", "merge-async") == 1 and not gh.pulls[7]["merged"]
+    step = d.journal.db.execute("SELECT request FROM operation_steps WHERE operation_id=? AND name='merge.submit'",
+                                (op["operation_id"],)).fetchone()
+    assert json.loads(step["request"])["method"] == "merge"
+
+
+@pytest.mark.parametrize("policy", [{"merge_methods": ("squash",)}, {"allow_merge": False}])
+async def test_c05_merge_policy_change_after_acceptance_keeps_verifying(make_daemon, gh, policy):
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    gh.merge_mode = "enqueue"
+    _, op = await default_merge_op(d)
+    assert (await settle(d, op["operation_id"], 1))["status"] == "waiting_external"
+    restart_delivery_service(d, default_merge_method="squash", **policy)
+    gh.merge(7)
+    done = await settle(d, op["operation_id"])
+    assert done["status"] == "succeeded" and done["result"]["method"] == "merge"
+    assert done["result"]["verified"] and gh.count("PUT", "merge-async") == 1
 
 
 async def test_c04_native_bottom_lists_upper_rebase_and_refuses(make_daemon, gh):
