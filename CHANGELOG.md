@@ -2,6 +2,13 @@
 
 ## Next release (unreleased)
 
+- Add local Desktop Fleet connection controls through the existing Kit's fixed PowerShell facade.
+  Restricted native IPC keeps configuration and process startup outside the webview, bounds replies and
+  deadlines, and uses only the OS PowerShell's system modules. Revision-bound selection drafts survive
+  uncertain replies; other-login monitors remain read-only. Shared confinement and cleanup views remain
+  available alongside Fleet settings. Installed Windows ownership/lifecycle acceptance and Rust Fleet
+  parity remain pending ([desktop Fleet adapter](docs/design/desktop-fleet.md)).
+
 - Capture one reviewed file from a positively classified manual BAT session as an immutable artifact.
   Idempotent replay and resume/cancel keep the original credential and combined scopes without re-expiring accepted previews.
   HTTP, MCP and CLI use a short-lived credential-bound preview and the existing operation/store quota,
