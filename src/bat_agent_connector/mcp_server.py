@@ -12,6 +12,7 @@ import asyncio
 import base64
 import functools
 import ipaddress
+import json
 import logging
 import os
 import sys
@@ -324,6 +325,15 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             raise WriteRefused("BATC_API_TOKEN is required for the principal-only profile (including reads)")
         return asyncio.to_thread(http_request, path, token=token, **params)
 
+    def principal_daemon(method: str, confirmed: bool, **params):
+        if not confirmed:
+            raise WriteRefused(f"{method} requires confirm=true")
+        token = os.environ.get("BATC_API_TOKEN")
+        if not token:
+            raise WriteRefused("operation writes need this client's own API token: issue one with "
+                               "`batc api-token issue --actor NAME --scope ...` and set BATC_API_TOKEN")
+        return asyncio.to_thread(task_request, method, _auth_token=token, timeout=40.0, entry="mcp", **params)
+
     async def capabilities_get() -> dict[str, Any]:
         """What this caller may do: its actor and scopes, per-host tiers and managed roots, and every operation
         action with whether it is allowed. Read this before submitting operations."""
@@ -596,15 +606,6 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
         # (send, merge, deploy...) is the token's scopes, not the BAT host tiers this MCP server was started with.
         op_write = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True)
 
-        def principal_daemon(method: str, confirm: bool, **params):
-            if not confirm:
-                raise WriteRefused(f"{method} requires confirm=true")
-            token = os.environ.get("BATC_API_TOKEN")
-            if not token:
-                raise WriteRefused("operation writes need this client's own API token: issue one with "
-                                   "`batc api-token issue --actor NAME --scope ...` and set BATC_API_TOKEN")
-            return asyncio.to_thread(task_request, method, _auth_token=token, timeout=40.0, entry="mcp", **params)
-
         async def operation_submit(action: str, idempotency_key: str, target: dict[str, Any],
                                    params: dict[str, Any] | None = None,
                                    preconditions: dict[str, Any] | None = None,
@@ -799,12 +800,24 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             return await service.session_continue(fleet, host, session_id, confirm, text, queue)
 
         async def session_interrupt(
-            host: str, session_id: str, mode: Literal["soft", "hard"] = "soft", confirm: bool = False
+            host: str, session_id: str, mode: Literal["soft", "hard"] = "soft", confirm: bool = False,
+            idempotency_key: str | None = None, control_version: int | None = None,
         ) -> dict[str, Any]:
             """WRITE. Interrupt the running turn. soft = Claude interrupt-turn (like one Esc; keeps
             background tasks); hard = abort-session (like double Esc; Codex always uses this). The
-            session itself is kept. Requires confirm=true."""
-            return await service.session_interrupt(fleet, host, session_id, mode, confirm)
+            session itself is kept. Requires confirm=true and BATC_API_TOKEN; the daemon owns the
+            operation. Reuse an explicit key for retries. Without a key each call is a new operation;
+            after a lost reply read the saved operation ID, never automatically resend."""
+            if not fleet.writes_enabled(host):
+                raise WriteRefused("the local write tier is off for this host")
+            params = {"host": host, "session_id": session_id, "mode": mode, "confirm": confirm,
+                      "idempotency_key": idempotency_key}
+            if control_version is not None:
+                params["control_version"] = control_version
+            out = await principal_daemon("session_interrupt", confirm, **params)
+            if out["operation_status"] in {"failed", "cancelled"}:
+                raise ToolError(json.dumps(out, ensure_ascii=False))
+            return out
 
         async def session_answer(
             host: str,

@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Route legacy MCP/CLI interrupt through the central durable `session.interrupt` action. Preserve
+  fixed session/task bindings, complete results and final-frame checks; lost replies only read back.
+  Optional keys explicitly report whether retries deduplicate; internal no-key sentinels never appear
+  in operation reads. CLI read-only now guards daemon-backed mutations before dispatch as well.
+
 - Join in-flight deployment history reads before event acknowledgment, wait for every sibling read,
   and retain the selected history page through failed refreshes. Open reviewed confirmations keep their
   original generation while the event checkpoint waits for the form to close.

@@ -277,6 +277,8 @@ def guarded(action):
                 raise WriteRefused(f"host {host!r} does not allow raising sessions to allow-all "
                                    '(set default_permission_mode = "allow_all" in its config)')
             tab, _ = await service._resolve_session(fleet.client(host), sid)
+            if values.get("_exact_session_id") and tab["id"] != sid:
+                raise TaskControlRefused("TASK_BINDING_MISMATCH", "the operation's session identity no longer resolves exactly")
             sid = tab["id"]
             await resource_policy.authorize_session(fleet, host, "session." + action, tab)
             task_id = owner_task(fleet, host, sid)

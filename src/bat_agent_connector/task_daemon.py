@@ -44,7 +44,7 @@ from .goose_acp import GooseACP
 from .inventory import Inventory, InventorySettings
 from .jev import Jev
 from .model_router import MinimalReviewGate, MinimalTaskRouter, ModelRouter, RouterConfig
-from .operations import OpContext, OperationError, OperationService
+from .operations import NO_KEY_PREFIX, OpContext, OperationError, OperationService
 from .task_bat import BatTaskAdapter
 from .task_core import TaskCoordinator
 from .task_journal import Journal
@@ -53,7 +53,7 @@ from .task_verifier import ObservedVerifier, load_settings
 
 DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 # /rpc methods that share /api/v1's principals and OperationService (MCP and CLI enter here).
-API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
+API_RPC = {"op_submit": "?", "session_interrupt": "operate", "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
            "work_status": "observe", "work_result": "observe", "work_events": "observe",
            "api_events": "observe", "inventory_sessions": "observe", "inventory_hosts": "observe",
            "inventory_session": "observe", "inventory_worktree": "observe", "resource_history": "observe", "resource_relations": "observe",
@@ -243,6 +243,8 @@ class TaskDaemon:
             raise OperationError("FORBIDDEN", f"{method} needs the {scope!r} scope", 403)
         entry = params.pop("entry", None)
         entry = entry if entry in {"mcp", "cli"} else "rpc"
+        if method == "session_interrupt":
+            return await api_actions.legacy_interrupt(self.ops, principal, params, entry=entry)
         if method in {"work_status", "work_result", "work_events"}:
             return await self.call(method, params, principal=principal)
         if method == "op_submit":
@@ -645,6 +647,9 @@ class TaskDaemon:
         if key is None:
             key = "legacy-request:" + secrets.token_hex(16)
         client_key = key
+        if isinstance(key, str) and key.strip().startswith(NO_KEY_PREFIX):
+            # Check the original legacy key before the 201–256 character compatibility hash.
+            raise LegacyTaskError("INVALID_IDEMPOTENCY_KEY", "idempotency_key uses a reserved prefix", 422)
         if method == "work_submit" and isinstance(key, str) and 200 < len(key) <= 256:
             # Keep the old 256-character contract without changing create()'s 200-character API key limit.
             params["legacy_idempotency_key"] = key

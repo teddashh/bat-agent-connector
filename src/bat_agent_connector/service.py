@@ -17,7 +17,7 @@ from typing import Any
 
 from . import confinement, registry, resource_policy, task_control
 from .client import BatClient, event_session_id
-from .errors import BatError, InvokeError, WriteRefused
+from .errors import BatError, InvokeError, TaskControlRefused, WriteRefused
 from .fleet import Fleet
 from .redact import redact
 from .safety import Audit
@@ -1165,6 +1165,7 @@ async def session_interrupt(
     fleet: Fleet, host: str, session_id: str, mode: str = "soft", confirm: bool = False,
     _task_guard: task_control.FrameGuard | None = None, control_version: int | None = None,
     operation_id: str | None = None,
+    _exact_session_id: bool = False,
 ) -> dict:
     _guard(fleet, host, confirm)
     if mode not in ("soft", "hard"):
@@ -1174,6 +1175,8 @@ async def session_interrupt(
     async with _write_lock(host):
         t, _ = await _resolve_session(c, session_id)
         sid = t["id"]
+        if _exact_session_id and sid != session_id:
+            raise TaskControlRefused("TASK_BINDING_MISMATCH", "the operation's session identity no longer resolves exactly")
         grant = await resource_policy.authorize_session(fleet, host, "session.interrupt", t)
         kind = agent_kind(t.get("agentPreset"))
         audit.check_rate(host, sid + "#interrupt")
