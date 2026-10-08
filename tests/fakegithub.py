@@ -29,6 +29,12 @@ class FakeGitHub:
         self.check_runs: dict[str, list[dict]] = {}
         self.runs: dict[int, dict] = {}
         self.jobs: dict[int, list[dict]] = {}
+        self.attempt_jobs: dict[tuple[int, int], list[dict]] = {}
+        self.pending_deployments: dict[int, list[dict]] = {}
+        self.artifacts: dict[int, dict] = {}
+        self.repository_id = 4242
+        self.workflow_ids = {"deploy.yml": 123}
+        self.deployed_source = "9" * 40
         self.next_run_id = 9000
         # number -> path of a bare repository: the PR head follows that branch, as on GitHub after a push
         self.pr_remotes: dict[int, str] = {}
@@ -112,6 +118,7 @@ class FakeGitHub:
         return seen
 
     def comparison(self, base, head, page):
+        base, head = self.branches.get(base, base), self.branches.get(head, head)
         ba, ha = self.ancestors(base), self.ancestors(head)
         common = ba & ha
         if not common:
@@ -123,11 +130,13 @@ class FakeGitHub:
                 "commits": [self.commits[s] for s in shas[(page-1)*100:page*100]], "files": []}
 
     def add_run(self, *, head_sha: str = "c" * 40, title: str = "deploy", status: str = "in_progress",
-                conclusion: str | None = None, event: str = "workflow_dispatch", job_conclusion: str | None = None):
+                conclusion: str | None = None, event: str = "workflow_dispatch", job_conclusion: str | None = None,
+                branch="main", workflow_id=123, attempt=1, repository_id=4242):
         rid = self.next_run_id
         self.next_run_id += 1
         self.runs[rid] = {"id": rid, "head_sha": head_sha, "display_title": title, "name": "Deploy",
-                          "status": status, "conclusion": conclusion, "event": event, "run_attempt": 1,
+                          "status": status, "conclusion": conclusion, "event": event, "run_attempt": attempt,
+                          "head_branch": branch, "workflow_id": workflow_id, "repository": {"id": repository_id},
                           "html_url": f"https://github.example/o/r/actions/runs/{rid}"}
         self.jobs[rid] = [{"name": "build", "conclusion": "success"},
                           {"name": "deploy", "conclusion": job_conclusion}]
@@ -176,7 +185,7 @@ class FakeGitHub:
                 if self.headers.get("X-GitHub-Api-Version") != "2026-03-10":
                     return self._send(400, {"message": "unsupported API version"})
                 if path == "/repos/o/r" and method == "GET":
-                    return self._send(200, {"id": 4242, "full_name": "o/r"})
+                    return self._send(200, {"id": fake.repository_id, "full_name": "o/r"})
                 if path == "/repos/o/r/pulls" and method == "GET":
                     prs = [p for p in fake.pulls.values() if query.get("state") == "all"
                            or p["state"] == query.get("state", "open")]
@@ -249,8 +258,29 @@ class FakeGitHub:
                 if m and method == "GET":
                     runs = [r for r in fake.runs.values()
                             if (not query.get("head_sha") or r["head_sha"] == query["head_sha"])
+                            and r["workflow_id"] == fake.workflow_ids.get(m.group(1), -1)
+                            and (not query.get("branch") or r["head_branch"] == query["branch"])
                             and (not query.get("event") or r["event"] == query["event"])]
-                    return self._send(200, {"total_count": len(runs), "workflow_runs": runs})
+                    page, size = int(query.get("page", 1)), int(query.get("per_page", 50))
+                    return self._send(200, {"total_count": len(runs), "workflow_runs": runs[(page-1)*size:page*size]})
+                m = re.fullmatch(r"/repos/o/r/actions/workflows/([^/]+)", path)
+                if m and method == "GET":
+                    return self._send(200, {"id": fake.workflow_ids.get(m.group(1), 123), "path": m.group(1)})
+                m = re.fullmatch(r"/repos/o/r/actions/runs/(\d+)/attempts/(\d+)/jobs", path)
+                if m and method == "GET":
+                    rid, attempt = int(m.group(1)), int(m.group(2))
+                    jobs = fake.attempt_jobs.get((rid, attempt), fake.jobs.get(rid, []) if attempt == 1 else [])
+                    jobs = [{"id": i + 1, "status": "completed" if j.get("conclusion") else "in_progress", **j}
+                            for i, j in enumerate(jobs)]
+                    page = int(query.get("page", 1))
+                    return self._send(200, {"jobs": jobs[(page-1)*100:page*100]})
+                m = re.fullmatch(r"/repos/o/r/actions/runs/(\d+)/pending_deployments", path)
+                if m and method == "GET":
+                    return self._send(200, fake.pending_deployments.get(int(m.group(1)), []))
+                m = re.fullmatch(r"/repos/o/r/actions/artifacts/(\d+)", path)
+                if m and method == "GET":
+                    artifact = fake.artifacts.get(int(m.group(1)))
+                    return self._send(200, artifact) if artifact else self._send(404, {"message": "Not Found"})
                 m = re.fullmatch(r"/repos/o/r/actions/runs/(\d+)", path)
                 if m and method == "GET":
                     run = fake.runs.get(int(m.group(1)))
@@ -294,7 +324,8 @@ class FakeGitHub:
             def _dispatch(self, body: dict) -> None:
                 inputs = body.get("inputs") or {}
                 title = "deploy " + str(inputs.get("operation_id", ""))
-                run = fake.add_run(head_sha="d" * 40, title=title)
+                fake.deployed_source = inputs.get("source_sha", fake.deployed_source)
+                run = fake.add_run(head_sha="d" * 40, title=title, branch=body["ref"])
                 if fake.dispatch_mode == "fail_500_but_started":
                     fake.dispatch_mode = "run_id"
                     return self._send(502, {"message": "Bad Gateway"})
