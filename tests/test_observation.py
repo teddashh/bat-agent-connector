@@ -1996,8 +1996,64 @@ async def test_b03_rpc_admin_identity_is_not_claimed_human(served, monkeypatch):
     paused = next(e for e in events if e["kind"] == "task.paused")
     assert paused["actor"] == "local-admin" and paused["context"]["actor"] == "local-admin"
     assert paused["context"]["entry_point"] == "rpc"
-    assert paused["context"]["actor_evidence"]["source"] == "rpc_admin_token"
+    assert paused["context"]["actor_evidence"]["source"] == "operations.actor"
+    assert paused["context"]["operation_id"] == paused["context"]["actor_evidence"]["operation_id"]
     assert all(e["context"]["actor"] != "ted" for e in events)
+
+
+async def test_b03_scheduled_task_effects_keep_each_operation_principal(tmp_path):
+    from bat_agent_connector.observation import event_context, writer_context
+    from bat_agent_connector.operations import ActionDef, OperationService
+    from tests.operation_helpers import settle_operations
+
+    journal = Journal(tmp_path / "principals.db")
+    started = set()
+    both_started = asyncio.Event()
+    contexts = {}
+
+    async def submit(ctx):
+        started.add(ctx.actor)
+        if len(started) == 2:
+            both_started.set()
+        await asyncio.wait_for(both_started.wait(), 2)
+        contexts[ctx.actor] = dict(writer_context.get())
+        return ctx.effect("submit", lambda: task(journal, ctx.operation_id))
+
+    ops = OperationService(journal, actions=[ActionDef("fixture.submit", "start", "Fixture", submit)])
+    admitted = [(actor, entry, ops.create(api_auth.Principal(actor, frozenset({"start"})),
+                    action="fixture.submit", idempotency_key=actor, entry=entry)[0])
+                for actor, entry in [("fixture-one", "http"), ("fixture-two", "mcp")]]
+    ambient = {"actor": "local-admin", "actor_basis": "authenticated_principal", "entry_point": "rpc",
+               "operation_id": "unrelated-operation", "scopes": ["start"], "admin": True}
+    try:
+        with event_context(**ambient):
+            # Observation context is not authority: an observe-only caller still cannot admit a write.
+            with pytest.raises(OperationError) as denied:
+                ops.create(api_auth.Principal("fixture-viewer", frozenset({"observe"})),
+                           action="fixture.submit", idempotency_key="forbidden")
+            assert denied.value.code == "FORBIDDEN"
+            await settle_operations(ops)
+            assert writer_context.get() == ambient
+        assert writer_context.get() is None
+        assert len(ops.list()["operations"]) == 2
+        for actor, entry, admitted_op in admitted:
+            op = ops.get(admitted_op["operation_id"])
+            assert op["status"] == "succeeded" and op["actor"] == actor
+            assert contexts[actor]["actor"] == actor and contexts[actor]["entry_point"] == entry
+            assert contexts[actor]["operation_id"] == op["operation_id"]
+            assert "scopes" not in contexts[actor] and "admin" not in contexts[actor]
+            task_events = journal.api_events(resource_type="task", resource_id=op["result"]["task_id"])["events"]
+            operation_events = journal.api_events(resource_type="operation", resource_id=op["operation_id"])["events"]
+            assert task_events and operation_events
+            assert all(event["actor"] == actor and event["context"]["actor"] == actor
+                       for event in task_events + operation_events)
+            assert all(event["context"]["operation_id"] == op["operation_id"]
+                       for event in task_events + operation_events)
+            assert all(event["context"]["operation_entry_point"] == entry
+                       for event in task_events + operation_events)
+    finally:
+        await ops.drain()
+        journal.close()
 
 
 def test_b03_backfilled_occurrence_time_filters_are_not_migration_time(tmp_path):
