@@ -47,6 +47,10 @@ Capabilities 增加 identity={server_id,principal_id} 與 features.dashboard_syn
 未帶 checkpoint 的 events 回應維持原形狀，但 cursor 超前／失去 retention 仍明確 reset。
 完整中央 store 不得用 filtered feed 的 cursor 代替完整 feed。Hidden history.backfilled seq 仍由
 next_cursor 跨過，不會停在 migration fact；沒有查詢另一份 event log。
+帶 checkpoint 的 JSON／SSE 請求不可同時帶 kind、resource_type、resource_id、related_resource_type
+或 related_resource_id 篩選；回 422 INVALID_REQUEST，驗證先於事件交易／metadata 查詢及 SSE headers。
+即使篩選結果為空、全部符合，或 token 來自前一頁，也不簽發可跳過其他事件的新 checkpoint。
+未帶 checkpoint 的既有篩選介面與 numeric cursor 保持原合約；該 cursor 不能與完整 feed 的 token 混用。
 
 `GET /api/v1/events/stream` 接相同 after／checkpoint，原 numeric id／event／data frames 不變。
 每批事件後送無 id 的 `event: sync.checkpoint`，data 為 sync；client 處理完前面的 batch 才保存。
@@ -99,6 +103,7 @@ Client reset 必須清掉該區觀測 cache、重新 bootstrap，保留該身份
 | T11 | test_t11_sync_checkpoint_is_bound_to_journal_and_effective_principal；test_t11_bootstrap_auth_identity_and_checkpoint_before_snapshot_reads |
 | B02 | test_b02_restored_journal_detects_regression_and_divergent_reused_sequence；test_b02_retention_keeps_head_and_explicitly_resets_expired_cursor |
 | B02 | test_b02_pages_refresh_checkpoint_and_hidden_events_advance_without_shape_change；test_b02_http_cursor_ahead_and_expired_are_explicit_resets；test_b02_sse_delivers_page_checkpoint_then_explicit_reset |
+| B02 | test_b02_filtered_checkpoint_refused_before_any_journal_read；test_b02_filtered_page_cannot_mint_or_reuse_a_complete_feed_checkpoint；test_b02_http_and_sse_reject_filtered_checkpoint_before_replay：bootstrap／前頁 token、所有 filter 欄位、空與非空 filtered page 均不跨過未處理事件 |
 
 ## 尚未涵蓋
 
