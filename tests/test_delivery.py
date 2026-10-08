@@ -1226,6 +1226,10 @@ async def test_verify_stops_updated_pr_pagination_at_admission(make_daemon, gh):
     for n in range(350, 450):
         gh.add_pr(n, HEAD, state="closed", updated_at=datetime.now(timezone.utc).isoformat())
     _, op = await preview_op(d)
+    # Pin these updates after admission; preview reads may take us past their creation second.
+    updated_at = datetime.fromtimestamp(op["created_at"] + 1, timezone.utc).isoformat()
+    for n in range(350, 450):
+        gh.pulls[n]["updated_at"] = updated_at
     done = await settle(d, op["operation_id"])
     assert done["status"] == "succeeded"
     paths = [p for m, p, _ in gh.requests if m == "GET" and "/pulls?" in p and "state=all" in p]
