@@ -314,7 +314,7 @@ class ApiV1:
                      "contract_version": CONTRACT_VERSION, "connector": __version__, "hosts": hosts,
                      "actions": actions, "operation_statuses": list(STATES),
                      "features": {"inventory": True, "session_history": True, "resource_relations": True, "discovery_scope": True,
-                                  "worktree_history": {"known_bindings_only": True}, "history": {"source": "journal", "legacy_transitions": "may_be_incomplete", "optional_adapters": [],
+                                  "worktree_history": {"known_bindings_only": True}, "history": {"source": "journal", "legacy_transitions": "may_be_incomplete", "optional_adapters": ["delivery_part_a"],
                                       "observed_event_kinds": [r[0] for r in self.daemon.journal.db.execute("SELECT DISTINCT kind FROM api_events ORDER BY kind")]}, "events_stream": True, "operations": True, "work_items": True,
                                   "github": self.daemon.ops.context.get("github") is not None,
                                   "deploy": bool(gh_cfg.recipes),

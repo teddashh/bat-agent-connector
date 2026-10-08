@@ -17,6 +17,7 @@ from .resource_ids import registry_worktree_intent, worktree_id
 
 MIGRATION_VERSION = 2  # One-time history backfill; data step allocated by the orchestrator.
 RESOURCE_TYPES = {"session", "worktree", "execution"}
+DELIVERY_ACTIONS = {"github.pr.update", "github.pr.merge", "delivery.merge_and_deploy"}
 PRIVATE_FIELDS = {"text", "words", "original_words", "instructions", "excerpt", "prompt", "payload",
                   "token", "authorization", "note", "error", "lines", "messages", "interpretation",
                   "acceptance", "original_request", "requirements", "goal", "reason_text"}
@@ -39,6 +40,9 @@ server_version capabilities enrichment_failures workspace_document workspace_ids
 archive claude_transcripts session_meta safe_state journal workspace:load resource_id resource_type
 runtime end_scope git_author author version verification_commit base_commit verification_tree before after
 count n attempt status_reason source_versions result_versions files conflict seq pin commits source_key
+number method head_sha merged_sha merged_onto_base_sha merge_base_sha reviewed_head base_moved other_commits_count
+other_commits affected_prs merged independent merged_after merge_receipt metadata_settlement verification_pending
+verification_error read_refused_before_write blocking code state settled_at parents stacks members metadata_reconciliation
 """.split())
 
 writer_context = ContextVar("observation_writer_context", default=None)
@@ -67,13 +71,19 @@ def body(value):
     return out if isinstance(out, dict) else {}
 
 
-def summary(value):
+def summary(value, *, pr=False):
     if isinstance(value, dict):
-        return {k: summary(v) for k, v in value.items() if k in SUMMARY_FIELDS and k not in PRIVATE_FIELDS
+        return {k: summary(v, pr=pr) for k, v in value.items() if k in SUMMARY_FIELDS and k not in PRIVATE_FIELDS
+                and not (pr and k == "title")
                 and not (k in {"request", "response", "body"} and not isinstance(v, dict))}
     if isinstance(value, list):
-        return [summary(v) for v in value]
+        return [summary(v, pr=pr) for v in value]
     return redact(value) if isinstance(value, str) else value
+
+
+def operation_summary(db, operation_id, value):
+    row = db.execute("SELECT action FROM operations WHERE operation_id=?", (operation_id,)).fetchone()
+    return summary(value, pr=bool(row and row[0] in DELIVERY_ACTIONS))
 
 
 def iso(value):
@@ -348,13 +358,15 @@ def record_event(journal, seq, *, legacy=False, extra=None):
                     ctx[target].append({"kind": "git", "sha": task[field], "role": field})
         if b.get("to") in {"done", "failed"}:
             close_relations(journal, task_id, seq, legacy=legacy)
-    op_id = rid if kind == "operation" else b.get("operation_id") or (rid if kind == "integration" else None)
+    snapshot = body(b.get("saved_snapshot"))
+    op_id = rid if kind == "operation" else b.get("operation_id") or snapshot.get("operation_id") or (rid if kind == "integration" else None)
     if not op_id and kind == "checkpoint":
         cp_op = db.execute("SELECT operation_id FROM checkpoints WHERE checkpoint_id=?", (rid,)).fetchone()
         op_id = cp_op[0] if cp_op else None
     op = db.execute("SELECT * FROM operations WHERE operation_id=?", (op_id,)).fetchone() if op_id else None
     if op:
-        target, ext = body(op["target"]), {} if legacy else body(op["external_refs"])
+        target = body(op["target"])
+        ext = body(b.get("refs")) if legacy and e["kind"] == "resource.bound" else {} if legacy else body(op["external_refs"])
         ctx.update(operation_id=op_id, operation_entry_point=op["entry"], observer="operation-service", host=ctx["host"] or target.get("host") or ext.get("host"))
         if e["kind"] == "operation.accepted":
             ctx["entry_point"] = op["entry"]
@@ -381,27 +393,31 @@ def record_event(journal, seq, *, legacy=False, extra=None):
         if target.get("operation_id"):
             refs.extend(_refs(db, "operation", target["operation_id"]))
         ctx["action"] = op["action"]
-        ctx["source_versions"] += [{"kind": "git", "sha": value, "role": name} for name, value in body(op["preconditions"]).items() if name in {"expected_head", "expected_commit"} and value]
+        ctx["source_versions"] += [{"kind": "git", "sha": value, "role": name} for name, value in body(op["preconditions"]).items() if name in {"expected_head", "expected_commit", "expected_head_sha", "expected_base_sha"} and value]
         host = ctx["host"]
-        response = b.get("response") or {}
+        response = body(b.get("response")) or body(snapshot.get("response"))
         if e["kind"] == "operation.succeeded" and not legacy:
             response = {**body(op["result"]), **response}
-        request = b.get("request") or {}
-        for field in ("head", "sha", "commit", "commit_sha", "base_sha", "source_sha", "delivered_sha", "integrated_sha", "resolution_sha"):
-            if isinstance(response.get(field), str) and len(response[field]) == 40:
-                ctx["result_versions"].append({"kind": "git", "sha": response[field], "role": field})
+        request = body(b.get("request")) or body(snapshot.get("request"))
+        for result in (response, body(response.get("merge")), body(body(b.get("refs")).get("merge_receipt"))):
+            for field in ("head", "sha", "commit", "commit_sha", "base_sha", "source_sha", "delivered_sha", "integrated_sha", "resolution_sha", "merged_sha", "merged_onto_base_sha"):
+                if isinstance(result.get(field), str) and len(result[field]) == 40:
+                    ctx["result_versions"].append({"kind": "git", "sha": result[field], "role": field})
         sid = b.get("session_id") or response.get("session_id") or request.get("session_id") or ext.get("session_id")
         path = ext.get("worktree_path") or ext.get("worktree") or response.get("worktree_path")
         if host and sid:
             refs.append(("session", f"{host}/{sid}"))
+        if ext.get("worktree_id") and db.execute("SELECT 1 FROM observation_resources WHERE resource_type='worktree' AND resource_id=?", (ext["worktree_id"],)).fetchone():
+            refs.append(("worktree", ext["worktree_id"]))
         if host and path and op["action"] in {"checkpoint.continue", "integration.handoff"}:
             wid = worktree(db, host, op["action"], op_id, "repair" if op["action"] == "integration.handoff" else "worktree",
                            path=path, branch=ext.get("branch"), clone=ext.get("clone_path"), session_id=sid)
             refs.append(("worktree", wid))
-        if e["kind"] == "resource.bound":
-            for old in db.execute("SELECT seq FROM api_events WHERE resource_type='operation' AND resource_id=? AND seq<?", (op_id, seq)):
-                for typ, res in refs:
-                    index(db, old[0], typ, res, seq, f"api_events:{seq}")
+    if kind == "pr_merge_preview":
+        ctx["observer"] = "delivery-service"
+        for field in ("head_sha", "base_sha"):
+            if body(b.get("target")).get(field):
+                ctx["source_versions"].append({"kind": "git", "sha": b["target"][field], "role": field})
     if kind == "checkpoint":
         cp = db.execute("SELECT * FROM checkpoints WHERE checkpoint_id=?", (rid,)).fetchone()
         if cp:
@@ -452,6 +468,18 @@ def record_event(journal, seq, *, legacy=False, extra=None):
             wid = body(row[0]).get("worktree_id") if row else None
             if wid:
                 refs.append(("worktree", wid))
+    if op:
+        if e["kind"] == "resource.bound":
+            for old in db.execute("SELECT seq FROM api_events WHERE resource_type='operation' AND resource_id=? AND seq<?", (op_id, seq)):
+                for typ, res in refs:
+                    index(db, old[0], typ, res, seq, f"api_events:{seq}")
+        preview_id = body(op["params"]).get("preview_id")
+        if preview_id and op["action"] in DELIVERY_ACTIONS:
+            for old in db.execute("""SELECT seq FROM api_events WHERE seq<? AND
+                ((resource_type='pr_merge_preview' AND resource_id=?) OR
+                 (kind='history.backfilled' AND resource_id=?))""", (seq, preview_id, f"pr_merge_previews:{preview_id}")):
+                for typ, res in refs:
+                    index(db, old[0], typ, res, seq, f"api_events:{seq}")
     for typ, res in set(refs):
         if typ == "session":
             h, _, sid = res.partition("/")
@@ -559,6 +587,20 @@ def backfill(journal):
                             path=ext["worktree_path"], branch=ext.get("branch"), session_id=sid)
                         refs.append(("worktree", wid))
             saved_fact(journal, table, key, summary(data), refs)
+    # Delivery's bounded snapshots are facts too; they do not imply a local session or worktree.
+    for row in db.execute("SELECT * FROM pr_merge_previews").fetchall():
+        if db.execute("SELECT 1 FROM api_events WHERE resource_type='pr_merge_preview' AND resource_id=?", (row["preview_id"],)).fetchone():
+            continue
+        data = {**summary(body(row["document"]), pr=True), "preview_id": row["preview_id"], "created_at": row["created_at"]}
+        refs = []
+        for op in db.execute("SELECT operation_id FROM operations WHERE action IN ('github.pr.merge','delivery.merge_and_deploy') AND json_extract(params,'$.preview_id')=?", (row["preview_id"],)):
+            refs.extend(_refs(db, "operation", op[0]))
+        saved_fact(journal, "pr_merge_previews", row["preview_id"], data, refs)
+    for row in db.execute("SELECT * FROM pr_metadata_settlements").fetchall():
+        if db.execute("SELECT 1 FROM api_events WHERE resource_type='operation' AND resource_id=? AND kind='delivery.metadata_settled'", (row["operation_id"],)).fetchone():
+            continue
+        data = {**summary(body(row["document"]), pr=True), "operation_id": row["operation_id"]}
+        saved_fact(journal, "pr_metadata_settlements", row["operation_id"], data, _refs(db, "operation", row["operation_id"]))
 
 
 def saved_fact(journal, table, key, data, refs):
@@ -566,9 +608,15 @@ def saved_fact(journal, table, key, data, refs):
     old = journal.db.execute("SELECT seq FROM observation_backfill WHERE source_key=?", (source_key,)).fetchone()
     if old:
         return old[0]
+    safe_data = operation_summary(journal.db, data.get("operation_id"), data)
+    context = {"backfilled": True, "resources": refs,
+        "occurred_at": iso(data.get("finished_at") or data.get("settled_at") or data.get("updated_at") or data.get("captured_at") or data.get("created_at") or data.get("last_seen_at") or data.get("first_seen_at")), "evidence": [{"table": table, "id": key}]}
+    if table in {"pr_merge_previews", "pr_metadata_settlements"}:
+        context["observer"] = "delivery-service"
+        context["source_versions"] = [{"kind": "git", "sha": value, "role": field}
+            for field, value in body(safe_data.get("target")).items() if field in {"head_sha", "base_sha"} and value]
     seq = journal.api_event("history", source_key, "history.backfilled", {"source_table": table, "source_key": key,
-        "saved_snapshot": summary(data)}, context={"backfilled": True, "resources": refs,
-        "occurred_at": iso(data.get("finished_at") or data.get("updated_at") or data.get("captured_at") or data.get("created_at") or data.get("last_seen_at") or data.get("first_seen_at")), "evidence": [{"table": table, "id": key}]})
+        "saved_snapshot": safe_data}, context=context)
     journal.db.execute("INSERT INTO observation_backfill VALUES(?,?)", (source_key, seq))
     return seq
 
@@ -577,7 +625,7 @@ def event_out(db, row, *, safe=False):
     e = dict(row)
     ctx = db.execute("SELECT context FROM api_event_context WHERE seq=?", (e["seq"],)).fetchone()
     return {"seq": e["seq"], "event_id": e["seq"], "resource_type": e["resource_type"], "resource_id": e["resource_id"],
-            "kind": e["kind"], "body": summary(body(e["body"])) if safe else body(e["body"]),
+            "kind": e["kind"], "body": operation_summary(db, e["resource_id"], body(e["body"])) if safe and e["resource_type"] == "operation" else summary(body(e["body"])) if safe else body(e["body"]),
             "actor": e["actor"], "created_at": e["created_at"], "context": body(ctx[0]) if ctx else {}}
 
 

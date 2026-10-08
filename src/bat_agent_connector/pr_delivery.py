@@ -201,6 +201,9 @@ def save_preview(ops, document: dict) -> dict:
             ops.db.execute("INSERT INTO pr_merge_previews VALUES (?,?,?,?,?,?,?)",
                            (doc["preview_id"], doc["repository"], doc["target"]["number"], json.dumps(doc),
                             doc["digest"], doc["created_at"], doc["expires_at"]))
+            from .observation import summary
+            ops.journal.api_event("pr_merge_preview", doc["preview_id"], "delivery.merge_previewed", summary(doc, pr=True),
+                                  context={"observer": "delivery-service", "evidence": [{"table": "pr_merge_previews", "id": doc["preview_id"]}]})
         ops.db.execute("INSERT OR REPLACE INTO pr_merge_scope_reads VALUES (?,?,?,?,?)",
                        (doc["repository"], doc["target"]["number"], doc["method"], doc["preview_id"], now))
     return doc
@@ -417,14 +420,23 @@ def metadata_settlement(ops, operation_id: str) -> dict | None:
     return json.loads(row["document"]) if row else None
 
 
+def settlement_event(ops, operation_id: str, receipt: dict) -> None:
+    from .observation import summary
+    ops.journal.api_event("operation", operation_id, "delivery.metadata_settled", summary(receipt, pr=True),
+                          context={"observer": "delivery-service", "entry_point": "daemon",
+                                   "evidence": [{"table": "pr_metadata_settlements", "id": operation_id}]})
+
+
 def settle_not_applied(ops, operation_id: str, started_at: float, observed: dict) -> dict | None:
     if time.time() - started_at < METADATA_SETTLE_S:
         return None
     receipt = {"status": "not_applied", "code": "PR_METADATA_NOT_APPLIED", "observed": observed,
                "settled_at": time.time()}
     with ops.journal.tx():
-        ops.db.execute("INSERT OR IGNORE INTO pr_metadata_settlements VALUES (?,?)",
-                       (operation_id, json.dumps(receipt)))
+        inserted = ops.db.execute("INSERT OR IGNORE INTO pr_metadata_settlements VALUES (?,?)",
+                                 (operation_id, json.dumps(receipt)))
+        if inserted.rowcount:
+            settlement_event(ops, operation_id, receipt)
     return metadata_settlement(ops, operation_id)
 
 
@@ -593,5 +605,7 @@ async def reconcile_metadata(ops):
                            "settled_at": time.time()}
                 # Record refs first so a restart cannot skip them once the settlement excludes this row.
                 with ops.journal.tx():
-                    ops.db.execute("INSERT OR IGNORE INTO pr_metadata_settlements VALUES (?,?)",
-                                   (row["operation_id"], json.dumps(receipt)))
+                    inserted = ops.db.execute("INSERT OR IGNORE INTO pr_metadata_settlements VALUES (?,?)",
+                                              (row["operation_id"], json.dumps(receipt)))
+                    if inserted.rowcount:
+                        settlement_event(ops, row["operation_id"], receipt)
