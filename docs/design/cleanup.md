@@ -60,6 +60,15 @@ Integration apply 先由 `params.preview_id` 找原 preview；handoff 先由 `ta
 三種 operation target 取得同一批 source／area／pins／repair／session；work-item links 的 integration
 operation 也用同一規則。只使用本次 snapshot 已載入的 operation rows，不逐 item 另查 journal。
 
+Work-item 等歷史 target 可包含已從 config 移除的 host。其 sessions_observed／links／tombstones 不消失；
+snapshot（含 only=item）只觀測目前 configured hosts，其他選中資源仍列出，observation 標
+host_configured=false，read-only／retain，沿用 OBSERVATION_UNAVAILABLE，不以 missing host 當 absent。
+同 preview 的 configured-host items 正常規劃；明確 host target 仍要求 configured host，否則 UNKNOWN_HOST。
+Audit：_terminal_observations／_runtime 在 inventory Fleet.client 前查目前設定；_host_call 在 runner lookup 前
+拒絕 unconfigured host；_phase_consumers／_execute_item／stop callback／retained read 使用同一 _host_config。
+Snapshot roots 用該輪 HostConfig，後續 adapter 仍再查 host 是否存在，config 移除不拋 ConfigError。
+guard／mark／release 只讀寫 flock 下 registry，不開 Fleet client；host 移除不解除 reservation／tombstone。
+
 範圍外的 active execution／command／有效 integration preview／resumable apply 也檢查依賴。
 History link 不是實體需求；未完成工作若有 command／operation 真正需要內容，列 content-required
 consumer。所有 consumer 從 authoritative tasks、commands、operations、previews 算出，不另存 consumers 表。
@@ -122,7 +131,7 @@ command／receipt ID 與 evidence；不能只回第一個。Choices 只排除表
 | MANUAL_READ_ONLY／UNKNOWN_READ_ONLY | 人工／無可信 creation evidence | 永遠不能 |
 | WORKDIR_NOT_MANAGED | legacy shared clone／人工主 checkout | 不能；shared_clone_worktrees 不豁免 cleanup |
 | BINDING_MISMATCH／CLONE_NOT_OURS／CLONE_CONFIG_TAMPERED | host／cwd／common dir／generation／markers／config／links 不符 | 不能 |
-| OBSERVATION_UNAVAILABLE | BAT／SSH／host 讀不到、超時、無可靠 dirty／runtime 資料 | 不能；讀取失敗不是 clean／absent |
+| OBSERVATION_UNAVAILABLE | host 已不在 config，或 BAT／SSH 讀不到、超時、無可靠 dirty／runtime 資料 | 不能；讀取失敗／host 移除不是 clean／absent |
 | ACTIVE_WRITER／SESSION_WAITING | streaming／writer、pending question／permission、queued turn | 不能；先用原控制路徑處理，再 preview |
 | COMMAND_UNRESOLVED | start／stop／send／prepare／push 未完成或 uncertain，即使 parent cancelled／failed | 不能；先由原 owner reconcile |
 | ACTIVE_EXECUTION／CONTENT_REQUIRED | 範圍內外 task／operation／有效 integration preview／resumable apply 真正需要內容 | 不能；paused 不是完成，history link 不算需求 |
@@ -316,6 +325,7 @@ Partial evidence 列 removed／changed（before/after facts）／added／remaini
 | PREVIEW_TOO_LARGE | 413，改較小scope，不截斷執行 |
 | RESOURCE_CLEANED／CLEANUP_IN_PROGRESS | 409／policy refusal，原generation已清理／reserved |
 | 共用ownership／destination／TIER_DISABLED／NO_MANAGED_ROOT／GIT_RUNNER_UNAVAILABLE | 沿用原code，保留不越界 |
+| OBSERVATION_UNAVAILABLE | retained reason；歷史 host 不在 config 時 preview 仍成功，無 live call；直接 adapter／mutation call 回 409，未決 phase 仍保留 guard |
 | DISCARD_MANIFEST_UNAVAILABLE／RETAINED_REF_MISMATCH／RETAINED_CONTENT_MISSING | 409，無完整discard／保留證據，停止移除 |
 | WORKTREE_REMOVE_REFUSED／REF_CHANGED | 409，非force Git拒絕／CAS不符，保留回執重preview |
 | STOP_UNPROVEN／EXTERNAL_EFFECT_UNPROVEN／UNCERTAIN_UNRESOLVED | uncertain／needs_attention，讀回不重送 |
@@ -460,6 +470,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | legacy confirmation／read-only audit；E01 | test_e01_legacy_mutations_require_confirmation_before_writes（planner／relay／merge／remove／failover／permissions／approve／verification）、test_e01_legacy_cleanup_disabled_apply_never_writes_with_auto_cleanup、test_e01_legacy_cleanup_evaluation_never_rehydrates_worktrees（confirm=false／true 都不寫） |
 | boundedread／serialization／deadline | test_e01_previews_serialize_per_host_and_share_read_deadline |
 | multi-host apply 每 item 只讀自己的 host；E01/E02 | test_e01_multi_host_apply_observes_only_each_items_host（另一 host terminal read 永不回覆；healthy session／worktree／branch 均成功，unavailable 資源保留；只有初始 preview／全 plan 驗證付該 host deadline） |
+| removed host 的歷史仍可 preview／read，無 live call；E01/E02 | test_e01_removed_host_history_is_retained_without_live_calls（work-item initial／only snapshot、configured items apply 正常；SSH／terminal／runtime／guard audit；實際 retained rows 在 host 移除後列 unavailable） |
 | attachmentreplicas只豁免exact manifest／exacttemps | test_e01_attachment_replicas_are_removed_without_discard_scope、test_e01_edited_or_extra_replica_content_counts_as_uncommitted、test_e01_replicas_without_manifest_are_ordinary_content、test_e01_replica_anomalies_require_reviewed_discard（missing/link/hardlink/directory）、test_e01_replica_edit_after_preview_is_stale、test_e01_lost_replies_reconcile_each_cleanup_phase（discard.replica）、test_e01_exact_temporary_requires_creation_markers_and_never_sweeps、test_e01_empty_integration_temporary_has_exact_intent_and_no_restore_promise |
 | acceptedauthority由server記錄／public request retry／載體不被guard退休 | test_e01_accepted_authorization_is_server_recorded（HTTP 422、persisted actor/scopes/choices、同key retry）、test_e01_accepted_authority_survives_key_rotation_and_carrier_stays_usable |
 | migration原histories／DDL不占user_version／keep無sweep | test_cleanup_migration_is_atomic_additive_and_preserves_history（version 1與3、第二次open不變）、test_e01_keep_defaults_reject_purge_and_never_sweep_by_name |

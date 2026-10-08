@@ -46,6 +46,10 @@
   rechecking their original manifest and every retained commit, or reports CLEANUP_PARTIAL_STATE with removed,
   changed and remaining content. Refusals before a mutating call remain definitive; partial states never count
   as success or release their reservation.
+  Cleanup previews keep historical resources on removed hosts visible and read-only with
+  OBSERVATION_UNAVAILABLE. Initial and per-item observations skip unconfigured hosts; BAT, SSH, apply and retained
+  reads check configuration before client/runner lookup. Configured-host items still plan normally, and registry
+  reservations and tombstones survive host removal.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps

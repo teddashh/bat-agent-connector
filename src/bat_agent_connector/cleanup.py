@@ -56,7 +56,7 @@ REASONS = {
     "BINDING_MISMATCH": "The resource does not match its creation binding.",
     "CLONE_NOT_OURS": "The repository has no matching connector creation markers.",
     "CLONE_CONFIG_TAMPERED": "Repository config or object storage is unsafe.",
-    "OBSERVATION_UNAVAILABLE": "Live observation was unavailable within the host deadline.",
+    "OBSERVATION_UNAVAILABLE": "Live observation was unavailable: the host is unconfigured or its read deadline expired.",
     "ACTIVE_WRITER": "A session is streaming or writing.",
     "SESSION_WAITING": "A session has a pending question, permission or queued turn.",
     "COMMAND_UNRESOLVED": "A command or external step has an unresolved outcome.",
@@ -538,7 +538,15 @@ def _selection(ops, target, items, pvs, links, op_rows):
     return selected, wi_ids
 
 
+def _host_config(ops, host):
+    hc = ops.context["fleet"].config.hosts.get(host)
+    if hc is None:
+        raise OperationError("OBSERVATION_UNAVAILABLE", "host is no longer configured; resource stays read-only", 409)
+    return hc
+
+
 async def _host_call(ops, host, req, timeout=READ_DEADLINE_S, *, locked_check=None):
+    _host_config(ops, host)
     runner = ops.context.get("git_runner")
     if not runner or not runner.available(host):
         raise OperationError("GIT_RUNNER_UNAVAILABLE", "no SSH runner for host", 409)
@@ -570,7 +578,10 @@ def _inside(path, cwd):
 
 
 async def _terminal_observations(ops, host, deadline):
-    client = ops.context["inventory"].fleet.client(host)
+    fleet = ops.context["inventory"].fleet
+    if host not in ops.context["fleet"].config.hosts or host not in fleet.config.hosts:
+        return [{"session_id": None, "error": "OBSERVATION_UNAVAILABLE"}]
+    client = fleet.client(host)
     async def bounded(awaitable):
         return await asyncio.wait_for(awaitable, max(.001, deadline - time.monotonic()))
     try:
@@ -601,6 +612,8 @@ async def _runtime(ops, item, deadline, *, terminal=None):
     if terminal and terminal.get("error"):
         return {"error": terminal["error"]}
     fleet = ops.context["inventory"].fleet  # read-only BAT fleet
+    if item["host"] not in ops.context["fleet"].config.hosts or item["host"] not in fleet.config.hosts:
+        return {"error": "OBSERVATION_UNAVAILABLE"}
     client = fleet.client(item["host"])
     async def read():
         meta = {"cwd": terminal["cwd"], "isStreaming": terminal["streaming"]} if terminal else await service._meta(client, item["session_id"])
@@ -803,16 +816,25 @@ def _replica_evidence(ops, item):
 async def snapshot(ops, target, choices, *, only=None, own_op=None):
     items, op_rows, pvs, worktrees, containers, links = _all(ops)
     selected, wi_ids = _selection(ops, target, items, pvs, links, op_rows)
+    configured = ops.context["fleet"].config.hosts
+    for item in items.values():
+        if item["host"] and item["host"] not in configured:
+            item["observation"] = {"error": "OBSERVATION_UNAVAILABLE", "host_configured": False}
     if only:
         item = items.get(only) or next((w for w in worktrees.values() if w.get("branch_id") == only), None)
-        hosts = [item["host"]] if item else []
+        hosts = [item["host"]] if item and item["host"] in configured else []
     else:
-        hosts = sorted({items[r]["host"] for r in selected if items[r]["host"]})
+        hosts = sorted({items[r]["host"] for r in selected if items[r]["host"] in configured})
     if len(selected) > MAX_ITEMS:
         raise OperationError("PREVIEW_TOO_LARGE", "preview exceeds 500 resources", 413)
     for host in hosts:
         deadline = time.monotonic() + READ_DEADLINE_S
         host_items = [i for i in items.values() if i["host"] == host]
+        hc = configured.get(host)
+        if hc is None:
+            for item in host_items:
+                item["observation"] = {"error": "OBSERVATION_UNAVAILABLE", "host_configured": False}
+            continue
         lock = _HOST_LOCKS.setdefault(host, asyncio.Lock())
         acquired = False
         try:
@@ -845,7 +867,7 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
                 for i in related:
                     if i["kind"] == "worktree" and i.get("flavor") == "checkpoint" and i.get("proven"):
                         i["replica_evidence"] = _replica_evidence(ops, i)
-                req = {"repository": repo, "roots": list(ops.context["fleet"].config.host(host).managed_roots),
+                req = {"repository": repo, "roots": list(hc.managed_roots),
                        "paths_only": bool(only),
                        "worktrees": [i["path"] for i in related if i["kind"] == "worktree" and
                            (not only or i["resource_id"] == only or i.get("branch_id") == only or
@@ -922,7 +944,7 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
             if sessions:
                 try:
                     paths = await asyncio.wait_for(_host_call(ops, host, {"canonical_paths": sorted({i["path"] for i in sessions}),
-                        "roots": list(ops.context["fleet"].config.host(host).managed_roots)}, max(.01, deadline - time.monotonic())),
+                        "roots": list(hc.managed_roots)}, max(.01, deadline - time.monotonic())),
                         max(.001, deadline - time.monotonic()))
                 except (BatError, OperationError, OSError, asyncio.TimeoutError, AmbiguousOutcome, ValueError):
                     paths = {}
@@ -1124,6 +1146,7 @@ def _progress(ctx):
 
 async def _phase_consumers(ctx, item):
     ops = ctx.service
+    _host_config(ops, item["host"])
     probe = {**item, "reasons": [], "consumers": []}
     _consumers(ops, probe, [ops._decode(r) for r in ops.db.execute("SELECT * FROM operations")],
                {r["preview_id"]: dict(r) for r in ops.db.execute("SELECT * FROM integration_previews")}, ctx.operation_id)
@@ -1320,6 +1343,7 @@ def _partial_attention(ctx, item, evidence):
 async def _execute_item(ctx, item, payload):
     """Validate once per item; named phases reconcile their own exact effects after a restart."""
     ops, rid = ctx.service, item["resource_id"]
+    hc = _host_config(ops, item["host"])
     begun = ops.db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? AND name LIKE ?",
                            (ctx.operation_id, "item." + rid + ".%" )).fetchone()
     if not begun:
@@ -1343,9 +1367,10 @@ async def _execute_item(ctx, item, payload):
                 if now != item["observation"]:
                     raise OperationError("PREVIEW_STALE", "session changed before stop", 409)
                 path = await _host_call(ops, item["host"], {"canonical_paths": [item["path"]],
-                    "roots": list(ops.context["fleet"].config.host(item["host"]).managed_roots)})
+                    "roots": list(_host_config(ops, item["host"]).managed_roots)})
                 if path.get(item["path"]) != item.get("path_observation") or path[item["path"]].get("error"):
                     raise OperationError("PREVIEW_STALE", "session workdir changed before stop", 409)
+                _host_config(ops, item["host"])
                 result = await lifecycle._stop(ops.context["fleet"], item["host"], item["session_id"],
                                               Audit(ops.context["fleet"].config.safety), cleanup=True)
                 if not result.get("stopped"):
@@ -1353,7 +1378,7 @@ async def _execute_item(ctx, item, payload):
                 if isinstance(result.get("result"), dict) and result["result"].get("ok") is False:
                     raise AmbiguousOutcome("stop acknowledgment did not confirm termination")
             await _host_call(ops, item["host"], {"phase": "lock.session", "repository": item.get("repository") or item["path"],
-                "roots": list(ops.context["fleet"].config.host(item["host"]).managed_roots)}, locked_check=checked_stop)
+                "roots": list(hc.managed_roots)}, locked_check=checked_stop)
             return result
 
         async def reconcile_stop(_):
@@ -1367,7 +1392,6 @@ async def _execute_item(ctx, item, payload):
                        "before": item["observation"]}, reconcile=reconcile_stop)
         _finalize(ctx, item, {"stopped": True, "runtime_restored": False})
         return
-    hc = ops.context["fleet"].config.host(item["host"])
     resource_policy.check_cleanup_worktree(hc, item["repository"], item["path"] if item["kind"] == "worktree" else None,
                                             item.get("branch") or "batc/temporary")
     if item["kind"] == "worktree":
@@ -1589,7 +1613,7 @@ async def retained(ops, *, host=None, resource_id=None, query=None, limit=50, cu
     for (h, repo), rs in groups.items():
         try:
             read = await _host_call(ops, h, {"phase": "verify.retained", "repository": repo,
-                "roots": list(ops.context["fleet"].config.host(h).managed_roots), "retained": rs})
+                "roots": list(_host_config(ops, h).managed_roots), "retained": rs})
             for row in read:
                 row["runtime_restored"] = False
                 if not row["available"]:
