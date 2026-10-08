@@ -385,6 +385,7 @@ async def session_start(
                 raise
             audit.record(**base, channel="claude:start-session", phase="result", ok=True)
         except BaseException as e:
+            retain_on_error = retain_on_error or start_confirmed
             registry.update(host, sid, status="failed" if unsent_refusal else
                             "uncertain" if retain_on_error else "failed", error_code=getattr(e, "code", None),
                             **({"start_sent": False} if unsent_refusal else {}),
