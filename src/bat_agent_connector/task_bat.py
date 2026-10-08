@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import lifecycle, orchestrate, registry, resource_policy, service
+from . import confinement, lifecycle, orchestrate, registry, resource_policy, service
 from .errors import TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .fleet import Fleet
 from .redact import redact_secrets
@@ -40,6 +40,8 @@ class BatTaskAdapter:
         self.verifier = verifier or ObservedVerifier(VerificationSettings())
         self.register_tabs = self.verifier.settings.register_tabs
         self.journal = journal
+        if journal is not None:
+            self.fleet.confinement_journal = journal
         self._agents_cache: dict[str, tuple[float, frozenset[str]]] = {}
 
     async def available_agents(self, task: dict) -> frozenset[str]:
@@ -199,6 +201,7 @@ class BatTaskAdapter:
                 or await client.invoke("git:getRoot", {"cwd": entry["cwd"]}, retry_on_disconnect=False)
                 != entry["cwd"]):
             return None
+        confinement.ensure_confirmed(entry.get("confinement") or {}, meta, allow_unknown=True)
         read = await service.session_read(self.fleet, task["host"], sid, last_n=1)
         identity = await self.verifier.identity(task, entry["cwd"])
         # Reuse only the exact verified state: HEAD must still be the previous task's verified commit.
@@ -221,8 +224,15 @@ class BatTaskAdapter:
                 continue
         return None
 
+    @registry.start_call
     async def start(self, task: dict, *, role: str, agent: str, session_id: str) -> str:
         host = task["host"]
+        entry = registry.get(host, session_id) or {}
+        if task.get("_warm_session_id") == session_id:
+            confinement.guard_start_record(entry)
+        else:
+            confinement.guard_new_start(entry)
+            registry.claim_unsent(host, session_id)
         if role == "lead":
             if task.get("_warm_session_id") == session_id:
                 previous = next((item for item in self.journal.warm_candidates(task)
@@ -252,7 +262,9 @@ class BatTaskAdapter:
                         external_branch=external["branch"] if external else None,
                         task_id=task["task_id"])
                     break
-                except Exception as exc:  # noqa: BLE001 - same reserved start is idempotent
+                except Exception as exc:  # noqa: BLE001 - retained sent starts are fenced by guard_new_start
+                    if getattr(exc, "sent", None) is False:
+                        raise
                     last_error = exc
                     if attempt == 2:
                         raise
@@ -283,52 +295,97 @@ class BatTaskAdapter:
                  "worktree_path": lead.get("worktree_path"), "branch": lead.get("branch"),
                  "lead_session_id": task["session_id"], "task_id": task["task_id"],
                  "title": "review " + task["task_id"][:8], "role": "reviewer"}
-        registry.reserve(host, entry, hc.orchestrate_max_sessions)
         opts = {"cwd": lead["cwd"], "agentPreset": preset,
                 "workspaceId": lead["workspace_id"], "workspaceName": lead["workspace_name"]}
         if agent == "codex":
             opts.update(codexSandboxMode="read-only", codexApprovalPolicy="never")
         else:
             opts.update(permissionMode="plan", model=CLAUDE_BAT_MODEL)
+        account = await confinement.start_account(self.fleet, host)
+        record = confinement.snapshot(agent, opts, account=account, task=True)
+        entry.update(confinement=record, start_sent=False, **orchestrate.registry_permission_fields(opts))
+        registry.reserve(host, entry, hc.orchestrate_max_sessions)
+        confinement.record_task_start(self.journal, task["task_id"], sid, entry)
         client = self.fleet.client(host)
-        started = None
-        last_error = None
-        for attempt in range(3):
+        with confinement.StartFrame(host, sid, journal=self.journal, task_id=task["task_id"]) as start_frame:
             try:
                 started = await client.invoke(
                     "claude:start-session", {"sessionId": sid, "options": opts}, retry_on_disconnect=False,
-                    grant=grant)
-                if isinstance(started, dict) and started.get("ok") is not False and started.get("sessionId") == sid:
-                    break
-                raise WriteRefused("BAT reviewer start did not confirm the reserved session ID")
-            except Exception as exc:  # noqa: BLE001 - poll identity before retrying
-                last_error = exc
-                try:
-                    meta = await client.invoke("claude:get-session-meta", {"sessionId": sid},
-                                               retry_on_disconnect=False)
-                    if isinstance(meta, dict) and meta.get("cwd") == lead["cwd"]:
-                        started = {"ok": True, "sessionId": sid}
+                    grant=grant, before_frame=lambda: confinement.guard_start_frame(self.fleet, host, record),
+                    on_transport=start_frame.on_transport)
+                if (not isinstance(started, dict) or started.get("ok") is False
+                        or started.get("sessionId") != sid):
+                    raise WriteRefused("BAT reviewer start did not confirm the reserved session ID")
+            except Exception as exc:  # noqa: BLE001 - a sent start permits only read-back, never another frame
+                if not start_frame.sent:
+                    registry.fail_reservation(host, sid)
+                    registry.update(host, sid, start_sent=False)
+                    raise
+                for attempt in range(3):
+                    try:
+                        meta = await client.invoke("claude:get-session-meta", {"sessionId": sid},
+                                                   retry_on_disconnect=False)
+                    except Exception:  # noqa: BLE001 - retry only the read of the reserved ID
+                        meta = None
+                    if isinstance(meta, dict):
                         break
-                except Exception:  # noqa: S110 - readback is best-effort; retry below
-                    pass
-                if attempt < 2:
-                    await asyncio.sleep(0.25 * (2 ** attempt))
-        if not started or started.get("sessionId") != sid:
-            registry.update(host, sid, status="uncertain")
-            raise last_error or WriteRefused("BAT reviewer start did not settle")
-        registry.update(host, sid, status="active", cwd=lead["cwd"])
-        if self.register_tabs and hc.orchestrate_register_tabs:
-            try:
-                tab = await self.fleet.client(host).append_workspace_terminal(hc.profile_id, {
-                    "id": sid, "workspaceId": lead["workspace_id"], "title": entry["title"],
-                    "type": "terminal", "cwd": lead["cwd"], "agentPreset": preset,
-                }, grant=resource_policy.authorize_register_tab(host, sid))
-                registry.update(host, sid, tab_registered=bool(tab.get("appended")))
-            except Exception:  # noqa: BLE001 - registration is visibility only
-                registry.update(host, sid, tab_registered=False)
-        return sid
+                    if attempt < 2:
+                        await asyncio.sleep(0.25 * (2 ** attempt))
+                else:
+                    registry.update(host, sid, status="uncertain", error_code="CONFINEMENT_START_UNSETTLED")
+                    raise confinement.ConfinementRefused(
+                        "CONFINEMENT_START_UNSETTLED", "BAT reviewer start did not settle; use read-back recovery",
+                        sent=True) from exc
+            else:
+                try:
+                    meta = await client.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
+                except Exception:  # noqa: BLE001 - evidence reads must not fail an acknowledged reviewer start
+                    meta = None
+            confinement.guard_start_record(registry.get(host, sid) or {})
+            if isinstance(meta, dict):
+                try:
+                    confinement.guard_start_cwd(entry, meta)
+                    confinement.ensure_confirmed(record, meta, allow_unknown=True)
+                except confinement.ConfinementRefused as refusal:
+                    registry.update(host, sid, status="uncertain", error_code=refusal.code,
+                                    **({"confinement": confinement.confirm(record, meta)}
+                                       if refusal.code == "CONFINEMENT_MISMATCH" else {}))
+                    if refusal.code == "CONFINEMENT_MISMATCH":
+                        confinement.record_task_start(self.journal, task["task_id"], sid, registry.get(host, sid) or {})
+                    raise
+            registry.update(host, sid, status="active", cwd=lead["cwd"], confinement=confinement.confirm(record, meta))
+            if self.register_tabs and hc.orchestrate_register_tabs:
+                try:
+                    tab = await self.fleet.client(host).append_workspace_terminal(hc.profile_id, {
+                        "id": sid, "workspaceId": lead["workspace_id"], "title": entry["title"],
+                        "type": "terminal", "cwd": lead["cwd"], "agentPreset": preset,
+                        "permissionMode": opts.get("permissionMode"),
+                        "agentParams": orchestrate.registry_permission_fields(opts)["agent_params"],
+                    }, grant=resource_policy.authorize_register_tab(host, sid))
+                    registry.update(host, sid, tab_registered=bool(tab.get("appended")))
+                except Exception:  # noqa: BLE001 - registration is visibility only
+                    registry.update(host, sid, tab_registered=False)
+            return sid
 
     async def recover_start(self, task: dict, *, role: str, session_id: str) -> bool:
+        intent = next((c for c in self.journal.commands(task["task_id"])
+                       if c["kind"] == "start_" + role and c["session_id"] == session_id), None) if self.journal else None
+        try:
+            confinement.guard_start_record(registry.get(task["host"], session_id) or {})
+            if intent:
+                confinement.guard_start_record({"confinement": json.loads(intent["payload"]).get("confinement")})
+        except (confinement.ConfinementRefused, TypeError, ValueError):
+            return False
+        entry = registry.get(task["host"], session_id)
+        if ((entry or {}).get("start_sent") is False
+                or entry is None and intent and json.loads(intent["payload"]).get("start_sent") is False):
+            if not intent:
+                return False
+            try:
+                await self.start(task, role=role, agent=json.loads(intent["payload"])["agent"], session_id=session_id)
+            except Exception:  # noqa: BLE001 - only durable unsent evidence permits this same-ID attempt
+                return False
+            return True
         if role == "lead" and task.get("base_branch"):
             try:
                 await self._ensure_external_worktree(task)
@@ -341,8 +398,6 @@ class BatTaskAdapter:
             return False
         if not self.journal:
             return False
-        intent = next((c for c in self.journal.commands(task["task_id"])
-                       if c["kind"] == "start_" + role and c["session_id"] == session_id), None)
         if not intent:
             return False
         try:
@@ -405,6 +460,7 @@ class BatTaskAdapter:
         if not workspace:
             raise ValueError("task workspace no longer exists on BAT host")
         existing = registry.get(task["host"], session_id)
+        confinement.guard_start_record(existing or {})
         if existing and (existing.get("task_id") not in {None, task["task_id"]}
                          or existing.get("role") not in {None, role}):
             raise ValueError("local session entry belongs to another task or role")
@@ -454,9 +510,14 @@ class BatTaskAdapter:
                     raise ValueError("lead worktree is not registered on BAT host")
                 expected_cwd = worktree["worktreePath"]
                 branch_name = worktree["branchName"]
-        if (meta["cwd"] != expected_cwd or
-                await client.invoke("git:getRoot", {"cwd": expected_cwd}, retry_on_disconnect=False)
-                != expected_cwd):
+        try:
+            confinement.guard_start_cwd({"cwd": (existing or {}).get("cwd") or expected_cwd}, meta)
+            confinement.guard_start_cwd({"cwd": expected_cwd}, meta)
+        except confinement.ConfinementRefused as refusal:
+            if existing and refusal.code in confinement.START_IDENTITY_MISMATCH_CODES:
+                registry.update(task["host"], session_id, error_code=refusal.code)
+            raise
+        if await client.invoke("git:getRoot", {"cwd": expected_cwd}, retry_on_disconnect=False) != expected_cwd:
             raise ValueError("BAT session folder does not match the journal-owned workspace")
         preset = orchestrate.PRESETS[(agent, role == "lead" and not task.get("external_worktree_path"))]
         if existing and any(existing.get(key) not in {None, expected}
@@ -466,13 +527,38 @@ class BatTaskAdapter:
                                 ("cwd", expected_cwd), ("worktree_path", expected_cwd),
                                 ("branch", branch_name), ("agent_preset", preset))):
             raise ValueError("local session entry conflicts with BAT and task identity")
+        intent = next((c for c in self.journal.commands(task["task_id"])
+                       if c["kind"] == "start_" + role and c["session_id"] == session_id), None)
+        evidence = json.loads(intent["payload"]) if intent else {}
+        record = (existing or {}).get("confinement") or evidence.get("confinement")
+        if record:
+            confinement.guard_start_record({"confinement": record})
+            try:
+                confinement.ensure_confirmed(record, meta, allow_unknown=True)
+            except confinement.ConfinementRefused as refusal:
+                if record.get("verification", {}).get("status") == "pending":
+                    record = confinement.confirm(record, meta)
+                    confinement.record_task_start(self.journal, task["task_id"], session_id, {"confinement": record})
+                if existing:
+                    registry.update(task["host"], session_id, status="uncertain", error_code=refusal.code,
+                                    confinement=record)
+                raise
+            if record.get("verification", {}).get("status") == "pending":
+                record = confinement.confirm(record, meta)
+                if existing:
+                    registry.update(task["host"], session_id, confinement=record)
         registry.ensure_existing(task["host"], {
             "session_id": session_id, "workspace_id": workspace.get("id"),
             "workspace_name": workspace.get("name"), "agent_preset": preset,
             "origin_cwd": workspace.get("folderPath"), "cwd": expected_cwd,
             "worktree_path": expected_cwd, "branch": branch_name,
-            "role": role, "task_id": task["task_id"], "lead_session_id": lead_id,
+            "role": role, "task_id": task["task_id"], "lead_session_id": lead_id, "error_code": None,
             "title": ("review " if role == "reviewer" else "task ") + task["task_id"][:8],
+            **({} if existing else {"confinement": record or {
+                **confinement.session_fields(task["host"], session_id)["confinement"],
+                "options": {k: meta[k] for k in confinement.OPTION_KEYS if meta.get(k)},
+                "evidence": {"source": "task_journal_and_bat_meta"}},
+                **{k: evidence[k] for k in ("write_scope", "permission_mode_claude", "agent_params") if k in evidence}}),
         })
 
     async def send(self, task: dict, session_id: str, text: str, message_id: str) -> dict:
@@ -738,6 +824,7 @@ class BatTaskAdapter:
                 return (False if any(e.get("failover_of") == task["session_id"] and
                                      e.get("status") in {"active", "starting", "uncertain"}
                                      for e in registry.list_entries(task["host"])) else None)
+            confinement.guard_start_record(entry)
             path, branch = old["worktree_path"], old["branch"]
             if (handoff["task_id"] != task["task_id"] or handoff["kind"] != "send"
                     or handoff["session_id"] != successor_id or handoff["message_id"] != handoff_message_id
@@ -764,19 +851,30 @@ class BatTaskAdapter:
             old_status = await reader("worktree:status", {"sessionId": task["session_id"]})
             new_status = await reader("worktree:status", {"sessionId": successor_id})
             root = await reader("git:getRoot", {"cwd": path})
-        except (KeyError, StopIteration, TypeError, ValueError, json.JSONDecodeError):
+        except (confinement.ConfinementRefused, KeyError, StopIteration, TypeError, ValueError, json.JSONDecodeError):
             return False
         except Exception:  # noqa: BLE001 - missing/unreachable BAT identity remains uncertain
             return None
         if (not isinstance(meta, dict) or not isinstance(old_status, dict)
                 or not isinstance(new_status, dict) or root is None):
             return None
-        return (meta.get("cwd") == path and root == path
+        return (confinement.verify(entry.get("confinement") or {}, meta)["status"] != "mismatch"
+                and meta.get("cwd") == path and root == path
                 and all(st.get("worktreePath") == path and st.get("branchName") == branch
                         for st in (old_status, new_status)))
 
     async def recover_failover(self, task: dict, *, successor_id: str,
                                handoff_message_id: str, handoff_command_id: str) -> dict | None:
+        entry = registry.get(task["host"], successor_id) or {}
+        if (entry.get("start_sent") is False and entry.get("handoff_status") == "pending"
+                and "handoff_frame_sha256" in entry and entry["handoff_frame_sha256"] is None):
+            try:
+                # Reuse the reserved IDs and all original handoff guards. No frame
+                # was handed to BAT; this is not a resend of an unsettled start.
+                await self.failover(task, task["session_id"], successor_id,
+                                    handoff_message_id=handoff_message_id, handoff_command_id=handoff_command_id)
+            except Exception:  # noqa: BLE001 - unavailable or refused starts keep the journal unsettled
+                return None
         identity = await self._verified_failover_successor(task, successor_id, handoff_message_id,
                                                            handoff_command_id)
         if identity is False:

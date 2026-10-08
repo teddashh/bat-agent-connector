@@ -19,6 +19,7 @@ from bat_agent_connector import (
     delivery,
     integration,
     pr_delivery,
+    registry,
     resource_policy,
 )
 from bat_agent_connector.config import ConfigError, parse_config
@@ -934,7 +935,7 @@ async def test_c03_handoff_resolution_resumes_without_recomposing_or_receiving_t
     starts = [i for i in w.mock.invokes if i["channel"] == "claude:start-session"]
     assert len(starts) == 1 and starts[0]["params"]["options"]["cwd"] == r["worktree_path"]
     assert re.search(r"/\.batc-integration/[^/]+/wt/batc-fix-[0-9a-f]{12}$", r["worktree_path"])
-    assert starts[0]["params"]["options"]["permissionMode"] == "acceptEdits"  # confined like checkpoint work
+    assert starts[0]["params"]["options"]["permissionMode"] == "default"  # confined like checkpoint work
     prompt = next(i for i in w.mock.invokes if i["channel"] == "claude:send-message")["params"]["prompt"]
     assert "a.txt" in prompt and "Do not push" in prompt and "Keep both lines" in prompt
     hc = w.d.fleet.config.host("h1")
@@ -959,6 +960,99 @@ async def test_c03_handoff_resolution_resumes_without_recomposing_or_receiving_t
     assert [b["code"] for b in again["blocking"]] == ["NOTHING_TO_INTEGRATE"] and w.reflog() == reflog
     kinds = [e["kind"] for e in w.d.journal.api_events(0, 500, resource_type="integration")["events"]]
     assert kinds.count("integration.conflict") == 1 and kinds.count("integration.resolved") == 1
+
+
+@pytest.mark.parametrize("observed", ["different", "missing", "permissions"])
+async def test_handoff_start_readback_refuses_identity_and_terminal_mismatch(world, monkeypatch, observed):
+    """A10/C03: repair uses the same reserved-start checks as checkpoint continuation."""
+    from bat_agent_connector.errors import InvokeTimeout
+
+    w = world
+    _, conflict, _, _ = await conflicted(w)
+    w.mock.invokes.clear()
+    client = w.d.fleet.client("h1")
+    invoke = client.invoke
+
+    async def lost_ack(channel, params=None, **kwargs):
+        result = await invoke(channel, params, **kwargs)
+        if channel == "claude:start-session":
+            raise InvokeTimeout("fixture lost repair start acknowledgement")
+        return result
+
+    monkeypatch.setattr(client, "invoke", lost_ack)
+    op, _ = w.d.ops.create(TED, action="integration.handoff", target={"operation_id": conflict["operation_id"]},
+                          params={}, idempotency_key="repair-readback")
+    await w.d.ops.drain(timeout=60)
+    op = w.d.ops.get(op["operation_id"])
+    assert op["status"] == "uncertain"
+    sid = next(i["params"]["sessionId"] for i in w.mock.invokes if i["channel"] == "claude:start-session")
+    row = registry.get("h1", sid)
+    if observed == "missing":
+        del w.mock.metas[sid]["cwd"]
+        code = "CONFINEMENT_START_UNSETTLED"
+    elif observed == "different":
+        w.mock.metas[sid]["cwd"] = "/srv/another-checkout"
+        code = "START_SESSION_MISMATCH"
+    else:
+        w.mock.metas[sid]["permissionMode"] = "bypassPermissions"
+        code = "CONFINEMENT_MISMATCH"
+    monkeypatch.setattr(client, "invoke", invoke)
+    refused = await w.settle(op["operation_id"])
+    assert refused["status"] == "needs_attention" and refused["error_code"] == code
+    assert registry.get("h1", sid)["status"] == row["status"] != "active"
+    assert w.mock.channels().count("claude:start-session") == 1
+    assert "claude:send-message" not in w.mock.channels()
+    if observed != "missing":
+        record = registry.get("h1", sid)["confinement"]
+        w.mock.metas[sid]["cwd"] = row["cwd"]
+        w.mock.metas[sid].update(record["options"])
+        reads = w.mock.channels().count("claude:get-session-meta")
+        w.d.ops.resume(TED, op["operation_id"])
+        still_refused = await w.settle(op["operation_id"])
+        assert still_refused["status"] == "needs_attention" and still_refused["error_code"] == code
+        assert w.mock.channels().count("claude:get-session-meta") == reads
+        assert registry.get("h1", sid)["confinement"] == record
+        assert "claude:send-message" not in w.mock.channels()
+
+
+@pytest.mark.parametrize("failure", ["timeout", "disconnect"])
+async def test_handoff_accepted_send_survives_evidence_read_failure(world, monkeypatch, failure):
+    """A10/C03: repair handoff succeeds after its accepted prompt even if evidence is unreadable."""
+    from bat_agent_connector.errors import ConnectionLost, InvokeTimeout
+
+    w = world
+    _, conflict, _, _ = await conflicted(w)
+    w.mock.invokes.clear()
+    client = w.d.fleet.client("h1")
+    invoke = client.invoke
+    accepted = False
+    evidence_failures = []
+
+    async def fail_after_send(channel, params=None, **kwargs):
+        nonlocal accepted
+        if accepted and channel == "claude:get-session-meta":
+            evidence_failures.append(params["sessionId"])
+            raise InvokeTimeout("fixture evidence timeout") if failure == "timeout" else ConnectionLost("fixture disconnect")
+        result = await invoke(channel, params, **kwargs)
+        if channel == "claude:send-message":
+            assert result["accepted"]
+            accepted = True
+        return result
+
+    monkeypatch.setattr(client, "invoke", fail_after_send)
+    target = {"operation_id": conflict["operation_id"]}
+    op = await w.run("integration.handoff", target, key="accepted-repair-evidence")
+    assert op["status"] == "succeeded", op
+    result = op["result"]
+    assert result["session_id"] in evidence_failures
+    assert result["current_verification"]["status"] == "unknown"
+    assert result["current_verification"]["reason"] == "readback_failed"
+    assert result["confinement"] == registry.get("h1", result["session_id"])["confinement"]
+    assert result["confinement"]["verification"]["status"] == "options_confirmed"
+    assert next(s for s in op["steps"] if s["name"] == "send")["status"] == "succeeded"
+    again = await w.run("integration.handoff", target, key="accepted-repair-evidence")
+    assert again == op
+    assert w.mock.channels().count("claude:start-session") == 1 and w.mock.channels().count("claude:send-message") == 1
 
 
 async def test_c03_resume_waits_while_the_resolver_streams(world):
@@ -1190,3 +1284,79 @@ async def test_only_hosts_that_can_integrate_are_offered(world):
     card = await w.d.call_api("github_pr_preview", {"repository": "o/r", "pull_number": 1}, TED)
     caps = await w.d.call_api("api_capabilities", {}, TED)
     assert card["pull_request"]["integration"]["hosts"] == [] and caps["features"]["integration"][0]["hosts"] == []
+
+
+@pytest.mark.parametrize('stage', ['before', 'after'])
+async def test_repair_preframe_cancellation_restarts_unsent_reserved_session_once(world, monkeypatch, stage):
+    """A10/C03: repair restart uses unsent proof; after-frame cancellation is read back, never restarted."""
+    import asyncio
+    from dataclasses import replace
+
+    from bat_agent_connector import orchestrate
+    from tests.test_confinement import ACCOUNT, AccountRunner
+    from tests.test_confinement_recovery import PauseAtFrame
+
+    w = world
+    _, conflict, _, _ = await conflicted(w)
+    fleet = w.d.fleet
+    fleet.config.hosts['h1'] = replace(fleet.config.host('h1'), confinement=ACCOUNT)
+    pause = PauseAtFrame()
+    fleet.confinement_runner = pause if stage == 'before' else AccountRunner()
+    ready = pause.entered if stage == 'before' else asyncio.Event()
+    invoke = fleet.client('h1').invoke
+    propagated = []
+    start_session = orchestrate.session_start
+
+    async def trace_start(*args, **kwargs):
+        try:
+            return await start_session(*args, **kwargs)
+        except asyncio.CancelledError as exc:
+            propagated.append(exc)
+            raise
+
+    monkeypatch.setattr(orchestrate, 'session_start', trace_start)
+
+    async def after_frame(channel, params=None, **kwargs):
+        result = await invoke(channel, params, **kwargs)
+        if channel == 'claude:start-session':
+            ready.set()
+            await asyncio.Event().wait()
+        return result
+
+    if stage == 'after':
+        monkeypatch.setattr(fleet.client('h1'), 'invoke', after_frame)
+    starts_before = w.mock.channels().count('claude:start-session')
+    sends_before = w.mock.channels().count('claude:send-message')
+    op, _ = w.d.ops.create(TED, action='integration.handoff', target={'operation_id': conflict['operation_id']},
+                           params={}, idempotency_key='preframe-repair-cancel')
+    await w.d.ops.run_due()
+    pending = w.d.ops._active[op['operation_id']]
+    try:
+        await asyncio.wait_for(ready.wait(), 60)
+        row = registry.list_entries('h1')[-1]
+        sid, worktree = row['session_id'], row['cwd']
+        pending.cancel('fixture repair cancellation')
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert len(propagated) == 1 and propagated[0].args == ('fixture repair cancellation',)
+        if stage == 'before':
+            assert propagated[0] is pause.cancelled
+        row = registry.get('h1', sid)
+        assert row['start_sent'] is (stage == 'after')
+        assert row['status'] == ('failed' if stage == 'before' else 'uncertain')
+        assert w.mock.channels().count('claude:start-session') - starts_before == (stage == 'after')
+        assert 'worktree:remove' not in w.mock.channels()
+        pause.release.set()
+        monkeypatch.setattr(fleet.client('h1'), 'invoke', invoke)
+        await w.d.ops.drain(timeout=60)
+        result = w.d.ops.get(op['operation_id'])
+        assert result['status'] == 'succeeded', result
+        assert result['result']['session_id'] == sid
+        assert registry.get('h1', sid)['cwd'] == worktree
+        assert w.mock.channels().count('claude:start-session') - starts_before == 1
+        assert w.mock.channels().count('claude:send-message') - sends_before == 1
+    finally:
+        if not pending.done():
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending

@@ -2,6 +2,10 @@
 
 ## Next release (unreleased)
 
+- Cleanup reservations now arbitrate with process-held start claims under the shared registry flock. A live
+  start refuses cleanup with START_IN_PROGRESS; a reserved or cleaned resource refuses new starts and recovery.
+  Cleanup writes and retirement enforce unique host/session identities, and releasing a reservation keeps the
+  same session ID on other hosts reserved.
 - Cleanup and observation now share registry worktree creation identities across failover, reuse and reviewer
   carriers regardless of registry order. Session reads preserve cleanup tombstones across all transports,
   including historical sessions on removed hosts.
@@ -87,6 +91,70 @@
   retained carriers and registry refusals/I/O failures without degrading a completed reclaim. Starting/uncertain
   sessions and carriers remain retained with COMMAND_UNRESOLVED. Confirmed planner stops stay reported as stopped
   even when capacity retirement fails; crash/resume replays the same retirement without rewriting it.
+- Preserve observation history/discovery alongside confinement evidence. Removed-host historical sessions
+  remain readable with unknown current account verification; live detail reads report option drift without
+  rewriting creation evidence. Additive host-check DDL preserves observation, delivery and future data versions.
+
+- Verify an unsent start's worktree is absent after a rollback success reply before clearing its durable path
+  ([design](docs/design/confinement.md), A10). BAT can acknowledge a no-op removal after losing its in-memory
+  mapping. A remaining carrier, unavailable read-back or cancellation now retains identity; repeated same-ID
+  recovery refuses to create a replacement until the original carrier can be reconciled.
+
+- Reject Python import-path overrides before account-check interpreters run ([design](docs/design/confinement.md),
+  A10). The shared shell gate now refuses executable/shared-library `._pth` files and build markers, including
+  libpython symlink targets and standard multiarch directories. These can redirect startup imports despite
+  `-I -S`; even root-owned overrides are outside the supported system-package layout. Earlier closure caches
+  expire. Custom Python builds/loader paths and hostile same-UID processes remain outside the trust claim.
+
+- Keep unsent same-ID starts retryable after a confirmed worktree rollback ([design](docs/design/confinement.md),
+  計畫 §06/§12/§28, A10; v2 A06). Clear the removed carrier's path/branch, restore the origin cwd and retain its
+  rollback audit, so retry creates a new worktree. Failed, cancelled or unconfirmed removal keeps the original
+  identity across repeated recovery attempts; only a matching read-back permits reuse. Task lead recovery uses
+  the same rule without changing its normal retain policy or task transitions. Sent starts remain fenced.
+  A10 still awaits W12 live acceptance.
+
+- Prove the full system Python closure before account-check interpreters execute ([design](docs/design/confinement.md),
+  計畫 §06/§07/§12, A10). A bounded absolute-tool gate checks every stdlib/platform-stdlib entry, bytecode and
+  extension, symlink hops/targets, zip and venv parents. Unknown layouts or incomplete scans report
+  check_executable_untrusted and confined Claude falls back to default. Gate and rechecks share one definition
+  and budget (default 50000 entries). Programs use -c argv with updated sudoers examples; ptrace_scope is recorded
+  and the no-hostile-same-UID trust assumption is explicit. Directory-only caches expire. W12 still must prove
+  real-host Debian/Ubuntu/RHEL behavior and A10.
+
+- Registry session identity is unique per host/session ID ([design](docs/design/confinement.md), 計畫 §06/§12, A10).
+  Sent starts, including BAT invoke-error replies and legacy failed/sent rows, are fenced from same-ID reservation
+  retries. The pinned Codex start path can retain a session after an error, so the connector keeps its reservation
+  and worktree for read-back; Task lead commands/tasks remain uncertain until recovery. Failover keeps the reserved
+  successor rather than releasing it. Shared registry read/write validation rejects duplicates explicitly with
+  REGISTRY_DUPLICATE_SESSION before writing; recovery and warm claims update the existing row. Cap and supersede
+  handoff rules remain intact; legacy failed/sent successors use the same failover binding for read-back recovery.
+  A10 still awaits W12.
+
+- Host-account verification now requires an operator-declared trusted auditor SSH channel ([design](docs/design/confinement.md),
+  計畫 §06/§07/§12, A10). The auditor proves its different identity and protected login/bootstrap paths before
+  directly executing isolated Python as the BAT account through a narrow sudo rule. Returned UID/channel facts
+  must match config; same-account login output can never certify a boundary. Without a trusted alias, no in-band
+  check runs: unknown/check_channel_untrusted gives fallback_default and confined Claude uses default, never
+  acceptEdits. Old checker caches are invalidated. Existing integrity/process/root scans remain defense in depth.
+  Trusted-channel verification on real hosts and A10 still await W12.
+
+- Task Service reviewer starts send one start frame per reservation ([design](docs/design/confinement.md),
+  計畫 §06/§12/§28, A10). Lost or unconfirmed replies, including `ok: false` or a different session ID, retry only
+  metadata reads with bounded backoff. Unproven starts keep their reservation and leave the command and task
+  uncertain with `CONFINEMENT_START_UNSETTLED`; a later tick settles by read-back without another dispatch.
+  Readable identity/permission mismatches still refuse, pre-transport failures still release, and valid ACKs retain
+  best-effort evidence reads. The lead retry loop and other start/recovery paths retain their transport fences.
+  A10 still awaits the W12 live run.
+
+- Dashboard start notes now follow the server's `host_account.start_effect` ([design](docs/design/confinement.md),
+  計畫 §06/§10/§12, A10). Unchecked or stale evidence requires a live recheck at start; supported hardening gaps
+  and undeclared accounts use confined Claude's plain default fallback. Only refusals show the blocked note and
+  reason, including before Codex's sandbox note. Capabilities GET remains read-only, and the projection shares its
+  rule with the start gate. English and zh-TW notes and both skills explain the four values. A10 still awaits W12.
+
+- The A10 Linux account-check fixture isolates its fake `pathlib` import, keeping pytest's real `Path` intact on
+  Python 3.10 and 3.11; the product's read-only check is unchanged.
+
 - Refuse BAT worktree mutations for legacy reviewers whose shared creation root is unproven in the registry,
   including paths under managed roots. Preserve proven carrier behavior and observation identity resolution;
   raw CLI policy does not require a task daemon or guess a journal location.
@@ -208,6 +276,42 @@
   a reply cut short or an unreadable body counts as no answer, and an unanswered run lookup after a 204 dispatch
   keeps looking. The GitHub token is resolved for every request, so a rotated or expiring token works without a restart.
 
+- Managed execution confinement ([design](docs/design/confinement.md), 計畫 §06/§07/§12, A10): preserve general
+  `default`/`allow_all`, add opt-in `confined`, record immutable creation evidence and separate current verification,
+  and refuse confined raises, persistent approvals and mode-widening ExitPlanMode answers. Claude uses default unless
+  a Linux read-only account check supports acceptEdits (BAT's acceptEdits file callback has no path check); Codex's
+  sandbox reaches at most options_confirmed. Planner is read-only/never; successors inherit limits. Task Service
+  behavior stays unchanged with its gap visible. Reads, bilingual forms and both skills explain the evidence.
+  Failover read-back now completes the reserved successor row and sends its unsent handoff with the same message ID,
+  journal hash and guards. A durable frame fence permits recovery before sending and prevents resends after a possible
+  frame attempt, including crashes between a normally confirmed start and its handoff.
+  Reserved-start recovery also checks normalized cwd before promotion; a different folder or a recorded permission
+  mismatch stays terminal, keeps its reservation and evidence, and never dispatches a handoff on a later matching read.
+  Checkpoint continuation and repair handoff remain successful when a display-only metadata read fails after their
+  first instruction was accepted; creation evidence stays intact and current verification reports unknown/readback_failed.
+  Reviewer starts now refuse readable permission mismatches after an ACK or during identity polling, keep terminal
+  evidence and the reservation, and leave the task and start command uncertain without a review prompt. Headless
+  recovery, warm reuse and Task Service failover guards also reject readable permission drift; unreadable reviewer
+  start metadata remains best-effort, and engine/recipe policy is unchanged.
+  Host-account checks now use a separate SSH command with a clean environment, fixed cwd, isolated absolute Python
+  and absolute find. Verification requires trusted root-owned checking executables/stdlib/parents and a hardened
+  passwd-derived login environment. Hosts missing these hardening preconditions report unknown: confined Claude
+  starts fall back to plain default, never acceptEdits; root/process failures still refuse starts. Old checker caches
+  are invalidated. Clean startup files must be installed from trusted copies before hardening; the same-UID check
+  cannot detect a payload planted before those files became protected.
+  Start-frame transport evidence now distinguishes pre-frame cancellation from an unsettled sent start. Cancellation
+  propagates without asynchronous rollback. Checkpoint/repair, failover and Task Service recover proven-unsent starts
+  under their reserved IDs; a later new-start retry cannot overwrite sent evidence with false. Retained BAT worktrees are checked and reused, and Task command evidence covers early
+  preparation. Starts already handed to transport remain uncertain and are read back without another start frame.
+  Cancellation tests check the original exception inside the coroutine, covering Python 3.10's loss of the message
+  when awaiting a cancelled task without weakening the propagation check.
+  Starting reservations now hold per-session OS flock claims through the start call. Only an abandoned unsent row
+  can be reclaimed; a live process or coroutine returns START_IN_PROGRESS without changing the row, worktree or
+  frame. Claims cover same-ID checkpoint/repair, Task Service and failover recovery, survive until return or
+  exception, and are released by the OS on a crash. Read back later instead of blindly retrying this refusal;
+  sent starts still use CONFINEMENT_START_UNSETTLED and read-back recovery.
+  **A10 is not proven until the W12 live run**; no sandbox evidence-file import is included here.
+
 - Delivery Part A ([design](docs/design/delivery.md), plan §09/§10/§15/§16/§18, C04/C05/C07):
   `github.pr.update` edits title/body with existing integrate scope and per-repository allow_pr_update opt-in,
   read-compare-write-readback and recorded conflicts; unknown PATCH replies are never resent. Immutable merge
@@ -289,7 +393,7 @@
   table). A checkpoint taken inside a managed clone continues in that clone. A session that is only in the
   registry keeps its workspace, and a checkpoint without one is refused up front (`NO_WORKSPACE`).
 - Checkpoint sessions are confined whatever the host's `default_permission_mode` (plan §06, A10): Claude starts in
-  `acceptEdits` and Codex in the `workspace-write` sandbox with `on-request` approval. The registry records
+  `default` (or `acceptEdits` with a verified host account) and Codex in the `workspace-write` sandbox with `on-request` approval. The registry records
   `write_scope: "confined"` and the permission fields from the reservation on, so a start proven by read-back, a
   resume and a Codex failover successor keep them. `session_set_permissions` refuses allow-all for these sessions
   and `approve_pending` skips them. The source conversation in the first instruction is marked as background.

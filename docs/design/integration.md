@@ -127,6 +127,9 @@ integrate = { hosts = ["workstation"], remote_url = "git@github.com:owner/name.g
 永久可查。Dashboard #/cleanup 與 work item 的整理入口，兩語預覽／逐項回執／歷史搜尋／實際 retained list；
 Part A 無 restore 按鈕。Task-owned 資源由 Task Service 整理，本輪列 TASK_OWNED；原 terminal cleanup 不變。
 Restore、reviewed task leftovers／coordinator 准入與 TaskDaemon 歷史投影在 Part B。Clone／area 與 pins 留存。
+## Repair 的執行限制（A10）
+
+`integration.handoff` 共用 checkpoint 的 confined start：Claude 未查核 account 時用 default；BAT acceptEdits 沒有 path check，只有查核 account 才使用它。Codex workspace-write/on-request 最多 options_confirmed。Operation refs／結果保存 snapshot 與 current verification，表單依 host／agent 提示限制；force／bulk／persistent raises 不放寬 repair。沒有改 composition／PR／deploy policy。A10 尚待 W12 live run，見 [confinement](confinement.md)。
 
 ## 尚未涵蓋
 

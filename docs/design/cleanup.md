@@ -219,6 +219,15 @@ Session marker 只鎖該 session ID；local branch marker 只鎖該 repository �
 未決 guard 不按時間解鎖；restart 先 reconcile。Confirmed cleaned generation 回 RESOURCE_CLEANED，
 reservation 回 CLEANUP_IN_PROGRESS；舊 send/client-resume／merge/remove 也會拒絕。
 
+與 confinement 的 start claim 共用上述 registry flock。Cleanup 寫 reservation 前，對該 session
+（worktree 則含同 path 的已登記 sessions）用新的 descriptor 嘗試既有 `start-claims/<sha256>.lock`；
+活躍 start 先取得 claim 時，cleanup 回 START_IN_PROGRESS，registry 不變。Cleanup 先寫 guard 時，
+reserve／claim_unsent／ensure_existing 在同 flock 下先回 CLEANUP_IN_PROGRESS（已 cleaned 則
+RESOURCE_CLEANED），不能取得 claim 或改 session row。Probe 只 close 自己的 descriptor，不 unlink
+lock inode；不靠 token 或 timeout 猜 owner 是否消失。所有 cleanup registry 讀寫與 retirement
+都核對 `(host, session_id)` 唯一性，重複 row 回 REGISTRY_DUPLICATE_SESSION 且不寫檔；release
+同時匹配 host 與 session ID，不解除另一個 host 的 reservation。
+
 `resource_policy.authorize_session` 及 check_checkpoint_worktree／check_repair_worktree／check_integration_area／
 check_external_worktree 各加一個 shared guard hook。service.py／orchestrate.py 不新增 caller checks。
 實際 ownership 仍由共用 policy；guard 只禁止使用 reserved／cleaned 資源，不授予 ownership。

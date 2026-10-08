@@ -21,6 +21,7 @@ from . import (
     api_auth,
     checkpoints,
     cleanup,
+    confinement,
     integration,
     pr_delivery,
     resource_policy,
@@ -314,7 +315,8 @@ class ApiV1:
         hosts = [{"host": h, "observe": True, "writes": fleet.writes_enabled(h),
                   "orchestrate": fleet.orchestrate_enabled(h),
                   "managed_roots": list(fleet.config.host(h).managed_roots),
-                  "shared_clone_worktrees": fleet.config.host(h).shared_clone_worktrees}
+                  "shared_clone_worktrees": fleet.config.host(h).shared_clone_worktrees,
+                  "confinement": confinement.host_capability(fleet, h)}
                  for h in fleet.config.hosts]
         return 200, {"actor": principal.actor, "scopes": sorted(principal.scopes), "api_version": API_VERSION,
                      "contract_version": CONTRACT_VERSION, "connector": __version__, "hosts": hosts,
@@ -379,6 +381,10 @@ class ApiV1:
             out = {"session": None, "cleanup": []}
         if live:
             out["policy"] = await resource_policy.session_policy(self.daemon.fleet, host, sid)
+            if out["session"]:
+                out["session"].update(confinement.session_fields(
+                    host, sid, await service._meta(self.daemon.fleet.client(host), sid),
+                    account=confinement.account_status(self.daemon.fleet, host)))
         return 200, out
 
     def _history(self, query, resource_type, resource_id):
