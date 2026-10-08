@@ -16,6 +16,12 @@
   submission and reports the extra commits; combined deploy uses the actual verified merged SHA. HTTP, MCP
   github_pr_update/github_pr_merge, caller-token delivery CLI, Dashboard metadata drawer/scope preview and both
   skills are aligned. Contract version remains the ISO change date 2026-10-08. Part B deployments/rollback are pending.
+- Delivery Part A review fixes ([design](docs/design/delivery.md), plan §10/§15/§16, C04/C05/C07):
+  uncertain metadata writes still unchanged after ten minutes settle as not applied,
+  releasing the PR without another PATCH. Merge previews reuse identical documents, prune expired unreferenced
+  rows and throttle event reloads for sixty seconds. Checks waits use cheap head/base reads; the final scope check
+  runs before the submit step so transient read failures can resume. Verification accepts related PRs merged later
+  and stops updated PR pagination at admission time.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps

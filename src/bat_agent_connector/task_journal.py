@@ -333,6 +333,18 @@ class Journal:
                 ON pr_merge_previews(repository, pull_number, created_at)""")
             if self.db.execute("PRAGMA user_version").fetchone()[0] < 2:
                 self.db.execute("PRAGMA user_version=2")
+        # Delivery A review fixes. Additive, idempotent; renumber only at rebase if needed.
+        with self.tx():
+            self.db.execute("""CREATE TABLE IF NOT EXISTS pr_metadata_settlements (
+                operation_id TEXT PRIMARY KEY, document TEXT NOT NULL
+            )""")
+            self.db.execute("""CREATE TABLE IF NOT EXISTS pr_merge_scope_reads (
+                repository TEXT NOT NULL, pull_number INTEGER NOT NULL, method TEXT NOT NULL,
+                preview_id TEXT NOT NULL, checked_at REAL NOT NULL,
+                PRIMARY KEY(repository, pull_number, method)
+            )""")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 3:
+                self.db.execute("PRAGMA user_version=3")
 
     def _drop_legacy_outbox(self):
         """Remove the retired chat outbox so no historical event can ever be published.

@@ -151,12 +151,13 @@ async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method:
     if pr.get("state") != "open":
         raise OperationError("PR_CLOSED", f"PR #{number} is {pr.get('state')} and not merged")
     if not submitted:
-        await pr_delivery.check_scope(ctx, preview)
-        head = (pr.get("head") or {}).get("sha")
-        if head != sha:
-            raise OperationError("TARGET_HEAD_CHANGED",
-                                 f"PR #{number} head is now {str(head)[:12]}, not the reviewed {sha[:12]}; "
-                                 "review the new head and submit again", 409)
+        for field, section, code in (("head_sha", "head", "TARGET_HEAD_CHANGED"),
+                                     ("base_sha", "base", "TARGET_BASE_CHANGED")):
+            observed = (pr.get(section) or {}).get("sha")
+            if observed != preview["target"][field]:
+                diff = {"field": field, "reviewed": preview["target"][field], "observed": observed}
+                ctx.set_refs(scope_difference=diff)
+                raise OperationError(code, json.dumps(diff), 409)
         if pr.get("draft"):
             raise OperationError("PR_DRAFT", f"PR #{number} is a draft")
         if pr.get("mergeable_state") == "dirty":
@@ -168,7 +169,6 @@ async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method:
                 raise Wait("waiting_checks", "required checks are still running", 30)
 
     async def submit() -> dict:
-        await pr_delivery.check_scope(ctx, preview, expiry=not submitted)
         status, body = await gh.merge_async(repository, number, sha, method)
         return {"http_status": status, "status": body.get("status"), "details": body.get("details") or {},
                 "message": str(body.get("message") or "")[:300]}
@@ -190,6 +190,8 @@ async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method:
             return RERUN
         return None
 
+    if not submitted:
+        await pr_delivery.check_scope(ctx, preview)
     r = await ctx.step(f"{prefix}.submit", submit, request={"repository": repository, "pull_number": number,
                                                            "sha": sha, "method": method}, reconcile=reconcile)
     status, result, details = r["http_status"], r.get("status"), r.get("details") or {}
@@ -377,7 +379,8 @@ async def _run_merge_and_deploy(ctx: OpContext) -> dict:
 
 
 # --------------------------------------------------------------------------- reads
-async def pr_preview(ops: OperationService, repository: str, number: int, method: str | None = None) -> dict:
+async def pr_preview(ops: OperationService, repository: str, number: int, method: str | None = None,
+                     *, from_event: bool = False) -> dict:
     """What the Dashboard shows before the one-click button: head, base, mergeability, checks, recipes."""
     gh = _gh(ops)
     repository = _repo_or_403(ops, repository)
@@ -399,10 +402,7 @@ async def pr_preview(ops: OperationService, repository: str, number: int, method
     method = method or repo.default_merge_method
     if method not in repo.merge_methods:
         raise OperationError("INVALID_PARAMS", "method is not enabled for this repository", 422)
-    document = await pr_delivery.scope(ops, repository, number, method)
-    if document["target"] != pr_delivery.identity(pr):
-        document["blocking"].append({"code": "MERGE_SCOPE_UNPROVEN", "message": "PR moved while loading its card; reload"})
-    preview = pr_delivery.save_preview(ops, document)
+    preview = await pr_delivery.card_preview(ops, repository, number, method, pr, from_event=from_event)
     return {"repository": repository, "pull_number": number, "title": pr.get("title"),
             "body": pr.get("body") or "", "metadata_digest": pr_delivery.digest(pr_delivery.metadata(pr)),
             "metadata_update": {"allowed": repo.allow_pr_update}, "merge_preview": preview, "state": pr.get("state"),

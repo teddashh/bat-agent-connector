@@ -1,15 +1,22 @@
 """Immutable PR merge scopes and metadata operations; no local Git or task ownership is inferred."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
 import time
 import uuid
+import weakref
 from datetime import datetime
 
 from .github import GitHubAmbiguous
 from .operations import RERUN, NeedsAttention, OperationError, Wait
+
+METADATA_SETTLE_S = 10 * 60
+SCOPE_REFRESH_S = 60
+PREVIEW_RETENTION_S = 24 * 3600
+FILE_FIELDS = ("filename", "status", "additions", "deletions", "changes", "previous_filename")
 
 
 def digest(value: dict) -> str:
@@ -66,7 +73,8 @@ async def commit_range(gh, repository, base, head) -> dict:
     return {"merge_base_sha": first["merge_base_commit"]["sha"], "status": first.get("status"),
             "commits": [{"sha": c["sha"], "parents": [p["sha"] for p in c.get("parents", [])],
                          "message": (c.get("commit") or {}).get("message", "")} for c in commits],
-            "files": first.get("files") or [], "files_may_be_truncated": len(first.get("files") or []) >= 300}
+            "files": [{k: f[k] for k in FILE_FIELDS if k in f} for f in first.get("files") or []],
+            "files_may_be_truncated": len(first.get("files") or []) >= 300}
 
 
 async def ancestor(gh, repository, base, head) -> bool:
@@ -168,13 +176,53 @@ async def scope(ops, repository: str, number: int, method: str) -> dict:
 
 
 def save_preview(ops, document: dict) -> dict:
-    doc = {**document, "preview_id": "mpv_" + uuid.uuid4().hex, "digest": digest(document),
-           "created_at": time.time(), "expires_at": time.time() + 3600}
+    now, value_digest = time.time(), digest(document)
     with ops.journal.tx():
-        ops.db.execute("INSERT INTO pr_merge_previews VALUES (?,?,?,?,?,?,?)",
-                       (doc["preview_id"], doc["repository"], doc["target"]["number"], json.dumps(doc),
-                        doc["digest"], doc["created_at"], doc["expires_at"]))
+        # An admitted operation still reads its immutable scope after expiry (e.g. a merge queue wait).
+        protected = {json.loads(r["params"]).get("preview_id") for r in ops.db.execute(
+            "SELECT params FROM operations WHERE action IN ('github.pr.merge','delivery.merge_and_deploy') "
+            "AND status NOT IN ('succeeded','failed','cancelled')")}
+        for row in ops.db.execute("SELECT preview_id FROM pr_merge_previews WHERE expires_at<?",
+                                  (now - PREVIEW_RETENTION_S,)).fetchall():
+            if row["preview_id"] not in protected:
+                ops.db.execute("DELETE FROM pr_merge_previews WHERE preview_id=?", (row["preview_id"],))
+        ops.db.execute("DELETE FROM pr_merge_scope_reads WHERE checked_at<?", (now - PREVIEW_RETENTION_S,))
+        row = ops.db.execute("SELECT document FROM pr_merge_previews WHERE repository=? AND pull_number=? "
+                             "AND digest=? AND expires_at>? ORDER BY created_at DESC LIMIT 1",
+                             (document["repository"], document["target"]["number"], value_digest, now)).fetchone()
+        if row:
+            doc = json.loads(row["document"])
+        else:
+            doc = {**document, "preview_id": "mpv_" + uuid.uuid4().hex, "digest": value_digest,
+                   "created_at": now, "expires_at": now + 3600}
+            ops.db.execute("INSERT INTO pr_merge_previews VALUES (?,?,?,?,?,?,?)",
+                           (doc["preview_id"], doc["repository"], doc["target"]["number"], json.dumps(doc),
+                            doc["digest"], doc["created_at"], doc["expires_at"]))
+        ops.db.execute("INSERT OR REPLACE INTO pr_merge_scope_reads VALUES (?,?,?,?,?)",
+                       (doc["repository"], doc["target"]["number"], doc["method"], doc["preview_id"], now))
     return doc
+
+
+async def card_preview(ops, repository: str, number: int, method: str, pr: dict, *, from_event: bool) -> dict:
+    locks = ops.context.setdefault("pr_merge_preview_locks", weakref.WeakValueDictionary())
+    key = (repository, number, method)
+    lock = locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        row = ops.db.execute("SELECT p.document,r.checked_at FROM pr_merge_scope_reads r "
+                             "JOIN pr_merge_previews p ON p.preview_id=r.preview_id "
+                             "WHERE r.repository=? AND r.pull_number=? AND r.method=?",
+                             key).fetchone()
+        if from_event and row and time.time() - row["checked_at"] < SCOPE_REFRESH_S:
+            cached = json.loads(row["document"])
+            current = identity(pr)
+            if (cached["expires_at"] > time.time()
+                    and all(cached["target"][f] == current[f] for f in ("head_sha", "base_sha"))):
+                return cached
+        document = await scope(ops, repository, number, method)
+        if document["target"] != identity(pr):
+            document["blocking"].append({"code": "MERGE_SCOPE_UNPROVEN",
+                                        "message": "PR moved while loading its card; reload"})
+        return save_preview(ops, document)
 
 
 def get_preview(db, preview_id: str) -> dict:
@@ -196,7 +244,10 @@ def merge_envelope(doc: dict, *, recipe: str | None = None) -> dict:
 async def check_scope(ctx, doc: dict, *, expiry: bool = True):
     if expiry and doc["expires_at"] < time.time():
         raise OperationError("PREVIEW_EXPIRED", "merge preview expired; read github_pr_preview again", 409)
-    fresh = await scope(ctx.service, doc["repository"], doc["target"]["number"], doc["method"])
+    try:
+        fresh = await scope(ctx.service, doc["repository"], doc["target"]["number"], doc["method"])
+    except GitHubAmbiguous as exc:
+        raise NeedsAttention("MERGE_SCOPE_UNPROVEN", str(exc)) from None
     for field, code in (("head_sha", "TARGET_HEAD_CHANGED"), ("base_sha", "TARGET_BASE_CHANGED")):
         if fresh["target"][field] != doc["target"][field]:
             diff = {"field": field, "reviewed": doc["target"][field], "observed": fresh["target"][field]}
@@ -258,7 +309,7 @@ async def verify_merge(ctx, pr: dict, doc: dict) -> dict:
                         candidates.setdefault(member["number"], identity(await read(gh.pull(repository, member["number"]))))
             # Include PRs that appeared during acceptance and vanished from stack membership after merging.
             # Only results reachable from this merge, outside its destination base, can be attributed to it.
-            for other in await pages(lambda page: gh.pulls(repository, page=page, state="all")):
+            for other in await recent_prs(gh, repository, ctx.op["created_at"]):
                 oi = identity(other)
                 merged_at = other.get("merged_at")
                 if merged_at:
@@ -275,20 +326,22 @@ async def verify_merge(ctx, pr: dict, doc: dict) -> dict:
             outcomes = []
             for number, candidate in candidates.items():
                 other = await read(gh.pull(repository, number))
-                independent = False
+                independent = merged_after = False
                 if other.get("merged"):
                     other_sha = other.get("merge_commit_sha")
                     if not other_sha:
                         raise OperationError("MERGE_RESULT_UNVERIFIABLE", "affected PR omitted its merged SHA")
                     independent = await ancestor(gh, repository, other_sha, onto)
                     swept = not independent and await ancestor(gh, repository, other_sha, merged)
-                    if not independent and not swept:
+                    merged_after = not independent and not swept and await ancestor(gh, repository, merged, other_sha)
+                    if not independent and not swept and not merged_after:
                         raise OperationError("MERGE_RESULT_UNVERIFIABLE", f"cannot attribute affected PR #{number}")
                     if swept:
                         ctx.set_refs(merge_receipt={"merged_sha": merged, "affected_prs": outcomes +
                                                    [{"number": number, "swept_in": True}]})
                         raise NeedsAttention("MERGE_RESULT_SCOPE_CHANGED", f"PR #{number} was swept into this merge")
-                outcomes.append({"number": number, "merged": bool(other.get("merged")), "independent": independent,
+                outcomes.append({"number": number, "merged": bool(other.get("merged")),
+                                 "independent": independent or merged_after, "merged_after": merged_after,
                                  "reviewed_head": candidate.get("head_sha")})
             return {"verified": True, "merged_sha": merged, "merged_onto_base_sha": onto,
                        "base_moved": onto != base, "other_commits_count": len(extra["commits"]),
@@ -316,6 +369,36 @@ async def verify_merge(ctx, pr: dict, doc: dict) -> dict:
     return receipt
 
 
+async def recent_prs(gh, repository: str, created_at: float) -> list:
+    result = []
+    for page in range(1, 10001):
+        items = (await read(gh.pulls(repository, page=page, state="all", sort="updated", direction="desc")))["items"]
+        for pr in items:
+            # REST timestamps have second precision; retain the whole admission second.
+            updated_at = datetime.fromisoformat(pr["updated_at"].replace("Z", "+00:00")).timestamp()
+            if updated_at < int(created_at):
+                return result
+            result.append(pr)
+        if len(items) < 100:
+            return result
+    raise OperationError("MERGE_RESULT_UNVERIFIABLE", "updated PR pagination did not terminate")
+
+
+def metadata_settlement(ops, operation_id: str) -> dict | None:
+    row = ops.db.execute("SELECT document FROM pr_metadata_settlements WHERE operation_id=?", (operation_id,)).fetchone()
+    return json.loads(row["document"]) if row else None
+
+
+def settle_not_applied(ops, operation_id: str, started_at: float, observed: dict) -> dict | None:
+    if time.time() - started_at < METADATA_SETTLE_S:
+        return None
+    receipt = {"status": "not_applied", "code": "PR_METADATA_NOT_APPLIED", "observed": observed,
+               "settled_at": time.time()}
+    with ops.journal.tx():
+        ops.db.execute("INSERT OR IGNORE INTO pr_metadata_settlements VALUES (?,?)",
+                       (operation_id, json.dumps(receipt)))
+    return metadata_settlement(ops, operation_id)
+
 
 def admit_update(ops, principal, target, params, pre):
     from .delivery import _gh, _repo_or_403
@@ -334,6 +417,8 @@ def admit_update(ops, principal, target, params, pre):
     for row in ops.db.execute("SELECT operation_id,target,status FROM operations WHERE action='github.pr.update'"):
         t = json.loads(row["target"])
         if t.get("repository", "").lower() == repository.lower() and t.get("pull_number") == target["pull_number"]:
+            if metadata_settlement(ops, row["operation_id"]):
+                continue
             unresolved = ops.db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? "
                                         "AND name='pr.metadata.write' AND status IN ('started','uncertain')",
                                         (row["operation_id"],)).fetchone()
@@ -369,6 +454,9 @@ async def run_update(ctx):
         status, _ = await gh.update_pull(repository, number, ctx.params)
         return {"http_status": status, "write_acknowledged": status == 200}
     async def reconcile(_):
+        settled = metadata_settlement(ctx.service, ctx.operation_id)
+        if settled:
+            return {"not_applied": settled}
         status, pr = await gh.pull(repository, number)
         if status != 200:
             return None
@@ -376,10 +464,17 @@ async def run_update(ctx):
         if observed == p["after"]:
             return {"http_status": 200, "observed_intent": True, "write_acknowledged": False}
         if observed == p["before"]:
-            return None  # an intervening editor could have restored before; never PATCH twice
+            step = ctx.service.db.execute("SELECT started_at FROM operation_steps WHERE operation_id=? "
+                                          "AND name='pr.metadata.write'", (ctx.operation_id,)).fetchone()
+            settled = settle_not_applied(ctx.service, ctx.operation_id, step["started_at"], observed)
+            return {"not_applied": settled} if settled else None  # never PATCH twice
         return {"conflict_after_write": True, "observed": observed}
     w = await ctx.step("pr.metadata.write", write, request={"repository": repository, "pull_number": number,
                                                            **p, "fields": ctx.params}, reconcile=reconcile)
+    if w.get("not_applied"):
+        ctx.set_refs(metadata_settlement=w["not_applied"], verification_pending=False)
+        raise OperationError("PR_METADATA_NOT_APPLIED", "metadata remained unchanged after the 10 minute settle window; "
+                             "review a fresh digest before starting a new update", 409)
     if w.get("conflict_before_write"):
         ctx.set_refs(metadata_difference={**p, "observed": w["observed"]})
         raise OperationError("PR_METADATA_CHANGED", "metadata changed immediately before PATCH", 409)
@@ -411,9 +506,11 @@ async def reconcile_metadata(ops):
     gh = ops.context.get("github")
     if not gh:
         return
-    rows = ops.db.execute("SELECT s.operation_id,s.request,s.status,o.external_refs FROM operation_steps s "
+    rows = ops.db.execute("SELECT s.operation_id,s.request,s.status,s.started_at,o.external_refs FROM operation_steps s "
                           "JOIN operations o ON o.operation_id=s.operation_id "
-                          "WHERE (o.status='cancelled' OR o.cancel_requested=1) "
+                          "WHERE (o.status='cancelled' OR o.cancel_requested=1 "
+                          "OR (o.status='needs_attention' AND o.error_code='UNCERTAIN_UNRESOLVED')) "
+                          "AND NOT EXISTS (SELECT 1 FROM pr_metadata_settlements m WHERE m.operation_id=s.operation_id) "
                           "AND s.name='pr.metadata.write'").fetchall()
     for row in rows:
         refs = json.loads(row["external_refs"] or "{}")
@@ -434,6 +531,8 @@ async def reconcile_metadata(ops):
                                {"http_status": 200, "observed_intent": True, "write_acknowledged": False}, reconciled=True)
             ops._merge_refs(row["operation_id"], {"verification_pending": False, "observed_intent": True,
                                                  "metadata_difference": {**p, "observed": observed}})
+        elif unresolved and observed == p["before"]:
+            settle_not_applied(ops, row["operation_id"], row["started_at"], observed)
         elif not unresolved:
             ops._merge_refs(row["operation_id"], {"verification_pending": False,
                                                  "metadata_reconciliation": "PR_METADATA_CONFLICT",

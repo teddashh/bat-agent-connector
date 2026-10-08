@@ -222,7 +222,10 @@ Requires integrate and repository allow_pr_update (default false); no new scope 
 PRs, without a task. The backend compares title/body before PATCH and reads back after it; GitHub has no atomic body
 CAS, so the last read/write race cannot be eliminated. On PR_METADATA_CHANGED / PR_METADATA_CONFLICT, read the recorded
 before/intended/observed content and edit against a new digest/key; never overwrite automatically or resend an unknown
-PATCH. Cancel does not undo metadata; an unresolved write can keep later edits blocked.
+PATCH. Cancel does not undo metadata; an unresolved write keeps later edits blocked during a ten-minute settle window.
+If readback still matches the original metadata after that window, delivery settles not_applied and admits new edits. An operation
+stopped at UNCERTAIN_UNRESOLVED can be resumed to read this settlement and fail with PR_METADATA_NOT_APPLIED without
+another PATCH; read a fresh digest and use a new key for the next edit. Late changes still fail PR_METADATA_CHANGED.
 
 Merging and deploying (only with the user's go-ahead for that PR and environment): read `github_pr_preview` with the
 chosen method and review its merge_preview's entire commit range, affected PRs, blocking and warnings. Use

@@ -123,6 +123,8 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 
 PR metadata 使用獨立 action `github.pr.update`：既有 integrate scope，加 repository `allow_pr_update = true`（預設 false），不需要重新發 token。先以 `github_pr_preview`／`batc delivery pr` 讀 title/body digest 與保存的 merge scope；metadata 寫前比較、寫後讀回，但 GitHub 最後讀寫窗口仍有競爭限制。合併前檢視完整 commits／受影響 PR，再以 `github_pr_merge`／`batc delivery merge --preview mpv_... --key KEY` 送出；舊 head-only 請求會拒絕。提交前 base 變動停止，queue 受理後可合併到較新 base 並列出其他 commits；驗證 actual merged SHA，拒絕不支援的 stack／間接合併。MCP／CLI 寫入需要 caller 自己的 BATC_API_TOKEN。詳見 [交付設計](docs/design/delivery.md)。部署 history、environment generations、runtime verification 與 rollback 留待 Part B。
 
+未知 metadata 寫入滿 10 分鐘後讀回仍未變，會結案為 not_applied、釋放 PR，不重送 PATCH；新編輯仍須讀取新 digest。相同 merge preview 重用 ID；事件重載的完整 scope 讀取以 60 秒節流，head／base 變動立即刷新，送出合併前仍完整核對。
+
 ## 工具一覽
 
 | 工具 | 用途 |

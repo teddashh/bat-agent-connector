@@ -178,6 +178,8 @@ pins, renames and archive follow Project Hub's rules. See [docs/design/work-item
 PR delivery now has a separate metadata action (`github.pr.update`, existing `integrate` scope, per-repository
 `allow_pr_update = true`; default false) and saved merge scope previews. Read `github_pr_preview` / `batc delivery pr`,
 review all commits and affected PRs, then `github_pr_merge` / `batc delivery merge --preview mpv_... --key KEY`.
+Unknown metadata writes still unchanged after ten minutes settle as not applied, freeing the PR without resending;
+review a fresh digest before a new edit. Identical previews reuse their ID, and event reloads throttle scope reads.
 Metadata edits compare the title/body digest before writing and read back afterward; GitHub's final read/write race
 still exists. Merge checks the reviewed head/base/scope before submit and verifies the actual merged SHA; queue merges
 onto a newer base report the extra commits. Unsupported stacks and indirect merges are refused. MCP/CLI writes need
