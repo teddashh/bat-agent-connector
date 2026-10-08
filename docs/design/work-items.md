@@ -110,6 +110,13 @@ create／update 的 attachments 為 `{artifact_id, revision, digest, role: input
 
 artifact_references 留每次 work_item 引用與釋放歷史，checkpoint 與 continuation operation 也有引用。本包不刪 artifacts，不另建 retention read model。Dashboard 編輯表單可 upload／選 role，refs 與需求原文保存於 localStorage 草稿；只有成功更新才清除那次提交。從 linked checkpoint 派工時，後端第一 step 記 work item 連結與 expected fingerprint，送出前再次查內容。見 [artifacts.md](artifacts.md)。
 
+## 整理與永久歷史（Part A）
+
+見 [cleanup.md](cleanup.md)：純讀 preview、signed token、逐項 operations／retained refs／tombstones，原 ID
+永久可查。Dashboard #/cleanup 與 work item 的整理入口，兩語預覽／逐項回執／歷史搜尋／實際 retained list；
+Part A 無 restore 按鈕。Task-owned 資源由 Task Service 整理，本輪列 TASK_OWNED；原 terminal cleanup 不變。
+Restore、reviewed task leftovers／coordinator 准入與 TaskDaemon 歷史投影在 Part B。Clone／area 與 pins 留存。
+
 ## 尚未涵蓋
 
 - 匯入 Project Hub 的資料（驗收 B05）；manual／managed artifact capture 與 acceptance（Part B）。

@@ -415,7 +415,9 @@ class TaskCoordinator:
         sid = warm_id or str(uuid.uuid4())
         command, fresh = self.journal.command(task["task_id"], "start_" + role, sid,
                                                {"role": role, "agent": agent,
-                                                "warm_session_id": warm_id}, key)
+                                                "warm_session_id": warm_id,
+                                                "control_version": task["control_version"],
+                                                "start_sent": None if warm_id else False}, key)
         if not fresh:
             return self.journal.change(task["task_id"], "uncertain")
         self.journal.change(task["task_id"], "dispatching",
@@ -436,12 +438,26 @@ class TaskCoordinator:
                 if current["state"] == "dispatching":
                     self.journal.change(task["task_id"], "verifying" if role == "reviewer" else "queued")
             raise
-        except Exception:
+        except Exception as exc:
+            if getattr(exc, "sent", None) is False:
+                code = getattr(exc, "code", "REFUSED")
+                self.journal.command_status(command["command_id"], "rejected")
+                self.journal._event(task["task_id"], "start_rejected", {
+                    "command_id": command["command_id"], "session_id": sid, "role": role, "code": code})
+                return self.journal.change(task["task_id"], "needs_ted", fields={"result": str(exc)})
             self.journal.command_status(command["command_id"], "uncertain")
             current = self.journal.get(task["task_id"])
             if current["paused"] or current["control_version"] != task["control_version"]:
                 return current
             return self.journal.change(task["task_id"], "uncertain")
+        # Evidence only; engine, recipes and command identity stay unchanged.
+        from . import registry
+        entry = registry.get(task["host"], sid) or {}
+        payload = json.loads(command["payload"])
+        payload.update({k: entry[k] for k in ("confinement", "write_scope", "permission_mode_claude", "agent_params", "start_sent")
+                        if k in entry})
+        self.journal.db.execute("UPDATE commands SET payload=? WHERE command_id=?",
+                                (json.dumps(payload), command["command_id"]))
         self.journal.command_status(command["command_id"], "settled")
         self.journal.provider_use(agent, "success")  # a real session on this provider
         self.journal.add_branch(task["task_id"], session_id=sid, provider=agent, role=role,

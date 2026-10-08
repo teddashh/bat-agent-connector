@@ -209,6 +209,16 @@ reference rows只有work_item、checkpoint、operation的writer。未完成工�
 
 Artifact DDL 只用 CREATE TABLE IF NOT EXISTS 與依 table_info 缺欄位才 ALTER；不讀寫 user_version。
 版本號屬一次性的 data migrations：1 既有 event copy、2 observation history、3 deployment history。
+
+Reviewed cleanup 只使用 `artifact_cleanup.replica_evidence` 投影的精確副本：creation intent／worktree
+binding、同 operation／host 的 verified materialization、固定 revision／digest、實際 transfer attempt
+與 immutable store 原件皆須吻合。僅提供精確路徑、bytes／digest 及已記錄 helper 名稱；不豁免整個
+`.batc-inputs/`。已修改、額外、tracked、symlink／hardlink 或原件缺失／損壞的內容仍受一般保留規則保護。
+每個未完成的 cleanup mutation 在 host flock 的最後准入、live consumer 檢查之後，重新驗證 store
+原件及 accepted evidence；改變即 PREVIEW_STALE，不換新的 manifest。已完成 step 優先重播，
+未確認的 destructive step 先 read-back；resume 不因已有 preserve receipt 而省略下一個 mutation 的原件查核。
+測試 `test_cleanup_resume_rechecks_original_before_removing_accepted_replica` 以實際暫存 Git、bytes 與
+MockBat 驗證 preserve 後暫停，再恢復時原件缺失／損壞保留最後副本，原件未變則正常完成。
 Artifacts 不佔號，也不以建表 stamp 跳過其他包的資料遷移。Migration 測試 stamp 3 只證明保留任意既有版本；
 不假裝本分支已執行 deployment history migration。
 

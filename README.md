@@ -20,10 +20,37 @@ MCP client) and shell scripts can:
 * (opt-in) nudge a session: send a message, say "continue", interrupt it, answer its question;
 * (opt-in, separate tier) fan work out: start sessions in fresh git worktrees, review their diffs, merge the clean ones;
 * spot sessions that hit a Claude usage quota and move them to Codex in the same worktree (failover);
-* auto-approve permission prompts and clean up finished sessions behind deterministic gates.
+* auto-approve permission prompts behind deterministic gates, and reclaim managed resources through a reviewed preview.
 
 > This project is **not affiliated with or endorsed by** the BAT authors. The protocol was read from BAT's MIT-licensed
 > source (v3.2.12) and can change between BAT releases. Credit for BAT goes to TonyQ and its contributors.
+
+General managed starts keep the operator's `default_permission_mode`: `default` preserves BAT defaults and
+`allow_all` preserves bypass/full access (level `none`). Choose `confined` to restrict general starts too. Checkpoint
+and repair starts always use confined options: Claude `default`, or `acceptEdits` only with a verified BAT host
+account; Codex `workspace-write/on-request`. Host-account verification requires a separate trusted auditor SSH
+alias (`check_ssh_alias`), its UID (`check_uid`) and the target `bat_account`, set up by the operator. The auditor
+proves the entire system Python closure before executing it, then uses a narrow sudo rule and `-c` argv without
+the BAT account's shell or startup files. Unknown layouts or incomplete gates use plain default.
+The channel and verdict UID are checked; the auditor login must be beyond the BAT account's control.
+Without that channel, `unknown/check_channel_untrusted` means `fallback_default`, never acceptEdits.
+Defense in depth still requires a root-owned, non-writable BAT home and trusted startup files, plus system-owned
+Python/find. The verdict assumes no hostile BAT-UID process during the check; ptrace_scope is recorded, not an
+isolation proof. Install clean startup files before hardening; agent
+state may live in account-owned `.claude`, `.codex` and `.cache` subdirectories. Unhardened hosts report unknown and
+confined Claude uses plain `default`. Cwd alone offers no protection, and acceptEdits has no path check.
+BAT cannot configure network or writable roots, so confined Codex may break installs and localhost test servers.
+Task Service engine/recipes stay unchanged and expose their compatibility gap. Session reads and the Dashboard
+show creation evidence separately from current verification. A10 is not proven until W12's live acceptance run.
+See [configuration, limits and the live procedure](docs/design/confinement.md).
+
+The Dashboard start note follows capabilities `hosts[].confinement.host_account.start_effect`: `verified`,
+`recheck` (unchecked or stale; checked live at start), `fallback_default` (a supported hardening gap or no account
+declaration; confined Claude uses plain default), or `refused` (blocks Claude and Codex). The read itself runs no
+check and keeps the reason visible. A non-verified status alone does not mean starts are blocked.
+
+`START_IN_PROGRESS` means another process is starting this session: read it back later, do not retry blindly;
+`CONFINEMENT_START_UNSETTLED` requires read-back of a possibly sent start.
 
 It ships four things:
 
@@ -175,7 +202,7 @@ No paid API key is required.
 The task daemon also serves `/api/v1` on its loopback port: capabilities, a persisted session inventory with
 staleness, durable operations, and one event cursor with SSE. Issue a token per client
 (`batc api-token issue --actor ted-dashboard --scope observe --scope operate --scope start --scope integrate --scope
-manage --scope approve --scope merge --scope deploy`; `start` lets it start new agent sessions from checkpoints,
+manage --scope approve --scope merge --scope deploy --scope cleanup`; `start` lets it start new agent sessions from checkpoints,
 `integrate` lets it push results to a PR's head branch, `manage` edits projects and work items, `approve` accepts work
 items as done, `merge` and `deploy` back the Delivery buttons) and send it as
 `Authorization: Bearer`. MCP clients reach the same operations with `operation_submit`, `operation_cancel` and
@@ -254,6 +281,31 @@ mcp_servers:
 bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 ```
 
+
+Cleanup and retained work (`#/cleanup`, also linked from work item details) lists actual resources, all retention
+reasons and exact steps before applying a signed preview valid for 15 minutes. Changed state requires a new preview.
+HTTP `/cleanup-previews` and the `cleanup.apply` operation, MCP `cleanup_preview`, `cleanup_apply`,
+`cleanup_retained`, `cleanup_tombstones`, and CLI `batc resource-cleanup preview|apply|retained|history` share the
+contract. Scope `cleanup` reclaims managed sessions, worktrees and exact temporaries; explicit
+`release_undelivered` keeps commits and the branch and records that results were not delivered.
+A reviewed preview can also release capacity when all eligible sessions and their carriers are already absent.
+Only `discard_uncommitted` needs the person's `cleanup_discard` scope; Hermes/Grokbot tokens do not receive it,
+and agents never request it. Manual, unknown, task-owned, streaming, waiting and unresolved resources are retained.
+A ref is written before non-force removal. All `refs/batc/*`, clones and integration areas stay. Original IDs,
+locations, reasons, receipts and PR destinations remain searchable forever. Supported settings are
+`[cleanup] retained_refs="keep", history_retention="forever", permanent_delete=false`. This release lists actual
+retained content; restore and reviewed task cleanup follow in Part B. `auto_cleanup` still parses but is deprecated
+and never enables writes. Legacy `batc cleanup` / `session_cleanup` only evaluate, without worktree rehydration.
+Fanout stops the planner only with confirmation and every planned task started, keeping its worktree; failed
+or incomplete starts keep the planner for retry. See [docs/design/cleanup.md](docs/design/cleanup.md).
+
+```sh
+batc resource-cleanup preview --checkpoint cp_EXAMPLE --json > preview.json
+batc resource-cleanup apply --preview-file preview.json --key cleanup-review-1 --confirm
+batc resource-cleanup retained
+batc resource-cleanup history --original-id cp_EXAMPLE
+```
+
 ## Tools reference
 
 | Tool | What it does |
@@ -277,13 +329,13 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 | `quota_sessions(host?)` | Shortcut: Claude sessions stopped by a usage quota. |
 | `session_set_permissions(host, session_id, mode, confirm)` | `allow_all` (host must allow it) or `default`. Claude sessions are only switched while idle (switching mid-turn would end the turn); Codex applies it from its next turn. |
 | `approve_pending(host, confirm, dry_run?)` | Approves every pending permission prompt (not questions) with "don't ask again" and raises the session to allow-all. Only on `default_permission_mode = "allow_all"` hosts. |
-| `session_failover(host, session_id? \| all_exhausted, confirm, dry_run?, model?, force?, instructions?, archive_only?)` | Starts a Codex session that continues a quota-stopped connector-managed Claude session: same worktree when there is one, handoff prompt with the original task, latest instruction, recent output and git state (credentials redacted). Idempotent. `model` defaults to the host's `codex_model`. `instructions` replaces the default "continue the task" steps (for example "only commit the work in progress"); `archive_only` makes cleanup keep that branch unmerged. |
+| `session_failover(host, session_id? \| all_exhausted, confirm, dry_run?, model?, force?, instructions?, archive_only?)` | Starts a Codex session that continues a quota-stopped connector-managed Claude session: same worktree when there is one, handoff prompt with the original task, latest instruction, recent output and git state (credentials redacted). Idempotent. `model` defaults to the host's `codex_model`. `instructions` replaces the default "continue the task" steps (for example "only commit the work in progress"); `archive_only` marks the successor for preservation; reviewed release keeps its commits and branch. |
 | `session_relay(host, message, confirm, workspace? \| session_id?, brief?, earlier?, channel?, thread?, request_fanout=0, dry_run?, start_if_missing?)` | Relays a human's message verbatim to the workspace's most recent connector-managed session (or a given one; sessions created in BAT are never written to, and `start_if_missing` starts a new worktree session instead), plus an optional brief labeled as the relayer's interpretation and the BAT-STATUS footer. `request_fanout=N` asks the session for a `bat-fanout` plan. Returns the rendered text. |
 | `fanout_plan_session(host, workspace, message, confirm, max_items=4, brief?)` | Starts a Codex planner in its own worktree (for when no managed session can plan) that answers with a `bat-fanout` plan. |
 | `session_policy(host, session_id?)` | Read. The host's mutation table and managed roots, or one session's provenance (`manual`, `connector_managed`, `unknown`), folder ownership and per-action verdicts with refusal codes. |
-| `fanout_from_plan(host, session_id, confirm, dry_run?, agent="codex", model?, max_items=4)` | Starts one worktree session per task of the last `bat-fanout` block of that session, prompts unchanged, then cleans up a planner session. |
-| `session_cleanup(host, confirm, dry_run=true, session_id?)` | Decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE per orchestrated session behind hard gates, then acts (needs `auto_cleanup = true`). See docs/ORCHESTRATE.md. |
-| `session_record_verification(host, session_id, candidate_commit, command, exit_code, environment, log_ref, confirm)` | Records an externally run verification for the host's current clean commit; automatic cleanup checks it again before merging. CLI: `batc record-verification`. |
+| `fanout_from_plan(host, session_id, confirm, dry_run?, agent="codex", model?, max_items=4)` | Starts one worktree session per task of the last `bat-fanout` block of that session, prompts unchanged. Stops a planner only with confirmation and every task started; otherwise keeps it for retry. Its worktree is kept. |
+| `session_cleanup(host, confirm, dry_run=true, session_id?)` | Decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE per orchestrated session behind hard gates, read-only evaluation; apply returns `LEGACY_CLEANUP_DISABLED`; `auto_cleanup` is deprecated. See docs/ORCHESTRATE.md. |
+| `session_record_verification(host, session_id, candidate_commit, command, exit_code, environment, log_ref, confirm)` | Records an externally run verification for the host's current clean commit; legacy read-only evaluation checks it against the candidate commit. CLI: `batc record-verification`. |
 
 ## CLI
 
@@ -312,7 +364,7 @@ batc quota                                            # quota-stopped Claude ses
 batc approve-pending box1 --dry-run                   # then --confirm
 batc permissions box1 1a2b3c4d --mode allow_all --confirm
 batc failover box1 --all-exhausted --dry-run          # then --confirm
-batc cleanup box1                                     # dry run table; --apply --confirm to act
+batc cleanup box1                                     # read-only evaluation; --apply returns LEGACY_CLEANUP_DISABLED
 ```
 
 Every command accepts the global `--json` flag, placed before the command: `batc --json hosts`.
@@ -330,7 +382,7 @@ planner) writes a `bat-fanout` block:
 
 and `fanout_from_plan` starts exactly those tasks. Every stop ends with one line: `BAT-STATUS: MILESTONE <name>`,
 `BAT-STATUS: CONTINUE <next step>` or `BAT-STATUS: NEED-<HUMAN> <reason>`; triage uses it as a completion claim.
-It does not replace a commit-bound verification record for automatic cleanup.
+It does not replace a commit-bound verification record for legacy cleanup evaluation.
 
 ## Safety model (short)
 

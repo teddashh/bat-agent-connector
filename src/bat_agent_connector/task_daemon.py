@@ -23,6 +23,7 @@ from . import (
     api_auth,
     artifacts,
     checkpoints,
+    confinement,
     delivery,
     integration,
     pr_delivery,
@@ -192,6 +193,11 @@ class TaskDaemon:
         self.ops.context.update(artifact_store=self.artifact_store,
                                 artifact_host=ArtifactHost(self.adapter.verifier.settings.ssh_hosts,
                                                            artifact_settings.transfer_timeout_s))
+
+        self.fleet.confinement_runner = self.ops.context["git_runner"]
+        self.fleet.confinement_journal = self.journal
+        self.inventory.fleet.confinement_runner = self.fleet.confinement_runner
+        self.inventory.fleet.confinement_journal = self.journal
         self.api = ApiV1(self, allowed_origins=config.api.allowed_origins)
         self._initialized = True
 
@@ -486,7 +492,11 @@ class TaskDaemon:
         if method == "work_status":
             task = self.journal.get(task_id)
             routes = self.journal.routes(task_id)
-            return {**task, "delivery": self.journal.delivery(task_id),
+            return {**task, "session_confinement": {
+                        sid: confinement.session_fields(task["host"], sid,
+                                                       account=confinement.account_status(self.fleet, task["host"]))
+                        for sid in (task.get("session_id"), task.get("reviewer_session_id")) if sid},
+                    "delivery": self.journal.delivery(task_id),
                     "engine_decision": self.journal.engine_decision(task_id),
                     "minimal_review_gate": (self.journal.minimal_review_gate(
                         task_id, task["verification_commit"], task["verification_tree"])

@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from bat_agent_connector import api_auth, registry, service
+from bat_agent_connector import api_auth, confinement, registry, service
 from bat_agent_connector.channels import GUARDED_CHANNELS, ORCHESTRATE_CHANNELS, WRITE_CHANNELS
 from bat_agent_connector.errors import InvokeTimeout
 from bat_agent_connector.inventory import Inventory, InventorySettings
@@ -337,6 +337,61 @@ async def test_inventory_keeps_offline_hosts_stale_and_marks_gone_after_two_miss
 
 
 # --------------------------------------------------------------------------- HTTP
+@pytest.mark.parametrize("case,status,reason,effect", [
+    ("unchecked", "unknown", "unchecked_or_stale", "recheck"),
+    ("stale", "unknown", "unchecked_or_stale", "recheck"),
+    ("fresh", "unknown", "check_executable_untrusted", "fallback_default"),
+    ("fresh", "unknown", "login_environment_writable", "fallback_default"),
+    ("fresh", "unknown", "login_shell_unsupported", "fallback_default"),
+    ("fresh", "unknown", "check_channel_untrusted", "fallback_default"),
+    ("fresh", "mismatch", "protected_root_writable", "refused"),
+    ("fresh", "unknown", "ssh_alias_unavailable", "refused"),
+    ("fresh", "verified", "read_only_account_check", "verified"),
+    ("undeclared", "unknown", "unchecked_or_stale", "fallback_default"),
+])
+async def test_a10_capabilities_account_start_effect_is_cached_read_only(served, mock, case, status, reason, effect):
+    from tests.test_confinement import ACCOUNT, AccountRunner, account_observation
+
+    class ReadOnlyRunner(AccountRunner):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def available(self, host):
+            self.calls.append("available")
+            return True
+
+        async def run_account_check(self, *args, **kwargs):
+            self.calls.append("run_account_check")
+            return await super().run_account_check(*args, **kwargs)
+
+    d, port = served
+    d.fleet.config.host("h1").confinement = {**ACCOUNT, "check_max_age_s": 45} if case != "undeclared" else {}
+    d.fleet.confinement_runner = ReadOnlyRunner()
+    if case in {"fresh", "stale"}:
+        cached = confinement.account_status(d.fleet, "h1")
+        cached.update(account_observation("verified" if case == "stale" else status,
+                                          "read_only_account_check" if case == "stale" else reason),
+                      checked_at=time.time() - (46 if case == "stale" else 0))
+        d.fleet._confinement_checks = {"h1": cached}
+    tok = token(d, "test-observer", "observe")
+    try:
+        code, caps = await http(port, "GET", "/api/v1/capabilities", tok=tok)
+        assert code == 200
+        account = caps["hosts"][0]["confinement"]["host_account"]
+        assert (account["status"], account["reason"], account["start_effect"]) == (status, reason, effect)
+        assert account["declared"] is (case != "undeclared")
+        # Daemon MCP capabilities and the CLI/MCP host read use the same projection.
+        code, rpc = await http(port, "POST", "/rpc", tok=tok,
+                               body={"method": "api_capabilities", "params": {}})
+        assert code == 200 and rpc["result"]["hosts"][0]["confinement"]["host_account"] == account
+        hosts = await service.hosts_list(d.fleet, probe=False)
+        assert hosts["hosts"][0]["confinement"]["host_account"] == account
+        assert not d.fleet.confinement_runner.calls and not mock.invokes
+    finally:
+        await d.fleet.close()
+
+
 async def test_http_auth_host_origin_and_reads(served, mock):
     d, port = served
     assert (await http(port, "GET", "/api/v1/version"))[0] == 200
@@ -715,3 +770,53 @@ async def test_inventory_keeps_what_one_refresh_did_not_observe(mock, tmp_path):
     finally:
         await inv.close()
         journal.close()
+
+
+async def test_a10_session_capabilities_inventory_and_triage_share_evidence(served, mock):
+    from bat_agent_connector import orchestrate, triage
+    d, port = served
+    r = await orchestrate.session_start(d.fleet, "h1", "demo-project", "codex", confirm=True, write_scope="confined")
+    sid = r["session_id"]
+    await d.inventory.refresh_host("h1")
+    tok = token(d, "test-observer", "observe")
+    status, caps = await http(port, "GET", "/api/v1/capabilities", tok=tok)
+    assert status == 200 and caps["hosts"][0]["confinement"]["agents"]["codex"]["gap"] == "sandbox_enforcement_unverified"
+    assert caps["hosts"][0]["confinement"]["network_configurable"] is False
+    status, detail = await http(port, "GET", f"/api/v1/sessions/h1/{sid}", tok=tok)
+    assert status == 200 and detail["session"]["confinement"] == r["confinement"]
+    status, listing = await http(port, "GET", "/api/v1/sessions", tok=tok)
+    row = next(s for s in listing["sessions"] if s["session_id"] == sid)
+    assert row["confinement"] == r["confinement"] and row["write_scope"] == "confined"
+    rows = (await triage.sessions_triage(d.fleet, use_jev="never"))["sessions"]
+    assert next(s for s in rows if s["session_id"] == sid)["confinement"] == r["confinement"]
+    manual = next(s for s in listing["sessions"] if s["session_id"] == MANUAL)
+    assert manual["confinement"]["level"] == "none" and manual["api_access"] == "read_only"
+    # The observation detail wrapper must enrich the row it actually returns.
+    mock.metas[sid]["codexSandboxMode"] = "danger-full-access"
+    status, live = await http(port, "GET", f"/api/v1/sessions/h1/{sid}?live=true", tok=tok)
+    assert status == 200 and live["history_available"] is True
+    assert live["session"]["current_verification"]["status"] == "mismatch"
+    assert live["session"]["confinement"] == r["confinement"]
+
+
+async def test_a10_cached_legacy_inventory_exposes_unknown_evidence_without_rewriting(served):
+    d, port = served
+    await d.inventory.refresh_host("h1")
+    row = d.journal.db.execute("SELECT body FROM sessions_observed WHERE host=? AND session_id=?",
+                               ("h1", MANUAL)).fetchone()
+    body = json.loads(row[0])
+    for field in ("confinement", "current_verification", "write_scope"):
+        body.pop(field, None)
+    original = json.dumps(body)
+    d.journal.db.execute("UPDATE sessions_observed SET body=? WHERE host=? AND session_id=?", (original, "h1", MANUAL))
+    tok = token(d, "test-observer", "observe")
+    status, out = await http(port, "GET", "/api/v1/sessions", tok=tok)
+    legacy = next(s for s in out["sessions"] if s["session_id"] == MANUAL)
+    assert status == 200 and legacy["confinement"]["level"] == "none"
+    assert legacy["confinement"]["verification"]["status"] == "unknown"
+    assert d.journal.db.execute("SELECT body FROM sessions_observed WHERE host=? AND session_id=?",
+                                ("h1", MANUAL)).fetchone()[0] == original
+    status, hosts = await http(port, "GET", "/api/v1/hosts", tok=tok)
+    assert status == 200 and hosts["hosts"][0]["confinement"]["host_account"]["declared"] is False
+    d.journal.db.execute("UPDATE hosts_observed SET reachable=0 WHERE host=?", ("h1",))
+    assert d.inventory.get_session("h1", MANUAL)["current_verification"]["reason"] == "inventory_stale"
