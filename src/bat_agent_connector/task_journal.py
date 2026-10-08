@@ -93,6 +93,9 @@ class Journal:
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.executescript("""
             BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS confinement_host_checks (
+                host TEXT PRIMARY KEY, evidence TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS tasks (
                 task_id TEXT PRIMARY KEY, idem_key TEXT UNIQUE NOT NULL, payload_hash TEXT NOT NULL,
                 project TEXT NOT NULL, host TEXT NOT NULL, workspace TEXT NOT NULL,
@@ -348,6 +351,9 @@ class Journal:
 
         from .observation import install
         install(self)
+
+        from .cleanup import migrate
+        migrate(self)
 
     def _drop_legacy_outbox(self):
         """Remove the retired chat outbox so no historical event can ever be published.

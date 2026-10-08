@@ -83,11 +83,13 @@ async def test_profile_missing_token_never_reads_admin_file_or_uses_task_capabil
     try:
         for name, args in [
             ("capabilities_get", {}), ("inventory_sessions", {}), ("work_status", {"task_id": "missing"}),
+            ("cleanup_preview", {"target": {"kind": "host", "host": "h1"}}),
+            ("cleanup_retained", {}), ("cleanup_tombstones", {}),
             ("work_submit", {"project": "p", "host": "h1", "workspace": "ws1",
                              "original_words": "refused", "idempotency_key": "refused"}),
             ("operation_cancel", {"operation_id": "op_missing", "confirm": True}),
         ]:
-            assert "token" in (await call(server, name, args)).lower()
+            assert "BATC_API_TOKEN" in await call(server, name, args)
         assert not d.journal.db.execute("SELECT 1 FROM operations").fetchone()
     finally:
         await fleet.close()
