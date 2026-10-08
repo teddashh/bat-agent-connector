@@ -2,6 +2,10 @@
 
 ## Next release (unreleased)
 
+- Delivery journal DDL ([design](docs/design/delivery.md), plan §09/§28, C04/C07 storage): create the preview,
+  metadata-settlement and scope-read tables and preview index on every open with idempotent DDL, preserving
+  user_version and saved previews. Version numbers belong to allocated one-time data steps; Part B follows this rule.
+
 - Delivery metadata conflict settlement ([design](docs/design/delivery.md), plan §09/§10/§15, C07): an unresolved
   cancelled or UNCERTAIN_UNRESOLVED metadata write that still shows a third value after ten minutes now saves a
   conflict receipt and before/intended/observed refs. This releases the PR for a fresh-digest update and stops

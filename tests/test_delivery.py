@@ -779,23 +779,34 @@ async def test_metadata_cancelled_unknown_write_stays_blocking_until_proven(make
     assert gh.count("PATCH", ".") == 1
 
 
-def test_part_a_preview_migration_reopens_without_data_change(tmp_path):
+@pytest.mark.parametrize("version", [1, 8])
+def test_part_a_preview_migration_reopens_without_data_change(tmp_path, version):
+    """Plan §09/§28: delivery DDL fills missing schema without taking a data-migration version."""
     from bat_agent_connector.task_journal import Journal
     path = tmp_path / "old.db"
     j = Journal(path)
+    j.db.execute("DROP TABLE pr_merge_previews")
+    j.db.execute("DROP TABLE pr_metadata_settlements")
+    j.db.execute("DROP TABLE pr_merge_scope_reads")
+    j.db.execute("PRAGMA user_version=1" if version == 1 else "PRAGMA user_version=8")
+    expected = {"pr_merge_previews": "table", "pr_merge_previews_pr": "index",
+                "pr_metadata_settlements": "table", "pr_merge_scope_reads": "table"}
+    schema_query = "SELECT name,type,sql FROM sqlite_master WHERE name IN (?,?,?,?) ORDER BY name"
+    assert not j.db.execute(schema_query, tuple(expected)).fetchall()
+    j.close()
+    j = Journal(path)
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == version
+    schema = j.db.execute(schema_query, tuple(expected)).fetchall()
+    assert {r["name"]: r["type"] for r in schema} == expected
     doc = {"fixed": "scope"}
-    j.db.execute("INSERT INTO pr_merge_previews VALUES (?,?,?,?,?,?,?)", ("mpv_" + "0" * 32, "o/r", 7,
-                                                                         json.dumps(doc), "digest", 1, 2))
-    j.db.execute("PRAGMA user_version=1")
+    preview = ("mpv_" + "0" * 32, "o/r", 7, json.dumps(doc), "digest", 1, 2)
+    j.db.execute("INSERT INTO pr_merge_previews VALUES (?,?,?,?,?,?,?)", preview)
     j.close()
     j = Journal(path)
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == 3
-    assert pr_delivery.get_preview(j.db, "mpv_" + "0" * 32) == doc
-    j.db.execute("PRAGMA user_version=8")  # rebase renumbering preserves both the row and later migrations
-    j.close()
-    j = Journal(path)
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == 8
-    assert pr_delivery.get_preview(j.db, "mpv_" + "0" * 32) == doc
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == version
+    assert j.db.execute(schema_query, tuple(expected)).fetchall() == schema
+    assert tuple(j.db.execute("SELECT * FROM pr_merge_previews").fetchone()) == preview
+    assert pr_delivery.get_preview(j.db, preview[0]) == doc
     j.close()
 
 
