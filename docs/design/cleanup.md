@@ -162,6 +162,9 @@ Apply 需 cleanup；release 只需 cleanup＋明選 choice。Actor 從 Principal
 choices；Resume 不重新授權。從 operation.running 的 api_events 記錄 resumed_by 作 receipt audit，不作 gate。
 Cancel 阻止未送出的 mutations；已送出的 uncertain steps 必須先 reconcile。Authorization 由 action admission
 固定於 server-only accepted metadata，再保存 cleanup_runs；不改 operations table。
+Admission 必須在 OperationService hash 公開 request 之後、persist params 之前寫入 `_accepted_authorization`
+（actor／scopes／choices）。Client 傳入這個欄位回 422 INVALID_PARAMS；同 key／同公開 request retry 必須
+回同 operation，不讓 server metadata 改變 request hash。測試固定此界面，operations-unification rebase 時保留。
 
 共享 `cleanup.guard()` 從原 registry JSON 的 cleanup_guards 讀 reservations／confirmed tombstones。
 Guard marker 在 registry._locked 同一 flock 下寫，原 registry._write 保留這些額外欄位；另在 session row
@@ -383,7 +386,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | legacy只讀、config解析、planner只stop、跨processguard | test_e01_legacy_apply_is_disabled_and_auto_cleanup_still_loads、test_e01_fanout_stops_planner_and_keeps_worktree、test_e01_guard_refuses_legacy_writes_on_reserved_and_cleaned_resources |
 | boundedread／serialization／deadline | test_e01_previews_serialize_per_host_and_share_read_deadline |
 | attachmentreplicas只豁免exact manifest／exacttemps | test_e01_attachment_replicas_are_removed_without_discard_scope、test_e01_edited_or_extra_replica_content_counts_as_uncommitted、test_e01_replicas_without_manifest_are_ordinary_content、test_e01_replica_anomalies_require_reviewed_discard（missing/link/hardlink/directory）、test_e01_replica_edit_after_preview_is_stale、test_e01_lost_replies_reconcile_each_cleanup_phase（discard.replica）、test_e01_exact_temporary_requires_creation_markers_and_never_sweeps、test_e01_empty_integration_temporary_has_exact_intent_and_no_restore_promise |
-| acceptedauthority／載體不被guard退休 | test_e01_accepted_authority_survives_key_rotation_and_carrier_stays_usable |
+| acceptedauthority由server記錄／public request retry／載體不被guard退休 | test_e01_accepted_authorization_is_server_recorded（HTTP 422、persisted actor/scopes/choices、同key retry）、test_e01_accepted_authority_survives_key_rotation_and_carrier_stays_usable |
 | migration原histories／DDL不占user_version／keep無sweep | test_cleanup_migration_is_atomic_additive_and_preserves_history（version 1與3、第二次open不變）、test_e01_keep_defaults_reject_purge_and_never_sweep_by_name |
 | §10三入口／§19Dashboard | test_e01_cleanup_adapters_share_the_action_contract；Playwright（含lostreply/reload同key） en/zh-TW/390px #/cleanup與workitementry／無restore／無null/undefined/[object文字 |
 | Part B延期 | taskcoordinator/reservation、TaskDaemonbackfill、restore/lostadd新tests；**container不屬Part B**另規格 |

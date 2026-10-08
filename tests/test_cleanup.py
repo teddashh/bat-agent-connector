@@ -80,6 +80,49 @@ async def test_e01_preview_is_pure_and_signed_plan_cannot_be_changed(daemon, moc
         daemon.ops.create(CLEANER, **req)
 
 
+async def test_e01_accepted_authorization_is_server_recorded(daemon, mock):
+    from tests.test_api_v1 import http
+
+    cp, op = await setup_work(daemon, mock)
+    wt = Path(op["result"]["worktree_path"])
+    (wt / "result.txt").write_text("undelivered result")
+    git(wt, "add", ".")
+    git(wt, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-qm", "result")
+    (wt / "uncommitted.txt").write_text("reviewed discard")
+    target = {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]}
+    doc = await cleanup.preview(daemon.ops, DISCARDER, target)
+    item = next(i for i in doc["items"] if i["kind"] == "worktree")
+    choices = {"discard_uncommitted": [item["resource_id"]], "release_undelivered": [item["resource_id"]]}
+    doc = await cleanup.preview(daemon.ops, DISCARDER, target, choices)
+    public_request = cleanup.apply_request(doc, "acceptance-authority")
+    token = api_auth.issue(daemon.journal.db, DISCARDER.actor, sorted(DISCARDER.scopes))
+    server = await asyncio.start_server(daemon._handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        forged = copy.deepcopy(public_request)
+        forged["params"]["_accepted_authorization"] = {"actor": "spoofed", "scopes": [], "choices": {}}
+        status, body = await http(port, "POST", "/api/v1/operations", tok=token, body=forged)
+        assert status == 422 and body["error"]["code"] == "INVALID_PARAMS"
+        assert not daemon.journal.db.execute("SELECT 1 FROM operations WHERE action='cleanup.apply'").fetchone()
+        status, body = await http(port, "POST", "/api/v1/operations", tok=token, body=public_request)
+        assert status == 202 and body["created"], body
+        accepted = body["operation"]
+        saved = json.loads(daemon.journal.db.execute("SELECT params FROM operations WHERE operation_id=?",
+                           (accepted["operation_id"],)).fetchone()[0])
+        assert saved["_accepted_authorization"] == {"actor": DISCARDER.actor, "scopes": sorted(DISCARDER.scopes),
+                                                  "choices": choices}
+        assert "_accepted_authorization" not in public_request["params"]
+        status, body = await http(port, "POST", "/api/v1/operations", tok=token, body=public_request)
+        assert status == 200 and not body["created"], body
+        assert body["operation"]["operation_id"] == accepted["operation_id"]
+        assert daemon.journal.db.execute("SELECT count(*) FROM operations WHERE action='cleanup.apply'").fetchone()[0] == 1
+        await daemon.ops.drain(timeout=60)
+        assert daemon.ops.get(accepted["operation_id"])["status"] == "succeeded"
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
 async def test_e01_preserve_precedes_nonforced_remove_and_cas_checks_delivered_refs(daemon, mock, human):
     cp, op = await setup_work(daemon, mock)
     doc = await cleanup.preview(daemon.ops, CLEANER, {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]})
