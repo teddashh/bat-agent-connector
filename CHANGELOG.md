@@ -61,6 +61,8 @@
   operations, no-key sentinel, null effect projections and A01/A05/A08 all-entry-point coverage remain Part B.
   Task sends that lose a pre-frame race to pause now fail with `TASK_PAUSED` and replay that refusal; resume
   requires a new send key. Success requires the operation's accepted/settled command receipt (A05/A07, §09/§10).
+  Locked verification, request-Ted and stage actions now recheck their state rules before the first effect,
+  refusing stale admission with TASK_PAUSED/TASK_STATE_BLOCKED while preserving succeeded receipt replay (A05/A07).
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps

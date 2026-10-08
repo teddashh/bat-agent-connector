@@ -69,6 +69,10 @@ def admit_stage(ops, principal, target, params, pre):
             or not isinstance(params.get("ref"), str) or not params["ref"].strip() or len(params["ref"]) > 300
             or params.get("actor", "service") not in {"service", "ted", "hermes", "executor"}):
         raise OperationError("INVALID_PARAMS", "stage, ref and actor must be valid", 422)
+    check_stage_state(task)
+
+
+def check_stage_state(task):
     if task["state"] != "done" or not task["verification_commit"]:
         raise OperationError("TASK_STATE_BLOCKED", "only a verified done task can be marked", 409)
 
@@ -97,6 +101,10 @@ def admit_scoped(ops, principal, target, params, pre):
     task = admit_task(ops, principal, target, params, pre)
     if task["engine"] != "goose" or (not principal.admin and not _task_capability(ops, principal, task["task_id"])):
         raise OperationError("FORBIDDEN", "a Goose task capability is required", 403)
+    check_scoped_state(task)
+
+
+def check_scoped_state(task):
     if task["paused"]:
         raise OperationError("TASK_PAUSED", "task is paused", 409)
     if task["state"] in {"done", "failed", "human_owned", "needs_ted", "uncertain"}:
@@ -145,7 +153,11 @@ async def run(ctx):
         if receipt and ctx.op["action"] in {"task.resume", "task.mark_stage", "task.verify", "task.request_ted"}:
             return json.loads(receipt["response"])
         if not receipt and ctx.op["action"] != "task.submit":
-            admit_task(ctx.service, None, ctx.target, ctx.params, ctx.preconditions)
+            task = admit_task(ctx.service, None, ctx.target, ctx.params, ctx.preconditions)
+            if ctx.op["action"] == "task.mark_stage":
+                check_stage_state(task)
+            elif ctx.op["action"] in {"task.verify", "task.request_ted"}:
+                check_scoped_state(task)
         if ctx.op["action"] == "task.verify":
             task = ctx.service.journal.get(ctx.target["task_id"])
             task_control.check(ctx.service.journal, task["task_id"], task["host"], task["session_id"],

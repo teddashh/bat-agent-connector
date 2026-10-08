@@ -614,6 +614,203 @@ async def test_a05_verify_request_ted_and_stage_use_original_receipts(owned, mon
         await d.call("work_mark_stage", {**stage, "ref": "commit-b"})
 
 
+def task_effect_snapshot(d, tid):
+    return {"task": d.journal.get(tid), "verification": d.journal.observed_verification(tid),
+            "delivery": d.journal.delivery(tid), "events": d.journal.events(tid),
+            "commands": d.journal.commands(tid)}
+
+
+def trusted_evidence():
+    return {"candidate_commit": "a" * 40, "tree_hash": "b" * 40, "command": "trusted tests",
+            "exit_code": 0, "log_ref": "log-1", "output_sha256": "c" * 64, "source": "observed_runner"}
+
+
+def finish_verified_task(d, tid):
+    evidence = trusted_evidence()
+    d.journal.change(tid, "verifying")
+    d.journal.record_observed_verification(tid, evidence)
+    return d.journal.change(tid, "done", fields={"verification_commit": evidence["candidate_commit"],
+                                                "verification_tree": evidence["tree_hash"], "result": "tests passed"})
+
+
+def locked_task_operation(d, tid, action, key):
+    params = {"task.request_ted": {"reason": "needs a decision"}, "task.verify": {},
+              "task.mark_stage": {"stage": "adopted", "ref": "commit-a"}}[action]
+    return d.ops.create(api_auth.Principal("local-admin", frozenset(), admin=True),
+                        action=action, target={"task_id": tid}, params=params, idempotency_key=key)
+
+
+async def wait_for_operation_running(d, op):
+    async def running():
+        while d.ops.get(op["operation_id"])["status"] == "accepted":
+            await asyncio.sleep(0)
+        assert d.ops.get(op["operation_id"])["status"] == "running"
+    await asyncio.wait_for(running(), 5)
+
+
+def assert_locked_action_refusal(d, tid, op, snapshot, code):
+    refused = d.ops.get(op["operation_id"])
+    assert refused["status"] == "failed" and refused["error_code"] == code
+    assert refused["steps"] == []  # the state check happens before any effect or receipt intent
+    assert task_effect_snapshot(d, tid) == snapshot
+    replay, created = locked_task_operation(d, tid, op["action"], op["idem_key"])
+    assert not created and d.ops.get(replay["operation_id"]) == refused
+
+
+@pytest.mark.parametrize("action", ["task.request_ted", "task.verify"])
+async def test_a05_locked_task_action_refuses_task_completed_by_tick(owned, mock, monkeypatch, action):
+    d, tid = owned
+    entered, release = asyncio.Event(), asyncio.Event()
+    completed = {}
+    d.journal.change(tid, "verifying")
+    d.coordinator.verification_quiet_s = 0
+
+    async def idle(*args):
+        return {"streaming": False, "pending": None}
+
+    async def candidate(*args):
+        return {"clean": True, "candidate_commit": "a" * 40, "tree_hash": "b" * 40}
+
+    async def verifying(*args):
+        entered.set()
+        await release.wait()
+        return trusted_evidence()
+
+    original_tick = d.coordinator._tick
+
+    async def completing(task_id):
+        result = await original_tick(task_id)
+        completed.update(task_effect_snapshot(d, tid))  # captured before tick releases the task lock
+        return result
+
+    monkeypatch.setattr(d.adapter, "read", idle)
+    monkeypatch.setattr(d.adapter, "candidate_identity", candidate)
+    monkeypatch.setattr(d.adapter, "run_verification", verifying)
+    monkeypatch.setattr(d.coordinator, "_tick", completing)
+    tick = asyncio.create_task(d.coordinator.tick(tid))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        op, _ = locked_task_operation(d, tid, action, "tick-completes")
+        worker = asyncio.create_task(d.ops.drain())
+        await wait_for_operation_running(d, op)
+    finally:
+        release.set()
+        await tick
+    await worker
+    assert completed["task"]["state"] == "done" and completed["delivery"]["stage"] == "verified"
+    assert_locked_action_refusal(d, tid, op, completed, "TASK_STATE_BLOCKED")
+    assert not writes(mock)
+
+
+@pytest.mark.parametrize("change", ["state", "verification"])
+async def test_a05_mark_stage_rechecks_verified_done_after_task_lock(owned, mock, change):
+    d, tid = owned
+    finish_verified_task(d, tid)
+    async with d.coordinator._task_locks.setdefault(tid, asyncio.Lock()):
+        op, _ = locked_task_operation(d, tid, "task.mark_stage", "stage-race")
+        worker = asyncio.create_task(d.ops.drain())
+        await wait_for_operation_running(d, op)
+        # Model a corrected completion record; normal journal transitions cannot leave a terminal task.
+        assignment = "state='running'" if change == "state" else "verification_commit=NULL"
+        d.journal.db.execute(f"UPDATE tasks SET {assignment} WHERE task_id=?", (tid,))
+        snapshot = task_effect_snapshot(d, tid)
+    await worker
+    assert_locked_action_refusal(d, tid, op, snapshot, "TASK_STATE_BLOCKED")
+    assert not writes(mock)
+
+
+@pytest.mark.parametrize("action", ["task.request_ted", "task.verify"])
+async def test_a05_scoped_task_action_rechecks_pause_after_task_lock(owned, mock, action):
+    d, tid = owned
+    async with d.coordinator._task_locks.setdefault(tid, asyncio.Lock()):
+        op, _ = locked_task_operation(d, tid, action, "scoped-pause-race")
+        worker = asyncio.create_task(d.ops.drain())
+        await wait_for_operation_running(d, op)
+        await d.coordinator.pause(tid)
+        snapshot = task_effect_snapshot(d, tid)
+    await worker
+    assert_locked_action_refusal(d, tid, op, snapshot, "TASK_PAUSED")
+    assert not writes(mock)
+
+
+@pytest.mark.parametrize("action,method", [("task.request_ted", "task_request_ted"),
+                                         ("task.verify", "task_run_verification"), ("task.mark_stage", "work_mark_stage")])
+async def test_a05_locked_task_action_replays_receipt_after_state_change(owned, monkeypatch, action, method):
+    d, tid = owned
+
+    async def verifying(*args):
+        return trusted_evidence()
+
+    monkeypatch.setattr(d.adapter, "run_verification", verifying)
+    if action == "task.mark_stage":
+        finish_verified_task(d, tid)
+    params = {"task.request_ted": {"reason": "needs a decision"}, "task.verify": {},
+              "task.mark_stage": {"stage": "adopted", "ref": "commit-a"}}[action]
+    first = await d.call(method, {"task_id": tid, "idempotency_key": "receipt-replay", "control_version": 0, **params})
+    original = d.ops.get(first["operation_id"])
+    if action == "task.mark_stage":
+        d.journal.db.execute("UPDATE tasks SET verification_commit=NULL WHERE task_id=?", (tid,))
+    elif action == "task.request_ted":
+        d.journal.change(tid, "failed")
+    else:
+        d.journal.pause(tid)
+    snapshot = task_effect_snapshot(d, tid)
+    # Resume a worker after the succeeded receipt committed, before the operation result was saved.
+    d.journal.db.execute("UPDATE operations SET status='running',result=NULL WHERE operation_id=?", (first["operation_id"],))
+    await d.ops.drain()
+    replay = d.ops.get(first["operation_id"])
+    assert replay["status"] == "succeeded" and replay["result"] == original["result"]
+    assert replay["steps"] == original["steps"] and task_effect_snapshot(d, tid) == snapshot
+
+
+@pytest.mark.parametrize("action", ["task.pause", "task.resume"])
+async def test_a05_task_controls_do_not_wait_for_task_lock_or_change_terminal_task(owned, mock, action):
+    d, tid = owned
+    async with d.coordinator._task_locks.setdefault(tid, asyncio.Lock()):
+        op, _ = d.ops.create(api_auth.Principal("local-admin", frozenset(), admin=True), action=action,
+                             target={"task_id": tid}, idempotency_key="control-race")
+        finish_verified_task(d, tid)
+        snapshot = task_effect_snapshot(d, tid)
+        await asyncio.wait_for(d.ops.drain(), 5)
+    assert d.ops.get(op["operation_id"])["status"] == "succeeded"
+    assert task_effect_snapshot(d, tid) == snapshot and not writes(mock)
+
+
+async def test_a05_reconcile_refuses_command_settled_while_waiting_for_task_lock(owned, mock, monkeypatch):
+    d, tid = owned
+    cmd, _ = d.journal.command(tid, "send", SID, {"purpose": "goose:one", "before": {}, "prompt_sha256": "d" * 64}, "pending")
+    d.journal.command_status(cmd["command_id"], "uncertain")
+    d.journal.change(tid, "uncertain")
+    cap = d.journal.issue_reconcile_capability(tid, cmd["command_id"])
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def readback(*args):
+        entered.set()
+        await release.wait()
+        return {"accepted": True, "turn_attribution": "exact_echo", "turn_marker": cmd["message_id"]}
+
+    monkeypatch.setattr(d.adapter, "reconcile_send", readback)
+    tick = asyncio.create_task(d.coordinator.tick(tid))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        params = {"outcome": "not_delivered", "actor": "operator", "source": "ticket-1", "evidence": "checked the exact turn"}
+        target = {"task_id": tid, "command_id": cmd["command_id"]}
+        principal = d.capability_principal(cap, "task.command.reconcile", target, "settled-race")
+        op, _ = d.ops.create(principal, action="task.command.reconcile", target=target, params=params,
+                             idempotency_key="settled-race")
+        worker = asyncio.create_task(d.ops.drain())
+        await wait_for_operation_running(d, op)
+    finally:
+        release.set()
+        await tick
+    await worker
+    refused = d.ops.get(op["operation_id"])
+    assert refused["status"] == "failed" and refused["error_code"] == "INVALID_PARAMS" and refused["steps"] == []
+    assert d.journal.get(tid)["state"] == "running" and d.journal.command_get(cmd["command_id"])["status"] == "accepted"
+    assert d.journal.authorize_reconcile_capability(cap, tid, cmd["command_id"])
+    assert d.journal.reconciliations(tid) == [] and not writes(mock)
+
+
 async def test_a05_reconcile_capability_consumption_and_receipt_are_atomic(owned, monkeypatch):
     d, tid = owned
     cmd, _ = d.journal.command(tid, "send", SID, {"purpose": "goose:one", "prompt_sha256": "d" * 64}, "uncertain-send")
