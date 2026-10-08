@@ -269,6 +269,16 @@ async def test_token_is_read_per_request_and_a_refused_read_after_the_merge_requ
     assert gh.count("PUT", "merge-async") == 1
 
 
+async def test_a_token_missing_mid_rotation_still_sends_the_dispatch_with_the_last_good_one(make_daemon, gh,
+                                                                                            monkeypatch):
+    d = make_daemon()
+    monkeypatch.delenv("FAKE_GH_TOKEN")  # the refresher is rewriting it
+    op, _ = deploy_op(d)
+    sent = await settle(d, op["operation_id"], rounds=1)
+    assert sent["status"] == "waiting_external" and sent["external_refs"]["deploy_run_id"], sent
+    assert gh.count("POST", "dispatches") == 1
+
+
 async def test_a_refused_read_before_any_write_still_fails_fast(make_daemon, gh):
     d = make_daemon()
     op, _ = merge_op(d, number=8)  # no such PR

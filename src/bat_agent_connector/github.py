@@ -38,8 +38,8 @@ class GitHubClient:
     def __init__(self, cfg: GitHubConfig, token: str | None = None) -> None:
         self.cfg = cfg
         self._fixed_token = token
-        if token is None:
-            cfg.token()  # a missing token disables delivery at startup (TokenUnavailable)
+        # A missing token disables delivery at startup (TokenUnavailable). Later requests resolve it again.
+        self._last_token = token if token is not None else cfg.token()
         host = urlsplit(cfg.api_url).hostname or ""
         # A loopback test server must not go through the egress proxy; real GitHub uses the environment's proxy.
         handlers = [urllib.request.ProxyHandler({})] if host in {"127.0.0.1", "localhost"} else []
@@ -49,10 +49,14 @@ class GitHubClient:
         url = self.cfg.api_url + path + (("?" + urlencode({k: v for k, v in query.items() if v is not None}))
                                          if query else "")
         data = json.dumps(body).encode() if body is not None else None
-        try:
-            token = self._fixed_token if self._fixed_token is not None else self.cfg.token()
-        except TokenUnavailable:  # mid-rotation: nothing was sent; the caller reads back or retries later
-            raise GitHubAmbiguous(f"GitHub {method} {path} not sent: the token is unavailable") from None
+        token = self._fixed_token
+        if token is None:
+            try:
+                token = self._last_token = self.cfg.token()
+            except TokenUnavailable:
+                # Mid-rotation: send with the last good token so GitHub's answer decides. Raising here would record
+                # a write that was never sent as uncertain, and a dispatch read-back can never prove it unsent.
+                token = self._last_token
         req = urllib.request.Request(url, data=data, method=method, headers={  # noqa: S310 - https or loopback
             "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": self.cfg.api_version,
             "Authorization": "Bearer " + token, "User-Agent": f"bat-agent-connector/{__version__}",
