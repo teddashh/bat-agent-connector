@@ -255,6 +255,8 @@ async def test_b02_session_specific_stale_gone_fresh_and_get_no_writes(mock, tmp
     start = j.api_head()
     await inv.refresh_host("h1")
     assert inv.get_session("h1", MANUAL)["state"]["enumeration"] == "missing"
+    assert inv.get_session("h1", MANUAL)["state"]["tab"] == "no_tab"
+    assert not inv.get_session("h1", MANUAL)["state"]["evidence"]["connection"]["stale"]
     await inv.refresh_host("h1")
     assert inv.get_session("h1", MANUAL)["state"]["enumeration"] == "gone"
     await inv.refresh_host("h1")
@@ -472,11 +474,20 @@ def test_b01_warm_binding_closes_reserved_intent_without_overwriting(tmp_path):
     j = Journal(tmp_path / "j.db")
     t = task(j, "a")
     cmd, _ = j.command(t["task_id"], "start_lead", "reserved", {"warm_session_id": "reused"}, "warm")
+    # A cursor captured before the bind must still list the command's old pending relation.
+    j.add_branch(t["task_id"], session_id="earlier", provider="codex", role="reviewer", reason="start")
+    obs = Observation(j)
+    baseline = obs.relations("execution", t["task_id"], limit=1)
     j.command_bind_session(cmd["command_id"], "reused")
     j.command_status(cmd["command_id"], "settled")
     obs = Observation(j)
     assert obs.relations("session", "h1/reserved")["relations"][0]["status"] == "closed"
     assert obs.relations("session", "h1/reused")["relations"][0]["status"] == "bound"
+    original = obs.relations("session", "h1/reserved")["relations"][0]
+    assert original["command_ids"] == [cmd["command_id"]]
+    tail = obs.relations("execution", t["task_id"], limit=1, cursor=baseline["next_cursor"])
+    assert tail["as_of"] == baseline["as_of"]
+    assert baseline["relations"][0]["command_ids"] == [cmd["command_id"]]
     j.close()
 
 
@@ -525,4 +536,20 @@ def test_b03_backfilled_occurrence_time_filters_are_not_migration_time(tmp_path)
     obs = Observation(j)
     assert [e["seq"] for e in obs.history("session", "h1/sid", since=123, until=124)["events"]] == [seq]
     assert obs.history("session", "h1/sid", since=124)["count"] == 0
+    j.close()
+
+
+def test_b01_legacy_task_external_creation_keeps_shared_identity(mock, tmp_path):
+    path = tmp_path / "j.db"
+    j = Journal(path)
+    t = task(j, "external")
+    bind(j, t, "sid")
+    j.db.execute("UPDATE tasks SET session_id='sid',external_worktree_path='/srv/ext',external_branch='batc/task-fixture' WHERE task_id=?", (t["task_id"],))
+    j.db.execute("PRAGMA user_version=1")
+    j.close()
+    j = Journal(path)
+    wid = worktree_id("h1", "task", t["task_id"], "external_worktree")
+    assert Observation(j).resource("session", "h1/sid")["worktree_id"] == wid
+    assert Observation(j).history("worktree", wid)["events"][0]["kind"] == "history.backfilled"
+    assert all(e["kind"] != "history.backfilled" for e in j.api_events()["events"])
     j.close()

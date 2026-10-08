@@ -238,7 +238,7 @@ Daemon 必須持有既有 owner lock，journal migration 完成；API observe �
 
 ## Migration 與失敗恢復
 
-沿用 `task_journal.Journal` 的 additive migration 與 `PRAGMA user_version`；固定基準目前是 1，Phase 2 使用當時 main 的下一版，不跟平行包搶編號。新增事件 context/resource 索引、discovery latest、已知 worktree identity、relation segments 及欄位 evidence；既有 tasks、commands、events、work_item_links、checkpoint IDs 不改編。Relation segments 唯一鍵為 `(execution_id, session_resource_id, role, anchor_id)`，command-relation mapping 以 command_id 為 key；各 revision 留 seq，只有 SQLite 原 writer 寫入。
+沿用 `task_journal.Journal` 的 additive migration 與 `PRAGMA user_version`；固定基準目前是 1，Phase 2 使用當時 main 的下一版，不跟平行包搶編號。新增事件 context/resource 索引、discovery latest、已知 worktree identity、relation segments 及欄位 evidence；既有 tasks、commands、events、work_item_links、checkpoint IDs 不改編。Relation segments 唯一鍵為 `(execution_id, session_resource_id, role, anchor_id)`，command-relation mapping 以 `(command_id, relation_id)` 為 key，保存 linked_at_seq；rebinding 保留舊 link，使 as_of 的 command_ids 不受最新 binding 影響；各 revision 留 seq，只有 SQLite 原 writer 寫入。
 
 回填在 daemon owner 內、背景 loops 開始前完成，單次版本化交易；DDL 使用 IF NOT EXISTS，版本編號在 rebase 時採 main 下一個可用 user_version。來源 key（表名／PK／事實類型）唯一，重啟重做不重複。已經有 api event 的 task／checkpoint／link／receipt 只補資源索引與可信 context，不追加同一件事的第二個 event。當舊 mutable step／receipt 只剩最後快照時，`history.backfilled` 記錄「目前保存的結果」及原 timestamp，不捏造 started → uncertain → succeeded 全序列；`history_coverage` 明列開始時間、缺少的 transitions。舊 profile／actor／range 不明保持 unknown。
 
@@ -261,7 +261,7 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | `tests/test_observation.py`（新增）、`test_api_v1.py`、`test_task_service.py`、`test_mcp_and_config.py`、`test_work_items.py`、`test_checkpoints.py` | 下節驗收；沿用 MockBat、LocalRunner/RealGitLog、temp git repos，必要時 FakeGitHub。新增可重跑 Dashboard harness／測試，不只依手動截圖。 |
 | `skills/bat-agent-connector/SKILL.md`、`skills/hermes/bat-agent-connector/SKILL.md` | 同步教 agent 用持久 inventory 的完整分頁、session/worktree history、relation range、unknown evidence、events 游標；區分訊息分頁與 journal 歷史，禁止因斷線而重開工作。 |
 | `README.md`、`README.zh-TW.md`、`CHANGELOG.md`、`docs/design/api-v1.md` | 各 README 加短說明與本文件連結；Next release 引用計畫章節、B01–B03；路由表／MCP/CLI/能力同步。 |
-| 本文件與相關 design 的 `尚未涵蓋` | Phase 2 完成後才改為實際結果；`api-v1.md` 更新 observation 路由及限制；`dashboard.md` 只移除已完成的已知 worktree history 部分，diff/檔案仍待辦。 |
+| 本文件與相關 design 的 `尚未涵蓋` | Phase 2 完成後才改為實際結果；`api-v1.md` 更新 observation 路由及限制；`dashboard.md` 的畫面待辦留給 Part B，diff/檔案仍待辦。 |
 
 ## 測試計畫與驗收對照
 
@@ -271,7 +271,7 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 |---|---|
 | B01；§08、§11、§19 | `test_b01_id_paging_complete_and_filter_changes_via_events`、`test_b01_relation_scope_and_cross_project_link_history`：205 筆 ID keyset 完整巡覽；filter changes 經 events；跨 project/work item 的 current/history 及 via 證據。 |
 | B01；§08 | `test_b01_warm_reuse_reviewer_followup_and_command_ranges`、`test_b01_pending_bind_and_snapshot_relations`、`test_b01_warm_binding_closes_reserved_intent_without_overwriting`：兩 task 共用 session 的 ranges、舊 reviewer/replacement、follow-up、pending/bound/closed、固定 revision 分頁；原 reserved intent 正確關閉。 |
-| B01；§08、§10 | `test_b01_worktree_shared_creation_identity_and_reuse`：共享 registry 建立 slot、reviewer/failover/reuse 同 ID、同 path 新 intent 不合併；使用 cleanup 共用 hash 函式。 |
+| B01；§08、§10 | `test_b01_worktree_shared_creation_identity_and_reuse`、`test_b01_legacy_task_external_creation_keeps_shared_identity`：共享 registry 建立 slot、reviewer/failover/reuse 同 ID、同 path 新 intent 不合併；使用 cleanup 共用 hash 函式。 |
 | B01、B03；§08、§11 | `test_b01_b03_checkpoint_source_run_steps_and_worktree_history`、`test_b01_b03_receipt_versions_are_fixed_at_the_writer_transition`：真實 temp Git checkpoint/run 及 steps 的多資源 timeline 去重；receipt 在既有 writer 轉換時保存各版本，不以新結果改舊事件。 |
 | B01、B02；§10、§11 | `test_b01_history_as_of_late_binding_and_invalid_cursors`：history as_of 同時限制 event/linked_at；晚 binding 不進已開 snapshot，kind/order/resource/time 游標契約。 |
 | B02；§11 | `test_b02_two_hosts_one_offline_and_scope_change`、`test_b02_null_workspace_preserves_missing_counts_even_with_registry`：另一 host 持續成功、離線保留舊值；scope 改綁不再 host I/O；移除 host 仍可讀 history；壞 workspace 不算完整列舉。 |

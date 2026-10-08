@@ -22,12 +22,12 @@ PRIVATE_FIELDS = {"text", "words", "original_words", "instructions", "excerpt", 
                   "acceptance", "original_request", "requirements", "goal", "reason_text"}
 
 SUMMARY_FIELDS = set("""host profile_id workspace workspace_id title cwd agent_kind agent_preset model loaded streaming
-runtime_status pending worktree_branch orchestrated has_tab provenance api_access read_only_code isolation
+runtime_status pending field_evidence field_observed_at loading activity tab enumeration lifecycle freshness fields_stale worktree_branch orchestrated has_tab provenance api_access read_only_code isolation
 provider_native_id first_seen_at last_seen_at observed_at gone_at misses changed_fields reason previous_reason
 session_id previous_session_id session_resource_id execution_id task_id relation_id branch_id parent_branch_id parent_relation_id
 follow_up_of_execution_id command_id command_ids start_command_id end_command_id kind status action from to
 operation_id step step_seq request response refs target entry actor source evidence table id seq ref sha head
-commit_sha source_sha base_sha integrated_sha resolution_sha delivered_sha pinned_sha commit tree_hash branch
+path retained_ref channel commit_sha source_sha base_sha integrated_sha resolution_sha delivered_sha pinned_sha commit tree_hash branch
 worktree_path clone_path repo_root source_session_id checkpoint_id source_kind source_id source_host
 repository repository_id pull_number preview_id mode location_class error_code accepted reconciled external_ref
 message_id turn_marker turn_ref marker prompt_sha256 digest hash sha256 start_seq end_seq started_at ended_at
@@ -99,7 +99,8 @@ def install(journal):
             body TEXT NOT NULL,PRIMARY KEY(relation_id,seq))""",
         "CREATE INDEX IF NOT EXISTS relation_execution ON observation_relations(execution_id)",
         "CREATE INDEX IF NOT EXISTS relation_session ON observation_relations(session_resource_id)",
-        """CREATE TABLE IF NOT EXISTS command_relations(command_id TEXT PRIMARY KEY,relation_id TEXT NOT NULL)""",
+        """CREATE TABLE IF NOT EXISTS command_relations(command_id TEXT NOT NULL,relation_id TEXT NOT NULL,linked_at_seq INTEGER NOT NULL,
+            PRIMARY KEY(command_id,relation_id))""",
         """CREATE TABLE IF NOT EXISTS discovery_latest(host TEXT NOT NULL,profile_id TEXT NOT NULL,
             binding TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(host,profile_id))""",
         """CREATE TABLE IF NOT EXISTS observation_backfill(source_key TEXT PRIMARY KEY,seq INTEGER NOT NULL)""",
@@ -298,7 +299,7 @@ def record_event(journal, seq, *, legacy=False, extra=None):
             if not e["kind"].startswith("relation."):
                 rel = relation(journal, task, sid, role, cmd["command_id"], seq,
                                confirmed=e["kind"] == "task.command_settled" and cmd["kind"].startswith("start_"), legacy=legacy)
-                db.execute("INSERT OR REPLACE INTO command_relations VALUES(?,?)", (cmd["command_id"], rel))
+                db.execute("INSERT OR IGNORE INTO command_relations VALUES(?,?,?)", (cmd["command_id"], rel, seq))
                 ctx["relation_ids"].append(rel)
             ctx["evidence"].append({"table": "commands", "id": cmd["command_id"]})
             if payload.get("old_session_id"):
@@ -323,6 +324,11 @@ def record_event(journal, seq, *, legacy=False, extra=None):
                 if rel.get("end_seq") is None or e["kind"] == "relation.closed":
                     refs.append(("session", rel["session_resource_id"]))
                     ctx["relation_ids"].append(rel["relation_id"])
+        if e["kind"] == "task.external_worktree_retained" and b.get("path"):
+            wid = worktree(db, task["host"], "task", task_id, "external_worktree", path=b["path"], branch=b.get("branch"), session_id=task.get("session_id"))
+            refs.append(("worktree", wid))
+            if b.get("commit"):
+                ctx["result_versions"].append({"kind": "git", "sha": b["commit"], "ref": b.get("retained_ref"), "role": "retained"})
         if not legacy and task.get("external_worktree_path"):
             wid = worktree(db, task["host"], "task", task_id, "external_worktree",
                            path=task["external_worktree_path"], branch=task.get("external_branch"), session_id=task.get("session_id"))
@@ -340,7 +346,7 @@ def record_event(journal, seq, *, legacy=False, extra=None):
     op = db.execute("SELECT * FROM operations WHERE operation_id=?", (op_id,)).fetchone() if op_id else None
     if op:
         target, ext = body(op["target"]), {} if legacy else body(op["external_refs"])
-        ctx.update(operation_id=op_id, operation_entry_point=op["entry"], host=ctx["host"] or target.get("host") or ext.get("host"))
+        ctx.update(operation_id=op_id, operation_entry_point=op["entry"], observer="operation-service", host=ctx["host"] or target.get("host") or ext.get("host"))
         if e["kind"] == "operation.accepted":
             ctx["entry_point"] = op["entry"]
         elif e["kind"] not in {"operation.cancelled", "operation.running"} and not legacy:
@@ -348,8 +354,10 @@ def record_event(journal, seq, *, legacy=False, extra=None):
         if target.get("host") and target.get("session_id"):
             refs.append(("session", f"{target['host']}/{target['session_id']}"))
         if target.get("checkpoint_id"):
-            cp_host = db.execute("SELECT host FROM checkpoints WHERE checkpoint_id=?", (target["checkpoint_id"],)).fetchone()
+            cp_host = db.execute("SELECT host,commit_sha FROM checkpoints WHERE checkpoint_id=?", (target["checkpoint_id"],)).fetchone()
             ctx["host"] = ctx["host"] or (cp_host[0] if cp_host else None)
+            if cp_host:
+                ctx["source_versions"].append({"kind": "git", "sha": cp_host[1], "role": "checkpoint", "evidence_ref": "checkpoints:" + target["checkpoint_id"]})
             refs.extend(_refs(db, "checkpoint", target["checkpoint_id"]))
         params = body(op["params"])
         source_specs = params.get("sources") or []
@@ -367,8 +375,10 @@ def record_event(journal, seq, *, legacy=False, extra=None):
         ctx["source_versions"] += [{"kind": "git", "sha": value, "role": name} for name, value in body(op["preconditions"]).items() if name in {"expected_head", "expected_commit"} and value]
         host = ctx["host"]
         response = b.get("response") or {}
+        if e["kind"] == "operation.succeeded" and not legacy:
+            response = {**body(op["result"]), **response}
         request = b.get("request") or {}
-        for field in ("head", "sha", "commit_sha", "base_sha", "source_sha", "delivered_sha", "integrated_sha", "resolution_sha"):
+        for field in ("head", "sha", "commit", "commit_sha", "base_sha", "source_sha", "delivered_sha", "integrated_sha", "resolution_sha"):
             if isinstance(response.get(field), str) and len(response[field]) == 40:
                 ctx["result_versions"].append({"kind": "git", "sha": response[field], "role": field})
         sid = b.get("session_id") or response.get("session_id") or request.get("session_id") or ext.get("session_id")
@@ -388,13 +398,15 @@ def record_event(journal, seq, *, legacy=False, extra=None):
         if cp:
             refs.append(("session", f"{cp['host']}/{cp['source_session_id']}"))
         if cp:
-            ctx.update(host=cp["host"], operation_id=ctx["operation_id"] or cp["operation_id"])
+            ctx.update(host=cp["host"], observer="checkpoint-service", operation_id=ctx["operation_id"] or cp["operation_id"])
             ctx["source_versions"].append({"kind": "git", "sha": cp["commit_sha"], "role": "checkpoint"})
+            ctx["source_versions"].append({"kind": "git", "sha": cp["head_sha"], "role": "captured_head"})
         for run in db.execute("SELECT * FROM checkpoint_runs WHERE checkpoint_id=? AND operation_id=?", (rid, b.get("operation_id"))):
             wid = worktree(db, run["host"], "checkpoint.continue", run["operation_id"], "worktree",
                            path=run["worktree_path"], branch=run["branch"], clone=run["clone_path"], session_id=run["session_id"])
             refs.append(("worktree", wid))
     if kind == "integration":
+        ctx["observer"] = "integration-service"
         pv = db.execute("SELECT * FROM integration_previews WHERE preview_id=?", (rid,)).fetchone()
         if pv:
             ctx["host"] = pv["host"]
@@ -421,6 +433,7 @@ def record_event(journal, seq, *, legacy=False, extra=None):
     if kind == "integration" and b.get("operation_id"):
         ctx["operation_id"] = b["operation_id"]
     if kind == "work_item":
+        ctx["observer"] = "work-item-service"
         ctx["work_item_ids"].append(rid)
         refs.extend(_refs(db, b.get("kind"), b.get("ref"), include_runs=True))
     refs.extend((typ, res) for typ, res in (extra or {}).get("resources", []))
@@ -474,6 +487,16 @@ def backfill(journal):
                           (row["task_id"], f"{task['host']}/{row['session_id']}")).fetchone():
             seq = saved_fact(journal, "branches", row["branch_id"], dict(row), [("session", f"{task['host']}/{row['session_id']}"), ("execution", row["task_id"])])
             relation(journal, task, row["session_id"], row["role"], row["branch_id"], seq, confirmed=True, branch=dict(row), legacy=True)
+    for task_row in db.execute("SELECT * FROM tasks WHERE external_worktree_path IS NOT NULL ORDER BY submitted_at").fetchall():
+        task_data = dict(task_row)
+        wid = worktree(db, task_data["host"], "task", task_data["task_id"], "external_worktree",
+            path=task_data["external_worktree_path"], branch=task_data["external_branch"], session_id=task_data["session_id"])
+        refs = [("execution", task_data["task_id"]), ("worktree", wid)]
+        if task_data["session_id"]:
+            refs.append(("session", f"{task_data['host']}/{task_data['session_id']}"))
+        saved_fact(journal, "tasks.external_worktree", task_data["task_id"],
+            {"host": task_data["host"], "task_id": task_data["task_id"], "worktree_path": task_data["external_worktree_path"],
+             "branch": task_data["external_branch"], "created_at": None}, refs)
     for table, pk in (("operations", "operation_id"), ("commands", "command_id"), ("operation_steps", None),
                       ("sessions_observed", None), ("checkpoints", "checkpoint_id"), ("checkpoint_runs", "operation_id"),
                       ("integration_receipts", None), ("work_item_links", "link_id")):
@@ -481,6 +504,8 @@ def backfill(journal):
             data = dict(row)
             key = data[pk] if pk else dump([data.get("host"), data.get("session_id"), data.get("operation_id"), data.get("seq")])
             if table in {"operations", "checkpoints"} and db.execute("SELECT 1 FROM api_events WHERE resource_type=? AND resource_id=?", ("operation" if table == "operations" else "checkpoint", key)).fetchone():
+                continue
+            if table == "checkpoint_runs" and db.execute("SELECT 1 FROM api_events WHERE kind='checkpoint.continued' AND json_extract(body,'$.operation_id')=?", (key,)).fetchone():
                 continue
             if table == "commands" and db.execute("SELECT 1 FROM api_events WHERE json_extract(body,'$.command_id')=?", (key,)).fetchone():
                 continue
@@ -666,8 +691,7 @@ class Observation:
                 raise OperationError("INVALID_CURSOR", "invalid relation key", 422)
             if last is not None and key <= last:
                 continue
-            r["command_ids"] = [x[0] for x in self.db.execute("""SELECT cr.command_id FROM command_relations cr WHERE relation_id=? AND EXISTS(
-                SELECT 1 FROM api_events e WHERE e.seq<=? AND json_extract(e.body,'$.command_id')=cr.command_id) ORDER BY cr.rowid""", (r["relation_id"], as_of))]
+            r["command_ids"] = [x[0] for x in self.db.execute("""SELECT cr.command_id FROM command_relations cr WHERE relation_id=? AND cr.linked_at_seq<=? ORDER BY cr.rowid""", (r["relation_id"], as_of))]
             out.append(r)
         out.sort(key=lambda r: (r["start_seq"] or 0, r["relation_id"]))
         page = out[:limit]
