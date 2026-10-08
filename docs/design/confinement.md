@@ -364,7 +364,9 @@ Task Service 的 promotion／第一個 prompt 邊界查核如下。一般 task �
 | `BatTaskAdapter.start` reviewer post-start meta | 有效 ACK 後的未知 read 為 best-effort；read exception 記 unknown／session_unloaded，仍 active。Lost／unconfirmed ACK 的 identity poll 則是必要 start proof，不可讀維持 uncertain、只重試 read。可讀但 cwd 或 requested permissions 不同則為必要拒絕，保留 reservation，非顯示證據失敗。 |
 | `BatTaskAdapter.failover` 的 after-send `_verified_failover_successor` | 此為既有 Task Service journal／registry／worktree authority proof，非顯示 evidence read，保持原未知／不相符行為；也核對 creation options 的可讀 drift，不能用此修正略過 Task gate。 |
 
-Journal schema additive：confinement_host_checks 在每次 open 以 CREATE TABLE IF NOT EXISTS 建立，不占 user_version，不需要 data migration。其餘 migration 沿用各工作包版本。利用原 commands／operation_steps／sessions_observed 的 JSON 與 evidence refs，不重建 task tables。registry 增 schema_version／confinement 欄位，missing 值按上述保守規則解讀。不改 delivery 的 2／3 或 observation 的 4 migration。
+Journal schema additive：confinement_host_checks 在每次 open 以 CREATE TABLE IF NOT EXISTS 建立，不占 user_version，不需要 data migration。Data steps 固定為 1（既有 api_events copy）、2（observation history backfill）、3（後續 delivery deployment history）；其他工作包 DDL 都不另占版本。利用原 commands／operation_steps／sessions_observed 的 JSON 與 evidence refs，不重建 task tables。registry 增 schema_version／confinement 欄位，missing 值按上述保守規則解讀。
+
+與 observation 合併後，離開 active config 的 host 仍可讀既有 session／history／relations。Creation snapshot 保留原證據；目前帳號查核回 unknown／host_not_configured，不用舊 cached verified 宣稱目前邊界。只有 durable identity 尚無觀測 row 的 session 也補共用 unknown confinement fields，不另查 BAT。
 
 ## Dashboard、文件與預計修改檔案
 

@@ -163,7 +163,8 @@ async def test_send_operation_runs_once_and_records_steps_and_events(daemon, moc
     sends = [i for i in mock.invokes if i["channel"] == "claude:send-message"]
     assert len(sends) == 1 and sends[0]["params"]["clientMessageId"] == "batc-" + op["operation_id"]
     kinds = [e["kind"] for e in daemon.journal.api_events(0, 100, resource_id=op["operation_id"])["events"]]
-    assert kinds == ["operation.accepted", "operation.running", "operation.succeeded"]
+    assert kinds == ["operation.accepted", "operation.running", "operation.step.started",
+                     "operation.step.succeeded", "operation.succeeded"]
     await daemon.ops.drain()  # a finished operation never runs again
     assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"]) == 1
     await daemon.fleet.close()
@@ -730,6 +731,12 @@ async def test_a10_session_capabilities_inventory_and_triage_share_evidence(serv
     assert next(s for s in rows if s["session_id"] == sid)["confinement"] == r["confinement"]
     manual = next(s for s in listing["sessions"] if s["session_id"] == MANUAL)
     assert manual["confinement"]["level"] == "none" and manual["api_access"] == "read_only"
+    # The observation detail wrapper must enrich the row it actually returns.
+    mock.metas[sid]["codexSandboxMode"] = "danger-full-access"
+    status, live = await http(port, "GET", f"/api/v1/sessions/h1/{sid}?live=true", tok=tok)
+    assert status == 200 and live["history_available"] is True
+    assert live["session"]["current_verification"]["status"] == "mismatch"
+    assert live["session"]["confinement"] == r["confinement"]
 
 
 async def test_a10_cached_legacy_inventory_exposes_unknown_evidence_without_rewriting(served):

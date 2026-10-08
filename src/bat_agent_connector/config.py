@@ -260,6 +260,7 @@ class GitHubRepo:
     merge_methods: tuple[str, ...] = MERGE_METHODS
     default_merge_method: str = "squash"
     integrate: IntegrateConfig | None = None
+    allow_pr_update: bool = False
 
 
 @dataclass(frozen=True)
@@ -362,7 +363,8 @@ def parse_github(data: dict) -> GitHubConfig:
         if default not in methods:
             raise ConfigError(f"[[github.repos]] {name}: default_merge_method must be one of merge_methods")
         repos[name.lower()] = GitHubRepo(name, bool(r.get("allow_merge", True)), methods, default,
-                                         _integrate(r, name, api_url, set((data.get("hosts") or {}).keys())))
+                                         _integrate(r, name, api_url, set((data.get("hosts") or {}).keys())),
+                                         bool(r.get("allow_pr_update", False)))
     recipes: dict[str, DeployRecipe] = {}
     for r in (data.get("deploy") or {}).get("recipes") or []:
         name = str(r.get("name") or "")
