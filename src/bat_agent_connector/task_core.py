@@ -10,9 +10,9 @@ import uuid
 from typing import Protocol
 
 from . import registry
-from .errors import TaskControlRefused, TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
+from .errors import BatError, TaskControlRefused, TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .model_router import MinimalReviewGate, ModelRouter
-from .operations import AMBIGUOUS, StepFailed, _error_code
+from .operations import AMBIGUOUS, AmbiguousOutcome, StepFailed, _error_code
 from .relay import parse_status
 from .task_journal import Journal
 from .task_recipes import limits, verification_reworks
@@ -246,9 +246,14 @@ class TaskCoordinator:
                         self.journal.change(task_id, "uncertain")
                     raise
                 except Exception as exc:
-                    self.journal.command_status(command["command_id"], "uncertain" if guard.frames else "rejected")
-                    if guard.frames:
+                    refused = (action in {"send", "answer", "interrupt"}
+                               and isinstance(exc, BatError) and not isinstance(exc, AMBIGUOUS))
+                    uncertain = bool(guard.frames) and not refused
+                    self.journal.command_status(command["command_id"], "uncertain" if uncertain else "rejected")
+                    if uncertain:
                         self.journal.change(task_id, "uncertain")
+                        if context and not isinstance(exc, (*AMBIGUOUS, OSError)):
+                            raise AmbiguousOutcome("runtime control reply could not be recorded: " + type(exc).__name__) from exc
                     elif context and isinstance(exc, (*AMBIGUOUS, OSError)):
                         # Transport loss before the effect frame has a definitive no-send outcome.
                         raise StepFailed(_error_code(exc), str(exc)) from exc
@@ -321,6 +326,14 @@ class TaskCoordinator:
             pending = next((c for c in reversed(cmds)
                             if c["status"] in {"intent", "needs_review", "uncertain"}), None)
         if pending:
+            operation_id = json.loads(pending["payload"]).get("operation_id")
+            if pending["kind"] == "send" and operation_id and getattr(self, "operations", None):
+                from .operations import OpContext
+                context = OpContext(self.operations, self.operations._row(operation_id))
+                try:
+                    await self._recover_unsent_send(task, pending, operation=context)
+                except StepFailed:
+                    return self.journal.get(task_id)  # a committed refusal needs no BAT proof
             # An intent may have reached BAT before a crash. Never dispatch it again.
             if pending["status"] in {"intent", "needs_review"}:
                 self.journal.command_status(pending["command_id"], "uncertain")
@@ -421,6 +434,16 @@ class TaskCoordinator:
 
     async def _recover_unsent_send(self, task: dict, cmd: dict, *, operation=None) -> dict | None:
         """Replay terminal local send outcomes without reconciling or dispatching a frame."""
+        if operation and cmd["status"] in {"intent", "needs_review", "uncertain", "rejected"}:
+            failed = operation.service.db.execute(
+                "SELECT error FROM operation_steps WHERE operation_id=? AND name='task_dispatch' AND status='failed'",
+                (operation.operation_id,)).fetchone()
+            if failed:
+                # The step can commit before the command status, including across a process crash.
+                if cmd["status"] != "rejected":
+                    self.journal.command_status(cmd["command_id"], "rejected")
+                error = json.loads(failed["error"] or "{}")
+                raise StepFailed(error.get("code", "STEP_FAILED"), error.get("message", "step failed earlier"))
         if cmd["status"] not in {"cancelled", "rejected"}:
             return None
         task = self.journal.get(task["task_id"])
@@ -435,13 +458,6 @@ class TaskCoordinator:
                     check(self.journal, task["task_id"], task["host"], cmd["session_id"], "send", version)
                 raise TaskControlRefused("TASK_SEND_NOT_DISPATCHED", "task send command was cancelled before dispatch")
             return task
-        if operation:
-            failed = operation.service.db.execute(
-                "SELECT error FROM operation_steps WHERE operation_id=? AND name='task_dispatch' AND status='failed'",
-                (operation.operation_id,)).fetchone()
-            if failed:
-                error = json.loads(failed["error"] or "{}")
-                raise StepFailed(error.get("code", "STEP_FAILED"), error.get("message", "step failed earlier"))
         # Do not overwrite a later control or a local outcome already committed before the crash.
         if (task["paused"] or version is not None and version != task["control_version"]
                 or cmd["session_id"] not in {task.get("session_id"), task.get("reviewer_session_id")}
@@ -485,9 +501,17 @@ class TaskCoordinator:
                     if unsent is not None:
                         return unsent
                     if cmd["status"] in {"intent", "needs_review", "uncertain"}:
+                        dispatch = operation.service.db.execute(
+                            "SELECT response FROM operation_steps WHERE operation_id=? AND name='task_dispatch' AND status='succeeded'",
+                            (operation.operation_id,)).fetchone()
+                        if dispatch:
+                            payload = json.loads(cmd["payload"])
+                            return await self._finish_send(task, cmd, json.loads(dispatch["response"]),
+                                initial_lead=payload["purpose"] == "lead:initial", operation=operation)
                         self.journal.command_status(cmd["command_id"], "uncertain")
                         task = await self._reconcile_command(task, cmd)
                     if self.journal.command_get(cmd["command_id"])["status"] in {"accepted", "settled"}:
+                        self._settle_dispatch_receipt(operation, self.journal.command_get(cmd["command_id"]))
                         return operation.effect("task_send_result", lambda: self.journal.get(task["task_id"]))
                     return self.journal.change(task["task_id"], "uncertain")
             if task["paused"]:
@@ -636,44 +660,61 @@ class TaskCoordinator:
                     self.journal.command_status(cmd["command_id"], "uncertain")
                     return self.journal.change(task["task_id"], "uncertain")
                 reconciled = True
-            if not r.get("accepted"):
-                self.journal.command_status(cmd["command_id"], "rejected")
-                if initial_lead and await self.adapter.session_presence(task, sid) == "vanished":
-                    return self.journal.mark_initial_session_vanished(task["task_id"], sid)
-                return self.journal.change(task["task_id"], "needs_ted")
-            if before.get("agent_kind") == "codex" and r.get("turn_attribution") != "exact_echo":
-                # An accepted Codex ACK can still carry only a timestamp. Read
-                # back the exact user echo before deciding it is unproven.
-                try:
-                    proof = await asyncio.wait_for(self.adapter.reconcile_send(
-                        task, sid, hashlib.sha256(text.encode()).hexdigest(), before,
-                        cmd["message_id"]), timeout=5)
-                except Exception:  # noqa: BLE001 - absent proof stays uncertain
-                    proof = None
-                if (proof and proof.get("accepted") and proof.get("turn_attribution") == "exact_echo"
-                        and proof.get("turn_marker")):
-                    r = proof
-                    reconciled = True
-                else:
-                    # A later timestamped assistant reply cannot own this turn.
-                    marker = r.get("turn_marker") or before.get("before_cursor")
-                    self.journal.command_status(cmd["command_id"], "uncertain", marker=marker)
-                    return self.journal.change(task["task_id"], "uncertain")
-            marker = r.get("turn_marker") or (before.get("before_cursor") if before.get("agent_kind") == "codex"
-                                               else cmd["message_id"])
-            if not marker:
-                self.journal.command_status(cmd["command_id"], "uncertain")
+            return await self._finish_send(task, cmd, r, initial_lead=initial_lead,
+                                           reconciled=reconciled, operation=operation)
+
+    async def _finish_send(self, task: dict, cmd: dict, r: dict, *, initial_lead: bool,
+                           reconciled: bool = False, operation=None) -> dict:
+        """Apply the same receipt checks to a live dispatch and a saved dispatch response."""
+        sid = cmd["session_id"]
+        before = json.loads(cmd["payload"])["before"]
+        if not r.get("accepted"):
+            self.journal.command_status(cmd["command_id"], "rejected")
+            if initial_lead and await self.adapter.session_presence(task, sid) == "vanished":
+                return self.journal.mark_initial_session_vanished(task["task_id"], sid)
+            return self.journal.change(task["task_id"], "needs_ted")
+        if before.get("agent_kind") == "codex" and r.get("turn_attribution") != "exact_echo":
+            # An accepted Codex ACK can still carry only a timestamp. Read
+            # back the exact user echo before deciding it is unproven.
+            try:
+                proof = await asyncio.wait_for(self.adapter.reconcile_send(
+                    task, sid, json.loads(cmd["payload"])["prompt_sha256"], before,
+                    cmd["message_id"]), timeout=5)
+            except Exception:  # noqa: BLE001 - absent proof stays uncertain
+                proof = None
+            if (proof and proof.get("accepted") and proof.get("turn_attribution") == "exact_echo"
+                    and proof.get("turn_marker")):
+                r = proof
+                reconciled = True
+            else:
+                # A later timestamped assistant reply cannot own this turn.
+                marker = r.get("turn_marker") or before.get("before_cursor")
+                self.journal.command_status(cmd["command_id"], "uncertain", marker=marker)
                 return self.journal.change(task["task_id"], "uncertain")
-            def delivered():
-                self.journal.command_status(cmd["command_id"], "accepted", marker=marker)
-                state = "verifying" if sid == task.get("reviewer_session_id") else "running"
-                field = "review_marker" if state == "verifying" else "turn_marker"
-                return self.journal.change(task["task_id"], state, fields={field: marker},
-                                           event="send_reconciled_delivered" if reconciled else None)
+        marker = r.get("turn_marker") or (before.get("before_cursor") if before.get("agent_kind") == "codex"
+                                           else cmd["message_id"])
+        if not marker:
+            self.journal.command_status(cmd["command_id"], "uncertain")
+            return self.journal.change(task["task_id"], "uncertain")
+        def delivered():
+            self.journal.command_status(cmd["command_id"], "accepted", marker=marker)
             if operation:
-                return operation.effect("task_send_result", delivered)
-            with self.journal.tx():
-                return delivered()
+                self._settle_dispatch_receipt(operation, self.journal.command_get(cmd["command_id"]))
+            state = "verifying" if sid == task.get("reviewer_session_id") else "running"
+            field = "review_marker" if state == "verifying" else "turn_marker"
+            return self.journal.change(task["task_id"], state, fields={field: marker},
+                                       event="send_reconciled_delivered" if reconciled else None)
+        if operation:
+            return operation.effect("task_send_result", delivered)
+        with self.journal.tx():
+            return delivered()
+
+    def _settle_dispatch_receipt(self, operation, cmd: dict) -> None:
+        if operation.service.db.execute(
+                "SELECT 1 FROM operation_steps WHERE operation_id=? AND name='task_dispatch' AND status IN ('started','uncertain')",
+                (operation.operation_id,)).fetchone():
+            operation.service._step_done(operation.operation_id, "task_dispatch", {
+                "accepted": True, "turn_marker": cmd["marker"], "settled_by": "task_command"}, reconciled=True)
 
     async def _observe(self, task: dict, cmds: list[dict]) -> dict:
         sid = task["session_id"]

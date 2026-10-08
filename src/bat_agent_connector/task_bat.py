@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from . import lifecycle, orchestrate, registry, resource_policy, service
-from .errors import TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
+from .errors import BatError, TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .fleet import Fleet
-from .operations import StepFailed, _error_code
+from .operations import AMBIGUOUS, AmbiguousOutcome, StepFailed, _error_code
 from .redact import redact_secrets
 from .safety import Audit
 from .task_handoff import history_excerpt, ledger_summary, original_words_archive
@@ -512,6 +512,10 @@ class BatTaskAdapter:
             if not guard.frames:
                 # The coordinator must not reconcile a prompt that could not have reached BAT.
                 raise StepFailed(_error_code(exc), str(exc)) from exc
+            if isinstance(exc, BatError) and not isinstance(exc, AMBIGUOUS):
+                raise StepFailed(_error_code(exc), str(exc)) from exc
+            if not isinstance(exc, (*AMBIGUOUS, BatError, OSError)):
+                raise AmbiguousOutcome("send reply could not be recorded: " + type(exc).__name__) from exc
             raise
 
     async def prepare_send(self, task: dict, session_id: str) -> dict:

@@ -80,6 +80,12 @@
   stops at needs_ted with the code in its result/event, retaining the initial-lead disappearance rule. The next
   daemon tick does not resend the rejected command. Lost send replies still use the original read-back,
   including Task Service adapter sends; operation step semantics are unchanged (A05/A07, §09/§10).
+  Recovery now honors a failed task_dispatch receipt even if the process stopped before recording the command
+  rejection: it records rejected and replays the saved failure without a BAT read-back or task mutation. A
+  coordinator tick that runs first observes the same receipt. Saved successful dispatch replies use the original
+  result rules, and task/result receipts remain atomic. Unexpected errors after the prompt frame, including
+  malformed replies, stay uncertain until the original read-back proves the outcome; explicit BAT refusals are
+  failed steps with rejected commands (A05/A07/A08, §09/§10).
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
