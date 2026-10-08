@@ -49,7 +49,7 @@ async def test_e01_removed_host_history_is_retained_without_live_calls(daemon, m
         monkeypatch.setattr(fleet, "client", configured_client)
     doc = await cleanup.preview(daemon.ops, CLEANER, target)
     old = next(i for i in doc["items"] if i["host"] == "h2" and i.get("session_id") == historical["session_id"])
-    assert old["decision"] == "retain" and not old["steps"] and not old["proven"]
+    assert old["decision"] == "retain" and not old["steps"] and old["proven"]  # original registry identity survives.
     assert "OBSERVATION_UNAVAILABLE" in {r["code"] for r in old["reasons"]}
     assert {i["kind"] for i in doc["items"] if i["host"] == "h1" and i["decision"] == "reclaim"} == {
         "session", "worktree", "local_branch"}

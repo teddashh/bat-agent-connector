@@ -235,7 +235,11 @@ def _target(ops, value):
         raise OperationError("INVALID_TARGET", "include_children applies only to work_item", 422)
     if kind == "host":
         if value[key] not in ops.context["fleet"].config.hosts:
-            raise OperationError("UNKNOWN_HOST", "host is not configured", 404)
+            known = any(e.get("host") == value[key] for e in registry.list_entries()) or any(
+                ops.db.execute(f"SELECT 1 FROM {table} WHERE host=? LIMIT 1", (value[key],)).fetchone()  # noqa: S608 - fixed table names
+                for table in ("checkpoints", "checkpoint_runs", "integration_previews", "tasks", "sessions_observed"))
+            if not known:
+                raise OperationError("UNKNOWN_HOST", "host has no configuration or resource history", 404)
     else:
         table = {"work_item": "work_items", "checkpoint": "checkpoints", "integration": "operations"}[kind]
         row = ops.db.execute(f"SELECT * FROM {table} WHERE {key}=?", (value[key],)).fetchone()  # noqa: S608
@@ -302,7 +306,7 @@ def _all(ops):
         item["original_ids"] = sorted(set(item["original_ids"] + [s for s in ids if s]))
 
     def wt(host, repo, path, branch, intent, flavor, base, ids, source=None):
-        if not path or not repo or host not in fleet.config.hosts:
+        if not path or not repo:
             return None
         key = host, path
         if key in worktrees:
@@ -431,7 +435,7 @@ def _all(ops):
                 w["task_owned"] = True
     for e in regs:
         host, sid = e.get("host"), e.get("session_id")
-        if host not in fleet.config.hosts or not sid:
+        if not host or not sid:
             continue
         creation = f"{sid}@{e.get('created_at')}"
         path = e.get("worktree_path") or e.get("cwd") or e.get("origin_cwd")
@@ -443,7 +447,8 @@ def _all(ops):
             recorded = bool(e.get("created_at") and e.get("branch") and e.get("origin_root") and
                             e.get("status") in {"active", "superseded", "removed", "cleaned", *registry.RETIRED} and
                             not e.get("failover_of") and e.get("worktree_made_by") != "connector")
-            proven = bool(recorded and resource_policy.in_managed_root(fleet.config.host(host), e["origin_root"]) and
+            hc = fleet.config.hosts.get(host)
+            proven = bool(recorded and hc and resource_policy.in_managed_root(hc, e["origin_root"]) and
                           resource_policy.in_bat_worktrees(e["worktree_path"], e["origin_root"]))
             # Project the carrier from this creation record, even without a checkpoint/integration/task.
             # Out-of-root or unexpected-layout records remain visible, but confer no cleanup ownership.
@@ -481,6 +486,13 @@ def _all(ops):
                 i["task_owned"] = True
                 alias(i, task["task_id"])
     links = [dict(r) for r in db.execute("SELECT * FROM work_item_links")]
+    # A recorded branch has an identity even when its host/HEAD cannot be observed.
+    for w in worktrees.values():
+        if w.get("branch"):
+            add(_resource(w["host"], "local_branch", w["creation_evidence"]["intent"], w["branch"],
+                          path=w["repository"], repository=w["repository"], branch=w["branch"], proven=w.get("proven", False),
+                          flavor=w.get("flavor"), base=w.get("base"), original_ids=w["original_ids"],
+                          task_owned=w.get("task_owned", False), worktree_id=w["resource_id"], content_path=w["path"]))
     for i in items.values():
         i["relations"] = sorted({r["work_item_id"] for r in links if r["ref"] in i["original_ids"]})
     return items, op_rows, pvs, worktrees, containers, links
@@ -1016,7 +1028,8 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
             if acquired:
                 lock.release()
     for i in list(items.values()):
-        if i["kind"] != "worktree" or i["resource_id"] not in selected or not i.get("proven"):
+        if (i["kind"] != "worktree" or not i.get("proven") or
+                i["resource_id"] not in selected and i.get("branch_id") not in selected):
             continue
         obs = i.get("observation", {})
         branch_obs = i.get("branch_observation") or {"head": obs.get("head"), "results": obs.get("results")}
@@ -1031,10 +1044,11 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
         i["branch_id"] = b["resource_id"]
         items[b["resource_id"]] = b
         selected.add(b["resource_id"])
+    planning = selected | {items[r]["worktree_id"] for r in selected if items[r]["kind"] == "local_branch"}
     for i in items.values():
-        if i["resource_id"] in selected or i["kind"] == "session":
+        if i["resource_id"] in planning or i["kind"] == "session":
             _plan(ops, i, choices, op_rows, pvs, own_op)
-    for rid in sorted(selected, key=lambda r: {"worktree": 0, "local_branch": 1}.get(items[r]["kind"], 2)):
+    for rid in sorted(planning, key=lambda r: {"worktree": 0, "local_branch": 1}.get(items[r]["kind"], 2)):
         i = items[rid]
         if i["kind"] == "worktree":
             for s in items.values():
@@ -1560,6 +1574,13 @@ async def _execute_item(ctx, item, payload):
             actual = item  # ref is still checked by the host CAS below; consumers checked separately below
         if item["kind"] == "worktree" and actual:
             actual["dependencies"] = item["dependencies"]
+        if item["kind"] == "local_branch" and actual and set(actual["dependencies"]) <= set(item["dependencies"]):
+            dropped = set(item["dependencies"]) - set(actual["dependencies"])
+            settled = {r["resource_id"] for r in ops.db.execute(
+                "SELECT resource_id,plan FROM cleanup_receipts WHERE operation_id=? AND status='succeeded'",
+                (ctx.operation_id,)) if json.loads(r["plan"])["kind"] == "worktree"}
+            if dropped <= settled:
+                actual["dependencies"] = item["dependencies"]
         if actual != item:
             raise OperationError("PREVIEW_STALE", "resource or its consumers changed", 409)
     if item["kind"] == "session":
