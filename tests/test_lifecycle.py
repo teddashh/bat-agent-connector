@@ -8,6 +8,7 @@ from bat_agent_connector import channels, lifecycle, orchestrate, registry, tria
 from bat_agent_connector.config import JevConfig
 from bat_agent_connector.errors import ResourceReadOnly, WriteRefused
 from bat_agent_connector.jev import Jev
+from bat_agent_connector.operations import OperationError
 from tests.conftest import adopt
 
 # the demo checkout as the connector's own clone: merges into its main checkout are allowed
@@ -363,6 +364,15 @@ async def test_claude_mode_not_switched_mid_turn(fleet_factory, mock):
     await f.close()
 
 
+async def legacy_evaluate(fleet, host, **kwargs):
+    """Legacy apply is always refused; preserve the prior decision tests as read-only evaluations."""
+    with pytest.raises(OperationError, match="LEGACY_CLEANUP_DISABLED") as caught:
+        await lifecycle.session_cleanup(fleet, host, **kwargs)
+    assert caught.value.status == 409
+    assert "resource-cleanup" in caught.value.message
+    return await lifecycle.session_cleanup(fleet, host, **{**kwargs, "dry_run": True})
+
+
 # --------------------------------------------------------------------------- cleanup
 async def _finished_wt(f, mock, kind="unknown", diff="", verified=True):
     r = await orchestrate.session_start(f, "h1", "demo-project", "codex", confirm=True)
@@ -402,7 +412,7 @@ async def test_legacy_cleanup_and_main_relay_skip_task_owned_sessions(fleet_fact
     started = await _finished_wt(f, mock)
     sid = started["session_id"]
     registry.update("h1", sid, task_id="task-service-owned")
-    decision = await lifecycle.session_cleanup(f, "h1", session_id=sid,
+    decision = await legacy_evaluate(f, "h1", session_id=sid,
                                                confirm=True, dry_run=False, min_idle_s=0)
     assert decision["decisions"][0]["decision"] == "KEEP"
     assert not any(i["channel"] in {"worktree:remove", "claude:stop-session"}
@@ -421,16 +431,15 @@ async def test_cleanup_clean_only_and_apply(fleet_factory, mock, monkeypatch):
     row = d["decisions"][0]
     assert row["decision"] == "CLEAN_ONLY" and "no changes" in row["reasons"][0]
     assert not any(i["channel"] in ("worktree:remove", "claude:stop-session") for i in mock.invokes)
-    with pytest.raises(WriteRefused, match="auto_cleanup"):
+    with pytest.raises(OperationError, match="LEGACY_CLEANUP_DISABLED"):
         await lifecycle.session_cleanup(f, "h1", confirm=True, dry_run=False)
     await f.close()
     f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0})
-    d = await lifecycle.session_cleanup(f, "h1", confirm=True, dry_run=False)
+    d = await legacy_evaluate(f, "h1", confirm=True, dry_run=False)
     row = d["decisions"][0]
-    assert "agent stopped" in row["actions"] and any("kept" in a for a in row["actions"])
-    rm = next(i for i in mock.invokes if i["channel"] == "worktree:remove")
-    assert rm["params"]["deleteBranch"] is False
-    assert registry.get("h1", r["session_id"])["status"] == "cleaned"
+    assert row["decision"] == "CLEAN_ONLY" and not row.get("actions")
+    assert "worktree:remove" not in mock.channels() and "claude:stop-session" not in mock.channels()
+    assert registry.get("h1", r["session_id"])["status"] == "active"
     await f.close()
 
 
@@ -447,10 +456,10 @@ async def test_cleanup_merge_needs_jev(fleet_factory, mock, monkeypatch):
         return {"claims_done": 0.95, "diff_verdict": "safe_complete", "diff_confidence": 0.9, "tests_ok": 0.9}
 
     monkeypatch.setattr(Jev, "merge_gate", fake_gate)
-    d = await lifecycle.session_cleanup(f, "h1", confirm=True, dry_run=False)
+    d = await legacy_evaluate(f, "h1", confirm=True, dry_run=False)
     row = d["decisions"][0]
-    assert row["decision"] == "MERGE_AND_CLEAN" and row["actions"][0].startswith("merged")
-    assert "worktree:merge" in mock.channels() and "claude:stop-session" in mock.channels()
+    assert row["decision"] == "MERGE_AND_CLEAN" and not row.get("actions")
+    assert "worktree:merge" not in mock.channels() and "claude:stop-session" not in mock.channels()
     await f.close()
 
 
@@ -488,26 +497,17 @@ async def test_cleanup_requires_commit_bound_execution_not_jev(fleet_factory, mo
     await f.close()
 
 
-async def test_cleanup_rechecks_candidate_before_merge(fleet_factory, mock, monkeypatch):
+async def test_cleanup_apply_never_evaluates_or_merges_changed_candidate(fleet_factory, mock, monkeypatch):
     f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0},
                       **MANAGED_CLONE)
     r = await _finished_wt(f, mock, "ahead", "diff --git a/x b/x\n+++ b/x\n+code\n")
-
-    async def confident_gate(self, task, final, diff_excerpt, tests):
-        return {"claims_done": 0.95, "diff_verdict": "safe_complete", "diff_confidence": 0.95, "tests_ok": 0.95}
-
-    monkeypatch.setattr(Jev, "merge_gate", confident_gate)
-    original = lifecycle._evaluate
-
-    async def change_after_evaluation(*args, **kwargs):
-        row = await original(*args, **kwargs)
-        mock.git_logs = {r["worktree_path"]: [{"hash": "def5678"}]}
-        return row
-
-    monkeypatch.setattr(lifecycle, "_evaluate", change_after_evaluation)
-    d = await lifecycle.session_cleanup(f, "h1", session_id=r["session_id"], dry_run=False, confirm=True)
-    assert d["decisions"][0]["decision"] == "ESCALATE"
-    assert "worktree:merge" not in mock.channels()
+    async def unexpected_evaluate(*args, **kwargs):
+        raise AssertionError("disabled apply must not evaluate or mutate")
+    monkeypatch.setattr(lifecycle, "_evaluate", unexpected_evaluate)
+    before = len(mock.invokes)
+    with pytest.raises(OperationError, match="LEGACY_CLEANUP_DISABLED"):
+        await lifecycle.session_cleanup(f, "h1", session_id=r["session_id"], dry_run=False, confirm=True)
+    assert len(mock.invokes) == before
     await f.close()
 
 
@@ -533,7 +533,7 @@ async def test_cleanup_never_merges_into_a_human_checkout(fleet_factory, mock, m
         return {"claims_done": 0.95, "diff_verdict": "safe_complete", "diff_confidence": 0.95, "tests_ok": 0.95}
 
     monkeypatch.setattr(Jev, "merge_gate", confident_gate)
-    d = await lifecycle.session_cleanup(f, "h1", session_id=r["session_id"], dry_run=False, confirm=True)
+    d = await legacy_evaluate(f, "h1", session_id=r["session_id"], dry_run=False, confirm=True)
     row = d["decisions"][0]
     assert row["decision"] == "ESCALATE" and "human checkout" in row["reasons"][-1]
     assert "worktree:merge" not in mock.channels() and "claude:stop-session" not in mock.channels()
@@ -548,7 +548,7 @@ async def test_cleanup_keeps_bat_sessions_and_legacy_boundaries(fleet_factory, m
     mock.metas["succ-0001"] = {"cwd": "/srv/demo/.bat-worktrees/abc", "isStreaming": False}
     adopt("sess-codex-0002")
     f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, safety={"write_min_interval_s": 0})
-    d = await lifecycle.session_cleanup(f, "h1", confirm=True, dry_run=False, min_idle_s=0)
+    d = await legacy_evaluate(f, "h1", confirm=True, dry_run=False, min_idle_s=0)
     by = {x["session_id"]: x for x in d["decisions"]}
     assert by[sid]["decision"] == "KEEP" and "manual" in by[sid]["reasons"][0]
     assert by["succ-0001"]["decision"] == "KEEP" and by["succ-0001"]["api_access"] == "read_only"
@@ -566,8 +566,9 @@ async def test_cleanup_stops_superseded_claude_after_failover(fleet_factory, moc
     assert by[sid]["decision"] == "CLEAN_ONLY" and by[sid]["stop"] and not by[sid]["remove_worktree"]
     new = by[fo["new_session_id"]]
     assert new["decision"] in ("KEEP", "ESCALATE")  # dirty shared worktree is never removed
-    d = await lifecycle.session_cleanup(f, "h1", confirm=True, dry_run=False, session_id=sid)
-    assert "agent stopped" in d["decisions"][0]["actions"]
+    d = await legacy_evaluate(f, "h1", confirm=True, dry_run=False, session_id=sid)
+    assert d["decisions"][0]["stop"] and not d["decisions"][0].get("actions")
+    assert "claude:stop-session" not in mock.channels()
     assert "worktree:remove" not in mock.channels()
     await f.close()
 
@@ -615,12 +616,11 @@ async def test_codex_model_default_and_archive_cleanup(fleet_factory, mock, monk
     # an ahead branch marked archive-only is cleaned (branch kept), never merged
     r = await _finished_wt(f, mock, kind="ahead", diff="diff --git a/x b/x\n+++ b/x\n+wip\n")
     registry.update("h1", r["session_id"], cleanup_policy="archive")
-    d = await lifecycle.session_cleanup(f, "h1", session_id=r["session_id"], confirm=True, dry_run=False)
+    d = await legacy_evaluate(f, "h1", session_id=r["session_id"], confirm=True, dry_run=False)
     row = d["decisions"][0]
     assert row["decision"] == "CLEAN_ONLY" and "archive" in row["reasons"][0]
     assert "worktree:merge" not in mock.channels()
-    rm = next(i for i in mock.invokes if i["channel"] == "worktree:remove")
-    assert rm["params"]["deleteBranch"] is False
+    assert "worktree:remove" not in mock.channels()
     await f.close()
 
 

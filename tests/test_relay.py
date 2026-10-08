@@ -123,7 +123,7 @@ async def test_relay_without_session(fleet_factory, mock, monkeypatch):
     await f.close()
 
 
-async def test_fanout_from_planner_starts_verbatim_and_cleans_planner(fleet_factory, mock):
+async def test_e01_fanout_stops_planner_and_keeps_worktree(fleet_factory, mock):
     f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, orchestrate_max_sessions=4,
                       safety={"write_min_interval_s": 0})
     p = await lifecycle.fanout_plan_session(f, "h1", "demo-project", "split the work", max_items=2, confirm=True)
@@ -139,11 +139,10 @@ async def test_fanout_from_planner_starts_verbatim_and_cleans_planner(fleet_fact
     sent = [i["params"].get("prompt") or i["params"].get("text") or "" for i in mock.invokes
             if i["channel"] in ("claude:send-message", "claude:start-session")]
     assert any(x.startswith("Exact prompt A\n\n") for x in sent) and any(x.startswith("Exact prompt B") for x in sent)
-    assert "agent stopped" in str(d["planner_cleanup"])
-    # The planner ran in its own worktree; its empty branch must not stay behind in the person's clone.
-    assert "deleted" in str(d["planner_cleanup"])
-    assert any(i["channel"] == "worktree:remove" and i["params"]["sessionId"] == sid and i["params"]["deleteBranch"]
-               for i in mock.invokes)
+    assert d["planner_cleanup"]["stopped"] and d["planner_cleanup"]["worktree_kept"]
+    assert sid in mock.worktrees
+    assert any(i["channel"] == "claude:stop-session" and i["params"]["sessionId"] == sid for i in mock.invokes)
+    assert not any(i["channel"] in {"worktree:remove", "worktree:merge"} for i in mock.invokes)
     await f.close()
 
 
