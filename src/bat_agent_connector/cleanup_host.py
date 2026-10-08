@@ -330,6 +330,8 @@ def mutate(req):
             if before != req["before"]:
                 raise ValueError("PREVIEW_STALE")
         if phase == "preserve":
+            if req.get("kind") == "local_branch" and observed["refs"].get("refs/heads/" + req["branch"]) != sha:
+                raise ValueError("PREVIEW_STALE")
             if not ref.startswith("refs/batc/retained/"):
                 raise ValueError("BINDING_MISMATCH")
             commits = set(before["refs"].values()) | ({sha} if sha else set()) if req.get("kind") == "temporary" else {sha}

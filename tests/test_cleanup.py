@@ -123,12 +123,25 @@ async def test_e01_accepted_authorization_is_server_recorded(daemon, mock):
         await server.wait_closed()
 
 
-async def test_e01_preserve_precedes_nonforced_remove_and_cas_checks_delivered_refs(daemon, mock, human):
+async def test_e01_preserve_precedes_nonforced_remove_and_cas_checks_delivered_refs(daemon, mock, human, monkeypatch):
     cp, op = await setup_work(daemon, mock)
     doc = await cleanup.preview(daemon.ops, CLEANER, {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]})
+    wt = next(i for i in doc["items"] if i["kind"] == "worktree")
+    branch = next(i for i in doc["items"] if i["kind"] == "local_branch")
+    assert branch["decision"] == "reclaim" and branch["dependencies"] == [wt["resource_id"]]
+    original = cleanup.snapshot
+    branch_snapshots = []
+    async def observe(*args, **kwargs):
+        current = await original(*args, **kwargs)
+        if kwargs.get("only") == branch["resource_id"]:
+            branch_snapshots.append(next((i for i in current["items"] if i["resource_id"] == branch["resource_id"]), None))
+        return current
+    monkeypatch.setattr(cleanup, "snapshot", observe)
     done = await apply(daemon, doc)
     assert done["status"] == "succeeded", done
-    wt = next(i for i in doc["items"] if i["kind"] == "worktree")
+    assert branch_snapshots == [None]  # only=branch has no repository projection; the planned-item fallback runs.
+    rows = {r["resource_id"]: r for r in cleanup.receipts(daemon.ops, done["operation_id"])}
+    assert rows[wt["resource_id"]]["status"] == rows[branch["resource_id"]]["status"] == "succeeded"
     assert not Path(wt["path"]).exists()
     assert git(wt["repository"], "rev-parse", "refs/batc/retained/" + wt["resource_id"] + "/" + wt["observation"]["head"])
     assert git(wt["repository"], "show-ref", "--heads")
@@ -137,6 +150,44 @@ async def test_e01_preserve_precedes_nonforced_remove_and_cas_checks_delivered_r
     ret = await cleanup.retained(daemon.ops)
     assert ret["retained"] and not ret["unavailable"]
     assert cleanup.lookup(daemon.journal.db, cp["checkpoint_id"])
+
+
+async def test_e01_branch_moved_after_worktree_removal_is_stale(daemon, mock):
+    import base64
+    import shlex
+
+    cp, op = await setup_work(daemon, mock)
+    doc = await cleanup.preview(daemon.ops, CLEANER, {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]})
+    wt = next(i for i in doc["items"] if i["kind"] == "worktree")
+    branch = next(i for i in doc["items"] if i["kind"] == "local_branch")
+    original = daemon.ops.context["git_runner"]
+    class MovedBranch(LocalRunner):
+        moved = None
+        refs_after_move = None
+        branch_phases = []
+        async def run(self, host, script, timeout_s=None):
+            req = json.loads(base64.b64decode(shlex.split(script)[-1]))
+            if self.moved and req.get("kind") == "local_branch" and req.get("phase"):
+                self.branch_phases.append(req["phase"])
+            out = await original.run(host, script, timeout_s)
+            if req.get("phase") == "remove.worktree" and json.loads(out).get("result", {}).get("removed"):
+                assert not Path(wt["path"]).exists()
+                sha = wt["observation"]["head"]
+                self.moved = git(wt["repository"], "-c", "user.name=test", "-c", "user.email=test@example.invalid",
+                                 "commit-tree", sha + "^{tree}", "-p", sha, "-m", "branch moved")
+                git(wt["repository"], "update-ref", "refs/heads/" + wt["branch"], self.moved, sha)
+                self.refs_after_move = git(wt["repository"], "for-each-ref")
+            return out
+    runner = MovedBranch()
+    daemon.ops.context["git_runner"] = runner
+    done = await apply(daemon, doc)
+    rows = {r["resource_id"]: r for r in cleanup.receipts(daemon.ops, done["operation_id"])}
+    assert rows[wt["resource_id"]]["status"] == "succeeded"
+    assert rows[branch["resource_id"]]["status"] == "blocked_stale"
+    assert rows[branch["resource_id"]]["error"]["code"] == "PREVIEW_STALE", rows[branch["resource_id"]]
+    assert "remove.branch" not in runner.branch_phases
+    assert git(wt["repository"], "for-each-ref") == runner.refs_after_move
+    assert git(wt["repository"], "rev-parse", wt["branch"]) == runner.moved
 
 
 async def test_e01_release_keeps_commits_with_cleanup_scope(daemon, mock):
