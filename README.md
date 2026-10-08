@@ -142,8 +142,9 @@ No paid API key is required.
 
 The task daemon also serves `/api/v1` on its loopback port: capabilities, a persisted session inventory with
 staleness, durable operations, and one event cursor with SSE. Issue a token per client
-(`batc api-token issue --actor ted-dashboard --scope observe --scope operate --scope start`; `start` lets it start
-new agent sessions from checkpoints) and send it as
+(`batc api-token issue --actor ted-dashboard --scope observe --scope operate --scope start --scope integrate`;
+`start` lets it start new agent sessions from checkpoints, `integrate` lets it push results to a PR's head branch) and
+send it as
 `Authorization: Bearer`. MCP clients reach the same operations with `operation_submit`, `operation_cancel` and
 `operation_resume` (`confirm=true`, and `BATC_API_TOKEN` set to the client's own token: operations never run as the
 local admin). See [docs/design/api-v1.md](docs/design/api-v1.md).
@@ -161,6 +162,12 @@ To continue a person's work without touching their session, record a checkpoint 
 and recent conversation, read-only) and start managed work from it (`checkpoint.continue`: a connector-owned clone,
 worktree, branch and session at that commit). This needs `managed_roots` and an SSH alias for the host. See
 [docs/design/checkpoints.md](docs/design/checkpoints.md).
+
+To put results into an existing PR, preview them (`integration.preview`: every commit and file that would enter,
+pinned by SHA) and apply the preview (`integration.apply`: one normal push of the composed commit to the PR's head
+branch, with the host's git credentials; never forced, and your folders are never changed). This needs
+`integrate = {hosts, remote_url}` on the repository's `[[github.repos]]` entry. See
+[docs/design/integration.md](docs/design/integration.md).
 
 ### Connect an MCP client
 

@@ -16,12 +16,12 @@ import time
 from importlib import resources
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import __version__, api_auth, checkpoints, delivery, resource_policy, service
+from . import __version__, api_auth, checkpoints, integration, resource_policy, service
 from .errors import BatError, ResourceReadOnly
 from .operations import STATES, OperationError
 
 API_VERSION = 1
-CONTRACT_VERSION = "2026-10-07"
+CONTRACT_VERSION = "2026-10-08"
 MAX_BODY = 200_000
 MAX_STREAMS = 16
 MAX_STREAMS_PER_ACTOR = 8  # several Dashboard tabs per person; reloads briefly overlap
@@ -105,6 +105,10 @@ class ApiV1:
             ("GET", r"/api/v1/checkpoints/(?P<cp>cp_[0-9a-f]{32})", self.checkpoint, "observe"),
             ("GET", r"/api/v1/repositories/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pulls/(?P<number>\d{1,9})",
              self.pull_preview, "observe"),
+            ("GET", r"/api/v1/integrations/candidates", self.integration_candidates, "observe"),
+            ("GET", r"/api/v1/integrations/previews/(?P<pv>ipv_[0-9a-f]{32})", self.integration_preview, "observe"),
+            ("GET", r"/api/v1/integrations", self.integrations, "observe"),
+            ("GET", r"/api/v1/integrations/(?P<op>op_[0-9a-f]{32})", self.integration, "observe"),
         ]
 
     # ------------------------------------------------------------------ plumbing
@@ -289,7 +293,10 @@ class ApiV1:
                      "features": {"inventory": True, "events_stream": True, "operations": True,
                                   "github": self.daemon.ops.context.get("github") is not None,
                                   "deploy": bool(gh_cfg.recipes),
-                                  "checkpoints": [h for h in fleet.config.hosts if self._can_continue(h)]},
+                                  "checkpoints": [h for h in fleet.config.hosts if self._can_continue(h)],
+                                  "integration": [{"repository": r.repository,
+                                                   "hosts": integration.usable_hosts(self.daemon.ops, r)}
+                                                  for r in gh_cfg.repos.values() if r.integrate]},
                      "repositories": [{"repository": r.repository, "allow_merge": r.allow_merge,
                                        "merge_methods": list(r.merge_methods)} for r in gh_cfg.repos.values()],
                      "deploy_recipes": [{"name": r.name, "repository": r.repository, "environment": r.environment,
@@ -373,7 +380,25 @@ class ApiV1:
             resource_type=self._q(query, "resource_type"), resource_id=self._q(query, "resource_id"))
 
     async def pull_preview(self, owner, repo, number, **_):
-        return 200, {"pull_request": await delivery.pr_preview(self.daemon.ops, f"{owner}/{repo}", int(number))}
+        return 200, {"pull_request": await integration.pr_card(self.daemon.ops, f"{owner}/{repo}", int(number))}
+
+    async def integration_candidates(self, query, **_):
+        host = self._q(query, "host")
+        self._known_host(host or "")
+        return 200, integration.candidates(self.daemon.ops, host, self._int(query, "limit", 50))
+
+    async def integration_preview(self, pv, **_):
+        return 200, {"preview": integration.preview_document(self.daemon.journal.db, pv)}
+
+    async def integrations(self, query, **_):
+        number = self._int(query, "pull_number", 0)
+        if not self._q(query, "repository") or number <= 0:
+            raise ApiError(422, "INVALID_REQUEST", "repository and pull_number are required")
+        return 200, integration.integrations_list(self.daemon.ops, self._q(query, "repository"), number,
+                                                  self._int(query, "limit", 20))
+
+    async def integration(self, op, **_):
+        return 200, integration.integration_get(self.daemon.ops, op)
 
     async def checkpoints(self, query, **_):
         return 200, checkpoints.list_checkpoints(self.daemon.journal.db, host=self._q(query, "host"),

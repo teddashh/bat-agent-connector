@@ -8,6 +8,29 @@
   worktree under the session's workspace folder (a person's checkout in real use, copying its env files in) and
   removed it from there, pruning that repository. New sessions record `worktree_made_by: "connector"`; older rows
   are recognised by their `batc/` branch.
+- Integration into an existing PR (docs/design/integration.md, plan §14, C01-C03): `integration.preview` pins the
+  PR head and chosen results (a person's checkpoint, an agent's checkpoint run, a GitHub branch) by SHA in a bare,
+  identity-checked area under the host's first managed root, lists every commit and file that would enter, and
+  predicts the result; `integration.apply` composes exactly that (fast-forward, merge commit or picked commits) with
+  git plumbing only, checks that nothing else entered, and pushes one exact SHA to the PR's head branch with a normal
+  push using the host's git credentials. Per-source receipts; a lost push reply is read back, never resent; a
+  conflict stops with nothing pushed. New scope `integrate`, config `integrate = {hosts, remote_url}` on
+  `[[github.repos]]`, routes `/api/v1/integrations/...`, MCP `integration_candidates`, `integration_get`,
+  `integrations_list`, CLI `batc integrate`, and an "Update PR results" panel in the Dashboard's Delivery view.
+  Merging is refused while an integration of the same PR is open, and the other way round.
+- Integration review fixes: a cancel requested while a step is being read back now stops before the step is sent
+  again (OperationService, all actions); a lost push reply waits for a push still running on the host and re-sends
+  only when GitHub says the composed commit does not exist (`PUSH_UNPROVEN` otherwise); once a push may have
+  happened, a closed PR or a GitHub error no longer ends the apply as "nothing pushed"; GitHub lag after a proven push
+  is a warning, not a wait; receipts of an unproven push read `unknown`; exact ref matching for `ls-remote`; no links
+  inside the integration area; the preview no longer runs `git status` in an agent's folder (its config could run
+  commands).
+- `integration.handoff`: an apply stopped at a conflict gets a repair worktree in the integration area and a confined
+  managed session that resolves it; Resume waits while the session works, accepts exactly one merge commit of the two
+  sides with no uncommitted changes or conflict markers, pins it by SHA, and continues without composing earlier
+  sources again (`RESOLUTION_INCOMPLETE`, `RESOLUTION_INVALID`). CLI `batc integrate handoff`; the Dashboard offers
+  "Ask an agent to resolve". Shared `checkpoints.start_in_worktree` starts both checkpoint and repair sessions.
+
 - Checkpoints no longer call BAT's `git:status` on the person's checkout: BAT runs a plain `git status`, which can
   rewrite `.git/index`, and answers `[]` on failure. Uncommitted changes are counted over SSH with
   `git --no-optional-locks status`, or reported as not observed (`dirty: null`); `dirty` is a count, not a bool.

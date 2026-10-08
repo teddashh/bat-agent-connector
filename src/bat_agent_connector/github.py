@@ -76,6 +76,9 @@ class GitHubClient:
     async def merge_async_result(self, repository: str, number: int, uuid: str):
         return await self.call("GET", f"{self._repo(repository)}/pulls/{int(number)}/merge-async/{quote(uuid)}")
 
+    async def commit(self, repository: str, sha: str):
+        return await self.call("GET", f"{self._repo(repository)}/commits/{quote(sha)}")
+
     async def check_runs(self, repository: str, sha: str):
         return await self.call("GET", f"{self._repo(repository)}/commits/{quote(sha)}/check-runs",
                                query={"per_page": 100})

@@ -51,6 +51,9 @@ READ_TOOLS = [
     "github_pr_preview",
     "checkpoints_list",
     "checkpoint_preview",
+    "integration_candidates",
+    "integration_get",
+    "integrations_list",
 ]
 # Registered unless --read-only: they act as BATC_API_TOKEN's principal, whose scopes decide what is allowed.
 OPERATION_TOOLS = ["operation_submit", "operation_cancel", "operation_resume", "checkpoint_create",
@@ -348,8 +351,26 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         first if the new work needs them."""
         return await daemon("checkpoint_preview", host=host, session_id=session_id)
 
+    async def integration_candidates(host: str, limit: int = 20) -> dict[str, Any]:
+        """Results that can go into a PR from this host: agent results (checkpoint runs, by operation id),
+        people's checkpoints, and where each was already delivered. Journal and inventory only."""
+        return await daemon("integration_candidates", host=host, limit=limit)
+
+    async def integration_get(operation_id: str | None = None, preview_id: str | None = None) -> dict[str, Any]:
+        """One integration: a preview document (preview_id: every commit and file that would enter the PR,
+        overlaps, predicted conflicts, blocking and warnings, digest) or an integration.apply operation
+        (operation_id) with its per-source receipts."""
+        if preview_id:
+            return await daemon("integration_preview_get", preview_id=preview_id)
+        return await daemon("integration_get", operation_id=operation_id)
+
+    async def integrations_list(repository: str, pull_number: int, limit: int = 20) -> dict[str, Any]:
+        """Integration updates of one PR, newest first, with their receipts."""
+        return await daemon("integrations_list", repository=repository, pull_number=pull_number, limit=limit)
+
     for fn in (capabilities_get, inventory_sessions, inventory_hosts, events_list, operation_get, operations_list,
-               github_pr_preview, checkpoints_list, checkpoint_preview):
+               github_pr_preview, checkpoints_list, checkpoint_preview, integration_candidates, integration_get,
+               integrations_list):
         mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
 
     if fleet.any_orchestrate:
@@ -432,7 +453,16 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             idempotency_key and reuse it to retry; the same key with different content is refused. Returns the
             operation (waits up to wait_s for an outcome). Writes to sessions created in BAT are refused
             (403); to continue such work, checkpoint.create reads it and checkpoint.continue starts a new
-            managed session from its commit (see checkpoints_list). Acts as BATC_API_TOKEN's principal;
+            managed session from its commit (see checkpoints_list). To put results into an existing PR
+            (scope integrate): 1) action="integration.preview", target={host, repository, pull_number},
+            params={sources: [{kind: checkpoint|checkpoint_run|branch, id, mode?: merge|pick, commits?}]}, a new
+            key per refresh; read every commit it lists. 2) action="integration.apply", same target,
+            params={preview_id}, preconditions={expected_head_sha: preview.target.head_sha, preview_digest:
+            preview.digest}, idempotency_key="integrate.<preview_id>". On INTEGRATION_CONFLICT,
+            action="integration.handoff", target={operation_id} starts a confined session that resolves it in the
+            connector's area (needs the start scope too); operation_resume once it has committed. On REMOTE_MOVED,
+            TARGET_HEAD_CHANGED or SOURCE_CHANGED preview again; never add sources to an apply. Acts as
+            BATC_API_TOKEN's principal;
             requires confirm=true."""
             return await principal_daemon("op_submit", confirm, action=action, idempotency_key=idempotency_key,
                                           target=target, params=params, preconditions=preconditions, wait_s=wait_s)
