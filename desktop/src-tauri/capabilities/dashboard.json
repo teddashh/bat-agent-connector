@@ -2,6 +2,17 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "dashboard",
   "description": "Only the packaged main Dashboard may use the constrained central transport.",
-  "windows": ["main"],
-  "permissions": ["allow-native-status", "allow-connector-connect", "allow-connector-disconnect", "allow-connector-request", "allow-connector-upload-artifact", "allow-open-external"]
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "allow-native-status",
+    "allow-connector-connect",
+    "allow-connector-disconnect",
+    "allow-connector-request",
+    "allow-connector-upload-artifact",
+    "allow-open-external",
+    "allow-fleet-availability",
+    "allow-fleet-request"
+  ]
 }

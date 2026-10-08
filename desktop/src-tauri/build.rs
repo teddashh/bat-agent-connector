@@ -7,6 +7,8 @@ fn main() {
             "connector_request",
             "connector_upload_artifact",
             "open_external",
+            "fleet_availability",
+            "fleet_request",
         ]),
     ))
     .expect("desktop build configuration");

@@ -12,6 +12,13 @@
 
 遠端使用一律經 SSH forward 到 daemon 的 loopback 埠；daemon 不綁非 loopback 位址。
 
+Legacy interrupt 第一個切片：MCP `session_interrupt`／CLI `interrupt` 經 `/rpc session_interrupt`
+呼叫既有 `session.interrupt` action，新增可選 key／control_version，保留完整結果並帶 operation ID/status/code。
+只此相容入口可省 key；每次建立獨立 operation，storage sentinel 在所有 operation 讀取中投影為
+`idem_key=null`、`idempotency_key=null`、`idempotency_enabled=false`。named keys 原值保留，
+`batc:nokey:` 為保留前綴；HTTP／`op_submit` 仍須明確 key。細節與尚未轉接入口見
+[operations-unification.md](operations-unification.md#part-b-第一個切片interrupt)。
+
 ## 身分與權限
 
 | 主體 | 取得方式 | 權限 |
@@ -120,6 +127,7 @@ History／relations 的 opaque cursor 在任何 journal read 前驗證 version�
 | 方法與路徑 | Scope | 說明 |
 |---|---|---|
 | `POST /api/v1/artifacts` | manage | artifact.upload intent；body 為 target／params／preconditions，Idempotency-Key，?wait |
+| `POST /api/v1/artifact-capture-previews` | observe | host/session_id/relative_path；唯讀人工單檔 evidence，10 分鐘 credential-bound signed preview，不建永久 preview rows |
 | `POST /api/v1/artifacts/uploads/{op_id}/content` | manage＋同 actor 或 admin | body 前驗證 action／state／Content-Length；只收 application/octet-stream，拒絕 chunked；operation 自己的 staging |
 | `GET /api/v1/artifacts?limit=&cursor=` | observe | 分頁 ID 與 latest ready 的展示 metadata；輸入選擇仍須精確 ref |
 | `GET /api/v1/artifacts/{art_id}/revisions/{revision}` | observe | immutable metadata 與 materialization evidence |
@@ -161,7 +169,7 @@ History／relations 的 opaque cursor 在任何 journal read 前驗證 version�
 
 ## 附件（Part A）
 
-`capabilities.artifacts` 公開 file／selection／store／MCP／upload window limits，以及 host helper 配置與已觀測 readiness。MCP 只有 artifact_upload、artifacts_list、artifact_get；confirmation 經 operation_submit 的 checkpoint.continue.revalidate。沒有 materialize action、store delete 或新 BAT channel。完整參數與錯誤見 [artifacts.md](artifacts.md)。
+`capabilities.artifacts` 公開 file／selection／store／MCP／upload window limits，以及 host helper 配置與已觀測 readiness。B1 增加 capture.manual_single_file、snapshot=false、preview_ttl_s；MCP 增加 artifact_capture_preview／artifact_capture，沿用 observe＋manage 與同 credential 的 signed preview。`artifact.capture` action target={preview_id}、params={preview_token}、preconditions={expected_fingerprint}，成功回既有 ArtifactRef；不接受 client source lineage。Confirmation 經 operation_submit 的 checkpoint.continue.revalidate。沒有 materialize action、store delete 或新 BAT channel。完整參數與錯誤見 [artifacts.md](artifacts.md)。
 
 ## 執行限制證據（A10）
 
@@ -274,7 +282,7 @@ Agent MCP 安裝使用 `--principal-only`：只註冊 central daemon reads、ope
 再加 `--read-only` 可完全隱藏寫入工具。預設 operator profile 保留舊 direct Fleet 工具，
 不代表 API principal scopes 可約束這些舊入口；agent 不使用它。詳見 [agent bundles](../agent-skills.md)。
 
-- Artifact 的 manual／managed capture 與 accept（Part B）、跨主機接續（Part C），見 [artifacts.md](artifacts.md)。Dashboard、GitHub 與 checkpoint 已有各自設計。
+- Artifact 的 managed capture 與 accept（Part B2）、跨主機接續（Part C），見 [artifacts.md](artifacts.md)。人工單檔 B1 不提供 dirty snapshot。
 
 - 既有 MCP 寫入工具（`session_send` 等）仍直接呼叫 service；它們受同一套資源政策約束，但不留 operation 紀錄。之後改為經 `operation_submit`。
 

@@ -12,6 +12,7 @@ import asyncio
 import base64
 import functools
 import ipaddress
+import json
 import logging
 import os
 import sys
@@ -60,11 +61,11 @@ READ_TOOLS = [
     "projects_list",
     "project_get",
     "work_items_list",
-    "work_item_get", "artifacts_list", "artifact_get", "cleanup_preview", "cleanup_retained", "cleanup_tombstones",
+    "work_item_get", "artifacts_list", "artifact_get", "artifact_capture_preview", "cleanup_preview", "cleanup_retained", "cleanup_tombstones",
 ]
 # Registered unless --read-only: they act as BATC_API_TOKEN's principal, whose scopes decide what is allowed.
 OPERATION_TOOLS = ["operation_submit", "operation_cancel", "operation_resume", "checkpoint_create",
-                   "work_continue_from_checkpoint", "artifact_upload", "cleanup_apply", "github_pr_update", "github_pr_merge",
+                   "work_continue_from_checkpoint", "artifact_upload", "artifact_capture", "cleanup_apply", "github_pr_update", "github_pr_merge",
                    "deployment_start", "deployment_retry", "deployment_rollback"]
 WRITE_TOOLS = [
     "session_send",
@@ -324,6 +325,15 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             raise WriteRefused("BATC_API_TOKEN is required for the principal-only profile (including reads)")
         return asyncio.to_thread(http_request, path, token=token, **params)
 
+    def principal_daemon(method: str, confirmed: bool, **params):
+        if not confirmed:
+            raise WriteRefused(f"{method} requires confirm=true")
+        token = os.environ.get("BATC_API_TOKEN")
+        if not token:
+            raise WriteRefused("operation writes need this client's own API token: issue one with "
+                               "`batc api-token issue --actor NAME --scope ...` and set BATC_API_TOKEN")
+        return asyncio.to_thread(task_request, method, _auth_token=token, timeout=40.0, entry="mcp", **params)
+
     async def capabilities_get() -> dict[str, Any]:
         """What this caller may do: its actor and scopes, per-host tiers and managed roots, and every operation
         action with whether it is allowed. Read this before submitting operations."""
@@ -495,6 +505,13 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
         """One immutable revision, its digest/size, download URL and continuation materialization evidence."""
         return await daemon("artifact_get", artifact_id=artifact_id, revision=revision)
 
+    async def artifact_capture_preview(host: str, session_id: str, relative_path: str) -> dict[str, Any]:
+        """READ (observe). Review one regular file under a manual session's observed folder.
+        Returns a credential-bound preview valid for ten minutes; no bytes or source edits. Not a snapshot."""
+        if not os.environ.get("BATC_API_TOKEN"):
+            raise WriteRefused("artifact capture preview requires BATC_API_TOKEN; no admin fallback")
+        return await daemon("artifact_capture_preview", host=host, session_id=session_id, relative_path=relative_path)
+
     async def cleanup_preview(target: dict[str, Any], choices: dict[str, list[str]] | None = None) -> dict[str, Any]:
         """Pure read preview of work_item (optional include_children), checkpoint, integration or host resources.
         Lists all retention reasons, exact steps and a signed token valid for 15 minutes. Explicit per-item
@@ -522,7 +539,8 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
                resource_history, resource_relations, events_list, operation_get, operations_list,
                github_pr_preview, github_merge_preview_get, deployment_preview, deployment_status, deployments_list,
                deployment_environment_get, checkpoints_list, checkpoint_preview, integration_candidates, integration_get,
-               integrations_list, projects_list, project_get, work_items_list, work_item_get, artifacts_list, artifact_get, cleanup_preview, cleanup_retained, cleanup_tombstones):
+               integrations_list, projects_list, project_get, work_items_list, work_item_get,
+               artifacts_list, artifact_get, artifact_capture_preview, cleanup_preview, cleanup_retained, cleanup_tombstones):
         mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
 
     if not read_only and (principal_only or fleet.any_orchestrate):
@@ -596,15 +614,6 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
         # (send, merge, deploy...) is the token's scopes, not the BAT host tiers this MCP server was started with.
         op_write = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True)
 
-        def principal_daemon(method: str, confirm: bool, **params):
-            if not confirm:
-                raise WriteRefused(f"{method} requires confirm=true")
-            token = os.environ.get("BATC_API_TOKEN")
-            if not token:
-                raise WriteRefused("operation writes need this client's own API token: issue one with "
-                                   "`batc api-token issue --actor NAME --scope ...` and set BATC_API_TOKEN")
-            return asyncio.to_thread(task_request, method, _auth_token=token, timeout=40.0, entry="mcp", **params)
-
         async def operation_submit(action: str, idempotency_key: str, target: dict[str, Any],
                                    params: dict[str, Any] | None = None,
                                    preconditions: dict[str, Any] | None = None,
@@ -652,6 +661,16 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             return await asyncio.to_thread(upload, data, display_name, idempotency_key, media_type=media_type,
                                            artifact_id=artifact_id, expected_latest_revision=expected_latest_revision,
                                            token=os.environ["BATC_API_TOKEN"], mcp=True)
+
+        async def artifact_capture(preview_id: str, preview_token: str, fingerprint: str, idempotency_key: str,
+                                   confirm: bool = False) -> dict[str, Any]:
+            """WRITE (manage + observe). Save exactly one reviewed manual file as an immutable ArtifactRef.
+            Use the preview and this agent's credential; source changes refuse. Keep the same key on lost reply.
+            This neither accepts results nor marks any work complete; it cannot change the manual source."""
+            return await principal_daemon("op_submit", confirm, action="artifact.capture",
+                                          target={"preview_id": preview_id}, params={"preview_token": preview_token},
+                                          preconditions={"expected_fingerprint": fingerprint},
+                                          idempotency_key=idempotency_key)
 
         async def cleanup_apply(preview_id: str, preview_token: str, fingerprint: str, idempotency_key: str,
                                 confirm: bool = False) -> dict[str, Any]:
@@ -770,7 +789,7 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             return await principal_daemon("op_resume", confirm, operation_id=operation_id)
 
         for fn in (operation_submit, operation_cancel, operation_resume, checkpoint_create,
-                   work_continue_from_checkpoint, artifact_upload, cleanup_apply, github_pr_update, github_pr_merge,
+                   work_continue_from_checkpoint, artifact_upload, artifact_capture, cleanup_apply, github_pr_update, github_pr_merge,
                    deployment_start, deployment_retry, deployment_rollback):
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=op_write)
 
@@ -799,12 +818,24 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             return await service.session_continue(fleet, host, session_id, confirm, text, queue)
 
         async def session_interrupt(
-            host: str, session_id: str, mode: Literal["soft", "hard"] = "soft", confirm: bool = False
+            host: str, session_id: str, mode: Literal["soft", "hard"] = "soft", confirm: bool = False,
+            idempotency_key: str | None = None, control_version: int | None = None,
         ) -> dict[str, Any]:
             """WRITE. Interrupt the running turn. soft = Claude interrupt-turn (like one Esc; keeps
             background tasks); hard = abort-session (like double Esc; Codex always uses this). The
-            session itself is kept. Requires confirm=true."""
-            return await service.session_interrupt(fleet, host, session_id, mode, confirm)
+            session itself is kept. Requires confirm=true and BATC_API_TOKEN; the daemon owns the
+            operation. Reuse an explicit key for retries. Without a key each call is a new operation;
+            after a lost reply read the saved operation ID, never automatically resend."""
+            if not fleet.writes_enabled(host):
+                raise WriteRefused("the local write tier is off for this host")
+            params = {"host": host, "session_id": session_id, "mode": mode, "confirm": confirm,
+                      "idempotency_key": idempotency_key}
+            if control_version is not None:
+                params["control_version"] = control_version
+            out = await principal_daemon("session_interrupt", confirm, **params)
+            if out["operation_status"] in {"failed", "cancelled"}:
+                raise ToolError(json.dumps(out, ensure_ascii=False))
+            return out
 
         async def session_answer(
             host: str,

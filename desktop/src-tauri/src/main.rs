@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bridge;
+mod fleet;
 
 use bridge::{Bridge, ConnectorRequest, ConnectorResponse, NativeStatus};
 use tauri::{
@@ -10,6 +11,25 @@ use tauri::{
 };
 use tauri_plugin_opener::OpenerExt;
 use zeroize::Zeroizing;
+
+#[tauri::command]
+fn fleet_availability(
+    window: WebviewWindow,
+    state: State<'_, fleet::FleetBridge>,
+) -> Result<fleet::FleetAvailability, String> {
+    local_main(&window)?;
+    Ok(state.availability())
+}
+
+#[tauri::command]
+async fn fleet_request(
+    window: WebviewWindow,
+    state: State<'_, fleet::FleetBridge>,
+    input: fleet::FleetRequest,
+) -> Result<serde_json::Value, String> {
+    local_main(&window)?;
+    state.request(input).await
+}
 
 #[tauri::command]
 fn open_external(window: WebviewWindow, app: tauri::AppHandle, url: String) -> Result<(), String> {
@@ -106,6 +126,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
             app.manage(Bridge::load(&app.path().app_config_dir()?, token));
+            app.manage(fleet::FleetBridge::load(&app.path().app_config_dir()?));
             let config = app.config().app.windows[0].clone();
             tauri::WebviewWindowBuilder::from_config(app, &config)?
                 .on_navigation(|url| {
@@ -154,6 +175,8 @@ fn main() {
             connector_disconnect,
             connector_request,
             connector_upload_artifact,
+            fleet_availability,
+            fleet_request,
             open_external
         ])
         .run(tauri::generate_context!())

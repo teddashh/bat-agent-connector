@@ -81,7 +81,12 @@ Upload with `batc artifact upload FILE --key KEY --confirm` or a Dashboard picke
 `{artifact_id, revision, digest}` to a work item or checkpoint, and continue on the checkpoint's host. Bytes are
 verified in the session's worktree before the first command; a moved source requires confirmation that resumes the
 same operation. Dashboard text and uploaded refs survive reloads and failures. Store content has no delete;
-manual/result capture and cross-host commit fetch are later parts. See [the artifact design](docs/design/artifacts.md).
+Use `batc artifact capture-preview HOST SESSION_ID relative/file` to review one manual-session file, save
+the JSON, then `batc artifact capture --preview-file PREVIEW.json --key KEY --confirm` with the same credential.
+Capture, including replay/resume/cancel, needs the original credential with `observe` and `manage`.
+Accepted operations remain recoverable after preview expiry. Capture refuses source changes and never changes the manual checkout. It preserves
+one file, not a dirty snapshot. Managed-result capture/accept and cross-host commit fetch remain later parts.
+See [the artifact design](docs/design/artifacts.md).
 
 ## Install
 
@@ -158,8 +163,12 @@ Task-owned sends, answers, interrupts and permission changes pass the same coord
 `TASK_PAUSED`, `TASK_VERIFYING` and `TASK_COMMAND_PENDING` mean stop and read `work_status`, never jump the queue
 with force or continue. `CONTROL_VERSION_CONFLICT` requires reading the changed state. A second daemon, even with
 a different `--db`, returns `OWNER_CONFLICT` with the existing owner; clients use that owner. This is
-[operations unification Part A](docs/design/operations-unification.md); the remaining legacy operations and
-no-key/null result projection are Part B.
+[operations unification](docs/design/operations-unification.md). The first Part B slice also routes MCP
+`session_interrupt` and CLI `interrupt` through the existing daemon. MCP needs `BATC_API_TOKEN`; CLI uses it
+when set, otherwise its local admin token. Both keep confirmation and host write tiers. Add `--key` (MCP:
+`idempotency_key`) to deduplicate retries; omitting it creates a distinct operation each time. Keep the returned
+operation ID after an unknown reply and read it with `batc op ID` / `operation_get`; neither adapter resends
+automatically or starts another daemon. Other legacy operations and task no-key projection remain Part B.
 
 Every task is one Goose session on Opus 5.5. The `goose-session` recipe prompt tells Goose to split the work
 once, to aim for an executor mix of Grok 4.7 : Codex : Opus 5.5 = 4:2:1, and to give no new work to a model

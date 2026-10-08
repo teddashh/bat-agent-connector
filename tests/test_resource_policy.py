@@ -19,7 +19,10 @@ from bat_agent_connector.config import parse_config
 from bat_agent_connector.errors import ConfigError, ResourceReadOnly
 from bat_agent_connector.mcp_server import build_server
 from bat_agent_connector.resource_policy import BAT_WRITE_CHANNELS, BY_ACTION, MUTATIONS
+from tests import test_api_v1 as api
 from tests.conftest import adopt, make_config
+
+daemon, served = api.daemon, api.served
 
 MANUAL = "sess-claude-0001"  # a tab Ted opened in BAT, loaded
 MANUAL_UNLOADED = "sess-unload-0003"
@@ -138,7 +141,10 @@ async def test_bulk_and_relay_paths_skip_bat_sessions(fleet_factory, mock):
     await f.close()
 
 
-async def test_mcp_tools_refuse_bat_sessions(mock):
+async def test_mcp_tools_refuse_bat_sessions(mock, served, monkeypatch):
+    d, port = served
+    monkeypatch.setenv("BATC_TASK_URL", f"http://127.0.0.1:{port}/rpc")
+    monkeypatch.setenv("BATC_API_TOKEN", api.token(d, "policy-test", "operate"))
     server, fleet = build_server(make_config(mock, writes=True, orchestrate=True))
     for tool, args in (("session_send", {"text": "hi", "confirm": True}),
                        ("session_interrupt", {"confirm": True, "mode": "hard"}),
@@ -157,7 +163,10 @@ async def test_mcp_tools_refuse_bat_sessions(mock):
     await fleet.close()
 
 
-async def test_cli_refuses_bat_sessions(mock, tmp_path, capsys):
+async def test_cli_refuses_bat_sessions(mock, tmp_path, capsys, served, monkeypatch):
+    d, port = served
+    monkeypatch.setenv("BATC_TASK_URL", f"http://127.0.0.1:{port}/rpc")
+    monkeypatch.setenv("BATC_API_TOKEN", api.token(d, "policy-test", "operate"))
     cfg = tmp_path / "hosts.toml"
     cfg.write_text(f'[hosts.h1]\nurl = "{mock.url}"\nfingerprint = "{mock.fingerprint}"\n'
                    'token_ref = "env:BATC_TEST_TOKEN"\nwrites = true\norchestrate = true\n')

@@ -75,6 +75,7 @@ textarea { width: 100%; min-height: 80px; resize: vertical; }
 .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.fleet-choice { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; }
 .chip.info { color: var(--info); border: 1px solid var(--info); background: transparent; }
 .note.ok { border-left-color: var(--ok); } .note.warn { border-left-color: var(--warn); }
 .pre { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -146,3 +147,11 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
   .deployment-versions { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .environment-card details > summary { min-height: 44px; display: flex; align-items: center; }
 }
+.observation-panel > summary { font-weight: 600; cursor: pointer; }
+.observation-panel .filters { margin-top: 12px; }
+.observation-panel input { min-width: 0; max-width: 100%; }
+.observation-record { padding: 10px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.observation-record:last-child { border-bottom: 0; }
+.observation-record .actions { margin-top: 0; }
+.observation-evidence { margin-top: 10px; overflow-wrap: anywhere; }
+.observation-evidence .kv { grid-template-columns: minmax(80px, max-content) minmax(0, 1fr); }

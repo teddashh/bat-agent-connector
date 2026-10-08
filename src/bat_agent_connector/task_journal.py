@@ -382,6 +382,9 @@ class Journal:
                     reserved_bytes INTEGER NOT NULL, attempt INTEGER NOT NULL DEFAULT 0,
                     receive_state TEXT NOT NULL DEFAULT 'waiting', received_size INTEGER NOT NULL DEFAULT 0,
                     received_digest TEXT, released_at REAL)""",
+                """CREATE TABLE IF NOT EXISTS artifact_capture_sources (
+                    operation_id TEXT PRIMARY KEY REFERENCES operations(operation_id),
+                    document TEXT NOT NULL)""",
                 """CREATE TABLE IF NOT EXISTS artifact_references (
                     owner_kind TEXT NOT NULL, owner_id TEXT NOT NULL, artifact_id TEXT NOT NULL,
                     revision INTEGER NOT NULL, digest TEXT NOT NULL, role TEXT NOT NULL,

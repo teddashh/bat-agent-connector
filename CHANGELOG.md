@@ -2,6 +2,38 @@
 
 ## Next release (unreleased)
 
+- Add local Desktop Fleet connection controls through the existing Kit's fixed PowerShell facade.
+  Restricted native IPC keeps configuration and process startup outside the webview, bounds replies and
+  deadlines, and uses only the OS PowerShell's system modules. Revision-bound selection drafts survive
+  uncertain replies; other-login monitors remain read-only. Shared confinement and cleanup views remain
+  available alongside Fleet settings. Installed Windows ownership/lifecycle acceptance and Rust Fleet
+  parity remain pending ([desktop Fleet adapter](docs/design/desktop-fleet.md)).
+
+- Capture one reviewed file from a positively classified manual BAT session as an immutable artifact.
+  Idempotent replay and resume/cancel keep the original credential and combined scopes without re-expiring accepted previews.
+  HTTP, MCP and CLI use a short-lived credential-bound preview and the existing operation/store quota,
+  staging and publication receipts. Reject symlinks, hardlinks, nonregular files, source changes and rebinding;
+  preserve the manual checkout and recover completed captures without rereading or republishing their source.
+  This is single-file continuation data; managed-result acceptance, dirty snapshots and capture UI remain separate.
+
+- Route legacy MCP/CLI interrupt through the central durable `session.interrupt` action. Preserve
+  fixed session/task bindings, complete results and final-frame checks; lost replies only read back.
+  Optional keys explicitly report whether retries deduplicate; internal no-key sentinels never appear
+  in operation reads. CLI read-only now guards daemon-backed mutations before dispatch as well.
+
+- Keep session subscriptions after an initial observation/message read failure. Retry failed reads,
+  disable session actions until recovery, and preserve pending answers and the original operation key.
+
+- Present central session state evidence and discovery coverage, plus fixed-snapshot history and relations
+  for sessions, known worktrees and executions. Retain loaded inventory pages using stable-ID order and
+  identity-scoped dependencies. Safety reads keep parent archive restrictions current while drafts defer
+  ordinary renders. Real central/MockBat and browser/native fixtures cover the shared UI; live M1 acceptance
+  remains pending.
+
+- Refresh mounted session questions, permissions and linked work-item evidence without losing drafts.
+  Recheck pending identity before answering, preserve failed-read checkpoints, and disable archived-parent
+  actions while an edit stays open. History/relations and full M1 acceptance remain tracked separately.
+
 - Reject malformed deployment history cursors before querying, including integer overflow and
   non-finite timestamps, while preserving valid integer ordering and saved page cursors.
 
