@@ -246,3 +246,23 @@ async def test_locate_refuses_github_truncated_filtered_search(make_daemon, gh):
     assert e.value.code == "DEPLOY_RUN_AMBIGUOUS"
     assert gh.count("GET", "workflows/.*/runs") == 1
     assert gh.count("POST", "dispatches") == 0
+
+
+async def test_current_reconcile_cadence_is_shared_when_current_changes(make_daemon, gh, monkeypatch):
+    d = make_daemon()
+    source_on_main(gh)
+    await deployed(d, gh)
+    clock = [1000.0]
+    monkeypatch.setattr(deployment, "reconcile_now", lambda: clock[0])
+    await delivery.reconcile_deployments(d.ops)
+    second = await deployed(d, gh, key="second")
+    clock[0] = 1010
+    gh.requests.clear()
+    verifier = d.ops.context["deployment_verifier"]
+    calls = verifier.calls
+    await delivery.reconcile_deployments(d.ops)
+    assert not gh.requests and verifier.calls == calls
+    clock[0] = 1300
+    await delivery.reconcile_deployments(d.ops)
+    assert gh.count("GET", f"/runs/{second['result']['run_id']}$") == 1
+    assert verifier.calls == calls + 1
