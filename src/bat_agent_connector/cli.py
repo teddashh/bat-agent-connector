@@ -646,7 +646,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("host")
     c.add_argument("--after", type=int, default=0)
     c.add_argument("--limit", type=int, default=20)
-    c = isp.add_parser("events")
+    c = isp.add_parser("events", description="Read journal events after a durable cursor. Session updates include "
+                       "fields_stale/field_evidence changes; observation/activity timestamps alone emit no update.")
     c.add_argument("--after", type=int, default=0)
     c.add_argument("--limit", type=int, default=100)
     c.add_argument("--kind")

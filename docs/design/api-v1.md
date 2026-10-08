@@ -65,7 +65,8 @@ Metadata uncertain write 從 step.started_at 起滿 600 秒，GET 仍為 before 
 - 一次輪詢沒觀測到的欄位沿用上次的值：讀 meta 失敗的 session 保留上一列；這次沒重讀 state（`auto` 只在 session 執行中才讀）時保留上次的 pending；活動時間只會往後。
 - 每台主機各自排程輪詢，慢的主機不會拖住其他主機。已從設定移除的主機不出現在列表。
 - Host stale 在讀取時推導，不向 sessions 發送 host flap 事件；只有 session-specific 缺席／gone／scope change 記 stale/fresh。
-- `last_activity` 以外的欄位有實質變化時，才寫 `session.added`／`session.updated`／`session.gone` 事件。
+- 首次觀測寫 `session.added`；值或非時間欄位 freshness 改變寫 `session.updated`，gone 後重現寫 `session.reappeared`。三者的 body 都帶 `fields_stale` 與 `field_evidence`；digest 與 `changed_fields` 包含這兩欄，即使沿用的 loaded／streaming 值相同，meta 失敗及恢復也會通知。`field_observed_at`、`last_activity_ms` 等時間單獨變動不寫 update；連續相同失敗／成功不寫事件。
+- 欄位 freshness 與 `session.stale`／`session.fresh` 的單一 specific reason 分開，可同時 stale。成功列舉缺席的 `session.gone` 規則沿用上文。
 - `order=activity` 的分頁鍵是活動時間；翻頁期間活動時間變動的列可能重複或漏掉，要完整清單用 `order=id`。
 - `GET /api/v1/sessions` 用 keyset 分頁（`order=activity` 或 `id`）。游標綁定篩選條件；第一頁回 `as_of`（當下事件游標），之後以 `/api/v1/events?after=as_of` 追變化，不必反覆重列。
 

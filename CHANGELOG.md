@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- Observation field freshness events ([design](docs/design/observation.md), plan §10/§11/§19, B02/B03):
+  emit session updates when fields_stale or fixed field_evidence values change, including meta failure/recovery
+  with unchanged retained values. Keep observation/activity timestamps and repeated identical polls quiet;
+  preserve freshness in HTTP/MCP/CLI history without error text. Document catch-up in the API and both skills;
+  the Dashboard Sessions list already reloads on these events. Keep session-specific stale/fresh reasons separate.
+
 - Observation operation ref positions ([design](docs/design/observation.md), plan §08/§10/§11, B01/B02/B03):
   bound operation refs by both event and link sequence; saved facts read strictly before their historical position,
   while live and replayed events include their own sequence. Exclude later checkpoint runs and mutable operation
