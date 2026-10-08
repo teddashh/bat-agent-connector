@@ -186,6 +186,52 @@ def claim_warm(host: str, session_id: str, *, previous_task_id: str, task_id: st
         _write(p, items)
 
 
+def confirm_failover_start(host: str, session_id: str, *, message_id: str, **fields) -> dict:
+    """Activate a read-back without overwriting a concurrently recorded handoff.
+
+    Older start blocks could not attempt a handoff before settling their start.
+    Backfill their null fence and message ID under the same registry flock.
+    """
+    from .errors import TaskIdentityMismatch
+
+    p = registry_path()
+    with _locked(p):
+        items = _read(p)
+        successor = next((e for e in items if e.get("host") == host and e.get("session_id") == session_id), None)
+        if not successor or not successor.get("failover_of"):
+            raise TaskIdentityMismatch("reserved successor disappeared during start read-back")
+        if (successor.get("start_uncertain") or successor.get("status") == "starting") and successor.get("handoff_status") == "pending":
+            successor.setdefault("handoff_frame_sha256", None)
+            if not successor.get("handoff_message_id"):
+                successor["handoff_message_id"] = message_id
+        successor.update(fields, updated_at=time.time())
+        _write(p, items)
+        return successor
+
+
+def claim_handoff_frame(host: str, successor_id: str, message_id: str, prompt_sha256: str) -> None:
+    """Consume the durable proof of an unsent failover handoff before transport.
+
+    Explicit null means this reservation uses the frame fence; a missing key in
+    a legacy row is not proof. The flock also fences separate daemon processes.
+    Task Service's ownership guard still runs on the actual frame afterwards.
+    """
+    from .errors import TaskIdentityMismatch
+
+    p = registry_path()
+    with _locked(p):
+        items = _read(p)
+        successor = next((e for e in items if e.get("host") == host and
+                          e.get("session_id") == successor_id), None)
+        if (not successor or not successor.get("failover_of") or successor.get("status") != "active"
+                or successor.get("handoff_status") != "pending"
+                or successor.get("handoff_message_id") != message_id
+                or "handoff_frame_sha256" not in successor or successor["handoff_frame_sha256"] is not None):
+            raise TaskIdentityMismatch("failover handoff may already have been attempted")
+        successor.update(handoff_frame_sha256=prompt_sha256, updated_at=time.time())
+        _write(p, items)
+
+
 def record_handoff_frame(host: str, *, old_session_id: str, successor_id: str, task_id: str,
                          worktree_path: str, branch: str, command_id: str,
                          message_id: str, prompt_sha256: str) -> None:
