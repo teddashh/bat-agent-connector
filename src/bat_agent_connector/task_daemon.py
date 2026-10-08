@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import hmac
 import json
 import logging
@@ -27,18 +28,20 @@ from . import (
     pr_delivery,
     registry,
     service,
+    task_actions,
+    task_control,
     work_items,
 )
 from .api_v1 import ApiV1, is_dashboard_path
 from .config import Config, state_dir
-from .errors import BatError, ResourceReadOnly, TokenUnavailable
+from .errors import BatError, OwnerConflict, ResourceReadOnly, TaskControlRefused, TokenUnavailable
 from .fleet import Fleet
 from .github import GitHubClient
 from .goose_acp import GooseACP
 from .inventory import Inventory, InventorySettings
 from .jev import Jev
 from .model_router import MinimalReviewGate, MinimalTaskRouter, ModelRouter, RouterConfig
-from .operations import OperationError, OperationService
+from .operations import OpContext, OperationError, OperationService
 from .task_bat import BatTaskAdapter
 from .task_core import TaskCoordinator
 from .task_journal import Journal
@@ -58,12 +61,16 @@ API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_canc
            "integration_preview_get": "observe", "integration_get": "observe", "integrations_list": "observe",
            "projects_list": "observe", "project_get": "observe", "work_items_list": "observe",
            "work_item_get": "observe"}
+class LegacyTaskError(OperationError, ValueError):
+    """Keep the old Python adapter's ValueError contract with a stable operation code."""
+
+
 ADMIN_RPC = {"api_token_issue", "api_token_revoke", "api_token_list", "work_reconcile_capability"}
 
 
-def request(method: str, *, _auth_token: str | None = None, timeout: float = 5.0, **params) -> dict:
+def request(method: str, *, _auth_token: str | None = None, _url: str | None = None, timeout: float = 5.0, **params) -> dict:
     """Small stdio-MCP client to the local daemon; no BAT token crosses this API."""
-    url = os.environ.get("BATC_TASK_URL", DEFAULT_URL)
+    url = _url or os.environ.get("BATC_TASK_URL", DEFAULT_URL)
     parsed = urlsplit(url)
     if (parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
             or parsed.username or parsed.password or parsed.path != "/rpc" or parsed.query or parsed.fragment):
@@ -87,7 +94,37 @@ def request(method: str, *, _auth_token: str | None = None, timeout: float = 5.0
 
 class TaskDaemon:
     def __init__(self, config: Config, db_path: str | Path | None = None):
-        self.journal = Journal(db_path or state_dir() / "tasks.sqlite3")
+        self._config = config
+        self._db_path = Path(db_path or state_dir() / "tasks.sqlite3")
+        self._lease_fd: int | None = None
+        self._owner_id = secrets.token_hex(16)
+        self._initialized = False
+        self._endpoint = DEFAULT_URL
+
+    _lazy_attributes = {"journal", "fleet", "adapter", "coordinator", "ops", "api", "inventory",
+                        "goose", "jev", "router", "_admin_token", "admin_token_path", "pusher",
+                        "minimal_router", "minimal_review_gate", "default_task_path", "_submit_lock",
+                        "verification_timeout_s", "verification_timeout_default_s",
+                        "verification_timeout_by_recipe", "_active_ticks", "_cleanup_retry_after"}
+
+    def __getattr__(self, name):
+        # Embedders enter through the same owner-first initialization as serve().
+        if name in self._lazy_attributes:
+            self.acquire_owner()
+            return self.__dict__[name]
+        raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        if (name in self._lazy_attributes and "_db_path" in self.__dict__
+                and not self.__dict__.get("_initialized") and not self.__dict__.get("_initializing")):
+            self.acquire_owner()
+        object.__setattr__(self, name, value)
+
+    def _initialize(self):
+        config = self._config
+        self.journal = Journal(self._db_path)
+        self.journal.on_close = self.release_owner
+        self.journal.owner_valid = self._owns_fleet
         self.admin_token_path = self.journal.path.parent / "task-admin.token"
         try:
             fd = os.open(self.admin_token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -130,15 +167,14 @@ class TaskDaemon:
         }
         self._active_ticks: dict[str, asyncio.Task] = {}
         self._cleanup_retry_after: dict[str, float] = {}
-        self._lease_fd: int | None = None
-        self._owner_id = secrets.token_hex(16)
         self.pusher = EventPusher(self.journal, self._event_webhook(self.adapter.verifier.settings),
                                   repo_urls=self.adapter.verifier.settings.repo_urls)
         # /api/v1: operations share this daemon's journal (one owner) and its write-capable fleet;
         # the inventory observes through its own read-only fleet.
         self.ops = OperationService(self.journal,
                                     actions=api_actions.ACTIONS + delivery.ACTIONS + checkpoints.ACTIONS
-                                    + integration.ACTIONS + work_items.ACTIONS)
+                                    + integration.ACTIONS + work_items.ACTIONS + task_actions.ACTIONS)
+        self.coordinator.operations = self.ops
         github = None
         if config.github.token_ref:
             try:
@@ -148,10 +184,12 @@ class TaskDaemon:
         self.inventory = Inventory(self.journal, config, InventorySettings(
             interval_s=config.api.inventory_interval_s, stale_after_s=config.api.stale_after_s,
             activity_every=config.api.activity_every))
-        self.ops.context.update(fleet=self.fleet, inventory=self.inventory, github=github,
+        self.ops.context.update(fleet=self.fleet, coordinator=self.coordinator, daemon=self,
+                                inventory=self.inventory, github=github,
                                 github_config=config.github,
                                 git_runner=checkpoints.SshGitRunner(self.adapter.verifier.settings.ssh_hosts))
         self.api = ApiV1(self, allowed_origins=config.api.allowed_origins)
+        self._initialized = True
 
     @staticmethod
     def _event_webhook(settings) -> EventWebhook | None:
@@ -291,7 +329,10 @@ class TaskDaemon:
             return work_items.work_item_get(self.journal.db, str(params.get("work_item_id")))
         raise ValueError("unknown api method")
 
-    async def call(self, method: str, params: dict, *, auth_token: str | None = None) -> dict:
+    async def call(self, method: str, params: dict, *, auth_token: str | None = None,
+                   principal: api_auth.Principal | None = None, _ctx: OpContext | None = None) -> dict:
+        if method in task_actions.METHODS and _ctx is None:
+            return await self._task_operation(method, params, auth_token=auth_token, principal=principal)
         if method == "api_token_issue":
             ttl_days = params.get("ttl_days")
             if ttl_days is not None and not float(ttl_days) > 0:
@@ -317,15 +358,30 @@ class TaskDaemon:
                              "failures": push["failures"], "last_error": push["last_error"]}
                             if push else {"configured": self.pusher.webhook is not None})
             return feed
+        if method == "task_session_control":
+            from . import lifecycle
+            action = params["action"]
+            handlers = {"send": service.session_send, "answer": service.session_answer,
+                        "interrupt": service.session_interrupt, "permissions": lifecycle.session_set_permissions}
+            if action not in handlers:
+                raise ValueError("invalid task session control")
+            return await handlers[action](self.fleet, params["host"], params["session_id"], **params["control"])
         if method == "work_submit":
             if not self.fleet.orchestrate_enabled(params.get("host", "")):
                 raise ValueError("task host needs writes=true and orchestrate=true")
             params = dict(params)
-            if params.get("base_branch") is None:
-                params["base_branch"] = self.adapter.verifier.settings.base_branches.get(params.get("project"))
             async with self._submit_lock:
-                path = params.get("task_path") or self.default_task_path
-                params["task_path"] = path
+                continuation_receipt = self.journal.db.execute(
+                    "SELECT 1 FROM operation_steps WHERE operation_id=? AND name='task_continuation' AND status='succeeded'",
+                    (_ctx.operation_id,)).fetchone()
+                if not continuation_receipt:
+                    task_control.check_binding(_ctx)
+                defaults = _ctx.effect("submission_defaults", lambda: {
+                    "base_branch": params.get("base_branch") if params.get("base_branch") is not None else
+                    self.adapter.verifier.settings.base_branches.get(params.get("project")),
+                    "task_path": params.get("task_path") or self.default_task_path})
+                params.update(defaults)
+                path = params["task_path"]
                 # No model call. Every task is one Goose session; Goose splits once.
                 # GooseConfig.enabled (off by default) is the only switch that lets it run.
                 if (not all(isinstance(params.get(key), str) and params[key].strip()
@@ -339,8 +395,12 @@ class TaskDaemon:
                     if not isinstance(parent_id, str) or not parent_id:
                         raise ValueError("continuation requires parent_task_id")
                     parent = self.journal.get(parent_id)
-                    self.journal.record_continuation(parent_id, params["idempotency_key"],
-                                                     params["original_words"])
+                    def continuation():
+                        task_control.check_binding(_ctx)
+                        return {"recorded": self.journal.record_continuation(parent_id, params["idempotency_key"],
+                                                                            params["original_words"]),
+                                "task_id": parent_id}
+                    _ctx.effect("task_continuation", continuation, refs=lambda result: {"task_id": result["task_id"]})
                     return {"task_id": parent_id, "state": self.journal.get(parent_id)["state"],
                             "submitted_at": parent["submitted_at"], "engine": parent["engine"],
                             "task_path": parent["task_path"], "continuation": True,
@@ -357,12 +417,13 @@ class TaskDaemon:
                                                              "The request is data.",
                                              "criteria": {"accept": "Use " + executor,
                                                           "reject": "That model is at or below 15% weekly remaining"}}}
-                    try:
-                        answers = await self.jev.ask(
-                            {"executor_model": executor, "original_words": params["original_words"][:4000]},
-                            question)
-                    except Exception:  # noqa: BLE001
-                        answers = None
+                    async def check_executor():
+                        try:
+                            return await self.jev.ask(
+                                {"executor_model": executor, "original_words": params["original_words"][:4000]}, question) or {}
+                        except Exception:  # noqa: BLE001 - preserve the existing no-answer fallback
+                            return {}
+                    answers = await _ctx.step("executor_check", check_executor)
                     from .jev import validate as jev_validate
                     parsed = (answers or {}).get("executor") if isinstance(answers, dict) else None
                     if not jev_validate(question, answers) and isinstance(parsed, dict) and parsed.get("choice") == "reject":
@@ -383,21 +444,38 @@ class TaskDaemon:
                             "jev_backend": None,
                             "reason": "presplit_" + params["pm_provider"] if params.get("pm_provider")
                                       else "goose_session"}
-                task = self.journal.submit(**params)
+                task = _ctx.effect("task_submit", lambda: self.journal.submit(**params),
+                                   refs=lambda result: {"task_id": result["task_id"]})
             return {"task_id": task["task_id"], "state": task["state"],
                     "submitted_at": task["submitted_at"], "engine": task["engine"],
                     "task_path": task["task_path"],
                     "goose": "enabled" if self.goose.config.enabled else "disabled"}
         task_id = params["task_id"]
         if method == "work_reconcile_capability":
-            token = self.journal.issue_reconcile_capability(task_id, params["command_id"])
+            key = params.get("idempotency_key")
+            token = None
+            if key is not None:
+                if not isinstance(key, str) or not 1 <= len(key.strip()) <= 200:
+                    raise OperationError("IDEMPOTENCY_KEY_REQUIRED", "idempotency_key must be 1-200 characters", 422)
+                key = key.strip()
+                identity = json.dumps(["task-reconcile", task_id, params["command_id"], key], separators=(",", ":"))
+                # The existing admin issuer supplies the same command capability on a keyed CLI retry.
+                token = hmac.new(self._admin_token.encode(), identity.encode(), hashlib.sha256).hexdigest()
+                principal = self.capability_principal(token, "task.command.reconcile", params, key)
+                replay = principal and self.journal.db.execute("SELECT 1 FROM operations WHERE actor=? AND idem_key=?",
+                                                                (principal.actor, key)).fetchone()
+                if not replay:
+                    self.journal.issue_reconcile_capability(task_id, params["command_id"], token=token)
+            else:
+                token = self.journal.issue_reconcile_capability(task_id, params["command_id"])
             return {"task_id": task_id, "command_id": params["command_id"], "capability": token,
                     "expires_in_s": 600}
         if method == "work_reconcile":
-            if not auth_token:
+            if not params.get("_capability_hash"):
                 raise ValueError("command-scoped reconciliation capability required")
             return await self.coordinator.resolve_command(
-                task_id, params["command_id"], token=auth_token, outcome=params["outcome"],
+                task_id, params["command_id"], token="", token_hash=params["_capability_hash"],
+                operation=_ctx, outcome=params["outcome"],
                 actor=params["actor"], source=params["source"], evidence=params["evidence"],
                 observed_result=params.get("observed_result", "none"), turn_ref=params.get("turn_ref"),
                 candidate_commit=params.get("candidate_commit"), tree_hash=params.get("tree_hash"),
@@ -428,26 +506,50 @@ class TaskDaemon:
                     "ted_interventions_basis": "caller_reported",
                     "delivery": self.journal.delivery(task_id)}
         if method == "work_mark_stage":
-            return self.journal.mark_stage(task_id, stage=params.get("stage"), ref=params.get("ref"),
-                                           actor=params.get("actor", "service"))
+            return _ctx.effect("task_mark_stage", lambda: self.journal.mark_stage(
+                task_id, stage=params.get("stage"), ref=params.get("ref"), actor=params.get("actor", "service")))
         if method == "work_pause":
             if params.get("actor", "service") not in {"service", "ted"}:
                 raise ValueError("invalid actor")
             if params.get("actor") == "ted" and not params.get("source_message_id"):
                 raise ValueError("Ted action requires source_message_id")
-            result = await self.coordinator.pause(task_id, abort_current=params.get("abort_current", False))
-            if params.get("actor") == "ted":
-                self.journal.ted_action(task_id, action="pause", source_message_id=params["source_message_id"])
+            def pause_effect():
+                task_control.check_binding(_ctx)
+                task_actions.admit_task(_ctx.service, None, _ctx.target, _ctx.params, _ctx.effective_preconditions)
+                task = self.journal.pause(task_id, abort_current=params.get("abort_current", False))
+                if params.get("actor") == "ted":
+                    self.journal.ted_action(task_id, action="pause", source_message_id=params["source_message_id"])
+                    task = self.journal.get(task_id)
+                return task
+            result = _ctx.effect("task_pause", pause_effect)
+            if params.get("abort_current") and result.get("session_id"):
+                async def abort():
+                    async with self.coordinator._task_locks.setdefault(task_id, asyncio.Lock()):
+                        async with self.coordinator._lock(result["host"], result["session_id"]):
+                            await self.adapter.interrupt(result, result["session_id"])
+                    return {"task_id": task_id, "control_version": result["control_version"]}
+
+                async def reconcile_abort(_):
+                    read = await self.adapter.read(result, result["session_id"], result.get("turn_marker"))
+                    return {"settled_by": "idle_readback"} if read.get("streaming") is False else None
+                await _ctx.step("abort_current", abort, request={"control_version": result["control_version"],
+                                                               "session_id": result["session_id"]},
+                                reconcile=reconcile_abort)
             return result
         if method == "work_resume":
             if params.get("actor", "service") not in {"service", "ted"}:
                 raise ValueError("invalid actor")
             if params.get("actor") == "ted" and not params.get("source_message_id"):
                 raise ValueError("Ted action requires source_message_id")
-            result = self.journal.resume(task_id)
-            if params.get("actor") == "ted":
-                self.journal.ted_action(task_id, action="resume", source_message_id=params["source_message_id"])
-            return result
+            def resume_effect():
+                task_control.check_binding(_ctx)
+                task_actions.admit_task(_ctx.service, None, _ctx.target, _ctx.params, _ctx.effective_preconditions)
+                result = self.journal.resume(task_id)
+                if params.get("actor") == "ted":
+                    self.journal.ted_action(task_id, action="resume", source_message_id=params["source_message_id"])
+                    result = self.journal.get(task_id)
+                return result
+            return _ctx.effect("task_resume", resume_effect)
         if method.startswith("task_"):
             task = self.journal.get(task_id)
             if task["engine"] != "goose":
@@ -465,8 +567,7 @@ class TaskDaemon:
                         or len(params["text"]) > 18_000 or not isinstance(params.get("step_id"), str)
                         or not 0 < len(params["step_id"]) <= 128):
                     raise ValueError("invalid task prompt or step id")
-                return await self.coordinator._send(task, task["session_id"], params["text"],
-                                                    "goose:" + params["step_id"])
+                return await task_actions.send(_ctx)
             if method == "task_run_verification":
                 if set(params) != {"task_id"}:
                     raise ValueError("caller-supplied verification evidence is forbidden")
@@ -475,14 +576,91 @@ class TaskDaemon:
                                              f"{task.get('verification_commit')}",
                                              "Check a clean candidate with the trusted runner",
                                              expected_type="verification", high_stakes=True)
-                evidence = await self.adapter.run_verification(task)
+                async def verify():
+                    task_control.check_binding(_ctx)
+                    return await self.adapter.run_verification(task)
+                evidence = await _ctx.step("trusted_verification", verify)
                 if not evidence:
                     raise ValueError("trusted verifier unavailable or candidate changed")
-                return self.journal.record_observed_verification(task_id, evidence)
+                return _ctx.effect("task_verification", lambda: self.journal.record_observed_verification(task_id, evidence))
             if method == "task_request_ted":
-                self.journal.request_ted(task_id, params["reason"])
-                return self.journal.change(task_id, "needs_ted", fields={"result": params["reason"]})
+                def request_ted():
+                    self.journal.request_ted(task_id, params["reason"])
+                    return self.journal.change(task_id, "needs_ted", fields={"result": params["reason"]})
+                return _ctx.effect("task_request_ted", request_ted)
         raise ValueError("unknown task method")
+
+    def capability_principal(self, token, action, target, key=None):
+        tid = target.get("task_id")
+        if not isinstance(tid, str):
+            return None
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        key = key.strip() if isinstance(key, str) else None
+        if action == "task.command.reconcile":
+            cid = target.get("command_id")
+            actor = f"reconcile:{tid}:{cid}:{digest}"
+            valid = self.journal.authorize_reconcile_capability(token, tid, cid)
+            # A consumed capability can only replay its own already admitted operation.
+            replay = key and self.journal.db.execute("SELECT 1 FROM operations WHERE actor=? AND idem_key=?",
+                                                      (actor, key)).fetchone()
+            if valid or replay:
+                return api_auth.Principal(actor, frozenset({"operate"}))
+        elif action in {"session.send", "task.verify", "task.request_ted"} and self.journal.authorize_capability(token, tid):
+            return api_auth.Principal(f"task:{tid}:{digest}", frozenset({"operate"}))
+        return None
+
+    async def _task_operation(self, method, params, *, auth_token=None, principal=None):
+        params = dict(params)
+        entry = params.pop("entry", "rpc")
+        key = params.pop("idempotency_key", None)
+        # Part A preserves create() and its schema. Unkeyed old controls never deduplicate.
+        if method == "task_send" and key is None:
+            key = "task-step:" + str(params.get("task_id")) + ":" + str(params.get("step_id"))
+        if key is None:
+            key = "legacy-request:" + secrets.token_hex(16)
+        client_key = key
+        if method == "work_submit" and isinstance(key, str) and 200 < len(key) <= 256:
+            # Keep the old 256-character contract without changing create()'s 200-character API key limit.
+            params["legacy_idempotency_key"] = key
+            key = "legacy-task-key:" + hashlib.sha256(key.encode()).hexdigest()
+        pre = {}
+        if "control_version" in params:
+            pre["control_version"] = params.pop("control_version")
+        if method == "work_submit":
+            target = {k: params.pop(k, None) for k in ("host", "workspace")}
+        else:
+            target = {"task_id": params.pop("task_id")}
+            if method == "work_reconcile":
+                target["command_id"] = params.pop("command_id")
+        if principal is None:
+            if auth_token:
+                digest = hashlib.sha256(auth_token.encode()).hexdigest()
+                prefix = (f"reconcile:{target['task_id']}:{target['command_id']}:" if method == "work_reconcile"
+                          else f"task:{target['task_id']}:")
+                principal = api_auth.Principal(prefix + digest, frozenset({"operate"}))
+            else:
+                principal = api_auth.Principal(api_auth.ADMIN_ACTOR, frozenset(), admin=True)
+        try:
+            # A restart must see both the admitted intent and its historical-key bridge, or neither.
+            with self.journal.tx():
+                op, _ = self.ops.create(principal, action=task_actions.METHODS[method], target=target,
+                                       params=params, preconditions=pre, idempotency_key=key,
+                                       entry=entry if entry in {"mcp", "cli"} else "rpc")
+                if method == "work_submit" and principal.admin and self.journal.by_idempotency_key(client_key):
+                    OpContext(self.ops, self.ops._row(op["operation_id"])).effect("legacy_task_key", lambda: {"key": client_key})
+        except OperationError as exc:
+            raise LegacyTaskError(exc.code, exc.message, exc.status) from None
+        await self.ops.run_due()
+        op = await self.ops.wait(op["operation_id"], 30)
+        if op["status"] == "failed":
+            raise LegacyTaskError(op["error_code"], op["status_reason"], 409)
+        result = dict(op.get("result") or {})
+        if method == "work_pause" and not result:
+            receipt = self.journal.db.execute("SELECT response FROM operation_steps WHERE operation_id=? "
+                                              "AND name='task_pause' AND status='succeeded'", (op["operation_id"],)).fetchone()
+            if receipt:
+                result = json.loads(receipt["response"])
+        return {**result, "operation_id": op["operation_id"], "operation_status": op["status"]}
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
@@ -527,6 +705,9 @@ class TaskDaemon:
             params = body.get("params") or {}
             if method in API_RPC:
                 principal = api_auth.authenticate(self.journal.db, token, self._admin_token)
+                if principal is None and method == "op_submit":
+                    principal = self.capability_principal(token, params.get("action"), params.get("target") or {},
+                                                          params.get("idempotency_key"))
                 if principal is None:
                     raise ValueError("task API authorization failed")
                 try:
@@ -547,18 +728,24 @@ class TaskDaemon:
                 writer.close()
                 await writer.wait_closed()
                 return
-            admin = hmac.compare_digest(token, self._admin_token)
-            scoped = (method.startswith("task_") and bool(params.get("task_id"))
+            principal = api_auth.authenticate(self.journal.db, token, self._admin_token)
+            admin = bool(principal and principal.admin)
+            scoped = (method != "task_session_control" and method.startswith("task_") and bool(params.get("task_id"))
                       and self.journal.authorize_capability(token, params["task_id"]))
             reconcile = (method == "work_reconcile" and bool(params.get("task_id"))
                          and bool(params.get("command_id"))
                          and self.journal.authorize_reconcile_capability(
                              token, params["task_id"], params["command_id"]))
-            if method == "work_reconcile" and not reconcile:
+            cap_principal = self.capability_principal(token, task_actions.METHODS.get(method), params,
+                                                       params.get("idempotency_key")) if method in task_actions.METHODS else None
+            if method == "work_reconcile" and not cap_principal:
                 raise ValueError("command-scoped reconciliation capability required")
+            if cap_principal:
+                principal = cap_principal
+                reconcile = method == "work_reconcile"
             if method in ADMIN_RPC and not admin:
                 raise ValueError("admin authorization required")
-            if not (admin or scoped or reconcile):
+            if not (admin or scoped or reconcile or principal and method in task_actions.METHODS):
                 raise ValueError("task API authorization failed")
             if scoped and not method.startswith("task_"):
                 raise ValueError("capability scope violation")
@@ -566,8 +753,11 @@ class TaskDaemon:
             with event_context(actor="local-admin" if admin else None, entry_point="rpc",
                                actor_evidence={"source": "rpc_admin_token" if admin else "command_capability"},
                                actor_basis="authenticated_principal" if admin else "unknown"):
-                result = {"result": await self.call(method, params, auth_token=token if reconcile else None)}
+                result = {"result": await self.call(method, params, auth_token=token if reconcile or scoped else None, principal=principal)}
             status = "200 OK"
+        except (TaskControlRefused, OperationError) as exc:
+            result = {"error": exc.code, "message": str(exc)}
+            status = "400 Bad Request"
         except Exception as exc:  # noqa: BLE001
             # Do not echo task text, tokens, or provider exceptions over RPC.
             result = {"error": type(exc).__name__}
@@ -602,8 +792,12 @@ class TaskDaemon:
 
     async def _tick_task(self, task_id: str):
         verifying = False
+        version = None
         try:
+            if not self.journal.owner_valid():
+                return
             task = self.journal.get(task_id)
+            version = task["control_version"]
             verifying = task["state"] == "verifying"
             if verifying and not task["paused"]:
                 remaining = self.verification_remaining(task)
@@ -644,6 +838,8 @@ class TaskDaemon:
                 goose_task = {**task, "_route_provider": self.goose.config.provider}
                 await self.goose.run_task(goose_task, goose_cwd, capability=capability,
                                           journal=self.journal)
+            except TaskControlRefused:
+                raise
             except Exception as exc:  # noqa: BLE001 - reconcile before uncertainty
                 logging.warning("Goose ACP task %s failed before settlement: %s",
                                 task_id[:8], type(exc).__name__)
@@ -674,10 +870,15 @@ class TaskDaemon:
             finally:
                 if temporary_cwd:
                     shutil.rmtree(temporary_cwd, ignore_errors=True)
+        except TaskControlRefused as exc:
+            logging.info("Task %s tick cancelled by %s", task_id[:8], exc.code)
         except Exception as exc:  # noqa: BLE001 - one task cannot kill worker
             logging.warning("Task %s needs reconciliation after %s", task_id[:8], type(exc).__name__)
             try:
                 current = self.journal.get(task_id)
+                if (not self.journal.owner_valid() or current["paused"]
+                        or version is not None and current["control_version"] != version):
+                    return
                 if verifying and current["state"] == "verifying":
                     kind = "verification_timeout" if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) else "verification_error"
                     self.journal.change(task_id, "needs_ted", event=kind,
@@ -689,7 +890,8 @@ class TaskDaemon:
         finally:
             try:
                 current = self.journal.get(task_id)
-                if current["state"] in {"done", "failed"} and current.get("external_worktree_path"):
+                if (self.journal.owner_valid() and current["state"] in {"done", "failed"}
+                        and current.get("external_worktree_path")):
                     proof = await self.adapter.cleanup_external_worktree(current)
                     self.journal.complete_external_cleanup(task_id, proof)
                     self._cleanup_retry_after.pop(task_id, None)
@@ -721,6 +923,9 @@ class TaskDaemon:
         worker = pusher = operations = metadata_reads = deployment_reads = inventory = None
         try:
             server = await asyncio.start_server(self._handle, host, port)
+            address = "[::1]" if host == "::1" else host
+            self._endpoint = f"http://{address}:{server.sockets[0].getsockname()[1]}/rpc"
+            self._write_owner_pointer()
             worker = asyncio.create_task(self._worker())
             pusher = asyncio.create_task(self._push_loop())
             operations = asyncio.create_task(self.ops.loop())
@@ -734,6 +939,9 @@ class TaskDaemon:
                 if background is not None:
                     background.cancel()
                     await asyncio.gather(background, return_exceptions=True)
+            for active in list(self.ops._active.values()):
+                active.cancel()
+            await asyncio.gather(*list(self.ops._active.values()), return_exceptions=True)
             await self.inventory.close()
             await self.fleet.close()
             self.journal.close()
@@ -742,25 +950,57 @@ class TaskDaemon:
     def acquire_owner(self):
         if self._lease_fd is not None:
             return
-        path = self.journal.path.parent / "task-daemon.lock"
+        # One fleet/registry has one owner, even when candidates name different journals.
+        path = registry.registry_path().parent / "task-daemon.lock"
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             os.close(fd)
-            raise RuntimeError("another task daemon owns this journal") from None
+            try:
+                owner = json.loads((path.parent / service.TASK_SERVICE_POINTER).read_text())
+            except (OSError, ValueError):
+                owner = {"lease_path": str(path)}
+            raise OwnerConflict(owner) from None
         self._lease_fd = fd
-        # Direct-send fences in other connector processes read the journal
-        # this daemon actually owns, not a guessed default path.
+        try:
+            if not self._initialized:
+                self._initializing = True
+                try:
+                    self._initialize()
+                finally:
+                    self._initializing = False
+            self.journal.db.execute("""INSERT INTO daemon_owner(singleton,owner_id,pid,heartbeat_at)
+                VALUES(1,?,?,?) ON CONFLICT(singleton) DO UPDATE SET owner_id=excluded.owner_id,
+                pid=excluded.pid,heartbeat_at=excluded.heartbeat_at""", (self._owner_id, os.getpid(), time.time()))
+            self._write_owner_pointer()
+        except BaseException:
+            if not self._initialized and self.__dict__.get("journal"):
+                self.journal.close()
+            self.release_owner()
+            raise
+
+    def _owns_fleet(self):
+        if self._lease_fd is None:
+            return False
+        try:
+            pointer = registry.registry_path().parent / service.TASK_SERVICE_POINTER
+            return json.loads(pointer.read_text()).get("owner_id") == self._owner_id
+        except (OSError, ValueError):
+            return False
+
+    def _write_owner_pointer(self):
         pointer = registry.registry_path().parent / service.TASK_SERVICE_POINTER
-        pointer.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        tmp = pointer.with_suffix(".tmp")
-        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
-            json.dump({"db_path": str(self.journal.path.resolve()), "pid": os.getpid()}, fh)
-        os.replace(tmp, pointer)
-        self.journal.db.execute("""INSERT INTO daemon_owner(singleton,owner_id,pid,heartbeat_at)
-            VALUES(1,?,?,?) ON CONFLICT(singleton) DO UPDATE SET owner_id=excluded.owner_id,
-            pid=excluded.pid,heartbeat_at=excluded.heartbeat_at""", (self._owner_id, os.getpid(), time.time()))
+        tmp = pointer.with_suffix("." + secrets.token_hex(8) + ".tmp")
+        try:
+            with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as fh:
+                json.dump({"db_path": str(self.journal.path.resolve()), "pid": os.getpid(),
+                           "owner_id": self._owner_id, "endpoint": self._endpoint,
+                           "lease_path": str(pointer.parent / "task-daemon.lock")}, fh)
+            os.replace(tmp, pointer)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def release_owner(self):
         if self._lease_fd is not None:

@@ -16,9 +16,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import lifecycle, orchestrate, registry, resource_policy, service
-from .errors import TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
+from . import lifecycle, orchestrate, registry, resource_policy, service, task_control
+from .errors import BatError, TaskControlRefused, TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .fleet import Fleet
+from .operations import AMBIGUOUS, AmbiguousOutcome, StepFailed, _error_code
 from .redact import redact_secrets
 from .safety import Audit
 from .task_handoff import history_excerpt, ledger_summary, original_words_archive
@@ -252,6 +253,8 @@ class BatTaskAdapter:
                         external_branch=external["branch"] if external else None,
                         task_id=task["task_id"])
                     break
+                except TaskControlRefused:
+                    raise
                 except Exception as exc:  # noqa: BLE001 - same reserved start is idempotent
                     last_error = exc
                     if attempt == 2:
@@ -291,16 +294,23 @@ class BatTaskAdapter:
         else:
             opts.update(permissionMode="plan", model=CLAUDE_BAT_MODEL)
         client = self.fleet.client(host)
+        def before_start():
+            if self.journal:
+                task_control.check_incarnation(self.journal, task)
         started = None
         last_error = None
         for attempt in range(3):
             try:
                 started = await client.invoke(
                     "claude:start-session", {"sessionId": sid, "options": opts}, retry_on_disconnect=False,
-                    grant=grant)
+                    grant=grant, before_send=before_start)
                 if isinstance(started, dict) and started.get("ok") is not False and started.get("sessionId") == sid:
                     break
                 raise WriteRefused("BAT reviewer start did not confirm the reserved session ID")
+            except TaskControlRefused as exc:
+                if exc.code != "TASK_OWNER_UNAVAILABLE":
+                    registry.update(host, sid, status="cancelled")
+                raise
             except Exception as exc:  # noqa: BLE001 - poll identity before retrying
                 last_error = exc
                 try:
@@ -495,10 +505,27 @@ class BatTaskAdapter:
                     or json.loads(command["payload"]).get("prompt_sha256") != hashlib.sha256(text.encode()).hexdigest()):
                 raise TaskDispatchCancelled("task send was cancelled before BAT invoke")
 
-        return await service.session_send(self.fleet, task["host"], session_id, text, confirm=True,
-                                          message_id=message_id, retry_on_disconnect=False,
-                                          before_invoke=before_invoke,
-                                          initial_task_send=initial_task_send)
+        from .task_control import FrameGuard
+        guard = FrameGuard(self.journal, task["task_id"], task["host"], session_id,
+                           task["control_version"], command["command_id"] if command else None,
+                           internal=not str(purpose).startswith("goose:"),
+                           prompt_sha256=hashlib.sha256(text.encode()).hexdigest())
+        try:
+            return await service.session_send(self.fleet, task["host"], session_id, text, confirm=True,
+                                              message_id=message_id, retry_on_disconnect=False,
+                                              before_invoke=before_invoke, _task_guard=guard,
+                                              initial_task_send=initial_task_send)
+        except WriteRefused:
+            raise
+        except Exception as exc:
+            if not guard.frames:
+                # The coordinator must not reconcile a prompt that could not have reached BAT.
+                raise StepFailed(_error_code(exc), str(exc)) from exc
+            if isinstance(exc, BatError) and not isinstance(exc, AMBIGUOUS):
+                raise StepFailed(_error_code(exc), str(exc)) from exc
+            if not isinstance(exc, (*AMBIGUOUS, BatError, OSError)):
+                raise AmbiguousOutcome("send reply could not be recorded: " + type(exc).__name__) from exc
+            raise
 
     async def prepare_send(self, task: dict, session_id: str) -> dict:
         entry = registry.get(task["host"], session_id)
@@ -560,7 +587,11 @@ class BatTaskAdapter:
         return result
 
     async def interrupt(self, task: dict, session_id: str) -> None:
-        await service.session_interrupt(self.fleet, task["host"], session_id, "hard", confirm=True)
+        from .task_control import FrameGuard
+        guard = FrameGuard(self.journal, task["task_id"], task["host"], session_id,
+                           task["control_version"], action="interrupt", abort=True)
+        await service.session_interrupt(self.fleet, task["host"], session_id, "hard", confirm=True,
+                                        _task_guard=guard)
 
     async def failover(self, task: dict, session_id: str, successor_id: str, *,
                        handoff_message_id: str, handoff_command_id: str) -> dict:
@@ -659,18 +690,17 @@ class BatTaskAdapter:
                 prompt_sha256=intended)
             before_handoff_invoke()
 
+        coordinator = getattr(self.fleet, "task_coordinator", None)
+        if coordinator is None or coordinator.adapter is not self or coordinator.journal is not self.journal:
+            raise TaskControlRefused("TASK_OWNED_CONTROL_REQUIRED", "failover requires the owning coordinator")
+        authority = coordinator._failover_authority(
+            task, successor_id, handoff_command_id, handoff_message_id,
+            before_handoff_send=before_send, verify_handoff_successor=verify_handoff_successor,
+            verify_handoff_at_frame=verify_handoff_at_frame, before_handoff_invoke=before_handoff_invoke,
+            handoff_frame_guard=handoff_frame_guard)
         r = await lifecycle.session_failover(self.fleet, task["host"], session_id, confirm=True,
-                                             successor_session_id=successor_id, instructions=instructions,
-                                             ledger_only=bool(self.journal),
-                                             handoff_message_id=handoff_message_id,
-                                             handoff_command_id=handoff_command_id,
-                                             task_id=task["task_id"],
-                                             before_handoff_send=before_send,
-                                             verify_handoff_successor=verify_handoff_successor,
-                                             verify_handoff_at_frame=verify_handoff_at_frame,
-                                             before_handoff_invoke=before_handoff_invoke,
-                                             handoff_frame_guard=handoff_frame_guard,
-                                             authoritative_original=True)
+                                             instructions=instructions, ledger_only=bool(self.journal),
+                                             task_authority=authority, authoritative_original=True)
         if not r.get("prompt_sent") and not r.get("skipped"):
             raise RuntimeError("failover handoff outcome is uncertain")
         if r.get("new_session_id") != successor_id:
@@ -825,13 +855,33 @@ class BatTaskAdapter:
         cwd = self._cwd(task)
         if not cwd:
             return {"ok": False, "reason": "worktree_unavailable"}
-        return await self.verifier.install_dependencies(task, cwd)
+        guard = (task_control.FrameGuard(self.journal, task["task_id"], task["host"], task["session_id"],
+                                        task["control_version"], action="verify", internal=True) if self.journal else None)
+        if guard:
+            guard.check()
+        if isinstance(self.verifier, ObservedVerifier):
+            result = await self.verifier.install_dependencies(task, cwd, before_run=guard.check if guard else None)
+        else:
+            result = await self.verifier.install_dependencies(task, cwd)
+        if guard:
+            guard.check()
+        return result
 
     async def run_verification(self, task: dict) -> dict | None:
         cwd = self._cwd(task)
         if not cwd:
             return None
-        evidence = await self.verifier.observe(task, cwd)
+        from .task_control import FrameGuard
+        guard = (FrameGuard(self.journal, task["task_id"], task["host"], task["session_id"],
+                            task["control_version"], action="verify", internal=True) if self.journal else None)
+        if guard:
+            guard.check()
+        if isinstance(self.verifier, ObservedVerifier):
+            evidence = await self.verifier.observe(task, cwd, before_run=guard.check if guard else None)
+        else:
+            evidence = await self.verifier.observe(task, cwd)
+        if guard:
+            guard.check()
         if not evidence:
             return None
         # The service, not Goose/Hermes, owns the PR #1 record after observing
@@ -839,6 +889,6 @@ class BatTaskAdapter:
         await lifecycle.session_record_verification(
             self.fleet, task["host"], task["session_id"], evidence["candidate_commit"],
             evidence["command"], evidence["exit_code"], "task-service:" + task["host"],
-            evidence["log_ref"], confirm=True,
+            evidence["log_ref"], confirm=True, _task_guard=guard,
         )
         return evidence
