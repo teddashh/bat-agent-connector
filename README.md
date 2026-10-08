@@ -143,8 +143,9 @@ No paid API key is required.
 The task daemon also serves `/api/v1` on its loopback port: capabilities, a persisted session inventory with
 staleness, durable operations, and one event cursor with SSE. Issue a token per client
 (`batc api-token issue --actor ted-dashboard --scope observe --scope operate --scope start --scope integrate --scope
-manage --scope approve`; `start` lets it start new agent sessions from checkpoints, `integrate` lets it push results
-to a PR's head branch, `manage` edits projects and work items, `approve` accepts work items as done) and send it as
+manage --scope approve --scope merge --scope deploy`; `start` lets it start new agent sessions from checkpoints,
+`integrate` lets it push results to a PR's head branch, `manage` edits projects and work items, `approve` accepts work
+items as done, `merge` and `deploy` back the Delivery buttons) and send it as
 `Authorization: Bearer`. MCP clients reach the same operations with `operation_submit`, `operation_cancel` and
 `operation_resume` (`confirm=true`, and `BATC_API_TOKEN` set to the client's own token: operations never run as the
 local admin). See [docs/design/api-v1.md](docs/design/api-v1.md).
