@@ -1,7 +1,10 @@
 """Checkpoints: continue a person's work in a new managed session without touching their session or folder.
 
-``checkpoint.create`` only reads the source (BAT read channels): the session's folder, branch and commit, whether it
-had uncommitted changes, and a fixed excerpt of its conversation. ``checkpoint.continue`` builds a connector-owned
+``checkpoint.create`` only reads the source: the session's folder, branch and commit and a fixed excerpt of its
+conversation through the inventory's read-only fleet, and the number of uncommitted changes with
+``git --no-optional-locks status`` over the host's SSH alias. BAT's own ``git:status`` is never used on the source: it
+runs a plain ``git status``, which may refresh and rewrite the person's ``.git/index``, and it answers ``[]`` on any
+failure, which would read as "clean". ``checkpoint.continue`` builds a connector-owned
 clone under the host's first managed root (cloned from the person's repository, which git only reads), adds a
 worktree on a new branch at the checkpoint's commit, starts a BAT session there, checks the session really starts
 at that commit, and only then sends the first instruction. BAT's ``worktree:create`` cannot start at a given
@@ -22,6 +25,7 @@ import uuid
 
 from . import orchestrate, registry, service
 from .api_auth import Principal
+from .errors import BatError
 from .operations import (
     RERUN,
     ActionDef,
@@ -83,7 +87,7 @@ async def _run(argv: tuple[str, ...]) -> str:
 # --------------------------------------------------------------------------- records
 def _decode(row) -> dict:
     cp = dict(row)
-    cp["dirty"] = bool(cp["dirty"])
+    cp["dirty"] = None if cp["dirty"] is None or cp["dirty"] < 0 else int(cp["dirty"])  # -1 = not observed
     cp["excerpt"] = json.loads(cp["excerpt"])
     return cp
 
@@ -113,6 +117,78 @@ def list_checkpoints(db, *, host: str | None = None, session_id: str | None = No
     return {"checkpoints": items}
 
 
+def started_from(db, host: str, session_id: str) -> dict | None:
+    """The checkpoint a managed session was started from, if any."""
+    row = db.execute("""SELECT r.checkpoint_id,r.operation_id,r.branch,r.created_at,c.host AS source_host,
+        c.source_session_id,c.commit_sha FROM checkpoint_runs r JOIN checkpoints c USING(checkpoint_id)
+        WHERE r.host=? AND r.session_id=?""", (host, session_id)).fetchone()
+    return dict(row) if row else None
+
+
+def source_state_script(root: str) -> str:
+    """HEAD and the count of changed paths, without taking or rewriting the index lock."""
+    q = shlex.quote(root)
+    return ("set -eu; "
+            f"head=$(git --no-optional-locks -C {q} rev-parse --verify HEAD); "
+            f"n=$(git --no-optional-locks -C {q} status --porcelain --untracked-files=normal | wc -l | tr -d ' '); "
+            "printf '%s %s\n' \"$head\" \"$n\"")
+
+
+async def source_state(ops: OperationService, host: str, root: str) -> tuple[str, int] | None:
+    """(HEAD, changed paths) of a source checkout read with no locks, or None when it cannot be observed."""
+    runner = ops.context.get("git_runner")
+    if runner is None or not runner.available(host):
+        return None
+    try:
+        out = (await runner.run(host, source_state_script(root))).split()
+    except (StepFailed, AmbiguousOutcome, OSError):
+        return None
+    if len(out) != 2 or not SHA.fullmatch(out[0]) or not out[1].isdigit():
+        return None
+    return out[0], int(out[1])
+
+
+def _read_fleet(ops: OperationService):
+    """Source reads go through the inventory's read-only fleet: its client core refuses every write channel."""
+    inventory = ops.context.get("inventory")
+    return inventory.fleet if inventory is not None else ops.context["fleet"]
+
+
+async def preview(ops: OperationService, host: str, session_id: str) -> dict:
+    """What a checkpoint of this session would record (reads only), for the Dashboard's commit picker."""
+    c = _read_fleet(ops).client(host)
+    t, _ws = await service._resolve_session(c, session_id)
+    meta = await c.invoke("claude:get-session-meta", {"sessionId": t["id"]})
+    cwd = norm((meta or {}).get("cwd") if isinstance(meta, dict) else None) or norm(t.get("worktreePath") or t.get("cwd"))
+    if not cwd:
+        raise OperationError("SOURCE_UNAVAILABLE", "the session's folder is unknown", 409)
+    root = norm(await c.invoke("git:getRoot", {"cwd": cwd}))
+    if not root:
+        raise OperationError("NOT_A_REPOSITORY", f"{cwd} is not in a git repository", 409)
+    log = [r for r in await c.invoke("git:log", {"cwd": cwd, "count": 20}) or []
+           if isinstance(r, dict) and SHA.fullmatch(str(r.get("hash") or ""))]
+    if not log:
+        raise OperationError("NO_COMMIT", "the source has no commit to continue from", 409)
+    branch = await c.invoke("git:branch", {"cwd": cwd})
+    state = await source_state(ops, host, root)
+    return {"host": host, "session_id": t["id"], "cwd": cwd, "repo_root": root,
+            "branch": branch if isinstance(branch, str) else None, "head": log[0]["hash"],
+            "commits": [{"hash": r["hash"], "message": str(r.get("message") or "")[:200], "date": r.get("date")}
+                        for r in log],
+            "dirty": None if state is None else state[1],
+            "snapshot": {"supported": False, "reason": "uncommitted changes are not carried over; commit first"}}
+
+
+async def source_head(ops: OperationService, cp: dict) -> dict:
+    """Whether the source branch moved past a checkpoint (the checkpoint itself never changes)."""
+    try:
+        log = await _read_fleet(ops).client(cp["host"]).invoke("git:log", {"cwd": cp["cwd"], "count": 1})
+    except BatError:
+        log = None
+    head = log[0].get("hash") if isinstance(log, list) and log and isinstance(log[0], dict) else None
+    return {"head": head, "advanced": None if head is None else head != cp["commit_sha"]}
+
+
 # --------------------------------------------------------------------------- checkpoint.create
 def _admit_create(ops: OperationService, principal: Principal, target: dict, params: dict, pre: dict) -> None:
     fleet = ops.context["fleet"]
@@ -135,7 +211,6 @@ def _admit_create(ops: OperationService, principal: Principal, target: dict, par
 
 async def _run_create(ctx: OpContext) -> dict:
     ops = ctx.service
-    fleet = ops.context["fleet"]
     host, sid = ctx.target["host"], ctx.target["session_id"]
     wanted = ctx.params.get("commit")
     last_n = ctx.params.get("last_n", 20)
@@ -143,8 +218,8 @@ async def _run_create(ctx: OpContext) -> dict:
     row = (inventory.get_session(host, sid) if inventory else None) or {}
 
     async def read() -> dict:
-        # Read channels only: nothing here can start, resume or change the source session or its folder.
-        c = fleet.client(host)
+        # A read-only fleet: nothing here can start, resume or change the source session or its folder.
+        c = _read_fleet(ops).client(host)
         meta = await c.invoke("claude:get-session-meta", {"sessionId": sid})
         cwd = norm((meta or {}).get("cwd") if isinstance(meta, dict) else None) or norm(row.get("cwd"))
         if not cwd:
@@ -159,18 +234,19 @@ async def _run_create(ctx: OpContext) -> dict:
             raise StepFailed("NO_COMMIT", "the source has no commit to continue from")
         if wanted and wanted not in hashes:
             raise StepFailed("COMMIT_NOT_FOUND", "commit is not among the last 200 commits of the source branch")
-        status = await c.invoke("git:status", {"cwd": cwd})
+        state = await source_state(ops, host, root)  # never BAT's git:status: it may rewrite the person's index
         excerpt = []
         if last_n:
-            read = await service.session_read(fleet, host, sid, last_n=last_n, max_chars=EXCERPT_CHARS)
+            read = await service.session_read(_read_fleet(ops), host, sid, last_n=last_n, max_chars=EXCERPT_CHARS)
             excerpt = [{"role": m.get("role"), "ts": m.get("ts"), "text": redact_secrets(redact(m.get("text") or ""))}
                        for m in read.get("messages") or [] if m.get("text")]
         after = await c.invoke("git:log", {"cwd": cwd, "count": 1})
-        if not wanted and (not after or after[0].get("hash") != hashes[0]):
+        if (not wanted and (not after or after[0].get("hash") != hashes[0])) \
+                or (state is not None and state[0] != hashes[0]):
             raise StepFailed("SOURCE_MOVED", "the source branch moved while it was read; create the checkpoint again")
         return {"cwd": cwd, "repo_root": root, "branch": branch if isinstance(branch, str) else None,
                 "commit": wanted or hashes[0], "head": hashes[0],
-                "dirty": len(status) if isinstance(status, list) else 0, "excerpt": excerpt}
+                "dirty": -1 if state is None else state[1], "excerpt": excerpt}
 
     async def reread(_request: dict) -> dict:
         return RERUN  # reads have no effect, so an unfinished read is simply done again
@@ -198,7 +274,8 @@ async def _run_create(ctx: OpContext) -> dict:
                               actor=ctx.actor)
     ctx.set_refs(checkpoint_id=checkpoint_id)
     return {"checkpoint_id": checkpoint_id, "commit": src["commit"], "branch": src["branch"],
-            "dirty": src["dirty"], "repo_root": src["repo_root"], "excerpt_messages": len(src["excerpt"])}
+            "dirty": None if src["dirty"] < 0 else src["dirty"], "repo_root": src["repo_root"],
+            "excerpt_messages": len(src["excerpt"])}
 
 
 # --------------------------------------------------------------------------- checkpoint.continue
@@ -264,8 +341,13 @@ def prepare_script(src: str, dest: str, worktree: str, branch: str, commit: str,
     ])
 
 
-def first_prompt(cp: dict, *, worktree: str, branch: str, instructions: str) -> str:
-    head = [
+def prompt_marker(cp: dict, operation_id: str) -> str:
+    """First line of the first instruction: lets a lost send be found in the new session's transcript."""
+    return f"[batc checkpoint {cp['checkpoint_id']} · {operation_id}]"
+
+
+def first_prompt(cp: dict, *, worktree: str, branch: str, instructions: str, marker: str | None = None) -> str:
+    head = [*([marker] if marker else []),
         "You are starting new work from a checkpoint of earlier work by a person. Their session and folder are "
         "read-only for you; work only in this folder and on this branch.",
         "",
@@ -275,6 +357,8 @@ def first_prompt(cp: dict, *, worktree: str, branch: str, instructions: str) -> 
     ]
     if cp["dirty"]:
         head.append(f"The source had {cp['dirty']} uncommitted change(s); they are NOT in this folder.")
+    elif cp["dirty"] is None:
+        head.append("Uncommitted changes in the source were not observed; none are in this folder.")
     tail = ["", "Task:", instructions.strip()]
     budget = service.MAX_PROMPT_CHARS - len("\n".join(head + tail)) - 200
     lines: list[str] = []
@@ -333,6 +417,8 @@ async def _run_continue(ctx: OpContext) -> dict:
         return {"session_id": r["session_id"], "cwd": r.get("cwd") or worktree}
 
     async def restart(_request: dict) -> dict | None:
+        if not any(e.get("session_id") == sid for e in registry.list_entries(host)):
+            return RERUN  # never reserved in the registry, so no start frame left this process
         try:
             meta = await c.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
         except Exception:  # noqa: BLE001 - unreadable: stay uncertain and read again later
@@ -340,16 +426,19 @@ async def _run_continue(ctx: OpContext) -> dict:
         if isinstance(meta, dict) and norm(meta.get("cwd")) == worktree:
             registry.update(host, sid, status="active", cwd=worktree)
             return {"session_id": sid, "cwd": worktree, "reconciled": True}
-        return RERUN if meta is None else None  # BAT has no such session: the start never landed
+        return None  # reserved and maybe sent: BAT may still be starting it, so read again later; never start twice
 
     await ctx.step("session.start", start, request={"session_id": sid, "cwd": worktree, "agent": agent},
                    reconcile=restart)
+    registry.update(host, sid, checkpoint_id=cp["checkpoint_id"], source_session_id=cp["source_session_id"],
+                    start_commit=cp["commit_sha"])
     # Before the first instruction, BAT itself must see the session's folder at the checkpoint commit.
     log = await c.invoke("git:log", {"cwd": worktree, "count": 1})
     seen = (log or [{}])[0].get("hash") if isinstance(log, list) else None
     if seen != cp["commit_sha"]:
         raise NeedsAttention("START_MISMATCH", f"BAT reports {str(seen)[:12]} in the new session's folder")
-    text = first_prompt(cp, worktree=worktree, branch=branch, instructions=ctx.params["instructions"])
+    marker = prompt_marker(cp, ctx.operation_id)
+    text = first_prompt(cp, worktree=worktree, branch=branch, instructions=ctx.params["instructions"], marker=marker)
     mid = "batc-" + ctx.operation_id
 
     async def send() -> dict:
@@ -358,8 +447,14 @@ async def _run_continue(ctx: OpContext) -> dict:
         return {"message_id": mid, "accepted": r.get("accepted"), "turn_marker": r.get("turn_marker")}
 
     async def resend(_request: dict) -> dict | None:
-        turn = registry.get_turn(host, sid, mid)
-        return {"message_id": mid, "accepted": True, "turn_marker": mid} if turn else None
+        if registry.get_turn(host, sid, mid):  # recorded once BAT accepted this clientMessageId (Claude)
+            return {"message_id": mid, "accepted": True, "turn_marker": mid}
+        # Codex has no turn record: the first instruction is in the transcript when it starts with the marker.
+        read = await service.session_read(_read_fleet(ops), host, sid, last_n=10)
+        if any(m.get("role") == "user" and str(m.get("text") or "").startswith(marker)
+               for m in read.get("messages") or []):
+            return {"message_id": mid, "accepted": True, "turn_marker": mid, "settled_by": "transcript"}
+        return None
 
     sent = await ctx.step("send", send, request={"message_id": mid,
                                                  "text_sha256": hashlib.sha256(text.encode()).hexdigest()},

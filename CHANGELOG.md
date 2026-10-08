@@ -2,6 +2,16 @@
 
 ## Next release (unreleased)
 
+- Checkpoints no longer call BAT's `git:status` on the person's checkout: BAT runs a plain `git status`, which can
+  rewrite `.git/index`, and answers `[]` on failure. Uncommitted changes are counted over SSH with
+  `git --no-optional-locks status`, or reported as not observed (`dirty: null`); `dirty` is a count, not a bool.
+  Source reads go through the inventory's read-only fleet. A lost `session.start` reply is only started again when
+  no registry reservation exists (a null session meta no longer counts as proof), and a lost first instruction to
+  a Codex session is settled from its transcript. New: `GET /api/v1/sessions/{host}/{id}/checkpoint-preview`,
+  `checkpoints/{id}?live=true` (`source.advanced`), `started_from` on the session read, MCP `checkpoint_preview`,
+  `checkpoint_create`, `work_continue_from_checkpoint`, CLI `batc checkpoint`, and a commit picker and note in the
+  Dashboard. The Dashboard no longer requests `/favicon.ico`.
+
 - Checkpoints (docs/design/checkpoints.md): `checkpoint.create` records any session's commit, branch, uncommitted
   change count and a fixed conversation excerpt through read channels only; `checkpoint.continue` builds a
   connector-owned clone under the first managed root (its origin is the source's origin, never the person's

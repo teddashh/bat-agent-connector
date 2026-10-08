@@ -6,7 +6,9 @@ Git runs for real in temp repositories (a local runner stands in for SSH); BAT i
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
 import subprocess
 
 import pytest
@@ -52,9 +54,19 @@ class RealGitLog(dict):
 
 
 def snapshot(repo) -> dict:
+    # --no-optional-locks: a plain `git status` here would refresh the index itself and hide a rewrite.
+    index = repo / ".git" / "index"
     return {"refs": git(repo, "for-each-ref"), "worktrees": git(repo, "worktree", "list", "--porcelain"),
-            "status": git(repo, "status", "--porcelain"), "config": git(repo, "config", "--local", "--list"),
-            "head": git(repo, "rev-parse", "HEAD")}
+            "status": git(repo, "--no-optional-locks", "status", "--porcelain"),
+            "config": git(repo, "config", "--local", "--list"), "head": git(repo, "rev-parse", "HEAD"),
+            "index": (hashlib.sha256(index.read_bytes()).hexdigest(), index.stat().st_mtime_ns)}
+
+
+def bat_git_status(p):
+    """What BAT's git:status runs: a plain `git status`, which may refresh and rewrite .git/index."""
+    r = subprocess.run(["git", "-C", p["cwd"], "status", "--porcelain", "--untracked-files=all"],
+                       capture_output=True, text=True)
+    return [{"path": line[3:], "status": line[:2].strip()} for line in r.stdout.splitlines()]
 
 
 @pytest.fixture
@@ -76,6 +88,7 @@ def human(tmp_path):
 def daemon(mock, human, tmp_path):
     mock.metas[MANUAL] = {"cwd": str(human), "isStreaming": False}
     mock.git_logs = RealGitLog()
+    mock.handlers["git:status"] = bat_git_status
     d = TaskDaemon(make_config(mock, writes=True, orchestrate=True, managed_roots=[str(tmp_path / "managed")],
                                safety={"write_min_interval_s": 0}), tmp_path / "tasks.db")
     d.ops.context["git_runner"] = LocalRunner()
@@ -104,10 +117,14 @@ async def make_checkpoint(d, **params):
 
 
 async def test_checkpoint_reads_a_person_session_and_writes_nothing(daemon, mock, human):
+    # Same content, new mtime: the index's stat data is stale, so a plain `git status` would rewrite it.
+    st = (human / "notes.txt").stat()
+    os.utime(human / "notes.txt", ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
     before = snapshot(human)
     cp = await make_checkpoint(daemon)
     assert cp["source_provenance"] == "manual" and cp["commit_sha"] == before["head"]
-    assert cp["branch"] == "main" and cp["dirty"] is False and cp["repo_root"] == str(human)
+    assert cp["branch"] == "main" and cp["dirty"] == 0 and cp["repo_root"] == str(human)
+    assert not [i for i in mock.invokes if i["channel"] == "git:status"]  # BAT's git:status may write the index
     assert len(cp["excerpt"]) == 5 and all(m["text"] for m in cp["excerpt"])
     assert bat_writes(mock) == []
     assert snapshot(human) == before
@@ -249,3 +266,99 @@ async def test_http_lists_checkpoints_and_reports_where_they_can_continue(daemon
         await server.wait_closed()
         await daemon.fleet.close()
         await daemon.inventory.close()
+
+
+async def test_a_lost_start_reply_is_read_back_not_started_again(daemon, mock, human, tmp_path, monkeypatch):
+    from bat_agent_connector import orchestrate
+    from bat_agent_connector.errors import InvokeTimeout
+
+    cp = await make_checkpoint(daemon)
+    real_start = orchestrate.session_start
+    calls = []
+
+    async def started_but_reply_lost(*a, **kw):
+        calls.append(kw["session_id"])
+        await real_start(*a, **kw)  # BAT started the session and the reply was lost
+        raise InvokeTimeout("claude:start-session timed out")
+
+    monkeypatch.setattr(orchestrate, "session_start", started_but_reply_lost)
+    meta_before = dict(mock.metas)
+    op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"})
+    assert op["status"] == "uncertain"
+    sid = op["external_refs"]["session_id"]
+    # BAT has not loaded it yet: a null meta while the reservation exists is not proof of "never started".
+    hidden = mock.metas.pop(sid)
+    daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+    await daemon.ops.drain(timeout=30)
+    assert daemon.ops.get(op["operation_id"])["status"] == "uncertain" and len(calls) == 1
+    mock.metas[sid] = hidden
+    monkeypatch.setattr(orchestrate, "session_start", real_start)
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+    daemon.journal.close()
+
+    d2 = TaskDaemon(make_config(mock, writes=True, orchestrate=True, managed_roots=[str(tmp_path / "managed")],
+                                safety={"write_min_interval_s": 0}), tmp_path / "tasks.db")  # the daemon restarts
+    d2.ops.context["git_runner"] = LocalRunner()
+    d2.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+    await d2.ops.drain(timeout=60)
+    done = d2.ops.get(op["operation_id"])
+    assert done["status"] == "succeeded", done
+    assert len(calls) == 1 and len([i for i in mock.invokes if i["channel"] == "claude:start-session"]) == 1
+    assert [i["params"]["sessionId"] for i in mock.invokes if i["channel"] == "claude:send-message"] == [sid]
+    assert checkpoints.started_from(d2.journal.db, "h1", sid)["checkpoint_id"] == cp["checkpoint_id"]
+    assert set(meta_before) <= set(mock.metas)
+    await d2.fleet.close()
+    await d2.inventory.close()
+    d2.journal.close()
+
+
+async def test_a_lost_codex_instruction_is_found_in_the_transcript(daemon, mock, human, monkeypatch):
+    from bat_agent_connector import service
+    from bat_agent_connector.errors import InvokeTimeout
+
+    cp = await make_checkpoint(daemon)
+    mock.echo_sends = True  # BAT appends the prompt to the session's transcript
+    real_send = service.session_send
+
+    async def sent_but_reply_lost(*a, **kw):
+        await real_send(*a, **kw)
+        raise InvokeTimeout("claude:send-message timed out")
+
+    monkeypatch.setattr(service, "session_send", sent_but_reply_lost)
+    op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]},
+                   {"instructions": "go", "agent": "codex"})
+    assert op["status"] == "uncertain"
+    monkeypatch.setattr(service, "session_send", real_send)
+    daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+    await daemon.ops.drain(timeout=30)
+    done = daemon.ops.get(op["operation_id"])
+    assert done["status"] == "succeeded", done
+    assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"]) == 1  # never sent twice
+    step = daemon.journal.db.execute("SELECT response FROM operation_steps WHERE operation_id=? AND name='send'",
+                                     (op["operation_id"],)).fetchone()
+    assert '"settled_by":"transcript"' in step["response"]
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
+async def test_preview_source_moved_and_unobserved_changes(daemon, mock, human):
+    pv = await checkpoints.preview(daemon.ops, "h1", MANUAL)
+    assert pv["head"] == git(human, "rev-parse", "HEAD") and len(pv["commits"]) == 2 and pv["dirty"] == 0
+    assert pv["snapshot"]["supported"] is False
+    (human / "notes.txt").write_text("mid-edit\n")
+    assert (await checkpoints.preview(daemon.ops, "h1", MANUAL))["dirty"] == 1
+    cp = await make_checkpoint(daemon)
+    assert cp["dirty"] == 1
+    assert (await checkpoints.source_head(daemon.ops, cp))["advanced"] is False
+    git(human, "commit", "-qam", "more work")
+    moved = await checkpoints.source_head(daemon.ops, cp)
+    assert moved["advanced"] is True and moved["head"] == git(human, "rev-parse", "HEAD")
+    assert checkpoints.get(daemon.journal.db, cp["checkpoint_id"])["commit_sha"] == cp["commit_sha"]
+    daemon.ops.context["git_runner"] = None  # no SSH: uncommitted changes are not observed, not "clean"
+    cp2 = await make_checkpoint(daemon, note="again")
+    assert cp2["dirty"] is None
+    text = checkpoints.first_prompt(cp2, worktree="/w", branch="b", instructions="x")
+    assert "were not observed" in text
+    await daemon.fleet.close()
+    await daemon.inventory.close()
