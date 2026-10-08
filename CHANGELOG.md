@@ -92,6 +92,13 @@
   task submission, continuation and reconciliation reservation links; admission bindings and API shapes are
   unchanged (A05/A07, §09/§10).
 
+- Trusted verification now treats a task pause, a control-version change, owner loss or a changed session binding
+  as cancellation. Cancelled runs write no evidence and keep the task's current control instead of escalating to
+  needs_ted or uncertain. Resume starts verification again, including a cancelled dependency retry; genuine
+  verifier errors retain the existing needs_ted path. Dependency and start handlers preserve control refusals,
+  and paused tasks retain their deadline exemption ([operations unification](docs/design/operations-unification.md),
+  計畫 §09/§10, A07).
+
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
   those sessions. BAT has no record of them: `batc remove-worktree` on a checkpoint session re-registered the

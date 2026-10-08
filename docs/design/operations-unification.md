@@ -317,6 +317,25 @@ coordinator 呼叫盤點：`_tick` 對現有 lead 送 initial；`_start` 對新 
 
 ## Task operations 與 A05
 
+### Trusted verification 的控制取消（Part A）
+
+pause／control_version 改變勝過正在執行的 trusted verifier 時，舊 run **取消，不是 verifier failure**。FrameGuard 在 runner／dependency install 前及 verification record 前檢查；coordinator 在 awaited read／classify／install／run 返回後、任何本機結果前再核對原 incarnation，不能重綁目前版本。`TaskControlRefused` 不得被 classifier、install 或 start 的 generic exception 吞掉。coordinator.tick／daemon 保留控制留下的 state、paused、control_version；取消的 run 不寫 verification.json 或 observed_verifications，也不去 needs_ted／uncertain。真正的 verifier exception 在同一有效版本、未 paused 時仍是 verification_error／needs_ted。
+
+沒有新 cancellation event：原 pause／resume event 與 tick log 的 refusal code 已可追查。`TASK_OWNER_UNAVAILABLE` 表示 lease 已失去，舊 owner 不再寫 task、command、record 或做 cleanup，交新 owner 接續。`TASK_BINDING_MISMATCH` 表示舊 session／role 不能代表目前 task，取消舊工作並保留目前 state，不用舊 cwd 保存證據；先修復／確認 binding，再 resume。resume 重設原 verifying_started_at／progress_at，早於新 phase 的舊 evidence 不作本次結果，下一個 tick 從 trusted runner 重跑，包括被取消的 dependency retry；不刪除先前合法保存的失敗 evidence／一次 install note。paused task 不檢查 verification_deadline；舊 run 的 timeout／error 晚到時，也不能蓋過 pause 或新版本。
+
+`_tick_task`／coordinator.tick 的 guard／control refusal 路徑盤點：
+
+| 路徑／邊界 | pause 勝出後 | 非 pause 的版本改變後 | authority／例外處理 |
+|---|---|---|---|
+| lead state、candidate identity、verification stability 的只讀 await | verifying＋paused 保留；不寫 stale progress／candidate 結果 | 保留新 state／版本，不套用舊 read | coordinator check_incarnation 在 await 後檢查，tick 消化 control refusal。 |
+| trusted observe → lifecycle.session_record_verification | verifying＋paused，取消的 run 零 evidence | verifying 保留，舊 run 零 evidence | verify/internal FrameGuard；record 前再查，tick／daemon 不視為 verification_error。 |
+| _verification_failed 的 classify／dependency install | verifying＋paused；不新增 stale install result／needs_ted | 保留新控制；舊分類／install 結果不套用 | 原 verify guard＋ObservedVerifier.before_run；control refusal 直接傳回 tick，只有真正 install error 才沿原 environment failure。 |
+| dependency install 後的第二次 trusted run | verifying＋paused，不記第二次 run 的 evidence | verifying 保留，不以 journal.get 的新版本重綁舊 retry | 重用原 incarnation，與第一次 run 相同 fencing；resume 從頭跑。先前合法的第一個 failed evidence 保留。 |
+| lead／reviewer start 的 pre-frame refusal | command cancelled；只將暫存 dispatching 還原 queued／verifying，保留 paused／版本 | 同樣還原派送前 phase；若新控制已改其他 state，保留它 | reviewer before_send 檢查，start retry 不吞 TaskControlRefused。lease lost 時連 cancelled／phase rollback 都不寫，保留 intent／dispatching 給新 owner。未證明的真 start failure 保留 command uncertainty，但不能將較新的控制改成 uncertain。保留 helper 不表示重新啟用 independent reviewer。 |
+| _send：initial／follow-up／continuation／verification rework；implicit client-resume | pre-frame control refusal 為 cancelled，task 保留控制原狀 | cancelled，保留新 state／版本 | 517db52 的 StepFailed 規則保留；TaskControlRefused 不落入普通 needs_ted 分支。resume 只 check，不算 send frame；lost own send reply 仍走既有 readback。lease lost 不寫 command／task，交新 owner。 |
+| pending command recovery／trusted task operation／pause abort | 原 pending proof／operation failure／pause receipt 不撤銷控制 | 第一個 effect／frame 仍核對原 binding；不新增 authority | tick 首次寫前檢查 lease；本機操作仍用 receipt，外部 task.verify 拒絕只令 operation failed。abort 在 pause operation，非 tick dispatch，不重送。 |
+| daemon deadline／generic fallback／terminal cleanup | 不跑 paused deadline；晚到 timeout／error 不改 task | 晚到 exception 不覆寫新版本 | 同一有效版本的真 verifier error 仍 needs_ted；lease invalid 不進 tick／deadline／cleanup，不寫新 owner 的 state。 |
+
 `task.submit` 的 operation succeeded 表示「原 task 意圖已受理」，不是 coding／verification 已完成。它的 refs.task_id 永遠指向原 task，後續查 work_status／GET tasks／events。pause／resume 表示控制變更已持久；abort 則另有已證明／uncertain 的 interrupt step。operation.cancel 不會撤銷已提交 task；要停派送使用 task.pause。不能用 operation.resume 重送 task prompt。
 
 Local task mutation 與 operation 的 effect receipt 要在 **同一 Journal.tx** commit，沿用 `work_items._once`「effect＋回執同交易」的做法，不只用 `ctx.step` 把整個 `work_*` 函式包住。可用既有 operation_steps 的 response 作本地回執，讓 Journal 的既有方法加入共用交易 helper；不另建 task database 或派工狀態表。意圖先提交，再於短交易同時寫 task/event/control_version、command linkage 與 step success。crash 發生在 effect 後、operation 終態前時，只讀回執，不能再增 control_version、continuations 或 ted_interventions。
@@ -512,6 +531,7 @@ Phase 2 擴充原 owner 機制，沒有第二份 owner database／另一套 leas
 | A07；§09／§10（resume guard 與 send readback） | `test_a07_preliminary_resume_checks_task_binding_without_sending`、`test_a07_send_reply_loss_after_resume_uses_original_readback`、`test_a07_client_resume_and_each_permission_channel_are_gated` | paused／版本在 resume frame 前改變，完整 guard 拒絕，零 resume／send frame。resume 後 send-message 接受、reply 遺失，command／operation uncertain；原 operation readback 與 restart tick 結清，只有一個 send-message／command，沒有第二 settlement 規則。 |
 | A07；§09／§10（daemon 的非 operation send） | `test_a07_daemon_tick_handles_pre_frame_send_failure_without_uncertainty`、`test_a07_daemon_tick_cancels_pre_frame_send_after_task_control` | 真正 `_tick_task` 驅動 initial lead／follow-up；client-resume 接受後 ConnectionLost／InvokeTimeout／BAT error／OSError：rejected、needs_ted，result／event 可讀 code，從未 uncertain；只有一個 resume、零 send-message，下次 tick 零 mutation。resume frame 前 pause 由完整 guard 拒絕；resume loss 期間 pause／版本改變則 cancelled、task snapshot 不變，無例外逃出 tick。 |
 | A07；§10（initial lead 的晚到 presence） | `test_a07_daemon_initial_send_failure_preserves_presence_and_control_rules` | initial resume 失敗後：vanished 沿用一次 replacement／上限；不可讀回 needs_ted，不是 uncertain。presence await 時 pause／版本變化勝出，command cancelled、不套用 stale vanished 證據；所有情況零 send-message，原 failure code event 保留。 |
+| A07；§09／§10（verification control cancellation） | `test_a07_daemon_verification_control_cancellation_preserves_task_and_restarts`、`test_a07_genuine_verifier_error_still_needs_ted`、`test_a07_tick_start_control_refusal_preserves_task_control` | 真 daemon tick／adapter，阻塞 observe、dependency install 與第二次 run；pause／非 pause 版本／owner loss／binding change 後保留 state，取消的 run 不寫兩種 evidence。paused deadline 不執行；合法 resume 後重新跑 trusted verifier，沿原 done／failure 路徑。真 error 仍 needs_ted；lead／reviewer pre-frame start refusal 不進 uncertain。原 daemon send／resume loss tests 保留。 |
 
 故障注入只用 `tests/mockbat.py`、`tests/fakegithub.py`、[test_checkpoints.py](../../tests/test_checkpoints.py) 的 LocalRunner／RealGitLog 與 temp Git repos。驗證 policy 時比較所有寫 channel 與目的端，不能只數 send-message。停用中的 `pytest.mark.skip` task 測試不算 A07／A08 證據；舊 engine／mid-task failover 的 skip 不因本包自動啟用。
 

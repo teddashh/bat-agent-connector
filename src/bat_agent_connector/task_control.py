@@ -56,6 +56,20 @@ def check_binding(ctx):
     return task
 
 
+def check_incarnation(journal, task):
+    """Fence a coordinator tick's awaited work before its local or external effects."""
+    if getattr(journal, "owner_valid", None) and not journal.owner_valid():
+        raise TaskControlRefused("TASK_OWNER_UNAVAILABLE", "fleet owner lease is no longer held")
+    current = journal.get(task["task_id"])
+    if any(current.get(key) != task.get(key) for key in ("host", "session_id", "reviewer_session_id")):
+        raise TaskControlRefused("TASK_BINDING_MISMATCH", "task session changed during tick")
+    if current["control_version"] != task["control_version"]:
+        raise TaskControlRefused("CONTROL_VERSION_CONFLICT", "task control changed during tick")
+    if current["paused"]:
+        raise TaskControlRefused("TASK_PAUSED", "task paused during tick")
+    return current
+
+
 def owner_task(fleet, host, sid):
     owner = registry.get(host, sid) or {}
     if owner.get("task_id"):

@@ -3,10 +3,11 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from dataclasses import replace
 
 import pytest
 
-from bat_agent_connector import registry, service, task_control
+from bat_agent_connector import registry, service, task_control, verification
 from bat_agent_connector.errors import OwnerConflict
 from bat_agent_connector.task_daemon import TaskDaemon
 from tests.conftest import make_config
@@ -2417,6 +2418,166 @@ async def test_a07_refusal_after_resume_rejects_only_the_unsent_command(owned, m
     assert len(commands) == 1 and commands[0]["status"] == "rejected"
     assert d.journal.get(tid) == expected
     assert [r["channel"] for r in writes(mock)] == ["claude:client-resume"]
+
+
+def configure_verification_tick(d, tid, monkeypatch):
+    monkeypatch.setattr(d.goose, "config", replace(d.goose.config, enabled=True))
+    d.coordinator.verification_quiet_s = 0
+    d.journal.change(tid, "verifying")
+
+    async def idle(*args):
+        return {"streaming": False, "pending": None}
+
+    async def candidate(*args):
+        return {"clean": True, "candidate_commit": "a" * 40, "tree_hash": "b" * 40}
+
+    async def head(*args):
+        return "a" * 40
+
+    async def clean(*args):
+        return False
+
+    monkeypatch.setattr(d.adapter, "read", idle)
+    monkeypatch.setattr(d.adapter, "candidate_identity", candidate)
+    monkeypatch.setattr(lifecycle, "_candidate_head", head)
+    monkeypatch.setattr(lifecycle, "_git_dirty", clean)
+
+
+@pytest.mark.parametrize("control", ["pause", "version", "owner", "binding"])
+@pytest.mark.parametrize("boundary", ["observe", "install", "rerun"])
+async def test_a07_daemon_verification_control_cancellation_preserves_task_and_restarts(
+        owned, mock, monkeypatch, control, boundary):
+    """A07: real adapter and daemon tick discard an obsolete trusted run, including dependency retries."""
+    d, tid = owned
+    configure_verification_tick(d, tid, monkeypatch)
+    entered, release = asyncio.Event(), asyncio.Event()
+    runs, records = [], []
+    original_record = verification.record
+
+    async def observe(task, cwd, *, before_run=None):
+        if before_run:
+            before_run()
+        runs.append(task["control_version"])
+        run = len(runs)
+        if boundary == "observe" and run == 1 or boundary == "rerun" and run == 2:
+            entered.set()
+            await release.wait()
+        return {**trusted_evidence(), "exit_code": int(boundary != "observe" and run == 1)}
+
+    async def dependencies(task, cwd, *, before_run=None):
+        if before_run:
+            before_run()
+        if boundary == "install":
+            entered.set()
+            await release.wait()
+        return {"ok": True, "reason": "installed", "lockfile": "uv.lock"}
+
+    async def missing(*args):
+        return {"kind": "missing_dependencies"}
+
+    def record(*args, **kwargs):
+        records.append(kwargs)
+        return original_record(*args, **kwargs)
+
+    monkeypatch.setattr(d.adapter.verifier, "observe", observe)
+    monkeypatch.setattr(d.adapter.verifier, "install_dependencies", dependencies)
+    monkeypatch.setattr(d.adapter, "verification_failure", missing)
+    monkeypatch.setattr(verification, "record", record)
+    tick = asyncio.create_task(d._tick_task(tid))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        if control in {"pause", "version"}:
+            await d.call("work_pause" if control == "pause" else "work_resume",
+                         {"task_id": tid, "idempotency_key": "cancel-verification"})
+        elif control == "owner":
+            monkeypatch.setattr(d.journal, "owner_valid", lambda: False)
+        else:
+            d.journal.db.execute("UPDATE tasks SET session_id='replacement' WHERE task_id=?", (tid,))
+        snapshot = task_effect_snapshot(d, tid)
+        before_records = len(records)
+    finally:
+        release.set()
+        await tick
+    assert d.journal.get(tid)["state"] == "verifying"
+    assert d.journal.get(tid)["paused"] == int(control == "pause")
+    assert task_effect_snapshot(d, tid) == snapshot
+    assert len(records) == before_records == int(boundary != "observe")
+    assert not writes(mock)
+    if control == "pause":
+        with monkeypatch.context() as patch:
+            patch.setattr(d, "verification_remaining", lambda task: 0)
+            await d._tick_task(tid)  # a paused task has no verification deadline
+            assert task_effect_snapshot(d, tid) == snapshot
+        await d.call("work_resume", {"task_id": tid, "idempotency_key": "restart-verification"})
+    elif control == "owner":
+        monkeypatch.setattr(d.journal, "owner_valid", lambda: True)
+    elif control == "binding":
+        d.journal.db.execute("UPDATE tasks SET session_id=? WHERE task_id=?", (SID, tid))
+    if control in {"owner", "binding"}:
+        await d.call("work_resume", {"task_id": tid, "idempotency_key": "restart-verification"})
+    await d._tick_task(tid)
+    assert d.journal.get(tid)["state"] == "done"
+    assert len(records) == before_records + 1
+    assert runs[-1] == d.journal.get(tid)["control_version"]
+    assert len(runs) == (3 if boundary == "rerun" else 2)
+    assert not writes(mock)
+
+
+async def test_a07_genuine_verifier_error_still_needs_ted(owned, mock, monkeypatch):
+    d, tid = owned
+    configure_verification_tick(d, tid, monkeypatch)
+
+    async def broken(*args, **kwargs):
+        raise ValueError("trusted runner failed")
+
+    monkeypatch.setattr(d.adapter.verifier, "observe", broken)
+    await d._tick_task(tid)
+    task = d.journal.get(tid)
+    assert task["state"] == "needs_ted" and task["result"] == "ValueError"
+    assert not d.journal.observed_verification(tid) and not writes(mock)
+    assert d.journal.events(tid)[-1]["kind"] == "verification_error"
+
+
+@pytest.mark.parametrize("role", ["lead", "reviewer"])
+@pytest.mark.parametrize("control", ["pause", "version", "owner", "binding"])
+async def test_a07_tick_start_control_refusal_preserves_task_control(owned, mock, monkeypatch, role, control):
+    """A07: start adapters must not turn a pre-frame control refusal into an uncertain task."""
+    d, tid = owned
+    configure_verification_tick(d, tid, monkeypatch)
+    if role == "lead":
+        d.journal.db.execute("UPDATE tasks SET state='queued',session_id=NULL WHERE task_id=?", (tid,))
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def starting(task_id):
+        return await d.coordinator._start(d.journal.get(task_id), role=role)
+
+    async def start(task, **kwargs):
+        entered.set()
+        await release.wait()
+        task_control.check_incarnation(d.journal, task)
+        pytest.fail("a changed task must not start the reserved session")
+
+    monkeypatch.setattr(d.coordinator, "_tick", starting)
+    monkeypatch.setattr(d.adapter, "start", start)
+    tick = asyncio.create_task(d._tick_task(tid))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        if control in {"pause", "version"}:
+            await d.call("work_pause" if control == "pause" else "work_resume",
+                         {"task_id": tid, "idempotency_key": "cancel-start"})
+        elif control == "owner":
+            monkeypatch.setattr(d.journal, "owner_valid", lambda: False)
+        else:
+            d.journal.db.execute("UPDATE tasks SET session_id='replacement' WHERE task_id=?", (tid,))
+        current = d.journal.get(tid)
+    finally:
+        release.set()
+        await tick
+    result = d.journal.get(tid)
+    assert result["paused"] == current["paused"] and result["control_version"] == current["control_version"]
+    assert result["state"] == ("dispatching" if control == "owner" else "verifying" if role == "reviewer" else "queued")
+    assert d.journal.commands(tid)[0]["status"] == ("intent" if control == "owner" else "cancelled")
+    assert not writes(mock)
 
 
 @pytest.mark.parametrize("door", ["legacy", "session_operation", "task_operation", "coordinator"])

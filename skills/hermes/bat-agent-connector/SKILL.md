@@ -245,6 +245,12 @@ may request a journaled abort; low-level interrupt cannot bypass pause or verifi
 [operations unification](../../../docs/design/operations-unification.md) (Part A); other legacy-tool operations,
 no-key sentinel and null effect projections remain Part B.
 
+A pause or control-version change during trusted verification cancels that run without saving its evidence.
+The task stays verifying with the user's pause; do not treat it as a verifier failure or escalate it yourself.
+After an authorized resume, the next tick runs verification again, including a cancelled dependency retry.
+Paused tasks have no verification deadline. Owner loss leaves state to the existing/new owner; a binding
+mismatch requires checking the current session before resume. Genuine verifier errors still need Ted.
+
 PR metadata is separate from head integration: read `github_pr_preview`, then use `github_pr_update` with
 its metadata_digest, a new idempotency_key and title and/or raw Markdown body (empty body clears; omitted stays).
 Requires integrate and repository allow_pr_update (default false); no new scope or token re-issue. Works on human-only

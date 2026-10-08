@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import uuid
 from typing import Protocol
@@ -282,6 +283,8 @@ class TaskCoordinator:
         reader = getattr(self.adapter, "available_agents", None)
         try:
             found = await reader(task) if callable(reader) else None
+        except TaskControlRefused:
+            raise
         except Exception:  # noqa: BLE001 - unknown availability means Codex only
             found = None
         return frozenset(a for a in (found or ()) if a in {"claude", "codex"}) | {"codex"}
@@ -310,12 +313,22 @@ class TaskCoordinator:
 
     async def tick(self, task_id: str) -> dict:
         async with self._task_locks.setdefault(task_id, asyncio.Lock()):
-            return await self._tick(task_id)
+            try:
+                return await self._tick(task_id)
+            except TaskControlRefused as exc:
+                # Control cancellation is not a failed verifier or an unknown BAT outcome.
+                logging.info("Task %s tick cancelled by %s", task_id[:8], exc.code)
+                return self.journal.get(task_id)
+
+    def _check_control(self, task: dict) -> dict:
+        """Keep awaited work bound to its original task incarnation before local effects."""
+        return task_control.check_incarnation(self.journal, task)
 
     async def _tick(self, task_id: str) -> dict:
         task = self.journal.get(task_id)
         if task["paused"] or task["state"] in {"done", "failed", "human_owned", "needs_ted"}:
             return task
+        self._check_control(task)
         cmds = self.journal.commands(task_id)
         pending = next((c for c in cmds if c["kind"] == "failover" and
                         c["status"] in {"intent", "uncertain"}), None)
@@ -377,7 +390,7 @@ class TaskCoordinator:
                           f"{task['control_version']}:{task['review_rejections']}:"
                           f"{task['session_replacements']}", stage, high_stakes=True,
                           provider=agent, reason=reason)
-        task = self.journal.get(task["task_id"])
+        task = self._check_control(task)
         if task["paused"]:
             return task
         candidate_key = task.get("review_commit") if role == "reviewer" else "lead"
@@ -392,8 +405,11 @@ class TaskCoordinator:
             if callable(finder):
                 try:
                     warm_id = await finder({**task, "lead_agent": agent})
+                except TaskControlRefused:
+                    raise
                 except Exception:  # noqa: BLE001 - an unproven warm session is never adopted
                     warm_id = None
+        self._check_control(task)
         sid = warm_id or str(uuid.uuid4())
         command, fresh = self.journal.command(task["task_id"], "start_" + role, sid,
                                                {"role": role, "agent": agent,
@@ -411,8 +427,18 @@ class TaskCoordinator:
                                                    role=role, agent=agent, session_id=sid)
             if started_sid != sid:
                 raise TaskIdentityMismatch("BAT start changed the reserved task session ID")
+        except TaskControlRefused as exc:
+            if exc.code != "TASK_OWNER_UNAVAILABLE":
+                self.journal.command_status(command["command_id"], "cancelled")
+                current = self.journal.get(task["task_id"])
+                if current["state"] == "dispatching":
+                    self.journal.change(task["task_id"], "verifying" if role == "reviewer" else "queued")
+            raise
         except Exception:
             self.journal.command_status(command["command_id"], "uncertain")
+            current = self.journal.get(task["task_id"])
+            if current["paused"] or current["control_version"] != task["control_version"]:
+                return current
             return self.journal.change(task["task_id"], "uncertain")
         self.journal.command_status(command["command_id"], "settled")
         self.journal.provider_use(agent, "success")  # a real session on this provider
@@ -632,6 +658,11 @@ class TaskCoordinator:
                         return self.journal.mark_initial_session_vanished(task["task_id"], sid)
                 return self.journal.change(task["task_id"], "needs_ted", fields={
                     "result": "Send rejected before BAT prompt: " + exc.code})
+            except TaskControlRefused as exc:
+                if exc.code == "TASK_OWNER_UNAVAILABLE":
+                    raise  # the next owner owns the intent and its settlement
+                self.journal.command_status(cmd["command_id"], "cancelled")
+                return self.journal.get(task["task_id"])
             except WriteRefused:
                 # Local streaming/rate guard rejected before BAT send-message.
                 current = self.journal.get(task["task_id"])
@@ -649,6 +680,8 @@ class TaskCoordinator:
                     r = await asyncio.wait_for(self.adapter.reconcile_send(
                         task, sid, hashlib.sha256(text.encode()).hexdigest(), before,
                         cmd["message_id"]), timeout=5)
+                except TaskControlRefused:
+                    raise
                 except Exception:  # noqa: BLE001 - missing proof stays uncertain
                     r = None
                 if (not r or not r.get("accepted") or r.get("turn_attribution") != "exact_echo"
@@ -676,6 +709,8 @@ class TaskCoordinator:
                 proof = await asyncio.wait_for(self.adapter.reconcile_send(
                     task, sid, json.loads(cmd["payload"])["prompt_sha256"], before,
                     cmd["message_id"]), timeout=5)
+            except TaskControlRefused:
+                raise
             except Exception:  # noqa: BLE001 - absent proof stays uncertain
                 proof = None
             if (proof and proof.get("accepted") and proof.get("turn_attribution") == "exact_echo"
@@ -806,6 +841,8 @@ class TaskCoordinator:
             proof = await asyncio.wait_for(self.adapter.reconcile_send(
                 task, sid, json.loads(cmd["payload"])["prompt_sha256"], before,
                 cmd["message_id"]), timeout=5)
+        except TaskControlRefused:
+            raise
         except Exception:  # noqa: BLE001 - recovery must fail closed
             proof = None
         if proof and proof.get("accepted") and proof.get("turn_attribution") == "exact_echo":
@@ -914,10 +951,12 @@ class TaskCoordinator:
 
     async def _verify_and_review(self, task: dict) -> dict:
         lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
+        self._check_control(task)
         if lead_read.get("streaming") is True or lead_read.get("pending"):
             return self._verification_wait(task, None, "lead_not_idle",
                                            working=lead_read.get("streaming") is True)[0]
         candidate = await self.adapter.candidate_identity(task)
+        self._check_control(task)
         if not candidate or not candidate.get("clean"):
             return self._verification_wait(task, None, "candidate_not_stable")[0]
         commit, tree = candidate["candidate_commit"], candidate["tree_hash"]
@@ -931,8 +970,11 @@ class TaskCoordinator:
                 "review_commit": None, "review_tree": None, "review_marker": None, "review_passed": 0,
             }, event="candidate_changed")
         evidence = self.journal.observed_verification(task["task_id"])
+        if evidence and task.get("verifying_started_at") and evidence["created_at"] < task["verifying_started_at"]:
+            evidence = None  # resume starts a new run, including a cancelled dependency retry
         if not evidence or (evidence["candidate_commit"], evidence["tree_hash"]) != (commit, tree):
             observed = await self.adapter.run_verification(task)
+            self._check_control(task)
             if not observed:
                 return task  # no configured trusted runner; no caller-supplied evidence accepted
             evidence = self.journal.record_observed_verification(task["task_id"], observed)
@@ -940,6 +982,7 @@ class TaskCoordinator:
         if evidence["exit_code"] != 0:
             return await self._verification_failed(task, evidence, commit, tree)
         lead_read = await self.adapter.read(task, task["session_id"], task["turn_marker"])
+        self._check_control(task)
         if lead_read.get("streaming") is True or lead_read.get("pending"):
             return self._verification_wait(task, None, "lead_not_idle_after_tests",
                                            working=lead_read.get("streaming") is True)[0]
@@ -964,11 +1007,14 @@ class TaskCoordinator:
         async def failure_of(ev: dict) -> dict:
             try:
                 found = await classify(task, ev) if callable(classify) else None
+            except TaskControlRefused:
+                raise
             except Exception:  # noqa: BLE001 - unknown failure class is escalated
                 found = None
             return found if isinstance(found, dict) else {"kind": "environment", "summary": ""}
 
         failure = await failure_of(evidence)
+        self._check_control(task)
         if failure.get("kind") == "missing_dependencies":
             if self.journal.has_note(task_id, "dependency_install", commit):
                 failure["kind"] = "code"  # the one install did not help; the candidate must fix it
@@ -977,8 +1023,11 @@ class TaskCoordinator:
                 installer = getattr(self.adapter, "install_dependencies", None)
                 try:
                     result = await installer(task) if callable(installer) else {"ok": False, "reason": "unsupported"}
+                except TaskControlRefused:
+                    raise
                 except Exception as exc:  # noqa: BLE001 - install failure is an environment issue
                     result = {"ok": False, "reason": type(exc).__name__}
+                self._check_control(task)
                 self.journal.note(task_id, "dependency_install_result", {
                     "candidate_commit": commit, "ok": bool(result.get("ok")),
                     "reason": str(result.get("reason"))[:200], "lockfile": result.get("lockfile")})
@@ -986,7 +1035,8 @@ class TaskCoordinator:
                     return self.journal.change(task_id, "needs_ted", event="verification_failed", fields={
                         "result": "Trusted tests need dependencies; lockfile install failed: "
                                   + str(result.get("reason"))[:200]})
-                observed = await self.adapter.run_verification(self.journal.get(task_id))
+                observed = await self.adapter.run_verification(self._check_control(task))
+                self._check_control(task)
                 if not observed:
                     return self.journal.get(task_id)
                 evidence = self.journal.record_observed_verification(task_id, observed)
@@ -994,6 +1044,7 @@ class TaskCoordinator:
                 if evidence["exit_code"] == 0:
                     return self.journal.get(task_id)
                 failure = await failure_of(evidence)
+                self._check_control(task)
                 if failure.get("kind") == "missing_dependencies":
                     failure["kind"] = "code"
         if failure.get("kind") != "code":
