@@ -37,6 +37,7 @@ Token values never live in this file.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import posixpath
@@ -232,7 +233,8 @@ class ApiConfig:
 
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 MERGE_METHODS = ("merge", "squash", "rebase")
-_INPUT_FIELDS = ("source_sha", "operation_id", "environment", "repository")
+_INPUT_FIELDS = ("source_sha", "operation_id", "environment", "repository", "environment_generation",
+                 "artifact_id", "artifact_digest")
 
 
 # Never a PR head that integration pushes to; the PR's base and the default branch are refused as well.
@@ -262,6 +264,75 @@ class GitHubRepo:
 
 
 @dataclass(frozen=True)
+class DeployVerification:
+    kind: str
+    url: str
+    version_required: bool = True
+    health_required: bool = False
+    timeout_s: float = 10.0
+    max_bytes: int = 65536
+    token_ref: str | None = None
+
+
+@dataclass(frozen=True)
+class DeployOrdering:
+    mode: str = "serialized"
+    concurrency_group: str = ""
+    cancel_in_progress: bool = False
+
+
+@dataclass(frozen=True)
+class DeployRollback:
+    supported: bool = False
+    identity: str = "source_sha"
+    not_undone: tuple[str, ...] = ()
+
+
+def verification_url(url: str) -> str:
+    from urllib.parse import urlsplit
+    if not isinstance(url, str):
+        raise ConfigError("verification.url must be a URL string")
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        _ = parsed.port
+    except ValueError:
+        raise ConfigError("verification.url is invalid") from None
+    loopback = host == "localhost"
+    try:
+        loopback = loopback or bool(host and ipaddress.ip_address(host).is_loopback)
+    except ValueError:
+        pass
+    if (not host or parsed.username or parsed.password or parsed.fragment
+            or any(c.isspace() for c in url)
+            or (parsed.scheme != "https" and not (parsed.scheme == "http" and loopback))):
+        raise ConfigError("verification.url must be HTTPS (HTTP only on loopback), without credentials or fragment")
+    return url
+
+
+def _deploy_verification(raw) -> DeployVerification | None:
+    if raw is None:
+        return None
+    allowed = {"kind", "url", "version_required", "health_required", "timeout_s", "max_bytes", "token_ref"}
+    if not isinstance(raw, dict) or set(raw) - allowed or raw.get("kind") != "http_json":
+        raise ConfigError("verification must declare kind=http_json and supported settings only")
+    url = verification_url(raw.get("url", ""))
+    version, health = raw.get("version_required", True), raw.get("health_required", False)
+    if not isinstance(version, bool) or not isinstance(health, bool) or not (version or health):
+        raise ConfigError("verification requires version_required and/or health_required")
+    try:
+        timeout, size = float(raw.get("timeout_s", 10)), int(raw.get("max_bytes", 65536))
+    except (ValueError, TypeError):
+        raise ConfigError("verification timeout_s/max_bytes must be numbers") from None
+    if not 2 <= timeout <= 60 or not 1 <= size <= 1048576:
+        raise ConfigError("verification timeout_s must be 2-60 and max_bytes 1-1048576")
+    token = raw.get("token_ref")
+    if token is not None and (not isinstance(token, str) or not re.fullmatch(r"(?:env|file):.+", token)):
+        raise ConfigError("verification.token_ref must be env:NAME or file:PATH")
+    return DeployVerification("http_json", url, version, health, timeout, size, token)
+
+
+@dataclass(frozen=True)
 class DeployRecipe:
     """One environment's deploy route. The Dashboard names a recipe; it never passes workflows or inputs."""
 
@@ -274,6 +345,9 @@ class DeployRecipe:
     ref: str = "main"  # branch whose workflow file runs (workflow_dispatch)
     inputs: tuple[tuple[str, str], ...] = ()  # workflow input -> one of _INPUT_FIELDS
     run_name_contains: str | None = None  # "operation_id": the workflow's run-name carries it
+    ordering: DeployOrdering = field(default_factory=DeployOrdering)
+    verification: DeployVerification | None = None
+    rollback: DeployRollback = field(default_factory=DeployRollback)
 
 
 @dataclass
@@ -384,12 +458,40 @@ def parse_github(data: dict) -> GitHubConfig:
         run_name = r.get("run_name_contains")
         if run_name not in (None, "operation_id"):
             raise ConfigError(f"[[deploy.recipes]] {name}: run_name_contains may only be \"operation_id\"")
-        if mode == "workflow_dispatch" and "operation_id" not in inputs.values():
-            raise ConfigError(f"[[deploy.recipes]] {name}: pass operation_id as a workflow input so a lost "
+        if mode == "workflow_dispatch" and not {"operation_id", "source_sha"} <= set(inputs.values()):
+            raise ConfigError(f"[[deploy.recipes]] {name}: pass source_sha and operation_id as workflow inputs so a lost "
                               "dispatch reply can be matched to its run")
+        ordering = r.get("ordering") or {}
+        if (not isinstance(ordering, dict) or set(ordering) - {"mode", "concurrency_group", "cancel_in_progress"}
+                or ordering.get("mode", "serialized") != "serialized" or ordering.get("cancel_in_progress", False) is not False):
+            raise ConfigError(f"[[deploy.recipes]] {name}: ordering must be serialized with cancel_in_progress=false")
+        environment = str(r.get("environment") or name)
+        group = ordering.get("concurrency_group", "deploy-" + repo.replace("/", "-") + "-" + environment)
+        if not isinstance(group, str) or not group.strip():
+            raise ConfigError(f"[[deploy.recipes]] {name}: ordering.concurrency_group is required")
+        rollback = r.get("rollback") or {}
+        if (not isinstance(rollback, dict) or set(rollback) - {"supported", "identity", "not_undone"}
+                or not isinstance(rollback.get("supported", False), bool)):
+            raise ConfigError(f"[[deploy.recipes]] {name}: invalid rollback settings")
+        supported, identity = rollback.get("supported", False), rollback.get("identity", "source_sha")
+        limits = rollback.get("not_undone", [])
+        if (identity not in {"source_sha", "artifact"} or not isinstance(limits, list)
+                or any(not isinstance(s, str) for s in limits)
+                or (supported and (mode != "workflow_dispatch" or "not_undone" not in rollback))
+                or (supported and identity == "artifact" and not {"artifact_id", "artifact_digest"} <= set(inputs.values()))):
+            raise ConfigError(f"[[deploy.recipes]] {name}: rollback needs workflow_dispatch, explicit not_undone and identity inputs")
         recipes[name] = DeployRecipe(name, repos[repo.lower()].repository, str(r.get("environment") or name),
                                      mode, workflow, job, str(r.get("ref") or "main"),
-                                     tuple(sorted((str(k), str(v)) for k, v in inputs.items())), run_name)
+                                     tuple(sorted((str(k), str(v)) for k, v in inputs.items())), run_name,
+                                     DeployOrdering("serialized", group, False), _deploy_verification(r.get("verification")),
+                                     DeployRollback(supported, identity, tuple(limits)))
+    routes = {}
+    for recipe in recipes.values():
+        key = (recipe.repository.lower(), recipe.environment)
+        route = (recipe.mode, recipe.workflow, recipe.ref, recipe.ordering)
+        if key in routes and routes[key] != route:
+            raise ConfigError("recipes for the same environment must share mode/workflow/ref/ordering")
+        routes[key] = route
     return GitHubConfig(
         token_ref=token_ref, api_url=api_url, api_version=str(g.get("api_version") or "2026-03-10"),
         timeout_s=max(2.0, min(120.0, float(g.get("timeout_s", 20)))),
