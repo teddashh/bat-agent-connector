@@ -9,6 +9,10 @@
 - Keep failed checkpoint-preview refreshes inside the event acknowledgment barrier. Preserve the original
   commit selection and note, refuse stale checkpoint creation, and resume after a successful read; a failed
   preview cannot silently change the request into a checkpoint of HEAD.
+- Port confinement evidence and reviewed cleanup into the shared desktop/browser source. Retain cleanup
+  requests within the original account across uncertain replies, preserve agent/form choices during updates,
+  and validate native cleanup routes and typed previews. Real temporary Git/MockBat cleanup and UI fixtures
+  verify the central flow; live confinement, restoration and full observation history UI remain pending.
 
 - Wait for asynchronous Dashboard view refreshes before persisting event checkpoints. Failed or deferred
   refreshes retain the original cursor and drafts. Failed reads pause mutations; deferred renders keep
