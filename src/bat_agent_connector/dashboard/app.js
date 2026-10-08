@@ -436,6 +436,8 @@ async function viewDelivery(main) {
   if (!repo.value && state.caps?.repositories?.length) repo.value = state.caps.repositories[0].repository;
   const load = async (flash = null, fromEvent = false) => {
     const opens = drawerOpens;
+    // Explicit PR loads only replace this card; another environment's open panel cannot hold them.
+    const holdCard = () => card.querySelector(".drawer:not([hidden])") || (fromEvent && holdRender(true, opens));
     sessionStorage.setItem("batc.repo", repo.value); sessionStorage.setItem("batc.pr", num.value);
     if (!repo.value || !/^\d+$/.test(num.value)) return;
     try {
@@ -443,7 +445,7 @@ async function viewDelivery(main) {
       if (selectedMethod) query.set("method", selectedMethod);
       if (fromEvent) query.set("from_event", "true");
       const pr = (await api("GET", `/repositories/${repo.value}/pulls/${num.value}?${query}`)).pull_request;
-      if (holdRender(fromEvent, opens) || editing) { idleReload = () => load(null, true); return; }
+      if (holdCard()) { idleReload = () => load(null, true); return; }
       const status = h("div", { "aria-live": "polite" });
       const target = { repository: pr.repository, pull_number: Number(pr.pull_number) };
       if (!fromEvent || !reviewedPreview) reviewedPreview = pr.merge_preview;
@@ -506,7 +508,7 @@ async function viewDelivery(main) {
         ...pv.warnings.map(w => h("p", { class: "muted" }, w)),
         h("div", { class: "actions" }, ...buttons), status, flash instanceof Node ? flash : null,
         pr.integration?.allowed ? integrationPanel(pr, load) : null);
-    } catch (e) { if (!holdRender(fromEvent, opens)) fill(card, errorBox(e)); }
+    } catch (e) { if (!holdCard()) fill(card, errorBox(e)); }
   };
   const reload = async (fromEvent = true) => { await Promise.all(environments.map(e => e.load(fromEvent))); await load(null, fromEvent); };
   await reload(false);
@@ -573,7 +575,7 @@ function deploymentIntent(dep, kind, reload) {
   const out = h("div", { "aria-live": "polite" });
   const d = drawer();
   let busy = false, accepted = false, preview = null;
-  const scope = `deployment.${kind}.${dep.deployment_id}.${crypto.randomUUID()}`;
+  const scope = `deployment.${kind}.${dep.deployment_id}`;
   const confirm = h("button", { class: kind === "rollback" ? "danger" : "primary", disabled: true,
     "data-testid": `deployment-${kind}-confirm`, onclick: async () => {
       if (busy || accepted || !preview) return;
@@ -653,6 +655,11 @@ function deploymentRecord(dep, env, reload, compact = false) {
     } else actions.push(h("span", { class: "muted" }, t(dep.provider_terminal ? "dep_retry_unavailable" : "dep_provider_pending")));
   }
   let rollbackReason = dep.rollback_reason;
+  let providerUrl = null;
+  try {
+    const url = new URL(dep.provider_url);
+    if (url.protocol === "https:") providerUrl = url.href;
+  } catch { /* malformed and relative provider links are not navigable */ }
   if (rollbackReason === "ROLLBACK_ARTIFACT_UNAVAILABLE" && dep.identity?.artifact_expires_at
       && Date.parse(dep.identity.artifact_expires_at) <= Date.now()) rollbackReason = "ROLLBACK_ARTIFACT_EXPIRED";
   return h("div", { class: "deployment-record", "data-deployment": dep.deployment_id },
@@ -662,7 +669,7 @@ function deploymentRecord(dep, env, reload, compact = false) {
       : h("p", { class: "muted" }, `${dep.environment} · ${deploymentTime(dep.created_at)}`),
     dep.state === "superseded" ? h("p", {}, t("dep_superseded"), " ",
       env.desired ? h("a", { href: `#/op/${env.desired.operation_id}` }, t("dep_new_desired")) : null, " · ",
-      dep.provider_url ? h("a", { href: dep.provider_url, target: "_blank", rel: "noopener" }, t("dep_provider_run")) : null) : null,
+      providerUrl ? h("a", { href: providerUrl, target: "_blank", rel: "noopener" }, t("dep_provider_run")) : null) : null,
     (dep.state === "needs_attention" || dep.reconciliation_error) ? h("p", { class: "note warn" }, t("dep_attention")) : null,
     !compact && rollbackReason ? h("p", { class: "muted" }, t(`dep_${rollbackReason}`)) : null,
     !compact && dep.rollback_eligible && !dep.is_current ? deploymentLimits(dep.rollback?.not_undone) : null,

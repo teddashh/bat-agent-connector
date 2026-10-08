@@ -24,7 +24,7 @@ from tests.fakeverifier import FakeVerifier
 from tests.mockbat import TOKEN as BAT_TOKEN
 from tests.mockbat import MockBat
 from tests.test_api_v1 import token
-from tests.test_delivery import MERGED, TED, config
+from tests.test_delivery import HEAD, MERGED, TED, config
 from tests.test_deployment_rollback import allow
 from tests.test_deployments import deployed, source_on_main
 
@@ -44,6 +44,7 @@ async def main():
     d = TaskDaemon(config(mock, gh), folder / "journal.db")
     d.ops.context["deployment_verifier"] = FakeVerifier(gh)
     source_on_main(gh)
+    gh.add_pr(7, HEAD)
     allow(d)
     cfg = d.ops.context["github_config"]
     cfg.recipes["unsupported"] = replace(
@@ -194,8 +195,14 @@ async def main():
 
     # Test controls on a separate loopback listener, absent from the product router.
     async def control(reader, writer):
+        nonlocal worker
         raw = await reader.readuntil(b"\r\n\r\n")
         path = raw.split(b" ")[1].decode()
+        if path == "/pause-operations":
+            await d.ops.drain()
+            worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await worker
         if path == "/reset":
             await d.ops.drain()
             d.ops.db.execute(
@@ -213,6 +220,8 @@ async def main():
                         env["environment_key"],
                     ),
                 )
+            if worker.done():
+                worker = asyncio.create_task(d.ops.loop(interval_s=0.05))
         if path == "/bump":
             d.ops.db.execute(
                 "UPDATE deployment_environments SET desired_generation=desired_generation+1 WHERE environment_key=?",
@@ -226,7 +235,10 @@ async def main():
             {
                 "operations": d.ops.db.execute(
                     "SELECT count(*) FROM operations WHERE action='deployment.rollback'"
-                ).fetchone()[0]
+                ).fetchone()[0],
+                "browser_operations": d.ops.db.execute(
+                    "SELECT count(*) FROM operations WHERE actor='delivery-browser'"
+                ).fetchone()[0],
             }
         ).encode()
         writer.write(
@@ -246,7 +258,7 @@ async def main():
         "viewer": viewer,
         "folder": str(folder),
     }
-    Path("/tmp/delivery-card-fixture.json").write_text(json.dumps(info))
+    Path(os.environ.get("BATC_BROWSER_FIXTURE", "/tmp/delivery-card-fixture.json")).write_text(json.dumps(info))
     print("fixture ready", flush=True)
     try:
         await asyncio.Event().wait()

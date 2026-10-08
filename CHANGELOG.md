@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Keep deployment rollback/retry keys stable across drawer close, live refresh and page reload for the same
+  reviewed request. Let explicit PR loading proceed while environment details remain open, render only HTTPS
+  provider links, and translate the new deployment labels in zh-TW. Browser regressions use a local daemon
+  with synthetic providers; no production deployment is implied.
+
 - Require both current merge and deploy scopes when resuming a combined delivery operation (Tauri v2 §18,
   C07), including its original actor. Refused resumes preserve receipts and do not contact the provider;
   authorized recovery keeps the admitted merged SHA and never repeats completed writes.
