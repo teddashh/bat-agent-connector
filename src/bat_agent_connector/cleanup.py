@@ -1102,6 +1102,19 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
             "config_digest": _config(ops), "contract_version": VERSION}
 
 
+def _capacity_ready(items):
+    absent_carriers = {i["resource_id"] for i in items if i["kind"] == "worktree" and i["decision"] == "already_absent"}
+    for item in items:
+        entry = item.get("registry", {})
+        if (item["kind"] != "session" or item["decision"] != "already_absent" or
+                entry.get("status") != "active" or entry.get("task_id")):
+            continue
+        carrier = item.get("worktree_id")
+        if carrier in absent_carriers or carrier is None and not entry.get("worktree_path"):
+            return True
+    return False
+
+
 async def preview(ops, principal, target, choices=None):
     if not principal.allows("observe"):
         raise OperationError("FORBIDDEN", "preview needs observe", 403)
@@ -1111,7 +1124,7 @@ async def preview(ops, principal, target, choices=None):
     now = int(time.time())
     payload = {"actor": principal.actor, "target": target, "choices": choices, "fingerprint": fingerprint,
                "config_digest": doc["config_digest"], "contract_version": VERSION, "iat": now, "exp": now + TTL_S,
-               "ready": any(i["decision"] == "reclaim" for i in doc["items"])}
+               "ready": any(i["decision"] == "reclaim" for i in doc["items"]) or _capacity_ready(doc["items"])}
     raw = _canonical(payload).encode()
     if len(raw) > MAX_TOKEN_BYTES:
         raise OperationError("PREVIEW_TOO_LARGE", "preview token is too large", 413)

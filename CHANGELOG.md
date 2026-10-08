@@ -68,6 +68,9 @@
   as absent_at_cleanup only when its carrier is removed/already absent (or it has no own worktree); retained
   worktrees keep their resume slot. Retired IDs refuse drive/resume/same-ID start with SESSION_RETIRED.
   Legacy worktree removal records its result while preserving an already-retired runtime status.
+  An all-absent host can now apply its reviewed preview to release eligible active session capacity even when
+  nothing remains to stop or remove. The local-only settlement leaves host resources and tombstones unchanged;
+  retained carriers and already-retired rows cannot enable an apply (docs/design/cleanup.md, plan §23, E01/E02).
   Removed hosts now keep every recorded checkpoint, task, repair and registry worktree identity, including its
   local branch and clone/area carrier. Branch identities are projected before live reads, so host removal keeps
   their IDs stable and retains them with OBSERVATION_UNAVAILABLE. Historical host targets remain inspectable;

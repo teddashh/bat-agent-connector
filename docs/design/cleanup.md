@@ -282,7 +282,11 @@ ready,blocking}`。每 item：resource_id／generation／kind／host／original_
 四狀態／HEAD／ref SHA／dirty manifest digest／last observation、完整 relations／consumers／receipt coverage／
 PR destinations、decision=retain/reclaim/already_absent、固定 steps 與 dependency IDs、全部 reasons／overridden_reasons。
 Impact 列 reclaim／retain 數與 undelivered_commits_kept；items.steps、work_items、manifest 列具體停止／移除／丟棄影響。
-不可量測 bytes=null，不能把留下的 Git objects 算回收。沒有可執行 reclaim item 時 ready=false。
+不可量測 bytes=null，不能把留下的 Git objects 算回收。沒有可執行 reclaim item 時，若有已證實 absent、
+仍占 cap 的 active 非 task session，且沒有自己的 worktree 或 carrier 同樣 already_absent，仍 ready=true。
+這類 apply 經相同 signed preview／scope／fingerprint 重核，只寫 retirement 與 absence receipt，不送 host
+mutation、不新增外部 step 或 tombstone。Retained carrier、未決 start、已退休／非 counted rows 不能單獨
+啟用 apply；其餘沒有可執行工作的 preview 為 ready=false。Preview 本身不釋放 cap。
 
 ### Signed token／fingerprint
 
@@ -607,6 +611,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | legacy只讀、config解析、planner只stop、跨processguard | test_e01_legacy_apply_is_disabled_and_auto_cleanup_still_loads、test_e01_fanout_stops_planner_and_keeps_worktree、test_e01_guard_refuses_legacy_writes_on_reserved_and_cleaned_resources |
 | planner stop 需確認與全數 tasks 啟動；失敗保留 plan 供 retry；E01 | test_e01_fanout_without_confirmation_keeps_planner_loaded、test_e01_fanout_failed_start_keeps_planner_for_retry（第一個／最後一個 start 失敗）、test_e01_fanout_stops_planner_and_keeps_worktree（stop frame 恰一次） |
 | retirement／cap／managed carrier 不遺失；E01/E02／§23 | test_e01_confirmed_planner_stop_frees_capacity_and_worktree_stays_reclaimable（cap=3、next start、reviewed worktree cleanup）、test_e01_unconfirmed_planner_stop_stays_counted（ACK／still loaded／read failed）、test_e01_absent_session_capacity_follows_carrier_receipt（reclaim／already absent／retained）、test_e01_absent_session_without_worktree_leaves_cap、test_e01_retired_session_refuses_send_resume_and_same_id_start（兩 statuses／generation mismatch／registry recovery）、test_e01_legacy_worktree_remove_keeps_runtime_retired（Git remove 成功／拒絕都不復活退休 runtime） |
+| 全部 runtime absent 仍可 reviewed 釋放 cap；E01/E02／§23 | test_e01_all_absent_host_releases_capacity_without_external_mutation（main checkout／carrier 與 branch 皆 absent、cap=1、preview 純讀、零 host mutation／step／tombstone、next start 可行）、test_e01_absent_runtime_with_retained_carrier_cannot_enable_bookkeeping_apply |
 | legacy confirmation／read-only audit；E01 | test_e01_legacy_mutations_require_confirmation_before_writes（planner／relay／merge／remove／failover／permissions／approve／verification）、test_e01_legacy_cleanup_disabled_apply_never_writes_with_auto_cleanup、test_e01_legacy_cleanup_evaluation_never_rehydrates_worktrees（confirm=false／true 都不寫） |
 | boundedread／serialization／deadline | test_e01_previews_serialize_per_host_and_share_read_deadline |
 | multi-host apply 每 item 只讀自己的 host；E01/E02 | test_e01_multi_host_apply_observes_only_each_items_host（另一 host terminal read 永不回覆；healthy session／worktree／branch 均成功，unavailable 資源保留；只有初始 preview／全 plan 驗證付該 host deadline） |

@@ -127,6 +127,7 @@ signed preview 套用同一份計畫；狀態改變必須重新預覽。HTTP `/c
 MCP `cleanup_preview`／`cleanup_apply`／`cleanup_retained`／`cleanup_tombstones`，CLI
 `batc resource-cleanup preview|apply|retained|history` 共用合約。`cleanup` 可回收 managed runtime、worktree
 與 exact temporary；明選 `release_undelivered` 仍保留 commits 與 branch，成果標為尚未送達。
+合格的 session 與 carrier 全部已 absent 時，仍可套用 reviewed preview 釋放占用的 host cap。
 只有 `discard_uncommitted` 需要人控制的 `cleanup_discard`；Hermes／Grokbot tokens 不給它，agents 不要求它。
 人工、未知、task-owned、writer、waiting 或未決指令一律保留。移除前 pin HEAD，保留所有 `refs/batc/*`、
 clones 與整合區，原 ID、位置、原因、回執與 PR 去向永久可查。設定僅支援

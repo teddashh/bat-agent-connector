@@ -218,6 +218,7 @@ HTTP `/cleanup-previews` and the `cleanup.apply` operation, MCP `cleanup_preview
 `cleanup_retained`, `cleanup_tombstones`, and CLI `batc resource-cleanup preview|apply|retained|history` share the
 contract. Scope `cleanup` reclaims managed sessions, worktrees and exact temporaries; explicit
 `release_undelivered` keeps commits and the branch and records that results were not delivered.
+A reviewed preview can also release capacity when all eligible sessions and their carriers are already absent.
 Only `discard_uncommitted` needs the person's `cleanup_discard` scope; Hermes/Grokbot tokens do not receive it,
 and agents never request it. Manual, unknown, task-owned, streaming, waiting and unresolved resources are retained.
 A ref is written before non-force removal. All `refs/batc/*`, clones and integration areas stay. Original IDs,
