@@ -2638,7 +2638,7 @@ async def test_live_failover_uses_private_history_fallback_when_ledger_unavailab
 
     async def fake_failover(*args, **kwargs):
         observed.update(kwargs)
-        kwargs["before_handoff_send"]("synthetic BAT handoff\n" + kwargs["instructions"])
+        kwargs["task_authority"].before_handoff_send("synthetic BAT handoff\n" + kwargs["instructions"])
         return {"new_session_id": "successor", "prompt_sent": True, "message_id": "handoff"}
 
     monkeypatch.setattr(task_bat.service, "session_read", fake_read)
@@ -3269,9 +3269,9 @@ async def test_failover_full_original_archive_verified_and_restart(mock, tmp_pat
 
     async def fake_failover(*args, **kwargs):
         called.append(kwargs)
-        kwargs["before_handoff_send"]("synthetic BAT handoff\n" + kwargs["instructions"])
+        kwargs["task_authority"].before_handoff_send("synthetic BAT handoff\n" + kwargs["instructions"])
         return {"new_session_id": "successor", "prompt_sent": True,
-                "message_id": kwargs["handoff_message_id"]}
+                "message_id": kwargs["task_authority"].handoff_message_id}
 
     monkeypatch.setattr(task_bat.lifecycle, "session_failover", fake_failover)
     async def verified(*args):

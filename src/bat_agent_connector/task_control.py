@@ -16,6 +16,46 @@ from .errors import TaskControlRefused, WriteRefused
 
 RUNTIME_KINDS = {"send", "answer", "interrupt", "permissions", "failover"}
 
+FAILOVER_CALLBACKS = ("before_handoff_send", "verify_handoff_successor", "verify_handoff_at_frame",
+                      "before_handoff_invoke", "handoff_frame_guard")
+
+
+@dataclass(frozen=True, init=False, eq=False)
+class TaskFailoverAuthority:
+    """An internal capability issued by the coordinator for its reserved handoff."""
+
+    task_id: str
+    host: str
+    session_id: str
+    successor_session_id: str
+    failover_command_id: str
+    handoff_command_id: str
+    handoff_message_id: str
+    control_version: int
+    before_handoff_send: object
+    verify_handoff_successor: object
+    verify_handoff_at_frame: object
+    before_handoff_invoke: object
+    handoff_frame_guard: object
+    _issuer: object = field(repr=False)
+
+    def __init__(self, *args, **kwargs):
+        raise TypeError("only the TaskCoordinator can issue failover authority")
+
+    def valid_for(self, fleet, host, sid, owner_id):
+        issuer = getattr(self, "_issuer", None)
+        return (issuer is not None and issuer is getattr(fleet, "task_coordinator", None)
+                and self in issuer._failover_authorities
+                and self.task_id == owner_id and self.host == host and self.session_id == sid
+                and all(callable(getattr(self, name, None)) for name in FAILOVER_CALLBACKS)
+                and issuer._valid_failover_authority(self))
+
+    def check(self):
+        task = self._issuer.journal.get(self.task_id)
+        bound = {**task, "host": self.host, "session_id": self.session_id,
+                 "control_version": self.control_version}
+        check_incarnation(self._issuer.journal, bound)
+
 
 def command_refs(command):
     return {"task_id": command["task_id"], "command_id": command["command_id"],

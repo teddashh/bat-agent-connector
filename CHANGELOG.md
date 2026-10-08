@@ -99,6 +99,13 @@
   and paused tasks retain their deadline exemption ([operations unification](docs/design/operations-unification.md),
   計畫 §09/§10, A07).
 
+- Task-owned failover now requires an internal authority issued by the owning coordinator from its journaled
+  successor and handoff reservation, with all identity and frame callbacks. A public task ID, an unissued object
+  or missing callbacks cannot bypass TASK_OWNED_CONTROL_REQUIRED. Ownership and control are checked again after
+  waiting for the writer lock and before the start frame. Standalone MCP/CLI failover and the existing handoff
+  proof are unchanged; automatic mid-task failover remains disabled
+  ([operations unification](docs/design/operations-unification.md), v2 計畫 §02/§10–12, A07).
+
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
   those sessions. BAT has no record of them: `batc remove-worktree` on a checkpoint session re-registered the
