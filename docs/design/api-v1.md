@@ -59,7 +59,7 @@ MCP `deployment_start`／`deployment_retry`／`deployment_rollback` 為 caller-t
 
 Deployment success 必須原固定 run attempt＋指定 job completed/success＋目標 environment 無 pending＋recipe runtime 的版本及／或健康證據（至少一種）。API 明示 version_checked／health_checked；job success 不替代 readback。Verifier 只存白名單 response fields；HTTPS（loopback HTTP 僅測試）、無 redirect、timeout／max_bytes 有界，Bearer 只用後端 token_ref。Dispatch 429 是 refusal：依 Retry-After 在 wait_max_s 內等待，每次再送前精確查 token，找到即採用；lost write 查不到仍 uncertain，不重新 POST。
 
-Cancel 不取消 provider run／queue：provider 未終態時仍持有環境 slot 與 recipe deploy lock，包含 cancelled combined merge、dispatch 與尚待定位的 on_merge。Combined on_merge 取消後若 merge 才落地，核對 reviewed head／實際 merge SHA 可達 recipe ref，再追 exact push run 至終態；legacy 未終態亦占用 repository（不分大小寫）／environment 的跨 recipe slot。Settled history 不再回查 provider／runtime；current run／runtime 與 unresolved locate 依 `[github] deployment_reconcile_interval_s`（預設 300、範圍 60–86400 秒）節流，cadence 跨 restart，相同證據不增 row version。只讀 reconcile_deployments 以原 snapshot 查 provider facts，終態才釋放，不 dispatch／resume／改 cancelled operation。晚到舊代不升 current，記 superseded；runtime 舊版使 current=null、ENVIRONMENT_VERSION_DRIFT，保留 last_verified，無自動重派。Rollback 是同 recipe/environment saved verified SHA／artifact 的新 generation／operation／run；API 列 not_undone，刪／inactive record 不回退。
+Cancel 不取消 provider run／queue：provider 未終態時仍持有環境 slot 與 recipe deploy lock，包含 cancelled combined merge、dispatch 與尚待定位的 on_merge。Combined on_merge 取消後若 merge 才落地，核對 reviewed head／實際 merge SHA 可達 recipe ref，再追 exact push run 至終態；legacy 未終態亦占用 repository（不分大小寫）／environment 的跨 recipe slot。Settled history 不再回查 provider／runtime；current run／runtime 與 unresolved locate 依 `[github] deployment_reconcile_interval_s`（預設 300、範圍 60–86400 秒）節流，cadence 跨 restart，相同證據不增 row version。Stopped provider run／legacy run／未決 merge 使用 per-deployment poll_due，初始 15 秒，provider state 不變每次倍增至設定上限，改變回 15 秒；interval／digest／checked_at 跨 restart。成功 read 清除 reconciliation_error；非預期單列例外記 RECONCILE_FAILED 並繼續下一列，只在內容變動時寫入。只讀 reconcile_deployments 以原 snapshot 查 provider facts，終態才釋放，不 dispatch／resume／改 cancelled operation。晚到舊代不升 current，記 superseded；runtime 舊版使 current=null、ENVIRONMENT_VERSION_DRIFT，保留 last_verified，無自動重派。Rollback 是同 recipe/environment saved verified SHA／artifact 的新 generation／operation／run；API 列 not_undone，刪／inactive record 不回退。
 
 Deployment tables 是每次 open 的冪等 DDL，不佔 user_version。Reviewer 分配 history data step 3：僅 version=2 時一交易回填舊 operations results／refs、設 3；crash rollback、重開 no-op。Old successes 為 unverified，never current／rollback；舊非終態已 dispatch 僅查原 run，未 dispatch 停 DEPLOY_PREVIEW_REQUIRED。Observation step 2 由 #35 提供，本包不代做。
 
@@ -115,7 +115,8 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 | `GET /api/v1/delivery/previews/{mpv_id}` | observe | 讀保存的 merge scope／digest／expiry，不刷新來源 |
 | `GET /api/v1/deployments/preview?recipe=NAME` | observe | repository ID、recipe digest／readiness、generation、desired／current／last_verified／observed、ordering／rollback limits |
 | `GET /api/v1/deployments?recipe=NAME&cursor=&limit=` | observe | keyset history（created_at／dep ID，預設 50、上限 200），offline 可讀，identity／evidence／rollback eligibility |
-| `GET /api/v1/deployments/{dep_id}` | observe | fixed identity、run／attempt、operation／provider URLs、state／is_current／evidence；missing DEPLOYMENT_NOT_FOUND |
+| `GET /api/v1/deployments/{dep_id}` | observe | fixed identity、run／attempt、operation／provider URLs、state／is_current／evidence／已過濾 runtime_evidence／reconciliation_error；missing DEPLOYMENT_NOT_FOUND |
+| `GET /api/v1/deployment-environments/history?recipe=NAME&cursor=&limit=` | observe | 同 repository／environment 的跨 recipe keyset history，含 legacy；同既有 status／cursor，offline 不呼叫 GitHub，Dashboard 每頁 5 筆；invalid cursor 回 INVALID_CURSOR |
 | `GET /api/v1/deployment-environments?recipe=NAME` | observe | desired generation／current／last_verified／observed_at／slot／attention；已移除 recipe 仍可讀保存資料 |
 | `GET /api/v1/integrations/candidates?host=` | observe | 可放進 PR 的 agent 成果與 checkpoint，及送過的 PR |
 | `GET /api/v1/integrations/previews/{ipv_id}` | observe | 預覽文件與是否過期 |
@@ -127,6 +128,5 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 
 ## 尚未涵蓋
 
-- GitHub 部署 history／rollback／environment generation／runtime check 為 delivery Part B（第二步），尚未加入路由。Dashboard、merge、metadata、checkpoint 與 integration 入口已交付。
 - 既有 MCP 寫入工具（`session_send` 等）仍直接呼叫 service；它們受同一套資源政策約束，但不留 operation 紀錄。之後改為經 `operation_submit`。
 - `task.submit`／`pause`／`resume` 尚未包成 operation。

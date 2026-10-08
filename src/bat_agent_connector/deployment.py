@@ -651,7 +651,7 @@ def status(ops, dep_id):
     s = dep["recipe_snapshot"]
     return {k: dep.get(k) for k in ("deployment_id", "operation_id", "recipe", "generation", "state", "identity",
             "created_at", "updated_at", "run_id", "run_attempt", "verified", "provider_terminal", "evidence",
-            "error_code", "rollback_of", "retry_of", "html_url", "legacy")} | {
+            "error_code", "rollback_of", "retry_of", "html_url", "legacy", "reconciliation_error", "runtime_evidence")} | {
         "repository": s["repository"], "environment": s["environment"], "workflow": s["workflow"],
         "source_sha": dep["identity"].get("source_sha"),
         "operation_url": f"/api/v1/operations/{dep['operation_id']}", "provider_url": dep.get("html_url"),
@@ -662,9 +662,32 @@ def status(ops, dep_id):
 
 
 def history(ops, name, *, cursor=None, limit=50):
+    return history_page(ops, "recipe=?", [str(name)], cursor=cursor, limit=limit)
+
+
+def environment_history(ops, name, *, cursor=None, limit=50):
+    """The existing history projection and cursor, grouped across recipes of one configured environment."""
+    r = recipe(ops, name)
+    try:
+        env = bound_environment(ops, r)
+        key = env["environment_key"]
+    except OperationError:
+        key = ""  # history stays readable before the first provider binding
+    aliases = [a.name for a in ops.context["github_config"].recipes.values()
+               if a.repository.lower() == r.repository.lower() and a.environment == r.environment]
+    placeholders = ",".join("?" for _ in aliases)
+    where = ("environment_key=? OR (recipe_digest='legacy' AND "
+             "(json_extract(recipe_snapshot,'$.repository')=? COLLATE NOCASE OR "
+             f"(json_extract(recipe_snapshot,'$.repository')='' AND recipe IN ({placeholders}))) AND "
+             "(json_extract(recipe_snapshot,'$.environment')=? OR "
+             f"(json_extract(recipe_snapshot,'$.environment') IS NULL AND recipe IN ({placeholders}))))")
+    return history_page(ops, "(" + where + ")", [key, r.repository, *aliases, r.environment, *aliases], cursor=cursor, limit=limit)
+
+
+def history_page(ops, where, args, *, cursor=None, limit=50):
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
         raise OperationError("INVALID_PARAMS", "limit must be 1..200", 422)
-    args, where = [str(name)], "recipe=?"
+    args = list(args)
     if cursor:
         try:
             stamp, dep_id = json.loads(base64.urlsafe_b64decode(str(cursor) + "=" * (-len(str(cursor)) % 4)))
