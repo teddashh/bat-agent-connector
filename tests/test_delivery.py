@@ -14,6 +14,7 @@ from bat_agent_connector.github import GitHubClient
 from bat_agent_connector.operations import OperationError, OperationService
 from bat_agent_connector.task_daemon import TaskDaemon
 from tests.fakegithub import TOKEN, FakeGitHub
+from tests.operation_helpers import settle_operations
 
 HEAD = "a" * 40
 MERGED = "9" * 40
@@ -73,8 +74,8 @@ async def settle(d, op_id, rounds=10):
     """Run the operation, fast-forwarding its scheduled waits, until it stops changing."""
     for _ in range(rounds):
         d.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op_id,))
-        # Finish the worker before sampling; the default five seconds is shorter than GitHub's read timeout.
-        await d.ops.drain(timeout=60)
+        # Wait for the persisted status and worker completion before sampling.
+        await settle_operations(d.ops)
         op = d.ops.get(op_id)
         if op["status"] in {"succeeded", "failed", "cancelled", "needs_attention"}:
             return op

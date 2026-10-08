@@ -10,6 +10,7 @@ from bat_agent_connector import registry, service
 from bat_agent_connector.errors import OwnerConflict
 from bat_agent_connector.task_daemon import TaskDaemon
 from tests.conftest import make_config
+from tests.operation_helpers import settle_operations
 
 
 def test_a09_same_fleet_different_journals_refuses_second_owner(mock, tmp_path):
@@ -280,7 +281,7 @@ async def test_a05_task_effect_and_receipt_commit_together(owned, monkeypatch):
     assert result["control_version"] == 1
     assert ctx.effect("task_pause", lambda: d.journal.pause(tid)) == result
     assert d.journal.get(tid)["control_version"] == 1
-    await d.ops.drain()
+    await settle_operations(d.ops)
     assert d.ops.get(op["operation_id"])["status"] == "succeeded"
     assert d.journal.get(tid)["control_version"] == 1
 
@@ -313,7 +314,7 @@ async def assert_paused_send_refusal(d, tid, mock, op, paused):
     assert await d.coordinator.tick(tid) == paused  # the coordinator still does nothing while paused
     replay, created = task_send_operation(d, tid, op["idem_key"])
     assert not created and d.ops.get(replay["operation_id"]) == refused
-    await d.ops.drain()
+    await settle_operations(d.ops)
     assert not d.journal.commands(tid) and not writes(mock)
     d.journal.resume(tid)
     # Resume cannot change this key's definitive refusal into a successful send.
@@ -321,7 +322,7 @@ async def assert_paused_send_refusal(d, tid, mock, op, paused):
     assert not created and d.ops.get(replay["operation_id"]) == refused
     fresh, created = task_send_operation(d, tid, op["idem_key"] + ":resumed")
     assert created
-    await d.ops.drain()
+    await settle_operations(d.ops)
     assert d.ops.get(fresh["operation_id"])["status"] == "succeeded"
     assert len(d.journal.commands(tid)) == 1 and d.journal.commands(tid)[0]["status"] == "accepted"
     assert len(writes(mock)) == 1 and writes(mock)[0]["channel"] == "claude:send-message"
@@ -339,7 +340,7 @@ async def test_a07_pause_while_send_waits_for_session_lock_refuses_operation(own
     monkeypatch.setattr(d.coordinator, "_send", sending)
     async with d.coordinator._lock("h1", SID):
         op, _ = task_send_operation(d, tid, "pause-at-session-lock")
-        worker = asyncio.create_task(d.ops.drain())
+        worker = asyncio.create_task(settle_operations(d.ops))
         await asyncio.wait_for(entered.wait(), 5)
         paused = await d.coordinator.pause(tid)
     await worker
@@ -369,7 +370,7 @@ async def test_a07_pause_during_send_preparation_refuses_operation(owned, mock, 
 
         monkeypatch.setattr(d.coordinator, "_send", initial_send)
     op, _ = task_send_operation(d, tid, "pause-at-" + boundary)
-    worker = asyncio.create_task(d.ops.drain())
+    worker = asyncio.create_task(settle_operations(d.ops))
     try:
         await asyncio.wait_for(entered.wait(), 5)
         paused = await d.coordinator.pause(tid)
@@ -398,7 +399,7 @@ async def test_a07_task_send_requires_its_accepted_command_receipt(owned, mock, 
 
     monkeypatch.setattr(d.coordinator, "_send", early_return)
     op, _ = task_send_operation(d, tid, "early-return")
-    await d.ops.drain()
+    await settle_operations(d.ops)
     result = d.ops.get(op["operation_id"])
     assert result["status"] == ("uncertain" if status == "uncertain" else "failed")
     assert result["error_code"] == code and not writes(mock)
@@ -416,7 +417,7 @@ async def test_a05_paused_send_refusal_survives_restart_before_operation_settlem
     op, _ = task_send_operation(d, tid, "refusal-restart")
     with monkeypatch.context() as patch:
         patch.setattr(d.coordinator, "_send", paused_send)
-        await d.ops.drain()
+        await settle_operations(d.ops)
     d.journal.resume(tid)
     # Crash after saving the refusal intent/receipt, before recording the operation's terminal status.
     if receipt_status == "started":
@@ -424,7 +425,7 @@ async def test_a05_paused_send_refusal_survives_restart_before_operation_settlem
                              "WHERE operation_id=? AND name='task_send_refusal'", (op["operation_id"],))
     d.journal.db.execute("UPDATE operations SET status='running',error_code=NULL WHERE operation_id=?",
                          (op["operation_id"],))
-    await d.ops.drain()
+    await settle_operations(d.ops)
     result = d.ops.get(op["operation_id"])
     assert result["status"] == "failed" and result["error_code"] == "TASK_PAUSED"
     assert result["steps"][-1]["status"] == "failed" and result["steps"][-1]["error"]["code"] == "TASK_PAUSED"
@@ -500,7 +501,7 @@ async def test_a05_a07_failed_dispatch_receipt_survives_crash_before_command_rej
         monkeypatch.setattr(restarted.adapter, "reconcile_send", unexpected_readback)
         if tick_first:
             assert await restarted.coordinator.tick(tid) == prior
-        await restarted.ops.drain(timeout=30)
+        await settle_operations(restarted.ops)
         result = restarted.ops.get(op["operation_id"])
         assert result["status"] == "failed" and result["error_code"] == saved_error["code"] == "BAT_ERROR"
         assert result["status_reason"] == saved_error["message"]
@@ -542,7 +543,7 @@ async def test_a05_a07_succeeded_dispatch_receipt_survives_crash_before_task_res
 
     async with restarted_daemon(d) as restarted:
         monkeypatch.setattr(restarted.adapter, "reconcile_send", no_readback)
-        await restarted.ops.drain(timeout=30)
+        await settle_operations(restarted.ops)
         result = restarted.ops.get(op["operation_id"])
         assert result["status"] == ("succeeded" if accepted else "failed")
         if not accepted:
@@ -584,7 +585,7 @@ async def test_a07_post_frame_send_error_is_uncertain_and_settles_by_readback(
         else:
             patch.setattr(registry, "record_turn", bookkeeping_failure)
         patch.setattr(d.adapter, "reconcile_send", unproven)
-        await d.ops.drain(timeout=30)
+        await settle_operations(d.ops)
     result = d.ops.get(op["operation_id"])
     step_name = "task_dispatch" if scoped else "send"
     assert result["status"] == "uncertain"
@@ -593,7 +594,7 @@ async def test_a07_post_frame_send_error_is_uncertain_and_settles_by_readback(
     assert command["status"] == d.journal.get(tid)["state"] == "uncertain"
     d.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
     async with restarted_daemon(d) as restarted:
-        await restarted.ops.drain(timeout=30)
+        await settle_operations(restarted.ops)
         result = restarted.ops.get(op["operation_id"])
         assert result["status"] == "succeeded"
         assert next(s for s in result["steps"] if s["name"] == step_name)["status"] == "succeeded"
@@ -644,7 +645,7 @@ async def test_a05_task_send_result_receipt_survives_crash_without_repeating_eff
 
     async with restarted_daemon(d) as restarted:
         monkeypatch.setattr(restarted.adapter, "reconcile_send", no_readback)
-        await restarted.ops.drain(timeout=30)
+        await settle_operations(restarted.ops)
         assert restarted.ops.get(op["operation_id"])["status"] == "succeeded"
         if committed:
             assert restarted.journal.get(tid) == prior
@@ -668,7 +669,7 @@ async def test_a07_bat_refusal_records_failed_runtime_step_and_rejected_command(
         raise RuntimeError("BAT refused the control")
 
     mock.handlers[channel] = refuse
-    await d.ops.drain(timeout=30)
+    await settle_operations(d.ops)
     result = d.ops.get(op["operation_id"])
     assert result["status"] == "failed" and result["error_code"] == "BAT_ERROR"
     assert next(s for s in result["steps"] if s["name"] == kind)["status"] == "failed"
@@ -730,7 +731,7 @@ async def test_a05_a07_cancelled_send_command_survives_restart_without_uncertain
     code = "CONTROL_VERSION_CONFLICT" if boundary == "version" else (
         "TASK_SEND_NOT_DISPATCHED" if boundary == "other_cancel" else "TASK_PAUSED")
     async with restarted_daemon(d) as restarted:
-        await restarted.ops.drain()
+        await settle_operations(restarted.ops)
         assert_terminal_send_replay(restarted, tid, op, code, commands, 0, mock)
         assert task_effect_snapshot(restarted, tid) == snapshot
         if code == "TASK_PAUSED":
@@ -738,7 +739,7 @@ async def test_a05_a07_cancelled_send_command_survives_restart_without_uncertain
             restarted.journal.resume(tid)
             assert_terminal_send_replay(restarted, tid, op, code, commands, 0, mock)
             fresh, _ = task_send_operation(restarted, tid, "cancelled-crash:resumed")
-            await restarted.ops.drain()
+            await settle_operations(restarted.ops)
             assert restarted.ops.get(fresh["operation_id"])["status"] == "succeeded"
             assert len(restarted.journal.commands(tid)) == 2 and len(writes(mock)) == 1
 
@@ -810,7 +811,7 @@ async def test_a05_a07_rejected_send_command_survives_restart_without_uncertain_
             async def presence(*args):
                 return "unknown" if cause == "unknown_presence" else "vanished"
             monkeypatch.setattr(restarted.adapter, "session_presence", presence)
-        await restarted.ops.drain()
+        await settle_operations(restarted.ops)
         assert_terminal_send_replay(restarted, tid, op, code, commands, frames, mock)
         task = restarted.journal.get(tid)
         assert task["state"] != "uncertain" and task["paused"] == snapshot["task"]["paused"]
@@ -838,7 +839,7 @@ async def test_a07_rejected_send_recovery_preserves_a_later_accepted_command(own
     snapshot, commands = task_effect_snapshot(d, tid), d.journal.commands(tid)
     assert commands[-1]["status"] == "accepted" and snapshot["task"]["state"] == "running"
     async with restarted_daemon(d) as restarted:
-        await restarted.ops.drain()
+        await settle_operations(restarted.ops)
         assert_terminal_send_replay(restarted, tid, op, "NOT_ACCEPTED", commands, 2, mock)
         assert task_effect_snapshot(restarted, tid) == snapshot
 
@@ -892,7 +893,7 @@ async def test_a07_other_controls_refuse_pause_while_waiting_for_session_lock(ow
                                  action="session." + action, target={"host": "h1", "session_id": SID},
                                  params={"tool_use_id": "ask-1", "answers": ["yes"]} if action == "answer" else {},
                                  idempotency_key="pause-other")
-            worker = asyncio.create_task(d.ops.drain())
+            worker = asyncio.create_task(settle_operations(d.ops))
         elif action == "permissions":
             worker = asyncio.create_task(lifecycle.session_set_permissions(d.fleet, "h1", SID, confirm=True))
         elif action == "relay":
@@ -1024,7 +1025,7 @@ async def test_a05_restart_after_effect_commit_replays_without_increment(mock, t
     first.journal.close()
     second = TaskDaemon(config, tmp_path / "restart.db")
     try:
-        await second.ops.drain()
+        await settle_operations(second.ops)
         assert second.ops.get(op["operation_id"])["status"] == "succeeded"
         assert second.journal.get(task["task_id"])["control_version"] == 1
         assert len([e for e in second.journal.events(task["task_id"]) if e["kind"] == "paused"]) == 1
@@ -1141,7 +1142,7 @@ async def test_a05_locked_task_action_refuses_task_completed_by_tick(owned, mock
     try:
         await asyncio.wait_for(entered.wait(), 5)
         op, _ = locked_task_operation(d, tid, action, "tick-completes")
-        worker = asyncio.create_task(d.ops.drain())
+        worker = asyncio.create_task(settle_operations(d.ops))
         await wait_for_operation_running(d, op)
     finally:
         release.set()
@@ -1158,7 +1159,7 @@ async def test_a05_mark_stage_rechecks_verified_done_after_task_lock(owned, mock
     finish_verified_task(d, tid)
     async with d.coordinator._task_locks.setdefault(tid, asyncio.Lock()):
         op, _ = locked_task_operation(d, tid, "task.mark_stage", "stage-race")
-        worker = asyncio.create_task(d.ops.drain())
+        worker = asyncio.create_task(settle_operations(d.ops))
         await wait_for_operation_running(d, op)
         # Model a corrected completion record; normal journal transitions cannot leave a terminal task.
         assignment = "state='running'" if change == "state" else "verification_commit=NULL"
@@ -1174,7 +1175,7 @@ async def test_a05_scoped_task_action_rechecks_pause_after_task_lock(owned, mock
     d, tid = owned
     async with d.coordinator._task_locks.setdefault(tid, asyncio.Lock()):
         op, _ = locked_task_operation(d, tid, action, "scoped-pause-race")
-        worker = asyncio.create_task(d.ops.drain())
+        worker = asyncio.create_task(settle_operations(d.ops))
         await wait_for_operation_running(d, op)
         await d.coordinator.pause(tid)
         snapshot = task_effect_snapshot(d, tid)
@@ -1208,7 +1209,7 @@ async def test_a05_locked_task_action_replays_receipt_after_state_change(owned, 
     snapshot = task_effect_snapshot(d, tid)
     # Resume a worker after the succeeded receipt committed, before the operation result was saved.
     d.journal.db.execute("UPDATE operations SET status='running',result=NULL WHERE operation_id=?", (first["operation_id"],))
-    await d.ops.drain()
+    await settle_operations(d.ops)
     replay = d.ops.get(first["operation_id"])
     assert replay["status"] == "succeeded" and replay["result"] == original["result"]
     assert replay["steps"] == original["steps"] and task_effect_snapshot(d, tid) == snapshot
@@ -1222,7 +1223,7 @@ async def test_a05_task_controls_do_not_wait_for_task_lock_or_change_terminal_ta
                              target={"task_id": tid}, idempotency_key="control-race")
         finish_verified_task(d, tid)
         snapshot = task_effect_snapshot(d, tid)
-        await asyncio.wait_for(d.ops.drain(), 5)
+        await settle_operations(d.ops)
     assert d.ops.get(op["operation_id"])["status"] == "succeeded"
     assert task_effect_snapshot(d, tid) == snapshot and not writes(mock)
 
@@ -1249,7 +1250,7 @@ async def test_a05_reconcile_refuses_command_settled_while_waiting_for_task_lock
         principal = d.capability_principal(cap, "task.command.reconcile", target, "settled-race")
         op, _ = d.ops.create(principal, action="task.command.reconcile", target=target, params=params,
                              idempotency_key="settled-race")
-        worker = asyncio.create_task(d.ops.drain())
+        worker = asyncio.create_task(settle_operations(d.ops))
         await wait_for_operation_running(d, op)
     finally:
         release.set()
@@ -1281,7 +1282,7 @@ async def test_a05_reconcile_capability_consumption_and_receipt_are_atomic(owned
         await d.call("work_reconcile", {**params, "outcome": "delivered"}, principal=principal)
     # Crash after consuming the capability, before the operation result was committed.
     d.journal.db.execute("UPDATE operations SET status='running',result=NULL WHERE operation_id=?", (first["operation_id"],))
-    await d.ops.drain()
+    await settle_operations(d.ops)
     assert d.ops.get(first["operation_id"])["status"] == "succeeded"
     assert len(d.journal.reconciliations(tid)) == 1
 
@@ -1374,7 +1375,7 @@ async def test_a07_scoped_operation_observes_late_control_version(owned, mock):
                          preconditions={"control_version": 0}, idempotency_key="late")
     d.journal.pause(tid)
     d.journal.resume(tid)
-    await d.ops.drain()
+    await settle_operations(d.ops)
     assert d.ops.get(op["operation_id"])["error_code"] == "CONTROL_VERSION_CONFLICT"
     assert not writes(mock)
 
@@ -1393,7 +1394,7 @@ async def test_a07_uncertain_task_send_reads_back_after_restart_without_resendin
     assert command["status"] == "uncertain"
     # Restarted worker has no successful operation result. Missing proof must not dispatch again.
     d.journal.db.execute("UPDATE operations SET status='running',next_run_at=0 WHERE operation_id=?", (first["operation_id"],))
-    await d.ops.drain()
+    await settle_operations(d.ops)
     assert not writes(mock)
     assert d.ops.get(first["operation_id"])["status"] == "uncertain"
     assert len([c for c in d.journal.commands(tid) if c["kind"] == "send"]) == 1
@@ -1435,7 +1436,7 @@ async def test_a07_operation_readback_and_coordinator_tick_settle_task_command(o
 
     with monkeypatch.context() as patch:
         patch.setattr(client, "_roundtrip", lose_reply)
-        await d.ops.drain(timeout=30)
+        await settle_operations(d.ops)
     command = d.journal.commands(tid)[-1]
     cid = command["command_id"]
     row = d.ops.get(op_id)
@@ -1469,7 +1470,7 @@ async def test_a07_operation_readback_and_coordinator_tick_settle_task_command(o
             patch.setattr(client, "_roundtrip", unreadable)
         for attempt in range(1 if proven else 2):
             d.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op_id,))
-            await d.ops.drain(timeout=30)
+            await settle_operations(d.ops)
             row = d.ops.get(op_id)
             assert row["status"] == ("succeeded" if proven else "uncertain")
             assert next(s for s in row["steps"] if s["name"] == step_name)["status"] == (
@@ -1487,7 +1488,7 @@ async def test_a07_operation_readback_and_coordinator_tick_settle_task_command(o
             assert len(writes(mock)) == len(d.journal.commands(tid)) == 1
     if proven:
         later, _ = d.ops.create(principal, action="session.interrupt", target=target, idempotency_key="later")
-        await d.ops.drain(timeout=30)
+        await settle_operations(d.ops)
         assert d.ops.get(later["operation_id"])["status"] == "succeeded"
         assert len(writes(mock)) == len(d.journal.commands(tid)) == 2
 
@@ -1578,7 +1579,7 @@ async def test_a05_historical_bridge_survives_restart_before_task_effect(mock, t
     first.journal.close()
     second = TaskDaemon(config, path)
     try:
-        await second.ops.drain()
+        await settle_operations(second.ops)
         assert second.ops.get(op_id)["result"]["task_id"] == old["task_id"]
         assert second.journal.db.execute("SELECT count(*) FROM tasks").fetchone()[0] == 1
     finally:
@@ -1718,7 +1719,7 @@ async def test_a07_session_operation_keeps_admission_incarnation(owned, mock, ki
         d.journal.pause(tid)
         d.journal.resume(tid)
     snapshot = task_effect_snapshot(d, tid)
-    await d.ops.drain()
+    await settle_operations(d.ops)
     result = d.ops.get(op["operation_id"])
     assert result["status"] == ("failed" if raced else "succeeded")
     assert result["external_refs"]["admission_binding"] == binding
@@ -1733,7 +1734,7 @@ async def test_a07_session_operation_keeps_admission_incarnation(owned, mock, ki
     replay_snapshot = task_effect_snapshot(d, tid)
     replay, created = d.ops.create(principal, **request)
     assert not created and replay["operation_id"] == op["operation_id"]
-    await d.ops.drain()
+    await settle_operations(d.ops)
     assert d.ops.get(op["operation_id"]) == result
     assert task_effect_snapshot(d, tid) == replay_snapshot
     assert len(writes(mock)) == int(not raced)
@@ -1751,7 +1752,7 @@ async def test_a07_send_refuses_replaced_admission_session(owned, mock, scoped):
     d.journal.change(tid, "accepted", fields={"session_id": replacement})
     adopt(replacement, task_id=tid, role="lead", agent_preset="codex-agent")
     snapshot = task_effect_snapshot(d, tid)
-    await d.ops.drain()
+    await settle_operations(d.ops)
     result = d.ops.get(op["operation_id"])
     assert result["status"] == "failed" and result["error_code"] == "TASK_BINDING_MISMATCH"
     assert not d.journal.commands(tid) and not writes(mock)
@@ -1796,7 +1797,7 @@ async def test_a07_task_actions_keep_admission_version(owned, mock, action):
     else:
         d.journal.pause(tid)
     snapshot = task_effect_snapshot(d, tid)
-    await d.ops.drain()
+    await settle_operations(d.ops)
     result = d.ops.get(op["operation_id"])
     assert result["status"] == "failed" and result["error_code"] == "CONTROL_VERSION_CONFLICT"
     assert result["steps"] == []  # no effect intent, command, or task write
@@ -1827,7 +1828,7 @@ async def test_a07_preupgrade_operation_without_admission_binding_keeps_old_beha
     d.journal.db.execute("UPDATE operations SET external_refs=NULL WHERE operation_id=?", (op["operation_id"],))
     d.journal.pause(tid)
     d.journal.resume(tid)
-    await d.ops.drain()
+    await settle_operations(d.ops)
     assert d.ops.get(op["operation_id"])["status"] == "succeeded"
     assert len(writes(mock)) == len(d.journal.commands(tid)) == 1
 
@@ -1852,14 +1853,14 @@ async def test_a07_admission_incarnation_survives_restart(owned, mock, scoped):
     snapshot = task_effect_snapshot(d, tid)
     async with restarted_daemon(d) as restarted:
         assert restarted.ops.get(op["operation_id"])["external_refs"] == op["external_refs"]
-        await restarted.ops.drain()
+        await settle_operations(restarted.ops)
         refused = restarted.ops.get(op["operation_id"])
         assert refused["status"] == "failed" and refused["error_code"] == "CONTROL_VERSION_CONFLICT"
         assert task_effect_snapshot(restarted, tid) == snapshot and not writes(mock)
         replay, created = restarted.ops.create(principal, **request)
         assert not created and restarted.ops.get(replay["operation_id"]) == refused
         _, _, fresh = admission_control(restarted, tid, mock, "send", scoped=scoped, key="new-incarnation")
-        await restarted.ops.drain()
+        await settle_operations(restarted.ops)
         assert restarted.ops.get(fresh["operation_id"])["status"] == "succeeded"
         assert len(writes(mock)) == len(restarted.journal.commands(tid)) == 1
 
@@ -1890,7 +1891,7 @@ async def test_a07_task_session_actions_refuse_replaced_admission_role(owned, mo
         d.journal.change(tid, "accepted", fields={"session_id": "sess-codex-0002"})
         adopt("sess-codex-0002", task_id=tid, role="lead", agent_preset="codex-agent")
     snapshot = task_effect_snapshot(d, tid)
-    await d.ops.drain()
+    await settle_operations(d.ops)
     refused = d.ops.get(op["operation_id"])
     assert refused["status"] == "failed" and refused["error_code"] == "TASK_BINDING_MISMATCH"
     assert refused["steps"] == [] and not writes(mock)
@@ -1913,12 +1914,12 @@ async def test_a07_readback_of_old_incarnation_does_not_dispatch_again(owned, mo
         return result
     with monkeypatch.context() as patch:
         patch.setattr(client, "_roundtrip", lose_reply)
-        await d.ops.drain()
+        await settle_operations(d.ops)
     assert d.ops.get(op["operation_id"])["status"] == "uncertain"
     d.journal.pause(tid)
     d.journal.resume(tid)
     d.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
-    await d.ops.drain()
+    await settle_operations(d.ops)
     assert d.ops.get(op["operation_id"])["status"] == "succeeded"
     await d.coordinator.tick(tid)
     assert d.journal.commands(tid)[0]["status"] == ("accepted" if kind == "send" else "settled")
@@ -2170,14 +2171,14 @@ async def test_a07_refusal_after_resume_rejects_only_the_unsent_command(owned, m
             await service.session_send(d.fleet, "h1", SID, "one instruction", confirm=True)
     else:
         principal, request, op = admission_control(d, tid, mock, "send", scoped=door == "task_operation")
-        await d.ops.drain()
+        await settle_operations(d.ops)
         result = d.ops.get(op["operation_id"])
         assert result["status"] == "failed" and result["error_code"] == code
         step = "task_dispatch" if door == "task_operation" else "send"
         assert next(s for s in result["steps"] if s["name"] == step)["status"] == "failed"
         replay, created = d.ops.create(principal, **request)
         assert not created and replay["operation_id"] == op["operation_id"]
-        await d.ops.drain()
+        await settle_operations(d.ops)
         assert d.ops.get(op["operation_id"]) == result
     commands = d.journal.commands(tid)
     assert len(commands) == 1 and commands[0]["status"] == "rejected"
@@ -2211,14 +2212,14 @@ async def test_a07_resume_transport_loss_rejects_command_without_uncertain_task(
             assert result["state"] == "needs_ted" and "BAT_ERROR" in result["result"]
         else:
             principal, request, op = admission_control(d, tid, mock, "send", scoped=door == "task_operation")
-            await d.ops.drain()
+            await settle_operations(d.ops)
             result = d.ops.get(op["operation_id"])
             assert result["status"] == "failed" and result["error_code"] == "BAT_ERROR"
             step = "task_dispatch" if door == "task_operation" else "send"
             assert next(s for s in result["steps"] if s["name"] == step)["status"] == "failed"
             replay, created = d.ops.create(principal, **request)
             assert not created and replay["operation_id"] == op["operation_id"]
-            await d.ops.drain()
+            await settle_operations(d.ops)
             assert d.ops.get(op["operation_id"]) == result
     commands = d.journal.commands(tid)
     assert len(commands) == 1 and commands[0]["status"] == "rejected"
@@ -2256,7 +2257,7 @@ async def test_a07_send_reply_loss_after_resume_uses_original_readback(owned, mo
         patch.setattr(client, "_roundtrip", lose_send_reply)
         if operation:
             principal, request, op = admission_control(d, tid, mock, "send")
-            await d.ops.drain()
+            await settle_operations(d.ops)
             result = d.ops.get(op["operation_id"])
             assert result["status"] == "uncertain"
             assert next(s for s in result["steps"] if s["name"] == "send")["status"] == "uncertain"
@@ -2267,7 +2268,7 @@ async def test_a07_send_reply_loss_after_resume_uses_original_readback(owned, mo
     assert command["status"] == d.journal.get(tid)["state"] == "uncertain"
     if operation:
         d.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
-        await d.ops.drain()
+        await settle_operations(d.ops)
         assert d.ops.get(op["operation_id"])["status"] == "succeeded"
         assert d.journal.command_get(command["command_id"])["status"] == "uncertain"
     async with restarted_daemon(d) as restarted:
@@ -2301,7 +2302,7 @@ async def test_a07_preliminary_resume_checks_task_binding_without_sending(owned,
     monkeypatch.setattr(client, "_invoke_checked", change_before_resume)
     if operation:
         _, _, op = admission_control(d, tid, mock, "send")
-        await d.ops.drain()
+        await settle_operations(d.ops)
         result = d.ops.get(op["operation_id"])
         assert result["status"] == "failed" and result["error_code"] == code
     else:
