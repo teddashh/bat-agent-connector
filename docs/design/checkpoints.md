@@ -50,16 +50,15 @@ BAT 的 `worktree:create` 不能指定起點 commit，所以 clone 與 worktree 
 
 ## Agent 的可寫範圍
 
-摘錄來自人的對話，裡面有人的絕對路徑與他對自己資料夾的指示。計畫 §06 與驗收 A10 要求由執行環境擋下寫回，不能靠 prompt 自律。不論主機的 `default_permission_mode`，checkpoint session 都以 agent CLI 自己的限制啟動（`orchestrate.CONFINED_OPTIONS`）：
+摘錄可能包含人的絕對路徑。計畫 §06／§12、A10 的執行限制不能靠 cwd 或 prompt 自律；實作與證據見 [confinement](confinement.md)。Checkpoint 與 repair 不論 host default 都帶 `write_scope=confined`。
 
-| Agent | 啟動選項 | 擋下什麼 |
+| Agent | 啟動選項／證據 | 限制與缺口 |
 |---|---|---|
-| Claude | `permissionMode: acceptEdits` | 自己資料夾內的編輯自動接受；寫到資料夾外、以及大部分 shell 指令，都變成待回答的權限詢問 |
-| Codex | `codexSandboxMode: workspace-write`、`codexApprovalPolicy: on-request` | sandbox 在 OS 層擋下資料夾外的寫入；要越過就得提出詢問 |
+| Claude，沒有已查核 account | `permissionMode: default`；`prompt_gated` | 未預先批准的工具會詢問；既有規則及 shell 可允許外部寫入，沒有 OS sandbox。表單推薦 Codex。 |
+| Claude，已查核 account | `permissionMode: acceptEdits`；`host_account` | BAT callback 對 Write／Edit 等直接 allow，沒有 path check；帳號才是宣告 roots 的邊界。 |
+| Codex | `workspace-write`／`on-request`；`os_sandbox`，最多 `options_confirmed` | BAT 不轉送 writable roots 或 network；OS 阻擋尚待 W12 實機驗證，逐次批准可能越過 sandbox。 |
 
-Registry 列記 `write_scope: "confined"`，從預留時就帶著權限欄位，所以讀回補記的 session、resume 與 Codex failover 的接手 session 都保持同樣限制。`session_set_permissions` 拒絕把它提升成 allow-all，`approve_pending` 跳過它（`skipped: "confined"`）：這些詢問就是擋住寫回的地方，要由人逐一回答。
-
-這不是完整隔離：人或有 `operate` 的 agent 逐一批准詢問，寫入仍會發生；Claude 的 shell 指令受詢問控管，不受 sandbox 控管。要更強的保證，讓 BAT 主機以不能寫人資料夾的帳號執行。
+Registry 從 reserve 記 creation snapshot 與實際 options。Resume 與 successor 保持限制；permission raise（含 force）、bulk、deferred raise、dont_ask_again 及放寬 mode 的 ExitPlanMode allow 都被拒絕。單次批准仍可能讓外部寫入通過。Existing loaded sessions 缺舊證據仍可 send；meta=null 的 confined resume 若缺原 policy 才被拒絕。Running sessions 不因升級而被重標。A10 在 W12 live run 前尚未證實。
 
 ## 讀取
 

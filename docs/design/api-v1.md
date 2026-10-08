@@ -40,6 +40,8 @@ MCP 的 `operation_submit`、`operation_cancel`、`operation_resume` 要 `confir
 
 取消只在下一步之前生效，而且不跳過回查：`uncertain` 的操作收到取消時先立刻回查，證明那一步已發生就照常完成，所以 `cancelled` 不會掩蓋已送出的動作。`needs_attention` 可以取消（原因會註明哪一步從未證明），也可以 `resume`：已完成的步驟不重做，未證明的步驟再回查一次，不重送。操作的 actor、admin，或擁有該 action scope 的主體可以取消或 resume；事件記在實際操作的人名下。
 
+`NeedsAttention` 從外部 `ctx.step` 傳出時，operation 停在 `needs_attention`，該 step 保留 `uncertain`。重啟或 resume 都先執行原 reconcile；沒有 reconcile 或回 None 時只讀回等待，不能再次呼叫 fn。回傳已知結果就補記成功；只有 reconcile 明確回 `RERUN`、證明原呼叫未生效時才可重新派送。這與 `ctx.effect` 的本地交易回執不同：effect 與 journal 變更在同一交易內，回滾後可安全重做本地變更。
+
 第一批 action：
 
 | Action | Scope | 外部呼叫 | 回查依據 |
@@ -122,6 +124,23 @@ History／relations 的 opaque cursor 在任何 journal read 前驗證 version�
 | `GET /api/v1/work-items`、`/work-items/{wi_id}` | observe | 跨專案的工作項目（`pending=true`：等人決定）；一個項目與它的完成狀態、連結、紀錄 |
 
 錯誤格式為 `{"error": {"code", "message"}}`：401 未驗證、403 權限或資源唯讀（代碼同 resource-policy）、404、405、409 冪等衝突、422 參數錯誤、502 BAT 錯誤。
+
+## 執行限制證據（A10）
+
+既有 session reads 帶 `write_scope`、`confinement` creation snapshot 與 `current_verification`；`/hosts` 及 `capabilities.hosts[].confinement` 帶 account check 與 agent 可達選項。Cached 舊列補 unknown evidence，不改資料庫；stale 不宣稱目前已 verified。`/tasks/{id}` 的 `session_confinement` 顯示 Task Service 相容 gap。Checkpoint preview、continue／repair operation refs 與結果帶同一證據；無新增 route 或 MCP tools。權限與批准的穩定拒絕見 [confinement](confinement.md)，A10 尚待 W12 live run。
+
+`GET /api/v1/capabilities` 的 `hosts[].confinement.host_account.start_effect` 描述新 start 的帳號查核流程，與 reason 一起回傳。MCP `capabilities_get`、CLI／MCP host reads 用同一後端 projection；GET 不觸發 live check。`start_account()` 在真正 start 時跑 live check，並用同一 `account_start_effect()` 規則決定拒絕。
+
+Host-account verdict 另含 `checked_uid` 與 `channel`：status、method=sudo_exec、ssh_alias、auditor_uid、bat_uid、bat_account、closure（schema_version/status/interpreter/roots/entries_remaining）、ptrace_scope（不可讀為 null）與 preflight evidence。Verified 須符合操作者宣告的 check_ssh_alias／check_uid／bat_account／expected_uid，auditor 與 BAT 的 UID 必須不同。無可信 alias 直接回 unknown／check_channel_untrusted，不跑 BAT 帳號的登入命令；此 reason 和其他 hardening gaps 一樣為 fallback_default，受限 Claude 用 default，不啟用 acceptEdits。Verified 另需完整 pre-interpreter closure proof；unknown／check_executable_untrusted 包含未知 layout 或不完整 gate，仍 fallback_default。同 UID hostile process 不在此證明範圍。舊同帳號／directory-only cache 不沿用，GET 仍只讀。
+
+| start_effect | 意義 |
+|---|---|
+| `verified` | 帳號已查核。新的受限 Claude 可用 acceptEdits，啟動前仍會再查；不是既有 session 的升級。 |
+| `recheck` | 宣告帳號但尚無 fresh evidence，reason=unchecked_or_stale。啟動時再查；通過、支援的加固 fallback 或拒絕由 live 結果決定。 |
+| `fallback_default` | Unknown 的 reason 是支援的環境加固缺口；受限 Claude 用 plain default，不啟用 acceptEdits。未宣告帳號也用此 value，跳過帳號 check；一般 operator／Task policy 不變。 |
+| `refused` | Mismatch 或其他 unknown；HOST_ACCOUNT_UNVERIFIED 拒絕 Claude 與 Codex 的新 start。 |
+
+Dashboard 依 start_effect 選啟動提示，不把所有非 verified status 當成 blocked、不在 JS 複製 reason 清單。Fallback／refusal 保留 reason code；Codex 保留原 sandbox 提示，refused 時先顯示拒絕。
 
 觀測 Part A 使用同 journal 的讀服務：MCP 只新增 inventory_session、inventory_worktree、resource_history、resource_relations 四個 tools；discovery 是 inventory_hosts 的參數。CLI 為 batc inventory/history/relations。History、relations、scope 的 GET 不呼叫 host、不寫入 journal；inventory 只保存 latest rows，沒有每 poll revisions。Dashboard 的跨專案歷史、scope 卡及 reopen/SSE 去重是 [observation.md](observation.md) 的 Part B。
 

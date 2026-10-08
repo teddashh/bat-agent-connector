@@ -110,7 +110,7 @@ task link 不授予 resource write grant。send／answer／interrupt／permissio
 
 ## 尚未涵蓋
 
-- **A10 執行環境限制**：本政策只管 connector 自己送出的 frame。BAT 上的 agent 仍可依對話中的絕對路徑寫入人工目錄；這需要 host 帳號權限、sandbox 或 ACL，屬 P2 managed clone 工作。在那之前，不能把 `legacy_shared_clone` 描述為完整隔離。
+- **A10 執行環境限制**：[confinement](confinement.md) 已新增 options／creation snapshot／current_verification 及不可 raise 閘門。Claude acceptEdits 沒有 path check；未查核 account 時 confined Claude 用 default，僅 prompt_gated。Codex sandbox 最多 options_confirmed，A10 尚待 W12 live run。資源歸屬、cwd、legacy_shared_clone 都不證明 agent 執行隔離；Task Service 保留測試行為並顯示 gap。
 - **Managed clone 的建立與 checkpoint 接續**（P2）。目前 `managed_roots` 只描述已存在的 clone。
 - **`workspace:save` 與 GUI 同時存檔的 race**（既有，見 SECURITY.md）。
 - **Part B legacy operations**：HTTP OperationService 已走同一 resource policy；其餘舊工具的 operation 轉接與外部 steps 拆分見 [operations-unification.md](operations-unification.md)。

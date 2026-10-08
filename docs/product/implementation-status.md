@@ -34,6 +34,9 @@
 GitHub Codex review bot 在 #45/Kit #8 後回報額度用盡；這不是乾淨 verdict。
 後續獨立本機 Codex 審查要另記 reviewer/head/發現與修正，不冒稱 GitHub 已審。
 
+46 項驗收的 source／fixture／native／installed／live 證據與缺口，另見
+[R10 驗收矩陣](acceptance-v2.md)；各文件快照日期不同，不把接手基線當作最新 head。
+
 ## 接手基線
 
 | 來源 | 接手時 remote head | 狀態及下一步 |
