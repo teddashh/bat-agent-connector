@@ -43,6 +43,10 @@ Token 缺少某個 scope（`start`、`integrate`、`manage`、`approve`）時，
 
 依瀏覽器語言選 zh-TW 或 en，預設 zh-TW。字串只在 `i18n.js`；程式與 CSS 只用 API 的機器值（`status`、`api_access` 等），不比對顯示文字。
 
+## 執行限制證據（A10）
+
+Session card 依 creation snapshot 顯示 level；OS sandbox 最多 options_confirmed，badge 明示尚未實機驗證。Detail 可展開建立選項、evidence／gap 及獨立 current verification；stale／mismatch 不改原 level。Checkpoint、work item 接續與 repair forms 隨所選 agent 顯示 options 的限制：未查核 account 的 Claude 用 default、既有規則與 shell 可允許外部寫入，並推薦 Codex；已宣告但未驗證 account 阻擋新 start。Codex 顯示 network／writable roots 不可設定與測試相容風險。所有字串有 en／zh-TW。Cwd 本身不稱為保護；A10 尚待 W12，見 [confinement](confinement.md)。
+
 ## 尚未涵蓋
 
 - Worktree、diff、檔案瀏覽，以及 Fleet Kit 的連線選擇（W10）。

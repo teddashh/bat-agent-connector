@@ -102,6 +102,10 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 
 錯誤格式為 `{"error": {"code", "message"}}`：401 未驗證、403 權限或資源唯讀（代碼同 resource-policy）、404、405、409 冪等衝突、422 參數錯誤、502 BAT 錯誤。
 
+## 執行限制證據（A10）
+
+既有 session reads 帶 `write_scope`、`confinement` creation snapshot 與 `current_verification`；`/hosts` 及 `capabilities.hosts[].confinement` 帶 account check 與 agent 可達選項。Cached 舊列補 unknown evidence，不改資料庫；stale 不宣稱目前已 verified。`/tasks/{id}` 的 `session_confinement` 顯示 Task Service 相容 gap。Checkpoint preview、continue／repair operation refs 與結果帶同一證據；無新增 route 或 MCP tools。權限與批准的穩定拒絕見 [confinement](confinement.md)，A10 尚待 W12 live run。
+
 ## 尚未涵蓋
 
 - Dashboard 畫面（W09）、GitHub merge／部署（W07／W08）、checkpoint 接續（W04）。這些新增 action 與路由，不改這裡的合約。

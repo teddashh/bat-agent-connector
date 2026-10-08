@@ -16,7 +16,7 @@ import json
 import time
 from dataclasses import dataclass
 
-from . import service
+from . import confinement, service
 from .config import Config
 from .fleet import Fleet
 from .redact import redact
@@ -225,7 +225,7 @@ class Inventory:
                         "last_attempt_at": _iso(r.get("last_attempt_at")),
                         "last_success_at": _iso(r.get("last_success_at")),
                         "consecutive_failures": r.get("consecutive_failures", 0), "stale": stale,
-                        "stale_reason": reason})
+                        "stale_reason": reason, "confinement": confinement.host_capability(self.fleet, name)})
         return out
 
     def _host_stale(self, r: dict, now: float) -> tuple[bool, str | None]:
@@ -239,6 +239,9 @@ class Inventory:
 
     def _session_out(self, r, hosts: dict, now: float) -> dict:
         body = json.loads(r["body"])
+        if "confinement" not in body:
+            body.update(confinement.session_fields(r["host"], r["session_id"],
+                                                  account=confinement.account_status(self.fleet, r["host"])))
         stale, reason = self._host_stale(hosts.get(r["host"]) or {}, now)
         if r["gone_at"] is not None:
             stale, reason = True, "gone"
@@ -247,6 +250,15 @@ class Inventory:
         activity = body.pop("last_activity_ms", None)
         body.pop("last_activity", None)
         body.pop("last_activity_age", None)
+        current = body.get("current_verification") or {}
+        if body["confinement"].get("level") == "host_account":
+            account = confinement.account_status(self.fleet, r["host"])
+            current["host_check"] = account
+            if account["status"] != "verified":
+                current.update(status="unknown", reason="host_account_unverified")
+        if stale:
+            current.update(status="unknown", reason="inventory_stale")
+        body["current_verification"] = current
         return {**body, "host": r["host"], "session_id": r["session_id"], "last_activity_ms": activity,
                 "last_activity_at": _iso(activity / 1000) if activity else None,
                 "first_seen_at": _iso(r["first_seen_at"]), "observed_at": _iso(r["last_seen_at"]),

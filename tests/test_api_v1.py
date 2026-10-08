@@ -675,3 +675,26 @@ async def test_a10_session_capabilities_inventory_and_triage_share_evidence(serv
     assert next(s for s in rows if s["session_id"] == sid)["confinement"] == r["confinement"]
     manual = next(s for s in listing["sessions"] if s["session_id"] == MANUAL)
     assert manual["confinement"]["level"] == "none" and manual["api_access"] == "read_only"
+
+
+async def test_a10_cached_legacy_inventory_exposes_unknown_evidence_without_rewriting(served):
+    d, port = served
+    await d.inventory.refresh_host("h1")
+    row = d.journal.db.execute("SELECT body FROM sessions_observed WHERE host=? AND session_id=?",
+                               ("h1", MANUAL)).fetchone()
+    body = json.loads(row[0])
+    for field in ("confinement", "current_verification", "write_scope"):
+        body.pop(field, None)
+    original = json.dumps(body)
+    d.journal.db.execute("UPDATE sessions_observed SET body=? WHERE host=? AND session_id=?", (original, "h1", MANUAL))
+    tok = token(d, "test-observer", "observe")
+    status, out = await http(port, "GET", "/api/v1/sessions", tok=tok)
+    legacy = next(s for s in out["sessions"] if s["session_id"] == MANUAL)
+    assert status == 200 and legacy["confinement"]["level"] == "none"
+    assert legacy["confinement"]["verification"]["status"] == "unknown"
+    assert d.journal.db.execute("SELECT body FROM sessions_observed WHERE host=? AND session_id=?",
+                                ("h1", MANUAL)).fetchone()[0] == original
+    status, hosts = await http(port, "GET", "/api/v1/hosts", tok=tok)
+    assert status == 200 and hosts["hosts"][0]["confinement"]["host_account"]["declared"] is False
+    d.journal.db.execute("UPDATE hosts_observed SET reachable=0 WHERE host=?", ("h1",))
+    assert d.inventory.get_session("h1", MANUAL)["current_verification"]["reason"] == "inventory_stale"

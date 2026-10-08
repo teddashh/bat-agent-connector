@@ -121,6 +121,10 @@ integrate = { hosts = ["workstation"], remote_url = "git@github.com:owner/name.g
 - CLI：`batc integrate candidates|preview|apply|handoff|show`；apply 只需要 `ipv_…`，其餘從預覽讀出；Resume 用 `batc op <op_id> --resume`。
 - Dashboard：成果與 GitHub 頁的 PR 卡片有「更新 PR 成果」區塊，和「合併 PR」分開。選來源、排順序後自動預覽；預覽過期或 PR head 變了按鈕就停用。完成後顯示新 head 並提醒本機資料夾不會自動更新。Operation 頁有各來源紀錄。
 
+## Repair 的執行限制（A10）
+
+`integration.handoff` 共用 checkpoint 的 confined start：Claude 未查核 account 時用 default；BAT acceptEdits 沒有 path check，只有查核 account 才使用它。Codex workspace-write/on-request 最多 options_confirmed。Operation refs／結果保存 snapshot 與 current verification，表單依 host／agent 提示限制；force／bulk／persistent raises 不放寬 repair。沒有改 composition／PR／deploy policy。A10 尚待 W12 live run，見 [confinement](confinement.md)。
+
 ## 尚未涵蓋
 
 - 整合後在 managed worktree 跑測試（`integrate.verify`）、Task Service 的執行結果作為來源、pick 模式的衝突交給 agent。
