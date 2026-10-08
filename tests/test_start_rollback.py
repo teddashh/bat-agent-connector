@@ -119,6 +119,49 @@ async def test_a10_unconfirmed_rollback_keeps_carrier_and_retry_proves_or_refuse
         await fleet.close()
 
 
+@pytest.mark.parametrize('readback', ['present', 'error', 'cancelled'])
+async def test_a10_successful_rollback_reply_needs_carrier_absence_readback(
+        fleet_factory, mock, monkeypatch, readback):
+    fleet = fleet_factory(writes=True, orchestrate=True, safety={'write_min_interval_s': 0}, **MANAGED)
+    enabled = refuse_before_frame(monkeypatch)
+    creates = create_unique_carriers(mock)
+    client = fleet.client('h1')
+    invoke = client.invoke
+    removed = False
+
+    async def no_op_remove(channel, params=None, **kwargs):
+        nonlocal removed
+        if channel == 'worktree:remove':
+            # BAT lost its in-memory mapping across a restart. The real carrier
+            # remains, but the untracked remove channel still returns success.
+            mock.worktrees.pop(params['sessionId'])
+            removed = True
+            return {'success': True}
+        if removed and channel == 'git:getRoot' and params['cwd'] == creates[0]['worktreePath']:
+            if readback == 'error':
+                raise ConnectionLost('fixture rollback read-back unavailable')
+            if readback == 'cancelled':
+                raise asyncio.CancelledError
+        return await invoke(channel, params, **kwargs)
+
+    monkeypatch.setattr(client, 'invoke', no_op_remove)
+    try:
+        with pytest.raises((WriteRefused, ConnectionLost, asyncio.CancelledError)):
+            await orchestrate.session_start(fleet, 'h1', 'demo-project', confirm=True, session_id='rollback-noop')
+        row = registry.get('h1', 'rollback-noop')
+        assert row['status'] == 'failed' and row['start_sent'] is False
+        assert row['worktree_path'] == row['cwd'] == creates[0]['worktreePath']
+        assert row['branch'] == creates[0]['branchName'] and not row.get('worktree_rolled_back')
+        enabled[0] = False
+        for _ in range(2):
+            with pytest.raises(WriteRefused, match='worktree identity is unavailable'):
+                await orchestrate.session_start(fleet, 'h1', 'demo-project', confirm=True, session_id='rollback-noop')
+            assert registry.get('h1', 'rollback-noop')['worktree_path'] == creates[0]['worktreePath']
+        assert len(creates) == 1 and 'claude:start-session' not in mock.channels()
+    finally:
+        await fleet.close()
+
+
 async def test_a10_task_lead_recover_start_recreates_a_confirmed_rollback_under_same_id(
         fleet_factory, mock, tmp_path, monkeypatch):
     fleet = fleet_factory(writes=True, orchestrate=True, safety={'write_min_interval_s': 0}, **MANAGED)

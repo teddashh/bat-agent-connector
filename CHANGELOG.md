@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Verify an unsent start's worktree is absent after a rollback success reply before clearing its durable path
+  ([design](docs/design/confinement.md), A10). BAT can acknowledge a no-op removal after losing its in-memory
+  mapping. A remaining carrier, unavailable read-back or cancellation now retains identity; repeated same-ID
+  recovery refuses to create a replacement until the original carrier can be reconciled.
+
 - Reject Python import-path overrides before account-check interpreters run ([design](docs/design/confinement.md),
   A10). The shared shell gate now refuses executable/shared-library `._pth` files and build markers, including
   libpython symlink targets and standard multiarch directories. These can redirect startup imports despite

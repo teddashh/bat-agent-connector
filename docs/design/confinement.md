@@ -330,6 +330,8 @@ Registry 對 (host, session_id) 永遠至多一列。reserve 的查重／claim�
 
 對一般 session_start 已建立、尚未送 frame 且 retain_on_error=false 的 carrier，保留既有 rollback，但 row 必須反映其回執。worktree:remove 回 success=true 後，同步將 worktree_path／branch 清為 null、cwd 回到 origin folder，並同次記 worktree_rolled_back=true、rolled_back_worktree_path／rolled_back_branch 供 audit；retry 因此重新 create 自己的 worktree，不採用外來 carrier。Removal 丟例外、被取消或沒有明確成功回覆時保留 identity；同 ID retry 只能經 worktree:status 證明原 path／branch，再沿用。Cancellation 本身仍原樣傳出，不追加 I/O；sent=true 的 start 不 rollback。新的 reservation 保留未證實移除的 identity，不能在一次失敗核對後將其丟掉，讓再下一次 retry 盲目建立 replacement。
 
+BAT 的 worktree manager 在重啟後可能遺失 mapping，此時 `worktree:remove` 即使沒有刪除任何東西仍回 success。上述清除還必須等 `git:getRoot` 對原 worktree path 明確回 null 才能進行；仍有 root、非預期回覆、read-back 失敗或取消都保留原 identity，不能把 success ACK 當實際移除證據。讀取取消後不追加 I/O。`test_a10_successful_rollback_reply_needs_carrier_absence_readback` 涵蓋 no-op success／read error／cancellation 與重複同 ID recovery，既有正常 rollback 測試仍證明真正移除後可重建。
+
 Failover reserve 先保存 branch、permission fields、handoff_message_id（Task Service 用 journal 已保留的 ID）、handoff_status=pending 與明確的 handoff_frame_sha256=null。只有 pending＋明確 null 才證明未進入 frame 派送；缺 key 的舊 active row 不算。升級前仍在 start block 的 unsettled／starting row 尚未嘗試 handoff，可在 readonly read-back 成功時，以 registry flock 補 null 與缺失的 ID／branch；不得覆寫另一個恢復程序已記的 hash 或 ID。
 
 session_start 在已知工作目錄後、start frame 前保存 cwd／worktree_path／branch，讓 ACK 遺失時也有原目的地。Checkpoint／repair 共用 start_in_worktree.restart；升級前尚缺 cwd 的 reservation 只能沿用原 session.start step 已持久化的 cwd，不採新的 host default 或 observed cwd。它們與 failover、Task Service reviewer poll／headless recovery 均在 promote 前核對原目錄。Creation permission mismatch 與 identity error 不由重試清除；只讀 session fields 仍可顯示 current_verification，不能因此改 creation snapshot。

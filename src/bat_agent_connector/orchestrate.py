@@ -326,6 +326,11 @@ async def session_start(
             removed = await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": True}, grant=grant)
             if not isinstance(removed, dict) or removed.get("success") is not True:
                 raise WriteRefused("unsent start's worktree rollback was not confirmed")
+            # BAT also returns success when a restart lost its in-memory mapping.
+            # Preserve the durable identity until an independent read proves absence.
+            remaining_root = await c.invoke("git:getRoot", {"cwd": wt["worktreePath"]})
+            if remaining_root is not None:
+                raise WriteRefused("unsent start's worktree rollback absence was not confirmed")
             registry.update(host, sid, cwd=folder, worktree_path=None, branch=None,
                             worktree_rolled_back=True, rolled_back_worktree_path=wt.get("worktreePath"),
                             rolled_back_branch=wt.get("branchName"))
