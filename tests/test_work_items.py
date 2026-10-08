@@ -417,3 +417,38 @@ def test_cli_reads_the_version_and_fingerprint_it_changes_against(monkeypatch, c
     assert cli.main(["item", "link", item["work_item_id"], "pull_request", "o/r#5", "--remove"]) == 0
     assert calls[-1][1]["params"] == {"kind": "pull_request", "ref": "o/r#5", "remove": True}
     capsys.readouterr()
+
+
+async def test_pages_never_skip_items_that_changed_at_the_same_time(daemon):
+    d = daemon
+    pid = await project(d)
+    top = await item(d, pid, "Top")
+    kids = [await item(d, pid, f"Kid {i}", parent_id=top) for i in range(4)]
+    await act(d, PERSON, "work_item.update", {"work_item_id": top}, {"archived": True}, {"expected_version": 1})
+    await act(d, PERSON, "work_item.update", {"work_item_id": top}, {"archived": False}, {"expected_version": 2})
+    times = {get(d, w)["updated_at"] for w in [top, *kids]}
+    assert len(times) == 1  # one restore: one timestamp for the whole subtree
+    seen, cursor = [], None
+    while True:
+        page = work_items.work_items_list(d.journal.db, limit=2, cursor=cursor)
+        seen += [x["work_item_id"] for x in page["work_items"]]
+        cursor = page["next_cursor"]
+        if not cursor:
+            break
+    assert sorted(seen) == sorted([top, *kids]) and len(seen) == 5
+    for bad in ("123", "x|wi_" + "0" * 20, "1.0|nope"):
+        with pytest.raises(OperationError) as e:
+            work_items.work_items_list(d.journal.db, cursor=bad)
+        assert e.value.code == "INVALID_CURSOR"
+
+
+async def test_an_archived_projects_items_are_frozen_links_included(daemon):
+    d = daemon
+    pid = await project(d)
+    wid = await item(d, pid, "Frozen")
+    await act(d, PERSON, "work_item.link", {"work_item_id": wid}, {"kind": "pull_request", "ref": "o/r#1"})
+    await act(d, PERSON, "project.update", {"project_id": pid}, {"archived": True}, {"expected_version": 1})
+    for params in ({"kind": "pull_request", "ref": "o/r#2"}, {"kind": "pull_request", "ref": "o/r#1", "remove": True}):
+        assert refused(d, AGENT, "work_item.link", {"work_item_id": wid}, params).code == "PROJECT_ARCHIVED"
+    assert refused(d, AGENT, "work_item.update", {"work_item_id": wid}, {"title": "x"},
+                   {"expected_version": 1}).code == "PROJECT_ARCHIVED"

@@ -85,7 +85,7 @@ Dashboard 的工作詳情可以從已連結的 checkpoint 直接派工：指示�
 |---|---|
 | `GET /api/v1/projects`（`include_archived`） | 專案樹（顯示順序）與各專案的項目統計 |
 | `GET /api/v1/projects/{prj}` | 一個專案、它的路徑、子專案與工作項目樹 |
-| `GET /api/v1/work-items`（`project_id`、`state`、`pending`、`include_archived`、`limit`、`before`） | 跨專案，最近修改的在前；`pending=true` 是等人決定的項目 |
+| `GET /api/v1/work-items`（`project_id`、`state`、`pending`、`include_archived`、`limit`、`cursor`） | 跨專案，最近修改的在前；`pending=true` 是等人決定的項目。下一頁帶上回應的 `next_cursor`（修改時間加 ID：整棵封存或復原的項目時間相同） |
 | `GET /api/v1/work-items/{wi}` | 一個項目、完成狀態（`completion`）、路徑、子項目、分支、連結與最近 50 筆紀錄 |
 | MCP | `projects_list`、`project_get`、`work_items_list`、`work_item_get`；修改用 `operation_submit` |
 | CLI | `batc project list|show|create|update`、`batc item list|show|create|update|approve|continue|link` |

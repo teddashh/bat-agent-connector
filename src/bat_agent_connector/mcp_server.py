@@ -385,11 +385,13 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         return await daemon("project_get", project_id=project_id, include_archived=include_archived)
 
     async def work_items_list(project_id: str | None = None, state: str | None = None,
-                              pending: bool | None = None, limit: int = 50) -> dict[str, Any]:
+                              pending: bool | None = None, limit: int = 50,
+                              cursor: str | None = None) -> dict[str, Any]:
         """Work items across projects, most recently changed first. state: todo, doing, waiting,
         awaiting_approval (claimed done, not yet accepted by a person) or done (accepted); pending=true lists
-        the ones waiting for a person's decision."""
-        return await daemon("work_items_list", project_id=project_id, state=state, pending=pending, limit=limit)
+        the ones waiting for a person's decision. Pass next_cursor as cursor for the next page."""
+        return await daemon("work_items_list", project_id=project_id, state=state, pending=pending, limit=limit,
+                            cursor=cursor)
 
     async def work_item_get(work_item_id: str) -> dict[str, Any]:
         """One work item: goal, the request verbatim, acceptance, steps, completion, its place in the tree, links
