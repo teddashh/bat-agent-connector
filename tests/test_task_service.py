@@ -3832,7 +3832,8 @@ async def test_reviewer_start_polls_existing_session_after_start_timeout(
                     idempotency_key="reviewer-start-retry")
     lead = "reviewer-start-lead"
     j.add_branch(task["task_id"], session_id=lead, provider="codex", role="lead", reason="start")
-    task = {**task, "session_id": lead}
+    j.change(task["task_id"], "dispatching")
+    task = j.change(task["task_id"], "accepted", fields={"session_id": lead})
     adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), j)
     lead_entry = {"session_id": lead, "workspace_id": "ws-1", "workspace_name": "demo-project",
                   "origin_cwd": "/srv/demo", "cwd": "/srv/demo", "worktree_path": "/srv/demo",
