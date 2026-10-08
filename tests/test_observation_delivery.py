@@ -186,7 +186,8 @@ async def test_b03_acknowledged_conflict_settlement_is_in_history_without_pr_tex
         settled = [e for e in events if e["body"]["source_table"] == "pr_metadata_settlements"]
         assert settled[0]["body"]["saved_snapshot"]["code"] == "PR_METADATA_CONFLICT"
         assert settled[0]["body"]["saved_snapshot"]["status"] == "conflict"
-        assert settled[0]["context"]["occurred_at_epoch"] == receipt["settled_at"]
+        # ISO timestamps have microsecond precision; the raw receipt equality above stays exact.
+        assert settled[0]["context"]["occurred_at_epoch"] == pytest.approx(receipt["settled_at"], rel=0, abs=1e-6)
         assert not any(e["kind"] == "history.backfilled" for e in journal.api_events()["events"])
     else:
         events = journal.api_events(resource_type="operation", resource_id=op["operation_id"])["events"]
