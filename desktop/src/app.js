@@ -880,7 +880,7 @@ async function viewDelivery(main) {
         pr.integration?.allowed ? integrationPanel(pr, load) : null);
     } catch (e) { if (!holdCard()) fill(card, errorBox(e)); }
   };
-  const reload = async (fromEvent = true) => { await Promise.all(environments.map(e => e.load(fromEvent))); await load(null, fromEvent); };
+  const reload = async (fromEvent = true) => { await settleRefreshes([...environments.map(e => e.load(fromEvent)), load(null, fromEvent)]); };
   await reload(false);
   return liveReload(reload, ["operation", "integration", "deployment", "deployment_environment"]);
 }
@@ -1054,18 +1054,26 @@ function deploymentRecord(dep, env, reload, compact = false) {
 function environmentCard(group) {
   const card = h("section", { class: "panel delivery-card environment-card", "data-environment": group[0].environment });
   const cursors = [null];
-  let page = 0, next = null, loading = false;
+  let page = 0, next = null, loading = false, inFlight = null;
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   async function load(fromEvent = false) {
+    // A journal invalidation arriving during pagination must join that read, then read
+    // again: the first request may have observed the environment before this event.
+    if (inFlight) { await inFlight; if (fromEvent) return load(true); return; }
     const opens = drawerOpens;
     if (editing || (fromEvent && typing())) { idleReload = () => load(true); return; }
-    if (loading) return;
     loading = true;
+    inFlight = (async () => {
     try {
+      assertView(connection);
       const query = new URLSearchParams({ recipe: group[0].name, limit: "5" });
       if (cursors[page]) query.set("cursor", cursors[page]);
-      const [environment, history] = await Promise.all([
+      const reads = await Promise.allSettled([
         api("GET", `/deployment-environments?recipe=${encodeURIComponent(group[0].name)}`),
         api("GET", `/deployment-environments/history?${query}`)]);
+      assertView(connection);
+      for (const read of reads) if (read.status === "rejected") throw read.reason;
+      const [environment, history] = reads.map(read => read.value);
       if (holdRender(fromEvent, opens) || editing) { idleReload = () => load(true); return; }
       const env = environment.environment;
       next = history.next_cursor;
@@ -1093,8 +1101,13 @@ function environmentCard(group) {
           ...(history.items.length ? history.items.map(dep => deploymentRecord(dep, env, load)) : [h("p", { class: "muted" }, t("dep_no_history"))])),
         !history.items.length && group.every(r => !r.rollback?.supported) ? h("p", { class: "muted" }, t("dep_ROLLBACK_UNSUPPORTED")) : null,
         h("div", { class: "actions deployment-pagination" }, previous, h("span", { class: "muted" }, t("dep_page", { page: page + 1 })), more));
-    } catch (e) { if (!holdRender(fromEvent, opens) && !editing) fill(card, errorBox(e)); }
-    finally { loading = false; }
+    } catch (e) {
+      if (["CONNECTION_CHANGED", "VIEW_CHANGED"].includes(e.code)) return;
+      const failure = errorBox(e); // mark the whole acknowledgment batch even under an open drawer
+      if (!holdRender(fromEvent, opens) && !editing) fill(card, failure);
+    }
+    })();
+    try { await inFlight; } finally { loading = false; inFlight = null; }
   }
   return { card, load };
 }

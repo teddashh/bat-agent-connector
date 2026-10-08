@@ -2372,8 +2372,7 @@ async function viewDelivery(main) {
 		}
 	};
 	const reload = async (fromEvent = true) => {
-		await Promise.all(environments.map((e) => e.load(fromEvent)));
-		await load(null, fromEvent);
+		await settleRefreshes([...environments.map((e) => e.load(fromEvent)), load(null, fromEvent)]);
 	};
 	await reload(false);
 	return liveReload(reload, [
@@ -2597,58 +2596,79 @@ function environmentCard(group) {
 		"data-environment": group[0].environment
 	});
 	const cursors = [null];
-	let page = 0, next = null, loading = false;
+	let page = 0, next = null, loading = false, inFlight = null;
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
 	async function load(fromEvent = false) {
+		if (inFlight) {
+			await inFlight;
+			if (fromEvent) return load(true);
+			return;
+		}
 		const opens = drawerOpens;
 		if (editing || fromEvent && typing()) {
 			idleReload = () => load(true);
 			return;
 		}
-		if (loading) return;
 		loading = true;
-		try {
-			const query = new URLSearchParams({
-				recipe: group[0].name,
-				limit: "5"
-			});
-			if (cursors[page]) query.set("cursor", cursors[page]);
-			const [environment, history] = await Promise.all([api("GET", `/deployment-environments?recipe=${encodeURIComponent(group[0].name)}`), api("GET", `/deployment-environments/history?${query}`)]);
-			if (holdRender(fromEvent, opens) || editing) {
-				idleReload = () => load(true);
-				return;
+		inFlight = (async () => {
+			try {
+				assertView(connection);
+				const query = new URLSearchParams({
+					recipe: group[0].name,
+					limit: "5"
+				});
+				if (cursors[page]) query.set("cursor", cursors[page]);
+				const reads = await Promise.allSettled([api("GET", `/deployment-environments?recipe=${encodeURIComponent(group[0].name)}`), api("GET", `/deployment-environments/history?${query}`)]);
+				assertView(connection);
+				for (const read of reads) if (read.status === "rejected") throw read.reason;
+				const [environment, history] = reads.map((read) => read.value);
+				if (holdRender(fromEvent, opens) || editing) {
+					idleReload = () => load(true);
+					return;
+				}
+				const env = environment.environment;
+				next = history.next_cursor;
+				const observed = env.observed || env.current?.evidence?.runtime?.observed;
+				const needs = env.attention || env.desired?.state === "needs_attention" || env.desired?.reconciliation_error || env.current?.state === "needs_attention" || env.current?.reconciliation_error;
+				const previous = h("button", {
+					class: "secondary",
+					disabled: page === 0,
+					"data-testid": "history-previous",
+					onclick: () => {
+						if (loading) return;
+						previous.disabled = more.disabled = true;
+						page -= 1;
+						load();
+					}
+				}, t("dep_previous"));
+				const more = h("button", {
+					class: "secondary",
+					disabled: !next,
+					"data-testid": "history-next",
+					onclick: () => {
+						if (loading) return;
+						previous.disabled = more.disabled = true;
+						cursors[++page] = next;
+						load();
+					}
+				}, t("dep_next"));
+				const verified = env.last_verified;
+				fill(card, h("div", { class: "deployment-card-heading" }, h("h2", {}, group[0].environment), needs ? chip(t("dep_attention"), "warn") : null), h("p", { class: "muted" }, group[0].repository, " · ", t("dep_generation", { generation: env.desired_generation })), needs ? h("p", { class: "note warn" }, t(env.attention === "ENVIRONMENT_VERSION_DRIFT" ? "dep_drift" : "dep_attention_help")) : null, h("div", { class: "deployment-versions" }, h("div", {}, h("h3", {}, t("dep_desired")), deploymentRecord(env.desired, env, load, true)), h("div", {}, h("h3", {}, t("dep_observed")), deploymentIdentity(observed), h("p", { class: "muted" }, t("dep_observed_at", { time: deploymentTime(observed?.observed_at || env.current?.evidence?.runtime?.checked_at) })), env.current?.evidence?.runtime?.summary ? h("p", { class: "muted" }, runtimeSummary(env.current.evidence.runtime)) : null)), h("div", { class: "deployment-last-verified" }, h("h3", {}, t("dep_last_verified")), deploymentIdentity(verified?.identity), h("p", { class: "muted" }, t("dep_verified_at", { time: deploymentTime(verified?.evidence?.runtime?.checked_at) })), verified?.evidence?.runtime?.summary ? h("p", { class: "muted" }, runtimeSummary(verified.evidence.runtime)) : null, verified ? deploymentReceipt(verified) : null), h("h3", {}, t("dep_history")), h("div", { "data-testid": "deployment-history" }, ...history.items.length ? history.items.map((dep) => deploymentRecord(dep, env, load)) : [h("p", { class: "muted" }, t("dep_no_history"))]), !history.items.length && group.every((r) => !r.rollback?.supported) ? h("p", { class: "muted" }, t("dep_ROLLBACK_UNSUPPORTED")) : null, h("div", { class: "actions deployment-pagination" }, previous, h("span", { class: "muted" }, t("dep_page", { page: page + 1 })), more));
+			} catch (e) {
+				if (["CONNECTION_CHANGED", "VIEW_CHANGED"].includes(e.code)) return;
+				const failure = errorBox(e);
+				if (!holdRender(fromEvent, opens) && !editing) fill(card, failure);
 			}
-			const env = environment.environment;
-			next = history.next_cursor;
-			const observed = env.observed || env.current?.evidence?.runtime?.observed;
-			const needs = env.attention || env.desired?.state === "needs_attention" || env.desired?.reconciliation_error || env.current?.state === "needs_attention" || env.current?.reconciliation_error;
-			const previous = h("button", {
-				class: "secondary",
-				disabled: page === 0,
-				"data-testid": "history-previous",
-				onclick: () => {
-					if (loading) return;
-					previous.disabled = more.disabled = true;
-					page -= 1;
-					load();
-				}
-			}, t("dep_previous"));
-			const more = h("button", {
-				class: "secondary",
-				disabled: !next,
-				"data-testid": "history-next",
-				onclick: () => {
-					if (loading) return;
-					previous.disabled = more.disabled = true;
-					cursors[++page] = next;
-					load();
-				}
-			}, t("dep_next"));
-			const verified = env.last_verified;
-			fill(card, h("div", { class: "deployment-card-heading" }, h("h2", {}, group[0].environment), needs ? chip(t("dep_attention"), "warn") : null), h("p", { class: "muted" }, group[0].repository, " · ", t("dep_generation", { generation: env.desired_generation })), needs ? h("p", { class: "note warn" }, t(env.attention === "ENVIRONMENT_VERSION_DRIFT" ? "dep_drift" : "dep_attention_help")) : null, h("div", { class: "deployment-versions" }, h("div", {}, h("h3", {}, t("dep_desired")), deploymentRecord(env.desired, env, load, true)), h("div", {}, h("h3", {}, t("dep_observed")), deploymentIdentity(observed), h("p", { class: "muted" }, t("dep_observed_at", { time: deploymentTime(observed?.observed_at || env.current?.evidence?.runtime?.checked_at) })), env.current?.evidence?.runtime?.summary ? h("p", { class: "muted" }, runtimeSummary(env.current.evidence.runtime)) : null)), h("div", { class: "deployment-last-verified" }, h("h3", {}, t("dep_last_verified")), deploymentIdentity(verified?.identity), h("p", { class: "muted" }, t("dep_verified_at", { time: deploymentTime(verified?.evidence?.runtime?.checked_at) })), verified?.evidence?.runtime?.summary ? h("p", { class: "muted" }, runtimeSummary(verified.evidence.runtime)) : null, verified ? deploymentReceipt(verified) : null), h("h3", {}, t("dep_history")), h("div", { "data-testid": "deployment-history" }, ...history.items.length ? history.items.map((dep) => deploymentRecord(dep, env, load)) : [h("p", { class: "muted" }, t("dep_no_history"))]), !history.items.length && group.every((r) => !r.rollback?.supported) ? h("p", { class: "muted" }, t("dep_ROLLBACK_UNSUPPORTED")) : null, h("div", { class: "actions deployment-pagination" }, previous, h("span", { class: "muted" }, t("dep_page", { page: page + 1 })), more));
-		} catch (e) {
-			if (!holdRender(fromEvent, opens) && !editing) fill(card, errorBox(e));
+		})();
+		try {
+			await inFlight;
 		} finally {
 			loading = false;
+			inFlight = null;
 		}
 	}
 	return {
