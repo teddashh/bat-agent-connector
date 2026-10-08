@@ -11,7 +11,7 @@ from bat_agent_connector import deployment_store as store
 from bat_agent_connector.operations import ActionDef, OperationError, OperationService
 from tests import test_delivery as fixtures
 from tests.test_delivery import HEAD, MERGED, TED, settle
-from tests.test_deployments import completed, source_on_main, start
+from tests.test_deployments import completed, deployed, source_on_main, start
 
 gh = fixtures.gh
 make_daemon = fixtures.make_daemon
@@ -86,7 +86,9 @@ async def test_legacy_run_blocks_alias_of_real_environment_until_provider_termin
 
 
 @pytest.mark.parametrize("legacy", [False, True], ids=["admitted", "legacy"])
-async def test_cancelled_combined_on_merge_holds_slot_through_late_push_run(make_daemon, gh, legacy):
+async def test_cancelled_combined_on_merge_holds_slot_through_late_push_run(make_daemon, gh, legacy, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(deployment, "reconcile_now", lambda: clock[0])
     from bat_agent_connector import pr_delivery
 
     d = make_daemon(mode="on_merge")
@@ -115,6 +117,7 @@ async def test_cancelled_combined_on_merge_holds_slot_through_late_push_run(make
         await start(d, key="blocked")
     assert e.value.code == "DEPLOY_IN_PROGRESS"
     run = gh.add_run(head_sha=MERGED, event="push")
+    clock[0] += 300
     await delivery.reconcile_deployments(d.ops)
     assert deployment.get(d.ops, dep_id)["run_id"] == run["id"]
     assert not deployment.get(d.ops, dep_id)["provider_terminal"]
@@ -154,3 +157,92 @@ async def test_cancelled_legacy_on_merge_requires_reviewed_head_and_ref_or_unmer
     await delivery.reconcile_deployments(d.ops)
     assert deployment.get(d.ops, dep["deployment_id"])["provider_terminal"] == (case == "closed")
     assert gh.count("GET", "/runs") == gh.count("POST", "dispatches") == gh.count("PUT", "merge-async") == 0
+
+
+async def test_reconcile_budget_skips_twenty_settled_rows_and_polls_current_once_per_cadence(make_daemon, gh, monkeypatch):
+    d = make_daemon()
+    source_on_main(gh)
+    done = await deployed(d, gh)
+    current = deployment.get(d.ops, done["result"]["deployment_id"])
+    template = dict(d.ops.db.execute("SELECT * FROM deployments WHERE deployment_id=?", (current["deployment_id"],)).fetchone())
+
+    async def obsolete(ctx):
+        return {}
+    old_ops = OperationService(d.journal, actions=[ActionDef("deployment.start", "deploy", "fixture", obsolete)])
+    for n in range(20):
+        old = old_ops.create(TED, action="deployment.start", target={"recipe": "prod"}, idempotency_key=f"history-{n}")[0]
+        d.ops.db.execute("UPDATE operations SET status='succeeded' WHERE operation_id=?", (old["operation_id"],))
+        row = {**template, "deployment_id": "dep_" + old["operation_id"][3:], "operation_id": old["operation_id"],
+               "generation": -n, "run_id": 9000 + n}
+        d.ops.db.execute("INSERT INTO deployments (" + ",".join(row) + ") VALUES(" + ",".join("?" for _ in row) + ")", tuple(row.values()))
+    before = [tuple(r) for r in d.ops.db.execute("SELECT deployment_id,version,updated_at FROM deployments ORDER BY deployment_id")]
+    env_before = dict(d.ops.db.execute("SELECT * FROM deployment_environments WHERE environment_key=?", (current["environment_key"],)).fetchone())
+    verifier = d.ops.context["deployment_verifier"]
+    calls = verifier.calls
+    gh.requests.clear()
+    clock = [1000.0]
+    monkeypatch.setattr(deployment, "reconcile_now", lambda: clock[0])
+    await delivery.reconcile_deployments(d.ops)
+    clock[0] += 10
+    fresh = OperationService(d.journal, actions=delivery.ACTIONS)
+    fresh.context.update(d.ops.context)
+    for _ in range(5):
+        await delivery.reconcile_deployments(fresh)
+    assert gh.count("GET", "/runs/") == gh.count("GET", f"/runs/{current['run_id']}$") == 1
+    assert gh.count("GET", "jobs|pending_deployments|workflows") == 0
+    assert verifier.calls - calls == 1
+    clock[0] = 1300
+    await delivery.reconcile_deployments(fresh)
+    assert gh.count("GET", "/runs/") == 2 and verifier.calls - calls == 2
+    assert [tuple(r) for r in d.ops.db.execute("SELECT deployment_id,version,updated_at FROM deployments ORDER BY deployment_id")] == before
+    assert dict(d.ops.db.execute("SELECT * FROM deployment_environments WHERE environment_key=?", (current["environment_key"],)).fetchone()) == env_before
+
+
+async def test_lost_dispatch_locate_is_throttled_across_restart_and_filters_saved_send_time(make_daemon, gh, monkeypatch):
+    d = make_daemon()
+    source_on_main(gh)
+    gh.script.append(("POST", "/dispatches$", 500, {}, {}))
+    op = await start(d)
+    waiting = await settle(d, op["operation_id"])
+    assert waiting["status"] == "needs_attention"
+    d.ops.cancel(TED, op["operation_id"])
+    dep = store.deployment(d.ops.db, operation_id=op["operation_id"])
+    assert dep["dispatch_sent_at"] and not dep["run_id"]
+    for _ in range(250):
+        run = gh.add_run(title="older")
+        run["created_at"] = "2020-01-01T00:00:00Z"
+    gh.requests.clear()
+    clock = [1000.0]
+    monkeypatch.setattr(deployment, "reconcile_now", lambda: clock[0])
+    await delivery.reconcile_deployments(d.ops)
+    version = deployment.get(d.ops, dep["deployment_id"])["version"]
+    clock[0] += 10
+    fresh = OperationService(d.journal, actions=delivery.ACTIONS)
+    fresh.context.update(d.ops.context)
+    await delivery.reconcile_deployments(fresh)
+    assert gh.count("GET", "workflows/.*/runs") == 1
+    assert "created=%3E%3D" in gh.requests[0][1]
+    assert deployment.get(d.ops, dep["deployment_id"])["version"] == version
+    run = gh.add_run(head_sha=MERGED, title=op["operation_id"])
+    clock[0] = 1300
+    await delivery.reconcile_deployments(fresh)
+    assert deployment.get(d.ops, dep["deployment_id"])["run_id"] == run["id"]
+    assert gh.count("POST", "dispatches") == gh.count("PUT", "merge-async") == 0
+
+
+async def test_locate_refuses_github_truncated_filtered_search(make_daemon, gh):
+    from bat_agent_connector.operations import NeedsAttention
+
+    d = make_daemon()
+    source_on_main(gh)
+    op = await start(d)
+    waiting = await settle(d, op["operation_id"], rounds=1)
+    dep = deployment.get(d.ops, waiting["external_refs"]["deployment_id"])
+    for _ in range(1000):
+        gh.add_run(title="another operation")
+    gh.requests.clear()
+    with pytest.raises(NeedsAttention) as e:
+        await deployment.locate(d.ops, dep)
+    assert e.value.code == "DEPLOY_RUN_AMBIGUOUS"
+    assert gh.count("GET", "workflows/.*/runs") == 1
+    assert gh.count("POST", "dispatches") == 0

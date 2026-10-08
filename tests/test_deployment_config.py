@@ -167,3 +167,18 @@ def test_delivery_fresh_post_step2_journal_ends_at3_and_ddl_preserves_other_vers
     assert j.db.execute("PRAGMA user_version").fetchone()[0] == 8
     assert j.db.execute("SELECT COUNT(*) FROM deployments").fetchone()[0] == 0
     j.close()
+
+
+@pytest.mark.parametrize("interval", [59, 86401, -1, True, "300", float("nan"), float("inf")])
+def test_deployment_reconcile_cadence_has_a_minimum_and_finite_bound(interval):
+    data = recipe_config()
+    data["github"]["deployment_reconcile_interval_s"] = interval
+    with pytest.raises(ConfigError, match="deployment_reconcile_interval_s"):
+        parse_config(data)
+
+
+def test_deployment_reconcile_cadence_default_and_override():
+    data = recipe_config()
+    assert parse_config(data).github.deployment_reconcile_interval_s == 300
+    data["github"]["deployment_reconcile_interval_s"] = 60
+    assert parse_config(data).github.deployment_reconcile_interval_s == 60

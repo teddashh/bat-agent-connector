@@ -45,6 +45,9 @@ def schema(journal) -> None:
             ON deployments(recipe,created_at DESC,deployment_id DESC)""")
         journal.db.execute("""CREATE INDEX IF NOT EXISTS deployments_provider
             ON deployments(provider_terminal,updated_at)""")
+        journal.db.execute("""CREATE TABLE IF NOT EXISTS deployment_reconcile_reads (
+            read_key TEXT PRIMARY KEY, checked_at REAL NOT NULL
+        )""")
 
 
 def deployment(db, *, deployment_id=None, operation_id=None) -> dict | None:

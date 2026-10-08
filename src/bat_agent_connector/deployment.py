@@ -7,7 +7,7 @@ import math
 import re
 import time
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 from . import deployment_store as store
@@ -342,12 +342,23 @@ async def background_read(coro):
 async def locate(ops, dep, ctx=None):
     gh, s = gh_for(ops, dep), dep["recipe_snapshot"]
     dispatch_mode = s["mode"] == "workflow_dispatch"
+    sent_at = dep.get("dispatch_sent_at") if dispatch_mode else None
+    if not sent_at:
+        step = ops.db.execute("SELECT min(started_at) FROM operation_steps WHERE operation_id=? AND name=?",
+                              (dep["operation_id"], "deploy.dispatch" if dispatch_mode else "merge.submit")).fetchone()
+        sent_at = step[0]
+    # Standalone on_merge may adopt an older push run: never filter it by admission time.
+    filters = {"created": ">=" + datetime.fromtimestamp(max(0, int(sent_at) - 1), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")} if sent_at else {}
     matches = []
-    for page in range(1, 10001):
+    # GitHub caps a filtered workflow-run search at 1,000 results. Do not accept a truncated search.
+    for page in range(1, 12):
         call = gh.runs(s["repository"], s["workflow"], branch=s["ref"],
                        head_sha=None if dispatch_mode else dep["identity"]["source_sha"], page=page, per_page=100,
+                       **filters,
                        event="workflow_dispatch" if dispatch_mode else "push")
         body = await read(ctx, call, "locate deployment run") if ctx else await background_read(call)
+        if body.get("total_count", 0) > 1000:
+            raise NeedsAttention("DEPLOY_RUN_AMBIGUOUS", "filtered run search exceeds GitHub's 1,000-result limit")
         runs = body.get("workflow_runs") or []
         matches.extend(r for r in runs if run_matches(r, dep, token=dispatch_mode))
         if len(runs) < 100:
@@ -407,7 +418,8 @@ async def dispatch(ctx, dep):
               "artifact_id": str(dep["identity"].get("artifact_id", "")), "artifact_digest": dep["identity"].get("artifact_digest", "")}
     inputs = {k: values[v] for k, v in s["inputs"]}
     async def send():
-        store.update(ctx.service.journal, dep["deployment_id"], state="uncertain", facts={"dispatch_sent": True, "provider_kind": "run"})
+        store.update(ctx.service.journal, dep["deployment_id"], state="uncertain",
+                     facts={"dispatch_sent": True, "provider_kind": "run", "dispatch_sent_at": dep.get("dispatch_sent_at") or time.time()})
         status, body = await gh.dispatch(s["repository"], s["workflow"], s["ref"], inputs)
         if status == 429:
             delay = retry_after(body.get("retry_after", "30"))
@@ -433,11 +445,12 @@ async def dispatch(ctx, dep):
     return result.get("run_id")
 
 
-async def observe(ops, dep, ctx=None):
+async def observe(ops, dep, ctx=None, *, run=None):
     gh, s = gh_for(ops, dep), dep["recipe_snapshot"]
     async def fetch(coro, what):
         return await read(ctx, coro, what) if ctx else await background_read(coro)
-    run = await fetch(gh.run(s["repository"], dep["run_id"]), "read the workflow run")
+    if run is None:
+        run = await fetch(gh.run(s["repository"], dep["run_id"]), "read the workflow run")
     terminal = run.get("status") == "completed"
     if not run_matches(run, dep, token=s["mode"] == "workflow_dispatch"):
         code = "RUN_VERSION_MISMATCH" if s["mode"] == "on_merge" and run.get("head_sha") != dep["identity"]["source_sha"] else "DEPLOY_RUN_AMBIGUOUS"
@@ -883,99 +896,179 @@ async def stopped_merge(ops, dep, op):
     return terminal
 
 
+def reconcile_now():
+    return time.time()
+
+
+def poll_due(ops, key):
+    """Persist the read cadence separately from evidence, including unsuccessful reads and restarts."""
+    now = reconcile_now()
+    interval = ops.context["github_config"].deployment_reconcile_interval_s
+    with store.tx(ops.journal):
+        row = ops.db.execute("SELECT checked_at FROM deployment_reconcile_reads WHERE read_key=?", (key,)).fetchone()
+        if row and now - row[0] < interval:
+            return False
+        ops.db.execute("INSERT INTO deployment_reconcile_reads VALUES(?,?) ON CONFLICT(read_key) "
+                       "DO UPDATE SET checked_at=excluded.checked_at", (key, now))
+    return True
+
+
+async def background_locate(ops, dep):
+    if not poll_due(ops, "locate:" + dep["deployment_id"]):
+        return None
+    return await locate(ops, dep)
+
+
+def attempt_attention(ops, dep, proof):
+    """An external rerun invalidates current without replacing the original saved attempt."""
+    with store.tx(ops.journal):
+        ops.db.execute("""UPDATE deployment_environments SET current_deployment_id=NULL,
+            attention=?,version=version+1,updated_at=? WHERE environment_key=? AND current_deployment_id=?""",
+            (proof["error"], time.time(), dep["environment_key"], dep["deployment_id"]))
+        if not proof.get("provider_terminal"):
+            ops.db.execute("UPDATE deployment_environments SET slot_deployment_id=?,version=version+1,updated_at=? "
+                           "WHERE environment_key=? AND slot_deployment_id IS NULL",
+                           (dep["deployment_id"], time.time(), dep["environment_key"]))
+
+
+def save_provider(ops, dep, proof):
+    if not store.update(ops.journal, dep["deployment_id"], expected_version=dep["version"],
+                        provider_terminal=proof.get("provider_terminal", dep["provider_terminal"]),
+                        run_attempt=dep["run_attempt"] or proof.get("run_attempt"), facts={"provider_evidence": proof}):
+        return None
+    if proof.get("provider_terminal"):
+        release_slot(ops, dep)
+    if proof.get("error"):
+        store.update(ops.journal, dep["deployment_id"], state="needs_attention" if proof.get("attention") else "failed",
+                     facts={"error_code": proof["error"]})
+        if proof["error"] == "DEPLOY_ATTEMPT_CHANGED":
+            attempt_attention(ops, dep, proof)
+    return get(ops, dep["deployment_id"])
+
+
+async def check_current(ops, dep, env):
+    if not poll_due(ops, "current:" + env["environment_key"] + ":" + dep["deployment_id"]):
+        return
+    s = dep["recipe_snapshot"]
+    run = await background_read(gh_for(ops, dep).run(s["repository"], dep["run_id"]))
+    if (not run_matches(run, dep, token=s["mode"] == "workflow_dispatch")
+            or run.get("run_attempt") != dep["run_attempt"] or run.get("status") != "completed"
+            or run.get("conclusion") != "success"):
+        proof = await observe(ops, dep, run=run)
+        if not proof.get("error"):
+            proof = {**proof, "error": "DEPLOY_VERSION_UNPROVEN", "attention": True}
+        if save_provider(ops, dep, proof):
+            attempt_attention(ops, dep, proof)
+        return
+    # The saved successful attempt's jobs and approvals are immutable evidence; do not page them again.
+    runtime = await runtime_check(ops, dep)
+    if runtime.get("observed"):
+        drift(ops, env, runtime["observed"])
+    prior = dep.get("runtime_evidence") or dep["evidence"]["runtime"]
+    def comparable(r):
+        return {k: v for k, v in r.items() if k != "checked_at"}
+    if comparable(runtime) != comparable(prior):
+        store.update(ops.journal, dep["deployment_id"], expected_version=dep["version"], facts={"runtime_evidence": runtime})
+        # A read started before a newer current was recorded cannot change that environment's attention.
+        with store.tx(ops.journal):
+            ops.db.execute("UPDATE deployment_environments SET observed=?,attention=?,version=version+1,updated_at=? "
+                           "WHERE environment_key=? AND version=? AND current_deployment_id=?",
+                           (store.encode({**(runtime.get("observed") or {}), "observed_at": runtime.get("checked_at", time.time())}),
+                            runtime.get("error") or ("DEPLOY_VERSION_UNPROVEN" if runtime.get("waiting") else None),
+                            time.time(), env["environment_key"], env["version"], dep["deployment_id"]))
+
+
+def settle_stopped_local(ops, dep, op):
+    """Terminal provider evidence needs no more network reads, even if the operation stopped before recording."""
+    env = store.environment(ops.db, dep["environment_key"])
+    older = dep["generation"] is not None and env["desired_deployment_id"] != dep["deployment_id"]
+    if older and dep["state"] != "superseded":
+        store.update(ops.journal, dep["deployment_id"], state="superseded")
+    elif not dep.get("recorded_result") and dep["state"] not in {"failed", "cancelled", "superseded", "unverified", "needs_attention"}:
+        store.update(ops.journal, dep["deployment_id"], state=op["status"] if op["status"] != "succeeded" else "unverified")
+    release_slot(ops, dep)
+
+
+async def reconcile_stopped(ops, dep, op):
+    if dep.get("legacy"):
+        dep = bind_legacy(ops, dep)
+        if dep.get("run_id"):
+            from .delivery import _gh
+            repository = dep["recipe_snapshot"].get("repository")
+            if repository:
+                run = await background_read(_gh(ops).run(repository, dep["run_id"]))
+                if run.get("status") == "completed":
+                    settle_legacy_run(ops, dep, run)
+            return
+        if dep.get("merge_sent"):
+            if not dep.get("on_merge_pending"):
+                if await stopped_merge(ops, dep, op):
+                    return
+                dep = get(ops, dep["deployment_id"])
+            if dep.get("on_merge_pending"):
+                run = await background_locate(ops, dep)
+                if run:
+                    store.update(ops.journal, dep["deployment_id"], run_id=run["id"])
+                    if run.get("status") == "completed":
+                        settle_legacy_run(ops, get(ops, dep["deployment_id"]), run)
+        return
+    if not dep.get("run_id"):
+        if not dep.get("dispatch_sent") and not dep.get("on_merge_pending"):
+            if merge_sent(ops, dep) and not dep.get("merged_result"):
+                if await stopped_merge(ops, dep, op):
+                    return
+                dep = get(ops, dep["deployment_id"])
+            elif op["status"] == "cancelled":
+                store.update(ops.journal, dep["deployment_id"], provider_terminal=True, state="cancelled")
+                release_slot(ops, dep)
+                return
+        if not dep.get("dispatch_sent") and not dep.get("on_merge_pending"):
+            return
+        run = await background_locate(ops, dep)
+        if not run:
+            return
+        store.update(ops.journal, dep["deployment_id"], run_id=run["id"])
+        dep = get(ops, dep["deployment_id"])
+    proof = await observe(ops, dep)
+    dep = save_provider(ops, dep, proof)
+    if not dep or proof.get("error") or not proof.get("provider_proven"):
+        return
+    env = store.environment(ops.db, dep["environment_key"])
+    runtime = await runtime_check(ops, dep)
+    if runtime.get("observed"):
+        drift(ops, env, runtime["observed"])
+    if runtime.get("error") or runtime.get("waiting"):
+        older = env["desired_deployment_id"] != dep["deployment_id"]
+        store.update(ops.journal, dep["deployment_id"], state="superseded" if older else "needs_attention",
+                     facts={"runtime_evidence": runtime})
+        return
+    if not dep.get("recorded_result"):
+        record(ops, dep, {"provider": proof, "runtime": runtime})
+
+
 async def reconcile_deployments(ops):
-    """Read provider facts only. Never resume an operation or send a dispatch/merge/cancel."""
-    rows = ops.db.execute("SELECT deployment_id FROM deployments ORDER BY created_at").fetchall()
+    """Read stopped in-flight providers and each current environment only; never send or resume writes."""
+    rows = ops.db.execute("""SELECT d.deployment_id FROM deployments d JOIN operations o USING(operation_id)
+        WHERE o.status IN ('cancelled','needs_attention','failed','succeeded') AND
+        (d.provider_terminal=0 OR EXISTS(SELECT 1 FROM deployment_environments e WHERE e.current_deployment_id=d.deployment_id)
+         OR (d.provider_terminal=1 AND json_extract(d.document,'$.recorded_result') IS NULL AND
+             (d.state NOT IN ('failed','cancelled','superseded','unverified','needs_attention') OR
+              (d.generation IS NOT NULL AND d.state IN ('cancelled','needs_attention') AND
+               EXISTS(SELECT 1 FROM deployment_environments e WHERE e.environment_key=d.environment_key
+                      AND e.desired_deployment_id!=d.deployment_id)))))
+        ORDER BY d.created_at""").fetchall()
     for row in rows:
         dep = get(ops, row[0])
         op = ops.get(dep["operation_id"])
-        # Runnable operations own their observation steps. Background reads settle stopped operations only,
-        # plus already recorded runs (attempt changes and runtime drift).
-        if op["status"] not in {"cancelled", "needs_attention", "failed", "succeeded"}:
-            continue
+        env = store.environment(ops.db, dep["environment_key"])
         try:
-            if dep.get("legacy"):
-                dep = bind_legacy(ops, dep)
-                if dep.get("run_id") and not dep["provider_terminal"]:
-                    from .delivery import _gh
-                    repository = dep["recipe_snapshot"].get("repository")
-                    if not repository:
-                        r = ops.context["github_config"].recipes.get(dep["recipe"])
-                        repository = r.repository if r else None
-                    if repository:
-                        run = await background_read(_gh(ops).run(repository, dep["run_id"]))
-                        if run.get("status") == "completed":
-                            settle_legacy_run(ops, dep, run)
-                elif dep.get("merge_sent") and not dep["provider_terminal"]:
-                    if await stopped_merge(ops, dep, op):
-                        continue
-                    dep = get(ops, dep["deployment_id"])
-                    if dep.get("on_merge_pending"):
-                        run = await locate(ops, dep)
-                        if run:
-                            store.update(ops.journal, dep["deployment_id"], run_id=run["id"])
-                            observed = await background_read(gh_for(ops, dep).run(dep["recipe_snapshot"]["repository"], run["id"]))
-                            if observed.get("status") == "completed":
-                                settle_legacy_run(ops, get(ops, dep["deployment_id"]), observed)
-                continue
-            if not dep.get("run_id"):
-                if dep.get("dispatch_sent") or dep.get("on_merge_pending"):
-                    run = await locate(ops, dep)
-                    if run:
-                        store.update(ops.journal, dep["deployment_id"], run_id=run["id"])
-                        dep = get(ops, dep["deployment_id"])
-                    else:
-                        continue
-                elif merge_sent(ops, dep) and not dep.get("merged_result"):
-                    if await stopped_merge(ops, dep, op):
-                        continue
-                    dep = get(ops, dep["deployment_id"])
-                    if not dep.get("on_merge_pending"):
-                        continue
-                    run = await locate(ops, dep)
-                    if not run:
-                        continue
-                    store.update(ops.journal, dep["deployment_id"], run_id=run["id"])
-                    dep = get(ops, dep["deployment_id"])
-                elif op["status"] == "cancelled":
-                    store.update(ops.journal, dep["deployment_id"], provider_terminal=True, state="cancelled")
-                    release_slot(ops, dep)
-                    continue
-                else:
-                    continue
-            proof = await observe(ops, dep)
-            version = dep["version"]
-            if not store.update(ops.journal, dep["deployment_id"], expected_version=version,
-                                provider_terminal=proof.get("provider_terminal", dep["provider_terminal"]),
-                                run_attempt=dep["run_attempt"] or proof.get("run_attempt"), facts={"provider_evidence": proof}):
-                continue
-            dep = get(ops, dep["deployment_id"])
-            if proof.get("provider_terminal"):
-                release_slot(ops, dep)
-            if proof.get("error"):
-                store.update(ops.journal, dep["deployment_id"], state="needs_attention" if proof.get("attention") else "failed",
-                             facts={"error_code": proof["error"]})
-                if proof["error"] == "DEPLOY_ATTEMPT_CHANGED":
-                    with store.tx(ops.journal):
-                        ops.db.execute("""UPDATE deployment_environments SET current_deployment_id=NULL,
-                            attention='DEPLOY_ATTEMPT_CHANGED',version=version+1,updated_at=?
-                            WHERE environment_key=? AND current_deployment_id=?""", (time.time(), dep["environment_key"], dep["deployment_id"]))
-                        if not proof.get("provider_terminal"):
-                            ops.db.execute("UPDATE deployment_environments SET slot_deployment_id=? WHERE environment_key=? "
-                                           "AND slot_deployment_id IS NULL", (dep["deployment_id"], dep["environment_key"]))
-                continue
-            if not proof.get("provider_proven"):
-                continue
-            env = store.environment(ops.db, dep["environment_key"])
-            runtime = await runtime_check(ops, dep)
-            if runtime.get("observed"):
-                drift(ops, env, runtime["observed"])
-            if runtime.get("error") or runtime.get("waiting"):
-                older = env["desired_deployment_id"] != dep["deployment_id"]
-                store.update(ops.journal, dep["deployment_id"], state="superseded" if older else dep["state"],
-                             facts={"runtime_evidence": runtime})
-                continue
-            if not dep.get("recorded_result"):
-                record(ops, dep, {"provider": proof, "runtime": runtime})
-        except (OperationError, NeedsAttention, GitHubAmbiguous, Wait):
+            if env["current_deployment_id"] == dep["deployment_id"]:
+                await check_current(ops, dep, env)
+            elif dep["provider_terminal"]:
+                settle_stopped_local(ops, dep, op)
+            else:
+                await reconcile_stopped(ops, dep, op)
+        except (OperationError, NeedsAttention) as exc:
+            store.update(ops.journal, dep["deployment_id"], facts={"reconciliation_error": exc.code})
+        except (GitHubAmbiguous, Wait):
             continue

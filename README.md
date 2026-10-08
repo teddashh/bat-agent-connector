@@ -184,7 +184,11 @@ Metadata edits compare the title/body digest before writing and read back afterw
 still exists. Merge checks the reviewed head/base/scope before submit and verifies the actual merged SHA; queue merges
 onto a newer base report the extra commits. Unsupported stacks and indirect merges are refused. MCP/CLI writes need
 the caller's `BATC_API_TOKEN`. See [delivery design](docs/design/delivery.md) for envelopes, errors and recovery.
-Deployment history and environment generations now bind a fixed source to a configured recipe. Read
+Deployment history and environment generations now bind a fixed source to a configured recipe.
+Under `[github]`, set `deployment_reconcile_interval_s = 300` (default 300, range 60–86400 seconds) for current run/runtime
+checks and unresolved run lookup. Settled history makes no provider/runtime reads; at the default each current
+environment costs at most 12 run reads and 12 runtime reads per hour. Stopped in-flight known runs still settle promptly.
+Read
 `batc delivery preview NAME`, then `delivery deploy NAME --sha SHA --generation N --recipe-digest DIGEST --key KEY`.
 Run success needs the saved attempt's deploy job, environment and runtime version and/or health evidence; the
 result says exactly what was checked. Recipes without `verification` disable deploys (breaking change): add
