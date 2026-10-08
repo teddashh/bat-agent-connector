@@ -55,7 +55,7 @@ Worktree 只有在 journal 或可信 registry 有明確建立 binding 時才建�
 
 Warm reuse、reviewer、failover successor 或後續 continue 指回首次建立的 slot，取得相同 ID；同 path 的新 creation intent 取得新 ID。Worktree 身分表保存這個 ID 及 binding/path/branch 證據。只有 cwd／branch 或無法證明建立 slot 時不猜 ID，不發送 rehydrate；這是觀測身分，不是 ownership grant。
 
-未被 inventory 看過但已有 command／checkpoint／run 證據的 session 也可取得詳情、關係及 history：`observation: unknown`、`has_tab: null`，並保留真實 ID。未知完整 ID 回 404；已知而 gone 的 ID 仍回 200。人工無 tab session 若從未被 BAT 可讀介面或 journal 記錄過，列入 outside scan，不能宣稱已發現。
+未被 inventory 看過但已有 command／checkpoint／run 證據的 session 也可取得詳情、關係及 history：`observation: unknown`、`has_tab: null`，並保留真實 ID。未知完整 ID 回 404；已知而 gone 的 ID 仍回 200。Registry 所知但尚未成功列舉者也保留 journal identity，未觀測的欄位維持 null。人工無 tab session 若從未被 BAT 可讀介面或 journal 記錄過，列入 outside scan，不能宣稱已發現。
 
 ### Execution 與 session 的使用區間
 
@@ -63,12 +63,12 @@ Execution 沿用 Task Service `task_id`，API 補 `execution_id = task_id`，不
 
 | Relation 欄位 | 定義 |
 |---|---|
-| `relation_id`、`execution_id`、`session_resource_id` | 一段使用關係的穩定 ID、原 task ID、資源 ID。`relation_id` 由 execution/session/role 與起始 command ID 衍生；舊資料沒有 command 才用 branch ID 作 anchor。Pending → confirmed 保持同 ID，後續取得 branch ID 只補關聯。 |
+| `relation_id`、`execution_id`、`session_resource_id` | 一段使用關係的穩定 ID、原 task ID、資源 ID。`relation_id` 由 execution/session/role 與起始 command ID 衍生；舊資料沒有 command 才用 branch ID 作 anchor。Pending → bound 保持同 ID，後續取得 branch ID 只補關聯。 |
 | `branch_id`、`role`、`reason` | 沿用 lead／reviewer 等真實角色與 `start`、`warm_reuse`、replacement／failover 原因。PM branch 沒有 BAT session 時不製造 session 列。 |
 | `follow_up_of_execution_id`、`parent_relation_id` | 只來自明確 `tasks.parent_task_id`／continuation 與 journal replacement 證據。Follow-up 的 lead 仍是 lead，以此欄標示後續工作，不因 provider 相同就推斷接續。 |
 | `start_seq`、`end_seq`、`started_at`、`ended_at` | 半開範圍 `[start_seq, end_seq)`；時間為 UTC。未證明終點為 null；不拿 task 的最新 `updated_at` 當終點。 |
 | `start_command_id`、`end_command_id`、`command_ids` | 穩定 command IDs；每 command 明確連到 relation。UUID 不作數值大小比較；範圍依 intent／binding 的 journal seq。摘要不冒充完整清單，完整 command 事實由 history 的 task command kinds 分頁閱讀。 |
-| `status`、`evidence` | `pending`（意圖）、`confirmed`（已綁定）、`closed`、`unknown`；含依據表／ID 及不完整邊界說明。關係不是資源寫入授權。 |
+| `status`、`evidence` | `pending`（意圖）、`bound`（已綁定）、`closed`；含依據表／ID 及不完整邊界說明。關係不是資源寫入授權。 |
 
 `Journal.warm_candidates`、`BatTaskAdapter.find_warm/_warm_identity/start` 與 `TaskCoordinator._start` 已有同 workstream、乾淨且 HEAD 為已驗證版本的 reuse 檢查。`commands.payload.warm_session_id`、新 task 的 `branches.reason=warm_reuse`、`task_capabilities_revoked`、`warm_base_recorded` 均已記錄；舊 task 的 branches／commands 不會被 registry owner 轉移刪掉。但目前沒有明確舊／新 execution 的完整區間及 binding event，`command_bind_session` 也沒有事件。
 
@@ -93,7 +93,7 @@ Execution 終態／明確 replacement 可關閉該已確認使用區間；不能
 | `freshness: fresh / stale` | 保留 `stale_reason`：`never_observed`、`host_unreachable`、`host_not_refreshed`、`not_enumerated`、`gone`，新增 scope／partial 原因。 | Stale 不覆寫最後已知狀態、actor 或 identity。 |
 | `provenance`、`api_access`、`isolation` | 沿用 `resource_policy`，來源、可寫能力、隔離各自呈現。 | 新 relation、人工 actor 標籤、Git author、history 完整度均不提升寫入能力。 |
 
-目前固定 BAT 的 stop 是卸載 runtime，仍可能保留 transcript／tab；只有 journal 有 stop 回執時可顯示「已證實 runtime 結束（可保留對話）」。目前 main 沒有保證覆蓋所有人工 session 的 resource 終態來源，無證據時 lifecycle 保持 unknown，不能為了填 ended 而呼叫 stop 或 resume。若後續 main 有正式 cleanup tombstone，它證明哪個實體被整理就顯示哪個 scope，不宣稱整段歷史消失。
+目前 main 沒有正式 journal stop 回執；interrupt／abort 是 turn interruption，不是 session 終止。未來 stop 若證明卸載 runtime，仍可能保留 transcript／tab，才可顯示「已證實 runtime 結束（可保留對話）」。目前 main 沒有保證覆蓋所有人工 session 的 resource 終態來源，無證據時 lifecycle 保持 unknown，不能為了填 ended 而呼叫 stop 或 resume。若後續 main 有正式 cleanup tombstone，它證明哪個實體被整理就顯示哪個 scope，不宣稱整段歷史消失。
 
 ## Discovery scope 的可見證據
 
@@ -112,7 +112,7 @@ Cheap poll 沒重讀 archive／pending 時明列 skipped，保留舊值及欄位
 
 Journal／registry 候選在失敗 poll 前已知的身分仍保留；不讀 registry 充當成功 BAT 枚舉。每台 host 的排程與退避沿用 `Inventory.loop`，慢 host 不阻擋其他 hosts。Host 從設定移除時沿用一般列表不列它的行為；journal 歷史保留，已知 ID 的純歷史讀取回 `scope_status: outside_current_config`，不呼叫已移除 host。
 
-Host reachability 沿用 `host.reachable`／`host.unreachable`，host_unreachable／host_not_refreshed／never_observed 的 session freshness 在讀取時由 host row 推導，不為每個 session 寫事件或索引 host flap。只對 session-specific 的 `not_enumerated`、`gone`、scope change 記 `session.stale`／`session.fresh`；相同 reason／觀測版本只記一次，GET 不寫事件。Daemon 停機期間不虛構 poll。
+Host reachability 沿用 `host.reachable`／`host.unreachable`，host_unreachable／host_not_refreshed／never_observed 的 session freshness 在讀取時由 host row 推導，不為每個 session 寫事件或索引 host flap。只對 session-specific 的 `not_enumerated`、`gone`、scope change 記 `session.stale`／`session.fresh`；相同 reason／觀測版本只記一次，GET 不寫事件。Daemon 停機期間不虛構 poll；host_not_refreshed 在讀取時推導，重啟不補寫每 session 的逾期事件。
 
 ## Timeline 的 journal 來源與事件種類
 
@@ -125,12 +125,12 @@ Operation intent 當下尚不知道新 session／worktree 時，其 context 保�
 | Event kind | Journal 來源／既有寫入點 | 事件固定 fields 與關聯 | 狀態 |
 |---|---|---|---|
 | `session.added` | `sessions_observed`；`Inventory._record_success` | resource、scan、first_seen、material snapshot、各欄觀測證據；只表示第一次被 Connector 看見。 | 已有；補 context |
-| `session.updated` | 同上 | before/after 或 changed fields、欄位 evidence；不因活動 timestamp 更新單獨發事件。 | 已有；補 diff/context |
+| `session.updated` | 同上 | before/after 或 changed fields、欄位 evidence；額外 field timestamps 保存於最新 observation，timeline context 取當輪已知來源；不因活動 timestamp 更新單獨發事件。 | 已有；補 diff/context |
 | `session.gone`、`session.reappeared` | `sessions_observed.missing_count/gone_at`；成功列舉交易 | misses、scan、最後 seen、原身分；重現清除 gone，不重建 ID。現有 reappear 是 `session.updated`，Phase 2 改發專用事件且不雙發。 | gone 已有；reappeared 補記 |
 | `session.stale`、`session.fresh` | 保存的 host／session freshness transition | reason、依據 scan/觀測版本、過期與記錄時間。 | 補記；GET 不產生 |
 | `host.reachable`、`host.unreachable`、`discovery.changed` | `hosts_observed`、`discovery_latest`；`_record_success/_record_failure` | host/profile、scope、完成度／redacted error；host 層事件不向 sessions fan-out。 | host 已有；scope transition 補記 |
 | `operation.accepted/running/waiting_checks/waiting_external/uncertain/needs_attention/succeeded/failed/cancelled` | `operations`；`OperationService.create/_transition` | action、from/to、error code、event actor、entry、target、當時版本與 external refs；結果中有真實 session/worktree 時追加 binding 事實。 | 已有；補 context |
-| `operation.step.started/restarted/succeeded/failed/uncertain` | `operation_steps`；既有 `_step_*` | operation ID、step name/seq、attempt、from/to、摘要或 hash、external ref、reconciled、已知來源／結果 SHA。 | 補記，不變更執行機制 |
+| `operation.step.started/restarted/succeeded/failed/uncertain` | `operation_steps`；既有 `_step_*` | operation ID、step name/seq、保存的 status、摘要或 hash、external ref、reconciled、已知來源／結果 SHA。 | 補記，不變更執行機制 |
 | `task.command_intent`、`task.command_accepted/running/settled/uncertain/rejected/cancelled`、`task.command_reconciled`、`task.failover_operator_reconciled` | `commands`、`command_reconciliations`、對應 `events`；`Journal.command/command_status/resolve_send/resolve_failover` | task/command、當時 session/relation、kind/status、message/turn refs、prompt hash；reconciliation 的 caller claim 與可驗證證據分開。 | 已有；補 context |
 | `task.command_bound`、`relation.opened/bound/closed` | `branches`、`commands`、關係區間；`add_branch/command_bind_session/change` 與已確認的 reuse/replacement 記錄點 | task、session、role、range、binding command、previous/next execution、reason。 | 補記 |
 | `task.task_branch`、`task.state`、`task.paused/resumed`、其他實際存在的 `task.*` | `events` 經 `Journal._event` 同交易投影；`tasks`、`branches`、`observed_verifications`、routing 等作證據 | 原 kind 的結構化摘要、明確 session refs 或當時有效 relation；task 的非 session 里程碑標 execution context，不宣稱每個 session 都做過該動作。 | 已有；完整列出，不受 `work_status` 最近 10 筆限制 |
@@ -152,7 +152,7 @@ Operation intent 當下尚不知道新 session／worktree 時，其 context 保�
 
 ### 固定排序與分頁
 
-Timeline 預設新到舊，`ORDER BY seq DESC`；`order=asc` 可逐筆回放。第一頁在短 SQLite read transaction 捕捉 `as_of = api_head()`，查詢只含 `seq <= as_of`。Next cursor 為 versioned opaque token，內容為 `{v, resource_type, resource_id, filter_hash, order, as_of, last_seq}`。DESC 下一頁 `seq < last_seq`，ASC 下一頁 `seq > last_seq`，一律限制 `seq <= as_of`。預設 limit 50，上限 200，非法值回 422；換 resource／kind／時間／順序不能沿用游標。`next_cursor=null` 表示這個 snapshot 讀完；回 `has_more`、`count`、`head_cursor`。
+Timeline 預設新到舊，`ORDER BY seq DESC`；`order=asc` 可逐筆回放。第一頁在 daemon 單一 journal owner 的同步讀取中捕捉 `as_of = api_head()`，查詢只含 `seq <= as_of`。Next cursor 為 versioned opaque token，內容為 `{v, f, a, k}`；f 是 resource/filters/order 的 hash，a 是 as_of，k 是 last_seq。DESC 下一頁 `seq < last_seq`，ASC 下一頁 `seq > last_seq`，一律限制 `seq <= as_of`。預設 limit 50，上限 200，非法值回 422；換 resource／kind／時間／順序不能沿用游標。`next_cursor=null` 表示這個 snapshot 讀完；回 `has_more`、`count`、`head_cursor`。
 
 `kind` 為精確種類集合，`since`／`until` 以 UTC occurred_at 篩選，但排序仍按 seq。歷史事件時間可以相同或晚補；晚補的舊事實按新 seq 顯示並標記原發生時間，不重排已讀頁面。GET 不因查詢而新增事件。
 
@@ -192,9 +192,9 @@ Operation／checkpoint／work item 新事件在現有交易中寫完整 context�
 | `GET /api/v1/sessions/{host}/{id}`（延伸） | `inventory_session`（新增） | `batc inventory session HOST SID` | 回 session、現有 started_from/work_items，新增 state、discovery、relations_summary、history_available；不為 journal-only session 呼叫 host。既有 `live=true` 明確為另外的 host 讀取，history 不支援 live。 |
 | `GET /api/v1/sessions/{host}/{id}/history` | `resource_history(resource_type="session", resource_id="host/id")` | `batc history session HOST SID` | cursor/limit/order/kind/since/until；回 resource、events、count、as_of、head_cursor、next_cursor、has_more、coverage。計畫 `/sessions/{id}/history` 的 ID 在現有 API 分成 host/id。 |
 | `GET /api/v1/sessions/{host}/{id}/relations` | `resource_relations(resource_type="session", resource_id="host/id")` | `batc relations session HOST SID` | cursor/limit、execution_id、include_closed（預設 true）；回 relations、count、as_of、next_cursor，完整 ranges／evidence。 |
-| `GET /api/v1/tasks/{task_id}/sessions`；`GET /tasks/{task_id}` 加摘要 | `resource_relations(resource_type="execution", resource_id=task_id)`；保留 `work_status` | `batc relations execution TASK` | execution_id 就是 task_id；以同 relation 服務分頁列 lead/reviewer/歷史 replacements，附 follow-up 關係與 worktree；不依最後五個 commands 充當完整列表。 |
+| `GET /api/v1/tasks/{task_id}/sessions`、`…/history`；`GET /tasks/{task_id}` 加摘要 | `resource_relations(resource_type="execution", resource_id=task_id)`；保留 `work_status` | `batc relations execution TASK` | execution_id 就是 task_id；history 同 resource_history(type=execution)，relations 以同 relation 服務分頁列 lead/reviewer/歷史 replacements，附 follow-up 關係與 worktree；不依最後五個 commands 充當完整列表。 |
 | `GET /api/v1/worktrees/{worktree_id}`、`…/history`、`…/relations` | `inventory_worktree`、`resource_history`／`resource_relations`（type=worktree） | `batc inventory worktree ID`、`batc history worktree ID`、`batc relations worktree ID` | 只讀 connector 已知 binding；history/relations 分頁與 session 相同。沒有 binding 回 404，不掃主機猜 path。 |
-| `GET /api/v1/hosts`（延伸）、`GET /api/v1/hosts/{host}/discovery` | `inventory_hosts(host, discovery=true) | `batc inventory hosts`、`batc inventory discovery HOST` | hosts 含每 configured profile 最近 scope/status/times；discovery 回最新 scan/outside_scan，近期 transitions 以 seq cursor 分頁。 |
+| `GET /api/v1/hosts`（延伸）、`GET /api/v1/hosts/{host}/discovery` | `inventory_hosts(host, discovery=true)` | `batc inventory hosts`、`batc inventory discovery HOST` | hosts 含每 configured profile 最近 scope/status/times；discovery 回最新 scan/outside_scan，近期 transitions 以 seq cursor 分頁。 |
 | `GET /api/v1/events`（延伸）；既有 `/events/stream` | `events_list` | `batc inventory events --after N` | 保留原契約；新增 related_resource 篩選與同 context。SSE 沿用全域 feed，不另建 timeline streamer。 |
 
 CLI 保留現有 `batc sessions/read/hosts` 的直接 BAT 行為，新增 `inventory/history/relations` 清楚表示中央持久讀模型。新命令 `--json` 結果與 MCP/HTTP 等價，不因 daemon 未啟動而退回實機 scan；回確切連線錯誤。MCP `inventory_sessions` 補現有 HTTP 的 order 參數，完整巡覽用 order=id。分頁 params／返回 keys 以契約測試比對，避免同名參數各入口不同意思。
@@ -230,7 +230,7 @@ Session 詳情加分頁 timeline 與 relations；工作項目、execution、oper
 
 Daemon 必須持有既有 owner lock，journal migration 完成；API observe 主體及 host 的 BAT credential 由既有配置提供。沒有 SSH alias 的 host 仍可讀 inventory/history，Git dirty 等欄位標未取得，不能為觀測要求開 write/orchestrate tier。
 
-讀 HTTP/MCP/CLI 只作 journal 的 SELECT，不寫 registry、不取得 host mutation lock、managed worktree flock 或 Git index lock。Background observation 的實際副作用只在 Connector 自己的 journal 保存 scans、最新觀測、關係投影與事件；read-only Fleet 會連線／驗證 BAT 並讀 workspace/meta/安全 state/archive。它不送 start、resume、client-resume、rehydrate、workspace save，也不執行 TaskCoordinator.tick 或 write grant。
+讀 HTTP/MCP/CLI 只作 journal 的 SELECT，不寫 registry、不取得 host mutation lock、managed worktree flock 或 Git index lock。Background observation 的實際副作用只在 Connector 自己的 journal 覆寫 latest discovery、最新觀測、關係投影與事件；read-only Fleet 會連線／驗證 BAT 並讀 workspace/meta/安全 state/archive。它不送 start、resume、client-resume、rehydrate、workspace save，也不執行 TaskCoordinator.tick 或 write grant。
 
 沿用 `service._state_safe`：Claude meta 沒有 cwd 就不讀 state；不以完整度要求繞過。不新增任何背景 Git 探測。Git 欄位只取 journal 已存的 checkpoint、step、receipt 或既有 on-demand reads；後者沿用 `checkpoints.source_state_script` 的 `git --no-optional-locks`。Outside scan 明列未背景掃描 Git 狀態；禁用 BAT `git:status` 及未驗證會刷新 index 的 worktree status 路徑。不能為補資料 stash、fetch 到人工 repo、checkout、commit、prune 或 rehydrate。讀取不到只回 unknown 與原因。
 
@@ -248,7 +248,7 @@ Reconcile 所補的是新證據與新 seq，先前 uncertain 事件留著；重�
 
 ## 預計修改檔案
 
-Phase 2 的新增 `observation.py` 只集中純 journal history／relations／event-context 查詢與投影，不取代 inventory 或 OperationService。
+Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中純 journal history／relations／event-context 查詢與投影，不取代 inventory 或 OperationService。
 
 | 檔案 | 修改 |
 |---|---|
@@ -269,19 +269,20 @@ Phase 2 的新增 `observation.py` 只集中純 journal history／relations／ev
 
 | 驗收／計畫 | 新測試名稱與必要斷言 |
 |---|---|
-| B01；§08、§11、§19 | `test_b01_same_provider_headless_and_full_pagination`：同 provider 多 ID、相同 BAT ID 不同 host、人工/managed/unknown、無 tab、journal-only／gone 都完整分頁；跨專案 history/current 關係 filters 不以最新 task 或 provider 覆蓋。 |
-| B01；§08 | `test_b01_warm_reuse_preserves_command_ranges_after_restart`：同 session 先後服務兩 tasks，各留 lead/command 範圍；registry 最新 owner 改變仍見舊 task；claim 與 journal 入帳間 crash 保留 pending，recover 不重開 session。 |
-| B01；§08、§10 | `test_b01_execution_lead_reviewer_followups_and_worktree_identity`：舊 reviewer/replacement、parent follow-up、共享 worktree 去重、同 path 新建立代別不併；完整 relations 不受 work_status 最近五命令／十事件限制。 |
-| B01、B03；§08、§11 | `test_b01_b03_resource_history_joins_facts_once`：checkpoint source/run、操作與步驟、commands、receipt 各版本、direct/indirect link/unlink 都能在對應 session/worktree 查到；同 event 多路 join 只有一列；unknown versions 不用今天的結果補舊事件。 |
-| B01、B02；§10、§11 | `test_b01_b02_history_bound_and_inventory_keyset_cursors`：相同 timestamp、超過 200 筆、多頁中間新 event／link/unlink／活動變化，history 的 as_of 不漏不重、inventory keyset 用 events 補追；cursor 綁 resource/filters/order，ASC/DESC、空尾頁、重啟、非法 limit/after、不可用 snapshot 都有確定結果。 |
-| B02；§11 | `test_b02_partial_scope_offline_and_independent_hosts`：兩台 mock hosts，一台慢或離線，另一台持續更新；保留失敗 host 的 ID、值、last_seen、stale 時間與 scope；null workspace 即使有 registry rows 也不計 miss；failed enrichment 保留欄位時間。 |
-| B02；§11 | `test_b02_discovery_authority_and_stale_transitions`：configured profile、scan methods、activity skipped、outside scan、scope change、移除 host、never scanned、逾期 timer／重啟的過期補記；transition 不重複，GET 不寫事件。 |
-| B02；§11、§19（Part B） | `test_b02_dashboard_reopen_and_sse_gap_without_duplicates`：可重跑瀏覽器測試，reopen baseline、多頁 gap catch-up、SSE 中斷／碎片／重複／重疊、token 更換、超前 cursor；最後 timeline 與 journal 相同，每個 seq 一次，filters/已載頁/草稿及 typing hold 保留。 |
-| B03；§08、§11 | `test_b03_unknown_actor_claim_and_git_author_are_separate`：null actor、自報 Ted/Hermes、local-admin 與 Git author、合法 API actor、cancel/resume 別的 actor，各有正確 basis／unknown evidence；觀測／link 不提升 manual/unknown 寫入能力。 |
-| B02、B03；§11 | `test_b02_b03_loading_tab_streaming_gone_and_ended_are_distinct`：斷線、meta null、meta timeout、no tab、starting、not streaming、gone、帶 scope 的終止證據各自呈現；無證據不說 deleted，stop runtime 不說 transcript/resource 永久刪除。 |
-| B03；§08、§11 | `test_b03_migration_backfill_is_idempotent_and_honest`：user_version=1 舊 journal、多次開啟、失敗回滾；既有 event seq 不重編、不重投影；只剩快照的 step/range/profile/actor 明列缺資料。 |
-| B01–B03；§10、§11 | `test_b01_b02_b03_observe_contracts_match_http_mcp_cli`：同 fixture 下三入口相同 keys/params/cursors/context，observe 拒絕／未知 ID／bad cursor 穩定；只有 journal 的讀取在 host 全部不可用仍成功。 |
-| B03；§06、§11 | `test_b03_observation_never_starts_resumes_rehydrates_or_locks_git`：MockBat 零 write frames、spy start/claim/rehydrate/host write lock、unsafe state 不呼叫；用 temp repo 對前後 HEAD/index/refs/files 與 lock footprint 比較，SSH runner 的 Git probes 都帶 no-optional-locks；history 連 Fleet/registry 都不讀。 |
+| B01；§08、§11、§19 | `test_b01_id_paging_complete_and_filter_changes_via_events`、`test_b01_relation_scope_and_cross_project_link_history`：205 筆 ID keyset 完整巡覽；filter changes 經 events；跨 project/work item 的 current/history 及 via 證據。 |
+| B01；§08 | `test_b01_warm_reuse_reviewer_followup_and_command_ranges`、`test_b01_pending_bind_and_snapshot_relations`、`test_b01_warm_binding_closes_reserved_intent_without_overwriting`：兩 task 共用 session 的 ranges、舊 reviewer/replacement、follow-up、pending/bound/closed、固定 revision 分頁；原 reserved intent 正確關閉。 |
+| B01；§08、§10 | `test_b01_worktree_shared_creation_identity_and_reuse`：共享 registry 建立 slot、reviewer/failover/reuse 同 ID、同 path 新 intent 不合併；使用 cleanup 共用 hash 函式。 |
+| B01、B03；§08、§11 | `test_b01_b03_checkpoint_source_run_steps_and_worktree_history`、`test_b01_b03_receipt_versions_are_fixed_at_the_writer_transition`：真實 temp Git checkpoint/run 及 steps 的多資源 timeline 去重；receipt 在既有 writer 轉換時保存各版本，不以新結果改舊事件。 |
+| B01、B02；§10、§11 | `test_b01_history_as_of_late_binding_and_invalid_cursors`：history as_of 同時限制 event/linked_at；晚 binding 不進已開 snapshot，kind/order/resource/time 游標契約。 |
+| B02；§11 | `test_b02_two_hosts_one_offline_and_scope_change`、`test_b02_null_workspace_preserves_missing_counts_even_with_registry`：另一 host 持續成功、離線保留舊值；scope 改綁不再 host I/O；移除 host 仍可讀 history；壞 workspace 不算完整列舉。 |
+| B02；§11 | `test_b02_discovery_latest_no_poll_rows_and_no_host_fanout`、`test_b02_session_specific_stale_gone_fresh_and_get_no_writes`：每 profile 一筆 latest、相同 poll 不寫事件；host flap 不 fan-out；missing/gone/reappear/fresh 與 GET 零 writes。 |
+| B02；§10、§11 | `test_b02_cursor_catchup_sse_resume_and_hidden_backfill`：分頁 gap catch-up、Last-Event-ID resume 不重複、backfill 不進 live feed、超前 cursor 422。 |
+| B02；§11、§19（Part B） | `test_b02_dashboard_reopen_and_sse_gap_without_duplicates`（待第二步）：瀏覽器 baseline/reopen、frame 碎片/重疊/去重、token 更換、filters/草稿及 typing hold；Playwright 驗證。 |
+| B03；§08、§11 | `test_b03_unknown_human_claim_is_not_api_actor_or_git_author`、`test_b03_rpc_admin_identity_is_not_claimed_human`：自報 Ted 保持 claim，RPC admin 是 local-admin；Git author 不升為 API actor。 |
+| B02、B03；§11 | `test_b03_states_unknown_no_tab_and_field_times`：meta null／失敗、無 tab、journal-only null、離線與 gone 分軸；失敗不刷新上一個 activity 時間。Main 沒有可證明 session 終止的正式 journal source，因此 lifecycle 保持 unknown，不用 gone／turn abort 推論 ended。 |
+| B03；§08、§11 | `test_b03_backfill_hidden_idempotent_and_unknown_boundaries`、`test_b03_migration_failure_rolls_back_and_restart_recovers`、`test_b03_backfilled_occurrence_time_filters_are_not_migration_time`：舊 journal 回填、全交易失敗回滾、重啟不重複、未知 range 邊界、原發生時間與隱藏 cursor。 |
+| B01–B03；§10、§11 | `test_b01_b02_b03_http_mcp_cli_contract_parity`：HTTP/實際 MCP server/CLI 經同 daemon；params、keys、cursor、context 一致；observe、404、422 契約及四個新 tools。 |
+| B03；§06、§11 | `test_b03_observation_never_starts_resumes_rehydrates_or_locks_git`：MockBat 零 write/git:status；unsafe Claude state 不呼叫，journal 讀取不讀 Fleet/registry、不寫 DB；temp repo HEAD/index/refs/files 不變且無 locks，既有 on-demand Git probe 使用 no-optional-locks。 |
 
 現有基線證據：
 
@@ -290,7 +291,7 @@ Phase 2 的新增 `observation.py` 只集中純 journal history／relations／ev
 - `tests/test_task_service.py::test_minimal_prefers_warm_session_id_and_goose_provider_order`、`test_warm_start_mismatched_ack_remains_uncertain`、`test_bat_warm_reuse_claims_only_clean_completed_service_session`、`test_warm_candidates_are_limited_to_the_same_workstream`：現有 warm reuse 行為；未證明分頁歷史 relations。
 - `tests/test_work_items.py::test_links_point_at_known_resources_and_removal_keeps_history`、`test_http_reads_and_one_operation_path`：既有 link/unlink 保留與 session reads；未證明全 timeline 的 actor/context。
 
-Phase 2 必須跑 `uv run ruff check .`、`uv run pytest -q` 全套，記精確摘要；Dashboard JS 複製成 `.mjs` 做 `node --check`，Playwright 對 zh-TW/en/390 px 驗證沒有 null/undefined/[object 文字及上述 reopen/SSE 情境。Fixtures 不含真實 host/token/session/workspace/email，不向真 host 寫入。
+Part A 必須跑 `uv run ruff check .`、`uv run pytest -q` 全套，記精確摘要。Part B 修改 Dashboard 時，JS 複製成 `.mjs` 做 `node --check`，Playwright 對 zh-TW/en/390 px 驗證沒有 null/undefined/[object 文字及上述 reopen/SSE 情境。Fixtures 不含真實 host/token/session/workspace/email，不向真 host 寫入。
 
 ## 尚未涵蓋
 

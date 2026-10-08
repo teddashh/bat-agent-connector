@@ -64,6 +64,7 @@ Metadata uncertain write 從 step.started_at 起滿 600 秒，GET 仍為 before 
 - 一列要連續兩次成功列舉都沒出現，才標 `gone`。`workspace:load` 回 null 或格式不對時算失敗，不當成空清單。
 - 一次輪詢沒觀測到的欄位沿用上次的值：讀 meta 失敗的 session 保留上一列；這次沒重讀 state（`auto` 只在 session 執行中才讀）時保留上次的 pending；活動時間只會往後。
 - 每台主機各自排程輪詢，慢的主機不會拖住其他主機。已從設定移除的主機不出現在列表。
+- Host stale 在讀取時推導，不向 sessions 發送 host flap 事件；只有 session-specific 缺席／gone／scope change 記 stale/fresh。
 - `last_activity` 以外的欄位有實質變化時，才寫 `session.added`／`session.updated`／`session.gone` 事件。
 - `order=activity` 的分頁鍵是活動時間；翻頁期間活動時間變動的列可能重複或漏掉，要完整清單用 `order=id`。
 - `GET /api/v1/sessions` 用 keyset 分頁（`order=activity` 或 `id`）。游標綁定篩選條件；第一頁回 `as_of`（當下事件游標），之後以 `/api/v1/events?after=as_of` 追變化，不必反覆重列。
@@ -82,6 +83,7 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 
 `api_events` 是單一、持久、單調的游標，涵蓋 task、operation、session、host。Task 事件在同一個交易中寫入 `events` 與 `api_events`；舊 journal 開啟時以 `PRAGMA user_version` 一次性回填。`work_events`（Hermes 的里程碑 feed）與 webhook 推播仍用原本的 `events.event_id`，不受影響。
 
+- 所有事件增加 provenance context；`history.backfilled` 預設不進 events／SSE，明確 `kind=history.backfilled` 才顯示，next_cursor 仍跨過隱藏 seq。`related_resource_type/id` 查資源索引，原 `resource_type/id` 仍是直接主體。完整契約見 [observation.md](observation.md)。
 - `GET /api/v1/events?after=N&limit=M` → `{events, next_cursor, head_cursor, has_more}`。
 - `GET /api/v1/events/stream`：SSE，支援 `Last-Event-ID`，15 秒 keepalive，最多 16 條同時連線（每個 actor 最多 8 條），單條最長 30 分鐘。串流每 5 秒重新驗一次 token，撤銷或過期後就結束。瀏覽器 `EventSource` 不能帶 Authorization，Dashboard 以 `fetch` 讀串流。
 
@@ -91,9 +93,13 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 |---|---|---|
 | `GET /api/v1/version` | 無 | connector、api_version、contract_version |
 | `GET /api/v1/capabilities` | observe | actor、scopes、主機 tiers、actions 與是否允許 |
-| `GET /api/v1/hosts` | observe | 主機可達性與 stale |
-| `GET /api/v1/sessions` | observe | 分頁目錄；`host`、`provenance`、`access`、`attention`、`include_gone`、`order`、`cursor`、`limit` |
+| `GET /api/v1/hosts` | observe | 主機可達性、stale、最近 discovery；host/discovery/after/limit 可讀 scope |
+| `GET /api/v1/hosts/{host}/discovery` | observe | 每 profile 最新 scope、authority、outside_scan 及 discovery.changed 事件分頁 |
+| `GET /api/v1/sessions` | observe | Keyset；host/provenance/access/attention/include_gone/order/cursor/limit，加 profile_id/project_id（可多值）/work_item_id/execution_id/provider/has_tab/loaded/streaming/lifecycle/stale/relation_scope（current/history） |
 | `GET /api/v1/sessions/{host}/{id}` | observe | 一列與連到它的工作項目；`live=true` 另附即時資源政策判定 |
+| `GET /api/v1/sessions/{host}/{id}/history`、`…/relations` | observe | Journal-only 分頁 timeline／使用區間；history 固定 as_of、actor evidence、版本 |
+| `GET /api/v1/worktrees/{wt_id}`、`…/history`、`…/relations` | observe | 只讀已知 creation intent 身分；不掃主機／Git，沒有 ownership grant |
+| `GET /api/v1/tasks/{task_id}/sessions`、`…/history` | observe | Execution 的 lead/reviewer/follow-up 關係分頁；不以最新 session pointer 取代歷史 |
 | `GET /api/v1/sessions/{host}/{id}/messages` | observe | 經 read-only fleet 讀對話 |
 | `GET /api/v1/policy` | observe | mutation 清單與各主機設定 |
 | `GET/POST /api/v1/operations` | observe／依 action | 列表；建立（`Idempotency-Key` 標頭或 `idempotency_key`，`?wait=0-60` 秒，格式錯誤時在保存前回 422） |
@@ -109,6 +115,8 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 | `GET /api/v1/work-items`、`/work-items/{wi_id}` | observe | 跨專案的工作項目（`pending=true`：等人決定）；一個項目與它的完成狀態、連結、紀錄 |
 
 錯誤格式為 `{"error": {"code", "message"}}`：401 未驗證、403 權限或資源唯讀（代碼同 resource-policy）、404、405、409 冪等衝突、422 參數錯誤、502 BAT 錯誤。
+
+觀測 Part A 使用同 journal 的讀服務：MCP 只新增 inventory_session、inventory_worktree、resource_history、resource_relations 四個 tools；discovery 是 inventory_hosts 的參數。CLI 為 batc inventory/history/relations。History、relations、scope 的 GET 不呼叫 host、不寫入 journal；inventory 只保存 latest rows，沒有每 poll revisions。Dashboard 的跨專案歷史、scope 卡及 reopen/SSE 去重是 [observation.md](observation.md) 的 Part B。
 
 ## 尚未涵蓋
 

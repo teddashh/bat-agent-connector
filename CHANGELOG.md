@@ -56,6 +56,15 @@
   runs before the submit step so transient read failures can resume. Verification accepts related PRs merged later
   and stops updated PR pagination at admission time.
 
+- Observation Part A ([design](docs/design/observation.md), plan §08/§10/§11/§19, W03 remainder, B01/B02 server/B03):
+  journal-only session/worktree history with a fixed sequence bound, task/session relation ranges that survive warm
+  reuse, actor and version evidence, distinct unknown/loading/tab/activity states, and latest discovery scope per
+  host/profile. Polls update bounded rows; host staleness is derived without session fan-out; migration facts stay
+  out of the default events/SSE feed while its cursor advances. Shared worktree creation IDs match cleanup's contract.
+  New HTTP routes, four MCP reads (`inventory_session`, `inventory_worktree`, `resource_history`, `resource_relations`),
+  discovery via `inventory_hosts`, and CLI `inventory/history/relations`. No background Git probing. Dashboard
+  timeline, filters, scope card and browser reconnect checks remain Part B.
+
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
   those sessions. BAT has no record of them: `batc remove-worktree` on a checkpoint session re-registered the
