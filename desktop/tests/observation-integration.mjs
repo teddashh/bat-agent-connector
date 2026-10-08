@@ -1,0 +1,56 @@
+// Generated shared UI against actual central history/relations/discovery contracts. All hosts are MockBat.
+import {spawn} from "node:child_process";
+import {createInterface} from "node:readline";
+import {resolve} from "node:path";
+import assert from "node:assert/strict";
+import {chromium, expect} from "@playwright/test";
+import {once} from "node:events";
+import {setTimeout as delay} from "node:timers/promises";
+const root = resolve("..");
+const python = process.env.BATC_OBSERVATION_PYTHON || resolve(process.platform === "win32" ? "../.venv/Scripts/python.exe" : "../.venv/bin/python");
+const child = spawn(python, [resolve("tests/observation-fixture.py")], {cwd: root,
+  env: {...process.env, PYTHONPATH: [resolve(root, "src"), root].join(process.platform === "win32" ? ";" : ":")}, stdio: ["pipe", "pipe", "inherit"]});
+const lines = createInterface({input: child.stdout})[Symbol.asyncIterator]();
+const next = async () => {const line = await lines.next(); if (line.done) throw new Error("Observation fixture stopped"); return JSON.parse(line.value);};
+const control = async action => {child.stdin.write(JSON.stringify({action}) + "\n"); return next();};
+const browser = await chromium.launch();
+try {
+  const fixture = await next(), page = await browser.newPage({locale: "en-US"});
+  const errors = []; page.on("pageerror", error => errors.push(error.message));
+  await page.addInitScript(token => sessionStorage.setItem("batc.dashboard.token", token), fixture.token);
+  await page.goto(`http://127.0.0.1:${fixture.port}/dashboard/#/session/h1/sess-claude-0001`);
+  const draft = page.locator("textarea").first(); await draft.fill("Real central draft remains");
+  const history = page.locator('[data-observation="history"]'), relations = page.locator('[data-observation="relations"]');
+  await history.locator("summary").first().click();
+  await expect(history.locator("[data-history-seq]")).toHaveCount(20);
+  const firstPage = await history.locator("[data-history-seq]").evaluateAll(rows => rows.map(row => row.dataset.historySeq));
+  await relations.locator("summary").first().click();
+  await expect(relations.getByRole("link", {name: fixture.execution_id, exact: true})).toBeVisible();
+  await control("question");
+  await expect(page.getByRole("textbox", {name: "Which fixture branch?"})).toBeVisible();
+  await expect(draft).toHaveValue("Real central draft remains");
+  await expect(history).toContainText("New journal facts are available");
+  assert.deepEqual(await history.locator("[data-history-seq]").evaluateAll(rows => rows.map(row => row.dataset.historySeq)), firstPage);
+  await history.getByRole("button", {name: "Load more"}).click();
+  await expect.poll(() => history.locator("[data-history-seq]").count()).toBeGreaterThan(20);
+  const seqs = await history.locator("[data-history-seq]").evaluateAll(rows => rows.map(row => Number(row.dataset.historySeq)));
+  assert.equal(new Set(seqs).size, seqs.length);
+  assert.deepEqual(seqs, [...seqs].sort((a, b) => b - a));
+  await history.getByRole("link", {name: fixture.worktree_id, exact: true}).first().click();
+  await expect(page.getByRole("heading", {name: "Worktree", exact: true})).toBeVisible();
+  await page.locator('[data-observation="relations"] > summary').click();
+  await expect(page.getByRole("link", {name: fixture.execution_id, exact: true})).toBeVisible();
+  await page.getByRole("link", {name: fixture.execution_id, exact: true}).click();
+  await expect(page.getByRole("heading", {name: "Execution", exact: true})).toBeVisible();
+  await page.locator('[data-observation="relations"] > summary').click();
+  await expect(page.getByRole("link", {name: "h1/sess-claude-0001", exact: true})).toBeVisible();
+  await page.getByRole("link", {name: "h1/sess-claude-0001", exact: true}).click();
+  await page.getByRole("link", {name: "h1", exact: true}).click();
+  await expect(page.getByRole("heading", {name: "h1 · Discovery coverage"})).toBeVisible();
+  await expect(page.getByText("Outside this scan", {exact: true})).toBeVisible();
+  assert.deepEqual(errors, []);
+  console.log("Actual central + shared UI: pending controls, fixed history pagination, execution/worktree relations and discovery passed");
+} finally {
+  await browser.close(); child.stdin.end(JSON.stringify({action: "stop"}) + "\n");
+  await Promise.race([once(child, "exit"), delay(3000, undefined, {ref: false}).then(() => child.kill())]);
+}
