@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Delivery operations no longer end as `failed` while GitHub is still merging or deploying (#32). A refused GitHub
+  read after a merge request or dispatch was sent (an expired token's 401, a 403, a 404) now waits for a person
+  (`needs_attention`) and keeps the recipe's deploy lock; before any write it still fails. A rate-limited read (403),
+  a reply cut short or an unreadable body counts as no answer, and an unanswered run lookup after a 204 dispatch
+  keeps looking. The GitHub token is resolved for every request, so a rotated or expiring token works without a restart.
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
   those sessions. BAT has no record of them: `batc remove-worktree` on a checkpoint session re-registered the
