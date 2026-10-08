@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Delivery metadata conflict settlement ([design](docs/design/delivery.md), plan §09/§10/§15, C07): an unresolved
+  cancelled or UNCERTAIN_UNRESOLVED metadata write that still shows a third value after ten minutes now saves a
+  conflict receipt and before/intended/observed refs. This releases the PR for a fresh-digest update and stops
+  background reads without another PATCH or undo; resuming the original operation retains PR_METADATA_CONFLICT.
+
 - Delivery native-stack verification ([design](docs/design/delivery.md), plan §09/§16, C05): a native stack
   created after the final scope check now stops merge verification even when its other members remain open.
   The merge receipt keeps every member's current state, head SHA and base ref; combined delivery does not dispatch.

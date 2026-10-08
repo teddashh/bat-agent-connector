@@ -189,7 +189,10 @@ Write reconcile／重啟：after 是正向證據，`observed_intent=true`，不�
 | PATCH 後 readback／uncertain write reconcile 被拒（401／403／404） | GITHUB_401／403／404、needs_attention；不固化成 failed write／verify step，修復 token／權限後 resume。Plan 與 PATCH 前讀取被拒仍 failed、zero PATCH，即使已有 readonly plan／write intent |
 | before，step 開始未滿 600 秒 | 保留 uncertain／PR_UPDATE_IN_PROGRESS，等原請求讀回；取消不釋放 |
 | before，step 開始已滿 600 秒 | 客戶端 timeout 早已結束；delivery 自己的 `pr_metadata_settlements` 保存 `not_applied`／`PR_METADATA_NOT_APPLIED`／observed／時間，釋放 PR，之後不再週期 GET 此 row；不改另一操作的 steps／refs |
+| 第三種內容，unresolved step 開始未滿 600 秒 | 保留 uncertain／PR_UPDATE_IN_PROGRESS；不 PATCH、不 undo，等 settle window 結束 |
+| 第三種內容，unresolved step 開始已滿 600 秒 | 沿用 not_applied 的 timeout／settle 界線，先保存 metadata_reconciliation=PR_METADATA_CONFLICT／metadata_difference=before、intended、observed／verification_pending=false refs，再於 pr_metadata_settlements 保存 status=conflict、code=PR_METADATA_CONFLICT、observed、settled_at。Receipt 釋放 admission lock 並停止背景 GET；step 不冒充 applied，不 PATCH／undo，新操作仍需 fresh digest |
 | 已保存 not_applied 的非取消操作 reconcile／resume | 只讀保存結論，step 不再 PATCH；handler 以 PR_METADATA_NOT_APPLIED 明確 failed。原 UNCERTAIN_UNRESOLVED 操作保留 needs_attention，直到 caller resume；cancelled 仍 cancelled，不自動恢復 |
+| 已保存 conflict 的非取消操作 reconcile／resume | 只讀保存結論，不再查 GitHub 或 PATCH；handler 為 PR_METADATA_CONFLICT／needs_attention，不能誤報 not_applied。原 UNCERTAIN_UNRESOLVED audit 保留至 resume；cancelled 仍 cancelled，新的 fresh-digest update 已可受理 |
 | settlement 後舊寫入非常晚才落地 | 每個新操作仍在 plan 與 PATCH 前比較新 digest／整對 metadata，差異為 PR_METADATA_CHANGED、zero 新 PATCH；不偷偷覆蓋。仍受下段 GitHub 無 CAS 的最後讀寫窗口限制 |
 
 Journal 保存必要的 before／intended／observed；沿用 api_events 的 action／target／狀態／錯誤摘要，不複製 body；完整內容在 operation／steps 與必要 settlement receipt。
@@ -415,6 +418,8 @@ Review follow-up 的新增回歸：
 Issue #32 low item：`test_merge_async_400_reads_pr_before_failing`（open／closed／reviewed head 已 merged／其他 head 已 merged，GET 必在 PUT 後；不 bypass verify／零第二 PUT）；`test_merge_async_400_readback_refusal_remains_resumable`（401／403／404、修復後正常驗證、不重送）。對應 C04／C05、計畫 §16。
 
 PR #34 Codex review：`test_c05_stack_created_after_final_check_needs_attention_and_never_dispatches`（PUT 時才建立 native stack；open 上層與獨立 merged 成員皆保留完整 receipt／needs_attention，單一 PUT、zero POST）。對應 C05、計畫 §09／§16。
+
+Metadata：`test_unresolved_metadata_write_third_value_settles_as_conflict_after_window`（cancelled／UNCERTAIN_UNRESOLVED；600 秒前仍拒絕新 edit，之後 conflict receipt／refs、新 digest admission、停止背景 GET；resume 沿用 conflict、總共一 PATCH、不 undo）。對應 C07、計畫 §09／§10／§15。
 
 以下均為 Part B（第二步）規劃，尚未聲稱完成：
 

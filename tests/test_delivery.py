@@ -1052,6 +1052,59 @@ async def test_metadata_lost_before_write_settles_not_applied_after_window(make_
     assert gh.count("PATCH", ".") == 1
 
 
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_unresolved_metadata_write_third_value_settles_as_conflict_after_window(make_daemon, gh, cancelled):
+    """C07, plan §09/§10/§15: third-value settlement releases admission without another PATCH or undo."""
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    gh.patch_mode = "lost_before"
+    op = await update_op(d)
+    unknown = await settle(d, op["operation_id"])
+    assert unknown["status"] == "needs_attention" and unknown["error_code"] == "UNCERTAIN_UNRESOLVED"
+    if cancelled:
+        d.ops.cancel(TED, op["operation_id"])
+    third = {"title": "Another editor's title", "body": "Another editor's body"}
+    gh.pulls[7].update(third)
+    await pr_delivery.reconcile_metadata(d.ops)
+    assert pr_delivery.metadata_settlement(d.ops, op["operation_id"]) is None
+    with pytest.raises(OperationError) as e:
+        await update_op(d, key="before-conflict-window")
+    assert e.value.code == "PR_UPDATE_IN_PROGRESS"
+    d.ops.db.execute("UPDATE operation_steps SET started_at=? WHERE operation_id=? AND name='pr.metadata.write'",
+                     (pr_delivery.time.time() - pr_delivery.METADATA_SETTLE_S - 1, op["operation_id"]))
+    settling_at = pr_delivery.time.time()
+    await pr_delivery.reconcile_metadata(d.ops)
+    receipt = pr_delivery.metadata_settlement(d.ops, op["operation_id"])
+    assert receipt["status"] == "conflict" and receipt["code"] == "PR_METADATA_CONFLICT"
+    assert receipt["observed"] == third
+    assert settling_at <= receipt["settled_at"] <= pr_delivery.time.time()
+    saved = d.ops.get(op["operation_id"])
+    refs = saved["external_refs"]
+    assert refs["metadata_reconciliation"] == "PR_METADATA_CONFLICT" and refs["verification_pending"] is False
+    assert refs["metadata_difference"]["observed"] == third
+    assert refs["metadata_difference"]["before"] == {"title": "PR 7", "body": ""}
+    assert refs["metadata_difference"]["after"] == {"title": "Reviewed title", "body": ""}
+    assert saved["steps"][-1]["status"] == "uncertain"
+    reads = gh.count("GET", r"/pulls/7(?:\?|$)")
+    await pr_delivery.reconcile_metadata(d.ops)
+    await pr_delivery.reconcile_metadata(d.ops)
+    assert gh.count("GET", r"/pulls/7(?:\?|$)") == reads
+    fresh = await update_op(d, key="after-conflict-window")
+    assert fresh["status"] == "accepted"
+    assert fresh["preconditions"]["expected_metadata_digest"] == pr_delivery.digest(third)
+    d.ops.cancel(TED, fresh["operation_id"])
+    if not cancelled:
+        reads = gh.count("GET", r"/pulls/7(?:\?|$)")
+        d.ops.resume(TED, op["operation_id"])
+        held = await settle(d, op["operation_id"])
+        assert held["status"] == "needs_attention" and held["error_code"] == "PR_METADATA_CONFLICT"
+        assert held["external_refs"]["metadata_reconciliation"] == "PR_METADATA_CONFLICT"
+        assert gh.count("GET", r"/pulls/7(?:\?|$)") == reads
+    else:
+        assert d.ops.get(op["operation_id"])["status"] == "cancelled"
+    assert pr_delivery.metadata(gh.pulls[7]) == third and gh.count("PATCH", ".") == 1
+
+
 async def test_metadata_late_landing_after_settlement_is_caught_by_digest(make_daemon, gh):
     d = make_daemon()
     gh.add_pr(7, HEAD)
