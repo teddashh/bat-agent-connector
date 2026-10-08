@@ -484,6 +484,8 @@ async def run_update(ctx):
     async def reconcile(_):
         settled = metadata_settlement(ctx.service, ctx.operation_id)
         if settled:
+            if settled["status"] == "conflict":
+                return {"conflict_after_write": True, "observed": settled["observed"]}
             return {"not_applied": settled}
         status, pr = await gh.pull(repository, number)
         _read_result(status, pr, "read back uncertain PR metadata", ctx)
@@ -572,7 +574,14 @@ async def reconcile_metadata(ops):
                                                  "metadata_difference": {**p, "observed": observed}})
         elif unresolved and observed == p["before"]:
             settle_not_applied(ops, row["operation_id"], row["started_at"], observed)
-        elif not unresolved:
+        elif not unresolved or time.time() - row["started_at"] >= METADATA_SETTLE_S:
             ops._merge_refs(row["operation_id"], {"verification_pending": False,
                                                  "metadata_reconciliation": "PR_METADATA_CONFLICT",
                                                  "metadata_difference": {**p, "observed": observed}})
+            if unresolved:
+                receipt = {"status": "conflict", "code": "PR_METADATA_CONFLICT", "observed": observed,
+                           "settled_at": time.time()}
+                # Record refs first so a restart cannot skip them once the settlement excludes this row.
+                with ops.journal.tx():
+                    ops.db.execute("INSERT OR IGNORE INTO pr_metadata_settlements VALUES (?,?)",
+                                   (row["operation_id"], json.dumps(receipt)))
