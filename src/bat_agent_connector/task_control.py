@@ -110,6 +110,34 @@ def check_incarnation(journal, task):
     return current
 
 
+def start_guard(journal, task, session_id, role):
+    """Bind a pre-ACK start to its original incarnation and durable command, when present.
+
+    The task's current session binding changes only after ACK, so runtime FrameGuard
+    cannot guard starts. Older internal adapter callers may lack a command; the
+    coordinator always supplies one, and recovery must keep that original intent.
+    """
+    command = next((c for c in journal.commands(task["task_id"])
+                    if c["kind"] == "start_" + role and c["session_id"] == session_id), None)
+
+    def guard():
+        current = check_incarnation(journal, task)
+        if command:
+            row = journal.command_get(command["command_id"])
+            payload = json.loads(row["payload"])
+            if (row["kind"] != "start_" + role or row["task_id"] != task["task_id"]
+                    or row["session_id"] != session_id
+                    or row["status"] not in {"intent", "needs_review", "uncertain", "rejected"}):
+                raise TaskControlRefused("TASK_COMMAND_PENDING", "start intent is no longer dispatchable")
+            if payload.get("control_version", task["control_version"]) != current["control_version"]:
+                raise TaskControlRefused("CONTROL_VERSION_CONFLICT", "start belongs to an earlier task version")
+        owner = registry.get(task["host"], session_id)
+        if owner and (owner.get("task_id") != task["task_id"] or owner.get("role") != role):
+            raise TaskControlRefused("TASK_BINDING_MISMATCH", "reserved start ownership changed")
+
+    return guard
+
+
 def owner_task(fleet, host, sid):
     owner = registry.get(host, sid) or {}
     if owner.get("task_id"):

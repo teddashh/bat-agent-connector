@@ -301,7 +301,8 @@ class BatClient:
         await self.close()
 
     # ------------------------------------------------------------------ requests
-    async def _roundtrip(self, frame: dict, timeout: float) -> dict:
+    async def _roundtrip(self, frame: dict, timeout: float,
+                         on_transport: Callable[[], None] | None = None) -> dict:
         if not self.connected:
             raise ConnectionLost(f"{self.host.name}: not connected")
         mid = frame["id"]
@@ -309,7 +310,10 @@ class BatClient:
         self._pending[mid] = fut
         try:
             assert self._ws is not None
-            await self._ws.send(json.dumps(frame))
+            encoded = json.dumps(frame)
+            if on_transport:
+                on_transport()  # No await between this durable fence and handing the frame to websocket send.
+            await self._ws.send(encoded)
             return await asyncio.wait_for(fut, timeout)
         except asyncio.TimeoutError:
             raise InvokeTimeout(
@@ -348,6 +352,7 @@ class BatClient:
                      before_send: Callable[[], None] | None = None,
                      before_frame: Callable[[], Awaitable[None]] | None = None,
                      frame_guard: Callable[[dict], None] | None = None,
+                     on_transport: Callable[[], None] | None = None,
                      grant: WriteGrant | None = None) -> Any:
         """Invoke an allow-listed channel. Raises ChannelNotAllowed before sending anything otherwise.
 
@@ -360,13 +365,14 @@ class BatClient:
         return await self._invoke_checked(canonical, params, timeout,
                                           retry_on_disconnect=retry_on_disconnect,
                                           before_send=before_send, before_frame=before_frame,
-                                          frame_guard=frame_guard)
+                                          frame_guard=frame_guard, on_transport=on_transport)
 
     async def _invoke_checked(self, canonical: str, params: dict | None, timeout: float | None,
                               *, retry_on_disconnect: bool = False,
                               before_send: Callable[[], None] | None = None,
                               before_frame: Callable[[], Awaitable[None]] | None = None,
-                              frame_guard: Callable[[dict], None] | None = None) -> Any:
+                              frame_guard: Callable[[dict], None] | None = None,
+                              on_transport: Callable[[], None] | None = None) -> Any:
         write = is_write(canonical)
         timeout = timeout or timeout_for(canonical)
         attempts = 1 if write and (canonical != "claude:send-message" or not retry_on_disconnect) else 3
@@ -387,7 +393,7 @@ class BatClient:
                         before_send()
                     if frame_guard:
                         frame_guard(frame)
-                    reply = await self._roundtrip(frame, timeout)
+                    reply = await self._roundtrip(frame, timeout, on_transport=on_transport)
                 self.last_used = time.monotonic()
                 if reply.get("type") == "invoke-error":
                     err = redact(reply.get("error"))

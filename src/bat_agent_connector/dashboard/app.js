@@ -139,9 +139,54 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 function debounce(fn, ms) { let id; return () => { clearTimeout(id); id = setTimeout(fn, ms); }; }
 
 // ------------------------------------------------------------------ shared pieces
+function confinementLabel(s) {
+  const level = s.confinement?.level || "none";
+  return t(level === "os_sandbox" && s.confinement?.verification?.status !== "verified"
+    ? "confinement_os_pending" : "confinement_" + level);
+}
+function confinementNote(host, agent) {
+  const note = h("p", { class: "muted", "data-confinement-note": "" });
+  const update = () => {
+    const account = state.caps?.hosts?.find(x => x.host === host)?.confinement?.host_account;
+    const effect = account?.start_effect;
+    if (effect === "refused") {
+      note.textContent = t("confinement_account_blocked", { reason: account.reason });
+      if (agent.value === "codex") note.textContent += " " + t("confinement_codex_note");
+    } else if (agent.value === "codex") {
+      note.textContent = t("confinement_codex_note");
+    } else if (effect === "verified") {
+      note.textContent = t("confinement_account_note");
+    } else if (effect === "recheck") {
+      note.textContent = t("confinement_account_recheck");
+    } else {
+      note.textContent = (effect === "fallback_default" && account?.declared
+        ? t("confinement_account_fallback", { reason: account.reason }) + " " : "") + t("confinement_claude_note");
+    }
+  };
+  agent.addEventListener("change", update);
+  note.setHost = value => { host = value; update(); };
+  update();
+  return note;
+}
+function confinementDetails(s) {
+  const record = s.confinement;
+  const current = s.current_verification;
+  return h("details", {}, h("summary", {}, t("confinement_evidence")),
+    h("p", { class: "muted" }, t("confined_note")),
+    h("dl", { class: "kv" },
+      h("dt", {}, t("confinement_creation")), h("dd", {}, confinementLabel(s)),
+      h("dt", {}, t("confinement_current")), h("dd", {}, t("confinement_status_" + (current?.status || "unknown"))),
+      h("dt", {}, t("confinement_options")), h("dd", {}, h("code", {}, JSON.stringify(record?.options || {}))),
+      h("dt", {}, t("confinement_evidence")), h("dd", {}, h("code", {}, JSON.stringify(record?.evidence || {}))),
+      h("dt", {}, t("confinement_gap")), h("dd", {}, record?.gap ? t("confinement_gap_" + record.gap) : t("none")),
+      h("dt", {}, t("confinement_current")), h("dd", {}, h("code", {}, JSON.stringify(current || { status: "unknown" })))));
+}
 function sessionBadges(s) {
   return [
     chip(s.host),
+    chip(confinementLabel(s), s.confinement?.level === "none" ? "readonly" : "info"),
+    s.confinement?.level && s.confinement.level !== "none" && ["unknown", "mismatch"].includes(s.current_verification?.status)
+      ? chip(t("confinement_current_" + s.current_verification.status), "stale") : null,
     s.api_access === "managed" ? chip(t("managed"), "managed") : chip(t("read_only"), "readonly"),
     s.stale ? chip(`${t("stale")} · ${t("stale_reason_" + s.stale_reason)}`, "stale") : null,
     s.pending ? chip(t("pending_" + s.pending.kind), "stale") : null,
@@ -157,7 +202,7 @@ function sessionRow(s) {
       h("a", { class: "title", href: `#/session/${encodeURIComponent(s.host)}/${encodeURIComponent(s.session_id)}` },
         s.title || s.session_id),
       h("div", { class: "muted" }, [s.workspace, s.agent_kind, s.worktree_branch].filter(Boolean).join(" · "))),
-    ...sessionBadges(s),
+    h("div", { class: "actions session-badges" }, ...sessionBadges(s)),
     h("span", { class: "muted" }, when(s.last_activity_at)));
 }
 const epoch = x => (x ? new Date(x * 1000).toISOString() : "");
@@ -256,6 +301,7 @@ async function viewSession(main, host, sid) {
       h("dt", {}, t("agent")), h("dd", {}, [row.agent_kind, row.model].filter(Boolean).join(" · ")),
       h("dt", {}, "Provenance"), h("dd", {}, t("provenance_" + row.provenance)),
       h("dt", {}, t("observed")), h("dd", {}, when(row.observed_at))));
+  head.append(confinementDetails(row));
   if (from) {
     head.append(h("p", { class: "note" }, t("started_from", { commit: from.commit_sha.slice(0, 12) }), " ",
       h("a", { href: `#/session/${encodeURIComponent(from.source_host)}/${encodeURIComponent(from.source_session_id)}` },
@@ -352,7 +398,7 @@ function checkpointPanel(host, sid) {
   const row = cp => rows.get(cp.checkpoint_id) || rows.set(cp.checkpoint_id, buildRow(cp)).get(cp.checkpoint_id);
   const buildRow = cp => {
     const instr = h("textarea", { placeholder: t("continue_placeholder") });
-    const agent = h("select", {}, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
+    const agent = h("select", { "aria-label": t("agent") }, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
     const out = h("div", { class: "muted" });
     const go = h("button", { class: "primary", onclick: async () => {
       if (!instr.value.trim()) return;
@@ -364,7 +410,7 @@ function checkpointPanel(host, sid) {
       } catch (e) { out.replaceChildren(errorBox(e)); }
       go.disabled = false;
     } }, t("start_agent_work"));
-    const form = h("div", { hidden: true }, h("p", { class: "muted" }, t("confined_note")), instr,
+    const form = h("div", { hidden: true }, confinementNote(host, agent), instr,
       h("div", { class: "actions" }, agent, go), out);
     return h("div", { class: "row" },
       h("div", { class: "grow" },
@@ -661,6 +707,32 @@ function integrationPanel(pr, reloadCard) {
   return box;
 }
 
+function repairControl(op) {
+  const conflict = ["INTEGRATION_CONFLICT", "RESOLUTION_INCOMPLETE", "RESOLUTION_INVALID"].includes(op.error_code);
+  const out = h("div", {});
+  let handoff = null;
+  let repair = null;
+  if (conflict && (state.caps?.scopes || []).includes("start")) {
+    const agent = h("select", { "aria-label": t("agent") },
+      h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
+    const go = h("button", { class: "secondary", onclick: async () => {
+      go.disabled = true;
+      try {
+        const o = await submit("integration.handoff", { operation_id: op.operation_id }, { agent: agent.value }, {},
+          `handoff.${op.operation_id}`);
+        out.append(h("p", {}, opStatus(o), " ", t("handoff_started"), " ",
+          h("a", { href: `#/op/${o.operation_id}` }, o.operation_id)));
+      } catch (e) { out.append(errorBox(e)); }
+      go.disabled = false;
+    } }, t("start_agent_work"));
+    repair = h("div", { class: "drawer", hidden: true },
+      confinementNote(op.target?.host || op.external_refs?.host, agent), h("div", { class: "actions" }, agent, go));
+    handoff = h("button", { class: "secondary", onclick: () => { repair.hidden = !repair.hidden; } }, t("hand_to_agent"));
+  }
+  if (handoff) out.append(handoff, repair);
+  return out;
+}
+
 function integrationStatus(op, act) {
   const code = op.error_code;
   const text = op.status === "succeeded"
@@ -671,17 +743,8 @@ function integrationStatus(op, act) {
         : op.status === "waiting_external" ? ((op.external_refs || {}).conflict ? t("integration_waiting_resolver")
           : (op.external_refs || {}).pushed_sha ? t("integration_waiting") : op.status_reason || t("integration_running"))
           : op.status === "failed" ? `${code}: ${op.status_reason || ""}` : t("integration_running");
-  const conflict = ["INTEGRATION_CONFLICT", "RESOLUTION_INCOMPLETE", "RESOLUTION_INVALID"].includes(code);
   const out = h("div", {});
-  const handoff = conflict && (state.caps?.scopes || []).includes("start")
-    ? h("button", { class: "secondary", onclick: async () => {
-      try {
-        const o = await submit("integration.handoff", { operation_id: op.operation_id }, { agent: "claude" }, {},
-          `handoff.${op.operation_id}`);
-        out.append(h("p", {}, opStatus(o), " ", t("handoff_started"), " ",
-          h("a", { href: `#/op/${o.operation_id}` }, o.operation_id)));
-      } catch (e) { out.append(errorBox(e)); }
-    } }, t("hand_to_agent")) : null;
+  const handoff = repairControl(op);
   const buttons = op.status === "needs_attention" ? [
     h("button", { class: "primary", onclick: act.resume }, t("resume")), handoff,
     h("button", { class: "danger", onclick: act.cancel }, t("cancel_and_preview"))].filter(Boolean) : [];
@@ -749,6 +812,8 @@ async function viewOperation(main, id) {
           Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null,
           op.result ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null),
         ...(receipts || []),
+        ...(op.action === "integration.apply" ? [repairControl(op)] : []),
+
         (op.result?.merge || op.result || refs.merge_receipt)?.base_moved
           ? h("p", { class: "note warn" }, t("merged_newer_base", { count: (op.result?.merge || op.result || refs.merge_receipt).other_commits_count })) : null,
         refs.write_acknowledged && refs.verification_pending ? h("p", { class: "note warn" }, t("metadata_pending")) : null,
@@ -1191,7 +1256,7 @@ function continueFrom(w, checkpointId, notice) {
     w.steps.length ? `${t("steps_title")}:\n${w.steps.map(s => `- [${s.done ? "x" : " "}] ${s.text}`).join("\n")}` : ""]
     .filter(Boolean).join("\n\n");
   const instr = h("textarea", {}, text);
-  const agent = h("select", {}, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
+  const agent = h("select", { "aria-label": t("agent") }, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
   const out = h("div", {});
   const go = h("button", { class: "primary", onclick: async () => {
     go.disabled = true;
@@ -1208,7 +1273,9 @@ function continueFrom(w, checkpointId, notice) {
       `wi.link.${w.work_item_id}.${op.operation_id}`);
     if (linked) out.append(" · ", t("linked_back"));
   } }, t("start_agent_work"));
-  const d = drawer(h("p", { class: "muted" }, t("confined_note")), instr, h("div", { class: "actions" }, agent, go), out);
+  const note = confinementNote(w.links?.find(l => l.ref === checkpointId)?.target?.host, agent);
+  api("GET", `/checkpoints/${encodeURIComponent(checkpointId)}`).then(x => note.setHost(x.checkpoint.host)).catch(() => {});
+  const d = drawer(note, instr, h("div", { class: "actions" }, agent, go), out);
   // Starting needs start; linking the run back needs manage. Without both, nothing starts (an unlinked run is untracked).
   const why = !may("start") ? t("needs_start_scope") : !may("manage") ? t("needs_manage_scope") : null;
   const open = h("button", { class: "secondary", disabled: Boolean(why), title: why, onclick: () => d.toggle.click() },

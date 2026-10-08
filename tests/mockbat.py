@@ -264,7 +264,9 @@ class MockBat:
         if ch == "claude:list-sessions":
             return [{"sdkSessionId": "sdk-1", "timestamp": 1_790_000_500_000, "messageCount": 5}]
         if ch == "claude:client-resume":
-            self.metas[sid] = {"cwd": p["options"]["cwd"], "isStreaming": False}
+            self.metas[sid] = {"cwd": p["options"]["cwd"], "isStreaming": False,
+                               **{k: v for k, v in p["options"].items() if k in
+                                  ("permissionMode", "codexSandboxMode", "codexApprovalPolicy")}}
             return {"ok": True}
         if ch == "claude:send-message":
             mid = p.get("clientMessageId")
@@ -309,6 +311,11 @@ class MockBat:
             opts = p["options"]
             cwd = opts.get("worktreePath") if opts.get("useWorktree") else opts["cwd"]
             self.metas[sid] = {"cwd": cwd, "isStreaming": False}
+            if str(opts.get("agentPreset", "")).startswith("codex"):
+                self.metas[sid].update(codexSandboxMode=opts.get("codexSandboxMode", "workspace-write"),
+                                       codexApprovalPolicy=opts.get("codexApprovalPolicy", "on-request"))
+            else:
+                self.metas[sid]["permissionMode"] = opts.get("permissionMode", "default")
             if opts.get("useWorktree"):
                 self.worktrees.setdefault(sid, {"worktreePath": opts["worktreePath"],
                                             "branchName": opts["worktreeBranch"]})
@@ -363,5 +370,9 @@ class MockBat:
             return {"ok": True, "existed": True}
         if ch in ("claude:set-permission-mode", "claude:set-codex-sandbox-mode", "claude:set-codex-approval-policy"):
             self.perm_calls.append((ch, p))
+            key = {"claude:set-permission-mode": "permissionMode", "claude:set-codex-sandbox-mode":
+                   "codexSandboxMode", "claude:set-codex-approval-policy": "codexApprovalPolicy"}[ch]
+            if self.metas.get(sid):
+                self.metas[sid][key] = p.get("mode", p.get("policy"))
             return True
         raise RuntimeError(f"mock: unhandled channel {ch}")
