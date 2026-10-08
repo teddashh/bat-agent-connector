@@ -106,7 +106,7 @@ worker 沒有完整 content 時用長 Wait，delay 為 upload window 剩餘時�
 | upload.publish | 正式目錄 manifest／hash 符合原 operation／revision 即補記，不覆寫 |
 | upload.record | 同交易 ready／refs／事件；重跑回原 result |
 
-deadline 無完整 content 就 failed/UPLOAD_EXPIRED；任一 terminal state 釋放 reservation並移除自己的 staging。marker／publish ACK 不明先讀回；staging partial 不可作 ready。正式檔案被改／遺失顯示 ARTIFACT_CONTENT_UNAVAILABLE，不從 client path 自行補抓。
+deadline 無完整 content 就 failed/UPLOAD_EXPIRED；任一 terminal state 釋放 reservation並移除自己的 staging。若取消／失敗前已 publish，正本仍保留；未 ready 的正本記 unavailable，仍計入 store quota，不把它當空間釋放。marker／publish ACK 不明先讀回；staging partial 不可作 ready。正式檔案被改／遺失顯示 ARTIFACT_CONTENT_UNAVAILABLE，不從 client path 自行補抓。
 
 ## 附件關聯與 work item（A）
 
@@ -199,6 +199,8 @@ BAT只用mockbat；git用temp repo／LocalRunner／RealGitLog。byte helper測�
 | test_artifact_upload_is_immutable_and_idempotent | 精確版本、same key、CAS、gaps、無覆寫 |
 | test_artifact_limits_include_partial_and_concurrent_reservations | 實際長度／hash、partial quota、並行、MCP小限額 |
 | test_upload_publish_lost_reply_and_restart_read_back | 正式publish後重啟回查、不第二版本 |
+| test_cancelled_unsettled_publish_keeps_original_and_its_quota | publish outcome 未結束後取消，保留正本且仍計 quota |
+| test_B04_missing_original_blocks_then_resumes_same_parent | store missing 的 proven error 先記 step，再 blocked；還原後續同 parent |
 | test_upload_window_expires_and_removes_only_its_own_staging | deadline、terminal scratch cleanup／reservation釋放 |
 | test_operation_wake_only_moves_waiting_external | 其他狀態不變，不poll |
 | test_attachment_change_invalidates_work_item_approval | 有附件才改fingerprint、version衝突 |

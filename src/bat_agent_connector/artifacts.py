@@ -250,7 +250,7 @@ class ArtifactStore:
             os.close(_open_dir(self.root / name, create=True))
 
     def used_bytes(self):
-        ready = self.db.execute("SELECT COALESCE(SUM(size_bytes),0) FROM artifact_revisions WHERE state='ready'").fetchone()[0]
+        ready = self.db.execute("SELECT COALESCE(SUM(size_bytes),0) FROM artifact_revisions WHERE state IN ('ready','unavailable')").fetchone()[0]
         reserved = self.db.execute("SELECT COALESCE(SUM(reserved_bytes),0) FROM artifact_uploads WHERE released_at IS NULL").fetchone()[0]
         return ready + reserved
 
@@ -441,7 +441,7 @@ class ArtifactStore:
         return None
 
     def reap_terminal(self):
-        rows = self.db.execute("""SELECT u.operation_id FROM artifact_uploads u JOIN operations o USING(operation_id)
+        rows = self.db.execute("""SELECT u.operation_id,u.artifact_id,u.revision FROM artifact_uploads u JOIN operations o USING(operation_id)
             WHERE o.status IN ('succeeded','failed','cancelled') AND u.released_at IS NULL""").fetchall()
         for row in rows:
             operation_id = row["operation_id"]
@@ -458,8 +458,14 @@ class ArtifactStore:
                     os.fsync(parent_fd)
                 finally:
                     os.close(parent_fd)
-            self.db.execute("UPDATE artifact_uploads SET reserved_bytes=0,released_at=? WHERE operation_id=?",
-                            (time.time(), operation_id))
+            # A publish may have happened before cancellation/record failure. The original stays charged.
+            formal = self.content_path(row["artifact_id"], row["revision"])
+            with self.journal.tx():
+                if formal.exists():
+                    self.db.execute("UPDATE artifact_revisions SET state='unavailable' WHERE operation_id=? AND state='receiving'",
+                                    (operation_id,))
+                self.db.execute("UPDATE artifact_uploads SET reserved_bytes=0,released_at=? WHERE operation_id=?",
+                                (time.time(), operation_id))
 
 
 def _admit_upload(ops, principal, target, params, pre):
@@ -605,7 +611,10 @@ async def materialize(ctx, checkpoint, clone, worktree, branch, refs):
                    "name": revision["display_name"], "attempt": row["attempt"], "size_bytes": revision["size_bytes"]}
 
         async def transfer(request=request, ref=ref):
-            content = store.read_content(ref["artifact_id"], ref["revision"])
+            try:
+                content = store.read_content(ref["artifact_id"], ref["revision"])
+            except OperationError as exc:
+                return {"ok": False, "code": exc.code, "source": "store", "observed_at": time.time()}
             evidence = await adapter.call(host, {**request, "mode": "receive"}, content)
             if evidence.get("uncertain"):
                 from .operations import AmbiguousOutcome
