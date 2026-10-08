@@ -155,6 +155,165 @@ def replay_version_one(j, path):
     return Journal(path)
 
 
+def observation_operation(j, key):
+    from bat_agent_connector.operations import ActionDef, OperationService
+
+    async def observe(ctx):
+        return {}
+
+    ops = OperationService(j, actions=[ActionDef("fixture.observe", "observe", "Fixture only", observe)])
+    op, _ = ops.create(api_auth.Principal("fixture", frozenset({"observe"})), action="fixture.observe",
+                       target={"host": "h1"}, idempotency_key=key)
+    return ops, op["operation_id"]
+
+
+@pytest.mark.parametrize("late_kind", ["event", "resource.bound"])
+@pytest.mark.parametrize("fact_kind,reference_kind", [
+    ("operation_steps", "operation"), ("integration_receipts", "operation"),
+    ("integration_receipts", "checkpoint_run"), ("work_item_links", "operation"),
+    ("work_item_links", "checkpoint_run"), ("operation_target", "operation"),
+    ("operation_source", "operation"), ("operation_source", "checkpoint_run"),
+])
+def test_b01_b03_saved_operation_refs_exclude_later_events_and_links(tmp_path, late_kind, fact_kind, reference_kind):
+    """B01/B03, §08/§10/§11: saved facts see only operation resources proven before their position."""
+    from bat_agent_connector import observation
+    path = tmp_path / "j.db"
+    j = Journal(path)
+    ops, oid = observation_operation(j, "historical-operation")
+    with j.tx():
+        if late_kind == "event":
+            # A continuation step records its creation intent and path in the saved response.
+            j.db.execute("UPDATE operations SET action='checkpoint.continue' WHERE operation_id=?", (oid,))
+            wid = worktree(j, "h1", "checkpoint.continue", oid, "worktree")
+        else:
+            wid = worktree(j, "h1", "registry", "later@1", "worktree")
+    ops._merge_refs(oid, {"host": "h1", "session_id": "early"})
+    with j.tx():
+        early = j.api_event("operation", oid, "operation.running", {})
+    if late_kind == "resource.bound":
+        ops._merge_refs(oid, {"host": "h1", "session_id": "later", "worktree_id": wid})
+        later = j.api_head()
+        assert j.db.execute("SELECT linked_at_seq FROM api_event_resources WHERE seq=? AND resource_id=?", (early, wid)).fetchone()[0] == later
+    else:
+        with j.tx():
+            later = j.api_event("operation", oid, "operation.step.succeeded",
+                                {"response": {"session_id": "later", "worktree_path": "/srv/later"}})
+    with j.tx():
+        after = j.api_event("operation", oid, "operation.running", {})
+    original = {e["seq"]: e["context"] for e in j.api_events(limit=200)["events"]}
+    assert original[early]["session_resource_ids"] == ["h1/early"]
+    assert original[after]["session_resource_ids"] == ["h1/early", "h1/later"]
+    assert original[after]["worktree_ids"] == [wid]
+    # Deterministic fact placement, exactly at the early event (first strictly later event is P).
+    j.db.execute("UPDATE api_events SET created_at=seq*10")
+    at = early * 10
+    if fact_kind == "operation_steps":
+        j.db.execute("""INSERT INTO operation_steps(operation_id,seq,name,status,request,started_at)
+            VALUES(?,1,'saved','succeeded','{}',?)""", (oid, at))
+    elif fact_kind == "integration_receipts":
+        j.db.execute("""INSERT INTO integration_receipts(operation_id,seq,preview_id,repository,
+            pull_number,head_ref,source_kind,source_id,source_host,location_class,pinned_sha,mode,source_key,
+            status,actor,created_at,updated_at) VALUES(?,1,'preview','o/r',1,'feature',?,?,'h1',
+            'connector',?,'merge','source','delivered','fixture',?,?)""", (oid, reference_kind, oid, "a" * 40, at, at))
+    elif fact_kind == "work_item_links":
+        j.db.execute("""INSERT INTO work_item_links(work_item_id,kind,ref,linked_by,linked_at,link_operation)
+            VALUES('wi_fixture',?,?,'fixture',?,'op_link')""", (reference_kind, oid, at))
+    else:
+        target = {"host": "h1", "operation_id": oid} if fact_kind == "operation_target" else {"host": "h1"}
+        params = {"sources": [{"kind": reference_kind, "id": oid}]} if fact_kind == "operation_source" else {}
+        j.db.execute("""INSERT INTO operations(operation_id,actor,entry,idem_key,request_hash,action,target,
+            params,preconditions,status,created_at,updated_at) VALUES('op_saved','fixture','cli','saved','hash',
+            'fixture.observe',?,?,'{}','succeeded',?,?)""", (dump(target), dump(params), at, at))
+    expected = {("session", "h1/early")}
+    assert set(observation.snapshot_refs(j.db, reference_kind, oid, later)) == expected
+    assert set(observation._refs(j.db, "operation", oid, seq=later - 1)) == expected
+    assert set(observation._refs(j.db, "operation", oid, seq=later)) == expected | {("session", "h1/later"), ("worktree", wid)}
+    assert set(observation._refs(j.db, "operation", oid)) == expected | {("session", "h1/later"), ("worktree", wid)}
+    assert observation.snapshot_refs(j.db, reference_kind, oid, None) == []
+    j = replay_version_one(j, path)
+    table = "operations" if fact_kind.startswith("operation_") and fact_kind != "operation_steps" else fact_kind
+    facts = [e for e in j.api_events(kind="history.backfilled", limit=500)["events"] if e["body"]["source_table"] == table]
+    assert len(facts) == 1
+    fact = facts[0]
+    assert fact["context"]["fact_at_seq"] == later
+    assert fact["context"]["session_resource_ids"] == ["h1/early"] and fact["context"]["worktree_ids"] == []
+    assert "projection_error" not in fact["context"]
+    obs = Observation(j)
+    assert fact["seq"] in {e["seq"] for e in obs.history("session", "h1/early", limit=200)["events"]}
+    for kind, rid in (("session", "h1/later"), ("worktree", wid)):
+        events = {e["seq"] for e in obs.history(kind, rid, limit=200)["events"]}
+        assert fact["seq"] not in events and {later, after} <= events
+    replayed = {e["seq"]: e["context"] for e in j.api_events(limit=200)["events"]}
+    for seq in (early, later, after):
+        for field in ("session_resource_ids", "worktree_ids"):
+            assert replayed[seq][field] == original[seq][field]
+    head, changes = j.api_head(), j.db.total_changes
+    observation.backfill(j)
+    assert j.api_head() == head and j.db.total_changes == changes
+    j.close()
+    j = Journal(path)
+    assert j.api_head() == head and j.db.total_changes == 0
+    j.close()
+
+
+@pytest.mark.parametrize("run_evidence", ["event", "row_time", "unknown_time"])
+def test_b01_b03_checkpoint_refs_exclude_later_runs(tmp_path, run_evidence):
+    """B01/B03, §08/§10/§11: fixed capture sources stay available; future runs never enter old facts."""
+    from bat_agent_connector import observation
+    path = tmp_path / "j.db"
+    j = Journal(path)
+    _, oid = observation_operation(j, "run-operation")
+    j.db.execute("""INSERT INTO checkpoints(checkpoint_id,host,source_session_id,source_provenance,cwd,
+        repo_root,commit_sha,head_sha,excerpt,excerpt_sha256,actor,operation_id,captured_at)
+        VALUES('cp_fixture','h1','captured','connector','/srv/repo','/srv/repo',?,?,'','hash','fixture',?,1)""", ("a" * 40, "a" * 40, oid))
+    with j.tx():
+        first = j.api_event("work_item", "wi_fixture", "work_item.linked", {"kind": "checkpoint", "ref": "cp_fixture"})
+    j.db.execute("""INSERT INTO checkpoint_runs(checkpoint_id,operation_id,host,session_id,clone_path,
+        worktree_path,branch,agent,actor,created_at) VALUES('cp_fixture',?,'h1','run','/srv/clone',
+        '/srv/worktree','feature','codex','fixture',?)""", (oid, "" if run_evidence == "unknown_time" else (first + 1) * 10 - 1))
+    with j.tx():
+        if run_evidence == "event":
+            created = j.api_event("checkpoint", "cp_fixture", "checkpoint.continued", {"operation_id": oid, "host": "h1", "session_id": "run"})
+        else:
+            created = j.api_event("operation", oid, "operation.running", {})
+        after = j.api_event("work_item", "wi_fixture", "work_item.unlinked", {"kind": "checkpoint", "ref": "cp_fixture"})
+    j.db.execute("UPDATE api_events SET created_at=seq*10")
+    expected = [("session", "h1/captured")]
+    assert observation._refs(j.db, "checkpoint", "cp_fixture", seq=first, include_runs=True) == expected
+    assert observation._refs(j.db, "checkpoint", "cp_fixture", include_runs=True) == expected + [("session", "h1/run")]
+    assert observation.snapshot_refs(j.db, "checkpoint_run", oid, created) == []
+    run_refs = [("session", "h1/run")] if run_evidence != "unknown_time" else []
+    assert observation._refs(j.db, "checkpoint_run", oid, seq=created) == run_refs
+    assert observation.snapshot_refs(j.db, "checkpoint_run", oid, after) == run_refs
+    original = {e["seq"]: e["context"] for e in j.api_events(limit=200)["events"]}
+    j = replay_version_one(j, path)
+    obs = Observation(j)
+    assert first in {e["seq"] for e in obs.history("session", "h1/captured", limit=200)["events"]}
+    events = {e["seq"]: e for e in obs.history("session", "h1/run", limit=200)["events"]}
+    assert first not in events
+    assert (after in events) == (run_evidence != "unknown_time")
+    contexts = {e["seq"]: e["context"] for e in j.api_events(limit=200)["events"]}
+    assert contexts[first]["session_resource_ids"] == ["h1/captured"]
+    assert contexts[after]["session_resource_ids"] == ["h1/captured", *(["h1/run"] if run_refs else [])]
+    for seq in (first, after):
+        assert contexts[seq]["session_resource_ids"] == original[seq]["session_resource_ids"]
+    assert observation._refs(j.db, "checkpoint_run", oid, seq=j.api_head()) == [("session", "h1/run")]
+    j.close()
+
+
+def test_b02_related_event_feed_bounds_links_by_its_captured_head(tmp_path, monkeypatch):
+    """B02, §10/§11: a link written after a captured feed head is not visible inside that read."""
+    j = Journal(tmp_path / "j.db")
+    with j.tx():
+        first = j.api_event("operation", "op_fixture", "operation.accepted", {})
+        later = j.api_event("session", "h1/later", "resource.bound", {})
+        index(j.db, first, "session", "h1/later", later)
+    assert {e["seq"] for e in j.api_events(related_resource_type="session", related_resource_id="h1/later")["events"]} == {first, later}
+    monkeypatch.setattr(j, "api_head", lambda: first)
+    assert j.api_events(related_resource_type="session", related_resource_id="h1/later")["events"] == []
+    j.close()
+
+
 @pytest.mark.parametrize("backfilled", [False, True])
 @pytest.mark.parametrize("command_count", [0, 2])
 def test_b01_b03_relation_closed_body_keeps_the_final_command(tmp_path, monkeypatch, backfilled, command_count):

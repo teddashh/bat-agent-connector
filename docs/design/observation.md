@@ -16,6 +16,7 @@ Phase 1 規格已審查。Phase 2 分兩步：Part A（本次）實作伺服器�
 | Relation event links 修正 | `38986e1`（#35 的審查基準）。具名 relation 事件只掛自己，execution fan-out 取原 seq 的有效 relation；live／版本 1 replay 使用同一規則。 |
 | Saved fact time 修正 | `a48dba3`（#35 的審查基準）。沒有原 event seq 的回填事實以自己的時間定位，保留 task execution link；不改 live projection，不 rebase。 |
 | Relation closure body 修正 | `a48dba3`（#35 的審查基準），接續 saved-fact 修正 `ad4d668`。新 relation 事件與同 seq revision 使用同一完整 body；legacy closure 重建 command 終點，不猜關閉時間。 |
+| Operation refs position 修正 | `f415cfb`（#35 的審查基準）。Operation event seq 與 resource linked_at_seq 都受 caller 的位置限制；checkpoint runs 也需要當時已存在的證據。不 rebase、不新增資料步驟。 |
 | 計畫 | v1.0（2026-10-06）；以章節及驗收編號引用，不複製私有計畫。 |
 | BAT | `b7419892fbc9946799b64cca24c2ec8c7fa15c42`；不代表每台主機都已安裝此版，實際 `serverVersion` 另存於掃描證據。 |
 
@@ -107,6 +108,19 @@ Task 的共同里程碑仍可掛當時所有有效 relations：只限沒有 comm
 取 backfill 開始前的 journal boundary（原 api_events head + 1），在原 events 中找 created_at 嚴格晚於事實時間的第一個 seq；沒有更晚事件時才用該 boundary。後來產生的 backfill rows 不參與定位。Context.fact_at_seq 保存此位置，occurred_at/occurred_at_epoch 使用同一事實時間；event 排序、cursor/as_of 與 linked_at_seq 仍使用新 fact event 的 seq，不能把它冒充原本就有的 event。
 
 Snapshot 的位置在第一個更晚 event **之前**，所以取 revision.seq < fact_at_seq 的最後 revision，再套上述 open/start/end 條件；更晚才 closed 的參與者仍保留，之後才 opened 的 replacement 不加入。衍生 worktree 也讀這個位置前的 binding，不拿 session 目前的 worktree。Absent/null/空值、非數字、布林、非有限或超出可表示範圍的時間均為 unknown；上述表的 snapshot 不建立 session links，即使 operation target 明存 session 也不補猜，指定時間欄位與 context 時間為 null。明確身分及 binding 的原 IDs/證據仍保留在 snapshot/目錄；先前定義的目前 binding seed 與 tasks.external_worktree 身分事實不經 task relation 推算，維持其原 link 規則。
+
+`_refs()` 的共用位置契約：live event 與 legacy event replay 傳自己的 seq=S，`before=False`，讀 <=S 的證據；沒有 event 的 snapshot 經 `snapshot_refs()` 傳 fact_at_seq=P，`before=True`，讀 <P（inclusive bound=P-1）的證據。`seq=None` 只表示目錄 membership，維持不設限的原行為。Snapshot 沒有可用位置時不將它當目錄查詢：operation/checkpoint_run 不推算 session 或 worktree；task 仍保留明確 execution。所有 branch 與 caller 使用以下規則，不因 backfill event 新 seq 已到 head 就放寬。
+
+| Ref branch／caller | 位置與不變事實 |
+|---|---|
+| `session` | 直接指定的穩定 resource ID，沒有「全部目前 session」推算；unknown 時間的 snapshot 仍依上文移除 session link。 |
+| `task` | 使用原位置的 open_relations/revisions，保留前述已出現、未 closed/end 的條件；snapshot 用 before=True。目錄才包含過去所有 relations。 |
+| `operation` | 只 join 該 operation 的原 api_events，要求 event.seq 與 api_event_resources.linked_at_seq **兩者** <= inclusive bound。晚 event 與晚 resource.bound 回掛舊 event 的 link 都不進早 snapshot；seq=None 才含全部。 |
+| `checkpoint` 的 source | 捕捉時固定的 host/source_session_id，不隨後來 run 改變，屬指定 checkpoint 的位置無關身分。沒有 checkpoint row 就不猜。 |
+| `checkpoint(include_runs=True)`、`checkpoint_run` | Run 的 host/session 是固定 receipt 身分，但 receipt 不一定已在當時存在。優先用具名 checkpoint.continued 的原 event seq；沒有該事件時，用 run.created_at 後第一個非 backfill journal event 的 seq 作保守已知位置。時間不能用或沒有更晚原 event 時，只能從該 run 的 history.backfilled event seq 起確認。Known seq 必須 <= inclusive bound；checkpoint_run 未存在或尚未證明時，fallback 到同 bound 的 operation refs。目錄不限制 run。 |
+| `record_event()` 原事件 | Operation 的 sources/preview sources、target.operation_id、integration sources/receipts、work-item refs 均傳原 event seq；operation 也繼承該 seq 已知的自己的 refs，使 live／legacy replay 一致。Legacy 不讀目前 external_refs，resource.bound 只讀原 body 的 refs；live writer 的 external_refs 是同交易當時的值。 |
+| `record_event()` 的 history.backfilled、`backfill()` | Saved steps、receipts、links、eventless operations、delivery previews/settlements 的 operation refs 均傳自己的 P，包括 op_id、params.sources、target.operation_id。不能從目前 operations.external_refs 的 session/worktree_path 補掛；row 自己的 request/response 明存 IDs 仍可作該 row 證據。Checkpoint/run 的建立 slot 與目前 binding 的身分 seed 維持各自正式來源。 |
+| 其他 resource index reads | History membership、earliest coverage 與 projection_error gap lookup 已以 reader.as_of 限制 linked_at_seq；gap 的來源 seq 也不得晚於失敗 event。Gap 與普通 history 一樣允許已在 as_of 前確認的晚 link，不假裝原投影成功。全域 /events 的 related-resource filter 另以本次捕捉的 head 限制 linked_at_seq。resource.bound／delivery preview 的 index 寫入仍明記晚 linked_at_seq，不能抹平。Inventory._memberships() 是不承諾 snapshot 的目錄查詢，使用 seq=None。 |
 
 凡 snapshot 的 source/reference 明存 task，`snapshot_refs()` 一律連該 execution；當時沒有 open relation 或時間 unknown 時仍可從 execution history 讀取。涵蓋 work-item task links、integration receipt task sources、eventless operation 的 params.sources／integration preview sources，以及 params.kind/ref 的 task reference；operation step/checkpoint/run 等經 operation 解析來源的 snapshots 也使用自己的時間。單一 execution 時 context.execution_id 同步保留，不能因當前 task 已 closed 使事實孤立。
 
@@ -317,6 +331,8 @@ Binding table/index 為每次開啟執行的 idempotent DDL，不讀寫 user_ver
 
 Eventless facts 的時間定位與 execution links 仍屬本包資料步驟 2。完成後直接重呼 backfill 或 reopen 都不寫入；guard 只用於這個一次性資料步驟，DDL 仍每次開啟獨立執行，不占 user_version。
 
+Operation refs 的位置修正也只套在原資料步驟 2 與之後的 live 投影；不新增 DDL 或 user_version，不重跑已完成 backfill。保存的 facts 早於 operation/resource binding 時，不能再從目前 refs 取得後來的 session/worktree；仍可從明確指定 kind 的全域 backfill feed 讀取其 metadata／來源證據。既有 projection savepoint 與 projection_error 保留。
+
 快照來源為 tasks.external_worktree、checkpoint_runs、保存的 operation refs/steps 或 session 的目前 binding，snapshot 明存 session/worktree 對。僅目前 binding 的 fallback 來源 key 為 `session_worktree_bindings:<session resource ID>`；它的 backfill event seq 同時是 binding.start_seq、linked_at_seq 及該 event 的 resource link seq。已知舊 creation 的重複 receipt/snapshot 不把已移走的 session 移回去。Legacy relation 的開始時間仍可 unknown，但確定的 command participation 與 live projection 相同；舊 command 在 binding 的證據之前時不宣稱它屬於該 worktree。已完成步驟 2 的 journal 只安裝 DDL，不再 seed；新 binding 由之後的 writer 事實建立，未被保存的過去 binding 不推測。
 
 as_of 稽核：history 的 membership/coverage 只查 api_event_resources 的 seq/linked_at_seq，context/occurred_at 固定保存；resource envelope 為目前身分摘要，不是 membership filter。Session/execution relations 用不可變 identity columns 與 revision/command link seq；worktree relations 改用上述 binding intervals。Inventory 的 as_of 只供 events catch-up，目錄本來就不承諾 snapshot：目前 host config、provenance/access、gone/state/freshness、project/work-item/execution memberships 都可在 traversal 中變動；order=id 保證穩定 key 前進，新增列/篩選 membership 變動由 events 補讀，order=activity 仍保留動態排序限制。這些目前值不能套進 history/relations 的 snapshot membership。
@@ -367,6 +383,9 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B02、B03；§11 | `test_b03_states_unknown_no_tab_and_field_times`：meta null／失敗、無 tab、journal-only null、離線與 gone 分軸；失敗不刷新上一個 activity 時間。Main 沒有可證明 session 終止的正式 journal source，因此 lifecycle 保持 unknown，不用 gone／turn abort 推論 ended。 |
 | B03；§08、§11 | `test_b03_backfill_hidden_idempotent_and_unknown_boundaries`、`test_b03_migration_failure_rolls_back_and_restart_recovers`、`test_b03_backfilled_occurrence_time_filters_are_not_migration_time`：舊 journal 回填、全交易失敗回滾、重啟不重複、未知 range 邊界、原發生時間與隱藏 cursor。 |
 | B03；§08、§11 | `test_b03_version_one_journal_runs_observation_backfill_once`：版本 1 → 2 回填一次；重開及已為 2 的 journal 不執行；新 journal 為 2，不重複回填。 |
+| B01、B03；§08、§10、§11 | `test_b01_b03_saved_operation_refs_exclude_later_events_and_links`：early step、receipt、operation/checkpoint_run link、eventless operation 的 sources 或 target.operation_id；late step 與 resource.bound 兩種來源都掛 session/worktree。P 前 facts 不到後來資源，context 不含後來 IDs；原 events 的已知 refs 在 live/replay 一致。Inclusive seq=P 可見、snapshot <P 不可見；seq=None 目錄不變，unknown P 不推算 refs。重呼 backfill／reopen 零 writes。 |
+| B01、B03；§08、§10、§11 | `test_b01_b03_checkpoint_refs_exclude_later_runs`：checkpoint 固定 capture source 保留，早 work-item event 不掛晚 run；checkpoint.continued、eventless run.created_at、unknown run time 三種證據，direct checkpoint_run 與 fallback 都守相同 boundary，live/replay 一致。`test_b03_delivery_snapshot_backfill_preserves_version_chain_and_private_text` 保留 delivery migration、原 documents、actor/privacy 及 reopen assertions；binding 前 preview/settlement 只從明確 kind 的 feed 讀，不回掛後來 session。 |
+| B02；§10、§11 | `test_b02_related_event_feed_bounds_links_by_its_captured_head`：related-resource feed 使用已捕捉 head，晚 linked_at_seq 不在早 read 中出現；正常新 head 仍讀得到晚 link。只替換 journal instance 的 api_head，不全域 monkeypatch stdlib。 |
 | B01、B03；§08、§10、§11 | `test_b01_b03_relation_closed_body_keeps_the_final_command`：兩個已連結 command 的 closure 保存最後一個，無 command 保存 null；end_command_id 在 history、current body、event seq revision、relations endpoint 四處一致，live／版本 1 replay 都驗證。用本包 iso 函式的遞增時間 fixture 驗證 live closure 只建一個 ended_at，不全域替換 stdlib。`test_b01_b03_relation_events_equal_their_lifecycle_revisions`：open/bind、lead/reviewer、replacement/parent、close 的所有新事件 body 逐欄等於 revision；legacy 只正規化未知的時間邊界。 |
 | B03；§08、§11 | `test_b03_version_one_closure_reconstructs_the_final_command`：真正沒有 relation 事件的版本 1 task 從兩個 commands 重建 closed revision，ended_at=null。`test_b03_legacy_closure_event_cannot_erase_its_reconstructed_command`：舊 relation.closed 的 null 不覆蓋已證明的最後 command，原 core event body 保留；既有 projection failure 測試持續保證核心寫入與 gap flag。 |
 | B01、B03；§08、§10、§11、§16 | `test_b01_b03_delivered_merge_history_uses_only_explicit_refs`：真實 fake GitHub merge/verify steps、session refs、worktree refs、無來源時不造關聯；PR title/body 不進事件摘要。`test_b01_delivery_preview_late_binding_respects_history_as_of`：晚到的 preview binding 不改舊游標結果。 |

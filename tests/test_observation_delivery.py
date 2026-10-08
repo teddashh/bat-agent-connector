@@ -243,13 +243,17 @@ async def test_b03_delivery_snapshot_backfill_preserves_version_chain_and_privat
     j = Journal(path)
     assert calls == [1] and j.db.execute("PRAGMA user_version").fetchone()[0] == 2
     events = Observation(j).history("session", "h1/source", limit=200)["events"]
-    facts = [e for e in events if e["kind"] == "history.backfilled" and e["body"]["source_table"] in snapshots]
+    facts = [e for e in j.api_events(kind="history.backfilled", limit=500)["events"] if e["body"]["source_table"] in snapshots]
     assert {e["body"]["source_table"] for e in facts} == {"pr_merge_previews", "pr_metadata_settlements"}
+    # Both saved facts predate the operation's session binding; the later link cannot rewrite their scope.
+    assert {e["seq"] for e in facts}.isdisjoint(e["seq"] for e in events)
+    assert all(e["context"]["session_resource_ids"] == [] for e in facts)
     settlement = next(e for e in facts if e["body"]["source_table"] == "pr_metadata_settlements")
     assert settlement["context"]["operation_id"] == op["operation_id"]
     assert settlement["context"]["occurred_at_epoch"] == 124
     assert all(e["context"]["observer"] == "delivery-service" and e["context"]["actor"] is None for e in facts)
     assert "private" not in json.dumps(events)
+    assert "private" not in json.dumps(facts)
     head, changes = j.api_head(), j.db.total_changes
     original(j)  # Idempotent source keys also prevent duplication if interrupted work is retried.
     assert j.api_head() == head and j.db.total_changes == changes
