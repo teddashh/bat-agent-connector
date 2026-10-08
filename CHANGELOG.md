@@ -2,6 +2,10 @@
 
 ## Next release (unreleased)
 
+- Join in-flight deployment history reads before event acknowledgment, wait for every sibling read,
+  and retain the selected history page through failed refreshes. Open reviewed confirmations keep their
+  original generation while the event checkpoint waits for the form to close.
+
 - Integrate delivery history after observation data step 2: run deployment step 3 in the same journal open,
   preserve original events, and append one saved snapshot per deployment. State changes publish bounded,
   operation-linked facts without verifier bodies or configuration; unchanged reads stay quiet.
