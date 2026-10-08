@@ -326,7 +326,7 @@ class Journal:
         self._migrate_hub_import()
 
     def _migrate_hub_import(self):
-        # Additive and idempotent; reserve the next free user_version when rebasing parallel packages.
+        # Schema DDL runs on every open; user_version belongs only to one-time data steps.
         self.db.executescript("""
             BEGIN IMMEDIATE;
             CREATE TABLE IF NOT EXISTS hub_import_sources (
@@ -360,9 +360,6 @@ class Journal:
             );
             COMMIT;
         """)
-        if self.db.execute("PRAGMA user_version").fetchone()[0] < 2:
-            with self.tx():
-                self.db.execute("PRAGMA user_version=2")
 
     def _drop_legacy_outbox(self):
         """Remove the retired chat outbox so no historical event can ever be published.

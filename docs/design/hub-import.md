@@ -73,7 +73,7 @@ runtime_retired = true
 
 ## 穩定 mapping 與來源資料
 
-在同一 journal 作 versioned、additive migration（起點 `PRAGMA user_version = 1`，本包取下一個空位 2；rebase 時若平行 migration 已使用它，改取下一個空位。DDL 為 idempotent）。以下是新增資料表的邏輯欄位；不另建 tasks database。
+在同一 journal 加入 additive、idempotent DDL，每次 open 執行，不讀寫 `PRAGMA user_version`。本包沒有一次性資料遷移；version 號碼僅供另外配置的 data steps 使用。以下是新增資料表的邏輯欄位；不另建 tasks database。
 
 | 紀錄 | 主鍵／必要欄位 |
 |---|---|
@@ -292,7 +292,7 @@ Phase 1 僅提交規格，審查修訂先獨立提交；Phase 2 實作如下：
 | 檔案 | 修改 |
 |---|---|
 | `src/bat_agent_connector/hub_import.py`（新增） | 純 parser／normalize、唯讀 snapshot、mapping、三方比對、ActionDefs、preview／apply 與 receipts |
-| `task_journal.py`、`work_items.py` | additive／versioned tables；共用管理 helper；external_url 驗證與 source read model，不移除原 UNIQUE 約束 |
+| `task_journal.py`、`work_items.py` | additive／idempotent tables，不使用 user_version；共用管理 helper；external_url 驗證與 source read model，不移除原 UNIQUE 約束 |
 | `config.py`、`task_daemon.py` | sources 設定、註冊 actions 與 read RPC、共用 OperationService；無 Hub 程序依賴 |
 | `api_v1.py`、`mcp_server.py`、`cli.py` | 同合約的 thin adapters、來源與預覽回查、batc hub 命令 |
 | `dashboard/app.js`、`app.css`、`i18n.js` | 小型 Projects 入口、來源與 incomplete 標記、en／zh-TW；沿用 fill()、CSP 與 live-update hold 規則 |
