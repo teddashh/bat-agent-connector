@@ -324,7 +324,13 @@ async def test_b05_restart_lost_reply_and_partial_recovery(daemon, monkeypatch, 
 
     monkeypatch.setattr(d.ops, "_step_done", crash)
     op, _ = d.ops.create(PERSON, **hub.apply_request(doc))
-    await d.ops.drain(timeout=60)
+    await d.ops.run_due()
+    # Stop after the first simulated daemon death; drain would keep scheduling that same crash.
+    stopped = await asyncio.wait_for(
+        asyncio.gather(d.ops._active[op["operation_id"]], return_exceptions=True), timeout=60
+    )
+    assert isinstance(stopped[0], asyncio.CancelledError)
+    assert d.ops.get(op["operation_id"])["status"] == "running"
     opid = op["operation_id"]
     receipts = {r["record_key"]: r["connector_id"] for r in d.ops.db.execute("SELECT * FROM hub_import_map")}
     cfg = replace(make_config_for(d), hub_import_sources=d.ops.context["hub_import_sources"])
