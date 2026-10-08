@@ -223,6 +223,10 @@
   refreshes retain the original cursor and drafts. Failed reads pause mutations; deferred renders keep
   version-checked form saves available. Delayed work cannot cross accounts or
   mounted views. Existing pending-control and linked-history presentation gaps remain tracked under R04.
+- Port Delivery environment history, fixed rollback/retry confirmations and translations into the shared
+  browser/Tauri frontend. Keep deployment previews and writes on the central API, add the narrow native read
+  allowlist, and preserve identity-scoped operation keys across reconnects and lost replies. Delivery events
+  refresh cards through shared polling; open confirmations retain the selected version.
 
 - Add the shared Vite/TypeScript Dashboard source and initial packaged Tauri 2 shell with restricted native
   central transport, native-memory credentials, tray hiding and same-session instance handoff. Browser and
