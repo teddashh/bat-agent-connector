@@ -55,6 +55,11 @@ read adapters 使用同 daemon 的 HTTP，不為新工具修改 task RPC dispatc
 | integration | operation_id（preview／apply／handoff） | preview、source、receipts、repair、session、pins、area；崩潰 preview 的 prepare request 也有 area |
 | host | configured host | inventory（含 gone）、registry、已知 checkpoint／integration／task intent；不掃 managed roots 或磁碟 |
 
+Integration apply 先由 `params.preview_id` 找原 preview；handoff 先由 `target.operation_id` 找 apply，
+再沿同一條鏈找 preview。把 preview ID 與 preview operation ID 都加入 refs，再展開所有 source IDs。
+三種 operation target 取得同一批 source／area／pins／repair／session；work-item links 的 integration
+operation 也用同一規則。只使用本次 snapshot 已載入的 operation rows，不逐 item 另查 journal。
+
 範圍外的 active execution／command／有效 integration preview／resumable apply 也檢查依賴。
 History link 不是實體需求；未完成工作若有 command／operation 真正需要內容，列 content-required
 consumer。所有 consumer 從 authoritative tasks、commands、operations、previews 算出，不另存 consumers 表。
@@ -383,6 +388,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | purepreview/token/stale/expiry；E01 | test_e01_preview_is_pure_and_signed_plan_cannot_be_changed、test_e01_stale_any_item_stops_before_mutation_and_reports_changes |
 | canonical/policy/preserve/nonforce/CAS；E01 | test_e01_every_mutation_rechecks_policy_and_canonical_destination、test_e01_preserve_precedes_nonforced_remove_and_cas_checks_delivered_refs |
 | 同 apply 的 worktree／branch 回執均成功；移除後 branch 移動先拒絕；E01 | test_e01_preserve_precedes_nonforced_remove_and_cas_checks_delivered_refs（branch snapshot actual is None）、test_e01_branch_moved_after_worktree_removal_is_stale（PREVIEW_STALE、所有 refs 不變） |
+| integration 三種 target 同 scope／handoff 完整鏈；E01/E02 | test_e01_integration_preview_apply_and_handoff_expand_to_same_resources（source／area／pins／repair／session 的所有 item fields 相等） |
 | crashedcheckpoint/handoff／未決start-stop；E01 | test_e01_crashed_continue_and_handoff_intents_are_discovered_without_adoption、test_e01_pending_start_stop_and_waiting_sessions_are_retained |
 | partsuccess/restart/lostreply；E01 | test_e01_partial_cleanup_resumes_only_unfinished_unchanged_items、test_e01_lost_replies_reconcile_each_cleanup_phase、test_e01_cancel_reconciles_sent_steps_and_releases_only_confirmed_reservations |
 | 原ID/位置/原因/relations/PR與真retained；E01/E02 | test_e01_original_ids_remain_searchable_with_location_reason_and_pr（同測試移除實際ref，確認列為unavailable） |

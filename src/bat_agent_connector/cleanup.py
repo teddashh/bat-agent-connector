@@ -470,7 +470,7 @@ def _all(ops):
     return items, op_rows, pvs, worktrees, containers, links
 
 
-def _selection(ops, target, items, pvs, links):
+def _selection(ops, target, items, pvs, links, op_rows):
     kind = target["kind"]
     if kind == "host":
         return {rid for rid, i in items.items() if i["host"] == target["host"]}, []
@@ -487,9 +487,20 @@ def _selection(ops, target, items, pvs, links):
                 wi_ids.extend(children)
                 todo.extend(children)
         refs.update(r["ref"] for r in links if r["work_item_id"] in wi_ids)
+    operations = {op["operation_id"]: op for op in op_rows}
+    todo = list(refs)
+    while todo:
+        op = operations.get(todo.pop())
+        if not op:
+            continue
+        related = (op["params"].get("preview_id") if op["action"] == "integration.apply" else
+                   op["target"].get("operation_id") if op["action"] == "integration.handoff" else None)
+        if isinstance(related, str) and related not in refs:
+            refs.add(related)
+            todo.append(related)
     for pv in pvs.values():
         if pv["operation_id"] in refs or pv["preview_id"] in refs:
-            refs.add(pv["preview_id"])
+            refs.update((pv["operation_id"], pv["preview_id"]))
             refs.update(s["id"] for s in json.loads(pv["sources"]))
     selected = {rid for rid, i in items.items() if refs.intersection(i["original_ids"]) or
                 set(wi_ids).intersection(i["relations"])}
@@ -729,7 +740,7 @@ def _replica_evidence(ops, item):
 
 async def snapshot(ops, target, choices, *, only=None, own_op=None):
     items, op_rows, pvs, worktrees, containers, links = _all(ops)
-    selected, wi_ids = _selection(ops, target, items, pvs, links)
+    selected, wi_ids = _selection(ops, target, items, pvs, links, op_rows)
     hosts = sorted({items[r]["host"] for r in selected if items[r]["host"]})
     if len(selected) > MAX_ITEMS:
         raise OperationError("PREVIEW_TOO_LARGE", "preview exceeds 500 resources", 413)
