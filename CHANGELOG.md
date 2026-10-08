@@ -2,6 +2,29 @@
 
 ## Next release (unreleased)
 
+- Delivery Part B backend ([design](docs/design/delivery.md), plan §09/§10/§17/§18/§28, D01–D06): fixed deployment
+  identities, environment generations and provider slots; saved attempts/jobs/pending-environment plus runtime evidence;
+  history and saved SHA/artifact rollback through the same recipe; caller-token HTTP/MCP/CLI start/retry/rollback reads
+  and writes. A read-only reconciliation loop handles cancelled runs, external reruns and version drift, without
+  dispatching or resuming. Superseded generations never become current. History backfill is allocated data step 3
+  after observation step 2; DDL takes no user_version. Dashboard environment card follows in the next round.
+- **Breaking deployment contract:** recipes without `verification` now refuse deploys with
+  DEPLOY_VERIFICATION_REQUIRED; history remains readable. Add this exact setting to `[[deploy.recipes]]`, replacing
+  the reserved example URL with your configured runtime endpoint (returns repository_id/environment and required
+  source_sha/healthy fields). For health-only evidence set version_required=false; at least one check is required:
+
+  ```toml
+  verification = { kind = "http_json", url = "https://deployment.example/version", version_required = true, health_required = true }
+  ```
+
+  Start, retry, rollback and combined merge now require deployment_preview's expected_environment_generation and
+  expected_recipe_digest; old start callers get DEPLOY_PREVIEW_REQUIRED naming that read. Contract date stays
+  2026-10-08 (same UTC day); capabilities add deployment_history/environment_generation/runtime_check/rollback_readiness.
+- Issue #32 deployments: on_merge run association includes recipe branch/repository/workflow/push/SHA; start/retry/SHA
+  rollback verify source reachable from the ref; combined admission rejects another base with DEPLOY_SOURCE_NOT_ON_REF.
+  Cancel retains provider locks until terminal evidence. Dispatch input mapping requires source_sha and operation_id;
+  a dispatch 429 is a refusal with bounded Retry-After and exact token lookup before another POST.
+
 - Delivery acknowledged metadata conflicts ([design](docs/design/delivery.md), plan §09/§10/§15, C07): save a
   conflict settlement when an acknowledged PATCH reads back differently, releasing the PR for a fresh-digest update
   while retaining needs_attention and its audit. Resume and reconciliation use the saved conclusion without GitHub
@@ -48,7 +71,7 @@
   branch chains and indirect merges are refused. Merge verifies actual results, accepts normal base movement after
   submission and reports the extra commits; combined deploy uses the actual verified merged SHA. HTTP, MCP
   github_pr_update/github_pr_merge, caller-token delivery CLI, Dashboard metadata drawer/scope preview and both
-  skills are aligned. Contract version remains the ISO change date 2026-10-08. Part B deployments/rollback are pending.
+  skills are aligned. Contract version remains the ISO change date 2026-10-08. The Dashboard environment card follows the Part B backend round.
 - Delivery Part A review fixes ([design](docs/design/delivery.md), plan §10/§15/§16, C04/C05/C07):
   uncertain metadata writes still unchanged after ten minutes settle as not applied,
   releasing the PR without another PATCH. Merge previews reuse identical documents, prune expired unreferenced

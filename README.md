@@ -184,7 +184,17 @@ Metadata edits compare the title/body digest before writing and read back afterw
 still exists. Merge checks the reviewed head/base/scope before submit and verifies the actual merged SHA; queue merges
 onto a newer base report the extra commits. Unsupported stacks and indirect merges are refused. MCP/CLI writes need
 the caller's `BATC_API_TOKEN`. See [delivery design](docs/design/delivery.md) for envelopes, errors and recovery.
-Deployment history, environment generations, runtime verification and rollback remain Part B.
+Deployment history and environment generations now bind a fixed source to a configured recipe. Read
+`batc delivery preview NAME`, then `delivery deploy NAME --sha SHA --generation N --recipe-digest DIGEST --key KEY`.
+Run success needs the saved attempt's deploy job, environment and runtime version and/or health evidence; the
+result says exactly what was checked. Recipes without `verification` disable deploys (breaking change): add
+`verification = { kind = "http_json", url = "https://deployment.example/version", version_required = true, health_required = true }`
+to your `[[deploy.recipes]]` and configure the endpoint to return the real repository/environment/version/health.
+`delivery history NAME` / `show DEP_ID` remain readable offline. Retry retains that saved identity; rollback starts a
+new operation/run through the same recipe with `delivery rollback NAME DEP_ID --generation N --recipe-digest DIGEST --key KEY`.
+A recipe must explicitly support rollback and list effects it does not undo (`rollback.not_undone`). Cancel keeps the
+provider slot until terminal evidence; old generations never become current, and drift requires attention without
+redispatch. MCP has matching preview/status/list/start/retry/rollback tools. The Dashboard environment card is next.
 
 ### Connect an MCP client
 
