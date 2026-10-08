@@ -24,7 +24,7 @@ runtime Codex send 保留舊 accepted 欄位，但 ACK 不是 task 的回合證�
 
 CLI task-reconcile 帶 --key 時，原 admin-only capability issuer 以既有 admin secret 綁定 task／command／key，使重試取得同一 capability 身分。capability 仍只保存 hash、一次性消耗、10 分鐘期限；consumed capability 只能取回自己相同 key 的原 operation。沒有 key 時保留原每次新發 capability。issuer 不執行 reconciliation，也不讓 admin token 代替 command capability。
 
-Part A 的可執行測試在 `tests/test_operations_unification.py`，加上既有 service/task/API tests。A05 包含 actor/key 衝突、所有 task actions、原子 rollback／restart／capability 消耗；A07 包含 legacy/API gate、每種 pending command、晚到版本/owner/frame、client-resume、permission channels、approval/deferred raise/relay、Goose 不自鎖與 pause abort；A09 包含不同 journal、owner metadata 不變、過期 heartbeat 不接管、第二 client 走中央 owner與重啟續用 journal。A01/A05/A08 的全 legacy 入口驗收仍是 Part B，不能由這批 task 測試宣稱完成。
+Part A 的可執行測試在 `tests/test_operations_unification.py`，加上既有 service/task/API tests。A05 包含 actor/key 衝突、所有 task actions、原子 rollback／restart／capability 消耗；A07 包含 legacy/API gate、每種 pending command、晚到版本/owner/frame、client-resume、permission channels、approval/deferred raise/relay、Goose 不自鎖與 pause abort；A09 包含不同 journal、owner metadata 不變、過期 heartbeat 不接管、第二 client 走中央 owner與重啟續用 journal。`tests/test_operations_delivery_seams.py` 另驗證 effect receipt 不被當成 delivery write、巢狀 effect 失敗只 rollback 自己的 savepoint，以及停止的 merge reconcile 保留 request 供後續讀回。A01/A05/A08 的全 legacy 入口驗收仍是 Part B，不能由這批 task 測試宣稱完成。
 
 ## 固定來源版本
 
@@ -337,8 +337,8 @@ Phase 2 擴充原 owner 機制，沒有第二份 owner database／另一套 leas
 
 不搬移、不重編 task／command／session／worktree／branch／checkpoint IDs，不重送歷史命令，不補造「以前執行過」的 operations。registry、tasks.sqlite3、verification 證詞與既有管理／delivery 資料保留。**沒有業務資料搬遷或歷史回填**；NOT NULL 與唯一索引保留，no-key sentinel 不需 schema change。
 
-- 不重建 operations、不改其 NOT NULL／FK／唯一索引。Part B 採保留前綴 sentinel；舊有 keys/hashes/steps 原樣保留。Part A 若需額外 task 欄位，以 guarded column add／idempotent DDL 與下一個 `PRAGMA user_version` 版本執行，版本可在 rebase 時重編。
-- task-operation linkage 可用現有 `external_refs`／command payload／operation_steps response；沒有第二個 task 狀態表。若實作需新索引／欄位，只做版本化 additive 變更。檢查 row count、operation_steps FK 與原 key 去重結果；migration 失敗 rollback，不先啟動 worker。
+- 不重建 operations、不改其 NOT NULL／FK／唯一索引。Part B 採保留前綴 sentinel；舊有 keys/hashes/steps 原樣保留。Part A 未新增 schema。之後若需額外欄位，以 guarded column add／idempotent DDL 每次開 journal 時執行，不讀寫 `PRAGMA user_version`；只有一次性資料搬移才使用 orchestrator 分配的版本。
+- task-operation linkage 使用現有 `external_refs`／command payload／operation_steps response；沒有第二個 task 狀態表，也沒有資料搬移。檢查 row count、operation_steps FK 與原 key 去重結果；初始化失敗 rollback，不先啟動 worker。
 - 原 `tasks.idem_key` 全域唯一保留。新版提交使用 operation 固定的內部 journal identity；這是已存在的 task receipt linkage，不是替未提供的 client key 提供去重。對原 work_submit key 的第一次升級重送，僅 local-admin 舊相容入口可按原 `Journal.submit` 的 payload_hash 核對並連到原 task，再寫新的 operation link；內容不同拒絕。無法證明原 actor 的歷史 key 不讓新的 API actor 認領。
 - 現有 continuation events／stage events／verification records 不追認為新的 action 回執。新的相同 key 只依新 operation hash 去重；不得因舊 stage 已存在就忽略 ref 不同的衝突。原一次性 reconcile capability 的期限與消耗規則保留。
 - 升級前由部署者備份中央 journal（含 WAL 一致性）、registry、設定、schema 版本與 owner pointer。spec 階段不接觸部署資料。舊 permission_raise_pending 尚無 operation：只有下一次明確 approve-pending 要求才把選定項目納入有意圖的 deferred steps，不啟動自動回填 writer。
