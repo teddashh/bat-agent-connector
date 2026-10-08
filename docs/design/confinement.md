@@ -219,7 +219,7 @@ Phase 2 新增的副作用只有 Connector 記錄／projection、既有 managed 
 | `HOST_ACCOUNT_UNVERIFIED` | 宣告與只讀查核不一致或無法完成；新 start blocked。來源與既有工作不動；明確標記 sent=false，釋放 reservation，按 caller 的 retain_on_error 決定是否沿用原 rollback。Task start command 記 rejected、task 到 needs_ted 並記 code，不 retry／read-back。Checkpoint／repair 到 NeedsAttention，同 operation 在設定修正後重跑未送步驟。 |
 | `CONFINEMENT_MISMATCH` | start 讀回／resume／permission reconcile 的 options 與意圖不同。停止新 prompt 派送，needs_attention；已 ACK 的 session 一律保留 reservation 與 worktree、記 uncertain 與 code。非 confined 的未知 metadata 只記 unknown 並繼續；confined 的 unknown 仍拒絕。Reviewer post-start read 為 best-effort。不自動修改 live runtime 來掩飾。 |
 | `CONFINEMENT_START_UNSETTLED` | 前次 successor start 未定，這次只讀回 reserved ID。options_confirmed／verified 時清 start_uncertain、active 並完成 confirm；mismatch 用上列 code。Unreadable／null 保留 reservation，不重送 start，也不把「未定」說成 options mismatch。 |
-| `CONFINEMENT_EVIDENCE_MISSING` | 已記 confined 的 session 在 meta=null 且遺失原 mode／policy、無可信 intent／回執可恢復時，不送 client-resume／cold resume；不可觸發 BAT 的 omission／bypass fallback。保留既有 session 與讀取，由操作者核對原證據；不把它重新 start 成新預設。loaded live session 的 send 不改 mode，不因 legacy 證據缺失而阻擋。 |
+| `CONFINEMENT_EVIDENCE_MISSING` | 已記 confined 的 session 在 meta=null 且遺失原 mode／policy、無可信 intent／回執可恢復時，不送 client-resume／cold resume；不可觸發 BAT 的 omission／bypass fallback。保留既有 session 與讀取，由操作者核對原證據；不把它重新 start 成新預設。loaded live session 的 send 不改 mode，不因 legacy 證據缺失而阻擋。另對升級時 in-flight checkpoint／repair 的 reservation 缺 confinement record，回 NeedsAttention，不無限讀回。 |
 | Start／setter ACK 遺失 | uncertain；以同 session ID 讀 meta 和已記 intent。cwd 相同但 options 不明不能確認限制；不 start 第二次，不退回 allow-all。 |
 | Codex 第二個 setter 失敗 | 保留各 step 的回執與不明狀態，逐項讀回，不重送已證明的 step；完成後及下一 turn 邊界再核對。沒有原子 sandbox＋approval 保證。 |
 | Host offline／check stale | session read 回原快照＋current_verification=unknown；不偽裝 verified。不得用 stale account check 開新 session。 |
@@ -268,6 +268,9 @@ Mock 只能證明 Connector 的 options、gate、evidence 與顯示；不假造 
 
 | 驗收／計畫 | 實作測試 | 結果與邊界 |
 |---|---|---|
+| A10；§06、§07、§12 | `test_host_account_refusal_before_frame_releases_start`、`test_task_start_refused_before_frame_needs_ted_not_uncertain`、`test_checkpoint_continue_host_account_refusal_needs_attention_and_resumes` | 明確 unsent refusal：零 start frame、釋放 reservation、按 retain_on_error rollback；task rejected／needs_ted 與 code；同 operation resume。 |
+| A10；§06、§12 | `test_general_start_unreadable_meta_records_unknown_and_keeps_session`、`test_post_start_mismatch_keeps_reservation_and_worktree`、`test_reviewer_start_meta_failure_still_activates`、`test_post_start_cancellation_keeps_acknowledged_reservation` | ACK 後不釋放 session；non-confined unknown 可繼續、真 mismatch 保留 uncertain；reviewer best-effort。 |
+| A10；§06 | `test_confined_failover_unsettled_successor_reads_back_before_new_attempt`、`test_host_check_table_is_created_without_consuming_schema_version`、`test_legacy_codex_predecessor_uses_its_recorded_agent`、`test_checkpoint_reconcile_legacy_reservation_requires_evidence` | Successor confirmed／mismatch／unreadable／null 的 readonly recovery；vanished 尚缺可信 absence signal。高版本 journal 補 table 不占版本；legacy agent 辨識與缺證據停在 needs_attention。 |
 | A10；§06、§12 | `test_a10_checkpoint_absolute_path_carries_confinement`（Claude／Codex） | 摘錄含人的絕對路徑；options／flag／level、拒絕 force raise、bulk skipped、來源零寫入。 |
 | A10；§06 | `test_a10_general_start_preserves_operator_policy_and_records_evidence`、`test_a10_confined_start_preserves_stronger_explicit_claude_mode`、`test_a10_level_requires_options_not_cwd` | default／allow_all／confined 的 options／level；explicit plan／dontAsk 不放寬；相同 cwd 不決定 level；os 最多 options_confirmed。 |
 | A10；§06、§12 | `test_a10_accept_edits_requires_verified_account_and_checks_are_read_only`、`test_a10_declared_unverified_account_blocks_new_start` | 未查核 account 不送 acceptEdits；宣告失敗不降級 start，零 start／worktree frame。 |
@@ -300,7 +303,7 @@ A10 的通過紀錄必須注明 level／機制與批准限制。`none`、只有 
 
 ## 尚未涵蓋
 
-- Failover 的 vanished proof 待釐清：既有 BatTaskAdapter.session_presence 對 null 一律 uncertain，claude:list-sessions 列 SDK history；無 tab 的 headless／unloaded session 也可存在。不得以 missing tab／null 或 history 缺項釋放可能仍在跑的 successor。已有唯讀 read-back 可恢復相符 successor，其餘保持 unsettled；需可信 host absence signal 才可重新 start。
+- Failover 的 vanished proof 待釐清：既有 BatTaskAdapter.session_presence 對 null 一律 uncertain，claude:list-sessions 列 SDK history；無 tab 的 headless／unloaded session 也可存在。不得以 missing tab／null 或 history 缺項釋放可能仍在跑的 successor。已有唯讀 read-back 可恢復相符 successor，其餘保持 unsettled；需可信 host absence signal 才可重新 start。固定 BAT 的 [remote_server.rs:3174](https://github.com/teddashh/better-agent-terminal/blob/b7419892fbc9946799b64cca24c2ec8c7fa15c42/src-tauri/src/remote_server.rs#L3174) 以 cwd／agentKind 呼叫 list_sessions_native；不提供完整 live local-session-ID 清單。
 - W12 的 sandbox_evidence_file 設定、可信證據匯入、其檢查與測試延後；schema 保留 verified，但本包不把 OS sandbox 標為 verified。
 - 真 host 的 BAT／CLI 版本、OS sandbox 實際 roots／network 與實機阻擋尚未驗收。W12 要提供可核對同 runtime 的證據；沒有證據的主機保持 gap。
 - Task Service 的 allow-all engine／recipe 如何改成更強限制且保留測試，屬後續決策。這裡只保存現況與限制不足，不修改 §28 禁止增加的模型／recipe 政策。
