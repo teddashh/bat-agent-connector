@@ -242,8 +242,10 @@ async def start_decision(fleet, host: str, agent: str, *, confined: bool = False
     if confined and claude_mode not in (None, "default", "plan", "dontAsk"):
         raise ConfinementRefused("CONFINEMENT_RAISE_REFUSED", "confined start cannot request a wider mode")
     options = dict(CONFINED_OPTIONS[agent]) if confined else policy_options(agent, mode, claude_mode)
-    if confined and agent == "claude" and account["status"] == "verified":
-        options["permissionMode"] = "acceptEdits"
+    if confined and agent == "claude":
+        options["permissionMode"] = claude_mode or "default"
+        if options["permissionMode"] == "default" and account["status"] == "verified":
+            options["permissionMode"] = "acceptEdits"
     if planner:
         options = {"codexSandboxMode": "read-only", "codexApprovalPolicy": "never"}
     if predecessor:

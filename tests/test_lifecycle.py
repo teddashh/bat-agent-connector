@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from bat_agent_connector import channels, lifecycle, orchestrate, registry, triage
+from bat_agent_connector import channels, confinement, lifecycle, orchestrate, registry, triage
 from bat_agent_connector.config import JevConfig
 from bat_agent_connector.errors import ResourceReadOnly, WriteRefused
 from bat_agent_connector.jev import Jev
@@ -214,6 +214,30 @@ async def test_failover_same_worktree(fleet_factory, mock):
                                          handoff_command_id="another-command")
     assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"]) == sends
     await f.close()
+
+
+async def test_a10_task_failover_records_missing_options_without_changing_engine(fleet_factory, mock):
+    sid = _add_wt_claude(mock)
+    f = fleet_factory(writes=True, orchestrate=True, default_permission_mode="allow_all",
+                      safety={"write_min_interval_s": 0})
+    client = f.client("h1")
+    invoke = client.invoke
+
+    async def omit_permission_fields(channel, params=None, **kwargs):
+        result = await invoke(channel, params, **kwargs)
+        if channel == "claude:get-session-meta" and params["sessionId"] != sid:
+            return {k: v for k, v in result.items() if k not in confinement.OPTION_KEYS}
+        return result
+
+    client.invoke = omit_permission_fields
+    try:
+        r = await lifecycle.session_failover(f, "h1", sid, confirm=True, task_id="task-test")
+        assert r["prompt_sent"]
+        assert r["confinement"]["verification"]["status"] == "unknown"
+        assert r["confinement"]["level"] == "none"
+        assert r["confinement"]["gap"] == "task_recipe_compatibility"
+    finally:
+        await f.close()
 
 
 async def test_failover_of_a_bat_session_is_refused_before_any_write(fleet_factory, mock):
