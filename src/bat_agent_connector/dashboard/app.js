@@ -2,6 +2,96 @@
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		"nav_cleanup": "整理與復原",
+		"cleanup_target": "選擇整理範圍",
+		"cleanup_target_work_item": "工作項目",
+		"cleanup_target_checkpoint": "Checkpoint",
+		"cleanup_target_integration": "整合操作",
+		"cleanup_target_host": "主機",
+		"cleanup_id": "主機名稱或原始 ID",
+		"cleanup_children": "包含子工作項目",
+		"cleanup_intro": "先查看實際資源與保留原因，再回收資源。工作脈絡、回執與原始 ID 永久可查。",
+		"cleanup_repreview": "選擇或實際狀態已改變。執行前請重新預覽。",
+		"cleanup_retry_same": "未收到明確回覆。請再次執行，使用原預覽與相同 key 查回原操作；不要另建清理。",
+		"cleanup_preview": "預覽整理",
+		"cleanup_apply": "執行已審閱的整理",
+		"cleanup_reviewed": "我已查看這份預覽的資源、保留內容與丟棄選擇。",
+		"cleanup_scope": "執行需要 cleanup 權限。",
+		"cleanup_counts": "回收 {reclaim} 個資源 · 保留 {retain} 個",
+		"cleanup_expires": "預覽到期時間：{time}（15 分鐘）。",
+		"cleanup_blocked": "所有資源都保留。請查看每項的原因。",
+		"cleanup_commit_kept": "保留 commit",
+		"cleanup_not_delivered": "成果尚未送達。釋放後仍保留 commits 與本機 branch。",
+		"cleanup_release": "釋放這個 worktree；保留尚未送達的 commits 與 branch",
+		"cleanup_discard": "永久丟棄未提交的檔案（需要 cleanup_discard）",
+		"cleanup_plan": "執行計畫",
+		"cleanup_evidence": "ID、證據與送達涵蓋範圍",
+		"cleanup_open_receipts": "查看逐項回執",
+		"cleanup_history": "永久整理紀錄",
+		"cleanup_retained": "實際保留的內容",
+		"cleanup_retained_help": "從主機驗證 refs 與 commit objects。目前只提供保留內容列表；runtime 不會復活。",
+		"cleanup_search": "搜尋原始 ID、舊位置或 PR",
+		"cleanup_search_button": "搜尋",
+		"cleanup_empty_history": "還沒有整理紀錄。",
+		"cleanup_empty_retained": "還沒有已記錄的保留內容。",
+		"cleanup_unavailable": "無法驗證主機或保留 objects。",
+		"cleanup_reason_reviewed": "由審閱後的整理操作移除。",
+		"cleanup_choice_UNCOMMITTED_CHANGES": "已選擇永久丟棄未提交內容。",
+		"cleanup_choice_RESULTS_NOT_DELIVERED": "已選擇釋放；保留尚未送達的 commits 與 branch。",
+		"cleanup_kind_session": "Session",
+		"cleanup_kind_worktree": "Worktree",
+		"cleanup_kind_local_branch": "本機 branch",
+		"cleanup_kind_clone": "Managed clone",
+		"cleanup_kind_integration_area": "整合區",
+		"cleanup_kind_git_pin": "Git pin",
+		"cleanup_kind_source": "原始來源",
+		"cleanup_kind_artifact": "附件參照",
+		"cleanup_kind_temporary": "暫存",
+		"cleanup_kind_retained_ref": "保留 ref",
+		"cleanup_decision_retain": "保留",
+		"cleanup_decision_reclaim": "回收",
+		"cleanup_decision_already_absent": "已不存在",
+		"cleanup_step_preserve": "Pin commit",
+		"cleanup_step_stop": "停止 session",
+		"cleanup_step_discard": "丟棄檔案",
+		"cleanup_step_remove.worktree": "移除 worktree",
+		"cleanup_step_remove.branch": "刪除已送達 branch",
+		"cleanup_step_finalize": "保存回執",
+		"cleanup_step_remove.temporary": "移除指定暫存",
+		"cleanup_kind_remote": "遠端資源",
+		"cleanup_reason_TIER_DISABLED": "主機的 write／orchestrate tier 未啟用。",
+		"cleanup_reason_MANUAL_READ_ONLY": "人工建立，永遠唯讀。",
+		"cleanup_reason_UNKNOWN_READ_ONLY": "無法證明建立來源。",
+		"cleanup_reason_WORKDIR_NOT_MANAGED": "工作目錄不在 managed roots 內。",
+		"cleanup_reason_BINDING_MISMATCH": "資源與建立時的綁定不符。",
+		"cleanup_reason_CLONE_NOT_OURS": "沒有符合的 Connector 建立標記。",
+		"cleanup_reason_CLONE_CONFIG_TAMPERED": "Repository 設定或 object 儲存不安全。",
+		"cleanup_reason_OBSERVATION_UNAVAILABLE": "無法在主機讀取期限內觀測。",
+		"cleanup_reason_ACTIVE_WRITER": "Session 正在串流或寫入。",
+		"cleanup_reason_SESSION_WAITING": "Session 有待回答問題、權限或排隊指令。",
+		"cleanup_reason_COMMAND_UNRESOLVED": "指令或外部步驟的結果尚未確認。",
+		"cleanup_reason_ACTIVE_EXECUTION": "另一個執行仍需要資源。",
+		"cleanup_reason_CONTENT_REQUIRED": "有效整合預覽或執行仍需要內容。",
+		"cleanup_reason_TASK_OWNED": "由 Task Service 整理；reviewed task cleanup 在 Part B。",
+		"cleanup_reason_UNCOMMITTED_CHANGES": "有未提交、未追蹤或 ignored 內容。",
+		"cleanup_reason_RESULTS_NOT_DELIVERED": "送達回執未涵蓋全部結果 commits。",
+		"cleanup_reason_DELIVERY_UNCERTAIN": "送達結果尚未確認。",
+		"cleanup_reason_RETENTION_RULE": "明確保留規則仍需要內容。",
+		"cleanup_reason_SHARED_CONTAINER": "這個載體有共用資源。",
+		"cleanup_reason_RETAINED_CONTENT_STORE": "載體或 pin 保留成果與證據。",
+		"cleanup_reason_REMOTE_OUT_OF_SCOPE": "遠端 branch 刪除是另一個動作。",
+		"cleanup_reason_RESOURCE_KIND_UNSUPPORTED": "這類資源或 Git 狀態沒有整理 adapter。",
+		"cleanup_reason_RESOURCE_CLEANED": "這一代資源已有已確認的整理紀錄。",
+		"cleanup_reason_CLEANUP_IN_PROGRESS": "整理操作已保留這個資源。",
+		"cleanup_receipt_retained": "保留",
+		"cleanup_receipt_pending": "等待",
+		"cleanup_receipt_running": "執行中",
+		"cleanup_receipt_succeeded": "完成",
+		"cleanup_receipt_already_absent": "已不存在",
+		"cleanup_receipt_failed": "失敗",
+		"cleanup_receipt_uncertain": "待確認結果",
+		"cleanup_receipt_blocked_stale": "狀態改變",
+		"cleanup_receipt_cancelled": "已取消",
 		offline_actions_paused: "中央離線，暫停操作",
 		sync_waiting: "等待更新，草稿已保留",
 		desktop_connection: "桌面中央連線",
@@ -226,7 +316,35 @@ var STRINGS = {
 		open_new_session: "開啟新 session",
 		checkpoint_unavailable: "這台主機尚未設定 managed_roots、SSH alias 或 write／orchestrate 權限，不能從版本開工。",
 		needs_start_scope: "你的 token 沒有 start 權限，不能開新的 agent 工作；用 --scope start 重新發 token。",
-		confined_note: "新 agent 只能寫自己的資料夾：Claude 要寫其他地方或跑大部分指令前會先問你，Codex 的 sandbox 直接擋下。",
+		confined_note: "工作目錄本身不提供保護。限制取決於啟動選項及帳號證據；個別批准可能允許外部寫入。",
+		confinement_none: "無已證實的執行限制",
+		confinement_prompt_gated: "權限詢問控管",
+		confinement_host_account: "帳號限制",
+		confinement_os_sandbox: "OS sandbox",
+		confinement_os_pending: "OS sandbox（尚未實機驗證）",
+		confinement_evidence: "限制證據",
+		confinement_creation: "建立時限制",
+		confinement_current: "目前核對",
+		confinement_options: "啟動選項",
+		confinement_gap: "尚未涵蓋",
+		confinement_status_verified: "已查核",
+		confinement_status_options_confirmed: "選項已核對",
+		confinement_current_unknown: "目前限制未知",
+		confinement_current_mismatch: "目前限制與紀錄不符",
+		confinement_status_unknown: "未知",
+		confinement_status_mismatch: "與紀錄不符",
+		confinement_status_pending: "等待核對",
+		confinement_gap_sandbox_enforcement_unverified: "尚未由 W12 實機驗證阻擋效果",
+		confinement_gap_prompt_rules_are_not_os_isolation: "既有批准規則及 shell 可能允許外部寫入",
+		confinement_gap_task_recipe_compatibility: "保留 Task Service 測試行為；未新增執行限制",
+		confinement_gap_execution_restriction_unverified: "尚無執行限制證據",
+		confinement_gap_legacy_evidence_missing: "舊 session 缺建立時證據；不自動升級",
+		confinement_claude_note: "Claude 使用 default：未預先授權的編輯及 Bash 會詢問。既有批准規則仍適用，沒有 OS 寫入隔離。建議使用 Codex；個別批准可能允許外部寫入。",
+		confinement_codex_note: "Codex 使用 workspace-write／on-request。未完成實機阻擋驗證；網路及可寫 roots 無法由 BAT 設定，安裝與 localhost 測試可能受限。個別批准可能越過限制。",
+		confinement_account_note: "已查核 BAT 帳號不能寫宣告的私人 roots。Claude 可使用 acceptEdits；限制只涵蓋已查核的 roots，啟動前會重新核對。",
+		confinement_account_blocked: "已宣告帳號限制，但查核尚未通過；新 session 會被拒絕。請修正主機配置。原因：{reason}。",
+		confinement_account_recheck: "啟動 session 時會重新查核帳號限制。通過後，Claude 可使用 acceptEdits；若僅缺少可降級處理的環境加固條件，Claude 仍可用 default 啟動。其他查核失敗會拒絕啟動。",
+		confinement_account_fallback: "帳號查核回報 {reason}。Claude 會使用 default，不啟用 acceptEdits。",
 		repository: "Repository",
 		pull_number: "PR 編號",
 		load_pr: "讀取 PR",
@@ -336,6 +454,96 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		"nav_cleanup": "Cleanup and retained work",
+		"cleanup_target": "Choose a scope",
+		"cleanup_target_work_item": "Work item",
+		"cleanup_target_checkpoint": "Checkpoint",
+		"cleanup_target_integration": "Integration",
+		"cleanup_target_host": "Host",
+		"cleanup_id": "Host name or original ID",
+		"cleanup_children": "Include child work items",
+		"cleanup_intro": "Review the resources before reclaiming them. Work context, receipts and original IDs stay findable forever.",
+		"cleanup_repreview": "Choices or live state changed. Preview again before applying.",
+		"cleanup_retry_same": "The reply was not confirmed. Apply again with this preview and the same key to recover the original operation.",
+		"cleanup_preview": "Preview cleanup",
+		"cleanup_apply": "Apply reviewed cleanup",
+		"cleanup_reviewed": "I reviewed the resources, retained content and discard choices in this preview.",
+		"cleanup_scope": "Applying needs the cleanup scope.",
+		"cleanup_counts": "{reclaim} resources to reclaim · {retain} retained",
+		"cleanup_expires": "This preview expires at {time} (15 minutes).",
+		"cleanup_blocked": "All resources are retained. Review the reasons for each item.",
+		"cleanup_commit_kept": "Commit kept",
+		"cleanup_not_delivered": "Results were not delivered. Releasing keeps the commits and local branch.",
+		"cleanup_release": "Release this worktree; keep its undelivered commits and branch",
+		"cleanup_discard": "Discard uncommitted files permanently (requires cleanup_discard)",
+		"cleanup_plan": "Plan",
+		"cleanup_evidence": "IDs, evidence and delivery coverage",
+		"cleanup_open_receipts": "View item receipts",
+		"cleanup_history": "Permanent cleanup history",
+		"cleanup_retained": "Actual retained content",
+		"cleanup_retained_help": "Refs and commit objects verified on their host. Worktree restore is not available yet; a runtime cannot be revived.",
+		"cleanup_search": "Search original ID, old location or PR",
+		"cleanup_search_button": "Search",
+		"cleanup_empty_history": "No cleanup history yet.",
+		"cleanup_empty_retained": "No retained content recorded yet.",
+		"cleanup_unavailable": "Host or retained objects could not be verified.",
+		"cleanup_reason_reviewed": "Removed by a reviewed cleanup operation.",
+		"cleanup_choice_UNCOMMITTED_CHANGES": "You chose permanent discard of uncommitted content.",
+		"cleanup_choice_RESULTS_NOT_DELIVERED": "You chose release; undelivered commits and branch are kept.",
+		"cleanup_kind_session": "Session",
+		"cleanup_kind_worktree": "Worktree",
+		"cleanup_kind_local_branch": "Local branch",
+		"cleanup_kind_clone": "Clone",
+		"cleanup_kind_integration_area": "Integration area",
+		"cleanup_kind_git_pin": "Git pin",
+		"cleanup_kind_source": "Source",
+		"cleanup_kind_artifact": "Artifact",
+		"cleanup_kind_temporary": "Temporary",
+		"cleanup_kind_retained_ref": "Retained ref",
+		"cleanup_decision_retain": "Retain",
+		"cleanup_decision_reclaim": "Reclaim",
+		"cleanup_decision_already_absent": "Already absent",
+		"cleanup_step_preserve": "Pin commit",
+		"cleanup_step_stop": "Stop session",
+		"cleanup_step_discard": "Discard files",
+		"cleanup_step_remove.worktree": "Remove worktree",
+		"cleanup_step_remove.branch": "Delete delivered branch",
+		"cleanup_step_finalize": "Record receipt",
+		"cleanup_step_remove.temporary": "Remove exact temporary",
+		"cleanup_kind_remote": "Remote resource",
+		"cleanup_reason_TIER_DISABLED": "The host write or orchestrate tier is disabled.",
+		"cleanup_reason_MANUAL_READ_ONLY": "A person created this resource; it is read-only.",
+		"cleanup_reason_UNKNOWN_READ_ONLY": "Creation ownership is not proven.",
+		"cleanup_reason_WORKDIR_NOT_MANAGED": "The workdir is outside the managed roots.",
+		"cleanup_reason_BINDING_MISMATCH": "The resource does not match its creation binding.",
+		"cleanup_reason_CLONE_NOT_OURS": "The repository has no matching connector creation markers.",
+		"cleanup_reason_CLONE_CONFIG_TAMPERED": "Repository config or object storage is unsafe.",
+		"cleanup_reason_OBSERVATION_UNAVAILABLE": "Live observation was unavailable within the host deadline.",
+		"cleanup_reason_ACTIVE_WRITER": "A session is streaming or writing.",
+		"cleanup_reason_SESSION_WAITING": "A session has a pending question, permission or queued turn.",
+		"cleanup_reason_COMMAND_UNRESOLVED": "A command or external step has an unresolved outcome.",
+		"cleanup_reason_ACTIVE_EXECUTION": "Another execution still needs this resource.",
+		"cleanup_reason_CONTENT_REQUIRED": "An active integration preview or execution needs the content.",
+		"cleanup_reason_TASK_OWNED": "The Task Service reclaims this resource; reviewed task cleanup comes later.",
+		"cleanup_reason_UNCOMMITTED_CHANGES": "Uncommitted tracked, staged, untracked or ignored content exists.",
+		"cleanup_reason_RESULTS_NOT_DELIVERED": "Delivery receipts do not cover all result commits.",
+		"cleanup_reason_DELIVERY_UNCERTAIN": "Delivery has an unresolved outcome.",
+		"cleanup_reason_RETENTION_RULE": "An explicit retention rule requires this content.",
+		"cleanup_reason_SHARED_CONTAINER": "This container has shared resources.",
+		"cleanup_reason_RETAINED_CONTENT_STORE": "The repository or pin carries retained content and evidence.",
+		"cleanup_reason_REMOTE_OUT_OF_SCOPE": "Remote branch deletion is a separate action.",
+		"cleanup_reason_RESOURCE_KIND_UNSUPPORTED": "This resource or Git state has no cleanup adapter.",
+		"cleanup_reason_RESOURCE_CLEANED": "This resource generation has a confirmed cleanup tombstone.",
+		"cleanup_reason_CLEANUP_IN_PROGRESS": "A cleanup operation has reserved this resource.",
+		"cleanup_receipt_retained": "retained",
+		"cleanup_receipt_pending": "pending",
+		"cleanup_receipt_running": "running",
+		"cleanup_receipt_succeeded": "succeeded",
+		"cleanup_receipt_already_absent": "already absent",
+		"cleanup_receipt_failed": "failed",
+		"cleanup_receipt_uncertain": "uncertain",
+		"cleanup_receipt_blocked_stale": "blocked stale",
+		"cleanup_receipt_cancelled": "cancelled",
 		offline_actions_paused: "Central offline · actions paused",
 		sync_waiting: "Waiting to refresh · draft preserved",
 		desktop_connection: "Desktop central connection",
@@ -560,7 +768,35 @@ var STRINGS = {
 		open_new_session: "Open the new session",
 		checkpoint_unavailable: "This host lacks managed_roots, an SSH alias or the write/orchestrate tiers, so work cannot start from a checkpoint here.",
 		needs_start_scope: "Your token lacks the start scope, so it cannot start agent work; issue one with --scope start.",
-		confined_note: "The new agent writes only in its own folder: Claude asks you before writing anywhere else or running most commands, and Codex's sandbox blocks it.",
+		confined_note: "The working directory alone offers no protection. Limits come from start options and account evidence; individual approvals may permit outside writes.",
+		confinement_none: "No proven execution limit",
+		confinement_prompt_gated: "Prompt gated",
+		confinement_host_account: "Host account",
+		confinement_os_sandbox: "OS sandbox",
+		confinement_os_pending: "OS sandbox (live verification pending)",
+		confinement_evidence: "Confinement evidence",
+		confinement_creation: "Creation limits",
+		confinement_current: "Current verification",
+		confinement_options: "Start options",
+		confinement_gap: "Coverage gap",
+		confinement_status_verified: "Verified",
+		confinement_status_options_confirmed: "Options confirmed",
+		confinement_current_unknown: "Current confinement unknown",
+		confinement_current_mismatch: "Confinement mismatch",
+		confinement_status_unknown: "Unknown",
+		confinement_status_mismatch: "Record mismatch",
+		confinement_status_pending: "Pending",
+		confinement_gap_sandbox_enforcement_unverified: "W12 live enforcement verification is pending",
+		confinement_gap_prompt_rules_are_not_os_isolation: "Existing approvals and shell commands can permit outside writes",
+		confinement_gap_task_recipe_compatibility: "Task Service test behavior is preserved; no additional execution restriction",
+		confinement_gap_execution_restriction_unverified: "No execution restriction evidence",
+		confinement_gap_legacy_evidence_missing: "Legacy creation evidence is missing; no automatic upgrade",
+		confinement_claude_note: "Claude uses default: unapproved edits and Bash ask for approval. Existing approval rules still apply; there is no OS write isolation. Consider Codex. Individual approvals may permit outside writes.",
+		confinement_codex_note: "Codex uses workspace-write / on-request. Live enforcement is unverified; BAT cannot configure network or writable roots, so installs and localhost tests may be restricted. Individual approvals may escape these limits.",
+		confinement_account_note: "The BAT account was checked against declared personal roots. Claude may use acceptEdits; only those roots are covered and the account is checked again before starting.",
+		confinement_account_blocked: "A host account boundary is declared but its check has not passed. New sessions will be refused; fix the host configuration. Reason: {reason}.",
+		confinement_account_recheck: "The account boundary is checked again when the session starts. If it passes, Claude may use acceptEdits; a supported hardening gap uses plain default. Other check failures refuse the start.",
+		confinement_account_fallback: "The account check reports {reason}. Claude uses plain default without acceptEdits.",
 		repository: "Repository",
 		pull_number: "PR number",
 		load_pr: "Load PR",
@@ -1258,9 +1494,44 @@ function debounceRefresh(fn, ms) {
 		}, ms);
 	});
 }
+function confinementLabel(s) {
+	const level = s.confinement?.level || "none";
+	return t(level === "os_sandbox" && s.confinement?.verification?.status !== "verified" ? "confinement_os_pending" : "confinement_" + level);
+}
+function confinementNote(host, agent) {
+	const note = h("p", {
+		class: "muted",
+		"data-confinement-note": ""
+	});
+	const update = () => {
+		const account = state.caps?.hosts?.find((x) => x.host === host)?.confinement?.host_account;
+		const effect = account?.start_effect;
+		if (effect === "refused") {
+			note.textContent = t("confinement_account_blocked", { reason: account.reason });
+			if (agent.value === "codex") note.textContent += " " + t("confinement_codex_note");
+		} else if (agent.value === "codex") note.textContent = t("confinement_codex_note");
+		else if (effect === "verified") note.textContent = t("confinement_account_note");
+		else if (effect === "recheck") note.textContent = t("confinement_account_recheck");
+		else note.textContent = (effect === "fallback_default" && account?.declared ? t("confinement_account_fallback", { reason: account.reason }) + " " : "") + t("confinement_claude_note");
+	};
+	agent.addEventListener("change", update);
+	note.setHost = (value) => {
+		host = value;
+		update();
+	};
+	update();
+	return note;
+}
+function confinementDetails(s) {
+	const record = s.confinement;
+	const current = s.current_verification;
+	return h("details", {}, h("summary", {}, t("confinement_evidence")), h("p", { class: "muted" }, t("confined_note")), h("dl", { class: "kv" }, h("dt", {}, t("confinement_creation")), h("dd", {}, confinementLabel(s)), h("dt", {}, t("confinement_current")), h("dd", {}, t("confinement_status_" + (current?.status || "unknown"))), h("dt", {}, t("confinement_options")), h("dd", {}, h("code", {}, JSON.stringify(record?.options || {}))), h("dt", {}, t("confinement_evidence")), h("dd", {}, h("code", {}, JSON.stringify(record?.evidence || {}))), h("dt", {}, t("confinement_gap")), h("dd", {}, record?.gap ? t("confinement_gap_" + record.gap) : t("none")), h("dt", {}, t("confinement_current")), h("dd", {}, h("code", {}, JSON.stringify(current || { status: "unknown" })))));
+}
 function sessionBadges(s) {
 	return [
 		chip(s.host),
+		chip(confinementLabel(s), s.confinement?.level === "none" ? "readonly" : "info"),
+		s.confinement?.level && s.confinement.level !== "none" && ["unknown", "mismatch"].includes(s.current_verification?.status) ? chip(t("confinement_current_" + s.current_verification.status), "stale") : null,
 		s.api_access === "managed" ? chip(t("managed"), "managed") : chip(t("read_only"), "readonly"),
 		s.stale ? chip(`${t("stale")} · ${t("stale_reason_" + s.stale_reason)}`, "stale") : null,
 		s.pending ? chip(t("pending_" + s.pending.kind), "stale") : null
@@ -1280,7 +1551,7 @@ function sessionRow(s) {
 		s.workspace,
 		s.agent_kind,
 		s.worktree_branch
-	].filter(Boolean).join(" · "))), ...sessionBadges(s), h("span", { class: "muted" }, when(s.last_activity_at)));
+	].filter(Boolean).join(" · "))), h("div", { class: "actions session-badges" }, ...sessionBadges(s)), h("span", { class: "muted" }, when(s.last_activity_at)));
 }
 var epoch = (x) => x ? new Date(x * 1e3).toISOString() : "";
 function opStatus(op) {
@@ -1395,6 +1666,7 @@ async function viewSession(main, host, sid) {
 	}
 	if (!head.isConnected) return;
 	head.replaceChildren(h("h1", {}, row.title || sid), h("div", { class: "actions" }, ...sessionBadges(row)), h("dl", { class: "kv" }, h("dt", {}, t("host")), h("dd", {}, row.host), h("dt", {}, t("workspace")), h("dd", {}, row.workspace || ""), h("dt", {}, "Session"), h("dd", {}, h("code", {}, row.session_id)), h("dt", {}, t("agent")), h("dd", {}, [row.agent_kind, row.model].filter(Boolean).join(" · ")), h("dt", {}, "Provenance"), h("dd", {}, t("provenance_" + row.provenance)), h("dt", {}, t("observed")), h("dd", {}, when(row.observed_at))));
+	head.append(confinementDetails(row));
 	if (from) head.append(h("p", { class: "note" }, t("started_from", { commit: from.commit_sha.slice(0, 12) }), " ", h("a", { href: `#/session/${encodeURIComponent(from.source_host)}/${encodeURIComponent(from.source_session_id)}` }, t("source_session")), " · ", h("a", { href: `#/op/${from.operation_id}` }, from.operation_id)));
 	if (linked?.length) head.append(linkedItems(linked));
 	const scope = `send.${host}.${sid}`;
@@ -1527,7 +1799,7 @@ function checkpointPanel(host, sid) {
 	const row = (cp) => rows.get(cp.checkpoint_id) || rows.set(cp.checkpoint_id, buildRow(cp)).get(cp.checkpoint_id);
 	const buildRow = (cp) => {
 		const instr = h("textarea", { placeholder: t("continue_placeholder") });
-		const agent = h("select", {}, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
+		const agent = h("select", { "aria-label": t("agent") }, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
 		const out = h("div", { class: "muted" });
 		const go = h("button", {
 			class: "primary",
@@ -1546,7 +1818,7 @@ function checkpointPanel(host, sid) {
 				go.disabled = false;
 			}
 		}, t("start_agent_work"));
-		const form = h("div", { hidden: true }, h("p", { class: "muted" }, t("confined_note")), instr, h("div", { class: "actions" }, agent, go), out);
+		const form = h("div", { hidden: true }, confinementNote(host, agent), instr, h("div", { class: "actions" }, agent, go), out);
 		return h("div", { class: "row" }, h("div", { class: "grow" }, h("div", { class: "title" }, h("code", {}, cp.commit_sha.slice(0, 12)), " ", cp.branch || ""), h("div", { class: "muted" }, [
 			when(epoch(cp.captured_at)),
 			cp.actor,
@@ -1997,6 +2269,40 @@ function integrationPanel(pr, reloadCard) {
 	box.append(pickList, h("h3", {}, t("selected_in_order")), order, previewBox, status);
 	return box;
 }
+function repairControl(op) {
+	const conflict = [
+		"INTEGRATION_CONFLICT",
+		"RESOLUTION_INCOMPLETE",
+		"RESOLUTION_INVALID"
+	].includes(op.error_code);
+	const out = h("div", {});
+	let handoff = null;
+	let repair = null;
+	if (conflict && (state.caps?.scopes || []).includes("start")) {
+		const agent = h("select", { "aria-label": t("agent") }, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
+		const go = h("button", {
+			class: "secondary",
+			onclick: async () => {
+				go.disabled = true;
+				try {
+					const o = await submit("integration.handoff", { operation_id: op.operation_id }, { agent: agent.value }, {}, `handoff.${op.operation_id}`);
+					out.append(h("p", {}, opStatus(o), " ", t("handoff_started"), " ", h("a", { href: `#/op/${o.operation_id}` }, o.operation_id)));
+				} catch (e) {
+					out.append(errorBox(e));
+				}
+				go.disabled = false;
+			}
+		}, t("start_agent_work"));
+		const d = drawer(confinementNote(op.target?.host || op.external_refs?.host, agent), h("div", { class: "actions" }, agent, go));
+		repair = d.box;
+		handoff = h("button", {
+			class: "secondary",
+			onclick: () => d.toggle.click()
+		}, t("hand_to_agent"));
+	}
+	if (handoff) out.append(handoff, repair);
+	return out;
+}
 function integrationStatus(op, act) {
 	const code = op.error_code;
 	const text = op.status === "succeeded" ? t("integration_done", {
@@ -2004,23 +2310,8 @@ function integrationStatus(op, act) {
 		new: op.result.new_head.slice(0, 7),
 		n: op.result.added_commits ?? "?"
 	}) : op.status === "needs_attention" ? t("integration_" + code) !== "integration_" + code ? t("integration_" + code) : op.status_reason : op.status === "uncertain" ? t("integration_uncertain") : op.status === "waiting_external" ? (op.external_refs || {}).conflict ? t("integration_waiting_resolver") : (op.external_refs || {}).pushed_sha ? t("integration_waiting") : op.status_reason || t("integration_running") : op.status === "failed" ? `${code}: ${op.status_reason || ""}` : t("integration_running");
-	const conflict = [
-		"INTEGRATION_CONFLICT",
-		"RESOLUTION_INCOMPLETE",
-		"RESOLUTION_INVALID"
-	].includes(code);
 	const out = h("div", {});
-	const handoff = conflict && (state.caps?.scopes || []).includes("start") ? h("button", {
-		class: "secondary",
-		onclick: async () => {
-			try {
-				const o = await submit("integration.handoff", { operation_id: op.operation_id }, { agent: "claude" }, {}, `handoff.${op.operation_id}`);
-				out.append(h("p", {}, opStatus(o), " ", t("handoff_started"), " ", h("a", { href: `#/op/${o.operation_id}` }, o.operation_id)));
-			} catch (e) {
-				out.append(errorBox(e));
-			}
-		}
-	}, t("hand_to_agent")) : null;
+	const handoff = repairControl(op);
 	const buttons = op.status === "needs_attention" ? [
 		h("button", {
 			class: "primary",
@@ -2052,11 +2343,13 @@ async function viewOperations(main) {
 	});
 }
 async function viewOperation(main, id) {
+	freshPage();
 	const panel = h("div", { class: "panel" });
 	main.append(panel);
-	const render = async () => {
+	const render = async (fromEvent = false) => {
+		const opens = drawerOpens;
 		try {
-			const { operation: op, work_items: linked } = await api("GET", `/operations/${id}`);
+			const { operation: op, work_items: linked, cleanup_receipts: cleanupReceipts } = await api("GET", `/operations/${id}`);
 			const refs = op.external_refs || {};
 			const retry = refs.merged_sha && op.action === "delivery.merge_and_deploy" && op.status === "failed" ? h("button", {
 				class: "primary",
@@ -2101,15 +2394,23 @@ async function viewOperation(main, id) {
 					}
 				}
 			}, t("cancel")) : null;
-			fill(panel, h("h1", {}, op.action), h("p", { class: "op-status" }, opStatus(op), " ", op.error_code ? chip(op.error_code, "bad") : null), ...linked?.length ? [linkedItems(linked)] : [], h("dl", { class: "kv" }, h("dt", {}, t("actor")), h("dd", {}, `${op.actor} (${op.entry})`), h("dt", {}, t("created")), h("dd", {}, when(epoch(op.created_at))), op.status_reason ? [h("dt", {}, t("reason")), h("dd", {}, op.status_reason)] : null, h("dt", {}, "Target"), h("dd", {}, h("code", {}, JSON.stringify(op.target))), Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null, op.result ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null), ...receipts || [], (op.result?.merge || op.result || refs.merge_receipt)?.base_moved ? h("p", { class: "note warn" }, t("merged_newer_base", { count: (op.result?.merge || op.result || refs.merge_receipt).other_commits_count })) : null, refs.write_acknowledged && refs.verification_pending ? h("p", { class: "note warn" }, t("metadata_pending")) : null, h("h2", {}, t("steps")), ...op.steps.map((s) => h("div", { class: "row" }, h("div", { class: "grow" }, s.name), h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)), h("div", { class: "actions" }, opened, resume, retry, cancel));
+			if (!panel.isConnected) return;
+			if (holdRender(fromEvent, opens)) {
+				idleReload = () => render(true);
+				return;
+			}
+			freshPage();
+			fill(panel, h("h1", {}, op.action), h("p", { class: "op-status" }, opStatus(op), " ", op.error_code ? chip(op.error_code, "bad") : null), ...linked?.length ? [linkedItems(linked)] : [], h("dl", { class: "kv" }, h("dt", {}, t("actor")), h("dd", {}, `${op.actor} (${op.entry})`), h("dt", {}, t("created")), h("dd", {}, when(epoch(op.created_at))), op.status_reason ? [h("dt", {}, t("reason")), h("dd", {}, op.status_reason)] : null, h("dt", {}, "Target"), h("dd", {}, h("code", {}, JSON.stringify(op.target))), Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null, op.result ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null), ...receipts || [], ...cleanupReceipts?.length ? [h("h2", {}, t("cleanup_open_receipts")), ...cleanupReceipts.map((r) => h("details", { class: "row-details" }, h("summary", {}, r.resource_id, " · ", t("cleanup_receipt_" + r.status)), h("pre", { class: "pre" }, JSON.stringify(r, null, 2))))] : [], ...op.action === "integration.apply" ? [repairControl(op)] : [], (op.result?.merge || op.result || refs.merge_receipt)?.base_moved ? h("p", { class: "note warn" }, t("merged_newer_base", { count: (op.result?.merge || op.result || refs.merge_receipt).other_commits_count })) : null, refs.write_acknowledged && refs.verification_pending ? h("p", { class: "note warn" }, t("metadata_pending")) : null, h("h2", {}, t("steps")), ...op.steps.map((s) => h("div", { class: "row" }, h("div", { class: "grow" }, s.name), h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)), h("div", { class: "actions" }, opened, resume, retry, cancel));
 		} catch (e) {
 			fill(panel, errorBox(e));
 		}
 	};
 	await render();
-	return onEvents((ev) => {
-		if (ev.resource_id === id) return render();
-	});
+	return liveReload(render, [
+		"operation",
+		"integration",
+		"cleanup"
+	]);
 }
 function viewSettings(main) {
 	if (nativeDesktop) return viewNativeSettings(main);
@@ -2805,7 +3106,7 @@ async function viewWorkItem(main, wid) {
 			class: "grow",
 			href: `#/item/${x.work_item_id}`
 		}, x.title));
-		fill(panel, h("div", { class: "muted" }, h("a", { href: "#/projects" }, t("nav_projects")), " / ", h("a", { href: `#/project/${data.project.project_id}` }, data.project.name), ...data.path.flatMap((x) => [" / ", h("a", { href: `#/item/${x.work_item_id}` }, x.title)])), h("h1", {}, w.title, " ", stateChip(c), w.archived ? [" ", chip(t("archived"), "warn")] : null), data.derived_from ? h("p", { class: "muted" }, t("derived_from"), " ", h("a", { href: `#/item/${data.derived_from.work_item_id}` }, data.derived_from.title)) : null, banner, h("div", { class: "actions" }, h("label", {}, t("state"), " ", stateSel), !c.pending && !c.approved && live ? approve : null, live && may("manage") ? d.toggle : null), d.box, ...section(t("goal"), w.goal), ...section(t("request"), w.request), ...section(t("acceptance"), w.acceptance), h("h2", {}, t("steps_title")), h("div", { class: "panel" }, ...stepRows.length ? stepRows : [h("p", { class: "muted" }, t("no_steps"))], live && may("manage") ? h("div", { class: "filters" }, newStep, addStep) : null), h("h2", {}, t("links")), h("div", { class: "panel" }, ...linkRows.length ? linkRows : [h("p", { class: "muted" }, t("no_links"))], live && may("manage") ? h("div", { class: "filters" }, kind, ref, h("button", {
+		fill(panel, h("div", { class: "muted" }, h("a", { href: "#/projects" }, t("nav_projects")), " / ", h("a", { href: `#/project/${data.project.project_id}` }, data.project.name), ...data.path.flatMap((x) => [" / ", h("a", { href: `#/item/${x.work_item_id}` }, x.title)])), h("h1", {}, w.title, " ", stateChip(c), w.archived ? [" ", chip(t("archived"), "warn")] : null), data.derived_from ? h("p", { class: "muted" }, t("derived_from"), " ", h("a", { href: `#/item/${data.derived_from.work_item_id}` }, data.derived_from.title)) : null, banner, h("div", { class: "actions" }, h("label", {}, t("state"), " ", stateSel), !c.pending && !c.approved && live ? approve : null, live && may("manage") ? d.toggle : null), d.box, ...section(t("goal"), w.goal), ...section(t("request"), w.request), ...section(t("acceptance"), w.acceptance), h("h2", {}, t("steps_title")), h("div", { class: "panel" }, ...stepRows.length ? stepRows : [h("p", { class: "muted" }, t("no_steps"))], live && may("manage") ? h("div", { class: "filters" }, newStep, addStep) : null), h("div", { class: "actions" }, h("a", { href: `#/cleanup/item/${wid}` }, t("nav_cleanup"))), h("h2", {}, t("links")), h("div", { class: "panel" }, ...linkRows.length ? linkRows : [h("p", { class: "muted" }, t("no_links"))], live && may("manage") ? h("div", { class: "filters" }, kind, ref, h("button", {
 			class: "secondary",
 			onclick: () => {
 				if (ref.value.trim()) link({
@@ -2830,7 +3131,7 @@ function continueFrom(w, checkpointId, notice) {
 		w.acceptance && `${t("acceptance")}:\n${w.acceptance}`,
 		w.steps.length ? `${t("steps_title")}:\n${w.steps.map((s) => `- [${s.done ? "x" : " "}] ${s.text}`).join("\n")}` : ""
 	].filter(Boolean).join("\n\n"));
-	const agent = h("select", {}, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
+	const agent = h("select", { "aria-label": t("agent") }, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
 	const out = h("div", {});
 	const go = h("button", {
 		class: "primary",
@@ -2855,7 +3156,9 @@ function continueFrom(w, checkpointId, notice) {
 			}, {}, `wi.link.${w.work_item_id}.${op.operation_id}`)) out.append(" · ", t("linked_back"));
 		}
 	}, t("start_agent_work"));
-	const d = drawer(h("p", { class: "muted" }, t("confined_note")), instr, h("div", { class: "actions" }, agent, go), out);
+	const note = confinementNote(w.links?.find((l) => l.ref === checkpointId)?.target?.host, agent);
+	api("GET", `/checkpoints/${encodeURIComponent(checkpointId)}`).then((x) => note.setHost(x.checkpoint.host)).catch(() => {});
+	const d = drawer(note, instr, h("div", { class: "actions" }, agent, go), out);
 	const why = !may("start") ? t("needs_start_scope") : !may("manage") ? t("needs_manage_scope") : null;
 	return h("div", { class: "grow" }, h("button", {
 		class: "secondary",
@@ -2879,12 +3182,316 @@ function workItemRow(w) {
 		href: `#/item/${w.work_item_id}`
 	}, w.title), h("div", { class: "muted" }, [w.project_name, w.completion.claimed_by && t("claimed_by", { who: w.completion.claimed_by })].filter(Boolean).join(" · "))), chip(t("needs_decision"), "warn"));
 }
+async function viewCleanup(main, section, ident) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	const draftKey = `batc.cleanup.draft.${connection.namespace}`;
+	const pendingKey = `batc.cleanup.pending.${connection.namespace}`;
+	const persist = (key, value) => {
+		assertView(connection);
+		try {
+			if (value === null) sessionStorage.removeItem(key);
+			else sessionStorage.setItem(key, JSON.stringify(value));
+		} catch (error) {
+			if (error.code) throw error;
+		}
+	};
+	const stored = (() => {
+		try {
+			return JSON.parse(sessionStorage.getItem(draftKey) || "{}");
+		} catch {
+			return {};
+		}
+	})();
+	const choices = section === "item" && stored.id !== ident ? {
+		discard_uncommitted: [],
+		release_undelivered: []
+	} : stored.choices || {
+		discard_uncommitted: [],
+		release_undelivered: []
+	};
+	const pending = (() => {
+		try {
+			return JSON.parse(sessionStorage.getItem(pendingKey) || "null");
+		} catch {
+			return null;
+		}
+	})();
+	const kind = h("select", { "aria-label": t("cleanup_target") }, ...[
+		"work_item",
+		"checkpoint",
+		"integration",
+		"host"
+	].map((k) => h("option", { value: k }, t("cleanup_target_" + k))));
+	kind.value = section === "item" ? "work_item" : stored.kind || "host";
+	const targetId = h("input", {
+		value: section === "item" ? ident : stored.id || "",
+		"aria-label": t("cleanup_id"),
+		placeholder: t("cleanup_id"),
+		class: "cleanup-id"
+	});
+	const children = h("input", {
+		type: "checkbox",
+		checked: stored.children || false
+	});
+	const childrenLabel = h("label", { class: "cleanup-choice" }, children, t("cleanup_children"));
+	const previewOut = h("div", { "aria-live": "polite" });
+	const status = h("div", { "aria-live": "polite" });
+	const historyOut = h("div", { "aria-live": "polite" });
+	const retainedOut = h("div", { "aria-live": "polite" });
+	let doc = pending, busy = false, pendingRequest = !!pending, previewRevision = 0;
+	function changed() {
+		assertView(connection);
+		previewRevision++;
+		doc = null;
+		apply.disabled = true;
+		reviewed.checked = false;
+		persist(draftKey, {
+			kind: kind.value,
+			id: targetId.value,
+			children: children.checked,
+			choices
+		});
+		childrenLabel.hidden = kind.value !== "work_item";
+		fill(status, h("p", { class: "muted" }, t("cleanup_repreview")));
+	}
+	function targetChanged() {
+		choices.discard_uncommitted = [];
+		choices.release_undelivered = [];
+		changed();
+	}
+	kind.addEventListener("change", targetChanged);
+	targetId.addEventListener("input", targetChanged);
+	children.addEventListener("change", targetChanged);
+	childrenLabel.hidden = kind.value !== "work_item";
+	function choice(item, key, label) {
+		const input = h("input", {
+			type: "checkbox",
+			checked: choices[key].includes(item.resource_id),
+			disabled: pendingRequest || key === "discard_uncommitted" && !may("cleanup_discard"),
+			onchange: () => {
+				choices[key] = choices[key].filter((id) => id !== item.resource_id);
+				if (input.checked) choices[key].push(item.resource_id);
+				changed();
+			}
+		});
+		return h("label", { class: "cleanup-choice" }, input, label);
+	}
+	function resourceRow(item) {
+		const codes = (item.reasons || []).map((r) => r.code);
+		const eligible = item.proven && item.kind === "worktree" && !item.task_owned;
+		return h("article", { class: "cleanup-resource" }, h("div", { class: "row" }, h("strong", { class: "grow" }, t("cleanup_kind_" + item.kind)), chip(t("cleanup_decision_" + item.decision), item.decision === "reclaim" ? "ok" : "")), h("div", { class: "cleanup-binding" }, item.host || "", " ", item.path || item.ref || item.resource_id), item.observation?.head ? h("p", { class: "muted" }, t("cleanup_commit_kept"), " ", h("code", {}, item.observation.head)) : null, item.delivery && !item.delivery.delivered ? h("p", { class: "note warn" }, t("cleanup_not_delivered")) : null, ...(item.reasons || []).map((r) => h("div", { class: "cleanup-reason" }, h("code", {}, r.code), " · ", t("cleanup_reason_" + r.code))), ...(item.overridden_reasons || []).map((r) => h("p", { class: "muted" }, t("cleanup_choice_" + r.code))), item.steps?.length ? h("p", {}, t("cleanup_plan"), ": ", item.steps.map((x) => t("cleanup_step_" + x)).join(" → ")) : null, eligible && codes.includes("RESULTS_NOT_DELIVERED") ? choice(item, "release_undelivered", t("cleanup_release")) : null, eligible && codes.includes("UNCOMMITTED_CHANGES") ? choice(item, "discard_uncommitted", t("cleanup_discard")) : null, h("details", {}, h("summary", {}, t("cleanup_evidence")), h("pre", { class: "pre" }, JSON.stringify({
+			resource_id: item.resource_id,
+			original_ids: item.original_ids,
+			reasons: item.reasons,
+			consumers: item.consumers,
+			delivery: item.delivery,
+			manifest: item.observation?.manifest
+		}, null, 2))));
+	}
+	const reviewed = h("input", {
+		type: "checkbox",
+		onchange: () => {
+			apply.disabled = !doc?.ready || !may("cleanup") || !reviewed.checked;
+		}
+	});
+	const apply = h("button", {
+		class: "primary",
+		disabled: true,
+		onclick: async () => {
+			if (busy || !doc || !reviewed.checked) return;
+			assertView(connection);
+			const reviewedDoc = doc;
+			busy = true;
+			pendingRequest = true;
+			apply.disabled = true;
+			previewButton.disabled = true;
+			kind.disabled = true;
+			targetId.disabled = true;
+			children.disabled = true;
+			previewOut.querySelectorAll("input").forEach((input) => {
+				input.disabled = true;
+			});
+			persist(pendingKey, reviewedDoc);
+			try {
+				const op = await submit("cleanup.apply", { preview_id: reviewedDoc.preview_id }, { preview_token: reviewedDoc.preview_token }, { preview_fingerprint: reviewedDoc.fingerprint }, "cleanup.apply");
+				assertView(connection);
+				fill(status, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, t("cleanup_open_receipts")), ...(op.result?.items || []).map((r) => h("p", {}, h("code", {}, r.resource_id), " · ", t("cleanup_receipt_" + r.status))));
+				persist(pendingKey, null);
+				pendingRequest = false;
+				doc = null;
+				reviewed.checked = false;
+				previewButton.disabled = false;
+				kind.disabled = false;
+				targetId.disabled = false;
+				children.disabled = false;
+				await loadHistory();
+				await loadRetained();
+			} catch (e) {
+				if (connection.epoch !== state.epoch || connection.namespace !== state.namespace || connection.generation !== generation) return;
+				if (!e.status || e.status >= 500) {
+					fill(status, errorBox(e), h("p", {}, t("cleanup_retry_same")));
+					apply.disabled = !may("cleanup");
+					previewButton.disabled = true;
+					kind.disabled = true;
+					targetId.disabled = true;
+					children.disabled = true;
+				} else {
+					persist(pendingKey, null);
+					pendingRequest = false;
+					fill(status, errorBox(e), h("p", {}, t("cleanup_repreview")));
+					doc = null;
+					previewButton.disabled = false;
+					kind.disabled = false;
+					targetId.disabled = false;
+					children.disabled = false;
+				}
+			} finally {
+				busy = false;
+			}
+		}
+	}, t("cleanup_apply"));
+	function renderPreview() {
+		fill(previewOut, h("h2", {}, t("cleanup_preview")), h("p", {}, t("cleanup_counts", {
+			reclaim: doc.impact.reclaim,
+			retain: doc.impact.retain
+		})), h("p", { class: "muted" }, t("cleanup_expires", { time: when(doc.expires_at * 1e3) })), ...(doc.items || []).map(resourceRow), !doc.ready ? h("p", { class: "note" }, t("cleanup_blocked")) : null);
+	}
+	const previewButton = h("button", {
+		class: "secondary",
+		onclick: async () => {
+			assertView(connection);
+			const revision = ++previewRevision;
+			previewButton.disabled = true;
+			doc = null;
+			apply.disabled = true;
+			reviewed.checked = false;
+			const key = {
+				work_item: "work_item_id",
+				checkpoint: "checkpoint_id",
+				integration: "operation_id",
+				host: "host"
+			}[kind.value];
+			const target = {
+				kind: kind.value,
+				[key]: targetId.value.trim(),
+				...kind.value === "work_item" ? { include_children: children.checked } : {}
+			};
+			try {
+				const result = await api("POST", "/cleanup-previews", {
+					target,
+					choices: structuredClone(choices)
+				});
+				assertView(connection);
+				if (revision !== previewRevision) return;
+				doc = result.preview;
+				renderPreview();
+				fill(status);
+			} catch (e) {
+				if (revision === previewRevision && connection.epoch === state.epoch) fill(status, errorBox(e));
+			} finally {
+				previewButton.disabled = false;
+			}
+		}
+	}, t("cleanup_preview"));
+	if (pending && section !== "resource") {
+		kind.value = pending.target.kind;
+		targetId.value = pending.target[{
+			work_item: "work_item_id",
+			checkpoint: "checkpoint_id",
+			integration: "operation_id",
+			host: "host"
+		}[kind.value]];
+		children.checked = !!pending.target.include_children;
+		childrenLabel.hidden = kind.value !== "work_item";
+		renderPreview();
+		reviewed.checked = true;
+		apply.disabled = !may("cleanup");
+		previewButton.disabled = true;
+		kind.disabled = true;
+		targetId.disabled = true;
+		children.disabled = true;
+		fill(status, h("p", { class: "note" }, t("cleanup_retry_same")));
+	}
+	const search = h("input", {
+		class: "cleanup-id",
+		"aria-label": t("cleanup_search"),
+		placeholder: t("cleanup_search")
+	});
+	async function loadHistory(cursor = "") {
+		try {
+			const result = await api("GET", `/cleanup-tombstones?query=${encodeURIComponent(search.value)}&cursor=${encodeURIComponent(cursor)}`);
+			assertView(connection);
+			const rows = (result.tombstones || []).map((x) => h("article", { class: "cleanup-resource" }, h("a", { href: `#/cleanup/resource/${x.resource_id}` }, t("cleanup_kind_" + x.kind)), h("div", { class: "cleanup-binding" }, x.host, " ", x.path || x.ref || ""), h("p", { class: "muted" }, x.actor, " · ", when(x.cleaned_at * 1e3)), h("p", {}, t("cleanup_reason_reviewed")), ...(x.pull_requests || []).map((pr) => h("p", {}, `${pr.repository} #${pr.pull_number}`))));
+			if (cursor) historyOut.append(...rows);
+			else fill(historyOut, ...rows, rows.length ? null : h("p", { class: "muted" }, t("cleanup_empty_history")));
+			if (result.next_cursor) historyOut.append(h("button", {
+				class: "secondary",
+				onclick: (e) => {
+					e.currentTarget.remove();
+					loadHistory(result.next_cursor);
+				}
+			}, t("more")));
+		} catch (e) {
+			fill(historyOut, errorBox(e));
+		}
+	}
+	async function loadRetained(cursor = "") {
+		try {
+			const result = await api("GET", `/cleanup-retained?cursor=${encodeURIComponent(cursor)}`);
+			assertView(connection);
+			const rows = (result.retained || []).map((x) => h("article", { class: "cleanup-resource" }, h("code", {}, x.commit_sha), h("div", { class: "cleanup-binding" }, x.host, " ", x.repository), h("p", { class: "muted" }, x.ref)));
+			const unavailable = (result.unavailable || []).map((x) => h("p", { class: "note warn" }, x.host, " ", x.ref, " · ", t("cleanup_unavailable")));
+			if (cursor) retainedOut.append(...rows, ...unavailable);
+			else fill(retainedOut, ...rows, ...unavailable, rows.length || unavailable.length ? null : h("p", { class: "muted" }, t("cleanup_empty_retained")));
+			if (result.next_cursor) retainedOut.append(h("button", {
+				class: "secondary",
+				onclick: (e) => {
+					e.currentTarget.remove();
+					loadRetained(result.next_cursor);
+				}
+			}, t("more")));
+		} catch (e) {
+			fill(retainedOut, errorBox(e));
+		}
+	}
+	main.append(h("h1", {}, t("nav_cleanup")), h("p", { class: "muted" }, t("cleanup_intro")));
+	if (section === "resource") {
+		try {
+			const data = await api("GET", `/cleanup-tombstones/${encodeURIComponent(ident)}`);
+			main.append(h("a", { href: "#/cleanup" }, t("nav_cleanup")), resourceRow(data.tombstone), h("h2", {}, t("cleanup_open_receipts")), h("pre", { class: "panel pre" }, JSON.stringify(data.receipts, null, 2)));
+		} catch (e) {
+			main.append(errorBox(e));
+		}
+		return;
+	}
+	main.append(h("div", { class: "panel" }, h("h2", {}, t("cleanup_target")), h("div", { class: "filters" }, kind, targetId), childrenLabel, h("div", { class: "actions" }, previewButton)), previewOut, h("div", { class: "panel" }, h("label", { class: "cleanup-choice" }, reviewed, t("cleanup_reviewed")), !may("cleanup") ? h("p", { class: "muted" }, t("cleanup_scope")) : null, h("div", { class: "actions" }, apply), status), h("h2", {}, t("cleanup_history")), h("div", { class: "panel" }, h("form", {
+		class: "filters",
+		onsubmit: (e) => {
+			e.preventDefault();
+			loadHistory();
+		}
+	}, search, h("button", {
+		class: "secondary",
+		type: "submit"
+	}, t("cleanup_search_button"))), historyOut), h("h2", {}, t("cleanup_retained")), h("p", { class: "muted" }, t("cleanup_retained_help")), h("div", { class: "panel" }, retainedOut));
+	await loadHistory();
+	await loadRetained();
+	const refresh = debounceRefresh(() => settleRefreshes([loadHistory(), loadRetained()]), 500);
+	return onEvents((ev) => {
+		if (["cleanup", "operation"].includes(ev.resource_type)) return refresh();
+	});
+}
 var NAV = [
 	["home", "nav_home"],
 	["projects", "nav_projects"],
 	["sessions", "nav_sessions"],
 	["delivery", "nav_delivery"],
 	["operations", "nav_operations"],
+	["cleanup", "nav_cleanup"],
 	["settings", "nav_settings"]
 ];
 var teardown = null;
@@ -2915,6 +3522,7 @@ async function route() {
 		project: viewProject,
 		item: viewWorkItem,
 		sessions: viewSessions,
+		cleanup: viewCleanup,
 		delivery: viewDelivery,
 		operations: viewOperations,
 		session: viewSession,

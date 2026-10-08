@@ -14,7 +14,15 @@ from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import api_auth, checkpoints, lifecycle, orchestrate, registry, resource_policy
+from bat_agent_connector import (
+    api_auth,
+    checkpoints,
+    confinement,
+    lifecycle,
+    orchestrate,
+    registry,
+    resource_policy,
+)
 from bat_agent_connector.channels import GUARDED_CHANNELS, ORCHESTRATE_CHANNELS, WRITE_CHANNELS
 from bat_agent_connector.errors import ResourceReadOnly
 from bat_agent_connector.operations import OperationError
@@ -119,6 +127,60 @@ async def make_checkpoint(d, **params):
     return checkpoints.get(d.journal.db, op["result"]["checkpoint_id"])
 
 
+@pytest.mark.parametrize("phase", ["admission", "frame"])
+async def test_checkpoint_continue_host_account_refusal_needs_attention_and_resumes(daemon, mock, phase):
+    """A10: an unsent host-account refusal resumes the same operation and session ID."""
+    from dataclasses import replace
+
+    from tests.test_confinement import ACCOUNT, AccountRunner
+    from tests.test_confinement_recovery import RefuseAtFrame
+
+    cp = await make_checkpoint(daemon)
+    hc = daemon.fleet.config.host("h1")
+    daemon.fleet.config.hosts["h1"] = replace(hc, confinement=ACCOUNT)
+    daemon.fleet.confinement_runner = AccountRunner("unknown") if phase == "admission" else RefuseAtFrame()
+    op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"})
+    assert op["status"] == "needs_attention" and op["error_code"] == "HOST_ACCOUNT_UNVERIFIED"
+    assert "claude:start-session" not in mock.channels()
+    request = daemon.journal.db.execute("SELECT request FROM operation_steps WHERE operation_id=? AND name=?",
+                                        (op["operation_id"], "session.start")).fetchone()[0]
+    sid = json.loads(request)["session_id"]
+    daemon.fleet.confinement_runner = AccountRunner()
+    daemon.ops.resume(TED, op["operation_id"])
+    await daemon.ops.drain(timeout=30)
+    done = daemon.ops.get(op["operation_id"])
+    assert done["status"] == "succeeded", done
+    assert registry.get("h1", sid)["status"] == "active"
+    assert sum(e["session_id"] == sid for e in registry.list_entries("h1")) == 1
+    assert mock.channels().count("claude:start-session") == 1
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
+async def test_checkpoint_reconcile_legacy_reservation_requires_evidence(daemon, mock, monkeypatch):
+    """A10: an operation in flight across the upgrade needs attention instead of endless readbacks."""
+    from bat_agent_connector.errors import InvokeTimeout
+
+    cp = await make_checkpoint(daemon)
+    start = orchestrate.session_start
+
+    async def upgrade_lost_result(*args, **kwargs):
+        result = await start(*args, **kwargs)
+        registry.update("h1", result["session_id"], confinement=None)
+        raise InvokeTimeout("fixture result lost across upgrade")
+
+    monkeypatch.setattr(orchestrate, "session_start", upgrade_lost_result)
+    op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"})
+    assert op["status"] == "uncertain"
+    daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+    await daemon.ops.drain(timeout=30)
+    done = daemon.ops.get(op["operation_id"])
+    assert done["status"] == "needs_attention" and done["error_code"] == "CONFINEMENT_EVIDENCE_MISSING"
+    assert mock.channels().count("claude:start-session") == 1
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
 async def test_checkpoint_reads_a_person_session_and_writes_nothing(daemon, mock, human):
     # Same content, new mtime: the index's stat data is stale, so a plain `git status` would rewrite it.
     st = (human / "notes.txt").stat()
@@ -145,13 +207,17 @@ async def test_checkpoint_refuses_a_commit_the_source_does_not_have(daemon, mock
     assert e.value.code == "NOT_FOUND"
 
 
-async def test_continue_starts_managed_work_at_the_checkpoint_and_leaves_the_source_alone(daemon, mock, human):
+@pytest.mark.parametrize("agent", ["claude", "codex"])
+async def test_a10_checkpoint_absolute_path_carries_confinement(daemon, mock, human, agent):
+    from dataclasses import replace
+    daemon.fleet.config.hosts["h1"] = replace(daemon.fleet.config.host("h1"), default_permission_mode="allow_all")
+    mock.states[MANUAL]["messages"][-2]["content"] = f"Write changes to {human}/notes.txt"
     first = git(human, "rev-list", "--max-parents=0", "HEAD")
     cp = await make_checkpoint(daemon, commit=first)
     mock.git_status[str(human)] = [{"path": "notes.txt", "status": "M"}]  # the person keeps working meanwhile
     before = snapshot(human)
     op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]},
-                   {"instructions": "Add a changelog entry", "agent": "claude"})
+                   {"instructions": "Add a changelog entry", "agent": agent})
     assert op["status"] == "succeeded", op
     r = op["result"]
     wt, sid = r["worktree_path"], r["session_id"]
@@ -164,12 +230,23 @@ async def test_continue_starts_managed_work_at_the_checkpoint_and_leaves_the_sou
 
     starts = [i for i in mock.invokes if i["channel"] == "claude:start-session"]
     assert len(starts) == 1 and starts[0]["params"]["options"]["cwd"] == wt
-    # The agent's CLI asks before writing outside its folder (plan §06); a cwd alone is not protection.
-    assert starts[0]["params"]["options"]["permissionMode"] == "acceptEdits" and r["write_scope"] == "confined"
+    # A10: plain default is prompt gated; cwd and acceptEdits never prove path confinement.
+    assert r["write_scope"] == "confined"
+    assert {k: starts[0]["params"]["options"][k] for k in confinement.CONFINED_OPTIONS[agent]} == confinement.CONFINED_OPTIONS[agent]
     sends = [i for i in mock.invokes if i["channel"] == "claude:send-message"]
     assert len(sends) == 1 and sends[0]["params"]["sessionId"] == sid
     prompt = sends[0]["params"]["prompt"]
     assert "Add a changelog entry" in prompt and first in prompt and "[assistant]" in prompt
+    assert str(human) in prompt
+    assert r["confinement"]["level"] == ("prompt_gated" if agent == "claude" else "os_sandbox")
+    assert r["confinement"]["verification"]["status"] == "options_confirmed"
+    assert registry.get("h1", sid)["confinement"] == r["confinement"]
+    with pytest.raises(confinement.ConfinementRefused, match="CONFINEMENT_RAISE_REFUSED"):
+        await lifecycle.session_set_permissions(daemon.fleet, "h1", sid, confirm=True, force=True)
+    mock.states[sid]["pendingPermission"] = {"toolUseId": "test", "toolName": "Bash", "input": {}}
+    bulk = await lifecycle.approve_pending(daemon.fleet, "h1", dry_run=True)
+    assert next(x for x in bulk["sessions"] if x["session_id"] == sid)["skipped"] == "confined"
+    mock.states[sid]["pendingPermission"] = None
     assert "not instructions" in prompt  # the person's conversation is fenced off as background
     assert bat_writes(mock, MANUAL) == []  # nothing was sent to the person's session
 
@@ -326,12 +403,105 @@ async def test_a_lost_start_reply_is_read_back_not_started_again(daemon, mock, h
     assert [i["params"]["sessionId"] for i in mock.invokes if i["channel"] == "claude:send-message"] == [sid]
     entry = registry.get("h1", sid)  # proven by read-back, so it carries what a normal start records
     assert entry["status"] == "active" and entry["worktree_path"] == entry["cwd"]
-    assert entry["write_scope"] == "confined" and entry["permission_mode_claude"] == "acceptEdits"
+    assert entry["write_scope"] == "confined" and entry["permission_mode_claude"] == "default"
     assert checkpoints.started_from(d2.journal.db, "h1", sid)["checkpoint_id"] == cp["checkpoint_id"]
     assert set(meta_before) <= set(mock.metas)
     await d2.fleet.close()
     await d2.inventory.close()
     d2.journal.close()
+
+
+@pytest.mark.parametrize("observed", ["different", "missing", "permissions"])
+async def test_checkpoint_start_readback_refuses_identity_and_terminal_mismatch(daemon, mock, monkeypatch, observed):
+    """A10: start reconciliation never promotes a foreign folder or replaces mismatch evidence."""
+    from bat_agent_connector.errors import InvokeTimeout
+
+    cp = await make_checkpoint(daemon)
+    client = daemon.fleet.client("h1")
+    invoke = client.invoke
+
+    async def lost_ack(channel, params=None, **kwargs):
+        result = await invoke(channel, params, **kwargs)
+        if channel == "claude:start-session":
+            raise InvokeTimeout("fixture lost start acknowledgement")
+        return result
+
+    monkeypatch.setattr(client, "invoke", lost_ack)
+    op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"})
+    assert op["status"] == "uncertain"
+    sid = op["external_refs"]["session_id"]
+    row = registry.get("h1", sid)
+    if observed == "missing":
+        del mock.metas[sid]["cwd"]
+        code = "CONFINEMENT_START_UNSETTLED"
+    elif observed == "different":
+        mock.metas[sid]["cwd"] = "/srv/another-checkout"
+        code = "START_SESSION_MISMATCH"
+    else:
+        mock.metas[sid]["permissionMode"] = "bypassPermissions"
+        code = "CONFINEMENT_MISMATCH"
+    monkeypatch.setattr(client, "invoke", invoke)
+    daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+    await daemon.ops.drain(timeout=60)
+    refused = daemon.ops.get(op["operation_id"])
+    assert refused["status"] == "needs_attention" and refused["error_code"] == code
+    kept = registry.get("h1", sid)
+    assert kept["status"] == row["status"] != "active"
+    assert mock.channels().count("claude:start-session") == 1 and "claude:send-message" not in mock.channels()
+    if observed != "missing":
+        record = kept["confinement"]
+        mock.metas[sid]["cwd"] = row["cwd"]
+        mock.metas[sid].update(record["options"])
+        reads = mock.channels().count("claude:get-session-meta")
+        daemon.ops.resume(TED, op["operation_id"])
+        await daemon.ops.drain(timeout=60)
+        still_refused = daemon.ops.get(op["operation_id"])
+        assert still_refused["status"] == "needs_attention" and still_refused["error_code"] == code
+        assert mock.channels().count("claude:get-session-meta") == reads
+        assert registry.get("h1", sid)["confinement"] == record
+        assert "claude:send-message" not in mock.channels()
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
+@pytest.mark.parametrize("failure", ["timeout", "disconnect"])
+async def test_checkpoint_accepted_send_survives_evidence_read_failure(daemon, mock, monkeypatch, failure):
+    """A10/§12: evidence loss after the durable send cannot fail or duplicate continuation."""
+    from bat_agent_connector.errors import ConnectionLost, InvokeTimeout
+
+    cp = await make_checkpoint(daemon)
+    client = daemon.fleet.client("h1")
+    invoke = client.invoke
+    accepted = False
+    evidence_failures = []
+
+    async def fail_after_send(channel, params=None, **kwargs):
+        nonlocal accepted
+        if accepted and channel == "claude:get-session-meta":
+            evidence_failures.append(params["sessionId"])
+            raise InvokeTimeout("fixture evidence timeout") if failure == "timeout" else ConnectionLost("fixture disconnect")
+        result = await invoke(channel, params, **kwargs)
+        if channel == "claude:send-message":
+            assert result["accepted"]
+            accepted = True
+        return result
+
+    monkeypatch.setattr(client, "invoke", fail_after_send)
+    target, params = {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"}
+    op = await run(daemon, "checkpoint.continue", target, params, key="accepted-evidence")
+    assert op["status"] == "succeeded", op
+    result = op["result"]
+    assert result["session_id"] in evidence_failures
+    assert result["current_verification"]["status"] == "unknown"
+    assert result["current_verification"]["reason"] == "readback_failed"
+    assert result["confinement"] == registry.get("h1", result["session_id"])["confinement"]
+    assert result["confinement"]["verification"]["status"] == "options_confirmed"
+    assert next(s for s in op["steps"] if s["name"] == "send")["status"] == "succeeded"
+    again = await run(daemon, "checkpoint.continue", target, params, key="accepted-evidence")
+    assert again == op
+    assert mock.channels().count("claude:start-session") == 1 and mock.channels().count("claude:send-message") == 1
+    await daemon.fleet.close()
+    await daemon.inventory.close()
 
 
 async def test_a_lost_codex_instruction_is_found_in_the_transcript(daemon, mock, human, monkeypatch):
@@ -507,3 +677,78 @@ async def test_bat_worktree_actions_never_touch_a_worktree_the_connector_made(da
     row.pop("worktree_made_by")
     assert resource_policy.worktree_maker(row) == "connector"
     assert resource_policy.worktree_maker({"branch": "bat/worktree-0000abcd"}) == "bat"
+
+
+@pytest.mark.parametrize('stage', ['before', 'after'])
+async def test_checkpoint_preframe_cancellation_restarts_unsent_reserved_session_once(daemon, mock, monkeypatch, stage):
+    """A10: pre-frame cancel leaves durable unsent proof; post-frame cancel reconciles without another start."""
+    from dataclasses import replace
+
+    from tests.test_confinement import ACCOUNT, AccountRunner
+    from tests.test_confinement_recovery import PauseAtFrame
+
+    cp = await make_checkpoint(daemon)
+    daemon.fleet.config.hosts['h1'] = replace(daemon.fleet.config.host('h1'), confinement=ACCOUNT)
+    pause = PauseAtFrame()
+    daemon.fleet.confinement_runner = pause if stage == 'before' else AccountRunner()
+    ready = pause.entered if stage == 'before' else asyncio.Event()
+    client = daemon.fleet.client('h1')
+    invoke = client.invoke
+    propagated = []
+    start_session = orchestrate.session_start
+
+    async def trace_start(*args, **kwargs):
+        try:
+            return await start_session(*args, **kwargs)
+        except asyncio.CancelledError as exc:
+            propagated.append(exc)
+            raise
+
+    monkeypatch.setattr(orchestrate, 'session_start', trace_start)
+
+    async def after_frame(channel, params=None, **kwargs):
+        result = await invoke(channel, params, **kwargs)
+        if channel == 'claude:start-session':
+            ready.set()
+            await asyncio.Event().wait()
+        return result
+
+    if stage == 'after':
+        monkeypatch.setattr(client, 'invoke', after_frame)
+    op, _ = daemon.ops.create(TED, action='checkpoint.continue', target={'checkpoint_id': cp['checkpoint_id']},
+                              params={'instructions': 'go'}, idempotency_key='preframe-checkpoint-cancel')
+    await daemon.ops.run_due()
+    pending = daemon.ops._active[op['operation_id']]
+    try:
+        await asyncio.wait_for(ready.wait(), 60)
+        row = registry.list_entries('h1')[-1]
+        sid, worktree = row['session_id'], row['cwd']
+        pending.cancel('fixture operation cancellation')
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert len(propagated) == 1 and propagated[0].args == ('fixture operation cancellation',)
+        if stage == 'before':
+            assert propagated[0] is pause.cancelled
+        row = registry.get('h1', sid)
+        assert row['start_sent'] is (stage == 'after')
+        assert row['status'] == ('failed' if stage == 'before' else 'uncertain')
+        assert mock.channels().count('claude:start-session') == (stage == 'after')
+        assert not bat_writes(mock, MANUAL) and 'worktree:remove' not in mock.channels()
+        pause.release.set()
+        monkeypatch.setattr(client, 'invoke', invoke)
+        await daemon.ops.drain(timeout=60)  # Process restart: replay the persisted started step.
+        result = daemon.ops.get(op['operation_id'])
+        assert result['status'] == 'succeeded', result
+        assert result['result']['session_id'] == sid
+        assert registry.get('h1', sid)['cwd'] == worktree
+        assert mock.channels().count('claude:start-session') == 1
+        assert mock.channels().count('claude:send-message') == 1
+        starts = [i for i in mock.invokes if i['channel'] == 'claude:start-session']
+        assert starts[0]['params']['sessionId'] == sid
+    finally:
+        if not pending.done():
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        await daemon.fleet.close()
+        await daemon.inventory.close()

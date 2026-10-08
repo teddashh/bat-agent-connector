@@ -233,6 +233,10 @@ async def test_t11_bootstrap_auth_identity_and_checkpoint_before_snapshot_reads(
     assert bootstrap["pagination"] == {"atomic": False, "session_order": "id"}
     assert set(bootstrap["snapshot"]) == {"hosts", "sessions", "projects", "work_items", "operations"}
     assert bootstrap["capabilities"]["identity"] == {key: bootstrap["sync"][key] for key in ("server_id", "principal_id")}
+    assert bootstrap["capabilities"]["features"]["dashboard_sync"]["checkpoint_replay"] is True
+    assert bootstrap["capabilities"]["features"]["cleanup"] is True
+    assert bootstrap["capabilities"]["cleanup"]["preview"] is True
+    assert "confinement" in bootstrap["capabilities"]["hosts"][0]
     status, page = await http(port, "GET", "/api/v1/events?" + urlencode({"after": cp["cursor"], "checkpoint": cp["token"]}), tok=viewer)
     assert status == 200 and any(e["seq"] == captured[0] for e in page["events"])
     assert page["sync"]["checkpoint"]["cursor"] == page["next_cursor"]
