@@ -1550,7 +1550,6 @@ function integrationPanel(pr, reloadCard) {
 	};
 	const runPreview = async () => {
 		const mine = ++generation;
-		state.viewReady = false;
 		doc = null;
 		if (!selected.length) {
 			previewBox.replaceChildren();
