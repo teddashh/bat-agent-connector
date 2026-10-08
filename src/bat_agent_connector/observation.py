@@ -15,7 +15,7 @@ from .operations import OperationError
 from .redact import redact
 from .resource_ids import registry_worktree_intent, worktree_id
 
-MIGRATION_VERSION = 4  # Delivery Part A reserves user_version 2 and 3.
+MIGRATION_VERSION = 2  # One-time history backfill; data step allocated by the orchestrator.
 RESOURCE_TYPES = {"session", "worktree", "execution"}
 PRIVATE_FIELDS = {"text", "words", "original_words", "instructions", "excerpt", "prompt", "payload",
                   "token", "authorization", "note", "error", "lines", "messages", "interpretation",
