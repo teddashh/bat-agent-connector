@@ -327,6 +327,8 @@ Session card 與 detail 同時顯示 level、write_scope、Git isolation；可�
 
 Mock 只能證明 Connector 的 options、gate、evidence 與顯示；不假造 Claude／Codex 的檔案 sandbox。所有人路徑是 fixture，例如 `/srv/example-personal/source`；不送 real-host 寫入 channel。用 `tests/mockbat.py`、checkpoint 的 `LocalRunner`／`RealGitLog` 與 temp repos。
 
+取消測試在 account hook 與 session_start 呼叫邊界捕捉原 CancelledError，核對同一個 exception／args；Task await 只核對取消確實傳出。Python 3.10 會在 await 已取消的 Task 時丟失 cancel message，不能把該 runtime 差異誤判為 Connector 改寫例外。完整 suite 仍在 3.10 與 worktree interpreter 執行。
+
 | 驗收／計畫 | 實作測試 | 結果與邊界 |
 |---|---|---|
 | A10；§06、§07、§12 | `test_start_preframe_cancellation_is_unsent_and_reuses_reserved_id`、`test_start_cancellation_at_earlier_await_is_also_unsent`、`test_task_preparation_cancellation_recovers_from_unsent_command_before_registry`、`test_start_postframe_cancellation_keeps_uncertain_and_does_not_resend`、`test_task_lead_lost_ack_keeps_sent_evidence_until_readback_recovery` | Account check／git log／connect／semaphore 取消：零 start／rollback frame、false＋failed、原 CancelledError；starting＋false 模擬未 unwind crash，原 ID／worktree 只 start 一次。已送後取消保留未定，read-back 不重送。 |
