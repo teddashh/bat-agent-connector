@@ -981,7 +981,7 @@ async def test_metadata_cancelled_unknown_write_stays_blocking_until_proven(make
 @pytest.mark.parametrize("version", [1, 8])
 def test_part_a_preview_migration_reopens_without_data_change(tmp_path, version):
     """Plan §09/§28: delivery DDL fills missing schema without taking a data-migration version."""
-    from bat_agent_connector.task_journal import Journal
+    from bat_agent_connector.task_journal import LATEST_DATA_STEP, Journal
     path = tmp_path / "old.db"
     j = Journal(path)
     j.db.execute("DROP TABLE pr_merge_previews")
@@ -994,7 +994,7 @@ def test_part_a_preview_migration_reopens_without_data_change(tmp_path, version)
     assert not j.db.execute(schema_query, tuple(expected)).fetchall()
     j.close()
     j = Journal(path)
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == version
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == max(version, LATEST_DATA_STEP)
     schema = j.db.execute(schema_query, tuple(expected)).fetchall()
     assert {r["name"]: r["type"] for r in schema} == expected
     doc = {"fixed": "scope"}
@@ -1002,7 +1002,7 @@ def test_part_a_preview_migration_reopens_without_data_change(tmp_path, version)
     j.db.execute("INSERT INTO pr_merge_previews VALUES (?,?,?,?,?,?,?)", preview)
     j.close()
     j = Journal(path)
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == version
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == max(version, LATEST_DATA_STEP)
     assert j.db.execute(schema_query, tuple(expected)).fetchall() == schema
     assert tuple(j.db.execute("SELECT * FROM pr_merge_previews").fetchone()) == preview
     assert pr_delivery.get_preview(j.db, preview[0]) == doc

@@ -45,6 +45,7 @@ READ_TOOLS = [
     "capabilities_get",
     "inventory_sessions",
     "inventory_hosts",
+    "inventory_session", "inventory_worktree", "resource_history", "resource_relations",
     "events_list",
     "operation_get",
     "operations_list",
@@ -305,23 +306,61 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
     async def inventory_sessions(host: str | None = None, access: Literal["managed", "read_only"] | None = None,
                                  provenance: Literal["manual", "connector_managed", "unknown"] | None = None,
                                  attention: bool | None = None, include_gone: bool = False,
-                                 cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
+                                 cursor: str | None = None, limit: int = 50, order: Literal["activity", "id"] = "activity",
+                                 profile_id: str | None = None, project_id: list[str] | None = None,
+                                 work_item_id: str | None = None, execution_id: str | None = None,
+                                 provider: str | None = None, has_tab: bool | None = None, loaded: bool | None = None,
+                                 streaming: bool | None = None, lifecycle: Literal["active", "ended", "unknown"] | None = None,
+                                 stale: bool | None = None, relation_scope: Literal["current", "history"] = "history") -> dict[str, Any]:
         """The daemon's persisted session inventory across hosts (no host round trip): provenance, api_access,
         loaded/streaming/pending, observed_at and stale. Offline hosts keep their last rows marked stale. Page with
-        next_cursor; as_of is the events cursor to follow with events_list for changes."""
+        next_cursor; as_of is the events cursor to follow with events_list for changes. Session updates include
+        fields_stale/field_evidence transitions even when the retained values are unchanged."""
         return await daemon("inventory_sessions", host=host, access=access, provenance=provenance,
-                            attention=attention, include_gone=include_gone, cursor=cursor, limit=limit)
+                            attention=attention, include_gone=include_gone, cursor=cursor, limit=limit, order=order,
+                            profile_id=profile_id, project_id=project_id, work_item_id=work_item_id, execution_id=execution_id,
+                            provider=provider, has_tab=has_tab, loaded=loaded, streaming=streaming, lifecycle=lifecycle,
+                            stale=stale, relation_scope=relation_scope)
 
-    async def inventory_hosts() -> dict[str, Any]:
+    async def inventory_hosts(host: str | None = None, discovery: bool = False, after: int = 0, limit: int = 20) -> dict[str, Any]:
         """Per-host reachability as last observed by the daemon: reachable, error, last_success_at, stale."""
-        return await daemon("inventory_hosts")
+        return await daemon("inventory_hosts", host=host, discovery=discovery, after=after, limit=limit)
+
+    async def inventory_session(host: str, session_id: str) -> dict[str, Any]:
+        """One full session identity, distinct state axes, relations and latest discovery scope; journal only."""
+        return await daemon("inventory_session", host=host, session_id=session_id)
+
+    async def inventory_worktree(worktree_id: str) -> dict[str, Any]:
+        """One worktree with a proven creation-intent identity. It grants no writes; never probes Git."""
+        return await daemon("inventory_worktree", worktree_id=worktree_id)
+
+    async def resource_history(resource_type: Literal["session", "worktree", "execution"], resource_id: str,
+                               cursor: str | None = None, limit: int = 50, order: Literal["asc", "desc"] = "desc",
+                               kind: list[str] | None = None, since: float | None = None, until: float | None = None) -> dict[str, Any]:
+        """Paginated journal facts with actor evidence and a fixed as_of bound. Session ID is host/full-ID.
+        Read every next_cursor for complete history; unknown actors remain unknown. Session added/updated/reappeared
+        facts retain fields_stale and fixed field_evidence values for meta failure/recovery. Summaries omit prose
+        reasons; since/until exclude unknown occurrence times, as flagged in coverage."""
+        return await daemon("resource_history", resource_type=resource_type, resource_id=resource_id,
+                            cursor=cursor, limit=limit, order=order, kind=kind, since=since, until=until)
+
+    async def resource_relations(resource_type: Literal["session", "worktree", "execution"], resource_id: str,
+                                 cursor: str | None = None, limit: int = 50, execution_id: str | None = None,
+                                 include_closed: bool = True) -> dict[str, Any]:
+        """Time/command-ranged lead and reviewer segments, including warm reuse and follow-up evidence.
+        execution means Task Service task_id. Relations never grant writes."""
+        return await daemon("resource_relations", resource_type=resource_type, resource_id=resource_id,
+                            cursor=cursor, limit=limit, execution_id=execution_id, include_closed=include_closed)
 
     async def events_list(after: int = 0, limit: int = 100, resource_type: str | None = None,
-                          resource_id: str | None = None) -> dict[str, Any]:
+                          resource_id: str | None = None, kind: str | None = None,
+                          related_resource_type: Literal["session", "worktree", "execution"] | None = None,
+                          related_resource_id: str | None = None) -> dict[str, Any]:
         """The shared event log (tasks, operations, sessions, hosts) after a persistent cursor. Store next_cursor
-        only after handling the returned events; limit=0 returns head_cursor."""
+        only after handling the returned events; limit=0 returns head_cursor. Session.updated includes changes to
+        fields_stale/field_evidence; observation/activity timestamps alone emit no update."""
         return await daemon("api_events", after=after, limit=limit, resource_type=resource_type,
-                            resource_id=resource_id)
+                            resource_id=resource_id, kind=kind, related_resource_type=related_resource_type, related_resource_id=related_resource_id)
 
     async def operation_get(operation_id: str) -> dict[str, Any]:
         """One operation with its steps: status (accepted, running, waiting_checks, waiting_external,
@@ -422,7 +461,8 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         to sessions, checkpoints, operations, tasks and PRs (with what each points at now) and its history."""
         return await daemon("work_item_get", work_item_id=work_item_id)
 
-    for fn in (capabilities_get, inventory_sessions, inventory_hosts, events_list, operation_get, operations_list,
+    for fn in (capabilities_get, inventory_sessions, inventory_hosts, inventory_session, inventory_worktree,
+               resource_history, resource_relations, events_list, operation_get, operations_list,
                github_pr_preview, github_merge_preview_get, deployment_preview, deployment_status, deployments_list,
                deployment_environment_get, checkpoints_list, checkpoint_preview, integration_candidates, integration_get,
                integrations_list, projects_list, project_get, work_items_list, work_item_get):

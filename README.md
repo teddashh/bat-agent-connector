@@ -6,6 +6,10 @@
 
 **Project page:** https://teddashh.github.io/bat-agent-connector/
 
+**Development direction:** [Tauri v2 product decisions](docs/product/realignment-v2.md) and
+[implementation status](docs/product/implementation-status.md). The desktop client will share the Dashboard
+frontend and the existing Python backend. Project Hub import is outside the v2 scope; project/work-item management remains.
+
 BAT (by [TonyQ / tony1223](https://github.com/tony1223)) is a terminal app that runs Claude Code and Codex agent
 sessions, grouped into workspaces, on your machines. It has a remote protocol (`bat-remote/v2`) that its own GUI and
 phone clients use. This project speaks that protocol so that *other* agents (Claude Code, Codex, Cursor, Hermes, or any
@@ -29,6 +33,12 @@ It ships four things:
 | MCP server (stdio, or localhost-only streamable HTTP) | `bat-agent-connector-mcp` (also `batc mcp`) |
 | CLI | `batc` |
 | Agent skill | [`skills/bat-agent-connector/SKILL.md`](skills/bat-agent-connector/SKILL.md) |
+
+Persisted observation is available through `batc inventory`, `batc history` and `batc relations`, or the matching
+HTTP/MCP reads. Session history uses journal facts; warm reuse keeps each task’s relation ranges. Discovery shows
+the latest host/profile scope and what was outside the scan. Unknown actors and states stay unknown; these reads
+do not start sessions or probe Git. See [observation](docs/design/observation.md). The Dashboard history and scope
+screens are Part B, to follow separately.
 
 ## Why
 

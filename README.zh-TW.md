@@ -6,6 +6,10 @@
 
 **專案介紹頁：** https://teddashh.github.io/bat-agent-connector/?lang=zh-TW
 
+**開發方向：** [Tauri v2 產品決策](docs/product/realignment-v2.md)與
+[實作狀態](docs/product/implementation-status.md)。桌面版共用 Dashboard frontend 與既有 Python 後端。
+v2 不提供 Project Hub 匯入；保留既有專案與工作項目管理。
+
 BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端機 app，在你自己的機器上執行 Claude Code 與 Codex 的 agent session，並依工作區（workspace）分組。它有一套遠端協定 `bat-remote/v2`，BAT 自己的桌面介面和手機客戶端都走這套協定。本專案實作同一套協定，讓「其他」agent（Claude Code、Codex、Cursor、Hermes 或任何 MCP 客戶端）以及 shell 腳本可以：
 
 * 看到有哪些 agent session、哪些正在跑或卡在問題上，以及它們最近說了什麼；
@@ -25,6 +29,8 @@ BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端�
 | MCP 伺服器（stdio，或只綁 localhost 的 streamable HTTP） | `bat-agent-connector-mcp`（也可以用 `batc mcp`） |
 | CLI | `batc` |
 | Agent skill | [`skills/bat-agent-connector/SKILL.md`](skills/bat-agent-connector/SKILL.md) |
+
+`batc inventory`、`batc history`、`batc relations` 與對應 HTTP/MCP 讀取提供持久觀測。Session 歷史只讀 journal 事實；warm reuse 保留每個 task 的關係區間，discovery 顯示最近 host/profile 掃描範圍及未掃項目。未知 actor／狀態保持 unknown，讀取不啟動 session、不背景探測 Git。詳見 [observation](docs/design/observation.md)。Dashboard 的歷史與 scope 畫面屬後續 Part B。
 
 ## 為什麼要做
 
