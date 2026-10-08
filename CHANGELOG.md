@@ -2,6 +2,10 @@
 
 ## Next release (unreleased)
 
+- Keep failed checkpoint-preview refreshes inside the event acknowledgment barrier. Preserve the original
+  commit selection and note, refuse stale checkpoint creation, and resume after a successful read; a failed
+  preview cannot silently change the request into a checkpoint of HEAD.
+
 - Wait for asynchronous Dashboard view refreshes before persisting event checkpoints. Failed or deferred
   refreshes retain the original cursor and drafts. Failed reads pause mutations; deferred renders keep
   version-checked form saves available. Delayed work cannot cross accounts or
