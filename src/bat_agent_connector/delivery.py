@@ -141,11 +141,20 @@ def _admit_merge(ops: OperationService, principal: Principal, target: dict, para
         raise OperationError("INVALID_PARAMS", f"method must be one of {', '.join(repo.merge_methods)}", 422)
 
 
-async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method: str, prefix: str = "merge") -> dict:
+def _check_merge_policy(ops: OperationService, repository: str, method: str) -> None:
+    repo = _cfg(ops).repos[_repo_or_403(ops, repository).lower()]
+    if not repo.allow_merge:
+        raise OperationError("MERGE_DISABLED", f"merging is disabled for {repository}", 403)
+    if method not in repo.merge_methods:
+        raise OperationError("INVALID_PARAMS", f"method must be one of {', '.join(repo.merge_methods)}", 422)
+
+
+async def _merge(ctx: OpContext, repository: str, number: int, sha: str, prefix: str = "merge") -> dict:
     gh = _gh(ctx.service)
     pr = await _read(gh.pull(repository, number), "read the pull request", ctx)
     submitted = _has_step(ctx, f"{prefix}.submit")
     preview = pr_delivery.get_preview(ctx.service.db, ctx.params["preview_id"])
+    method = preview["method"]
     if pr.get("merged"):
         if (pr.get("head") or {}).get("sha") != sha:
             raise NeedsAttention("MERGED_DIFFERENT_HEAD",
@@ -203,11 +212,17 @@ async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method:
                 return None
             except (OperationError, GitHubAmbiguous):
                 return None
+            try:
+                _check_merge_policy(ctx.service, repository, method)
+            except OperationError as exc:
+                # The earlier request still has an unknown outcome; block a resend without hiding it.
+                raise NeedsAttention(exc.code, exc.message) from None
             return RERUN
         return None
 
     if not submitted:
         await pr_delivery.check_scope(ctx, preview)
+        _check_merge_policy(ctx.service, repository, method)
     r = await ctx.step(f"{prefix}.submit", submit, request={"repository": repository, "pull_number": number,
                                                            "sha": sha, "method": method}, reconcile=reconcile)
     status, result, details = r["http_status"], r.get("status"), r.get("details") or {}
@@ -266,9 +281,7 @@ async def _merged_result(ctx, pr, preview, submitted, repository, number, method
 
 async def _run_merge(ctx: OpContext) -> dict:
     repository = _repo_or_403(ctx.service, ctx.target["repository"])
-    repo = _cfg(ctx.service).repos[repository.lower()]
-    return await _merge(ctx, repository, ctx.target["pull_number"], ctx.preconditions["expected_head_sha"],
-                        ctx.params.get("method", repo.default_merge_method))
+    return await _merge(ctx, repository, ctx.target["pull_number"], ctx.preconditions["expected_head_sha"])
 
 
 # --------------------------------------------------------------------------- deploy
@@ -390,9 +403,7 @@ def _admit_merge_and_deploy(ops: OperationService, principal: Principal, target:
 
 async def _run_merge_and_deploy(ctx: OpContext) -> dict:
     repository = _repo_or_403(ctx.service, ctx.target["repository"])
-    repo = _cfg(ctx.service).repos[repository.lower()]
-    merged = await _merge(ctx, repository, ctx.target["pull_number"], ctx.preconditions["expected_head_sha"],
-                          ctx.params.get("method", repo.default_merge_method))
+    merged = await _merge(ctx, repository, ctx.target["pull_number"], ctx.preconditions["expected_head_sha"])
     if (ctx.op.get("external_refs") or {}).get("merged_sha") != merged["merged_sha"]:
         ctx.set_refs(merged_sha=merged["merged_sha"])  # kept even if the deploy fails: retry deploys this version
     deployed = await _deploy(ctx, _recipe(ctx.service, ctx.target["recipe"]), merged["merged_sha"])
