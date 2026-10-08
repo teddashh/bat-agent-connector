@@ -1,13 +1,13 @@
 # Tauri v2：R10 驗收證據矩陣
 
-證據快照：2026-10-08 22:48 UTC；文件基底為 main `2ac5715`（#37 merge）。依產品負責人提供的
+證據快照：2026-10-08 23:03 UTC；已合併 main 至 `8c755a3`（#38 merge）。依產品負責人提供的
 Tauri 第二版計畫 §24，保留 **A01–A10、B01–B05、C01–C07、D01–D06、E01–E06、T01–T12，共 46 項**。
 範圍見 [realignment-v2.md](realignment-v2.md)，進度見 [implementation-status.md](implementation-status.md)。
 此表不是通過清單：**尚未建立同一候選版本的 installed／live 證據，M1、M2、M3 及正式 v1 均未完成。**
 
 ## 證據層級與版本
 
-- **主線／分支**：程式所在位置；有程式或測試來源不等於已驗收。本輪只核對文件與來源，未重跑測試。
+- **主線／分支**：程式所在位置；有程式或測試來源不等於已驗收。本輪彙整已記錄測試與審查證據；本文件更新沒有重跑測試。
 - **F（fixture）**：MockBat、FakeGitHub、暫存真 Git／bytes、HTTP、browser／IPC mock。可證明指定邏輯，不能證明真 BAT、WebView 或實際部署。
 - **N（native fixture）**：真 OS 子程序或打包 WebView 接合成服務。Windows PowerShell startup 與 Linux WebKit smoke 都不等於已安裝產品的端到端驗收。
 - **I／L（installed／live）**：實際安裝組合、真中央／BAT／provider 的記錄。以下 46 項均仍需補對應 I／L 證據；未測平台不標支援。
@@ -17,18 +17,24 @@ Tauri 第二版計畫 §24，保留 **A01–A10、B01–B05、C01–C07、D01–
 
 | 代號／候選 | 固定證據來源 | 此快照狀態與限制 |
 | --- | --- | --- |
-| M：#35、#36、#37 與既有核心 | [main `2ac5715`](https://github.com/teddashh/bat-agent-connector/tree/2ac5715549e08e36cfc0d2fd6b2c9e84a39a9334)：`resource_policy`、operations/task gates、confinement、observation、checkpoints、integration、work_items、PR delivery | 已合併；F 證據已審。不是逐 host runtime 隔離或跨 client 實機證據。 |
-| C：[#38](https://github.com/teddashh/bat-agent-connector/pull/38) cleanup | [`edf5683`](https://github.com/teddashh/bat-agent-connector/tree/edf5683af8a79ec802192b84a0b23029fa770ad5)：`cleanup.py`、`cleanup_host.py`、`test_cleanup*.py` | 最新整合 CI 待確認；前一 head `ef18d5f` 四個 Python CI jobs 綠。保留曾有本機 settlement timeout 與原碼重跑紀錄，不把單測重跑當 full。Task-owned cleanup 未交付。 |
-| S：[#43](https://github.com/teddashh/bat-agent-connector/pull/43) skills | [`f43f3c2`](https://github.com/teddashh/bat-agent-connector/tree/f43f3c2237d4c5092326a67fd5c7b90e6979f680)：canonical workflow `.3`、generator、principal-only MCP、`test_agent_skills.py`／`test_mcp_principal.py` | 已整合 C 的來源；focused／peer 證據，最新 head CI 待確認。Installer 尚未安裝此組合。 |
-| U：[#44](https://github.com/teddashh/bat-agent-connector/pull/44) desktop foundation | [`a3c541d`](https://github.com/teddashh/bat-agent-connector/tree/a3c541d8d3df50d19972f7dc51f52a74577025b9)：`desktop/src`、Rust bridge/main、capabilities、`docs/design/desktop.md` | 整合進行中；舊 `c9a470b` 的 Windows NSIS／Linux deb CI 與 Linux WebKit N 證據不能代替最終整合。尚無 Windows 安裝、實體 tray、跨登入驗收。 |
-| F：[#45](https://github.com/teddashh/bat-agent-connector/pull/45) Fleet desktop | [`525fe48`](https://github.com/teddashh/bat-agent-connector/tree/525fe4813860eacfdb35373fdb098149b3a20394)：`desktop/src-tauri/src/fleet.rs`、`desktop/tests/fleet.spec.ts` | 該 head CI 綠，含 Windows 固定 PowerShell 子程序與打包；僅 PS bridge，Rust supervisor parity 未實作，未與 installed Kit 合驗。 |
+| M：#35、#36、#37 與既有核心 | [main `2ac5715`](https://github.com/teddashh/bat-agent-connector/tree/2ac5715549e08e36cfc0d2fd6b2c9e84a39a9334)：policy、operation/task gates、confinement、observation、checkpoints、integration | #37 已合併；head `09faafd` 四個 Python CI jobs 綠，本機 3.13/3.10 各 1619 passed/33 skipped。逐 host runtime／installed/live 尚缺。 |
+| C：[#38](https://github.com/teddashh/bat-agent-connector/pull/38) cleanup | [`edf5683`](https://github.com/teddashh/bat-agent-connector/tree/edf5683af8a79ec802192b84a0b23029fa770ad5)：`cleanup.py`、`cleanup_host.py`、`test_cleanup*.py` | 已合併 `8c755a3`；四個 Python CI jobs 各 1835 passed/33 skipped。保留較早本機 3.10 的 settlement deadline failure 與原碼重跑紀錄；不以 retry 取代 full。Task-owned cleanup 未交付。 |
+| S：[#43](https://github.com/teddashh/bat-agent-connector/pull/43) skills | [`f43f3c2`](https://github.com/teddashh/bat-agent-connector/tree/f43f3c2237d4c5092326a67fd5c7b90e6979f680)：canonical workflow `.3`、generator、principal-only MCP | 該 head 四個 Python CI jobs 各 1851 passed/33 skipped，已進整合候選；installer 尚未安裝此組合。 |
+| U：[#44](https://github.com/teddashh/bat-agent-connector/pull/44) desktop foundation | [`5bccb63`](https://github.com/teddashh/bat-agent-connector/tree/5bccb63594b10fe61a772e45f3198e8b3969415e)：shared frontend、Rust bridge/main、capabilities、desktop design | 已進候選；保留既有 packaging/Linux WebKit N 證據，最新 head CI 另查。Windows install/tray/跨登入尚缺。 |
+| F：[#45](https://github.com/teddashh/bat-agent-connector/pull/45) Fleet desktop | [`69f94d2`](https://github.com/teddashh/bat-agent-connector/tree/69f94d2719ba4c428392f087782e7ae4d290924e)：`fleet.rs`、`fleet.spec.ts` | 已進候選；既有 Windows 固定 PS subprocess 與 packaging 證據不代替最後組合。Rust supervisor parity、installed Kit 合驗尚缺。 |
 | K：Fleet Kit [#8](https://github.com/teddashh/bat-fleet-kit/pull/8) | [merge `d3697dc`](https://github.com/teddashh/bat-fleet-kit/commit/d3697dc)，[reviewed head `2ec4b11`](https://github.com/teddashh/bat-fleet-kit/tree/2ec4b11bc010bfd669040e942648c741b63d0b7c)：`client/fleet-desktop.ps1`、`tests/fleet-*.tests.ps1` | 已合併；Windows PS 5.1／7、Linux PS 7 CI；所有環境均為合成 fixtures 或自有測試程序，未安裝。 |
-| A：[#46](https://github.com/teddashh/bat-agent-connector/pull/46) artifacts Part A | [`3d3789f`](https://github.com/teddashh/bat-agent-connector/tree/3d3789f4a1615f017377959fb537524a7cada519)：artifact store/host、exact-replica cleanup、binary upload bridge | Draft；malformed admission 與 observation fixture 已修，focused 證據；最新 head CI 待確認。跨 host Git materialization、完整 native 檔案流程未交付。 |
-| D：[#47](https://github.com/teddashh/bat-agent-connector/pull/47) Delivery Part B | [`831d670`](https://github.com/teddashh/bat-agent-connector/tree/831d670d9d50fdecc002faf9d2dfe2517d90e488)：deployment/store/verifier、owner/scope/history、shared UI | Draft；包含 A 修正與 cursor overflow 拒絕；focused／peer 證據，最新 head CI 待確認，沒有真部署版本證據。 |
+| A：[#46](https://github.com/teddashh/bat-agent-connector/pull/46) artifacts Part A | [`560870b`](https://github.com/teddashh/bat-agent-connector/tree/560870b568ffa202d01501c3e553fbc3011c3561)：store/host、exact replica cleanup、binary upload bridge | Draft，已進候選；admission/fixture 修正已含，focused/peer 證據。跨 host Git、完整 native file/save/download 尚缺。 |
+| D：[#47](https://github.com/teddashh/bat-agent-connector/pull/47) Delivery Part B | [`9874eae`](https://github.com/teddashh/bat-agent-connector/tree/9874eae4ae2c6622a866a792dff45d010dd16dd7)：deployment/store/verifier、owner/scope/history、shared UI | `831d670` CI 兩項舊 fixture 假設已修（canonical UI source、latest data step）；14 受影響 tests 兩版本通過。新 CI 待確認，無真 deployed version 證據。 |
 | O：[#48](https://github.com/teddashh/bat-agent-connector/pull/48) R04 UI | [`90e2392`](https://github.com/teddashh/bat-agent-connector/tree/90e2392bb8409c1d37cb76f27c8caae72af8e00c)：observation UI、pending/linked events、`desktop/tests/observation*` | 已含 D；browser、native IPC mock、真中央加 MockBat 的 F 證據；最新 head CI 待確認，不是 M1。 |
 | I：[#49](https://github.com/teddashh/bat-agent-connector/pull/49) R01 interrupt | [`3877da5`](https://github.com/teddashh/bat-agent-connector/tree/3877da5d0f8dc949fe19e3d8bfc61455d1eef5e0)：legacy interrupt adapter、`test_interrupt_operations.py` | 已含 D；focused／peer 證據，最新 head CI 待確認。只是 Part B 第一個 slice，其他 legacy mutations 尚未統一。 |
-| B1：manual single-file capture | [`835e455`](https://github.com/teddashh/bat-agent-connector/tree/835e455c6e7a5e4580392f8f31bbdfea00668247)：`artifact_capture*.py`、`test_artifact_capture.py` | 整合中；同 credential／manage+observe 的 admission、replay/resume/cancel 已補並審查。不是 managed-result capture/accept，也不是 dirty snapshot。 |
+| B1：[#50](https://github.com/teddashh/bat-agent-connector/pull/50) manual single-file capture | [`c3b4abd`](https://github.com/teddashh/bat-agent-connector/tree/c3b4abd2617f4d46a1f35beb0230fa1bb5a4d80e)：`artifact_capture*.py`、capture/interrupt/principal tests | Draft stacked on #49；139 focused tests 各 Python 版本與 38 seam checks 通過，已進候選。同 credential/雙 scope replay/control 已審；UI/native preview allowlist、B2/C 尚缺。 |
 | P：私有 installer draft #6 | `d33ddbf`：canonical pin/digest、principal-only、保留既有配置的 installer tests | 僅版本／測試來源記錄；不複製私有配置。候選 pin 仍須更新、整合審查與實際安裝。 |
+
+單一整合候選：`1cffa7107232cb6dde35f634b998a62f3333174f`，包含上述 heads（K/P 是外部相依，未安裝）。
+前身 `1498a6f` 的 production source 相同，已有 439 backend focused、74 UI、8 state、20 Rust、
+5 真中央 fixtures 與 build/Clippy/release check 通過；目前候選再含 #38 main merge（無 source diff）
+與 Delivery 兩項 test-only 修正。**此 exact head 的 full CI 尚待確認；不是完整 matrix 綠，也不是 I/L 證據。**
+#48/#49/#50 的各自 CI 可能繼承舊 Delivery fixture failure；候選已含修正，仍保留原失敗紀錄。
 
 ## 46 項對照
 
