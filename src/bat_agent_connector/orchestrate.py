@@ -165,7 +165,11 @@ async def session_worktree_status(
     d["worktree_dirty_files"] = None if dirty is None else len(dirty)
     d["worktree_dirty_preview"] = [f"{e.get('status')} {e.get('file')}" for e in (dirty or [])[:20]]
     origin = _origin_cwd(t, ws)
-    if origin:
+    if origin and (registry.get(host, t["id"]) or {}).get("checkpoint_id"):
+        # A checkpoint session's recorded main checkout is the person's folder: merges into it are refused, and
+        # BAT's git:status there could rewrite their index (a plain `git status`), so it is not read at all.
+        d["main_checkout_note"] = "not read: the person's folder (checkpoint sessions never merge into it)"
+    elif origin:
         d["main_checkout_branch"] = await c.invoke("git:branch", {"cwd": origin})
         md = await _git_dirty(c, origin)
         d["main_checkout_dirty_files"] = None if md is None else len(md)
