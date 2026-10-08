@@ -66,6 +66,10 @@ metadata:
 | Shared event log (read, daemon) | `events_list(after, limit)` | - |
 | Durable operation (write, daemon) | `operation_submit(action, idempotency_key, target, params)`, `operation_get(id)` | `batc op [ID]` |
 | Pull request before merging (read, daemon) | `github_pr_preview(repository, pull_number)` | - |
+| What a checkpoint would record (read, daemon) | `checkpoint_preview(host, session_id)` | - |
+| Record a checkpoint (connector records only, daemon) | `checkpoint_create(host, session_id, idempotency_key, commit?, note?, confirm=true)` | `batc checkpoint create HOST SID --note ...` |
+| Continue from it in a new managed session (daemon) | `work_continue_from_checkpoint(checkpoint_id, instructions, idempotency_key, agent?, confirm=true)` | `batc checkpoint continue CP --instructions ...` |
+| Checkpoints and the sessions started from them (read, daemon) | `checkpoints_list(host?, session_id?, checkpoint_id?)` | `batc checkpoint list`, `batc checkpoint show CP` |
 
 `session_id` accepts a unique prefix (8 characters is usually enough). Use `next_offset` from `session_read` to page
 back in history.
@@ -82,7 +86,7 @@ back in history.
    - idle and clearly mid-task (e.g. it stopped at a limit, or asked "shall I continue?"): propose a short nudge;
    - idle and done: report the result.
    - `api_access: read_only` (a person's BAT session): report only. The person answers or nudges it in BAT; if they
-     want an agent to carry the work on, propose a new managed worktree session (`session_start`) instead.
+     want an agent to carry the work on, propose a checkpoint continuation (checkpoint workflow) instead.
 4. Only if write tools exist **and** the user asked (or pre-approved this kind of nudge) **and** the session is
    `api_access: managed`: send one short message with `confirm=true`. Never loop sends; respect rate-limit errors
    instead of retrying around them.
@@ -101,6 +105,20 @@ session in its own worktree with the same text. If the target is busy or quota-s
 instead, wait, then `fanout_from_plan` on the planner. After a relay or send, pass its `turn_marker` as `after=` to `session_wait` and `session_read`. For Claude, this matches BAT's exact echo ID. Check `turn_phase` and `turn_attribution`; queued output stays unconfirmed until the previous-turn boundary is observed. BAT Codex currently uses a weaker timestamp fallback, so do not claim its output is definitively tied to the send.
 Read the session's
 last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_continue`), NEED-<HUMAN> → ask the human.
+
+## Checkpoint workflow (an agent continues a person's work)
+
+1. `checkpoint_preview(host, session_id)`: branch, HEAD, recent commits and `dirty`. Uncommitted changes are never
+   carried over (`dirty: null` means not observed); if the new work needs them, ask the person to commit in BAT first.
+2. Check earlier work first: `checkpoints_list(host, session_id)`, and for a candidate `checkpoints_list(checkpoint_id=...)`
+   shows its `runs`, so you do not start the same work twice.
+3. `checkpoint_create(host, session_id, idempotency_key, note=<the person's request, verbatim>, confirm=true)`. The
+   commit defaults to HEAD; pass another full SHA from the preview's `commits` if asked. Keep `checkpoint_id`.
+4. With the person's go-ahead: `work_continue_from_checkpoint(checkpoint_id, instructions=<their words>,
+   idempotency_key, agent, confirm=true)`. It may still be running when it returns: follow
+   `operation_get(operation_id)` and reuse the same key on retry. A new key starts a second session.
+5. Track `result.session_id` like any managed session. The source session is only a reference: do not nudge, stop or
+   clean it up. Take a new checkpoint to include the person's newer commits.
 
 ## Plan fan-out workflow (orchestrate tier)
 

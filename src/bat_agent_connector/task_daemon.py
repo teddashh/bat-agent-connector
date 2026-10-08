@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 from . import api_actions, api_auth, checkpoints, delivery, registry, service
 from .api_v1 import ApiV1, is_dashboard_path
 from .config import Config, state_dir
-from .errors import ResourceReadOnly, TokenUnavailable
+from .errors import BatError, ResourceReadOnly, TokenUnavailable
 from .fleet import Fleet
 from .github import GitHubClient
 from .goose_acp import GooseACP
@@ -39,7 +39,7 @@ DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
            "api_events": "observe", "inventory_sessions": "observe", "inventory_hosts": "observe",
            "api_capabilities": "observe", "github_pr_preview": "observe", "checkpoints_list": "observe",
-           "checkpoint_get": "observe"}
+           "checkpoint_get": "observe", "checkpoint_preview": "observe"}
 ADMIN_RPC = {"api_token_issue", "api_token_revoke", "api_token_list", "work_reconcile_capability"}
 
 
@@ -217,7 +217,13 @@ class TaskDaemon:
                                                 session_id=params.get("session_id"),
                                                 limit=int(params.get("limit") or 50))
         if method == "checkpoint_get":
-            return {"checkpoint": checkpoints.get(self.journal.db, str(params.get("checkpoint_id")))}
+            cp = checkpoints.get(self.journal.db, str(params.get("checkpoint_id")))
+            return {"checkpoint": cp, "source": await checkpoints.source_head(self.ops, cp)}
+        if method == "checkpoint_preview":
+            host = str(params.get("host"))
+            if host not in self.fleet.config.hosts:
+                raise OperationError("UNKNOWN_HOST", f"unknown host {host!r}", 404)
+            return {"preview": await checkpoints.preview(self.ops, host, str(params.get("session_id")))}
         raise ValueError("unknown api method")
 
     async def call(self, method: str, params: dict, *, auth_token: str | None = None) -> dict:
@@ -464,6 +470,8 @@ class TaskDaemon:
                     api_result, api_status = {"error": e.code, "message": e.message}, "400 Bad Request"
                 except ResourceReadOnly as e:
                     api_result, api_status = {"error": e.code, "message": str(e)}, "400 Bad Request"
+                except BatError as e:  # a host read failed (unreachable, session not found)
+                    api_result, api_status = {"error": "BAT_ERROR", "message": service._err(e)[:300]}, "400 Bad Request"
                 except (ValueError, TypeError, KeyError) as e:
                     api_result = {"error": "INVALID_REQUEST", "message": str(e)[:300]}
                     api_status = "400 Bad Request"
