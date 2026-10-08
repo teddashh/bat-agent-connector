@@ -1,8 +1,8 @@
 # GitHub 交付：PR 描述、合併、部署與回退
 
-日期：2026-10-08。對應計畫 v1.0 的 §09、§10、§15–§18、§26、§28，工作包 W07／W08。既有功能的驗收為 C04–C07、D01–D04；本次 Phase 1 補訂 metadata、rollback、environment ordering、merge scope 與完成驗證，主要驗收 C04、C05、C07、D03、D05、D06。
+日期：2026-10-08。對應計畫 v1.0 的 §09、§10、§15–§18、§26、§28，工作包 W07／W08。既有功能的驗收為 C04–C07、D01–D04；Phase 1 補訂 metadata、rollback、environment ordering、merge scope 與完成驗證，Phase 2 Part A 已交付 metadata／merge 部分，主要驗收 C04、C05、C07、D03、D05、D06。
 
-沿用本文件，因為新功能延伸同一套 `delivery.py`／`github.py`、recipe 與恢復流程；另開文件會有兩份完成判定。以下「現有」各節描述固定版本的程式，「Phase 2 規格」尚未實作，批准後取代相應合約。PR head 更新仍見 [integration.md](integration.md)。Phase 1 只提交本文件。2026-10-08 review 後分成兩步：Part A（現在）metadata、merge preview／verify、C04／C05／C07、PR 卡與各入口文件；Part B（之後另開 branch）部署 runtime evidence、generations／ordering、history／rollback、D03／D05／D06 與環境卡。
+沿用本文件，因為新功能延伸同一套 `delivery.py`／`github.py`、recipe 與恢復流程；另開文件會有兩份完成判定。以下「現有」各節記錄起點；metadata／merge 的 Phase 2 規格已由 Part A 取代相應合約，標為 Part B 的部署規格保留待第二步。PR head 更新仍見 [integration.md](integration.md)。Phase 1 規格為 `5f94ad7`，review 修訂為 `afac4e9`，兩筆均獨立提交。2026-10-08 review 後分成兩步：Part A（現在）metadata、merge preview／verify、C04／C05／C07、PR 卡與各入口文件；Part B（之後另開 branch）部署 runtime evidence、generations／ordering、history／rollback、D03／D05／D06 與環境卡。
 
 ## 固定來源版本
 
@@ -123,16 +123,18 @@ Metadata 使用既有 integrate capability（計畫 §10、§15），與 head �
 
 每個 mutation 經共用 action 的 allowlist／目標身分檢查，列入 `resource_policy.MUTATIONS` 的遠端 mutation 說明。沿用現有資源政策，不新增第二套 ownership 判斷；本包不呼叫 BAT／Git mutation，不修改人的 session、檔案、HEAD、index 或 refs。所有 actions 都不要求 task_id／managed execution／work item，只有人工成果的 PR 也可用（C06 精神、計畫 §18）。
 
-Actor 來自 API principal，GitHub credential identity 另記證據；不從 request body／Git author 猜 actor。HTTP、MCP、CLI 執行同一 handler，agent 不繼承 Dashboard 的 grant（C07）。Browser／MCP 不取得底層憑證；不要求 Administration、secrets 或 bypass，不送 `bypass_rules`。
+Actor 來自 API principal，provider origin／repository ID 另記 scope 證據，GitHub credential 留在後端；不從 request body／Git author 猜 actor，也不以 metadata 讀回推定實際編輯者。HTTP、MCP、CLI 執行同一 handler，agent 不繼承 Dashboard 的 grant（C07）。Browser／MCP 不取得底層憑證；不要求 Administration、secrets 或 bypass，不送 `bypass_rules`。
 
 ## Phase 2 規格：輸入／輸出與入口
+
+此節列完整兩步 contract；Part A 的 deployment.start 保持現有輸入，combined 只新增 merge preview preconditions。Generation、recipe digest、history 與 rollback 均屬 Part B。
 
 Mutation 仍是 `POST /api/v1/operations`，現有 envelope `{action, target, params, preconditions, idempotency_key}`，回 `{operation}`；同 actor／key／內容回原 operation，不同內容回 `IDEMPOTENCY_CONFLICT`。沒有直接 PR PATCH／dispatch HTTP 旁路。
 
 | Action | target | params | 必填 preconditions | 結果重點 |
 |---|---|---|---|---|
 | `github.pr.update` | `{repository, pull_number}` | `{title?, body?}`，至少一欄 | `{expected_metadata_digest}` | repository ID／PR、before／after digest、實際 title／body、URL、verified |
-| `github.pr.merge` | 同現有 | `{method, preview_id}` | `{expected_head_sha, expected_base_sha, preview_digest}` | actual merged SHA／tree、UUID／queue、scope verification、attribution |
+| `github.pr.merge` | 同現有 | `{method, preview_id}` | `{expected_head_sha, expected_base_sha, preview_digest}` | actual merged SHA、destination base／base_moved、UUID／queue、scope verification、attribution |
 | `deployment.start` | `{recipe}` | `{source_sha}`（完整 40 hex） | `{expected_environment_generation, expected_recipe_digest}` | deployment ID、identity、generation、run／attempt、evidence、is_current |
 | `deployment.rollback` | `{recipe}` | `{deployment_id}`（選定舊紀錄） | 同 start | 新 deployment ID、rollback_of、固定舊 identity、此次 run／generation／evidence |
 | `delivery.merge_and_deploy` | `{repository, pull_number, recipe}` | `{method, preview_id}` | merge＋deploy 的前置條件 | `{merge, deploy}`，deploy 失敗仍保留 merge receipt |
@@ -150,7 +152,7 @@ Generation 從 0 開始，以選定順序遞增，不依 commit 時間或 SHA �
 | `GET /api/v1/deployment-environments?recipe=NAME` | `deployment_environment_get` | environment 隨 preview／history 輸出 |
 | `POST /api/v1/operations`：start／rollback | `deployment_start`／`deployment_rollback` → `op_submit` | `batc delivery deploy NAME --sha SHA --generation N --recipe-digest DIGEST --key KEY`；`batc delivery rollback NAME DEP_ID --generation N --recipe-digest DIGEST --key KEY` |
 
-CLI merge 讀保存的 immutable preview 組 envelope，不自動刷新；需補 `GET /api/v1/delivery/previews/{mpv_id}`、MCP `github_merge_preview_get`／RPC 同名，scope observe。Part B 另加 deployment_retry：從已保存部署 identity 組 deployment.start，需新 key／generation／recipe digest，不能重新 merge（D04）。新 MCP write wrappers 都沿用 `principal_daemon()`：confirm=true、BATC_API_TOKEN 必填，read_only server 不註冊。新 CLI mutation 也以 BATC_API_TOKEN 的 principal 呼叫，不退回 local admin；讀取沿用既有 read 授權。`operation_get`／`batc op` 用於追蹤、取消、resume。
+CLI merge 讀保存的 immutable preview 組 envelope，不自動刷新；已加 `GET /api/v1/delivery/previews/{mpv_id}`、MCP `github_merge_preview_get`／RPC 同名，scope observe。Part B 另加 deployment_retry：從已保存部署 identity 組 deployment.start，需新 key／generation／recipe digest，不能重新 merge（D04）。新 MCP write wrappers 都沿用 `principal_daemon()`：confirm=true、BATC_API_TOKEN 必填，read_only server 不註冊。新 CLI mutation 也以 BATC_API_TOKEN 的 principal 呼叫，不退回 local admin；讀取沿用既有 read 授權。`operation_get`／`batc op` 用於追蹤、取消、resume。
 
 PR preview 保留現有 fields，加 `{body, metadata_digest, metadata_update, merge_preview}`。`integration.pr_card()` 繼續包 `delivery.pr_preview()` 加既有 integration 欄位，不建立第二個 head 更新入口。Merge preview 保存 ID／digest／method、repository ID、固定 head／base refs／SHA、完整 commit set、觀測範圍、受影響 PRs、blocking／warnings、created／expires。
 
@@ -162,7 +164,7 @@ Deployment preview 回 recipe digest／readiness、environment generation、desi
 
 計畫 §10 要區分 metadata 與 head。本次只更新 title／原始 Markdown body。Body 可含使用者選定的工作項目／operation links，不加入自動管理區塊：現有 `work_item.link` 已管理 Connector 關聯，計畫未定義 marker／公開連結規則／同步權威。`links`、state、base、head、labels 等欄位拒絕，不能靜默忽略。
 
-Title 是非空字串；body 是字串，空字串清空，省略保留。GitHub null body 正規化為空字串；不 trim 或改 Markdown／換行。`metadata_digest` 是 UTF-8 `json.dumps({"title": title, "body": body}, sort_keys=True, ensure_ascii=False, separators=(",", ":"))` 的 SHA-256。比較整對 title／body，單欄更新也察覺另一欄被改；不用隨其他 PR 活動變動的 updated_at 作 revision。
+Title 是非空字串；body 是字串，空字串清空，省略保留。CLI body-file 保留原始換行；Dashboard 以 textarea 初值判斷是否修改，避免只改 title 時因瀏覽器 CRLF 正規化而順帶改 body。GitHub null body 正規化為空字串；不 trim 或改 Markdown／換行。`metadata_digest` 是 UTF-8 `json.dumps({"title": title, "body": body}, sort_keys=True, ensure_ascii=False, separators=(",", ":"))` 的 SHA-256。比較整對 title／body，單欄更新也察覺另一欄被改；不用隨其他 PR 活動變動的 updated_at 作 revision。
 
 | 步驟 | I/O／前置條件 | 實際副作用 | 失敗恢復 |
 |---|---|---|---|
@@ -173,7 +175,7 @@ Title 是非空字串；body 是字串，空字串清空，省略保留。GitHub
 
 Write reconcile／重啟：after 是正向證據，`observed_intent=true`，不猜作者；before 也不證明沒寫（可能已寫後被人改回），維持 uncertain，沒有 RERUN；第三種內容為 conflict。Cancel／resume 不覆蓋或自動還原。處理方式是讀新內容、重新編輯、以新 digest／key 建操作；操作不能在 resume 換 precondition。
 
-取消不掩蓋已收到的 PATCH 回執；保存 `write_acknowledged`／`verification_pending`，UI 顯示已修改、待驗證。尚未證明的 started／uncertain write 即使 operation cancelled 仍阻擋另一個 metadata update，避免舊 PATCH 晚到再覆蓋新操作。Delivery 的只讀 reconciliation 也查這些 metadata steps，直到效果有證據；無證據不因取消釋放。Journal 保存必要的 before／intended／observed；api_events 只放 digest／欄位名／結果，不複製 body。
+取消不掩蓋已收到的 PATCH 回執；保存 `write_acknowledged`／`verification_pending`，UI 顯示已修改、待驗證。尚未證明的 started／uncertain write 即使 operation cancelled 仍阻擋另一個 metadata update，避免舊 PATCH 晚到再覆蓋新操作。Delivery 的只讀 reconciliation 也查這些 metadata steps，直到效果有證據；無證據不因取消釋放。Journal 保存必要的 before／intended／observed；沿用 api_events 的 action／target／狀態／錯誤摘要，不複製 body；完整三份內容只在 operation／steps。
 
 [GitHub update PR](https://docs.github.com/en/rest/pulls/pulls?apiVersion=2026-03-10#update-a-pull-request) 沒有 body CAS。本規格是 read-compare-write 加寫後讀回，仍有最後 GET 與 PATCH 之間的窗口，也無法發現窗口內被覆蓋且沒留下不同結果的編輯。不宣稱零遺失更新；UI 在編輯區簡短說明限制。可編輯 open／closed／merged PR 的 metadata，依 GitHub 權限，不把 merge 狀態當本地寫入權。
 
@@ -207,11 +209,11 @@ Write reconcile／重啟：after 是正向證據，`observed_intent=true`，不�
 | 200／輪詢 enqueued | 記 queue，GET PR 等實際合併；不重送、不部署 |
 | 409 existing | 比 head、resolved method、merge_action=default，重查 repo／base／單 PR scope；缺證據或不同為 `EXISTING_MERGE_REQUEST`。default method 只有能證明解析成選定值才接受 |
 | 400／輪詢 failed | 沿用 PR_NOT_MERGEABLE／MERGE_FAILED，不能 bypass |
-| `merge.verify`（新增） | GET merged PR／commit parents／tree、固定 base 到真正 merged SHA 的 comparison、受影響 PR 狀態；保存逐 PR 結果與 actual merged SHA |
+| `merge.verify`（新增） | GET merged PR／commit parents、固定 base 到真正 merged SHA 的 comparison、受影響 PR 狀態；保存逐 PR 結果與 actual merged SHA |
 
-Merge.verify 查實際 merged PR／commit 與 base history：PR 必須 merged；merge method 的 merge commit 第二 parent 等於 reviewed head，squash／rebase 則 merged PR 的 head SHA 等於 reviewed head；結果在 base branch history 上，且 reviewed base 是其祖先。保存 merged_onto_base_sha（merge／squash 的第一 parent，rebase 以實際 merged SHA 沿 reviewed commits 數量回溯的 base，證據不足時不猜）、base_moved、其他將一起發布的 commits／數量。
+Merge.verify 查實際 merged PR／commit 與 base history：PR 必須 merged；merge method 的 merge commit 第二 parent 等於 reviewed head，squash／rebase 則 merged PR 的 head SHA 等於 reviewed head；結果在 base branch history 上，且 reviewed base 是其祖先。merge.verify 在讀取前保存 step intent；readback 尚未答覆則 waiting_external，重讀／resume 以 merge.verify.retry.<attempt> 保存另一次只讀證據，成功的 receipt 不再重驗或重送合併。保存 merged_onto_base_sha（merge／squash 的第一 parent，rebase 以實際 merged SHA 沿 reviewed commits 數量回溯的 base，證據不足時不猜）、base_moved、其他將一起發布的 commits／數量。
 
-提交被受理後 base 前進是正常行为，包括 queue 先合成其他 PR，不比預覽 tree、不做 rebase blob mapping。UI 顯示「合併到較新的 base：另有 N 個 commits 會一起發布」。Combined 驗證通過就部署 actual merged SHA；§17 pipeline pre-deploy check 與 Part B D03 runtime evidence 驗證最後版本。
+提交被受理後 base 前進是正常行為，包括 queue 先合成其他 PR，不比預覽 tree、不做 rebase blob mapping。UI 顯示「合併到較新的 base：另有 N 個 commits 會一起發布」。Combined 驗證通過就部署 actual merged SHA；§17 pipeline pre-deploy check 與 Part B D03 runtime evidence 驗證最後版本。
 
 重查預覽 affected list（stack／chain／indirect candidates）及提交時新出現的 stack 成員，沒有其他 PR 被本次 merge 掃入；若候選已 merged，須以其 head 在本次 head 的可達性、其 merge SHA／目標 merge parents／實際 base history 與時間等證據區分先前獨立合併，不能把合法 base 前進誤判。確定額外 PR 被掃入才 MERGE_RESULT_SCOPE_CHANGED；缺少證據才 MERGE_RESULT_UNVERIFIABLE。保存 merged_sha／merge_receipt／逐 PR 結果，scope changed 時 combined 不 dispatch。On_merge 可能已觸發，只觀測不假稱無副作用，不自動 revert。
 
@@ -297,11 +299,11 @@ Rollback 只收舊 deployment ID，取 saved identity，不接受 client 替換 
 
 失敗不撤銷已發生的 migration／資料／通知；UI 列 not_undone 與本次實際結果。Retry 用新 key／最新 env g／recipe digest／原固定 identity，只重試 deploy（Part B deployment_retry wrapper），不重新 merge、換 main/latest 或靜默重派。Combined merge receipt／merged SHA 保留（D04 回歸）。
 
-## Phase 2 規格：Dashboard／skills／相容性
+## Phase 2 規格：Dashboard／skills／相容性（Part A PR 卡；Part B 環境卡）
 
 Delivery PR 卡加 metadata drawer，載入 body／digest，保存草稿，一次存檔提交 operation。Stale／conflict 顯示 before／intended／observed 差異，不自動合併 body。Merge preview 列 commits／受影響 PRs／blocking，stack disabled，直接 API 亦拒絕；SSE 不替使用者換已選版本。
 
-環境卡不依附 PR open 狀態；顯示 desired／current／last verified／observed time／歷史。可回退的舊紀錄有「回退到此版本」，旁邊列 SHA／artifact／環境／not_undone；unsupported／unverified／expired 顯示原因。Superseded 連新 desired 與原 provider run，drift 顯 needs_attention。按一次開始新操作，不加聊天批准或假的 managed task。
+Part B 環境卡不依附 PR open 狀態；顯示 desired／current／last verified／observed time／歷史。可回退的舊紀錄有「回退到此版本」，旁邊列 SHA／artifact／環境／not_undone；unsupported／unverified／expired 顯示原因。Superseded 連新 desired 與原 provider run，drift 顯 needs_attention。按一次開始新操作，不加聊天批准或假的 managed task。
 
 沿用 `fill()`、`setEditing()`、`holdRender()`、`liveReload()`，開 drawer／focus 時不重畫，en／zh-TW、390 px 可操作，不印 null／undefined／[object]；CSP 不加 inline style，必要時 el.style.setProperty。技術回執在可展開 operation details。
 
@@ -315,8 +317,10 @@ Contract_version 保持 YYYY-MM-DD，以該部分變更日期更新（Part A 為
 |---|---|---|
 | FORBIDDEN／REPO_NOT_CONFIGURED／PR_UPDATE_DISABLED | 403 | 使用有 grant／設定的 principal／repo |
 | PRECONDITION_REQUIRED／INVALID_PARAMS | 422 | 相容 client 讀預覽／補正欄位 |
+| PREVIEW_NOT_FOUND／PREVIEW_MISMATCH／PREVIEW_EXPIRED | 404／409 或 failed | 讀保存的 preview 或重新預覽；expiry 只在首次 submit 前檢查 |
 | PR_UPDATE_IN_PROGRESS | 409 | 查原 operation，包括尚未證明的 write |
 | PR_METADATA_CHANGED | failed／409 | 讀差異，新 digest／key |
+| PR_METADATA_UNVERIFIABLE | needs_attention | 保留 write receipt，補足 readback；不重新 PATCH |
 | PR_METADATA_CONFLICT | needs_attention | 保留三份內容，不覆蓋／還原 |
 | STACKED_PR_UNSUPPORTED／MERGE_SCOPE_EXPANDED／MERGE_SCOPE_UNPROVEN | preview blocking；needs_attention | 檢視各 PR／commits，正常重整或補讀取證據後重新預覽 |
 | TARGET_HEAD_CHANGED／TARGET_BASE_CHANGED／MERGE_SCOPE_CHANGED | failed／409 | 重新預覽，zero PUT |
@@ -338,10 +342,10 @@ Worker 錯誤記 operation.error_code／status_reason，已受理 HTTP 不假裝
 
 | 檔案 | 改動 |
 |---|---|
-| `src/bat_agent_connector/delivery.py` | update／rollback ActionDef、scope preview／verify、env ordering／history／部署與 metadata 只讀 reconcile；保留可用 merge／deploy |
+| `src/bat_agent_connector/delivery.py`、`pr_delivery.py`（新增） | Part A 在 delivery 註冊 action／merge 流程，PR helper 保存 immutable scopes、metadata、verification／只讀對帳，隔開 Part B deploy 演進；不改 core admission |
 | `src/bat_agent_connector/github.py` | repo／PATCH／stack／compare／array 分頁、pending env／attempt jobs／artifact reads、fixed version |
 | `src/bat_agent_connector/deployment_verifier.py`（新增） | 可注入、有限、recipe 固定 URL 的 HTTP JSON readback，無外部寫入 |
-| `src/bat_agent_connector/config.py`、`api_auth.py`、`resource_policy.py` | 新 grant／repo allowlist／recipe 欄位／inputs／mutation inventory，沿用人工唯讀邊界 |
+| `src/bat_agent_connector/config.py`、`api_auth.py`、`resource_policy.py` | 既有 integrate scope／repo opt-in／mutation inventory；Part B recipe 欄位／inputs；不改 api_auth scopes，沿用人工唯讀邊界 |
 | `src/bat_agent_connector/task_journal.py` | Part A preview migration；Part B deployment local transactions／tables／CAS，不改 operations.py／ActionDef |
 | `src/bat_agent_connector/api_v1.py`、`task_daemon.py` | routes／RPC／capabilities／contract，cancelled／superseded provider runs 與未證明 metadata write 只讀對帳 |
 | `src/bat_agent_connector/mcp_server.py`、`cli.py` | 薄 wrappers／delivery 命令、caller token／confirm／key |
@@ -354,15 +358,21 @@ Worker 錯誤記 operation.error_code／status_reason，已受理 HTTP 不假裝
 
 ## 驗收與測試計畫
 
-新增名稱是 Phase 2 要實作的 tests，不是 Phase 1 已通過的證據。既有 tests 保留，僅補新 preconditions／fake version fixtures，不能刪負面 assertions。
+Part A 已實作下列 tests；Part B 列為第二步的 test plan。既有負面 assertions 保留，integration 互斥測試只補新的 merge envelope。
 
-| 計畫／驗收 | 既有證據與缺口 | 預計新增 tests／證明 |
+| 計畫／驗收 | Part A tests 與證明 |
+|---|---|
+| §10／§15、C06 精神 | `test_metadata_human_only_pr_preserves_body_and_clears_explicitly`：人的 PR、title/body 單欄與空 body、Markdown；`test_metadata_stale_digest_and_last_read_race_send_zero_patch`；`test_metadata_write_readback_conflict_never_overwrites`；`test_metadata_lost_reply_restart_and_cancel_never_resend`；`test_metadata_cancelled_unknown_write_stays_blocking_until_proven`；`test_metadata_cancel_after_acknowledgement_retains_verified_effect` |
+| C04、§16 | 保留 `test_merge_records_the_real_merged_sha`、`test_pending_required_checks_wait_without_merging`、`test_existing_merge_request_is_adopted_only_when_it_matches`；新增 `test_c04_existing_request_requires_exact_options`（head／method／action 缺欄或不同拒絕）、`test_c04_expired_request_uuid_reads_pr_without_resubmit`、`test_c04_old_merge_client_requires_saved_preview` |
+| C05、§16 | `test_c05_base_changed_before_submit_has_diff_and_zero_put`；`test_c05_queue_newer_base_verifies_actual_merge`（merge／squash）；`test_c05_newer_base_combined_deploy_uses_actual_sha`；`test_c05_rebase_verifies_reviewed_head_and_actual_destination`；`test_c05_merge_restart_preserves_actual_sha_without_attribution`；`test_c05_wrong_merge_parent_keeps_receipt_and_stops_deploy`；`test_merge_preview_expiry_only_before_first_submit`；`test_c05_merge_verification_intent_precedes_reads_and_resume_is_read_only` |
+| §16 stack、C04／C05 | `test_c04_native_stack_and_branch_chain_are_listed_and_refused`、`test_c04_native_bottom_lists_upper_rebase_and_refuses`；`test_c04_indirect_merge_differs_by_method_and_shared_ancestor`；`test_c04_complete_compare_pagination_over_250_commits`、`test_c04_paginated_pr_list_finds_late_indirect_candidate`；`test_c04_scope_changes_or_missing_pages_never_submit`；`test_c04_stack_read_errors_are_not_empty_membership`；`test_c05_swept_downstack_fails_verification_and_never_dispatches`；`test_c05_new_stack_during_acceptance_never_dispatches`（list 的 merged_at／秒級時間、無 merged boolean）；`test_c05_independently_merged_candidate_on_new_base_is_allowed` |
+| C07、§09／§15 | `test_c07_metadata_integrate_scope_opt_in_and_fields`；`test_c07_delivery_transports_share_actions_and_principals`（真 HTTP／MCP／CLI，同 actor/key 回同 operation、scope 不借 Dashboard、combined capabilities）；`test_c07_delivery_wrappers_require_confirmation_and_token`（confirm／token／read_only）；既有 `test_merge_admission` |
+| §09／§28 migration | `test_part_a_preview_migration_reopens_without_data_change`：version 1／2／較高版本重開、資料保留；既有 task event backfill test 保留。Part A 不呼叫 BAT／SSH Git mutation |
+
+以下均為 Part B（第二步）規劃，尚未聲稱完成：
+
+| 計畫／驗收 | 既有證據與缺口 | 第二步 tests／證明 |
 |---|---|---|
-| §10／§15、C06 精神 | 缺 metadata | `test_c07_pr_metadata_updates_person_only_pr`：title only／body only／空 body／Markdown／無 task；`test_pr_metadata_stale_digest_and_concurrent_write`：兩次寫前比較／寫後第三種內容；`test_pr_metadata_lost_reply_restart_never_overwrites`：after／before／第三種、cancel／resume 不重 PATCH，取消 unknown write 不解鎖 |
-| C04、§16 | `test_merge_records_the_real_merged_sha` 走 202；`test_merge_queue_waits_until_github_shows_the_merge`、`test_existing_merge_request_is_adopted_only_when_it_matches` 測 200 queue／409 head-method | `test_c04_async_merge_response_matrix`：202 pending／enqueued final、200 queue 不部署、409 action／resolved method／scope 不同或缺欄；`test_c04_expired_request_uuid_reads_pr_without_resubmit` |
-| C05、§16 | `test_lost_merge_reply_is_read_back_not_blindly_resent` 沒真重啟；缺 base 競爭 | `test_c05_restart_after_merge_recovers_actual_revision`；`test_c05_base_moves_before_and_after_submit`：前移 zero PUT、後移／queue 正常驗證並 dispatch actual merged SHA；`test_c05_result_verification_by_merge_method`：merge／squash／rebase／queue／不可驗證 |
-| §16 stack、C04／C05 | 缺偵測 | `test_stack_preview_lists_downstack_and_refuses_merge`：top／middle／bottom／已 merged 成員；`test_merge_preview_detects_branch_chain_and_indirect_merge`：native／人工 chain／共用祖先／squash 不誤判；`test_merge_scope_changed_after_preview_never_submits`；`test_merge_scope_requires_complete_paginated_evidence`：>250 commits／第2頁／403／404／未知 schema；`test_c05_stack_added_during_submit_is_attention_not_deploy` |
-| C07、§09／§15 | `test_merge_admission` 有 scope refusal；integration 的 `test_c01_one_operation_path_for_http_mcp_cli` 未涵蓋新 action | `test_c07_delivery_transports_share_actions_and_principals`：Part A update／merge 同 handler；observe／merge 不得 update，integrate 只在 repo opt-in 後可 update；Part B rollback parity；agent 不借 Dashboard scope；confirm／無 token／read_only／combined allowed |
 | D03、§17 | `test_dispatch_deploy_succeeds_only_when_the_deploy_job_succeeds` 已測 skipped；缺 env／實際版本 | `test_d03_success_requires_job_environment_version_and_health` matrix：missing／skipped／未completed job、run success 但 pending、SHA／artifact／repo／env mismatch、健康 failed、缺資料／失聯／超時；`test_d03_workflow_sha_is_not_product_sha`；`test_d03_run_attempt_cannot_borrow_other_jobs` |
 | D05、§17 | `test_on_merge_recipe_tracks_the_existing_run_and_serializes_the_environment` 只限制 recipe，未測逆序 | `test_d05_environment_generation_is_atomic_across_recipes`：雙 client／key／不同env；`test_d05_late_old_run_is_superseded_never_current`：新先完成舊後回報；`test_d05_runtime_drift_invalidates_current_without_redispatch`；`test_d05_restart_and_cancel_keep_provider_slot_and_desired`；`test_d05_combined_selects_generation_then_binds_real_merge_sha` |
 | D06、§17 | 缺 history／rollback | `test_d06_rollback_redeploys_saved_identity_through_same_recipe`：SHA／artifact、新generation／run／原紀錄；`test_d06_rollback_refuses_unverified_expired_or_other_environment`；`test_d06_rollback_lost_reply_restart_never_dispatches_twice`；`test_d06_record_inactive_or_deleted_is_not_runtime_rollback` |
@@ -371,11 +381,11 @@ Worker 錯誤記 operation.error_code／status_reason，已受理 HTTP 不假裝
 
 UI 用 FakeGitHub／MockBat／fake verifier 驗收 zh-TW、en、390 px：編輯中 SSE 不丟草稿、conflict 差異、history 分頁、rollback limits／unsupported、superseded／desired-observed 不同、stack 各 PR 與後端拒絕。將 app.js 複製為 /tmp 的 .mjs 再 node --check；不為文案／低影響排版寫鏡像 tests。
 
-Phase 2 完成前跑 `uv run ruff check .`、`uv run pytest -q` 全套。Phase 1 同跑基線，不聲稱新驗收已實作。真實 repo／environment 接入由 orchestrator 另授權，本 clone 不呼叫 GitHub mutation、不推送、不開 PR。
+各部分完成前跑 `uv run ruff check .`、`uv run pytest -q` 全套。Phase 1 同跑基線，不聲稱新驗收已實作。真實 repo／environment 接入由 orchestrator 另授權，本 clone 不呼叫 GitHub mutation、不推送、不開 PR。
 
 ## 尚未涵蓋
 
-- Part A 已批准開始實作；Part B 待第二步實作，原 D05／D06／stack 不偵測的空白已改為 contract／test plan，尚不代表功能可用。
+- Part B 尚未實作：recipe／runtime check 與 rollback limits、journal deployment tables／environment generations、部署驗證／排序／history／rollback／reconcile_deployments、環境卡；D03／D05／D06 新驗收留待第二步。Part A 不改 deployment.start／deploy admission／OperationService.create／ActionDef。
 - PR head 更新仍是 [integration.md](integration.md)；integrate.verify、Task Service 成果來源、fork／LFS／跨主機整合不屬本包。
 - 不支援 native stack 建立／重整／多 PR merge；本版偵測、列出並拒絕。GitHub 沒有 base／scope／body 原子鎖，觀測間的競爭窗口仍存在。
 - 自動 managed links 區塊延後；需要時先決定 markers、公開 links、與 work_item.link 的權威關係，不猜自動同步需求。
