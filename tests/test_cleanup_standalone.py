@@ -1,6 +1,9 @@
 """Standalone registry-owned BAT worktrees: no checkpoint, integration or task carrier record."""
 from __future__ import annotations
 
+import asyncio
+import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -32,12 +35,13 @@ async def close_clients(daemon):
     await daemon.fleet.close()
 
 
-async def standalone_worktree(d, mock, human, tmp_path, *, managed=True):
-    repo = tmp_path / ("managed" if managed else "outside") / "standalone"
+async def standalone_worktree(d, mock, human, tmp_path, *, managed=True, host="h1"):
+    repo = tmp_path / ("managed" if managed else "outside") / ("standalone" if host == "h1" else host + "-standalone")
     repo.parent.mkdir(parents=True, exist_ok=True)
     git(repo.parent, "clone", "-q", "--no-hardlinks", str(human), str(repo))
     git(repo, "config", "batc.managed-clone", "true")
-    mock.ws_doc["workspaces"][0]["folderPath"] = str(repo)
+    workspace = mock.ws_doc["workspaces"][0 if host == "h1" else 1]
+    workspace["folderPath"] = str(repo)
     mock.handlers["git:getRoot"] = lambda p: git(p["cwd"], "rev-parse", "--show-toplevel")
 
     def create(p):
@@ -47,8 +51,8 @@ async def standalone_worktree(d, mock, human, tmp_path, *, managed=True):
         return {"success": True, "worktreePath": str(path), "branchName": branch, "sourceBranch": "main"}
 
     mock.handlers["worktree:create"] = create
-    started = await orchestrate.session_start(d.fleet, "h1", "ws-1", confirm=True, use_worktree=True)
-    assert started["started"] and registry.get("h1", started["session_id"])["origin_root"] == str(repo)
+    started = await orchestrate.session_start(d.fleet, host, workspace["id"], confirm=True, use_worktree=True)
+    assert started["started"] and registry.get(host, started["session_id"])["origin_root"] == str(repo)
     assert not d.journal.db.execute("SELECT 1 FROM checkpoint_runs").fetchone()
     assert not d.journal.db.execute("SELECT 1 FROM integration_previews").fetchone()
     assert not d.journal.db.execute("SELECT 1 FROM tasks").fetchone()
@@ -156,3 +160,56 @@ async def test_e01_standalone_bat_release_keeps_undelivered_branch(daemon, mock,
     assert not Path(wt["path"]).exists()
     assert git(repo, "rev-parse", started["branch"]) == wt["observation"]["head"]
     assert git(repo, "rev-parse", "refs/batc/retained/" + wt["resource_id"] + "/" + wt["observation"]["head"])
+
+
+async def test_e01_multi_host_apply_observes_only_each_items_host(daemon, mock, human, tmp_path, monkeypatch):
+    daemon.fleet.config.hosts["h2"] = replace(daemon.fleet.config.host("h1"), name="h2")
+    repo, healthy = await standalone_worktree(daemon, mock, human, tmp_path)
+    _, unavailable = await standalone_worktree(daemon, mock, human, tmp_path, host="h2")
+    target = await linked_work_item(daemon, "h1/" + healthy["session_id"], "h2/" + unavailable["session_id"])
+    add_receipt(daemon, {"observation": {"head": git(healthy["worktree_path"], "rev-parse", "HEAD")}},
+                source_kind="session", source_id=healthy["session_id"])
+    monkeypatch.setattr(cleanup, "READ_DEADLINE_S", 2)
+    original_read, original_snapshot = cleanup._terminal_observations, cleanup.snapshot
+    pending = asyncio.Event()
+    terminal_reads, item_reads = [], []
+    current_only = None
+
+    async def terminals(ops, host, deadline):
+        terminal_reads.append((current_only, host))
+        if host == "h2":
+            # The other host never replies. Bound the read using the real per-host deadline.
+            await asyncio.wait_for(pending.wait(), max(.001, deadline - time.monotonic()))
+        return await original_read(ops, host, deadline)
+
+    async def observed(*args, **kwargs):
+        nonlocal current_only
+        previous, current_only = current_only, kwargs.get("only")
+        if current_only:
+            item_reads.append(current_only)
+        try:
+            return await original_snapshot(*args, **kwargs)
+        finally:
+            current_only = previous
+
+    monkeypatch.setattr(cleanup, "_terminal_observations", terminals)
+    monkeypatch.setattr(cleanup, "snapshot", observed)
+    doc = await cleanup.preview(daemon.ops, CLEANER, target)
+    reclaimed = {i["resource_id"] for i in doc["items"] if i["host"] == "h1" and i["decision"] == "reclaim"}
+    assert {i["kind"] for i in doc["items"] if i["resource_id"] in reclaimed} == {"session", "worktree", "local_branch"}
+    blocked = [i for i in doc["items"] if i["host"] == "h2" and i["kind"] in {"session", "worktree"}]
+    assert {i["kind"] for i in blocked} == {"session", "worktree"}
+    assert all(i["decision"] == "retain" and "OBSERVATION_UNAVAILABLE" in {r["code"] for r in i["reasons"]} for i in blocked)
+    done = await apply(daemon, doc)
+    assert done["status"] == "succeeded", done
+    receipts = {r["resource_id"]: r for r in cleanup.receipts(daemon.ops, done["operation_id"])}
+    assert all(receipts[rid]["status"] == "succeeded" for rid in reclaimed)
+    assert all(receipts[i["resource_id"]]["status"] == "retained" for i in blocked)
+    assert set(item_reads) == reclaimed
+    assert {only for only, host in terminal_reads if only} == reclaimed
+    assert all(host == "h1" for only, host in terminal_reads if only), terminal_reads
+    # Only the initial preview and apply's whole-plan validation pay the unavailable host's deadline.
+    assert [only for only, host in terminal_reads if host == "h2"] == [None, None]
+    assert not Path(healthy["worktree_path"]).exists() and Path(unavailable["worktree_path"]).exists()
+    assert not git(repo, "for-each-ref", "refs/heads/" + healthy["branch"])
+    assert [i["params"]["sessionId"] for i in mock.invokes if i["channel"] == "claude:stop-session"] == [healthy["session_id"]]

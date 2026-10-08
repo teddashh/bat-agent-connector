@@ -309,6 +309,9 @@ def _all(ops):
         projected["resource_id"] = worktree_id(host, intent_type, intent, slot)
         projected["generation"] = _hash(["worktree", host, intent_type, intent, slot])
         projected["creation_evidence"].update(intent_type=intent_type)
+        if branch:
+            # A branch's observation is projected later, but its creation slot already fixes its ID/host.
+            projected["branch_id"] = _resource(host, "local_branch", intent, branch)["resource_id"]
         item = add(projected)
         alias(item, *ids)
         worktrees[key] = item
@@ -791,7 +794,11 @@ def _replica_evidence(ops, item):
 async def snapshot(ops, target, choices, *, only=None, own_op=None):
     items, op_rows, pvs, worktrees, containers, links = _all(ops)
     selected, wi_ids = _selection(ops, target, items, pvs, links, op_rows)
-    hosts = sorted({items[r]["host"] for r in selected if items[r]["host"]})
+    if only:
+        item = items.get(only) or next((w for w in worktrees.values() if w.get("branch_id") == only), None)
+        hosts = [item["host"]] if item else []
+    else:
+        hosts = sorted({items[r]["host"] for r in selected if items[r]["host"]})
     if len(selected) > MAX_ITEMS:
         raise OperationError("PREVIEW_TOO_LARGE", "preview exceeds 500 resources", 413)
     for host in hosts:

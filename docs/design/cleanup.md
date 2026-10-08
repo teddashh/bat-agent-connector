@@ -245,7 +245,11 @@ Fingerprint 包含完整 resource 集合（包括 retain）、ownership/generati
 refs／registration／merge state、writer/pending、commands／global consumers、receipt coverage、retention rules、
 choices／steps；排除 heartbeat／抓取時間／讀取次數／顯示語言。
 Apply 在首個 mutation 前重新計算**整份** snapshot；之後每 item 的 mutations 前只核對該 item／consumers
-（及自身已證實的 planned transitions），不 O(n²) 重讀所有剩餘資源。任何外部變動 PREVIEW_STALE，不能換 plan。
+（及自身已證實的 planned transitions）。`snapshot(only=resource_id)` 只觀測該 item 的 host，仍讀該 host
+全部 terminals／consumers；local_branch 尚未投影 observation 時，由 worktree 的 creation slot 對應 branch ID
+確定 host，不需新 journal／SSH 查詢。初始 preview 與 apply 首次驗證仍觀測所有選中 hosts。其他 host
+逾時不會在每個 healthy item 上重付 deadline；其資源仍保留 OBSERVATION_UNAVAILABLE。
+不 O(n²) 重讀所有剩餘資源。任何外部變動 PREVIEW_STALE，不能換 plan。
 
 ### cleanup.apply
 
@@ -432,6 +436,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | planner stop 需確認與全數 tasks 啟動；失敗保留 plan 供 retry；E01 | test_e01_fanout_without_confirmation_keeps_planner_loaded、test_e01_fanout_failed_start_keeps_planner_for_retry（第一個／最後一個 start 失敗）、test_e01_fanout_stops_planner_and_keeps_worktree（stop frame 恰一次） |
 | legacy confirmation／read-only audit；E01 | test_e01_legacy_mutations_require_confirmation_before_writes（planner／relay／merge／remove／failover／permissions／approve／verification）、test_e01_legacy_cleanup_disabled_apply_never_writes_with_auto_cleanup、test_e01_legacy_cleanup_evaluation_never_rehydrates_worktrees（confirm=false／true 都不寫） |
 | boundedread／serialization／deadline | test_e01_previews_serialize_per_host_and_share_read_deadline |
+| multi-host apply 每 item 只讀自己的 host；E01/E02 | test_e01_multi_host_apply_observes_only_each_items_host（另一 host terminal read 永不回覆；healthy session／worktree／branch 均成功，unavailable 資源保留；只有初始 preview／全 plan 驗證付該 host deadline） |
 | attachmentreplicas只豁免exact manifest／exacttemps | test_e01_attachment_replicas_are_removed_without_discard_scope、test_e01_edited_or_extra_replica_content_counts_as_uncommitted、test_e01_replicas_without_manifest_are_ordinary_content、test_e01_replica_anomalies_require_reviewed_discard（missing/link/hardlink/directory）、test_e01_replica_edit_after_preview_is_stale、test_e01_lost_replies_reconcile_each_cleanup_phase（discard.replica）、test_e01_exact_temporary_requires_creation_markers_and_never_sweeps、test_e01_empty_integration_temporary_has_exact_intent_and_no_restore_promise |
 | acceptedauthority由server記錄／public request retry／載體不被guard退休 | test_e01_accepted_authorization_is_server_recorded（HTTP 422、persisted actor/scopes/choices、同key retry）、test_e01_accepted_authority_survives_key_rotation_and_carrier_stays_usable |
 | migration原histories／DDL不占user_version／keep無sweep | test_cleanup_migration_is_atomic_additive_and_preserves_history（version 1與3、第二次open不變）、test_e01_keep_defaults_reject_purge_and_never_sweep_by_name |
