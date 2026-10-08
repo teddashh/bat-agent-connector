@@ -1,6 +1,6 @@
 # Project Hub 資料匯入
 
-日期：2026-10-08。本規格已依 Phase 2 審查修訂，接續實作。對應《Better Agent Dashboard／Connector 計畫》v1.0 的 §08（穩定識別）、§09（共用操作與預覽）、§20（Hub 重用）、§24 現有資料遷移第 7 步、§28，以及驗收 B05。
+日期：2026-10-08。本規格已依 Phase 2 審查修訂並實作。對應《Better Agent Dashboard／Connector 計畫》v1.0 的 §08（穩定識別）、§09（共用操作與預覽）、§20（Hub 重用）、§24 現有資料遷移第 7 步、§28，以及驗收 B05。
 
 新增本文件，因為來源檔案、安全讀取、重匯衝突與遷移復原需要獨立的合約；[work-items.md](work-items.md) 繼續說明日常管理規則。匯入後，管理資料的權威來源是 Connector journal。
 
@@ -26,7 +26,7 @@
 
 ## 現有與新增行為差異
 
-現有 `work_items.py` 已有 `prj_`／`wi_`、樹、順序、固定、封存、完成確認及資源連結。`_once()` 把修改與 `management_applied` 同交易保存。`task_journal.py` 尚無 Hub mapping 表；`THIRD_PARTY_NOTICES.md` 現在的表是規則移植對照，不是使用者資料的 ID mapping。
+起點的 `work_items.py` 已有 `prj_`／`wi_`、樹、順序、固定、封存、完成確認及資源連結。`_once()` 把修改與 `management_applied` 同交易保存。起點的 `task_journal.py` 尚無 Hub mapping 表；當時 `THIRD_PARTY_NOTICES.md` 的表是規則移植對照，不是使用者資料的 ID mapping。
 
 新增的是離線資料匯入、來源標記、預覽、逐項回執與重匯比對。沿用 `OperationService`、`ActionDef`、`api_auth`、同一 journal 與現有 work item 驗證。匯入不建立 execution、Task Service task、session、worktree、Git branch 或派工命令。Hub 的 `owner`、`model`、`role`、`workdir`、queue 與 provider session ID 不會變成執行設定或管理權證據。
 
@@ -52,7 +52,7 @@ frontmatter 採與上游有限語法相容的 Python parser，支援 scalar、in
 
 ## 必要前置條件與來源唯讀
 
-人先在 daemon 的主機準備來源，並修改 daemon 設定。以下為**新增設定**，不是目前可用的命令：
+人先在 daemon 的主機準備來源，並修改 daemon 設定。以下設定由人加入 daemon 設定檔；重新啟動 daemon 後可用：
 
 ```toml
 [[hub_import.sources]]
@@ -73,15 +73,16 @@ runtime_retired = true
 
 ## 穩定 mapping 與來源資料
 
-在同一 journal 作 versioned、additive migration（目前 `PRAGMA user_version = 1`；在核准實作的 base 上取下一個未用版本）。以下是新增資料表的邏輯欄位；不另建 tasks database。
+在同一 journal 作 versioned、additive migration（起點 `PRAGMA user_version = 1`，本包取下一個空位 2；rebase 時若平行 migration 已使用它，改取下一個空位。DDL 為 idempotent）。以下是新增資料表的邏輯欄位；不另建 tasks database。
 
 | 紀錄 | 主鍵／必要欄位 |
 |---|---|
-| `hub_import_sources` | `source_id`；固定 Hub commit、首次匯入 actor／operation、最後成功的 manifest digest、來源 revision。路徑取 daemon 設定，不是 identity |
-| `hub_import_map` | `(source_id, kind, hub_project_id, hub_task_id)`；`kind = project/item`；project 的 task key 為空字串；`connector_id`、最近成功的 source digest／snapshot、destination baseline、import operation；未完成批次另有 pending snapshot／receipt reference。`connector_id` 不得被另一個 mapping 使用 |
+| `hub_import_sources` | `source_id`；最後成功的 actor／operation、manifest 與來源 revision；固定 Hub commit 由 parser/read model 定義，首次 actor／operation 仍可由 receipts 查回。路徑取 daemon 設定，不是 identity |
+| `hub_import_map` | 實體主鍵 `(source_id, record_key)`，record_key 編碼 kind／Hub project ID／task ID；`kind = project/item`；project 的 task key 為空字串；`connector_id`、最近成功的 source digest／snapshot、destination baseline、import operation；未完成批次另有 pending snapshot／receipt reference。`connector_id` 不得被另一個 mapping 使用 |
 | `hub_import_previews` | `preview_id = hip_` + 32 hex；actor、source_id、parser version、manifest、normalized records、計畫與依賴、destination preconditions、digest、created_at、expires_at |
-| `hub_import_receipts` | `(apply_operation_id, record_key)`；creation reference、結果、建立／修改的 connector ID、before／after digest、step 名稱與錯誤。也記結構／order group；不是派工狀態 |
-| `hub_import_groups` | `(source_id, scope, parent)`；最近成功的來源 sibling order、destination order digest 與事件游標。scope 沿用 `projects`／`items:<prj_id>` |
+| `hub_import_receipts` | `(apply_operation_id, record_key)`；結果中的 operation_id／import_record 可還原 creation reference；connector ID、after destination／mapping digest。before 留在綁定的 preview，錯誤留 operation／phase；另有 structure／finalize receipts，不是派工狀態 |
+| `hub_import_groups` | `(source_id, group_key)`；group_key 編碼 kind／Hub project／parent record key。保存來源順序及 pins digest、destination baseline 與事件游標；實際 tree_order scope 沿用 `projects`／`items:<prj_id>` |
+| `hub_import_source_snapshots` | `apply operation_id`；完整 shared order／pins／completion／marker 文字與 manifest，交易內存一次，避免每個 task 複製 ledger。完成後由 imports read 回查 |
 
 `record_key` 是 canonical JSON 的 kind／Hub project ID／Hub task ID，不能用容易混淆的字串拼接。對照如下：
 
@@ -204,13 +205,13 @@ preview 結果的必要內容：
 }
 ```
 
-counts 的各 entity 分類互斥，總和等於這次來源與舊 mapping 的聯集；blockers 為診斷數，不再算成 entity。records 含 source identity、現有 connector ID（新項目為 null）、classification、changed_fields、S0／S1／D1 差異、預計完成狀態、依賴與來源位置。groups 列實際排序／固定／parent 差異。完整長文由 preview 詳情提供；一般 operation 事件不帶需求正文。
+counts 的各 entity 分類互斥，總和等於這次來源與舊 mapping 的聯集；blockers 為診斷數，不再算成 entity。records 含 source identity、現有 connector ID（新項目為 null）、classification、changed_fields、S0／S1／D1 差異、預計完成狀態、依賴與來源位置。groups 列實際排序／固定／parent 差異。完整長文由 actor-bound preview 詳情提供；operation.result.preview 只含 preview_id／source_id／digest／counts／can_apply／expires_at，避免一般 operation read 繞過 actor 綁定。一般事件不帶需求正文。
 
-apply 結果含 preview_id、source_id、實際 counts、每列 connector ID／import_record／結果、groups 回執與 `partial`。逐項結果為 created／updated／metadata_only／unchanged／local_only／source_missing／pending／conflict／failed；不把前面成功項目因後面失敗變成 failed。
+apply 結果含 preview_id、source_id、實際 counts、每列 connector ID／import_record／結果、groups 回執與 `partial`。逐項結果為 created／updated／metadata_only／unchanged／local_only／source_missing／pending；不把前面成功項目因後面失敗變成 failed。
 
 | Surface | 合約 |
 |---|---|
-| CLI，先做 | `batc hub import --source hub-fixture --preview [--key KEY]`；顯示 counts／conflicts 與 preview ID。`batc hub import --apply --preview-id hip_… [--key KEY]`；adapter 讀預覽取得 source_id／digest；不用 client local path |
+| CLI，先做 | `batc hub import --source hub-fixture --preview [--key KEY]`；顯示 counts／conflicts 與 preview ID。`batc hub import --source hub-fixture --apply --preview-id hip_…`；adapter 核對 source_id 並讀預覽取得 digest，apply 固定使用 `hub.import.apply.<preview_id>` key；不用 client local path |
 | CLI 回查 | `batc hub show hip_…` 讀預覽；`batc op op_…` 看結果／逐項回執；已有需注意操作用 `batc op op_… --resume` |
 | HTTP mutation | `POST /api/v1/operations`，action = hub.import.preview／hub.import.apply，沿用 Idempotency-Key、wait 與標準 operation response。沒有直接寫檔 endpoint |
 | HTTP read | 新增 `GET /api/v1/hub-import/sources`、`/previews/{hip_id}`、`/imports/{op_id}`；sources 列 source_id、可預覽／可 apply 與原因，不公開本機絕對 path |
@@ -234,21 +235,21 @@ apply 直接寫管理資料，沒有子 operation、每列 step 或等待排程�
 1. `source.verify`：驗原 manifest、退役聲明、所有目的 preconditions 與最終樹。handler 每次進入（包括 resume）都重新驗 source；不能以已完成 step 跳過。
 2. `records`：先 projects 後 items，一列一交易；resume 跳過已有 receipt 的列，但仍檢查已提交列未被外部編輯。新列先不連 parent／derived_from，source.import_state 為 incomplete；既有列的結構暫不改。沒有每列 step。
 3. `structure.apply`：ID 已存在後，一個 management 交易套用 parent／derived_from／pins／order groups，驗最終樹，保留本機 siblings、archived 槽位。避免合法父子互換在中間狀態形成循環。
-4. `baseline.finalize`：同交易保存成功 baseline、source revision、complete 標記與 summary receipt；unchanged／local_only 不更新 baseline。只記一個 `hub_import.completed`。
+4. `baseline.finalize`：同交易保存成功 baseline、source revision、complete 標記與 finalize receipt；unchanged／local_only 不更新 baseline。summary 另由 `_once()` 去重，避免 finalize 回覆遺失造成重複事件。
 
 phase 用固定 management receipt key 去重，泛化同一 `_once()`；events 始終引用真實 apply op。`records` 的 reconcile 讀 receipts，若未全提交，證明是本機交易後回 RERUN 接續剩餘列。structure／finalize 以 management_applied 回查。來源與目的變動以 needs_attention 明確停止；不把未知的新內容納入原計畫。
 
 | 失敗位置 | 恢復與結果 |
 |---|---|
-| admission／首次 verify | 409／422 或 failed；零管理寫入，重新 preview |
+| admission／首次 verify | admission 回 409／422；首次 verify 停在 needs_attention，零管理寫入，重新 preview |
 | 某列 commit 前停止／SQLite 錯誤 | row、mapping、snapshot、receipt 一起 rollback；resume 驗原 manifest 與剩餘目的 preconditions，再以相同 creation reference 接續 |
 | 某列 commit 後、records phase 回覆遺失 | 查 receipt／management_applied；已提交列跳過，IDs 不重建；phase uncertain 的 reconcile 接續剩餘本機交易 |
-| 已套用幾列後來源／目的變動或磁碟故障 | partial = true、needs_attention；保留 applied／pending、incomplete。不宣稱整批原子提交 |
+| 已套用幾列後來源／目的變動 | partial = true、needs_attention；保留 applied／pending、incomplete。不宣稱整批原子提交 |
 | structure commit 後、finalize 前停止 | 查 phase receipt；不再次移動／排序，驗未被外部編輯後 finalize |
-| finalize commit 後、operation 結果未存 | 查 summary 完成原 op；不增加 revision、不重發項目事件 |
+| finalize commit 後、operation 結果未存 | 查 finalize receipt 完成原 op 與 phase；不增加 revision、不重發項目事件 |
 | cancel | 在下一筆交易／phase 前停止，已提交列與 receipt 保留；uncertain phase 先回查，不刪列回滾 |
 
-imports read model 由 receipts 推導 partial／pending；錯誤或 cancel 的標準 operation result 即使為空，逐項結果仍能回查。一次 apply 最多一個 summary event：成功為 `hub_import.completed`，否則 `hub_import.incomplete`。不發 per-record hub_import 事件，metadata-only 只留 receipt；原文不進一般 audit event／log。
+imports read model 由 receipts 推導 partial／pending；錯誤或 cancel 的標準 operation result 即使為空，逐項結果仍能回查。執行過的 apply 在成功或第一次停止需人處理／取消時記 summary：成功為 `hub_import.completed`，否則 `hub_import.incomplete`。一個 apply 最多一個 summary；needs_attention 後恢復成功仍保留先前 incomplete 歷史，最新完整狀態由 imports read 查回。SQLite／回覆遺失先沿用 OperationService 的 uncertain 重試；超出既有 read-back 次數時記 incomplete。執行前已取消的 intent 沿用 operation.cancelled，沒有管理寫入。不發 per-record hub_import 事件，metadata-only 只留 receipt；原文不進一般 audit event／log。
 
 只有原 manifest 與目的 preconditions 仍成立，resume 才能續做。SOURCE_CHANGED／DESTINATION_CHANGED 須取消停住的 apply，重新 preview。incomplete mapping 以 pending snapshot 與 receipt 的實際 after 狀態作恢復基準；外部編輯仍 conflict。incomplete 不分類 unchanged，列剩餘 structure／finalize 工作。此基準不抹掉人的修改。
 
@@ -284,9 +285,9 @@ imports read model 由 receipts 推導 partial／pending；錯誤或 cancel 的�
 
 沒有第二份自行派工的 Hub 狀態是 B05 的必要條件。Importer 不以沒有觀測到 Hub 程序就宣稱退役成功；也不重新啟動 Hub 讀取資料。execution branch ID 留來源紀錄，不能當 Git branch 名稱或授權 Git 操作。
 
-## 預計修改檔案
+## 修改檔案
 
-Phase 1 只提交本文件與 work-items.md 的設計連結，不發布任何可用功能。核准後 Phase 2 預計修改：
+Phase 1 僅提交規格，審查修訂先獨立提交；Phase 2 實作如下：
 
 | 檔案 | 修改 |
 |---|---|
@@ -297,49 +298,35 @@ Phase 1 只提交本文件與 work-items.md 的設計連結，不發布任何可
 | `dashboard/app.js`、`app.css`、`i18n.js` | 小型 Projects 入口、來源與 incomplete 標記、en／zh-TW；沿用 fill()、CSP 與 live-update hold 規則 |
 | `tests/test_hub_import.py`、`tests/fixtures/hub-import/` | 真格式合成 fixtures、B05 契約與故障注入 |
 | `docs/design/work-items.md`、`api-v1.md` | 實作完成後更新尚未涵蓋、actions／routes 與 source／external_url 規則 |
-| `README.md`、`README.zh-TW.md`、`CHANGELOG.md` | CLI／遷移及設計連結；Next release 引計畫 §08、§09、§20、§24 第 7 步與 B05；Phase 1 不宣稱可匯入 |
+| `README.md`、`README.zh-TW.md`、`CHANGELOG.md` | CLI／遷移及設計連結；Next release 引計畫 §08、§09、§20、§24 第 7 步與 B05 |
 | `THIRD_PARTY_NOTICES.md` | parser／顯示階層／順序／completion 規則若移植，補固定 commit、上游檔案與 Python 位置，保留既有 MIT 聲明 |
-| 兩份 `skills/*/bat-agent-connector/SKILL.md` | Phase 2 的 agent workflow 若新增匯入步驟，同步規範 preview、conflict、退役及不可匯入 runtime |
+| 兩份 `skills/*/bat-agent-connector/SKILL.md` | 未修改：此包是人主導的一次遷移，未新增 agent 常態匯入流程；MCP action 說明要求人的授權，不替人宣告退役 |
 
 ## B05 測試計畫
 
-以下名稱是**待實作測試**，不是 Phase 1 已通過的 B05 證據。fixtures 用上游 createProject／createTask 產出的欄位、上游 tests 的合法舊 task 名稱與 synthetic JSON；不複製個人資料、真實 host／token／email。fixtures README 記來源 commit／檔案與刻意差異。正常 fixture 例如：
+`tests/fixtures/hub-import/` 是合成資料，來源檔案與刻意差異見其 README；basic 有四個 projects、八個 tasks，date-id 另涵蓋日期序號。損壞、競態、深樹與大量項目都在臨時副本產生，不執行上游 Store。
 
-```text
-hub-import/basic/
-  Product/p/PROJECT.md
-  Product/p/.ai/tasks/20261001-01.md
-  Product/p/.ai/tasks/t.md
-  Product/p/.ai/chat/t.jsonl
-  Product/child/PROJECT.md
-  _hub/project-order.json
-  _hub/project-pins.json
-  _hub/completion.json
-  _hub/completion.migrated
-```
-
-| 待實作測試（`tests/test_hub_import.py`） | 驗收／計畫與必要證據 |
+| 已實作測試（`tests/test_hub_import.py`） | B05／計畫與證據 |
 |---|---|
-| `test_b05_real_format_and_source_mapping` | B05、§08：讀真 frontmatter／JSON 布局、日期與舊 task IDs；跨 source／project 同 task ID 不衝突；改顯示名稱／搬快照仍是同 prj／wi |
-| `test_b05_hierarchy_order_pins_and_derived_links` | B05、§20：project name-ref／ID-ref、深樹、derived 同層及跨 project、pins-first、task 次序、archived 槽位及本機 siblings；與上游 project-order／hierarchy tests 的純輸入輸出案例對照 |
-| `test_b05_requests_acceptance_and_external_links` | B05：完整 Markdown、user JSONL 多輪需求、驗收標題、Unicode／CRLF／comments／quoted values／inline maps；重複外部 URL、reference links、code、unsafe scheme、本機 references、連結刪除歷史；不得截斷或漏原文 |
-| `test_b05_completion_facts_do_not_grant_approval` | B05、§05／§20：Hub 整檔 hash、continued steps JSON hash、at=migrated、缺 ledger／marker、stale hash、project phases 歷史；manage 不寫 Connector approval，done 仍待確認；open steps 明確阻擋 |
-| `test_b05_rerun_changes_nothing_when_source_is_unchanged` | B05、§09：相同／不同 apply key 重跑；row version、updated_at、mapping baseline、link IDs、tree_order、項目事件完全不變；只有本機變更列 local_only |
-| `test_b05_source_updates_and_local_edits_conflict` | B05、§09：source-only 更新／metadata-only 皆回報；content、approval、archive、pin、link、order、改回原值的本機編輯都保護；group 移動／新 siblings 不被覆寫 |
-| `test_b05_preview_has_counts_and_no_management_writes` | B05、§09：各分類 counts 相加、conflict／blocker 停 apply；preview 不分配正式 ID、不改管理表；CLI／HTTP／MCP params／results 一致 |
-| `test_b05_stale_source_and_destination_stop_apply` | B05、§09：preview 後 bytes 改但 mtime／size 一樣、來源集合變、根被換、目的版本／link／pin／order 變；首次 verify 零寫入，途中變動 partial 可回查 |
-| `test_b05_restart_lost_reply_and_partial_recovery` | B05、§09／§24：每個 named step 前後重啟、records phase 回覆遺失、SQLite rollback／disk failure、structure commit／finalize reply 遺失；同 ID、receipt 去重、pending／incomplete 誠實呈現，無重建或重複事件 |
-| `test_b05_missing_source_keeps_ids_and_archives` | B05、§08：來源消失不刪列／mapping、不 archive；復原回同 ID；destination missing 明確報錯；既有封存不被重匯解封 |
-| `test_b05_source_is_read_only_and_never_dispatches` | B05、§24 第 7 步：record 前後來源 bytes／mtime／檔案集合相同；不呼叫 Store／Hub runtime、不 spawn CLI／PTY、無 BAT write／Git／network；tasks／commands／branches／registry 沒有新增；parent 不流入 continuation，branch_id 不成 Git branch |
-| `test_b05_daemon_source_boundary_and_scopes` | B05、§06／§09：HTTP／MCP 任意 path／URL／額外參數被拒；symlink／race／special file／unreadable／超限；observe 不能 preview／apply，manage 可匯入但不可 approve；另一 actor 不能讀未匯入 preview 或重用其他 actor 的 preview |
-| `test_b05_retirement_busy_cancel_and_resume` | B05、§24 第 7 步：未退役 preview 有 blocker、apply 拒絕；同 source 並行 apply 被拒；cancel 不抹掉已提交列，uncertain 先 reconcile；新來源不能用 resume 偷渡 |
-| `test_b05_invalid_and_incomplete_formats_are_reported` | B05：損壞 JSON／UTF-8／重複 key、id mismatch、missing／ambiguous relation／cycles、超深、非法 state、非完整 export；可選檔缺失與損壞的結果不同 |
+| `test_B05_preview_apply_preserves_hub_data_and_four_phases` | §08／§20／§24 第 7 步：真格式、完整需求／驗收／links／user 歷史、name-ref／derived／跨 project 階層、pins-first、歷史完成與 continued；來源 bytes 不變、沒有 BAT 呼叫或 Task Service task，只有四個 phase steps |
+| `test_B05_idempotent_reimport_and_source_update` | §09：unchanged 的 row／mapping、version／updated_at／links／項目事件不變；source-only 更新、固定 creation reference、相同 apply key 回同 operation；一個 summary |
+| `test_b05_metadata_links_source_missing_and_rename` | §08／§09：metadata-only 不 bump 版本；URL 修改有 removed_links；來源消失不 archive，恢復／顯示改名仍用原 ID |
+| `test_b05_cross_source_mapping_and_snapshot_move`、`test_b05_date_id_and_depth` | §08：同 task ID 在不同 project／source 不衝突，搬快照不換 ID，日期／舊 ID；超過 32 層阻擋 |
+| `test_b05_source_updates_and_local_edits_conflict`、`test_b05_order_changes_protect_local_siblings`、`test_b05_archived_destination_is_not_used_for_new_items` | §09：內容／改回原值／pin／link／approval／archive 保護；本機 sibling 使來源重排衝突；不向封存專案加入新項目 |
+| `test_b05_stale_source_and_destination_stop_apply`、`test_b05_snapshot_race_and_destination_missing` | §09：bytes 改但 size／mtime 相同、集合／根身分、目的版本／pin／link／order 變；兩次 descriptor 掃描競態、目的消失；首次驗證沒有新增 receipt |
+| `test_b05_restart_lost_reply_and_partial_recovery` | §09／§24：四個 phase 的回覆提交前／後重啟，共八種；receipts 去重、沿用 ID、每個 phase 最終成功且 summary 不重複 |
+| `test_b05_sqlite_rollback_is_reconciled_without_duplicate_rows`、`test_b05_record_commit_reply_loss_and_mid_import_source_change`、`test_b05_uncertain_budget_has_one_incomplete_summary_and_can_resume` | §09／§24：逐筆 rollback、commit 後回覆遺失、途中來源變動／partial／新 preview、重試耗盡後 resume，沒有重建或重複事件 |
+| `test_b05_retirement_busy_cancel_and_resume` | §24 第 7 步：人的退役聲明、busy、cancel 保留已提交列，下一張 preview 安全接續 incomplete |
+| `test_b05_invalid_and_incomplete_formats_are_reported`、`test_b05_descriptor_snapshot_refuses_unsafe_sources`、`test_b05_ambiguous_names_are_blocked_and_parser_reports_nested_blocks` | §06／§20：JSON／UTF-8／重複 key、id mismatch／missing／ambiguous／cycles、非法 state／open steps；symlink／FIFO／超限／不支援巢狀語法明列 blocker |
+| `test_b05_completion_missing_ledger_never_seeds_approval`、`test_b05_frontmatter_dialect_and_crlf_hash` | §05／§20：缺 ledger／marker 不寫 seed，不授權 Connector approval；CRLF、Unicode、引號、comments、list／map 與原始文字 |
+| `test_b05_daemon_source_boundary_and_scopes`、`test_b05_config_source_allowlist_is_strict` | §06／§09：observe 不能變更、browser path／unknown source／非字串／額外參數拒絕；actor／digest／TTL 綁定；sources 不洩漏絕對 path |
+| `test_b05_http_rpc_and_mcp_share_the_same_actions`、`test_b05_cli_submits_preview_then_its_fixed_apply_key` | §09：CLI／HTTP／MCP 同 OperationService、reads 與 action、actor-bound preview 不由 generic operation read 洩漏 |
+| `test_b05_many_records_use_constant_steps_and_no_children` | §09／§24：1,008 work items 仍只有兩個 operations（preview／apply）、四個 phase steps、一個 shared snapshot／summary；沒有 child operations 或 per-record Hub events |
 
-故障測試沿用 `tests/test_work_items.py` 的 TaskDaemon／Principal fixture、`tests/test_api_v1.py` 的 HTTP／token helpers、`tests/mockbat.py`；不連真主機。純格式 parser 不執行上游 Store，因 Store／Completion 的建構與某些 read 會寫來源。Phase 2 必跑 `uv run ruff check .`、`uv run pytest -q`；Dashboard 做 `.mjs` node check 與 en／zh-TW／390px 的 Playwright 檢查。Phase 1 的既有套件測試只證明文件提交沒有破壞基線。
+必跑 `uv run ruff check .`、完整 `uv run pytest -q`；Dashboard 另做 `.mjs` 的 node check 與 en／zh-TW、390／768／1440 px 的 Playwright 預覽、套用雙擊去重、console／overflow／錯誤 DOM 文字檢查。
 
 ## 尚未涵蓋
 
-- Phase 2 實作接續本規格；完成前不宣稱 B05 已驗收。
 - 任意新版 Hub、壓縮匯出、自訂 YAML 全語法、刪除／trash 紀錄的復原、附件 bytes／Git 成果／完整 assistant 對話遷移。需求文字和原始連結保留，但不 materialize 其指向內容。
 - 自動改名 identity、認領同名 Connector 列、雙向同步、watcher、Hub runtime 接管、重送 queue／delegate。第一版皆不做。
 - 衝突後明確 adopt-baseline／逐欄位人工合併操作尚未設計；第一版衝突持續可見，管理 actions 可人工處理正式內容，匯入器不自動重設 baseline。

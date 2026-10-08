@@ -97,10 +97,15 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 | `GET /api/v1/integrations/candidates?host=` | observe | 可放進 PR 的 agent 成果與 checkpoint，及送過的 PR |
 | `GET /api/v1/integrations/previews/{ipv_id}` | observe | 預覽文件與是否過期 |
 | `GET /api/v1/integrations?repository=&pull_number=`、`/integrations/{op_id}` | observe | 一個 PR 的整合紀錄、一次整合與各來源 receipts |
+| `GET /api/v1/hub-import/sources` | observe | daemon 登記的 source_id、退役聲明與可預覽／套用原因，不公開本機 path |
+| `GET /api/v1/hub-import/previews/{hip_id}` | observe，actor 或 admin | 完整 preview／counts／conflicts／expired；另一 actor 不可讀未匯入來源 |
+| `GET /api/v1/hub-import/imports/{op_id}` | observe | apply 與逐項 receipts／partial／complete；完成後另附 shared source snapshot |
 | `GET /api/v1/projects`、`/projects/{prj_id}` | observe | 專案樹與統計；一個專案與它的工作項目樹（[work-items.md](work-items.md)） |
 | `GET /api/v1/work-items`、`/work-items/{wi_id}` | observe | 跨專案的工作項目（`pending=true`：等人決定）；一個項目與它的完成狀態、連結、紀錄 |
 
 錯誤格式為 `{"error": {"code", "message"}}`：401 未驗證、403 權限或資源唯讀（代碼同 resource-policy）、404、405、409 冪等衝突、422 參數錯誤、502 BAT 錯誤。
+
+Hub 匯入沿用 `POST /operations`：`hub.import.preview` 與 `hub.import.apply` 都是 manage，target 僅 source_id。preview params/preconditions 為空；apply params 為 preview_id，preconditions 為 preview_digest，建議固定 key `hub.import.apply.<preview_id>`。預覽綁 actor、設定與 24 小時 TTL。一般 operation.result.preview 只含摘要；完整來源只由 actor-bound read 取得。來源／目的過期與衝突不 force，見 [hub-import.md](hub-import.md)（計畫 §08／§09／§20／§24 第 7 步，B05）。MCP 查詢為 hub_import_sources／hub_import_get，CLI 為 batc hub import／show。
 
 ## 尚未涵蓋
 

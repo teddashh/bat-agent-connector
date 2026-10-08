@@ -121,6 +121,26 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 
 `batc serve` 也在同一個 loopback 埠提供 `/api/v1` 與瀏覽器 Dashboard（`http://127.0.0.1:18796/dashboard/`）：需要你處理的項目、所有 session 與其來源（人在 BAT 建立的 session 一律唯讀）、managed session 的操作、PR 合併與部署按鈕，以及操作紀錄。以 `batc api-token issue --actor ted-dashboard --scope observe --scope operate --scope start --scope integrate --scope manage --scope approve --scope merge --scope deploy`（`merge`、`deploy` 給合併與部署按鈕）發行 token 後在 Dashboard 的「連線」輸入。專案與工作項目記下在做什麼、為什麼：需求原文、驗收、步驟，以及做這件事的 sessions、checkpoint、操作與 PR。有 `manage` 的 agent 可以回報完成；只有帶 `approve` 的 token 能確認完成，而且確認的是它讀到的內容，之後內容再改會重新等待確認。排序、固定、改名與封存沿用 Project Hub 的規則。要接續人的工作而不碰它的 session，先記下 checkpoint（`checkpoint.create`：commit 與最近對話，只讀），再從它開始 managed 工作（`checkpoint.continue`：在 Connector 自有的 clone、worktree、分支與 session 從那個 commit 開始）。需要 `managed_roots` 與主機的 SSH alias。要把成果放進既有 PR，先預覽（`integration.preview`：列出以 SHA 釘住、會進 PR 的每個 commit 與檔案），再套用預覽（`integration.apply`：以主機的 git 憑證，一般 push 組合後的 commit 到 PR 的 head 分支；不強推，也不改你的資料夾），需要在 repository 的 `[[github.repos]]` 設定 `integrate = {hosts, remote_url}`。設計見 [docs/design/api-v1.md](docs/design/api-v1.md)、[docs/design/delivery.md](docs/design/delivery.md)、[docs/design/dashboard.md](docs/design/dashboard.md)、[docs/design/checkpoints.md](docs/design/checkpoints.md)、[docs/design/integration.md](docs/design/integration.md)、[docs/design/work-items.md](docs/design/work-items.md)。
 
+Project Hub v4.68.2 的資料遷移由人先退役 Hub 與派工、備份資料，再登記 daemon 主機上的快照目錄。匯入器唯讀來源，不啟動 Hub／BAT／Git；以目錄與檔名對照固定 Connector ID，保留需求原文、階層、順序、固定、完成歷史與外部連結。重匯不改未變項目，兩側都改時列衝突；Hub 的完成確認不會授予 Connector 簽核。這是人的遷移工作，未新增 agent 常態匯入流程。詳見[匯入合約與退役步驟](docs/design/hub-import.md)。
+
+```toml
+[[hub_import.sources]]
+id = "hub-fixture"
+path = "/srv/import-fixtures/hub-snapshot"
+runtime_retired = true  # 由人在退役 Hub 後宣告
+```
+
+修改設定後重啟 daemon。兩個 actions 都需 `manage`，查詢需 `observe`：
+
+```bash
+batc hub show
+batc hub import --source hub-fixture --preview
+batc hub import --source hub-fixture --apply --preview-id hip_...
+batc hub show op_...
+```
+
+先看預覽的數量、差異與阻擋項目，再套用。預覽綁 actor，24 小時過期；來源或目的改變時停止。CLI、HTTP `POST /api/v1/operations`、MCP `operation_submit`（`hub.import.preview`／`hub.import.apply`）與 Projects 的匯入入口共用 action。MCP 查詢為 `hub_import_sources`／`hub_import_get`；HTTP 為 `/api/v1/hub-import/sources`、`/previews/{hip_id}`、`/imports/{op_id}`。只選已登記 ID，不接收 browser path。回執可查 partial，沿用既有 operation 恢復；來源或目的已改時須取消停住的 apply，再預覽。
+
 ## 工具一覽
 
 | 工具 | 用途 |
