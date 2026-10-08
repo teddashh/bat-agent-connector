@@ -1155,9 +1155,11 @@ def test_b01_relation_scope_and_cross_project_link_history(mock, tmp_path):
     bind(j, t, "sid")
     # Use the existing work-item operation writer, with no provider call.
     from bat_agent_connector import work_items
+    from bat_agent_connector.artifacts import ArtifactSettings, ArtifactStore
     from bat_agent_connector.operations import OperationService
     ops = OperationService(j, actions=work_items.ACTIONS)
     ops.context["fleet"] = inv.fleet
+    ops.context["artifact_store"] = ArtifactStore(ops, ArtifactSettings(store_root=str(tmp_path / "artifacts")))
     principal = api_auth.Principal("agent", frozenset({"observe", "manage"}))
     async def create():
         p, _ = ops.create(principal, action="project.create", params={"name": "P"}, idempotency_key="p")
