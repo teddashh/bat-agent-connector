@@ -68,6 +68,9 @@ BAT tab 記的 `cwd`／`worktreePath` 和紀錄不同也是 `BINDING_MISMATCH`�
 | `session.create` | `session_start`、`session_failover`、`session_relay(start_if_missing)`、fan-out、task lead／reviewer 啟動 | 先在 registry 預留 ID；資料夾是 managed root、connector 新建的 worktree，或共享 connector 擁有的 worktree |
 | `workspace.register_tab` | `session_start`、task reviewer 啟動 | 只為剛啟動的 managed session 追加 tab，其他 tab 必須保持不變 |
 | `task.external_worktree` | task service 的 `base_branch` 啟動與整理（SSH git） | 固定命名的 connector worktree |
+| `checkpoint.managed_worktree` | `checkpoint.continue`（SSH git） | managed root 下一層的 connector clone，與固定命名的 worktree 及分支 |
+| `integration.area` | `integration.preview`、`integration.apply`、`batc integrate`（SSH git） | 只寫 `<第一個 managed root>/.batc-integration/<name>-<8 hex>/repo.git`，每次寫入前核對身分；其他 repository（包括人的）只當 fetch／ls-remote 的來源 |
+| `integration.push` | `integration.apply`（SSH git，scope `remote`） | 一般 push 一個確切 commit 到同 repository、開著的 PR 的 head 分支；不強推、不刪除，不推 base、預設或受保護分支。見 [integration.md](integration.md) |
 
 只寫 connector 自己資料的動作（`session_record_verification`、`work_*` 帳本）不碰 BAT 或 Git，不需要 grant。
 
@@ -83,6 +86,8 @@ BAT tab 記的 `cwd`／`worktreePath` 和紀錄不同也是 `BINDING_MISMATCH`�
 | `DESTINATION_MANUAL` | 新 session 或 merge 的目的端是人工 checkout。 |
 | `DESTINATION_UNKNOWN` | 目的路徑不是絕對路徑，或 BAT 建在預期外的位置。 |
 | `TIER_DISABLED` | 只出現在 `session_policy`：主機沒開對應層級。 |
+| `CLONE_NOT_OURS`、`CLONE_CONFIG_TAMPERED` | 整合區的標記、本地設定或完整性不符（被改過），什麼都不做。 |
+| `PR_CLOSED`、`PR_HEAD_IN_FORK`、`TARGET_REF_FORBIDDEN` | 整合不推送到已關閉、fork 或 base／預設／受保護分支的 PR head。 |
 | `GRANT_REQUIRED`、`GRANT_MISMATCH` | 程式缺陷：某段程式沒經過政策就要送寫入 frame。 |
 
 ## 升級後的行為差異

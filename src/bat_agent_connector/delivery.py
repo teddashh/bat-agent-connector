@@ -9,6 +9,7 @@ when the recipe's deploy job concluded success; a completed run with a skipped d
 
 from __future__ import annotations
 
+import json
 import re
 import time
 
@@ -61,6 +62,19 @@ def _check_wait(ctx: OpContext, key: str) -> None:
         raise NeedsAttention("WAIT_TIMEOUT", f"still waiting after {int(_cfg(ctx.service).wait_max_s)} s ({key})")
 
 
+def open_operations(ops: OperationService, actions: tuple[str, ...], repository: str, number: int) -> list[str]:
+    """Non-terminal operations of these actions on one PR (merges and integrations exclude each other)."""
+    marks, states = ",".join("?" * len(actions)), ",".join("?" * len(TERMINAL))
+    rows = ops.db.execute(f"""SELECT operation_id, target FROM operations WHERE action IN ({marks})
+        AND status NOT IN ({states}) ORDER BY created_at""", (*actions, *TERMINAL)).fetchall()  # noqa: S608
+    out = []
+    for r in rows:
+        t = json.loads(r["target"])
+        if str(t.get("repository") or "").lower() == repository.lower() and t.get("pull_number") == number:
+            out.append(r["operation_id"])
+    return out
+
+
 def _has_step(ctx: OpContext, name: str) -> bool:
     return ctx.service.db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? AND name=?",
                                   (ctx.operation_id, name)).fetchone() is not None
@@ -89,6 +103,10 @@ def _admit_merge(ops: OperationService, principal: Principal, target: dict, para
     method = params.get("method", repo.default_merge_method)
     if method not in repo.merge_methods:
         raise OperationError("INVALID_PARAMS", f"method must be one of {', '.join(repo.merge_methods)}", 422)
+    updating = open_operations(ops, ("integration.apply",), repository, number)
+    if updating:
+        raise OperationError("INTEGRATION_IN_PROGRESS", f"{updating[0]} is updating this PR's head; merge after it "
+                             "finishes, at the new head", 409)
 
 
 async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method: str, prefix: str = "merge") -> dict:

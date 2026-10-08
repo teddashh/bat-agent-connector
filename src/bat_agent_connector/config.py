@@ -235,12 +235,28 @@ MERGE_METHODS = ("merge", "squash", "rebase")
 _INPUT_FIELDS = ("source_sha", "operation_id", "environment", "repository")
 
 
+# Never a PR head that integration pushes to; the PR's base and the default branch are refused as well.
+PROTECTED_REFS = ("main", "master", "release/*", "releases/*", "production", "staging")
+
+
+@dataclass(frozen=True)
+class IntegrateConfig:
+    """``integrate = {...}`` on a [[github.repos]] entry: which hosts may push composed results to its PR heads,
+    and the exact URL they push to (with that host's own git credentials). Design: docs/design/integration.md."""
+
+    hosts: tuple[str, ...]
+    remote_url: str
+    protected_refs: tuple[str, ...] = PROTECTED_REFS
+    fetch_timeout_s: float = 1800.0
+
+
 @dataclass(frozen=True)
 class GitHubRepo:
     repository: str  # owner/name
     allow_merge: bool = True
     merge_methods: tuple[str, ...] = MERGE_METHODS
     default_merge_method: str = "squash"
+    integrate: IntegrateConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -276,6 +292,46 @@ class GitHubConfig:
         return tok
 
 
+def _integrate_url(url, repository: str, api_url: str) -> str:
+    """The push URL must name this repository on this GitHub, with no credentials or tricks in it."""
+    if not isinstance(url, str) or not url or url != url.strip() or url.startswith("-") or any(
+            c.isspace() or c in "?#" for c in url):
+        raise ConfigError(f"[[github.repos]] {repository}: integrate.remote_url is not a plain URL")
+    api_host = re.sub(r"^https?://", "", api_url).split("/", 1)[0].split(":", 1)[0]
+    if api_host in {"127.0.0.1", "localhost"} and (url.startswith("/") or url.startswith("file:///")):
+        return url  # a local bare repository stands in for GitHub in tests
+    gh = "github.com" if api_host == "api.github.com" else api_host
+    owner, name = (re.escape(p) for p in repository.split("/", 1))
+    tail = rf"{owner}/{name}(\.git)?"
+    forms = (rf"git@{re.escape(gh)}:{tail}", rf"ssh://git@{re.escape(gh)}/{tail}", rf"https://{re.escape(gh)}/{tail}")
+    if not any(re.fullmatch(f, url, re.IGNORECASE) for f in forms):
+        raise ConfigError(f"[[github.repos]] {repository}: integrate.remote_url must be git@{gh}:{repository}.git, "
+                          f"ssh://git@{gh}/{repository}.git or https://{gh}/{repository}.git (no token in it)")
+    return url
+
+
+def _integrate(r: dict, repository: str, api_url: str, host_names: set[str]) -> IntegrateConfig | None:
+    raw = r.get("integrate")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError(f"[[github.repos]] {repository}: integrate must be a table")
+    hosts = raw.get("hosts")
+    if not isinstance(hosts, list) or not hosts or any(h not in host_names for h in hosts):
+        raise ConfigError(f"[[github.repos]] {repository}: integrate.hosts must list configured hosts")
+    protected = raw.get("protected_refs", list(PROTECTED_REFS))
+    if not isinstance(protected, list) or any(not isinstance(p, str) or not p for p in protected):
+        raise ConfigError(f"[[github.repos]] {repository}: integrate.protected_refs must be a list of globs")
+    try:
+        timeout = float(raw.get("fetch_timeout_s", 1800))
+    except (TypeError, ValueError):
+        timeout = -1.0
+    if not 60 <= timeout <= 7200:
+        raise ConfigError(f"[[github.repos]] {repository}: integrate.fetch_timeout_s must be 60-7200")
+    return IntegrateConfig(tuple(dict.fromkeys(str(h) for h in hosts)),
+                           _integrate_url(raw.get("remote_url"), repository, api_url), tuple(protected), timeout)
+
+
 def parse_github(data: dict) -> GitHubConfig:
     g = data.get("github") or {}
     api_url = str(g.get("api_url") or "https://api.github.com").rstrip("/")
@@ -297,7 +353,8 @@ def parse_github(data: dict) -> GitHubConfig:
         default = str(r.get("default_merge_method") or methods[0])
         if default not in methods:
             raise ConfigError(f"[[github.repos]] {name}: default_merge_method must be one of merge_methods")
-        repos[name.lower()] = GitHubRepo(name, bool(r.get("allow_merge", True)), methods, default)
+        repos[name.lower()] = GitHubRepo(name, bool(r.get("allow_merge", True)), methods, default,
+                                         _integrate(r, name, api_url, set((data.get("hosts") or {}).keys())))
     recipes: dict[str, DeployRecipe] = {}
     for r in (data.get("deploy") or {}).get("recipes") or []:
         name = str(r.get("name") or "")

@@ -2,6 +2,17 @@
 
 ## Next release (unreleased)
 
+- Integration into an existing PR (docs/design/integration.md, plan §14, C01-C03): `integration.preview` pins the
+  PR head and chosen results (a person's checkpoint, an agent's checkpoint run, a GitHub branch) by SHA in a bare,
+  identity-checked area under the host's first managed root, lists every commit and file that would enter, and
+  predicts the result; `integration.apply` composes exactly that (fast-forward, merge commit or picked commits) with
+  git plumbing only, checks that nothing else entered, and pushes one exact SHA to the PR's head branch with a normal
+  push using the host's git credentials. Per-source receipts; a lost push reply is read back, never resent; a
+  conflict stops with nothing pushed. New scope `integrate`, config `integrate = {hosts, remote_url}` on
+  `[[github.repos]]`, routes `/api/v1/integrations/...`, MCP `integration_candidates`, `integration_get`,
+  `integrations_list`, CLI `batc integrate`, and an "Update PR results" panel in the Dashboard's Delivery view.
+  Merging is refused while an integration of the same PR is open, and the other way round.
+
 - Checkpoints no longer call BAT's `git:status` on the person's checkout: BAT runs a plain `git status`, which can
   rewrite `.git/index`, and answers `[]` on failure. Uncommitted changes are counted over SSH with
   `git --no-optional-locks status`, or reported as not observed (`dirty: null`); `dirty` is a count, not a bool.

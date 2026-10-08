@@ -63,17 +63,17 @@ class SshGitRunner:
     def available(self, host: str) -> bool:
         return bool(self.aliases.get(host))
 
-    async def run(self, host: str, script: str) -> str:
+    async def run(self, host: str, script: str, timeout_s: float | None = None) -> str:
         alias = self.aliases.get(host)
         if not alias:
             raise GitCommandFailed(f"no SSH alias is configured for host {host}")
-        return await _run(("ssh", "-o", "BatchMode=yes", alias, "sh -lc " + shlex.quote(script)))
+        return await _run(("ssh", "-o", "BatchMode=yes", alias, "sh -lc " + shlex.quote(script)), timeout_s)
 
 
-async def _run(argv: tuple[str, ...]) -> str:
+async def _run(argv: tuple[str, ...], timeout_s: float | None = None) -> str:
     proc = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), GIT_TIMEOUT_S)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout_s or GIT_TIMEOUT_S)
     except asyncio.TimeoutError:
         proc.kill()
         raise AmbiguousOutcome("git script timed out") from None
