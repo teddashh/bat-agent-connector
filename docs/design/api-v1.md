@@ -106,6 +106,17 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 
 既有 session reads 帶 `write_scope`、`confinement` creation snapshot 與 `current_verification`；`/hosts` 及 `capabilities.hosts[].confinement` 帶 account check 與 agent 可達選項。Cached 舊列補 unknown evidence，不改資料庫；stale 不宣稱目前已 verified。`/tasks/{id}` 的 `session_confinement` 顯示 Task Service 相容 gap。Checkpoint preview、continue／repair operation refs 與結果帶同一證據；無新增 route 或 MCP tools。權限與批准的穩定拒絕見 [confinement](confinement.md)，A10 尚待 W12 live run。
 
+`GET /api/v1/capabilities` 的 `hosts[].confinement.host_account.start_effect` 描述新 start 的帳號查核流程，與 reason 一起回傳。MCP `capabilities_get`、CLI／MCP host reads 用同一後端 projection；GET 不觸發 live check。`start_account()` 在真正 start 時跑 live check，並用同一 `account_start_effect()` 規則決定拒絕。
+
+| start_effect | 意義 |
+|---|---|
+| `verified` | 帳號已查核。新的受限 Claude 可用 acceptEdits，啟動前仍會再查；不是既有 session 的升級。 |
+| `recheck` | 宣告帳號但尚無 fresh evidence，reason=unchecked_or_stale。啟動時再查；通過、支援的加固 fallback 或拒絕由 live 結果決定。 |
+| `fallback_default` | Unknown 的 reason 是支援的環境加固缺口；受限 Claude 用 plain default，不啟用 acceptEdits。未宣告帳號也用此 value，跳過帳號 check；一般 operator／Task policy 不變。 |
+| `refused` | Mismatch 或其他 unknown；HOST_ACCOUNT_UNVERIFIED 拒絕 Claude 與 Codex 的新 start。 |
+
+Dashboard 依 start_effect 選啟動提示，不把所有非 verified status 當成 blocked、不在 JS 複製 reason 清單。Fallback／refusal 保留 reason code；Codex 保留原 sandbox 提示，refused 時先顯示拒絕。
+
 ## 尚未涵蓋
 
 - Dashboard 畫面（W09）、GitHub merge／部署（W07／W08）、checkpoint 接續（W04）。這些新增 action 與路由，不改這裡的合約。

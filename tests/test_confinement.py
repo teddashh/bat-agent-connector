@@ -56,6 +56,67 @@ class AccountRunner:
 ACCOUNT = {"host_account": True, "expected_uid": 2001, "protected_roots": ["/srv/personal"]}
 
 
+@pytest.mark.parametrize("status,reason,declared,effect", [
+    ("verified", "read_only_account_check", True, "verified"),
+    ("unknown", "check_executable_untrusted", True, "fallback_default"),
+    ("unknown", "login_environment_writable", True, "fallback_default"),
+    ("unknown", "login_shell_unsupported", True, "fallback_default"),
+    ("mismatch", "protected_root_writable", True, "refused"),
+    ("unknown", "ssh_alias_unavailable", True, "refused"),
+    ("unknown", "unchecked_or_stale", False, "fallback_default"),
+])
+async def test_a10_account_start_effect_and_gate_agree(fleet_factory, status, reason, declared, effect):
+    f = fleet_factory(confinement=ACCOUNT if declared else {})
+
+    class Runner(AccountRunner):
+        async def run_account_check(self, host, script, timeout_s=None):
+            self.scripts.append(script)
+            return json.dumps({"status": status, "reason": reason})
+
+    f.confinement_runner = Runner()
+    try:
+        # Seed a fresh cache using the actual checker; undeclared hosts skip it.
+        result = await confinement.check_account(f, "h1")
+        projection = confinement.host_capability(f, "h1")["host_account"]
+        assert projection["start_effect"] == confinement.account_start_effect(result) == effect
+        calls = len(f.confinement_runner.scripts)
+        if effect == "refused":
+            with pytest.raises(confinement.ConfinementRefused, match="HOST_ACCOUNT_UNVERIFIED") as error:
+                await confinement.start_account(f, "h1")
+            assert error.value.code == "HOST_ACCOUNT_UNVERIFIED" and error.value.sent is False
+        else:
+            account = await confinement.start_account(f, "h1")
+            assert confinement.account_start_effect(account) == effect
+            opts, _, _ = await confinement.start_decision(f, "h1", "claude", confined=True)
+            assert opts == {"permissionMode": "acceptEdits" if effect == "verified" else "default"}
+        assert len(f.confinement_runner.scripts) > calls if declared else not f.confinement_runner.scripts
+    finally:
+        await f.close()
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["unchecked", "stale"])
+async def test_a10_recheck_passes_live_and_confined_claude_uses_accept_edits(fleet_factory, mock, cached):
+    f = fleet_factory(writes=True, orchestrate=True, confinement={**ACCOUNT, "check_max_age_s": 45},
+                      safety={"write_min_interval_s": 0}, **MANAGED)
+    f.confinement_runner = AccountRunner()
+    if cached:
+        await confinement.check_account(f, "h1")
+        f._confinement_checks["h1"]["checked_at"] = time.time() - 46
+        f.confinement_runner.scripts.clear()
+    try:
+        projection = confinement.host_capability(f, "h1")["host_account"]
+        assert projection["start_effect"] == "recheck" and projection["reason"] == "unchecked_or_stale"
+        assert not f.confinement_runner.scripts
+        result = await orchestrate.session_start(f, "h1", "demo-project", confirm=True, write_scope="confined")
+        assert result["confinement"]["options"] == {"permissionMode": "acceptEdits"}
+        starts = [i for i in mock.invokes if i["channel"] == "claude:start-session"]
+        assert len(starts) == 1 and starts[0]["params"]["options"]["permissionMode"] == "acceptEdits"
+        assert len(f.confinement_runner.scripts) == 2  # fresh admission, then frame check
+        assert confinement.host_capability(f, "h1")["host_account"]["start_effect"] == "verified"
+    finally:
+        await f.close()
+
+
 async def test_a10_accept_edits_requires_verified_account_and_checks_are_read_only(fleet_factory, mock):
     f = fleet_factory(writes=True, orchestrate=True, confinement=ACCOUNT, **MANAGED)
     f.confinement_runner = AccountRunner()

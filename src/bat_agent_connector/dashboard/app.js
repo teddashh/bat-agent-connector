@@ -148,9 +148,20 @@ function confinementNote(host, agent) {
   const note = h("p", { class: "muted", "data-confinement-note": "" });
   const update = () => {
     const account = state.caps?.hosts?.find(x => x.host === host)?.confinement?.host_account;
-    note.textContent = t(account?.declared && account?.status !== "verified" ? "confinement_account_blocked"
-      : account?.status === "verified" ? "confinement_account_note"
-        : agent.value === "codex" ? "confinement_codex_note" : "confinement_claude_note");
+    const effect = account?.start_effect;
+    if (effect === "refused") {
+      note.textContent = t("confinement_account_blocked", { reason: account.reason });
+      if (agent.value === "codex") note.textContent += " " + t("confinement_codex_note");
+    } else if (agent.value === "codex") {
+      note.textContent = t("confinement_codex_note");
+    } else if (effect === "verified") {
+      note.textContent = t("confinement_account_note");
+    } else if (effect === "recheck") {
+      note.textContent = t("confinement_account_recheck");
+    } else {
+      note.textContent = (effect === "fallback_default" && account?.declared
+        ? t("confinement_account_fallback", { reason: account.reason }) + " " : "") + t("confinement_claude_note");
+    }
   };
   agent.addEventListener("change", update);
   note.setHost = value => { host = value; update(); };

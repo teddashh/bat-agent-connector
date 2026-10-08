@@ -115,6 +115,9 @@ last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_cont
    ExitPlanMode allow to remove its limits. Never approve a write to a person's protected roots. If tests are blocked,
    report the exact limitation; do not change host policy, Task Service engine or recipes. Existing running sessions
    retain their recorded level; inspect current verification for drift.
+   For a new start, read capabilities `hosts[].confinement.host_account.start_effect` and `reason`.
+   `recheck` runs a fresh check at start; `fallback_default` uses plain default for confined Claude (also the
+   undeclared-account path), and `refused` blocks Claude and Codex. Never treat every non-verified status as blocked.
 7. `START_IN_PROGRESS`: another process is starting this session; read it back later, do not retry blindly.
    `CONFINEMENT_START_UNSETTLED` requires read-back of a possibly sent start.
    START_IN_PROGRESS 表示另一程序正在 start 此 session；稍後讀回，不盲目重試。CONFINEMENT_START_UNSETTLED 須讀回可能已送出的 start。

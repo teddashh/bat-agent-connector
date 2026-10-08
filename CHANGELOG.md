@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- Dashboard start notes now follow the server's `host_account.start_effect` ([design](docs/design/confinement.md),
+  計畫 §06/§10/§12, A10). Unchecked or stale evidence requires a live recheck at start; supported hardening gaps
+  and undeclared accounts use confined Claude's plain default fallback. Only refusals show the blocked note and
+  reason, including before Codex's sandbox note. Capabilities GET remains read-only, and the projection shares its
+  rule with the start gate. English and zh-TW notes and both skills explain the four values. A10 still awaits W12.
+
 - The A10 Linux account-check fixture isolates its fake `pathlib` import, keeping pytest's real `Path` intact on
   Python 3.10 and 3.11; the product's read-only check is unchanged.
 

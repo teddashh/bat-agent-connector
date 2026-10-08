@@ -288,10 +288,24 @@ async def check_account(fleet, host: str) -> dict:
     return copy.deepcopy(result)
 
 
+def account_start_effect(result: dict) -> str:
+    """Project the start gate without checking a host. Undeclared accounts use CLI defaults."""
+    if result.get("declared") is False:
+        return "fallback_default"
+    if result.get("status") == "verified":
+        return "verified"
+    if result.get("status") == "unknown":
+        if result.get("reason") == "unchecked_or_stale":
+            return "recheck"
+        if result.get("reason") in ACCOUNT_HARDENING_GAPS:
+            return "fallback_default"
+    return "refused"
+
+
 async def start_account(fleet, host: str) -> dict:
     result = await check_account(fleet, host)
-    if (result["declared"] and result["status"] != "verified"
-            and not (result["status"] == "unknown" and result["reason"] in ACCOUNT_HARDENING_GAPS)):
+    # A live check must settle recheck before any start can proceed.
+    if account_start_effect(result) in {"refused", "recheck"}:
         raise ConfinementRefused("HOST_ACCOUNT_UNVERIFIED", result["reason"], sent=False)
     return result
 
@@ -338,6 +352,7 @@ async def start_decision(fleet, host: str, agent: str, *, confined: bool = False
 
 def host_capability(fleet, host: str) -> dict:
     account = account_status(fleet, host)
+    account["start_effect"] = account_start_effect(account)
     verified = account["status"] == "verified"
     return {"policy": fleet.config.host(host).default_permission_mode, "host_account": account,
             "network_configurable": False, "writable_roots_configurable": False,

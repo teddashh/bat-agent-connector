@@ -33,6 +33,11 @@ Task Service engine/recipes stay unchanged and expose their compatibility gap. S
 show creation evidence separately from current verification. A10 is not proven until W12's live acceptance run.
 See [configuration, limits and the live procedure](docs/design/confinement.md).
 
+The Dashboard start note follows capabilities `hosts[].confinement.host_account.start_effect`: `verified`,
+`recheck` (unchecked or stale; checked live at start), `fallback_default` (a supported hardening gap or no account
+declaration; confined Claude uses plain default), or `refused` (blocks Claude and Codex). The read itself runs no
+check and keeps the reason visible. A non-verified status alone does not mean starts are blocked.
+
 `START_IN_PROGRESS` means another process is starting this session: read it back later, do not retry blindly;
 `CONFINEMENT_START_UNSETTLED` requires read-back of a possibly sent start.
 

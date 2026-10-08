@@ -194,13 +194,26 @@ Home 本身、.ssh 及其中全部 entries、.pam_environment 與以上 startup 
 | 表面 | 新增輸出／既有入口 |
 |---|---|
 | Session reads | `service.sessions_list`／`session_read`、triage、`inventory`、`GET /api/v1/sessions` 與 `GET /api/v1/sessions/{host}/{id}` 的 session 列帶 write_scope、confinement、current_verification；MCP `sessions_list`／`session_read` 與 CLI `sessions`／`read` 同值。manual／unknown 不因加欄位取得寫權。 |
-| `GET /api/v1/capabilities` | `hosts[].confinement`：`agents.{claude,codex}` 的 reachable_options、requested_level、verified_level、limits／gap；`host_account` 的 declared、status、checked_at、protected_roots、evidence_ref、reason。supported／unknown／unsupported 分開；不把 host 的 capability level 直接套到既有 session。 |
+| `GET /api/v1/capabilities` | `hosts[].confinement`：`agents.{claude,codex}` 的 reachable_options、requested_level、verified_level、limits／gap；`host_account` 的 declared、status、checked_at、protected_roots、evidence_ref、reason、start_effect。supported／unknown／unsupported 分開；不把 host 的 capability level 直接套到既有 session。 |
 | Host reads | 既有 `hosts_list`／`host_status`、`GET /api/v1/hosts` 帶同一 account check 摘要。只讀刷新不新增 mutation action；離線回最後證據與 stale，不因 capabilities 載入卡住 Dashboard。 |
 | Checkpoint／repair | `checkpoint-preview` 與 capabilities 提供所選 agent 的預計限制；`checkpoint.continue`／`integration.handoff` 的結果與 operation.external_refs 帶 confinement snapshot／evidence_ref。work item 的 `continueFrom` 也使用此摘要。 |
 | 權限與 bulk | operations-unification 的 `session.permissions`／`session.approve_pending`；現有 `session_set_permissions`／`approve_pending`、CLI `permissions`／`approve-pending`。結果沿用 per-item，新增 skipped=confined 與穩定 error code；dry-run 也不顯示「would raise」受限列。 |
 | Task Service | commands start payload 與 registry 保存 actual options 與 snapshot；`work_status`／task reads 顯示 session 限制與 task_recipe_compatibility gap，不改 engine_decision／recipe。 |
 
 必要條件仍為 scopes、write／orchestrate tier、resource_policy 的來源與目的地檢查、穩定 session／worktree 身分。CLI sandbox 不把 legacy shared clone 變成 §07 的獨立 clone；本包不變更 shared_clone_worktrees 遷移政策，UI 仍同時列 isolation 與 confinement。
+
+### 啟動提示與帳號查核結果
+
+`confinement.account_start_effect(result)` 是帳號查核的共用規則。Capabilities 的 `hosts[].confinement.host_account.start_effect`、MCP capabilities／host reads 與 CLI host reads 用同一 projection；reason 原樣保留。GET 只讀 cache／journal 與期限，不跑 SSH 或 live check，不改 session 的 creation evidence。`start_account()` 啟動時先跑 live check，再用同一函式決定是否拒絕；live check 須把 recheck 定案為 verified、fallback_default 或 refused，未定案也不允許 start。
+
+| start_effect | 條件 | 啟動提示／行為 |
+|---|---|---|
+| `verified` | 已宣告且 status=verified | 沿用已查核帳號提示。新的受限 Claude 可用 acceptEdits，啟動前仍重新查核。只涵蓋宣告 roots，不升級既有 session。 |
+| `recheck` | 已宣告、unknown／unchecked_or_stale；沒有 fresh cache 或超過 check_max_age_s | 不顯示 blocked。啟動時重新查核；通過可用 acceptEdits，支援的環境加固缺口用 plain default，其他查核失敗拒絕。 |
+| `fallback_default` | unknown 且 reason 在 ACCOUNT_HARDENING_GAPS；或帳號未宣告 | 已宣告者顯示 reason、Claude 使用 default 且不啟用 acceptEdits，再附既有批准規則／shell／無 OS 寫入隔離的 caveats。未宣告者跳過帳號 check，沿用一般 Claude 提示；此 value 描述受限 Claude 的帳號 fallback，不改一般 default／allow_all 或 Task recipe policy。 |
+| `refused` | mismatch，或其他 unknown／無有效結果 | 顯示既有拒絕提示與 reason；HOST_ACCOUNT_UNVERIFIED 阻止所有 agent 的新 start。 |
+
+Dashboard 的 checkpoint／repair／work-item 接續表單依 start_effect 選文字，不在 JavaScript 複製 hardening reason 清單，不把所有非 verified status 都當成 blocked。Codex 一律保留 workspace-write／on-request、network／writable roots 及 live verification 的原提示，不依賴 acceptEdits；effect=refused 時先顯示拒絕與 reason，再列 Codex 提示。切換 agent／host 時重算文字，en 與 zh-TW 同義。
 
 ## 不可放寬與操作銜接
 
@@ -374,6 +387,8 @@ Mock 只能證明 Connector 的 options、gate、evidence 與顯示；不假造 
 | A10；§06 | `test_a10_partial_permission_ack_preserves_creation_and_reports_drift`、`test_a10_start_mismatch_stays_uncertain_and_never_sends_prompt`、`test_a10_frame_guard_catches_drift_after_first_read`、`test_a10_creation_snapshot_survives_runtime_drift_and_send_refuses` | Partial setter ACK／GUI drift／start mismatch 保留快照並顯示 current；受限 drift 不送下一 prompt。 |
 | A10；§06 | `test_a10_persistent_and_exit_plan_approvals_are_refused` | dont_ask_again、ExitPlanMode mode raise 被拒絕；deny／一般問題仍走原流程。 |
 | A10；§10、§19 | `test_a10_session_capabilities_inventory_and_triage_share_evidence`、`test_a10_cached_legacy_inventory_exposes_unknown_evidence_without_rewriting` | REST／service／inventory／triage 一致；既有 MCP／CLI 直接轉出同 reads。manual readonly 不變。Dashboard Playwright fixture：en／zh-TW、390／768／1440 px、session card 與 checkpoint／repair forms 切 agent、無 null／undefined／[object／水平 overflow。 |
+| A10；§06、§10、§12 | `test_a10_capabilities_account_start_effect_is_cached_read_only`、`test_a10_account_start_effect_and_gate_agree`、`test_a10_recheck_passes_live_and_confined_claude_uses_accept_edits` | Unchecked、stale、三種 hardening gap、mismatch、其他 unknown、verified、undeclared 的 start_effect／reason；REST GET、daemon MCP 與 CLI／MCP host reads 同值、零 runner call。非 stale state 的 projection 與 start gate 一致；recheck 後 live 通過才送 acceptEdits。 |
+| A10；§06、§10、§12 | `test_a10_dashboard_start_note_matches_account_effect_in_both_languages`／`tests/dashboard_confinement_note.mjs` | 用真 app／i18n 的 confinementNote 跑 22 個 Node rendering cases：四種 effect × Claude／Codex × en／zh-TW、未宣告、切 agent／host。與 status 相反的 effect 及任意 reason 證明 UI 不另建規則。Refused＋reason 先列、Codex 不談 acceptEdits，fallback 附原 caveats，recheck 不誤稱 blocked。 |
 
 Mock 與只讀 fixture 只能證明 options／gate／證據，不能宣布 A10 的實機阻擋通過。完成須跑 `uv run ruff check .`、完整 `uv run pytest -q`、`.mjs` 的 `node --check` 與雙語 Playwright。Host check table 的 DDL 每次 open 執行、idempotent，不更動 user_version；既有高版本 journal 缺 table 也可補齊。
 
