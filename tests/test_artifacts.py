@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import sys
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -32,8 +33,14 @@ def human(tmp_path):
 
 
 @pytest.fixture
-def daemon(mock, human, tmp_path):
-    yield from checkpoint_daemon.__wrapped__(mock, human, tmp_path)
+async def daemon(mock, human, tmp_path):
+    fixture = checkpoint_daemon.__wrapped__(mock, human, tmp_path)
+    d = next(fixture)
+    try:
+        yield d
+    finally:
+        await d.artifact_store.close_reaper()
+        fixture.close()
 
 
 class LocalArtifactHost(ArtifactHost):
@@ -73,7 +80,7 @@ async def upload(d, data=b"immutable input", **kw):
     if op["status"] == "waiting_external":
         await d.artifact_store.receive(PERSON, op["operation_id"], reader(data), len(data))
         await d.ops.drain(30)
-        await asyncio.sleep(0)
+        await d.artifact_store.reap_best_effort()
         op = d.ops.get(op["operation_id"])
     assert op["status"] == "succeeded", op
     return {k: op["result"][k] for k in ("artifact_id", "revision", "digest")}
@@ -142,16 +149,19 @@ async def test_upload_publish_lost_reply_and_restart_read_back(daemon, monkeypat
     assert daemon.ops.get(op["operation_id"])["status"] == "uncertain"
     # Close SQLite and construct a new daemon: memory contains no step or upload result.
     path, config = daemon.journal.path, daemon.fleet.config
+    await daemon.artifact_store.close_reaper()
     daemon.journal.close()
     reopened = TaskDaemon(config, path)
     try:
         reopened.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
         await reopened.ops.drain(30)
+        await reopened.artifact_store.reap_best_effort()
         done = reopened.ops.get(op["operation_id"])
         assert done["status"] == "succeeded", json.dumps(done, indent=2)
         assert len(list(reopened.artifact_store.root.glob("revisions/*/*/content"))) == 1
         assert not (reopened.artifact_store.root / "staging" / op["operation_id"]).exists()
     finally:
+        await reopened.artifact_store.close_reaper()
         await reopened.fleet.close()
         await reopened.inventory.close()
         reopened.journal.close()
@@ -209,6 +219,102 @@ class Writer:
         self.data.extend(data)
     async def drain(self):
         pass
+
+
+@pytest.mark.parametrize("failure", [ValueError("private scratch detail"),
+    ResourceReadOnly("DESTINATION_UNKNOWN", "private scratch detail"), OSError("private scratch detail")],
+    ids=["value", "policy", "filesystem"])
+async def test_reaper_failure_never_stops_ticks_or_fails_cancel(daemon, monkeypatch, caplog, failure):
+    """Plan §09/B04: failed scratch cleanup preserves committed intent and task reconciliation."""
+    first = await reserve(daemon)
+    calls = []
+    def fail():
+        calls.append(True)
+        raise failure
+    monkeypatch.setattr(daemon.artifact_store, "reap_terminal", fail)
+    with daemon.journal.tx():
+        token = api_auth.issue(daemon.journal.db, PERSON.actor, list(PERSON.scopes))
+    writer = Writer()
+    await daemon.api.handle("POST", f"/api/v1/operations/{first['operation_id']}/cancel",
+        {"host": "localhost", "authorization": "Bearer " + token, "content-length": "0"}, reader(b""), writer)
+    assert writer.data.startswith(b"HTTP/1.1 200")
+    assert json.loads(writer.data.split(b"\r\n\r\n", 1)[1])["operation"]["status"] == "cancelled"
+    admitted = await reserve(daemon, key="admitted-despite-reaper")
+    assert admitted["status"] == "waiting_external"
+    result = await daemon.artifact_store.receive(PERSON, admitted["operation_id"], reader(b"immutable input"), 15)
+    assert result["operation_id"] == admitted["operation_id"]
+    cancelled = await daemon.call_api("op_cancel", {"operation_id": admitted["operation_id"]}, PERSON)
+    assert cancelled["operation"]["status"] == "cancelled"
+    partial = await reserve(daemon, key="partial-despite-reaper")
+    with pytest.raises(OperationError) as error:
+        await daemon.artifact_store.receive(PERSON, partial["operation_id"], reader(b"partial"), 15)
+    assert error.value.code == "UPLOAD_INCOMPLETE"  # reaping does not replace the original failure
+    row = daemon.journal.db.execute("SELECT reserved_bytes,released_at FROM artifact_uploads WHERE operation_id=?",
+                                   (first["operation_id"],)).fetchone()
+    assert row[0] == 15 and row[1] is None
+    ready = await upload(daemon, key="ready-despite-reaper")
+    assert daemon.journal.db.execute("SELECT reserved_bytes FROM artifact_uploads WHERE artifact_id=?",
+                                    (ready["artifact_id"],)).fetchone()[0] == 15
+    next_revision = await reserve(daemon, key="next-despite-reaper", target={"artifact_id": ready["artifact_id"]},
+                                  pre={"expected_latest_revision": 1})
+    assert next_revision["status"] == "waiting_external"  # terminal scratch does not block revision CAS
+    task = daemon.journal.submit(project="p", host="h1", workspace="w", original_words="keep ticking", idempotency_key="tick")
+    ticks = asyncio.Queue()
+    async def tick(task_id):
+        ticks.put_nowait(task_id)
+    monkeypatch.setattr(daemon, "_tick_task", tick)
+    worker = asyncio.create_task(daemon._worker())
+    reaper = asyncio.create_task(daemon._artifact_reap_loop())
+    try:
+        assert await asyncio.wait_for(ticks.get(), 2) == task["task_id"]
+        assert await asyncio.wait_for(ticks.get(), 3) == task["task_id"]
+        assert not worker.done() and not reaper.done() and len(calls) >= 2
+    finally:
+        worker.cancel()
+        reaper.cancel()
+        await asyncio.gather(worker, reaper, return_exceptions=True)
+        await daemon.artifact_store.close_reaper()
+    assert type(failure).__name__ in caplog.text and first["operation_id"] in caplog.text
+    assert "private scratch detail" not in caplog.text
+
+
+async def test_slow_reaper_never_delays_task_ticks(daemon, monkeypatch):
+    """Plan §09: blocking filesystem cleanup stays off the task worker's event loop."""
+    op = await reserve(daemon)
+    with pytest.raises(OperationError):
+        await daemon.artifact_store.receive(PERSON, op["operation_id"], reader(b"partial"), 15)
+    daemon.ops.cancel(PERSON, op["operation_id"])
+    started, ticked = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    real = daemon.artifact_store._remove_staging
+    def slow(operation_id):
+        loop.call_soon_threadsafe(started.set)
+        release.wait(5)
+        real(operation_id)
+    monkeypatch.setattr(daemon.artifact_store, "_remove_staging", slow)
+    daemon.journal.submit(project="p", host="h1", workspace="w", original_words="keep ticking", idempotency_key="slow-tick")
+    async def tick(_task_id):
+        ticked.set()
+    monkeypatch.setattr(daemon, "_tick_task", tick)
+    reaper = asyncio.create_task(daemon.artifact_store.reap_best_effort())
+    worker = None
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        worker = asyncio.create_task(daemon._worker())
+        await asyncio.wait_for(ticked.wait(), 2)
+        assert not reaper.done()
+        assert daemon.journal.db.execute("SELECT released_at FROM artifact_uploads WHERE operation_id=?",
+                                        (op["operation_id"],)).fetchone()[0] is None
+    finally:
+        release.set()
+        await reaper
+        if worker:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+        await daemon.artifact_store.close_reaper()
+    assert daemon.journal.db.execute("SELECT released_at FROM artifact_uploads WHERE operation_id=?",
+                                    (op["operation_id"],)).fetchone()[0] is not None
 
 
 async def test_artifact_http_mcp_cli_contract_and_scopes(daemon, monkeypatch, tmp_path):
@@ -272,7 +378,7 @@ async def test_upload_window_expires_and_removes_only_its_own_staging(daemon):
     daemon.journal.db.execute("UPDATE artifact_uploads SET deadline=0 WHERE operation_id=?", (expired["operation_id"],))
     daemon.ops.wake(expired["operation_id"])
     await daemon.ops.drain(30)
-    await asyncio.sleep(0)
+    await daemon.artifact_store.reap_best_effort()
     failed = daemon.ops.get(expired["operation_id"])
     assert failed["status"] == "failed" and failed["error_code"] == "UPLOAD_EXPIRED"
     assert not (daemon.artifact_store.root / "staging" / expired["operation_id"]).exists()
@@ -475,7 +581,7 @@ async def test_cancelled_unsettled_publish_keeps_original_and_its_quota(daemon, 
     assert daemon.ops.get(op["operation_id"])["status"] == "uncertain"
     daemon.journal.db.execute("UPDATE operations SET status='needs_attention' WHERE operation_id=?", (op["operation_id"],))
     daemon.ops.cancel(PERSON, op["operation_id"])
-    daemon.artifact_store.reap_terminal()
+    await daemon.artifact_store.reap_terminal()
     ref = op["external_refs"]
     formal = daemon.artifact_store.content_path(ref["artifact_id"], ref["revision"])
     assert formal.read_bytes() == b"immutable input"

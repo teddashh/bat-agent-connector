@@ -212,7 +212,7 @@ class TaskDaemon:
                                  limit=int(params.get("limit") or 50))
         if method == "op_cancel":
             op = self.ops.cancel(principal, str(params.get("operation_id")))
-            self.artifact_store.reap_terminal()
+            await self.artifact_store.reap_best_effort(op["operation_id"])
             return {"operation": op}
         if method == "op_resume":
             return {"operation": self.ops.resume(principal, str(params.get("operation_id")))}
@@ -564,7 +564,6 @@ class TaskDaemon:
 
     async def _worker(self):
         while True:
-            self.artifact_store.reap_terminal()
             self.journal.db.execute("UPDATE daemon_owner SET heartbeat_at=? WHERE singleton=1 AND owner_id=?",
                                     (time.time(), self._owner_id))
             for task in self.journal.list_active() + self.journal.list_cleanup_pending():
@@ -584,6 +583,12 @@ class TaskDaemon:
             except Exception as exc:  # noqa: BLE001 - the push cursor stays put and is retried
                 logging.warning("Milestone push loop error: %s", type(exc).__name__)
             await asyncio.sleep(1)
+
+    async def _artifact_reap_loop(self):
+        """Scratch cleanup retries independently of task ticks and operation reconciliation."""
+        while True:
+            await self.artifact_store.reap_best_effort()
+            await asyncio.sleep(2)
 
     async def _tick_task(self, task_id: str):
         verifying = False
@@ -687,20 +692,22 @@ class TaskDaemon:
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("task service only binds loopback")
         self.acquire_owner()
-        worker = pusher = operations = inventory = None
+        worker = pusher = reaper = operations = inventory = None
         try:
             server = await asyncio.start_server(self._handle, host, port)
             worker = asyncio.create_task(self._worker())
             pusher = asyncio.create_task(self._push_loop())
+            reaper = asyncio.create_task(self._artifact_reap_loop())
             operations = asyncio.create_task(self.ops.loop())
             inventory = asyncio.create_task(self.inventory.loop())
             async with server:
                 await server.serve_forever()
         finally:
-            for background in (worker, pusher, operations, inventory):
+            for background in (worker, pusher, reaper, operations, inventory):
                 if background is not None:
                     background.cancel()
                     await asyncio.gather(background, return_exceptions=True)
+            await self.artifact_store.close_reaper()
             await self.inventory.close()
             await self.fleet.close()
             self.journal.close()
