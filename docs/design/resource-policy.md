@@ -30,6 +30,8 @@ Session 歸屬與資料夾歸屬分開判斷。Managed session 只有在 connect
 
 Connector 經 SSH git 自己建立的 worktree（checkpoint 的 `batc-cp-…`、解衝突的 `batc-fix-…`、Task Service 的 `batc-task-…`；registry 記 `worktree_made_by: "connector"`，舊紀錄以 `batc/` 開頭的分支辨認）BAT 沒有紀錄。BAT 的 `worktree:rehydrate` 會把它登記在 session 的 workspace 資料夾（實際使用時可能是人的 checkout）底下並把那裡的 env 檔案複製進去，`worktree:remove` 會在那個 repository 執行 prune，所以 rehydrate、merge、remove 對它一律回 `NOT_A_BAT_WORKTREE`，`session_cleanup` 也保留它。送字、停止等 session 動作不受影響。
 
+Reviewer 的 session 建立紀錄不證明共享 worktree 的建立者。Registry root walk 若停在沒有 connector marker 的 reviewer（例如只有 task_id、缺 lead_session_id 的舊列），maker 為 `unknown`，BAT 的 rehydrate／merge／remove 同樣回 `NOT_A_BAT_WORKTREE` 並說明 creation root 無法證明；managed_roots 不繞過此限制。Policy 不為 raw CLI 啟動 daemon 或猜 journal 路徑。Observation 可用自己 journal 的 lead 證據保存身分，但不能代替 mutation grant；已證明的共享 carrier 與 session 動作沿用原規則。
+
 `legacy_shared_clone` 的 worktree 仍在人工 clone 內，共用它的 refs 與物件庫（見 git-worktree(1)），不是完整隔離。只有 `managed_clone` 符合計畫 §07 的獨立 clone。位於人工資料夾的 connector session 是 §24 說的 legacy boundary：保留觀測與歷史，全部唯讀（包括 stop），由 Ted 在 BAT 處理。
 
 ## 寫入前即時核對
@@ -85,7 +87,7 @@ BAT tab 記的 `cwd`／`worktreePath` 和紀錄不同也是 `BINDING_MISMATCH`�
 | `WORKDIR_NOT_MANAGED` | Managed session 但資料夾是人工的（legacy boundary）。 |
 | `BINDING_MISMATCH` | BAT 的實際狀態和 connector 紀錄不符。 |
 | `WORKDIR_MISSING` | 需要資料夾的動作，但資料夾讀不到。 |
-| `NOT_A_BAT_WORKTREE` | BAT 的 worktree 動作（rehydrate、merge、remove）用在 connector 經 SSH 建立的 worktree。 |
+| `NOT_A_BAT_WORKTREE` | BAT 的 worktree 動作（rehydrate、merge、remove）用在 connector 經 SSH 建立、沒有記錄 path，或 reviewer 建立根節點無法證明的 worktree。 |
 | `DESTINATION_MANUAL` | 新 session 或 merge 的目的端是人工 checkout。 |
 | `DESTINATION_UNKNOWN` | 目的路徑不是絕對路徑，或 BAT 建在預期外的位置。 |
 | `TIER_DISABLED` | 只出現在 `session_policy`：主機沒開對應層級。 |
@@ -102,12 +104,16 @@ BAT tab 記的 `cwd`／`worktreePath` 和紀錄不同也是 `BINDING_MISMATCH`�
 - `session_cleanup` 對人工與 legacy session 一律 `KEEP`，不 stop、不 merge。
 - `sessions_list`、`sessions_triage`、`worktree_status` 每列多了 `provenance` 與 `api_access`。
 
+## Task authority（2026-10-08，Part A）
+
+task link 不授予 resource write grant。send／answer／interrupt／permissions（含 client-resume、approve-pending、deferred raises 與 relay target）先通過本政策，再交同一 owner 的 TaskCoordinator；paused／verifying／pending commands／stale control_version 皆拒絕。frame 邊界再次核對原 journal command、session ownership 與 owner lease。registry task 標記遺失時仍查原 journal 的 current session／start reservation／branch，不能因此變成 standalone。task-owned worktree／failover／外部 verification 不由低階工具接管，cleanup KEEP；原受信 verifier 仍可保存其 observed evidence。詳見 [operations-unification.md](operations-unification.md) 與 [api-v1.md](api-v1.md) 的穩定拒絕碼。
+
 ## 尚未涵蓋
 
 - **A10 執行環境限制**：本政策只管 connector 自己送出的 frame。BAT 上的 agent 仍可依對話中的絕對路徑寫入人工目錄；這需要 host 帳號權限、sandbox 或 ACL，屬 P2 managed clone 工作。在那之前，不能把 `legacy_shared_clone` 描述為完整隔離。
 - **Managed clone 的建立與 checkpoint 接續**（P2）。目前 `managed_roots` 只描述已存在的 clone。
 - **`workspace:save` 與 GUI 同時存檔的 race**（既有，見 SECURITY.md）。
-- **HTTP API**：目前只有 MCP 與 CLI，兩者呼叫同一組 service 函式；之後的 HTTP 層也要走同一組函式。
+- **Part B legacy operations**：HTTP OperationService 已走同一 resource policy；其餘舊工具的 operation 轉接與外部 steps 拆分見 [operations-unification.md](operations-unification.md)。
 
 ## 設定
 

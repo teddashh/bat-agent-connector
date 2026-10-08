@@ -33,6 +33,8 @@ BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端�
 Hermes 與 Grokbot 配接皆[由 canonical skill 產生](docs/agent-skills.md)。更新工作流程後重新產生，
 安裝時使用與 Connector 相同已驗證版本的 bundle。
 
+`batc inventory`、`batc history`、`batc relations` 與對應 HTTP/MCP 讀取提供持久觀測。Session 歷史只讀 journal 事實；warm reuse 保留每個 task 的關係區間，discovery 顯示最近 host/profile 掃描範圍及未掃項目。未知 actor／狀態保持 unknown，讀取不啟動 session、不背景探測 Git。詳見 [observation](docs/design/observation.md)。Dashboard 的歷史與 scope 畫面屬後續 Part B。
+
 ## 為什麼要做
 
 同時跑好幾個長時間執行的 coding agent，就得一直切分頁檢查：哪個做完了、哪個卡在問題上、哪個只差一句「continue」。透過 BAT 的協定讀這些狀態很可靠（不抓畫面、不模擬 GUI 操作），也能讓一個負責監看的 agent 替你檢查，而任何會寫入的動作都還是由你掌控。
@@ -83,6 +85,10 @@ write 與 orchestrate 的工具沒開啟時根本不會註冊；開啟後每次�
 ### 任務服務里程碑（選用）
 
 `batc serve` 會在 `127.0.0.1:18796` 啟動以 SQLite WAL 為基礎的任務協調服務。原本的 MCP 伺服器因此多了 `work_submit`、`work_status`、`work_pause`、`work_resume`、`work_result`，以及唯讀的 `work_events` 事件流；它的 stdio 行程透過 `BATC_TASK_URL`（預設 `http://127.0.0.1:18796/rpc`）呼叫這個常駐服務。`work_submit` 在 `original_words` 收下 Ted 的**原話**，再加上一個冪等鍵（例如 Discord 訊息 ID），不等 BAT 就直接回傳 `task_id`。Hermes 不可以重新詮釋或拆分這個請求。規劃由跑在 Opus 5.5 上的 Goose 在 repo 裡進行。任務的寫入動作要求主機原本就設好 `writes=true` 與 `orchestrate=true`。原有的低階工具與 `batc` 指令照常可用。
+
+Task-bound operations 在 admission 固定 task 版本，省略 `control_version` 也一樣；session controls 另固定當時 session。`external_refs.admission_binding` 是 server binding，與 caller preconditions 分開。執行前 pause／resume 或換 session 會以 `CONTROL_VERSION_CONFLICT`／`TASK_BINDING_MISMATCH` 拒絕舊要求；同 key 重讀原拒絕或成功，先讀 task 再以新 key 提交有授權的新決定。升級前無 binding 的 operations 保留原行為。
+
+Task mutations 現在保存 operation，原結果新增 `operation_id`／`operation_status`。重試保留同一 key；key 以驗證 actor 為範圍，無 key 的舊 task controls 每次是獨立要求。task-owned 的 send／answer／interrupt／permissions，包括 legacy tools，都經同一 coordinator；`TASK_PAUSED`、`TASK_VERIFYING`、`TASK_COMMAND_PENDING` 表示停止並讀 work_status，不用 force／continue 插隊。`CONTROL_VERSION_CONFLICT` 要先讀變更後狀態。第二個 daemon 即使指定不同 --db，也回 `OWNER_CONFLICT` 與既有 owner 資訊；client 連原 owner。詳見[統一操作 Part A](docs/design/operations-unification.md)；其餘 legacy operations、no-key／null 結果投影留在 Part B。
 
 每個任務就是一個跑在 Opus 5.5 上的 Goose session。`goose-session` recipe 的 prompt 會指示 Goose 一開始拆一次工作，以 Grok 4.7 : Codex : Opus 5.5 = 4:2:1 的比例為目標分配執行者，而且不把新工作交給每週額度剩餘在 15% 以下（含）的模型。這些是寫在 prompt 裡的指示，不是服務會強制執行的規則：服務不會統計分派次數，也不會讀取額度。這個服務本身不做路由、不做審查，也不做 failover。驗證結果以可信任的測試為準；程式碼沒過，就退回同一個 session 在有限次數內重做，預算用完則標為 `needs_ted`。Ted 之後補充的指示，會接在同一個任務上繼續（同一個 session，不重新規劃，也不開新任務）。這條路徑不經過 Jev。只有當調度者送出已經拆好的任務，並指定 `executor_model`（`grok`、`codex` 或 `claude`）而跳過 Opus 規劃時，才會用到 Jev。Goose 本身有一個開關，預設關閉（`GooseConfig.enabled`）；關閉期間，任務會一直排隊，不會啟動任何東西。
 

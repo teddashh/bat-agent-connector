@@ -64,7 +64,9 @@ Metadata uncertain write 從 step.started_at 起滿 600 秒，GET 仍為 before 
 - 一列要連續兩次成功列舉都沒出現，才標 `gone`。`workspace:load` 回 null 或格式不對時算失敗，不當成空清單。
 - 一次輪詢沒觀測到的欄位沿用上次的值：讀 meta 失敗的 session 保留上一列；這次沒重讀 state（`auto` 只在 session 執行中才讀）時保留上次的 pending；活動時間只會往後。
 - 每台主機各自排程輪詢，慢的主機不會拖住其他主機。已從設定移除的主機不出現在列表。
-- `last_activity` 以外的欄位有實質變化時，才寫 `session.added`／`session.updated`／`session.gone` 事件。
+- Host stale 在讀取時推導，不向 sessions 發送 host flap 事件；只有 session-specific 缺席／gone／scope change 記 stale/fresh。
+- 首次觀測寫 `session.added`；值或非時間欄位 freshness 改變寫 `session.updated`，gone 後重現寫 `session.reappeared`。三者的 body 都帶 `fields_stale` 與 `field_evidence`；digest 與 `changed_fields` 包含這兩欄，即使沿用的 loaded／streaming 值相同，meta 失敗及恢復也會通知。`field_observed_at`、`last_activity_ms` 等時間單獨變動不寫 update；連續相同失敗／成功不寫事件。
+- 欄位 freshness 與 `session.stale`／`session.fresh` 的單一 specific reason 分開，可同時 stale。成功列舉缺席的 `session.gone` 規則沿用上文。
 - `order=activity` 的分頁鍵是活動時間；翻頁期間活動時間變動的列可能重複或漏掉，要完整清單用 `order=id`。
 - `GET /api/v1/sessions` 用 keyset 分頁（`order=activity` 或 `id`）。游標綁定篩選條件；第一頁回 `as_of`（當下事件游標），之後以 `/api/v1/events?after=as_of` 追變化，不必反覆重列。
 
@@ -82,8 +84,15 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 
 `api_events` 是單一、持久、單調的游標，涵蓋 task、operation、session、host。Task 事件在同一個交易中寫入 `events` 與 `api_events`；舊 journal 開啟時以 `PRAGMA user_version` 一次性回填。`work_events`（Hermes 的里程碑 feed）與 webhook 推播仍用原本的 `events.event_id`，不受影響。
 
+- 所有事件增加 provenance context；`history.backfilled` 預設不進 events／SSE，明確 `kind=history.backfilled` 才顯示，next_cursor 仍跨過隱藏 seq。`related_resource_type/id` 查資源索引，原 `resource_type/id` 仍是直接主體。完整契約見 [observation.md](observation.md)。
 - `GET /api/v1/events?after=N&limit=M` → `{events, next_cursor, head_cursor, has_more}`。
 - `GET /api/v1/events/stream`：SSE，支援 `Last-Event-ID`，15 秒 keepalive，最多 16 條同時連線（每個 actor 最多 8 條），單條最長 30 分鐘。串流每 5 秒重新驗一次 token，撤銷或過期後就結束。瀏覽器 `EventSource` 不能帶 Authorization，Dashboard 以 `fetch` 讀串流。
+
+資源 `…/history` 使用安全的遞迴摘要：reason／previous_reason 只保留已知固定 enum 或 null；caller 的 request_ted／task result／command conflict／operation diagnostic prose 移除，保留原已記錄的機器 reason_code／error_code。所有 title、status_reason、git_author claim、scalar body/request/response/evidence 等 prose 入口排除，含 history.resource 及 saved_snapshot；來源 evidence 只留結構化表／ID／enum／hash。Scalar source 只允許固定來源 enum，ref／external_ref 只允許無空白的 ID/Git ref/URL token；原 journal 與既有 work_events 的文字不改。完整 producer/value/shape 稽核見 [observation.md](observation.md)。
+
+History 的 since／until 是 inclusive UTC epoch seconds，按 occurrence 篩選，排序仍按 seq。Context 缺少 occurred_at_epoch 才以 api_events.created_at fallback；明確 JSON null 是未知發生時間，不符合任何單邊／雙邊界線。無界線仍顯示該 fact 且 occurred_at 為 null。Coverage.unknown_occurrence_times_excluded 在有時間界線時為 true（表示排除規則，非筆數）；無界線為 false。Coverage.first_recorded_at 仍是最早 journal 記錄時間，可為 migration 時間，不能當發生時間。
+
+History／relations 的 opaque cursor 在任何 journal read 前驗證 version、filter hash、as_of 型別與 key；之後才讀 head 驗上界並查資源／結果。History key 為 int，relations key 為恰兩元素的 [int, str]；bool 不是 int，null 不是有效 key 或元素。錯 key 一律 `INVALID_CURSOR`／422，包含資源沒有 rows 或 execution_id／include_closed 篩掉全部 rows 的情況；合法游標的分頁與 as_of 不變。
 
 ## 路由
 
@@ -91,9 +100,13 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 |---|---|---|
 | `GET /api/v1/version` | 無 | connector、api_version、contract_version |
 | `GET /api/v1/capabilities` | observe | actor、scopes、主機 tiers、actions 與是否允許 |
-| `GET /api/v1/hosts` | observe | 主機可達性與 stale |
-| `GET /api/v1/sessions` | observe | 分頁目錄；`host`、`provenance`、`access`、`attention`、`include_gone`、`order`、`cursor`、`limit` |
+| `GET /api/v1/hosts` | observe | 主機可達性、stale、最近 discovery；host/discovery/after/limit 可讀 scope |
+| `GET /api/v1/hosts/{host}/discovery` | observe | 每 profile 最新 scope、authority、outside_scan 及 discovery.changed 事件分頁 |
+| `GET /api/v1/sessions` | observe | Keyset；host/provenance/access/attention/include_gone/order/cursor/limit，加 profile_id/project_id（可多值）/work_item_id/execution_id/provider/has_tab/loaded/streaming/lifecycle/stale/relation_scope（current/history） |
 | `GET /api/v1/sessions/{host}/{id}` | observe | 一列與連到它的工作項目；`live=true` 另附即時資源政策判定 |
+| `GET /api/v1/sessions/{host}/{id}/history`、`…/relations` | observe | Journal-only 分頁 timeline／使用區間；history 固定 as_of、actor evidence、版本 |
+| `GET /api/v1/worktrees/{wt_id}`、`…/history`、`…/relations` | observe | 只讀已知 creation intent 身分；不掃主機／Git，沒有 ownership grant |
+| `GET /api/v1/tasks/{task_id}/sessions`、`…/history` | observe | Execution 的 lead/reviewer/follow-up 關係分頁；不以最新 session pointer 取代歷史 |
 | `GET /api/v1/sessions/{host}/{id}/messages` | observe | 經 read-only fleet 讀對話 |
 | `GET /api/v1/policy` | observe | mutation 清單與各主機設定 |
 | `GET/POST /api/v1/operations` | observe／依 action | 列表；建立（`Idempotency-Key` 標頭或 `idempotency_key`，`?wait=0-60` 秒，格式錯誤時在保存前回 422） |
@@ -110,8 +123,54 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 
 錯誤格式為 `{"error": {"code", "message"}}`：401 未驗證、403 權限或資源唯讀（代碼同 resource-policy）、404、405、409 冪等衝突、422 參數錯誤、502 BAT 錯誤。
 
+觀測 Part A 使用同 journal 的讀服務：MCP 只新增 inventory_session、inventory_worktree、resource_history、resource_relations 四個 tools；discovery 是 inventory_hosts 的參數。CLI 為 batc inventory/history/relations。History、relations、scope 的 GET 不呼叫 host、不寫入 journal；inventory 只保存 latest rows，沒有每 poll revisions。Dashboard 的跨專案歷史、scope 卡及 reopen/SSE 去重是 [observation.md](observation.md) 的 Part B。
+
+## Task Service operations（2026-10-08，Part A）
+
+依[統一操作規格](operations-unification.md)的 Part A，以下能力經既有 `POST /api/v1/operations`／`/rpc op_submit`，不新增 task 寫入 URL。舊 RPC／MCP 保留原結果，增加 `operation_id`、`operation_status`；operation succeeded 只表示該次控制完成，不表示 task done。
+
+| Action | target | params | Scope／身分 | 舊入口 |
+|---|---|---|---|---|
+| `task.submit` | host、workspace | project、original_words 與原 work_submit 選項 | start | work_submit |
+| `task.pause` | task_id | abort_current、actor、source_message_id | operate | work_pause |
+| `task.resume` | task_id | actor、source_message_id | operate | work_resume |
+| `task.mark_stage` | task_id | stage、ref、actor | manage；verified done task | work_mark_stage |
+| `session.send` | task_id | text、step_id | 原 task capability／本機 admin 相容路徑；不授予一般 operate token task-scoped 權限 | task_send |
+| `task.verify` | task_id | 空物件；不能自填 argv、exit code 或 evidence | 原 task capability／本機 admin 相容路徑 | task_run_verification |
+| `task.request_ted` | task_id | reason | 同上 | task_request_ted |
+| `task.command.reconcile` | task_id、command_id | 原 outcome、actor、source、evidence、observed_result、turn_ref、candidate／tree、next_prompt | 原一次性 command capability；admin 不能代替 | work_reconcile、task-reconcile |
+
+`preconditions.control_version` 可要求目前版本。舊 task tools 新增可選 `idempotency_key`／`control_version`，CLI `task-reconcile` 新增 `--key`／`--control-version` 並遵守 `--read-only`。key 以驗證 actor 為範圍；相同 key／params 回原 operation，不同內容 409 `IDEMPOTENCY_CONFLICT`。Goose 的原 `step_id` 在未指定 key 時仍是 task send 的重試身分。其他無 key 的舊 task controls 每次使用獨立 request identity，不跨次去重；no-key sentinel／null 投影留在 Part B。舊 work_submit 的 201–256 字 key 由相容 adapter 保存原字串、以 SHA-256 映射到既有 200 字 operation key 上限；通用 HTTP 上限不變。
+
+Task-bound operation 受理時固定 task `control_version`；session target 另固定 host／session／role，存於 `external_refs.admission_binding`（server admission binding，不是 caller precondition）。省略 `preconditions.control_version` 也不能跨 pause／resume 或換 session 執行：第一個 effect 前以 `CONTROL_VERSION_CONFLICT`／`TASK_BINDING_MISMATCH` failed，零 frame／command／task write。request hash 與 caller preconditions 不變；同 key 仍重讀原成功或拒絕。pause／resume 不覆寫較新 incarnation；已成功 receipt／未知 frame readback 沿用原恢復。升級前無 binding 的 operation 保留原 execution-time binding。詳見[盤點與儲存規則](operations-unification.md)。
+
+原 task／continuation／pause／resume／stage／observed verification／request-Ted／reconcile 的 local effect 與 operation step receipt 同交易提交，不另建 task 狀態表。pause 先保存 paused／control_version，abort 再記獨立 step；等待 task lock 或 verifier 不延後 pause 的持久化。RPC 最多等 30 秒；未完成時以 operation ID 回查，pause 可回已保存的 task snapshot。reconcile capability 只存 hash，消耗與回執原子提交；已消耗的 capability 只能用原 key 重讀自己的 operation，不能建立新控制。
+
+task command receipt succeeded 時，`external_refs.task_id`／`command_id`／`control_version` 已與 receipt 同交易保存，版本來自 command 的 dispatch binding；prepared operator command 也適用。舊缺 refs 的 receipt 在 operation 恢復／讀回前修復 link，不重跑 effect 或派送 frame；standalone operation 不寫 task refs。
+
+CLI `task-reconcile --key` 把 key 同時交原 admin-only capability issuer，依既有 admin secret 綁定 task／command／key，使跨次重試保留 actor。沒有 key 時維持原新發一次性 capability；發行本身只是 connector credential data，不執行 task command，也不授予一般 token 對帳權限。
+
+task-owned session 的 send／answer／interrupt／permissions 都先經 resource policy，再進 daemon 原 coordinator；舊直接 service tools 也經相同 gate。鎖順序為 task → session → host write lock → BAT semaphore；client-resume、answer、abort 與每個 permission channel 在 frame 前重查 journal 的版本與 ownership。任意 before_invoke callback 不授予插隊權限。standalone managed session 沿用原行為。
+
+背景 trusted verification 期間的 pause／版本改變為控制取消：task 保留 verifying／paused，取消的 run 不寫 evidence，不升級 needs_ted／uncertain。resume 後下一個 tick 從頭跑，包括 dependency retry；paused task 不計 verification_deadline。lease lost／binding mismatch 保留目前 state，交既有 owner／修復 binding 後再 resume；真正 verifier error 仍是 verification_error／needs_ted。沒有新增 event 或錯誤碼。
+
+| 409 task code | 處理 |
+|---|---|
+| `TASK_OWNER_UNAVAILABLE` | pointer／journal／row／owner lease 不可用；連既有 owner，不啟動第二個 daemon |
+| `TASK_BINDING_MISMATCH` | registry 與 task ownership 不一致；停止並查 work_status |
+| `CONTROL_VERSION_CONFLICT` | 控制版本已改；讀狀態，不自動換成新版重試 |
+| `TASK_PAUSED`／`TASK_VERIFYING` | task 暫停／驗證中；不可用 queue、force、continue、approve-pending 或 relay 插隊 |
+| `TASK_SEND_NOT_DISPATCHED`／`NOT_ACCEPTED`（task send） | operation 沒有已接受／settled 的原 send command；failed 結果沿用原 key，新的派送用新 key |
+| `TASK_COMMAND_PENDING`／`TASK_RECONCILIATION_REQUIRED` | 原 command 結果未證明；由 coordinator 回查／command capability 對帳，不重送 |
+| `TASK_STATE_BLOCKED` | current lead／task state 不允許該控制；waiting_permission 不接受 send |
+| `TASK_OWNED_CONTROL_REQUIRED` | 低階 failover／worktree／外部 verification 不管理 task-owned session；cleanup 保持 KEEP |
+
+policy admission 仍 403、無 operation row；執行期拒絕保留 failed operation 與原 code。`OWNER_CONFLICT` 是 `batc serve` 啟動拒絕，附既有 owner_id、db_path、pid、endpoint、lease_path；不同 `--db` 也不能建立第二個 fleet authority。
+
 ## 尚未涵蓋
 
 - GitHub 部署 history／rollback／environment generation／runtime check 為 delivery Part B（第二步），尚未加入路由。Dashboard、merge、metadata、checkpoint 與 integration 入口已交付。
 - 既有 MCP 寫入工具（`session_send` 等）仍直接呼叫 service；它們受同一套資源政策約束，但不留 operation 紀錄。之後改為經 `operation_submit`。
-- `task.submit`／`pause`／`resume` 尚未包成 operation。
+- Part B：其餘 legacy writes 的 operations、no-key sentinel／讀取投影、完整結果與外部 steps 拆分。Task controls 與 A07 共用 gate 已在 Part A 完成。
+- `import-bat --output PATH --force` 是 owner 啟動前的本機 config 安裝指令，僅寫指定設定檔，保留現有路徑。
+- operation cancel/resume 已授權且 evented，不新增其 control operations；api-token issue/revoke 只改 connector 資料、不觸及 BAT/Git/provider，也不新增 operation。
