@@ -34,8 +34,13 @@ defined here. Register the executable from that same installation through the
 runtime's standard MCP client settings; for clients using `mcpServers`:
 
 ```json
-{"mcpServers":{"bat":{"command":"bat-agent-connector-mcp","args":["--read-only"]}}}
+{"mcpServers":{"bat":{"command":"bat-agent-connector-mcp","args":[]}}}
 ```
+
+This configuration exposes the workflow tools; existing host write/orchestration
+settings and the caller's action scopes still authorize each operation. For an
+observation-only installation, set `args` to `["--read-only"]`: that option omits
+write tools entirely, so adding token scopes cannot enable them.
 
 The operator supplies this agent's `BATC_API_TOKEN` through the MCP server's
 environment/secret configuration, and `BATC_TASK_URL` when the daemon endpoint
