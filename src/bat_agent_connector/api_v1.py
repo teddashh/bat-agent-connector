@@ -546,6 +546,10 @@ class ApiV1:
         except ValueError:
             raise ApiError(422, "INVALID_REQUEST", "after must be an integer") from None
         checkpoint_token = self._q(query, "checkpoint")
+        # Validate every event filter, including direct resource filters this legacy stream ignores.
+        dashboard_sync.require_unfiltered(checkpoint_token, **{
+            name: self._q(query, name) for name in
+            ("kind", "resource_type", "resource_id", "related_resource_type", "related_resource_id")})
         dashboard_sync.event_page(self.daemon.journal, principal, after, 0, token=checkpoint_token, kind=self._q(query, "kind"),
             related_resource_type=self._q(query, "related_resource_type"), related_resource_id=self._q(query, "related_resource_id"))  # validate before streaming headers
         self._streams += 1
