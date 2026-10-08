@@ -30,7 +30,7 @@ from . import (
 )
 from .api_v1 import ApiV1, is_dashboard_path
 from .config import Config, state_dir
-from .errors import BatError, ResourceReadOnly, TokenUnavailable
+from .errors import BatError, OwnerConflict, ResourceReadOnly, TokenUnavailable
 from .fleet import Fleet
 from .github import GitHubClient
 from .goose_acp import GooseACP
@@ -83,7 +83,25 @@ def request(method: str, *, _auth_token: str | None = None, timeout: float = 5.0
 
 class TaskDaemon:
     def __init__(self, config: Config, db_path: str | Path | None = None):
-        self.journal = Journal(db_path or state_dir() / "tasks.sqlite3")
+        self._config = config
+        self._db_path = Path(db_path or state_dir() / "tasks.sqlite3")
+        self._lease_fd: int | None = None
+        self._owner_id = secrets.token_hex(16)
+        self._initialized = False
+        self._endpoint = DEFAULT_URL
+
+    def __getattr__(self, name):
+        # Embedders and tests enter through the same owner-first initialization as serve().
+        if name in {"journal", "fleet", "adapter", "coordinator", "ops", "api", "inventory",
+                    "goose", "jev", "router", "_admin_token", "admin_token_path", "pusher"}:
+            self.acquire_owner()
+            return self.__dict__[name]
+        raise AttributeError(name)
+
+    def _initialize(self):
+        config = self._config
+        self.journal = Journal(self._db_path)
+        self.journal.on_close = self.release_owner
         self.admin_token_path = self.journal.path.parent / "task-admin.token"
         try:
             fd = os.open(self.admin_token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -126,8 +144,6 @@ class TaskDaemon:
         }
         self._active_ticks: dict[str, asyncio.Task] = {}
         self._cleanup_retry_after: dict[str, float] = {}
-        self._lease_fd: int | None = None
-        self._owner_id = secrets.token_hex(16)
         self.pusher = EventPusher(self.journal, self._event_webhook(self.adapter.verifier.settings),
                                   repo_urls=self.adapter.verifier.settings.repo_urls)
         # /api/v1: operations share this daemon's journal (one owner) and its write-capable fleet;
@@ -148,6 +164,7 @@ class TaskDaemon:
                                 github_config=config.github,
                                 git_runner=checkpoints.SshGitRunner(self.adapter.verifier.settings.ssh_hosts))
         self.api = ApiV1(self, allowed_origins=config.api.allowed_origins)
+        self._initialized = True
 
     @staticmethod
     def _event_webhook(settings) -> EventWebhook | None:
@@ -689,6 +706,9 @@ class TaskDaemon:
         worker = pusher = operations = metadata_reads = inventory = None
         try:
             server = await asyncio.start_server(self._handle, host, port)
+            address = "[::1]" if host == "::1" else host
+            self._endpoint = f"http://{address}:{server.sockets[0].getsockname()[1]}/rpc"
+            self._write_owner_pointer()
             worker = asyncio.create_task(self._worker())
             pusher = asyncio.create_task(self._push_loop())
             operations = asyncio.create_task(self.ops.loop())
@@ -709,25 +729,39 @@ class TaskDaemon:
     def acquire_owner(self):
         if self._lease_fd is not None:
             return
-        path = self.journal.path.parent / "task-daemon.lock"
+        # One fleet/registry has one owner, even when candidates name different journals.
+        path = registry.registry_path().parent / "task-daemon.lock"
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             os.close(fd)
-            raise RuntimeError("another task daemon owns this journal") from None
+            try:
+                owner = json.loads((path.parent / service.TASK_SERVICE_POINTER).read_text())
+            except (OSError, ValueError):
+                owner = {"lease_path": str(path)}
+            raise OwnerConflict(owner) from None
         self._lease_fd = fd
-        # Direct-send fences in other connector processes read the journal
-        # this daemon actually owns, not a guessed default path.
+        try:
+            if not self._initialized:
+                self._initialize()
+            self.journal.db.execute("""INSERT INTO daemon_owner(singleton,owner_id,pid,heartbeat_at)
+                VALUES(1,?,?,?) ON CONFLICT(singleton) DO UPDATE SET owner_id=excluded.owner_id,
+                pid=excluded.pid,heartbeat_at=excluded.heartbeat_at""", (self._owner_id, os.getpid(), time.time()))
+            self._write_owner_pointer()
+        except BaseException:
+            self.release_owner()
+            raise
+
+    def _write_owner_pointer(self):
         pointer = registry.registry_path().parent / service.TASK_SERVICE_POINTER
-        pointer.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         tmp = pointer.with_suffix(".tmp")
         with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
-            json.dump({"db_path": str(self.journal.path.resolve()), "pid": os.getpid()}, fh)
+            json.dump({"db_path": str(self.journal.path.resolve()), "pid": os.getpid(),
+                       "owner_id": self._owner_id, "endpoint": self._endpoint,
+                       "lease_path": str(pointer.parent / "task-daemon.lock")}, fh)
         os.replace(tmp, pointer)
-        self.journal.db.execute("""INSERT INTO daemon_owner(singleton,owner_id,pid,heartbeat_at)
-            VALUES(1,?,?,?) ON CONFLICT(singleton) DO UPDATE SET owner_id=excluded.owner_id,
-            pid=excluded.pid,heartbeat_at=excluded.heartbeat_at""", (self._owner_id, os.getpid(), time.time()))
 
     def release_owner(self):
         if self._lease_fd is not None:
