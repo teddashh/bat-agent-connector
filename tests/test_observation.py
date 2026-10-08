@@ -15,6 +15,7 @@ from bat_agent_connector.inventory import Inventory
 from bat_agent_connector.observation import (
     Observation,
     bind_worktree,
+    close_relations,
     dump,
     index,
     remember,
@@ -143,6 +144,115 @@ def test_b01_pending_bind_and_snapshot_relations(tmp_path):
     j.change(t["task_id"], "failed")
     tail = Observation(j).relations("execution", t["task_id"], limit=1, cursor=page["next_cursor"])
     assert tail["as_of"] == page["as_of"] and tail["relations"][0]["status"] == "bound"
+    j.close()
+
+
+def replay_version_one(j, path):
+    for table in ("api_event_context", "api_event_resources", "command_relations", "relation_revisions", "observation_relations"):
+        j.db.execute(f"DELETE FROM {table}")
+    j.db.execute("PRAGMA user_version=1")
+    j.close()
+    return Journal(path)
+
+
+@pytest.mark.parametrize("backfilled", [False, True])
+def test_b01_b03_pending_replacement_closure_links_only_its_own_session(tmp_path, backfilled):
+    """B01/B03, §08/§10/§11: a branchless replacement never lends its closure to an old session."""
+    path = tmp_path / "j.db"
+    j = Journal(path)
+    t = task(j, "replacement-closure")
+    bind(j, t, "old")
+    with j.tx():
+        prior = j.api_event("task", t["task_id"], "task.paused", {})
+        close_relations(j, t["task_id"], prior)
+    c, _ = j.command(t["task_id"], "start_lead", None, {}, "replacement")
+    j.command_bind_session(c["command_id"], "new")
+    pending = Observation(j).relations("session", "h1/new")["relations"][0]
+    assert pending["status"] == "pending" and pending["branch_id"] is None
+    with j.tx():
+        linked = j.api_event("work_item", "wi_fixture", "work_item.linked", {"kind": "task", "ref": t["task_id"]})
+    j.change(t["task_id"], "failed")
+    if backfilled:
+        j = replay_version_one(j, path)
+    obs = Observation(j)
+    old = obs.history("session", "h1/old", limit=200)["events"]
+    new = obs.history("session", "h1/new", limit=200)["events"]
+    assert all(e["body"].get("session_resource_id") != "h1/new" for e in old)
+    assert all("h1/new" not in e["context"]["session_resource_ids"] for e in old)
+    assert linked not in {e["seq"] for e in old} and linked in {e["seq"] for e in new}
+    assert any(e["kind"] == "relation.closed" and e["body"]["session_resource_id"] == "h1/new" for e in new)
+    assert not any(e["kind"] == "task.state" and e["body"].get("to") == "failed" for e in old)
+    execution, page = [], obs.history("execution", t["task_id"], limit=2)
+    while True:
+        execution.extend(page["events"])
+        if not page["next_cursor"]:
+            break
+        page = obs.history("execution", t["task_id"], limit=2, cursor=page["next_cursor"])
+    expected = {r[0] for r in j.db.execute("SELECT seq FROM api_events WHERE resource_id=? OR seq=?", (t["task_id"], linked))}
+    assert len(execution) == len({e["seq"] for e in execution}) == len(expected)
+    assert {e["seq"] for e in execution} == expected
+    assert all(e["body"].get("relation_id") and e["body"].get("session_resource_id")
+               for e in execution if e["kind"].startswith("relation."))
+    # Reproject the earlier milestone with today's closed relations: its original members still apply.
+    with j.tx():
+        j.db.execute("DELETE FROM api_event_context WHERE seq=?", (prior,))
+        j.db.execute("DELETE FROM api_event_resources WHERE seq=?", (prior,))
+        j._project_event(prior, None, legacy=backfilled)
+    assert [r[0] for r in j.db.execute("SELECT resource_id FROM api_event_resources WHERE seq=? AND resource_type='session'", (prior,))] == ["h1/old"]
+    j.close()
+
+
+@pytest.mark.parametrize("backfilled", [False, True])
+def test_b01_b03_parallel_lead_reviewer_relation_events_have_exact_links(tmp_path, backfilled):
+    """B01/B03, §08/§10/§11: shared task milestones fan out, named relation facts do not."""
+    path = tmp_path / "j.db"
+    j = Journal(path)
+    t = task(j, "parallel-roles")
+    bind(j, t, "lead")
+    bind(j, t, "reviewer", "reviewer")
+    with j.tx():
+        milestone = j.api_event("task", t["task_id"], "task.paused", {})
+    j.change(t["task_id"], "failed")
+    if backfilled:
+        j = replay_version_one(j, path)
+    obs = Observation(j)
+    for sid, role in (("lead", "lead"), ("reviewer", "reviewer")):
+        events = obs.history("session", f"h1/{sid}", limit=200)["events"]
+        assert milestone in {e["seq"] for e in events}
+        relation_events = [e for e in events if e["kind"].startswith("relation.")]
+        assert {e["kind"] for e in relation_events} == {"relation.opened", "relation.bound", "relation.closed"}
+        for e in relation_events:
+            assert e["body"]["role"] == role and e["body"]["session_resource_id"] == f"h1/{sid}"
+            assert e["context"]["session_resource_ids"] == [f"h1/{sid}"]
+            assert e["context"]["relation_ids"] == [e["body"]["relation_id"]]
+            links = {r[0] for r in j.db.execute("SELECT resource_id FROM api_event_resources WHERE seq=? AND resource_type='session'", (e["seq"],))}
+            assert links == {f"h1/{sid}"}
+    j.close()
+
+
+@pytest.mark.parametrize("kind", ["relation.opened", "relation.bound", "relation.closed"])
+@pytest.mark.parametrize("missing", ["relation_id", "session_resource_id"])
+@pytest.mark.parametrize("backfilled", [False, True])
+def test_b03_malformed_relation_events_log_evidence_without_links(tmp_path, caplog, kind, missing, backfilled):
+    """B03, §08/§11: missing explicit identities cannot be guessed from the task or branch."""
+    path = tmp_path / "j.db"
+    j = Journal(path)
+    t = task(j, "malformed")
+    bind(j, t, "lead")
+    rel = Observation(j).relations("execution", t["task_id"])["relations"][0]
+    data = {**rel, "note": "private malformed prose"}
+    data.pop(missing)
+    with j.tx():
+        seq = j.api_event("execution", t["task_id"], kind, data,
+            context={"resources": [("session", "h1/lead")], "relation_ids": [rel["relation_id"]]})
+    if backfilled:
+        j = replay_version_one(j, path)
+    event = next(e for e in j.api_events()["events"] if e["seq"] == seq)
+    assert event["context"]["evidence"] == [{"table": "api_events", "id": seq, "code": "MALFORMED_RELATION_EVENT"}]
+    assert event["context"]["relation_ids"] == event["context"]["session_resource_ids"] == []
+    assert j.db.execute("SELECT COUNT(*) FROM api_event_resources WHERE seq=?", (seq,)).fetchone()[0] == 0
+    assert not any(e["seq"] == seq for e in Observation(j).history("session", "h1/lead")["events"])
+    assert "malformed relation event" in caplog.text and "private" not in caplog.text
     j.close()
 
 

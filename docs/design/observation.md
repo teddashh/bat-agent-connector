@@ -13,6 +13,7 @@ Phase 1 規格已審查。Phase 2 分兩步：Part A（本次）實作伺服器�
 | Delivery acknowledged-conflict adapter | 本輪 rebase 基準 `200636f9bcc5d5bd13b3f2963fe812ff58c0645a`（#40）。接讀 acknowledged PATCH 的 conflict settlement，原 metadata control flow 不變。 |
 | Worktree relations 修正 | `eff252e`（#35 的審查基準）。補 seq binding intervals，固定 relations 的 as_of；不改已核准的 Part A/B、worktree ID 或資料步驟編號。 |
 | History role 摘要修正 | `7001934`（#35 的審查基準）。補遞迴摘要的 role 與下列有限 metadata；不改寫 journal 事實或資料步驟。 |
+| Relation event links 修正 | `38986e1`（#35 的審查基準）。具名 relation 事件只掛自己，execution fan-out 取原 seq 的有效 relation；live／版本 1 replay 使用同一規則。 |
 | 計畫 | v1.0（2026-10-06）；以章節及驗收編號引用，不複製私有計畫。 |
 | BAT | `b7419892fbc9946799b64cca24c2ec8c7fa15c42`；不代表每台主機都已安裝此版，實際 `serverVersion` 另存於掃描證據。 |
 
@@ -81,6 +82,12 @@ Execution 沿用 Task Service `task_id`，API 補 `execution_id = task_id`，不
 `Journal.warm_candidates`、`BatTaskAdapter.find_warm/_warm_identity/start` 與 `TaskCoordinator._start` 已有同 workstream、乾淨且 HEAD 為已驗證版本的 reuse 檢查。`commands.payload.warm_session_id`、新 task 的 `branches.reason=warm_reuse`、`task_capabilities_revoked`、`warm_base_recorded` 均已記錄；舊 task 的 branches／commands 不會被 registry owner 轉移刪掉。但目前沒有明確舊／新 execution 的完整區間及 binding event，`command_bind_session` 也沒有事件。
 
 Phase 2 在既有 journal 寫入點補 `relation.opened`、`relation.closed`、`relation.bound`；同交易保存舊／新 task、role、session、binding command 及來源證據。Start intent 是 pending，只有原流程確認身分後才 bound。Warm claim 與 SQLite 不共用交易：以已持久化的 start command 連接 claim 結果；當中斷時保留 pending／unknown，由既有 Task Service recovery 確認後補記事實。讀 history 不執行 recovery、claim、start 或新派工。
+
+`relation.opened/bound/closed` 必須明存 `relation_id` 與 `session_resource_id`。其 resource refs 只保留事件的 execution 與該 session；context.relation_ids 只含該 relation。Worktree link 只從該 session 在事件 seq 的 binding 衍生。不能從 command、branch、execution 的其他 relations、目前 task worktree 或 caller context 加掛其他 session。`relation()` 與 `close_relations()` 都送完整 IDs；沒有任一 ID 的事件屬 malformed，核心事件照常保留在全域 feed，log 與 context.evidence 記 `MALFORMED_RELATION_EVENT`，不寫任何 resource link，也不猜 relation 身分。此規則同時適用 legacy=True。
+
+Task 的共同里程碑仍可掛當時所有有效 relations：只限沒有 command／branch 的 `task.*` 事件，例如 state、paused、resumed，不含 relation.*。用 `relation_revisions` 在該 seq 以前（含該 seq）的最後一份 revision，而非目前 mutable body；必須已在事件前出現，status 不是 closed，已知 start_seq < event.seq，且 end_seq 為 null 或 >= event.seq。Terminal task 的事件先掛當時仍開啟的 relations，再各自送具名 closure；之前已關閉的 session 不再收到後續里程碑。Legacy start_seq=null 不代表一直存在，以較早的 revision seq 證明當時已有這段關係。
+
+同一 seq 規則也用於 `_refs(kind="task")` 的寫入查詢：operation 的 task sources、integration preview sources／receipts、work-item task links/unlinks，以及步驟 2 的 work-item/integration receipt snapshots；不能把已結束的參與者加回新事件。Snapshot 沒有更早事件證據時，取 backfill 新事件之前的 journal boundary，只掛當時仍開啟的關係。Inventory 的 `_memberships()` 是目錄查詢，仍保留曾參與 task 的 sessions 作 current/history work-item membership；它不寫事件，也不承諾 as_of snapshot，與 projection 的事件歸屬不同。
 
 Session/worktree binding 另存 `session_worktree_bindings(session_resource_id, worktree_id, start_seq, end_seq, linked_at_seq, evidence_ref)`；PK 為 session/start_seq，只有 bind/move 改變才寫入。區間為 [start_seq, end_seq)，end_seq=null 表示尚未見到替換。首次 registry 證據發 `session.worktree_bound`；同一 binding 的重複 poll 不追加事件。原 event 的 projection、checkpoint/run/task 建立事實可直接使用其 seq；移動關閉舊 binding 並開新 binding，不能刪掉舊列。`observation_resources.worktree_id` 只作目前身分摘要，不用來篩選 snapshot 的 relations。
 
@@ -285,6 +292,8 @@ Journal 的 `LATEST_DATA_STEP` 記整套 journal 最新配發的資料步驟，�
 
 Binding table/index 為每次開啟執行的 idempotent DDL，不讀寫 user_version。既有 binding 的 seed 屬本包資料步驟 2，不另占步驟 3：重播有明確 session/worktree 對的 binding/建立事件，使用最早可證明的原 seq；只有保存的目前 binding 而沒有更早證據時，用既有 backfill 為該 session/link 配發的 history.backfilled seq 作已知起點。不得由今天的 mutable worktree_id 將更早事件或已結束 relation 回掛目前 worktree；無證據的更早歸屬保持 unknown。Reopen 不再執行資料步驟或補 poll rows。Projection 失敗仍只回滾 savepoint，core event 保留 projection_error；不留下半個 binding move。
 
+步驟 2 重播已保存的具名 relation 事件時，保留其明確 IDs 及 status/end 的 revision，讓後續事件不再掛已關閉的 session；原 legacy start_seq/started_at 的 unknown 保持 null。Malformed relation 只保存上述證據，不建立 links。此修正不新增 DDL 或資料步驟，也不重跑已完成的步驟 2；投影若例外仍由既有 savepoint 保護核心寫入。
+
 快照來源為 tasks.external_worktree、checkpoint_runs、保存的 operation refs/steps 或 session 的目前 binding，snapshot 明存 session/worktree 對。僅目前 binding 的 fallback 來源 key 為 `session_worktree_bindings:<session resource ID>`；它的 backfill event seq 同時是 binding.start_seq、linked_at_seq 及該 event 的 resource link seq。已知舊 creation 的重複 receipt/snapshot 不把已移走的 session 移回去。Legacy relation 的開始時間仍可 unknown，但確定的 command participation 與 live projection 相同；舊 command 在 binding 的證據之前時不宣稱它屬於該 worktree。已完成步驟 2 的 journal 只安裝 DDL，不再 seed；新 binding 由之後的 writer 事實建立，未被保存的過去 binding 不推測。
 
 as_of 稽核：history 的 membership/coverage 只查 api_event_resources 的 seq/linked_at_seq，context/occurred_at 固定保存；resource envelope 為目前身分摘要，不是 membership filter。Session/execution relations 用不可變 identity columns 與 revision/command link seq；worktree relations 改用上述 binding intervals。Inventory 的 as_of 只供 events catch-up，目錄本來就不承諾 snapshot：目前 host config、provenance/access、gone/state/freshness、project/work-item/execution memberships 都可在 traversal 中變動；order=id 保證穩定 key 前進，新增列/篩選 membership 變動由 events 補讀，order=activity 仍保留動態排序限制。這些目前值不能套進 history/relations 的 snapshot membership。
@@ -341,6 +350,9 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B03、C07；§08、§09、§10、§11、§15 | `test_b03_acknowledged_conflict_settlement_is_in_history_without_pr_text`：acknowledged PATCH 的 conflict settlement 可從 operation events 與明確來源 session history 讀到，保留 code、排除 PR text；live/backfill 兩路徑驗證，重複 insert 保留原回執、不追加事件，重開不重複回填。既有 `test_metadata_acknowledged_write_conflict_settles_and_releases_pr` 保持全部 delivery assertions。 |
 | B01、B03；§08、§11 | `test_projection_failure_keeps_core_write_and_flags_event`：task state 與 operation step 的投影例外只回滾 savepoint，核心寫入及外部 step 成功；history 顯示 projection_error，無部分 resource／relation rows。 |
 | B01、B03；§08、§10、§11 | `test_b01_b03_relation_history_keeps_roles_and_strips_free_text`：lead/reviewer 共用 session，execution/session history 的 opened/bound/closed 都保留 role；live 與版本 1 重播各驗證，nested source/result versions 的 role 保留，備註/prompt/commit message 仍移除，重開不追加事件。 |
+| B01、B03；§08、§10、§11 | `test_b01_b03_pending_replacement_closure_links_only_its_own_session`：old 已關閉、new 無 branch 且 pending 後 task 關閉；old 沒有 new 的 closure/refs，new 收自己的 closure；task-source work-item link 只到當時的 new；execution 分頁每事件一次。Live／版本 1 replay 各驗證，重投影舊 milestone 仍用原 seq 的 old。 |
+| B01、B03；§08、§10、§11 | `test_b01_b03_parallel_lead_reviewer_relation_events_have_exact_links`：同時開啟 lead/reviewer，共同 milestone 到兩邊；每個 opened/bound/closed 的 resource links 與 context IDs 只到自己的 session/relation，live／版本 1 replay 一致。 |
+| B03；§08、§11 | `test_b03_malformed_relation_events_log_evidence_without_links`：三種 relation 事件缺 relation_id 或 session_resource_id，log 不洩漏 body，自帶 branch/caller refs 不能補猜；核心 row/evidence 保留、無 resource links，live／版本 1 replay 一致。 |
 | B03；§08、§11、§15、§16 | `test_b03_backfilled_summary_retains_bounded_metadata_and_nested_roles`：saved_snapshot 的 enum/ID/seq/SHA/布林及 nested role 保存，混合容器、自由文字、數量/評分繼續移除。既有 `test_b01_b03_delivered_merge_history_uses_only_explicit_refs` 與 `test_b03_acknowledged_conflict_settlement_is_in_history_without_pr_text` 同時驗證 head_repo_id、files_may_be_truncated、write_acknowledged 的正式 writer 輸出及 PR 文字隔離。 |
 | B01–B03；§10、§11 | `test_b01_b02_b03_http_mcp_cli_contract_parity`：HTTP/實際 MCP server/CLI 經同 daemon；params、keys、cursor、context 一致；observe、404、422 契約及四個新 tools。 |
 | B03；§06、§11 | `test_b03_observation_never_starts_resumes_rehydrates_or_locks_git`：MockBat 零 write/git:status；unsafe Claude state 不呼叫，journal 讀取不讀 Fleet/registry、不寫 DB；temp repo HEAD/index/refs/files 不變且無 locks，既有 on-demand Git probe 使用 no-optional-locks。 |
