@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import __version__, lifecycle, orchestrate, resource_policy, service, triage
+from . import __version__, api_auth, lifecycle, orchestrate, resource_policy, service, triage
 from .config import DEFAULT_BAT_PROFILES_DIR, default_config_path, load_config
 from .errors import BatError
 from .fleet import Fleet
@@ -615,7 +615,7 @@ def build_parser() -> argparse.ArgumentParser:
     t = tsp.add_parser("issue", help="issue a token for an actor (printed once)")
     t.add_argument("--actor", required=True, help="e.g. ted-dashboard, hermes, grokbot")
     t.add_argument("--scope", action="append", required=True,
-                   choices=["observe", "operate", "manage", "merge", "deploy"])
+                   choices=list(api_auth.SCOPES))
     t.add_argument("--ttl-days", type=float)
     t.add_argument("--label")
     tsp.add_parser("list", help="list actors, scopes and expiry (never tokens)")
