@@ -48,6 +48,10 @@ def schema(journal) -> None:
         journal.db.execute("""CREATE TABLE IF NOT EXISTS deployment_reconcile_reads (
             read_key TEXT PRIMARY KEY, checked_at REAL NOT NULL
         )""")
+        columns = {r[1] for r in journal.db.execute("PRAGMA table_info(deployment_reconcile_reads)")}
+        for name, declaration in (("interval_s", "REAL NOT NULL DEFAULT 15"), ("provider_state", "TEXT")):
+            if name not in columns:
+                journal.db.execute(f"ALTER TABLE deployment_reconcile_reads ADD COLUMN {name} {declaration}")  # noqa: S608
 
 
 def deployment(db, *, deployment_id=None, operation_id=None) -> dict | None:

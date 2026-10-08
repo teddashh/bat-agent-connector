@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import math
 import re
 import time
@@ -854,6 +855,9 @@ async def stopped_merge(ops, dep, op):
         return False
     gh = _gh(ops) if dep.get("legacy") else gh_for(ops, dep)
     pr = await background_read(gh.pull(s["repository"], op["target"]["pull_number"]))
+    store.update(ops.journal, dep["deployment_id"], facts={"merge_observation": {
+        "merged": pr.get("merged"), "state": pr.get("state"), "head_sha": (pr.get("head") or {}).get("sha"),
+        "merge_commit_sha": pr.get("merge_commit_sha")}})
     terminal = pr.get("state") == "closed"
     uuid = (op.get("external_refs") or {}).get("merge_request_uuid")
     if not terminal and uuid:
@@ -900,23 +904,32 @@ def reconcile_now():
     return time.time()
 
 
-def poll_due(ops, key):
+def poll_due(ops, key, *, adaptive=False):
     """Persist the read cadence separately from evidence, including unsuccessful reads and restarts."""
     now = reconcile_now()
     interval = ops.context["github_config"].deployment_reconcile_interval_s
     with store.tx(ops.journal):
-        row = ops.db.execute("SELECT checked_at FROM deployment_reconcile_reads WHERE read_key=?", (key,)).fetchone()
-        if row and now - row[0] < interval:
+        row = ops.db.execute("SELECT * FROM deployment_reconcile_reads WHERE read_key=?", (key,)).fetchone()
+        if row and now - row["checked_at"] < (min(interval, row["interval_s"]) if adaptive else interval):
             return False
-        ops.db.execute("INSERT INTO deployment_reconcile_reads VALUES(?,?) ON CONFLICT(read_key) "
+        ops.db.execute("INSERT INTO deployment_reconcile_reads(read_key,checked_at) VALUES(?,?) ON CONFLICT(read_key) "
                        "DO UPDATE SET checked_at=excluded.checked_at", (key, now))
     return True
 
 
+def provider_cadence(ops, key, dep, error=None):
+    state = store.digest({k: dep.get(k) for k in ("provider_evidence", "legacy_provider_evidence", "merge_observation",
+                                                "run_id", "identity", "provider_terminal", "on_merge_pending")} | {"error": error})
+    with store.tx(ops.journal):
+        row = ops.db.execute("SELECT * FROM deployment_reconcile_reads WHERE read_key=?", (key,)).fetchone()
+        interval = min(ops.context["github_config"].deployment_reconcile_interval_s, row["interval_s"] * 2) if row["provider_state"] == state else 15
+        ops.db.execute("UPDATE deployment_reconcile_reads SET interval_s=?,provider_state=? WHERE read_key=?", (interval, state, key))
+
+
 async def background_locate(ops, dep):
     if not poll_due(ops, "locate:" + dep["deployment_id"]):
-        return None
-    return await locate(ops, dep)
+        return False, None
+    return True, await locate(ops, dep)
 
 
 def attempt_attention(ops, dep, proof):
@@ -948,7 +961,7 @@ def save_provider(ops, dep, proof):
 
 async def check_current(ops, dep, env):
     if not poll_due(ops, "current:" + env["environment_key"]):
-        return
+        return False
     s = dep["recipe_snapshot"]
     run = await background_read(gh_for(ops, dep).run(s["repository"], dep["run_id"]))
     if (not run_matches(run, dep, token=s["mode"] == "workflow_dispatch")
@@ -959,7 +972,7 @@ async def check_current(ops, dep, env):
             proof = {**proof, "error": "DEPLOY_VERSION_UNPROVEN", "attention": True}
         if save_provider(ops, dep, proof):
             attempt_attention(ops, dep, proof)
-        return
+        return True
     # The saved successful attempt's jobs and approvals are immutable evidence; do not page them again.
     runtime = await runtime_check(ops, dep)
     if runtime.get("observed"):
@@ -976,6 +989,7 @@ async def check_current(ops, dep, env):
                            (store.encode({**(runtime.get("observed") or {}), "observed_at": runtime.get("checked_at", time.time())}),
                             runtime.get("error") or ("DEPLOY_VERSION_UNPROVEN" if runtime.get("waiting") else None),
                             time.time(), env["environment_key"], env["version"], dep["deployment_id"]))
+    return True
 
 
 def settle_stopped_local(ops, dep, op):
@@ -990,6 +1004,7 @@ def settle_stopped_local(ops, dep, op):
 
 
 async def reconcile_stopped(ops, dep, op):
+    merge_read = False
     if dep.get("legacy"):
         dep = bind_legacy(ops, dep)
         if dep.get("run_id"):
@@ -997,42 +1012,49 @@ async def reconcile_stopped(ops, dep, op):
             repository = dep["recipe_snapshot"].get("repository")
             if repository:
                 run = await background_read(_gh(ops).run(repository, dep["run_id"]))
+                store.update(ops.journal, dep["deployment_id"], facts={"legacy_provider_evidence": {
+                    k: run.get(k) for k in ("id", "status", "conclusion", "run_attempt")}})
                 if run.get("status") == "completed":
                     settle_legacy_run(ops, dep, run)
-            return
+                return True
+            return False
         if dep.get("merge_sent"):
             if not dep.get("on_merge_pending"):
                 if await stopped_merge(ops, dep, op):
-                    return
+                    return True
+                merge_read = True
                 dep = get(ops, dep["deployment_id"])
             if dep.get("on_merge_pending"):
-                run = await background_locate(ops, dep)
+                read, run = await background_locate(ops, dep)
                 if run:
                     store.update(ops.journal, dep["deployment_id"], run_id=run["id"])
                     if run.get("status") == "completed":
                         settle_legacy_run(ops, get(ops, dep["deployment_id"]), run)
-        return
+                return read or merge_read
+            return True
+        return False
     if not dep.get("run_id"):
         if not dep.get("dispatch_sent") and not dep.get("on_merge_pending"):
             if merge_sent(ops, dep) and not dep.get("merged_result"):
                 if await stopped_merge(ops, dep, op):
-                    return
+                    return True
+                merge_read = True
                 dep = get(ops, dep["deployment_id"])
             elif op["status"] == "cancelled":
                 store.update(ops.journal, dep["deployment_id"], provider_terminal=True, state="cancelled")
                 release_slot(ops, dep)
-                return
+                return True
         if not dep.get("dispatch_sent") and not dep.get("on_merge_pending"):
-            return
-        run = await background_locate(ops, dep)
+            return True
+        read, run = await background_locate(ops, dep)
         if not run:
-            return
+            return read or merge_read
         store.update(ops.journal, dep["deployment_id"], run_id=run["id"])
         dep = get(ops, dep["deployment_id"])
     proof = await observe(ops, dep)
     dep = save_provider(ops, dep, proof)
     if not dep or proof.get("error") or not proof.get("provider_proven"):
-        return
+        return True
     env = store.environment(ops.db, dep["environment_key"])
     runtime = await runtime_check(ops, dep)
     if runtime.get("observed"):
@@ -1041,9 +1063,10 @@ async def reconcile_stopped(ops, dep, op):
         older = env["desired_deployment_id"] != dep["deployment_id"]
         store.update(ops.journal, dep["deployment_id"], state="superseded" if older else "needs_attention",
                      facts={"runtime_evidence": runtime})
-        return
+        return True
     if not dep.get("recorded_result"):
         record(ops, dep, {"provider": proof, "runtime": runtime})
+    return True
 
 
 async def reconcile_deployments(ops):
@@ -1058,17 +1081,43 @@ async def reconcile_deployments(ops):
                       AND e.desired_deployment_id!=d.deployment_id)))))
         ORDER BY d.created_at""").fetchall()
     for row in rows:
-        dep = get(ops, row[0])
-        op = ops.get(dep["operation_id"])
-        env = store.environment(ops.db, dep["environment_key"])
+        dep = None
+        adaptive = False
+        key = "provider:" + row[0]
         try:
+            dep = get(ops, row[0])
+            op = ops.get(dep["operation_id"])
+            env = store.environment(ops.db, dep["environment_key"])
+            adaptive = (not dep["provider_terminal"] and bool(dep.get("run_id") or
+                (merge_sent(ops, dep) and not dep.get("on_merge_pending") and not dep.get("dispatch_sent"))))
+            if adaptive and not poll_due(ops, key, adaptive=True):
+                continue
             if env["current_deployment_id"] == dep["deployment_id"]:
-                await check_current(ops, dep, env)
+                complete = await check_current(ops, dep, env)
             elif dep["provider_terminal"]:
                 settle_stopped_local(ops, dep, op)
+                complete = True
             else:
-                await reconcile_stopped(ops, dep, op)
+                complete = await reconcile_stopped(ops, dep, op)
+            if complete:
+                fresh = get(ops, dep["deployment_id"])
+                if adaptive:
+                    provider_cadence(ops, key, fresh)
+                if fresh.get("reconciliation_error"):
+                    store.update(ops.journal, dep["deployment_id"], facts={"reconciliation_error": None})
         except (OperationError, NeedsAttention) as exc:
-            store.update(ops.journal, dep["deployment_id"], facts={"reconciliation_error": exc.code})
+            store.update(ops.journal, row[0], facts={"reconciliation_error": exc.code})
+            if adaptive:
+                provider_cadence(ops, key, get(ops, row[0]), exc.code)
         except (GitHubAmbiguous, Wait):
+            if adaptive:
+                provider_cadence(ops, key, get(ops, row[0]), "unanswered")
             continue
+        except Exception as exc:  # noqa: BLE001 - one malformed row must not starve later deployments
+            logging.warning("deployment %s reconciliation failed: %s", row[0], type(exc).__name__)
+            try:
+                store.update(ops.journal, row[0], facts={"reconciliation_error": "RECONCILE_FAILED"})
+                if adaptive and dep:
+                    provider_cadence(ops, key, dep, "RECONCILE_FAILED")
+            except Exception as save_error:  # noqa: BLE001 - a corrupt receipt must not stop later rows either
+                logging.warning("deployment %s reconciliation receipt failed: %s", row[0], type(save_error).__name__)

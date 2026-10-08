@@ -2,6 +2,10 @@
 
 ## Next release (unreleased)
 
+- Stopped deployment provider reads use persistent 15-second exponential backoff, capped at the configured reconcile
+  interval and reset by changed provider evidence. Successful reads clear stale errors; a bad row records
+  RECONCILE_FAILED and cannot starve later rows ([design](docs/design/delivery.md), plan §09/§17, D03/D05).
+
 - Deployment reconciliation skips settled history, polls each current run/runtime and unresolved run lookup at
   `[github] deployment_reconcile_interval_s = 300` (60–86400 seconds), and preserves row versions for unchanged
   evidence. Run lookup narrows by saved send time; the environment cadence survives restart and current-version changes.
