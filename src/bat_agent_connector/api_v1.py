@@ -16,7 +16,7 @@ import time
 from importlib import resources
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import __version__, api_auth, delivery, resource_policy, service
+from . import __version__, api_auth, checkpoints, delivery, resource_policy, service
 from .errors import BatError, ResourceReadOnly
 from .operations import STATES, OperationError
 
@@ -99,6 +99,8 @@ class ApiV1:
             ("POST", r"/api/v1/operations/(?P<op>op_[0-9a-f]{32})/resume", self.resume_operation, None),
             ("GET", r"/api/v1/events", self.events, "observe"),
             ("GET", r"/api/v1/tasks/(?P<task>[0-9a-f-]{8,64})", self.task, "observe"),
+            ("GET", r"/api/v1/checkpoints", self.checkpoints, "observe"),
+            ("GET", r"/api/v1/checkpoints/(?P<cp>cp_[0-9a-f]{32})", self.checkpoint, "observe"),
             ("GET", r"/api/v1/repositories/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pulls/(?P<number>\d{1,9})",
              self.pull_preview, "observe"),
         ]
@@ -284,11 +286,18 @@ class ApiV1:
                      "actions": actions, "operation_statuses": list(STATES),
                      "features": {"inventory": True, "events_stream": True, "operations": True,
                                   "github": self.daemon.ops.context.get("github") is not None,
-                                  "deploy": bool(gh_cfg.recipes), "checkpoints": False},
+                                  "deploy": bool(gh_cfg.recipes),
+                                  "checkpoints": [h for h in fleet.config.hosts if self._can_continue(h)]},
                      "repositories": [{"repository": r.repository, "allow_merge": r.allow_merge,
                                        "merge_methods": list(r.merge_methods)} for r in gh_cfg.repos.values()],
                      "deploy_recipes": [{"name": r.name, "repository": r.repository, "environment": r.environment,
                                          "mode": r.mode} for r in gh_cfg.recipes.values()]}
+
+    def _can_continue(self, host: str) -> bool:
+        runner = self.daemon.ops.context.get("git_runner")
+        fleet = self.daemon.fleet
+        return bool(runner and runner.available(host) and fleet.writes_enabled(host)
+                    and fleet.orchestrate_enabled(host) and fleet.config.host(host).managed_roots)
 
     async def hosts(self, **_):
         return 200, {"hosts": self.daemon.inventory.hosts()}
@@ -363,6 +372,14 @@ class ApiV1:
 
     async def pull_preview(self, owner, repo, number, **_):
         return 200, {"pull_request": await delivery.pr_preview(self.daemon.ops, f"{owner}/{repo}", int(number))}
+
+    async def checkpoints(self, query, **_):
+        return 200, checkpoints.list_checkpoints(self.daemon.journal.db, host=self._q(query, "host"),
+                                                 session_id=self._q(query, "session_id"),
+                                                 limit=self._int(query, "limit", 50))
+
+    async def checkpoint(self, cp, **_):
+        return 200, {"checkpoint": checkpoints.get(self.daemon.journal.db, cp)}
 
     async def task(self, task, **_):
         return 200, {"task": await self.daemon.call("work_status", {"task_id": task})}

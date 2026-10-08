@@ -2,6 +2,13 @@
 
 ## Next release (unreleased)
 
+- Checkpoints (docs/design/checkpoints.md): `checkpoint.create` records any session's commit, branch, uncommitted
+  change count and a fixed conversation excerpt through read channels only; `checkpoint.continue` builds a
+  connector-owned clone under the first managed root (its origin is the source's origin, never the person's
+  folder), adds a worktree and branch at that commit over the host's SSH alias, starts a managed session there,
+  checks BAT sees that commit, and only then sends the first instruction. New reads `GET /api/v1/checkpoints`,
+  `GET /api/v1/checkpoints/{id}` and MCP `checkpoints_list`; the Dashboard's session page records checkpoints and
+  starts work from them.
 - Browser Dashboard at `/dashboard/` on the task daemon's loopback port (docs/design/dashboard.md): pending items,
   the session inventory with provenance and staleness, managed-session send (queued behind a running turn),
   interrupt and answer, a read-only view for sessions a person created in BAT, PR merge and merge-and-deploy

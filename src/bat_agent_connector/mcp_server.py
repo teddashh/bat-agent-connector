@@ -49,6 +49,7 @@ READ_TOOLS = [
     "operation_get",
     "operations_list",
     "github_pr_preview",
+    "checkpoints_list",
 ]
 # Registered unless --read-only: they act as BATC_API_TOKEN's principal, whose scopes decide what is allowed.
 OPERATION_TOOLS = ["operation_submit", "operation_cancel", "operation_resume"]
@@ -328,8 +329,18 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         "delivery.merge_and_deploy")."""
         return await daemon("github_pr_preview", repository=repository, pull_number=pull_number)
 
+    async def checkpoints_list(host: str | None = None, session_id: str | None = None,
+                               checkpoint_id: str | None = None, limit: int = 20) -> dict[str, Any]:
+        """Checkpoints of a session (its commit, branch, uncommitted-change count) or one checkpoint with its
+        conversation excerpt and the managed sessions started from it. Create one with
+        operation_submit(action="checkpoint.create", target={host, session_id}); start work from it with
+        operation_submit(action="checkpoint.continue", target={checkpoint_id}, params={instructions})."""
+        if checkpoint_id:
+            return await daemon("checkpoint_get", checkpoint_id=checkpoint_id)
+        return await daemon("checkpoints_list", host=host, session_id=session_id, limit=limit)
+
     for fn in (capabilities_get, inventory_sessions, inventory_hosts, events_list, operation_get, operations_list,
-               github_pr_preview):
+               github_pr_preview, checkpoints_list):
         mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
 
     if fleet.any_orchestrate:
@@ -411,7 +422,9 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             Dashboard): e.g. action="session.send", target={host, session_id}, params={text}. Keep the
             idempotency_key and reuse it to retry; the same key with different content is refused. Returns the
             operation (waits up to wait_s for an outcome). Writes to sessions created in BAT are refused
-            (403). Acts as BATC_API_TOKEN's principal; requires confirm=true."""
+            (403); to continue such work, checkpoint.create reads it and checkpoint.continue starts a new
+            managed session from its commit (see checkpoints_list). Acts as BATC_API_TOKEN's principal;
+            requires confirm=true."""
             return await principal_daemon("op_submit", confirm, action=action, idempotency_key=idempotency_key,
                                           target=target, params=params, preconditions=preconditions, wait_s=wait_s)
 
