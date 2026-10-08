@@ -107,6 +107,10 @@ MUTATIONS: tuple[Mutation, ...] = (
              ("checkpoint.continue",),
              "a connector clone <managed root>/<name> (marked batc.managed-clone) that only reads the person's "
              "repository, and the worktree <clone>/.bat-worktrees/batc-cp-<12 hex> on branch batc/cp-<12 hex>"),
+    Mutation("artifact.storage", "connector-storage", "path", frozenset(), ("artifact.upload",),
+             "configured connector-owned storage; no symlinks or adoption of unknown content"),
+    Mutation("artifact.materialize", "ssh-files", "path", frozenset(), ("checkpoint.continue",),
+             "only .batc-inputs in the continuation's fixed managed worktree; no-follow host read-back"),
     Mutation("integration.area", "ssh-git", "path", frozenset(),
              ("integration.preview", "integration.apply", "integration.handoff", "batc integrate"),
              "only <first managed root>/.batc-integration/<name>-<8 hex>/repo.git, a bare repository whose identity "
@@ -714,3 +718,29 @@ async def session_policy(fleet, host: str, session_id: str | None = None) -> dic
                 actions[action] = {"allowed": False, "code": e.code, "reason": str(e)}
     return {**base, "session_id": t["id"], **cls.to_dict(),
             "observed": live.observed if live else None, "actions": actions}
+
+
+def check_artifact_storage(path) -> None:
+    """Configured local store: reject symlinks before setup or any write."""
+    from pathlib import Path
+
+    p = Path(path)
+    if not p.is_absolute() or ".." in p.parts or p == Path("/"):
+        raise ResourceReadOnly("DESTINATION_UNKNOWN", "artifact store must be a real absolute directory")
+    for component in (p, *p.parents):
+        if component.is_symlink():
+            raise ResourceReadOnly("DESTINATION_UNKNOWN", "artifact store may not contain symlinks")
+
+
+def check_artifact_destination(hc: HostConfig, clone: str, worktree: str, branch: str,
+                               relative_path: str) -> None:
+    """Materialization extends the shared checkpoint policy, never arbitrary managed paths."""
+    import re
+
+    check_checkpoint_worktree(hc, clone, worktree, branch)
+    parts = relative_path.split("/") if isinstance(relative_path, str) else []
+    if (len(parts) != 3 or parts[0] != ".batc-inputs"
+            or not re.fullmatch(r"art_[0-9a-f]{32}-r[1-9][0-9]*", parts[1])
+            or not parts[2] or parts[2] in {".", "..", ".git"}
+            or any(c in parts[2] for c in "/\\") or any(ord(c) < 32 or ord(c) == 127 for c in parts[2])):
+        raise ResourceReadOnly("DESTINATION_UNKNOWN", "not a continuation input path")

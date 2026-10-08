@@ -1155,9 +1155,11 @@ def test_b01_relation_scope_and_cross_project_link_history(mock, tmp_path):
     bind(j, t, "sid")
     # Use the existing work-item operation writer, with no provider call.
     from bat_agent_connector import work_items
+    from bat_agent_connector.artifacts import ArtifactSettings, ArtifactStore
     from bat_agent_connector.operations import OperationService
     ops = OperationService(j, actions=work_items.ACTIONS)
     ops.context["fleet"] = inv.fleet
+    ops.context["artifact_store"] = ArtifactStore(ops, ArtifactSettings(store_root=str(tmp_path / "artifacts")))
     principal = api_auth.Principal("agent", frozenset({"observe", "manage"}))
     async def create():
         p, _ = ops.create(principal, action="project.create", params={"name": "P"}, idempotency_key="p")
@@ -1691,7 +1693,9 @@ async def test_b02_cursor_catchup_sse_resume_and_hidden_backfill(served):
         newest = d.journal.api_event("session", "h1/sid", "session.updated", {"n": 8})
     frame2 = await stream(latest)
     assert f"id: {newest}\n".encode() in frame2 and f"id: {latest}\n".encode() not in frame2
-    assert (await http(port, "GET", f"/api/v1/events/stream?after={newest+100}", tok=viewer))[0] == 422
+    status, reset = await http(port, "GET", f"/api/v1/events/stream?after={newest+100}", tok=viewer)
+    assert status == 409 and reset["error"]["code"] == "EVENT_CURSOR_RESET"
+    assert reset["error"]["reason"] == "cursor_ahead"
 
 
 async def test_b01_b02_b03_http_mcp_cli_contract_parity(served, mock, monkeypatch, capsys):

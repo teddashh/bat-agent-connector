@@ -1,3 +1,4 @@
+<!-- Generated from desktop/index.html and desktop/src; npm run build:browser. -->
 <!doctype html>
 <html lang="zh-Hant">
 <head>
@@ -5,7 +6,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BAT Dashboard</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="/dashboard/app.css">
+  <script type="module" src="/dashboard/app.js"></script>
+  <link rel="stylesheet" crossorigin href="/dashboard/app.css">
 </head>
 <body>
 <header class="top">
@@ -14,6 +16,5 @@
   <span id="live" class="live" aria-live="polite"></span>
 </header>
 <main id="main" tabindex="-1"></main>
-<script type="module" src="/dashboard/app.js"></script>
 </body>
 </html>

@@ -351,9 +351,53 @@ class Journal:
 
         from .observation import install
         install(self)
+        from .dashboard_sync import install as install_sync
+        install_sync(self)
 
         from .cleanup import migrate
         migrate(self)
+        self._migrate_artifacts()
+
+    def _migrate_artifacts(self):
+        # Additive DDL runs after numbered data migrations without claiming their versions.
+        with self.tx():
+            for table in ("checkpoints", "work_items"):
+                if "attachments" not in {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}:
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'")
+            statements = (
+                """CREATE TABLE IF NOT EXISTS artifacts (
+                    artifact_id TEXT PRIMARY KEY, latest_revision INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL, actor TEXT NOT NULL)""",
+                """CREATE TABLE IF NOT EXISTS artifact_revisions (
+                    artifact_id TEXT NOT NULL REFERENCES artifacts(artifact_id), revision INTEGER NOT NULL,
+                    digest TEXT NOT NULL, size_bytes INTEGER NOT NULL, media_type TEXT NOT NULL,
+                    display_name TEXT NOT NULL, operation_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL,
+                    created_at REAL NOT NULL, PRIMARY KEY(artifact_id,revision))""",
+                """CREATE TABLE IF NOT EXISTS artifact_uploads (
+                    operation_id TEXT PRIMARY KEY REFERENCES operations(operation_id),
+                    artifact_id TEXT NOT NULL, revision INTEGER NOT NULL, deadline REAL NOT NULL,
+                    reserved_bytes INTEGER NOT NULL, attempt INTEGER NOT NULL DEFAULT 0,
+                    receive_state TEXT NOT NULL DEFAULT 'waiting', received_size INTEGER NOT NULL DEFAULT 0,
+                    received_digest TEXT, released_at REAL)""",
+                """CREATE TABLE IF NOT EXISTS artifact_references (
+                    owner_kind TEXT NOT NULL, owner_id TEXT NOT NULL, artifact_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL, digest TEXT NOT NULL, role TEXT NOT NULL,
+                    operation_id TEXT NOT NULL, created_at REAL NOT NULL, released_at REAL,
+                    release_operation_id TEXT,
+                    PRIMARY KEY(owner_kind,owner_id,artifact_id,revision,role,operation_id))""",
+                """CREATE TABLE IF NOT EXISTS artifact_materializations (
+                    materialization_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES operations(operation_id),
+                    artifact_id TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL,
+                    host TEXT NOT NULL, managed_path TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+                    attempt INTEGER NOT NULL DEFAULT 0, evidence TEXT, updated_at REAL NOT NULL,
+                    UNIQUE(operation_id,artifact_id,revision))""",
+                """CREATE TABLE IF NOT EXISTS checkpoint_source_confirmations (
+                    operation_id TEXT PRIMARY KEY REFERENCES operations(operation_id),
+                    parent_operation_id TEXT NOT NULL REFERENCES operations(operation_id),
+                    source_head_sha TEXT NOT NULL, actor TEXT NOT NULL, created_at REAL NOT NULL)""",
+            )
+            for statement in statements:
+                self.db.execute(statement)
 
     def _drop_legacy_outbox(self):
         """Remove the retired chat outbox so no historical event can ever be published.
@@ -606,7 +650,9 @@ class Journal:
             self.db.execute(f"RELEASE {savepoint}")
 
     def api_head(self) -> int:
-        return int(self.db.execute("SELECT COALESCE(MAX(seq),0) FROM api_events").fetchone()[0])
+        # The durable allocator survives retained-event deletion; absence never rewinds a cursor.
+        return int(self.db.execute("SELECT MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='api_events'),0), "
+                                   "COALESCE((SELECT MAX(seq) FROM api_events),0))").fetchone()[0])
 
     def api_events(self, after: int = 0, limit: int = 100, *, resource_type: str | None = None,
                    resource_id: str | None = None, kind: str | None = None,

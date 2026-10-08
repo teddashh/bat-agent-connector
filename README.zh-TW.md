@@ -38,11 +38,16 @@ Dashboard 啟動提示依 capabilities 的 `hosts[].confinement.host_account.sta
 | CLI | `batc` |
 | Agent skill | [`skills/bat-agent-connector/SKILL.md`](skills/bat-agent-connector/SKILL.md) |
 
+Hermes 與 Grokbot 配接皆[由 canonical skill 產生](docs/agent-skills.md)。更新工作流程後重新產生，
+安裝時使用與 Connector 相同已驗證版本的 bundle。
+
 `batc inventory`、`batc history`、`batc relations` 與對應 HTTP/MCP 讀取提供持久觀測。Session 歷史只讀 journal 事實；warm reuse 保留每個 task 的關係區間，discovery 顯示最近 host/profile 掃描範圍及未掃項目。未知 actor／狀態保持 unknown，讀取不啟動 session、不背景探測 Git。詳見 [observation](docs/design/observation.md)。Dashboard 的歷史與 scope 畫面屬後續 Part B。
 
 ## 為什麼要做
 
 同時跑好幾個長時間執行的 coding agent，就得一直切分頁檢查：哪個做完了、哪個卡在問題上、哪個只差一句「continue」。透過 BAT 的協定讀這些狀態很可靠（不抓畫面、不模擬 GUI 操作），也能讓一個負責監看的 agent 替你檢查，而任何會寫入的動作都還是由你掌控。
+
+附件以 immutable revision 存在 Connector 自有 store，記 SHA-256、size 與明確配額。用 `batc artifact upload FILE --key KEY --confirm` 或 Dashboard 選檔上傳，把精確 `{artifact_id, revision, digest}` 附到工作項目或 checkpoint。接續固定 checkpoint 的主機，第一指令前在 session worktree 驗證 bytes；來源前進時明確確認，續同一 operation。草稿文字與已上傳 refs 在 reload／失敗後保留。Store 沒有 delete；manual／result capture 與跨主機 commit fetch 分別留待 Part B／C。見 [Artifacts 設計](docs/design/artifacts.md)。
 
 ## 安裝
 

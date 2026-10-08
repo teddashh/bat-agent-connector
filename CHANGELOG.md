@@ -2,6 +2,46 @@
 
 ## Next release (unreleased)
 
+- Reject malformed artifact IDs and attachment roles at HTTP admission with a structured error,
+  before recording an operation or reserving upload storage.
+
+- Add `--principal-only` for agent MCP installations: require the agent token for all calls,
+  expose central operations and task adapters, and omit direct Fleet tools. Task status/result/events
+  now accept principals with `observe`; missing agent credentials never borrow local admin authority.
+
+- Generate Hermes and Grokbot skill bundles from the packaged canonical workflow, with
+  source digest/version metadata and a CI drift check ([guide](docs/agent-skills.md)).
+  Remove the Hermes cron-cleanup policy override; discover capabilities and preserve
+  original operations/keys on reconnect or lost replies. Fleet pins and live installs are unchanged.
+
+
+- Integrate immutable artifact inputs with reviewed cleanup: exempt only verified exact replicas with a
+  readable store original. Recheck accepted evidence under the host mutation gate, including resumed
+  cleanup after refs were preserved; missing or corrupt originals retain the surviving worktree copy.
+
+- Prepare a read-only projection of exact verified artifact replicas for reviewed cleanup.
+  Bind replicas to checkpoint creation and transfer intents; retain ordinary content when the
+  immutable original is unavailable. Cleanup wiring awaits the integrated base; correct the
+  artifact spec's data-step allocation and remove its obsolete Hub-import dependency.
+
+- Artifact attachments, Part A ([design](docs/design/artifacts.md), plan §08/§12/§13, W05b, B04): immutable
+  Connector-owned revisions, quota reservations and operation staging; binary HTTP upload authenticates before
+  reading content. Typed work item/checkpoint refs, restricted Python 3.9+ SSH materialization inside the continuation
+  worktree, independent digest read-back and a fresh source/input guard before dispatch. Source confirmation resumes
+  the same parent; start/send lost replies use existing reconcile. HTTP, CLI, three MCP tools and bilingual Dashboard
+  pickers/drafts/materialization status. No store deletion or new BAT channel; manual/result capture and artifact.accept
+  (Part B, A03 attachments) and cross-host commit fetch (Part C) remain deferred.
+- Artifact schema setup runs idempotently after numbered migrations without reading or advancing `user_version`,
+  preserving delivery and observation data migrations ([design](docs/design/artifacts.md), plan §08/§13).
+- Artifact scratch reaping retries independently of task ticks, with filesystem deletion off the event loop.
+  Cleanup failures keep reservations and cannot fail a committed cancel, upload receive or unrelated admission
+  ([design](docs/design/artifacts.md), plan §09/§13, B04).
+- Attachment continuations reject oversized prompt manifests before recording an operation. Host readiness reports
+  Git versions and requires Git 2.31+; managed clones safely create missing `info/exclude` with no-follow checks
+  ([design](docs/design/artifacts.md), plan §06/§13/§28, B04).
+
+
+
 - Duplicate registry identities discovered during capacity bookkeeping now retain the confirmed stop or reclaim
   result and report `REGISTRY_DUPLICATE_SESSION` as a capacity refusal, without changing the invalid registry.
 - Cleanup uses Task Service's shared ownership lookup for preview, locked mutation checks and capacity retirement.
@@ -160,6 +200,47 @@
 
 - The A10 Linux account-check fixture isolates its fake `pathlib` import, keeping pytest's real `Path` intact on
   Python 3.10 and 3.11; the product's read-only check is unchanged.
+- Share artifact attachments across browser and desktop work-item/continuation forms. Preserve exact
+  identity-scoped operation intents through lost replies and source-head changes. Native binary upload
+  uses capped raw IPC to one operation-bound central route, with no credential or URL supplied by JavaScript.
+  Temporary real Git/MockBat fixtures verify immutable bytes and materialization; native file-picker and
+  complete live attachment acceptance remain pending.
+
+- Port confinement evidence and reviewed cleanup into the shared desktop/browser source. Retain cleanup
+  requests within the original account across uncertain replies, preserve agent/form choices during updates,
+  and validate native cleanup routes and typed previews. Real temporary Git/MockBat cleanup and UI fixtures
+  verify the central flow; live confinement, restoration and full observation history UI remain pending.
+- Refuse filtered Dashboard checkpoint replay before reading events or opening SSE. Shared signed checkpoints
+  acknowledge only the complete public feed, so an empty or partial filtered page cannot skip other updates.
+  Legacy filtered event requests keep their existing response shape and numeric cursors.
+
+- Keep failed checkpoint-preview refreshes inside the event acknowledgment barrier. Preserve the original
+  commit selection and note, refuse stale checkpoint creation, and resume after a successful read; a failed
+  preview cannot silently change the request into a checkpoint of HEAD.
+
+- Wait for asynchronous Dashboard view refreshes before persisting event checkpoints. Failed or deferred
+  refreshes retain the original cursor and drafts. Failed reads pause mutations; deferred renders keep
+  version-checked form saves available. Delayed work cannot cross accounts or
+  mounted views. Existing pending-control and linked-history presentation gaps remain tracked under R04.
+
+- Add the shared Vite/TypeScript Dashboard source and initial packaged Tauri 2 shell with restricted native
+  central transport, native-memory credentials, tray hiding and same-session instance handoff. Browser and
+  desktop share bounded checkpoint polling, isolated draft/operation storage and offline write blocking;
+  account changes abort pending submissions. Generated assets and unsigned packaging are checked in CI.
+  Linux native and combined central fixtures pass; Windows, Fleet, protected credential enrollment and R04
+  per-view freshness remain pending ([desktop foundation](docs/design/desktop.md)).
+
+- Record the [Tauri v2 product scope](docs/product/realignment-v2.md) and
+  [integration status](docs/product/implementation-status.md) (R00). Keep the central Python backend and
+  share the browser/desktop UI; exclude Hub import and redefine B05 as Connector data preservation.
+  Desktop, Fleet parity and live acceptance remain tracked work, not completed capabilities.
+
+- Add an authenticated bootstrap checkpoint before persisted Dashboard snapshot reads, stable journal/principal
+  cache identities, and signed replay checkpoints refreshed after each event page. Cursor rollback, missing
+  retained history and changed event anchors explicitly require resnapshot while preserving drafts. SSE supports
+  checkpoint/reset control events; legacy event page shapes remain unchanged. Versionless metadata shares the
+  existing journal and adds no retention job (v2 §14, R04, B02/B05/T11; docs/design/dashboard-sync.md).
+
 - Validate the complete session inventory cursor before reading session rows: versioned payload schema,
   exact SQLite-compatible key types, and a non-coerced event boundary between zero and the journal head.
   Malformed cursors consistently return 422 for empty, filtered and populated inventories; previously issued
@@ -239,11 +320,6 @@
   all three metadata-settlement writers share one insert/event transaction, including acknowledged PATCH conflicts.
   Only the first inserted receipt emits history, preserving its code without PR text; legacy receipts use the
   same sanitized backfill. Delivery DDL checks use the journal's latest allocated data-step constant.
-
-- Record the [Tauri v2 product scope](docs/product/realignment-v2.md) and
-  [integration status](docs/product/implementation-status.md) (R00). Keep the central Python backend and
-  share the browser/desktop UI; exclude Hub import and redefine B05 as Connector data preservation.
-  Desktop, Fleet parity and live acceptance remain tracked work, not completed capabilities.
 
 - Delivery acknowledged metadata conflicts ([design](docs/design/delivery.md), plan §09/§10/§15, C07): save a
   conflict settlement when an acknowledged PATCH reads back differently, releasing the PR for a fresh-digest update

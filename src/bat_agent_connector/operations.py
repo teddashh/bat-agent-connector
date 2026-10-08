@@ -502,6 +502,12 @@ class OperationService:
         if self._wake is not None:
             self._wake.set()
 
+    def wake(self, operation_id: str) -> None:
+        """Make a waiting payload/provider operation due now without changing its state."""
+        self.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=? AND status='waiting_external'",
+                        (operation_id,))
+        self.kick()
+
     async def run_due(self) -> None:
         now = time.time()
         placeholders = ",".join("?" * len(RUNNABLE))
