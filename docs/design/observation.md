@@ -80,7 +80,7 @@ Execution 沿用 Task Service `task_id`，API 補 `execution_id = task_id`，不
 
 Phase 2 在既有 journal 寫入點補 `relation.opened`、`relation.closed`、`relation.bound`；同交易保存舊／新 task、role、session、binding command 及來源證據。Start intent 是 pending，只有原流程確認身分後才 bound。Warm claim 與 SQLite 不共用交易：以已持久化的 start command 連接 claim 結果；當中斷時保留 pending／unknown，由既有 Task Service recovery 確認後補記事實。讀 history 不執行 recovery、claim、start 或新派工。
 
-Session/worktree binding 另存 `session_worktree_bindings(session_resource_id, worktree_id, start_seq, end_seq, linked_at_seq, evidence_ref)`；PK 為 session/start_seq，只有 bind/move 改變才写入。區間為 [start_seq, end_seq)，end_seq=null 表示尚未見到替換。首次 registry 證據發 `session.worktree_bound`；同一 binding 的重複 poll 不追加事件。原 event 的 projection、checkpoint/run/task 建立事實可直接使用其 seq；移動關閉舊 binding 並開新 binding，不能刪掉舊列。`observation_resources.worktree_id` 只作目前身分摘要，不用來篩選 snapshot 的 relations。
+Session/worktree binding 另存 `session_worktree_bindings(session_resource_id, worktree_id, start_seq, end_seq, linked_at_seq, evidence_ref)`；PK 為 session/start_seq，只有 bind/move 改變才寫入。區間為 [start_seq, end_seq)，end_seq=null 表示尚未見到替換。首次 registry 證據發 `session.worktree_bound`；同一 binding 的重複 poll 不追加事件。原 event 的 projection、checkpoint/run/task 建立事實可直接使用其 seq；移動關閉舊 binding 並開新 binding，不能刪掉舊列。`observation_resources.worktree_id` 只作目前身分摘要，不用來篩選 snapshot 的 relations。
 
 Worktree relations 固定同一 as_of：binding 的 start_seq 與 linked_at_seq 都必須 <= as_of；end_seq 若在 as_of 之後，該 snapshot 視為尚未結束。Relation 仍取 as_of 前最後 revision，只收其時間範圍與 binding 有交集的列。已離開 worktree 的 session 保留當時交集；移動後才開始的其他 relations 不回掛舊 worktree。跨越移動的同一 relation 可在 A/B 都出現，但回 `worktree_ranges` 列各自交集與 binding 證據，command_ids 只含落在該交集且已 linked 的 command。原 relation_id/start_seq 保持不變，分頁 key 仍是原 start_seq/relation_id；重返同一 worktree 以多個 ranges 顯示，不重複 relation row。未知 legacy 起點仍為 null，交集不宣稱可證明更早的起點。
 
@@ -137,6 +137,7 @@ Operation intent 當下尚不知道新 session／worktree 時，其 context 保�
 |---|---|---|---|
 | `session.added` | `sessions_observed`；`Inventory._record_success` | resource、scan、first_seen、material snapshot、各欄觀測證據；只表示第一次被 Connector 看見。 | 已有；補 context |
 | `session.updated` | 同上 | before/after 或 changed fields、欄位 evidence；額外 field timestamps 保存於最新 observation，timeline context 取當輪已知來源；不因活動 timestamp 更新單獨發事件。 | 已有；補 diff/context |
+| `session.worktree_bound` | registry 的首次／變更 binding；`registry_bindings/bind_worktree` | session resource ID、worktree ID、previous worktree ID；用原 seq 保存 start/end 與 linked_at_seq。已知 creation intent 由原 operation/task/checkpoint event 投影，不另發一筆。同一 registry binding 重複 poll 不追加事件。 | 補記；projection 與 index 共用 savepoint |
 | `session.gone`、`session.reappeared` | `sessions_observed.missing_count/gone_at`；成功列舉交易 | misses、scan、最後 seen、原身分；重現清除 gone，不重建 ID。現有 reappear 是 `session.updated`，Phase 2 改發專用事件且不雙發。 | gone 已有；reappeared 補記 |
 | `session.stale`、`session.fresh` | 保存的 host／session freshness transition | reason、依據 scan/觀測版本、過期與記錄時間。 | 補記；GET 不產生 |
 | `host.reachable`、`host.unreachable`、`discovery.changed` | `hosts_observed`、`discovery_latest`；`_record_success/_record_failure` | host/profile、scope、完成度／redacted error；host 層事件不向 sessions fan-out。 | host 已有；scope transition 補記 |
@@ -266,7 +267,9 @@ Journal 的 `LATEST_DATA_STEP` 記整套 journal 最新配發的資料步驟，�
 
 版本 1 journal 已有 delivery 的 DDL 與資料時，資料步驟 2 也涵蓋 pr_merge_previews／pr_metadata_settlements；沒有對應事件才補 history.backfilled，以表名/PK 作唯一來源 key。保留原 preview.created_at／settlement.settled_at、摘要及正式 operation refs；原 delivery tables/documents 不改寫。Scope-read throttle 表不是 immutable 歷史，不把 pr_merge_scope_reads 的覆寫列偽裝為每次讀取事件。回填仍不進預設 live feed。
 
-Binding table/index 為每次開啟執行的 idempotent DDL，不讀写 user_version。既有 binding 的 seed 屬本包資料步驟 2，不另占步驟 3：重播有明確 session/worktree 對的 binding/建立事件，使用最早可證明的原 seq；只有保存的目前 binding 而沒有更早證據時，用既有 backfill 為該 session/link 配發的 history.backfilled seq 作已知起點。不得由今天的 mutable worktree_id 將更早事件或已結束 relation 回掛目前 worktree；無證據的更早歸屬保持 unknown。Reopen 不再執行資料步驟或補 poll rows。Projection 失敗仍只回滾 savepoint，core event 保留 projection_error；不留下半個 binding move。
+Binding table/index 為每次開啟執行的 idempotent DDL，不讀寫 user_version。既有 binding 的 seed 屬本包資料步驟 2，不另占步驟 3：重播有明確 session/worktree 對的 binding/建立事件，使用最早可證明的原 seq；只有保存的目前 binding 而沒有更早證據時，用既有 backfill 為該 session/link 配發的 history.backfilled seq 作已知起點。不得由今天的 mutable worktree_id 將更早事件或已結束 relation 回掛目前 worktree；無證據的更早歸屬保持 unknown。Reopen 不再執行資料步驟或補 poll rows。Projection 失敗仍只回滾 savepoint，core event 保留 projection_error；不留下半個 binding move。
+
+快照來源為 tasks.external_worktree、checkpoint_runs、保存的 operation refs/steps 或 session 的目前 binding，snapshot 明存 session/worktree 對。僅目前 binding 的 fallback 來源 key 為 `session_worktree_bindings:<session resource ID>`；它的 backfill event seq 同時是 binding.start_seq、linked_at_seq 及該 event 的 resource link seq。已知舊 creation 的重複 receipt/snapshot 不把已移走的 session 移回去。Legacy relation 的開始時間仍可 unknown，但確定的 command participation 與 live projection 相同；舊 command 在 binding 的證據之前時不宣稱它屬於該 worktree。已完成步驟 2 的 journal 只安裝 DDL，不再 seed；新 binding 由之後的 writer 事實建立，未被保存的過去 binding 不推測。
 
 as_of 稽核：history 的 membership/coverage 只查 api_event_resources 的 seq/linked_at_seq，context/occurred_at 固定保存；resource envelope 為目前身分摘要，不是 membership filter。Session/execution relations 用不可變 identity columns 與 revision/command link seq；worktree relations 改用上述 binding intervals。Inventory 的 as_of 只供 events catch-up，目錄本來就不承諾 snapshot：目前 host config、provenance/access、gone/state/freshness、project/work-item/execution memberships 都可在 traversal 中變動；order=id 保證穩定 key 前進，新增列/篩選 membership 變動由 events 補讀，order=activity 仍保留動態排序限制。這些目前值不能套進 history/relations 的 snapshot membership。
 

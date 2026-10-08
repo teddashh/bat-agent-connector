@@ -34,7 +34,7 @@ repository repository_id pull_number preview_id mode location_class error_code a
 message_id turn_marker turn_ref marker prompt_sha256 digest hash sha256 start_seq end_seq started_at ended_at
 created_at updated_at submitted_at finished_at linked_at removed_at linked_by removed_by link_id link_operation
 remove_operation work_item_id project_id needs_review source_table source_key saved_snapshot body backfilled
-legacy anchor_id identity_evidence worktree_id intent_type intent_id slot coverage methods authority observer
+legacy anchor_id identity_evidence worktree_id previous_worktree_id intent_type intent_id slot coverage methods authority observer
 scan_id binding_version attempted_binding_version last_success_at complete_enumeration errors outside_scan scope verified credential_ref
 server_version capabilities enrichment_failures workspace_document workspace_ids registry_entries session_count
 archive claude_transcripts session_meta safe_state journal workspace:load resource_id resource_type
@@ -111,6 +111,11 @@ def install(journal):
             body TEXT NOT NULL,PRIMARY KEY(relation_id,seq))""",
         "CREATE INDEX IF NOT EXISTS relation_execution ON observation_relations(execution_id)",
         "CREATE INDEX IF NOT EXISTS relation_session ON observation_relations(session_resource_id)",
+        """CREATE TABLE IF NOT EXISTS session_worktree_bindings(session_resource_id TEXT NOT NULL,
+            worktree_id TEXT NOT NULL,start_seq INTEGER NOT NULL,end_seq INTEGER,linked_at_seq INTEGER NOT NULL,
+            evidence_ref TEXT NOT NULL,PRIMARY KEY(session_resource_id,start_seq))""",
+        """CREATE INDEX IF NOT EXISTS worktree_binding_lookup
+            ON session_worktree_bindings(worktree_id,session_resource_id,start_seq)""",
         """CREATE TABLE IF NOT EXISTS command_relations(command_id TEXT NOT NULL,relation_id TEXT NOT NULL,linked_at_seq INTEGER NOT NULL,
             PRIMARY KEY(command_id,relation_id))""",
         """CREATE TABLE IF NOT EXISTS discovery_latest(host TEXT NOT NULL,profile_id TEXT NOT NULL,
@@ -146,12 +151,52 @@ def index(db, seq, kind, rid, linked=None, evidence=None):
     remember(db, kind, rid)
 
 
-def worktree(db, host, intent_type, intent_id, slot, *, path=None, branch=None, session_id=None, clone=None):
+def bind_worktree(journal, session_resource_id, wid, *, seq=None):
+    """Keep binding intervals, with every live change backed by an isolated event projection."""
+    db = journal.db
+    if seq is None:
+        current = db.execute("""SELECT worktree_id FROM session_worktree_bindings
+            WHERE session_resource_id=? AND end_seq IS NULL""", (session_resource_id,)).fetchone()
+        if current and current[0] == wid:
+            return
+        journal.api_event("session", session_resource_id, "session.worktree_bound",
+            {"worktree_id": wid, "previous_worktree_id": current[0] if current else None})
+        return
+    prior = db.execute("""SELECT * FROM session_worktree_bindings
+        WHERE session_resource_id=? AND start_seq<=? ORDER BY start_seq DESC LIMIT 1""",
+        (session_resource_id, seq)).fetchone()
+    if prior and (prior["end_seq"] is None or seq < prior["end_seq"]):
+        if prior["worktree_id"] == wid:
+            return
+        if prior["start_seq"] == seq:
+            raise ValueError("conflicting worktree binding at one sequence")
+        db.execute("UPDATE session_worktree_bindings SET end_seq=? WHERE session_resource_id=? AND start_seq=?",
+                   (seq, session_resource_id, prior["start_seq"]))
+    later = db.execute("""SELECT * FROM session_worktree_bindings
+        WHERE session_resource_id=? AND start_seq>? ORDER BY start_seq LIMIT 1""",
+        (session_resource_id, seq)).fetchone()
+    # Nested relation projections can discover the same intent before the enclosing event finishes.
+    if later and later["worktree_id"] == wid:
+        db.execute("""UPDATE session_worktree_bindings SET start_seq=?,linked_at_seq=?,evidence_ref=?
+            WHERE session_resource_id=? AND start_seq=?""",
+            (seq, seq, f"api_events:{seq}", session_resource_id, later["start_seq"]))
+    else:
+        db.execute("INSERT INTO session_worktree_bindings VALUES(?,?,?,?,?,?)",
+                   (session_resource_id, wid, seq, later["start_seq"] if later else None, seq, f"api_events:{seq}"))
+    latest = db.execute("""SELECT worktree_id FROM session_worktree_bindings
+        WHERE session_resource_id=? ORDER BY start_seq DESC LIMIT 1""", (session_resource_id,)).fetchone()
+    host, _, sid = session_resource_id.partition("/")
+    remember(db, "session", session_resource_id, host=host, session_id=sid, worktree_id=latest[0])
+
+
+def worktree(journal, host, intent_type, intent_id, slot, *, path=None, branch=None, session_id=None, clone=None, seq=None):
+    db = journal.db
     wid = worktree_id(host, intent_type, str(intent_id), slot)
     remember(db, "worktree", wid, host=host, intent_type=intent_type, intent_id=intent_id, slot=slot,
              worktree_path=path, branch=branch, clone_path=clone, identity_evidence="creation_intent")
-    if session_id:
-        remember(db, "session", f"{host}/{session_id}", host=host, session_id=session_id, worktree_id=wid)
+    if session_id and (seq is None or not db.execute("""SELECT 1 FROM session_worktree_bindings
+            WHERE session_resource_id=? AND worktree_id=? AND start_seq<=?""", (f"{host}/{session_id}", wid, seq)).fetchone()):
+        bind_worktree(journal, f"{host}/{session_id}", wid, seq=seq)
     return wid
 
 
@@ -177,7 +222,7 @@ def registry_bindings(journal, host, entries):
         intent = registry_worktree_intent(entries, host, sid, lead_of)
         if intent:
             root = roots[intent[1]]
-            wid = worktree(db, host, *intent, "worktree", path=root["worktree_path"], branch=root.get("branch"))
+            wid = worktree(journal, host, *intent, "worktree", path=root["worktree_path"], branch=root.get("branch"))
         else:
             # Non-BAT creations keep their already-journaled checkpoint/integration/task slot.
             r = db.execute("SELECT body FROM observation_resources WHERE resource_type='session' AND resource_id=?",
@@ -189,7 +234,7 @@ def registry_bindings(journal, host, entries):
             if not wid and parent in by_id:
                 wid = one(parent)
         if wid:
-            remember(db, "session", f"{host}/{sid}", host=host, session_id=sid, worktree_id=wid)
+            bind_worktree(journal, f"{host}/{sid}", wid)
         resolved[sid] = wid
         return wid
 
@@ -294,6 +339,9 @@ def record_event(journal, seq, *, legacy=False, extra=None):
         host, _, sid = rid.partition("/")
         ctx.update(host=host, observer="inventory", actor_basis="service" if e["actor"] == "inventory" else ctx["actor_basis"])
         remember(db, "session", rid, host=host, session_id=sid)
+        if b.get("worktree_id"):
+            bind_worktree(journal, rid, b["worktree_id"], seq=seq)
+            refs.append(("worktree", b["worktree_id"]))
     task_id = rid if kind in {"task", "execution"} else b.get("ref") if kind == "work_item" and b.get("kind") == "task" else b.get("execution_id")
     task_row = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone() if task_id else None
     if task_row:
@@ -344,13 +392,13 @@ def record_event(journal, seq, *, legacy=False, extra=None):
                     refs.append(("session", rel["session_resource_id"]))
                     ctx["relation_ids"].append(rel["relation_id"])
         if e["kind"] == "task.external_worktree_retained" and b.get("path"):
-            wid = worktree(db, task["host"], "task", task_id, "external_worktree", path=b["path"], branch=b.get("branch"), session_id=task.get("session_id"))
+            wid = worktree(journal, task["host"], "task", task_id, "external_worktree", path=b["path"], branch=b.get("branch"), session_id=task.get("session_id"), seq=seq)
             refs.append(("worktree", wid))
             if b.get("commit"):
                 ctx["result_versions"].append({"kind": "git", "sha": b["commit"], "ref": b.get("retained_ref"), "role": "retained"})
         if not legacy and task.get("external_worktree_path"):
-            wid = worktree(db, task["host"], "task", task_id, "external_worktree",
-                           path=task["external_worktree_path"], branch=task.get("external_branch"), session_id=task.get("session_id"))
+            wid = worktree(journal, task["host"], "task", task_id, "external_worktree",
+                           path=task["external_worktree_path"], branch=task.get("external_branch"), session_id=task.get("session_id"), seq=seq)
             refs.append(("worktree", wid))
         if not legacy:
             for field, target in (("base_commit", "source_versions"), ("verification_commit", "result_versions")):
@@ -359,6 +407,13 @@ def record_event(journal, seq, *, legacy=False, extra=None):
         if b.get("to") in {"done", "failed"}:
             close_relations(journal, task_id, seq, legacy=legacy)
     snapshot = body(b.get("saved_snapshot"))
+    if snapshot.get("worktree_id"):
+        session_ref = snapshot.get("session_resource_id") or (
+            f"{snapshot['host']}/{snapshot['session_id']}" if snapshot.get("host") and snapshot.get("session_id") else None)
+        if session_ref and (b.get("source_table") == "session_worktree_bindings" or not db.execute(
+                "SELECT 1 FROM session_worktree_bindings WHERE session_resource_id=? AND worktree_id=?",
+                (session_ref, snapshot["worktree_id"])).fetchone()):
+            bind_worktree(journal, session_ref, snapshot["worktree_id"], seq=seq)
     op_id = rid if kind == "operation" else b.get("operation_id") or snapshot.get("operation_id") or (rid if kind == "integration" else None)
     if not op_id and kind == "checkpoint":
         cp_op = db.execute("SELECT operation_id FROM checkpoints WHERE checkpoint_id=?", (rid,)).fetchone()
@@ -410,8 +465,8 @@ def record_event(journal, seq, *, legacy=False, extra=None):
         if ext.get("worktree_id") and db.execute("SELECT 1 FROM observation_resources WHERE resource_type='worktree' AND resource_id=?", (ext["worktree_id"],)).fetchone():
             refs.append(("worktree", ext["worktree_id"]))
         if host and path and op["action"] in {"checkpoint.continue", "integration.handoff"}:
-            wid = worktree(db, host, op["action"], op_id, "repair" if op["action"] == "integration.handoff" else "worktree",
-                           path=path, branch=ext.get("branch"), clone=ext.get("clone_path"), session_id=sid)
+            wid = worktree(journal, host, op["action"], op_id, "repair" if op["action"] == "integration.handoff" else "worktree",
+                           path=path, branch=ext.get("branch"), clone=ext.get("clone_path"), session_id=sid, seq=seq)
             refs.append(("worktree", wid))
     if kind == "pr_merge_preview":
         ctx["observer"] = "delivery-service"
@@ -427,8 +482,8 @@ def record_event(journal, seq, *, legacy=False, extra=None):
             ctx["source_versions"].append({"kind": "git", "sha": cp["commit_sha"], "role": "checkpoint"})
             ctx["source_versions"].append({"kind": "git", "sha": cp["head_sha"], "role": "captured_head"})
         for run in db.execute("SELECT * FROM checkpoint_runs WHERE checkpoint_id=? AND operation_id=?", (rid, b.get("operation_id"))):
-            wid = worktree(db, run["host"], "checkpoint.continue", run["operation_id"], "worktree",
-                           path=run["worktree_path"], branch=run["branch"], clone=run["clone_path"], session_id=run["session_id"])
+            wid = worktree(journal, run["host"], "checkpoint.continue", run["operation_id"], "worktree",
+                           path=run["worktree_path"], branch=run["branch"], clone=run["clone_path"], session_id=run["session_id"], seq=seq)
             refs.append(("worktree", wid))
     if kind == "integration":
         ctx["observer"] = "integration-service"
@@ -452,8 +507,8 @@ def record_event(journal, seq, *, legacy=False, extra=None):
                 if not resolver_host:
                     continue
                 refs.append(("session", f"{resolver_host}/{rec['resolver_session_id']}"))
-                wid = worktree(db, resolver_host, "integration.handoff", rec["resolver_operation_id"], "repair",
-                               path=rec["repair_worktree"], branch=rec["repair_branch"], session_id=rec["resolver_session_id"])
+                wid = worktree(journal, resolver_host, "integration.handoff", rec["resolver_operation_id"], "repair",
+                               path=rec["repair_worktree"], branch=rec["repair_branch"], session_id=rec["resolver_session_id"], seq=seq)
                 refs.append(("worktree", wid))
     if kind == "integration" and b.get("operation_id"):
         ctx["operation_id"] = b["operation_id"]
@@ -464,10 +519,11 @@ def record_event(journal, seq, *, legacy=False, extra=None):
     refs.extend((typ, res) for typ, res in (extra or {}).get("resources", []))
     for typ, res in list(refs):
         if typ == "session":
-            row = db.execute("SELECT body FROM observation_resources WHERE resource_type='session' AND resource_id=?", (res,)).fetchone()
-            wid = body(row[0]).get("worktree_id") if row else None
-            if wid:
-                refs.append(("worktree", wid))
+            row = db.execute("""SELECT worktree_id FROM session_worktree_bindings
+                WHERE session_resource_id=? AND start_seq<=? AND linked_at_seq<=?
+                AND (end_seq IS NULL OR end_seq>?) ORDER BY start_seq DESC LIMIT 1""", (res, seq, seq, seq)).fetchone()
+            if row:
+                refs.append(("worktree", row[0]))
     if op:
         if e["kind"] == "resource.bound":
             for old in db.execute("SELECT seq FROM api_events WHERE resource_type='operation' AND resource_id=? AND seq<?", (op_id, seq)):
@@ -515,8 +571,10 @@ def record_event(journal, seq, *, legacy=False, extra=None):
 
 def backfill(journal):
     db = journal.db
+    saved_bindings = [(r["resource_id"], body(r["body"])["worktree_id"]) for r in db.execute(
+        "SELECT * FROM observation_resources WHERE resource_type='session'") if body(r["body"]).get("worktree_id")]
     for e in db.execute("SELECT seq FROM api_events ORDER BY seq").fetchall():
-        record_event(journal, e[0], legacy=True)
+        journal._project_event(e[0], None, legacy=True)
     # Branches without an event and journal-only sessions still keep their identity.
     for row in db.execute("SELECT * FROM branches WHERE session_id IS NOT NULL").fetchall():
         task = dict(db.execute("SELECT * FROM tasks WHERE task_id=?", (row["task_id"],)).fetchone())
@@ -526,14 +584,15 @@ def backfill(journal):
             relation(journal, task, row["session_id"], row["role"], row["branch_id"], seq, confirmed=True, branch=dict(row), legacy=True)
     for task_row in db.execute("SELECT * FROM tasks WHERE external_worktree_path IS NOT NULL ORDER BY submitted_at").fetchall():
         task_data = dict(task_row)
-        wid = worktree(db, task_data["host"], "task", task_data["task_id"], "external_worktree",
-            path=task_data["external_worktree_path"], branch=task_data["external_branch"], session_id=task_data["session_id"])
+        wid = worktree(journal, task_data["host"], "task", task_data["task_id"], "external_worktree",
+            path=task_data["external_worktree_path"], branch=task_data["external_branch"])
         refs = [("execution", task_data["task_id"]), ("worktree", wid)]
         if task_data["session_id"]:
             refs.append(("session", f"{task_data['host']}/{task_data['session_id']}"))
         saved_fact(journal, "tasks.external_worktree", task_data["task_id"],
             {"host": task_data["host"], "task_id": task_data["task_id"], "worktree_path": task_data["external_worktree_path"],
-             "branch": task_data["external_branch"], "created_at": None}, refs)
+             "branch": task_data["external_branch"], "session_id": task_data["session_id"],
+             "worktree_id": wid, "created_at": None}, refs)
     for table, pk in (("operations", "operation_id"), ("commands", "command_id"), ("operation_steps", None),
                       ("sessions_observed", None), ("checkpoints", "checkpoint_id"), ("checkpoint_runs", "operation_id"),
                       ("integration_receipts", None), ("work_item_links", "link_id")):
@@ -565,8 +624,9 @@ def backfill(journal):
             if table == "checkpoints":
                 refs.append(("session", f"{data['host']}/{data['source_session_id']}"))
             if table == "checkpoint_runs":
-                wid = worktree(db, data["host"], "checkpoint.continue", data["operation_id"], "worktree",
-                    path=data["worktree_path"], branch=data["branch"], session_id=data["session_id"], clone=data["clone_path"])
+                wid = worktree(journal, data["host"], "checkpoint.continue", data["operation_id"], "worktree",
+                    path=data["worktree_path"], branch=data["branch"], clone=data["clone_path"])
+                data["worktree_id"] = wid
                 refs.append(("worktree", wid))
             if table == "work_item_links":
                 refs.extend(_refs(db, data["kind"], data["ref"]))
@@ -583,8 +643,10 @@ def backfill(journal):
                     if h and sid:
                         refs.append(("session", f"{h}/{sid}"))
                     if h and ext.get("worktree_path") and op["action"] in {"checkpoint.continue", "integration.handoff"}:
-                        wid = worktree(db, h, op["action"], data["operation_id"], "repair" if op["action"] == "integration.handoff" else "worktree",
-                            path=ext["worktree_path"], branch=ext.get("branch"), session_id=sid)
+                        wid = worktree(journal, h, op["action"], data["operation_id"], "repair" if op["action"] == "integration.handoff" else "worktree",
+                            path=ext["worktree_path"], branch=ext.get("branch"))
+                        if sid:
+                            data.update(session_resource_id=f"{h}/{sid}", worktree_id=wid)
                         refs.append(("worktree", wid))
             saved_fact(journal, table, key, summary(data), refs)
     # Delivery's bounded snapshots are facts too; they do not imply a local session or worktree.
@@ -601,6 +663,12 @@ def backfill(journal):
             continue
         data = {**summary(body(row["document"]), pr=True), "operation_id": row["operation_id"]}
         saved_fact(journal, "pr_metadata_settlements", row["operation_id"], data, _refs(db, "operation", row["operation_id"]))
+    for session_ref, wid in saved_bindings:
+        current = db.execute("""SELECT worktree_id FROM session_worktree_bindings
+            WHERE session_resource_id=? AND end_seq IS NULL""", (session_ref,)).fetchone()
+        if not current or current[0] != wid:
+            saved_fact(journal, "session_worktree_bindings", session_ref,
+                {"session_resource_id": session_ref, "worktree_id": wid}, [("session", session_ref), ("worktree", wid)])
 
 
 def saved_fact(journal, table, key, data, refs):
@@ -650,6 +718,22 @@ def cursor_read(cursor, filters, head):
 
 def cursor_out(fhash, as_of, key):
     return base64.urlsafe_b64encode(dump({"v": 1, "f": fhash, "a": as_of, "k": key}).encode()).decode().rstrip("=")
+
+
+def worktree_ranges(db, relation, wid, as_of):
+    ranges = []
+    for binding in db.execute("""SELECT * FROM session_worktree_bindings
+        WHERE session_resource_id=? AND worktree_id=? AND start_seq<=? AND linked_at_seq<=?
+        ORDER BY start_seq""", (relation["session_resource_id"], wid, as_of, as_of)):
+        binding_end = binding["end_seq"] if binding["end_seq"] is not None and binding["end_seq"] <= as_of else None
+        start = max(relation["start_seq"] or 0, binding["start_seq"])
+        ends = [end for end in (relation["end_seq"], binding_end) if end is not None]
+        end = min(ends) if ends else None
+        if end is None or start < end:
+            ranges.append({"start_seq": start, "end_seq": end, "binding_start_seq": binding["start_seq"],
+                           "binding_end_seq": binding_end, "linked_at_seq": binding["linked_at_seq"],
+                           "evidence_ref": binding["evidence_ref"]})
+    return ranges
 
 
 class Observation:
@@ -748,8 +832,8 @@ class Observation:
             if resource_type == "session" and r["session_resource_id"] != resource_id:
                 continue
             if resource_type == "worktree":
-                s = self.db.execute("SELECT body FROM observation_resources WHERE resource_type='session' AND resource_id=?", (r["session_resource_id"],)).fetchone()
-                if not s or body(s[0]).get("worktree_id") != resource_id:
+                r["worktree_ranges"] = worktree_ranges(self.db, r, resource_id, as_of)
+                if not r["worktree_ranges"]:
                     continue
             if execution_id and r["execution_id"] != execution_id or not include_closed and r["status"] == "closed":
                 continue
@@ -758,7 +842,9 @@ class Observation:
                 raise OperationError("INVALID_CURSOR", "invalid relation key", 422)
             if last is not None and key <= last:
                 continue
-            r["command_ids"] = [x[0] for x in self.db.execute("""SELECT cr.command_id FROM command_relations cr WHERE relation_id=? AND cr.linked_at_seq<=? ORDER BY cr.rowid""", (r["relation_id"], as_of))]
+            r["command_ids"] = [x[0] for x in self.db.execute("""SELECT cr.command_id,cr.linked_at_seq FROM command_relations cr WHERE relation_id=? AND cr.linked_at_seq<=? ORDER BY cr.rowid""", (r["relation_id"], as_of))
+                if resource_type != "worktree" or any(interval["start_seq"] <= x[1] and
+                    (interval["end_seq"] is None or x[1] < interval["end_seq"]) for interval in r["worktree_ranges"])]
             out.append(r)
         out.sort(key=lambda r: (r["start_seq"] or 0, r["relation_id"]))
         page = out[:limit]

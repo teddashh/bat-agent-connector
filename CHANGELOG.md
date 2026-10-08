@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- Observation worktree relation snapshots ([design](docs/design/observation.md), plan §08/§10/§11, B01/B03):
+  retain sequenced session/worktree binding intervals instead of filtering by the current worktree pointer.
+  Late bindings stay outside existing `as_of` cursors; moves preserve earlier participation, with scoped ranges
+  and command lists across pages. Data step 2 seeds proven original sequences or the saved binding's backfill
+  link sequence once; projection failures keep the core event and expose the gap.
+
 - Observation settlement history ([design](docs/design/observation.md), plan §08/§09/§10/§11/§15, B03/C07):
   all three metadata-settlement writers share one insert/event transaction, including acknowledged PATCH conflicts.
   Only the first inserted receipt emits history, preserving its code without PR text; legacy receipts use the

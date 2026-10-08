@@ -572,13 +572,13 @@ class Journal:
             self._project_event(cur.lastrowid, context)
         return int(cur.lastrowid)
 
-    def _project_event(self, seq: int, context: dict | None) -> None:
+    def _project_event(self, seq: int, context: dict | None, *, legacy: bool = False) -> None:
         # A projection bug must not roll back the authoritative writer's transaction.
         savepoint = f"observation_{int(seq)}"
         self.db.execute(f"SAVEPOINT {savepoint}")
         try:
             from .observation import record_event
-            record_event(self, seq, extra=context)
+            record_event(self, seq, extra=context, legacy=legacy)
         except Exception as exc:  # noqa: BLE001 - preserve the core write and expose the projection gap
             self.db.execute(f"ROLLBACK TO {savepoint}")
             self.db.execute(f"RELEASE {savepoint}")

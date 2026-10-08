@@ -12,7 +12,15 @@ import pytest
 
 from bat_agent_connector import api_auth, cli, mcp_server, registry
 from bat_agent_connector.inventory import Inventory
-from bat_agent_connector.observation import Observation, dump, index, saved_fact, worktree
+from bat_agent_connector.observation import (
+    Observation,
+    bind_worktree,
+    dump,
+    index,
+    remember,
+    saved_fact,
+    worktree,
+)
 from bat_agent_connector.operations import OperationError
 from bat_agent_connector.resource_ids import worktree_id
 from bat_agent_connector.task_journal import Journal
@@ -138,6 +146,221 @@ def test_b01_pending_bind_and_snapshot_relations(tmp_path):
     j.close()
 
 
+def relation_pages(obs, wid, first=None):
+    page = first or obs.relations("worktree", wid, limit=1)
+    rows, as_of = list(page["relations"]), page["as_of"]
+    while page["next_cursor"]:
+        page = obs.relations("worktree", wid, limit=1, cursor=page["next_cursor"])
+        assert page["as_of"] == as_of
+        rows.extend(page["relations"])
+    assert len(rows) == len({r["relation_id"] for r in rows})
+    return rows
+
+
+def test_b01_worktree_relations_exclude_late_bindings_from_existing_cursor(tmp_path):
+    """B01, §08/§10: a binding added after page one cannot change its remaining pages."""
+    j = Journal(tmp_path / "j.db")
+    with j.tx():
+        wid = worktree(j, "h1", "registry", "root@123", "worktree", session_id="early-a")
+        bind_worktree(j, "h1/early-b", wid)
+    for sid in ("early-a", "early-b", "late"):
+        bind(j, task(j, sid), sid)
+    obs = Observation(j)
+    first = obs.relations("worktree", wid, limit=1)
+    assert first["has_more"]
+    history = obs.history("worktree", wid, limit=1)
+    with j.tx():
+        bind_worktree(j, "h1/late", wid)
+    assert j.api_head() > first["as_of"]
+    old = relation_pages(obs, wid, first)
+    assert {r["session_resource_id"] for r in old} == {"h1/early-a", "h1/early-b"}
+    assert {r["session_resource_id"] for r in relation_pages(obs, wid)} == {"h1/early-a", "h1/early-b", "h1/late"}
+    # Current identity metadata is allowed to change; history membership stays bounded by link seq.
+    while history["next_cursor"]:
+        history = obs.history("worktree", wid, limit=1, cursor=history["next_cursor"])
+        assert all("h1/late" not in e["context"].get("session_resource_ids", []) for e in history["events"])
+    j.close()
+
+
+def test_b01_worktree_moves_preserve_relation_ranges_across_pages(tmp_path):
+    """B01/B03, §08/§10: a move clips participation, retaining the old worktree's ranges."""
+    j = Journal(tmp_path / "j.db")
+    obs = Observation(j)
+    with j.tx():
+        a = worktree(j, "h1", "registry", "root@123", "worktree", session_id="shared")
+        b = worktree(j, "h1", "checkpoint.continue", "new", "worktree")
+    previous = []
+    for key in ("past-a", "past-b"):
+        t = task(j, key)
+        c = bind(j, t, "shared")
+        previous.append((t, c))
+        j.change(t["task_id"], "failed")
+    ongoing = task(j, "ongoing")
+    before = bind(j, ongoing, "shared")
+    j.change(ongoing["task_id"], "dispatching")
+    first = obs.relations("worktree", a, limit=1)
+    with j.tx():
+        bind_worktree(j, "h1/shared", b)
+    move_seq = j.api_head()
+    after, _ = j.command(ongoing["task_id"], "send", "shared", {}, "after-move")
+    j.command_status(after["command_id"], "settled")
+    new = task(j, "only-b")
+    newest = bind(j, new, "shared")
+    old_snapshot = relation_pages(obs, a, first)
+    assert old_snapshot[-1]["worktree_ranges"][0]["end_seq"] is None
+    assert old_snapshot[-1]["command_ids"] == [before["command_id"]]
+    on_a = {r["execution_id"]: r for r in relation_pages(obs, a)}
+    on_b = {r["execution_id"]: r for r in relation_pages(obs, b)}
+    assert set(on_a) == {t["task_id"] for t, _ in previous} | {ongoing["task_id"]}
+    assert set(on_b) == {ongoing["task_id"], new["task_id"]}
+    for t, c in previous:
+        assert on_a[t["task_id"]]["command_ids"] == [c["command_id"]]
+    assert on_a[ongoing["task_id"]]["command_ids"] == [before["command_id"]]
+    assert on_a[ongoing["task_id"]]["worktree_ranges"][0]["end_seq"] == move_seq
+    assert on_b[ongoing["task_id"]]["command_ids"] == [after["command_id"]]
+    assert on_b[ongoing["task_id"]]["worktree_ranges"][0]["start_seq"] == move_seq
+    assert on_b[new["task_id"]]["command_ids"] == [newest["command_id"]]
+    # A stale creation receipt must not move a session back to the old worktree.
+    with j.tx():
+        seq = j.api_event("session", "h1/shared", "fixture.receipt", {})
+        worktree(j, "h1", "registry", "root@123", "worktree", session_id="shared", seq=seq)
+    assert obs.resource("session", "h1/shared")["worktree_id"] == b
+    assert all(e["kind"] != "fixture.receipt" for e in obs.history("worktree", a)["events"])
+    # Re-entry adds another range to one relation, rather than another copy of that relation.
+    with j.tx():
+        bind_worktree(j, "h1/shared", a)
+    return_seq = j.api_head()
+    returned, _ = j.command(ongoing["task_id"], "send", "shared", {}, "return")
+    j.command_status(returned["command_id"], "settled")
+    returning = next(r for r in relation_pages(obs, a) if r["execution_id"] == ongoing["task_id"])
+    assert [r["start_seq"] for r in returning["worktree_ranges"]] == [returning["start_seq"], return_seq]
+    assert returning["command_ids"] == [before["command_id"], returned["command_id"]]
+    assert Observation(j).relations("execution", ongoing["task_id"])["relations"][0]["command_ids"] == [before["command_id"], after["command_id"], returned["command_id"]]
+    j.close()
+
+
+def test_b03_worktree_binding_projection_failure_preserves_core_event(tmp_path, monkeypatch, caplog):
+    """B03, §08/§11: a partially projected move rolls back without losing its core event."""
+    from bat_agent_connector import observation
+    j = Journal(tmp_path / "j.db")
+    with j.tx():
+        a = worktree(j, "h1", "registry", "root@123", "worktree", session_id="sid")
+        b = worktree(j, "h1", "checkpoint.continue", "new", "worktree")
+    before = [tuple(r) for r in j.db.execute("SELECT * FROM session_worktree_bindings")]
+    original = observation.record_event
+
+    def fail(journal, seq, **kwargs):
+        original(journal, seq, **kwargs)
+        raise KeyError("private projection text")
+
+    monkeypatch.setattr(observation, "record_event", fail)
+    with j.tx():
+        bind_worktree(j, "h1/sid", b)
+    seq = j.api_head()
+    assert before == [tuple(r) for r in j.db.execute("SELECT * FROM session_worktree_bindings")]
+    assert Observation(j).resource("session", "h1/sid")["worktree_id"] == a
+    assert j.db.execute("SELECT COUNT(*) FROM api_event_resources WHERE seq=?", (seq,)).fetchone()[0] == 0
+    assert j.db.execute("SELECT COUNT(*) FROM relation_revisions").fetchone()[0] == 0
+    e = Observation(j).history("session", "h1/sid")["events"][0]
+    assert e["seq"] == seq and e["context"] == {"projection_error": "KeyError"}
+    assert "private projection text" not in caplog.text
+    j.close()
+
+
+def test_b03_worktree_binding_backfill_matches_live_and_reopens_without_writes(tmp_path, monkeypatch):
+    """B01/B03, §08/§11: step 2 seeds proven binding seqs, preserving live command participation."""
+    from bat_agent_connector import observation
+    from bat_agent_connector.operations import ActionDef, OperationService
+
+    async def never_run(ctx):
+        raise AssertionError("read-model fixture must not execute operations")
+
+    def populate(j):
+        ops = OperationService(j, actions=[ActionDef("checkpoint.continue", "observe", "Fixture only", never_run)])
+        principal = api_auth.Principal("fixture", frozenset({"observe"}))
+        op, _ = ops.create(principal, action="checkpoint.continue", target={"host": "h1"}, idempotency_key="creation")
+        ops._merge_refs(op["operation_id"], {"host": "h1", "session_id": "shared", "worktree_path": "/srv/wt"})
+        binding_seq = j.api_head()
+        t = task(j, "past")
+        bind(j, t, "shared")
+        j.change(t["task_id"], "failed")
+        bind(j, task(j, "current"), "shared")
+        return worktree_id("h1", "checkpoint.continue", op["operation_id"], "worktree"), binding_seq
+
+    def participation(j, wid):
+        return [(j.get(r["execution_id"])["idem_key"], r["status"],
+                 [j.command_get(cid)["kind"] for cid in r["command_ids"]]) for r in relation_pages(Observation(j), wid)]
+
+    live = Journal(tmp_path / "live.db")
+    live_wid, live_seq = populate(live)
+    assert live.db.execute("SELECT start_seq FROM session_worktree_bindings").fetchone()[0] == live_seq
+    expected = participation(live, live_wid)
+    path = tmp_path / "legacy.db"
+    with monkeypatch.context() as legacy:
+        legacy.setattr(observation, "install", lambda journal: None)
+        j = Journal(path)
+    wid, seq = populate(j)
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == 1
+    j.close()
+    original = observation.backfill
+    calls = []
+
+    def capture(journal):
+        calls.append(True)
+        original(journal)
+
+    monkeypatch.setattr(observation, "backfill", capture)
+    j = Journal(path)
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    binding = j.db.execute("SELECT * FROM session_worktree_bindings").fetchone()
+    assert binding["start_seq"] == binding["linked_at_seq"] == seq
+    assert binding["evidence_ref"] == f"api_events:{seq}"
+    assert participation(j, wid) == expected
+    # Command ownership is proven; an old relation's exact start still stays unknown.
+    assert all(r["start_seq"] is None for r in relation_pages(Observation(j), wid))
+    tables = ("session_worktree_bindings", "relation_revisions", "api_event_resources", "observation_backfill")
+    saved = {table: [tuple(r) for r in j.db.execute(f"SELECT * FROM {table}")] for table in tables}
+    head = j.api_head()
+    j.close()
+    j = Journal(path)
+    assert calls == [True] and j.api_head() == head and j.db.total_changes == 0
+    assert saved == {table: [tuple(r) for r in j.db.execute(f"SELECT * FROM {table}")] for table in tables}
+    assert participation(j, wid) == expected
+    j.close()
+    live.close()
+
+
+def test_b03_saved_worktree_binding_uses_backfill_link_seq_without_inventing_earlier_range(tmp_path):
+    """B03, §08: a saved current pointer alone does not prove an earlier worktree assignment."""
+    path = tmp_path / "j.db"
+    j = Journal(path)
+    past = task(j, "past")
+    bind(j, past, "sid")
+    j.change(past["task_id"], "failed")
+    current = task(j, "current")
+    bind(j, current, "sid")
+    with j.tx():
+        wid = worktree(j, "h1", "registry", "root@123", "worktree")
+        remember(j.db, "session", "h1/sid", worktree_id=wid)
+    j.db.execute("PRAGMA user_version=1")
+    j.close()
+    j = Journal(path)
+    binding = j.db.execute("SELECT * FROM session_worktree_bindings").fetchone()
+    seed = j.db.execute("SELECT seq FROM observation_backfill WHERE source_key='session_worktree_bindings:h1/sid'").fetchone()[0]
+    assert binding["start_seq"] == binding["linked_at_seq"] == seed
+    assert j.db.execute("SELECT linked_at_seq FROM api_event_resources WHERE seq=? AND resource_type='session'", (seed,)).fetchone()[0] == seed
+    rows = relation_pages(Observation(j), wid)
+    assert [r["execution_id"] for r in rows] == [current["task_id"]]
+    assert rows[0]["command_ids"] == []  # Their earlier commands have no proven worktree binding.
+    assert rows[0]["worktree_ranges"][0]["start_seq"] == seed
+    assert {e["seq"] for e in Observation(j).history("worktree", wid)["events"]} == {seed}
+    head = j.api_head()
+    j.close()
+    j = Journal(path)
+    assert j.api_head() == head and j.db.total_changes == 0
+    j.close()
+
+
 def test_b01_id_paging_complete_and_filter_changes_via_events(mock, tmp_path):
     j = Journal(tmp_path / "j.db")
     inv = Inventory(j, make_config(mock))
@@ -200,7 +423,7 @@ def test_b01_worktree_shared_creation_identity_and_reuse(mock, tmp_path):
     registry_bindings(j, "h1", list(reversed(entries)))
     assert Observation(j).resource("session", "h1/original")["worktree_id"] in ids
     with j.tx():
-        newer = worktree(j.db, "h1", "checkpoint.continue", "another", "worktree", path="/srv/wt")
+        newer = worktree(j, "h1", "checkpoint.continue", "another", "worktree", path="/srv/wt")
     assert newer not in ids
     j.close()
 
@@ -277,7 +500,7 @@ async def test_b02_unchanged_poll_does_not_rewrite_observation_identities(mock, 
 
     monkeypatch.setattr(inventory, "registry_bindings", capture)
     await inv.refresh_host("h1")
-    tables = ("observation_resources", "observation_relations", "relation_revisions", "command_relations",
+    tables = ("observation_resources", "session_worktree_bindings", "observation_relations", "relation_revisions", "command_relations",
               "api_event_context", "api_event_resources", "observation_backfill")
     before = {table: [tuple(r) for r in j.db.execute(f"SELECT * FROM {table}")] for table in tables}
     await inv.refresh_host("h1")
@@ -509,7 +732,7 @@ async def test_b01_b02_b03_http_mcp_cli_contract_parity(served, mock, monkeypatc
     t = task(d.journal, "a")
     bind(d.journal, t, MANUAL)
     with d.journal.tx():
-        wid = worktree(d.journal.db, "h1", "task", t["task_id"], "external_worktree", path="/srv/wt", session_id=MANUAL)
+        wid = worktree(d.journal, "h1", "task", t["task_id"], "external_worktree", path="/srv/wt", session_id=MANUAL)
         d.journal.api_event("session", "h1/" + MANUAL, "resource.bound", {})
     server, fleet = mcp_server.build_server(d.fleet.config, read_only=True)
     cases = [
