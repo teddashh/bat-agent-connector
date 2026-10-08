@@ -400,7 +400,9 @@ class ApiV1:
             resource_type=self._q(query, "resource_type"), resource_id=self._q(query, "resource_id"))
 
     async def pull_preview(self, owner, repo, number, query, **_):
-        return 200, {"pull_request": await integration.pr_card(self.daemon.ops, f"{owner}/{repo}", int(number), self._q(query, "method"))}
+        return 200, {"pull_request": await integration.pr_card(
+            self.daemon.ops, f"{owner}/{repo}", int(number), self._q(query, "method"),
+            from_event=self._q(query, "from_event") == "true")}
 
     async def merge_preview(self, pv, **_):
         return 200, {"preview": pr_delivery.get_preview(self.daemon.journal.db, pv)}

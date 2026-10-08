@@ -7,6 +7,7 @@ import re
 import subprocess
 import threading
 import uuid as uuidlib
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
 
@@ -61,6 +62,7 @@ class FakeGitHub:
         head_repo = {"id": repo_id + 1, "full_name": "someone/r"} if fork else {"id": repo_id, "full_name": "o/r"}
         pr = {"number": number, "state": "open", "draft": False, "merged": False, "merge_commit_sha": None,
               "mergeable": True, "mergeable_state": "clean", "title": f"PR {number}",
+              "updated_at": datetime.now(timezone.utc).isoformat(), "merged_at": None,
               "head": {"sha": head, "ref": head_ref or f"feature-{number}", "repo": head_repo},
               "base": {"sha": "b" * 40, "ref": "main", "repo": repo},
               "html_url": f"https://github.example/o/r/pull/{number}", **fields}
@@ -97,7 +99,8 @@ class FakeGitHub:
             parents.append({"sha": pr["head"]["sha"]})
         self.commits[sha] = {"sha": sha, "parents": parents, "commit": {"message": "merged"}}
         self.branches[pr["base"]["ref"]] = sha
-        pr.update(merged=True, state="closed", merge_commit_sha=sha)
+        now = datetime.now(timezone.utc).isoformat()
+        pr.update(merged=True, state="closed", merge_commit_sha=sha, merged_at=now, updated_at=now)
 
     def ancestors(self, sha):
         seen, pending = set(), [sha]
@@ -177,6 +180,8 @@ class FakeGitHub:
                 if path == "/repos/o/r/pulls" and method == "GET":
                     prs = [p for p in fake.pulls.values() if query.get("state") == "all"
                            or p["state"] == query.get("state", "open")]
+                    if query.get("sort") == "updated":
+                        prs.sort(key=lambda p: p["updated_at"], reverse=query.get("direction", "desc") == "desc")
                     page = int(query.get("page", 1))
                     return self._send(200, prs[(page-1)*100:page*100])
                 if path == "/repos/o/r/stacks" and method == "GET":
@@ -197,6 +202,7 @@ class FakeGitHub:
                     mode = fake.patch_mode
                     if mode != "lost_before":
                         pr.update(body or {})
+                        pr["updated_at"] = datetime.now(timezone.utc).isoformat()
                     if fake.patch_after:
                         fake.patch_after(pr)
                     if mode.startswith("lost"):

@@ -226,7 +226,8 @@ class TaskDaemon:
             return (await self.api.capabilities(principal=principal))[1]
         if method == "github_pr_preview":
             return {"pull_request": await integration.pr_card(self.ops, str(params.get("repository")),
-                                                              int(params.get("pull_number") or 0), params.get("method"))}
+                                                              int(params.get("pull_number") or 0), params.get("method"),
+                                                              from_event=params.get("from_event") is True)}
         if method == "github_merge_preview_get":
             return {"preview": pr_delivery.get_preview(self.journal.db, str(params.get("preview_id")))}
         if method == "checkpoints_list":

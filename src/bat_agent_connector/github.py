@@ -105,9 +105,11 @@ class GitHubClient:
     async def update_pull(self, repository: str, number: int, fields: dict):
         return await self.call("PATCH", f"{self._repo(repository)}/pulls/{int(number)}", fields)
 
-    async def pulls(self, repository: str, *, page: int = 1, state: str = "open"):
+    async def pulls(self, repository: str, *, page: int = 1, state: str = "open",
+                    sort: str | None = None, direction: str | None = None):
         return await self.call("GET", f"{self._repo(repository)}/pulls",
-                               query={"per_page": 100, "page": page, "state": state})
+                               query={"per_page": 100, "page": page, "state": state,
+                                      **({"sort": sort} if sort else {}), **({"direction": direction} if direction else {})})
 
     async def stacks(self, repository: str, number: int, *, page: int = 1):
         return await self.call("GET", f"{self._repo(repository)}/stacks",

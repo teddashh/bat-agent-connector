@@ -431,7 +431,10 @@ async function viewDelivery(main) {
     sessionStorage.setItem("batc.repo", repo.value); sessionStorage.setItem("batc.pr", num.value);
     if (!repo.value || !/^\d+$/.test(num.value)) return;
     try {
-      const pr = (await api("GET", `/repositories/${repo.value}/pulls/${num.value}${selectedMethod ? `?method=${selectedMethod}` : ""}`)).pull_request;
+      const query = new URLSearchParams();
+      if (selectedMethod) query.set("method", selectedMethod);
+      if (fromEvent) query.set("from_event", "true");
+      const pr = (await api("GET", `/repositories/${repo.value}/pulls/${num.value}?${query}`)).pull_request;
       if (holdRender(fromEvent, opens)) { idleReload = () => load(null, true); return; }
       freshPage();
       const status = h("div", { "aria-live": "polite" });

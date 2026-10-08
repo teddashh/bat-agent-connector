@@ -756,7 +756,7 @@ def test_part_a_preview_migration_reopens_without_data_change(tmp_path):
     j.db.execute("PRAGMA user_version=1")
     j.close()
     j = Journal(path)
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == 3
     assert pr_delivery.get_preview(j.db, "mpv_" + "0" * 32) == doc
     j.db.execute("PRAGMA user_version=8")  # rebase renumbering preserves both the row and later migrations
     j.close()
@@ -978,3 +978,255 @@ async def test_c04_paginated_pr_list_finds_late_indirect_candidate(make_daemon, 
     assert doc["affected_prs"][0]["number"] == 111
     assert doc["blocking"][0]["code"] == "MERGE_SCOPE_EXPANDED"
     assert gh.count("GET", r"pulls\?.*page=2") == 1 and gh.count("PUT", ".") == 0
+
+
+@pytest.mark.parametrize("cancelled", [True, False])
+async def test_metadata_lost_before_write_settles_not_applied_after_window(make_daemon, gh, cancelled):
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    gh.patch_mode = "lost_before"
+    op = await update_op(d)
+    unknown = await settle(d, op["operation_id"])
+    assert unknown["status"] == "needs_attention" and unknown["error_code"] == "UNCERTAIN_UNRESOLVED"
+    if cancelled:
+        d.ops.cancel(TED, op["operation_id"])
+    await pr_delivery.reconcile_metadata(d.ops)
+    assert pr_delivery.metadata_settlement(d.ops, op["operation_id"]) is None
+    with pytest.raises(OperationError) as e:
+        await update_op(d, key="before-window")
+    assert e.value.code == "PR_UPDATE_IN_PROGRESS"
+    d.ops.db.execute("UPDATE operation_steps SET started_at=? WHERE operation_id=? AND name='pr.metadata.write'",
+                     (pr_delivery.time.time() - pr_delivery.METADATA_SETTLE_S - 1, op["operation_id"]))
+    await pr_delivery.reconcile_metadata(d.ops)
+    receipt = pr_delivery.metadata_settlement(d.ops, op["operation_id"])
+    assert receipt["status"] == "not_applied" and receipt["code"] == "PR_METADATA_NOT_APPLIED"
+    reads = gh.count("GET", r"/pulls/7(?:\?|$)")
+    await pr_delivery.reconcile_metadata(d.ops)
+    await pr_delivery.reconcile_metadata(d.ops)
+    assert gh.count("GET", r"/pulls/7(?:\?|$)") == reads
+    # The delivery receipt settles the lock without changing another operation's step or refs.
+    assert d.ops.get(op["operation_id"])["steps"][-1]["status"] == "uncertain"
+    new = await update_op(d, key="after-window")
+    assert new["status"] == "accepted" and gh.count("PATCH", ".") == 1
+    d.ops.cancel(TED, new["operation_id"])
+    if not cancelled:
+        d.ops.resume(TED, op["operation_id"])
+        done = await settle(d, op["operation_id"])
+        assert done["status"] == "failed" and done["error_code"] == "PR_METADATA_NOT_APPLIED"
+        assert done["external_refs"]["metadata_settlement"] == receipt
+    else:
+        assert d.ops.get(op["operation_id"])["status"] == "cancelled"
+    assert gh.count("PATCH", ".") == 1
+
+
+async def test_metadata_late_landing_after_settlement_is_caught_by_digest(make_daemon, gh):
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    gh.patch_mode = "lost_before"
+    op = await update_op(d, params={"body": "late old write"})
+    await settle(d, op["operation_id"])
+    d.ops.cancel(TED, op["operation_id"])
+    d.ops.db.execute("UPDATE operation_steps SET started_at=? WHERE operation_id=? AND name='pr.metadata.write'",
+                     (pr_delivery.time.time() - pr_delivery.METADATA_SETTLE_S - 1, op["operation_id"]))
+    await pr_delivery.reconcile_metadata(d.ops)
+    new = await update_op(d, key="fresh", params={"title": "new title"})
+    gh.pulls[7]["body"] = "late old write"  # lands after the new operation's digest was reviewed
+    done = await settle(d, new["operation_id"])
+    assert done["status"] == "failed" and done["error_code"] == "PR_METADATA_CHANGED"
+    assert gh.pulls[7]["title"] == "PR 7" and gh.pulls[7]["body"] == "late old write"
+    assert gh.count("PATCH", ".") == 1
+
+
+async def test_metadata_positive_cancel_reconciliation_pins_private_service_calls(make_daemon, gh, monkeypatch):
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    gh.patch_mode = "lost_before"
+    op = await update_op(d)
+    await settle(d, op["operation_id"])
+    d.ops.cancel(TED, op["operation_id"])
+    calls = []
+    step_done, merge_refs = d.ops._step_done, d.ops._merge_refs
+    def done(*args, **kwargs):
+        calls.append(("step", args, kwargs))
+        return step_done(*args, **kwargs)
+    def refs(*args, **kwargs):
+        calls.append(("refs", args, kwargs))
+        return merge_refs(*args, **kwargs)
+    monkeypatch.setattr(d.ops, "_step_done", done)
+    monkeypatch.setattr(d.ops, "_merge_refs", refs)
+    gh.pulls[7]["title"] = "Reviewed title"
+    await pr_delivery.reconcile_metadata(d.ops)
+    assert calls[0] == ("step", (op["operation_id"], "pr.metadata.write",
+                               {"http_status": 200, "observed_intent": True, "write_acknowledged": False}),
+                        {"reconciled": True})
+    assert calls[1][0] == "refs" and calls[1][1][0] == op["operation_id"] and calls[1][2] == {}
+    saved = d.ops.get(op["operation_id"])
+    assert saved["status"] == "cancelled" and saved["steps"][-1]["status"] == "succeeded"
+    assert saved["external_refs"]["observed_intent"] and not saved["external_refs"]["verification_pending"]
+    assert gh.count("PATCH", ".") == 1
+
+
+async def test_pr_card_reuses_identical_preview_and_prunes_expired(make_daemon, gh, monkeypatch):
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    client = d.ops.context["github"]
+    original = client.compare
+    summary = {"filename": "new.txt", "status": "renamed", "additions": 1, "deletions": 2, "changes": 3,
+               "previous_filename": "old.txt"}
+    async def files(*args, **kwargs):
+        status, body = await original(*args, **kwargs)
+        body["files"] = [{**summary, "patch": "large patch", "blob_url": "https://example/blob",
+                          "contents_url": "https://example/contents", "raw_url": "https://example/raw", "sha": HEAD}]
+        return status, body
+    monkeypatch.setattr(client, "compare", files)
+    first = (await delivery.pr_preview(d.ops, "o/r", 7))["merge_preview"]
+    second = (await delivery.pr_preview(d.ops, "o/r", 7))["merge_preview"]
+    assert first == second and first["files"] == [summary]
+    assert d.ops.db.execute("SELECT count(*) FROM pr_merge_previews").fetchone()[0] == 1
+    # Keep a queued merge's expired row while pruning an unreferenced preview at the same age.
+    op, _ = d.ops.create(TED, **pr_delivery.merge_envelope(first), idempotency_key="queued")
+    gh.merge_mode = "enqueue"
+    assert (await settle(d, op["operation_id"], 1))["status"] == "waiting_external"
+    orphan = {**first, "preview_id": "mpv_" + "0" * 32}
+    d.ops.db.execute("INSERT INTO pr_merge_previews VALUES (?,?,?,?,?,?,?)",
+                     (orphan["preview_id"], "o/r", 7, json.dumps(orphan), orphan["digest"],
+                      orphan["created_at"], orphan["expires_at"]))
+    monkeypatch.setattr(pr_delivery.time, "time", lambda: first["expires_at"] + pr_delivery.PREVIEW_RETENTION_S + 1)
+    third = (await delivery.pr_preview(d.ops, "o/r", 7))["merge_preview"]
+    assert third["preview_id"] != first["preview_id"]
+    assert pr_delivery.get_preview(d.ops.db, first["preview_id"]) == first
+    with pytest.raises(OperationError) as e:
+        pr_delivery.get_preview(d.ops.db, orphan["preview_id"])
+    assert e.value.code == "PREVIEW_NOT_FOUND"
+    gh.merge(7)
+    assert (await settle(d, op["operation_id"]))["status"] == "succeeded"
+    await delivery.pr_preview(d.ops, "o/r", 7)
+    with pytest.raises(OperationError):
+        pr_delivery.get_preview(d.ops.db, first["preview_id"])
+
+
+async def test_event_reloads_do_not_recompute_scope_within_window(make_daemon, gh):
+    from bat_agent_connector import integration
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    for n in range(8, 18):
+        gh.add_pr(n, f"{n:040x}")
+    first = (await integration.pr_card(d.ops, "o/r", 7))["merge_preview"]
+    before = len(gh.requests)
+    for _ in range(8):
+        card = await integration.pr_card(d.ops, "o/r", 7, from_event=True)
+        assert card["merge_preview"] == first
+    requests = gh.requests[before:]
+    assert len(requests) == 16  # only one PR read and its checks per event
+    assert all("/pulls/7" in p or "check-runs" in p for _, p, _ in requests)
+    d.ops.db.execute("UPDATE pr_merge_scope_reads SET checked_at=checked_at-61")
+    before_compares = gh.count("GET", "/compare/")
+    card = await integration.pr_card(d.ops, "o/r", 7, from_event=True)
+    assert gh.count("GET", "/compare/") > before_compares and card["merge_preview"] == first
+    before_compares = gh.count("GET", "/compare/")
+    await integration.pr_card(d.ops, "o/r", 7, from_event=True)
+    assert gh.count("GET", "/compare/") == before_compares  # identical-row reuse refreshes the throttle clock
+    gh.pulls[7]["title"] = "fresh cheap metadata"
+    card = await integration.pr_card(d.ops, "o/r", 7, from_event=True)
+    assert card["title"] == "fresh cheap metadata" and card["merge_preview"] == first
+    gh.pulls[7]["head"]["sha"] = "e" * 40
+    gh.commits["e" * 40] = {"sha": "e" * 40, "parents": [{"sha": "b" * 40}], "commit": {"message": "new head"}}
+    card = await integration.pr_card(d.ops, "o/r", 7, from_event=True)
+    assert card["merge_preview"]["target"]["head_sha"] == "e" * 40
+    assert gh.count("GET", "/compare/") > before_compares
+    before_compares = gh.count("GET", "/compare/")
+    gh.pulls[7]["base"]["sha"] = "e" * 40
+    card = await integration.pr_card(d.ops, "o/r", 7, from_event=True)
+    assert card["merge_preview"]["target"]["base_sha"] == "e" * 40
+    assert gh.count("GET", "/compare/") > before_compares
+
+
+async def test_event_reload_throttle_is_shared_by_http_and_rpc(make_daemon, gh):
+    from tests.test_api_v1 import http, token
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    gh.add_pr(8, "c" * 40)
+    server = await asyncio.start_server(d._handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    observe = token(d, "viewer", "observe")
+    try:
+        status, body = await http(port, "GET", "/api/v1/repositories/o/r/pulls/7", tok=observe)
+        assert status == 200
+        preview = body["pull_request"]["merge_preview"]
+        before = len(gh.requests)
+        for _ in range(3):
+            status, body = await http(port, "GET", "/api/v1/repositories/o/r/pulls/7?from_event=true", tok=observe)
+            assert status == 200 and body["pull_request"]["merge_preview"] == preview
+            status, body = await http(port, "POST", "/rpc", tok=observe, body={"method": "github_pr_preview",
+                "params": {"repository": "o/r", "pull_number": 7, "from_event": True}})
+            assert status == 200 and body["result"]["pull_request"]["merge_preview"] == preview
+        assert len(gh.requests) - before == 12
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_transient_scope_read_error_before_submit_is_resumable(make_daemon, gh, monkeypatch):
+    from bat_agent_connector.github import GitHubAmbiguous
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    _, op = await preview_op(d)
+    original = d.ops.context["github"].repository
+    async def once(*args):
+        monkeypatch.setattr(d.ops.context["github"], "repository", original)
+        raise GitHubAmbiguous("transient scope read")
+    monkeypatch.setattr(d.ops.context["github"], "repository", once)
+    stopped = await settle(d, op["operation_id"])
+    assert stopped["status"] == "needs_attention" and stopped["error_code"] == "MERGE_SCOPE_UNPROVEN"
+    assert not stopped["steps"] and gh.count("PUT", ".") == 0
+    d.ops.resume(TED, op["operation_id"])
+    done = await settle(d, op["operation_id"])
+    assert done["status"] == "succeeded" and gh.count("PUT", ".") == 1
+
+
+async def test_checks_wait_only_rereads_head_and_base_before_final_scope(make_daemon, gh):
+    d = make_daemon()
+    pr = gh.add_pr(7, HEAD, mergeable_state="blocked")
+    gh.check_runs[HEAD] = [{"status": "in_progress", "conclusion": None}]
+    _, op = await preview_op(d)
+    compares = gh.count("GET", "/compare/")
+    lists = gh.count("GET", r"/pulls\?")
+    assert (await settle(d, op["operation_id"], 5))["status"] == "waiting_checks"
+    assert gh.count("GET", "/compare/") == compares and gh.count("GET", r"/pulls\?") == lists
+    pr["base"]["sha"] = "e" * 40
+    stopped = await settle(d, op["operation_id"])
+    assert stopped["error_code"] == "TARGET_BASE_CHANGED" and gh.count("PUT", ".") == 0
+
+
+async def test_verify_accepts_affected_pr_merged_after_this_merge(make_daemon, gh):
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    gh.add_pr(6, HEAD)
+    gh.merge_mode = "enqueue"
+    doc, op = await preview_op(d)
+    assert doc["affected_prs"][0]["number"] == 6
+    await settle(d, op["operation_id"], 1)
+    gh.merge(7)
+    gh.merge(6, "8" * 40)
+    done = await settle(d, op["operation_id"])
+    assert done["status"] == "succeeded" and done["result"]["merged_sha"] == MERGED
+    outcome = done["result"]["affected_prs"][0]
+    assert outcome["number"] == 6 and outcome["merged_after"] and outcome["independent"]
+    assert gh.count("PUT", ".") == 1
+
+
+async def test_verify_stops_updated_pr_pagination_at_admission(make_daemon, gh):
+    from datetime import datetime, timezone
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    # More than two pages of history, with recent PRs deliberately inserted among old ones.
+    for n in range(100, 350):
+        gh.add_pr(n, HEAD, state="closed", updated_at="2020-01-01T00:00:00+00:00")
+    for n in range(350, 450):
+        gh.add_pr(n, HEAD, state="closed", updated_at=datetime.now(timezone.utc).isoformat())
+    _, op = await preview_op(d)
+    done = await settle(d, op["operation_id"])
+    assert done["status"] == "succeeded"
+    paths = [p for m, p, _ in gh.requests if m == "GET" and "/pulls?" in p and "state=all" in p]
+    assert len(paths) == 2 and all("sort=updated" in p and "direction=desc" in p for p in paths)
+    assert "page=1&" in paths[0] and "page=2&" in paths[1]
