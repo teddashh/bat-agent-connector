@@ -23,6 +23,8 @@
   `write_scope: "confined"` and the permission fields from the reservation on, so a start proven by read-back, a
   resume and a Codex failover successor keep them. `session_set_permissions` refuses allow-all for these sessions
   and `approve_pending` skips them. The source conversation in the first instruction is marked as background.
+- `session_worktree_status` no longer reads a checkpoint session's recorded main checkout (the person's folder)
+  with BAT's `git:status`, which could rewrite their index; it says the folder is not read instead.
 - New API scope `start` for starting agent sessions; `checkpoint.continue` needs it. An `operate` token (send,
   answer, interrupt) no longer starts sessions. Reissue the Dashboard token with `--scope start`; the Dashboard
   disables "Start agent work" and says why when the token lacks it.
