@@ -2,6 +2,16 @@
 
 ## Next release (unreleased)
 
+- Add `--principal-only` for agent MCP installations: require the agent token for all calls,
+  expose central operations and task adapters, and omit direct Fleet tools. Task status/result/events
+  now accept principals with `observe`; missing agent credentials never borrow local admin authority.
+
+- Generate Hermes and Grokbot skill bundles from the packaged canonical workflow, with
+  source digest/version metadata and a CI drift check ([guide](docs/agent-skills.md)).
+  Remove the Hermes cron-cleanup policy override; discover capabilities and preserve
+  original operations/keys on reconnect or lost replies. Fleet pins and live installs are unchanged.
+
+
 - Integrate immutable artifact inputs with reviewed cleanup: exempt only verified exact replicas with a
   readable store original. Recheck accepted evidence under the host mutation gate, including resumed
   cleanup after refs were preserved; missing or corrupt originals retain the surviving worktree copy.

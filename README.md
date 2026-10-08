@@ -61,6 +61,9 @@ It ships four things:
 | CLI | `batc` |
 | Agent skill | [`skills/bat-agent-connector/SKILL.md`](skills/bat-agent-connector/SKILL.md) |
 
+Hermes and Grokbot adapters are [generated from the canonical skill](docs/agent-skills.md);
+regenerate them after workflow changes and install bundles from the matching Connector release.
+
 Persisted observation is available through `batc inventory`, `batc history` and `batc relations`, or the matching
 HTTP/MCP reads. Session history uses journal facts; warm reuse keeps each task’s relation ranges. Discovery shows
 the latest host/profile scope and what was outside the scan. Unknown actors and states stay unknown; these reads
