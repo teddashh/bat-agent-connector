@@ -903,7 +903,8 @@ class TaskDaemon:
     async def reconcile_metadata(self):
         while True:
             try:
-                await pr_delivery.reconcile_metadata(self.ops)
+                if self.journal.owner_valid():
+                    await pr_delivery.reconcile_metadata(self.ops)
             except Exception:  # keep periodic reads alive; operation evidence is retained
                 logging.getLogger(__name__).exception("metadata reconciliation failed")
             await asyncio.sleep(10)
@@ -911,7 +912,8 @@ class TaskDaemon:
     async def reconcile_deployments(self):
         while True:
             try:
-                await delivery.reconcile_deployments(self.ops)
+                if self.journal.owner_valid():
+                    await delivery.reconcile_deployments(self.ops)
             except Exception:  # preserve provider evidence and keep read-only recovery alive
                 logging.getLogger(__name__).exception("deployment reconciliation failed")
             await asyncio.sleep(10)
