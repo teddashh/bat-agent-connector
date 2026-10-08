@@ -59,6 +59,86 @@ pub struct ConnectorRequest {
     pub idempotency_key: Option<String>,
 }
 
+// Cleanup previews only describe existing central IDs. They cannot carry headers,
+// host paths, commands, credential material, or an altered cleanup apply envelope.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CleanupPreviewRequest {
+    target: CleanupTarget,
+    #[serde(default)]
+    choices: CleanupChoices,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum CleanupTarget {
+    Host {
+        host: String,
+    },
+    WorkItem {
+        work_item_id: String,
+        #[serde(default)]
+        include_children: bool,
+    },
+    Checkpoint {
+        checkpoint_id: String,
+    },
+    Integration {
+        operation_id: String,
+    },
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CleanupChoices {
+    #[serde(default)]
+    discard_uncommitted: Vec<String>,
+    #[serde(default)]
+    release_undelivered: Vec<String>,
+}
+
+fn validate_cleanup_preview(body: Option<&Value>) -> Result<(), String> {
+    let doc: CleanupPreviewRequest =
+        serde_json::from_value(body.cloned().ok_or("Cleanup preview body is required")?)
+            .map_err(|_| "Invalid typed cleanup preview request")?;
+    let valid_id = match doc.target {
+        CleanupTarget::Host { host } => {
+            !host.is_empty()
+                && host.len() <= 200
+                && host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+        }
+        CleanupTarget::WorkItem {
+            work_item_id,
+            include_children,
+        } => {
+            let _ = include_children; // accepted only as the typed boolean for this variant
+            Regex::new(r"^wi_[0-9a-f]{20}$")
+                .unwrap()
+                .is_match(&work_item_id)
+        }
+        CleanupTarget::Checkpoint { checkpoint_id } => Regex::new(r"^cp_[0-9a-f]{32}$")
+            .unwrap()
+            .is_match(&checkpoint_id),
+        CleanupTarget::Integration { operation_id } => Regex::new(r"^op_[0-9a-f]{32}$")
+            .unwrap()
+            .is_match(&operation_id),
+    };
+    let resource = Regex::new(r"^(?:cr|wt)_[0-9a-f]{32}$").unwrap();
+    if !valid_id
+        || [
+            &doc.choices.discard_uncommitted,
+            &doc.choices.release_undelivered,
+        ]
+        .iter()
+        .any(|ids| ids.len() > 500 || ids.iter().any(|id| !resource.is_match(id)))
+    {
+        return Err("Cleanup preview IDs or choice count are invalid".into());
+    }
+    Ok(())
+}
+
 #[derive(Serialize)]
 pub struct ConnectorResponse {
     pub status: u16,
@@ -274,6 +354,7 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
     static POST: OnceLock<Regex> = OnceLock::new();
     let pattern = if input.method == "GET" {
         GET.get_or_init(|| Regex::new(concat!(r"^/(?:version|capabilities|bootstrap|hosts|sessions|policy|operations|events|checkpoints|projects|work-items|integrations|integrations/candidates|",
+            r"cleanup-retained|cleanup-tombstones(?:/(?:cr|wt)_[0-9a-f]{32})?|",
             r"sessions/[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+(?:/(?:messages|checkpoint-preview|history|relations))?|",
             r"operations/op_[0-9a-f]{32}|tasks/[0-9a-f-]{8,64}(?:/(?:history|sessions))?|checkpoints/cp_[0-9a-f]{32}|",
             r"hosts/[A-Za-z0-9_.-]+/discovery|worktrees/wt_[0-9a-f]{32}(?:/(?:history|relations))?|",
@@ -281,7 +362,8 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             r"delivery/previews/mpv_[0-9a-f]{32}|integrations/previews/ipv_[0-9a-f]{32}|integrations/op_[0-9a-f]{32})$")).unwrap())
     } else if input.method == "POST" {
         POST.get_or_init(|| {
-            Regex::new(r"^/operations(?:/op_[0-9a-f]{32}/(?:cancel|resume))?$").unwrap()
+            Regex::new(r"^/(?:cleanup-previews|operations(?:/op_[0-9a-f]{32}/(?:cancel|resume))?)$")
+                .unwrap()
         })
     } else {
         return Err("Only defined central GET and operation POST requests are allowed".into());
@@ -289,9 +371,32 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
     if !pattern.is_match(path) {
         return Err("Central route is not allowed".into());
     }
+    let cleanup = path.starts_with("/cleanup-");
+    let mut query_keys = std::collections::HashSet::new();
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         if key.chars().chain(value.chars()).any(char::is_control) {
             return Err("Control characters in central query are refused".into());
+        }
+        if cleanup {
+            let allowed = match path {
+                "/cleanup-retained" => matches!(
+                    key.as_ref(),
+                    "host" | "resource_id" | "query" | "cursor" | "limit"
+                ),
+                "/cleanup-tombstones" => matches!(
+                    key.as_ref(),
+                    "host" | "kind" | "query" | "original_id" | "work_item_id" | "cursor" | "limit"
+                ),
+                _ => false,
+            };
+            if !allowed
+                || !query_keys.insert(key.to_string())
+                || value.len() > 4096
+                || key == "limit" && !value.parse::<u16>().is_ok_and(|n| (1..=200).contains(&n))
+            {
+                return Err("Cleanup query parameter is invalid".into());
+            }
+            continue;
         }
         if !matches!(
             key.as_ref(),
@@ -356,6 +461,9 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
         .is_some_and(|b| b.to_string().len() > MAX_REQUEST)
     {
         return Err("Operation request is too large".into());
+    }
+    if path == "/cleanup-previews" {
+        validate_cleanup_preview(input.body.as_ref())?;
     }
     if let Some(key) = &input.idempotency_key {
         if key.is_empty() || key.len() > 256 || !key.bytes().all(|c| c.is_ascii_graphic()) {
@@ -436,6 +544,57 @@ mod tests {
         format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)
     }
     const CAPS: &str = r#"{"actor":"fixture-operator","api_version":1,"contract_version":"2026-10-08","scopes":["observe","operate"]}"#;
+
+    #[test]
+    fn cleanup_routes_and_typed_previews_are_bounded() {
+        let rid = format!("wt_{}", "a".repeat(32));
+        for path in [
+            format!("/cleanup-tombstones/{rid}"),
+            "/cleanup-tombstones?query=old%20place&cursor=&limit=100".into(),
+            "/cleanup-retained?host=demo&resource_id=cr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&cursor="
+                .into(),
+        ] {
+            assert!(validate_request(&request("GET", &path)).is_ok(), "{path}");
+        }
+        for path in [
+            "/cleanup-tombstones/../../../token",
+            "/cleanup-tombstones/cr_bad",
+            "/cleanup-retained?query=x&query=y",
+            "/cleanup-retained?limit=501",
+            "/cleanup-retained?limit=true",
+            "/cleanup-retained?url=https%3A%2F%2Fevil.example",
+            "/cleanup-retained?original_id=x",
+            "/cleanup-tombstones?headers=secret",
+        ] {
+            assert!(validate_request(&request("GET", path)).is_err(), "{path}");
+        }
+        let mut preview = request("POST", "/cleanup-previews");
+        preview.body = Some(serde_json::json!({"target":{"kind":"host","host":"demo"},
+            "choices":{"discard_uncommitted":[],"release_undelivered":[rid]}}));
+        assert!(validate_request(&preview).is_ok());
+        for body in [
+            serde_json::json!({"target":{"kind":"host","host":"../other"}}),
+            serde_json::json!({"target":{"kind":"host","host":"demo","include_children":true}}),
+            serde_json::json!({"target":{"kind":"work_item","work_item_id":"wi_aaaaaaaaaaaaaaaaaaaa","include_children":"true"}}),
+            serde_json::json!({"target":{"kind":"host","host":"demo"},"headers":{"Authorization":"fake"}}),
+            serde_json::json!({"target":{"kind":"host","host":"demo"},"choices":{"discard_uncommitted":["/tmp/path"]}}),
+            serde_json::json!({"target":{"kind":"host","host":"demo"},"choices":{"release_undelivered":vec![rid;501]}}),
+        ] {
+            preview.body = Some(body);
+            assert!(validate_request(&preview).is_err());
+        }
+        for target in [
+            serde_json::json!({"kind":"work_item","work_item_id":"wi_aaaaaaaaaaaaaaaaaaaa","include_children":true}),
+            serde_json::json!({"kind":"checkpoint","checkpoint_id":"cp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}),
+            serde_json::json!({"kind":"integration","operation_id":"op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}),
+        ] {
+            preview.body = Some(serde_json::json!({"target":target}));
+            assert!(validate_request(&preview).is_ok());
+        }
+        preview.path = "/cleanup-previews?wait=3".into();
+        assert!(validate_request(&preview).is_err());
+        assert!(validate_request(&request("POST", "/cleanup-retained")).is_err());
+    }
 
     #[test]
     fn endpoints_require_a_trusted_origin() {

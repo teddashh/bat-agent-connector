@@ -247,9 +247,55 @@ function debounceRefresh(fn, ms) {
 }
 
 // ------------------------------------------------------------------ shared pieces
+function confinementLabel(s) {
+  const level = s.confinement?.level || "none";
+  return t(level === "os_sandbox" && s.confinement?.verification?.status !== "verified"
+    ? "confinement_os_pending" : "confinement_" + level);
+}
+function confinementNote(host, agent) {
+  const note = h("p", { class: "muted", "data-confinement-note": "" });
+  const update = () => {
+    const account = state.caps?.hosts?.find(x => x.host === host)?.confinement?.host_account;
+    const effect = account?.start_effect;
+    if (effect === "refused") {
+      note.textContent = t("confinement_account_blocked", { reason: account.reason });
+      if (agent.value === "codex") note.textContent += " " + t("confinement_codex_note");
+    } else if (agent.value === "codex") {
+      note.textContent = t("confinement_codex_note");
+    } else if (effect === "verified") {
+      note.textContent = t("confinement_account_note");
+    } else if (effect === "recheck") {
+      note.textContent = t("confinement_account_recheck");
+    } else {
+      note.textContent = (effect === "fallback_default" && account?.declared
+        ? t("confinement_account_fallback", { reason: account.reason }) + " " : "") + t("confinement_claude_note");
+    }
+  };
+  agent.addEventListener("change", update);
+  note.setHost = value => { host = value; update(); };
+  update();
+  return note;
+}
+function confinementDetails(s) {
+  const record = s.confinement;
+  const current = s.current_verification;
+  return h("details", {}, h("summary", {}, t("confinement_evidence")),
+    h("p", { class: "muted" }, t("confined_note")),
+    h("dl", { class: "kv" },
+      h("dt", {}, t("confinement_creation")), h("dd", {}, confinementLabel(s)),
+      h("dt", {}, t("confinement_current")), h("dd", {}, t("confinement_status_" + (current?.status || "unknown"))),
+      h("dt", {}, t("confinement_options")), h("dd", {}, h("code", {}, JSON.stringify(record?.options || {}))),
+      h("dt", {}, t("confinement_evidence")), h("dd", {}, h("code", {}, JSON.stringify(record?.evidence || {}))),
+      h("dt", {}, t("confinement_gap")), h("dd", {}, record?.gap ? t("confinement_gap_" + record.gap) : t("none")),
+      h("dt", {}, t("confinement_current")), h("dd", {}, h("code", {}, JSON.stringify(current || { status: "unknown" })))));
+}
+
 function sessionBadges(s) {
   return [
     chip(s.host),
+    chip(confinementLabel(s), s.confinement?.level === "none" ? "readonly" : "info"),
+    s.confinement?.level && s.confinement.level !== "none" && ["unknown", "mismatch"].includes(s.current_verification?.status)
+      ? chip(t("confinement_current_" + s.current_verification.status), "stale") : null,
     s.api_access === "managed" ? chip(t("managed"), "managed") : chip(t("read_only"), "readonly"),
     s.stale ? chip(`${t("stale")} · ${t("stale_reason_" + s.stale_reason)}`, "stale") : null,
     s.pending ? chip(t("pending_" + s.pending.kind), "stale") : null,
@@ -265,7 +311,7 @@ function sessionRow(s) {
       h("a", { class: "title", href: `#/session/${encodeURIComponent(s.host)}/${encodeURIComponent(s.session_id)}` },
         s.title || s.session_id),
       h("div", { class: "muted" }, [s.workspace, s.agent_kind, s.worktree_branch].filter(Boolean).join(" · "))),
-    ...sessionBadges(s),
+    h("div", { class: "actions session-badges" }, ...sessionBadges(s)),
     h("span", { class: "muted" }, when(s.last_activity_at)));
 }
 const epoch = x => (x ? new Date(x * 1000).toISOString() : "");
@@ -364,6 +410,7 @@ async function viewSession(main, host, sid) {
       h("dt", {}, t("agent")), h("dd", {}, [row.agent_kind, row.model].filter(Boolean).join(" · ")),
       h("dt", {}, "Provenance"), h("dd", {}, t("provenance_" + row.provenance)),
       h("dt", {}, t("observed")), h("dd", {}, when(row.observed_at))));
+  head.append(confinementDetails(row));
   if (from) {
     head.append(h("p", { class: "note" }, t("started_from", { commit: from.commit_sha.slice(0, 12) }), " ",
       h("a", { href: `#/session/${encodeURIComponent(from.source_host)}/${encodeURIComponent(from.source_session_id)}` },
@@ -461,7 +508,7 @@ function checkpointPanel(host, sid) {
   const row = cp => rows.get(cp.checkpoint_id) || rows.set(cp.checkpoint_id, buildRow(cp)).get(cp.checkpoint_id);
   const buildRow = cp => {
     const instr = h("textarea", { placeholder: t("continue_placeholder") });
-    const agent = h("select", {}, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
+    const agent = h("select", { "aria-label": t("agent") }, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
     const out = h("div", { class: "muted" });
     const go = h("button", { class: "primary", onclick: async () => {
       if (!instr.value.trim()) return;
@@ -473,7 +520,7 @@ function checkpointPanel(host, sid) {
       } catch (e) { out.replaceChildren(errorBox(e)); }
       go.disabled = false;
     } }, t("start_agent_work"));
-    const form = h("div", { hidden: true }, h("p", { class: "muted" }, t("confined_note")), instr,
+    const form = h("div", { hidden: true }, confinementNote(host, agent), instr,
       h("div", { class: "actions" }, agent, go), out);
     return h("div", { class: "row" },
       h("div", { class: "grow" },
@@ -770,6 +817,33 @@ function integrationPanel(pr, reloadCard) {
   return box;
 }
 
+function repairControl(op) {
+  const conflict = ["INTEGRATION_CONFLICT", "RESOLUTION_INCOMPLETE", "RESOLUTION_INVALID"].includes(op.error_code);
+  const out = h("div", {});
+  let handoff = null;
+  let repair = null;
+  if (conflict && (state.caps?.scopes || []).includes("start")) {
+    const agent = h("select", { "aria-label": t("agent") },
+      h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
+    const go = h("button", { class: "secondary", onclick: async () => {
+      go.disabled = true;
+      try {
+        const o = await submit("integration.handoff", { operation_id: op.operation_id }, { agent: agent.value }, {},
+          `handoff.${op.operation_id}`);
+        out.append(h("p", {}, opStatus(o), " ", t("handoff_started"), " ",
+          h("a", { href: `#/op/${o.operation_id}` }, o.operation_id)));
+      } catch (e) { out.append(errorBox(e)); }
+      go.disabled = false;
+    } }, t("start_agent_work"));
+    const d = drawer(confinementNote(op.target?.host || op.external_refs?.host, agent),
+      h("div", { class: "actions" }, agent, go));
+    repair = d.box;
+    handoff = h("button", { class: "secondary", onclick: () => d.toggle.click() }, t("hand_to_agent"));
+  }
+  if (handoff) out.append(handoff, repair);
+  return out;
+}
+
 function integrationStatus(op, act) {
   const code = op.error_code;
   const text = op.status === "succeeded"
@@ -780,17 +854,8 @@ function integrationStatus(op, act) {
         : op.status === "waiting_external" ? ((op.external_refs || {}).conflict ? t("integration_waiting_resolver")
           : (op.external_refs || {}).pushed_sha ? t("integration_waiting") : op.status_reason || t("integration_running"))
           : op.status === "failed" ? `${code}: ${op.status_reason || ""}` : t("integration_running");
-  const conflict = ["INTEGRATION_CONFLICT", "RESOLUTION_INCOMPLETE", "RESOLUTION_INVALID"].includes(code);
   const out = h("div", {});
-  const handoff = conflict && (state.caps?.scopes || []).includes("start")
-    ? h("button", { class: "secondary", onclick: async () => {
-      try {
-        const o = await submit("integration.handoff", { operation_id: op.operation_id }, { agent: "claude" }, {},
-          `handoff.${op.operation_id}`);
-        out.append(h("p", {}, opStatus(o), " ", t("handoff_started"), " ",
-          h("a", { href: `#/op/${o.operation_id}` }, o.operation_id)));
-      } catch (e) { out.append(errorBox(e)); }
-    } }, t("hand_to_agent")) : null;
+  const handoff = repairControl(op);
   const buttons = op.status === "needs_attention" ? [
     h("button", { class: "primary", onclick: act.resume }, t("resume")), handoff,
     h("button", { class: "danger", onclick: act.cancel }, t("cancel_and_preview"))].filter(Boolean) : [];
@@ -812,11 +877,13 @@ async function viewOperations(main) {
 }
 
 async function viewOperation(main, id) {
+  freshPage();
   const panel = h("div", { class: "panel" });
   main.append(panel);
-  const render = async () => {
+  const render = async (fromEvent = false) => {
+    const opens = drawerOpens;
     try {
-      const { operation: op, work_items: linked } = await api("GET", `/operations/${id}`);
+      const { operation: op, work_items: linked, cleanup_receipts: cleanupReceipts } = await api("GET", `/operations/${id}`);
       const refs = op.external_refs || {};
       const retry = refs.merged_sha && op.action === "delivery.merge_and_deploy" && op.status === "failed"
         ? h("button", { class: "primary", onclick: async () => {
@@ -847,6 +914,9 @@ async function viewOperation(main, id) {
           try { await api("POST", `/operations/${id}/cancel`, {}); render(); } catch (e) { panel.append(errorBox(e)); }
         } }, t("cancel"))
         : null;
+      if (!panel.isConnected) return;
+      if (holdRender(fromEvent, opens)) { idleReload = () => render(true); return; }
+      freshPage();
       fill(panel, h("h1", {}, op.action),
         h("p", { class: "op-status" }, opStatus(op), " ", op.error_code ? chip(op.error_code, "bad") : null),
         ...(linked?.length ? [linkedItems(linked)] : []),
@@ -858,6 +928,11 @@ async function viewOperation(main, id) {
           Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null,
           op.result ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null),
         ...(receipts || []),
+        ...(cleanupReceipts?.length ? [h("h2", {}, t("cleanup_open_receipts")), ...cleanupReceipts.map(r =>
+          h("details", {class: "row-details"}, h("summary", {}, r.resource_id, " · ", t("cleanup_receipt_" + r.status)),
+            h("pre", {class: "pre"}, JSON.stringify(r, null, 2))))] : []),
+        ...(op.action === "integration.apply" ? [repairControl(op)] : []),
+
         (op.result?.merge || op.result || refs.merge_receipt)?.base_moved
           ? h("p", { class: "note warn" }, t("merged_newer_base", { count: (op.result?.merge || op.result || refs.merge_receipt).other_commits_count })) : null,
         refs.write_acknowledged && refs.verification_pending ? h("p", { class: "note warn" }, t("metadata_pending")) : null,
@@ -868,7 +943,7 @@ async function viewOperation(main, id) {
     } catch (e) { fill(panel, errorBox(e)); }
   };
   await render();
-  return onEvents(ev => { if (ev.resource_id === id) return render(); });
+  return liveReload(render, ["operation", "integration", "cleanup"]);
 }
 
 function viewSettings(main) {
@@ -1326,6 +1401,7 @@ async function viewWorkItem(main, wid) {
       ...section(t("goal"), w.goal), ...section(t("request"), w.request), ...section(t("acceptance"), w.acceptance),
       h("h2", {}, t("steps_title")), h("div", { class: "panel" }, ...(stepRows.length ? stepRows : [h("p", { class: "muted" }, t("no_steps"))]),
         live && may("manage") ? h("div", { class: "filters" }, newStep, addStep) : null),
+      h("div", { class: "actions" }, h("a", { href: `#/cleanup/item/${wid}` }, t("nav_cleanup"))),
       h("h2", {}, t("links")), h("div", { class: "panel" },
         ...(linkRows.length ? linkRows : [h("p", { class: "muted" }, t("no_links"))]),
         live && may("manage") ? h("div", { class: "filters" }, kind, ref, h("button", { class: "secondary", onclick: () => {
@@ -1349,7 +1425,7 @@ function continueFrom(w, checkpointId, notice) {
     w.steps.length ? `${t("steps_title")}:\n${w.steps.map(s => `- [${s.done ? "x" : " "}] ${s.text}`).join("\n")}` : ""]
     .filter(Boolean).join("\n\n");
   const instr = h("textarea", {}, text);
-  const agent = h("select", {}, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
+  const agent = h("select", { "aria-label": t("agent") }, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
   const out = h("div", {});
   const go = h("button", { class: "primary", onclick: async () => {
     go.disabled = true;
@@ -1366,7 +1442,9 @@ function continueFrom(w, checkpointId, notice) {
       `wi.link.${w.work_item_id}.${op.operation_id}`);
     if (linked) out.append(" · ", t("linked_back"));
   } }, t("start_agent_work"));
-  const d = drawer(h("p", { class: "muted" }, t("confined_note")), instr, h("div", { class: "actions" }, agent, go), out);
+  const note = confinementNote(w.links?.find(l => l.ref === checkpointId)?.target?.host, agent);
+  api("GET", `/checkpoints/${encodeURIComponent(checkpointId)}`).then(x => note.setHost(x.checkpoint.host)).catch(() => {});
+  const d = drawer(note, instr, h("div", { class: "actions" }, agent, go), out);
   // Starting needs start; linking the run back needs manage. Without both, nothing starts (an unlinked run is untracked).
   const why = !may("start") ? t("needs_start_scope") : !may("manage") ? t("needs_manage_scope") : null;
   const open = h("button", { class: "secondary", disabled: Boolean(why), title: why, onclick: () => d.toggle.click() },
@@ -1392,8 +1470,186 @@ function workItemRow(w) {
 }
 
 // ------------------------------------------------------------------ router
+async function viewCleanup(main, section, ident) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const draftKey = `batc.cleanup.draft.${connection.namespace}`;
+  const pendingKey = `batc.cleanup.pending.${connection.namespace}`;
+  const persist = (key, value) => {
+    assertView(connection);
+    try { if (value === null) sessionStorage.removeItem(key); else sessionStorage.setItem(key, JSON.stringify(value)); }
+    catch (error) { if (error.code) throw error; /* this view retains the request */ }
+  };
+  const stored = (() => { try { return JSON.parse(sessionStorage.getItem(draftKey) || "{}"); } catch { return {}; } })();
+  const choices = section === "item" && stored.id !== ident ? { discard_uncommitted: [], release_undelivered: [] }
+    : (stored.choices || { discard_uncommitted: [], release_undelivered: [] });
+  const pending = (() => { try { return JSON.parse(sessionStorage.getItem(pendingKey) || "null"); } catch { return null; } })();
+  const kind = h("select", { "aria-label": t("cleanup_target") }, ...["work_item", "checkpoint", "integration", "host"].map(k =>
+    h("option", { value: k }, t("cleanup_target_" + k))));
+  kind.value = section === "item" ? "work_item" : (stored.kind || "host");
+  const targetId = h("input", { value: section === "item" ? ident : (stored.id || ""), "aria-label": t("cleanup_id"),
+    placeholder: t("cleanup_id"), class: "cleanup-id" });
+  const children = h("input", { type: "checkbox", checked: stored.children || false });
+  const childrenLabel = h("label", { class: "cleanup-choice" }, children, t("cleanup_children"));
+  const previewOut = h("div", { "aria-live": "polite" });
+  const status = h("div", { "aria-live": "polite" });
+  const historyOut = h("div", { "aria-live": "polite" });
+  const retainedOut = h("div", { "aria-live": "polite" });
+  let doc = pending, busy = false, pendingRequest = !!pending, previewRevision = 0;
+  function changed() {
+    assertView(connection);
+    previewRevision++; doc = null;
+    apply.disabled = true;
+    reviewed.checked = false;
+    persist(draftKey, { kind: kind.value, id: targetId.value, children: children.checked, choices });
+    childrenLabel.hidden = kind.value !== "work_item";
+    fill(status, h("p", { class: "muted" }, t("cleanup_repreview")));
+  }
+  function targetChanged() { choices.discard_uncommitted = []; choices.release_undelivered = []; changed(); }
+  kind.addEventListener("change", targetChanged); targetId.addEventListener("input", targetChanged); children.addEventListener("change", targetChanged);
+  childrenLabel.hidden = kind.value !== "work_item";
+  function choice(item, key, label) {
+    const input = h("input", { type: "checkbox", checked: choices[key].includes(item.resource_id),
+      disabled: pendingRequest || key === "discard_uncommitted" && !may("cleanup_discard"), onchange: () => {
+        choices[key] = choices[key].filter(id => id !== item.resource_id);
+        if (input.checked) choices[key].push(item.resource_id);
+        changed();
+      } });
+    return h("label", { class: "cleanup-choice" }, input, label);
+  }
+  function resourceRow(item) {
+    const codes = (item.reasons || []).map(r => r.code);
+    const eligible = item.proven && item.kind === "worktree" && !item.task_owned;
+    return h("article", { class: "cleanup-resource" },
+      h("div", { class: "row" }, h("strong", { class: "grow" }, t("cleanup_kind_" + item.kind)),
+        chip(t("cleanup_decision_" + item.decision), item.decision === "reclaim" ? "ok" : "")),
+      h("div", { class: "cleanup-binding" }, item.host || "", " ", item.path || item.ref || item.resource_id),
+      item.observation?.head ? h("p", { class: "muted" }, t("cleanup_commit_kept"), " ", h("code", {}, item.observation.head)) : null,
+      item.delivery && !item.delivery.delivered ? h("p", { class: "note warn" }, t("cleanup_not_delivered")) : null,
+      ...(item.reasons || []).map(r => h("div", { class: "cleanup-reason" }, h("code", {}, r.code), " · ", t("cleanup_reason_" + r.code))),
+      ...(item.overridden_reasons || []).map(r => h("p", { class: "muted" }, t("cleanup_choice_" + r.code))),
+      item.steps?.length ? h("p", {}, t("cleanup_plan"), ": ", item.steps.map(x => t("cleanup_step_" + x)).join(" → ")) : null,
+      eligible && codes.includes("RESULTS_NOT_DELIVERED") ? choice(item, "release_undelivered", t("cleanup_release")) : null,
+      eligible && codes.includes("UNCOMMITTED_CHANGES") ? choice(item, "discard_uncommitted", t("cleanup_discard")) : null,
+      h("details", {}, h("summary", {}, t("cleanup_evidence")), h("pre", { class: "pre" }, JSON.stringify({
+        resource_id: item.resource_id, original_ids: item.original_ids, reasons: item.reasons,
+        consumers: item.consumers, delivery: item.delivery, manifest: item.observation?.manifest }, null, 2))));
+  }
+  const reviewed = h("input", { type: "checkbox", onchange: () => { apply.disabled = !doc?.ready || !may("cleanup") || !reviewed.checked; } });
+  const apply = h("button", { class: "primary", disabled: true, onclick: async () => {
+    if (busy || !doc || !reviewed.checked) return;
+    assertView(connection);
+    const reviewedDoc = doc; busy = true; pendingRequest = true;
+    apply.disabled = true;
+    previewButton.disabled = true; kind.disabled = true; targetId.disabled = true; children.disabled = true;
+    previewOut.querySelectorAll("input").forEach(input => { input.disabled = true; });
+    // Keep the reviewed request as well as submit()'s stable key across a lost reply or page reload.
+    persist(pendingKey, reviewedDoc);
+    try {
+      const op = await submit("cleanup.apply", { preview_id: reviewedDoc.preview_id }, { preview_token: reviewedDoc.preview_token },
+        { preview_fingerprint: reviewedDoc.fingerprint }, "cleanup.apply");
+      assertView(connection);
+      fill(status, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, t("cleanup_open_receipts")),
+        ...(op.result?.items || []).map(r => h("p", {}, h("code", {}, r.resource_id), " · ", t("cleanup_receipt_" + r.status))));
+      persist(pendingKey, null); pendingRequest = false;
+      doc = null; reviewed.checked = false;
+      previewButton.disabled = false; kind.disabled = false; targetId.disabled = false; children.disabled = false;
+      await loadHistory(); await loadRetained();
+    } catch (e) {
+      if (connection.epoch !== state.epoch || connection.namespace !== state.namespace || connection.generation !== generation) return;
+      if (!e.status || e.status >= 500) {
+        fill(status, errorBox(e), h("p", {}, t("cleanup_retry_same")));
+        apply.disabled = !may("cleanup");
+        previewButton.disabled = true; kind.disabled = true; targetId.disabled = true; children.disabled = true;
+      } else {
+        persist(pendingKey, null); pendingRequest = false;
+        fill(status, errorBox(e), h("p", {}, t("cleanup_repreview"))); doc = null;
+        previewButton.disabled = false; kind.disabled = false; targetId.disabled = false; children.disabled = false;
+      }
+    } finally { busy = false; }
+  } }, t("cleanup_apply"));
+  function renderPreview() {
+    fill(previewOut, h("h2", {}, t("cleanup_preview")), h("p", {}, t("cleanup_counts", { reclaim: doc.impact.reclaim, retain: doc.impact.retain })),
+      h("p", { class: "muted" }, t("cleanup_expires", { time: when(doc.expires_at * 1000) })),
+      ...(doc.items || []).map(resourceRow), !doc.ready ? h("p", { class: "note" }, t("cleanup_blocked")) : null);
+  }
+  const previewButton = h("button", { class: "secondary", onclick: async () => {
+    assertView(connection);
+    const revision = ++previewRevision;
+    previewButton.disabled = true; doc = null; apply.disabled = true; reviewed.checked = false;
+    const key = { work_item: "work_item_id", checkpoint: "checkpoint_id", integration: "operation_id", host: "host" }[kind.value];
+    const target = { kind: kind.value, [key]: targetId.value.trim(), ...(kind.value === "work_item" ? { include_children: children.checked } : {}) };
+    try {
+      const result = await api("POST", "/cleanup-previews", { target, choices: structuredClone(choices) });
+      assertView(connection);
+      if (revision !== previewRevision) return;
+      doc = result.preview; renderPreview();
+      fill(status);
+    } catch (e) { if (revision === previewRevision && connection.epoch === state.epoch) fill(status, errorBox(e)); }
+    finally { previewButton.disabled = false; }
+  } }, t("cleanup_preview"));
+  if (pending && section !== "resource") {
+    kind.value = pending.target.kind;
+    targetId.value = pending.target[{work_item: "work_item_id", checkpoint: "checkpoint_id", integration: "operation_id", host: "host"}[kind.value]];
+    children.checked = !!pending.target.include_children;
+    childrenLabel.hidden = kind.value !== "work_item";
+    renderPreview(); reviewed.checked = true; apply.disabled = !may("cleanup");
+    previewButton.disabled = true; kind.disabled = true; targetId.disabled = true; children.disabled = true;
+    fill(status, h("p", { class: "note" }, t("cleanup_retry_same")));
+  }
+  const search = h("input", { class: "cleanup-id", "aria-label": t("cleanup_search"), placeholder: t("cleanup_search") });
+  async function loadHistory(cursor = "") {
+    try {
+      const result = await api("GET", `/cleanup-tombstones?query=${encodeURIComponent(search.value)}&cursor=${encodeURIComponent(cursor)}`);
+      assertView(connection);
+      const rows = (result.tombstones || []).map(x => h("article", { class: "cleanup-resource" },
+        h("a", { href: `#/cleanup/resource/${x.resource_id}` }, t("cleanup_kind_" + x.kind)),
+        h("div", { class: "cleanup-binding" }, x.host, " ", x.path || x.ref || ""),
+        h("p", { class: "muted" }, x.actor, " · ", when(x.cleaned_at * 1000)),
+        h("p", {}, t("cleanup_reason_reviewed")), ...(x.pull_requests || []).map(pr => h("p", {}, `${pr.repository} #${pr.pull_number}`))));
+      if (cursor) historyOut.append(...rows); else fill(historyOut, ...rows, rows.length ? null : h("p", { class: "muted" }, t("cleanup_empty_history")));
+      if (result.next_cursor) historyOut.append(h("button", { class: "secondary", onclick: e => {
+        e.currentTarget.remove(); loadHistory(result.next_cursor);
+      } }, t("more")));
+    } catch (e) { fill(historyOut, errorBox(e)); }
+  }
+  async function loadRetained(cursor = "") {
+    try {
+      const result = await api("GET", `/cleanup-retained?cursor=${encodeURIComponent(cursor)}`);
+      assertView(connection);
+      const rows = (result.retained || []).map(x => h("article", { class: "cleanup-resource" },
+        h("code", {}, x.commit_sha), h("div", { class: "cleanup-binding" }, x.host, " ", x.repository),
+        h("p", { class: "muted" }, x.ref)));
+      const unavailable = (result.unavailable || []).map(x => h("p", { class: "note warn" }, x.host, " ", x.ref, " · ", t("cleanup_unavailable")));
+      if (cursor) retainedOut.append(...rows, ...unavailable); else fill(retainedOut, ...rows, ...unavailable,
+        rows.length || unavailable.length ? null : h("p", { class: "muted" }, t("cleanup_empty_retained")));
+      if (result.next_cursor) retainedOut.append(h("button", { class: "secondary", onclick: e => {
+        e.currentTarget.remove(); loadRetained(result.next_cursor);
+      } }, t("more")));
+    } catch (e) { fill(retainedOut, errorBox(e)); }
+  }
+  main.append(h("h1", {}, t("nav_cleanup")), h("p", { class: "muted" }, t("cleanup_intro")));
+  if (section === "resource") {
+    try {
+      const data = await api("GET", `/cleanup-tombstones/${encodeURIComponent(ident)}`);
+      main.append(h("a", { href: "#/cleanup" }, t("nav_cleanup")), resourceRow(data.tombstone),
+        h("h2", {}, t("cleanup_open_receipts")), h("pre", { class: "panel pre" }, JSON.stringify(data.receipts, null, 2)));
+    } catch (e) { main.append(errorBox(e)); }
+    return;
+  }
+  main.append(h("div", { class: "panel" }, h("h2", {}, t("cleanup_target")), h("div", { class: "filters" }, kind, targetId),
+    childrenLabel, h("div", { class: "actions" }, previewButton)), previewOut,
+    h("div", { class: "panel" }, h("label", { class: "cleanup-choice" }, reviewed, t("cleanup_reviewed")),
+      !may("cleanup") ? h("p", { class: "muted" }, t("cleanup_scope")) : null, h("div", { class: "actions" }, apply), status),
+    h("h2", {}, t("cleanup_history")), h("div", { class: "panel" }, h("form", { class: "filters", onsubmit: e => { e.preventDefault(); loadHistory(); } },
+      search, h("button", { class: "secondary", type: "submit" }, t("cleanup_search_button"))), historyOut),
+    h("h2", {}, t("cleanup_retained")), h("p", { class: "muted" }, t("cleanup_retained_help")), h("div", { class: "panel" }, retainedOut));
+  await loadHistory(); await loadRetained();
+  const refresh = debounceRefresh(() => settleRefreshes([loadHistory(), loadRetained()]), 500);
+  return onEvents(ev => { if (["cleanup", "operation"].includes(ev.resource_type)) return refresh(); });
+}
+
 const NAV = [["home", "nav_home"], ["projects", "nav_projects"], ["sessions", "nav_sessions"], ["delivery", "nav_delivery"],
-  ["operations", "nav_operations"], ["settings", "nav_settings"]];
+  ["operations", "nav_operations"], ["cleanup", "nav_cleanup"], ["settings", "nav_settings"]];
 let teardown = null;
 let generation = 0;
 async function route() {
@@ -1408,7 +1664,7 @@ async function route() {
   main.replaceChildren();
   if (!state.token && name !== "settings") { main.append(h("p", { class: "note" }, t(nativeDesktop ? "desktop_connect_needed" : "need_token"))); viewSettings(main); return; }
   const views = { home: viewHome, projects: viewProjects, project: viewProject, item: viewWorkItem, sessions: viewSessions,
-    delivery: viewDelivery, operations: viewOperations, session: viewSession, op: viewOperation, settings: viewSettings };
+    cleanup: viewCleanup, delivery: viewDelivery, operations: viewOperations, session: viewSession, op: viewOperation, settings: viewSettings };
   const off = await (views[name] || viewHome)(main, ...rest);
   if (mine !== generation) { if (off) off(); return; } // the user navigated away while this view loaded
   teardown = off || null;
