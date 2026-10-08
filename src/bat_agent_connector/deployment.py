@@ -145,6 +145,9 @@ def admission(ops, principal, target, params, pre, *, combined=False, rollback=F
 
 
 def no_recipe_in_flight(ops, r):
+    legacy = legacy_occupant(ops, r.repository, r.environment)
+    if legacy:
+        raise OperationError("DEPLOY_IN_PROGRESS", f"{legacy['operation_id']} still owns this environment's legacy provider slot", 409)
     for row in ops.db.execute("SELECT operation_id,target,status FROM operations WHERE action IN "
                               "('deployment.start','deployment.rollback','delivery.merge_and_deploy')"):
         if json.loads(row["target"]).get("recipe") != r.name:
@@ -152,6 +155,31 @@ def no_recipe_in_flight(ops, r):
         dep = store.deployment(ops.db, operation_id=row["operation_id"])
         if (dep and not dep["provider_terminal"]) or (not dep and row["status"] not in TERMINAL):
             raise OperationError("DEPLOY_IN_PROGRESS", f"{row['operation_id']} still owns this recipe's deploy lock", 409)
+
+
+def bind_legacy(ops, dep):
+    """Fill absent legacy routing once, recording the configuration fallback rather than guessing from a merge."""
+    s = dict(dep["recipe_snapshot"])
+    r = ops.context["github_config"].recipes.get(dep["recipe"])
+    sources = dict(dep.get("legacy_binding_sources") or {})
+    if r:
+        configured = asdict(r)
+        for field in ("repository", "environment", "mode", "workflow", "ref"):
+            if not s.get(field):
+                s[field] = configured[field]
+                sources[field] = "configured_recipe"
+    store.update(ops.journal, dep["deployment_id"], recipe_snapshot=s,
+                 facts={"legacy_binding_sources": sources})
+    return get(ops, dep["deployment_id"])
+
+
+def legacy_occupant(ops, repository, environment):
+    for row in ops.db.execute("SELECT deployment_id FROM deployments WHERE provider_terminal=0 AND recipe_digest='legacy'").fetchall():
+        dep = bind_legacy(ops, get(ops, row[0]))
+        s = dep["recipe_snapshot"]
+        if s.get("repository", "").lower() == repository.lower() and s.get("environment") == environment:
+            return dep
+    return None
 
 
 async def select(ctx, *, combined=False, rollback=False):
@@ -276,7 +304,8 @@ async def order(ctx, dep):
             ctx.service.db.execute("UPDATE deployments SET state='superseded',provider_terminal=1,version=version+1 "
                                    "WHERE deployment_id=? AND run_id IS NULL", (dep["deployment_id"],))
             outcome = "superseded"
-        elif env["slot_deployment_id"] and env["slot_deployment_id"] != dep["deployment_id"]:
+        elif (legacy_occupant(ctx.service, dep["recipe_snapshot"]["repository"], dep["recipe_snapshot"]["environment"])
+              or (env["slot_deployment_id"] and env["slot_deployment_id"] != dep["deployment_id"])):
             outcome = "waiting"
         else:
             ctx.service.db.execute("UPDATE deployment_environments SET slot_deployment_id=?,version=version+1,updated_at=? "
@@ -747,6 +776,7 @@ def record(ops, dep, evidence):
 
 
 async def legacy_readback(ctx, dep):
+    dep = bind_legacy(ctx.service, dep)
     ctx.set_refs(deployment_id=dep["deployment_id"])
     if not dep.get("dispatch_sent") and not dep.get("run_id"):
         if not dep.get("merge_sent"):
@@ -763,9 +793,19 @@ async def legacy_readback(ctx, dep):
     run = await read(ctx, _gh(ctx.service).run(repository, dep["run_id"]), "read original legacy run")
     if run.get("status") != "completed":
         raise Wait("waiting_external", "waiting for original legacy run", 15)
-    store.update(ctx.service.journal, dep["deployment_id"], state="unverified", provider_terminal=True)
-    release_slot(ctx.service, dep)
+    settle_legacy_run(ctx.service, dep, run)
     raise NeedsAttention("DEPLOY_VERSION_UNPROVEN", "legacy run completed without runtime evidence; saved as unverified")
+
+
+def settle_legacy_run(ops, dep, run):
+    outcome = dep.get("legacy_operation_status")
+    state = {"failed": "failed", "cancelled": "cancelled"}.get(outcome,
+        "unverified" if run.get("conclusion") == "success" else "failed")
+    facts = {"legacy_provider_evidence": {k: run.get(k) for k in ("id", "status", "conclusion", "run_attempt")}}
+    if state == "failed" and not dep.get("error_code"):
+        facts["error_code"] = "DEPLOY_FAILED"
+    store.update(ops.journal, dep["deployment_id"], provider_terminal=True, state=state, facts=facts)
+    release_slot(ops, dep)
 
 
 def drift(ops, env, observed):
@@ -805,6 +845,7 @@ async def reconcile_deployments(ops):
             continue
         try:
             if dep.get("legacy"):
+                dep = bind_legacy(ops, dep)
                 if dep.get("run_id") and not dep["provider_terminal"]:
                     from .delivery import _gh
                     repository = dep["recipe_snapshot"].get("repository")
@@ -814,8 +855,7 @@ async def reconcile_deployments(ops):
                     if repository:
                         run = await background_read(_gh(ops).run(repository, dep["run_id"]))
                         if run.get("status") == "completed":
-                            store.update(ops.journal, dep["deployment_id"], provider_terminal=True, state="unverified")
-                            release_slot(ops, dep)
+                            settle_legacy_run(ops, dep, run)
                 elif dep.get("merge_sent") and not dep["provider_terminal"]:
                     from .delivery import _gh
                     number = op["target"].get("pull_number")

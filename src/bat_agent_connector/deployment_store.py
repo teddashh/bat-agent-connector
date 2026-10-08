@@ -79,6 +79,8 @@ def update(journal, deployment_id: str, *, facts=None, expected_version=None, **
             return False
         document = {**json.loads(row["document"]), **(facts or {})}
         columns = {k: encode(v) if k in {"identity", "recipe_snapshot"} else v for k, v in columns.items()}
+        if document == json.loads(row["document"]) and all(row[k] == v for k, v in columns.items()):
+            return True
         setters = ",".join(k + "=?" for k in columns)
         journal.db.execute(f"UPDATE deployments SET {setters + ',' if setters else ''}document=?,"  # noqa: S608
                            "version=version+1,updated_at=? WHERE deployment_id=? AND version=?",
@@ -108,23 +110,31 @@ def _legacy_deployment(journal, row) -> None:
                                     (row["operation_id"],)).fetchone() is not None
     recipe = target.get("recipe", "")
     repository = result.get("repository") or target.get("repository") or ""
-    env = result.get("environment") or recipe
+    env = result.get("environment")
     key = environment_key("legacy", 0, recipe)
     identity = {"source_sha": result.get("source_sha") or params.get("source_sha") or refs.get("merged_sha")}
     run_id = result.get("run_id") or refs.get("deploy_run_id")
-    terminal = row["status"] == "succeeded" or row["error_code"] in {"DEPLOY_FAILED", "DEPLOY_NOT_RUN"}
     sent = bool(step or run_id or merge_sent)
+    outcome = row["status"]
+    terminal = (not sent or outcome == "succeeded"
+                or (outcome == "failed" and row["error_code"] in {"DEPLOY_FAILED", "DEPLOY_NOT_RUN"}))
+    state = {"succeeded": "unverified", "failed": "failed", "cancelled": "cancelled"}.get(
+        outcome, "uncertain" if sent else "failed")
     dep_id = "dep_" + row["operation_id"].removeprefix("op_")
     snapshot = {"name": recipe, "repository": repository, "environment": env,
-                "workflow": result.get("workflow"), "mode": "workflow_dispatch" if step else "on_merge",
+                "workflow": result.get("workflow"), "mode": result.get("mode"),
                 "legacy": True}
     document = {"legacy": True, "dispatch_sent": bool(step), "merge_sent": merge_sent,
                 "provider_kind": "run" if step or run_id else "merge" if merge_sent else "none",
                 "html_url": result.get("html_url") or refs.get("deploy_run_url"),
-                "evidence": None, "verified": False, "rollback_of": None}
+                "evidence": None, "verified": False, "rollback_of": None,
+                "legacy_operation_status": outcome, "error_code": row["error_code"] or
+                ("DEPLOY_PREVIEW_REQUIRED" if not sent and outcome not in {"succeeded", "failed", "cancelled"} else None),
+                "legacy_binding_sources": {"environment": "result" if env else "unknown",
+                                           "mode": "result" if result.get("mode") else "unknown"}}
     journal.db.execute("""INSERT OR IGNORE INTO deployment_environments
         (environment_key,provider_origin,repository_id,repository,environment,slot_deployment_id,updated_at)
-        VALUES(?,'legacy',0,?,?,?,?)""", (key, repository, env, dep_id if sent and not terminal else None, row["updated_at"]))
+        VALUES(?,'legacy',0,?,?,?,?)""", (key, repository, env or "", dep_id if sent and not terminal else None, row["updated_at"]))
     if sent and not terminal:
         journal.db.execute("UPDATE deployment_environments SET slot_deployment_id=? WHERE environment_key=? "
                            "AND slot_deployment_id IS NULL", (dep_id, key))
@@ -133,5 +143,5 @@ def _legacy_deployment(journal, row) -> None:
          state,provider_terminal,run_id,run_attempt,document,created_at,updated_at)
         VALUES(?,?,?,?,NULL,?,?,?, ?,?,?,?,?,?,?)""",
         (dep_id, row["operation_id"], recipe, key, encode(identity), encode(snapshot), "legacy",
-         "unverified" if terminal else "uncertain" if sent else "selected", terminal, run_id,
+         state, terminal, run_id,
          result.get("run_attempt"), encode(document), row["created_at"], row["updated_at"]))

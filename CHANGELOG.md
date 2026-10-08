@@ -2,6 +2,10 @@
 
 ## Next release (unreleased)
 
+- Delivery legacy recovery preserves failed/cancelled outcomes and releases unsent terminal operations; only old
+  successes are unverified. In-flight legacy runs hold the real repository/environment slot across recipe aliases,
+  with recorded configuration fallbacks for missing environment and mode.
+
 - Delivery Part B backend ([design](docs/design/delivery.md), plan §09/§10/§17/§18/§28, D01–D06): fixed deployment
   identities, environment generations and provider slots; saved attempts/jobs/pending-environment plus runtime evidence;
   history and saved SHA/artifact rollback through the same recipe; caller-token HTTP/MCP/CLI start/retry/rollback reads
