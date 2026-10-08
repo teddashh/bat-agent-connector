@@ -106,7 +106,7 @@ Dashboard 的工作詳情可以從已連結的 checkpoint 直接派工：指示�
 
 ## 尚未涵蓋
 
-- 匯入 Project Hub 的資料（驗收 B05）與工作項目的附件（W05b）。
+- 匯入 Project Hub 的資料（驗收 B05）：[hub-import.md](hub-import.md) 已有 Phase 1 規格，尚待審核與實作。工作項目的附件（W05b）也尚未實作。
 - 專案的階段與專案層級的完成確認。
 - 在專案之間移動工作項目。
 - `work_submit` 與 checkpoint 派工以外的入口自動建立連結。
