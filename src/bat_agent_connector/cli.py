@@ -12,7 +12,7 @@ from typing import Any
 
 from . import __version__, api_auth, lifecycle, orchestrate, resource_policy, service, triage
 from .config import DEFAULT_BAT_PROFILES_DIR, default_config_path, load_config
-from .errors import BatError
+from .errors import BatError, WriteRefused
 from .fleet import Fleet
 from .importer import read_bat_profiles, render_hosts_toml
 from .redact import redact
@@ -599,6 +599,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--since", type=int, default=0, help="cursor from a previous read (0 = from the beginning)")
     p.add_argument("--limit", type=int, default=50, help="max milestones (0 = only report head_cursor)")
     p = sp.add_parser("task-reconcile", help="attest one uncertain task command and optionally send a new prompt")
+    p.add_argument("--key", help="operation idempotency key (reuse on retries)")
+    p.add_argument("--control-version", type=int, help="required task control version")
     p.add_argument("--task-id", required=True)
     p.add_argument("--command-id", required=True)
     p.add_argument("--outcome", required=True, choices=["delivered", "not_delivered", "superseded"])
@@ -971,17 +973,22 @@ def main(argv: list[str] | None = None) -> int:
             _print(request("work_events", since_cursor=args.since, limit=args.limit), args.json)
             return 0
         if args.cmd == "task-reconcile":
+            if args.read_only:
+                raise WriteRefused("--read-only refuses task reconciliation")
             from .task_daemon import request
 
             cap = request("work_reconcile_capability", task_id=args.task_id,
-                          command_id=args.command_id)["capability"]
+                          command_id=args.command_id,
+                          **({"idempotency_key": args.key} if args.key is not None else {}))["capability"]
             next_prompt = Path(args.next_prompt_file).read_text() if args.next_prompt_file else None
-            result = request("work_reconcile", _auth_token=cap, task_id=args.task_id,
+            result = request("work_reconcile", _auth_token=cap, timeout=40, task_id=args.task_id,
                              command_id=args.command_id, outcome=args.outcome, actor=args.actor,
                              source=args.source, evidence=args.evidence,
                              observed_result=args.observed_result, turn_ref=args.turn_ref,
                              candidate_commit=args.candidate_commit, tree_hash=args.tree_hash,
-                             next_prompt=next_prompt)
+                             next_prompt=next_prompt, entry="cli",
+                             **({"idempotency_key": args.key} if args.key is not None else {}),
+                             **({"control_version": args.control_version} if args.control_version is not None else {}))
             _print(result, args.json)
             return 0
         if args.cmd == "api-token":

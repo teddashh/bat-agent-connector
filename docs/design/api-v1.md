@@ -110,8 +110,52 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 
 錯誤格式為 `{"error": {"code", "message"}}`：401 未驗證、403 權限或資源唯讀（代碼同 resource-policy）、404、405、409 冪等衝突、422 參數錯誤、502 BAT 錯誤。
 
+## Task Service operations（2026-10-08，Part A）
+
+依[統一操作規格](operations-unification.md)的 Part A，以下能力經既有 `POST /api/v1/operations`／`/rpc op_submit`，不新增 task 寫入 URL。舊 RPC／MCP 保留原結果，增加 `operation_id`、`operation_status`；operation succeeded 只表示該次控制完成，不表示 task done。
+
+| Action | target | params | Scope／身分 | 舊入口 |
+|---|---|---|---|---|
+| `task.submit` | host、workspace | project、original_words 與原 work_submit 選項 | start | work_submit |
+| `task.pause` | task_id | abort_current、actor、source_message_id | operate | work_pause |
+| `task.resume` | task_id | actor、source_message_id | operate | work_resume |
+| `task.mark_stage` | task_id | stage、ref、actor | manage；verified done task | work_mark_stage |
+| `session.send` | task_id | text、step_id | 原 task capability／本機 admin 相容路徑；不授予一般 operate token task-scoped 權限 | task_send |
+| `task.verify` | task_id | 空物件；不能自填 argv、exit code 或 evidence | 原 task capability／本機 admin 相容路徑 | task_run_verification |
+| `task.request_ted` | task_id | reason | 同上 | task_request_ted |
+| `task.command.reconcile` | task_id、command_id | 原 outcome、actor、source、evidence、observed_result、turn_ref、candidate／tree、next_prompt | 原一次性 command capability；admin 不能代替 | work_reconcile、task-reconcile |
+
+`preconditions.control_version` 可要求目前版本。舊 task tools 新增可選 `idempotency_key`／`control_version`，CLI `task-reconcile` 新增 `--key`／`--control-version` 並遵守 `--read-only`。key 以驗證 actor 為範圍；相同 key／params 回原 operation，不同內容 409 `IDEMPOTENCY_CONFLICT`。Goose 的原 `step_id` 在未指定 key 時仍是 task send 的重試身分。其他無 key 的舊 task controls 每次使用獨立 request identity，不跨次去重；no-key sentinel／null 投影留在 Part B。舊 work_submit 的 201–256 字 key 由相容 adapter 保存原字串、以 SHA-256 映射到既有 200 字 operation key 上限；通用 HTTP 上限不變。
+
+Task-bound operation 受理時固定 task `control_version`；session target 另固定 host／session／role，存於 `external_refs.admission_binding`（server admission binding，不是 caller precondition）。省略 `preconditions.control_version` 也不能跨 pause／resume 或換 session 執行：第一個 effect 前以 `CONTROL_VERSION_CONFLICT`／`TASK_BINDING_MISMATCH` failed，零 frame／command／task write。request hash 與 caller preconditions 不變；同 key 仍重讀原成功或拒絕。pause／resume 不覆寫較新 incarnation；已成功 receipt／未知 frame readback 沿用原恢復。升級前無 binding 的 operation 保留原 execution-time binding。詳見[盤點與儲存規則](operations-unification.md)。
+
+原 task／continuation／pause／resume／stage／observed verification／request-Ted／reconcile 的 local effect 與 operation step receipt 同交易提交，不另建 task 狀態表。pause 先保存 paused／control_version，abort 再記獨立 step；等待 task lock 或 verifier 不延後 pause 的持久化。RPC 最多等 30 秒；未完成時以 operation ID 回查，pause 可回已保存的 task snapshot。reconcile capability 只存 hash，消耗與回執原子提交；已消耗的 capability 只能用原 key 重讀自己的 operation，不能建立新控制。
+
+task command receipt succeeded 時，`external_refs.task_id`／`command_id`／`control_version` 已與 receipt 同交易保存，版本來自 command 的 dispatch binding；prepared operator command 也適用。舊缺 refs 的 receipt 在 operation 恢復／讀回前修復 link，不重跑 effect 或派送 frame；standalone operation 不寫 task refs。
+
+CLI `task-reconcile --key` 把 key 同時交原 admin-only capability issuer，依既有 admin secret 綁定 task／command／key，使跨次重試保留 actor。沒有 key 時維持原新發一次性 capability；發行本身只是 connector credential data，不執行 task command，也不授予一般 token 對帳權限。
+
+task-owned session 的 send／answer／interrupt／permissions 都先經 resource policy，再進 daemon 原 coordinator；舊直接 service tools 也經相同 gate。鎖順序為 task → session → host write lock → BAT semaphore；client-resume、answer、abort 與每個 permission channel 在 frame 前重查 journal 的版本與 ownership。任意 before_invoke callback 不授予插隊權限。standalone managed session 沿用原行為。
+
+背景 trusted verification 期間的 pause／版本改變為控制取消：task 保留 verifying／paused，取消的 run 不寫 evidence，不升級 needs_ted／uncertain。resume 後下一個 tick 從頭跑，包括 dependency retry；paused task 不計 verification_deadline。lease lost／binding mismatch 保留目前 state，交既有 owner／修復 binding 後再 resume；真正 verifier error 仍是 verification_error／needs_ted。沒有新增 event 或錯誤碼。
+
+| 409 task code | 處理 |
+|---|---|
+| `TASK_OWNER_UNAVAILABLE` | pointer／journal／row／owner lease 不可用；連既有 owner，不啟動第二個 daemon |
+| `TASK_BINDING_MISMATCH` | registry 與 task ownership 不一致；停止並查 work_status |
+| `CONTROL_VERSION_CONFLICT` | 控制版本已改；讀狀態，不自動換成新版重試 |
+| `TASK_PAUSED`／`TASK_VERIFYING` | task 暫停／驗證中；不可用 queue、force、continue、approve-pending 或 relay 插隊 |
+| `TASK_SEND_NOT_DISPATCHED`／`NOT_ACCEPTED`（task send） | operation 沒有已接受／settled 的原 send command；failed 結果沿用原 key，新的派送用新 key |
+| `TASK_COMMAND_PENDING`／`TASK_RECONCILIATION_REQUIRED` | 原 command 結果未證明；由 coordinator 回查／command capability 對帳，不重送 |
+| `TASK_STATE_BLOCKED` | current lead／task state 不允許該控制；waiting_permission 不接受 send |
+| `TASK_OWNED_CONTROL_REQUIRED` | 低階 failover／worktree／外部 verification 不管理 task-owned session；cleanup 保持 KEEP |
+
+policy admission 仍 403、無 operation row；執行期拒絕保留 failed operation 與原 code。`OWNER_CONFLICT` 是 `batc serve` 啟動拒絕，附既有 owner_id、db_path、pid、endpoint、lease_path；不同 `--db` 也不能建立第二個 fleet authority。
+
 ## 尚未涵蓋
 
 - GitHub 部署 history／rollback／environment generation／runtime check 為 delivery Part B（第二步），尚未加入路由。Dashboard、merge、metadata、checkpoint 與 integration 入口已交付。
 - 既有 MCP 寫入工具（`session_send` 等）仍直接呼叫 service；它們受同一套資源政策約束，但不留 operation 紀錄。之後改為經 `operation_submit`。
-- `task.submit`／`pause`／`resume` 尚未包成 operation。
+- Part B：其餘 legacy writes 的 operations、no-key sentinel／讀取投影、完整結果與外部 steps 拆分。Task controls 與 A07 共用 gate 已在 Part A 完成。
+- `import-bat --output PATH --force` 是 owner 啟動前的本機 config 安裝指令，僅寫指定設定檔，保留現有路徑。
+- operation cancel/resume 已授權且 evented，不新增其 control operations；api-token issue/revoke 只改 connector 資料、不觸及 BAT/Git/provider，也不新增 operation。
