@@ -80,6 +80,10 @@ Execution 沿用 Task Service `task_id`，API 補 `execution_id = task_id`，不
 
 Phase 2 在既有 journal 寫入點補 `relation.opened`、`relation.closed`、`relation.bound`；同交易保存舊／新 task、role、session、binding command 及來源證據。Start intent 是 pending，只有原流程確認身分後才 bound。Warm claim 與 SQLite 不共用交易：以已持久化的 start command 連接 claim 結果；當中斷時保留 pending／unknown，由既有 Task Service recovery 確認後補記事實。讀 history 不執行 recovery、claim、start 或新派工。
 
+Session/worktree binding 另存 `session_worktree_bindings(session_resource_id, worktree_id, start_seq, end_seq, linked_at_seq, evidence_ref)`；PK 為 session/start_seq，只有 bind/move 改變才写入。區間為 [start_seq, end_seq)，end_seq=null 表示尚未見到替換。首次 registry 證據發 `session.worktree_bound`；同一 binding 的重複 poll 不追加事件。原 event 的 projection、checkpoint/run/task 建立事實可直接使用其 seq；移動關閉舊 binding 並開新 binding，不能刪掉舊列。`observation_resources.worktree_id` 只作目前身分摘要，不用來篩選 snapshot 的 relations。
+
+Worktree relations 固定同一 as_of：binding 的 start_seq 與 linked_at_seq 都必須 <= as_of；end_seq 若在 as_of 之後，該 snapshot 視為尚未結束。Relation 仍取 as_of 前最後 revision，只收其時間範圍與 binding 有交集的列。已離開 worktree 的 session 保留當時交集；移動後才開始的其他 relations 不回掛舊 worktree。跨越移動的同一 relation 可在 A/B 都出現，但回 `worktree_ranges` 列各自交集與 binding 證據，command_ids 只含落在該交集且已 linked 的 command。原 relation_id/start_seq 保持不變，分頁 key 仍是原 start_seq/relation_id；重返同一 worktree 以多個 ranges 顯示，不重複 relation row。未知 legacy 起點仍為 null，交集不宣稱可證明更早的起點。
+
 Execution 終態／明確 replacement 可關閉該已確認使用區間；不能由 session idle、host 離線或 registry 最新 owner 推斷終點。Task 結束後又有明確帳本活動時另開區間。舊資料依每 task 的 branches、commands、events 回填，確定的 command 歸屬保留；只有開始下限而沒有結束事實就保留 null。Reviewer 歷史即使當前 `reviewer_session_id` 清掉仍可見。
 
 工作項目的直接 link 沿用 `work_item_links`，unlink 的 actor、時間與 operation 保留。Timeline 對 event 的 work item 歸屬固定在當時的 link 區間；後來 unlink 不抹去舊關係，後來新增 link 不回寫舊事件。目錄的「曾經關聯」可經 task／operation／checkpoint 的明確 link 找到 session，必須標 `via`；單靠同 project／repo 不建立隱含連結。
@@ -262,6 +266,10 @@ Journal 的 `LATEST_DATA_STEP` 記整套 journal 最新配發的資料步驟，�
 
 版本 1 journal 已有 delivery 的 DDL 與資料時，資料步驟 2 也涵蓋 pr_merge_previews／pr_metadata_settlements；沒有對應事件才補 history.backfilled，以表名/PK 作唯一來源 key。保留原 preview.created_at／settlement.settled_at、摘要及正式 operation refs；原 delivery tables/documents 不改寫。Scope-read throttle 表不是 immutable 歷史，不把 pr_merge_scope_reads 的覆寫列偽裝為每次讀取事件。回填仍不進預設 live feed。
 
+Binding table/index 為每次開啟執行的 idempotent DDL，不讀写 user_version。既有 binding 的 seed 屬本包資料步驟 2，不另占步驟 3：重播有明確 session/worktree 對的 binding/建立事件，使用最早可證明的原 seq；只有保存的目前 binding 而沒有更早證據時，用既有 backfill 為該 session/link 配發的 history.backfilled seq 作已知起點。不得由今天的 mutable worktree_id 將更早事件或已結束 relation 回掛目前 worktree；無證據的更早歸屬保持 unknown。Reopen 不再執行資料步驟或補 poll rows。Projection 失敗仍只回滾 savepoint，core event 保留 projection_error；不留下半個 binding move。
+
+as_of 稽核：history 的 membership/coverage 只查 api_event_resources 的 seq/linked_at_seq，context/occurred_at 固定保存；resource envelope 為目前身分摘要，不是 membership filter。Session/execution relations 用不可變 identity columns 與 revision/command link seq；worktree relations 改用上述 binding intervals。Inventory 的 as_of 只供 events catch-up，目錄本來就不承諾 snapshot：目前 host config、provenance/access、gone/state/freshness、project/work-item/execution memberships 都可在 traversal 中變動；order=id 保證穩定 key 前進，新增列/篩選 membership 變動由 events 補讀，order=activity 仍保留動態排序限制。這些目前值不能套進 history/relations 的 snapshot membership。
+
 已確認綁定的 operation 可能在 runs 表入帳之前中斷；讀 `external_refs`、已持久 step 及 commands 保留其身分與 uncertainty，不執行啟動補償。Context／index 在原交易內用獨立 savepoint 寫入；投影例外只回滾該投影，核心事實照常提交，context 留 `projection_error` 的例外類名並記 log，不保存訊息。History 由原寫入資源或此前已證實的資源連結顯示該事件及缺口；不留下部分 index／relation rows，也不對外宣告 journal 未提交的事件。Poll 失敗保存 failed scan，舊欄位及其他 hosts 不受影響；meta 失敗只影響該 session 的相關欄位。
 
 Reconcile 所補的是新證據與新 seq，先前 uncertain 事件留著；重新讀 timeline 不重送任何命令。讀到未知未來 kind 仍回原 kind、摘要及 evidence，Dashboard 用一般事件列呈現，不因版本差把歷史丟掉。
@@ -293,6 +301,7 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B01；§08、§11、§19 | `test_b01_id_paging_complete_and_filter_changes_via_events`、`test_b01_relation_scope_and_cross_project_link_history`：205 筆 ID keyset 完整巡覽；filter changes 經 events；跨 project/work item 的 current/history 及 via 證據。 |
 | B01；§08 | `test_b01_warm_reuse_reviewer_followup_and_command_ranges`、`test_b01_pending_bind_and_snapshot_relations`、`test_b01_warm_binding_closes_reserved_intent_without_overwriting`：兩 task 共用 session 的 ranges、舊 reviewer/replacement、follow-up、pending/bound/closed、固定 revision 分頁；原 reserved intent 正確關閉。 |
 | B01；§08、§10 | `test_b01_worktree_shared_creation_identity_and_reuse`、`test_b01_legacy_task_external_creation_keeps_shared_identity`：共享 registry 建立 slot、reviewer/failover/reuse 同 ID、同 path 新 intent 不合併；使用 cleanup 共用 hash 函式。 |
+| B01、B03；§08、§10、§11 | `test_b01_worktree_relations_exclude_late_bindings_from_existing_cursor`、`test_b01_worktree_moves_preserve_relation_ranges_across_pages`：舊 cursor 不受晚 binding 或後續 move 影響；fresh read 看新 binding；A 保留舊 relations/commands，B 只收 move 後範圍，跨頁無重複。`test_b03_worktree_binding_backfill_matches_live_and_reopens_without_writes`：版本 1 以資料步驟 2 seed，明確原 seq 與 live projection 相同；重開不改 rows/head/version。`test_b03_worktree_binding_projection_failure_preserves_core_event`：move 投影失敗回滾新列與舊 end，core row/錯誤 flag 保留。 |
 | B01；§08 | `tests/test_resource_ids.py`：共用 root resolver 的 failover chain、reviewer lookup、warm reuse、逆序 registry、缺 parent、cycle、其他建立 intent 及原 JSON created_at 格式。 |
 | B01、B03；§08、§11 | `test_b01_b03_checkpoint_source_run_steps_and_worktree_history`、`test_b01_b03_receipt_versions_are_fixed_at_the_writer_transition`：真實 temp Git checkpoint/run 及 steps 的多資源 timeline 去重；receipt 在既有 writer 轉換時保存各版本，不以新結果改舊事件。 |
 | B01、B02；§10、§11 | `test_b01_history_as_of_late_binding_and_invalid_cursors`：history as_of 同時限制 event/linked_at；晚 binding 不進已開 snapshot，kind/order/resource/time 游標契約。 |
