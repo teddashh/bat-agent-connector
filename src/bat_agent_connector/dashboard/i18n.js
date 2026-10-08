@@ -27,6 +27,8 @@ const STRINGS = {
     dirty_warning: "記錄時有 {n} 個未提交的修改，不會帶入新工作。", continue_placeholder: "要 agent 接著做什麼…",
     start_agent_work: "開始 agent 工作", open_new_session: "開啟新 session",
     checkpoint_unavailable: "這台主機尚未設定 managed_roots、SSH alias 或 write／orchestrate 權限，不能從版本開工。",
+    needs_start_scope: "你的 token 沒有 start 權限，不能開新的 agent 工作；用 --scope start 重新發 token。",
+    confined_note: "新 agent 只能寫自己的資料夾：Claude 要寫其他地方或跑大部分指令前會先問你，Codex 的 sandbox 直接擋下。",
     repository: "Repository", pull_number: "PR 編號", load_pr: "讀取 PR", head: "Head", base: "Base",
     checks: "Checks", checks_summary: "{total} 個，{pending} 個未完成，{failed} 個失敗", mergeable: "可合併狀態",
     merge: "合併 PR", deploy_to: "部署到 {env}", merge_and_deploy_to: "合併並部署到 {env}",
@@ -75,6 +77,9 @@ const STRINGS = {
     open_new_session: "Open the new session",
     checkpoint_unavailable: "This host lacks managed_roots, an SSH alias or the write/orchestrate tiers, so work " +
       "cannot start from a checkpoint here.",
+    needs_start_scope: "Your token lacks the start scope, so it cannot start agent work; issue one with --scope start.",
+    confined_note: "The new agent writes only in its own folder: Claude asks you before writing anywhere else or " +
+      "running most commands, and Codex's sandbox blocks it.",
     repository: "Repository", pull_number: "PR number", load_pr: "Load PR", head: "Head", base: "Base",
     checks: "Checks", checks_summary: "{total} total, {pending} pending, {failed} failed", mergeable: "Mergeable",
     merge: "Merge PR", deploy_to: "Deploy to {env}", merge_and_deploy_to: "Merge and deploy to {env}",

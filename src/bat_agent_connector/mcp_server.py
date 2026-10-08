@@ -456,7 +456,9 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             """WRITE. Continue from a checkpoint in a NEW connector-managed session: a worktree is added in the
             connector's own clone at exactly the checkpoint commit, the session starts there, and only then are
             `instructions` sent (the person's words, verbatim). The source session is never written, stopped or
-            superseded. Long-running: if the result is not final, follow operation_get(operation_id) and reuse the
+            superseded. The new session is confined to its folder (Claude asks before writing elsewhere, Codex's
+            sandbox blocks it); leave those prompts to the person. Needs a BATC_API_TOKEN with the `start` scope.
+            Long-running: if the result is not final, follow operation_get(operation_id) and reuse the
             same idempotency_key on retry; a new key starts a second session. Requires confirm=true."""
             return await principal_daemon("op_submit", confirm, action="checkpoint.continue",
                                           idempotency_key=idempotency_key, target={"checkpoint_id": checkpoint_id},

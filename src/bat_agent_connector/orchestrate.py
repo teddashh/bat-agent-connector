@@ -201,6 +201,16 @@ def permission_options(agent: str, mode: str, claude_mode: str | None = None) ->
     return {}
 
 
+# write_scope="confined": the agent's own CLI enforces the folder, whatever the host default is. Claude asks before
+# writing outside its working directory (and before most shell commands); Codex's workspace-write sandbox blocks
+# writes outside it at the OS level. Plan §06: a cwd alone is not protection, and these sessions start from a
+# person's conversation, which names the person's folders.
+CONFINED_OPTIONS = {
+    "claude": {"permissionMode": "acceptEdits"},
+    "codex": {"codexSandboxMode": "workspace-write", "codexApprovalPolicy": "on-request"},
+}
+
+
 def registry_permission_fields(opts: dict) -> dict:
     ap = {}
     if opts.get("codexSandboxMode"):
@@ -236,8 +246,11 @@ async def session_start(
     cwd_override: str | None = None,
     external_branch: str | None = None,
     task_id: str | None = None,
+    write_scope: str | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
+    if write_scope not in (None, "confined"):
+        raise WriteRefused("write_scope must be confined or omitted")
     if agent not in ("claude", "codex"):
         raise WriteRefused("agent must be claude or codex")
     if prompt is not None and len(prompt) > 20_000:
@@ -261,6 +274,8 @@ async def session_start(
     if agent == "codex" and not model and hc.codex_model:
         model = hc.codex_model
     sid = session_id or str(uuid.uuid4())
+    perm = (dict(CONFINED_OPTIONS[agent]) if write_scope == "confined"
+            else permission_options(agent, hc.default_permission_mode, permission_mode))
     # Read-only: how the host resolves the destination, so links into a human checkout are caught up front.
     git_roots = {}
     for path in {folder, cwd_override} - {None}:
@@ -282,6 +297,9 @@ async def session_start(
                 "model": model,
                 "title": title,
                 "isolation": grant.isolation,
+                # Recorded with the reservation, so a start proven later by read-back keeps them too.
+                **registry_permission_fields(perm),
+                **({"write_scope": write_scope} if write_scope else {}),
                 **({"task_id": task_id, "role": "lead"} if task_id else {}),
             },
             hc.orchestrate_max_sessions,
@@ -327,7 +345,7 @@ async def session_start(
             }
             if model:
                 opts["model"] = model
-            opts.update(permission_options(agent, hc.default_permission_mode, permission_mode))
+            opts.update(perm)
             if use_worktree:
                 opts.update(
                     useWorktree=True, worktreePath=wt["worktreePath"], worktreeBranch=wt.get("branchName")
@@ -428,7 +446,7 @@ async def session_start(
         "tab": tab,
         "prompt_sent": bool(prompt),
         "message_id": mid,
-        "permissions": hc.default_permission_mode if not permission_mode else permission_mode,
+        "permissions": write_scope or permission_mode or hc.default_permission_mode,
         "isolation": grant.isolation,
         "note": None
         if tab and tab.get("appended")

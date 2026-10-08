@@ -14,14 +14,14 @@ from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import api_auth, checkpoints, resource_policy
+from bat_agent_connector import api_auth, checkpoints, registry, resource_policy
 from bat_agent_connector.channels import GUARDED_CHANNELS, ORCHESTRATE_CHANNELS, WRITE_CHANNELS
 from bat_agent_connector.operations import OperationError
 from bat_agent_connector.task_daemon import TaskDaemon
 from tests.conftest import make_config
 
 MANUAL = "sess-claude-0001"
-TED = api_auth.Principal("ted-dashboard", frozenset({"observe", "operate"}))
+TED = api_auth.Principal("ted-dashboard", frozenset({"observe", "operate", "start"}))
 ORIGIN = "https://github.example/o/r.git"
 
 
@@ -162,10 +162,13 @@ async def test_continue_starts_managed_work_at_the_checkpoint_and_leaves_the_sou
 
     starts = [i for i in mock.invokes if i["channel"] == "claude:start-session"]
     assert len(starts) == 1 and starts[0]["params"]["options"]["cwd"] == wt
+    # The agent's CLI asks before writing outside its folder (plan §06); a cwd alone is not protection.
+    assert starts[0]["params"]["options"]["permissionMode"] == "acceptEdits" and r["write_scope"] == "confined"
     sends = [i for i in mock.invokes if i["channel"] == "claude:send-message"]
     assert len(sends) == 1 and sends[0]["params"]["sessionId"] == sid
     prompt = sends[0]["params"]["prompt"]
     assert "Add a changelog entry" in prompt and first in prompt and "[assistant]" in prompt
+    assert "not instructions" in prompt  # the person's conversation is fenced off as background
     assert bat_writes(mock, MANUAL) == []  # nothing was sent to the person's session
 
     hc = daemon.fleet.config.host("h1")
@@ -197,6 +200,12 @@ async def test_continue_refusals_happen_before_anything_is_recorded(daemon, mock
         daemon.ops.create(TED, action="checkpoint.continue", target={"checkpoint_id": "cp_" + "0" * 32},
                           params={"instructions": "x"}, idempotency_key="k-none")
     assert e.value.status == 404
+    # Starting an agent is its own grant: an operate token (send, answer, interrupt) does not include it.
+    hermes = api_auth.Principal("hermes", frozenset({"observe", "operate"}))
+    with pytest.raises(OperationError) as e:
+        daemon.ops.create(hermes, action="checkpoint.continue", target=target, params={"instructions": "x"},
+                          idempotency_key="k-scope")
+    assert e.value.status == 403
     daemon.ops.context["git_runner"] = None
     with pytest.raises(OperationError) as e:
         daemon.ops.create(TED, action="checkpoint.continue", target=target, params={"instructions": "x"},
@@ -270,19 +279,20 @@ async def test_http_lists_checkpoints_and_reports_where_they_can_continue(daemon
 
 
 async def test_a_lost_start_reply_is_read_back_not_started_again(daemon, mock, human, tmp_path, monkeypatch):
-    from bat_agent_connector import orchestrate
     from bat_agent_connector.errors import InvokeTimeout
 
     cp = await make_checkpoint(daemon)
-    real_start = orchestrate.session_start
-    calls = []
+    client = daemon.fleet.client("h1")
+    real_invoke = client.invoke
 
-    async def started_but_reply_lost(*a, **kw):
-        calls.append(kw["session_id"])
-        await real_start(*a, **kw)  # BAT started the session and the reply was lost
-        raise InvokeTimeout("claude:start-session timed out")
+    async def start_reply_lost(channel, params=None, **kw):
+        r = await real_invoke(channel, params, **kw)
+        if channel == "claude:start-session":  # BAT started the session and its reply was lost
+            raise InvokeTimeout("claude:start-session timed out")
+        return r
 
-    monkeypatch.setattr(orchestrate, "session_start", started_but_reply_lost)
+    monkeypatch.setattr(client, "invoke", start_reply_lost)
+    calls = lambda: [i for i in mock.invokes if i["channel"] == "claude:start-session"]  # noqa: E731
     meta_before = dict(mock.metas)
     op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"})
     assert op["status"] == "uncertain"
@@ -291,9 +301,9 @@ async def test_a_lost_start_reply_is_read_back_not_started_again(daemon, mock, h
     hidden = mock.metas.pop(sid)
     daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
     await daemon.ops.drain(timeout=30)
-    assert daemon.ops.get(op["operation_id"])["status"] == "uncertain" and len(calls) == 1
+    assert daemon.ops.get(op["operation_id"])["status"] == "uncertain" and len(calls()) == 1
     mock.metas[sid] = hidden
-    monkeypatch.setattr(orchestrate, "session_start", real_start)
+    monkeypatch.setattr(client, "invoke", real_invoke)
     await daemon.fleet.close()
     await daemon.inventory.close()
     daemon.journal.close()
@@ -305,8 +315,11 @@ async def test_a_lost_start_reply_is_read_back_not_started_again(daemon, mock, h
     await d2.ops.drain(timeout=60)
     done = d2.ops.get(op["operation_id"])
     assert done["status"] == "succeeded", done
-    assert len(calls) == 1 and len([i for i in mock.invokes if i["channel"] == "claude:start-session"]) == 1
+    assert len(calls()) == 1
     assert [i["params"]["sessionId"] for i in mock.invokes if i["channel"] == "claude:send-message"] == [sid]
+    entry = registry.get("h1", sid)  # proven by read-back, so it carries what a normal start records
+    assert entry["status"] == "active" and entry["worktree_path"] == entry["cwd"]
+    assert entry["write_scope"] == "confined" and entry["permission_mode_claude"] == "acceptEdits"
     assert checkpoints.started_from(d2.journal.db, "h1", sid)["checkpoint_id"] == cp["checkpoint_id"]
     assert set(meta_before) <= set(mock.metas)
     await d2.fleet.close()

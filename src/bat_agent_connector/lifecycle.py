@@ -33,6 +33,7 @@ from .errors import (
 from .fleet import Fleet
 from .jev import Jev
 from .orchestrate import (
+    CONFINED_OPTIONS,
     MERGED_KINDS,
     _git_dirty,
     _origin_cwd,
@@ -139,6 +140,9 @@ async def session_set_permissions(
         t, _ = await _resolve_session(c, session_id)
         sid = t["id"]
         grant = await resource_policy.authorize_session(fleet, host, "session.permissions", t)
+        if mode == "allow_all" and (registry.get(host, sid) or {}).get("write_scope") == "confined":
+            raise WriteRefused("this session is confined to its managed folder (it started from a person's "
+                               "work); it is never raised to allow-all")
         kind = agent_kind(t.get("agentPreset"))
         meta = await _meta(c, sid)
         if meta is None:
@@ -220,6 +224,11 @@ async def approve_pending(
         if row.get("api_access") != "managed":
             item.update(approved=False, skipped="read_only", read_only_code=row.get("read_only_code"),
                         provenance=row.get("provenance"))
+            out.append(item)
+            continue
+        if (registry.get(host, row["session_id"]) or {}).get("write_scope") == "confined":
+            # Its prompts are how a write outside its folder is stopped; a person answers them one by one.
+            item.update(approved=False, skipped="confined")
             out.append(item)
             continue
         if dry_run:
@@ -539,7 +548,7 @@ async def _failover_one(
         "branch": branch,
         "same_worktree": same_worktree,
         "agent_preset": preset,
-        "permissions": hc.default_permission_mode,
+        "permissions": "confined" if (old_reg or {}).get("write_scope") == "confined" else hc.default_permission_mode,
         "evidence": cls.get("evidence"),
         "resets": cls.get("resets"),
         "model": model or "(BAT default)",
@@ -566,7 +575,9 @@ async def _failover_one(
     }
     if model:
         opts["model"] = model
-    opts.update(permission_options("codex", hc.default_permission_mode))
+    # A successor of a confined session stays confined; it carries the same person's context.
+    confined = (old_reg or {}).get("write_scope") == "confined"
+    opts.update(CONFINED_OPTIONS["codex"] if confined else permission_options("codex", hc.default_permission_mode))
     if same_worktree:
         opts.update(useWorktree=True, worktreePath=wt_path, worktreeBranch=branch)
     base = {"actor": fleet.actor, "tool": "session_failover", "host": host, "session_id": new_sid}
@@ -588,6 +599,7 @@ async def _failover_one(
                 "worktree_path": wt_path if same_worktree else None,
                 "cwd": cwd,
                 "isolation": grant.isolation,
+                **({"write_scope": "confined"} if confined else {}),
                 "handoff_status": "pending",
                 "handoff_message_id": handoff_message_id,
                 "handoff_command_id": handoff_command_id,
