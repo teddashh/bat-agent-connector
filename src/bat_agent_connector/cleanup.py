@@ -22,7 +22,7 @@ from importlib import resources
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
-from . import integration, lifecycle, registry, resource_policy, service
+from . import checkpoints, integration, lifecycle, registry, resource_policy, service
 from .api_auth import SCOPES
 from .config import state_dir
 from .errors import BatError, ResourceReadOnly
@@ -525,24 +525,72 @@ def _selection(ops, target, items, pvs, links, op_rows):
     return selected, wi_ids
 
 
-async def _host_call(ops, host, req, timeout=READ_DEADLINE_S):
+async def _host_call(ops, host, req, timeout=READ_DEADLINE_S, *, locked_check=None):
     runner = ops.context.get("git_runner")
     if not runner or not runner.available(host):
         raise OperationError("GIT_RUNNER_UNAVAILABLE", "no SSH runner for host", 409)
     source = (resources.files(__package__) / "cleanup_host.py").read_text()
-    arg = base64.b64encode(_canonical({**req, "deadline_s": timeout}).encode()).decode()
-    result = json.loads(await runner.run(host, "python3 -c " + shlex.quote(source) + " " + shlex.quote(arg),
-                                        timeout_s=max(0.01, timeout)))
+    arg = base64.b64encode(_canonical({**req, "deadline_s": timeout, **({"locked_check": True} if locked_check else {})}).encode()).decode()
+    checked = False
+    async def check():
+        nonlocal checked
+        await locked_check()
+        checked = True
+    token = checkpoints._LOCKED_CHECK.set(check if locked_check else None)
+    try:
+        result = json.loads(await runner.run(host, "python3 -c " + shlex.quote(source) + " " + shlex.quote(arg),
+                                            timeout_s=max(0.01, timeout)))
+    finally:
+        checkpoints._LOCKED_CHECK.reset(token)
     if "error" in result:
         raise OperationError(result["error"], "host cleanup check refused", 409)
+    if locked_check and not checked:
+        raise AmbiguousOutcome("host reply without a confirmed locked consumer check")
     return result["result"]
 
 
-async def _runtime(ops, item, deadline):
+def _inside(path, cwd):
+    return (isinstance(path, str) and path.startswith("/") and isinstance(cwd, str) and cwd.startswith("/") and
+            posixpath.commonpath((posixpath.normpath(path), posixpath.normpath(cwd))) == posixpath.normpath(path))
+
+
+async def _terminal_observations(ops, host, deadline):
+    client = ops.context["inventory"].fleet.client(host)
+    async def bounded(awaitable):
+        return await asyncio.wait_for(awaitable, max(.001, deadline - time.monotonic()))
+    try:
+        workspace = await bounded(service._workspace(client))
+        if not isinstance(workspace.get("terminals"), list):
+            raise ValueError("terminals unavailable")
+    except (BatError, OSError, asyncio.TimeoutError, ValueError):
+        return [{"session_id": None, "error": "OBSERVATION_UNAVAILABLE"}]
+    observed = []
+    for terminal in workspace["terminals"]:
+        sid = terminal.get("id") if isinstance(terminal, dict) else None
+        fact = {"session_id": sid}
+        try:
+            if not sid or time.monotonic() >= deadline:
+                raise ValueError("terminal unreadable")
+            meta = await bounded(service._meta(client, sid))
+            cwd = (meta or {}).get("cwd")
+            if not isinstance(cwd, str) or not cwd.startswith("/") or "\0" in cwd:
+                raise ValueError("live cwd unavailable")
+            fact.update(cwd=posixpath.normpath(cwd), streaming=bool(meta.get("isStreaming")))
+        except (BatError, OSError, asyncio.TimeoutError, ValueError):
+            fact["error"] = "OBSERVATION_UNAVAILABLE"
+        observed.append(fact)
+    return observed
+
+
+async def _runtime(ops, item, deadline, *, terminal=None):
+    if terminal and terminal.get("error"):
+        return {"error": terminal["error"]}
     fleet = ops.context["inventory"].fleet  # read-only BAT fleet
     client = fleet.client(item["host"])
     async def read():
-        meta = await service._meta(client, item["session_id"])
+        meta = {"cwd": terminal["cwd"], "isStreaming": terminal["streaming"]} if terminal else await service._meta(client, item["session_id"])
+        if meta is not None and (not isinstance(meta.get("cwd"), str) or not meta["cwd"].startswith("/") or "\0" in meta["cwd"]):
+            return {"error": "OBSERVATION_UNAVAILABLE"}
         state = None
         preset = (item.get("registry") or {}).get("agent_preset", "claude")
         kind = "codex" if "codex" in preset else "claude"
@@ -667,6 +715,9 @@ def _plan(ops, item, choices, op_rows, pvs, own_op=None):
         _reason(item, obs["error"] if obs["error"] in REASONS else "OBSERVATION_UNAVAILABLE")
     if item.get("live_host_unavailable"):
         _reason(item, "OBSERVATION_UNAVAILABLE")
+    for consumer in item.get("live_consumers", []):
+        if consumer.get("error"):
+            _reason(item, "OBSERVATION_UNAVAILABLE", session_id=consumer.get("session_id"))
     if item.get("repository_error"):
         code = item["repository_error"]
         _reason(item, code if code in REASONS else "OBSERVATION_UNAVAILABLE")
@@ -748,30 +799,24 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
         try:
             await asyncio.wait_for(lock.acquire(), max(.001, deadline - time.monotonic()))
             acquired = True
-            try:
-                workspace = await asyncio.wait_for(service._workspace(ops.context["inventory"].fleet.client(host)),
-                                                   max(.001, deadline - time.monotonic()))
-                for t in workspace.get("terminals", []):
-                    sid = t.get("id")
-                    if not sid or any(i.get("session_id") == sid for i in host_items):
-                        continue
-                    meta = await asyncio.wait_for(service._meta(ops.context["inventory"].fleet.client(host), sid),
-                                                  max(.001, deadline - time.monotonic()))
-                    path = (meta or {}).get("cwd") or t.get("cwd")
-                    w = worktrees.get((host, path))
+            terminals = await _terminal_observations(ops, host, deadline)
+            by_sid = {t["session_id"]: t for t in terminals if t["session_id"]}
+            for t in terminals:
+                sid, path = t["session_id"], t.get("cwd")
+                if not sid:
+                    continue
+                i = next((i for i in host_items if i.get("session_id") == sid), None)
+                w = next((w for w in worktrees.values() if w["host"] == host and _inside(w["path"], path)), None)
+                if i is None:
                     i = _resource(host, "session", "observed:" + sid, sid, session_id=sid, path=path,
-                        proven=False, provenance="manual" if sid not in {r.get("session_id") for r in registry.list_entries(host)} else "unknown",
-                        original_ids=[sid, host + "/" + sid])
+                                  proven=False, provenance="manual", original_ids=[sid, host + "/" + sid])
                     if w:
                         i.update(repository=w["repository"], worktree_id=w["resource_id"])
                     items[i["resource_id"]] = i
                     host_items.append(i)
-                    if target["kind"] == "host" or w and w["resource_id"] in selected:
-                        selected.add(i["resource_id"])
-            except (BatError, OSError, asyncio.TimeoutError):
-                for i in host_items:
-                    if i["resource_id"] in selected:
-                        i["live_host_unavailable"] = True
+                # A live binding is consumer evidence, never creation/ownership evidence.
+                if target["kind"] == "host" or w and w["resource_id"] in selected:
+                    selected.add(i["resource_id"])
             # Observe all sessions in selected containers, including consumers outside the requested work item.
             repos = {i.get("repository") for i in host_items if i["resource_id"] in selected and i.get("repository")}
             if only:
@@ -784,7 +829,8 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
                 req = {"repository": repo, "roots": list(ops.context["fleet"].config.host(host).managed_roots),
                        "paths_only": bool(only),
                        "worktrees": [i["path"] for i in related if i["kind"] == "worktree" and
-                           (not only or i["resource_id"] == only or i.get("branch_id") == only)],
+                           (not only or i["resource_id"] == only or i.get("branch_id") == only or
+                            items.get(only, {}).get("worktree_id") == i["resource_id"])],
                        "branches": {i["branch"]: i.get("base") for i in related if i["kind"] == "worktree" and i.get("branch")},
                        "replicas": {i["path"]: i["replica_evidence"] for i in related if "replica_evidence" in i},
                        "temporaries": [i["path"] for i in related if i["kind"] == "temporary"],
@@ -843,10 +889,15 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
                         if container and container["resource_id"] in selected:
                             selected.add(i["resource_id"])
             for i in host_items:
-                if i["kind"] == "session" and (i["resource_id"] in selected or i.get("repository") in repos):
-                    if only and i["resource_id"] != only and i.get("repository") not in repos:
-                        continue
-                    i["observation"] = await _runtime(ops, i, deadline)
+                if i["kind"] == "session":
+                    i["observation"] = await _runtime(ops, i, deadline, terminal=by_sid.get(i["session_id"]))
+            unknown = [t for t in terminals if t.get("error")]
+            unknown.extend({"session_id": i["session_id"], "error": "OBSERVATION_UNAVAILABLE"}
+                           for i in host_items if i["kind"] == "session" and i.get("observation", {}).get("error")
+                           and i["session_id"] not in by_sid)
+            for i in host_items:
+                if i["kind"] in {"session", "worktree", "temporary"}:
+                    i["live_consumers"] = unknown
             sessions = [i for i in host_items if i["kind"] == "session" and i.get("proven") and i.get("path") and
                         i["resource_id"] in selected and (not only or i["resource_id"] == only)]
             if sessions:
@@ -876,6 +927,7 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
                       path=i["repository"], repository=i["repository"], branch=i.get("branch"), proven=True,
                       flavor=i.get("flavor"), base=i.get("base"), observation=branch_obs, original_ids=i["original_ids"], relations=i["relations"],
                       task_owned=i.get("task_owned", False), worktree_id=i["resource_id"],
+                      content_path=i["path"], live_consumers=i.get("live_consumers", []),
                       repository_identity=i.get("repository_identity"), repository_error=i.get("repository_error"))
         i["branch_id"] = b["resource_id"]
         items[b["resource_id"]] = b
@@ -887,7 +939,8 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
         i = items[rid]
         if i["kind"] == "worktree":
             for s in items.values():
-                if s["kind"] != "session" or s["host"] != i["host"] or s.get("path") != i.get("path"):
+                if s["kind"] != "session" or s["host"] != i["host"] or not (
+                        _inside(i.get("path"), s.get("path")) or _inside(i.get("path"), s.get("observation", {}).get("cwd"))):
                     continue
                 for reason in s["reasons"]:
                     if reason["code"] in {"ACTIVE_WRITER", "SESSION_WAITING", "COMMAND_UNRESOLVED", "TASK_OWNED",
@@ -900,6 +953,15 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
                         i["dependencies"].append(s["resource_id"])
             if i["reasons"]:
                 i.update(steps=[], decision="retain")
+            # Do not stop the selected sessions when an unreviewed/unknown consumer needs their worktree.
+            for s in items.values():
+                if s["kind"] == "session" and s.get("worktree_id") == rid and s["resource_id"] in selected:
+                    for reason in i["reasons"]:
+                        if reason["code"] in {"ACTIVE_EXECUTION", "ACTIVE_WRITER", "SESSION_WAITING", "COMMAND_UNRESOLVED",
+                                              "TASK_OWNED", "OBSERVATION_UNAVAILABLE", "BINDING_MISMATCH"}:
+                            _reason(s, reason["code"], **{k: v for k, v in reason.items() if k != "code"})
+                    if s["reasons"]:
+                        s.update(steps=[], decision="retain")
         if i["kind"] == "local_branch":
             w = items[i["worktree_id"]]
             absent_cleaned = w.get("observation", {}).get("exists") is False and all(
@@ -1044,24 +1106,49 @@ async def _phase_consumers(ctx, item):
                {r["preview_id"]: dict(r) for r in ops.db.execute("SELECT * FROM integration_previews")}, ctx.operation_id)
     if probe["reasons"]:
         raise OperationError("PREVIEW_STALE", "new content consumer before mutation", 409)
-    entries = registry.list_entries(item["host"])
-    workspace = await service._workspace(ops.context["inventory"].fleet.client(item["host"]))
-    for t in workspace.get("terminals", []):
-        if t.get("id") and t.get("id") not in {e.get("session_id") for e in entries}:
-            meta = await service._meta(ops.context["inventory"].fleet.client(item["host"]), t["id"])
-            if (meta or {}).get("cwd") == item.get("path"):
-                raise OperationError("PREVIEW_STALE", "a manual session uses this worktree", 409)
-    for e in entries:
-        if (e.get("worktree_path") or e.get("cwd")) != item.get("path"):
-            continue
-        if e.get("task_id") or e.get("status") in {"starting", "uncertain"} or e.get("handoff_status") == "pending":
-            raise OperationError("PREVIEW_STALE", "a task or unresolved start needs this worktree", 409)
-        runtime = await _runtime(ops, {"host": item["host"], "session_id": e["session_id"], "registry": e},
-                                 time.monotonic() + READ_DEADLINE_S)
-        if any((runtime.get("state") or {}).get(k) for k in service.SESSION_WAITING_FIELDS):
-            raise OperationError("SESSION_WAITING", "a session is waiting; preview again", 409)
-        if runtime.get("error") or runtime.get("loaded"):
-            raise OperationError("PREVIEW_STALE", "a session still uses this worktree", 409)
+    host, path = item["host"], item.get("content_path") or item.get("path")
+    deadline = time.monotonic() + READ_DEADLINE_S
+    lock = _HOST_LOCKS.setdefault(host, asyncio.Lock())
+    acquired = False
+    try:
+        await asyncio.wait_for(lock.acquire(), max(.001, deadline - time.monotonic()))
+        acquired = True
+        terminals = await _terminal_observations(ops, host, deadline)
+        if any(t.get("error") for t in terminals):
+            raise OperationError("OBSERVATION_UNAVAILABLE", "a terminal's live cwd is unknown; preview again", 409)
+        by_sid = {t["session_id"]: t for t in terminals}
+        entries = {e["session_id"]: e for e in registry.list_entries(host)}
+        # A stop may share its worktree with other idle sessions in this exact accepted plan.
+        # Their own stop phases remain prerequisites of the worktree removal.
+        allowed = {}
+        if item["kind"] == "session":
+            for row in ops.db.execute("SELECT plan FROM cleanup_receipts WHERE operation_id=?", (ctx.operation_id,)):
+                plan = json.loads(row[0])
+                if plan["host"] == host and plan["kind"] == "session" and plan["decision"] == "reclaim" and "stop" in plan["steps"]:
+                    allowed[plan["session_id"]] = plan["path"]
+        for sid in sorted(set(entries) | set(by_sid)):
+            e = entries.get(sid, {})
+            runtime = await _runtime(ops, {"host": host, "session_id": sid, "registry": e}, deadline,
+                                     terminal=by_sid.get(sid))
+            if runtime.get("error"):
+                raise OperationError("OBSERVATION_UNAVAILABLE", "a session's live cwd/state is unknown; preview again", 409)
+            recorded = e.get("worktree_path") or e.get("cwd")
+            if not _inside(path, runtime.get("cwd")) and not _inside(path, recorded):
+                continue
+            if e.get("task_id") or e.get("status") in {"starting", "uncertain"} or e.get("handoff_status") == "pending":
+                raise OperationError("PREVIEW_STALE", "a task or unresolved start needs this worktree", 409)
+            state = runtime.get("state") or {}
+            if runtime.get("streaming") or state.get("isStreaming"):
+                raise OperationError("ACTIVE_WRITER", "a session is streaming; preview again", 409)
+            if any(state.get(k) for k in service.SESSION_WAITING_FIELDS):
+                raise OperationError("SESSION_WAITING", "a session is waiting; preview again", 409)
+            if runtime.get("loaded") and not (sid in allowed and recorded == allowed[sid] == runtime.get("cwd")):
+                raise OperationError("PREVIEW_STALE", "an unreviewed session uses this worktree", 409)
+    except asyncio.TimeoutError:
+        raise OperationError("OBSERVATION_UNAVAILABLE", "live consumer read deadline expired; preview again", 409) from None
+    finally:
+        if acquired:
+            lock.release()
 
 async def _run(ctx):
     ops, db = ctx.service, ctx.service.db
@@ -1177,19 +1264,26 @@ async def _execute_item(ctx, item, payload):
             raise OperationError("PREVIEW_STALE", "resource or its consumers changed", 409)
     if item["kind"] == "session":
         async def stop():
-            now = await _runtime(ops, item, time.monotonic() + READ_DEADLINE_S)
-            if now != item["observation"]:
-                raise OperationError("PREVIEW_STALE", "session changed before stop", 409)
-            path = await _host_call(ops, item["host"], {"canonical_paths": [item["path"]],
-                "roots": list(ops.context["fleet"].config.host(item["host"]).managed_roots)})
-            if path.get(item["path"]) != item.get("path_observation") or path[item["path"]].get("error"):
-                raise OperationError("PREVIEW_STALE", "session workdir changed before stop", 409)
-            result = await lifecycle._stop(ops.context["fleet"], item["host"], item["session_id"],
-                                          Audit(ops.context["fleet"].config.safety), cleanup=True)
-            if not result.get("stopped"):
-                raise OperationError(result.get("code", "STOP_UNPROVEN"), result.get("reason", "stop was not confirmed"), 409)
-            if isinstance(result.get("result"), dict) and result["result"].get("ok") is False:
-                raise AmbiguousOutcome("stop acknowledgment did not confirm termination")
+            result = None
+            async def checked_stop():
+                nonlocal result
+                ctx.check_cancel()
+                await _phase_consumers(ctx, item)
+                now = await _runtime(ops, item, time.monotonic() + READ_DEADLINE_S)
+                if now != item["observation"]:
+                    raise OperationError("PREVIEW_STALE", "session changed before stop", 409)
+                path = await _host_call(ops, item["host"], {"canonical_paths": [item["path"]],
+                    "roots": list(ops.context["fleet"].config.host(item["host"]).managed_roots)})
+                if path.get(item["path"]) != item.get("path_observation") or path[item["path"]].get("error"):
+                    raise OperationError("PREVIEW_STALE", "session workdir changed before stop", 409)
+                result = await lifecycle._stop(ops.context["fleet"], item["host"], item["session_id"],
+                                              Audit(ops.context["fleet"].config.safety), cleanup=True)
+                if not result.get("stopped"):
+                    raise OperationError(result.get("code", "STOP_UNPROVEN"), result.get("reason", "stop was not confirmed"), 409)
+                if isinstance(result.get("result"), dict) and result["result"].get("ok") is False:
+                    raise AmbiguousOutcome("stop acknowledgment did not confirm termination")
+            await _host_call(ops, item["host"], {"phase": "lock.session", "repository": item.get("repository") or item["path"],
+                "roots": list(ops.context["fleet"].config.host(item["host"]).managed_roots)}, locked_check=checked_stop)
             return result
 
         async def reconcile_stop(_):
@@ -1242,8 +1336,7 @@ async def _execute_item(ctx, item, payload):
 
         async def execute(request=request):
             ctx.check_cancel()
-            await _phase_consumers(ctx, item)
-            return await _host_call(ops, item["host"], request)
+            return await _host_call(ops, item["host"], request, locked_check=lambda: _phase_consumers(ctx, item))
 
         async def reconcile(_, phase=phase, request=request):
             observed = await read(probe=True)

@@ -23,6 +23,10 @@
   operation rows, so preview/apply/handoff targets list the same sources, areas, pins, repairs and sessions.
   Preview, apply checks and the final pre-stop read share the complete waiting-field set; a session that becomes
   waiting returns SESSION_WAITING and keeps its worktree.
+  All terminals, including registered terminals, now supply live cwd consumer evidence using path components.
+  Missing or failed live reads retain resources with OBSERVATION_UNAVAILABLE. Apply repeats consumer checks
+  while holding the host directory flock before stop and each Git phase; a relocated or unknown consumer blocks
+  mutation and keeps the worktree.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps

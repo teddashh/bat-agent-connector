@@ -28,6 +28,14 @@ from tests.test_checkpoints import (
 daemon = checkpoint_daemon
 human = checkpoint_human
 
+
+@pytest.fixture(autouse=True)
+def known_live_terminals(mock):
+    # These unrelated fixture terminals have known live cwd. Unknown cwd is tested explicitly below.
+    for terminal in mock.ws_doc["terminals"]:
+        if mock.metas.get(terminal["id"]) is None:
+            mock.metas[terminal["id"]] = {"cwd": terminal["cwd"], "isStreaming": False}
+
 CLEANER = api_auth.Principal("cleaner", frozenset({"observe", "cleanup"}))
 DISCARDER = api_auth.Principal("person", frozenset({"observe", "cleanup", "cleanup_discard"}))
 
@@ -117,7 +125,9 @@ async def test_e01_accepted_authorization_is_server_recorded(daemon, mock):
         assert body["operation"]["operation_id"] == accepted["operation_id"]
         assert daemon.journal.db.execute("SELECT count(*) FROM operations WHERE action='cleanup.apply'").fetchone()[0] == 1
         await daemon.ops.drain(timeout=60)
-        assert daemon.ops.get(accepted["operation_id"])["status"] == "succeeded"
+        finished = daemon.ops.get(accepted["operation_id"])
+        assert finished["status"] == "succeeded", (finished.get("error"), [(r["plan"]["kind"], r["status"], r["error"])
+                                                    for r in cleanup.receipts(daemon.ops, accepted["operation_id"])])
     finally:
         server.close()
         await server.wait_closed()
@@ -386,6 +396,106 @@ def test_e01_preview_recheck_and_stop_share_waiting_fields():
     assert cleanup.service.SESSION_WAITING_FIELDS is lifecycle.service.SESSION_WAITING_FIELDS
     for handler in (cleanup._plan, cleanup._phase_consumers, lifecycle._stop):
         assert "service.SESSION_WAITING_FIELDS" in inspect.getsource(handler)
+
+
+def registered_terminal_elsewhere(mock, path):
+    sid, recorded = "registered-elsewhere", str(Path(path).parent / "elsewhere")
+    registry.reserve("h1", {"session_id": sid, "cwd": recorded, "worktree_path": recorded,
+                            "agent_preset": "claude"}, 5)
+    registry.update("h1", sid, status="active")
+    mock.ws_doc["terminals"].append({"id": sid, "cwd": recorded, "agentPreset": "claude"})
+    mock.metas[sid] = {"cwd": recorded, "isStreaming": False}
+    mock.states[sid] = {"isStreaming": False, "messages": []}
+    return sid
+
+
+def change_live_cwd(mock, sid, path, mode):
+    if mode == "inside":
+        mock.metas[sid]["cwd"] = str(Path(path) / "nested")
+    elif mode == "missing_cwd":
+        mock.metas[sid] = {"isStreaming": False}
+    elif mode == "missing_meta":
+        mock.metas[sid] = None
+    else:
+        def failed(params):
+            if params["sessionId"] == sid:
+                raise RuntimeError("live metadata read failed")
+            return copy.deepcopy(mock.metas.get(params["sessionId"]))
+        mock.handlers["claude:get-session-meta"] = failed
+
+
+@pytest.mark.parametrize("mode", ["inside", "missing_cwd", "missing_meta", "failed_read"])
+async def test_e01_registered_terminal_live_cwd_or_unknown_blocks_preview_and_apply(daemon, mock, mode):
+    cp, op = await setup_work(daemon, mock)
+    path = op["result"]["worktree_path"]
+    sid = registered_terminal_elsewhere(mock, path)
+    target = {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]}
+    reviewed = await cleanup.preview(daemon.ops, CLEANER, target)
+    assert reviewed["ready"]
+    change_live_cwd(mock, sid, path, mode)
+    before = len(mock.invokes)
+    blocked = await cleanup.preview(daemon.ops, CLEANER, target)
+    code = "ACTIVE_EXECUTION" if mode == "inside" else "OBSERVATION_UNAVAILABLE"
+    assert not blocked["ready"], blocked
+    for item in blocked["items"]:
+        if item["kind"] == "worktree" or item.get("session_id") == op["result"]["session_id"]:
+            assert code in {r["code"] for r in item["reasons"]}, item
+    done = await apply(daemon, reviewed)
+    assert done["status"] == "failed" and done["error_code"] == "PREVIEW_STALE", done
+    assert not any(i["channel"] == "claude:stop-session" for i in mock.invokes[before:])
+    assert Path(path).exists() and git(path, "rev-parse", "HEAD") == cp["commit_sha"]
+
+
+@pytest.mark.parametrize("phase", ["lock.session", "preserve", "remove.worktree"])
+@pytest.mark.parametrize("mode", ["inside", "failed_read"])
+async def test_e01_live_cwd_is_rechecked_under_host_flock_before_stop_and_removal(daemon, mock, monkeypatch, phase, mode):
+    import fcntl
+    import os
+    cp, op = await setup_work(daemon, mock)
+    path = op["result"]["worktree_path"]
+    sid = registered_terminal_elsewhere(mock, path)
+    doc = await cleanup.preview(daemon.ops, CLEANER, {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]})
+    assert doc["ready"]
+    original, gates = cleanup._host_call, []
+    async def race(ops, host, req, timeout=cleanup.READ_DEADLINE_S, *, locked_check=None):
+        if locked_check and req.get("phase") == phase:
+            check = locked_check
+            async def under_lock():
+                fd = os.open(req["repository"], os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(fd)
+                gates.append(phase)
+                change_live_cwd(mock, sid, path, mode)
+                await check()
+            locked_check = under_lock
+        return await original(ops, host, req, timeout, locked_check=locked_check)
+    monkeypatch.setattr(cleanup, "_host_call", race)
+    before = len(mock.invokes)
+    done = await apply(daemon, doc)
+    assert gates == [phase]
+    assert done["status"] == "needs_attention", done
+    rows = cleanup.receipts(daemon.ops, done["operation_id"])
+    assert any(r["error"] and r["error"]["code"] == ("PREVIEW_STALE" if mode == "inside" else "OBSERVATION_UNAVAILABLE")
+               for r in rows), rows
+    stops = [i for i in mock.invokes[before:] if i["channel"] == "claude:stop-session"]
+    assert len(stops) == (0 if phase == "lock.session" else 1)
+    assert Path(path).exists() and git(path, "rev-parse", "HEAD") == cp["commit_sha"]
+
+
+async def test_e01_live_cwd_uses_path_components_not_string_prefix(daemon, mock):
+    cp, op = await setup_work(daemon, mock)
+    path = op["result"]["worktree_path"]
+    sid = registered_terminal_elsewhere(mock, path)
+    mock.metas[sid]["cwd"] = path + "-other/nested"
+    doc = await cleanup.preview(daemon.ops, CLEANER, {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]})
+    assert doc["ready"]
+    done = await apply(daemon, doc)
+    assert done["status"] == "succeeded", done
+    assert not Path(path).exists()
+    assert mock.metas[sid] is not None
 
 
 async def test_e02_shared_worktree_is_one_item_and_checks_out_of_scope_consumers(daemon, mock):
