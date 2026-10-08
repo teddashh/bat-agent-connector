@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- Add an authenticated bootstrap checkpoint before persisted Dashboard snapshot reads, stable journal/principal
+  cache identities, and signed replay checkpoints refreshed after each event page. Cursor rollback, missing
+  retained history and changed event anchors explicitly require resnapshot while preserving drafts. SSE supports
+  checkpoint/reset control events; legacy event page shapes remain unchanged. Versionless metadata shares the
+  existing journal and adds no retention job (v2 §14, R04, B02/B05/T11; docs/design/dashboard-sync.md).
+
 - Refuse BAT worktree mutations for legacy reviewers whose shared creation root is unproven in the registry,
   including paths under managed roots. Preserve proven carrier behavior and observation identity resolution;
   raw CLI policy does not require a task daemon or guess a journal location.
