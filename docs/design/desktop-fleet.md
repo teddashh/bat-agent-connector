@@ -58,7 +58,7 @@ the current selection. An uncertain write never resends automatically; a matchin
 status read settles it. Closing the page stops its poll, with no monitor lifecycle effect.
 
 Synthetic JSON fixtures originate from the Fleet Kit facade tests developed
-at `8ef95c83eaaed878d62c08dc772578fdfb62f746` (based on upstream `4ca47d0`) and are copied explicitly
+at `875e7d8ee74487def96cd32b41796777b166418b` (based on upstream `4ca47d0`) and are copied explicitly
 for the native contract tests. They contain no live configuration. Unit tests cover
 forbidden IPC inputs, contract/reply mismatch, installation containment, output
 filtering, subprocess EOF/bounds, uncertain exits and cancellation. Linux process

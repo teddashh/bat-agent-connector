@@ -55,7 +55,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: teddashh/bat-fleet-kit
-          ref: 8ef95c83eaaed878d62c08dc772578fdfb62f746
+          ref: 875e7d8ee74487def96cd32b41796777b166418b
           path: fleet-kit-fixture
           persist-credentials: false
       - name: Locate Fleet contract fixture (no live configuration)
