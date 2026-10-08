@@ -138,6 +138,17 @@ Claude-to-Codex failover journals its handoff as a separate uncertain send. Long
 private archive verified from the successor host before dispatch; the service fails closed if access cannot be proved.
 No paid API key is required.
 
+### Dashboard API (`/api/v1`)
+
+The task daemon also serves `/api/v1` on its loopback port: capabilities, a persisted session inventory with
+staleness, durable operations, and one event cursor with SSE. Issue a token per client
+(`batc api-token issue --actor ted-dashboard --scope observe --scope operate`) and send it as
+`Authorization: Bearer`. MCP clients reach the same operations with `operation_submit`, `operation_cancel` and
+`operation_resume` (`confirm=true`, and `BATC_API_TOKEN` set to the client's own token: operations never run as the
+local admin). See [docs/design/api-v1.md](docs/design/api-v1.md).
+
+### Connect an MCP client
+
 The server name is `bat`. Examples (add `--read-only` if you want to be sure):
 
 **Claude Code**

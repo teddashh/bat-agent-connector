@@ -1,0 +1,620 @@
+"""/api/v1 foundation: event log, API principals, OperationService, persisted inventory, HTTP surface."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+
+import pytest
+
+from bat_agent_connector import api_auth, registry, service
+from bat_agent_connector.channels import GUARDED_CHANNELS, ORCHESTRATE_CHANNELS, WRITE_CHANNELS
+from bat_agent_connector.errors import InvokeTimeout
+from bat_agent_connector.inventory import Inventory, InventorySettings
+from bat_agent_connector.operations import OperationError
+from bat_agent_connector.task_daemon import TaskDaemon
+from bat_agent_connector.task_journal import Journal
+from tests.conftest import adopt, make_config
+
+MANUAL = "sess-claude-0001"
+BAT_WRITES = WRITE_CHANNELS | ORCHESTRATE_CHANNELS | GUARDED_CHANNELS
+
+
+def write_frames(mock):
+    return [i for i in mock.invokes if i["channel"] in BAT_WRITES]
+
+
+@pytest.fixture
+def daemon(mock, tmp_path):
+    d = TaskDaemon(make_config(mock, writes=True, orchestrate=True, managed_roots=["/srv"],
+                               safety={"write_min_interval_s": 0}), tmp_path / "tasks.db")
+    yield d
+    d.journal.close()
+
+
+def token(d, actor, *scopes):
+    with d.journal.tx():
+        return api_auth.issue(d.journal.db, actor, list(scopes))
+
+
+async def http(port, method, path, *, tok=None, body=None, headers=None, raw_headers=None):
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    data = json.dumps(body).encode() if body is not None else b""
+    lines = [f"{method} {path} HTTP/1.1", f"Host: 127.0.0.1:{port}"]
+    if tok:
+        lines.append("Authorization: Bearer " + tok)
+    for k, v in (headers or {}).items():
+        lines.append(f"{k}: {v}")
+    lines += raw_headers or []
+    if data or method == "POST":
+        lines.append(f"Content-Length: {len(data)}")
+    writer.write(("\r\n".join(lines) + "\r\n\r\n").encode() + data)
+    await writer.drain()
+    raw = await asyncio.wait_for(reader.read(), 10)
+    writer.close()
+    head, _, payload = raw.partition(b"\r\n\r\n")
+    status = int(head.split(b" ")[1])
+    return status, json.loads(payload) if payload else None
+
+
+@pytest.fixture
+async def served(daemon):
+    server = await asyncio.start_server(daemon._handle, "127.0.0.1", 0)
+    yield daemon, server.sockets[0].getsockname()[1]
+    server.close()
+    await server.wait_closed()
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
+# --------------------------------------------------------------------------- event log
+def test_task_events_project_into_the_api_cursor_and_old_journals_backfill(tmp_path):
+    path = tmp_path / "j.db"
+    j = Journal(path)
+    t = j.submit(project="p", host="h1", workspace="w", original_words="do it", idempotency_key="k1")
+    page = j.api_events(0, 10)
+    assert page["events"] and all(e["resource_type"] == "task" and e["resource_id"] == t["task_id"]
+                                  for e in page["events"])
+    assert page["events"][0]["kind"].startswith("task.")
+    # an older journal (no projection yet) gets a one-time backfill on open
+    j.db.execute("DELETE FROM api_events")
+    j.db.execute("PRAGMA user_version=0")
+    j.close()
+    j = Journal(path)
+    again = j.api_events(0, 10)
+    assert [e["body"] for e in again["events"]] == [e["body"] for e in page["events"]]
+    assert j.api_events(again["next_cursor"], 10) == {"events": [], "next_cursor": again["next_cursor"],
+                                                      "head_cursor": again["head_cursor"], "has_more": False}
+    with pytest.raises(ValueError):
+        j.api_events(-1, 10)
+    j.close()
+
+
+def test_api_tokens_are_hashed_scoped_and_revocable(tmp_path):
+    j = Journal(tmp_path / "j.db")
+    with j.tx():
+        tok = api_auth.issue(j.db, "ted-dashboard", ["observe", "operate"], label="laptop")
+    assert tok not in json.dumps([dict(r) for r in j.db.execute("SELECT * FROM api_principals")])
+    p = api_auth.authenticate(j.db, tok, "admin-token-" + "x" * 30)
+    assert p.actor == "ted-dashboard" and p.allows("operate") and not p.allows("merge")
+    assert api_auth.authenticate(j.db, "admin-token-" + "x" * 30, "admin-token-" + "x" * 30).admin
+    assert api_auth.authenticate(j.db, "nope", "admin-token-" + "x" * 30) is None
+    for bad in (("local-admin", ["observe"]), ("x", ["root"]), ("x", []), ("bad actor!", ["observe"])):
+        with pytest.raises(ValueError):
+            api_auth.issue(j.db, *bad)
+    with j.tx():
+        assert api_auth.revoke(j.db, "ted-dashboard") == 1
+    assert api_auth.authenticate(j.db, tok, "admin-token-" + "x" * 30) is None
+    with j.tx():
+        short = api_auth.issue(j.db, "temp", ["observe"], ttl_s=60)
+    j.db.execute("UPDATE api_principals SET expires_at=? WHERE actor='temp'", (time.time() - 1,))
+    assert api_auth.authenticate(j.db, short, "admin-token-" + "x" * 30) is None
+    j.close()
+
+
+# --------------------------------------------------------------------------- operations
+def ted(*scopes):
+    return api_auth.Principal("ted-dashboard", frozenset(scopes or ("observe", "operate")))
+
+
+def send_op(daemon, key="k1", sid=MANUAL, text="hello", principal=None):
+    return daemon.ops.create(principal or ted(), action="session.send",
+                             target={"host": "h1", "session_id": sid}, params={"text": text},
+                             idempotency_key=key)
+
+
+async def test_operation_idempotency_scope_and_bat_sessions(daemon, mock):
+    with pytest.raises(OperationError) as e:
+        send_op(daemon)  # never observed and never created by the connector
+    assert e.value.status == 403 and e.value.code == "UNKNOWN_READ_ONLY"
+    await daemon.inventory.refresh_host("h1")
+    with pytest.raises(OperationError) as e:
+        send_op(daemon)  # Ted's BAT session: refused before anything is stored
+    assert e.value.status == 403 and e.value.code == "MANUAL_READ_ONLY"
+    assert daemon.journal.db.execute("SELECT COUNT(*) FROM operations").fetchone()[0] == 0
+    adopt(MANUAL)  # now a connector-created session in a managed root
+    with pytest.raises(OperationError) as e:
+        send_op(daemon, principal=ted("observe"))
+    assert e.value.status == 403 and e.value.code == "FORBIDDEN"
+    op, created = send_op(daemon)
+    again, created_again = send_op(daemon)
+    assert created and not created_again and again["operation_id"] == op["operation_id"]
+    with pytest.raises(OperationError) as e:
+        send_op(daemon, text="different words")
+    assert e.value.status == 409 and e.value.code == "IDEMPOTENCY_CONFLICT"
+    other, other_created = send_op(daemon, principal=api_auth.Principal("hermes", frozenset({"operate"})))
+    assert other_created and other["operation_id"] != op["operation_id"]  # keys are scoped by actor
+    with pytest.raises(OperationError) as e:
+        daemon.ops.create(ted(), action="session.delete", target={}, idempotency_key="x")
+    assert e.value.status == 422
+    assert write_frames(mock) == []  # nothing ran yet
+
+
+async def test_send_operation_runs_once_and_records_steps_and_events(daemon, mock):
+    adopt(MANUAL)
+    mock.echo_sends = True
+    op, _ = send_op(daemon)
+    await daemon.ops.drain()
+    done = daemon.ops.get(op["operation_id"])
+    assert done["status"] == "succeeded" and done["result"]["accepted"] is True
+    assert done["result"]["message_id"] == "batc-" + op["operation_id"]
+    assert [s["name"] for s in done["steps"]] == ["send"] and done["steps"][0]["status"] == "succeeded"
+    sends = [i for i in mock.invokes if i["channel"] == "claude:send-message"]
+    assert len(sends) == 1 and sends[0]["params"]["clientMessageId"] == "batc-" + op["operation_id"]
+    kinds = [e["kind"] for e in daemon.journal.api_events(0, 100, resource_id=op["operation_id"])["events"]]
+    assert kinds == ["operation.accepted", "operation.running", "operation.succeeded"]
+    await daemon.ops.drain()  # a finished operation never runs again
+    assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"]) == 1
+    await daemon.fleet.close()
+
+
+async def test_ambiguous_send_becomes_uncertain_and_settles_by_read_back(daemon, mock, monkeypatch):
+    adopt(MANUAL)
+    calls = []
+
+    async def lost(*a, **k):
+        calls.append(k["message_id"])
+        raise InvokeTimeout("h1: claude:send-message timed out after 120s")
+
+    monkeypatch.setattr(service, "session_send", lost)
+    op, _ = send_op(daemon)
+    await daemon.ops.drain()
+    row = daemon.ops.get(op["operation_id"])
+    assert row["status"] == "uncertain" and row["steps"][0]["status"] == "uncertain"
+    # Re-running without proof keeps it uncertain and never sends again.
+    daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+    await daemon.ops.drain()
+    assert daemon.ops.get(op["operation_id"])["status"] == "uncertain" and len(calls) == 1
+    # BAT did accept it: the turn record proves it, and the read-back settles the operation.
+    registry.record_turn("h1", MANUAL, "batc-" + op["operation_id"], queued=False, baseline_turns=3)
+    daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+    await daemon.ops.drain()
+    settled = daemon.ops.get(op["operation_id"])
+    assert settled["status"] == "succeeded" and settled["result"]["accepted"] and len(calls) == 1
+
+
+async def test_restart_replays_finished_steps_and_reconciles_unfinished_ones(daemon, mock, tmp_path):
+    adopt(MANUAL)
+    op, _ = send_op(daemon)
+    # Simulate a crash after the step intent was committed but before any outcome was recorded.
+    daemon.ops._transition(op["operation_id"], "running", attempts=1)
+    daemon.ops._step_start(op["operation_id"], "send", {"message_id": "batc-" + op["operation_id"]})
+    daemon.journal.close()
+    d2 = TaskDaemon(make_config(mock, writes=True, orchestrate=True, managed_roots=["/srv"]), tmp_path / "tasks.db")
+    await d2.ops.drain()
+    assert d2.ops.get(op["operation_id"])["status"] == "uncertain"
+    assert not any(i["channel"] == "claude:send-message" for i in mock.invokes)  # never re-sent
+    d2.journal.close()
+
+
+async def test_cancel_before_start_never_runs(daemon, mock):
+    adopt(MANUAL)
+    op, _ = send_op(daemon)
+    cancelled = daemon.ops.cancel(ted(), op["operation_id"])
+    assert cancelled["status"] == "cancelled"
+    await daemon.ops.drain()
+    assert write_frames(mock) == []
+    with pytest.raises(OperationError) as e:  # cancelling needs the action's scope (or being its actor)
+        daemon.ops.cancel(api_auth.Principal("someone-else", frozenset({"observe"})), op["operation_id"])
+    assert e.value.status == 403
+    other, _ = send_op(daemon, key="k-other")
+    daemon.ops.cancel(api_auth.Principal("teammate", frozenset({"operate"})), other["operation_id"])
+    events = daemon.journal.api_events(0, 100, resource_id=other["operation_id"])["events"]
+    assert events[-1]["kind"] == "operation.cancelled" and events[-1]["actor"] == "teammate"
+
+
+# --------------------------------------------------------------------------- inventory
+async def test_inventory_observes_read_only_and_pages_every_row_once(mock, tmp_path):
+    cfg = make_config(mock, writes=True, orchestrate=True)  # write tiers on, yet observation cannot write
+    j = Journal(tmp_path / "j.db")
+    inv = Inventory(j, cfg)
+    assert not inv.fleet.writes_enabled("h1")
+    r = await inv.refresh_host("h1")
+    assert r["reachable"] and r["sessions"] == 3 and r["added"] == 3
+    assert write_frames(mock) == []
+    seen, cursor = [], None
+    while True:
+        page = inv.list_sessions(limit=1, cursor=cursor)
+        seen += [s["session_id"] for s in page["sessions"]]
+        cursor = page["next_cursor"]
+        if not cursor:
+            break
+    assert sorted(seen) == sorted(["sess-claude-0001", "sess-codex-0002", "sess-unload-0003"])
+    row = inv.get_session("h1", MANUAL)
+    assert row["provenance"] == "manual" and row["api_access"] == "read_only" and row["stale"] is False
+    assert inv.list_sessions(api_access="managed")["sessions"] == []
+    with pytest.raises(ValueError):
+        inv.list_sessions(api_access="managed", cursor=inv.list_sessions(limit=1)["next_cursor"])
+    kinds = [e["kind"] for e in j.api_events(0, 50)["events"]]
+    assert kinds.count("session.added") == 3 and "host.reachable" in kinds
+    again = await inv.refresh_host("h1")  # nothing material changed: no new events
+    assert again["added"] == again["updated"] == 0
+    await inv.close()
+    j.close()
+
+
+async def test_inventory_keeps_offline_hosts_stale_and_marks_gone_after_two_misses(mock, tmp_path):
+    j = Journal(tmp_path / "j.db")
+    inv = Inventory(j, make_config(mock), InventorySettings(stale_after_s=60))
+    await inv.refresh_host("h1")
+    mock.ws_doc["terminals"] = [t for t in mock.ws_doc["terminals"] if t["id"] != "sess-codex-0002"]
+    await inv.refresh_host("h1")
+    assert inv.get_session("h1", "sess-codex-0002")["gone_at"] is None  # one miss is not proof
+    await inv.refresh_host("h1")
+    gone = inv.get_session("h1", "sess-codex-0002")
+    assert gone["gone_at"] and gone["stale_reason"] == "gone"
+    assert "sess-codex-0002" not in [s["session_id"] for s in inv.list_sessions()["sessions"]]
+    assert "sess-codex-0002" in [s["session_id"] for s in inv.list_sessions(include_gone=True)["sessions"]]
+    await inv.close()
+    await mock.stop()
+    r = await inv.refresh_host("h1")
+    assert r["reachable"] is False
+    rows = inv.list_sessions()["sessions"]
+    assert rows and all(s["stale"] and s["stale_reason"] == "host_unreachable" for s in rows)
+    assert inv.hosts()[0]["stale"] and "host.unreachable" in [e["kind"] for e in j.api_events(0, 100)["events"]]
+    await inv.close()
+    j.close()
+
+
+# --------------------------------------------------------------------------- HTTP
+async def test_http_auth_host_origin_and_reads(served, mock):
+    d, port = served
+    assert (await http(port, "GET", "/api/v1/version"))[0] == 200
+    assert (await http(port, "GET", "/api/v1/sessions"))[0] == 401
+    viewer = token(d, "viewer", "observe")
+    await d.inventory.refresh_host("h1")
+    status, body = await http(port, "GET", "/api/v1/sessions?limit=2", tok=viewer)
+    assert status == 200 and body["count"] == 2 and body["next_cursor"]
+    status, body = await http(port, "GET", "/api/v1/sessions/h1/" + MANUAL, tok=viewer)
+    assert status == 200 and body["session"]["provenance"] == "manual"
+    assert (await http(port, "GET", "/api/v1/sessions/nohost/x", tok=viewer))[0] == 404
+    status, caps = await http(port, "GET", "/api/v1/capabilities", tok=viewer)
+    assert status == 200 and caps["actor"] == "viewer"
+    assert {a["action"]: a["allowed"] for a in caps["actions"]}["session.send"] is False
+    status, body = await http(port, "GET", "/api/v1/sessions", tok=viewer,
+                              raw_headers=["Host: attacker.example"])  # a second Host header
+    assert status == 400
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(b"GET /api/v1/version HTTP/1.1\r\nHost: evil.example:80\r\n\r\n")
+    await writer.drain()
+    assert b" 400 " in (await reader.read())[:20]
+    writer.close()
+    status, body = await http(port, "GET", "/api/v1/hosts", tok=viewer, headers={"Origin": "https://evil.example"})
+    assert status == 403 and body["error"]["code"] == "BAD_ORIGIN"
+    status, body = await http(port, "GET", "/api/v1/hosts", tok=viewer, headers={"Origin": "http://127.0.0.1:9"})
+    assert status == 200 and body["hosts"][0]["reachable"]
+    assert (await http(port, "DELETE", "/api/v1/hosts", tok=viewer))[0] == 405
+    assert write_frames(mock) == []
+
+
+async def test_http_operations_end_to_end(served, mock):
+    d, port = served
+    operator = token(d, "ted-dashboard", "observe", "operate")
+    viewer = token(d, "viewer", "observe")
+    await d.inventory.refresh_host("h1")
+    req = {"action": "session.send", "target": {"host": "h1", "session_id": MANUAL}, "params": {"text": "hi"}}
+    status, body = await http(port, "POST", "/api/v1/operations", tok=viewer, body=req,
+                              headers={"Idempotency-Key": "a1"})
+    assert status == 403 and body["error"]["code"] == "FORBIDDEN"
+    status, body = await http(port, "POST", "/api/v1/operations", tok=operator, body=req,
+                              headers={"Idempotency-Key": "a1"})
+    assert status == 403 and body["error"]["code"] == "MANUAL_READ_ONLY"
+    assert (await http(port, "POST", "/api/v1/operations", tok=operator, body=req))[0] == 422  # no key
+    adopt(MANUAL)
+    mock.echo_sends = True
+    ops_task = asyncio.create_task(d.ops.loop(interval_s=0.05))
+    try:
+        status, body = await http(port, "POST", "/api/v1/operations?wait=5", tok=operator, body=req,
+                                  headers={"Idempotency-Key": "a1"})
+        assert status == 202 and body["created"] and body["operation"]["status"] == "succeeded"
+        op_id = body["operation"]["operation_id"]
+        status, again = await http(port, "POST", "/api/v1/operations", tok=operator, body=req,
+                                   headers={"Idempotency-Key": "a1"})
+        assert status == 200 and again["created"] is False and again["operation"]["operation_id"] == op_id
+        status, got = await http(port, "GET", f"/api/v1/operations/{op_id}", tok=viewer)
+        assert status == 200 and got["operation"]["steps"][0]["name"] == "send"
+        status, listing = await http(port, "GET", "/api/v1/operations?status=succeeded", tok=viewer)
+        assert [o["operation_id"] for o in listing["operations"]] == [op_id]
+        status, events = await http(port, "GET", "/api/v1/events?limit=500", tok=viewer)
+        assert "operation.succeeded" in [e["kind"] for e in events["events"]]
+    finally:
+        ops_task.cancel()
+        await asyncio.gather(ops_task, return_exceptions=True)
+    assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"]) == 1
+
+
+async def test_sse_stream_resumes_from_last_event_id(served):
+    d, port = served
+    viewer = token(d, "viewer", "observe")
+    with d.journal.tx():
+        first = d.journal.api_event("host", "h1", "host.reachable", {})
+        d.journal.api_event("host", "h1", "host.unreachable", {"error": "x"})
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write((f"GET /api/v1/events/stream HTTP/1.1\r\nHost: localhost:{port}\r\n"
+                  f"Authorization: Bearer {viewer}\r\nLast-Event-ID: {first}\r\n\r\n").encode())
+    await writer.drain()
+    data = b""
+    while b"host.unreachable" not in data:
+        data += await asyncio.wait_for(reader.read(4096), 5)
+    assert b"text/event-stream" in data and b"event: host.reachable" not in data
+    assert f"id: {first + 1}".encode() in data
+    writer.close()
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(f"GET /api/v1/events/stream HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n".encode())
+    await writer.drain()
+    assert b" 401 " in (await asyncio.wait_for(reader.read(), 5))[:20]
+    writer.close()
+
+
+async def test_rpc_doors_share_the_operation_service(served, mock):
+    d, port = served
+
+    async def rpc(tok, method, params):
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        body = json.dumps({"method": method, "params": params}).encode()
+        writer.write(b"POST /rpc HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer " + tok.encode()
+                     + b"\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+        await writer.drain()
+        raw = await reader.read()
+        writer.close()
+        return json.loads(raw.split(b"\r\n\r\n", 1)[1])
+
+    hermes = token(d, "hermes", "observe", "operate")
+    out = await rpc(hermes, "op_submit", {"action": "session.send", "idempotency_key": "h1",
+                                          "target": {"host": "h1", "session_id": MANUAL},
+                                          "params": {"text": "x"}, "entry": "mcp"})
+    assert out["error"] == "UNKNOWN_READ_ONLY" or out["error"] == "MANUAL_READ_ONLY"
+    assert (await rpc(hermes, "api_token_issue", {"actor": "x", "scopes": ["observe"]}))["error"] == "ValueError"
+    issued = await rpc(d._admin_token, "api_token_issue", {"actor": "grokbot", "scopes": ["observe"]})
+    assert issued["result"]["token"].startswith("batc_")
+    listed = await rpc(d._admin_token, "api_token_list", {})
+    assert {p["actor"] for p in listed["result"]["principals"]} == {"hermes", "grokbot"}
+    assert "token" not in json.dumps(listed)
+    caps = await rpc(issued["result"]["token"], "api_capabilities", {})
+    assert caps["result"]["actor"] == "grokbot"
+    assert (await rpc(issued["result"]["token"], "op_submit", {"action": "session.send"}))["error"] == "FORBIDDEN"
+
+
+# --------------------------------------------------------------------------- review follow-ups
+def answer_op(daemon, key="a1", **params):
+    return daemon.ops.create(ted(), action="session.answer", target={"host": "h1", "session_id": MANUAL},
+                             params={"permission": "allow", "tool_use_id": "tu1", **params}, idempotency_key=key)
+
+
+def due_now(daemon, op_id):
+    daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op_id,))
+
+
+async def test_a_failed_read_back_keeps_the_operation_uncertain(daemon, mock, monkeypatch):
+    from bat_agent_connector.errors import ConnectionLost
+
+    adopt(MANUAL)
+    mock.states[MANUAL]["pendingPermission"] = {"toolUseId": "tu1", "toolName": "Bash", "input": {}}
+
+    async def delivered_then_dropped(*a, **k):
+        raise ConnectionLost("h1: connection closed")
+
+    monkeypatch.setattr(service, "session_answer", delivered_then_dropped)
+    op, _ = answer_op(daemon)
+    await daemon.ops.drain()
+    assert daemon.ops.get(op["operation_id"])["status"] == "uncertain"
+
+    async def host_down(*a, **k):
+        raise ConnectionLost("h1: connect failed")
+
+    monkeypatch.setattr(service, "_meta", host_down)
+    due_now(daemon, op["operation_id"])
+    await daemon.ops.drain()
+    after = daemon.ops.get(op["operation_id"])
+    assert after["status"] == "uncertain" and after["steps"][0]["status"] == "uncertain"
+    assert after["uncertain_tries"] == 2
+
+
+async def test_answers_name_the_exact_prompt(daemon, mock):
+    adopt(MANUAL)
+    with pytest.raises(OperationError) as e:
+        daemon.ops.create(ted(), action="session.answer", target={"host": "h1", "session_id": MANUAL},
+                          params={"permission": "allow"}, idempotency_key="no-tuid")
+    assert e.value.code == "INVALID_PARAMS" and "tool_use_id" in e.value.message
+
+
+async def test_a_lost_send_reply_is_settled_from_the_bat_transcript(daemon, mock, monkeypatch):
+    adopt(MANUAL, agent_preset="claude-code")
+    mock.echo_sends = True
+    real_send = service.session_send
+
+    async def reply_lost(*a, **k):
+        await real_send(*a, **k)  # BAT took the frame and echoed the prompt
+        raise InvokeTimeout("h1: claude:send-message timed out")
+
+    monkeypatch.setattr(service, "session_send", reply_lost)
+    monkeypatch.setattr(registry, "get_turn", lambda *a, **k: None)  # the local turn record never happened
+    op, _ = send_op(daemon)
+    await daemon.ops.drain()
+    assert daemon.ops.get(op["operation_id"])["status"] == "uncertain"
+    # A cancel arriving now must not hide the delivered message: the read-back runs first.
+    assert daemon.ops.cancel(ted(), op["operation_id"])["status"] == "uncertain"
+    await daemon.ops.drain()
+    done = daemon.ops.get(op["operation_id"])
+    assert done["status"] == "succeeded" and done["result"]["settled_by"] == "bat_transcript"
+    assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"]) == 1
+
+
+async def test_needs_attention_can_be_cancelled_or_resumed(daemon, mock, monkeypatch):
+    adopt(MANUAL)
+
+    async def lost(*a, **k):
+        raise InvokeTimeout("h1: timed out")
+
+    monkeypatch.setattr(service, "session_send", lost)
+    monkeypatch.setattr(registry, "get_turn", lambda *a, **k: None)
+    ops = [send_op(daemon, key=k)[0] for k in ("n1", "n2")]
+    for op in ops:
+        await daemon.ops.drain()
+        daemon.journal.db.execute("UPDATE operations SET uncertain_tries=5 WHERE operation_id=?",
+                                  (op["operation_id"],))
+        due_now(daemon, op["operation_id"])
+        await daemon.ops.drain()
+        assert daemon.ops.get(op["operation_id"])["status"] == "needs_attention"
+    cancelled = daemon.ops.cancel(ted(), ops[0]["operation_id"])  # its worker already finished
+    assert cancelled["status"] == "cancelled" and "never proven" in cancelled["status_reason"]
+    resumed = daemon.ops.resume(ted(), ops[1]["operation_id"])
+    assert resumed["status"] == "running" and resumed["uncertain_tries"] == 0
+    await daemon.ops.drain()
+    assert daemon.ops.get(ops[1]["operation_id"])["status"] == "uncertain"  # read back again, never re-sent
+    with pytest.raises(OperationError) as e:
+        daemon.ops.resume(ted(), ops[0]["operation_id"])
+    assert e.value.code == "NOT_RESUMABLE"
+
+
+async def test_waiting_does_not_use_up_the_read_back_budget(daemon):
+    from bat_agent_connector.operations import ActionDef, Wait
+
+    calls = {"n": 0}
+
+    async def run(ctx):
+        calls["n"] += 1
+        if calls["n"] <= 6:
+            raise Wait("waiting_external", "polling", delay_s=1)
+
+        async def lost():
+            raise InvokeTimeout("timed out")
+
+        return await ctx.step("call", lost)
+
+    daemon.ops.register(ActionDef("test.poll", "operate", "test", run))
+    op, _ = daemon.ops.create(ted(), action="test.poll", idempotency_key="poll")
+    for _ in range(7):
+        due_now(daemon, op["operation_id"])
+        await daemon.ops.drain()
+    after = daemon.ops.get(op["operation_id"])
+    assert after["status"] == "uncertain" and after["uncertain_tries"] == 1 and after["attempts"] == 7
+
+
+async def test_http_edges(served, mock, monkeypatch):
+    d, port = served
+    ted_tok = token(d, "ted-dashboard", "observe", "operate")
+    adopt(MANUAL)
+    await d.inventory.refresh_host("h1")
+    status, body = await http(port, "POST", "/api/v1/operations?wait=soon", tok=ted_tok,
+                              body={"action": "session.send", "target": {"host": "h1", "session_id": MANUAL},
+                                    "params": {"text": "x"}}, headers={"Idempotency-Key": "w1"})
+    assert status == 422 and d.ops.list()["operations"] == []  # refused before anything was stored
+    status, _ = await http(port, "POST", "/api/v1/operations", tok=ted_tok,
+                           raw_headers=["Content-Length: -5"])
+    assert status == 400
+    writer_only = token(d, "writer", "operate")
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write((f"GET /api/v1/events/stream HTTP/1.1\r\nHost: localhost\r\n"
+                  f"Authorization: Bearer {writer_only}\r\n\r\n").encode())
+    await writer.drain()
+    assert b" 403 " in (await asyncio.wait_for(reader.read(), 5))[:20]
+    writer.close()
+
+
+async def test_event_streams_stop_on_revocation_and_are_capped_per_actor(served, monkeypatch):
+    from bat_agent_connector import api_v1
+
+    d, port = served
+    monkeypatch.setattr(api_v1, "REAUTH_S", 0.2)
+    monkeypatch.setattr(api_v1, "MAX_STREAMS_PER_ACTOR", 1)
+    viewer = token(d, "viewer", "observe")
+
+    async def open_stream():
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write((f"GET /api/v1/events/stream HTTP/1.1\r\nHost: localhost\r\n"
+                      f"Authorization: Bearer {viewer}\r\n\r\n").encode())
+        await writer.drain()
+        return reader, writer
+
+    r1, w1 = await open_stream()
+    assert b" 200 " in (await asyncio.wait_for(r1.read(64), 5))
+    r2, w2 = await open_stream()
+    assert b" 429 " in (await asyncio.wait_for(r2.read(), 5))[:20]
+    w2.close()
+    with d.journal.tx():
+        api_auth.revoke(d.journal.db, "viewer")
+    assert await asyncio.wait_for(r1.read(), 5) is not None  # the server ends the stream
+    assert r1.at_eof()
+    w1.close()
+
+
+async def test_cors_only_for_listed_origins(mock, tmp_path):
+    cfg = make_config(mock, writes=True, orchestrate=True)
+    d = TaskDaemon(cfg, tmp_path / "t.db")
+    d.api.allowed_origins = ("https://hub.example",)
+    server = await asyncio.start_server(d._handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        async def raw(method, origin):
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(f"{method} /api/v1/version HTTP/1.1\r\nHost: localhost\r\nOrigin: {origin}\r\n\r\n".encode())
+            await writer.drain()
+            head = (await asyncio.wait_for(reader.read(), 5)).split(b"\r\n\r\n")[0].decode()
+            writer.close()
+            return head
+
+        pre = await raw("OPTIONS", "https://hub.example")
+        assert " 204 " in pre and "Access-Control-Allow-Origin: https://hub.example" in pre
+        assert "Access-Control-Allow-Headers: Authorization" in pre
+        assert "Access-Control-Allow-Origin: https://hub.example" in await raw("GET", "https://hub.example")
+        local = await raw("GET", "http://127.0.0.1:9")
+        assert " 200 " in local and "Access-Control-Allow-Origin" not in local
+        assert " 403 " in await raw("OPTIONS", "http://127.0.0.1:9")
+    finally:
+        server.close()
+        await server.wait_closed()
+        await d.fleet.close()
+        await d.inventory.close()
+        d.journal.close()
+
+
+async def test_inventory_keeps_what_one_refresh_did_not_observe(mock, tmp_path):
+    cfg = make_config(mock, writes=True)
+    journal = Journal(tmp_path / "inv.db")
+    inv = Inventory(journal, cfg, InventorySettings(activity_every=5))
+    try:
+        await inv.refresh_host("h1")  # run 0 reads every activity source
+        first = inv.get_session("h1", MANUAL)
+        assert first["last_activity_ms"]
+        mock.states[MANUAL]["pendingAskUser"] = {"toolUseId": "tu9", "questions": [{"question": "Q?"}]}
+        mock.metas[MANUAL]["isStreaming"] = True  # makes the auto check read state once
+        await inv.refresh_host("h1")
+        assert inv.get_session("h1", MANUAL)["pending"]["toolUseId"] == "tu9"
+        mock.metas[MANUAL]["isStreaming"] = False  # the next cheap refresh does not re-read state
+        await inv.refresh_host("h1")
+        again = inv.get_session("h1", MANUAL)
+        assert again["pending"]["toolUseId"] == "tu9"  # unobserved is not "answered"
+        assert again["last_activity_ms"] >= first["last_activity_ms"]  # activity never moves backwards
+        mock.handlers["workspace:load"] = lambda p: None  # a null workspace document
+        for _ in range(3):
+            r = await inv.refresh_host("h1")
+        assert r["reachable"] is False and inv.get_session("h1", MANUAL)["gone_at"] is None
+        with journal.tx():
+            journal.db.execute("""INSERT INTO sessions_observed(host,session_id,body,digest,provenance,api_access,
+                first_seen_at,last_seen_at) VALUES('old-host','s1','{}','d','manual','read_only',0,0)""")
+        assert "old-host" not in {s["host"] for s in inv.list_sessions(include_gone=True)["sessions"]}
+    finally:
+        await inv.close()
+        journal.close()
