@@ -323,7 +323,6 @@ class BatTaskAdapter:
             registry.update(host, sid, status="uncertain")
             raise last_error or WriteRefused("BAT reviewer start did not settle")
         meta = await client.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
-        confinement.ensure_confirmed(record, meta)
         registry.update(host, sid, status="active", cwd=lead["cwd"], confinement=confinement.confirm(record, meta))
         if self.register_tabs and hc.orchestrate_register_tabs:
             try:
@@ -481,7 +480,6 @@ class BatTaskAdapter:
         evidence = json.loads(intent["payload"]) if intent else {}
         record = (existing or {}).get("confinement") or evidence.get("confinement")
         if record:
-            confinement.ensure_confirmed(record, meta)
             if record.get("verification", {}).get("status") == "pending":
                 record = confinement.confirm(record, meta)
                 if existing:
