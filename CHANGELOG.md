@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- Observation worktree maker agreement ([design](docs/design/observation.md), plan §06/§08/§11, B01/B03/D05):
+  share the connector creation predicate and registry root walk with the ownership classifier, including legacy
+  batc/ branches. Retain journaled connector slots or parent slots instead of minting BAT registry IDs; missing
+  slots remain unknown. Refuse BAT worktree actions when successor/reviewer rows lose root markers, preserve
+  existing refusals, and verify live identity/history/relations and data-step-2 replay without a new migration.
+
 - Observation history privacy and occurrence bounds ([design](docs/design/observation.md), plan §08/§10/§11, B03):
   keep reason/previous_reason only as fixed enums; omit task and operation diagnostics, titles, prose containers
   and free-form refs recursively from history and saved snapshots while preserving recorded codes and identities.

@@ -31,6 +31,7 @@ from . import registry
 from .channels import GUARDED_CHANNELS, ORCHESTRATE_CHANNELS, WRITE_CHANNELS
 from .config import HostConfig
 from .errors import BatError, ResourceReadOnly
+from .resource_ids import connector_made, registry_worktree_root
 
 MANUAL = "manual"
 MANAGED = "connector_managed"
@@ -271,9 +272,11 @@ def folder_owner(hc: HostConfig, row: dict, entries: list[dict], depth: int = 0)
 BAT_WORKTREE_ACTIONS = frozenset({"worktree.rehydrate", "worktree.merge", "worktree.remove"})
 
 
-def worktree_maker(row: dict) -> str:
-    if (row.get("worktree_made_by") == "connector" or row.get("checkpoint_id") or row.get("integration_operation_id")
-            or str(row.get("branch") or "").startswith("batc/")):
+def worktree_maker(row: dict, entries: list[dict] | None = None, lead_of=None, *, host: str | None = None) -> str:
+    root = registry_worktree_root(entries if entries is not None else [row],
+                                  host if host is not None else row.get("host", ""), row.get("session_id"), lead_of)
+    # Preserve every previous refusal, including conflicting current-row creation evidence.
+    if connector_made(row) or connector_made(root or {}):
         return "connector"
     return "bat"
 
@@ -296,7 +299,7 @@ def classify(hc: HostConfig, session_id: str, *, terminal: dict | None, entries:
         return cls
     cls.registry_status = row.get("status")
     cls.worktree_path = norm(row.get("worktree_path"))
-    cls.worktree_made_by = worktree_maker(row)
+    cls.worktree_made_by = worktree_maker(row, entries, host=hc.name)
     created = _creation_evidence(row)
     if not created:
         cls.code, cls.reason = "UNKNOWN_READ_ONLY", "the connector record carries no creation evidence"
