@@ -29,7 +29,7 @@ BAT [ClaudeRuntimeRouter::stop_session／claude_stop_session](https://github.com
 | `integration.receipts()` 的 effective_status 含送達與 unknown | 依 exact revision coverage 判斷，不能看 ancestor／PR link／done／verified |
 | registry 沒有 delete；inventory gone 仍保留 | 不刪 registry；確認 cleanup 後標 cleaned，保存 tombstone、aliases、receipt |
 | `lifecycle.session_cleanup` 在 auto_cleanup 下 merge／remove／stop | 只讀評估；apply 回 LEGACY_CLEANUP_DISABLED。auto_cleanup 繼續解析但 deprecated |
-| `fanout_from_plan` 對 planner 呼叫上述 cleanup | 只用原 stop 路徑停止 idle planner，保留 worktree，誠實回報 |
+| `fanout_from_plan` 對 planner 呼叫上述 cleanup | caller confirm=true 且全部 planned tasks 啟動成功，才用原 stop 路徑停止 idle planner；其他情況保留 planner 供 retry，worktree 一律保留 |
 | `TaskDaemon._tick_task` finally 清 terminal external worktree，留下 refs/batc/tasks/* | **保持原行為**。它是 task owner；本輪所有 task-owned 資源列 TASK_OWNED，不問 coordinator、不獨立回收 |
 | 詳情資料可能引用已移除資源 | 自有 tombstone routes 永久查詢；其他詳情最多一個 lookup 附加 cleanup context，不接管 observation 的 sessions/history |
 
@@ -360,7 +360,12 @@ Capabilities列cleanup/read/apply/discard、host能力／reason／limits／15分
 api-token issue help、api-v1.md、README兩語、兩份skills都列新scopes；agent不要求cleanup_discard。
 Legacy batc cleanup／session_cleanup名稱保留只讀，不alias新的host-wide語意；apply立即409並指出新流程。
 auto_cleanup只保留config解析，deprecated且不啟用writes；worktree_merge/remove仍是explicit動作，只共享guard。
-Fanout planner經原stop後回planner_cleanup={stopped,reason,worktree_kept:true}，不merge/remove。
+Fanout planner 只有 caller `confirm=true` 且每一個 planned task 都成功啟動，才經原 stop 路徑停止。
+未確認、任一 start failed 或 loop 提早停止，都保留 loaded planner／原 plan 供 retry；不能因 starts
+回傳 error 或只是部分成功就 stop。回 `planner_cleanup={stopped:false,reason,worktree_kept:true,
+next_action:"batc resource-cleanup"}`，reason 區分 confirmation／start failed／incomplete loop。
+成功 fan-out 的 stop 仍核 tier／policy／streaming，stop refused／error 也保留 reason 與 next_action。
+任何情況都不 merge／remove planner worktree；idle planner 可另經 reviewed cleanup 回收。
 
 Dashboard #/cleanup、#/cleanup/resource/ID：scope／子工作、真resource與all reasons／plan、保留commits與
 未送達標記、discard不可復原內容、一次apply、逐itemreceipt、tombstone搜尋、實際retained列表。
@@ -414,6 +419,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | 原ID/位置/原因/relations/PR與真retained；E01/E02 | test_e01_original_ids_remain_searchable_with_location_reason_and_pr（同測試移除實際ref，確認列為unavailable） |
 | TASK_OWNED／原TaskDaemon不變 | test_e01_task_owned_resources_are_retained；原test_external_cleanup_retains_unmerged_commit_and_recovers_after_restart／test_terminal_cleanup_requires_proof_before_journal_path_is_cleared |
 | legacy只讀、config解析、planner只stop、跨processguard | test_e01_legacy_apply_is_disabled_and_auto_cleanup_still_loads、test_e01_fanout_stops_planner_and_keeps_worktree、test_e01_guard_refuses_legacy_writes_on_reserved_and_cleaned_resources |
+| planner stop 需確認與全數 tasks 啟動；失敗保留 plan 供 retry；E01 | test_e01_fanout_without_confirmation_keeps_planner_loaded、test_e01_fanout_failed_start_keeps_planner_for_retry（第一個／最後一個 start 失敗）、test_e01_fanout_stops_planner_and_keeps_worktree（stop frame 恰一次） |
 | boundedread／serialization／deadline | test_e01_previews_serialize_per_host_and_share_read_deadline |
 | attachmentreplicas只豁免exact manifest／exacttemps | test_e01_attachment_replicas_are_removed_without_discard_scope、test_e01_edited_or_extra_replica_content_counts_as_uncommitted、test_e01_replicas_without_manifest_are_ordinary_content、test_e01_replica_anomalies_require_reviewed_discard（missing/link/hardlink/directory）、test_e01_replica_edit_after_preview_is_stale、test_e01_lost_replies_reconcile_each_cleanup_phase（discard.replica）、test_e01_exact_temporary_requires_creation_markers_and_never_sweeps、test_e01_empty_integration_temporary_has_exact_intent_and_no_restore_promise |
 | acceptedauthority由server記錄／public request retry／載體不被guard退休 | test_e01_accepted_authorization_is_server_recorded（HTTP 422、persisted actor/scopes/choices、同key retry）、test_e01_accepted_authority_survives_key_rotation_and_carrier_stays_usable |

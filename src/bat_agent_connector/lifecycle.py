@@ -1538,7 +1538,8 @@ async def fanout_plan_session(
 ) -> dict:
     """Start a fresh Codex planning session (host codex_model, own worktree, read-only instructions) that
     returns a ```bat-fanout plan for the person's verbatim message. Use when the main session is busy or
-    quota-stopped. After it answers, fanout_from_plan(session_id) starts the tasks and cleans the planner up."""
+    quota-stopped. After it answers, confirmed fanout_from_plan(session_id) stops the planner only when every
+    task starts; its worktree is kept for reviewed resource-cleanup."""
     from .orchestrate import session_start
 
     cap = fleet.config.safety.max_start_per_call
@@ -1567,7 +1568,7 @@ async def fanout_from_plan(
 ) -> dict:
     """Start one worktree session per item of the latest ```bat-fanout block in a session's replies, with the
     item's prompt verbatim (plus the BAT-STATUS request). Nothing is re-planned. A planner session made by
-    fanout_plan_session is cleaned up afterwards."""
+    fanout_plan_session is stopped only after confirmed, complete fan-out; its worktree is kept."""
     from .orchestrate import session_start
     from .service import session_read
 
@@ -1598,10 +1599,19 @@ async def fanout_from_plan(
     out["started"] = started
     e = registry.get(host, session_id)
     if e and e.get("role") == "planner":
-        try:
-            stopped = await _stop(fleet, host, session_id, Audit(fleet.config.safety))
-            out["planner_cleanup"] = {**stopped, "worktree_kept": True,
-                                      "next_action": "batc resource-cleanup"}
-        except BatError as ex:
-            out["planner_cleanup"] = {"stopped": False, "reason": _err(ex), "worktree_kept": True}
+        kept = {"stopped": False, "worktree_kept": True, "next_action": "batc resource-cleanup"}
+        if confirm is not True:
+            kept["reason"] = "confirm=true is required; planner kept for retry"
+        elif any("error" in s for s in started):
+            count = sum("session_id" in s for s in started)
+            kept["reason"] = f"fan-out start failed; loop stopped after {count} of {len(plan['tasks'])} tasks; planner kept for retry"
+        elif len(started) != len(plan["tasks"]):
+            kept["reason"] = "fan-out loop stopped early; not every planned task started; planner kept for retry"
+        else:
+            try:
+                _orch_guard(fleet, host, confirm)
+                kept.update(await _stop(fleet, host, session_id, Audit(fleet.config.safety)))
+            except BatError as ex:
+                kept["reason"] = _err(ex)
+        out["planner_cleanup"] = kept
     return out
