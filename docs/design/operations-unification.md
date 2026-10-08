@@ -280,6 +280,21 @@ task send operation 的成功必要條件是：這個 operation 已保存 `task_
 
 bulk approve、deferred raise、明確 relay target 與 implicit client-resume 都使用同一 gate。bulk 被擋的項目保留 skipped/code，不阻擋其他獨立 standalone 項目；不得把 refused task 項目帶到新 session 繼續。task-owned worktree merge/remove/failover 由 F 拒絕 `TASK_OWNED_CONTROL_REQUIRED`；legacy cleanup dry run 繼續 KEEP，apply 由 cleanup package 封鎖。Task Service 自己的 external_worktree cleanup 保留原命名／證據與 coordinator 生命週期，不交另一個 cleanup owner。
 
+### Runtime answer 身分與其他 controls 盤點（Part A）
+
+task-owned legacy answer 省略 `tool_use_id` 時，`session_control` 在 task → session lock 下先只讀 live state。先沿用 session readiness／cwd 保護；`answers` 只取 `pendingAskUser.toolUseId`，`permission` 只取 `pendingPermission.toolUseId`。沒有對應 prompt／可解析 ID 或 live state 不可讀時，沿用 service 的「session has no pending ask-user question／permission request」拒絕；unloaded 沿用「session is not loaded on the host; nothing to answer」。不建立 command，不改 task。
+
+讀取後再查原 task gate，將解析出的 ID 保存於 command payload 的 `tool_use_id`，並標 `tool_use_id_source: service`；同一 ID 傳給原 `service.session_answer`。ID 在任何 answer frame 前已提交。若 service 在自己的 host write lock 下讀到另一個 prompt，沿用原 mismatch message，command 為 rejected，task 不變，零 frame。transport 回覆遺失後，重啟的 coordinator tick 以原 `_reconcile_command` 讀回：舊 ID 不在任一 pending prompt 才 settled，uncertain task 恢復 running；讀取失敗／舊 ID 仍 pending 則保持 uncertain，不重送。
+
+明確 `tool_use_id` 的路徑完全沿用原判斷與錯誤；HTTP `session.answer` 仍要求明確 ID。caller params、operation request hash／idempotency 和 legacy result shape 不變；解析值只存 command，source 標為 service，不填回 caller params／preconditions。舊 payload 沒有 ID 時不能事後猜出已清除的 prompt，本次不回填，也不另加 settlement 規則。
+
+| Runtime control | durable 身分／意圖 | 原 `_reconcile_command` 的證明規則／盤點結果 |
+|---|---|---|
+| answer（ask-user／permission；含 approve-pending） | task/session/version＋固定 tool_use_id；省略 ID 時在 command 前解析並標 service source | 讀回原 ID 已清除才 settled；修掉 legacy ID 遺漏。permission answer 與修改 permission mode 是兩種 command。 |
+| interrupt（soft／hard） | command.session_id、payload.mode 與 control_version；default mode 已由 wrapper 固定 | 同 session 的 meta 明確 isStreaming=false 才 settled；已有所需身分，無省略後才選 target 的問題。 |
+| permissions／mode changes（含 deferred raise） | command.session_id＋payload.mode／control_version；Claude mode、Codex sandbox／approval 由既有 mode mapping 決定 | payload 已有固定 mode；Part A 的 `_reconcile_command` 沒有正面 mode 證明，尤其 Codex 兩個 frame 可部分完成，保持 uncertain。不能拿清除 permission prompt 的證據結清 mode change；本次不新增權限回查規則。 |
+| relay／continue／client-resume | 交原 send command，固定 session、message_id、before cursor／agent kind、最終 prompt_sha256 | 原 exact echo／回合歸因讀回；payload 已有原送字身分，未知結果不再生成 message ID 或重送 relay。client-resume 仍經原 FrameGuard。 |
+
 ## Task operations 與 A05
 
 `task.submit` 的 operation succeeded 表示「原 task 意圖已受理」，不是 coding／verification 已完成。它的 refs.task_id 永遠指向原 task，後續查 work_status／GET tasks／events。pause／resume 表示控制變更已持久；abort 則另有已證明／uncertain 的 interrupt step。operation.cancel 不會撤銷已提交 task；要停派送使用 task.pause。不能用 operation.resume 重送 task prompt。
@@ -314,6 +329,7 @@ work_submit 原已要求 key，保留其最大 256 字相容長度；一般 oper
 | permissions | Claude mode；Codex sandbox 與 approval 各一步 | 讀同 session meta 的實際 mode；證據不足時維持 uncertain。deferred raise 保存固定目標／版本；task gate 改變時拒絕，不盲目掃全 registry。 |
 | interrupt／pause abort | interrupt／abort 各一步；固定 task/session/version | 證明相同 session 不 streaming；查不到或 binding 不符不能算完成。已 pause 的意圖保留，不因 abort 不明而退回未 paused。 |
 | task-owned session.send／answer／interrupt | operation_id 連原 task command；保留原 payload／control_version | operation 讀回先結清自己的 step；下次 coordinator.tick 在 task lock 下以原 `_reconcile_command` 的證據結清 command（send 為 accepted，其餘為 settled），將 lead task 恢復 running。operation 的證據不代替 task 回執；command 未解仍擋控制，回查不明維持 uncertain、不重送。 |
+| task-owned legacy answer 省略 prompt ID | command 前只讀並固定 tool_use_id；payload.tool_use_id_source=service | 回覆遺失後 tick 可依原 prompt 清除規則 settled；prompt 在 resolution 後更換則 service mismatch、rejected／零 frame。無對應 prompt 時零 command。 |
 | task-scoped session.send 的 terminal command | `task_send_command` 回執、原 command status／payload、`task_dispatch` failure | command status 已提交，但 result／refusal 未提交即 crash：cancelled／rejected 沿用下表的本機結果，不進 uncertain、不建立新 command／BAT frame；舊 coordinator send 與 tick 共用這項處理。 |
 | start／relay 新建／fanout 項目 | reserve IDs、worktree.create、start-session、選配 tab append、第一個 prompt | 核對預留 ID、creation evidence、cwd、branch。已存在只補回執；不能重新 random ID、刪已可能成功的 worktree，或回退人工 cwd。tab 整份 workspace save 的既有 race 不在此聲稱修好。 |
 | failover | 固定 source/successor、writer proof、start、獨立 handoff send | successor 存在不代表 handoff 成功；舊 writer 不明時不建第二 writer。registry starting／uncertain 不作「可再開」依據。 |
@@ -423,6 +439,8 @@ Phase 2 擴充原 owner 機制，沒有第二份 owner database／另一套 leas
 | A05／A07；§09／§10（Part A admission binding） | `test_a07_session_operation_keeps_admission_incarnation`、`test_a07_send_refuses_replaced_admission_session`、`test_a07_task_actions_keep_admission_version` | send／answer／interrupt／permission answer，省略或明確版本：pause＋resume 後拒絕 CONTROL_VERSION_CONFLICT，無競態恰一 frame。task target send session 被換後 TASK_BINDING_MISMATCH，零 frame／command／task write。verify／request_ted／stage／pause／resume／reconcile／continuation 逐 action 綁定版本；stale pause／resume 不覆寫較新控制。原 request hash、refusal replay 與 success replay 不變；明確 stale 版本仍在 admission 拒絕。 |
 | A05／A07；§09／§10（binding 持久化與相容） | `test_a05_admission_binding_is_atomic_with_operation_row`、`test_a07_admission_incarnation_survives_restart`、`test_a07_task_session_actions_refuse_replaced_admission_role`、`test_a07_preupgrade_operation_without_admission_binding_keeps_old_behavior`、`test_a05_legacy_task_door_records_admission_binding`、`test_a07_readback_of_old_incarnation_does_not_dispatch_again` | admission event 前 crash rollback 整個 row；restart 保留原 binding／拒絕，新 key 恰送一次。verify／abort pause／reviewer reconcile 不可換 session；舊無 binding rows 保留原行為。RPC／MCP／CLI 相同保存；已送 frame 在新版 incarnation 仍可 readback＋coordinator tick，不重送。 |
 | A05；§09（Part A receipt replay 與控制） | `test_a05_locked_task_action_replays_receipt_after_state_change`、`test_a05_task_controls_do_not_wait_for_task_lock_or_change_terminal_task`、`test_a05_reconcile_refuses_command_settled_while_waiting_for_task_lock`、`test_a05_verify_request_ted_and_stage_use_original_receipts` | succeeded receipt 優先於新 state／version；未競態要求仍成功。pause／resume 本機 effect 不等 task lock、保留 terminal task；原 command 在等鎖時已被 tick 接受，reconcile 不消耗 capability／不寫對帳回執。 |
+| A07；§09／§10（Part A legacy answer 身分） | `test_a07_legacy_answer_resolves_prompt_before_frame_and_reconciles_after_restart`、`test_a07_legacy_answer_prompt_change_rejects_command_before_frame`、`test_a07_legacy_answer_without_resolvable_prompt_creates_no_command`、`test_a07_answer_resolution_rechecks_task_gate_before_command` | ask-user／permission 都在 frame 前提交 ID；BAT 接受後遺失 reply，restart 先讀取失敗仍 uncertain，再讀回已清除才 settled／running，零第二 frame；下一個 control 可受理。prompt 更換為原 mismatch，command rejected、task 不變。只有另一類 prompt、缺 ID、unreadable／unloaded 時零 command；resolution await 時 pause，零 command／frame。 |
+| A07；§10（runtime control 盤點與相容） | `test_a07_explicit_answer_prompt_keeps_existing_behavior`、`test_a07_legacy_mcp_answer_without_prompt_id_uses_owner_resolution`、`test_a07_permission_mode_identity_survives_lost_reply_without_replay`、`test_a07_relay_runtime_command_has_original_send_readback_identity`、`test_a07_operation_readback_and_coordinator_tick_settle_task_command` | 明確 ID 的 match／mismatch 不變；legacy MCP 經原 owner 解析。permissions mode payload 完整，lost reply 保持未知、零第二設定 frame；relay 原 hash／message ID 可讀回，interrupt 沿用 idle 證明。caller contract／hash 不變。 |
 
 故障注入只用 `tests/mockbat.py`、`tests/fakegithub.py`、[test_checkpoints.py](../../tests/test_checkpoints.py) 的 LocalRunner／RealGitLog 與 temp Git repos。驗證 policy 時比較所有寫 channel 與目的端，不能只數 send-message。停用中的 `pytest.mark.skip` task 測試不算 A07／A08 證據；舊 engine／mid-task failover 的 skip 不因本包自動啟用。
 

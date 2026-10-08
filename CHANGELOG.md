@@ -69,7 +69,10 @@
   role remain fixed even when callers omit control_version. Stale execution, including pause/resume and task
   continuation, fails CONTROL_VERSION_CONFLICT / TASK_BINDING_MISMATCH before any effect. Caller preconditions,
   request hashes and same-key replay are unchanged; old unbound operations retain their behaviour (A05/A07,
-  §09/§10).
+  §09/§10). Legacy task-owned answers without a prompt ID now resolve and journal the ask-user or permission
+  ID before dispatch, then pass it to the existing service check. Lost replies settle through the original
+  coordinator read-back after restart; a changed prompt is rejected before any frame, and a missing prompt
+  creates no command. Explicit IDs, caller params, hashes and result shapes are unchanged (A07, §09/§10).
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps

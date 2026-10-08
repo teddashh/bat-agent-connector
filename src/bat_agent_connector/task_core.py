@@ -187,6 +187,25 @@ class TaskCoordinator:
             async with self._lock(host, sid):
                 task = check(self.journal, task_id, host, sid, action, task["control_version"])
                 before = await self.adapter.prepare_send(task, sid) if action == "send" else {}
+                resolved_prompt = False
+                if action == "answer" and not params.get("tool_use_id"):
+                    from . import service
+                    answers, permission = params.get("answers"), params.get("permission")
+                    if (answers is None) == (permission is None):
+                        raise WriteRefused("pass exactly one of answers (for ask-user) or permission (allow|deny)")
+                    client = self.adapter.fleet.client(host)
+                    tab, _ = await service._resolve_session(client, sid)
+                    meta = await service._meta(client, sid)
+                    if not service._state_safe(service.agent_kind(tab.get("agentPreset")), meta):
+                        raise WriteRefused("session is not loaded on the host; nothing to answer")
+                    state = await client.invoke("claude:get-session-state", {"sessionId": sid})
+                    field = "pendingAskUser" if answers is not None else "pendingPermission"
+                    prompt = state.get(field) if isinstance(state, dict) else None
+                    if not isinstance(prompt, dict) or not prompt.get("toolUseId"):
+                        label = "ask-user question" if answers is not None else "permission request"
+                        raise WriteRefused("session has no pending " + label)
+                    params = {**params, "tool_use_id": prompt["toolUseId"]}
+                    resolved_prompt = True
                 if context:
                     check_binding(context)
                 check(self.journal, task_id, host, sid, action, task["control_version"])
@@ -195,6 +214,8 @@ class TaskCoordinator:
                            "before": before, "operation_id": params.get("operation_id"),
                            "prompt_sha256": hashlib.sha256(str(params.get("text", "")).encode()).hexdigest(),
                            "tool_use_id": params.get("tool_use_id"), "mode": params.get("mode")}
+                if resolved_prompt:
+                    payload["tool_use_id_source"] = "service"
                 def intent():
                     with self.journal.tx():
                         command, fresh = self.journal.command(task_id, action, sid, payload, "runtime:" + key)
