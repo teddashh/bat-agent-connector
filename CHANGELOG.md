@@ -2,6 +2,9 @@
 
 ## Next release (unreleased)
 
+- The A10 Linux account-check fixture isolates its fake `pathlib` import, keeping pytest's real `Path` intact on
+  Python 3.10 and 3.11; the product's read-only check is unchanged.
+
 - Delivery operations no longer end as `failed` while GitHub is still merging or deploying (#32). A refused GitHub
   read after a merge request or dispatch was sent (an expired token's 401, a 403, a 404) now waits for a person
   (`needs_attention`) and keeps the recipe's deploy lock; before any write it still fails. A rate-limited read (403),

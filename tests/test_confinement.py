@@ -5,7 +5,9 @@ import copy
 import json
 import os
 import pathlib
+import sys
 import time
+import types
 
 import pytest
 
@@ -280,14 +282,17 @@ def test_a10_linux_read_only_scan_uses_find_and_process_identity(tmp_path, monke
     def path(*parts):
         return Proc(*parts) if str(parts[0]).startswith("/proc") else real_path(*parts)
 
-    monkeypatch.setattr(pathlib, "Path", path)
     monkeypatch.setattr(os, "readlink", lambda _: "socket:[101]")
     monkeypatch.setattr(os, "access", lambda *a, **k: case == "ancestor")
     monkeypatch.setattr('sys.argv', ["check", json.dumps({"uid": uid + 1 if case == "identity" else uid,
                                                         "roots": [str(root)], "entries": 1 if case == "budget" else 10,
                                                         "seconds": .000001 if case == "time" else 5, "port": 9876})])
-    with pytest.raises(SystemExit):
-        exec(confinement._ACCOUNT_PROGRAM, {})
+    # Isolate the program's import: replacing the real Path breaks Path.__new__
+    # and pytest's failure reporting on Python 3.10/3.11.
+    with monkeypatch.context() as program_imports:
+        program_imports.setitem(sys.modules, "pathlib", types.SimpleNamespace(Path=path))
+        with pytest.raises(SystemExit):
+            exec(confinement._ACCOUNT_PROGRAM, {})
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == expected
     if case == "idle":
