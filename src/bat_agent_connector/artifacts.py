@@ -118,7 +118,9 @@ def get(db, artifact_id, revision) -> dict:
     if row is None:
         raise OperationError("ARTIFACT_NOT_FOUND", "no such artifact revision", 404)
     out = dict(row)
-    out["source"] = {"kind": "upload", "operation_id": out["operation_id"]}
+    source = db.execute("SELECT document FROM artifact_capture_sources WHERE operation_id=?",
+                        (out["operation_id"],)).fetchone()
+    out["source"] = json.loads(source[0]) if source else {"kind": "upload", "operation_id": out["operation_id"]}
     out["content_url"] = f"/api/v1/artifacts/{artifact_id}/revisions/{revision}/content"
     out["materializations"] = materializations(db, artifact_id=artifact_id, revision=revision)
     return out
@@ -284,21 +286,24 @@ class ArtifactStore:
             raise OperationError("ARTIFACT_STORE_FULL", "artifact store is full; increase the configured quota", 409)
 
     def reserve(self, ctx):
+        return self.reserve_revision(ctx, ctx.target, ctx.params, ctx.preconditions)
+
+    def reserve_revision(self, ctx, target, params, pre):
         with self.journal.tx():
             row = self.db.execute("SELECT * FROM artifact_uploads WHERE operation_id=?", (ctx.operation_id,)).fetchone()
             if row:
                 return dict(row)
-            self.validate_upload(ctx.target, ctx.params, ctx.preconditions)
-            artifact_id = ctx.target.get("artifact_id") or "art_" + ctx.operation_id[3:]
+            self.validate_upload(target, params, pre)
+            artifact_id = target.get("artifact_id") or "art_" + ctx.operation_id[3:]
             now = time.time()
             self.db.execute("INSERT OR IGNORE INTO artifacts(artifact_id,created_at,actor) VALUES(?,?,?)", (artifact_id, now, ctx.actor))
             revision = self.db.execute("SELECT COALESCE(MAX(revision),0)+1 FROM artifact_revisions WHERE artifact_id=?", (artifact_id,)).fetchone()[0]
             self.db.execute("""INSERT INTO artifact_revisions(artifact_id,revision,digest,size_bytes,media_type,
                 display_name,operation_id,state,created_at) VALUES(?,?,?,?,?,?,?,'receiving',?)""",
-                           (artifact_id, revision, ctx.params["expected_digest"], ctx.params["size_bytes"],
-                            ctx.params.get("media_type", "application/octet-stream"), ctx.params["display_name"], ctx.operation_id, now))
+                           (artifact_id, revision, params["expected_digest"], params["size_bytes"],
+                            params.get("media_type", "application/octet-stream"), params["display_name"], ctx.operation_id, now))
             self.db.execute("""INSERT INTO artifact_uploads(operation_id,artifact_id,revision,deadline,reserved_bytes)
-                VALUES(?,?,?,?,?)""", (ctx.operation_id, artifact_id, revision, now + self.settings.upload_window_s, ctx.params["size_bytes"]))
+                VALUES(?,?,?,?,?)""", (ctx.operation_id, artifact_id, revision, now + self.settings.upload_window_s, params["size_bytes"]))
         return dict(self.db.execute("SELECT * FROM artifact_uploads WHERE operation_id=?", (ctx.operation_id,)).fetchone())
 
     def content_path(self, artifact_id, revision) -> Path:
@@ -340,7 +345,11 @@ class ArtifactStore:
         return op, dict(row)
 
     async def receive(self, principal, operation_id, reader, length):
-        op, row = self.check_receive(principal, operation_id, length)
+        _op, row = self.check_receive(principal, operation_id, length)
+        return await self.receive_reserved(operation_id, row, reader, length, principal.actor)
+
+    async def receive_reserved(self, operation_id, row, reader, length, actor):
+        """Internal receiver for an already authorized reservation; not an API entry point."""
         attempt = row["attempt"] + 1
         with self.journal.tx():
             # Partial bytes remain scratch until terminal; reserve room for this entire next attempt.
@@ -351,7 +360,7 @@ class ArtifactStore:
                 reserved_bytes=reserved_bytes+?,received_size=0,received_digest=NULL WHERE operation_id=?""",
                             (attempt, partial, operation_id))
             self.journal.api_event("artifact", row["artifact_id"], "artifact.receiving",
-                                   {"operation_id": operation_id, "attempt": attempt}, actor=principal.actor)
+                                   {"operation_id": operation_id, "attempt": attempt}, actor=actor)
         self.receivers.add(operation_id)
         digest, size, complete = hashlib.sha256(), 0, False
         directory = self.root / "staging" / operation_id / f"a{attempt:04d}"
@@ -532,37 +541,47 @@ async def _run_upload(ctx):
                 raise StepFailed("UPLOAD_EXPIRED", "upload window expired")
             raise Wait("waiting_external", "waiting for file content", row["deadline"] - time.time())
 
-        async def verify():
-            if existing:
-                return {"digest": existing["digest"], "size_bytes": existing["size_bytes"]}
-            size, digest = _file_hash(store.root / "staging" / ctx.operation_id / f"a{row['attempt']:04d}" / "content")
-            return {"size_bytes": size, "digest": digest}
-
-        evidence = await ctx.step(f"upload.verify.{row['attempt']}", verify, reconcile=reread)
-        if evidence["size_bytes"] != ctx.params["size_bytes"]:
-            raise StepFailed("ARTIFACT_SIZE_MISMATCH", "uploaded bytes differ from the declared size")
-        if evidence["digest"] != ctx.params["expected_digest"]:
-            raise StepFailed("ARTIFACT_DIGEST_MISMATCH", "uploaded bytes differ from the expected SHA-256")
-
-        async def publish():
-            return store.publish(row)
-
-        async def read_published(_request):
-            result = store.published(row)
-            return result if result else RERUN
-
-        document = await ctx.step("upload.publish", publish, reconcile=read_published)
-        with store.journal.tx():
-            changed = store.db.execute("UPDATE artifact_revisions SET state='ready' WHERE operation_id=? AND state!='ready'",
-                                       (ctx.operation_id,)).rowcount
-            store.db.execute("UPDATE artifacts SET latest_revision=MAX(latest_revision,?) WHERE artifact_id=?",
-                             (row["revision"], row["artifact_id"]))
-            if changed:
-                store.journal.api_event("artifact", row["artifact_id"], "artifact.uploaded", document, actor=ctx.actor)
-        return document
+        return await finish_revision(ctx, row, existing=existing)
     finally:
         # _execute commits its terminal transition before this callback runs.
         asyncio.get_running_loop().call_soon(store.schedule_reap, ctx.operation_id)
+
+
+async def finish_revision(ctx, row, *, existing=None, event="artifact.uploaded"):
+    store = ctx.service.context["artifact_store"]
+    revision = get(store.db, row["artifact_id"], row["revision"])
+
+    async def reread(_request):
+        return RERUN
+
+    async def verify():
+        if existing:
+            return {"digest": existing["digest"], "size_bytes": existing["size_bytes"]}
+        size, digest = _file_hash(store.root / "staging" / ctx.operation_id / f"a{row['attempt']:04d}" / "content")
+        return {"size_bytes": size, "digest": digest}
+
+    evidence = await ctx.step(f"upload.verify.{row['attempt']}", verify, reconcile=reread)
+    if evidence["size_bytes"] != revision["size_bytes"]:
+        raise StepFailed("ARTIFACT_SIZE_MISMATCH", "uploaded bytes differ from the declared size")
+    if evidence["digest"] != revision["digest"]:
+        raise StepFailed("ARTIFACT_DIGEST_MISMATCH", "uploaded bytes differ from the expected SHA-256")
+
+    async def publish():
+        return store.publish(row)
+
+    async def read_published(_request):
+        result = store.published(row)
+        return result if result else RERUN
+
+    document = await ctx.step("upload.publish", publish, reconcile=read_published)
+    with store.journal.tx():
+        changed = store.db.execute("UPDATE artifact_revisions SET state='ready' WHERE operation_id=? AND state!='ready'",
+                                   (ctx.operation_id,)).rowcount
+        store.db.execute("UPDATE artifacts SET latest_revision=MAX(latest_revision,?) WHERE artifact_id=?",
+                         (row["revision"], row["artifact_id"]))
+        if changed:
+            store.journal.api_event("artifact", row["artifact_id"], event, document, actor=ctx.actor)
+    return document
 
 
 ACTIONS = [ActionDef("artifact.upload", "manage", "Upload an immutable artifact revision", _run_upload, _admit_upload)]

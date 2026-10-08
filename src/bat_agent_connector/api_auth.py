@@ -13,7 +13,7 @@ import json
 import re
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # observe: read inventory, operations, events and policy
 # operate: drive connector-managed sessions (send, answer, interrupt)
@@ -34,6 +34,8 @@ class Principal:
     actor: str
     scopes: frozenset[str]
     admin: bool = False
+    # Internal credential identity, never a bearer secret or a public actor field.
+    credential_id: str | None = field(default=None, repr=False, compare=False)
 
     def allows(self, scope: str) -> bool:
         return self.admin or scope in self.scopes
@@ -80,9 +82,9 @@ def authenticate(db, token: str, admin_token: str) -> Principal | None:
     if not token:
         return None
     if hmac.compare_digest(token, admin_token):
-        return Principal(ADMIN_ACTOR, frozenset(SCOPES), admin=True)
+        return Principal(ADMIN_ACTOR, frozenset(SCOPES), admin=True, credential_id=_digest(token))
     row = db.execute("SELECT actor,scopes,expires_at,revoked_at FROM api_principals WHERE token_hash=?",
                      (_digest(token),)).fetchone()
     if not row or row["revoked_at"] is not None or (row["expires_at"] and row["expires_at"] <= time.time()):
         return None
-    return Principal(row["actor"], frozenset(json.loads(row["scopes"])))
+    return Principal(row["actor"], frozenset(json.loads(row["scopes"])), credential_id=_digest(token))

@@ -2,7 +2,7 @@
 
 日期：2026-10-08。依 Tauri v2 §16 附件／跨主機接續、§19 清理，R05／R08。
 歷史 spec 的 W05b、B04 與 A03 用於對照既有測試，不代表新範圍已完成。
-A03 的檔案擷取部分另列 Part B；本文件分為 A／B／C，本輪只實作 Part A。
+A03 的人工單檔擷取另列 Part B1；本文件分為 A／B1／B2／C，目前實作 A 與 B1。
 
 ## 固定來源版本（A／B／C）
 
@@ -256,9 +256,74 @@ BAT只用mockbat；git用temp repo／LocalRunner／RealGitLog。byte helper測�
 
 Dashboard Playwright不進CI：390px、en／zh-TW，選檔upload、text/refs reload、failure留草稿、success只清提交snapshot、prompt無localpath。交付跑ruff全repo、pytest全suite、app.js的.mjs copy node --check。
 
-## 人工／managed成果擷取與接受（Part B，後續審查）
+## 人工單檔擷取（Part B1）
 
-B才新增artifact_capture_preview／artifact_capture／artifact_accept（MCP最多這三個）。preview／capture只明選regular file，session observed root下的relative path，no-follow、前後file fingerprint／commit一致，source只open read不chmod／stash／commit／refs/index／start／resume。保存source host/session/commit、digest、擷取時間；manual file是immutable continuation data，不是完整dirty snapshot；A03保持snapshot=false能力說明。
+B1 只將明選的人工 session 檔案保存為既有 immutable ArtifactRef，不新增 snapshot、
+managed-result lineage、accept、work completion 或跨 host Git 接續。來源須由目前 BAT
+workspace 的完整 session ID 加現有 resource policy 正面分類為 `manual`；沒有 tab、
+orphan、unknown、Connector creation record 或目前已移除的 host 一律拒絕。每次讀取前
+重新讀 workspace/session metadata/root 與 registry policy，結束後再確認相同 binding。
+不以路徑、client 自報 project/execution ID 或「沒有 managed 記錄」單獨推論人工來源。
+
+| 入口 | scope／固定資料 |
+| --- | --- |
+| `POST /api/v1/artifact-capture-previews`、RPC/MCP `artifact_capture_preview`、CLI `artifact capture-preview` | `observe`；只接受 `host`、完整 `session_id`、`relative_path` |
+| `artifact.capture`（既有 `/operations`／RPC）、MCP `artifact_capture`、CLI `artifact capture` | 同時 `manage` + `observe`；target `preview_id`、params `preview_token`、preconditions `expected_fingerprint`；沿用 operation key、cancel、readback |
+| artifact list/get/content、attachment selection | 沿用既有 `observe`／各使用動作的 scope，固定 revision/digest；不擴張 task-scoped capability |
+
+Preview 是有界、有效 10 分鐘的 signed stateless document（最多 24 KiB token），不寫
+preview rows，因此 observe 請求不建立無界永久 storage，無需 preview reaper。HMAC 分隔
+domain，綁定 daemon key、credential 的不可逆 identity、actor、scopes、admin flag、來源
+binding、檔案 evidence 與 fingerprint；同 actor label 的另一張 token 仍不能套用。
+不回傳 credential hash。過期／篡改／不同 credential 零 reservation 拒絕；新請求須重新
+preview。Operation admission 保存已驗證的原 document 作中央證據，重啟後不依賴 client
+重新提交 lineage；接受後的同 key 查回不因 preview 過期建立第二個 artifact。
+
+Source binding 包含 host/profile、完整 session ID、目前 tab 身分欄位、已觀察的 cwd/root、
+inventory 首見身分，以及 host/SSH 設定的不可逆 binding。人工 BAT 沒有 Connector creation
+receipt；這只是目前觀察到的人工來源證據，不能變成 managed 所有權證明。根目錄 inode
+与檔案 inode、mode、link count、size、mtime/ctime ns、HEAD 及 SHA-256 構成固定 evidence。
+不因檔案同名、內容相同或 session ID 重用而跳過重新查證。
+
+同時最多四個有界 source reads；額滿回 CAPTURE_BUSY，不建立永久等待佇列。
+只接受 UTF-8 長度 ≤4096 的 POSIX relative path：不能 absolute、空 segment、`.`、`..`、
+`.git`（任一 segment）、反斜線或控制字元。固定 host helper 由既有配置 alias 選擇，沒有
+新 BAT channel、任意 shell、client 本機路徑或 request 提供的 host 絕對路徑 transport。
+固定 helper 使用 Python `-I -S -B`，停用工作目錄／usersite／site startup 和 bytecode writes；
+不是 host-account trust proof，仍沿用既有可信 SSH host 配置。檔名限制沿用 upload 的 safe_name。
+從 `/` 到 observed root、再到每層父目錄都以 dirfd + `O_NOFOLLOW` 開啟；最後檔案以
+read-only + no-follow + nonblock 開啟，只准 regular file、`nlink == 1`。Symlink、hardlink、
+FIFO/device/socket/directory、超過既有 `max_file_bytes` 一律拒絕。HEAD 用固定 read-only
+Git 命令及 `--no-optional-locks` 讀取；不讀工作目錄 status，不 chmod、stash、commit、
+改 refs/index/permissions，不 start/resume。Helper 只在記憶體有界讀 bytes，不在來源建暫存。
+
+讀取前後比較 root/file identity、路徑目前解析的同 inode、HEAD、大小及 timestamps；capture
+亦必須與 preview 的 digest/evidence 完全一致，中央再對傳回 bytes 驗證 size/SHA-256。
+這些檢查可拒絕可觀察到的寫入／替換／來源移動，**不是鎖住人工 writer 的 snapshot**；
+不能證明讀取期間沒有無痕並行改動或 HEAD 離開後返回。保存的是經檢查的單檔 bytes 與
+實際觀測證據，完整 dirty snapshot 始終 `supported=false`。
+
+沿用 ArtifactStore quota、reservation、attempt staging、verify、publish、terminal reaper；
+operation ID 決定新 artifact ID，B1 不追加既有 artifact revision、不自動建立 project link。
+`artifact_capture_sources` 是 versionless additive DDL，依 operation/revision 保存中央
+source proof；get 的 `source.kind=manual_capture` 來自該 proof，不接受 client 自報。
+`capture.receive` 完成需同時有完整 staging bytes 與 source receipt；重啟只信兩者相符。
+未完成的 read 可在同 operation 重讀原固定來源，不換最新內容；完整 receipt 後不再讀來源。
+publish 回覆遺失沿用既有 readback，最多一份 immutable revision；cancel 在下個 step 停止，
+接收中的 scratch 留給既有 terminal reaper，已公開的內容保留真實 receipt。
+
+目前 API principals 是 daemon-wide scopes，沒有 per-project ACL。B1 不聲稱新增私人
+artifact：與 upload 相同，獲 `observe` 的 principal 可讀已 ready 的 artifact；沒有 `observe`
+或 task-local capability 不可讀。Preview/提交不能借另一個 credential，MCP 不回退 admin。
+Project/work-item 附件仍走既有 authority 和固定 ArtifactRef，不因 capture 放寬其操作 scope。
+
+UI 選檔器可稍後接此兩步 API；B1 不回傳目錄 listing，不將任意 host path 顯示成 client
+file picker handle。驗收涵蓋 HTTP/MCP/CLI、scope/credential 邊界、篡改/過期、所有 path/file
+拒絕、中途改動/rebinding、quota、cancel/restart/lost ACK 及來源 bytes/index/refs 不變。
+
+## Managed 成果擷取與接受（Part B2，後續審查）
+
+B2 才擴充 capture 為 managed-result 並新增 artifact_accept；B1 不接受 managed 來源。
 
 Managed-result保存既有execution operation或task/command ID、session、實際commit／hash。不能信client自報lineage。artifact.accept用approve保存精確revision/digest／execution／session／commit／驗收receipt，不等同work completion、merge或deploy。B的schema／scope／失敗恢復與A03tests在實作前再審。
 
@@ -272,7 +337,7 @@ C才新增target host/workspace選擇。任何writes+orchestrate+managed_roots+a
 
 ## 尚未涵蓋
 
-- 本輪只Part A；Part B（人工檔案、managed成果capture／accept、A03附件驗收）與Part C（target選擇／跨hostfetch）後續再審。
+- B1 的 HTTP/MCP/CLI 人工單檔擷取已實作；原生／browser 選檔 UI 接點另行接入，未宣稱實機驗收。B2（managed成果capture／accept）與 C（target選擇／跨hostfetch）後續再審。
 - 完整dirty snapshot、任意目錄解壓、可執行附件／URL下載、非checkpoint的Task Service附件派工不在A。舊context_refs字串不提供readiness。
 - Artifact deletion、retention期限／read model／server draft holds屬未來artifact cleanup。目前store只留內容／拒絕超額，cleanup對artifact保持RESOURCE_KIND_UNSUPPORTED。
 - GitHub Actions build artifacts／deploy promotion與本store分開；若日後橋接需兩邊ID／digest證據，不能互換。

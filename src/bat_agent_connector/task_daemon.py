@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from . import (
     api_actions,
     api_auth,
+    artifact_capture,
     artifacts,
     checkpoints,
     confinement,
@@ -61,7 +62,8 @@ API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_canc
            "checkpoint_get": "observe", "checkpoint_preview": "observe", "integration_candidates": "observe",
            "integration_preview_get": "observe", "integration_get": "observe", "integrations_list": "observe",
            "projects_list": "observe", "project_get": "observe", "work_items_list": "observe",
-           "work_item_get": "observe", "artifacts_list": "observe", "artifact_get": "observe"}
+           "work_item_get": "observe", "artifacts_list": "observe", "artifact_get": "observe",
+           "artifact_capture_preview": "observe"}
 class LegacyTaskError(OperationError, ValueError):
     """Keep the old Python adapter's ValueError contract with a stable operation code."""
 
@@ -324,6 +326,8 @@ class TaskDaemon:
             return artifacts.list_artifacts(self.journal.db, limit=int(params.get("limit", 50)), cursor=params.get("cursor"))
         if method == "artifact_get":
             return {"artifact": artifacts.get(self.journal.db, str(params.get("artifact_id")), int(params.get("revision", 0)))}
+        if method == "artifact_capture_preview":
+            return {"preview": await artifact_capture.preview(self.ops, principal, params)}
         if method == "projects_list":
             return work_items.projects_list(self.journal.db, include_archived=bool(params.get("include_archived")))
         if method == "project_get":

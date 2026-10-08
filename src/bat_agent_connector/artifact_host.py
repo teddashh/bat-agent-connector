@@ -7,9 +7,10 @@ import json
 import shlex
 from pathlib import Path
 
-from .operations import AmbiguousOutcome
+from .operations import AmbiguousOutcome, OperationError
 
 HELPER = Path(__file__).with_name("artifact_host_helper.py").read_text()
+CAPTURE_HELPER = Path(__file__).with_name("artifact_capture_helper.py").read_text()
 
 
 class ArtifactHost:
@@ -77,3 +78,58 @@ class ArtifactHost:
             result = {"ok": False, "code": "ARTIFACT_ADAPTER_UNAVAILABLE"}
         self.readiness[host] = result
         return result
+
+    def capture_argv(self, host):
+        if not self.available(host):
+            raise OperationError("ARTIFACT_ADAPTER_UNAVAILABLE", "capture requires a configured SSH alias", 409)
+        return ("ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", self.aliases[host],
+                "python3 -I -S -B -c " + shlex.quote(CAPTURE_HELPER))
+
+    async def capture(self, host, request):
+        """Only the fixed read helper; bounded JSON evidence followed by bounded binary content."""
+        process = await asyncio.create_subprocess_exec(*self.capture_argv(host), stdin=asyncio.subprocess.PIPE,
+                                                       stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+
+        async def exchange():
+            process.stdin.write(json.dumps(request, separators=(",", ":")).encode() + b"\n")
+            await process.stdin.drain()
+            process.stdin.close()
+
+            async def read_output():
+                line = await process.stdout.readline()
+                if len(line) > 8192:
+                    raise ValueError()
+                result = json.loads(line)
+                if not isinstance(result, dict):
+                    raise ValueError()
+                limit = request["max_file_bytes"] if request["mode"] == "capture" else 0
+                data = bytearray()
+                while True:
+                    chunk = await process.stdout.read(min(65536, limit - len(data) + 1))
+                    if not chunk:
+                        return result, bytes(data)
+                    data.extend(chunk)
+                    if len(data) > limit:
+                        raise ValueError()
+
+            async def read_error():
+                size = 0
+                while chunk := await process.stderr.read(1024):
+                    size += len(chunk)
+                    if size > 8192:
+                        raise ValueError()
+
+            (result, data), _ = await asyncio.gather(read_output(), read_error())
+            await process.wait()
+            if process.returncode != 0:
+                raise ValueError()
+            return result, data
+
+        try:
+            return await asyncio.wait_for(exchange(), self.timeout_s)
+        except (asyncio.TimeoutError, OSError, ValueError):
+            raise AmbiguousOutcome("capture source read did not complete") from None
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
