@@ -98,7 +98,13 @@ write 與 orchestrate 的工具沒開啟時根本不會註冊；開啟後每次�
 
 Task-bound operations 在 admission 固定 task 版本，省略 `control_version` 也一樣；session controls 另固定當時 session。`external_refs.admission_binding` 是 server binding，與 caller preconditions 分開。執行前 pause／resume 或換 session 會以 `CONTROL_VERSION_CONFLICT`／`TASK_BINDING_MISMATCH` 拒絕舊要求；同 key 重讀原拒絕或成功，先讀 task 再以新 key 提交有授權的新決定。升級前無 binding 的 operations 保留原行為。
 
-Task mutations 現在保存 operation，原結果新增 `operation_id`／`operation_status`。重試保留同一 key；key 以驗證 actor 為範圍，無 key 的舊 task controls 每次是獨立要求。task-owned 的 send／answer／interrupt／permissions，包括 legacy tools，都經同一 coordinator；`TASK_PAUSED`、`TASK_VERIFYING`、`TASK_COMMAND_PENDING` 表示停止並讀 work_status，不用 force／continue 插隊。`CONTROL_VERSION_CONFLICT` 要先讀變更後狀態。第二個 daemon 即使指定不同 --db，也回 `OWNER_CONFLICT` 與既有 owner 資訊；client 連原 owner。詳見[統一操作 Part A](docs/design/operations-unification.md)；其餘 legacy operations、no-key／null 結果投影留在 Part B。
+Task mutations 現在保存 operation，原結果新增 `operation_id`／`operation_status`。重試保留同一 key；key 以驗證 actor 為範圍，無 key 的舊 task controls 每次是獨立要求。task-owned 的 send／answer／interrupt／permissions，包括 legacy tools，都經同一 coordinator；`TASK_PAUSED`、`TASK_VERIFYING`、`TASK_COMMAND_PENDING` 表示停止並讀 work_status，不用 force／continue 插隊。`CONTROL_VERSION_CONFLICT` 要先讀變更後狀態。第二個 daemon 即使指定不同 --db，也回 `OWNER_CONFLICT` 與既有 owner 資訊；client 連原 owner。詳見[統一操作](docs/design/operations-unification.md)。
+
+Part B 第一個切片將 MCP `session_interrupt`／CLI `interrupt` 接到既有 daemon。MCP 必須設定自己的
+`BATC_API_TOKEN`；CLI 優先用此 token，未設定才沿用本機 admin token，兩者仍需 confirm 與 host write tier。
+用 `--key`（MCP：`idempotency_key`）保留重試身分；省略時每次都是獨立 operation。未知回覆後保存
+operation ID，透過 `batc op ID`／`operation_get` 查回，不自動重送或另啟 daemon。其他 legacy operations
+與 task 的 no-key 投影仍待 Part B 後續。
 
 每個任務就是一個跑在 Opus 5.5 上的 Goose session。`goose-session` recipe 的 prompt 會指示 Goose 一開始拆一次工作，以 Grok 4.7 : Codex : Opus 5.5 = 4:2:1 的比例為目標分配執行者，而且不把新工作交給每週額度剩餘在 15% 以下（含）的模型。這些是寫在 prompt 裡的指示，不是服務會強制執行的規則：服務不會統計分派次數，也不會讀取額度。這個服務本身不做路由、不做審查，也不做 failover。驗證結果以可信任的測試為準；程式碼沒過，就退回同一個 session 在有限次數內重做，預算用完則標為 `needs_ted`。Ted 之後補充的指示，會接在同一個任務上繼續（同一個 session，不重新規劃，也不開新任務）。這條路徑不經過 Jev。只有當調度者送出已經拆好的任務，並指定 `executor_model`（`grok`、`codex` 或 `claude`）而跳過 Opus 規劃時，才會用到 Jev。Goose 本身有一個開關，預設關閉（`GooseConfig.enabled`）；關閉期間，任務會一直排隊，不會啟動任何東西。
 

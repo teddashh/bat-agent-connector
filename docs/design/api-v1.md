@@ -12,6 +12,13 @@
 
 遠端使用一律經 SSH forward 到 daemon 的 loopback 埠；daemon 不綁非 loopback 位址。
 
+Legacy interrupt 第一個切片：MCP `session_interrupt`／CLI `interrupt` 經 `/rpc session_interrupt`
+呼叫既有 `session.interrupt` action，新增可選 key／control_version，保留完整結果並帶 operation ID/status/code。
+只此相容入口可省 key；每次建立獨立 operation，storage sentinel 在所有 operation 讀取中投影為
+`idem_key=null`、`idempotency_key=null`、`idempotency_enabled=false`。named keys 原值保留，
+`batc:nokey:` 為保留前綴；HTTP／`op_submit` 仍須明確 key。細節與尚未轉接入口見
+[operations-unification.md](operations-unification.md#part-b-第一個切片interrupt)。
+
 ## 身分與權限
 
 | 主體 | 取得方式 | 權限 |
