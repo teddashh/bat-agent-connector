@@ -207,6 +207,10 @@
   requests within the original account across uncertain replies, preserve agent/form choices during updates,
   and validate native cleanup routes and typed previews. Real temporary Git/MockBat cleanup and UI fixtures
   verify the central flow; live confinement, restoration and full observation history UI remain pending.
+- Refuse filtered Dashboard checkpoint replay before reading events or opening SSE. Shared signed checkpoints
+  acknowledge only the complete public feed, so an empty or partial filtered page cannot skip other updates.
+  Legacy filtered event requests keep their existing response shape and numeric cursors.
+
 - Keep failed checkpoint-preview refreshes inside the event acknowledgment barrier. Preserve the original
   commit selection and note, refuse stale checkpoint creation, and resume after a successful read; a failed
   preview cannot silently change the request into a checkpoint of HEAD.
