@@ -592,6 +592,45 @@ def test_b03_migration_failure_rolls_back_and_restart_recovers(tmp_path, monkeyp
     j.close()
 
 
+def test_b03_version_three_runs_observation_backfill_once(tmp_path, monkeypatch):
+    """B03, §08/§11: delivery's version 3 does not skip observation's version 4 backfill."""
+    from bat_agent_connector import observation
+    path = tmp_path / "j.db"
+    with monkeypatch.context() as legacy:
+        legacy.setattr(observation, "install", lambda journal: None)
+        j = Journal(path)
+    t = task(j, "legacy")
+    bind(j, t, "sid")
+    j.db.execute("""INSERT INTO sessions_observed(host,session_id,body,digest,provenance,api_access,first_seen_at,last_seen_at)
+        VALUES('h1','saved','{}','legacy','unknown','read_only',123,124)""")
+    j.db.execute("PRAGMA user_version=3")
+    original = observation.backfill
+    calls = []
+
+    def capture(journal):
+        assert journal.db.execute("PRAGMA user_version").fetchone()[0] == 3
+        calls.append("backfill")
+        original(journal)
+
+    monkeypatch.setattr(observation, "backfill", capture)
+    j.close()
+    j = Journal(path)
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == observation.MIGRATION_VERSION == 4
+    assert calls == ["backfill"]
+    saved = Observation(j).history("session", "h1/saved")["events"]
+    assert len(saved) == 1 and saved[0]["kind"] == "history.backfilled"
+    assert Observation(j).relations("session", "h1/sid")["relations"]
+    head = j.api_head()
+    snapshot = [tuple(r) for r in j.db.execute("SELECT * FROM observation_backfill")]
+    j.close()
+    for _ in range(2):
+        j = Journal(path)
+        assert j.api_head() == head
+        assert snapshot == [tuple(r) for r in j.db.execute("SELECT * FROM observation_backfill")]
+        j.close()
+    assert calls == ["backfill"]
+
+
 async def test_b03_rpc_admin_identity_is_not_claimed_human(served, monkeypatch):
     from bat_agent_connector.task_daemon import request
     d, port = served
