@@ -516,9 +516,16 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
                           reconcile=resend)
     if not sent.get("accepted"):
         raise NeedsAttention("NOT_ACCEPTED", "BAT did not accept the first instruction")
+    readback_failed = False
+    try:
+        meta = await service._meta(c, sid)
+    except Exception:  # noqa: BLE001 - the durable send succeeded; evidence cannot fail the operation
+        meta, readback_failed = None, True
+    fields = confinement.session_fields(host, sid, meta, account=confinement.account_status(fleet, host))
+    if readback_failed:
+        fields["current_verification"].update(status="unknown", reason="readback_failed")
     return {"session_id": sid, "message_id": mid,
-            **confinement.session_fields(host, sid, await service._meta(c, sid),
-                                        account=confinement.account_status(fleet, host))}
+            **fields}
 
 
 async def _run_continue(ctx: OpContext) -> dict:

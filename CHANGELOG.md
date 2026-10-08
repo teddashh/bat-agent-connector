@@ -22,6 +22,8 @@
   frame attempt, including crashes between a normally confirmed start and its handoff.
   Reserved-start recovery also checks normalized cwd before promotion; a different folder or a recorded permission
   mismatch stays terminal, keeps its reservation and evidence, and never dispatches a handoff on a later matching read.
+  Checkpoint continuation and repair handoff remain successful when a display-only metadata read fails after their
+  first instruction was accepted; creation evidence stays intact and current verification reports unknown/readback_failed.
   **A10 is not proven until the W12 live run**; no sandbox evidence-file import is included here.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the

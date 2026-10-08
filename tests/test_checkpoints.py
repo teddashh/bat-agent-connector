@@ -463,6 +463,46 @@ async def test_checkpoint_start_readback_refuses_identity_and_terminal_mismatch(
     await daemon.inventory.close()
 
 
+@pytest.mark.parametrize("failure", ["timeout", "disconnect"])
+async def test_checkpoint_accepted_send_survives_evidence_read_failure(daemon, mock, monkeypatch, failure):
+    """A10/§12: evidence loss after the durable send cannot fail or duplicate continuation."""
+    from bat_agent_connector.errors import ConnectionLost, InvokeTimeout
+
+    cp = await make_checkpoint(daemon)
+    client = daemon.fleet.client("h1")
+    invoke = client.invoke
+    accepted = False
+    evidence_failures = []
+
+    async def fail_after_send(channel, params=None, **kwargs):
+        nonlocal accepted
+        if accepted and channel == "claude:get-session-meta":
+            evidence_failures.append(params["sessionId"])
+            raise InvokeTimeout("fixture evidence timeout") if failure == "timeout" else ConnectionLost("fixture disconnect")
+        result = await invoke(channel, params, **kwargs)
+        if channel == "claude:send-message":
+            assert result["accepted"]
+            accepted = True
+        return result
+
+    monkeypatch.setattr(client, "invoke", fail_after_send)
+    target, params = {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"}
+    op = await run(daemon, "checkpoint.continue", target, params, key="accepted-evidence")
+    assert op["status"] == "succeeded", op
+    result = op["result"]
+    assert result["session_id"] in evidence_failures
+    assert result["current_verification"]["status"] == "unknown"
+    assert result["current_verification"]["reason"] == "readback_failed"
+    assert result["confinement"] == registry.get("h1", result["session_id"])["confinement"]
+    assert result["confinement"]["verification"]["status"] == "options_confirmed"
+    assert next(s for s in op["steps"] if s["name"] == "send")["status"] == "succeeded"
+    again = await run(daemon, "checkpoint.continue", target, params, key="accepted-evidence")
+    assert again == op
+    assert mock.channels().count("claude:start-session") == 1 and mock.channels().count("claude:send-message") == 1
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
 async def test_a_lost_codex_instruction_is_found_in_the_transcript(daemon, mock, human, monkeypatch):
     from bat_agent_connector import service
     from bat_agent_connector.errors import InvokeTimeout
