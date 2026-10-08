@@ -88,6 +88,11 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
 .drawer label { color: var(--muted); font-size: 13px; }
 .step { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; }
 .step label { overflow-wrap: anywhere; }
+.hub-import > summary { color: var(--accent); cursor: pointer; }
+.hub-import .row-details { overflow-wrap: anywhere; }
+.hub-import pre { font-size: 13px; }
+.hub-import select { max-width: 100%; min-width: 0; }
+.hub-counts p { margin: 8px 0; }
 @media (max-width: 640px) {
   main { padding: 10px; }
   .top { gap: 8px; }
