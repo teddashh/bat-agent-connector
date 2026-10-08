@@ -62,8 +62,13 @@ metadata:
 | Gated cleanup of finished sessions (orchestrate) | `session_cleanup(host, confirm=true, dry_run=false)` | `batc cleanup HOST --apply --confirm` |
 | Who may change what (read) | `session_policy(host, session_id?)` | `batc policy HOST [SID]` |
 | What this caller may do (read, daemon) | `capabilities_get()` | - |
-| Persisted inventory with staleness (read, daemon) | `inventory_sessions(host?, access?, attention?, cursor?)`, `inventory_hosts()` | - |
-| Shared event log (read, daemon) | `events_list(after, limit)` | - |
+| Persisted inventory (read, daemon) | `inventory_sessions(order="id", project_id?, execution_id?, relation_scope?, cursor?)` | `batc inventory sessions --order id` |
+| Session identity and state evidence (read, daemon) | `inventory_session(host, session_id)` | `batc inventory session HOST SID` |
+| Known worktree identity (read, daemon) | `inventory_worktree(worktree_id)` | `batc inventory worktree ID` |
+| Journal timeline (read, daemon) | `resource_history(resource_type, resource_id, cursor?, limit?, kind?)` | `batc history session HOST SID`, `batc history worktree ID` |
+| Execution/session/worktree relations (read, daemon) | `resource_relations(resource_type, resource_id, cursor?, include_closed?)` | `batc relations execution TASK`, `batc relations session HOST SID` |
+| Discovery authority and scan limits (read, daemon) | `inventory_hosts(host?, discovery=true, after?, limit?)` | `batc inventory discovery HOST` |
+| Shared event log (read, daemon) | `events_list(after, limit, kind?, related_resource_type?, related_resource_id?)` | `batc inventory events --after N` |
 | Durable operation (write, daemon) | `operation_submit(action, idempotency_key, target, params)`, `operation_get(id)` | `batc op [ID]` |
 | Pull request / fixed merge scope (read, daemon) | `github_pr_preview(repository, pull_number, method?)`, `github_merge_preview_get(preview_id)` | `batc delivery pr OWNER/REPO NUMBER [--method METHOD]` |
 | Edit PR title/body (integrate, repository opt-in) | `github_pr_update(repository, pull_number, expected_metadata_digest, idempotency_key, title?, body?, confirm)` | `batc delivery update-pr OWNER/REPO NUMBER --metadata-digest DIGEST --title TITLE --body-file FILE --key KEY` |
@@ -75,8 +80,29 @@ metadata:
 | Projects and work items (read, daemon) | `projects_list()`, `project_get(project_id)`, `work_items_list(project_id?, state?, pending?)`, `work_item_get(work_item_id)` | `batc project list`, `batc item show WI` |
 | Change a work item (scope manage, daemon) | `operation_submit(action="work_item.update", ..., preconditions={expected_version})` | `batc item update WI --check 1 --state done` |
 
-`session_id` accepts a unique prefix (8 characters is usually enough). Use `next_offset` from `session_read` to page
-back in history.
+Direct BAT tools accept a unique session prefix; persisted observation requires the full ID. For
+`resource_history`/`resource_relations`, resource_type is `session`, `worktree` or `execution`; a session resource ID
+is `HOST/FULL_SESSION_ID`, and execution is the Task Service task_id. Page every next_cursor. Use order=id for
+complete inventory traversal; rows added or changing filters during traversal are caught up through events.
+
+For historical questions, use these daemon reads before live reads. Check `state` and its evidence: not connected,
+not loaded, no tab and not streaming are distinct; gone means no longer enumerated. An unknown lifecycle does not
+prove deletion or completion. Keep API actor, claimed actor and observer separate; a Git author is version metadata.
+Relations and worktree IDs grant no writes. Read discovery's methods, authority and outside_scan before claiming
+coverage. Observation never starts/resumes/rehydrates sessions or probes Git in the background. Default events hide
+history.backfilled; explicit kind filtering or resource history can read it. Process events before saving next_cursor.
+Session added/updated/reappeared events carry `fields_stale` and `field_evidence`. Treat meta failure/recovery or
+changed evidence as an update even when loaded/streaming values stay the same. Observation/activity timestamps
+alone emit no update. The separate session.stale/session.fresh pair tracks not_enumerated/gone/scope_changed;
+it does not clear stale field evidence. Resource history preserves the freshness booleans and fixed evidence values.
+History cursors retain their original as_of bound; new facts require a new first page. See docs/design/observation.md.
+History summaries keep only fixed enum reasons and recorded machine codes; task request/result diagnostics, titles,
+scalar prose containers and free-form refs are omitted, including nested saved snapshots. Use structured evidence
+and IDs; do not infer an omitted human reason. `since`/`until` are inclusive occurrence-time bounds: explicit unknown
+times match neither bound. Only absent occurrence metadata falls back to event record time. Unbounded history still
+lists unknown-time facts; `coverage.unknown_occurrence_times_excluded` flags the bounded-read rule, not a count.
+`coverage.first_recorded_at` is journal record time and can be migration time, not occurrence time.
+Dashboard timeline and reconnect flow are the later Part B.
 
 ## Vibe-partner workflow (supervising running sessions)
 

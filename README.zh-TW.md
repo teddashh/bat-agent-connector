@@ -30,6 +30,8 @@ BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端�
 | CLI | `batc` |
 | Agent skill | [`skills/bat-agent-connector/SKILL.md`](skills/bat-agent-connector/SKILL.md) |
 
+`batc inventory`、`batc history`、`batc relations` 與對應 HTTP/MCP 讀取提供持久觀測。Session 歷史只讀 journal 事實；warm reuse 保留每個 task 的關係區間，discovery 顯示最近 host/profile 掃描範圍及未掃項目。未知 actor／狀態保持 unknown，讀取不啟動 session、不背景探測 Git。詳見 [observation](docs/design/observation.md)。Dashboard 的歷史與 scope 畫面屬後續 Part B。
+
 ## 為什麼要做
 
 同時跑好幾個長時間執行的 coding agent，就得一直切分頁檢查：哪個做完了、哪個卡在問題上、哪個只差一句「continue」。透過 BAT 的協定讀這些狀態很可靠（不抓畫面、不模擬 GUI 操作），也能讓一個負責監看的 agent 替你檢查，而任何會寫入的動作都還是由你掌控。

@@ -51,6 +51,7 @@ DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 # /rpc methods that share /api/v1's principals and OperationService (MCP and CLI enter here).
 API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
            "api_events": "observe", "inventory_sessions": "observe", "inventory_hosts": "observe",
+           "inventory_session": "observe", "inventory_worktree": "observe", "resource_history": "observe", "resource_relations": "observe",
            "api_capabilities": "observe", "github_pr_preview": "observe", "github_merge_preview_get": "observe",
            "checkpoints_list": "observe",
            "checkpoint_get": "observe", "checkpoint_preview": "observe", "integration_candidates": "observe",
@@ -251,15 +252,24 @@ class TaskDaemon:
             limit = params.get("limit")
             return self.journal.api_events(int(params.get("after") or 0), 100 if limit is None else int(limit),
                                            resource_type=params.get("resource_type"),
-                                           resource_id=params.get("resource_id"))
+                                           resource_id=params.get("resource_id"), kind=params.get("kind"),
+                                           related_resource_type=params.get("related_resource_type"), related_resource_id=params.get("related_resource_id"))
         if method == "inventory_sessions":
             return self.inventory.list_sessions(
                 host=params.get("host"), provenance=params.get("provenance"), api_access=params.get("access"),
                 attention=params.get("attention"), include_gone=bool(params.get("include_gone")),
                 order=params.get("order") or "activity", cursor=params.get("cursor"),
-                limit=int(params.get("limit") or 50))
+                limit=int(params.get("limit") or 50), **{k: params[k] for k in ("profile_id", "project_id", "work_item_id", "execution_id", "provider", "has_tab", "loaded", "streaming", "lifecycle", "stale", "relation_scope") if k in params and params[k] is not None})
         if method == "inventory_hosts":
-            return {"hosts": self.inventory.hosts()}
+            return self.inventory.hosts_document(host=params.get("host"), discovery=params.get("discovery", False), after=params.get("after", 0), limit=params.get("limit", 20))
+        if method == "inventory_session":
+            return self.inventory.session_document(str(params.get("host")), str(params.get("session_id")))
+        if method == "inventory_worktree":
+            return {"worktree": self.inventory.observation.resource("worktree", params.get("worktree_id"))}
+        if method in {"resource_history", "resource_relations"}:
+            keys = ("cursor", "limit", "order", "kind", "since", "until") if method == "resource_history" else ("cursor", "limit", "execution_id", "include_closed")
+            read = self.inventory.observation.history if method == "resource_history" else self.inventory.observation.relations
+            return read(params.get("resource_type"), params.get("resource_id"), **{k: params[k] for k in keys if k in params and params[k] is not None})
         if method == "api_capabilities":
             return (await self.api.capabilities(principal=principal))[1]
         if method == "github_pr_preview":
@@ -728,8 +738,12 @@ class TaskDaemon:
                 raise ValueError("task API authorization failed")
             if scoped and not method.startswith("task_"):
                 raise ValueError("capability scope violation")
-            result = {"result": await self.call(method, params,
-                                                auth_token=token if reconcile or scoped else None, principal=principal)}
+            from .observation import event_context
+            with event_context(actor="local-admin" if admin else None, entry_point="rpc",
+                               actor_evidence={"source": "rpc_admin_token" if admin else "command_capability"},
+                               actor_basis="authenticated_principal" if admin else "unknown"):
+                result = {"result": await self.call(method, params,
+                                                    auth_token=token if reconcile or scoped else None, principal=principal)}
             status = "200 OK"
         except (TaskControlRefused, OperationError) as exc:
             result = {"error": exc.code, "message": str(exc)}
