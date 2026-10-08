@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -422,6 +423,227 @@ async def test_a05_paused_send_refusal_survives_restart_before_operation_settlem
     assert result["status"] == "failed" and result["error_code"] == "TASK_PAUSED"
     assert result["steps"][-1]["status"] == "failed" and result["steps"][-1]["error"]["code"] == "TASK_PAUSED"
     assert not d.journal.commands(tid) and not writes(mock)
+
+
+@asynccontextmanager
+async def restarted_daemon(d):
+    d.release_owner()  # the stopped worker no longer owns the fleet; the new daemon reads persisted rows
+    restarted = TaskDaemon(d._config, d._db_path)
+    restarted.acquire_owner()
+    try:
+        yield restarted
+    finally:
+        await restarted.fleet.close()
+        await restarted.inventory.close()
+        restarted.journal.close()
+
+
+def stop_after_command_status(d, patch, status):
+    original = d.journal.command_status
+
+    def stop(command_id, new_status, **kwargs):
+        original(command_id, new_status, **kwargs)
+        if new_status == status:
+            raise asyncio.CancelledError("crash after command status committed")
+
+    patch.setattr(d.journal, "command_status", stop)
+
+
+def assert_terminal_send_replay(d, tid, op, code, commands, frames, mock):
+    refused = d.ops.get(op["operation_id"])
+    assert refused["status"] == "failed" and refused["error_code"] == code
+    assert d.journal.commands(tid) == commands and len(writes(mock)) == frames
+    replay, created = task_send_operation(d, tid, op["idem_key"])
+    assert not created and d.ops.get(replay["operation_id"]) == refused
+
+
+@pytest.mark.parametrize("boundary", ["last_paused", "presence", "version", "other_cancel"])
+async def test_a05_a07_cancelled_send_command_survives_restart_without_uncertain_task(owned, mock, monkeypatch, boundary):
+    d, tid = owned
+    op, _ = task_send_operation(d, tid, "cancelled-crash")
+    with monkeypatch.context() as patch:
+        if boundary == "presence":
+            original_send = d.coordinator._send
+            probes = 0
+
+            async def initial_send(task, sid, text, purpose, **kwargs):
+                return await original_send(task, sid, text, "lead:initial", **kwargs)
+
+            async def presence(task, sid):
+                nonlocal probes
+                probes += 1
+                if probes == 2:
+                    await d.coordinator.pause(tid)
+                return "present"
+
+            patch.setattr(d.coordinator, "_send", initial_send)
+            patch.setattr(d.adapter, "session_presence", presence)
+        else:
+            original_refs = d.ops._merge_refs
+
+            def pause_after_command_receipt(operation_id, refs):
+                original_refs(operation_id, refs)
+                if refs.get("command_id"):
+                    if boundary == "other_cancel":
+                        d.journal.command_status(refs["command_id"], "cancelled")
+                    else:
+                        d.journal.pause(tid)
+
+            patch.setattr(d.ops, "_merge_refs", pause_after_command_receipt)
+        stop_after_command_status(d, patch, "cancelled")
+        with pytest.raises(asyncio.CancelledError):
+            await d.ops._execute(op["operation_id"])
+    if boundary == "version":
+        d.journal.resume(tid)  # another control commits after the crash, before the worker can recover
+    snapshot, commands = task_effect_snapshot(d, tid), d.journal.commands(tid)
+    assert len(commands) == 1 and commands[0]["status"] == "cancelled" and not writes(mock)
+    assert d.ops.get(op["operation_id"])["status"] == "running"
+    assert not any(s["name"] in {"task_send_result", "task_send_refusal"} for s in d.ops.get(op["operation_id"])["steps"])
+    code = "CONTROL_VERSION_CONFLICT" if boundary == "version" else (
+        "TASK_SEND_NOT_DISPATCHED" if boundary == "other_cancel" else "TASK_PAUSED")
+    async with restarted_daemon(d) as restarted:
+        await restarted.ops.drain()
+        assert_terminal_send_replay(restarted, tid, op, code, commands, 0, mock)
+        assert task_effect_snapshot(restarted, tid) == snapshot
+        if code == "TASK_PAUSED":
+            assert await restarted.coordinator.tick(tid) == snapshot["task"]
+            restarted.journal.resume(tid)
+            assert_terminal_send_replay(restarted, tid, op, code, commands, 0, mock)
+            fresh, _ = task_send_operation(restarted, tid, "cancelled-crash:resumed")
+            await restarted.ops.drain()
+            assert restarted.ops.get(fresh["operation_id"])["status"] == "succeeded"
+            assert len(restarted.journal.commands(tid)) == 2 and len(writes(mock)) == 1
+
+
+@pytest.mark.parametrize("cause", ["local_refusal", "version", "accepted_false", "vanished", "unknown_presence"])
+@pytest.mark.parametrize("crash_window", ["command_status", "local_outcome"])
+async def test_a05_a07_rejected_send_command_survives_restart_without_uncertain_task(owned, mock, monkeypatch,
+                                                                                   cause, crash_window):
+    d, tid = owned
+    op, _ = task_send_operation(d, tid, "rejected-crash")
+    initial = cause in {"vanished", "unknown_presence"}
+    with monkeypatch.context() as patch:
+        if initial:
+            original_send = d.coordinator._send
+            probes = 0
+
+            async def initial_send(task, sid, text, purpose, **kwargs):
+                return await original_send(task, sid, text, "lead:initial", **kwargs)
+
+            async def presence(*args):
+                nonlocal probes
+                probes += 1
+                return "present" if probes == 1 else "vanished"
+
+            patch.setattr(d.coordinator, "_send", initial_send)
+            patch.setattr(d.adapter, "session_presence", presence)
+        elif cause in {"local_refusal", "version"}:
+            original_send = d.adapter.send
+
+            async def refusing(*args):
+                if cause == "version":
+                    d.journal.resume(tid)
+                    return await original_send(*args)
+                raise service.WriteRefused("local streaming guard refused send")
+
+            patch.setattr(d.adapter, "send", refusing)
+        else:
+            mock.handlers["claude:send-message"] = lambda params: {"accepted": False}
+        if crash_window == "command_status":
+            stop_after_command_status(d, patch, "rejected")
+        elif cause in {"local_refusal", "version"}:
+            original_transition = d.ops._transition
+
+            def stop_before_operation_failure(operation_id, status, **kwargs):
+                if status == "failed":
+                    raise asyncio.CancelledError("crash after local outcome before operation settlement")
+                return original_transition(operation_id, status, **kwargs)
+
+            patch.setattr(d.ops, "_transition", stop_before_operation_failure)
+        else:
+            original_start = d.ops._step_start
+
+            def stop_before_refusal_intent(operation_id, name, request):
+                if name == "task_send_refusal":
+                    raise asyncio.CancelledError("crash after local outcome before refusal intent")
+                return original_start(operation_id, name, request)
+
+            patch.setattr(d.ops, "_step_start", stop_before_refusal_intent)
+        with pytest.raises(asyncio.CancelledError):
+            await d.ops._execute(op["operation_id"])
+    snapshot, commands = task_effect_snapshot(d, tid), d.journal.commands(tid)
+    frames = int(cause == "accepted_false")
+    assert len(commands) == 1 and commands[0]["status"] == "rejected" and len(writes(mock)) == frames
+    assert d.ops.get(op["operation_id"])["status"] == "running"
+    assert not any(s["name"] == "task_send_refusal" for s in d.ops.get(op["operation_id"])["steps"])
+    code = {"local_refusal": "REFUSED", "version": "CONTROL_VERSION_CONFLICT"}.get(cause, "NOT_ACCEPTED")
+    async with restarted_daemon(d) as restarted:
+        if initial:
+            async def presence(*args):
+                return "unknown" if cause == "unknown_presence" else "vanished"
+            monkeypatch.setattr(restarted.adapter, "session_presence", presence)
+        await restarted.ops.drain()
+        assert_terminal_send_replay(restarted, tid, op, code, commands, frames, mock)
+        task = restarted.journal.get(tid)
+        assert task["state"] != "uncertain" and task["paused"] == snapshot["task"]["paused"]
+        assert task["control_version"] == snapshot["task"]["control_version"]
+        if cause in {"local_refusal", "version"} or crash_window == "local_outcome":
+            assert task_effect_snapshot(restarted, tid) == snapshot
+        elif cause == "vanished":
+            assert task["state"] == "queued" and task["session_id"] is None and task["session_replacements"] == 1
+        else:
+            assert task["state"] == "needs_ted"
+
+
+async def test_a07_rejected_send_recovery_preserves_a_later_accepted_command(owned, mock, monkeypatch):
+    d, tid = owned
+    op, _ = task_send_operation(d, tid, "older-rejected")
+    mock.handlers["claude:send-message"] = lambda params: {"accepted": False}
+    with monkeypatch.context() as patch:
+        stop_after_command_status(d, patch, "rejected")
+        with pytest.raises(asyncio.CancelledError):
+            await d.ops._execute(op["operation_id"])
+    mock.handlers.pop("claude:send-message")
+    fresh, _ = task_send_operation(d, tid, "later-accepted")
+    await d.ops._execute(fresh["operation_id"])
+    assert d.ops.get(fresh["operation_id"])["status"] == "succeeded"
+    snapshot, commands = task_effect_snapshot(d, tid), d.journal.commands(tid)
+    assert commands[-1]["status"] == "accepted" and snapshot["task"]["state"] == "running"
+    async with restarted_daemon(d) as restarted:
+        await restarted.ops.drain()
+        assert_terminal_send_replay(restarted, tid, op, "NOT_ACCEPTED", commands, 2, mock)
+        assert task_effect_snapshot(restarted, tid) == snapshot
+
+
+@pytest.mark.parametrize("status", ["cancelled", "rejected"])
+@pytest.mark.parametrize("restart_path", ["send", "tick"])
+async def test_a07_legacy_send_reuses_terminal_command_without_uncertain_task(owned, mock, monkeypatch, status, restart_path):
+    d, tid = owned
+    async def presence(*args):
+        return "present"
+    with monkeypatch.context() as patch:
+        async def refusing(*args):
+            if status == "cancelled":
+                from bat_agent_connector.errors import TaskDispatchCancelled
+                raise TaskDispatchCancelled("cancelled before frame")
+            raise service.WriteRefused("local streaming guard refused send")
+
+        patch.setattr(d.adapter, "send", refusing)
+        patch.setattr(d.adapter, "session_presence", presence)
+        stop_after_command_status(d, patch, status)
+        with pytest.raises(asyncio.CancelledError):
+            await d.coordinator._send(d.journal.get(tid), SID, "one instruction", "lead:initial")
+    commands, snapshot = d.journal.commands(tid), task_effect_snapshot(d, tid)
+    async with restarted_daemon(d) as restarted:
+        monkeypatch.setattr(restarted.adapter, "session_presence", presence)
+        if restart_path == "send":
+            result = await restarted.coordinator._send(restarted.journal.get(tid), SID, "one instruction", "lead:initial")
+        else:
+            result = await restarted.coordinator.tick(tid)
+        assert result["state"] == ("accepted" if status == "cancelled" else "needs_ted")
+        assert restarted.journal.commands(tid) == commands and not writes(mock)
+        if status == "cancelled":
+            assert task_effect_snapshot(restarted, tid) == snapshot
 
 
 @pytest.mark.parametrize("action", ["answer", "interrupt", "permissions", "relay", "deferred_raise"])
