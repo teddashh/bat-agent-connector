@@ -29,7 +29,9 @@ are refused before and after canonicalization. Validated local paths are convert
 to ordinary drive spelling for PowerShell 5.1; overlong installation paths are refused.
 No arbitrary executable,
 script, arguments, filesystem path, URL, headers or credentials cross IPC.
-The child inherits only selected Windows identity paths; central tokens and proxy
+The child inherits only selected Windows identity paths. `PSModulePath` is explicitly the
+OS-selected PowerShell's `Modules` directory; ambient user or PowerShell 7 module paths
+are not inherited. Central tokens and proxy
 credentials are not inherited. Only the packaged main window has command access,
 with the same native origin checks as the central transport.
 

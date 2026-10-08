@@ -329,6 +329,9 @@ fn adapter_command(executable: &Path, script: &Path) -> Result<Command, String> 
         .and_then(Path::parent)
     {
         command.env("PATH", system);
+        // Use the modules shipped with this OS-selected PowerShell only. Do not inherit
+        // user module paths (or PowerShell 7's paths when launched by a different host).
+        command.env("PSModulePath", executable.parent().unwrap().join("Modules"));
         if let Some(windows) = system.parent() {
             command.env("SystemRoot", windows).env("WINDIR", windows);
         }
