@@ -75,6 +75,8 @@ class GitHubClient:
                 payload = {"message": raw[:200].decode(errors="replace")}
             # A rate-limited read is retried later; a write refused for its rate limit keeps its 403 (not sent).
             rate_limited_read = e.code == 403 and method == "GET" and _rate_limited(e.headers, payload)
+            if e.code == 429 and method == "POST" and path.endswith("/dispatches"):
+                return 429, {"retry_after": e.headers.get("Retry-After", "30")}
             if e.code == 429 or e.code >= 500 or rate_limited_read:
                 raise GitHubAmbiguous(f"GitHub {method} {path} answered {e.code}") from None
             return e.code, payload if isinstance(payload, dict) else {"items": payload}
@@ -151,3 +153,16 @@ class GitHubClient:
     async def jobs(self, repository: str, run_id: int):
         return await self.call("GET", f"{self._repo(repository)}/actions/runs/{int(run_id)}/jobs",
                                query={"per_page": 100})
+
+    async def workflow(self, repository: str, workflow: str):
+        return await self.call("GET", f"{self._repo(repository)}/actions/workflows/{quote(workflow)}")
+
+    async def attempt_jobs(self, repository: str, run_id: int, attempt: int, *, page: int = 1):
+        return await self.call("GET", f"{self._repo(repository)}/actions/runs/{int(run_id)}/attempts/"
+                               f"{int(attempt)}/jobs", query={"per_page": 100, "page": page})
+
+    async def pending_deployments(self, repository: str, run_id: int):
+        return await self.call("GET", f"{self._repo(repository)}/actions/runs/{int(run_id)}/pending_deployments")
+
+    async def artifact(self, repository: str, artifact_id: int):
+        return await self.call("GET", f"{self._repo(repository)}/actions/artifacts/{int(artifact_id)}")

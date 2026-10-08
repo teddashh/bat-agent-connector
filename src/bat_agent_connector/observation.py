@@ -20,7 +20,8 @@ from .resource_ids import registry_worktree_intent, registry_worktree_parent, wo
 MIGRATION_VERSION = 2  # One-time history backfill; data step allocated by the orchestrator.
 RESOURCE_TYPES = {"session", "worktree", "execution"}
 RELATION_EVENTS = {"relation.opened", "relation.bound", "relation.closed"}
-DELIVERY_ACTIONS = {"github.pr.update", "github.pr.merge", "delivery.merge_and_deploy"}
+DELIVERY_ACTIONS = {"github.pr.update", "github.pr.merge", "delivery.merge_and_deploy",
+                    "deployment.start", "deployment.retry", "deployment.rollback"}
 PRIVATE_FIELDS = {"text", "words", "original_words", "instructions", "excerpt", "prompt", "payload",
                   "token", "authorization", "note", "error", "lines", "messages", "interpretation",
                   "acceptance", "original_request", "requirements", "goal", "reason_text",
@@ -71,6 +72,8 @@ head_repo_id resolver_operation_id resolver_session_id apply_operation_id integr
 parent_id verification_id route_id old_session_id handoff_command_id operator_followup source_message_id linked_at_seq evidence_ref
 expected_head_sha expected_base_sha preview_digest request_hash excerpt_sha256 before_digest after_digest
 candidate_commit diff_sha256 start_commit old_head new_head pushed_sha push_old_sha composed_tree predicted_tree approved_fingerprint
+deployment_id environment_key generation provider_terminal run_id run_attempt rollback_of retry_of artifact_id artifact_digest
+release_id provider_url is_current last_verified
 cancel_requested would_merge files_may_be_truncated write_acknowledged observed_intent read_refused
 conflict_before_write conflict_after_write pushed local_checkouts_changed advisory_only abort_current ready stale attention
 """.split())

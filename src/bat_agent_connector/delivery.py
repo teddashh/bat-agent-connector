@@ -4,7 +4,7 @@ These are deterministic backend actions (plan §15-§18): the Dashboard button a
 run the same handler, no LLM is involved, and a task id is not required. Every write is a recorded step; a lost
 reply is settled by reading GitHub back. Merges use the asynchronous merge API, so a merge queue is waited on as
 ``waiting_external`` and never reported as merged until the PR itself is merged. A deploy is only ``succeeded``
-when the recipe's deploy job concluded success; a completed run with a skipped deploy job is not a deploy.
+when its fixed run attempt, deploy job, environment and runtime check all provide evidence.
 """
 
 from __future__ import annotations
@@ -13,9 +13,9 @@ import json
 import re
 import time
 
-from . import pr_delivery
+from . import deployment, pr_delivery
 from .api_auth import Principal
-from .config import DeployRecipe, GitHubConfig
+from .config import GitHubConfig
 from .github import GitHubAmbiguous, GitHubClient
 from .operations import (
     RERUN,
@@ -149,7 +149,7 @@ def _check_merge_policy(ops: OperationService, repository: str, method: str) -> 
         raise OperationError("INVALID_PARAMS", f"method must be one of {', '.join(repo.merge_methods)}", 422)
 
 
-async def _merge(ctx: OpContext, repository: str, number: int, sha: str, prefix: str = "merge") -> dict:
+async def _merge(ctx: OpContext, repository: str, number: int, sha: str, prefix: str = "merge", *, before_submit=None) -> dict:
     gh = _gh(ctx.service)
     pr = await _read(gh.pull(repository, number), "read the pull request", ctx)
     submitted = _has_step(ctx, f"{prefix}.submit")
@@ -160,6 +160,8 @@ async def _merge(ctx: OpContext, repository: str, number: int, sha: str, prefix:
             raise NeedsAttention("MERGED_DIFFERENT_HEAD",
                                  f"PR #{number} was merged at head {str((pr.get('head') or {}).get('sha'))[:12]}, "
                                  f"not the reviewed {sha[:12]}")
+        if before_submit and not submitted:
+            await before_submit()
         acknowledged = False
         if submitted:
             async def observed():
@@ -221,6 +223,9 @@ async def _merge(ctx: OpContext, repository: str, number: int, sha: str, prefix:
         return None
 
     if not submitted:
+        _check_merge_policy(ctx.service, repository, method)
+        if before_submit:
+            await before_submit()
         await pr_delivery.check_scope(ctx, preview)
         _check_merge_policy(ctx.service, repository, method)
     r = await ctx.step(f"{prefix}.submit", submit, request={"repository": repository, "pull_number": number,
@@ -285,108 +290,16 @@ async def _run_merge(ctx: OpContext) -> dict:
 
 
 # --------------------------------------------------------------------------- deploy
-def _recipe(ops: OperationService, name) -> DeployRecipe:
-    recipe = _cfg(ops).recipes.get(str(name or ""))
-    if recipe is None:
-        raise OperationError("RECIPE_NOT_CONFIGURED", f"no [[deploy.recipes]] named {name!r}", 403)
-    return recipe
-
-
-def _no_deploy_in_flight(ops: OperationService, recipe: DeployRecipe) -> None:
-    placeholders = ",".join("?" * len(TERMINAL))
-    rows = ops.db.execute(f"""SELECT operation_id,target FROM operations WHERE action IN
-        ('deployment.start','delivery.merge_and_deploy') AND status NOT IN ({placeholders})""",  # noqa: S608
-                          tuple(TERMINAL)).fetchall()
-    import json
-
-    for row in rows:
-        if json.loads(row["target"]).get("recipe") == recipe.name:
-            raise OperationError("DEPLOY_IN_PROGRESS",
-                                 f"{row['operation_id']} is still deploying to {recipe.environment}", 409)
-
-
-def _admit_deploy(ops: OperationService, principal: Principal, target: dict, params: dict, pre: dict) -> None:
-    _gh(ops)
-    recipe = _recipe(ops, target.get("recipe"))
-    if not HEX40.match(str(params.get("source_sha") or "")):
-        raise OperationError("INVALID_PARAMS", "params.source_sha must be the full 40-hex commit to deploy", 422)
-    _no_deploy_in_flight(ops, recipe)
-
-
-async def _find_run_by_operation(gh: GitHubClient, recipe: DeployRecipe, operation_id: str) -> dict | None:
-    status, body = await gh.runs(recipe.repository, recipe.workflow, event="workflow_dispatch", branch=recipe.ref)
-    if status != 200:
-        return None
-    for run in body.get("workflow_runs") or []:
-        if operation_id in str(run.get("display_title") or "") or operation_id in str(run.get("name") or ""):
-            return run
-    return None
-
-
-async def _deploy(ctx: OpContext, recipe: DeployRecipe, source_sha: str, prefix: str = "deploy") -> dict:
-    gh = _gh(ctx.service)
-    refs = ctx.op.get("external_refs") or {}
-    run_id = refs.get(f"{prefix}_run_id")
-    if recipe.mode == "workflow_dispatch":
-        values = {"source_sha": source_sha, "operation_id": ctx.operation_id, "environment": recipe.environment,
-                  "repository": recipe.repository}
-        inputs = {k: values[v] for k, v in recipe.inputs}
-
-        async def dispatch() -> dict:
-            status, body = await gh.dispatch(recipe.repository, recipe.workflow, recipe.ref, inputs)
-            if status not in {200, 204}:
-                raise OperationError(f"GITHUB_{status}", str(body.get("message") or "dispatch refused")[:300])
-            return {"http_status": status, "run_id": body.get("workflow_run_id"), "html_url": body.get("html_url")}
-
-        async def reconcile(_request: dict):
-            run = await _find_run_by_operation(gh, recipe, ctx.operation_id)
-            return {"run_id": run["id"], "html_url": run.get("html_url"), "found_by": "run_name"} if run else None
-
-        d = await ctx.step(f"{prefix}.dispatch", dispatch, request={"recipe": recipe.name, "inputs": inputs},
-                           reconcile=reconcile)
-        run_id = run_id or d.get("run_id")
-        if not run_id:  # older API answer (204) without a run id: find it by the operation id in its run-name
-            try:
-                run = await _find_run_by_operation(gh, recipe, ctx.operation_id)
-            except GitHubAmbiguous:  # the run may already be deploying: keep looking, never fail here
-                run = None
-            if run is None:
-                _check_wait(ctx, f"{prefix}_locate_started_at")
-                raise Wait("waiting_external", "waiting for the dispatched workflow run to appear", 10)
-            run_id = run["id"]
-    elif not run_id:
-        body = await _read(gh.runs(recipe.repository, recipe.workflow, head_sha=source_sha, event="push"),
-                           "list workflow runs", ctx)
-        runs = sorted(body.get("workflow_runs") or [], key=lambda r: r.get("id") or 0)
-        if not runs:
-            _check_wait(ctx, f"{prefix}_locate_started_at")
-            raise Wait("waiting_external", "waiting for the merge's deploy run to start", 15)
-        run_id = runs[-1]["id"]
-    if refs.get(f"{prefix}_run_id") != run_id:
-        ctx.set_refs(**{f"{prefix}_run_id": run_id})
-        ctx.op["external_refs"] = {**refs, f"{prefix}_run_id": run_id}
-    run = await _read(gh.run(recipe.repository, run_id), "read the workflow run", ctx)
-    if recipe.mode == "on_merge" and run.get("head_sha") != source_sha:
-        raise NeedsAttention("RUN_VERSION_MISMATCH", "the located run is for a different commit")
-    if run.get("status") != "completed":
-        _check_wait(ctx, f"{prefix}_wait_started_at")
-        reason = ("waiting for environment approval" if run.get("status") == "waiting"
-                  else f"workflow run is {run.get('status')}")
-        raise Wait("waiting_external", reason, 15, {f"{prefix}_run_url": run.get("html_url")})
-    jobs = await _read(gh.jobs(recipe.repository, run_id), "read workflow jobs", ctx)
-    job = next((j for j in jobs.get("jobs") or [] if j.get("name") == recipe.deploy_job), None)
-    if run.get("conclusion") != "success":
-        raise OperationError("DEPLOY_FAILED", f"workflow run concluded {run.get('conclusion')}")
-    if job is None or job.get("conclusion") != "success":
-        raise OperationError("DEPLOY_NOT_RUN", f"job {recipe.deploy_job!r} concluded "
-                                               f"{job.get('conclusion') if job else 'missing'}; not deployed")
-    return {"deployed": True, "recipe": recipe.name, "environment": recipe.environment, "source_sha": source_sha,
-            "repository": recipe.repository, "workflow": recipe.workflow, "run_id": run_id,
-            "run_attempt": run.get("run_attempt"), "html_url": run.get("html_url")}
-
-
 async def _run_deploy(ctx: OpContext) -> dict:
-    return await _deploy(ctx, _recipe(ctx.service, ctx.target["recipe"]), ctx.params["source_sha"])
+    return await deployment.run_start(ctx)
+
+
+async def _run_rollback(ctx: OpContext) -> dict:
+    return await deployment.run_start(ctx, rollback=True)
+
+
+def _admit_rollback(ops, principal, target, params, pre):
+    deployment.admission(ops, principal, target, params, pre, rollback=True)
 
 
 # --------------------------------------------------------------------------- merge + deploy
@@ -395,19 +308,23 @@ def _admit_merge_and_deploy(ops: OperationService, principal: Principal, target:
     if not principal.allows("deploy"):
         raise OperationError("FORBIDDEN", "delivery.merge_and_deploy also needs the 'deploy' scope", 403)
     _admit_merge(ops, principal, target, params, pre)
-    recipe = _recipe(ops, target.get("recipe"))
+    recipe = deployment.recipe(ops, target.get("recipe"))
     if recipe.repository.lower() != str(target.get("repository")).lower():
         raise OperationError("INVALID_TARGET", "the recipe deploys a different repository", 422)
-    _no_deploy_in_flight(ops, recipe)
+    preview = pr_delivery.get_preview(ops.db, params["preview_id"])
+    if preview["target"]["base_ref"] != recipe.ref:
+        raise OperationError("DEPLOY_SOURCE_NOT_ON_REF", "reviewed PR base is not the recipe ref", 422)
+    deployment.admission(ops, principal, target, params, pre, combined=True)
 
 
 async def _run_merge_and_deploy(ctx: OpContext) -> dict:
     repository = _repo_or_403(ctx.service, ctx.target["repository"])
-    merged = await _merge(ctx, repository, ctx.target["pull_number"], ctx.preconditions["expected_head_sha"])
-    if (ctx.op.get("external_refs") or {}).get("merged_sha") != merged["merged_sha"]:
-        ctx.set_refs(merged_sha=merged["merged_sha"])  # kept even if the deploy fails: retry deploys this version
-    deployed = await _deploy(ctx, _recipe(ctx.service, ctx.target["recipe"]), merged["merged_sha"])
-    return {"merge": merged, "deploy": deployed}
+    return await deployment.run_combined(ctx, lambda before: _merge(
+        ctx, repository, ctx.target["pull_number"], ctx.preconditions["expected_head_sha"], before_submit=before))
+
+
+async def reconcile_deployments(ops):
+    await deployment.reconcile_deployments(ops)
 
 
 # --------------------------------------------------------------------------- reads
@@ -455,7 +372,9 @@ ACTIONS = [
     ActionDef("github.pr.merge", "merge", "Merge a pull request at the reviewed head SHA",
               _run_merge, _admit_merge, ("repository",)),
     ActionDef("deployment.start", "deploy", "Deploy a fixed commit through a configured recipe",
-              _run_deploy, _admit_deploy, ("recipe",)),
+              _run_deploy, deployment.admission, ("recipe",)),
+    ActionDef("deployment.rollback", "deploy", "Redeploy a saved verified identity through its recipe",
+              _run_rollback, _admit_rollback, ("recipe",)),
     ActionDef("delivery.merge_and_deploy", "merge", "Merge a pull request, then deploy the merged commit",
               _run_merge_and_deploy, _admit_merge_and_deploy, ("repository", "recipe")),
 ]
