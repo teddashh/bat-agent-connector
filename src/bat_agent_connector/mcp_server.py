@@ -755,8 +755,8 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             (max_start_per_call). Refuses sessions that do not look exhausted unless force=true. Idempotent per
             old session. model defaults to the host's codex_model. instructions (single session only) replace the
             default "continue the task" steps, e.g. "only commit the work in progress"; archive_only=true means
-            session_cleanup will never merge that session's branch (it removes the worktree, keeping the branch,
-            once the session is idle and clean). Returns old/new session ids, cwd, branch, same_worktree.
+            the session is marked archive-only. Reclaim its resources through cleanup_preview and cleanup_apply;
+            release_undelivered preserves its commits and branch. Returns old/new session ids, cwd, branch, same_worktree.
             Requires confirm=true."""
             return await lifecycle.session_failover(
                 fleet, host, session_id, confirm, all_exhausted, dry_run, model, force, 12, workspace,
@@ -812,7 +812,8 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             """ORCHESTRATE. Start one worktree session per item of the latest ```bat-fanout block in that
             session's replies, each with the item's prompt VERBATIM (plus the BAT-STATUS request). You do not
             split or rewrite anything. Capped by max_start_per_call and the host cap. A planner session from
-            fanout_plan_session is cleaned up afterwards. dry_run=true only parses. Requires confirm=true."""
+            fanout_plan_session is stopped afterwards; its worktree is kept for resource-cleanup.
+            dry_run=true only parses. Requires confirm=true."""
             return await lifecycle.fanout_from_plan(fleet, host, session_id, confirm, dry_run, agent, None, max_items)
 
         for fn in (
@@ -826,7 +827,7 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             fanout_from_plan,
         ):
             fn.__doc__ = (fn.__doc__ or "") + f" Orchestrate is enabled for: {oenabled}."
-            mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=orc)
+            mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro if fn is session_cleanup else orc)
 
     return mcp, fleet
 

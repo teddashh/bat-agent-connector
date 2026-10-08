@@ -61,26 +61,28 @@ def file_fact(path, relative):
     h = hashlib.sha256()
     with os.fdopen(fd, "rb") as f:
         for b in iter(lambda: f.read(131072), b""):
+            if time.monotonic() >= DEADLINE:
+                raise ValueError("OBSERVATION_UNAVAILABLE")
             h.update(b)
     return {"path": relative, "type": "file", "digest": h.hexdigest(), "bytes": s.st_size,
             "mode": stat.S_IMODE(s.st_mode)}
 
 
-def manifest(path, *, skip_replicas=False):
+def manifest(path, *, skip_replicas=False, include_git=False):
     # A complete exact file manifest also detects ignored files and same-status content edits.
     out = []
     for parent, dirs, files in os.walk(path, followlinks=False):
         if time.monotonic() >= DEADLINE:
             raise ValueError("OBSERVATION_UNAVAILABLE")
-        dirs[:] = sorted(d for d in dirs if d != ".git" and not (skip_replicas and parent == path and d == ".batc-inputs"))
+        dirs[:] = sorted(d for d in dirs if (include_git or d != ".git") and not (skip_replicas and parent == path and d == ".batc-inputs"))
         for d in list(dirs):
             if os.path.islink(os.path.join(parent, d)):
                 files.append(d)
                 dirs.remove(d)
-        if parent != path and ".git" in files:
+        if not include_git and parent != path and ".git" in files:
             raise ValueError("RESOURCE_KIND_UNSUPPORTED: nested repository")
         for name in sorted(files):
-            if parent == path and name == ".git":
+            if not include_git and parent == path and name == ".git":
                 continue
             p = os.path.join(parent, name)
             out.append(file_fact(p, os.path.relpath(p, path)))
@@ -94,7 +96,10 @@ def identity(repo, roots):
     common = git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
     canonical(common, roots)
     for parent, dirs, files in os.walk(common, followlinks=False):
-        if any(os.path.islink(os.path.join(parent, n)) for n in dirs + files):
+        if time.monotonic() >= DEADLINE:
+            raise ValueError("OBSERVATION_UNAVAILABLE")
+        if any(os.path.islink(os.path.join(parent, n)) for n in dirs + files) or any(
+                os.stat(os.path.join(parent, n)).st_nlink > 1 for n in files):
             raise ValueError("CLONE_CONFIG_TAMPERED")
     for name in ("objects", "refs", "config"):
         canonical(os.path.join(common, name), roots)
@@ -131,9 +136,13 @@ def observe(req):
         return result
     result.update(identity(repo, roots))
     regs = registrations(repo)
+    if len(regs) > 500:
+        raise ValueError("PREVIEW_TOO_LARGE")
     result["registrations"] = regs
     result["refs"] = dict(line.split(" ", 1) for line in
                           git(repo, "for-each-ref", "--format=%(refname) %(objectname)").splitlines())
+    if len(result["refs"]) > 2000:
+        raise ValueError("PREVIEW_TOO_LARGE")
     requested = set(req.get("worktrees", []))
     if not req.get("paths_only"):
         requested |= {r["worktree"] for r in regs}
@@ -180,8 +189,26 @@ def observe(req):
     for temp in req.get("temporaries", []):
         try:
             canonical(temp, roots)
-            result["temporaries"][temp] = {"exists": os.path.isdir(temp), "manifest": manifest(temp),
-                "marker": git(temp, "config", "--get", "batc.managed-clone", optional=True)}
+            d = {"exists": os.path.isdir(temp)}
+            result["temporaries"][temp] = d
+            if not d["exists"]:
+                continue
+            d["identity"] = identity(temp, roots)
+            d["layout"] = "bare" if git(temp, "rev-parse", "--is-bare-repository").strip() == "true" else "clone"
+            head = git(temp, "rev-parse", "--verify", "HEAD", optional=True)
+            d["head"] = head.strip() if head else None
+            d["refs"] = dict(line.split(" ", 1) for line in git(temp, "for-each-ref", "--format=%(refname) %(objectname)").splitlines())
+            if d["head"] is None and d["refs"]:
+                d["head"] = sorted(d["refs"].values())[0]
+            d["manifest"] = manifest(temp, include_git=True)
+            d["manifest_digest"] = digest(d["manifest"])
+            d["directories"] = sorted(os.path.relpath(parent, temp) for parent, dirs, files in os.walk(temp, followlinks=False))
+            d["content_available"] = all(git(repo, "cat-file", "-e", sha + "^{commit}", optional=True) is not None
+                                         for sha in set(d["refs"].values()) | ({d["head"]} if d["head"] else set()))
+            d["git_only"] = all(f["type"] == "file" and (
+                f["path"].startswith(".git/") if d["layout"] == "clone" else
+                f["path"] in {"HEAD", "config", "description", "packed-refs", "info/exclude"} or
+                f["path"].startswith(("objects/", "refs/", "logs/"))) for f in d["manifest"])
         except (ValueError, OSError, subprocess.SubprocessError) as e:
             result["temporaries"][temp] = {"error": str(e).split(":", 1)[0]}
     return result
@@ -225,22 +252,46 @@ def mutate(req):
         phase, ref, sha = req["phase"], req.get("retained_ref"), req.get("sha")
         wt = req.get("path")
         before = observed["worktrees"].get(wt) if wt else None
-        if phase in {"preserve", "discard", "remove.worktree"}:
+        if phase in {"preserve", "discard", "remove.worktree"} and req.get("kind") != "temporary":
+            if before != req["before"]:
+                raise ValueError("PREVIEW_STALE")
+        if req.get("kind") == "temporary":
+            before = observed["temporaries"].get(wt)
             if before != req["before"]:
                 raise ValueError("PREVIEW_STALE")
         if phase == "preserve":
             if not ref.startswith("refs/batc/retained/"):
                 raise ValueError("BINDING_MISMATCH")
-            current = observed["refs"].get(ref)
-            if current and current != sha:
-                raise ValueError("RETAINED_REF_MISMATCH")
-            if not current:
-                git(repo, "update-ref", ref, sha, "0" * 40)
-            if not retained(repo, ref, sha):
-                raise ValueError("RETAINED_CONTENT_MISSING")
-            return {"ref": ref, "sha": sha, "tree": git(repo, "rev-parse", sha + "^{tree}").strip()}
-        if not retained(repo, ref, sha):
+            commits = set(before["refs"].values()) | ({sha} if sha else set()) if req.get("kind") == "temporary" else {sha}
+            pins = []
+            for commit in sorted(commits):
+                pin = ref.rsplit("/", 1)[0] + "/" + commit
+                current = observed["refs"].get(pin)
+                if current and current != commit:
+                    raise ValueError("RETAINED_REF_MISMATCH")
+                if not current:
+                    git(repo, "update-ref", pin, commit, "0" * 40)
+                if not retained(repo, pin, commit):
+                    raise ValueError("RETAINED_CONTENT_MISSING")
+                pins.append({"ref": pin, "sha": commit, "tree": git(repo, "rev-parse", commit + "^{tree}").strip()})
+            return {"ref": ref, "sha": sha, "tree": git(repo, "rev-parse", sha + "^{tree}").strip(), "pins": pins}
+        if sha and not retained(repo, ref, sha):
             raise ValueError("RETAINED_CONTENT_MISSING")
+        if phase == "remove.temporary":
+            if req.get("kind") != "temporary" or not before["content_available"]:
+                raise ValueError("RETAINED_CONTENT_MISSING")
+            if not before["git_only"]:
+                raise ValueError("RESOURCE_KIND_UNSUPPORTED")
+            for other in sorted(set(before["refs"].values())):
+                if not ref or not retained(repo, ref.rsplit("/", 1)[0] + "/" + other, other):
+                    raise ValueError("RETAINED_CONTENT_MISSING")
+            names = sorted((f["path"] for f in before["manifest"]), key=lambda n: n in {".git/config", "config"})
+            exact_unlink(wt, names, before["manifest"])
+            for d in sorted((x for x in before["directories"] if x != "."), key=lambda x: x.count("/"), reverse=True):
+                canonical(os.path.join(wt, d), req["roots"])
+                os.rmdir(os.path.join(wt, d))
+            os.rmdir(wt)
+            return {"removed": True, "retained_commits": sorted(set(before["refs"].values()) | ({sha} if sha else set()))}
         if phase == "discard":
             if before["complex_state"] or any(f["type"] != "file" for f in before["manifest"]):
                 raise ValueError("DISCARD_MANIFEST_UNAVAILABLE")
@@ -278,7 +329,19 @@ def main():
     try:
         if req.get("phase") == "verify.retained":
             identity(req["repository"], req["roots"])
-            out = [{**r, "available": retained(req["repository"], r["ref"], r["commit_sha"])} for r in req["retained"]]
+            out = []
+            for r in req["retained"]:
+                available = retained(req["repository"], r["ref"], r["commit_sha"])
+                out.append({**r, "available": available, "tree_sha": git(req["repository"], "rev-parse",
+                    r["commit_sha"] + "^{tree}").strip() if available else r.get("tree_sha")})
+        elif req.get("probe"):
+            fd = os.open(req["repository"], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                out = observe(req)
+                out["process_ended"] = True
+            finally:
+                os.close(fd)
         else:
             out = mutate(req) if req.get("phase") else observe(req)
         print(json.dumps({"result": out}, ensure_ascii=True))

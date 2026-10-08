@@ -1,4 +1,4 @@
-"""Session lifecycle helpers: permissions, quota failover, and gated cleanup.
+"""Session lifecycle helpers: permissions, quota failover, and read-only legacy evaluation.
 
 * ``session_set_permissions`` / ``approve_pending`` (write tier): make a session behave like
   a BAT GUI session with "allow bypass permissions" on. Raising to allow-all is only
@@ -7,10 +7,10 @@
   continued by a new Codex session in the SAME folder (same worktree + branch when the
   Claude session was a worktree session), with a handoff prompt (original task, latest
   instruction, recent output, git state). The old session is left untouched.
-* ``session_cleanup`` (orchestrate tier, ``auto_cleanup = true`` on the host): evaluates
+* ``session_cleanup`` (orchestrate tier; auto_cleanup deprecated): only evaluates
   orchestrated sessions and decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE with
   deterministic gates first and an optional Jev judgment last (Jev unavailable => escalate,
-  never merge). Branches are always kept, so a removed worktree can be recreated.
+  never merge). Apply is disabled; reviewed cleanup lives in cleanup.py.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from . import registry, resource_policy, verification
+from . import registry, resource_policy, service, verification
 from .errors import (
     BatError,
     InvokeTimeout,
@@ -1271,6 +1271,11 @@ async def _stop(fleet: Fleet, host: str, sid: str, audit: Audit, *, cleanup: boo
         return {"stopped": False, "reason": "not loaded"}
     if meta.get("isStreaming"):
         return {"stopped": False, "reason": "started streaming again; left running"}
+    if cleanup and service._state_safe(service.agent_kind(t.get("agentPreset")), meta):
+        state = await c.invoke("claude:get-session-state", {"sessionId": sid})
+        if isinstance(state, dict) and any(state.get(k) for k in
+                ("isStreaming", "pendingAskUser", "pendingPermission", "queuedMessages", "queuedMessageCount")):
+            return {"stopped": False, "reason": "session became busy or waiting; preview again"}
     base = {"actor": fleet.actor, "tool": "session_cleanup", "host": host, "session_id": sid + "#stop"}
     audit.check_rate(host, sid + "#stop")
     audit.record(**base, channel="claude:stop-session", phase="attempt")
@@ -1293,7 +1298,7 @@ async def session_cleanup(
     session_id: str | None = None,
     min_idle_s: float = 120,
 ) -> dict:
-    """Evaluate orchestrated sessions (and Claude sessions superseded by failover) and clean up."""
+    """Read-only legacy evaluation of orchestrated sessions and superseded Claude sessions."""
     if not fleet.orchestrate_enabled(host):
         raise WriteRefused(f"orchestrate tier is disabled for host {host!r}")
     if not dry_run:

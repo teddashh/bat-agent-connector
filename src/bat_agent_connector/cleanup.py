@@ -27,6 +27,7 @@ from .api_auth import SCOPES
 from .config import state_dir
 from .errors import BatError, ResourceReadOnly
 from .operations import (
+    RERUN,
     ActionDef,
     AmbiguousOutcome,
     NeedsAttention,
@@ -70,6 +71,7 @@ REASONS = {
     "RESOURCE_KIND_UNSUPPORTED": "This resource or Git state has no cleanup adapter.",
     "RESOURCE_CLEANED": "This resource generation has a confirmed cleanup tombstone.",
     "CLEANUP_IN_PROGRESS": "A cleanup operation has reserved this resource.",
+    "TIER_DISABLED": "Cleanup needs the host write and orchestrate tiers.",
 }
 
 
@@ -130,8 +132,13 @@ def guard(host=None, *, session_id=None, path=None, branch=None):
     for g in _registry_document().get("cleanup_guards", {}).values():
         if host is not None and g.get("host") != host:
             continue
-        matches = (session_id and session_id in g.get("session_ids", [])) or (
-            path and path == g.get("path") and (branch is None or branch == g.get("branch")))
+        # A stopped session and a deleted branch do not retire their carrier worktree/repository.
+        kind = g.get("kind")
+        matches = session_id and session_id in g.get("session_ids", [])
+        if kind == "local_branch":
+            matches = matches or (branch and branch == g.get("branch") and path == g.get("path"))
+        elif kind != "session":
+            matches = matches or (path and path == g.get("path"))
         if not matches:
             continue
         if g["status"] == "cleaned":
@@ -146,11 +153,13 @@ def _mark(item, op_id, status):
         d = _registry_document()
         guards = d.setdefault("cleanup_guards", {})
         old = guards.get(item["resource_id"])
+        if old and old["operation_id"] == op_id and old["status"] == status:
+            return
         if old and old["operation_id"] != op_id:
             raise ResourceReadOnly("CLEANUP_IN_PROGRESS", "resource has another cleanup owner")
         guard(item["host"], session_id=item.get("session_id"), path=item.get("path"), branch=item.get("branch"))
         guards[item["resource_id"]] = {
-            "operation_id": op_id, "status": status, "host": item["host"], "path": item.get("path"),
+            "operation_id": op_id, "status": status, "host": item["host"], "kind": item["kind"], "path": item.get("path"),
             "branch": item.get("branch"), "generation": item["generation"],
             "session_ids": [item["session_id"]] if item.get("session_id") else [],
         }
@@ -192,6 +201,8 @@ def decode_token(ops, token, *, allow_expired=False):
         if version != "v1" or len(token) > MAX_TOKEN_BYTES * 2:
             raise ValueError()
         payload = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+        if _b64(payload) != raw:
+            raise ValueError()
         expected = hmac.digest(ops.context["cleanup_key"], b"v1." + payload, "sha256")
         if not hmac.compare_digest(_b64(expected), sig):
             raise ValueError()
@@ -299,6 +310,7 @@ def _all(ops):
         projected = _resource(host, "worktree", intent, slot, path=path, repository=repo, branch=branch,
                               flavor=flavor, base=base, source=source, proven=True)
         projected["resource_id"] = worktree_id(host, intent_type, intent, slot)
+        projected["generation"] = _hash(["worktree", host, intent_type, intent, slot])
         projected["creation_evidence"].update(intent_type=intent_type)
         item = add(projected)
         alias(item, *ids)
@@ -316,6 +328,18 @@ def _all(ops):
         wt(r["host"], r["clone_path"], r["worktree_path"], r["branch"], r["operation_id"], "checkpoint",
            cp["commit_sha"], [r["checkpoint_id"], r["operation_id"], r["host"] + "/" + r["session_id"]],
            cp["repo_root"])
+    for op in op_rows:
+        if op["action"] == "checkpoint.continue":
+            refs = op.get("external_refs") or {}
+            cp = cps.get(op["target"].get("checkpoint_id"))
+            prepare = db.execute("SELECT request FROM operation_steps WHERE operation_id=? AND name='worktree.prepare'",
+                                 (op["operation_id"],)).fetchone()
+            repo = refs.get("clone_path")
+            if cp and repo and prepare:
+                temp = repo + ".batc-tmp-" + op["operation_id"][3:15]
+                item = add(_resource(cp["host"], "temporary", op["operation_id"], temp,
+                    path=temp, repository=repo, source=cp["repo_root"], proven=True,
+                    original_ids=[op["operation_id"], cp["checkpoint_id"]]))
     for op in op_rows:
         refs = op.get("external_refs") or {}
         host = refs.get("host") or op["target"].get("host")
@@ -344,17 +368,41 @@ def _all(ops):
                               (op["operation_id"],)).fetchone()
             area = refs.get("area_path") or (json.loads(step[0]).get("area") if step else None)
             if area and (host, area) not in containers:
+                repo = fleet.config.github.repos.get(op["target"].get("repository", "").lower())
+                source = {"host": host, "repository": repo.repository, "remote-url": repo.integrate.remote_url} if repo else None
                 item = add(_resource(host, "integration_area", op["operation_id"], area, path=area,
-                                     repository=area, proven=True))
+                                     repository=area, proven=bool(source), source=source))
                 containers[host, area] = item
                 alias(item, op["operation_id"])
     for pv in pvs.values():
+        for source in json.loads(pv["sources"]):
+            if source["kind"] == "branch":
+                remote = add(_resource(pv["host"], "remote", "remote:" + pv["repository"], source["id"],
+                    proven=False, ref=source.get("ref"), original_ids=[source["id"], pv["operation_id"], pv["preview_id"]]))
+                remote["remote"] = True
         ck = pv["host"], pv["area_path"]
         if ck not in containers:
             containers[ck] = add(_resource(pv["host"], "integration_area", pv["operation_id"], pv["area_path"],
                 path=pv["area_path"], repository=pv["area_path"], proven=True,
                 source={"host": pv["host"], "repository": pv["repository"], "remote-url": pv["remote_url"]}))
+        containers[ck].setdefault("source", {"host": pv["host"], "repository": pv["repository"], "remote-url": pv["remote_url"]})
         alias(containers[ck], pv["operation_id"], pv["preview_id"])
+    for op in op_rows:
+        if op["action"] not in {"integration.preview", "integration.apply"}:
+            continue
+        prepare = db.execute("SELECT request FROM operation_steps WHERE operation_id=? AND name='prepare'",
+                             (op["operation_id"],)).fetchone()
+        if not prepare:
+            continue
+        host = op["target"].get("host")
+        pv = pvs.get(op["params"].get("preview_id"))
+        area = (pv or {}).get("area_path") or json.loads(prepare[0]).get("area")
+        container = containers.get((host, area))
+        if container:
+            temp = area + "/repo.git.batc-tmp-" + op["operation_id"][3:15]
+            add(_resource(host, "temporary", op["operation_id"], temp, path=temp, repository=area,
+                source=container.get("source"), proven=bool(container.get("source")),
+                original_ids=[op["operation_id"], *(([pv["preview_id"]]) if pv else [])]))
     for task in db.execute("SELECT * FROM tasks ORDER BY submitted_at"):
         path = task["external_worktree_path"]
         if path:
@@ -375,15 +423,16 @@ def _all(ops):
             # A successful legacy BAT create/start records its origin root, branch and worktree path together.
             proven = bool(e.get("created_at") and e.get("branch") and e.get("origin_root") and
                           e.get("status") in {"active", "superseded", "removed", "cleaned"} and
+                          (host, e.get("origin_root")) in containers and not e.get("failover_of") and
                           e.get("worktree_made_by") != "connector")
             if proven or e.get("task_id"):
                 w = wt(host, e.get("origin_root") or e.get("origin_cwd"), e["worktree_path"], e.get("branch"),
-                       creation, "bat", e.get("base_commit"), [host + "/" + sid, e.get("task_id")])
+                       creation, "bat", e.get("start_commit") or e.get("base_commit"), [host + "/" + sid, e.get("task_id")])
                 if w:
                     w["proven"] = proven
         w = worktrees.get((host, path))
         if w:
-            alias(w, host + "/" + sid, e.get("task_id"))
+            alias(w, sid, host + "/" + sid, e.get("task_id"))
             w["task_owned"] = w.get("task_owned", False) or bool(e.get("task_id"))
             session["worktree_id"] = w["resource_id"]
             session["repository"] = w["repository"]
@@ -443,9 +492,10 @@ def _selection(ops, target, items, pvs, links):
     for cp_id in cp_ids:
         cp = ops.db.execute("SELECT * FROM checkpoints WHERE checkpoint_id=?", (cp_id,)).fetchone()
         if cp:
-            item = _resource(cp["host"], "source", cp_id, cp["repo_root"], path=cp["repo_root"], proven=False,
+            item = _resource(cp["host"], "source", "manual:" + cp["repo_root"], cp["repo_root"], path=cp["repo_root"], proven=False,
                              provenance="manual", original_ids=[cp_id, cp["host"] + "/" + cp["source_session_id"]])
-            items[item["resource_id"]] = item
+            old = items.setdefault(item["resource_id"], item)
+            old["original_ids"] = sorted(set(old["original_ids"] + item["original_ids"]))
             selected.add(item["resource_id"])
     # Opaque or remote links remain findable; they are never interpreted as paths.
     for r in links:
@@ -481,6 +531,12 @@ async def _runtime(ops, item, deadline):
         kind = "codex" if "codex" in preset else "claude"
         if service._state_safe(kind, meta):
             state = await client.invoke("claude:get-session-state", {"sessionId": item["session_id"]})
+        if isinstance(state, dict):
+            # Runtime facts only: do not archive raw transcripts or prompt text in cleanup receipts.
+            state = {k: (bool(v) if k.startswith("pending") or k in {"queuedMessages", "isWaitingForInput"} else v)
+                     for k, v in state.items() if k in {"status", "sessionId", "isStreaming", "pendingAskUser",
+                         "pendingPermission", "pendingQuestion", "pendingPermissions", "pendingQuestions",
+                         "queuedMessages", "queuedMessageCount", "pendingApproval", "isWaitingForInput"}}
         return {"loaded": meta is not None, "cwd": (meta or {}).get("cwd"),
                 "streaming": bool((meta or {}).get("isStreaming")), "state": state}
     try:
@@ -494,15 +550,18 @@ async def _runtime(ops, item, deadline):
 
 def _coverage(ops, item, observed):
     coverage, prs, covered = [], [], set()
+    full_head = False
     results = observed.get("results")
     head = observed.get("head")
     ids = set(item["original_ids"])
     for op_id in {r[0] for r in ops.db.execute("SELECT DISTINCT operation_id FROM integration_receipts")}:
         for r in integration.receipts(ops.db, op_id):
             # A repair result is covered by a delivered resolution receipt as well as source revisions.
-            match = (r["source_host"] == item["host"] and r["location_class"] == "managed_clone" and
+            repair_host = ops.db.execute("SELECT host FROM integration_previews WHERE preview_id=?", (r["preview_id"],)).fetchone()
+            match = (r["source_kind"] in {"checkpoint_run", "session"} and
+                     r["source_host"] == item["host"] and r["location_class"] == "managed_clone" and
                      r["source_id"] in ids) or (r.get("repair_worktree") == item.get("path") and
-                                               r["source_host"] == item["host"])
+                                               repair_host and repair_host[0] == item["host"])
             if not match:
                 continue
             coverage.append({k: r.get(k) for k in ("operation_id", "seq", "source_kind", "source_id",
@@ -514,6 +573,7 @@ def _coverage(ops, item, observed):
             prs.append({"repository": r["repository"], "pull_number": r["pull_number"],
                         "delivered_sha": r["delivered_sha"]})
             if r["mode"] != "pick" and r["pinned_sha"] == head or r.get("resolution_sha") == head:
+                full_head = True
                 covered.update(results or [])
                 covered.add(head)
             if r["mode"] == "pick":
@@ -522,14 +582,14 @@ def _coverage(ops, item, observed):
                 mapped = {p.get("source") for p in picked if p.get("new") and p.get("source")}
                 covered.update(set(r.get("commits") or []) & mapped)
     no_result = results == [] and item.get("base") == head
-    delivered = no_result or (results is not None and bool(results) and set(results) <= covered) or head in covered
+    delivered = no_result or full_head or (results is not None and bool(results) and set(results) <= covered)
     return {"delivered": delivered, "no_result": no_result, "receipts": coverage,
             "result_commits": results, "covered_commits": sorted(covered), "pull_requests": prs}
 
 
 def _consumers(ops, item, op_rows, pvs, own_op=None):
     ids = set(item["original_ids"])
-    needles = ids | {v for v in (item.get("path"), item.get("repository")) if v}
+    needles = ids | {v for v in (item.get("path") if item["kind"] != "local_branch" else item.get("branch"),) if v}
     for op in op_rows:
         if op["operation_id"] == own_op or op["action"] == "cleanup.apply":
             continue  # reservations below handle concurrent cleanup, without circular self-consumers
@@ -579,24 +639,30 @@ def _plan(ops, item, choices, op_rows, pvs, own_op=None):
         _reason(item, "TASK_OWNED")
     if kind in {"clone", "integration_area", "git_pin", "retained_ref"}:
         _reason(item, "RETAINED_CONTENT_STORE")
+    if kind == "remote":
+        _reason(item, "REMOTE_OUT_OF_SCOPE")
     if kind in {"artifact", "source"}:
         _reason(item, "RESOURCE_KIND_UNSUPPORTED")
     hc = ops.context["fleet"].config.hosts.get(item["host"])
+    if hc and kind in {"session", "worktree", "local_branch", "temporary"} and (not hc.writes or not hc.orchestrate):
+        _reason(item, "TIER_DISABLED")
     if hc and not resource_policy.in_managed_root(hc, item.get("path") or item.get("repository")):
         _reason(item, "WORKDIR_NOT_MANAGED")
     if obs.get("error"):
         _reason(item, obs["error"] if obs["error"] in REASONS else "OBSERVATION_UNAVAILABLE")
+    if item.get("live_host_unavailable"):
+        _reason(item, "OBSERVATION_UNAVAILABLE")
     if item.get("repository_error"):
         code = item["repository_error"]
         _reason(item, code if code in REASONS else "OBSERVATION_UNAVAILABLE")
     _consumers(ops, item, op_rows, pvs, own_op)
     if kind == "session":
-        if obs.get("streaming"):
+        if obs.get("streaming") or (isinstance(obs.get("state"), dict) and obs["state"].get("isStreaming")):
             _reason(item, "ACTIVE_WRITER")
         state = obs.get("state") or {}
         if isinstance(state, dict) and any(state.get(k) for k in
                 ("pendingPermission", "pendingQuestion", "pendingPermissions", "pendingQuestions", "queuedMessages",
-                 "pendingApproval", "pendingAskUser", "isWaitingForInput")):
+                 "pendingApproval", "pendingAskUser", "queuedMessageCount", "isWaitingForInput")):
             _reason(item, "SESSION_WAITING")
         if obs.get("loaded") and obs.get("cwd") != item.get("path"):
             _reason(item, "BINDING_MISMATCH")
@@ -610,7 +676,7 @@ def _plan(ops, item, choices, op_rows, pvs, own_op=None):
                 _reason(item, "UNCOMMITTED_CHANGES", manifest=obs.get("manifest_digest"))
             if obs.get("complex_state") or any(f.get("type") != "file" for f in obs.get("manifest", [])):
                 _reason(item, "RESOURCE_KIND_UNSUPPORTED")
-        coverage = _coverage(ops, item, obs)
+        coverage = _coverage(ops, item, item.get("branch_observation", obs) if obs.get("exists") is False else obs)
         item["delivery"] = coverage
         if not coverage["delivered"]:
             _reason(item, "RESULTS_NOT_DELIVERED", receipts=coverage["receipts"])
@@ -624,11 +690,23 @@ def _plan(ops, item, choices, op_rows, pvs, own_op=None):
             item["steps"] = ["preserve", *(["discard"] if obs.get("status") else []), "remove.worktree", "finalize"]
         if kind == "local_branch" and obs.get("head") and not item["reasons"]:
             item["steps"] = ["preserve", "remove.branch", "finalize"]
+    if kind == "temporary":
+        if obs.get("exists"):
+            if not obs.get("content_available"):
+                _reason(item, "CONTENT_REQUIRED")
+            if not obs.get("git_only"):
+                _reason(item, "UNCOMMITTED_CHANGES")
+            if not item["reasons"]:
+                commits = sorted(set(obs.get("refs", {}).values()) | ({obs["head"]} if obs.get("head") else set()))
+                obs["head"] = obs.get("head") or (commits[0] if commits else None)
+                item["steps"] = [*(["preserve"] if commits else []), "remove.temporary", "finalize"]
+        elif obs.get("exists") is False and not obs.get("error"):
+            item["states"] = {"resource": "absent"}
     item["decision"] = "reclaim" if item["steps"] else "retain"
     item["states"] = {"work": "history", "runtime": "active" if obs.get("loaded") else "absent",
                       "delivery": "delivered" if item.get("delivery", {}).get("delivered") else "not_delivered",
                       "resource": "present" if obs.get("exists", obs.get("loaded", True)) else "absent"}
-    if (kind == "session" and obs.get("loaded") is False or kind == "worktree" and obs.get("exists") is False) and not obs.get("error"):
+    if (kind == "session" and obs.get("loaded") is False or kind in {"worktree", "temporary"} and obs.get("exists") is False) and not obs.get("error"):
         item["decision"] = "already_absent" if not item["reasons"] else "retain"
     return item
 
@@ -647,6 +725,30 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
         try:
             await asyncio.wait_for(lock.acquire(), max(.001, deadline - time.monotonic()))
             acquired = True
+            try:
+                workspace = await asyncio.wait_for(service._workspace(ops.context["inventory"].fleet.client(host)),
+                                                   max(.001, deadline - time.monotonic()))
+                for t in workspace.get("terminals", []):
+                    sid = t.get("id")
+                    if not sid or any(i.get("session_id") == sid for i in host_items):
+                        continue
+                    meta = await asyncio.wait_for(service._meta(ops.context["inventory"].fleet.client(host), sid),
+                                                  max(.001, deadline - time.monotonic()))
+                    path = (meta or {}).get("cwd") or t.get("cwd")
+                    w = worktrees.get((host, path))
+                    i = _resource(host, "session", "observed:" + sid, sid, session_id=sid, path=path,
+                        proven=False, provenance="manual" if sid not in {r.get("session_id") for r in registry.list_entries(host)} else "unknown",
+                        original_ids=[sid, host + "/" + sid])
+                    if w:
+                        i.update(repository=w["repository"], worktree_id=w["resource_id"])
+                    items[i["resource_id"]] = i
+                    host_items.append(i)
+                    if target["kind"] == "host" or w and w["resource_id"] in selected:
+                        selected.add(i["resource_id"])
+            except (BatError, OSError, TimeoutError):
+                for i in host_items:
+                    if i["resource_id"] in selected:
+                        i["live_host_unavailable"] = True
             # Observe all sessions in selected containers, including consumers outside the requested work item.
             repos = {i.get("repository") for i in host_items if i["resource_id"] in selected and i.get("repository")}
             if only:
@@ -659,6 +761,7 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
                            (not only or i["resource_id"] == only or i.get("branch_id") == only)],
                        "branches": {i["branch"]: i.get("base") for i in related if i["kind"] == "worktree" and i.get("branch")},
                        "replica_paths": [i["path"] for i in related if i.get("flavor") == "checkpoint"],
+                       "temporaries": [i["path"] for i in related if i["kind"] == "temporary"],
                        "bases": {i["path"]: i["base"] for i in related if i["kind"] == "worktree" and i.get("base")}}
                 try:
                     if time.monotonic() >= deadline:
@@ -666,10 +769,24 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
                     read = await asyncio.wait_for(_host_call(ops, host, req, deadline - time.monotonic()),
                                                   max(.001, deadline - time.monotonic()))
                 except (BatError, OperationError, OSError, TimeoutError, AmbiguousOutcome, ValueError) as e:
+                    if getattr(e, "code", None) == "PREVIEW_TOO_LARGE":
+                        raise OperationError("PREVIEW_TOO_LARGE", "repository observation exceeds cleanup limits", 413) from None
                     read = {"error": getattr(e, "code", "OBSERVATION_UNAVAILABLE")}
+                carrier_source = (containers.get((host, repo)) or {}).get("source")
+                markers = read.get("markers", {})
+                if carrier_source and (isinstance(carrier_source, str) and markers.get("batc.source") != carrier_source or
+                        isinstance(carrier_source, dict) and any(markers.get("batc." + k) != v for k,v in carrier_source.items())):
+                    read["error"] = "CLONE_NOT_OURS"
                 for i in related:
                     i["repository_identity"] = {k: read.get(k) for k in ("common_dir", "markers", "config_digest")}
                     i["repository_error"] = read.get("error")
+                    if i["kind"] == "temporary":
+                        i["observation"] = read.get("temporaries", {}).get(i["path"], {"error": "OBSERVATION_UNAVAILABLE"})
+                        temp_markers = i["observation"].get("identity", {}).get("markers", {})
+                        src = i.get("source")
+                        if i["observation"].get("exists") and (isinstance(src, str) and temp_markers.get("batc.source") != src or
+                                isinstance(src, dict) and any(temp_markers.get("batc." + k) != v for k,v in src.items())):
+                            i["repository_error"] = "CLONE_NOT_OURS"
                     if i["kind"] == "worktree":
                         i["branch_observation"] = read.get("branches", {}).get(i.get("branch"), {})
                         i["observation"] = read.get("worktrees", {}).get(i["path"], {"error": read.get("error") or
@@ -729,7 +846,7 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
     for i in items.values():
         if i["resource_id"] in selected or i["kind"] == "session":
             _plan(ops, i, choices, op_rows, pvs, own_op)
-    for rid in selected:
+    for rid in sorted(selected, key=lambda r: {"worktree": 0, "local_branch": 1}.get(items[r]["kind"], 2)):
         i = items[rid]
         if i["kind"] == "worktree":
             for s in items.values():
@@ -748,7 +865,9 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
                 i.update(steps=[], decision="retain")
         if i["kind"] == "local_branch":
             w = items[i["worktree_id"]]
-            if w["decision"] in {"reclaim", "already_absent"} and i.get("flavor") in {"checkpoint", "repair"}:
+            absent_cleaned = w.get("observation", {}).get("exists") is False and all(
+                r["code"] == "RESOURCE_CLEANED" for r in w["reasons"])
+            if (w["decision"] in {"reclaim", "already_absent"} or absent_cleaned) and i.get("flavor") in {"checkpoint", "repair"}:
                 i["dependencies"] = [w["resource_id"]] if w["decision"] == "reclaim" else []
             else:
                 _reason(i, "CONTENT_REQUIRED", resource_id=w["resource_id"])
@@ -871,13 +990,58 @@ def _finalize(ctx, item, after):
     _mark(item, ctx.operation_id, "cleaned")
 
 
+def _progress(ctx):
+    result = receipts(ctx.service, ctx.operation_id)
+    summary = {"succeeded": sum(r["status"] == "succeeded" for r in result),
+               "retained": sum(r["status"] == "retained" for r in result),
+               "partial": any(r["status"] in {"failed", "blocked_stale", "uncertain", "running", "pending"} for r in result)}
+    ctx.service._transition(ctx.operation_id, "running", result={"preview_id": ctx.target["preview_id"],
+        "items": result, "summary": summary, "next_action": "inspect receipts; resume or preview again"})
+
+
+async def _phase_consumers(ctx, item):
+    ops = ctx.service
+    probe = {**item, "reasons": [], "consumers": []}
+    _consumers(ops, probe, [ops._decode(r) for r in ops.db.execute("SELECT * FROM operations")],
+               {r["preview_id"]: dict(r) for r in ops.db.execute("SELECT * FROM integration_previews")}, ctx.operation_id)
+    if probe["reasons"]:
+        raise OperationError("PREVIEW_STALE", "new content consumer before mutation", 409)
+    entries = registry.list_entries(item["host"])
+    workspace = await service._workspace(ops.context["inventory"].fleet.client(item["host"]))
+    for t in workspace.get("terminals", []):
+        if t.get("id") and t.get("id") not in {e.get("session_id") for e in entries}:
+            meta = await service._meta(ops.context["inventory"].fleet.client(item["host"]), t["id"])
+            if (meta or {}).get("cwd") == item.get("path"):
+                raise OperationError("PREVIEW_STALE", "a manual session uses this worktree", 409)
+    for e in entries:
+        if (e.get("worktree_path") or e.get("cwd")) != item.get("path"):
+            continue
+        if e.get("task_id") or e.get("status") in {"starting", "uncertain"} or e.get("handoff_status") == "pending":
+            raise OperationError("PREVIEW_STALE", "a task or unresolved start needs this worktree", 409)
+        runtime = await _runtime(ops, {"host": item["host"], "session_id": e["session_id"], "registry": e},
+                                 time.monotonic() + READ_DEADLINE_S)
+        if runtime.get("error") or runtime.get("loaded"):
+            raise OperationError("PREVIEW_STALE", "a session still uses this worktree", 409)
+
 async def _run(ctx):
     ops, db = ctx.service, ctx.service.db
     existing = db.execute("SELECT * FROM cleanup_runs WHERE operation_id=?", (ctx.operation_id,)).fetchone()
-    payload = decode_token(ops, ctx.params["preview_token"], allow_expired=existing is not None)
     if existing:
+        # Acceptance is durable. A signing-key rotation cannot revoke an already accepted operation on resume.
+        if existing["token_hash"] != _hash(ctx.params["preview_token"]):
+            raise OperationError("PREVIEW_MISMATCH", "accepted token differs from journal", 409)
+        raw = ctx.params["preview_token"].split(".")[1]
+        payload = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
         doc = json.loads(existing["document"])
+        if time.time() >= payload["exp"] and not db.execute("SELECT 1 FROM operation_steps WHERE operation_id=?", (ctx.operation_id,)).fetchone():
+            raise OperationError("PREVIEW_EXPIRED", "preview expired before any external step", 409)
     else:
+        # Admission already verified this token and durably recorded its authority in the operation params.
+        # Key rotation after acceptance cannot revoke queued work; expiry before execution still applies.
+        raw = ctx.params["preview_token"].split(".")[1]
+        payload = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+        if time.time() >= payload["exp"]:
+            raise OperationError("PREVIEW_EXPIRED", "preview expired before execution", 409)
         doc = await snapshot(ops, payload["target"], payload["choices"], own_op=ctx.operation_id)
         if _hash(doc) != payload["fingerprint"]:
             raise OperationError("PREVIEW_STALE", "live resources or consumers changed; preview again", 409)
@@ -915,6 +1079,7 @@ async def _run(ctx):
                     await _execute_item(ctx, item, payload)
                 except Uncertain:
                     _receipt(ctx, item, "uncertain")
+                    _progress(ctx)
                     raise
                 except (OperationError, ResourceReadOnly, StepFailed) as e:
                     code = getattr(e, "code", "CLEANUP_FAILED")
@@ -922,10 +1087,12 @@ async def _run(ctx):
                              error={"code": code, "message": str(e)[:300]})
                     # A definitive refusal made no pending external call; keep its content and release the guard.
                     _release(item, ctx.operation_id)
+                    _progress(ctx)
                     if code == "PREVIEW_STALE":
                         raise NeedsAttention(code, "item changed; keep receipts and preview again") from None
         result = receipts(ops, ctx.operation_id)
         if any(r["status"] == "failed" for r in result):
+            _progress(ctx)
             raise NeedsAttention("CLEANUP_PARTIAL", "some items failed; inspect receipts before resuming")
         return {"preview_id": ctx.target["preview_id"], "fingerprint": payload["fingerprint"], "items": result,
                 "summary": {"succeeded": sum(r["status"] == "succeeded" for r in result),
@@ -976,7 +1143,8 @@ async def _execute_item(ctx, item, payload):
         _finalize(ctx, item, {"stopped": True, "runtime_restored": False})
         return
     hc = ops.context["fleet"].config.host(item["host"])
-    resource_policy.check_cleanup_worktree(hc, item["repository"], item["path"] if item["kind"] == "worktree" else None, item["branch"])
+    resource_policy.check_cleanup_worktree(hc, item["repository"], item["path"] if item["kind"] == "worktree" else None,
+                                            item.get("branch") or "batc/temporary")
     if item["kind"] == "worktree":
         if item["flavor"] == "checkpoint":
             resource_policy.check_checkpoint_worktree(hc, item["repository"], item["path"], item["branch"])
@@ -984,20 +1152,21 @@ async def _execute_item(ctx, item, payload):
             resource_policy.check_repair_worktree(hc, item["repository"], item["path"], item["branch"])
         else:
             resource_policy.check_cleanup_worktree(hc, item["repository"], item["path"], item["branch"])
-    else:
+    elif item["kind"] == "local_branch":
         resource_policy.check_cleanup_worktree(hc, item["repository"], None, item["branch"])
-    sha = item["observation"]["head"]
-    retained_ref = "refs/batc/retained/" + rid + "/" + sha
+    sha = item["observation"].get("head")
+    retained_ref = "refs/batc/retained/" + rid + "/" + sha if sha else None
     req = {"repository": item["repository"], "roots": list(hc.managed_roots), "identity": item["repository_identity"],
-           "path": item["path"] if item["kind"] == "worktree" else None, "branch": item["branch"], "sha": sha,
-           "retained_ref": retained_ref, "delivered": item["delivery"]["delivered"],
+           "path": item["path"] if item["kind"] in {"worktree", "temporary"} else None, "kind": item["kind"],
+           "temporaries": [item["path"]] if item["kind"] == "temporary" else [], "branch": item.get("branch"), "sha": sha,
+           "retained_ref": retained_ref, "delivered": item.get("delivery", {}).get("delivered", False),
            "worktrees": [item["path"]] if item["kind"] == "worktree" else [],
            "paths_only": True, "replica_paths": [item["path"]] if item.get("flavor") == "checkpoint" else [],
            "bases": {item["path"]: item["base"]} if item.get("base") and item["kind"] == "worktree" else {}}
-    before = item["observation"] if item["kind"] == "worktree" else None
+    before = item["observation"] if item["kind"] in {"worktree", "temporary"} else None
 
-    async def read():
-        return await _host_call(ops, item["host"], {k: v for k, v in req.items() if k != "phase"})
+    async def read(*, probe=False):
+        return await _host_call(ops, item["host"], {**{k: v for k, v in req.items() if k != "phase"}, "probe": probe})
 
     for phase in item["steps"]:
         if phase == "finalize":
@@ -1007,47 +1176,71 @@ async def _execute_item(ctx, item, payload):
 
         async def execute(request=request):
             ctx.check_cancel()
-            # New authoritative consumers may appear between phases; re-check just this item's dependencies.
-            probe = {**item, "reasons": [], "consumers": []}
-            _consumers(ops, probe, [ops._decode(r) for r in ops.db.execute("SELECT * FROM operations")],
-                       {r["preview_id"]: dict(r) for r in ops.db.execute("SELECT * FROM integration_previews")}, ctx.operation_id)
-            if probe["reasons"]:
-                raise OperationError("PREVIEW_STALE", "new content consumer before mutation", 409)
+            await _phase_consumers(ctx, item)
             return await _host_call(ops, item["host"], request)
 
-        async def reconcile(_, phase=phase):
-            observed = await read()
+        async def reconcile(_, phase=phase, request=request):
+            observed = await read(probe=True)
             pinned = observed.get("refs", {}).get(retained_ref) == sha
             if phase == "preserve" and pinned:
+                commits = sorted(set(item["observation"].get("refs", {}).values()) | {sha}) if item["kind"] == "temporary" else [sha]
                 result = await _host_call(ops, item["host"], {**req, "phase": "verify.retained",
-                    "retained": [{"ref": retained_ref, "commit_sha": sha}]})
-                if result[0]["available"]:
+                    "retained": [{"ref": retained_ref.rsplit("/", 1)[0] + "/" + commit, "commit_sha": commit} for commit in commits]})
+                if all(p["available"] for p in result):
                     return {"ref": retained_ref, "sha": sha,
-                            "tree": item.get("retained_tree") or await _tree(ops, item, retained_ref, sha)}
+                            "tree": next(p["tree_sha"] for p in result if p["commit_sha"] == sha),
+                            "pins": [{"ref": p["ref"], "sha": p["commit_sha"], "tree": p["tree_sha"]} for p in result]}
             if phase == "remove.worktree" and pinned:
                 wt = observed.get("worktrees", {}).get(item["path"], {})
                 if wt.get("exists") is False and wt.get("registration") is None:
                     return {"removed": True}
+            if phase == "remove.temporary" and (pinned or sha is None) and observed.get("temporaries", {}).get(item["path"], {}).get("exists") is False:
+                return {"removed": True}
             if phase == "remove.branch" and pinned and "refs/heads/" + item["branch"] not in observed.get("refs", {}):
                 return {"deleted": True, "sha": sha}
             if phase == "discard" and pinned:
                 wt = observed.get("worktrees", {}).get(item["path"], {})
                 if wt.get("head") == sha and wt.get("status") == "" and not wt.get("complex_state"):
                     return {"discarded": True}
+            if observed.get("process_ended") and observed.get("common_dir") == req["identity"]["common_dir"]:
+                current = observed.get("worktrees", {}).get(item["path"])
+                if phase in {"preserve", "remove.worktree", "discard"} and current == request["before"]:
+                    return RERUN  # repository flock proves the earlier single-phase process ended without effect
+                if phase == "remove.temporary" and pinned and observed.get("temporaries", {}).get(item["path"]) == request["before"]:
+                    return RERUN
+                if phase == "preserve" and item["kind"] == "temporary" and observed.get("temporaries", {}).get(item["path"]) == request["before"]:
+                    return RERUN
+                if phase == "remove.branch" and pinned and observed.get("refs", {}).get("refs/heads/" + item["branch"]) == sha:
+                    return RERUN
             return None  # never retry when the remote process's outcome is unproven
+        previous = ops.db.execute("SELECT name,status,error FROM operation_steps WHERE operation_id=? AND name LIKE ? ORDER BY seq DESC LIMIT 1",
+                                  (ctx.operation_id, "item." + rid + "." + phase + ".a%" )).fetchone()
+        if previous and previous["status"] == "failed" and json.loads(previous["error"] or "{}").get("code") == "WORKTREE_REMOVE_REFUSED":
+            observed = await read(probe=True)
+            if observed.get("worktrees", {}).get(item["path"]) != request["before"]:
+                raise OperationError("PREVIEW_STALE", "failed removal no longer has its original binding", 409)
+            n = int(previous["name"].rsplit(".a", 1)[1]) + 1
+            name = "item." + rid + "." + phase + ".a" + str(n)
+        elif previous:
+            name = previous["name"]
         result = await ctx.step(name, execute, request=request, reconcile=reconcile)
         if phase == "preserve":
-            ret_id = "ret_" + _hash([rid, sha, item["repository"]])[:32]
-            fact = {"host": item["host"], "repository": item["repository"], "ref": retained_ref,
-                    "commit": sha, "tree": result["tree"]}
-            ops.db.execute("INSERT OR IGNORE INTO cleanup_retained VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (ret_id, rid, ctx.operation_id, name, sha, item["host"], item["repository"], retained_ref, sha,
-                 result["tree"], _hash(fact), _canonical(item["creation_evidence"]), time.time()))
+            for pin in result.get("pins", [result]):
+                commit = pin["sha"]
+                ret_id = "ret_" + _hash([rid, commit, item["repository"]])[:32]
+                fact = {"host": item["host"], "repository": item["repository"], "ref": pin["ref"],
+                        "commit": commit, "tree": pin["tree"]}
+                ops.db.execute("INSERT OR IGNORE INTO cleanup_retained VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (ret_id, rid, ctx.operation_id, name, commit, item["host"], item["repository"], pin["ref"], commit,
+                     pin["tree"], _hash(fact), _canonical(item["creation_evidence"]), time.time()))
         if phase == "discard":
             observed = await read()
             before = observed["worktrees"][item["path"]]
     after = await read()
-    if item["kind"] == "worktree":
+    if item["kind"] == "temporary":
+        if after.get("temporaries", {}).get(item["path"], {}).get("exists") is not False:
+            raise AmbiguousOutcome("temporary removal not confirmed")
+    elif item["kind"] == "worktree":
         wt = after.get("worktrees", {}).get(item["path"], {})
         if wt.get("exists") or wt.get("registration"):
             raise AmbiguousOutcome("worktree removal not confirmed")
@@ -1056,18 +1249,10 @@ async def _execute_item(ctx, item, payload):
     _finalize(ctx, item, {"removed": True, "retained_ref": retained_ref, "head": sha})
 
 
-async def _tree(ops, item, ref, sha):
-    # Reconcile preserve using the same idempotent CAS script; it cannot change an existing equal ref.
-    req = {"repository": item["repository"], "roots": list(ops.context["fleet"].config.host(item["host"]).managed_roots),
-           "phase": "preserve", "identity": item["repository_identity"], "retained_ref": ref, "sha": sha,
-           "path": None, "before": None}
-    return (await _host_call(ops, item["host"], req))["tree"]
-
-
 def lookup(db, original_id, host=None):
-    rows = db.execute("SELECT DISTINCT t.document FROM resource_tombstones t JOIN cleanup_aliases a USING(resource_id) "
-                      "WHERE a.external_id=? AND (? IS NULL OR t.host=?) ORDER BY t.cleaned_at DESC",
-                      (original_id, host, host)).fetchall()
+    rows = db.execute("SELECT DISTINCT t.document FROM resource_tombstones t LEFT JOIN cleanup_aliases a USING(resource_id) "
+                      "WHERE (t.resource_id=? OR a.external_id=?) AND (? IS NULL OR t.host=?) ORDER BY t.cleaned_at DESC",
+                      (original_id, original_id, host, host)).fetchall()
     return [json.loads(r[0]) for r in rows]
 
 
@@ -1115,6 +1300,8 @@ async def retained(ops, *, host=None, resource_id=None, query=None, limit=50, cu
                 "roots": list(ops.context["fleet"].config.host(h).managed_roots), "retained": rs})
             for row in read:
                 row["runtime_restored"] = False
+                if not row["available"]:
+                    row["reason"] = "RETAINED_CONTENT_MISSING"
                 (available if row.pop("available") else unavailable).append(row)
         except (OperationError, BatError, OSError, AmbiguousOutcome, ValueError):
             unavailable.extend({**r, "reason": "OBSERVATION_UNAVAILABLE"} for r in rs)
@@ -1139,10 +1326,12 @@ def http_request(path, *, body=None, token=None, key=None, timeout=40):
     try:
         with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout) as response:  # noqa: S310 - loopback
             out = json.load(response)
+            status = response.status
     except urllib.error.HTTPError as e:
         out = json.load(e)
+        status = e.code
     if "error" in out:
-        raise OperationError(out["error"]["code"], out["error"]["message"], 409)
+        raise OperationError(out["error"]["code"], out["error"]["message"], status)
     return out
 
 
