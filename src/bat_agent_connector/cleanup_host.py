@@ -287,7 +287,9 @@ def retained(repo, ref, sha):
 def exact_unlink(base, names, facts):
     by_path = {f["path"]: f for f in facts}
     # Resolve each parent with dirfds and O_NOFOLLOW. Do not follow a newly inserted directory link.
-    for name in sorted(names, key=lambda n: (by_path.get(n, {}).get("type") == "directory", -n.count("/"), n)):
+    # Keep the caller's file order (temporary config markers go last); remove directories deepest first.
+    for name in sorted(names, key=lambda n: (by_path.get(n, {}).get("type") == "directory",
+                                            -n.count("/") if by_path.get(n, {}).get("type") == "directory" else 0)):
         parts = name.split("/")
         if any(p in {"", ".", ".."} for p in parts):
             raise ValueError("BINDING_MISMATCH")
