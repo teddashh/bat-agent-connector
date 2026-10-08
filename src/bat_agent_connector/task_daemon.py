@@ -751,7 +751,8 @@ class TaskDaemon:
             with event_context(actor="local-admin" if admin else None, entry_point="rpc",
                                actor_evidence={"source": "rpc_admin_token" if admin else "command_capability"},
                                actor_basis="authenticated_principal" if admin else "unknown"):
-                result = {"result": await self.call(method, params, auth_token=token if reconcile or scoped else None, principal=principal)}
+                result = {"result": await self.call(method, params,
+                                                    auth_token=token if reconcile or scoped else None, principal=principal)}
             status = "200 OK"
         except (TaskControlRefused, OperationError) as exc:
             result = {"error": exc.code, "message": str(exc)}
