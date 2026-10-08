@@ -312,12 +312,13 @@ async def test_e01_legacy_apply_is_disabled_and_auto_cleanup_still_loads(daemon,
         await lifecycle.session_cleanup(daemon.fleet, "h1", confirm=True, dry_run=False)
 
 
-def add_receipt(d, item, *, mode="merge", commits=None, picked=None, status="delivered", pinned=None):
+def add_receipt(d, item, *, mode="merge", commits=None, picked=None, status="delivered", pinned=None,
+                source_kind="checkpoint_run", source_id=None, source_host="h1"):
     """The same integration_receipts facts used by integration.receipts(); no ancestry inference."""
     import time
     record = {"operation_id": "op_" + "a" * 32, "seq": 1, "preview_id": "ipv_" + "b" * 32,
-        "repository": "o/r", "pull_number": 7, "head_ref": "feature/result", "source_kind": "checkpoint_run",
-        "source_id": next(x for x in item["original_ids"] if x.startswith("op_")), "source_host": "h1",
+        "repository": "o/r", "pull_number": 7, "head_ref": "feature/result", "source_kind": source_kind,
+        "source_id": source_id or next(x for x in item["original_ids"] if x.startswith("op_")), "source_host": source_host,
         "location_class": "managed_clone", "pinned_sha": pinned or item["observation"]["head"], "mode": mode,
         "source_key": "coverage", "status": status, "method": "squash", "delivered_sha": "c" * 40,
         "actor": "delivery", "created_at": time.time(), "updated_at": time.time(),

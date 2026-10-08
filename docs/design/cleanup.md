@@ -84,9 +84,9 @@ integration.handoff／operation_id／repair；task external 為 task／task_id�
 | session | registry reservation／task recovery、runs／start step、BAT host/profile/workspace/meta cwd，resource_policy.classify／authorize_session | 無 writer／pending、非 task、managed root 內時經原 stop；不刪 tab／transcript | 原 ID、最後觀測、固定 excerpt、relations、stop receipt、PR 去向 |
 | checkpoint worktree | checkpoint_runs／continue external refs／prepare request，check_checkpoint_worktree、clone markers、canonical common dir、HEAD／branch | 先 pin HEAD，再非 force git worktree remove | 起點／HEAD、原 branch／path、source checkpoint、retained ref |
 | integration repair worktree | handoff external refs／repair.prepare、resolver receipt，check_repair_worktree、Area identity | unresolved apply／resolver 保留；釋放後同上 | resolution commit、source pins、parents、receipts |
-| BAT-made connector worktree | 原 registry creation／worktree create 回執、BAT binding、common dir／managed clone | 有充分建立證據才經 SSH 非 force remove；不用 rehydrate／BAT remove | 原 branch／HEAD、來源 session、retained ref |
+| BAT-made connector worktree | 原 registry creation／worktree create 回執直接投影 origin_root 載體，不需 checkpoint／integration／task；BAT binding、common dir／managed clone | 有充分建立證據才經 SSH 非 force remove；不用 rehydrate／BAT remove | 原 branch／HEAD、來源 session、retained ref |
 | task-owned session／worktree／branch | task IDs、branches／commands、registry、external_worktree_path、共享 owner | Part A **永遠 TASK_OWNED**；Task Service 原 terminal cleanup 不變 | 原 task facts；Part B 才投影 TaskDaemon tombstones／refs |
-| local_branch | 原 prepare intent＋exact refs/heads/batc/cp-* 或 batc/fix-*，repo／branch／old SHA | 已送達、無 checkout／consumer、retained ref 可讀時 update-ref -d exact-ref expected-old-SHA CAS；無 branch -D | retained HEAD；release_undelivered 的原 branch 保留 |
+| local_branch | 原 prepare intent＋exact refs/heads/batc/cp-* 或 batc/fix-*，或 BAT creation registry 的 exact bat/*；repo／branch／old SHA | 已送達、無 checkout／consumer、retained ref 可讀時 update-ref -d exact-ref expected-old-SHA CAS；無 branch -D | retained HEAD；release_undelivered 的原 branch 保留 |
 | git_pin | 已知 clone/area 的 exact refs/batc/source/*、pv/*、ops/*、tasks/*、retained/*；intent／receipt／SHA | **本包全部保留**，不刪 pins、不 gc | 原 refs 與 evidence；未知 pin 不認領 |
 | clone／integration_area | prepare intent／runs／preview area／Area identity，batc markers／canonical path／config integrity | **本包不退休** | RETAINED_CONTENT_STORE，作 retained refs 的載體 |
 | exact temporary | 原 prepare／check intent 的 exact temp path＋batc marker／Git binding；半建成無 marker 是 unknown | 無 writer／未決 step、無其他內容需求時 no-follow exact deletion；Git worktree 仍用非 force remove | 有 commit 先 pin；空 temp 只保留 observation／receipt，不能宣稱可 restore |
@@ -100,6 +100,12 @@ prepare 的 exact bare init temp。兩者需原intent、相符markers、完整Gi
 舊writer未留下resource marker，不補認ownership、不unlink鎖，列UNKNOWN_READ_ONLY；未決writer另列COMMAND_UNRESOLVED。
 
 Checkpoint clone 檢查 batc.managed-clone／batc.source 與 creation intent，不能接管 managed root 中預先存在的 repo。
+Standalone BAT worktree 由 registry 的 created_at／branch／origin_root／worktree_path 建立記錄投影 clone，
+status 必須為 active／superseded／removed／cleaned，且非 failover_of、非 worktree_made_by=connector。
+只有 origin_root 在 managed roots、worktree_path 符合該 origin 的 in_bat_worktrees layout，才有 ownership 證據。
+相同 SSH read／flock 內重核 batc.managed-clone、canonical common dir／config integrity、Git registration 與 recorded branch；
+carrier common dir 或 branch 不符列 BINDING_MISMATCH，不能只憑目錄形狀移除。Origin 在 managed roots 外仍列出
+worktree，但不認領，保留 WORKDIR_NOT_MANAGED；clone 一律留作 RETAINED_CONTENT_STORE。
 Integration 沿用 Area.prelude 的 host/repository/URL markers、config allowlist、no links／alternates／replace／grafts。
 目的地、Git dir／commondir／objects／refs 都要在 managed roots。SSH adapter 可用 host Python 3 的
 no-follow 檔案檢查／刪除（能力不足即保留），不能提供 raw shell API。Git 關閉 optional locks、hooks、
@@ -414,6 +420,8 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | release保留內容只需cleanup／discard需scope；E01 | test_e01_release_keeps_commits_with_cleanup_scope、test_e01_discard_requires_cleanup_discard |
 | purepreview/token/stale/expiry；E01 | test_e01_preview_is_pure_and_signed_plan_cannot_be_changed、test_e01_stale_any_item_stops_before_mutation_and_reports_changes |
 | canonical/policy/preserve/nonforce/CAS；E01 | test_e01_every_mutation_rechecks_policy_and_canonical_destination、test_e01_preserve_precedes_nonforced_remove_and_cas_checks_delivered_refs |
+| standalone BAT creation 的 host／work-item scope、preserve／remove／branch CAS；E01/E02 | test_e01_standalone_bat_worktree_and_branch_are_reclaimed（兩種 target、session delivery receipt、兩 item succeeded、載體保留）、test_e01_standalone_bat_release_keeps_undelivered_branch |
+| standalone live carrier／branch 矛盾、managed roots 外不能回收；E01 | test_e01_standalone_bat_worktree_live_binding_mismatch_is_retained、test_e01_standalone_bat_worktree_outside_managed_roots_is_listed_and_retained |
 | 同 apply 的 worktree／branch 回執均成功；移除後 branch 移動先拒絕；E01 | test_e01_preserve_precedes_nonforced_remove_and_cas_checks_delivered_refs（branch snapshot actual is None）、test_e01_branch_moved_after_worktree_removal_is_stale（PREVIEW_STALE、所有 refs 不變） |
 | integration 三種 target 同 scope／handoff 完整鏈；E01/E02 | test_e01_integration_preview_apply_and_handoff_expand_to_same_resources（source／area／pins／repair／session 的所有 item fields 相等） |
 | crashedcheckpoint/handoff／未決start-stop；E01 | test_e01_crashed_continue_and_handoff_intents_are_discovered_without_adoption、test_e01_pending_start_stop_and_waiting_sessions_are_retained |
