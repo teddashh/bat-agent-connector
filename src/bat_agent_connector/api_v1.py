@@ -13,6 +13,7 @@ import contextlib
 import json
 import re
 import time
+from importlib import resources
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import __version__, api_auth, delivery, resource_policy, service
@@ -28,7 +29,12 @@ REAUTH_S = 5.0  # an open event stream re-checks its token this often (revoked o
 STREAM_MAX_S = 1800.0
 KEEPALIVE_S = 15.0
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
-_REASONS = {200: "OK", 202: "Accepted", 204: "No Content", 400: "Bad Request", 401: "Unauthorized",
+# The Dashboard is four static files; nothing else under /dashboard/ is served.
+DASHBOARD_FILES = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8",
+                   "i18n.js": "text/javascript; charset=utf-8", "app.css": "text/css; charset=utf-8"}
+DASHBOARD_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; "
+                 "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+_REASONS = {200: "OK", 202: "Accepted", 204: "No Content", 302: "Found", 400: "Bad Request", 401: "Unauthorized",
             403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed", 409: "Conflict", 413: "Payload Too Large",
             422: "Unprocessable Entity", 429: "Too Many Requests", 500: "Internal Server Error",
             502: "Bad Gateway", 503: "Service Unavailable"}
@@ -54,6 +60,10 @@ def _origin_ok(origin: str, allowed: tuple[str, ...]) -> bool:
         return True
     parts = urlsplit(origin)
     return parts.scheme in {"http", "https"} and _host_is_loopback(parts.netloc)
+
+
+def is_dashboard_path(path: str) -> bool:
+    return path in {"/", "/dashboard"} or path.startswith("/dashboard/")
 
 
 def parse_wait(value) -> float:
@@ -155,6 +165,33 @@ class ApiV1:
         except Exception as e:  # noqa: BLE001 - never echo internals
             status, payload = 500, {"error": {"code": "INTERNAL", "message": type(e).__name__}}
         await self._send_json(writer, status, payload, cors)
+
+    async def dashboard(self, method: str, target: str, headers: dict[str, str], writer) -> None:
+        """Static Dashboard files. They hold no data and need no token; the API calls they make do."""
+        path = urlsplit(target).path
+        extra = ""
+        body = b""
+        if not _host_is_loopback(headers.get("host", "")):
+            status, ctype, body = 400, "text/plain; charset=utf-8", b"Host must be a loopback address\n"
+        elif method not in {"GET", "HEAD"}:
+            status, ctype, extra = 405, "text/plain; charset=utf-8", "Allow: GET, HEAD\r\n"
+        elif path in {"/", "/dashboard"}:
+            status, ctype, extra = 302, "text/plain; charset=utf-8", "Location: /dashboard/\r\n"
+        else:
+            name = path[len("/dashboard/"):] or "index.html"
+            if name in DASHBOARD_FILES:
+                status, ctype = 200, DASHBOARD_FILES[name]
+                body = (resources.files(__package__) / "dashboard" / name).read_bytes()
+            else:
+                status, ctype, body = 404, "text/plain; charset=utf-8", b"not found\n"
+        head = (f"HTTP/1.1 {status} {_REASONS[status]}\r\n"
+                f"Content-Type: {ctype}\r\nContent-Length: {len(body)}\r\n{extra}"
+                f"Cache-Control: no-cache\r\nContent-Security-Policy: {DASHBOARD_CSP}\r\n"
+                "X-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n"
+                "Cross-Origin-Opener-Policy: same-origin\r\nConnection: close\r\n\r\n")
+        writer.write(head.encode() + (b"" if method == "HEAD" else body))
+        with contextlib.suppress(Exception):
+            await writer.drain()
 
     @staticmethod
     def _bearer(headers: dict[str, str]) -> str:
