@@ -335,7 +335,8 @@ async def test_d05_environment_generation_is_atomic_across_recipes(make_daemon, 
     d = make_daemon()
     source_on_main(gh)
     cfg = d.ops.context["github_config"]
-    cfg.recipes["alias"] = replace(cfg.recipes["prod"], name="alias")
+    cfg.recipes["alias"] = replace(cfg.recipes["prod"], name="alias", workflow="release.yml")
+    gh.workflow_ids["release.yml"] = 456
     p = await deployment.preview(d.ops, "prod")
     a = await start(d, pre=p["preconditions"])
     alias_pre = {
@@ -472,3 +473,256 @@ async def test_repository_identity_and_recipe_are_rechecked_before_dispatch(make
     done = await settle(d, op["operation_id"])
     assert done["error_code"] == "REPOSITORY_ID_CHANGED"
     assert gh.count("POST", "dispatches") == 0
+
+
+async def test_d05_undispatched_selection_superseded_has_zero_post(make_daemon, gh):
+    d = make_daemon()
+    source_on_main(gh)
+    cfg = d.ops.context["github_config"]
+    cfg.recipes["alias"] = replace(cfg.recipes["prod"], name="alias")
+    old = await start(d)
+    # A transient source read pauses before any dispatch, after selection.
+    gh.script.append(("GET", "/compare/main", 502, {}, {}))
+    w = await settle(d, old["operation_id"], rounds=1)
+    assert w["status"] == "waiting_external" and gh.count("POST", "dispatches") == 0
+    new = await start(d, name="alias", key="new")
+    await settle(d, new["operation_id"], rounds=1)
+    done = await settle(d, old["operation_id"])
+    assert done["error_code"] == "DEPLOY_SUPERSEDED"
+    assert gh.count("POST", "dispatches") == 1
+    assert not any(
+        b["inputs"]["operation_id"] == old["operation_id"] for m, p, b in gh.requests if m == "POST"
+    )
+
+
+async def test_d05_current_survives_old_verification_that_arrives_after_new_record(make_daemon, gh):
+    d = make_daemon()
+    source_on_main(gh)
+    cfg = d.ops.context["github_config"]
+    cfg.recipes["alias"] = replace(cfg.recipes["prod"], name="alias")
+    old = await start(d)
+    w = await settle(d, old["operation_id"], rounds=1)
+    completed(gh, w["external_refs"]["deploy_run_id"])
+    d.ops.context["deployment_verifier"].response = {"waiting": "temporarily unavailable"}
+    # Provider is terminal, but the old operation has no runtime proof yet.
+    await settle(d, old["operation_id"], rounds=1)
+    d.ops.cancel(TED, old["operation_id"])
+    await delivery.reconcile_deployments(d.ops)
+    gh.commits[NEW] = {"sha": NEW, "parents": [{"sha": MERGED}]}
+    gh.branches["main"] = NEW
+    d.ops.context["deployment_verifier"].response = None
+    newer = await start(d, name="alias", sha=NEW, key="new")
+    n = await settle(d, newer["operation_id"], rounds=1)
+    completed(gh, n["external_refs"]["deploy_run_id"], source=NEW)
+    new = await settle(d, newer["operation_id"])
+    assert new["status"] == "succeeded"
+    await delivery.reconcile_deployments(d.ops)
+    env = deployment.environment_status(d.ops, "prod")
+    assert env["current"]["deployment_id"] == new["result"]["deployment_id"]
+    assert deployment.status(d.ops, w["external_refs"]["deployment_id"])["state"] == "superseded"
+    assert gh.count("POST", "dispatches") == 2
+
+
+async def test_d05_independent_environments_have_independent_generations(make_daemon, gh):
+    d = make_daemon()
+    source_on_main(gh)
+    cfg = d.ops.context["github_config"]
+    cfg.recipes["staging"] = replace(cfg.recipes["prod"], name="staging", environment="staging")
+    a = await start(d)
+    b = await start(d, name="staging", key="staging")
+    await settle(d, a["operation_id"], rounds=1)
+    await settle(d, b["operation_id"], rounds=1)
+    assert deployment.environment_status(d.ops, "prod")["desired_generation"] == 1
+    assert deployment.environment_status(d.ops, "staging")["desired_generation"] == 1
+    assert gh.count("POST", "dispatches") == 2
+
+
+async def test_d03_external_rerun_invalidates_current_and_keeps_original_attempt(make_daemon, gh):
+    d = make_daemon()
+    source_on_main(gh)
+    done = await deployed(d, gh)
+    dep_id, rid = done["result"]["deployment_id"], done["result"]["run_id"]
+    gh.runs[rid].update(run_attempt=2, status="in_progress", conclusion=None)
+    await delivery.reconcile_deployments(d.ops)
+    env = deployment.environment_status(d.ops, "prod")
+    assert env["current"] is None and env["attention"] == "DEPLOY_ATTEMPT_CHANGED"
+    assert env["slot_deployment_id"] == dep_id
+    assert deployment.status(d.ops, dep_id)["run_attempt"] == 1
+    assert d.ops.get(done["operation_id"])["status"] == "succeeded"
+    assert gh.count("POST", "dispatches") == 1
+    gh.runs[rid].update(status="completed", conclusion="success")
+    await delivery.reconcile_deployments(d.ops)
+    assert deployment.environment_status(d.ops, "prod")["slot_deployment_id"] is None
+
+
+@pytest.mark.parametrize("answer", [401, 403, 404])
+async def test_deploy_refused_read_after_dispatch_keeps_lock_and_resumes(make_daemon, gh, answer):
+    d = make_daemon()
+    source_on_main(gh)
+    op = await start(d)
+    w = await settle(d, op["operation_id"], rounds=1)
+    rid = w["external_refs"]["deploy_run_id"]
+    gh.script.append(("GET", f"/runs/{rid}$", answer, {}, {}))
+    held = await settle(d, op["operation_id"])
+    assert held["status"] == "needs_attention" and held["error_code"] == f"GITHUB_{answer}"
+    with pytest.raises(OperationError) as e:
+        await start(d, key="blocked")
+    assert e.value.code == "DEPLOY_IN_PROGRESS"
+    completed(gh, rid)
+    d.ops.resume(TED, op["operation_id"])
+    assert (await settle(d, op["operation_id"]))["status"] == "succeeded"
+    assert gh.count("POST", "dispatches") == 1
+
+
+async def test_d01_d02_204_requires_exact_unique_operation_token_and_never_redispatches(make_daemon, gh):
+    d = make_daemon()
+    source_on_main(gh)
+    gh.dispatch_mode = "no_content"
+    op = await start(d)
+    w = await settle(d, op["operation_id"], rounds=1)
+    rid = w["external_refs"]["deploy_run_id"]
+    # Reopen association from its saved 204 receipt: near tokens cannot stand in for the operation.
+    dep_id = w["external_refs"]["deployment_id"]
+    store.update(d.journal, dep_id, run_id=None)
+    gh.runs[rid]["display_title"] += "_suffix"
+    not_found = await settle(d, op["operation_id"], rounds=1)
+    assert not_found["status"] == "waiting_external"
+    gh.runs[rid]["display_title"] = "deploy " + op["operation_id"]
+    gh.add_run(title="deploy " + op["operation_id"])
+    ambiguous = await settle(d, op["operation_id"])
+    assert ambiguous["error_code"] == "DEPLOY_RUN_AMBIGUOUS"
+    assert gh.count("POST", "dispatches") == 1
+
+
+async def test_delivery_actions_never_mutate_manual_or_unknown_resources(make_daemon, gh, mock):
+    d = make_daemon()
+    source_on_main(gh)
+    await deployed(d, gh)
+    assert not mock.frames and not mock.invokes
+    assert all("/repos/o/r" in p for _, p, _ in gh.requests)
+    # Deployment actions neither invoke a host runner nor acquire a local Git writer.
+    assert not d.journal.db.execute(
+        "SELECT 1 FROM operations WHERE action LIKE 'session.%' OR action LIKE 'worktree.%'"
+    ).fetchone()
+
+
+async def test_legacy_dispatched_operation_reads_original_run_and_never_dispatches(make_daemon, gh):
+    from bat_agent_connector.operations import ActionDef
+
+    d = make_daemon()
+
+    async def obsolete(ctx):
+        return {}
+
+    ops = OperationService(d.journal, actions=[ActionDef("deployment.start", "deploy", "old", obsolete)])
+    old = ops.create(
+        TED,
+        action="deployment.start",
+        target={"recipe": "prod"},
+        params={"source_sha": MERGED},
+        idempotency_key="old",
+    )[0]
+    run = gh.add_run(status="completed", conclusion="success", job_conclusion="success")
+    d.journal.db.execute(
+        "UPDATE operations SET status='waiting_external',external_refs=? WHERE operation_id=?",
+        (json.dumps({"deploy_run_id": run["id"]}), old["operation_id"]),
+    )
+    d.journal.db.execute(
+        "INSERT INTO operation_steps(operation_id,seq,name,status,request,started_at) VALUES(?,1,'deploy.dispatch','succeeded','{}',1)",
+        (old["operation_id"],),
+    )
+    d.journal.db.execute("PRAGMA user_version=2")
+    store.backfill(d.journal)
+    done = await settle(d, old["operation_id"])
+    assert done["status"] == "needs_attention" and done["error_code"] == "DEPLOY_VERSION_UNPROVEN"
+    dep = deployment.status(
+        d.ops, done["external_refs"].get("deployment_id") or "dep_" + old["operation_id"][3:]
+    )
+    assert dep["state"] == "unverified" and not dep["is_current"] and not dep["rollback_eligible"]
+    assert gh.count("POST", "dispatches") == 0 and gh.count("GET", f"/runs/{run['id']}") == 1
+
+
+async def test_legacy_undispatched_operation_stops_for_deployment_preview(make_daemon, gh):
+    from bat_agent_connector.operations import ActionDef
+
+    d = make_daemon()
+
+    async def obsolete(ctx):
+        return {}
+
+    ops = OperationService(d.journal, actions=[ActionDef("deployment.start", "deploy", "old", obsolete)])
+    old = ops.create(
+        TED,
+        action="deployment.start",
+        target={"recipe": "prod"},
+        params={"source_sha": MERGED},
+        idempotency_key="old",
+    )[0]
+    d.journal.db.execute("PRAGMA user_version=2")
+    store.backfill(d.journal)
+    done = await settle(d, old["operation_id"])
+    assert done["error_code"] == "DEPLOY_PREVIEW_REQUIRED" and gh.count("POST", "dispatches") == 0
+
+
+async def test_issue32_cancelled_on_merge_wait_keeps_slot_until_the_exact_run_finishes(make_daemon, gh):
+    d = make_daemon(mode="on_merge")
+    source_on_main(gh)
+    op = await start(d)
+    w = await settle(d, op["operation_id"], rounds=1)
+    d.ops.cancel(TED, op["operation_id"])
+    await delivery.reconcile_deployments(d.ops)
+    assert (
+        deployment.environment_status(d.ops, "prod")["slot_deployment_id"]
+        == w["external_refs"]["deployment_id"]
+    )
+    run = gh.add_run(head_sha=MERGED, event="push")
+    await delivery.reconcile_deployments(d.ops)
+    assert deployment.environment_status(d.ops, "prod")["slot_deployment_id"]
+    completed(gh, run["id"])
+    await delivery.reconcile_deployments(d.ops)
+    assert deployment.environment_status(d.ops, "prod")["slot_deployment_id"] is None
+    assert d.ops.get(op["operation_id"])["status"] == "cancelled" and gh.count("POST", "dispatches") == 0
+
+
+async def test_issue32_dispatch_429_wait_is_bounded_without_early_resend(make_daemon, gh):
+    d = make_daemon()
+    source_on_main(gh)
+    gh.script.append(("POST", "/dispatches$", 429, {"Retry-After": "3600"}, {}))
+    op = await start(d)
+    w = await settle(d, op["operation_id"], rounds=1)
+    assert w["status"] == "waiting_external"
+    assert w["next_run_at"] - w["updated_at"] <= 601
+    refs = {**w["external_refs"], "deploy_dispatch_wait_started_at": 0}
+    d.journal.db.execute(
+        "UPDATE operations SET external_refs=? WHERE operation_id=?", (json.dumps(refs), op["operation_id"])
+    )
+    done = await settle(d, op["operation_id"])
+    assert done["error_code"] == "WAIT_TIMEOUT" and gh.count("POST", "dispatches") == 1 and not gh.runs
+
+
+async def test_recipe_change_blocks_new_dispatch_but_removed_recipe_cannot_stop_original_readback(
+    make_daemon, gh
+):
+    d = make_daemon()
+    source_on_main(gh)
+    op = await start(d)
+    cfg = d.ops.context["github_config"]
+    r = cfg.recipes["prod"]
+    cfg.recipes["prod"] = replace(r, deploy_job="different")
+    refused = await settle(d, op["operation_id"])
+    assert refused["error_code"] == "RECIPE_CHANGED" and gh.count("POST", "dispatches") == 0
+    cfg.recipes["prod"] = r
+    op = await start(d, key="sent")
+    w = await settle(d, op["operation_id"], rounds=1)
+    cfg.recipes.clear()
+    completed(gh, w["external_refs"]["deploy_run_id"])
+    assert (await settle(d, op["operation_id"]))["status"] == "succeeded"
+    assert gh.count("POST", "dispatches") == 1
+
+
+async def test_issue32_unknown_source_comparison_refuses_before_dispatch(make_daemon, gh):
+    d = make_daemon()
+    source_on_main(gh)
+    op = await start(d, sha=NEW)
+    done = await settle(d, op["operation_id"])
+    assert done["error_code"] == "DEPLOY_SOURCE_NOT_ON_REF" and gh.count("POST", "dispatches") == 0

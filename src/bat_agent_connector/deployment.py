@@ -16,6 +16,15 @@ from .operations import RERUN, TERMINAL, NeedsAttention, OperationError, Wait
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+ARTIFACT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def unexpired(value):
+    try:
+        date = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return date.tzinfo is not None and date.timestamp() > time.time()
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
 
 
 def recipe(ops, name):
@@ -97,7 +106,7 @@ def rollback_reason(ops, dep, r=None, env=None):
         identity = dep["identity"]
         expiry = identity.get("artifact_expires_at")
         if (not identity.get("artifact_id") or not identity.get("artifact_digest") or not identity.get("artifact_run_id")
-                or not expiry or datetime.fromisoformat(expiry.replace("Z", "+00:00")).timestamp() <= time.time()):
+                or not ARTIFACT_DIGEST.fullmatch(str(identity.get("artifact_digest", ""))) or not unexpired(expiry)):
             return "ROLLBACK_ARTIFACT_UNAVAILABLE"
     return None
 
@@ -224,8 +233,7 @@ async def artifact_check(ctx, dep, identity):
             or artifact.get("digest") != identity["artifact_digest"]
             or (artifact.get("workflow_run") or {}).get("id") != identity["artifact_run_id"]
             or (artifact.get("workflow_run") or {}).get("repository_id") != s["repository_id"]
-            or not artifact.get("expires_at")
-            or datetime.fromisoformat(artifact["expires_at"].replace("Z", "+00:00")).timestamp() <= time.time()):
+            or not unexpired(artifact.get("expires_at"))):
         raise OperationError("ROLLBACK_ARTIFACT_UNAVAILABLE", "saved artifact identity is unavailable or expired", 409)
 
 
@@ -243,11 +251,18 @@ async def source(ctx, dep, merged=None):
         identity = {"source_sha": merged["merged_sha"]}
     if identity.get("artifact_id"):
         await artifact_check(ctx, dep, identity)
-    else:
-        comparison = await read(ctx, gh.compare(s["repository"], s["ref"], identity["source_sha"]), "check source on recipe ref")
+    if not identity.get("artifact_id") or ctx.op["action"] != "deployment.rollback":
+        try:
+            comparison = await read(ctx, gh.compare(s["repository"], s["ref"], identity["source_sha"]), "check source on recipe ref")
+        except OperationError as exc:
+            if exc.code != "GITHUB_404":
+                raise
+            raise OperationError("DEPLOY_SOURCE_NOT_ON_REF", "source/ref comparison is unavailable", 422) from None
         if comparison.get("status") not in {"identical", "behind"}:
             raise OperationError("DEPLOY_SOURCE_NOT_ON_REF", "source SHA is not reachable from recipe ref", 422)
     workflow = await read(ctx, gh.workflow(s["repository"], s["workflow"]), "read workflow identity")
+    if type(workflow.get("id")) is not int or workflow["id"] <= 0:
+        raise NeedsAttention("DEPLOY_RUN_AMBIGUOUS", "workflow omitted its fixed identity")
     store.update(ctx.service.journal, dep["deployment_id"], identity=identity,
                  recipe_snapshot={**s, "workflow_id": workflow["id"]}, facts={"provider_kind": "none"})
     return {"identity": identity, "workflow_id": workflow["id"]}
@@ -300,8 +315,9 @@ async def locate(ops, dep, ctx=None):
     dispatch_mode = s["mode"] == "workflow_dispatch"
     matches = []
     for page in range(1, 10001):
-        call = gh.runs(s["repository"], s["workflow"], event="workflow_dispatch" if dispatch_mode else "push",
-                       branch=s["ref"], head_sha=None if dispatch_mode else dep["identity"]["source_sha"], page=page, per_page=100)
+        call = gh.runs(s["repository"], s["workflow"], branch=s["ref"],
+                       head_sha=None if dispatch_mode else dep["identity"]["source_sha"], page=page, per_page=100,
+                       event="workflow_dispatch" if dispatch_mode else "push")
         body = await read(ctx, call, "locate deployment run") if ctx else await background_read(call)
         runs = body.get("workflow_runs") or []
         matches.extend(r for r in runs if run_matches(r, dep, token=dispatch_mode))
@@ -316,12 +332,22 @@ async def locate(ops, dep, ctx=None):
 
 def retry_after(value):
     try:
-        return max(1.0, float(value))
+        seconds = float(value)
+        return max(1.0, seconds) if math.isfinite(seconds) else 30.0
     except (TypeError, ValueError):
         try:
             return max(1.0, parsedate_to_datetime(str(value)).timestamp() - time.time())
         except (TypeError, ValueError, OverflowError):
             return 30.0
+
+
+def dispatch_wait(ctx, delay):
+    from .delivery import _check_wait
+    key = "deploy_dispatch_wait_started_at"
+    _check_wait(ctx, key)
+    started = (ctx.service.get(ctx.operation_id).get("external_refs") or {})[key]
+    remaining = ctx.service.context["github_config"].wait_max_s - (time.time() - started)
+    return Wait("waiting_external", "dispatch rate limited; honouring Retry-After", min(delay, max(1, remaining)))
 
 
 async def dispatch(ctx, dep):
@@ -337,7 +363,7 @@ async def dispatch(ctx, dep):
         if run:
             return run["id"]
         if time.time() < dep.get("dispatch_retry_at", 0):
-            raise Wait("waiting_external", "dispatch rate limited; honouring Retry-After", dep["dispatch_retry_at"] - time.time())
+            raise dispatch_wait(ctx, dep["dispatch_retry_at"] - time.time())
         await order(ctx, dep)
         await source(ctx, dep)
     name = f"deploy.dispatch.retry.{last['seq']}" if refused else last["name"] if last else "deploy.dispatch"
@@ -362,17 +388,17 @@ async def dispatch(ctx, dep):
         if status not in {200, 204}:
             store.update(ctx.service.journal, dep["deployment_id"], provider_terminal=True, facts={"dispatch_refused": True})
             return {"http_status": status}
-        store.update(ctx.service.journal, dep["deployment_id"], state="queued", run_id=body.get("workflow_run_id"),
+        run_id = body.get("workflow_run_id")
+        run_id = run_id if type(run_id) is int and run_id > 0 else None
+        store.update(ctx.service.journal, dep["deployment_id"], state="queued", run_id=run_id,
                      facts={"html_url": body.get("html_url"), "write_acknowledged": True})
-        return {"http_status": status, "run_id": body.get("workflow_run_id")}
+        return {"http_status": status, "run_id": run_id}
     async def reconcile(_):
         run = await locate(ctx.service, get(ctx.service, dep["deployment_id"]), ctx)
         return {"http_status": 200, "run_id": run["id"], "observed_only": True} if run else None
     result = await ctx.step(name, send, request={"recipe": dep["recipe"], "inputs": inputs}, reconcile=reconcile)
     if result["http_status"] == 429:
-        from .delivery import _check_wait
-        _check_wait(ctx, "deploy_dispatch_wait_started_at")
-        raise Wait("waiting_external", "dispatch rate limited; honouring Retry-After", result["retry_after"])
+        raise dispatch_wait(ctx, result["retry_after"])
     if result["http_status"] not in {200, 204}:
         raise OperationError(f"GITHUB_{result['http_status']}", "GitHub refused dispatch")
     return result.get("run_id")
@@ -458,7 +484,7 @@ def release_slot(ops, dep):
 
 def failure(ops, dep, code, *, attention=False):
     fresh = get(ops, dep["deployment_id"])
-    sent = fresh.get("dispatch_sent") or fresh.get("run_id") or merge_sent(ops, fresh)
+    sent = fresh.get("dispatch_sent") or fresh.get("run_id") or fresh.get("on_merge_pending") or merge_sent(ops, fresh)
     store.update(ops.journal, dep["deployment_id"], state="superseded" if code == "DEPLOY_SUPERSEDED" else "needs_attention" if attention else "failed",
                  provider_terminal=fresh["provider_terminal"] or not sent, facts={"error_code": code})
     if get(ops, dep["deployment_id"])["provider_terminal"]:
@@ -476,6 +502,7 @@ async def finish(ctx, dep, merged=None):
         if dep["recipe_snapshot"]["mode"] == "workflow_dispatch":
             run_id = await dispatch(ctx, dep)
         else:
+            store.update(ctx.service.journal, dep["deployment_id"], facts={"on_merge_pending": True})
             run_id = None
         if not run_id:
             receipt = await read_step(ctx, "deploy.locate", lambda: locate_receipt(ctx, dep))
@@ -488,17 +515,19 @@ async def finish(ctx, dep, merged=None):
     attempt = dep.get("run_attempt") or receipt.get("run_attempt")
     store.update(ctx.service.journal, dep["deployment_id"], run_attempt=attempt,
                  provider_terminal=receipt.get("provider_terminal", dep["provider_terminal"]),
-                 state=receipt.get("state", "verifying"), facts={"provider_evidence": receipt})
+                 state=receipt.get("state", "verifying"), facts={"provider_evidence": receipt,
+                        "html_url": receipt.get("html_url") or dep.get("html_url")})
     if receipt.get("html_url"):
         ctx.set_refs(deploy_run_url=receipt["html_url"])
     dep = get(ctx.service, dep["deployment_id"])
     apply_receipt(ctx, dep, receipt, "deploy_wait_started_at")
+    observed_env = store.environment(ctx.service.db, dep["environment_key"])
     evidence = await read_step(ctx, "deploy.verify", lambda: runtime_check(ctx.service, dep))
     store.update(ctx.service.journal, dep["deployment_id"], facts={"runtime_evidence": evidence})
     env = store.environment(ctx.service.db, dep["environment_key"])
     if env["desired_deployment_id"] != dep["deployment_id"]:
         if evidence.get("observed"):
-            drift(ctx.service, env, evidence["observed"])
+            drift(ctx.service, observed_env, evidence["observed"])
         if evidence.get("error") or evidence.get("waiting"):
             store.update(ctx.service.journal, dep["deployment_id"], state="superseded", facts={"error_code": "DEPLOY_SUPERSEDED"})
             release_slot(ctx.service, dep)
@@ -618,7 +647,8 @@ def environment_view(ops, env):
             "environment": env["environment"], "desired_generation": env["desired_generation"],
             "desired": item(env["desired_deployment_id"]), "current": item(env["current_deployment_id"]),
             "last_verified": item(env["last_verified_deployment_id"]), "slot_deployment_id": env["slot_deployment_id"],
-            "observed": env["observed"], "attention": env["attention"]}
+            "observed": env["observed"], "observed_at": (env["observed"] or {}).get("observed_at"),
+            "attention": env["attention"]}
 
 
 def retry_envelope(saved, preconditions):
@@ -662,7 +692,8 @@ async def runtime_check(ops, dep):
         if any(k not in observed for k in fields):
             return {"waiting": "runtime omitted required version evidence", "observed": observed}
         if any(observed[k] != identity[k] for k in fields):
-            return {"error": "DEPLOY_VERSION_MISMATCH", "attention": True, "observed": observed}
+            code = "DEPLOY_VERSION_MISMATCH" if observed["source_sha"] != identity["source_sha"] else "DEPLOY_ARTIFACT_MISMATCH"
+            return {"error": code, "attention": True, "observed": observed}
     if health and "healthy" not in observed:
         return {"waiting": "runtime omitted required health evidence", "observed": observed}
     if health and observed["healthy"] is not True:
@@ -671,15 +702,18 @@ async def runtime_check(ops, dep):
     if s["rollback"]["identity"] == "artifact" and observed.get("artifact_id") and not identity.get("artifact_id"):
         if not observed.get("artifact_digest"):
             return {"waiting": "runtime omitted artifact digest", "observed": observed}
+        if observed["artifact_id"] <= 0 or not ARTIFACT_DIGEST.fullmatch(observed["artifact_digest"]):
+            return {"error": "DEPLOY_ARTIFACT_MISMATCH", "attention": True, "observed": observed}
         a = await background_read(gh_for(ops, dep).artifact(s["repository"], observed["artifact_id"]))
         run = a.get("workflow_run") or {}
         if (a.get("expired") or a.get("digest") != observed["artifact_digest"] or run.get("repository_id") != s["repository_id"]
-                or not run.get("id") or not a.get("expires_at")):
+                or not run.get("id") or not unexpired(a.get("expires_at"))):
             return {"error": "ROLLBACK_ARTIFACT_UNAVAILABLE", "attention": True, "observed": observed}
         identity = {**identity, "artifact_id": a["id"], "artifact_digest": a["digest"],
                     "artifact_run_id": run["id"], "artifact_expires_at": a["expires_at"]}
         store.update(ops.journal, dep["deployment_id"], identity=identity)
     return {"observed": observed, "version_checked": version, "health_checked": health,
+            "checked_at": time.time(),
             "summary": ("version passed" if version else "runtime version not checked by this recipe")
                        + "; " + ("health passed" if health else "health not checked by this recipe")}
 
@@ -698,12 +732,14 @@ def record(ops, dep, evidence):
                   "run_id": dep["run_id"], "run_attempt": dep["run_attempt"], "html_url": evidence["provider"].get("html_url"),
                   "deployed": current, "is_current": current, "evidence": evidence}
         store.update(ops.journal, dep["deployment_id"], state="succeeded" if current else "superseded", provider_terminal=True,
-                     facts={"verified": True, "evidence": evidence, "recorded_result": result})
+                     facts={"verified": True, "evidence": evidence, "recorded_result": result,
+                            "html_url": evidence["provider"].get("html_url")})
         if current:
             ops.db.execute("""UPDATE deployment_environments SET current_deployment_id=?,last_verified_deployment_id=?,
                 observed=?,attention=NULL,version=version+1,updated_at=? WHERE environment_key=? AND
                 desired_generation=? AND desired_deployment_id=?""", (dep["deployment_id"], dep["deployment_id"],
-                store.encode(evidence["runtime"]["observed"]), now, dep["environment_key"], dep["generation"], dep["deployment_id"]))
+                store.encode({**evidence["runtime"]["observed"], "observed_at": evidence["runtime"].get("checked_at", now)}),
+                now, dep["environment_key"], dep["generation"], dep["deployment_id"]))
         release_slot(ops, dep)
         ops.journal.api_event("deployment", dep["deployment_id"], "deployment.verified" if current else "deployment.superseded",
                               {"generation": dep["generation"], "is_current": current})
@@ -711,7 +747,12 @@ def record(ops, dep, evidence):
 
 
 async def legacy_readback(ctx, dep):
+    ctx.set_refs(deployment_id=dep["deployment_id"])
     if not dep.get("dispatch_sent") and not dep.get("run_id"):
+        if not dep.get("merge_sent"):
+            store.update(ctx.service.journal, dep["deployment_id"], provider_terminal=True, state="failed",
+                         facts={"error_code": "DEPLOY_PREVIEW_REQUIRED"})
+            release_slot(ctx.service, dep)
         raise preview_required()
     s = dep["recipe_snapshot"]
     r = ctx.service.context["github_config"].recipes.get(dep["recipe"])
@@ -745,7 +786,7 @@ def drift(ops, env, observed):
         with store.tx(ops.journal):
             changed = ops.db.execute("""UPDATE deployment_environments SET current_deployment_id=NULL,observed=?,
                 attention='ENVIRONMENT_VERSION_DRIFT',version=version+1,updated_at=? WHERE environment_key=? AND version=?
-                AND current_deployment_id=?""", (store.encode(observed), time.time(), env["environment_key"], env["version"],
+                AND current_deployment_id=?""", (store.encode({**observed, "observed_at": time.time()}), time.time(), env["environment_key"], env["version"],
                 current["deployment_id"]))
             if changed.rowcount:
                 ops.journal.api_event("deployment_environment", env["environment_key"], "deployment.drift",
@@ -775,9 +816,17 @@ async def reconcile_deployments(ops):
                         if run.get("status") == "completed":
                             store.update(ops.journal, dep["deployment_id"], provider_terminal=True, state="unverified")
                             release_slot(ops, dep)
+                elif dep.get("merge_sent") and not dep["provider_terminal"]:
+                    from .delivery import _gh
+                    number = op["target"].get("pull_number")
+                    if number and dep["recipe_snapshot"].get("repository"):
+                        pr = await background_read(_gh(ops).pull(dep["recipe_snapshot"]["repository"], number))
+                        if pr.get("merged") or pr.get("state") == "closed":
+                            store.update(ops.journal, dep["deployment_id"], provider_terminal=True, state="unverified")
+                            release_slot(ops, dep)
                 continue
             if not dep.get("run_id"):
-                if dep.get("dispatch_sent"):
+                if dep.get("dispatch_sent") or dep.get("on_merge_pending"):
                     run = await locate(ops, dep)
                     if run:
                         store.update(ops.journal, dep["deployment_id"], run_id=run["id"])
@@ -826,8 +875,8 @@ async def reconcile_deployments(ops):
                 continue
             if not proof.get("provider_proven"):
                 continue
-            runtime = await runtime_check(ops, dep)
             env = store.environment(ops.db, dep["environment_key"])
+            runtime = await runtime_check(ops, dep)
             if runtime.get("observed"):
                 drift(ops, env, runtime["observed"])
             if runtime.get("error") or runtime.get("waiting"):

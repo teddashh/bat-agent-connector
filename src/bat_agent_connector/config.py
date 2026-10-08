@@ -488,9 +488,9 @@ def parse_github(data: dict) -> GitHubConfig:
     routes = {}
     for recipe in recipes.values():
         key = (recipe.repository.lower(), recipe.environment)
-        route = (recipe.mode, recipe.workflow, recipe.ref, recipe.ordering)
+        route = recipe.ordering
         if key in routes and routes[key] != route:
-            raise ConfigError("recipes for the same environment must share mode/workflow/ref/ordering")
+            raise ConfigError("recipes for the same environment must share provider ordering")
         routes[key] = route
     return GitHubConfig(
         token_ref=token_ref, api_url=api_url, api_version=str(g.get("api_version") or "2026-03-10"),

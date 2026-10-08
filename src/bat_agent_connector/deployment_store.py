@@ -125,6 +125,9 @@ def _legacy_deployment(journal, row) -> None:
     journal.db.execute("""INSERT OR IGNORE INTO deployment_environments
         (environment_key,provider_origin,repository_id,repository,environment,slot_deployment_id,updated_at)
         VALUES(?,'legacy',0,?,?,?,?)""", (key, repository, env, dep_id if sent and not terminal else None, row["updated_at"]))
+    if sent and not terminal:
+        journal.db.execute("UPDATE deployment_environments SET slot_deployment_id=? WHERE environment_key=? "
+                           "AND slot_deployment_id IS NULL", (dep_id, key))
     journal.db.execute("""INSERT OR IGNORE INTO deployments
         (deployment_id,operation_id,recipe,environment_key,generation,identity,recipe_snapshot,recipe_digest,
          state,provider_terminal,run_id,run_attempt,document,created_at,updated_at)

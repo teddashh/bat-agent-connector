@@ -67,13 +67,16 @@ def test_rollback_and_ordering_configuration_refuses_unsupported_routes(change):
         parse_config(data)
 
 
-def test_environment_aliases_must_share_the_provider_route():
+def test_environment_aliases_must_share_provider_ordering():
     data = recipe_config()
     alias = copy.deepcopy(data["deploy"]["recipes"][0])
     alias["name"] = "alias"
     data["deploy"]["recipes"].append(alias)
     assert len(parse_config(data).github.recipes) == 2
     alias["ref"] = "other"
+    alias["workflow"] = "release.yml"
+    assert len(parse_config(data).github.recipes) == 2
+    alias["ordering"] = {"concurrency_group": "different-group"}
     with pytest.raises(ConfigError, match="same environment"):
         parse_config(data)
 

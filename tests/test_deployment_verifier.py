@@ -153,7 +153,7 @@ async def test_runtime_artifact_mismatch_is_d03_failure(make_daemon, gh):
     completed(gh, w["external_refs"]["deploy_run_id"])
     v.response["artifact_digest"] = "sha256:" + "a" * 64
     done = await settle(d, op["operation_id"])
-    assert done["error_code"] == "DEPLOY_VERSION_MISMATCH"
+    assert done["error_code"] == "DEPLOY_ARTIFACT_MISMATCH"
     assert (
         deployment.environment_status(d.ops, "prod")["current"]["deployment_id"]
         == first["result"]["deployment_id"]
