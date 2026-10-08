@@ -498,6 +498,22 @@ async def test_e01_live_cwd_uses_path_components_not_string_prefix(daemon, mock)
     assert mock.metas[sid] is not None
 
 
+async def test_e01_refused_locked_check_closes_host_input_without_waiting_for_deadline(daemon):
+    import time
+    root = daemon.ops.context["fleet"].config.host("h1").managed_roots[0]
+    path = str(Path(root) / "leased")
+    Path(path).mkdir(parents=True)
+    refused_at = []
+    async def refuse():
+        refused_at.append(time.monotonic())
+        raise OperationError("OBSERVATION_UNAVAILABLE", "live read failed", 409)
+    with pytest.raises(OperationError, match="OBSERVATION_UNAVAILABLE"):
+        await cleanup._host_call(daemon.ops, "h1", {"phase": "lock.session", "repository": path, "roots": [root]},
+                                 timeout=10, locked_check=refuse)
+    assert len(refused_at) == 1
+    assert time.monotonic() - refused_at[0] < 2  # EOF ends the host helper immediately, including on Python 3.10.
+
+
 async def test_e02_shared_worktree_is_one_item_and_checks_out_of_scope_consumers(daemon, mock):
     from bat_agent_connector.resource_ids import worktree_id
     cp, op = await setup_work(daemon, mock)

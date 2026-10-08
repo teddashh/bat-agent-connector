@@ -103,17 +103,21 @@ async def _run_locked(argv, check, timeout_s):
             await check()
             proc.stdin.write(b'{"proceed": true}\n')
             await proc.stdin.drain()
+            proc.stdin.close()
             return await proc.communicate()
+        proc.stdin.close()
         out, err = await proc.communicate()
         return first + out, err  # a host refusal before the gate, with no mutation
     try:
         out, err = await asyncio.wait_for(exchange(), timeout_s or GIT_TIMEOUT_S)
     except asyncio.TimeoutError:
+        proc.stdin.close()
         if proc.returncode is None:
             proc.kill()
         await proc.communicate()
         raise AmbiguousOutcome("locked git script timed out") from None
     except BaseException:
+        proc.stdin.close()
         if proc.returncode is None:
             proc.kill()
         await proc.communicate()
