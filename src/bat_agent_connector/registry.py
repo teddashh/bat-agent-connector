@@ -190,28 +190,45 @@ def update(host: str, session_id: str, **fields) -> None:
 
 
 def retire(host: str, session_id: str, status: str, *, created_at, actor: str, reason: str,
-           operation_id: str | None = None, carrier_resource_id: str | None = None) -> None:
+           operation_id: str | None = None, carrier_resource_id: str | None = None) -> dict:
     """Release capacity for a confirmed runtime generation without retiring its worktree/history."""
     if status not in RETIRED:
         raise ValueError("invalid session retirement status")
     p = registry_path()
     with _locked(p):
-        items = _read(p)
+        try:
+            document = json.loads(p.read_text())
+        except FileNotFoundError:
+            document = {"sessions": []}
+        except ValueError:
+            from .errors import ResourceReadOnly
+            raise ResourceReadOnly("REGISTRY_READ_FAILED", "registry retirement data is invalid") from None
+        if not isinstance(document, dict) or not isinstance(document.get("sessions", []), list):
+            from .errors import ResourceReadOnly
+            raise ResourceReadOnly("REGISTRY_READ_FAILED", "registry retirement data is invalid")
+        items = [e for e in document.get("sessions", []) if isinstance(e, dict)]
         for e in items:
-            if (e.get("host") != host or e.get("session_id") != session_id or e.get("created_at") != created_at
-                    or e.get("task_id") or e.get("status") not in {"active", "superseded", "removed", *RETIRED}):
+            if e.get("host") != host or e.get("session_id") != session_id:
                 continue
+            result = {"capacity_released": False, "registry_status": e.get("status"), "capacity_reason": None}
+            if e.get("created_at") != created_at:
+                return {**result, "capacity_reason": "generation_changed"}
+            if e.get("task_id"):
+                return {**result, "capacity_reason": "task_owned"}
+            if e.get("status") == "starting":
+                return {**result, "capacity_reason": "start_unsettled"}
             retirement = {"actor": actor, "reason": reason, "operation_id": operation_id,
                           "carrier_resource_id": carrier_resource_id}
             if e.get("status") == status and e.get("retirement") == retirement:
-                return
+                return {**result, "capacity_released": True}
+            if e.get("status") != "active":
+                return {**result, "capacity_reason": "not_counted"}
             e.update(status=status, retired_at=time.time(), retirement=retirement, updated_at=time.time())
             if status == "stopped":
                 e.update(stopped_at=e["retired_at"], stopped_by=actor)
             _write(p, items)
-            return
-    from .errors import ResourceReadOnly
-    raise ResourceReadOnly("BINDING_MISMATCH", "registry generation/status changed before session retirement")
+            return {**result, "capacity_released": True, "registry_status": status}
+    return {"capacity_released": False, "registry_status": None, "capacity_reason": "generation_changed"}
 
 
 def claim_warm(host: str, session_id: str, *, previous_task_id: str, task_id: str,

@@ -60,7 +60,7 @@ async def test_e01_confirmed_planner_stop_frees_capacity_and_worktree_stays_recl
     done = await apply(daemon, doc)
     assert done["status"] == "succeeded", done
     assert not Path(start["worktree_path"]).exists() and repo.exists()
-    assert registry.get("h1", sid)["status"] == "absent_at_cleanup"
+    assert registry.get("h1", sid) == retired  # a non-counted planner's stop history is not rewritten.
     assert not cleanup.lookup(daemon.journal.db, next(i["resource_id"] for i in doc["items"] if i.get("session_id") == sid))
 
 
@@ -119,8 +119,8 @@ async def test_e01_retired_session_refuses_send_resume_and_same_id_start(daemon,
     _, start = await standalone_worktree(daemon, mock, human, tmp_path)
     sid = start["session_id"]
     original = registry.get("h1", sid)
-    with pytest.raises(ResourceReadOnly, match="BINDING_MISMATCH"):
-        registry.retire("h1", sid, status, created_at=original["created_at"] + 1, actor="person", reason="wrong generation")
+    mismatch = registry.retire("h1", sid, status, created_at=original["created_at"] + 1, actor="person", reason="wrong generation")
+    assert mismatch == {"capacity_released": False, "registry_status": "active", "capacity_reason": "generation_changed"}
     assert registry.get("h1", sid)["status"] == "active"
     registry.retire("h1", sid, status, created_at=original["created_at"], actor="person", reason="confirmed retirement")
     mock.metas[sid] = None

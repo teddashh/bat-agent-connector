@@ -1616,8 +1616,13 @@ async def fanout_from_plan(
                             await _meta(fleet.client(host), session_id) is not None):
                         kept.update(stopped=False, code="STOP_UNPROVEN", reason="stop acknowledgement/read-back did not confirm termination")
                     else:
-                        registry.retire(host, session_id, "stopped", created_at=e.get("created_at"), actor=fleet.actor,
-                                        reason="confirmed fan-out planner stop")
+                        try:
+                            kept.update(registry.retire(host, session_id, "stopped", created_at=e.get("created_at"),
+                                        actor=fleet.actor, reason="confirmed fan-out planner stop"))
+                        except (BatError, OSError) as ex:
+                            kept.update(capacity_released=False, registry_status=None,
+                                capacity_reason="registry_refused" if isinstance(ex, BatError) else "registry_io_failed",
+                                capacity_error={"code": getattr(ex, "code", "REGISTRY_IO_FAILED")})
             except BatError as ex:
                 kept["stopped"] = False
                 kept["reason"] = _err(ex)
