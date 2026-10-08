@@ -621,8 +621,11 @@ def build_parser() -> argparse.ArgumentParser:
     tsp.add_parser("list", help="list actors, scopes and expiry (never tokens)")
     t = tsp.add_parser("revoke", help="revoke every token of an actor")
     t.add_argument("--actor", required=True)
-    p = sp.add_parser("op", help="show one operation, or list recent ones")
+    p = sp.add_parser("op", help="show one operation, or list recent ones; --cancel / --resume one")
     p.add_argument("operation_id", nargs="?")
+    steer = p.add_mutually_exclusive_group()
+    steer.add_argument("--cancel", action="store_true", help="stop it before its next step (local admin)")
+    steer.add_argument("--resume", action="store_true", help="run a needs_attention operation again (local admin)")
     p.add_argument("--status", action="append")
     p.add_argument("--limit", type=int, default=20)
     sp.add_parser("config-path", help="print the config path")
@@ -677,7 +680,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "op":
             from .task_daemon import request
 
-            if args.operation_id:
+            if (args.cancel or args.resume) and not args.operation_id:
+                raise ValueError("--cancel and --resume need an operation ID")
+            if args.cancel:
+                out = request("op_cancel", operation_id=args.operation_id, entry="cli")
+            elif args.resume:
+                out = request("op_resume", operation_id=args.operation_id, entry="cli")
+            elif args.operation_id:
                 out = request("op_get", operation_id=args.operation_id, entry="cli")
             else:
                 out = request("op_list", statuses=args.status, limit=args.limit, entry="cli")

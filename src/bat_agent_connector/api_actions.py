@@ -62,6 +62,16 @@ async def _send(ctx: OpContext) -> dict:
         turn = registry.get_turn(host, sid, mid)
         if turn:  # recorded only after BAT accepted this exact clientMessageId
             return {"message_id": mid, "accepted": True, "queued": turn.get("queued"), "turn_marker": mid}
+        # The reply may have been lost after BAT took the frame: BAT echoes a Claude prompt as a user message
+        # whose id is the clientMessageId. Codex ignores that id, so a lost Codex reply stays unproven.
+        c = fleet.client(host)
+        kind = service.agent_kind((registry.get(host, sid) or {}).get("agent_preset"))
+        if kind == "codex":
+            return None
+        state = await service._live_state(c, sid, kind, await service._meta(c, sid))
+        if any(isinstance(m, dict) and m.get("id") == mid and m.get("role") == "user"
+               for m in (state or {}).get("messages") or []):
+            return {"message_id": mid, "accepted": True, "turn_marker": mid, "settled_by": "bat_transcript"}
         return None
 
     r = await ctx.step("send", send, request={"message_id": mid,
@@ -73,6 +83,10 @@ async def _send(ctx: OpContext) -> dict:
 
 
 def _admit_answer(ops: OperationService, principal: Principal, target: dict, params: dict, pre: dict) -> None:
+    # The exact prompt is required: without it an answer could land on whatever prompt is pending next, and a
+    # read-back could not tell this prompt from another one.
+    if not isinstance(params.get("tool_use_id"), str) or not params["tool_use_id"]:
+        raise OperationError("INVALID_PARAMS", "tool_use_id (the pending prompt's toolUseId) is required", 422)
     if ("answers" in params) == ("permission" in params):
         raise OperationError("INVALID_PARAMS", "pass exactly one of answers or permission", 422)
     if "permission" in params and params["permission"] not in {"allow", "deny"}:
