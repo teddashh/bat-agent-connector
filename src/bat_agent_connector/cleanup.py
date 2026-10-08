@@ -81,10 +81,9 @@ def _hash(value):
 
 
 def migrate(journal):
-    """Add only cleanup facts. Renumberable: claim the next version only on first installation."""
+    """Add cleanup facts on every open; numbered versions belong to data migrations."""
     db = journal.db
     with journal.tx():
-        installed = db.execute("SELECT 1 FROM sqlite_master WHERE name='cleanup_runs'").fetchone()
         for ddl in (
             """CREATE TABLE IF NOT EXISTS cleanup_runs (operation_id TEXT PRIMARY KEY REFERENCES operations,
                 preview_id TEXT NOT NULL, token_hash TEXT NOT NULL, fingerprint TEXT NOT NULL,
@@ -109,9 +108,6 @@ def migrate(journal):
             "CREATE INDEX IF NOT EXISTS cleanup_history_order ON resource_tombstones(cleaned_at,resource_id)",
         ):
             db.execute(ddl)
-        if not installed:
-            version = int(db.execute("PRAGMA user_version").fetchone()[0]) + 1
-            db.execute(f"PRAGMA user_version={version}")  # noqa: S608 - local integer, rebase-safe
 
 
 def _registry_document():
