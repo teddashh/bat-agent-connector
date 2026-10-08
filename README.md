@@ -83,7 +83,8 @@ verified in the session's worktree before the first command; a moved source requ
 same operation. Dashboard text and uploaded refs survive reloads and failures. Store content has no delete;
 Use `batc artifact capture-preview HOST SESSION_ID relative/file` to review one manual-session file, save
 the JSON, then `batc artifact capture --preview-file PREVIEW.json --key KEY --confirm` with the same credential.
-Capture needs `observe` and `manage`, refuses source changes, and never changes the manual checkout. It preserves
+Capture, including replay/resume/cancel, needs the original credential with `observe` and `manage`.
+Accepted operations remain recoverable after preview expiry. Capture refuses source changes and never changes the manual checkout. It preserves
 one file, not a dirty snapshot. Managed-result capture/accept and cross-host commit fetch remain later parts.
 See [the artifact design](docs/design/artifacts.md).
 

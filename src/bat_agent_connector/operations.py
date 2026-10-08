@@ -109,6 +109,9 @@ class ActionDef:
     run: Callable[[OpContext], Awaitable[dict]]
     admit: Callable[[OperationService, Principal, dict, dict, dict], dict | None] | None = None
     target_keys: tuple[str, ...] = ()
+    # Existing intent must not repeat admission (for example, an accepted preview may have expired),
+    # but some actions bind replay and controls to authority narrower than their primary scope.
+    authorize_existing: Callable[[OperationService, Principal, dict, str], None] | None = None
 
 
 def _canonical(value: Any) -> str:
@@ -434,7 +437,10 @@ class OperationService:
             if existing["request_hash"] != request_hash:
                 raise OperationError("IDEMPOTENCY_CONFLICT",
                                      "this idempotency_key was already used for a different request", 409)
-            return self._decode(existing), False
+            op = self._decode(existing)
+            if adef.authorize_existing:
+                adef.authorize_existing(self, principal, op, "replay")
+            return op, False
         binding = adef.admit(self, principal, target, params, preconditions) if adef.admit else None
         operation_id = "op_" + uuid.uuid4().hex
         now = time.time()
@@ -451,6 +457,8 @@ class OperationService:
 
     def _may_steer(self, principal: Principal, op: dict, verb: str) -> None:
         adef = self.actions.get(op["action"])
+        if adef and adef.authorize_existing:
+            adef.authorize_existing(self, principal, op, verb)
         if not (op["actor"] == principal.actor or principal.admin or (adef and principal.allows(adef.scope))):
             raise OperationError("FORBIDDEN", f"{verb} needs the operation's own actor or its {op['action']} scope",
                                  403)

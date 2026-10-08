@@ -278,6 +278,10 @@ binding、檔案 evidence 與 fingerprint；同 actor label 的另一張 token �
 不回傳 credential hash。過期／篡改／不同 credential 零 reservation 拒絕；新請求須重新
 preview。Operation admission 保存已驗證的原 document 作中央證據，重啟後不依賴 client
 重新提交 lineage；接受後的同 key 查回不因 preview 過期建立第二個 artifact。
+同 key replay、resume、cancel 仍需目前的 `manage` + `observe` 與原接受時的 credential／
+principal binding；不能只憑相同 actor label、另一張 manage token 或 admin fallback 接管。
+這些控制查證已保存的 authority，不重新套用 preview TTL、來源讀取或 quota admission；
+同一 credential 的合法重試仍查回原 operation，保留完成／不確定 step 的 readback。
 
 Source binding 包含 host/profile、完整 session ID、目前 tab 身分欄位、已觀察的 cwd/root、
 inventory 首見身分，以及 host/SSH 設定的不可逆 binding。人工 BAT 沒有 Connector creation
