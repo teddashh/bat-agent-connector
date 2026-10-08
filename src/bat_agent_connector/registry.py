@@ -23,6 +23,8 @@ from pathlib import Path
 
 from .config import state_dir
 
+RETIRED = frozenset({"stopped", "absent_at_cleanup"})
+
 
 def registry_path() -> Path:
     return state_dir() / "orchestrated.json"
@@ -113,7 +115,7 @@ def _own_claim(path: Path, host: str, session_id: str) -> _StartClaim | None:
         claim in call.claims if call else True) else None
 
 
-def _take_claim(path: Path, host: str, session_id: str) -> _StartClaim:
+def _open_claim(path: Path, host: str, session_id: str) -> int:
     from .confinement import ConfinementRefused
 
     directory = path.parent / "start-claims"
@@ -129,6 +131,20 @@ def _take_claim(path: Path, host: str, session_id: str) -> _StartClaim:
     except BaseException:
         os.close(fd)
         raise
+    return fd
+
+
+def refuse_start_claim(path: Path, host: str, session_id: str) -> None:
+    """Check a live start while holding the registry flock, before cleanup reserves it.
+
+    A new descriptor must contend even with this coroutine's existing claim.
+    Closing it releases only this probe; never unlink the persistent lock inode.
+    """
+    os.close(_open_claim(path, host, session_id))
+
+
+def _take_claim(path: Path, host: str, session_id: str) -> _StartClaim:
+    fd = _open_claim(path, host, session_id)
     claim = _StartClaim(path, host, session_id, fd, _caller())
     _start_claims[(path, host, session_id)] = claim
     if call := _call():
@@ -154,7 +170,17 @@ def claim_unsent(host: str, session_id: str) -> str:
     """
     p = registry_path()
     with _locked(p):
-        return _claim_unsent_locked(p, _read(p), host, session_id)
+        items = _read(p)
+        entry = next((e for e in items if e.get("host") == host and e.get("session_id") == session_id), {})
+        _cleanup_guard(host, {**entry, "session_id": session_id})
+        return _claim_unsent_locked(p, items, host, session_id)
+
+
+def _cleanup_guard(host: str, entry: dict) -> None:
+    from .cleanup import guard
+
+    guard(host, session_id=entry.get("session_id"), path=entry.get("worktree_path") or entry.get("cwd"),
+          branch=entry.get("branch"))
 
 
 def _release_implicit(claim: _StartClaim | None, items: list[dict]) -> None:
@@ -222,13 +248,30 @@ def _validate_unique(items: list[dict]) -> None:
         seen.add(key)
 
 
-def _write(path: Path, items: list[dict]) -> None:
-    _validate_unique(items)
+def _write_document(path: Path, data: dict) -> None:
+    _validate_unique(data.get("sessions", []))
     tmp = path.with_suffix(".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
-        json.dump({"sessions": items}, fh, indent=1)
+        json.dump(data, fh, indent=1)
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp, path)
+    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write(path: Path, items: list[dict]) -> None:
+    # All callers hold _locked. Preserve cross-process cleanup reservations and tombstones.
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        data = {}
+    data["sessions"] = items
+    _write_document(path, data)
 
 
 def list_entries(host: str | None = None, active_only: bool = False) -> list[dict]:
@@ -252,6 +295,11 @@ def ensure_existing(host: str, entry: dict) -> None:
     p = registry_path()
     with _locked(p), _discard_unused_claim(p, host, entry["session_id"]):
         items = _read(p)
+        _cleanup_guard(host, entry)
+        if any(e.get("host") == host and e.get("session_id") == entry.get("session_id") and
+               e.get("status") in RETIRED for e in items):
+            from .errors import ResourceReadOnly
+            raise ResourceReadOnly("SESSION_RETIRED", "this session ID left the host cap; start a new session ID")
         claim = _own_claim(p, host, entry["session_id"])
         if not claim:
             _claim_unsent_locked(p, items, host, entry["session_id"])
@@ -294,6 +342,11 @@ def reserve(host: str, entry: dict, max_active: int, replaces: str | None = None
     p = registry_path()
     with _locked(p), _discard_unused_claim(p, host, entry["session_id"]):
         items = _read(p)
+        _cleanup_guard(host, entry)
+        if any(e.get("host") == host and e.get("session_id") == entry.get("session_id") and
+               e.get("status") in RETIRED for e in items):
+            from .errors import ResourceReadOnly
+            raise ResourceReadOnly("SESSION_RETIRED", "this session ID left the host cap; start a new session ID")
         sid = entry["session_id"]
         previous = next((e for e in items if e.get("host") == host and e.get("session_id") == sid), None)
         # False proves no frame, not abandonment. The OS lock proves whether
@@ -378,6 +431,49 @@ def update(host: str, session_id: str, **fields) -> None:
         if fields.get("status") and fields["status"] != "starting":
             _release_implicit(claim, items)
         _write(p, items)
+
+
+def retire(host: str, session_id: str, status: str, *, created_at, actor: str, reason: str,
+           operation_id: str | None = None, carrier_resource_id: str | None = None) -> dict:
+    """Release capacity for a confirmed runtime generation without retiring its worktree/history."""
+    if status not in RETIRED:
+        raise ValueError("invalid session retirement status")
+    p = registry_path()
+    with _locked(p):
+        try:
+            document = json.loads(p.read_text())
+        except FileNotFoundError:
+            document = {"sessions": []}
+        except ValueError:
+            from .errors import ResourceReadOnly
+            raise ResourceReadOnly("REGISTRY_READ_FAILED", "registry retirement data is invalid") from None
+        if not isinstance(document, dict) or not isinstance(document.get("sessions", []), list):
+            from .errors import ResourceReadOnly
+            raise ResourceReadOnly("REGISTRY_READ_FAILED", "registry retirement data is invalid")
+        items = [e for e in document.get("sessions", []) if isinstance(e, dict)]
+        _validate_unique(items)
+        for e in items:
+            if e.get("host") != host or e.get("session_id") != session_id:
+                continue
+            result = {"capacity_released": False, "registry_status": e.get("status"), "capacity_reason": None}
+            if e.get("created_at") != created_at:
+                return {**result, "capacity_reason": "generation_changed"}
+            if e.get("task_id"):
+                return {**result, "capacity_reason": "task_owned"}
+            if e.get("status") == "starting":
+                return {**result, "capacity_reason": "start_unsettled"}
+            retirement = {"actor": actor, "reason": reason, "operation_id": operation_id,
+                          "carrier_resource_id": carrier_resource_id}
+            if e.get("status") == status and e.get("retirement") == retirement:
+                return {**result, "capacity_released": True}
+            if e.get("status") != "active":
+                return {**result, "capacity_reason": "not_counted"}
+            e.update(status=status, retired_at=time.time(), retirement=retirement, updated_at=time.time())
+            if status == "stopped":
+                e.update(stopped_at=e["retired_at"], stopped_by=actor)
+            _write(p, items)
+            return {**result, "capacity_released": True, "registry_status": status}
+    return {"capacity_released": False, "registry_status": None, "capacity_reason": "generation_changed"}
 
 
 def claim_warm(host: str, session_id: str, *, previous_task_id: str, task_id: str,

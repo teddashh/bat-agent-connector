@@ -95,6 +95,18 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
   .row.tree { padding-left: calc(var(--depth, 0) * 12px); }
   button.mini { min-width: 36px; height: 36px; }
 }
+.cleanup-resource { padding: 12px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.cleanup-resource:last-child { border-bottom: 0; }
+.cleanup-resource .row { border: 0; padding: 0 0 6px; }
+.cleanup-binding { font-size: 14px; overflow-wrap: anywhere; }
+.cleanup-id { flex: 1 1 230px; min-width: 0; }
+.cleanup-choice { display: flex; align-items: center; gap: 8px; padding: 8px 0; min-height: 44px; }
+.cleanup-reason { padding: 4px 0; font-size: 14px; }
+.cleanup-resource pre { font-size: 12px; }
+@media (max-width: 640px) {
+  .cleanup-id, .filters select { font-size: 16px; max-width: 100%; }
+  .cleanup-choice + .actions button { min-height: 44px; }
+}
 
 .session-badges { margin-top: 0; min-width: 0; }
 .session-badges .chip { white-space: normal; }

@@ -53,7 +53,7 @@ BAT tab 記的 `cwd`／`worktreePath` 和紀錄不同也是 `BINDING_MISMATCH`�
 - **新 session**：不能直接在人工 checkout 工作（`use_worktree=false` 只限 managed root）。在人工 clone 內開新 worktree，只有 `shared_clone_worktrees = true`（預設，legacy）時允許。BAT 把 worktree 建在 workspace 資料夾解析後的 git root 下，所以經 symlink 開的 workspace 以 `git:getRoot` 的結果比對，並記入 registry 的 `origin_root`。BAT 回傳的 worktree 不在預期位置時中止，且不 rollback：位置不明的路徑可能就是人工 checkout，`worktree:remove` 加 `deleteBranch` 可能刪掉人的分支。
 - **Merge**：BAT 的 `worktree:merge` 在主 checkout 執行 `git checkout`／`merge`，只有主 checkout 位於 managed root 時才允許，否則回 `DESTINATION_MANUAL`。主 checkout 取 session 建立時記下的 `origin_cwd`，而且必須仍是 tab 所在 workspace 的資料夾；workspace 後來改指別處就是 `BINDING_MISMATCH`，不會改用新位置。`session_cleanup` 對準備好合併但目的端是人工 checkout 的工作改判 `ESCALATE`。
 - **Task service 的 SSH worktree**：只能是 `<workspace>/.bat-worktrees/batc-task-<12 hex>` 與分支 `batc/task-<12 hex>`，而且 `shared_clone_worktrees = false` 時（workspace 不在 managed root）在任何 SSH git 之前就拒絕。
-- **Fan-out planner**：在自己的 worktree 規劃；cleanup 移除 worktree 時，若分支上沒有 commit，連同分支一起刪掉（其他 session 一律保留分支）。規劃者有 commit 時改判 `ESCALATE`。
+- **Fan-out planner**：在自己的 worktree 規劃；fanout 後只透過原 stop path 停止 idle planner，保留 worktree 與 branch，交由 resource-cleanup 預覽。
 - **Failover（`all_exhausted`）**：Claude 額度是整個帳號共用，人的 tab 會和 managed session 一起用完。唯讀 session 先剔除、列在 `skipped_read_only`，`max_start_per_call` 只算 managed session。
 
 ## 全 mutation 清單
@@ -66,9 +66,9 @@ BAT tab 記的 `cwd`／`worktreePath` 和紀錄不同也是 `BINDING_MISMATCH`�
 | `session.answer` | `session_answer`、`approve_pending` | 同上 |
 | `session.permissions` | `session_set_permissions`、`approve_pending` | 同上 |
 | `session.interrupt` | `session_interrupt`、task interrupt／`work_pause(abort_current)` | 同上 |
-| `session.stop` | `session_cleanup` | 同上 |
-| `worktree.rehydrate`、`worktree.remove` | `worktree_merge`、`worktree_remove`、`session_cleanup` | 同上 |
-| `worktree.merge` | `worktree_merge`、`session_cleanup` | 同上，且目的端在 managed root |
+| `session.stop` | `cleanup.apply`、fanout planner | 同上 |
+| `worktree.rehydrate`、`worktree.remove` | `worktree_merge`、`worktree_remove` | 同上 |
+| `worktree.merge` | `worktree_merge` | 同上，且目的端在 managed root |
 | `session.create` | `session_start`、`session_failover`、`session_relay(start_if_missing)`、fan-out、task lead／reviewer 啟動 | 先在 registry 預留 ID；資料夾是 managed root、connector 新建的 worktree，或共享 connector 擁有的 worktree |
 | `workspace.register_tab` | `session_start`、task reviewer 啟動 | 只為剛啟動的 managed session 追加 tab，其他 tab 必須保持不變 |
 | `task.external_worktree` | task service 的 `base_branch` 啟動與整理（SSH git） | 固定命名的 connector worktree |
@@ -104,6 +104,15 @@ BAT tab 記的 `cwd`／`worktreePath` 和紀錄不同也是 `BINDING_MISMATCH`�
 - `session_cleanup` 對人工與 legacy session 一律 `KEEP`，不 stop、不 merge。
 - `sessions_list`、`sessions_triage`、`worktree_status` 每列多了 `provenance` 與 `api_access`。
 
+## Reviewed cleanup（Part A）
+
+[cleanup.md](cleanup.md) 使用同一 ownership policy；cleanup.guard 從原 registry 在每 process 讀同一
+reservation／confirmed tombstone，回 CLEANUP_IN_PROGRESS／RESOURCE_CLEANED。authorize_session 與 checkpoint／
+repair／integration area／external worktree checks 各一個 hook；legacy merge/remove 也不能穿過 guard。
+Marker 不授予 ownership；SSH 每次重新驗證 canonical paths、markers、common dir、manifest／CAS。
+先 preserve 再非 force remove，clones／areas 與全部 refs/batc/* 保留。Task-owned 資源本輪 TASK_OWNED，
+TaskDaemon 原 terminal cleanup 不變。Legacy session_cleanup 的 apply 一律 LEGACY_CLEANUP_DISABLED (409)；
+auto_cleanup deprecated，只保留 config parsing，不啟用 writes；read evaluation／explicit merge/remove 保留。
 ## Task authority（2026-10-08，Part A）
 
 task link 不授予 resource write grant。send／answer／interrupt／permissions（含 client-resume、approve-pending、deferred raises 與 relay target）先通過本政策，再交同一 owner 的 TaskCoordinator；paused／verifying／pending commands／stale control_version 皆拒絕。frame 邊界再次核對原 journal command、session ownership 與 owner lease。registry task 標記遺失時仍查原 journal 的 current session／start reservation／branch，不能因此變成 standalone。task-owned worktree／failover／外部 verification 不由低階工具接管，cleanup KEEP；原受信 verifier 仍可保存其 observed evidence。詳見 [operations-unification.md](operations-unification.md) 與 [api-v1.md](api-v1.md) 的穩定拒絕碼。
