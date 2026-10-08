@@ -216,6 +216,25 @@ the row is the last known state of an unreachable host. Operation writes need `B
 pending prompt's `tool_use_id`. A `needs_attention` operation can be resumed with `operation_resume` once its cause is
 fixed; it reads unproven steps back and never resends them.
 
+Task controls (`work_submit`, `work_pause`, `work_resume`, `work_mark_stage`, the scoped task tools and
+`task-reconcile`) now share operations and the original task commands. Keep the returned `operation_id` and
+`operation_status`; succeeded means that control finished, not that the task is done. Reuse an explicit
+`idempotency_key` and the same params on retries. Keys are scoped to the authenticated actor; the work tools use
+`BATC_API_TOKEN` when set, with the old local-admin path retained for local callers. Old controls without a key
+are separate requests; Goose `step_id` remains its task-send retry identity. A long or uncertain result needs
+read-back, not another dispatch. CLI reconciliation accepts `--key` and `--control-version`.
+
+For a task-owned session, low-level send/continue/answer/interrupt/permissions, relay, force and batch approval
+all pass the same TaskCoordinator. On `TASK_PAUSED` or `TASK_VERIFYING`, read `work_status` and leave control to
+the task service. On `TASK_COMMAND_PENDING` or `TASK_RECONCILIATION_REQUIRED`, reconcile the original command;
+never resend uncertain text. On `CONTROL_VERSION_CONFLICT`, read the new state before making a new decision;
+do not silently replace the precondition. `TASK_BINDING_MISMATCH` / `TASK_STATE_BLOCKED` mean the session or task
+cannot accept that control. `TASK_OWNER_UNAVAILABLE` means contact the existing owner; `OWNER_CONFLICT` tells you
+which daemon already owns the fleet. Never start a second authority with another journal. Explicit task pause
+may request a journaled abort; low-level interrupt cannot bypass pause or verification. See
+[operations unification](../../../docs/design/operations-unification.md) (Part A); other legacy-tool operations,
+no-key sentinel and null effect projections remain Part B.
+
 PR metadata is separate from head integration: read `github_pr_preview`, then use `github_pr_update` with
 its metadata_digest, a new idempotency_key and title and/or raw Markdown body (empty body clears; omitted stays).
 Requires integrate and repository allow_pr_update (default false); no new scope or token re-issue. Works on human-only

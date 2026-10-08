@@ -18,7 +18,7 @@ Ted 只對 Discord 裡的 Hermes 說話。Hermes 只能逐字保存原話、交�
 
 本機 one-line README 模擬 A/B（fake BAT、Jev network 關閉、可信測試 fake，並非實際 README 修改）：每組 10 個完成任務，標準 `bugfix-with-tests` 中位數 48.44 ms、最小 `small-task-with-tests` 中位數 22.73 ms。數字只衡量本機 journal／coordinator 路徑，沒有 BAT、模型、SSH、真實測試或網路延遲；不能外推真實交付時間。`fix/task-initial-write-spacing` PR 另外修正 start 後首個 `lead:initial`／`reviewer:initial` 被 60 秒同 session 限速誤擋，仍保留每小時 cap 與後續 write spacing；此分支以該修正為基礎，不改 BAT 或 Hermes 部署。
 
-服務每次先記命令 intent，再呼叫 BAT。單一 task 的同一 host/session 只有一個 writer；控制版本與 pause 在送出前重查。送出逾時後標 `uncertain`，**絕不重送同一命令**。Claude→Codex failover 也分成原子預留 successor 與獨立 `send` 命令：handoff prompt 送出前已有 task／command ID、`needs_review` marker 和完整 prompt hash。BAT 接受不等於 Codex 回合歸因；重啟後若只能證實 successor 存在，仍把 handoff send 留在 uncertain。BAT Codex 沒有可靠的 host-side command receipt，無法承諾 exactly once；GUI 或舊低階工具也不受服務鎖約束。新自動化入口須用 task 工具。
+服務每次先記命令 intent，再呼叫 BAT。單一 task 的同一 host/session 只有一個 writer；控制版本與 pause 在送出前重查。送出逾時後標 `uncertain`，**絕不重送同一命令**。Claude→Codex failover 也分成原子預留 successor 與獨立 `send` 命令：handoff prompt 送出前已有 task／command ID、`needs_review` marker 和完整 prompt hash。BAT 接受不等於 Codex 回合歸因；重啟後若只能證實 successor 存在，仍把 handoff send 留在 uncertain。BAT Codex 沒有可靠的 host-side command receipt，無法承諾 exactly once；BAT GUI 不受 connector 鎖約束；舊低階工具現在經原 coordinator 的 task gate。新自動化入口須用 task 工具。
 
 Rules 引擎在回合確定完成、尚未達驗收、沒有 blocker／額度／人工接管且未達 recipe 續推上限時，派一次短 `continue`；模糊語意才請 Jev 分類。狀態包括 queued、dispatching、accepted、running、waiting_permission、quota_limited、human_owned、needs_ted、verifying、done、failed、uncertain。Pause 停止新派送，可選擇 abort 當前回合或讓其結束；resume 先對帳再續推。額度 failover 呼叫 PR #1 的原子 successor reservation 路徑，記下新舊 session。開發者自稱完成、測試通過後，starter recipe 預設開**另一個** reviewer session：Claude 額度可用時用 Claude，否則用全新 Codex。Reviewer 依驗收條件回報；拒絕時送回開發者並計數，達 retry cap 即請 Ted 處理。通過後才以 PR #1 的 commit 綁定驗證紀錄進入 VERIFIED_CANDIDATE。`done` 仍需驗證與 review 都通過。代理自稱 MILESTONE 只進 verifying。
 
@@ -82,7 +82,7 @@ Pause 在任何等待的 presence lookup 後重查；`service.session_send` 的 
 | `verifying` | `done`／`accepted`／`needs_ted` | 乾淨候選 commit/tree 的觀察測試與 fresh reviewer PASS／REJECT／測試失敗 |
 | `uncertain` | `accepted`／`running`／`verifying`／`human_owned`／`done`／`needs_ted` | 可歸因的 BAT 證據或有權操作者針對特定命令明確處理；絕不自動重送 |
 
-`pause` 先持久化控制版本，停止新派送；可選擇 interrupt 當前 turn。start 等待期間發生 pause 時，已接受的 session 保存為 `accepted` 但不送初始 prompt。若 pause 在 send 前的 presence lookup 期間發生，服務在 BAT send 呼叫前再次讀 pause，取消尚未送出的命令。`resume` 清除 pause，下一 tick 先查 pending 命令；若無待對帳且 session 尚未收到 prompt，才以新的 control version 送第一次 prompt。每個 host/session 在單 daemon 內有 writer lock；程序間以 0600 lock file 的排他 `flock` 與 owner heartbeat 限制為一個 daemon。外部 BAT GUI／舊低階工具不受此鎖控制，故遇無法歸因的 turn 保留 uncertain。
+`pause` 先持久化控制版本，停止新派送；可選擇 interrupt 當前 turn。start 等待期間發生 pause 時，已接受的 session 保存為 `accepted` 但不送初始 prompt。若 pause 在 send 前的 presence lookup 期間發生，服務在 BAT send 呼叫前再次讀 pause，取消尚未送出的命令。`resume` 清除 pause，下一 tick 先查 pending 命令；若無待對帳且 session 尚未收到 prompt，才以新的 control version 送第一次 prompt。每個 host/session 在單 daemon 內有 writer lock；程序間以 0600 lock file 的排他 `flock` 與 owner heartbeat 限制為一個 daemon。外部 BAT GUI 不受此鎖控制；connector 舊低階工具也先走 task gate。遇無法歸因的 turn 仍保留 uncertain。
 
 送 prompt 前先持久記 `needs_review`，包含 message ID、prompt SHA-256 與送出前游標；即使 crash 發生在實際送出前，也按**可能已送出**處理。逾時、斷線或回覆遺失後保持 `uncertain`。Claude `session_read` 的 `correlated`／`correlated_after_prior_turn` 可用於對帳；Codex 的 `timestamp_cursor` **只是時間位置，不能證明回覆屬於本命令**，連同後來出現的 `REVIEW: PASS` 都不能用來結案或自動重送。Codex 只有明確的命令／turn 綁定證據才可自動歸因，否則走下述人工對帳。Reviewer PASS 同時要求獨立 reviewer prompt／turn 歸因、lead 已停筆、乾淨的當前 commit/tree 和受信測試 exit 0。BAT 明確回 busy/rejected 時標 rejected、請 Ted 處理，不假設可安全重送。start 對帳使用預留 session ID 和 BAT meta；lead／reviewer／failover successor start 的 ack 都須回精確預留 session ID。相同 worktree 的 failover 另比對 host worktree path/branch、Git branch 與 registry branch，任何變動都 fail closed。failover 的 registry＋BAT meta **只證實 successor session 存在**，handoff `batc-*` ID、registry `sent` 和後來不相關的回覆都不能證明 prompt 所屬 turn。handoff `send` 維持 uncertain，可用獨立一次性命令 capability 人工對帳；確認 session 閒置後才可送文字不同的新 prompt。遇 candidate commit 或 tree 改變，清除舊 verification/reviewer/PASS，建立新 reviewer session。
 
@@ -134,7 +134,7 @@ Jev 共用客戶端先用 TypeSafe `/v1/systemone`；主端逾時、錯誤或回
 
 Reviewer 只以**最後一則 agent 訊息**中的 JSON verdict 決定：`{"verdict":"pass|reject","candidate_commit","tree_hash","findings":[]}`。缺少、格式無效、同一訊息內互相矛盾（含舊式 `REVIEW: PASS`／`REVIEW: REJECT` 文字與 JSON 不一致）、commit/tree 與 review candidate 不符、訊息被讀取截斷、或 PASS 但含 high／critical finding（含 PR #8 的未標記 `High:` 行），一律視為 reject，走有上限的 rework（`review_verdict_rejected` 事件記原因），超過 recipe 上限才 `needs_ted`。Lead 的 `BAT-STATUS` 也只取最後一則 agent 訊息的最後一個 marker；前面引用的 marker 不會推動狀態。Task adapter 讀取時每則訊息上限提高到 20k 字，避免尾端 marker 被預設 2k 截斷。
 
-直接 send／answer 的 fence 改讀 daemon 啟動時寫在 registry 旁的 `task-service.json`（實際 `--db` 路徑）。Session 在 registry 標為 task-owned，但 pointer、DB 或 task row 讀不到時，一律拒絕低階 send／answer（fail closed）；狀態可讀且為 `verifying` 時也拒絕。Daemon 自己的 send 仍透過 journal-bound `before_invoke` 通過。
+直接 send／answer／interrupt／permissions 的共用 gate 讀既有 owner 的 `task-service.json` 與 journal，然後轉交**同一個** coordinator。pointer／DB／row／lease 不可用時 `TASK_OWNER_UNAVAILABLE`，registry／task／預留 start／branch ownership 不一致時拒絕，不能降級為 standalone。`paused`、`verifying`、未對帳命令與不允許的 task state 都阻擋低階操作；queue／force／approve-pending／deferred raise／relay 不會插隊。send、client-resume、answer、interrupt、兩個 Codex permission channels 都在 frame 前重查 control_version。只有原 journal command 綁定的內部 send／受信 verification，以及該 pause 版本的 abort，能使用 coordinator 內部權限。
 
 ## Verification lifecycle（2026-09-29 hardening）
 
@@ -144,3 +144,18 @@ Reviewer 只以**最後一則 agent 訊息**中的 JSON verdict 決定：`{"verd
 
 受信測試失敗不再直接 `needs_ted`（stuck handler）：以 log 尾端做決定性分類。缺依賴時，每個候選 commit 只跑一次 repo 追蹤中的 lockfile 安裝（pnpm／yarn／npm ci／uv sync／cargo fetch），工作樹須保持乾淨，再重測；安裝後仍缺即視為程式問題。程式／測試失敗時把遮蔽後的輸出尾端（≤2500 字）送回 lead 做有上限的 rework（`verification_failures`；small 1 次、其他 2 次），再驗證新 commit；超過上限才 `needs_ted`。逾時、權限、登入、網路、磁碟等環境問題直接 `needs_ted`。
 
+
+
+## Operations 與唯一 owner（2026-10-08，Part A）
+
+[統一操作規格](operations-unification.md) Part A 已把 task.submit／pause／resume／mark_stage、task_send（session.send 的 task target）、task.verify、task.request_ted、task.command.reconcile 包成 OperationService actions。HTTP、原 MCP／RPC 和 CLI task-reconcile 共用原 Journal／TaskCoordinator；原結果增加 operation_id／operation_status。新增 scope 對照與拒絕碼見 [api-v1.md](api-v1.md)。有 key 時依驗證 actor 去重；無 key 的舊 controls 每次是獨立要求。Goose step_id 仍可重試。一般 session runtime actions 即使走 legacy service，也先提交原 task command，未知結果不重送。
+
+`OpContext.effect` 以同一 journal transaction 保存原 task effect 與 operation_steps receipt。restart 讀到 receipt 就重用結果；只剩 started 意圖表示 effect transaction 沒提交，可安全重做本機 journal method。pause 的 local effect（含 Ted action 去重）先提交，abort_current 為獨立 intent／readback step，resume 後舊版本的 abort 無法送出。reconcile 的一次性 capability 消耗、原 command resolution、新 next_prompt command 與 receipt 同交易提交；跟進 prompt 仍走原 _send，未知結果只回查。
+
+owner lock 固定在 registry/state directory 的 `task-daemon.lock`，不同 --db 仍爭同一把 flock。TaskDaemon 在取得 owner 後才初始化 Journal、0600 admin token、providers、listener 與 worker。第二個 daemon 回 OWNER_CONFLICT 與既有 pointer metadata，不修改候選 journal／token／pointer。heartbeat 是觀測，不能用過期時間奪取 live lock；OS 釋放後才可重啟並沿用 journal。升級需先停舊版（舊版鎖在 DB 父目錄），不得混跑。
+
+Part A 沒有 schema migration、業務資料搬移或歷史 operations 回填。僅 local-admin work_submit 相容入口可按原 payload hash 連到既有 task；其 bridge receipt 與 operation intent 同交易提交，crash 不會造成重啟錯建 task。新提交使用 operation identity 作 task key，其他 actor 不認領歷史 key。
+
+## 尚未涵蓋
+
+Part B 尚未涵蓋其餘 legacy tools 的 operations、no-key sentinel／null 結果投影、外部 step 拆分及全入口 A01/A05/A08；live BAT／Goose gate 保持原限制。BAT GUI 的外部派送與沒有明確 turn 證據的 Codex 回覆仍不能由 connector 保證歸因。

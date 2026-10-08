@@ -2,7 +2,7 @@
 
 日期：2026-10-08。對應《Better Agent Dashboard／Connector 計畫》v1.0 的 §09、§10、§24，W01／W04 剩餘工作，驗收 A01、A05、A07、A08、A09。
 
-本文依 2026-10-08 規格審查決議修訂。實作分為 Part A 與 Part B；下列標「新增」者是核准的實作合約，交付狀態以各階段的測試與文件為準。
+本文依 2026-10-08 規格審查決議修訂。Part A 已實作 Task Service authority；Part B 保留第二步合約。交付狀態以本文件、測試與 api-v1/task-service 文件為準。
 
 ## 分段交付與審查決議
 
@@ -11,6 +11,20 @@
 - Part A 不改 `OperationService.create` 的 admission 順序或 operations schema。policy admission 拒絕仍 403、沒有 operation；執行中才發現的拒絕仍為 failed operation。
 - Part B 無 key 呼叫在原 NOT NULL 欄位保存 `batc:nokey:<operation_id>`：只作唯一的儲存值，絕不與另一要求去重。拒絕 client key 使用 `batc:nokey:` 前綴（422）；所有讀取投影 `idempotency_key: null`、`idempotency_enabled: false`。**不 rebuild operations，不需此項 schema migration**。
 - 舊 task control 沒有 key 的 RPC 在 Part A 使用每次呼叫獨立的 request key，不提供跨呼叫去重；Part B 才統一 no-key sentinel 與投影。明確給 key 的 task actions 現在即須符合 A05。
+
+## Part A 實作對照
+
+`task_actions.py` 註冊 task.submit／pause／resume／mark_stage／verify／request_ted／command.reconcile；task_send 使用原 session.send 的 `{task_id}` target。`task_control.py` 是 service/lifecycle 的共用 gate，轉交 daemon 原 coordinator；journal 的 current session、start reservation、branch 仍是 ownership 證據。任意 callback 不再跳過 gate。只有既有 command 綁定的 send、原受信 verifier 與 pause 版本的 abort 使用內部 FrameGuard。permissions、relay、批次 approval 與 deferred raises 尚是 legacy 路徑，但 A07 已生效；cleanup 只加 ownership／stop 邊界保護，沒有 Part B step 拆分。
+
+`OpContext.effect` 與原 Journal.tx 的巢狀 savepoint 保存同交易 receipt；沒有 schema migration。task/send linkage 使用 external_refs、command payload 與 operation_steps response，不新增派工資料表。pause local effect 不等待 task lock，abort step 再按 task → session → host → BAT semaphore 順序執行。受信 verifier 在啟動 runner 與保存 evidence 前重查版本；caller 不能以外部 verification 取代它。未知 send 不重送；answer/interrupt 的正面 readback 可交原 coordinator，無法證明的 permissions 保留 uncertain，原 command capability 可作一次性人工對帳。
+
+舊 task 結果只新增 operation_id／operation_status。無 key 舊 controls 為獨立 request identity；task_send 未指定 key 時以 task_id＋原 step_id 保留 retry 身分。舊 work_submit 201–256 字 key 在 adapter 保存原字串並作 SHA-256 operation-key 映射（不改 create 的 200 字限制）；只有 local-admin work_submit 相容入口可寫歷史 task-key bridge receipt，HTTP 一般 actor／新 API admin submission 不追認歷史 key。bridge 與 operation admission 在同一外層 Journal.tx 提交；中途 crash 不會留下可錯建新 task 的孤立 intent，create 的 admission 順序不變。reconcile capability 明文不入 operation；消耗後只能重讀相同 actor/key 的原 operation。
+
+runtime Codex send 保留舊 accepted 欄位，但 ACK 不是 task 的回合證據。沒有 exact echo 時交原 coordinator 的 command readback；證據不足就維持 task／command uncertain，拒絕下一個低階 send。Part B 才改未知效果的 null 投影。
+
+CLI task-reconcile 帶 --key 時，原 admin-only capability issuer 以既有 admin secret 綁定 task／command／key，使重試取得同一 capability 身分。capability 仍只保存 hash、一次性消耗、10 分鐘期限；consumed capability 只能取回自己相同 key 的原 operation。沒有 key 時保留原每次新發 capability。issuer 不執行 reconciliation，也不讓 admin token 代替 command capability。
+
+Part A 的可執行測試在 `tests/test_operations_unification.py`，加上既有 service/task/API tests。A05 包含 actor/key 衝突、所有 task actions、原子 rollback／restart／capability 消耗；A07 包含 legacy/API gate、每種 pending command、晚到版本/owner/frame、client-resume、permission channels、approval/deferred raise/relay、Goose 不自鎖與 pause abort；A09 包含不同 journal、owner metadata 不變、過期 heartbeat 不接管、第二 client 走中央 owner與重啟續用 journal。A01/A05/A08 的全 legacy 入口驗收仍是 Part B，不能由這批 task 測試宣稱完成。
 
 ## 固定來源版本
 
@@ -168,7 +182,7 @@ Operation cancel/resume 保留原 endpoints、authorization 與 events；不新�
 
 ### 每個舊工具的結果投影（Part B；task 欄位新增 ID/status 為 Part A）
 
-所有相容入口保留原頂層欄位；新增 `operation_id`、`operation_status`、`operation_error_code`，不以 operation 的 status 覆蓋 task 的 `state`。HTTP／通用 `operation_submit` 仍回 `{operation, created}`。bounded wait 沿用 RPC 上限 30 秒；逾時回紀錄，不在 adapter 再呼叫 handler。
+所有相容入口保留原頂層欄位；Part A task 結果新增 `operation_id`、`operation_status`；Part B 另加 `operation_error_code`，不以 operation 的 status 覆蓋 task 的 `state`。HTTP／通用 `operation_submit` 仍回 `{operation, created}`。bounded wait 沿用 RPC 上限 30 秒；逾時回紀錄，不在 adapter 再呼叫 handler。
 
 | 工具／命令 | 必須保留的結果與特別相容規則 |
 |---|---|
@@ -350,7 +364,7 @@ Phase 2 擴充原 owner 機制，沒有第二份 owner database／另一套 leas
 
 ## 測試計畫與驗收對照
 
-以下新增測試名稱是預定名稱，**本次沒有新增可執行驗收測試**。既有測試提供起點證據，不代表全入口驗收已達成。測試名或 docstring 標 acceptance ID，參數化使用上面每一列（含 admin／RPC／task-scoped、dry run 與內部隱式 mutation）；靜態入口清單也要與 MCP 註冊／CLI parser／HTTP route／ActionDef 清單比對，避免只測 HTTP。
+下表保留完整分段測試計畫；Part A 已加入上節對應的可執行測試。Part B 的全入口名稱仍是預定名稱，不代表全入口驗收已達成。測試名或 docstring 標 acceptance ID，參數化使用上面每一列（含 admin／RPC／task-scoped、dry run 與內部隱式 mutation）；靜態入口清單也要與 MCP 註冊／CLI parser／HTTP route／ActionDef 清單比對，避免只測 HTTP。
 
 | 驗收／計畫 | 既有可執行證據 | Phase 2 新增／延伸測試與必須斷言 |
 |---|---|---|
