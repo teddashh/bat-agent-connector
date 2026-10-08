@@ -287,6 +287,7 @@ work_submit 原已要求 key，保留其最大 256 字相容長度；一般 oper
 | answer／approve-pending | pending prompt binding、每個 prompt answer、每個 permission 設定 | prompt ID 不再 pending 才能證明清除；不代表所有後續工作成功。失敗讀取不是「沒有 pending」。 |
 | permissions | Claude mode；Codex sandbox 與 approval 各一步 | 讀同 session meta 的實際 mode；證據不足時維持 uncertain。deferred raise 保存固定目標／版本；task gate 改變時拒絕，不盲目掃全 registry。 |
 | interrupt／pause abort | interrupt／abort 各一步；固定 task/session/version | 證明相同 session 不 streaming；查不到或 binding 不符不能算完成。已 pause 的意圖保留，不因 abort 不明而退回未 paused。 |
+| task-owned session.send／answer／interrupt | operation_id 連原 task command；保留原 payload／control_version | operation 讀回先結清自己的 step；下次 coordinator.tick 在 task lock 下以原 `_reconcile_command` 的證據結清 command（send 為 accepted，其餘為 settled），將 lead task 恢復 running。operation 的證據不代替 task 回執；command 未解仍擋控制，回查不明維持 uncertain、不重送。 |
 | start／relay 新建／fanout 項目 | reserve IDs、worktree.create、start-session、選配 tab append、第一個 prompt | 核對預留 ID、creation evidence、cwd、branch。已存在只補回執；不能重新 random ID、刪已可能成功的 worktree，或回退人工 cwd。tab 整份 workspace save 的既有 race 不在此聲稱修好。 |
 | failover | 固定 source/successor、writer proof、start、獨立 handoff send | successor 存在不代表 handoff 成功；舊 writer 不明時不建第二 writer。registry starting／uncertain 不作「可再開」依據。 |
 | worktree merge／remove | 可選 rehydrate、merge、remove、選配 branch delete、stop、registry effect，每項分開 | 保存來源／目的 commit 與 path；merge 以目的 Git 證據核對，remove 以 exact worktree 身分／存在性核對。不能因資料夾不存在就順手刪別的 branch。無法唯一歸因就 uncertain。 |
