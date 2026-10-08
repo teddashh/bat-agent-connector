@@ -327,7 +327,7 @@ class Journal:
         self._migrate_artifacts()
 
     def _migrate_artifacts(self):
-        # Version 2 is additive; repeated setup also repairs missing DDL in older journals.
+        # Additive DDL runs after numbered data migrations without claiming their versions.
         with self.tx():
             for table in ("checkpoints", "work_items"):
                 if "attachments" not in {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}:
@@ -366,8 +366,6 @@ class Journal:
             )
             for statement in statements:
                 self.db.execute(statement)
-            if self.db.execute("PRAGMA user_version").fetchone()[0] < 2:
-                self.db.execute("PRAGMA user_version=2")
 
     def _drop_legacy_outbox(self):
         """Remove the retired chat outbox so no historical event can ever be published.

@@ -173,23 +173,33 @@ async def test_attachment_change_invalidates_work_item_approval(daemon):
     assert daemon.journal.db.execute("SELECT owner_kind FROM artifact_references").fetchone()[0] == "work_item"
 
 
-def test_artifact_migration_preserves_existing_journal_and_empty_manifests(tmp_path):
+@pytest.mark.parametrize("version", [1, 3])
+def test_artifact_migration_preserves_existing_journal_and_empty_manifests(tmp_path, version):
     path = tmp_path / "legacy.db"
     j = Journal(path)
     task = j.submit(project="p", host="h1", workspace="w", original_words="keep", idempotency_key="legacy")
     before = j.api_events(0, 10)
     j.db.execute("ALTER TABLE checkpoints DROP COLUMN attachments")
     j.db.execute("ALTER TABLE work_items DROP COLUMN attachments")
-    j.db.execute("PRAGMA user_version=1")
+    tables = ("checkpoint_source_confirmations", "artifact_materializations", "artifact_references",
+              "artifact_uploads", "artifact_revisions", "artifacts")
+    for table in tables:
+        j.db.execute(f"DROP TABLE {table}")
+    j.db.execute(f"PRAGMA user_version={version}")
     j.close()
     j = Journal(path)
     assert j.get(task["task_id"])["original_words"] == "keep"
     assert j.api_events(0, 10) == before
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == version
+    assert set(tables) <= {x[0] for x in j.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for table in ("checkpoints", "work_items"):
         assert next(x for x in j.db.execute(f"PRAGMA table_info({table})") if x[1] == "attachments")[4] == "'[]'"
+    snapshot = list(j.db.iterdump())
     j.close()
-    Journal(path).close()  # idempotent second open
+    j = Journal(path)
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == version
+    assert list(j.db.iterdump()) == snapshot  # idempotent second open, including data
+    j.close()
 
 
 class Writer:

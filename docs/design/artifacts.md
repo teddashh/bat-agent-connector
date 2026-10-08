@@ -180,7 +180,7 @@ reference rows只有work_item、checkpoint、operation的writer。未完成工�
 | 檔案 | Part A 修改 |
 |---|---|
 | artifacts.py（新）／artifact_host.py／artifact_host_helper.py／artifact_client.py（新） | store、upload adapter／actions、refs、固定 Python helper／read-back |
-| task_journal.py | next free user_version 的 idempotent additive DDL；舊附件空，舊字串不遷成 artifact |
+| task_journal.py | 不佔 user_version 的 idempotent additive DDL；每次 open 在 numbered migrations 後執行，舊附件空，舊字串不遷成 artifact |
 | resource_policy.py | storage／materialize mutation與 shared destination checks，配合cleanup guard |
 | operations.py | **只有 additive wake(operation_id)**；不改 create／resume／cancel／STATES／table／replay |
 | checkpoints.py | frozen refs、handler第一step連結、materialize／guard、before_send callback／confirmation；保持其他包修改 |
@@ -189,6 +189,8 @@ reference rows只有work_item、checkpoint、operation的writer。未完成工�
 | dashboard/app.js／app.css／i18n.js | selection upload、localStorage草稿與pending提示、operation evidence，兩語系 |
 | tests/test_artifacts.py 等 | 下列接受情境、HTTP/MCP/CLI契約與policy失敗 |
 | api-v1.md／checkpoints.md／work-items.md／dashboard.md；README x2／CHANGELOG／兩skills | 完成部分與尚未涵蓋；計畫§08/§12/§13、B04、MCP 256KiB與大檔路徑 |
+
+Artifact DDL 只用 CREATE TABLE IF NOT EXISTS 與依 table_info 缺欄位才 ALTER；不讀寫 user_version。版本號屬一次性的 data migrations：delivery 佔 2–3、observation 佔 4。artifact 不能先標 2，否則合併後會跳過 delivery 的資料遷移。
 
 ## 測試計畫（A；B04）
 
