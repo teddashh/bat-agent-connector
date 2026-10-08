@@ -310,6 +310,50 @@ async def test_b02_two_hosts_one_offline_and_scope_change(mock, tmp_path):
     j.close()
 
 
+@pytest.mark.parametrize("changed_field", ["url", "fingerprint"])
+async def test_b02_scope_change_stays_blocked_on_later_refreshes(mock, tmp_path, changed_field):
+    """B02, §11: the refused scope never replaces the stored scope or starts later BAT reads."""
+    j = Journal(tmp_path / "j.db")
+    cfg = make_config(mock)
+    inv = Inventory(j, cfg)
+    await inv.refresh_host("h1")
+    original = cfg.host("h1")
+    stored_binding = inv._binding("h1")
+    ids = {s["resource_id"] for s in inv.list_sessions(order="id")["sessions"]}
+    obs = Observation(j)
+    histories = {rid: {e["seq"]: e for e in obs.history("session", rid)["events"]} for rid in ids}
+    assert "attempted_binding_version" not in inv.discovery("h1")["scopes"][0]
+    fields = {changed_field: original.url + "?scope=changed" if changed_field == "url" else "0" * 64}
+    cfg.hosts["h1"] = replace(original, **fields)
+    assert cfg.host("h1").profile_id == original.profile_id
+    attempted = inv._binding("h1")
+    assert attempted != stored_binding
+    first_head = None
+    for _ in range(2):
+        frames = list(mock.frames)
+        result = await inv.refresh_host("h1")
+        assert not result["reachable"] and "DISCOVERY_SCOPE_CHANGED" in result["error"]
+        assert mock.frames == frames
+        row = j.db.execute("SELECT binding,body FROM discovery_latest WHERE host=? AND profile_id=?", ("h1", original.profile_id)).fetchone()
+        scope = json.loads(row["body"])
+        assert row["binding"] == scope["binding_version"] == stored_binding
+        assert scope["attempted_binding_version"] == attempted
+        assert inv.discovery("h1")["scopes"][0] == scope
+        assert {s["resource_id"] for s in inv.list_sessions(order="id")["sessions"]} == ids
+        for rid, history in histories.items():
+            current = {e["seq"]: e for e in obs.history("session", rid)["events"]}
+            assert all(current[seq] == event for seq, event in history.items())
+        if first_head is None:
+            first_head = j.api_head()
+        else:
+            assert j.api_head() == first_head
+    cfg.hosts["h1"] = original
+    inv._record_failure("h1", time.time(), RuntimeError("offline"))
+    assert "attempted_binding_version" not in inv.discovery("h1")["scopes"][0]
+    await inv.close()
+    j.close()
+
+
 async def test_b02_null_workspace_preserves_missing_counts_even_with_registry(mock, tmp_path):
     j = Journal(tmp_path / "j.db")
     inv = Inventory(j, make_config(mock))

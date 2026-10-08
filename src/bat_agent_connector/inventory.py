@@ -238,12 +238,16 @@ class Inventory:
     def _discovery(self, host, at, *, failed=None, count=None):
         hc = self.config.host(host)
         scan = self._scans.get(host, {})
-        previous = self.db.execute("SELECT body FROM discovery_latest WHERE host=? AND profile_id=?", (host, hc.profile_id)).fetchone()
-        old = body(previous[0]) if previous else {}
+        previous = self.db.execute("SELECT binding,body FROM discovery_latest WHERE host=? AND profile_id=?", (host, hc.profile_id)).fetchone()
+        old = body(previous["body"]) if previous else {}
         info = self.fleet.client(host).auth_info
         errors = scan.get("enrichment_failures", 0)
         scope_changed = bool(failed and "DISCOVERY_SCOPE_CHANGED" in failed)
-        data = {"host": host, "profile_id": hc.profile_id, "binding_version": self._binding(host),
+        binding = self._binding(host)
+        stored = previous
+        if scope_changed and stored is None:
+            stored = self.db.execute("SELECT binding FROM discovery_latest WHERE host=? ORDER BY profile_id LIMIT 1", (host,)).fetchone()
+        data = {"host": host, "profile_id": hc.profile_id, "binding_version": stored["binding"] if scope_changed and stored else binding,
                 "scan_id": f"scan_{int(at * 1000000)}", "started_at": _iso(at), "finished_at": _iso(time.time()),
                 "last_success_at": old.get("last_success_at") if failed else _iso(at),
                 "observer": "inventory", "status": "failed" if failed else "partial" if errors else "succeeded",
@@ -261,10 +265,12 @@ class Inventory:
                     ("other_profiles_and_hosts", "not_configured"), ("manual_sessions_without_tabs_or_facts", "not_enumerable"),
                     ("arbitrary_transcripts", "only_known_claude_cwd"), ("codex_rollouts", "scan_cost"),
                     ("background_git_state", "no_background_git_probing"), ("earlier_history", "journal_facts_only"))]}
+        if scope_changed:
+            data["attempted_binding_version"] = binding
         if failed and "workspace:load" in data["methods"]:
             data["methods"]["workspace:load"]["status"] = "skipped" if scope_changed else "failed"
         self.db.execute("INSERT INTO discovery_latest VALUES(?,?,?,?) ON CONFLICT(host,profile_id) DO UPDATE SET body=excluded.body",
-                        (host, hc.profile_id, self._binding(host), dump(data)))
+                        (host, hc.profile_id, data["binding_version"], dump(data)))
         if old.get("status") != data["status"] or old.get("coverage") != data["coverage"]:
             self.journal.api_event("host", host, "discovery.changed", data, actor="inventory", context=self._context(host))
 
