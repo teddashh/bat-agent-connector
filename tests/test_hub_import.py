@@ -894,3 +894,229 @@ def test_b05_cli_successful_preview_with_blockers_is_nonzero(monkeypatch, capsys
                         else {"operation": {"operation_id": opid, "status": "succeeded", "result": {"preview": doc}}})
     assert cli.main(["hub", "import", "--source", "sample", "--preview"]) == 1
     assert opid in capsys.readouterr().out
+
+
+async def clean_reapply(d):
+    """B05 invariant: a successful apply leaves source/destination baselines aligned."""
+    doc = await preview(d)
+    assert doc["can_apply"], doc["blockers"]
+    assert all(row["classification"] == "unchanged" for row in doc["records"]), [
+        (row["key"], row["classification"]) for row in doc["records"]
+    ]
+    op = await apply(d, doc)
+    assert op["error_code"] != "DESTINATION_CHANGED"
+    return doc
+
+
+async def test_b05_moved_hub_child_keeps_order_slot_and_reapplies(daemon):
+    d, src = daemon
+    await apply(d, await preview(d))
+    child, old_parent = mapped(d, "alpha", "child"), mapped(d, "alpha", "t")
+    path = src / "Product/alpha/.ai/tasks/child.md"
+    path.write_text(path.read_text().replace("parent: t", "parent: continued"))
+    doc = await preview(d)
+    assert doc["can_apply"], doc["blockers"]
+    await apply(d, doc)
+    assert get(d, child)["parent_id"] == mapped(d, "alpha", "continued")
+    assert child in wi._saved_order(d.ops.db, "items:" + mapped(d, "alpha"), old_parent)
+    await clean_reapply(d)
+    await clean_reapply(d)
+
+
+async def test_b05_first_import_preserves_moved_local_project_slot(daemon):
+    d, _ = daemon
+    a = (await act(d, PERSON, "project.create", {}, {"name": "Local A"}))["result"]["project_id"]
+    b = (await act(d, PERSON, "project.create", {}, {"name": "Local B"}))["result"]["project_id"]
+    before = [x["project_id"] for x in wi.projects_list(d.ops.db)["projects"]]
+    await act(d, PERSON, "project.order", {}, {"order": list(reversed(before))}, {"before": before})
+    await act(d, PERSON, "project.update", {"project_id": b}, {"parent_id": a},
+              {"expected_version": wi.project_get(d.ops.db, b)["project"]["version"]})
+    assert b in wi._saved_order(d.ops.db, "projects", "")
+    doc = await preview(d)
+    assert doc["can_apply"], doc["blockers"]
+    await apply(d, doc)
+    assert b in wi._saved_order(d.ops.db, "projects", "")
+    await clean_reapply(d)
+
+
+async def test_b05_import_order_events_do_not_poison_project_baseline(daemon):
+    d, src = daemon
+    await apply(d, await preview(d))
+    alpha = mapped(d, "alpha")
+    (src / "Product/alpha/.ai/tasks/new.md").write_text("---\ntitle: New\n---\n")
+    doc = await preview(d)
+    assert next(r for r in doc["records"] if r["connector_id"] == alpha)["classification"] == "unchanged"
+    await apply(d, doc)
+    await clean_reapply(d)
+    path = src / "Product/alpha/PROJECT.md"
+    path.write_text(path.read_text().replace("Synthetic migration project", "Source description"))
+    doc = await preview(d)
+    assert doc["can_apply"], doc["blockers"]
+    assert next(r for r in doc["records"] if r["connector_id"] == alpha)["classification"] == "update"
+    await apply(d, doc)
+    await clean_reapply(d)
+
+
+async def test_b05_local_task_reorder_is_group_state_not_a_project_edit(daemon):
+    d, _ = daemon
+    await apply(d, await preview(d))
+    alpha = mapped(d, "alpha")
+    before = [x["work_item_id"] for x in wi.project_get(d.ops.db, alpha)["work_items"]]
+    await act(d, PERSON, "work_item.order", {"project_id": alpha}, {"order": list(reversed(before))},
+              {"before": before})
+    await clean_reapply(d)
+    after = [x["work_item_id"] for x in wi.project_get(d.ops.db, alpha)["work_items"]]
+    assert after == list(reversed(before))
+
+
+async def test_b05_local_description_still_conflicts_after_group_only_import(daemon):
+    d, src = daemon
+    await apply(d, await preview(d))
+    alpha = mapped(d, "alpha")
+    await act(d, PERSON, "project.update", {"project_id": alpha}, {"description": "Local description"},
+              {"expected_version": wi.project_get(d.ops.db, alpha)["project"]["version"]})
+    (src / "Product/alpha/.ai/tasks/new.md").write_text("---\ntitle: New\n---\n")
+    await apply(d, await preview(d))
+    path = src / "Product/alpha/PROJECT.md"
+    path.write_text(path.read_text().replace("Synthetic migration project", "Source description"))
+    doc = await preview(d)
+    assert not doc["can_apply"]
+    assert next(r for r in doc["records"] if r["connector_id"] == alpha)["classification"] == "conflict"
+
+
+@pytest.mark.parametrize("target", ["alpha", "fork", "rename"])
+async def test_b05_project_name_clash_is_rechecked_inside_record_transaction(daemon, target):
+    d, src = daemon
+    if target == "rename":
+        await apply(d, await preview(d))
+        path = src / "Product/alpha/PROJECT.md"
+        path.write_text(path.read_text().replace("name: Alpha", "name: Renamed"))
+        for project in (src / "Product").glob("*/PROJECT.md"):
+            project.write_text(project.read_text().replace("parent: Alpha", "parent: alpha")
+                               .replace("derivedFrom: Alpha", "derivedFrom: alpha"))
+    local = (await act(d, PERSON, "project.create", {}, {"name": "Local"}))["result"]["project_id"]
+    doc = await preview(d)
+    assert doc["can_apply"], doc["blockers"]
+    name = {"alpha": "Alpha", "fork": "Fork", "rename": "Renamed"}[target]
+    await act(d, PERSON, "project.create", {}, {"name": name, "parent_id": local})
+    op = await apply(d, doc, ok=False)
+    assert (op["status"], op["error_code"]) == ("needs_attention", "NAME_TAKEN")
+    assert d.ops.db.execute("SELECT COUNT(*) FROM projects WHERE name=? AND archived_at IS NULL", (name,)).fetchone()[0] == 1
+    if target == "fork":
+        assert len(hub.import_get(d.ops, op["operation_id"])["import"]["records"]) == 12
+        assert d.ops.db.execute("SELECT COUNT(*) FROM hub_import_receipts WHERE operation_id=?", (op["operation_id"],)).fetchone()[0] == 3
+
+
+async def test_b05_group_order_query_uses_the_event_resource_index(daemon):
+    d, _ = daemon
+    await apply(d, await preview(d))
+    statements = []
+    d.ops.db.set_trace_callback(statements.append)
+    hub._group_state(d.ops.db, "sample", hub.record_key("item", "alpha"))
+    d.ops.db.set_trace_callback(None)
+    query = next(sql for sql in statements if sql.startswith("SELECT seq,body FROM api_events"))
+    plan = [r[3] for r in d.ops.db.execute("EXPLAIN QUERY PLAN " + query)]
+    assert any("SEARCH api_events USING INDEX" in detail for detail in plan), plan
+    assert not any("SCAN api_events" in detail for detail in plan), plan
+
+
+@pytest.mark.parametrize("kind", ["project", "task"])
+async def test_b05_blank_display_names_fall_back_to_hub_ids(daemon, kind):
+    d, src = daemon
+    if kind == "project":
+        shutil.rmtree(src)
+        shutil.copytree(FIXTURE.parent / "date-id", src)
+        path = src / "Product/dated/PROJECT.md"
+        path.write_text(path.read_text().replace("name: Dated sample", "name:"))
+        key, field, expected = hub.record_key("project", "dated"), "name", "dated"
+    else:
+        path = src / "Product/alpha/.ai/tasks/waiting.md"
+        path.write_text(path.read_text().replace("title: Waiting", "title:"))
+        key, field, expected = hub.record_key("item", "alpha", "waiting"), "title", "waiting"
+    doc = await preview(d)
+    assert doc["can_apply"], doc["blockers"]
+    assert next(r for r in doc["records"] if r["key"] == key)["record"]["values"][field] == expected
+    await apply(d, doc)
+    await clean_reapply(d)
+
+
+@pytest.mark.parametrize("bad", ["Bad\tName", "Bad\u2028Name", "x" * 121])
+async def test_b05_all_bad_records_are_reported_with_correct_format_or_limit_code(daemon, bad):
+    d, src = daemon
+    paths = ["Product/alpha/.ai/tasks/waiting.md", "Product/delta/.ai/tasks/t.md"]
+    for relative in paths:
+        (src / relative).write_text('---\ntitle: "' + bad + '"\n---\n')
+    doc = await preview(d)
+    code = "IMPORT_LIMIT_EXCEEDED" if len(bad) > 120 else "IMPORT_FORMAT_INVALID"
+    assert not doc["can_apply"]
+    assert {b["path"] for b in doc["blockers"] if b["code"] == code} == set(paths), doc["blockers"]
+    if len(bad) <= 120:
+        assert not any(b["code"] == "IMPORT_LIMIT_EXCEEDED" for b in doc["blockers"])
+    assert d.ops.db.execute("SELECT COUNT(*) FROM hub_import_map").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("kind", ["file", "symlink", "fifo"])
+async def test_b05_product_stray_files_are_skipped_but_unsafe_entries_are_refused(daemon, kind):
+    import os
+
+    d, src = daemon
+    path = src / "Product/notes.txt"
+    if kind == "file":
+        path.write_text("Synthetic note outside project records.\n")
+    elif kind == "symlink":
+        path.symlink_to(src / "Product/alpha")
+    else:
+        os.mkfifo(path)
+    doc = await preview(d)
+    if kind == "file":
+        assert doc["can_apply"], doc["blockers"]
+        assert {"code": "PROJECT_SKIPPED", "path": "Product/notes.txt"} in doc["warnings"]
+        assert len(doc["records"]) == 12
+        await apply(d, doc)
+    else:
+        assert not doc["can_apply"]
+        assert any(b["code"] == "IMPORT_SOURCE_UNSAFE" for b in doc["blockers"])
+
+
+async def test_b05_section_comments_are_filtered_and_raw_request_is_preserved(daemon):
+    d, src = daemon
+    body = "\n## 次にやること\n<!-- template guidance -->\n\nShip a fixture.\n\n## Acceptance\n  <!-- hidden guidance -->\nOne condition.\n\nAnother condition.\n"
+    text = "---\ntitle: Waiting\n---\n" + body
+    (src / "Product/alpha/.ai/tasks/waiting.md").write_text(text)
+    doc = await preview(d)
+    assert doc["can_apply"], doc["blockers"]
+    row = next(r for r in doc["records"] if r["key"] == hub.record_key("item", "alpha", "waiting"))
+    assert row["record"]["values"]["goal"] == "Ship a fixture."
+    assert row["record"]["values"]["acceptance"] == "One condition.\nAnother condition."
+    assert row["record"]["values"]["request"] == body
+    assert row["record"]["snapshot"]["text"] == text
+    await apply(d, doc)
+    item = get(d, mapped(d, "alpha", "waiting"))
+    assert item["goal"] == "Ship a fixture."
+    assert item["request"] == body and item["source"]["snapshot"]["text"] == text
+
+
+@pytest.mark.parametrize("change", ["none", "request", "parent", "add_task", "project_description", "project_pin", "project_order"])
+async def test_b05_unchanged_applicable_preview_never_fails_destination_preconditions(daemon, change):
+    d, src = daemon
+    await apply(d, await preview(d))
+    if change == "request":
+        path = src / "Product/alpha/.ai/tasks/t.md"
+        path.write_text(path.read_text() + "\nAdditional synthetic request.\n")
+    elif change == "parent":
+        path = src / "Product/alpha/.ai/tasks/child.md"
+        path.write_text(path.read_text().replace("parent: t", "parent: continued"))
+    elif change == "add_task":
+        (src / "Product/alpha/.ai/tasks/new.md").write_text("---\ntitle: New\n---\n")
+    elif change == "project_description":
+        path = src / "Product/alpha/PROJECT.md"
+        path.write_text(path.read_text().replace("Synthetic migration project", "Updated source description"))
+    elif change == "project_pin":
+        (src / "_hub/project-pins.json").write_text('["delta", "alpha"]')
+    elif change == "project_order":
+        (src / "_hub/project-order.json").write_text('{"groups":{"": ["fork", "alpha", "delta"],"alpha":["beta"]}}')
+    doc = await preview(d)
+    assert doc["can_apply"], doc["blockers"]
+    op = await apply(d, doc)
+    assert op["error_code"] != "DESTINATION_CHANGED"
+    await clean_reapply(d)

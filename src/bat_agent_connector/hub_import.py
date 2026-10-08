@@ -195,7 +195,7 @@ def _sections(body: str) -> list[tuple[str, str]]:
             if heading is not None:
                 out.append((heading, "\n".join(lines).strip()))
             heading, lines = m[1], []
-        elif heading is not None:
+        elif heading is not None and line.strip() and not line.strip().startswith("<!--"):
             lines.append(line)
     if heading is not None:
         out.append((heading, "\n".join(lines).strip()))
@@ -337,6 +337,15 @@ def _scan(source: HubImportSource) -> dict:
             raise _error("IMPORT_LIMIT_EXCEEDED", "too many projects")
         projects, count, warnings = {}, 0, []
         for pid in names:
+            entry = f"Product/{pid}"
+            with reader.open(entry) as entry_fd:
+                mode = os.fstat(entry_fd).st_mode
+                if stat.S_ISREG(mode):
+                    warnings.append({"code": "PROJECT_SKIPPED", "path": entry})
+                    reader.files[entry] = {"skipped": True}
+                    continue
+                if not stat.S_ISDIR(mode):
+                    raise _error("IMPORT_SOURCE_UNSAFE", f"project entry is not a directory: {entry}")
             path = f"Product/{pid}/PROJECT.md"
             text = reader.read(path, optional=True)
             if text is None:
@@ -373,6 +382,48 @@ def _scalar(data: dict, key: str, default: str = "") -> str:
     if not isinstance(value, str):
         raise ValueError(f"{key} must be a scalar string")
     return value
+
+
+def _line(value: str, field: str, limit: int) -> str:
+    if len(value.strip()) > limit and not wi._NOT_ONE_LINE.search(value.strip()):
+        raise _error("IMPORT_LIMIT_EXCEEDED", f"{field} exceeds {limit} characters")
+    try:
+        return wi._one_line(value, field, limit)
+    except OperationError as exc:
+        raise _error("IMPORT_FORMAT_INVALID", str(exc)) from None
+
+
+def _text(value: str, field: str) -> str:
+    text = value.replace("\r\n", "\n").replace("\r", "\n")
+    if len(text) > wi.TEXT_MAX and not wi._CONTROL.search(text):
+        raise _error("IMPORT_LIMIT_EXCEEDED", f"{field} exceeds {wi.TEXT_MAX} characters")
+    try:
+        return wi._text(value, field)
+    except OperationError as exc:
+        raise _error("IMPORT_FORMAT_INVALID", str(exc)) from None
+
+
+def _steps(body: str) -> list[dict]:
+    steps = read_steps(body)
+    if len(steps) > wi.STEPS_MAX:
+        raise _error("IMPORT_LIMIT_EXCEEDED", f"steps exceed {wi.STEPS_MAX} entries")
+    return wi._steps([{**s, "text": _line(s["text"], "a step", wi.STEP_MAX)} for s in steps])
+
+
+def _diagnostic(exc, path):
+    if isinstance(exc, OperationError):
+        code = "IMPORT_FORMAT_INVALID" if exc.code == "INVALID_PARAMS" else exc.code
+    else:
+        code = "IMPORT_RELATION_INVALID" if any(x in str(exc) for x in ("relation", "cyclic", "levels")) else "IMPORT_FORMAT_INVALID"
+    return {"code": code, "path": path, "message": str(exc)}
+
+
+@contextmanager
+def _record_errors(blockers, path):
+    try:
+        yield
+    except (OperationError, ValueError, TypeError, KeyError, RecursionError) as exc:
+        blockers.append(_diagnostic(exc, path))
 
 
 def _ledger(raw: str | None, default, filename: str):
@@ -422,6 +473,96 @@ def _near(items: list[str], records: dict, fixed: set[str]) -> list[str]:
     return result
 
 
+def _project_record(pid, project, ledger, pins):
+    location = f"Product/{pid}/PROJECT.md"
+    data, body = parse_doc(project["text"])
+    key = record_key("project", pid)
+    name = _line(_scalar(data, "name", pid) or pid, "name", wi.NAME_MAX["project"])
+    record = {"key": key, "path": location, "kind": "project", "hub_project_id": pid, "hub_task_id": "",
+                    "values": {"name": name, "description": _text(_scalar(data, "description"), "description")},
+                    "raw_parent": _scalar(data, "parent"), "raw_derived": _scalar(data, "derivedFrom"),
+                    "updated": _scalar(data, "updated"), "pinned": pid in pins,
+                    "snapshot": {"text": project["text"], "data": data, "body": body,
+                                 "historical_completion": {"raw_state": data.get("status"),
+                                     "phases": data.get("phases", []), "record": ledger["projects"].get(pid)},
+                                 "references": [], "external_links": [], "related_projects": []}}
+    refs = _markdown_refs(body)
+    chats = data.get("chats", [])
+    if not isinstance(chats, list):
+        raise ValueError("project chats must be a list")
+    for chat in chats:
+        if not isinstance(chat, dict) or not isinstance(chat.get("url"), str):
+            raise ValueError("chat must contain a URL")
+        refs.append({"label": str(chat.get("title", "")), "ref": chat["url"]})
+    folders = data.get("folders", {})
+    if not isinstance(folders, dict):
+        raise ValueError("folders must be a map")
+    refs.extend({"label": k, "ref": v} for k, v in folders.items() if v)
+    record["snapshot"]["references"] = refs
+    return record
+
+
+def _task_record(pid, tid, task, ledger, extras, warnings):
+    location = f"Product/{pid}/.ai/tasks/{tid}.md"
+    td, tb = parse_doc(task["text"])
+    if "id" in td and td["id"] != tid:
+        raise ValueError(f"task id differs from filename: {pid}/{tid}")
+    tk = record_key("item", pid, tid)
+    sections = _sections(tb)
+    goals = [v for k, v in sections if "次にやること" in k]
+    if len(goals) > 1:
+        raise ValueError("ambiguous next section")
+    steps = _steps(tb)
+    raw_state = _scalar(td, "state", "未着手") or "未着手"
+    state = {"未着手": "todo", "実行中": "doing", "返事待ち": "waiting", "上限で停止": "waiting",
+             "停止": "waiting", "完了": "done"}.get(raw_state)
+    if state is None:
+        raise _error("IMPORT_STATE_UNSUPPORTED", f"unsupported task state: {pid}/{tid}")
+    if state == "done" and any(not s["done"] for s in steps):
+        raise _error("COMPLETION_STEPS_OPEN", f"done task has open steps: {pid}/{tid}")
+    cp = ledger["tasks"].get(f"{pid}/{tid}")
+    if cp is not None and (not isinstance(cp, dict) or not isinstance(cp.get("hash"), str)):
+        raise ValueError("invalid completion task record")
+    sh = hub_hash(json.dumps(steps, ensure_ascii=False, separators=(",", ":")))
+    continued = ledger["continued"].get(f"{pid}/{tid}") == sh
+    approved = state == "done" and bool(cp) and cp.get("hash") == hub_hash(task["text"])
+    history = []
+    if task["chat"] is None:
+        warnings.append({"code": "REQUEST_HISTORY_MISSING", "path": f"Product/{pid}/.ai/chat/{tid}.jsonl"})
+    else:
+        for line_no, line in enumerate(task["chat"].splitlines(), 1):
+            if not line.strip():
+                continue
+            row = _load(line)
+            if not isinstance(row, dict):
+                raise ValueError("chat row must be an object")
+            if row.get("role") == "user":
+                if not isinstance(row.get("text"), str):
+                    raise ValueError("user request needs text")
+                history.append({"text": row["text"], "at": row.get("at"), "request": row.get("request"), "line": line_no})
+    kind = _scalar(td, "kind", "main") or "main"
+    if kind not in ("main", "derived"):
+        raise ValueError("unsupported task kind")
+    record = {"key": tk, "path": location, "kind": "item", "hub_project_id": pid, "hub_task_id": tid,
+                  "values": {"title": _line(_scalar(td, "title", tid) or tid, "title", wi.NAME_MAX["work_item"]),
+                      "goal": _text(goals[0] if goals else "", "goal"), "request": _text(tb, "request"),
+                      "acceptance": _text("\n\n".join(v for k, v in sections if k in ACCEPTANCE), "acceptance"),
+                      "steps": steps, "state": state,
+                      "continued_steps": wi.steps_hash(steps) if continued and state != "done" else None},
+                  "raw_parent": _scalar(td, "parent"),
+                  "raw_derived": _scalar(td, "derivedFrom") if kind == "derived" else "",
+                  "updated": _scalar(td, "updated"), "pinned": False,
+                  "snapshot": {"text": task["text"], "data": td, "body": tb, "request_history": history,
+                      "references": _markdown_refs(tb) + [r for x in history for r in _markdown_refs(x["text"])],
+                      "historical_completion": {"raw_state": raw_state, "record": cp, "hash_matches": approved,
+                          "continued_hash": ledger["continued"].get(f"{pid}/{tid}"), "continued": continued,
+                          "approved": approved, "pending": not approved and (state == "done" or bool(steps) and all(x["done"] for x in steps) and not continued),
+                          "ledger_missing": extras["completion.json"] is None,
+                          "legacy_unverified": extras["completion.json"] is None and extras["completion.migrated"] is None},
+                      "external_links": []}}
+    return record
+
+
 def normalize(snap: dict) -> dict:
     """Pure normalization: raw provenance remains intact; invalid structures become preview blockers."""
     records, warnings, blockers, groups = {}, list(snap["warnings"]), [], {}
@@ -453,90 +594,16 @@ def normalize(snap: dict) -> dict:
         for cp in ledger["projects"].values():
             if not isinstance(cp, dict) or not isinstance(cp.get("phases"), dict):
                 raise ValueError("invalid completion project record")
-        for pid, p in snap["projects"].items():
-            location = f"Product/{pid}/PROJECT.md"
-            data, body = parse_doc(p["text"])
-            key = record_key("project", pid)
-            name = wi._one_line(_scalar(data, "name", pid), "name", wi.NAME_MAX["project"])
-            records[key] = {"key": key, "path": location, "kind": "project", "hub_project_id": pid, "hub_task_id": "",
-                            "values": {"name": name, "description": wi._text(_scalar(data, "description"), "description")},
-                            "raw_parent": _scalar(data, "parent"), "raw_derived": _scalar(data, "derivedFrom"),
-                            "updated": _scalar(data, "updated"), "pinned": pid in pins,
-                            "snapshot": {"text": p["text"], "data": data, "body": body,
-                                         "historical_completion": {"raw_state": data.get("status"),
-                                             "phases": data.get("phases", []), "record": ledger["projects"].get(pid)},
-                                         "references": [], "external_links": [], "related_projects": []}}
-            refs = _markdown_refs(body)
-            chats = data.get("chats", [])
-            if not isinstance(chats, list):
-                raise ValueError("project chats must be a list")
-            for chat in chats:
-                if not isinstance(chat, dict) or not isinstance(chat.get("url"), str):
-                    raise ValueError("chat must contain a URL")
-                refs.append({"label": str(chat.get("title", "")), "ref": chat["url"]})
-            folders = data.get("folders", {})
-            if not isinstance(folders, dict):
-                raise ValueError("folders must be a map")
-            refs.extend({"label": k, "ref": v} for k, v in folders.items() if v)
-            records[key]["snapshot"]["references"] = refs
-            for tid, task in p["tasks"].items():
-                location = f"Product/{pid}/.ai/tasks/{tid}.md"
-                td, tb = parse_doc(task["text"])
-                if "id" in td and td["id"] != tid:
-                    raise ValueError(f"task id differs from filename: {pid}/{tid}")
-                tk = record_key("item", pid, tid)
-                sections = _sections(tb)
-                goals = [v for k, v in sections if "次にやること" in k]
-                if len(goals) > 1:
-                    raise ValueError("ambiguous next section")
-                steps = wi._steps(read_steps(tb))
-                raw_state = _scalar(td, "state", "未着手") or "未着手"
-                state = {"未着手": "todo", "実行中": "doing", "返事待ち": "waiting", "上限で停止": "waiting",
-                         "停止": "waiting", "完了": "done"}.get(raw_state)
-                if state is None:
-                    raise _error("IMPORT_STATE_UNSUPPORTED", f"unsupported task state: {pid}/{tid}")
-                if state == "done" and any(not s["done"] for s in steps):
-                    raise _error("COMPLETION_STEPS_OPEN", f"done task has open steps: {pid}/{tid}")
-                cp = ledger["tasks"].get(f"{pid}/{tid}")
-                if cp is not None and (not isinstance(cp, dict) or not isinstance(cp.get("hash"), str)):
-                    raise ValueError("invalid completion task record")
-                sh = hub_hash(json.dumps(steps, ensure_ascii=False, separators=(",", ":")))
-                continued = ledger["continued"].get(f"{pid}/{tid}") == sh
-                approved = state == "done" and bool(cp) and cp.get("hash") == hub_hash(task["text"])
-                history = []
-                if task["chat"] is None:
-                    warnings.append({"code": "REQUEST_HISTORY_MISSING", "path": f"Product/{pid}/.ai/chat/{tid}.jsonl"})
-                else:
-                    for line_no, line in enumerate(task["chat"].splitlines(), 1):
-                        if not line.strip():
-                            continue
-                        row = _load(line)
-                        if not isinstance(row, dict):
-                            raise ValueError("chat row must be an object")
-                        if row.get("role") == "user":
-                            if not isinstance(row.get("text"), str):
-                                raise ValueError("user request needs text")
-                            history.append({"text": row["text"], "at": row.get("at"), "request": row.get("request"), "line": line_no})
-                kind = _scalar(td, "kind", "main") or "main"
-                if kind not in ("main", "derived"):
-                    raise ValueError("unsupported task kind")
-                records[tk] = {"key": tk, "path": location, "kind": "item", "hub_project_id": pid, "hub_task_id": tid,
-                              "values": {"title": wi._one_line(_scalar(td, "title", tid), "title", wi.NAME_MAX["work_item"]),
-                                  "goal": wi._text(goals[0] if goals else "", "goal"), "request": wi._text(tb, "request"),
-                                  "acceptance": wi._text("\n\n".join(v for k, v in sections if k in ACCEPTANCE), "acceptance"),
-                                  "steps": steps, "state": state,
-                                  "continued_steps": wi.steps_hash(steps) if continued and state != "done" else None},
-                              "raw_parent": _scalar(td, "parent"),
-                              "raw_derived": _scalar(td, "derivedFrom") if kind == "derived" else "",
-                              "updated": _scalar(td, "updated"), "pinned": False,
-                              "snapshot": {"text": task["text"], "data": td, "body": tb, "request_history": history,
-                                  "references": _markdown_refs(tb) + [r for x in history for r in _markdown_refs(x["text"])],
-                                  "historical_completion": {"raw_state": raw_state, "record": cp, "hash_matches": approved,
-                                      "continued_hash": ledger["continued"].get(f"{pid}/{tid}"), "continued": continued,
-                                      "approved": approved, "pending": not approved and (state == "done" or bool(steps) and all(x["done"] for x in steps) and not continued),
-                                      "ledger_missing": extras["completion.json"] is None,
-                                      "legacy_unverified": extras["completion.json"] is None and extras["completion.migrated"] is None},
-                                  "external_links": []}}
+        for pid, project in snap["projects"].items():
+            with _record_errors(blockers, f"Product/{pid}/PROJECT.md"):
+                record = _project_record(pid, project, ledger, pins)
+                records[record["key"]] = record
+            for tid, task in project["tasks"].items():
+                with _record_errors(blockers, f"Product/{pid}/.ai/tasks/{tid}.md"):
+                    record = _task_record(pid, tid, task, ledger, extras, warnings)
+                    records[record["key"]] = record
+        if blockers:
+            return {"records": records, "groups": groups, "warnings": warnings, "blockers": blockers}
         project_records = {k: r for k, r in records.items() if r["kind"] == "project"}
         by_name = defaultdict(list)
         for k, r in project_records.items():
@@ -553,6 +620,7 @@ def normalize(snap: dict) -> dict:
             return by_name[ref][0]
 
         for key, r in records.items():
+            location = r["path"]
             if r["kind"] == "project":
                 r["raw_parent_key"] = project_ref(r["raw_parent"])
                 r["derived_key"] = project_ref(r["raw_derived"])
@@ -625,12 +693,8 @@ def normalize(snap: dict) -> dict:
             ordered = _near(keys, records, set(saved))
             ordered = [k for k in ordered if records[k]["pinned"]] + [k for k in ordered if not records[k]["pinned"]]
             groups[gk] = {"keys": ordered, "source_digest": _hash([(k, records[k]["pinned"]) for k in ordered])}
-    except OperationError as exc:
-        code = "IMPORT_LIMIT_EXCEEDED" if exc.code == "INVALID_PARAMS" else exc.code
-        blockers.append({"code": code, "path": location, "message": str(exc)})
-    except (ValueError, TypeError, KeyError, RecursionError) as exc:
-        code = "IMPORT_RELATION_INVALID" if "relation" in str(exc) or "cyclic" in str(exc) or "levels" in str(exc) else "IMPORT_FORMAT_INVALID"
-        blockers.append({"code": code, "path": location, "message": str(exc)})
+    except (OperationError, ValueError, TypeError, KeyError, RecursionError) as exc:
+        blockers.append(_diagnostic(exc, location))
     return {"records": records, "groups": groups, "warnings": warnings, "blockers": blockers}
 
 # --------------------------------------------------------------------------- journal read models and preconditions
@@ -690,9 +754,32 @@ def _maps(db, sid: str) -> dict:
 
 
 def _event_seq(db, resource: str, rid: str, *, exclude: str | None = None) -> int:
-    row = db.execute("""SELECT MAX(seq) FROM api_events WHERE resource_type=? AND resource_id=?
-        AND (? IS NULL OR COALESCE(json_extract(body,'$.operation_id'),'') != ?)""", (resource, rid, exclude, exclude)).fetchone()
-    return row[0] or 0
+    mapped = {"name", "description", "parent_id", "derived_from", "pinned"} if resource == "project" else {
+        "title", "goal", "request", "acceptance", "steps", "state", "continued_steps", "parent_id", "derived_from"}
+    seq = 0
+    for row in db.execute("SELECT seq,kind,body FROM api_events WHERE resource_type=? AND resource_id=? ORDER BY seq", (resource, rid)):
+        body = json.loads(row["body"])
+        if row["kind"].endswith(".ordered") or (exclude and body.get("operation_id") == exclude):
+            continue
+        if row["kind"].endswith(".updated") and not mapped.intersection(body.get("fields", [])):
+            continue
+        seq = row["seq"]
+    return seq
+
+
+def _group_order(db, scope, parent, table, pk, *, exclude=None):
+    """Keep archived/moved slots; only this apply's new creation references are omitted."""
+    order = wi._saved_order(db, scope, parent)
+    if not order or not exclude:
+        return order
+    prefix = exclude + "#"
+    ignored = set()
+    for row in db.execute(f"SELECT {pk},operation_id FROM {table} WHERE operation_id>=? AND operation_id<?",  # noqa: S608 - fixed identifiers
+                          (prefix, prefix + "g")):
+        ref = wi.split_creation_reference(row["operation_id"])
+        if ref.get("import_record") and ref["operation_id"] == exclude:
+            ignored.add(row[pk])
+    return [cid for cid in order if cid not in ignored]
 
 
 def _destination(db, kind: str, cid: str | None, *, exclude: str | None = None) -> dict | None:
@@ -740,12 +827,10 @@ def _group_state(db, sid: str, gk: str, *, exclude: str | None = None, ignore_ne
             if e["kind"].endswith(("pinned", "unpinned", "archived", "restored")) or "parent_id" in body.get("fields", []):
                 seq = e["seq"]
         members.append({"id": cid, "pinned": bool(row["pinned"]), "archived": row["archived_at"] is not None, "seq": seq})
-    order = wi._saved_order(db, scope, parent_id)
-    if ignore_new and order:
-        ids = {x["id"] for x in members}
-        order = [x for x in order if x in ids]
+    table, pk = ("projects", "project_id") if kind == "project" else ("work_items", "work_item_id")
+    order = _group_order(db, scope, parent_id, table, pk, exclude=exclude if ignore_new else None)
     ordered_seq = 0
-    for e in db.execute("SELECT seq,body FROM api_events WHERE kind=? AND resource_id=? ORDER BY seq", ("project.ordered" if kind == "project" else "work_item.ordered", parent_id or "root" if kind == "project" else project_id)):
+    for e in db.execute("SELECT seq,body FROM api_events WHERE resource_type='project' AND resource_id=? AND kind=? ORDER BY seq", (parent_id or "root" if kind == "project" else project_id, "project.ordered" if kind == "project" else "work_item.ordered")):
         body = json.loads(e["body"])
         if (body.get("parent_id") or "") == parent_id and (not exclude or body.get("operation_id") != exclude):
             ordered_seq = e["seq"]
@@ -881,7 +966,7 @@ def _plan(ops, snap: dict, normalized: dict) -> dict:
             pending_groups.update({k: (op, v) for k, v in structure["after"]["groups"].items()})
     for gk in sorted(set(normalized["groups"]) | set(saved_groups)):
         group = normalized["groups"].get(gk, {"keys": [], "source_digest": _hash([])})
-        state, old = _group_state(db, sid, gk), saved_groups.get(gk)
+        state, old = _group_state(db, sid, gk, ignore_new=True), saved_groups.get(gk)
         changed = not old or old["source_digest"] != group["source_digest"]
         comparable = state
         baseline = json.loads(old["baseline"]) if old else None
@@ -1094,6 +1179,8 @@ def _write_record(ctx, row: dict, doc: dict) -> dict:
         values = dict(record["values"])
         if "steps" in values:
             values["steps"] = _json(values["steps"])
+        if kind == "project":
+            wi._name_free(db, values["name"], other_than=cid if mapping else None)
         if mapping is None:
             columns = {"project_id" if kind == "project" else "work_item_id": cid, **values,
                        "created_by": ctx.actor, "operation_id": reference, "created_at": now, "updated_at": now}
@@ -1236,8 +1323,15 @@ def _summary(ctx, doc, *, complete: bool):
 def _finalize(ctx, doc):
     def change(db, now):
         _verify_destinations(ctx, doc)
+        touched = {r["resource_id"] for r in db.execute("""SELECT resource_id FROM api_events
+            WHERE resource_type IN ('project','work_item') AND json_extract(body,'$.operation_id')=?""", (ctx.operation_id,))}
         for row in doc["records"]:
             if row["classification"] not in ("create", "update", "metadata_only"):
+                # Group-only events can touch an unchanged project. Never adopt a local-only edit.
+                if row["classification"] == "unchanged" and row["connector_id"] in touched:
+                    baseline = _destination(db, row["kind"], row["connector_id"])
+                    db.execute("UPDATE hub_import_map SET baseline=? WHERE source_id=? AND record_key=?",
+                               (_json(baseline), doc["source_id"], row["key"]))
                 continue
             mapping = db.execute("SELECT * FROM hub_import_map WHERE source_id=? AND record_key=?", (doc["source_id"], row["key"])).fetchone()
             baseline = _destination(db, row["kind"], mapping["connector_id"])
