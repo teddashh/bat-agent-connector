@@ -88,5 +88,5 @@ run_name_contains = "operation_id"
 
 - 同一環境的部署順序目前以「同 recipe 同時只能有一個操作」保證；較舊 run 較晚完成的情況（D05）依賴 workflow 的 concurrency 設定。
 - 回退（D06）：以已保存的舊 `source_sha` 發起新的 `deployment.start`；資料庫 migration 等外部副作用由 recipe 說明。
-- 更新 PR head（整合 managed 成果，§14）屬 Git 整合工作包，尚未實作。
+- 更新 PR head（整合成果，§14）見 [integration.md](integration.md)；整合進行中不能合併同一個 PR（`INTEGRATION_IN_PROGRESS`）。
 - Stacked PR：`merge-async` 對 stack 會一併合併下層 PR；第一版不偵測，請勿對 stack 使用。

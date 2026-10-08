@@ -42,6 +42,10 @@ h2 { font-size: 16px; margin: 18px 0 8px; }
 .chip.managed { color: var(--ok); border: 1px solid var(--ok); background: transparent; }
 .chip.stale { color: var(--warn); border: 1px solid var(--warn); background: transparent; }
 .chip.bad { color: var(--bad); border: 1px solid var(--bad); background: transparent; }
+.chip.ok { color: var(--ok); border: 1px solid var(--ok); background: transparent; }
+.chip.warn { color: var(--warn); border: 1px solid var(--warn); background: transparent; }
+details.row-details { padding: 6px 0; border-bottom: 1px solid var(--line, #8883); }
+details.row-details ul { margin: 4px 0 4px 18px; padding: 0; overflow-wrap: anywhere; }
 .light { width: 10px; height: 10px; border-radius: 50%; display: inline-block; background: var(--muted); flex: none; }
 .light.streaming { background: var(--info); }
 .light.pending { background: var(--warn); }

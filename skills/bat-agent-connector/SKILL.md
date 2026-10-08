@@ -109,6 +109,28 @@ last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_cont
    most commands, Codex's sandbox blocks such writes. Leave those prompts to the person; never approve a write to a
    path outside the session's own folder, and do not try to raise its permissions (refused).
 
+## Updating a PR with results (scope integrate)
+
+Only with the person's go-ahead for that PR. Results go into the PR's existing head branch with one normal push;
+nothing is ever forced, and the person's folders are never changed.
+
+1. `integration_candidates(host)`: agent results (`checkpoint_run`, by the `checkpoint.continue` operation id) and
+   people's checkpoints, with where each was already delivered.
+2. `operation_submit(action="integration.preview", target={host, repository, pull_number}, params={sources: [{kind,
+   id}, ...]})` with a new key per refresh. Read every commit it lists, its `warnings` (`BRINGS_FOREIGN_COMMITS`,
+   `UNCOMMITTED_NOT_INCLUDED`, ...) and `blocking`; tell the person what will enter the PR.
+3. `operation_submit(action="integration.apply", target=<same>, params={preview_id}, preconditions={expected_head_sha:
+   preview.target.head_sha, preview_digest: preview.digest}, idempotency_key="integrate.<preview_id>")`. Never add or
+   reorder sources here; preview again instead.
+4. `REMOTE_MOVED`, `TARGET_HEAD_CHANGED`, `SOURCE_CHANGED`: someone moved the PR or a source; preview again.
+   `INTEGRATION_CONFLICT`: nothing was pushed. With the person's go-ahead, `operation_submit(action=
+   "integration.handoff", target={operation_id})` starts a confined session that resolves it in the connector's
+   area; once it has committed (`git commit --no-edit`, one merge commit), `operation_resume(operation_id)`.
+   `RESOLUTION_INCOMPLETE`/`RESOLUTION_INVALID` say what is missing. Or cancel and preview without that source.
+   `uncertain`: the daemon reads the remote back; never push or resubmit yourself.
+5. Never `git push` from a session prompt to do this, and never merge as part of it: merging is `github.pr.merge`, a
+   separate action on the new head.
+
 ## Plan fan-out workflow (orchestrate tier)
 
 1. Read the project plan. Split it into tasks that can run **independently** (different files/modules, no ordering

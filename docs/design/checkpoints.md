@@ -46,7 +46,7 @@ BAT 的 `worktree:create` 不能指定起點 commit，所以 clone 與 worktree 
 | `session.start` | Registry 沒有預留紀錄：start frame 從未送出，可以重跑。BAT 的 session meta 顯示該 ID 在這個 worktree：補記成功。其他情況（包括 meta 是 null；BAT 可能還在啟動）：維持 `uncertain` 稍後再讀，不再啟動第二次 |
 | `send` | Claude：BAT 接受該 `clientMessageId` 後寫入的 turn 紀錄。Codex：新 session 對話中開頭是上述第一行的 user 訊息 |
 
-新 session 的 registry 列與 `checkpoint_runs` 都記下來源；`GET /api/v1/sessions/{host}/{id}` 回 `started_from`。
+新 session 的 registry 列與 `checkpoint_runs` 都記下來源；`GET /api/v1/sessions/{host}/{id}` 回 `started_from`。Checkpoint（人的成果）與 checkpoint run（agent 成果，以 `checkpoint.continue` 的 operation ID 指定）都能經 [integration](integration.md) 放進既有 PR。
 
 ## Agent 的可寫範圍
 

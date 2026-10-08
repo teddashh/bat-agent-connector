@@ -20,7 +20,10 @@ boundary and stays read-only too.
 
 from __future__ import annotations
 
+import fnmatch
+import hashlib
 import posixpath
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -53,7 +56,7 @@ _UNCONFIRMED = {"starting": "BAT has not acknowledged its start", "uncertain": "
 class Mutation:
     action: str
     via: str  # "bat" (remote protocol frame) or "ssh-git" (task service host git)
-    scope: str  # "session" | "create" | "tab" | "path"
+    scope: str  # "session" | "create" | "tab" | "path" | "remote"
     channels: frozenset[str]
     entry_points: tuple[str, ...]
     rule: str
@@ -89,7 +92,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation("session.create", "bat", "create",
              frozenset({"claude:start-session", "worktree:create", "worktree:remove", "claude:send-message"}),
              ("session_start", "session_failover", "session_relay(start_if_missing)", "fanout_plan_session",
-              "fanout_from_plan", "batc fanout --start", "task service lead/reviewer start", "checkpoint.continue"),
+              "fanout_from_plan", "batc fanout --start", "task service lead/reviewer start", "checkpoint.continue",
+              "integration.handoff"),
              "new session ID reserved in the registry first; it works in a managed root, a worktree the "
              "connector creates, or a connector-owned worktree it shares; never in a human checkout"),
     Mutation("workspace.register_tab", "bat", "tab", frozenset({"workspace:save"}),
@@ -102,6 +106,17 @@ MUTATIONS: tuple[Mutation, ...] = (
              ("checkpoint.continue",),
              "a connector clone <managed root>/<name> (marked batc.managed-clone) that only reads the person's "
              "repository, and the worktree <clone>/.bat-worktrees/batc-cp-<12 hex> on branch batc/cp-<12 hex>"),
+    Mutation("integration.area", "ssh-git", "path", frozenset(),
+             ("integration.preview", "integration.apply", "integration.handoff", "batc integrate"),
+             "only <first managed root>/.batc-integration/<name>-<8 hex>/repo.git, a bare repository whose identity "
+             "(real path, batc.* markers, a local-config allowlist, no grafts, alternates or replace refs) is "
+             "checked before every write; refs only under refs/batc/; other repositories, the person's included, "
+             "are only read as the source of git fetch or ls-remote"),
+    Mutation("integration.push", "ssh-git", "remote", frozenset(), ("integration.apply",),
+             "one normal push of one recorded 40-hex commit to refs/heads/<head ref> of an open, same-repository "
+             "PR whose [[github.repos]] entry has integrate, sent to integrate.remote_url with the host's git "
+             "credentials; never a +refspec, an empty source, --force, --force-with-lease, --mirror, --all, "
+             "--tags, --delete or --prune; never the base, default or a protected branch"),
 )
 BY_ACTION = {m.action: m for m in MUTATIONS}
 # The only granted write channel whose frame names no session (its terminal carries the ID).
@@ -532,6 +547,76 @@ def check_checkpoint_worktree(hc: HostConfig, clone: str, path: str, branch: str
             or not name.startswith("batc-cp-") or len(suffix) != 12
             or any(ch not in "0123456789abcdef" for ch in suffix) or branch != f"batc/cp-{suffix}"):
         raise ResourceReadOnly("DESTINATION_UNKNOWN", f"{path} is not a connector checkpoint worktree in a managed root")
+
+
+# --------------------------------------------------------------------------- integration (W06)
+INTEGRATION_DIR = ".batc-integration"
+_AREA_NAME = re.compile(r"[A-Za-z0-9._-]+-[0-9a-f]{8}")
+# A PR head ref integration may push to: no leading '-', no '..', '//' or '@{', no trailing '.' or '/'.
+HEAD_REF = re.compile(r"(?!-)(?!.*\.\.)(?!.*//)(?!.*@\{)[A-Za-z0-9._/-]{1,200}(?<![./])")
+_HEX40 = re.compile(r"[0-9a-f]{40}")
+
+
+def integration_area_path(hc: HostConfig, host: str, repository: str, remote_url: str) -> str:
+    """One bare integration repository per (host, repository, remote_url); a new URL never relabels an old one."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", repository.split("/", 1)[-1]).strip(".-") or "repo"
+    digest = hashlib.sha256(f"{host}\0{repository.lower()}\0{remote_url}".encode()).hexdigest()[:8]
+    return posixpath.join(norm(hc.managed_roots[0]) or "", INTEGRATION_DIR, f"{name}-{digest}")
+
+
+def check_integration_area(hc: HostConfig, path: str) -> None:
+    """The integration area: a fixed name directly under <first managed root>/.batc-integration/."""
+    p = norm(path) or ""
+    parent = posixpath.join(norm(hc.managed_roots[0]) or "", INTEGRATION_DIR) if hc.managed_roots else ""
+    if (not parent or posixpath.dirname(p) != parent or not _AREA_NAME.fullmatch(posixpath.basename(p))
+            or not in_managed_root(hc, p)):
+        raise ResourceReadOnly("DESTINATION_MANUAL", f"{path} is not a connector integration area")
+
+
+def check_repair_worktree(hc: HostConfig, area: str, path: str, branch: str) -> None:
+    """A conflict-resolving worktree: <area>/wt/batc-fix-<12 hex> on branch batc/fix-<12 hex>, nothing else."""
+    check_integration_area(hc, area)
+    name = posixpath.basename(norm(path) or "")
+    suffix = name[len("batc-fix-"):]
+    if (norm(path) != posixpath.join(norm(area) or "", "wt", name) or not name.startswith("batc-fix-")
+            or not re.fullmatch(r"[0-9a-f]{12}", suffix) or branch != f"batc/fix-{suffix}"):
+        raise ResourceReadOnly("DESTINATION_UNKNOWN", f"{path} is not a connector repair worktree")
+
+
+def classify_integration_source(hc: HostConfig, kind: str, location: str | None) -> tuple[str, bool]:
+    """(location_class, fetch_only) for a source. Only a managed clone may be more than a fetch source; a person's
+    checkout is only ever the repository argument of git fetch or ls-remote."""
+    if kind == "branch":
+        return "remote", True
+    if kind == "checkpoint_run":
+        if not in_managed_root(hc, location):
+            raise ResourceReadOnly("DESTINATION_MANUAL", "an agent result must live in a connector clone")
+        return MANAGED_CLONE, False
+    if kind == "checkpoint":
+        return "human_checkout", True
+    raise ResourceReadOnly("DESTINATION_UNKNOWN", f"unknown source kind {kind!r}")
+
+
+def check_push_target(protected: tuple[str, ...], pr: dict) -> str:
+    """The PR head ref integration may push to, or why not (blocking codes, never a fallback)."""
+    head, base = pr.get("head") or {}, pr.get("base") or {}
+    if pr.get("state") != "open" or pr.get("merged"):
+        raise ResourceReadOnly("PR_CLOSED", f"PR #{pr.get('number')} is {pr.get('state')}")
+    if not head.get("repo") or (head.get("repo") or {}).get("id") != (base.get("repo") or {}).get("id"):
+        raise ResourceReadOnly("PR_HEAD_IN_FORK", "the PR's head branch is not in the same repository")
+    ref = str(head.get("ref") or "")
+    default = (base.get("repo") or {}).get("default_branch")
+    if (not HEAD_REF.fullmatch(ref) or ref in {base.get("ref"), default}
+            or any(fnmatch.fnmatchcase(ref, g) for g in protected)):
+        raise ResourceReadOnly("TARGET_REF_FORBIDDEN", f"{ref!r} is the base, default or a protected branch")
+    return ref
+
+
+def push_refspec(sha: str, head_ref: str) -> str:
+    """The only refspec integration pushes: an exact commit to one branch. It can never be forced or delete."""
+    if not _HEX40.fullmatch(sha or "") or not HEAD_REF.fullmatch(head_ref or ""):
+        raise ResourceReadOnly("INTERNAL_PUSH_SHAPE", "push needs a 40-hex commit and a valid branch name")
+    return f"{sha}:refs/heads/{head_ref}"
 
 
 def check_external_worktree(root: str, path: str, branch: str, task_id: str) -> None:

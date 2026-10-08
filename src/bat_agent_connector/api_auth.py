@@ -21,7 +21,8 @@ from dataclasses import dataclass
 #   session runs an agent with the caller's instructions on a host
 # manage: change connector management data (work items, completion, tokens are admin-only)
 # merge / deploy: GitHub delivery actions
-SCOPES = ("observe", "operate", "start", "manage", "merge", "deploy")
+# integrate: push composed results to a PR's head branch (never merges; a merge token cannot push)
+SCOPES = ("observe", "operate", "start", "manage", "merge", "deploy", "integrate")
 ADMIN_ACTOR = "local-admin"
 _ACTOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 

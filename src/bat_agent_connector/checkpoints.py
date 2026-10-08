@@ -63,17 +63,17 @@ class SshGitRunner:
     def available(self, host: str) -> bool:
         return bool(self.aliases.get(host))
 
-    async def run(self, host: str, script: str) -> str:
+    async def run(self, host: str, script: str, timeout_s: float | None = None) -> str:
         alias = self.aliases.get(host)
         if not alias:
             raise GitCommandFailed(f"no SSH alias is configured for host {host}")
-        return await _run(("ssh", "-o", "BatchMode=yes", alias, "sh -lc " + shlex.quote(script)))
+        return await _run(("ssh", "-o", "BatchMode=yes", alias, "sh -lc " + shlex.quote(script)), timeout_s)
 
 
-async def _run(argv: tuple[str, ...]) -> str:
+async def _run(argv: tuple[str, ...], timeout_s: float | None = None) -> str:
     proc = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), GIT_TIMEOUT_S)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout_s or GIT_TIMEOUT_S)
     except asyncio.TimeoutError:
         proc.kill()
         raise AmbiguousOutcome("git script timed out") from None
@@ -401,6 +401,80 @@ def first_prompt(cp: dict, *, worktree: str, branch: str, instructions: str, mar
     return "\n".join(head + middle + tail)
 
 
+async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent: str, worktree: str, branch: str,
+                            head: str, title: str, text: str, marker: str, registry_fields: dict) -> dict:
+    """Start a confined managed session in a connector worktree and send its first instruction, as recorded steps.
+
+    ``verify.start``: BAT itself sees the folder at ``head`` (a step, so a replay after the agent committed returns
+    this result instead of checking a moved HEAD). ``session.start``: started again only when no registry
+    reservation exists. ``send``: settled from the turn record (Claude) or the transcript line starting with
+    ``marker`` (Codex), never sent twice."""
+    ops = ctx.service
+    fleet = ops.context["fleet"]
+    c = fleet.client(host)
+    sid = str(uuid.uuid5(_SESSION_NS, ctx.operation_id))
+
+    async def verify() -> dict:
+        root = norm(await c.invoke("git:getRoot", {"cwd": worktree}))
+        log = await c.invoke("git:log", {"cwd": worktree, "count": 1})
+        seen = log[0].get("hash") if isinstance(log, list) and log and isinstance(log[0], dict) else None
+        if root != worktree or seen != head:
+            raise StepFailed("START_MISMATCH", f"BAT sees {worktree} at {str(seen)[:12]} (git root {root}), not "
+                             f"{head[:12]}; managed_roots must be real paths")
+        return {"git_root": root, "head": seen}
+
+    async def reverify(_request: dict) -> dict:
+        return RERUN  # reads only
+
+    await ctx.step("verify.start", verify, reconcile=reverify)
+
+    async def start() -> dict:
+        r = await orchestrate.session_start(
+            fleet, host, workspace, agent, confirm=True, prompt=None, use_worktree=False, title=title,
+            session_id=sid, retain_on_error=True, cwd_override=worktree, external_branch=branch,
+            write_scope="confined")
+        return {"session_id": r["session_id"], "cwd": r.get("cwd") or worktree}
+
+    async def restart(_request: dict) -> dict | None:
+        if not any(e.get("session_id") == sid for e in registry.list_entries(host)):
+            return RERUN  # never reserved in the registry, so no start frame left this process
+        try:
+            meta = await c.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
+        except Exception:  # noqa: BLE001 - unreadable: stay uncertain and read again later
+            return None
+        if isinstance(meta, dict) and norm(meta.get("cwd")) == worktree:
+            registry.update(host, sid, status="active", cwd=worktree, worktree_path=worktree, branch=branch)
+            return {"session_id": sid, "cwd": worktree, "reconciled": True}
+        return None  # reserved and maybe sent: BAT may still be starting it, so read again later; never start twice
+
+    await ctx.step("session.start", start, request={"session_id": sid, "cwd": worktree, "agent": agent},
+                   reconcile=restart)
+    registry.update(host, sid, **registry_fields)
+    mid = "batc-" + ctx.operation_id
+
+    async def send() -> dict:
+        r = await service.session_send(fleet, host, sid, text, confirm=True, message_id=mid,
+                                       tool="api:" + ctx.actor, retry_on_disconnect=False)
+        return {"message_id": mid, "accepted": r.get("accepted"), "turn_marker": r.get("turn_marker")}
+
+    async def resend(_request: dict) -> dict | None:
+        if registry.get_turn(host, sid, mid):  # recorded once BAT accepted this clientMessageId (Claude)
+            return {"message_id": mid, "accepted": True, "turn_marker": mid}
+        # Codex has no turn record: the first instruction is in the transcript when it starts with the marker.
+        read = await service.session_read(_read_fleet(ops), host, sid, last_n=10)
+        if any(m.get("role") == "user" and str(m.get("text") or "").startswith(marker)
+               for m in read.get("messages") or []):
+            return {"message_id": mid, "accepted": True, "turn_marker": mid, "settled_by": "transcript"}
+        return None
+
+    sent = await ctx.step("send", send, request={"message_id": mid,
+                                                 "text_sha256": hashlib.sha256(text.encode()).hexdigest()},
+                          reconcile=resend)
+    if not sent.get("accepted"):
+        raise NeedsAttention("NOT_ACCEPTED", "BAT did not accept the first instruction")
+    return {"session_id": sid, "message_id": mid}
+
+
 async def _run_continue(ctx: OpContext) -> dict:
     ops = ctx.service
     fleet = ops.context["fleet"]
@@ -436,74 +510,18 @@ async def _run_continue(ctx: OpContext) -> dict:
     if made["head"] != cp["commit_sha"] or made["dirty"] != 0:
         raise NeedsAttention("START_MISMATCH", f"the new worktree is at {made['head'][:12]} with "
                              f"{made['dirty']} change(s), not clean at {cp['commit_sha'][:12]}")
-    c = fleet.client(host)
     agent = ctx.params.get("agent", "claude")
-
-    async def verify() -> dict:
-        # BAT itself must see the new folder at the checkpoint commit before a session starts there. A step, so a
-        # replay after the agent has committed returns this result instead of checking a moved HEAD again.
-        root = norm(await c.invoke("git:getRoot", {"cwd": worktree}))
-        log = await c.invoke("git:log", {"cwd": worktree, "count": 1})
-        seen = log[0].get("hash") if isinstance(log, list) and log and isinstance(log[0], dict) else None
-        if root != worktree or seen != cp["commit_sha"]:
-            raise StepFailed("START_MISMATCH", f"BAT sees {worktree} at {str(seen)[:12]} (git root {root}), not "
-                             f"{cp['commit_sha'][:12]}; managed_roots must be real paths")
-        return {"git_root": root, "head": seen}
-
-    async def reverify(_request: dict) -> dict:
-        return RERUN  # reads only
-
-    await ctx.step("verify.start", verify, reconcile=reverify)
-
-    async def start() -> dict:
-        r = await orchestrate.session_start(
-            fleet, host, cp["workspace_id"] or cp["workspace_name"], agent, confirm=True, prompt=None,
-            use_worktree=False, title=f"checkpoint {cp['checkpoint_id'][3:11]}", session_id=sid,
-            retain_on_error=True, cwd_override=worktree, external_branch=branch, write_scope="confined")
-        return {"session_id": r["session_id"], "cwd": r.get("cwd") or worktree}
-
-    async def restart(_request: dict) -> dict | None:
-        if not any(e.get("session_id") == sid for e in registry.list_entries(host)):
-            return RERUN  # never reserved in the registry, so no start frame left this process
-        try:
-            meta = await c.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
-        except Exception:  # noqa: BLE001 - unreadable: stay uncertain and read again later
-            return None
-        if isinstance(meta, dict) and norm(meta.get("cwd")) == worktree:
-            registry.update(host, sid, status="active", cwd=worktree, worktree_path=worktree, branch=branch)
-            return {"session_id": sid, "cwd": worktree, "reconciled": True}
-        return None  # reserved and maybe sent: BAT may still be starting it, so read again later; never start twice
-
-    await ctx.step("session.start", start, request={"session_id": sid, "cwd": worktree, "agent": agent},
-                   reconcile=restart)
-    # origin_cwd stays the workspace folder session_start recorded: merges into it are refused
-    # (DESTINATION_MANUAL), which is what a checkpoint session's work should get. Results reach a PR instead.
-    registry.update(host, sid, checkpoint_id=cp["checkpoint_id"], source_session_id=cp["source_session_id"],
-                    start_commit=cp["commit_sha"])
     marker = prompt_marker(cp, ctx.operation_id)
     text = first_prompt(cp, worktree=worktree, branch=branch, instructions=ctx.params["instructions"], marker=marker)
-    mid = "batc-" + ctx.operation_id
-
-    async def send() -> dict:
-        r = await service.session_send(fleet, host, sid, text, confirm=True, message_id=mid,
-                                       tool="api:" + ctx.actor, retry_on_disconnect=False)
-        return {"message_id": mid, "accepted": r.get("accepted"), "turn_marker": r.get("turn_marker")}
-
-    async def resend(_request: dict) -> dict | None:
-        if registry.get_turn(host, sid, mid):  # recorded once BAT accepted this clientMessageId (Claude)
-            return {"message_id": mid, "accepted": True, "turn_marker": mid}
-        # Codex has no turn record: the first instruction is in the transcript when it starts with the marker.
-        read = await service.session_read(_read_fleet(ops), host, sid, last_n=10)
-        if any(m.get("role") == "user" and str(m.get("text") or "").startswith(marker)
-               for m in read.get("messages") or []):
-            return {"message_id": mid, "accepted": True, "turn_marker": mid, "settled_by": "transcript"}
-        return None
-
-    sent = await ctx.step("send", send, request={"message_id": mid,
-                                                 "text_sha256": hashlib.sha256(text.encode()).hexdigest()},
-                          reconcile=resend)
-    if not sent.get("accepted"):
-        raise NeedsAttention("NOT_ACCEPTED", "BAT did not accept the first instruction")
+    # origin_cwd stays the workspace folder session_start recorded: merges into it are refused
+    # (DESTINATION_MANUAL), which is what a checkpoint session's work should get. Results reach a PR instead.
+    started = await start_in_worktree(
+        ctx, host=host, workspace=cp["workspace_id"] or cp["workspace_name"], agent=agent, worktree=worktree,
+        branch=branch, head=cp["commit_sha"], title=f"checkpoint {cp['checkpoint_id'][3:11]}", text=text,
+        marker=marker, registry_fields={"checkpoint_id": cp["checkpoint_id"],
+                                        "source_session_id": cp["source_session_id"],
+                                        "start_commit": cp["commit_sha"]})
+    sid, mid = started["session_id"], started["message_id"]
     journal = ops.journal
     with journal.tx():
         cur = journal.db.execute(

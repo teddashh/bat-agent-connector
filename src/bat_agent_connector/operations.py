@@ -183,6 +183,12 @@ class OpContext:
             if recovered is not RERUN:
                 self.service._step_done(self.operation_id, name, recovered, reconciled=True)
                 return recovered
+            try:  # proven not to have happened: a cancel requested meanwhile stops here instead of sending it now
+                self.check_cancel()
+            except Cancelled:
+                self.service._step_status(self.operation_id, name, "failed",
+                                          error={"code": "CANCELLED", "message": "proven not sent; cancelled"})
+                raise
             self.service._step_restart(self.operation_id, name, request or {})
         else:
             self.check_cancel()
