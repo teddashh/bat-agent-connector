@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 from . import (
     __version__,
     api_auth,
+    artifact_capture,
     artifacts,
     checkpoints,
     cleanup,
@@ -95,6 +96,7 @@ class ApiV1:
     def __init__(self, daemon, *, allowed_origins: tuple[str, ...] = ()) -> None:
         self.daemon = daemon
         cleanup.install(daemon.ops, daemon._admin_token)
+        artifact_capture.install(daemon.ops, daemon._admin_token)
         self.allowed_origins = allowed_origins
         self._streams = 0
         self._streams_by_actor: dict[str, int] = {}
@@ -106,6 +108,7 @@ class ApiV1:
             ("GET", r"/api/v1/version", self.version, None),
             ("GET", r"/api/v1/capabilities", self.capabilities, "observe"),
             ("POST", r"/api/v1/artifacts", self.create_artifact, "manage"),
+            ("POST", r"/api/v1/artifact-capture-previews", self.artifact_capture_preview, "observe"),
             ("GET", r"/api/v1/artifacts", self.artifacts, "observe"),
             ("GET", r"/api/v1/artifacts/(?P<aid>art_[0-9a-f]{32})/revisions/(?P<revision>[1-9][0-9]*)", self.artifact, "observe"),
             ("GET", r"/api/v1/bootstrap", self.bootstrap, "observe"),
@@ -351,7 +354,8 @@ class ApiV1:
         fleet = self.daemon.fleet
         gh_cfg = self.daemon.ops.context["github_config"]
         actions = [{"action": a.name, "scope": a.scope, "summary": a.summary, "allowed": principal.allows(a.scope)
-                               and (a.name != "delivery.merge_and_deploy" or principal.allows("deploy"))}
+                               and (a.name != "delivery.merge_and_deploy" or principal.allows("deploy"))
+                               and (a.name != "artifact.capture" or principal.allows("observe"))}
                    for a in self.daemon.ops.actions.values()]
         hosts = [{"host": h, "observe": True, "writes": fleet.writes_enabled(h),
                   "orchestrate": fleet.orchestrate_enabled(h),
@@ -362,6 +366,8 @@ class ApiV1:
         return 200, {"actor": principal.actor, "scopes": sorted(principal.scopes), "api_version": API_VERSION,
                      "contract_version": CONTRACT_VERSION, "connector": __version__, "hosts": hosts,
                      "artifacts": {"limits": self.daemon.artifact_store.settings.limits(),
+                                   "capture": {"manual_single_file": True, "snapshot": False,
+                                               "preview_ttl_s": artifact_capture.TTL_S},
                                    "hosts": [{"host": h, "configured": self.daemon.ops.context["artifact_host"].available(h),
                                               "readiness": self.daemon.ops.context["artifact_host"].readiness.get(h)} for h in fleet.config.hosts]},
                      "identity": dashboard_sync.identity(self.daemon.journal, principal),
@@ -529,6 +535,9 @@ class ApiV1:
                     "params": body.get("params", {}), "preconditions": body.get("preconditions", {}),
                     "idempotency_key": body.get("idempotency_key")}
         return await self.create_operation(principal, query, envelope, headers)
+
+    async def artifact_capture_preview(self, principal, body, **_):
+        return 200, {"preview": await artifact_capture.preview(self.daemon.ops, principal, body)}
 
     async def artifacts(self, query, **_):
         return 200, artifacts.list_artifacts(self.daemon.journal.db, limit=self._int(query, "limit", 50), cursor=self._q(query, "cursor"))

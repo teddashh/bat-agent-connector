@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- Capture one reviewed file from a positively classified manual BAT session as an immutable artifact.
+  HTTP, MCP and CLI use a short-lived credential-bound preview and the existing operation/store quota,
+  staging and publication receipts. Reject symlinks, hardlinks, nonregular files, source changes and rebinding;
+  preserve the manual checkout and recover completed captures without rereading or republishing their source.
+  This is single-file continuation data; managed-result acceptance, dirty snapshots and capture UI remain separate.
+
 - Add `--principal-only` for agent MCP installations: require the agent token for all calls,
   expose central operations and task adapters, and omit direct Fleet tools. Task status/result/events
   now accept principals with `observe`; missing agent credentials never borrow local admin authority.

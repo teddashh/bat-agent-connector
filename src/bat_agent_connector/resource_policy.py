@@ -107,7 +107,7 @@ MUTATIONS: tuple[Mutation, ...] = (
              ("checkpoint.continue",),
              "a connector clone <managed root>/<name> (marked batc.managed-clone) that only reads the person's "
              "repository, and the worktree <clone>/.bat-worktrees/batc-cp-<12 hex> on branch batc/cp-<12 hex>"),
-    Mutation("artifact.storage", "connector-storage", "path", frozenset(), ("artifact.upload",),
+    Mutation("artifact.storage", "connector-storage", "path", frozenset(), ("artifact.upload", "artifact.capture"),
              "configured connector-owned storage; no symlinks or adoption of unknown content"),
     Mutation("artifact.materialize", "ssh-files", "path", frozenset(), ("checkpoint.continue",),
              "only .batc-inputs in the continuation's fixed managed worktree; no-follow host read-back"),

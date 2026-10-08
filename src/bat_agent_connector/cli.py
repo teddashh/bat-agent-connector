@@ -661,6 +661,14 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--artifact-id")
     c.add_argument("--expected-latest-revision", type=int)
     c.add_argument("--type", default="application/octet-stream")
+    c = asp.add_parser("capture-preview", help="review one manual-session file without modifying its source")
+    c.add_argument("host")
+    c.add_argument("session_id")
+    c.add_argument("relative_path")
+    c = asp.add_parser("capture", help="save the exact reviewed manual file as an immutable artifact")
+    c.add_argument("--preview-file", required=True, help="JSON saved from capture-preview")
+    c.add_argument("--key", required=True, help="reuse this key after a lost reply")
+    c.add_argument("--confirm", action="store_true")
     c = asp.add_parser("list")
     c.add_argument("--limit", type=int, default=50)
     c.add_argument("--cursor")
@@ -883,6 +891,21 @@ def cmd_artifact(args) -> int:
             raise ValueError("ARTIFACT_TOO_LARGE")
         out = upload(data, path.name, args.key, media_type=args.type, artifact_id=args.artifact_id,
                      expected_latest_revision=args.expected_latest_revision, token=token)
+    elif args.artifact_cmd == "capture-preview":
+        out = request("artifact_capture_preview", _auth_token=token, entry="cli", host=args.host,
+                      session_id=args.session_id, relative_path=args.relative_path)
+    elif args.artifact_cmd == "capture":
+        if not args.confirm:
+            raise ValueError("artifact capture requires --confirm")
+        with Path(args.preview_file).open("rb") as file:
+            raw = file.read(65537)
+        if len(raw) > 65536:
+            raise ValueError("capture preview exceeds its bound")
+        preview = json.loads(raw)
+        preview = preview.get("preview", preview)
+        out = request("op_submit", _auth_token=token, entry="cli", action="artifact.capture",
+                      target={"preview_id": preview["preview_id"]}, params={"preview_token": preview["preview_token"]},
+                      preconditions={"expected_fingerprint": preview["fingerprint"]}, idempotency_key=args.key)
     elif args.artifact_cmd == "list":
         out = request("artifacts_list", _auth_token=token, limit=args.limit, cursor=args.cursor)
     else:
