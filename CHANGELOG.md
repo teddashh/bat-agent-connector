@@ -2,6 +2,10 @@
 
 ## Next release (unreleased)
 
+- Keep failed checkpoint-preview refreshes inside the event acknowledgment barrier. Preserve the original
+  commit selection and note, refuse stale checkpoint creation, and resume after a successful read; a failed
+  preview cannot silently change the request into a checkpoint of HEAD.
+
 - Wait for asynchronous Dashboard view refreshes before persisting event checkpoints. Failed or deferred
   refreshes retain the original cursor and drafts. Failed reads pause mutations; deferred renders keep
   version-checked form saves available. Delayed work cannot cross accounts or
@@ -24,6 +28,11 @@
   retained history and changed event anchors explicitly require resnapshot while preserving drafts. SSE supports
   checkpoint/reset control events; legacy event page shapes remain unchanged. Versionless metadata shares the
   existing journal and adds no retention job (v2 §14, R04, B02/B05/T11; docs/design/dashboard-sync.md).
+
+- Validate the complete session inventory cursor before reading session rows: versioned payload schema,
+  exact SQLite-compatible key types, and a non-coerced event boundary between zero and the journal head.
+  Malformed cursors consistently return 422 for empty, filtered and populated inventories; previously issued
+  unversioned cursors remain valid, including paging after a restart and catching up from the original boundary.
 
 - Bind task-effect observation history to the executing operation's persisted actor, entry point and ID.
   An unrelated RPC caller waking the shared scheduler cannot relabel other users' task events; observation
