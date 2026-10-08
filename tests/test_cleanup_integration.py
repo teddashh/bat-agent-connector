@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from bat_agent_connector import cleanup
 from tests.test_cleanup import CLEANER
+from tests.test_cleanup import known_live_terminals as cleanup_terminals
 from tests.test_integration import conflicted
 from tests.test_integration import gh as integration_gh
 from tests.test_integration import hermetic_git as integration_git
@@ -11,6 +12,7 @@ from tests.test_integration import world as integration_world
 gh = integration_gh
 hermetic_git = integration_git
 world = integration_world
+known_live_terminals = cleanup_terminals
 
 
 async def test_e01_integration_preview_apply_and_handoff_expand_to_same_resources(world):

@@ -1270,7 +1270,8 @@ async def _stop(fleet: Fleet, host: str, sid: str, audit: Audit, *, cleanup: boo
     if meta is None:
         return {"stopped": False, "reason": "not loaded"}
     if meta.get("isStreaming"):
-        return {"stopped": False, "reason": "started streaming again; left running"}
+        return {"stopped": False, "reason": "started streaming again; left running",
+                **({"code": "ACTIVE_WRITER"} if cleanup else {})}
     if cleanup and service._state_safe(service.agent_kind(t.get("agentPreset")), meta):
         state = await c.invoke("claude:get-session-state", {"sessionId": sid})
         if isinstance(state, dict) and state.get("isStreaming"):

@@ -132,6 +132,13 @@ discard_uncommitted 是唯一摧毀內容的 choice；overridden_reasons 顯示 
 release_undelivered 不是 discard，只有保留 commit／branch 後釋放 runtime／worktree；正常 agent 可用 cleanup
 scope 做明確 per-item release。兩者不能越過 manual／unknown／writer／command／task／其他 content consumer。
 
+每個 host 的全部 workspace terminals（含已註冊 terminals）都讀 live metadata.cwd；registry cwd／
+worktree_path 只能提供歷史 binding，不能取代 live read。Live cwd 等於 worktree path 或在其下
+（path components／commonpath 比較，不用字串 prefix）即為 consumer，無論 recorded cwd 在哪。
+讀取失敗、超時、meta 缺失或沒有 absolute cwd 都是 unknown consumer，回 OBSERVATION_UNAVAILABLE；
+同 host 的選中 worktrees／sessions 保留，不把 unknown 當 unused。範圍外 live consumer 回 ACTIVE_EXECUTION，
+相連的選中 idle session 也保留，不能先 stop 再發現 worktree 被其他 session 使用。
+
 Checkpoint worktree 的 common info/exclude 排除 `.batc-inputs/`，但忽略目錄不等於內容已驗證。
 Connector 每個 worktree 傳 `replica_manifest=[{path,bytes,digest}]`（digest 為 SHA-256）與
 `bookkeeping_names`：exact `.batc-inputs/.owner`、`.batc-inputs/.attempts/<art>-r<rev>/.attempt-N`／
@@ -185,6 +192,12 @@ reservation 回 CLEANUP_IN_PROGRESS；舊 send/client-resume／merge/remove 也�
 check_external_worktree 各加一個 shared guard hook。service.py／orchestrate.py 不新增 caller checks。
 實際 ownership 仍由共用 policy；guard 只禁止使用 reserved／cleaned 資源，不授予 ownership。
 同 host repo 的 cleanup mutation 互斥；Git script 鎖內即時核對 canonical paths／refs／dirty／bindings。
+Apply 每個 stop／Git phase 都先由 SSH helper 取得 managed repository 的 directory flock；standalone
+managed session 使用其 canonical workdir。Helper 在鎖內發 locked notification，Connector 才在共享
+per-host read lock／deadline 下重讀全部 terminals 的 live cwd／session state／consumers。只有全部檢查
+通過才用 stdin 明確許可 Git phase；stop 在 callback 中經既有 BAT stop path 執行，完成才釋放 host flock。
+拒絕／斷線／EOF／deadline 不許可後續 mutation，不寫新 lockfile。Lost reply 沿用既有 uncertain／reconcile
+規則，不能因 handshake 遺失重 stop。自己的已接受 idle stop items 可先後停止，worktree 仍依賴全數 stop 成功。
 Connector locks 不能保證同帳號外部 writer；觀測不足即保留，非 force remove 最後拒絕 dirty race。
 
 ## Preview／apply 合約（Part A）
@@ -199,6 +212,7 @@ Input `{target, choices}`。Choices：discard_uncommitted[]、release_undelivere
 不能傳任意 path／ref／force。每 host serialize preview，一次一個，**包括排隊時間的共享 deadline**；
 每 repository/container 一個 batched SSH read script，一次枚舉 worktrees／refs／dirty manifests，不逐 ref SSH。
 每 host 另用一個 batch 解析所有選中 managed session 的 canonical workdirs；stop call 前再核該 path。
+全部 terminal 的 live cwd 及 registered session state 讀取也共用同一 host lock／deadline，不略過 registry entries。
 單一 snapshot；沒有 double snapshot／PREVIEW_UNSTABLE。Deadline 未讀完的項目 OBSERVATION_UNAVAILABLE，
 不以缺失當乾淨。最多 500 resources、token payload 16 KiB；整份過大回 PREVIEW_TOO_LARGE，不截斷 apply。
 
@@ -382,6 +396,8 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 |---|---|
 | 四狀態／inactive不足；E01 | test_e01_pending_start_stop_and_waiting_sessions_are_retained |
 | preview 到 stop 間任何 waiting field 改變都不 stop／remove；E01 | test_e01_every_waiting_field_racing_with_stop_keeps_session_and_worktree（共用 set 全部九個 fields）、test_e01_preview_recheck_and_stop_share_waiting_fields |
+| registered live cwd／unknown consumer 阻止 stop 與 remove；E01/E02 | test_e01_registered_terminal_live_cwd_or_unknown_blocks_preview_and_apply（inside／missing cwd／missing meta／failed read）、test_e01_live_cwd_uses_path_components_not_string_prefix |
+| host flock 內、每個 phase 前再查全部 live consumers；E01 | test_e01_live_cwd_is_rechecked_under_host_flock_before_stop_and_removal（lock.session／preserve／remove.worktree，各測 live cwd race／read failure，實際驗證 flock 被持有） |
 | 父子樹、manual/unknown/active/completed與exactplan；E01 | test_e01_tree_preview_apply_matches_and_read_only_resources_survive |
 | sharedID／全域consumer、history不擋；E02 | test_e02_shared_worktree_is_one_item_and_checks_out_of_scope_consumers、test_e01_tree_preview_apply_matches_and_read_only_resources_survive |
 | receipt而非ancestor，partialpick/newtip/uncertain；E02 | test_e02_squash_and_pick_use_exact_delivery_receipt_coverage |

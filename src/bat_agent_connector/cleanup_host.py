@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import select
 import stat
 import subprocess
 import sys
@@ -312,9 +313,24 @@ def exact_unlink(base, names, facts):
 
 def mutate(req):
     repo = req["repository"]
+    canonical(repo, req["roots"])
     fd = os.open(repo, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if req.get("locked_check"):
+            if req["phase"] != "lock.session":
+                checked = identity(repo, req["roots"])
+                if checked != req["identity"]:
+                    raise ValueError("PREVIEW_STALE")
+            print(json.dumps({"locked": True}), flush=True)
+            if not select.select([sys.stdin], [], [], max(0, DEADLINE - time.monotonic()))[0]:
+                raise ValueError("OBSERVATION_UNAVAILABLE")
+            permission = sys.stdin.readline()
+            if not permission or json.loads(permission) != {"proceed": True}:
+                return {"aborted": True}
+        if req["phase"] == "lock.session":
+            canonical(repo, req["roots"])
+            return {"released": True}
         observed = observe(req)
         expected = req["identity"]
         if any(observed.get(k) != expected.get(k) for k in ("common_dir", "markers", "config_digest")):

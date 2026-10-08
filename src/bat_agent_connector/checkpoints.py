@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import hashlib
 import json
 import posixpath
@@ -47,6 +48,7 @@ MAX_INSTRUCTIONS = 12_000
 GIT_TIMEOUT_S = 600.0
 _SESSION_NS = uuid.UUID("6f1c9a52-3d4e-4b8a-9c1d-2e7f5a8b0c3d")
 _clone_locks: dict[tuple[str, str], asyncio.Lock] = {}
+_LOCKED_CHECK = contextvars.ContextVar("git_locked_check", default=None)
 
 
 class GitCommandFailed(StepFailed):
@@ -71,6 +73,13 @@ class SshGitRunner:
 
 
 async def _run(argv: tuple[str, ...], timeout_s: float | None = None) -> str:
+    check = _LOCKED_CHECK.get()
+    if check is not None:
+        token = _LOCKED_CHECK.set(None)  # nested read scripts must not wait for another gate
+        try:
+            return await _run_locked(argv, check, timeout_s)
+        finally:
+            _LOCKED_CHECK.reset(token)
     proc = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout_s or GIT_TIMEOUT_S)
@@ -81,6 +90,38 @@ async def _run(argv: tuple[str, ...], timeout_s: float | None = None) -> str:
         raise AmbiguousOutcome("ssh connection failed")
     if proc.returncode != 0:
         raise GitCommandFailed(redact((err or out).decode(errors="replace").strip()[-800:]) or "git script failed")
+    return out.decode(errors="replace").strip()
+
+
+async def _run_locked(argv, check, timeout_s):
+    """Keep the host's directory flock while the connector checks BAT; permit only on an explicit reply."""
+    proc = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.PIPE,
+                                               stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    async def exchange():
+        first = await proc.stdout.readline()
+        if first.strip() == b'{"locked": true}':
+            await check()
+            proc.stdin.write(b'{"proceed": true}\n')
+            await proc.stdin.drain()
+            return await proc.communicate()
+        out, err = await proc.communicate()
+        return first + out, err  # a host refusal before the gate, with no mutation
+    try:
+        out, err = await asyncio.wait_for(exchange(), timeout_s or GIT_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.communicate()
+        raise AmbiguousOutcome("locked git script timed out") from None
+    except BaseException:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.communicate()
+        raise
+    if proc.returncode == 255 and argv[0] == "ssh":
+        raise AmbiguousOutcome("ssh connection failed during locked check")
+    if proc.returncode != 0:
+        raise GitCommandFailed(redact((err or out).decode(errors="replace").strip()[-800:]) or "locked git script failed")
     return out.decode(errors="replace").strip()
 
 
