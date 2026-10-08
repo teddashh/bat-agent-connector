@@ -50,7 +50,7 @@ Token 缺少某個 scope（`start`、`integrate`、`manage`、`approve`）時，
 
 ## 尚未涵蓋
 
-- Worktree、diff、檔案瀏覽，以及 Fleet Kit 的連線選擇（W10）。
+- Worktree、diff、檔案瀏覽。Fleet Kit 的連線選擇已由 Windows [PS adapter](desktop-fleet.md) 與桌面設定頁提供；Rust parity 與實機驗收仍待完成。
 - 推播通知。
 - #35 history／relations／discovery read models 已有中央合約；其完整 UI 呈現、已開 session 的 pending 控制刷新、linked operation／parent project invalidation 仍屬 R04 待完成範圍。
 - Windows 真實 tray、cross-session ownership、native files、Fleet parity、OS credential enrollment 與 signed updates 未因桌面殼可編譯而視為驗收完成。

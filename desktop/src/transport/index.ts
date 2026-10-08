@@ -7,6 +7,12 @@ export const nativeStatus = () => invoke<NativeStatus>("native_status");
 export const nativeConnect = () => invoke<any>("connector_connect");
 export const nativeDisconnect = () => invoke<void>("connector_disconnect");
 export const openExternal = (url: string) => invoke<void>("open_external", { url });
+export const fleetAvailability = () => invoke<{configured: boolean; platform_supported: boolean; error?: string}>("fleet_availability");
+export type FleetRequest = {action: "status" | "contract" | "validate_configuration"}
+  | {action: "set_connections"; connections: string[]; expected_configuration_binding: string; expected_selection_revision: string; expected_monitor_epoch: string | null}
+  | {action: "ensure_monitor"; expected_configuration_binding: string}
+  | {action: "quit_owned"; expected_configuration_binding: string; expected_monitor_epoch: string};
+export const fleetRequest = (input: FleetRequest) => invoke<any>("fleet_request", {input});
 
 export async function connectorRequest(method: string, path: string, body: unknown, key: string | undefined,
   browserToken: string): Promise<ConnectorResponse> {

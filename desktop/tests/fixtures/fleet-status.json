@@ -6,7 +6,39 @@
     "configuration": {
       "valid": true,
       "binding": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      "issues": []
+      "issues": [],
+      "connections": [
+        {
+          "name": "node-1",
+          "label": "Fixture 1",
+          "kind": "host"
+        },
+        {
+          "name": "node-2",
+          "label": "Fixture 2",
+          "kind": "host"
+        },
+        {
+          "name": "node-3",
+          "label": "Fixture 3",
+          "kind": "host"
+        },
+        {
+          "name": "node-4",
+          "label": "Fixture 4",
+          "kind": "host"
+        },
+        {
+          "name": "node-5",
+          "label": "Fixture 5",
+          "kind": "host"
+        },
+        {
+          "name": "connector",
+          "label": "Fixture Connector",
+          "kind": "connector"
+        }
+      ]
     },
     "monitor": {
       "state": "running",

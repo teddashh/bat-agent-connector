@@ -75,6 +75,7 @@ textarea { width: 100%; min-height: 80px; resize: vertical; }
 .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.fleet-choice { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; }
 .chip.info { color: var(--info); border: 1px solid var(--info); background: transparent; }
 .note.ok { border-left-color: var(--ok); } .note.warn { border-left-color: var(--warn); }
 .pre { white-space: pre-wrap; overflow-wrap: anywhere; }
