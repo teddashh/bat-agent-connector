@@ -100,6 +100,8 @@ MUTATIONS: tuple[Mutation, ...] = (
              "only <workspace>/.bat-worktrees/batc-task-<12 hex> and branch batc/task-<12 hex>"),
 )
 BY_ACTION = {m.action: m for m in MUTATIONS}
+# The only granted write channel whose frame names no session (its terminal carries the ID).
+SESSIONLESS_CHANNELS = frozenset({"workspace:save"})
 SESSION_ACTIONS = tuple(m.action for m in MUTATIONS if m.scope == "session")
 BAT_WRITE_CHANNELS = WRITE_CHANNELS | ORCHESTRATE_CHANNELS | GUARDED_CHANNELS
 
@@ -121,7 +123,8 @@ def check_grant(grant: WriteGrant | None, host: str, channel: str, params: dict 
     if not isinstance(grant, WriteGrant):
         raise ResourceReadOnly("GRANT_REQUIRED", f"write channel {channel!r} needs a resource policy grant")
     sid = (params or {}).get("sessionId")
-    if grant.host != host or channel not in grant.channels or (sid is not None and sid != grant.session_id):
+    if (grant.host != host or channel not in grant.channels
+            or (channel not in SESSIONLESS_CHANNELS and sid != grant.session_id)):
         raise ResourceReadOnly("GRANT_MISMATCH",
                                f"the policy grant for {grant.action} does not cover {channel!r} on this session")
 
@@ -214,7 +217,7 @@ def folder_owner(hc: HostConfig, row: dict, entries: list[dict], depth: int = 0)
     wt = norm(row.get("worktree_path"))
     if not wt or wt != cwd:
         return MANUAL, None, f"{cwd} is not a worktree the connector created (a human checkout)"
-    if not in_bat_worktrees(wt, row.get("origin_cwd")):
+    if not (in_bat_worktrees(wt, row.get("origin_cwd")) or in_bat_worktrees(wt, row.get("origin_root"))):
         return MANUAL, None, f"{wt} is not under the workspace's {BAT_WORKTREES_DIR} folder"
     owner_sid = row.get("shares_worktree_with") or row.get("lead_session_id")
     if not owner_sid:
@@ -263,7 +266,8 @@ def classify(hc: HostConfig, session_id: str, *, terminal: dict | None, entries:
     if tab is not None:
         for tab_key, row_key in (("cwd", "cwd"), ("worktreePath", "worktree_path")):
             a, b = norm(tab.get(tab_key)), norm(row.get(row_key))
-            if a and b and a != b:
+            # A tab folder the record lacks counts too: worktree actions would otherwise act on the tab's path.
+            if a and a != b and (b or tab_key == "worktreePath"):
                 cls.code, cls.reason = ("BINDING_MISMATCH",
                                         f"the BAT tab's {tab_key} {a} differs from the connector record {b}")
                 return cls
@@ -293,8 +297,13 @@ class LiveCheck:
     observed: dict = field(default_factory=dict)
 
 
-async def live_check(c, cls: Classification) -> LiveCheck:
-    """Compare BAT's view of the session and its folder with the connector record (reads only)."""
+async def live_check(c, cls: Classification, *, worktree: bool = True, folder: bool = True) -> LiveCheck:
+    """Compare BAT's view of the session and its folder with the connector record (reads only).
+
+    ``worktree:status`` computes the branch diff and can take a minute on a large branch, so only worktree
+    actions ask for it; session.send/answer/permissions bind the session through its meta cwd and git root,
+    and interrupt/stop (which do not touch the folder) through the meta cwd alone.
+    """
     out = LiveCheck()
     meta = await c.invoke("claude:get-session-meta", {"sessionId": cls.session_id})
     meta_cwd = norm(meta.get("cwd")) if isinstance(meta, dict) else None
@@ -302,7 +311,7 @@ async def live_check(c, cls: Classification) -> LiveCheck:
     if meta_cwd and cls.workdir and meta_cwd != cls.workdir:
         out.issue = ("BINDING_MISMATCH", f"BAT runs the session in {meta_cwd}, the connector record says {cls.workdir}")
         return out
-    if cls.worktree_path:
+    if worktree and cls.worktree_path:
         st = await c.invoke("worktree:status", {"sessionId": cls.session_id})
         st_path = norm(st.get("worktreePath")) if isinstance(st, dict) else None
         out.observed["worktree_status_path"] = st_path
@@ -310,7 +319,7 @@ async def live_check(c, cls: Classification) -> LiveCheck:
             out.issue = ("BINDING_MISMATCH",
                          f"BAT tracks worktree {st_path}, the connector record says {cls.worktree_path}")
             return out
-    if cls.workdir:
+    if folder and cls.workdir:
         root = await c.invoke("git:getRoot", {"cwd": cls.workdir})
         root_n = norm(root) if isinstance(root, str) else None
         out.observed["git_root"] = root_n
@@ -340,10 +349,19 @@ def _entries(host: str) -> list[dict]:
     return registry.list_entries(host)
 
 
-async def classify_live(fleet, host: str, t: dict) -> tuple[Classification, LiveCheck | None]:
+def _live_scope(action: str | None) -> dict:
+    if action is None:  # read views: every check
+        return {"worktree": True, "folder": True}
+    m = BY_ACTION[action]
+    on_worktree = action.startswith("worktree.")
+    return {"worktree": on_worktree, "folder": on_worktree or m.live_folder}
+
+
+async def classify_live(fleet, host: str, t: dict, action: str | None = None
+                        ) -> tuple[Classification, LiveCheck | None]:
     hc = fleet.config.host(host)
     cls = classify(hc, t["id"], terminal=t, entries=_entries(host))
-    live = await live_check(fleet.client(host), cls) if cls.writable else None
+    live = await live_check(fleet.client(host), cls, **_live_scope(action)) if cls.writable else None
     return cls, live
 
 
@@ -354,7 +372,7 @@ async def authorize_session(fleet, host: str, action: str, t: dict, *, live: Liv
     if m.scope != "session":
         raise BatError(f"internal: {action} is not a session action")
     if cls is None:
-        cls, live = await classify_live(fleet, host, t)
+        cls, live = await classify_live(fleet, host, t, action)
     refusal = _decide(cls, m, live)
     if refusal:
         raise ResourceReadOnly(refusal[0], f"{action} refused for session {t['id'][:8]}: {refusal[1]}")
@@ -366,15 +384,30 @@ def _create_grant(host: str, session_id: str, workdir: str | None, isolation: st
     return WriteGrant(host, m.action, session_id, m.channels, workdir, isolation)
 
 
+def _check_resolved(hc: HostConfig, path: str, git_roots: dict | None) -> None:
+    """A managed-root path must also be managed after the host resolves it (a symlink can point anywhere)."""
+    real = norm((git_roots or {}).get(path))
+    if real and not in_managed_root(hc, real):
+        raise ResourceReadOnly("DESTINATION_MANUAL",
+                               f"{path} resolves to {real}, outside the managed roots (a link into another "
+                               "checkout?); list real paths in managed_roots")
+
+
 def authorize_new_session(hc: HostConfig, session_id: str, *, folder: str, use_worktree: bool,
-                          cwd_override: str | None = None, task_id: str | None = None) -> WriteGrant:
-    """Destination check for session_start: where may a brand-new session work?"""
+                          cwd_override: str | None = None, task_id: str | None = None,
+                          git_roots: dict | None = None) -> WriteGrant:
+    """Destination check for session_start: where may a brand-new session work?
+
+    ``git_roots`` maps a normalized path to the git root the host reports for it (``git:getRoot``), so a
+    managed-root path that is really a link into a human checkout is refused before anything is written.
+    """
     root = norm(folder)
     if not root:
         raise ResourceReadOnly("DESTINATION_UNKNOWN", f"workspace folder {folder!r} is not an absolute path")
     if cwd_override is not None:
         path = norm(cwd_override)
         if path and in_managed_root(hc, path):
+            _check_resolved(hc, path, git_roots)
             return _create_grant(hc.name, session_id, path, MANAGED_CLONE)
         suffix = (task_id or "").replace("-", "")[:12]
         expected = posixpath.join(root, BAT_WORKTREES_DIR, f"batc-task-{suffix}")
@@ -384,6 +417,7 @@ def authorize_new_session(hc: HostConfig, session_id: str, *, folder: str, use_w
             raise ResourceReadOnly("DESTINATION_MANUAL", "shared_clone_worktrees = false on this host")
         return _create_grant(hc.name, session_id, path, LEGACY_SHARED_CLONE)
     if in_managed_root(hc, root):
+        _check_resolved(hc, root, git_roots)
         return _create_grant(hc.name, session_id, None if use_worktree else root, MANAGED_CLONE)
     if not use_worktree:
         raise ResourceReadOnly(
@@ -397,10 +431,16 @@ def authorize_new_session(hc: HostConfig, session_id: str, *, folder: str, use_w
     return _create_grant(hc.name, session_id, None, LEGACY_SHARED_CLONE)
 
 
-def check_new_worktree(grant: WriteGrant, hc: HostConfig, folder: str, worktree_path: Any) -> WriteGrant:
-    """After worktree:create: the host-chosen folder must be where the connector expects it."""
+def check_new_worktree(grant: WriteGrant, hc: HostConfig, folder: str, worktree_path: Any,
+                       git_root: str | None = None) -> WriteGrant:
+    """After worktree:create: the host-chosen folder must be where the connector expects it.
+
+    BAT puts the worktree under the folder's git root as the host resolves it, so a workspace opened through a
+    symlink gets a worktree under the resolved root; ``git_root`` (from ``git:getRoot``) accepts that.
+    """
     path = norm(worktree_path)
-    if not path or not (in_bat_worktrees(path, folder) or in_managed_root(hc, path)):
+    if not path or not (in_bat_worktrees(path, folder) or (git_root and in_bat_worktrees(path, git_root))
+                        or in_managed_root(hc, path)):
         raise ResourceReadOnly("DESTINATION_UNKNOWN", f"BAT created the worktree at an unexpected path {worktree_path!r}")
     if grant.isolation == MANAGED_CLONE and not in_managed_root(hc, path):
         raise ResourceReadOnly("DESTINATION_UNKNOWN", f"BAT created the worktree outside the managed root: {path}")
@@ -413,7 +453,7 @@ async def authorize_shared_session(fleet, host: str, session_id: str, owner: dic
     cls = classify(hc, owner["id"], terminal=owner, entries=_entries(host))
     if cls.code:
         raise ResourceReadOnly(cls.code, f"a new session cannot share {owner['id'][:8]}'s folder: {cls.reason}")
-    live = await live_check(fleet.client(host), cls)
+    live = await live_check(fleet.client(host), cls, worktree=False)
     if live.issue:
         raise ResourceReadOnly(live.issue[0], live.issue[1])
     if live.folder_missing:
@@ -430,6 +470,18 @@ def authorize_register_tab(host: str, session_id: str) -> WriteGrant:
     return WriteGrant(host, m.action, session_id, m.channels)
 
 
+def merge_origin(hc: HostConfig, session_id: str, t: dict, ws: dict) -> str | None:
+    """The main checkout a worktree merge would write: the folder recorded at start, which must still be the
+    workspace's folder. A tab whose workspace now points elsewhere is a binding mismatch, not a new target."""
+    recorded = norm((_latest(_entries(hc.name), session_id) or {}).get("origin_cwd"))
+    w = next((x for x in ws.get("workspaces") or [] if x.get("id") == t.get("workspaceId")), {})
+    current = norm(t.get("_origin_cwd") or w.get("folderPath"))
+    if recorded and current and recorded != current:
+        raise ResourceReadOnly("BINDING_MISMATCH",
+                               f"the workspace folder is now {current}; the session was started from {recorded}")
+    return recorded or current
+
+
 def check_merge_destination(hc: HostConfig, origin: Any) -> None:
     """worktree:merge runs in the main checkout; only a managed clone may receive it."""
     if not in_managed_root(hc, origin):
@@ -437,6 +489,14 @@ def check_merge_destination(hc: HostConfig, origin: Any) -> None:
             "DESTINATION_MANUAL",
             f"the merge destination {origin} is a human checkout; the connector never merges into it "
             "(integrate in a managed clone or through a pull request)")
+
+
+def authorize_external_worktree(hc: HostConfig, root: str, path: str, branch: str, task_id: str) -> None:
+    """Before any SSH git: the task worktree goes inside the workspace's clone only where that is allowed."""
+    check_external_worktree(root, path, branch, task_id)
+    if not (hc.shared_clone_worktrees or in_managed_root(hc, root)):
+        raise ResourceReadOnly("DESTINATION_MANUAL",
+                               f"{root} is not inside a managed root and shared_clone_worktrees = false on this host")
 
 
 def check_external_worktree(root: str, path: str, branch: str, task_id: str) -> None:

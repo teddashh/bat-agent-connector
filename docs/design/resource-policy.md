@@ -34,19 +34,22 @@ Session 歸屬與資料夾歸屬分開判斷。Managed session 只有在 connect
 
 Registry 只是 connector 自己的說法。每次寫入前再讀 BAT：
 
-1. `claude:get-session-meta` 的 `cwd` 要等於紀錄的資料夾。
-2. Worktree session 的 `worktree:status` 路徑要等於紀錄。
-3. `git:getRoot(cwd)` 要等於 worktree 本身（managed root 則要落在 managed root 內）。指回主 checkout 的連結會在這裡被擋下。
+1. `claude:get-session-meta` 的 `cwd` 要等於紀錄的資料夾（每個動作）。
+2. `git:getRoot(cwd)` 要等於 worktree 本身（managed root 則要落在 managed root 內）。指回主 checkout 的連結會在這裡被擋下。送字、回答、權限與 worktree 動作做這項；interrupt、stop 不碰資料夾，只核對 1。
+3. Worktree 動作（merge、remove、rehydrate）另外比對 `worktree:status` 的路徑。這個 channel 會計算整條分支的 diff，大分支要一分鐘，所以送字、回答、中斷不讀它，以免在 host 寫入鎖內等待。
 
-不符回 `BINDING_MISMATCH`。送字、回答、權限與 merge 另外要求資料夾存在（`WORKDIR_MISSING`）；stop、interrupt、remove 在資料夾已消失時仍可執行。
+BAT tab 記的 `cwd`／`worktreePath` 和紀錄不同也是 `BINDING_MISMATCH`；紀錄沒有 worktree 而 tab 有，同樣算不符，否則 worktree 動作會作用在 tab 指的路徑。
 
-`managed_roots` 請填實際路徑（不要經過 symlink），因為 git root 回傳的是解析後的路徑，不一致會被拒絕。
+不符回 `BINDING_MISMATCH`。送字、回答、權限與 merge 另外要求資料夾存在（`WORKDIR_MISSING`）；stop、interrupt、remove 在資料夾已消失時仍可執行。`session_cleanup` 先看 registry 與 tab（不讀 host），只在要碰 worktree 時才做即時核對；資料夾已消失時不送 `worktree:rehydrate`。
+
+`managed_roots` 請填實際路徑（不要經過 symlink）。開新 session 前會用 `git:getRoot` 讀目的地的實際位置：managed root 內的路徑若解析到 managed root 之外（連結到人工 checkout），在任何寫入前拒絕（`DESTINATION_MANUAL`）。
 
 ## 目的端
 
-- **新 session**：不能直接在人工 checkout 工作（`use_worktree=false` 只限 managed root）。在人工 clone 內開新 worktree，只有 `shared_clone_worktrees = true`（預設，legacy）時允許。BAT 回傳的 worktree 不在預期位置時中止，且不 rollback（不刪一個位置不明的資料夾）。
-- **Merge**：BAT 的 `worktree:merge` 在主 checkout 執行 `git checkout`／`merge`，只有主 checkout 位於 managed root 時才允許，否則回 `DESTINATION_MANUAL`。`session_cleanup` 對準備好合併但目的端是人工 checkout 的工作改判 `ESCALATE`。
-- **Task service 的 SSH worktree**：只能是 `<workspace>/.bat-worktrees/batc-task-<12 hex>` 與分支 `batc/task-<12 hex>`。
+- **新 session**：不能直接在人工 checkout 工作（`use_worktree=false` 只限 managed root）。在人工 clone 內開新 worktree，只有 `shared_clone_worktrees = true`（預設，legacy）時允許。BAT 把 worktree 建在 workspace 資料夾解析後的 git root 下，所以經 symlink 開的 workspace 以 `git:getRoot` 的結果比對，並記入 registry 的 `origin_root`。BAT 回傳的 worktree 不在預期位置時中止，且不 rollback：位置不明的路徑可能就是人工 checkout，`worktree:remove` 加 `deleteBranch` 可能刪掉人的分支。
+- **Merge**：BAT 的 `worktree:merge` 在主 checkout 執行 `git checkout`／`merge`，只有主 checkout 位於 managed root 時才允許，否則回 `DESTINATION_MANUAL`。主 checkout 取 session 建立時記下的 `origin_cwd`，而且必須仍是 tab 所在 workspace 的資料夾；workspace 後來改指別處就是 `BINDING_MISMATCH`，不會改用新位置。`session_cleanup` 對準備好合併但目的端是人工 checkout 的工作改判 `ESCALATE`。
+- **Task service 的 SSH worktree**：只能是 `<workspace>/.bat-worktrees/batc-task-<12 hex>` 與分支 `batc/task-<12 hex>`，而且 `shared_clone_worktrees = false` 時（workspace 不在 managed root）在任何 SSH git 之前就拒絕。
+- **Failover（`all_exhausted`）**：Claude 額度是整個帳號共用，人的 tab 會和 managed session 一起用完。唯讀 session 先剔除、列在 `skipped_read_only`，`max_start_per_call` 只算 managed session。
 
 ## 全 mutation 清單
 
