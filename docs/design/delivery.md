@@ -532,3 +532,9 @@ Step 3 為舊 operation 回填部署後，以 `deployment.backfilled` 附記當�
 回歸：`tests/test_deployment_history.py` 驗證 step 1→2→3、原 events 不變、重開無重複、session history 的
 明確 operation link、未洩漏 provider/verifier 私密欄位、相同狀態 quiet、state/event 同交易 rollback；
 `test_delivery_v2_migration_keeps_history_unverified_and_reopens` 保留 unverified 與 provider-slot 契約。
+
+
+Metadata 與 deployment 的 daemon 背景 read-reconcile loop 每輪都先查同一 `journal.owner_valid()`；
+owner 不可用時不開始 provider reconcile。這是既有 fleet lease 的使用，沒有第二個 daemon 或 authority。
+Operation steps／取消／恢復仍走同一 OperationService；同一輪進行中的 provider reads 沿原 read-back 語意。
+測試 `tests/test_delivery_owner.py` 覆蓋兩個 loop、owner 有效／失效的零 provider-call 行為。
