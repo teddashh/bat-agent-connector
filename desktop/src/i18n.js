@@ -1,6 +1,8 @@
 // Display labels only. Logic and CSS never key on these strings (machine enums come from /api/v1).
 const STRINGS = {
   "zh-TW": {
+    parent_archived: "這個項目或所屬專案已封存；編輯草稿仍保留。",
+    pending_changed: "待回覆的問題已改變；草稿仍保留。請查看目前的要求後重新作答。",
     attachment_file_changed: "請重新選擇相同檔案以查回原上傳；不同內容請先移除這一項。", attachment_pending: "上傳結果仍待確認。請以相同檔案重試原操作。",
     existing_artifact: "已上傳附件", add_attachment: "加入附件",
     attachments: "附件", choose_attachments: "選擇附件", upload_on_choose: "選擇檔案後立即上傳。成功上傳的版本會隨草稿保存。",
@@ -251,6 +253,8 @@ const STRINGS = {
     integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。",
   },
   en: {
+    parent_archived: "This item or its project is archived. Your edit draft is retained.",
+    pending_changed: "The pending request changed. Your draft is retained; review the current request before answering.",
     attachment_file_changed: "Choose the same file to recover this upload; remove this entry before choosing different content.", attachment_pending: "Upload outcome is still pending. Retry the original operation with the same file.",
     existing_artifact: "Uploaded attachment", add_attachment: "Add attachment",
     attachments: "Attachments", choose_attachments: "Choose attachments", upload_on_choose: "Files upload when chosen. Uploaded revisions are saved with your draft.",
