@@ -55,3 +55,21 @@ class ResourceReadOnly(WriteRefused):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(f"[{code}] {message}")
+
+
+class TaskControlRefused(WriteRefused):
+    """The task authority refused a stale or out-of-order session control."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(f"[{code}] {message}")
+
+
+class OwnerConflict(RuntimeError, BatError):
+    """A live daemon already owns this connector fleet."""
+
+    code = "OWNER_CONFLICT"
+
+    def __init__(self, owner: dict) -> None:
+        self.owner = owner
+        super().__init__(f"[OWNER_CONFLICT] another task daemon owns this fleet: {owner}")

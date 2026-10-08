@@ -166,6 +166,10 @@ class ApiV1:
             body = await self._read_body(method, headers, reader)
             token = self._bearer(headers)
             principal = api_auth.authenticate(self.daemon.journal.db, token, self.daemon._admin_token)
+            if principal is None and method == "POST" and path == "/api/v1/operations":
+                principal = self.daemon.capability_principal(
+                    token, body.get("action"), body.get("target") or {},
+                    headers.get("idempotency-key") or body.get("idempotency_key"))
             if path == "/api/v1/events/stream" and method == "GET":
                 if principal is None:
                     raise ApiError(401, "UNAUTHORIZED", "a valid bearer token is required")
