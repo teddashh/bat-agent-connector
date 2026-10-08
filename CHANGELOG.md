@@ -9,6 +9,8 @@
   the same parent; start/send lost replies use existing reconcile. HTTP, CLI, three MCP tools and bilingual Dashboard
   pickers/drafts/materialization status. No store deletion or new BAT channel; manual/result capture and artifact.accept
   (Part B, A03 attachments) and cross-host commit fetch (Part C) remain deferred.
+- Artifact schema setup runs idempotently after numbered migrations without reading or advancing `user_version`,
+  preserving delivery and observation data migrations ([design](docs/design/artifacts.md), plan §08/§13).
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
