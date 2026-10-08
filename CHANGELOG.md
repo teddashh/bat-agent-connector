@@ -2,11 +2,55 @@
 
 ## Next release (unreleased)
 
+- Delivery merge method ([design](docs/design/delivery.md), plan §09/§16, C05): execution, recorded steps and
+  verification use the admitted preview's method across checks waits and restarts; current policy can block a PUT
+  with MERGE_DISABLED/INVALID_PARAMS, but changing the default never changes the reviewed method.
+
+- Delivery journal DDL ([design](docs/design/delivery.md), plan §09/§28, C04/C07 storage): create the preview,
+  metadata-settlement and scope-read tables and preview index on every open with idempotent DDL, preserving
+  user_version and saved previews. Version numbers belong to allocated one-time data steps; Part B follows this rule.
+
+- Delivery metadata conflict settlement ([design](docs/design/delivery.md), plan §09/§10/§15, C07): an unresolved
+  cancelled or UNCERTAIN_UNRESOLVED metadata write that still shows a third value after ten minutes now saves a
+  conflict receipt and before/intended/observed refs. This releases the PR for a fresh-digest update and stops
+  background reads without another PATCH or undo; resuming the original operation retains PR_METADATA_CONFLICT.
+
+- Delivery native-stack verification ([design](docs/design/delivery.md), plan §09/§16, C05): a native stack
+  created after the final scope check now stops merge verification even when its other members remain open.
+  The merge receipt keeps every member's current state, head SHA and base ref; combined delivery does not dispatch.
+  Membership already dissolved by GitHub remains an observation limit; unrelated open-PR head changes are not proof.
+
+- Merge-async 400 recovery (#32 low item; [design](docs/design/delivery.md), plan §16, C04/C05): re-read the PR
+  before recording refusal. An already merged reviewed head goes through normal result verification without
+  claiming this operation merged it; all other states retain PR_NOT_MERGEABLE. Refused readback stays resumable,
+  and neither recovery path sends a second PUT.
+
+- Delivery Part A after #33 ([design](docs/design/delivery.md), plan §09/§10/§15/§16, C04/C05/C07): refused GitHub
+  reads after merge.submit or a metadata PATCH retain needs_attention and resume with fresh readonly verification,
+  including comparison and recent-PR pages. Readonly plan/verify steps do not count as sent writes; pre-write
+  refusals still fail fast. Repeated resumes do not reuse a stale refusal receipt or resend the accepted write.
+
 - Delivery operations no longer end as `failed` while GitHub is still merging or deploying (#32). A refused GitHub
   read after a merge request or dispatch was sent (an expired token's 401, a 403, a 404) now waits for a person
   (`needs_attention`) and keeps the recipe's deploy lock; before any write it still fails. A rate-limited read (403),
   a reply cut short or an unreadable body counts as no answer, and an unanswered run lookup after a 204 dispatch
   keeps looking. The GitHub token is resolved for every request, so a rotated or expiring token works without a restart.
+
+- Delivery Part A ([design](docs/design/delivery.md), plan §09/§10/§15/§16/§18, C04/C05/C07):
+  `github.pr.update` edits title/body with existing integrate scope and per-repository allow_pr_update opt-in,
+  read-compare-write-readback and recorded conflicts; unknown PATCH replies are never resent. Immutable merge
+  previews pin head/base/method, complete paginated commit ranges and affected PRs; unsupported native stacks,
+  branch chains and indirect merges are refused. Merge verifies actual results, accepts normal base movement after
+  submission and reports the extra commits; combined deploy uses the actual verified merged SHA. HTTP, MCP
+  github_pr_update/github_pr_merge, caller-token delivery CLI, Dashboard metadata drawer/scope preview and both
+  skills are aligned. Contract version remains the ISO change date 2026-10-08. Part B deployments/rollback are pending.
+- Delivery Part A review fixes ([design](docs/design/delivery.md), plan §10/§15/§16, C04/C05/C07):
+  uncertain metadata writes still unchanged after ten minutes settle as not applied,
+  releasing the PR without another PATCH. Merge previews reuse identical documents, prune expired unreferenced
+  rows and throttle event reloads for sixty seconds. Checks waits use cheap head/base reads; the final scope check
+  runs before the submit step so transient read failures can resume. Verification accepts related PRs merged later
+  and stops updated PR pagination at admission time.
+
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
   those sessions. BAT has no record of them: `batc remove-worktree` on a checkpoint session re-registered the

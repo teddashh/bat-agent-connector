@@ -65,7 +65,9 @@ metadata:
 | Persisted inventory with staleness (read, daemon) | `inventory_sessions(host?, access?, attention?, cursor?)`, `inventory_hosts()` | - |
 | Shared event log (read, daemon) | `events_list(after, limit)` | - |
 | Durable operation (write, daemon) | `operation_submit(action, idempotency_key, target, params)`, `operation_get(id)` | `batc op [ID]` |
-| Pull request before merging (read, daemon) | `github_pr_preview(repository, pull_number)` | - |
+| Pull request / fixed merge scope (read, daemon) | `github_pr_preview(repository, pull_number, method?)`, `github_merge_preview_get(preview_id)` | `batc delivery pr OWNER/REPO NUMBER [--method METHOD]` |
+| Edit PR title/body (integrate, repository opt-in) | `github_pr_update(repository, pull_number, expected_metadata_digest, idempotency_key, title?, body?, confirm)` | `batc delivery update-pr OWNER/REPO NUMBER --metadata-digest DIGEST --title TITLE --body-file FILE --key KEY` |
+| Merge reviewed scope (merge; deploy for recipe) | `github_pr_merge(preview_id, idempotency_key, recipe?, confirm)` | `batc delivery merge --preview mpv_... [--recipe NAME] --key KEY` |
 | What a checkpoint would record (read, daemon) | `checkpoint_preview(host, session_id)` | - |
 | Record a checkpoint (connector records only, daemon) | `checkpoint_create(host, session_id, idempotency_key, commit?, note?, confirm=true)` | `batc checkpoint create HOST SID --note ...` |
 | Continue from it in a new managed session (daemon) | `work_continue_from_checkpoint(checkpoint_id, instructions, idempotency_key, agent?, confirm=true)` | `batc checkpoint continue CP --instructions ...` |
@@ -214,11 +216,32 @@ the row is the last known state of an unreachable host. Operation writes need `B
 pending prompt's `tool_use_id`. A `needs_attention` operation can be resumed with `operation_resume` once its cause is
 fixed; it reads unproven steps back and never resends them.
 
-Merging and deploying (only with the user's go-ahead for that PR and environment): read `github_pr_preview`, then
-`operation_submit(action="github.pr.merge", target={repository, pull_number}, preconditions={expected_head_sha:
-<the head_sha you reviewed>})`, or `delivery.merge_and_deploy` with `target.recipe`. `waiting_checks` and
-`waiting_external` are normal; report the reason and follow `operation_get`. A failed deploy after a merge keeps
-`external_refs.merged_sha`: retry with `deployment.start(params={source_sha: merged_sha})`, never by merging again.
+PR metadata is separate from head integration: read `github_pr_preview`, then use `github_pr_update` with
+its metadata_digest, a new idempotency_key and title and/or raw Markdown body (empty body clears; omitted stays).
+Requires integrate and repository allow_pr_update (default false); no new scope or token re-issue. Works on human-only
+PRs, without a task. The backend compares title/body before PATCH and reads back after it; GitHub has no atomic body
+CAS, so the last read/write race cannot be eliminated. On PR_METADATA_CHANGED / PR_METADATA_CONFLICT, read the recorded
+before/intended/observed content and edit against a new digest/key; never overwrite automatically or resend an unknown
+PATCH. Cancel does not undo metadata; an unresolved write keeps later edits blocked during a ten-minute settle window.
+If readback still matches the original metadata after that window, delivery settles not_applied and admits new edits. An operation
+stopped at UNCERTAIN_UNRESOLVED can be resumed to read this settlement and fail with PR_METADATA_NOT_APPLIED without
+another PATCH; read a fresh digest and use a new key for the next edit. Late changes still fail PR_METADATA_CHANGED.
+
+Merging and deploying (only with the user's go-ahead for that PR and environment): read `github_pr_preview` with the
+chosen method and review its merge_preview's entire commit range, affected PRs, blocking and warnings. Use
+`github_pr_merge(preview_id=<mpv id>, idempotency_key=<key>, confirm=true)`, optionally recipe for merge-and-deploy.
+The thin wrapper reads the saved immutable preview; no refresh or implicit latest version. Generic operation_submit
+uses params={preview_id, method}, preconditions={expected_head_sha: preview.target.head_sha, expected_base_sha:
+preview.target.base_sha, preview_digest: preview.digest}, target={repository,pull_number[,recipe]}. Head-only clients
+are refused. Native stacks (including bottom), branch dependencies and unsupported indirect merges are refused;
+no bypass or automatic rebase. Pre-submit base movement requires a new preview; after acceptance, a newer base is
+normal and merge.verify records merged_onto_base_sha, base_moved and other_commits_count. Report those extra commits.
+waiting_checks / waiting_external are normal; follow operation_get, preserving the key on lost replies. A different
+PR swept in fails verification and combined does not dispatch. A passed combined merge deploys its actual merged SHA.
+A failed deploy after merge retains external_refs.merged_sha: retry deployment.start with source_sha=merged_sha,
+never merge again. Deployment generations/history/runtime evidence/rollback are Part B and are not available yet.
+Both new MCP wrappers require confirm=true and the client's BATC_API_TOKEN; read-only MCP does not register them.
+New delivery CLI writes also require that token and never inherit Dashboard or local-admin grants.
 
 ## Safety rules
 
