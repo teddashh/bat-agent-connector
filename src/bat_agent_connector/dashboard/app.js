@@ -492,6 +492,10 @@ function integrationPanel(pr, reloadCard) {
       h("button", { class: "secondary", disabled: i === selected.length - 1, onclick: () => { selected.splice(i + 1, 0, selected.splice(i, 1)[0]); changed(); } }, "↓"),
       h("button", { class: "secondary", onclick: () => { selected.splice(i, 1); changed(); } }, "×"))));
   };
+  const freshHead = async () => { // the card's head is stale after the PR moved: re-read it before previewing again
+    try { pr.head_sha = (await api("GET", `/repositories/${pr.repository}/pulls/${pr.pull_number}`)).pull_request.head_sha; }
+    catch { /* the preview then reports the real head */ }
+  };
   const runPreview = async () => {
     const mine = ++generation;
     doc = null;
@@ -556,13 +560,13 @@ function integrationPanel(pr, reloadCard) {
           try { follow((await api("POST", `/operations/${op.operation_id}/resume`, {})).operation); }
           catch (e) { status.append(errorBox(e)); }
         },
-        cancel: async () => { await api("POST", `/operations/${op.operation_id}/cancel`, {}); runPreview(); } }));
+        cancel: async () => { await api("POST", `/operations/${op.operation_id}/cancel`, {}); await freshHead(); runPreview(); } }));
       if (TERMINAL.includes(op.status) || op.status === "needs_attention") break;
       await sleep(1500);
       op = (await api("GET", `/operations/${op.operation_id}`)).operation;
     }
     if (op.status === "succeeded") reloadCard(integrationStatus(op, {})); // the card shows the new head
-    else if (["TARGET_HEAD_CHANGED", "SOURCE_CHANGED"].includes(op.error_code)) runPreview();
+    else if (["TARGET_HEAD_CHANGED", "SOURCE_CHANGED"].includes(op.error_code)) { await freshHead(); runPreview(); }
   };
   const branch = h("input", { placeholder: t("branch_on_github") });
   (async () => {
@@ -598,8 +602,8 @@ function integrationStatus(op, act) {
       n: op.result.added_commits ?? "?" })
     : op.status === "needs_attention" ? (t("integration_" + code) !== "integration_" + code ? t("integration_" + code) : op.status_reason)
       : op.status === "uncertain" ? t("integration_uncertain")
-        : op.status === "waiting_external" ? t((op.external_refs || {}).conflict ? "integration_waiting_resolver"
-          : "integration_waiting")
+        : op.status === "waiting_external" ? ((op.external_refs || {}).conflict ? t("integration_waiting_resolver")
+          : (op.external_refs || {}).pushed_sha ? t("integration_waiting") : op.status_reason || t("integration_running"))
           : op.status === "failed" ? `${code}: ${op.status_reason || ""}` : t("integration_running");
   const conflict = ["INTEGRATION_CONFLICT", "RESOLUTION_INCOMPLETE", "RESOLUTION_INVALID"].includes(code);
   const out = h("div", {});
