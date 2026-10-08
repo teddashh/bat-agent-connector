@@ -851,9 +851,11 @@ def cmd_hub(args) -> int:
             raise ValueError("--source differs from the reviewed preview")
         out = request("op_submit", **apply_request(doc), wait_s=30, timeout=40.0, entry="cli")
     _print(out, True)
+    if args.hub_cmd == "show":
+        return 0
     op = out.get("operation", {})
     preview = out.get("preview") or (op.get("result") or {}).get("preview")
-    return int((preview is not None and not preview["can_apply"]) or op.get("status") in {"failed", "needs_attention", "cancelled"})
+    return int(op.get("status") != "succeeded" or (args.preview and not (preview or {}).get("can_apply")))
 
 
 def _manage(action: str, target: dict, params: dict, pre: dict | None = None) -> dict:

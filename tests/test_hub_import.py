@@ -21,6 +21,35 @@ from tests.test_work_items import act as management_act
 FIXTURE = Path(__file__).parent / "fixtures/hub-import/basic"
 
 
+@pytest.mark.parametrize("version", [1, 8])
+def test_b05_import_ddl_preserves_data_step_version_and_is_idempotent(tmp_path, version):
+    import sqlite3
+
+    from bat_agent_connector.task_journal import Journal
+
+    path = tmp_path / "journal.db"
+    with sqlite3.connect(path) as db:
+        db.execute(f"PRAGMA user_version={version}")
+    journal = Journal(path)
+    db = journal.db
+    assert db.execute("PRAGMA user_version").fetchone()[0] == version
+    tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"hub_import_sources", "hub_import_map", "hub_import_previews", "hub_import_receipts",
+            "hub_import_groups", "hub_import_source_snapshots"} <= tables
+    db.execute("INSERT INTO hub_import_sources(source_id,revision) VALUES('fixture',3)")
+    statements = []
+    db.set_trace_callback(statements.append)
+    journal._migrate_hub_import()
+    db.set_trace_callback(None)
+    assert not any("user_version" in sql.lower() for sql in statements)
+    before = list(db.iterdump())
+    journal.close()
+    reopened = Journal(path)
+    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == version
+    assert list(reopened.db.iterdump()) == before
+    reopened.close()
+
+
 @pytest.fixture
 async def daemon(mock, tmp_path):
     src = tmp_path / "hub"
@@ -831,3 +860,37 @@ async def test_b05_ambiguous_names_are_blocked_and_parser_reports_nested_blocks(
     with pytest.raises(ValueError, match="nested"):
         hub.parse_doc("---\nfield:\n  nested:\n    child: unsupported\n---\n")
     assert hub.parse_doc("---\nname : Value\n---\n")[0] == {"name": "Value"}
+
+
+@pytest.mark.parametrize("mode", ["preview", "apply"])
+@pytest.mark.parametrize("status", ["accepted", "running", "waiting_checks", "waiting_external", "uncertain",
+                                   "needs_attention", "failed", "cancelled", "succeeded"])
+def test_b05_cli_import_exit_code_requires_success(monkeypatch, capsys, mode, status):
+    from bat_agent_connector import cli, task_daemon
+
+    doc = {"source_id": "sample", "preview_id": "hip_" + "2" * 32,
+           "digest": "fixture-digest", "can_apply": True}
+    opid = "op_" + "2" * 32
+
+    def request(method, **kw):
+        if method == "hub_import_get":
+            return {"preview": doc}
+        return {"operation": {"operation_id": opid, "status": status, "result": {"preview": doc}}}
+
+    monkeypatch.setattr(task_daemon, "request", request)
+    args = ["hub", "import", "--source", "sample", "--" + mode]
+    if mode == "apply":
+        args += ["--preview-id", doc["preview_id"]]
+    assert cli.main(args) == (0 if status == "succeeded" else 1)
+    assert opid in capsys.readouterr().out
+
+
+def test_b05_cli_successful_preview_with_blockers_is_nonzero(monkeypatch, capsys):
+    from bat_agent_connector import cli, task_daemon
+
+    doc = {"source_id": "sample", "preview_id": "hip_" + "3" * 32, "can_apply": False}
+    opid = "op_" + "3" * 32
+    monkeypatch.setattr(task_daemon, "request", lambda method, **kw: {"preview": doc} if method == "hub_import_get"
+                        else {"operation": {"operation_id": opid, "status": "succeeded", "result": {"preview": doc}}})
+    assert cli.main(["hub", "import", "--source", "sample", "--preview"]) == 1
+    assert opid in capsys.readouterr().out
