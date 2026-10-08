@@ -551,7 +551,11 @@ function integrationPanel(pr, reloadCard) {
   const follow = async op => {
     for (;;) {
       if (!box.isConnected) return;
-      status.replaceChildren(integrationStatus(op, { resume: () => api("POST", `/operations/${op.operation_id}/resume`, {}),
+      status.replaceChildren(integrationStatus(op, {
+        resume: async () => {
+          try { follow((await api("POST", `/operations/${op.operation_id}/resume`, {})).operation); }
+          catch (e) { status.append(errorBox(e)); }
+        },
         cancel: async () => { await api("POST", `/operations/${op.operation_id}/cancel`, {}); runPreview(); } }));
       if (TERMINAL.includes(op.status) || op.status === "needs_attention") break;
       await sleep(1500);
@@ -594,13 +598,26 @@ function integrationStatus(op, act) {
       n: op.result.added_commits ?? "?" })
     : op.status === "needs_attention" ? (t("integration_" + code) !== "integration_" + code ? t("integration_" + code) : op.status_reason)
       : op.status === "uncertain" ? t("integration_uncertain")
-        : op.status === "waiting_external" ? t("integration_waiting")
+        : op.status === "waiting_external" ? t((op.external_refs || {}).conflict ? "integration_waiting_resolver"
+          : "integration_waiting")
           : op.status === "failed" ? `${code}: ${op.status_reason || ""}` : t("integration_running");
+  const conflict = ["INTEGRATION_CONFLICT", "RESOLUTION_INCOMPLETE", "RESOLUTION_INVALID"].includes(code);
+  const out = h("div", {});
+  const handoff = conflict && (state.caps?.scopes || []).includes("start")
+    ? h("button", { class: "secondary", onclick: async () => {
+      try {
+        const o = await submit("integration.handoff", { operation_id: op.operation_id }, { agent: "claude" }, {},
+          `handoff.${op.operation_id}`);
+        out.append(h("p", {}, opStatus(o), " ", t("handoff_started"), " ",
+          h("a", { href: `#/op/${o.operation_id}` }, o.operation_id)));
+      } catch (e) { out.append(errorBox(e)); }
+    } }, t("hand_to_agent")) : null;
   const buttons = op.status === "needs_attention" ? [
-    h("button", { class: "primary", onclick: act.resume }, t("resume")),
-    h("button", { class: "danger", onclick: act.cancel }, t("cancel_and_preview"))] : [];
-  return h("div", {}, h("p", {}, opStatus(op), " ", text, " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id)),
+    h("button", { class: "primary", onclick: act.resume }, t("resume")), handoff,
+    h("button", { class: "danger", onclick: act.cancel }, t("cancel_and_preview"))].filter(Boolean) : [];
+  out.append(h("p", {}, opStatus(op), " ", text, " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id)),
     h("div", { class: "actions" }, ...buttons));
+  return out;
 }
 
 async function viewOperations(main) {

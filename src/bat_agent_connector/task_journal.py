@@ -242,7 +242,9 @@ class Journal:
                 source_kind TEXT NOT NULL, source_id TEXT NOT NULL, source_host TEXT NOT NULL,
                 location_class TEXT NOT NULL, pinned_sha TEXT NOT NULL, mode TEXT NOT NULL, commits TEXT,
                 source_key TEXT NOT NULL, status TEXT NOT NULL, method TEXT, base_sha TEXT, integrated_sha TEXT,
-                picked TEXT, conflict_files TEXT, resolution_sha TEXT, delivered_sha TEXT, delivered_at REAL,
+                picked TEXT, conflict_files TEXT, resolution_sha TEXT, remerge_stat TEXT,
+                resolver_operation_id TEXT, resolver_session_id TEXT, repair_worktree TEXT, repair_branch TEXT,
+                delivered_sha TEXT, delivered_at REAL,
                 actor TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
                 PRIMARY KEY(operation_id, seq)
             );
@@ -264,6 +266,11 @@ class Journal:
                                ("task_path", "TEXT NOT NULL DEFAULT 'standard'")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {sql_type}")  # noqa: S608 - fixed local identifiers
+        receipt_columns = {r[1] for r in self.db.execute("PRAGMA table_info(integration_receipts)")}
+        for name in ("remerge_stat", "resolver_operation_id", "resolver_session_id", "repair_worktree",
+                     "repair_branch"):
+            if name not in receipt_columns:
+                self.db.execute(f"ALTER TABLE integration_receipts ADD COLUMN {name} TEXT")  # noqa: S608 - fixed names
         if "uncertain_tries" not in {r[1] for r in self.db.execute("PRAGMA table_info(operations)")}:
             self.db.execute("ALTER TABLE operations ADD COLUMN uncertain_tries INTEGER NOT NULL DEFAULT 0")
         cap_columns = {r[1] for r in self.db.execute("PRAGMA table_info(capabilities)")}

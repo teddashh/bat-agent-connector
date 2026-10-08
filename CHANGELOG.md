@@ -12,6 +12,11 @@
   `[[github.repos]]`, routes `/api/v1/integrations/...`, MCP `integration_candidates`, `integration_get`,
   `integrations_list`, CLI `batc integrate`, and an "Update PR results" panel in the Dashboard's Delivery view.
   Merging is refused while an integration of the same PR is open, and the other way round.
+- `integration.handoff`: an apply stopped at a conflict gets a repair worktree in the integration area and a confined
+  managed session that resolves it; Resume waits while the session works, accepts exactly one merge commit of the two
+  sides with no uncommitted changes or conflict markers, pins it by SHA, and continues without composing earlier
+  sources again (`RESOLUTION_INCOMPLETE`, `RESOLUTION_INVALID`). CLI `batc integrate handoff`; the Dashboard offers
+  "Ask an agent to resolve". Shared `checkpoints.start_in_worktree` starts both checkpoint and repair sessions.
 
 - Checkpoints no longer call BAT's `git:status` on the person's checkout: BAT runs a plain `git status`, which can
   rewrite `.git/index`, and answers `[]` on failure. Uncommitted changes are counted over SSH with

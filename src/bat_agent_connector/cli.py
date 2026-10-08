@@ -657,6 +657,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--key", help="idempotency key (default: a new one; the same key returns the same preview)")
     c = isp.add_parser("apply", help="compose a reviewed preview and push it to the PR head")
     c.add_argument("preview_id")
+    c = isp.add_parser("handoff", help="start a managed session that resolves an apply's conflict, then Resume")
+    c.add_argument("operation_id")
+    c.add_argument("--agent", choices=["claude", "codex"], default="claude")
+    c.add_argument("--instructions-file", help="your note for the session (optional)")
+    c.add_argument("--key", help="idempotency key (default: a new one)")
     c = isp.add_parser("show", help="one preview (ipv_...) or integration operation (op_...)")
     c.add_argument("id")
     p = sp.add_parser("op", help="show one operation, or list recent ones; --cancel / --resume one")
@@ -732,6 +737,12 @@ def cmd_integrate(args) -> int:
     elif cmd == "apply":
         doc = request("integration_preview_get", preview_id=args.preview_id, entry="cli")["preview"]
         out = request("op_submit", **apply_request(doc), wait_s=30, entry="cli", timeout=40.0)
+    elif cmd == "handoff":
+        note = Path(args.instructions_file).read_text() if args.instructions_file else ""
+        out = request("op_submit", action="integration.handoff", idempotency_key=args.key or f"cli-{uuid.uuid4()}",
+                      target={"operation_id": args.operation_id}, params={"agent": args.agent, "instructions": note},
+                      wait_s=30, entry="cli", timeout=40.0)
+        out["next"] = f"when the session has committed: batc op {args.operation_id} --resume"
     elif args.id.startswith("ipv_"):
         out = request("integration_preview_get", preview_id=args.id, entry="cli")
     else:

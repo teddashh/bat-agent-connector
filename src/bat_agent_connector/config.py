@@ -248,6 +248,7 @@ class IntegrateConfig:
     remote_url: str
     protected_refs: tuple[str, ...] = PROTECTED_REFS
     fetch_timeout_s: float = 1800.0
+    workspace: str | None = None  # BAT workspace for a conflict-resolving session when its source has none
 
 
 @dataclass(frozen=True)
@@ -328,8 +329,12 @@ def _integrate(r: dict, repository: str, api_url: str, host_names: set[str]) -> 
         timeout = -1.0
     if not 60 <= timeout <= 7200:
         raise ConfigError(f"[[github.repos]] {repository}: integrate.fetch_timeout_s must be 60-7200")
+    workspace = raw.get("workspace")
+    if workspace is not None and (not isinstance(workspace, str) or not workspace.strip()):
+        raise ConfigError(f"[[github.repos]] {repository}: integrate.workspace must be a BAT workspace name or id")
     return IntegrateConfig(tuple(dict.fromkeys(str(h) for h in hosts)),
-                           _integrate_url(raw.get("remote_url"), repository, api_url), tuple(protected), timeout)
+                           _integrate_url(raw.get("remote_url"), repository, api_url), tuple(protected), timeout,
+                           workspace)
 
 
 def parse_github(data: dict) -> GitHubConfig:

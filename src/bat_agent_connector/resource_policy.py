@@ -92,7 +92,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation("session.create", "bat", "create",
              frozenset({"claude:start-session", "worktree:create", "worktree:remove", "claude:send-message"}),
              ("session_start", "session_failover", "session_relay(start_if_missing)", "fanout_plan_session",
-              "fanout_from_plan", "batc fanout --start", "task service lead/reviewer start", "checkpoint.continue"),
+              "fanout_from_plan", "batc fanout --start", "task service lead/reviewer start", "checkpoint.continue",
+              "integration.handoff"),
              "new session ID reserved in the registry first; it works in a managed root, a worktree the "
              "connector creates, or a connector-owned worktree it shares; never in a human checkout"),
     Mutation("workspace.register_tab", "bat", "tab", frozenset({"workspace:save"}),
@@ -106,7 +107,7 @@ MUTATIONS: tuple[Mutation, ...] = (
              "a connector clone <managed root>/<name> (marked batc.managed-clone) that only reads the person's "
              "repository, and the worktree <clone>/.bat-worktrees/batc-cp-<12 hex> on branch batc/cp-<12 hex>"),
     Mutation("integration.area", "ssh-git", "path", frozenset(),
-             ("integration.preview", "integration.apply", "batc integrate"),
+             ("integration.preview", "integration.apply", "integration.handoff", "batc integrate"),
              "only <first managed root>/.batc-integration/<name>-<8 hex>/repo.git, a bare repository whose identity "
              "(real path, batc.* markers, a local-config allowlist, no grafts, alternates or replace refs) is "
              "checked before every write; refs only under refs/batc/; other repositories, the person's included, "
@@ -551,6 +552,16 @@ def check_integration_area(hc: HostConfig, path: str) -> None:
     if (not parent or posixpath.dirname(p) != parent or not _AREA_NAME.fullmatch(posixpath.basename(p))
             or not in_managed_root(hc, p)):
         raise ResourceReadOnly("DESTINATION_MANUAL", f"{path} is not a connector integration area")
+
+
+def check_repair_worktree(hc: HostConfig, area: str, path: str, branch: str) -> None:
+    """A conflict-resolving worktree: <area>/wt/batc-fix-<12 hex> on branch batc/fix-<12 hex>, nothing else."""
+    check_integration_area(hc, area)
+    name = posixpath.basename(norm(path) or "")
+    suffix = name[len("batc-fix-"):]
+    if (norm(path) != posixpath.join(norm(area) or "", "wt", name) or not name.startswith("batc-fix-")
+            or not re.fullmatch(r"[0-9a-f]{12}", suffix) or branch != f"batc/fix-{suffix}"):
+        raise ResourceReadOnly("DESTINATION_UNKNOWN", f"{path} is not a connector repair worktree")
 
 
 def classify_integration_source(hc: HostConfig, kind: str, location: str | None) -> tuple[str, bool]:
