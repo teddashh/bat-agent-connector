@@ -86,6 +86,8 @@ def install(journal):
     statements = [
         """CREATE TABLE IF NOT EXISTS api_event_context(seq INTEGER PRIMARY KEY REFERENCES api_events(seq) ON DELETE CASCADE,
             context TEXT NOT NULL)""",
+        """CREATE INDEX IF NOT EXISTS event_projection_errors ON api_event_context(seq)
+            WHERE json_extract(context,'$.projection_error') IS NOT NULL""",
         """CREATE TABLE IF NOT EXISTS api_event_resources(seq INTEGER NOT NULL REFERENCES api_events(seq) ON DELETE CASCADE,
             resource_type TEXT NOT NULL,resource_id TEXT NOT NULL,linked_at_seq INTEGER NOT NULL,
             evidence_ref TEXT,PRIMARY KEY(seq,resource_type,resource_id))""",
@@ -642,16 +644,18 @@ class Observation:
             raise OperationError("INVALID_PARAMS", "since must not exceed until", 422)
         head = self.journal.api_head()
         f, as_of, last = cursor_read(cursor, [resource_type, resource_id, order, sorted(kinds), since, until], head)
-        sql = """SELECT e.* FROM api_events e
-            LEFT JOIN api_event_resources r ON r.seq=e.seq AND r.resource_type=? AND r.resource_id=? AND r.linked_at_seq<=?
-            LEFT JOIN api_event_context c ON c.seq=e.seq WHERE e.seq<=? AND (r.seq IS NOT NULL OR
-                (json_extract(c.context,'$.projection_error') IS NOT NULL AND (
-                    (e.resource_type=? AND e.resource_id=?) OR
-                    (?='execution' AND e.resource_type='task' AND e.resource_id=?) OR
+        sql = """SELECT e.* FROM api_events e LEFT JOIN api_event_context c ON c.seq=e.seq
+            WHERE e.seq<=? AND e.seq IN (
+                SELECT r.seq FROM api_event_resources r WHERE r.resource_type=? AND r.resource_id=? AND r.linked_at_seq<=?
+                UNION SELECT gap.seq FROM api_event_context gap
+                WHERE json_extract(gap.context,'$.projection_error') IS NOT NULL AND gap.seq<=?
+                AND EXISTS(SELECT 1 FROM api_events failed WHERE failed.seq=gap.seq AND (
+                    (failed.resource_type=? AND failed.resource_id=?) OR
+                    (?='execution' AND failed.resource_type='task' AND failed.resource_id=?) OR
                     EXISTS(SELECT 1 FROM api_events source JOIN api_event_resources known ON known.seq=source.seq
-                        WHERE source.resource_type=e.resource_type AND source.resource_id=e.resource_id AND source.seq<=e.seq
+                        WHERE source.resource_type=failed.resource_type AND source.resource_id=failed.resource_id AND source.seq<=failed.seq
                         AND known.resource_type=? AND known.resource_id=? AND known.linked_at_seq<=?))))"""
-        args = [resource_type, resource_id, as_of, as_of, resource_type, resource_id,
+        args = [as_of, resource_type, resource_id, as_of, as_of, resource_type, resource_id,
                 resource_type, resource_id, resource_type, resource_id, as_of]
         if last is not None:
             if type(last) is not int:
