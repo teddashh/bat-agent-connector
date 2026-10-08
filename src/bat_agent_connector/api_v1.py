@@ -20,6 +20,7 @@ from . import (
     __version__,
     api_auth,
     checkpoints,
+    deployment,
     integration,
     pr_delivery,
     resource_policy,
@@ -30,7 +31,7 @@ from .errors import BatError, ResourceReadOnly
 from .operations import STATES, OperationError
 
 API_VERSION = 1
-CONTRACT_VERSION = "2026-10-08"  # delivery Part A shares this contract change date; keep an ISO date
+CONTRACT_VERSION = "2026-10-08"  # delivery A/B contract changes share this UTC date; keep an ISO date
 MAX_BODY = 200_000
 MAX_STREAMS = 16
 MAX_STREAMS_PER_ACTOR = 8  # several Dashboard tabs per person; reloads briefly overlap
@@ -115,6 +116,10 @@ class ApiV1:
             ("GET", r"/api/v1/repositories/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pulls/(?P<number>\d{1,9})",
              self.pull_preview, "observe"),
             ("GET", r"/api/v1/delivery/previews/(?P<pv>mpv_[0-9a-f]{32})", self.merge_preview, "observe"),
+            ("GET", r"/api/v1/deployments/preview", self.deployment_preview, "observe"),
+            ("GET", r"/api/v1/deployments", self.deployments, "observe"),
+            ("GET", r"/api/v1/deployments/(?P<dep>dep_[0-9a-f]{32})", self.deployment, "observe"),
+            ("GET", r"/api/v1/deployment-environments", self.deployment_environment, "observe"),
             ("GET", r"/api/v1/integrations/candidates", self.integration_candidates, "observe"),
             ("GET", r"/api/v1/integrations/previews/(?P<pv>ipv_[0-9a-f]{32})", self.integration_preview, "observe"),
             ("GET", r"/api/v1/integrations", self.integrations, "observe"),
@@ -307,7 +312,9 @@ class ApiV1:
                      "actions": actions, "operation_statuses": list(STATES),
                      "features": {"inventory": True, "events_stream": True, "operations": True, "work_items": True,
                                   "github": self.daemon.ops.context.get("github") is not None,
-                                  "deploy": bool(gh_cfg.recipes),
+                                  "deploy": self.daemon.ops.context.get("github") is not None and any(r.verification for r in gh_cfg.recipes.values()),
+                                  "deployment_history": True, "environment_generation": True,
+                                  "runtime_check": True, "rollback_readiness": True,
                                   "metadata_update": self.daemon.ops.context.get("github") is not None,
                                   "merge_scope_preview": self.daemon.ops.context.get("github") is not None,
                                   "checkpoints": [h for h in fleet.config.hosts if self._can_continue(h)],
@@ -317,7 +324,12 @@ class ApiV1:
                      "repositories": [{"repository": r.repository, "allow_merge": r.allow_merge, "allow_pr_update": r.allow_pr_update,
                                        "merge_methods": list(r.merge_methods)} for r in gh_cfg.repos.values()],
                      "deploy_recipes": [{"name": r.name, "repository": r.repository, "environment": r.environment,
-                                         "mode": r.mode} for r in gh_cfg.recipes.values()]}
+                                         "mode": r.mode, "readiness": deployment.ready(r),
+                                         "environment_generation": deployment.environment_status(self.daemon.ops, r.name)["desired_generation"],
+                                         "runtime_check": {"version_required": r.verification.version_required,
+                                                           "health_required": r.verification.health_required} if r.verification else None,
+                                         "rollback": {"supported": r.rollback.supported, "identity": r.rollback.identity,
+                                                      "not_undone": list(r.rollback.not_undone)}} for r in gh_cfg.recipes.values()]}
 
     def _can_continue(self, host: str) -> bool:
         runner = self.daemon.ops.context.get("git_runner")
@@ -406,6 +418,19 @@ class ApiV1:
 
     async def merge_preview(self, pv, **_):
         return 200, {"preview": pr_delivery.get_preview(self.daemon.journal.db, pv)}
+
+    async def deployment_preview(self, query, **_):
+        return 200, {"preview": await deployment.preview(self.daemon.ops, self._q(query, "recipe"))}
+
+    async def deployments(self, query, **_):
+        return 200, deployment.history(self.daemon.ops, self._q(query, "recipe"),
+                                       cursor=self._q(query, "cursor"), limit=self._int(query, "limit", 50))
+
+    async def deployment(self, dep, **_):
+        return 200, {"deployment": deployment.status(self.daemon.ops, dep)}
+
+    async def deployment_environment(self, query, **_):
+        return 200, {"environment": deployment.environment_status(self.daemon.ops, self._q(query, "recipe"))}
 
     async def integration_candidates(self, query, **_):
         host = self._q(query, "host")
