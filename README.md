@@ -99,6 +99,15 @@ waiting for BAT. Hermes must not reinterpret or split the request. Goose, on Opu
 Task writes require the host's existing `writes=true` and `orchestrate=true` settings. Existing low-level tools
 and `batc` commands remain available.
 
+Task mutations now record an operation and return `operation_id` / `operation_status` with the existing result.
+Keep a key for retries; keys belong to the authenticated actor. Unkeyed old task controls are separate requests.
+Task-owned sends, answers, interrupts and permission changes pass the same coordinator, including legacy tools:
+`TASK_PAUSED`, `TASK_VERIFYING` and `TASK_COMMAND_PENDING` mean stop and read `work_status`, never jump the queue
+with force or continue. `CONTROL_VERSION_CONFLICT` requires reading the changed state. A second daemon, even with
+a different `--db`, returns `OWNER_CONFLICT` with the existing owner; clients use that owner. This is
+[operations unification Part A](docs/design/operations-unification.md); the remaining legacy operations and
+no-key/null result projection are Part B.
+
 Every task is one Goose session on Opus 5.5. The `goose-session` recipe prompt tells Goose to split the work
 once, to aim for an executor mix of Grok 4.7 : Codex : Opus 5.5 = 4:2:1, and to give no new work to a model
 whose weekly quota remaining is at or below 15%. These are instructions in the prompt, not rules the service

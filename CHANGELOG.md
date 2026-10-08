@@ -51,6 +51,15 @@
   runs before the submit step so transient read failures can resume. Verification accepts related PRs merged later
   and stops updated PR pagination at admission time.
 
+- Operations unification Part A ([design](docs/design/operations-unification.md), plan §09/§10/§24,
+  A05/A07/A09): task submit/pause/resume/stage, scoped send/verification/request-Ted and command reconciliation
+  use OperationService with receipts committed alongside the original journal effects. Legacy task tools keep
+  their results and add operation ID/status, with optional keys and control versions. Shared coordinator gates
+  cover legacy session writes, client-resume, permission channels, approval/deferred raises and relay; paused,
+  verifying or unreconciled tasks cannot be bypassed. The canonical fleet owner lock is acquired before journal,
+  token or provider initialization; conflicts report the existing owner. No schema migration. Remaining legacy
+  operations, no-key sentinel, null effect projections and A01/A05/A08 all-entry-point coverage remain Part B.
+
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
   those sessions. BAT has no record of them: `batc remove-worktree` on a checkpoint session re-registered the
