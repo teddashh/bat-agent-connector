@@ -34,12 +34,12 @@ ID 隨機產生，封存的列保留，所以 ID 不會重用。改名、移動�
 
 ## 完成確認
 
-Agent 把狀態設成 `done` 是「回報完成」，不是完成：項目顯示為待確認（`awaiting_approval`），列在「待處理」。人以 `work_item.approve` 確認時帶上自己讀到的內容指紋（目標、需求原文、驗收條件、步驟的 SHA-256；不含標題，所以改名保留確認）。
+Agent 把狀態設成 `done` 是「回報完成」，不是完成：項目顯示為待確認（`awaiting_approval`），列在「待處理」。人以 `work_item.approve` 確認時帶上自己讀到的內容指紋（標題、目標、需求原文、驗收條件、步驟的 SHA-256）。標題也算：任何有 `manage` 的人都能改名。
 
-- 確認後內容再被修改，指紋不同，項目回到待確認。
+- 確認後內容再被修改（改名也算），指紋不同，項目回到待確認，改內容的人成為新的回報者（`claimed_by`）。
 - `work_item.continue`（「還沒完成，繼續」）把 `done` 改回 `doing` 並清掉確認。
 - 步驟全部勾完、狀態還不是 `done` 時，也會等人決定；`continue` 記下當時的步驟，同一組步驟不再詢問，加了新步驟並勾完會再問。
-- 還有未勾的步驟時不能設成 `done`（`STEPS_OPEN`）；已完成的項目被取消勾選一個步驟時，狀態回到 `doing`。
+- 還有未勾的步驟時不能設成 `done`（`STEPS_OPEN`）。已完成的項目改了步驟後仍有未勾的（取消勾選或新增），狀態回到 `doing`；改名等其他修改不會。
 - `approve` 可以從任何狀態直接把項目標為完成（人在 Dashboard 按「標記完成」）。
 
 `approve` 是獨立的 scope：有 `manage` 的 agent 能編輯項目、回報完成，但不能替自己的回報簽核。發 token 給 agent 時不要給它 `approve`。
@@ -55,7 +55,8 @@ Agent 把狀態設成 `done` 是「回報完成」，不是完成：項目顯示
 - 固定的項目一定在未固定的上面；排序不能讓固定的項目排到未固定的下面（`PINNED_FIRST`）。
 - 排序要帶 `before`，與目前順序不同就回 `ORDER_CHANGED`。
 - 從沒排過的分支放在來源後面；其他新項目放在最後。
-- 封存的項目保留原本的位置，復原後回到那裡。
+- 封存的項目保留原本的位置，復原後回到那裡；第一次排序時，已封存的項目也照預設順序保有位置。
+- 專案樹與工作項目樹最多 32 層（`TOO_DEEP`）；移動時連同被移動項目底下的層數一起算。
 
 ## 封存
 
@@ -88,7 +89,7 @@ Dashboard 的工作詳情可以從已連結的 checkpoint 直接派工：指示�
 | `GET /api/v1/work-items`（`project_id`、`state`、`pending`、`include_archived`、`limit`、`cursor`） | 跨專案，最近修改的在前；`pending=true` 是等人決定的項目。下一頁帶上回應的 `next_cursor`（修改時間加 ID：整棵封存或復原的項目時間相同） |
 | `GET /api/v1/work-items/{wi}` | 一個項目、完成狀態（`completion`）、路徑、子項目、分支、連結與最近 50 筆紀錄 |
 | MCP | `projects_list`、`project_get`、`work_items_list`、`work_item_get`；修改用 `operation_submit` |
-| CLI | `batc project list|show|create|update`、`batc item list|show|create|update|approve|continue|link` |
+| CLI | `batc project list|show|create|update`、`batc item list|show|create|update|approve|continue|link`。`batc item approve` 要帶 `--fingerprint`（`batc item show` 的 `completion.fingerprint`），確認的是你讀過的內容；`--archive`／`--restore` 不能和其他修改一起用 |
 
 事件：`project.*` 與 `work_item.*`（`created`、`updated`、`state`、`approved`、`continued`、`linked`、`unlinked`、`archived`、`restored`、`pinned`、`unpinned`、`ordered`），帶 actor 與 `operation_id`。
 
@@ -100,7 +101,7 @@ Dashboard 的工作詳情可以從已連結的 checkpoint 直接派工：指示�
 |---|---|---|
 | `hub/lib/hierarchy.js` | 改名與關係 | 關係只存 ID，所以改名不用改寫其他紀錄；以版本號取代內容雜湊 |
 | `hub/lib/project-order.js`、`hub/public/project-order.js` | `siblings()`、`_save_order()` | 新項目放最後（Hub 放最前）；固定也適用於工作項目；分支的位置由 `parent_id` 決定，不跟著來源移動 |
-| `hub/lib/completion.js` | `completion()`、`approve`／`continue` | 指紋只含內容欄位，不含標題；確認需要 `approve` scope |
+| `hub/lib/completion.js` | `completion()`、`approve`／`continue` | 指紋含標題（Hub 的改名由人操作；這裡 agent 也能改名）；確認需要 `approve` scope |
 | `hub/lib/task-ids.js` | 隨機 ID、封存保留 | 不需要依日期編號與預約檔 |
 
 ## 尚未涵蓋
