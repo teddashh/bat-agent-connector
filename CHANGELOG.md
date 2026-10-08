@@ -14,6 +14,19 @@
   Optional keys explicitly report whether retries deduplicate; internal no-key sentinels never appear
   in operation reads. CLI read-only now guards daemon-backed mutations before dispatch as well.
 
+- Keep session subscriptions after an initial observation/message read failure. Retry failed reads,
+  disable session actions until recovery, and preserve pending answers and the original operation key.
+
+- Present central session state evidence and discovery coverage, plus fixed-snapshot history and relations
+  for sessions, known worktrees and executions. Retain loaded inventory pages using stable-ID order and
+  identity-scoped dependencies. Safety reads keep parent archive restrictions current while drafts defer
+  ordinary renders. Real central/MockBat and browser/native fixtures cover the shared UI; live M1 acceptance
+  remains pending.
+
+- Refresh mounted session questions, permissions and linked work-item evidence without losing drafts.
+  Recheck pending identity before answering, preserve failed-read checkpoints, and disable archived-parent
+  actions while an edit stays open. History/relations and full M1 acceptance remain tracked separately.
+
 - Reject malformed deployment history cursors before querying, including integer overflow and
   non-finite timestamps, while preserving valid integer ordering and saved page cursors.
 
