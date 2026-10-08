@@ -201,6 +201,7 @@ class BatTaskAdapter:
                 or await client.invoke("git:getRoot", {"cwd": entry["cwd"]}, retry_on_disconnect=False)
                 != entry["cwd"]):
             return None
+        confinement.ensure_confirmed(entry.get("confinement") or {}, meta, allow_unknown=True)
         read = await service.session_read(self.fleet, task["host"], sid, last_n=1)
         identity = await self.verifier.identity(task, entry["cwd"])
         # Reuse only the exact verified state: HEAD must still be the previous task's verified commit.
@@ -325,8 +326,13 @@ class BatTaskAdapter:
                     try:
                         confinement.guard_start_record(registry.get(host, sid) or {})
                         confinement.guard_start_cwd(entry, meta)
+                        confinement.ensure_confirmed(record, meta, allow_unknown=True)
                     except confinement.ConfinementRefused as refusal:
-                        registry.update(host, sid, status="uncertain", error_code=refusal.code)
+                        registry.update(host, sid, status="uncertain", error_code=refusal.code,
+                                        **({"confinement": confinement.confirm(record, meta)}
+                                           if refusal.code == "CONFINEMENT_MISMATCH" else {}))
+                        if refusal.code == "CONFINEMENT_MISMATCH":
+                            confinement.record_task_start(self.journal, task["task_id"], sid, registry.get(host, sid) or {})
                         raise
                     started = {"ok": True, "sessionId": sid}
                     break
@@ -342,8 +348,13 @@ class BatTaskAdapter:
         if isinstance(meta, dict):
             try:
                 confinement.guard_start_cwd(entry, meta)
+                confinement.ensure_confirmed(record, meta, allow_unknown=True)
             except confinement.ConfinementRefused as refusal:
-                registry.update(host, sid, status="uncertain", error_code=refusal.code)
+                registry.update(host, sid, status="uncertain", error_code=refusal.code,
+                                **({"confinement": confinement.confirm(record, meta)}
+                                   if refusal.code == "CONFINEMENT_MISMATCH" else {}))
+                if refusal.code == "CONFINEMENT_MISMATCH":
+                    confinement.record_task_start(self.journal, task["task_id"], sid, registry.get(host, sid) or {})
                 raise
         registry.update(host, sid, status="active", cwd=lead["cwd"], confinement=confinement.confirm(record, meta))
         if self.register_tabs and hc.orchestrate_register_tabs:
@@ -360,9 +371,13 @@ class BatTaskAdapter:
         return sid
 
     async def recover_start(self, task: dict, *, role: str, session_id: str) -> bool:
+        intent = next((c for c in self.journal.commands(task["task_id"])
+                       if c["kind"] == "start_" + role and c["session_id"] == session_id), None) if self.journal else None
         try:
             confinement.guard_start_record(registry.get(task["host"], session_id) or {})
-        except confinement.ConfinementRefused:
+            if intent:
+                confinement.guard_start_record({"confinement": json.loads(intent["payload"]).get("confinement")})
+        except (confinement.ConfinementRefused, TypeError, ValueError):
             return False
         if role == "lead" and task.get("base_branch"):
             try:
@@ -376,8 +391,6 @@ class BatTaskAdapter:
             return False
         if not self.journal:
             return False
-        intent = next((c for c in self.journal.commands(task["task_id"])
-                       if c["kind"] == "start_" + role and c["session_id"] == session_id), None)
         if not intent:
             return False
         try:
@@ -513,6 +526,16 @@ class BatTaskAdapter:
         record = (existing or {}).get("confinement") or evidence.get("confinement")
         if record:
             confinement.guard_start_record({"confinement": record})
+            try:
+                confinement.ensure_confirmed(record, meta, allow_unknown=True)
+            except confinement.ConfinementRefused as refusal:
+                if record.get("verification", {}).get("status") == "pending":
+                    record = confinement.confirm(record, meta)
+                    confinement.record_task_start(self.journal, task["task_id"], session_id, {"confinement": record})
+                if existing:
+                    registry.update(task["host"], session_id, status="uncertain", error_code=refusal.code,
+                                    confinement=record)
+                raise
             if record.get("verification", {}).get("status") == "pending":
                 record = confinement.confirm(record, meta)
                 if existing:
@@ -794,6 +817,7 @@ class BatTaskAdapter:
                 return (False if any(e.get("failover_of") == task["session_id"] and
                                      e.get("status") in {"active", "starting", "uncertain"}
                                      for e in registry.list_entries(task["host"])) else None)
+            confinement.guard_start_record(entry)
             path, branch = old["worktree_path"], old["branch"]
             if (handoff["task_id"] != task["task_id"] or handoff["kind"] != "send"
                     or handoff["session_id"] != successor_id or handoff["message_id"] != handoff_message_id
@@ -820,14 +844,15 @@ class BatTaskAdapter:
             old_status = await reader("worktree:status", {"sessionId": task["session_id"]})
             new_status = await reader("worktree:status", {"sessionId": successor_id})
             root = await reader("git:getRoot", {"cwd": path})
-        except (KeyError, StopIteration, TypeError, ValueError, json.JSONDecodeError):
+        except (confinement.ConfinementRefused, KeyError, StopIteration, TypeError, ValueError, json.JSONDecodeError):
             return False
         except Exception:  # noqa: BLE001 - missing/unreachable BAT identity remains uncertain
             return None
         if (not isinstance(meta, dict) or not isinstance(old_status, dict)
                 or not isinstance(new_status, dict) or root is None):
             return None
-        return (meta.get("cwd") == path and root == path
+        return (confinement.verify(entry.get("confinement") or {}, meta)["status"] != "mismatch"
+                and meta.get("cwd") == path and root == path
                 and all(st.get("worktreePath") == path and st.get("branchName") == branch
                         for st in (old_status, new_status)))
 

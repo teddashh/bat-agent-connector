@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 
 import pytest
 
 from bat_agent_connector import confinement, lifecycle, orchestrate, registry, task_bat
-from bat_agent_connector.errors import InvokeError, InvokeTimeout
+from bat_agent_connector.errors import InvokeError, InvokeTimeout, TaskIdentityMismatch
 from bat_agent_connector.task_core import TaskCoordinator
 from bat_agent_connector.task_journal import Journal
 from bat_agent_connector.task_verifier import ObservedVerifier, VerificationSettings
@@ -155,7 +156,8 @@ async def test_post_start_mismatch_keeps_reservation_and_worktree(fleet_factory,
         await f.close()
 
 
-async def test_reviewer_start_meta_failure_still_activates(fleet_factory, mock, tmp_path, monkeypatch):
+@pytest.mark.parametrize("agent", ["codex", "claude"])
+async def test_reviewer_start_meta_failure_still_activates(fleet_factory, mock, tmp_path, monkeypatch, agent):
     f = fleet_factory(writes=True, orchestrate=True, **MANAGED)
     journal = Journal(tmp_path / "tasks.db")
     adapter, task = reviewer_adapter(f, mock, journal, monkeypatch)
@@ -169,7 +171,7 @@ async def test_reviewer_start_meta_failure_still_activates(fleet_factory, mock, 
 
     monkeypatch.setattr(client, "invoke", unreadable)
     try:
-        sid = await adapter.start(task, role="reviewer", agent="codex", session_id="review-unreadable")
+        sid = await adapter.start(task, role="reviewer", agent=agent, session_id="review-unreadable")
         entry = registry.get("h1", sid)
         assert entry["status"] == "active"
         assert entry["confinement"]["verification"] == {
@@ -177,6 +179,248 @@ async def test_reviewer_start_meta_failure_still_activates(fleet_factory, mock, 
         assert mock.channels().count("claude:start-session") == 1
     finally:
         await f.close()
+        journal.close()
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude"])
+@pytest.mark.parametrize("lost_ack", [False, True], ids=["acknowledged", "identity_poll"])
+async def test_reviewer_permission_mismatch_keeps_task_uncertain_without_prompt(
+        fleet_factory, mock, tmp_path, monkeypatch, agent, lost_ack):
+    """A10: a readable reviewer mismatch is terminal before any review send intent."""
+    fleet = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0}, **MANAGED)
+    journal = Journal(tmp_path / "tasks.db")
+    adapter, task = reviewer_adapter(fleet, mock, journal, monkeypatch)
+    journal.change(task["task_id"], "dispatching")
+    task = journal.change(task["task_id"], "verifying", fields={
+        "session_id": task["session_id"], "lead_agent": "claude" if agent == "codex" else "codex",
+        "review_commit": "a" * 40, "review_tree": "b" * 40})
+
+    async def available(_task):
+        return frozenset({agent})
+
+    monkeypatch.setattr(adapter, "available_agents", available)
+    client = fleet.client("h1")
+    invoke = client.invoke
+    requested = {}
+    reads = []
+
+    async def wider_options(channel, params=None, **kwargs):
+        result = await invoke(channel, params, **kwargs)
+        if channel == "claude:start-session":
+            requested.update(params["options"])
+            mock.metas[params["sessionId"]].update(
+                {"codexSandboxMode": "danger-full-access"} if agent == "codex" else {"permissionMode": "bypassPermissions"})
+            if lost_ack:
+                raise InvokeTimeout("fixture lost reviewer start acknowledgement")
+        if channel == "claude:get-session-meta" and params["sessionId"] != task["session_id"]:
+            reads.append(params["sessionId"])
+            # A second read would match; the first mismatch must already stop the start.
+            mock.metas[params["sessionId"]].update(requested)
+        return result
+
+    monkeypatch.setattr(client, "invoke", wider_options)
+    core = TaskCoordinator(journal, adapter)
+    try:
+        result = await core._start(task, role="reviewer")
+        assert result["state"] == "uncertain" and result["reviewer_session_id"] is None
+        command = next(c for c in journal.commands(task["task_id"]) if c["kind"] == "start_reviewer")
+        sid = command["session_id"]
+        row = copy.deepcopy(registry.get("h1", sid))
+        assert command["status"] == "uncertain"
+        assert row["status"] == "uncertain" and row["error_code"] == "CONFINEMENT_MISMATCH"
+        assert row["confinement"]["verification"]["status"] == "mismatch"
+        assert row["confinement"]["verification"]["reason"] == "permission_options_changed"
+        assert json.loads(command["payload"])["confinement"] == row["confinement"]
+        assert reads == [sid] and mock.channels().count("claude:start-session") == 1
+        assert "claude:send-message" not in mock.channels()
+        assert not any(c["kind"] == "send" for c in journal.commands(task["task_id"]))
+        assert not any(b["session_id"] == sid for b in journal.branches(task["task_id"]))
+        assert not await adapter.recover_start(result, role="reviewer", session_id=sid)
+        assert (await core.tick(task["task_id"]))["state"] == "uncertain"
+        assert reads == [sid] and registry.get("h1", sid) == row
+        assert "claude:send-message" not in mock.channels()
+        # The journal preserves the refusal even if local lookup is lost later.
+        registry._write(registry.registry_path(), [e for e in registry.list_entries() if e["session_id"] != sid])
+        assert not await adapter.recover_start(result, role="reviewer", session_id=sid)
+        assert reads == [sid]
+    finally:
+        await fleet.close()
+        journal.close()
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude"])
+@pytest.mark.parametrize("lost_ack", [False, True], ids=["acknowledged", "identity_poll"])
+async def test_reviewer_matching_readback_still_activates(fleet_factory, mock, tmp_path, monkeypatch, agent, lost_ack):
+    """A10: checking known mismatches does not change successful reviewer starts."""
+    fleet = fleet_factory(writes=True, orchestrate=True, **MANAGED)
+    journal = Journal(tmp_path / "tasks.db")
+    adapter, task = reviewer_adapter(fleet, mock, journal, monkeypatch)
+    client = fleet.client("h1")
+    invoke = client.invoke
+
+    async def start_ack(channel, params=None, **kwargs):
+        result = await invoke(channel, params, **kwargs)
+        if lost_ack and channel == "claude:start-session":
+            raise InvokeTimeout("fixture lost reviewer start acknowledgement")
+        return result
+
+    monkeypatch.setattr(client, "invoke", start_ack)
+    try:
+        sid = await adapter.start(task, role="reviewer", agent=agent, session_id="review-matching")
+        row = registry.get("h1", sid)
+        assert row["status"] == "active" and not row.get("error_code")
+        assert row["confinement"]["verification"]["status"] == "options_confirmed"
+        assert mock.channels().count("claude:start-session") == 1
+    finally:
+        await fleet.close()
+        journal.close()
+
+
+@pytest.mark.parametrize("role", ["lead", "reviewer"])
+@pytest.mark.parametrize("pending", [False, True], ids=["creation_confirmed", "creation_pending"])
+@pytest.mark.parametrize("missing_lookup", [False, True], ids=["reserved", "headless"])
+async def test_task_headless_start_mismatch_never_promotes(
+        fleet_factory, mock, tmp_path, role, pending, missing_lookup):
+    """A10: start recovery validates requested options before restoring an active lookup."""
+    fleet = fleet_factory(writes=True, orchestrate=True, default_permission_mode="allow_all",
+                          safety={"write_min_interval_s": 0}, **MANAGED)
+    journal = Journal(tmp_path / "tasks.db")
+    task = journal.submit(project="p", host="h1", workspace="demo-project", original_words="Review fixture",
+                          idempotency_key="headless-permissions", lead_agent="claude")
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), journal)
+    lead, reviewer = "permission-lead", "permission-reviewer"
+    try:
+        lead_command, _ = journal.command(task["task_id"], "start_lead", lead,
+                                          {"role": "lead", "agent": "claude"}, "lead-start")
+        await adapter.start(task, role="lead", agent="claude", session_id=lead)
+        journal.command_status(lead_command["command_id"], "settled")
+        journal.add_branch(task["task_id"], session_id=lead, provider="claude", role="lead", reason="start")
+        journal.change(task["task_id"], "dispatching")
+        task = journal.change(task["task_id"], "accepted", fields={"session_id": lead, "base_branch": None})
+        sid = lead
+        if role == "reviewer":
+            journal.command(task["task_id"], "start_reviewer", reviewer,
+                            {"role": "reviewer", "agent": "codex"}, "reviewer-start")
+            await adapter.start(task, role="reviewer", agent="codex", session_id=reviewer)
+            journal.add_branch(task["task_id"], session_id=reviewer, provider="codex", role="reviewer", reason="start")
+            task = journal.change(task["task_id"], "verifying", fields={"reviewer_session_id": reviewer})
+            sid = reviewer
+        row = registry.get("h1", sid)
+        record = (confinement.snapshot("claude" if role == "lead" else "codex", row["confinement"]["options"], task=True)
+                  if pending else row["confinement"])
+        registry.update("h1", sid, status="starting", confinement=record)
+        confinement.record_task_start(journal, task["task_id"], sid, {"confinement": record})
+        if missing_lookup:
+            registry._write(registry.registry_path(), [e for e in registry.list_entries() if e["session_id"] != sid])
+        mock.metas[sid].update({"permissionMode": "plan"} if role == "lead" else {"codexSandboxMode": "danger-full-access"})
+        assert not await adapter.recover_start(task, role=role, session_id=sid)
+        saved = registry.get("h1", sid)
+        if missing_lookup:
+            assert saved is None
+        else:
+            assert saved["status"] == "uncertain" and saved["error_code"] == "CONFINEMENT_MISMATCH"
+            assert saved["confinement"]["verification"]["status"] == ("mismatch" if pending else "options_confirmed")
+            if not pending:
+                assert saved["confinement"] == record  # live drift cannot rewrite confirmed creation evidence
+        if pending:
+            command = next(c for c in journal.commands(task["task_id"]) if c["session_id"] == sid)
+            assert json.loads(command["payload"])["confinement"]["verification"]["status"] == "mismatch"
+            reads = mock.channels().count("claude:get-session-meta")
+            assert not await adapter.recover_start(task, role=role, session_id=sid)
+            assert mock.channels().count("claude:get-session-meta") == reads
+        assert (await TaskCoordinator(journal, adapter)._send(task, sid, "review fixture", role + ":initial"))["state"] == "uncertain"
+        assert "claude:send-message" not in mock.channels()
+        assert not any(c["kind"] == "send" for c in journal.commands(task["task_id"]))
+    finally:
+        await fleet.close()
+        journal.close()
+
+
+@pytest.mark.parametrize("agent", ["claude", "codex"])
+async def test_task_lead_start_mismatch_never_sends_initial_prompt(fleet_factory, mock, tmp_path, monkeypatch, agent):
+    """A10: the existing lead start gate keeps mismatches uncertain before its first prompt."""
+    fleet = fleet_factory(writes=True, orchestrate=True, default_permission_mode="allow_all",
+                          safety={"write_min_interval_s": 0}, **MANAGED)
+    journal = Journal(tmp_path / "tasks.db")
+    task = journal.submit(project="p", host="h1", workspace="demo-project", original_words="Lead fixture",
+                          idempotency_key="lead-permissions", lead_agent=agent)
+    adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), journal)
+
+    async def available(_task):
+        return frozenset({agent})
+
+    monkeypatch.setattr(adapter, "available_agents", available)
+    invoke = fleet.client("h1").invoke
+
+    async def drift(channel, params=None, **kwargs):
+        result = await invoke(channel, params, **kwargs)
+        if channel == "claude:start-session":
+            mock.metas[params["sessionId"]].update(
+                {"permissionMode": "plan"} if agent == "claude" else {"codexSandboxMode": "read-only"})
+        return result
+
+    monkeypatch.setattr(fleet.client("h1"), "invoke", drift)
+    try:
+        result = await TaskCoordinator(journal, adapter)._start(task, role="lead")
+        assert result["state"] == "uncertain" and result["session_id"] is None
+        command = next(c for c in journal.commands(task["task_id"]) if c["kind"] == "start_lead")
+        row = registry.get("h1", command["session_id"])
+        assert command["status"] == "uncertain"
+        assert row["status"] == "uncertain" and row["error_code"] == "CONFINEMENT_MISMATCH"
+        assert row["confinement"]["verification"]["status"] == "mismatch"
+        assert mock.channels().count("claude:start-session") == 1
+        assert "claude:send-message" not in mock.channels()
+        reads = mock.channels().count("claude:get-session-meta")
+        assert not await adapter.recover_start(result, role="lead", session_id=row["session_id"])
+        assert mock.channels().count("claude:get-session-meta") == reads
+    finally:
+        await fleet.close()
+        journal.close()
+
+
+@pytest.mark.parametrize("phase", [1, 2, 3], ids=["post_start", "before_handoff", "at_frame"])
+async def test_task_failover_options_mismatch_blocks_first_handoff(fleet_factory, mock, tmp_path, phase):
+    """A10: Task successor options are checked at start and again by its handoff guards."""
+    fleet = fleet_factory(writes=True, orchestrate=True, default_permission_mode="allow_all",
+                          safety={"write_min_interval_s": 0}, **MANAGED)
+    lead = _add_wt_claude(mock)
+    journal = Journal(tmp_path / "tasks.db")
+    task = journal.submit(project="p", host="h1", workspace="demo-project", original_words="Continue fixture",
+                          idempotency_key="successor-permissions", lead_agent="claude")
+    journal.change(task["task_id"], "dispatching")
+    journal.change(task["task_id"], "accepted", fields={"session_id": lead})
+    journal.add_branch(task["task_id"], session_id=lead, provider="claude", role="lead", reason="start")
+    journal.change(task["task_id"], "running")
+    task = journal.change(task["task_id"], "quota_limited")
+    _, handoff = journal.reserve_failover(task["task_id"], lead, "permission-successor")
+    adapter = task_bat.BatTaskAdapter(fleet, journal=journal)
+    reads = 0
+
+    def metadata(params):
+        nonlocal reads
+        sid = params["sessionId"]
+        if sid == "permission-successor":
+            reads += 1
+            if reads >= phase:
+                mock.metas[sid]["codexSandboxMode"] = "read-only"
+        return copy.deepcopy(mock.metas.get(sid))
+
+    mock.handlers["claude:get-session-meta"] = metadata
+    try:
+        with pytest.raises(confinement.ConfinementRefused if phase == 1 else TaskIdentityMismatch):
+            await adapter.failover(task, lead, "permission-successor", handoff_message_id=handoff["message_id"],
+                                   handoff_command_id=handoff["command_id"])
+        assert reads == phase
+        assert "claude:send-message" not in mock.channels()
+        row = registry.get("h1", "permission-successor")
+        assert row and row["handoff_frame_sha256"] is None
+        if phase == 1:
+            assert row["status"] == "uncertain" and row["error_code"] == "CONFINEMENT_MISMATCH"
+            assert row["confinement"]["verification"]["status"] == "mismatch"
+        else:
+            assert row["confinement"]["verification"]["status"] == "options_confirmed"
+    finally:
+        await fleet.close()
         journal.close()
 
 
