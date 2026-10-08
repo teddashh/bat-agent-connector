@@ -24,6 +24,10 @@
   mismatch stays terminal, keeps its reservation and evidence, and never dispatches a handoff on a later matching read.
   Checkpoint continuation and repair handoff remain successful when a display-only metadata read fails after their
   first instruction was accepted; creation evidence stays intact and current verification reports unknown/readback_failed.
+  Reviewer starts now refuse readable permission mismatches after an ACK or during identity polling, keep terminal
+  evidence and the reservation, and leave the task and start command uncertain without a review prompt. Headless
+  recovery, warm reuse and Task Service failover guards also reject readable permission drift; unreadable reviewer
+  start metadata remains best-effort, and engine/recipe policy is unchanged.
   **A10 is not proven until the W12 live run**; no sandbox evidence-file import is included here.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
