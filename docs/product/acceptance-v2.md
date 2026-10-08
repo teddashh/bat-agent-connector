@@ -31,6 +31,7 @@ Tauri 第二版計畫 §24，保留 **A01–A10、B01–B05、C01–C07、D01–
 | P：私有 installer draft #6 | `d33ddbf`：canonical pin/digest、principal-only、保留既有配置的 installer tests | 僅版本／測試來源記錄；不複製私有配置。候選 pin 仍須更新、整合審查與實際安裝。 |
 
 單一整合候選：`1cffa7107232cb6dde35f634b998a62f3333174f`，包含上述 heads（K/P 是外部相依，未安裝）。
+整合後 canonical workflow 為 `2026-10-08.4`；S 列的 `.3` 僅描述該獨立 PR 的固定 head。
 前身 `1498a6f` 的 production source 相同，已有 439 backend focused、74 UI、8 state、20 Rust、
 5 真中央 fixtures 與 build/Clippy/release check 通過；目前候選再含 #38 main merge（無 source diff）
 與 Delivery 兩項 test-only 修正。**此 exact head 的 full CI 尚待確認；不是完整 matrix 綠，也不是 I/L 證據。**
