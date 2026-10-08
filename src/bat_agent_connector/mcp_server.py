@@ -24,7 +24,7 @@ from mcp_types import ToolAnnotations
 
 from . import __version__, lifecycle, orchestrate, resource_policy, service, triage
 from .config import Config, load_config
-from .errors import BatError
+from .errors import BatError, WriteRefused
 from .fleet import Fleet
 from .redact import redact
 from .task_daemon import request as task_request
@@ -50,9 +50,9 @@ READ_TOOLS = [
     "operations_list",
     "github_pr_preview",
 ]
+# Registered unless --read-only: they act as BATC_API_TOKEN's principal, whose scopes decide what is allowed.
+OPERATION_TOOLS = ["operation_submit", "operation_cancel", "operation_resume"]
 WRITE_TOOLS = [
-    "operation_submit",
-    "operation_cancel",
     "session_send",
     "session_continue",
     "session_interrupt",
@@ -389,6 +389,45 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         for fn in (work_submit, work_pause, work_resume, work_mark_stage):
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=task_write)
 
+    if not read_only:
+        # Operations act as the caller's own API principal, never as the local admin: what this client may do
+        # (send, merge, deploy...) is the token's scopes, not the BAT host tiers this MCP server was started with.
+        op_write = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True)
+
+        def principal_daemon(method: str, confirm: bool, **params):
+            if not confirm:
+                raise WriteRefused(f"{method} requires confirm=true")
+            token = os.environ.get("BATC_API_TOKEN")
+            if not token:
+                raise WriteRefused("operation writes need this client's own API token: issue one with "
+                                   "`batc api-token issue --actor NAME --scope ...` and set BATC_API_TOKEN")
+            return asyncio.to_thread(task_request, method, _auth_token=token, timeout=40.0, entry="mcp", **params)
+
+        async def operation_submit(action: str, idempotency_key: str, target: dict[str, Any],
+                                   params: dict[str, Any] | None = None,
+                                   preconditions: dict[str, Any] | None = None,
+                                   wait_s: float = 10, confirm: bool = False) -> dict[str, Any]:
+            """WRITE. Submit an operation through the daemon's shared OperationService (same path as the
+            Dashboard): e.g. action="session.send", target={host, session_id}, params={text}. Keep the
+            idempotency_key and reuse it to retry; the same key with different content is refused. Returns the
+            operation (waits up to wait_s for an outcome). Writes to sessions created in BAT are refused
+            (403). Acts as BATC_API_TOKEN's principal; requires confirm=true."""
+            return await principal_daemon("op_submit", confirm, action=action, idempotency_key=idempotency_key,
+                                          target=target, params=params, preconditions=preconditions, wait_s=wait_s)
+
+        async def operation_cancel(operation_id: str, confirm: bool = False) -> dict[str, Any]:
+            """WRITE. Ask an operation to stop before its next step. A step that may already have run is read
+            back first, so a cancelled operation never hides an action that happened. Requires confirm=true."""
+            return await principal_daemon("op_cancel", confirm, operation_id=operation_id)
+
+        async def operation_resume(operation_id: str, confirm: bool = False) -> dict[str, Any]:
+            """WRITE. Run a needs_attention operation again after you fixed its cause: finished steps are not
+            repeated and an unproven step is read back, never re-sent. Requires confirm=true."""
+            return await principal_daemon("op_resume", confirm, operation_id=operation_id)
+
+        for fn in (operation_submit, operation_cancel, operation_resume):
+            mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=op_write)
+
     if fleet.any_writes:
         enabled = ", ".join(sorted(h for h in config.hosts if fleet.writes_enabled(h)))
         wr = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)
@@ -487,24 +526,7 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
                 max_items, confirm, dry_run, queue, start_if_missing,
             )
 
-        async def operation_submit(action: str, idempotency_key: str, target: dict[str, Any],
-                                   params: dict[str, Any] | None = None,
-                                   preconditions: dict[str, Any] | None = None,
-                                   wait_s: float = 10) -> dict[str, Any]:
-            """WRITE. Submit an operation through the daemon's shared OperationService (same path as the
-            Dashboard): e.g. action="session.send", target={host, session_id}, params={text}. Keep the
-            idempotency_key and reuse it to retry; the same key with different content is refused. Returns the
-            operation (waits up to wait_s for an outcome). Sessions created in BAT are refused (403)."""
-            return await daemon("op_submit", action=action, idempotency_key=idempotency_key, target=target,
-                                params=params, preconditions=preconditions, wait_s=wait_s)
-
-        async def operation_cancel(operation_id: str) -> dict[str, Any]:
-            """WRITE. Ask an operation to stop before its next step. A step already sent is not undone."""
-            return await daemon("op_cancel", operation_id=operation_id)
-
         for fn in (
-            operation_submit,
-            operation_cancel,
             session_send,
             session_continue,
             session_interrupt,

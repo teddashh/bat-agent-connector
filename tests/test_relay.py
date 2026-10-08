@@ -140,6 +140,10 @@ async def test_fanout_from_planner_starts_verbatim_and_cleans_planner(fleet_fact
             if i["channel"] in ("claude:send-message", "claude:start-session")]
     assert any(x.startswith("Exact prompt A\n\n") for x in sent) and any(x.startswith("Exact prompt B") for x in sent)
     assert "agent stopped" in str(d["planner_cleanup"])
+    # The planner ran in its own worktree; its empty branch must not stay behind in the person's clone.
+    assert "deleted" in str(d["planner_cleanup"])
+    assert any(i["channel"] == "worktree:remove" and i["params"]["sessionId"] == sid and i["params"]["deleteBranch"]
+               for i in mock.invokes)
     await f.close()
 
 

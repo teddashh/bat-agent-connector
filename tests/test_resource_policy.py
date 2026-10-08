@@ -64,9 +64,21 @@ def test_mutation_table_classifies_every_bat_write_channel():
 
 
 def test_only_the_policy_mints_write_grants():
+    import re
+    minting = re.compile(r"WriteGrant\(|_create_grant\(|replace\(\s*grant")
     offenders = [p.name for p in SRC.glob("*.py")
-                 if p.name != "resource_policy.py" and "WriteGrant(" in p.read_text()]
+                 if p.name != "resource_policy.py" and minting.search(p.read_text())]
     assert offenders == []
+
+
+def test_a_session_grant_never_covers_a_frame_without_its_session_id():
+    grant = resource_policy.WriteGrant("h1", "session.send", "s-1", BY_ACTION["session.send"].channels)
+    resource_policy.check_grant(grant, "h1", "claude:send-message", {"sessionId": "s-1"})
+    for params in ({}, None, {"sessionId": "s-2"}):
+        with pytest.raises(ResourceReadOnly, match="GRANT_MISMATCH"):
+            resource_policy.check_grant(grant, "h1", "claude:send-message", params)
+    tab = resource_policy.WriteGrant("h1", "workspace.register_tab", "s-1", frozenset({"workspace:save"}))
+    resource_policy.check_grant(tab, "h1", "workspace:save", {"profileId": "default"})
 
 
 # --------------------------------------------------------------------------- A01: every entry point
@@ -190,7 +202,10 @@ async def test_connector_record_pointing_at_a_human_checkout_grants_nothing(flee
         mock.ws_doc["terminals"].append({"id": sid, "workspaceId": "ws-1", "agentPreset": "claude-code-worktree",
                                          "cwd": "/srv/demo", "worktreePath": "/srv/demo"})
     f = all_tiers(fleet_factory)
-    for op in ("send", "answer", "permissions_force", "merge", "remove_all_overrides"):
+    ops = ("send", "answer", "permissions_force", "merge", "remove_all_overrides")
+    if case == "bat_tracks_another_worktree":  # only worktree actions read worktree:status (a branch diff)
+        ops = ("merge", "remove_all_overrides")
+    for op in ops:
         with pytest.raises(ResourceReadOnly) as ei:
             await SESSION_WRITES[op](f, sid)
         assert ei.value.code == code, op
@@ -303,3 +318,80 @@ async def test_retried_start_rows_resolve_to_the_newest_record(fleet_factory, mo
     r = await service.session_send(f, "h1", "dup-0001", "go", confirm=True)
     assert r["accepted"]
     await f.close()
+
+
+# --------------------------------------------------------------------------- review follow-ups
+async def test_a_tab_worktree_the_record_lacks_is_a_binding_mismatch(fleet_factory, mock):
+    sid = "managed-root-0002"
+    adopt(sid, cwd="/srv/demo")  # started without a worktree in a managed root
+    mock.metas[sid] = {"cwd": "/srv/demo", "isStreaming": False}
+    mock.ws_doc["terminals"].append({"id": sid, "workspaceId": "ws-1", "agentPreset": "claude-code-worktree",
+                                     "cwd": "/srv/demo", "worktreePath": "/srv/demo/.bat-worktrees/feedbeef",
+                                     "worktreeBranch": "bat/worktree-feedbeef"})
+    f = all_tiers(fleet_factory, managed_roots=["/srv/demo"])
+    for op in ("remove_all_overrides", "send"):
+        with pytest.raises(ResourceReadOnly, match="BINDING_MISMATCH"):
+            await SESSION_WRITES[op](f, sid)
+    assert write_frames(mock) == []
+    await f.close()
+
+
+async def test_shared_clone_setting_is_applied_before_any_ssh_git(tmp_path, fleet_factory, monkeypatch):
+    from bat_agent_connector import task_bat
+    from bat_agent_connector.task_journal import Journal
+    from bat_agent_connector.task_verifier import ObservedVerifier, VerificationSettings
+
+    journal = Journal(tmp_path / "tasks.sqlite3")
+    task = journal.submit(project="p", host="h1", workspace="demo-project", original_words="x",
+                          base_branch="main", idempotency_key="k1")
+    adapter = task_bat.BatTaskAdapter(fleet_factory(writes=True, orchestrate=True, shared_clone_worktrees=False),
+                                      ObservedVerifier(VerificationSettings(ssh_hosts={"h1": "worker-1"})), journal)
+    scripts = []
+
+    async def ssh(_task, script):
+        scripts.append(script)
+        return ""
+
+    monkeypatch.setattr(adapter, "_ssh_script", ssh)
+    with pytest.raises(ResourceReadOnly, match="shared_clone_worktrees"):
+        await adapter._ensure_external_worktree(task)
+    assert scripts == []
+    journal.close()
+
+
+async def test_a_managed_root_that_resolves_into_a_human_checkout_is_refused(fleet_factory, mock):
+    mock.handlers["git:getRoot"] = lambda p: "/home/ted/proj" if p["cwd"] == "/srv/demo" else p["cwd"]
+    f = all_tiers(fleet_factory, managed_roots=["/srv/demo"])
+    with pytest.raises(ResourceReadOnly, match="DESTINATION_MANUAL"):
+        await orchestrate.session_start(f, "h1", "demo-project", use_worktree=False, confirm=True, prompt="x")
+    assert write_frames(mock) == [] and registry.list_entries("h1") == []
+    await f.close()
+
+
+async def test_a_worktree_under_the_resolved_git_root_is_the_connectors(fleet_factory, mock):
+    real = "/mnt/data/demo"  # the workspace folder /srv/demo is a symlink to it
+    wt = real + "/.bat-worktrees/abcd1234"
+    mock.handlers["git:getRoot"] = lambda p: real if p["cwd"] == "/srv/demo" else p["cwd"]
+    mock.handlers["worktree:create"] = lambda p: {"success": True, "worktreePath": wt,
+                                                  "branchName": "bat/worktree-abcd1234", "sourceBranch": "main"}
+    f = all_tiers(fleet_factory)
+    r = await orchestrate.session_start(f, "h1", "demo-project", confirm=True)
+    assert r["worktree_path"] == wt and registry.get("h1", r["session_id"])["origin_root"] == real
+    sent = await service.session_send(f, "h1", r["session_id"], "go on", confirm=True)
+    assert sent["accepted"]
+    await f.close()
+
+
+def test_merge_destination_is_the_recorded_origin(fleet_factory):
+    adopt("m-1", cwd="/srv/m/demo/.bat-worktrees/0000abcd", worktree_path="/srv/m/demo/.bat-worktrees/0000abcd",
+          origin_cwd="/srv/demo")
+    hc = parse_config({"hosts": {"h1": {"url": "wss://h1.invalid:1", "fingerprint": "a" * 64,
+                                        "token_ref": "env:X", "managed_roots": ["/srv/m"]}}}).host("h1")
+    t = {"id": "m-1", "workspaceId": "ws-1"}
+    moved = {"workspaces": [{"id": "ws-1", "folderPath": "/srv/m/demo"}]}
+    with pytest.raises(ResourceReadOnly, match="BINDING_MISMATCH"):
+        resource_policy.merge_origin(hc, "m-1", t, moved)
+    same = {"workspaces": [{"id": "ws-1", "folderPath": "/srv/demo"}]}
+    assert resource_policy.merge_origin(hc, "m-1", t, same) == "/srv/demo"
+    with pytest.raises(ResourceReadOnly, match="DESTINATION_MANUAL"):
+        resource_policy.check_merge_destination(hc, "/srv/demo")
