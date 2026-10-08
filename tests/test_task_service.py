@@ -683,6 +683,8 @@ async def test_claude_sessions_pin_opus_55_for_lead_and_reviewer(fleet_factory, 
                     and i["params"]["sessionId"] == sid)["params"]["options"]
         assert opts["agentPreset"] == preset and opts["model"] == task_bat.CLAUDE_BAT_MODEL
         assert opts["model"].startswith("claude-opus-5-5")
+        assert task_bat.registry.get("h1", sid)["confinement"]["level"] == "prompt_gated"
+        assert task_bat.registry.get("h1", sid)["confinement"]["verification"]["status"] == "options_confirmed"
     j.close()
 
 

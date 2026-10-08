@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import lifecycle, orchestrate, registry, resource_policy, service
+from . import confinement, lifecycle, orchestrate, registry, resource_policy, service
 from .errors import TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .fleet import Fleet
 from .redact import redact_secrets
@@ -40,6 +40,8 @@ class BatTaskAdapter:
         self.verifier = verifier or ObservedVerifier(VerificationSettings())
         self.register_tabs = self.verifier.settings.register_tabs
         self.journal = journal
+        if journal is not None:
+            self.fleet.confinement_journal = journal
         self._agents_cache: dict[str, tuple[float, frozenset[str]]] = {}
 
     async def available_agents(self, task: dict) -> frozenset[str]:
@@ -283,13 +285,17 @@ class BatTaskAdapter:
                  "worktree_path": lead.get("worktree_path"), "branch": lead.get("branch"),
                  "lead_session_id": task["session_id"], "task_id": task["task_id"],
                  "title": "review " + task["task_id"][:8], "role": "reviewer"}
-        registry.reserve(host, entry, hc.orchestrate_max_sessions)
         opts = {"cwd": lead["cwd"], "agentPreset": preset,
                 "workspaceId": lead["workspace_id"], "workspaceName": lead["workspace_name"]}
         if agent == "codex":
             opts.update(codexSandboxMode="read-only", codexApprovalPolicy="never")
         else:
             opts.update(permissionMode="plan", model=CLAUDE_BAT_MODEL)
+        account = await confinement.start_account(self.fleet, host)
+        record = confinement.snapshot(agent, opts, account=account, task=True)
+        entry.update(confinement=record, **orchestrate.registry_permission_fields(opts))
+        registry.reserve(host, entry, hc.orchestrate_max_sessions)
+        confinement.record_task_start(self.journal, task["task_id"], sid, entry)
         client = self.fleet.client(host)
         started = None
         last_error = None
@@ -297,7 +303,7 @@ class BatTaskAdapter:
             try:
                 started = await client.invoke(
                     "claude:start-session", {"sessionId": sid, "options": opts}, retry_on_disconnect=False,
-                    grant=grant)
+                    grant=grant, before_frame=lambda: confinement.guard_start_frame(self.fleet, host))
                 if isinstance(started, dict) and started.get("ok") is not False and started.get("sessionId") == sid:
                     break
                 raise WriteRefused("BAT reviewer start did not confirm the reserved session ID")
@@ -316,12 +322,16 @@ class BatTaskAdapter:
         if not started or started.get("sessionId") != sid:
             registry.update(host, sid, status="uncertain")
             raise last_error or WriteRefused("BAT reviewer start did not settle")
-        registry.update(host, sid, status="active", cwd=lead["cwd"])
+        meta = await client.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
+        confinement.ensure_confirmed(record, meta)
+        registry.update(host, sid, status="active", cwd=lead["cwd"], confinement=confinement.confirm(record, meta))
         if self.register_tabs and hc.orchestrate_register_tabs:
             try:
                 tab = await self.fleet.client(host).append_workspace_terminal(hc.profile_id, {
                     "id": sid, "workspaceId": lead["workspace_id"], "title": entry["title"],
                     "type": "terminal", "cwd": lead["cwd"], "agentPreset": preset,
+                    "permissionMode": opts.get("permissionMode"),
+                    "agentParams": orchestrate.registry_permission_fields(opts)["agent_params"],
                 }, grant=resource_policy.authorize_register_tab(host, sid))
                 registry.update(host, sid, tab_registered=bool(tab.get("appended")))
             except Exception:  # noqa: BLE001 - registration is visibility only
@@ -466,6 +476,16 @@ class BatTaskAdapter:
                                 ("cwd", expected_cwd), ("worktree_path", expected_cwd),
                                 ("branch", branch_name), ("agent_preset", preset))):
             raise ValueError("local session entry conflicts with BAT and task identity")
+        intent = next((c for c in self.journal.commands(task["task_id"])
+                       if c["kind"] == "start_" + role and c["session_id"] == session_id), None)
+        evidence = json.loads(intent["payload"]) if intent else {}
+        record = (existing or {}).get("confinement") or evidence.get("confinement")
+        if record:
+            confinement.ensure_confirmed(record, meta)
+            if record.get("verification", {}).get("status") == "pending":
+                record = confinement.confirm(record, meta)
+                if existing:
+                    registry.update(task["host"], session_id, confinement=record)
         registry.ensure_existing(task["host"], {
             "session_id": session_id, "workspace_id": workspace.get("id"),
             "workspace_name": workspace.get("name"), "agent_preset": preset,
@@ -473,6 +493,11 @@ class BatTaskAdapter:
             "worktree_path": expected_cwd, "branch": branch_name,
             "role": role, "task_id": task["task_id"], "lead_session_id": lead_id,
             "title": ("review " if role == "reviewer" else "task ") + task["task_id"][:8],
+            **({} if existing else {"confinement": record or {
+                **confinement.session_fields(task["host"], session_id)["confinement"],
+                "options": {k: meta[k] for k in confinement.OPTION_KEYS if meta.get(k)},
+                "evidence": {"source": "task_journal_and_bat_meta"}},
+                **{k: evidence[k] for k in ("write_scope", "permission_mode_claude", "agent_params") if k in evidence}}),
         })
 
     async def send(self, task: dict, session_id: str, text: str, message_id: str) -> dict:

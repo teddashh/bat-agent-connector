@@ -288,6 +288,14 @@ class TaskCoordinator:
         except Exception:
             self.journal.command_status(command["command_id"], "uncertain")
             return self.journal.change(task["task_id"], "uncertain")
+        # Evidence only; engine, recipes and command identity stay unchanged.
+        from . import registry
+        entry = registry.get(task["host"], sid) or {}
+        payload = json.loads(command["payload"])
+        payload.update({k: entry[k] for k in ("confinement", "write_scope", "permission_mode_claude", "agent_params")
+                        if k in entry})
+        self.journal.db.execute("UPDATE commands SET payload=? WHERE command_id=?",
+                                (json.dumps(payload), command["command_id"]))
         self.journal.command_status(command["command_id"], "settled")
         self.journal.provider_use(agent, "success")  # a real session on this provider
         self.journal.add_branch(task["task_id"], session_id=sid, provider=agent, role=role,

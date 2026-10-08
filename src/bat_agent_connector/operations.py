@@ -109,6 +109,10 @@ def _canonical(value: Any) -> str:
 
 
 def _error_code(exc: BaseException) -> str:
+    from .confinement import ConfinementRefused
+
+    if isinstance(exc, ConfinementRefused):
+        return exc.code
     if isinstance(exc, ResourceReadOnly):
         return exc.code
     if isinstance(exc, StepFailed | NeedsAttention | OperationError):

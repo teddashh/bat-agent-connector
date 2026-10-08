@@ -925,7 +925,7 @@ async def test_c03_handoff_resolution_resumes_without_recomposing_or_receiving_t
     starts = [i for i in w.mock.invokes if i["channel"] == "claude:start-session"]
     assert len(starts) == 1 and starts[0]["params"]["options"]["cwd"] == r["worktree_path"]
     assert re.search(r"/\.batc-integration/[^/]+/wt/batc-fix-[0-9a-f]{12}$", r["worktree_path"])
-    assert starts[0]["params"]["options"]["permissionMode"] == "acceptEdits"  # confined like checkpoint work
+    assert starts[0]["params"]["options"]["permissionMode"] == "default"  # confined like checkpoint work
     prompt = next(i for i in w.mock.invokes if i["channel"] == "claude:send-message")["params"]["prompt"]
     assert "a.txt" in prompt and "Do not push" in prompt and "Keep both lines" in prompt
     hc = w.d.fleet.config.host("h1")

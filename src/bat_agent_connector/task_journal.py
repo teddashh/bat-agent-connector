@@ -323,6 +323,11 @@ class Journal:
                     task_event_id,created_at) SELECT 'task',task_id,'task.'||kind,body,event_id,created_at
                     FROM events ORDER BY event_id""")
                 self.db.execute("PRAGMA user_version=1")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 2:
+            with self.tx():
+                self.db.execute("""CREATE TABLE IF NOT EXISTS confinement_host_checks (
+                    host TEXT PRIMARY KEY, evidence TEXT NOT NULL)""")
+                self.db.execute("PRAGMA user_version=2")
 
     def _drop_legacy_outbox(self):
         """Remove the retired chat outbox so no historical event can ever be published.

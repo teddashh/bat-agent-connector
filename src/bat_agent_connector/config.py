@@ -21,7 +21,8 @@ Config file (default ``~/.config/bat-agent-connector/hosts.toml``)::
     orchestrate = false                # 3rd tier: start worktree sessions, merge, remove (needs writes)
     orchestrate_max_sessions = 4       # cap on concurrently orchestrated sessions on this host
     orchestrate_register_tabs = false  # append a tab to the host workspace (workspace:save, append-only)
-    default_permission_mode = "default" # "default" (agent asks) or "allow_all" (like BAT's bypass setting)
+    default_permission_mode = "default" # default/allow_all preserve BAT policy; confined gates tools/sandboxes
+    # confined Codex may block installs/network/local sockets; BAT cannot pass network or writable roots.
     auto_cleanup = false               # allow session_cleanup to merge/remove/stop on this host
     codex_model = ""                   # default model for Codex sessions started/failed over here ("" = BAT default)
     profile_id = "default"             # workspace profile on the host
@@ -112,6 +113,7 @@ class HostConfig:
     labels: list[str] = field(default_factory=list)
     managed_roots: tuple[str, ...] = ()
     shared_clone_worktrees: bool = True
+    confinement: dict = field(default_factory=dict)
 
     def __repr__(self) -> str:  # never include token material
         return f"HostConfig(name={self.name!r}, url={self.url!r}, writes={self.writes}, orchestrate={self.orchestrate})"
@@ -188,7 +190,7 @@ class SafetyConfig:
     max_start_per_call: int = 4
 
 
-PERMISSION_MODES = ("default", "allow_all")
+PERMISSION_MODES = ("default", "allow_all", "confined")
 
 
 def normalize_host_path(raw: str) -> str:
@@ -465,6 +467,27 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
         cmodel = str(h.get("codex_model") or "").strip() or None
         if cmodel and not re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", cmodel):
             raise ConfigError(f"host {name!r}: codex_model {cmodel!r} is not a valid model id")
+        managed_roots = _managed_roots(name, h.get("managed_roots"))
+        confinement = h.get("confinement", {})
+        if not isinstance(confinement, dict):
+            raise ConfigError(f"host {name!r}: confinement must be a table")
+        allowed = {"host_account", "expected_uid", "protected_roots", "check_max_age_s",
+                   "check_timeout_s", "check_max_entries", "bat_port"}
+        if set(confinement) - allowed or not isinstance(confinement.get("host_account", False), bool):
+            raise ConfigError(f"host {name!r}: invalid confinement settings")
+        if confinement.get("host_account"):
+            uid = confinement.get("expected_uid")
+            if type(uid) is not int or uid <= 0:
+                raise ConfigError(f"host {name!r}: confinement.expected_uid must be a non-root UID")
+            roots = _managed_roots(name, confinement.get("protected_roots"))
+            if not roots or any(a == b or a.startswith(b + "/") or b.startswith(a + "/")
+                                for a in roots for b in managed_roots):
+                raise ConfigError(f"host {name!r}: protected_roots must be nonempty and separate from managed_roots")
+            confinement = {**confinement, "protected_roots": list(roots)}
+        for key, maximum in (("check_max_age_s", 3600), ("check_timeout_s", 30),
+                             ("check_max_entries", 100000), ("bat_port", 65535)):
+            if key in confinement and (type(confinement[key]) is not int or not 0 < confinement[key] <= maximum):
+                raise ConfigError(f"host {name!r}: confinement.{key} must be between 1 and {maximum}")
         hosts[name] = HostConfig(
             name=name,
             url=url,
@@ -480,8 +503,9 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
             profile_id=str(h.get("profile_id") or "default"),
             bat_profiles_dir=str(h.get("bat_profiles_dir") or pdir),
             labels=list(h.get("labels") or []),
-            managed_roots=_managed_roots(name, h.get("managed_roots")),
+            managed_roots=managed_roots,
             shared_clone_worktrees=shared,
+            confinement=confinement,
         )
     s = data.get("safety") or {}
     safety = SafetyConfig(
