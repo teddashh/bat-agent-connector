@@ -654,3 +654,24 @@ async def test_inventory_keeps_what_one_refresh_did_not_observe(mock, tmp_path):
     finally:
         await inv.close()
         journal.close()
+
+
+async def test_a10_session_capabilities_inventory_and_triage_share_evidence(served, mock):
+    from bat_agent_connector import orchestrate, triage
+    d, port = served
+    r = await orchestrate.session_start(d.fleet, "h1", "demo-project", "codex", confirm=True, write_scope="confined")
+    sid = r["session_id"]
+    await d.inventory.refresh_host("h1")
+    tok = token(d, "test-observer", "observe")
+    status, caps = await http(port, "GET", "/api/v1/capabilities", tok=tok)
+    assert status == 200 and caps["hosts"][0]["confinement"]["agents"]["codex"]["gap"] == "sandbox_enforcement_unverified"
+    assert caps["hosts"][0]["confinement"]["network_configurable"] is False
+    status, detail = await http(port, "GET", f"/api/v1/sessions/h1/{sid}", tok=tok)
+    assert status == 200 and detail["session"]["confinement"] == r["confinement"]
+    status, listing = await http(port, "GET", "/api/v1/sessions", tok=tok)
+    row = next(s for s in listing["sessions"] if s["session_id"] == sid)
+    assert row["confinement"] == r["confinement"] and row["write_scope"] == "confined"
+    rows = (await triage.sessions_triage(d.fleet, use_jev="never"))["sessions"]
+    assert next(s for s in rows if s["session_id"] == sid)["confinement"] == r["confinement"]
+    manual = next(s for s in listing["sessions"] if s["session_id"] == MANUAL)
+    assert manual["confinement"]["level"] == "none" and manual["api_access"] == "read_only"

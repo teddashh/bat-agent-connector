@@ -21,9 +21,10 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from . import registry, resource_policy, verification
+from . import confinement, registry, resource_policy, verification
 from .errors import (
     BatError,
+    ConnectionLost,
     InvokeTimeout,
     ResourceReadOnly,
     TaskDispatchCancelled,
@@ -129,20 +130,16 @@ async def session_set_permissions(
     if mode not in ("allow_all", "default"):
         raise WriteRefused("mode must be allow_all or default")
     hc = fleet.config.host(host)
-    if mode == "allow_all" and hc.default_permission_mode != "allow_all":
-        raise WriteRefused(
-            f"host {host!r} does not allow raising sessions to allow-all "
-            '(set default_permission_mode = "allow_all" in its config)'
-        )
     c = fleet.client(host)
     audit = Audit(fleet.config.safety)
     async with _write_lock(host):
         t, _ = await _resolve_session(c, session_id)
         sid = t["id"]
+        if mode == "allow_all":
+            confinement.guard_raise(host, sid)
+            if hc.default_permission_mode != "allow_all":
+                raise WriteRefused(f'host {host!r}: raising to allow-all requires default_permission_mode = "allow_all"')
         grant = await resource_policy.authorize_session(fleet, host, "session.permissions", t)
-        if mode == "allow_all" and (registry.get(host, sid) or {}).get("write_scope") == "confined":
-            raise WriteRefused("this session is confined to its managed folder (it started from a person's "
-                               "work); it is never raised to allow-all")
         kind = agent_kind(t.get("agentPreset"))
         meta = await _meta(c, sid)
         if meta is None:
@@ -155,13 +152,18 @@ async def session_set_permissions(
                 "(approve_pending does this automatically)"
             )
         audit.check_rate(host, sid + "#perm")
+        original = registry.get(host, sid) or {}
+        o = confinement.recorded_options(original) if original.get("write_scope") == "confined" else (
+            {"permissionMode": _claude_mode(mode)} if kind == "claude" else
+            permission_options("codex", mode) or dict(CONFINED_OPTIONS["codex"]))
+        confinement.guard_permissions(host, sid, o)
         if kind == "claude":
-            calls = [("claude:set-permission-mode", {"sessionId": sid, "mode": _claude_mode(mode)})]
+            if not o.get("permissionMode"):
+                raise confinement.ConfinementRefused("CONFINEMENT_RAISE_REFUSED", "confined policy is unknown")
+            calls = [("claude:set-permission-mode", {"sessionId": sid, "mode": o["permissionMode"]})]
         else:
-            o = permission_options("codex", mode) or {
-                "codexSandboxMode": "workspace-write",
-                "codexApprovalPolicy": "on-request",
-            }
+            if not all(o.get(k) for k in ("codexSandboxMode", "codexApprovalPolicy")):
+                raise confinement.ConfinementRefused("CONFINEMENT_RAISE_REFUSED", "confined policy is unknown")
             calls = [
                 ("claude:set-codex-sandbox-mode", {"sessionId": sid, "mode": o["codexSandboxMode"]}),
                 ("claude:set-codex-approval-policy", {"sessionId": sid, "policy": o["codexApprovalPolicy"]}),
@@ -176,15 +178,17 @@ async def session_set_permissions(
         for ch, params in calls:
             audit.record(**base, channel=ch, phase="attempt", mode=mode)
             try:
-                r = await c.invoke(ch, params, grant=grant)
+                r = await c.invoke(ch, params, grant=grant, frame_guard=lambda _: (
+                    confinement.guard_raise(host, sid) if mode == "allow_all" else
+                    confinement.guard_permissions(host, sid, o)))
             except BatError as e:
                 audit.record(**base, channel=ch, phase="result", ok=False, error=_err(e))
                 raise
             audit.record(**base, channel=ch, phase="result", ok=True)
             results.append({"channel": ch, "result": r})
         if registry.get(host, sid):
-            pf = registry_permission_fields(permission_options(kind or "claude", mode))
-            registry.update(host, sid, permission_raise_pending=None, **pf)
+            pf = registry_permission_fields(o)
+            registry.update(host, sid, permission_raise_pending=None, execution_options=o, **pf)
     note = "applies from the next turn" if kind != "claude" else "applies now (session idle)"
     return {"host": host, "session_id": sid, "agent_kind": kind, "mode": mode, "calls": results, "note": note}
 
@@ -227,8 +231,8 @@ async def approve_pending(
             out.append(item)
             continue
         if (registry.get(host, row["session_id"]) or {}).get("write_scope") == "confined":
-            # Its prompts are how a write outside its folder is stopped; a person answers them one by one.
-            item.update(approved=False, skipped="confined")
+            # Keep prompt/sandbox escape decisions individual; never persist wider permissions.
+            item.update(approved=False, skipped="confined", error_code="CONFINEMENT_RAISE_REFUSED")
             out.append(item)
             continue
         if dry_run:
@@ -268,6 +272,13 @@ async def _raise_deferred(fleet: Fleet, host: str, dry_run: bool) -> list[dict]:
         if not e.get("permission_raise_pending") or e.get("status") not in ("active", None):
             continue
         sid = e["session_id"]
+        if e.get("write_scope") == "confined":
+            done.append({"session_id": sid, "raised": False, "skipped": "confined",
+                         "error_code": "CONFINEMENT_RAISE_REFUSED"})
+            if not dry_run:
+                registry.update(host, sid, permission_raise_pending=None,
+                                permission_raise_refused="CONFINEMENT_RAISE_REFUSED")
+            continue
         if dry_run:
             done.append({"session_id": sid, "action": "would raise if idle"})
             continue
@@ -463,6 +474,9 @@ async def _failover_one(
     ]
     if prior:
         e = prior[-1]
+        if e.get("start_uncertain"):
+            raise confinement.ConfinementRefused("CONFINEMENT_MISMATCH",
+                                                 "successor start is unsettled; keep its reservation for readback")
         if (successor_session_id and e.get("session_id") != successor_session_id
                 or handoff_message_id and e.get("handoff_message_id") != handoff_message_id
                 or handoff_command_id and e.get("handoff_command_id") != handoff_command_id
@@ -577,7 +591,10 @@ async def _failover_one(
         opts["model"] = model
     # A successor of a confined session stays confined; it carries the same person's context.
     confined = (old_reg or {}).get("write_scope") == "confined"
-    opts.update(CONFINED_OPTIONS["codex"] if confined else permission_options("codex", hc.default_permission_mode))
+    perm, scope, confinement_record = await confinement.start_decision(
+        fleet, host, "codex", confined=confined, task=bool(task_id), predecessor=old_reg if confined else None)
+    confined = scope == "confined"
+    opts.update(perm)
     if same_worktree:
         opts.update(useWorktree=True, worktreePath=wt_path, worktreeBranch=branch)
     base = {"actor": fleet.actor, "tool": "session_failover", "host": host, "session_id": new_sid}
@@ -599,6 +616,8 @@ async def _failover_one(
                 "worktree_path": wt_path if same_worktree else None,
                 "cwd": cwd,
                 "isolation": grant.isolation,
+                "confinement": confinement_record,
+                **registry_permission_fields(opts),
                 **({"write_scope": "confined"} if confined else {}),
                 "handoff_status": "pending",
                 "handoff_message_id": handoff_message_id,
@@ -624,13 +643,20 @@ async def _failover_one(
         audit.record(**base, channel="claude:start-session", phase="attempt", preset=preset, failover_of=sid)
         try:
             started = await c.invoke("claude:start-session", {"sessionId": new_sid, "options": opts},
-                                     grant=grant)
+                                     grant=grant,
+                                     before_frame=lambda: confinement.guard_start_frame(fleet, host))
             if (not isinstance(started, dict) or started.get("ok") is False or
                     started.get("sessionId") != new_sid):
                 raise WriteRefused("BAT failover start did not confirm the reserved session ID")
+            meta = await _meta(c, new_sid)
+            confinement.ensure_confirmed(confinement_record, meta)
+            confinement_record = confinement.confirm(confinement_record, meta)
         except BaseException as e:
             audit.record(**base, channel="claude:start-session", phase="result", ok=False, error=_err(e))
-            registry.fail_reservation(host, new_sid, replaces)
+            if confined and isinstance(e, (confinement.ConfinementRefused, InvokeTimeout, ConnectionLost)):
+                registry.update(host, new_sid, status="starting", start_uncertain=True)
+            else:
+                registry.fail_reservation(host, new_sid, replaces)
             raise
         audit.record(**base, channel="claude:start-session", phase="result", ok=True)
         registry.update(
@@ -641,6 +667,7 @@ async def _failover_one(
             worktree_path=wt_path if same_worktree else None,
             branch=branch if same_worktree else None,
             **registry_permission_fields(opts),
+            confinement=confinement_record,
         )
         mid = handoff_message_id or f"batc-{uuid.uuid4()}"
         registry.update(host, new_sid, handoff_message_id=mid)
@@ -652,12 +679,17 @@ async def _failover_one(
             before_handoff_invoke()
         audit.record(**base, channel="claude:send-message", phase="attempt", message_id=mid, text=prompt)
         sent, err = True, None
+        async def check_handoff_frame() -> None:
+            await confinement.guard_frame(c, host, new_sid)
+            if verify_handoff_at_frame:
+                await verify_handoff_at_frame()
+
         try:
             ack = await c.invoke(
                 "claude:send-message", {"sessionId": new_sid, "prompt": prompt, "clientMessageId": mid},
                 retry_on_disconnect=False,
                 before_send=before_handoff_invoke,
-                before_frame=verify_handoff_at_frame,
+                before_frame=check_handoff_frame,
                 frame_guard=handoff_frame_guard,
                 grant=grant,
             )
@@ -686,6 +718,7 @@ async def _failover_one(
         "message_id": mid,
         "error": err,
         "counts_toward_cap": replaces is None,
+        "write_scope": scope, "confinement": confinement_record,
         "old_session": "left as is (not stopped); session_cleanup stops it once the Codex session is running",
     }
 
@@ -1598,7 +1631,8 @@ async def fanout_plan_session(
         message, host=host, workspace=workspace, channel=channel, thread=thread, earlier=earlier, brief=brief,
         human_name=fleet.config.human_name, relay_name=fleet.config.relay_name, request_fanout=True, max_items=n,
     )
-    r = await session_start(fleet, host, workspace, "codex", confirm, text, None, True, "fan-out planner", "default")
+    r = await session_start(fleet, host, workspace, "codex", confirm, text, None, True, "fan-out planner", "default",
+                            confinement_role="planner")
     if registry.get(host, r["session_id"]):
         registry.update(host, r["session_id"], role="planner")
     return {**r, "role": "planner", "max_items": n,
@@ -1642,7 +1676,8 @@ async def fanout_from_plan(
                 f"fanout {tk['index']}: {tk['title'][:40]}",
             )
             started.append({"task": tk["index"], "title": tk["title"], "session_id": s["session_id"],
-                            "branch": s.get("worktree_branch") or s.get("branch")})
+                            "branch": s.get("worktree_branch") or s.get("branch"),
+                            "write_scope": s.get("write_scope"), "confinement": s.get("confinement")})
         except BatError as e:
             started.append({"task": tk["index"], "title": tk["title"], "error": _err(e)})
             break

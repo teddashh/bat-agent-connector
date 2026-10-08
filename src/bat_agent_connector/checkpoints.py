@@ -23,7 +23,7 @@ import shlex
 import time
 import uuid
 
-from . import orchestrate, registry, resource_policy, service
+from . import confinement, orchestrate, registry, resource_policy, service
 from .api_auth import Principal
 from .errors import BatError
 from .operations import (
@@ -176,6 +176,7 @@ async def preview(ops: OperationService, host: str, session_id: str) -> dict:
             "commits": [{"hash": r["hash"], "message": str(r.get("message") or "")[:200], "date": r.get("date")}
                         for r in log],
             "dirty": None if state is None else state[1],
+            "confinement": confinement.host_capability(ops.context["fleet"], host),
             "snapshot": {"supported": False, "reason": "uncommitted changes are not carried over; commit first"}}
 
 
@@ -433,7 +434,9 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
             fleet, host, workspace, agent, confirm=True, prompt=None, use_worktree=False, title=title,
             session_id=sid, retain_on_error=True, cwd_override=worktree, external_branch=branch,
             write_scope="confined")
-        return {"session_id": r["session_id"], "cwd": r.get("cwd") or worktree}
+        ctx.set_refs(confinement=r["confinement"])
+        return {"session_id": r["session_id"], "cwd": r.get("cwd") or worktree,
+                "confinement": r["confinement"]}
 
     async def restart(_request: dict) -> dict | None:
         if not any(e.get("session_id") == sid for e in registry.list_entries(host)):
@@ -443,11 +446,24 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
         except Exception:  # noqa: BLE001 - unreadable: stay uncertain and read again later
             return None
         if isinstance(meta, dict) and norm(meta.get("cwd")) == worktree:
-            registry.update(host, sid, status="active", cwd=worktree, worktree_path=worktree, branch=branch)
-            return {"session_id": sid, "cwd": worktree, "reconciled": True}
+            record = (registry.get(host, sid) or {}).get("confinement")
+            if not record:
+                return None
+            state = confinement.verify(record, meta)
+            if state["status"] == "mismatch":
+                raise NeedsAttention("CONFINEMENT_MISMATCH", state["reason"])
+            if state["status"] == "unknown":
+                return None
+            if record["verification"]["status"] == "pending":
+                record = confinement.confirm(record, meta)
+            registry.update(host, sid, status="active", cwd=worktree, worktree_path=worktree, branch=branch,
+                            confinement=record)
+            ctx.set_refs(confinement=record)
+            return {"session_id": sid, "cwd": worktree, "reconciled": True, "confinement": record}
         return None  # reserved and maybe sent: BAT may still be starting it, so read again later; never start twice
 
-    await ctx.step("session.start", start, request={"session_id": sid, "cwd": worktree, "agent": agent},
+    await ctx.step("session.start", start, request={"session_id": sid, "cwd": worktree, "agent": agent,
+                                                 "write_scope": "confined"},
                    reconcile=restart)
     registry.update(host, sid, **registry_fields)
     mid = "batc-" + ctx.operation_id
@@ -472,7 +488,9 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
                           reconcile=resend)
     if not sent.get("accepted"):
         raise NeedsAttention("NOT_ACCEPTED", "BAT did not accept the first instruction")
-    return {"session_id": sid, "message_id": mid}
+    return {"session_id": sid, "message_id": mid,
+            **confinement.session_fields(host, sid, await service._meta(c, sid),
+                                        account=confinement.account_status(fleet, host))}
 
 
 async def _run_continue(ctx: OpContext) -> dict:
@@ -537,7 +555,8 @@ async def _run_continue(ctx: OpContext) -> dict:
         with contextlib.suppress(Exception):
             await inventory.refresh_host(host)
     return {"checkpoint_id": cp["checkpoint_id"], "host": host, "session_id": sid, "worktree_path": worktree,
-            "branch": branch, "base_commit": cp["commit_sha"], "message_id": mid, "write_scope": "confined"}
+            "branch": branch, "base_commit": cp["commit_sha"], "message_id": mid, "write_scope": "confined",
+            "confinement": started["confinement"], "current_verification": started["current_verification"]}
 
 
 ACTIONS = [

@@ -28,8 +28,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import registry, resource_policy
-from .errors import BatError, WriteRefused
+from . import confinement, registry, resource_policy
+from .errors import BatError, ConnectionLost, InvokeTimeout, WriteRefused
 from .fleet import Fleet
 from .resource_policy import WriteGrant
 from .safety import Audit
@@ -194,25 +194,15 @@ def permission_options(agent: str, mode: str, claude_mode: str | None = None) ->
 
     ``allow_all`` = what BAT does with "allow bypass permissions" on: Claude runs in
     ``bypassPermissions``; Codex starts with sandbox ``danger-full-access`` and approval ``never``.
-    ``default`` sends nothing (the agent asks before tools, BAT's conservative default).
+    ``default`` sends nothing and preserves BAT defaults and inherited rules.
+    ``confined`` requests restricted options; the creation path also checks host-account evidence.
     """
-    if agent == "claude":
-        if claude_mode:
-            return {"permissionMode": claude_mode}
-        return {"permissionMode": "bypassPermissions"} if mode == "allow_all" else {}
-    if mode == "allow_all":
-        return {"codexSandboxMode": "danger-full-access", "codexApprovalPolicy": "never"}
-    return {}
+    return confinement.policy_options(agent, mode, claude_mode)
 
 
-# write_scope="confined": the agent's own CLI enforces the folder, whatever the host default is. Claude asks before
-# writing outside its working directory (and before most shell commands); Codex's workspace-write sandbox blocks
-# writes outside it at the OS level. Plan §06: a cwd alone is not protection, and these sessions start from a
-# person's conversation, which names the person's folders.
-CONFINED_OPTIONS = {
-    "claude": {"permissionMode": "acceptEdits"},
-    "codex": {"codexSandboxMode": "workspace-write", "codexApprovalPolicy": "on-request"},
-}
+# BAT's acceptEdits callback allows file tools without a path check. Use default unless a host account was
+# checked; cwd is never protection. Codex options require W12 live enforcement evidence (plan §06, A10).
+CONFINED_OPTIONS = confinement.CONFINED_OPTIONS
 
 
 def registry_permission_fields(opts: dict) -> dict:
@@ -251,6 +241,7 @@ async def session_start(
     external_branch: str | None = None,
     task_id: str | None = None,
     write_scope: str | None = None,
+    confinement_role: str | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
     if write_scope not in (None, "confined"):
@@ -278,8 +269,6 @@ async def session_start(
     if agent == "codex" and not model and hc.codex_model:
         model = hc.codex_model
     sid = session_id or str(uuid.uuid4())
-    perm = (dict(CONFINED_OPTIONS[agent]) if write_scope == "confined"
-            else permission_options(agent, hc.default_permission_mode, permission_mode))
     # Read-only: how the host resolves the destination, so links into a human checkout are caught up front.
     git_roots = {}
     for path in {folder, cwd_override} - {None}:
@@ -289,6 +278,9 @@ async def session_start(
                                                   cwd_override=cwd_override, task_id=task_id,
                                                   git_roots=git_roots)
     async with _write_lock(host):
+        perm, write_scope, confinement_record = await confinement.start_decision(
+            fleet, host, agent, confined=write_scope == "confined", task=bool(task_id),
+            planner=confinement_role == "planner", claude_mode=permission_mode)
         audit.check_rate(host, "#orchestrate-start-" + sid)
         registry.reserve(
             host,
@@ -303,11 +295,15 @@ async def session_start(
                 "isolation": grant.isolation,
                 # Recorded with the reservation, so a start proven later by read-back keeps them too.
                 **registry_permission_fields(perm),
+                "confinement": confinement_record,
                 **({"write_scope": write_scope} if write_scope else {}),
                 **({"task_id": task_id, "role": "lead"} if task_id else {}),
             },
             hc.orchestrate_max_sessions,
         )
+        if task_id:
+            confinement.record_task_start(getattr(fleet, "confinement_journal", None), task_id, sid,
+                                          registry.get(host, sid))
         base = {"actor": fleet.actor, "tool": "session_start", "host": host, "session_id": sid}
         wt: dict = {}
         base_commit = None
@@ -356,11 +352,20 @@ async def session_start(
                 )
             audit.record(**base, channel="claude:start-session", phase="attempt", preset=preset)
             try:
-                started = await c.invoke("claude:start-session", {"sessionId": sid, "options": opts}, grant=grant)
+                started = await c.invoke("claude:start-session", {"sessionId": sid, "options": opts}, grant=grant,
+                                         before_frame=lambda: confinement.guard_start_frame(fleet, host))
                 if (not isinstance(started, dict) or started.get("ok") is False or
                         started.get("sessionId") != sid):
                     raise WriteRefused("BAT start reply did not confirm the reserved session ID")
+                meta = await _meta(c, sid)
+                confinement.ensure_confirmed(confinement_record, meta)
+                confinement_record = confinement.confirm(confinement_record, meta)
+            except confinement.ConfinementRefused:
+                retain_on_error = True  # The agent started; never remove its worktree on a policy mismatch.
+                raise
             except BatError as e:
+                if write_scope == "confined" and isinstance(e, (InvokeTimeout, ConnectionLost)):
+                    retain_on_error = True  # No ACK cannot justify removing a possibly running agent's worktree.
                 audit.record(**base, channel="claude:start-session", phase="result", ok=False, error=_err(e))
                 if use_worktree and not retain_on_error:  # may have reached BAT on timeout
                     await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": True}, grant=grant)
@@ -380,6 +385,7 @@ async def session_start(
             **({"worktree_made_by": "connector"} if cwd_override else {}),
             origin_root=git_roots.get(resource_policy.norm(folder)),
             **registry_permission_fields(opts),
+            confinement=confinement_record,
         )
         tab = None
         if hc.orchestrate_register_tabs and register_tab is not False:
@@ -421,6 +427,7 @@ async def session_start(
                 ack = await c.invoke(
                     "claude:send-message", {"sessionId": sid, "prompt": prompt, "clientMessageId": mid},
                     retry_on_disconnect=agent == "claude", grant=grant,
+                    before_frame=lambda: confinement.guard_frame(c, host, sid),
                 )
                 if not isinstance(ack, dict) or not (ack.get("accepted") or ack.get("ok")):
                     raise WriteRefused("initial prompt was not accepted by BAT")
@@ -452,6 +459,8 @@ async def session_start(
         "prompt_sent": bool(prompt),
         "message_id": mid,
         "permissions": write_scope or permission_mode or hc.default_permission_mode,
+        "write_scope": write_scope,
+        "confinement": confinement_record,
         "isolation": grant.isolation,
         "note": None
         if tab and tab.get("appended")

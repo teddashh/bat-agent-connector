@@ -316,18 +316,17 @@ async def test_set_permissions_and_approve_pending(fleet_factory, mock):
 
 
 async def test_confined_sessions_stay_confined_on_an_allow_all_host(fleet_factory, mock):
-    # Checkpoint work starts from a person's conversation, which names their folders: the agent's own CLI keeps
-    # it in its folder (plan §06, A10), and nothing raises it to allow-all later.
+    # A10: record CLI options honestly (Claude is only prompt gated); subsequent raises are refused.
     f = fleet_factory(writes=True, orchestrate=True, default_permission_mode="allow_all",
                       safety={"write_min_interval_s": 0}, **MANAGED_CLONE)
     a = await orchestrate.session_start(f, "h1", "demo-project", "claude", confirm=True, write_scope="confined")
     b = await orchestrate.session_start(f, "h1", "demo-project", "codex", confirm=True, write_scope="confined")
     starts = [i["params"]["options"] for i in mock.invokes if i["channel"] == "claude:start-session"]
-    assert starts[0]["permissionMode"] == "acceptEdits" and "codexSandboxMode" not in starts[0]
+    assert starts[0]["permissionMode"] == "default" and "codexSandboxMode" not in starts[0]
     assert (starts[1]["codexSandboxMode"], starts[1]["codexApprovalPolicy"]) == ("workspace-write", "on-request")
     assert a["permissions"] == b["permissions"] == "confined"
     ea, eb = registry.get("h1", a["session_id"]), registry.get("h1", b["session_id"])
-    assert ea["write_scope"] == eb["write_scope"] == "confined" and ea["permission_mode_claude"] == "acceptEdits"
+    assert ea["write_scope"] == eb["write_scope"] == "confined" and ea["permission_mode_claude"] == "default"
     assert eb["agent_params"] == {"sandboxMode": "workspace-write", "approvalPolicy": "on-request"}
     with pytest.raises(WriteRefused, match="confined"):
         await lifecycle.session_set_permissions(f, "h1", b["session_id"], "allow_all", confirm=True)

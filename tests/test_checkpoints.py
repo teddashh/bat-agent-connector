@@ -14,7 +14,15 @@ from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import api_auth, checkpoints, lifecycle, orchestrate, registry, resource_policy
+from bat_agent_connector import (
+    api_auth,
+    checkpoints,
+    confinement,
+    lifecycle,
+    orchestrate,
+    registry,
+    resource_policy,
+)
 from bat_agent_connector.channels import GUARDED_CHANNELS, ORCHESTRATE_CHANNELS, WRITE_CHANNELS
 from bat_agent_connector.errors import ResourceReadOnly
 from bat_agent_connector.operations import OperationError
@@ -144,13 +152,17 @@ async def test_checkpoint_refuses_a_commit_the_source_does_not_have(daemon, mock
     assert e.value.code == "NOT_FOUND"
 
 
-async def test_continue_starts_managed_work_at_the_checkpoint_and_leaves_the_source_alone(daemon, mock, human):
+@pytest.mark.parametrize("agent", ["claude", "codex"])
+async def test_a10_checkpoint_absolute_path_carries_confinement(daemon, mock, human, agent):
+    from dataclasses import replace
+    daemon.fleet.config.hosts["h1"] = replace(daemon.fleet.config.host("h1"), default_permission_mode="allow_all")
+    mock.states[MANUAL]["messages"][-2]["content"] = f"Write changes to {human}/notes.txt"
     first = git(human, "rev-list", "--max-parents=0", "HEAD")
     cp = await make_checkpoint(daemon, commit=first)
     mock.git_status[str(human)] = [{"path": "notes.txt", "status": "M"}]  # the person keeps working meanwhile
     before = snapshot(human)
     op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]},
-                   {"instructions": "Add a changelog entry", "agent": "claude"})
+                   {"instructions": "Add a changelog entry", "agent": agent})
     assert op["status"] == "succeeded", op
     r = op["result"]
     wt, sid = r["worktree_path"], r["session_id"]
@@ -163,12 +175,23 @@ async def test_continue_starts_managed_work_at_the_checkpoint_and_leaves_the_sou
 
     starts = [i for i in mock.invokes if i["channel"] == "claude:start-session"]
     assert len(starts) == 1 and starts[0]["params"]["options"]["cwd"] == wt
-    # The agent's CLI asks before writing outside its folder (plan §06); a cwd alone is not protection.
-    assert starts[0]["params"]["options"]["permissionMode"] == "acceptEdits" and r["write_scope"] == "confined"
+    # A10: plain default is prompt gated; cwd and acceptEdits never prove path confinement.
+    assert r["write_scope"] == "confined"
+    assert {k: starts[0]["params"]["options"][k] for k in confinement.CONFINED_OPTIONS[agent]} == confinement.CONFINED_OPTIONS[agent]
     sends = [i for i in mock.invokes if i["channel"] == "claude:send-message"]
     assert len(sends) == 1 and sends[0]["params"]["sessionId"] == sid
     prompt = sends[0]["params"]["prompt"]
     assert "Add a changelog entry" in prompt and first in prompt and "[assistant]" in prompt
+    assert str(human) in prompt
+    assert r["confinement"]["level"] == ("prompt_gated" if agent == "claude" else "os_sandbox")
+    assert r["confinement"]["verification"]["status"] == "options_confirmed"
+    assert registry.get("h1", sid)["confinement"] == r["confinement"]
+    with pytest.raises(confinement.ConfinementRefused, match="CONFINEMENT_RAISE_REFUSED"):
+        await lifecycle.session_set_permissions(daemon.fleet, "h1", sid, confirm=True, force=True)
+    mock.states[sid]["pendingPermission"] = {"toolUseId": "test", "toolName": "Bash", "input": {}}
+    bulk = await lifecycle.approve_pending(daemon.fleet, "h1", dry_run=True)
+    assert next(x for x in bulk["sessions"] if x["session_id"] == sid)["skipped"] == "confined"
+    mock.states[sid]["pendingPermission"] = None
     assert "not instructions" in prompt  # the person's conversation is fenced off as background
     assert bat_writes(mock, MANUAL) == []  # nothing was sent to the person's session
 
@@ -325,7 +348,7 @@ async def test_a_lost_start_reply_is_read_back_not_started_again(daemon, mock, h
     assert [i["params"]["sessionId"] for i in mock.invokes if i["channel"] == "claude:send-message"] == [sid]
     entry = registry.get("h1", sid)  # proven by read-back, so it carries what a normal start records
     assert entry["status"] == "active" and entry["worktree_path"] == entry["cwd"]
-    assert entry["write_scope"] == "confined" and entry["permission_mode_claude"] == "acceptEdits"
+    assert entry["write_scope"] == "confined" and entry["permission_mode_claude"] == "default"
     assert checkpoints.started_from(d2.journal.db, "h1", sid)["checkpoint_id"] == cp["checkpoint_id"]
     assert set(meta_before) <= set(mock.metas)
     await d2.fleet.close()

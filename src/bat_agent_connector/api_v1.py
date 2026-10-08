@@ -16,7 +16,16 @@ import time
 from importlib import resources
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import __version__, api_auth, checkpoints, integration, resource_policy, service, work_items
+from . import (
+    __version__,
+    api_auth,
+    checkpoints,
+    confinement,
+    integration,
+    resource_policy,
+    service,
+    work_items,
+)
 from .errors import BatError, ResourceReadOnly
 from .operations import STATES, OperationError
 
@@ -289,7 +298,8 @@ class ApiV1:
         hosts = [{"host": h, "observe": True, "writes": fleet.writes_enabled(h),
                   "orchestrate": fleet.orchestrate_enabled(h),
                   "managed_roots": list(fleet.config.host(h).managed_roots),
-                  "shared_clone_worktrees": fleet.config.host(h).shared_clone_worktrees}
+                  "shared_clone_worktrees": fleet.config.host(h).shared_clone_worktrees,
+                  "confinement": confinement.host_capability(fleet, h)}
                  for h in fleet.config.hosts]
         return 200, {"actor": principal.actor, "scopes": sorted(principal.scopes), "api_version": API_VERSION,
                      "contract_version": CONTRACT_VERSION, "connector": __version__, "hosts": hosts,
@@ -329,11 +339,17 @@ class ApiV1:
     async def session(self, query, host, sid, **_):
         self._known_host(host)
         row = self.daemon.inventory.get_session(host, sid)
+        if row and "confinement" not in row:
+            row.update(confinement.session_fields(host, sid))
         db = self.daemon.journal.db
         out = {"session": row, "started_from": checkpoints.started_from(db, host, sid),
                "work_items": work_items.work_items_for(db, "session", f"{host}/{sid}")}
         if self._bool(query, "live"):
             out["policy"] = await resource_policy.session_policy(self.daemon.fleet, host, sid)
+            if row:
+                row.update(confinement.session_fields(
+                    host, sid, await service._meta(self.daemon.fleet.client(host), sid),
+                    account=confinement.account_status(self.daemon.fleet, host)))
         elif row is None:
             raise ApiError(404, "NOT_FOUND", "session is not in the inventory (pass live=true to ask the host)")
         return 200, out

@@ -24,7 +24,7 @@ from .redact import redact
 # Changes to these fields produce a session.updated event; activity time alone does not.
 MATERIAL = ("workspace", "workspace_id", "title", "cwd", "agent_kind", "agent_preset", "model", "loaded",
             "streaming", "runtime_status", "pending", "worktree_branch", "orchestrated", "has_tab", "provenance",
-            "api_access", "read_only_code", "isolation")
+            "api_access", "read_only_code", "isolation", "write_scope", "confinement", "current_verification")
 GONE_AFTER_MISSES = 2
 MAX_PAGE = 200
 

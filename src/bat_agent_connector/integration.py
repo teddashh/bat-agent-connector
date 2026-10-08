@@ -1569,7 +1569,8 @@ async def _run_handoff(ctx: OpContext) -> dict:
                                   actor=ctx.actor)
     return {"apply_operation_id": op["operation_id"], "seq": seq, "host": host, "session_id": started["session_id"],
             "worktree_path": wt, "branch": branch, "base_sha": prev, "source_sha": src["pin"],
-            "conflict_files": files, "message_id": started["message_id"], "write_scope": "confined"}
+            "conflict_files": files, "message_id": started["message_id"], "write_scope": "confined",
+            "confinement": started["confinement"], "current_verification": started["current_verification"]}
 
 
 def apply_request(doc: dict) -> dict:
