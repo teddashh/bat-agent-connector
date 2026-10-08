@@ -394,6 +394,8 @@ async def live_check(c, cls: Classification, *, worktree: bool = True, folder: b
 def _decide(cls: Classification, m: Mutation, live: LiveCheck | None) -> tuple[str, str] | None:
     if cls.code:
         return cls.code, cls.reason or "read-only"
+    if cls.registry_status in registry.RETIRED and m.action.startswith("session.") and m.action != "session.stop":
+        return "SESSION_RETIRED", "this session ID left the host cap; start a new session ID"
     if m.action in BAT_WORKTREE_ACTIONS and cls.worktree_made_by == "connector":
         return ("NOT_A_BAT_WORKTREE", "the connector made this worktree over SSH and BAT has no record of it; "
                 "BAT's worktree actions would act on the workspace folder's repository")
@@ -433,6 +435,8 @@ async def classify_live(fleet, host: str, t: dict, action: str | None = None
 async def authorize_session(fleet, host: str, action: str, t: dict, *, live: LiveCheck | None = None,
                             cls: Classification | None = None) -> WriteGrant:
     """Grant one session-scoped action, or raise ResourceReadOnly before any write frame."""
+    from .cleanup import guard
+    guard(host, session_id=t["id"], path=t.get("cwd") or t.get("worktreePath"))
     m = BY_ACTION[action]
     if m.scope != "session":
         raise BatError(f"internal: {action} is not a session action")
@@ -451,6 +455,8 @@ def _create_grant(host: str, session_id: str, workdir: str | None, isolation: st
 
 def _check_resolved(hc: HostConfig, path: str, git_roots: dict | None) -> None:
     """A managed-root path must also be managed after the host resolves it (a symlink can point anywhere)."""
+    from .cleanup import guard
+    guard(hc.name, path=path)
     real = norm((git_roots or {}).get(path))
     if real and not in_managed_root(hc, real):
         raise ResourceReadOnly("DESTINATION_MANUAL",
@@ -566,6 +572,8 @@ def authorize_external_worktree(hc: HostConfig, root: str, path: str, branch: st
 
 def check_checkpoint_worktree(hc: HostConfig, clone: str, path: str, branch: str) -> None:
     """A checkpoint execution's clone and worktree: fixed names one level inside a managed root."""
+    from .cleanup import guard
+    guard(hc.name, path=path, branch=branch)
     c, p = norm(clone), norm(path)
     root = next((r for r in hc.managed_roots if c and posixpath.dirname(c) == r.rstrip("/")), None)
     name = posixpath.basename(p or "")
@@ -593,6 +601,8 @@ def integration_area_path(hc: HostConfig, host: str, repository: str, remote_url
 
 def check_integration_area(hc: HostConfig, path: str) -> None:
     """The integration area: a fixed name directly under <first managed root>/.batc-integration/."""
+    from .cleanup import guard
+    guard(hc.name, path=path)
     p = norm(path) or ""
     parent = posixpath.join(norm(hc.managed_roots[0]) or "", INTEGRATION_DIR) if hc.managed_roots else ""
     if (not parent or posixpath.dirname(p) != parent or not _AREA_NAME.fullmatch(posixpath.basename(p))
@@ -602,6 +612,8 @@ def check_integration_area(hc: HostConfig, path: str) -> None:
 
 def check_repair_worktree(hc: HostConfig, area: str, path: str, branch: str) -> None:
     """A conflict-resolving worktree: <area>/wt/batc-fix-<12 hex> on branch batc/fix-<12 hex>, nothing else."""
+    from .cleanup import guard
+    guard(hc.name, path=path, branch=branch)
     check_integration_area(hc, area)
     name = posixpath.basename(norm(path) or "")
     suffix = name[len("batc-fix-"):]
@@ -648,12 +660,27 @@ def push_refspec(sha: str, head_ref: str) -> str:
 
 def check_external_worktree(root: str, path: str, branch: str, task_id: str) -> None:
     """The task service's SSH-created worktree may only use its fixed connector-owned name."""
+    from .cleanup import guard
+    guard(path=path, branch=branch)
     suffix = task_id.replace("-", "")[:12]
     if (len(suffix) != 12 or any(ch not in "0123456789abcdef" for ch in suffix)
             or norm(path) != posixpath.join(norm(root) or "", BAT_WORKTREES_DIR, f"batc-task-{suffix}")
             or branch != f"batc/task-{suffix}"):
         raise ResourceReadOnly("DESTINATION_MANUAL", "external worktree identity is not connector-owned")
 
+
+
+def check_cleanup_worktree(hc: HostConfig, repository: str, path: str | None, branch: str) -> None:
+    """SSH cleanup destination; creation intent and live Git binding are checked by the cleanup handler."""
+    from .cleanup import guard
+    guard(hc.name, path=path or repository, branch=branch)
+    if not hc.writes or not hc.orchestrate:
+        raise ResourceReadOnly("TIER_DISABLED", "cleanup needs the host write and orchestrate tiers")
+    if (not in_managed_root(hc, repository) or (path and (not in_managed_root(hc, path) or
+            not path.startswith(repository.rstrip("/") + "/")))):
+        raise ResourceReadOnly("WORKDIR_NOT_MANAGED", "cleanup requires a managed clone or integration area")
+    if not branch or not branch.startswith(("batc/", "bat/")):
+        raise ResourceReadOnly("UNKNOWN_READ_ONLY", "cleanup requires a proven connector branch")
 
 # --------------------------------------------------------------------------- read views
 async def session_policy(fleet, host: str, session_id: str | None = None) -> dict:

@@ -92,6 +92,66 @@ async def test_replica_projection_keeps_last_copy_when_original_is_unavailable(d
     assert artifact_cleanup.replica_evidence(daemon.ops, item)["replica_manifest"]
 
 
+@pytest.mark.parametrize("failure", ["missing", "corrupt", "unchanged"])
+async def test_cleanup_resume_rechecks_original_before_removing_accepted_replica(daemon, mock, monkeypatch, failure):
+    from bat_agent_connector import cleanup
+    from bat_agent_connector.operations import OperationError
+    from tests.operation_helpers import settle_operations
+    from tests.test_cleanup import CLEANER, apply
+
+    ref, continuation_op, item = await setup_replica(daemon)
+    sid = continuation_op["result"]["session_id"]
+    mock.metas[sid]["isStreaming"] = False
+    for terminal in mock.ws_doc["terminals"]:
+        if mock.metas.get(terminal["id"]) is None:
+            mock.metas[terminal["id"]] = {"cwd": terminal["cwd"], "isStreaming": False}
+    doc = await cleanup.preview(daemon.ops, CLEANER, {
+        "kind": "checkpoint", "checkpoint_id": continuation_op["target"]["checkpoint_id"]})
+    assert doc["ready"], doc
+    accepted = next(row for row in doc["items"] if row["kind"] == "worktree")
+    assert accepted["replica_evidence"]["replica_manifest"]
+    original_call = cleanup._host_call
+    remove_attempts = []
+
+    async def hold_remove(ops, host, request, *args, **kwargs):
+        if request.get("phase") == "remove.worktree":
+            remove_attempts.append(request)
+            raise OperationError("PREVIEW_STALE", "test pause after preserving refs", 409)
+        return await original_call(ops, host, request, *args, **kwargs)
+
+    monkeypatch.setattr(cleanup, "_host_call", hold_remove)
+    paused = await apply(daemon, doc)
+    assert paused["status"] == "needs_attention", paused
+    assert remove_attempts
+    assert daemon.journal.db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? "
+        "AND name LIKE '%.preserve.%' AND status='succeeded'", (paused["operation_id"],)).fetchone()
+    original = daemon.artifact_store.content_path(ref["artifact_id"], ref["revision"])
+    saved = original.with_name("saved-content")
+    if failure != "unchanged":
+        original.rename(saved)
+        if failure == "corrupt":
+            original.write_bytes(b"corrupt original")
+    monkeypatch.setattr(cleanup, "_host_call", original_call)
+    try:
+        daemon.ops.resume(CLEANER, paused["operation_id"])
+        await settle_operations(daemon.ops)
+        resumed = daemon.ops.get(paused["operation_id"])
+        if failure == "unchanged":
+            assert resumed["status"] == "succeeded", resumed
+            assert not Path(item["path"]).exists()
+        else:
+            assert resumed["status"] == "needs_attention", resumed
+            evidence = accepted["replica_evidence"]["replica_manifest"][0]
+            assert (Path(item["path"]) / evidence["path"]).read_bytes() == b"immutable input"
+            receipts = cleanup.receipts(daemon.ops, paused["operation_id"])
+            assert any(r["error"] and r["error"].get("refused_code", r["error"]["code"]) == "PREVIEW_STALE"
+                       for r in receipts), receipts
+    finally:
+        if failure != "unchanged":
+            original.unlink(missing_ok=True)
+            saved.rename(original)
+
+
 async def test_replica_projection_uses_recorded_attempts_without_guessing_gaps(daemon):
     ref, op, item = await setup_replica(daemon)
     db = daemon.journal.db

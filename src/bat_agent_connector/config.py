@@ -21,8 +21,9 @@ Config file (default ``~/.config/bat-agent-connector/hosts.toml``)::
     orchestrate = false                # 3rd tier: start worktree sessions, merge, remove (needs writes)
     orchestrate_max_sessions = 4       # cap on concurrently orchestrated sessions on this host
     orchestrate_register_tabs = false  # append a tab to the host workspace (workspace:save, append-only)
-    default_permission_mode = "default" # "default" (agent asks) or "allow_all" (like BAT's bypass setting)
-    auto_cleanup = false               # allow session_cleanup to merge/remove/stop on this host
+    default_permission_mode = "default" # default/allow_all preserve BAT policy; confined gates tools/sandboxes
+    # confined Codex may block installs/network/local sockets; BAT cannot pass network or writable roots.
+    auto_cleanup = false               # deprecated: parses only; never enables cleanup writes
     codex_model = ""                   # default model for Codex sessions started/failed over here ("" = BAT default)
     profile_id = "default"             # workspace profile on the host
     managed_roots = []                 # host folders the connector owns (its own clones); see resource_policy.py
@@ -105,13 +106,14 @@ class HostConfig:
     orchestrate_max_sessions: int = 4
     orchestrate_register_tabs: bool = False
     default_permission_mode: str = "default"
-    auto_cleanup: bool = False
+    auto_cleanup: bool = False  # Deprecated: parses for compatibility; never enables cleanup writes.
     codex_model: str | None = None
     profile_id: str = "default"
     bat_profiles_dir: str = DEFAULT_BAT_PROFILES_DIR
     labels: list[str] = field(default_factory=list)
     managed_roots: tuple[str, ...] = ()
     shared_clone_worktrees: bool = True
+    confinement: dict = field(default_factory=dict)
 
     def __repr__(self) -> str:  # never include token material
         return f"HostConfig(name={self.name!r}, url={self.url!r}, writes={self.writes}, orchestrate={self.orchestrate})"
@@ -188,7 +190,7 @@ class SafetyConfig:
     max_start_per_call: int = 4
 
 
-PERMISSION_MODES = ("default", "allow_all")
+PERMISSION_MODES = ("default", "allow_all", "confined")
 
 
 def normalize_host_path(raw: str) -> str:
@@ -228,6 +230,13 @@ class ApiConfig:
     stale_after_s: float = 180.0
     activity_every: int = 5
     allowed_origins: tuple[str, ...] = ()
+
+
+@dataclass
+class CleanupConfig:
+    retained_refs: str = "keep"
+    history_retention: str = "forever"
+    permanent_delete: bool = False
 
 
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
@@ -403,6 +412,7 @@ class Config:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     jev: JevConfig = field(default_factory=JevConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
     client_label: str = "BAT Agent Connector"
     path: Path | None = None
@@ -467,6 +477,37 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
         cmodel = str(h.get("codex_model") or "").strip() or None
         if cmodel and not re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", cmodel):
             raise ConfigError(f"host {name!r}: codex_model {cmodel!r} is not a valid model id")
+        managed_roots = _managed_roots(name, h.get("managed_roots"))
+        confinement = h.get("confinement", {})
+        if not isinstance(confinement, dict):
+            raise ConfigError(f"host {name!r}: confinement must be a table")
+        allowed = {"host_account", "expected_uid", "protected_roots", "check_max_age_s",
+                   "check_timeout_s", "check_max_entries", "bat_port", "check_ssh_alias", "check_uid", "bat_account"}
+        if set(confinement) - allowed or not isinstance(confinement.get("host_account", False), bool):
+            raise ConfigError(f"host {name!r}: invalid confinement settings")
+        if confinement.get("host_account"):
+            uid = confinement.get("expected_uid")
+            if type(uid) is not int or uid <= 0:
+                raise ConfigError(f"host {name!r}: confinement.expected_uid must be a non-root UID")
+            roots = _managed_roots(name, confinement.get("protected_roots"))
+            if not roots or any(a == b or a.startswith(b + "/") or b.startswith(a + "/")
+                                for a in roots for b in managed_roots):
+                raise ConfigError(f"host {name!r}: protected_roots must be nonempty and separate from managed_roots")
+            confinement = {**confinement, "protected_roots": list(roots)}
+        if "check_ssh_alias" in confinement:
+            alias = confinement["check_ssh_alias"]
+            account = confinement.get("bat_account")
+            auditor = confinement.get("check_uid")
+            if (not isinstance(alias, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", alias)
+                    or not isinstance(account, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", account)
+                    or type(auditor) is not int or auditor < 0 or auditor == confinement.get("expected_uid")):
+                raise ConfigError(f"host {name!r}: trusted check requires an SSH alias, BAT account and different check_uid")
+        elif "check_uid" in confinement or "bat_account" in confinement:
+            raise ConfigError(f"host {name!r}: check_uid and bat_account require check_ssh_alias")
+        for key, maximum in (("check_max_age_s", 3600), ("check_timeout_s", 30),
+                             ("check_max_entries", 100000), ("bat_port", 65535)):
+            if key in confinement and (type(confinement[key]) is not int or not 0 < confinement[key] <= maximum):
+                raise ConfigError(f"host {name!r}: confinement.{key} must be between 1 and {maximum}")
         hosts[name] = HostConfig(
             name=name,
             url=url,
@@ -482,8 +523,9 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
             profile_id=str(h.get("profile_id") or "default"),
             bat_profiles_dir=str(h.get("bat_profiles_dir") or pdir),
             labels=list(h.get("labels") or []),
-            managed_roots=_managed_roots(name, h.get("managed_roots")),
+            managed_roots=managed_roots,
             shared_clone_worktrees=shared,
+            confinement=confinement,
         )
     s = data.get("safety") or {}
     safety = SafetyConfig(
@@ -518,6 +560,12 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
         activity_every=max(1, min(100, int(a.get("activity_every", 5)))),
         allowed_origins=tuple(origins),
     )
+    cleanup_data = data.get("cleanup") or {}
+    if (set(cleanup_data) - {"retained_refs", "history_retention", "permanent_delete"} or
+            cleanup_data.get("retained_refs", "keep") != "keep" or
+            cleanup_data.get("history_retention", "forever") != "forever" or
+            cleanup_data.get("permanent_delete", False) is not False):
+        raise ConfigError('[cleanup] supports only retained_refs="keep", history_retention="forever", permanent_delete=false')
     cl = data.get("client") or {}
     label = str(cl.get("label") or "BAT Agent Connector")
     human = str(cl.get("human_name") or "").strip() or None
