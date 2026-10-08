@@ -18,6 +18,17 @@
   paths are checked against the managed roots before any write (`checkpoint.managed_worktree` in the mutation
   table). A checkpoint taken inside a managed clone continues in that clone. A session that is only in the
   registry keeps its workspace, and a checkpoint without one is refused up front (`NO_WORKSPACE`).
+- Checkpoint sessions are confined whatever the host's `default_permission_mode` (plan §06, A10): Claude starts in
+  `acceptEdits` and Codex in the `workspace-write` sandbox with `on-request` approval. The registry records
+  `write_scope: "confined"` and the permission fields from the reservation on, so a start proven by read-back, a
+  resume and a Codex failover successor keep them. `session_set_permissions` refuses allow-all for these sessions
+  and `approve_pending` skips them. The source conversation in the first instruction is marked as background.
+- New API scope `start` for starting agent sessions; `checkpoint.continue` needs it. An `operate` token (send,
+  answer, interrupt) no longer starts sessions. Reissue the Dashboard token with `--scope start`; the Dashboard
+  disables "Start agent work" and says why when the token lacks it.
+- Dashboard: an idempotency key is reused only while the operation it created is unfinished, so the same draft
+  sent again later is a new request instead of a silent replay; a session page that finishes loading after you
+  navigated away no longer adds its Checkpoints panel to the next page.
 
 - Checkpoints (docs/design/checkpoints.md): `checkpoint.create` records any session's commit, branch, uncommitted
   change count and a fixed conversation excerpt through read channels only; `checkpoint.continue` builds a

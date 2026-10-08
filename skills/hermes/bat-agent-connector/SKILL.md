@@ -116,9 +116,13 @@ last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_cont
    commit defaults to HEAD; pass another full SHA from the preview's `commits` if asked. Keep `checkpoint_id`.
 4. With the person's go-ahead: `work_continue_from_checkpoint(checkpoint_id, instructions=<their words>,
    idempotency_key, agent, confirm=true)`. It may still be running when it returns: follow
-   `operation_get(operation_id)` and reuse the same key on retry. A new key starts a second session.
+   `operation_get(operation_id)` and reuse the same key on retry. A new key starts a second session. It needs a
+   token with the `start` scope; `FORBIDDEN` means ask the person to issue one, do not look for another way in.
 5. Track `result.session_id` like any managed session. The source session is only a reference: do not nudge, stop or
    clean it up. Take a new checkpoint to include the person's newer commits.
+6. The new session is confined (`write_scope: "confined"`): Claude asks before writing outside its folder or running
+   most commands, Codex's sandbox blocks such writes. Leave those prompts to the person; never approve a write to a
+   path outside the session's own folder, and do not try to raise its permissions (refused).
 
 ## Plan fan-out workflow (orchestrate tier)
 
