@@ -1155,8 +1155,7 @@ async def _evaluate(
     live = await resource_policy.live_check(c, pol)
     if live.issue:
         return decide("ESCALATE", f"{live.issue[0]}: {live.issue[1]}")
-    rehydrate = await resource_policy.authorize_session(fleet, host, "worktree.rehydrate", t, cls=pol, live=live)
-    st, rehydrated = await _wt_status(c, t, rehydrate=rehydrate)
+    st, rehydrated = await _wt_status(c, t)  # Legacy evaluation never re-registers BAT worktrees.
     row["rehydrated"] = rehydrated
     if not st:
         return decide("ESCALATE", "host has no worktree state (cannot judge merge safety)")

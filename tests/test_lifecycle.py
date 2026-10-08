@@ -374,6 +374,59 @@ async def legacy_evaluate(fleet, host, **kwargs):
 
 
 # --------------------------------------------------------------------------- cleanup
+@pytest.mark.parametrize("entry", ["planner", "relay", "merge", "remove", "failover", "permissions", "approve", "verification"])
+async def test_e01_legacy_mutations_require_confirmation_before_writes(fleet_factory, mock, entry):
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True,
+                      default_permission_mode="allow_all", safety={"write_min_interval_s": 0})
+    sid = "sess-claude-0001"
+    calls = {
+        "planner": lambda: lifecycle.fanout_plan_session(f, "h1", "demo-project", "plan", confirm=False),
+        "relay": lambda: lifecycle.session_relay(f, "h1", "task", session_id=sid, start_if_missing=True, confirm=False),
+        "merge": lambda: orchestrate.worktree_merge(f, "h1", sid, confirm=False),
+        "remove": lambda: orchestrate.worktree_remove(f, "h1", sid, confirm=False),
+        "failover": lambda: lifecycle.session_failover(f, "h1", sid, confirm=False),
+        "permissions": lambda: lifecycle.session_set_permissions(f, "h1", sid, confirm=False),
+        "approve": lambda: lifecycle.approve_pending(f, "h1", confirm=False),
+        "verification": lambda: lifecycle.session_record_verification(f, "h1", sid, "0" * 40, "pytest", 0,
+                                                                      "mock host", "tests.log", confirm=False),
+    }
+    before = len(mock.invokes)
+    with pytest.raises(WriteRefused, match="confirm=true"):
+        await calls[entry]()
+    assert not any(i["channel"] in channels.WRITE_CHANNELS | channels.ORCHESTRATE_CHANNELS for i in mock.invokes[before:])
+    assert registry.list_entries("h1") == []
+    assert mock.metas[sid] is not None
+    await f.close()
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+async def test_e01_legacy_cleanup_disabled_apply_never_writes_with_auto_cleanup(fleet_factory, mock, confirm):
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True)
+    before = len(mock.invokes)
+    with pytest.raises(OperationError, match="LEGACY_CLEANUP_DISABLED") as caught:
+        await lifecycle.session_cleanup(f, "h1", confirm=confirm, dry_run=False)
+    assert caught.value.status == 409
+    assert len(mock.invokes) == before and registry.list_entries("h1") == []
+    await f.close()
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+async def test_e01_legacy_cleanup_evaluation_never_rehydrates_worktrees(fleet_factory, mock, confirm):
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True,
+                      safety={"write_min_interval_s": 0}, **MANAGED_CLONE)
+    started = await _finished_wt(f, mock)
+    sid = started["session_id"]
+    mock.worktrees.pop(sid)  # BAT forgot the worktree; live cwd and the connector's creation record remain.
+    entries, before = registry.list_entries("h1"), len(mock.invokes)
+    result = await lifecycle.session_cleanup(f, "h1", confirm=confirm, dry_run=True, session_id=sid)
+    assert not any(i["channel"] in channels.WRITE_CHANNELS | channels.ORCHESTRATE_CHANNELS for i in mock.invokes[before:])
+    assert sid not in mock.worktrees and registry.list_entries("h1") == entries
+    row = result["decisions"][0]
+    assert row["decision"] == "ESCALATE" and "no worktree state" in row["reasons"][0]
+    assert row["rehydrated"] is False
+    await f.close()
+
+
 async def _finished_wt(f, mock, kind="unknown", diff="", verified=True):
     r = await orchestrate.session_start(f, "h1", "demo-project", "codex", confirm=True)
     sid = r["session_id"]

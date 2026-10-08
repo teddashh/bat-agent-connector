@@ -359,12 +359,14 @@ Tombstone自有routes可查原ID、舊位置、清理原因、誰做的、哪個
 Capabilities列cleanup/read/apply/discard、host能力／reason／limits／15分鐘TTL／retention；restore=false。
 api-token issue help、api-v1.md、README兩語、兩份skills都列新scopes；agent不要求cleanup_discard。
 Legacy batc cleanup／session_cleanup名稱保留只讀，不alias新的host-wide語意；apply立即409並指出新流程。
+Legacy evaluation 只讀 worktree status；BAT 忘記 worktree 時不取得 mutation grant、不發
+worktree:rehydrate，即使 confirm=true 也不重登記；缺狀態回 ESCALATE，registry 不變。
 auto_cleanup只保留config解析，deprecated且不啟用writes；worktree_merge/remove仍是explicit動作，只共享guard。
 Fanout planner 只有 caller `confirm=true` 且每一個 planned task 都成功啟動，才經原 stop 路徑停止。
 未確認、任一 start failed 或 loop 提早停止，都保留 loaded planner／原 plan 供 retry；不能因 starts
 回傳 error 或只是部分成功就 stop。回 `planner_cleanup={stopped:false,reason,worktree_kept:true,
 next_action:"batc resource-cleanup"}`，reason 區分 confirmation／start failed／incomplete loop。
-成功 fan-out 的 stop 仍核 tier／policy／streaming，stop refused／error 也保留 reason 與 next_action。
+成功 fan-out 的 stop 仍核 tier／policy／streaming，stop refused／error 也保留原因與 next_action。
 任何情況都不 merge／remove planner worktree；idle planner 可另經 reviewed cleanup 回收。
 
 Dashboard #/cleanup、#/cleanup/resource/ID：scope／子工作、真resource與all reasons／plan、保留commits與
@@ -420,6 +422,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | TASK_OWNED／原TaskDaemon不變 | test_e01_task_owned_resources_are_retained；原test_external_cleanup_retains_unmerged_commit_and_recovers_after_restart／test_terminal_cleanup_requires_proof_before_journal_path_is_cleared |
 | legacy只讀、config解析、planner只stop、跨processguard | test_e01_legacy_apply_is_disabled_and_auto_cleanup_still_loads、test_e01_fanout_stops_planner_and_keeps_worktree、test_e01_guard_refuses_legacy_writes_on_reserved_and_cleaned_resources |
 | planner stop 需確認與全數 tasks 啟動；失敗保留 plan 供 retry；E01 | test_e01_fanout_without_confirmation_keeps_planner_loaded、test_e01_fanout_failed_start_keeps_planner_for_retry（第一個／最後一個 start 失敗）、test_e01_fanout_stops_planner_and_keeps_worktree（stop frame 恰一次） |
+| legacy confirmation／read-only audit；E01 | test_e01_legacy_mutations_require_confirmation_before_writes（planner／relay／merge／remove／failover／permissions／approve／verification）、test_e01_legacy_cleanup_disabled_apply_never_writes_with_auto_cleanup、test_e01_legacy_cleanup_evaluation_never_rehydrates_worktrees（confirm=false／true 都不寫） |
 | boundedread／serialization／deadline | test_e01_previews_serialize_per_host_and_share_read_deadline |
 | attachmentreplicas只豁免exact manifest／exacttemps | test_e01_attachment_replicas_are_removed_without_discard_scope、test_e01_edited_or_extra_replica_content_counts_as_uncommitted、test_e01_replicas_without_manifest_are_ordinary_content、test_e01_replica_anomalies_require_reviewed_discard（missing/link/hardlink/directory）、test_e01_replica_edit_after_preview_is_stale、test_e01_lost_replies_reconcile_each_cleanup_phase（discard.replica）、test_e01_exact_temporary_requires_creation_markers_and_never_sweeps、test_e01_empty_integration_temporary_has_exact_intent_and_no_restore_promise |
 | acceptedauthority由server記錄／public request retry／載體不被guard退休 | test_e01_accepted_authorization_is_server_recorded（HTTP 422、persisted actor/scopes/choices、同key retry）、test_e01_accepted_authority_survives_key_rotation_and_carrier_stays_usable |
