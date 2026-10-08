@@ -70,7 +70,7 @@ for (const native of [false, true]) {
     await expect(drawer.getByTestId("deployment-preview-generation")).toContainText("generation 4");
     append("deployment_environment");
     await expect.poll(async () => page.evaluate(() => JSON.parse(Object.entries(localStorage)
-      .find(([key]) => key.startsWith("batc.sync."))?.[1] || "null")?.cursor)).toBe(sequence);
+      .find(([key]) => key.startsWith("batc.sync."))?.[1] || "null")?.cursor)).toBe(sequence - 1);
     await expect(drawer.getByTestId("deployment-preview-generation")).toContainText("generation 4");
     await drawer.getByTestId("deployment-rollback-confirm").click();
     await expect(drawer).toContainText("Review the fresh preview");
@@ -88,5 +88,79 @@ for (const native of [false, true]) {
     expect(requests.every(input => !input.token && !input.headers)).toBe(true);
     expect(errors).toEqual([]);
     if (native) expect(httpCalls).toBe(0);
+  });
+}
+
+for (const native of [false, true]) {
+  test(`event acknowledgment joins failed in-flight history reads (${native ? "native" : "browser"})`, async ({page}) => {
+    const caps = {actor: "delivery-race", scopes: ["observe", "deploy"], api_version: 1,
+      contract_version: "2026-10-08", hosts: [], repositories: [], features: {}, actions: [],
+      deploy_recipes: [{name: "prod", repository: "o/r", environment: "production", readiness: {ready: true}}]};
+    let changed = false, failing = false, environmentReads = 0, historyReads = 0, delivered = false;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => {release = resolve;});
+    const checkpoints = (cursor: number) => ({cursor, token: `delivery-race-${cursor}`});
+    const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
+    const historyCursors: (string | null)[] = [];
+    const dispatch = async (input: any) => {
+      const url = new URL(input.path, "http://fixture"), path = url.pathname;
+      if (path === "/deployment-environments") {
+        environmentReads++;
+        if (failing) return {status: 503, data: {error: {code: "UNAVAILABLE", message: "Environment refresh failed"}}};
+        return {status: 200, data: {environment: {environment: "production", desired_generation: changed ? 2 : 1}}};
+      }
+      if (path === "/deployment-environments/history") {
+        historyReads++; historyCursors.push(url.searchParams.get("cursor"));
+        if (historyReads === 2) await held;
+        return {status: 200, data: {items: [], next_cursor: url.searchParams.has("cursor") ? null : "page-two"}};
+      }
+      if (path === "/events" && changed) delivered = true;
+      return {status: 200, data: path === "/capabilities" ? caps : path === "/bootstrap" ? {capabilities: caps,
+        sync: {version: 1, server_id: "server", principal_id: "principal", checkpoint: checkpoints(0)}}
+        : path === "/events" ? {events: changed && url.searchParams.get("after") === "0"
+          ? [{seq: 1, kind: "deployment.updated", resource_type: "deployment_environment", resource_id: "production"}] : [],
+          head_cursor: changed ? 1 : 0, next_cursor: changed ? 1 : 0, has_more: false, sync: {checkpoint: checkpoints(changed ? 1 : 0)}}
+        : {sessions: [], work_items: [], operations: [], hosts: []}};
+    };
+    if (native) {
+      await page.exposeFunction("fixtureConnector", dispatch);
+      await page.addInitScript(caps => Object.assign(window, {isTauri: true, __TAURI_INTERNALS__: {invoke: async (command: string, args: any) => {
+        if (command === "native_status") return {endpoint: "https://central.example/", credential_available: true};
+        if (command === "connector_connect") return caps;
+        if (command === "connector_disconnect") return null;
+        if (command === "connector_request") return (window as any).fixtureConnector(args.input);
+        throw new Error(`Unexpected native command ${command}`);
+      }}}), caps);
+    } else await page.addInitScript(() => sessionStorage.setItem("batc.dashboard.token", "fixture-token"));
+    await page.route("**/api/v1/**", async route => {
+      if (native) throw new Error("Native requests must use IPC");
+      const request = route.request(), url = new URL(request.url());
+      const response = await dispatch({method: request.method(), path: url.pathname.slice(7) + url.search});
+      return route.fulfill({status: response.status, json: response.data});
+    });
+    await page.goto("/dashboard/#/delivery");
+    const card = page.locator('[data-environment="production"]');
+    await expect(card).toContainText("Environment generation 1");
+    const saved = () => page.evaluate(() => JSON.parse(Object.entries(localStorage).find(([key]) => key.startsWith("batc.sync."))?.[1] || "null"));
+    await expect.poll(saved).toEqual(checkpoints(0));
+    failing = true;
+    await card.getByTestId("history-next").click();
+    await expect.poll(() => historyReads).toBe(2);
+    changed = true;
+    await expect.poll(() => delivered).toBe(true);
+    await expect(page.locator("#live")).toContainText("Waiting to refresh");
+    // Both the failed environment read and its still-running history sibling belong to the barrier.
+    expect(environmentReads).toBe(2);
+    expect(await saved()).toEqual(checkpoints(0));
+    release();
+    await expect(card).toContainText("UNAVAILABLE Environment refresh failed");
+    await expect(page.locator("#live")).toContainText("Central offline");
+    expect(await saved()).toEqual(checkpoints(0));
+    failing = false;
+    await expect.poll(saved, {timeout: 10000}).toEqual(checkpoints(1));
+    await expect(card).toContainText("Environment generation 2");
+    await expect(card).toContainText("Page 2");
+    expect(historyCursors.slice(1).every(cursor => cursor === "page-two")).toBe(true);
+    expect(errors).toEqual([]);
   });
 }
