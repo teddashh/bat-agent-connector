@@ -144,3 +144,7 @@ Reviewer 只以**最後一則 agent 訊息**中的 JSON verdict 決定：`{"verd
 
 受信測試失敗不再直接 `needs_ted`（stuck handler）：以 log 尾端做決定性分類。缺依賴時，每個候選 commit 只跑一次 repo 追蹤中的 lockfile 安裝（pnpm／yarn／npm ci／uv sync／cargo fetch），工作樹須保持乾淨，再重測；安裝後仍缺即視為程式問題。程式／測試失敗時把遮蔽後的輸出尾端（≤2500 字）送回 lead 做有上限的 rework（`verification_failures`；small 1 次、其他 2 次），再驗證新 commit；超過上限才 `needs_ted`。逾時、權限、登入、網路、磁碟等環境問題直接 `needs_ted`。
 
+
+## 執行限制證據（A10）
+
+[confinement](confinement.md) 在既有 start command payload／registry 保存 options 與 creation snapshot；`work_status.session_confinement` 分開顯示 creation 與 current verification。Lead、reviewer、warm、resume／recovery 不改模型、引擎、recipe 或 verifier 命令。`allow_all` 仍用原選項，level=none＋task_recipe_compatibility；host 新增 confined 時 Task Service 沿用原 default 行為並列 gap。Claude acceptEdits 沒有 path check，cwd 不構成保護；A10 尚待 W12 live run。

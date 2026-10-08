@@ -21,6 +21,14 @@ BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端�
 
 > 本專案與 BAT 作者**沒有任何關係，也未經其背書**。協定是從 BAT 以 MIT 授權公開的原始碼（v3.2.12）讀出來的，BAT 改版時可能跟著變。BAT 的功勞屬於 TonyQ 與其貢獻者。
 
+一般 managed start 保留操作者的 `default_permission_mode`：`default` 沿用 BAT 預設、`allow_all` 保留 bypass／full access（level=none）；新增 `confined` 才對一般 start 套限制。Checkpoint／repair 固定 confined：Claude 用 default，只有已查核 BAT 帳號才用 acceptEdits；Codex 用 workspace-write／on-request。帳號查核須有 root-owned、BAT 不可寫的 home／可信 startup files 與系統 Python/find；先從可信副本替換再 harden，.claude／.codex／.cache 等 state 子目錄仍可由 BAT 帳號擁有。未 harden 的 host 記 unknown，confined Claude 用 plain default。Cwd 本身不保護寫入，acceptEdits 沒有 path check。BAT 不能設定 network／writable roots，因此 confined Codex 可能影響安裝及 localhost 測試。Task Service engine／recipe 不變並顯示相容 gap。Session reads 與 Dashboard 分開列建立證據與目前核對；A10 尚待 W12 實機驗收。詳見[設定、限制與 live procedure](docs/design/confinement.md)。
+
+Dashboard 啟動提示依 capabilities 的 `hosts[].confinement.host_account.start_effect` 判斷：`verified` 表示帳號已查核；`recheck` 表示尚未查核或已過期，啟動時會重查；`fallback_default` 表示可降級處理的加固缺口或未宣告帳號，受限 Claude 使用 plain default；只有 `refused` 會拒絕 Claude 與 Codex 的新 start。讀取不觸發查核，reason 仍可見，不能只因 status 不是 verified 就認定無法啟動。
+
+帳號查核另需操作者設好的可信 auditor SSH alias（`check_ssh_alias`）、其 UID（`check_uid`）及目標 BAT 帳號名稱（`bat_account`）。Auditor 的登入環境不得受 BAT 帳號控制，先證明 system Python 的完整 closure，再透過限定 sudo 指令以 -c argv 執行隔離的 Python，不經 BAT 的 shell 或 startup files；回覆的 UID／channel facts 也須符合設定。沒有可信通道時回 `unknown/check_channel_untrusted`、`fallback_default`，受限 Claude 用 plain default，絕不啟用 acceptEdits。原本的 BAT home／startup 加固仍是額外檢查，單靠它不能證明通道可信。未知 layout 或不完整 gate 用 default；查核假設沒有同 BAT UID 的 hostile process，ptrace_scope 只留作證據，不宣稱額外隔離。設定與 sudoers 範例見[設計文件](docs/design/confinement.md)。
+
+`START_IN_PROGRESS` 表示另一程序正在 start 此 session：稍後讀回，不盲目重試；`CONFINEMENT_START_UNSETTLED` 則須讀回可能已送出的 start。
+
 內容包含四個部分：
 
 | 元件 | 名稱 |

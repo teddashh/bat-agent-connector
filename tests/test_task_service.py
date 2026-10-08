@@ -683,6 +683,8 @@ async def test_claude_sessions_pin_opus_55_for_lead_and_reviewer(fleet_factory, 
                     and i["params"]["sessionId"] == sid)["params"]["options"]
         assert opts["agentPreset"] == preset and opts["model"] == task_bat.CLAUDE_BAT_MODEL
         assert opts["model"].startswith("claude-opus-5-5")
+        assert task_bat.registry.get("h1", sid)["confinement"]["level"] == "prompt_gated"
+        assert task_bat.registry.get("h1", sid)["confinement"]["verification"]["status"] == "options_confirmed"
     j.close()
 
 
@@ -2308,6 +2310,15 @@ async def test_bat_warm_reuse_claims_only_clean_completed_service_session(fleet_
     verifier.head = "e" * 40
     assert await adapter.find_warm(current) is None  # HEAD moved past the verified commit
     verifier.head = "a" * 40
+    # A10: a readable permission mismatch cannot be claimed as a warm lead.
+    original_meta = dict(mock.metas[old_sid])
+    creation = registry.get("h1", old_sid)["confinement"]
+    mock.metas[old_sid]["codexSandboxMode"] = "danger-full-access"
+    assert await adapter.find_warm(current) is None
+    assert registry.get("h1", old_sid)["task_id"] == previous["task_id"]
+    assert registry.get("h1", old_sid)["confinement"] == creation
+    assert journal.authorize_capability(old_capability, previous["task_id"])
+    mock.metas[old_sid] = original_meta
     assert await adapter.find_warm(current) == old_sid
     starts_before = len([i for i in mock.invokes if i["channel"] == "claude:start-session"])
     assert await adapter.start({**current, "_warm_session_id": old_sid},
@@ -3836,6 +3847,7 @@ async def test_reviewer_start_polls_existing_session_after_start_timeout(
     async def invoke(channel, params, **kwargs):
         calls.append(channel)
         if channel == "claude:start-session":
+            kwargs["on_transport"]()  # Model a lost reply after the frame, not a pre-transport timeout.
             raise TimeoutError("host-a workspace load timeout")
         if channel == "claude:get-session-meta":
             return {"cwd": "/srv/demo", "isStreaming": False}

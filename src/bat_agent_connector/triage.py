@@ -15,7 +15,7 @@ import re
 import time
 from typing import Any
 
-from . import registry
+from . import confinement, registry
 from .client import BatClient
 from .fleet import Fleet
 from .jev import Jev
@@ -290,6 +290,7 @@ async def _host_triage(
             "worktree_branch": t.get("worktreeBranch"),
             "loaded": meta is not None,
             "orchestrated": bool(t.get("_orchestrated")) or registry.get(name, t.get("id")) is not None,
+            **confinement.session_fields(name, t.get("id"), meta, account=confinement.account_status(fleet, name)),
             **classify_row_for_read(c.host, t.get("id"), has_tab=not t.get("_orchestrated"), entries=entries),
         }
         try:

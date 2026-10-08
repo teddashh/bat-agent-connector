@@ -131,6 +131,7 @@ def _registry_document():
     if (not isinstance(d, dict) or not isinstance(d.get("sessions", []), list) or
             not isinstance(d.get("cleanup_guards", {}), dict)):
         raise ResourceReadOnly("CLEANUP_IN_PROGRESS", "cleanup guard registry is invalid")
+    registry._validate_unique(d.get("sessions", []))
     return d
 
 
@@ -165,6 +166,12 @@ def _mark(item, op_id, status):
         if old and old["operation_id"] != op_id:
             raise ResourceReadOnly("CLEANUP_IN_PROGRESS", "resource has another cleanup owner")
         guard(item["host"], session_id=item.get("session_id"), path=item.get("path"), branch=item.get("branch"))
+        sessions = {item["session_id"]} if item.get("session_id") else set()
+        if item["kind"] != "session" and item.get("path"):
+            sessions.update(e["session_id"] for e in d.get("sessions", []) if e.get("host") == item["host"]
+                            and (e.get("worktree_path") or e.get("cwd")) == item["path"])
+        for sid in sorted(sessions):
+            registry.refuse_start_claim(path, item["host"], sid)
         guards[item["resource_id"]] = {
             "operation_id": op_id, "status": status, "host": item["host"], "kind": item["kind"], "path": item.get("path"),
             "branch": item.get("branch"), "generation": item["generation"],
@@ -186,7 +193,8 @@ def _release(item, op_id):
         if old and old.get("status") == "reserved" and old["operation_id"] == op_id:
             del d["cleanup_guards"][item["resource_id"]]
             for e in d.get("sessions", []):
-                if e.get("cleanup_reservation") == op_id and e.get("session_id") == item.get("session_id"):
+                if (e.get("cleanup_reservation") == op_id and e.get("host") == item["host"]
+                        and e.get("session_id") == item.get("session_id")):
                     e["cleanup_reservation"] = None
             registry._write_document(path, d)
 

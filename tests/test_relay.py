@@ -95,11 +95,13 @@ async def test_relay_dry_run_targets_managed_session_never_a_bat_session(fleet_f
 
 
 async def test_relay_to_bat_session_starts_a_new_worktree_instead(fleet_factory, mock):
-    f = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})
+    f = fleet_factory(writes=True, orchestrate=True, default_permission_mode="confined", safety={"write_min_interval_s": 0})
     n = await lifecycle.session_relay(f, "h1", TED, session_id="sess-claude-0001", confirm=True)
     assert n["sent"] is False and n["read_only"] and n["read_only_code"] == "MANUAL_READ_ONLY"
     s = await lifecycle.session_relay(f, "h1", TED, session_id="sess-claude-0001", confirm=True,
                                       start_if_missing=True)
+    assert s["result"]["write_scope"] == "confined"
+    assert s["result"]["confinement"]["level"] == "os_sandbox"
     assert s["started"] and s["session_id"] != "sess-claude-0001"
     assert "read_only" not in s and s["replaced"]["read_only_code"] == "MANUAL_READ_ONLY"
     assert s["result"]["worktree_path"].startswith("/srv/demo/.bat-worktrees/")
@@ -127,6 +129,8 @@ async def fanout_planner(f, mock):
     p = await lifecycle.fanout_plan_session(f, "h1", "demo-project", "split the work", max_items=2, confirm=True)
     sid = p["session_id"]
     assert registry.get("h1", sid)["role"] == "planner"
+    assert p["confinement"]["options"] == {"codexSandboxMode": "read-only", "codexApprovalPolicy": "never"}
+    assert p["write_scope"] == "confined"
     block = '```bat-fanout\n[{"title": "A", "prompt": "Exact prompt A"}, {"title": "B", "prompt": "Exact prompt B"}]\n```'
     mock.states[sid] = {"isStreaming": False, "messages": [
         msg(0, "user", "plan"), msg(1, "assistant", block + "\nBAT-STATUS: MILESTONE fan-out plan ready")]}
@@ -134,7 +138,7 @@ async def fanout_planner(f, mock):
 
 
 async def test_e01_fanout_without_confirmation_keeps_planner_loaded(fleet_factory, mock):
-    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, orchestrate_max_sessions=4,
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, orchestrate_max_sessions=4, default_permission_mode="allow_all",
                       safety={"write_min_interval_s": 0})
     sid = await fanout_planner(f, mock)
     entries, before = registry.list_entries("h1"), len(mock.invokes)
@@ -168,13 +172,15 @@ async def test_e01_fanout_failed_start_keeps_planner_for_retry(fleet_factory, mo
 
 
 async def test_e01_fanout_stops_planner_and_keeps_worktree(fleet_factory, mock):
-    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, orchestrate_max_sessions=4,
+    f = fleet_factory(writes=True, orchestrate=True, auto_cleanup=True, orchestrate_max_sessions=4, default_permission_mode="allow_all",
                       safety={"write_min_interval_s": 0})
     sid = await fanout_planner(f, mock)
     d = await lifecycle.fanout_from_plan(f, "h1", sid, dry_run=True)
     assert [t["title"] for t in d["plan"]] == ["A", "B"]
     d = await lifecycle.fanout_from_plan(f, "h1", sid, confirm=True)
     assert len(d["started"]) == 2 and all("session_id" in x for x in d["started"])
+    for child in d["started"]:
+        assert child["confinement"]["level"] == "none" and child["write_scope"] is None
     sent = [i["params"].get("prompt") or i["params"].get("text") or "" for i in mock.invokes
             if i["channel"] in ("claude:send-message", "claude:start-session")]
     assert any(x.startswith("Exact prompt A\n\n") for x in sent) and any(x.startswith("Exact prompt B") for x in sent)

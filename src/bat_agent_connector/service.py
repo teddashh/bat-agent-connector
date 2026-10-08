@@ -17,7 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from . import registry, resource_policy
+from . import confinement, registry, resource_policy
 from .client import BatClient, event_session_id
 from .errors import BatError, InvokeError, WriteRefused
 from .fleet import Fleet
@@ -213,6 +213,7 @@ async def hosts_list(fleet: Fleet, probe: bool = True) -> dict:
             "orchestrate_enabled": fleet.orchestrate_enabled(name),
             "token_ref_kind": hc.token_kind,
             "token_available": hc.token_available(),
+            "confinement": confinement.host_capability(fleet, name),
         }
         if probe:
             c = fleet.client(name)
@@ -233,6 +234,7 @@ async def hosts_list(fleet: Fleet, probe: bool = True) -> dict:
 
 
 async def host_status(fleet: Fleet, host: str) -> dict:
+    await confinement.check_account(fleet, host)
     c = fleet.client(host)
     was_connected = c.connected
     await c.connect()
@@ -270,6 +272,7 @@ async def host_status(fleet: Fleet, host: str) -> dict:
         "meta_errors": sum(1 for m in metas if isinstance(m, Exception)),
         "writes_enabled": fleet.writes_enabled(host),
         "orchestrate_enabled": fleet.orchestrate_enabled(host),
+        "confinement": confinement.host_capability(fleet, host),
     }
 
 
@@ -396,6 +399,7 @@ async def _host_sessions(
             "worktree_branch": t.get("worktreeBranch"),
             "orchestrated": t.get("id") in orchestrated_ids,
             "has_tab": not t.get("_orchestrated", False),
+            **confinement.session_fields(name, t.get("id"), meta, account=confinement.account_status(fleet, name)),
             **resource_policy.classify_row_for_read(c.host, t.get("id"), has_tab=not t.get("_orchestrated", False),
                                                     entries=entries),
             "pending": None,
@@ -772,6 +776,7 @@ async def session_read(
         "workspace": w.get("name"),
         "title": t.get("title"),
         "agent_kind": kind,
+        **confinement.session_fields(host, sid, meta, account=confinement.account_status(fleet, host)),
         "loaded": meta is not None,
         "streaming": bool((state or {}).get("isStreaming") or m.get("isStreaming")),
         "streaming_text_tail": None
@@ -1040,6 +1045,9 @@ async def session_send(
                     "session is not loaded on the host (pass ensure_loaded=true to client-resume it)"
                 )
             params = _resume_params(t, ws)
+            original = confinement.resume_options(host, sid, kind or "claude")
+            if original:
+                params["options"].update(original)
             audit.record(
                 actor=fleet.actor,
                 tool=tool,
@@ -1049,7 +1057,8 @@ async def session_send(
                 phase="attempt",
             )
             try:
-                await c.invoke("claude:client-resume", params, grant=grant)
+                await c.invoke("claude:client-resume", params, grant=grant,
+                               frame_guard=lambda frame: confinement.guard_resume_frame(host, sid, kind or "claude", frame))
             except BatError as e:
                 audit.record(
                     actor=fleet.actor,
@@ -1064,6 +1073,7 @@ async def session_send(
                 raise
             resumed = True
             meta = await _meta(c, sid)
+        confinement.guard_loaded(host, sid, meta)
         if (meta or {}).get("isStreaming") and not queue:
             raise WriteRefused(
                 "session is currently streaming a turn; pass queue=true to queue the message behind it"
@@ -1085,13 +1095,19 @@ async def session_send(
             phase="attempt",
             text=text,
         )
+        async def verify_at_frame() -> None:
+            entry = registry.get(host, sid) or {}
+            if entry.get("write_scope") == "confined" and entry.get("confinement"):
+                observed = await c.guard_read("claude:get-session-meta", {"sessionId": sid})
+                confinement.guard_loaded(host, sid, observed)
+
         try:
             if before_invoke:
                 before_invoke()
             r = await c.invoke(
                 "claude:send-message", {"sessionId": sid, "prompt": text, "clientMessageId": mid},
                 retry_on_disconnect=retry_on_disconnect and agent_kind(t.get("agentPreset")) == "claude",
-                before_send=before_invoke, grant=grant,
+                before_send=before_invoke, before_frame=verify_at_frame, grant=grant,
             )
         except BatError as e:
             audit.record(
@@ -1286,6 +1302,8 @@ async def session_answer(
             tuid = pend.get("toolUseId")
             if tool_use_id and tool_use_id != tuid:
                 raise WriteRefused("tool_use_id does not match the pending permission request")
+            confinement.guard_answer(host, sid, pend.get("toolName"),
+                                     dont_ask_again=dont_ask_again, allow=permission == "allow")
             if permission == "allow":
                 result = {"behavior": "allow", "updatedInput": pend.get("input")}
                 if dont_ask_again:
@@ -1316,7 +1334,10 @@ async def session_answer(
             **detail,
         )
         try:
-            r = await c.invoke(channel, params, grant=grant)
+            r = await c.invoke(channel, params, grant=grant,
+                               frame_guard=lambda _: confinement.guard_answer(
+                                   host, sid, detail.get("permission_tool"),
+                                   dont_ask_again=dont_ask_again, allow=permission == "allow"))
         except InvokeError as e:
             audit.record(
                 actor=fleet.actor,

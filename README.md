@@ -25,6 +25,33 @@ MCP client) and shell scripts can:
 > This project is **not affiliated with or endorsed by** the BAT authors. The protocol was read from BAT's MIT-licensed
 > source (v3.2.12) and can change between BAT releases. Credit for BAT goes to TonyQ and its contributors.
 
+General managed starts keep the operator's `default_permission_mode`: `default` preserves BAT defaults and
+`allow_all` preserves bypass/full access (level `none`). Choose `confined` to restrict general starts too. Checkpoint
+and repair starts always use confined options: Claude `default`, or `acceptEdits` only with a verified BAT host
+account; Codex `workspace-write/on-request`. Host-account verification requires a separate trusted auditor SSH
+alias (`check_ssh_alias`), its UID (`check_uid`) and the target `bat_account`, set up by the operator. The auditor
+proves the entire system Python closure before executing it, then uses a narrow sudo rule and `-c` argv without
+the BAT account's shell or startup files. Unknown layouts or incomplete gates use plain default.
+The channel and verdict UID are checked; the auditor login must be beyond the BAT account's control.
+Without that channel, `unknown/check_channel_untrusted` means `fallback_default`, never acceptEdits.
+Defense in depth still requires a root-owned, non-writable BAT home and trusted startup files, plus system-owned
+Python/find. The verdict assumes no hostile BAT-UID process during the check; ptrace_scope is recorded, not an
+isolation proof. Install clean startup files before hardening; agent
+state may live in account-owned `.claude`, `.codex` and `.cache` subdirectories. Unhardened hosts report unknown and
+confined Claude uses plain `default`. Cwd alone offers no protection, and acceptEdits has no path check.
+BAT cannot configure network or writable roots, so confined Codex may break installs and localhost test servers.
+Task Service engine/recipes stay unchanged and expose their compatibility gap. Session reads and the Dashboard
+show creation evidence separately from current verification. A10 is not proven until W12's live acceptance run.
+See [configuration, limits and the live procedure](docs/design/confinement.md).
+
+The Dashboard start note follows capabilities `hosts[].confinement.host_account.start_effect`: `verified`,
+`recheck` (unchecked or stale; checked live at start), `fallback_default` (a supported hardening gap or no account
+declaration; confined Claude uses plain default), or `refused` (blocks Claude and Codex). The read itself runs no
+check and keeps the reason visible. A non-verified status alone does not mean starts are blocked.
+
+`START_IN_PROGRESS` means another process is starting this session: read it back later, do not retry blindly;
+`CONFINEMENT_START_UNSETTLED` requires read-back of a possibly sent start.
+
 It ships four things:
 
 | Piece | Name |
