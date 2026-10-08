@@ -614,8 +614,8 @@ class Journal:
             sql += " AND e.kind!='history.backfilled'"
         if related_resource_type:
             sql += """ AND EXISTS(SELECT 1 FROM api_event_resources r WHERE r.seq=e.seq
-                AND r.resource_type=? AND r.resource_id=?)"""
-            args.extend([related_resource_type, related_resource_id])
+                AND r.resource_type=? AND r.resource_id=? AND r.linked_at_seq<=?)"""
+            args.extend([related_resource_type, related_resource_id, head])
         rows = self.db.execute(sql + " ORDER BY e.seq LIMIT ?", (*args, limit + 1)).fetchall() if limit else []
         events = [event_out(self.db, r) for r in rows[:limit]]
         more = len(rows) > limit if limit else after < head

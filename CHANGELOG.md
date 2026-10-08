@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- Observation operation ref positions ([design](docs/design/observation.md), plan §08/§10/§11, B01/B02/B03):
+  bound operation refs by both event and link sequence; saved facts read strictly before their historical position,
+  while live and replayed events include their own sequence. Exclude later checkpoint runs and mutable operation
+  refs from early facts, preserve unbounded catalogue membership, and bound related-event links by the captured
+  feed head. Backfill stays in data step 2 with projection failures isolated.
+
 - Observation relation closure bodies ([design](docs/design/observation.md), plan §08/§10/§11, B01/B03):
   emit the complete final command boundary and one close timestamp in the same body stored by the relation
   and its revision. Open/bind/close events match their revisions across replacement lifecycles; version-1

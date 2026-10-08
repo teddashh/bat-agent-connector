@@ -319,7 +319,30 @@ def open_relations(db, execution_id, seq, *, before=False):
             and (rel.get("end_seq") is None or rel["end_seq"] >= seq)]
 
 
-def _refs(db, kind, rid, *, seq=None, include_runs=False):
+def run_known_at(db, run, seq):
+    if seq is None:
+        return True
+    event = db.execute("""SELECT MIN(seq) FROM api_events WHERE resource_type='checkpoint'
+        AND resource_id=? AND kind='checkpoint.continued' AND json_extract(body,'$.operation_id')=?""",
+        (run["checkpoint_id"], run["operation_id"])).fetchone()[0]
+    if event is not None:
+        return event <= seq
+    # Eventless legacy rows prove only the first journal position after their own time.
+    occurred = fact_time("checkpoint_runs", dict(run))
+    if occurred is not None:
+        event = db.execute("""SELECT MIN(seq) FROM api_events WHERE kind!='history.backfilled'
+            AND created_at>?""", (occurred,)).fetchone()[0]
+        if event is not None:
+            return event <= seq
+    event = db.execute("""SELECT MIN(seq) FROM api_events WHERE kind='history.backfilled'
+        AND json_extract(body,'$.source_table')='checkpoint_runs'
+        AND json_extract(body,'$.saved_snapshot.operation_id')=?""", (run["operation_id"],)).fetchone()[0]
+    return event is not None and event <= seq
+
+
+def _refs(db, kind, rid, *, seq=None, include_runs=False, before=False):
+    # Live/replay events see <= seq; a saved fact at P sees < P. None is catalogue membership.
+    bound = seq - 1 if seq is not None and before else seq
     if kind == "session":
         return [("session", rid)]
     if kind == "task":
@@ -327,20 +350,26 @@ def _refs(db, kind, rid, *, seq=None, include_runs=False):
             # Inventory catalogue membership includes past relations; event projections always pass seq.
             return [("session", r[0]) for r in db.execute(
                 "SELECT DISTINCT session_resource_id FROM observation_relations WHERE execution_id=?", (rid,))]
-        return [("session", rel["session_resource_id"]) for rel in open_relations(db, rid, seq)]
+        return [("session", rel["session_resource_id"]) for rel in open_relations(db, rid, seq, before=before)]
     if kind == "checkpoint":
         cp = db.execute("SELECT host,source_session_id FROM checkpoints WHERE checkpoint_id=?", (rid,)).fetchone()
         out = [("session", f"{cp[0]}/{cp[1]}")] if cp else []
         if include_runs:
             out += [("session", f"{r[0]}/{r[1]}") for r in db.execute(
-                "SELECT host,session_id FROM checkpoint_runs WHERE checkpoint_id=?", (rid,))]
+                "SELECT host,session_id,checkpoint_id,operation_id,created_at FROM checkpoint_runs WHERE checkpoint_id=?", (rid,))
+                if run_known_at(db, r, bound)]
         return out
     if kind == "checkpoint_run":
-        r = db.execute("SELECT host,session_id FROM checkpoint_runs WHERE operation_id=?", (rid,)).fetchone()
-        return [("session", f"{r[0]}/{r[1]}")] if r else _refs(db, "operation", rid, seq=seq)
+        r = db.execute("SELECT host,session_id,checkpoint_id,operation_id,created_at FROM checkpoint_runs WHERE operation_id=?", (rid,)).fetchone()
+        return [("session", f"{r[0]}/{r[1]}")] if r and run_known_at(db, r, bound) else _refs(db, "operation", rid, seq=seq, before=before)
     if kind == "operation":
-        return [(r[0], r[1]) for r in db.execute("""SELECT DISTINCT resource_type,resource_id FROM api_event_resources
-            WHERE seq IN (SELECT seq FROM api_events WHERE resource_type='operation' AND resource_id=?)""", (rid,))]
+        sql = """SELECT DISTINCT r.resource_type,r.resource_id FROM api_event_resources r
+            JOIN api_events e USING(seq) WHERE e.resource_type='operation' AND e.resource_id=?"""
+        args = [rid]
+        if bound is not None:
+            sql += " AND e.seq<=? AND r.linked_at_seq<=?"
+            args.extend([bound, bound])
+        return [(r[0], r[1]) for r in db.execute(sql, args)]
     return []
 
 
@@ -376,9 +405,11 @@ def fact_position(db, occurred_at, boundary):
 
 def snapshot_refs(db, kind, rid, position):
     if kind == "task":
-        sessions = [("session", rel["session_resource_id"]) for rel in open_relations(db, rid, position, before=True)] if position is not None else []
+        sessions = _refs(db, kind, rid, seq=position, before=True) if position is not None else []
         return [("execution", rid), *sessions]
-    refs = _refs(db, kind, rid, seq=position)
+    if position is None and kind in {"operation", "checkpoint_run"}:
+        return []
+    refs = _refs(db, kind, rid, seq=position, before=True)
     return refs if position is not None else [(typ, res) for typ, res in refs if typ != "session"]
 
 
@@ -503,7 +534,14 @@ def record_event(journal, seq, *, legacy=False, extra=None):
     op = db.execute("SELECT * FROM operations WHERE operation_id=?", (op_id,)).fetchone() if op_id else None
     if op:
         target = body(op["target"])
-        ext = body(b.get("refs")) if legacy and e["kind"] == "resource.bound" else {} if legacy else body(op["external_refs"])
+        if e["kind"] == "history.backfilled":
+            position = (extra or {}).get("fact_at_seq") if extra and "fact_at_seq" in extra else fact_position(
+                db, fact_time(b.get("source_table"), snapshot), seq)
+            ext = {}
+            refs.extend(snapshot_refs(db, "operation", op_id, position))
+        else:
+            ext = body(b.get("refs")) if legacy and e["kind"] == "resource.bound" else {} if legacy else body(op["external_refs"])
+            refs.extend(_refs(db, "operation", op_id, seq=seq))
         ctx.update(operation_id=op_id, operation_entry_point=op["entry"], observer="operation-service", host=ctx["host"] or target.get("host") or ext.get("host"))
         if e["kind"] == "operation.accepted":
             ctx["entry_point"] = op["entry"]
@@ -537,7 +575,8 @@ def record_event(journal, seq, *, legacy=False, extra=None):
                 db, fact_time(b.get("source_table"), snapshot), seq)
             refs.extend(snapshot_refs(db, "task", params.get("ref"), position))
         if target.get("operation_id"):
-            refs.extend(_refs(db, "operation", target["operation_id"], seq=seq))
+            refs.extend(snapshot_refs(db, "operation", target["operation_id"], position) if e["kind"] == "history.backfilled"
+                        else _refs(db, "operation", target["operation_id"], seq=seq))
         ctx["action"] = op["action"]
         ctx["source_versions"] += [{"kind": "git", "sha": value, "role": name} for name, value in body(op["preconditions"]).items() if name in {"expected_head", "expected_commit", "expected_head_sha", "expected_base_sha"} and value]
         host = ctx["host"]
@@ -746,20 +785,14 @@ def backfill(journal):
                 refs.extend(snapshot_refs(db, data["source_kind"], data["source_id"], position))
             if data.get("operation_id"):
                 refs.extend(snapshot_refs(db, "operation", data["operation_id"], position))
-                op = db.execute("SELECT action,target,external_refs FROM operations WHERE operation_id=?", (data["operation_id"],)).fetchone()
+                op = db.execute("SELECT target FROM operations WHERE operation_id=?", (data["operation_id"],)).fetchone()
                 if op:
-                    target, ext = body(op["target"]), body(op["external_refs"])
+                    target = body(op["target"])
                     cp = db.execute("SELECT host FROM checkpoints WHERE checkpoint_id=?", (target.get("checkpoint_id"),)).fetchone()
-                    h = target.get("host") or ext.get("host") or (cp[0] if cp else None)
-                    sid = ext.get("session_id") or body(data.get("request")).get("session_id") or body(data.get("response")).get("session_id")
+                    h = target.get("host") or (cp[0] if cp else None)
+                    sid = body(data.get("request")).get("session_id") or body(data.get("response")).get("session_id")
                     if h and sid:
                         refs.append(("session", f"{h}/{sid}"))
-                    if h and ext.get("worktree_path") and op["action"] in {"checkpoint.continue", "integration.handoff"}:
-                        wid = worktree(journal, h, op["action"], data["operation_id"], "repair" if op["action"] == "integration.handoff" else "worktree",
-                            path=ext["worktree_path"], branch=ext.get("branch"))
-                        if sid:
-                            data.update(session_resource_id=f"{h}/{sid}", worktree_id=wid)
-                        refs.append(("worktree", wid))
             saved_fact(journal, table, key, data, refs, boundary=boundary)
     # Delivery's bounded snapshots are facts too; they do not imply a local session or worktree.
     for row in db.execute("SELECT * FROM pr_merge_previews").fetchall():
