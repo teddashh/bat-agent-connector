@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import uuid
+import weakref
 from typing import Protocol
 
 from . import registry, task_control
@@ -158,6 +159,7 @@ class TaskCoordinator:
         self.minimal_review_gate = minimal_review_gate
         self._writers: dict[tuple[str, str], asyncio.Lock] = {}
         self._task_locks: dict[str, asyncio.Lock] = {}
+        self._failover_authorities = weakref.WeakSet()
         self.verification_quiet_s = max(0.0, verification_quiet_s)
         self._verification_stability: dict[str, tuple[tuple[str, str] | None, float]] = {}
         self._verification_activity: dict[str, float] = {}
@@ -867,6 +869,43 @@ class TaskCoordinator:
         reviewer = sid == task.get("reviewer_session_id")
         return self.journal.change(task["task_id"], "verifying" if reviewer else "running",
                                    fields={"review_marker" if reviewer else "turn_marker": marker})
+
+    def _failover_authority(self, task, successor_id, handoff_command_id, handoff_message_id, **callbacks):
+        """Issue only against this coordinator's durable successor and handoff reservation."""
+        from .task_control import FAILOVER_CALLBACKS, TaskFailoverAuthority
+        self._check_control(task)
+        candidates = [c for c in self.journal.commands(task["task_id"])
+                      if c["kind"] == "failover" and c["session_id"] == successor_id
+                      and c["status"] in {"intent", "needs_review", "uncertain"}]
+        failover = next((c for c in candidates
+                         if (self._bound_handoff(task, c) or {}).get("command_id") == handoff_command_id), None)
+        handoff = self._bound_handoff(task, failover) if failover else None
+        if (not handoff or handoff["message_id"] != handoff_message_id
+                or set(callbacks) != set(FAILOVER_CALLBACKS) or not all(map(callable, callbacks.values()))):
+            raise TaskControlRefused("TASK_OWNED_CONTROL_REQUIRED", "failover has no complete coordinator reservation")
+        authority = object.__new__(TaskFailoverAuthority)
+        fields = dict(task_id=task["task_id"], host=task["host"], session_id=task["session_id"],
+                      successor_session_id=successor_id, failover_command_id=failover["command_id"],
+                      handoff_command_id=handoff_command_id, handoff_message_id=handoff_message_id,
+                      control_version=task["control_version"], _issuer=self, **callbacks)
+        for name, value in fields.items():
+            object.__setattr__(authority, name, value)
+        self._failover_authorities.add(authority)
+        return authority
+
+    def _valid_failover_authority(self, authority):
+        try:
+            task = self.journal.get(authority.task_id)
+            failover = self.journal.command_get(authority.failover_command_id)
+            handoff = self._bound_handoff(task, failover)
+            return (task["state"] == "quota_limited"
+                    and task["host"] == authority.host and task["session_id"] == authority.session_id
+                    and failover["session_id"] == authority.successor_session_id
+                    and failover["status"] in {"intent", "needs_review", "uncertain"}
+                    and handoff is not None and handoff["command_id"] == authority.handoff_command_id
+                    and handoff["message_id"] == authority.handoff_message_id)
+        except (ValueError, KeyError):
+            return False
 
     async def _failover(self, task: dict) -> dict:
         successor = str(uuid.uuid4())

@@ -18,7 +18,6 @@ from __future__ import annotations
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable
 from typing import Any
 
 from . import registry, resource_policy, task_control, verification
@@ -447,11 +446,7 @@ async def _failover_one(
     handoff_message_id: str | None = None,
     handoff_command_id: str | None = None,
     task_id: str | None = None,
-    before_handoff_send: Callable[[str], None] | None = None,
-    verify_handoff_successor: Callable[[], Awaitable[None]] | None = None,
-    verify_handoff_at_frame: Callable[[], Awaitable[None]] | None = None,
-    before_handoff_invoke: Callable[[], None] | None = None,
-    handoff_frame_guard: Callable[[dict], None] | None = None,
+    task_authority: task_control.TaskFailoverAuthority | None = None,
     authoritative_original: bool = False,
 ) -> dict:
     hc = fleet.config.host(host)
@@ -469,8 +464,22 @@ async def _failover_one(
             f"failover only continues connector-managed sessions; {sid[:8]}: {source.reason}. The source stays "
             "untouched: start a new managed worktree session (session_start) from its committed work instead")
     owner_id = task_control.owner_task(fleet, host, sid)
-    if owner_id and owner_id != task_id:
-        task_control.refuse_owned(fleet, host, sid)
+    before_handoff_send = verify_handoff_successor = verify_handoff_at_frame = None
+    before_handoff_invoke = handoff_frame_guard = None
+    if owner_id:
+        if (not isinstance(task_authority, task_control.TaskFailoverAuthority)
+                or not task_authority.valid_for(fleet, host, sid, owner_id)):
+            task_control.refuse_owned(fleet, host, sid)
+        task_authority.check()
+        task_id = task_authority.task_id
+        successor_session_id = task_authority.successor_session_id
+        handoff_command_id = task_authority.handoff_command_id
+        handoff_message_id = task_authority.handoff_message_id
+        before_handoff_send = task_authority.before_handoff_send
+        verify_handoff_successor = task_authority.verify_handoff_successor
+        verify_handoff_at_frame = task_authority.verify_handoff_at_frame
+        before_handoff_invoke = task_authority.before_handoff_invoke
+        handoff_frame_guard = task_authority.handoff_frame_guard
     prior = [
         e
         for e in registry.list_entries(host)
@@ -597,6 +606,12 @@ async def _failover_one(
         opts.update(useWorktree=True, worktreePath=wt_path, worktreeBranch=branch)
     base = {"actor": fleet.actor, "tool": "session_failover", "host": host, "session_id": new_sid}
     async with _write_lock(host):
+        owner_id = task_control.owner_task(fleet, host, sid)
+        if owner_id:
+            if (not isinstance(task_authority, task_control.TaskFailoverAuthority)
+                    or not task_authority.valid_for(fleet, host, sid, owner_id)):
+                task_control.refuse_owned(fleet, host, sid)
+            task_authority.check()
         audit.check_rate(host, "#failover-" + sid)
         existing = registry.reserve(
             host,
@@ -639,7 +654,7 @@ async def _failover_one(
         audit.record(**base, channel="claude:start-session", phase="attempt", preset=preset, failover_of=sid)
         try:
             started = await c.invoke("claude:start-session", {"sessionId": new_sid, "options": opts},
-                                     grant=grant)
+                                     before_send=task_authority.check if owner_id else None, grant=grant)
             if (not isinstance(started, dict) or started.get("ok") is False or
                     started.get("sessionId") != new_sid):
                 raise WriteRefused("BAT failover start did not confirm the reserved session ID")
@@ -723,11 +738,7 @@ async def session_failover(
     handoff_message_id: str | None = None,
     handoff_command_id: str | None = None,
     task_id: str | None = None,
-    before_handoff_send: Callable[[str], None] | None = None,
-    verify_handoff_successor: Callable[[], Awaitable[None]] | None = None,
-    verify_handoff_at_frame: Callable[[], Awaitable[None]] | None = None,
-    before_handoff_invoke: Callable[[], None] | None = None,
-    handoff_frame_guard: Callable[[dict], None] | None = None,
+    task_authority: task_control.TaskFailoverAuthority | None = None,
     authoritative_original: bool = False,
 ) -> dict:
     """Continue quota-exhausted Claude session(s) with Codex in the same folder/worktree.
@@ -765,11 +776,7 @@ async def session_failover(
             handoff_message_id=handoff_message_id,
             handoff_command_id=handoff_command_id,
             task_id=task_id,
-            before_handoff_send=before_handoff_send,
-            verify_handoff_successor=verify_handoff_successor,
-            verify_handoff_at_frame=verify_handoff_at_frame,
-            before_handoff_invoke=before_handoff_invoke,
-            handoff_frame_guard=handoff_frame_guard,
+            task_authority=task_authority,
             authoritative_original=authoritative_original,
         )
     from .triage import sessions_triage
