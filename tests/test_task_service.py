@@ -843,8 +843,12 @@ async def test_task_reservation_excludes_paused_lead_from_legacy_cleanup(
     assert reserved and reserved[0]["task_id"] == task["task_id"]
     assert not any(i["channel"] == "claude:send-message" and
                    i["params"].get("sessionId") == sid for i in mock.invokes)
+    from bat_agent_connector.operations import OperationError
+    with pytest.raises(OperationError, match="LEGACY_CLEANUP_DISABLED") as disabled:
+        await lifecycle.session_cleanup(fleet, "h1", session_id=sid, confirm=True, dry_run=False, min_idle_s=0)
+    assert disabled.value.status == 409
     decision = await lifecycle.session_cleanup(fleet, "h1", session_id=sid,
-                                               confirm=True, dry_run=False, min_idle_s=0)
+                                               dry_run=True, min_idle_s=0)
     assert decision["decisions"][0]["decision"] == "KEEP"
     main = await lifecycle.main_session(fleet, "h1", "demo-project")
     assert not main or main["session_id"] != sid

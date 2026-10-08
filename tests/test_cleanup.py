@@ -633,3 +633,39 @@ async def test_e01_empty_integration_temporary_has_exact_intent_and_no_restore_p
     assert not temp.exists()
     tomb = cleanup.lookup(daemon.journal.db, item["resource_id"])[0]
     assert tomb["retained_ids"] == []
+
+
+@pytest.mark.parametrize("lost_reply", [False, True])
+async def test_e01_cancel_reconciles_sent_steps_and_releases_only_confirmed_reservations(daemon, mock, lost_reply):
+    cp, op = await setup_work(daemon, mock)
+    target = {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]}
+    doc = await cleanup.preview(daemon.ops, CLEANER, target)
+    original = daemon.ops.context["git_runner"]
+    from bat_agent_connector.operations import AmbiguousOutcome
+    class CancelRunner(LocalRunner):
+        fired = False
+        async def run(self, host, script, timeout_s=None):
+            out = await original.run(host, script, timeout_s)
+            request = json.loads(__import__("base64").b64decode(__import__("shlex").split(script)[-1]))
+            if request.get("phase") == "preserve" and not self.fired:
+                self.fired = True
+                pending = daemon.journal.db.execute("SELECT operation_id FROM cleanup_runs").fetchone()[0]
+                daemon.ops.cancel(CLEANER, pending)
+                if lost_reply:
+                    raise AmbiguousOutcome("preserve reply lost while cancel was requested")
+            return out
+    daemon.ops.context["git_runner"] = CancelRunner()
+    done = await apply(daemon, doc)
+    if lost_reply:
+        assert done["status"] == "uncertain", done
+        daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (done["operation_id"],))
+        await daemon.ops.drain(timeout=60)
+        done = daemon.ops.get(done["operation_id"])
+    assert done["status"] == "cancelled", done
+    wt = next(i for i in doc["items"] if i["kind"] == "worktree" and i.get("proven"))
+    assert Path(wt["path"]).exists()
+    assert git(wt["repository"], "rev-parse", "refs/batc/retained/" + wt["resource_id"] + "/" + wt["observation"]["head"])
+    cleanup.guard("h1", path=wt["path"], branch=wt["branch"])
+    rows = cleanup.receipts(daemon.ops, done["operation_id"])
+    assert next(r["status"] for r in rows if r["resource_id"] == wt["resource_id"]) == "cancelled"
+    assert (await cleanup.preview(daemon.ops, CLEANER, target))["ready"]
