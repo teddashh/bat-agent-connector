@@ -47,6 +47,7 @@ ALLOWED = {
     "needs_attention": {"running", "cancelled", "failed"},
 }
 UNCERTAIN_RETRY_S = (30.0, 60.0, 120.0, 300.0, 600.0)
+NO_KEY_PREFIX = "batc:nokey:"
 
 
 class AmbiguousOutcome(Exception):
@@ -296,6 +297,11 @@ class OperationService:
         for key in ("result", "external_refs"):
             op[key] = json.loads(op[key]) if op[key] else None
         op["cancel_requested"] = bool(op["cancel_requested"])
+        # Keep the old field for readers, but never expose a storage sentinel as a client key.
+        if op["idem_key"] == NO_KEY_PREFIX + op["operation_id"]:
+            op["idem_key"] = None
+        op["idempotency_key"] = op["idem_key"]
+        op["idempotency_enabled"] = op["idem_key"] is not None
         op.pop("request_hash", None)
         return op
 
@@ -412,16 +418,19 @@ class OperationService:
             self._observation_event(operation_id, "operation.step." + status, {"step": name, "status": status, "error_code": (error or {}).get("code")})
 
     # ------------------------------------------------------------------ create / cancel
-    def create(self, principal: Principal, *, action: str, target: dict | None = None, params: dict | None = None,
-               preconditions: dict | None = None, idempotency_key: str, entry: str = "http") -> tuple[dict, bool]:
-        """Persist an operation (or return the one this key already created). Returns (operation, created)."""
+    def _prepare_create(self, principal, *, action, target=None, params=None, preconditions=None,
+                        idempotency_key, _legacy_interrupt=False):
+        """Validate caller intent and replay before any asynchronous compatibility resolution."""
         adef = self.actions.get(action)
         if adef is None:
             raise OperationError("UNKNOWN_ACTION", f"unknown action {action!r}", 422)
         if not principal.allows(adef.scope):
             raise OperationError("FORBIDDEN", f"{action} needs the {adef.scope!r} scope", 403)
-        if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key.strip()) <= 200:
+        no_key = _legacy_interrupt and action == "session.interrupt" and idempotency_key is None
+        if not no_key and (not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key.strip()) <= 200):
             raise OperationError("IDEMPOTENCY_KEY_REQUIRED", "idempotency_key must be 1-200 characters", 422)
+        if isinstance(idempotency_key, str) and idempotency_key.strip().startswith(NO_KEY_PREFIX):
+            raise OperationError("INVALID_IDEMPOTENCY_KEY", "idempotency_key uses a reserved prefix", 422)
         target, params, preconditions = target or {}, params or {}, preconditions or {}
         if not all(isinstance(x, dict) for x in (target, params, preconditions)):
             raise OperationError("INVALID_REQUEST", "target, params and preconditions must be objects", 422)
@@ -430,26 +439,42 @@ class OperationService:
             raise OperationError("INVALID_TARGET", f"target needs {', '.join(missing)}", 422)
         request_hash = hashlib.sha256(_canonical({"action": action, "target": target, "params": params,
                                                   "preconditions": preconditions}).encode()).hexdigest()
-        key = idempotency_key.strip()
+        key = None if no_key else idempotency_key.strip()
         existing = self.db.execute("SELECT * FROM operations WHERE actor=? AND idem_key=?",
                                    (principal.actor, key)).fetchone()
         if existing:
             if existing["request_hash"] != request_hash:
                 raise OperationError("IDEMPOTENCY_CONFLICT",
                                      "this idempotency_key was already used for a different request", 409)
-            op = self._decode(existing)
-            if adef.authorize_existing:
-                adef.authorize_existing(self, principal, op, "replay")
-            return op, False
-        binding = adef.admit(self, principal, target, params, preconditions) if adef.admit else None
+        op = self._decode(existing) if existing else None
+        if op and adef.authorize_existing:
+            adef.authorize_existing(self, principal, op, "replay")
+        return adef, target, params, preconditions, key, request_hash, op
+
+    def create(self, principal: Principal, *, action: str, target: dict | None = None, params: dict | None = None,
+               preconditions: dict | None = None, idempotency_key: str | None, entry: str = "http",
+               _legacy_interrupt: bool = False, _resolved_target: dict | None = None) -> tuple[dict, bool]:
+        """Persist intent. Private compatibility arguments are never accepted from HTTP/RPC bodies."""
+        adef, target, params, preconditions, key, request_hash, existing = self._prepare_create(
+            principal, action=action, target=target, params=params, preconditions=preconditions,
+            idempotency_key=idempotency_key, _legacy_interrupt=_legacy_interrupt)
+        if existing:
+            return existing, False
+        if _resolved_target is not None and not (_legacy_interrupt and action == "session.interrupt"):
+            raise ValueError("resolved targets are limited to the legacy interrupt adapter")
+        binding = adef.admit(self, principal, _resolved_target or target, params, preconditions) if adef.admit else None
         operation_id = "op_" + uuid.uuid4().hex
+        key = key if key is not None else NO_KEY_PREFIX + operation_id
+        refs = {"admission_binding": binding} if binding else {}
+        if _resolved_target is not None:
+            refs["resolved_target"] = _resolved_target
         now = time.time()
         with self.journal.tx():
             self.db.execute("""INSERT INTO operations(operation_id,actor,entry,idem_key,request_hash,action,target,
                 params,preconditions,status,created_at,updated_at,external_refs) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                             (operation_id, principal.actor, entry[:20], key, request_hash, action,
                              _canonical(target), _canonical(params), _canonical(preconditions), "accepted", now,
-                             now, _canonical({"admission_binding": binding}) if binding else None))
+                             now, _canonical(refs) if refs else None))
             self.journal.api_event("operation", operation_id, "operation.accepted",
                                    {"action": action, "target": target, "entry": entry}, actor=principal.actor)
         self.kick()
@@ -497,6 +522,9 @@ class OperationService:
         re-sent), and the handler's checks run afresh."""
         op = self.get(operation_id, steps=False)
         self._may_steer(principal, op, "resume")
+        if op["action"] == "delivery.merge_and_deploy" and not (
+                principal.allows("merge") and principal.allows("deploy")):
+            raise OperationError("FORBIDDEN", "resuming merge-and-deploy needs both merge and deploy scopes", 403)
         if op["status"] != "needs_attention":
             raise OperationError("NOT_RESUMABLE", f"only needs_attention operations resume (this one is "
                                  f"{op['status']})", 409)

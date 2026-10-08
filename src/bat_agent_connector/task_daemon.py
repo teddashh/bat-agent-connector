@@ -26,6 +26,7 @@ from . import (
     checkpoints,
     confinement,
     delivery,
+    deployment,
     integration,
     pr_delivery,
     registry,
@@ -44,7 +45,7 @@ from .goose_acp import GooseACP
 from .inventory import Inventory, InventorySettings
 from .jev import Jev
 from .model_router import MinimalReviewGate, MinimalTaskRouter, ModelRouter, RouterConfig
-from .operations import OpContext, OperationError, OperationService
+from .operations import NO_KEY_PREFIX, OpContext, OperationError, OperationService
 from .task_bat import BatTaskAdapter
 from .task_core import TaskCoordinator
 from .task_journal import Journal
@@ -53,11 +54,13 @@ from .task_verifier import ObservedVerifier, load_settings
 
 DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 # /rpc methods that share /api/v1's principals and OperationService (MCP and CLI enter here).
-API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
+API_RPC = {"op_submit": "?", "session_interrupt": "operate", "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
            "work_status": "observe", "work_result": "observe", "work_events": "observe",
            "api_events": "observe", "inventory_sessions": "observe", "inventory_hosts": "observe",
            "inventory_session": "observe", "inventory_worktree": "observe", "resource_history": "observe", "resource_relations": "observe",
            "api_capabilities": "observe", "github_pr_preview": "observe", "github_merge_preview_get": "observe",
+           "deployment_preview": "observe", "deployment_status": "observe", "deployments_list": "observe",
+           "deployment_environment_get": "observe",
            "checkpoints_list": "observe",
            "checkpoint_get": "observe", "checkpoint_preview": "observe", "integration_candidates": "observe",
            "integration_preview_get": "observe", "integration_get": "observe", "integrations_list": "observe",
@@ -242,6 +245,8 @@ class TaskDaemon:
             raise OperationError("FORBIDDEN", f"{method} needs the {scope!r} scope", 403)
         entry = params.pop("entry", None)
         entry = entry if entry in {"mcp", "cli"} else "rpc"
+        if method == "session_interrupt":
+            return await api_actions.legacy_interrupt(self.ops, principal, params, entry=entry)
         if method in {"work_status", "work_result", "work_events"}:
             return await self.call(method, params, principal=principal)
         if method == "op_submit":
@@ -298,6 +303,14 @@ class TaskDaemon:
                                                               from_event=params.get("from_event") is True)}
         if method == "github_merge_preview_get":
             return {"preview": pr_delivery.get_preview(self.journal.db, str(params.get("preview_id")))}
+        if method == "deployment_preview":
+            return {"preview": await deployment.preview(self.ops, params.get("recipe"))}
+        if method == "deployment_status":
+            return {"deployment": deployment.status(self.ops, params.get("deployment_id"))}
+        if method == "deployments_list":
+            return deployment.history(self.ops, params.get("recipe"), cursor=params.get("cursor"), limit=params.get("limit", 50))
+        if method == "deployment_environment_get":
+            return {"environment": deployment.environment_status(self.ops, params.get("recipe"))}
         if method == "checkpoints_list":
             return checkpoints.list_checkpoints(self.journal.db, host=params.get("host"),
                                                 session_id=params.get("session_id"),
@@ -638,6 +651,9 @@ class TaskDaemon:
         if key is None:
             key = "legacy-request:" + secrets.token_hex(16)
         client_key = key
+        if isinstance(key, str) and key.strip().startswith(NO_KEY_PREFIX):
+            # Check the original legacy key before the 201–256 character compatibility hash.
+            raise LegacyTaskError("INVALID_IDEMPOTENCY_KEY", "idempotency_key uses a reserved prefix", 422)
         if method == "work_submit" and isinstance(key, str) and 200 < len(key) <= 256:
             # Keep the old 256-character contract without changing create()'s 200-character API key limit.
             params["legacy_idempotency_key"] = key
@@ -929,16 +945,26 @@ class TaskDaemon:
     async def reconcile_metadata(self):
         while True:
             try:
-                await pr_delivery.reconcile_metadata(self.ops)
+                if self.journal.owner_valid():
+                    await pr_delivery.reconcile_metadata(self.ops)
             except Exception:  # keep periodic reads alive; operation evidence is retained
                 logging.getLogger(__name__).exception("metadata reconciliation failed")
+            await asyncio.sleep(10)
+
+    async def reconcile_deployments(self):
+        while True:
+            try:
+                if self.journal.owner_valid():
+                    await delivery.reconcile_deployments(self.ops)
+            except Exception:  # preserve provider evidence and keep read-only recovery alive
+                logging.getLogger(__name__).exception("deployment reconciliation failed")
             await asyncio.sleep(10)
 
     async def serve(self, host: str = "127.0.0.1", port: int = 18796):
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("task service only binds loopback")
         self.acquire_owner()
-        worker = pusher = reaper = operations = metadata_reads = inventory = None
+        worker = pusher = reaper = operations = metadata_reads = deployment_reads = inventory = None
         try:
             server = await asyncio.start_server(self._handle, host, port)
             address = "[::1]" if host == "::1" else host
@@ -949,11 +975,12 @@ class TaskDaemon:
             reaper = asyncio.create_task(self._artifact_reap_loop())
             operations = asyncio.create_task(self.ops.loop())
             metadata_reads = asyncio.create_task(self.reconcile_metadata())
+            deployment_reads = asyncio.create_task(self.reconcile_deployments())
             inventory = asyncio.create_task(self.inventory.loop())
             async with server:
                 await server.serve_forever()
         finally:
-            for background in (worker, pusher, reaper, operations, metadata_reads, inventory):
+            for background in (worker, pusher, reaper, operations, metadata_reads, deployment_reads, inventory):
                 if background is not None:
                     background.cancel()
                     await asyncio.gather(background, return_exceptions=True)

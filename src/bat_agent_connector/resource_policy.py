@@ -134,6 +134,14 @@ MUTATIONS: tuple[Mutation, ...] = (
              ("github_pr_update", "operation_submit", "batc delivery update-pr", "Delivery metadata drawer"),
              "integrate principal and configured repository with allow_pr_update; title/body only, recorded "
              "read-compare-write-readback; never a BAT session, local folder or PR head update"),
+    Mutation("deployment.start", "github", "remote", frozenset(),
+             ("deployment_start", "deployment_retry", "operation_submit", "batc delivery deploy", "batc delivery retry"),
+             "deploy principal; fixed source reachable from recipe ref, repository identity, recipe digest and "
+             "environment generation; configured workflow only; no local Git/BAT mutation"),
+    Mutation("deployment.rollback", "github", "remote", frozenset(),
+             ("deployment_rollback", "operation_submit", "batc delivery rollback"),
+             "deploy principal; a saved verified identity of the same recipe/environment, explicit rollback "
+             "support and not_undone limits; a new deployment through that recipe, never a history edit"),
 )
 BY_ACTION = {m.action: m for m in MUTATIONS}
 # The only granted write channel whose frame names no session (its terminal carries the ID).

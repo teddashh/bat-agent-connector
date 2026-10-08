@@ -9,6 +9,25 @@
   preserve the manual checkout and recover completed captures without rereading or republishing their source.
   This is single-file continuation data; managed-result acceptance, dirty snapshots and capture UI remain separate.
 
+- Route legacy MCP/CLI interrupt through the central durable `session.interrupt` action. Preserve
+  fixed session/task bindings, complete results and final-frame checks; lost replies only read back.
+  Optional keys explicitly report whether retries deduplicate; internal no-key sentinels never appear
+  in operation reads. CLI read-only now guards daemon-backed mutations before dispatch as well.
+
+- Reject malformed deployment history cursors before querying, including integer overflow and
+  non-finite timestamps, while preserving valid integer ordering and saved page cursors.
+
+- Join in-flight deployment history reads before event acknowledgment, wait for every sibling read,
+  and retain the selected history page through failed refreshes. Open reviewed confirmations keep their
+  original generation while the event checkpoint waits for the form to close.
+
+- Integrate delivery history after observation data step 2: run deployment step 3 in the same journal open,
+  preserve original events, and append one saved snapshot per deployment. State changes publish bounded,
+  operation-linked facts without verifier bodies or configuration; unchanged reads stay quiet.
+
+- Reject malformed artifact IDs and attachment roles at HTTP admission with a structured error,
+  before recording an operation or reserving upload storage.
+
 - Add `--principal-only` for agent MCP installations: require the agent token for all calls,
   expose central operations and task adapters, and omit direct Fleet tools. Task status/result/events
   now accept principals with `observe`; missing agent credentials never borrow local admin authority.
@@ -226,6 +245,10 @@
   refreshes retain the original cursor and drafts. Failed reads pause mutations; deferred renders keep
   version-checked form saves available. Delayed work cannot cross accounts or
   mounted views. Existing pending-control and linked-history presentation gaps remain tracked under R04.
+- Port Delivery environment history, fixed rollback/retry confirmations and translations into the shared
+  browser/Tauri frontend. Keep deployment previews and writes on the central API, add the narrow native read
+  allowlist, and preserve identity-scoped operation keys across reconnects and lost replies. Delivery events
+  refresh cards through shared polling; open confirmations retain the selected version.
 
 - Add the shared Vite/TypeScript Dashboard source and initial packaged Tauri 2 shell with restricted native
   central transport, native-memory credentials, tray hiding and same-session instance handoff. Browser and
@@ -325,6 +348,65 @@
   Only the first inserted receipt emits history, preserving its code without PR text; legacy receipts use the
   same sanitized backfill. Delivery DDL checks use the journal's latest allocated data-step constant.
 
+- Record the [Tauri v2 product scope](docs/product/realignment-v2.md) and
+  [integration status](docs/product/implementation-status.md) (R00). Keep the central Python backend and
+  share the browser/desktop UI; exclude Hub import and redefine B05 as Connector data preservation.
+  Desktop, Fleet parity and live acceptance remain tracked work, not completed capabilities.
+
+- Keep deployment rollback/retry keys stable across drawer close, live refresh and page reload for the same
+  reviewed request. Let explicit PR loading proceed while environment details remain open, render only HTTPS
+  provider links, and translate the new deployment labels in zh-TW. Browser regressions use a local daemon
+  with synthetic providers; no production deployment is implied.
+
+- Require both current merge and deploy scopes when resuming a combined delivery operation (Tauri v2 §18,
+  C07), including its original actor. Refused resumes preserve receipts and do not contact the provider;
+  authorized recovery keeps the admitted merged SHA and never repeats completed writes.
+
+- Dashboard Delivery now groups configured recipes into repository/environment cards: selected, observed and last
+  verified identities, cursor-paged history, rollback readiness and not_undone limits, fixed-identity deploy retry,
+  superseded links and drift attention. Confirmations bind preview preconditions, refuse stale selections without
+  automatic resubmission and survive SSE; scope-disabled buttons explain why. Receipts expand separately. A thin
+  observe-only environment history HTTP read reuses saved history and cursors without provider calls. English and
+  zh-TW browser flows pass at 390/768/1440 px ([design](docs/design/delivery.md), plan §09/§10/§17/§18, C07/D02–D06).
+
+- Stopped deployment provider reads use persistent 15-second exponential backoff, capped at the configured reconcile
+  interval and reset by changed provider evidence. Successful reads clear stale errors; a bad row records
+  RECONCILE_FAILED and cannot starve later rows ([design](docs/design/delivery.md), plan §09/§17, D03/D05).
+
+- Deployment reconciliation skips settled history, polls each current run/runtime and unresolved run lookup at
+  `[github] deployment_reconcile_interval_s = 300` (60–86400 seconds), and preserves row versions for unchanged
+  evidence. Run lookup narrows by saved send time; the environment cadence survives restart and current-version changes.
+
+- Cancelled combined on_merge operations, including legacy history, bind the reviewed merge result on the recipe
+  ref and retain the environment slot until its exact push run is terminal; reconciliation never merges or dispatches.
+
+- Delivery legacy recovery preserves failed/cancelled outcomes and releases unsent terminal operations; only old
+  successes are unverified. In-flight legacy runs hold the real repository/environment slot across recipe aliases,
+  with recorded configuration fallbacks for missing environment and mode.
+
+- Delivery Part B backend ([design](docs/design/delivery.md), plan §09/§10/§17/§18/§28, D01–D06): fixed deployment
+  identities, environment generations and provider slots; saved attempts/jobs/pending-environment plus runtime evidence;
+  history and saved SHA/artifact rollback through the same recipe; caller-token HTTP/MCP/CLI start/retry/rollback reads
+  and writes. A read-only reconciliation loop handles cancelled runs, external reruns and version drift, without
+  dispatching or resuming. Superseded generations never become current. History backfill is allocated data step 3
+  after observation step 2; DDL takes no user_version. The Dashboard environment card is included in this release.
+- **Breaking deployment contract:** recipes without `verification` now refuse deploys with
+  DEPLOY_VERIFICATION_REQUIRED; history remains readable. Add this exact setting to `[[deploy.recipes]]`, replacing
+  the reserved example URL with your configured runtime endpoint (returns repository_id/environment and required
+  source_sha/healthy fields). For health-only evidence set version_required=false; at least one check is required:
+
+  ```toml
+  verification = { kind = "http_json", url = "https://deployment.example/version", version_required = true, health_required = true }
+  ```
+
+  Start, retry, rollback and combined merge now require deployment_preview's expected_environment_generation and
+  expected_recipe_digest; old start callers get DEPLOY_PREVIEW_REQUIRED naming that read. Contract date stays
+  2026-10-08 (same UTC day); capabilities add deployment_history/environment_generation/runtime_check/rollback_readiness.
+- Issue #32 deployments: on_merge run association includes recipe branch/repository/workflow/push/SHA; start/retry/SHA
+  rollback verify source reachable from the ref; combined admission rejects another base with DEPLOY_SOURCE_NOT_ON_REF.
+  Cancel retains provider locks until terminal evidence. Dispatch input mapping requires source_sha and operation_id;
+  a dispatch 429 is a refusal with bounded Retry-After and exact token lookup before another POST.
+
 - Delivery acknowledged metadata conflicts ([design](docs/design/delivery.md), plan §09/§10/§15, C07): save a
   conflict settlement when an acknowledged PATCH reads back differently, releasing the PR for a fresh-digest update
   while retaining needs_attention and its audit. Resume and reconciliation use the saved conclusion without GitHub
@@ -413,7 +495,7 @@
   branch chains and indirect merges are refused. Merge verifies actual results, accepts normal base movement after
   submission and reports the extra commits; combined deploy uses the actual verified merged SHA. HTTP, MCP
   github_pr_update/github_pr_merge, caller-token delivery CLI, Dashboard metadata drawer/scope preview and both
-  skills are aligned. Contract version remains the ISO change date 2026-10-08. Part B deployments/rollback are pending.
+  skills are aligned. Contract version remains the ISO change date 2026-10-08. The Dashboard environment card is delivered in Part B.
 - Delivery Part A review fixes ([design](docs/design/delivery.md), plan §10/§15/§16, C04/C05/C07):
   uncertain metadata writes still unchanged after ten minutes settle as not applied,
   releasing the PR without another PATCH. Merge previews reuse identical documents, prune expired unreferenced

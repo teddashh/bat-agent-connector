@@ -515,3 +515,29 @@ async def test_mcp_no_admin_fallback_and_cli_share_fixed_request(served, monkeyp
         await settle_operations(d.ops)
     finally:
         await fleet.close()
+
+
+def test_cli_read_only_capture_refuses_before_preview_file_or_rpc(monkeypatch, capsys):
+    from bat_agent_connector import task_daemon
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("read-only capture reached file, configuration or RPC I/O")
+    monkeypatch.setattr(cli, "Path", forbidden)
+    monkeypatch.setattr(cli, "load_config", forbidden)
+    monkeypatch.setattr(task_daemon, "request", forbidden)
+    assert cli.main(["--read-only", "artifact", "capture", "--preview-file", "unopened-preview.json",
+                     "--key", "reviewed-capture", "--confirm"]) == 1
+    assert "--read-only" in capsys.readouterr().err
+
+
+def test_cli_read_only_capture_preview_uses_fixed_read_rpc(monkeypatch, capsys):
+    from bat_agent_connector import task_daemon
+    calls = []
+    monkeypatch.setenv("BATC_API_TOKEN", "fixture-only-credential")
+    def request(method, **params):
+        calls.append((method, params))
+        return {"preview": {"preview_id": "fixture-only-preview"}}
+    monkeypatch.setattr(task_daemon, "request", request)
+    assert cli.main(["--read-only", "artifact", "capture-preview", "h1", MANUAL, "notes.txt"]) == 0
+    assert calls == [("artifact_capture_preview", {"_auth_token": "fixture-only-credential", "entry": "cli",
+                                                 "host": "h1", "session_id": MANUAL, "relative_path": "notes.txt"})]
+    assert json.loads(capsys.readouterr().out)["preview"]["preview_id"] == "fixture-only-preview"
