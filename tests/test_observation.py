@@ -197,7 +197,7 @@ def test_b01_worktree_shared_creation_identity_and_reuse(mock, tmp_path):
     ids = {Observation(j).resource("session", f"h1/{e['session_id']}")["worktree_id"] for e in entries}
     assert ids == {worktree_id("h1", "registry", "original@123.456", "worktree")}
     entries[0]["task_id"] = "new-task"
-    registry_bindings(j, "h1", entries)
+    registry_bindings(j, "h1", list(reversed(entries)))
     assert Observation(j).resource("session", "h1/original")["worktree_id"] in ids
     with j.tx():
         newer = worktree(j.db, "h1", "checkpoint.continue", "another", "worktree", path="/srv/wt")
@@ -258,6 +258,31 @@ async def test_b02_discovery_latest_no_poll_rows_and_no_host_fanout(mock, tmp_pa
     assert kinds == ["host.unreachable", "discovery.changed"]
     assert inv.get_session("h1", MANUAL)["state"]["connection"] == "not_connected"
     assert all(s["stale"] for s in inv.list_sessions()["sessions"])
+    await inv.close()
+    j.close()
+
+
+async def test_b02_unchanged_poll_does_not_rewrite_observation_identities(mock, tmp_path, monkeypatch):
+    from bat_agent_connector import inventory
+    j = Journal(tmp_path / "j.db")
+    inv = Inventory(j, make_config(mock))
+    adopt("registry-only", worktree_path="/srv/wt", worktree_made_by="bat")
+    changes = []
+    original = inventory.registry_bindings
+
+    def capture(journal, host, entries):
+        before = journal.db.total_changes
+        original(journal, host, entries)
+        changes.append(journal.db.total_changes - before)
+
+    monkeypatch.setattr(inventory, "registry_bindings", capture)
+    await inv.refresh_host("h1")
+    tables = ("observation_resources", "observation_relations", "relation_revisions", "command_relations",
+              "api_event_context", "api_event_resources", "observation_backfill")
+    before = {table: [tuple(r) for r in j.db.execute(f"SELECT * FROM {table}")] for table in tables}
+    await inv.refresh_host("h1")
+    assert changes[0] > 0 and changes[1] == 0
+    assert before == {table: [tuple(r) for r in j.db.execute(f"SELECT * FROM {table}")] for table in tables}
     await inv.close()
     j.close()
 

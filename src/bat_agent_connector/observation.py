@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from .operations import OperationError
 from .redact import redact
-from .resource_ids import worktree_id
+from .resource_ids import registry_worktree_intent, worktree_id
 
 MIGRATION_VERSION = 2  # Renumber to the next free user_version when rebasing parallel packages.
 RESOURCE_TYPES = {"session", "worktree", "execution"}
@@ -117,9 +117,13 @@ def install(journal):
 def remember(db, kind, rid, **fields):
     old = db.execute("SELECT body FROM observation_resources WHERE resource_type=? AND resource_id=?",
                      (kind, rid)).fetchone()
-    data = {**(body(old[0]) if old else {}), **{k: v for k, v in fields.items() if v is not None}}
+    stored = body(old[0]) if old else {}
+    data = {**stored, **{k: v for k, v in fields.items() if v is not None}}
+    raw = dump(data)
+    if old and raw == dump(stored):
+        return
     db.execute("""INSERT INTO observation_resources VALUES(?,?,?) ON CONFLICT(resource_type,resource_id)
-        DO UPDATE SET body=excluded.body""", (kind, rid, dump(data)))
+        DO UPDATE SET body=excluded.body""", (kind, rid, raw))
 
 
 def index(db, seq, kind, rid, linked=None, evidence=None):
@@ -143,8 +147,13 @@ def registry_bindings(journal, host, entries):
     """Capture already-known creation slots, without claiming or modifying the registry."""
     db = journal.db
     by_id = {e["session_id"]: e for e in entries if e.get("session_id")}
+    roots = {f"{sid}@{str(e['created_at'])}": e for sid, e in by_id.items() if e.get("created_at") is not None}
     seen = set()
     resolved = {}
+
+    def lead_of(task_id):
+        t = db.execute("SELECT session_id FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+        return t[0] if t else None
 
     def one(sid):
         if sid in resolved:
@@ -153,22 +162,20 @@ def registry_bindings(journal, host, entries):
             return None
         seen.add(sid)
         e = by_id[sid]
-        parent = e.get("failover_of") or e.get("shared_worktree_from") or e.get("lead_session_id")
-        if not parent and e.get("role") == "reviewer" and e.get("task_id"):
-            t = db.execute("SELECT session_id FROM tasks WHERE task_id=?", (e["task_id"],)).fetchone()
-            parent = t[0] if t else None
-        if parent and parent in by_id:
-            wid = one(parent)
+        intent = registry_worktree_intent(entries, host, sid, lead_of)
+        if intent:
+            root = roots[intent[1]]
+            wid = worktree(db, host, *intent, "worktree", path=root["worktree_path"], branch=root.get("branch"))
         else:
+            # Non-BAT creations keep their already-journaled checkpoint/integration/task slot.
             r = db.execute("SELECT body FROM observation_resources WHERE resource_type='session' AND resource_id=?",
                            (f"{host}/{sid}",)).fetchone()
             wid = body(r[0]).get("worktree_id") if r else None
-            if not wid and e.get("created_at") is not None and e.get("worktree_path"):
-                # Only a BAT-made creation uses this slot. External creations have their own journal intent.
-                if e.get("worktree_made_by") == "connector" or e.get("checkpoint_id") or e.get("integration_operation_id"):
-                    return None
-                wid = worktree(db, host, "registry", f"{sid}@{e['created_at']}", "worktree",
-                               path=e["worktree_path"], branch=e.get("branch"), session_id=sid)
+            parent = e.get("failover_of") or e.get("shared_worktree_from") or e.get("lead_session_id")
+            if not parent and e.get("role") == "reviewer" and e.get("task_id"):
+                parent = lead_of(e["task_id"])
+            if not wid and parent in by_id:
+                wid = one(parent)
         if wid:
             remember(db, "session", f"{host}/{sid}", host=host, session_id=sid, worktree_id=wid)
         resolved[sid] = wid

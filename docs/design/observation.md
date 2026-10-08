@@ -46,6 +46,8 @@ Session 的 `resource_id` 沿用 `host/session_id`，`session_id` 是完整 BAT 
 
 Worktree 只有在 journal 或可信 registry 有明確建立 binding 時才建立讀模型。使用共享 `resource_ids.worktree_id(host, intent_type, intent_id, slot)`：將 `["worktree", host, intent_type, intent_id, slot]` 以 `json.dumps(sort_keys=True, ensure_ascii=False, separators=(",", ":"))` 編碼，再回 `wt_` 加 SHA-256 前 32 hex。Cleanup 使用同一個函式，先合併的包提供模組，另一包原樣引用。
 
+BAT-made worktree 的建立根節點由共用純函式 `resource_ids.registry_worktree_intent(entries, host, session_id, lead_of=None)` 解析。依 failover_of／shared_worktree_from／lead_session_id 回溯；reviewer 缺 lead 時可用 journal task lookup。Registry 順序不影響結果；缺 parent 停在最後已知 entry，cycle 為 unknown。根節點屬 connector external worktree、checkpoint、integration 或缺 created_at／path 時不鑄 registry ID；created_at 使用載入 JSON 值的 str()，不重新格式化。Observation／cleanup 共用此解析，其他建立 intent 沿用既有 journal binding。
+
 | 建立來源 | intent_type | intent_id | slot |
 |---|---|---|---|
 | Checkpoint continue | `checkpoint.continue` | continue operation_id | `worktree` |
@@ -236,6 +238,8 @@ Daemon 必須持有既有 owner lock，journal migration 完成；API observe �
 
 新增 journal writes 在原 writer 的短交易內，外部呼叫仍在 commit 之後。API 只讀不因觀察人工資源建立 managed registry entry，不改配額、不恢復未知 ownership。直接 messages/live 讀取是另有 host I/O 的既有能力，與純 journal history 分開。
 
+Registry identity 合併結果以 canonical JSON 比較，未變更不執行 upsert。相同 BAT／registry 的第二輪 poll 不改 observation identity／relation／event tables；latest discovery 仍更新本輪掃描時間。
+
 ## Migration 與失敗恢復
 
 沿用 `task_journal.Journal` 的 additive migration 與 `PRAGMA user_version`；固定基準目前是 1，Phase 2 使用當時 main 的下一版，不跟平行包搶編號。新增事件 context/resource 索引、discovery latest、已知 worktree identity、relation segments 及欄位 evidence；既有 tasks、commands、events、work_item_links、checkpoint IDs 不改編。Relation segments 唯一鍵為 `(execution_id, session_resource_id, role, anchor_id)`，command-relation mapping 以 `(command_id, relation_id)` 為 key，保存 linked_at_seq；rebinding 保留舊 link，使 as_of 的 command_ids 不受最新 binding 影響；各 revision 留 seq，只有 SQLite 原 writer 寫入。
@@ -272,10 +276,12 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B01；§08、§11、§19 | `test_b01_id_paging_complete_and_filter_changes_via_events`、`test_b01_relation_scope_and_cross_project_link_history`：205 筆 ID keyset 完整巡覽；filter changes 經 events；跨 project/work item 的 current/history 及 via 證據。 |
 | B01；§08 | `test_b01_warm_reuse_reviewer_followup_and_command_ranges`、`test_b01_pending_bind_and_snapshot_relations`、`test_b01_warm_binding_closes_reserved_intent_without_overwriting`：兩 task 共用 session 的 ranges、舊 reviewer/replacement、follow-up、pending/bound/closed、固定 revision 分頁；原 reserved intent 正確關閉。 |
 | B01；§08、§10 | `test_b01_worktree_shared_creation_identity_and_reuse`、`test_b01_legacy_task_external_creation_keeps_shared_identity`：共享 registry 建立 slot、reviewer/failover/reuse 同 ID、同 path 新 intent 不合併；使用 cleanup 共用 hash 函式。 |
+| B01；§08 | `tests/test_resource_ids.py`：共用 root resolver 的 failover chain、reviewer lookup、warm reuse、逆序 registry、缺 parent、cycle、其他建立 intent 及原 JSON created_at 格式。 |
 | B01、B03；§08、§11 | `test_b01_b03_checkpoint_source_run_steps_and_worktree_history`、`test_b01_b03_receipt_versions_are_fixed_at_the_writer_transition`：真實 temp Git checkpoint/run 及 steps 的多資源 timeline 去重；receipt 在既有 writer 轉換時保存各版本，不以新結果改舊事件。 |
 | B01、B02；§10、§11 | `test_b01_history_as_of_late_binding_and_invalid_cursors`：history as_of 同時限制 event/linked_at；晚 binding 不進已開 snapshot，kind/order/resource/time 游標契約。 |
 | B02；§11 | `test_b02_two_hosts_one_offline_and_scope_change`、`test_b02_null_workspace_preserves_missing_counts_even_with_registry`：另一 host 持續成功、離線保留舊值；scope 改綁不再 host I/O；移除 host 仍可讀 history；壞 workspace 不算完整列舉。 |
 | B02；§11 | `test_b02_discovery_latest_no_poll_rows_and_no_host_fanout`、`test_b02_session_specific_stale_gone_fresh_and_get_no_writes`：每 profile 一筆 latest、相同 poll 不寫事件；host flap 不 fan-out；missing/gone/reappear/fresh 與 GET 零 writes。 |
+| B02；§11 | `test_b02_unchanged_poll_does_not_rewrite_observation_identities`：第二輪 registry 投影的 total_changes 不變；相同 BAT／registry 不重寫 observation tables。 |
 | B02；§10、§11 | `test_b02_cursor_catchup_sse_resume_and_hidden_backfill`：分頁 gap catch-up、Last-Event-ID resume 不重複、backfill 不進 live feed、超前 cursor 422。 |
 | B02；§11、§19（Part B） | `test_b02_dashboard_reopen_and_sse_gap_without_duplicates`（待第二步）：瀏覽器 baseline/reopen、frame 碎片/重疊/去重、token 更換、filters/草稿及 typing hold；Playwright 驗證。 |
 | B03；§08、§11 | `test_b03_unknown_human_claim_is_not_api_actor_or_git_author`、`test_b03_rpc_admin_identity_is_not_claimed_human`：自報 Ted 保持 claim，RPC admin 是 local-admin；Git author 不升為 API actor。 |
