@@ -1419,9 +1419,9 @@ def candidates(ops: OperationService, host: str, limit: int = 50) -> dict:
     return {"host": host, "agent_results": runs, "checkpoints": cps}
 
 
-async def pr_card(ops: OperationService, repository: str, number: int) -> dict:
+async def pr_card(ops: OperationService, repository: str, number: int, method: str | None = None) -> dict:
     """The Delivery view's PR card: delivery's facts plus whether and how results can be integrated."""
-    card = await pr_preview(ops, repository, number)
+    card = await pr_preview(ops, repository, number, method)
     card["integration"] = pr_integration(ops, card["repository"], number)
     return card
 

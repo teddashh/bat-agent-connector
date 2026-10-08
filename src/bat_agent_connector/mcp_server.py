@@ -22,7 +22,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import ToolAnnotations
 
-from . import __version__, lifecycle, orchestrate, resource_policy, service, triage
+from . import __version__, lifecycle, orchestrate, pr_delivery, resource_policy, service, triage
 from .config import Config, load_config
 from .errors import BatError, WriteRefused
 from .fleet import Fleet
@@ -49,6 +49,7 @@ READ_TOOLS = [
     "operation_get",
     "operations_list",
     "github_pr_preview",
+    "github_merge_preview_get",
     "checkpoints_list",
     "checkpoint_preview",
     "integration_candidates",
@@ -61,7 +62,7 @@ READ_TOOLS = [
 ]
 # Registered unless --read-only: they act as BATC_API_TOKEN's principal, whose scopes decide what is allowed.
 OPERATION_TOOLS = ["operation_submit", "operation_cancel", "operation_resume", "checkpoint_create",
-                   "work_continue_from_checkpoint"]
+                   "work_continue_from_checkpoint", "github_pr_update", "github_pr_merge"]
 WRITE_TOOLS = [
     "session_send",
     "session_continue",
@@ -331,12 +332,15 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         """Recent operations, newest first, optionally filtered by status or action."""
         return await daemon("op_list", statuses=statuses, action=action, limit=limit)
 
-    async def github_pr_preview(repository: str, pull_number: int) -> dict[str, Any]:
-        """Read a configured repository's pull request before merging: head and base SHA, mergeable state,
-        check-run counts, allowed merge methods and the deploy recipes for that repository. Pass head_sha as
-        preconditions.expected_head_sha to operation_submit(action="github.pr.merge" or
-        "delivery.merge_and_deploy")."""
-        return await daemon("github_pr_preview", repository=repository, pull_number=pull_number)
+    async def github_pr_preview(repository: str, pull_number: int, method: str | None = None) -> dict[str, Any]:
+        """Read title/body digest and save a complete immutable merge_preview: fixed head/base, all commits,
+        stacks, chains, indirect-merge candidates, blocking and warnings. Review it, then github_pr_merge with
+        its preview_id. Metadata changes use github_pr_update with metadata_digest (integrate scope)."""
+        return await daemon("github_pr_preview", repository=repository, pull_number=pull_number, method=method)
+
+    async def github_merge_preview_get(preview_id: str) -> dict[str, Any]:
+        """Read a saved mpv_ merge preview without refreshing its fixed source versions or expiry."""
+        return await daemon("github_merge_preview_get", preview_id=preview_id)
 
     async def checkpoints_list(host: str | None = None, session_id: str | None = None,
                                checkpoint_id: str | None = None, limit: int = 20) -> dict[str, Any]:
@@ -399,7 +403,7 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         return await daemon("work_item_get", work_item_id=work_item_id)
 
     for fn in (capabilities_get, inventory_sessions, inventory_hosts, events_list, operation_get, operations_list,
-               github_pr_preview, checkpoints_list, checkpoint_preview, integration_candidates, integration_get,
+               github_pr_preview, github_merge_preview_get, checkpoints_list, checkpoint_preview, integration_candidates, integration_get,
                integrations_list, projects_list, project_get, work_items_list, work_item_get):
         mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
 
@@ -502,6 +506,29 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             return await principal_daemon("op_submit", confirm, action=action, idempotency_key=idempotency_key,
                                           target=target, params=params, preconditions=preconditions, wait_s=wait_s)
 
+        async def github_pr_update(repository: str, pull_number: int, expected_metadata_digest: str,
+                                   idempotency_key: str, title: str | None = None, body: str | None = None,
+                                   wait_s: float = 10, confirm: bool = False) -> dict[str, Any]:
+            """WRITE (integrate). Edit title/body at the reviewed digest; omitted fields stay, empty body clears.
+            Needs repository allow_pr_update and this client's token. Read-compare-write-readback has a final
+            GET/PATCH race; conflicts need a new preview/edit/key, never an automatic overwrite or undo."""
+            return await principal_daemon("op_submit", confirm, action="github.pr.update",
+                                          target={"repository": repository, "pull_number": pull_number},
+                                          params={k: v for k, v in {"title": title, "body": body}.items() if v is not None},
+                                          preconditions={"expected_metadata_digest": expected_metadata_digest},
+                                          idempotency_key=idempotency_key, wait_s=wait_s)
+
+        async def github_pr_merge(preview_id: str, idempotency_key: str, recipe: str | None = None,
+                                  wait_s: float = 10, confirm: bool = False) -> dict[str, Any]:
+            """WRITE (merge; deploy too for a recipe). Merge the immutable reviewed mpv_ preview. An old head
+            alone is insufficient. Stacks/expanded scope are refused; queues wait, then verify the actual merged
+            SHA. A newer base after acceptance is normal and recorded. No bypass, redispatch or branch update."""
+            if not confirm or not os.environ.get("BATC_API_TOKEN"):
+                return await principal_daemon("op_submit", confirm)  # shared confirmation/token errors
+            doc = (await daemon("github_merge_preview_get", preview_id=preview_id))["preview"]
+            return await principal_daemon("op_submit", confirm, **pr_delivery.merge_envelope(doc, recipe=recipe),
+                                          idempotency_key=idempotency_key, wait_s=wait_s)
+
         async def checkpoint_create(host: str, session_id: str, idempotency_key: str, commit: str | None = None,
                                     note: str | None = None, last_n: int = 20, wait_s: float = 20,
                                     confirm: bool = False) -> dict[str, Any]:
@@ -540,7 +567,7 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             return await principal_daemon("op_resume", confirm, operation_id=operation_id)
 
         for fn in (operation_submit, operation_cancel, operation_resume, checkpoint_create,
-                   work_continue_from_checkpoint):
+                   work_continue_from_checkpoint, github_pr_update, github_pr_merge):
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=op_write)
 
     if fleet.any_writes:

@@ -82,7 +82,8 @@ class GitHubClient:
             # HTTPException covers a body cut short (IncompleteRead) after GitHub may already have acted.
             raise GitHubAmbiguous(redact(f"GitHub {method} {path} failed: {type(e).__name__}")) from None
         try:
-            return status, (json.loads(raw) if raw else {})
+            payload = json.loads(raw) if raw else {}
+            return status, {"items": payload} if isinstance(payload, list) else payload
         except ValueError:
             raise GitHubAmbiguous(f"GitHub {method} {path} answered {status} with an unreadable body") from None
 
@@ -98,6 +99,27 @@ class GitHubClient:
     async def pull(self, repository: str, number: int):
         return await self.call("GET", f"{self._repo(repository)}/pulls/{int(number)}")
 
+    async def repository(self, repository: str):
+        return await self.call("GET", self._repo(repository))
+
+    async def update_pull(self, repository: str, number: int, fields: dict):
+        return await self.call("PATCH", f"{self._repo(repository)}/pulls/{int(number)}", fields)
+
+    async def pulls(self, repository: str, *, page: int = 1, state: str = "open"):
+        return await self.call("GET", f"{self._repo(repository)}/pulls",
+                               query={"per_page": 100, "page": page, "state": state})
+
+    async def stacks(self, repository: str, number: int, *, page: int = 1):
+        return await self.call("GET", f"{self._repo(repository)}/stacks",
+                               query={"pull_request": number, "per_page": 100, "page": page})
+
+    async def stack(self, repository: str, number: int):
+        return await self.call("GET", f"{self._repo(repository)}/stacks/{int(number)}")
+
+    async def compare(self, repository: str, base: str, head: str, *, page: int = 1):
+        return await self.call("GET", f"{self._repo(repository)}/compare/{quote(base, safe='')}..."
+                               f"{quote(head, safe='')}", query={"per_page": 100, "page": page})
+
     async def merge_async(self, repository: str, number: int, sha: str, method: str):
         return await self.call("PUT", f"{self._repo(repository)}/pulls/{int(number)}/merge-async",
                                {"sha": sha, "merge_method": method, "merge_action": "default"})
@@ -106,7 +128,7 @@ class GitHubClient:
         return await self.call("GET", f"{self._repo(repository)}/pulls/{int(number)}/merge-async/{quote(uuid)}")
 
     async def commit(self, repository: str, sha: str):
-        return await self.call("GET", f"{self._repo(repository)}/commits/{quote(sha)}")
+        return await self.call("GET", f"{self._repo(repository)}/commits/{quote(sha, safe='')}")
 
     async def check_runs(self, repository: str, sha: str):
         return await self.call("GET", f"{self._repo(repository)}/commits/{quote(sha)}/check-runs",
