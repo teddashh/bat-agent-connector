@@ -21,6 +21,9 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+# Latest allocated data step; individual backfills retain their own version gates.
+LATEST_DATA_STEP = 2
+
 STATES = frozenset({
     "queued", "dispatching", "accepted", "running", "waiting_permission",
     "quota_limited", "human_owned", "needs_ted", "verifying", "done", "failed", "uncertain",
