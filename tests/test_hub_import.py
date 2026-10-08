@@ -324,7 +324,7 @@ async def test_b05_restart_lost_reply_and_partial_recovery(daemon, monkeypatch, 
 
     monkeypatch.setattr(d.ops, "_step_done", crash)
     op, _ = d.ops.create(PERSON, **hub.apply_request(doc))
-    await d.ops.drain()
+    await d.ops.drain(timeout=60)
     opid = op["operation_id"]
     receipts = {r["record_key"]: r["connector_id"] for r in d.ops.db.execute("SELECT * FROM hub_import_map")}
     cfg = replace(make_config_for(d), hub_import_sources=d.ops.context["hub_import_sources"])
@@ -362,12 +362,12 @@ async def test_b05_sqlite_rollback_is_reconciled_without_duplicate_rows(daemon, 
 
     monkeypatch.setattr(hub, "_save_receipt", fail)
     op, _ = d.ops.create(PERSON, **hub.apply_request(doc))
-    await d.ops.drain()
+    await d.ops.drain(timeout=60)
     assert d.ops.get(op["operation_id"])["status"] == "uncertain"
     assert d.ops.db.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
     monkeypatch.setattr(hub, "_save_receipt", original)
     d.ops.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
-    await d.ops.drain()
+    await d.ops.drain(timeout=60)
     assert d.ops.get(op["operation_id"])["status"] == "succeeded"
     assert d.ops.db.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 4
 
@@ -395,7 +395,7 @@ async def test_b05_retirement_busy_cancel_and_resume(daemon, monkeypatch):
         return result
 
     monkeypatch.setattr(hub, "_write_record", cancel)
-    await d.ops.drain()
+    await d.ops.drain(timeout=60)
     final = d.ops.get(op["operation_id"])
     assert final["status"] == "cancelled"
     assert hub.import_get(d.ops, final["operation_id"])["import"]["partial"]
@@ -566,7 +566,7 @@ async def test_b05_http_rpc_and_mcp_share_the_same_actions(daemon, monkeypatch):
             body={"action": "hub.import.preview", "target": {"source_id": "sample"}},
         )
         assert status == 202
-        await d.ops.drain()
+        await d.ops.drain(timeout=60)
         op = d.ops.get(out["operation"]["operation_id"])
         assert (
             "records" not in op["result"]["preview"]
@@ -576,7 +576,7 @@ async def test_b05_http_rpc_and_mcp_share_the_same_actions(daemon, monkeypatch):
         assert status == 200 and result["preview"]["can_apply"]
         req = hub.apply_request(result["preview"])
         out = await d.call_api("op_submit", {**req, "entry": "mcp"}, PERSON)
-        await d.ops.drain()
+        await d.ops.drain(timeout=60)
         opid = out["operation"]["operation_id"]
         status, result = await http(port, "GET", "/api/v1/hub-import/imports/" + opid, tok=tok)
         assert status == 200 and result["import"]["complete"]
@@ -697,12 +697,12 @@ async def test_b05_record_commit_reply_loss_and_mid_import_source_change(daemon,
 
     monkeypatch.setattr(hub, "_write_record", lost)
     op, _ = d.ops.create(PERSON, **hub.apply_request(doc))
-    await d.ops.drain()
+    await d.ops.drain(timeout=60)
     assert d.ops.get(op["operation_id"])["status"] == "uncertain"
     cid = mapped(d, "alpha")
     monkeypatch.setattr(hub, "_write_record", real)
     d.ops.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
-    await d.ops.drain()
+    await d.ops.drain(timeout=60)
     assert d.ops.get(op["operation_id"])["status"] == "succeeded" and mapped(d, "alpha") == cid
     path = src / "Product/alpha/.ai/tasks/waiting.md"
     path.write_text(path.read_text().replace("Waiting", "Updated waiting"))
@@ -797,7 +797,7 @@ async def test_b05_uncertain_budget_has_one_incomplete_summary_and_can_resume(da
     op, _ = d.ops.create(PERSON, **hub.apply_request(await preview(d)))
     for _ in range(len(hub.UNCERTAIN_RETRY_S) + 1):
         d.ops.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
-        await d.ops.drain()
+        await d.ops.drain(timeout=60)
     assert d.ops.get(op["operation_id"])["status"] == "needs_attention"
     assert (
         d.ops.db.execute("SELECT COUNT(*) FROM api_events WHERE kind='hub_import.incomplete'").fetchone()[0]
@@ -810,3 +810,17 @@ async def test_b05_uncertain_budget_has_one_incomplete_summary_and_can_resume(da
     assert (
         d.ops.db.execute("SELECT COUNT(*) FROM api_events WHERE kind LIKE 'hub_import.%'").fetchone()[0] == 1
     )
+
+
+async def test_b05_ambiguous_names_are_blocked_and_parser_reports_nested_blocks(daemon):
+    d, src = daemon
+    p = src / "Product/collision"
+    p.mkdir()
+    (p / "PROJECT.md").write_text("---\nname: Alpha\n---\n")
+    doc = await preview(d)
+    assert any(
+        b["code"] == "IMPORT_RELATION_INVALID" and "ambiguous" in b["message"] for b in doc["blockers"]
+    )
+    with pytest.raises(ValueError, match="nested"):
+        hub.parse_doc("---\nfield:\n  nested:\n    child: unsupported\n---\n")
+    assert hub.parse_doc("---\nname : Value\n---\n")[0] == {"name": "Value"}
