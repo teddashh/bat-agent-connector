@@ -58,6 +58,8 @@ async def test_b01_b03_delivered_merge_history_uses_only_explicit_refs(make_daem
         preview_event = next(e for e in events if e["kind"] == "delivery.merge_previewed")
         assert preview_event["resource_id"] == preview_id
         assert preview_event["body"]["target"]["number"] == 7
+        assert preview_event["body"]["target"]["head_repo_id"] == preview["target"]["head_repo_id"]
+        assert preview_event["body"]["files_may_be_truncated"] is False
         assert preview_event["context"]["actor"] is None
         assert preview_event["context"]["actor_basis"] == "unknown"
         assert preview_event["context"]["observer"] == "delivery-service"
@@ -204,6 +206,7 @@ async def test_b03_acknowledged_conflict_settlement_is_in_history_without_pr_tex
     history = Observation(journal).history("session", "h1/source", limit=200)["events"]
     assert event["seq"] in {e["seq"] for e in history}
     assert "private" not in json.dumps(history)
+    assert any(e["body"].get("refs", {}).get("write_acknowledged") is True for e in history)
     if backfilled:
         head = journal.api_head()
         journal.close()

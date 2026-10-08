@@ -12,6 +12,7 @@ Phase 1 規格已審查。Phase 2 分兩步：Part A（本次）實作伺服器�
 | Delivery Part A adapter | Rebase 基準 `0c13601a7316a581fc6a4a504de37035b870ee4d`（#34）。已接讀 `pr_merge_previews`、`merge.verify` step receipt 與 `pr_metadata_settlements`；其 DDL 不占資料步驟編號。 |
 | Delivery acknowledged-conflict adapter | 本輪 rebase 基準 `200636f9bcc5d5bd13b3f2963fe812ff58c0645a`（#40）。接讀 acknowledged PATCH 的 conflict settlement，原 metadata control flow 不變。 |
 | Worktree relations 修正 | `eff252e`（#35 的審查基準）。補 seq binding intervals，固定 relations 的 as_of；不改已核准的 Part A/B、worktree ID 或資料步驟編號。 |
+| History role 摘要修正 | `7001934`（#35 的審查基準）。補遞迴摘要的 role 與下列有限 metadata；不改寫 journal 事實或資料步驟。 |
 | 計畫 | v1.0（2026-10-06）；以章節及驗收編號引用，不複製私有計畫。 |
 | BAT | `b7419892fbc9946799b64cca24c2ec8c7fa15c42`；不代表每台主機都已安裝此版，實際 `serverVersion` 另存於掃描證據。 |
 
@@ -198,6 +199,20 @@ Backfill 事件只在 resource history 或明確 `kind=history.backfilled` 的 e
 
 Operation／checkpoint／work item 新事件在現有交易中寫完整 context；舊 operation 的建立者／原入口／target 可由不可變欄位還原，變動過的 result/version 不拿最新值補舊 status。Step、receipt、command 的每次轉換保存當時 fields，HTTP/MCP/CLI 回同一份 envelope。History 使用明確 allowlist 回結構化摘要、hash 及 reference；舊 task body 裡的需求原文或原始 prompt 不整段複製到 timeline。聊天內容仍用既有 messages 讀取路徑，不擴大 event feed 的敏感內容。
 
+`summary()` 對 dict 與 list 遞迴使用同一 SUMMARY_FIELDS；relation.opened/bound/closed 的 body.role、source_versions/result_versions 各項的 role、history.backfilled.saved_snapshot 的 role 都保留。Role 是固定機器角色，不能用備註或 prompt 補值。原 context 的版本角色也保留；Git author 仍不是 API actor。新增欄位只接受現有 writer 契約中屬於 enum、ID、seq、SHA 或布林的欄位，不因巢狀位置放寬文字內容。以下為本輪稽核新增的完整清單：
+
+| 類型 | 新增 SUMMARY_FIELDS |
+|---|---|
+| Enum | `role`、`agent`、`source_provenance`、`effect`、`outcome`、`verdict`、`write_scope` |
+| ID／來源 reference | `head_repo_id`、`resolver_operation_id`、`resolver_session_id`、`apply_operation_id`、`integration_operation_id`、`parent_id`、`verification_id`、`route_id`、`old_session_id`、`handoff_command_id`、`operator_followup`、`source_message_id`、`evidence_ref` |
+| Journal seq | `integration_seq`、`linked_at_seq` |
+| Git SHA／SHA-256 | `expected_head_sha`、`expected_base_sha`、`preview_digest`、`request_hash`、`excerpt_sha256`、`before_digest`、`after_digest`、`candidate_commit`、`diff_sha256`、`start_commit`、`old_head`、`new_head`、`pushed_sha`、`push_old_sha`、`composed_tree`、`predicted_tree`、`approved_fingerprint` |
+| 布林（journal flags 可為 0/1） | `cancel_requested`、`would_merge`、`files_may_be_truncated`、`write_acknowledged`、`observed_intent`、`read_refused`、`conflict_before_write`、`conflict_after_write`、`pushed`、`local_checkouts_changed`、`advisory_only`、`abort_current`、`ready`、`stale`、`attention` |
+
+稽核範圍包括 relation.*、session.worktree_bound、delivery.merge_previewed/metadata_settled、operation steps/refs、task/checkpoint/integration/work-item/inventory 事件與回填表的 snapshots。Session/worktree binding 的 worktree_id/previous_worktree_id 等欄位原已保留。原有 allowlist 欄位不擴大文字契約。Prompt／需求／聊天的 `prompt/words/original_words/instructions/payload/excerpt/text/messages/note`，以及 `message/subject/summary/description/warnings/lines/error` 等自由文字仍排除。PR `title` 在 pr=True 的整棵摘要排除；scalar `body` 不接受，PR title/body 不進事件。
+
+`provider` 同時可能是 provider 名稱與 GitHub API URL，不能全域列為 enum。`head_ref/base_ref/html_url/remote_url/name/idem_key/purpose/step_type/field/fingerprint` 可帶任意名稱、位址或 caller 文字，保持排除；已明確命名的 ID/SHA 才新增。`old/new/tree` 的通用名稱及 `params/preconditions/result/external_refs/observed/reviewed/intended/picked/conflict_files/remerge_stat` 等混合容器不放寬，使用已保存的具名版本與 context。`dirty/missing_count/attempts/uncertain_tries/diff_chars/confidence/tests_ok` 是數量或評分，並非布林/ID/seq；新 timestamps 也不在本輪新增範圍。回填缺少的資料仍 unknown，不增加資料步驟重寫已保存的摘要。
+
 `resource_policy` 是可寫判斷唯一來源。B03 的 unknown actor/provenance 不會產生 grant，不回填 managed creation intent，也不增加配額；觀測 journal 的 relation/index 不能被 mutation admission 當作擁有權證據。
 
 ## 輸入／輸出與介面
@@ -325,6 +340,8 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B03；§08、§10、§11、§15 | `test_b03_metadata_settlement_history_has_codes_without_pr_text`：not_applied/conflict 回執各一事件、不重送 PATCH、不將背景觀測歸為 Ted。`test_b03_delivery_snapshot_backfill_preserves_version_chain_and_private_text`：版本 1 已有 delivery tables/documents，回填一次至 2、重開無寫入、原 documents 保留、原時間與未知 actor 保留。 |
 | B03、C07；§08、§09、§10、§11、§15 | `test_b03_acknowledged_conflict_settlement_is_in_history_without_pr_text`：acknowledged PATCH 的 conflict settlement 可從 operation events 與明確來源 session history 讀到，保留 code、排除 PR text；live/backfill 兩路徑驗證，重複 insert 保留原回執、不追加事件，重開不重複回填。既有 `test_metadata_acknowledged_write_conflict_settles_and_releases_pr` 保持全部 delivery assertions。 |
 | B01、B03；§08、§11 | `test_projection_failure_keeps_core_write_and_flags_event`：task state 與 operation step 的投影例外只回滾 savepoint，核心寫入及外部 step 成功；history 顯示 projection_error，無部分 resource／relation rows。 |
+| B01、B03；§08、§10、§11 | `test_b01_b03_relation_history_keeps_roles_and_strips_free_text`：lead/reviewer 共用 session，execution/session history 的 opened/bound/closed 都保留 role；live 與版本 1 重播各驗證，nested source/result versions 的 role 保留，備註/prompt/commit message 仍移除，重開不追加事件。 |
+| B03；§08、§11、§15、§16 | `test_b03_backfilled_summary_retains_bounded_metadata_and_nested_roles`：saved_snapshot 的 enum/ID/seq/SHA/布林及 nested role 保存，混合容器、自由文字、數量/評分繼續移除。既有 `test_b01_b03_delivered_merge_history_uses_only_explicit_refs` 與 `test_b03_acknowledged_conflict_settlement_is_in_history_without_pr_text` 同時驗證 head_repo_id、files_may_be_truncated、write_acknowledged 的正式 writer 輸出及 PR 文字隔離。 |
 | B01–B03；§10、§11 | `test_b01_b02_b03_http_mcp_cli_contract_parity`：HTTP/實際 MCP server/CLI 經同 daemon；params、keys、cursor、context 一致；observe、404、422 契約及四個新 tools。 |
 | B03；§06、§11 | `test_b03_observation_never_starts_resumes_rehydrates_or_locks_git`：MockBat 零 write/git:status；unsafe Claude state 不呼叫，journal 讀取不讀 Fleet/registry、不寫 DB；temp repo HEAD/index/refs/files 不變且無 locks，既有 on-demand Git probe 使用 no-optional-locks。 |
 

@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Observation history roles ([design](docs/design/observation.md), plan §08/§10/§11/§15/§16, B01/B03):
+  retain lead/reviewer and other fixed roles in relation events and nested version/backfill summaries.
+  Audit the recursive whitelist to preserve bounded IDs, sequences, SHAs and boolean/state evidence, including
+  delivery head-repository identity and write acknowledgement; keep prompts, PR text and commit messages excluded.
+
 - Observation worktree relation snapshots ([design](docs/design/observation.md), plan §08/§10/§11, B01/B03):
   retain sequenced session/worktree binding intervals instead of filtering by the current worktree pointer.
   Late bindings stay outside existing `as_of` cursors; moves preserve earlier participation, with scoped ranges
