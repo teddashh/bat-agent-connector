@@ -65,6 +65,11 @@ for (const native of [false, true]) for (const refresh of ["messages", "preview"
       await page.getByRole("combobox", {name: "Commit"}).selectOption("b".repeat(40));
       await page.locator("textarea").nth(1).fill("Keep this checkpoint note");
     }
+    // Establish a real accepted intent before the read failure; its key must survive recovery.
+    await page.getByRole("button", {name: "Send", exact: true}).click();
+    await expect.poll(() => writes.length).toBe(1);
+    const originalKey = writes[0].idempotency_key;
+    expect(originalKey).toBeTruthy();
     changed = true;
     await expect.poll(() => messageReads).toBe(2);
     expect(await saved()).toEqual(checkpoint(0));
@@ -76,24 +81,26 @@ for (const native of [false, true]) for (const refresh of ["messages", "preview"
       await expect(page.getByRole("button", {name: "Record this version"})).toBeDisabled();
       await expect(page.getByRole("combobox", {name: "Commit"})).toHaveValue("b".repeat(40));
     }
-    await page.getByRole("button", {name: "Send", exact: true}).click();
-    await expect(page.getByText("CENTRAL_OFFLINE Central offline · actions paused")).toBeVisible();
-    expect(writes).toHaveLength(0);
-    const originalKey = await page.evaluate(() => JSON.parse(Object.entries(localStorage)
-      .find(([key]) => key.startsWith("batc.key."))![1]).key);
+    if (refresh === "messages") {
+      await expect(page.getByRole("button", {name: "Send", exact: true})).toBeDisabled();
+    } else {
+      await page.getByRole("button", {name: "Send", exact: true}).click();
+      await expect(page.getByText("CENTRAL_OFFLINE Central offline · actions paused")).toBeVisible();
+    }
+    expect(writes).toHaveLength(1);
     await expect(draft).toHaveValue("Keep this exact draft and original operation key");
     failing = false;
     await expect.poll(saved, {timeout: 10000}).toEqual(checkpoint(1));
     if (refresh === "messages") await expect(page.getByText("Refreshed evidence")).toBeVisible();
     await page.getByRole("button", {name: "Send", exact: true}).click();
-    await expect.poll(() => writes.length).toBe(1);
-    expect(writes[0].idempotency_key).toBe(originalKey);
+    await expect.poll(() => writes.length).toBe(2);
+    expect(writes[1].idempotency_key).toBe(originalKey);
     if (refresh === "preview") {
       await expect(page.getByRole("combobox", {name: "Commit"})).toHaveValue("b".repeat(40));
       await expect(page.locator("textarea").nth(1)).toHaveValue("Keep this checkpoint note");
       await page.getByRole("button", {name: "Record this version"}).click();
-      await expect.poll(() => writes.length).toBe(2);
-      expect(writes[1].body.params).toEqual({last_n: 20, commit: "b".repeat(40), note: "Keep this checkpoint note"});
+      await expect.poll(() => writes.length).toBe(3);
+      expect(writes[2].body.params).toEqual({last_n: 20, commit: "b".repeat(40), note: "Keep this checkpoint note"});
     }
     expect(errors).toEqual([]);
   });
