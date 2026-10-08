@@ -14,13 +14,17 @@ import json
 import re
 import time
 from importlib import resources
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from . import (
     __version__,
     api_auth,
+    artifacts,
     checkpoints,
+    cleanup,
+    confinement,
     dashboard_sync,
+    deployment,
     integration,
     pr_delivery,
     resource_policy,
@@ -31,7 +35,7 @@ from .errors import BatError, ResourceReadOnly
 from .operations import STATES, OperationError
 
 API_VERSION = 1
-CONTRACT_VERSION = "2026-10-08"  # delivery Part A shares this contract change date; keep an ISO date
+CONTRACT_VERSION = "2026-10-08"  # delivery A/B contract changes share this UTC date; keep an ISO date
 MAX_BODY = 200_000
 MAX_STREAMS = 16
 MAX_STREAMS_PER_ACTOR = 8  # several Dashboard tabs per person; reloads briefly overlap
@@ -91,12 +95,20 @@ def parse_wait(value) -> float:
 class ApiV1:
     def __init__(self, daemon, *, allowed_origins: tuple[str, ...] = ()) -> None:
         self.daemon = daemon
+        cleanup.install(daemon.ops, daemon._admin_token)
         self.allowed_origins = allowed_origins
         self._streams = 0
         self._streams_by_actor: dict[str, int] = {}
         self.routes = [
+            ("POST", r"/api/v1/cleanup-previews", self.cleanup_preview, "observe"),
+            ("GET", r"/api/v1/cleanup-retained", self.cleanup_retained, "observe"),
+            ("GET", r"/api/v1/cleanup-tombstones", self.cleanup_tombstones, "observe"),
+            ("GET", r"/api/v1/cleanup-tombstones/(?P<rid>(?:cr|wt)_[0-9a-f]{32})", self.cleanup_tombstone, "observe"),
             ("GET", r"/api/v1/version", self.version, None),
             ("GET", r"/api/v1/capabilities", self.capabilities, "observe"),
+            ("POST", r"/api/v1/artifacts", self.create_artifact, "manage"),
+            ("GET", r"/api/v1/artifacts", self.artifacts, "observe"),
+            ("GET", r"/api/v1/artifacts/(?P<aid>art_[0-9a-f]{32})/revisions/(?P<revision>[1-9][0-9]*)", self.artifact, "observe"),
             ("GET", r"/api/v1/bootstrap", self.bootstrap, "observe"),
             ("GET", r"/api/v1/hosts", self.hosts, "observe"),
             ("GET", r"/api/v1/sessions", self.sessions, "observe"),
@@ -125,6 +137,11 @@ class ApiV1:
             ("GET", r"/api/v1/repositories/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pulls/(?P<number>\d{1,9})",
              self.pull_preview, "observe"),
             ("GET", r"/api/v1/delivery/previews/(?P<pv>mpv_[0-9a-f]{32})", self.merge_preview, "observe"),
+            ("GET", r"/api/v1/deployments/preview", self.deployment_preview, "observe"),
+            ("GET", r"/api/v1/deployments", self.deployments, "observe"),
+            ("GET", r"/api/v1/deployments/(?P<dep>dep_[0-9a-f]{32})", self.deployment, "observe"),
+            ("GET", r"/api/v1/deployment-environments", self.deployment_environment, "observe"),
+            ("GET", r"/api/v1/deployment-environments/history", self.deployment_environment_history, "observe"),
             ("GET", r"/api/v1/integrations/candidates", self.integration_candidates, "observe"),
             ("GET", r"/api/v1/integrations/previews/(?P<pv>ipv_[0-9a-f]{32})", self.integration_preview, "observe"),
             ("GET", r"/api/v1/integrations", self.integrations, "observe"),
@@ -165,6 +182,35 @@ class ApiV1:
                 return
             parts = urlsplit(target)
             path, query = parts.path.rstrip("/") or "/", parse_qs(parts.query)
+            content = re.fullmatch(r"/api/v1/artifacts/uploads/(?P<op>op_[0-9a-f]{32})/content", path)
+            download = re.fullmatch(r"/api/v1/artifacts/(?P<aid>art_[0-9a-f]{32})/revisions/(?P<revision>[1-9][0-9]*)/content", path)
+            if content or download:
+                principal = api_auth.authenticate(self.daemon.journal.db, self._bearer(headers), self.daemon._admin_token)
+                if principal is None:
+                    raise ApiError(401, "UNAUTHORIZED", "a valid bearer token is required")
+                if content:
+                    if method != "POST":
+                        raise ApiError(405, "METHOD_NOT_ALLOWED", "upload content needs POST")
+                    if headers.get("transfer-encoding") or headers.get("content-type") != "application/octet-stream":
+                        raise ApiError(422, "INVALID_REQUEST", "use Content-Length and application/octet-stream; chunked transfer is refused")
+                    length = headers.get("content-length", "")
+                    if not length.isdigit():
+                        raise ApiError(400, "BAD_LENGTH", "declared Content-Length is required")
+                    op = await self.daemon.artifact_store.receive(principal, content["op"], reader, int(length))
+                    await self._send_json(writer, 202, {"operation": op}, cors)
+                else:
+                    if method != "GET":
+                        raise ApiError(405, "METHOD_NOT_ALLOWED", "download content needs GET")
+                    if not principal.allows("observe"):
+                        raise ApiError(403, "FORBIDDEN", "download needs observe scope")
+                    row = artifacts.get(self.daemon.journal.db, download["aid"], int(download["revision"]))
+                    data = self.daemon.artifact_store.read_content(row["artifact_id"], row["revision"])
+                    head = (f"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {len(data)}\r\n"
+                            f"Content-Disposition: attachment; filename*=UTF-8''{quote(row['display_name'], safe='')}\r\n"
+                            f"X-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\n{cors}Connection: close\r\n\r\n")
+                    writer.write(head.encode() + data)
+                    await writer.drain()
+                return
             body = await self._read_body(method, headers, reader)
             token = self._bearer(headers)
             principal = api_auth.authenticate(self.daemon.journal.db, token, self.daemon._admin_token)
@@ -316,18 +362,32 @@ class ApiV1:
         hosts = [{"host": h, "observe": True, "writes": fleet.writes_enabled(h),
                   "orchestrate": fleet.orchestrate_enabled(h),
                   "managed_roots": list(fleet.config.host(h).managed_roots),
-                  "shared_clone_worktrees": fleet.config.host(h).shared_clone_worktrees}
+                  "shared_clone_worktrees": fleet.config.host(h).shared_clone_worktrees,
+                  "confinement": confinement.host_capability(fleet, h)}
                  for h in fleet.config.hosts]
         return 200, {"actor": principal.actor, "scopes": sorted(principal.scopes), "api_version": API_VERSION,
                      "contract_version": CONTRACT_VERSION, "connector": __version__, "hosts": hosts,
+                     "artifacts": {"limits": self.daemon.artifact_store.settings.limits(),
+                                   "hosts": [{"host": h, "configured": self.daemon.ops.context["artifact_host"].available(h),
+                                              "readiness": self.daemon.ops.context["artifact_host"].readiness.get(h)} for h in fleet.config.hosts]},
                      "identity": dashboard_sync.identity(self.daemon.journal, principal),
                      "actions": actions, "operation_statuses": list(STATES),
+                     "cleanup": {"preview_ttl_s": cleanup.TTL_S, "max_items": cleanup.MAX_ITEMS, "restore": False,
+                                 "scopes": ["cleanup", "cleanup_discard"], "retention": vars(fleet.config.cleanup),
+                                 "read_deadline_s": cleanup.READ_DEADLINE_S, "serialize_previews": True,
+                                 "preview": principal.allows("observe"), "apply": principal.allows("cleanup"),
+                                 "discard": principal.allows("cleanup_discard"),
+                                 "hosts": [{"host": name, "available": self._can_continue(name),
+                                     "reasons": ([] if self._can_continue(name) else ["HOST_CLEANUP_UNAVAILABLE"])}
+                                     for name in fleet.config.hosts]},
                      "features": {"dashboard_sync": {"version": 1, "bootstrap": "/api/v1/bootstrap", "checkpoint_replay": True},
-                                  "inventory": True, "session_history": True, "resource_relations": True, "discovery_scope": True,
-                                  "worktree_history": {"known_bindings_only": True}, "history": {"source": "journal", "legacy_transitions": "may_be_incomplete", "optional_adapters": ["delivery_part_a"],
+                                  "cleanup": True, "inventory": True, "session_history": True, "resource_relations": True, "discovery_scope": True,
+                                  "worktree_history": {"known_bindings_only": True}, "history": {"source": "journal", "legacy_transitions": "may_be_incomplete", "optional_adapters": ["delivery_part_a", "delivery_part_b"],
                                       "observed_event_kinds": [r[0] for r in self.daemon.journal.db.execute("SELECT DISTINCT kind FROM api_events ORDER BY kind")]}, "events_stream": True, "operations": True, "work_items": True,
                                   "github": self.daemon.ops.context.get("github") is not None,
-                                  "deploy": bool(gh_cfg.recipes),
+                                  "deploy": self.daemon.ops.context.get("github") is not None and any(r.verification for r in gh_cfg.recipes.values()),
+                                  "deployment_history": True, "environment_generation": True,
+                                  "runtime_check": True, "rollback_readiness": True,
                                   "metadata_update": self.daemon.ops.context.get("github") is not None,
                                   "merge_scope_preview": self.daemon.ops.context.get("github") is not None,
                                   "checkpoints": [h for h in fleet.config.hosts if self._can_continue(h)],
@@ -337,7 +397,12 @@ class ApiV1:
                      "repositories": [{"repository": r.repository, "allow_merge": r.allow_merge, "allow_pr_update": r.allow_pr_update,
                                        "merge_methods": list(r.merge_methods)} for r in gh_cfg.repos.values()],
                      "deploy_recipes": [{"name": r.name, "repository": r.repository, "environment": r.environment,
-                                         "mode": r.mode} for r in gh_cfg.recipes.values()]}
+                                         "mode": r.mode, "readiness": deployment.ready(r),
+                                         "environment_generation": deployment.environment_status(self.daemon.ops, r.name)["desired_generation"],
+                                         "runtime_check": {"version_required": r.verification.version_required,
+                                                           "health_required": r.verification.health_required} if r.verification else None,
+                                         "rollback": {"supported": r.rollback.supported, "identity": r.rollback.identity,
+                                                      "not_undone": list(r.rollback.not_undone)}} for r in gh_cfg.recipes.values()]}
 
     async def bootstrap(self, principal, **_):
         # Cursor first. The following existing read models are live pages, not an atomic snapshot.
@@ -377,13 +442,22 @@ class ApiV1:
             raise ApiError(404, "UNKNOWN_HOST", f"unknown host {host!r}")
 
     async def session(self, query, host, sid, **_):
-        if self._bool(query, "live"):
+        live = self._bool(query, "live")
+        if live:
             self._known_host(host)
-            row = self.daemon.inventory.get_session(host, sid)
-            out = self.daemon.inventory.session_document(host, sid) if row else {"session": None}
+        try:
+            out = self.daemon.inventory.session_document(host, sid)
+        except OperationError as exc:
+            if not live or exc.code != "NOT_FOUND":
+                raise
+            out = {"session": None, "cleanup": []}
+        if live:
             out["policy"] = await resource_policy.session_policy(self.daemon.fleet, host, sid)
-            return 200, out
-        return 200, self.daemon.inventory.session_document(host, sid)
+            if out["session"]:
+                out["session"].update(confinement.session_fields(
+                    host, sid, await service._meta(self.daemon.fleet.client(host), sid),
+                    account=confinement.account_status(self.daemon.fleet, host)))
+        return 200, out
 
     def _history(self, query, resource_type, resource_id):
         return self.daemon.inventory.observation.history(resource_type, resource_id,
@@ -455,10 +529,25 @@ class ApiV1:
 
     async def operation(self, op, **_):
         return 200, {"operation": self.daemon.ops.get(op),
-                     "work_items": work_items.work_items_for(self.daemon.journal.db, "operation", op)}
+                     "work_items": work_items.work_items_for(self.daemon.journal.db, "operation", op),
+                     "cleanup_receipts": cleanup.receipts(self.daemon.ops, op)}
 
     async def cancel_operation(self, principal, op, **_):
-        return 200, {"operation": self.daemon.ops.cancel(principal, op)}
+        result = self.daemon.ops.cancel(principal, op)
+        await self.daemon.artifact_store.reap_best_effort(op)
+        return 200, {"operation": result}
+
+    async def create_artifact(self, principal, query, body, headers, **_):
+        envelope = {"action": "artifact.upload", "target": body.get("target", {}),
+                    "params": body.get("params", {}), "preconditions": body.get("preconditions", {}),
+                    "idempotency_key": body.get("idempotency_key")}
+        return await self.create_operation(principal, query, envelope, headers)
+
+    async def artifacts(self, query, **_):
+        return 200, artifacts.list_artifacts(self.daemon.journal.db, limit=self._int(query, "limit", 50), cursor=self._q(query, "cursor"))
+
+    async def artifact(self, aid, revision, **_):
+        return 200, {"artifact": artifacts.get(self.daemon.journal.db, aid, int(revision))}
 
     async def resume_operation(self, principal, op, **_):
         return 200, {"operation": self.daemon.ops.resume(principal, op)}
@@ -478,6 +567,23 @@ class ApiV1:
     async def merge_preview(self, pv, **_):
         return 200, {"preview": pr_delivery.get_preview(self.daemon.journal.db, pv)}
 
+    async def deployment_preview(self, query, **_):
+        return 200, {"preview": await deployment.preview(self.daemon.ops, self._q(query, "recipe"))}
+
+    async def deployments(self, query, **_):
+        return 200, deployment.history(self.daemon.ops, self._q(query, "recipe"),
+                                       cursor=self._q(query, "cursor"), limit=self._int(query, "limit", 50))
+
+    async def deployment(self, dep, **_):
+        return 200, {"deployment": deployment.status(self.daemon.ops, dep)}
+
+    async def deployment_environment(self, query, **_):
+        return 200, {"environment": deployment.environment_status(self.daemon.ops, self._q(query, "recipe"))}
+
+    async def deployment_environment_history(self, query, **_):
+        return 200, deployment.environment_history(self.daemon.ops, self._q(query, "recipe"),
+                                                   cursor=self._q(query, "cursor"), limit=self._int(query, "limit", 50))
+
     async def integration_candidates(self, query, **_):
         host = self._q(query, "host")
         self._known_host(host or "")
@@ -494,7 +600,9 @@ class ApiV1:
                                                   self._int(query, "limit", 20))
 
     async def integration(self, op, **_):
-        return 200, integration.integration_get(self.daemon.ops, op)
+        out = integration.integration_get(self.daemon.ops, op)
+        out["cleanup"] = cleanup.lookup(self.daemon.journal.db, op)
+        return 200, out
 
     async def checkpoints(self, query, **_):
         return 200, checkpoints.list_checkpoints(self.daemon.journal.db, host=self._q(query, "host"),
@@ -503,7 +611,7 @@ class ApiV1:
 
     async def checkpoint(self, query, cp, **_):
         record = checkpoints.get(self.daemon.journal.db, cp)
-        out = {"checkpoint": record}
+        out = {"checkpoint": record, "cleanup": cleanup.lookup(self.daemon.journal.db, cp)}
         if self._bool(query, "live"):  # has the source moved on since? (the checkpoint itself never changes)
             out["source"] = await checkpoints.source_head(self.daemon.ops, record)
         return 200, out
@@ -527,7 +635,29 @@ class ApiV1:
             limit=self._int(query, "limit", 50), cursor=self._q(query, "cursor"))
 
     async def work_item(self, wi, **_):
-        return 200, work_items.work_item_get(self.daemon.journal.db, wi)
+        out = work_items.work_item_get(self.daemon.journal.db, wi)
+        out["cleanup"] = cleanup.lookup(self.daemon.journal.db, wi)
+        return 200, out
+
+    async def cleanup_preview(self, principal, body, **_):
+        if set(body) - {"target", "choices"}:
+            raise ApiError(422, "INVALID_PARAMS", "preview accepts target and choices")
+        return 200, {"preview": await cleanup.preview(self.daemon.ops, principal, body.get("target"), body.get("choices"))}
+
+    async def cleanup_retained(self, query, **_):
+        return 200, await cleanup.retained(self.daemon.ops, **{k: self._q(query, k) for k in
+            ("host", "resource_id", "query", "cursor")}, limit=self._int(query, "limit", 50))
+
+    async def cleanup_tombstones(self, query, **_):
+        return 200, cleanup.tombstones(self.daemon.ops, **{k: self._q(query, k) for k in
+            ("host", "kind", "query", "original_id", "work_item_id", "cursor")}, limit=self._int(query, "limit", 50))
+
+    async def cleanup_tombstone(self, rid, **_):
+        row = self.daemon.journal.db.execute("SELECT document FROM resource_tombstones WHERE resource_id=?", (rid,)).fetchone()
+        if not row:
+            raise ApiError(404, "NOT_FOUND", "tombstone not found")
+        doc = json.loads(row[0])
+        return 200, {"tombstone": doc, "receipts": cleanup.receipts(self.daemon.ops, doc["operation_id"])}
 
     async def task(self, task, **_):
         return 200, {"task": await self.daemon.call("work_status", {"task_id": task}), "execution_id": task,
@@ -546,6 +676,10 @@ class ApiV1:
         except ValueError:
             raise ApiError(422, "INVALID_REQUEST", "after must be an integer") from None
         checkpoint_token = self._q(query, "checkpoint")
+        # Validate every event filter, including direct resource filters this legacy stream ignores.
+        dashboard_sync.require_unfiltered(checkpoint_token, **{
+            name: self._q(query, name) for name in
+            ("kind", "resource_type", "resource_id", "related_resource_type", "related_resource_id")})
         dashboard_sync.event_page(self.daemon.journal, principal, after, 0, token=checkpoint_token, kind=self._q(query, "kind"),
             related_resource_type=self._q(query, "related_resource_type"), related_resource_id=self._q(query, "related_resource_id"))  # validate before streaming headers
         self._streams += 1

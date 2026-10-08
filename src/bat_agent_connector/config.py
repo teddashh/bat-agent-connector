@@ -21,8 +21,9 @@ Config file (default ``~/.config/bat-agent-connector/hosts.toml``)::
     orchestrate = false                # 3rd tier: start worktree sessions, merge, remove (needs writes)
     orchestrate_max_sessions = 4       # cap on concurrently orchestrated sessions on this host
     orchestrate_register_tabs = false  # append a tab to the host workspace (workspace:save, append-only)
-    default_permission_mode = "default" # "default" (agent asks) or "allow_all" (like BAT's bypass setting)
-    auto_cleanup = false               # allow session_cleanup to merge/remove/stop on this host
+    default_permission_mode = "default" # default/allow_all preserve BAT policy; confined gates tools/sandboxes
+    # confined Codex may block installs/network/local sockets; BAT cannot pass network or writable roots.
+    auto_cleanup = false               # deprecated: parses only; never enables cleanup writes
     codex_model = ""                   # default model for Codex sessions started/failed over here ("" = BAT default)
     profile_id = "default"             # workspace profile on the host
     managed_roots = []                 # host folders the connector owns (its own clones); see resource_policy.py
@@ -37,6 +38,7 @@ Token values never live in this file.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import posixpath
@@ -105,13 +107,14 @@ class HostConfig:
     orchestrate_max_sessions: int = 4
     orchestrate_register_tabs: bool = False
     default_permission_mode: str = "default"
-    auto_cleanup: bool = False
+    auto_cleanup: bool = False  # Deprecated: parses for compatibility; never enables cleanup writes.
     codex_model: str | None = None
     profile_id: str = "default"
     bat_profiles_dir: str = DEFAULT_BAT_PROFILES_DIR
     labels: list[str] = field(default_factory=list)
     managed_roots: tuple[str, ...] = ()
     shared_clone_worktrees: bool = True
+    confinement: dict = field(default_factory=dict)
 
     def __repr__(self) -> str:  # never include token material
         return f"HostConfig(name={self.name!r}, url={self.url!r}, writes={self.writes}, orchestrate={self.orchestrate})"
@@ -188,7 +191,7 @@ class SafetyConfig:
     max_start_per_call: int = 4
 
 
-PERMISSION_MODES = ("default", "allow_all")
+PERMISSION_MODES = ("default", "allow_all", "confined")
 
 
 def normalize_host_path(raw: str) -> str:
@@ -230,9 +233,17 @@ class ApiConfig:
     allowed_origins: tuple[str, ...] = ()
 
 
+@dataclass
+class CleanupConfig:
+    retained_refs: str = "keep"
+    history_retention: str = "forever"
+    permanent_delete: bool = False
+
+
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 MERGE_METHODS = ("merge", "squash", "rebase")
-_INPUT_FIELDS = ("source_sha", "operation_id", "environment", "repository")
+_INPUT_FIELDS = ("source_sha", "operation_id", "environment", "repository", "environment_generation",
+                 "artifact_id", "artifact_digest")
 
 
 # Never a PR head that integration pushes to; the PR's base and the default branch are refused as well.
@@ -262,6 +273,75 @@ class GitHubRepo:
 
 
 @dataclass(frozen=True)
+class DeployVerification:
+    kind: str
+    url: str
+    version_required: bool = True
+    health_required: bool = False
+    timeout_s: float = 10.0
+    max_bytes: int = 65536
+    token_ref: str | None = None
+
+
+@dataclass(frozen=True)
+class DeployOrdering:
+    mode: str = "serialized"
+    concurrency_group: str = ""
+    cancel_in_progress: bool = False
+
+
+@dataclass(frozen=True)
+class DeployRollback:
+    supported: bool = False
+    identity: str = "source_sha"
+    not_undone: tuple[str, ...] = ()
+
+
+def verification_url(url: str) -> str:
+    from urllib.parse import urlsplit
+    if not isinstance(url, str):
+        raise ConfigError("verification.url must be a URL string")
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        _ = parsed.port
+    except ValueError:
+        raise ConfigError("verification.url is invalid") from None
+    loopback = host == "localhost"
+    try:
+        loopback = loopback or bool(host and ipaddress.ip_address(host).is_loopback)
+    except ValueError:
+        pass
+    if (not host or parsed.username or parsed.password or parsed.fragment
+            or any(c.isspace() for c in url)
+            or (parsed.scheme != "https" and not (parsed.scheme == "http" and loopback))):
+        raise ConfigError("verification.url must be HTTPS (HTTP only on loopback), without credentials or fragment")
+    return url
+
+
+def _deploy_verification(raw) -> DeployVerification | None:
+    if raw is None:
+        return None
+    allowed = {"kind", "url", "version_required", "health_required", "timeout_s", "max_bytes", "token_ref"}
+    if not isinstance(raw, dict) or set(raw) - allowed or raw.get("kind") != "http_json":
+        raise ConfigError("verification must declare kind=http_json and supported settings only")
+    url = verification_url(raw.get("url", ""))
+    version, health = raw.get("version_required", True), raw.get("health_required", False)
+    if not isinstance(version, bool) or not isinstance(health, bool) or not (version or health):
+        raise ConfigError("verification requires version_required and/or health_required")
+    try:
+        timeout, size = float(raw.get("timeout_s", 10)), int(raw.get("max_bytes", 65536))
+    except (ValueError, TypeError):
+        raise ConfigError("verification timeout_s/max_bytes must be numbers") from None
+    if not 2 <= timeout <= 60 or not 1 <= size <= 1048576:
+        raise ConfigError("verification timeout_s must be 2-60 and max_bytes 1-1048576")
+    token = raw.get("token_ref")
+    if token is not None and (not isinstance(token, str) or not re.fullmatch(r"(?:env|file):.+", token)):
+        raise ConfigError("verification.token_ref must be env:NAME or file:PATH")
+    return DeployVerification("http_json", url, version, health, timeout, size, token)
+
+
+@dataclass(frozen=True)
 class DeployRecipe:
     """One environment's deploy route. The Dashboard names a recipe; it never passes workflows or inputs."""
 
@@ -274,6 +354,9 @@ class DeployRecipe:
     ref: str = "main"  # branch whose workflow file runs (workflow_dispatch)
     inputs: tuple[tuple[str, str], ...] = ()  # workflow input -> one of _INPUT_FIELDS
     run_name_contains: str | None = None  # "operation_id": the workflow's run-name carries it
+    ordering: DeployOrdering = field(default_factory=DeployOrdering)
+    verification: DeployVerification | None = None
+    rollback: DeployRollback = field(default_factory=DeployRollback)
 
 
 @dataclass
@@ -283,6 +366,7 @@ class GitHubConfig:
     api_version: str = "2026-03-10"
     timeout_s: float = 20.0
     wait_max_s: float = 3600.0
+    deployment_reconcile_interval_s: float = 300.0
     repos: dict[str, GitHubRepo] = field(default_factory=dict)
     recipes: dict[str, DeployRecipe] = field(default_factory=dict)
 
@@ -341,6 +425,9 @@ def _integrate(r: dict, repository: str, api_url: str, host_names: set[str]) -> 
 
 def parse_github(data: dict) -> GitHubConfig:
     g = data.get("github") or {}
+    interval = g.get("deployment_reconcile_interval_s", 300)
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not 60 <= interval <= 86400:
+        raise ConfigError("[github] deployment_reconcile_interval_s must be between 60 and 86400 seconds")
     api_url = str(g.get("api_url") or "https://api.github.com").rstrip("/")
     host = re.sub(r"^https?://", "", api_url).split("/", 1)[0].split(":", 1)[0]
     if not (api_url.startswith("https://") or (api_url.startswith("http://")
@@ -384,16 +471,45 @@ def parse_github(data: dict) -> GitHubConfig:
         run_name = r.get("run_name_contains")
         if run_name not in (None, "operation_id"):
             raise ConfigError(f"[[deploy.recipes]] {name}: run_name_contains may only be \"operation_id\"")
-        if mode == "workflow_dispatch" and "operation_id" not in inputs.values():
-            raise ConfigError(f"[[deploy.recipes]] {name}: pass operation_id as a workflow input so a lost "
+        if mode == "workflow_dispatch" and not {"operation_id", "source_sha"} <= set(inputs.values()):
+            raise ConfigError(f"[[deploy.recipes]] {name}: pass source_sha and operation_id as workflow inputs so a lost "
                               "dispatch reply can be matched to its run")
+        ordering = r.get("ordering") or {}
+        if (not isinstance(ordering, dict) or set(ordering) - {"mode", "concurrency_group", "cancel_in_progress"}
+                or ordering.get("mode", "serialized") != "serialized" or ordering.get("cancel_in_progress", False) is not False):
+            raise ConfigError(f"[[deploy.recipes]] {name}: ordering must be serialized with cancel_in_progress=false")
+        environment = str(r.get("environment") or name)
+        group = ordering.get("concurrency_group", "deploy-" + repo.replace("/", "-") + "-" + environment)
+        if not isinstance(group, str) or not group.strip():
+            raise ConfigError(f"[[deploy.recipes]] {name}: ordering.concurrency_group is required")
+        rollback = r.get("rollback") or {}
+        if (not isinstance(rollback, dict) or set(rollback) - {"supported", "identity", "not_undone"}
+                or not isinstance(rollback.get("supported", False), bool)):
+            raise ConfigError(f"[[deploy.recipes]] {name}: invalid rollback settings")
+        supported, identity = rollback.get("supported", False), rollback.get("identity", "source_sha")
+        limits = rollback.get("not_undone", [])
+        if (identity not in {"source_sha", "artifact"} or not isinstance(limits, list)
+                or any(not isinstance(s, str) for s in limits)
+                or (supported and (mode != "workflow_dispatch" or "not_undone" not in rollback))
+                or (supported and identity == "artifact" and not {"artifact_id", "artifact_digest"} <= set(inputs.values()))):
+            raise ConfigError(f"[[deploy.recipes]] {name}: rollback needs workflow_dispatch, explicit not_undone and identity inputs")
         recipes[name] = DeployRecipe(name, repos[repo.lower()].repository, str(r.get("environment") or name),
                                      mode, workflow, job, str(r.get("ref") or "main"),
-                                     tuple(sorted((str(k), str(v)) for k, v in inputs.items())), run_name)
+                                     tuple(sorted((str(k), str(v)) for k, v in inputs.items())), run_name,
+                                     DeployOrdering("serialized", group, False), _deploy_verification(r.get("verification")),
+                                     DeployRollback(supported, identity, tuple(limits)))
+    routes = {}
+    for recipe in recipes.values():
+        key = (recipe.repository.lower(), recipe.environment)
+        route = recipe.ordering
+        if key in routes and routes[key] != route:
+            raise ConfigError("recipes for the same environment must share provider ordering")
+        routes[key] = route
     return GitHubConfig(
         token_ref=token_ref, api_url=api_url, api_version=str(g.get("api_version") or "2026-03-10"),
         timeout_s=max(2.0, min(120.0, float(g.get("timeout_s", 20)))),
         wait_max_s=max(60.0, min(7 * 86400.0, float(g.get("wait_max_s", 3600)))),
+        deployment_reconcile_interval_s=float(interval),
         repos=repos, recipes=recipes)
 
 
@@ -403,6 +519,7 @@ class Config:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     jev: JevConfig = field(default_factory=JevConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
     client_label: str = "BAT Agent Connector"
     path: Path | None = None
@@ -467,6 +584,37 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
         cmodel = str(h.get("codex_model") or "").strip() or None
         if cmodel and not re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", cmodel):
             raise ConfigError(f"host {name!r}: codex_model {cmodel!r} is not a valid model id")
+        managed_roots = _managed_roots(name, h.get("managed_roots"))
+        confinement = h.get("confinement", {})
+        if not isinstance(confinement, dict):
+            raise ConfigError(f"host {name!r}: confinement must be a table")
+        allowed = {"host_account", "expected_uid", "protected_roots", "check_max_age_s",
+                   "check_timeout_s", "check_max_entries", "bat_port", "check_ssh_alias", "check_uid", "bat_account"}
+        if set(confinement) - allowed or not isinstance(confinement.get("host_account", False), bool):
+            raise ConfigError(f"host {name!r}: invalid confinement settings")
+        if confinement.get("host_account"):
+            uid = confinement.get("expected_uid")
+            if type(uid) is not int or uid <= 0:
+                raise ConfigError(f"host {name!r}: confinement.expected_uid must be a non-root UID")
+            roots = _managed_roots(name, confinement.get("protected_roots"))
+            if not roots or any(a == b or a.startswith(b + "/") or b.startswith(a + "/")
+                                for a in roots for b in managed_roots):
+                raise ConfigError(f"host {name!r}: protected_roots must be nonempty and separate from managed_roots")
+            confinement = {**confinement, "protected_roots": list(roots)}
+        if "check_ssh_alias" in confinement:
+            alias = confinement["check_ssh_alias"]
+            account = confinement.get("bat_account")
+            auditor = confinement.get("check_uid")
+            if (not isinstance(alias, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", alias)
+                    or not isinstance(account, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", account)
+                    or type(auditor) is not int or auditor < 0 or auditor == confinement.get("expected_uid")):
+                raise ConfigError(f"host {name!r}: trusted check requires an SSH alias, BAT account and different check_uid")
+        elif "check_uid" in confinement or "bat_account" in confinement:
+            raise ConfigError(f"host {name!r}: check_uid and bat_account require check_ssh_alias")
+        for key, maximum in (("check_max_age_s", 3600), ("check_timeout_s", 30),
+                             ("check_max_entries", 100000), ("bat_port", 65535)):
+            if key in confinement and (type(confinement[key]) is not int or not 0 < confinement[key] <= maximum):
+                raise ConfigError(f"host {name!r}: confinement.{key} must be between 1 and {maximum}")
         hosts[name] = HostConfig(
             name=name,
             url=url,
@@ -482,8 +630,9 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
             profile_id=str(h.get("profile_id") or "default"),
             bat_profiles_dir=str(h.get("bat_profiles_dir") or pdir),
             labels=list(h.get("labels") or []),
-            managed_roots=_managed_roots(name, h.get("managed_roots")),
+            managed_roots=managed_roots,
             shared_clone_worktrees=shared,
+            confinement=confinement,
         )
     s = data.get("safety") or {}
     safety = SafetyConfig(
@@ -518,6 +667,12 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
         activity_every=max(1, min(100, int(a.get("activity_every", 5)))),
         allowed_origins=tuple(origins),
     )
+    cleanup_data = data.get("cleanup") or {}
+    if (set(cleanup_data) - {"retained_refs", "history_retention", "permanent_delete"} or
+            cleanup_data.get("retained_refs", "keep") != "keep" or
+            cleanup_data.get("history_retention", "forever") != "forever" or
+            cleanup_data.get("permanent_delete", False) is not False):
+        raise ConfigError('[cleanup] supports only retained_refs="keep", history_retention="forever", permanent_delete=false')
     cl = data.get("client") or {}
     label = str(cl.get("label") or "BAT Agent Connector")
     human = str(cl.get("human_name") or "").strip() or None

@@ -2,7 +2,7 @@
 
 日期：2026-10-08。對應計畫 v1.0 的 §09、§10、§15–§18、§26、§28，工作包 W07／W08。既有功能的驗收為 C04–C07、D01–D04；Phase 1 補訂 metadata、rollback、environment ordering、merge scope 與完成驗證，Phase 2 Part A 已交付 metadata／merge 部分，主要驗收 C04、C05、C07、D03、D05、D06。
 
-沿用本文件，因為新功能延伸同一套 `delivery.py`／`github.py`、recipe 與恢復流程；另開文件會有兩份完成判定。以下「現有」各節記錄起點；metadata／merge 的 Phase 2 規格已由 Part A 取代相應合約，標為 Part B 的部署規格保留待第二步。PR head 更新仍見 [integration.md](integration.md)。Phase 1 規格為 `5f94ad7`，review 修訂為 `afac4e9`，兩筆均獨立提交。2026-10-08 review 後分成兩步：Part A（現在）metadata、merge preview／verify、C04／C05／C07、PR 卡與各入口文件；Part B（之後另開 branch）部署 runtime evidence、generations／ordering、history／rollback、D03／D05／D06 與環境卡。
+沿用本文件，因為新功能延伸同一套 `delivery.py`／`github.py`、recipe 與恢復流程；另開文件會有兩份完成判定。以下「現有」各節記錄起點；metadata／merge 的 Phase 2 規格已由 Part A 取代相應合約，Part B 已交付後端、非 Dashboard 入口與環境卡。PR head 更新仍見 [integration.md](integration.md)。Phase 1 規格為 `5f94ad7`，review 修訂為 `afac4e9`，兩筆均獨立提交。2026-10-08 review 後分成兩步：Part A（已合併）metadata、merge preview／verify、C04／C05／C07、PR 卡與各入口文件；Part B（後端與環境卡已交付）部署 runtime evidence、generations／ordering、history／rollback、D03／D05／D06 與環境卡。
 
 Part A review follow-up 以 `85601e2f6a36517ba559705e9e360763e7c4d63b` 為固定來源：修正 metadata 無落地的期限、預覽成本／保留、submit 前檢查位置與最後合併歸因；保留已批准的 action／digest／scope 與 Part B 邊界。
 
@@ -13,6 +13,8 @@ PR #34 Codex review follow-up 以 `04bdb75` 為固定來源；補上 verify 時�
 Journal DDL follow-up 以 `3e038c5` 為固定來源；移除純 DDL 的 user_version stamp，保留交易與既有資料回填，依共用 journal 規則區分 schema 與一次性資料步驟。
 
 ## 固定來源版本
+
+Part B 起點：`0da20ba165dc99054b9b06902e28582cbc54f6c1`（#40 metadata ACK conflict fix），分支 `feat/delivery-b`。後端包含 HTTP／MCP／CLI、capabilities 與接入文件。環境卡輪以 `b9d7d96` 為固定來源，先以 `e558e92` 補上 stopped provider cadence／error 恢復，再接既有 store／operations；本輪不 rebase、不改 OperationService core。
 
 | 來源 | 固定版本與用途 |
 |---|---|
@@ -30,7 +32,7 @@ Journal DDL follow-up 以 `3e038c5` 為固定來源；移除純 DDL 的 user_ver
 | 部署序列 | `_no_deploy_in_flight()` 比 recipe 名稱，並非 environment | repository ID＋environment 的 desired generation／dispatch slot，跨 recipe 共用，晚到結果為 superseded |
 | 部署成功 | `_deploy()` 查 run／job，只有 on_merge 核對 run head | 查 pending environment、指定 attempt jobs、實際 runtime version／artifact／健康；workflow SHA 與產品 SHA 分開 |
 | 歷史／回退 | 回執在 operation，無部署表／rollback action | 保存 deployment identity／evidence，以同 recipe 的舊紀錄建立新 rollback operation |
-| Delivery UI | `viewDelivery()` merge／deploy／integration，operation view 有 deploy retry | metadata 編輯、scope 差異、環境 desired／current、部署歷史／rollback／superseded 與限制 |
+| Delivery UI | Part A 已有 metadata 編輯與 scope preview | 不依 PR 的 repository／environment 卡；desired／observed／last verified、游標 history、rollback／retry／superseded／drift 與限制 |
 
 保留 `OperationService`、`ActionDef`、具名 steps、actor-scoped idempotency、中央 journal、`api_events`、既有取消／resume 與 integration 互斥。不建立第二個 task database、planner、任意 shell 或人工資源接管（計畫 §06、§09、§28）。
 
@@ -86,6 +88,12 @@ run-name: deploy ${{ inputs.source_sha }} (${{ inputs.operation_id }})
 ## 現有合併並部署：`delivery.merge_and_deploy`
 
 需要 `merge` 與 `deploy` 兩個 scope。先依上面的合併流程取得實際合併版本，記入 `external_refs.merged_sha`，再以這個版本部署。部署失敗時操作為 `failed`，但合併結果保留；Dashboard 以 `merged_sha` 發起新的 `deployment.start` 重試，不會再合併。
+
+Tauri v2 §18／C07：`delivery.merge_and_deploy` 的人工 resume 也同時需要目前 principal 的
+`merge` 與 `deploy`，即使 actor 與原操作相同。縮減權限後回 `FORBIDDEN`，不改 operation、
+steps 或 events、不呼叫 provider；恢復完整權限後沿用已完成 receipts 與固定 merged SHA。
+Local admin 保留既有權限。唯讀查詢、背景 reconciliation、cancel 不增加這個 resume gate。
+`tests/test_delivery_resume_scopes.py` 驗證相同／不同 actor、縮權、admin 與已 merge 後續做。
 
 ## 現有讀取
 
@@ -143,11 +151,11 @@ Mutation 仍是 `POST /api/v1/operations`，現有 envelope `{action, target, pa
 |---|---|---|---|---|
 | `github.pr.update` | `{repository, pull_number}` | `{title?, body?}`，至少一欄 | `{expected_metadata_digest}` | repository ID／PR、before／after digest、實際 title／body、URL、verified |
 | `github.pr.merge` | 同現有 | `{method, preview_id}` | `{expected_head_sha, expected_base_sha, preview_digest}` | actual merged SHA、destination base／base_moved、UUID／queue、scope verification、attribution |
-| `deployment.start` | `{recipe}` | `{source_sha}`（完整 40 hex） | `{expected_environment_generation, expected_recipe_digest}` | deployment ID、identity、generation、run／attempt、evidence、is_current |
+| `deployment.start` | `{recipe}` | `{source_sha, retry_of?}`（完整 40 hex；retry_of 從保存 identity 取得，SHA 必須相符） | `{expected_environment_generation, expected_recipe_digest}` | deployment ID、identity、generation、run／attempt、evidence、is_current |
 | `deployment.rollback` | `{recipe}` | `{deployment_id}`（選定舊紀錄） | 同 start | 新 deployment ID、rollback_of、固定舊 identity、此次 run／generation／evidence |
 | `delivery.merge_and_deploy` | `{repository, pull_number, recipe}` | `{method, preview_id}` | merge＋deploy 的前置條件 | `{merge, deploy}`，deploy 失敗仍保留 merge receipt |
 
-Generation 從 0 開始，以選定順序遞增，不依 commit 時間或 SHA 大小排序。Recipe digest 包含 repository ID、environment、mode、workflow／ref、inputs、ordering、verification、rollback。Browser 只能選 recipe／保存的版本，不能提供任意 workflow、inputs、URL、headers 或 shell。
+Generation 從 0 開始，以選定順序遞增，不依 commit 時間或 SHA 大小排序。Recipe digest 包含 recipe 名稱、provider origin、repository ID、environment、mode、workflow／ref、inputs、ordering、verification、rollback。Browser 只能選 recipe／保存的版本，不能提供任意 workflow、inputs、URL、headers 或 shell。
 
 | HTTP（reads 為 observe） | MCP／daemon RPC | CLI（新增） |
 |---|---|---|
@@ -157,6 +165,7 @@ Generation 從 0 開始，以選定順序遞增，不依 commit 時間或 SHA �
 | `GET /api/v1/deployments/preview?recipe=NAME` | `deployment_preview` | `batc delivery preview NAME` |
 | `GET /api/v1/deployments?recipe=NAME&cursor=&limit=` | `deployments_list` | `batc delivery history NAME [--cursor CURSOR]` |
 | `GET /api/v1/deployments/{dep_id}` | `deployment_status` | `batc delivery show DEP_ID` |
+| `GET /api/v1/deployment-environments/history?recipe=NAME&cursor=&limit=`（Dashboard 薄 read） | —（既有 per-recipe reads 不變） | — |
 | `GET /api/v1/deployment-environments?recipe=NAME` | `deployment_environment_get` | environment 隨 preview／history 輸出 |
 | `POST /api/v1/operations`：start／rollback | `deployment_start`／`deployment_rollback` → `op_submit` | `batc delivery deploy NAME --sha SHA --generation N --recipe-digest DIGEST --key KEY`；`batc delivery rollback NAME DEP_ID --generation N --recipe-digest DIGEST --key KEY` |
 
@@ -270,11 +279,11 @@ rollback = { supported = true, identity = "source_sha", not_undone = ["不撤銷
 
 Inputs 白名單新增 environment_generation／artifact_id／artifact_digest，其他沿用。Dispatch 必須有 source_sha／operation_id；ref 是配置的 branch／tag，workflow ID／SHA 與產品 SHA 分開保存。[Dispatch](https://docs.github.com/en/rest/actions/workflows?apiVersion=2026-03-10#create-a-workflow-dispatch-event) 200／相容 204 只證明請求，不證明 deployed。精確 operation ID token 關聯 run-name，另核對 repo／workflow／event／ref，不能 substring 命中；多筆為 DEPLOY_RUN_AMBIGUOUS。
 
-本包新增唯一 verification 方式 `http_json`：後端 GET recipe 固定 URL，JSON 至少 repository_id／environment；依 recipe 的 version_required／health_required 取得 source_sha／artifact identity 或 healthy，至少要求一種 runtime check；artifact version check 另需 artifact_id／artifact_digest，可附 release_id／operation_id／environment_generation。SHA 完整 40 hex、digest 完整 sha256。Endpoint 必須回實際服務版本，不可只回 inputs。可只驗版本、只驗健康或兩者。Evidence／UI 精確說明，例如「健康通過；此 recipe 未檢查 runtime 版本」。Job success 單獨不能 deployed；要求版本時 mismatch 仍是 D03 失敗。
+本包新增唯一 verification 方式 `http_json`：後端 GET recipe 固定 URL，JSON 至少 repository_id／environment；依 recipe 的 version_required／health_required 取得 source_sha／artifact identity 或 healthy，至少要求一種 runtime check；artifact version check 另需 artifact_id／artifact_digest。Verifier 的 response 白名單為 repository_id／environment／source_sha／artifact_id／artifact_digest／healthy；其他欄位不保存。SHA 完整 40 hex、digest 完整 sha256。Endpoint 必須回實際服務版本，不可只回 inputs。可只驗版本、只驗健康或兩者。Evidence／UI 精確說明，例如「健康通過；此 recipe 未檢查 runtime 版本」。Job success 單獨不能 deployed；要求版本時 mismatch 仍是 D03 失敗。
 
 Verifier 預設 timeout_s=10（可配置 2–60）、max_bytes=65536、拒絕 redirect，正式 URL 只允許配置的 HTTPS；HTTP loopback 僅供 fake。可選 verification.token_ref（env:／file:）提供後端 Bearer 認證，不接受 client headers、不把憑證寫入 journal。缺 runtime check 的 recipe 為 not fully configured，capabilities／UI 禁用 deploy 並點名缺少設定，直接 mutation 回 `DEPLOY_VERIFICATION_REQUIRED`，歷史可讀；資料缺欄／回查失聯為 unverified／waiting，不退回 job success 判定。這是 D03 明確接入升級。
 
-Ordering mode=serialized：Connector 的 dispatch 共用 env provider-in-flight slot；provider workflow concurrency group 跨 aliases／自動觸發一致，cancel_in_progress=false。宣告不是遠端已配置的證明，接入驗收須核對固定 workflow 及故障注入；未驗證不得宣稱阻止 runtime 覆蓋。Generation 始終保護 current 報告，不增加 provider fencing、自動取消或重派。
+Ordering mode=serialized：Connector 的 dispatch 共用 env provider-in-flight slot；provider workflow concurrency group 跨 aliases／自動觸發一致，cancel_in_progress=false。Aliases 可以有不同 workflow／ref，但同 env 必須宣告同一 ordering。宣告不是遠端已配置的證明，接入驗收須核對固定 workflow 及故障注入；未驗證不得宣稱阻止 runtime 覆蓋。Generation 始終保護 current 報告，不增加 provider fencing、自動取消或重派。
 
 Rollback supported 預設 false；true 必須 identity=source_sha|artifact、not_undone 陣列（可明確為空）。本版僅 workflow_dispatch 支援；on_merge 只追舊 run，無同 recipe 主動重部署能力，supported=true 設定拒絕。不偷偷改模式、revert／push main 或把舊 run 成功當 rollback。
 
@@ -282,7 +291,7 @@ Artifact rollback 必須配置 artifact_id／digest inputs；一般 start 仍選
 
 ## Part B（第二步）：journal／desired version／順序（D05）
 
-同一 Journal 的 schema 使用冪等 DDL：CREATE TABLE／INDEX IF NOT EXISTS；column adds 先以 PRAGMA table_info 查存在。每次 open 都執行，不讀取或寫入 PRAGMA user_version。Part A 的 pr_merge_previews、pr_metadata_settlements、pr_merge_scope_reads 與 preview index 沿用各自交易；Part B 的部署表／索引／欄位亦遵循同一規則，不取得版本號。user_version 只留給一次性資料回填／重寫；若之後確實需要資料步驟，先向 orchestrator 申請分配號碼，不自行選號。沒有新 tasks authority。
+同一 Journal 的 schema 使用冪等 DDL：CREATE TABLE／INDEX IF NOT EXISTS；column adds 先以 PRAGMA table_info 查存在。每次 open 都執行，不讀取或寫入 PRAGMA user_version。Part A 的 pr_merge_previews、pr_metadata_settlements、pr_merge_scope_reads 與 preview index 沿用各自交易；Part B 的部署表／索引／欄位亦遵循同一規則，不取得版本號。user_version 只留給一次性資料回填／重寫。Reviewer 已分配 delivery history data step 3：只有 user_version=2 時，在同一交易從舊操作回填並設為 3；crash 整筆 rollback。Observation 的 step 2（#35）由其套件先執行；同次 open 的 step 3 隨後回填部署，LATEST_DATA_STEP=3。以後的 data step 仍先向 orchestrator 申請號碼。沒有新 tasks authority。
 
 | 新表 | 欄位／約束 |
 |---|---|
@@ -290,13 +299,14 @@ Artifact rollback 必須配置 artifact_id／digest inputs；一般 start 仍選
 | `pr_metadata_settlements`（Part A） | operation ID PK、delivery 的 not_applied／conflict receipt（status、code、observed、settled_at）；ACK readback conflict 立即保存，unresolved 依 settle window；不改別的 operation steps |
 | `pr_merge_scope_reads`（Part A） | PK(repository, PR, method)、preview ID、scope checked_at；與 immutable authority 分開 |
 | `deployment_environments` | PK(provider origin, repository ID, environment)；desired generation／deployment ID／identity、current ID／generation、observed identity／時間／health、attention、dispatch slot；name 是顯示／定位值 |
+| `deployment_reconcile_reads` | 獨立 read_key／checked_at；只記 polling cadence／adaptive interval／provider digest，無 deployment evidence／version 權威；冪等 DDL 不占 user_version |
 | `deployments` | dep ID、operation ID UNIQUE、recipe name／digest／snapshot、env key、generation、source／artifact／release identity、rollback_of、run／attempt、workflow ID／SHA、state／evidence／times／URLs；UNIQUE(env key, generation) |
 
 Deployment preview GET repo 核對 ID，保存 environment 觀測 binding；改名沿用 ID，同名不同 ID 停 REPOSITORY_ID_CHANGED。Admission 只用可信 saved binding，缺時 DEPLOY_PREVIEW_REQUIRED；外部 mutation 前 fresh GET 再核 ID。
 
 Operation 固定 recipe snapshot。Dispatch 前發現設定已換為 RECIPE_CHANGED，不用新設定代送；已有外部寫入時仍以原 snapshot 追原 workflow／environment，不能因目前 recipe 改名／移除就停止必要回查或換成另一條發布路線。
 
-不修改 OperationService.create()／ActionDef admission。Part B 的第一個 local deploy.select step 以 journal transaction 比 recipe digest／expected generation，保存 op-linked applied receipt／deployment row／desired／event；沒有 network。已成功的 select 重播 no-op，stale generation 在執行時異步 ENVIRONMENT_CHANGED，不回同步 CAS 結果。
+不修改 OperationService.create()／ActionDef admission。Part B 的第一個 local deploy.select step 以 journal transaction 比 recipe digest／expected generation，保存 op-linked applied receipt／deployment row／desired／event；沒有 network。Combined checks 尚在等待時不 reserve；checks／policy 通過後，第一個具名 local step 先 select／claim slot，才 final scope check 與 merge.submit。已成功的 select 重播 no-op，stale generation 在執行時異步 ENVIRONMENT_CHANGED，不回同步 CAS 結果。
 
 1. Preview 讀 g。Operation 先依既有流程受理；deploy.select 用 expected g 寫 g+1，兩 client 只有一個 select 成功，另一個異步 failed／ENVIRONMENT_CHANGED。Generation 是成功選定順序，不是完成順序。
 2. Select 固定 source identity；combined 可保存 source_pending_merge／reviewed PR，再綁 verified actual merged SHA。Merge 失敗 desired 保留失敗，不偷偷倒退。
@@ -313,18 +323,20 @@ Desired 不因 failed／cancelled／刪歷史倒退，rollback 亦取得較大 g
 | superseded | 新 desired 已取代；保留 provider_status／實際結果；operation needs_attention，不新增全域 operation state |
 | failed／cancelled／uncertain／needs_attention／unverified | 不升 current；未知副作用不能冒充已取消外部 run |
 
-Cancel 只停後續步驟，不取消 GitHub run。Slot 等 provider 終態證據才釋放，unknown／needs_attention 不釋放。`task_daemon.py` 加 `delivery.reconcile_deployments()` 只讀輪詢所有 provider 尚未終態的 rows，包括 operation cancelled／superseded；目前 env 與已知 run attempt 也週期回查，以捕捉外部 rerun／版本漂移。以 row version／generation CAS 保存 facts，不改已終態 operation；不能 dispatch／resume。避免只掃 RUNNABLE operations 漏掉晚到 run，重啟／重播不重增 generation／事件。
+Cancel 只停後續步驟，不取消 GitHub run。Slot 等 provider 終態證據才釋放，unknown／needs_attention 不釋放。Combined on_merge（包含 legacy）即使取消後 PR 才 merged，也不視為 provider 終態：只讀核對 reviewed head（merge method 另核第二 parent）、實際 merge SHA 可達 recipe ref，固定該 SHA 並以正常 repo／workflow／push／branch／SHA 條件追 run，直到 run 終態才釋放。Closed 未 merged 才可立即釋放；workflow_dispatch recipe 的取消不再 dispatch，merged／closed 可釋放。`task_daemon.py` 的 `delivery.reconcile_deployments()` 每 10 秒只讀掃描停止中 operation 的 provider 未終態 rows；每個 environment 的 current deployment 另回查 run／runtime，以捕捉其外部 rerun／版本漂移。Provider 已終態且有 recorded result 或 final state 的其他歷史不回查 GitHub／runtime。Provider 已終態但尚未完成 record 的 stopped row 只做 local 結案，不恢復操作或補 runtime proof。以 row version／generation CAS 保存 facts；runtime GET 前固定 environment row version，stale receipt 不使新 current 失效。不改已終態 operation；不能 dispatch／resume。避免只掃 RUNNABLE operations 漏掉晚到 run，重啟／重播不重增 generation／事件。
 
-Migration 從舊 start／combined result／external refs 建歷史 identity（generation 可 null）；缺 runtime 證據的舊 success 為 unverified、不可 rollback／自動 current。已送出的舊非終態先查原 run、不重新 dispatch；未送出的舊操作 DEPLOY_PREVIEW_REQUIRED 停住。Migration 重播安全，保留原 tasks／operations／events。
+`[github] deployment_reconcile_interval_s = 300` 控制 current 及 unresolved locate 的 cadence（60–86400 秒，拒絕無限／非數字）；`deployment_reconcile_reads` 保存每 environment current／deployment locate 的開始時間，含失聯／refused read，跨 daemon restart 仍節流；current ID 改變亦共用該 environment 的 cadence，新部署本身的正常 verify 不受此背景節流影響。Current 未變的 successful attempt 沿用保存的 jobs／approval 證據，不重新分頁，每個 cadence 最多一筆 run GET＋一筆 runtime GET；預設每小時每 env 各 12 次。Settled history 的 read budget 為零。Stopped provider 的 run／完整 attempt jobs／pending deployments、legacy run 與未決 merge PR（必要時 merge-async status）共用 per-deployment 持久化 cadence：初始 15 秒；每次 read 的 provider 狀態／attempt／jobs／pending／merge facts 不變則倍增至 deployment_reconcile_interval_s，改變立即回 15 秒；重啟保留 interval／digest／checked_at。預設等 approval 一小時的 run 最多 18 次 observation（單 jobs page 時 ≤54 次 GitHub GET）；run 完成後在下一次 due read 釋放 slot；on_merge 綁 SHA 後轉為節流 locate。成功完成的 read 清除既有 reconciliation_error；節流未到期不冒充成功。任何單列例外記錄類型、保存 RECONCILE_FAILED 後繼續下一列；所有 facts 仍只在改變時寫入。Locate 使用保存的 dispatch／merge send time（向前保留一秒）加入 [GitHub created filter](https://docs.github.com/en/rest/actions/workflow-runs?apiVersion=2026-03-10#list-workflow-runs-for-a-workflow)，仍保留完整 token／repo／workflow／branch／event／SHA 核對；standalone on_merge 可採用早於 admission 的 push run，不用 admission time 排除。每次 filtered search 最多 1000 筆、11 頁（含空尾頁），超出 GitHub 上限為 DEPLOY_RUN_AMBIGUOUS，不猜唯一 run。Journal 只在 state／evidence 改變時寫 deployment／增加 version；新 GET 的 checked_at 單獨變動不算新證據，polling 時間留在獨立表。
+
+Migration 從舊 start／combined result／external refs 建歷史 identity（generation 可 null）；Data step 3 不改 tasks／operations／events；只有舊 success 為 unverified、不可 rollback／自動 current；failed 保存 failed／原 error code，cancelled 保存 cancelled，legacy 不保存 selected。未送出任何 dispatch／merge 的終態 provider_terminal=true，不持鎖；已送出的終態除已知 provider failure／success 外，仍等原 provider 終態證據才釋放。已送出的舊非終態先查原 run、不重新 dispatch；未送出的舊操作 DEPLOY_PREVIEW_REQUIRED 停住。缺少 environment／mode／routing 時由仍存在的 configured recipe 補齊一次，保存 legacy_binding_sources，不從 merge step 推測 on_merge。Provider 未終態的 legacy row 以 repository（不分大小寫）＋environment 占用真實環境，跨 recipe admission 回 DEPLOY_IN_PROGRESS、order 等 waiting_order。Migration 重播安全，保留原 tasks／operations／events。
 
 ## Part B（第二步）：部署／rollback 的步驟與恢復
 
 | 步驟 | I/O／前置條件 | 副作用 | 恢復 |
 |---|---|---|---|
 | `deploy.select`（local transaction） | recipe digest／env g、SHA 或舊 dep ID | 同交易固定 desired／intent／snapshot／event | stale 整個交易 rollback；key 重送 no-op |
-| `deploy.source` | fresh repo ID；舊 dep 同 recipe／repo／env、已驗證；identity 可取得；combined 有 verified merged SHA | 只讀；一次性綁來源 | rollback target／artifact 不可用拒絕，zero dispatch，不改舊紀錄 |
+| `deploy.source` | fresh repo ID；SHA 以 ref...sha 的 identical／behind 證明可達；舊 dep 同 recipe／repo／env、已驗證，artifact 可取得；combined 有 verified merged SHA | 只讀；一次性綁來源 | rollback target／artifact 不可用拒絕，zero dispatch，不改舊紀錄 |
 | `deploy.order` | 同 generation desired、env slot 可用 | local slot claim | waiting_order／superseded；重啟沿用 claim |
-| `deploy.dispatch` | intent 先 commit，白名單固定 source／artifact／operation／generation | 新 run／真正發布，可能 migrations／通知 | 200 run ID／204 精確關聯；失聯 uncertain，查不到也不重 POST |
+| `deploy.dispatch` | intent 先 commit，白名單固定 source／artifact／operation／generation | 新 run／真正發布，可能 migrations／通知 | 200 run ID／204 精確關聯；429 明確 refusal，以 Retry-After 在 wait_max_s 內等待，重送前先精確查 token，找到即採用；其餘失聯 uncertain，查不到也不重 POST |
 | `deploy.locate`（on_merge） | repo／workflow／ref／push／固定 source SHA | 只附加舊 run，無 POST | 尚未出現等待；多筆不猜、不改走 dispatch |
 | `deploy.observe` | run、固定 attempt 的完整 jobs、pending environments | journal refs／狀態 | waiting_environment；failed／cancelled 保存原因；missing／skipped job 不 deployed |
 | `deploy.verify` | run＋指定 job success，目標 environment 無 pending，runtime identity／health 通過 | 保存實際 observed evidence | mismatch／health failure attention；缺資料等待，超時 DEPLOY_VERSION_UNPROVEN |
@@ -342,13 +354,21 @@ Rollback 只收舊 deployment ID，取 saved identity，不接受 client 替換 
 
 Delivery PR 卡加 metadata drawer，載入 body／digest，保存草稿，一次存檔提交 operation。Stale／conflict 顯示 before／intended／observed 差異，不自動合併 body。Merge preview 列 commits／受影響 PRs／blocking，stack disabled，直接 API 亦拒絕；SSE 不替使用者換已選版本。
 
-Part B 環境卡不依附 PR open 狀態；顯示 desired／current／last verified／observed time／歷史。可回退的舊紀錄有「回退到此版本」，旁邊列 SHA／artifact／環境／not_undone；unsupported／unverified／expired 顯示原因。Superseded 連新 desired 與原 provider run，drift 顯 needs_attention。按一次開始新操作，不加聊天批准或假的 managed task。
+Part B 依 configured repository（不分大小寫）／environment 分組，每組一張卡，不依 PR open。卡面並列 desired 的固定 SHA／artifact、state 與操作連結、目前 observed SHA／artifact／時間；下方直接顯示 last verified 的固定 identity／驗證時間。Runtime 文案明示 version／health 各證明了什麼。缺觀測／版本用兩語系空狀態，不把 null 當文字。
+
+History 每頁 5 筆，前後頁保存 API cursor；SSE 重載保留頁碼，不累積全部 records。新增 HTTP-only observe read `GET /api/v1/deployment-environments/history?recipe=NAME&cursor=&limit=` 是既有 history status／cursor 的薄投影，涵蓋同 repository／environment 的 recipe aliases 與已保存 legacy rows；不呼叫 GitHub／verifier、不建 preview 或 operation。Legacy 未保存環境／repository 的卡面用 configured recipe 補顯示，未保存 identity 用空狀態，不改舊 snapshot。既有 per-recipe history／MCP／CLI 不變。Status 另公開保存且已過濾的 runtime_evidence／reconciliation_error，供卡片和展開詳情顯示。
+
+每筆 eligible old record 有「Rollback to this version／回退到此版本」，旁邊列完整 SHA、artifact ID／digest、環境與 not_undone；unsupported、unverified、expired、unavailable 依 backend rollback_reason 顯示原因。Failed 且 provider 已終態、非 legacy、保存 SHA 的版本可「Retry deploy／重試部署」；按鈕點名固定 SHA，送 deployment.start＋retry_of，不再 merge。Capabilities／readiness／allowed actions、deploy scope 與狀態決定可用性，disabled 旁列原因；combined PR 部署另需 merge scope。Superseded 連新 desired 操作與原 provider run；drift 或 needs_attention 顯警示，把選定與觀測值並列，不自動部署。
+
+按鈕開 confirmation drawer，先讀 deployment preview 的 generation／recipe digest，再送該 preconditions；drawer 上列固定 identity 與 rollback limits。同步 busy guard 與每個 intent 的 actor-scoped idempotency key 防止 double click；lost reply 重用原 key。DEPLOY_PREVIEW_REQUIRED／ENVIRONMENT_CHANGED／RECIPE_CHANGED 顯拒絕與新 preview，使用者另按才建立新操作，不自動重送；等待 local admission step 的結果仍只讀原 operation。沒有聊天批准或 managed task。Operation ID、provider run ID／attempt、step states／error codes 收在可展開 operation details，卡面只留有語意的操作連結。關閉 drawer 同時釋放巢狀 details 的 editing hold，SSE 不丟選定版本或確認框。
+
+Tauri v2 R07／§18 的環境卡修正：rollback／retry 的 draft scope 固定為 `deployment.<kind>.<deployment_id>`，不含 render 產生的亂數；`draftId` 仍雜湊完整 request（含 preview preconditions），`keyFor` 對已知 terminal operation 沿用原換 key 規則。相同意圖的回應遺失後，Close、SSE 重畫、page reload、重新開 drawer 均沿用原 key；環境／recipe 的新預覽形成不同意圖，必須重新確認。手動 Load PR 只受 PR 卡自己的 drawer 保護，不被其他環境的詳情／確認框擋住；自動 live reload 保留原全頁 editing／typing hold。Provider run 連結只有 `URL` 成功解析且 protocol 為 `https:` 才輸出，拒絕相對、無效與其他 scheme。zh-TW 的新部署 labels 使用「環境第 N 代」、產物、執行環境與服務商執行紀錄，保留 PR 與 deploy 權限代碼。
 
 沿用 `fill()`、`setEditing()`、`holdRender()`、`liveReload()`，開 drawer／focus 時不重畫，en／zh-TW、390 px 可操作，不印 null／undefined／[object]；CSP 不加 inline style，必要時 el.style.setProperty。技術回執在可展開 operation details。
 
-Part A 兩份 skills／README／CHANGELOG 同步教 integrate metadata／digest、完整 merge preview／前置條件、base moved evidence、lost reply 查原 operation；Part B 再交付 deploy generation／runtime evidence／rollback／superseded 文件。
+Part A 兩份 skills／README／CHANGELOG 同步教 integrate metadata／digest、完整 merge preview／前置條件、base moved evidence、lost reply 查原 operation；Part B 已交付 deploy generation／runtime evidence／rollback／superseded 文件。環境卡輪不改 agent workflow，所以不再改兩份 skills。
 
-Contract_version 保持 YYYY-MM-DD，以該部分變更日期更新（Part A 為 2026-10-08）；Part A 宣告 metadata_update／merge_scope_preview，Part B 再宣告 deployment_history／environment_generation／runtime check／rollback readiness。舊 merge client 缺 preview／base／digest 回 PRECONDITION_REQUIRED，點名 github_pr_preview／HTTP preview read，不隱式讀最新版代送；Part A 不更改 deploy 前置條件。
+Contract_version 保持 YYYY-MM-DD，以該部分變更日期更新（Part A 為 2026-10-08）；Part A 宣告 metadata_update／merge_scope_preview，Part B 宣告 deployment_history／environment_generation／runtime_check／rollback_readiness；2026-10-08 UTC 同日變更維持日期，以 capability 名稱辨識。舊 merge client 缺 preview／base／digest 回 PRECONDITION_REQUIRED，點名 github_pr_preview／HTTP preview read，不隱式讀最新版代送；Part A 不更改 deploy 前置條件；Part B 舊 start 缺 generation／recipe digest 回 DEPLOY_PREVIEW_REQUIRED，點名 deployment_preview／HTTP read，不代選新版。
 
 ## 穩定錯誤與處理
 
@@ -367,6 +387,8 @@ Contract_version 保持 YYYY-MM-DD，以該部分變更日期更新（Part A 為
 | TARGET_HEAD_CHANGED／TARGET_BASE_CHANGED／MERGE_SCOPE_CHANGED | failed／409 | 重新預覽，zero PUT |
 | EXISTING_MERGE_REQUEST | needs_attention | 核對既有 intent，不借不同操作 |
 | MERGE_RESULT_SCOPE_CHANGED／MERGE_RESULT_UNVERIFIABLE | needs_attention | 保存 merged evidence，檢視最後版本，combined 不 dispatch |
+| DEPLOY_SOURCE_NOT_ON_REF | admission 422（combined）；執行 failed（SHA／retry／rollback） | 核對 recipe ref 與 reviewed PR base／可達固定 SHA；zero merge PUT／dispatch POST |
+| DEPLOYMENT_NOT_FOUND | 404 | 讀 deployment history，選現存 dep ID |
 | DEPLOY_PREVIEW_REQUIRED／DEPLOY_VERIFICATION_REQUIRED | 409／422 | 讀新預覽／配置實際版本 endpoint |
 | ENVIRONMENT_CHANGED／RECIPE_CHANGED／REPOSITORY_ID_CHANGED | 409 或執行中 needs_attention | 看新目標，不自動換 repo／recipe |
 | ROLLBACK_UNSUPPORTED／ROLLBACK_TARGET_INVALID／ROLLBACK_ARTIFACT_UNAVAILABLE | 422／409 | 選可取得的已驗證同 recipe／env 版本 |
@@ -385,6 +407,7 @@ Worker 錯誤記 operation.error_code／status_reason，已受理 HTTP 不假裝
 |---|---|
 | `src/bat_agent_connector/delivery.py`、`pr_delivery.py`（新增） | Part A 在 delivery 註冊 action／merge 流程，PR helper 保存 immutable scopes、metadata、verification／只讀對帳，隔開 Part B deploy 演進；不改 core admission |
 | `src/bat_agent_connector/github.py` | repo／PATCH／stack／compare／array 分頁、pending env／attempt jobs／artifact reads、fixed version |
+| `src/bat_agent_connector/deployment.py`、`deployment_store.py`（新增） | deploy steps／固定 snapshots／CAS／read-only reconcile；history／rollback／retry；冪等 DDL 與 data step 3 |
 | `src/bat_agent_connector/deployment_verifier.py`（新增） | 可注入、有限、recipe 固定 URL 的 HTTP JSON readback，無外部寫入 |
 | `src/bat_agent_connector/config.py`、`api_auth.py`、`resource_policy.py` | 既有 integrate scope／repo opt-in／mutation inventory；Part B recipe 欄位／inputs；不改 api_auth scopes，沿用人工唯讀邊界 |
 | `src/bat_agent_connector/task_journal.py` | Part A preview migration；Part B deployment local transactions／tables／CAS，不改 operations.py／ActionDef |
@@ -393,13 +416,15 @@ Worker 錯誤記 operation.error_code／status_reason，已受理 HTTP 不假裝
 | `src/bat_agent_connector/integration.py` | 必要時只接 pr_card 新 fields，不改 head integration |
 | `src/bat_agent_connector/dashboard/app.js`、`app.css`、`i18n.js` | Delivery 新流程／兩語系／草稿 hold |
 | `tests/fakegithub.py`、`tests/test_delivery.py` | REST shapes／故障注入、fake runtime verifier／主要驗收 |
+| `tests/fakeverifier.py`、`tests/test_deployments.py`、`test_deployment_config.py`、`test_deployment_rollback.py`、`test_deployment_verifier.py`、`test_deployment_surfaces.py` | runtime fake、D03／D05／D06、#32、data step 3、security／transport parity |
+| `tests/manual/delivery_dashboard_fixture.py`、`delivery_dashboard.mjs`（新增） | 真實 daemon／FakeGitHub／MockBat／fake verifier 的兩語系 × 三寬度操作驗收；screenshots 與 matrix 存 /tmp，不加入版面鏡像 tests |
 | `tests/test_api_v1.py`、`tests/test_mcp_and_config.py`、`tests/test_integration.py` | transports／grants／migration／head integration 互斥回歸 |
 | `docs/design/delivery.md`、`docs/design/api-v1.md` | 完成狀態、route／scope tables、尚未涵蓋 |
 | `README.md`、`README.zh-TW.md`、`CHANGELOG.md`、`skills/bat-agent-connector/SKILL.md`、`skills/hermes/bat-agent-connector/SKILL.md` | 同步接入／能力／workflow 文件 |
 
 ## 驗收與測試計畫
 
-Part A 已實作下列 tests；Part B 列為第二步的 test plan。既有負面 assertions 保留，integration 互斥測試只補新的 merge envelope。
+Part A 已實作下列 tests；Part B 後端與環境卡的實際 test names 見後表。既有負面 assertions 保留，integration 互斥測試只補新的 merge envelope。
 
 | 計畫／驗收 | Part A tests 與證明 |
 |---|---|
@@ -428,23 +453,60 @@ PR #34 Codex review：`test_c05_stack_created_after_final_check_needs_attention_
 
 Metadata：`test_unresolved_metadata_write_third_value_settles_as_conflict_after_window`（cancelled／UNCERTAIN_UNRESOLVED；600 秒前仍拒絕新 edit，之後 conflict receipt／refs、新 digest admission、停止背景 GET；resume 沿用 conflict、總共一 PATCH、不 undo）。對應 C07、計畫 §09／§10／§15。
 
-以下均為 Part B（第二步）規劃，尚未聲稱完成：
+Part B 後端、入口與 Dashboard 的實際 tests（計畫 §09／§10／§17／§28）：
 
-| 計畫／驗收 | 既有證據與缺口 | 第二步 tests／證明 |
-|---|---|---|
-| D03、§17 | `test_dispatch_deploy_succeeds_only_when_the_deploy_job_succeeds` 已測 skipped；缺 env／實際版本 | `test_d03_success_requires_job_environment_version_and_health` matrix：missing／skipped／未completed job、run success 但 pending、SHA／artifact／repo／env mismatch、健康 failed、缺資料／失聯／超時；`test_d03_workflow_sha_is_not_product_sha`；`test_d03_run_attempt_cannot_borrow_other_jobs` |
-| D05、§17 | `test_on_merge_recipe_tracks_the_existing_run_and_serializes_the_environment` 只限制 recipe，未測逆序 | `test_d05_environment_generation_is_atomic_across_recipes`：雙 client／key／不同env；`test_d05_late_old_run_is_superseded_never_current`：新先完成舊後回報；`test_d05_runtime_drift_invalidates_current_without_redispatch`；`test_d05_restart_and_cancel_keep_provider_slot_and_desired`；`test_d05_combined_selects_generation_then_binds_real_merge_sha` |
-| D06、§17 | 缺 history／rollback | `test_d06_rollback_redeploys_saved_identity_through_same_recipe`：SHA／artifact、新generation／run／原紀錄；`test_d06_rollback_refuses_unverified_expired_or_other_environment`；`test_d06_rollback_lost_reply_restart_never_dispatches_twice`；`test_d06_record_inactive_or_deleted_is_not_runtime_rollback` |
-| D01／D02／D04 回歸 | `test_lost_dispatch_reply_is_matched_by_run_name_not_redispatched`、上述 on_merge test、`test_merge_and_deploy_keeps_the_merge_when_the_deploy_fails` | 精確關聯／204／無匹配／多匹配，只追原 run／重試原 identity；保留 zero extra POST／PUT assertions |
-| §09／§28、政策 | 現有 operation restart／policy tests | `test_delivery_v2_migration_keeps_history_unverified_and_reopens`：舊journal／crash／重播／tasks-events不變；`test_delivery_actions_never_mutate_manual_or_unknown_resources`：無 BAT／Git mutation；recipe／URL白名單、憑證不外洩 |
+| 驗收／規格 | 實際 test names |
+|---|---|
+| D03：run／job／pending／repo／env／版本／健康交集 | `test_d03_success_requires_job_environment_version_and_health`；`test_runtime_artifact_mismatch_is_d03_failure`；`test_d03_runtime_unavailable_expires_as_unproven` |
+| D03：workflow 與產品 SHA／固定 attempt／完整 jobs | `test_d03_workflow_sha_is_not_product_sha`；`test_d03_run_attempt_cannot_borrow_other_jobs`；`test_d03_attempt_jobs_are_paginated`；`test_d03_external_rerun_invalidates_current_and_keeps_original_attempt` |
+| D03：版本或健康、明確 evidence | `test_d03_health_only_recipe_states_exactly_what_was_proven`；`test_deploy_preview_required_and_missing_verifier_disable_writes_but_not_history`；`test_capabilities_missing_runtime_verification_disables_deploys` |
+| D05：CAS、跨 aliases／獨立 env、未送出 superseded | `test_d05_environment_generation_is_atomic_across_recipes`；`test_d05_independent_environments_have_independent_generations`；`test_d05_undispatched_selection_superseded_has_zero_post` |
+| D05：晚到 current／drift／重啟／cancel／combined | `test_d05_late_old_run_is_superseded_never_current`；`test_d05_current_survives_old_verification_that_arrives_after_new_record`；`test_d05_runtime_drift_invalidates_current_without_redispatch`；`test_d05_restart_and_cancel_keep_provider_slot_and_desired`；`test_d05_combined_selects_generation_then_binds_real_merge_sha` |
+| D06：SHA／artifact identity、新 operation／generation／run、不可用拒絕 | `test_d06_rollback_redeploys_saved_identity_through_same_recipe`；`test_d06_rollback_refuses_unverified_expired_or_other_environment`；`test_d06_rollback_lost_reply_restart_never_dispatches_twice`；`test_d06_record_inactive_or_deleted_is_not_runtime_rollback` |
+| D01／D02／D04 回歸 | `test_lost_dispatch_reply_is_matched_by_run_name_not_redispatched`；`test_on_merge_recipe_tracks_the_existing_run_and_serializes_the_environment`；`test_merge_and_deploy_keeps_the_merge_when_the_deploy_fails`；`test_d01_d02_204_requires_exact_unique_operation_token_and_never_redispatches`；`test_d04_retry_keeps_saved_identity_and_never_merges_again` |
+| §09／§28：data step 3、crash／reopen／fresh post-step-2、舊操作 | `test_delivery_v2_migration_keeps_history_unverified_and_reopens`；`test_delivery_data_step3_crash_rolls_back_whole`；`test_delivery_fresh_post_step2_journal_ends_at3_and_ddl_preserves_other_versions`；`test_legacy_dispatched_operation_reads_original_run_and_never_dispatches`；`test_legacy_undispatched_operation_stops_for_deployment_preview` |
+| §09／§28、D05：legacy 終態與共用環境鎖 | `test_legacy_terminal_states_release_unsent_or_definitively_failed_recipe`；`test_legacy_run_blocks_alias_of_real_environment_until_provider_terminal` |
+| D05／#32：cancelled combined on_merge 與 legacy | `test_cancelled_combined_on_merge_holds_slot_through_late_push_run`（兩種來源）；`test_legacy_cancelled_dispatch_merge_uses_config_mode_and_never_locates_push`；`test_cancelled_legacy_on_merge_requires_reviewed_head_and_ref_or_unmerged_close` |
+| D03／D05、§09／§17：停止中 provider 退避／error 清除／單列隔離 | `test_stopped_provider_cadence_bounds_hour_and_resets_on_state_change`；`test_reconcile_success_clears_error_once_without_unchanged_version_writes`；`test_reconcile_bad_row_logs_and_continues_without_repeated_version_writes` |
+| D03／D05、§09／§17：reconcile 預算／restart cadence | `test_reconcile_budget_skips_twenty_settled_rows_and_polls_current_once_per_cadence`；`test_current_reconcile_cadence_is_shared_when_current_changes`；`test_lost_dispatch_locate_is_throttled_across_restart_and_filters_saved_send_time`；`test_locate_refuses_github_truncated_filtered_search`；`test_deployment_reconcile_cadence_has_a_minimum_and_finite_bound`；`test_deployment_reconcile_cadence_default_and_override` |
+| §09／§10、C07：transport／grants／history offline | `test_deployment_transports_share_fixed_identity_generation_and_principal`；`test_deployment_wrappers_require_confirmation_token_and_are_hidden_read_only`；`test_history_keyset_is_stable_offline_and_rollback_disabled_for_missing_config` |
+| §06／§17：政策、設定／憑證／verifier 有限讀取 | `test_delivery_actions_never_mutate_manual_or_unknown_resources`；`test_recipe_change_blocks_new_dispatch_but_removed_recipe_cannot_stop_original_readback`；`test_repository_identity_and_recipe_are_rechecked_before_dispatch`；`test_verifier_security_refuses_redirect_oversized_non_https_and_slow`；`test_verifier_backend_token_and_raw_body_never_enter_journal_logs_or_events`；`test_verifier_refuses_secret_echo_in_whitelisted_field`；`test_verification_settings_cannot_be_overridden_by_a_client` |
 
-UI 用 FakeGitHub／MockBat／fake verifier 驗收 zh-TW、en、390 px：編輯中 SSE 不丟草稿、conflict 差異、history 分頁、rollback limits／unsupported、superseded／desired-observed 不同、stack 各 PR 與後端拒絕。將 app.js 複製為 /tmp 的 .mjs 再 node --check；不為文案／低影響排版寫鏡像 tests。
+Issue #32 本輪六項：
+
+| Item | 實際 test names |
+|---|---|
+| 1 on_merge 完整 branch／repo／workflow／push／SHA | `test_issue32_on_merge_locate_requires_recipe_branch_repository_and_workflow` |
+| 2 start／retry／SHA rollback 必須 on ref | `test_issue32_source_must_be_reachable_from_recipe_ref`（三種）；`test_issue32_artifact_retry_also_requires_source_on_recipe_ref`；`test_issue32_unknown_source_comparison_refuses_before_dispatch` |
+| 3 combined reviewed base 必須等於 recipe ref | `test_issue32_combined_admission_requires_preview_base_on_recipe_ref` |
+| 4 cancel 保留 provider slot／recipe lock | `test_issue32_cancel_keeps_provider_slot_and_recipe_lock_until_terminal`（combined merge／dispatch）；`test_issue32_cancelled_on_merge_wait_keeps_slot_until_the_exact_run_finishes` |
+| 5 dispatch source／operation inputs 必填 | `test_issue32_dispatch_requires_source_sha_and_operation_id_inputs` |
+| 6 dispatch 429 明確 refusal／Retry-After／查 token | `test_issue32_dispatch_429_waits_retry_after_and_adopts_before_resend`；`test_issue32_dispatch_429_retries_only_after_backoff`；`test_issue32_dispatch_429_wait_is_bounded_without_early_resend` |
+
+UI 用真實 daemon API＋FakeGitHub／MockBat／fake verifier 驗收 zh-TW、en × 390／768／1440 px：編輯中 SSE 不丟草稿、conflict 差異、history 分頁、rollback limits／unsupported、superseded／desired-observed 不同、stack 各 PR 與後端拒絕。將 app.js 複製為 /tmp 的 .mjs 再 node --check；不為文案／低影響排版寫鏡像 tests。
 
 各部分完成前跑 `uv run ruff check .`、`uv run pytest -q` 全套。Phase 1 同跑基線，不聲稱新驗收已實作。真實 repo／environment 接入由 orchestrator 另授權，本 clone 不呼叫 GitHub mutation、不推送、不開 PR。
 
+環境卡的 Playwright runner 為 `tests/manual/delivery_dashboard.mjs`，fixture 為 `tests/manual/delivery_dashboard_fixture.py`。從 repo root 跑 `uv run python tests/manual/delivery_dashboard_fixture.py`，另一終端以已安裝的 Playwright 執行 `BATC_PLAYWRIGHT_MODULE=/tmp/batc-confinement-playwright/node_modules/playwright node tests/manual/delivery_dashboard.mjs`；也可用 BATC_PLAYWRIGHT_MODULE／BATC_CHROMIUM／BATC_BROWSER_FIXTURE／BATC_BROWSER_OUTPUT 指向自己的安裝與 temp 輸出。只用 synthetic IDs／SHA／保留 example domain；fixture 控制 listener 不在產品 router。
+
+| Part B 環境卡驗收（en／zh-TW × 390／768／1440 px） | 實際 case／test 名稱 |
+|---|---|
+| D03／D05、§17 desired／observed／last verified、drift／superseded | `dashboard_environment_versions` |
+| D05、§11／§17 cursor、同環境 recipe 分組、offline read／observe scope | `dashboard_history_cursor`；`test_environment_history_read_pages_aliases_and_legacy_offline_with_observe_scope` |
+| D06、§17 limits／unsupported／unverified／expired／unavailable | `dashboard_rollback_readiness` |
+| D05／D06、§09／§17 stale refusal＋fresh preview，無自動重送 | `dashboard_stale_preview` |
+| D02／D06、§09 actor-key／double click 一筆 operation | `dashboard_double_click` |
+| D02／D06；v2 R07／§18 相同 rollback／retry 的遺失回應、Close、SSE、reload、重開沿用 key 與原 operation | `dashboard_lost_reply_reopen`（真 daemon 接受後暫停處理；僅攔截 browser ACK） |
+| v2 R07／§18 環境 history 詳情保持開啟時，手動 Load PR 即時更新 PR 卡 | `dashboard_load_pr_with_history_open` |
+| v2 R07／§18 Provider link 僅限 HTTPS，無效／相對／script／data／HTTP 不建立可點連結 | `dashboard_https_provider_links` |
+| D04、§17 retry 固定 SHA＋retry_of，只 deploy 不 merge | `dashboard_retry_fixed_identity` |
+| C07、§10 scope disabled 與原因 | `dashboard_scope_disabled` |
+| §18 open confirmation＋SSE 保留 identity | `dashboard_confirmation_sse` |
+| §18／§28 兩語系、390／768／1440、console／overflow／空值 | `dashboard_dom_console_overflow`（每格零 console errors、無橫向 overflow／null／undefined／[object]） |
+
 ## 尚未涵蓋
 
-- Part B 尚未實作：recipe／runtime check 與 rollback limits、journal deployment tables／environment generations、部署驗證／排序／history／rollback／reconcile_deployments、環境卡；D03／D05／D06 新驗收留待第二步。Part A 不改 deployment.start／deploy admission／OperationService.create／ActionDef。
+- 本分支已接 observation step 2；version-1 journal 在同次 open 依序執行 2、3，原 events/operations 不重寫。正式 main 合併與 live acceptance 另行記錄。
 - PR head 更新仍是 [integration.md](integration.md)；integrate.verify、Task Service 成果來源、fork／LFS／跨主機整合不屬本包。
 - 不支援 native stack 建立／重整／多 PR merge；本版偵測、列出並拒絕。GitHub 沒有 base／scope／body 原子鎖，觀測間的競爭窗口仍存在。
 - 最後的 pre-PUT scope check 將檢查完成至提交的窗口縮至一次 GitHub 請求往返。若 merge 後 GitHub 已解散新 stack membership，verify 無法再看見該 stack；不能從其他 open PR 的 head 變化猜測，因為作者也會自行 push／rebase。
@@ -452,3 +514,27 @@ UI 用 FakeGitHub／MockBat／fake verifier 驗收 zh-TW、en、390 px：編輯�
 - 未知 provider、on_merge 主動 rollback 路線、資料 migration 反向執行、artifact 長期保存／清理不屬本包，沒有可取得的同 identity 路線就 unsupported。
 - 實際接入待確認：各 env 的 runtime version URL／認證、固定 workflow 的 source／artifact 驗證、跨 recipe concurrency、rollback identity／not_undone。本例只用保留 example domain，不猜真實設定。
 - Review 決策：Part A integrate＋repo opt-in、ISO date contract、預覽升級已批准；Part B generation／runtime check 接入值待配置；本包不以未確認設定啟用 production mutation。
+
+
+### Tauri v2 R07：Observation 整合回執
+
+部署 row 的有效變更同交易追加 `deployment.updated`；同值讀回不新增 row version 或事件。
+`deployment.selected/verified/superseded` 保留，所有事件帶明確 operation/deployment ID、generation、state、
+固定 SHA/artifact identity、run/attempt 與機器 error code。只記 provider HTTPS URL 的 origin/path，移除 query、
+fragment 與含帳密 URL。Verifier body、runtime response、recipe config、authorization/token、自由 diagnostic 不進事件。
+`deployment.drift` 明存受影響的 deployment/operation ID。Observation 依 operation 的既有證據索引；不由相同 SHA、
+PR 或路徑猜 session/worktree 關係。一般沒有 source binding 的部署不出现在任何 session timeline。
+
+Step 3 為舊 operation 回填部署後，以 `deployment.backfilled` 附記當下的 saved snapshot，
+`backfilled=true`、`occurred_at=null`；不偽造選取／執行／驗證時間，不修改原 api_events。
+已有 Part B row 也得到一次 snapshot；同交易 crash rollback，重開不重複。舊成功仍是 unverified。
+
+回歸：`tests/test_deployment_history.py` 驗證 step 1→2→3、原 events 不變、重開無重複、session history 的
+明確 operation link、未洩漏 provider/verifier 私密欄位、相同狀態 quiet、state/event 同交易 rollback；
+`test_delivery_v2_migration_keeps_history_unverified_and_reopens` 保留 unverified 與 provider-slot 契約。
+
+
+Metadata 與 deployment 的 daemon 背景 read-reconcile loop 每輪都先查同一 `journal.owner_valid()`；
+owner 不可用時不開始 provider reconcile。這是既有 fleet lease 的使用，沒有第二個 daemon 或 authority。
+Operation steps／取消／恢復仍走同一 OperationService；同一輪進行中的 provider reads 沿原 read-back 語意。
+測試 `tests/test_delivery_owner.py` 覆蓋兩個 loop、owner 有效／失效的零 provider-call 行為。

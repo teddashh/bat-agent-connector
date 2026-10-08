@@ -372,7 +372,7 @@ CLI 保留現有 `batc sessions/read/hosts` 的直接 BAT 行為，新增 `inven
 
 `capabilities.features` 增 `session_history`、`resource_relations`、`discovery_scope`，`worktree_history` 說明只限已知 binding；附支援 kinds、history 起始／backfill 限制及 optional providers。能力須反映已在 main 的實作；缺少 optional writer 回 unsupported/未取得原因，不造空的成功資料。
 
-本次 rebase 的 history.optional_adapters 列 `delivery_part_a`。這只表示已接讀正式 journal facts，不表示有 GitHub credential、可寫 PR 或有未知的 session/worktree 關係。
+本次整合的 history.optional_adapters 列 `delivery_part_a`、`delivery_part_b`。這只表示已接讀正式 journal facts，不表示有 GitHub credential、可寫 PR 或有未知的 session/worktree 關係。
 
 | 錯誤 | HTTP | 恢復 |
 |---|---|---|
@@ -537,3 +537,13 @@ Part A 必須跑 `uv run ruff check .`、`uv run pytest -q` 全套，記精確�
 - Host alias 的改綁合併及 profile 切換遷移；本版偵測 scope change 並保留舊身分，新範圍需獨立 alias。舊 profile 缺證據不追認。
 - Operation unification／Task Service 共用 gate、delivery 剩餘 provider 功能、§23 tombstone／retained refs／restore；是否已在 main 是 Phase 2 的條件式 adapter 清單，未落地的 facts 仍待各包提供。
 - Worktree diff／檔案瀏覽、附件/B04、歷史保留／pruning 政策、原生 BAT deep link。既有資料讀取與人工唯讀邊界不因這些待辦改變。依 v2 決策不提供 Hub 匯入；B05 改為 Connector 既有資料升級與穩定 ID 保留。
+
+
+### Delivery Part B adapter（v2 R07）
+
+`deployment.selected/updated/verified/superseded/backfilled` 與 `deployment.drift` 由既有部署 writer 發出，
+帶 deployment/operation ID、generation、state、source SHA、artifact identity、provider run/attempt 與固定 code。
+只有 operation 的明確 source binding 才連 session/worktree，不能由 recipe/PR/SHA 推定來源。
+provider_url 是去除 query/fragment 的 HTTPS URL；不含 verifier body、recipe config 或自由文字 diagnostics。
+Step 3 的 backfilled 是當下保存快照，occurred_at=null；原始事件與 step 2 不改。參見 delivery.md 與
+`tests/test_deployment_history.py` 的 migration/privacy/transaction 測試。

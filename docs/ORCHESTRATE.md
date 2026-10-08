@@ -49,7 +49,7 @@ The connector therefore:
 
 | `session_failover(...)` | orchestrate | Only for connector-managed sessions in a folder the connector owns, and only for sessions classified `quota_exhausted` (unless `force`), never while streaming; one successor per session and worktree (atomic registry reservation); `max_start_per_call` for `all_exhausted`; the old registry entry becomes `superseded` and is stopped only after the handoff is acknowledged. |
 | `session_record_verification(...)` | orchestrate | Records a trusted external command, exit code, environment and log reference for the host's current clean commit. A later commit or dirty tree invalidates it. CLI: `batc record-verification`. |
-| `session_cleanup(...)` | orchestrate | Dry run by default; acting needs `confirm` **and** host `auto_cleanup = true`. Gates below. |
+| `session_cleanup(...)` | read-only legacy evaluation | Reports the decisions below. Apply always returns `LEGACY_CLEANUP_DISABLED` (409); use `batc resource-cleanup`. The deprecated `auto_cleanup` host key still parses and never enables writes. |
 
 ## Quota failover
 
@@ -61,27 +61,29 @@ session in a managed root's main checkout, `codex-agent` in the same folder. A s
 over: its successor would write into a human folder. Its first message is a handoff prompt: original task, latest
 instruction, recent output, git state (branch, dirty files, commits, diff stats) and the quota evidence.
 
-## Automatic cleanup gates
+## Legacy cleanup evaluation
 
-`session_cleanup` evaluates every orchestrated session (and failed-over Claude sessions) and decides. Sessions created
+`session_cleanup` evaluates orchestrated sessions (and failed-over Claude sessions) without merging, stopping, or removing them. Its decision labels describe the legacy evaluation only. Sessions created
 in BAT and connector sessions in a human checkout are always `KEEP`: cleanup never stops, merges or removes them.
 
 | Decision | When |
 |---|---|
 | `KEEP` | Streaming, waiting for a permission/answer, quota or transient limit, idle for less than `min_idle_s`, worktree shared by another active session. **Never stops a session that is mid-work.** |
-| `CLEAN_ONLY` | Superseded by a failover successor whose handoff was acknowledged; archive-only successor (see below) that is idle, clean and verified; worktree already merged or removed; no new commits and no diff; main-checkout coding session with a passing verification record whose final output Jev confirms as finished. Stops the agent, removes the worktree with the branch **kept**. |
-| `MERGE_AND_CLEAN` | All hard gates pass: idle, worktree clean, `mergedKind == ahead` (conflict-free, via `worktree_merge` never-force semantics), main checkout clean and on the source branch, a passing `session_record_verification` record for the current commit, last test run not failed, deterministic risk checks clean (no credential-looking additions, no secrets/infra paths, no large deletions or huge diffs); **then** Jev must confirm the final output claims completion (≥ 0.8) and the diff is `safe_complete` (≥ 0.8). HEAD and cleanliness are rechecked immediately before acting. Merges locally, removes the worktree (branch kept), stops the agent. |
+| `CLEAN_ONLY` | Superseded by a failover successor whose handoff was acknowledged; archive-only successor (see below) that is idle, clean and verified; worktree already merged or removed; no new commits and no diff; main-checkout coding session with a passing verification record whose final output Jev confirms as finished. Reports eligibility; keeps the session, worktree and branch. |
+| `MERGE_AND_CLEAN` | All hard gates pass: idle, worktree clean, `mergedKind == ahead` (conflict-free, via `worktree_merge` never-force semantics), main checkout clean and on the source branch, a passing `session_record_verification` record for the current commit, last test run not failed, deterministic risk checks clean (no credential-looking additions, no secrets/infra paths, no large deletions or huge diffs); **then** Jev must confirm the final output claims completion (≥ 0.8) and the diff is `safe_complete` (≥ 0.8). Reports the legacy eligibility result without acting. Reviewed cleanup uses delivery receipts, not this completion judgement. |
 | `ESCALATE` | Merge destination is a human checkout (not a managed root), uncommitted changes, diverged branch, dirty main checkout, missing/stale/failed verification, failing tests, risk-check hit, Jev unavailable/unsure. Collected into one `escalation_summary` line per call. |
 
 `ESCALATE_TO_TED` (the 0.2.0 name of `ESCALATE`) is still accepted as an alias by `normalize_decision`.
 
 **Preserving superseded work.** When a session's work is superseded but its uncommitted changes should not be lost,
 fail it over with `force`, `archive_only=true` and `instructions` such as "only commit everything on the current
-branch with message …; do not build, test, push or merge". The Codex helper commits in the same worktree; cleanup
-then stops the old session, removes the worktree and keeps the branch, and never merges it.
+branch with message …; do not build, test, push or merge". The Codex helper commits in the same worktree.
+Use a reviewed resource-cleanup preview with `release_undelivered` to pin the commits, keep the branch and remove
+the idle worktree. The result remains undelivered.
 
-Every decision and action is appended to the audit log with its reasons. Branches are never deleted by cleanup, so a
-merge or removal can be undone from the branch. BAT's remote protocol has no push, tag or PR channel: merges stay in
+Evaluation decisions are appended to the audit log. Reviewed resource-cleanup writes permanent per-item receipts
+and tombstones, preserves a retained ref before removal, and may CAS-delete a delivered local connector branch.
+See [the cleanup design](design/cleanup.md). BAT's remote protocol has no push, tag or PR channel: merges stay in
 the host's main checkout, and pushing or opening a PR is left to the host's own workflow.
 
 ## Suggested workflow
@@ -92,5 +94,7 @@ the host's main checkout, and pushing or opening a PR is left to the host's own 
 4. Review each branch: `session_worktree_status(include_diff=true)`, `session_read`.
 5. Merge the clean ones with `worktree_merge` when the workspace is a managed clone; otherwise leave the branch for a
    pull request. For `diverged` branches ask the session to rebase first.
-6. `worktree_remove` merged worktrees (branch kept unless you ask), or let `session_cleanup` do steps 5-6 behind its
-   gates. Report results to the user.
+6. Preview with `batc resource-cleanup preview`, review every item and its retention reasons, then apply that
+   exact preview with a stable key. `worktree_remove` remains a separate explicit action and refuses resources
+   reserved or already cleaned. Fanout stops the planner session and keeps its worktree for reviewed cleanup.
+   Report receipts and retained content to the user.

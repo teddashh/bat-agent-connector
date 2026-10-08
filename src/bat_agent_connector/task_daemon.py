@@ -21,8 +21,11 @@ from urllib.parse import urlsplit
 from . import (
     api_actions,
     api_auth,
+    artifacts,
     checkpoints,
+    confinement,
     delivery,
+    deployment,
     integration,
     pr_delivery,
     registry,
@@ -32,6 +35,7 @@ from . import (
     work_items,
 )
 from .api_v1 import ApiV1, is_dashboard_path
+from .artifact_host import ArtifactHost
 from .config import Config, state_dir
 from .errors import BatError, OwnerConflict, ResourceReadOnly, TaskControlRefused, TokenUnavailable
 from .fleet import Fleet
@@ -50,14 +54,17 @@ from .task_verifier import ObservedVerifier, load_settings
 DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 # /rpc methods that share /api/v1's principals and OperationService (MCP and CLI enter here).
 API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
+           "work_status": "observe", "work_result": "observe", "work_events": "observe",
            "api_events": "observe", "inventory_sessions": "observe", "inventory_hosts": "observe",
            "inventory_session": "observe", "inventory_worktree": "observe", "resource_history": "observe", "resource_relations": "observe",
            "api_capabilities": "observe", "github_pr_preview": "observe", "github_merge_preview_get": "observe",
+           "deployment_preview": "observe", "deployment_status": "observe", "deployments_list": "observe",
+           "deployment_environment_get": "observe",
            "checkpoints_list": "observe",
            "checkpoint_get": "observe", "checkpoint_preview": "observe", "integration_candidates": "observe",
            "integration_preview_get": "observe", "integration_get": "observe", "integrations_list": "observe",
            "projects_list": "observe", "project_get": "observe", "work_items_list": "observe",
-           "work_item_get": "observe"}
+           "work_item_get": "observe", "artifacts_list": "observe", "artifact_get": "observe"}
 class LegacyTaskError(OperationError, ValueError):
     """Keep the old Python adapter's ValueError contract with a stable operation code."""
 
@@ -170,7 +177,7 @@ class TaskDaemon:
         # the inventory observes through its own read-only fleet.
         self.ops = OperationService(self.journal,
                                     actions=api_actions.ACTIONS + delivery.ACTIONS + checkpoints.ACTIONS
-                                    + integration.ACTIONS + work_items.ACTIONS + task_actions.ACTIONS)
+                                    + integration.ACTIONS + work_items.ACTIONS + task_actions.ACTIONS + artifacts.ACTIONS)
         self.coordinator.operations = self.ops
         github = None
         if config.github.token_ref:
@@ -185,6 +192,16 @@ class TaskDaemon:
                                 inventory=self.inventory, github=github,
                                 github_config=config.github,
                                 git_runner=checkpoints.SshGitRunner(self.adapter.verifier.settings.ssh_hosts))
+        artifact_settings = artifacts.ArtifactSettings.from_dict(self.adapter.verifier.settings.artifacts)
+        self.artifact_store = artifacts.ArtifactStore(self.ops, artifact_settings)
+        self.ops.context.update(artifact_store=self.artifact_store,
+                                artifact_host=ArtifactHost(self.adapter.verifier.settings.ssh_hosts,
+                                                           artifact_settings.transfer_timeout_s))
+
+        self.fleet.confinement_runner = self.ops.context["git_runner"]
+        self.fleet.confinement_journal = self.journal
+        self.inventory.fleet.confinement_runner = self.fleet.confinement_runner
+        self.inventory.fleet.confinement_journal = self.journal
         self.api = ApiV1(self, allowed_origins=config.api.allowed_origins)
         self._initialized = True
 
@@ -226,6 +243,8 @@ class TaskDaemon:
             raise OperationError("FORBIDDEN", f"{method} needs the {scope!r} scope", 403)
         entry = params.pop("entry", None)
         entry = entry if entry in {"mcp", "cli"} else "rpc"
+        if method in {"work_status", "work_result", "work_events"}:
+            return await self.call(method, params, principal=principal)
         if method == "op_submit":
             try:  # validated before anything is stored, so an error means nothing happened
                 wait = min(max(float(params.get("wait_s") or 0), 0.0), 30.0)
@@ -245,7 +264,9 @@ class TaskDaemon:
                                  actor=params.get("actor"), action=params.get("action"),
                                  limit=int(params.get("limit") or 50))
         if method == "op_cancel":
-            return {"operation": self.ops.cancel(principal, str(params.get("operation_id")))}
+            op = self.ops.cancel(principal, str(params.get("operation_id")))
+            await self.artifact_store.reap_best_effort(op["operation_id"])
+            return {"operation": op}
         if method == "op_resume":
             return {"operation": self.ops.resume(principal, str(params.get("operation_id")))}
         if method == "api_events":
@@ -278,6 +299,14 @@ class TaskDaemon:
                                                               from_event=params.get("from_event") is True)}
         if method == "github_merge_preview_get":
             return {"preview": pr_delivery.get_preview(self.journal.db, str(params.get("preview_id")))}
+        if method == "deployment_preview":
+            return {"preview": await deployment.preview(self.ops, params.get("recipe"))}
+        if method == "deployment_status":
+            return {"deployment": deployment.status(self.ops, params.get("deployment_id"))}
+        if method == "deployments_list":
+            return deployment.history(self.ops, params.get("recipe"), cursor=params.get("cursor"), limit=params.get("limit", 50))
+        if method == "deployment_environment_get":
+            return {"environment": deployment.environment_status(self.ops, params.get("recipe"))}
         if method == "checkpoints_list":
             return checkpoints.list_checkpoints(self.journal.db, host=params.get("host"),
                                                 session_id=params.get("session_id"),
@@ -302,6 +331,10 @@ class TaskDaemon:
         if method == "integrations_list":
             return integration.integrations_list(self.ops, str(params.get("repository")),
                                                  int(params.get("pull_number") or 0), int(params.get("limit") or 20))
+        if method == "artifacts_list":
+            return artifacts.list_artifacts(self.journal.db, limit=int(params.get("limit", 50)), cursor=params.get("cursor"))
+        if method == "artifact_get":
+            return {"artifact": artifacts.get(self.journal.db, str(params.get("artifact_id")), int(params.get("revision", 0)))}
         if method == "projects_list":
             return work_items.projects_list(self.journal.db, include_archived=bool(params.get("include_archived")))
         if method == "project_get":
@@ -473,7 +506,11 @@ class TaskDaemon:
         if method == "work_status":
             task = self.journal.get(task_id)
             routes = self.journal.routes(task_id)
-            return {**task, "delivery": self.journal.delivery(task_id),
+            return {**task, "session_confinement": {
+                        sid: confinement.session_fields(task["host"], sid,
+                                                       account=confinement.account_status(self.fleet, task["host"]))
+                        for sid in (task.get("session_id"), task.get("reviewer_session_id")) if sid},
+                    "delivery": self.journal.delivery(task_id),
                     "engine_decision": self.journal.engine_decision(task_id),
                     "minimal_review_gate": (self.journal.minimal_review_gate(
                         task_id, task["verification_commit"], task["verification_tree"])
@@ -780,6 +817,12 @@ class TaskDaemon:
                 logging.warning("Milestone push loop error: %s", type(exc).__name__)
             await asyncio.sleep(1)
 
+    async def _artifact_reap_loop(self):
+        """Scratch cleanup retries independently of task ticks and operation reconciliation."""
+        while True:
+            await self.artifact_store.reap_best_effort()
+            await asyncio.sleep(2)
+
     async def _tick_task(self, task_id: str):
         verifying = False
         version = None
@@ -893,16 +936,26 @@ class TaskDaemon:
     async def reconcile_metadata(self):
         while True:
             try:
-                await pr_delivery.reconcile_metadata(self.ops)
+                if self.journal.owner_valid():
+                    await pr_delivery.reconcile_metadata(self.ops)
             except Exception:  # keep periodic reads alive; operation evidence is retained
                 logging.getLogger(__name__).exception("metadata reconciliation failed")
+            await asyncio.sleep(10)
+
+    async def reconcile_deployments(self):
+        while True:
+            try:
+                if self.journal.owner_valid():
+                    await delivery.reconcile_deployments(self.ops)
+            except Exception:  # preserve provider evidence and keep read-only recovery alive
+                logging.getLogger(__name__).exception("deployment reconciliation failed")
             await asyncio.sleep(10)
 
     async def serve(self, host: str = "127.0.0.1", port: int = 18796):
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("task service only binds loopback")
         self.acquire_owner()
-        worker = pusher = operations = metadata_reads = inventory = None
+        worker = pusher = reaper = operations = metadata_reads = deployment_reads = inventory = None
         try:
             server = await asyncio.start_server(self._handle, host, port)
             address = "[::1]" if host == "::1" else host
@@ -910,19 +963,22 @@ class TaskDaemon:
             self._write_owner_pointer()
             worker = asyncio.create_task(self._worker())
             pusher = asyncio.create_task(self._push_loop())
+            reaper = asyncio.create_task(self._artifact_reap_loop())
             operations = asyncio.create_task(self.ops.loop())
             metadata_reads = asyncio.create_task(self.reconcile_metadata())
+            deployment_reads = asyncio.create_task(self.reconcile_deployments())
             inventory = asyncio.create_task(self.inventory.loop())
             async with server:
                 await server.serve_forever()
         finally:
-            for background in (worker, pusher, operations, metadata_reads, inventory):
+            for background in (worker, pusher, reaper, operations, metadata_reads, deployment_reads, inventory):
                 if background is not None:
                     background.cancel()
                     await asyncio.gather(background, return_exceptions=True)
             for active in list(self.ops._active.values()):
                 active.cancel()
             await asyncio.gather(*list(self.ops._active.values()), return_exceptions=True)
+            await self.artifact_store.close_reaper()
             await self.inventory.close()
             await self.fleet.close()
             self.journal.close()

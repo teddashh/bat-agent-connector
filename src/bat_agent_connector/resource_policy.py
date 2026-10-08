@@ -107,6 +107,10 @@ MUTATIONS: tuple[Mutation, ...] = (
              ("checkpoint.continue",),
              "a connector clone <managed root>/<name> (marked batc.managed-clone) that only reads the person's "
              "repository, and the worktree <clone>/.bat-worktrees/batc-cp-<12 hex> on branch batc/cp-<12 hex>"),
+    Mutation("artifact.storage", "connector-storage", "path", frozenset(), ("artifact.upload",),
+             "configured connector-owned storage; no symlinks or adoption of unknown content"),
+    Mutation("artifact.materialize", "ssh-files", "path", frozenset(), ("checkpoint.continue",),
+             "only .batc-inputs in the continuation's fixed managed worktree; no-follow host read-back"),
     Mutation("integration.area", "ssh-git", "path", frozenset(),
              ("integration.preview", "integration.apply", "integration.handoff", "batc integrate"),
              "only <first managed root>/.batc-integration/<name>-<8 hex>/repo.git, a bare repository whose identity "
@@ -130,6 +134,14 @@ MUTATIONS: tuple[Mutation, ...] = (
              ("github_pr_update", "operation_submit", "batc delivery update-pr", "Delivery metadata drawer"),
              "integrate principal and configured repository with allow_pr_update; title/body only, recorded "
              "read-compare-write-readback; never a BAT session, local folder or PR head update"),
+    Mutation("deployment.start", "github", "remote", frozenset(),
+             ("deployment_start", "deployment_retry", "operation_submit", "batc delivery deploy", "batc delivery retry"),
+             "deploy principal; fixed source reachable from recipe ref, repository identity, recipe digest and "
+             "environment generation; configured workflow only; no local Git/BAT mutation"),
+    Mutation("deployment.rollback", "github", "remote", frozenset(),
+             ("deployment_rollback", "operation_submit", "batc delivery rollback"),
+             "deploy principal; a saved verified identity of the same recipe/environment, explicit rollback "
+             "support and not_undone limits; a new deployment through that recipe, never a history edit"),
 )
 BY_ACTION = {m.action: m for m in MUTATIONS}
 # The only granted write channel whose frame names no session (its terminal carries the ID).
@@ -390,6 +402,8 @@ async def live_check(c, cls: Classification, *, worktree: bool = True, folder: b
 def _decide(cls: Classification, m: Mutation, live: LiveCheck | None) -> tuple[str, str] | None:
     if cls.code:
         return cls.code, cls.reason or "read-only"
+    if cls.registry_status in registry.RETIRED and m.action.startswith("session.") and m.action != "session.stop":
+        return "SESSION_RETIRED", "this session ID left the host cap; start a new session ID"
     if m.action in BAT_WORKTREE_ACTIONS and cls.worktree_made_by == "connector":
         return ("NOT_A_BAT_WORKTREE", "the connector made this worktree over SSH and BAT has no record of it; "
                 "BAT's worktree actions would act on the workspace folder's repository")
@@ -429,6 +443,8 @@ async def classify_live(fleet, host: str, t: dict, action: str | None = None
 async def authorize_session(fleet, host: str, action: str, t: dict, *, live: LiveCheck | None = None,
                             cls: Classification | None = None) -> WriteGrant:
     """Grant one session-scoped action, or raise ResourceReadOnly before any write frame."""
+    from .cleanup import guard
+    guard(host, session_id=t["id"], path=t.get("cwd") or t.get("worktreePath"))
     m = BY_ACTION[action]
     if m.scope != "session":
         raise BatError(f"internal: {action} is not a session action")
@@ -447,6 +463,8 @@ def _create_grant(host: str, session_id: str, workdir: str | None, isolation: st
 
 def _check_resolved(hc: HostConfig, path: str, git_roots: dict | None) -> None:
     """A managed-root path must also be managed after the host resolves it (a symlink can point anywhere)."""
+    from .cleanup import guard
+    guard(hc.name, path=path)
     real = norm((git_roots or {}).get(path))
     if real and not in_managed_root(hc, real):
         raise ResourceReadOnly("DESTINATION_MANUAL",
@@ -562,6 +580,8 @@ def authorize_external_worktree(hc: HostConfig, root: str, path: str, branch: st
 
 def check_checkpoint_worktree(hc: HostConfig, clone: str, path: str, branch: str) -> None:
     """A checkpoint execution's clone and worktree: fixed names one level inside a managed root."""
+    from .cleanup import guard
+    guard(hc.name, path=path, branch=branch)
     c, p = norm(clone), norm(path)
     root = next((r for r in hc.managed_roots if c and posixpath.dirname(c) == r.rstrip("/")), None)
     name = posixpath.basename(p or "")
@@ -589,6 +609,8 @@ def integration_area_path(hc: HostConfig, host: str, repository: str, remote_url
 
 def check_integration_area(hc: HostConfig, path: str) -> None:
     """The integration area: a fixed name directly under <first managed root>/.batc-integration/."""
+    from .cleanup import guard
+    guard(hc.name, path=path)
     p = norm(path) or ""
     parent = posixpath.join(norm(hc.managed_roots[0]) or "", INTEGRATION_DIR) if hc.managed_roots else ""
     if (not parent or posixpath.dirname(p) != parent or not _AREA_NAME.fullmatch(posixpath.basename(p))
@@ -598,6 +620,8 @@ def check_integration_area(hc: HostConfig, path: str) -> None:
 
 def check_repair_worktree(hc: HostConfig, area: str, path: str, branch: str) -> None:
     """A conflict-resolving worktree: <area>/wt/batc-fix-<12 hex> on branch batc/fix-<12 hex>, nothing else."""
+    from .cleanup import guard
+    guard(hc.name, path=path, branch=branch)
     check_integration_area(hc, area)
     name = posixpath.basename(norm(path) or "")
     suffix = name[len("batc-fix-"):]
@@ -644,12 +668,27 @@ def push_refspec(sha: str, head_ref: str) -> str:
 
 def check_external_worktree(root: str, path: str, branch: str, task_id: str) -> None:
     """The task service's SSH-created worktree may only use its fixed connector-owned name."""
+    from .cleanup import guard
+    guard(path=path, branch=branch)
     suffix = task_id.replace("-", "")[:12]
     if (len(suffix) != 12 or any(ch not in "0123456789abcdef" for ch in suffix)
             or norm(path) != posixpath.join(norm(root) or "", BAT_WORKTREES_DIR, f"batc-task-{suffix}")
             or branch != f"batc/task-{suffix}"):
         raise ResourceReadOnly("DESTINATION_MANUAL", "external worktree identity is not connector-owned")
 
+
+
+def check_cleanup_worktree(hc: HostConfig, repository: str, path: str | None, branch: str) -> None:
+    """SSH cleanup destination; creation intent and live Git binding are checked by the cleanup handler."""
+    from .cleanup import guard
+    guard(hc.name, path=path or repository, branch=branch)
+    if not hc.writes or not hc.orchestrate:
+        raise ResourceReadOnly("TIER_DISABLED", "cleanup needs the host write and orchestrate tiers")
+    if (not in_managed_root(hc, repository) or (path and (not in_managed_root(hc, path) or
+            not path.startswith(repository.rstrip("/") + "/")))):
+        raise ResourceReadOnly("WORKDIR_NOT_MANAGED", "cleanup requires a managed clone or integration area")
+    if not branch or not branch.startswith(("batc/", "bat/")):
+        raise ResourceReadOnly("UNKNOWN_READ_ONLY", "cleanup requires a proven connector branch")
 
 # --------------------------------------------------------------------------- read views
 async def session_policy(fleet, host: str, session_id: str | None = None) -> dict:
@@ -687,3 +726,29 @@ async def session_policy(fleet, host: str, session_id: str | None = None) -> dic
                 actions[action] = {"allowed": False, "code": e.code, "reason": str(e)}
     return {**base, "session_id": t["id"], **cls.to_dict(),
             "observed": live.observed if live else None, "actions": actions}
+
+
+def check_artifact_storage(path) -> None:
+    """Configured local store: reject symlinks before setup or any write."""
+    from pathlib import Path
+
+    p = Path(path)
+    if not p.is_absolute() or ".." in p.parts or p == Path("/"):
+        raise ResourceReadOnly("DESTINATION_UNKNOWN", "artifact store must be a real absolute directory")
+    for component in (p, *p.parents):
+        if component.is_symlink():
+            raise ResourceReadOnly("DESTINATION_UNKNOWN", "artifact store may not contain symlinks")
+
+
+def check_artifact_destination(hc: HostConfig, clone: str, worktree: str, branch: str,
+                               relative_path: str) -> None:
+    """Materialization extends the shared checkpoint policy, never arbitrary managed paths."""
+    import re
+
+    check_checkpoint_worktree(hc, clone, worktree, branch)
+    parts = relative_path.split("/") if isinstance(relative_path, str) else []
+    if (len(parts) != 3 or parts[0] != ".batc-inputs"
+            or not re.fullmatch(r"art_[0-9a-f]{32}-r[1-9][0-9]*", parts[1])
+            or not parts[2] or parts[2] in {".", "..", ".git"}
+            or any(c in parts[2] for c in "/\\") or any(ord(c) < 32 or ord(c) == 127 for c in parts[2])):
+        raise ResourceReadOnly("DESTINATION_UNKNOWN", "not a continuation input path")

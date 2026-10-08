@@ -116,7 +116,9 @@ def _canonical(value: Any) -> str:
 
 
 def _error_code(exc: BaseException) -> str:
-    if isinstance(exc, ResourceReadOnly | TaskControlRefused):
+    from .confinement import ConfinementRefused
+
+    if isinstance(exc, ConfinementRefused | ResourceReadOnly | TaskControlRefused):
         return exc.code
     if isinstance(exc, StepFailed | NeedsAttention | OperationError):
         return exc.code
@@ -246,6 +248,9 @@ class OpContext:
             self.service._step_start(self.operation_id, name, request or {})
         try:
             response = await fn()
+        except NeedsAttention:
+            self.service._step_status(self.operation_id, name, "uncertain")
+            raise
         except (*AMBIGUOUS, OSError) as exc:  # OSError: local bookkeeping may fail after the external call
             self.service._step_status(self.operation_id, name, "uncertain",
                                       error={"code": "UNCERTAIN", "message": redact(f"{type(exc).__name__}: {exc}")})
@@ -484,6 +489,9 @@ class OperationService:
         re-sent), and the handler's checks run afresh."""
         op = self.get(operation_id, steps=False)
         self._may_steer(principal, op, "resume")
+        if op["action"] == "delivery.merge_and_deploy" and not (
+                principal.allows("merge") and principal.allows("deploy")):
+            raise OperationError("FORBIDDEN", "resuming merge-and-deploy needs both merge and deploy scopes", 403)
         if op["status"] != "needs_attention":
             raise OperationError("NOT_RESUMABLE", f"only needs_attention operations resume (this one is "
                                  f"{op['status']})", 409)
@@ -496,6 +504,12 @@ class OperationService:
     def kick(self) -> None:
         if self._wake is not None:
             self._wake.set()
+
+    def wake(self, operation_id: str) -> None:
+        """Make a waiting payload/provider operation due now without changing its state."""
+        self.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=? AND status='waiting_external'",
+                        (operation_id,))
+        self.kick()
 
     async def run_due(self) -> None:
         now = time.time()
