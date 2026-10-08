@@ -42,6 +42,7 @@ def directory(path):
 def child(fd, name):
     try:
         os.mkdir(name, 0o700, dir_fd=fd)
+        os.fsync(fd)
     except FileExistsError:
         pass
     return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
