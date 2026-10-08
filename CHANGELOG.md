@@ -2,6 +2,10 @@
 
 ## Next release (unreleased)
 
+- Refuse BAT worktree mutations for legacy reviewers whose shared creation root is unproven in the registry,
+  including paths under managed roots. Preserve proven carrier behavior and observation identity resolution;
+  raw CLI policy does not require a task daemon or guess a journal location.
+
 - Observation creation-root carriers ([design](docs/design/observation.md), plan §06/§08/§11, B01/B03/D05):
   follow explicit shares_worktree_with, equal-path legacy failovers and proven reviewer carriers through one
   parent rule. Remove the unwritten sharing key; non-sharing successors keep their own root and never inherit

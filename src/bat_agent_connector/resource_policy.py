@@ -205,7 +205,7 @@ class Classification:
     code: str | None = None  # why session-scoped writes are refused (None = allowed)
     reason: str | None = None
     worktree_path: str | None = None
-    worktree_made_by: str = "bat"  # "connector": made over SSH git (checkpoint, repair, task); BAT has no record
+    worktree_made_by: str = "bat"  # "connector": SSH git; "unknown": reviewer carrier is unproven
 
     @property
     def writable(self) -> bool:
@@ -278,6 +278,10 @@ def worktree_maker(row: dict, entries: list[dict] | None = None, lead_of=None, *
     # Preserve every previous refusal, including conflicting current-row creation evidence.
     if connector_made(row) or connector_made(root or {}):
         return "connector"
+    if root and root.get("role") == "reviewer":
+        # A reviewer shares its lead's worktree; its session creation is not worktree creation proof.
+        # Observation can resolve legacy rows through its journal, but raw CLI policy has no such authority.
+        return "unknown"
     return "bat"
 
 
@@ -389,6 +393,8 @@ def _decide(cls: Classification, m: Mutation, live: LiveCheck | None) -> tuple[s
     if m.action in BAT_WORKTREE_ACTIONS and cls.worktree_made_by == "connector":
         return ("NOT_A_BAT_WORKTREE", "the connector made this worktree over SSH and BAT has no record of it; "
                 "BAT's worktree actions would act on the workspace folder's repository")
+    if m.action in BAT_WORKTREE_ACTIONS and cls.worktree_made_by == "unknown":
+        return "NOT_A_BAT_WORKTREE", "the reviewer's shared worktree creation root cannot be proven from the registry"
     if m.action in BAT_WORKTREE_ACTIONS and not cls.worktree_path:
         return "NOT_A_BAT_WORKTREE", "the connector has no recorded worktree for this session"
     if live is not None:
