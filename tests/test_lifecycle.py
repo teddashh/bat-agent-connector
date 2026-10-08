@@ -223,7 +223,9 @@ async def test_failover_of_a_bat_session_is_refused_before_any_write(fleet_facto
         with pytest.raises(ResourceReadOnly, match="MANUAL_READ_ONLY"):
             await lifecycle.session_failover(f, "h1", sid, **kwargs)
     r = await lifecycle.session_failover(f, "h1", all_exhausted=True, confirm=True)
-    assert r["exhausted_found"] == 1 and "MANUAL_READ_ONLY" in r["failovers"][0]["error"]
+    # The person's session is skipped before the per-call cap, so it never takes a managed session's slot.
+    assert r["exhausted_found"] == 1 and r["failovers"] == [] and not r["truncated_by_max_start_per_call"]
+    assert r["skipped_read_only"] == [{"session_id": sid, "skipped": "read_only", "code": "MANUAL_READ_ONLY"}]
     assert not any(i["channel"] in channels.WRITE_CHANNELS | channels.ORCHESTRATE_CHANNELS for i in mock.invokes)
     assert registry.list_entries("h1") == []
     await f.close()
@@ -244,7 +246,7 @@ async def test_failover_main_checkout_and_all_exhausted(fleet_factory, mock):
     adopt("sess-claude-0001")  # a connector session in the main checkout of a human clone
     f = fleet_factory(writes=True, orchestrate=True)
     r = await lifecycle.session_failover(f, "h1", all_exhausted=True, confirm=True)
-    assert "WORKDIR_NOT_MANAGED" in r["failovers"][0]["error"]  # legacy boundary
+    assert r["failovers"] == [] and r["skipped_read_only"][0]["code"] == "WORKDIR_NOT_MANAGED"  # legacy boundary
     assert "claude:start-session" not in mock.channels()
     await f.close()
     f = fleet_factory(writes=True, orchestrate=True, **MANAGED_CLONE)
