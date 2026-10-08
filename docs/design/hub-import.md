@@ -156,7 +156,18 @@ completion ledger 缺失但 marker 存在：歷史確認 unknown，完了仍待�
 
 以來源 identity 比較，使用三份資料：最近**成功套用**的 source snapshot（S0）、目前來源（S1）、最近匯入寫下的 destination baseline（D0）與目前目的地（D1）。來源 digest 包含原檔 bytes、需求歷史及該列相關的 completion／pins／關係；order group 有獨立 digest。改了未知欄位或 updated 也算來源變更，必須報告，不能只比 title。
 
-D0 包含 row version、所有可變欄位、完成欄位、archive、pin、active／removed link 摘要與相關 `api_events.seq` 游標。row 游標排除 *.ordered；updated 只計 import 映射欄位的事件，簽核／link／archive 等保護事實仍納入；resume 比對排除本 apply 自己的事件。group baseline 包含完整 sibling ID 順序、pins、parent 與對應 ordered／移動事件。只用 row.version 不夠：現有 pin、order、link 不一定增加它。只用內容 hash 也不夠：先改再改回的編輯仍由版本／事件辨識。現有不在 journal 的直接 SQLite 手改不屬支援入口，但 digest 仍能查出當下差異。
+D0 保存完整目的端快照，包括 row version、可變欄位、完成欄位、archive、pin、active／removed links 與相關 `api_events.seq` 游標。重匯的 row 比對只保護匯入事實：work item 排除 group 管理的 pinned、pin 會改的 updated_at，以及來源 snapshot 的 external URL 以外的 links；本機 session、PR 或另加的 URL 不阻擋來源更新，apply 保留它們及移除歷史。來源已映射的 URL 仍比對 active／removed link 事實，避免把人移除的來源連結補回。project 的 pinned 是映射欄位，仍受保護。preview 後的 apply 前置條件比對完整目的端快照；此時任何 pin／link 變動仍回 DESTINATION_CHANGED。
+
+row 游標依 resource type 明確分類。created 只有別的 operation 才算；updated 只有 fields 含映射欄位才算（project：name／description／parent_id／derived_from／pinned；work item：title／goal／request／acceptance／steps／state／continued_steps／parent_id／derived_from）。resume 與目的端驗證排除本 apply 自己的事件，finalize 刷新本 apply 觸及的 row baseline。
+
+| Resource | 算 row 本機編輯的事件 | 不算的事件 |
+|---|---|---|
+| project | project.created、project.updated、project.pinned、project.unpinned、project.archived、project.restored | project.ordered；work_item.ordered（現有管理 action 將任務排序事件記在 project 上） |
+| work_item | work_item.created、work_item.updated、work_item.state、work_item.continued、work_item.approved、work_item.archived、work_item.restored | work_item.ordered、work_item.linked、work_item.unlinked、work_item.pinned、work_item.unpinned |
+
+未列出的 kind 一律算編輯，不能默默放行；測試掃描 work_items.py／hub_import.py 的事件呼叫，新增 kind 必須補分類。SQL 排除上述不計的 kind，按 seq 由新到舊讀；找到第一個計入事件即停止，只為 updated 的 fields 判定或本 apply 的 operation_id 排除解析 JSON。事件是 append-only；D1 的計入 seq 高於 D0 游標才算新編輯。舊版 baseline 若把 link／任務 pin 事件算進游標，新分類使目前 seq 降低也不製造衝突；仍逐項比對受保護事實，不重寫或認領舊 baseline。
+
+group baseline 包含完整 sibling ID 順序、pins、parent 與對應 ordered／移動事件。本機任務 pin 與來源內容更新可並存；兩邊同時改同 group 則依 group 的 S0／S1／D0／D1 列衝突。簽核、封存／恢復與真正內容編輯仍由 row 保護。只用 row.version 不夠：現有 project pin 與連結不一定增加它。只用內容 hash 也不夠：先改再改回的編輯仍由版本／事件辨識。現有不在 journal 的直接 SQLite 手改不屬支援入口，但 digest 仍能查出受保護事實的當下差異。
 
 | 比對 | 預覽分類 | apply 行為 |
 |---|---|---|
@@ -319,7 +330,7 @@ Phase 1 僅提交規格，審查修訂先獨立提交；Phase 2 實作如下：
 | `test_B05_idempotent_reimport_and_source_update` | §09：unchanged 的 row／mapping、version／updated_at／links／項目事件不變；source-only 更新、固定 creation reference、相同 apply key 回同 operation；一個 summary |
 | `test_b05_metadata_links_source_missing_and_rename` | §08／§09：metadata-only 不 bump 版本；URL 修改有 removed_links；來源消失不 archive，恢復／顯示改名仍用原 ID |
 | `test_b05_cross_source_mapping_and_snapshot_move`、`test_b05_date_id_and_depth` | §08：同 task ID 在不同 project／source 不衝突，搬快照不換 ID，日期／舊 ID；超過 32 層阻擋 |
-| `test_b05_source_updates_and_local_edits_conflict`、`test_b05_order_changes_protect_local_siblings`、`test_b05_archived_destination_is_not_used_for_new_items` | §09：內容／改回原值／pin／link／approval／archive 保護；本機 sibling 使來源重排衝突；不向封存專案加入新項目 |
+| `test_b05_source_updates_and_local_edits_conflict`、`test_b05_order_changes_protect_local_siblings`、`test_b05_archived_destination_is_not_used_for_new_items` | §09：內容／改回原值／approval／archive 保護；本機 sibling 使來源重排衝突；不向封存專案加入新項目 |
 | `test_b05_stale_source_and_destination_stop_apply`、`test_b05_snapshot_race_and_destination_missing` | §09：bytes 改但 size／mtime 相同、集合／根身分、目的版本／pin／link／order 變；兩次 descriptor 掃描競態、目的消失；首次驗證沒有新增 receipt |
 | `test_b05_restart_lost_reply_and_partial_recovery` | §09／§24：四個 phase 的回覆提交前／後重啟，共八種；receipts 去重、沿用 ID、每個 phase 最終成功且 summary 不重複 |
 | `test_b05_sqlite_rollback_is_reconciled_without_duplicate_rows`、`test_b05_record_commit_reply_loss_and_mid_import_source_change`、`test_b05_uncertain_budget_has_one_incomplete_summary_and_can_resume` | §09／§24：逐筆 rollback、commit 後回覆遺失、途中來源變動／partial／新 preview、重試耗盡後 resume，沒有重建或重複事件 |
@@ -345,7 +356,18 @@ Phase 1 僅提交規格，審查修訂先獨立提交；Phase 2 實作如下：
 | 8：事件 index | test_b05_group_order_query_uses_the_event_resource_index：EXPLAIN QUERY PLAN 為 SEARCH，不 SCAN api_events |
 | 9：section 註解 | test_b05_section_comments_are_filtered_and_raw_request_is_preserved：goal／acceptance 濾掉註解，request／source 完整 |
 
-必跑 `uv run ruff check .`、完整 `uv run pytest -q`；Dashboard 另做 `.mjs` 的 node check 與 en／zh-TW、390／768／1440 px 的 Playwright 預覽、套用雙擊去重、console／overflow／錯誤 DOM 文字檢查。
+### Review round 2 的回歸測試
+
+| 測試（同一 tests/test_hub_import.py） | B05／計畫 §08／§09 證據 |
+|---|---|
+| `test_b05_local_session_and_pr_links_survive_source_update` | 本機 session／PR／URL 連結並移除 session 後仍 unchanged；Hub 更新分類 update、成功套用、保留 PR／URL 及移除歷史；套用後再次 unchanged |
+| `test_b05_local_item_pin_is_group_state_and_survives_source_update` | 本機任務 pin 不算 row 編輯；Hub 更新成功且保留 pin，前後均可 unchanged 重匯 |
+| `test_b05_source_updates_and_local_edits_conflict[archive]`、`test_b05_local_removal_of_source_url_still_conflicts` | 本機封存與來源 URL 移除仍與 Hub 更新衝突，不覆蓋人的決定 |
+| `test_b05_every_emitted_row_event_kind_is_explicitly_classified`、`test_b05_unknown_row_event_kinds_fail_closed` | 掃描兩個模組的全部事件 kind；分類互斥、逐 kind 驗證、未知 kind 保護、本 apply 事件排除 |
+| `test_b05_row_marker_filters_in_sql_and_stops_at_newest_edit` | SQL 篩選忽略事件；由新到舊只取到第一個編輯，只有 updated／own-operation checks 解析 JSON；兩種 resource 均驗證 |
+| `test_b05_legacy_link_event_baseline_does_not_block_reimport` | 舊 baseline 計入匯入器的 link 事件，更新分類後仍 unchanged 並可接受 Hub 更新；不需資料 migration／adopt-baseline |
+
+必跑 `uv run ruff check .`、完整 `uv run pytest -q` 及 `UV_PROJECT_ENVIRONMENT=/tmp/hubimport-py310 uv run --python 3.10 pytest -q`；Dashboard 改動另做 `.mjs` 的 node check 與 en／zh-TW、390／768／1440 px 的 Playwright 預覽、套用雙擊去重、console／overflow／錯誤 DOM 文字檢查。
 
 ## 尚未涵蓋
 
