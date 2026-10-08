@@ -75,11 +75,12 @@ from bat_agent_connector import api_auth, lifecycle  # noqa: E402
 from bat_agent_connector.channels import GUARDED_CHANNELS, ORCHESTRATE_CHANNELS, WRITE_CHANNELS  # noqa: E402
 from bat_agent_connector.errors import (  # noqa: E402
     ConnectionLost,
+    InvokeError,
     InvokeTimeout,
     TaskControlRefused,
     WriteRefused,
 )
-from bat_agent_connector.operations import OpContext, OperationError, StepFailed  # noqa: E402
+from bat_agent_connector.operations import OpContext, OperationError  # noqa: E402
 from tests.conftest import adopt  # noqa: E402
 
 SID = "sess-claude-0001"
@@ -1984,9 +1985,8 @@ async def test_a07_resume_transport_loss_rejects_command_without_uncertain_task(
             with pytest.raises(error):
                 await service.session_send(d.fleet, "h1", SID, "one instruction", confirm=True)
         elif door == "coordinator":
-            with pytest.raises(StepFailed) as failed:
-                await d.coordinator._send(prior, SID, "one instruction", "lead:followup")
-            assert failed.value.code == "BAT_ERROR"
+            result = await d.coordinator._send(prior, SID, "one instruction", "lead:followup")
+            assert result["state"] == "needs_ted" and "BAT_ERROR" in result["result"]
         else:
             principal, request, op = admission_control(d, tid, mock, "send", scoped=door == "task_operation")
             await d.ops.drain()
@@ -2000,8 +2000,14 @@ async def test_a07_resume_transport_loss_rejects_command_without_uncertain_task(
             assert d.ops.get(op["operation_id"]) == result
     commands = d.journal.commands(tid)
     assert len(commands) == 1 and commands[0]["status"] == "rejected"
-    assert d.journal.get(tid) == prior
+    if door == "coordinator":
+        assert d.journal.get(tid)["state"] == "needs_ted"
+        assert d.journal.get(tid)["control_version"] == prior["control_version"]
+    else:
+        assert d.journal.get(tid) == prior
     assert [r["channel"] for r in writes(mock)] == ["claude:client-resume"]
+    if door == "coordinator":
+        return  # Ted must explicitly intervene; a terminal local refusal does not permit another control.
     # The failed resume must not leave a pending task command blocking later controls.
     await service.session_interrupt(d.fleet, "h1", SID, confirm=True)
     assert d.journal.commands(tid)[-1]["status"] == "settled"
@@ -2083,3 +2089,143 @@ async def test_a07_preliminary_resume_checks_task_binding_without_sending(owned,
     commands = d.journal.commands(tid)
     assert len(commands) == 1 and commands[0]["status"] == "rejected"
     assert not writes(mock)
+
+
+def coordinator_tick_send(d, tid, patch, kind):
+    d.journal.db.execute("UPDATE tasks SET engine='rules' WHERE task_id=?", (tid,))
+    if kind == "initial_lead":
+        # Presence was proved before the runtime unloaded; dispatch still uses the real adapter and mockbat.
+        async def present(task, sid):
+            return "present"
+        patch.setattr(d.adapter, "session_presence", present)
+    else:
+        d.journal.change(tid, "running", fields={"turn_marker": "previous-turn"})
+        async def completed_turn(task, sid, marker):
+            return {"streaming": False, "turn_started": True, "turn_done": True,
+                    "turn_attribution": "correlated", "messages": [
+                        {"role": "assistant", "text": "BAT-STATUS: CONTINUE"}]}
+        patch.setattr(d.adapter, "read", completed_turn)
+
+
+@pytest.mark.parametrize("kind", ["initial_lead", "followup"])
+@pytest.mark.parametrize("error,code", [(ConnectionLost, "BAT_ERROR"), (InvokeTimeout, "BAT_ERROR"),
+                                       (InvokeError, "BAT_ERROR"), (OSError, "INTERNAL")])
+async def test_a07_daemon_tick_handles_pre_frame_send_failure_without_uncertainty(owned, mock, monkeypatch, kind, error, code):
+    d, tid = owned
+    coordinator_tick_send(d, tid, monkeypatch, kind)
+    mock.metas[SID] = None
+    client = d.fleet.client("h1")
+    original = client._roundtrip
+
+    async def lose_resume_reply(frame, timeout):
+        result = await original(frame, timeout)
+        if frame["channel"] == "claude:client-resume":
+            raise error("resume failed before the command frame")
+        return result
+
+    monkeypatch.setattr(client, "_roundtrip", lose_resume_reply)
+    await d._tick_task(tid)
+    task = d.journal.get(tid)
+    assert task["state"] == "needs_ted" and code in task["result"]
+    commands = d.journal.commands(tid)
+    assert len(commands) == 1 and commands[0]["status"] == "rejected"
+    assert json.loads(commands[0]["payload"])["purpose"] == ("lead:initial" if kind == "initial_lead" else "continue")
+    events = d.journal.events(tid)
+    assert any(e["kind"] == "send_rejected" and json.loads(e["body"]) == {
+        "command_id": commands[0]["command_id"], "code": code} for e in events)
+    assert not any(json.loads(e["body"]).get("to") == "uncertain" for e in events)
+    assert [r["channel"] for r in writes(mock)] == ["claude:client-resume"]
+    snapshot = task_effect_snapshot(d, tid)
+    await d._tick_task(tid)
+    assert task_effect_snapshot(d, tid) == snapshot
+    assert [r["channel"] for r in writes(mock)] == ["claude:client-resume"]
+
+
+@pytest.mark.parametrize("kind", ["initial_lead", "followup"])
+@pytest.mark.parametrize("boundary", ["before_resume", "resume_reply_loss", "version_changed"])
+async def test_a07_daemon_tick_cancels_pre_frame_send_after_task_control(owned, mock, monkeypatch, kind, boundary):
+    d, tid = owned
+    coordinator_tick_send(d, tid, monkeypatch, kind)
+    mock.metas[SID] = None
+    client = d.fleet.client("h1")
+    original_checked, original_roundtrip = client._invoke_checked, client._roundtrip
+    controlled = {}
+
+    async def change_before_resume(channel, *args, **kwargs):
+        if channel == "claude:client-resume":
+            controlled.update(d.journal.pause(tid))
+        return await original_checked(channel, *args, **kwargs)
+
+    async def change_then_lose_reply(frame, timeout):
+        result = await original_roundtrip(frame, timeout)
+        if frame["channel"] == "claude:client-resume":
+            d.journal.pause(tid)
+            if boundary == "version_changed":
+                d.journal.resume(tid)
+            controlled.update(d.journal.get(tid))
+            raise ConnectionLost("resume reply lost after task control")
+        return result
+
+    monkeypatch.setattr(client, "_invoke_checked" if boundary == "before_resume" else "_roundtrip",
+                        change_before_resume if boundary == "before_resume" else change_then_lose_reply)
+    await d._tick_task(tid)
+    assert d.journal.get(tid) == controlled and controlled["state"] != "uncertain"
+    commands = d.journal.commands(tid)
+    assert len(commands) == 1 and commands[0]["status"] == "cancelled"
+    assert [r["channel"] for r in writes(mock)] == ([] if boundary == "before_resume" else ["claude:client-resume"])
+    if boundary != "version_changed":
+        snapshot = task_effect_snapshot(d, tid)
+        await d._tick_task(tid)
+        assert task_effect_snapshot(d, tid) == snapshot
+        assert [r["channel"] for r in writes(mock)] == ([] if boundary == "before_resume" else ["claude:client-resume"])
+
+
+@pytest.mark.parametrize("presence", ["vanished", "replacement_limit", "unreadable", "paused", "version_changed"])
+async def test_a07_daemon_initial_send_failure_preserves_presence_and_control_rules(owned, mock, monkeypatch, presence):
+    d, tid = owned
+    coordinator_tick_send(d, tid, monkeypatch, "initial_lead")
+    if presence == "replacement_limit":
+        d.journal.db.execute("UPDATE tasks SET session_replacements=1 WHERE task_id=?", (tid,))
+    mock.metas[SID] = None
+    probes, controlled = 0, {}
+    client = d.fleet.client("h1")
+    original = client._roundtrip
+
+    async def lose_resume_reply(frame, timeout):
+        result = await original(frame, timeout)
+        if frame["channel"] == "claude:client-resume":
+            raise ConnectionLost("resume reply lost before prompt")
+        return result
+
+    async def final_presence(task, sid):
+        nonlocal probes
+        probes += 1
+        if probes <= 2:
+            return "present"
+        if presence == "unreadable":
+            raise ConnectionLost("presence read failed")
+        if presence in {"paused", "version_changed"}:
+            d.journal.pause(tid)
+            if presence == "version_changed":
+                d.journal.resume(tid)
+            controlled.update(d.journal.get(tid))
+            return "vanished"  # A later pause/version must win over this stale absence proof.
+        return "vanished"
+
+    monkeypatch.setattr(client, "_roundtrip", lose_resume_reply)
+    monkeypatch.setattr(d.adapter, "session_presence", final_presence)
+    await d._tick_task(tid)
+    task = d.journal.get(tid)
+    commands = d.journal.commands(tid)
+    assert probes == 3 and len(commands) == 1
+    assert task["state"] != "uncertain"
+    if controlled:
+        assert task == controlled and commands[0]["status"] == "cancelled"
+    else:
+        assert commands[0]["status"] == "rejected"
+        assert task["state"] == ("queued" if presence == "vanished" else "needs_ted")
+        assert task["session_replacements"] == int(presence != "unreadable")
+        assert task["session_id"] == (None if presence == "vanished" else SID)
+    assert any(e["kind"] == "send_rejected" and json.loads(e["body"])["code"] == "BAT_ERROR"
+               for e in d.journal.events(tid))
+    assert [r["channel"] for r in writes(mock)] == ["claude:client-resume"]

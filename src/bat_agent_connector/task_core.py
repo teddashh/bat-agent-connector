@@ -587,10 +587,31 @@ class TaskCoordinator:
             except TaskDispatchCancelled:
                 self.journal.command_status(cmd["command_id"], "cancelled")
                 return self.journal.get(task["task_id"])
-            except StepFailed:
-                # Operation steps preserve definitive policy/task refusals; no uncertain command was sent.
-                self.journal.command_status(cmd["command_id"], "rejected")
-                raise
+            except StepFailed as exc:
+                if operation:
+                    self.journal.command_status(cmd["command_id"], "rejected")
+                    raise
+                current = self.journal.get(task["task_id"])
+                if current["paused"] or current["control_version"] != task["control_version"]:
+                    self.journal.command_status(cmd["command_id"], "cancelled")
+                    return current
+                with self.journal.tx():
+                    self.journal.command_status(cmd["command_id"], "rejected")
+                    self.journal.note(task["task_id"], "send_rejected", {
+                        "command_id": cmd["command_id"], "code": exc.code})
+                if initial_lead:
+                    try:
+                        presence = await self.adapter.session_presence(current, sid)
+                    except Exception:  # noqa: BLE001 - a failed read is not proof of disappearance
+                        presence = "unknown"
+                    current = self.journal.get(task["task_id"])
+                    if current["paused"] or current["control_version"] != task["control_version"]:
+                        self.journal.command_status(cmd["command_id"], "cancelled")
+                        return current
+                    if presence == "vanished":
+                        return self.journal.mark_initial_session_vanished(task["task_id"], sid)
+                return self.journal.change(task["task_id"], "needs_ted", fields={
+                    "result": "Send rejected before BAT prompt: " + exc.code})
             except WriteRefused:
                 # Local streaming/rate guard rejected before BAT send-message.
                 current = self.journal.get(task["task_id"])
