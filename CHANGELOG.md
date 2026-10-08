@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Browser Dashboard at `/dashboard/` on the task daemon's loopback port (docs/design/dashboard.md): pending items,
+  the session inventory with provenance and staleness, managed-session send (queued behind a running turn),
+  interrupt and answer, a read-only view for sessions a person created in BAT, PR merge and merge-and-deploy
+  buttons, and the operation log with deploy retry from the merged commit. Four static files with no build step,
+  a strict CSP, and a client of `/api/v1` only.
 - GitHub delivery operations (docs/design/delivery.md): `github.pr.merge` merges at the reviewed head SHA through
   the asynchronous merge API (waits on pending checks and merge queues, adopts a matching pending request,
   records the real merged SHA by reading the PR back), `deployment.start` runs a configured `[[deploy.recipes]]`

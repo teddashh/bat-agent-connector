@@ -396,6 +396,42 @@ async def test_rpc_doors_share_the_operation_service(served, mock):
     assert (await rpc(issued["result"]["token"], "op_submit", {"action": "session.send"}))["error"] == "FORBIDDEN"
 
 
+async def raw_get(port, path, *, method="GET", host=None):
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(f"{method} {path} HTTP/1.1\r\nHost: {host or f'127.0.0.1:{port}'}\r\n\r\n".encode())
+    await writer.drain()
+    raw = await asyncio.wait_for(reader.read(), 10)
+    writer.close()
+    head, _, body = raw.partition(b"\r\n\r\n")
+    lines = head.decode().split("\r\n")
+    hdrs = {k.lower(): v.strip() for k, _, v in (line.partition(":") for line in lines[1:])}
+    return int(lines[0].split(" ")[1]), hdrs, body
+
+
+async def test_dashboard_serves_only_its_static_files_with_strict_headers(served):
+    _, port = served
+    status, hdrs, _ = await raw_get(port, "/")
+    assert status == 302 and hdrs["location"] == "/dashboard/"
+    for path, ctype in [("/dashboard/", "text/html"), ("/dashboard/app.js", "text/javascript"),
+                        ("/dashboard/i18n.js", "text/javascript"), ("/dashboard/app.css", "text/css")]:
+        status, hdrs, body = await raw_get(port, path)
+        assert status == 200 and hdrs["content-type"].startswith(ctype) and body
+        assert int(hdrs["content-length"]) == len(body)
+        assert "script-src 'self'" in hdrs["content-security-policy"]
+        assert "frame-ancestors 'none'" in hdrs["content-security-policy"]
+        assert hdrs["x-frame-options"] == "DENY" and hdrs["x-content-type-options"] == "nosniff"
+    status, hdrs, body = await raw_get(port, "/dashboard/app.js", method="HEAD")
+    assert status == 200 and body == b"" and int(hdrs["content-length"]) > 0
+    for path in ["/dashboard/../task_daemon.py", "/dashboard/%2e%2e/api_v1.py", "/dashboard/x.js", "/favicon.ico"]:
+        assert (await raw_get(port, path))[0] in {400, 404}
+    assert (await raw_get(port, "/dashboard/", method="POST"))[0] == 405
+    assert (await raw_get(port, "/dashboard/", host="evil.example"))[0] == 400
+    # The page itself is static: no token, no data, and no inline script for the CSP to allow.
+    _, _, page = await raw_get(port, "/dashboard/")
+    assert b"<script type=\"module\" src=\"/dashboard/app.js\"></script>" in page
+    assert b"<script>" not in page and b"batc_" not in page
+
+
 # --------------------------------------------------------------------------- review follow-ups
 def answer_op(daemon, key="a1", **params):
     return daemon.ops.create(ted(), action="session.answer", target={"host": "h1", "session_id": MANUAL},
