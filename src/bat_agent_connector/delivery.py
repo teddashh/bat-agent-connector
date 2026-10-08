@@ -42,14 +42,24 @@ def _cfg(ops: OperationService) -> GitHubConfig:
     return ops.context["github_config"]
 
 
-async def _read(coro, what: str):
-    """A read that GitHub could not answer just waits and retries; it never fails the operation."""
+async def _read(coro, what: str, ctx: OpContext | None = None):
+    """A read that GitHub could not answer just waits and retries; it never fails the operation.
+
+    A refused read (401 expired token, 403, 404) fails the operation only while it has sent nothing. Once a merge
+    request or dispatch is out, GitHub may still be merging or deploying, so the operation waits for a person
+    instead: ``failed`` would hide that and release the recipe's deploy lock.
+    """
     try:
         status, body = await coro
     except GitHubAmbiguous:
         raise Wait("waiting_external", f"GitHub did not answer ({what}); retrying", 30) from None
     if status != 200:
-        raise OperationError(f"GITHUB_{status}", f"{what}: {str(body.get('message') or status)[:200]}")
+        message = f"{what}: {str(body.get('message') or status)[:200]}"
+        if ctx is not None and ctx.service.db.execute("SELECT 1 FROM operation_steps WHERE operation_id=?",
+                                                      (ctx.operation_id,)).fetchone():
+            raise NeedsAttention(f"GITHUB_{status}", message + "; a write was already sent, so check GitHub, fix "
+                                 "the token or permission, then resume")
+        raise OperationError(f"GITHUB_{status}", message)
     return body
 
 
@@ -111,7 +121,7 @@ def _admit_merge(ops: OperationService, principal: Principal, target: dict, para
 
 async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method: str, prefix: str = "merge") -> dict:
     gh = _gh(ctx.service)
-    pr = await _read(gh.pull(repository, number), "read the pull request")
+    pr = await _read(gh.pull(repository, number), "read the pull request", ctx)
     submitted = _has_step(ctx, f"{prefix}.submit")
     if pr.get("merged"):
         if (pr.get("head") or {}).get("sha") != sha:
@@ -135,7 +145,7 @@ async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method:
         if pr.get("mergeable_state") == "dirty":
             raise NeedsAttention("MERGE_CONFLICT", f"PR #{number} has merge conflicts with its base")
         if pr.get("mergeable_state") == "blocked":
-            checks = await _read(gh.check_runs(repository, sha), "read check runs")
+            checks = await _read(gh.check_runs(repository, sha), "read check runs", ctx)
             if any(c.get("status") != "completed" for c in checks.get("check_runs") or []):
                 _check_wait(ctx, "checks_wait_started_at")
                 raise Wait("waiting_checks", "required checks are still running", 30)
@@ -170,7 +180,7 @@ async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method:
         ctx.set_refs(merge_request_uuid=details["uuid"])
     uuid = details.get("uuid") or (ctx.op.get("external_refs") or {}).get("merge_request_uuid")
     if result == "pending" and uuid:
-        res = await _read(gh.merge_async_result(repository, number, uuid), "read the merge request")
+        res = await _read(gh.merge_async_result(repository, number, uuid), "read the merge request", ctx)
         result, details = res.get("status"), res.get("details") or {}
         if result == "pending":
             _check_wait(ctx, "merge_wait_started_at")
@@ -179,7 +189,7 @@ async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method:
         raise NeedsAttention("MERGE_FAILED", str(details.get("message") or "GitHub refused the merge")[:300])
     if result == "enqueued":
         ctx.set_refs(merge_queue=True)
-    pr = await _read(gh.pull(repository, number), "read the merged pull request")
+    pr = await _read(gh.pull(repository, number), "read the merged pull request", ctx)
     if not pr.get("merged"):
         _check_wait(ctx, "merge_wait_started_at")
         reason = "in the merge queue" if result == "enqueued" else "waiting for GitHub to show the merge"
@@ -261,14 +271,17 @@ async def _deploy(ctx: OpContext, recipe: DeployRecipe, source_sha: str, prefix:
                            reconcile=reconcile)
         run_id = run_id or d.get("run_id")
         if not run_id:  # older API answer (204) without a run id: find it by the operation id in its run-name
-            run = await _find_run_by_operation(gh, recipe, ctx.operation_id)
+            try:
+                run = await _find_run_by_operation(gh, recipe, ctx.operation_id)
+            except GitHubAmbiguous:  # the run may already be deploying: keep looking, never fail here
+                run = None
             if run is None:
                 _check_wait(ctx, f"{prefix}_locate_started_at")
                 raise Wait("waiting_external", "waiting for the dispatched workflow run to appear", 10)
             run_id = run["id"]
     elif not run_id:
         body = await _read(gh.runs(recipe.repository, recipe.workflow, head_sha=source_sha, event="push"),
-                           "list workflow runs")
+                           "list workflow runs", ctx)
         runs = sorted(body.get("workflow_runs") or [], key=lambda r: r.get("id") or 0)
         if not runs:
             _check_wait(ctx, f"{prefix}_locate_started_at")
@@ -277,7 +290,7 @@ async def _deploy(ctx: OpContext, recipe: DeployRecipe, source_sha: str, prefix:
     if refs.get(f"{prefix}_run_id") != run_id:
         ctx.set_refs(**{f"{prefix}_run_id": run_id})
         ctx.op["external_refs"] = {**refs, f"{prefix}_run_id": run_id}
-    run = await _read(gh.run(recipe.repository, run_id), "read the workflow run")
+    run = await _read(gh.run(recipe.repository, run_id), "read the workflow run", ctx)
     if recipe.mode == "on_merge" and run.get("head_sha") != source_sha:
         raise NeedsAttention("RUN_VERSION_MISMATCH", "the located run is for a different commit")
     if run.get("status") != "completed":
@@ -285,7 +298,7 @@ async def _deploy(ctx: OpContext, recipe: DeployRecipe, source_sha: str, prefix:
         reason = ("waiting for environment approval" if run.get("status") == "waiting"
                   else f"workflow run is {run.get('status')}")
         raise Wait("waiting_external", reason, 15, {f"{prefix}_run_url": run.get("html_url")})
-    jobs = await _read(gh.jobs(recipe.repository, run_id), "read workflow jobs")
+    jobs = await _read(gh.jobs(recipe.repository, run_id), "read workflow jobs", ctx)
     job = next((j for j in jobs.get("jobs") or [] if j.get("name") == recipe.deploy_job), None)
     if run.get("conclusion") != "success":
         raise OperationError("DEPLOY_FAILED", f"workflow run concluded {run.get('conclusion')}")

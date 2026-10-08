@@ -23,7 +23,9 @@ Scope `merge`。輸入：`target {repository, pull_number}`、`params {method}`�
 4. 輪詢 `GET …/merge-async/{uuid}`：`pending` 轉 `waiting_external`；`failed`（分支保護或規則在執行時才判斷）轉 `needs_attention`；`enqueued` 等 PR 真正合併，queue 狀態不算合併。
 5. 讀回 PR，以 `merged` 與 `merge_commit_sha` 為準記錄實際合併版本。
 
-送出後回應遺失（逾時、5xx、429）：步驟記為 `uncertain`。回查 PR：已合併就補記成功；仍開著才再送一次，因為 GitHub 會把同一 PR 的待處理請求以 409 回傳原 UUID，不會產生第二次合併。
+送出後回應遺失（逾時、5xx、429、回應內容被截斷）：步驟記為 `uncertain`。回查 PR：已合併就補記成功；仍開著才再送一次，因為 GitHub 會把同一 PR 的待處理請求以 409 回傳原 UUID，不會產生第二次合併。
+
+讀取沒有回應（含帶 rate-limit header 的 403）時 `waiting_external`，稍後再讀。讀取被拒（401、403、404）時，若這個操作還沒送出任何寫入就 `failed`；已送出合併請求或 dispatch 後則轉 `needs_attention`，因為 GitHub 可能仍在合併或部署，`failed` 會釋放 recipe 的部署鎖。修好 token 或權限後 `resume`。Token 每次請求重新讀取，所以輪替或會過期的 token（GitHub App token 一小時）不必重啟 daemon。
 
 ## 部署：`deployment.start`
 
