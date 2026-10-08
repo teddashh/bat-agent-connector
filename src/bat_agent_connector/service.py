@@ -1031,7 +1031,7 @@ async def session_send(
                 phase="attempt",
             )
             try:
-                # Reattach checks the binding without consuming the command prompt.
+                # Reattach checks the task binding without submitting its prompt.
                 await c.invoke("claude:client-resume", params, grant=grant,
                                before_send=_task_guard.check if _task_guard else None,
                                frame_guard=lambda frame: confinement.guard_resume_frame(host, sid, kind or "claude", frame))

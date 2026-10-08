@@ -282,6 +282,20 @@ Phase 2 新增的副作用只有 Connector 記錄／projection、既有 managed 
 
 升級不遍歷 running sessions 送 setter、resume 或 stop。既有有完整 start intent／實際 options 的紀錄可以只讀回填證據；只有 cwd／tab／事後 host default 的紀錄填 none、reason=legacy_evidence_missing。現有 confined flag 保留，即使其實際 level 為 none；人工／unknown 資源不回填成 managed。之後補到較強 host 證據只更新 current_verification，不把建立快照升級；要採新限制，開新的 managed session。Warm reuse 同樣不升級。
 
+### Task authority 與 outcome 分類
+
+Task lead／reviewer 的 start 綁定原 task incarnation、durable start command 與 reserved ID；start command 保存 control_version。實際 frame 的順序是 task gate → confinement async check → task gate（即使 check 拒絕仍核對）→ registry start claim 的 on_transport fence → BAT。準備 worktree 的 frame 也核對 task gate。pause、version 變動或 command 取消若發生在 connect／confinement await 期間，仍是未送，保留操作者的 pause／新 version，不把舊 tick 改為 needs_ted。Warm reuse 在 awaited identity 後先核對 incarnation 才轉移所有權。
+
+下表補充 [operations-unification.md](operations-unification.md) 的共用 outcome 規則；send 的 durable task command／operation receipts 仍由該文件定義。
+
+| 證據／邊界 | Start | Send |
+|---|---|---|
+| Task gate 在 transport 前拒絕 | 原 command cancelled；保留 pause／新 version；不送 frame、不自動換 ID | pre-frame StepFailed；取消失效 intent，不重送 |
+| ConfinementRefused(sent=False)，task authority 仍有效 | rejected＋needs_ted，記 code；安全的 operation resume 先用 reconcile 判斷原 reserved ID | pre-frame refusal；未送，保留明確 code |
+| sent=True／sent=None，或 frame 已可能送出 | uncertain，保留原 ID／carrier，只讀回，不因 InvokeError 重送 | 可能送出的例外為 AmbiguousOutcome，讀回原 command／message |
+| BAT 明確 error reply | start 尚不能證明 absence，仍按 sent fence 讀回 | 已有明確錯誤回覆的 send 可記 definitive failure |
+| NeedsAttention 來自外部 operation step | step uncertain；resume 必須 reconcile，證明未生效才 RERUN | 同一共用 step 規則，不以 attention 當未送證據 |
+
 ### Start frame 與取消邊界稽核
 
 `BatClient._invoke_checked` 的順序是 connect → semaphore → await before_frame → before_send／frame_guard → _roundtrip。`_roundtrip` 在 connection 檢查及 JSON 編碼之後，同步呼叫 on_transport；registry／Task command 的 start_sent=true 落盤後立即呼叫 websocket.send，中間沒有 await。故 account check、connect、semaphore 或更早 await 的取消都是未送；websocket.send 內或等待 ACK／metadata 的取消均保守當成可能已送。Marker 不是「BAT 已接受」的證明；crash 在 marker 與 transport 之間仍保持未定，不能為此重送。

@@ -149,6 +149,7 @@ Reviewer 只以**最後一則 agent 訊息**中的 JSON verdict 決定：`{"verd
 
 [confinement](confinement.md) 在既有 start command payload／registry 保存 options 與 creation snapshot；`work_status.session_confinement` 分開顯示 creation 與 current verification。Lead、reviewer、warm、resume／recovery 不改模型、引擎、recipe 或 verifier 命令。`allow_all` 仍用原選項，level=none＋task_recipe_compatibility；host 新增 confined 時 Task Service 沿用原 default 行為並列 gap。Claude acceptEdits 沒有 path check，cwd 不構成保護；A10 尚待 W12 live run。
 
+
 ## Operations 與唯一 owner（2026-10-08，Part A）
 
 [統一操作規格](operations-unification.md) Part A 已把 task.submit／pause／resume／mark_stage、task_send（session.send 的 task target）、task.verify、task.request_ted、task.command.reconcile 包成 OperationService actions。HTTP、原 MCP／RPC 和 CLI task-reconcile 共用原 Journal／TaskCoordinator；原結果增加 operation_id／operation_status。新增 scope 對照與拒絕碼見 [api-v1.md](api-v1.md)。有 key 時依驗證 actor 去重；無 key 的舊 controls 每次是獨立要求。Goose step_id 仍可重試。一般 session runtime actions 即使走 legacy service，也先提交原 task command，未知結果不重送。
