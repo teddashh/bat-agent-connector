@@ -524,9 +524,11 @@ async def test_needs_attention_can_be_cancelled_or_resumed(daemon, mock, monkeyp
     assert e.value.code == "NOT_RESUMABLE"
 
 
-async def test_waiting_does_not_use_up_the_read_back_budget(daemon):
+async def test_waiting_does_not_use_up_the_read_back_budget(daemon, monkeypatch):
     from bat_agent_connector.operations import ActionDef, Wait
 
+    # One forced poll per drain, even when journal I/O outlasts the synthetic one-second Wait.
+    monkeypatch.setattr("bat_agent_connector.operations.time.time", lambda: 1000.0)
     calls = {"n": 0}
 
     async def run(ctx):
