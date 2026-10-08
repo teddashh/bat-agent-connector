@@ -219,6 +219,11 @@ async def _merge(ctx: OpContext, repository: str, number: int, sha: str, method:
         await pr_delivery.check_scope(ctx, preview, expiry=False)
         result = "pending"
     elif status not in {200, 202}:
+        if status == 400:
+            again = await _read(gh.pull(repository, number), "read PR after the merge request was refused", ctx)
+            if again.get("merged") and (again.get("head") or {}).get("sha") == sha:
+                ctx.set_refs(merge_write_acknowledged=False)
+                return await _merged_result(ctx, again, preview, False, repository, number, method)
         code = "PR_NOT_MERGEABLE" if status == 400 else f"GITHUB_{status}"
         raise OperationError(code, (details.get("message") or r.get("message") or "merge refused")[:300])
     ctx.set_refs(merge_write_acknowledged=status in {200, 202} and not r.get("observed_only", False))

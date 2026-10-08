@@ -47,7 +47,7 @@ Scope `merge`。輸入：`target {repository, pull_number}`、`params {method}`�
    - 202：記下 request UUID。
    - 200 `merged`／`enqueued`：已合併或已在 queue。
    - 409：既有請求。只有 `expected_head_sha` 與方法相符才沿用它的 UUID，否則 `needs_attention`。
-   - 400：PR 不能合併，失敗。
+   - 400：先讀 PR；已在 reviewed head 合併則走正常結果驗證，否則仍 PR_NOT_MERGEABLE。
 4. 輪詢 `GET …/merge-async/{uuid}`：`pending` 轉 `waiting_external`；`failed`（分支保護或規則在執行時才判斷）轉 `needs_attention`；`enqueued` 等 PR 真正合併，queue 狀態不算合併。
 5. 讀回 PR，以 `merged` 與 `merge_commit_sha` 為準記錄實際合併版本。
 
@@ -227,7 +227,8 @@ Journal 保存必要的 before／intended／observed；沿用 api_events 的 act
 | 200 merged | GET PR 核對 reviewed head／真正 merged SHA，接結果驗證 |
 | 200／輪詢 enqueued | 記 queue，GET PR 等實際合併；不重送、不部署 |
 | 409 existing | 比 head、resolved method、merge_action=default，重查 repo／base／單 PR scope；缺證據或不同為 `EXISTING_MERGE_REQUEST`。default method 只有能證明解析成選定值才接受 |
-| 400／輪詢 failed | 沿用 PR_NOT_MERGEABLE／MERGE_FAILED，不能 bypass |
+| 400 | 先 GET PR；merged 且 head 等於 reviewed head 則走 merge.verify，不把拒絕的 PUT 歸因為本操作合併（merged_by_this_operation=false）。未合併／closed／不同 head 仍 PR_NOT_MERGEABLE；只讀拒絕或 ambiguous 時保留可恢復操作，resume 不重 PUT |
+| 輪詢 failed | 沿用 MERGE_FAILED，不能 bypass |
 | `merge.verify`（新增） | GET merged PR／commit parents、固定 base 到真正 merged SHA 的 comparison、受影響 PR 狀態；保存逐 PR 結果與 actual merged SHA |
 | submit 後 PR／commit／compare／stack／recent PR read 被拒（401／403／404） | GITHUB_401／403／404、needs_attention；保留 merge receipt／lock，修好 token／權限後 resume，不重 PUT。Verify 拒絕回執在 step 中保存、在 step 外轉 attention；uncertain submit reconcile 的拒絕亦可 resume |
 | UUID 404 | 保留已批准的 expired UUID 路徑：改查 PR／queue、不重 PUT；只有 PR 可讀才繼續觀測，PR 自身 401／403／404 仍 needs_attention |
@@ -405,6 +406,8 @@ Review follow-up 的新增回歸：
 | C04／C05、§16 submit／verify | `test_transient_scope_read_error_before_submit_is_resumable`（failed step 不存在、resume 僅一 PUT）；`test_checks_wait_only_rereads_head_and_base_before_final_scope`；`test_verify_accepts_affected_pr_merged_after_this_merge`；`test_verify_stops_updated_pr_pagination_at_admission`（排序與 pages） |
 
 #33 rebase 後新增：`test_refused_read_after_merge_submit_needs_attention_and_resumes`（PR／commit／compare／recent PR／stack／affected PR × 401／403／404，連續 resume、單一 PUT）；`test_refused_read_after_metadata_write_needs_attention_and_resumes`（ACK readback／lost PATCH reconcile × 三種拒絕，單一 PATCH）；`test_metadata_refused_read_before_patch_fails_fast`（plan／pre-PATCH × 三種拒絕）；`test_readonly_merge_verification_refusal_before_write_fails_fast`。對應 C04／C05／C07、計畫 §09／§10／§15／§16。
+
+Issue #32 low item：`test_merge_async_400_reads_pr_before_failing`（open／closed／reviewed head 已 merged／其他 head 已 merged，GET 必在 PUT 後；不 bypass verify／零第二 PUT）；`test_merge_async_400_readback_refusal_remains_resumable`（401／403／404、修復後正常驗證、不重送）。對應 C04／C05、計畫 §16。
 
 以下均為 Part B（第二步）規劃，尚未聲稱完成：
 

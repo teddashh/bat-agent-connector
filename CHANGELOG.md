@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Merge-async 400 recovery (#32 low item; [design](docs/design/delivery.md), plan §16, C04/C05): re-read the PR
+  before recording refusal. An already merged reviewed head goes through normal result verification without
+  claiming this operation merged it; all other states retain PR_NOT_MERGEABLE. Refused readback stays resumable,
+  and neither recovery path sends a second PUT.
+
 - Delivery Part A after #33 ([design](docs/design/delivery.md), plan §09/§10/§15/§16, C04/C05/C07): refused GitHub
   reads after merge.submit or a metadata PATCH retain needs_attention and resume with fresh readonly verification,
   including comparison and recent-PR pages. Readonly plan/verify steps do not count as sent writes; pre-write
