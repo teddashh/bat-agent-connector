@@ -739,7 +739,8 @@ async def test_b05_many_records_use_constant_steps_and_no_children(daemon):
         )
     doc = await preview(d)
     op, _ = d.ops.create(PERSON, **hub.apply_request(doc))
-    await d.ops.drain(timeout=60)
+    # A thousand individual commits can exceed a minute on the shared test filesystem.
+    await d.ops.drain(timeout=180)
     op = d.ops.get(op["operation_id"])
     assert op["status"] == "succeeded", (op["status"], op["error_code"])
     assert len(op["steps"]) == 4
