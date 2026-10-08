@@ -324,6 +324,9 @@ class Journal:
                     FROM events ORDER BY event_id""")
                 self.db.execute("PRAGMA user_version=1")
 
+        from .cleanup import migrate
+        migrate(self)
+
     def _drop_legacy_outbox(self):
         """Remove the retired chat outbox so no historical event can ever be published.
 

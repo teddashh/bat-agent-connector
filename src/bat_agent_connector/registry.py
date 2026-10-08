@@ -42,12 +42,29 @@ def _read(path: Path) -> list[dict]:
         return []
 
 
-def _write(path: Path, items: list[dict]) -> None:
+def _write_document(path: Path, data: dict) -> None:
     tmp = path.with_suffix(".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
-        json.dump({"sessions": items}, fh, indent=1)
+        json.dump(data, fh, indent=1)
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp, path)
+    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write(path: Path, items: list[dict]) -> None:
+    # All callers hold _locked. Preserve cross-process cleanup reservations and tombstones.
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        data = {}
+    data["sessions"] = items
+    _write_document(path, data)
 
 
 def list_entries(host: str | None = None, active_only: bool = False) -> list[dict]:
