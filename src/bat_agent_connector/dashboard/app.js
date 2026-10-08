@@ -420,9 +420,17 @@ async function viewDelivery(main) {
   const repo = h("input", { placeholder: "owner/name", value: sessionStorage.getItem("batc.repo") || "" });
   const num = h("input", { placeholder: "123", inputmode: "numeric", size: 6, value: sessionStorage.getItem("batc.pr") || "" });
   const card = h("div", { class: "panel delivery-card" });
+  const groups = new Map();
+  for (const r of state.caps?.deploy_recipes || []) {
+    const key = JSON.stringify([r.repository.toLowerCase(), r.environment]);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  const environments = [...groups.values()].map(environmentCard);
+  main.append(h("h1", {}, t("nav_delivery")), ...environments.map(e => e.card));
   let selectedMethod = "";
   let reviewedPreview = null;
-  main.append(h("h1", {}, t("nav_delivery")),
+  main.append(h("h2", {}, t("dep_pull_request")),
     h("div", { class: "filters delivery-controls" }, repo, num,
       h("button", { class: "secondary", onclick: () => load() }, t("load_pr"))), card);
   if (!repo.value && state.caps?.repositories?.length) repo.value = state.caps.repositories[0].repository;
@@ -435,8 +443,7 @@ async function viewDelivery(main) {
       if (selectedMethod) query.set("method", selectedMethod);
       if (fromEvent) query.set("from_event", "true");
       const pr = (await api("GET", `/repositories/${repo.value}/pulls/${num.value}?${query}`)).pull_request;
-      if (holdRender(fromEvent, opens)) { idleReload = () => load(null, true); return; }
-      freshPage();
+      if (holdRender(fromEvent, opens) || editing) { idleReload = () => load(null, true); return; }
       const status = h("div", { "aria-live": "polite" });
       const target = { repository: pr.repository, pull_number: Number(pr.pull_number) };
       if (!fromEvent || !reviewedPreview) reviewedPreview = pr.merge_preview;
@@ -459,13 +466,19 @@ async function viewDelivery(main) {
         disabled: blocked || !pr.merge.allowed || !may("merge"),
         onclick: () => run("github.pr.merge", {}, `merge.${pv.preview_id}`) }, t("merge"))];
       for (const r of pr.recipes) {
-        buttons.push(h("button", { class: "secondary", disabled: blocked || !pr.merge.allowed || !may("merge") || !may("deploy"),
-          onclick: () => run("delivery.merge_and_deploy", { target: { recipe: r.name } }, `merge_deploy.${pv.preview_id}.${r.name}`) },
-        t("merge_and_deploy_to", { env: r.environment })));
-        if (pr.merged && pr.merge_commit_sha) buttons.push(h("button", { class: "secondary", disabled: !may("deploy"),
+        buttons.push(h("button", { class: "secondary", disabled: blocked || !pr.merge.allowed || !may("merge") || !may("deploy") || !state.caps?.deploy_recipes?.find(c => c.name === r.name)?.readiness?.ready,
           onclick: async () => {
             try {
-              const op = await submit("deployment.start", { recipe: r.name }, { source_sha: pr.merge_commit_sha }, {}, `deploy.${r.name}.${pr.merge_commit_sha}`);
+              const deploymentPreview = (await api("GET", `/deployments/preview?recipe=${encodeURIComponent(r.name)}`)).preview;
+              await run("delivery.merge_and_deploy", { target: { recipe: r.name }, pre: { ...pre, ...deploymentPreview.preconditions } }, `merge_deploy.${pv.preview_id}.${r.name}`);
+            } catch (e) { fill(status, errorBox(e)); }
+          } },
+        t("merge_and_deploy_to", { env: r.environment })));
+        if (pr.merged && pr.merge_commit_sha) buttons.push(h("button", { class: "secondary", disabled: !may("deploy") || !state.caps?.deploy_recipes?.find(c => c.name === r.name)?.readiness?.ready,
+          onclick: async () => {
+            try {
+              const deploymentPreview = (await api("GET", `/deployments/preview?recipe=${encodeURIComponent(r.name)}`)).preview;
+              const op = await submit("deployment.start", { recipe: r.name }, { source_sha: pr.merge_commit_sha }, deploymentPreview.preconditions, `deploy.${r.name}.${pr.merge_commit_sha}`);
               fill(status, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
             } catch (e) { fill(status, errorBox(e)); }
           } }, t("deploy_to", { env: r.environment })));
@@ -495,8 +508,216 @@ async function viewDelivery(main) {
         pr.integration?.allowed ? integrationPanel(pr, load) : null);
     } catch (e) { if (!holdRender(fromEvent, opens)) fill(card, errorBox(e)); }
   };
-  await load();
-  return liveReload(() => load(null, true), ["operation", "integration"]);
+  const reload = async (fromEvent = true) => { await Promise.all(environments.map(e => e.load(fromEvent))); await load(null, fromEvent); };
+  await reload(false);
+  return liveReload(reload, ["operation", "integration", "deployment", "deployment_environment"]);
+}
+
+function deploymentIdentity(identity, empty = "dep_no_version") {
+  if (!identity?.source_sha && !identity?.artifact_id) return h("p", { class: "muted" }, t(empty));
+  return h("div", { class: "deployment-identity" },
+    identity.source_sha ? h("code", {}, identity.source_sha) : null,
+    identity.artifact_id ? h("p", {}, t("dep_artifact", { id: identity.artifact_id }),
+      identity.artifact_digest ? [" · ", h("code", {}, identity.artifact_digest)] : null) : null);
+}
+function deploymentState(value) {
+  return chip(t(`dep_state_${value || "unverified"}`), ["failed", "needs_attention", "uncertain"].includes(value) ? "bad"
+    : value === "succeeded" ? "ok" : "warn");
+}
+function deploymentTime(value) { return value ? when(Number(value) * 1000) : t("dep_not_observed"); }
+function heldDetails(title, children, onOpen) {
+  let counted = false;
+  const details = h("details", { class: "row-details", ontoggle: () => {
+    if (details.open !== counted) {
+      counted = details.open;
+      if (counted) { drawerOpens += 1; if (onOpen) onOpen(); }
+      setEditing(editing + (counted ? 1 : -1));
+    }
+  } }, h("summary", {}, title), ...children);
+  details.closeHeld = () => {
+    if (counted) { counted = false; setEditing(editing - 1); }
+    details.open = false;
+  };
+  return details;
+}
+function deploymentReceipt(dep) {
+  const body = h("div", {});
+  let read = false;
+  const details = heldDetails(t("dep_operation_details"), [body], async () => {
+    if (read) return;
+    read = true;
+    try {
+      const op = (await api("GET", `/operations/${dep.operation_id}`)).operation;
+      const saved = op.external_refs?.deployment_id && op.external_refs.deployment_id !== dep.deployment_id
+        ? (await api("GET", `/deployments/${op.external_refs.deployment_id}`)).deployment : dep;
+      const values = [[t("dep_operation"), h("a", { href: `#/op/${op.operation_id}` }, op.operation_id)],
+        [t("dep_status"), opStatus(op)], [t("dep_run"), saved.run_id], [t("dep_attempt"), saved.run_attempt],
+        [t("dep_error_code"), op.error_code || saved.error_code || saved.reconciliation_error]];
+      fill(body, h("dl", { class: "kv" }, ...values.filter(([, v]) => v !== null && v !== undefined && v !== "")
+        .flatMap(([label, value]) => [h("dt", {}, label), h("dd", {}, value)])),
+        op.status_reason ? h("p", {}, op.status_reason) : null,
+        ...(op.steps || []).map(s => h("div", { class: "row" }, h("code", {}, s.name), h("code", {}, s.status))));
+    } catch (e) { fill(body, errorBox(e)); read = false; }
+  });
+  return details;
+}
+function deploymentLimits(limits) {
+  return h("div", { class: "deployment-limits" }, h("span", { class: "muted" }, t("dep_not_undone")),
+    limits?.length ? h("ul", {}, ...limits.map(value => h("li", {}, value))) : h("p", { class: "muted" }, t("dep_no_limits")));
+}
+function deploymentPreviewSummary(preview) {
+  return h("p", { class: "muted", "data-testid": "deployment-preview-generation" },
+    t("dep_preview_generation", { env: preview.environment, generation: preview.environment_generation }));
+}
+function deploymentIntent(dep, kind, reload) {
+  const out = h("div", { "aria-live": "polite" });
+  const d = drawer();
+  let busy = false, accepted = false, preview = null;
+  const scope = `deployment.${kind}.${dep.deployment_id}.${crypto.randomUUID()}`;
+  const confirm = h("button", { class: kind === "rollback" ? "danger" : "primary", disabled: true,
+    "data-testid": `deployment-${kind}-confirm`, onclick: async () => {
+      if (busy || accepted || !preview) return;
+      busy = true; confirm.disabled = true;
+      try {
+        const action = kind === "rollback" ? "deployment.rollback" : "deployment.start";
+        const params = kind === "rollback" ? { deployment_id: dep.deployment_id }
+          : { source_sha: dep.identity.source_sha, retry_of: dep.deployment_id };
+        let op = await submit(action, { recipe: dep.recipe }, params, preview.preconditions, scope);
+        while (["accepted", "running"].includes(op.status) && d.box.isConnected && !d.box.hidden) {
+          await sleep(1000);
+          op = (await api("GET", `/operations/${op.operation_id}`)).operation;
+        }
+        if (["DEPLOY_PREVIEW_REQUIRED", "ENVIRONMENT_CHANGED", "RECIPE_CHANGED"].includes(op.error_code)) {
+          fill(out, h("p", { class: "note warn" }, t("dep_stale_preview")), deploymentReceipt({ operation_id: op.operation_id }));
+          await refreshPreview();
+        } else {
+          accepted = true;
+          fill(out, h("p", {}, opStatus(op), " · ", h("a", { href: `#/op/${op.operation_id}` }, t("dep_open_operation"))),
+            deploymentReceipt({ operation_id: op.operation_id }));
+        }
+      } catch (e) {
+        fill(out, h("p", { class: "error" }, t("dep_refused")), heldDetails(t("dep_operation_details"), [errorBox(e)]));
+        if (["DEPLOY_PREVIEW_REQUIRED", "ENVIRONMENT_CHANGED", "RECIPE_CHANGED"].includes(e.code)) {
+          out.prepend(h("p", { class: "note warn" }, t("dep_stale_preview")));
+          await refreshPreview();
+        }
+      } finally { busy = false; confirm.disabled = accepted || !preview?.readiness?.ready; }
+    } }, t(kind === "rollback" ? "dep_confirm_rollback" : "dep_confirm_retry"));
+  const previewBox = h("div", {});
+  async function refreshPreview() {
+    preview = null;
+    confirm.disabled = true;
+    try {
+      preview = (await api("GET", `/deployments/preview?recipe=${encodeURIComponent(dep.recipe)}`)).preview;
+      fill(previewBox, deploymentPreviewSummary(preview),
+        preview.readiness?.ready ? null : h("p", { class: "note warn" }, t("dep_missing_verification")));
+      confirm.disabled = busy || accepted || !preview.readiness?.ready;
+    } catch (e) { fill(previewBox, errorBox(e)); }
+  }
+  fill(d.box, h("h3", {}, t(kind === "rollback" ? "dep_rollback_review" : "dep_retry_review")),
+    deploymentIdentity(dep.identity), h("p", {}, `${dep.repository} · ${dep.environment}`),
+    kind === "rollback" ? deploymentLimits(dep.rollback?.not_undone) : h("p", { class: "muted" }, t("dep_retry_only")),
+    previewBox, out, h("div", { class: "actions" }, confirm,
+      h("button", { class: "secondary", onclick: () => {
+        d.box.querySelectorAll("details[open]").forEach(el => el.closeHeld?.());
+        d.close(); reload();
+      } }, t("close"))));
+  const button = h("button", { class: "secondary", "data-testid": `deployment-${kind}`, onclick: () => {
+    if (!d.box.hidden) return;
+    d.open(); refreshPreview();
+  } }, t(kind === "rollback" ? "dep_rollback" : "dep_retry", { sha: (dep.identity?.source_sha || "").slice(0, 8) }));
+  return { button, box: d.box };
+}
+function deploymentRecord(dep, env, reload, compact = false) {
+  if (!dep) return h("p", { class: "muted" }, t("dep_no_version"));
+  const r = (state.caps?.deploy_recipes || []).find(r => r.name === dep.recipe);
+  dep = { ...dep, repository: dep.repository || r?.repository || "",
+    environment: dep.environment || r?.environment || env.environment || t("dep_no_version") };
+  const canDeploy = Boolean(state.caps?.features?.deploy && r?.readiness?.ready
+    && (state.caps?.actions || []).some(a => a.action === "deployment.start" && a.allowed) && may("deploy"));
+  const disabledReason = !may("deploy") ? "dep_needs_scope" : !r ? "dep_missing_recipe"
+    : !r.readiness?.ready ? "dep_missing_verification" : "dep_disabled";
+  const actions = [], drawers = [];
+  if (!compact && dep.rollback_eligible && !dep.is_current) {
+    const intent = deploymentIntent(dep, "rollback", reload);
+    intent.button.disabled = !canDeploy || !(state.caps?.actions || []).some(a => a.action === "deployment.rollback" && a.allowed);
+    actions.push(intent.button); drawers.push(intent.box);
+    if (intent.button.disabled) actions.push(h("span", { class: "muted" }, t(disabledReason)));
+  }
+  if (!compact && dep.state === "failed") {
+    if (dep.provider_terminal && !dep.legacy && dep.identity?.source_sha) {
+      const intent = deploymentIntent(dep, "retry", reload);
+      intent.button.disabled = !canDeploy;
+      actions.push(intent.button); drawers.push(intent.box);
+      if (!canDeploy) actions.push(h("span", { class: "muted" }, t(disabledReason)));
+    } else actions.push(h("span", { class: "muted" }, t(dep.provider_terminal ? "dep_retry_unavailable" : "dep_provider_pending")));
+  }
+  let rollbackReason = dep.rollback_reason;
+  if (rollbackReason === "ROLLBACK_ARTIFACT_UNAVAILABLE" && dep.identity?.artifact_expires_at
+      && Date.parse(dep.identity.artifact_expires_at) <= Date.now()) rollbackReason = "ROLLBACK_ARTIFACT_EXPIRED";
+  return h("div", { class: "deployment-record", "data-deployment": dep.deployment_id },
+    h("div", { class: "deployment-record-heading" }, deploymentState(dep.state), h("span", { class: "muted" }, dep.recipe)),
+    deploymentIdentity(dep.identity),
+    compact ? h("p", {}, h("a", { href: `#/op/${dep.operation_id}` }, t("dep_open_operation")))
+      : h("p", { class: "muted" }, `${dep.environment} · ${deploymentTime(dep.created_at)}`),
+    dep.state === "superseded" ? h("p", {}, t("dep_superseded"), " ",
+      env.desired ? h("a", { href: `#/op/${env.desired.operation_id}` }, t("dep_new_desired")) : null, " · ",
+      dep.provider_url ? h("a", { href: dep.provider_url, target: "_blank", rel: "noopener" }, t("dep_provider_run")) : null) : null,
+    (dep.state === "needs_attention" || dep.reconciliation_error) ? h("p", { class: "note warn" }, t("dep_attention")) : null,
+    !compact && rollbackReason ? h("p", { class: "muted" }, t(`dep_${rollbackReason}`)) : null,
+    !compact && dep.rollback_eligible && !dep.is_current ? deploymentLimits(dep.rollback?.not_undone) : null,
+    actions.length ? h("div", { class: "actions" }, ...actions) : null,
+    deploymentReceipt(dep), ...drawers);
+}
+function environmentCard(group) {
+  const card = h("section", { class: "panel delivery-card environment-card", "data-environment": group[0].environment });
+  const cursors = [null];
+  let page = 0, next = null, loading = false;
+  async function load(fromEvent = false) {
+    const opens = drawerOpens;
+    if (editing || (fromEvent && typing())) { idleReload = () => load(true); return; }
+    if (loading) return;
+    loading = true;
+    try {
+      const query = new URLSearchParams({ recipe: group[0].name, limit: "5" });
+      if (cursors[page]) query.set("cursor", cursors[page]);
+      const [environment, history] = await Promise.all([
+        api("GET", `/deployment-environments?recipe=${encodeURIComponent(group[0].name)}`),
+        api("GET", `/deployment-environments/history?${query}`)]);
+      if (holdRender(fromEvent, opens) || editing) { idleReload = () => load(true); return; }
+      const env = environment.environment;
+      next = history.next_cursor;
+      const observed = env.observed || env.current?.evidence?.runtime?.observed;
+      const needs = env.attention || env.desired?.state === "needs_attention" || env.desired?.reconciliation_error
+        || env.current?.state === "needs_attention" || env.current?.reconciliation_error;
+      const previous = h("button", { class: "secondary", disabled: page === 0, "data-testid": "history-previous",
+        onclick: () => { if (loading) return; previous.disabled = more.disabled = true; page -= 1; load(); } }, t("dep_previous"));
+      const more = h("button", { class: "secondary", disabled: !next, "data-testid": "history-next",
+        onclick: () => { if (loading) return; previous.disabled = more.disabled = true; cursors[++page] = next; load(); } }, t("dep_next"));
+      const verified = env.last_verified;
+      fill(card, h("div", { class: "deployment-card-heading" }, h("h2", {}, group[0].environment),
+        needs ? chip(t("dep_attention"), "warn") : null), h("p", { class: "muted" }, group[0].repository, " · ", t("dep_generation", { generation: env.desired_generation })),
+        needs ? h("p", { class: "note warn" }, t(env.attention === "ENVIRONMENT_VERSION_DRIFT" ? "dep_drift" : "dep_attention_help")) : null,
+        h("div", { class: "deployment-versions" },
+          h("div", {}, h("h3", {}, t("dep_desired")), deploymentRecord(env.desired, env, load, true)),
+          h("div", {}, h("h3", {}, t("dep_observed")), deploymentIdentity(observed),
+            h("p", { class: "muted" }, t("dep_observed_at", { time: deploymentTime(observed?.observed_at || env.current?.evidence?.runtime?.checked_at) })),
+            env.current?.evidence?.runtime?.summary ? h("p", { class: "muted" }, runtimeSummary(env.current.evidence.runtime)) : null)),
+        h("div", { class: "deployment-last-verified" }, h("h3", {}, t("dep_last_verified")), deploymentIdentity(verified?.identity),
+          h("p", { class: "muted" }, t("dep_verified_at", { time: deploymentTime(verified?.evidence?.runtime?.checked_at) })),
+          verified?.evidence?.runtime?.summary ? h("p", { class: "muted" }, runtimeSummary(verified.evidence.runtime)) : null,
+          verified ? deploymentReceipt(verified) : null),
+        h("h3", {}, t("dep_history")), h("div", { "data-testid": "deployment-history" },
+          ...(history.items.length ? history.items.map(dep => deploymentRecord(dep, env, load)) : [h("p", { class: "muted" }, t("dep_no_history"))])),
+        !history.items.length && group.every(r => !r.rollback?.supported) ? h("p", { class: "muted" }, t("dep_ROLLBACK_UNSUPPORTED")) : null,
+        h("div", { class: "actions deployment-pagination" }, previous, h("span", { class: "muted" }, t("dep_page", { page: page + 1 })), more));
+    } catch (e) { if (!holdRender(fromEvent, opens) && !editing) fill(card, errorBox(e)); }
+    finally { loading = false; }
+  }
+  return { card, load };
+}
+function runtimeSummary(evidence) {
+  return t(evidence.version_checked ? evidence.health_checked ? "dep_version_health" : "dep_version_only" : "dep_health_only");
 }
 
 function metadataDrawer(pr, reload) {
@@ -712,7 +933,8 @@ async function viewOperation(main, id) {
       const retry = refs.merged_sha && op.action === "delivery.merge_and_deploy" && op.status === "failed"
         ? h("button", { class: "primary", onclick: async () => {
           try {
-            const o = await submit("deployment.start", { recipe: op.target.recipe }, { source_sha: refs.merged_sha }, {},
+            const preview = (await api("GET", `/deployments/preview?recipe=${encodeURIComponent(op.target.recipe)}`)).preview;
+            const o = await submit("deployment.start", { recipe: op.target.recipe }, { source_sha: refs.merged_sha }, preview.preconditions,
               `deploy.${op.target.recipe}.${refs.merged_sha}`);
             location.hash = `#/op/${o.operation_id}`;
           } catch (e) { panel.append(errorBox(e)); }

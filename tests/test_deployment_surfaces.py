@@ -203,3 +203,41 @@ async def test_capabilities_missing_runtime_verification_disables_deploys(make_d
     assert not caps["features"]["deploy"]
     assert caps["features"]["deployment_history"]
     assert caps["deploy_recipes"][0]["readiness"]["missing"] == ["verification"]
+
+
+async def test_environment_history_read_pages_aliases_and_legacy_offline_with_observe_scope(make_daemon, gh):
+    from bat_agent_connector import deployment_store as store
+    from tests.test_deployment_recovery import legacy_operation
+    from tests.test_deployments import deployed
+
+    d = make_daemon()
+    source_on_main(gh)
+    cfg = d.ops.context["github_config"]
+    cfg.recipes["alias"] = replace(cfg.recipes["prod"], name="alias")
+    old, legacy = legacy_operation(d, status="failed", error="DEPLOY_FAILED")
+    one = await deployed(d, gh)
+    saved = deployment.get(d.ops, one["result"]["deployment_id"])
+    store.update(d.journal, saved["deployment_id"], facts={"reconciliation_error": "RECONCILE_FAILED"})
+    # A different recipe contributes to the same environment history without duplicating a mechanism.
+    d.ops.db.execute("UPDATE deployments SET recipe='alias' WHERE deployment_id=?", (saved["deployment_id"],))
+    before = len(gh.requests)
+    server = await asyncio.start_server(d._handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    viewer = token(d, "history-viewer", "observe")
+    deployer = token(d, "no-observe", "deploy")
+    try:
+        route = "/api/v1/deployment-environments/history?recipe=prod&limit=1"
+        status, page = await http(port, "GET", route, tok=viewer)
+        assert status == 200 and len(page["items"]) == 1 and page["next_cursor"]
+        assert page["items"][0]["recipe"] == "alias"
+        assert page["items"][0]["reconciliation_error"] == "RECONCILE_FAILED"
+        second = (await http(port, "GET", route + "&cursor=" + page["next_cursor"], tok=viewer))[1]
+        assert second["items"][0]["deployment_id"] == legacy["deployment_id"] and second["next_cursor"] is None
+        assert second["items"][0]["operation_id"] == old["operation_id"]
+        assert (await http(port, "GET", route, tok=deployer))[0] == 403
+        assert (await http(port, "GET", route + "&cursor=invalid", tok=viewer))[0] == 422
+        assert len(gh.requests) == before
+        assert "token_ref" not in json.dumps(page)
+    finally:
+        server.close()
+        await server.wait_closed()

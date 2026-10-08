@@ -120,6 +120,7 @@ class ApiV1:
             ("GET", r"/api/v1/deployments", self.deployments, "observe"),
             ("GET", r"/api/v1/deployments/(?P<dep>dep_[0-9a-f]{32})", self.deployment, "observe"),
             ("GET", r"/api/v1/deployment-environments", self.deployment_environment, "observe"),
+            ("GET", r"/api/v1/deployment-environments/history", self.deployment_environment_history, "observe"),
             ("GET", r"/api/v1/integrations/candidates", self.integration_candidates, "observe"),
             ("GET", r"/api/v1/integrations/previews/(?P<pv>ipv_[0-9a-f]{32})", self.integration_preview, "observe"),
             ("GET", r"/api/v1/integrations", self.integrations, "observe"),
@@ -431,6 +432,10 @@ class ApiV1:
 
     async def deployment_environment(self, query, **_):
         return 200, {"environment": deployment.environment_status(self.daemon.ops, self._q(query, "recipe"))}
+
+    async def deployment_environment_history(self, query, **_):
+        return 200, deployment.environment_history(self.daemon.ops, self._q(query, "recipe"),
+                                                   cursor=self._q(query, "cursor"), limit=self._int(query, "limit", 50))
 
     async def integration_candidates(self, query, **_):
         host = self._q(query, "host")

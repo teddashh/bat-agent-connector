@@ -2,6 +2,13 @@
 
 ## Next release (unreleased)
 
+- Dashboard Delivery now groups configured recipes into repository/environment cards: selected, observed and last
+  verified identities, cursor-paged history, rollback readiness and not_undone limits, fixed-identity deploy retry,
+  superseded links and drift attention. Confirmations bind preview preconditions, refuse stale selections without
+  automatic resubmission and survive SSE; scope-disabled buttons explain why. Receipts expand separately. A thin
+  observe-only environment history HTTP read reuses saved history and cursors without provider calls. English and
+  zh-TW browser flows pass at 390/768/1440 px ([design](docs/design/delivery.md), plan §09/§10/§17/§18, C07/D02–D06).
+
 - Stopped deployment provider reads use persistent 15-second exponential backoff, capped at the configured reconcile
   interval and reset by changed provider evidence. Successful reads clear stale errors; a bad row records
   RECONCILE_FAILED and cannot starve later rows ([design](docs/design/delivery.md), plan §09/§17, D03/D05).
@@ -22,7 +29,7 @@
   history and saved SHA/artifact rollback through the same recipe; caller-token HTTP/MCP/CLI start/retry/rollback reads
   and writes. A read-only reconciliation loop handles cancelled runs, external reruns and version drift, without
   dispatching or resuming. Superseded generations never become current. History backfill is allocated data step 3
-  after observation step 2; DDL takes no user_version. Dashboard environment card follows in the next round.
+  after observation step 2; DDL takes no user_version. The Dashboard environment card is included in this release.
 - **Breaking deployment contract:** recipes without `verification` now refuse deploys with
   DEPLOY_VERIFICATION_REQUIRED; history remains readable. Add this exact setting to `[[deploy.recipes]]`, replacing
   the reserved example URL with your configured runtime endpoint (returns repository_id/environment and required
@@ -86,7 +93,7 @@
   branch chains and indirect merges are refused. Merge verifies actual results, accepts normal base movement after
   submission and reports the extra commits; combined deploy uses the actual verified merged SHA. HTTP, MCP
   github_pr_update/github_pr_merge, caller-token delivery CLI, Dashboard metadata drawer/scope preview and both
-  skills are aligned. Contract version remains the ISO change date 2026-10-08. The Dashboard environment card follows the Part B backend round.
+  skills are aligned. Contract version remains the ISO change date 2026-10-08. The Dashboard environment card is delivered in Part B.
 - Delivery Part A review fixes ([design](docs/design/delivery.md), plan §10/§15/§16, C04/C05/C07):
   uncertain metadata writes still unchanged after ten minutes settle as not applied,
   releasing the PR without another PATCH. Merge previews reuse identical documents, prune expired unreferenced
