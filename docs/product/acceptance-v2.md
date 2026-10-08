@@ -1,6 +1,6 @@
 # Tauri v2：R10 驗收證據矩陣
 
-證據快照：2026-10-08 23:03 UTC；已合併 main 至 `8c755a3`（#38 merge）。依產品負責人提供的
+證據快照：2026-10-08 23:26 UTC；產品整合 main 至 `6d88f4d`（#51 merge）。依產品負責人提供的
 Tauri 第二版計畫 §24，保留 **A01–A10、B01–B05、C01–C07、D01–D06、E01–E06、T01–T12，共 46 項**。
 範圍見 [realignment-v2.md](realignment-v2.md)，進度見 [implementation-status.md](implementation-status.md)。
 此表不是通過清單：**尚未建立同一候選版本的 installed／live 證據，M1、M2、M3 及正式 v1 均未完成。**
@@ -19,23 +19,23 @@ Tauri 第二版計畫 §24，保留 **A01–A10、B01–B05、C01–C07、D01–
 | --- | --- | --- |
 | M：#35、#36、#37 與既有核心 | [main `2ac5715`](https://github.com/teddashh/bat-agent-connector/tree/2ac5715549e08e36cfc0d2fd6b2c9e84a39a9334)：policy、operation/task gates、confinement、observation、checkpoints、integration | #37 已合併；head `09faafd` 四個 Python CI jobs 綠，本機 3.13/3.10 各 1619 passed/33 skipped。逐 host runtime／installed/live 尚缺。 |
 | C：[#38](https://github.com/teddashh/bat-agent-connector/pull/38) cleanup | [`edf5683`](https://github.com/teddashh/bat-agent-connector/tree/edf5683af8a79ec802192b84a0b23029fa770ad5)：`cleanup.py`、`cleanup_host.py`、`test_cleanup*.py` | 已合併 `8c755a3`；四個 Python CI jobs 各 1835 passed/33 skipped。保留較早本機 3.10 的 settlement deadline failure 與原碼重跑紀錄；不以 retry 取代 full。Task-owned cleanup 未交付。 |
-| S：[#43](https://github.com/teddashh/bat-agent-connector/pull/43) skills | [`f43f3c2`](https://github.com/teddashh/bat-agent-connector/tree/f43f3c2237d4c5092326a67fd5c7b90e6979f680)：canonical workflow `.3`、generator、principal-only MCP | 該 head 四個 Python CI jobs 各 1851 passed/33 skipped，已進整合候選；installer 尚未安裝此組合。 |
-| U：[#44](https://github.com/teddashh/bat-agent-connector/pull/44) desktop foundation | [`5bccb63`](https://github.com/teddashh/bat-agent-connector/tree/5bccb63594b10fe61a772e45f3198e8b3969415e)：shared frontend、Rust bridge/main、capabilities、desktop design | 已進候選；保留既有 packaging/Linux WebKit N 證據，最新 head CI 另查。Windows install/tray/跨登入尚缺。 |
-| F：[#45](https://github.com/teddashh/bat-agent-connector/pull/45) Fleet desktop | [`69f94d2`](https://github.com/teddashh/bat-agent-connector/tree/69f94d2719ba4c428392f087782e7ae4d290924e)：`fleet.rs`、`fleet.spec.ts` | 已進候選；既有 Windows 固定 PS subprocess 與 packaging 證據不代替最後組合。Rust supervisor parity、installed Kit 合驗尚缺。 |
+| S：[#43](https://github.com/teddashh/bat-agent-connector/pull/43) skills | [`f43f3c2`](https://github.com/teddashh/bat-agent-connector/tree/f43f3c2237d4c5092326a67fd5c7b90e6979f680)：canonical workflow `.3`、generator、principal-only MCP | 該 head 四個 Python CI jobs 各 1851 passed/33 skipped，已合併；installer 已改 pin 最終整合候選 `.4`，未實際安裝。 |
+| U：[#44](https://github.com/teddashh/bat-agent-connector/pull/44) desktop foundation | [`5bccb63`](https://github.com/teddashh/bat-agent-connector/tree/5bccb63594b10fe61a772e45f3198e8b3969415e)：shared frontend、Rust bridge/main、capabilities、desktop design | 已合併；該 head 四個 Python jobs 各 1878/33，packaging 通過；保留 Linux WebKit N 證據。Windows install/tray/跨登入尚缺。 |
+| F：[#45](https://github.com/teddashh/bat-agent-connector/pull/45) Fleet desktop | [`69f94d2`](https://github.com/teddashh/bat-agent-connector/tree/69f94d2719ba4c428392f087782e7ae4d290924e)：`fleet.rs`、`fleet.spec.ts` | 已合併；該 head 四個 Python jobs 各 1878/33、Windows 固定 PS subprocess/packaging 通過，候選整組另列。Rust supervisor parity、installed Kit 合驗尚缺。 |
 | K：Fleet Kit [#8](https://github.com/teddashh/bat-fleet-kit/pull/8) | [merge `d3697dc`](https://github.com/teddashh/bat-fleet-kit/commit/d3697dc)，[reviewed head `2ec4b11`](https://github.com/teddashh/bat-fleet-kit/tree/2ec4b11bc010bfd669040e942648c741b63d0b7c)：`client/fleet-desktop.ps1`、`tests/fleet-*.tests.ps1` | 已合併；Windows PS 5.1／7、Linux PS 7 CI；所有環境均為合成 fixtures 或自有測試程序，未安裝。 |
-| A：[#46](https://github.com/teddashh/bat-agent-connector/pull/46) artifacts Part A | [`560870b`](https://github.com/teddashh/bat-agent-connector/tree/560870b568ffa202d01501c3e553fbc3011c3561)：store/host、exact replica cleanup、binary upload bridge | Draft，已進候選；admission/fixture 修正已含，focused/peer 證據。跨 host Git、完整 native file/save/download 尚缺。 |
-| D：[#47](https://github.com/teddashh/bat-agent-connector/pull/47) Delivery Part B | [`9874eae`](https://github.com/teddashh/bat-agent-connector/tree/9874eae4ae2c6622a866a792dff45d010dd16dd7)：deployment/store/verifier、owner/scope/history、shared UI | `831d670` CI 兩項舊 fixture 假設已修（canonical UI source、latest data step）；14 受影響 tests 兩版本通過。新 CI 待確認，無真 deployed version 證據。 |
-| O：[#48](https://github.com/teddashh/bat-agent-connector/pull/48) R04 UI | [`90e2392`](https://github.com/teddashh/bat-agent-connector/tree/90e2392bb8409c1d37cb76f27c8caae72af8e00c)：observation UI、pending/linked events、`desktop/tests/observation*` | 已含 D；browser、native IPC mock、真中央加 MockBat 的 F 證據；最新 head CI 待確認，不是 M1。 |
-| I：[#49](https://github.com/teddashh/bat-agent-connector/pull/49) R01 interrupt | [`3877da5`](https://github.com/teddashh/bat-agent-connector/tree/3877da5d0f8dc949fe19e3d8bfc61455d1eef5e0)：legacy interrupt adapter、`test_interrupt_operations.py` | 已含 D；focused／peer 證據，最新 head CI 待確認。只是 Part B 第一個 slice，其他 legacy mutations 尚未統一。 |
-| B1：[#50](https://github.com/teddashh/bat-agent-connector/pull/50) manual single-file capture | [`c3b4abd`](https://github.com/teddashh/bat-agent-connector/tree/c3b4abd2617f4d46a1f35beb0230fa1bb5a4d80e)：`artifact_capture*.py`、capture/interrupt/principal tests | Draft stacked on #49；139 focused tests 各 Python 版本與 38 seam checks 通過，已進候選。同 credential/雙 scope replay/control 已審；UI/native preview allowlist、B2/C 尚缺。 |
-| P：私有 installer draft #6 | `d33ddbf`：canonical pin/digest、principal-only、保留既有配置的 installer tests | 僅版本／測試來源記錄；不複製私有配置。候選 pin 仍須更新、整合審查與實際安裝。 |
+| A：[#46](https://github.com/teddashh/bat-agent-connector/pull/46) artifacts Part A | [`560870b`](https://github.com/teddashh/bat-agent-connector/tree/560870b568ffa202d01501c3e553fbc3011c3561)：store/host、exact replica cleanup、binary upload bridge | 已合併；該 head 四個 Python jobs 各 1982/33，admission/fixture 修正與 peer 證據已含。跨 host Git、完整 native file/save/download 尚缺。 |
+| D：[#47](https://github.com/teddashh/bat-agent-connector/pull/47) Delivery Part B | [`9874eae`](https://github.com/teddashh/bat-agent-connector/tree/9874eae4ae2c6622a866a792dff45d010dd16dd7)：deployment/store/verifier、owner/scope/history、shared UI | `831d670` CI 兩項舊 fixture 假設已修（canonical UI source、latest data step）；14 受影響 tests 兩版本通過。該 head full CI 四版各 2141/33，已合併且 issue #32 關閉；無真 deployed version 證據。 |
+| O：[#48](https://github.com/teddashh/bat-agent-connector/pull/48) R04 UI | [`90e2392`](https://github.com/teddashh/bat-agent-connector/tree/90e2392bb8409c1d37cb76f27c8caae72af8e00c)：observation UI、pending/linked events、`desktop/tests/observation*` | 經 #51 合併；browser/native IPC mock/真中央加 MockBat 的 F 證據，最終整組 CI 綠；不是 M1。 |
+| I：[#49](https://github.com/teddashh/bat-agent-connector/pull/49) R01 interrupt | [`3877da5`](https://github.com/teddashh/bat-agent-connector/tree/3877da5d0f8dc949fe19e3d8bfc61455d1eef5e0)：legacy interrupt adapter、`test_interrupt_operations.py` | 經 #51 合併；focused/peer 及最終整組 CI 綠。只是 Part B 第一片，其他 legacy mutations 尚未統一。 |
+| B1：[#50](https://github.com/teddashh/bat-agent-connector/pull/50) manual single-file capture | [`c3b4abd`](https://github.com/teddashh/bat-agent-connector/tree/c3b4abd2617f4d46a1f35beb0230fa1bb5a4d80e)：`artifact_capture*.py`、capture/interrupt/principal tests | 經 #51 合併；139 focused tests 各 Python 版本、38 seam checks 及最終整組 CI 通過。同 credential/雙 scope replay/control 已審；UI/native preview allowlist、B2/C 尚缺。 |
+| P：私有 installer #6 | reviewed `60ff6bd`，merge `2026750`：canonical pin/digest、principal-only、保留既有配置 | 已 pin `e634c30`/workflow `.4`；17 mock tests default Python/3.10、source verify-only、獨立審查通過。沒有實際安裝；不複製私有配置。 |
 
-單一整合候選：`1cffa7107232cb6dde35f634b998a62f3333174f`，包含上述 heads（K/P 是外部相依，未安裝）。
-整合後 canonical workflow 為 `2026-10-08.4`；S 列的 `.3` 僅描述該獨立 PR 的固定 head。
-前身 `1498a6f` 的 production source 相同，已有 439 backend focused、74 UI、8 state、20 Rust、
-5 真中央 fixtures 與 build/Clippy/release check 通過；目前候選再含 #38 main merge（無 source diff）
-與 Delivery 兩項 test-only 修正。**此 exact head 的 full CI 尚待確認；不是完整 matrix 綠，也不是 I/L 證據。**
-#48/#49/#50 的各自 CI 可能繼承舊 Delivery fixture failure；候選已含修正，仍保留原失敗紀錄。
+整合候選 `e634c3067e0ba1761336f2bb02360281f9f8e93d` 已經 #51 合併。其 [Python 3.10–3.13 full CI](https://github.com/teddashh/bat-agent-connector/actions/runs/37857510798) 各 2264 passed/33 skipped；
+[Windows NSIS/Linux deb、74 UI、8 state、Rust checks](https://github.com/teddashh/bat-agent-connector/actions/runs/37857510691) 皆通過。
+Canonical workflow 是 `2026-10-08.4`；S 列 `.3` 僅描述獨立 PR 的歷史 head。
+產品整合 commit `6d88f4d` 與已測候選 Git tree 完全相同；本次 docs-only 收斂更新未改 runtime/build/skills。
+先前 439 focused、5 真中央 fixtures 與獨立審查仍保留其證據層級；沒有升格為 I/L。
+#48/#49/#50 舊 CI 的 canonical-source/data-step fixture failures 已在候選修正，原失敗紀錄保留。
 
 ## 46 項對照
 
