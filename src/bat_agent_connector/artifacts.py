@@ -79,6 +79,7 @@ def _open_dir(path: Path, *, create=False) -> int:
             if create:
                 with contextlib.suppress(FileExistsError):
                     os.mkdir(part, 0o700, dir_fd=fd)
+                    os.fsync(fd)
             nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = nxt
@@ -370,6 +371,11 @@ class ArtifactStore:
                     file.write(chunk)
                 file.flush()
                 os.fsync(file.fileno())
+            directory_fd = _open_dir(directory)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
             complete = True
         except (asyncio.TimeoutError, OSError) as exc:
             raise OperationError("UPLOAD_INCOMPLETE", f"upload did not complete ({type(exc).__name__})", 400) from None
@@ -393,6 +399,7 @@ class ArtifactStore:
             try:
                 os.link("content", "content", src_dir_fd=src_fd, dst_dir_fd=dest_fd, follow_symlinks=False)
                 os.unlink("content", dir_fd=src_fd)
+                os.fsync(src_fd)
                 os.chmod("content", 0o400, dir_fd=dest_fd, follow_symlinks=False)
             except (FileExistsError, FileNotFoundError):
                 try:
@@ -446,6 +453,11 @@ class ArtifactStore:
             resource_policy.check_artifact_storage(directory)
             if directory.exists():
                 shutil.rmtree(directory)  # only this terminal operation's scratch; never revisions
+                parent_fd = _open_dir(directory.parent)
+                try:
+                    os.fsync(parent_fd)
+                finally:
+                    os.close(parent_fd)
             self.db.execute("UPDATE artifact_uploads SET reserved_bytes=0,released_at=? WHERE operation_id=?",
                             (time.time(), operation_id))
 
