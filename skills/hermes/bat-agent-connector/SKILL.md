@@ -224,9 +224,14 @@ item is done.
   and causes no per-item host call, tombstone or registry cleaned mark: cleanup did not remove that resource.
   Read its original IDs and observation through the operation receipt.
   Confirmed planner stops leave the host cap as stopped while their worktrees stay reclaimable. Reviewed
-  absence leaves the cap as absent_at_cleanup when its carrier is removed/already absent or it has no
-  own worktree; retained worktrees keep the resume slot. The receipt records capacity_released and
-  stopped_by_cleanup=false. Retired IDs refuse drive/resume/same-ID start with SESSION_RETIRED; start a
+  absence retires only matching active, non-task rows as absent_at_cleanup when their carrier is removed/
+  already absent or they have no own worktree; retained worktrees keep the resume slot. Capacity is bookkeeping:
+  receipts record capacity_released, registry_status and capacity_reason (not_counted, generation_changed,
+  task_owned, start_unsettled, carrier_retained, registry_refused, registry_io_failed; null on success), plus
+  capacity_error on refusal/I/O failure. These facts never degrade a completed reclaim or rewrite non-counted
+  history. Starting/uncertain sessions and carriers stay retained with COMMAND_UNRESOLVED. A confirmed planner
+  stop stays stopped=true even if capacity_released=false. Absence records stopped_by_cleanup=false.
+  Retired IDs refuse drive/resume/same-ID start with SESSION_RETIRED; start a
   new ID through the normal cap check. Ownership and original creation IDs remain connector-managed.
   Use cleanup_tombstones to find original IDs, location, reasons and PR destinations,
   cleanup_retained to read actual retained refs. Restore comes in Part B; no tool can revive a runtime.

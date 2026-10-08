@@ -73,6 +73,12 @@
   their IDs stable and retains them with OBSERVATION_UNAVAILABLE. Historical host targets remain inspectable;
   mixed-host apply still reclaims healthy-host items without any removed-host BAT or SSH call. Branch re-checks
   read the live ref after worktree removal and normalize only dependencies with succeeded worktree receipts.
+  Capacity retirement follow-up (v2 plan §19/§22 R08/§24, E01/E02) is non-failing bookkeeping: it changes only
+  matching active, non-task registry rows.
+  Non-counted history remains unchanged; session receipts explain generation changes, task/start ownership,
+  retained carriers and registry refusals/I/O failures without degrading a completed reclaim. Starting/uncertain
+  sessions and carriers remain retained with COMMAND_UNRESOLVED. Confirmed planner stops stay reported as stopped
+  even when capacity retirement fails; crash/resume replays the same retirement without rewriting it.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
