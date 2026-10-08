@@ -288,16 +288,20 @@ def relation(journal, task, sid, role, anchor, seq, *, confirmed=False, branch=N
     return relid
 
 
+def last_relation_command(db, relation_id):
+    command = db.execute("""SELECT cr.command_id FROM command_relations cr JOIN commands c USING(command_id)
+        WHERE cr.relation_id=? ORDER BY c.created_at DESC LIMIT 1""", (relation_id,)).fetchone()
+    return command[0] if command else None
+
+
 def close_relations(journal, task_id, seq, *, role=None, except_sid=None, legacy=False):
     for row in journal.db.execute("SELECT * FROM observation_relations WHERE execution_id=?", (task_id,)).fetchall():
         data = body(row["body"])
         if data["end_seq"] is not None or (role and data["role"] != role) or data["session_resource_id"] == except_sid:
             continue
-        close_seq = seq if legacy else journal.api_event("execution", task_id, "relation.closed",
-            {**data, "status": "closed", "end_seq": seq, "ended_at": iso(time.time())})
-        command = journal.db.execute("""SELECT cr.command_id FROM command_relations cr JOIN commands c USING(command_id)
-            WHERE cr.relation_id=? ORDER BY c.created_at DESC LIMIT 1""", (row["relation_id"],)).fetchone()
-        data.update(status="closed", end_seq=seq, ended_at=None if legacy else iso(time.time()), end_command_id=command[0] if command else None)
+        data.update(status="closed", end_seq=seq, ended_at=None if legacy else iso(time.time()),
+                    end_command_id=last_relation_command(journal.db, row["relation_id"]))
+        close_seq = seq if legacy else journal.api_event("execution", task_id, "relation.closed", data)
         journal.db.execute("UPDATE observation_relations SET body=? WHERE relation_id=?", (dump(data), row["relation_id"]))
         journal.db.execute("INSERT OR REPLACE INTO relation_revisions VALUES(?,?,?)", (row["relation_id"], close_seq, dump(data)))
         index(journal.db, close_seq, "session", data["session_resource_id"])
@@ -411,6 +415,8 @@ def record_event(journal, seq, *, legacy=False, extra=None):
             row = db.execute("SELECT body FROM observation_relations WHERE relation_id=?", (b["relation_id"],)).fetchone()
             if row:
                 data = {**body(row[0]), **{k: v for k, v in b.items() if k not in {"start_seq", "started_at"}}}
+                if e["kind"] == "relation.closed":
+                    data.update(end_command_id=last_relation_command(db, b["relation_id"]), ended_at=None)
                 db.execute("INSERT OR REPLACE INTO relation_revisions VALUES(?,?,?)", (b["relation_id"], seq, dump(data)))
                 db.execute("UPDATE observation_relations SET body=? WHERE relation_id=?", (dump(data), b["relation_id"]))
     if kind == "session":

@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Observation relation closure bodies ([design](docs/design/observation.md), plan §08/§10/§11, B01/B03):
+  emit the complete final command boundary and one close timestamp in the same body stored by the relation
+  and its revision. Open/bind/close events match their revisions across replacement lifecycles; version-1
+  replay reconstructs the final linked command while keeping unknown close times null and saved events intact.
+
 - Observation saved-fact placement ([design](docs/design/observation.md), plan §08/§10/§11, B01/B03):
   position eventless snapshots using their own timestamps and the original journal boundary, recovering
   historical task/session/worktree links without attaching later participants. Task-source snapshots retain

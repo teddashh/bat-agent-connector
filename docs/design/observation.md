@@ -15,6 +15,7 @@ Phase 1 規格已審查。Phase 2 分兩步：Part A（本次）實作伺服器�
 | History role 摘要修正 | `7001934`（#35 的審查基準）。補遞迴摘要的 role 與下列有限 metadata；不改寫 journal 事實或資料步驟。 |
 | Relation event links 修正 | `38986e1`（#35 的審查基準）。具名 relation 事件只掛自己，execution fan-out 取原 seq 的有效 relation；live／版本 1 replay 使用同一規則。 |
 | Saved fact time 修正 | `a48dba3`（#35 的審查基準）。沒有原 event seq 的回填事實以自己的時間定位，保留 task execution link；不改 live projection，不 rebase。 |
+| Relation closure body 修正 | `a48dba3`（#35 的審查基準），接續 saved-fact 修正 `ad4d668`。新 relation 事件與同 seq revision 使用同一完整 body；legacy closure 重建 command 終點，不猜關閉時間。 |
 | 計畫 | v1.0（2026-10-06）；以章節及驗收編號引用，不複製私有計畫。 |
 | BAT | `b7419892fbc9946799b64cca24c2ec8c7fa15c42`；不代表每台主機都已安裝此版，實際 `serverVersion` 另存於掃描證據。 |
 
@@ -85,6 +86,8 @@ Execution 沿用 Task Service `task_id`，API 補 `execution_id = task_id`，不
 Phase 2 在既有 journal 寫入點補 `relation.opened`、`relation.closed`、`relation.bound`；同交易保存舊／新 task、role、session、binding command 及來源證據。Start intent 是 pending，只有原流程確認身分後才 bound。Warm claim 與 SQLite 不共用交易：以已持久化的 start command 連接 claim 結果；當中斷時保留 pending／unknown，由既有 Task Service recovery 確認後補記事實。讀 history 不執行 recovery、claim、start 或新派工。
 
 `relation.opened/bound/closed` 必須明存 `relation_id` 與 `session_resource_id`。其 resource refs 只保留事件的 execution 與該 session；context.relation_ids 只含該 relation。Worktree link 只從該 session 在事件 seq 的 binding 衍生。不能從 command、branch、execution 的其他 relations、目前 task worktree 或 caller context 加掛其他 session。`relation()` 與 `close_relations()` 都送完整 IDs；沒有任一 ID 的事件屬 malformed，核心事件照常保留在全域 feed，log 與 context.evidence 記 `MALFORMED_RELATION_EVENT`，不寫任何 resource link，也不猜 relation 身分。此規則同時適用 legacy=True。
+
+新寫入的三種 relation 事件，body 必須逐欄等於該事件 seq 的 `relation_revisions.body`。先完成所有欄位，再送事件；不能在事件之後才補 branch、parent relation 或 command 邊界。Closure 先從 `command_relations` JOIN `commands` 按 created_at DESC 查最後一個已連結 command；沒有 command 時 end_command_id=null。一次建好 status=closed、end_seq、end_command_id 與單一 ended_at，再以同一 body 送 relation.closed、更新 observation_relations、保存 event seq 的 revision。Relations endpoint 在這份 body 上另加 command_ids；history 摘要保留上述邊界。`relation()` 的 open/bind 也在 emission 前完成 branch/reason/parent 欄位。
 
 Task 的共同里程碑仍可掛當時所有有效 relations：只限沒有 command／branch 的 `task.*` 事件，例如 state、paused、resumed，不含 relation.*。用 `relation_revisions` 在該 seq 以前（含該 seq）的最後一份 revision，而非目前 mutable body；必須已在事件前出現，status 不是 closed，已知 start_seq < event.seq，且 end_seq 為 null 或 >= event.seq。Terminal task 的事件先掛當時仍開啟的 relations，再各自送具名 closure；之前已關閉的 session 不再收到後續里程碑。Legacy start_seq=null 不代表一直存在，以較早的 revision seq 證明當時已有這段關係。
 
@@ -310,7 +313,7 @@ Journal 的 `LATEST_DATA_STEP` 記整套 journal 最新配發的資料步驟，�
 
 Binding table/index 為每次開啟執行的 idempotent DDL，不讀寫 user_version。既有 binding 的 seed 屬本包資料步驟 2，不另占步驟 3：重播有明確 session/worktree 對的 binding/建立事件，使用最早可證明的原 seq；只有保存的目前 binding 而沒有更早證據時，用既有 backfill 為該 session/link 配發的 history.backfilled seq 作已知起點。不得由今天的 mutable worktree_id 將更早事件或已結束 relation 回掛目前 worktree；無證據的更早歸屬保持 unknown。Reopen 不再執行資料步驟或補 poll rows。Projection 失敗仍只回滾 savepoint，core event 保留 projection_error；不留下半個 binding move。
 
-步驟 2 重播已保存的具名 relation 事件時，保留其明確 IDs 及 status/end 的 revision，讓後續事件不再掛已關閉的 session；原 legacy start_seq/started_at 的 unknown 保持 null。Malformed relation 只保存上述證據，不建立 links。此修正不新增 DDL 或資料步驟，也不重跑已完成的步驟 2；投影若例外仍由既有 savepoint 保護核心寫入。
+步驟 2 重播已保存的具名 relation 事件時，保留其明確 IDs 及 status/end 的 revision，讓後續事件不再掛已關閉的 session；原 legacy start_seq/started_at 的 unknown 保持 null。Legacy closure 及具名 relation.closed 的 replay 都用同一 command query 重建 end_command_id，避免舊 event 的 null 抹掉已證明的最後 command；無 command 仍為 null。關閉時間未知，replayed revision 的 ended_at 保持 null。這是舊資料的重建規則：原 api_events.body 不改寫，與新 writer 的逐欄相等 invariant 區分；重建不把舊 body 缺失的值當已知事實。Malformed relation 只保存上述證據，不建立 links。此修正不新增 DDL 或資料步驟，也不重跑已完成的步驟 2；投影若例外仍由既有 savepoint 保護核心寫入。
 
 Eventless facts 的時間定位與 execution links 仍屬本包資料步驟 2。完成後直接重呼 backfill 或 reopen 都不寫入；guard 只用於這個一次性資料步驟，DDL 仍每次開啟獨立執行，不占 user_version。
 
@@ -364,6 +367,8 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B02、B03；§11 | `test_b03_states_unknown_no_tab_and_field_times`：meta null／失敗、無 tab、journal-only null、離線與 gone 分軸；失敗不刷新上一個 activity 時間。Main 沒有可證明 session 終止的正式 journal source，因此 lifecycle 保持 unknown，不用 gone／turn abort 推論 ended。 |
 | B03；§08、§11 | `test_b03_backfill_hidden_idempotent_and_unknown_boundaries`、`test_b03_migration_failure_rolls_back_and_restart_recovers`、`test_b03_backfilled_occurrence_time_filters_are_not_migration_time`：舊 journal 回填、全交易失敗回滾、重啟不重複、未知 range 邊界、原發生時間與隱藏 cursor。 |
 | B03；§08、§11 | `test_b03_version_one_journal_runs_observation_backfill_once`：版本 1 → 2 回填一次；重開及已為 2 的 journal 不執行；新 journal 為 2，不重複回填。 |
+| B01、B03；§08、§10、§11 | `test_b01_b03_relation_closed_body_keeps_the_final_command`：兩個已連結 command 的 closure 保存最後一個，無 command 保存 null；end_command_id 在 history、current body、event seq revision、relations endpoint 四處一致，live／版本 1 replay 都驗證。用本包 iso 函式的遞增時間 fixture 驗證 live closure 只建一個 ended_at，不全域替換 stdlib。`test_b01_b03_relation_events_equal_their_lifecycle_revisions`：open/bind、lead/reviewer、replacement/parent、close 的所有新事件 body 逐欄等於 revision；legacy 只正規化未知的時間邊界。 |
+| B03；§08、§11 | `test_b03_version_one_closure_reconstructs_the_final_command`：真正沒有 relation 事件的版本 1 task 從兩個 commands 重建 closed revision，ended_at=null。`test_b03_legacy_closure_event_cannot_erase_its_reconstructed_command`：舊 relation.closed 的 null 不覆蓋已證明的最後 command，原 core event body 保留；既有 projection failure 測試持續保證核心寫入與 gap flag。 |
 | B01、B03；§08、§10、§11、§16 | `test_b01_b03_delivered_merge_history_uses_only_explicit_refs`：真實 fake GitHub merge/verify steps、session refs、worktree refs、無來源時不造關聯；PR title/body 不進事件摘要。`test_b01_delivery_preview_late_binding_respects_history_as_of`：晚到的 preview binding 不改舊游標結果。 |
 | B03；§08、§10、§11、§16 | `test_b03_merge_receipt_history_keeps_moved_base_shas_without_commit_messages`：queue 受理後 base 前進，保存 actual merged/onto SHA、額外 commits 數量/parents，不回 commit message；後續 mutable refs 不改舊 receipt/context。 |
 | B03；§08、§10、§11、§15 | `test_b03_metadata_settlement_history_has_codes_without_pr_text`：not_applied/conflict 回執各一事件、不重送 PATCH、不將背景觀測歸為 Ted。`test_b03_delivery_snapshot_backfill_preserves_version_chain_and_private_text`：版本 1 已有 delivery tables/documents，回填一次至 2、重開無寫入、原 documents 保留、原時間與未知 actor 保留。 |

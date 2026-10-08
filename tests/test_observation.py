@@ -155,6 +155,133 @@ def replay_version_one(j, path):
     return Journal(path)
 
 
+@pytest.mark.parametrize("backfilled", [False, True])
+@pytest.mark.parametrize("command_count", [0, 2])
+def test_b01_b03_relation_closed_body_keeps_the_final_command(tmp_path, monkeypatch, backfilled, command_count):
+    """B01/B03, §08/§10/§11: closure history and relation reads share the same command boundary."""
+    from bat_agent_connector import observation
+    path = tmp_path / "j.db"
+    j = Journal(path)
+    t = task(j, "closed-body")
+    commands = []
+    if command_count:
+        commands.append(bind(j, t, "lead"))
+        j.change(t["task_id"], "dispatching")
+        c, _ = j.command(t["task_id"], "send", "lead", {}, "second")
+        j.command_status(c["command_id"], "settled")
+        commands.append(c)
+        for n, c in enumerate(commands):
+            j.db.execute("UPDATE commands SET created_at=? WHERE command_id=?", (100 + n, c["command_id"]))
+    else:
+        j.add_branch(t["task_id"], session_id="lead", provider="codex", role="lead", reason="start")
+    original_iso = observation.iso
+    ticks = iter(range(100))
+
+    def advancing_iso(value):
+        return original_iso(value + next(ticks)) if value is not None else None
+
+    # Make separate timestamp evaluations observably different without patching a stdlib class.
+    with monkeypatch.context() as closure:
+        closure.setattr(observation, "iso", advancing_iso)
+        j.change(t["task_id"], "failed")
+    if backfilled:
+        j = replay_version_one(j, path)
+    obs = Observation(j)
+    event = next(e for e in obs.history("session", "h1/lead", limit=200)["events"] if e["kind"] == "relation.closed")
+    rid = event["body"]["relation_id"]
+    current = json.loads(j.db.execute("SELECT body FROM observation_relations WHERE relation_id=?", (rid,)).fetchone()[0])
+    revision = json.loads(j.db.execute("SELECT body FROM relation_revisions WHERE relation_id=? AND seq=?", (rid, event["seq"])).fetchone()[0])
+    endpoint = obs.relations("session", "h1/lead")["relations"][0]
+    assert endpoint.pop("command_ids") == [c["command_id"] for c in commands]
+    assert current == revision == endpoint
+    expected = commands[-1]["command_id"] if commands else None
+    assert all(data["end_command_id"] == expected for data in (event["body"], current, revision, endpoint))
+    assert event["body"]["end_seq"] == revision["end_seq"]
+    if backfilled:
+        # Original facts stay immutable; reconstructed legacy time boundaries remain unknown.
+        assert current["start_seq"] is current["started_at"] is current["ended_at"] is None
+    else:
+        assert event["body"] == current and current["ended_at"] is not None
+    j.close()
+
+
+@pytest.mark.parametrize("backfilled", [False, True])
+def test_b01_b03_relation_events_equal_their_lifecycle_revisions(tmp_path, backfilled):
+    """B01/B03, §08/§10/§11: open, bind, replace and close finish their body before emitting it."""
+    path = tmp_path / "j.db"
+    j = Journal(path)
+    t = task(j, "relation-lifecycle")
+    c, _ = j.command(t["task_id"], "start_lead", None, {}, "start")
+    j.command_bind_session(c["command_id"], "old")
+    j.command_status(c["command_id"], "settled")
+    old = j.add_branch(t["task_id"], session_id="old", provider="codex", role="lead", reason="start")
+    bind(j, t, "reviewer", "reviewer")
+    c, _ = j.command(t["task_id"], "start_lead", None, {}, "replacement")
+    j.command_bind_session(c["command_id"], "new")
+    j.command_status(c["command_id"], "settled")
+    j.add_branch(t["task_id"], session_id="new", provider="codex", role="lead", reason="replacement", parent_branch_id=old["branch_id"])
+    j.change(t["task_id"], "failed")
+    if backfilled:
+        j = replay_version_one(j, path)
+    events = j.db.execute("SELECT seq,kind,body FROM api_events WHERE kind LIKE 'relation.%' ORDER BY seq").fetchall()
+    assert {e["kind"] for e in events} == {"relation.opened", "relation.bound", "relation.closed"}
+    assert {json.loads(e["body"])["session_resource_id"] for e in events} == {"h1/old", "h1/new", "h1/reviewer"}
+    for event in events:
+        expected = json.loads(event["body"])
+        revision = json.loads(j.db.execute("SELECT body FROM relation_revisions WHERE relation_id=? AND seq=?", (expected["relation_id"], event["seq"])).fetchone()[0])
+        if backfilled:
+            expected.update(start_seq=None, started_at=None)
+            if event["kind"] == "relation.closed":
+                expected["ended_at"] = None
+        assert revision == expected
+    j.close()
+
+
+def test_b03_version_one_closure_reconstructs_the_final_command(tmp_path, monkeypatch):
+    """B03, §08/§11: pre-observation task events reconstruct a closure without guessing its time."""
+    from bat_agent_connector import observation
+    path = tmp_path / "j.db"
+    with monkeypatch.context() as legacy:
+        legacy.setattr(observation, "install", lambda journal: None)
+        j = Journal(path)
+    t = task(j, "legacy-closed-body")
+    first = bind(j, t, "lead")
+    j.change(t["task_id"], "dispatching")
+    last, _ = j.command(t["task_id"], "send", "lead", {}, "second")
+    j.command_status(last["command_id"], "settled")
+    j.change(t["task_id"], "failed")
+    closed_at = j.api_head()
+    assert j.db.execute("SELECT COUNT(*) FROM api_events WHERE kind LIKE 'relation.%'").fetchone()[0] == 0
+    j.close()
+    j = Journal(path)
+    r = Observation(j).relations("session", "h1/lead")["relations"][0]
+    revision = json.loads(j.db.execute("SELECT body FROM relation_revisions WHERE relation_id=? AND seq=?", (r["relation_id"], closed_at)).fetchone()[0])
+    assert r["command_ids"] == [first["command_id"], last["command_id"]]
+    assert r["end_command_id"] == revision["end_command_id"] == last["command_id"]
+    assert r["status"] == revision["status"] == "closed"
+    assert r["ended_at"] is revision["ended_at"] is None
+    j.close()
+
+
+def test_b03_legacy_closure_event_cannot_erase_its_reconstructed_command(tmp_path):
+    """B03, §08/§11: an older relation.closed body may lack the final linked command."""
+    path = tmp_path / "j.db"
+    j = Journal(path)
+    t = task(j, "legacy-null-command")
+    command = bind(j, t, "lead")
+    j.change(t["task_id"], "failed")
+    row = j.db.execute("SELECT seq,body FROM api_events WHERE kind='relation.closed'").fetchone()
+    original = {**json.loads(row["body"]), "end_command_id": None}
+    j.db.execute("UPDATE api_events SET body=? WHERE seq=?", (dump(original), row["seq"]))
+    j = replay_version_one(j, path)
+    r = Observation(j).relations("session", "h1/lead")["relations"][0]
+    revision = json.loads(j.db.execute("SELECT body FROM relation_revisions WHERE relation_id=? AND seq=?", (r["relation_id"], row["seq"])).fetchone()[0])
+    assert r["end_command_id"] == revision["end_command_id"] == command["command_id"]
+    assert r["ended_at"] is revision["ended_at"] is None
+    assert json.loads(j.db.execute("SELECT body FROM api_events WHERE seq=?", (row["seq"],)).fetchone()[0]) == original
+    j.close()
+
+
 @pytest.mark.parametrize("table", ["work_item_links", "integration_receipts", "operations", "operation_steps", "operation_task_link"])
 @pytest.mark.parametrize("when", ["during_a", "gap", "missing", "after_last"])
 def test_b01_b03_saved_task_facts_use_their_own_time_and_keep_execution(tmp_path, table, when):
