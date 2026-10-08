@@ -310,6 +310,23 @@ async def verify_merge(ctx, pr: dict, doc: dict) -> dict:
             # Re-read current stack membership: a stack created during the final GET -> PUT window matters too.
             for stack in await pages(lambda page: gh.stacks(repository, doc["target"]["number"], page=page), ctx):
                 full = await read(gh.stack(repository, stack["number"]), ctx)
+                members = full.get("pull_requests", [])
+                target_number = doc["target"]["number"]
+                if (target_number in [m["number"] for m in members]
+                        and any(m["number"] != target_number for m in members)
+                        and full["number"] not in [s["number"] for s in doc["stacks"]]):
+                    observed = []
+                    for member in members:
+                        other = await read(gh.pull(repository, member["number"]), ctx)
+                        oi = identity(other)
+                        observed.append({"number": oi["number"], "state": other.get("state"),
+                                         "head_sha": oi["head_sha"], "base_ref": oi["base_ref"]})
+                    ctx.set_refs(merge_receipt={"merged_sha": merged, "verified": False,
+                                               "preview_id": doc["preview_id"],
+                                               "stacks": [{"number": full["number"], "members": observed}],
+                                               "affected_prs": [m for m in observed if m["number"] != target_number]})
+                    raise NeedsAttention("MERGE_RESULT_SCOPE_CHANGED",
+                                         f"native stack #{full['number']} appeared after the reviewed preview")
                 for member in full.get("pull_requests", []):
                     if member["number"] != doc["target"]["number"]:
                         candidates.setdefault(member["number"], identity(await read(gh.pull(repository, member["number"]), ctx)))

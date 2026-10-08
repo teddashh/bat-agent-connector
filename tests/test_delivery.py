@@ -664,6 +664,38 @@ async def test_c05_new_stack_during_acceptance_never_dispatches(make_daemon, gh,
     assert gh.count("POST", ".") == 0 and gh.count("PUT", ".") == 1
 
 
+@pytest.mark.parametrize("merged_member", [False, True])
+async def test_c05_stack_created_after_final_check_needs_attention_and_never_dispatches(make_daemon, gh,
+                                                                                     merged_member):
+    """C05, plan §16: new native membership also changes scope when the upper PR remains open."""
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    upper = gh.add_pr(8, "c" * 40)
+    doc, op = await preview_op(d, action="delivery.merge_and_deploy", recipe="prod")
+    assert not doc["stacks"] and not doc["blocking"]
+    def create_stack(method, path, _):
+        if method == "PUT" and path.endswith("/merge-async"):
+            if merged_member:
+                gh.merge(8, "8" * 40)  # independent merge on the newer base; native membership still matters
+            else:
+                upper["head"]["sha"] = "d" * 40
+                upper["base"]["ref"] = "feature7"
+            gh.stacks[1] = {"number": 1, "pull_requests": [
+                {"number": 7, "state": "open"}, {"number": 8, "state": upper["state"]}]}
+    gh.before_request = create_stack
+    done = await settle(d, op["operation_id"])
+    assert done["status"] == "needs_attention" and done["error_code"] == "MERGE_RESULT_SCOPE_CHANGED", done
+    receipt = done["external_refs"]["merge_receipt"]
+    members = [{"number": p["number"], "state": p["state"], "head_sha": p["head"]["sha"],
+                "base_ref": p["base"]["ref"]} for p in (gh.pulls[7], upper)]
+    assert done["external_refs"]["merged_sha"] == MERGED and receipt["merged_sha"] == MERGED
+    assert receipt["preview_id"] == doc["preview_id"] and receipt["verified"] is False
+    assert receipt["stacks"] == [{"number": 1, "members": members}]
+    assert receipt["affected_prs"] == [members[1]]
+    assert all(s["status"] != "failed" for s in done["steps"])
+    assert gh.count("PUT", "merge-async") == 1 and gh.count("POST", ".") == 0
+
+
 async def test_c04_scope_changes_or_missing_pages_never_submit(make_daemon, gh, monkeypatch):
     d = make_daemon()
     gh.add_pr(7, HEAD)

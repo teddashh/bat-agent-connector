@@ -8,6 +8,8 @@ Part A review follow-up 以 `85601e2f6a36517ba559705e9e360763e7c4d63b` 為固定
 
 本輪 rebase 的固定來源為 main `22da8d8eaa1835724674f5e595995d81c12dde5c`（#33），Part A replay 後為 `de82a18`；合併 token 輪替、ambiguous transport／rate limit／204 run lookup 與 sent-write 讀取恢復。Part A 的唯讀 steps 不作為「已送出寫入」證據；migration 保持 2／3，DDL 可改號、不改資料。
 
+PR #34 Codex review follow-up 以 `04bdb75` 為固定來源；補上 verify 時新 native stack 的拒絕與 unresolved metadata 第三種內容的 settlement，沿用已批准的 action／receipt／恢復路徑。
+
 ## 固定來源版本
 
 | 來源 | 固定版本與用途 |
@@ -230,6 +232,7 @@ Journal 保存必要的 before／intended／observed；沿用 api_events 的 act
 | 400 | 先 GET PR；merged 且 head 等於 reviewed head 則走 merge.verify，不把拒絕的 PUT 歸因為本操作合併（merged_by_this_operation=false）。未合併／closed／不同 head 仍 PR_NOT_MERGEABLE；只讀拒絕或 ambiguous 時保留可恢復操作，resume 不重 PUT |
 | 輪詢 failed | 沿用 MERGE_FAILED，不能 bypass |
 | `merge.verify`（新增） | GET merged PR／commit parents、固定 base 到真正 merged SHA 的 comparison、受影響 PR 狀態；保存逐 PR 結果與 actual merged SHA |
+| verify 時發現預覽未列的 native stack，含 target 與其他成員 | 不論其他成員仍 open 或已 merged，均 MERGE_RESULT_SCOPE_CHANGED／needs_attention；保留 merged_sha／preview_id／verified=false、stack number 與每個 member 的 number／state／current head_sha／base_ref，affected_prs 列其他成員；combined 不 dispatch |
 | submit 後 PR／commit／compare／stack／recent PR read 被拒（401／403／404） | GITHUB_401／403／404、needs_attention；保留 merge receipt／lock，修好 token／權限後 resume，不重 PUT。Verify 拒絕回執在 step 中保存、在 step 外轉 attention；uncertain submit reconcile 的拒絕亦可 resume |
 | UUID 404 | 保留已批准的 expired UUID 路徑：改查 PR／queue、不重 PUT；只有 PR 可讀才繼續觀測，PR 自身 401／403／404 仍 needs_attention |
 
@@ -237,7 +240,9 @@ Merge.verify 查實際 merged PR／commit 與 base history：PR 必須 merged；
 
 提交被受理後 base 前進是正常行為，包括 queue 先合成其他 PR，不比預覽 tree、不做 rebase blob mapping。UI 顯示「合併到較新的 base：另有 N 個 commits 會一起發布」。Combined 驗證通過就部署 actual merged SHA；§17 pipeline pre-deploy check 與 Part B D03 runtime evidence 驗證最後版本。
 
-重查預覽 affected list（stack／chain／indirect candidates）及提交時新出現的 stack 成員，沒有其他 PR 被本次 merge 掃入；若候選已 merged，須以其 head 在本次 head 的可達性、其 merge SHA／目標 merge parents／實際 base history 與時間等證據區分先前獨立合併，不能把合法 base 前進誤判。確定額外 PR 被掃入才 MERGE_RESULT_SCOPE_CHANGED；缺少證據才 MERGE_RESULT_UNVERIFIABLE。保存 merged_sha／merge_receipt／逐 PR 結果，scope changed 時 combined 不 dispatch。On_merge 可能已觸發，只觀測不假稱無副作用，不自動 revert。
+重查預覽 affected list（stack／chain／indirect candidates）及提交時新出現的 stack 成員。Native stack 會自動 rebase 上層分支，preview 已拒絕此副作用；verify 看見 target 與其他成員所在的新 stack，直接 MERGE_RESULT_SCOPE_CHANGED，不因上層仍 open 放行。Receipt 的 stacks[].members 保存全部成員的現況，affected_prs 保存其他成員。
+
+原有 merged candidates 規則不變：須以其 head 在本次 head 的可達性、其 merge SHA／目標 merge parents／實際 base history 與時間等證據區分先前獨立合併，不能把合法 base 前進誤判。新 native stack 或已證明額外 PR 被掃入為 MERGE_RESULT_SCOPE_CHANGED；缺少證據才 MERGE_RESULT_UNVERIFIABLE。保存 merged_sha／merge_receipt／逐 PR 結果，scope changed 時 combined 不 dispatch。On_merge 可能已觸發，只觀測不假稱無副作用，不自動 revert。
 
 若本次 merged SHA 是候選 merge commit 的祖先，候選為之後獨立合併，保存 `merged_after=true`／`independent=true` 並接受；驗證延遲不將後來的合法 merge 誤判成缺證據。補查提交後出現的 PR 用 [list pulls](https://docs.github.com/en/rest/pulls/pulls?apiVersion=2026-03-10#list-pull-requests) 的 state=all、sort=updated、direction=desc，updated_at 早於 operation created_at 就停止分頁；保留 admission 整秒，避免 GitHub 秒級時間漏掉同秒 merge。預覽已列的 affected candidates 與當前 stack 成員仍逐筆驗證，不因 paging 截止略過。
 
@@ -409,6 +414,8 @@ Review follow-up 的新增回歸：
 
 Issue #32 low item：`test_merge_async_400_reads_pr_before_failing`（open／closed／reviewed head 已 merged／其他 head 已 merged，GET 必在 PUT 後；不 bypass verify／零第二 PUT）；`test_merge_async_400_readback_refusal_remains_resumable`（401／403／404、修復後正常驗證、不重送）。對應 C04／C05、計畫 §16。
 
+PR #34 Codex review：`test_c05_stack_created_after_final_check_needs_attention_and_never_dispatches`（PUT 時才建立 native stack；open 上層與獨立 merged 成員皆保留完整 receipt／needs_attention，單一 PUT、zero POST）。對應 C05、計畫 §09／§16。
+
 以下均為 Part B（第二步）規劃，尚未聲稱完成：
 
 | 計畫／驗收 | 既有證據與缺口 | 第二步 tests／證明 |
@@ -428,6 +435,7 @@ UI 用 FakeGitHub／MockBat／fake verifier 驗收 zh-TW、en、390 px：編輯�
 - Part B 尚未實作：recipe／runtime check 與 rollback limits、journal deployment tables／environment generations、部署驗證／排序／history／rollback／reconcile_deployments、環境卡；D03／D05／D06 新驗收留待第二步。Part A 不改 deployment.start／deploy admission／OperationService.create／ActionDef。
 - PR head 更新仍是 [integration.md](integration.md)；integrate.verify、Task Service 成果來源、fork／LFS／跨主機整合不屬本包。
 - 不支援 native stack 建立／重整／多 PR merge；本版偵測、列出並拒絕。GitHub 沒有 base／scope／body 原子鎖，觀測間的競爭窗口仍存在。
+- 最後的 pre-PUT scope check 將檢查完成至提交的窗口縮至一次 GitHub 請求往返。若 merge 後 GitHub 已解散新 stack membership，verify 無法再看見該 stack；不能從其他 open PR 的 head 變化猜測，因為作者也會自行 push／rebase。
 - 自動 managed links 區塊延後；需要時先決定 markers、公開 links、與 work_item.link 的權威關係，不猜自動同步需求。
 - 未知 provider、on_merge 主動 rollback 路線、資料 migration 反向執行、artifact 長期保存／清理不屬本包，沒有可取得的同 identity 路線就 unsupported。
 - 實際接入待確認：各 env 的 runtime version URL／認證、固定 workflow 的 source／artifact 驗證、跨 recipe concurrency、rollback identity／not_undone。本例只用保留 example domain，不猜真實設定。

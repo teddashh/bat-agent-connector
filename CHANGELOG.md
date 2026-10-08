@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Delivery native-stack verification ([design](docs/design/delivery.md), plan §09/§16, C05): a native stack
+  created after the final scope check now stops merge verification even when its other members remain open.
+  The merge receipt keeps every member's current state, head SHA and base ref; combined delivery does not dispatch.
+  Membership already dissolved by GitHub remains an observation limit; unrelated open-PR head changes are not proof.
+
 - Merge-async 400 recovery (#32 low item; [design](docs/design/delivery.md), plan §16, C04/C05): re-read the PR
   before recording refusal. An already merged reviewed head goes through normal result verification without
   claiming this operation merged it; all other states retain PR_NOT_MERGEABLE. Refused readback stays resumable,
