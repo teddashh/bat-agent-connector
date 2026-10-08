@@ -27,6 +27,11 @@ class FakeGitHub:
         self.merge_mode = "async"  # async | enqueue | fail_500 | fail_500_but_merged | conflict_409_same | conflict_409_other
         self.dispatch_mode = "run_id"  # run_id | no_content | fail_500_but_started
         self.result_status = "merged"  # what GET merge-async/{uuid} reports first
+        self.token = TOKEN  # the token GitHub currently accepts (rotate it to expire the connector's copy)
+        # one-off answers, each used once by the first matching request: (method, path regex, status, headers, body)
+        self.script: list[tuple[str, str, int, dict, dict]] = []
+        # (method, path regex): handle the request normally, then cut the reply body short, once
+        self.truncate: list[tuple[str, str]] = []
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.port = self._server.server_address[1]
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -90,11 +95,19 @@ class FakeGitHub:
             def log_message(self, *a):  # quiet
                 pass
 
-            def _send(self, status: int, body: dict | None = None) -> None:
+            def _send(self, status: int, body: dict | None = None, headers: dict | None = None) -> None:
                 raw = json.dumps(body).encode() if body is not None else b""
+                length = len(raw)
+                for i, (m, pattern) in enumerate(fake.truncate):
+                    if m == self.command and re.search(pattern, self.path):
+                        del fake.truncate[i]
+                        length += 50  # promise more than is sent: the client sees IncompleteRead
+                        break
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Content-Length", str(length))
+                for k, v in (headers or {}).items():
+                    self.send_header(k, v)
                 self.end_headers()
                 self.wfile.write(raw)
 
@@ -104,7 +117,11 @@ class FakeGitHub:
                 path = self.path.split("?", 1)[0]
                 query = dict(p.split("=", 1) for p in self.path.split("?", 1)[1].split("&")) if "?" in self.path else {}
                 fake.requests.append((method, self.path, body))
-                if self.headers.get("Authorization") != "Bearer " + TOKEN:
+                for i, (m, pattern, status, headers, answer) in enumerate(fake.script):
+                    if m == method and re.search(pattern, path):
+                        del fake.script[i]
+                        return self._send(status, answer, headers)
+                if self.headers.get("Authorization") != "Bearer " + fake.token:
                     return self._send(401, {"message": "Bad credentials"})
                 if self.headers.get("X-GitHub-Api-Version") != "2026-03-10":
                     return self._send(400, {"message": "unsupported API version"})
