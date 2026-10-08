@@ -396,6 +396,38 @@ def parse_github(data: dict) -> GitHubConfig:
 
 
 @dataclass
+class HubImportSource:
+    source_id: str
+    path: str
+    runtime_retired: bool = False
+
+
+def parse_hub_sources(data: dict) -> dict[str, HubImportSource]:
+    section = data.get("hub_import", {})
+    if not isinstance(section, dict) or set(section) - {"sources"}:
+        raise ConfigError("[hub_import] takes only sources")
+    rows = section.get("sources", [])
+    if not isinstance(rows, list):
+        raise ConfigError("[[hub_import.sources]] must be a list of tables")
+    out, paths = {}, set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) - {"id", "path", "runtime_retired"}:
+            raise ConfigError("hub import source takes id, path, runtime_retired")
+        sid, path, retired = row.get("id"), row.get("path"), row.get("runtime_retired", False)
+        if not isinstance(sid, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", sid) or sid in out:
+            raise ConfigError("hub import source id must be unique and match [a-z][a-z0-9_-]{0,63}")
+        if (not isinstance(path, str) or not Path(path).is_absolute() or "\x00" in path
+                or ".." in Path(path).parts or not isinstance(retired, bool)):
+            raise ConfigError("hub import source requires an absolute path and boolean runtime_retired")
+        canonical = str(Path(path).resolve())
+        if canonical in paths:
+            raise ConfigError("hub import sources must not share a canonical path")
+        paths.add(canonical)
+        out[sid] = HubImportSource(sid, path, retired)
+    return out
+
+
+@dataclass
 class Config:
     hosts: dict[str, HostConfig]
     safety: SafetyConfig = field(default_factory=SafetyConfig)
@@ -406,6 +438,7 @@ class Config:
     path: Path | None = None
     human_name: str | None = None  # [client] human_name: who relayed messages come from (NEED-<NAME> marker)
     relay_name: str | None = None  # [client] relay_name: the relaying bot, named in relay headers
+    hub_import_sources: dict[str, HubImportSource] = field(default_factory=dict)
 
     def host(self, name: str) -> HostConfig:
         if name not in self.hosts:
@@ -525,7 +558,7 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
     if relay_name and not re.fullmatch(r"[A-Za-z0-9 ._-]{1,40}", relay_name):
         raise ConfigError("[client] relay_name must be 1-40 letters/digits/spaces")
     return Config(hosts=hosts, safety=safety, jev=jev, api=api, github=parse_github(data), client_label=label,
-                  path=path, human_name=human, relay_name=relay_name)
+                  path=path, human_name=human, relay_name=relay_name, hub_import_sources=parse_hub_sources(data))
 
 
 def load_config(path: str | Path | None = None) -> Config:

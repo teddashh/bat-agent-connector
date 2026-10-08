@@ -1,0 +1,2 @@
+{"at": "2026-10-01T11:00:00Z", "role": "user", "text": "Preserve this additional synthetic request. https://example.invalid/history", "request": "fixture-request"}
+{"role": "assistant", "text": "Historical assistant output is not a request."}

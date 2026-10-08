@@ -12,7 +12,18 @@ The project and work item rules in `src/bat_agent_connector/work_items.py` are p
 | `hub/lib/completion.js` | `work_items.completion`, `work_item.approve`, `work_item.continue` | an agent's done is a claim a person approves against a content fingerprint; a content change asks again; "keep working" holds for the current steps |
 | `hub/lib/task-ids.js` | `work_items.py` IDs | IDs are never reused |
 
-Changes are listed in [docs/design/work-items.md](docs/design/work-items.md). Project Hub's license:
+The offline importer in `src/bat_agent_connector/hub_import.py` also ports rules from the same pinned commit:
+
+| Project Hub file | Ported to | What was kept / changed |
+|---|---|---|
+| `hub/lib/frontmatter.js` | `parse_doc`, `_value`, `_comment`, `_split` | limited strings/booleans/list/map dialect; Python rejects malformed, duplicate or unsupported input instead of silently defaulting |
+| `hub/lib/store.js`, `hub/lib/hierarchy.js`, `hub/lib/task-ids.js` | `snapshot`, `normalize`, `record_key` | directory/file identities, full request body, steps, ID-first/unique-name relations; no Store construction or runtime execution |
+| `hub/lib/project-order.js`, `hub/public/project-order.js`, `hub/public/app.js` | `normalize`, `_near`, `_merge_order` | display parents, derived placement, updated order, saved project groups and pins; invalid relations block, existing Connector slots are preserved |
+| `hub/lib/completion.js` | `hub_hash`, `normalize` | full-file CRLF-normalized SHA-256 and compact steps hash; historical approvals never grant Connector approval; no migration seeding |
+| `hub/lib/chat.js` | read-only request-history extraction | user JSONL rows retained as provenance; no replay, dispatch or ChatRunner |
+
+Changes are listed in [docs/design/work-items.md](docs/design/work-items.md) and
+[docs/design/hub-import.md](docs/design/hub-import.md). The fixtures are synthetic. Project Hub's license:
 
 ```
 MIT License

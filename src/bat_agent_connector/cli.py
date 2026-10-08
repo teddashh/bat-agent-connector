@@ -664,6 +664,17 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--key", help="idempotency key (default: a new one)")
     c = isp.add_parser("show", help="one preview (ipv_...) or integration operation (op_...)")
     c.add_argument("id")
+    p = sp.add_parser("hub", help="offline Project Hub import from a daemon-configured source")
+    hsp = p.add_subparsers(dest="hub_cmd", required=True)
+    c = hsp.add_parser("import", help="preview first, then apply that reviewed snapshot")
+    c.add_argument("--source", required=True, help="configured source_id, never a filesystem path")
+    mode = c.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--preview", action="store_true")
+    mode.add_argument("--apply", action="store_true")
+    c.add_argument("--preview-id", help="hip_... from the reviewed preview (required with --apply)")
+    c.add_argument("--key", help="preview idempotency key; apply uses hub.import.apply.<preview_id>")
+    c = hsp.add_parser("show", help="sources, a preview (hip_...) or import receipts (op_...)")
+    c.add_argument("id", nargs="?")
     p = sp.add_parser("project", help="projects: the connector's own grouping of work items")
     psp = p.add_subparsers(dest="project_cmd", required=True)
     c = psp.add_parser("list", help="the project tree with work item counts")
@@ -815,6 +826,36 @@ def cmd_integrate(args) -> int:
     return 0
 
 
+def cmd_hub(args) -> int:
+    import uuid
+
+    from .hub_import import apply_request
+    from .task_daemon import request
+
+    if args.hub_cmd == "show":
+        out = request("hub_import_get", **({"preview_id": args.id} if args.id.startswith("hip_") else
+                      {"operation_id": args.id}), entry="cli") if args.id else request("hub_import_sources", entry="cli")
+    elif args.preview:
+        if args.preview_id:
+            raise ValueError("--preview-id is only used with --apply")
+        out = request("op_submit", action="hub.import.preview", target={"source_id": args.source}, params={},
+                      idempotency_key=args.key or f"cli-{uuid.uuid4()}", wait_s=30, timeout=40.0, entry="cli")
+        result = out["operation"].get("result") or {}
+        if result.get("preview"):
+            out.update(request("hub_import_get", preview_id=result["preview"]["preview_id"], entry="cli"))
+    else:
+        if not args.preview_id or args.key:
+            raise ValueError("--apply requires --preview-id and uses its fixed idempotency key")
+        doc = request("hub_import_get", preview_id=args.preview_id, entry="cli")["preview"]
+        if doc["source_id"] != args.source:
+            raise ValueError("--source differs from the reviewed preview")
+        out = request("op_submit", **apply_request(doc), wait_s=30, timeout=40.0, entry="cli")
+    _print(out, True)
+    op = out.get("operation", {})
+    preview = out.get("preview") or (op.get("result") or {}).get("preview")
+    return int((preview is not None and not preview["can_apply"]) or op.get("status") in {"failed", "needs_attention", "cancelled"})
+
+
 def _manage(action: str, target: dict, params: dict, pre: dict | None = None) -> dict:
     import uuid
 
@@ -955,6 +996,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_checkpoint(args)
         if args.cmd == "integrate":
             return cmd_integrate(args)
+        if args.cmd == "hub":
+            return cmd_hub(args)
         if args.cmd == "project":
             return cmd_project(args)
         if args.cmd == "item":

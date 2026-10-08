@@ -28,13 +28,14 @@ import secrets
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from urllib.parse import urlsplit
 
 from .operations import ActionDef, OpContext, OperationError, OperationService
 
 PROJECT_ID = re.compile(r"prj_[0-9a-f]{20}")
 WORK_ITEM_ID = re.compile(r"wi_[0-9a-f]{20}")
 STATES = ("todo", "doing", "waiting", "done")
-LINK_KINDS = ("session", "checkpoint", "operation", "task", "pull_request")
+LINK_KINDS = ("session", "checkpoint", "operation", "task", "pull_request", "external_url")
 STARTS_SESSION = ("checkpoint.continue", "integration.handoff")  # their result names the session they started
 NAME_MAX = {"project": 80, "work_item": 120}
 TEXT_MAX = 20_000
@@ -182,8 +183,24 @@ def _only(params: dict, allowed: tuple[str, ...]) -> None:
 
 
 # ------------------------------------------------------------------ rows
+def split_creation_reference(value: str) -> dict:
+    """An import's per-record creation reference is never an operation ID on a read surface."""
+    op, sep, record = value.partition("#")
+    if sep and _OPERATION.fullmatch(op) and re.fullmatch(r"[0-9a-f]{32}", record):
+        return {"operation_id": op, "import_record": record}
+    return {"operation_id": value}
+
+
+def _with_source(db, value: dict, *, detail: bool = False) -> dict:
+    from .hub_import import source_for
+    source = source_for(db, value.get("project_id") if "work_item_id" not in value else value["work_item_id"],
+                        detail=detail)
+    return {**value, "source": source} if source else value
+
+
 def _project(row) -> dict:
-    return {"project_id": row["project_id"], "name": row["name"], "description": row["description"],
+    return {**split_creation_reference(row["operation_id"]),
+            "project_id": row["project_id"], "name": row["name"], "description": row["description"],
             "parent_id": row["parent_id"], "derived_from": row["derived_from"],
             "repositories": json.loads(row["repositories"]), "task_project": row["task_project"],
             "pinned": bool(row["pinned"]), "archived": row["archived_at"] is not None,
@@ -192,7 +209,8 @@ def _project(row) -> dict:
 
 
 def _item(row) -> dict:
-    item = {"work_item_id": row["work_item_id"], "project_id": row["project_id"], "parent_id": row["parent_id"],
+    item = {**split_creation_reference(row["operation_id"]),
+            "work_item_id": row["work_item_id"], "project_id": row["project_id"], "parent_id": row["parent_id"],
             "derived_from": row["derived_from"], "title": row["title"], "goal": row["goal"],
             "request": row["request"], "acceptance": row["acceptance"], "steps": json.loads(row["steps"]),
             "state": row["state"], "done_by": row["done_by"], "done_at": row["done_at"],
@@ -216,7 +234,7 @@ def _get_project(db, project_id, *, active: bool = False) -> dict:
         raise _bad("PROJECT_NOT_FOUND", "no such project", 404)
     if active and row["archived_at"] is not None:
         raise _bad("PROJECT_ARCHIVED", "the project is archived; restore it first", 409)
-    return _project(row)
+    return _with_source(db, _project(row), detail=True)
 
 
 def _get_item(db, work_item_id, *, active: bool = False) -> dict:
@@ -225,7 +243,7 @@ def _get_item(db, work_item_id, *, active: bool = False) -> dict:
         raise _bad("WORK_ITEM_NOT_FOUND", "no such work item", 404)
     if active and row["archived_at"] is not None:
         raise _bad("WORK_ITEM_ARCHIVED", "the work item is archived; restore it first", 409)
-    return _item(row)
+    return _with_source(db, _item(row), detail=True)
 
 
 def _target_id(target: dict, key: str, pattern: re.Pattern) -> str:
@@ -419,12 +437,28 @@ def _descendants(db, table: str, key: str, root: str, *, archived_by_op: str | N
 
 
 # ------------------------------------------------------------------ links
+def external_url(ref: str) -> str:
+    if not isinstance(ref, str) or not ref or len(ref) > 300 or re.search(r"[\x00-\x20\x7f]", ref):
+        raise _bad("INVALID_PARAMS", "external_url must be an HTTP(S) URL of at most 300 characters")
+    try:
+        parts = urlsplit(ref)
+        valid = (parts.scheme in ("http", "https") and parts.hostname and not parts.username
+                 and not parts.password and parts.port != 0)
+    except ValueError:
+        valid = False
+    if not valid:
+        raise _bad("INVALID_PARAMS", "external_url must be HTTP(S), with no user information")
+    return ref
+
+
 def _link_ref(ops: OperationService, kind, ref) -> str:
     db = ops.db
     if kind not in LINK_KINDS:
         raise _bad("INVALID_PARAMS", f"params.kind must be one of {', '.join(LINK_KINDS)}")
     if not isinstance(ref, str) or not ref or len(ref) > 300:
         raise _bad("INVALID_PARAMS", "params.ref is required")
+    if kind == "external_url":
+        return external_url(ref)
     if kind == "session":
         host, sep, sid = ref.partition("/")
         fleet = ops.context.get("fleet")
@@ -450,6 +484,8 @@ def _link_ref(ops: OperationService, kind, ref) -> str:
 
 def _link_summary(db, kind: str, ref: str) -> dict:
     """What a link points at now, from the journal and inventory only (no host is asked)."""
+    if kind == "external_url":
+        return {"found": True, "url": ref}
     if kind == "session":
         host, _, sid = ref.partition("/")
         row = db.execute("SELECT body,api_access,gone_at,last_seen_at FROM sessions_observed WHERE host=? "
@@ -483,19 +519,20 @@ def _link_summary(db, kind: str, ref: str) -> dict:
 
 
 # ------------------------------------------------------------------ applying a change once
-def _once(ctx: OpContext, change: Callable[[object, float], dict]) -> dict:
+def _once(ctx: OpContext, change: Callable[[object, float], dict], *, key: str | None = None) -> dict:
     """Run ``change`` and record the operation in the same transaction. A re-run of the same operation (the
     daemon restarted before the result was stored) returns the recorded result."""
     journal, db = ctx.service.journal, ctx.service.db
+    key = ctx.operation_id if key is None else key
     with journal.tx():
         row = db.execute("SELECT result FROM management_applied WHERE operation_id=?",
-                         (ctx.operation_id,)).fetchone()
+                         (key,)).fetchone()
         if row is not None:
             return json.loads(row["result"])
         now = _now()
         result = change(db, now)
         db.execute("INSERT INTO management_applied(operation_id,result,applied_at) VALUES(?,?,?)",
-                   (ctx.operation_id, json.dumps(result, ensure_ascii=False), now))
+                   (key, json.dumps(result, ensure_ascii=False), now))
     return result
 
 
@@ -982,11 +1019,11 @@ def projects_list(db, *, include_archived: bool = False) -> dict:
         by_project[r["project_id"]].append(_item(r))
 
     def decorate(p: dict) -> dict:
-        return {**p, "counts": _counts(by_project.get(p["project_id"], []))}
+        return _with_source(db, {**p, "counts": _counts(by_project.get(p["project_id"], []))})
 
     out = {"projects": _tree(projects, "projects", db, "project_id", decorate)}
     if include_archived:
-        out["archived"] = [_project(r) for r in db.execute(
+        out["archived"] = [_with_source(db, _project(r)) for r in db.execute(
             "SELECT * FROM projects WHERE archived_at IS NOT NULL ORDER BY archived_at DESC LIMIT ?", (LIST_MAX,))]
     return out
 
@@ -1014,9 +1051,10 @@ def project_get(db, project_id: str, *, include_archived: bool = False) -> dict:
     out = {"project": {**project, "counts": _counts(items)}, "path": _project_path(db, project),
            "sub_projects": [{"project_id": p["project_id"], "name": p["name"], "pinned": p["pinned"]}
                             for p in children],
-           "work_items": _tree(items, _item_scope(project_id), db, "work_item_id", _public)}
+           "work_items": _tree(items, _item_scope(project_id), db, "work_item_id",
+                               lambda x: _with_source(db, _public(x)))}
     if include_archived:
-        out["archived"] = [_public(_item(r)) for r in db.execute(
+        out["archived"] = [_with_source(db, _public(_item(r))) for r in db.execute(
             """SELECT * FROM work_items WHERE project_id=? AND archived_at IS NOT NULL ORDER BY archived_at DESC
             LIMIT ?""", (project_id, LIST_MAX))]
     return out
@@ -1055,7 +1093,7 @@ def work_items_list(db, *, project_id: str | None = None, state: str | None = No
         if len(out) == limit:
             more = True
             break
-        out.append({**x, "project_name": r["project_name"]})
+        out.append(_with_source(db, {**x, "project_name": r["project_name"]}))
         last = f"{x['updated_at']!r}|{x['work_item_id']}"
     return {"work_items": out, "next_cursor": last if more else None}
 
