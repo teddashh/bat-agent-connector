@@ -58,6 +58,8 @@ READ_TOOLS = [
     "project_get",
     "work_items_list",
     "work_item_get",
+    "hub_import_sources",
+    "hub_import_get",
 ]
 # Registered unless --read-only: they act as BATC_API_TOKEN's principal, whose scopes decide what is allowed.
 OPERATION_TOOLS = ["operation_submit", "operation_cancel", "operation_resume", "checkpoint_create",
@@ -398,9 +400,19 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         to sessions, checkpoints, operations, tasks and PRs (with what each points at now) and its history."""
         return await daemon("work_item_get", work_item_id=work_item_id)
 
+    async def hub_import_sources() -> dict[str, Any]:
+        """Daemon-configured offline Project Hub sources and their retirement declaration. No paths accepted."""
+        return await daemon("hub_import_sources")
+
+    async def hub_import_get(preview_id: str | None = None, operation_id: str | None = None) -> dict[str, Any]:
+        """Read an actor-bound Hub preview (hip_...) or apply receipts (op_...). Imports require a person's
+        retirement declaration and review; read-only sources never run Hub tasks."""
+        return await daemon("hub_import_get", preview_id=preview_id, operation_id=operation_id)
+
     for fn in (capabilities_get, inventory_sessions, inventory_hosts, events_list, operation_get, operations_list,
                github_pr_preview, checkpoints_list, checkpoint_preview, integration_candidates, integration_get,
-               integrations_list, projects_list, project_get, work_items_list, work_item_get):
+               integrations_list, projects_list, project_get, work_items_list, work_item_get,
+               hub_import_sources, hub_import_get):
         mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
 
     if fleet.any_orchestrate:
@@ -496,9 +508,12 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             target={project_id}, params={title, goal?, request?, acceptance?, steps?, parent_id?};
             action="work_item.update", target={work_item_id}, params={only the fields that change, e.g. steps or
             state: todo|doing|waiting|done}, preconditions={expected_version}; action="work_item.link",
-            target={work_item_id}, params={kind: session|checkpoint|operation|task|pull_request, ref}. Setting
+            target={work_item_id}, params={kind: session|checkpoint|operation|task|pull_request|external_url, ref}. Setting
             state=done is a claim that a person accepts or sends back (work_item.approve needs the approve scope;
-            do not ask for it). Acts as BATC_API_TOKEN's principal; requires confirm=true."""
+            do not ask for it). A person may authorize an offline Hub import (manage): hub.import.preview,
+            target={source_id}, params={}; review hub_import_get, then hub.import.apply, same target,
+            params={preview_id}, preconditions={preview_digest}, key="hub.import.apply.<preview_id>".
+            Never declare retirement for the person. Acts as BATC_API_TOKEN's principal; requires confirm=true."""
             return await principal_daemon("op_submit", confirm, action=action, idempotency_key=idempotency_key,
                                           target=target, params=params, preconditions=preconditions, wait_s=wait_s)
 

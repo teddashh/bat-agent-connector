@@ -17,7 +17,17 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import api_actions, api_auth, checkpoints, delivery, integration, registry, service, work_items
+from . import (
+    api_actions,
+    api_auth,
+    checkpoints,
+    delivery,
+    hub_import,
+    integration,
+    registry,
+    service,
+    work_items,
+)
 from .api_v1 import ApiV1, is_dashboard_path
 from .config import Config, state_dir
 from .errors import BatError, ResourceReadOnly, TokenUnavailable
@@ -42,7 +52,7 @@ API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_canc
            "checkpoint_get": "observe", "checkpoint_preview": "observe", "integration_candidates": "observe",
            "integration_preview_get": "observe", "integration_get": "observe", "integrations_list": "observe",
            "projects_list": "observe", "project_get": "observe", "work_items_list": "observe",
-           "work_item_get": "observe"}
+           "work_item_get": "observe", "hub_import_sources": "observe", "hub_import_get": "observe"}
 ADMIN_RPC = {"api_token_issue", "api_token_revoke", "api_token_list", "work_reconcile_capability"}
 
 
@@ -123,7 +133,7 @@ class TaskDaemon:
         # the inventory observes through its own read-only fleet.
         self.ops = OperationService(self.journal,
                                     actions=api_actions.ACTIONS + delivery.ACTIONS + checkpoints.ACTIONS
-                                    + integration.ACTIONS + work_items.ACTIONS)
+                                    + integration.ACTIONS + work_items.ACTIONS + hub_import.ACTIONS)
         github = None
         if config.github.token_ref:
             try:
@@ -134,6 +144,7 @@ class TaskDaemon:
             interval_s=config.api.inventory_interval_s, stale_after_s=config.api.stale_after_s,
             activity_every=config.api.activity_every))
         self.ops.context.update(fleet=self.fleet, inventory=self.inventory, github=github,
+                                hub_import_sources=config.hub_import_sources,
                                 github_config=config.github,
                                 git_runner=checkpoints.SshGitRunner(self.adapter.verifier.settings.ssh_hosts))
         self.api = ApiV1(self, allowed_origins=config.api.allowed_origins)
@@ -242,6 +253,12 @@ class TaskDaemon:
                                                  int(params.get("pull_number") or 0), int(params.get("limit") or 20))
         if method == "projects_list":
             return work_items.projects_list(self.journal.db, include_archived=bool(params.get("include_archived")))
+        if method == "hub_import_sources":
+            return hub_import.sources_list(self.ops)
+        if method == "hub_import_get":
+            if params.get("preview_id"):
+                return {"preview": hub_import.get_preview(self.ops, str(params["preview_id"]), principal)}
+            return hub_import.import_get(self.ops, str(params.get("operation_id")))
         if method == "project_get":
             return work_items.project_get(self.journal.db, str(params.get("project_id")),
                                           include_archived=bool(params.get("include_archived")))

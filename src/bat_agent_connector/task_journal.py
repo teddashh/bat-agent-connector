@@ -323,6 +323,46 @@ class Journal:
                     task_event_id,created_at) SELECT 'task',task_id,'task.'||kind,body,event_id,created_at
                     FROM events ORDER BY event_id""")
                 self.db.execute("PRAGMA user_version=1")
+        self._migrate_hub_import()
+
+    def _migrate_hub_import(self):
+        # Additive and idempotent; reserve the next free user_version when rebasing parallel packages.
+        self.db.executescript("""
+            BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS hub_import_sources (
+                source_id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0,
+                manifest TEXT, operation_id TEXT, actor TEXT, updated_at REAL
+            );
+            CREATE TABLE IF NOT EXISTS hub_import_previews (
+                preview_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE,
+                actor TEXT NOT NULL, source_id TEXT NOT NULL, digest TEXT NOT NULL,
+                document TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS hub_import_map (
+                source_id TEXT NOT NULL, record_key TEXT NOT NULL, kind TEXT NOT NULL,
+                hub_project_id TEXT NOT NULL, hub_task_id TEXT NOT NULL,
+                connector_id TEXT NOT NULL UNIQUE, source_digest TEXT, snapshot TEXT,
+                baseline TEXT, pending TEXT, import_state TEXT NOT NULL DEFAULT 'incomplete',
+                operation_id TEXT NOT NULL, imported_at REAL NOT NULL,
+                PRIMARY KEY(source_id, record_key)
+            );
+            CREATE TABLE IF NOT EXISTS hub_import_receipts (
+                operation_id TEXT NOT NULL, record_key TEXT NOT NULL, result TEXT NOT NULL,
+                after_state TEXT, created_at REAL NOT NULL, PRIMARY KEY(operation_id, record_key)
+            );
+            CREATE TABLE IF NOT EXISTS hub_import_groups (
+                source_id TEXT NOT NULL, group_key TEXT NOT NULL, source_digest TEXT NOT NULL,
+                baseline TEXT NOT NULL, PRIMARY KEY(source_id, group_key)
+            );
+            CREATE TABLE IF NOT EXISTS hub_import_source_snapshots (
+                operation_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, manifest TEXT NOT NULL,
+                snapshot TEXT NOT NULL, created_at REAL NOT NULL
+            );
+            COMMIT;
+        """)
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 2:
+            with self.tx():
+                self.db.execute("PRAGMA user_version=2")
 
     def _drop_legacy_outbox(self):
         """Remove the retired chat outbox so no historical event can ever be published.

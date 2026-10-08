@@ -16,7 +16,16 @@ import time
 from importlib import resources
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import __version__, api_auth, checkpoints, integration, resource_policy, service, work_items
+from . import (
+    __version__,
+    api_auth,
+    checkpoints,
+    hub_import,
+    integration,
+    resource_policy,
+    service,
+    work_items,
+)
 from .errors import BatError, ResourceReadOnly
 from .operations import STATES, OperationError
 
@@ -110,6 +119,9 @@ class ApiV1:
             ("GET", r"/api/v1/integrations", self.integrations, "observe"),
             ("GET", r"/api/v1/integrations/(?P<op>op_[0-9a-f]{32})", self.integration, "observe"),
             ("GET", r"/api/v1/projects", self.projects, "observe"),
+            ("GET", r"/api/v1/hub-import/sources", self.hub_import_sources, "observe"),
+            ("GET", r"/api/v1/hub-import/previews/(?P<pv>hip_[0-9a-f]{32})", self.hub_import_preview, "observe"),
+            ("GET", r"/api/v1/hub-import/imports/(?P<op>op_[0-9a-f]{32})", self.hub_import_get, "observe"),
             ("GET", r"/api/v1/projects/(?P<prj>prj_[0-9a-f]{20})", self.project, "observe"),
             ("GET", r"/api/v1/work-items", self.work_items, "observe"),
             ("GET", r"/api/v1/work-items/(?P<wi>wi_[0-9a-f]{20})", self.work_item, "observe"),
@@ -295,6 +307,7 @@ class ApiV1:
                      "contract_version": CONTRACT_VERSION, "connector": __version__, "hosts": hosts,
                      "actions": actions, "operation_statuses": list(STATES),
                      "features": {"inventory": True, "events_stream": True, "operations": True, "work_items": True,
+                                  "hub_import": bool(self.daemon.ops.context.get("hub_import_sources")),
                                   "github": self.daemon.ops.context.get("github") is not None,
                                   "deploy": bool(gh_cfg.recipes),
                                   "checkpoints": [h for h in fleet.config.hosts if self._can_continue(h)],
@@ -426,6 +439,15 @@ class ApiV1:
     async def projects(self, query, **_):
         return 200, work_items.projects_list(self.daemon.journal.db,
                                              include_archived=bool(self._bool(query, "include_archived")))
+
+    async def hub_import_sources(self, **_):
+        return 200, hub_import.sources_list(self.daemon.ops)
+
+    async def hub_import_preview(self, pv, principal, **_):
+        return 200, {"preview": hub_import.get_preview(self.daemon.ops, pv, principal)}
+
+    async def hub_import_get(self, op, **_):
+        return 200, hub_import.import_get(self.daemon.ops, op)
 
     async def project(self, query, prj, **_):
         return 200, work_items.project_get(self.daemon.journal.db, prj,
