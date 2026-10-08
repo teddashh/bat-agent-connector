@@ -2,6 +2,82 @@
 
 ## Next release (unreleased)
 
+- Refuse BAT worktree mutations for legacy reviewers whose shared creation root is unproven in the registry,
+  including paths under managed roots. Preserve proven carrier behavior and observation identity resolution;
+  raw CLI policy does not require a task daemon or guess a journal location.
+
+- Observation cursor key validation ([design](docs/design/observation.md), plan v2 §14 (former §10/§11), B01/B02):
+  validate history integer keys and relation [integer, string] keys in the shared decoder before any journal read.
+  Reject booleans, nulls and malformed shapes with INVALID_CURSOR even for empty or fully filtered results;
+  verify HTTP/MCP/CLI parity, audit inventory/discovery/event cursors, and preserve valid snapshot paging.
+
+- Observation creation-root carriers ([design](docs/design/observation.md), plan §06/§08/§11, B01/B03/D05):
+  follow explicit shares_worktree_with, equal-path legacy failovers and proven reviewer carriers through one
+  parent rule. Remove the unwritten sharing key; non-sharing successors keep their own root and never inherit
+  old worktree identity/history, live or in step-2 replay. Require task lead/path evidence for pathless reviewers;
+  refuse BAT worktree actions without a recorded worktree even in managed roots. No new data step.
+
+- Observation worktree maker agreement ([design](docs/design/observation.md), plan §06/§08/§11, B01/B03/D05):
+  share the connector creation predicate and registry root walk with the ownership classifier, including legacy
+  batc/ branches. Retain journaled connector slots or parent slots instead of minting BAT registry IDs; missing
+  slots remain unknown. Refuse BAT worktree actions when successor/reviewer rows lose root markers, preserve
+  existing refusals, and verify live identity/history/relations and data-step-2 replay without a new migration.
+
+- Observation history privacy and occurrence bounds ([design](docs/design/observation.md), plan §08/§10/§11, B03):
+  keep reason/previous_reason only as fixed enums; omit task and operation diagnostics, titles, prose containers
+  and free-form refs recursively from history and saved snapshots while preserving recorded codes and identities.
+  Explicit unknown occurrence times never match since/until; only absent metadata uses event record time.
+  Report the exclusion rule in coverage, preserve unknown facts in unbounded reads, and document every producer
+  in the spec, API contract and both skills. Keep source journal rows and data step 2 unchanged.
+
+- Observation field freshness events ([design](docs/design/observation.md), plan §10/§11/§19, B02/B03):
+  emit session updates when fields_stale or fixed field_evidence values change, including meta failure/recovery
+  with unchanged retained values. Keep observation/activity timestamps and repeated identical polls quiet;
+  preserve freshness in HTTP/MCP/CLI history without error text. Document catch-up in the API and both skills;
+  the Dashboard Sessions list already reloads on these events. Keep session-specific stale/fresh reasons separate.
+
+- Observation operation ref positions ([design](docs/design/observation.md), plan §08/§10/§11, B01/B02/B03):
+  bound operation refs by both event and link sequence; saved facts read strictly before their historical position,
+  while live and replayed events include their own sequence. Exclude later checkpoint runs and mutable operation
+  refs from early facts, preserve unbounded catalogue membership, and bound related-event links by the captured
+  feed head. Backfill stays in data step 2 with projection failures isolated.
+
+- Observation relation closure bodies ([design](docs/design/observation.md), plan §08/§10/§11, B01/B03):
+  emit the complete final command boundary and one close timestamp in the same body stored by the relation
+  and its revision. Open/bind/close events match their revisions across replacement lifecycles; version-1
+  replay reconstructs the final linked command while keeping unknown close times null and saved events intact.
+
+- Observation saved-fact placement ([design](docs/design/observation.md), plan §08/§10/§11, B01/B03):
+  position eventless snapshots using their own timestamps and the original journal boundary, recovering
+  historical task/session/worktree links without attaching later participants. Task-source snapshots retain
+  execution links even when no relation was open or time is unknown; completed backfill retries write nothing.
+
+- Observation relation event links ([design](docs/design/observation.md), plan §08/§10/§11, B01/B03):
+  attach opened/bound/closed facts only to their named relation and session, including version-1 replay;
+  retain malformed-event evidence without guessed links. Task milestones and task-source projections use
+  relations proven open at the event sequence, excluding former participants and preserving execution paging.
+
+- Observation history roles ([design](docs/design/observation.md), plan §08/§10/§11/§15/§16, B01/B03):
+  retain lead/reviewer and other fixed roles in relation events and nested version/backfill summaries.
+  Audit the recursive whitelist to preserve bounded IDs, sequences, SHAs and boolean/state evidence, including
+  delivery head-repository identity and write acknowledgement; keep prompts, PR text and commit messages excluded.
+
+- Observation worktree relation snapshots ([design](docs/design/observation.md), plan §08/§10/§11, B01/B03):
+  retain sequenced session/worktree binding intervals instead of filtering by the current worktree pointer.
+  Late bindings stay outside existing `as_of` cursors; moves preserve earlier participation, with scoped ranges
+  and command lists across pages. Data step 2 seeds proven original sequences or the saved binding's backfill
+  link sequence once; projection failures keep the core event and expose the gap.
+
+- Observation settlement history ([design](docs/design/observation.md), plan §08/§09/§10/§11/§15, B03/C07):
+  all three metadata-settlement writers share one insert/event transaction, including acknowledged PATCH conflicts.
+  Only the first inserted receipt emits history, preserving its code without PR text; legacy receipts use the
+  same sanitized backfill. Delivery DDL checks use the journal's latest allocated data-step constant.
+
+- Record the [Tauri v2 product scope](docs/product/realignment-v2.md) and
+  [integration status](docs/product/implementation-status.md) (R00). Keep the central Python backend and
+  share the browser/desktop UI; exclude Hub import and redefine B05 as Connector data preservation.
+  Desktop, Fleet parity and live acceptance remain tracked work, not completed capabilities.
+
 - Keep deployment rollback/retry keys stable across drawer close, live refresh and page reload for the same
   reviewed request. Let explicit PR loading proceed while environment details remain open, render only HTTPS
   provider links, and translate the new deployment labels in zh-TW. Browser regressions use a local daemon
@@ -61,6 +137,12 @@
   while retaining needs_attention and its audit. Resume and reconciliation use the saved conclusion without GitHub
   calls; refused readback keeps verification pending and the update lock until a successful read.
 
+- Observation history after Delivery Part A ([design](docs/design/observation.md), plan §08/§10/§11/§15/§16,
+  B01/B03): index immutable merge previews, `merge.verify` receipts and first metadata settlements using explicit
+  operation resource refs. History keeps numbers, SHAs, states and codes without PR titles/bodies; preview reuse
+  and repeated reconciliation add no events. Late links respect `as_of`, and data step 2 backfills saved delivery
+  facts once without changing their documents. Repository/PR refs alone imply no session or worktree link.
+
 - Delivery merge method ([design](docs/design/delivery.md), plan §09/§16, C05): execution, recorded steps and
   verification use the admitted preview's method across checks waits and restarts; current policy can block a PUT
   with MERGE_DISABLED/INVALID_PARAMS, but changing the default never changes the reviewed method.
@@ -109,6 +191,15 @@
   rows and throttle event reloads for sixty seconds. Checks waits use cheap head/base reads; the final scope check
   runs before the submit step so transient read failures can resume. Verification accepts related PRs merged later
   and stops updated PR pagination at admission time.
+
+- Observation Part A ([design](docs/design/observation.md), plan §08/§10/§11/§19, W03 remainder, B01/B02 server/B03):
+  journal-only session/worktree history with a fixed sequence bound, task/session relation ranges that survive warm
+  reuse, actor and version evidence, distinct unknown/loading/tab/activity states, and latest discovery scope per
+  host/profile. Polls update bounded rows; host staleness is derived without session fan-out; migration facts stay
+  out of the default events/SSE feed while its cursor advances. Shared worktree creation IDs match cleanup's contract.
+  New HTTP routes, four MCP reads (`inventory_session`, `inventory_worktree`, `resource_history`, `resource_relations`),
+  discovery via `inventory_hosts`, and CLI `inventory/history/relations`. No background Git probing. Dashboard
+  timeline, filters, scope card and browser reconnect checks remain Part B.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
