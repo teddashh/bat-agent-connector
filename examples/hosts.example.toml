@@ -28,7 +28,7 @@ orchestrate_register_tabs = false      # append a GUI tab via workspace:save (ap
 default_permission_mode = "default"    # "allow_all" = sessions the connector starts/fails over run like BAT's GUI
                                        # default (Claude bypassPermissions, Codex danger-full-access + never ask),
                                        # and approve_pending / session_set_permissions may raise sessions (needs writes)
-auto_cleanup = false                   # let session_cleanup actually merge/clean/stop (needs orchestrate)
+auto_cleanup = false                   # deprecated: parses only; never enables cleanup writes
 codex_model = ""                       # default model for Codex sessions started/failed over ("" = BAT's default)
 managed_roots = []                     # host folders that are the connector's own clones (real paths, no symlinks);
                                        # only there may sessions work in the main checkout and worktree_merge merge
@@ -39,6 +39,21 @@ shared_clone_worktrees = true          # legacy: new worktrees may live in a hum
 url = "wss://127.0.0.2:9876/"
 fingerprint = "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF"
 token_ref = "bat-profile:buildbox"     # read from BAT's own client token store at connect time
+
+# Optional verified host-account boundary. The operator must establish this trusted auditor channel first.
+# [hosts.buildbox.confinement]
+# host_account = true
+# expected_uid = 2001
+# bat_account = "example-bat"
+# check_ssh_alias = "example-auditor"    # different account; never the BAT account's login
+# check_uid = 2002                     # auditor UID, or 0 for a trusted root alias
+# protected_roots = ["/srv/example-personal"]
+# check_max_age_s = 300
+# check_timeout_s = 10
+# check_max_entries = 50000
+# bat_port = 9876
+# No trusted alias => unknown/check_channel_untrusted; confined Claude falls back to default.
+# Exact sudoers rule and hardening: docs/design/confinement.md. Git aliases stay in Task settings.
 
 # /api/v1 on the task daemon (batc serve). See docs/design/api-v1.md.
 [api]
@@ -67,7 +82,7 @@ allowed_origins = []                   # extra browser origins (loopback origins
 # verification = { kind = "http_json", url = "https://deployment.example/version", version_required = true, health_required = true }
 
 # Optional judgment layer (TypeSafe Jev). OFF unless an API key is in the environment variable below.
-# It only refines ambiguous session-state classifications and gates cleanup merges; any error or
+# It only refines ambiguous session-state classifications and refines legacy read-only cleanup evaluation; any error or
 # timeout falls back to the deterministic result (for cleanup: escalate instead of merge).
 # Only short, secret-redacted excerpts are sent.
 [jev]
