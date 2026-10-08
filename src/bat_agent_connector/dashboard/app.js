@@ -2,6 +2,8 @@
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		parent_archived: "這個項目或所屬專案已封存；編輯草稿仍保留。",
+		pending_changed: "待回覆的問題已改變；草稿仍保留。請查看目前的要求後重新作答。",
 		attachment_file_changed: "請重新選擇相同檔案以查回原上傳；不同內容請先移除這一項。",
 		attachment_pending: "上傳結果仍待確認。請以相同檔案重試原操作。",
 		existing_artifact: "已上傳附件",
@@ -448,6 +450,8 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		parent_archived: "This item or its project is archived. Your edit draft is retained.",
+		pending_changed: "The pending request changed. Your draft is retained; review the current request before answering.",
 		attachment_file_changed: "Choose the same file to recover this upload; remove this entry before choosing different content.",
 		attachment_pending: "Upload outcome is still pending. Retry the original operation with the same file.",
 		existing_artifact: "Uploaded attachment",
@@ -1832,141 +1836,213 @@ async function viewSessions(main) {
 	});
 }
 async function viewSession(main, host, sid) {
-	const head = h("div", { class: "panel" });
-	const msgs = h("div", { class: "panel" });
-	const controls = h("div", { class: "panel" });
-	main.append(head, controls, h("h2", {}, t("messages")), msgs);
-	let row, from, linked;
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	const path = `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`;
+	const head = h("div", { class: "panel" }), msgs = h("div", { class: "panel" });
+	const pending = h("div", { "data-pending-controls": "" }), status = h("div", { class: "muted" });
+	const scope = `send.${host}.${sid}`, draftKey = `batc.draft.${connection.namespace}.${scope}`;
+	const box = h("textarea", { placeholder: t("send_placeholder") });
 	try {
-		({session: row, started_from: from, work_items: linked} = await api("GET", `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`));
-	} catch (e) {
-		head.replaceChildren(errorBox(e));
-		return;
-	}
-	if (!head.isConnected) return;
-	head.replaceChildren(h("h1", {}, row.title || sid), h("div", { class: "actions" }, ...sessionBadges(row)), h("dl", { class: "kv" }, h("dt", {}, t("host")), h("dd", {}, row.host), h("dt", {}, t("workspace")), h("dd", {}, row.workspace || ""), h("dt", {}, "Session"), h("dd", {}, h("code", {}, row.session_id)), h("dt", {}, t("agent")), h("dd", {}, [row.agent_kind, row.model].filter(Boolean).join(" · ")), h("dt", {}, "Provenance"), h("dd", {}, t("provenance_" + row.provenance)), h("dt", {}, t("observed")), h("dd", {}, when(row.observed_at))));
-	head.append(confinementDetails(row));
-	if (from) head.append(h("p", { class: "note" }, t("started_from", { commit: from.commit_sha.slice(0, 12) }), " ", h("a", { href: `#/session/${encodeURIComponent(from.source_host)}/${encodeURIComponent(from.source_session_id)}` }, t("source_session")), " · ", h("a", { href: `#/op/${from.operation_id}` }, from.operation_id)));
-	if (linked?.length) head.append(linkedItems(linked));
-	const scope = `send.${host}.${sid}`;
-	const draftNamespace = state.namespace;
-	const cps = checkpointPanel(host, sid);
-	main.insertBefore(cps.box, msgs.previousSibling);
-	if (row.api_access !== "managed") controls.replaceChildren(h("p", { class: "note" }, t("read_only_note")));
-	else {
-		const box = h("textarea", { placeholder: t("send_placeholder") });
+		box.value = localStorage.getItem(draftKey) || "";
+	} catch {}
+	box.oninput = () => {
 		try {
-			box.value = localStorage.getItem(`batc.draft.${draftNamespace}.${scope}`) || "";
+			localStorage.setItem(draftKey, box.value);
 		} catch {}
-		box.oninput = () => {
+	};
+	const queue = h("input", { type: "checkbox" });
+	let row, pendingIdentity, sending = false;
+	const identity = (pend) => pend ? JSON.stringify({
+		kind: pend.kind,
+		toolUseId: pend.toolUseId,
+		toolName: pend.toolName,
+		input_preview: pend.input_preview,
+		questions: pend.questions
+	}) : "";
+	const send = h("button", {
+		class: "primary",
+		onclick: async () => {
+			if (!box.value.trim()) return;
+			const submitted = box.value;
+			sending = true;
+			send.disabled = true;
 			try {
-				localStorage.setItem(`batc.draft.${draftNamespace}.${scope}`, box.value);
-			} catch {}
-		};
-		const status = h("div", { class: "muted" });
-		const queue = h("input", {
-			type: "checkbox",
-			checked: row.streaming
-		});
-		const send = h("button", {
-			class: "primary",
-			onclick: async () => {
-				if (!box.value.trim()) return;
-				send.disabled = true;
-				try {
-					const op = await submit("session.send", {
-						host,
-						session_id: sid
-					}, {
-						text: box.value,
-						queue: queue.checked
-					}, {}, scope);
-					status.replaceChildren(opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
-					if (op.status === "succeeded") {
-						box.value = "";
-						try {
-							localStorage.removeItem(`batc.draft.${draftNamespace}.${scope}`);
-						} catch {}
-					}
-				} catch (e) {
-					status.replaceChildren(errorBox(e));
+				assertView(connection);
+				const op = await submit("session.send", {
+					host,
+					session_id: sid
+				}, {
+					text: submitted,
+					queue: queue.checked
+				}, {}, scope);
+				assertView(connection);
+				status.replaceChildren(opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
+				if (op.status === "succeeded" && box.value === submitted) {
+					box.value = "";
+					try {
+						localStorage.removeItem(draftKey);
+					} catch {}
 				}
-				send.disabled = false;
+			} catch (e) {
+				status.replaceChildren(errorBox(e));
+			} finally {
+				sending = false;
+				send.disabled = row?.api_access !== "managed";
 			}
-		}, t("send"));
-		const stop = h("button", {
-			class: "danger",
-			onclick: async () => {
-				try {
-					const op = await submit("session.interrupt", {
-						host,
-						session_id: sid
-					}, { mode: "soft" }, {}, `interrupt.${host}.${sid}`);
-					status.replaceChildren(opStatus(op));
-				} catch (e) {
-					status.replaceChildren(errorBox(e));
-				}
-			}
-		}, t("interrupt"));
-		controls.replaceChildren(box, h("div", { class: "actions" }, send, stop, h("label", { class: "muted" }, queue, " ", t("queue_behind"))), status);
-		if (row.pending) {
-			const pend = row.pending;
-			const answerScope = `answer.${host}.${sid}.${pend.toolUseId || ""}`;
-			const answer = async (params) => {
-				try {
-					status.replaceChildren(opStatus(await submit("session.answer", {
-						host,
-						session_id: sid
-					}, {
-						...params,
-						tool_use_id: pend.toolUseId
-					}, {}, answerScope)));
-				} catch (e) {
-					status.replaceChildren(errorBox(e));
-				}
-			};
-			const pendingBox = h("div", { class: "panel" }, h("div", { class: "title" }, t("pending_" + pend.kind)));
-			if (pend.kind === "permission") pendingBox.append(h("p", {}, h("code", {}, pend.toolName || "")), h("p", { class: "msg" }, pend.input_preview || ""), h("div", { class: "actions" }, h("button", {
-				class: "primary",
-				onclick: () => answer({ permission: "allow" })
-			}, t("allow")), h("button", {
-				class: "danger",
-				onclick: () => answer({ permission: "deny" })
-			}, t("deny"))));
-			else {
-				const fields = (pend.questions || []).map((q) => {
-					const input = h("input", { placeholder: t("answer") });
-					const picks = (q.options || []).map((o) => h("button", {
-						class: "secondary",
-						onclick: () => {
-							input.value = o;
-						}
-					}, o));
-					pendingBox.append(h("p", {}, q.header ? h("strong", {}, `${q.header} · `) : null, q.question), picks.length ? h("div", { class: "actions" }, ...picks) : null, h("div", { class: "actions" }, input));
-					return input;
-				});
-				pendingBox.append(h("div", { class: "actions" }, h("button", {
-					class: "primary",
-					onclick: () => answer({ answers: fields.map((f) => f.value) })
-				}, t("answer"))));
-			}
-			controls.prepend(pendingBox);
 		}
-	}
-	const loadMessages = async () => {
+	}, t("send"));
+	const stop = h("button", {
+		class: "danger",
+		onclick: async () => {
+			try {
+				assertView(connection);
+				const op = await submit("session.interrupt", {
+					host,
+					session_id: sid
+				}, { mode: "soft" }, {}, `interrupt.${host}.${sid}`);
+				assertView(connection);
+				status.replaceChildren(opStatus(op));
+			} catch (e) {
+				status.replaceChildren(errorBox(e));
+			}
+		}
+	}, t("interrupt"));
+	const composer = h("div", {}, box, h("div", { class: "actions" }, send, stop, h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
+	const readonly = h("p", { class: "note" }, t("read_only_note"));
+	const controls = h("div", { class: "panel" }, pending, readonly, composer, status);
+	const cps = checkpointPanel(host, sid);
+	main.append(head, controls, cps.box, h("h2", {}, t("messages")), msgs);
+	const renderPending = () => {
+		const pend = row.api_access === "managed" ? row.pending : null;
+		const current = identity(pend);
+		if (current === pendingIdentity) return;
+		pendingIdentity = current;
+		pending.replaceChildren();
+		if (!pend) return;
+		const answerScope = `answer.${host}.${sid}.${pend.toolUseId || ""}`;
+		const key = `batc.draft.${connection.namespace}.${answerScope}`;
+		let saved;
 		try {
-			const items = (await api("GET", `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sid)}/messages?last_n=30`)).messages.map((m) => h("div", { class: `msg ${m.role === "user" ? "user" : ""}` }, h("span", { class: "who" }, `${m.role || ""} · ${when(m.ts)}`), m.text || ""));
-			msgs.replaceChildren(...items.length ? items : [h("p", { class: "muted" }, t("no_messages"))]);
-		} catch (e) {
-			msgs.replaceChildren(errorBox(e));
+			saved = JSON.parse(localStorage.getItem(key));
+		} catch {}
+		const answer = async (params) => {
+			try {
+				assertView(connection);
+				const latest = await api("GET", path);
+				assertView(connection);
+				applyObservation(latest);
+				if (latest.session.api_access !== "managed" || identity(latest.session.pending) !== current || !pend.toolUseId) throw new ApiError(409, "PENDING_CHANGED", t("pending_changed"));
+				const op = await submit("session.answer", {
+					host,
+					session_id: sid
+				}, {
+					...params,
+					tool_use_id: pend.toolUseId
+				}, {}, answerScope);
+				assertView(connection);
+				status.replaceChildren(opStatus(op));
+				if (op.status === "succeeded") await loadObservation();
+			} catch (e) {
+				status.replaceChildren(errorBox(e));
+			}
+		};
+		const card = h("div", { class: "panel" }, h("div", { class: "title" }, t("pending_" + pend.kind)));
+		if (pend.kind === "permission") card.append(h("p", {}, h("code", {}, pend.toolName || "")), h("p", { class: "msg" }, pend.input_preview || ""), h("div", { class: "actions" }, h("button", {
+			class: "primary",
+			disabled: !pend.toolUseId,
+			onclick: () => answer({ permission: "allow" })
+		}, t("allow")), h("button", {
+			class: "danger",
+			disabled: !pend.toolUseId,
+			onclick: () => answer({ permission: "deny" })
+		}, t("deny"))));
+		else if (pend.kind === "ask_user") {
+			const fields = [];
+			const save = () => {
+				try {
+					localStorage.setItem(key, JSON.stringify({
+						identity: current,
+						answers: fields.map((f) => f.value)
+					}));
+				} catch {}
+			};
+			for (const [index, q] of (pend.questions || []).entries()) {
+				const input = h("input", {
+					placeholder: t("answer"),
+					"aria-label": q.question || t("answer"),
+					value: saved?.identity === current ? saved.answers?.[index] || "" : "",
+					oninput: save
+				});
+				fields.push(input);
+				const picks = (q.options || []).map((o) => h("button", {
+					class: "secondary",
+					onclick: () => {
+						input.value = o;
+						save();
+					}
+				}, o));
+				card.append(h("p", {}, q.header ? h("strong", {}, `${q.header} · `) : null, q.question), picks.length ? h("div", { class: "actions" }, ...picks) : null, h("div", { class: "actions" }, input));
+			}
+			card.append(h("div", { class: "actions" }, h("button", {
+				class: "primary",
+				disabled: !pend.toolUseId,
+				onclick: () => answer({ answers: fields.map((f) => f.value) })
+			}, t("answer"))));
+		}
+		pending.append(card);
+	};
+	const applyObservation = (data) => {
+		const first = !row;
+		row = data.session;
+		if (first) queue.checked = Boolean(row.streaming);
+		head.replaceChildren(h("h1", {}, row.title || sid), h("div", { class: "actions" }, ...sessionBadges(row)), h("dl", { class: "kv" }, h("dt", {}, t("host")), h("dd", {}, row.host), h("dt", {}, t("workspace")), h("dd", {}, row.workspace || ""), h("dt", {}, "Session"), h("dd", {}, h("code", {}, row.session_id)), h("dt", {}, t("agent")), h("dd", {}, [row.agent_kind, row.model].filter(Boolean).join(" · ")), h("dt", {}, "Provenance"), h("dd", {}, t("provenance_" + row.provenance)), h("dt", {}, t("observed")), h("dd", {}, when(row.observed_at))), confinementDetails(row));
+		if (data.started_from) {
+			const from = data.started_from;
+			head.append(h("p", { class: "note" }, t("started_from", { commit: from.commit_sha.slice(0, 12) }), " ", h("a", { href: `#/session/${encodeURIComponent(from.source_host)}/${encodeURIComponent(from.source_session_id)}` }, t("source_session")), " · ", h("a", { href: `#/op/${from.operation_id}` }, from.operation_id)));
+		}
+		if (data.work_items?.length) head.append(linkedItems(data.work_items));
+		const managed = row.api_access === "managed";
+		composer.hidden = !managed;
+		readonly.hidden = managed;
+		send.disabled = !managed || sending;
+		stop.disabled = !managed;
+		renderPending();
+	};
+	const loadObservation = async () => {
+		const data = await api("GET", path);
+		assertView(connection);
+		applyObservation(data);
+	};
+	const loadMessages = async () => {
+		const read = await api("GET", `${path}/messages?last_n=30`);
+		assertView(connection);
+		const items = read.messages.map((m) => h("div", { class: `msg ${m.role === "user" ? "user" : ""}` }, h("span", { class: "who" }, `${m.role || ""} · ${when(m.ts)}`), m.text || ""));
+		msgs.replaceChildren(...items.length ? items : [h("p", { class: "muted" }, t("no_messages"))]);
+	};
+	const refresh = async () => {
+		try {
+			await settleRefreshes([loadObservation(), loadMessages()]);
+		} catch (error) {
+			status.replaceChildren(errorBox(error));
+			throw error;
 		}
 	};
-	await Promise.all([loadMessages(), cps.load()]);
-	const reload = debounceRefresh(loadMessages, 800);
-	const reloadCps = debounceRefresh(cps.load, 800);
-	return onEvents((ev) => {
-		return settleRefreshes([ev.resource_id === `${host}/${sid}` ? reload() : Promise.resolve(), ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve()]);
-	});
+	try {
+		await settleRefreshes([refresh(), cps.load()]);
+	} catch {
+		return;
+	}
+	const reload = debounceRefresh(refresh, 500), reloadCps = debounceRefresh(cps.load, 500);
+	return onEvents((ev) => settleRefreshes([ev.resource_type === "session" && ev.resource_id === `${host}/${sid}` || ev.resource_type === "host" && ev.resource_id === host || [
+		"work_item",
+		"operation",
+		"execution",
+		"task"
+	].includes(ev.resource_type) ? reload() : Promise.resolve(), ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve()]));
 }
 function checkpointPanel(host, sid) {
 	const can = (state.caps?.features?.checkpoints || []).includes(host);
@@ -2871,13 +2947,14 @@ document.addEventListener("focusout", () => setTimeout(() => {
 		fn();
 	}
 }, 0));
-function liveReload(fn, kinds) {
+function liveReload(fn, kinds, prepare = null) {
 	const connection = {
 		epoch: state.epoch,
 		namespace: state.namespace,
 		generation
 	};
 	const later = debounceRefresh(async () => {
+		if (prepare) await prepare();
 		for (;;) {
 			while (editing || typing()) {
 				assertView(connection);
@@ -3070,7 +3147,7 @@ async function viewProject(main, pid) {
 					task_project: f.task_project.value.trim()
 				};
 				const ok = await change(msg, "project.update", { project_id: pid }, params, { expected_version: p.version }, `project.edit.${pid}`);
-				if (!ok && STALE.includes(op.error_code)) draft = params;
+				if (!ok && STALE.includes(lastFailure)) draft = params;
 				if (ok || draft) render();
 			}
 		}, t("save"))));
@@ -3163,6 +3240,36 @@ async function viewWorkItem(main, wid) {
 	freshPage();
 	const notice = h("div", {});
 	const panel = h("div", {});
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	let mutable = true;
+	const blocked = h("p", {
+		class: "note warn",
+		hidden: true
+	}, t("parent_archived"));
+	main.append(blocked);
+	const requireMutable = () => {
+		assertView(connection);
+		if (!mutable) throw new ApiError(409, "ITEM_ARCHIVED", t("parent_archived"));
+	};
+	const refreshSafety = async () => {
+		try {
+			const data = await api("GET", `/work-items/${wid}`);
+			assertView(connection);
+			mutable = !data.work_item.archived && !data.project.archived;
+			blocked.hidden = mutable;
+			if (!mutable) {
+				for (const button of panel.querySelectorAll("button")) if (button.getAttribute("aria-label") !== t("more")) button.disabled = true;
+				for (const control of panel.querySelectorAll("select,input[type=checkbox]")) control.disabled = true;
+			}
+		} catch (error) {
+			fill(notice, errorBox(error));
+			throw error;
+		}
+	};
 	let draft = null;
 	const newStep = h("input", {
 		placeholder: t("new_step"),
@@ -3197,10 +3304,15 @@ async function viewWorkItem(main, wid) {
 		}
 		freshPage();
 		const w = data.work_item, c = w.completion;
-		const live = !w.archived && !data.project.archived;
+		const live = mutable = !w.archived && !data.project.archived;
+		blocked.hidden = live;
 		const pre = { expected_version: w.version };
-		const update = (params, scope) => change(notice, "work_item.update", { work_item_id: wid }, params, pre, scope);
+		const update = (params, scope) => {
+			requireMutable();
+			return change(notice, "work_item.update", { work_item_id: wid }, params, pre, scope);
+		};
 		const decide = async (action, scope) => {
+			requireMutable();
 			await change(notice, action, { work_item_id: wid }, {}, { expected_fingerprint: c.fingerprint }, scope);
 			render();
 		};
@@ -3268,6 +3380,7 @@ async function viewWorkItem(main, wid) {
 				}
 				let op;
 				try {
+					requireMutable();
 					op = await attachment.perform("work_item.update", { work_item_id: wid }, params, pre, `wi.edit.${wid}`);
 				} catch (e) {
 					fill(notice, errorBox(e));
@@ -3313,6 +3426,7 @@ async function viewWorkItem(main, wid) {
 			}
 		}, t("add"));
 		const link = async (params, scope, typed) => {
+			requireMutable();
 			if (await change(notice, "work_item.link", { work_item_id: wid }, params, {}, scope)) {
 				if (typed) ref.value = "";
 				render();
@@ -3347,7 +3461,15 @@ async function viewWorkItem(main, wid) {
 		}
 	};
 	await render();
-	return liveReload(render, ["work_item"]);
+	return liveReload(render, [
+		"work_item",
+		"project",
+		"operation",
+		"session",
+		"execution",
+		"task",
+		"checkpoint"
+	], refreshSafety);
 }
 function continueFrom(w, checkpointId, notice) {
 	const connection = {

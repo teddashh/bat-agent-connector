@@ -2,6 +2,10 @@
 
 ## Next release (unreleased)
 
+- Refresh mounted session questions, permissions and linked work-item evidence without losing drafts.
+  Recheck pending identity before answering, preserve failed-read checkpoints, and disable archived-parent
+  actions while an edit stays open. History/relations and full M1 acceptance remain tracked separately.
+
 - Share artifact attachments across browser and desktop work-item/continuation forms. Preserve exact
   identity-scoped operation intents through lost replies and source-head changes. Native binary upload
   uses capped raw IPC to one operation-bound central route, with no credential or URL supplied by JavaScript.
