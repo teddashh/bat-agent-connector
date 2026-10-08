@@ -545,6 +545,69 @@ async def test_metadata_write_readback_conflict_never_overwrites(make_daemon, gh
     assert gh.count("PATCH", ".") == 1 and gh.pulls[7]["body"] == "concurrent editor"
 
 
+@pytest.mark.parametrize("refused_status", [None, 401, 403, 404])
+async def test_metadata_acknowledged_write_conflict_settles_and_releases_pr(make_daemon, gh, refused_status):
+    """C07, plan §09/§10/§15: a completed ACK readback releases admission while retaining the conflict audit."""
+    d = make_daemon()
+    gh.add_pr(7, HEAD, body="Original body")
+    op = await update_op(d)
+    def concurrent_edit(pr):
+        pr.update(body="Concurrent editor's body")
+        if refused_status:
+            gh.script.append(("GET", r"/pulls/7$", refused_status, {}, {"message": "read permission unavailable"}))
+    gh.patch_after = concurrent_edit
+    started = pr_delivery.time.time()
+    done = await settle(d, op["operation_id"])
+    if refused_status:
+        assert done["status"] == "needs_attention" and done["error_code"] == f"GITHUB_{refused_status}"
+        assert done["external_refs"]["write_acknowledged"] and done["external_refs"]["verification_pending"]
+        assert pr_delivery.metadata_settlement(d.ops, op["operation_id"]) is None
+        with pytest.raises(OperationError) as exc:
+            await update_op(d, key="readback-still-pending")
+        assert exc.value.code == "PR_UPDATE_IN_PROGRESS" and gh.count("PATCH", ".") == 1
+        d.ops.resume(TED, op["operation_id"])
+        done = await settle(d, op["operation_id"])
+    assert done["status"] == "needs_attention" and done["error_code"] == "PR_METADATA_CONFLICT"
+    observed = {"title": "Reviewed title", "body": "Concurrent editor's body"}
+    receipt = pr_delivery.metadata_settlement(d.ops, op["operation_id"])
+    assert receipt["status"] == "conflict" and receipt["code"] == "PR_METADATA_CONFLICT"
+    assert receipt["observed"] == observed and started <= receipt["settled_at"] <= pr_delivery.time.time()
+    refs = done["external_refs"]
+    assert refs["write_acknowledged"] and refs["verification_pending"] is False
+    assert refs["metadata_reconciliation"] == "PR_METADATA_CONFLICT"
+    assert refs["metadata_difference"]["before"] == {"title": "PR 7", "body": "Original body"}
+    assert refs["metadata_difference"]["after"] == {"title": "Reviewed title", "body": "Original body"}
+    assert refs["metadata_difference"]["observed"] == observed
+    assert all(s["status"] == "succeeded" for s in done["steps"])
+    assert gh.count("PATCH", ".") == 1
+    requests = len(gh.requests)
+    await pr_delivery.reconcile_metadata(d.ops)
+    assert len(gh.requests) == requests
+
+    gh.patch_after = None
+    fresh = await update_op(d, key="fresh-after-ack-conflict", params={"body": "Freshly reviewed body"})
+    assert fresh["status"] == "accepted"
+    assert fresh["preconditions"]["expected_metadata_digest"] == pr_delivery.digest(observed)
+    assert (await settle(d, fresh["operation_id"]))["status"] == "succeeded"
+    assert d.ops.get(op["operation_id"])["status"] == "needs_attention"
+    assert [b for m, _, b in gh.requests if m == "PATCH"] == [
+        {"title": "Reviewed title"}, {"body": "Freshly reviewed body"}]
+
+    restart_delivery_service(d)
+    requests = len(gh.requests)
+    d.ops.resume(TED, op["operation_id"])
+    held = await settle(d, op["operation_id"])
+    assert held["status"] == "needs_attention" and held["error_code"] == "PR_METADATA_CONFLICT"
+    assert held["external_refs"] == refs and held["steps"] == done["steps"]
+    await pr_delivery.reconcile_metadata(d.ops)
+    assert len(gh.requests) == requests
+    d.ops.cancel(TED, op["operation_id"])
+    await pr_delivery.reconcile_metadata(d.ops)
+    assert (await settle(d, op["operation_id"]))["status"] == "cancelled"
+    assert len(gh.requests) == requests and pr_delivery.metadata_settlement(d.ops, op["operation_id"]) == receipt
+    assert pr_delivery.metadata(gh.pulls[7]) == {"title": "Reviewed title", "body": "Freshly reviewed body"}
+
+
 async def test_metadata_lost_reply_restart_and_cancel_never_resend(make_daemon, gh):
     d = make_daemon()
     gh.add_pr(7, HEAD)
