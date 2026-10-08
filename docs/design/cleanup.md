@@ -231,6 +231,9 @@ RESOURCE_CLEANED），不能取得 claim 或改 session row。Probe 只 close �
 lock inode；不靠 token 或 timeout 猜 owner 是否消失。所有 cleanup registry 讀寫與 retirement
 都核對 `(host, session_id)` 唯一性，重複 row 回 REGISTRY_DUPLICATE_SESSION 且不寫檔；release
 同時匹配 host 與 session ID，不解除另一個 host 的 reservation。
+若重複 row 只在 confirmed stop／absence 的 capacity bookkeeping 才被發現，回執記
+registry_refused／capacity_error.code=REGISTRY_DUPLICATE_SESSION；已確認的 stop 或 reclaim 結果保留。
+Capacity 的共用 owner lookup 拒絕同樣只保留 cap，不把 absence 改成 cleanup failure。
 
 `resource_policy.authorize_session` 及 check_checkpoint_worktree／check_repair_worktree／check_integration_area／
 check_external_worktree 各加一個 shared guard hook。service.py／orchestrate.py 不新增 caller checks。
