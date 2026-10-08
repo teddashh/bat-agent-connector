@@ -2,10 +2,10 @@
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
 import { connectorRequest, nativeDesktop, nativeStatus, nativeConnect, nativeDisconnect, openExternal } from "./transport/index.ts";
-import { consumePage, storageScope } from "./state/events.ts";
+import { consumePageAsync, settleRefreshes, storageScope } from "./state/events.ts";
 
 const TOKEN_KEY = "batc.dashboard.token";
-const state = { token: null, caps: null, lastEvent: 0, listeners: new Set(), namespace: "", epoch: 0, online: false, viewReady: false, sync: null, endpoint: "", connectionError: null };
+const state = { token: null, caps: null, lastEvent: 0, listeners: new Set(), namespace: "", epoch: 0, online: false, viewReady: false, sync: null, endpoint: "", connectionError: null, refreshCycle: null };
 async function activate(caps, endpoint = location.origin, reset = false) {
   state.epoch++;
   state.connectionError = null;
@@ -146,6 +146,9 @@ async function api(method, path, body, key) {
   return data;
 }
 function errorBox(e) {
+  // Renderers display read errors locally. Also report them to the event batch so a
+  // caught refresh error cannot acknowledge its checkpoint or re-enable mutations.
+  if (state.refreshCycle) state.refreshCycle.error ||= e;
   const text = e.status === 403 && e.code === "FORBIDDEN" ? t("forbidden_scope") : `${e.code || ""} ${e.message || e}`;
   return h("p", { class: "error" }, text);
 }
@@ -177,15 +180,21 @@ async function streamEvents() {
       live.className = "live down"; live.textContent = state.token ? t("sync_waiting") : "";
       await sleep(1000); continue;
     }
-    const epoch = state.epoch;
+    const epoch = state.epoch, view = generation;
+    let cycle;
     try {
       const before = state.lastEvent;
       const checkpoint = state.sync ? `&checkpoint=${encodeURIComponent(state.sync.token)}` : "";
       const page = await api("GET", `/events?after=${before}&limit=100${checkpoint}`);
-      if (epoch !== state.epoch || !state.viewReady) continue;
-      const cursor = consumePage(page, before, ev => {
-        for (const fn of state.listeners) fn(ev);
+      if (epoch !== state.epoch || view !== generation || !state.viewReady) continue;
+      cycle = {error: null}; state.refreshCycle = cycle;
+      state.online = false;
+      live.className = "live down"; live.textContent = t("sync_waiting");
+      const cursor = await consumePageAsync(page, before, ev => {
+        return settleRefreshes([...state.listeners].map(fn => Promise.resolve().then(() => fn(ev))));
       });
+      if (epoch !== state.epoch || view !== generation || !state.viewReady) continue;
+      if (cycle.error) throw cycle.error;
       if (state.sync) {
         if (page.sync?.checkpoint?.cursor !== cursor || !page.sync?.checkpoint?.token)
           throw new Error("Invalid central event checkpoint");
@@ -193,11 +202,13 @@ async function streamEvents() {
       }
       state.lastEvent = cursor;
       saveCursor();
+      state.refreshCycle = null;
       state.online = true;
       live.className = "live ok"; live.textContent = t("desktop_polling");
       if (!page.has_more || cursor <= before) await sleep(1000);
     } catch (error) {
-      if (epoch !== state.epoch) continue;
+      if (epoch !== state.epoch || view !== generation) continue;
+      if (state.refreshCycle === cycle) state.refreshCycle = null;
       state.online = false;
       live.className = "live down"; live.textContent = t("offline_actions_paused");
       if (error.code === "EVENT_CURSOR_RESET") {
@@ -210,11 +221,29 @@ async function streamEvents() {
         } catch { state.sync = previous.sync; state.viewReady = true; /* retry continuity proof */ }
       }
       await sleep(3000);
+    } finally {
+      if (state.refreshCycle === cycle) state.refreshCycle = null;
     }
   }
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 function debounce(fn, ms) { let id; return () => { clearTimeout(id); id = setTimeout(fn, ms); }; }
+function assertView(connection) {
+  assertConnection(connection);
+  if (connection.generation !== generation) throw new ApiError(0, "VIEW_CHANGED", "View changed during refresh");
+}
+function debounceRefresh(fn, ms) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  let id, waiting = [];
+  return () => new Promise((resolve, reject) => {
+    waiting.push({resolve, reject}); clearTimeout(id);
+    id = setTimeout(async () => {
+      const batch = waiting; waiting = [];
+      try { assertView(connection); await fn(); assertView(connection); batch.forEach(p => p.resolve()); }
+      catch (error) { batch.forEach(p => p.reject(error)); }
+    }, ms);
+  });
+}
 
 // ------------------------------------------------------------------ shared pieces
 function sessionBadges(s) {
@@ -282,7 +311,7 @@ async function viewHome(main) {
     } catch (e) { panel.replaceChildren(errorBox(e)); }
   };
   await render();
-  return onEvents(debounce(render, 500));
+  return onEvents(debounceRefresh(render, 500));
 }
 
 async function viewSessions(main) {
@@ -314,8 +343,8 @@ async function viewSessions(main) {
   hostSel.onchange = accessSel.onchange = () => load(true);
   more.onclick = () => load(false);
   await load(true);
-  const reload = debounce(() => load(true), 800);
-  return onEvents(ev => { if (ev.resource_type === "session" || ev.resource_type === "host") reload(); });
+  const reload = debounceRefresh(() => load(true), 800);
+  return onEvents(ev => { if (ev.resource_type === "session" || ev.resource_type === "host") return reload(); });
 }
 
 async function viewSession(main, host, sid) {
@@ -410,11 +439,11 @@ async function viewSession(main, host, sid) {
     } catch (e) { msgs.replaceChildren(errorBox(e)); }
   };
   await Promise.all([loadMessages(), cps.load()]);
-  const reload = debounce(loadMessages, 800);
-  const reloadCps = debounce(cps.load, 800);
+  const reload = debounceRefresh(loadMessages, 800);
+  const reloadCps = debounceRefresh(cps.load, 800);
   return onEvents(ev => {
-    if (ev.resource_id === `${host}/${sid}`) reload();
-    if (ev.resource_type === "checkpoint") reloadCps();
+    return settleRefreshes([ev.resource_id === `${host}/${sid}` ? reload() : Promise.resolve(),
+      ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve()]);
   });
 }
 
@@ -777,8 +806,8 @@ async function viewOperations(main) {
     catch (e) { list.replaceChildren(errorBox(e)); }
   };
   await render();
-  const reload = debounce(render, 500);
-  return onEvents(ev => { if (ev.resource_type === "operation") reload(); });
+  const reload = debounceRefresh(render, 500);
+  return onEvents(ev => { if (ev.resource_type === "operation") return reload(); });
 }
 
 async function viewOperation(main, id) {
@@ -838,7 +867,7 @@ async function viewOperation(main, id) {
     } catch (e) { fill(panel, errorBox(e)); }
   };
   await render();
-  return onEvents(ev => { if (ev.resource_id === id) render(); });
+  return onEvents(ev => { if (ev.resource_id === id) return render(); });
 }
 
 function viewSettings(main) {
@@ -985,8 +1014,18 @@ document.addEventListener("focusout", () => setTimeout(() => {
   if (!editing && !typing() && idleReload) { const fn = idleReload; idleReload = null; fn(); }
 }, 0));
 function liveReload(fn, kinds) {
-  const later = debounce(() => { if (editing || typing()) idleReload = () => fn(true); else fn(true); }, 500);
-  return onEvents(ev => { if (kinds.includes(ev.resource_type)) later(); });
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const later = debounceRefresh(async () => {
+    for (;;) {
+      while (editing || typing()) { assertView(connection); await sleep(100); }
+      assertView(connection);
+      const opened = drawerOpens;
+      await fn(true);
+      assertView(connection);
+      if (!editing && !typing() && drawerOpens === opened) return;
+    }
+  }, 500);
+  return onEvents(ev => { if (kinds.includes(ev.resource_type)) return later(); });
 }
 
 async function viewProjects(main) {

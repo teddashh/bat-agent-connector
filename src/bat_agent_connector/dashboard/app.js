@@ -670,6 +670,30 @@ function consumePage(page, cursor, emit) {
 	if (Number.isSafeInteger(page.next_cursor) && page.next_cursor >= cursor && page.next_cursor <= page.head_cursor) cursor = page.next_cursor;
 	return cursor;
 }
+async function consumePageAsync(page, cursor, emit) {
+	if (page.reset_required || page.reset || page.head_cursor < cursor) {
+		await emit({
+			seq: 0,
+			kind: "reset",
+			resource_type: "reset"
+		});
+		cursor = 0;
+	}
+	const pending = [];
+	const next = consumePage({
+		...page,
+		reset: false,
+		reset_required: false
+	}, cursor, (event) => {
+		pending.push(Promise.resolve().then(() => emit(event)));
+	});
+	await settleRefreshes(pending);
+	return next;
+}
+async function settleRefreshes(pending) {
+	const results = await Promise.allSettled(pending);
+	for (const result of results) if (result.status === "rejected") throw result.reason;
+}
 function storageScope(endpoint, actor, server = "legacy", principal = actor) {
 	return [
 		endpoint,
@@ -692,7 +716,8 @@ var state = {
 	viewReady: false,
 	sync: null,
 	endpoint: "",
-	connectionError: null
+	connectionError: null,
+	refreshCycle: null
 };
 async function activate(caps, endpoint = location.origin, reset = false) {
 	state.epoch++;
@@ -862,6 +887,7 @@ async function api(method, path, body, key) {
 	return data;
 }
 function errorBox(e) {
+	if (state.refreshCycle) state.refreshCycle.error ||= e;
 	return h("p", { class: "error" }, e.status === 403 && e.code === "FORBIDDEN" ? t("forbidden_scope") : `${e.code || ""} ${e.message || e}`);
 }
 async function submit(action, target, params, preconditions, scope) {
@@ -903,26 +929,36 @@ async function streamEvents() {
 			await sleep(1e3);
 			continue;
 		}
-		const epoch = state.epoch;
+		const epoch = state.epoch, view = generation;
+		let cycle;
 		try {
 			const before = state.lastEvent;
 			const page = await api("GET", `/events?after=${before}&limit=100${state.sync ? `&checkpoint=${encodeURIComponent(state.sync.token)}` : ""}`);
-			if (epoch !== state.epoch || !state.viewReady) continue;
-			const cursor = consumePage(page, before, (ev) => {
-				for (const fn of state.listeners) fn(ev);
+			if (epoch !== state.epoch || view !== generation || !state.viewReady) continue;
+			cycle = { error: null };
+			state.refreshCycle = cycle;
+			state.online = false;
+			live.className = "live down";
+			live.textContent = t("sync_waiting");
+			const cursor = await consumePageAsync(page, before, (ev) => {
+				return settleRefreshes([...state.listeners].map((fn) => Promise.resolve().then(() => fn(ev))));
 			});
+			if (epoch !== state.epoch || view !== generation || !state.viewReady) continue;
+			if (cycle.error) throw cycle.error;
 			if (state.sync) {
 				if (page.sync?.checkpoint?.cursor !== cursor || !page.sync?.checkpoint?.token) throw new Error("Invalid central event checkpoint");
 				state.sync = page.sync.checkpoint;
 			}
 			state.lastEvent = cursor;
 			saveCursor();
+			state.refreshCycle = null;
 			state.online = true;
 			live.className = "live ok";
 			live.textContent = t("desktop_polling");
 			if (!page.has_more || cursor <= before) await sleep(1e3);
 		} catch (error) {
-			if (epoch !== state.epoch) continue;
+			if (epoch !== state.epoch || view !== generation) continue;
+			if (state.refreshCycle === cycle) state.refreshCycle = null;
 			state.online = false;
 			live.className = "live down";
 			live.textContent = t("offline_actions_paused");
@@ -941,6 +977,8 @@ async function streamEvents() {
 				}
 			}
 			await sleep(3e3);
+		} finally {
+			if (state.refreshCycle === cycle) state.refreshCycle = null;
 		}
 	}
 }
@@ -951,6 +989,37 @@ function debounce(fn, ms) {
 		clearTimeout(id);
 		id = setTimeout(fn, ms);
 	};
+}
+function assertView(connection) {
+	assertConnection(connection);
+	if (connection.generation !== generation) throw new ApiError(0, "VIEW_CHANGED", "View changed during refresh");
+}
+function debounceRefresh(fn, ms) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	let id, waiting = [];
+	return () => new Promise((resolve, reject) => {
+		waiting.push({
+			resolve,
+			reject
+		});
+		clearTimeout(id);
+		id = setTimeout(async () => {
+			const batch = waiting;
+			waiting = [];
+			try {
+				assertView(connection);
+				await fn();
+				assertView(connection);
+				batch.forEach((p) => p.resolve());
+			} catch (error) {
+				batch.forEach((p) => p.reject(error));
+			}
+		}, ms);
+	});
 }
 function sessionBadges(s) {
 	return [
@@ -1029,7 +1098,7 @@ async function viewHome(main) {
 		}
 	};
 	await render();
-	return onEvents(debounce(render, 500));
+	return onEvents(debounceRefresh(render, 500));
 }
 async function viewSessions(main) {
 	const q = new URLSearchParams(sessionStorage.getItem("batc.sessions") || "");
@@ -1070,9 +1139,9 @@ async function viewSessions(main) {
 	hostSel.onchange = accessSel.onchange = () => load(true);
 	more.onclick = () => load(false);
 	await load(true);
-	const reload = debounce(() => load(true), 800);
+	const reload = debounceRefresh(() => load(true), 800);
 	return onEvents((ev) => {
-		if (ev.resource_type === "session" || ev.resource_type === "host") reload();
+		if (ev.resource_type === "session" || ev.resource_type === "host") return reload();
 	});
 }
 async function viewSession(main, host, sid) {
@@ -1205,11 +1274,10 @@ async function viewSession(main, host, sid) {
 		}
 	};
 	await Promise.all([loadMessages(), cps.load()]);
-	const reload = debounce(loadMessages, 800);
-	const reloadCps = debounce(cps.load, 800);
+	const reload = debounceRefresh(loadMessages, 800);
+	const reloadCps = debounceRefresh(cps.load, 800);
 	return onEvents((ev) => {
-		if (ev.resource_id === `${host}/${sid}`) reload();
-		if (ev.resource_type === "checkpoint") reloadCps();
+		return settleRefreshes([ev.resource_id === `${host}/${sid}` ? reload() : Promise.resolve(), ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve()]);
 	});
 }
 function checkpointPanel(host, sid) {
@@ -1729,9 +1797,9 @@ async function viewOperations(main) {
 		}
 	};
 	await render();
-	const reload = debounce(render, 500);
+	const reload = debounceRefresh(render, 500);
 	return onEvents((ev) => {
-		if (ev.resource_type === "operation") reload();
+		if (ev.resource_type === "operation") return reload();
 	});
 }
 async function viewOperation(main, id) {
@@ -1791,7 +1859,7 @@ async function viewOperation(main, id) {
 	};
 	await render();
 	return onEvents((ev) => {
-		if (ev.resource_id === id) render();
+		if (ev.resource_id === id) return render();
 	});
 }
 function viewSettings(main) {
@@ -2042,12 +2110,26 @@ document.addEventListener("focusout", () => setTimeout(() => {
 	}
 }, 0));
 function liveReload(fn, kinds) {
-	const later = debounce(() => {
-		if (editing || typing()) idleReload = () => fn(true);
-		else fn(true);
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	const later = debounceRefresh(async () => {
+		for (;;) {
+			while (editing || typing()) {
+				assertView(connection);
+				await sleep(100);
+			}
+			assertView(connection);
+			const opened = drawerOpens;
+			await fn(true);
+			assertView(connection);
+			if (!editing && !typing() && drawerOpens === opened) return;
+		}
 	}, 500);
 	return onEvents((ev) => {
-		if (kinds.includes(ev.resource_type)) later();
+		if (kinds.includes(ev.resource_type)) return later();
 	});
 }
 async function viewProjects(main) {
