@@ -2,7 +2,15 @@
 
 日期：2026-10-08。對應《Better Agent Dashboard／Connector 計畫》v1.0 的 §09、§10、§24，W01／W04 剩餘工作，驗收 A01、A05、A07、A08、A09。
 
-本文是 **Phase 1 規格，尚未實作**。本次只新增此文件。下列 action、錯誤碼與測試名稱凡標「新增」者均為 Phase 2 合約；既有行為以程式為準。
+本文依 2026-10-08 規格審查決議修訂。實作分為 Part A 與 Part B；下列標「新增」者是核准的實作合約，交付狀態以各階段的測試與文件為準。
+
+## 分段交付與審查決議
+
+- **Part A（本次）**：Task Service authority。共用 coordinator gate 先套到現有 ActionDefs 與低階 service/lifecycle 路徑（包括 client-resume、permissions、approve-pending／deferred raise、relay）；task 操作連到原 commands 與同交易回執；canonical owner lock、owner-first 初始化與 A07／A09／task A05 測試。
+- **Part B（後續分支）**：舊 session／orchestration MCP／CLI 的 operation 轉接、無 key sentinel 與讀取投影、完整結果與未知布林 null、外部 steps 拆分、A01／A05／A08 全入口測試。本文的舊工具映射、逐工具結果投影、外部步驟拆分與 standalone failover 正面停筆證據保留為第二步。
+- Part A 不改 `OperationService.create` 的 admission 順序或 operations schema。policy admission 拒絕仍 403、沒有 operation；執行中才發現的拒絕仍為 failed operation。
+- Part B 無 key 呼叫在原 NOT NULL 欄位保存 `batc:nokey:<operation_id>`：只作唯一的儲存值，絕不與另一要求去重。拒絕 client key 使用 `batc:nokey:` 前綴（422）；所有讀取投影 `idempotency_key: null`、`idempotency_enabled: false`。**不 rebuild operations，不需此項 schema migration**。
+- 舊 task control 沒有 key 的 RPC 在 Part A 使用每次呼叫獨立的 request key，不提供跨呼叫去重；Part B 才統一 no-key sentinel 與投影。明確給 key 的 task actions 現在即須符合 A05。
 
 ## 固定來源版本
 
@@ -33,10 +41,10 @@ HTTP `/api/v1/operations`、MCP、CLI 與相容 `POST /rpc` 都進入同一個 `
 
 1. 驗證身分、scope、confirm 與輸入格式。MCP fleet mutation 使用 `BATC_API_TOKEN`，沿用 `principal_daemon` 的原則，不退回本機 admin token。CLI 使用明確的 API token；沒有該 token 時，既有本機 0600 admin token 的路徑保留為 `local-admin`。task／command capability 仍由 Journal 驗證。
 2. 將語意相同的 alias 正規化成同一 action／params，核對明確的 key。transport、wait 時間、confirm、輸出格式不進 request hash；會改變效果的選項與呼叫者提供的 preconditions 都進 hash。
-3. 先持久保存意圖，再做資源政策與 coordinator admission。已驗證、格式有效的寫入要求，包括政策／task 拒絕，留一列 operation；拒絕者為 `failed`，沒有外部步驟。未驗證、scope 不足、未確認或格式無效者不建立 operation。
+3. 保留既有 admission 順序：身分、格式、key/replay、資源政策與 coordinator admission 通過後，先持久保存意圖才執行 mutation。admission 拒絕不建立 operation；執行中才發現政策／task 條件改變時，原 operation 記 failed。
 4. 執行前做即時 policy；task-owned 再經 coordinator。每個 BAT／Git／provider mutation 都是一個 intent 已提交的具名 step。已完成 step 重讀結果；未知結果只 reconcile。
 
-第 3 點改變目前 HTTP policy admission 拒絕時「403、不留 operation」的行為：HTTP 仍回 403 與原政策碼，另帶 `error.operation_id`；MCP／CLI 的拒絕也帶該 ID。這是為了滿足每次有效寫入要求都有紀錄，須同步改 `api-v1.md` 與既有 admission 測試。replay 已存在 operation 時先檢查身分／scope 與 hash，再回原紀錄，不重新套用 admission 或重做副作用。
+Policy admission 拒絕保留 HTTP 403 與政策碼，不讓未受理要求增加 journal。replay 已存在 operation 時先檢查身分／scope 與 hash，再回原紀錄，不重新套用 admission 或重做副作用。
 
 host 的 `writes`／`orchestrate`、`read_only`、rate limit、session cap、`default_permission_mode`、confined session 規則均繼續有效。MCP 原本有 confirm 的工具仍須 `confirm=true`；`work_*` 與 task-scoped tools 原本沒有 confirm，保留已授權提交的相容語意。`--read-only` 在 CLI adapter 也須擋所有 daemon mutation，包含目前在 `main` 先分流的子命令。讀取入口與純 dry run 的註冊／結果不變。
 
@@ -59,7 +67,7 @@ Policy 縮寫只描述既有檢查，實作仍呼叫 `resource_policy.py`：
 
 Coordinator gate：`G`＝下面的 task-owned runtime gate；`TC`＝原 task 控制方法；`R`＝原 command-scoped reconciliation；`F`＝task-owned failover／worktree／cleanup 不由低階工具執行；`—`＝沒有 task runtime 控制，但連結絕不授予控制權。新 action 名稱是本文的實作合約。
 
-### 舊 session／orchestration 工具與 CLI
+### 舊 session／orchestration 工具與 CLI（Part B；Part A 先加共用 gate）
 
 | MCP tool（今天） | CLI command（今天，省略 `batc`） | HTTP（今天 → Phase 2） | Action | Scope | Policy | Coordinator gate |
 |---|---|---|---|---|---|---|
@@ -82,7 +90,7 @@ Coordinator gate：`G`＝下面的 task-owned runtime gate；`TC`＝原 task 控
 
 `integrate` 是既有成果整合 scope；在此也用於會改 managed Git 目的端的 worktree merge，與 GitHub `merge` 分開。清理／remove 用 operate 並保留 host orchestrate tier，不新增 scope。組合 action 的額外 scopes 在寫入意圖前檢查；不能先做一部分才發現沒有權限。
 
-### Task Service 與 task 專用 MCP
+### Task Service 與 task 專用 MCP（Part A）
 
 | MCP tool（今天） | CLI（今天） | HTTP／RPC（今天 → Phase 2） | Action | Scope／驗證 | Policy | Coordinator gate |
 |---|---|---|---|---|---|---|
@@ -123,29 +131,29 @@ CLI 今天沒有 task submit／pause／resume 子命令，不能把不存在的�
 | —／`item continue` | OP | `work_item.continue` | manage | L；expected_fingerprint | — |
 | —／`item link`（含 `--remove`） | OP | `work_item.link` | manage | L；連結不授權資源 | — |
 | `operation_submit`／— | OP；`/rpc op_submit` | 指定的任何已註冊 action | 依 action | 依 action | 依 action |
-| `operation_cancel`／`op ID --cancel` | `POST /api/v1/operations/{id}/cancel`；`/rpc op_cancel` | **新增** `operation.cancel`，連到被取消 operation | 原 actor／admin／目標 action scope | 操作紀錄控制；未證明 step 仍須回查 | 不等於 task.pause；已提交 task 不撤回 |
-| `operation_resume`／`op ID --resume` | `POST /api/v1/operations/{id}/resume`；`/rpc op_resume` | **新增** `operation.resume`，連到被恢復 operation | 原 actor／admin／目標 action scope | 操作紀錄控制；只允許 needs_attention | 不等於 task.resume；task gate 不會失效 |
+| `operation_cancel`／`op ID --cancel` | `POST /api/v1/operations/{id}/cancel`；`/rpc op_cancel` | 原 `OperationService.cancel`，不新增 action | 原 actor／admin／目標 action scope | 操作紀錄控制；未證明 step 仍須回查 | 不等於 task.pause；已提交 task 不撤回 |
+| `operation_resume`／`op ID --resume` | `POST /api/v1/operations/{id}/resume`；`/rpc op_resume` | 原 `OperationService.resume`，不新增 action | 原 actor／admin／目標 action scope | 操作紀錄控制；只允許 needs_attention | 不等於 task.resume；task gate 不會失效 |
 
-Operation steering 本身也有一列 control operation 與可選 key；handler 使用原 `OperationService.cancel`／`resume` 的內部實作，不再遞迴送同一 transport。原 target operation 的取消／回查語意保留。`ActionDef` 需支援此處的 target-dependent authorization，不能硬加 operate／observe scope 改變原 actor 的控制權。
+Operation cancel/resume 保留原 endpoints、authorization 與 events；不新增 control operation、key 或 target-dependent ActionDef 授權。它們不等同 task.pause/resume。
 
 ### 管理憑證與本機初始化：明列邊界
 
 | 現有入口 | 將使用的 action／邊界 | Scope | Resource policy | TaskCoordinator gate |
 |---|---|---|---|---|
-| `api-token issue`；`/rpc api_token_issue` | **新增** `api.token.issue`；只存 token hash 與發行回執，明文一次回傳 | local-admin 專用，不可發行可冒充 admin 的 scope | 只改 api_principals，不寫 BAT | — |
-| `api-token revoke`；`/rpc api_token_revoke` | **新增** `api.token.revoke`；同 operation 不重複撤銷新發 token | local-admin 專用 | 同上 | — |
-| `task-reconcile` 的前置 `/rpc work_reconcile_capability` | **新增** `task.command.reconcile_capability`；或作 reconciliation operation 的具名授權步驟，保留原 RPC 轉接 | local-admin 專用；一次性 command capability | 只改 capabilities，不放明文 token 入 operation | R；限 uncertain command 與原 10 分鐘期限 |
-| `import-bat`（output 為檔案，含 force） | 本機安裝／設定初始化，**沒有 fleet action**；是否納入另見待決問題 | 現有本機操作者 | 現況直接寫指定 config 檔；不能宣稱已有 managed path policy | 不建立 task owner |
+| `api-token issue`；`/rpc api_token_issue` | 原短 connector-data RPC；不新增 operation | local-admin 專用，不可發行可冒充 admin 的 scope | 只改 api_principals，不寫 BAT | — |
+| `api-token revoke`；`/rpc api_token_revoke` | 原短 connector-data RPC；不新增 operation | local-admin 專用 | 同上 | — |
+| `task-reconcile` 的前置 `/rpc work_reconcile_capability` | 原 admin-only capability 發行 RPC；reconcile 本身是 operation | local-admin 專用；一次性 command capability | 只改 capabilities，不放明文 token 入 operation | R；限 uncertain command 與原 10 分鐘期限 |
+| `import-bat`（output 為檔案，含 force） | 本機安裝／設定初始化，**沒有 fleet action**；審查已決定保留 | 現有本機操作者 | 現況直接寫指定 config 檔；不能宣稱已有 managed path policy | 不建立 task owner |
 | `serve --db` | owner 啟動／schema 初始化，**不是 task action**；不能先要求一個尚未啟動的 OperationService | 本機操作者 | acquire_owner 成功後才開始服務／worker；不得覆寫別人的 owner pointer | 唯一 owner gate，見 A09 |
 | `mcp`／MCP server 啟動；讀取連線時的 device-id／token 檔初始化 | transport／身分初始化，**不是 fleet mutation action** | 原本機設定 | 不新增 BAT mutation 能力；保留既有讀取行為 | client 只連既有 owner |
 
-此表避免把行政憑證或初始化遺漏成隱藏的 write。token issue／capability issue 的重送可回同一 operation，卻不能從 journal 取回已交付的明文；回 `token_retrievable=false` 與原回執，不新發一個 token。首次 response 的 token 欄位仍保留。外部參數、step response、events、log 只保存 hash／非秘密參照。
+憑證發行／撤銷與一次性 capability 發行是短 connector-data 修改，不觸及 BAT/Git/provider，保留原行為與秘密處理。只存 token hash，明文一次回傳；不新增其 operation 回執。
 
 ## 輸入、輸出與相容性
 
 ### 共用 action 輸入
 
-既有 OP envelope 保留：`action`、`target`、`params`、`preconditions`、`idempotency_key`。HTTP 新 mutation action 預設仍要求明確的 key；只有經核准的舊入口允許 key 省略。這個相容模式由 transport 內部選定，不接受 client body 的 bypass 旗標。舊工具新增可選 `idempotency_key` 與 `control_version`；舊 CLI 新增 `--key` 與 `--control-version`。不要用 text hash、message_id、session ID、時間或隨機 UUID 暗中補 client key。
+既有 OP envelope 保留：`action`、`target`、`params`、`preconditions`、`idempotency_key`。HTTP 新 mutation action 預設仍要求明確的 key；只有經核准的舊入口允許 key 省略。這個相容模式由 transport 內部選定，不接受 client body 的 bypass 旗標。舊工具新增可選 `idempotency_key` 與 `control_version`；舊 CLI 新增 `--key` 與 `--control-version`。Part B 只使用保留前綴＋operation ID 作不去重的儲存 sentinel，不以文字／資源身分推導 client key。
 
 | 能力 | target | params／preconditions 的必要內容 | result／refs |
 |---|---|---|---|
@@ -155,11 +163,10 @@ Operation steering 本身也有一列 control operation 與可選 key；handler 
 | task.pause／resume／mark_stage | task_id | abort_current；caller provenance actor／source_message_id；stage／ref。明確控制版本用 preconditions.control_version。 | 原 task／delivery 結果；控制版本與 effect 回執。 |
 | task.verify／request_ted | capability 綁定的 task_id | verify 不接受 caller argv／exit code／evidence；request_ted 帶 reason。 | 原受信 evidence／task 結果、candidate 與 log reference。 |
 | task.command.reconcile | task_id、command_id | 原 outcome、source、evidence、observed_result、turn_ref、candidate_commit／tree_hash、新 next_prompt；一次性 capability 走認證，不放 params。 | 原 reconciliation task 結果；原 command 與新 command IDs。 |
-| operation.cancel／resume | operation_id | 可選 key；目標 actor／scope 權限由後端取得 | target operation 的原 envelope＋control operation ID。 |
 
 舊 host／session 短名解析保留，但在 daemon 唯讀解析成穩定 ID 後即固定，不在 retry／執行時重新挑選另一資源。傳入的字面 target 進 hash；解析結果存在 refs，不因 inventory 更新改寫 intent。task_send 的 `{task_id}` 也在第一次 admission 固定 host／session；重送先查原 operation，不能因 task 換 session 而送到新的 writer。session.send 的共用 schema 明列這兩種 target，不能在 adapter 先查當前 session 再改變 replay 的 request hash。`queue=true` 只描述 BAT 的 standalone streaming guard，不把 task-owned 要求放到另一個 queue。
 
-### 每個舊工具的結果投影
+### 每個舊工具的結果投影（Part B；task 欄位新增 ID/status 為 Part A）
 
 所有相容入口保留原頂層欄位；新增 `operation_id`、`operation_status`、`operation_error_code`，不以 operation 的 status 覆蓋 task 的 `state`。HTTP／通用 `operation_submit` 仍回 `{operation, created}`。bounded wait 沿用 RPC 上限 30 秒；逾時回紀錄，不在 adapter 再呼叫 handler。
 
@@ -185,7 +192,7 @@ Operation steering 本身也有一列 control operation 與可選 key；handler 
 | work_mark_stage | 原 delivery 結果；adopted／merged／deployed 都是證詞，不觸發外部操作。 |
 | task_send／run_verification／request_ted | 原 task／evidence 結果；task_send step_id 保留，新增 operation reference。 |
 | task-reconcile | 原 task／reconciliation 結果與 `_next_command_id`（適用時）；不增加自動重送或自動採用 successor。 |
-| op --cancel／--resume 與 MCP steering | 原 `{operation: target_operation}` 保留，另加 `control_operation_id`／`control_operation_status`；可用其 ID 查本次控制。 |
+| op --cancel／--resume 與 MCP steering | 原 `{operation: target_operation}`、授權與事件完全保留；不新增 control operation。 |
 | 已有 checkpoint／integrate／project／item CLI | 原 `{operation, created}` 與 note／next 保留；現有隨機預設 key 改為「未提供就是無 client key」，新增／統一 `--key`，明確顯示去重是否啟用。 |
 
 尚未得到外部 ACK 時，舊布林效果欄位使用 `null` 表示未知（例如 accepted、sent、prompt_sent、merged_now、removed），附 operation_status；不用 false 表示確定沒發生。已證明的前段結果照常回傳。這是 bounded wait／uncertain 新增的結果情況，README 與兩份 skill 必須說明；成功結果保持原型別。CLI 非同步受理退出碼為 0，確定拒絕／failed 為 1；uncertain 顯示 ID 與回查方式。
@@ -248,7 +255,7 @@ Task scope command 外部派送仍由 coordinator 擁有。operation refs 記 ta
 | 同 actor/key，但文字、模式、task、source、prompt ID、plan、force、控制版本等有效參數不同 | `IDEMPOTENCY_CONFLICT`，HTTP 409；沒有新的 task／command／session。 |
 | 不同 actor 使用同 key | 不同 operation；tasks 原全域 key 不能碰撞。task submit 的內部 journal key 以固定 operation_id 對應，不把 client key 直接當 tasks.idem_key。 |
 | 同 key 從 continue 與 text=continue 的 send 重送 | 正規化後相同；transport entry 不造成衝突。原 relay 是另一能力，不因最後組出的 text 相同而合併。 |
-| 省略 key | 存 NULL，每次有效要求新 operation；明確回 idempotency_enabled=false，不暗中推導 key。遇 timeout 使用已得到的 operation_id；若連 ID 都未收到，不能承諾重送去重。 |
+| 省略 key（Part B） | 存保留前綴＋operation ID 的唯一 sentinel，每次受理要求新 operation；讀取為 idempotency_key=null、idempotency_enabled=false。遇 timeout 使用已得到的 operation_id；若連 ID 都未收到，不能承諾重送去重。 |
 | task_send 的舊 step_id | 這是 caller 已提供的重送識別，明列映射為 key，principal 限同 task；不是由文字推導。改 text 或明確版本要衝突，不能被 Journal.command 的既有舊列遮住。 |
 | work_submit continuation | 原 record_continuation 只按 key 去重、未比 words；operation hash 先補齊不同 words 的衝突，同 receipt 保護 continuations 計數。 |
 | replay 前置的結果後記失敗／重啟 | 讀既有 task effect／command／step 回執；不補一套 dispatch。 |
@@ -256,7 +263,7 @@ Task scope command 外部派送仍由 coordinator 擁有。operation refs 記 ta
 
 work_submit 原已要求 key，保留其最大 256 字相容長度；一般 operation 既有上限 200 字保留。validation 由該 action 的 key constraint 決定，避免把合法舊 task key 截短或 rehash 成另一個 client key。舊 task global key 的升級重送另見資料遷移。
 
-## 實際副作用、步驟與失敗恢復
+## 實際副作用、步驟與失敗恢復（task 為 Part A，其餘拆分為 Part B）
 
 不能只以 `ctx.step("legacy", legacy_function)` 包整個 lifecycle 函式。那些函式內有多次 BAT mutation，有些會吞例外或 rollback。Phase 2 做最小拆分／注入 step 執行介面，使原判斷與 policy 保留，每次 mutation 都有 commit 在先的 intent。原 helper 只供共用 action／coordinator 使用；transport 不直接呼叫它。
 
@@ -283,7 +290,7 @@ A08 特別要求 standalone failover 取得 **正面的舊 writer 停筆證據**
 
 | 代碼 | HTTP／相容入口 | 恢復方式 |
 |---|---|---|
-| 原 resource-policy codes | 403，failed operation ID；bulk 每項 code | 不改 force／confirm 繞過；改用合法新 managed 工作。 |
+| 原 resource-policy codes | 403，admission 不建 operation；執行拒絕才 failed；bulk 每項 code | 不改 force／confirm 繞過；改用合法新 managed 工作。 |
 | `IDEMPOTENCY_CONFLICT` | 409 | 回原 key 的 operation；新的意圖用明確的新 key。 |
 | `CONTROL_VERSION_CONFLICT` | 409 | 讀同 owner 的 task，重新決定動作；不自動換版本重送。 |
 | `TASK_PAUSED`、`TASK_VERIFYING` | 409 | 查 task；有授權才用 task.resume／task.pause，不插隊。 |
@@ -313,9 +320,9 @@ Phase 2 擴充原 owner 機制，沒有第二份 owner database／另一套 leas
 
 ## 現有資料與 schema 遷移
 
-不搬移、不重編 task／command／session／worktree／branch／checkpoint IDs，不重送歷史命令，不補造「以前執行過」的 operations。registry、tasks.sqlite3、verification 證詞與既有管理／delivery 資料保留。**沒有業務資料搬遷或歷史回填，但不是完全零 schema 遷移**：這是核對目前 NOT NULL 後必須揭露的差異。
+不搬移、不重編 task／command／session／worktree／branch／checkpoint IDs，不重送歷史命令，不補造「以前執行過」的 operations。registry、tasks.sqlite3、verification 證詞與既有管理／delivery 資料保留。**沒有業務資料搬遷或歷史回填**；NOT NULL 與唯一索引保留，no-key sentinel 不需 schema change。
 
-- 用既有 `Journal`、`PRAGMA user_version` 加下一個版本（起點為 1），將 `operations.idem_key` 改為 nullable；保留 `UNIQUE(actor, idem_key)`。SQLite 多筆 NULL 不去重，有 key 的現有列、request_hash、steps／refs 全部原樣保留。SQLite 不能直接移除 NOT NULL，需交易化、保留列與 FK 的 table rebuild；這是相容欄位限制放寬，與共用 brief 偏好的純 additive DDL 有差異，Phase 2 審查需確認。不能以偷偷生成 key 避開需求。
+- 不重建 operations、不改其 NOT NULL／FK／唯一索引。Part B 採保留前綴 sentinel；舊有 keys/hashes/steps 原樣保留。Part A 若需額外 task 欄位，以 guarded column add／idempotent DDL 與下一個 `PRAGMA user_version` 版本執行，版本可在 rebase 時重編。
 - task-operation linkage 可用現有 `external_refs`／command payload／operation_steps response；沒有第二個 task 狀態表。若實作需新索引／欄位，只做版本化 additive 變更。檢查 row count、operation_steps FK 與原 key 去重結果；migration 失敗 rollback，不先啟動 worker。
 - 原 `tasks.idem_key` 全域唯一保留。新版提交使用 operation 固定的內部 journal identity；這是已存在的 task receipt linkage，不是替未提供的 client key 提供去重。對原 work_submit key 的第一次升級重送，僅 local-admin 舊相容入口可按原 `Journal.submit` 的 payload_hash 核對並連到原 task，再寫新的 operation link；內容不同拒絕。無法證明原 actor 的歷史 key 不讓新的 API actor 認領。
 - 現有 continuation events／stage events／verification records 不追認為新的 action 回執。新的相同 key 只依新 operation hash 去重；不得因舊 stage 已存在就忽略 ref 不同的衝突。原一次性 reconcile capability 的期限與消耗規則保留。
@@ -326,7 +333,7 @@ Phase 2 擴充原 owner 機制，沒有第二份 owner database／另一套 leas
 | 檔案 | Phase 2 修改 |
 |---|---|
 | `src/bat_agent_connector/api_actions.py` | 原 3 個 action 完整結果、共用 action schema／admission、task ownership gate；註冊新增 session／composite actions。可按既有 delivery/checkpoints 慣例分模組，避免重複定義。 |
-| `operations.py` | 舊入口 nullable key、key constraint、有效拒絕留紀錄、target-dependent authorization、本地原子 effect receipt、steering actions；原 uncertain/reconcile loop 保留。 |
+| `operations.py` | Part A 不改 create admission/schema；task 使用原子 effect receipt。Part B 補 no-key sentinel／投影；原 steering 與 uncertain/reconcile loop 保留。 |
 | `task_daemon.py`、`api_auth.py` | coordinator 注入 ops.context、task／舊 RPC 薄轉接、capability 到受限 principal 的原驗證映射、canonical owner lock／metadata、初始化順序、穩定錯誤。 |
 | `task_core.py`、`task_bat.py` | 公共 task-owned action gate、原鎖／commands／版本 guard、answer／permissions／interrupt 回查、pause abort 回執；不改 engine／recipe／模型政策。 |
 | `task_journal.py` | 版本化 schema 調整、原子 task effect／step receipt、commands 的新 runtime kinds／operation linkage；原 tasks／events authority 保留。 |
@@ -339,7 +346,7 @@ Phase 2 擴充原 owner 機制，沒有第二份 owner database／另一套 leas
 | `skills/bat-agent-connector/SKILL.md`、`skills/hermes/bat-agent-connector/SKILL.md` | 同步描述保留 key／operation ID、拒絕碼／回查、work_* 原語意、暫停／驗證不插隊、unknown writer 不 failover，不讓 agent 要求 approve scope。 |
 | `README.md`、`README.zh-TW.md`、`CHANGELOG.md` | 指向本 spec，說明 daemon/token 前置條件、相容欄位／未知結果、scope 與無 key 重送限制；unreleased 記計畫 §09／§10／§24 與 A01／A05／A07／A08／A09。 |
 
-Phase 1 不修改這些既有檔案、不宣稱它們的尚未涵蓋已完成；只有本 spec 在本次 commit。Phase 2 文件與兩份 skill 必須隨實作同步，不提前把規劃能力寫成已可用。Dashboard 本包沒有新畫面需求，繼續使用同 operation／events／task read API。
+規格修訂先獨立 commit。Part A 更新 task／API 文件、兩份 skill、README x2 與 CHANGELOG，只描述本段交付；Part B 文件隨其實作同步，不提前把規劃能力寫成已可用。Dashboard 本包沒有新畫面需求，繼續使用同 operation／events／task read API。
 
 ## 測試計畫與驗收對照
 
@@ -347,27 +354,26 @@ Phase 1 不修改這些既有檔案、不宣稱它們的尚未涵蓋已完成；
 
 | 驗收／計畫 | 既有可執行證據 | Phase 2 新增／延伸測試與必須斷言 |
 |---|---|---|
-| A01；§09／§10／§24 | `test_session_writes_refused_before_any_frame`、`test_bulk_and_relay_paths_skip_bat_sessions`、`test_mcp_tools_refuse_bat_sessions`、`test_cli_refuses_bat_sessions`（resource_policy）；`test_operation_idempotency_scope_and_bat_sessions`（api_v1） | `test_a01_all_write_adapters_share_policy`：manual／unknown／legacy cwd，各 transport、force/bulk/隱式 resume/deferred raise；所有 BAT write channels／SSH Git spy 為零、來源 files/HEAD/index/refs 未改；有效拒絕有 failed op。`test_all_write_entry_points_have_one_action`／`test_read_only_adapters_never_submit_mutations`。 |
-| A05；§09 | `test_operation_idempotency_scope_and_bat_sessions`、`test_send_operation_runs_once_and_records_steps_and_events`、`test_restart_replays_finished_steps_and_reconciles_unfinished_ones`、`test_rpc_doors_share_the_operation_service`（api_v1）；`test_journal_idempotency_restart_and_metrics`（task_service） | `test_a05_all_actions_actor_scoped_idempotency`：每個 mutation、跨 adapter replay、same key changed params/preconditions 409、不同 actor 不撞 task key。`test_a05_legacy_no_key_creates_distinct_operations`、`test_a05_task_effect_and_receipt_commit_together`（pause/resume/continuation/stage/reconcile 交易邊界 crash）、`test_a05_task_submit_upgrade_replay`、`test_nullable_key_migration_preserves_steps_and_hashes`、`test_token_issue_replay_never_reissues_or_persists_secret`。 |
+| A01；§09／§10／§24 | `test_session_writes_refused_before_any_frame`、`test_bulk_and_relay_paths_skip_bat_sessions`、`test_mcp_tools_refuse_bat_sessions`、`test_cli_refuses_bat_sessions`（resource_policy）；`test_operation_idempotency_scope_and_bat_sessions`（api_v1） | `test_a01_all_write_adapters_share_policy`：manual／unknown／legacy cwd，各 transport、force/bulk/隱式 resume/deferred raise；所有 BAT write channels／SSH Git spy 為零、來源 files/HEAD/index/refs 未改；admission 拒絕沒有 op，執行拒絕保留 failed op。`test_all_write_entry_points_have_one_action`／`test_read_only_adapters_never_submit_mutations`。 |
+| A05；§09 | `test_operation_idempotency_scope_and_bat_sessions`、`test_send_operation_runs_once_and_records_steps_and_events`、`test_restart_replays_finished_steps_and_reconciles_unfinished_ones`、`test_rpc_doors_share_the_operation_service`（api_v1）；`test_journal_idempotency_restart_and_metrics`（task_service） | `test_a05_all_actions_actor_scoped_idempotency`：每個 mutation、跨 adapter replay、same key changed params/preconditions 409、不同 actor 不撞 task key。`test_a05_legacy_no_key_creates_distinct_operations`、`test_a05_task_effect_and_receipt_commit_together`（pause/resume/continuation/stage/reconcile 交易邊界 crash）、`test_a05_task_submit_upgrade_replay`、`test_no_key_sentinel_never_deduplicates_and_is_projected_as_null`（Part B）。 |
 | A07；§10 | `test_pause_during_final_presence_check_cancels_unsent_command`、`test_pause_during_late_session_send_lookup_blocks_bat_frame`、`test_daemon_records_actual_journal_for_send_fence`、`test_task_reservation_excludes_paused_lead_from_legacy_cleanup`（task_service） | `test_a07_task_owned_actions_respect_coordinator_gate`：各允許/拒絕 state、paused bool、各 unresolved kind/status、lead/reviewer/預留與舊 session；send/answer/interrupt/permissions、relay、approve/deferred、client-resume 全入口。`test_a07_late_state_version_and_owner_change_blocks_frame`：lookup、session/host lock、BAT semaphore 等待期間 pause/resume/version/verification/binding 改變，零新 frame。`test_a07_task_pause_abort_is_journaled_control`、`test_a07_goose_run_does_not_block_its_own_task_send`、`test_a07_task_resume_reconciles_before_dispatch`。 |
 | A08；§09／§10／§24 | `test_continue_starts_managed_work_at_the_checkpoint_and_leaves_the_source_alone`、`test_a_lost_start_reply_is_read_back_not_started_again`（checkpoints）；`test_vanished_after_uncertain_initial_send_never_replaced`、`test_goose_uncertain_prompt_does_not_switch`（task_service） | `test_a08_failover_requires_positive_previous_writer_proof`：meta/offline/null、未確認 streaming、pending send/start/operation、force/bulk；零 successor write。`test_a08_failover_concurrent_keys_reserve_one_writer`、`test_a08_failover_restart_reconciles_successor_and_handoff_separately`、`test_a08_superseded_source_cannot_resume_a_second_writer`、`test_a08_manual_continuation_preserves_source`；證明 distinct 新 session/clone、不改來源、未知 Codex handoff 不重送。 |
 | A09；§24 | `test_daemon_lock_and_rpc_task_scope`、`test_daemon_records_actual_journal_for_send_fence`（task_service） | 延伸同名 owner test；`test_a09_same_fleet_different_journals_refuses_second_owner`：含不同父目錄、同時啟動、尚無 pointer。`test_a09_conflict_reports_owner_and_preserves_pointer`、`test_a09_second_client_uses_central_owner`、`test_a09_stale_heartbeat_never_steals_live_lock`、`test_a09_restart_releases_lease_and_reuses_journal`；斷言相同權威、可讀 owner/endpoint、無第二 worker/BAT frames、衝突前不改 DB/token。 |
-| 失敗恢復；A05／A07／A08 | `test_ambiguous_send_becomes_uncertain_and_settles_by_read_back`、`test_a_failed_read_back_keeps_the_operation_uncertain`、`test_needs_attention_can_be_cancelled_or_resumed`（api_v1） | `test_each_external_mutation_has_committed_intent`、`test_composite_partial_results_survive_lost_ack_and_restart`、`test_operation_steering_is_idempotent_and_does_not_resume_task`；覆蓋 resume/start/tab/answer/兩個 permissions/merge/remove/stop/deferred 與本地記錄失敗，reconcile 無證據不發送。 |
+| 失敗恢復；A05／A07／A08 | `test_ambiguous_send_becomes_uncertain_and_settles_by_read_back`、`test_a_failed_read_back_keeps_the_operation_uncertain`、`test_needs_attention_can_be_cancelled_or_resumed`（api_v1） | `test_each_external_mutation_has_committed_intent`、`test_composite_partial_results_survive_lost_ack_and_restart`、既有 operation steering 不派送 task 的 regression；覆蓋 resume/start/tab/answer/兩個 permissions/merge/remove/stop/deferred 與本地記錄失敗，reconcile 無證據不發送。 |
 
 故障注入只用 `tests/mockbat.py`、`tests/fakegithub.py`、[test_checkpoints.py](../../tests/test_checkpoints.py) 的 LocalRunner／RealGitLog 與 temp Git repos。驗證 policy 時比較所有寫 channel 與目的端，不能只數 send-message。停用中的 `pytest.mark.skip` task 測試不算 A07／A08 證據；舊 engine／mid-task failover 的 skip 不因本包自動啟用。
 
 Phase 1 與 Phase 2 報告都跑 `uv run ruff check .`、`uv run pytest -q`；只有 Phase 2 新行為測試通過後才聲稱驗收完成。spec commit 只證明盤點與可審查合約完成。
 
-## 待決問題
+## 已決事項
 
-- `import-bat --output PATH --force` 是 daemon 設定產生器，能在 owner 尚未存在前執行，又可覆寫任意本機檔案。它已完整列入盤點；本包預設把安裝初始化與 fleet action 分開。若「所有 CLI write」也要求這個離線設定命令成為 operation，需先決定無 daemon 初始化與 connector-owned config destination 合約，不能臨時建立第二個 OperationService/journal 或沿用任意 force 寫入。
-- Nullable client key 與現有 NOT NULL schema 衝突；本文提出保留資料的版本化 rebuild，而非純 additive DDL。Phase 2 審查需確認此必要調整；無論選哪種 schema，不能把隨機 key 當 caller 提供或承諾無 key 重送冪等。
-- 原 task global key 沒有 actor 資訊；本文只讓 local-admin 相容重送連回既有 task，不開放其他 principal 認領。若部署需要把歷史提交歸到個別 actor，需有明確外部身分證據，不能由文字／thread 推測。
+歷史 task global key 仍沒有 actor 證據：只有 local-admin compatibility path 可依原 payload_hash 連回原 task；其他 API actor 不認領。無 key sentinel、policy admission、不納入離線 import／operation steering／token operations 的決議見分段交付。
 
 ## 尚未涵蓋
 
-- 本文所有新增能力仍待 Phase 2；本次沒有產品程式／schema／skill／README 變更，A01／A05／A07／A08／A09 尚未完成整包驗收。
-- 離線 config 初始化的 operation 合約與任意 output path 保護，待上述產品邊界決定；不得藏成未列出的 fleet 寫入旁路。
+- **Part B 尚未交付**：舊 session/orchestration tools 成為 operations、no-key sentinel/投影、未知布林 null、外部 step 拆分與完整 A01/A05/A08 全入口驗收。Part A 只聲稱 task A05、A07、A09。
+- `import-bat --output PATH --force` 保留 install-time local command；它在 owner 存在前執行、只寫本機 config，不是 fleet action，本包不改。
+- operation cancel/resume 自身的 control operations，以及 api-token issue/revoke operations 不在本包；原 endpoints/RPC 已授權、留事件或立即完成短 connector-data 修改，不觸及 BAT/Git/provider。
 - 不新增 task planner、recipe/model 政策、第二個 task database、分散式 owner lease 或人工資源接管；不恢復已停用的 task 中途 failover。
 - 不完成計畫 §23 的新版 managed clone／integration area cleanup、retained refs/tombstones／restore；本包只統一現有 session_cleanup 與其政策／回執。
 - BAT GUI 可直接改自己的 session，connector 的鎖不能約束它；不宣稱 BAT 提供跨系統原子控制或 Codex exactly-once receipt。workspace:save race、host sandbox/ACL 與完整 A10 仍按原設計界定。
