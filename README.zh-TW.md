@@ -13,7 +13,7 @@ BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端�
 * （選擇性開啟）推動 session：送訊息、叫它「continue」、中斷它、回答它的問題；
 * （選擇性開啟，獨立的一層）分派工作：在新的 git worktree 開 session、檢查它們的 diff、merge 乾淨的分支；
 * 找出碰到 Claude 用量額度上限的 session，在同一個 worktree 改由 Codex 接手（failover）；
-* 在確定性的關卡後面，自動核准權限請求，並清理已完成的 session。
+* 在確定性的關卡後面自動核准權限請求，並透過經審閱的預覽回收 managed 資源。
 
 > 本專案與 BAT 作者**沒有任何關係，也未經其背書**。協定是從 BAT 以 MIT 授權公開的原始碼（v3.2.12）讀出來的，BAT 改版時可能跟著變。BAT 的功勞屬於 TonyQ 與其貢獻者。
 
@@ -119,7 +119,21 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 
 ### Dashboard 與 `/api/v1`（選用）
 
-`batc serve` 也在同一個 loopback 埠提供 `/api/v1` 與瀏覽器 Dashboard（`http://127.0.0.1:18796/dashboard/`）：需要你處理的項目、所有 session 與其來源（人在 BAT 建立的 session 一律唯讀）、managed session 的操作、PR 合併與部署按鈕，以及操作紀錄。以 `batc api-token issue --actor ted-dashboard --scope observe --scope operate --scope start --scope integrate --scope manage --scope approve --scope merge --scope deploy`（`merge`、`deploy` 給合併與部署按鈕）發行 token 後在 Dashboard 的「連線」輸入。專案與工作項目記下在做什麼、為什麼：需求原文、驗收、步驟，以及做這件事的 sessions、checkpoint、操作與 PR。有 `manage` 的 agent 可以回報完成；只有帶 `approve` 的 token 能確認完成，而且確認的是它讀到的內容，之後內容再改會重新等待確認。排序、固定、改名與封存沿用 Project Hub 的規則。要接續人的工作而不碰它的 session，先記下 checkpoint（`checkpoint.create`：commit 與最近對話，只讀），再從它開始 managed 工作（`checkpoint.continue`：在 Connector 自有的 clone、worktree、分支與 session 從那個 commit 開始）。需要 `managed_roots` 與主機的 SSH alias。要把成果放進既有 PR，先預覽（`integration.preview`：列出以 SHA 釘住、會進 PR 的每個 commit 與檔案），再套用預覽（`integration.apply`：以主機的 git 憑證，一般 push 組合後的 commit 到 PR 的 head 分支；不強推，也不改你的資料夾），需要在 repository 的 `[[github.repos]]` 設定 `integrate = {hosts, remote_url}`。設計見 [docs/design/api-v1.md](docs/design/api-v1.md)、[docs/design/delivery.md](docs/design/delivery.md)、[docs/design/dashboard.md](docs/design/dashboard.md)、[docs/design/checkpoints.md](docs/design/checkpoints.md)、[docs/design/integration.md](docs/design/integration.md)、[docs/design/work-items.md](docs/design/work-items.md)。
+`batc serve` 也在同一個 loopback 埠提供 `/api/v1` 與瀏覽器 Dashboard（`http://127.0.0.1:18796/dashboard/`）：需要你處理的項目、所有 session 與其來源（人在 BAT 建立的 session 一律唯讀）、managed session 的操作、PR 合併與部署按鈕，以及操作紀錄。以 `batc api-token issue --actor ted-dashboard --scope observe --scope operate --scope start --scope integrate --scope manage --scope approve --scope merge --scope deploy --scope cleanup`（`merge`、`deploy` 給合併與部署按鈕）發行 token 後在 Dashboard 的「連線」輸入。專案與工作項目記下在做什麼、為什麼：需求原文、驗收、步驟，以及做這件事的 sessions、checkpoint、操作與 PR。有 `manage` 的 agent 可以回報完成；只有帶 `approve` 的 token 能確認完成，而且確認的是它讀到的內容，之後內容再改會重新等待確認。排序、固定、改名與封存沿用 Project Hub 的規則。要接續人的工作而不碰它的 session，先記下 checkpoint（`checkpoint.create`：commit 與最近對話，只讀），再從它開始 managed 工作（`checkpoint.continue`：在 Connector 自有的 clone、worktree、分支與 session 從那個 commit 開始）。需要 `managed_roots` 與主機的 SSH alias。要把成果放進既有 PR，先預覽（`integration.preview`：列出以 SHA 釘住、會進 PR 的每個 commit 與檔案），再套用預覽（`integration.apply`：以主機的 git 憑證，一般 push 組合後的 commit 到 PR 的 head 分支；不強推，也不改你的資料夾），需要在 repository 的 `[[github.repos]]` 設定 `integrate = {hosts, remote_url}`。設計見 [docs/design/api-v1.md](docs/design/api-v1.md)、[docs/design/delivery.md](docs/design/delivery.md)、[docs/design/dashboard.md](docs/design/dashboard.md)、[docs/design/checkpoints.md](docs/design/checkpoints.md)、[docs/design/integration.md](docs/design/integration.md)、[docs/design/work-items.md](docs/design/work-items.md)。
+
+
+「整理與復原」與工作項目詳情的整理入口先列出實際資源、全部保留原因與執行計畫，再以 15 分鐘
+signed preview 套用同一份計畫；狀態改變必須重新預覽。HTTP `/cleanup-previews`、`cleanup.apply` operation，
+MCP `cleanup_preview`／`cleanup_apply`／`cleanup_retained`／`cleanup_tombstones`，CLI
+`batc resource-cleanup preview|apply|retained|history` 共用合約。`cleanup` 可回收 managed runtime、worktree
+與 exact temporary；明選 `release_undelivered` 仍保留 commits 與 branch，成果標為尚未送達。
+只有 `discard_uncommitted` 需要人控制的 `cleanup_discard`；Hermes／Grokbot tokens 不給它，agents 不要求它。
+人工、未知、task-owned、writer、waiting 或未決指令一律保留。移除前 pin HEAD，保留所有 `refs/batc/*`、
+clones 與整合區，原 ID、位置、原因、回執與 PR 去向永久可查。設定僅支援
+`[cleanup] retained_refs="keep", history_retention="forever", permanent_delete=false`。本輪提供實際 retained
+內容列表；restore 與 reviewed task cleanup 在 Part B。`auto_cleanup` 保留解析但已 deprecated，不啟用任何寫入。
+舊 `batc cleanup`／`session_cleanup` 只讀評估；fanout planner 只停止，保留 worktree。
+設計見 [docs/design/cleanup.md](docs/design/cleanup.md)。
 
 ## 工具一覽
 
@@ -149,8 +163,8 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 | `fanout_plan_session(host, workspace, message, confirm, max_items=4, brief?)` | 在獨立 worktree 啟動一個 Codex 規劃 session（適用於沒有 managed session 可規劃時），由它回覆一份 `bat-fanout` 計畫。 |
 | `session_policy(host, session_id?)` | 唯讀。主機的 mutation 清單與 managed roots，或單一 session 的來源（`manual`、`connector_managed`、`unknown`）、資料夾歸屬與每個寫入動作的判定與拒絕代碼。 |
 | `fanout_from_plan(host, session_id, confirm, dry_run?, agent="codex", model?, max_items=4)` | 依該 session 最後一個 `bat-fanout` 區塊，每個任務各開一個 worktree session，prompt 原封不動，接著清掉規劃 session。 |
-| `session_cleanup(host, confirm, dry_run=true, session_id?)` | 在硬性關卡後面，為每個受調度的 session 決定 MERGE_AND_CLEAN／CLEAN_ONLY／KEEP／ESCALATE，然後執行（需要 `auto_cleanup = true`）。詳見 docs/ORCHESTRATE.md。 |
-| `session_record_verification(host, session_id, candidate_commit, command, exit_code, environment, log_ref, confirm)` | 為主機目前乾淨的 commit 記錄一筆在外部執行的驗證；自動清理在 merge 前會再檢查一次。CLI：`batc record-verification`。 |
+| `session_cleanup(host, confirm, dry_run=true, session_id?)` | 在硬性關卡後面，為每個受調度的 session 決定 MERGE_AND_CLEAN／CLEAN_ONLY／KEEP／ESCALATE，只讀評估；apply 回 `LEGACY_CLEANUP_DISABLED`，`auto_cleanup` 已 deprecated。詳見 docs/ORCHESTRATE.md。 |
+| `session_record_verification(host, session_id, candidate_commit, command, exit_code, environment, log_ref, confirm)` | 為主機目前乾淨的 commit 記錄一筆在外部執行的驗證；舊清理評估用它判斷完成；reviewed cleanup 依送達回執判斷。CLI：`batc record-verification`。 |
 
 ## CLI
 
@@ -178,7 +192,7 @@ batc quota                                            # 所有主機上因額度
 batc approve-pending box1 --dry-run                   # 確認後改用 --confirm
 batc permissions box1 1a2b3c4d --mode allow_all --confirm
 batc failover box1 --all-exhausted --dry-run          # 確認後改用 --confirm
-batc cleanup box1                                     # dry run 表格；要執行請加 --apply --confirm
+batc cleanup box1                                     # 唯讀評估；--apply 回 LEGACY_CLEANUP_DISABLED
 ```
 
 每個指令都能用全域的 `--json` 旗標，但要放在指令前面：`batc --json hosts`。
@@ -191,7 +205,7 @@ batc cleanup box1                                     # dry run 表格；要執�
 [{"title": "short title", "prompt": "self-contained task prompt", "area": "files/modules touched"}]
 ```
 
-`fanout_from_plan` 就只啟動這幾個任務。每次停下來都以一行結尾：`BAT-STATUS: MILESTONE <name>`、`BAT-STATUS: CONTINUE <next step>` 或 `BAT-STATUS: NEED-<HUMAN> <reason>`；triage 會把它當成「已完成」的聲明。它不能取代自動清理需要的、綁定 commit 的驗證紀錄。
+`fanout_from_plan` 就只啟動這幾個任務。每次停下來都以一行結尾：`BAT-STATUS: MILESTONE <name>`、`BAT-STATUS: CONTINUE <next step>` 或 `BAT-STATUS: NEED-<HUMAN> <reason>`；triage 會把它當成「已完成」的聲明。它不能取代送達回執，也不會讓 reviewed cleanup 把未送達的結果當成已送達。
 
 ## 安全模型（精簡版）
 

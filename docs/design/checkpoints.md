@@ -86,9 +86,16 @@ managed_roots = ["/srv/batc-managed"]   # 第一個是 Connector clone 的位置
 ssh_hosts = { workstation = "workstation-alias" }   # ~/.ssh/config 的 alias，BatchMode
 ```
 
+## 整理與永久歷史（Part A）
+
+見 [cleanup.md](cleanup.md)：純讀 preview、signed token、逐項 operations／retained refs／tombstones，原 ID
+永久可查。Dashboard #/cleanup 與 work item 的整理入口，兩語預覽／逐項回執／歷史搜尋／實際 retained list；
+Part A 無 restore 按鈕。Task-owned 資源由 Task Service 整理，本輪列 TASK_OWNED；原 terminal cleanup 不變。
+Restore、reviewed task leftovers／coordinator 准入與 TaskDaemon 歷史投影在 Part B。Clone／area 與 pins 留存。
+
 ## 尚未涵蓋
 
 - 未提交內容的唯讀 snapshot（計畫 §12「未提交修改」）：目前只顯示 `dirty` 提醒。
 - 跨主機接續：新工作固定在 checkpoint 所在的主機。
 - 附件與 artifact revisions、work item 關聯（W05）。
-- Managed clone 的清理：worktree 與分支保留，由之後的整理工作處理。
+- 復原 retained worktree 在 cleanup Part B；clone 退休、永久刪除另規格。

@@ -28,7 +28,7 @@ orchestrate_register_tabs = false      # append a GUI tab via workspace:save (ap
 default_permission_mode = "default"    # "allow_all" = sessions the connector starts/fails over run like BAT's GUI
                                        # default (Claude bypassPermissions, Codex danger-full-access + never ask),
                                        # and approve_pending / session_set_permissions may raise sessions (needs writes)
-auto_cleanup = false                   # let session_cleanup actually merge/clean/stop (needs orchestrate)
+auto_cleanup = false                   # deprecated: parses only; never enables cleanup writes
 codex_model = ""                       # default model for Codex sessions started/failed over ("" = BAT's default)
 managed_roots = []                     # host folders that are the connector's own clones (real paths, no symlinks);
                                        # only there may sessions work in the main checkout and worktree_merge merge
@@ -65,7 +65,7 @@ allowed_origins = []                   # extra browser origins (loopback origins
 # run_name_contains = "operation_id"
 
 # Optional judgment layer (TypeSafe Jev). OFF unless an API key is in the environment variable below.
-# It only refines ambiguous session-state classifications and gates cleanup merges; any error or
+# It only refines ambiguous session-state classifications and refines legacy read-only cleanup evaluation; any error or
 # timeout falls back to the deterministic result (for cleanup: escalate instead of merge).
 # Only short, secret-redacted excerpts are sent.
 [jev]

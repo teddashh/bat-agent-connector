@@ -44,7 +44,9 @@ license: MIT
 | Approve pending permission prompts (write) | `approve_pending(host, confirm=true, dry_run?)` | `batc approve-pending HOST --confirm` |
 | Change a session's permissions (write) | `session_set_permissions(host, sid, mode, confirm=true)` | `batc permissions HOST SID --mode allow_all --confirm` |
 | Move a quota-stopped Claude session to Codex (orchestrate) | `session_failover(host, session_id \| all_exhausted=true, confirm=true, dry_run?)` | `batc failover HOST [SID] --all-exhausted --confirm` |
-| Gated cleanup of finished sessions (orchestrate) | `session_cleanup(host, confirm=true, dry_run=false)` | `batc cleanup HOST --apply --confirm` |
+| Reviewed resource cleanup (daemon, cleanup scope) | `cleanup_preview` → `cleanup_apply(confirm=true)` | `batc resource-cleanup preview` → `apply --confirm` |
+| Retained content / permanent cleanup history (observe) | `cleanup_retained`, `cleanup_tombstones` | `batc resource-cleanup retained`, `history` |
+| Legacy evaluation only | `session_cleanup(host, dry_run=true)` | `batc cleanup HOST` |
 | Who may change what (read) | `session_policy(host, session_id?)` | `batc policy HOST [SID]` |
 | What this caller may do (read, daemon) | `capabilities_get()` | - |
 | Persisted inventory with staleness (read, daemon) | `inventory_sessions(host?, access?, attention?, cursor?)`, `inventory_hosts()` | - |
@@ -179,13 +181,23 @@ item is done.
   first, then `session_failover(confirm=true)`. The Codex successor reuses the same worktree when there is one and
   uses the host's `codex_model`. Report old → new session id, then track the new one. To keep a superseded
   session's uncommitted work without continuing it, fail it over with `force`, `archive_only=true` and
-  `instructions` that say to only commit it; cleanup then keeps that branch and never merges it.
+  `instructions` that say to only commit it; reviewed cleanup can release it while keeping its commits and branch.
 - **Permissions**: on hosts with `default_permission_mode = "allow_all"`, `approve_pending` answers permission prompts
   (not questions) with "don't ask again" and raises the session to allow-all. Claude sessions are raised only when
   idle; Codex from its next turn, so repeat `approve_pending` while a turn is still asking.
-- **Cleanup**: run verification in the candidate environment, retain its log, and call `session_record_verification` with the current commit, command, exit code, environment and log reference. `session_cleanup` (dry run first) decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE per
-  session behind hard gates (idle, clean, conflict-free, commit-bound verification, risk checks, then the optional Jev judgment). It keeps
-  branches, never stops a working session, and returns one `escalation_summary`: report that once, not per item.
+- **Cleanup**: use `cleanup_preview(target={kind: work_item|checkpoint|integration|host, ...})` and inspect every
+  resource, retention reason and planned step. Work item scope can include its children. With the person's
+  authorization and your own `cleanup` token, apply exactly that preview using `cleanup_apply(preview_id,
+  preview_token, fingerprint, idempotency_key, confirm=true)`. It pins HEAD before non-force worktree removal.
+  `release_undelivered` is an explicit per-item preview choice: commits and the branch stay, and results remain
+  undelivered. It needs only cleanup. **Never request cleanup_discard** or choose discard_uncommitted as an agent;
+  Hermes/Grokbot tokens have no cleanup_discard. Manual/unknown resources, writers, pending commands and task-owned
+  resources stay. Stale/mismatched/expired previews require a new preview (15-minute TTL); never change a reviewed
+  apply. After a lost reply, reuse the same key and read the operation. Resume follows the original accepted plan;
+  cancel stops unsent steps. Use cleanup_tombstones to find original IDs, location, reasons and PR destinations,
+  cleanup_retained to read actual retained refs. Restore comes in Part B; no tool can revive a runtime.
+  Legacy session_cleanup is read-only evaluation; apply always returns LEGACY_CLEANUP_DISABLED. auto_cleanup is
+  deprecated and cannot enable writes. Do not set up a housekeeping sweep. See [cleanup.md](../../docs/design/cleanup.md).
 - `sessions_triage` shows `source` (pattern or jev) and an evidence line for every state; quote the evidence.
 
 ## Operations (when the task daemon is running)
