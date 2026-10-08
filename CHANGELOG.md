@@ -75,7 +75,10 @@
   creates no command. Explicit IDs, caller params, hashes and result shapes are unchanged (A07, §09/§10).
   Preliminary client-resume frames now check the full task guard without counting as a send command's effect.
   Resume failures and later pre-send refusals reject the unsent command without making the task uncertain;
-  operations fail definitively with the existing code. Lost send replies still use the original read-back,
+  operations fail definitively with the existing code. Coordinator sends without an operation handle pre-frame
+  failures inside the tick: pause/version changes cancel the command; otherwise it is rejected and the task
+  stops at needs_ted with the code in its result/event, retaining the initial-lead disappearance rule. The next
+  daemon tick does not resend the rejected command. Lost send replies still use the original read-back,
   including Task Service adapter sends; operation step semantics are unchanged (A05/A07, §09/§10).
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
