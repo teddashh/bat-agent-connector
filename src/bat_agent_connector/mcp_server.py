@@ -54,6 +54,10 @@ READ_TOOLS = [
     "integration_candidates",
     "integration_get",
     "integrations_list",
+    "projects_list",
+    "project_get",
+    "work_items_list",
+    "work_item_get",
 ]
 # Registered unless --read-only: they act as BATC_API_TOKEN's principal, whose scopes decide what is allowed.
 OPERATION_TOOLS = ["operation_submit", "operation_cancel", "operation_resume", "checkpoint_create",
@@ -368,9 +372,35 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         """Integration updates of one PR, newest first, with their receipts."""
         return await daemon("integrations_list", repository=repository, pull_number=pull_number, limit=limit)
 
+    async def projects_list(include_archived: bool = False) -> dict[str, Any]:
+        """The project tree in display order (pinned first, then the saved order), with work item counts per
+        state. Projects and work items are the connector's own records; change them with operation_submit
+        (project.* and work_item.* actions)."""
+        return await daemon("projects_list", include_archived=include_archived)
+
+    async def project_get(project_id: str, include_archived: bool = False) -> dict[str, Any]:
+        """One project and its work item tree. Each work item carries version (pass it as
+        preconditions.expected_version to work_item.update) and completion (display_state, pending,
+        fingerprint)."""
+        return await daemon("project_get", project_id=project_id, include_archived=include_archived)
+
+    async def work_items_list(project_id: str | None = None, state: str | None = None,
+                              pending: bool | None = None, limit: int = 50,
+                              cursor: str | None = None) -> dict[str, Any]:
+        """Work items across projects, most recently changed first. state: todo, doing, waiting,
+        awaiting_approval (claimed done, not yet accepted by a person) or done (accepted); pending=true lists
+        the ones waiting for a person's decision. Pass next_cursor as cursor for the next page."""
+        return await daemon("work_items_list", project_id=project_id, state=state, pending=pending, limit=limit,
+                            cursor=cursor)
+
+    async def work_item_get(work_item_id: str) -> dict[str, Any]:
+        """One work item: goal, the request verbatim, acceptance, steps, completion, its place in the tree, links
+        to sessions, checkpoints, operations, tasks and PRs (with what each points at now) and its history."""
+        return await daemon("work_item_get", work_item_id=work_item_id)
+
     for fn in (capabilities_get, inventory_sessions, inventory_hosts, events_list, operation_get, operations_list,
                github_pr_preview, checkpoints_list, checkpoint_preview, integration_candidates, integration_get,
-               integrations_list):
+               integrations_list, projects_list, project_get, work_items_list, work_item_get):
         mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
 
     if fleet.any_orchestrate:
@@ -461,9 +491,14 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             preview.digest}, idempotency_key="integrate.<preview_id>". On INTEGRATION_CONFLICT,
             action="integration.handoff", target={operation_id} starts a confined session that resolves it in the
             connector's area (needs the start scope too); operation_resume once it has committed. On REMOTE_MOVED,
-            TARGET_HEAD_CHANGED or SOURCE_CHANGED preview again; never add sources to an apply. Acts as
-            BATC_API_TOKEN's principal;
-            requires confirm=true."""
+            TARGET_HEAD_CHANGED or SOURCE_CHANGED preview again; never add sources to an apply. Work items
+            (scope manage; read project_get / work_item_get first): action="work_item.create",
+            target={project_id}, params={title, goal?, request?, acceptance?, steps?, parent_id?};
+            action="work_item.update", target={work_item_id}, params={only the fields that change, e.g. steps or
+            state: todo|doing|waiting|done}, preconditions={expected_version}; action="work_item.link",
+            target={work_item_id}, params={kind: session|checkpoint|operation|task|pull_request, ref}. Setting
+            state=done is a claim that a person accepts or sends back (work_item.approve needs the approve scope;
+            do not ask for it). Acts as BATC_API_TOKEN's principal; requires confirm=true."""
             return await principal_daemon("op_submit", confirm, action=action, idempotency_key=idempotency_key,
                                           target=target, params=params, preconditions=preconditions, wait_s=wait_s)
 

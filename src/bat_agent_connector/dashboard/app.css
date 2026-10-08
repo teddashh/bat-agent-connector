@@ -11,6 +11,7 @@
   }
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text);
   font: 15px/1.5 system-ui, -apple-system, "Segoe UI", "Noto Sans TC", sans-serif; }
 a { color: var(--accent); }
@@ -74,8 +75,23 @@ textarea { width: 100%; min-height: 80px; resize: vertical; }
 .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.chip.info { color: var(--info); border: 1px solid var(--info); background: transparent; }
+.note.ok { border-left-color: var(--ok); } .note.warn { border-left-color: var(--warn); }
+.pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.clamp { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row.tree { padding-left: calc(var(--depth, 0) * 22px); }
+.tree-actions { display: inline-flex; gap: 4px; }
+button.mini { min-width: 30px; height: 30px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--text); cursor: pointer; font: inherit; }
+button.mini.on { color: var(--warn); border-color: var(--warn); }
+.drawer { border: 1px dashed var(--line); border-radius: 8px; padding: 10px; margin: 4px 0 8px; display: grid; gap: 6px; }
+.drawer label { color: var(--muted); font-size: 13px; }
+.step { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; }
+.step label { overflow-wrap: anywhere; }
 @media (max-width: 640px) {
   main { padding: 10px; }
   .top { gap: 8px; }
   .row { align-items: flex-start; }
+  .row.tree { padding-left: calc(var(--depth, 0) * 12px); }
+  button.mini { min-width: 36px; height: 36px; }
 }

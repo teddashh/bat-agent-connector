@@ -664,6 +664,70 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--key", help="idempotency key (default: a new one)")
     c = isp.add_parser("show", help="one preview (ipv_...) or integration operation (op_...)")
     c.add_argument("id")
+    p = sp.add_parser("project", help="projects: the connector's own grouping of work items")
+    psp = p.add_subparsers(dest="project_cmd", required=True)
+    c = psp.add_parser("list", help="the project tree with work item counts")
+    c.add_argument("--archived", action="store_true", help="also list archived projects")
+    c = psp.add_parser("show", help="one project and its work item tree")
+    c.add_argument("project_id")
+    c.add_argument("--archived", action="store_true", help="also list archived work items")
+    for name in ("create", "update"):
+        c = psp.add_parser(name, help=f"{name} a project")
+        c.add_argument("name" if name == "create" else "project_id")
+        if name == "update":
+            c.add_argument("--name")
+        c.add_argument("--description")
+        c.add_argument("--parent", help="parent project ID ('' for the top level)")
+        c.add_argument("--repo", action="append", help="owner/name (repeat; replaces the list on update)")
+        c.add_argument("--task-project", help="the Task Service project name this project covers")
+        if name == "update":
+            g = c.add_mutually_exclusive_group()
+            g.add_argument("--archive", action="store_true")
+            g.add_argument("--restore", action="store_true")
+    p = sp.add_parser("item", help="work items: goals, requests, acceptance, steps and completion")
+    wsp = p.add_subparsers(dest="item_cmd", required=True)
+    c = wsp.add_parser("list", help="work items, most recently changed first")
+    c.add_argument("--project")
+    c.add_argument("--state", choices=["todo", "doing", "waiting", "awaiting_approval", "done"])
+    c.add_argument("--pending", action="store_true", help="only items waiting for a person's decision")
+    c.add_argument("--limit", type=int, default=50)
+    c.add_argument("--cursor", help="next_cursor from the previous page")
+    c = wsp.add_parser("show", help="one work item with its links and history")
+    c.add_argument("work_item_id")
+    for name in ("create", "update"):
+        c = wsp.add_parser(name, help=f"{name} a work item")
+        if name == "create":
+            c.add_argument("project_id")
+            c.add_argument("title")
+            c.add_argument("--derived-from", help="work item ID this one branches from")
+        else:
+            c.add_argument("work_item_id")
+            c.add_argument("--title")
+            c.add_argument("--state", choices=["todo", "doing", "waiting", "done"])
+            c.add_argument("--check", type=int, action="append", default=[], help="mark step N (1-based) done")
+            c.add_argument("--uncheck", type=int, action="append", default=[], help="mark step N not done")
+            g = c.add_mutually_exclusive_group()
+            g.add_argument("--archive", action="store_true", help="archive it and everything under it")
+            g.add_argument("--restore", action="store_true")
+        c.add_argument("--goal")
+        c.add_argument("--request-file", help="the request, verbatim, from a file")
+        c.add_argument("--acceptance")
+        c.add_argument("--step", action="append", help="a step (repeat; replaces the list on update)")
+        c.add_argument("--parent", help="parent work item ID ('' for the top level)")
+    for name, text in (("approve", "accept it as done (needs the approve scope)"),
+                       ("continue", "send a done claim back: not finished")):
+        c = wsp.add_parser(name, help=text)
+        c.add_argument("work_item_id")
+        c.add_argument("--note")
+        # Approving accepts the content you read: pass completion.fingerprint from `batc item show`.
+        c.add_argument("--fingerprint", required=name == "approve",
+                       help="completion.fingerprint from `batc item show` (the content you read)")
+    c = wsp.add_parser("link", help="link it to a session (host/id), checkpoint, operation, task or PR (o/r#n)")
+    c.add_argument("work_item_id")
+    c.add_argument("kind", choices=["session", "checkpoint", "operation", "task", "pull_request"])
+    c.add_argument("ref")
+    c.add_argument("--note")
+    c.add_argument("--remove", action="store_true", help="remove the link instead (it stays in the history)")
     p = sp.add_parser("op", help="show one operation, or list recent ones; --cancel / --resume one")
     p.add_argument("operation_id", nargs="?")
     steer = p.add_mutually_exclusive_group()
@@ -751,6 +815,97 @@ def cmd_integrate(args) -> int:
     return 0
 
 
+def _manage(action: str, target: dict, params: dict, pre: dict | None = None) -> dict:
+    import uuid
+
+    from .task_daemon import request
+
+    return request("op_submit", action=action, idempotency_key=f"cli-{uuid.uuid4()}", target=target, params=params,
+                   preconditions=pre or {}, wait_s=10, entry="cli", timeout=20.0)
+
+
+def cmd_project(args) -> int:
+    from .task_daemon import request
+
+    cmd = args.project_cmd
+    if cmd == "list":
+        out = request("projects_list", include_archived=args.archived, entry="cli")
+    elif cmd == "show":
+        out = request("project_get", project_id=args.project_id, include_archived=args.archived, entry="cli")
+    else:
+        params = {k: v for k, v in (("description", args.description), ("parent_id", args.parent),
+                                    ("repositories", args.repo), ("task_project", args.task_project))
+                  if v is not None}
+        if cmd == "create":
+            out = _manage("project.create", {}, {"name": args.name, **params})
+        else:
+            current = request("project_get", project_id=args.project_id, entry="cli")["project"]
+            if args.archive or args.restore:
+                if params or args.name is not None:
+                    raise ValueError("--archive and --restore cannot be combined with other changes")
+                params = {"archived": bool(args.archive)}
+            elif args.name is not None:
+                params["name"] = args.name
+            out = _manage("project.update", {"project_id": args.project_id}, params,
+                          {"expected_version": current["version"]})
+    _print(out, True)
+    return 0
+
+
+def cmd_item(args) -> int:
+    from .task_daemon import request
+
+    cmd = args.item_cmd
+    if cmd == "list":
+        out = request("work_items_list", project_id=args.project, state=args.state,
+                      pending=True if args.pending else None, limit=args.limit, cursor=args.cursor, entry="cli")
+    elif cmd == "show":
+        out = request("work_item_get", work_item_id=args.work_item_id, entry="cli")
+    elif cmd in {"create", "update"}:
+        params = {k: v for k, v in (("goal", args.goal), ("acceptance", args.acceptance), ("steps", args.step),
+                                    ("parent_id", args.parent)) if v is not None}
+        if args.request_file:
+            params["request"] = Path(args.request_file).read_text()
+        if cmd == "create":
+            if args.derived_from:
+                params["derived_from"] = args.derived_from
+            out = _manage("work_item.create", {"project_id": args.project_id}, {"title": args.title, **params})
+        else:
+            item = request("work_item_get", work_item_id=args.work_item_id, entry="cli")["work_item"]
+            if args.archive or args.restore:
+                if params or args.title is not None or args.state is not None or args.check or args.uncheck:
+                    raise ValueError("--archive and --restore cannot be combined with other changes")
+                params = {"archived": bool(args.archive)}
+            else:
+                if args.title is not None:
+                    params["title"] = args.title
+                if args.state is not None:
+                    params["state"] = args.state
+                if args.check or args.uncheck:
+                    steps = [{"text": x, "done": False} if isinstance(x, str) else dict(x)
+                             for x in params.get("steps", item["steps"])]
+                    for n, done in [(n, True) for n in args.check] + [(n, False) for n in args.uncheck]:
+                        if not 1 <= n <= len(steps):
+                            raise ValueError(f"there is no step {n}")
+                        steps[n - 1]["done"] = done
+                    params["steps"] = steps
+            out = _manage("work_item.update", {"work_item_id": args.work_item_id}, params,
+                          {"expected_version": item["version"]})
+    elif cmd in {"approve", "continue"}:
+        fp = args.fingerprint
+        if not fp:  # continue only sends the claim back; it may use the current content
+            fp = request("work_item_get", work_item_id=args.work_item_id, entry="cli")["work_item"]["completion"][
+                "fingerprint"]
+        out = _manage(f"work_item.{cmd}", {"work_item_id": args.work_item_id},
+                      {"note": args.note} if args.note else {}, {"expected_fingerprint": fp})
+    else:
+        params = {"kind": args.kind, "ref": args.ref, **({"note": args.note} if args.note else {}),
+                  **({"remove": True} if args.remove else {})}
+        out = _manage("work_item.link", {"work_item_id": args.work_item_id}, params)
+    _print(out, True)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["mcp"]:
@@ -800,6 +955,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_checkpoint(args)
         if args.cmd == "integrate":
             return cmd_integrate(args)
+        if args.cmd == "project":
+            return cmd_project(args)
+        if args.cmd == "item":
+            return cmd_item(args)
         if args.cmd == "op":
             from .task_daemon import request
 
