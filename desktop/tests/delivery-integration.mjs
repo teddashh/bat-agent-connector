@@ -272,4 +272,3 @@ try {
   child.kill('SIGTERM');
   await once(child, 'exit');
 }
-
