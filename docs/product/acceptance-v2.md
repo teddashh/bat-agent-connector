@@ -1,9 +1,10 @@
-# Tauri v2：R10 驗收證據矩陣
+# Better Agent Dashboard／Connector：R10 驗收證據矩陣
 
 證據快照：2026-10-08 23:26 UTC；產品整合 main 至 `6d88f4d`（#51 merge）。依產品負責人提供的
 Tauri 第二版計畫 §24，保留 **A01–A10、B01–B05、C01–C07、D01–D06、E01–E06、T01–T12，共 46 項**。
 範圍見 [realignment-v2.md](realignment-v2.md)，進度見 [implementation-status.md](implementation-status.md)。
-此表不是通過清單：**尚未建立同一候選版本的 installed／live 證據，M1、M2、M3 及正式 v1 均未完成。**
+兩份計畫對應同一產品與功能 backlog；Tauri 是更新的介面方向。
+此表不是通過清單：**尚未建立同一候選版本的 installed／live 證據，M1、M2、M3 及完整產品交付均未完成。**
 
 ## 證據層級與版本
 

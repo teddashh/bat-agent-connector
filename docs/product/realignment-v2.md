@@ -1,8 +1,11 @@
-# Better Agent Dashboard：Tauri v2 範圍校正
+# Better Agent Dashboard：共用產品與 Tauri 介面方向
 
 日期：2026-10-08。來源：產品負責人提供的《Better Agent Dashboard Tauri 校正開發計畫
 第二版》v2.0，§01–27。本文保留 repository 需要的決策；私人環境設定不放入 repo。
-本版取代 v1 的產品範圍、client 選型及驗收定義。實際提交與證據見
+產品負責人後續澄清：**v1、v2 是同一產品的計畫／UI 設計修訂，不是兩套產品或分開的功能發行。**
+既有 Connector、Task Service 與共用功能 backlog 持續累加；依第二版採用 Tauri 介面方向，
+保留以下明列的中央權威、唯讀來源與不做 Hub 匯入器等決策。檔名保留以維持既有連結。
+實際提交與證據見
 [implementation-status.md](implementation-status.md)，既有細節仍以 `docs/design/` 為準。
 
 ## 固定決策（R00）
@@ -29,7 +32,7 @@
 8. ACK、accepted、idle、無 tab 不代表完成或死亡。送出後結果不明保留原 ID/key、
    claim/worktree 與 receipt，先查回。Cancel 不能抹除外部效果或釋放仍在使用的排他資源。
 9. Fleet 沿用已驗證 inventory/readiness/ownership。早期 PS adapter 與 Rust 移植任一
-   時刻只允許一個本機 tunnel owner；Rust parity 是正式 v1 gate。
+   時刻只允許一個本機 tunnel owner；Rust parity 是完整產品交付 gate。
 10. Canonical API、MCP/CLI adapter、agent skill 分層。Hermes/Grokbot 只有薄的環境
     配接，使用自己的 principal；能力不足不改走 raw BAT 或 shell 旁路。
 
@@ -73,13 +76,13 @@ Fleet observe 身分與使用者 mutation 身分分開。
   cancel 仍讀回並保留 environment slot，不把 workflow success/skipped 當部署版本證據。
 - Reviewed cleanup 保留人工/unknown、active writer、pending、未對帳 command、live
   consumer、引用與唯一內容。Task-owned 的 Part A `TASK_OWNED` 保留直到 coordinator
-  cleanup 通過驗收；retained-content restore API 是後續擴充，不阻擋正式 v1。
+  cleanup 通過驗收；retained-content restore API 是後續擴充，不阻擋完整產品交付。
 
 ## 分期與驗收
 
 | 階段 | 退出條件 |
 | --- | --- |
-| M0 | R00 新範圍、現況/owners/合約、排除 importer |
+| M0 | R00 共用產品決策、現況/owners/合約、排除 importer |
 | M1 | 可安裝 Tauri、真中央資料、manual/managed/unknown、history/relations、pending/linked 即時刷新、close-to-tray、Dashboard-only；PS 可暫為唯一 Fleet backend |
 | M2 | R01/R05/R06/R08 必要控制與輸入、pause/unknown recovery/cleanup、Rust Fleet parity |
 | M3 | R07/R09/R10：同 PR 整合、固定版本 merge/deploy、skills/install 同版、完整實機展示 |

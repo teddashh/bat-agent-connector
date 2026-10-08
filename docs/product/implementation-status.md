@@ -1,10 +1,20 @@
-# Tauri v2 實作狀態
+# Better Agent Dashboard／Connector 實作狀態
 
-查核日期：2026-10-08。依 [v2 範圍](realignment-v2.md)；歷史交接見
+查核日期：2026-10-08。依 [共用產品與 Tauri 方向](realignment-v2.md)；兩份計畫是同一產品的 UI 修訂，共用一份功能 backlog。歷史交接見
 [`2026-10-08-dispatch.md`](../handoff/2026-10-08-dispatch.md)。此表以 source evidence
 追蹤，不以測試數或 PR 數代替產品驗收。開工時 main 為 `2568520`（#41 已合併）；
 本輪已依序合併 #36（`800f6ec`）、#35（`8e687fb`）、#37（`2ac5715`）及 #38（`8c755a3`）。下面的接手基線保留歷史，
-目前進度以「本輪進度」為準。
+已合併證據以「本輪收斂結果」為準，續作以「目前續作」為準。
+
+## 目前續作
+
+追蹤 [#55](https://github.com/teddashh/bat-agent-connector/issues/55)，從 main `0c7c8fb` 開隔離工作線：
+
+- R01：legacy send／continue／answer 接同一 durable operations，保留原 caller、message/prompt ID、queue、完整 receipt 及未知結果查回。
+- R05 B1：共用 browser／Tauri UI 接既有 remote single-file preview／capture；明示 host、完整 session ID 與相對遠端路徑，來源唯讀。
+- R08 相容入口：補 legacy worktree removal 對共用 live consumers 的證據檢查；其餘 mutation 入口盤點留在同一 backlog。
+
+以上為進行中實作，尚未新增合併或驗收宣稱；完整交付仍依 46 項矩陣。
 
 ## 本輪收斂結果（2026-10-08 23:26 UTC）
 
@@ -16,13 +26,13 @@
   本次收斂文件是後續 docs-only 更新，未更動該 runtime/build/skill source，沒有另宣稱文件 head 跑過一次 full suite。
 - Fleet Kit #8 已合併 `d3697dc`；私有 installer #6 已合併 `2026750`，reviewed head `60ff6bd`。
   Installer pin 是上述完整 candidate、workflow `2026-10-08.4`、canonical digest `5f7e04d84dd9b207ee553e3308e988a07d890ba219ceebb9b26fc09a21c1b723`。
-  17 temporary/mock tests 在 default Python 與 3.10 通過；真 source verify-only 通過。保留 `draft_candidate`，並非正式 v1 release。
+  17 temporary/mock tests 在 default Python 與 3.10 通過；真 source verify-only 通過。保留 `draft_candidate`，並非完整產品發行。
 - 獨立審查修正了 artifact scalar admission、deployment cursor bounds、interrupt history prefix binding、capture replay/control credential binding、installer YAML 與 concurrent config preservation。
   先前 full/CI failures 均保留；#48/#49/#50 的舊 fixture failures 已由 #51 的 canonical-source/data-step 修正及整組 CI 覆蓋，未把舊紅燈改稱綠燈。
 - #38 早期本機 3.10 full 曾為 1834 passed/33 skipped/1 個 60 秒 settlement timeout；journal 顯示持續進展，原碼單測 2.52 秒重跑通過。後續 exact-head 四版 CI 各 1835/33 通過；不把單測 retry 當 full。
 - 合併後新增 [Linux GLib release gate #53](https://github.com/teddashh/bat-agent-connector/issues/53)：鎖定的 `glib 0.18.5` 受 [RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429.html) 影響，目前 GTK/WebKit 0.18 相依沒有可直接更新的已發布修正版。Windows locked graph 不含該依賴；Linux production distribution 仍須已審修正。CI 綠燈不消除此 advisory，Dependabot 保持開啟。
 - GitHub Codex bot 後期額度用盡，後續使用獨立本機 Codex peer review，沒有冒稱新 bot verdict。
-  **沒有 live host/provider writes、主機安裝或 Windows installed acceptance；M1/M2/M3 與正式 v1 尚未完成。**
+  **沒有 live host/provider writes、主機安裝或 Windows installed acceptance；M1/M2/M3 與完整產品交付尚未完成。**
 
 ## 接手基線
 
@@ -32,7 +42,7 @@
 | #36 operations Part A | `d51290b` | CI 綠但不是最新修正；worker 已有 `c9c5a2e` pause/verifier 修正，內部 failover authority 尚在跑 |
 | #37 confinement | `d03fc1f` | 衝突、無 CI；worker 修 Python 啟動前依賴完整性與 pre-send rollback；須累加 #36 gate |
 | #38 cleanup Part A | `51bb65c` | 衝突、無 CI；worker 已有 `26fecc2`/`cad864f` 容量及移除 host 修正，retirement follow-up 尚在跑 |
-| #39 Hub import | `0018b58` | v2 排除，不合併、不作依賴；通用 project/work-item 已在 main |
+| #39 Hub import | `0018b58` | 明確排除，不合併、不作依賴；通用 project/work-item 已在 main |
 | Delivery Part B（local） | `b2e2050` | 既有已審成果需在 #35/#36 後整合；data step 3、history adapter、owner lease、固定 UI key 等 pending notes 仍適用 |
 | Artifacts Part A（local） | `3c59f4f` | 保留已有成果；在 confinement/cleanup 後整合 exact replica manifest，無 Hub import 依賴 |
 | Fleet Kit main | `4ca47d0`（計畫 pin） | #7 已合併；既有 inventory/readiness/ownership 是 R03 基礎，Rust parity 尚未交付 |
@@ -69,7 +79,7 @@
 4. 共用 frontend 接 observation，完成事件 store、pending/linked 刷新與 M1；Fleet
    adapter 遵循唯一 owner，不靠第二個 monitor 補缺口。
 5. 整合現有 artifacts/Delivery Part B，補 R01 Part B、R05/R06/R08；R03 Rust parity。
-6. R09 版本與安裝一致；R10 用同一候選版本跑 46 項及正式展示，才宣稱 M3/v1 完成。
+6. R09 版本與安裝一致；R10 用同一候選版本跑 46 項及正式展示，才宣稱 M3／完整產品交付完成。
 
 ## 驗收證據與外部依賴
 
