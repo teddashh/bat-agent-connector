@@ -294,12 +294,25 @@ work_submit 原已要求 key，保留其最大 256 字相容長度；一般 oper
 | permissions | Claude mode；Codex sandbox 與 approval 各一步 | 讀同 session meta 的實際 mode；證據不足時維持 uncertain。deferred raise 保存固定目標／版本；task gate 改變時拒絕，不盲目掃全 registry。 |
 | interrupt／pause abort | interrupt／abort 各一步；固定 task/session/version | 證明相同 session 不 streaming；查不到或 binding 不符不能算完成。已 pause 的意圖保留，不因 abort 不明而退回未 paused。 |
 | task-owned session.send／answer／interrupt | operation_id 連原 task command；保留原 payload／control_version | operation 讀回先結清自己的 step；下次 coordinator.tick 在 task lock 下以原 `_reconcile_command` 的證據結清 command（send 為 accepted，其餘為 settled），將 lead task 恢復 running。operation 的證據不代替 task 回執；command 未解仍擋控制，回查不明維持 uncertain、不重送。 |
+| task-scoped session.send 的 terminal command | `task_send_command` 回執、原 command status／payload、`task_dispatch` failure | command status 已提交，但 result／refusal 未提交即 crash：cancelled／rejected 沿用下表的本機結果，不進 uncertain、不建立新 command／BAT frame；舊 coordinator send 與 tick 共用這項處理。 |
 | start／relay 新建／fanout 項目 | reserve IDs、worktree.create、start-session、選配 tab append、第一個 prompt | 核對預留 ID、creation evidence、cwd、branch。已存在只補回執；不能重新 random ID、刪已可能成功的 worktree，或回退人工 cwd。tab 整份 workspace save 的既有 race 不在此聲稱修好。 |
 | failover | 固定 source/successor、writer proof、start、獨立 handoff send | successor 存在不代表 handoff 成功；舊 writer 不明時不建第二 writer。registry starting／uncertain 不作「可再開」依據。 |
 | worktree merge／remove | 可選 rehydrate、merge、remove、選配 branch delete、stop、registry effect，每項分開 | 保存來源／目的 commit 與 path；merge 以目的 Git 證據核對，remove 以 exact worktree 身分／存在性核對。不能因資料夾不存在就順手刪別的 branch。無法唯一歸因就 uncertain。 |
 | fanout | 固定 plan digest、每項預留 ID／steps；planner cleanup 僅回報 legacy apply 拒絕 | per-item 已完成結果不重做；未證明項目維持 uncertain，不啟動更多可能重複的 writer。保留 planner session 交 `cleanup_preview`，不經 legacy apply 清理。partial items 與原 cap 行為保留。 |
 | task submit／控制／證詞 | 原 task effect＋同交易 step response；command IDs 連結 | 本地 commit 回執即完成證據；沒有回執代表交易未完成，可以重新做本地交易，不能重播已存在 external command。 |
 | task.verify | 固定 candidate、原 runner invocation、output artifact、observed verification receipt | runner 失聯／重啟後無完成證據就 needs_attention／既有 task 恢復規則，不把 invocation 再當普通本地寫入重跑，不接受 caller 填 exit code。 |
+
+task send command 的恢復規則：
+
+| command／durable step | 恢復結果 |
+|---|---|
+| cancelled | task 仍 paused：TASK_PAUSED；已 resume／control_version 改變：以 command payload 的綁定版本交原 `task_control.check`，回 CONTROL_VERSION_CONFLICT（binding 改變則沿用 gate 的 code）；其他取消固定為 TASK_SEND_NOT_DISPATCHED。只拒絕，task 完全不變。 |
+| rejected，task_dispatch 已 failed | 重拋保存的 StepFailed code／message，與原失敗路徑相同；不改 task，不回查 send、不派送。 |
+| rejected，沒有 failed dispatch | 保留已記錄的 needs_ted／vanished 結果或較新的 task control／send command（即使 control_version 相同）。仍是同版本、同 session 的原派送狀態時，恢復 needs_ted；initial lead 可由新的 presence 正面證明 vanished，交原 `mark_initial_session_vanished`（最多一次 replacement）。presence await 後重讀 task，期間有改變就保留新狀態。operation 回 NOT_ACCEPTED。 |
+| intent／needs_review／uncertain | 保留原 `_reconcile_command` 的證據與未知結果規則；不能重送。 |
+| accepted／settled | 保留 task_send_result 的成功回執。 |
+
+舊 command status 沒保存當時的 presence 理由；rejected 本身也不能證明 initial session 已 vanished。若恢復時 presence 不明、讀取失敗或 session 已恢復存在，就選 needs_ted：確定沒有已接受的 send，不需要人工對帳，且不會自動重送或憑空建立 replacement。已提交的本機結果不再寫一次。coordinator 自己的 cancelled send 保留原 task 回傳；non-operation rejected send 在重用 command key、或 tick 要觀測回合前恢復同一本機結果（只處理同版本的 coordinator command，不套用到 runtime control 的拒絕）。沒有新增 command settlement 的證據規則。operation 一旦保存 refusal intent／terminal failure，同 key 永遠重讀原 code。
 
 沿用 operation 的 accepted／running／waiting_external／uncertain／needs_attention／succeeded／failed／cancelled。回查退避與 uncertain_tries 上限沿用 `operations.py`；不新增 task state。多項 operation result 保存每項 code、已完成 steps、effect、尚未證明的部分；每項失敗不能消去其他項已完成的 mutation。
 
@@ -385,6 +398,7 @@ Phase 2 擴充原 owner 機制，沒有第二份 owner database／另一套 leas
 | A07；§09／§10（Part A pause 競態） | `test_a07_pause_while_send_waits_for_session_lock_refuses_operation`、`test_a07_pause_during_send_preparation_refuses_operation`、`test_a07_task_send_requires_its_accepted_command_receipt` | 等待 session lock、route／presence／prepare_send 時 pause 勝出：operation／step failed、TASK_PAUSED，零 command／frame，task snapshot 不變；同 key 重讀拒絕，resume＋新 key 恰一 frame。paused tick 不派送；缺少回執／rejected／cancelled 不能成功，未解 command 維持 uncertain。 |
 | A07；§10（Part A 其他控制） | `test_a07_other_controls_refuse_pause_while_waiting_for_session_lock` | answer／interrupt operations、legacy permissions／relay／deferred raise 等鎖時 pause：鎖後 gate 拒絕，零 command／frame；bulk deferred 項目 raised=false 與明確 code，不能回報成功。 |
 | A05；§09（Part A 拒絕恢復） | `test_a05_paused_send_refusal_survives_restart_before_operation_settlement` | refusal step 在 started／failed、operation terminal status 尚未提交即 crash；task resume 後重啟仍重讀 TASK_PAUSED，不建立 command 或補送。 |
+| A05／A07；§09／§10（Part A terminal send crash） | `test_a05_a07_cancelled_send_command_survives_restart_without_uncertain_task`、`test_a05_a07_rejected_send_command_survives_restart_without_uncertain_task`、`test_a07_rejected_send_recovery_preserves_a_later_accepted_command`、`test_a07_legacy_send_reuses_terminal_command_without_uncertain_task` | 最後 paused check／initial presence 後 cancelled status 提交即停止；新 daemon 恢復 TASK_PAUSED，task snapshot 不變、零 frame／新 command，resume＋新 key 恰一 frame。版本改變沿用 gate code；其他取消固定拒絕。rejected 的 local refusal／accepted=false／vanished／presence 不明，涵蓋 status 後及本機結果後 crash，保持 failed code、不進 uncertain、不重寫既有結果或較晚 accepted command 的 task。舊 send／tick 的相同 crash 也不製造 uncertain。 |
 | A05／A07；§09／§10（Part A task action 鎖後檢查） | `test_a05_locked_task_action_refuses_task_completed_by_tick`、`test_a05_mark_stage_rechecks_verified_done_after_task_lock`、`test_a05_scoped_task_action_rechecks_pause_after_task_lock` | request_ted／verify 已受理但等待驗證 tick 的 task lock；tick 完成後 TASK_STATE_BLOCKED，done／verification／delivery 不變。mark_stage 等鎖後失去 done／verification_commit 時拒絕；scoped actions 等鎖時 pause 以 TASK_PAUSED 拒絕。零 effect／receipt intent、同 key 重讀拒絕。 |
 | A05；§09（Part A receipt replay 與控制） | `test_a05_locked_task_action_replays_receipt_after_state_change`、`test_a05_task_controls_do_not_wait_for_task_lock_or_change_terminal_task`、`test_a05_reconcile_refuses_command_settled_while_waiting_for_task_lock`、`test_a05_verify_request_ted_and_stage_use_original_receipts` | succeeded receipt 優先於新 state／version；未競態要求仍成功。pause／resume 本機 effect 不等 task lock、保留 terminal task；原 command 在等鎖時已被 tick 接受，reconcile 不消耗 capability／不寫對帳回執。 |
 

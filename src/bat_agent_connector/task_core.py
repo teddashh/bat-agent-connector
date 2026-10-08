@@ -305,6 +305,13 @@ class TaskCoordinator:
                     return self.journal.change(task_id, "verifying" if task.get("reviewer_session_id")
                                                else "accepted", event="session_presence_restored")
             return task
+        rejected = next((c for c in reversed(cmds) if c["kind"] == "send"
+                         and c["session_id"] == task.get("session_id")), None)
+        if rejected and rejected["status"] == "rejected":
+            payload = json.loads(rejected["payload"])
+            if (not payload.get("operation_id") and not str(payload.get("purpose")).startswith("runtime:")
+                    and payload.get("control_version") == task["control_version"]):
+                return await self._recover_unsent_send(task, rejected)
         if task["state"] == "queued":
             return await self._start(task, role="lead")
         if task["state"] == "verifying":
@@ -381,6 +388,48 @@ class TaskCoordinator:
                   if role == "reviewer" else initial_prompt(task))
         return await self._send(self.journal.get(task["task_id"]), sid, prompt, role + ":initial")
 
+    async def _recover_unsent_send(self, task: dict, cmd: dict, *, operation=None) -> dict | None:
+        """Replay terminal local send outcomes without reconciling or dispatching a frame."""
+        if cmd["status"] not in {"cancelled", "rejected"}:
+            return None
+        task = self.journal.get(task["task_id"])
+        payload = json.loads(cmd["payload"])
+        version = payload.get("control_version")
+        if cmd["status"] == "cancelled":
+            if operation:
+                if task["paused"]:
+                    raise TaskControlRefused("TASK_PAUSED", "task paused before send dispatch")
+                if version is not None and version != task["control_version"]:
+                    from .task_control import check
+                    check(self.journal, task["task_id"], task["host"], cmd["session_id"], "send", version)
+                raise TaskControlRefused("TASK_SEND_NOT_DISPATCHED", "task send command was cancelled before dispatch")
+            return task
+        if operation:
+            failed = operation.service.db.execute(
+                "SELECT error FROM operation_steps WHERE operation_id=? AND name='task_dispatch' AND status='failed'",
+                (operation.operation_id,)).fetchone()
+            if failed:
+                error = json.loads(failed["error"] or "{}")
+                raise StepFailed(error.get("code", "STEP_FAILED"), error.get("message", "step failed earlier"))
+        # Do not overwrite a later control or a local outcome already committed before the crash.
+        if (task["paused"] or version is not None and version != task["control_version"]
+                or cmd["session_id"] not in {task.get("session_id"), task.get("reviewer_session_id")}
+                or task["state"] not in {"accepted", "running", "verifying", "dispatching"}
+                or any(c["kind"] == "send" and c["session_id"] == cmd["session_id"]
+                       and c["created_at"] > cmd["created_at"] for c in self.journal.commands(task["task_id"]))):
+            return task
+        if payload.get("purpose") == "lead:initial" and task["state"] == "accepted":
+            try:
+                presence = await self.adapter.session_presence(task, cmd["session_id"])
+            except Exception:  # noqa: BLE001 - no presence proof means a human decides, never a resend
+                presence = "unknown"
+            current = self.journal.get(task["task_id"])
+            if current != task:
+                return current
+            if presence == "vanished":
+                return self.journal.mark_initial_session_vanished(task["task_id"], cmd["session_id"])
+        return self.journal.change(task["task_id"], "needs_ted")
+
     async def _send(self, task: dict, sid: str, text: str, purpose: str,
                     *, prepared_command: dict | None = None, operation=None) -> dict:
         expected_version = task["control_version"]
@@ -401,6 +450,9 @@ class TaskCoordinator:
                     (operation.operation_id,)).fetchone()
                 if receipt:
                     cmd = self.journal.command_get(json.loads(receipt["response"])["command_id"])
+                    unsent = await self._recover_unsent_send(task, cmd, operation=operation)
+                    if unsent is not None:
+                        return unsent
                     if cmd["status"] in {"intent", "needs_review", "uncertain"}:
                         self.journal.command_status(cmd["command_id"], "uncertain")
                         task = await self._reconcile_command(task, cmd)
@@ -468,6 +520,9 @@ class TaskCoordinator:
                     operation.set_refs(task_id=task["task_id"], command_id=cmd["command_id"],
                                        control_version=task["control_version"])
                 if not fresh:
+                    unsent = await self._recover_unsent_send(task, cmd)
+                    if unsent is not None:
+                        return unsent
                     return self.journal.change(task["task_id"], "uncertain")
             if initial_lead or initial_reviewer:
                 presence = await self.adapter.session_presence(task, sid)
