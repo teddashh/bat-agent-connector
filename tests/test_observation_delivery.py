@@ -17,8 +17,9 @@ async def test_b01_b03_delivered_merge_history_uses_only_explicit_refs(make_daem
     d = make_daemon()
     gh.add_pr(7, delivery_tests.HEAD, body="private PR body")
     gh.pulls[7]["title"] = "private PR title"
-    wid = worktree(d.ops.db, "h1", "registry", "source@123", "worktree", path="/srv/worktree",
-                   session_id="source" if binding == "session" else None)
+    with d.journal.tx():
+        wid = worktree(d.journal, "h1", "registry", "source@123", "worktree", path="/srv/worktree",
+                       session_id="source" if binding == "session" else None)
     remember(d.ops.db, "session", "h1/source", host="h1", session_id="source")
     op, _ = await delivery_tests.merge_op(d)
     preview_id = op["params"]["preview_id"]
