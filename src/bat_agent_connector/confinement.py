@@ -342,10 +342,11 @@ try:
         child = path
         for parent in path.parents:
             budget(); info = parent.stat(); victim = child.stat()
+            if info.st_uid == os.geteuid(): finish('mismatch', 'owned_ancestor_can_chmod')
             if os.access(parent, os.W_OK | os.X_OK, effective_ids=True) and (not info.st_mode & stat.S_ISVTX or os.geteuid() in (info.st_uid, victim.st_uid)):
                 finish('mismatch', 'writable_ancestor')
             child = parent
-        proc = subprocess.Popen(['find', root, '-xdev', '-printf', 'E:%D\n', '-writable', '-printf', 'W\n', '-quit', '-o', '-type', 'l', '-printf', 'L\n', '-quit'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.Popen(['find', root, '-xdev', '-printf', 'E:%D\n', '-writable', '-printf', 'W\n', '-quit', '-o', '-uid', str(c['uid']), '-printf', 'O\n', '-quit', '-o', '-type', 'l', '-printf', 'L\n', '-quit'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         selector = selectors.DefaultSelector(); selector.register(proc.stdout, selectors.EVENT_READ)
         try:
             pending = b''
@@ -359,6 +360,7 @@ try:
                 lines = pending.split(b'\n'); pending = lines.pop()
                 for line in lines:
                     if line == b'W': finish('mismatch', 'writable_entry')
+                    if line == b'O': finish('mismatch', 'owned_entry_can_chmod')
                     if line == b'L': finish('unknown', 'symlink_unchecked')
                     if not line.startswith(b'E:'): finish('unknown', 'find_output_invalid')
                     if int(line[2:]) != path.stat().st_dev: finish('unknown', 'mount_unchecked')

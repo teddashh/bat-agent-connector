@@ -194,18 +194,22 @@ def test_a10_host_evidence_migration_is_idempotent_and_persists(tmp_path):
 @pytest.mark.parametrize("case,expected", [("safe", "verified"), ("writable", "mismatch"),
                                           ("budget", "unknown"), ("identity", "unknown"),
                                           ("capabilities", "mismatch"), ("ancestor", "mismatch"),
-                                          ("time", "unknown"), ("process", "unknown"), ("symlink", "unknown")])
+                                          ("time", "unknown"), ("process", "unknown"), ("symlink", "unknown"),
+                                          ("ownership", "mismatch"), ("ancestor_owner", "mismatch")])
 def test_a10_linux_read_only_scan_uses_find_and_process_identity(tmp_path, monkeypatch, capsys, case, expected):
     """Use real GNU find on a disposable fixture; simulate /proc, alias and ancestor metadata only."""
     root = tmp_path / "protected"
     root.mkdir()
     (root / "file").write_text("fixture")
-    (root / "file").chmod(0o600 if case == "writable" else 0o400)
+    (root / "file").chmod(0o600 if case == "writable" else 0o444)
     if case == "symlink":
         (root / "link").symlink_to(root / "file")
-    root.chmod(0o500)
+    root.chmod(0o555)
     real_path = pathlib.Path
-    uid = os.getuid()
+    actual_uid = os.getuid()
+    uid = actual_uid if case in {"ownership", "ancestor_owner"} else actual_uid + 1000
+    monkeypatch.setattr(os, "getuid", lambda: uid)
+    monkeypatch.setattr(os, "geteuid", lambda: uid)
     gid = os.getgid()
     groups = " ".join(str(g) for g in sorted(os.getgroups()))
     def status(parent):
@@ -240,7 +244,10 @@ def test_a10_linux_read_only_scan_uses_find_and_process_identity(tmp_path, monke
                                                         "seconds": .000001 if case == "time" else 5, "port": 9876})])
     with pytest.raises(SystemExit):
         exec(confinement._ACCOUNT_PROGRAM, {})
-    assert json.loads(capsys.readouterr().out)["status"] == expected
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == expected
+    if case == "ancestor_owner":
+        assert result["reason"] == "owned_ancestor_can_chmod"
     root.chmod(0o700)
     (root / "file").chmod(0o600)
 
