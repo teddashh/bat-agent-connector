@@ -14,6 +14,7 @@
     "check:browser": "node scripts/check-browser-assets.mjs",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "test:ui": "playwright test",
+    "test:delivery": "node tests/delivery-integration.mjs",
     "test:central": "node tests/central-integration.mjs",
     "tauri": "tauri",
     "test:cleanup": "node tests/cleanup-integration.mjs",

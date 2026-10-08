@@ -129,3 +129,21 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
   .delivery-controls input, .delivery-card input, .delivery-card select, .delivery-card textarea { font-size: 16px; }
   .delivery-controls button, .delivery-card button, .delivery-card select { min-height: 44px; }
 }
+
+/* Delivery environments use the existing panel, type scale and compact actions. */
+.deployment-card-heading, .deployment-record-heading { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.deployment-card-heading h2 { margin: 0; }
+.environment-card h3 { font-size: 15px; margin: 14px 0 8px; }
+.deployment-versions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.deployment-versions > div { min-width: 0; }
+.deployment-identity { overflow-wrap: anywhere; }
+.deployment-identity p, .deployment-record p { margin: 6px 0; }
+.deployment-record { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.deployment-record:last-child { border-bottom: 0; }
+.deployment-limits ul { padding-left: 18px; margin: 4px 0; }
+.deployment-pagination { align-items: center; justify-content: flex-end; }
+.environment-card details > summary { cursor: pointer; color: var(--accent); padding: 6px 0; }
+@media (max-width: 600px) {
+  .deployment-versions { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .environment-card details > summary { min-height: 44px; display: flex; align-items: center; }
+}
