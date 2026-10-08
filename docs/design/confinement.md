@@ -140,14 +140,14 @@ Session 物件（新增；下例 options 已核對但主機還沒做 sandbox 實
 | fanout planner | Codex `read-only`＋`never`，記 options 與受限旗標。 | planner 的既有工作只讀；不需要 commit、安裝或測試。仍不宣稱新 planner／模型政策。若實機不支援，顯示不支援，不退回可寫 allow-all planner。 |
 | failover／archive successor | 新 session 用上述預設，並繼承 predecessor 的禁止 raise、受保護 roots 與證據關係。 | 受限 predecessor 不依 host allow-all 放寬；非受限 predecessor 保持 host 政策。對 predecessor 為 read-only／never，successor 保持該限制；對已有 host_account，不丟 account 邊界。無法維持時 blocked，保留前任。新 session 可有更強證據，但不能重標前任。 |
 | Task Service 新 lead／external worktree | **保留現有 engine／recipe 的權限行為**。default 不新增送出欄位；start 後由 BAT meta 保存實際 workspace-write/on-request 或 Claude default，不新增 sandbox roots／網路政策。 | allow-all 任務如無已查核的 host_account，level=none、`gap=task_recipe_compatibility`；不冒稱 confined，也不強制改成 sandbox/never 令測試失敗。Task Service 保持其 default／allow_all 行為；新增 confined 設定在 task 內仍沿用原 default 行為並記 task_recipe_compatibility，不另改 engine／recipe。 |
-| Task Service reviewer 相容分支 | 保存現有 Codex read-only/never 或 Claude plan，不改 recipe 是否會使用 reviewer。 | reserve、read-back 與 tab 都保存實際 options。 |
+| Task Service reviewer 相容分支 | 保存現有 Codex read-only/never 或 Claude plan，不改 recipe 是否會使用 reviewer。 | reserve、read-back 與 tab 都保存實際 options；未讀到 permission fields 記 unknown，不增加 Task Service engine 的阻擋。 |
 | warm reuse、resume、rehydrate、start recovery | 保持該 session 原已記 options／level，不套新 start 預設。 | 恢復不得抹去 write_scope；缺證據顯示 unknown／none，不能按今日 host default 或 cwd 升級。 |
 
 Codex `never` 不普遍取代 `on-request`：它可能禁止測試需要的外部 cache、Git common dir 或依賴網路，而 BAT 不能指定這些 writable roots／network settings。`read-only` 不能完成 coding／repair。先用可工作的最強 sandbox mode，保留有界的逐次詢問；禁止的是 mode raise 與自動批准，不能聲稱批准後仍完全隔離。Task Service 的自動測試 runner（`task_verifier.py:ObservedVerifier`，含安裝依賴）不是 session 的 sandbox subprocess；只能用其既有 cwd／SSH 政策與已查核帳號解釋限制，不拿 session level 替它背書。
 
 Task Service 若不能在既有 engine／recipe 下保持測試，這一包記錄 gap，README／Dashboard 明示尚未達成該任務的 A10。後續 engine／recipe 調整由另一工作包決定；不偷偷改模型、路由、測試命令、cache／HOME、安裝位置或選另一個 host。
 
-Task Service 的新列保存既有 options／level；原 task 用 allow_all 就保持 none＋task_recipe_compatibility，不用改 policy 來讓測試過關。新 host confined 不悄悄改 task engine 的原行為；此例外只在既有 task-owned write point 內記證據，不新增外部 bypass 參數。
+Task Service 的 metadata 未包含權限欄位時只記 unknown，不改原 start／recovery 行為；confined 的 resume／send 仍由共用 service guard 保持其原限制。Task Service 的新列保存既有 options／level；原 task 用 allow_all 就保持 none＋task_recipe_compatibility，不用改 policy 來讓測試過關。新 host confined 不悄悄改 task engine 的原行為；此例外只在既有 task-owned write point 內記證據，不新增外部 bypass 參數。
 
 ## Host account 宣告與只讀查核
 

@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import shlex
+import sqlite3
 import time
 
 from . import registry
@@ -176,12 +177,16 @@ def account_status(fleet, host: str) -> dict:
     config = fleet.config.host(host).confinement
     result = getattr(fleet, "_confinement_checks", {}).get(host)
     signature = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
-    if not result and getattr(fleet, "confinement_journal", None):
-        row = fleet.confinement_journal.db.execute(
-            "SELECT evidence FROM confinement_host_checks WHERE host=?", (host,)).fetchone()
-        result = json.loads(row[0]) if row else None
-    if result and result.get("config_sha256") == signature:
-        if time.time() - result["checked_at"] <= config.get("check_max_age_s", 300):
+    if config.get("host_account") and not result and getattr(fleet, "confinement_journal", None):
+        try:
+            row = fleet.confinement_journal.db.execute(
+                "SELECT evidence FROM confinement_host_checks WHERE host=?", (host,)).fetchone()
+            result = json.loads(row[0]) if row else None
+        except (sqlite3.Error, ValueError, TypeError):
+            result = None  # Read failures never certify a boundary or block an existing job.
+    if isinstance(result, dict) and result.get("config_sha256") == signature:
+        checked = result.get("checked_at")
+        if isinstance(checked, (int, float)) and 0 <= time.time() - checked <= config.get("check_max_age_s", 300):
             return copy.deepcopy(result)
     return {"declared": bool(config.get("host_account")), "status": "unknown", "reason": "unchecked_or_stale",
             "protected_roots": list(config.get("protected_roots") or []), "checked_at": None,

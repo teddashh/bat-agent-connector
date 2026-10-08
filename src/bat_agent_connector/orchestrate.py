@@ -358,7 +358,8 @@ async def session_start(
                         started.get("sessionId") != sid):
                     raise WriteRefused("BAT start reply did not confirm the reserved session ID")
                 meta = await _meta(c, sid)
-                confinement.ensure_confirmed(confinement_record, meta)
+                if not task_id or write_scope == "confined":
+                    confinement.ensure_confirmed(confinement_record, meta)
                 confinement_record = confinement.confirm(confinement_record, meta)
             except confinement.ConfinementRefused:
                 retain_on_error = True  # The agent started; never remove its worktree on a policy mismatch.
