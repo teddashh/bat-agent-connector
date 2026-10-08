@@ -53,6 +53,12 @@
   All host mutations require the locked consumer gate. Process, transport, decoding and malformed-reply failures
   after permission now remain uncertain with their reservation kept and settle by read-back; failures before
   permission remain definitive because the host helper aborts on EOF or refusal without writing.
+  Cleanup receipts and tombstones now expose cumulative completed and refused phases, including prerequisite
+  session stops and worktree removals. Later refusals keep runtime/destructive partial items reserved with
+  CLEANUP_PARTIAL_STATE; resuming validates the recorded post-discard state and retries only refused phases under
+  a new attempt. Cancel keeps partial effects and reservations visible; additive-only settled pins may release
+  their guard and stay listed. Stop's read-only gate now completes before its BAT write, so a lost stop reply
+  is uncertain too. The API contract and both skills document the receipt fields and cancellation rule.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps

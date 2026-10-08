@@ -196,7 +196,14 @@ item is done.
   Hermes/Grokbot tokens have no cleanup_discard. Manual/unknown resources, writers, pending commands and task-owned
   resources stay. Stale/mismatched/expired previews require a new preview (15-minute TTL); never change a reviewed
   apply. After a lost reply, reuse the same key and read the operation. Resume follows the original accepted plan;
-  cancel stops unsent steps. Use cleanup_tombstones to find original IDs, location, reasons and PR destinations,
+  cancel stops unsent steps. Inspect receipt.completed_phases (including prerequisites), refused_phases and
+  operation.cancel_requested: a later refusal never hides an earlier stop, discard or removal. result.items is
+  the last progress snapshot; HTTP GET /api/v1/operations/{id} also returns live cleanup_receipts. CLEANUP_PARTIAL_STATE keeps
+  the item uncertain and reserved; clear the blocker before resuming the same operation. A new attempt checks the
+  original post-discard state and never repeats successful phases. Cancelling this partial operation keeps the
+  reservation for inspection; it cannot be resumed or force-unlocked here. Additive-only settled pins may release
+  the guard and remain in the receipt. Gate-passed transport/protocol failures stay uncertain and require read-back.
+  Use cleanup_tombstones to find original IDs, location, reasons and PR destinations,
   cleanup_retained to read actual retained refs. Restore comes in Part B; no tool can revive a runtime.
   Legacy session_cleanup is read-only evaluation; apply always returns LEGACY_CLEANUP_DISABLED. auto_cleanup is
   deprecated and cannot enable writes. Do not set up a housekeeping sweep. See [cleanup.md](../../docs/design/cleanup.md).

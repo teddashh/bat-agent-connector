@@ -424,7 +424,9 @@ def mutate(req):
             changing("restore", wt, git, wt, "restore", "--source=" + sha, "--staged", "--worktree", "--", ".")
             removed_replicas = {e["path"] for e in req.get("replicas", {}).get(wt, {}).get("replica_manifest", [])
                                 if e["path"] in before["extras"]}
-            return {"discarded": True, "acknowledged_missing_replicas": sorted(set(before["missing_replicas"]) | removed_replicas)}
+            acknowledged = sorted(set(before["missing_replicas"]) | removed_replicas)
+            after = observe({**req, "acknowledged_missing_replicas": {wt: acknowledged}})["worktrees"][wt]
+            return {"discarded": True, "acknowledged_missing_replicas": acknowledged, "after": after}
         if phase == "remove.worktree":
             if before["status"] or before["complex_state"] or before["head"] != sha:
                 raise ValueError("PREVIEW_STALE")
