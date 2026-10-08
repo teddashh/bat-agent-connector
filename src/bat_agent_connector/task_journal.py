@@ -341,6 +341,9 @@ class Journal:
                 preview_id TEXT NOT NULL, checked_at REAL NOT NULL,
                 PRIMARY KEY(repository, pull_number, method)
             )""")
+        from . import deployment_store
+        deployment_store.schema(self)
+        deployment_store.backfill(self)
 
     def _drop_legacy_outbox(self):
         """Remove the retired chat outbox so no historical event can ever be published.
