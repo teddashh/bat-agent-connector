@@ -297,78 +297,80 @@ class BatTaskAdapter:
             opts.update(permissionMode="plan", model=CLAUDE_BAT_MODEL)
         account = await confinement.start_account(self.fleet, host)
         record = confinement.snapshot(agent, opts, account=account, task=True)
-        entry.update(confinement=record, **orchestrate.registry_permission_fields(opts))
+        entry.update(confinement=record, start_sent=False, **orchestrate.registry_permission_fields(opts))
         registry.reserve(host, entry, hc.orchestrate_max_sessions)
         confinement.record_task_start(self.journal, task["task_id"], sid, entry)
         client = self.fleet.client(host)
-        started = None
-        last_error = None
-        for attempt in range(3):
-            try:
-                started = await client.invoke(
-                    "claude:start-session", {"sessionId": sid, "options": opts}, retry_on_disconnect=False,
-                    grant=grant, before_frame=lambda: confinement.guard_start_frame(self.fleet, host, record))
-                if isinstance(started, dict) and started.get("ok") is not False and started.get("sessionId") == sid:
-                    break
-                raise WriteRefused("BAT reviewer start did not confirm the reserved session ID")
-            except Exception as exc:  # noqa: BLE001 - poll identity before retrying
-                if getattr(exc, "sent", None) is False:
-                    registry.fail_reservation(host, sid)
-                    registry.update(host, sid, start_sent=False)
-                    raise
-                last_error = exc
+        with confinement.StartFrame(host, sid, journal=self.journal, task_id=task["task_id"]) as start_frame:
+            started = None
+            last_error = None
+            for attempt in range(3):
                 try:
-                    meta = await client.invoke("claude:get-session-meta", {"sessionId": sid},
-                                               retry_on_disconnect=False)
-                except Exception:  # noqa: BLE001 - readback is best-effort; retry below
-                    meta = None
-                if isinstance(meta, dict):
-                    try:
-                        confinement.guard_start_record(registry.get(host, sid) or {})
-                        confinement.guard_start_cwd(entry, meta)
-                        confinement.ensure_confirmed(record, meta, allow_unknown=True)
-                    except confinement.ConfinementRefused as refusal:
-                        registry.update(host, sid, status="uncertain", error_code=refusal.code,
-                                        **({"confinement": confinement.confirm(record, meta)}
-                                           if refusal.code == "CONFINEMENT_MISMATCH" else {}))
-                        if refusal.code == "CONFINEMENT_MISMATCH":
-                            confinement.record_task_start(self.journal, task["task_id"], sid, registry.get(host, sid) or {})
+                    started = await client.invoke(
+                        "claude:start-session", {"sessionId": sid, "options": opts}, retry_on_disconnect=False,
+                        grant=grant, before_frame=lambda: confinement.guard_start_frame(self.fleet, host, record),
+                        on_transport=start_frame.on_transport)
+                    if isinstance(started, dict) and started.get("ok") is not False and started.get("sessionId") == sid:
+                        break
+                    raise WriteRefused("BAT reviewer start did not confirm the reserved session ID")
+                except Exception as exc:  # noqa: BLE001 - poll identity before retrying
+                    if not start_frame.sent:
+                        registry.fail_reservation(host, sid)
+                        registry.update(host, sid, start_sent=False)
                         raise
-                    started = {"ok": True, "sessionId": sid}
-                    break
-                if attempt < 2:
-                    await asyncio.sleep(0.25 * (2 ** attempt))
-        if not started or started.get("sessionId") != sid:
-            registry.update(host, sid, status="uncertain")
-            raise last_error or WriteRefused("BAT reviewer start did not settle")
-        try:
-            meta = await client.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
-        except Exception:  # noqa: BLE001 - evidence reads must not fail an acknowledged reviewer start
-            meta = None
-        if isinstance(meta, dict):
+                    last_error = exc
+                    try:
+                        meta = await client.invoke("claude:get-session-meta", {"sessionId": sid},
+                                                   retry_on_disconnect=False)
+                    except Exception:  # noqa: BLE001 - readback is best-effort; retry below
+                        meta = None
+                    if isinstance(meta, dict):
+                        try:
+                            confinement.guard_start_record(registry.get(host, sid) or {})
+                            confinement.guard_start_cwd(entry, meta)
+                            confinement.ensure_confirmed(record, meta, allow_unknown=True)
+                        except confinement.ConfinementRefused as refusal:
+                            registry.update(host, sid, status="uncertain", error_code=refusal.code,
+                                            **({"confinement": confinement.confirm(record, meta)}
+                                               if refusal.code == "CONFINEMENT_MISMATCH" else {}))
+                            if refusal.code == "CONFINEMENT_MISMATCH":
+                                confinement.record_task_start(self.journal, task["task_id"], sid, registry.get(host, sid) or {})
+                            raise
+                        started = {"ok": True, "sessionId": sid}
+                        break
+                    if attempt < 2:
+                        await asyncio.sleep(0.25 * (2 ** attempt))
+            if not started or started.get("sessionId") != sid:
+                registry.update(host, sid, status="uncertain")
+                raise last_error or WriteRefused("BAT reviewer start did not settle")
             try:
-                confinement.guard_start_cwd(entry, meta)
-                confinement.ensure_confirmed(record, meta, allow_unknown=True)
-            except confinement.ConfinementRefused as refusal:
-                registry.update(host, sid, status="uncertain", error_code=refusal.code,
-                                **({"confinement": confinement.confirm(record, meta)}
-                                   if refusal.code == "CONFINEMENT_MISMATCH" else {}))
-                if refusal.code == "CONFINEMENT_MISMATCH":
-                    confinement.record_task_start(self.journal, task["task_id"], sid, registry.get(host, sid) or {})
-                raise
-        registry.update(host, sid, status="active", cwd=lead["cwd"], confinement=confinement.confirm(record, meta))
-        if self.register_tabs and hc.orchestrate_register_tabs:
-            try:
-                tab = await self.fleet.client(host).append_workspace_terminal(hc.profile_id, {
-                    "id": sid, "workspaceId": lead["workspace_id"], "title": entry["title"],
-                    "type": "terminal", "cwd": lead["cwd"], "agentPreset": preset,
-                    "permissionMode": opts.get("permissionMode"),
-                    "agentParams": orchestrate.registry_permission_fields(opts)["agent_params"],
-                }, grant=resource_policy.authorize_register_tab(host, sid))
-                registry.update(host, sid, tab_registered=bool(tab.get("appended")))
-            except Exception:  # noqa: BLE001 - registration is visibility only
-                registry.update(host, sid, tab_registered=False)
-        return sid
+                meta = await client.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
+            except Exception:  # noqa: BLE001 - evidence reads must not fail an acknowledged reviewer start
+                meta = None
+            if isinstance(meta, dict):
+                try:
+                    confinement.guard_start_cwd(entry, meta)
+                    confinement.ensure_confirmed(record, meta, allow_unknown=True)
+                except confinement.ConfinementRefused as refusal:
+                    registry.update(host, sid, status="uncertain", error_code=refusal.code,
+                                    **({"confinement": confinement.confirm(record, meta)}
+                                       if refusal.code == "CONFINEMENT_MISMATCH" else {}))
+                    if refusal.code == "CONFINEMENT_MISMATCH":
+                        confinement.record_task_start(self.journal, task["task_id"], sid, registry.get(host, sid) or {})
+                    raise
+            registry.update(host, sid, status="active", cwd=lead["cwd"], confinement=confinement.confirm(record, meta))
+            if self.register_tabs and hc.orchestrate_register_tabs:
+                try:
+                    tab = await self.fleet.client(host).append_workspace_terminal(hc.profile_id, {
+                        "id": sid, "workspaceId": lead["workspace_id"], "title": entry["title"],
+                        "type": "terminal", "cwd": lead["cwd"], "agentPreset": preset,
+                        "permissionMode": opts.get("permissionMode"),
+                        "agentParams": orchestrate.registry_permission_fields(opts)["agent_params"],
+                    }, grant=resource_policy.authorize_register_tab(host, sid))
+                    registry.update(host, sid, tab_registered=bool(tab.get("appended")))
+                except Exception:  # noqa: BLE001 - registration is visibility only
+                    registry.update(host, sid, tab_registered=False)
+            return sid
 
     async def recover_start(self, task: dict, *, role: str, session_id: str) -> bool:
         intent = next((c for c in self.journal.commands(task["task_id"])
@@ -379,6 +381,16 @@ class BatTaskAdapter:
                 confinement.guard_start_record({"confinement": json.loads(intent["payload"]).get("confinement")})
         except (confinement.ConfinementRefused, TypeError, ValueError):
             return False
+        entry = registry.get(task["host"], session_id)
+        if ((entry or {}).get("start_sent") is False
+                or entry is None and intent and json.loads(intent["payload"]).get("start_sent") is False):
+            if not intent:
+                return False
+            try:
+                await self.start(task, role=role, agent=json.loads(intent["payload"])["agent"], session_id=session_id)
+            except Exception:  # noqa: BLE001 - only durable unsent evidence permits this same-ID attempt
+                return False
+            return True
         if role == "lead" and task.get("base_branch"):
             try:
                 await self._ensure_external_worktree(task)
@@ -858,6 +870,16 @@ class BatTaskAdapter:
 
     async def recover_failover(self, task: dict, *, successor_id: str,
                                handoff_message_id: str, handoff_command_id: str) -> dict | None:
+        entry = registry.get(task["host"], successor_id) or {}
+        if (entry.get("start_sent") is False and entry.get("handoff_status") == "pending"
+                and "handoff_frame_sha256" in entry and entry["handoff_frame_sha256"] is None):
+            try:
+                # Reuse the reserved IDs and all original handoff guards. No frame
+                # was handed to BAT; this is not a resend of an unsettled start.
+                await self.failover(task, task["session_id"], successor_id,
+                                    handoff_message_id=handoff_message_id, handoff_command_id=handoff_command_id)
+            except Exception:  # noqa: BLE001 - unavailable or refused starts keep the journal unsettled
+                return None
         identity = await self._verified_failover_successor(task, successor_id, handoff_message_id,
                                                            handoff_command_id)
         if identity is False:

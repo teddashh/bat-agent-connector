@@ -34,6 +34,10 @@
   starts fall back to plain default, never acceptEdits; root/process failures still refuse starts. Old checker caches
   are invalidated. Clean startup files must be installed from trusted copies before hardening; the same-UID check
   cannot detect a payload planted before those files became protected.
+  Start-frame transport evidence now distinguishes pre-frame cancellation from an unsettled sent start. Cancellation
+  propagates without asynchronous rollback. Checkpoint/repair, failover and Task Service recover proven-unsent starts
+  under their reserved IDs; retained BAT worktrees are checked and reused, and Task command evidence covers early
+  preparation. Starts already handed to transport remain uncertain and are read back without another start frame.
   **A10 is not proven until the W12 live run**; no sandbox evidence-file import is included here.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the

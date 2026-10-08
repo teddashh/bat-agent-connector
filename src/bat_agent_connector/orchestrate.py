@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from . import confinement, registry, resource_policy
-from .errors import BatError, ConnectionLost, InvokeTimeout, WriteRefused
+from .errors import BatError, InvokeError, WriteRefused
 from .fleet import Fleet
 from .resource_policy import WriteGrant
 from .safety import Audit
@@ -269,7 +269,8 @@ async def session_start(
     if agent == "codex" and not model and hc.codex_model:
         model = hc.codex_model
     sid = session_id or str(uuid.uuid4())
-    confinement.guard_start_record(registry.get(host, sid) or {})
+    previous = registry.get(host, sid) or {}
+    confinement.guard_start_record(previous)
     # Read-only: how the host resolves the destination, so links into a human checkout are caught up front.
     git_roots = {}
     for path in {folder, cwd_override} - {None}:
@@ -294,6 +295,7 @@ async def session_start(
                 "model": model,
                 "title": title,
                 "isolation": grant.isolation,
+                "start_sent": False,
                 # Recorded with the reservation, so a start proven later by read-back keeps them too.
                 **registry_permission_fields(perm),
                 "confinement": confinement_record,
@@ -307,18 +309,27 @@ async def session_start(
                                           registry.get(host, sid))
         base = {"actor": fleet.actor, "tool": "session_start", "host": host, "session_id": sid}
         wt: dict = {}
+        worktree_created = False
         base_commit = None
         start_confirmed = False
-        unsent_refusal = False
+        start_frame = confinement.StartFrame(host, sid, journal=getattr(fleet, "confinement_journal", None),
+                                             task_id=task_id)
         meta = None
         try:
             if use_worktree:
-                audit.record(**base, channel="worktree:create", phase="attempt")
-                wt = await c.invoke(
-                    "worktree:create", {"sessionId": sid, "cwd": folder, "installPnpm": False,
-                                         **({"baseBranch": base_branch} if base_branch else {})},
-                    grant=grant,
-                )
+                if previous.get("start_sent") is False and previous.get("worktree_path"):
+                    wt = await c.invoke("worktree:status", {"sessionId": sid})
+                    if (not isinstance(wt, dict) or wt.get("worktreePath") != previous["worktree_path"]
+                            or wt.get("branchName") != previous.get("branch")):
+                        raise WriteRefused("unsent start's worktree identity is unavailable or changed")
+                else:
+                    audit.record(**base, channel="worktree:create", phase="attempt")
+                    wt = await c.invoke(
+                        "worktree:create", {"sessionId": sid, "cwd": folder, "installPnpm": False,
+                                             **({"baseBranch": base_branch} if base_branch else {})},
+                        grant=grant,
+                    )
+                    worktree_created = True
                 if not isinstance(wt, dict) or wt.get("success") is False or not wt.get("worktreePath"):
                     err = (wt or {}).get("error") if isinstance(wt, dict) else "unexpected reply"
                     audit.record(**base, channel="worktree:create", phase="result", ok=False, error=str(err))
@@ -338,6 +349,7 @@ async def session_start(
                 grant = resource_policy.check_new_worktree(grant, hc, folder, wt.get("worktreePath"), origin_root)
             cwd = cwd_override or wt.get("worktreePath") or folder
             if use_worktree:
+                registry.update(host, sid, cwd=cwd, worktree_path=wt.get("worktreePath"), branch=wt.get("branchName"))
                 rows = await c.invoke("git:log", {"cwd": cwd, "count": 1})
                 if isinstance(rows, list) and rows and isinstance(rows[0], dict):
                     base_commit = rows[0].get("hash")
@@ -359,7 +371,8 @@ async def session_start(
             audit.record(**base, channel="claude:start-session", phase="attempt", preset=preset)
             try:
                 started = await c.invoke("claude:start-session", {"sessionId": sid, "options": opts}, grant=grant,
-                                         before_frame=lambda: confinement.guard_start_frame(fleet, host, confinement_record))
+                                         before_frame=lambda: confinement.guard_start_frame(fleet, host, confinement_record),
+                                         on_transport=start_frame.on_transport)
                 if (not isinstance(started, dict) or started.get("ok") is False or
                         started.get("sessionId") != sid):
                     raise WriteRefused("BAT start reply did not confirm the reserved session ID")
@@ -372,28 +385,28 @@ async def session_start(
                     confinement.guard_start_cwd({"cwd": cwd}, meta)
                 confinement.ensure_confirmed(confinement_record, meta, allow_unknown=write_scope != "confined")
                 confinement_record = confinement.confirm(confinement_record, meta)
-            except confinement.ConfinementRefused as e:
-                unsent_refusal = e.sent is False and not start_confirmed
-                if start_confirmed or not unsent_refusal:
+            except confinement.ConfinementRefused:
+                if start_frame.sent or start_confirmed:
                     retain_on_error = True
-                elif use_worktree and not retain_on_error:
+                elif worktree_created and not retain_on_error:
                     await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": True}, grant=grant)
                     audit.record(**base, channel="worktree:remove", phase="rollback", ok=True)
                 raise
             except BatError as e:
-                if start_confirmed or write_scope == "confined" and isinstance(e, (InvokeTimeout, ConnectionLost)):
+                if start_confirmed or start_frame.sent and not isinstance(e, InvokeError):
                     retain_on_error = True  # No ACK cannot justify removing a possibly running agent's worktree.
                 audit.record(**base, channel="claude:start-session", phase="result", ok=False, error=_err(e))
-                if use_worktree and not retain_on_error:  # may have reached BAT on timeout
+                if worktree_created and not retain_on_error:  # may have reached BAT on timeout
                     await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": True}, grant=grant)
                     audit.record(**base, channel="worktree:remove", phase="rollback", ok=True)
                 raise
             audit.record(**base, channel="claude:start-session", phase="result", ok=True)
         except BaseException as e:
-            retain_on_error = retain_on_error or start_confirmed
-            registry.update(host, sid, status="failed" if unsent_refusal else
+            unsent = not start_frame.sent and not start_confirmed
+            retain_on_error = retain_on_error or start_confirmed or start_frame.sent and not isinstance(e, InvokeError)
+            registry.update(host, sid, status="failed" if unsent else
                             "uncertain" if retain_on_error else "failed", error_code=getattr(e, "code", None),
-                            **({"start_sent": False} if unsent_refusal else {}),
+                            start_sent=not unsent,
                             **({"cwd": cwd, "worktree_path": cwd if cwd_override else wt.get("worktreePath"),
                                 "branch": external_branch if cwd_override else wt.get("branchName"),
                                 "confinement": confinement.confirm(confinement_record, meta)}

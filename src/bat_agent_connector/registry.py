@@ -125,6 +125,10 @@ def reserve(host: str, entry: dict, max_active: int, replaces: str | None = None
             for e in items:
                 if e.get("host") == host and e.get("session_id") == replaces and e.get("status") == "active":
                     e.update(status="superseded", superseded_by=entry.get("session_id"), updated_at=time.time())
+        # A crash can leave the original starting row intact. Explicit false is
+        # durable proof that this exact reserved ID never reached the transport.
+        items = [e for e in items if not (e.get("host") == host and e.get("session_id") == entry["session_id"]
+                                        and e.get("status") in {"failed", "starting"} and e.get("start_sent") is False)]
         active = [e for e in items if e.get("host") == host and e.get("status") in ("active", "starting")]
         if len(active) >= max_active:
             raise WriteRefused(
@@ -132,8 +136,6 @@ def reserve(host: str, entry: dict, max_active: int, replaces: str | None = None
                 f"(orchestrate_max_sessions={max_active}); remove finished worktrees first"
             )
         entry = {**entry, "host": host, "status": "starting", "created_at": time.time()}
-        items = [e for e in items if not (e.get("host") == host and e.get("session_id") == entry["session_id"]
-                                        and e.get("status") == "failed" and e.get("start_sent") is False)]
         items.append(entry)
         _write(p, items)
     return None

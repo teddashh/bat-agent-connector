@@ -1274,3 +1274,64 @@ async def test_only_hosts_that_can_integrate_are_offered(world):
     card = await w.d.call_api("github_pr_preview", {"repository": "o/r", "pull_number": 1}, TED)
     caps = await w.d.call_api("api_capabilities", {}, TED)
     assert card["pull_request"]["integration"]["hosts"] == [] and caps["features"]["integration"][0]["hosts"] == []
+
+
+@pytest.mark.parametrize('stage', ['before', 'after'])
+async def test_repair_preframe_cancellation_restarts_unsent_reserved_session_once(world, monkeypatch, stage):
+    """A10/C03: repair restart uses unsent proof; after-frame cancellation is read back, never restarted."""
+    import asyncio
+    from dataclasses import replace
+
+    from tests.test_confinement import ACCOUNT, AccountRunner
+    from tests.test_confinement_recovery import PauseAtFrame
+
+    w = world
+    _, conflict, _, _ = await conflicted(w)
+    fleet = w.d.fleet
+    fleet.config.hosts['h1'] = replace(fleet.config.host('h1'), confinement=ACCOUNT)
+    pause = PauseAtFrame()
+    fleet.confinement_runner = pause if stage == 'before' else AccountRunner()
+    ready = pause.entered if stage == 'before' else asyncio.Event()
+    invoke = fleet.client('h1').invoke
+
+    async def after_frame(channel, params=None, **kwargs):
+        result = await invoke(channel, params, **kwargs)
+        if channel == 'claude:start-session':
+            ready.set()
+            await asyncio.Event().wait()
+        return result
+
+    if stage == 'after':
+        monkeypatch.setattr(fleet.client('h1'), 'invoke', after_frame)
+    starts_before = w.mock.channels().count('claude:start-session')
+    sends_before = w.mock.channels().count('claude:send-message')
+    op, _ = w.d.ops.create(TED, action='integration.handoff', target={'operation_id': conflict['operation_id']},
+                           params={}, idempotency_key='preframe-repair-cancel')
+    await w.d.ops.run_due()
+    pending = w.d.ops._active[op['operation_id']]
+    try:
+        await asyncio.wait_for(ready.wait(), 60)
+        row = registry.list_entries('h1')[-1]
+        sid, worktree = row['session_id'], row['cwd']
+        pending.cancel('fixture repair cancellation')
+        with pytest.raises(asyncio.CancelledError, match='fixture repair cancellation'):
+            await pending
+        row = registry.get('h1', sid)
+        assert row['start_sent'] is (stage == 'after')
+        assert row['status'] == ('failed' if stage == 'before' else 'uncertain')
+        assert w.mock.channels().count('claude:start-session') - starts_before == (stage == 'after')
+        assert 'worktree:remove' not in w.mock.channels()
+        pause.release.set()
+        monkeypatch.setattr(fleet.client('h1'), 'invoke', invoke)
+        await w.d.ops.drain(timeout=60)
+        result = w.d.ops.get(op['operation_id'])
+        assert result['status'] == 'succeeded', result
+        assert result['result']['session_id'] == sid
+        assert registry.get('h1', sid)['cwd'] == worktree
+        assert w.mock.channels().count('claude:start-session') - starts_before == 1
+        assert w.mock.channels().count('claude:send-message') - sends_before == 1
+    finally:
+        if not pending.done():
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending

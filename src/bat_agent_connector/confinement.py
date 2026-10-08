@@ -6,6 +6,7 @@ not of enforcement: only the W12 live run can prove A10. Existing creation snaps
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -29,6 +30,34 @@ class ConfinementRefused(WriteRefused):
     def __init__(self, code: str, message: str, *, sent: bool | None = None) -> None:
         self.code, self.sent = code, sent
         super().__init__(f"[{code}] {message}")
+
+
+class StartFrame:
+    """Per-invocation transport evidence; before_frame/connect/semaphore waits are still unsent."""
+
+    def __init__(self, host: str, sid: str, *, journal=None, task_id: str | None = None) -> None:
+        self.host, self.sid, self.sent = host, sid, False
+        self.journal, self.task_id = journal, task_id
+
+    def on_transport(self) -> None:
+        registry.update(self.host, self.sid, start_sent=True)
+        if self.task_id:
+            record_task_start(self.journal, self.task_id, self.sid, registry.get(self.host, self.sid) or {})
+        self.sent = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, exc, traceback):
+        if isinstance(exc, asyncio.CancelledError):
+            # Synchronous local bookkeeping only. Never start SSH/BAT rollback I/O
+            # while unwinding cancellation; a later recovery reuses the worktree.
+            if self.sent:
+                registry.update(self.host, self.sid, status="uncertain")
+            else:
+                registry.fail_reservation(self.host, self.sid)
+                registry.update(self.host, self.sid, start_sent=False)
+        return False
 
 
 def guard_start_record(entry: dict) -> None:
@@ -508,7 +537,7 @@ def record_task_start(journal, task_id: str, sid: str, entry: dict) -> None:
                     and c["kind"] in {"start_lead", "start_reviewer"}), None)
     if command:
         payload = json.loads(command["payload"])
-        payload.update({k: entry[k] for k in ("confinement", "write_scope", "permission_mode_claude", "agent_params")
+        payload.update({k: entry[k] for k in ("confinement", "write_scope", "permission_mode_claude", "agent_params", "start_sent")
                         if k in entry})
         journal.db.execute("UPDATE commands SET payload=? WHERE command_id=?",
                            (json.dumps(payload), command["command_id"]))
