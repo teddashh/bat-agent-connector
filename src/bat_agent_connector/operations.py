@@ -40,7 +40,16 @@ ALLOWED = {
     "needs_attention": {"running", "cancelled", "failed"},
 }
 UNCERTAIN_RETRY_S = (30.0, 60.0, 120.0, 300.0, 600.0)
-AMBIGUOUS = (InvokeTimeout, ConnectionLost, asyncio.TimeoutError)
+
+
+class AmbiguousOutcome(Exception):
+    """An external call whose effect is unknown (timeout, lost connection, 5xx after sending)."""
+
+
+AMBIGUOUS = (InvokeTimeout, ConnectionLost, asyncio.TimeoutError, AmbiguousOutcome)
+# A reconcile function returns RERUN when it proved the earlier attempt had no effect and the call is safe to
+# make again (for example a merge request deduplicated by the provider). Only use it with such proof.
+RERUN: dict = {"__rerun__": True}
 
 
 class OperationError(Exception):
@@ -171,10 +180,13 @@ class OpContext:
             if recovered is None:
                 self.service._step_status(self.operation_id, name, "uncertain")
                 raise Uncertain(name, f"outcome of step {name!r} is not proven; reading it back again later")
-            self.service._step_done(self.operation_id, name, recovered, reconciled=True)
-            return recovered
-        self.check_cancel()
-        self.service._step_start(self.operation_id, name, request or {})
+            if recovered is not RERUN:
+                self.service._step_done(self.operation_id, name, recovered, reconciled=True)
+                return recovered
+            self.service._step_restart(self.operation_id, name, request or {})
+        else:
+            self.check_cancel()
+            self.service._step_start(self.operation_id, name, request or {})
         try:
             response = await fn()
         except (*AMBIGUOUS, OSError) as exc:  # OSError: local bookkeeping may fail after the external call
@@ -296,6 +308,12 @@ class OperationService:
                                   (operation_id,)).fetchone()[0]
             self.db.execute("""INSERT INTO operation_steps(operation_id,seq,name,status,request,started_at)
                 VALUES(?,?,?,?,?,?)""", (operation_id, seq, name, "started", _canonical(request), time.time()))
+
+    def _step_restart(self, operation_id: str, name: str, request: dict) -> None:
+        with self.journal.tx():
+            self.db.execute("""UPDATE operation_steps SET status='started',request=?,response=NULL,error=NULL,
+                started_at=?,finished_at=NULL WHERE operation_id=? AND name=?""",
+                            (_canonical(request), time.time(), operation_id, name))
 
     def _step_done(self, operation_id: str, name: str, response: dict, *, reconciled: bool = False) -> None:
         with self.journal.tx():

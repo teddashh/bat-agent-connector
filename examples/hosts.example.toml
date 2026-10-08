@@ -47,6 +47,23 @@ stale_after_s = 180                    # rows not observed for this long are mar
 activity_every = 5                     # transcript/archive activity lookups every Nth refresh
 allowed_origins = []                   # extra browser origins (loopback origins are always allowed)
 
+# Optional GitHub delivery (merge PRs and deploy from the Dashboard). See docs/design/delivery.md.
+# [github]
+# token_ref = "env:GITHUB_TOKEN"
+# [[github.repos]]
+# repository = "owner/name"
+# merge_methods = ["squash", "merge"]
+# [[deploy.recipes]]
+# name = "site-production"
+# repository = "owner/name"
+# environment = "production"
+# mode = "workflow_dispatch"           # or "on_merge"
+# workflow = "deploy.yml"
+# ref = "main"
+# deploy_job = "deploy"
+# inputs = { source_sha = "source_sha", operation_id = "operation_id" }
+# run_name_contains = "operation_id"
+
 # Optional judgment layer (TypeSafe Jev). OFF unless an API key is in the environment variable below.
 # It only refines ambiguous session-state classifications and gates cleanup merges; any error or
 # timeout falls back to the deterministic result (for cleanup: escalate instead of merge).

@@ -48,6 +48,7 @@ READ_TOOLS = [
     "events_list",
     "operation_get",
     "operations_list",
+    "github_pr_preview",
 ]
 # Registered unless --read-only: they act as BATC_API_TOKEN's principal, whose scopes decide what is allowed.
 OPERATION_TOOLS = ["operation_submit", "operation_cancel", "operation_resume"]
@@ -320,7 +321,15 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
         """Recent operations, newest first, optionally filtered by status or action."""
         return await daemon("op_list", statuses=statuses, action=action, limit=limit)
 
-    for fn in (capabilities_get, inventory_sessions, inventory_hosts, events_list, operation_get, operations_list):
+    async def github_pr_preview(repository: str, pull_number: int) -> dict[str, Any]:
+        """Read a configured repository's pull request before merging: head and base SHA, mergeable state,
+        check-run counts, allowed merge methods and the deploy recipes for that repository. Pass head_sha as
+        preconditions.expected_head_sha to operation_submit(action="github.pr.merge" or
+        "delivery.merge_and_deploy")."""
+        return await daemon("github_pr_preview", repository=repository, pull_number=pull_number)
+
+    for fn in (capabilities_get, inventory_sessions, inventory_hosts, events_list, operation_get, operations_list,
+               github_pr_preview):
         mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
 
     if fleet.any_orchestrate:
