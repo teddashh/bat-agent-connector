@@ -20,6 +20,7 @@ import time
 
 from . import checkpoints, resource_policy
 from .api_auth import Principal
+from .checkpoints import _read_fleet, start_in_worktree
 from .config import GitHubRepo
 from .delivery import _check_wait, _gh, _has_step, _read, open_operations, pr_preview
 from .errors import ResourceReadOnly
@@ -49,8 +50,9 @@ FILE_CAP = 500
 GIT_MIN = (2, 38)  # merge-tree --write-tree
 PICK_GIT_MIN = (2, 40)  # merge-tree --merge-base
 IDENTITY = ("BAT Connector", "bat-connector@noreply.invalid")  # .invalid can never be a GitHub account
+# user.name/user.email: a resolving agent may set them in its worktree; composition sets its own identity anyway.
 CONFIG_ALLOW = (r"core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks)"
-                r"|batc\.(managed-clone|role|repository|remote-url|host)")
+                r"|batc\.(managed-clone|role|repository|remote-url|host)|user\.(name|email)")
 AUTH_FAILURE = re.compile(r"Permission denied|Authentication failed|could not read Username|Repository not found|"
                           r"\b403\b|denied to|SAML", re.IGNORECASE)
 _area_locks: dict[tuple[str, str], asyncio.Lock] = {}
@@ -552,6 +554,58 @@ if gi merge-base --is-ancestor "$base" "$seen"; then echo contains_base; fi
 """)
 
 
+def _gw(wt: str) -> str:
+    return (f'gw() {{ env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C {_q(wt)} -c core.hooksPath=/dev/null '
+            '-c core.fsmonitor=false -c commit.gpgSign=false "$@"; }\n')
+
+
+def repair_script(area: Area, tag: str, head_ref: str, wt: str, branch: str, prev: str, src: str) -> str:
+    """A worktree of the area at ``prev`` with ``src`` merged in and its conflicts left for a session to resolve.
+    Re-run safe: an existing worktree is reported as it is (the session may already be working in it)."""
+    env = _commit_env(*IDENTITY, "@0 +0000")
+    return (area.prelude("repair", tag, head_ref) + "ident\n" + _gw(wt) +
+            f"wt={_q(wt)}; br={_q(branch)}; prev={_sha(prev)}; src={_sha(src)}\n" +
+            f"""real() {{ [ -d "$1" ] && [ ! -L "$1" ] && [ "$(cd "$1" && pwd -P)" = "$1" ]; }}
+d="$area/wt"
+if [ -e "$d" ] || [ -L "$d" ]; then real "$d" || {{ echo "error DESTINATION_MANUAL wt"; exit 0; }}; else mkdir "$d"; fi
+if ! gi worktree list --porcelain | grep -Fxq "worktree $wt"; then
+  if [ -e "$wt" ] || [ -L "$wt" ]; then rm -rf "$wt"; fi
+  gi worktree prune
+  if gi show-ref --verify -q "refs/heads/$br"; then gi worktree add -q "$wt" "$br"
+  else gi worktree add -q -b "$br" "$wt" "$prev"; fi
+  set +e; (export {env}; gw merge --no-ff --no-commit "$src") >/dev/null 2>&1; set -e
+fi
+echo "head $(gw rev-parse HEAD)"; echo "merge_head $(gw rev-parse -q --verify MERGE_HEAD || echo -)"
+echo "first_parent $(gw rev-parse -q --verify HEAD^1 || echo -)"
+gw diff --name-only --diff-filter=U | sed 's/^/conflict /'
+""")
+
+
+def inspect_script(area: Area, tag: str, head_ref: str, wt: str, prev: str) -> str:
+    """Read-only: what the resolving session left in its worktree."""
+    return (area.prelude("repair-inspect", tag, head_ref) + "ident\n" + _gw(wt) + f"prev={_sha(prev)}\n" +
+            f"""[ -d {_q(wt)} ] || {{ echo missing; exit 0; }}
+echo "head $(gw rev-parse HEAD)"; echo "merge_head $(gw rev-parse -q --verify MERGE_HEAD || echo -)"
+echo "dirty $(gw status --porcelain --untracked-files=no | wc -l)"
+echo "parents $(gw rev-list --parents -n1 HEAD)"
+echo "first_parents $(gw rev-list --count --first-parent "$prev..HEAD")"
+echo "markers $(gw diff --check "$prev" HEAD | grep -c 'leftover conflict marker' || true)"
+""")
+
+
+def resolve_script(area: Area, tag: str, head_ref: str, seq: int, prev: str, src: str, resolution: str) -> str:
+    """Pin a validated resolution as source ``seq``'s result: exactly one merge commit of (prev, src), no markers."""
+    return (area.prelude("resolve", tag, head_ref) + "ident\n" +
+            f'prev={_sha(prev)}; src={_sha(src)}; R={_sha(resolution)}; r="refs/batc/ops/$op/after/{seq}"\n' +
+            """[ "$(gi cat-file -t "$R" 2>/dev/null)" = commit ] || { echo "invalid not a commit"; exit 0; }
+[ "$(gi rev-list --parents -n1 "$R")" = "$R $prev $src" ] || { echo "invalid parents"; exit 0; }
+n=$(gi diff --check "$prev" "$R" | grep -c 'leftover conflict marker' || true)
+[ "$n" = 0 ] || { echo "invalid conflict markers"; exit 0; }
+cas "$r" "$R"
+echo "stat $(gi show --remerge-diff --stat --format= "$R" | tail -n1)"; echo ok
+""")
+
+
 # --------------------------------------------------------------------------- parsing (pure)
 def parse_push(lines: list[str], head: str, head_ref: str, base: str) -> dict:
     """Map `git push --porcelain` output to an outcome. '+' (forced) or '-' (deleted) cannot happen by construction
@@ -998,6 +1052,7 @@ async def _run_apply(ctx: OpContext) -> dict:
             raise OperationError("SOURCE_UNAVAILABLE", f"{x}; nothing ran", 409)
     prev = base
     allowed, ranges, must = [], [], []
+    resolved = False
     for s in sources:
         seq = s["seq"]
         msg = (f"Integrate {s['kind']} {s['id'][:15]} into {head_ref}\n\n"
@@ -1011,13 +1066,14 @@ async def _run_apply(ctx: OpContext) -> dict:
                                                                   "mode": s["mode"]}, reconcile=rerun))["lines"]
         method, after, picked, files = _compose_outcome(out, s, prev)
         if method == "conflict":
-            _receipt_update(ctx, seq, ("pending", "conflict"), "integration.conflict", status="conflict",
-                            base_sha=prev, conflict_files=json.dumps(files))
-            ctx.set_refs(conflict={"seq": seq, "base": prev, "files": files})
-            raise NeedsAttention("INTEGRATION_CONFLICT", f"source {seq} ({s['kind']} {s['id'][:15]}) conflicts in "
-                                 f"{len(files)} file(s): {', '.join(files[:5])}; earlier sources are composed in the "
-                                 "connector's area and nothing was pushed. Cancel and preview again without it, or "
-                                 "resolve it in the source and preview again")
+            after = await _resolution(ctx, area, tag, head_ref, s, prev, files)
+            method = "resolved"
+            resolved = True
+            ranges.append((prev, s["pin"]))
+            must.append((seq, s["pin"]))
+            allowed.append(after)
+            prev = after
+            continue
         if not SHA.fullmatch(after):
             raise StepFailed("GIT_FAILED", f"compose for source {seq} gave no commit")
         _receipt_update(ctx, seq, ("pending",), "integration.composed",
@@ -1049,12 +1105,92 @@ async def _run_apply(ctx: OpContext) -> dict:
         if x.startswith("fail"):
             raise OperationError("GIT_FAILED", f"composition check failed ({x}); nothing was pushed")
     tree = next((x.split(" ", 1)[1] for x in clines if x.startswith("tree ")), None)
-    if pv["predicted_tree"] and tree != pv["predicted_tree"]:
+    if pv["predicted_tree"] and not resolved and tree != pv["predicted_tree"]:
         raise OperationError("TREE_MISMATCH", "the composed files differ from the preview's prediction; nothing was "
                              "pushed. Preview again")
     ctx.set_refs(composed_sha=head, composed_tree=tree)
     await _push(ctx, area, tag, head_ref, base, head, sources)
     return await _confirm_and_finish(ctx, area, tag, pv, sources, base, head, tree)
+
+
+async def _host_read(ctx: OpContext, area: Area, script: str) -> list[str]:
+    """A read that is not a step: an unreachable host waits and retries instead of failing the operation."""
+    try:
+        return await area.run(script)
+    except (AmbiguousOutcome, OSError):
+        _check_wait(ctx, "host_read_wait_started_at")
+        raise Wait("waiting_external", "the host did not answer; retrying", 30) from None
+
+
+async def _resolver_streaming(ops: OperationService, host: str, sid: str | None) -> bool | None:
+    if not sid:
+        return False
+    try:
+        meta = await _read_fleet(ops).client(host).invoke("claude:get-session-meta", {"sessionId": sid},
+                                                          retry_on_disconnect=False)
+    except Exception:  # noqa: BLE001 - unknown: the caller waits rather than reading a half-done worktree
+        return None
+    return bool(isinstance(meta, dict) and (meta.get("isStreaming") or meta.get("streaming")))
+
+
+async def _resolution(ctx: OpContext, area: Area, tag: str, head_ref: str, src: dict, prev: str,
+                      files: list[str]) -> str:
+    """Source ``seq`` conflicts. Use its pinned resolution if one was accepted; otherwise, once a handed-off session
+    is idle, validate what it committed and pin it by SHA (after which the worktree is never read again)."""
+    ops, seq = ctx.service, src["seq"]
+    for r in ops.db.execute("""SELECT response FROM operation_steps WHERE operation_id=? AND name LIKE ?
+        AND status='succeeded'""", (ctx.operation_id, f"resolve.{seq}.%")):
+        return json.loads(r["response"])["resolution"]
+    _receipt_update(ctx, seq, ("pending",), "integration.conflict", status="conflict", base_sha=prev,
+                    conflict_files=json.dumps(files))
+    ctx.set_refs(conflict={"seq": seq, "base": prev, "files": files})
+    rec = ops.db.execute("SELECT * FROM integration_receipts WHERE operation_id=? AND seq=?",
+                         (ctx.operation_id, seq)).fetchone()
+    label = f"source {seq} ({src['kind']} {src['id'][:15]})"
+    if not rec["repair_worktree"]:
+        raise NeedsAttention("INTEGRATION_CONFLICT", f"{label} conflicts in {len(files)} file(s): "
+                             f"{', '.join(files[:5])}; earlier sources are composed in the connector's area and "
+                             "nothing was pushed. Hand it to a managed session (integration.handoff), or cancel and "
+                             "preview again without it")
+    streaming = await _resolver_streaming(ops, area.host, rec["resolver_session_id"])
+    if streaming is not False:
+        _check_wait(ctx, "resolver_wait_started_at")
+        raise Wait("waiting_external", "the session resolving the conflict is still working", 30)
+    facts = dict(x.split(" ", 1) for x in await _host_read(ctx, area, inspect_script(
+        area, tag, head_ref, rec["repair_worktree"], prev)) if " " in x)
+    head = facts.get("head", "")
+    if not SHA.fullmatch(head) or head == prev or facts.get("merge_head", "-") != "-":
+        raise NeedsAttention("RESOLUTION_INCOMPLETE", f"{label}: the conflict is not committed yet in "
+                             f"{rec['repair_branch']}; finish it with `git commit --no-edit`, then Resume")
+    why = []
+    if facts.get("dirty", "0").strip() != "0":
+        why.append(f"{facts['dirty'].strip()} uncommitted change(s)")
+    if facts.get("parents") != f"{head} {prev} {src['pin']}":
+        why.append("the commit is not one merge of the PR side and the source")
+    if facts.get("first_parents", "").strip() != "1":
+        why.append("more than one commit on top of the PR side")
+    if facts.get("markers", "0").strip() != "0":
+        why.append("conflict markers remain")
+    if why:
+        raise NeedsAttention("RESOLUTION_INVALID", f"{label}: {'; '.join(why)}. Fix it in {rec['repair_branch']} "
+                             "(one merge commit), then Resume")
+
+    async def pin() -> dict:
+        lines = await area.run(resolve_script(area, tag, head_ref, seq, prev, src["pin"], head))
+        bad = next((x[8:] for x in lines if x.startswith("invalid ")), None)
+        stat = next((x[5:] for x in lines if x.startswith("stat ")), "")
+        return {"resolution": None if bad else head, "invalid": bad, "stat": stat}
+
+    async def rerun(_request: dict) -> dict:
+        return RERUN  # validation plus compare-and-swap: a re-run gives the same answer
+
+    done = await ctx.step(f"resolve.{seq}.{head[:12]}", pin, request={"prev": prev, "src": src["pin"], "R": head},
+                          reconcile=rerun)
+    if not done.get("resolution"):
+        raise NeedsAttention("RESOLUTION_INVALID", f"{label}: {done.get('invalid')}; fix it, then Resume")
+    _receipt_update(ctx, seq, ("conflict",), "integration.resolved", status="resolved", method="merge",
+                    integrated_sha=head, resolution_sha=head, remerge_stat=done.get("stat"))
+    return head
 
 
 async def _push(ctx: OpContext, area: Area, tag: str, head_ref: str, base: str, head: str, sources: list) -> None:
@@ -1101,7 +1237,7 @@ async def _push(ctx: OpContext, area: Area, tag: str, head_ref: str, base: str, 
     if outcome in {"pushed", "pushed_on_other_base", "pushed_recreated"}:
         with ops.journal.tx():
             cur = ops.db.execute("""UPDATE integration_receipts SET status='delivered', delivered_sha=?, delivered_at=?,
-                updated_at=? WHERE operation_id=? AND status='composed'""",
+                updated_at=? WHERE operation_id=? AND status IN ('composed', 'resolved')""",
                                  (head, time.time(), time.time(), ctx.operation_id))
             if cur.rowcount:
                 refs = ctx.op["external_refs"]
@@ -1202,7 +1338,7 @@ def preview_document(db, preview_id: str) -> dict:
 
 def integration_get(ops: OperationService, operation_id: str) -> dict:
     op = ops.get(operation_id)
-    if op["action"] not in {"integration.apply", "integration.preview"}:
+    if op["action"] not in {"integration.apply", "integration.preview", "integration.handoff"}:
         raise OperationError("NOT_AN_INTEGRATION", f"{operation_id} is {op['action']}", 422)
     pv_id = (op["params"] or {}).get("preview_id") or ("ipv_" + operation_id[3:])
     try:
@@ -1265,6 +1401,133 @@ def pr_integration(ops: OperationService, repository: str, number: int) -> dict:
             "in_progress_operation_id": integration_in_progress(ops, repository, number), "last_delivered": last}
 
 
+# --------------------------------------------------------------------------- handoff
+RESUMABLE_CONFLICTS = {"INTEGRATION_CONFLICT", "RESOLUTION_INCOMPLETE", "RESOLUTION_INVALID"}
+MAX_HANDOFF_INSTRUCTIONS = 4000
+
+
+def _conflict_of(ops: OperationService, apply_id: str) -> tuple[dict, dict, dict, dict]:
+    """(apply operation, preview, conflicting source, its receipt) for an apply stopped at a conflict."""
+    op = ops.get(apply_id, steps=False)
+    if op["action"] != "integration.apply":
+        raise OperationError("NOT_AN_INTEGRATION", f"{apply_id} is {op['action']}", 422)
+    conflict = (op.get("external_refs") or {}).get("conflict")
+    if op["status"] != "needs_attention" or op["error_code"] not in RESUMABLE_CONFLICTS or not conflict:
+        raise OperationError("NOT_IN_CONFLICT", f"{apply_id} is {op['status']} ({op['error_code']}), not stopped at "
+                             "a conflict", 409)
+    pv = get_preview(ops.db, op["params"]["preview_id"])
+    src = next(s for s in json.loads(pv["sources"]) if s["seq"] == conflict["seq"])
+    rec = ops.db.execute("SELECT * FROM integration_receipts WHERE operation_id=? AND seq=?",
+                         (apply_id, conflict["seq"])).fetchone()
+    return op, pv, src, dict(rec)
+
+
+def _handoff_workspace(ops: OperationService, repo: GitHubRepo, src: dict) -> str | None:
+    """The BAT workspace for the resolving session: the conflicting source's own, else integrate.workspace."""
+    row = None
+    if src["kind"] == "checkpoint":
+        row = ops.db.execute("SELECT workspace_id, workspace_name FROM checkpoints WHERE checkpoint_id=?",
+                             (src["id"],)).fetchone()
+    elif src["kind"] == "checkpoint_run":
+        row = ops.db.execute("""SELECT c.workspace_id, c.workspace_name FROM checkpoint_runs r JOIN checkpoints c
+            USING(checkpoint_id) WHERE r.operation_id=?""", (src["id"],)).fetchone()
+    return (row and (row["workspace_id"] or row["workspace_name"])) or repo.integrate.workspace
+
+
+def _admit_handoff(ops: OperationService, principal: Principal, target: dict, params: dict, pre: dict) -> None:
+    if not principal.allows("start"):
+        raise OperationError("FORBIDDEN", "integration.handoff starts an agent session and also needs the 'start' "
+                             "scope", 403)
+    if not OP_ID.fullmatch(target["operation_id"]):
+        raise OperationError("INVALID_TARGET", "operation_id is malformed", 422)
+    op, pv, src, rec = _conflict_of(ops, target["operation_id"])
+    repo, _, _ = _admit_target(ops, op["target"])
+    if params.get("agent", "claude") not in {"claude", "codex"}:
+        raise OperationError("INVALID_PARAMS", "agent must be claude or codex", 422)
+    text = params.get("instructions", "")
+    if not isinstance(text, str) or len(text) > MAX_HANDOFF_INSTRUCTIONS:
+        raise OperationError("INVALID_PARAMS", f"instructions must be at most {MAX_HANDOFF_INSTRUCTIONS} characters",
+                             422)
+    if rec.get("resolver_operation_id"):
+        other = ops.get(rec["resolver_operation_id"], steps=False)
+        if other["status"] not in {"failed", "cancelled"}:
+            raise OperationError("HANDOFF_EXISTS", f"{other['operation_id']} already hands this conflict to a "
+                                 "session", 409)
+    running = [r["operation_id"] for r in ops.db.execute(
+        "SELECT operation_id, target, status FROM operations WHERE action='integration.handoff'")
+        if json.loads(r["target"]).get("operation_id") == op["operation_id"]
+        and r["status"] not in {"succeeded", "failed", "cancelled"}]
+    if running:
+        raise OperationError("HANDOFF_EXISTS", f"{running[0]} is already handing this conflict to a session", 409)
+    if not _handoff_workspace(ops, repo, src):
+        raise OperationError("RESOLVE_UNAVAILABLE", "no BAT workspace to start the session in; set "
+                             "integrate.workspace", 409)
+
+
+def repair_prompt(*, marker: str, worktree: str, branch: str, head_ref: str, prev: str, src: dict,
+                  files: list[str], instructions: str) -> str:
+    lines = [marker,
+             "You are resolving a merge conflict for a pull request. Work only in this folder and on this branch.",
+             "", f"Folder: {worktree}", f"Branch: {branch} (the PR's head branch is {head_ref})",
+             f"Merging {src['kind']} {src['id']} at {src['pin']} onto {prev}.",
+             f"Conflicted files: {', '.join(files) or '(see git status)'}", "",
+             "Resolve the conflicts so both sides' intent is kept, run the project's tests if there are any, then "
+             "finish the merge with `git commit --no-edit`. Make exactly one commit. Do not push, rebase, reset, "
+             "amend, change git config, or touch other branches or folders."]
+    if instructions.strip():
+        lines += ["", "From the person:", instructions.strip()]
+    return "\n".join(lines)
+
+
+async def _run_handoff(ctx: OpContext) -> dict:
+    ops = ctx.service
+    op, pv, src, rec = _conflict_of(ops, ctx.target["operation_id"])
+    repo, host, _ = _admit_target(ops, op["target"])
+    conflict = op["external_refs"]["conflict"]
+    prev, seq = conflict["base"], conflict["seq"]
+    area = Area(ops, repo, host)
+    r12 = ctx.operation_id[3:15]
+    wt = f"{area.path}/wt/batc-fix-{r12}"
+    branch = f"batc/fix-{r12}"
+    resource_policy.check_repair_worktree(area.hc, area.path, wt, branch)  # before any host write
+    ctx.set_refs(apply_operation_id=op["operation_id"], seq=seq, worktree_path=wt, branch=branch)
+
+    async def prepare() -> dict:
+        return {"lines": await area.run(repair_script(area, r12, pv["head_ref"], wt, branch, prev, src["pin"]))}
+
+    async def rerun(_request: dict) -> dict:
+        return RERUN  # finds the worktree it made and reports it
+
+    lines = (await ctx.step("repair.prepare", prepare, request={"worktree": wt, "branch": branch, "prev": prev,
+                                                                "src": src["pin"]}, reconcile=rerun))["lines"]
+    facts = dict(x.split(" ", 1) for x in lines if x.split(" ", 1)[0] in {"head", "merge_head", "first_parent"})
+    files = [x[9:] for x in lines if x.startswith("conflict ")] or conflict["files"]
+    fresh = facts.get("head") == prev and facts.get("merge_head") == src["pin"]
+    if not (fresh or facts.get("first_parent") == prev):
+        raise OperationError("REPAIR_STATE_MISMATCH", f"{wt} is not at the conflict being resolved; nothing was "
+                             "started")
+    marker = f"[batc integration {op['operation_id']} · source {seq} · {ctx.operation_id}]"
+    text = repair_prompt(marker=marker, worktree=wt, branch=branch, head_ref=pv["head_ref"], prev=prev, src=src,
+                         files=files, instructions=ctx.params.get("instructions", ""))
+    started = await start_in_worktree(
+        ctx, host=host, workspace=_handoff_workspace(ops, repo, src), agent=ctx.params.get("agent", "claude"),
+        worktree=wt, branch=branch, head=prev, title=f"resolve {op['operation_id'][3:11]}", text=text, marker=marker,
+        registry_fields={"integration_operation_id": op["operation_id"], "integration_seq": seq})
+    with ops.journal.tx():
+        cur = ops.db.execute("""UPDATE integration_receipts SET resolver_operation_id=?, resolver_session_id=?,
+            repair_worktree=?, repair_branch=?, updated_at=? WHERE operation_id=? AND seq=? AND status='conflict'""",
+                             (ctx.operation_id, started["session_id"], wt, branch, time.time(), op["operation_id"],
+                              seq))
+        if cur.rowcount:
+            ops.journal.api_event("integration", op["operation_id"], "integration.handoff_started",
+                                  {"repository": pv["repository"], "pull_number": pv["pull_number"], "seq": seq,
+                                   "operation_id": ctx.operation_id, "session_id": started["session_id"]},
+                                  actor=ctx.actor)
+    return {"apply_operation_id": op["operation_id"], "seq": seq, "host": host, "session_id": started["session_id"],
+            "worktree_path": wt, "branch": branch, "base_sha": prev, "source_sha": src["pin"],
+            "conflict_files": files, "message_id": started["message_id"], "write_scope": "confined"}
+
+
 def apply_request(doc: dict) -> dict:
     """The one integration.apply request for a preview document (CLI and MCP docs; the Dashboard sends the same):
     sources come only from the preview, bound by its head and digest, and the key makes a double click one push."""
@@ -1280,4 +1543,6 @@ ACTIONS = [
               _run_preview, _admit_preview, ("host", "repository")),
     ActionDef("integration.apply", "integrate", "Compose a reviewed preview into the PR head with one normal push",
               _run_apply, _admit_apply, ("host", "repository")),
+    ActionDef("integration.handoff", "integrate", "Start a managed session that resolves an integration conflict",
+              _run_handoff, _admit_handoff, ("operation_id",)),
 ]

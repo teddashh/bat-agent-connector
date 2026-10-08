@@ -2,12 +2,13 @@
 
 日期：2026-10-08。對應《Better Agent Dashboard／Connector 計畫》v1.0 的 §14（Git 成果整合）、驗收 C01–C03 與工作包 W06。程式在 `integration.py`，經 [OperationService](api-v1.md) 執行；資源規則見 [resource-policy.md](resource-policy.md)；成果來源見 [checkpoints.md](checkpoints.md)。
 
-## 兩個 action
+## 三個 action
 
 | Action | Scope | 做什麼 | 寫入 |
 |---|---|---|---|
 | `integration.preview` | integrate | 釘住 PR head 與每個來源的 SHA，列出會進 PR 的每個 commit 與檔案、重疊、依賴，預測結果與衝突，並以 `push --dry-run` 確認主機能推送 | 只寫整合區（物件與 `refs/batc/pv/…`） |
 | `integration.apply`（更新 PR 成果） | integrate | 依預覽的來源與順序組合，檢查只多了預覽列出的 commit，一般 push 一個確切 SHA 到 PR 的 head 分支，再讀遠端確認 | 整合區，加上遠端的一個分支 |
+| `integration.handoff`（交給 agent 解衝突） | integrate，另需 start | 在整合區為停在衝突的 apply 建一個 repair worktree，開一個受限的 managed session 解衝突 | 整合區的 `wt/batc-fix-<12 hex>` 與分支 `batc/fix-<12 hex>`，加上一個新 session |
 
 `integrate` 是獨立的 scope：`merge` token 不能推送，`integrate` token 不能合併（計畫 §15、C07）。Agent 的 token 只有刻意發行時才有它。
 
@@ -56,7 +57,15 @@ Apply 只接受 `params.preview_id`，並要求 `preconditions.expected_head_sha
 | `push.<12 hex>#<n>` | 推送前一刻 `ls-remote` 必須仍是 base，然後 `git push --porcelain --no-verify <url> <sha>:refs/heads/<ref>` | 回覆遺失時先讀遠端，見下 |
 | 確認 | GitHub 顯示新 head；落後時等，遠端被改寫時 `needs_attention` | — |
 
-衝突：第 k 項衝突時，receipt 記 `conflict` 與檔案，前面的項目已在整合區完成，什麼都沒推送，operation 停在 `needs_attention`（`INTEGRATION_CONFLICT`）。Resume 會重播同一個衝突。第一版的出路是取消、不含它重新預覽，或先在來源解決；交給 managed session 解衝突是下一版（`integration.handoff`）。
+衝突：第 k 項衝突時，receipt 記 `conflict` 與檔案，前面的項目已在整合區完成，什麼都沒推送，operation 停在 `needs_attention`（`INTEGRATION_CONFLICT`）。出路是交給 agent 解（見下），或取消、不含它重新預覽。
+
+## 交給 agent 解衝突（integration.handoff）
+
+1. `repair.prepare`：在整合區加 worktree `wt/batc-fix-<12 hex>`（分支 `batc/fix-<12 hex>`），停在第 k-1 項之後的結果，`merge --no-ff --no-commit` 第 k 項，留下衝突。已存在的 worktree 必須仍是這個衝突（或已 commit 在它上面），否則 `REPAIR_STATE_MISMATCH`。
+2. 和 checkpoint 接續同一套步驟（`checkpoints.start_in_worktree`）：BAT 看到 worktree 在預期的 commit、啟動 session（`write_scope: "confined"`）、送出第一個指令。指令列出衝突檔案，要求保留兩邊的意圖、跑測試、以 `git commit --no-edit` 完成**一個** merge commit，不 push、不 rebase、不改 git 設定。
+3. 人（或 Hermes）在 session commit 後對 apply 按 Resume。Apply 在 session 還在工作時等待（`waiting_external`，有上限），之後讀 worktree：沒 commit 是 `RESOLUTION_INCOMPLETE`；有未提交修改、不只一個 commit、parents 不是（前一項的結果、第 k 項）或留有衝突標記是 `RESOLUTION_INVALID`；都符合就在 `resolve.<k>.<12 hex>` 步驟裡再驗一次並以 SHA 釘住，receipt 記 `resolved`、`resolution_sha` 與 remerge-diff 統計（agent 在解衝突之外多改了什麼）。之後 worktree 不再被讀，第 k+1 項以後接著組合，前面的項目不重新組合。
+
+Agent 可能在 worktree 設 `user.name`／`user.email`，所以整合區的設定白名單包含這兩個；組合時 connector 一律用自己的身分。Codex 的 sandbox 只允許寫 worktree，commit 寫入整合區的物件時會請求核准，由人回答。
 
 推送回覆遺失（timeout、SSH 中斷、讀不懂的輸出）時，**不重推**，先讀遠端：
 
@@ -99,18 +108,19 @@ integrate = { hosts = ["workstation"], remote_url = "git@github.com:owner/name.g
 - `remote_url` 必須是這個 repository 在這個 GitHub 上的 `git@`、`ssh://git@` 或 `https://` URL，不能帶帳密、query 或其他使用者；本機路徑只在 `[github] api_url` 是 loopback（測試）時允許。
 - `protected_refs` 預設 `main`、`master`、`release/*`、`releases/*`、`production`、`staging`；PR 的 base 與預設分支一律拒絕。
 - `fetch_timeout_s`（60–7200，預設 1800）：第一次預覽會 fetch 整個 repository。
+- `workspace`：解衝突的 session 要開在哪個 BAT workspace；衝突來源是 checkpoint 或 checkpoint run 時用它自己的 workspace，GitHub 分支才需要這個設定（沒有時 `RESOLVE_UNAVAILABLE`）。
 - 主機需要 `[verification] ssh_hosts` alias、managed root 與 write、orchestrate tier；git 2.38 以上（pick 需要 2.40）。
 
 ## 讀取與入口
 
 - HTTP：`GET /api/v1/integrations/candidates?host=`（可放進 PR 的 agent 成果與 checkpoint，以及送過的 PR）、`/integrations/previews/{ipv_…}`、`/integrations?repository=&pull_number=`、`/integrations/{op_…}`（含 receipts）；PR 卡片（`/repositories/{o}/{r}/pulls/{n}`）多了 `integration`。`capabilities.features.integration` 列出能整合的 repository 與主機。
 - MCP：`integration_candidates`、`integration_get`、`integrations_list`；寫入用 `operation_submit`（docstring 有完整流程）。
-- CLI：`batc integrate candidates|preview|apply|show`；apply 只需要 `ipv_…`，其餘從預覽讀出。
+- CLI：`batc integrate candidates|preview|apply|handoff|show`；apply 只需要 `ipv_…`，其餘從預覽讀出；Resume 用 `batc op <op_id> --resume`。
 - Dashboard：成果與 GitHub 頁的 PR 卡片有「更新 PR 成果」區塊，和「合併 PR」分開。選來源、排順序後自動預覽；預覽過期或 PR head 變了按鈕就停用。完成後顯示新 head 並提醒本機資料夾不會自動更新。Operation 頁有各來源紀錄。
 
 ## 尚未涵蓋
 
-- 衝突交給 managed session 解決後 Resume（`integration.handoff`）、整合後在 managed worktree 跑測試（`integrate.verify`）、Task Service 的執行結果作為來源。
+- 整合後在 managed worktree 跑測試（`integrate.verify`）、Task Service 的執行結果作為來源、pick 模式的衝突交給 agent。
 - 遠端前進時自動重新整合；第一版一律停在 `REMOTE_MOVED`，請重新預覽。
 - 衝突時只推送前面完成的部分、建立新 PR、fork PR、stacked PR、Git LFS、跨主機來源、未提交內容。
 - 整理整合區（§23）。

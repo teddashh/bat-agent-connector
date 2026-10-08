@@ -458,8 +458,11 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             params={sources: [{kind: checkpoint|checkpoint_run|branch, id, mode?: merge|pick, commits?}]}, a new
             key per refresh; read every commit it lists. 2) action="integration.apply", same target,
             params={preview_id}, preconditions={expected_head_sha: preview.target.head_sha, preview_digest:
-            preview.digest}, idempotency_key="integrate.<preview_id>". On REMOTE_MOVED, TARGET_HEAD_CHANGED or
-            SOURCE_CHANGED preview again; never add sources to an apply. Acts as BATC_API_TOKEN's principal;
+            preview.digest}, idempotency_key="integrate.<preview_id>". On INTEGRATION_CONFLICT,
+            action="integration.handoff", target={operation_id} starts a confined session that resolves it in the
+            connector's area (needs the start scope too); operation_resume once it has committed. On REMOTE_MOVED,
+            TARGET_HEAD_CHANGED or SOURCE_CHANGED preview again; never add sources to an apply. Acts as
+            BATC_API_TOKEN's principal;
             requires confirm=true."""
             return await principal_daemon("op_submit", confirm, action=action, idempotency_key=idempotency_key,
                                           target=target, params=params, preconditions=preconditions, wait_s=wait_s)

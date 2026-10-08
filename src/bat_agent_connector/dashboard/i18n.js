@@ -60,7 +60,11 @@ const STRINGS = {
     agent_results: "agent 成果", your_checkpoints: "你的 checkpoint", still_working: "執行中", done: "已完成",
     none: "沒有", selected_in_order: "已選（依序整合）",
     integration_done: "PR 已更新：{old} → {new}，加入 {n} 個 commit。你本機的資料夾不會自動更新；要同步請在 BAT 裡 pull。",
-    integration_INTEGRATION_CONFLICT: "有一項衝突。前面的項目已在 Connector 的整合區完成，尚未推送。取消後不含它重新預覽，或先在來源解決。",
+    integration_INTEGRATION_CONFLICT: "有一項衝突。前面的項目已在 Connector 的整合區完成，尚未推送。可以交給 agent 在整合區解衝突，或取消後不含它重新預覽。",
+    integration_RESOLUTION_INCOMPLETE: "衝突還沒解完（還沒 commit）。等 agent 完成 `git commit --no-edit` 後按「重新執行」。",
+    integration_RESOLUTION_INVALID: "解衝突的結果不符合要求（要剛好一個 merge commit、沒有未提交修改或衝突標記）；修好後按「重新執行」。",
+    integration_waiting_resolver: "等 agent 解完衝突（它還在工作）", hand_to_agent: "交給 agent 解衝突",
+    handoff_started: "已開始解衝突的 session；它 commit 之後按「重新執行」。",
     integration_REMOTE_MOVED: "PR 在整合時有新的推送，沒有覆蓋它，也沒有推送。請取消並以最新版本重新預覽。",
     integration_PUSH_REJECTED: "GitHub 拒絕這次推送（保護規則或簽章要求）。",
     integration_PUSH_AUTH_FAILED: "這台主機的 git 憑證無法推送；修好後按「重新執行」。",
@@ -150,7 +154,13 @@ const STRINGS = {
     integration_done: "PR updated: {old} → {new}, {n} commit(s) added. Your local folders are not updated; pull in " +
       "BAT to sync.",
     integration_INTEGRATION_CONFLICT: "One item conflicts. The items before it are composed in the connector's " +
-      "area and nothing was pushed. Cancel and preview again without it, or resolve it in its source first.",
+      "area and nothing was pushed. Hand it to an agent to resolve there, or cancel and preview again without it.",
+    integration_RESOLUTION_INCOMPLETE: "The conflict is not resolved yet (nothing committed). Resume after the agent " +
+      "runs `git commit --no-edit`.",
+    integration_RESOLUTION_INVALID: "The resolution does not qualify (exactly one merge commit, no uncommitted " +
+      "changes or conflict markers); fix it, then Resume.",
+    integration_waiting_resolver: "Waiting for the agent to finish resolving (it is still working)",
+    hand_to_agent: "Ask an agent to resolve", handoff_started: "A session is resolving it; Resume after it commits.",
     integration_REMOTE_MOVED: "Someone pushed to the PR meanwhile; nothing was overwritten or pushed. Cancel and " +
       "preview again at the new head.",
     integration_PUSH_REJECTED: "GitHub refused the push (branch protection or signature rules).",

@@ -179,7 +179,9 @@ class World:
             sha = commit(wt, path, text, f"agent: {path}")
         return op["operation_id"], sha, wt
 
-    async def preview(self, sources, key=None, expected=None) -> dict:
+    async def preview(self, sources, key=None, expected=None, sync=True) -> dict:
+        if sync:  # GitHub moves refs/pull/<n>/head after every push to the PR branch
+            self.sync_pull()
         op = await self.run("integration.preview", {"host": "h1", "repository": "o/r", "pull_number": 1},
                             {"sources": sources}, {"expected_head_sha": expected} if expected else None, key=key)
         assert op["status"] == "succeeded", (op["error_code"], op["status_reason"],
@@ -831,7 +833,7 @@ async def test_remote_identity_mismatch_blocks_the_preview(world):
     w = world
     cp = await w.checkpoint()
     git(w.remote, "update-ref", "refs/pull/1/head", w.main)  # the host's remote disagrees with GitHub
-    doc = await w.preview([{"kind": "checkpoint", "id": cp["checkpoint_id"]}])
+    doc = await w.preview([{"kind": "checkpoint", "id": cp["checkpoint_id"]}], sync=False)
     assert [b["code"] for b in doc["blocking"]] == ["REMOTE_IDENTITY_MISMATCH"]
 
 
@@ -887,3 +889,163 @@ async def test_a_managed_root_that_links_elsewhere_is_refused_before_any_write(w
                      {"sources": [{"kind": "checkpoint", "id": cp["checkpoint_id"]}]})
     assert op["status"] == "failed" and op["error_code"] == "DESTINATION_MANUAL", op
     assert list(outside.iterdir()) == []
+
+
+# --------------------------------------------------------------------------- C03: handoff
+async def conflicted(w) -> tuple[dict, dict, str, str]:
+    """Two agent results that change the same line: apply stops at source 2."""
+    cp = await w.checkpoint()
+    r1, a1, _ = await w.agent_result(cp, files=(("a.txt", "one\ntwo\nmine\n"),))
+    r2, a2, _ = await w.agent_result(cp, files=(("a.txt", "one\ntwo\nyours\n"),))
+    doc = await w.preview([{"kind": "checkpoint_run", "id": r1}, {"kind": "checkpoint_run", "id": r2}])
+    op = await w.apply(doc)
+    assert op["status"] == "needs_attention" and op["error_code"] == "INTEGRATION_CONFLICT", op
+    return doc, op, a1, a2
+
+
+def resolve_in(wt: str, text: str = "one\ntwo\nmine\nyours\n", *, commit_it: bool = True) -> str | None:
+    Path(wt, "a.txt").write_text(text)
+    git(wt, "add", "a.txt")
+    if commit_it:
+        git(wt, "commit", "-q", "--no-edit")
+        return git(wt, "rev-parse", "HEAD")
+    return None
+
+
+async def test_c03_handoff_resolution_resumes_without_recomposing_or_receiving_twice(world):
+    w = world
+    doc, op, a1, a2 = await conflicted(w)
+    w.mock.invokes.clear()
+    h = await w.run("integration.handoff", {"operation_id": op["operation_id"]},
+                    {"agent": "claude", "instructions": "Keep both lines"})
+    assert h["status"] == "succeeded", h
+    r = h["result"]
+    starts = [i for i in w.mock.invokes if i["channel"] == "claude:start-session"]
+    assert len(starts) == 1 and starts[0]["params"]["options"]["cwd"] == r["worktree_path"]
+    assert re.search(r"/\.batc-integration/[^/]+/wt/batc-fix-[0-9a-f]{12}$", r["worktree_path"])
+    assert starts[0]["params"]["options"]["permissionMode"] == "acceptEdits"  # confined like checkpoint work
+    prompt = next(i for i in w.mock.invokes if i["channel"] == "claude:send-message")["params"]["prompt"]
+    assert "a.txt" in prompt and "Do not push" in prompt and "Keep both lines" in prompt
+    hc = w.d.fleet.config.host("h1")
+    entries = resource_policy._entries("h1")
+    assert resource_policy.classify_row_for_read(hc, r["session_id"], has_tab=False,
+                                                 entries=entries)["api_access"] == "managed"
+    assert git(r["worktree_path"], "rev-parse", "HEAD") == a1  # the PR side, with the source merged in
+    resolution = resolve_in(r["worktree_path"])
+    w.d.ops.resume(TED, op["operation_id"])
+    done = await w.settle(op["operation_id"])
+    assert done["status"] == "succeeded", done
+    assert w.runner.ran["compose"] == 2 and w.runner.ran["push"] == 1  # nothing composed again
+    assert [s["name"] for s in done["steps"] if s["name"].startswith("resolve.")] == [f"resolve.2.{resolution[:12]}"]
+    rec = w.receipts(op["operation_id"])
+    assert [(x["status"], x["method"]) for x in rec] == [("delivered", "fast_forward"), ("delivered", "merge")]
+    assert rec[1]["resolution_sha"] == resolution and rec[1]["resolver_session_id"] == r["session_id"]
+    assert w.remote_head() == resolution
+    reflog = w.reflog()
+    again = await w.preview([{"kind": "checkpoint_run", "id": doc["sources"][0]["id"]},
+                             {"kind": "checkpoint_run", "id": doc["sources"][1]["id"]}], key="after")
+    assert [s["predicted"] for s in again["sources"]] == ["already_included", "already_included"]
+    assert [b["code"] for b in again["blocking"]] == ["NOTHING_TO_INTEGRATE"] and w.reflog() == reflog
+    kinds = [e["kind"] for e in w.d.journal.api_events(0, 500, resource_type="integration")["events"]]
+    assert kinds.count("integration.conflict") == 1 and kinds.count("integration.resolved") == 1
+
+
+async def test_c03_resume_waits_while_the_resolver_streams(world):
+    w = world
+    _, op, _, _ = await conflicted(w)
+    h = await w.run("integration.handoff", {"operation_id": op["operation_id"]})
+    sid, wt = h["result"]["session_id"], h["result"]["worktree_path"]
+    w.mock.metas[sid]["isStreaming"] = True
+    w.d.ops.resume(TED, op["operation_id"])
+    waiting = await w.settle(op["operation_id"], rounds=2)
+    assert waiting["status"] == "waiting_external", waiting
+    assert not [s for s in waiting["steps"] if s["name"].startswith("resolve.")]
+    resolve_in(wt)
+    w.mock.metas[sid]["isStreaming"] = False
+    done = await w.settle(op["operation_id"])
+    assert done["status"] == "succeeded", done
+
+
+async def test_c03_invalid_or_missing_resolution_is_refused(world):
+    w = world
+    _, op, a1, _ = await conflicted(w)
+    h = await w.run("integration.handoff", {"operation_id": op["operation_id"]})
+    wt = h["result"]["worktree_path"]
+
+    async def resume() -> dict:
+        w.d.ops.resume(TED, op["operation_id"])
+        return await w.settle(op["operation_id"])
+
+    assert (await resume())["error_code"] == "RESOLUTION_INCOMPLETE"  # nothing committed yet
+    marked = "one\ntwo\n<<<<<<< HEAD\nmine\n=======\nyours\n>>>>>>> theirs\n"
+    resolve_in(wt, marked)
+    assert (await resume())["error_code"] == "RESOLUTION_INVALID"  # conflict markers left in
+    git(wt, "reset", "-q", "--hard", a1)
+    subprocess.run(["git", "-C", wt, "merge", "-q", "--no-ff", "--no-commit", h["result"]["source_sha"]],
+                   capture_output=True)
+    resolve_in(wt)
+    commit(wt, "extra.txt", "x\n", "a second commit")
+    out = await resume()
+    assert out["error_code"] == "RESOLUTION_INVALID" and "more than one commit" in out["status_reason"]
+    git(wt, "reset", "-q", "--hard", "HEAD~1")
+    Path(wt, "c.txt").write_text("dirty\n")
+    out = await resume()
+    assert out["error_code"] == "RESOLUTION_INVALID" and "uncommitted" in out["status_reason"]
+    assert w.remote_head() == w.f1 and w.runner.ran["push"] == 0
+    git(wt, "checkout", "--", "c.txt")
+    assert (await resume())["status"] == "succeeded"
+
+
+async def test_handoff_admission(world):
+    w = world
+    _, op, _, _ = await conflicted(w)
+    no_start = api_auth.Principal("bot", frozenset({"observe", "integrate", "operate"}))
+    with pytest.raises(OperationError) as e:
+        w.d.ops.create(no_start, action="integration.handoff", target={"operation_id": op["operation_id"]},
+                       idempotency_key="h0")
+    assert e.value.code == "FORBIDDEN"
+    cp_op = w.d.ops.list(action="checkpoint.create")["operations"][0]["operation_id"]
+    with pytest.raises(OperationError) as e:
+        w.d.ops.create(TED, action="integration.handoff", target={"operation_id": cp_op}, idempotency_key="h1")
+    assert e.value.code == "NOT_AN_INTEGRATION"
+    first = await w.run("integration.handoff", {"operation_id": op["operation_id"]}, key="h2")
+    assert first["status"] == "succeeded"
+    with pytest.raises(OperationError) as e:
+        w.d.ops.create(TED, action="integration.handoff", target={"operation_id": op["operation_id"]},
+                       idempotency_key="h3")
+    assert e.value.code == "HANDOFF_EXISTS"
+    resolve_in(first["result"]["worktree_path"])
+    w.d.ops.resume(TED, op["operation_id"])
+    assert (await w.settle(op["operation_id"]))["status"] == "succeeded"
+    with pytest.raises(OperationError) as e:
+        w.d.ops.create(TED, action="integration.handoff", target={"operation_id": op["operation_id"]},
+                       idempotency_key="h4")
+    assert e.value.code == "NOT_IN_CONFLICT"
+
+
+async def test_c03_a_pinned_resolution_is_never_read_again(world):
+    w = world
+    _, op, _, _ = await conflicted(w)
+    h = await w.run("integration.handoff", {"operation_id": op["operation_id"]})
+    wt = h["result"]["worktree_path"]
+    resolution = resolve_in(wt)
+    w.runner.lose_before.add("push")  # stops right after the resolution was pinned
+    w.d.ops.resume(TED, op["operation_id"])
+    await w.d.ops.drain(timeout=60)
+    assert w.d.ops.get(op["operation_id"])["status"] == "uncertain"
+    commit(wt, "late.txt", "the agent kept going\n", "after the pin")  # never picked up
+    done = await w.settle(op["operation_id"])
+    assert done["status"] == "succeeded", done
+    assert w.remote_head() == resolution
+
+
+async def test_c03_a_resolution_that_is_not_a_merge_of_both_sides_is_refused(world):
+    w = world
+    _, op, a1, _ = await conflicted(w)
+    h = await w.run("integration.handoff", {"operation_id": op["operation_id"]})
+    wt = h["result"]["worktree_path"]
+    git(wt, "merge", "--abort")
+    commit(wt, "a.txt", "one\ntwo\nmine\nyours\n", "just my side, rewritten")  # parents: (a1) only
+    w.d.ops.resume(TED, op["operation_id"])
+    out = await w.settle(op["operation_id"])
+    assert out["error_code"] == "RESOLUTION_INVALID" and w.remote_head() == w.f1

@@ -138,8 +138,11 @@ nothing is ever forced, and the person's folders are never changed.
    preview.target.head_sha, preview_digest: preview.digest}, idempotency_key="integrate.<preview_id>")`. Never add or
    reorder sources here; preview again instead.
 4. `REMOTE_MOVED`, `TARGET_HEAD_CHANGED`, `SOURCE_CHANGED`: someone moved the PR or a source; preview again.
-   `INTEGRATION_CONFLICT`: nothing was pushed; cancel and preview without that source, or have it resolved in its
-   source first. `uncertain`: the daemon reads the remote back; never push or resubmit yourself.
+   `INTEGRATION_CONFLICT`: nothing was pushed. With the person's go-ahead, `operation_submit(action=
+   "integration.handoff", target={operation_id})` starts a confined session that resolves it in the connector's
+   area; once it has committed (`git commit --no-edit`, one merge commit), `operation_resume(operation_id)`.
+   `RESOLUTION_INCOMPLETE`/`RESOLUTION_INVALID` say what is missing. Or cancel and preview without that source.
+   `uncertain`: the daemon reads the remote back; never push or resubmit yourself.
 5. Never `git push` from a session prompt to do this, and never merge as part of it: merging is `github.pr.merge`, a
    separate action on the new head.
 
