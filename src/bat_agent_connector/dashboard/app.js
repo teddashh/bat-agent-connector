@@ -937,7 +937,6 @@ async function streamEvents() {
 			if (epoch !== state.epoch || view !== generation || !state.viewReady) continue;
 			cycle = { error: null };
 			state.refreshCycle = cycle;
-			state.online = false;
 			live.className = "live down";
 			live.textContent = t("sync_waiting");
 			const cursor = await consumePageAsync(page, before, (ev) => {

@@ -3,7 +3,8 @@
 ## Next release (unreleased)
 
 - Wait for asynchronous Dashboard view refreshes before persisting event checkpoints. Failed or deferred
-  refreshes retain the original cursor and drafts and pause mutations; delayed work cannot cross accounts or
+  refreshes retain the original cursor and drafts. Failed reads pause mutations; deferred renders keep
+  version-checked form saves available. Delayed work cannot cross accounts or
   mounted views. Existing pending-control and linked-history presentation gaps remain tracked under R04.
 
 - Add the shared Vite/TypeScript Dashboard source and initial packaged Tauri 2 shell with restricted native
