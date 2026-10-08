@@ -691,6 +691,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--state", choices=["todo", "doing", "waiting", "awaiting_approval", "done"])
     c.add_argument("--pending", action="store_true", help="only items waiting for a person's decision")
     c.add_argument("--limit", type=int, default=50)
+    c.add_argument("--cursor", help="next_cursor from the previous page")
     c = wsp.add_parser("show", help="one work item with its links and history")
     c.add_argument("work_item_id")
     for name in ("create", "update"):
@@ -718,6 +719,9 @@ def build_parser() -> argparse.ArgumentParser:
         c = wsp.add_parser(name, help=text)
         c.add_argument("work_item_id")
         c.add_argument("--note")
+        # Approving accepts the content you read: pass completion.fingerprint from `batc item show`.
+        c.add_argument("--fingerprint", required=name == "approve",
+                       help="completion.fingerprint from `batc item show` (the content you read)")
     c = wsp.add_parser("link", help="link it to a session (host/id), checkpoint, operation, task or PR (o/r#n)")
     c.add_argument("work_item_id")
     c.add_argument("kind", choices=["session", "checkpoint", "operation", "task", "pull_request"])
@@ -837,6 +841,8 @@ def cmd_project(args) -> int:
         else:
             current = request("project_get", project_id=args.project_id, entry="cli")["project"]
             if args.archive or args.restore:
+                if params or args.name is not None:
+                    raise ValueError("--archive and --restore cannot be combined with other changes")
                 params = {"archived": bool(args.archive)}
             elif args.name is not None:
                 params["name"] = args.name
@@ -852,7 +858,7 @@ def cmd_item(args) -> int:
     cmd = args.item_cmd
     if cmd == "list":
         out = request("work_items_list", project_id=args.project, state=args.state,
-                      pending=True if args.pending else None, limit=args.limit, entry="cli")
+                      pending=True if args.pending else None, limit=args.limit, cursor=args.cursor, entry="cli")
     elif cmd == "show":
         out = request("work_item_get", work_item_id=args.work_item_id, entry="cli")
     elif cmd in {"create", "update"}:
@@ -867,6 +873,8 @@ def cmd_item(args) -> int:
         else:
             item = request("work_item_get", work_item_id=args.work_item_id, entry="cli")["work_item"]
             if args.archive or args.restore:
+                if params or args.title is not None or args.state is not None or args.check or args.uncheck:
+                    raise ValueError("--archive and --restore cannot be combined with other changes")
                 params = {"archived": bool(args.archive)}
             else:
                 if args.title is not None:
@@ -884,10 +892,12 @@ def cmd_item(args) -> int:
             out = _manage("work_item.update", {"work_item_id": args.work_item_id}, params,
                           {"expected_version": item["version"]})
     elif cmd in {"approve", "continue"}:
-        item = request("work_item_get", work_item_id=args.work_item_id, entry="cli")["work_item"]
+        fp = args.fingerprint
+        if not fp:  # continue only sends the claim back; it may use the current content
+            fp = request("work_item_get", work_item_id=args.work_item_id, entry="cli")["work_item"]["completion"][
+                "fingerprint"]
         out = _manage(f"work_item.{cmd}", {"work_item_id": args.work_item_id},
-                      {"note": args.note} if args.note else {},
-                      {"expected_fingerprint": item["completion"]["fingerprint"]})
+                      {"note": args.note} if args.note else {}, {"expected_fingerprint": fp})
     else:
         params = {"kind": args.kind, "ref": args.ref, **({"note": args.note} if args.note else {}),
                   **({"remove": True} if args.remove else {})}

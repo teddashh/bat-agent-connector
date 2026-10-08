@@ -217,14 +217,19 @@ async def test_an_agents_done_is_a_claim_that_a_person_approves_for_the_content_
     c = get(d, wid)["completion"]
     assert c["display_state"] == "done" and c["approved"] and not c["pending"] and c["approved_by"] == "ted-dashboard"
     assert c["claimed_by"] == "hermes"
-    # a rename keeps the approval; a content change asks again
+    # any content change asks again, a rename included, and the editor now presents it as done
     v = get(d, wid)["version"]
-    await act(d, AGENT, "work_item.update", {"work_item_id": wid}, {"title": "Ship it now"}, {"expected_version": v})
-    assert get(d, wid)["completion"]["approved"]
-    await act(d, AGENT, "work_item.update", {"work_item_id": wid}, {"acceptance": "tests and docs"},
-              {"expected_version": v + 1})
+    op = await act(d, AGENT, "work_item.update", {"work_item_id": wid}, {"title": "Ship it now"},
+                   {"expected_version": v})
+    assert op["result"]["completion"]["claimed_by"] == "hermes" and not op["result"]["completion"]["approved"]
     c = get(d, wid)["completion"]
     assert c["display_state"] == "awaiting_approval" and c["pending"] and not c["approved"]
+    await act(d, PERSON, "work_item.approve", {"work_item_id": wid}, {}, {"expected_fingerprint": c["fingerprint"]})
+    await act(d, PERSON, "work_item.update", {"work_item_id": wid}, {"acceptance": "tests and docs"},
+              {"expected_version": v + 2})
+    c = get(d, wid)["completion"]
+    assert c["display_state"] == "awaiting_approval" and c["pending"] and not c["approved"]
+    assert c["claimed_by"] == "ted-dashboard"  # the claim moves to whoever changed the done content
     # "keep working" sends it back
     await act(d, PERSON, "work_item.continue", {"work_item_id": wid}, {"note": "docs missing"},
               {"expected_fingerprint": c["fingerprint"]})
@@ -410,8 +415,18 @@ def test_cli_reads_the_version_and_fingerprint_it_changes_against(monkeypatch, c
     assert method == "op_submit" and sent["action"] == "work_item.update"
     assert sent["preconditions"] == {"expected_version": 7}
     assert sent["params"] == {"state": "doing", "steps": [{"text": "a", "done": False}, {"text": "b", "done": True}]}
-    assert cli.main(["item", "approve", item["work_item_id"]]) == 0
+    with pytest.raises(SystemExit):  # approving needs the fingerprint of the content you read
+        cli.main(["item", "approve", item["work_item_id"]])
+    capsys.readouterr()
+    assert cli.main(["item", "approve", item["work_item_id"], "--fingerprint", "e" * 64]) == 0
+    assert calls[-1][1]["preconditions"] == {"expected_fingerprint": "e" * 64}
+    assert cli.main(["item", "continue", item["work_item_id"]]) == 0
     assert calls[-1][1]["preconditions"] == {"expected_fingerprint": "f" * 64}
+    n = len(calls)
+    assert cli.main(["item", "update", item["work_item_id"], "--archive", "--title", "x"]) == 1
+    assert calls[n:] and all(m != "op_submit" for m, _ in calls[n:])
+    assert cli.main(["item", "list", "--cursor", "1.5|wi_" + "2" * 20]) == 0
+    assert calls[-1][1]["cursor"] == "1.5|wi_" + "2" * 20
     assert cli.main(["item", "update", item["work_item_id"], "--check", "3"]) == 1  # no step 3: nothing sent
     assert calls[-1][0] == "work_item_get"
     assert cli.main(["item", "link", item["work_item_id"], "pull_request", "o/r#5", "--remove"]) == 0
@@ -451,4 +466,45 @@ async def test_an_archived_projects_items_are_frozen_links_included(daemon):
     for params in ({"kind": "pull_request", "ref": "o/r#2"}, {"kind": "pull_request", "ref": "o/r#1", "remove": True}):
         assert refused(d, AGENT, "work_item.link", {"work_item_id": wid}, params).code == "PROJECT_ARCHIVED"
     assert refused(d, AGENT, "work_item.update", {"work_item_id": wid}, {"title": "x"},
+                   {"expected_version": 1}).code == "PROJECT_ARCHIVED"
+
+
+async def test_review_rules_reopen_only_on_step_edits_depth_and_first_reorder(daemon):
+    d = daemon
+    pid = await project(d)
+    wid = await item(d, pid, "Marked", steps=["a", "b"])
+    c = get(d, wid)["completion"]
+    await act(d, PERSON, "work_item.approve", {"work_item_id": wid}, {}, {"expected_fingerprint": c["fingerprint"]})
+    # a person marked it done with open steps: a rename keeps it done (asking again), a step edit reopens it
+    await act(d, AGENT, "work_item.update", {"work_item_id": wid}, {"title": "Marked!"}, {"expected_version": 2})
+    assert get(d, wid)["state"] == "done"
+    await act(d, AGENT, "work_item.update", {"work_item_id": wid},
+              {"steps": [{"text": "a", "done": True}, {"text": "b", "done": False}]}, {"expected_version": 3})
+    assert get(d, wid)["state"] == "doing"
+    # trees stop at MAX_DEPTH levels, and moving a subtree counts its height
+    chain = [await item(d, pid, "L0")]
+    for i in range(1, work_items.MAX_DEPTH):
+        chain.append(await item(d, pid, f"L{i}", parent_id=chain[-1]))
+    assert refused(d, PERSON, "work_item.create", {"project_id": pid},
+                   {"title": "too deep", "parent_id": chain[-1]}).code == "TOO_DEEP"
+    under = await item(d, pid, "Under", parent_id=wid)  # two levels; chain[1] carries 31 levels with it
+    assert refused(d, PERSON, "work_item.update", {"work_item_id": chain[1]}, {"parent_id": under},
+                   {"expected_version": 1}).code == "TOO_DEEP"
+    await act(d, PERSON, "work_item.update", {"work_item_id": chain[1]}, {"parent_id": wid}, {"expected_version": 1})
+    assert len(work_items.project_get(d.journal.db, pid)["work_items"]) == 2
+    # a long chain of branches orders without recursion
+    e = [{"id": f"x{i}", "derived_from": f"x{i - 1}" if i else None, "pinned": False} for i in range(5000)]
+    assert [x["id"] for x in work_items.siblings(e, None, "id")][-1] == "x4999"
+    # the first reorder of a parent keeps the slot of an entry archived before it
+    p2 = await project(d, "Other")
+    a, b, c3 = [await item(d, p2, t) for t in "ABC"]
+    await act(d, PERSON, "work_item.update", {"work_item_id": a}, {"archived": True}, {"expected_version": 1})
+    await act(d, PERSON, "work_item.order", {"project_id": p2}, {"order": [c3, b]}, {"before": [b, c3]})
+    await act(d, PERSON, "work_item.update", {"work_item_id": a}, {"archived": False}, {"expected_version": 2})
+    assert ids(work_items.project_get(d.journal.db, p2)["work_items"]) == [a, c3, b]
+    # an archived project's items cannot be pinned or archived either
+    await act(d, PERSON, "project.update", {"project_id": p2}, {"archived": True}, {"expected_version": 1})
+    assert refused(d, PERSON, "work_item.pin", {"work_item_id": b}, {"pinned": True},
+                   {"before": False}).code == "PROJECT_ARCHIVED"
+    assert refused(d, PERSON, "work_item.update", {"work_item_id": b}, {"archived": True},
                    {"expected_version": 1}).code == "PROJECT_ARCHIVED"

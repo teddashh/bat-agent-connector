@@ -52,6 +52,8 @@ _NOT_ONE_LINE = re.compile(r"[\x00-\x1f\x7f  ]")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 PROJECT_FIELDS = ("name", "description", "parent_id", "repositories", "task_project")
 ITEM_FIELDS = ("title", "goal", "request", "acceptance", "steps", "state", "parent_id")
+CONTENT_FIELDS = ("title", "goal", "request", "acceptance", "steps")
+MAX_DEPTH = 32  # levels in a project or work item tree
 
 
 def _now() -> float:
@@ -69,10 +71,9 @@ def _bad(code: str, message: str, status: int = 422) -> OperationError:
 
 # ------------------------------------------------------------------ completion (from completion.js)
 def fingerprint(item: dict) -> str:
-    """What a person approves: the content they read. The title is left out, so a rename keeps an approval
-    (Hub re-approves after a rename); order, pins and links are not content."""
-    return _sha({"goal": item["goal"], "request": item["request"], "acceptance": item["acceptance"],
-                 "steps": item["steps"]})
+    """What a person approves: the content they read, title included (anyone with manage can rename, so a rename
+    asks again). Order, pins and links are not content."""
+    return _sha({k: item[k] for k in CONTENT_FIELDS})
 
 
 def steps_hash(steps: list[dict]) -> str:
@@ -250,14 +251,15 @@ def siblings(items: list[dict], saved: list[str] | None, key: str) -> list[dict]
     result: list[dict] = []
     seen: set[str] = set()
 
-    def add(x: dict) -> None:
-        if x[key] in seen:
-            return
-        seen.add(x[key])
-        result.append(x)
-        for child in loose:
-            if child["derived_from"] == x[key]:
-                add(child)
+    def add(x: dict) -> None:  # depth-first, iterative: a long chain of branches must not recurse
+        stack = [x]
+        while stack:
+            cur = stack.pop()
+            if cur[key] in seen:
+                continue
+            seen.add(cur[key])
+            result.append(cur)
+            stack.extend(reversed([c for c in loose if c["derived_from"] == cur[key]]))
 
     for x in sorted((x for x in items if x[key] in rank), key=lambda x: rank[x[key]]):
         add(x)
@@ -309,9 +311,14 @@ def _check_order(current: list[dict], key: str, before, order) -> None:
         raise _bad("PINNED_FIRST", "pinned entries stay above the others; unpin one to move it down", 409)
 
 
-def _save_order(db, scope: str, parent: str, current: list[dict], key: str, order: list[str]) -> list[str]:
+def _save_order(db, scope: str, parent: str, current: list[dict], key: str, order: list[str],
+                everyone: list[dict]) -> list[str]:
+    """Save ``order`` for the active siblings. ``everyone`` (archived included, creation order) seeds a first save,
+    so an entry archived before any reorder still has a slot to come back to."""
     active = {x[key] for x in current}
-    old = _saved_order(db, scope, parent) or []
+    old = _saved_order(db, scope, parent)
+    if old is None:
+        old = [x[key] for x in siblings(everyone, None, key)]
     it = iter(order)
     merged = [next(it) if i in active else i for i in old]  # archived or moved IDs keep their slot
     merged += list(it)
@@ -348,6 +355,7 @@ def _project_parent(db, parent_id, *, moving: str | None = None) -> str | None:
         seen.add(cur)
         row = db.execute("SELECT parent_id FROM projects WHERE project_id=?", (cur,)).fetchone()
         cur = row["parent_id"] if row else None
+    _fits(len(seen), _height(db, "projects", "project_id", moving))
     return parent_id
 
 
@@ -366,7 +374,25 @@ def _item_parent(db, project_id: str, parent_id, *, moving: str | None = None) -
         seen.add(cur)
         row = db.execute("SELECT parent_id FROM work_items WHERE work_item_id=?", (cur,)).fetchone()
         cur = row["parent_id"] if row else None
+    _fits(len(seen), _height(db, "work_items", "work_item_id", moving))
     return parent_id
+
+
+def _height(db, table: str, key: str, root: str | None) -> int:
+    """Levels below ``root`` (0 for a leaf or a new entry)."""
+    levels, frontier = 0, [root] if root else []
+    while frontier:
+        frontier = [r[key] for p in frontier for r in db.execute(
+            f"SELECT {key} FROM {table} WHERE parent_id=?", (p,))]  # noqa: S608 - fixed names
+        levels += bool(frontier)
+        if levels > MAX_DEPTH:
+            break
+    return levels
+
+
+def _fits(ancestors: int, height: int) -> None:
+    if ancestors + 1 + height > MAX_DEPTH:
+        raise _bad("TOO_DEEP", f"a tree is at most {MAX_DEPTH} levels deep", 409)
 
 
 def _name_free(db, name: str, *, other_than: str | None = None) -> None:
@@ -595,7 +621,9 @@ async def _run_project_order(ctx: OpContext) -> dict:
     def change(db, now):
         parent, current = _check_project_order(ctx.service, ctx.params)
         _check_order(current, "project_id", ctx.preconditions.get("before"), ctx.params.get("order"))
-        order = _save_order(db, "projects", parent, current, "project_id", ctx.params["order"])
+        everyone = [_project(r) for r in db.execute("""SELECT * FROM projects WHERE parent_id IS ?
+            ORDER BY created_at, project_id""", (parent or None,))]
+        order = _save_order(db, "projects", parent, current, "project_id", ctx.params["order"], everyone)
         _event(ctx, "project", parent or "root", "project.ordered", {"parent_id": parent or None})
         return {"parent_id": parent or None, "order": order}
     return _once(ctx, change)
@@ -679,8 +707,8 @@ def _check_item_update(ops: OperationService, target: dict, params: dict, pre: d
     if "archived" in params:
         _only(params, ("archived",))
         archived = _bool(params, "archived")
+        _get_project(db, item["project_id"], active=True)  # an archived project's items are frozen
         if not archived and item["archived"]:
-            _get_project(db, item["project_id"], active=True)
             if item["parent_id"] and _get_item(db, item["parent_id"])["archived"]:
                 raise _bad("PARENT_ARCHIVED", "restore its parent work item first", 409)
         return item, {"archived": archived}
@@ -724,15 +752,21 @@ async def _run_item_update(ctx: OpContext) -> dict:
         if not changes:
             return {"work_item_id": wid, "version": item["version"], "changed": False}
         after = {**item, **changes}
-        if after["state"] == "done" and not all(s["done"] for s in after["steps"]):
-            after["state"] = changes["state"] = "doing"  # an unchecked step reopens it (Hub's setStep)
-        cols = dict(changes)
+        if ("steps" in changes and after["state"] == "done" and item["state"] == "done"
+                and not all(s["done"] for s in after["steps"])):
+            after["state"] = changes["state"] = "doing"  # an unchecked or added step reopens it (Hub's setStep)
+        claim: dict = {}
+        if changes.get("state") == "done":
+            claim = {"done_by": actor, "done_at": now}
+        elif "state" in changes and item["state"] == "done":
+            claim = {"done_by": None, "done_at": None, "approved_fingerprint": None, "approved_by": None,
+                     "approved_at": None}
+        elif item["state"] == "done" and any(k in changes for k in CONTENT_FIELDS):
+            claim = {"done_by": actor, "done_at": now}  # whoever changes done content now presents it as done
+        after.update(claim)
+        cols = {**changes, **claim}
         if "steps" in cols:
             cols["steps"] = json.dumps(cols["steps"], ensure_ascii=False)
-        if changes.get("state") == "done":
-            cols.update(done_by=actor, done_at=now)
-        elif "state" in changes and item["state"] == "done":
-            cols.update(done_by=None, done_at=None, approved_fingerprint=None, approved_by=None, approved_at=None)
         sets = ",".join(f"{k}=?" for k in cols)
         db.execute(f"UPDATE work_items SET {sets},version=version+1,updated_at=? WHERE work_item_id=?",  # noqa: S608
                    (*cols.values(), now, wid))
@@ -741,8 +775,6 @@ async def _run_item_update(ctx: OpContext) -> dict:
             _event(ctx, "work_item", wid, "work_item.updated", {"fields": fields})
         if "state" in changes:
             _event(ctx, "work_item", wid, "work_item.state", {"from": item["state"], "to": changes["state"]})
-        if "state" in changes and item["state"] == "done":
-            after.update(approved_fingerprint=None, approved_by=None, approved_at=None)
         return {"work_item_id": wid, "version": item["version"] + 1, "changed": True, "fields": sorted(changes),
                 "completion": completion(after)}
     return _once(ctx, change)
@@ -794,7 +826,9 @@ async def _run_item_order(ctx: OpContext) -> dict:
     def change(db, now):
         scope, parent, current = _check_item_order(ctx.service, ctx.target, ctx.params)
         _check_order(current, "work_item_id", ctx.preconditions.get("before"), ctx.params.get("order"))
-        order = _save_order(db, scope, parent, current, "work_item_id", ctx.params["order"])
+        everyone = [_item(r) for r in db.execute("""SELECT * FROM work_items WHERE project_id=? AND parent_id IS ?
+            ORDER BY created_at, work_item_id""", (ctx.target["project_id"], parent or None))]
+        order = _save_order(db, scope, parent, current, "work_item_id", ctx.params["order"], everyone)
         pid = ctx.target["project_id"]
         _event(ctx, "project", pid, "work_item.ordered", {"parent_id": parent or None})
         return {"project_id": pid, "parent_id": parent or None, "order": order}
@@ -802,12 +836,15 @@ async def _run_item_order(ctx: OpContext) -> dict:
 
 
 def _admit_item_pin(ops, principal, target, params, pre) -> None:
-    _check_pin(_get_item(ops.db, _target_id(target, "work_item_id", WORK_ITEM_ID)), params, pre)
+    item = _get_item(ops.db, _target_id(target, "work_item_id", WORK_ITEM_ID))
+    _get_project(ops.db, item["project_id"], active=True)
+    _check_pin(item, params, pre)
 
 
 async def _run_item_pin(ctx: OpContext) -> dict:
     def change(db, now):
         item = _get_item(db, _target_id(ctx.target, "work_item_id", WORK_ITEM_ID))
+        _get_project(db, item["project_id"], active=True)
         pinned = _check_pin(item, ctx.params, ctx.preconditions)
         db.execute("UPDATE work_items SET pinned=?,updated_at=? WHERE work_item_id=?",
                    (int(pinned), now, item["work_item_id"]))
