@@ -28,7 +28,7 @@
 | 工作項目 | 目標、需求原文、驗收、步驟、完成狀態、連結（附現況）、子項目與分支、紀錄 | `work-items/{id}` | 編輯、勾步驟、改狀態、確認完成或退回、連結與移除、從已連結的 checkpoint 派工（[work-items.md](work-items.md)） |
 | Sessions | 依主機與存取方式篩選；每列標出 Connector 管理或 API 唯讀、資料過期原因 | `sessions`（keyset 分頁） | — |
 | Session | 基本資料、來源、相關工作項目、最近訊息、checkpoint | `sessions/{host}/{sid}`、`…/messages`、`checkpoints` | Managed：送出（session 執行中預設排隊）、中斷、回答問題或權限。人工建立：唯讀說明。任何 session：記下目前版本，從版本開始 agent 工作（[checkpoints.md](checkpoints.md)） |
-| 成果與 GitHub | PR 的 head／base、checks、可合併狀態 | `repositories/{o}/{r}/pulls/{n}` | 合併、合併並部署到各 recipe、已合併時部署合併版本 |
+| 成果與 GitHub | 環境的選定／觀測／最後驗證版本、游標分頁部署歷史；PR 的 head／base、checks、可合併狀態 | `deployment-environments`、`deployment-environments/history`、`deployments/{id}`、`repositories/{o}/{r}/pulls/{n}` | 以 `deployments/preview` 固定環境代數與 recipe digest 後回退或重試固定版本；合併、合併並部署、部署已合併版本 |
 | 操作紀錄／操作 | 狀態、原因、步驟、`external_refs`、結果 | `operations`、`operations/{id}` | 取消；`needs_attention` 時重新執行（resume）；合併並部署失敗時以 `merged_sha` 重試部署 |
 | 連線 | Browser 輸入 API token；Tauri 顯示配置位置、原生憑證狀態；兩者顯示 actor 與 scopes | `capabilities`、`bootstrap` | 連線、斷線 |
 

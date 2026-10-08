@@ -11,4 +11,4 @@ createServer(async (req, res) => {
       "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'" });
     res.end(body);
   } catch { res.writeHead(404).end(); }
-}).listen(1421, "127.0.0.1");
+}).listen(Number(process.env.BATC_UI_TEST_PORT || 1421), "127.0.0.1");
