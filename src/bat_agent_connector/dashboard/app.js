@@ -11,7 +11,35 @@ var STRINGS = {
 		desktop_config_needed: "尚未配置中央連線。",
 		desktop_credential_missing: "本機憑證尚未提供，請依桌面安裝說明設定後重新啟動。",
 		desktop_credential_help: "中央位置與身份由本機設定指定；憑證保留在原生程式，不存入此畫面。",
-		desktop_dashboard_only: "目前支援 Dashboard，無需安裝 BAT。Fleet 連線管理、開啟 BAT、原生附件、登入自啟與更新尚未提供。關閉視窗會留在系統匣；退出程式不會停止中央工作。",
+		desktop_dashboard_only: "Dashboard 無需安裝 BAT。本機 Fleet 可使用已配置的 Kit 管理連線。開啟 BAT、原生附件、登入自啟與更新尚未提供。關閉視窗會留在系統匣；退出程式不會停止中央工作或 Fleet。",
+		fleet_title: "本機 Fleet 連線",
+		fleet_help: "選擇這台電腦需要的連線；連線選擇與實際就緒狀態分開顯示。",
+		fleet_apply: "儲存連線選擇",
+		fleet_refresh: "重新讀取狀態",
+		fleet_use_current: "使用目前選擇",
+		fleet_start: "啟動連線監控",
+		fleet_quit: "停止本機連線監控",
+		fleet_monitor_running: "監控執行中",
+		fleet_monitor_stopped: "監控已停止",
+		fleet_ready: "就緒",
+		fleet_degraded: "部分可用",
+		fleet_down: "無法連線",
+		fleet_off: "未啟用",
+		fleet_fresh: "最新觀測",
+		fleet_stale: "觀測已過期",
+		fleet_unavailable: "尚無可用觀測",
+		fleet_applied: "監控已讀取目前選擇。",
+		fleet_waiting: "等待監控讀取目前選擇。",
+		fleet_changed: "連線選擇或監控已變更。草稿已保留；請讀取並檢視目前選擇。",
+		fleet_other_owner: "目前監控不屬於這個登入工作階段，僅供檢視。",
+		fleet_invalid: "Fleet 設定需要處理（{n} 項）。",
+		fleet_windows: "Fleet 連線管理需要 Windows。",
+		fleet_setup: "尚未配置 Fleet Kit；請依桌面設定文件指定安裝位置。",
+		fleet_working: "正在處理連線設定…",
+		fleet_saved: "設定已儲存；就緒狀態由監控回報。",
+		fleet_quit_requested: "已請求停止監控；正在等候狀態更新。",
+		fleet_unknown: "結果尚未確定，草稿已保留。重新讀取狀態後再操作。",
+		fleet_read_failed: "無法讀取 Fleet；操作已暫停。",
 		merge_scope_reload: "PR 範圍已變更，已保留你選定的預覽。請重新讀取並檢視後再合併。",
 		metadata_diff: "內容比較",
 		metadata_before: "寫前",
@@ -317,7 +345,35 @@ var STRINGS = {
 		desktop_config_needed: "Central connection is not configured.",
 		desktop_credential_missing: "Native credential unavailable. Follow desktop setup and restart the app.",
 		desktop_credential_help: "The central address and expected identity come from local configuration. Credentials stay in the native app, outside this page.",
-		desktop_dashboard_only: "Dashboard is available without BAT installed. Fleet connections, opening BAT, native attachments, login autostart and updates are not available yet. Closing the window keeps the app in the tray; quitting does not stop central work.",
+		desktop_dashboard_only: "Dashboard is available without BAT installed. Local Fleet connections use your configured Kit. Opening BAT, native attachments, login autostart and updates are not available yet. Closing the window keeps the app in the tray; quitting does not stop central work or Fleet.",
+		fleet_title: "Local Fleet connections",
+		fleet_help: "Choose connections for this computer. Your selection and observed readiness are shown separately.",
+		fleet_apply: "Save connections",
+		fleet_refresh: "Read status",
+		fleet_use_current: "Use current selection",
+		fleet_start: "Start connection monitor",
+		fleet_quit: "Stop local connection monitor",
+		fleet_monitor_running: "Monitor running",
+		fleet_monitor_stopped: "Monitor stopped",
+		fleet_ready: "Ready",
+		fleet_degraded: "Partly available",
+		fleet_down: "Unavailable",
+		fleet_off: "Off",
+		fleet_fresh: "Recent observation",
+		fleet_stale: "Observation stale",
+		fleet_unavailable: "No current observation",
+		fleet_applied: "The monitor has read the current selection.",
+		fleet_waiting: "Waiting for the monitor to read the current selection.",
+		fleet_changed: "The selection or monitor changed. Your draft is preserved; read and review the current selection.",
+		fleet_other_owner: "This monitor is outside this login session's control; status is read-only.",
+		fleet_invalid: "Fleet configuration needs attention ({n} issues).",
+		fleet_windows: "Fleet connection management requires Windows.",
+		fleet_setup: "Fleet Kit is not configured. Follow desktop setup to select its installation.",
+		fleet_working: "Updating connections…",
+		fleet_saved: "Selection saved; the monitor reports readiness separately.",
+		fleet_quit_requested: "Monitor stop requested; waiting for status.",
+		fleet_unknown: "The outcome is unknown; your draft is preserved. Read status before acting again.",
+		fleet_read_failed: "Fleet status unavailable; actions are paused.",
 		merge_scope_reload: "PR scope changed; your selected preview is retained. Load and review it again before merging.",
 		metadata_diff: "Content comparison",
 		metadata_before: "Before",
@@ -631,6 +687,8 @@ var nativeStatus = () => invoke("native_status");
 var nativeConnect = () => invoke("connector_connect");
 var nativeDisconnect = () => invoke("connector_disconnect");
 var openExternal = (url) => invoke("open_external", { url });
+var fleetAvailability = () => invoke("fleet_availability");
+var fleetRequest = (input) => invoke("fleet_request", { input });
 async function connectorRequest(method, path, body, key, browserToken) {
 	if (nativeDesktop) return invoke("connector_request", { input: {
 		method,
@@ -649,6 +707,184 @@ async function connectorRequest(method, path, body, key, browserToken) {
 	return {
 		status: res.status,
 		data: await res.json().catch(() => ({}))
+	};
+}
+//#endregion
+//#region src/fleet.js
+async function mountFleet(main, { h, t }) {
+	const panel = h("section", {
+		class: "panel",
+		"aria-label": t("fleet_title")
+	});
+	const content = h("div"), message = h("p", {
+		class: "muted",
+		role: "status"
+	});
+	panel.append(h("h2", {}, t("fleet_title")), h("p", { class: "muted" }, t("fleet_help")), content, message);
+	main.append(panel);
+	let disposed = false, busy = false, readable = false, timer, snapshot, draft, binding;
+	const alive = () => !disposed && panel.isConnected;
+	const key = () => `batc.desktop.fleet.selection.${binding}`;
+	const save = () => {
+		try {
+			if (draft) sessionStorage.setItem(key(), JSON.stringify(draft));
+			else sessionStorage.removeItem(key());
+		} catch {}
+	};
+	const same = (a, b) => a.length === b.length && [...a].sort().every((x, i) => x === [...b].sort()[i]);
+	const changed = () => draft && (draft.revision !== snapshot.selection.revision || draft.epoch !== snapshot.monitor.epoch);
+	const editable = () => readable && !busy && snapshot?.configuration.valid && (snapshot.monitor.state === "stopped" || snapshot.monitor.controllable);
+	const render = () => {
+		if (!alive() || !snapshot) return;
+		const names = draft?.connections || snapshot.selection.connections;
+		const ready = new Map([...snapshot.readiness.hosts || [], snapshot.readiness.connector].filter(Boolean).map((row) => [row.name, row]));
+		const focus = document.activeElement?.dataset?.fleetName;
+		const rows = snapshot.configuration.connections.map((entry) => {
+			const input = h("input", {
+				type: "checkbox",
+				checked: names.includes(entry.name),
+				disabled: !editable() || !!changed(),
+				"data-fleet-name": entry.name,
+				onchange: () => {
+					if (!draft) draft = {
+						revision: snapshot.selection.revision,
+						epoch: snapshot.monitor.epoch,
+						connections: [...snapshot.selection.connections]
+					};
+					draft.connections = input.checked ? [...new Set([...draft.connections, entry.name])] : draft.connections.filter((x) => x !== entry.name);
+					if (same(draft.connections, snapshot.selection.connections)) draft = null;
+					save();
+					render();
+				}
+			});
+			const observed = ready.get(entry.name);
+			return h("div", { class: "row" }, h("label", { class: "grow fleet-choice" }, input, " ", entry.label), h("span", { class: "chip" }, t("fleet_" + (observed?.level || "unavailable"))), observed?.blocking ? h("span", { class: "muted" }, observed.blocking) : null);
+		});
+		content.replaceChildren(...[
+			h("p", {}, t("fleet_monitor_" + snapshot.monitor.state), " · ", t("fleet_" + snapshot.readiness.state)),
+			!snapshot.configuration.valid ? h("p", { class: "error" }, t("fleet_invalid", { n: snapshot.configuration.issue_count })) : null,
+			snapshot.monitor.state === "running" && !snapshot.monitor.controllable ? h("p", { class: "note" }, t("fleet_other_owner")) : null,
+			...rows,
+			h("p", { class: "muted" }, t(snapshot.selection.applied_revision === snapshot.selection.revision ? "fleet_applied" : "fleet_waiting")),
+			changed() ? h("p", { class: "error" }, t("fleet_changed")) : h("span"),
+			h("div", { class: "actions" }, h("button", {
+				class: "primary",
+				disabled: !editable() || !draft || !!changed(),
+				onclick: () => mutate({
+					action: "set_connections",
+					connections: [...draft.connections],
+					expected_selection_revision: draft.revision,
+					expected_monitor_epoch: draft.epoch,
+					expected_configuration_binding: binding
+				})
+			}, t("fleet_apply")), h("button", {
+				class: "secondary",
+				disabled: busy,
+				onclick: () => read(true)
+			}, t("fleet_refresh")), h("button", {
+				class: "secondary",
+				disabled: !readable || busy || !draft,
+				onclick: () => {
+					draft = null;
+					save();
+					message.textContent = "";
+					render();
+				}
+			}, t("fleet_use_current"))),
+			h("div", { class: "actions" }, h("button", {
+				class: "secondary",
+				disabled: !editable() || !!draft || snapshot.monitor.state !== "stopped",
+				onclick: () => mutate({
+					action: "ensure_monitor",
+					expected_configuration_binding: binding
+				})
+			}, t("fleet_start")), h("button", {
+				class: "danger",
+				disabled: !editable() || !!draft || !snapshot.monitor.controllable,
+				onclick: () => mutate({
+					action: "quit_owned",
+					expected_configuration_binding: binding,
+					expected_monitor_epoch: snapshot.monitor.epoch
+				})
+			}, t("fleet_quit")))
+		].filter(Boolean));
+		if (focus) [...content.querySelectorAll("input")].find((input) => input.dataset.fleetName === focus)?.focus();
+	};
+	const accept = (value) => {
+		if (!value?.configuration?.connections || !value?.monitor || !value?.selection || !value?.readiness) throw new Error(t("fleet_unavailable"));
+		if (binding !== value.configuration.binding) {
+			binding = value.configuration.binding;
+			draft = null;
+			try {
+				const old = JSON.parse(sessionStorage.getItem(key()) || "null");
+				if (old && Array.isArray(old.connections) && old.connections.every((x) => typeof x === "string") && typeof old.revision === "string") draft = old;
+			} catch {}
+		}
+		snapshot = value;
+		readable = true;
+		if (draft && same(draft.connections, value.selection.connections)) {
+			draft = null;
+			save();
+		}
+	};
+	const read = async (explicit = false) => {
+		if (!alive() || busy) return;
+		busy = true;
+		render();
+		try {
+			const value = await fleetRequest({ action: "status" });
+			if (!alive()) return;
+			accept(value);
+			if (explicit) message.textContent = "";
+		} catch (error) {
+			if (alive()) {
+				readable = false;
+				message.textContent = `${t("fleet_read_failed")} ${String(error)}`;
+			}
+		} finally {
+			busy = false;
+			render();
+		}
+	};
+	const mutate = async (input) => {
+		if (!editable() || !alive()) return;
+		busy = true;
+		readable = false;
+		message.textContent = t("fleet_working");
+		render();
+		try {
+			const result = await fleetRequest(input);
+			if (!alive()) return;
+			if (input.action !== "quit_owned") accept(result);
+			message.textContent = t(input.action === "quit_owned" ? "fleet_quit_requested" : "fleet_saved");
+		} catch (error) {
+			if (alive()) message.textContent = `${t("fleet_unknown")} ${String(error)}`;
+		} finally {
+			busy = false;
+			render();
+		}
+	};
+	try {
+		const availability = await fleetAvailability();
+		if (!alive()) return () => {
+			disposed = true;
+		};
+		if (!availability.configured || !availability.platform_supported) message.textContent = t(!availability.platform_supported ? "fleet_windows" : "fleet_setup");
+		else {
+			await read();
+			const poll = async () => {
+				if (!alive()) return;
+				await read();
+				if (alive()) timer = setTimeout(poll, 5e3);
+			};
+			timer = setTimeout(poll, 5e3);
+		}
+	} catch {
+		message.textContent = t("fleet_unavailable");
+	}
+	return () => {
+		disposed = true;
+		clearTimeout(timer);
 	};
 }
 //#endregion
@@ -1955,6 +2191,10 @@ async function viewNativeSettings(main) {
 	} catch (e) {
 		info.replaceChildren(errorBox(e));
 	}
+	return mountFleet(main, {
+		h,
+		t
+	});
 }
 var may = (scope) => (state.caps?.scopes || []).includes(scope);
 function fill(el, ...kids) {

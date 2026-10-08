@@ -40,11 +40,15 @@ pub enum FleetRequest {
     ValidateConfiguration {},
     SetConnections {
         connections: Vec<String>,
+        expected_configuration_binding: String,
         expected_selection_revision: String,
         expected_monitor_epoch: Option<String>,
     },
-    EnsureMonitor {},
+    EnsureMonitor {
+        expected_configuration_binding: String,
+    },
     QuitOwned {
+        expected_configuration_binding: String,
         expected_monitor_epoch: String,
     },
 }
@@ -56,13 +60,14 @@ impl FleetRequest {
             Self::Status {} => "status",
             Self::ValidateConfiguration {} => "validate_configuration",
             Self::SetConnections { .. } => "set_connections",
-            Self::EnsureMonitor {} => "ensure_monitor",
+            Self::EnsureMonitor { .. } => "ensure_monitor",
             Self::QuitOwned { .. } => "quit_owned",
         };
         let mut body = json!({"schema_version":1,"request_id":id,"action":action});
         match self {
             Self::SetConnections {
                 connections,
+                expected_configuration_binding,
                 expected_selection_revision,
                 expected_monitor_epoch,
             } => {
@@ -71,21 +76,33 @@ impl FleetRequest {
                     || unique.len() != connections.len()
                     || connections.iter().any(|s| !identifier(s, 128))
                     || !hex(expected_selection_revision, 64)
+                    || !hex(expected_configuration_binding, 64)
                     || expected_monitor_epoch.as_ref().is_some_and(|s| !hex(s, 32))
                 {
                     return Err("Invalid Fleet selection or version".into());
                 }
                 body["connections"] = json!(connections);
+                body["expected_configuration_binding"] = json!(expected_configuration_binding);
                 body["expected_selection_revision"] = json!(expected_selection_revision);
                 body["expected_monitor_epoch"] = json!(expected_monitor_epoch);
             }
             Self::QuitOwned {
+                expected_configuration_binding,
                 expected_monitor_epoch,
             } => {
-                if !hex(expected_monitor_epoch, 32) {
+                if !hex(expected_monitor_epoch, 32) || !hex(expected_configuration_binding, 64) {
                     return Err("Invalid Fleet monitor version".into());
                 }
                 body["expected_monitor_epoch"] = json!(expected_monitor_epoch);
+                body["expected_configuration_binding"] = json!(expected_configuration_binding);
+            }
+            Self::EnsureMonitor {
+                expected_configuration_binding,
+            } => {
+                if !hex(expected_configuration_binding, 64) {
+                    return Err("Invalid Fleet configuration version".into());
+                }
+                body["expected_configuration_binding"] = json!(expected_configuration_binding);
             }
             _ => {}
         }
@@ -167,21 +184,69 @@ fn load_script(config: &Path) -> Result<PathBuf, String> {
     }
     let config: Config =
         serde_json::from_slice(&bytes).map_err(|_| "Invalid Fleet configuration")?;
-    if !config.kit_root.is_absolute() || config.kit_root.to_string_lossy().starts_with("\\\\") {
+    if !config.kit_root.is_absolute() || !local_path(&config.kit_root) {
         return Err("Fleet Kit must use an absolute local installation directory".into());
     }
     let root = config
         .kit_root
         .canonicalize()
         .map_err(|_| "Fleet Kit installation is unavailable")?;
+    if !local_path(&root) {
+        return Err("Fleet Kit must remain on a local drive".into());
+    }
     let script = root
         .join("client/fleet-desktop.ps1")
         .canonicalize()
         .map_err(|_| "Fleet Kit desktop adapter is unavailable")?;
-    if !script.starts_with(&root) || !script.is_file() {
+    if !script.starts_with(&root) || !script.is_file() || !local_path(&script) {
         return Err("Fleet adapter is outside its installation".into());
     }
-    Ok(script)
+    powershell_path(script)
+}
+
+#[cfg(windows)]
+fn local_path(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    let drive = match path.components().next() {
+        Some(Component::Prefix(p)) => match p.kind() {
+            Prefix::Disk(d) | Prefix::VerbatimDisk(d) => d,
+            _ => return false,
+        },
+        _ => return false,
+    };
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDriveTypeW(root: *const u16) -> u32;
+    }
+    let root = [drive as u16, b':' as u16, b'\\' as u16, 0];
+    // Exclude UNC, device namespaces and mapped network drives, before and after resolving links.
+    matches!(unsafe { GetDriveTypeW(root.as_ptr()) }, 2 | 3 | 6)
+}
+#[cfg(not(windows))]
+fn local_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    !s.starts_with("\\\\") && !s.starts_with("//")
+}
+#[cfg(windows)]
+fn powershell_path(path: PathBuf) -> Result<PathBuf, String> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::path::{Component, Prefix};
+    let units: Vec<_> = path.as_os_str().encode_wide().collect();
+    // PowerShell5.1 accepts ordinary local paths; avoid passing Rust's verbatim path spelling.
+    let start = match path.components().next() {
+        Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::VerbatimDisk(_)) => 4,
+        _ => 0,
+    };
+    if units.len() - start > 240 {
+        return Err("Fleet Kit installation path is too long for Windows PowerShell".into());
+    }
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(
+        &units[start..],
+    )))
+}
+#[cfg(not(windows))]
+fn powershell_path(path: PathBuf) -> Result<PathBuf, String> {
+    Ok(path)
 }
 
 #[cfg(windows)]
@@ -217,7 +282,14 @@ async fn call(
 ) -> Result<Value, String> {
     let mut command = Command::new(executable);
     command
-        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
         .arg(script);
     command.current_dir(
         script
@@ -364,6 +436,7 @@ fn parse_response(bytes: &[u8], request: &Value) -> Result<Value, String> {
                     "INVALID_REQUEST",
                     "PLATFORM_UNSUPPORTED",
                     "CONFIGURATION_INVALID",
+                    "CONFIGURATION_CHANGED",
                     "INVALID_SELECTION",
                     "SELECTION_CHANGED",
                     "SELECTION_BUSY",
@@ -499,8 +572,36 @@ fn configuration(value: &Value) -> Result<Value, String> {
         .filter(|a| a.len() <= 1000)
         .ok_or("Invalid Fleet configuration issues")?
         .len();
+    let connections = value["connections"]
+        .as_array()
+        .filter(|a| a.len() <= 1000)
+        .ok_or("Invalid Fleet connections")?;
+    let mut names = HashSet::new();
+    let connections = connections
+        .iter()
+        .map(|entry| {
+            let name = entry["name"]
+                .as_str()
+                .filter(|s| identifier(s, 128))
+                .ok_or("Invalid Fleet connection name")?;
+            let label = entry["label"]
+                .as_str()
+                .filter(|s| {
+                    s.len() <= 1024 && s.chars().count() <= 256 && !s.chars().any(char::is_control)
+                })
+                .ok_or("Invalid Fleet connection label")?;
+            let kind = entry["kind"]
+                .as_str()
+                .filter(|s| ["host", "connector"].contains(s))
+                .ok_or("Invalid Fleet connection kind")?;
+            if !names.insert(name) {
+                return Err("Duplicate Fleet connection");
+            }
+            Ok(json!({"name":name,"label":label,"kind":kind}))
+        })
+        .collect::<Result<Vec<_>, &str>>()?;
     // The Kit validation report can contain local paths; only its status/count crosses IPC.
-    Ok(json!({"valid":valid,"binding":binding,"issue_count":count}))
+    Ok(json!({"valid":valid,"binding":binding,"issue_count":count,"connections":connections}))
 }
 fn readiness_row(value: &Value) -> Result<Value, String> {
     let invalid = || "Invalid Fleet readiness".to_owned();
@@ -510,7 +611,7 @@ fn readiness_row(value: &Value) -> Result<Value, String> {
         .ok_or_else(invalid)?;
     let label = value["label"]
         .as_str()
-        .filter(|s| s.len() <= 256 && !s.chars().any(char::is_control))
+        .filter(|s| s.len() <= 1024 && s.chars().count() <= 256 && !s.chars().any(char::is_control))
         .ok_or_else(invalid)?;
     let level = value["level"]
         .as_str()
@@ -595,7 +696,7 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<FleetRequest>(body).is_err());
         }
-        let mut body = json!({"action":"set_connections","connections":["node-1"],"expected_selection_revision":"d".repeat(64),"expected_monitor_epoch":null});
+        let mut body = json!({"action":"set_connections","connections":["node-1"],"expected_configuration_binding":"c".repeat(64),"expected_selection_revision":"d".repeat(64),"expected_monitor_epoch":null});
         assert!(serde_json::from_value::<FleetRequest>(body.clone())
             .unwrap()
             .envelope("test")
@@ -714,6 +815,39 @@ mod tests {
         )
         .unwrap();
         assert!(load_script(&config).is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_refuse_network_and_device_namespaces() {
+        for path in [
+            r"\\server\share\kit",
+            "//server/share/kit",
+            r"\\?\UNC\server\share\kit",
+            r"\\.\PhysicalDrive0",
+        ] {
+            assert!(!local_path(Path::new(path)), "{path}");
+        }
+        assert_eq!(
+            powershell_path(PathBuf::from(r"\\?\C:\Tools\kit\client\fleet-desktop.ps1")).unwrap(),
+            PathBuf::from(r"C:\Tools\kit\client\fleet-desktop.ps1")
+        );
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_installed_facade_contract_uses_actual_system_powershell() {
+        let Some(root) = std::env::var_os("BATC_FLEET_TEST_KIT") else {
+            return;
+        };
+        let temp = Temp::new();
+        std::fs::write(
+            temp.0.join("fleet.json"),
+            serde_json::to_vec(&json!({"kit_root":PathBuf::from(root)})).unwrap(),
+        )
+        .unwrap();
+        let bridge = FleetBridge::load(&temp.0);
+        // Contract exits before reading inventory, credentials, preferences or live processes.
+        let result = bridge.request(FleetRequest::Contract {}).await.unwrap();
+        assert_eq!(result["implementation_version"], "desktop-facade-v1");
     }
     #[cfg(unix)]
     fn python(code: &str) -> Command {

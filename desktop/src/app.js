@@ -2,6 +2,7 @@
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
 import { connectorRequest, nativeDesktop, nativeStatus, nativeConnect, nativeDisconnect, openExternal } from "./transport/index.ts";
+import { mountFleet } from "./fleet.js";
 import { consumePageAsync, settleRefreshes, storageScope } from "./state/events.ts";
 
 const TOKEN_KEY = "batc.dashboard.token";
@@ -939,6 +940,7 @@ async function viewNativeSettings(main) {
     else if (!status.credential_available) info.textContent = t("desktop_credential_missing");
     connect.disabled = !!status.error || !status.credential_available;
   } catch (e) { info.replaceChildren(errorBox(e)); }
+  return mountFleet(main, {h, t});
 }
 
 // ------------------------------------------------------------------ projects and work items

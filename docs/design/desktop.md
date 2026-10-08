@@ -35,7 +35,7 @@ For this slice, supply `BATC_DESKTOP_TOKEN` in the launching process environment
 
 The first connection reads `/capabilities` and requires the configured actor, API version `1`, contract version `2026-10-08`, and `observe` scope. It displays the central actor/scopes, without claiming a distinct cryptographic server identity. HTTPS certificates or the configured tunnel provide transport identity. Contract or actor mismatches leave operations blocked.
 
-The app works without BAT installed. Connection settings explicitly list Fleet, opening BAT, native attachments, autostart and updates as unavailable. Missing configuration and credentials remain visible in the app.
+The app works without BAT installed. Configured Windows installations can manage local connections through the [Fleet Kit adapter](desktop-fleet.md). Opening BAT, native attachments, autostart and updates remain unavailable. Missing configuration and credentials remain visible in the app.
 
 ## Native boundary
 
@@ -73,7 +73,7 @@ npm run tauri -- build --debug --bundles deb
 xvfb-run -a -s '-screen 0 1440x900x24' dbus-run-session -- node tests/native-smoke.mjs
 ```
 
-The app bundles frontend assets and does not require Vite in production. Closing the main window hides it; the tray offers Open Dashboard and Quit Dashboard. Quitting does not stop central tasks. The single-instance plugin focuses the existing window in the current desktop session. This plugin is not the Fleet cross-Windows-session ownership protocol; another interactive Windows session is not yet fenced. Because this slice starts no supervisor, it cannot start a second tunnel owner.
+The app bundles frontend assets and does not require Vite in production. Closing the main window hides it; the tray offers Open Dashboard and Quit Dashboard. Quitting does not stop central tasks or Fleet. The single-instance plugin focuses the existing window in the current desktop session. This plugin is not the Fleet cross-Windows-session ownership protocol; another interactive Windows session is not yet fenced. Fleet monitor control delegates ownership checks to the existing Kit; native Rust does not create a second supervisor.
 
 The desktop workflow packages unsigned Windows NSIS and Linux deb artifacts for validation. Signing, updater channels, macOS packages and release publishing are not configured.
 

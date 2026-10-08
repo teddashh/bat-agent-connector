@@ -1,6 +1,8 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 const root = new URL("../../src/bat_agent_connector/dashboard/", import.meta.url);
+const port = Number(process.env.BATC_TEST_PORT || 1421);
+if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("Invalid fixture port");
 createServer(async (req, res) => {
   const path = new URL(req.url, "http://127.0.0.1").pathname;
   const file = path === "/dashboard/" ? "index.html" : path.slice("/dashboard/".length);
@@ -11,4 +13,4 @@ createServer(async (req, res) => {
       "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'" });
     res.end(body);
   } catch { res.writeHead(404).end(); }
-}).listen(1421, "127.0.0.1");
+}).listen(port, "127.0.0.1");
