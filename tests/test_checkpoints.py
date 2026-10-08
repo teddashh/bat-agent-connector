@@ -14,8 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import api_auth, checkpoints, orchestrate, registry, resource_policy
+from bat_agent_connector import api_auth, checkpoints, lifecycle, orchestrate, registry, resource_policy
 from bat_agent_connector.channels import GUARDED_CHANNELS, ORCHESTRATE_CHANNELS, WRITE_CHANNELS
+from bat_agent_connector.errors import ResourceReadOnly
 from bat_agent_connector.operations import OperationError
 from bat_agent_connector.task_daemon import TaskDaemon
 from tests.conftest import make_config
@@ -475,3 +476,33 @@ def test_checkpoint_paths_are_fixed_names_inside_a_managed_root(tmp_path):
     assert "checkpoint.continue" in resource_policy.BY_ACTION["checkpoint.managed_worktree"].entry_points
     assert checkpoints.target_clone(("/srv/managed",), "h1", "/srv/managed/app-1/.bat-worktrees/batc-cp-1")[1]
     assert not checkpoints.target_clone(("/srv/managed",), "h1", "/home/ted/app")[1]
+
+
+async def test_bat_worktree_actions_never_touch_a_worktree_the_connector_made(daemon, mock, human):
+    """BAT has no record of a checkpoint worktree: a rehydrate would register it under the workspace folder (a
+    person's checkout in real use) and copy its env files in, and a remove would prune that repository."""
+    cp = await make_checkpoint(daemon)
+    op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]},
+                   {"instructions": "Add a changelog entry", "agent": "claude"})
+    sid, wt = op["result"]["session_id"], op["result"]["worktree_path"]
+    assert registry.get("h1", sid)["worktree_made_by"] == "connector"
+    mock.invokes.clear()
+    with pytest.raises(ResourceReadOnly) as e:
+        await orchestrate.worktree_remove(daemon.fleet, "h1", sid, confirm=True, delete_branch=True)
+    assert e.value.code == "NOT_A_BAT_WORKTREE"
+    with pytest.raises(ResourceReadOnly) as e:
+        await orchestrate.worktree_merge(daemon.fleet, "h1", sid, confirm=True)
+    assert e.value.code == "NOT_A_BAT_WORKTREE"
+    out = await lifecycle.session_cleanup(daemon.fleet, "h1", dry_run=True, session_id=sid, min_idle_s=0)
+    assert out["decisions"][0]["decision"] == "KEEP" and "over SSH" in out["decisions"][0]["reasons"][0]
+    assert not [i for i in mock.invokes if i["channel"].startswith("worktree:") and i["channel"] != "worktree:status"]
+    assert git(wt, "rev-parse", "--abbrev-ref", "HEAD") == op["result"]["branch"]  # still there
+    policy = await resource_policy.session_policy(daemon.fleet, "h1", sid)
+    assert policy["worktree_made_by"] == "connector"
+    assert policy["actions"]["worktree.remove"]["code"] == "NOT_A_BAT_WORKTREE"
+    assert policy["actions"]["session.send"]["allowed"] and policy["actions"]["session.stop"]["allowed"]
+    # rows written before worktree_made_by existed are recognised by their connector branch
+    row = {**registry.get("h1", sid)}
+    row.pop("worktree_made_by")
+    assert resource_policy.worktree_maker(row) == "connector"
+    assert resource_policy.worktree_maker({"branch": "bat/worktree-0000abcd"}) == "bat"
