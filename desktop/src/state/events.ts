@@ -18,6 +18,28 @@ export function consumePage(page: EventPage, cursor: number, emit: (event: Conne
   return cursor;
 }
 
+// A page is one acknowledgment unit. Coalesce view invalidations while every returned
+// refresh promise remains outstanding; a rejected refresh leaves the caller's cursor unchanged.
+export async function consumePageAsync(page: EventPage, cursor: number,
+  emit: (event: ConnectorEvent) => void | Promise<unknown>): Promise<number> {
+  if (page.reset_required || page.reset || page.head_cursor < cursor) {
+    await emit({seq: 0, kind: "reset", resource_type: "reset"});
+    cursor = 0;
+  }
+  const pending: Promise<unknown>[] = [];
+  const next = consumePage({...page, reset: false, reset_required: false}, cursor,
+    event => { pending.push(Promise.resolve().then(() => emit(event))); });
+  await settleRefreshes(pending);
+  return next;
+}
+
+export async function settleRefreshes(pending: Promise<unknown>[]): Promise<void> {
+  // Finish sibling reads even when one fails, so a late renderer cannot overwrite
+  // evidence after a later retry has already acknowledged the page.
+  const results = await Promise.allSettled(pending);
+  for (const result of results) if (result.status === "rejected") throw result.reason;
+}
+
 export function storageScope(endpoint: string, actor: string, server = "legacy", principal = actor): string {
   return [endpoint, server, principal, actor].map(encodeURIComponent).join(":");
 }

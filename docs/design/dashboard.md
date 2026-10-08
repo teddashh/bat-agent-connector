@@ -41,7 +41,7 @@ Token 缺少某個 scope（`start`、`integrate`、`manage`、`approve`）時，
 - 既有 projects／work-items／delivery 的 live render 會避開開啟中的編輯欄或正在輸入的欄位，關閉或離開後再補上。新增步驟、連結的輸入框在相應 view 重畫時保留內容；這不代表所有表單都已持久化。Session 送字草稿另存於身份分區，重開仍可回復。
 - 從 checkpoint 派工的表單送出後就不能再送：結果留在表單裡，關閉後頁面列出這次執行。
 - Browser 與 Tauri 共用有界的 `GET /api/v1/events` polling，追平後每秒讀一次；原生 Rust 不另建 event log。中央 SSE 仍可供其他 clients 使用，但這個版本沒有 native streaming subscription。
-- 新中央提供 [bootstrap／checkpoint 合約](dashboard-sync.md)。先取得 cursor/token，再讀需要的畫面資料，畫面 mounted 後續讀事件。Snapshot 與多頁讀取不是原子快照（`atomic:false`）；資料以 stable IDs 及 API 讀回為準。每頁事件 invalidations 同步派送後才一起保存 `next_cursor` 與新 checkpoint token，不能先跳到 head。既有 async/debounced view refresh 不在此 acknowledgment 內，單一 view 讀回失敗可能仍已前進 cursor；各 view 的 freshness 與失敗重讀仍由 R04 完成。Cache／草稿／操作 keys 依 endpoint、server_id、principal_id、actor 分區。
+- 新中央提供 [bootstrap／checkpoint 合約](dashboard-sync.md)。先取得 cursor/token，再讀需要的畫面資料，畫面 mounted 後續讀事件。Snapshot 與多頁讀取不是原子快照（`atomic:false`）；資料以 stable IDs 及 API 讀回為準。每頁等待所有 async/debounced view refresh 完成後才一起保存 `next_cursor` 與新 checkpoint token，不能先跳到 head。讀回失敗保留原 cursor/token，暫停操作並重讀同一頁；開啟的編輯表單延後 refresh 與 acknowledgment，保留草稿。此保障限於已訂閱的畫面更新；pending controls、linked resource invalidations 與 history/relations 畫面仍由 R04 完成。Cache／草稿／操作 keys 依 endpoint、server_id、principal_id、actor 分區。
 - `EVENT_CURSOR_RESET` 重讀 bootstrap；同身份已開表單保留至使用者離開再刷新，其間不接受 mutation。切換 backend／principal 立即換分區，不把舊表單內容寫入新身份。Poll 失敗也會暫停 operation POST，保留草稿和原 key。舊中央無 bootstrap 時仍可讀目前畫面，但沒有 retention／continuity 保證。
 
 ## 語言
