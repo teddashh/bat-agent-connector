@@ -249,6 +249,16 @@ policy/contract/config digest、iat/exp（UTC integer seconds，exp=iat+900）�
 fingerprint/iat canonical hash 前 32 hex 加 clpv_。Admin token 輪替使尚未接受的 token 無效；token 不授予 scopes。
 已接受的 operation params 有 server-only authorization；key 輪替不撤銷 accepted／resumed plan。
 尚未送任何 external step 就過期仍拒絕；已送 steps 先 reconcile，不重授權。
+恢復固定 plan 時若 PREVIEW_EXPIRED、PREVIEW_MISMATCH 或其他 early refusal，且此 operation **完全沒有
+operation_steps row**，先以 registry flock 釋放此 operation 的全部 reserved guards 與 session
+cleanup_reservation，再把所有 pending／running 回執改為 failed、error.code=該 refusal code，記
+guard_released=true，才交回 OperationService。這沿用 cancel 的未送出規則：外部 mutation 必須先有
+durable step，完全無 row 即證明沒有 pending／completed phase，釋放安全。僅因只讀觀測失敗留下的
+uncertain 回執也按同一無 step 證明結清，不殘留假未決效果。即使原 document 無法解碼，仍按
+operation_id 釋放，不依賴 item loop；他人的 guard 與 confirmed cleaned marks 不動。中斷可同值重播。
+這是 refusal 的 release，不是逾時自動解鎖。只要已有任一 step（含 failed），就不走此全 operation
+release；原 reconcile／partial 規則不變。Resume mismatch 指 accepted token hash 與 journal 不符，
+不是同 key／同 public request retry；後者仍回同一 operation。
 
 Fingerprint 包含完整 resource 集合（包括 retain）、ownership/generation/path、content／dirty bytes/type、
 refs／registration／merge state、writer/pending、commands／global consumers、receipt coverage、retention rules、
@@ -295,7 +305,22 @@ attempts、before/after、retained SHA/location、discard/release choices／auth
 cancel_requested。兩個 phases 欄位每次從 authoritative operation_steps 重建，含 approved DAG 的遞迴
 prerequisites：worktree 的 session stop、branch 的 worktree removal 都帶原 resource_id。不加重複的 journal
 欄位；step success 已 commit 後即使 receipt／finalize crash，成功 evidence 仍在，tombstone 也保存同一 projection。
-Item status：retained/pending/running/succeeded/already_absent/failed/uncertain/blocked_stale/cancelled。
+
+| Item status | 回執／副作用 |
+|---|---|
+| retained | 明列 retention reasons，不執行 |
+| pending／running | reclaim intent 已保存／已 reserved，尚未完成 |
+| succeeded | 實際 stop／remove 經 read-back 確認；finalize 寫 tombstone／aliases、registry cleaned |
+| already_absent | preview 與首輪全 plan 驗證證實 session 不 loaded 或 worktree／temporary 不存在，且無 retention reason；直接保存同名 definitive receipt 與原 observation／IDs，不送任何 per-item host call，不新增 tombstone／aliases／registry cleaned mark，不能聲稱是 cleanup 移除的 |
+| failed／blocked_stale | definitive refusal／item precondition 變動；已完成 effects 仍投影，runtime／destructive partial 不用這兩個 status |
+| uncertain | 未決效果或已完成 runtime／destructive 的 partial，reservation 保留 |
+| cancelled | 未送出或 additive-only 已結清，回執仍列已完成 pins；不包含 partial runtime／destructive |
+
+result.items 與 summary 分別計數 succeeded／retained／already_absent；already_absent 不算 retained 或 partial。
+原 absence 回執永久可由 operation read 查詢；cleanup-tombstones 不為沒有 cleanup mutation 的 item 建假 history。
+Dependency satisfaction 接受 succeeded 或 already_absent。現有 planner 只把 loaded 的 reclaim session 加入
+worktree dependencies、只把 reclaim worktree 加入 branch dependencies，通常不產生 absent edge；若已接受
+DAG 有此 edge，absence 回執也已滿足 prerequisite。Cancel 保持 already_absent status。
 Operation 沿用原狀態；summary.partial=true，不新增 partial state。獨立 item確定失敗可繼續其他項；
 uncertain／stale 停後續。首輪 stale=failed、零 mutation；部分成功後 stale=needs_attention、須新 preview。
 Definitive refusal 只證明**該次 phase**沒有未決效果，不代表 item／DAG 之前沒有更動。
@@ -316,6 +341,20 @@ CLEANUP_PARTIAL_STATE、completed_phases 與 reservation；cancel_requested 由�
 Operation cancelled 不代表內容保留或 runtime 還在；這些保留的 partial reservations 需人工檢視，
 本包不提供強制解除／takeover，不能 resume 已 cancelled operation。只有未送出或純 additive、全部已結清
 的 item 才 cancelled 並釋放 reservation，pins 仍列出。未知 phase 先 reconcile，cancel 不跳過證明。
+
+### Reserved 後退出路徑稽核
+
+| 路徑 | Guard／回執規則 |
+|---|---|
+| admission、initial expiry／整份 fingerprint revalidation | reservation 尚未建立，無釋放需求；admission 不寫 cleanup guards／receipts |
+| resumed token hash／expiry／document decode、set_refs 的 early refusal | 完全無 step row 時走上述 operation-wide release，pending／running 全改 failed；有 step 不釋放，由既有 durable evidence 保持 reservation |
+| mark／receipt running 到第一個 step 間、validate／policy／canonical／readonly precheck 的 OperationError／ResourceReadOnly | mark 與 receipt running 在同一 per-item try；無 pending／runtime／destructive 時 failed 或 blocked_stale 並釋放 own guard。若因此停止且整個 operation 無 step，外層同時釋放其他 crash 留下的 own reservations、結清 pending／running |
+| dependency refusal | 無未決 call／irreversible effect 時 failed 並釋放該 item；未決 step 或已完成 prerequisite stop／remove 時 uncertain、保留 guard、needs_attention |
+| host mutation／lost reply、runtime／destructive 完成後的後續 refusal | 依 step reconcile／CLEANUP_PARTIAL_STATE 保存已完成效果；不能因後續 refusal 釋放 |
+| local／read-only OSError、Uncertain | 不把未知觀測當可繼續；保留 guard 與 uncertain 回執，OperationService 再回查，不是 definitive release |
+| finalize／registry cleaned replay | tombstone 與 step 成功保留；同一 ID 補 mark，不解除 confirmed cleaned guard |
+| cancel | 未送出／additive-only 且已結清才釋放，partial／unknown 保留；already_absent／retained／succeeded 不改 status |
+| 其他 local handler exception | 完全無 step 時仍按 operation_id 結清／釋放，回執沿用 code，無 code 為 INTERNAL；任何 step 已存在都不走此 release |
 
 Host helper 在第一個 mutating call（update-ref、exact unlink／rmdir、git restore、git worktree remove）開始前
 設 marker。之前的拒絕仍是 `{error:code}`，沿用 definitive code；之後任一 ValueError／OSError／SubprocessError
@@ -359,8 +398,8 @@ step definitive failed；canonical_paths／observation／verify.retained 是 rea
 | NOT_FOUND／UNKNOWN_HOST | 404；原 ID有tombstone仍可查 |
 | FORBIDDEN／DISCARD_SCOPE_REQUIRED | 403；discard admission缺cleanup_discard，不用於resume |
 | PREVIEW_TOKEN_INVALID | 409，格式／signature／rotated key不符，重preview |
-| PREVIEW_MISMATCH | 409，actor／target／choices／precondition與token不符，重preview |
-| PREVIEW_EXPIRED／PREVIEW_BLOCKED | 409，過期／ready=false |
+| PREVIEW_MISMATCH | 409，actor／target／choices／precondition與token不符或 resumed accepted token hash 不符；完全無 step 的 run 先釋放 own guards、pending／running 改 failed，再重preview |
+| PREVIEW_EXPIRED／PREVIEW_BLOCKED | 409，過期／ready=false；resumed run 完全無 step 時 expiry 先釋放 own guards、pending／running 改 failed；已有 step 沿原 reconcile 規則 |
 | PREVIEW_STALE | 409或operation error，live state changed；首輪回fingerprint已變，item階段回resource已變；重preview比較原預覽 |
 | PREVIEW_TOO_LARGE | 413，改較小scope，不截斷執行 |
 | RESOURCE_CLEANED／CLEANUP_IN_PROGRESS | 409／policy refusal，原generation已清理／reserved |
@@ -374,6 +413,7 @@ step definitive failed；canonical_paths／observation／verify.retained 是 rea
 | CLEANUP_HOST_REFUSED／CLEANUP_GATE_REQUIRED | 409，gate 前 exchange 失敗／mutation 缺 gate；helper 未獲 proceed，不會寫入 |
 | CLEANUP_PARTIAL_STATE | operation needs_attention、item uncertain；未決 step uncertain，definitive refused step failed。保存 completed_phases、refused_phase／refused_code 或 removed／changed／remaining；guard 保留。cancel 仍保存 effects／reservation，不能把 partial 當 success／kept |
 | LEGACY_CLEANUP_DISABLED | 409，改用batc resource-cleanup |
+| INTERNAL | OperationService 原 handler error；完全無 step 的 local／journal decode failure 仍先結清 pending／running、釋放 own reserved guards，不做 host call |
 | IDEMPOTENCY_CONFLICT／IDEMPOTENCY_KEY_REQUIRED／NOT_RESUMABLE | 沿用OperationService |
 
 ## Crash／lost-reply（Part A；restore列為Part B）
@@ -385,7 +425,7 @@ parent cancelled/failed把它當成沒發生。遠端程序仍在／身份不明
 |---|---|
 | preview reply lost | 純讀重取；沒有preview row要刪 |
 | accepted reply lost | 同key查同operation |
-| validate／guard後crash | 查固定plan／registry marker，未送出steps仍受initial expiry；有step先reconcile |
+| validate／guard後crash | 查固定plan／registry marker；完全無 step 時 expiry／mismatch／early refusal 先按 operation_id 釋放全部 own reserved guards／session markers、pending／running 回執改 failed；無外部 mutation 可安全釋放，新 preview／apply 可再回收。有step不採此 release，先reconcile |
 | preserve ACK lost／部分 pins 後錯誤 | 全部 exact ref=planned SHA且object可讀補成功；content unchanged、flock 證明原程序結束才 CAS 補 missing pins；不同SHA轉 CLEANUP_PARTIAL_STATE、guard 保留 |
 | stop ACK lost | 已證實start、host健康、相同generation的終止證據才成功；單次meta=null／無tab不足；unknown不重stop |
 | discard partial／lost | 完整 dirty=0／HEAD／retained 證據補成功；同 before 且原程序結束可重跑；extras 已刪但 tracked／staged 未完整 restore 時 CLEANUP_PARTIAL_STATE，逐 entry 證據保留且不再 remove worktree |
@@ -496,6 +536,9 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | receipt而非ancestor，partialpick/newtip/uncertain；E02 | test_e02_squash_and_pick_use_exact_delivery_receipt_coverage |
 | release保留內容只需cleanup／discard需scope；E01 | test_e01_release_keeps_commits_with_cleanup_scope、test_e01_discard_requires_cleanup_discard |
 | purepreview/token/stale/expiry；E01 | test_e01_preview_is_pure_and_signed_plan_cannot_be_changed、test_e01_stale_any_item_stops_before_mutation_and_reports_changes |
+| guard 到第一個 step 間 crash／early refusal、同資源可再回收；E01／§23 failures | test_e01_resumed_unstarted_refusal_releases_all_reservations（expiry／mismatch／journal decode error、全部 guards／session markers 清除、回執 definitive、新 preview／apply 成功）、test_e01_refusal_before_first_step_releases_guard（validate／reservation／set_refs）、test_e01_expiry_after_read_only_failure_settles_unstarted_uncertainty |
+| 有 step 的 resume 不採 unstarted release；E01 | test_e01_resumed_expired_run_with_steps_keeps_reservations_and_finishes、test_e01_resumed_mismatch_with_steps_never_releases_guard、test_e01_dependency_refusal_keeps_unresolved_call_reserved |
+| observed absence 不假稱 retained／cleaned；E01/E02／§23 receipts | test_e01_already_absent_receipt_and_satisfied_dependency（mixed reclaim、HTTP operation receipt／summary、自有 tombstones 不建 absence row、無 per-item execution／stop／registry cleaned、accepted absent dependency 可繼續） |
 | canonical/policy/preserve/nonforce/CAS；E01 | test_e01_every_mutation_rechecks_policy_and_canonical_destination、test_e01_preserve_precedes_nonforced_remove_and_cas_checks_delivered_refs |
 | standalone BAT creation 的 host／work-item scope、preserve／remove／branch CAS；E01/E02 | test_e01_standalone_bat_worktree_and_branch_are_reclaimed（兩種 target、session delivery receipt、兩 item succeeded、載體保留）、test_e01_standalone_bat_release_keeps_undelivered_branch |
 | standalone live carrier／branch 矛盾、managed roots 外不能回收；E01 | test_e01_standalone_bat_worktree_live_binding_mismatch_is_retained、test_e01_standalone_bat_worktree_outside_managed_roots_is_listed_and_retained |

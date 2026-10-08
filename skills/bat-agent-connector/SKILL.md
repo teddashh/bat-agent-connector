@@ -203,6 +203,11 @@ item is done.
   original post-discard state and never repeats successful phases. Cancelling this partial operation keeps the
   reservation for inspection; it cannot be resumed or force-unlocked here. Additive-only settled pins may release
   the guard and remain in the receipt. Gate-passed transport/protocol failures stay uncertain and require read-back.
+  An expired/mismatched resumed run with no durable steps releases all its reservations and settles
+  pending/running receipts as failed with the refusal code; get a new preview. Runs with steps keep their
+  read-back rules. already_absent is a separate definitive receipt and summary count, satisfies dependencies,
+  and causes no per-item host call, tombstone or registry cleaned mark: cleanup did not remove that resource.
+  Read its original IDs and observation through the operation receipt.
   Use cleanup_tombstones to find original IDs, location, reasons and PR destinations,
   cleanup_retained to read actual retained refs. Restore comes in Part B; no tool can revive a runtime.
   Legacy session_cleanup is read-only evaluation; apply always returns LEGACY_CLEANUP_DISABLED. auto_cleanup is

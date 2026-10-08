@@ -112,6 +112,12 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 Apply 只執行同一 reviewed fingerprint；16 KiB signed token，15 分鐘到期。release_undelivered 保留 commits 與
 branch，不需 cleanup_discard；只有 discard_uncommitted 摧毀內容。Accepted actor/scopes/choices 固定，resume
 沿用原 OperationService 規則，不再檢查 discard scope；回執記錄 resumer。保留設定 keep/forever/false。
+Resumed run 在沒有任何 operation_steps row 時若 expiry／mismatch／early refusal，先釋放全部 own reserved
+guards／session markers、pending／running 回執改 failed 並保存 refusal code；已有 step 不走此 release。
+完全無 step、只因 read-only failure 留下的 uncertain 回執也在 refusal 時結清為 failed。
+Item status=already_absent 是獨立 definitive receipt，result.items 與 summary.already_absent 分別列出，
+不算 retained。它只保存經全 plan 驗證的 absence／original IDs，沒有 per-item host call、tombstone／aliases
+或 registry cleaned mark；不是 cleanup 移除的證據。Dependencies 接受 succeeded 或 already_absent。
 GET /operations/{id} 的 cleanup_receipts／tombstone 回執包含 completed_phases=[{resource_id,phase,effect,step,result}]、
 refused_phases（同形但 error）及 cancel_requested。它們投影 durable steps／operation，含 approved DAG 的
 prerequisites，不因後續失敗消失。result.items 是最後一次 progress snapshot；cancel 後以 live cleanup_receipts

@@ -59,6 +59,10 @@
   a new attempt. Cancel keeps partial effects and reservations visible; additive-only settled pins may release
   their guard and stay listed. Stop's read-only gate now completes before its BAT write, so a lost stop reply
   is uncertain too. The API contract and both skills document the receipt fields and cancellation rule.
+  Resumed cleanup refusals before any durable external step now release all of that operation's reservations
+  and settle pending/running receipts with the refusal code, including expiry and token mismatch. Runs with
+  steps keep their existing reconcile rules. Already-absent resources get their own receipt and summary count,
+  satisfy dependencies, and make no per-item host call or false tombstone/registry cleaned mark.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
