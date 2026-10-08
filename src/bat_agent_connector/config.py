@@ -357,6 +357,7 @@ class GitHubConfig:
     api_version: str = "2026-03-10"
     timeout_s: float = 20.0
     wait_max_s: float = 3600.0
+    deployment_reconcile_interval_s: float = 300.0
     repos: dict[str, GitHubRepo] = field(default_factory=dict)
     recipes: dict[str, DeployRecipe] = field(default_factory=dict)
 
@@ -415,6 +416,9 @@ def _integrate(r: dict, repository: str, api_url: str, host_names: set[str]) -> 
 
 def parse_github(data: dict) -> GitHubConfig:
     g = data.get("github") or {}
+    interval = g.get("deployment_reconcile_interval_s", 300)
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not 60 <= interval <= 86400:
+        raise ConfigError("[github] deployment_reconcile_interval_s must be between 60 and 86400 seconds")
     api_url = str(g.get("api_url") or "https://api.github.com").rstrip("/")
     host = re.sub(r"^https?://", "", api_url).split("/", 1)[0].split(":", 1)[0]
     if not (api_url.startswith("https://") or (api_url.startswith("http://")
@@ -496,6 +500,7 @@ def parse_github(data: dict) -> GitHubConfig:
         token_ref=token_ref, api_url=api_url, api_version=str(g.get("api_version") or "2026-03-10"),
         timeout_s=max(2.0, min(120.0, float(g.get("timeout_s", 20)))),
         wait_max_s=max(60.0, min(7 * 86400.0, float(g.get("wait_max_s", 3600)))),
+        deployment_reconcile_interval_s=float(interval),
         repos=repos, recipes=recipes)
 
 

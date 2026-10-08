@@ -136,6 +136,7 @@ class FakeGitHub:
         self.next_run_id += 1
         self.runs[rid] = {"id": rid, "head_sha": head_sha, "display_title": title, "name": "Deploy",
                           "status": status, "conclusion": conclusion, "event": event, "run_attempt": attempt,
+                          "created_at": datetime.now(timezone.utc).isoformat(),
                           "head_branch": branch, "workflow_id": workflow_id, "repository": {"id": repository_id},
                           "html_url": f"https://github.example/o/r/actions/runs/{rid}"}
         self.jobs[rid] = [{"name": "build", "conclusion": "success"},
@@ -261,6 +262,10 @@ class FakeGitHub:
                             and r["workflow_id"] == fake.workflow_ids.get(m.group(1), -1)
                             and (not query.get("branch") or r["head_branch"] == query["branch"])
                             and (not query.get("event") or r["event"] == query["event"])]
+                    if query.get("created"):
+                        cutoff = unquote(query["created"]).removeprefix(">=")
+                        start = datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
+                        runs = [r for r in runs if datetime.fromisoformat(r["created_at"].replace("Z", "+00:00")) >= start]
                     page, size = int(query.get("page", 1)), int(query.get("per_page", 50))
                     return self._send(200, {"total_count": len(runs), "workflow_runs": runs[(page-1)*size:page*size]})
                 m = re.fullmatch(r"/repos/o/r/actions/workflows/([^/]+)", path)

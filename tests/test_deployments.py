@@ -664,7 +664,9 @@ async def test_legacy_undispatched_operation_stops_for_deployment_preview(make_d
     assert done["error_code"] == "DEPLOY_PREVIEW_REQUIRED" and gh.count("POST", "dispatches") == 0
 
 
-async def test_issue32_cancelled_on_merge_wait_keeps_slot_until_the_exact_run_finishes(make_daemon, gh):
+async def test_issue32_cancelled_on_merge_wait_keeps_slot_until_the_exact_run_finishes(make_daemon, gh, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(deployment, "reconcile_now", lambda: clock[0])
     d = make_daemon(mode="on_merge")
     source_on_main(gh)
     op = await start(d)
@@ -676,6 +678,7 @@ async def test_issue32_cancelled_on_merge_wait_keeps_slot_until_the_exact_run_fi
         == w["external_refs"]["deployment_id"]
     )
     run = gh.add_run(head_sha=MERGED, event="push")
+    clock[0] += 300
     await delivery.reconcile_deployments(d.ops)
     assert deployment.environment_status(d.ops, "prod")["slot_deployment_id"]
     completed(gh, run["id"])

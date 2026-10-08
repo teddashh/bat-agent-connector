@@ -250,6 +250,9 @@ confirm=true). This creates a new operation/generation/run and redeploys the sav
 SHA rollback rebuilds from that source; it does not promise the same binary. Artifacts must retain their original
 ID/digest/producing-run and be available, unexpired. Deleting or marking a history row inactive never changes runtime.
 Cancel stops local steps; GitHub can still merge/deploy, so the provider slot stays locked until terminal evidence.
+For on_merge, a cancelled PR merging still holds the slot until its exact push run finishes. Legacy runs also block
+other recipes in the same repository/environment. Settled history is not polled; current runtime/run and unknown-run
+lookup use `[github] deployment_reconcile_interval_s` (default 300, minimum 60 seconds), including after restart.
 Reconciliation only reads. Superseded or ENVIRONMENT_VERSION_DRIFT never triggers an automatic dispatch.
 
 All delivery MCP write wrappers require confirm=true and the client's BATC_API_TOKEN; read-only MCP does not register
