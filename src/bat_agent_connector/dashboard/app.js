@@ -174,6 +174,8 @@ function sessionBadges(s) {
   return [
     chip(s.host),
     chip(confinementLabel(s), s.confinement?.level === "none" ? "readonly" : "info"),
+    s.confinement?.level && s.confinement.level !== "none" && ["unknown", "mismatch"].includes(s.current_verification?.status)
+      ? chip(t("confinement_current_" + s.current_verification.status), "stale") : null,
     s.api_access === "managed" ? chip(t("managed"), "managed") : chip(t("read_only"), "readonly"),
     s.stale ? chip(`${t("stale")} · ${t("stale_reason_" + s.stale_reason)}`, "stale") : null,
     s.pending ? chip(t("pending_" + s.pending.kind), "stale") : null,
