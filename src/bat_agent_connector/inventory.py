@@ -2,8 +2,8 @@
 
 A refresher polls each configured host with its own read-only Fleet (every write channel is refused in the client
 core, so observation can never change BAT), upserts one row per (host, session_id), and appends an /api/v1 event
-only when something material changed. An unreachable host keeps its last rows, marked stale, instead of dropping
-them; a row is only marked gone after two consecutive successful enumerations without it.
+only when material values or field freshness changed. An unreachable host keeps its last rows, marked stale,
+instead of dropping them; a row is only marked gone after two consecutive successful enumerations without it.
 """
 
 from __future__ import annotations
@@ -22,10 +22,10 @@ from .fleet import Fleet
 from .observation import Observation, _refs, body, dump, registry_bindings
 from .redact import redact
 
-# Changes to these fields produce a session.updated event; activity time alone does not.
+# Values and non-timestamp field freshness produce session.updated; activity/observation times alone do not.
 MATERIAL = ("workspace", "workspace_id", "title", "cwd", "agent_kind", "agent_preset", "model", "loaded",
             "streaming", "runtime_status", "pending", "worktree_branch", "orchestrated", "has_tab", "provenance",
-            "api_access", "read_only_code", "isolation")
+            "api_access", "read_only_code", "isolation", "fields_stale", "field_evidence")
 GONE_AFTER_MISSES = 2
 MAX_PAGE = 200
 
@@ -175,11 +175,12 @@ class Inventory:
                                  -int(activity), at, at))
                 if prev is None:
                     added += 1
-                    self.journal.api_event("session", f"{host}/{sid}", "session.added", {**_material(row), "first_seen_at": _iso(at), "field_evidence": row.get("field_evidence"), "field_observed_at": row.get("field_observed_at")}, actor="inventory", context=self._context(host))
-                elif prev["digest"] != digest or prev["gone_at"] is not None:
+                    self.journal.api_event("session", f"{host}/{sid}", "session.added", {**_material(row), "first_seen_at": _iso(at), "field_observed_at": row.get("field_observed_at")}, actor="inventory", context=self._context(host))
+                # Recompute with today's keys so an older cached digest cannot make an unchanged poll noisy.
+                elif _digest(prior) != digest or prev["gone_at"] is not None:
                     updated += 1
                     self.journal.api_event("session", f"{host}/{sid}", "session.reappeared" if prev["gone_at"] is not None else "session.updated",
-                                           {**_material(row), "field_evidence": row.get("field_evidence"), "field_observed_at": row.get("field_observed_at"), "changed_fields": [k for k in MATERIAL if prior.get(k) != row.get(k)]},
+                                           {**_material(row), "field_observed_at": row.get("field_observed_at"), "changed_fields": [k for k in MATERIAL if prior.get(k) != row.get(k)]},
                                            actor="inventory", context=self._context(host))
                 if old_reason:
                     self.journal.api_event("session", f"{host}/{sid}", "session.fresh", {"previous_reason": old_reason}, actor="inventory", context=self._context(host))

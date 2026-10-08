@@ -1074,6 +1074,153 @@ async def test_b02_unchanged_poll_does_not_rewrite_observation_identities(mock, 
     j.close()
 
 
+def freshness_sessions(mock):
+    sids = [MANUAL, "sess-unload-0003"]
+    mock.ws_doc["terminals"] = [t for t in mock.ws_doc["terminals"] if t["id"] in sids]
+    mock.metas[sids[1]] = dict(mock.metas[sids[0]])
+    failing = set()
+
+    def meta(params):
+        sid = params["sessionId"]
+        if sid in failing:
+            raise RuntimeError("private meta failure details")
+        return mock.metas[sid]
+
+    mock.handlers["claude:get-session-meta"] = meta
+    return sids, failing
+
+
+async def test_b02_b03_field_freshness_swap_catches_up_through_events(served, mock, monkeypatch, capsys):
+    """B02/B03, §11/§19: swapping meta failures stays visible even with unchanged discovery coverage."""
+    d, port = served
+    sids, failing = freshness_sessions(mock)
+    viewer = token(d, "viewer", "observe")
+    monkeypatch.setenv("BATC_API_TOKEN", viewer)
+    monkeypatch.setenv("BATC_TASK_URL", f"http://127.0.0.1:{port}/rpc")
+    await d.inventory.refresh_host("h1")
+    added = [e for e in d.journal.api_events()["events"] if e["kind"] == "session.added"]
+    assert len(added) == 2 and all(e["body"]["fields_stale"] is False for e in added)
+    failing.add(sids[0])
+    await d.inventory.refresh_host("h1")
+    status, baseline = await http(port, "GET", "/api/v1/sessions?order=id", tok=viewer)
+    assert status == 200
+    assert {s["session_id"]: s["fields_stale"] for s in baseline["sessions"]} == {sids[0]: True, sids[1]: False}
+    scope = d.inventory.discovery("h1")["scopes"][0]
+    assert scope["status"] == "partial"
+    failing.remove(sids[0])
+    failing.add(sids[1])
+    await d.inventory.refresh_host("h1")
+    current_scope = d.inventory.discovery("h1")["scopes"][0]
+    assert current_scope["status"] == "partial" and current_scope["coverage"] == scope["coverage"]
+    status, catchup = await http(port, "GET", f"/api/v1/events?after={baseline['as_of']}", tok=viewer)
+    assert status == 200
+    assert [e["kind"] for e in catchup["events"]] == ["session.updated", "session.updated"]
+    updates = {e["resource_id"]: e["body"] for e in catchup["events"]}
+    assert set(updates) == {"h1/" + sid for sid in sids}
+    assert "private meta failure details" not in dump(catchup)
+    status, current = await http(port, "GET", "/api/v1/sessions?order=id", tok=viewer)
+    assert status == 200
+    for session in current["sessions"]:
+        stale = session["session_id"] == sids[1]
+        event = updates[session["resource_id"]]
+        assert event["fields_stale"] is session["fields_stale"] is stale
+        assert event["field_evidence"] == session["field_evidence"]
+        assert set(event["changed_fields"]) == {"fields_stale", "field_evidence"}
+        assert session["state"]["evidence"]["loading"]["stale"] is stale
+        assert session["state"]["evidence"]["activity"]["stale"] is stale
+        assert event["field_evidence"]["loaded"] == ("previous_session_meta" if stale else "session_meta")
+
+    # Legacy or injected extra text stays out of summaries, including inside the evidence map.
+    seq = catchup["events"][0]["seq"]
+    saved = json.loads(d.journal.db.execute("SELECT body FROM api_events WHERE seq=?", (seq,)).fetchone()[0])
+    saved["error"] = "private meta failure details"
+    saved["field_evidence"]["note"] = "private meta failure details"
+    with d.journal.tx():
+        d.journal.db.execute("UPDATE api_events SET body=? WHERE seq=?", (dump(saved), seq))
+    server, fleet = mcp_server.build_server(d.fleet.config, read_only=True)
+    try:
+        for sid, states in zip(sids, ([False, True, False], [False, True])):
+            status, expected = await http(port, "GET", f"/api/v1/sessions/h1/{sid}/history?order=asc", tok=viewer)
+            assert status == 200 and "private meta failure details" not in dump(expected)
+            events = [e for e in expected["events"] if e["kind"] in {"session.added", "session.updated"}]
+            assert [e["body"]["fields_stale"] for e in events] == states
+            for event, stale in zip(events, states):
+                source = "previous_session_meta" if stale else "session_meta"
+                assert event["body"]["field_evidence"] == {"loaded": source, "streaming": source, "has_tab": "workspace_document"}
+            result = await server.call_tool("resource_history", {"resource_type": "session", "resource_id": "h1/" + sid, "order": "asc"})
+            if isinstance(result, tuple):
+                content, structured = result
+                actual = structured if structured is not None else json.loads(content[0].text)
+            else:
+                content = result.content if hasattr(result, "content") else result
+                actual = json.loads(content[0].text)
+            assert actual == expected
+            assert await asyncio.to_thread(cli.main, ["--json", "history", "session", "h1", sid, "--order", "asc"]) == 0
+            assert json.loads(capsys.readouterr().out) == expected
+    finally:
+        await fleet.close()
+    assert write_frames(mock) == []
+
+
+async def test_b02_unchanged_field_freshness_polls_emit_no_events(mock, tmp_path):
+    """B02, §11: repeated failures/successes and advancing observation/activity times stay quiet."""
+    j = Journal(tmp_path / "j.db")
+    inv = Inventory(j, make_config(mock))
+    sids, failing = freshness_sessions(mock)
+    await inv.refresh_host("h1")
+    failing.add(sids[0])
+    await inv.refresh_host("h1")
+    before = j.api_head()
+    await inv.refresh_host("h1")
+    assert j.api_head() == before
+    failing.clear()
+    await inv.refresh_host("h1")
+    before = j.api_head()
+    await inv.refresh_host("h1")
+    assert j.api_head() == before
+    rows = [json.loads(r[0]) for r in j.db.execute("SELECT body FROM sessions_observed")]
+    for row in rows:
+        row["last_activity_ms"] += 1000
+    inv._record_success("h1", time.time() + 120, rows, "v-test")
+    assert j.api_head() == before
+    for row in rows:
+        current = inv.get_session("h1", row["session_id"])
+        assert current["field_observed_at"]["loading"] != row["field_observed_at"]["loading"]
+        assert current["last_activity_ms"] == row["last_activity_ms"]
+    await inv.close()
+    j.close()
+
+
+async def test_b02_field_evidence_only_change_and_old_digest_upgrade(mock, tmp_path):
+    """B02, §11: evidence itself is material; upgrading the cached digest is not a transition."""
+    from bat_agent_connector.inventory import MATERIAL
+
+    j = Journal(tmp_path / "j.db")
+    inv = Inventory(j, make_config(mock))
+    mock.ws_doc["terminals"] = [t for t in mock.ws_doc["terminals"] if t["id"] == MANUAL]
+    mock.metas[MANUAL] = {}
+    await inv.refresh_host("h1")
+    before = j.api_head()
+    row = json.loads(j.db.execute("SELECT body FROM sessions_observed").fetchone()[0])
+    old_material = {k: row.get(k) for k in MATERIAL if k not in {"fields_stale", "field_evidence"}}
+    old_digest = hashlib.sha256(json.dumps(old_material, sort_keys=True, default=str).encode()).hexdigest()
+    with j.tx():
+        j.db.execute("UPDATE sessions_observed SET digest=?", (old_digest,))
+    await inv.refresh_host("h1")
+    assert j.api_head() == before
+    mock.metas[MANUAL] = {"numTurns": 0}
+    await inv.refresh_host("h1")
+    events = j.api_events(before)["events"]
+    assert len(events) == 1 and events[0]["kind"] == "session.updated"
+    assert events[0]["body"]["changed_fields"] == ["field_evidence"]
+    assert events[0]["body"]["fields_stale"] is False
+    assert events[0]["body"]["field_evidence"]["streaming"] == "session_meta"
+    assert inv.get_session("h1", MANUAL)["loaded"] is True
+    assert inv.get_session("h1", MANUAL)["streaming"] is None
+    await inv.close()
+    j.close()
+
+
 async def test_b02_two_hosts_one_offline_and_scope_change(mock, tmp_path):
     j = Journal(tmp_path / "j.db")
     cfg = make_config(mock)

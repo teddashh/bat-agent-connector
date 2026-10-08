@@ -76,6 +76,10 @@ prove deletion or completion. Keep API actor, claimed actor and observer separat
 Relations and worktree IDs grant no writes. Read discovery's methods, authority and outside_scan before claiming
 coverage. Observation never starts/resumes/rehydrates sessions or probes Git in the background. Default events hide
 history.backfilled; explicit kind filtering or resource history can read it. Process events before saving next_cursor.
+Session added/updated/reappeared events carry `fields_stale` and `field_evidence`. Treat meta failure/recovery or
+changed evidence as an update even when loaded/streaming values stay the same. Observation/activity timestamps
+alone emit no update. The separate session.stale/session.fresh pair tracks not_enumerated/gone/scope_changed;
+it does not clear stale field evidence. Resource history preserves the freshness booleans and fixed evidence values.
 History cursors retain their original as_of bound; new facts require a new first page. See docs/design/observation.md.
 Dashboard timeline and reconnect flow are the later Part B.
 

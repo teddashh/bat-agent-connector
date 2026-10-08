@@ -17,6 +17,7 @@ Phase 1 規格已審查。Phase 2 分兩步：Part A（本次）實作伺服器�
 | Saved fact time 修正 | `a48dba3`（#35 的審查基準）。沒有原 event seq 的回填事實以自己的時間定位，保留 task execution link；不改 live projection，不 rebase。 |
 | Relation closure body 修正 | `a48dba3`（#35 的審查基準），接續 saved-fact 修正 `ad4d668`。新 relation 事件與同 seq revision 使用同一完整 body；legacy closure 重建 command 終點，不猜關閉時間。 |
 | Operation refs position 修正 | `f415cfb`（#35 的審查基準）。Operation event seq 與 resource linked_at_seq 都受 caller 的位置限制；checkpoint runs 也需要當時已存在的證據。不 rebase、不新增資料步驟。 |
+| Field freshness 事件修正 | `96a0b1c`（#35 的審查基準）。Session 值相同但 meta freshness 改變仍寫 update；不 rebase、不新增 event kind 或資料步驟。 |
 | 計畫 | v1.0（2026-10-06）；以章節及驗收編號引用，不複製私有計畫。 |
 | BAT | `b7419892fbc9946799b64cca24c2ec8c7fa15c42`；不代表每台主機都已安裝此版，實際 `serverVersion` 另存於掃描證據。 |
 
@@ -165,6 +166,10 @@ Execution 終態／明確 replacement 可關閉該已確認使用區間；不能
 
 Cheap poll 沒重讀 archive／pending 時明列 skipped，保留舊值及欄位時間。首次 meta 失敗仍可保存 tab 身分，但 loading/activity 為 unknown；後續失敗沿用舊事實並標欄位 stale。Null／壞 workspace 文件一律不是完整列舉，即使 registry 剛好提供非空 rows 也不增加 missing_count。成功文件僅有部分 enrichment 失敗時，已確認的 tab 列舉仍可成功，相關欄位及來源保持 partial。
 
+欄位 freshness 採既有 session 事件：`Inventory.MATERIAL`、digest、`changed_fields` 納入 `fields_stale` 與 `field_evidence` 的值；`session.added`／`session.updated`／`session.reappeared` 的 body 都帶兩欄。Meta 失敗改為 `fields_stale: true`、loaded/streaming 的 `previous_session_meta`；恢復改回 false 與本輪的 `session_meta`／`not_observed`。Evidence 的其他固定值為 `meta_failed`（首次失敗）、`workspace_document`（tab）。即使 loaded／streaming 保留相同值，兩向轉換與單獨 evidence 改變都寫 update；兩個 session 互換失敗時，即使 discovery 的 partial／coverage 不變，也能從 inventory.as_of 之後的 events catch-up。`field_observed_at`、`last_activity_ms` 不加入 digest 或 changed_fields；相同 evidence 的連續失敗／成功不寫事件。比較舊 body 時使用同一組現行 keys，舊版本 cached digest 的格式變更不算 freshness 轉換。
+
+欄位 freshness 不使用 `session.stale`／`session.fresh`；後者只描述 specific_stale_reason，兩種 stale 可同時存在。History 的遞迴 SUMMARY_FIELDS 已保留 `fields_stale`、`field_evidence` 及其中 loaded／streaming／has_tab；本輪不放寬 whitelist，只傳固定 enum 與布林，meta_error、error、note 不進摘要。MCP resource_history 與 CLI history 直接回相同 server body。現有 Dashboard 列表依 session resource_type 事件重新讀目錄，session 頁依自身 resource_id 更新訊息；沒有套用 delta 或 kind 白名單，因此沿用 session.updated 即可通知。Dashboard 多軸狀態／timeline／reconnect 消費仍屬 Part B。
+
 Journal／registry 候選在失敗 poll 前已知的身分仍保留；不讀 registry 充當成功 BAT 枚舉。每台 host 的排程與退避沿用 `Inventory.loop`，慢 host 不阻擋其他 hosts。Host 從設定移除時沿用一般列表不列它的行為；journal 歷史保留，已知 ID 的純歷史讀取回 `scope_status: outside_current_config`，不呼叫已移除 host。
 
 Host reachability 沿用 `host.reachable`／`host.unreachable`，host_unreachable／host_not_refreshed／never_observed 的 session freshness 在讀取時由 host row 推導，不為每個 session 寫事件或索引 host flap。只對 session-specific 的 `not_enumerated`、`gone`、scope change 記 `session.stale`／`session.fresh`；相同 reason／觀測版本只記一次，GET 不寫事件。Daemon 停機期間不虛構 poll；host_not_refreshed 在讀取時推導，重啟不補寫每 session 的逾期事件。
@@ -179,8 +184,8 @@ Operation intent 當下尚不知道新 session／worktree 時，其 context 保�
 
 | Event kind | Journal 來源／既有寫入點 | 事件固定 fields 與關聯 | 狀態 |
 |---|---|---|---|
-| `session.added` | `sessions_observed`；`Inventory._record_success` | resource、scan、first_seen、material snapshot、各欄觀測證據；只表示第一次被 Connector 看見。 | 已有；補 context |
-| `session.updated` | 同上 | before/after 或 changed fields、欄位 evidence；額外 field timestamps 保存於最新 observation，timeline context 取當輪已知來源；不因活動 timestamp 更新單獨發事件。 | 已有；補 diff/context |
+| `session.added` | `sessions_observed`；`Inventory._record_success` | resource、scan、first_seen、material snapshot、fields_stale 布林及固定 field_evidence；只表示第一次被 Connector 看見。 | 已有；補 context |
+| `session.updated` | 同上 | material snapshot、changed_fields、fields_stale、field_evidence；freshness 的兩向轉換即使保留值相同仍記錄，連續相同結果不記。Field timestamps 不參與 digest，timeline context 取當輪已知來源；活動時間單獨改變不發事件。 | 已有；補 diff/context |
 | `session.worktree_bound` | registry 的首次／變更 binding；`registry_bindings/bind_worktree` | session resource ID、worktree ID、previous worktree ID；用原 seq 保存 start/end 與 linked_at_seq。已知 creation intent 由原 operation/task/checkpoint event 投影，不另發一筆。同一 registry binding 重複 poll 不追加事件。 | 補記；projection 與 index 共用 savepoint |
 | `session.gone`、`session.reappeared` | `sessions_observed.missing_count/gone_at`；成功列舉交易 | misses、scan、最後 seen、原身分；重現清除 gone，不重建 ID。現有 reappear 是 `session.updated`，Phase 2 改發專用事件且不雙發。 | gone 已有；reappeared 補記 |
 | `session.stale`、`session.fresh` | 保存的 host／session freshness transition | reason、依據 scan/觀測版本、過期與記錄時間。 | 補記；GET 不產生 |
@@ -377,6 +382,8 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B02；§11 | `test_b02_scope_change_stays_blocked_on_later_refreshes`：同 profile 改 URL／fingerprint，連續兩輪零 BAT frames；binding 與 binding_version 固定原值，attempted_binding_version 記被拒絕值；原身分及 history 不變。 |
 | B02；§11 | `test_b02_discovery_latest_no_poll_rows_and_no_host_fanout`、`test_b02_session_specific_stale_gone_fresh_and_get_no_writes`：每 profile 一筆 latest、相同 poll 不寫事件；host flap 不 fan-out；missing/gone/reappear/fresh 與 GET 零 writes。 |
 | B02；§11 | `test_b02_unchanged_poll_does_not_rewrite_observation_identities`：第二輪 registry 投影的 total_changes 不變；相同 BAT／registry 不重寫 observation tables。 |
+| B02、B03；§11、§19 | `test_b02_b03_field_freshness_swap_catches_up_through_events`：兩 sessions 的 meta 失敗互換，discovery 持續 partial／相同 coverage；inventory.as_of 後 HTTP events 分別通知恢復／失敗，最終 state evidence 一致。HTTP/MCP/CLI history 保留每次 freshness，原 error 與巢狀 note 被移除；零 BAT writes。 |
+| B02；§11 | `test_b02_unchanged_field_freshness_polls_emit_no_events`：連續相同失敗／成功、僅 field_observed_at／last_activity_ms 前進都不寫事件。`test_b02_field_evidence_only_change_and_old_digest_upgrade`：僅 evidence enum 改變寫 update，fields_stale 保持 false；舊 digest 首輪相同 poll 不誤發。 |
 | B02；§10、§11 | `test_b02_cursor_catchup_sse_resume_and_hidden_backfill`：分頁 gap catch-up、Last-Event-ID resume 不重複、backfill 不進 live feed、超前 cursor 422。 |
 | B02；§11、§19（Part B） | `test_b02_dashboard_reopen_and_sse_gap_without_duplicates`（待第二步）：瀏覽器 baseline/reopen、frame 碎片/重疊/去重、token 更換、filters/草稿及 typing hold；Playwright 驗證。 |
 | B03；§08、§11 | `test_b03_unknown_human_claim_is_not_api_actor_or_git_author`、`test_b03_rpc_admin_identity_is_not_claimed_human`：自報 Ted 保持 claim，RPC admin 是 local-admin；Git author 不升為 API actor。 |

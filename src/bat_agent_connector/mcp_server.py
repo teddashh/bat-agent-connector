@@ -312,7 +312,8 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
                                  stale: bool | None = None, relation_scope: Literal["current", "history"] = "history") -> dict[str, Any]:
         """The daemon's persisted session inventory across hosts (no host round trip): provenance, api_access,
         loaded/streaming/pending, observed_at and stale. Offline hosts keep their last rows marked stale. Page with
-        next_cursor; as_of is the events cursor to follow with events_list for changes."""
+        next_cursor; as_of is the events cursor to follow with events_list for changes. Session updates include
+        fields_stale/field_evidence transitions even when the retained values are unchanged."""
         return await daemon("inventory_sessions", host=host, access=access, provenance=provenance,
                             attention=attention, include_gone=include_gone, cursor=cursor, limit=limit, order=order,
                             profile_id=profile_id, project_id=project_id, work_item_id=work_item_id, execution_id=execution_id,
@@ -335,7 +336,8 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
                                cursor: str | None = None, limit: int = 50, order: Literal["asc", "desc"] = "desc",
                                kind: list[str] | None = None, since: float | None = None, until: float | None = None) -> dict[str, Any]:
         """Paginated journal facts with actor evidence and a fixed as_of bound. Session ID is host/full-ID.
-        Read every next_cursor for complete history; unknown actors remain unknown."""
+        Read every next_cursor for complete history; unknown actors remain unknown. Session added/updated/reappeared
+        facts retain fields_stale and fixed field_evidence values for meta failure/recovery."""
         return await daemon("resource_history", resource_type=resource_type, resource_id=resource_id,
                             cursor=cursor, limit=limit, order=order, kind=kind, since=since, until=until)
 
@@ -352,7 +354,8 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
                           related_resource_type: Literal["session", "worktree", "execution"] | None = None,
                           related_resource_id: str | None = None) -> dict[str, Any]:
         """The shared event log (tasks, operations, sessions, hosts) after a persistent cursor. Store next_cursor
-        only after handling the returned events; limit=0 returns head_cursor."""
+        only after handling the returned events; limit=0 returns head_cursor. Session.updated includes changes to
+        fields_stale/field_evidence; observation/activity timestamps alone emit no update."""
         return await daemon("api_events", after=after, limit=limit, resource_type=resource_type,
                             resource_id=resource_id, kind=kind, related_resource_type=related_resource_type, related_resource_id=related_resource_id)
 
