@@ -210,6 +210,20 @@ class Journal:
                 missing_count INTEGER NOT NULL DEFAULT 0, gone_at REAL, PRIMARY KEY(host, session_id)
             );
             CREATE INDEX IF NOT EXISTS sessions_observed_activity ON sessions_observed(sort_key, host, session_id);
+            CREATE TABLE IF NOT EXISTS checkpoints (
+                checkpoint_id TEXT PRIMARY KEY, host TEXT NOT NULL, source_session_id TEXT NOT NULL,
+                source_provenance TEXT NOT NULL, workspace_id TEXT, workspace_name TEXT, cwd TEXT NOT NULL,
+                repo_root TEXT NOT NULL, branch TEXT, commit_sha TEXT NOT NULL, head_sha TEXT NOT NULL,
+                dirty INTEGER NOT NULL DEFAULT 0, excerpt TEXT NOT NULL, excerpt_sha256 TEXT NOT NULL, note TEXT,
+                actor TEXT NOT NULL, operation_id TEXT NOT NULL, captured_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS checkpoints_source ON checkpoints(host, source_session_id, captured_at);
+            CREATE TABLE IF NOT EXISTS checkpoint_runs (
+                checkpoint_id TEXT NOT NULL REFERENCES checkpoints(checkpoint_id),
+                operation_id TEXT PRIMARY KEY, host TEXT NOT NULL, session_id TEXT NOT NULL, clone_path TEXT NOT NULL,
+                worktree_path TEXT NOT NULL, branch TEXT NOT NULL, agent TEXT NOT NULL, actor TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
             COMMIT;
         """)
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(tasks)")}

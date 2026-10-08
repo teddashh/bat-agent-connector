@@ -156,6 +156,11 @@ session with its provenance (sessions a person created in BAT stay read-only), m
 merge and deploy buttons, and the operation log. Connect it with an API token. See
 [docs/design/dashboard.md](docs/design/dashboard.md).
 
+To continue a person's work without touching their session, record a checkpoint (`checkpoint.create`: its commit
+and recent conversation, read-only) and start managed work from it (`checkpoint.continue`: a connector-owned clone,
+worktree, branch and session at that commit). This needs `managed_roots` and an SSH alias for the host. See
+[docs/design/checkpoints.md](docs/design/checkpoints.md).
+
 ### Connect an MCP client
 
 The server name is `bat`. Examples (add `--read-only` if you want to be sure):

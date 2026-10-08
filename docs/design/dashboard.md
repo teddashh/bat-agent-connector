@@ -21,7 +21,7 @@
 |---|---|---|---|
 | 待處理 | 「需要你處理」：等你回答或等權限的 session、`needs_attention`／`uncertain` 操作、連不上的主機。「待確認」：尚未結束的操作 | `sessions?attention=true`、`operations?status=…`、`hosts` | — |
 | Sessions | 依主機與存取方式篩選；每列標出 Connector 管理或 API 唯讀、資料過期原因 | `sessions`（keyset 分頁） | — |
-| Session | 基本資料、來源、最近訊息 | `sessions/{host}/{sid}`、`…/messages` | Managed：送出（session 執行中預設排隊）、中斷、回答問題或權限。人工建立：只顯示唯讀說明 |
+| Session | 基本資料、來源、最近訊息、checkpoint | `sessions/{host}/{sid}`、`…/messages`、`checkpoints` | Managed：送出（session 執行中預設排隊）、中斷、回答問題或權限。人工建立：唯讀說明。任何 session：記下目前版本，從版本開始 agent 工作（[checkpoints.md](checkpoints.md)） |
 | 成果與 GitHub | PR 的 head／base、checks、可合併狀態 | `repositories/{o}/{r}/pulls/{n}` | 合併、合併並部署到各 recipe、已合併時部署合併版本 |
 | 操作紀錄／操作 | 狀態、原因、步驟、`external_refs`、結果 | `operations`、`operations/{id}` | 取消；`needs_attention` 時重新執行（resume）；合併並部署失敗時以 `merged_sha` 重試部署 |
 | 連線 | 輸入 API token，顯示 actor 與 scopes | `capabilities` | — |
@@ -39,7 +39,6 @@
 
 ## 尚未涵蓋
 
-- 從人工 session 的 commit 另開 managed 工作（P2 checkpoint）：按鈕已在，但停用，標示「尚未提供」。
 - Worktree、diff、檔案瀏覽，以及 Fleet Kit 的連線選擇（W10）。
 - 推播通知。
 

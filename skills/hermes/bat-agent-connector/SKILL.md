@@ -165,7 +165,9 @@ Merging and deploying (only with the user's go-ahead for that PR and environment
   unmerged branch, disabled tier). Report the refusal.
 - A read-only refusal (`MANUAL_READ_ONLY`, `UNKNOWN_READ_ONLY`, `WORKDIR_NOT_MANAGED`, `BINDING_MISMATCH`,
   `DESTINATION_MANUAL`) is final. Never reach the session another way (raw BAT calls, shell, another tool); report the
-  code and offer a new managed session instead.
+  code and offer a new managed session instead: `operation_submit(action="checkpoint.create", target={host,
+  session_id})` records its commit and conversation without writing, then `action="checkpoint.continue",
+  target={checkpoint_id}, params={instructions}` starts managed work from that commit.
 - Do not interrupt a streaming session unless the user asked; prefer `soft`.
 - Never use override flags (`discard_uncommitted`, `allow_unmerged`, `delete_branch`, failover `force`) without the
   user's explicit approval for that specific session.
