@@ -13,6 +13,8 @@ npm run build:all
 npm test
 npm run test:ui
 cargo test --locked --manifest-path src-tauri/Cargo.toml
+# After `uv sync --locked --extra dev` at repository root:
+npm run test:central
 ```
 
 `npm run build` generates packaged assets in `desktop/dist`. `npm run build:browser` generates the original four permitted `/dashboard/` files, including a compatibility `i18n.js` stub; translations are bundled from `desktop/src/i18n.js`. The Python server keeps its same-origin authorization, file allowlist and CSP. CI rebuilds browser assets and rejects drift. `package-lock.json` and `src-tauri/Cargo.lock` pin dependency resolution; the initial build uses Node 24.21.0 and Rust 1.98.1, Tauri 2.12.1, Vite 8.3.4, TypeScript 7.0.2.
@@ -55,7 +57,7 @@ When `/bootstrap` is available, the client takes its checkpoint before mounting 
 
 Session text drafts, original operation keys/IDs and checkpoint state stay in browser storage under the identity namespace. Poll failures block operation POSTs while preserving the draft and retry key. A reconnect never starts another session or changes the operation envelope. A lost reply can be retried after reopening with the same key; a 409 retains that key. Existing unscoped browser storage is left untouched and is not automatically assigned to a newly identified backend. Migration of ambiguous pre-desktop drafts/unknown operations needs explicit reconciliation before replay.
 
-This extraction preserves existing view invalidation behavior. R04 still owns pending-control refresh, relations/history presentation, linked operation/parent-project events, and full freshness-aware button presentation.
+This extraction persists a page after synchronously dispatching its invalidations; existing async/debounced view refreshes are not awaited by that acknowledgment. A later refresh failure can therefore coexist with an advanced replay cursor. Reopening fetches fresh views, but successful replay alone does not prove every mounted view is fresh. R04 still owns per-view refresh recovery/freshness gates, pending-control refresh, relations/history presentation, and linked operation/parent-project events.
 
 ## Packaging and lifecycle
 
@@ -77,7 +79,7 @@ The desktop workflow packages unsigned Windows NSIS and Linux deb artifacts for 
 
 ## Evidence and remaining acceptance
 
-On the Linux development host: both frontend builds, Rust compilation/tests/clippy, existing Python static allowlist/CSP test, and Chromium browser/IPC-mock tests passed. Browser screenshots at 390/768/1440 preserve the original dashboard layout. A debug deb was built. The genuine packaged Linux WebKit view read a loopback fixture's capabilities/bootstrap/data/events without Vite; a window-manager close event hid it while retaining the process, and a second app invocation exited and restored the same window. This verifies close handling and instance handoff, but not a physical tray interaction. This is native fixture evidence, not live BAT/central service acceptance.
+On the Linux development host: both frontend builds, Rust compilation/tests/clippy, existing Python static allowlist/CSP test, and Chromium browser/IPC-mock tests passed. The separate `test:central` integration uses the real Python HTTP API and journal with MockBat: signed checkpoint replay, actual retention reset, and draft recovery passed through the generated browser UI. Browser screenshots at 390/768/1440 preserve the original dashboard layout. A debug deb was built. The genuine packaged Linux WebKit view read a loopback fixture's capabilities/bootstrap/data/events without Vite; a window-manager close event hid it while retaining the process, and a second app invocation exited and restored the same window. This verifies close handling and instance handoff, but not a physical tray interaction. These are fixture results, not live BAT/central service acceptance.
 
 Windows installation, actual Windows tray behavior, cross-session fencing, production credentials, native files, Fleet parity, autostart, signed updates, and end-to-end work against real central/BAT hosts remain unvalidated or unimplemented. This commit is an R02 foundation and does not claim M1 or product v1 completion.
 

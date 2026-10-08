@@ -691,10 +691,12 @@ var state = {
 	online: false,
 	viewReady: false,
 	sync: null,
-	endpoint: ""
+	endpoint: "",
+	connectionError: null
 };
 async function activate(caps, endpoint = location.origin, reset = false) {
 	state.epoch++;
+	state.connectionError = null;
 	state.online = false;
 	state.viewReady = false;
 	state.caps = caps;
@@ -797,8 +799,12 @@ var TERMINAL = [
 	"failed",
 	"cancelled"
 ];
-async function keyFor(scope) {
-	const k = `batc.key.${state.namespace}.${scope}`;
+function assertConnection(connection) {
+	if (connection.epoch !== state.epoch || connection.namespace !== state.namespace) throw new ApiError(0, "CONNECTION_CHANGED", "Connection changed while preparing the operation");
+}
+async function keyFor(scope, connection) {
+	assertConnection(connection);
+	const k = `batc.key.${connection.namespace}.${scope}`;
 	let saved = null;
 	try {
 		const raw = localStorage.getItem(k);
@@ -812,10 +818,13 @@ async function keyFor(scope) {
 	}
 	if (saved?.key && saved.op) try {
 		const op = (await api("GET", `/operations/${saved.op}`)).operation;
+		assertConnection(connection);
 		if (TERMINAL.includes(op.status)) saved = null;
 	} catch (e) {
+		if (e.code === "CONNECTION_CHANGED") throw e;
 		if (e.status === 404) saved = null;
 	}
+	assertConnection(connection);
 	if (saved?.key) return saved.key;
 	const key = crypto.randomUUID();
 	try {
@@ -823,17 +832,17 @@ async function keyFor(scope) {
 	} catch {}
 	return key;
 }
-function rememberOp(scope, key, op) {
+function rememberOp(scope, key, op, namespace) {
 	try {
-		localStorage.setItem(`batc.key.${state.namespace}.${scope}`, JSON.stringify({
+		localStorage.setItem(`batc.key.${namespace}.${scope}`, JSON.stringify({
 			key,
 			op
 		}));
 	} catch {}
 }
-function dropKey(scope) {
+function dropKey(scope, namespace) {
 	try {
-		localStorage.removeItem(`batc.key.${state.namespace}.${scope}`);
+		localStorage.removeItem(`batc.key.${namespace}.${scope}`);
 	} catch {}
 }
 var ApiError = class extends Error {
@@ -856,6 +865,10 @@ function errorBox(e) {
 	return h("p", { class: "error" }, e.status === 403 && e.code === "FORBIDDEN" ? t("forbidden_scope") : `${e.code || ""} ${e.message || e}`);
 }
 async function submit(action, target, params, preconditions, scope) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace
+	};
 	const request = {
 		action,
 		target,
@@ -863,14 +876,17 @@ async function submit(action, target, params, preconditions, scope) {
 		preconditions
 	};
 	scope = await draftId(scope, request);
-	const key = await keyFor(scope);
+	assertConnection(connection);
+	const key = await keyFor(scope, connection);
+	assertConnection(connection);
 	try {
 		const out = await api("POST", "/operations?wait=3", request, key);
-		if (TERMINAL.includes(out.operation.status)) dropKey(scope);
-		else rememberOp(scope, key, out.operation.operation_id);
+		assertConnection(connection);
+		if (TERMINAL.includes(out.operation.status)) dropKey(scope, connection.namespace);
+		else rememberOp(scope, key, out.operation.operation_id, connection.namespace);
 		return out.operation;
 	} catch (e) {
-		if (e.status && e.status < 500 && e.status !== 409) dropKey(scope);
+		if (e.status && e.status < 500 && e.status !== 409) dropKey(scope, connection.namespace);
 		throw e;
 	}
 }
@@ -1076,17 +1092,18 @@ async function viewSession(main, host, sid) {
 	if (from) head.append(h("p", { class: "note" }, t("started_from", { commit: from.commit_sha.slice(0, 12) }), " ", h("a", { href: `#/session/${encodeURIComponent(from.source_host)}/${encodeURIComponent(from.source_session_id)}` }, t("source_session")), " · ", h("a", { href: `#/op/${from.operation_id}` }, from.operation_id)));
 	if (linked?.length) head.append(linkedItems(linked));
 	const scope = `send.${host}.${sid}`;
+	const draftNamespace = state.namespace;
 	const cps = checkpointPanel(host, sid);
 	main.insertBefore(cps.box, msgs.previousSibling);
 	if (row.api_access !== "managed") controls.replaceChildren(h("p", { class: "note" }, t("read_only_note")));
 	else {
 		const box = h("textarea", { placeholder: t("send_placeholder") });
 		try {
-			box.value = localStorage.getItem(`batc.draft.${state.namespace}.${scope}`) || "";
+			box.value = localStorage.getItem(`batc.draft.${draftNamespace}.${scope}`) || "";
 		} catch {}
 		box.oninput = () => {
 			try {
-				localStorage.setItem(`batc.draft.${state.namespace}.${scope}`, box.value);
+				localStorage.setItem(`batc.draft.${draftNamespace}.${scope}`, box.value);
 			} catch {}
 		};
 		const status = h("div", { class: "muted" });
@@ -1111,7 +1128,7 @@ async function viewSession(main, host, sid) {
 					if (op.status === "succeeded") {
 						box.value = "";
 						try {
-							localStorage.removeItem(`batc.draft.${state.namespace}.${scope}`);
+							localStorage.removeItem(`batc.draft.${draftNamespace}.${scope}`);
 						} catch {}
 					}
 				} catch (e) {
@@ -1792,6 +1809,7 @@ function viewSettings(main) {
 		actor: state.caps.actor,
 		scopes: state.caps.scopes.join(", ")
 	});
+	else if (state.connectionError) info.replaceChildren(errorBox(state.connectionError));
 	main.append(h("h1", {}, t("nav_settings")), h("div", { class: "panel" }, h("label", {}, t("token")), h("div", { class: "filters" }, input, h("button", {
 		class: "primary",
 		onclick: async () => {
@@ -1850,6 +1868,7 @@ async function viewNativeSettings(main) {
 		scopes: state.caps.scopes.join(", ")
 	});
 	try {
+		if (!state.caps && state.connectionError) info.replaceChildren(errorBox(state.connectionError));
 		const status = await nativeStatus();
 		endpoint.textContent = status.endpoint || t("desktop_config_needed");
 		if (status.error) info.textContent = status.error;
@@ -2582,7 +2601,10 @@ async function start() {
 			const caps = await nativeConnect();
 			state.token = "native-credential";
 			await activate(caps, status.endpoint);
-		} catch {}
+		} catch (error) {
+			disconnect();
+			state.connectionError = error;
+		}
 	} else {
 		state.token = loadToken();
 		if (state.token) try {

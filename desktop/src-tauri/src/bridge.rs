@@ -316,6 +316,33 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
                 | "project_id"
                 | "state"
                 | "live"
+                | "action"
+                | "actor"
+                | "before"
+                | "discovery"
+                | "execution_id"
+                | "has_tab"
+                | "include_closed"
+                | "include_gone"
+                | "include_tools"
+                | "kind"
+                | "lifecycle"
+                | "loaded"
+                | "max_chars"
+                | "offset"
+                | "order"
+                | "profile_id"
+                | "provenance"
+                | "provider"
+                | "pull_number"
+                | "related_resource_id"
+                | "related_resource_type"
+                | "relation_scope"
+                | "since"
+                | "stale"
+                | "streaming"
+                | "until"
+                | "work_item_id"
         ) {
             return Err("Central query parameter is not allowed".into());
         }
@@ -486,6 +513,19 @@ mod tests {
             "https://github.com:8443/",
         ] {
             assert!(external_url(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn observation_routes_allow_stable_paging_and_documented_filters() {
+        for path in [
+            "/sessions?order=id&include_gone=true&provenance=manual",
+            "/sessions/h1/fixture-session/history?order=desc&kind=session.updated&since=1&until=2",
+            "/hosts/h1/discovery?after=0&limit=50",
+            "/worktrees/wt_00000000000000000000000000000000/relations?include_closed=true&execution_id=fixture-execution",
+            "/events?after=1&checkpoint=s1.fixture.signature",
+        ] {
+            assert!(validate_request(&request("GET", path)).is_ok(), "{path}");
         }
     }
 
