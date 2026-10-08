@@ -139,6 +139,7 @@ task-owned session 的 send／answer／interrupt／permissions 都先經 resourc
 | `TASK_BINDING_MISMATCH` | registry 與 task ownership 不一致；停止並查 work_status |
 | `CONTROL_VERSION_CONFLICT` | 控制版本已改；讀狀態，不自動換成新版重試 |
 | `TASK_PAUSED`／`TASK_VERIFYING` | task 暫停／驗證中；不可用 queue、force、continue、approve-pending 或 relay 插隊 |
+| `TASK_SEND_NOT_DISPATCHED`／`NOT_ACCEPTED`（task send） | operation 沒有已接受／settled 的原 send command；failed 結果沿用原 key，新的派送用新 key |
 | `TASK_COMMAND_PENDING`／`TASK_RECONCILIATION_REQUIRED` | 原 command 結果未證明；由 coordinator 回查／command capability 對帳，不重送 |
 | `TASK_STATE_BLOCKED` | current lead／task state 不允許該控制；waiting_permission 不接受 send |
 | `TASK_OWNED_CONTROL_REQUIRED` | 低階 failover／worktree／外部 verification 不管理 task-owned session；cleanup 保持 KEEP |

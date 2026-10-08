@@ -211,7 +211,9 @@ read-back, not another dispatch. CLI reconciliation accepts `--key` and `--contr
 
 For a task-owned session, low-level send/continue/answer/interrupt/permissions, relay, force and batch approval
 all pass the same TaskCoordinator. On `TASK_PAUSED` or `TASK_VERIFYING`, read `work_status` and leave control to
-the task service. On `TASK_COMMAND_PENDING` or `TASK_RECONCILIATION_REQUIRED`, reconcile the original command;
+the task service. A task send refused with `TASK_PAUSED` stays failed on the same key; after an authorized resume,
+use a new key for the new send. `TASK_SEND_NOT_DISPATCHED` means this operation has no accepted send command;
+read its result and task before issuing a new send. On `TASK_COMMAND_PENDING` or `TASK_RECONCILIATION_REQUIRED`, reconcile the original command;
 never resend uncertain text. On `CONTROL_VERSION_CONFLICT`, read the new state before making a new decision;
 do not silently replace the precondition. `TASK_BINDING_MISMATCH` / `TASK_STATE_BLOCKED` mean the session or task
 cannot accept that control. `TASK_OWNER_UNAVAILABLE` means contact the existing owner; `OWNER_CONFLICT` tells you

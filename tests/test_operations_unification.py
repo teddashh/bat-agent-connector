@@ -1,5 +1,6 @@
 """A05/A07/A09: operation admission and the single Task Service authority."""
 
+import asyncio
 import json
 
 import pytest
@@ -287,6 +288,183 @@ async def test_a07_goose_run_does_not_block_its_own_task_send(owned, mock):
     assert len([c for c in d.journal.commands(tid) if c["kind"] == "send"]) == 1
     with pytest.raises(OperationError, match="IDEMPOTENCY_CONFLICT"):
         await d.call("task_send", {"task_id": tid, "text": "different", "step_id": "step-1"})
+
+
+def task_send_operation(d, tid, key):
+    return d.ops.create(api_auth.Principal("local-admin", frozenset(), admin=True),
+                        action="session.send", target={"task_id": tid},
+                        params={"text": "one instruction", "step_id": "pause-race"}, idempotency_key=key)
+
+
+async def assert_paused_send_refusal(d, tid, mock, op, paused):
+    refused = d.ops.get(op["operation_id"])
+    assert refused["status"] == "failed" and refused["error_code"] == "TASK_PAUSED"
+    step = next(s for s in refused["steps"] if s["name"] == "task_send_refusal")
+    assert step["status"] == "failed" and step["error"]["code"] == "TASK_PAUSED"
+    assert not d.journal.commands(tid) and not writes(mock)
+    assert d.journal.get(tid) == paused
+    assert await d.coordinator.tick(tid) == paused  # the coordinator still does nothing while paused
+    replay, created = task_send_operation(d, tid, op["idem_key"])
+    assert not created and d.ops.get(replay["operation_id"]) == refused
+    await d.ops.drain()
+    assert not d.journal.commands(tid) and not writes(mock)
+    d.journal.resume(tid)
+    # Resume cannot change this key's definitive refusal into a successful send.
+    replay, created = task_send_operation(d, tid, op["idem_key"])
+    assert not created and d.ops.get(replay["operation_id"]) == refused
+    fresh, created = task_send_operation(d, tid, op["idem_key"] + ":resumed")
+    assert created
+    await d.ops.drain()
+    assert d.ops.get(fresh["operation_id"])["status"] == "succeeded"
+    assert len(d.journal.commands(tid)) == 1 and d.journal.commands(tid)[0]["status"] == "accepted"
+    assert len(writes(mock)) == 1 and writes(mock)[0]["channel"] == "claude:send-message"
+
+
+async def test_a07_pause_while_send_waits_for_session_lock_refuses_operation(owned, mock, monkeypatch):
+    d, tid = owned
+    entered = asyncio.Event()
+    original = d.coordinator._send
+
+    async def sending(*args, **kwargs):
+        entered.set()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(d.coordinator, "_send", sending)
+    async with d.coordinator._lock("h1", SID):
+        op, _ = task_send_operation(d, tid, "pause-at-session-lock")
+        worker = asyncio.create_task(d.ops.drain())
+        await asyncio.wait_for(entered.wait(), 5)
+        paused = await d.coordinator.pause(tid)
+    await worker
+    await assert_paused_send_refusal(d, tid, mock, op, paused)
+
+
+@pytest.mark.parametrize("boundary", ["route", "presence", "prepare_send"])
+async def test_a07_pause_during_send_preparation_refuses_operation(owned, mock, monkeypatch, boundary):
+    d, tid = owned
+    entered, release = asyncio.Event(), asyncio.Event()
+    owner, method = (d.coordinator, "_route") if boundary == "route" else (
+        d.adapter, "session_presence" if boundary == "presence" else "prepare_send")
+    original = getattr(owner, method)
+
+    async def preparing(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, method, preparing)
+    if boundary == "presence":
+        # The public scoped send uses goose:*; exercise the original initial-send probe too.
+        original_send = d.coordinator._send
+
+        async def initial_send(task, sid, text, purpose, **kwargs):
+            return await original_send(task, sid, text, "lead:initial", **kwargs)
+
+        monkeypatch.setattr(d.coordinator, "_send", initial_send)
+    op, _ = task_send_operation(d, tid, "pause-at-" + boundary)
+    worker = asyncio.create_task(d.ops.drain())
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        paused = await d.coordinator.pause(tid)
+    finally:
+        release.set()
+        await worker
+    if boundary == "presence":
+        monkeypatch.setattr(d.coordinator, "_send", original_send)
+    await assert_paused_send_refusal(d, tid, mock, op, paused)
+
+
+@pytest.mark.parametrize("status,code", [(None, "TASK_SEND_NOT_DISPATCHED"), ("rejected", "NOT_ACCEPTED"),
+                                       ("cancelled", "TASK_SEND_NOT_DISPATCHED"), ("uncertain", "UNCERTAIN")])
+async def test_a07_task_send_requires_its_accepted_command_receipt(owned, mock, monkeypatch, status, code):
+    d, tid = owned
+
+    async def early_return(task, sid, text, purpose, *, operation):
+        if status:
+            def command_effect():
+                command, _ = d.journal.command(tid, "send", sid, {"operation_id": operation.operation_id},
+                                                "op:" + operation.operation_id)
+                d.journal.command_status(command["command_id"], status)
+                return command
+            operation.effect("task_send_command", command_effect)
+        return task
+
+    monkeypatch.setattr(d.coordinator, "_send", early_return)
+    op, _ = task_send_operation(d, tid, "early-return")
+    await d.ops.drain()
+    result = d.ops.get(op["operation_id"])
+    assert result["status"] == ("uncertain" if status == "uncertain" else "failed")
+    assert result["error_code"] == code and not writes(mock)
+
+
+@pytest.mark.parametrize("receipt_status", ["started", "failed"])
+async def test_a05_paused_send_refusal_survives_restart_before_operation_settlement(owned, mock, monkeypatch, receipt_status):
+    d, tid = owned
+    original = d.coordinator._send
+
+    async def paused_send(*args, **kwargs):
+        await d.coordinator.pause(tid)
+        return await original(*args, **kwargs)
+
+    op, _ = task_send_operation(d, tid, "refusal-restart")
+    with monkeypatch.context() as patch:
+        patch.setattr(d.coordinator, "_send", paused_send)
+        await d.ops.drain()
+    d.journal.resume(tid)
+    # Crash after saving the refusal intent/receipt, before recording the operation's terminal status.
+    if receipt_status == "started":
+        d.journal.db.execute("UPDATE operation_steps SET status='started',error=NULL,finished_at=NULL "
+                             "WHERE operation_id=? AND name='task_send_refusal'", (op["operation_id"],))
+    d.journal.db.execute("UPDATE operations SET status='running',error_code=NULL WHERE operation_id=?",
+                         (op["operation_id"],))
+    await d.ops.drain()
+    result = d.ops.get(op["operation_id"])
+    assert result["status"] == "failed" and result["error_code"] == "TASK_PAUSED"
+    assert result["steps"][-1]["status"] == "failed" and result["steps"][-1]["error"]["code"] == "TASK_PAUSED"
+    assert not d.journal.commands(tid) and not writes(mock)
+
+
+@pytest.mark.parametrize("action", ["answer", "interrupt", "permissions", "relay", "deferred_raise"])
+async def test_a07_other_controls_refuse_pause_while_waiting_for_session_lock(owned, mock, monkeypatch, action):
+    d, tid = owned
+    entered = asyncio.Event()
+    original = d.coordinator.session_control
+
+    async def controlling(*args, **kwargs):
+        entered.set()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(d.coordinator, "session_control", controlling)
+    mock.states[SID]["pendingAskUser"] = {"toolUseId": "ask-1", "questions": [{"question": "Choice?"}]}
+    async with d.coordinator._lock("h1", SID):
+        if action in {"answer", "interrupt"}:
+            op, _ = d.ops.create(api_auth.Principal("local-admin", frozenset(), admin=True),
+                                 action="session." + action, target={"host": "h1", "session_id": SID},
+                                 params={"tool_use_id": "ask-1", "answers": ["yes"]} if action == "answer" else {},
+                                 idempotency_key="pause-other")
+            worker = asyncio.create_task(d.ops.drain())
+        elif action == "permissions":
+            worker = asyncio.create_task(lifecycle.session_set_permissions(d.fleet, "h1", SID, confirm=True))
+        elif action == "relay":
+            worker = asyncio.create_task(lifecycle.session_relay(d.fleet, "h1", "instruction", session_id=SID,
+                                                                confirm=True, dry_run=False))
+        else:
+            registry.update("h1", SID, permission_raise_pending="allow_all")
+            worker = asyncio.create_task(lifecycle._raise_deferred(d.fleet, "h1", False))
+        await asyncio.wait_for(entered.wait(), 5)
+        paused = await d.coordinator.pause(tid)
+    if action in {"answer", "interrupt"}:
+        await worker
+        result = d.ops.get(op["operation_id"])
+        assert result["status"] == "failed" and result["error_code"] == "CONTROL_VERSION_CONFLICT"
+    elif action == "deferred_raise":
+        result = await worker
+        assert result[0]["raised"] is False and "CONTROL_VERSION_CONFLICT" in result[0]["error"]
+    else:
+        with pytest.raises(TaskControlRefused, match="CONTROL_VERSION_CONFLICT"):
+            await worker
+    assert not d.journal.commands(tid) and not writes(mock)
+    assert d.journal.get(tid) == paused
 
 
 async def test_a07_approve_pending_deferred_raise_and_relay_do_not_jump_pause(owned, mock):
