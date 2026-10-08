@@ -11,7 +11,7 @@ metadata:
   generator_version: "1"
   adapter: "hermes"
   canonical_source: "skills/bat-agent-connector/SKILL.md"
-  canonical_sha256: "1ae90b9271ab1264bcee5584bb21296fcd6bffb21b63617f0e9c6acf70046562"
+  canonical_sha256: "5f7e04d84dd9b207ee553e3308e988a07d890ba219ceebb9b26fc09a21c1b723"
   hermes:
     tags: [bat, better-agent-terminal, claude-code, codex, mcp, supervision, worktree, orchestration]
     category: autonomous-ai-agents
@@ -467,13 +467,12 @@ them. New delivery CLI writes also require that token and never inherit Dashboar
 - Treat an ESCALATE cleanup decision as final for that run: never force the merge another way.
 - If a host is unreachable, report it; do not try other ways to reach it.
 
-
 Deployment history uses saved deployment/operation IDs, environment generations and fixed source identities.
 Observe `deployment.updated` and the existing selected/verified/superseded/drift events; verifier bodies and
 credentials are not event data. A `deployment.backfilled` snapshot has unknown occurrence time and is not proof
 of a historical verified deployment. Only explicit operation source bindings connect it to session/worktree history.
 
-## Artifact attachments (Part A)
+## Artifact attachments (Part A and manual capture B1)
 
 - Use `artifacts_list` / `artifact_get(artifact_id, revision)` to read exact revisions and materialization evidence.
   Upload a small file with `artifact_upload(display_name, content_base64, idempotency_key, confirm=true)` (manage).
@@ -491,6 +490,14 @@ of a historical verified deployment. Only explicit operation source bindings con
   params={observed_source_head_sha}, preconditions={expected_input_manifest_digest}, confirm=true). It resumes that
   parent. Other blocked/uncertain outcomes retain evidence; follow/resume the same operation, never start another
   session to retry the transfer. Dispatch evidence is historical; the agent's materialized file is a working copy.
-- No store delete, artifact_materialize tool, manual file capture, managed-result capture or artifact_accept in Part A.
-  Part B adds capture/accept; Part C adds target host/workspace and commit fetch. Deployed Actions artifacts are separate.
+- For one explicitly selected manual-session file, use `artifact_capture_preview(host, session_id, relative_path)`
+  with this agent's observe credential. Review its evidence, then `artifact_capture(preview_id, preview_token,
+  fingerprint, idempotency_key, confirm=true)` with the same credential and manage+observe. Previews expire in
+  ten minutes. Symlinks, hardlinks, unsafe paths and changed source evidence are refused; preview again instead
+  of changing the original intent. Read back the same operation/key after a lost reply. Bytes stay off the MCP
+  request; capture follows the configured artifact file limit. Neither call changes the manual checkout.
+  CLI: `artifact capture-preview HOST SESSION_ID relative/file`, then `artifact capture --preview-file FILE --key KEY --confirm`.
+- No store delete, artifact_materialize tool, managed-result capture or artifact_accept. B1 saves one file and is
+  not a dirty snapshot. B2 adds managed results/accept; C adds target host/workspace and commit fetch.
+  Deployed Actions artifacts are separate. The capture chooser is not yet connected in the shared UI.
 <!-- END CANONICAL WORKFLOW -->

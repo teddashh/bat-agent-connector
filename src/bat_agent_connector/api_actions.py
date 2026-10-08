@@ -148,7 +148,8 @@ async def _answer(ctx: OpContext) -> dict:
 
 
 def _admit_interrupt(ops: OperationService, principal: Principal, target: dict, params: dict, pre: dict) -> dict | None:
-    if params.get("mode", "soft") not in {"soft", "hard"}:
+    mode = params.get("mode", "soft")
+    if not isinstance(mode, str) or mode not in {"soft", "hard"}:
         raise OperationError("INVALID_PARAMS", "mode must be soft or hard", 422)
     return _admit_session(ops, principal, target, params, pre, "interrupt")
 
@@ -156,22 +157,66 @@ def _admit_interrupt(ops: OperationService, principal: Principal, target: dict, 
 async def _interrupt(ctx: OpContext) -> dict:
     task_control.replay_command_refs(ctx)
     fleet = _fleet(ctx.service)
-    host, sid = ctx.target["host"], ctx.target["session_id"]
+    target = (ctx.op.get("external_refs") or {}).get("resolved_target") or ctx.target
+    host, sid = target["host"], target["session_id"]
 
     async def interrupt() -> dict:
         task_control.check_binding(ctx)
         r = await service.session_interrupt(fleet, host, sid, ctx.params.get("mode", "soft"), confirm=True,
                                             control_version=ctx.effective_preconditions.get("control_version"),
-                                            operation_id=ctx.operation_id)
-        return {"channel": r.get("channel"), "mode": r.get("mode")}
+                                            operation_id=ctx.operation_id, _exact_session_id=True)
+        return r
 
     async def reconcile(_request: dict) -> dict | None:
         meta = await fleet.client(host).invoke("claude:get-session-meta", {"sessionId": sid})
-        if isinstance(meta, dict) and not meta.get("isStreaming"):
-            return {"settled_by": "session_not_streaming"}
+        if isinstance(meta, dict) and meta.get("isStreaming") is False:
+            return {"host": host, "session_id": sid, "mode": ctx.params.get("mode", "soft"),
+                    "channel": None, "result": None, "note": None, "settled_by": "session_not_streaming"}
         return None
 
     return await ctx.step("interrupt", interrupt, reconcile=reconcile)
+
+
+async def legacy_interrupt(ops: OperationService, principal: Principal, request: dict, *, entry: str) -> dict:
+    """The approved compatibility door; raw operation submission still requires a client key."""
+    allowed = {"host", "session_id", "mode", "confirm", "idempotency_key", "control_version"}
+    if set(request) - allowed:
+        raise OperationError("INVALID_REQUEST", "unknown interrupt arguments", 422)
+    if request.get("confirm") is not True:
+        raise OperationError("CONFIRM_REQUIRED", "session_interrupt requires confirm=true", 403)
+    intent = {"action": "session.interrupt",
+              "target": {"host": request.get("host"), "session_id": request.get("session_id")},
+              "params": {"mode": request.get("mode", "soft")},
+              "preconditions": ({"control_version": request["control_version"]}
+                                if "control_version" in request else {}),
+              "idempotency_key": request.get("idempotency_key")}
+    # Validate scope/key/hash and return named-key replay BEFORE observing or resolving a selector.
+    *_, op = ops._prepare_create(principal, **intent, _legacy_interrupt=True)
+    if op is None:
+        fleet = _fleet(ops)
+        host = intent["target"]["host"]
+        mode = intent["params"]["mode"]
+        if not isinstance(mode, str) or mode not in {"soft", "hard"}:
+            raise OperationError("INVALID_PARAMS", "mode must be soft or hard", 422)
+        if host not in fleet.config.hosts:
+            raise OperationError("UNKNOWN_HOST", f"unknown host {host!r}", 404)
+        if not fleet.writes_enabled(host):
+            raise OperationError("TIER_DISABLED", f"the write tier is off for host {host}", 403)
+        terminal, _ = await service._resolve_session(fleet.client(host), intent["target"]["session_id"])
+        await resource_policy.authorize_session(fleet, host, "session.interrupt", terminal)
+        # create repeats replay after the await, then atomically stores literal intent, stable ID and
+        # task admission incarnation. The adapter never turns the resolved ID into a new request hash.
+        op, _ = ops.create(principal, **intent, entry=entry, _legacy_interrupt=True,
+                           _resolved_target={"host": host, "session_id": terminal["id"]})
+    await ops.run_due()
+    op = await ops.wait(op["operation_id"], 30)
+    target = (op.get("external_refs") or {}).get("resolved_target") or op["target"]
+    result = {"host": target["host"], "session_id": target["session_id"],
+              "mode": op["params"].get("mode", "soft"), "channel": None, "result": None, "note": None,
+              **(op.get("result") or {})}
+    return {**result, "operation_id": op["operation_id"], "operation_status": op["status"],
+            "operation_error_code": op["error_code"], "idempotency_key": op["idempotency_key"],
+            "idempotency_enabled": op["idempotency_enabled"]}
 
 
 SESSION_TARGET = ("host", "session_id")
