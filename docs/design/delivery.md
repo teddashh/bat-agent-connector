@@ -291,7 +291,7 @@ Artifact rollback 必須配置 artifact_id／digest inputs；一般 start 仍選
 
 ## Part B（第二步）：journal／desired version／順序（D05）
 
-同一 Journal 的 schema 使用冪等 DDL：CREATE TABLE／INDEX IF NOT EXISTS；column adds 先以 PRAGMA table_info 查存在。每次 open 都執行，不讀取或寫入 PRAGMA user_version。Part A 的 pr_merge_previews、pr_metadata_settlements、pr_merge_scope_reads 與 preview index 沿用各自交易；Part B 的部署表／索引／欄位亦遵循同一規則，不取得版本號。user_version 只留給一次性資料回填／重寫。Reviewer 已分配 delivery history data step 3：只有 user_version=2 時，在同一交易從舊操作回填並設為 3；crash 整筆 rollback。Observation 的 step 2（#35）由其套件提供，本包不代做；rebase 前以 version-2 fixture 驗證。以後的 data step 仍先向 orchestrator 申請號碼。沒有新 tasks authority。
+同一 Journal 的 schema 使用冪等 DDL：CREATE TABLE／INDEX IF NOT EXISTS；column adds 先以 PRAGMA table_info 查存在。每次 open 都執行，不讀取或寫入 PRAGMA user_version。Part A 的 pr_merge_previews、pr_metadata_settlements、pr_merge_scope_reads 與 preview index 沿用各自交易；Part B 的部署表／索引／欄位亦遵循同一規則，不取得版本號。user_version 只留給一次性資料回填／重寫。Reviewer 已分配 delivery history data step 3：只有 user_version=2 時，在同一交易從舊操作回填並設為 3；crash 整筆 rollback。Observation 的 step 2（#35）由其套件先執行；同次 open 的 step 3 隨後回填部署，LATEST_DATA_STEP=3。以後的 data step 仍先向 orchestrator 申請號碼。沒有新 tasks authority。
 
 | 新表 | 欄位／約束 |
 |---|---|
@@ -506,7 +506,7 @@ UI 用真實 daemon API＋FakeGitHub／MockBat／fake verifier 驗收 zh-TW、en
 
 ## 尚未涵蓋
 
-- Observation data step 2（#35）尚未進本輪來源 main；delivery step 3 以 version-2 fixture 驗證，待 rebase 由 step 2 接續。
+- 本分支已接 observation step 2；version-1 journal 在同次 open 依序執行 2、3，原 events/operations 不重寫。正式 main 合併與 live acceptance 另行記錄。
 - PR head 更新仍是 [integration.md](integration.md)；integrate.verify、Task Service 成果來源、fork／LFS／跨主機整合不屬本包。
 - 不支援 native stack 建立／重整／多 PR merge；本版偵測、列出並拒絕。GitHub 沒有 base／scope／body 原子鎖，觀測間的競爭窗口仍存在。
 - 最後的 pre-PUT scope check 將檢查完成至提交的窗口縮至一次 GitHub 請求往返。若 merge 後 GitHub 已解散新 stack membership，verify 無法再看見該 stack；不能從其他 open PR 的 head 變化猜測，因為作者也會自行 push／rebase。
@@ -514,3 +514,21 @@ UI 用真實 daemon API＋FakeGitHub／MockBat／fake verifier 驗收 zh-TW、en
 - 未知 provider、on_merge 主動 rollback 路線、資料 migration 反向執行、artifact 長期保存／清理不屬本包，沒有可取得的同 identity 路線就 unsupported。
 - 實際接入待確認：各 env 的 runtime version URL／認證、固定 workflow 的 source／artifact 驗證、跨 recipe concurrency、rollback identity／not_undone。本例只用保留 example domain，不猜真實設定。
 - Review 決策：Part A integrate＋repo opt-in、ISO date contract、預覽升級已批准；Part B generation／runtime check 接入值待配置；本包不以未確認設定啟用 production mutation。
+
+
+### Tauri v2 R07：Observation 整合回執
+
+部署 row 的有效變更同交易追加 `deployment.updated`；同值讀回不新增 row version 或事件。
+`deployment.selected/verified/superseded` 保留，所有事件帶明確 operation/deployment ID、generation、state、
+固定 SHA/artifact identity、run/attempt 與機器 error code。只記 provider HTTPS URL 的 origin/path，移除 query、
+fragment 與含帳密 URL。Verifier body、runtime response、recipe config、authorization/token、自由 diagnostic 不進事件。
+`deployment.drift` 明存受影響的 deployment/operation ID。Observation 依 operation 的既有證據索引；不由相同 SHA、
+PR 或路徑猜 session/worktree 關係。一般沒有 source binding 的部署不出现在任何 session timeline。
+
+Step 3 為舊 operation 回填部署後，以 `deployment.backfilled` 附記當下的 saved snapshot，
+`backfilled=true`、`occurred_at=null`；不偽造選取／執行／驗證時間，不修改原 api_events。
+已有 Part B row 也得到一次 snapshot；同交易 crash rollback，重開不重複。舊成功仍是 unverified。
+
+回歸：`tests/test_deployment_history.py` 驗證 step 1→2→3、原 events 不變、重開無重複、session history 的
+明確 operation link、未洩漏 provider/verifier 私密欄位、相同狀態 quiet、state/event 同交易 rollback；
+`test_delivery_v2_migration_keeps_history_unverified_and_reopens` 保留 unverified 與 provider-slot 契約。

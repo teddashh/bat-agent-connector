@@ -222,8 +222,7 @@ async def select(ctx, *, combined=False, rollback=False):
                 VALUES(?,?,?,?,?,?,?,?, 'selected',?,?,?)""",
                 (dep_id, ctx.operation_id, r.name, env["environment_key"], g, store.encode(identity), store.encode(snap), dig,
                  store.encode(doc), now, now))
-            ctx.service.journal.api_event("deployment", dep_id, "deployment.selected", {"generation": g, "recipe": r.name},
-                                         actor=ctx.op["actor"])
+            store.event(ctx.service.journal, dep_id, "deployment.selected", actor=ctx.op["actor"])
         return {"deployment_id": dep_id, "generation": g}
     async def reconcile(_):
         saved = store.deployment(ctx.service.db, operation_id=ctx.operation_id)
@@ -302,8 +301,9 @@ async def order(ctx, dep):
     with store.tx(ctx.service.journal):
         env = store.environment(ctx.service.db, dep["environment_key"])
         if env["desired_generation"] != dep["generation"] or env["desired_deployment_id"] != dep["deployment_id"]:
-            ctx.service.db.execute("UPDATE deployments SET state='superseded',provider_terminal=1,version=version+1 "
-                                   "WHERE deployment_id=? AND run_id IS NULL", (dep["deployment_id"],))
+            current = store.deployment(ctx.service.db, deployment_id=dep["deployment_id"])
+            if current["run_id"] is None:
+                store.update(ctx.service.journal, dep["deployment_id"], state="superseded", provider_terminal=True)
             outcome = "superseded"
         elif (legacy_occupant(ctx.service, dep["recipe_snapshot"]["repository"], dep["recipe_snapshot"]["environment"])
               or (env["slot_deployment_id"] and env["slot_deployment_id"] != dep["deployment_id"])):
@@ -807,8 +807,8 @@ def record(ops, dep, evidence):
                 store.encode({**evidence["runtime"]["observed"], "observed_at": evidence["runtime"].get("checked_at", now)}),
                 now, dep["environment_key"], dep["generation"], dep["deployment_id"]))
         release_slot(ops, dep)
-        ops.journal.api_event("deployment", dep["deployment_id"], "deployment.verified" if current else "deployment.superseded",
-                              {"generation": dep["generation"], "is_current": current})
+        store.event(ops.journal, dep["deployment_id"], "deployment.verified" if current else "deployment.superseded",
+                    extra={"is_current": current})
     return result
 
 
@@ -867,7 +867,8 @@ def drift(ops, env, observed):
                 current["deployment_id"]))
             if changed.rowcount:
                 ops.journal.api_event("deployment_environment", env["environment_key"], "deployment.drift",
-                                      {"code": "ENVIRONMENT_VERSION_DRIFT", "last_verified": current["deployment_id"]})
+                                      {"code": "ENVIRONMENT_VERSION_DRIFT", "last_verified": current["deployment_id"],
+                                       "deployment_id": current["deployment_id"], "operation_id": current["operation_id"]})
 
 
 async def stopped_merge(ops, dep, op):

@@ -125,11 +125,20 @@ def test_delivery_v2_migration_keeps_history_unverified_and_reopens(tmp_path):
     assert pending["run_id"] == 13 and not pending["provider_terminal"]
     assert pending["identity"]["source_sha"] == "b" * 40
     assert not j.db.execute("SELECT 1 FROM deployment_environments WHERE current_deployment_id IS NOT NULL").fetchone()
-    assert {t: [tuple(r) for r in j.db.execute(f"SELECT * FROM {t}")] for t in unchanged} == unchanged  # noqa: S608
+    for table, original in unchanged.items():
+        rows = [tuple(r) for r in j.db.execute(f"SELECT * FROM {table}")]  # noqa: S608 - fixed tables
+        assert rows[:len(original)] == original
+        if table != "api_events":
+            assert rows == original
+    snapshots = [e for e in j.api_events()["events"] if e["kind"] == "deployment.backfilled"]
+    assert len(snapshots) == 2
+    assert all(e["context"]["backfilled"] and e["context"]["occurred_at"] is None for e in snapshots)
+    events_before = j.api_head()
     before = [tuple(r) for r in j.db.execute("SELECT * FROM deployments")]
     j.close()
     j = Journal(path)
     assert [tuple(r) for r in j.db.execute("SELECT * FROM deployments")] == before
+    assert j.api_head() == events_before
     assert j.db.execute("PRAGMA user_version").fetchone()[0] == 3
     j.close()
 

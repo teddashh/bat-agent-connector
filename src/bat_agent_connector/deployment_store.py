@@ -5,6 +5,7 @@ import hashlib
 import json
 import time
 from contextlib import nullcontext
+from urllib.parse import urlsplit, urlunsplit
 
 
 def tx(journal):
@@ -92,6 +93,7 @@ def update(journal, deployment_id: str, *, facts=None, expected_version=None, **
         journal.db.execute(f"UPDATE deployments SET {setters + ',' if setters else ''}document=?,"  # noqa: S608
                            "version=version+1,updated_at=? WHERE deployment_id=? AND version=?",
                            (*columns.values(), encode(document), time.time(), deployment_id, row["version"]))
+        event(journal, deployment_id, "deployment.updated")
         return True
 
 
@@ -104,6 +106,10 @@ def backfill(journal) -> None:
                                   "('deployment.start','delivery.merge_and_deploy') ORDER BY created_at").fetchall()
         for row in rows:
             _legacy_deployment(journal, row)
+        # A current saved snapshot, not invented historical transitions. Existing Part B rows
+        # also need an index when upgrading an observation journal at step 2.
+        for dep in journal.db.execute("SELECT deployment_id FROM deployments ORDER BY created_at,deployment_id").fetchall():
+            event(journal, dep[0], "deployment.backfilled", backfilled=True)
         journal.db.execute("PRAGMA user_version=3")
 
 
@@ -152,3 +158,28 @@ def _legacy_deployment(journal, row) -> None:
         (dep_id, row["operation_id"], recipe, key, encode(identity), encode(snapshot), "legacy",
          state, terminal, run_id,
          result.get("run_attempt"), encode(document), row["created_at"], row["updated_at"]))
+
+
+def event(journal, deployment_id, kind, *, actor=None, backfilled=False, extra=None):
+    """Publish bounded saved identities; never verifier/provider response bodies or recipe config."""
+    dep = deployment(journal.db, deployment_id=deployment_id)
+    if dep is None:
+        return
+    fields = ("deployment_id", "operation_id", "environment_key", "generation", "state", "version",
+              "provider_terminal", "run_id", "run_attempt", "verified", "rollback_of", "retry_of", "error_code")
+    facts = {key: dep[key] for key in fields if key in dep}
+    facts.update({key: dep["identity"][key] for key in ("source_sha", "artifact_id", "artifact_digest", "release_id")
+                  if key in dep["identity"]})
+    provider_url = dep.get("html_url")
+    if isinstance(provider_url, str):
+        try:
+            url = urlsplit(provider_url)
+            if url.scheme == "https" and url.hostname and not url.username and not url.password:
+                facts["provider_url"] = urlunsplit((url.scheme, url.netloc, url.path, "", ""))
+        except ValueError:
+            pass
+    facts.update(extra or {})
+    context = {"observer": "deployment-service"}
+    if backfilled:
+        context.update(backfilled=True, occurred_at=None)
+    journal.api_event("deployment", deployment_id, kind, facts, actor=actor, context=context)
