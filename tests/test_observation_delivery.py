@@ -88,6 +88,34 @@ async def test_b01_delivery_preview_late_binding_respects_history_as_of(make_dae
     d.ops.cancel(delivery_tests.TED, op["operation_id"])
 
 
+async def test_b03_merge_receipt_history_keeps_moved_base_shas_without_commit_messages(make_daemon, gh):
+    d = make_daemon()
+    gh.add_pr(7, delivery_tests.HEAD)
+    gh.merge_mode = "enqueue"
+    op, _ = await delivery_tests.merge_op(d)
+    d.ops._merge_refs(op["operation_id"], {"host": "h1", "session_id": "source"})
+    assert (await delivery_tests.settle(d, op["operation_id"], 2))["status"] == "waiting_external"
+    newer = "c" * 40
+    gh.commits[newer] = {"sha": newer, "parents": [{"sha": "b" * 40}], "commit": {"message": "private commit message"}}
+    gh.branches["main"] = newer
+    gh.merge(7)
+    done = await delivery_tests.settle(d, op["operation_id"])
+    assert done["status"] == "succeeded", done
+    events = Observation(d.journal).history("session", "h1/source", limit=200)["events"]
+    verified = next(e for e in events if e["kind"] == "operation.step.succeeded" and e["body"]["step"] == "merge.verify")
+    receipt = verified["body"]["response"]
+    assert receipt["merged_onto_base_sha"] == newer and receipt["base_moved"] is True
+    assert receipt["other_commits_count"] == 1
+    assert receipt["other_commits"] == [{"sha": newer, "parents": ["b" * 40]}]
+    assert {v["sha"] for v in verified["context"]["result_versions"]} == {newer, delivery_tests.MERGED}
+    # A later mutable refs update cannot rewrite the saved receipt's versions.
+    d.ops._merge_refs(op["operation_id"], {"merged_sha": "e" * 40})
+    after = next(e for e in Observation(d.journal).history("session", "h1/source", limit=200)["events"] if e["seq"] == verified["seq"])
+    assert after == verified
+    assert "private commit message" not in json.dumps(events)
+    assert "private commit message" not in " ".join(r[0] for r in d.ops.db.execute("SELECT body FROM api_events"))
+
+
 @pytest.mark.parametrize("conflict", [False, True])
 async def test_b03_metadata_settlement_history_has_codes_without_pr_text(make_daemon, gh, conflict):
     d = make_daemon()
