@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from bat_agent_connector import api_auth, registry, service
+from bat_agent_connector import api_auth, confinement, registry, service
 from bat_agent_connector.channels import GUARDED_CHANNELS, ORCHESTRATE_CHANNELS, WRITE_CHANNELS
 from bat_agent_connector.errors import InvokeTimeout
 from bat_agent_connector.inventory import Inventory, InventorySettings
@@ -278,6 +278,60 @@ async def test_inventory_keeps_offline_hosts_stale_and_marks_gone_after_two_miss
 
 
 # --------------------------------------------------------------------------- HTTP
+@pytest.mark.parametrize("case,status,reason,effect", [
+    ("unchecked", "unknown", "unchecked_or_stale", "recheck"),
+    ("stale", "unknown", "unchecked_or_stale", "recheck"),
+    ("fresh", "unknown", "check_executable_untrusted", "fallback_default"),
+    ("fresh", "unknown", "login_environment_writable", "fallback_default"),
+    ("fresh", "unknown", "login_shell_unsupported", "fallback_default"),
+    ("fresh", "mismatch", "protected_root_writable", "refused"),
+    ("fresh", "unknown", "ssh_alias_unavailable", "refused"),
+    ("fresh", "verified", "read_only_account_check", "verified"),
+    ("undeclared", "unknown", "unchecked_or_stale", "fallback_default"),
+])
+async def test_a10_capabilities_account_start_effect_is_cached_read_only(served, mock, case, status, reason, effect):
+    from tests.test_confinement import ACCOUNT, AccountRunner
+
+    class ReadOnlyRunner(AccountRunner):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def available(self, host):
+            self.calls.append("available")
+            return True
+
+        async def run_account_check(self, *args, **kwargs):
+            self.calls.append("run_account_check")
+            return await super().run_account_check(*args, **kwargs)
+
+    d, port = served
+    d.fleet.config.host("h1").confinement = {**ACCOUNT, "check_max_age_s": 45} if case != "undeclared" else {}
+    d.fleet.confinement_runner = ReadOnlyRunner()
+    if case in {"fresh", "stale"}:
+        cached = confinement.account_status(d.fleet, "h1")
+        cached.update(status="verified" if case == "stale" else status,
+                      reason="read_only_account_check" if case == "stale" else reason,
+                      checked_at=time.time() - (46 if case == "stale" else 0))
+        d.fleet._confinement_checks = {"h1": cached}
+    tok = token(d, "test-observer", "observe")
+    try:
+        code, caps = await http(port, "GET", "/api/v1/capabilities", tok=tok)
+        assert code == 200
+        account = caps["hosts"][0]["confinement"]["host_account"]
+        assert (account["status"], account["reason"], account["start_effect"]) == (status, reason, effect)
+        assert account["declared"] is (case != "undeclared")
+        # Daemon MCP capabilities and the CLI/MCP host read use the same projection.
+        code, rpc = await http(port, "POST", "/rpc", tok=tok,
+                               body={"method": "api_capabilities", "params": {}})
+        assert code == 200 and rpc["result"]["hosts"][0]["confinement"]["host_account"] == account
+        hosts = await service.hosts_list(d.fleet, probe=False)
+        assert hosts["hosts"][0]["confinement"]["host_account"] == account
+        assert not d.fleet.confinement_runner.calls and not mock.invokes
+    finally:
+        await d.fleet.close()
+
+
 async def test_http_auth_host_origin_and_reads(served, mock):
     d, port = served
     assert (await http(port, "GET", "/api/v1/version"))[0] == 200
