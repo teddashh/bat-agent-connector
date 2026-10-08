@@ -2306,6 +2306,15 @@ async def test_bat_warm_reuse_claims_only_clean_completed_service_session(fleet_
     verifier.head = "e" * 40
     assert await adapter.find_warm(current) is None  # HEAD moved past the verified commit
     verifier.head = "a" * 40
+    # A10: a readable permission mismatch cannot be claimed as a warm lead.
+    original_meta = dict(mock.metas[old_sid])
+    creation = registry.get("h1", old_sid)["confinement"]
+    mock.metas[old_sid]["codexSandboxMode"] = "danger-full-access"
+    assert await adapter.find_warm(current) is None
+    assert registry.get("h1", old_sid)["task_id"] == previous["task_id"]
+    assert registry.get("h1", old_sid)["confinement"] == creation
+    assert journal.authorize_capability(old_capability, previous["task_id"])
+    mock.metas[old_sid] = original_meta
     assert await adapter.find_warm(current) == old_sid
     starts_before = len([i for i in mock.invokes if i["channel"] == "claude:start-session"])
     assert await adapter.start({**current, "_warm_session_id": old_sid},
