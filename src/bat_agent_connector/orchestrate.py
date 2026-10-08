@@ -25,10 +25,11 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from . import registry, resource_policy, task_control
+from . import confinement, registry, resource_policy, task_control
 from .errors import BatError, WriteRefused
 from .fleet import Fleet
 from .resource_policy import WriteGrant
@@ -194,25 +195,15 @@ def permission_options(agent: str, mode: str, claude_mode: str | None = None) ->
 
     ``allow_all`` = what BAT does with "allow bypass permissions" on: Claude runs in
     ``bypassPermissions``; Codex starts with sandbox ``danger-full-access`` and approval ``never``.
-    ``default`` sends nothing (the agent asks before tools, BAT's conservative default).
+    ``default`` sends nothing and preserves BAT defaults and inherited rules.
+    ``confined`` requests restricted options; the creation path also checks host-account evidence.
     """
-    if agent == "claude":
-        if claude_mode:
-            return {"permissionMode": claude_mode}
-        return {"permissionMode": "bypassPermissions"} if mode == "allow_all" else {}
-    if mode == "allow_all":
-        return {"codexSandboxMode": "danger-full-access", "codexApprovalPolicy": "never"}
-    return {}
+    return confinement.policy_options(agent, mode, claude_mode)
 
 
-# write_scope="confined": the agent's own CLI enforces the folder, whatever the host default is. Claude asks before
-# writing outside its working directory (and before most shell commands); Codex's workspace-write sandbox blocks
-# writes outside it at the OS level. Plan §06: a cwd alone is not protection, and these sessions start from a
-# person's conversation, which names the person's folders.
-CONFINED_OPTIONS = {
-    "claude": {"permissionMode": "acceptEdits"},
-    "codex": {"codexSandboxMode": "workspace-write", "codexApprovalPolicy": "on-request"},
-}
+# BAT's acceptEdits callback allows file tools without a path check. Use default unless a host account was
+# checked; cwd is never protection. Codex options require W12 live enforcement evidence (plan §06, A10).
+CONFINED_OPTIONS = confinement.CONFINED_OPTIONS
 
 
 def registry_permission_fields(opts: dict) -> dict:
@@ -232,6 +223,7 @@ PRESETS = {
 }
 
 
+@registry.start_call
 async def session_start(
     fleet: Fleet,
     host: str,
@@ -251,6 +243,8 @@ async def session_start(
     external_branch: str | None = None,
     task_id: str | None = None,
     write_scope: str | None = None,
+    confinement_role: str | None = None,
+    _task_start_guard: Callable[[], None] | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
     if write_scope not in (None, "confined"):
@@ -278,8 +272,9 @@ async def session_start(
     if agent == "codex" and not model and hc.codex_model:
         model = hc.codex_model
     sid = session_id or str(uuid.uuid4())
-    perm = (dict(CONFINED_OPTIONS[agent]) if write_scope == "confined"
-            else permission_options(agent, hc.default_permission_mode, permission_mode))
+    previous = registry.get(host, sid) or {}
+    confinement.guard_new_start(previous)
+    registry.claim_unsent(host, sid)
     # Read-only: how the host resolves the destination, so links into a human checkout are caught up front.
     git_roots = {}
     for path in {folder, cwd_override} - {None}:
@@ -289,6 +284,15 @@ async def session_start(
                                                   cwd_override=cwd_override, task_id=task_id,
                                                   git_roots=git_roots)
     async with _write_lock(host):
+        if _task_start_guard:
+            _task_start_guard()
+        try:
+            perm, write_scope, confinement_record = await confinement.start_decision(
+                fleet, host, agent, confined=write_scope == "confined", task=bool(task_id),
+                planner=confinement_role == "planner", claude_mode=permission_mode)
+        finally:
+            if _task_start_guard:
+                _task_start_guard()
         audit.check_rate(host, "#orchestrate-start-" + sid)
         registry.reserve(
             host,
@@ -301,24 +305,61 @@ async def session_start(
                 "model": model,
                 "title": title,
                 "isolation": grant.isolation,
+                "start_sent": False,
+                # Preserve a retained carrier until its identity has been rechecked or removal confirmed.
+                **({k: previous[k] for k in ("cwd", "worktree_path", "branch", "worktree_rolled_back",
+                                             "rolled_back_worktree_path", "rolled_back_branch") if k in previous}
+                   if previous.get("start_sent") is False else {}),
                 # Recorded with the reservation, so a start proven later by read-back keeps them too.
                 **registry_permission_fields(perm),
+                "confinement": confinement_record,
                 **({"write_scope": write_scope} if write_scope else {}),
                 **({"task_id": task_id, "role": "lead"} if task_id else {}),
             },
             hc.orchestrate_max_sessions,
         )
+        if task_id:
+            confinement.record_task_start(getattr(fleet, "confinement_journal", None), task_id, sid,
+                                          registry.get(host, sid))
         base = {"actor": fleet.actor, "tool": "session_start", "host": host, "session_id": sid}
         wt: dict = {}
+        worktree_created = False
         base_commit = None
+        start_confirmed = False
+        start_frame = confinement.StartFrame(host, sid, journal=getattr(fleet, "confinement_journal", None),
+                                             task_id=task_id)
+        meta = None
+
+        async def rollback_worktree():
+            removed = await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": True}, grant=grant)
+            if not isinstance(removed, dict) or removed.get("success") is not True:
+                raise WriteRefused("unsent start's worktree rollback was not confirmed")
+            # BAT also returns success when a restart lost its in-memory mapping.
+            # Preserve the durable identity until an independent read proves absence.
+            remaining_root = await c.invoke("git:getRoot", {"cwd": wt["worktreePath"]})
+            if remaining_root is not None:
+                raise WriteRefused("unsent start's worktree rollback absence was not confirmed")
+            registry.update(host, sid, cwd=folder, worktree_path=None, branch=None,
+                            worktree_rolled_back=True, rolled_back_worktree_path=wt.get("worktreePath"),
+                            rolled_back_branch=wt.get("branchName"))
+            audit.record(**base, channel="worktree:remove", phase="rollback", ok=True,
+                         worktree_path=wt.get("worktreePath"), branch=wt.get("branchName"))
+
         try:
             if use_worktree:
-                audit.record(**base, channel="worktree:create", phase="attempt")
-                wt = await c.invoke(
-                    "worktree:create", {"sessionId": sid, "cwd": folder, "installPnpm": False,
-                                         **({"baseBranch": base_branch} if base_branch else {})},
-                    grant=grant,
-                )
+                if previous.get("start_sent") is False and previous.get("worktree_path"):
+                    wt = await c.invoke("worktree:status", {"sessionId": sid})
+                    if (not isinstance(wt, dict) or wt.get("worktreePath") != previous["worktree_path"]
+                            or wt.get("branchName") != previous.get("branch")):
+                        raise WriteRefused("unsent start's worktree identity is unavailable or changed")
+                else:
+                    audit.record(**base, channel="worktree:create", phase="attempt")
+                    wt = await c.invoke(
+                        "worktree:create", {"sessionId": sid, "cwd": folder, "installPnpm": False,
+                                             **({"baseBranch": base_branch} if base_branch else {})},
+                        grant=grant, before_send=_task_start_guard,
+                    )
+                    worktree_created = True
                 if not isinstance(wt, dict) or wt.get("success") is False or not wt.get("worktreePath"):
                     err = (wt or {}).get("error") if isinstance(wt, dict) else "unexpected reply"
                     audit.record(**base, channel="worktree:create", phase="result", ok=False, error=str(err))
@@ -338,6 +379,7 @@ async def session_start(
                 grant = resource_policy.check_new_worktree(grant, hc, folder, wt.get("worktreePath"), origin_root)
             cwd = cwd_override or wt.get("worktreePath") or folder
             if use_worktree:
+                registry.update(host, sid, cwd=cwd, worktree_path=wt.get("worktreePath"), branch=wt.get("branchName"))
                 rows = await c.invoke("git:log", {"cwd": cwd, "count": 1})
                 if isinstance(rows, list) and rows and isinstance(rows[0], dict):
                     base_commit = rows[0].get("hash")
@@ -354,21 +396,59 @@ async def session_start(
                 opts.update(
                     useWorktree=True, worktreePath=wt["worktreePath"], worktreeBranch=wt.get("branchName")
                 )
+            registry.update(host, sid, cwd=cwd, worktree_path=cwd if cwd_override else wt.get("worktreePath"),
+                            branch=external_branch if cwd_override else wt.get("branchName"))
             audit.record(**base, channel="claude:start-session", phase="attempt", preset=preset)
+            async def before_start_frame():
+                if _task_start_guard:
+                    _task_start_guard()
+                try:
+                    await confinement.guard_start_frame(fleet, host, confinement_record)
+                finally:
+                    if _task_start_guard:
+                        _task_start_guard()
+
             try:
-                started = await c.invoke("claude:start-session", {"sessionId": sid, "options": opts}, grant=grant)
+                started = await c.invoke("claude:start-session", {"sessionId": sid, "options": opts}, grant=grant,
+                                         before_frame=before_start_frame, before_send=_task_start_guard,
+                                         on_transport=start_frame.on_transport)
                 if (not isinstance(started, dict) or started.get("ok") is False or
                         started.get("sessionId") != sid):
                     raise WriteRefused("BAT start reply did not confirm the reserved session ID")
+                start_confirmed = True
+                try:
+                    meta = await _meta(c, sid)
+                except Exception:  # noqa: BLE001 - an evidence read cannot undo an acknowledged start
+                    meta = None
+                if isinstance(meta, dict):
+                    confinement.guard_start_cwd({"cwd": cwd}, meta)
+                confinement.ensure_confirmed(confinement_record, meta, allow_unknown=write_scope != "confined")
+                confinement_record = confinement.confirm(confinement_record, meta)
+            except confinement.ConfinementRefused:
+                if start_frame.sent or start_confirmed:
+                    retain_on_error = True
+                elif worktree_created and not retain_on_error:
+                    await rollback_worktree()
+                raise
             except BatError as e:
+                if start_confirmed or start_frame.sent:
+                    retain_on_error = True  # Even invoke-error may follow creation of the BAT session.
                 audit.record(**base, channel="claude:start-session", phase="result", ok=False, error=_err(e))
-                if use_worktree and not retain_on_error:  # may have reached BAT on timeout
-                    await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": True}, grant=grant)
-                    audit.record(**base, channel="worktree:remove", phase="rollback", ok=True)
+                if worktree_created and not retain_on_error:  # may have reached BAT on timeout
+                    await rollback_worktree()
                 raise
             audit.record(**base, channel="claude:start-session", phase="result", ok=True)
-        except BaseException:
-            registry.update(host, sid, status="uncertain" if retain_on_error else "failed")
+        except BaseException as e:
+            unsent = not start_frame.sent and not start_confirmed
+            retain_on_error = retain_on_error or start_confirmed or start_frame.sent
+            registry.update(host, sid, status="failed" if unsent else
+                            "uncertain" if retain_on_error else "failed",
+                            error_code=getattr(e, "code", None) or ("CONFINEMENT_START_UNSETTLED" if not unsent else None),
+                            start_sent=not unsent,
+                            **({"cwd": cwd, "worktree_path": cwd if cwd_override else wt.get("worktreePath"),
+                                "branch": external_branch if cwd_override else wt.get("branchName"),
+                                "confinement": confinement.confirm(confinement_record, meta)}
+                               if start_confirmed else {}))
             raise
         registry.update(
             host,
@@ -380,6 +460,7 @@ async def session_start(
             **({"worktree_made_by": "connector"} if cwd_override else {}),
             origin_root=git_roots.get(resource_policy.norm(folder)),
             **registry_permission_fields(opts),
+            confinement=confinement_record,
         )
         tab = None
         if hc.orchestrate_register_tabs and register_tab is not False:
@@ -421,6 +502,7 @@ async def session_start(
                 ack = await c.invoke(
                     "claude:send-message", {"sessionId": sid, "prompt": prompt, "clientMessageId": mid},
                     retry_on_disconnect=agent == "claude", grant=grant,
+                    before_frame=lambda: confinement.guard_frame(c, host, sid),
                 )
                 if not isinstance(ack, dict) or not (ack.get("accepted") or ack.get("ok")):
                     raise WriteRefused("initial prompt was not accepted by BAT")
@@ -452,6 +534,8 @@ async def session_start(
         "prompt_sent": bool(prompt),
         "message_id": mid,
         "permissions": write_scope or permission_mode or hc.default_permission_mode,
+        "write_scope": write_scope,
+        "confinement": confinement_record,
         "isolation": grant.isolation,
         "note": None
         if tab and tab.get("appended")
@@ -627,8 +711,12 @@ async def worktree_remove(
             still_there = bool(root) and str(root).rstrip("/") == str(wt_path).rstrip("/")
             ok = not still_there
         audit.record(**base, channel="worktree:remove", phase="result", ok=ok, still_there=still_there)
-        if registry.get(host, sid):
-            registry.update(host, sid, status="removed" if ok else "active")
+        entry = registry.get(host, sid)
+        if entry:
+            if entry.get("status") in registry.RETIRED:
+                registry.update(host, sid, worktree_removed=ok)
+            else:
+                registry.update(host, sid, status="removed" if ok else "active")
     return {
         **report,
         "removed": ok,

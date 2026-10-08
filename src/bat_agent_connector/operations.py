@@ -116,7 +116,9 @@ def _canonical(value: Any) -> str:
 
 
 def _error_code(exc: BaseException) -> str:
-    if isinstance(exc, ResourceReadOnly | TaskControlRefused):
+    from .confinement import ConfinementRefused
+
+    if isinstance(exc, ConfinementRefused | ResourceReadOnly | TaskControlRefused):
         return exc.code
     if isinstance(exc, StepFailed | NeedsAttention | OperationError):
         return exc.code
@@ -246,6 +248,9 @@ class OpContext:
             self.service._step_start(self.operation_id, name, request or {})
         try:
             response = await fn()
+        except NeedsAttention:
+            self.service._step_status(self.operation_id, name, "uncertain")
+            raise
         except (*AMBIGUOUS, OSError) as exc:  # OSError: local bookkeeping may fail after the external call
             self.service._step_status(self.operation_id, name, "uncertain",
                                       error={"code": "UNCERTAIN", "message": redact(f"{type(exc).__name__}: {exc}")})
@@ -500,6 +505,12 @@ class OperationService:
         if self._wake is not None:
             self._wake.set()
 
+    def wake(self, operation_id: str) -> None:
+        """Make a waiting payload/provider operation due now without changing its state."""
+        self.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=? AND status='waiting_external'",
+                        (operation_id,))
+        self.kick()
+
     async def run_due(self) -> None:
         now = time.time()
         placeholders = ",".join("?" * len(RUNNABLE))
@@ -544,9 +555,21 @@ class OperationService:
             await asyncio.sleep(0.1)
 
     async def _execute(self, operation_id: str) -> None:
+        from .observation import event_context
+
         op = self._row(operation_id)
         if op is None or op["status"] in TERMINAL:
             return
+        # run_due may be woken by an unrelated authenticated RPC. Task effects must use
+        # their own durable admission identity, never the scheduler's inherited context.
+        with event_context(actor=op["actor"], entry_point=op["entry"], operation_entry_point=op["entry"],
+                           operation_id=operation_id, actor_basis="authenticated_principal",
+                           actor_evidence={"source": "operations.actor", "operation_id": operation_id,
+                                           "principal_ref": op["actor"]}):
+            await self._execute_bound(op)
+
+    async def _execute_bound(self, op: dict) -> None:
+        operation_id = op["operation_id"]
         adef = self.actions.get(op["action"])
         if adef is None:
             self._transition(operation_id, "failed", error_code="UNKNOWN_ACTION",

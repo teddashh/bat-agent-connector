@@ -1,0 +1,128 @@
+"""Bundle/contract checks; no daemon, BAT connection or agent runtime is started."""
+
+from __future__ import annotations
+
+import hashlib
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from bat_agent_connector.config import Config, HostConfig
+from bat_agent_connector.mcp_server import build_server
+from scripts import generate_agent_skills as generator
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def bundle_repo(tmp_path):
+    for relative in (generator.SOURCE, Path(generator.GENERATOR), Path("pyproject.toml"),
+                     Path("src/bat_agent_connector/__init__.py"), Path("src/bat_agent_connector/api_v1.py")):
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, target)
+    return tmp_path
+
+
+def run_generator(root, *args):
+    return subprocess.run([sys.executable, str(root / generator.GENERATOR), *args],
+                          capture_output=True, text=True, check=False)
+
+
+def test_all_adapters_preserve_exact_canonical_workflow_and_digest():
+    source = (ROOT / generator.SOURCE).read_bytes()
+    body = source.decode().split("\n---\n", 1)[1]
+    for relative, expected in generator.render(ROOT).items():
+        assert (ROOT / relative).read_bytes() == expected
+        text = expected.decode()
+        embedded = text.split("<!-- BEGIN CANONICAL WORKFLOW -->\n", 1)[1]
+        assert embedded.removesuffix("<!-- END CANONICAL WORKFLOW -->\n") == body
+        assert f'canonical_sha256: "{hashlib.sha256(source).hexdigest()}"' in text
+        assert f'canonical_source: "{generator.SOURCE.as_posix()}"' in text
+        assert "GENERATED" in text
+    # The generic package continues to ship this same file, not an adapter.
+    assert '"skills/bat-agent-connector/SKILL.md" = "bat_agent_connector/skill/SKILL.md"' in (
+        ROOT / "pyproject.toml").read_text()
+
+
+def test_generation_is_deterministic_and_check_never_repairs_drift(bundle_repo):
+    assert run_generator(bundle_repo, "--check").returncode == 1
+    assert not (bundle_repo / "skills/hermes").exists()
+    assert run_generator(bundle_repo).returncode == 0
+    paths = list(generator.render(bundle_repo))
+    snapshots = {p: (bundle_repo / p).read_bytes() for p in paths}
+    assert run_generator(bundle_repo).returncode == 0
+    assert run_generator(bundle_repo, "--check").returncode == 0
+    assert snapshots == {p: (bundle_repo / p).read_bytes() for p in paths}
+    changed = bundle_repo / paths[0]
+    changed.write_bytes(changed.read_bytes() + b"\nManual policy drift.\n")
+    before = changed.read_bytes()
+    out = run_generator(bundle_repo, "--check")
+    assert out.returncode == 1 and paths[0].as_posix() in out.stderr
+    assert changed.read_bytes() == before
+    assert run_generator(bundle_repo).returncode == 0
+    assert changed.read_bytes() == snapshots[paths[0]]
+
+
+def test_canonical_change_invalidates_both_bundles_and_updates_provenance(bundle_repo):
+    assert run_generator(bundle_repo).returncode == 0
+    original = generator.render(bundle_repo)
+    source = bundle_repo / generator.SOURCE
+    source.write_text(source.read_text() + "\nAdditional canonical instruction.\n")
+    out = run_generator(bundle_repo, "--check")
+    assert out.returncode == 1
+    assert all(p.as_posix() in out.stderr for p in original)
+    assert run_generator(bundle_repo).returncode == 0
+    for relative, new in generator.render(bundle_repo).items():
+        assert new != original[relative]
+        assert (bundle_repo / relative).read_bytes() == new
+
+
+@pytest.mark.parametrize("relative,old,new", [
+    ("src/bat_agent_connector/api_v1.py", 'CONTRACT_VERSION = "2026-10-08"', 'CONTRACT_VERSION = "2026-10-09"'),
+    ("src/bat_agent_connector/api_v1.py", "API_VERSION = 1", "API_VERSION = 2"),
+    ("src/bat_agent_connector/__init__.py", '__version__ = "0.2.4"', '__version__ = "0.2.5"'),
+    ("pyproject.toml", 'version = "0.2.4"', 'version = "0.2.5"'),
+])
+def test_version_drift_requires_canonical_review_before_generation(bundle_repo, relative, old, new):
+    assert run_generator(bundle_repo).returncode == 0
+    before = {p: (bundle_repo / p).read_bytes() for p in generator.render(bundle_repo)}
+    source = bundle_repo / relative
+    source.write_text(source.read_text().replace(old, new, 1))
+    assert run_generator(bundle_repo, "--check").returncode == 1
+    assert run_generator(bundle_repo).returncode == 1
+    assert before == {p: (bundle_repo / p).read_bytes() for p in before}
+
+
+async def test_skill_tool_references_and_recovery_parameters_match_discovered_schemas():
+    # Discovery does not dial this deliberately unusable test host or read tokens.
+    config = Config(hosts={"test": HostConfig("test", "wss://127.0.0.1:1/", "AA" * 32,
+                                             "env:UNUSED_SKILL_TEST_TOKEN", writes=True, orchestrate=True)})
+    server, fleet = build_server(config)
+    try:
+        tools = {t.name: t.input_schema for t in await server.list_tools()}
+        text = (ROOT / generator.SOURCE).read_text()
+        referenced = set(re.findall(r"\b([a-z]+_[a-z_]+)\(", text))
+        assert referenced <= tools.keys(), f"Unknown tool references: {referenced - tools.keys()}"
+        # The reconnect/lost-ACK/manual-source scenarios need these exact inputs;
+        # a renamed/removed parameter must invalidate the skill's instructions.
+        expected = {
+            "capabilities_get": set(),
+            "work_status": {"task_id"},
+            "work_item_get": {"work_item_id"},
+            "operations_list": {"statuses", "action"},
+            "operation_get": {"operation_id"},
+            "operation_submit": {"action", "idempotency_key", "target", "params", "preconditions", "confirm"},
+            "checkpoint_preview": {"host", "session_id"},
+            "checkpoint_create": {"host", "session_id", "commit", "idempotency_key", "confirm"},
+            "work_continue_from_checkpoint": {"checkpoint_id", "instructions", "idempotency_key", "confirm"},
+            "session_cleanup": {"host", "dry_run"},
+        }
+        for name, params in expected.items():
+            assert params <= tools[name]["properties"].keys()
+    finally:
+        await fleet.close()

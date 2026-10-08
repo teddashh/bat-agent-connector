@@ -39,9 +39,25 @@ Token 缺少某個 scope（`start`、`integrate`、`manage`、`approve`）時，
 - 從 checkpoint 派工的表單送出後就不能再送：結果留在表單裡，關閉後頁面列出這次執行。
 - 即時更新用 fetch 讀 `GET /api/v1/events/stream`，因為 `EventSource` 不能帶 `Authorization`。斷線後從最後一個 `seq` 續接。事件只觸發重新讀取，畫面內容一律以 API 讀回為準。
 
+## 附件與草稿（Part A；計畫 §13，B04）
+
+工作項目編輯與 checkpoint 接續表單提供檔案 picker，選擇即 upload。原 `batc.draft.<scope>` localStorage 草稿擴充為 text／uploaded refs／尚未成功檔名／提交 operation；沒有 server draft 或 IndexedDB。File 只在記憶體，失敗可 Retry；重新載入列檔名並明確顯示「請重新選擇這個檔案。瀏覽器無法在重新載入後開啟本機檔案。」（英文同義）。成功 upload 不清草稿，continue／update succeeded 才清提交 snapshot，期間新編輯留下。
+
+Dashboard 開接續表單時讀 source HEAD 並送 expected_source_head_sha；SOURCE_MOVED 在原 operation 頁明確確認原 commit／attachments，續同 parent。操作页展示各 materialization 的 pending／transferring／uncertain／verified／blocked evidence。prompt 只有 worktree-relative paths 與精確 ref／digest，無 client-local path；download attachment 無 preview。完整合約見 [artifacts.md](artifacts.md)。
+
 ## 語言
 
 依瀏覽器語言選 zh-TW 或 en，預設 zh-TW。字串只在 `i18n.js`；程式與 CSS 只用 API 的機器值（`status`、`api_access` 等），不比對顯示文字。
+
+## 整理與永久歷史（Part A）
+
+見 [cleanup.md](cleanup.md)：純讀 preview、signed token、逐項 operations／retained refs／tombstones，原 ID
+永久可查。Dashboard #/cleanup 與 work item 的整理入口，兩語預覽／逐項回執／歷史搜尋／實際 retained list；
+Part A 無 restore 按鈕。Task-owned 資源由 Task Service 整理，本輪列 TASK_OWNED；原 terminal cleanup 不變。
+Restore、reviewed task leftovers／coordinator 准入與 TaskDaemon 歷史投影在 Part B。Clone／area 與 pins 留存。
+## 執行限制證據（A10）
+
+Session card 依 creation snapshot 顯示 level；OS sandbox 最多 options_confirmed，badge 明示尚未實機驗證。Detail 可展開建立選項、evidence／gap 及獨立 current verification；stale／mismatch 不改原 level。Checkpoint、work item 接續與 repair forms 隨所選 agent 顯示 options 的限制：未查核 account 的 Claude 用 default、既有規則與 shell 可允許外部寫入，並推薦 Codex；已宣告但未驗證 account 阻擋新 start。Codex 顯示 network／writable roots 不可設定與測試相容風險。所有字串有 en／zh-TW。Cwd 本身不稱為保護；A10 尚待 W12，見 [confinement](confinement.md)。
 
 ## 尚未涵蓋
 

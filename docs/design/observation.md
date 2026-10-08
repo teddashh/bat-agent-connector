@@ -4,6 +4,11 @@
 
 Phase 1 規格已審查。Phase 2 分兩步：Part A（本次）實作伺服器、journal、HTTP/MCP/CLI、skills、文件及伺服器驗收；Part B 在後續分支實作 Dashboard。下列 Dashboard 畫面與瀏覽器 reopen／catch-up／SSE 去重驗收都屬 Part B。共用操作、資源政策、checkpoint 與管理資料分別沿用 [api-v1.md](api-v1.md)、[resource-policy.md](resource-policy.md)、[checkpoints.md](checkpoints.md)、[work-items.md](work-items.md)。
 
+與 Task Service operations 整合後，執行中的 task effects 以 operation 已保存的 actor、entry 與
+operation ID 建立 observation context；喚醒 scheduler 的另一位 RPC 使用者不會成為這些事件的
+actor。事件證據來源為 `operations.actor`，不是繼承當下 RPC 的驗證證據。Context 只供歷史歸屬，
+不提供 scopes、admin 權限或跳過既有 admission／frame gate；各 operation 的 context 互相隔離。
+
 ## 固定來源版本
 
 | 來源 | 固定版本與本規格使用處 |
