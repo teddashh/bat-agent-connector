@@ -33,6 +33,9 @@ Task Service engine/recipes stay unchanged and expose their compatibility gap. S
 show creation evidence separately from current verification. A10 is not proven until W12's live acceptance run.
 See [configuration, limits and the live procedure](docs/design/confinement.md).
 
+`START_IN_PROGRESS` means another process is starting this session: read it back later, do not retry blindly;
+`CONFINEMENT_START_UNSETTLED` requires read-back of a possibly sent start.
+
 It ships four things:
 
 | Piece | Name |

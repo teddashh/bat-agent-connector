@@ -19,6 +19,8 @@ BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端�
 
 一般 managed start 保留操作者的 `default_permission_mode`：`default` 沿用 BAT 預設、`allow_all` 保留 bypass／full access（level=none）；新增 `confined` 才對一般 start 套限制。Checkpoint／repair 固定 confined：Claude 用 default，只有已查核 BAT 帳號才用 acceptEdits；Codex 用 workspace-write／on-request。帳號查核須有 root-owned、BAT 不可寫的 home／可信 startup files 與系統 Python/find；先從可信副本替換再 harden，.claude／.codex／.cache 等 state 子目錄仍可由 BAT 帳號擁有。未 harden 的 host 記 unknown，confined Claude 用 plain default。Cwd 本身不保護寫入，acceptEdits 沒有 path check。BAT 不能設定 network／writable roots，因此 confined Codex 可能影響安裝及 localhost 測試。Task Service engine／recipe 不變並顯示相容 gap。Session reads 與 Dashboard 分開列建立證據與目前核對；A10 尚待 W12 實機驗收。詳見[設定、限制與 live procedure](docs/design/confinement.md)。
 
+`START_IN_PROGRESS` 表示另一程序正在 start 此 session：稍後讀回，不盲目重試；`CONFINEMENT_START_UNSETTLED` 則須讀回可能已送出的 start。
+
 內容包含四個部分：
 
 | 元件 | 名稱 |

@@ -222,6 +222,7 @@ PRESETS = {
 }
 
 
+@registry.start_call
 async def session_start(
     fleet: Fleet,
     host: str,
@@ -271,6 +272,7 @@ async def session_start(
     sid = session_id or str(uuid.uuid4())
     previous = registry.get(host, sid) or {}
     confinement.guard_new_start(previous)
+    registry.claim_unsent(host, sid)
     # Read-only: how the host resolves the destination, so links into a human checkout are caught up front.
     git_roots = {}
     for path in {folder, cwd_override} - {None}:

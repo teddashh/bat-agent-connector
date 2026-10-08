@@ -40,6 +40,11 @@
   preparation. Starts already handed to transport remain uncertain and are read back without another start frame.
   Cancellation tests check the original exception inside the coroutine, covering Python 3.10's loss of the message
   when awaiting a cancelled task without weakening the propagation check.
+  Starting reservations now hold per-session OS flock claims through the start call. Only an abandoned unsent row
+  can be reclaimed; a live process or coroutine returns START_IN_PROGRESS without changing the row, worktree or
+  frame. Claims cover same-ID checkpoint/repair, Task Service and failover recovery, survive until return or
+  exception, and are released by the OS on a crash. Read back later instead of blindly retrying this refusal;
+  sent starts still use CONFINEMENT_START_UNSETTLED and read-back recovery.
   **A10 is not proven until the W12 live run**; no sandbox evidence-file import is included here.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the

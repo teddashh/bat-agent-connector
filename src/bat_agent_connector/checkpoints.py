@@ -444,7 +444,7 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
                 write_scope="confined")
         except confinement.ConfinementRefused as exc:
             if (exc.sent is False or exc.code in confinement.START_IDENTITY_MISMATCH_CODES
-                    or exc.code in {"CONFINEMENT_MISMATCH", "CONFINEMENT_START_UNSETTLED"}):
+                    or exc.code in {"CONFINEMENT_MISMATCH", "CONFINEMENT_START_UNSETTLED", "START_IN_PROGRESS"}):
                 raise NeedsAttention(exc.code, str(exc)) from exc
             raise
         ctx.set_refs(confinement=r["confinement"])

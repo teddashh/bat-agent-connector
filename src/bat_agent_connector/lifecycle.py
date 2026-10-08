@@ -431,6 +431,7 @@ def build_handoff_prompt(
     return text[:MAX_HANDOFF_CHARS]
 
 
+@registry.start_call
 async def _failover_one(
     fleet: Fleet,
     host: str,
@@ -480,6 +481,8 @@ async def _failover_one(
         e = prior[-1]
         confinement.guard_start_record(e)
         if e.get("start_sent") is False:
+            if not dry_run:
+                registry.claim_unsent(host, e["session_id"])
             unsent_entry = e  # Proven pre-transport failure: keep the reserved ID and handoff binding.
         elif e.get("start_uncertain") or e.get("status") == "starting":
             try:

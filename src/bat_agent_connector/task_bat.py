@@ -224,6 +224,7 @@ class BatTaskAdapter:
                 continue
         return None
 
+    @registry.start_call
     async def start(self, task: dict, *, role: str, agent: str, session_id: str) -> str:
         host = task["host"]
         entry = registry.get(host, session_id) or {}
@@ -231,6 +232,7 @@ class BatTaskAdapter:
             confinement.guard_start_record(entry)
         else:
             confinement.guard_new_start(entry)
+            registry.claim_unsent(host, session_id)
         if role == "lead":
             if task.get("_warm_session_id") == session_id:
                 previous = next((item for item in self.journal.warm_candidates(task)

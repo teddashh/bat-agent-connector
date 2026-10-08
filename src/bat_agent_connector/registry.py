@@ -7,11 +7,18 @@ can still find, cap, review and clean them up.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import contextvars
 import fcntl
+import functools
+import hashlib
 import json
 import os
+import threading
 import time
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import state_dir
@@ -19,6 +26,163 @@ from .config import state_dir
 
 def registry_path() -> Path:
     return state_dir() / "orchestrated.json"
+
+
+def _caller():
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    return task or threading.current_thread()
+
+
+@dataclass
+class _StartClaim:
+    path: Path
+    host: str
+    session_id: str
+    fd: int
+    owner: object
+    token: str = field(default_factory=lambda: str(uuid.uuid4()))
+    reserved: bool = False
+
+
+@dataclass
+class _StartCall:
+    owner: object
+    claims: list[_StartClaim] = field(default_factory=list)
+
+
+_start_call = contextvars.ContextVar("registry_start_call", default=None)
+_start_claims: dict[tuple[Path, str, str], _StartClaim] = {}
+
+
+def _call() -> _StartCall | None:
+    call = _start_call.get()
+    return call if call and call.owner == _caller() else None
+
+
+def start_call(fn):
+    """Keep reservation locks through the entire start's return or exception.
+
+    A nested start may take its caller's preparation claim, never a reservation
+    already in use. Child tasks cannot borrow inherited ContextVar claims.
+    """
+    @functools.wraps(fn)
+    async def wrapped(*args, **kwargs):
+        call = _StartCall(_caller())
+        if parent := _call():
+            call.claims = [claim for claim in parent.claims if not claim.reserved]
+            parent.claims = [claim for claim in parent.claims if claim.reserved]
+        context = _start_call.set(call)
+        try:
+            return await fn(*args, **kwargs)
+        finally:
+            try:
+                for claim in call.claims:
+                    try:
+                        # The token is diagnostic. A cleanup write cannot undo
+                        # an accepted start or replace the original cancellation.
+                        with contextlib.suppress(OSError), _locked(claim.path):
+                            items = _read(claim.path)
+                            _clear_claim_token(claim, items)
+                            _write(claim.path, items)
+                    finally:
+                        _close_claim(claim)
+            finally:
+                _start_call.reset(context)
+    return wrapped
+
+
+def _clear_claim_token(claim: _StartClaim, items: list[dict]) -> None:
+    for entry in items:
+        if (entry.get("host") == claim.host and entry.get("session_id") == claim.session_id
+                and entry.get("start_claim_token") == claim.token):
+            entry["start_claim_token"] = None
+
+
+def _close_claim(claim: _StartClaim) -> None:
+    _start_claims.pop((claim.path, claim.host, claim.session_id), None)
+    os.close(claim.fd)  # close, not unlink: every contender must lock the same inode
+
+
+def _own_claim(path: Path, host: str, session_id: str) -> _StartClaim | None:
+    claim = _start_claims.get((path, host, session_id))
+    call = _call()
+    return claim if claim and claim.owner == _caller() and (
+        claim in call.claims if call else True) else None
+
+
+def _take_claim(path: Path, host: str, session_id: str) -> _StartClaim:
+    from .confinement import ConfinementRefused
+
+    directory = path.parent / "start-claims"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    digest = hashlib.sha256((host + "\0" + session_id).encode()).hexdigest()
+    fd = os.open(directory / (digest + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        os.close(fd)
+        raise ConfinementRefused("START_IN_PROGRESS", "another process or coroutine is starting this session; "
+                                "read it back later, do not retry blindly", sent=False) from exc
+    except BaseException:
+        os.close(fd)
+        raise
+    claim = _StartClaim(path, host, session_id, fd, _caller())
+    _start_claims[(path, host, session_id)] = claim
+    if call := _call():
+        call.claims.append(claim)
+    return claim
+
+
+def _claim_unsent_locked(path: Path, items: list[dict], host: str, session_id: str) -> str:
+    entry = next((e for e in items if e.get("host") == host and e.get("session_id") == session_id), None)
+    if not entry or entry.get("status") not in {"failed", "starting"} or entry.get("start_sent") is not False:
+        return "not_unsent"
+    claim = _own_claim(path, host, session_id)
+    if not claim or claim.reserved:
+        _take_claim(path, host, session_id)
+    return "claimed"
+
+
+def claim_unsent(host: str, session_id: str) -> str:
+    """Claim an abandoned unsent row, or refuse its live owner without changes.
+
+    Call from a start_call before preparation. reserve consumes this call's
+    preclaim under the registry flock; another coroutine always opens a new fd.
+    """
+    p = registry_path()
+    with _locked(p):
+        return _claim_unsent_locked(p, _read(p), host, session_id)
+
+
+def _release_implicit(claim: _StartClaim | None, items: list[dict]) -> None:
+    if claim and not _call():
+        _clear_claim_token(claim, items)
+        _close_claim(claim)
+
+
+@contextlib.contextmanager
+def _discard_unused_claim(path: Path, host: str, session_id: str):
+    try:
+        yield
+    finally:
+        claim = _own_claim(path, host, session_id)
+        if claim and not claim.reserved and not _call():
+            _close_claim(claim)
+
+
+def _after_fork() -> None:
+    # A forked helper must not keep its parent's claims alive. Unlocking the
+    # shared open-file description here would also unlock the parent's claim.
+    for claim in _start_claims.values():
+        os.close(claim.fd)
+    _start_claims.clear()
+    _start_call.set(None)
+
+
+os.register_at_fork(after_in_child=_after_fork)
 
 
 @contextlib.contextmanager
@@ -69,8 +233,12 @@ def get(host: str, session_id: str) -> dict | None:
 def ensure_existing(host: str, entry: dict) -> None:
     """Restore local lookup for a BAT session verified by task journal and host meta."""
     p = registry_path()
-    with _locked(p):
+    with _locked(p), _discard_unused_claim(p, host, entry["session_id"]):
         items = _read(p)
+        claim = _own_claim(p, host, entry["session_id"])
+        if not claim:
+            _claim_unsent_locked(p, items, host, entry["session_id"])
+            claim = _own_claim(p, host, entry["session_id"])
         for old in items:
             if old.get("host") == host and old.get("session_id") == entry.get("session_id"):
                 if (old.get("task_id") not in {None, entry.get("task_id")}
@@ -82,6 +250,7 @@ def ensure_existing(host: str, entry: dict) -> None:
                 old.update(entry)
                 old["status"] = "active"
                 old["updated_at"] = time.time()
+                _release_implicit(claim, items)
                 _write(p, items)
                 return
         items.append({**entry, "host": host, "status": "active", "created_at": time.time(),
@@ -106,27 +275,35 @@ def reserve(host: str, entry: dict, max_active: int, replaces: str | None = None
     from .errors import WriteRefused
 
     p = registry_path()
-    with _locked(p):
+    with _locked(p), _discard_unused_claim(p, host, entry["session_id"]):
         items = _read(p)
+        sid = entry["session_id"]
+        previous = next((e for e in items if e.get("host") == host and e.get("session_id") == sid), None)
+        # False proves no frame, not abandonment. The OS lock proves whether
+        # another start call still owns that unsent reservation.
+        reclaim = _claim_unsent_locked(p, items, host, sid) == "claimed"
+        if previous:
+            from .confinement import guard_new_start
+            guard_new_start(previous)
         # The earlier caller-side lookup is only a hint. This check and the reservation
         # must share the flock, including when two independent MCP processes race.
         old = entry.get("failover_of")
         if old:
             existing = next((e for e in items if e.get("host") == host and
                              e.get("failover_of") == old and e.get("status") in ("starting", "active")), None)
-            if existing:
+            if existing and not (reclaim and existing.get("session_id") == sid):
                 return existing
             worktree = entry.get("worktree_path")
             if worktree and any(e.get("host") == host and e.get("worktree_path") == worktree and
                                 e.get("failover_of") and e.get("status") in ("starting", "active")
+                                and not (reclaim and e.get("session_id") == sid)
                                 for e in items):
                 raise WriteRefused("another active failover successor already owns this worktree")
         if replaces:
             for e in items:
                 if e.get("host") == host and e.get("session_id") == replaces and e.get("status") == "active":
                     e.update(status="superseded", superseded_by=entry.get("session_id"), updated_at=time.time())
-        # A crash can leave the original starting row intact. Explicit false is
-        # durable proof that this exact reserved ID never reached the transport.
+        # The preclaim (or fresh claim below) and replacement share this flock.
         items = [e for e in items if not (e.get("host") == host and e.get("session_id") == entry["session_id"]
                                         and e.get("status") in {"failed", "starting"} and e.get("start_sent") is False)]
         active = [e for e in items if e.get("host") == host and e.get("status") in ("active", "starting")]
@@ -135,9 +312,14 @@ def reserve(host: str, entry: dict, max_active: int, replaces: str | None = None
                 f"orchestrate cap reached on {host}: {len(active)} active orchestrated sessions "
                 f"(orchestrate_max_sessions={max_active}); remove finished worktrees first"
             )
-        entry = {**entry, "host": host, "status": "starting", "created_at": time.time()}
+        claim = _own_claim(p, host, sid)
+        if not claim or claim.reserved:
+            claim = _take_claim(p, host, sid)
+        entry = {**entry, "host": host, "status": "starting", "created_at": time.time(),
+                 "start_claim_token": claim.token}
         items.append(entry)
         _write(p, items)
+        claim.reserved = True
     return None
 
 
@@ -146,12 +328,17 @@ def fail_reservation(host: str, session_id: str, replaces: str | None = None) ->
     p = registry_path()
     with _locked(p):
         items = _read(p)
+        claim = _own_claim(p, host, session_id)
+        if not claim:
+            _claim_unsent_locked(p, items, host, session_id)
+            claim = _own_claim(p, host, session_id)
         for e in items:
             if e.get("host") == host and e.get("session_id") == session_id:
                 e.update(status="failed", updated_at=time.time())
             if (replaces and e.get("host") == host and e.get("session_id") == replaces
                     and e.get("superseded_by") == session_id):
                 e.update(status="active", superseded_by=None, updated_at=time.time())
+        _release_implicit(claim, items)
         _write(p, items)
 
 
@@ -159,10 +346,16 @@ def update(host: str, session_id: str, **fields) -> None:
     p = registry_path()
     with _locked(p):
         items = _read(p)
+        claim = _own_claim(p, host, session_id)
+        if fields.get("status") and fields["status"] != "starting" and not claim:
+            _claim_unsent_locked(p, items, host, session_id)
+            claim = _own_claim(p, host, session_id)
         for e in items:
             if e.get("host") == host and e.get("session_id") == session_id:
                 e.update(fields)
                 e["updated_at"] = time.time()
+        if fields.get("status") and fields["status"] != "starting":
+            _release_implicit(claim, items)
         _write(p, items)
 
 
