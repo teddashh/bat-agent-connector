@@ -17,6 +17,30 @@ from .errors import TaskControlRefused, WriteRefused
 RUNTIME_KINDS = {"send", "answer", "interrupt", "permissions", "failover"}
 
 
+def admission_binding(task, *, session=False, role="lead"):
+    binding = {"task_id": task["task_id"], "control_version": task["control_version"]}
+    if session:
+        field = "reviewer_session_id" if role == "reviewer" else "session_id"
+        binding.update(host=task["host"], session_id=task.get(field), role=role)
+    return binding
+
+
+def check_binding(ctx):
+    binding = ctx.admission_binding
+    if not binding:  # pre-upgrade operations retain their original execution-time binding
+        return None
+    task = ctx.service.journal.get(binding["task_id"])
+    if task["control_version"] != binding["control_version"]:
+        raise TaskControlRefused("CONTROL_VERSION_CONFLICT", "task control_version changed since admission")
+    if "session_id" in binding:
+        sid = binding["session_id"]
+        role = binding["role"]
+        field = "reviewer_session_id" if role == "reviewer" else "session_id"
+        if task["host"] != binding["host"] or task.get(field) != sid:
+            raise TaskControlRefused("TASK_BINDING_MISMATCH", "task session changed since admission")
+    return task
+
+
 def owner_task(fleet, host, sid):
     owner = registry.get(host, sid) or {}
     if owner.get("task_id"):

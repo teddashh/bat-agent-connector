@@ -169,6 +169,15 @@ class TaskCoordinator:
     async def session_control(self, task_id: str, host: str, sid: str, action: str,
                               params: dict, fn) -> dict:
         from .task_control import FrameGuard, check
+        context = None
+        if params.get("operation_id") and getattr(self, "operations", None):
+            from .operations import OpContext
+            from .task_control import check_binding
+            context = OpContext(self.operations, self.operations._row(params["operation_id"]))
+            check_binding(context)
+            if context.admission_binding and context.admission_binding["task_id"] != task_id:
+                raise TaskControlRefused("TASK_BINDING_MISMATCH", "session task owner changed since admission")
+            params = {**params, "control_version": context.effective_preconditions.get("control_version")}
         # Admission never waits behind verification. Freeze the version before any lock/await.
         admitted = check(self.journal, task_id, host, sid, action, params.get("control_version"))
         params = {**params, "control_version": admitted["control_version"]}
@@ -178,6 +187,8 @@ class TaskCoordinator:
             async with self._lock(host, sid):
                 task = check(self.journal, task_id, host, sid, action, task["control_version"])
                 before = await self.adapter.prepare_send(task, sid) if action == "send" else {}
+                if context:
+                    check_binding(context)
                 check(self.journal, task_id, host, sid, action, task["control_version"])
                 key = params.get("operation_id") or "legacy:" + str(uuid.uuid4())
                 payload = {"purpose": "runtime:" + action, "control_version": task["control_version"],
@@ -192,10 +203,6 @@ class TaskCoordinator:
                                                     (params["message_id"], command["command_id"]))
                             command = self.journal.command_get(command["command_id"])
                         return {**command, "fresh": fresh}
-                context = None
-                if params.get("operation_id") and getattr(self, "operations", None):
-                    from .operations import OpContext
-                    context = OpContext(self.operations, self.operations._row(params["operation_id"]))
                 command = context.effect("task_command", intent) if context else intent()
                 fresh = command["fresh"]
                 if context:
@@ -543,6 +550,9 @@ class TaskCoordinator:
             reconciled = False
             try:
                 async def dispatch():
+                    if operation:
+                        from .task_control import check_binding
+                        check_binding(operation)
                     return await self.adapter.send(task, sid, text, cmd["message_id"])
                 async def readback(_):
                     proof = await self.adapter.reconcile_send(task, sid, hashlib.sha256(text.encode()).hexdigest(),
@@ -950,10 +960,15 @@ class TaskCoordinator:
                                                 prepared_command={"command_id": result["_next_command_id"]},
                                                 operation=operation)
                     return result
-            expected_version = operation.preconditions.get("control_version", task["control_version"]) if operation else None
+            if operation:
+                from .task_control import check_binding
+                check_binding(operation)
+            expected_version = operation.effective_preconditions.get("control_version", task["control_version"]) if operation else None
             if operation:
                 operation.set_refs(task_id=task_id, command_id=command_id, control_version=expected_version)
             def check_version():
+                if operation:
+                    check_binding(operation)
                 if expected_version is not None and self.journal.get(task_id)["control_version"] != expected_version:
                     raise TaskControlRefused("CONTROL_VERSION_CONFLICT", "task control changed before command resolution")
             if command["task_id"] != task_id or command["status"] != "uncertain":

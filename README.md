@@ -101,6 +101,12 @@ and `batc` commands remain available.
 
 Task mutations now record an operation and return `operation_id` / `operation_status` with the existing result.
 Keep a key for retries; keys belong to the authenticated actor. Unkeyed old task controls are separate requests.
+Task-bound operations capture the task version at admission, including when `control_version` is omitted;
+session controls also capture the current session. Read this server binding in `external_refs.admission_binding`,
+separate from caller preconditions. A pause/resume or session replacement before execution refuses the old request
+with `CONTROL_VERSION_CONFLICT` / `TASK_BINDING_MISMATCH`. The same key replays the refusal or original success;
+read the task and use a new key for an authorized new decision. Older operations without this binding retain
+their previous behaviour.
 Task-owned sends, answers, interrupts and permission changes pass the same coordinator, including legacy tools:
 `TASK_PAUSED`, `TASK_VERIFYING` and `TASK_COMMAND_PENDING` mean stop and read `work_status`, never jump the queue
 with force or continue. `CONTROL_VERSION_CONFLICT` requires reading the changed state. A second daemon, even with

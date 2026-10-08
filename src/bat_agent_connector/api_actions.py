@@ -19,7 +19,7 @@ def _fleet(ops: OperationService):
 
 
 def _admit_session(ops: OperationService, principal: Principal, target: dict, params: dict, pre: dict,
-                   action: str = "send") -> None:
+                   action: str = "send") -> dict | None:
     fleet = _fleet(ops)
     host, sid = target["host"], target["session_id"]
     if host not in fleet.config.hosts:
@@ -44,23 +44,23 @@ def _admit_session(ops: OperationService, principal: Principal, target: dict, pa
         if coordinator is None:
             raise OperationError("TASK_OWNER_UNAVAILABLE", "task coordinator unavailable", 409)
         try:
-            task_control.check(coordinator.journal, task_id, host, sid,
-                               action, pre.get("control_version"))
+            task = task_control.check(coordinator.journal, task_id, host, sid,
+                                      action, pre.get("control_version"))
         except TaskControlRefused as exc:
             raise OperationError(exc.code, str(exc), 409) from None
+        return task_control.admission_binding(task, session=True)
 
 
-def _admit_send(ops: OperationService, principal: Principal, target: dict, params: dict, pre: dict) -> None:
+def _admit_send(ops: OperationService, principal: Principal, target: dict, params: dict, pre: dict) -> dict | None:
     if target.get("task_id"):
         from .task_actions import admit_send
-        admit_send(ops, principal, target, params, pre)
-        return
+        return admit_send(ops, principal, target, params, pre)
     if not all(isinstance(target.get(k), str) and target[k] for k in SESSION_TARGET):
         raise OperationError("INVALID_TARGET", "host and session_id are required", 422)
     text = params.get("text")
     if not isinstance(text, str) or not text.strip() or len(text) > service.MAX_PROMPT_CHARS:
         raise OperationError("INVALID_PARAMS", f"text must be 1-{service.MAX_PROMPT_CHARS} characters", 422)
-    _admit_session(ops, principal, target, params, pre)
+    return _admit_session(ops, principal, target, params, pre)
 
 
 async def _send(ctx: OpContext) -> dict:
@@ -73,9 +73,10 @@ async def _send(ctx: OpContext) -> dict:
     mid = "batc-" + ctx.operation_id  # the clientMessageId BAT echoes back for Claude sessions
 
     async def send() -> dict:
+        task_control.check_binding(ctx)
         r = await service.session_send(fleet, host, sid, text, confirm=True, message_id=mid,
                                        queue=bool(ctx.params.get("queue")), tool="api:" + ctx.actor,
-                                       retry_on_disconnect=False, control_version=ctx.preconditions.get("control_version"),
+                                       retry_on_disconnect=False, control_version=ctx.effective_preconditions.get("control_version"),
                                        operation_id=ctx.operation_id)
         return {k: r.get(k) for k in ("message_id", "accepted", "queued", "turn_marker", "turn_attribution",
                                       "marker_source", "resumed")}
@@ -104,7 +105,7 @@ async def _send(ctx: OpContext) -> dict:
     return r
 
 
-def _admit_answer(ops: OperationService, principal: Principal, target: dict, params: dict, pre: dict) -> None:
+def _admit_answer(ops: OperationService, principal: Principal, target: dict, params: dict, pre: dict) -> dict | None:
     # The exact prompt is required: without it an answer could land on whatever prompt is pending next, and a
     # read-back could not tell this prompt from another one.
     if not isinstance(params.get("tool_use_id"), str) or not params["tool_use_id"]:
@@ -113,7 +114,7 @@ def _admit_answer(ops: OperationService, principal: Principal, target: dict, par
         raise OperationError("INVALID_PARAMS", "pass exactly one of answers or permission", 422)
     if "permission" in params and params["permission"] not in {"allow", "deny"}:
         raise OperationError("INVALID_PARAMS", "permission must be allow or deny", 422)
-    _admit_session(ops, principal, target, params, pre, "answer")
+    return _admit_session(ops, principal, target, params, pre, "answer")
 
 
 async def _answer(ctx: OpContext) -> dict:
@@ -121,10 +122,11 @@ async def _answer(ctx: OpContext) -> dict:
     host, sid, p = ctx.target["host"], ctx.target["session_id"], ctx.params
 
     async def answer() -> dict:
+        task_control.check_binding(ctx)
         r = await service.session_answer(fleet, host, sid, confirm=True, answers=p.get("answers"),
                                          permission=p.get("permission"), deny_message=p.get("deny_message"),
                                          tool_use_id=p.get("tool_use_id"),
-                                         control_version=ctx.preconditions.get("control_version"),
+                                         control_version=ctx.effective_preconditions.get("control_version"),
                                          operation_id=ctx.operation_id)
         return {k: r.get(k) for k in ("channel", "tool_use_id", "questions", "answered", "permission")}
 
@@ -143,10 +145,10 @@ async def _answer(ctx: OpContext) -> dict:
     return await ctx.step("answer", answer, request={"tool_use_id": p.get("tool_use_id")}, reconcile=reconcile)
 
 
-def _admit_interrupt(ops: OperationService, principal: Principal, target: dict, params: dict, pre: dict) -> None:
+def _admit_interrupt(ops: OperationService, principal: Principal, target: dict, params: dict, pre: dict) -> dict | None:
     if params.get("mode", "soft") not in {"soft", "hard"}:
         raise OperationError("INVALID_PARAMS", "mode must be soft or hard", 422)
-    _admit_session(ops, principal, target, params, pre, "interrupt")
+    return _admit_session(ops, principal, target, params, pre, "interrupt")
 
 
 async def _interrupt(ctx: OpContext) -> dict:
@@ -154,8 +156,9 @@ async def _interrupt(ctx: OpContext) -> dict:
     host, sid = ctx.target["host"], ctx.target["session_id"]
 
     async def interrupt() -> dict:
+        task_control.check_binding(ctx)
         r = await service.session_interrupt(fleet, host, sid, ctx.params.get("mode", "soft"), confirm=True,
-                                            control_version=ctx.preconditions.get("control_version"),
+                                            control_version=ctx.effective_preconditions.get("control_version"),
                                             operation_id=ctx.operation_id)
         return {"channel": r.get("channel"), "mode": r.get("mode")}
 

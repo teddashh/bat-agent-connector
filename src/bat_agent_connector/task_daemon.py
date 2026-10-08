@@ -28,6 +28,7 @@ from . import (
     registry,
     service,
     task_actions,
+    task_control,
     work_items,
 )
 from .api_v1 import ApiV1, is_dashboard_path
@@ -349,6 +350,11 @@ class TaskDaemon:
                 raise ValueError("task host needs writes=true and orchestrate=true")
             params = dict(params)
             async with self._submit_lock:
+                continuation_receipt = self.journal.db.execute(
+                    "SELECT 1 FROM operation_steps WHERE operation_id=? AND name='task_continuation' AND status='succeeded'",
+                    (_ctx.operation_id,)).fetchone()
+                if not continuation_receipt:
+                    task_control.check_binding(_ctx)
                 defaults = _ctx.effect("submission_defaults", lambda: {
                     "base_branch": params.get("base_branch") if params.get("base_branch") is not None else
                     self.adapter.verifier.settings.base_branches.get(params.get("project")),
@@ -368,10 +374,12 @@ class TaskDaemon:
                     if not isinstance(parent_id, str) or not parent_id:
                         raise ValueError("continuation requires parent_task_id")
                     parent = self.journal.get(parent_id)
-                    _ctx.effect("task_continuation", lambda: {
-                        "recorded": self.journal.record_continuation(parent_id, params["idempotency_key"],
-                                                                      params["original_words"]),
-                        "task_id": parent_id})
+                    def continuation():
+                        task_control.check_binding(_ctx)
+                        return {"recorded": self.journal.record_continuation(parent_id, params["idempotency_key"],
+                                                                            params["original_words"]),
+                                "task_id": parent_id}
+                    _ctx.effect("task_continuation", continuation)
                     return {"task_id": parent_id, "state": self.journal.get(parent_id)["state"],
                             "submitted_at": parent["submitted_at"], "engine": parent["engine"],
                             "task_path": parent["task_path"], "continuation": True,
@@ -484,7 +492,8 @@ class TaskDaemon:
             if params.get("actor") == "ted" and not params.get("source_message_id"):
                 raise ValueError("Ted action requires source_message_id")
             def pause_effect():
-                task_actions.admit_task(_ctx.service, None, _ctx.target, _ctx.params, _ctx.preconditions)
+                task_control.check_binding(_ctx)
+                task_actions.admit_task(_ctx.service, None, _ctx.target, _ctx.params, _ctx.effective_preconditions)
                 task = self.journal.pause(task_id, abort_current=params.get("abort_current", False))
                 if params.get("actor") == "ted":
                     self.journal.ted_action(task_id, action="pause", source_message_id=params["source_message_id"])
@@ -511,7 +520,8 @@ class TaskDaemon:
             if params.get("actor") == "ted" and not params.get("source_message_id"):
                 raise ValueError("Ted action requires source_message_id")
             def resume_effect():
-                task_actions.admit_task(_ctx.service, None, _ctx.target, _ctx.params, _ctx.preconditions)
+                task_control.check_binding(_ctx)
+                task_actions.admit_task(_ctx.service, None, _ctx.target, _ctx.params, _ctx.effective_preconditions)
                 result = self.journal.resume(task_id)
                 if params.get("actor") == "ted":
                     self.journal.ted_action(task_id, action="resume", source_message_id=params["source_message_id"])
@@ -544,7 +554,10 @@ class TaskDaemon:
                                              f"{task.get('verification_commit')}",
                                              "Check a clean candidate with the trusted runner",
                                              expected_type="verification", high_stakes=True)
-                evidence = await _ctx.step("trusted_verification", lambda: self.adapter.run_verification(task))
+                async def verify():
+                    task_control.check_binding(_ctx)
+                    return await self.adapter.run_verification(task)
+                evidence = await _ctx.step("trusted_verification", verify)
                 if not evidence:
                     raise ValueError("trusted verifier unavailable or candidate changed")
                 return _ctx.effect("task_verification", lambda: self.journal.record_observed_verification(task_id, evidence))

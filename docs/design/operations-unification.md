@@ -18,7 +18,7 @@
 
 `OpContext.effect` 與原 Journal.tx 的巢狀 savepoint 保存同交易 receipt；沒有 schema migration。task/send linkage 使用 external_refs、command payload 與 operation_steps response，不新增派工資料表。pause local effect 不等待 task lock，abort step 再按 task → session → host → BAT semaphore 順序執行。受信 verifier 在啟動 runner 與保存 evidence 前重查版本；caller 不能以外部 verification 取代它。未知 send 不重送；answer/interrupt 的正面 readback 可交原 coordinator，無法證明的 permissions 保留 uncertain，原 command capability 可作一次性人工對帳。
 
-task.verify／task.request_ted 的 paused／state 規則，以及 task.mark_stage 的 verified done 規則，與 principal／capability／engine 檢查分開。admission 沿用原順序與拒絕碼；執行取得 task lock 後，在第一個 effect／receipt intent 前重跑同一 state check。等待鎖時 task 完成、暫停或失去 verified done 條件，operation 以 TASK_PAUSED／TASK_STATE_BLOCKED failed，task、verification／delivery、events 與 commands 不變。已有 succeeded receipt 的 worker replay 先回原 receipt，不因後來的 state／version 改變而重做 effect。task.pause／resume 的本機 effect 前沒有 await，交易內重查版本，原 journal 保留 terminal task；pause abort 的等待只發生在 pause receipt 之後。task.command.reconcile 在 task lock 下重讀 command，原 journal 交易再查 uncertain task／command 與 capability，並在最後提交前重查版本，不套用只供派送的 scoped state 規則。
+task.verify／task.request_ted 的 paused／state 規則，以及 task.mark_stage 的 verified done 規則，與 principal／capability／engine 檢查分開。admission 沿用原順序與拒絕碼；執行取得 task lock 後，在第一個 effect／receipt intent 前重查 admission binding，再跑同一 state check。等待鎖時版本改變先回 CONTROL_VERSION_CONFLICT；同版本下 task 完成、暫停或失去 verified done 條件仍以 TASK_PAUSED／TASK_STATE_BLOCKED failed。task、verification／delivery、events 與 commands 不變。已有 succeeded receipt 的 worker replay 先回原 receipt，不因後來的 state／version 改變而重做 effect。task.pause／resume 的本機 effect 前沒有 await，交易內重查版本，原 journal 保留 terminal task；pause abort 的等待只發生在 pause receipt 之後。task.command.reconcile 在 task lock 下重讀 command，原 journal 交易再查 uncertain task／command 與 capability，並在最後提交前重查版本，不套用只供派送的 scoped state 規則。
 
 舊 task 結果只新增 operation_id／operation_status。無 key 舊 controls 為獨立 request identity；task_send 未指定 key 時以 task_id＋原 step_id 保留 retry 身分。舊 work_submit 201–256 字 key 在 adapter 保存原字串並作 SHA-256 operation-key 映射（不改 create 的 200 字限制）；只有 local-admin work_submit 相容入口可寫歷史 task-key bridge receipt，HTTP 一般 actor／新 API admin submission 不追認歷史 key。bridge 與 operation admission 在同一外層 Journal.tx 提交；中途 crash 不會留下可錯建新 task 的孤立 intent，create 的 admission 順序不變。reconcile capability 明文不入 operation；消耗後只能重讀相同 actor/key 的原 operation。
 
@@ -235,7 +235,7 @@ OperationService 的 context 注入 daemon **同一個 coordinator**。不可在
 | manual／unknown／人工 cwd／binding mismatch | 原 resource-policy 拒絕碼 | 零 BAT／Git mutation；task link 不會改分類。 |
 | task-owned，但中央 owner／row 不可讀 | `TASK_OWNER_UNAVAILABLE` | 不降級為 standalone，也不另外建帳本。 |
 | registry／task／預留 command 指向不同 owner、host 或 session | `TASK_BINDING_MISMATCH` | 不改任何一方的 ownership。 |
-| 明確 control_version 與目前不符 | `CONTROL_VERSION_CONFLICT` | 不自動更新 client precondition。 |
+| 明確 control_version 或 operation 的 admission binding 與目前不符 | `CONTROL_VERSION_CONFLICT` | 不自動更新 client precondition／admission binding。 |
 | `paused=true`（任何 state） | `TASK_PAUSED` | send 的 queue／permission force／批次工具都不插隊。 |
 | state=verifying | `TASK_VERIFYING` | 即使 lead 看似 idle 也拒絕，避免改掉候選或 reviewer turn。 |
 | unresolved runtime command：send／failover／start_% 或本包新增的 answer／permissions／interrupt，status 為 intent／needs_review／uncertain | `TASK_COMMAND_PENDING` | 回傳非秘密 task_id／command_id／status，交原 coordinator reconcile。 |
@@ -249,11 +249,30 @@ pending command 指待確認派送的命令，不等同 BAT pendingPermission／
 
 選擇 **拒絕、不新增 queue**。`G` 允許的 action 由 coordinator 的公共控制方法取得原 task/session 鎖、固定版本、透過原 commands 留意圖；send 延用 `_send`／prepare_send／reconcile_send，answer／interrupt／permissions 只增加必要 command kind／回查，不增加另一種 task state。外部不能把它包成 reviewer:initial 或 initial_task_send 以繞 gate。
 
-舊入口沒傳 control_version 時，共用 gate 在第一次 admission 讀出並固定當時版本，保存為 execution binding（不混入 client request hash）；之後每次 await／取得 send semaphore／真正 frame 前再核對。這是相容觀察版本，不是 client 去重 key。新 client 應明確傳讀到的 control_version。task state 改成 verifying 時即使 control_version 未增加，也要重新擋；task ownership 變動也一樣。
+operation 沒傳 control_version 時，admission 仍固定當時的 task incarnation。版本與 session 在 operation row 同交易保存，不能等執行時才改綁新版本／新 session。執行在第一個 effect／command 前核對：版本變動為 `CONTROL_VERSION_CONFLICT`（409）；同版本但 journal 的 bound role host／session 改變為 `TASK_BINDING_MISMATCH`（409）。零 BAT frame／新 command／task write，原 key 重讀同一 failed operation。task state 改成 verifying 時即使 control_version 未增加，也仍跑原 state gate。registry／resource ownership 保留於原 admission／共用 runtime gate／FrameGuard；本機 command reconciliation 不新增 registry 前置條件。
+
+### Admission binding 儲存與 action 盤點（Part A）
+
+`ActionDef.admit` 可回傳 binding；`OperationService.create` 將它保存於既有 `external_refs.admission_binding`，與 operation INSERT／accepted event 同交易提交。沒有 schema migration、沒有先建立 binding step。binding 至少含 `task_id`／`control_version`；session target 另含 `host`／`session_id`／`role`。API 將此欄標為 **admission binding**，不是 caller precondition。`preconditions` 原樣保存；request hash 只使用 caller 原 action／target／params／preconditions，binding 不進 hash。replay 仍在 admission 前比原 hash，所以 task 改變後相同 actor／key／原 request 仍回原 operation；把省略版本改成明確版本是不同 request。
+
+| 已核對入口／action | 保存的 binding | 首次 effect 前核對位置 |
+|---|---|---|
+| task-owned `session.send`（host/session target）／`session.answer`／`session.interrupt` | task version＋current lead host/session/role；answer 的 permission 分支同樣綁定 | ActionDef step callback、`session_control` 取得鎖後／command 前、原 FrameGuard |
+| `session.send`（`{task_id}`；`task_send`） | task version＋current lead host/session/role | task lock 下 `task_binding` effect 前；原 session lock／frame gate |
+| `task.verify`（`task_run_verification`） | task version＋current lead host/session/role | task lock 下、trusted runner callback |
+| `task.request_ted`（`task_request_ted`）／`task.mark_stage`（`work_mark_stage`） | task version | task lock 下，local effect／receipt intent 前 |
+| `task.pause`／`task.resume`（`work_pause`／`work_resume`） | task version；abort_current 的 pause 另綁 lead host/session/role | local effect 的交易內；abort 仍使用 pause 後自己的 bound version |
+| `task.command.reconcile`（`work_reconcile`／`task-reconcile`） | task version＋原 command 的 current lead/reviewer role host/session | task lock 下與 reconciliation local effect 的交易內；command_id 仍是原固定 target |
+| `task.submit` continuation（`work_submit`） | parent task version | submit lock 下，在 submission_defaults／continuation effect 前；新 task submission 沒有既存 incarnation 可綁 |
+| legacy permissions／relay target／continue（含 client-resume）／approve-pending／deferred raises | Part A 尚沒有 operation admission；共用 `session_control` 在第一次 gate 固定版本，owner RPC 轉送同一版本 | 原 task/session lock 與每個 permission／resume frame；Part B 包成 action 時須回傳相同 session admission binding，不能建立第二 writer |
+
+上述 RPC／MCP／CLI task doors 都進 `ops.create`，因此得到相同持久 binding。standalone managed session 沒有 task binding。升級前已受理、沒有 `external_refs.admission_binding` 的 operation 保留原 execution-time binding，不回填、不重算 hash。已成功 effect 的 receipt 或外部 uncertain step 的正面 readback 仍按原證據恢復；此檢查只擋新的 effect，不能以較新版本否定已發生的效果或重送未知 frame。
 
 只在 admission 查版本不夠。answer、兩個 Codex permission calls、interrupt、client-resume 都要使用 journal-bound 的內部 guard；public params 不提供 skip_gate／before_invoke／task_id 認領旗標。callback 存在本身不能作為 bypass 證據。所有 runtime writer 共享 coordinator 鎖的取得次序（task → session → host write lock → BAT semaphore），避免低階工具持有 host lock 再等 coordinator。
 
 task.pause 是明確控制例外：先提交 pause、增版本，令未送 command 取消；abort step 只操作被綁定的 current session，即使 task 原先 verifying／pending 也能走 coordinator 停止目前回合。記下該 pause 的版本，若等待鎖期間 task 已 resume／換 session，拒絕遲到 interrupt。task.resume 只清 paused，不證明 writer 已停止；pending 命令仍先 reconcile。
+
+pause／resume 也遵守 admission version：已受理的 resume 不能清掉後來的新 pause；已受理的 pause 不能暫停後來 resume 的 incarnation。兩者在自己的 local effect 前以 CONTROL_VERSION_CONFLICT 拒絕，task 不變。pause 不等待其他 task lock 的既有語意保留；「先提交的 pause 阻止舊 send」不表示排隊中的 stale pause 可永遠覆寫新控制。取得有效 incarnation、通過 gate 並開始 `_send` 後才輸給 pause 的既有 send race，仍沿用下面的 TASK_PAUSED 規則。
 
 task-scoped `session.send` 已通過 admission 後，pause 仍可在等待 session lock、`_route`、presence probe 或 `prepare_send` 時先提交。若 pause 在 command／frame 前勝出，send 以 `TASK_PAUSED`（409）明確拒絕，`task_send_refusal` step 與 operation 都是 failed，沒有 command／BAT write frame，task 保持 pause 留下的內容。相同 key 永遠重讀此拒絕；resume 後要用新 key 才是新派送。原 coordinator 自己的 `_send`（沒有 operation）仍回傳 paused task，paused tick 不派送。
 
@@ -272,6 +291,7 @@ Task scope command 外部派送仍由 coordinator 擁有。operation refs 記 ta
 | A05 情境 | 固定規則 |
 |---|---|
 | 同驗證 actor、同 key、同 canonical action/target/params/preconditions | 回同 operation_id；不重跑 admission、模型判斷、task.submit、control 或任何外部 step。 |
+| 省略 control_version 的 task-bound operation | admission 版本／session 保存在 external_refs，不改 caller request hash；版本／role 改變後尚未執行的要求 failed，原 key 重讀拒絕。已 succeeded 的要求仍回原成功。 |
 | 同 actor/key，但文字、模式、task、source、prompt ID、plan、force、控制版本等有效參數不同 | `IDEMPOTENCY_CONFLICT`，HTTP 409；沒有新的 task／command／session。 |
 | 不同 actor 使用同 key | 不同 operation；tasks 原全域 key 不能碰撞。task submit 的內部 journal key 以固定 operation_id 對應，不把 client key 直接當 tasks.idem_key。 |
 | 同 key 從 continue 與 text=continue 的 send 重送 | 正規化後相同；transport entry 不造成衝突。原 relay 是另一能力，不因最後組出的 text 相同而合併。 |
@@ -355,7 +375,7 @@ Phase 2 擴充原 owner 機制，沒有第二份 owner database／另一套 leas
 
 ## 現有資料與 schema 遷移
 
-不搬移、不重編 task／command／session／worktree／branch／checkpoint IDs，不重送歷史命令，不補造「以前執行過」的 operations。registry、tasks.sqlite3、verification 證詞與既有管理／delivery 資料保留。**沒有業務資料搬遷或歷史回填**；NOT NULL 與唯一索引保留，no-key sentinel 不需 schema change。
+不搬移、不重編 task／command／session／worktree／branch／checkpoint IDs，不重送歷史命令，不補造「以前執行過」的 operations。registry、tasks.sqlite3、verification 證詞與既有管理／delivery 資料保留。**沒有業務資料搬遷或歷史回填**；NOT NULL 與唯一索引保留，no-key sentinel 不需 schema change。 admission binding 只存於新 operation 的既有 external_refs；舊無 binding rows 保留原行為。
 
 - 不重建 operations、不改其 NOT NULL／FK／唯一索引。Part B 採保留前綴 sentinel；舊有 keys/hashes/steps 原樣保留。Part A 未新增 schema。之後若需額外欄位，以 guarded column add／idempotent DDL 每次開 journal 時執行，不讀寫 `PRAGMA user_version`；只有一次性資料搬移才使用 orchestrator 分配的版本。
 - task-operation linkage 使用現有 `external_refs`／command payload／operation_steps response；沒有第二個 task 狀態表，也沒有資料搬移。檢查 row count、operation_steps FK 與原 key 去重結果；初始化失敗 rollback，不先啟動 worker。
@@ -399,7 +419,9 @@ Phase 2 擴充原 owner 機制，沒有第二份 owner database／另一套 leas
 | A07；§10（Part A 其他控制） | `test_a07_other_controls_refuse_pause_while_waiting_for_session_lock` | answer／interrupt operations、legacy permissions／relay／deferred raise 等鎖時 pause：鎖後 gate 拒絕，零 command／frame；bulk deferred 項目 raised=false 與明確 code，不能回報成功。 |
 | A05；§09（Part A 拒絕恢復） | `test_a05_paused_send_refusal_survives_restart_before_operation_settlement` | refusal step 在 started／failed、operation terminal status 尚未提交即 crash；task resume 後重啟仍重讀 TASK_PAUSED，不建立 command 或補送。 |
 | A05／A07；§09／§10（Part A terminal send crash） | `test_a05_a07_cancelled_send_command_survives_restart_without_uncertain_task`、`test_a05_a07_rejected_send_command_survives_restart_without_uncertain_task`、`test_a07_rejected_send_recovery_preserves_a_later_accepted_command`、`test_a07_legacy_send_reuses_terminal_command_without_uncertain_task` | 最後 paused check／initial presence 後 cancelled status 提交即停止；新 daemon 恢復 TASK_PAUSED，task snapshot 不變、零 frame／新 command，resume＋新 key 恰一 frame。版本改變沿用 gate code；其他取消固定拒絕。rejected 的 local refusal／accepted=false／vanished／presence 不明，涵蓋 status 後及本機結果後 crash，保持 failed code、不進 uncertain、不重寫既有結果或較晚 accepted command 的 task。舊 send／tick 的相同 crash 也不製造 uncertain。 |
-| A05／A07；§09／§10（Part A task action 鎖後檢查） | `test_a05_locked_task_action_refuses_task_completed_by_tick`、`test_a05_mark_stage_rechecks_verified_done_after_task_lock`、`test_a05_scoped_task_action_rechecks_pause_after_task_lock` | request_ted／verify 已受理但等待驗證 tick 的 task lock；tick 完成後 TASK_STATE_BLOCKED，done／verification／delivery 不變。mark_stage 等鎖後失去 done／verification_commit 時拒絕；scoped actions 等鎖時 pause 以 TASK_PAUSED 拒絕。零 effect／receipt intent、同 key 重讀拒絕。 |
+| A05／A07；§09／§10（Part A task action 鎖後檢查） | `test_a05_locked_task_action_refuses_task_completed_by_tick`、`test_a05_mark_stage_rechecks_verified_done_after_task_lock`、`test_a05_scoped_task_action_rechecks_pause_after_task_lock` | request_ted／verify 已受理但等待驗證 tick 的 task lock；tick 完成後 TASK_STATE_BLOCKED，done／verification／delivery 不變。mark_stage 等鎖後失去 done／verification_commit 時拒絕；scoped actions 等鎖時 pause 增版本，以 CONTROL_VERSION_CONFLICT 拒絕；同版本的 state 規則不變。零 effect／receipt intent、同 key 重讀拒絕。 |
+| A05／A07；§09／§10（Part A admission binding） | `test_a07_session_operation_keeps_admission_incarnation`、`test_a07_send_refuses_replaced_admission_session`、`test_a07_task_actions_keep_admission_version` | send／answer／interrupt／permission answer，省略或明確版本：pause＋resume 後拒絕 CONTROL_VERSION_CONFLICT，無競態恰一 frame。task target send session 被換後 TASK_BINDING_MISMATCH，零 frame／command／task write。verify／request_ted／stage／pause／resume／reconcile／continuation 逐 action 綁定版本；stale pause／resume 不覆寫較新控制。原 request hash、refusal replay 與 success replay 不變；明確 stale 版本仍在 admission 拒絕。 |
+| A05／A07；§09／§10（binding 持久化與相容） | `test_a05_admission_binding_is_atomic_with_operation_row`、`test_a07_admission_incarnation_survives_restart`、`test_a07_task_session_actions_refuse_replaced_admission_role`、`test_a07_preupgrade_operation_without_admission_binding_keeps_old_behavior`、`test_a05_legacy_task_door_records_admission_binding`、`test_a07_readback_of_old_incarnation_does_not_dispatch_again` | admission event 前 crash rollback 整個 row；restart 保留原 binding／拒絕，新 key 恰送一次。verify／abort pause／reviewer reconcile 不可換 session；舊無 binding rows 保留原行為。RPC／MCP／CLI 相同保存；已送 frame 在新版 incarnation 仍可 readback＋coordinator tick，不重送。 |
 | A05；§09（Part A receipt replay 與控制） | `test_a05_locked_task_action_replays_receipt_after_state_change`、`test_a05_task_controls_do_not_wait_for_task_lock_or_change_terminal_task`、`test_a05_reconcile_refuses_command_settled_while_waiting_for_task_lock`、`test_a05_verify_request_ted_and_stage_use_original_receipts` | succeeded receipt 優先於新 state／version；未競態要求仍成功。pause／resume 本機 effect 不等 task lock、保留 terminal task；原 command 在等鎖時已被 tick 接受，reconcile 不消耗 capability／不寫對帳回執。 |
 
 故障注入只用 `tests/mockbat.py`、`tests/fakegithub.py`、[test_checkpoints.py](../../tests/test_checkpoints.py) 的 LocalRunner／RealGitLog 與 temp Git repos。驗證 policy 時比較所有寫 channel 與目的端，不能只數 send-message。停用中的 `pytest.mark.skip` task 測試不算 A07／A08 證據；舊 engine／mid-task failover 的 skip 不因本包自動啟用。

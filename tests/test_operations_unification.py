@@ -951,7 +951,8 @@ async def test_a05_scoped_task_action_rechecks_pause_after_task_lock(owned, mock
         await d.coordinator.pause(tid)
         snapshot = task_effect_snapshot(d, tid)
     await worker
-    assert_locked_action_refusal(d, tid, op, snapshot, "TASK_PAUSED")
+    # Pause advanced the incarnation before this operation's first effect.
+    assert_locked_action_refusal(d, tid, op, snapshot, "CONTROL_VERSION_CONFLICT")
     assert not writes(mock)
 
 
@@ -1456,3 +1457,241 @@ async def test_a07_api_actor_name_cannot_impersonate_task_capability(owned, mock
         d.ops.create(principal, action=action, target={"task_id": tid}, params=params, idempotency_key="attempt")
     assert d.journal.db.execute("SELECT count(*) FROM operations").fetchone()[0] == 0
     assert not writes(mock)
+
+
+def admission_control(d, tid, mock, kind, *, scoped=False, pre=None, key="admission"):
+    if kind == "answer":
+        mock.states[SID]["pendingAskUser"] = {"toolUseId": "ask-1", "questions": [{"question": "Choice?"}]}
+    elif kind == "permission":
+        mock.states[SID]["pendingPermission"] = {"toolUseId": "permission-1"}
+    elif kind == "interrupt":
+        mock.metas[SID]["isStreaming"] = mock.states[SID]["isStreaming"] = True
+    action = "session.answer" if kind == "permission" else "session." + kind
+    params = {"send": {"text": "one instruction"}, "answer": {"answers": ["yes"], "tool_use_id": "ask-1"},
+              "permission": {"permission": "allow", "tool_use_id": "permission-1"}, "interrupt": {"mode": "soft"}}[kind]
+    if scoped:
+        params["step_id"] = "one"
+    principal = api_auth.Principal("local-admin", frozenset(), admin=True)
+    request = {"action": action, "target": {"task_id": tid} if scoped else {"host": "h1", "session_id": SID},
+               "params": params, "preconditions": pre or {}, "idempotency_key": key}
+    return principal, request, d.ops.create(principal, **request)[0]
+
+
+@pytest.mark.parametrize("kind", ["send", "answer", "interrupt", "permission"])
+@pytest.mark.parametrize("raced", [False, True], ids=["unraced", "pause_resume"])
+@pytest.mark.parametrize("explicit", [False, True], ids=["omitted_version", "explicit_version"])
+async def test_a07_session_operation_keeps_admission_incarnation(owned, mock, kind, raced, explicit):
+    d, tid = owned
+    principal, request, op = admission_control(d, tid, mock, kind, pre={"control_version": 0} if explicit else {})
+    binding = {"task_id": tid, "control_version": 0, "host": "h1", "session_id": SID, "role": "lead"}
+    assert op["external_refs"]["admission_binding"] == binding
+    assert op["preconditions"] == request["preconditions"]  # server metadata never changes the hashed request
+    if raced:
+        d.journal.pause(tid)
+        d.journal.resume(tid)
+    snapshot = task_effect_snapshot(d, tid)
+    await d.ops.drain()
+    result = d.ops.get(op["operation_id"])
+    assert result["status"] == ("failed" if raced else "succeeded")
+    assert result["external_refs"]["admission_binding"] == binding
+    assert len(writes(mock)) == int(not raced)
+    if raced:
+        assert result["error_code"] == "CONTROL_VERSION_CONFLICT"
+        assert task_effect_snapshot(d, tid) == snapshot
+        assert not d.journal.commands(tid)
+    else:
+        d.journal.pause(tid)
+        d.journal.resume(tid)
+    replay_snapshot = task_effect_snapshot(d, tid)
+    replay, created = d.ops.create(principal, **request)
+    assert not created and replay["operation_id"] == op["operation_id"]
+    await d.ops.drain()
+    assert d.ops.get(op["operation_id"]) == result
+    assert task_effect_snapshot(d, tid) == replay_snapshot
+    assert len(writes(mock)) == int(not raced)
+    with pytest.raises(OperationError, match="IDEMPOTENCY_CONFLICT"):
+        d.ops.create(principal, **{**request, "preconditions": {"control_version": 0 if not explicit else 2}})
+    with pytest.raises(OperationError, match="CONTROL_VERSION_CONFLICT"):
+        d.ops.create(principal, **{**request, "preconditions": {"control_version": 0}, "idempotency_key": "stale"})
+
+
+@pytest.mark.parametrize("scoped", [False, True], ids=["session_target", "task_target"])
+async def test_a07_send_refuses_replaced_admission_session(owned, mock, scoped):
+    d, tid = owned
+    principal, request, op = admission_control(d, tid, mock, "send", scoped=scoped)
+    replacement = "sess-codex-0002"
+    d.journal.change(tid, "accepted", fields={"session_id": replacement})
+    adopt(replacement, task_id=tid, role="lead", agent_preset="codex-agent")
+    snapshot = task_effect_snapshot(d, tid)
+    await d.ops.drain()
+    result = d.ops.get(op["operation_id"])
+    assert result["status"] == "failed" and result["error_code"] == "TASK_BINDING_MISMATCH"
+    assert not d.journal.commands(tid) and not writes(mock)
+    assert task_effect_snapshot(d, tid) == snapshot
+    replay, created = d.ops.create(principal, **request)
+    assert not created and d.ops.get(replay["operation_id"]) == result
+
+
+@pytest.mark.parametrize("action", ["task.verify", "task.request_ted", "task.mark_stage", "task.pause",
+                                    "task.resume", "task.command.reconcile", "task.submit"])
+async def test_a07_task_actions_keep_admission_version(owned, mock, action):
+    d, tid = owned
+    principal = api_auth.Principal("local-admin", frozenset(), admin=True)
+    target, params = {"task_id": tid}, {}
+    if action == "task.mark_stage":
+        finish_verified_task(d, tid)
+        params = {"stage": "adopted", "ref": "commit-a"}
+    elif action == "task.request_ted":
+        params = {"reason": "decision"}
+    elif action == "task.pause":
+        d.journal.pause(tid)  # a queued pause must not undo a later resume
+    elif action == "task.command.reconcile":
+        cmd, _ = d.journal.command(tid, "send", SID, {"purpose": "goose:one"}, "pending")
+        d.journal.command_status(cmd["command_id"], "uncertain")
+        d.journal.change(tid, "uncertain")
+        target["command_id"] = cmd["command_id"]
+        cap = d.journal.issue_reconcile_capability(tid, cmd["command_id"])
+        principal = d.capability_principal(cap, action, target, "admission")
+        params = {"outcome": "not_delivered", "actor": "operator", "source": "ticket-1", "evidence": "checked"}
+    elif action == "task.submit":
+        target = {"host": "h1", "workspace": "demo-project"}
+        params = {"project": "p", "original_words": "follow up", "continuation": True, "parent_task_id": tid}
+    request = {"action": action, "target": target, "params": params, "idempotency_key": "admission"}
+    version = d.journal.get(tid)["control_version"]
+    op, _ = d.ops.create(principal, **request)
+    assert op["external_refs"]["admission_binding"]["control_version"] == version
+    if action == "task.pause":
+        d.journal.resume(tid)
+    elif action == "task.mark_stage":
+        # Model a corrected terminal incarnation; terminal pause/resume intentionally makes no change.
+        d.journal.db.execute("UPDATE tasks SET control_version=control_version+1 WHERE task_id=?", (tid,))
+    else:
+        d.journal.pause(tid)
+    snapshot = task_effect_snapshot(d, tid)
+    await d.ops.drain()
+    result = d.ops.get(op["operation_id"])
+    assert result["status"] == "failed" and result["error_code"] == "CONTROL_VERSION_CONFLICT"
+    assert result["steps"] == []  # no effect intent, command, or task write
+    assert task_effect_snapshot(d, tid) == snapshot and not writes(mock)
+    replay, created = d.ops.create(principal, **request)
+    assert not created and d.ops.get(replay["operation_id"]) == result
+    if action == "task.command.reconcile":
+        assert d.journal.authorize_reconcile_capability(cap, tid, cmd["command_id"])
+
+
+async def test_a05_admission_binding_is_atomic_with_operation_row(owned, mock, monkeypatch):
+    d, tid = owned
+    def fail_event(*args, **kwargs):
+        raise RuntimeError("crash before admission commits")
+    with monkeypatch.context() as patch:
+        patch.setattr(d.journal, "api_event", fail_event)
+        with pytest.raises(RuntimeError, match="admission commits"):
+            admission_control(d, tid, mock, "send")
+    assert d.journal.db.execute("SELECT count(*) FROM operations").fetchone()[0] == 0
+    _, _, op = admission_control(d, tid, mock, "send")
+    assert op["external_refs"]["admission_binding"]["control_version"] == 0
+
+
+@pytest.mark.parametrize("kind,scoped", [("send", False), ("answer", False), ("interrupt", False), ("send", True)])
+async def test_a07_preupgrade_operation_without_admission_binding_keeps_old_behavior(owned, mock, kind, scoped):
+    d, tid = owned
+    _, _, op = admission_control(d, tid, mock, kind, scoped=scoped)
+    d.journal.db.execute("UPDATE operations SET external_refs=NULL WHERE operation_id=?", (op["operation_id"],))
+    d.journal.pause(tid)
+    d.journal.resume(tid)
+    await d.ops.drain()
+    assert d.ops.get(op["operation_id"])["status"] == "succeeded"
+    assert len(writes(mock)) == len(d.journal.commands(tid)) == 1
+
+
+@pytest.mark.parametrize("entry", ["rpc", "mcp", "cli"])
+async def test_a05_legacy_task_door_records_admission_binding(owned, entry):
+    d, tid = owned
+    result = await d.call("work_pause", {"task_id": tid, "entry": entry, "idempotency_key": "legacy-door"})
+    op = d.ops.get(result["operation_id"])
+    assert op["entry"] == entry and op["preconditions"] == {}
+    assert op["external_refs"]["admission_binding"] == {"task_id": tid, "control_version": 0}
+    d.journal.resume(tid)
+    assert await d.call("work_pause", {"task_id": tid, "entry": entry, "idempotency_key": "legacy-door"}) == result
+
+
+@pytest.mark.parametrize("scoped", [False, True], ids=["session_target", "task_target"])
+async def test_a07_admission_incarnation_survives_restart(owned, mock, scoped):
+    d, tid = owned
+    principal, request, op = admission_control(d, tid, mock, "send", scoped=scoped)
+    d.journal.pause(tid)
+    d.journal.resume(tid)
+    snapshot = task_effect_snapshot(d, tid)
+    async with restarted_daemon(d) as restarted:
+        assert restarted.ops.get(op["operation_id"])["external_refs"] == op["external_refs"]
+        await restarted.ops.drain()
+        refused = restarted.ops.get(op["operation_id"])
+        assert refused["status"] == "failed" and refused["error_code"] == "CONTROL_VERSION_CONFLICT"
+        assert task_effect_snapshot(restarted, tid) == snapshot and not writes(mock)
+        replay, created = restarted.ops.create(principal, **request)
+        assert not created and restarted.ops.get(replay["operation_id"]) == refused
+        _, _, fresh = admission_control(restarted, tid, mock, "send", scoped=scoped, key="new-incarnation")
+        await restarted.ops.drain()
+        assert restarted.ops.get(fresh["operation_id"])["status"] == "succeeded"
+        assert len(writes(mock)) == len(restarted.journal.commands(tid)) == 1
+
+
+@pytest.mark.parametrize("action", ["task.verify", "task.pause", "task.command.reconcile"])
+async def test_a07_task_session_actions_refuse_replaced_admission_role(owned, mock, action):
+    d, tid = owned
+    target = {"task_id": tid}
+    params = {"abort_current": True} if action == "task.pause" else {}
+    principal = api_auth.Principal("local-admin", frozenset(), admin=True)
+    if action == "task.command.reconcile":
+        reviewer = "sess-codex-0002"
+        adopt(reviewer, task_id=tid, role="reviewer", agent_preset="codex-agent")
+        d.journal.change(tid, "accepted", fields={"reviewer_session_id": reviewer})
+        cmd, _ = d.journal.command(tid, "send", reviewer, {}, "reviewer-send")
+        d.journal.command_status(cmd["command_id"], "uncertain")
+        d.journal.change(tid, "uncertain")
+        target["command_id"] = cmd["command_id"]
+        cap = d.journal.issue_reconcile_capability(tid, cmd["command_id"])
+        principal = d.capability_principal(cap, action, target, "role")
+        params = {"outcome": "not_delivered", "actor": "operator", "source": "ticket-1", "evidence": "checked"}
+    op, _ = d.ops.create(principal, action=action, target=target, params=params, idempotency_key="role")
+    binding = op["external_refs"]["admission_binding"]
+    assert binding["role"] == ("reviewer" if action == "task.command.reconcile" else "lead")
+    if action == "task.command.reconcile":
+        d.journal.change(tid, "uncertain", fields={"reviewer_session_id": None})
+    else:
+        d.journal.change(tid, "accepted", fields={"session_id": "sess-codex-0002"})
+        adopt("sess-codex-0002", task_id=tid, role="lead", agent_preset="codex-agent")
+    snapshot = task_effect_snapshot(d, tid)
+    await d.ops.drain()
+    refused = d.ops.get(op["operation_id"])
+    assert refused["status"] == "failed" and refused["error_code"] == "TASK_BINDING_MISMATCH"
+    assert refused["steps"] == [] and not writes(mock)
+    assert task_effect_snapshot(d, tid) == snapshot
+
+
+@pytest.mark.parametrize("kind", ["send", "answer", "interrupt"])
+async def test_a07_readback_of_old_incarnation_does_not_dispatch_again(owned, mock, monkeypatch, kind):
+    d, tid = owned
+    mock.echo_sends = True
+    _, _, op = admission_control(d, tid, mock, kind)
+    client = d.fleet.client("h1")
+    original = client._roundtrip
+    async def lose_reply(frame, timeout):
+        result = await original(frame, timeout)
+        if frame["channel"] in WRITE_CHANNELS:
+            if kind == "interrupt":
+                mock.metas[SID]["isStreaming"] = mock.states[SID]["isStreaming"] = False
+            raise ConnectionLost("BAT accepted, reply lost")
+        return result
+    with monkeypatch.context() as patch:
+        patch.setattr(client, "_roundtrip", lose_reply)
+        await d.ops.drain()
+    assert d.ops.get(op["operation_id"])["status"] == "uncertain"
+    d.journal.pause(tid)
+    d.journal.resume(tid)
+    d.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+    await d.ops.drain()
+    assert d.ops.get(op["operation_id"])["status"] == "succeeded"
+    await d.coordinator.tick(tid)
+    assert d.journal.commands(tid)[0]["status"] == ("accepted" if kind == "send" else "settled")
+    assert len(writes(mock)) == len(d.journal.commands(tid)) == 1

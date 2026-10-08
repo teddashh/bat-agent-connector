@@ -127,6 +127,8 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 
 `preconditions.control_version` 可要求目前版本。舊 task tools 新增可選 `idempotency_key`／`control_version`，CLI `task-reconcile` 新增 `--key`／`--control-version` 並遵守 `--read-only`。key 以驗證 actor 為範圍；相同 key／params 回原 operation，不同內容 409 `IDEMPOTENCY_CONFLICT`。Goose 的原 `step_id` 在未指定 key 時仍是 task send 的重試身分。其他無 key 的舊 task controls 每次使用獨立 request identity，不跨次去重；no-key sentinel／null 投影留在 Part B。舊 work_submit 的 201–256 字 key 由相容 adapter 保存原字串、以 SHA-256 映射到既有 200 字 operation key 上限；通用 HTTP 上限不變。
 
+Task-bound operation 受理時固定 task `control_version`；session target 另固定 host／session／role，存於 `external_refs.admission_binding`（server admission binding，不是 caller precondition）。省略 `preconditions.control_version` 也不能跨 pause／resume 或換 session 執行：第一個 effect 前以 `CONTROL_VERSION_CONFLICT`／`TASK_BINDING_MISMATCH` failed，零 frame／command／task write。request hash 與 caller preconditions 不變；同 key 仍重讀原成功或拒絕。pause／resume 不覆寫較新 incarnation；已成功 receipt／未知 frame readback 沿用原恢復。升級前無 binding 的 operation 保留原 execution-time binding。詳見[盤點與儲存規則](operations-unification.md)。
+
 原 task／continuation／pause／resume／stage／observed verification／request-Ted／reconcile 的 local effect 與 operation step receipt 同交易提交，不另建 task 狀態表。pause 先保存 paused／control_version，abort 再記獨立 step；等待 task lock 或 verifier 不延後 pause 的持久化。RPC 最多等 30 秒；未完成時以 operation ID 回查，pause 可回已保存的 task snapshot。reconcile capability 只存 hash，消耗與回執原子提交；已消耗的 capability 只能用原 key 重讀自己的 operation，不能建立新控制。
 
 CLI `task-reconcile --key` 把 key 同時交原 admin-only capability issuer，依既有 admin secret 綁定 task／command／key，使跨次重試保留 actor。沒有 key 時維持原新發一次性 capability；發行本身只是 connector credential data，不執行 task command，也不授予一般 token 對帳權限。

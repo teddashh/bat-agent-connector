@@ -64,7 +64,12 @@
   Recovery after a cancelled/rejected command commits preserves the original refusal or local task outcome,
   without inventing uncertainty, commands or frames; legacy coordinator sends and ticks use the same rule.
   Locked verification, request-Ted and stage actions now recheck their state rules before the first effect,
-  refusing stale admission with TASK_PAUSED/TASK_STATE_BLOCKED while preserving succeeded receipt replay (A05/A07).
+  preserving state refusal codes and succeeded receipt replay (A05/A07). Task-bound operations now persist
+  `external_refs.admission_binding` atomically with the operation: the admitted task version and targeted session
+  role remain fixed even when callers omit control_version. Stale execution, including pause/resume and task
+  continuation, fails CONTROL_VERSION_CONFLICT / TASK_BINDING_MISMATCH before any effect. Caller preconditions,
+  request hashes and same-key replay are unchanged; old unbound operations retain their behaviour (A05/A07,
+  §09/§10).
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
