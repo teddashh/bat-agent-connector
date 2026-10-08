@@ -1,6 +1,18 @@
 // Display labels only. Logic and CSS never key on these strings (machine enums come from /api/v1).
 const STRINGS = {
   "zh-TW": {
+    merge_scope_reload: "PR 範圍已變更，已保留你選定的預覽。請重新讀取並檢視後再合併。",
+    metadata_diff: "內容比較", metadata_before: "寫前", metadata_intended: "預期", metadata_observed: "讀回",
+    scope_stack_rebase: "上層分支將重整", scope_dependency: "分支相依",
+    metadata_edit: "編輯 PR 標題與說明", metadata_title: "PR 標題", metadata_disabled: "此 repository 尚未啟用 allow_pr_update。",
+    metadata_race_limit: "儲存前比較標題與說明，寫後再次讀回。GitHub 沒有原子比對寫入，最後讀取與寫入間仍可能覆蓋同時發生的編輯。",
+    metadata_result_help: "操作詳情保留寫前、預期與讀回內容。若有衝突，先重新讀取再編輯；不自動覆蓋或還原。",
+    metadata_pending: "PR 已修改，讀回驗證仍待完成。", merge_scope: "合併範圍", merge_method: "合併方式",
+    merge_commit_range: "查看完整 BASE..HEAD：{count} 個 commits", merge_preview_fixed: "此預覽固定 head、base 與範圍；更換方式需重新讀取。",
+    scope_single_pr: "未發現其他 PR 會被合併。", scope_native_stack: "原生 stack", scope_branch_chain: "相依分支 chain",
+    scope_indirect_merge: "間接合併候選", scope_would_merge: "影響其他 PR", scope_candidate: "已包含的 commits",
+    merged_newer_base: "合併到較新的 base：另有 {count} 個 commits 會一起發布。", close: "關閉",
+
     nav_projects: "專案", projects_help: "專案與工作項目是 Connector 自己的紀錄：目標、需求原文、驗收、步驟，以及做這件事的 sessions、版本、操作與 PR。改名不會改 ID；排序與固定只影響顯示。",
     new_project_name: "新專案名稱", add_project: "新增", show_archived: "顯示已封存", no_projects: "還沒有專案。",
     new_sub_project: "子專案名稱", rename: "改名", archive: "封存", restore: "復原", more: "更多", move_up: "上移",
@@ -132,6 +144,18 @@ const STRINGS = {
     integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。",
   },
   en: {
+    merge_scope_reload: "PR scope changed; your selected preview is retained. Load and review it again before merging.",
+    metadata_diff: "Content comparison", metadata_before: "Before", metadata_intended: "Intended", metadata_observed: "Observed",
+    scope_stack_rebase: "Upper branch rebase", scope_dependency: "Branch dependency",
+    metadata_edit: "Edit PR title and description", metadata_title: "PR title", metadata_disabled: "This repository has not enabled allow_pr_update.",
+    metadata_race_limit: "Compare title/body before saving and read back after writing. GitHub has no atomic compare-and-write; edits in the final read/write window can still be overwritten.",
+    metadata_result_help: "Operation details retain before, intended and observed content. On conflict, reload and edit again; no automatic overwrite or undo.",
+    metadata_pending: "PR was modified; readback verification is pending.", merge_scope: "Merge scope", merge_method: "Merge method",
+    merge_commit_range: "Review complete BASE..HEAD: {count} commits", merge_preview_fixed: "This preview fixes head, base and scope; changing method reloads it.",
+    scope_single_pr: "No other PR was found to be merged.", scope_native_stack: "Native stack", scope_branch_chain: "Dependent branch chain",
+    scope_indirect_merge: "Indirect merge candidate", scope_would_merge: "Affects other PRs", scope_candidate: "Included commits",
+    merged_newer_base: "Merged onto a newer base: {count} other commits will ship too.", close: "Close",
+
     nav_projects: "Projects", projects_help: "Projects and work items are the connector's own records: goals, the " +
       "request verbatim, acceptance, steps, and the sessions, checkpoints, operations and PRs that carried them. A " +
       "rename never changes an ID; order and pins only change the display.",

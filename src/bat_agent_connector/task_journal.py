@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -19,6 +20,9 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+
+# Latest allocated data step; individual backfills retain their own version gates.
+LATEST_DATA_STEP = 2
 
 STATES = frozenset({
     "queued", "dispatching", "accepted", "running", "waiting_permission",
@@ -326,6 +330,27 @@ class Journal:
                     task_event_id,created_at) SELECT 'task',task_id,'task.'||kind,body,event_id,created_at
                     FROM events ORDER BY event_id""")
                 self.db.execute("PRAGMA user_version=1")
+        # Delivery A. Idempotent DDL runs on every open and takes no data-migration version.
+        with self.tx():
+            self.db.execute("""CREATE TABLE IF NOT EXISTS pr_merge_previews (
+                preview_id TEXT PRIMARY KEY, repository TEXT NOT NULL, pull_number INTEGER NOT NULL,
+                document TEXT NOT NULL, digest TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL
+            )""")
+            self.db.execute("""CREATE INDEX IF NOT EXISTS pr_merge_previews_pr
+                ON pr_merge_previews(repository, pull_number, created_at)""")
+        # Delivery A review fixes. These tables follow the same idempotent DDL rule.
+        with self.tx():
+            self.db.execute("""CREATE TABLE IF NOT EXISTS pr_metadata_settlements (
+                operation_id TEXT PRIMARY KEY, document TEXT NOT NULL
+            )""")
+            self.db.execute("""CREATE TABLE IF NOT EXISTS pr_merge_scope_reads (
+                repository TEXT NOT NULL, pull_number INTEGER NOT NULL, method TEXT NOT NULL,
+                preview_id TEXT NOT NULL, checked_at REAL NOT NULL,
+                PRIMARY KEY(repository, pull_number, method)
+            )""")
+
+        from .observation import install
+        install(self)
 
     def _drop_legacy_outbox(self):
         """Remove the retired chat outbox so no historical event can ever be published.
@@ -528,39 +553,77 @@ class Journal:
         raw, now = json.dumps(body or {}, ensure_ascii=False), time.time()
         cur = self.db.execute("INSERT INTO events(task_id,kind,body,created_at) VALUES(?,?,?,?)",
                               (task_id, kind, raw, now))
-        self.db.execute("""INSERT INTO api_events(resource_type,resource_id,kind,body,task_event_id,created_at)
-            VALUES('task',?,?,?,?,?)""", (task_id, "task." + kind, raw, cur.lastrowid, now))
+        from .observation import writer_context
+        context = writer_context.get() or {}
+        api_cur = self.db.execute("""INSERT INTO api_events(resource_type,resource_id,kind,body,task_event_id,created_at,actor)
+            VALUES('task',?,?,?,?,?,?)""", (task_id, "task." + kind, raw, cur.lastrowid, now, context.get("actor")))
+        if getattr(self, "_observation_ready", False):
+            self._project_event(api_cur.lastrowid, context)
 
     def api_event(self, resource_type: str, resource_id: str, kind: str, body: dict | None = None,
-                  actor: str | None = None) -> int:
+                  actor: str | None = None, *, context: dict | None = None) -> int:
         """Append one /api/v1 event; call it inside the transaction that made the change."""
+        if resource_type == "execution":
+            from .observation import writer_context
+            source = writer_context.get() or {}
+            actor = actor or source.get("actor")
+            context = {**source, **(context or {})}
         cur = self.db.execute("""INSERT INTO api_events(resource_type,resource_id,kind,body,actor,created_at)
             VALUES(?,?,?,?,?,?)""", (resource_type, resource_id, kind,
                                      json.dumps(body or {}, ensure_ascii=False, default=str), actor, time.time()))
+        if getattr(self, "_observation_ready", False):
+            self._project_event(cur.lastrowid, context)
         return int(cur.lastrowid)
+
+    def _project_event(self, seq: int, context: dict | None, *, legacy: bool = False) -> None:
+        # A projection bug must not roll back the authoritative writer's transaction.
+        savepoint = f"observation_{int(seq)}"
+        self.db.execute(f"SAVEPOINT {savepoint}")
+        try:
+            from .observation import record_event
+            record_event(self, seq, extra=context, legacy=legacy)
+        except Exception as exc:  # noqa: BLE001 - preserve the core write and expose the projection gap
+            self.db.execute(f"ROLLBACK TO {savepoint}")
+            self.db.execute(f"RELEASE {savepoint}")
+            error = type(exc).__name__
+            self.db.execute("INSERT INTO api_event_context VALUES(?,?) ON CONFLICT(seq) DO UPDATE SET context=excluded.context",
+                            (seq, json.dumps({"projection_error": error})))
+            logging.warning("observation projection failed for event %s: %s", seq, error)
+        else:
+            self.db.execute(f"RELEASE {savepoint}")
 
     def api_head(self) -> int:
         return int(self.db.execute("SELECT COALESCE(MAX(seq),0) FROM api_events").fetchone()[0])
 
     def api_events(self, after: int = 0, limit: int = 100, *, resource_type: str | None = None,
-                   resource_id: str | None = None) -> dict:
-        """Page the /api/v1 event log by its persistent, monotonic ``seq`` cursor."""
+                   resource_id: str | None = None, kind: str | None = None,
+                   related_resource_type: str | None = None, related_resource_id: str | None = None) -> dict:
+        """Persistent global cursor; hidden migration facts still advance it."""
+        from .observation import RESOURCE_TYPES, event_out
         if (isinstance(after, bool) or not isinstance(after, int) or after < 0
                 or isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500):
             raise ValueError("after must be >= 0 and limit between 0 and 500")
+        if bool(related_resource_type) != bool(related_resource_id) or (related_resource_type and related_resource_type not in RESOURCE_TYPES):
+            raise ValueError("related resource needs a type and full ID")
         head = self.api_head()
-        sql, args = "SELECT * FROM api_events WHERE seq>?", [after]
-        if resource_type:
-            sql, args = sql + " AND resource_type=?", [*args, resource_type]
-        if resource_id:
-            sql, args = sql + " AND resource_id=?", [*args, resource_id]
-        rows = self.db.execute(sql + " ORDER BY seq LIMIT ?", (*args, limit)).fetchall() if limit else []
-        events = [{"seq": r["seq"], "resource_type": r["resource_type"], "resource_id": r["resource_id"],
-                   "kind": r["kind"], "body": self._body(r["body"]), "actor": r["actor"],
-                   "created_at": r["created_at"]} for r in rows]
-        last = events[-1]["seq"] if events else after
-        return {"events": events, "next_cursor": last, "head_cursor": head,
-                "has_more": (len(events) == limit and last < head) if limit else after < head}
+        if after > head:
+            raise ValueError("after exceeds the journal head")
+        sql, args = "SELECT e.* FROM api_events e WHERE e.seq>? AND e.seq<=?", [after, head]
+        for column, value in (("resource_type", resource_type), ("resource_id", resource_id), ("kind", kind)):
+            if value:
+                sql += f" AND e.{column}=?"  # fixed identifiers
+                args.append(value)
+        if not kind:
+            sql += " AND e.kind!='history.backfilled'"
+        if related_resource_type:
+            sql += """ AND EXISTS(SELECT 1 FROM api_event_resources r WHERE r.seq=e.seq
+                AND r.resource_type=? AND r.resource_id=? AND r.linked_at_seq<=?)"""
+            args.extend([related_resource_type, related_resource_id, head])
+        rows = self.db.execute(sql + " ORDER BY e.seq LIMIT ?", (*args, limit + 1)).fetchall() if limit else []
+        events = [event_out(self.db, r) for r in rows[:limit]]
+        more = len(rows) > limit if limit else after < head
+        last = events[-1]["seq"] if more and events else (after if not limit else head)
+        return {"events": events, "next_cursor": last, "head_cursor": head, "has_more": more}
 
     def submit(self, *, project: str, host: str, workspace: str, original_words: str,
                discord_thread_id: str | None = None, recipe: str = "feature-to-staging",
@@ -1113,8 +1176,12 @@ class Journal:
             self._event(row["task_id"], "command_" + status, {"command_id": command_id})
 
     def command_bind_session(self, command_id: str, session_id: str):
-        self.db.execute("UPDATE commands SET session_id=?,updated_at=? WHERE command_id=?",
-                        (session_id, time.time(), command_id))
+        with self.tx():
+            row = self.db.execute("SELECT task_id,session_id FROM commands WHERE command_id=?", (command_id,)).fetchone()
+            self.db.execute("UPDATE commands SET session_id=?,updated_at=? WHERE command_id=?",
+                            (session_id, time.time(), command_id))
+            if row and row["session_id"] != session_id:
+                self._event(row["task_id"], "command_bound", {"command_id": command_id, "session_id": session_id, "previous_session_id": row["session_id"]})
 
     def commands(self, task_id: str) -> list[dict]:
         return [dict(r) for r in self.db.execute("SELECT * FROM commands WHERE task_id=? ORDER BY created_at", (task_id,))]

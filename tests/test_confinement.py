@@ -299,16 +299,17 @@ def test_a10_host_evidence_migration_is_idempotent_and_persists(tmp_path):
     journal.close()
 
 
-def test_host_check_table_is_created_without_consuming_schema_version(tmp_path):
-    """A10: a delivery journal's version is independent of the additive evidence table."""
+@pytest.mark.parametrize("version", [2, 3, 17])
+def test_host_check_table_is_created_without_consuming_schema_version(tmp_path, version):
+    """A10: observation/delivery/future data steps are independent of this additive table."""
     path = tmp_path / "tasks.db"
     journal = Journal(path)
     journal.db.execute("DROP TABLE confinement_host_checks")
-    journal.db.execute("PRAGMA user_version=3")
+    journal.db.execute(f"PRAGMA user_version={version}")
     journal.close()
     journal = Journal(path)
     assert journal.db.execute("SELECT count(*) FROM confinement_host_checks").fetchone()[0] == 0
-    assert journal.db.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert journal.db.execute("PRAGMA user_version").fetchone()[0] == version
     journal.close()
 
 

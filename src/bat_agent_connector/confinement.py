@@ -253,6 +253,10 @@ def guard_answer(host: str, sid: str, tool: str | None, *, dont_ask_again: bool,
 
 
 def account_status(fleet, host: str) -> dict:
+    if host not in fleet.config.hosts:
+        # Historical inventory remains readable after a host leaves the active scope.
+        return {"declared": False, "status": "unknown", "reason": "host_not_configured",
+                "protected_roots": [], "checked_at": None, "config_sha256": None}
     config = fleet.config.host(host).confinement
     result = getattr(fleet, "_confinement_checks", {}).get(host)
     # Same-account login checks cannot establish an authentic verdict.

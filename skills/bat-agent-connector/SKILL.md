@@ -47,10 +47,17 @@ license: MIT
 | Gated cleanup of finished sessions (orchestrate) | `session_cleanup(host, confirm=true, dry_run=false)` | `batc cleanup HOST --apply --confirm` |
 | Who may change what (read) | `session_policy(host, session_id?)` | `batc policy HOST [SID]` |
 | What this caller may do (read, daemon) | `capabilities_get()` | - |
-| Persisted inventory with staleness (read, daemon) | `inventory_sessions(host?, access?, attention?, cursor?)`, `inventory_hosts()` | - |
-| Shared event log (read, daemon) | `events_list(after, limit)` | - |
+| Persisted inventory (read, daemon) | `inventory_sessions(order="id", project_id?, execution_id?, relation_scope?, cursor?)` | `batc inventory sessions --order id` |
+| Session identity and state evidence (read, daemon) | `inventory_session(host, session_id)` | `batc inventory session HOST SID` |
+| Known worktree identity (read, daemon) | `inventory_worktree(worktree_id)` | `batc inventory worktree ID` |
+| Journal timeline (read, daemon) | `resource_history(resource_type, resource_id, cursor?, limit?, kind?)` | `batc history session HOST SID`, `batc history worktree ID` |
+| Execution/session/worktree relations (read, daemon) | `resource_relations(resource_type, resource_id, cursor?, include_closed?)` | `batc relations execution TASK`, `batc relations session HOST SID` |
+| Discovery authority and scan limits (read, daemon) | `inventory_hosts(host?, discovery=true, after?, limit?)` | `batc inventory discovery HOST` |
+| Shared event log (read, daemon) | `events_list(after, limit, kind?, related_resource_type?, related_resource_id?)` | `batc inventory events --after N` |
 | Durable operation (write, daemon) | `operation_submit(action, idempotency_key, target, params)`, `operation_get(id)` | `batc op [ID]` |
-| Pull request before merging (read, daemon) | `github_pr_preview(repository, pull_number)` | - |
+| Pull request / fixed merge scope (read, daemon) | `github_pr_preview(repository, pull_number, method?)`, `github_merge_preview_get(preview_id)` | `batc delivery pr OWNER/REPO NUMBER [--method METHOD]` |
+| Edit PR title/body (integrate, repository opt-in) | `github_pr_update(repository, pull_number, expected_metadata_digest, idempotency_key, title?, body?, confirm)` | `batc delivery update-pr OWNER/REPO NUMBER --metadata-digest DIGEST --title TITLE --body-file FILE --key KEY` |
+| Merge reviewed scope (merge; deploy for recipe) | `github_pr_merge(preview_id, idempotency_key, recipe?, confirm)` | `batc delivery merge --preview mpv_... [--recipe NAME] --key KEY` |
 | What a checkpoint would record (read, daemon) | `checkpoint_preview(host, session_id)` | - |
 | Record a checkpoint (connector records only, daemon) | `checkpoint_create(host, session_id, idempotency_key, commit?, note?, confirm=true)` | `batc checkpoint create HOST SID --note ...` |
 | Continue from it in a new managed session (daemon) | `work_continue_from_checkpoint(checkpoint_id, instructions, idempotency_key, agent?, confirm=true)` | `batc checkpoint continue CP --instructions ...` |
@@ -58,8 +65,29 @@ license: MIT
 | Projects and work items (read, daemon) | `projects_list()`, `project_get(project_id)`, `work_items_list(project_id?, state?, pending?)`, `work_item_get(work_item_id)` | `batc project list`, `batc item show WI` |
 | Change a work item (scope manage, daemon) | `operation_submit(action="work_item.update", ..., preconditions={expected_version})` | `batc item update WI --check 1 --state done` |
 
-`session_id` accepts a unique prefix (8 characters is usually enough). Use `next_offset` from `session_read` to page
-back in history.
+Direct BAT tools accept a unique session prefix; persisted observation requires the full ID. For
+`resource_history`/`resource_relations`, resource_type is `session`, `worktree` or `execution`; a session resource ID
+is `HOST/FULL_SESSION_ID`, and execution is the Task Service task_id. Page every next_cursor. Use order=id for
+complete inventory traversal; rows added or changing filters during traversal are caught up through events.
+
+For historical questions, use these daemon reads before live reads. Check `state` and its evidence: not connected,
+not loaded, no tab and not streaming are distinct; gone means no longer enumerated. An unknown lifecycle does not
+prove deletion or completion. Keep API actor, claimed actor and observer separate; a Git author is version metadata.
+Relations and worktree IDs grant no writes. Read discovery's methods, authority and outside_scan before claiming
+coverage. Observation never starts/resumes/rehydrates sessions or probes Git in the background. Default events hide
+history.backfilled; explicit kind filtering or resource history can read it. Process events before saving next_cursor.
+Session added/updated/reappeared events carry `fields_stale` and `field_evidence`. Treat meta failure/recovery or
+changed evidence as an update even when loaded/streaming values stay the same. Observation/activity timestamps
+alone emit no update. The separate session.stale/session.fresh pair tracks not_enumerated/gone/scope_changed;
+it does not clear stale field evidence. Resource history preserves the freshness booleans and fixed evidence values.
+History cursors retain their original as_of bound; new facts require a new first page. See docs/design/observation.md.
+History summaries keep only fixed enum reasons and recorded machine codes; task request/result diagnostics, titles,
+scalar prose containers and free-form refs are omitted, including nested saved snapshots. Use structured evidence
+and IDs; do not infer an omitted human reason. `since`/`until` are inclusive occurrence-time bounds: explicit unknown
+times match neither bound. Only absent occurrence metadata falls back to event record time. Unbounded history still
+lists unknown-time facts; `coverage.unknown_occurrence_times_excluded` flags the bounded-read rule, not a count.
+`coverage.first_recorded_at` is journal record time and can be migration time, not occurrence time.
+Dashboard timeline and reconnect flow are the later Part B.
 
 ## Vibe-partner workflow (supervising running sessions)
 
@@ -218,11 +246,32 @@ the row is the last known state of an unreachable host. Operation writes need `B
 pending prompt's `tool_use_id`. A `needs_attention` operation can be resumed with `operation_resume` once its cause is
 fixed; it reads unproven steps back and never resends them.
 
-Merging and deploying (only with the user's go-ahead for that PR and environment): read `github_pr_preview`, then
-`operation_submit(action="github.pr.merge", target={repository, pull_number}, preconditions={expected_head_sha:
-<the head_sha you reviewed>})`, or `delivery.merge_and_deploy` with `target.recipe`. `waiting_checks` and
-`waiting_external` are normal; report the reason and follow `operation_get`. A failed deploy after a merge keeps
-`external_refs.merged_sha`: retry with `deployment.start(params={source_sha: merged_sha})`, never by merging again.
+PR metadata is separate from head integration: read `github_pr_preview`, then use `github_pr_update` with
+its metadata_digest, a new idempotency_key and title and/or raw Markdown body (empty body clears; omitted stays).
+Requires integrate and repository allow_pr_update (default false); no new scope or token re-issue. Works on human-only
+PRs, without a task. The backend compares title/body before PATCH and reads back after it; GitHub has no atomic body
+CAS, so the last read/write race cannot be eliminated. On PR_METADATA_CHANGED / PR_METADATA_CONFLICT, read the recorded
+before/intended/observed content and edit against a new digest/key; never overwrite automatically or resend an unknown
+PATCH. Cancel does not undo metadata; an unresolved write keeps later edits blocked during a ten-minute settle window.
+If readback still matches the original metadata after that window, delivery settles not_applied and admits new edits. An operation
+stopped at UNCERTAIN_UNRESOLVED can be resumed to read this settlement and fail with PR_METADATA_NOT_APPLIED without
+another PATCH; read a fresh digest and use a new key for the next edit. Late changes still fail PR_METADATA_CHANGED.
+
+Merging and deploying (only with the user's go-ahead for that PR and environment): read `github_pr_preview` with the
+chosen method and review its merge_preview's entire commit range, affected PRs, blocking and warnings. Use
+`github_pr_merge(preview_id=<mpv id>, idempotency_key=<key>, confirm=true)`, optionally recipe for merge-and-deploy.
+The thin wrapper reads the saved immutable preview; no refresh or implicit latest version. Generic operation_submit
+uses params={preview_id, method}, preconditions={expected_head_sha: preview.target.head_sha, expected_base_sha:
+preview.target.base_sha, preview_digest: preview.digest}, target={repository,pull_number[,recipe]}. Head-only clients
+are refused. Native stacks (including bottom), branch dependencies and unsupported indirect merges are refused;
+no bypass or automatic rebase. Pre-submit base movement requires a new preview; after acceptance, a newer base is
+normal and merge.verify records merged_onto_base_sha, base_moved and other_commits_count. Report those extra commits.
+waiting_checks / waiting_external are normal; follow operation_get, preserving the key on lost replies. A different
+PR swept in fails verification and combined does not dispatch. A passed combined merge deploys its actual merged SHA.
+A failed deploy after merge retains external_refs.merged_sha: retry deployment.start with source_sha=merged_sha,
+never merge again. Deployment generations/history/runtime evidence/rollback are Part B and are not available yet.
+Both new MCP wrappers require confirm=true and the client's BATC_API_TOKEN; read-only MCP does not register them.
+New delivery CLI writes also require that token and never inherit Dashboard or local-admin grants.
 
 ## Safety rules
 
