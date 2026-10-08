@@ -131,6 +131,8 @@ Task-bound operation 受理時固定 task `control_version`；session target 另
 
 原 task／continuation／pause／resume／stage／observed verification／request-Ted／reconcile 的 local effect 與 operation step receipt 同交易提交，不另建 task 狀態表。pause 先保存 paused／control_version，abort 再記獨立 step；等待 task lock 或 verifier 不延後 pause 的持久化。RPC 最多等 30 秒；未完成時以 operation ID 回查，pause 可回已保存的 task snapshot。reconcile capability 只存 hash，消耗與回執原子提交；已消耗的 capability 只能用原 key 重讀自己的 operation，不能建立新控制。
 
+task command receipt succeeded 時，`external_refs.task_id`／`command_id`／`control_version` 已與 receipt 同交易保存，版本來自 command 的 dispatch binding；prepared operator command 也適用。舊缺 refs 的 receipt 在 operation 恢復／讀回前修復 link，不重跑 effect 或派送 frame；standalone operation 不寫 task refs。
+
 CLI `task-reconcile --key` 把 key 同時交原 admin-only capability issuer，依既有 admin secret 綁定 task／command／key，使跨次重試保留 actor。沒有 key 時維持原新發一次性 capability；發行本身只是 connector credential data，不執行 task command，也不授予一般 token 對帳權限。
 
 task-owned session 的 send／answer／interrupt／permissions 都先經 resource policy，再進 daemon 原 coordinator；舊直接 service tools 也經相同 gate。鎖順序為 task → session → host write lock → BAT semaphore；client-resume、answer、abort 與每個 permission channel 在 frame 前重查 journal 的版本與 ownership。任意 before_invoke callback 不授予插隊權限。standalone managed session 沿用原行為。

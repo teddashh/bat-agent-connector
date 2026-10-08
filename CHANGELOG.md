@@ -86,6 +86,11 @@
   result rules, and task/result receipts remain atomic. Unexpected errors after the prompt frame, including
   malformed replies, stay uncertain until the original read-back proves the outcome; explicit BAT refusals are
   failed steps with rejected commands (A05/A07/A08, §09/§10).
+  Command receipts now commit their task_id, command_id and dispatch control_version refs in the same journal
+  transaction, including prepared operator commands. Receipt replay repairs older missing links before outer
+  read-back or early result/refusal returns without repeating an effect or frame. The same mechanism protects
+  task submission, continuation and reconciliation reservation links; admission bindings and API shapes are
+  unchanged (A05/A07, §09/§10).
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps

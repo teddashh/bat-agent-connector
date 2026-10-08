@@ -152,6 +152,26 @@ async def test_operation_idempotency_scope_and_bat_sessions(daemon, mock):
     assert write_frames(mock) == []  # nothing ran yet
 
 
+@pytest.mark.parametrize("kind", ["send", "answer", "interrupt"])
+async def test_standalone_operation_records_no_task_refs(daemon, mock, kind):
+    adopt(MANUAL)
+    params = {"text": "hello"} if kind == "send" else {}
+    if kind == "answer":
+        mock.states[MANUAL]["pendingAskUser"] = {"toolUseId": "ask-1", "questions": [{"question": "Choice?"}]}
+        params = {"answers": ["yes"], "tool_use_id": "ask-1"}
+    op, _ = daemon.ops.create(ted(), action="session." + kind, target={"host": "h1", "session_id": MANUAL},
+                              params=params, idempotency_key="standalone")
+    try:
+        await settle_operations(daemon.ops)
+        done = daemon.ops.get(op["operation_id"])
+        assert done["status"] == "succeeded" and done["external_refs"] is None
+        assert len(write_frames(mock)) == 1
+        assert not daemon.journal.db.execute("SELECT 1 FROM commands").fetchone()
+    finally:
+        await daemon.fleet.close()
+        await daemon.inventory.close()
+
+
 async def test_send_operation_runs_once_and_records_steps_and_events(daemon, mock):
     adopt(MANUAL)
     mock.echo_sends = True

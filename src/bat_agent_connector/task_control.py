@@ -17,6 +17,21 @@ from .errors import TaskControlRefused, WriteRefused
 RUNTIME_KINDS = {"send", "answer", "interrupt", "permissions", "failover"}
 
 
+def command_refs(command):
+    return {"task_id": command["task_id"], "command_id": command["command_id"],
+            "control_version": json.loads(command["payload"]).get("control_version")}
+
+
+def replay_command_refs(ctx):
+    """Repair old command receipts before an outer read-back or an early result/refusal replay."""
+    for name in ("task_command", "task_send_command"):
+        row = ctx.service.db.execute(
+            "SELECT response FROM operation_steps WHERE operation_id=? AND name=? AND status='succeeded'",
+            (ctx.operation_id, name)).fetchone()
+        if row:
+            ctx.effect(name, lambda row=row: json.loads(row["response"]), refs=command_refs)
+
+
 def admission_binding(task, *, session=False, role="lead"):
     binding = {"task_id": task["task_id"], "control_version": task["control_version"]}
     if session:

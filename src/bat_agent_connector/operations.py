@@ -172,24 +172,39 @@ class OpContext:
     def set_refs(self, **refs: Any) -> None:
         self.service._merge_refs(self.operation_id, refs)
 
-    def effect(self, name: str, fn: Callable[[], dict], *, request: dict | None = None) -> dict:
+    def effect(self, name: str, fn: Callable[[], dict], *, request: dict | None = None,
+               refs: dict | Callable[[dict], dict] | None = None) -> dict:
         """Commit a local task effect and its receipt in one journal transaction.
 
         A started receipt without a result proves the effect transaction rolled back. Replaying the
-        original journal method is safe; no BAT/provider call may run inside this callback.
+        original journal method is safe; no BAT/provider call may run inside this callback. Refs commit with
+        the receipt; replay repairs their missing values without running the effect again.
         """
         row = self.service.db.execute("SELECT * FROM operation_steps WHERE operation_id=? AND name=?",
                                       (self.operation_id, name)).fetchone()
         if row and row["status"] == "succeeded":
             self.replayed.append(name)
-            return json.loads(row["response"] or "{}")
+            result = json.loads(row["response"] or "{}")
+            self._effect_refs(result, refs)
+            return result
         self.check_cancel()
         if row is None:
             self.service._step_start(self.operation_id, name, request or {})
         with self.service.journal.tx():
             result = fn()
             self.service._step_done(self.operation_id, name, result or {})
+            self._effect_refs(result or {}, refs)
         return result or {}
+
+    def _effect_refs(self, result: dict, refs: dict | Callable[[dict], dict] | None) -> None:
+        if refs is None:
+            return
+        values = refs(result) if callable(refs) else refs
+        row = self.service.db.execute("SELECT external_refs FROM operations WHERE operation_id=?",
+                                      (self.operation_id,)).fetchone()
+        current = json.loads(row["external_refs"] or "{}")
+        if any(k not in current or current[k] != v for k, v in values.items()):
+            self.set_refs(**values)
 
     async def step(self, name: str, fn: Callable[[], Awaitable[dict]], *, request: dict | None = None,
                    reconcile: Callable[[dict], Awaitable[dict | None]] | None = None) -> dict:

@@ -64,6 +64,7 @@ def _admit_send(ops: OperationService, principal: Principal, target: dict, param
 
 
 async def _send(ctx: OpContext) -> dict:
+    task_control.replay_command_refs(ctx)
     if ctx.target.get("task_id"):
         from .task_actions import send
         return await send(ctx)
@@ -118,6 +119,7 @@ def _admit_answer(ops: OperationService, principal: Principal, target: dict, par
 
 
 async def _answer(ctx: OpContext) -> dict:
+    task_control.replay_command_refs(ctx)
     fleet = _fleet(ctx.service)
     host, sid, p = ctx.target["host"], ctx.target["session_id"], ctx.params
 
@@ -152,6 +154,7 @@ def _admit_interrupt(ops: OperationService, principal: Principal, target: dict, 
 
 
 async def _interrupt(ctx: OpContext) -> dict:
+    task_control.replay_command_refs(ctx)
     fleet = _fleet(ctx.service)
     host, sid = ctx.target["host"], ctx.target["session_id"]
 

@@ -321,7 +321,31 @@ coordinator 呼叫盤點：`_tick` 對現有 lead 送 initial；`_start` 對新 
 
 Local task mutation 與 operation 的 effect receipt 要在 **同一 Journal.tx** commit，沿用 `work_items._once`「effect＋回執同交易」的做法，不只用 `ctx.step` 把整個 `work_*` 函式包住。可用既有 operation_steps 的 response 作本地回執，讓 Journal 的既有方法加入共用交易 helper；不另建 task database 或派工狀態表。意圖先提交，再於短交易同時寫 task/event/control_version、command linkage 與 step success。crash 發生在 effect 後、operation 終態前時，只讀回執，不能再增 control_version、continuations 或 ted_interventions。
 
-Task scope command 外部派送仍由 coordinator 擁有。operation refs 記 task_id／command_ids，task command payload 另記 operation_id；command 的 message_id、before cursor、prompt hash、狀態與 reconciliation 仍使用原機制。不能同時讓 OpContext 與 TaskCoordinator 各自送一份 prompt。answer／permissions／interrupt 的新 command kinds 也由 coordinator reconcile；operation 反映命令證據，不自行改 task state。
+Task scope command 外部派送仍由 coordinator 擁有。operation refs 記 task_id／command_id，task command payload 另記 operation_id；command 的 message_id、before cursor、prompt hash、狀態與 reconciliation 仍使用原機制。不能同時讓 OpContext 與 TaskCoordinator 各自送一份 prompt。answer／permissions／interrupt 的新 command kinds 也由 coordinator reconcile；operation 反映命令證據，不自行改 task state。
+
+`external_refs` 的 task link 合約（既有 API shape，不改 request hash／caller preconditions）：
+
+| ref | 出現時點與含義 |
+|---|---|
+| `admission_binding` | task-bound admission 時與 operation row 同交易保存；固定受理時的 task_id／control_version，session action 另有 host／session_id／role。它是 server admission binding，不是 caller precondition，也不因 replay 改成目前版本。舊無 binding rows 不補造 binding。 |
+| `task_id` | task submit／continuation 與本機 receipt 同交易寫入；task target send 的 task_binding receipt 同交易保存。runtime command 建立時與 command receipt 同交易寫入。其餘固定 task target 控制在結果返回時補記，target／admission_binding 已可識別 task，重啟重讀 receipt 後仍補記相同 ID。 |
+| `command_id`、`control_version` | `task_command`／`task_send_command` receipt 一旦 succeeded，refs 必須同時指向該 command 與 payload 中的 dispatch control_version。prepared operator command 也適用，不能以恢復時的目前版本代替。reconcile 如保留新 prompt command，`task_reconcile` receipt 當下即指向新 command；否則指向原對帳 command 與對帳 binding 版本。 |
+
+`OpContext.effect(..., refs=dict／callable(result))` 在同一 Journal.tx 內寫本機 effect、成功 receipt 與 `_merge_refs`；後者沿用 nested savepoint，不另提交外層交易。任何一項失敗都 rollback 三項。replay 已 succeeded receipt 時只從保存的 result 算相同 refs，修復舊 build 留下的缺值／錯誤 link；不重跑 effect callback、不建立 command、不送 frame，也不重新判定控制版本。完整且相同的 refs 不重寫 updated_at。outer send／answer／interrupt 讀回前、task send 的早到 result／refusal 返回前，先透過同一 effect replay 修復 command refs；不能因跳過 command creator 而永久缺 link。舊 rows 的修復只在 operation 執行／恢復時做，沒有全表回填或 migration。
+
+本分支 ref write 盤點（含所有 `set_refs`／`ctx.op["external_refs"]` 使用位置）：
+
+| 位置 | 交易／恢復保證 |
+|---|---|
+| operations.create；OpContext.admission_binding／API decode | create 的 admission_binding 與 row／admission event 同交易；其餘只讀，沒有直接修改 ctx.op.external_refs。 |
+| operations.OpContext.effect／_effect_refs／set_refs／_merge_refs | effect refs 在 receipt 外層交易內 merge；saved receipt replay 做本機修復。set_refs 是同一 merge helper，沒有另一個 command writer。 |
+| task_core.session_control 的 task_command | command、receipt、task_id／command_id／control_version 同交易；移除 receipt 後的 separate set_refs。 |
+| task_core._send 的新 command／prepared operator command | task_send_command 使用同一 effect refs 機制；result receipt 早回前也修復舊 command link。 |
+| task_core.resolve_command | task_reconcile 消耗 capability、settle 原 command／reserve 新 command、receipt 與對應 refs 同交易。saved reconcile receipt 在返回或送 prepared prompt 前重播 refs；沒有 command reservation 已提交但 operation 仍指向原 command 的窗口。 |
+| task_actions.send 的 task_binding／refusal replay | binding refs 與本機 receipt 同交易；saved command link 在 refusal／result 返回前修復，不重送。 |
+| task_actions.run 的 result.task_id set_refs | submit／continuation 已由 effect 原子保存新 task link；固定 task controls 的 target 與 admission_binding 已識別 task。若在最後補記前停止，receipt replay 每次返回前重建相同 task_id，不會跳過這項補記，也不重做控制。reconcile command link 由 task_core 的 receipt 機制保護。 |
+| api_actions._send／_answer／_interrupt | 不直接寫 refs；outer step readback／saved success 前重播已有 command receipt，舊 rows 可修復。standalone operation 沒有 command receipt，不寫 task refs。 |
+| task_daemon.work_submit 的 task_submit／task_continuation | audit 延伸修正：task_id 與 effect receipt 同交易；saved receipt replay 也修復舊缺值，不再只依賴 run 的結果後記。 |
 
 | A05 情境 | 固定規則 |
 |---|---|
@@ -377,6 +401,8 @@ operation send／answer／interrupt 的 crash window 盤點（各 commit 之間�
 
 | 停止位置 | 重啟證據與處理 |
 |---|---|
+| command receipt 已提交、refs 尚未寫入 | 新 build 不可能：task_command／task_send_command 的 command、成功 receipt 與 refs 同交易。舊 build 的 rows 在 outer readback／早回前以 saved receipt 修復 task_id／command_id／control_version，不新增 command、effect 或 frame。 |
+| task_reconcile 已 reserve operator command、task_send_command 尚未寫入 | reserve 與 refs 同 receipt 交易，當下已指向新 command。saved reconcile receipt 返回前恢復同一 link；只派送原保留的 prepared command，不再建立第二 command。 |
 | task_send_command 的 effect／receipt | command 與 receipt 同一 Journal.tx；只有 intent 而無成功回執則交易未做／rollback，可完成本機建立。成功回執只取原 command ID，不另建立 command。 |
 | task_dispatch failed 已提交、command 尚 intent／needs_review／uncertain | `_recover_unsent_send` 先將 command rejected，重拋原 code／message。operation worker 或 coordinator tick 先執行皆不改 task、不查 BAT、不重送。 |
 | task_dispatch succeeded 已提交、task_send_result 尚未提交 | 保存的 reply 走原 `_finish_send`，accepted=false 沿用 NOT_ACCEPTED／needs_ted；正面受理證據沿用原 marker／Codex proof 規則，與 live path 一致。 |
@@ -480,6 +506,8 @@ Phase 2 擴充原 owner 機制，沒有第二份 owner database／另一套 leas
 | A07；§10（runtime control 盤點與相容） | `test_a07_explicit_answer_prompt_keeps_existing_behavior`、`test_a07_legacy_mcp_answer_without_prompt_id_uses_owner_resolution`、`test_a07_permission_mode_identity_survives_lost_reply_without_replay`、`test_a07_relay_runtime_command_has_original_send_readback_identity`、`test_a07_operation_readback_and_coordinator_tick_settle_task_command` | 明確 ID 的 match／mismatch 不變；legacy MCP 經原 owner 解析。permissions mode payload 完整，lost reply 保持未知、零第二設定 frame；relay 原 hash／message ID 可讀回，interrupt 沿用 idle 證明。caller contract／hash 不變。 |
 | A05／A07；§09／§10（command frame 與 preliminary resume） | `test_a07_refusal_after_resume_rejects_only_the_unsent_command`、`test_a07_resume_transport_loss_rejects_command_without_uncertain_task` | legacy、session operation、task-scoped operation：resume 成功後 streaming／版本拒絕，或 resume 接受但 transport reply 遺失，零 send-message、只有一個 rejected command、task snapshot 不變。operation step failed／原 code，相同 key 重讀拒絕；後續控制可受理。Task Service 自己的 adapter send 也不以 resume loss 製造 uncertain。 |
 | A05／A07；§09／§10（dispatch receipt crash） | `test_a05_a07_failed_dispatch_receipt_survives_crash_before_command_rejection`、`test_a05_a07_succeeded_dispatch_receipt_survives_crash_before_task_result`、`test_a05_task_send_result_receipt_survives_crash_without_repeating_effect` | resume reply 遺失後 failed step 已提交、rejected 尚未寫入即停止；intent／needs_review／uncertain 與 operation／tick 兩種啟動順序皆 rejected、原 code、task 不變、零 send／readback、一個 resume。succeeded reply 在 task result 前停止，沿原 accepted=true／false 結果；result transaction 中／提交後停止，不重寫 effect 或建立第二 command。 |
+| A05／A07；§09／§10（command refs 與 receipt） | `test_a05_a07_command_refs_commit_with_receipt_and_survive_restart`、`test_a05_old_command_receipt_replay_repairs_refs_without_repeating_effect`、`test_a05_command_receipt_and_refs_roll_back_together` | session send／answer／interrupt、新 task send、prepared operator send，receipt 交易後立即停止或 BAT frame 後停止；restart 的 refs 指向 receipt 原 command／version，沒有新 command 或額外 frame。舊 rows 的 started outer readback 與 succeeded receipt replay 都修復 link；舊無 binding 不補造 admission_binding。refs merge 後停止 rollback command＋receipt＋refs；完整 refs replay 不改 updated_at。 |
+| A05；§09（task link 的延伸 audit） | `test_a05_reconcile_reservation_commits_new_command_refs_before_dispatch_receipt`、`test_a05_submission_refs_commit_with_receipt_and_replay_without_effect`、`test_standalone_operation_records_no_task_refs`（api_v1） | reconcile reservation 已提交、prepared receipt 尚未寫入時 refs 已指向新 command；restart 保留相同 command，只送一次。submit／continuation effect 後停止，task link 已保存，舊缺值 replay 修復且不重做 effect。standalone send／answer／interrupt 不產生 task refs。 |
 | A07／A08；§09／§10（frame 後 classification） | `test_a07_post_frame_send_error_is_uncertain_and_settles_by_readback`、`test_a07_bat_refusal_records_failed_runtime_step_and_rejected_command`、`test_a07_send_reply_loss_after_resume_uses_original_readback` | malformed send reply／record_turn ValueError 在 session／task operation 都為 uncertain step／command，重啟原讀回 settled，恰一 resume＋send。BAT 明確拒絕 send／answer／interrupt 則 failed／rejected、task 不變、同 key 重讀拒絕。既有 lost send reply 規則保持。 |
 | A07；§09／§10（resume guard 與 send readback） | `test_a07_preliminary_resume_checks_task_binding_without_sending`、`test_a07_send_reply_loss_after_resume_uses_original_readback`、`test_a07_client_resume_and_each_permission_channel_are_gated` | paused／版本在 resume frame 前改變，完整 guard 拒絕，零 resume／send frame。resume 後 send-message 接受、reply 遺失，command／operation uncertain；原 operation readback 與 restart tick 結清，只有一個 send-message／command，沒有第二 settlement 規則。 |
 | A07；§09／§10（daemon 的非 operation send） | `test_a07_daemon_tick_handles_pre_frame_send_failure_without_uncertainty`、`test_a07_daemon_tick_cancels_pre_frame_send_after_task_control` | 真正 `_tick_task` 驅動 initial lead／follow-up；client-resume 接受後 ConnectionLost／InvokeTimeout／BAT error／OSError：rejected、needs_ted，result／event 可讀 code，從未 uncertain；只有一個 resume、零 send-message，下次 tick 零 mutation。resume frame 前 pause 由完整 guard 拒絕；resume loss 期間 pause／版本改變則 cancelled、task snapshot 不變，無例外逃出 tick。 |
