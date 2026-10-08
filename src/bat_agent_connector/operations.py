@@ -304,9 +304,22 @@ class OperationService:
         with self.journal.tx():
             row = self.db.execute("SELECT external_refs FROM operations WHERE operation_id=?",
                                   (operation_id,)).fetchone()
-            merged = {**(json.loads(row["external_refs"]) if row and row["external_refs"] else {}), **refs}
+            previous = json.loads(row["external_refs"]) if row and row["external_refs"] else {}
+            merged = {**previous, **refs}
             self.db.execute("UPDATE operations SET external_refs=?,updated_at=? WHERE operation_id=?",
                             (_canonical(merged), time.time(), operation_id))
+            if merged != previous:
+                self._observation_event(operation_id, "resource.bound", {"refs": refs})
+
+    def _observation_event(self, operation_id: str, kind: str, data: dict) -> None:
+        from .observation import operation_summary
+        row = self.db.execute("SELECT actor FROM operations WHERE operation_id=?", (operation_id,)).fetchone()
+        if data.get("step"):
+            step = self.db.execute("SELECT seq,status FROM operation_steps WHERE operation_id=? AND name=?", (operation_id, data["step"])).fetchone()
+            if step:
+                data = {"step_seq": step["seq"], "status": step["status"], **data}
+        self.journal.api_event("operation", operation_id, kind, operation_summary(self.db, operation_id, data), actor=row["actor"] if row else None,
+                               context={"entry_point": "daemon", "observer": "operation-service"})
 
     def _step_start(self, operation_id: str, name: str, request: dict) -> None:
         with self.journal.tx():
@@ -314,12 +327,14 @@ class OperationService:
                                   (operation_id,)).fetchone()[0]
             self.db.execute("""INSERT INTO operation_steps(operation_id,seq,name,status,request,started_at)
                 VALUES(?,?,?,?,?,?)""", (operation_id, seq, name, "started", _canonical(request), time.time()))
+            self._observation_event(operation_id, "operation.step.started", {"step": name, "step_seq": seq, "request": request})
 
     def _step_restart(self, operation_id: str, name: str, request: dict) -> None:
         with self.journal.tx():
             self.db.execute("""UPDATE operation_steps SET status='started',request=?,response=NULL,error=NULL,
                 started_at=?,finished_at=NULL WHERE operation_id=? AND name=?""",
                             (_canonical(request), time.time(), operation_id, name))
+            self._observation_event(operation_id, "operation.step.restarted", {"step": name, "request": request})
 
     def _step_done(self, operation_id: str, name: str, response: dict, *, reconciled: bool = False) -> None:
         with self.journal.tx():
@@ -327,6 +342,7 @@ class OperationService:
                 external_ref=COALESCE(?,external_ref) WHERE operation_id=? AND name=?""",
                             (_canonical({**response, **({"reconciled": True} if reconciled else {})}),
                              time.time(), response.get("external_ref"), operation_id, name))
+            self._observation_event(operation_id, "operation.step.succeeded", {"step": name, "response": response, "reconciled": reconciled})
 
     def _step_status(self, operation_id: str, name: str, status: str, *, error: dict | None = None) -> None:
         with self.journal.tx():
@@ -334,6 +350,7 @@ class OperationService:
                 finished_at=CASE WHEN ?='failed' THEN ? ELSE finished_at END WHERE operation_id=? AND name=?""",
                             (status, _canonical(error) if error else None, status, time.time(), operation_id,
                              name))
+            self._observation_event(operation_id, "operation.step." + status, {"step": name, "status": status, "error_code": (error or {}).get("code")})
 
     # ------------------------------------------------------------------ create / cancel
     def create(self, principal: Principal, *, action: str, target: dict | None = None, params: dict | None = None,

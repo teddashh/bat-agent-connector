@@ -12,7 +12,15 @@ from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import api_auth, checkpoints, cli, integration, resource_policy
+from bat_agent_connector import (
+    api_auth,
+    checkpoints,
+    cli,
+    delivery,
+    integration,
+    pr_delivery,
+    resource_policy,
+)
 from bat_agent_connector.config import ConfigError, parse_config
 from bat_agent_connector.operations import AmbiguousOutcome, OperationError
 from bat_agent_connector.task_daemon import TaskDaemon
@@ -525,8 +533,9 @@ async def test_c02_one_update_per_pr_and_merge_exclusion(world):
     clean = await w.preview([{"kind": "checkpoint_run", "id": r1}])
     assert clean["ready"], clean["blocking"]
     w.gh.merge_mode = "enqueue"
-    merge = await w.run("github.pr.merge", {"repository": "o/r", "pull_number": 1}, {"method": "squash"},
-                        {"expected_head_sha": w.f1})
+    merge_doc = (await delivery.pr_preview(w.d.ops, "o/r", 1))["merge_preview"]
+    envelope = pr_delivery.merge_envelope(merge_doc)
+    merge = await w.run(envelope["action"], envelope["target"], envelope["params"], envelope["preconditions"])
     assert merge["status"] not in {"succeeded", "failed", "cancelled"}, merge
     with pytest.raises(OperationError) as e:
         w.d.ops.create(TED, action="integration.apply", target=target, params={"preview_id": clean["preview_id"]},

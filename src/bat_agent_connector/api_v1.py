@@ -16,12 +16,22 @@ import time
 from importlib import resources
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import __version__, api_auth, checkpoints, cleanup, integration, resource_policy, service, work_items
+from . import (
+    __version__,
+    api_auth,
+    checkpoints,
+    cleanup,
+    integration,
+    pr_delivery,
+    resource_policy,
+    service,
+    work_items,
+)
 from .errors import BatError, ResourceReadOnly
 from .operations import STATES, OperationError
 
 API_VERSION = 1
-CONTRACT_VERSION = "2026-10-08"
+CONTRACT_VERSION = "2026-10-08"  # delivery Part A shares this contract change date; keep an ISO date
 MAX_BODY = 200_000
 MAX_STREAMS = 16
 MAX_STREAMS_PER_ACTOR = 8  # several Dashboard tabs per person; reloads briefly overlap
@@ -96,6 +106,14 @@ class ApiV1:
             ("GET", r"/api/v1/sessions", self.sessions, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)", self.session, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/messages", self.messages, "observe"),
+            ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/history", self.session_history, "observe"),
+            ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/relations", self.session_relations, "observe"),
+            ("GET", r"/api/v1/hosts/(?P<host>[^/]+)/discovery", self.discovery, "observe"),
+            ("GET", r"/api/v1/worktrees/(?P<wid>wt_[0-9a-f]{32})", self.worktree, "observe"),
+            ("GET", r"/api/v1/worktrees/(?P<wid>wt_[0-9a-f]{32})/history", self.worktree_history, "observe"),
+            ("GET", r"/api/v1/worktrees/(?P<wid>wt_[0-9a-f]{32})/relations", self.worktree_relations, "observe"),
+            ("GET", r"/api/v1/tasks/(?P<task>[0-9a-f-]{8,64})/history", self.task_history, "observe"),
+            ("GET", r"/api/v1/tasks/(?P<task>[0-9a-f-]{8,64})/sessions", self.task_sessions, "observe"),
             ("GET", r"/api/v1/policy", self.policy, "observe"),
             ("GET", r"/api/v1/operations", self.operations, "observe"),
             ("POST", r"/api/v1/operations", self.create_operation, None),
@@ -110,6 +128,7 @@ class ApiV1:
             ("GET", r"/api/v1/checkpoints/(?P<cp>cp_[0-9a-f]{32})", self.checkpoint, "observe"),
             ("GET", r"/api/v1/repositories/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pulls/(?P<number>\d{1,9})",
              self.pull_preview, "observe"),
+            ("GET", r"/api/v1/delivery/previews/(?P<pv>mpv_[0-9a-f]{32})", self.merge_preview, "observe"),
             ("GET", r"/api/v1/integrations/candidates", self.integration_candidates, "observe"),
             ("GET", r"/api/v1/integrations/previews/(?P<pv>ipv_[0-9a-f]{32})", self.integration_preview, "observe"),
             ("GET", r"/api/v1/integrations", self.integrations, "observe"),
@@ -289,7 +308,8 @@ class ApiV1:
     async def capabilities(self, principal, **_):
         fleet = self.daemon.fleet
         gh_cfg = self.daemon.ops.context["github_config"]
-        actions = [{"action": a.name, "scope": a.scope, "summary": a.summary, "allowed": principal.allows(a.scope)}
+        actions = [{"action": a.name, "scope": a.scope, "summary": a.summary, "allowed": principal.allows(a.scope)
+                               and (a.name != "delivery.merge_and_deploy" or principal.allows("deploy"))}
                    for a in self.daemon.ops.actions.values()]
         hosts = [{"host": h, "observe": True, "writes": fleet.writes_enabled(h),
                   "orchestrate": fleet.orchestrate_enabled(h),
@@ -307,14 +327,18 @@ class ApiV1:
                                  "hosts": [{"host": name, "available": self._can_continue(name),
                                      "reasons": ([] if self._can_continue(name) else ["HOST_CLEANUP_UNAVAILABLE"])}
                                      for name in fleet.config.hosts]},
-                     "features": {"cleanup": True, "inventory": True, "events_stream": True, "operations": True, "work_items": True,
+                     "features": {"cleanup": True, "inventory": True, "session_history": True, "resource_relations": True, "discovery_scope": True,
+                                  "worktree_history": {"known_bindings_only": True}, "history": {"source": "journal", "legacy_transitions": "may_be_incomplete", "optional_adapters": ["delivery_part_a"],
+                                      "observed_event_kinds": [r[0] for r in self.daemon.journal.db.execute("SELECT DISTINCT kind FROM api_events ORDER BY kind")]}, "events_stream": True, "operations": True, "work_items": True,
                                   "github": self.daemon.ops.context.get("github") is not None,
                                   "deploy": bool(gh_cfg.recipes),
+                                  "metadata_update": self.daemon.ops.context.get("github") is not None,
+                                  "merge_scope_preview": self.daemon.ops.context.get("github") is not None,
                                   "checkpoints": [h for h in fleet.config.hosts if self._can_continue(h)],
                                   "integration": [{"repository": r.repository,
                                                    "hosts": integration.usable_hosts(self.daemon.ops, r)}
                                                   for r in gh_cfg.repos.values() if r.integrate]},
-                     "repositories": [{"repository": r.repository, "allow_merge": r.allow_merge,
+                     "repositories": [{"repository": r.repository, "allow_merge": r.allow_merge, "allow_pr_update": r.allow_pr_update,
                                        "merge_methods": list(r.merge_methods)} for r in gh_cfg.repos.values()],
                      "deploy_recipes": [{"name": r.name, "repository": r.repository, "environment": r.environment,
                                          "mode": r.mode} for r in gh_cfg.recipes.values()]}
@@ -325,32 +349,72 @@ class ApiV1:
         return bool(runner and runner.available(host) and fleet.writes_enabled(host)
                     and fleet.orchestrate_enabled(host) and fleet.config.host(host).managed_roots)
 
-    async def hosts(self, **_):
-        return 200, {"hosts": self.daemon.inventory.hosts()}
+    async def hosts(self, query, **_):
+        return 200, self.daemon.inventory.hosts_document(host=self._q(query, "host"), discovery=bool(self._bool(query, "discovery")), after=self._int(query, "after", 0), limit=self._int(query, "limit", 20))
 
     async def sessions(self, query, **_):
         return 200, self.daemon.inventory.list_sessions(
             host=self._q(query, "host"), provenance=self._q(query, "provenance"),
             api_access=self._q(query, "access"), attention=self._bool(query, "attention"),
             include_gone=bool(self._bool(query, "include_gone")), order=self._q(query, "order", "activity"),
-            cursor=self._q(query, "cursor"), limit=self._int(query, "limit", 50))
+            cursor=self._q(query, "cursor"), limit=self._int(query, "limit", 50),
+            profile_id=self._q(query, "profile_id"), project_id=query.get("project_id"), work_item_id=self._q(query, "work_item_id"),
+            execution_id=self._q(query, "execution_id"), provider=self._q(query, "provider"), has_tab=self._bool(query, "has_tab"),
+            loaded=self._bool(query, "loaded"), streaming=self._bool(query, "streaming"), lifecycle=self._q(query, "lifecycle"),
+            stale=self._bool(query, "stale"), relation_scope=self._q(query, "relation_scope", "history"))
 
     def _known_host(self, host: str) -> None:
         if host not in self.daemon.fleet.config.hosts:
             raise ApiError(404, "UNKNOWN_HOST", f"unknown host {host!r}")
 
     async def session(self, query, host, sid, **_):
-        self._known_host(host)
-        row = self.daemon.inventory.get_session(host, sid)
-        db = self.daemon.journal.db
-        out = {"session": row, "started_from": checkpoints.started_from(db, host, sid),
-               "work_items": work_items.work_items_for(db, "session", f"{host}/{sid}")}
-        out["cleanup"] = cleanup.lookup(db, host + "/" + sid, host)
-        if self._bool(query, "live"):
+        live = self._bool(query, "live")
+        if live:
+            self._known_host(host)
+        try:
+            out = self.daemon.inventory.session_document(host, sid)
+        except OperationError as exc:
+            if not live or exc.code != "NOT_FOUND":
+                raise
+            out = {"session": None, "cleanup": []}
+        if live:
             out["policy"] = await resource_policy.session_policy(self.daemon.fleet, host, sid)
-        elif row is None and not out["cleanup"]:
-            raise ApiError(404, "NOT_FOUND", "session is not in the inventory (pass live=true to ask the host)")
         return 200, out
+
+    def _history(self, query, resource_type, resource_id):
+        return self.daemon.inventory.observation.history(resource_type, resource_id,
+            cursor=self._q(query, "cursor"), limit=self._int(query, "limit", 50), order=self._q(query, "order", "desc"),
+            kind=query.get("kind"), since=float(self._q(query, "since")) if self._q(query, "since") is not None else None,
+            until=float(self._q(query, "until")) if self._q(query, "until") is not None else None)
+
+    def _relations(self, query, resource_type, resource_id):
+        include = self._bool(query, "include_closed")
+        return self.daemon.inventory.observation.relations(resource_type, resource_id, cursor=self._q(query, "cursor"),
+            limit=self._int(query, "limit", 50), execution_id=self._q(query, "execution_id"), include_closed=True if include is None else include)
+
+    async def session_history(self, query, host, sid, **_):
+        return 200, self._history(query, "session", f"{host}/{sid}")
+
+    async def session_relations(self, query, host, sid, **_):
+        return 200, self._relations(query, "session", f"{host}/{sid}")
+
+    async def task_history(self, query, task, **_):
+        return 200, self._history(query, "execution", task)
+
+    async def task_sessions(self, query, task, **_):
+        return 200, self._relations(query, "execution", task)
+
+    async def worktree(self, wid, **_):
+        return 200, {"worktree": self.daemon.inventory.observation.resource("worktree", wid)}
+
+    async def worktree_history(self, query, wid, **_):
+        return 200, self._history(query, "worktree", wid)
+
+    async def worktree_relations(self, query, wid, **_):
+        return 200, self._relations(query, "worktree", wid)
+
+    async def discovery(self, query, host, **_):
+        return 200, self.daemon.inventory.discovery(host, after=self._int(query, "after", 0), limit=self._int(query, "limit", 20))
 
     async def messages(self, query, host, sid, **_):
         self._known_host(host)
@@ -399,10 +463,16 @@ class ApiV1:
     async def events(self, query, **_):
         return 200, self.daemon.journal.api_events(
             self._int(query, "after", 0), self._int(query, "limit", 100),
-            resource_type=self._q(query, "resource_type"), resource_id=self._q(query, "resource_id"))
+            resource_type=self._q(query, "resource_type"), resource_id=self._q(query, "resource_id"), kind=self._q(query, "kind"),
+            related_resource_type=self._q(query, "related_resource_type"), related_resource_id=self._q(query, "related_resource_id"))
 
-    async def pull_preview(self, owner, repo, number, **_):
-        return 200, {"pull_request": await integration.pr_card(self.daemon.ops, f"{owner}/{repo}", int(number))}
+    async def pull_preview(self, owner, repo, number, query, **_):
+        return 200, {"pull_request": await integration.pr_card(
+            self.daemon.ops, f"{owner}/{repo}", int(number), self._q(query, "method"),
+            from_event=self._q(query, "from_event") == "true")}
+
+    async def merge_preview(self, pv, **_):
+        return 200, {"preview": pr_delivery.get_preview(self.daemon.journal.db, pv)}
 
     async def integration_candidates(self, query, **_):
         host = self._q(query, "host")
@@ -480,7 +550,8 @@ class ApiV1:
         return 200, {"tombstone": doc, "receipts": cleanup.receipts(self.daemon.ops, doc["operation_id"])}
 
     async def task(self, task, **_):
-        return 200, {"task": await self.daemon.call("work_status", {"task_id": task})}
+        return 200, {"task": await self.daemon.call("work_status", {"task_id": task}), "execution_id": task,
+                     "relations_summary": self.daemon.inventory.observation.relations("execution", task, limit=200)}
 
     # ------------------------------------------------------------------ SSE
     async def _stream(self, query: dict, headers: dict[str, str], reader, writer, *, token: str,
@@ -494,6 +565,8 @@ class ApiV1:
             after = int(headers.get("last-event-id") or self._q(query, "after", 0) or 0)
         except ValueError:
             raise ApiError(422, "INVALID_REQUEST", "after must be an integer") from None
+        self.daemon.journal.api_events(after, 0, kind=self._q(query, "kind"),
+            related_resource_type=self._q(query, "related_resource_type"), related_resource_id=self._q(query, "related_resource_id"))  # validate before streaming headers
         self._streams += 1
         self._streams_by_actor[actor] = self._streams_by_actor.get(actor, 0) + 1
         hangup = asyncio.ensure_future(reader.read(1))  # a client never sends after the request: EOF = gone
@@ -508,11 +581,13 @@ class ApiV1:
                     if current is None or not current.allows("observe"):
                         return  # revoked or expired: stop sending; the client sees the stream end
                     last_auth = time.monotonic()
-                page = self.daemon.journal.api_events(after, 100)
+                page = self.daemon.journal.api_events(after, 100, kind=self._q(query, "kind"),
+                    related_resource_type=self._q(query, "related_resource_type"), related_resource_id=self._q(query, "related_resource_id"))
                 for ev in page["events"]:
                     data = json.dumps(ev, ensure_ascii=False, default=str)
                     writer.write(f"id: {ev['seq']}\nevent: {ev['kind']}\ndata: {data}\n\n".encode())
                     after = ev["seq"]
+                after = page["next_cursor"]
                 if page["events"]:
                     await asyncio.wait_for(writer.drain(), 10)
                     last_write = time.monotonic()

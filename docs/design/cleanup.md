@@ -91,7 +91,10 @@ Worktree 使用共用 `resource_ids.worktree_id`：canonical JSON `["worktree",h
 的 SHA-256 前 32 hex 加 `wt_`。Checkpoint 為 checkpoint.continue／operation_id／worktree；repair 為
 integration.handoff／operation_id／repair；task external 為 task／task_id／external_worktree；BAT-made
 為 registry／session_id@created_at（原 registry 值）／worktree。Warm reuse、reviewer、failover、後續 reuse
-追第一個 creation slot，沿用 ID。Observation 使用相同函式，rebase 時共用。
+追第一個 creation slot，沿用 ID。Observation 與 cleanup 共用
+`registry_worktree_intent`／`registry_worktree_root`；registry 列的順序不影響 creation slot，
+connector-made 與舊 `batc/` branch 不能被誤列為 BAT-made。Session 詳情的中央 read model
+一併帶出 cleanup tombstones；原 host 移除且 inventory row 不存在時，HTTP／MCP／CLI 仍可查詢。
 其他 projection ID 為 `cr_<32 hex>`：host、kind、creation intent、slot 的 canonical hash。
 同 canonical path／common dir 且 creation 相同才去重；證據矛盾列 BINDING_MISMATCH。
 重建同路徑是新 generation；原 tombstone 不改回 active。Retained ID 為 `ret_<32 hex>`。
@@ -522,6 +525,8 @@ parent cancelled/failed把它當成沒發生。遠端程序仍在／身份不明
 不讀、不寫user_version，中斷rollback可重跑。版本號只供 orchestrator 跨package分配的一次性data steps使用，
 本包不假設其他package的版號。DDL若相對遞增版本會跳過其他package的data steps；
 Part A只有建表/index，不占版本號。
+目前 data steps 為 1 event copy、2 observation history；deployment history 的 3 另行整合。
+Cleanup DDL 單獨執行時保留原 version；完整 Journal open 仍依已整合的 migration 升級。
 不改operations table，不host calls、不刪舊rows／registry／events，不重編cursor。
 
 | 表 | 固定事實／鍵 |

@@ -38,7 +38,7 @@ from .operations import (
     Uncertain,
     _canonical,
 )
-from .resource_ids import worktree_id
+from .resource_ids import registry_worktree_intent, registry_worktree_root, worktree_id
 from .safety import Audit
 
 VERSION = "cleanup-1"
@@ -445,22 +445,30 @@ def _all(ops):
         session = add(_resource(host, "session", creation, sid, session_id=sid, path=path, registry=e,
                                proven=bool(e.get("created_at")), task_owned=bool(e.get("task_id"))))
         alias(session, sid, host + "/" + sid, e.get("task_id"))
-        if e.get("worktree_path") and (host, e["worktree_path"]) not in worktrees:
+        def lead_of(task_id, host=host):
+            row = db.execute("SELECT session_id,external_worktree_path FROM tasks WHERE task_id=? AND host=?",
+                             (task_id, host)).fetchone()
+            return {"session_id": row[0], "worktree_path": row[1]} if row else None
+
+        intent = registry_worktree_intent(regs, host, sid, lead_of)
+        root = registry_worktree_root(regs, host, sid, lead_of) if intent else None
+        if root and (host, root["worktree_path"]) not in worktrees:
             # A successful legacy BAT create/start records its origin root, branch and worktree path together.
-            recorded = bool(e.get("created_at") and e.get("branch") and e.get("origin_root") and
-                            e.get("status") in {"active", "starting", "uncertain", "superseded", "removed", "cleaned", *registry.RETIRED} and
-                            not e.get("failover_of") and e.get("worktree_made_by") != "connector")
+            # The shared resolver already excludes connector-made roots/current rows,
+            # including legacy batc/ branches, and follows proven reuse relationships.
+            recorded = bool(root.get("created_at") and root.get("branch") and root.get("origin_root") and
+                            root.get("status") in {"active", "starting", "uncertain", "superseded", "removed", "cleaned", *registry.RETIRED})
             hc = fleet.config.hosts.get(host)
-            proven = bool(recorded and hc and resource_policy.in_managed_root(hc, e["origin_root"]) and
-                          resource_policy.in_bat_worktrees(e["worktree_path"], e["origin_root"]))
+            proven = bool(recorded and hc and resource_policy.in_managed_root(hc, root["origin_root"]) and
+                          resource_policy.in_bat_worktrees(root["worktree_path"], root["origin_root"]))
             # Project the carrier from this creation record, even without a checkpoint/integration/task.
             # Out-of-root or unexpected-layout records remain visible, but confer no cleanup ownership.
-            if recorded or e.get("task_id"):
-                w = wt(host, e.get("origin_root") or e.get("origin_cwd"), e["worktree_path"], e.get("branch"),
-                       creation, "bat", e.get("start_commit") or e.get("base_commit"), [host + "/" + sid, e.get("task_id")])
+            if recorded or root.get("task_id"):
+                w = wt(host, root.get("origin_root") or root.get("origin_cwd"), root["worktree_path"], root.get("branch"),
+                       intent[1], "bat", root.get("start_commit") or root.get("base_commit"), [host + "/" + sid, e.get("task_id")])
                 if w:
                     w["proven"] = proven
-        w = worktrees.get((host, path))
+        w = worktrees.get((host, root["worktree_path"] if root else path))
         if w:
             alias(w, sid, host + "/" + sid, e.get("task_id"))
             w["task_owned"] = w.get("task_owned", False) or bool(e.get("task_id"))
