@@ -427,11 +427,14 @@ def _all(ops):
         alias(session, sid, host + "/" + sid, e.get("task_id"))
         if e.get("worktree_path") and (host, e["worktree_path"]) not in worktrees:
             # A successful legacy BAT create/start records its origin root, branch and worktree path together.
-            proven = bool(e.get("created_at") and e.get("branch") and e.get("origin_root") and
-                          e.get("status") in {"active", "superseded", "removed", "cleaned"} and
-                          (host, e.get("origin_root")) in containers and not e.get("failover_of") and
-                          e.get("worktree_made_by") != "connector")
-            if proven or e.get("task_id"):
+            recorded = bool(e.get("created_at") and e.get("branch") and e.get("origin_root") and
+                            e.get("status") in {"active", "superseded", "removed", "cleaned"} and
+                            not e.get("failover_of") and e.get("worktree_made_by") != "connector")
+            proven = bool(recorded and resource_policy.in_managed_root(fleet.config.host(host), e["origin_root"]) and
+                          resource_policy.in_bat_worktrees(e["worktree_path"], e["origin_root"]))
+            # Project the carrier from this creation record, even without a checkpoint/integration/task.
+            # Out-of-root or unexpected-layout records remain visible, but confer no cleanup ownership.
+            if recorded or e.get("task_id"):
                 w = wt(host, e.get("origin_root") or e.get("origin_cwd"), e["worktree_path"], e.get("branch"),
                        creation, "bat", e.get("start_commit") or e.get("base_commit"), [host + "/" + sid, e.get("task_id")])
                 if w:
@@ -966,11 +969,11 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
             w = items[i["worktree_id"]]
             absent_cleaned = w.get("observation", {}).get("exists") is False and all(
                 r["code"] == "RESOURCE_CLEANED" for r in w["reasons"])
-            if (w["decision"] in {"reclaim", "already_absent"} or absent_cleaned) and i.get("flavor") in {"checkpoint", "repair"}:
+            if (w["decision"] in {"reclaim", "already_absent"} or absent_cleaned) and i.get("flavor") in {"checkpoint", "repair", "bat"}:
                 i["dependencies"] = [w["resource_id"]] if w["decision"] == "reclaim" else []
             else:
                 _reason(i, "CONTENT_REQUIRED", resource_id=w["resource_id"])
-            if i.get("flavor") not in {"checkpoint", "repair"}:
+            if i.get("flavor") not in {"checkpoint", "repair", "bat"}:
                 _reason(i, "RESOURCE_KIND_UNSUPPORTED")
             if i["reasons"]:
                 i.update(steps=[], decision="retain")
@@ -1313,6 +1316,7 @@ async def _execute_item(ctx, item, payload):
     retained_ref = "refs/batc/retained/" + rid + "/" + sha if sha else None
     req = {"repository": item["repository"], "roots": list(hc.managed_roots), "identity": item["repository_identity"],
            "path": item["path"] if item["kind"] in {"worktree", "temporary"} else None, "kind": item["kind"],
+           "flavor": item.get("flavor"),
            "temporaries": [item["path"]] if item["kind"] == "temporary" else [], "branch": item.get("branch"), "sha": sha,
            "retained_ref": retained_ref, "delivered": item.get("delivery", {}).get("delivered", False),
            "worktrees": [item["path"]] if item["kind"] == "worktree" else [],

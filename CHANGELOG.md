@@ -34,6 +34,10 @@
   a resource-cleanup next action; its worktree always stays.
   The legacy write-path audit also removed implicit worktree rehydration from cleanup evaluation. Missing BAT
   worktree state now escalates without a registration frame or registry changes, even with auto_cleanup enabled.
+  Standalone BAT worktrees now project their clone from registry creation evidence, without needing a checkpoint,
+  integration or task carrier record. Managed-root/layout evidence and live repository/branch binding are required;
+  mismatches and origins outside managed roots stay listed and retained. Their delivered local BAT branches use
+  the same preserve-before-remove and CAS path, while the clone remains the retained content store.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps

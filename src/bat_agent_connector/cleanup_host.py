@@ -400,7 +400,9 @@ def mutate(req):
             return {"removed": True}
         if phase == "remove.branch":
             branch = req["branch"]
-            if not branch.startswith(("batc/cp-", "batc/fix-")) or not req["delivered"]:
+            connector_branch = branch.startswith(("batc/cp-", "batc/fix-")) or (
+                req.get("flavor") == "bat" and branch.startswith("bat/"))
+            if not connector_branch or not req["delivered"]:
                 raise ValueError("BINDING_MISMATCH")
             full = "refs/heads/" + branch
             if any(r.get("branch") == full for r in observed["registrations"]):
