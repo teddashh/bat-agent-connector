@@ -6,6 +6,11 @@
   including paths under managed roots. Preserve proven carrier behavior and observation identity resolution;
   raw CLI policy does not require a task daemon or guess a journal location.
 
+- Observation cursor key validation ([design](docs/design/observation.md), plan v2 §14 (former §10/§11), B01/B02):
+  validate history integer keys and relation [integer, string] keys in the shared decoder before any journal read.
+  Reject booleans, nulls and malformed shapes with INVALID_CURSOR even for empty or fully filtered results;
+  verify HTTP/MCP/CLI parity, audit inventory/discovery/event cursors, and preserve valid snapshot paging.
+
 - Observation creation-root carriers ([design](docs/design/observation.md), plan §06/§08/§11, B01/B03/D05):
   follow explicit shares_worktree_with, equal-path legacy failovers and proven reviewer carriers through one
   parent rule. Remove the unwritten sharing key; non-sharing successors keep their own root and never inherit
