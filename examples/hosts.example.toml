@@ -50,7 +50,7 @@ token_ref = "bat-profile:buildbox"     # read from BAT's own client token store 
 # protected_roots = ["/srv/example-personal"]
 # check_max_age_s = 300
 # check_timeout_s = 10
-# check_max_entries = 10000
+# check_max_entries = 50000
 # bat_port = 9876
 # No trusted alias => unknown/check_channel_untrusted; confined Claude falls back to default.
 # Exact sudoers rule and hardening: docs/design/confinement.md. Git aliases stay in Task settings.

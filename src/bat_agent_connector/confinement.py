@@ -24,6 +24,22 @@ CONFINED_OPTIONS = {
 }
 OPTION_KEYS = ("permissionMode", "codexSandboxMode", "codexApprovalPolicy")
 START_IDENTITY_MISMATCH_CODES = {"START_SESSION_MISMATCH", "FAILOVER_SUCCESSOR_MISMATCH"}
+CLOSURE_VERSIONS = tuple(f"3.{minor}" for minor in range(6, 15))
+CLOSURE_TREE_PREFIXES = ("/usr/lib/python", "/usr/lib64/python")
+ACCOUNT_CHECK_MAX_ENTRIES = 50000
+ACCOUNT_CHECK_TOOLS = ('/usr/bin/find', '/usr/bin/head', '/usr/bin/readlink', '/usr/bin/dirname',
+                       '/usr/bin/printf', '/usr/bin/tr', '/usr/bin/env', '/usr/bin/timeout', '/bin/sh',
+                       '/usr/bin/sudo', '/usr/sbin/sshd')
+_ACCOUNT_TOOLS_PROGRAM = 'CHECK_TOOLS = ' + repr(ACCOUNT_CHECK_TOOLS) + '\n'
+_ACCOUNT_NATIVE_PROGRAM = r'''
+def native_paths():
+    paths = []
+    for line in pathlib.Path('/proc/self/maps').read_text().splitlines():
+        fields = line.split(maxsplit=5)
+        if len(fields) == 6 and fields[5].startswith('/'):
+            paths.append(pathlib.Path(fields[5]))
+    return paths
+'''
 
 
 class ConfinementRefused(WriteRefused):
@@ -119,7 +135,8 @@ def snapshot(agent: str, options: dict, *, account: dict | None = None, task: bo
     if account_ok:
         mechanisms.append("host_account")
         limits.extend(["host_account_declared_roots_only", "account_check_is_point_in_time",
-                       "hardlinks_and_privilege_paths_unverified"])
+                       "hardlinks_and_privilege_paths_unverified", "no_hostile_same_uid_during_account_check",
+                       "system_bootstrap_trusted"])
         limits.extend(account.get("limits", []))
     if agent == "codex" and options.get("codexSandboxMode") in {"workspace-write", "read-only"}:
         level = "os_sandbox"
@@ -238,7 +255,7 @@ def account_status(fleet, host: str) -> dict:
     config = fleet.config.host(host).confinement
     result = getattr(fleet, "_confinement_checks", {}).get(host)
     # Same-account login checks cannot establish an authentic verdict.
-    signature = hashlib.sha256(json.dumps(["trusted-account-channel-v2", config], sort_keys=True).encode()).hexdigest()
+    signature = hashlib.sha256(json.dumps(["trusted-account-closure-v3", config], sort_keys=True).encode()).hexdigest()
     if config.get("host_account") and not config.get("check_ssh_alias"):
         return {"declared": True, "status": "unknown", "reason": "check_channel_untrusted",
                 "protected_roots": list(config.get("protected_roots") or []), "checked_at": None,
@@ -303,7 +320,19 @@ def channel_matches(config: dict, result: dict) -> bool:
             and channel.get("ssh_alias") == config["check_ssh_alias"]
             and channel.get("auditor_uid") == config.get("check_uid")
             and channel.get("bat_uid") == config.get("expected_uid")
-            and channel.get("bat_account") == config.get("bat_account"))
+            and channel.get("bat_account") == config.get("bat_account")
+            and closure_matches(channel.get("closure")))
+
+
+def closure_matches(proof: dict | None) -> bool:
+    if not isinstance(proof, dict):
+        return False
+    version = next((v for v in CLOSURE_VERSIONS if proof.get("interpreter") == "/usr/bin/python" + v), None)
+    roots = proof.get("roots")
+    return (version is not None and proof.get("status") == "proven" and proof.get("schema_version") == 1
+            and isinstance(roots, list) and bool(roots)
+            and all(root in [p + version for p in CLOSURE_TREE_PREFIXES] for root in roots)
+            and type(proof.get("entries_remaining")) is int and proof["entries_remaining"] > 0)
 
 
 def account_start_effect(result: dict) -> str:
@@ -389,13 +418,131 @@ def host_capability(fleet, host: str) -> dict:
 def account_script(config: dict) -> str:
     """Linux-only metadata scan. GNU find evaluates ACLs; no probe or hand-written ACL evaluator."""
     payload = json.dumps({"uid": config["expected_uid"], "roots": config["protected_roots"],
-                          "entries": config.get("check_max_entries", 10000),
+                          "entries": config.get("check_max_entries", ACCOUNT_CHECK_MAX_ENTRIES),
                           "seconds": config.get("check_timeout_s", 10), "port": config.get("bat_port", 9876),
                           "auditor_uid": config["check_uid"], "bat_account": config["bat_account"],
                           "ssh_alias": config["check_ssh_alias"]})
-    return ("cd / && exec /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/python3 -I -S -B - "
-            + shlex.quote(payload) + " <<'BATC_CONFINEMENT'\n" + _ACCOUNT_CHANNEL_PROGRAM
-            + "\nBATC_CONFINEMENT")
+    gate = (_CLOSURE_SHELL + '\nproof=$(prove_closure) || exit 1\n'
+            + 'exec /usr/bin/python3 -I -S -B -c ' + shlex.quote(_ACCOUNT_CHANNEL_PROGRAM)
+            + ' "$2" "$proof" < /dev/null')
+    return ("cd / && /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/timeout "
+            + str(config.get("check_timeout_s", 10)) + " /bin/sh -s -- "
+            + str(config.get("check_max_entries", ACCOUNT_CHECK_MAX_ENTRIES)) + " " + shlex.quote(payload)
+            + " <<'BATC_CLOSURE'\n" + gate + "\nBATC_CLOSURE\n"
+            + "if [ $? -ne 0 ]; then /usr/bin/printf '%s\\n' "
+            + shlex.quote('{"status":"unknown","reason":"check_executable_untrusted"}') + "; fi")
+
+
+# Both the pre-interpreter gate and the in-program rechecks execute this definition.
+# Fixed system layouts; never ask the unproven interpreter where it imports code.
+_CLOSURE_SHELL = r'''
+remaining=$1
+newline='
+'
+consume() { remaining=$((remaining - 1)); [ "$remaining" -gt 0 ] || return 1; }
+point() {
+    local hit
+    consume || return 1
+    hit=$(/usr/bin/find -P "$1" -maxdepth 0 \( ! -uid 0 -o \( ! -type l -a -perm /022 \) -o ! -readable \) -printf X 2>&1) || return 1
+    [ -z "$hit" ]
+}
+parents() {
+    local parent
+    parent=$(/usr/bin/dirname -- "$1") || return 1
+    while :; do
+        if [ -e "$parent" ] || [ -L "$parent" ]; then
+            point "$parent" || return 1
+            [ -d "$parent" ] && [ -x "$parent" ] && [ ! -L "$parent" ] || return 1
+        fi
+        [ "$parent" = / ] && break
+        parent=$(/usr/bin/dirname -- "$parent") || return 1
+    done
+}
+target() {
+    local path next
+    path=$1
+    while :; do
+        case "$path" in /*) ;; *) return 1 ;; esac
+        case "$path" in *"$newline"*) return 1 ;; esac
+        parents "$path" && point "$path" || return 1
+        if [ ! -L "$path" ]; then break; fi
+        next=$(/usr/bin/readlink -- "$path") || return 1
+        case "$next" in /*) path=$next ;; *) path="$(/usr/bin/dirname -- "$path")/$next" ;; esac
+    done
+    if [ -d "$path" ]; then tree "$path"; else [ -f "$path" ]; fi
+}
+tree() {
+    local records record complete
+    # The terminal marker proves find completed. head bounds captured records;
+    # find errors, truncation, special files and newline names never count as proof.
+    records=$({ /usr/bin/find -P "$1" \( ! -uid 0 -o \( ! -type l -a -perm /022 \) -o ! -readable -o -name "*$newline*" -o \( ! -type f -a ! -type d -a ! -type l \) \) -printf 'X\n' -quit -o -type l -printf 'L%p\n' -o -printf 'E\n' 2>&1
+                [ $? -eq 0 ] && /usr/bin/printf 'DONE\n' || /usr/bin/printf 'X\n'
+              } | /usr/bin/head -n "$((remaining + 2))") || return 1
+    complete=false
+    while IFS= read -r record; do
+        [ "$complete" = false ] || return 1
+        case "$record" in
+            E) consume || return 1 ;;
+            L*) consume && target "${record#L}" || return 1 ;;
+            DONE) complete=true ;;
+            *) return 1 ;;
+        esac
+    done <<EOF
+$records
+EOF
+    [ "$complete" = true ]
+}
+prove_closure() {
+    local interpreter version config roots prefix root zip
+    interpreter=$(/usr/bin/readlink -e /usr/bin/python3) || return 1
+    case "$interpreter" in @INTERPRETERS@) ;; *) return 1 ;; esac
+    version=${interpreter#/usr/bin/python}
+    target /usr/bin/python3 && target "$interpreter" || return 1
+    # A venv can redirect the import closure; it is outside the supported layout.
+    for config in /usr/bin/pyvenv.cfg /usr/pyvenv.cfg; do
+        parents "$config" || return 1
+        [ ! -e "$config" ] && [ ! -L "$config" ] || return 1
+    done
+    roots=''
+    for prefix in @TREE_PREFIXES@; do
+        root=$prefix$version
+        parents "$root" || return 1
+        if [ -e "$root" ] || [ -L "$root" ]; then
+            [ -d "$root" ] && target "$root" || return 1
+            roots="${roots}${roots:+,}\"$root\""
+        fi
+        zip=$prefix$(/usr/bin/printf '%s' "$version" | /usr/bin/tr -d .).zip
+        parents "$zip" || return 1
+        if [ -e "$zip" ] || [ -L "$zip" ]; then target "$zip" || return 1; fi
+    done
+    [ -n "$roots" ] || return 1
+    /usr/bin/printf '{"schema_version":1,"status":"proven","interpreter":"%s","roots":[%s],"entries_remaining":%s}\n' "$interpreter" "$roots" "$remaining"
+}
+'''.replace('@INTERPRETERS@', '|'.join('/usr/bin/python' + v for v in CLOSURE_VERSIONS)).replace(
+    '@TREE_PREFIXES@', ' '.join(CLOSURE_TREE_PREFIXES))
+
+_ACCOUNT_CLOSURE_PROGRAM = r'''
+def check_closure():
+    global remaining
+    try:
+        budget()
+        result = subprocess.run(['/usr/bin/timeout', str(max(.01, deadline-time.monotonic())),
+                                 '/bin/sh', '-c', CLOSURE_SHELL + '\nprove_closure\n', 'closure', str(remaining)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=max(.01, deadline-time.monotonic()))
+        proof = json.loads(result.stdout)
+        if result.returncode or result.stderr or not closure_matches(proof): raise ValueError('closure_unproven')
+        if proof['entries_remaining'] >= remaining: raise ValueError('closure_budget_unproven')
+        remaining = proof['entries_remaining']; c['closure'] = proof
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        finish('unknown', 'check_executable_untrusted')
+'''.replace('CLOSURE_SHELL', repr(_CLOSURE_SHELL))
+_ACCOUNT_CLOSURE_PROGRAM = ('\n' + _ACCOUNT_CLOSURE_PROGRAM.replace('closure_matches(proof)',
+    "(proof.get('status') == 'proven' and proof.get('schema_version') == 1 and "
+    "proof.get('interpreter') in " + repr(['/usr/bin/python' + v for v in CLOSURE_VERSIONS]) + " and "
+    "isinstance(proof.get('roots'), list) and proof['roots'] and all(root in "
+    + repr([p + v for p in CLOSURE_TREE_PREFIXES for v in CLOSURE_VERSIONS]) + " for root in proof['roots']) and "
+    "type(proof.get('entries_remaining')) is int and proof['entries_remaining'] > 0)"))
 
 
 ACCOUNT_HARDENING_GAPS = {"check_executable_untrusted", "login_environment_writable", "login_shell_unsupported",
@@ -412,15 +559,18 @@ def check_integrity(account_uid=None):
                'bash': ['.bashrc', '.bash_profile', '.bash_login', '.profile'],
                'zsh': ['.zshenv', '.zprofile', '.zshrc', '.zlogin']}.get(shell.name)
     if startup is None: return 'login_shell_unsupported', {'login_shell': str(shell)}
-    executables = [pathlib.Path(sys.executable), pathlib.Path('/usr/bin/find'), shell,
-                   pathlib.Path(sysconfig.get_path('stdlib'))]
+    executables = [pathlib.Path(sys.executable), shell,
+                  *[pathlib.Path(p) for p in c['closure']['roots']],
+                  *[pathlib.Path(p) for p in CHECK_TOOLS], *native_paths()]
     trusted = set()
     for path in executables:
         resolved = path.resolve(strict=True)
         for target in (path, resolved):
             for part in [target, *target.parents]:
                 budget()
-                if part.lstat().st_uid != 0 or os.access(part, os.W_OK, effective_ids=True):
+                info = part.lstat()
+                if (info.st_uid != 0 or not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o022
+                        or os.access(part, os.W_OK, effective_ids=True)):
                     return 'check_executable_untrusted', {'paths': [str(part)]}
                 trusted.add(str(part))
     # Bootstrap above rejects a replaceable find before running it. GNU find's
@@ -478,7 +628,7 @@ def check_integrity(account_uid=None):
 
 
 _ACCOUNT_PROGRAM = r'''
-import json, os, pathlib, pwd, selectors, stat, subprocess, sys, sysconfig, time
+import json, os, pathlib, pwd, selectors, stat, subprocess, sys, time
 c = json.loads(sys.argv[1]); deadline = time.monotonic() + c['seconds']; remaining = c['entries']
 def finish(status, reason, **evidence):
     print(json.dumps(dict(status=status, reason=reason, checked_uid=os.geteuid(), channel=c.get('channel'), entries_remaining=remaining, **evidence))); raise SystemExit
@@ -488,7 +638,7 @@ if not sys.platform.startswith('linux'): finish('unknown', 'linux_only')
 if os.geteuid() != c['uid'] or os.getuid() != c['uid']: finish('unknown', 'ssh_uid_mismatch')
 if not c.get('channel'): finish('unknown', 'check_channel_untrusted')
 groups = sorted(set(os.getgroups() + [os.getegid()]))
-''' + _ACCOUNT_INTEGRITY_PROGRAM + r'''
+''' + _ACCOUNT_TOOLS_PROGRAM + _ACCOUNT_NATIVE_PROGRAM + _ACCOUNT_CLOSURE_PROGRAM + _ACCOUNT_INTEGRITY_PROGRAM + r'''
 def identity(pid):
     text = pathlib.Path('/proc', str(pid), 'status').read_text()
     values = dict(line.split(':', 1) for line in text.splitlines() if ':' in line)
@@ -498,6 +648,7 @@ def identity(pid):
                 capabilities_permitted=int(values['CapPrm'].strip(), 16),
                 capabilities_ambient=int(values['CapAmb'].strip(), 16))
 try:
+    check_closure()
     reason, integrity = check_integrity()
     if reason: finish('unknown', reason, **integrity)
     reason, auditor_integrity = check_integrity(c['channel']['auditor_uid'])
@@ -591,9 +742,9 @@ def channel_preconditions():
         return 'check_channel_untrusted', {'channel_reason': 'bat_account_uid_mismatch'}
     auditor = pwd.getpwuid(c['auditor_uid'])
     trusted = set()
-    for path in [pathlib.Path(sys.executable), pathlib.Path(sysconfig.get_path('stdlib')),
-                 pathlib.Path('/usr/bin/sudo'), pathlib.Path('/usr/bin/env'), pathlib.Path('/usr/bin/find'),
-                 pathlib.Path(auditor.pw_shell)]:
+    for path in [pathlib.Path(sys.executable), pathlib.Path(auditor.pw_shell),
+                 *[pathlib.Path(p) for p in c['closure']['roots']],
+                 *[pathlib.Path(p) for p in CHECK_TOOLS], *native_paths()]:
         for target in (path, path.resolve(strict=True)):
             for part in [target, *target.parents]:
                 budget(); remaining -= 1
@@ -633,8 +784,9 @@ def channel_preconditions():
 '''
 
 _ACCOUNT_CHANNEL_PROGRAM = r'''
-import errno, json, os, pathlib, pwd, stat, subprocess, sys, sysconfig, time
-c = json.loads(sys.argv[1]); deadline = time.monotonic() + c['seconds']; remaining = c['entries']
+import errno, json, os, pathlib, pwd, stat, subprocess, sys, time
+c = json.loads(sys.argv[1]); c['closure'] = json.loads(sys.argv[2])
+deadline = time.monotonic() + c['seconds']; remaining = c['closure']['entries_remaining']
 channel = dict(status='pending', method='sudo_exec', ssh_alias=c['ssh_alias'], auditor_uid=os.geteuid(),
                bat_uid=c['uid'], bat_account=c['bat_account'])
 def finish(status, reason, **evidence):
@@ -642,18 +794,21 @@ def finish(status, reason, **evidence):
 def budget():
     if time.monotonic() >= deadline: finish('unknown', 'time_budget_exhausted')
 if not sys.platform.startswith('linux'): finish('unknown', 'linux_only')
-''' + _ACCOUNT_CHANNEL_INTEGRITY_PROGRAM + r'''
+''' + _ACCOUNT_TOOLS_PROGRAM + _ACCOUNT_NATIVE_PROGRAM + _ACCOUNT_CLOSURE_PROGRAM + _ACCOUNT_CHANNEL_INTEGRITY_PROGRAM + r'''
 try:
+    check_closure()
     reason, integrity = channel_preconditions()
     if reason: finish('unknown', reason, **integrity)
     argv = ['/usr/bin/sudo', '-n', '-u', c['bat_account'], '--', '/usr/bin/env', '-i',
-            'PATH=/usr/bin:/bin', 'LC_ALL=C', '/usr/bin/python3', '-I', '-S', '-B', '-']
+            'PATH=/usr/bin:/bin', 'LC_ALL=C', '/usr/bin/python3', '-I', '-S', '-B']
     def run_stage(preflight):
+        check_closure()  # Reprove the same closure before starting another interpreter as BAT.
         budget()
         payload = dict(c, entries=remaining, seconds=max(.01, deadline-time.monotonic()),
                        channel=channel, channel_only=preflight)
         program = 'import sys\nsys.argv = ["-", ' + repr(json.dumps(payload)) + ']\n' + CHILD_PROGRAM
-        result = subprocess.run(argv, input=program.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        result = subprocess.run(argv + ['-c', program], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 timeout=max(.01, deadline-time.monotonic()))
         if result.returncode or result.stderr: finish('unknown', 'check_channel_untrusted', channel_reason='direct_exec_failed')
         observed = json.loads(result.stdout)
@@ -667,7 +822,12 @@ try:
         print(json.dumps(preflight)); raise SystemExit
     remaining = preflight['entries_remaining']
     if remaining <= 0: finish('unknown', 'entry_budget_exhausted')
-    channel.update(status='verified', bootstrap=integrity, auditor_integrity=preflight['auditor_integrity'])
+    try:
+        ptrace_scope = int(pathlib.Path('/proc/sys/kernel/yama/ptrace_scope').read_text().strip())
+    except (OSError, ValueError):
+        ptrace_scope = None
+    channel.update(status='verified', bootstrap=integrity, auditor_integrity=preflight['auditor_integrity'],
+                   closure=c['closure'], ptrace_scope=ptrace_scope)
     observed = run_stage(False)
     print(json.dumps(observed))
 except (OSError, ValueError, KeyError, subprocess.TimeoutExpired): finish('unknown', 'check_channel_untrusted', channel_reason='channel_check_incomplete')

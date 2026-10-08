@@ -62,7 +62,12 @@ def account_observation(status, reason):
     return {"status": status, "reason": reason, "checked_uid": ACCOUNT["expected_uid"],
             "channel": {"status": "verified", "method": "sudo_exec", "ssh_alias": ACCOUNT["check_ssh_alias"],
                         "auditor_uid": ACCOUNT["check_uid"], "bat_uid": ACCOUNT["expected_uid"],
-                        "bat_account": ACCOUNT["bat_account"]}}
+                        "bat_account": ACCOUNT["bat_account"], "closure": closure_observation()}}
+
+
+def closure_observation(remaining=9000):
+    return {"schema_version": 1, "status": "proven", "interpreter": "/usr/bin/python3.10",
+            "roots": ["/usr/lib/python3.10"], "entries_remaining": remaining}
 
 
 @pytest.mark.parametrize("status,reason,declared,effect", [
@@ -135,8 +140,8 @@ async def test_a10_accept_edits_requires_verified_account_and_checks_are_read_on
     assert r["confinement"]["level"] == "host_account"
     assert r["confinement"]["verification"]["status"] == "verified"
     script = f.confinement_runner.scripts[0]
-    assert "'-xdev'" in script and "'-writable'" in script and "'status'" in script
-    assert "'/usr/bin/sudo', '-n', '-u'" in script and "write_text" not in script
+    assert "-xdev" in script and "-writable" in script and "/proc" in script
+    assert "/usr/bin/sudo" in script and "write_text" not in script
     assert "'sudo', '-i'" not in script and "'sudo', '-s'" not in script
     await f.close()
 
@@ -343,6 +348,8 @@ def test_a10_linux_read_only_scan_uses_find_and_process_identity(tmp_path, monke
         def __truediv__(self, part):
             return Proc(*self.parts, part)
         def read_text(self):
+            if self.parts == ('/proc/self/maps',):
+                return '1-2 r-xp 0 0:0 1 /usr/lib/fixture-native.so\n'
             if self.name in {"tcp", "tcp6"}:
                 return "header\n0: 0100007F:2694 0:0 0A 0 0 0 0 0 101\n"
             return status(1 if self.parts[1] == "2" else 0)
@@ -355,8 +362,12 @@ def test_a10_linux_read_only_scan_uses_find_and_process_identity(tmp_path, monke
 
     class TrustedPath(type(real_path("/"))):
         def lstat(self):
-            values = list(super().lstat())
+            try:
+                values = list(super().lstat())
+            except FileNotFoundError:
+                values = [0o100555, 1, 1, 1, 0, 0, 0, 0, 0, 0]
             values[4] = 0  # Synthetic root-owned bootstrap layout, independent of the container image.
+            values[0] &= ~0o022
             return os.stat_result(values)
 
         def stat(self, **kwargs):
@@ -386,7 +397,15 @@ def test_a10_linux_read_only_scan_uses_find_and_process_identity(tmp_path, monke
         program_imports.setitem(sys.modules, "pathlib", types.SimpleNamespace(Path=path))
         program_imports.setitem(sys.modules, "pwd", types.SimpleNamespace(getpwuid=lambda _: types.SimpleNamespace(
             pw_dir="/usr", pw_shell="/bin/sh")))
-        program_imports.setitem(sys.modules, "sysconfig", types.SimpleNamespace(get_path=lambda _: "/usr/lib"))
+        real_subprocess = __import__('subprocess')
+        def run(args, **kwargs):
+            if args[0] == '/usr/bin/timeout':
+                proof = closure_observation(max(0, int(args[-1])-1))
+                proof.update(interpreter='/usr/bin/python3.14', roots=['/usr/lib/python3.14'])
+                return types.SimpleNamespace(returncode=0, stdout=json.dumps(proof).encode(), stderr=b'')
+            return types.SimpleNamespace(returncode=0, stdout=b'', stderr=b'')  # Synthetic bootstrap metadata.
+        program_imports.setitem(sys.modules, "subprocess", types.SimpleNamespace(
+            run=run, Popen=real_subprocess.Popen, PIPE=real_subprocess.PIPE, TimeoutExpired=real_subprocess.TimeoutExpired))
         with pytest.raises(SystemExit):
             exec(confinement._ACCOUNT_PROGRAM, {})
     result = json.loads(capsys.readouterr().out)

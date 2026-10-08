@@ -32,6 +32,9 @@ def integrity_fixture(*, owned=(), writable=(), shell="/bin/bash", missing=(), a
         def is_symlink(self):
             return False
 
+        def read_text(self):
+            return '1-2 r-xp 0 0:0 1 /usr/lib/fixture-native.so\n'
+
     def run(args, **kwargs):
         calls.append(args)
         return types.SimpleNamespace(returncode=0, stderr=b"", stdout=b"W" if args[1] in writable else b"")
@@ -64,7 +67,9 @@ def integrity_fixture(*, owned=(), writable=(), shell="/bin/bash", missing=(), a
         return output
 
     selector = types.SimpleNamespace(register=lambda *a: None, select=lambda *a: [True], close=lambda: None)
-    namespace = {"c": {"uid": uid}, "remaining": 1000, "deadline": 100., "budget": lambda: None,
+    namespace = {"c": {"uid": uid, "closure": {"roots": ["/usr/lib/python3.10"]}},
+                 "CHECK_TOOLS": confinement.ACCOUNT_CHECK_TOOLS,
+                 "remaining": 1000, "deadline": 100., "budget": lambda: None,
                  "pwd": types.SimpleNamespace(getpwuid=lambda account: types.SimpleNamespace(
                      pw_dir="/usr/fixture-home" if account == uid else "/usr/fixture-auditor", pw_shell=shell)),
                  "pathlib": types.SimpleNamespace(Path=FixturePath),
@@ -75,7 +80,7 @@ def integrity_fixture(*, owned=(), writable=(), shell="/bin/bash", missing=(), a
                  "stat": stat, "time": types.SimpleNamespace(monotonic=lambda: 0.),
                  "subprocess": types.SimpleNamespace(run=run, Popen=popen, PIPE=-1),
                  "selectors": types.SimpleNamespace(DefaultSelector=lambda: selector, EVENT_READ=1)}
-    exec(confinement._ACCOUNT_INTEGRITY_PROGRAM, namespace)
+    exec(confinement._ACCOUNT_NATIVE_PROGRAM + confinement._ACCOUNT_INTEGRITY_PROGRAM, namespace)
     return namespace["check_integrity"](account_uid), calls
 
 
@@ -118,9 +123,11 @@ async def test_account_check_remote_command_is_isolated_and_git_runner_unchanged
     command = confinement.account_script(ACCOUNT)
     await runner.run_account_check("fixture", command, ssh_alias=ACCOUNT["check_ssh_alias"])
     assert calls[0] == ("ssh", "-o", "BatchMode=yes", ACCOUNT["check_ssh_alias"], command)
-    assert command.startswith("cd / && exec /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/python3 -I -S -B - ")
+    assert command.startswith("cd / && /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/timeout ")
+    assert command.index('proof=$(prove_closure)') < command.index('exec /usr/bin/python3 -I -S -B -')
+    assert '"$2" "$proof" < /dev/null' in command
     assert "sh -l" not in command and "-lc" not in command
-    assert "['find'" not in command and "['/usr/bin/find'" in command
+    assert "['find'" not in command and "/usr/bin/find" in command
     await runner.run("fixture", "git status")
     assert calls[1][-1] == "sh -lc 'git status'"
 

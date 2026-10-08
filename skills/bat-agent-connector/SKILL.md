@@ -120,6 +120,9 @@ last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_cont
    undeclared-account path), and `refused` blocks Claude and Codex. Never treat every non-verified status as blocked.
    Host-account verification requires an operator-declared trusted auditor `check_ssh_alias`, a different `check_uid`
    and `bat_account`; the checker never logs in as BAT. `check_channel_untrusted` means fallback_default, not verified.
+   The pre-interpreter closure gate must pass; an unknown layout or incomplete proof uses default.
+   The verdict assumes no hostile BAT-UID process during the check; ptrace_scope is evidence, not isolation.
+   完整 closure gate 未通過就用 default；查核假設沒有同 UID 惡意程序，不把 ptrace_scope 說成隔離。
    No trusted channel: use Claude default; do not ask to enable acceptEdits or create an auditor/sudo rule yourself.
    沒有可信 auditor 通道時，受限 Claude 用 default；同帳號登入回報的 verified 不算證據，也不自行改 SSH／sudo 設定。
 7. `START_IN_PROGRESS`: another process is starting this session; read it back later, do not retry blindly.
