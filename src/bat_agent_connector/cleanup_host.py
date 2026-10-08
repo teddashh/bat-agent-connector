@@ -1,0 +1,290 @@
+"""Host-side cleanup script, transported through SshGitRunner; no connector installation needed on the host.
+
+Only stdlib and Git. Reads never create locks. Mutations lock the existing repository directory inode, verify
+canonical bindings again, and operate on exact reviewed names. There is no directory discovery or prune fallback.
+"""
+from __future__ import annotations
+
+import base64
+import fcntl
+import hashlib
+import json
+import os
+import stat
+import subprocess
+import sys
+import time
+
+DEADLINE = float("inf")
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def git(repo, *args, optional=False):
+    if time.monotonic() >= DEADLINE:
+        raise ValueError("OBSERVATION_UNAVAILABLE")
+    if os.path.isdir(os.path.join(repo, "repo.git")):
+        repo = os.path.join(repo, "repo.git")
+    env = dict(os.environ)
+    for k in list(env):
+        if k.startswith("GIT_"):
+            del env[k]
+    env.update(GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
+               GIT_TERMINAL_PROMPT="0")
+    p = subprocess.run(  # noqa: S603, S607 - fixed commands, argv only
+        ["git", "--no-optional-locks", "-c", "core.hooksPath=/dev/null", "-c",  # noqa: S607 - host Git executable
+                        "core.fsmonitor=false", "-c", "gc.auto=0", "-C", repo, *args], env=env,
+                       capture_output=True, timeout=max(.01, min(30, DEADLINE - time.monotonic())))  # noqa: S603, S607 - fixed Git commands, argv only
+    if p.returncode and not optional:
+        raise ValueError("GIT_FAILED: " + p.stderr.decode(errors="replace")[-300:])
+    return p.stdout.decode(errors="surrogateescape") if not p.returncode else None
+
+
+def canonical(path, roots):
+    if not isinstance(path, str) or not path.startswith("/") or ".." in path.split("/"):
+        raise ValueError("BINDING_MISMATCH")
+    real = os.path.realpath(path)
+    if real != path or not any(real.startswith(r.rstrip("/") + "/") and os.path.realpath(r) == r for r in roots):
+        raise ValueError("WORKDIR_NOT_MANAGED")
+    return real
+
+
+def file_fact(path, relative):
+    s = os.lstat(path)
+    if stat.S_ISLNK(s.st_mode):
+        return {"path": relative, "type": "link", "digest": digest(os.readlink(path)), "bytes": s.st_size}
+    if not stat.S_ISREG(s.st_mode) or s.st_nlink != 1:
+        raise ValueError("DISCARD_MANIFEST_UNAVAILABLE")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    h = hashlib.sha256()
+    with os.fdopen(fd, "rb") as f:
+        for b in iter(lambda: f.read(131072), b""):
+            h.update(b)
+    return {"path": relative, "type": "file", "digest": h.hexdigest(), "bytes": s.st_size,
+            "mode": stat.S_IMODE(s.st_mode)}
+
+
+def manifest(path, *, skip_replicas=False):
+    # A complete exact file manifest also detects ignored files and same-status content edits.
+    out = []
+    for parent, dirs, files in os.walk(path, followlinks=False):
+        if time.monotonic() >= DEADLINE:
+            raise ValueError("OBSERVATION_UNAVAILABLE")
+        dirs[:] = sorted(d for d in dirs if d != ".git" and not (skip_replicas and parent == path and d == ".batc-inputs"))
+        for d in list(dirs):
+            if os.path.islink(os.path.join(parent, d)):
+                files.append(d)
+                dirs.remove(d)
+        if parent != path and ".git" in files:
+            raise ValueError("RESOURCE_KIND_UNSUPPORTED: nested repository")
+        for name in sorted(files):
+            if parent == path and name == ".git":
+                continue
+            p = os.path.join(parent, name)
+            out.append(file_fact(p, os.path.relpath(p, path)))
+            if len(out) > 10000:
+                raise ValueError("DISCARD_MANIFEST_UNAVAILABLE: too many files")
+    return out
+
+
+def identity(repo, roots):
+    canonical(repo, roots)
+    common = git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+    canonical(common, roots)
+    for parent, dirs, files in os.walk(common, followlinks=False):
+        if any(os.path.islink(os.path.join(parent, n)) for n in dirs + files):
+            raise ValueError("CLONE_CONFIG_TAMPERED")
+    for name in ("objects", "refs", "config"):
+        canonical(os.path.join(common, name), roots)
+    if git(repo, "config", "--get", "batc.managed-clone", optional=True) != "true\n":
+        raise ValueError("CLONE_NOT_OURS")
+    if (os.path.lexists(os.path.join(common, "objects/info/alternates")) or
+            os.path.lexists(os.path.join(common, "info/grafts")) or
+            os.path.lexists(os.path.join(common, "shallow")) or
+            git(repo, "for-each-ref", "refs/replace/")):
+        raise ValueError("CLONE_CONFIG_TAMPERED")
+    cfg = git(repo, "config", "--local", "--list").splitlines()
+    allowed = ("core.repositoryformatversion=", "core.filemode=", "core.bare=", "core.logallrefupdates=",
+               "core.ignorecase=", "core.precomposeunicode=", "core.worktree=", "remote.origin.url=", "remote.origin.fetch=",
+               "branch.", "batc.", "user.name=", "user.email=")
+    if any(not c.startswith(allowed) for c in cfg):
+        raise ValueError("CLONE_CONFIG_TAMPERED")
+    markers = {line.split("=", 1)[0]: line.split("=", 1)[1] for line in cfg if line.startswith("batc.")}
+    return {"common_dir": common, "markers": markers, "config_digest": digest(cfg)}
+
+
+def registrations(repo):
+    out = []
+    for block in git(repo, "worktree", "list", "--porcelain").strip().split("\n\n"):
+        d = dict(line.split(" ", 1) if " " in line else (line, True) for line in block.splitlines())
+        if d.get("worktree"):
+            out.append(d)
+    return out
+
+
+def observe(req):
+    repo, roots = req["repository"], req["roots"]
+    result = {"repository": repo, "exists": os.path.isdir(repo), "worktrees": {}, "refs": {}, "temporaries": {}}
+    if not result["exists"]:
+        return result
+    result.update(identity(repo, roots))
+    regs = registrations(repo)
+    result["registrations"] = regs
+    result["refs"] = dict(line.split(" ", 1) for line in
+                          git(repo, "for-each-ref", "--format=%(refname) %(objectname)").splitlines())
+    requested = set(req.get("worktrees", []))
+    if not req.get("paths_only"):
+        requested |= {r["worktree"] for r in regs}
+    for wt in sorted(requested):
+        d = {"path": wt, "exists": os.path.isdir(wt), "registration": next(
+            (r for r in regs if r["worktree"] == wt), None)}
+        result["worktrees"][wt] = d
+        if not d["exists"]:
+            continue
+        try:
+            canonical(wt, roots)
+            common = git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+            if common != result["common_dir"]:
+                raise ValueError("BINDING_MISMATCH")
+            d["head"] = git(wt, "rev-parse", "HEAD").strip()
+            d["branch"] = git(wt, "symbolic-ref", "--short", "HEAD", optional=True)
+            d["branch"] = (d["branch"] or "").strip()
+            d["status"] = git(wt, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                              "--ignored=matching")
+            d["diff"] = digest([git(wt, "diff", "--binary"), git(wt, "diff", "--cached", "--binary")])
+            replicas = wt in req.get("replica_paths", []) and not git(wt, "ls-files", ".batc-inputs/")
+            if replicas:
+                d["status"] = "\0".join(x for x in d["status"].split("\0") if not x.startswith("!! .batc-inputs/"))
+            d["manifest"] = manifest(wt, skip_replicas=replicas)
+            d["manifest_digest"] = digest(d["manifest"])
+            d["extras"] = sorted(set(git(wt, "ls-files", "--others", "--exclude-standard", "-z").split("\0") +
+                                     git(wt, "ls-files", "--others", "--ignored", "--exclude-standard", "-z").split("\0")) - {""})
+            if replicas:
+                d["extras"] = [x for x in d["extras"] if not x.startswith(".batc-inputs/")]
+            gd = git(wt, "rev-parse", "--absolute-git-dir").strip()
+            canonical(gd, roots)
+            d["complex_state"] = any(os.path.lexists(os.path.join(gd, x)) for x in
+                                     ("MERGE_HEAD", "CHERRY_PICK_HEAD", "rebase-merge", "rebase-apply", "BISECT_LOG"))
+            base = req.get("bases", {}).get(wt)
+            d["results"] = (git(wt, "rev-list", base + ".." + d["head"], optional=True) if base else None)
+            d["results"] = d["results"].splitlines() if d["results"] is not None else None
+        except (ValueError, OSError, subprocess.SubprocessError) as e:
+            d["error"] = str(e).split(":", 1)[0]
+    result["branches"] = {}
+    for br, base in req.get("branches", {}).items():
+        sha = result["refs"].get("refs/heads/" + br)
+        commits = git(repo, "rev-list", base + ".." + sha, optional=True) if sha and base else None
+        result["branches"][br] = {"head": sha, "results": commits.splitlines() if commits is not None else None}
+    for temp in req.get("temporaries", []):
+        try:
+            canonical(temp, roots)
+            result["temporaries"][temp] = {"exists": os.path.isdir(temp), "manifest": manifest(temp),
+                "marker": git(temp, "config", "--get", "batc.managed-clone", optional=True)}
+        except (ValueError, OSError, subprocess.SubprocessError) as e:
+            result["temporaries"][temp] = {"error": str(e).split(":", 1)[0]}
+    return result
+
+
+def retained(repo, ref, sha):
+    return (git(repo, "rev-parse", "--verify", ref, optional=True) == sha + "\n" and
+            git(repo, "cat-file", "-e", sha + "^{commit}", optional=True) is not None)
+
+
+def exact_unlink(base, names, facts):
+    by_path = {f["path"]: f for f in facts}
+    # Resolve each parent with dirfds and O_NOFOLLOW. Do not follow a newly inserted directory link.
+    for name in names:
+        parts = name.split("/")
+        if any(p in {"", ".", ".."} for p in parts):
+            raise ValueError("BINDING_MISMATCH")
+        fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for part in parts[:-1]:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(fd)
+                fd = child
+            current = file_fact(os.path.join(base, name), name)
+            if current != by_path.get(name):
+                raise ValueError("PREVIEW_STALE")
+            os.unlink(parts[-1], dir_fd=fd)
+        finally:
+            os.close(fd)
+
+
+def mutate(req):
+    repo = req["repository"]
+    fd = os.open(repo, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        observed = observe(req)
+        expected = req["identity"]
+        if any(observed.get(k) != expected.get(k) for k in ("common_dir", "markers", "config_digest")):
+            raise ValueError("PREVIEW_STALE")
+        phase, ref, sha = req["phase"], req.get("retained_ref"), req.get("sha")
+        wt = req.get("path")
+        before = observed["worktrees"].get(wt) if wt else None
+        if phase in {"preserve", "discard", "remove.worktree"}:
+            if before != req["before"]:
+                raise ValueError("PREVIEW_STALE")
+        if phase == "preserve":
+            if not ref.startswith("refs/batc/retained/"):
+                raise ValueError("BINDING_MISMATCH")
+            current = observed["refs"].get(ref)
+            if current and current != sha:
+                raise ValueError("RETAINED_REF_MISMATCH")
+            if not current:
+                git(repo, "update-ref", ref, sha, "0" * 40)
+            if not retained(repo, ref, sha):
+                raise ValueError("RETAINED_CONTENT_MISSING")
+            return {"ref": ref, "sha": sha, "tree": git(repo, "rev-parse", sha + "^{tree}").strip()}
+        if not retained(repo, ref, sha):
+            raise ValueError("RETAINED_CONTENT_MISSING")
+        if phase == "discard":
+            if before["complex_state"] or any(f["type"] != "file" for f in before["manifest"]):
+                raise ValueError("DISCARD_MANIFEST_UNAVAILABLE")
+            exact_unlink(wt, before["extras"], before["manifest"])
+            git(wt, "restore", "--source=" + sha, "--staged", "--worktree", "--", ".")
+            return {"discarded": True}
+        if phase == "remove.worktree":
+            if before["status"] or before["complex_state"] or before["head"] != sha:
+                raise ValueError("PREVIEW_STALE")
+            try:
+                git(repo, "worktree", "remove", wt)
+            except ValueError as e:
+                raise ValueError("WORKTREE_REMOVE_REFUSED") from e
+            return {"removed": True}
+        if phase == "remove.branch":
+            branch = req["branch"]
+            if not branch.startswith(("batc/cp-", "batc/fix-")) or not req["delivered"]:
+                raise ValueError("BINDING_MISMATCH")
+            full = "refs/heads/" + branch
+            if any(r.get("branch") == full for r in observed["registrations"]):
+                raise ValueError("REF_CHANGED")
+            if observed["refs"].get(full) != sha:
+                raise ValueError("REF_CHANGED")
+            git(repo, "update-ref", "-d", full, sha)
+            return {"deleted": True, "ref": full, "sha": sha}
+        raise ValueError("RESOURCE_KIND_UNSUPPORTED")
+    finally:
+        os.close(fd)
+
+
+def main():
+    global DEADLINE
+    req = json.loads(base64.b64decode(sys.argv[1]))
+    DEADLINE = time.monotonic() + min(60, req.get("deadline_s", 20))
+    try:
+        if req.get("phase") == "verify.retained":
+            identity(req["repository"], req["roots"])
+            out = [{**r, "available": retained(req["repository"], r["ref"], r["commit_sha"])} for r in req["retained"]]
+        else:
+            out = mutate(req) if req.get("phase") else observe(req)
+        print(json.dumps({"result": out}, ensure_ascii=True))
+    except (ValueError, OSError, subprocess.SubprocessError) as e:
+        print(json.dumps({"error": str(e).split(":", 1)[0]}))
+
+
+if __name__ == "__main__":
+    main()

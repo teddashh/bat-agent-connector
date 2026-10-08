@@ -41,8 +41,6 @@ from .orchestrate import (
     diff_stats,
     permission_options,
     registry_permission_fields,
-    worktree_merge,
-    worktree_remove,
 )
 from .orchestrate import (
     _guard as _orch_guard,
@@ -1261,7 +1259,7 @@ async def _evaluate(
     )
 
 
-async def _stop(fleet: Fleet, host: str, sid: str, audit: Audit) -> dict:
+async def _stop(fleet: Fleet, host: str, sid: str, audit: Audit, *, cleanup: bool = False) -> dict:
     c = fleet.client(host)
     t, _ = await _resolve_session(c, sid)
     try:
@@ -1277,8 +1275,10 @@ async def _stop(fleet: Fleet, host: str, sid: str, audit: Audit) -> dict:
     audit.check_rate(host, sid + "#stop")
     audit.record(**base, channel="claude:stop-session", phase="attempt")
     try:
-        r = await c.invoke("claude:stop-session", {"sessionId": sid}, grant=grant)
+        r = await c.invoke("claude:stop-session", {"sessionId": sid}, grant=grant, retry_on_disconnect=not cleanup)
     except BatError as e:
+        if cleanup:
+            raise
         audit.record(**base, channel="claude:stop-session", phase="result", ok=False, error=_err(e))
         return {"stopped": False, "error": _err(e)}
     audit.record(**base, channel="claude:stop-session", phase="result", ok=True)
@@ -1294,13 +1294,11 @@ async def session_cleanup(
     min_idle_s: float = 120,
 ) -> dict:
     """Evaluate orchestrated sessions (and Claude sessions superseded by failover) and clean up."""
-    hc = fleet.config.host(host)
     if not fleet.orchestrate_enabled(host):
         raise WriteRefused(f"orchestrate tier is disabled for host {host!r}")
     if not dry_run:
-        _orch_guard(fleet, host, confirm)
-        if not hc.auto_cleanup:
-            raise WriteRefused(f"host {host!r}: auto_cleanup is not enabled in its config (dry_run works)")
+        from .operations import OperationError
+        raise OperationError("LEGACY_CLEANUP_DISABLED", "use batc resource-cleanup preview/apply", 409)
     c = fleet.client(host)
     ws = await _workspace(c)
     jev = Jev(fleet.config.jev)
@@ -1362,62 +1360,6 @@ async def session_cleanup(
             dry_run=dry_run,
         )
         rows.append(r)
-    if not dry_run:
-        for r in rows:
-            sid = r["session_id"]
-            acts: list[str] = []
-            d = r.get("decision")
-            try:
-                if d in ("MERGE_AND_CLEAN", "CLEAN_ONLY") and r["gates"]["verified_candidate"]:
-                    cwd = r.get("candidate_cwd")
-                    current_head = await _candidate_head(c, cwd)
-                    current_dirty = await _git_dirty(c, cwd)
-                    if (current_head != r.get("candidate_commit") or current_dirty != [] or
-                            not verification.matches(verification.get(host, sid), current_head)):
-                        r["decision"] = "ESCALATE"
-                        r["reasons"].append("candidate changed after evaluation; verification invalid")
-                        audit.record(actor=fleet.actor, tool="session_cleanup", host=host,
-                                     session_id=sid + "#cleanup", phase="candidate_changed",
-                                     decision="ESCALATE", expected_commit=r.get("candidate_commit"),
-                                     current_commit=current_head)
-                        continue
-                if d == "MERGE_AND_CLEAN":
-                    r["gates"]["approved_for_merge"] = True
-                    m = await worktree_merge(fleet, host, sid, confirm=True)
-                    if not m.get("merged_now"):
-                        r["decision"] = "ESCALATE"
-                        r["reasons"].append(f"merge refused: {m.get('reason')}")
-                        continue
-                    acts.append(f"merged {r.get('branch')} -> {m.get('source_branch')}")
-                if r.get("decision") in ("MERGE_AND_CLEAN", "CLEAN_ONLY") and r.get("remove_worktree"):
-                    drop = bool(r.get("delete_branch"))
-                    x = await worktree_remove(fleet, host, sid, confirm=True, delete_branch=drop)
-                    if not x.get("removed"):
-                        r["reasons"].append(f"remove refused: {x.get('reason')}")
-                        r["stop"] = False
-                    else:
-                        acts.append(f"worktree removed (branch {r.get('branch')} {'deleted' if drop else 'kept'})")
-                if r.get("decision") in ("MERGE_AND_CLEAN", "CLEAN_ONLY") and r.get("stop"):
-                    s = await _stop(fleet, host, sid, audit)
-                    acts.append(
-                        "agent stopped"
-                        if s.get("stopped")
-                        else f"not stopped: {s.get('reason') or s.get('error')}"
-                    )
-                if r.get("decision") in ("MERGE_AND_CLEAN", "CLEAN_ONLY") and registry.get(host, sid):
-                    registry.update(host, sid, status="merged" if d == "MERGE_AND_CLEAN" else "cleaned")
-            except BatError as ex:
-                r["reasons"].append(f"action error: {_err(ex)}")
-            r["actions"] = acts
-            audit.record(
-                actor=fleet.actor,
-                tool="session_cleanup",
-                host=host,
-                session_id=sid + "#cleanup",
-                phase="done",
-                decision=r.get("decision"),
-                actions=acts,
-            )
     esc = [r for r in rows if r.get("decision") == "ESCALATE"]
     summary = None
     if esc:
@@ -1650,8 +1592,9 @@ async def fanout_from_plan(
     e = registry.get(host, session_id)
     if e and e.get("role") == "planner":
         try:
-            d = await session_cleanup(fleet, host, confirm=True, dry_run=False, session_id=session_id, min_idle_s=0)
-            out["planner_cleanup"] = [x.get("actions") or x.get("decision") for x in d.get("decisions", [])]
+            stopped = await _stop(fleet, host, session_id, Audit(fleet.config.safety))
+            out["planner_cleanup"] = {**stopped, "worktree_kept": True,
+                                      "next_action": "batc resource-cleanup"}
         except BatError as ex:
-            out["planner_cleanup"] = f"not cleaned: {_err(ex)}"
+            out["planner_cleanup"] = {"stopped": False, "reason": _err(ex), "worktree_kept": True}
     return out

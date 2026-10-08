@@ -61,9 +61,12 @@ consumer。所有 consumer 從 authoritative tasks、commands、operations、pre
 不透明附件參照永遠保留，不能當作 remote path。
 
 原 session ID（host/session_id）、task／command／work item／checkpoint／operation ID 不改。
-Cleanup projection ID 為 `cr_<32 hex>`：host、kind、原 creation intent ID、resource slot 的 canonical
-JSON SHA-256 前 32 hex。Shared worktree 追到原 creation slot，reviewer／failover／warm reuse 只是 aliases。
-舊 registry reservation 用 host/session_id/created_at 作 intent ID。Clone／area 追首次可信 intent。
+Worktree 使用共用 `resource_ids.worktree_id`：canonical JSON `["worktree",host,intent_type,intent_id,slot]`
+的 SHA-256 前 32 hex 加 `wt_`。Checkpoint 為 checkpoint.continue／operation_id／worktree；repair 為
+integration.handoff／operation_id／repair；task external 為 task／task_id／external_worktree；BAT-made
+為 registry／session_id@created_at（原 registry 值）／worktree。Warm reuse、reviewer、failover、後續 reuse
+追第一個 creation slot，沿用 ID。Observation 使用相同函式，rebase 時共用。
+其他 projection ID 為 `cr_<32 hex>`：host、kind、creation intent、slot 的 canonical hash。
 同 canonical path／common dir 且 creation 相同才去重；證據矛盾列 BINDING_MISMATCH。
 重建同路徑是新 generation；原 tombstone 不改回 active。Retained ID 為 `ret_<32 hex>`。
 
@@ -117,6 +120,11 @@ command／receipt ID 與 evidence；不能只回第一個。Choices 只排除表
 discard_uncommitted 是唯一摧毀內容的 choice；overridden_reasons 顯示 manifest、actor、不可復原部分。
 release_undelivered 不是 discard，只有保留 commit／branch 後釋放 runtime／worktree；正常 agent 可用 cleanup
 scope 做明確 per-item release。兩者不能越過 manual／unknown／writer／command／task／其他 content consumer。
+
+Checkpoint worktree 的 `.batc-inputs/` 是 artifacts package 的 verified attachment replicas；common
+info/exclude 排除這個目錄。它不算 uncommitted user content，不要求 discard scope，也不額外 pin。
+非 force worktree remove 同時移除 replicas；artifact store 保留 originals，tombstone 註記去向。
+Tracked 或非 checkpoint 的同名內容仍按一般 manifest／保留規則判斷。
 
 ### Receipt coverage（E02）
 

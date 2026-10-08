@@ -16,7 +16,7 @@ import time
 from importlib import resources
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import __version__, api_auth, checkpoints, integration, resource_policy, service, work_items
+from . import __version__, api_auth, checkpoints, cleanup, integration, resource_policy, service, work_items
 from .errors import BatError, ResourceReadOnly
 from .operations import STATES, OperationError
 
@@ -81,10 +81,15 @@ def parse_wait(value) -> float:
 class ApiV1:
     def __init__(self, daemon, *, allowed_origins: tuple[str, ...] = ()) -> None:
         self.daemon = daemon
+        cleanup.install(daemon.ops, daemon._admin_token)
         self.allowed_origins = allowed_origins
         self._streams = 0
         self._streams_by_actor: dict[str, int] = {}
         self.routes = [
+            ("POST", r"/api/v1/cleanup-previews", self.cleanup_preview, "observe"),
+            ("GET", r"/api/v1/cleanup-retained", self.cleanup_retained, "observe"),
+            ("GET", r"/api/v1/cleanup-tombstones", self.cleanup_tombstones, "observe"),
+            ("GET", r"/api/v1/cleanup-tombstones/(?P<rid>(?:cr|wt)_[0-9a-f]{32})", self.cleanup_tombstone, "observe"),
             ("GET", r"/api/v1/version", self.version, None),
             ("GET", r"/api/v1/capabilities", self.capabilities, "observe"),
             ("GET", r"/api/v1/hosts", self.hosts, "observe"),
@@ -294,6 +299,8 @@ class ApiV1:
         return 200, {"actor": principal.actor, "scopes": sorted(principal.scopes), "api_version": API_VERSION,
                      "contract_version": CONTRACT_VERSION, "connector": __version__, "hosts": hosts,
                      "actions": actions, "operation_statuses": list(STATES),
+                     "cleanup": {"preview_ttl_s": cleanup.TTL_S, "max_items": cleanup.MAX_ITEMS, "restore": False,
+                                 "scopes": ["cleanup", "cleanup_discard"], "retention": vars(fleet.config.cleanup)},
                      "features": {"inventory": True, "events_stream": True, "operations": True, "work_items": True,
                                   "github": self.daemon.ops.context.get("github") is not None,
                                   "deploy": bool(gh_cfg.recipes),
@@ -332,9 +339,10 @@ class ApiV1:
         db = self.daemon.journal.db
         out = {"session": row, "started_from": checkpoints.started_from(db, host, sid),
                "work_items": work_items.work_items_for(db, "session", f"{host}/{sid}")}
+        out["cleanup"] = cleanup.lookup(db, host + "/" + sid, host)
         if self._bool(query, "live"):
             out["policy"] = await resource_policy.session_policy(self.daemon.fleet, host, sid)
-        elif row is None:
+        elif row is None and not out["cleanup"]:
             raise ApiError(404, "NOT_FOUND", "session is not in the inventory (pass live=true to ask the host)")
         return 200, out
 
@@ -405,7 +413,9 @@ class ApiV1:
                                                   self._int(query, "limit", 20))
 
     async def integration(self, op, **_):
-        return 200, integration.integration_get(self.daemon.ops, op)
+        out = integration.integration_get(self.daemon.ops, op)
+        out["cleanup"] = cleanup.lookup(self.daemon.journal.db, op)
+        return 200, out
 
     async def checkpoints(self, query, **_):
         return 200, checkpoints.list_checkpoints(self.daemon.journal.db, host=self._q(query, "host"),
@@ -414,7 +424,7 @@ class ApiV1:
 
     async def checkpoint(self, query, cp, **_):
         record = checkpoints.get(self.daemon.journal.db, cp)
-        out = {"checkpoint": record}
+        out = {"checkpoint": record, "cleanup": cleanup.lookup(self.daemon.journal.db, cp)}
         if self._bool(query, "live"):  # has the source moved on since? (the checkpoint itself never changes)
             out["source"] = await checkpoints.source_head(self.daemon.ops, record)
         return 200, out
@@ -438,7 +448,29 @@ class ApiV1:
             limit=self._int(query, "limit", 50), cursor=self._q(query, "cursor"))
 
     async def work_item(self, wi, **_):
-        return 200, work_items.work_item_get(self.daemon.journal.db, wi)
+        out = work_items.work_item_get(self.daemon.journal.db, wi)
+        out["cleanup"] = cleanup.lookup(self.daemon.journal.db, wi)
+        return 200, out
+
+    async def cleanup_preview(self, principal, body, **_):
+        if set(body) - {"target", "choices"}:
+            raise ApiError(422, "INVALID_PARAMS", "preview accepts target and choices")
+        return 200, {"preview": await cleanup.preview(self.daemon.ops, principal, body.get("target"), body.get("choices"))}
+
+    async def cleanup_retained(self, query, **_):
+        return 200, await cleanup.retained(self.daemon.ops, **{k: self._q(query, k) for k in
+            ("host", "resource_id", "query", "cursor")}, limit=self._int(query, "limit", 50))
+
+    async def cleanup_tombstones(self, query, **_):
+        return 200, cleanup.tombstones(self.daemon.ops, **{k: self._q(query, k) for k in
+            ("host", "kind", "query", "original_id", "work_item_id", "cursor")}, limit=self._int(query, "limit", 50))
+
+    async def cleanup_tombstone(self, rid, **_):
+        row = self.daemon.journal.db.execute("SELECT document FROM resource_tombstones WHERE resource_id=?", (rid,)).fetchone()
+        if not row:
+            raise ApiError(404, "NOT_FOUND", "tombstone not found")
+        doc = json.loads(row[0])
+        return 200, {"tombstone": doc, "receipts": cleanup.receipts(self.daemon.ops, doc["operation_id"])}
 
     async def task(self, task, **_):
         return 200, {"task": await self.daemon.call("work_status", {"task_id": task})}

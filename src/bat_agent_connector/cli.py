@@ -15,6 +15,7 @@ from .config import DEFAULT_BAT_PROFILES_DIR, default_config_path, load_config
 from .errors import BatError
 from .fleet import Fleet
 from .importer import read_bat_profiles, render_hosts_toml
+from .operations import OperationError
 from .redact import redact
 
 
@@ -610,6 +611,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--candidate-commit")
     p.add_argument("--tree-hash")
     p.add_argument("--next-prompt-file", help="explicit new prompt file; never reuses uncertain text")
+    p = sp.add_parser("resource-cleanup", help="preview and apply reviewed resource cleanup; retained content and permanent history")
+    csp = p.add_subparsers(dest="cleanup_cmd", required=True)
+    c = csp.add_parser("preview", help="pure read; signed plan expires after 15 minutes")
+    targets = c.add_mutually_exclusive_group(required=True)
+    for flag in ("item", "checkpoint", "integration", "host"):
+        targets.add_argument("--" + flag)
+    c.add_argument("--include-children", action="store_true")
+    c.add_argument("--discard-uncommitted", action="append", default=[], metavar="RESOURCE_ID",
+                   help="destroys uncommitted content; needs cleanup_discard (person-controlled)")
+    c.add_argument("--release-undelivered", action="append", default=[], metavar="RESOURCE_ID",
+                   help="keeps commits and branch; needs cleanup, result remains undelivered")
+    c.add_argument("--json", action="store_true")
+    c = csp.add_parser("apply", help="execute exactly a reviewed preview through cleanup.apply")
+    c.add_argument("--preview-file", help="JSON output saved from preview")
+    c.add_argument("--preview-token")
+    c.add_argument("--fingerprint")
+    c.add_argument("--key", required=True, help="keep this key after a lost reply")
+    c.add_argument("--confirm", action="store_true")
+    c.add_argument("--json", action="store_true")
+    for name in ("retained", "history"):
+        c = csp.add_parser(name)
+        c.add_argument("--host")
+        c.add_argument("--query")
+        c.add_argument("--original-id")
+        c.add_argument("--resource-id")
+        c.add_argument("--limit", type=int, default=50)
+        c.add_argument("--cursor")
+        c.add_argument("--json", action="store_true")
     p = sp.add_parser("api-token", help="manage /api/v1 tokens on the local task daemon (admin)")
     tsp = p.add_subparsers(dest="api_token_cmd", required=True)
     t = tsp.add_parser("issue", help="issue a token for an actor (printed once)")
@@ -763,6 +792,44 @@ def cmd_checkpoint(args) -> int:
         out = request("checkpoints_list", host=args.host, session_id=args.session, limit=args.limit, entry="cli")
     else:
         out = request("checkpoint_get", checkpoint_id=args.checkpoint_id, entry="cli", timeout=40.0)
+    _print(out, True)
+    return 0
+
+
+def cmd_resource_cleanup(args) -> int:
+    from . import cleanup
+    if args.cleanup_cmd == "preview":
+        kind, key, value = next((kind, key, getattr(args, flag)) for flag, kind, key in
+            (("item", "work_item", "work_item_id"), ("checkpoint", "checkpoint", "checkpoint_id"),
+             ("integration", "integration", "operation_id"), ("host", "host", "host")) if getattr(args, flag))
+        target = {"kind": kind, key: value}
+        if args.include_children:
+            target["include_children"] = True
+        out = cleanup.http_request("/api/v1/cleanup-previews", body={"target": target, "choices":
+            {"discard_uncommitted": args.discard_uncommitted, "release_undelivered": args.release_undelivered}})
+    elif args.cleanup_cmd == "apply":
+        if not args.confirm:
+            raise ValueError("resource-cleanup apply requires --confirm")
+        if args.preview_file:
+            doc = json.loads(Path(args.preview_file).read_text())
+            doc = doc.get("preview", doc)
+        else:
+            # The token carries its preview identity; the server verifies it, the adapter does not grant authority.
+            import base64
+            raw = (args.preview_token or "").split(".")
+            if len(raw) != 3 or not args.fingerprint:
+                raise ValueError("apply needs --preview-file or --preview-token and --fingerprint")
+            payload = json.loads(base64.urlsafe_b64decode(raw[1] + "=" * (-len(raw[1]) % 4)))
+            doc = {"preview_id": "clpv_" + cleanup._hash(payload)[:32], "preview_token": args.preview_token,
+                   "fingerprint": args.fingerprint}
+        out = cleanup.http_request("/api/v1/operations?wait=3", body=cleanup.apply_request(doc, args.key), key=args.key)
+    else:
+        filters = {"host": args.host, "query": args.query, "limit": args.limit, "cursor": args.cursor}
+        if args.cleanup_cmd == "history":
+            filters["original_id"] = args.original_id
+        else:
+            filters["resource_id"] = args.resource_id
+        out = cleanup.http_request(cleanup.read_path("tombstones" if args.cleanup_cmd == "history" else "retained", **filters))
     _print(out, True)
     return 0
 
@@ -951,6 +1018,8 @@ def main(argv: list[str] | None = None) -> int:
             out = calls[args.api_token_cmd]()
             _print(out, True)
             return 0
+        if args.cmd == "resource-cleanup":
+            return cmd_resource_cleanup(args)
         if args.cmd == "checkpoint":
             return cmd_checkpoint(args)
         if args.cmd == "integrate":
@@ -982,7 +1051,7 @@ def main(argv: list[str] | None = None) -> int:
         obj, render = asyncio.run(_run(args))
         _print(obj, args.json, render)
         return 0
-    except (BatError, ValueError) as e:
+    except (BatError, ValueError, OperationError) as e:
         print(f"error: {redact(e)}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

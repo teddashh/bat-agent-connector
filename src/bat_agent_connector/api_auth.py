@@ -24,7 +24,7 @@ from dataclasses import dataclass
 #   done cannot also sign off its own claim
 # merge / deploy: GitHub delivery actions
 # integrate: push composed results to a PR's head branch (never merges; a merge token cannot push)
-SCOPES = ("observe", "operate", "start", "manage", "approve", "merge", "deploy", "integrate")
+SCOPES = ("observe", "operate", "start", "manage", "approve", "merge", "deploy", "integrate", "cleanup", "cleanup_discard")
 ADMIN_ACTOR = "local-admin"
 _ACTOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 
