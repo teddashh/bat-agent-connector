@@ -166,6 +166,37 @@ async def test_a05_prefix_resolution_is_fixed_and_replay_precedes_lookup(daemon,
     await daemon.fleet.close()
 
 
+@pytest.mark.parametrize("replay", [False, True])
+async def test_prefix_interrupt_history_uses_bound_session_even_before_bat_effect(daemon, mock, monkeypatch, replay):
+    from bat_agent_connector.observation import Observation
+
+    adopt(SID)
+
+    async def refused(*args, **kwargs):
+        raise WriteRefused("FIXTURE_REFUSED", "refused before a BAT effect")
+
+    monkeypatch.setattr(service, "session_interrupt", refused)
+    out = await legacy(daemon, session_id="sess-claude", idempotency_key="prefix-history")
+    assert out["operation_status"] == "failed"
+    op = daemon.ops.get(out["operation_id"])
+    assert op["target"]["session_id"] == "sess-claude"
+    if replay:
+        seqs = [r[0] for r in daemon.journal.db.execute("SELECT seq FROM api_events ORDER BY seq")]
+        with daemon.journal.tx():
+            daemon.journal.db.execute("DELETE FROM api_event_context")
+            daemon.journal.db.execute("DELETE FROM api_event_resources")
+            for seq in seqs:
+                daemon.journal._project_event(seq, None, legacy=True)
+    rid = f"h1/{SID}"
+    events = daemon.journal.api_events(related_resource_type="session", related_resource_id=rid)["events"]
+    assert {"operation.accepted", "operation.running", "operation.failed"} <= {e["kind"] for e in events}
+    assert all(e["context"]["session_resource_ids"] == [rid] for e in events)
+    assert not daemon.journal.api_events(related_resource_type="session", related_resource_id="h1/sess-claude")["events"]
+    assert {e["seq"] for e in Observation(daemon.journal).history("session", rid)["events"]} == {e["seq"] for e in events}
+    assert not api.write_frames(mock)
+    await daemon.fleet.close()
+
+
 async def test_a05_legacy_keys_remain_actor_scoped(daemon, mock):
     adopt(SID)
     first = await legacy(daemon, idempotency_key="shared")
