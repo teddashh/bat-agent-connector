@@ -121,9 +121,19 @@ integrate = { hosts = ["workstation"], remote_url = "git@github.com:owner/name.g
 - CLI：`batc integrate candidates|preview|apply|handoff|show`；apply 只需要 `ipv_…`，其餘從預覽讀出；Resume 用 `batc op <op_id> --resume`。
 - Dashboard：成果與 GitHub 頁的 PR 卡片有「更新 PR 成果」區塊，和「合併 PR」分開。選來源、排順序後自動預覽；預覽過期或 PR head 變了按鈕就停用。完成後顯示新 head 並提醒本機資料夾不會自動更新。Operation 頁有各來源紀錄。
 
+## 整理與永久歷史（Part A）
+
+見 [cleanup.md](cleanup.md)：純讀 preview、signed token、逐項 operations／retained refs／tombstones，原 ID
+永久可查。Dashboard #/cleanup 與 work item 的整理入口，兩語預覽／逐項回執／歷史搜尋／實際 retained list；
+Part A 無 restore 按鈕。Task-owned 資源由 Task Service 整理，本輪列 TASK_OWNED；原 terminal cleanup 不變。
+Restore、reviewed task leftovers／coordinator 准入與 TaskDaemon 歷史投影在 Part B。Clone／area 與 pins 留存。
+## Repair 的執行限制（A10）
+
+`integration.handoff` 共用 checkpoint 的 confined start：Claude 未查核 account 時用 default；BAT acceptEdits 沒有 path check，只有查核 account 才使用它。Codex workspace-write/on-request 最多 options_confirmed。Operation refs／結果保存 snapshot 與 current verification，表單依 host／agent 提示限制；force／bulk／persistent raises 不放寬 repair。沒有改 composition／PR／deploy policy。A10 尚待 W12 live run，見 [confinement](confinement.md)。
+
 ## 尚未涵蓋
 
 - 整合後在 managed worktree 跑測試（`integrate.verify`）、Task Service 的執行結果作為來源、pick 模式的衝突交給 agent。
 - 遠端前進時自動重新整合；第一版一律停在 `REMOTE_MOVED`，請重新預覽。
 - 衝突時只推送前面完成的部分、建立新 PR、fork PR、stacked PR、Git LFS、跨主機來源、未提交內容。
-- 整理整合區（§23）。
+- 整合area全體退休／refs刪除／GC不在cleanup A或B；area保留作retained載體。Reviewed task資源與restore在Part B。

@@ -111,7 +111,14 @@ def checkpoint(journal, principal, cursor=None):
             "checkpoint": {"cursor": cursor, "token": "s1." + _b64(payload) + "." + _b64(signature)}}
 
 
+def require_unfiltered(token, **filters):
+    """A shared checkpoint may acknowledge only the complete public event feed."""
+    if token is not None and any(value is not None for value in filters.values()):
+        raise ValueError("checkpoint replay requires the unfiltered event feed; omit event filters")
+
+
 def event_page(journal, principal, after=0, limit=100, *, token=None, **filters):
+    require_unfiltered(token, **filters)
     # These reads share one SQLite snapshot with validation, including other-process writers/pruning.
     with journal.tx():
         check(journal, principal, after, token)

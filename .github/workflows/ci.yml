@@ -26,6 +26,8 @@ jobs:
         run: uv sync --locked --extra dev
       - name: Lint
         run: uv run ruff check .
+      - name: Generated agent skills
+        run: uv run python scripts/generate_agent_skills.py --check
       - name: Tests (mock server only; live tests are skipped without BATC_LIVE)
         run: uv run pytest -q
 

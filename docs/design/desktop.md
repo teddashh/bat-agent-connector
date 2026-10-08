@@ -59,6 +59,28 @@ Session text drafts, original operation keys/IDs and checkpoint state stay in br
 
 Event acknowledgment now waits for asynchronous and debounced view refreshes, including all sibling reads on a failed batch. A locally displayed refresh error retains the original cursor/checkpoint pair and pauses mutations; polling retries the same page. Open edits defer renders and acknowledgment until they can refresh without discarding input. A pending refresh alone does not disable connected, version-checked form saves; an actual failed read or continuity reset does. Delayed refreshes are bound to the original account and mounted view. Mounted session events now refresh the observation header, pending questions/permissions and messages without replacing the composer or checkpoint forms. Pending answers are stored per identity and pending ID. Before answering, the client rereads the persisted pending observation and refuses a changed/missing ID; central still validates the live BAT frame because inventory reads are not write authority. Work-item pages refresh for linked operation/session/execution/checkpoint and parent-project events. Parent archive restrictions update immediately while an open edit remains intact; full rerender and acknowledgment wait until editing ends. Relations/history presentation, discovery coverage and complete M1 acceptance remain pending.
 
+## Shared delivery controls
+
+Delivery's environment cards, paginated history, rollback/retry confirmations and English/Traditional Chinese
+labels now live in the same canonical `desktop/src` files. Browser assets are generated; the delivery backend
+retains operation ownership. Deployment and deployment-environment journal events invalidate these cards through
+the shared polling reader. Open confirmations keep their fixed identity and preview; a stale generation requires
+a refreshed preview and another explicit click. Stable identity-scoped intent keys survive a lost reply and reload.
+These cards have the same documented asynchronous view-refresh limitations as other views.
+
+The native bridge explicitly allows the delivery preview, record, environment and history GET routes and `recipe`
+query parameter. Deployment writes still go through `/operations` with the same envelope and idempotency key.
+The restricted native GitHub opener is unchanged; arbitrary provider/enterprise origins are not supported by it.
+
+`npm run test:delivery` runs the real daemon's delivery fixture with fake GitHub/BAT/runtime providers and serves
+this worktree's generated assets. It requires the delivery backend and its dev dependencies; while the changes
+are on separate branches, set `BATC_DELIVERY_ROOT` to that backend worktree. It covers both languages at
+390/768/1440px, cursor paging, readiness/scope refusals, fixed confirmations during polling, stale previews,
+double clicks, deploy-only retries, provider URL filtering, and lost-reply keys across reopening/reloading.
+Only a legacy backend's expected `/bootstrap` 404 is excluded from console-error checks; this does not claim
+checkpoint support for that backend. The CI UI fixtures separately exercise paired checkpoint polling through
+browser HTTP and mocked native IPC. Neither fixture is a live deployment or Windows WebView acceptance test.
+
 ## Packaging and lifecycle
 
 ```sh

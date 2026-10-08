@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import hashlib
 import json
 import posixpath
@@ -22,8 +23,9 @@ import re
 import shlex
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 
-from . import orchestrate, registry, resource_policy, service
+from . import artifacts, confinement, orchestrate, registry, resource_policy, service
 from .api_auth import Principal
 from .errors import BatError
 from .operations import (
@@ -47,6 +49,7 @@ MAX_INSTRUCTIONS = 12_000
 GIT_TIMEOUT_S = 600.0
 _SESSION_NS = uuid.UUID("6f1c9a52-3d4e-4b8a-9c1d-2e7f5a8b0c3d")
 _clone_locks: dict[tuple[str, str], asyncio.Lock] = {}
+_LOCKED_CHECK = contextvars.ContextVar("git_locked_check", default=None)
 
 
 class GitCommandFailed(StepFailed):
@@ -69,8 +72,20 @@ class SshGitRunner:
             raise GitCommandFailed(f"no SSH alias is configured for host {host}")
         return await _run(("ssh", "-o", "BatchMode=yes", alias, "sh -lc " + shlex.quote(script)), timeout_s)
 
+    async def run_account_check(self, host: str, command: str, timeout_s: float | None = None,
+                                *, ssh_alias: str) -> str:
+        """Use the explicitly trusted auditor alias; never fall back to the BAT login."""
+        return await _run(("ssh", "-o", "BatchMode=yes", ssh_alias, command), timeout_s)
+
 
 async def _run(argv: tuple[str, ...], timeout_s: float | None = None) -> str:
+    check = _LOCKED_CHECK.get()
+    if check is not None:
+        token = _LOCKED_CHECK.set(None)  # nested read scripts must not wait for another gate
+        try:
+            return await _run_locked(argv, check, timeout_s)
+        finally:
+            _LOCKED_CHECK.reset(token)
     proc = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout_s or GIT_TIMEOUT_S)
@@ -84,11 +99,48 @@ async def _run(argv: tuple[str, ...], timeout_s: float | None = None) -> str:
     return out.decode(errors="replace").strip()
 
 
+async def _run_locked(argv, check, timeout_s):
+    """Keep the host's directory flock while the connector checks BAT; permit only on an explicit reply."""
+    proc = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.PIPE,
+                                               stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    async def exchange():
+        first = await proc.stdout.readline()
+        if first.strip() == b'{"locked": true}':
+            await check()
+            proc.stdin.write(b'{"proceed": true}\n')
+            await proc.stdin.drain()
+            proc.stdin.close()
+            return await proc.communicate()
+        proc.stdin.close()
+        out, err = await proc.communicate()
+        return first + out, err  # a host refusal before the gate, with no mutation
+    try:
+        out, err = await asyncio.wait_for(exchange(), timeout_s or GIT_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        proc.stdin.close()
+        if proc.returncode is None:
+            proc.kill()
+        await proc.communicate()
+        raise AmbiguousOutcome("locked git script timed out") from None
+    except BaseException:
+        proc.stdin.close()
+        if proc.returncode is None:
+            proc.kill()
+        await proc.communicate()
+        raise
+    if proc.returncode == 255 and argv[0] == "ssh":
+        raise AmbiguousOutcome("ssh connection failed during locked check")
+    if proc.returncode != 0:
+        raise GitCommandFailed(redact((err or out).decode(errors="replace").strip()[-800:]) or "locked git script failed")
+    return out.decode(errors="replace").strip()
+
+
 # --------------------------------------------------------------------------- records
 def _decode(row) -> dict:
     cp = dict(row)
     cp["dirty"] = None if cp["dirty"] is None or cp["dirty"] < 0 else int(cp["dirty"])  # -1 = not observed
     cp["excerpt"] = json.loads(cp["excerpt"])
+    cp["artifacts"] = json.loads(cp.pop("attachments"))
     return cp
 
 
@@ -176,6 +228,7 @@ async def preview(ops: OperationService, host: str, session_id: str) -> dict:
             "commits": [{"hash": r["hash"], "message": str(r.get("message") or "")[:200], "date": r.get("date")}
                         for r in log],
             "dirty": None if state is None else state[1],
+            "confinement": confinement.host_capability(ops.context["fleet"], host),
             "snapshot": {"supported": False, "reason": "uncommitted changes are not carried over; commit first"}}
 
 
@@ -192,6 +245,7 @@ async def source_head(ops: OperationService, cp: dict) -> dict:
 # --------------------------------------------------------------------------- checkpoint.create
 def _admit_create(ops: OperationService, principal: Principal, target: dict, params: dict, pre: dict) -> None:
     fleet = ops.context["fleet"]
+    artifacts.normalize_refs(ops.db, params.get("artifacts", []), ops.context["artifact_store"].settings)
     host, sid = target["host"], target["session_id"]
     if host not in fleet.config.hosts:
         raise OperationError("UNKNOWN_HOST", f"unknown host {host!r}", 404)
@@ -255,6 +309,7 @@ async def _run_create(ctx: OpContext) -> dict:
                          reconcile=reread)
     checkpoint_id = "cp_" + ctx.operation_id[3:]
     excerpt = json.dumps(src["excerpt"], ensure_ascii=False)
+    refs = artifacts.normalize_refs(ops.db, ctx.params.get("artifacts", []), ops.context["artifact_store"].settings)
     now = time.time()
     journal = ops.journal
     reg = registry.get(host, sid) or {}  # a headless managed session may not be in the inventory yet
@@ -269,12 +324,14 @@ async def _run_create(ctx: OpContext) -> dict:
              row.get("workspace") or reg.get("workspace_name"), src["cwd"], src["repo_root"], src["branch"], src["commit"], src["head"],
              src["dirty"], excerpt, hashlib.sha256(excerpt.encode()).hexdigest(), ctx.params.get("note"),
              ctx.actor, ctx.operation_id, now))
+        journal.db.execute("UPDATE checkpoints SET attachments=? WHERE checkpoint_id=?", (artifacts.canonical(refs), checkpoint_id))
+        artifacts.reference(journal.db, "checkpoint", checkpoint_id, refs, ctx.operation_id)
         if cur.rowcount:
             journal.api_event("checkpoint", checkpoint_id, "checkpoint.created",
                               {"host": host, "session_id": sid, "commit": src["commit"], "dirty": src["dirty"]},
                               actor=ctx.actor)
     ctx.set_refs(checkpoint_id=checkpoint_id)
-    return {"checkpoint_id": checkpoint_id, "commit": src["commit"], "branch": src["branch"],
+    return {"checkpoint_id": checkpoint_id, "artifacts": refs, "commit": src["commit"], "branch": src["branch"],
             "dirty": None if src["dirty"] < 0 else src["dirty"], "repo_root": src["repo_root"],
             "excerpt_messages": len(src["excerpt"])}
 
@@ -284,6 +341,26 @@ def _admit_continue(ops: OperationService, principal: Principal, target: dict, p
     if not CHECKPOINT_ID.fullmatch(target["checkpoint_id"]):
         raise OperationError("INVALID_TARGET", "checkpoint_id is malformed", 422)
     cp = get(ops.db, target["checkpoint_id"])
+    refs = artifacts.continuation_refs(ops, cp, params)
+    expected = pre.get("expected_source_head_sha")
+    if expected is not None and (not isinstance(expected, str) or not SHA.fullmatch(expected)):
+        raise OperationError("INVALID_PARAMS", "expected_source_head_sha must be a full SHA", 422)
+    if refs and not expected:
+        raise OperationError("INVALID_PARAMS", "attachments need expected_source_head_sha", 422)
+    if refs:
+        adapter = ops.context["artifact_host"]
+        ready = adapter.readiness.get(cp["host"], {})
+        if not adapter.available(cp["host"]) or ready.get("ok") is False:
+            raise OperationError("ARTIFACT_ADAPTER_UNAVAILABLE", ready.get("message") or "no ready artifact SSH adapter for this host", 409)
+    if params.get("target_host") or params.get("target_workspace"):
+        raise OperationError("INVALID_PARAMS", "cross-host continuation is not available yet", 422)
+    if params.get("work_item_id"):
+        from . import work_items
+
+        if not principal.allows("manage"):
+            raise OperationError("FORBIDDEN", "linking this continuation needs manage", 403)
+        item = work_items._get_item(ops.db, params["work_item_id"], active=True)
+        work_items._expect_fingerprint(item, {"expected_fingerprint": pre.get("expected_work_item_fingerprint")})
     fleet = ops.context["fleet"]
     host = cp["host"]
     if not (fleet.writes_enabled(host) and fleet.orchestrate_enabled(host)):
@@ -297,6 +374,8 @@ def _admit_continue(ops: OperationService, principal: Principal, target: dict, p
     text = params.get("instructions")
     if not isinstance(text, str) or not text.strip() or len(text) > MAX_INSTRUCTIONS:
         raise OperationError("INVALID_PARAMS", f"instructions must be 1-{MAX_INSTRUCTIONS} characters", 422)
+    if refs and len(_input_instructions(ops.db, text, refs)) > service.MAX_PROMPT_CHARS - 1500:
+        raise OperationError("INVALID_PARAMS", "instructions and input manifest exceed the prompt limit", 422)
     if params.get("agent", "claude") not in {"claude", "codex"}:
         raise OperationError("INVALID_PARAMS", "agent must be claude or codex", 422)
     if not (cp["workspace_id"] or cp["workspace_name"]):
@@ -374,6 +453,17 @@ def prompt_marker(cp: dict, operation_id: str) -> str:
     return f"[batc checkpoint {cp['checkpoint_id']} · {operation_id}]"
 
 
+def _input_instructions(db, instructions: str, refs: list[dict]) -> str:
+    if not refs:
+        return instructions
+    lines = ["", "Verified input files (relative to your working folder):"]
+    for ref in refs:
+        row = artifacts.get(db, ref["artifact_id"], ref["revision"])
+        lines.append(f".batc-inputs/{ref['artifact_id']}-r{ref['revision']}/{row['display_name']} "
+                     f"[{ref['artifact_id']} revision {ref['revision']}, SHA-256 {ref['digest']}]")
+    return instructions + "\n".join(lines)
+
+
 def first_prompt(cp: dict, *, worktree: str, branch: str, instructions: str, marker: str | None = None) -> str:
     head = [*([marker] if marker else []),
         "You are starting new work from a checkpoint of earlier work by a person. Their session and folder are "
@@ -402,7 +492,8 @@ def first_prompt(cp: dict, *, worktree: str, branch: str, instructions: str, mar
 
 
 async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent: str, worktree: str, branch: str,
-                            head: str, title: str, text: str, marker: str, registry_fields: dict) -> dict:
+                            head: str, title: str, text: str, marker: str, registry_fields: dict,
+                            before_send: Callable[[], Awaitable[None]] | None = None) -> dict:
     """Start a confined managed session in a connector worktree and send its first instruction, as recorded steps.
 
     ``verify.start``: BAT itself sees the folder at ``head`` (a step, so a replay after the agent committed returns
@@ -429,25 +520,68 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
     await ctx.step("verify.start", verify, reconcile=reverify)
 
     async def start() -> dict:
-        r = await orchestrate.session_start(
-            fleet, host, workspace, agent, confirm=True, prompt=None, use_worktree=False, title=title,
-            session_id=sid, retain_on_error=True, cwd_override=worktree, external_branch=branch,
-            write_scope="confined")
-        return {"session_id": r["session_id"], "cwd": r.get("cwd") or worktree}
+        try:
+            r = await orchestrate.session_start(
+                fleet, host, workspace, agent, confirm=True, prompt=None, use_worktree=False, title=title,
+                session_id=sid, retain_on_error=True, cwd_override=worktree, external_branch=branch,
+                write_scope="confined")
+        except confinement.ConfinementRefused as exc:
+            if (exc.sent is False or exc.code in confinement.START_IDENTITY_MISMATCH_CODES
+                    or exc.code in {"CONFINEMENT_MISMATCH", "CONFINEMENT_START_UNSETTLED", "START_IN_PROGRESS"}):
+                raise NeedsAttention(exc.code, str(exc)) from exc
+            raise
+        ctx.set_refs(confinement=r["confinement"])
+        return {"session_id": r["session_id"], "cwd": r.get("cwd") or worktree,
+                "confinement": r["confinement"]}
 
     async def restart(_request: dict) -> dict | None:
-        if not any(e.get("session_id") == sid for e in registry.list_entries(host)):
+        entry = registry.get(host, sid)
+        if not entry or entry.get("start_sent") is False:
             return RERUN  # never reserved in the registry, so no start frame left this process
+        if not entry.get("confinement"):
+            raise NeedsAttention("CONFINEMENT_EVIDENCE_MISSING", "reserved start has no confinement evidence")
+        try:
+            confinement.guard_start_record(entry)
+        except confinement.ConfinementRefused as exc:
+            raise NeedsAttention(exc.code, str(exc)) from exc
         try:
             meta = await c.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
         except Exception:  # noqa: BLE001 - unreadable: stay uncertain and read again later
             return None
-        if isinstance(meta, dict) and norm(meta.get("cwd")) == worktree:
-            registry.update(host, sid, status="active", cwd=worktree, worktree_path=worktree, branch=branch)
-            return {"session_id": sid, "cwd": worktree, "reconciled": True}
+        if isinstance(meta, dict):
+            try:
+                # Older in-flight rows omitted cwd; the durable start request
+                # still records the exact folder passed to BAT.
+                confinement.guard_start_cwd({"cwd": entry.get("cwd") or _request.get("cwd")}, meta)
+                confinement.guard_start_cwd({"cwd": worktree}, meta)
+            except confinement.ConfinementRefused as exc:
+                if exc.code in confinement.START_IDENTITY_MISMATCH_CODES:
+                    registry.update(host, sid, error_code=exc.code)
+                raise NeedsAttention(exc.code, str(exc)) from exc
+            record = (registry.get(host, sid) or {}).get("confinement")
+            if not record:
+                raise NeedsAttention("CONFINEMENT_EVIDENCE_MISSING", "reserved start has no confinement evidence")
+            try:
+                confinement.guard_start_record({"confinement": record})
+            except confinement.ConfinementRefused as exc:
+                raise NeedsAttention(exc.code, str(exc)) from exc
+            state = confinement.verify(record, meta)
+            if state["status"] == "mismatch":
+                registry.update(host, sid, error_code="CONFINEMENT_MISMATCH",
+                                confinement=confinement.confirm(record, meta))
+                raise NeedsAttention("CONFINEMENT_MISMATCH", state["reason"])
+            if state["status"] == "unknown":
+                return None
+            if record["verification"]["status"] == "pending":
+                record = confinement.confirm(record, meta)
+            registry.update(host, sid, status="active", cwd=worktree, worktree_path=worktree, branch=branch,
+                            confinement=record)
+            ctx.set_refs(confinement=record)
+            return {"session_id": sid, "cwd": worktree, "reconciled": True, "confinement": record}
         return None  # reserved and maybe sent: BAT may still be starting it, so read again later; never start twice
 
-    await ctx.step("session.start", start, request={"session_id": sid, "cwd": worktree, "agent": agent},
+    await ctx.step("session.start", start, request={"session_id": sid, "cwd": worktree, "agent": agent,
+                                                 "write_scope": "confined"},
                    reconcile=restart)
     registry.update(host, sid, **registry_fields)
     mid = "batc-" + ctx.operation_id
@@ -467,12 +601,23 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
             return {"message_id": mid, "accepted": True, "turn_marker": mid, "settled_by": "transcript"}
         return None
 
+    if before_send is not None:
+        await before_send()
     sent = await ctx.step("send", send, request={"message_id": mid,
                                                  "text_sha256": hashlib.sha256(text.encode()).hexdigest()},
                           reconcile=resend)
     if not sent.get("accepted"):
         raise NeedsAttention("NOT_ACCEPTED", "BAT did not accept the first instruction")
-    return {"session_id": sid, "message_id": mid}
+    readback_failed = False
+    try:
+        meta = await service._meta(c, sid)
+    except Exception:  # noqa: BLE001 - the durable send succeeded; evidence cannot fail the operation
+        meta, readback_failed = None, True
+    fields = confinement.session_fields(host, sid, meta, account=confinement.account_status(fleet, host))
+    if readback_failed:
+        fields["current_verification"].update(status="unknown", reason="readback_failed")
+    return {"session_id": sid, "message_id": mid,
+            **fields}
 
 
 async def _run_continue(ctx: OpContext) -> dict:
@@ -480,6 +625,31 @@ async def _run_continue(ctx: OpContext) -> dict:
     fleet = ops.context["fleet"]
     runner = ops.context["git_runner"]
     cp = get(ops.db, ctx.target["checkpoint_id"])
+    refs = artifacts.continuation_refs(ops, cp, ctx.params)
+    digest = artifacts.input_manifest(cp, ctx.params, ctx.preconditions, refs)
+
+    async def link_inputs():
+        from . import work_items
+
+        def change(db, now):
+            wid = ctx.params.get("work_item_id")
+            if wid:
+                item = work_items._get_item(db, wid, active=True)
+                work_items._expect_fingerprint(item, {"expected_fingerprint": ctx.preconditions.get("expected_work_item_fingerprint")})
+                if not work_items._active_link(db, wid, "operation", ctx.operation_id):
+                    db.execute("""INSERT INTO work_item_links(work_item_id,kind,ref,linked_by,linked_at,link_operation)
+                        VALUES(?,'operation',?,?,?,?)""", (wid, ctx.operation_id, ctx.actor, now, ctx.operation_id))
+                    work_items._event(ctx, "work_item", wid, "work_item.linked", {"kind": "operation", "ref": ctx.operation_id})
+            artifacts.reference(db, "operation", ctx.operation_id, refs, ctx.operation_id)
+            return {"input_manifest_digest": digest, "work_item_id": wid}
+        return work_items._once(ctx, change)
+
+    async def replay_link(_request):
+        return RERUN
+
+    if refs or ctx.params.get("work_item_id"):
+        await ctx.step("inputs.link", link_inputs, reconcile=replay_link)
+    ctx.set_refs(input_manifest_digest=digest)
     host = cp["host"]
     hc = fleet.config.host(host)
     suffix = ctx.operation_id[3:15]
@@ -510,9 +680,21 @@ async def _run_continue(ctx: OpContext) -> dict:
     if made["head"] != cp["commit_sha"] or made["dirty"] != 0:
         raise NeedsAttention("START_MISMATCH", f"the new worktree is at {made['head'][:12]} with "
                              f"{made['dirty']} change(s), not clean at {cp['commit_sha'][:12]}")
+    send_recorded = ops.db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? AND name='send'", (ctx.operation_id,)).fetchone()
+    if not send_recorded:
+        await artifacts.source_guard(ctx, cp)
+        await artifacts.materialize(ctx, cp, dest, worktree, branch, refs)
+
+    async def before_send():
+        if refs or ctx.preconditions.get("expected_source_head_sha") or ctx.params.get("work_item_id"):
+            await artifacts.dispatch_guard(ctx, cp, dest, worktree, branch, refs)
+
     agent = ctx.params.get("agent", "claude")
     marker = prompt_marker(cp, ctx.operation_id)
-    text = first_prompt(cp, worktree=worktree, branch=branch, instructions=ctx.params["instructions"], marker=marker)
+    instructions = _input_instructions(ops.db, ctx.params["instructions"], refs)
+    if refs and len(instructions) > service.MAX_PROMPT_CHARS - 1500:
+        raise NeedsAttention("INVALID_PARAMS", "instructions and input manifest exceed the prompt limit")
+    text = first_prompt(cp, worktree=worktree, branch=branch, instructions=instructions, marker=marker)
     # origin_cwd stays the workspace folder session_start recorded: merges into it are refused
     # (DESTINATION_MANUAL), which is what a checkpoint session's work should get. Results reach a PR instead.
     started = await start_in_worktree(
@@ -520,7 +702,7 @@ async def _run_continue(ctx: OpContext) -> dict:
         branch=branch, head=cp["commit_sha"], title=f"checkpoint {cp['checkpoint_id'][3:11]}", text=text,
         marker=marker, registry_fields={"checkpoint_id": cp["checkpoint_id"],
                                         "source_session_id": cp["source_session_id"],
-                                        "start_commit": cp["commit_sha"]})
+                                        "start_commit": cp["commit_sha"]}, before_send=before_send)
     sid, mid = started["session_id"], started["message_id"]
     journal = ops.journal
     with journal.tx():
@@ -537,10 +719,56 @@ async def _run_continue(ctx: OpContext) -> dict:
         with contextlib.suppress(Exception):
             await inventory.refresh_host(host)
     return {"checkpoint_id": cp["checkpoint_id"], "host": host, "session_id": sid, "worktree_path": worktree,
-            "branch": branch, "base_commit": cp["commit_sha"], "message_id": mid, "write_scope": "confined"}
+            "branch": branch, "base_commit": cp["commit_sha"], "message_id": mid, "write_scope": "confined",
+            "confinement": started["confinement"], "current_verification": started["current_verification"],
+            "input_manifest_digest": digest, "materializations": artifacts.materializations(ops.db, operation_id=ctx.operation_id)}
+
+
+def _admit_revalidate(ops, principal, target, params, pre):
+    parent = ops.get(target["operation_id"])
+    if parent["action"] != "checkpoint.continue" or parent["status"] != "needs_attention" or parent["error_code"] not in {"SOURCE_MOVED", "SOURCE_UNAVAILABLE"}:
+        raise OperationError("NOT_RESUMABLE", "only a source-blocked continuation can be confirmed", 409)
+    if not SHA.fullmatch(str(params.get("observed_source_head_sha", ""))):
+        raise OperationError("INVALID_PARAMS", "observed_source_head_sha must be a full SHA", 422)
+    if parent["external_refs"].get("input_manifest_digest") != pre.get("expected_input_manifest_digest"):
+        raise OperationError("CONTENT_CHANGED", "confirm the original input manifest", 409)
+    if ops.db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? AND name='send'", (target["operation_id"],)).fetchone():
+        raise OperationError("NOT_RESUMABLE", "a recorded send must reconcile, never be confirmed again", 409)
+
+
+async def _run_revalidate(ctx):
+    ops, parent_id = ctx.service, ctx.target["operation_id"]
+    receipt = ops.db.execute("SELECT * FROM checkpoint_source_confirmations WHERE operation_id=?", (ctx.operation_id,)).fetchone()
+    if receipt is None:
+        _admit_revalidate(ops, None, ctx.target, ctx.params, ctx.preconditions)
+        parent = ops.get(parent_id)
+        checkpoint = get(ops.db, parent["target"]["checkpoint_id"])
+        seen = await source_head(ops, checkpoint)
+        if seen["head"] != ctx.params["observed_source_head_sha"]:
+            raise NeedsAttention("SOURCE_MOVED", "source changed again; read its HEAD before confirming")
+        with ops.journal.tx():
+            ops.db.execute("""INSERT OR IGNORE INTO checkpoint_source_confirmations(operation_id,parent_operation_id,
+                source_head_sha,actor,created_at) VALUES(?,?,?,?,?)""", (ctx.operation_id, parent_id, seen["head"], ctx.actor, time.time()))
+            ops.journal.api_event("checkpoint", checkpoint["checkpoint_id"], "checkpoint.source_confirmed",
+                                 {"operation_id": ctx.operation_id, "parent_operation_id": parent_id, "head": seen["head"]}, actor=ctx.actor)
+
+    async def resume():
+        from .api_auth import Principal
+
+        parent = ops.get(parent_id)
+        if parent["status"] == "needs_attention":
+            ops.resume(Principal(ctx.actor, frozenset({"start"})), parent_id)
+        return {"parent_operation_id": parent_id}
+
+    async def read_resume(_request):
+        return RERUN if ops.get(parent_id)["status"] == "needs_attention" else {"parent_operation_id": parent_id}
+
+    return await ctx.step("parent.resume", resume, reconcile=read_resume)
 
 
 ACTIONS = [
+    ActionDef("checkpoint.continue.revalidate", "start", "Confirm unchanged inputs and resume the same continuation",
+              _run_revalidate, _admit_revalidate, ("operation_id",)),
     ActionDef("checkpoint.create", "operate", "Record a session's commit and recent conversation (read-only)",
               _run_create, _admit_create, ("host", "session_id")),
     ActionDef("checkpoint.continue", "start", "Start a new managed session from a checkpoint's commit",
