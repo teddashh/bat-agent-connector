@@ -630,7 +630,7 @@ async def materialize(ctx, checkpoint, clone, worktree, branch, refs):
     if refs:
         ready = await adapter.probe(host)
         if not ready.get("ok"):
-            raise NeedsAttention("ARTIFACT_ADAPTER_UNAVAILABLE", "artifact helper needs Python 3.9+ and no-follow/link support")
+            raise NeedsAttention("ARTIFACT_ADAPTER_UNAVAILABLE", ready.get("message") or "artifact helper needs Python 3.9+, Git 2.31+ and no-follow/link support")
     for ref in refs:
         revision = get(ops.db, ref["artifact_id"], ref["revision"])
         relative = f".batc-inputs/{ref['artifact_id']}-r{ref['revision']}/{safe_name(revision['display_name'])}"

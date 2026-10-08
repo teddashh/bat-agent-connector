@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import os
+import shutil
 import sys
 import threading
 from dataclasses import replace
@@ -416,6 +417,127 @@ async def test_materialized_inputs_are_git_excluded_and_inside_the_worktree(daem
     assert ".batc-inputs/" in prompt and ref["digest"] in prompt
     assert str(human) not in prompt
     assert cp["artifacts"] == [ref]
+
+
+async def test_continue_prompt_limit_is_checked_before_operation_or_host_write(daemon, mock, monkeypatch):
+    """B04/plan §13: an oversized exact input manifest has no durable dispatch intent or host side effect."""
+    adapter = LocalArtifactHost()
+    daemon.ops.context["artifact_host"] = adapter
+    ref = await upload(daemon, name="a" * 190 + ".txt")
+    cp = await make_checkpoint(daemon)
+    monkeypatch.setattr(service, "MAX_PROMPT_CHARS", 2000)
+    before = daemon.journal.db.execute("SELECT COUNT(*) FROM operations").fetchone()[0]
+    host_calls = list(mock.invokes)
+    git_calls = list(daemon.ops.context["git_runner"].scripts)
+    with pytest.raises(OperationError) as error:
+        daemon.ops.create(PERSON, action="checkpoint.continue", target={"checkpoint_id": cp["checkpoint_id"]},
+            params={"instructions": "Read carefully. " * 15, "artifacts": [ref]},
+            preconditions={"expected_source_head_sha": cp["head_sha"]}, idempotency_key="oversized-manifest")
+    assert error.value.code == "INVALID_PARAMS" and error.value.status == 422
+    assert daemon.journal.db.execute("SELECT COUNT(*) FROM operations").fetchone()[0] == before
+    assert mock.invokes == host_calls and not adapter.calls and daemon.ops.context["git_runner"].scripts == git_calls
+
+
+@pytest.mark.parametrize("version,ready", [("2.30.9", False), ("2.31.0", True), ("2.39.5 (Apple Git-154)", True)])
+async def test_artifact_probe_reports_git_floor_and_blocks_unready_admission(daemon, mock, tmp_path, monkeypatch, version, ready):
+    """B04/plan §28: observed unsupported Git is diagnosable before creating continuation intent."""
+    adapter = LocalArtifactHost()
+    daemon.ops.context["artifact_host"] = adapter
+    ref = await upload(daemon)
+    cp = await make_checkpoint(daemon)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_git = bin_dir / "git"
+    fake_git.write_text("#!/bin/sh\nprintf '%s\\n' 'git version " + version + "'\n")
+    fake_git.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+    result = await adapter.probe("h1")
+    assert result["git_version"] == version and result["ok"] is ready
+    _, capabilities = await daemon.api.capabilities(principal=PERSON)
+    assert capabilities["artifacts"]["hosts"][0]["readiness"] == result
+    if not ready:
+        assert result["code"] == "ARTIFACT_ADAPTER_UNAVAILABLE" and "Git 2.31+" in result["message"]
+        before = daemon.journal.db.execute("SELECT COUNT(*) FROM operations").fetchone()[0]
+        host_calls, helper_calls = list(mock.invokes), list(adapter.calls)
+        git_calls = list(daemon.ops.context["git_runner"].scripts)
+        with pytest.raises(OperationError) as error:
+            daemon.ops.create(PERSON, action="checkpoint.continue", target={"checkpoint_id": cp["checkpoint_id"]},
+                params={"instructions": "Read the input.", "artifacts": [ref]},
+                preconditions={"expected_source_head_sha": cp["head_sha"]}, idempotency_key="unsupported-git")
+        assert error.value.code == "ARTIFACT_ADAPTER_UNAVAILABLE" and "2.31+" in str(error.value)
+        assert daemon.journal.db.execute("SELECT COUNT(*) FROM operations").fetchone()[0] == before
+        assert mock.invokes == host_calls and adapter.calls == helper_calls
+        assert daemon.ops.context["git_runner"].scripts == git_calls
+        # A later readiness probe can discover an upgrade; an old failed probe does not trap the host.
+        fake_git.write_text("#!/bin/sh\nprintf '%s\\n' 'git version 2.31.0'\n")
+        assert (await adapter.probe("h1"))["ok"]
+
+
+@pytest.mark.parametrize("missing", ["exclude", "info"])
+async def test_artifact_materialization_creates_missing_git_exclude(daemon, mock, missing):
+    """B04/plan §13: managed clones without Git templates still receive ignored inputs."""
+    adapter = LocalArtifactHost()
+    daemon.ops.context["artifact_host"] = adapter
+    ref = await upload(daemon)
+    cp = await make_checkpoint(daemon)
+    old_mode = []
+    real = adapter.call
+    async def without_templates(host, request, content=b""):
+        if request["mode"] == "receive":
+            info = Path(request["clone"]) / ".git/info"
+            if missing == "exclude":
+                old_mode.append(info.stat().st_mode & 0o777)
+                (info / "exclude").unlink()
+            else:
+                shutil.rmtree(info)
+        return await real(host, request, content)
+    adapter.call = without_templates
+    done = await continuation(daemon, cp, [ref])
+    assert done["status"] == "succeeded" and len(sends(mock)) == 1, done
+    info = Path(done["external_refs"]["clone_path"]) / ".git/info"
+    assert info.is_dir() and info.stat().st_mode & 0o777 == (old_mode[0] if old_mode else 0o755)
+    exclude = info / "exclude"
+    assert exclude.stat().st_nlink == 1 and exclude.stat().st_mode & 0o777 == 0o644
+    assert exclude.read_text().count("/.batc-inputs/") == 1
+    assert git(done["result"]["worktree_path"], "--no-optional-locks", "status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("kind", ["info-file", "info-symlink", "exclude-directory", "exclude-symlink", "exclude-hardlink"])
+async def test_artifact_exclude_refuses_non_directory_or_shared_files(daemon, mock, tmp_path, kind):
+    """B04/plan §06: repairing an absent exclude never adopts symlinks, non-files or shared files."""
+    adapter = LocalArtifactHost()
+    daemon.ops.context["artifact_host"] = adapter
+    ref = await upload(daemon)
+    cp = await make_checkpoint(daemon)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    kept = outside / "exclude"
+    kept.write_text("keep\n")
+    real = adapter.call
+    async def unknown_exclude(host, request, content=b""):
+        if request["mode"] == "receive":
+            info = Path(request["clone"]) / ".git/info"
+            if kind.startswith("info-"):
+                shutil.rmtree(info)
+                if kind == "info-file":
+                    info.write_text("unknown")
+                else:
+                    info.symlink_to(outside, target_is_directory=True)
+            else:
+                exclude = info / "exclude"
+                exclude.unlink()
+                if kind == "exclude-directory":
+                    exclude.mkdir()
+                elif kind == "exclude-symlink":
+                    exclude.symlink_to(kept)
+                else:
+                    os.link(kept, exclude)
+        return await real(host, request, content)
+    adapter.call = unknown_exclude
+    blocked = await continuation(daemon, cp, [ref])
+    assert blocked["status"] == "needs_attention" and blocked["error_code"] == "DESTINATION_UNKNOWN", blocked
+    assert not sends(mock) and not registry.list_entries("h1")
+    assert kept.read_text() == "keep\n" and list(outside.iterdir()) == [kept]
 
 
 async def test_artifact_policy_refuses_escape_before_any_host_write(daemon, mock, tmp_path):

@@ -39,17 +39,17 @@ def directory(path):
         raise
 
 
-def child(fd, name):
+def child(fd, name, mode=0o700):
     try:
-        os.mkdir(name, 0o700, dir_fd=fd)
+        os.mkdir(name, mode, dir_fd=fd)
         os.fsync(fd)
     except FileExistsError:
         pass
     return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
 
 
-def regular(fd, name, flags=os.O_RDONLY):
-    result = os.open(name, flags | os.O_NOFOLLOW, dir_fd=fd)
+def regular(fd, name, flags=os.O_RDONLY, mode=0o600):
+    result = os.open(name, flags | os.O_NOFOLLOW, mode, dir_fd=fd)
     info = os.fstat(result)
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         os.close(result)
@@ -101,7 +101,17 @@ def execute(request, stream):
     if sys.version_info < (3, 9) or not hasattr(os, "O_NOFOLLOW") or os.link not in os.supports_dir_fd:
         raise Refusal("ARTIFACT_ADAPTER_UNAVAILABLE", "Python 3.9+ with no-follow dirfd and link is required")
     if request.get("mode") == "probe":
-        return {"ok": True, "helper_version": VERSION, "python": list(sys.version_info[:3])}
+        ready = {"helper_version": VERSION, "python": list(sys.version_info[:3]), "git_version": None}
+        try:
+            result = subprocess.run(["git", "--version"], capture_output=True, text=True, timeout=20, check=True)  # noqa: S603,S607 - fixed read-only git verb
+        except (OSError, subprocess.SubprocessError):
+            return {**ready, "ok": False, "code": "ARTIFACT_ADAPTER_UNAVAILABLE", "message": "Git 2.31+ is required; git --version is unavailable"}
+        version = result.stdout.strip().removeprefix("git version ")
+        ready["git_version"] = version
+        match = re.match(r"^(\d+)\.(\d+)(?:\.\d+)?(?:\s|\.|$)", version)
+        if not match or tuple(map(int, match.groups())) < (2, 31):
+            return {**ready, "ok": False, "code": "ARTIFACT_ADAPTER_UNAVAILABLE", "message": "Git 2.31+ is required for absolute common-dir paths; found " + version}
+        return {**ready, "ok": True}
     clone, worktree = request["clone"], request["worktree"]
     operation = request["operation_id"]
     ref, name, attempt = request["ref"], request["name"], request["attempt"]
@@ -178,19 +188,26 @@ def execute(request, stream):
             os.close(check_fd)
         # The common exclude is the clone's, never the source checkout's.
         common_fd = directory(common)
-        info_fd = os.open("info", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=common_fd)
         try:
-            if request["mode"] == "receive":
-                exclude = regular(info_fd, "exclude", os.O_RDWR | os.O_APPEND)
-                try:
-                    existing = os.read(exclude, 1024 * 1024)
-                    if b"/.batc-inputs/" not in existing.splitlines():
-                        os.write(exclude, b"\n/.batc-inputs/\n")
-                        os.fsync(exclude)
-                finally:
-                    os.close(exclude)
+            info_fd = child(common_fd, "info", 0o755) if request["mode"] == "receive" else os.open(
+                "info", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=common_fd)
+            try:
+                if request["mode"] == "receive":
+                    try:
+                        exclude = regular(info_fd, "exclude", os.O_RDWR | os.O_APPEND)
+                    except FileNotFoundError:
+                        exclude = regular(info_fd, "exclude", os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_EXCL, 0o644)
+                        os.fsync(info_fd)
+                    try:
+                        existing = os.read(exclude, 1024 * 1024)
+                        if b"/.batc-inputs/" not in existing.splitlines():
+                            os.write(exclude, b"\n/.batc-inputs/\n")
+                            os.fsync(exclude)
+                    finally:
+                        os.close(exclude)
+            finally:
+                os.close(info_fd)
         finally:
-            os.close(info_fd)
             os.close(common_fd)
         if request["mode"] == "receive":
             inputs = child(work_fd, ".batc-inputs")

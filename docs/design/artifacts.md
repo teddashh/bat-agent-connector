@@ -26,7 +26,7 @@ BAT 固定來源 `b7419892fbc9946799b64cca24c2ec8c7fa15c42` 的 [remote_server.r
 
 - Connector 的 journal 目錄或配置 store_root 是自有實體目錄，無 symlink；設定來自 0600 的 BATC_TASK_SETTINGS。
 - observe 可讀／download；manage 可 upload／修改 work item；operate 可 checkpoint.create；start 可 continue／確認原版本。work item 連回派工另須 manage 與 expected_work_item_fingerprint。
-- 同主機 continue 需要既有 writes、orchestrate、managed_roots、BAT workspace 與 [verification] ssh_hosts alias。host helper 支援 Python 3.9+（不假設 macOS 有 3.10）、dirfd／no-follow、link／fsync；readiness 不符顯示 blocked。
+- 同主機 continue 需要既有 writes、orchestrate、managed_roots、BAT workspace 與 [verification] ssh_hosts alias。host helper 支援 Python 3.9+（不假設 macOS 有 3.10）、Git 2.31+（absolute common-dir paths）、dirfd／no-follow、link／fsync。probe 回 git_version；已觀測 readiness 不符在 admission 拒絕 ARTIFACT_ADAPTER_UNAVAILABLE，capabilities 保留版本與原因。
 - SSH BatchMode、StrictHostKeyChecking=yes、既有 known_hosts。alias 只能由配置提供，不能來自 request。
 - ArtifactRef 必為 ready 的精確版本。Dashboard 始終傳 expected_source_head_sha；有附件的其他 client 也必須帶它。舊 client 無此欄位且無附件，保持既有無 guard 合約。
 
@@ -118,7 +118,7 @@ Checkpoint create 凍結 refs；之後 immutable。continue 的 params.artifacts
 
 ## Host helper／worktree materialization（A；B 擷取另行審查）
 
-副本固定在 `<worktree>/.batc-inputs/<artifact_id>-r<revision>/<safe name>`。safe name 來自 validated display name，無 separator／control，不能是 .、..、.git。clone common info/exclude idempotent append `/.batc-inputs/`；worktree.prepare 的 clean check在 materialization 前。派工 prompt 只列 worktree-relative path、ref／digest；絕無 client-local absolute path。
+副本固定在 `<worktree>/.batc-inputs/<artifact_id>-r<revision>/<safe name>`。safe name 來自 validated display name，無 separator／control，不能是 .、..、.git。clone common info/exclude idempotent append `/.batc-inputs/`；沒有 template 時，以 common-dir fd／no-follow 補建 info（0755）與 exclude（0644、O_CREAT／O_EXCL）。既有 info 必須是 directory，exclude 必須是 single-link regular file；拒絕 symlink／shared file。worktree.prepare 的 clean check在 materialization 前。派工 prompt 只列 worktree-relative path、ref／digest；絕無 client-local absolute path。
 
 每個 materialization set 只屬一個 continuation operation。rows 是「T 時刻為 X verified」的派工證據，不是 live inventory。無跨 operation reuse、generation、removed state、shared cache、host flock 或 host quota reservation；傳輸前檢查 free space。dispatch 後副本是 agent 的工作副本，store immutable revision 仍是 reference。cleanup 的非 force worktree remove 帶走 ignored replicas；store 原件保留。
 
@@ -139,6 +139,8 @@ attempt file O_EXCL／no-follow，fsync；publish 用 link(attempt, final) 再 u
 7. send 的 stable message ID／turn／transcript reconcile 沿用。已可能送出時只回查，不 duplicate execution。
 
 confirmation action核對原 input_manifest_digest、當前 source HEAD、parent 是 SOURCE_MOVED／SOURCE_UNAVAILABLE 的 needs_attention，且沒有 send 記錄。保存 minimum confirmation HEAD／actor／time，再經既有 resume 恢復原 parent；不換 commit、refs、workspace、instructions。重跑同 confirmation 不再重複 resume。target／artifact mismatch 不可用 source confirmation 繞過。
+
+Admission 使用與 run 共用的 input manifest lines helper，依精確 refs／immutable display names 合併 instructions。超過 MAX_PROMPT_CHARS − 1500 回 422 INVALID_PARAMS，不建立 operation／clone／worktree；run 保留相同 check 作 backstop。
 
 回查是 observed_at 的證據，不是跨主機原子 snapshot；不鎖人的來源。B04 拒絕已觀測的前進，固定選定內容不隨 latest 改變。
 
@@ -163,6 +165,7 @@ reference rows只有work_item、checkpoint、operation的writer。未完成工�
 | Code | 處理 |
 |---|---|
 | INVALID_ARTIFACT_REF／ARTIFACT_NOT_FOUND | 422／404；選合法精確版本，不補 latest |
+| INVALID_PARAMS | instructions＋manifest 超過 prompt budget 在 admission 回 422，沒有 operation 或 host write |
 | ARTIFACT_TOO_LARGE／ARTIFACT_SELECTION_TOO_LARGE | 413／422；保留原稿 |
 | ARTIFACT_STORE_FULL／UPLOAD_LIMIT | 409／429；調 quota／等 reservation 結束 |
 | REVISION_CONFLICT／UPLOAD_IN_PROGRESS／IDEMPOTENCY_CONFLICT | 409；讀既有 intent，不搶 revision |
@@ -170,7 +173,7 @@ reference rows只有work_item、checkpoint、operation的writer。未完成工�
 | UPLOAD_INCOMPLETE | 等待同 operation 下一 attempt；超過 window 到期 |
 | ARTIFACT_DIGEST_MISMATCH／ARTIFACT_SIZE_MISMATCH | needs_attention／逐項 blocked，沒有 first command |
 | ARTIFACT_CONTENT_UNAVAILABLE | missing／corrupt 正本；不改原 ref |
-| ARTIFACT_ADAPTER_UNAVAILABLE／NO_MANAGED_ROOT／NO_WORKSPACE | capability blocked，不回 manual cwd |
+| ARTIFACT_ADAPTER_UNAVAILABLE／NO_MANAGED_ROOT／NO_WORKSPACE | capability blocked；helper probe 的 Git 版本低於 2.31 回明確原因，不回 manual cwd |
 | FORBIDDEN／TIER_DISABLED／DESTINATION_MANUAL／DESTINATION_UNKNOWN／BINDING_MISMATCH | shared policy拒絕；confirm／force 不繞過 |
 | SOURCE_MOVED／SOURCE_UNAVAILABLE／CONTENT_CHANGED／START_MISMATCH | needs_attention；同 parent 回查／明確確認或修正，不換 input |
 | UNCERTAIN／UNCERTAIN_UNRESOLVED | 查原 final／meta／turn／transcript，不盲目重送 |
@@ -181,13 +184,13 @@ reference rows只有work_item、checkpoint、operation的writer。未完成工�
 
 | 檔案 | Part A 修改 |
 |---|---|
-| artifacts.py（新）／artifact_host.py／artifact_host_helper.py／artifact_client.py（新） | store、upload adapter／actions、refs、固定 Python helper／read-back |
+| artifacts.py（新）／artifact_host.py／artifact_host_helper.py／artifact_client.py（新） | store、upload adapter／actions、refs、獨立 scratch reaper、固定 Python helper／Git readiness／read-back／no-follow exclude repair |
 | task_journal.py | 不佔 user_version 的 idempotent additive DDL；每次 open 在 numbered migrations 後執行，舊附件空，舊字串不遷成 artifact |
 | resource_policy.py | storage／materialize mutation與 shared destination checks，配合cleanup guard |
 | operations.py | **只有 additive wake(operation_id)**；不改 create／resume／cancel／STATES／table／replay |
-| checkpoints.py | frozen refs、handler第一step連結、materialize／guard、before_send callback／confirmation；保持其他包修改 |
+| checkpoints.py | frozen refs、handler第一step連結、共用 manifest helper 的 admission 長度檢查、materialize／guard、before_send callback／confirmation；保持其他包修改 |
 | work_items.py | typed attachments／指紋／transaction；保持hubimport／observation／cleanup修改 |
-| task_verifier.py／task_daemon.py／api_v1.py／mcp_server.py／cli.py | settings／setup／actions、受限content route／download／三MCP tools／CLI／capabilities |
+| task_verifier.py／task_daemon.py／api_v1.py／mcp_server.py／cli.py | settings／setup／actions、獨立 reaper loop／best-effort cancel、受限content route／download／三MCP tools／CLI／capabilities |
 | dashboard/app.js／app.css／i18n.js | selection upload、localStorage草稿與pending提示、operation evidence，兩語系 |
 | tests/test_artifacts.py 等 | 下列接受情境、HTTP/MCP/CLI契約與policy失敗 |
 | api-v1.md／checkpoints.md／work-items.md／dashboard.md；README x2／CHANGELOG／兩skills | 完成部分與尚未涵蓋；計畫§08/§12/§13、B04、MCP 256KiB與大檔路徑 |
@@ -214,6 +217,10 @@ BAT只用mockbat；git用temp repo／LocalRunner／RealGitLog。byte helper測�
 | test_artifact_http_mcp_cli_contract_and_scopes | body前auth／actor／state／type／length、download headers、scope、same action |
 | test_artifact_policy_refuses_escape_before_any_host_write | worktree內no-follow／traversal／hardlink／unknown拒絕 |
 | test_materialized_inputs_are_git_excluded_and_inside_the_worktree | cwd內relative paths、dirty=0、exclude冪等 |
+| test_continue_prompt_limit_is_checked_before_operation_or_host_write | 過長 manifest 在 admission 拒絕，零 operation／host write |
+| test_artifact_probe_reports_git_floor_and_blocks_unready_admission | Git 2.30 拒絕、2.31／Apple Git 通過；capabilities 版本／原因、unready admission 拒絕 |
+| test_artifact_materialization_creates_missing_git_exclude | 無 info／exclude 的 managed clone 補建後 dirty=0 |
+| test_artifact_exclude_refuses_non_directory_or_shared_files | common info／exclude 的 symlink／non-directory／hardlink 拒絕，外部 bytes 不變 |
 | test_B04_transfer_interrupted_before_dispatch | 中斷零first-send／start，保留work／artifact／draft，resume同parent |
 | test_B04_digest_size_or_path_mismatch_blocks_first_command | 不符不verified、不派工、partial evidence留下 |
 | test_B04_source_advanced_after_preview_keeps_selection | source advance拒絕、confirm同parent／session／refs |
