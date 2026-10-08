@@ -7,6 +7,12 @@
   while retaining needs_attention and its audit. Resume and reconciliation use the saved conclusion without GitHub
   calls; refused readback keeps verification pending and the update lock until a successful read.
 
+- Observation history after Delivery Part A ([design](docs/design/observation.md), plan §08/§10/§11/§15/§16,
+  B01/B03): index immutable merge previews, `merge.verify` receipts and first metadata settlements using explicit
+  operation resource refs. History keeps numbers, SHAs, states and codes without PR titles/bodies; preview reuse
+  and repeated reconciliation add no events. Late links respect `as_of`, and data step 2 backfills saved delivery
+  facts once without changing their documents. Repository/PR refs alone imply no session or worktree link.
+
 - Delivery merge method ([design](docs/design/delivery.md), plan §09/§16, C05): execution, recorded steps and
   verification use the admitted preview's method across checks waits and restarts; current policy can block a PUT
   with MERGE_DISABLED/INVALID_PARAMS, but changing the default never changes the reviewed method.

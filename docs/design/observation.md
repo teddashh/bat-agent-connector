@@ -9,6 +9,7 @@ Phase 1 規格已審查。Phase 2 分兩步：Part A（本次）實作伺服器�
 | 來源 | 固定版本與本規格使用處 |
 |---|---|
 | Connector | `5e8e41696ebc6a1a9d3ea92ddb7a1d338537ca1b`，本工作開始時的 `HEAD` 與 `origin/main`；branch 為 `feat/observation`。套件版本仍為 `0.2.4`。本文件中的「現有」均指這個 commit。 |
+| Delivery Part A adapter | Rebase 基準 `0c13601a7316a581fc6a4a504de37035b870ee4d`（#34）。已接讀 `pr_merge_previews`、`merge.verify` step receipt 與 `pr_metadata_settlements`；其 DDL 不占資料步驟編號。 |
 | 計畫 | v1.0（2026-10-06）；以章節及驗收編號引用，不複製私有計畫。 |
 | BAT | `b7419892fbc9946799b64cca24c2ec8c7fa15c42`；不代表每台主機都已安裝此版，實際 `serverVersion` 另存於掃描證據。 |
 
@@ -35,6 +36,8 @@ BAT 協定判讀依據如下；Phase 2 開始時重新比對 main 的來源版�
 | Dashboard | `viewSessions` 只有 host/access 篩選；`viewSession` 有訊息、`started_from`、工作項目及 checkpoint。`streamEvents` 重連續讀，但不先排除重複 seq；`start` 先取 head，沒有完整 reopen 驗收。 | 加跨專案目錄、關係、timeline 與掃描證據；Part B 補 baseline／catch-up／SSE 交接及重複防護測試。 |
 
 操作統一、delivery、cleanup 是平行工作包。本包不實作 Task Service actions／共用 gate、PR metadata／merge preview／新的 deployment history、tombstone／retained refs／restore。Phase 2 只接讀當時已在 main 的正式 journal 契約；未合併的 branch 不是來源。
+
+Delivery Part A 已於上述 rebase 基準合併。本包只加既有 preview／settlement 寫入點的事件與讀模型 adapter，不改其 admission、merge、metadata reconciliation 或背景排程。Delivery 的正式 operation steps 沿用本包的既有 step 投影。
 
 ## 資源身分與關係模型
 
@@ -141,6 +144,9 @@ Operation intent 當下尚不知道新 session／worktree 時，其 context 保�
 | `checkpoint.continued` | `checkpoint_runs`；`checkpoints._run_continue` | checkpoint、operation、新 session/worktree、source session、固定起點、實際 branch；在來源與新資源 timeline 均可見。 | 已有；補 context |
 | `resource.bound` | `operations.external_refs`、成功或 uncertain step 中已知的真實 binding | operation、資源、step、checkpoint source、可信度；送字前中斷尚無 `checkpoint_runs` 也能看見預留／已建立資源。 | 補記；intent 不說成啟動成功 |
 | `integration.previewed/composed/conflict/resolved/delivered/updated/handoff_started` | `integration_previews`、`integration_receipts`、`api_events`；`integration._receipt_update/_push/_finish` 等 | operation、receipt 的 `(operation_id, seq)`、source kind/id/host、pinned/base/integrated/resolution/delivered SHA、resolver session/worktree、PR 身分；依 checkpoint/run 的明確來源連資源。 | 已有；補當時 fields |
+| `delivery.merge_previewed` | `pr_merge_previews`；`pr_delivery.save_preview` 新增 immutable preview 的短交易 | preview ID、repository、PR number、method、head/base/merge-base SHA、commits 的 SHA/parents、affected PR numbers/states、blocking codes；PR title/body、commit message 不入摘要。同一 preview 重讀不追加事件。 | #34 合併後接讀；preview 的 seq 使用全域 api_events.seq |
+| `operation.step.*`（`merge.verify` 及其 retry） | `operation_steps`；`pr_delivery.verify_merge` 經既有 `_step_*` | verified、merged_sha、merged_onto_base_sha、base_moved、other_commits_count、額外 commits SHA、affected PR number/state；source_versions 接 expected_head_sha/expected_base_sha，result_versions 保存當時的 merge SHA。 | 既有 step 投影涵蓋，不另造 receipt 事件 |
+| `delivery.metadata_settled` | `pr_metadata_settlements`；`settle_not_applied/reconcile_metadata` 首次 INSERT 成功的短交易 | operation ID、status、code、settled_at；同一 operation 只有首次入帳發事件。觀測者 delivery-service，未證實背景呼叫者時 actor 為 unknown；不回 observed PR title/body。 | #34 合併後接讀；後續 reconciliation 不重複發事件 |
 | `work_item.linked`、`work_item.unlinked` | `work_item_links`、`work_items._run_link/_event` | link ID、work item、kind/ref、actor、時間、link/remove operation；間接關係附 via。 | 已有；補 link ID/context |
 | `task.external_worktree_retained`、`task.initial_session_vanished` | `events`；`Journal.complete_external_cleanup/mark_initial_session_vanished` | 原 worktree path/branch/ref/commit 或消失的 ID、command evidence；保存原事件語意。 | 已有；不改造成 §23 tombstone |
 | `history.backfilled`（預設 live feed 隱藏） | migration 的舊 journal 事實投影 | 原表、PK、可證明的 snapshot、原 timestamp、`backfilled=true`、缺少的歷史；只在沒有對應 api event 時補一筆。 | 補記；不虛構過去 transitions |
@@ -150,8 +156,10 @@ Operation intent 當下尚不知道新 session／worktree 時，其 context 保�
 | 未來事實種類 | 來源及 fields | 本包邊界 |
 |---|---|---|
 | Task Service operation／step 關聯 | operations unification 的正式 operation-command binding，含 operation、task、command、actor、entry。 | 接讀已合併的契約；本包不建立 task actions 或第二套 gate。 |
-| PR metadata、merge preview、後續 deployment history | delivery 正式 journal facts，含 repository/PR、版本、workflow/run/environment、來源／結果版本；只有明確連到 session/worktree 的才入該 timeline。 | 目前 main 的 merge/deploy operation 可按上表顯示；不實作新 provider 行為或猜測關聯。 |
+| 後續 deployment history | delivery 後續正式 journal facts，含 repository/PR、workflow/run/environment、來源／結果版本；只有明確連到 session/worktree 的才入該 timeline。 | Part A 的 preview／settlement／merge receipt 已按上表接讀；後續 provider 契約未合併時不宣告支援。 |
 | `cleanup.tombstone`、retained ref、restore | cleanup 正式 tombstone/receipt，含 resource ID、operation、actor、移除範圍、保留 ref/commit、restore 的新實體關係。 | 不掃磁碟補墓碑；不實作 cleanup、refs 寫入、restore；保留歷史身分。 |
+
+Delivery 的 merge envelope 目前只含 repository/PR，沒有 session/worktree refs；一般 merge 因此不出現在任意 session/worktree timeline。不依 PR number、相同 SHA 或路徑推斷來源。只有 operation target／external_refs 明確指向 session，或 external_refs.worktree_id 指向 journal 已知的 worktree，才連結其 steps/receipts。Operation.params.preview_id 可將該 preview 的既有事件回連資源；索引的 linked_at_seq 記實際連結時點，原 event context/actor 不回寫，既有 as_of 分頁不會突然多出舊 preview。
 
 ### 固定排序與分頁
 
@@ -204,6 +212,8 @@ CLI 保留現有 `batc sessions/read/hosts` 的直接 BAT 行為，新增 `inven
 
 `capabilities.features` 增 `session_history`、`resource_relations`、`discovery_scope`，`worktree_history` 說明只限已知 binding；附支援 kinds、history 起始／backfill 限制及 optional providers。能力須反映已在 main 的實作；缺少 optional writer 回 unsupported/未取得原因，不造空的成功資料。
 
+本次 rebase 的 history.optional_adapters 列 `delivery_part_a`。這只表示已接讀正式 journal facts，不表示有 GitHub credential、可寫 PR 或有未知的 session/worktree 關係。
+
 | 錯誤 | HTTP | 恢復 |
 |---|---|---|
 | `UNAUTHORIZED`、`FORBIDDEN` | 401／403 | 沿用既有驗證與代碼；讀工具不升權。 |
@@ -247,6 +257,8 @@ Registry identity 合併結果以 canonical JSON 比較，未變更不執行 ups
 
 回填在 daemon owner 內、背景 loops 開始前完成，是 orchestrator 配發的一次性資料步驟 2；backfill 與 `user_version=2` 在同一交易提交。版本 1 的 journal 執行一次，版本已為 2 時不再執行；新 journal 也以 2 結束。DDL 使用 IF NOT EXISTS，位於資料步驟的版本 gate 之外。來源 key（表名／PK／事實類型）唯一，重啟重做不重複。已經有 api event 的 task／checkpoint／link／receipt 只補資源索引與可信 context，不追加同一件事的第二個 event。當舊 mutable step／receipt 只剩最後快照時，`history.backfilled` 記錄「目前保存的結果」及原 timestamp，不捏造 started → uncertain → succeeded 全序列；`history_coverage` 明列開始時間、缺少的 transitions。舊 profile／actor／range 不明保持 unknown。
 
+版本 1 journal 已有 delivery 的 DDL 與資料時，資料步驟 2 也涵蓋 pr_merge_previews／pr_metadata_settlements；沒有對應事件才補 history.backfilled，以表名/PK 作唯一來源 key。保留原 preview.created_at／settlement.settled_at、摘要及正式 operation refs；原 delivery tables/documents 不改寫。Scope-read throttle 表不是 immutable 歷史，不把 pr_merge_scope_reads 的覆寫列偽裝為每次讀取事件。回填仍不進預設 live feed。
+
 已確認綁定的 operation 可能在 runs 表入帳之前中斷；讀 `external_refs`、已持久 step 及 commands 保留其身分與 uncertainty，不執行啟動補償。Context／index 在原交易內用獨立 savepoint 寫入；投影例外只回滾該投影，核心事實照常提交，context 留 `projection_error` 的例外類名並記 log，不保存訊息。History 由原寫入資源或此前已證實的資源連結顯示該事件及缺口；不留下部分 index／relation rows，也不對外宣告 journal 未提交的事件。Poll 失敗保存 failed scan，舊欄位及其他 hosts 不受影響；meta 失敗只影響該 session 的相關欄位。
 
 Reconcile 所補的是新證據與新 seq，先前 uncertain 事件留著；重新讀 timeline 不重送任何命令。讀到未知未來 kind 仍回原 kind、摘要及 evidence，Dashboard 用一般事件列呈現，不因版本差把歷史丟掉。
@@ -260,6 +272,7 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | `src/bat_agent_connector/task_journal.py`、新增 `observation.py` | Additive migration、事件 envelope／資源索引、回填、ranges、分頁與讀模型。 |
 | `inventory.py`、`service.py`、必要的 `config.py` | Scope/scan/field evidence、安全候選聯集、三值狀態、stale 排程；不擴大可寫 channel。 |
 | `operations.py`、`task_core.py`、`task_bat.py` | 在既有 journal 寫入點補 step/binding/relation 事實；不實作 operations-unification 的 action/gate。 |
+| `pr_delivery.py` | 只在既有 preview/settlement 入帳交易追加摘要事件；保留 delivery 的 cache、retention、step/reconcile/control flow。 |
 | `checkpoints.py`、`integration.py`、`work_items.py` | 同交易保存當時 versions／多資源來源及 link ID；沿用已有 writer。 |
 | `api_v1.py`、`task_daemon.py`、`mcp_server.py`、`cli.py` | Observe 路由/RPC/tools/命令、params 契約、feature capabilities。 |
 | `dashboard/app.js`、`app.css`、`i18n.js`（Part B） | Sessions/歷史/relations/scope、filters、baseline/SSE、兩語言及手機。 |
@@ -290,6 +303,8 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B02、B03；§11 | `test_b03_states_unknown_no_tab_and_field_times`：meta null／失敗、無 tab、journal-only null、離線與 gone 分軸；失敗不刷新上一個 activity 時間。Main 沒有可證明 session 終止的正式 journal source，因此 lifecycle 保持 unknown，不用 gone／turn abort 推論 ended。 |
 | B03；§08、§11 | `test_b03_backfill_hidden_idempotent_and_unknown_boundaries`、`test_b03_migration_failure_rolls_back_and_restart_recovers`、`test_b03_backfilled_occurrence_time_filters_are_not_migration_time`：舊 journal 回填、全交易失敗回滾、重啟不重複、未知 range 邊界、原發生時間與隱藏 cursor。 |
 | B03；§08、§11 | `test_b03_version_one_journal_runs_observation_backfill_once`：版本 1 → 2 回填一次；重開及已為 2 的 journal 不執行；新 journal 為 2，不重複回填。 |
+| B01、B03；§08、§10、§11、§16 | `test_b01_b03_delivered_merge_history_uses_only_explicit_refs`：真實 fake GitHub merge/verify steps、session refs、worktree refs、無來源時不造關聯；PR title/body 不進事件摘要。`test_b01_delivery_preview_late_binding_respects_history_as_of`：晚到的 preview binding 不改舊游標結果。 |
+| B03；§08、§10、§11、§15 | `test_b03_metadata_settlement_history_has_codes_without_pr_text`：not_applied/conflict 回執各一事件、不重送 PATCH、不將背景觀測歸為 Ted。`test_b03_delivery_snapshot_backfill_preserves_version_chain_and_private_text`：版本 1 已有 delivery tables/documents，回填一次至 2、重開無寫入、原 documents 保留、原時間與未知 actor 保留。 |
 | B01、B03；§08、§11 | `test_projection_failure_keeps_core_write_and_flags_event`：task state 與 operation step 的投影例外只回滾 savepoint，核心寫入及外部 step 成功；history 顯示 projection_error，無部分 resource／relation rows。 |
 | B01–B03；§10、§11 | `test_b01_b02_b03_http_mcp_cli_contract_parity`：HTTP/實際 MCP server/CLI 經同 daemon；params、keys、cursor、context 一致；observe、404、422 契約及四個新 tools。 |
 | B03；§06、§11 | `test_b03_observation_never_starts_resumes_rehydrates_or_locks_git`：MockBat 零 write/git:status；unsafe Claude state 不呼叫，journal 讀取不讀 Fleet/registry、不寫 DB；temp repo HEAD/index/refs/files 不變且無 locks，既有 on-demand Git probe 使用 no-optional-locks。 |

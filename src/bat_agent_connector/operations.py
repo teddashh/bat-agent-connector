@@ -312,13 +312,13 @@ class OperationService:
                 self._observation_event(operation_id, "resource.bound", {"refs": refs})
 
     def _observation_event(self, operation_id: str, kind: str, data: dict) -> None:
-        from .observation import summary
+        from .observation import operation_summary
         row = self.db.execute("SELECT actor FROM operations WHERE operation_id=?", (operation_id,)).fetchone()
         if data.get("step"):
             step = self.db.execute("SELECT seq,status FROM operation_steps WHERE operation_id=? AND name=?", (operation_id, data["step"])).fetchone()
             if step:
                 data = {"step_seq": step["seq"], "status": step["status"], **data}
-        self.journal.api_event("operation", operation_id, kind, summary(data), actor=row["actor"] if row else None,
+        self.journal.api_event("operation", operation_id, kind, operation_summary(self.db, operation_id, data), actor=row["actor"] if row else None,
                                context={"entry_point": "daemon", "observer": "operation-service"})
 
     def _step_start(self, operation_id: str, name: str, request: dict) -> None:
