@@ -41,6 +41,11 @@
   Per-item apply snapshots observe only the item's host, including a branch's host derived from its creation slot.
   Initial previews and whole-plan validation still check every selected host; unavailable hosts retain resources
   with OBSERVATION_UNAVAILABLE without adding their read deadline to each healthy-host item.
+  Host errors after a mutating call starts now report an uncertain outcome with exact call evidence and keep
+  the cleanup guard. Read-back settles completed phases, completes unchanged temporary remnants only after
+  rechecking their original manifest and every retained commit, or reports CLEANUP_PARTIAL_STATE with removed,
+  changed and remaining content. Refusals before a mutating call remain definitive; partial states never count
+  as success or release their reservation.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps

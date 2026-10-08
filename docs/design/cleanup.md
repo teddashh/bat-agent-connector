@@ -273,7 +273,7 @@ item（actual is None）；不把 worktree 已完成的 planned transition 誤�
 | stop | lifecycle._stop 新 keyword-only cleanup=False；default 保留舊行為，cleanup=True 時 no retry on disconnect、ambiguous 傳給 OpContext。Preview／apply re-check／最後 pre-stop 共用 service.SESSION_WAITING_FIELDS；所有 pending question/permission/approval、queued message/count、input waiting 都再查，任一為真回 SESSION_WAITING、streaming 回 ACTIVE_WRITER，不送 stop；不直接 shell kill |
 | discard | preview 完整 tracked/staged/untracked/ignored manifest；tracked git restore 到 pinned HEAD，untracked no-follow exact unlink；不 clean sweep／force remove。複雜 merge/rebase 若無精確 after manifest就保留 |
 | remove worktree | HEAD retained、writer/pending/consumer 消失、dirty=0，managed clone/area 中 git worktree remove exact-path，無 force／prune／rm fallback |
-| remove branch | 只 delivered batc/cp-*／fix-*、無 checkout/consumer，retained HEAD存在，update-ref -d full-ref expected-old-SHA CAS；release 的 branch保留 |
+| remove branch | 只 delivered batc/cp-*／fix-* 或有 BAT creation 證據的 exact bat/*、無 checkout/consumer，retained HEAD存在，update-ref -d full-ref expected-old-SHA CAS；release 的 branch保留 |
 | remove temporary | exact intent／markers／完整 manifest，先 pin commit，no-follow exact deletion；未知內容不碰 |
 | finalize | receipt／tombstone／aliases／retained／api event 一個 SQLite tx；registry 同 flock標 cleaned，可由相同 tombstone ID重播 |
 
@@ -283,6 +283,24 @@ Item status：retained/pending/running/succeeded/already_absent/failed/uncertain
 Operation 沿用原狀態；summary.partial=true，不新增 partial state。獨立 item確定失敗可繼續其他項；
 uncertain／stale 停後續。首輪 stale=failed、零 mutation；部分成功後 stale=needs_attention、須新 preview。
 暫時失敗且 unchanged plan可 Resume，新 .a2 只在 .a1 confirmed-no-effect 後執行；成功不重做。
+
+Host helper 在第一個 mutating call（update-ref、exact unlink／rmdir、git restore、git worktree remove）開始前
+設 marker。之前的拒絕仍是 `{error:code}`，沿用 definitive code；之後任一 ValueError／OSError／SubprocessError
+回 `{error:code,mutated:true,effects:[{action,target,completed}]}`。mutated 表示 call 已開始、可能有部分效果，
+不宣稱該 call 成功；completed 只表示該 call 已返回成功，Git 失敗仍可能有部分更動。
+`_host_call` 將此形狀轉 MutationUncertain（AmbiguousOutcome），step／item 保持 uncertain、guard 不釋放；
+receipt 保存 host_error／phase／effects。Resume 的 live read-back 只有四種結果：完整 after 補成功；
+完整 before 且 flock 證明程序結束時可重跑；preserve 的等值 pins 可 CAS 補齊；可證明的 temporary subset
+才完成原 exact removal；其餘 partial state 轉 needs_attention／CLEANUP_PARTIAL_STATE，step 仍 uncertain。
+
+Temporary partial recovery 不要求已部分刪掉的 Git metadata 仍可開 repo：先 canonical／no-follow 讀完整剩餘
+manifest／directories。剩餘每個 entry 的 path／type／bytes／digest／mode 必須等於原 preview，directories
+只能是原集合的子集；任何新增／改變／link／不完整 observation 都不能刪。原 temp 需 git-only／content_available
+證據；在 carrier flock 內再核 identity、subset 與**全部** retained refs／commit 可讀，才 unlink 剩餘 exact entries。
+原 step intent 授權同一 manifest，receipt 先記 recovery evidence，成功的 step response 保存此證據；cancel 不開始續刪。
+Discard 的 tracked／staged after-state 未完整成立時，不猜哪些 restore 已完成，保留 needs_attention。
+Partial evidence 列 removed／changed（before/after facts）／added／remaining、directories、refs 與 repository identity。
+讀不到時維持 unknown／uncertain，不以空集合假裝已刪；partial 未被解釋前，不因之後的 refusal 釋放 guard。
 
 ### 錯誤代碼
 
@@ -301,6 +319,8 @@ uncertain／stale 停後續。首輪 stale=failed、零 mutation；部分成功�
 | DISCARD_MANIFEST_UNAVAILABLE／RETAINED_REF_MISMATCH／RETAINED_CONTENT_MISSING | 409，無完整discard／保留證據，停止移除 |
 | WORKTREE_REMOVE_REFUSED／REF_CHANGED | 409，非force Git拒絕／CAS不符，保留回執重preview |
 | STOP_UNPROVEN／EXTERNAL_EFFECT_UNPROVEN／UNCERTAIN_UNRESOLVED | uncertain／needs_attention，讀回不重送 |
+| CLEANUP_MUTATION_UNCERTAIN | per-item uncertain，host 回 mutated=true；保存 host code／effects、保留 guard，讀回核對原 intent |
+| CLEANUP_PARTIAL_STATE | operation needs_attention、step／item uncertain；保存 removed／changed／remaining 等證據，guard 保留；不能把 partial 當 success |
 | LEGACY_CLEANUP_DISABLED | 409，改用batc resource-cleanup |
 | IDEMPOTENCY_CONFLICT／IDEMPOTENCY_KEY_REQUIRED／NOT_RESUMABLE | 沿用OperationService |
 
@@ -314,12 +334,12 @@ parent cancelled/failed把它當成沒發生。遠端程序仍在／身份不明
 | preview reply lost | 純讀重取；沒有preview row要刪 |
 | accepted reply lost | 同key查同operation |
 | validate／guard後crash | 查固定plan／registry marker，未送出steps仍受initial expiry；有step先reconcile |
-| preserve ACK lost | exact ref=planned SHA且object可讀補成功；ref缺且原程序已结束才CAS RERUN；不同SHA拒絕 |
+| preserve ACK lost／部分 pins 後錯誤 | 全部 exact ref=planned SHA且object可讀補成功；content unchanged、flock 證明原程序結束才 CAS 補 missing pins；不同SHA轉 CLEANUP_PARTIAL_STATE、guard 保留 |
 | stop ACK lost | 已證實start、host健康、相同generation的終止證據才成功；單次meta=null／無tab不足；unknown不重stop |
-| discard partial／lost | 每entry核before／expected-after digest；已after不重丟，第三種state stale；同manifest且原程序结束才續 |
+| discard partial／lost | 完整 dirty=0／HEAD／retained 證據補成功；同 before 且原程序結束可重跑；extras 已刪但 tracked／staged 未完整 restore 時 CLEANUP_PARTIAL_STATE，逐 entry 證據保留且不再 remove worktree |
 | worktree remove lost | retained仍在，path與registration都消失即成功；只有path消失不prune；仍原binding/clean且前程序结束才非force重送 |
 | branch CAS lost | ref absent且retained old SHA在即成功；still old且無writer可CAS retry；第三種SHA stale |
-| temporary partial／lost | 全部消失且pins仍在即補成功；仍完整before且原程序結束才續。部分刪除／marker損壞留uncertain，不猜測或掃剩餘檔案 |
+| temporary partial／lost | 全部消失且pins仍在補成功；完整 before 可重跑；原 exact manifest／directories 的 unchanged subset、carrier identity 與全部 pins 重新核實才續刪。新增／改變內容或 missing pins 轉 CLEANUP_PARTIAL_STATE，保存證據，不掃剩餘檔案 |
 | finalize crash | steps讀回可補finalize；同tx／unique keys防重複event／aliases；registry同值對帳 |
 | cancel／Resume | 成功item留存，未送出cancel；uncertain先讀回。Confirmed未送出的reservation釋放，未知outcome不解鎖。OpContext.failed不自動retry；confirmed-no-effect才另建.a2 |
 | Part B restore add lost | exact新worktree/branch/HEAD/tree對上intent才補成功，未知目的地不認領；不重建runtime |
@@ -430,6 +450,9 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | integration 三種 target 同 scope／handoff 完整鏈；E01/E02 | test_e01_integration_preview_apply_and_handoff_expand_to_same_resources（source／area／pins／repair／session 的所有 item fields 相等） |
 | crashedcheckpoint/handoff／未決start-stop；E01 | test_e01_crashed_continue_and_handoff_intents_are_discovered_without_adoption、test_e01_pending_start_stop_and_waiting_sessions_are_retained |
 | partsuccess/restart/lostreply；E01 | test_e01_partial_cleanup_resumes_only_unfinished_unchanged_items、test_e01_lost_replies_reconcile_each_cleanup_phase、test_e01_cancel_reconciles_sent_steps_and_releases_only_confirmed_reservations |
+| post-mutation error 保持 uncertain／guard；partial reconcile；E01 | test_e01_temporary_post_mutation_failure_keeps_guard_and_reconciles（第二次 unlink／root rmdir failure，原 subset 安全續刪）、test_e01_discard_restore_failure_after_unlink_reports_partial_evidence（needs_attention、removed／remaining）、test_e01_preserve_failure_after_a_pin_completes_missing_pins |
+| mutation 前 refusal 仍 definitive；E01 | test_e01_refusal_before_host_mutation_stays_definitive（PREVIEW_STALE、failed step、零 ref write、guard 釋放） |
+| partial temporary 的新內容／missing pin 不能續刪；E01/E02 | test_e01_partial_temporary_unreviewed_changes_or_missing_pins_need_attention（exact removed／changed／added／remaining、缺 retained 證據、不再改檔、guard 保留） |
 | 原ID/位置/原因/relations/PR與真retained；E01/E02 | test_e01_original_ids_remain_searchable_with_location_reason_and_pr（同測試移除實際ref，確認列為unavailable） |
 | TASK_OWNED／原TaskDaemon不變 | test_e01_task_owned_resources_are_retained；原test_external_cleanup_retains_unmerged_commit_and_recovers_after_restart／test_terminal_cleanup_requires_proof_before_journal_path_is_cleared |
 | legacy只讀、config解析、planner只stop、跨processguard | test_e01_legacy_apply_is_disabled_and_auto_cleanup_still_loads、test_e01_fanout_stops_planner_and_keeps_worktree、test_e01_guard_refuses_legacy_writes_on_reserved_and_cleaned_resources |

@@ -24,6 +24,7 @@ from urllib.parse import urlencode, urlsplit
 
 from . import checkpoints, integration, lifecycle, registry, resource_policy, service
 from .api_auth import SCOPES
+from .cleanup_host import temporary_subset as _temporary_subset
 from .config import state_dir
 from .errors import BatError, ResourceReadOnly
 from .operations import (
@@ -78,6 +79,12 @@ REASONS = {
 
 def _hash(value):
     return hashlib.sha256(_canonical(value).encode()).hexdigest()
+
+
+class MutationUncertain(AmbiguousOutcome):
+    def __init__(self, result):
+        self.result = result
+        super().__init__("host mutation may be partial: " + _canonical(result))
 
 
 def migrate(journal):
@@ -549,6 +556,8 @@ async def _host_call(ops, host, req, timeout=READ_DEADLINE_S, *, locked_check=No
     finally:
         checkpoints._LOCKED_CHECK.reset(token)
     if "error" in result:
+        if result.get("mutated") is True:
+            raise MutationUncertain(result)
         raise OperationError(result["error"], "host cleanup check refused", 409)
     if locked_check and not checked:
         raise AmbiguousOutcome("host reply without a confirmed locked consumer check")
@@ -1046,6 +1055,10 @@ def apply_request(doc, key):
 
 
 def _receipt(ctx, item, status, **extra):
+    if "error" not in extra and status in {"running", "uncertain"}:
+        row = ctx.service.db.execute("SELECT error FROM cleanup_receipts WHERE operation_id=? AND resource_id=?",
+                                     (ctx.operation_id, item["resource_id"])).fetchone()
+        extra["error"] = json.loads(row[0]) if row and row[0] else None
     ctx.service.db.execute("UPDATE cleanup_receipts SET status=?,updated_at=?,after_state=COALESCE(?,after_state),"
         "error=?,settled_by=COALESCE(?,settled_by) WHERE operation_id=? AND resource_id=?",
         (status, time.time(), _canonical(extra.get("after")) if extra.get("after") is not None else None,
@@ -1221,8 +1234,19 @@ async def _run(ctx):
                     _receipt(ctx, item, "uncertain")
                     _progress(ctx)
                     raise
+                except NeedsAttention:
+                    _progress(ctx)
+                    raise
                 except (OperationError, ResourceReadOnly, StepFailed) as e:
                     code = getattr(e, "code", "CLEANUP_FAILED")
+                    prior = db.execute("SELECT error FROM cleanup_receipts WHERE operation_id=? AND resource_id=?",
+                                       (ctx.operation_id, item["resource_id"])).fetchone()
+                    if unresolved or prior[0] and json.loads(prior[0]).get("mutated"):
+                        saved = json.loads(prior[0]) if prior[0] else {"code": "UNCERTAIN"}
+                        _receipt(ctx, item, "uncertain", error={**saved, "cause": code})
+                        _progress(ctx)
+                        raise NeedsAttention("CLEANUP_PARTIAL_STATE" if saved.get("mutated") else "UNCERTAIN_UNRESOLVED",
+                                             "unresolved mutation remains reserved; inspect receipts") from None
                     _receipt(ctx, item, "blocked_stale" if code == "PREVIEW_STALE" else "failed",
                              error={"code": code, "message": str(e)[:300]})
                     # A definitive refusal made no pending external call; keep its content and release the guard.
@@ -1255,6 +1279,42 @@ async def _run(ctx):
         raise
     finally:
         _OWNER.reset(owner)
+
+
+def _partial_evidence(phase, item, before, current, observed):
+    old = {f["path"]: f for f in (before or {}).get("manifest", [])}
+    new = {f["path"]: f for f in current.get("manifest", [])}
+    complete = "manifest" in current or current.get("exists") is False
+    refs = {k: v for k, v in observed.get("refs", {}).items() if k == "refs/heads/" + (item.get("branch") or "") or
+            k.startswith("refs/batc/retained/" + item["resource_id"] + "/")}
+    expected_refs = {"refs/heads/" + item["branch"]: item["observation"].get("head")} if item.get("branch") else {}
+    return {"phase": phase, "path": item["path"], "removed": sorted(old.keys() - new.keys()) if complete else None,
+            "changed": [{"path": p, "before": old[p], "after": new[p]} for p in sorted(old.keys() & new.keys())
+                        if old[p] != new[p]], "added": [new[p] for p in sorted(new.keys() - old.keys())],
+            "remaining": current.get("manifest", [] if current.get("exists") is False else None), "observation": current, "refs": refs,
+            "ref_changes": [{"ref": ref, "before": sha, "after": observed.get("refs", {}).get(ref)}
+                            for ref, sha in expected_refs.items() if observed.get("refs", {}).get(ref) != sha],
+            "directories_removed": sorted(set((before or {}).get("directories", [])) - set(current.get("directories", [])))
+                if "directories" in current or current.get("exists") is False else None,
+            "directories_remaining": current.get("directories"),
+            "repository_identity": {k: observed.get(k) for k in ("common_dir", "markers", "config_digest")}}
+
+
+def _record_partial(ctx, item, evidence):
+    for row in ctx.service.db.execute("SELECT name FROM operation_steps WHERE operation_id=? AND name LIKE ? AND status='started'",
+                                      (ctx.operation_id, "item." + item["resource_id"] + ".%")):
+        ctx.service._step_status(ctx.operation_id, row[0], "uncertain")
+    prior = ctx.service.db.execute("SELECT error FROM cleanup_receipts WHERE operation_id=? AND resource_id=?",
+                                   (ctx.operation_id, item["resource_id"])).fetchone()
+    _receipt(ctx, item, "uncertain", after=evidence,
+             error={**(json.loads(prior[0]) if prior and prior[0] else {}),
+                    "code": "CLEANUP_PARTIAL_STATE", "mutated": True, "phase": evidence["phase"],
+                    "message": "state differs from both the reviewed before-state and the proven complete result"})
+
+
+def _partial_attention(ctx, item, evidence):
+    _record_partial(ctx, item, evidence)
+    raise NeedsAttention("CLEANUP_PARTIAL_STATE", "partial cleanup remains reserved; inspect removed/changed/remaining evidence")
 
 
 async def _execute_item(ctx, item, payload):
@@ -1336,8 +1396,20 @@ async def _execute_item(ctx, item, payload):
 
     async def read(*, probe=False, acknowledge_missing=False):
         extra = {"acknowledged_missing_replicas": {item["path"]: discarded_replicas}} if acknowledge_missing else {}
-        return await _host_call(ops, item["host"], {**{k: v for k, v in req.items() if k != "phase"},
-                                                 **extra, "probe": probe})
+        try:
+            return await _host_call(ops, item["host"], {**{k: v for k, v in req.items() if k != "phase"},
+                                                     **extra, "probe": probe})
+        except OperationError as e:
+            if probe:
+                raise AmbiguousOutcome("host read-back unavailable: " + e.code) from e
+            raise
+
+    async def verify_pins(commits):
+        try:
+            return await _host_call(ops, item["host"], {**req, "phase": "verify.retained",
+                "retained": [{"ref": retained_ref.rsplit("/", 1)[0] + "/" + commit, "commit_sha": commit} for commit in commits]})
+        except OperationError as e:
+            raise AmbiguousOutcome("retained read-back unavailable: " + e.code) from e
 
     for phase in item["steps"]:
         if phase == "finalize":
@@ -1347,15 +1419,33 @@ async def _execute_item(ctx, item, payload):
 
         async def execute(request=request):
             ctx.check_cancel()
-            return await _host_call(ops, item["host"], request, locked_check=lambda: _phase_consumers(ctx, item))
+            try:
+                return await _host_call(ops, item["host"], request, locked_check=lambda: _phase_consumers(ctx, item))
+            except MutationUncertain as e:
+                _receipt(ctx, item, "uncertain", error={"code": "CLEANUP_MUTATION_UNCERTAIN", "mutated": True,
+                    "host_error": e.result["error"], "phase": request["phase"], "effects": e.result.get("effects", [])})
+                raise
+            except OperationError as e:
+                prior = ops.db.execute("SELECT error FROM cleanup_receipts WHERE operation_id=? AND resource_id=?",
+                                       (ctx.operation_id, rid)).fetchone()
+                if prior[0] and json.loads(prior[0]).get("mutated"):
+                    raise AmbiguousOutcome("refusal while an earlier partial mutation remains reserved: " + e.code) from e
+                raise
 
         async def reconcile(_, phase=phase, request=request):
             observed = await read(probe=True)
             pinned = observed.get("refs", {}).get(retained_ref) == sha
+            if phase == "remove.temporary" and sha:
+                commits = sorted(set(item["observation"].get("refs", {}).values()) | {sha})
+                verified = await verify_pins(commits)
+                pinned = all(p["available"] for p in verified)
+                if not pinned and observed.get("process_ended"):
+                    current = observed.get("temporaries", {}).get(item["path"], {})
+                    evidence = _partial_evidence(phase, item, request["before"], current, observed)
+                    _partial_attention(ctx, item, {**evidence, "retained_refs": verified})
             if phase == "preserve" and pinned:
                 commits = sorted(set(item["observation"].get("refs", {}).values()) | {sha}) if item["kind"] == "temporary" else [sha]
-                result = await _host_call(ops, item["host"], {**req, "phase": "verify.retained",
-                    "retained": [{"ref": retained_ref.rsplit("/", 1)[0] + "/" + commit, "commit_sha": commit} for commit in commits]})
+                result = await verify_pins(commits)
                 if all(p["available"] for p in result):
                     return {"ref": retained_ref, "sha": sha,
                             "tree": next(p["tree_sha"] for p in result if p["commit_sha"] == sha),
@@ -1374,15 +1464,44 @@ async def _execute_item(ctx, item, payload):
                 if wt.get("head") == sha and wt.get("status") == "" and not wt.get("complex_state"):
                     return {"discarded": True, "acknowledged_missing_replicas": discarded_replicas}
             if observed.get("process_ended") and observed.get("common_dir") == req["identity"]["common_dir"]:
+                if phase == "preserve":
+                    commits = set(item["observation"].get("refs", {}).values()) | {sha} if item["kind"] == "temporary" else {sha}
+                    pins = {retained_ref.rsplit("/", 1)[0] + "/" + commit: commit for commit in commits}
+                    if (any(ref in observed["refs"] and observed["refs"][ref] != commit for ref, commit in pins.items()) or
+                            item["kind"] == "local_branch" and observed["refs"].get("refs/heads/" + item["branch"]) != sha):
+                        current = observed.get("temporaries" if item["kind"] == "temporary" else "worktrees", {}).get(item["path"], {})
+                        _partial_attention(ctx, item, _partial_evidence(phase, item, request["before"], current, observed))
+                    if any(ref in observed["refs"] for ref in pins):
+                        current = observed.get("temporaries" if item["kind"] == "temporary" else "worktrees", {}).get(item["path"], {})
+                        _record_partial(ctx, item, _partial_evidence(phase, item, request["before"], current, observed))
                 current = observed.get("worktrees", {}).get(item["path"])
                 if phase in {"preserve", "remove.worktree", "discard"} and current == request["before"]:
-                    return RERUN  # repository flock proves the earlier single-phase process ended without effect
+                    return RERUN  # unchanged content; preserve CAS also completes any missing pins idempotently
                 if phase == "remove.temporary" and pinned and observed.get("temporaries", {}).get(item["path"]) == request["before"]:
                     return RERUN
                 if phase == "preserve" and item["kind"] == "temporary" and observed.get("temporaries", {}).get(item["path"]) == request["before"]:
                     return RERUN
                 if phase == "remove.branch" and pinned and observed.get("refs", {}).get("refs/heads/" + item["branch"]) == sha:
                     return RERUN
+                current = (observed.get("temporaries", {}) if item["kind"] == "temporary" else
+                           observed.get("worktrees", {})).get(item["path"], {})
+                evidence = _partial_evidence(phase, item, request["before"], current, observed)
+                if phase == "remove.temporary" and (pinned or sha is None) and _temporary_subset(request["before"], current):
+                    _record_partial(ctx, item, evidence)
+                    if ops._row(ctx.operation_id)["cancel_requested"]:
+                        _partial_attention(ctx, item, evidence)
+                    # The original step intent authorizes exactly these unchanged remaining entries.
+                    # The helper rechecks the subset and every retained commit under the directory flock.
+                    try:
+                        result = await execute({**request, "before": current, "recovery_before": request["before"]})
+                    except Cancelled:
+                        _partial_attention(ctx, item, evidence)
+                    confirmed = await read(probe=True)
+                    if confirmed.get("temporaries", {}).get(item["path"], {}).get("exists") is False:
+                        return {**result, "recovery": evidence, "confirmed": True}
+                    return None
+                if current.get("manifest_complete") or current.get("manifest") is not None or item["kind"] == "local_branch":
+                    _partial_attention(ctx, item, evidence)
             return None  # never retry when the remote process's outcome is unproven
         previous = ops.db.execute("SELECT name,status,error FROM operation_steps WHERE operation_id=? AND name LIKE ? ORDER BY seq DESC LIMIT 1",
                                   (ctx.operation_id, "item." + rid + "." + phase + ".a%" )).fetchone()
@@ -1395,6 +1514,7 @@ async def _execute_item(ctx, item, payload):
         elif previous:
             name = previous["name"]
         result = await ctx.step(name, execute, request=request, reconcile=reconcile)
+        _receipt(ctx, item, "running", error=None)
         if phase == "preserve":
             for pin in result.get("pins", [result]):
                 commit = pin["sha"]

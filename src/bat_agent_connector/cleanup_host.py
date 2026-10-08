@@ -18,6 +18,19 @@ import sys
 import time
 
 DEADLINE = float("inf")
+MUTATED = False
+EFFECTS = []
+
+
+def changing(action, target, fn, *args, **kwargs):
+    """Once a mutating call starts, even its error may hide partial effects."""
+    global MUTATED
+    MUTATED = True
+    effect = {"action": action, "target": target, "completed": False}
+    EFFECTS.append(effect)
+    result = fn(*args, **kwargs)
+    effect["completed"] = True
+    return result
 
 
 def digest(value):
@@ -74,10 +87,14 @@ def file_fact(path, relative, *, dir_fd=None):
             "bytes": s.st_size, "mode": stat.S_IMODE(s.st_mode)}
 
 
+def walk_error(error):
+    raise error
+
+
 def manifest(path, *, include_git=False):
     # A complete exact file manifest also detects ignored files and same-status content edits.
     out = []
-    for parent, dirs, files in os.walk(path, followlinks=False):
+    for parent, dirs, files in os.walk(path, followlinks=False, onerror=walk_error):
         if time.monotonic() >= DEADLINE:
             raise ValueError("OBSERVATION_UNAVAILABLE")
         dirs[:] = sorted(d for d in dirs if include_git or d != ".git")
@@ -149,7 +166,7 @@ def identity(repo, roots):
     canonical(repo, roots)
     common = git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
     canonical(common, roots)
-    for parent, dirs, files in os.walk(common, followlinks=False):
+    for parent, dirs, files in os.walk(common, followlinks=False, onerror=walk_error):
         if time.monotonic() >= DEADLINE:
             raise ValueError("OBSERVATION_UNAVAILABLE")
         if any(os.path.islink(os.path.join(parent, n)) for n in dirs + files) or any(
@@ -249,6 +266,7 @@ def observe(req):
         commits = git(repo, "rev-list", base + ".." + sha, optional=True) if sha and base else None
         result["branches"][br] = {"head": sha, "results": commits.splitlines() if commits is not None else None}
     for temp in req.get("temporaries", []):
+        d = {}
         try:
             canonical(temp, roots)
             d = {"exists": os.path.lexists(temp)}
@@ -259,6 +277,12 @@ def observe(req):
                 d.update(layout="file", manifest=[file_fact(temp, os.path.basename(temp))], git_only=False,
                          content_available=False, head=None)
                 continue
+            # A partially removed Git directory may no longer pass identity(). Its exact remaining files
+            # still provide read-back evidence; canonical/no-follow checks precede this read.
+            d["manifest"] = manifest(temp, include_git=True)
+            d["manifest_digest"] = digest(d["manifest"])
+            d["directories"] = sorted(os.path.relpath(parent, temp) for parent, dirs, files in os.walk(temp, followlinks=False, onerror=walk_error))
+            d["manifest_complete"] = True
             d["identity"] = identity(temp, roots)
             d["layout"] = "bare" if git(temp, "rev-parse", "--is-bare-repository").strip() == "true" else "clone"
             head = git(temp, "rev-parse", "--verify", "HEAD", optional=True)
@@ -266,9 +290,6 @@ def observe(req):
             d["refs"] = dict(line.split(" ", 1) for line in git(temp, "for-each-ref", "--format=%(refname) %(objectname)").splitlines())
             if d["head"] is None and d["refs"]:
                 d["head"] = sorted(d["refs"].values())[0]
-            d["manifest"] = manifest(temp, include_git=True)
-            d["manifest_digest"] = digest(d["manifest"])
-            d["directories"] = sorted(os.path.relpath(parent, temp) for parent, dirs, files in os.walk(temp, followlinks=False))
             d["content_available"] = all(git(repo, "cat-file", "-e", sha + "^{commit}", optional=True) is not None
                                          for sha in set(d["refs"].values()) | ({d["head"]} if d["head"] else set()))
             d["git_only"] = all(f["type"] == "file" and (
@@ -276,7 +297,7 @@ def observe(req):
                 f["path"] in {"HEAD", "config", "description", "packed-refs", "info/exclude"} or
                 f["path"].startswith(("objects/", "refs/", "logs/"))) for f in d["manifest"])
         except (ValueError, OSError, subprocess.SubprocessError) as e:
-            result["temporaries"][temp] = {"error": str(e).split(":", 1)[0]}
+            result["temporaries"][temp] = {**d, "error": str(e).split(":", 1)[0]}
     return result
 
 
@@ -304,11 +325,20 @@ def exact_unlink(base, names, facts):
             if current != by_path.get(name):
                 raise ValueError("PREVIEW_STALE")
             if current["type"] == "directory":
-                os.rmdir(parts[-1], dir_fd=fd)
+                changing("rmdir", os.path.join(base, name), os.rmdir, parts[-1], dir_fd=fd)
             else:
-                os.unlink(parts[-1], dir_fd=fd)
+                changing("unlink", os.path.join(base, name), os.unlink, parts[-1], dir_fd=fd)
         finally:
             os.close(fd)
+
+
+def temporary_subset(original, current):
+    """Only unchanged reviewed entries may remain after a partial exact temporary removal."""
+    old = {f["path"]: f for f in original.get("manifest", [])}
+    return (original.get("git_only") and original.get("content_available") and current.get("exists") and
+            current.get("manifest_complete") and
+            set(current.get("directories", [])) <= set(original.get("directories", [])) and
+            all(f == old.get(f["path"]) for f in current["manifest"]))
 
 
 def mutate(req):
@@ -358,7 +388,7 @@ def mutate(req):
                 if current and current != commit:
                     raise ValueError("RETAINED_REF_MISMATCH")
                 if not current:
-                    git(repo, "update-ref", pin, commit, "0" * 40)
+                    changing("update-ref", pin, git, repo, "update-ref", pin, commit, "0" * 40)
                 if not retained(repo, pin, commit):
                     raise ValueError("RETAINED_CONTENT_MISSING")
                 pins.append({"ref": pin, "sha": commit, "tree": git(repo, "rev-parse", commit + "^{tree}").strip()})
@@ -366,27 +396,30 @@ def mutate(req):
         if sha and not retained(repo, ref, sha):
             raise ValueError("RETAINED_CONTENT_MISSING")
         if phase == "remove.temporary":
-            if req.get("kind") != "temporary" or not before["content_available"]:
+            original = req.get("recovery_before", before)
+            if req.get("recovery_before") and not temporary_subset(original, before):
+                raise ValueError("PREVIEW_STALE")
+            if req.get("kind") != "temporary" or not original["content_available"]:
                 raise ValueError("RETAINED_CONTENT_MISSING")
-            if not before["git_only"]:
+            if not original["git_only"]:
                 raise ValueError("RESOURCE_KIND_UNSUPPORTED")
-            for other in sorted(set(before["refs"].values())):
+            for other in sorted(set(original["refs"].values()) | ({original["head"]} if original.get("head") else set())):
                 if not ref or not retained(repo, ref.rsplit("/", 1)[0] + "/" + other, other):
                     raise ValueError("RETAINED_CONTENT_MISSING")
             names = sorted((f["path"] for f in before["manifest"]), key=lambda n: n in {".git/config", "config"})
             exact_unlink(wt, names, before["manifest"])
             for d in sorted((x for x in before["directories"] if x != "."), key=lambda x: x.count("/"), reverse=True):
                 canonical(os.path.join(wt, d), req["roots"])
-                os.rmdir(os.path.join(wt, d))
-            os.rmdir(wt)
-            return {"removed": True, "retained_commits": sorted(set(before["refs"].values()) | ({sha} if sha else set()))}
+                changing("rmdir", os.path.join(wt, d), os.rmdir, os.path.join(wt, d))
+            changing("rmdir", wt, os.rmdir, wt)
+            return {"removed": True, "retained_commits": sorted(set(original["refs"].values()) | ({sha} if sha else set()))}
         if phase == "discard":
             if before["complex_state"] or any(f["type"] != "file" and not (
                     input_path(f["path"]) and f["type"] in {"link", "hardlink", "directory", "missing"})
                     for f in before["manifest"]):
                 raise ValueError("DISCARD_MANIFEST_UNAVAILABLE")
             exact_unlink(wt, before["extras"], before["manifest"])
-            git(wt, "restore", "--source=" + sha, "--staged", "--worktree", "--", ".")
+            changing("restore", wt, git, wt, "restore", "--source=" + sha, "--staged", "--worktree", "--", ".")
             removed_replicas = {e["path"] for e in req.get("replicas", {}).get(wt, {}).get("replica_manifest", [])
                                 if e["path"] in before["extras"]}
             return {"discarded": True, "acknowledged_missing_replicas": sorted(set(before["missing_replicas"]) | removed_replicas)}
@@ -394,7 +427,7 @@ def mutate(req):
             if before["status"] or before["complex_state"] or before["head"] != sha:
                 raise ValueError("PREVIEW_STALE")
             try:
-                git(repo, "worktree", "remove", wt)
+                changing("worktree.remove", wt, git, repo, "worktree", "remove", wt)
             except ValueError as e:
                 raise ValueError("WORKTREE_REMOVE_REFUSED") from e
             return {"removed": True}
@@ -409,7 +442,7 @@ def mutate(req):
                 raise ValueError("REF_CHANGED")
             if observed["refs"].get(full) != sha:
                 raise ValueError("REF_CHANGED")
-            git(repo, "update-ref", "-d", full, sha)
+            changing("update-ref", full, git, repo, "update-ref", "-d", full, sha)
             return {"deleted": True, "ref": full, "sha": sha}
         raise ValueError("RESOURCE_KIND_UNSUPPORTED")
     finally:
@@ -417,7 +450,8 @@ def mutate(req):
 
 
 def main():
-    global DEADLINE
+    global DEADLINE, MUTATED, EFFECTS
+    MUTATED, EFFECTS = False, []
     req = json.loads(base64.b64decode(sys.argv[1]))
     DEADLINE = time.monotonic() + min(60, req.get("deadline_s", 20))
     try:
@@ -450,7 +484,8 @@ def main():
             out = mutate(req) if req.get("phase") else observe(req)
         print(json.dumps({"result": out}, ensure_ascii=True))
     except (ValueError, OSError, subprocess.SubprocessError) as e:
-        print(json.dumps({"error": str(e).split(":", 1)[0]}))
+        print(json.dumps({"error": str(e).split(":", 1)[0],
+                          **({"mutated": True, "effects": EFFECTS} if MUTATED else {})}))
 
 
 if __name__ == "__main__":
