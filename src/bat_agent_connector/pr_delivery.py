@@ -28,18 +28,21 @@ def metadata(pr: dict) -> dict:
     return {"title": pr.get("title") or "", "body": pr.get("body") or ""}
 
 
-async def read(coro):
+async def read(coro, ctx=None):
     status, body = await coro
+    if ctx is not None:
+        from .delivery import _read_result
+        return _read_result(status, body, "read PR merge evidence", ctx)
     if status != 200:
         raise OperationError("MERGE_SCOPE_UNPROVEN", f"GitHub scope read returned {status}: "
                              f"{str(body.get('message') or '')[:160]}")
     return body
 
 
-async def pages(fetch) -> list:
+async def pages(fetch, ctx=None) -> list:
     result = []
     for page in range(1, 10001):
-        body = await read(fetch(page))
+        body = await read(fetch(page), ctx)
         items = body.get("items")
         if not isinstance(items, list):
             raise OperationError("MERGE_SCOPE_UNPROVEN", "GitHub omitted the paginated list")
@@ -49,15 +52,15 @@ async def pages(fetch) -> list:
     raise OperationError("MERGE_SCOPE_UNPROVEN", "GitHub pagination did not terminate")
 
 
-async def commit_range(gh, repository, base, head) -> dict:
-    first = await read(gh.compare(repository, base, head))
+async def commit_range(gh, repository, base, head, ctx=None) -> dict:
+    first = await read(gh.compare(repository, base, head), ctx)
     total = first.get("total_commits")
     commits = list(first.get("commits") or [])
     if not isinstance(total, int) or not (first.get("merge_base_commit") or {}).get("sha"):
         raise OperationError("MERGE_SCOPE_UNPROVEN", "comparison omitted its total or merge base")
     page = 2
     while len(commits) < total:
-        body = await read(gh.compare(repository, base, head, page=page))
+        body = await read(gh.compare(repository, base, head, page=page), ctx)
         more = body.get("commits") or []
         if not more or body.get("total_commits") != total:
             raise OperationError("MERGE_SCOPE_UNPROVEN", "incomplete paginated commit comparison")
@@ -77,8 +80,8 @@ async def commit_range(gh, repository, base, head) -> dict:
             "files_may_be_truncated": len(first.get("files") or []) >= 300}
 
 
-async def ancestor(gh, repository, base, head) -> bool:
-    body = await read(gh.compare(repository, base, head))
+async def ancestor(gh, repository, base, head, ctx=None) -> bool:
+    body = await read(gh.compare(repository, base, head), ctx)
     merge_base = (body.get("merge_base_commit") or {}).get("sha")
     if not merge_base or body.get("status") not in {"ahead", "behind", "identical", "diverged"}:
         raise OperationError("MERGE_SCOPE_UNPROVEN", "comparison omitted ancestry evidence")
@@ -93,25 +96,25 @@ def identity(pr: dict) -> dict:
             "base_ref": base.get("ref"), "repository_id": (base.get("repo") or {}).get("id")}
 
 
-async def scope(ops, repository: str, number: int, method: str) -> dict:
+async def scope(ops, repository: str, number: int, method: str, ctx=None) -> dict:
     gh = ops.context["github"]
-    pr = await read(gh.pull(repository, number))
+    pr = await read(gh.pull(repository, number), ctx)
     target = identity(pr)
     result = {"repository": repository, "provider": gh.cfg.api_url, "target": target, "method": method,
               "commits": [], "files": [], "stacks": [], "affected_prs": [], "blocking": [], "warnings": []}
     def block(code, message):
         result["blocking"].append({"code": code, "message": message})
     try:
-        repo = await read(gh.repository(repository))
+        repo = await read(gh.repository(repository), ctx)
         if (not target["head_repo_id"] or not target["repository_id"] or not target["base_ref"]
                 or repo.get("id") != target["repository_id"]
                 or not re.fullmatch(r"[0-9a-f]{40}", target["head_sha"] or "")
                 or not re.fullmatch(r"[0-9a-f]{40}", target["base_sha"] or "")):
             raise OperationError("MERGE_SCOPE_UNPROVEN", "missing or inconsistent repository/head/base identity")
-        stacks = await pages(lambda page: gh.stacks(repository, number, page=page))
+        stacks = await pages(lambda page: gh.stacks(repository, number, page=page), ctx)
         affected = {}
         for entry in stacks:
-            stack = await read(gh.stack(repository, entry["number"]))
+            stack = await read(gh.stack(repository, entry["number"]), ctx)
             members = stack.get("pull_requests")
             if not isinstance(members, list) or number not in [p.get("number") for p in members]:
                 raise OperationError("MERGE_SCOPE_UNPROVEN", "inconsistent native stack membership")
@@ -119,16 +122,16 @@ async def scope(ops, repository: str, number: int, method: str) -> dict:
             target_index = [p["number"] for p in members].index(number)
             for index, member in enumerate(members):
                 if member["number"] != number and member.get("state") == "open":
-                    full = await read(gh.pull(repository, member["number"]))
+                    full = await read(gh.pull(repository, member["number"]), ctx)
                     affected[full["number"]] = {**identity(full), "reason": "native_stack",
                                                 "would_merge": index < target_index,
                                                 "effect": "merge" if index < target_index else "branch_rebase"}
             block("STACKED_PR_UNSUPPORTED", "native stack members may merge or have their branches rebased")
-        comparison = await commit_range(gh, repository, target["base_sha"], target["head_sha"])
+        comparison = await commit_range(gh, repository, target["base_sha"], target["head_sha"], ctx)
         result.update(comparison)
         if comparison["merge_base_sha"] != target["base_sha"]:
             result["warnings"].append("head is behind or diverged from base; GitHub up-to-date rules apply")
-        all_prs = await pages(lambda page: gh.pulls(repository, page=page))
+        all_prs = await pages(lambda page: gh.pulls(repository, page=page), ctx)
         if any(not identity(p)["number"] or not identity(p)["repository_id"] or not identity(p)["head_repo_id"]
                or not identity(p)["head_ref"] or not identity(p)["base_ref"]
                or not re.fullmatch(r"[0-9a-f]{40}", str(identity(p)["head_sha"] or "")) for p in all_prs):
@@ -158,8 +161,8 @@ async def scope(ops, repository: str, number: int, method: str) -> dict:
             if other["number"] == number or other["number"] in affected:
                 continue
             if oi["base_ref"] == target["base_ref"] and oi["repository_id"] == target["repository_id"]:
-                reachable = await ancestor(gh, repository, oi["head_sha"], target["head_sha"])
-                if reachable and not await ancestor(gh, repository, oi["head_sha"], target["base_sha"]):
+                reachable = await ancestor(gh, repository, oi["head_sha"], target["head_sha"], ctx)
+                if reachable and not await ancestor(gh, repository, oi["head_sha"], target["base_sha"], ctx):
                     affected[other["number"]] = {**oi, "reason": "indirect_merge", "would_merge": method == "merge"}
                     if method == "merge":
                         block("MERGE_SCOPE_EXPANDED", f"PR #{other['number']} would be indirectly merged")
@@ -167,7 +170,7 @@ async def scope(ops, repository: str, number: int, method: str) -> dict:
                         result["warnings"].append(f"PR #{other['number']} shares included commits; {method} does not "
                                                   "normally close it by SHA reachability")
         result["affected_prs"] = [affected[n] for n in sorted(affected)]
-        again = identity(await read(gh.pull(repository, number)))
+        again = identity(await read(gh.pull(repository, number), ctx))
         if again != target:
             raise OperationError("MERGE_SCOPE_UNPROVEN", "PR moved while reading the scope; reload its preview")
     except (OperationError, GitHubAmbiguous, KeyError, TypeError, AttributeError) as exc:
@@ -242,10 +245,12 @@ def merge_envelope(doc: dict, *, recipe: str | None = None) -> dict:
 
 
 async def check_scope(ctx, doc: dict, *, expiry: bool = True):
+    from .delivery import _sent_write
     if expiry and doc["expires_at"] < time.time():
         raise OperationError("PREVIEW_EXPIRED", "merge preview expired; read github_pr_preview again", 409)
     try:
-        fresh = await scope(ctx.service, doc["repository"], doc["target"]["number"], doc["method"])
+        fresh = await scope(ctx.service, doc["repository"], doc["target"]["number"], doc["method"],
+                            ctx if _sent_write(ctx) else None)
     except GitHubAmbiguous as exc:
         raise NeedsAttention("MERGE_SCOPE_UNPROVEN", str(exc)) from None
     for field, code in (("head_sha", "TARGET_HEAD_CHANGED"), ("base_sha", "TARGET_BASE_CHANGED")):
@@ -265,7 +270,7 @@ async def check_scope(ctx, doc: dict, *, expiry: bool = True):
 async def verify_merge(ctx, pr: dict, doc: dict) -> dict:
     gh, repository = ctx.service.context["github"], doc["repository"]
     merged, head, base = pr.get("merge_commit_sha"), doc["target"]["head_sha"], doc["target"]["base_sha"]
-    previous = ctx.service.db.execute("SELECT name,status,response FROM operation_steps WHERE operation_id=? "
+    previous = ctx.service.db.execute("SELECT name,status,response,seq FROM operation_steps WHERE operation_id=? "
                                       "AND (name='merge.verify' OR name LIKE 'merge.verify.retry.%') "
                                       "ORDER BY seq DESC LIMIT 1", (ctx.operation_id,)).fetchone()
     if previous and previous["status"] == "succeeded":
@@ -274,14 +279,14 @@ async def verify_merge(ctx, pr: dict, doc: dict) -> dict:
             ctx.set_refs(merge_receipt=saved)
             return saved
     name = (previous["name"] if previous and previous["status"] in {"started", "uncertain"}
-            else f"merge.verify.retry.{ctx.op['attempts']}" if previous else "merge.verify")
+            else f"merge.verify.retry.{previous['seq']}" if previous else "merge.verify")
     ctx.set_refs(merged_sha=merged, merge_receipt={"merged_sha": merged, "verified": False,
                                                 "preview_id": doc["preview_id"]})
     async def verify():
         try:
             if not pr.get("merged") or not merged or (pr.get("head") or {}).get("sha") != head:
                 raise OperationError("MERGE_RESULT_UNVERIFIABLE", "GitHub has not proven the reviewed head was merged")
-            commit = await read(gh.commit(repository, merged))
+            commit = await read(gh.commit(repository, merged), ctx)
             parents = commit.get("parents") or []
             method = doc["method"]
             if not parents or (method == "merge" and (len(parents) != 2 or parents[1].get("sha") != head)):
@@ -290,26 +295,27 @@ async def verify_merge(ctx, pr: dict, doc: dict) -> dict:
             if method == "rebase":
                 cursor = merged
                 for _ in doc["commits"]:
-                    c = await read(gh.commit(repository, cursor))
+                    c = await read(gh.commit(repository, cursor), ctx)
                     ps = c.get("parents") or []
                     if len(ps) != 1:
                         raise OperationError("MERGE_RESULT_UNVERIFIABLE", "cannot determine the rebase destination")
                     cursor = ps[0]["sha"]
                 onto = cursor
-            tip = await read(gh.commit(repository, doc["target"]["base_ref"]))
-            if not await ancestor(gh, repository, base, onto) or not await ancestor(gh, repository, merged, tip["sha"]):
+            tip = await read(gh.commit(repository, doc["target"]["base_ref"]), ctx)
+            if (not await ancestor(gh, repository, base, onto, ctx)
+                    or not await ancestor(gh, repository, merged, tip["sha"], ctx)):
                 raise OperationError("MERGE_RESULT_UNVERIFIABLE", "merged result is not on the reviewed base history")
-            extra = await commit_range(gh, repository, base, onto)
+            extra = await commit_range(gh, repository, base, onto, ctx)
             candidates = {p["number"]: p for p in doc["affected_prs"]}
             # Re-read current stack membership: a stack created during the final GET -> PUT window matters too.
-            for stack in await pages(lambda page: gh.stacks(repository, doc["target"]["number"], page=page)):
-                full = await read(gh.stack(repository, stack["number"]))
+            for stack in await pages(lambda page: gh.stacks(repository, doc["target"]["number"], page=page), ctx):
+                full = await read(gh.stack(repository, stack["number"]), ctx)
                 for member in full.get("pull_requests", []):
                     if member["number"] != doc["target"]["number"]:
-                        candidates.setdefault(member["number"], identity(await read(gh.pull(repository, member["number"]))))
+                        candidates.setdefault(member["number"], identity(await read(gh.pull(repository, member["number"]), ctx)))
             # Include PRs that appeared during acceptance and vanished from stack membership after merging.
             # Only results reachable from this merge, outside its destination base, can be attributed to it.
-            for other in await recent_prs(gh, repository, ctx.op["created_at"]):
+            for other in await recent_prs(gh, repository, ctx.op["created_at"], ctx):
                 oi = identity(other)
                 merged_at = other.get("merged_at")
                 if merged_at:
@@ -321,19 +327,19 @@ async def verify_merge(ctx, pr: dict, doc: dict) -> dict:
                 if (oi["number"] != doc["target"]["number"] and (merged_at or other.get("merged"))
                         and oi["base_ref"] == doc["target"]["base_ref"]
                         and oi["repository_id"] == doc["target"]["repository_id"]):
-                    if await ancestor(gh, repository, oi["head_sha"], head):
+                    if await ancestor(gh, repository, oi["head_sha"], head, ctx):
                         candidates.setdefault(oi["number"], oi)
             outcomes = []
             for number, candidate in candidates.items():
-                other = await read(gh.pull(repository, number))
+                other = await read(gh.pull(repository, number), ctx)
                 independent = merged_after = False
                 if other.get("merged"):
                     other_sha = other.get("merge_commit_sha")
                     if not other_sha:
                         raise OperationError("MERGE_RESULT_UNVERIFIABLE", "affected PR omitted its merged SHA")
-                    independent = await ancestor(gh, repository, other_sha, onto)
-                    swept = not independent and await ancestor(gh, repository, other_sha, merged)
-                    merged_after = not independent and not swept and await ancestor(gh, repository, merged, other_sha)
+                    independent = await ancestor(gh, repository, other_sha, onto, ctx)
+                    swept = not independent and await ancestor(gh, repository, other_sha, merged, ctx)
+                    merged_after = not independent and not swept and await ancestor(gh, repository, merged, other_sha, ctx)
                     if not independent and not swept and not merged_after:
                         raise OperationError("MERGE_RESULT_UNVERIFIABLE", f"cannot attribute affected PR #{number}")
                     if swept:
@@ -354,6 +360,9 @@ async def verify_merge(ctx, pr: dict, doc: dict) -> dict:
             return {"verification_error": "MERGE_RESULT_UNVERIFIABLE", "merged_sha": merged,
                     "message": "GitHub omitted required merge evidence"}
         except OperationError as exc:
+            if exc.code.startswith("GITHUB_"):
+                return {"read_refused_before_write": True, "verification_error": exc.code,
+                        "message": exc.message, "merged_sha": merged}
             return {"verification_error": "MERGE_RESULT_UNVERIFIABLE", "message": str(exc), "merged_sha": merged}
     async def reread(_):
         return RERUN  # verification is read-only, including recovery after a process exits mid-read
@@ -364,15 +373,17 @@ async def verify_merge(ctx, pr: dict, doc: dict) -> dict:
         _check_wait(ctx, "merge_verification_wait_started_at")
         raise Wait("waiting_external", "waiting for merge verification evidence", 30)
     if receipt.get("verification_error"):
+        if receipt.get("read_refused_before_write"):
+            raise OperationError(receipt["verification_error"], receipt["message"])
         raise NeedsAttention(receipt["verification_error"], receipt["message"])
     ctx.set_refs(merge_receipt=receipt)
     return receipt
 
 
-async def recent_prs(gh, repository: str, created_at: float) -> list:
+async def recent_prs(gh, repository: str, created_at: float, ctx=None) -> list:
     result = []
     for page in range(1, 10001):
-        items = (await read(gh.pulls(repository, page=page, state="all", sort="updated", direction="desc")))["items"]
+        items = (await read(gh.pulls(repository, page=page, state="all", sort="updated", direction="desc"), ctx))["items"]
         for pr in items:
             # REST timestamps have second precision; retain the whole admission second.
             updated_at = datetime.fromisoformat(pr["updated_at"].replace("Z", "+00:00")).timestamp()
@@ -427,7 +438,7 @@ def admit_update(ops, principal, target, params, pre):
 
 
 async def run_update(ctx):
-    from .delivery import _gh, _read, _repo_or_403
+    from .delivery import _gh, _read, _read_result, _repo_or_403
     gh = _gh(ctx.service)
     repository, number = _repo_or_403(ctx.service, ctx.target["repository"]), ctx.target["pull_number"]
     async def plan():
@@ -458,8 +469,7 @@ async def run_update(ctx):
         if settled:
             return {"not_applied": settled}
         status, pr = await gh.pull(repository, number)
-        if status != 200:
-            return None
+        _read_result(status, pr, "read back uncertain PR metadata", ctx)
         observed = metadata(pr)
         if observed == p["after"]:
             return {"http_status": 200, "observed_intent": True, "write_acknowledged": False}
@@ -484,11 +494,23 @@ async def run_update(ctx):
     if w.get("http_status") != 200:
         raise OperationError(f"GITHUB_{w.get('http_status')}", "GitHub refused the metadata update")
     ctx.set_refs(write_acknowledged=w.get("write_acknowledged"), verification_pending=True)
+    previous = ctx.service.db.execute("SELECT name,status,response,seq FROM operation_steps WHERE operation_id=? "
+                                      "AND (name='pr.metadata.verify' OR name LIKE 'pr.metadata.verify.retry.%') "
+                                      "ORDER BY seq DESC LIMIT 1", (ctx.operation_id,)).fetchone()
+    retry = previous and previous["status"] == "succeeded" and json.loads(previous["response"] or "{}").get("http_status") != 200
+    name = (f"pr.metadata.verify.retry.{previous['seq']}" if retry
+            else previous["name"] if previous else "pr.metadata.verify")
     async def verify():
         status, pr = await gh.pull(repository, number)
+        try:
+            _read_result(status, pr, "read back PR metadata", ctx)
+        except NeedsAttention as exc:
+            return {"http_status": status, "read_refused": True, "code": exc.code, "message": exc.message}
         return {"http_status": status, "observed": metadata(pr),
                 "repository_id": (pr.get("base", {}).get("repo") or {}).get("id")}
-    v = await ctx.step("pr.metadata.verify", verify, request={"after_digest": digest(p["after"])}, reconcile=reread)
+    v = await ctx.step(name, verify, request={"after_digest": digest(p["after"])}, reconcile=reread)
+    if v.get("read_refused"):
+        raise NeedsAttention(v["code"], v["message"])
     if v["http_status"] != 200:
         raise NeedsAttention("PR_METADATA_UNVERIFIABLE", "cannot read back the metadata write")
     observed = v["observed"]

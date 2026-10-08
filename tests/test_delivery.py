@@ -1230,3 +1230,87 @@ async def test_verify_stops_updated_pr_pagination_at_admission(make_daemon, gh):
     paths = [p for m, p, _ in gh.requests if m == "GET" and "/pulls?" in p and "state=all" in p]
     assert len(paths) == 2 and all("sort=updated" in p and "direction=desc" in p for p in paths)
     assert "page=1&" in paths[0] and "page=2&" in paths[1]
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+@pytest.mark.parametrize("endpoint", ["pull", "commit", "compare", "recent_prs", "stacks", "affected_pull"])
+async def test_refused_read_after_merge_submit_needs_attention_and_resumes(make_daemon, gh, status, endpoint):
+    """C04/C05, plan §09/§16: refused evidence reads retain the sent merge and resume without another PUT."""
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    gh.add_pr(6, HEAD)
+    gh.merge_mode = "enqueue"
+    _, op = await preview_op(d)
+    assert (await settle(d, op["operation_id"], 1))["status"] == "waiting_external"
+    gh.merge(7)
+    pattern = {"pull": r"/pulls/7$", "commit": rf"/commits/{MERGED}$", "compare": r"/compare/",
+               "recent_prs": r"/pulls$", "stacks": r"/stacks$", "affected_pull": r"/pulls/6$"}[endpoint]
+    for _ in range(2):
+        gh.script.append(("GET", pattern, status, {}, {"message": "read permission unavailable"}))
+        held = await settle(d, op["operation_id"])
+        assert held["status"] == "needs_attention" and held["error_code"] == f"GITHUB_{status}", held
+        assert all(s["status"] != "failed" for s in held["steps"])
+        assert gh.count("PUT", "merge-async") == 1 and gh.count("POST", ".") == 0
+        d.ops.resume(TED, op["operation_id"])
+    done = await settle(d, op["operation_id"])
+    assert done["status"] == "succeeded" and done["result"]["verified"] and done["result"]["merged_sha"] == MERGED
+    assert gh.count("PUT", "merge-async") == 1
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+@pytest.mark.parametrize("lost_reply", [False, True])
+async def test_refused_read_after_metadata_write_needs_attention_and_resumes(make_daemon, gh, status, lost_reply):
+    """C07, plan §10/§15: refused ACK readback or uncertain PATCH reconcile never fails or re-PATCHes."""
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    op = await update_op(d)
+    if lost_reply:
+        gh.patch_mode = "lost_after"
+    refusal = ("GET", r"/pulls/7$", status, {}, {"message": "read permission unavailable"})
+    gh.patch_after = lambda _: gh.script.append(refusal)
+    held = await settle(d, op["operation_id"])
+    assert held["status"] == "needs_attention" and held["error_code"] == f"GITHUB_{status}", held
+    assert all(s["status"] != "failed" for s in held["steps"])
+    assert gh.pulls[7]["title"] == "Reviewed title" and gh.count("PATCH", ".") == 1
+    # Resuming before permission is repaired must remain resumable, with a fresh read each time.
+    gh.script.append(refusal)
+    d.ops.resume(TED, op["operation_id"])
+    again = await settle(d, op["operation_id"])
+    assert again["status"] == "needs_attention" and again["error_code"] == f"GITHUB_{status}", again
+    d.ops.resume(TED, op["operation_id"])
+    done = await settle(d, op["operation_id"])
+    assert done["status"] == "succeeded" and done["result"]["verified"]
+    assert gh.count("PATCH", ".") == 1
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+@pytest.mark.parametrize("phase", ["plan", "pre_patch"])
+async def test_metadata_refused_read_before_patch_fails_fast(make_daemon, gh, status, phase):
+    """C07, plan §10/§15: a recorded readonly plan or write intent alone cannot hide a pre-PATCH refusal."""
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    op = await update_op(d)
+    reads = 0
+    def refuse(method, path, _):
+        nonlocal reads
+        if method == "GET" and path == "/repos/o/r/pulls/7":
+            reads += 1
+            if reads == (1 if phase == "plan" else 2):
+                gh.script.append(("GET", r"/pulls/7$", status, {}, {"message": "no permission before PATCH"}))
+    gh.before_request = refuse
+    done = await settle(d, op["operation_id"])
+    assert done["status"] == "failed" and done["error_code"] == f"GITHUB_{status}", done
+    assert gh.count("PATCH", ".") == 0
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+async def test_readonly_merge_verification_refusal_before_write_fails_fast(make_daemon, gh, status):
+    """C04/C05, plan §16: an observed merge by another person is not this operation's recorded write."""
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    _, op = await preview_op(d)
+    gh.merge(7)  # another person merged it before this operation sent anything
+    gh.script.append(("GET", rf"/commits/{MERGED}$", status, {}, {"message": "no permission before our write"}))
+    done = await settle(d, op["operation_id"])
+    assert done["status"] == "failed" and done["error_code"] == f"GITHUB_{status}", done
+    assert gh.count("PUT", ".") == 0 and gh.count("POST", ".") == 0
