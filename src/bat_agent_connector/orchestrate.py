@@ -377,6 +377,7 @@ async def session_start(
             cwd=cwd,
             worktree_path=cwd if cwd_override else wt.get("worktreePath"),
             branch=external_branch if cwd_override else wt.get("branchName"),
+            **({"worktree_made_by": "connector"} if cwd_override else {}),
             origin_root=git_roots.get(resource_policy.norm(folder)),
             **registry_permission_fields(opts),
         )

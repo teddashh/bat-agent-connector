@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
+  connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
+  those sessions. BAT has no record of them: `batc remove-worktree` on a checkpoint session re-registered the
+  worktree under the session's workspace folder (a person's checkout in real use, copying its env files in) and
+  removed it from there, pruning that repository. New sessions record `worktree_made_by: "connector"`; older rows
+  are recognised by their `batc/` branch.
 - Projects and work items (docs/design/work-items.md, plan §05/§08/§10/§19/§20, W05): connector-owned projects (tree,
   repositories, Task Service project) and work items (goal, request verbatim, acceptance, steps, state, parent,
   `derived_from`) with stable IDs, per-parent order with pins, archive and restore that keep an entry's slot, and
