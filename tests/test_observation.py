@@ -1691,7 +1691,9 @@ async def test_b02_cursor_catchup_sse_resume_and_hidden_backfill(served):
         newest = d.journal.api_event("session", "h1/sid", "session.updated", {"n": 8})
     frame2 = await stream(latest)
     assert f"id: {newest}\n".encode() in frame2 and f"id: {latest}\n".encode() not in frame2
-    assert (await http(port, "GET", f"/api/v1/events/stream?after={newest+100}", tok=viewer))[0] == 422
+    status, reset = await http(port, "GET", f"/api/v1/events/stream?after={newest+100}", tok=viewer)
+    assert status == 409 and reset["error"]["code"] == "EVENT_CURSOR_RESET"
+    assert reset["error"]["reason"] == "cursor_ahead"
 
 
 async def test_b01_b02_b03_http_mcp_cli_contract_parity(served, mock, monkeypatch, capsys):
