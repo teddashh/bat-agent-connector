@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from bat_agent_connector import registry, service
+from bat_agent_connector import registry, service, task_control
 from bat_agent_connector.errors import OwnerConflict
 from bat_agent_connector.task_daemon import TaskDaemon
 from tests.conftest import make_config
@@ -678,6 +678,238 @@ async def test_a07_bat_refusal_records_failed_runtime_step_and_rejected_command(
     assert not created and d.ops.get(replay["operation_id"]) == result
 
 
+def command_ref_operation(d, tid, mock, kind):
+    if kind in {"send", "answer", "interrupt"}:
+        return admission_control(d, tid, mock, kind)[2]
+    if kind == "task_send":
+        return task_send_operation(d, tid, "command-refs")[0]
+    # An operator reconciliation reserves one new command beside the original uncertain command.
+    command, _ = d.journal.command(tid, "send", SID, {
+        "purpose": "goose:old", "before": {}, "prompt_sha256": "d" * 64, "control_version": 0}, "old-command")
+    d.journal.command_status(command["command_id"], "uncertain")
+    d.journal.change(tid, "uncertain")
+    cap = d.journal.issue_reconcile_capability(tid, command["command_id"])
+    target = {"task_id": tid, "command_id": command["command_id"]}
+    principal = d.capability_principal(cap, "task.command.reconcile", target, "command-refs")
+    return d.ops.create(principal, action="task.command.reconcile", target=target, params={
+        "outcome": "not_delivered", "actor": "operator", "source": "ticket-1", "evidence": "checked exact turn",
+        "next_prompt": "one instruction"}, idempotency_key="command-refs")[0]
+
+
+def assert_command_refs(d, op_id, step):
+    receipt = d.ops.db.execute("SELECT response FROM operation_steps WHERE operation_id=? AND name=? AND status='succeeded'",
+                               (op_id, step)).fetchone()
+    command = d.journal.command_get(json.loads(receipt["response"])["command_id"])
+    refs = d.ops.get(op_id)["external_refs"]
+    assert {key: refs[key] for key in ("task_id", "command_id", "control_version")} == task_control.command_refs(command)
+    return command
+
+
+@pytest.mark.parametrize("kind", ["send", "answer", "interrupt", "task_send", "prepared"])
+@pytest.mark.parametrize("boundary", ["receipt", "frame"])
+@pytest.mark.parametrize("old_row", [False, True], ids=["atomic_refs", "legacy_missing_refs"])
+async def test_a05_a07_command_refs_commit_with_receipt_and_survive_restart(owned, mock, monkeypatch, kind, boundary, old_row):
+    """A05/A07: linkage is durable before the first frame and survives lost replies/restarts."""
+    d, tid = owned
+    mock.echo_sends = True
+    mock.states[SID]["messages"] = list(mock.archives[SID])
+    op = command_ref_operation(d, tid, mock, kind)
+    op_id = op["operation_id"]
+    step = "task_command" if kind in {"send", "answer", "interrupt"} else "task_send_command"
+    channel = {"answer": "claude:resolve-ask-user", "interrupt": "claude:interrupt-turn"}.get(kind, "claude:send-message")
+    original_effect = OpContext.effect
+    original_roundtrip = d.fleet.client("h1")._roundtrip
+
+    def after_receipt(ctx, name, fn, **kwargs):
+        result = original_effect(ctx, name, fn, **kwargs)
+        if name == step:
+            assert_command_refs(d, op_id, step)
+            if boundary == "receipt":
+                raise asyncio.CancelledError("crash immediately after command/receipt/refs commit")
+        return result
+
+    async def after_frame(frame, timeout):
+        result = await original_roundtrip(frame, timeout)
+        if frame["channel"] == channel:
+            assert_command_refs(d, op_id, step)
+            if kind == "interrupt":
+                mock.metas[SID]["isStreaming"] = mock.states[SID]["isStreaming"] = False
+            raise asyncio.CancelledError("crash after command frame, before recording the outcome")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(OpContext, "effect", after_receipt)
+        if boundary == "frame":
+            patch.setattr(d.fleet.client("h1"), "_roundtrip", after_frame)
+        with pytest.raises(asyncio.CancelledError):
+            await d.ops._execute(op_id)
+    command = assert_command_refs(d, op_id, step)
+    ids = [c["command_id"] for c in d.journal.commands(tid)]
+    assert len(ids) == (2 if kind == "prepared" else 1)
+    assert d.ops.get(op_id)["external_refs"]["admission_binding"] == op["external_refs"]["admission_binding"]
+    assert len(writes(mock)) == int(boundary == "frame")
+    if old_row:
+        d.ops.db.execute("UPDATE operations SET external_refs=? WHERE operation_id=?",
+                         (json.dumps({"admission_binding": op["external_refs"]["admission_binding"]}), op_id))
+    async with restarted_daemon(d) as restarted:
+        await settle_operations(restarted.ops)
+        result = restarted.ops.get(op_id)
+        assert result["status"] == ("succeeded" if boundary == "frame" else "uncertain")
+        await restarted.coordinator.tick(tid)
+        status = "accepted" if kind in {"send", "task_send", "prepared"} else "settled"
+        assert restarted.journal.command_get(command["command_id"])["status"] == (status if boundary == "frame" else "uncertain")
+        assert_command_refs(restarted, op_id, step)
+        assert [c["command_id"] for c in restarted.journal.commands(tid)] == ids
+        assert len(writes(mock)) == int(boundary == "frame")
+
+
+async def test_a05_reconcile_reservation_commits_new_command_refs_before_dispatch_receipt(owned, mock, monkeypatch):
+    d, tid = owned
+    mock.echo_sends = True
+    op = command_ref_operation(d, tid, mock, "prepared")
+    original_effect = OpContext.effect
+
+    def after_reservation(ctx, name, fn, **kwargs):
+        result = original_effect(ctx, name, fn, **kwargs)
+        if name == "task_reconcile":
+            command = d.journal.command_get(result["_next_command_id"])
+            refs = d.ops.get(op["operation_id"])["external_refs"]
+            assert {k: refs[k] for k in ("task_id", "command_id", "control_version")} == task_control.command_refs(command)
+            raise asyncio.CancelledError("crash after reserving the operator command, before its dispatch receipt")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(OpContext, "effect", after_reservation)
+        with pytest.raises(asyncio.CancelledError):
+            await d.ops._execute(op["operation_id"])
+    ids = [c["command_id"] for c in d.journal.commands(tid)]
+    assert len(ids) == 2 and not writes(mock)
+    assert not any(s["name"] == "task_send_command" for s in d.ops.get(op["operation_id"])["steps"])
+    async with restarted_daemon(d) as restarted:
+        await settle_operations(restarted.ops)
+        done = restarted.ops.get(op["operation_id"])
+        assert done["status"] == "succeeded"
+        assert_command_refs(restarted, op["operation_id"], "task_send_command")
+        assert [c["command_id"] for c in restarted.journal.commands(tid)] == ids
+        assert [frame["channel"] for frame in writes(mock)] == ["claude:send-message"]
+
+
+@pytest.mark.parametrize("continuation", [False, True], ids=["submit", "continuation"])
+@pytest.mark.parametrize("old_row", [False, True], ids=["atomic_refs", "legacy_missing_refs"])
+async def test_a05_submission_refs_commit_with_receipt_and_replay_without_effect(owned, mock, monkeypatch, continuation, old_row):
+    d, tid = owned
+    params = {"project": "p", "original_words": "one instruction"}
+    if continuation:
+        params.update(continuation=True, parent_task_id=tid)
+    op, _ = d.ops.create(api_auth.Principal("caller", frozenset({"start"})), action="task.submit",
+                         target={"host": "h1", "workspace": "demo-project"}, params=params,
+                         idempotency_key="submission-refs")
+    step = "task_continuation" if continuation else "task_submit"
+    original_effect = OpContext.effect
+
+    def after_receipt(ctx, name, fn, **kwargs):
+        result = original_effect(ctx, name, fn, **kwargs)
+        if name == step:
+            assert d.ops.get(op["operation_id"])["external_refs"]["task_id"] == result["task_id"]
+            raise asyncio.CancelledError("crash after submitting task and committing its refs")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(OpContext, "effect", after_receipt)
+        with pytest.raises(asyncio.CancelledError):
+            await d.ops._execute(op["operation_id"])
+    refs = d.ops.get(op["operation_id"])["external_refs"]
+    snapshot = task_effect_snapshot(d, refs["task_id"])
+    count = d.journal.db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    if old_row:
+        retained = {"admission_binding": refs["admission_binding"]} if continuation else {}
+        d.ops.db.execute("UPDATE operations SET external_refs=? WHERE operation_id=?", (json.dumps(retained), op["operation_id"]))
+
+    def no_effect(*args, **kwargs):
+        pytest.fail("saved submission receipt must not rerun its effect")
+
+    async with restarted_daemon(d) as restarted:
+        monkeypatch.setattr(restarted.journal, "record_continuation" if continuation else "submit", no_effect)
+        await settle_operations(restarted.ops)
+        done = restarted.ops.get(op["operation_id"])
+        assert done["status"] == "succeeded" and done["external_refs"] == refs
+        assert done["result"]["task_id"] == refs["task_id"]
+        assert task_effect_snapshot(restarted, refs["task_id"]) == snapshot
+        assert restarted.journal.db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == count
+        assert not writes(mock)
+
+
+@pytest.mark.parametrize("kind", ["send", "answer", "interrupt", "task_send", "prepared"])
+@pytest.mark.parametrize("keep_binding", [False, True], ids=["preupgrade_unbound", "bound"])
+async def test_a05_old_command_receipt_replay_repairs_refs_without_repeating_effect(owned, mock, monkeypatch, kind, keep_binding):
+    d, tid = owned
+    mock.echo_sends = True
+    mock.states[SID]["messages"] = list(mock.archives[SID])
+    op = command_ref_operation(d, tid, mock, kind)
+    if kind == "interrupt":
+        mock.metas[SID]["isStreaming"] = mock.states[SID]["isStreaming"] = False
+    await settle_operations(d.ops)
+    done = d.ops.get(op["operation_id"])
+    assert done["status"] == "succeeded"
+    d.journal.pause(tid)
+    d.journal.resume(tid)
+    snapshot = task_effect_snapshot(d, tid)
+    ids = [c["command_id"] for c in d.journal.commands(tid)]
+    frames = len(writes(mock))
+    refs = done["external_refs"]
+    retained = {"admission_binding": refs["admission_binding"]} if keep_binding else {}
+    d.ops.db.execute("UPDATE operations SET external_refs=?,status='running',result=NULL WHERE operation_id=?",
+                     (json.dumps(retained), op["operation_id"]))
+
+    def no_new_command(*args, **kwargs):
+        pytest.fail("repair must replay the receipt, never create a command")
+
+    async with restarted_daemon(d) as restarted:
+        monkeypatch.setattr(restarted.journal, "command", no_new_command)
+        await settle_operations(restarted.ops)
+        result = restarted.ops.get(op["operation_id"])
+        assert result["status"] == "succeeded" and result["result"] == done["result"]
+        assert result["steps"] == done["steps"]
+        assert {k: result["external_refs"][k] for k in ("task_id", "command_id", "control_version")} == {
+            k: refs[k] for k in ("task_id", "command_id", "control_version")}
+        assert (result["external_refs"].get("admission_binding") or None) == retained.get("admission_binding")
+        assert task_effect_snapshot(restarted, tid) == snapshot
+        assert [c["command_id"] for c in restarted.journal.commands(tid)] == ids
+        assert len(writes(mock)) == frames
+        first_repair = restarted.ops.get(op["operation_id"])
+        task_control.replay_command_refs(OpContext(restarted.ops, restarted.ops._row(op["operation_id"])))
+        assert restarted.ops.get(op["operation_id"]) == first_repair
+
+
+async def test_a05_command_receipt_and_refs_roll_back_together(owned, monkeypatch):
+    d, tid = owned
+    op, _ = task_send_operation(d, tid, "refs-rollback")
+    ctx = OpContext(d.ops, d.ops._row(op["operation_id"]))
+    original = d.ops._merge_refs
+    before = d.ops.get(op["operation_id"])["external_refs"]
+
+    def create():
+        command, fresh = d.journal.command(tid, "send", SID, {"control_version": 0}, "refs-rollback")
+        return {**command, "fresh": fresh}
+
+    def crash_after_merge(operation_id, refs):
+        original(operation_id, refs)
+        raise asyncio.CancelledError("crash during nested refs savepoint")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(d.ops, "_merge_refs", crash_after_merge)
+        with pytest.raises(asyncio.CancelledError):
+            ctx.effect("task_send_command", create, refs=task_control.command_refs)
+    assert not d.journal.commands(tid)
+    assert d.ops.get(op["operation_id"])["external_refs"] == before
+    assert d.ops.get(op["operation_id"])["steps"][0]["status"] == "started"
+    command = ctx.effect("task_send_command", create, refs=task_control.command_refs)
+    assert_command_refs(d, op["operation_id"], "task_send_command")
+    assert len(d.journal.commands(tid)) == 1
+    assert command["command_id"] == d.journal.commands(tid)[0]["command_id"]
+    d.ops.cancel(api_auth.Principal("local-admin", frozenset(), admin=True), op["operation_id"])
+
+
 def assert_terminal_send_replay(d, tid, op, code, commands, frames, mock):
     refused = d.ops.get(op["operation_id"])
     assert refused["status"] == "failed" and refused["error_code"] == code
@@ -708,17 +940,18 @@ async def test_a05_a07_cancelled_send_command_survives_restart_without_uncertain
             patch.setattr(d.coordinator, "_send", initial_send)
             patch.setattr(d.adapter, "session_presence", presence)
         else:
-            original_refs = d.ops._merge_refs
+            original_effect = OpContext.effect
 
-            def pause_after_command_receipt(operation_id, refs):
-                original_refs(operation_id, refs)
-                if refs.get("command_id"):
+            def pause_after_command_receipt(ctx, name, fn, **kwargs):
+                result = original_effect(ctx, name, fn, **kwargs)
+                if name == "task_send_command":
                     if boundary == "other_cancel":
-                        d.journal.command_status(refs["command_id"], "cancelled")
+                        d.journal.command_status(result["command_id"], "cancelled")
                     else:
                         d.journal.pause(tid)
+                return result
 
-            patch.setattr(d.ops, "_merge_refs", pause_after_command_receipt)
+            patch.setattr(OpContext, "effect", pause_after_command_receipt)
         stop_after_command_status(d, patch, "cancelled")
         with pytest.raises(asyncio.CancelledError):
             await d.ops._execute(op["operation_id"])

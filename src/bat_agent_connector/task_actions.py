@@ -142,6 +142,7 @@ def admit_reconcile(ops, principal, target, params, pre):
 
 
 async def run(ctx):
+    task_control.replay_command_refs(ctx)
     method = next(k for k, v in METHODS.items() if v == ctx.op["action"])
     params = {**ctx.params, **ctx.target}
     params.pop("legacy_idempotency_key", None)
@@ -203,6 +204,7 @@ async def send(ctx):
         return await ctx.step("task_send_refusal", failed, request={"code": exc.code, "message": message},
                               reconcile=local_readback)
     async with coordinator._task_locks.setdefault(tid, asyncio.Lock()):
+        task_control.replay_command_refs(ctx)
         # The refusal intent itself binds the decision, even if the process died before its failed receipt.
         refusal = ctx.service.db.execute("SELECT request FROM operation_steps WHERE operation_id=? AND name='task_send_refusal'",
                                           (ctx.operation_id,)).fetchone()
@@ -219,8 +221,7 @@ async def send(ctx):
         if not ctx.service.db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? AND name='task_binding'",
                                       (ctx.operation_id,)).fetchone():
             task_control.check_binding(ctx)
-        binding = ctx.effect("task_binding", bind)
-        ctx.set_refs(task_id=tid, **binding)
+        binding = ctx.effect("task_binding", bind, refs=lambda result: {"task_id": tid, **result})
         recovering = ctx.service.db.execute(
             "SELECT 1 FROM operation_steps WHERE operation_id=? AND name='task_send_command' AND status='succeeded'",
             (ctx.operation_id,)).fetchone()

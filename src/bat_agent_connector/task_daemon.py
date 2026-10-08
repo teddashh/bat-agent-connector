@@ -379,7 +379,7 @@ class TaskDaemon:
                         return {"recorded": self.journal.record_continuation(parent_id, params["idempotency_key"],
                                                                             params["original_words"]),
                                 "task_id": parent_id}
-                    _ctx.effect("task_continuation", continuation)
+                    _ctx.effect("task_continuation", continuation, refs=lambda result: {"task_id": result["task_id"]})
                     return {"task_id": parent_id, "state": self.journal.get(parent_id)["state"],
                             "submitted_at": parent["submitted_at"], "engine": parent["engine"],
                             "task_path": parent["task_path"], "continuation": True,
@@ -423,7 +423,8 @@ class TaskDaemon:
                             "jev_backend": None,
                             "reason": "presplit_" + params["pm_provider"] if params.get("pm_provider")
                                       else "goose_session"}
-                task = _ctx.effect("task_submit", lambda: self.journal.submit(**params))
+                task = _ctx.effect("task_submit", lambda: self.journal.submit(**params),
+                                   refs=lambda result: {"task_id": result["task_id"]})
             return {"task_id": task["task_id"], "state": task["state"],
                     "submitted_at": task["submitted_at"], "engine": task["engine"],
                     "task_path": task["task_path"],

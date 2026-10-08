@@ -9,7 +9,7 @@ import re
 import uuid
 from typing import Protocol
 
-from . import registry
+from . import registry, task_control
 from .errors import BatError, TaskControlRefused, TaskDispatchCancelled, TaskIdentityMismatch, WriteRefused
 from .model_router import MinimalReviewGate, ModelRouter
 from .operations import AMBIGUOUS, AmbiguousOutcome, StepFailed, _error_code
@@ -224,11 +224,8 @@ class TaskCoordinator:
                                                     (params["message_id"], command["command_id"]))
                             command = self.journal.command_get(command["command_id"])
                         return {**command, "fresh": fresh}
-                command = context.effect("task_command", intent) if context else intent()
+                command = context.effect("task_command", intent, refs=task_control.command_refs) if context else intent()
                 fresh = command["fresh"]
-                if context:
-                    context.set_refs(task_id=task_id, command_id=command["command_id"],
-                                     control_version=task["control_version"])
                 if not fresh:
                     raise TaskControlRefused("TASK_RECONCILIATION_REQUIRED", "existing command must be read back")
                 guard = FrameGuard(self.journal, task_id, host, sid, task["control_version"],
@@ -487,6 +484,7 @@ class TaskCoordinator:
         async with self._lock(task["host"], sid):
             task = self.journal.get(task["task_id"])
             if operation:
+                task_control.replay_command_refs(operation)
                 receipt = operation.service.db.execute(
                     "SELECT response FROM operation_steps WHERE operation_id=? AND name='task_send_result' AND status='succeeded'",
                     (operation.operation_id,)).fetchone()
@@ -548,8 +546,8 @@ class TaskCoordinator:
                     raise ValueError("prepared operator prompt does not match journal intent")
                 before = payload["before"]
                 if operation:
-                    operation.effect("task_send_command", lambda: {**cmd, "fresh": True})
-                    operation.set_refs(task_id=task["task_id"], command_id=cmd["command_id"])
+                    operation.effect("task_send_command", lambda: {**cmd, "fresh": True},
+                                     refs=task_control.command_refs)
             else:
                 key = (f"{task['task_id']}:{purpose}:{task['review_rejections']}:{task['continuations']}:"
                        f"{task['control_version']}:"
@@ -569,11 +567,9 @@ class TaskCoordinator:
                          "prompt_sha256": hashlib.sha256(text.encode()).hexdigest()},
                         "op:" + operation.operation_id if operation else key)
                     return {**cmd, "fresh": fresh}
-                cmd = operation.effect("task_send_command", command_effect) if operation else command_effect()
+                cmd = operation.effect("task_send_command", command_effect,
+                                       refs=task_control.command_refs) if operation else command_effect()
                 fresh = cmd["fresh"]
-                if operation:
-                    operation.set_refs(task_id=task["task_id"], command_id=cmd["command_id"],
-                                       control_version=task["control_version"])
                 if not fresh:
                     unsent = await self._recover_unsent_send(task, cmd)
                     if unsent is not None:
@@ -1034,12 +1030,19 @@ class TaskCoordinator:
         async with self._task_locks.setdefault(task_id, asyncio.Lock()):
             task = self.journal.get(task_id)
             command = self.journal.command_get(command_id)
+            expected_version = operation.effective_preconditions.get("control_version", task["control_version"]) if operation else None
+            def reconciliation_refs(result):
+                if result.get("_next_command_id"):
+                    return task_control.command_refs(self.journal.command_get(result["_next_command_id"]))
+                return {"task_id": task_id, "command_id": command_id,
+                        "control_version": operation.effective_preconditions.get("control_version", result.get("control_version"))}
             if operation:
                 receipt = operation.service.db.execute(
                     "SELECT response FROM operation_steps WHERE operation_id=? AND name='task_reconcile' AND status='succeeded'",
                     (operation.operation_id,)).fetchone()
                 if receipt:
-                    result = json.loads(receipt["response"])
+                    result = operation.effect("task_reconcile", lambda: json.loads(receipt["response"]),
+                                              refs=reconciliation_refs)
                     if next_prompt is not None and result.get("_next_command_id"):
                         return await self._send(result, command["session_id"], next_prompt,
                                                 "operator:" + command_id,
@@ -1049,9 +1052,6 @@ class TaskCoordinator:
             if operation:
                 from .task_control import check_binding
                 check_binding(operation)
-            expected_version = operation.effective_preconditions.get("control_version", task["control_version"]) if operation else None
-            if operation:
-                operation.set_refs(task_id=task_id, command_id=command_id, control_version=expected_version)
             def check_version():
                 if operation:
                     check_binding(operation)
@@ -1069,7 +1069,7 @@ class TaskCoordinator:
                     check_version()
                     return self.journal.resolve_failover(task_id, command_id, handoff["command_id"],
                         token=token, token_hash=token_hash, outcome=outcome, actor=actor, source=source, evidence=evidence)
-                return operation.effect("task_reconcile", resolve_failover) if operation else resolve_failover()
+                return operation.effect("task_reconcile", resolve_failover, refs=reconciliation_refs) if operation else resolve_failover()
             if next_prompt is not None:
                 if not isinstance(next_prompt, str) or not next_prompt.strip() or len(next_prompt) > 18_000:
                     raise ValueError("invalid new prompt")
@@ -1101,7 +1101,7 @@ class TaskCoordinator:
                     if next_prompt is not None else None, next_before=next_before,
                     operation_id=operation.operation_id if operation else None,
                 )
-            result = operation.effect("task_reconcile", resolve) if operation else resolve()
+            result = operation.effect("task_reconcile", resolve, refs=reconciliation_refs) if operation else resolve()
             if next_prompt is not None:
                 return await self._send(result, command["session_id"], next_prompt,
                                         "operator:" + command_id,
