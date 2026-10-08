@@ -17,6 +17,8 @@
   single link); edited, extra or missing content and unexpected directories require reviewed discard authority.
   Until the artifacts adapter supplies that evidence, all `.batc-inputs/` content follows ordinary retention rules.
   An HTTP regression test pins server-recorded acceptance authority and retries of the same public request.
+  Joint worktree/branch cleanup is covered by succeeded receipts for both items. A branch moved after its worktree
+  removal now returns PREVIEW_STALE before writing its retained ref.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps

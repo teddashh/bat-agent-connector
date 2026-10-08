@@ -232,6 +232,9 @@ Validation 成功後保存同 fingerprint 的完整 document、accepted authoriz
 每個 item 的 DAG：validate → preserve → stop（若列出 idle loaded session）→ discard（明選才有）→
 remove.worktree／remove.temporary → remove.branch（只有 delivered）→ finalize。Session、worktree、branch
 各有 item ID；worktree 依賴對應 session 已停止。steps 命名 item.<id>.<phase>.a<attempt>。
+Local branch 的 only=resource_id snapshot 若無 repository projection，不重建 branch item，沿用 reviewed
+item（actual is None）；不把 worktree 已完成的 planned transition 誤判 stale。Host 在同一 flock 下、
+寫 branch retained ref 前核 exact branch SHA，移動即 PREVIEW_STALE、無 ref 寫入；刪除時仍核 checkout 與 CAS。
 
 | 副作用 | 限制 |
 |---|---|
@@ -379,6 +382,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | release保留內容只需cleanup／discard需scope；E01 | test_e01_release_keeps_commits_with_cleanup_scope、test_e01_discard_requires_cleanup_discard |
 | purepreview/token/stale/expiry；E01 | test_e01_preview_is_pure_and_signed_plan_cannot_be_changed、test_e01_stale_any_item_stops_before_mutation_and_reports_changes |
 | canonical/policy/preserve/nonforce/CAS；E01 | test_e01_every_mutation_rechecks_policy_and_canonical_destination、test_e01_preserve_precedes_nonforced_remove_and_cas_checks_delivered_refs |
+| 同 apply 的 worktree／branch 回執均成功；移除後 branch 移動先拒絕；E01 | test_e01_preserve_precedes_nonforced_remove_and_cas_checks_delivered_refs（branch snapshot actual is None）、test_e01_branch_moved_after_worktree_removal_is_stale（PREVIEW_STALE、所有 refs 不變） |
 | crashedcheckpoint/handoff／未決start-stop；E01 | test_e01_crashed_continue_and_handoff_intents_are_discovered_without_adoption、test_e01_pending_start_stop_and_waiting_sessions_are_retained |
 | partsuccess/restart/lostreply；E01 | test_e01_partial_cleanup_resumes_only_unfinished_unchanged_items、test_e01_lost_replies_reconcile_each_cleanup_phase、test_e01_cancel_reconciles_sent_steps_and_releases_only_confirmed_reservations |
 | 原ID/位置/原因/relations/PR與真retained；E01/E02 | test_e01_original_ids_remain_searchable_with_location_reason_and_pr（同測試移除實際ref，確認列為unavailable） |
