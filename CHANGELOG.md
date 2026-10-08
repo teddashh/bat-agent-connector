@@ -50,6 +50,9 @@
   OBSERVATION_UNAVAILABLE. Initial and per-item observations skip unconfigured hosts; BAT, SSH, apply and retained
   reads check configuration before client/runner lookup. Configured-host items still plan normally, and registry
   reservations and tombstones survive host removal.
+  All host mutations require the locked consumer gate. Process, transport, decoding and malformed-reply failures
+  after permission now remain uncertain with their reservation kept and settle by read-back; failures before
+  permission remain definitive because the host helper aborts on EOF or refusal without writing.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps

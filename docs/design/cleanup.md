@@ -311,6 +311,17 @@ Discard 的 tracked／staged after-state 未完整成立時，不猜哪些 resto
 Partial evidence 列 removed／changed（before/after facts）／added／remaining、directories、refs 與 repository identity。
 讀不到時維持 unknown／uncertain，不以空集合假裝已刪；partial 未被解釋前，不因之後的 refusal 釋放 guard。
 
+所有可能寫入的 host phase：lock.session（gate 內呼叫既有 BAT stop）、preserve、discard、remove.worktree、
+remove.temporary、remove.branch，必須提供 locked_check；_host_call 與 cleanup_host.mutate 都拒絕缺 gate。
+Helper 的 mutate 在 flock／identity 核對後輸出 locked，並以 select／readline 等待明確 `{proceed:true}`；
+EOF／refusal／deadline 不進入任何 mutation。checkpoints._run_locked 在 check 拒絕或 exchange 失敗時關閉 stdin，
+cleanup_host.mutate 的 proceed 分支保證此界線前失敗沒有寫入。
+Gate 通過（checked=true）後，runner process／transport／timeout／decode／reply schema 失敗都轉
+MutationUncertain，synthetic host_error=CLEANUP_HOST_PROTOCOL_UNCERTAIN；缺 result／error、錯誤型別或
+phase completion 欄位不足都不能當成功。合法 `{error:code}` 仍可表示 helper 尚未寫入的 definitive refusal；
+`mutated:true` 的合法 error 仍 uncertain。Gate 前 exchange 失敗是 CLEANUP_HOST_REFUSED，不重送寫入，
+step definitive failed；canonical_paths／observation／verify.retained 是 read-only，沿用原錯誤處理。
+
 ### 錯誤代碼
 
 | code | HTTP／下一步 |
@@ -330,6 +341,8 @@ Partial evidence 列 removed／changed（before/after facts）／added／remaini
 | WORKTREE_REMOVE_REFUSED／REF_CHANGED | 409，非force Git拒絕／CAS不符，保留回執重preview |
 | STOP_UNPROVEN／EXTERNAL_EFFECT_UNPROVEN／UNCERTAIN_UNRESOLVED | uncertain／needs_attention，讀回不重送 |
 | CLEANUP_MUTATION_UNCERTAIN | per-item uncertain，host 回 mutated=true；保存 host code／effects、保留 guard，讀回核對原 intent |
+| CLEANUP_HOST_PROTOCOL_UNCERTAIN | gate 已通過但 transport／process／decode／schema 無可靠回覆；同 uncertain／guard／reconcile 路徑 |
+| CLEANUP_HOST_REFUSED／CLEANUP_GATE_REQUIRED | 409，gate 前 exchange 失敗／mutation 缺 gate；helper 未獲 proceed，不會寫入 |
 | CLEANUP_PARTIAL_STATE | operation needs_attention、step／item uncertain；保存 removed／changed／remaining 等證據，guard 保留；不能把 partial 當 success |
 | LEGACY_CLEANUP_DISABLED | 409，改用batc resource-cleanup |
 | IDEMPOTENCY_CONFLICT／IDEMPOTENCY_KEY_REQUIRED／NOT_RESUMABLE | 沿用OperationService |
@@ -461,6 +474,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | crashedcheckpoint/handoff／未決start-stop；E01 | test_e01_crashed_continue_and_handoff_intents_are_discovered_without_adoption、test_e01_pending_start_stop_and_waiting_sessions_are_retained |
 | partsuccess/restart/lostreply；E01 | test_e01_partial_cleanup_resumes_only_unfinished_unchanged_items、test_e01_lost_replies_reconcile_each_cleanup_phase、test_e01_cancel_reconciles_sent_steps_and_releases_only_confirmed_reservations |
 | post-mutation error 保持 uncertain／guard；partial reconcile；E01 | test_e01_temporary_post_mutation_failure_keeps_guard_and_reconciles（第二次 unlink／root rmdir failure，原 subset 安全續刪）、test_e01_discard_restore_failure_after_unlink_reports_partial_evidence（needs_attention、removed／remaining）、test_e01_preserve_failure_after_a_pin_completes_missing_pins |
+| locked gate 後 process／protocol failure；E01／§23 lost-reply | test_e01_post_gate_transport_and_protocol_failures_reconcile（GitCommandFailed／timeout／OSError／disconnect／truncated／not JSON／{}／malformed result）、test_e01_eof_during_locked_check_refuses_without_mutation、test_e01_mutating_phase_requires_locked_gate |
 | mutation 前 refusal 仍 definitive；E01 | test_e01_refusal_before_host_mutation_stays_definitive（PREVIEW_STALE、failed step、零 ref write、guard 釋放） |
 | partial temporary 的新內容／missing pin 不能續刪；E01/E02 | test_e01_partial_temporary_unreviewed_changes_or_missing_pins_need_attention（exact removed／changed／added／remaining、缺 retained 證據、不再改檔、guard 保留） |
 | 原ID/位置/原因/relations/PR與真retained；E01/E02 | test_e01_original_ids_remain_searchable_with_location_reason_and_pr（同測試移除實際ref，確認列為unavailable） |
