@@ -83,3 +83,74 @@ async def test_legacy_run_blocks_alias_of_real_environment_until_provider_termin
     assert d.ops.get(old["operation_id"])["status"] == "cancelled"
     await settle(d, pending["operation_id"], rounds=1)
     assert gh.count("POST", "dispatches") == 1
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["admitted", "legacy"])
+async def test_cancelled_combined_on_merge_holds_slot_through_late_push_run(make_daemon, gh, legacy):
+    from bat_agent_connector import pr_delivery
+
+    d = make_daemon(mode="on_merge")
+    gh.add_pr(7, HEAD)
+    if legacy:
+        op, dep = legacy_operation(d, merge=True)
+        dep_id = dep["deployment_id"]
+    else:
+        gh.merge_mode = "enqueue"
+        doc = (await delivery.pr_preview(d.ops, "o/r", 7))["merge_preview"]
+        envelope = pr_delivery.merge_envelope(doc, recipe="prod")
+        envelope["preconditions"].update((await deployment.preview(d.ops, "prod"))["preconditions"])
+        op = d.ops.create(TED, **envelope, idempotency_key="combined")[0]
+        waiting = await settle(d, op["operation_id"], rounds=1)
+        dep_id = waiting["external_refs"]["deployment_id"]
+        d.ops.cancel(TED, op["operation_id"])
+    writes = gh.count("PUT", "merge-async")
+    await delivery.reconcile_deployments(d.ops)
+    assert not deployment.get(d.ops, dep_id)["provider_terminal"]
+    gh.merge(7)
+    await delivery.reconcile_deployments(d.ops)
+    dep = deployment.get(d.ops, dep_id)
+    assert not dep["provider_terminal"] and dep["identity"]["source_sha"] == MERGED
+    assert dep["merge_binding"]["reviewed_head_sha"] == HEAD
+    with pytest.raises(OperationError) as e:
+        await start(d, key="blocked")
+    assert e.value.code == "DEPLOY_IN_PROGRESS"
+    run = gh.add_run(head_sha=MERGED, event="push")
+    await delivery.reconcile_deployments(d.ops)
+    assert deployment.get(d.ops, dep_id)["run_id"] == run["id"]
+    assert not deployment.get(d.ops, dep_id)["provider_terminal"]
+    completed(gh, run["id"])
+    await delivery.reconcile_deployments(d.ops)
+    assert deployment.get(d.ops, dep_id)["provider_terminal"]
+    await start(d, key="unblocked")
+    assert d.ops.get(op["operation_id"])["status"] == "cancelled"
+    assert gh.count("PUT", "merge-async") == writes and gh.count("POST", "dispatches") == 0
+
+
+async def test_legacy_cancelled_dispatch_merge_uses_config_mode_and_never_locates_push(make_daemon, gh):
+    d = make_daemon()
+    gh.add_pr(7, HEAD)
+    op, dep = legacy_operation(d, merge=True)
+    gh.merge(7)
+    await delivery.reconcile_deployments(d.ops)
+    assert deployment.get(d.ops, dep["deployment_id"])["provider_terminal"]
+    assert deployment.get(d.ops, dep["deployment_id"])["recipe_snapshot"]["mode"] == "workflow_dispatch"
+    assert gh.count("GET", "/runs") == gh.count("POST", "dispatches") == gh.count("PUT", "merge-async") == 0
+    assert d.ops.get(op["operation_id"])["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("case", ["wrong_head", "off_ref", "closed"])
+async def test_cancelled_legacy_on_merge_requires_reviewed_head_and_ref_or_unmerged_close(make_daemon, gh, case):
+    d = make_daemon(mode="on_merge")
+    pr = gh.add_pr(7, HEAD)
+    _, dep = legacy_operation(d, merge=True)
+    if case == "closed":
+        pr["state"] = "closed"
+    else:
+        gh.merge(7)
+        if case == "wrong_head":
+            pr["head"]["sha"] = "1" * 40
+        else:
+            gh.branches["main"] = "b" * 40
+    await delivery.reconcile_deployments(d.ops)
+    assert deployment.get(d.ops, dep["deployment_id"])["provider_terminal"] == (case == "closed")
+    assert gh.count("GET", "/runs") == gh.count("POST", "dispatches") == gh.count("PUT", "merge-async") == 0
