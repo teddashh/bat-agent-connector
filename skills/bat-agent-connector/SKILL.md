@@ -3,9 +3,38 @@ name: bat-agent-connector
 description: Use this when you need to check on, read, wait for, or (only when explicitly enabled and asked) nudge Claude Code / Codex agent sessions running in Better Agent Terminal (BAT), or fan a project plan out into parallel BAT worktree sessions.
 version: 0.2.4
 license: MIT
+metadata:
+  workflow_version: "2026-10-08.1"
+  api_version: "1"
+  contract_version: "2026-10-08"
 ---
 
 # Better Agent Terminal (BAT) connector
+
+## Connect or reconnect
+
+1. Check the configured Connector endpoint and MCP initialization `serverInfo` (name/version). Read
+   `capabilities_get()` before operations: it returns `connector`, `api_version`, `contract_version`, `actor`,
+   `scopes`, allowed `actions`, hosts and features. HTTP clients can also read `GET /api/v1/version`.
+   These versions identify compatibility, not a unique server identity; this API has no `skill_version` field.
+   Compare with this bundle's version metadata and inspect the current MCP tool schemas. A missing tool, denied
+   action or unavailable feature is not permission to use raw BAT or shell instead.
+2. Supply your own principal's token through `BATC_API_TOKEN` in the MCP server environment. Check that the returned
+   `actor` is yours; an unexpected `local-admin` read result is not your authorization to write. Keep credentials
+   outside skill files and session prompts. A CLI adapter may use the same central operation and identity;
+   changing transports must not bypass a refusal.
+3. Recover saved context before new work: read `work_item_get(work_item_id)` and its links, known tasks with
+   `work_status(task_id)`, `inventory_sessions`, and `operations_list` / `operation_get(operation_id)`.
+   Preserve distinct work item, task, operation, session and checkpoint IDs. An idle session, missing tab or stale
+   inventory row does not prove completion or death. `accepted` only means the intent was recorded.
+4. Save the endpoint, actor, exact request (including preconditions), idempotency key and returned operation ID.
+   After a lost reply, read the original operation. If its ID was never received, look for it in `operations_list`;
+   replay only the identical request with the original key and actor to recover its receipt. Never use a new key,
+   restart a session, or clear a claim to resolve an uncertain result. Preserve reserved IDs and external refs.
+5. Choose the supported workflow: work-item updates manage records; a direct managed session runs bounded work;
+   a Task Service recipe uses the discovered `work_submit` schema and the person's exact `original_words`.
+   Reconnecting does not create another task or re-split an existing one. Apply only the workflows whose tools and
+   capabilities this server actually exposes; an older bundle is not evidence of installed functionality.
 
 ## Concept
 
@@ -33,7 +62,7 @@ license: MIT
 | Sessions, newest activity first | `sessions_list(host?, workspace?, agent?, active_within_hours?)` | `batc sessions [HOST] --active-within 24` |
 | Read recent messages | `session_read(host, session_id, last_n, offset, after?)` | `batc read HOST SID -n 20 [--after MARKER]` |
 | Wait for turn end / question | `session_wait(host, session_id, timeout_s, after?)` | `batc wait HOST SID --timeout 600 [--after MARKER]` |
-| Worktree state / diff | `worktree_status(host)`, `session_worktree_status(host, sid, include_diff)` | `batc worktrees HOST`, `batc wt-status HOST SID --diff` |
+| Worktree state / diff | `worktree_status(host)`, `session_worktree_status(host, session_id, include_diff)` | `batc worktrees HOST`, `batc wt-status HOST SID --diff` |
 | Send a message (write) | `session_send(..., confirm=true)` | `batc send HOST SID "text" --confirm` |
 | Nudge "continue" (write) | `session_continue(..., confirm=true)` | `batc continue HOST SID --confirm` |
 | Interrupt (write) | `session_interrupt(mode=soft/hard, confirm=true)` | `batc interrupt HOST SID --mode soft --confirm` |
@@ -42,14 +71,14 @@ license: MIT
 | Merge / remove worktree (orchestrate) | `worktree_merge`, `worktree_remove` | `batc merge ...`, `batc remove-worktree ...` |
 | Classify sessions (quota, waiting, working, done) | `sessions_triage(host?, states?)`, `quota_sessions(host?)` | `batc triage [HOST] --state ...`, `batc quota` |
 | Approve pending permission prompts (write) | `approve_pending(host, confirm=true, dry_run?)` | `batc approve-pending HOST --confirm` |
-| Change a session's permissions (write) | `session_set_permissions(host, sid, mode, confirm=true)` | `batc permissions HOST SID --mode allow_all --confirm` |
+| Change a session's permissions (write) | `session_set_permissions(host, session_id, mode, confirm=true)` | `batc permissions HOST SID --mode allow_all --confirm` |
 | Move a quota-stopped Claude session to Codex (orchestrate) | `session_failover(host, session_id \| all_exhausted=true, confirm=true, dry_run?)` | `batc failover HOST [SID] --all-exhausted --confirm` |
-| Gated cleanup of finished sessions (orchestrate) | `session_cleanup(host, confirm=true, dry_run=false)` | `batc cleanup HOST --apply --confirm` |
+| Legacy cleanup evaluation (orchestrate) | `session_cleanup(host, dry_run=true)` | `batc cleanup HOST` |
 | Who may change what (read) | `session_policy(host, session_id?)` | `batc policy HOST [SID]` |
 | What this caller may do (read, daemon) | `capabilities_get()` | - |
 | Persisted inventory with staleness (read, daemon) | `inventory_sessions(host?, access?, attention?, cursor?)`, `inventory_hosts()` | - |
 | Shared event log (read, daemon) | `events_list(after, limit)` | - |
-| Durable operation (write, daemon) | `operation_submit(action, idempotency_key, target, params)`, `operation_get(id)` | `batc op [ID]` |
+| Durable operation (write, daemon) | `operation_submit(action, idempotency_key, target, params, preconditions?, confirm=true)`, `operation_get(operation_id)`, `operations_list(statuses?, action?)` | `batc op [ID]` |
 | Pull request / fixed merge scope (read, daemon) | `github_pr_preview(repository, pull_number, method?)`, `github_merge_preview_get(preview_id)` | `batc delivery pr OWNER/REPO NUMBER [--method METHOD]` |
 | Edit PR title/body (integrate, repository opt-in) | `github_pr_update(repository, pull_number, expected_metadata_digest, idempotency_key, title?, body?, confirm)` | `batc delivery update-pr OWNER/REPO NUMBER --metadata-digest DIGEST --title TITLE --body-file FILE --key KEY` |
 | Merge reviewed scope (merge; deploy for recipe) | `github_pr_merge(preview_id, idempotency_key, recipe?, confirm)` | `batc delivery merge --preview mpv_... [--recipe NAME] --key KEY` |
@@ -185,9 +214,14 @@ item is done.
 - **Permissions**: on hosts with `default_permission_mode = "allow_all"`, `approve_pending` answers permission prompts
   (not questions) with "don't ask again" and raises the session to allow-all. Claude sessions are raised only when
   idle; Codex from its next turn, so repeat `approve_pending` while a turn is still asking.
-- **Cleanup**: run verification in the candidate environment, retain its log, and call `session_record_verification` with the current commit, command, exit code, environment and log reference. `session_cleanup` (dry run first) decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE per
-  session behind hard gates (idle, clean, conflict-free, commit-bound verification, risk checks, then the optional Jev judgment). It keeps
-  branches, never stops a working session, and returns one `escalation_summary`: report that once, not per item.
+- **Cleanup**: inspect the server's capabilities and cleanup tool schema first. Legacy `session_cleanup(dry_run=true)`
+  evaluates candidates; a preview is not an apply authorization. If legacy apply is unavailable, keep it unavailable
+  even with earlier automatic-cleanup permission: do not schedule apply sweeps or switch to raw BAT, shell or another
+  adapter. Use reviewed cleanup only when the server exposes it, on the exact reviewed scope with existing user
+  authorization. On older servers that still support legacy apply, retain its dry run, explicit authorization and
+  all verification gates: record verification with `session_record_verification` at the current commit, including
+  command, exit code, environment and log reference. Respect KEEP / ESCALATE, preserve branches and human sources,
+  and report the single `escalation_summary`. Never infer cleanup eligibility from an idle session alone.
 - `sessions_triage` shows `source` (pattern or jev) and an evidence line for every state; quote the evidence.
 
 ## Operations (when the task daemon is running)

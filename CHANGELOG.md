@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Generate Hermes and Grokbot skill bundles from the packaged canonical workflow, with
+  source digest/version metadata and a CI drift check ([guide](docs/agent-skills.md)).
+  Remove the Hermes cron-cleanup policy override; discover capabilities and preserve
+  original operations/keys on reconnect or lost replies. Fleet pins and live installs are unchanged.
+
 - Record the [Tauri v2 product scope](docs/product/realignment-v2.md) and
   [integration status](docs/product/implementation-status.md) (R00). Keep the central Python backend and
   share the browser/desktop UI; exclude Hub import and redefine B05 as Connector data preservation.
