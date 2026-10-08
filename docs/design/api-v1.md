@@ -19,7 +19,7 @@
 | `local-admin` | daemon 的 `task-admin.token`（0600） | 全部 |
 | API token | `batc api-token issue --actor ted-dashboard --scope observe --scope operate` | 發行時指定的 scopes |
 
-Scopes：`observe`（讀目錄、操作、事件、政策）、`operate`（驅動 managed session）、`start`（開新的 managed agent session，例如 `checkpoint.continue`）、`manage`（專案、工作項目與連結）、`approve`（確認工作項目完成；與 `manage` 分開，回報完成的 agent 不能自己簽核，見 [work-items.md](work-items.md)）、`merge`、`deploy`、`integrate`（把成果推送到 PR 的 head 分支，見 [integration.md](integration.md)）。Journal 只存 token 的 SHA-256。操作的 actor 一律取自 token；request body 或 MCP 參數自報的名字沒有授權效果。冪等鍵的唯一性以 actor 為範圍：同 actor、同 key、同內容回原 operation；同 key 不同內容回 409。
+Scopes：`observe`（讀目錄、操作、事件、政策）、`operate`（驅動 managed session）、`start`（開新的 managed agent session，例如 `checkpoint.continue`）、`manage`（專案、工作項目與連結）、`approve`（確認工作項目完成；與 `manage` 分開，回報完成的 agent 不能自己簽核，見 [work-items.md](work-items.md)）、`merge`、`deploy`、`integrate`（PR metadata 更新與把成果推送到 head 分支；兩個 action 分開，metadata 另需 repo allow_pr_update，見 [delivery.md](delivery.md)／[integration.md](integration.md)）。Journal 只存 token 的 SHA-256。操作的 actor 一律取自 token；request body 或 MCP 參數自報的名字沒有授權效果。冪等鍵的唯一性以 actor 為範圍：同 actor、同 key、同內容回原 operation；同 key 不同內容回 409。
 
 瀏覽器防護：Host 必須是 loopback（擋 DNS rebinding）；有 Origin 時須是 loopback 或 `[api] allowed_origins`；只接受 bearer token，不用 cookie，所以沒有 CSRF 面。只有列在 `allowed_origins` 的 Origin 會收到 CORS 標頭（含 `OPTIONS` preflight）；Dashboard 與 API 同源，不需要它。
 
@@ -49,6 +49,8 @@ MCP 的 `operation_submit`、`operation_cancel`、`operation_resume` 要 `confir
 | `session.interrupt` | operate | `claude:interrupt-turn`／`abort-session` | session 已不在 streaming |
 
 Session action 在建立時先用 registry 與目錄判斷來源，人工、unknown、未啟用 write tier 的主機直接回 403，不寫入 operation；執行時 `service.py` 再做一次資源政策的即時檢查。新 action 以 `ActionDef` 註冊（`api_actions.py`），之後的 GitHub merge、部署、checkpoint 都用同一套步驟與回查規則。
+
+Part A delivery actions 仍由 `POST /api/v1/operations` 受理：`github.pr.update`（integrate，repo opt-in）帶 `params={title?,body?}`、`expected_metadata_digest`；`github.pr.merge` 帶 `params={preview_id,method}`、`preconditions={expected_head_sha,expected_base_sha,preview_digest}`。`delivery.merge_and_deploy` 使用同 merge envelope，加 recipe 與 deploy scope；只部署經驗證的 actual merged SHA。舊 head-only 請求回 PRECONDITION_REQUIRED，點名 preview read。MCP `github_pr_update`／`github_pr_merge` 是 caller-token operation wrappers；`github_merge_preview_get` 為 observe read。新 CLI mutation 也要求 BATC_API_TOKEN。Contract_version 保持 ISO date `2026-10-08`（既有 contract 和本次變更同一天）；capabilities 宣告 metadata_update／merge_scope_preview 與 per-repo allow_pr_update。Part B deployment history／rollback／generation routes 尚未交付。
 
 ## 資源目錄
 
@@ -94,6 +96,8 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 | `GET /api/v1/operations/{id}`、`POST …/cancel`、`POST …/resume` | observe／actor 或 action scope | 含步驟；取消見上；resume 只用於 `needs_attention` |
 | `GET /api/v1/events`、`/events/stream` | observe | 事件分頁、SSE |
 | `GET /api/v1/tasks/{task_id}` | observe | 既有 `work_status` |
+| `GET /api/v1/repositories/{owner}/{repo}/pulls/{number}?method=` | observe | PR title/body 與 metadata_digest；保存 immutable mpv merge_preview（完整 commits、stacks／chains／indirect PRs、blocking） |
+| `GET /api/v1/delivery/previews/{mpv_id}` | observe | 讀保存的 merge scope／digest／expiry，不刷新來源 |
 | `GET /api/v1/integrations/candidates?host=` | observe | 可放進 PR 的 agent 成果與 checkpoint，及送過的 PR |
 | `GET /api/v1/integrations/previews/{ipv_id}` | observe | 預覽文件與是否過期 |
 | `GET /api/v1/integrations?repository=&pull_number=`、`/integrations/{op_id}` | observe | 一個 PR 的整合紀錄、一次整合與各來源 receipts |
@@ -104,6 +108,6 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 
 ## 尚未涵蓋
 
-- Dashboard 畫面（W09）、GitHub merge／部署（W07／W08）、checkpoint 接續（W04）。這些新增 action 與路由，不改這裡的合約。
+- GitHub 部署 history／rollback／environment generation／runtime check 為 delivery Part B（第二步），尚未加入路由。Dashboard、merge、metadata、checkpoint 與 integration 入口已交付。
 - 既有 MCP 寫入工具（`session_send` 等）仍直接呼叫 service；它們受同一套資源政策約束，但不留 operation 紀錄。之後改為經 `operation_submit`。
 - `task.submit`／`pause`／`resume` 尚未包成 operation。

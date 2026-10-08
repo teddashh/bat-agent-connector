@@ -7,6 +7,16 @@
   (`needs_attention`) and keeps the recipe's deploy lock; before any write it still fails. A rate-limited read (403),
   a reply cut short or an unreadable body counts as no answer, and an unanswered run lookup after a 204 dispatch
   keeps looking. The GitHub token is resolved for every request, so a rotated or expiring token works without a restart.
+
+- Delivery Part A ([design](docs/design/delivery.md), plan §09/§10/§15/§16/§18, C04/C05/C07):
+  `github.pr.update` edits title/body with existing integrate scope and per-repository allow_pr_update opt-in,
+  read-compare-write-readback and recorded conflicts; unknown PATCH replies are never resent. Immutable merge
+  previews pin head/base/method, complete paginated commit ranges and affected PRs; unsupported native stacks,
+  branch chains and indirect merges are refused. Merge verifies actual results, accepts normal base movement after
+  submission and reports the extra commits; combined deploy uses the actual verified merged SHA. HTTP, MCP
+  github_pr_update/github_pr_merge, caller-token delivery CLI, Dashboard metadata drawer/scope preview and both
+  skills are aligned. Contract version remains the ISO change date 2026-10-08. Part B deployments/rollback are pending.
+
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
   those sessions. BAT has no record of them: `batc remove-worktree` on a checkpoint session re-registered the
