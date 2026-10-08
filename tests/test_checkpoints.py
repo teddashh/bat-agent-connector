@@ -410,6 +410,59 @@ async def test_a_lost_start_reply_is_read_back_not_started_again(daemon, mock, h
     d2.journal.close()
 
 
+@pytest.mark.parametrize("observed", ["different", "missing", "permissions"])
+async def test_checkpoint_start_readback_refuses_identity_and_terminal_mismatch(daemon, mock, monkeypatch, observed):
+    """A10: start reconciliation never promotes a foreign folder or replaces mismatch evidence."""
+    from bat_agent_connector.errors import InvokeTimeout
+
+    cp = await make_checkpoint(daemon)
+    client = daemon.fleet.client("h1")
+    invoke = client.invoke
+
+    async def lost_ack(channel, params=None, **kwargs):
+        result = await invoke(channel, params, **kwargs)
+        if channel == "claude:start-session":
+            raise InvokeTimeout("fixture lost start acknowledgement")
+        return result
+
+    monkeypatch.setattr(client, "invoke", lost_ack)
+    op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"})
+    assert op["status"] == "uncertain"
+    sid = op["external_refs"]["session_id"]
+    row = registry.get("h1", sid)
+    if observed == "missing":
+        del mock.metas[sid]["cwd"]
+        code = "CONFINEMENT_START_UNSETTLED"
+    elif observed == "different":
+        mock.metas[sid]["cwd"] = "/srv/another-checkout"
+        code = "START_SESSION_MISMATCH"
+    else:
+        mock.metas[sid]["permissionMode"] = "bypassPermissions"
+        code = "CONFINEMENT_MISMATCH"
+    monkeypatch.setattr(client, "invoke", invoke)
+    daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+    await daemon.ops.drain(timeout=30)
+    refused = daemon.ops.get(op["operation_id"])
+    assert refused["status"] == "needs_attention" and refused["error_code"] == code
+    kept = registry.get("h1", sid)
+    assert kept["status"] == row["status"] != "active"
+    assert mock.channels().count("claude:start-session") == 1 and "claude:send-message" not in mock.channels()
+    if observed != "missing":
+        record = kept["confinement"]
+        mock.metas[sid]["cwd"] = row["cwd"]
+        mock.metas[sid].update(record["options"])
+        reads = mock.channels().count("claude:get-session-meta")
+        daemon.ops.resume(TED, op["operation_id"])
+        await daemon.ops.drain(timeout=30)
+        still_refused = daemon.ops.get(op["operation_id"])
+        assert still_refused["status"] == "needs_attention" and still_refused["error_code"] == code
+        assert mock.channels().count("claude:get-session-meta") == reads
+        assert registry.get("h1", sid)["confinement"] == record
+        assert "claude:send-message" not in mock.channels()
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
 async def test_a_lost_codex_instruction_is_found_in_the_transcript(daemon, mock, human, monkeypatch):
     from bat_agent_connector import service
     from bat_agent_connector.errors import InvokeTimeout

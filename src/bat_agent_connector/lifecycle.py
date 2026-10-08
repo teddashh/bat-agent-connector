@@ -476,6 +476,7 @@ async def _failover_one(
     resume_entry = None
     if prior:
         e = prior[-1]
+        confinement.guard_start_record(e)
         if e.get("start_uncertain") or e.get("status") == "starting":
             try:
                 meta = await c.invoke("claude:get-session-meta", {"sessionId": e["session_id"]},
@@ -483,8 +484,16 @@ async def _failover_one(
             except Exception as exc:  # noqa: BLE001 - an unreadable successor must keep its reservation
                 raise confinement.ConfinementRefused("CONFINEMENT_START_UNSETTLED",
                                                      "successor start cannot be read back") from exc
+            try:
+                confinement.guard_start_cwd(e, meta, code="FAILOVER_SUCCESSOR_MISMATCH")
+            except confinement.ConfinementRefused as exc:
+                if exc.code in confinement.START_IDENTITY_MISMATCH_CODES:
+                    registry.update(host, e["session_id"], error_code=exc.code)
+                raise
             state = confinement.verify(e.get("confinement") or {}, meta)
             if state["status"] == "mismatch":
+                registry.update(host, e["session_id"], error_code="CONFINEMENT_MISMATCH",
+                                confinement=confinement.confirm(e["confinement"], meta))
                 raise confinement.ConfinementRefused("CONFINEMENT_MISMATCH", state["reason"])
             if state["status"] not in {"options_confirmed", "verified"}:
                 raise confinement.ConfinementRefused("CONFINEMENT_START_UNSETTLED", state["reason"])
@@ -711,6 +720,8 @@ async def _failover_one(
                     meta = await _meta(c, new_sid)
                 except Exception:  # noqa: BLE001 - missing evidence keeps an acknowledged successor managed
                     meta = None
+                if isinstance(meta, dict):
+                    confinement.guard_start_cwd({"cwd": cwd}, meta, code="FAILOVER_SUCCESSOR_MISMATCH")
                 confinement.ensure_confirmed(confinement_record, meta, allow_unknown=not confined)
                 confinement_record = confinement.confirm(confinement_record, meta)
             except BaseException as e:

@@ -20,6 +20,8 @@
   Failover read-back now completes the reserved successor row and sends its unsent handoff with the same message ID,
   journal hash and guards. A durable frame fence permits recovery before sending and prevents resends after a possible
   frame attempt, including crashes between a normally confirmed start and its handoff.
+  Reserved-start recovery also checks normalized cwd before promotion; a different folder or a recorded permission
+  mismatch stays terminal, keeps its reservation and evidence, and never dispatches a handoff on a later matching read.
   **A10 is not proven until the W12 live run**; no sandbox evidence-file import is included here.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the

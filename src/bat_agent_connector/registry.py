@@ -192,6 +192,7 @@ def confirm_failover_start(host: str, session_id: str, *, message_id: str, **fie
     Older start blocks could not attempt a handoff before settling their start.
     Backfill their null fence and message ID under the same registry flock.
     """
+    from . import confinement
     from .errors import TaskIdentityMismatch
 
     p = registry_path()
@@ -200,6 +201,7 @@ def confirm_failover_start(host: str, session_id: str, *, message_id: str, **fie
         successor = next((e for e in items if e.get("host") == host and e.get("session_id") == session_id), None)
         if not successor or not successor.get("failover_of"):
             raise TaskIdentityMismatch("reserved successor disappeared during start read-back")
+        confinement.guard_start_record(successor)
         if (successor.get("start_uncertain") or successor.get("status") == "starting") and successor.get("handoff_status") == "pending":
             successor.setdefault("handoff_frame_sha256", None)
             if not successor.get("handoff_message_id"):

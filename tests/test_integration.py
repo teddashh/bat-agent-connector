@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import api_auth, checkpoints, cli, integration, resource_policy
+from bat_agent_connector import api_auth, checkpoints, cli, integration, registry, resource_policy
 from bat_agent_connector.config import ConfigError, parse_config
 from bat_agent_connector.operations import AmbiguousOutcome, OperationError
 from bat_agent_connector.task_daemon import TaskDaemon
@@ -950,6 +950,59 @@ async def test_c03_handoff_resolution_resumes_without_recomposing_or_receiving_t
     assert [b["code"] for b in again["blocking"]] == ["NOTHING_TO_INTEGRATE"] and w.reflog() == reflog
     kinds = [e["kind"] for e in w.d.journal.api_events(0, 500, resource_type="integration")["events"]]
     assert kinds.count("integration.conflict") == 1 and kinds.count("integration.resolved") == 1
+
+
+@pytest.mark.parametrize("observed", ["different", "missing", "permissions"])
+async def test_handoff_start_readback_refuses_identity_and_terminal_mismatch(world, monkeypatch, observed):
+    """A10/C03: repair uses the same reserved-start checks as checkpoint continuation."""
+    from bat_agent_connector.errors import InvokeTimeout
+
+    w = world
+    _, conflict, _, _ = await conflicted(w)
+    w.mock.invokes.clear()
+    client = w.d.fleet.client("h1")
+    invoke = client.invoke
+
+    async def lost_ack(channel, params=None, **kwargs):
+        result = await invoke(channel, params, **kwargs)
+        if channel == "claude:start-session":
+            raise InvokeTimeout("fixture lost repair start acknowledgement")
+        return result
+
+    monkeypatch.setattr(client, "invoke", lost_ack)
+    op, _ = w.d.ops.create(TED, action="integration.handoff", target={"operation_id": conflict["operation_id"]},
+                          params={}, idempotency_key="repair-readback")
+    await w.d.ops.drain(timeout=60)
+    op = w.d.ops.get(op["operation_id"])
+    assert op["status"] == "uncertain"
+    sid = next(i["params"]["sessionId"] for i in w.mock.invokes if i["channel"] == "claude:start-session")
+    row = registry.get("h1", sid)
+    if observed == "missing":
+        del w.mock.metas[sid]["cwd"]
+        code = "CONFINEMENT_START_UNSETTLED"
+    elif observed == "different":
+        w.mock.metas[sid]["cwd"] = "/srv/another-checkout"
+        code = "START_SESSION_MISMATCH"
+    else:
+        w.mock.metas[sid]["permissionMode"] = "bypassPermissions"
+        code = "CONFINEMENT_MISMATCH"
+    monkeypatch.setattr(client, "invoke", invoke)
+    refused = await w.settle(op["operation_id"])
+    assert refused["status"] == "needs_attention" and refused["error_code"] == code
+    assert registry.get("h1", sid)["status"] == row["status"] != "active"
+    assert w.mock.channels().count("claude:start-session") == 1
+    assert "claude:send-message" not in w.mock.channels()
+    if observed != "missing":
+        record = registry.get("h1", sid)["confinement"]
+        w.mock.metas[sid]["cwd"] = row["cwd"]
+        w.mock.metas[sid].update(record["options"])
+        reads = w.mock.channels().count("claude:get-session-meta")
+        w.d.ops.resume(TED, op["operation_id"])
+        still_refused = await w.settle(op["operation_id"])
+        assert still_refused["status"] == "needs_attention" and still_refused["error_code"] == code
+        assert w.mock.channels().count("claude:get-session-meta") == reads
+        assert registry.get("h1", sid)["confinement"] == record
+        assert "claude:send-message" not in w.mock.channels()
 
 
 async def test_c03_resume_waits_while_the_resolver_streams(world):

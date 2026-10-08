@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 
@@ -31,8 +32,6 @@ def lose_start_confirmation(client, failure):
                 raise InvokeTimeout("start frame arrived; acknowledgement lost")
             if params["sessionId"] == "successor":
                 lost = True
-                if failure == "meta_mismatch":
-                    return {**result, "codexSandboxMode": "read-only"}
                 return None
         return result
 
@@ -44,14 +43,13 @@ def handoffs(mock):
     return [i["params"] for i in mock.invokes if i["channel"] == "claude:send-message"]
 
 
-@pytest.mark.parametrize("failure", ["ack", "meta"])
-@pytest.mark.parametrize("policy", ["confined", "allow_all"])
+@pytest.mark.parametrize("policy,failure", [("confined", "ack"), ("confined", "meta"), ("allow_all", "ack")])
 async def test_manual_failover_recovered_start_sends_reserved_handoff_once(fleet_factory, mock, failure, policy):
     lead = _add_wt_claude(mock)
     fleet = fleet_factory(writes=True, orchestrate=True, default_permission_mode=policy,
                           safety={"write_min_interval_s": 0}, **MANAGED)
     client = fleet.client("h1")
-    invoke = lose_start_confirmation(client, "meta_mismatch" if failure == "meta" and policy == "allow_all" else failure)
+    invoke = lose_start_confirmation(client, failure)
     try:
         with pytest.raises((InvokeTimeout, confinement.ConfinementRefused)):
             await lifecycle.session_failover(fleet, "h1", lead, confirm=True, successor_session_id="successor")
@@ -69,6 +67,88 @@ async def test_manual_failover_recovered_start_sends_reserved_handoff_once(fleet
         assert len([i for i in mock.invokes if i["channel"] == "claude:start-session"]) == 1
         assert (await lifecycle.session_failover(fleet, "h1", lead, confirm=True))["skipped"]
         assert len(handoffs(mock)) == 1
+    finally:
+        await fleet.close()
+
+
+@pytest.mark.parametrize("observed", ["different", "missing", "normalized"])
+@pytest.mark.parametrize("status", ["starting", "uncertain"])
+async def test_failover_recovery_checks_reserved_cwd_before_promotion(fleet_factory, mock, observed, status):
+    """A10: matching permissions cannot identify a successor in another checkout."""
+    lead = _add_wt_claude(mock)
+    fleet = fleet_factory(writes=True, orchestrate=True, default_permission_mode="confined",
+                          safety={"write_min_interval_s": 0}, **MANAGED)
+    client = fleet.client("h1")
+    invoke = lose_start_confirmation(client, "ack")
+    try:
+        with pytest.raises(InvokeTimeout):
+            await lifecycle.session_failover(fleet, "h1", lead, confirm=True, successor_session_id="successor")
+        registry.update("h1", "successor", status=status)
+        row = registry.get("h1", "successor")
+        client.invoke = invoke
+        if observed == "missing":
+            del mock.metas["successor"]["cwd"]
+        else:
+            mock.metas["successor"]["cwd"] = "/srv/another-checkout" if observed == "different" else row["cwd"] + "/./"
+        if observed == "normalized":
+            assert (await lifecycle.session_failover(fleet, "h1", lead, confirm=True))["prompt_sent"]
+            assert len(handoffs(mock)) == 1
+        else:
+            code = "FAILOVER_SUCCESSOR_MISMATCH" if observed == "different" else "CONFINEMENT_START_UNSETTLED"
+            with pytest.raises(confinement.ConfinementRefused, match=code):
+                await lifecycle.session_failover(fleet, "h1", lead, confirm=True)
+            kept = registry.get("h1", "successor")
+            assert kept["status"] == status and kept["start_uncertain"]
+            assert kept["confinement"] == row["confinement"]
+            assert kept["handoff_frame_sha256"] is None and not handoffs(mock)
+            if observed == "different":
+                assert kept["error_code"] == code
+                reads = mock.channels().count("claude:get-session-meta")
+                mock.metas["successor"]["cwd"] = row["cwd"]
+                with pytest.raises(confinement.ConfinementRefused, match=code):
+                    await lifecycle.session_failover(fleet, "h1", lead, confirm=True)
+                assert mock.channels().count("claude:get-session-meta") == reads
+                assert registry.get("h1", "successor") == kept
+                assert not handoffs(mock)
+    finally:
+        await fleet.close()
+
+
+@pytest.mark.parametrize("phase", ["post_start", "recovery"])
+@pytest.mark.parametrize("policy", ["confined", "allow_all"])
+async def test_failover_recorded_permission_mismatch_is_terminal(fleet_factory, mock, phase, policy):
+    """A10: a later matching read cannot rewrite mismatch evidence or dispatch context."""
+    lead = _add_wt_claude(mock)
+    fleet = fleet_factory(writes=True, orchestrate=True, default_permission_mode=policy,
+                          safety={"write_min_interval_s": 0}, **MANAGED)
+    client = fleet.client("h1")
+    invoke = client.invoke
+    try:
+        if phase == "recovery":
+            invoke = lose_start_confirmation(client, "ack")
+            with pytest.raises(InvokeTimeout):
+                await lifecycle.session_failover(fleet, "h1", lead, confirm=True, successor_session_id="successor")
+            mock.metas["successor"]["codexSandboxMode"] = "read-only"
+            client.invoke = invoke
+        else:
+            async def drift(channel, params=None, **kwargs):
+                result = await invoke(channel, params, **kwargs)
+                if channel == "claude:start-session":
+                    mock.metas["successor"]["codexSandboxMode"] = "read-only"
+                return result
+            client.invoke = drift
+        with pytest.raises(confinement.ConfinementRefused, match="CONFINEMENT_MISMATCH"):
+            await lifecycle.session_failover(fleet, "h1", lead, confirm=True, successor_session_id="successor")
+        row = copy.deepcopy(registry.get("h1", "successor"))
+        assert row["confinement"]["verification"]["status"] == "mismatch" and row["start_uncertain"]
+        mock.metas["successor"].update(row["confinement"]["options"])
+        client.invoke = invoke
+        reads = mock.channels().count("claude:get-session-meta")
+        with pytest.raises(confinement.ConfinementRefused, match="CONFINEMENT_MISMATCH"):
+            await lifecycle.session_failover(fleet, "h1", lead, confirm=True)
+        assert mock.channels().count("claude:get-session-meta") == reads
+        assert registry.get("h1", "successor") == row and not handoffs(mock)
+        assert confinement.confirm(row["confinement"], mock.metas["successor"]) == row["confinement"]
     finally:
         await fleet.close()
 

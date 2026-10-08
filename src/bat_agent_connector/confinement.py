@@ -22,12 +22,33 @@ CONFINED_OPTIONS = {
     "codex": {"codexSandboxMode": "workspace-write", "codexApprovalPolicy": "on-request"},
 }
 OPTION_KEYS = ("permissionMode", "codexSandboxMode", "codexApprovalPolicy")
+START_IDENTITY_MISMATCH_CODES = {"START_SESSION_MISMATCH", "FAILOVER_SUCCESSOR_MISMATCH"}
 
 
 class ConfinementRefused(WriteRefused):
     def __init__(self, code: str, message: str, *, sent: bool | None = None) -> None:
         self.code, self.sent = code, sent
         super().__init__(f"[{code}] {message}")
+
+
+def guard_start_record(entry: dict) -> None:
+    """A recorded start mismatch cannot become a successful start on a later read."""
+    record = entry.get("confinement") or {}
+    if record.get("verification", {}).get("status") == "mismatch":
+        raise ConfinementRefused("CONFINEMENT_MISMATCH", "reserved start already recorded a permission mismatch")
+    if entry.get("error_code") in START_IDENTITY_MISMATCH_CODES:
+        raise ConfinementRefused(entry["error_code"], "reserved start already recorded a different session folder")
+
+
+def guard_start_cwd(entry: dict, meta: dict | None, *, code: str = "START_SESSION_MISMATCH") -> None:
+    from .resource_policy import norm
+
+    expected = norm(entry.get("cwd"))
+    observed = norm(meta.get("cwd")) if isinstance(meta, dict) else None
+    if not expected or not observed:
+        raise ConfinementRefused("CONFINEMENT_START_UNSETTLED", "reserved or observed session folder is missing")
+    if observed != expected:
+        raise ConfinementRefused(code, "BAT session folder differs from the reserved start folder")
 
 
 def policy_options(agent: str, mode: str, claude_mode: str | None = None) -> dict:
@@ -104,6 +125,8 @@ def verify(record: dict, meta: dict | None) -> dict:
 
 def confirm(record: dict, meta: dict | None) -> dict:
     result = copy.deepcopy(record)
+    if result.get("verification", {}).get("status") == "mismatch":
+        return result
     if not result.get("options") and isinstance(meta, dict):
         actual = {k: meta[k] for k in OPTION_KEYS if meta.get(k)}
         if actual:
@@ -119,6 +142,7 @@ def confirm(record: dict, meta: dict | None) -> dict:
 
 
 def ensure_confirmed(record: dict, meta: dict | None, *, allow_unknown: bool = False) -> None:
+    guard_start_record({"confinement": record})
     state = verify(record, meta)
     if (state["status"] == "mismatch" or state["status"] == "unknown" and not allow_unknown) and record.get("options"):
         raise ConfinementRefused("CONFINEMENT_MISMATCH", state["reason"])
