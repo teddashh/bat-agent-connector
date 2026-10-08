@@ -21,7 +21,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .api_auth import Principal
-from .errors import BatError, ConnectionLost, InvokeTimeout, ResourceReadOnly, WriteRefused
+from .errors import (
+    BatError,
+    ConnectionLost,
+    InvokeTimeout,
+    ResourceReadOnly,
+    TaskControlRefused,
+    WriteRefused,
+)
 from .redact import redact
 
 STATES = ("accepted", "running", "waiting_checks", "waiting_external", "needs_attention", "uncertain",
@@ -94,13 +101,13 @@ class Cancelled(Exception):
 
 @dataclass(frozen=True)
 class ActionDef:
-    """One action: its scope, its static admission check, and its handler."""
+    """One action: scope, admission (with an optional server binding), and handler."""
 
     name: str
     scope: str
     summary: str
     run: Callable[[OpContext], Awaitable[dict]]
-    admit: Callable[[OperationService, Principal, dict, dict, dict], None] | None = None
+    admit: Callable[[OperationService, Principal, dict, dict, dict], dict | None] | None = None
     target_keys: tuple[str, ...] = ()
 
 
@@ -109,7 +116,7 @@ def _canonical(value: Any) -> str:
 
 
 def _error_code(exc: BaseException) -> str:
-    if isinstance(exc, ResourceReadOnly):
+    if isinstance(exc, ResourceReadOnly | TaskControlRefused):
         return exc.code
     if isinstance(exc, StepFailed | NeedsAttention | OperationError):
         return exc.code
@@ -143,6 +150,16 @@ class OpContext:
         return self.op["preconditions"]
 
     @property
+    def admission_binding(self) -> dict | None:
+        return (self.op.get("external_refs") or {}).get("admission_binding")
+
+    @property
+    def effective_preconditions(self) -> dict:
+        if self.admission_binding:
+            return {**self.preconditions, "control_version": self.admission_binding["control_version"]}
+        return self.preconditions
+
+    @property
     def actor(self) -> str:
         return self.op["actor"]
 
@@ -154,6 +171,40 @@ class OpContext:
 
     def set_refs(self, **refs: Any) -> None:
         self.service._merge_refs(self.operation_id, refs)
+
+    def effect(self, name: str, fn: Callable[[], dict], *, request: dict | None = None,
+               refs: dict | Callable[[dict], dict] | None = None) -> dict:
+        """Commit a local task effect and its receipt in one journal transaction.
+
+        A started receipt without a result proves the effect transaction rolled back. Replaying the
+        original journal method is safe; no BAT/provider call may run inside this callback. Refs commit with
+        the receipt; replay repairs their missing values without running the effect again.
+        """
+        row = self.service.db.execute("SELECT * FROM operation_steps WHERE operation_id=? AND name=?",
+                                      (self.operation_id, name)).fetchone()
+        if row and row["status"] == "succeeded":
+            self.replayed.append(name)
+            result = json.loads(row["response"] or "{}")
+            self._effect_refs(result, refs)
+            return result
+        self.check_cancel()
+        if row is None:
+            self.service._step_start(self.operation_id, name, request or {})
+        with self.service.journal.tx():
+            result = fn()
+            self.service._step_done(self.operation_id, name, result or {})
+            self._effect_refs(result or {}, refs)
+        return result or {}
+
+    def _effect_refs(self, result: dict, refs: dict | Callable[[dict], dict] | None) -> None:
+        if refs is None:
+            return
+        values = refs(result) if callable(refs) else refs
+        row = self.service.db.execute("SELECT external_refs FROM operations WHERE operation_id=?",
+                                      (self.operation_id,)).fetchone()
+        current = json.loads(row["external_refs"] or "{}")
+        if any(k not in current or current[k] != v for k, v in values.items()):
+            self.set_refs(**values)
 
     async def step(self, name: str, fn: Callable[[], Awaitable[dict]], *, request: dict | None = None,
                    reconcile: Callable[[dict], Awaitable[dict | None]] | None = None) -> dict:
@@ -379,16 +430,15 @@ class OperationService:
                 raise OperationError("IDEMPOTENCY_CONFLICT",
                                      "this idempotency_key was already used for a different request", 409)
             return self._decode(existing), False
-        if adef.admit:
-            adef.admit(self, principal, target, params, preconditions)
+        binding = adef.admit(self, principal, target, params, preconditions) if adef.admit else None
         operation_id = "op_" + uuid.uuid4().hex
         now = time.time()
         with self.journal.tx():
             self.db.execute("""INSERT INTO operations(operation_id,actor,entry,idem_key,request_hash,action,target,
-                params,preconditions,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                params,preconditions,status,created_at,updated_at,external_refs) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                             (operation_id, principal.actor, entry[:20], key, request_hash, action,
                              _canonical(target), _canonical(params), _canonical(preconditions), "accepted", now,
-                             now))
+                             now, _canonical({"admission_binding": binding}) if binding else None))
             self.journal.api_event("operation", operation_id, "operation.accepted",
                                    {"action": action, "target": target, "entry": entry}, actor=principal.actor)
         self.kick()
@@ -491,9 +541,21 @@ class OperationService:
             await asyncio.sleep(0.1)
 
     async def _execute(self, operation_id: str) -> None:
+        from .observation import event_context
+
         op = self._row(operation_id)
         if op is None or op["status"] in TERMINAL:
             return
+        # run_due may be woken by an unrelated authenticated RPC. Task effects must use
+        # their own durable admission identity, never the scheduler's inherited context.
+        with event_context(actor=op["actor"], entry_point=op["entry"], operation_entry_point=op["entry"],
+                           operation_id=operation_id, actor_basis="authenticated_principal",
+                           actor_evidence={"source": "operations.actor", "operation_id": operation_id,
+                                           "principal_ref": op["actor"]}):
+            await self._execute_bound(op)
+
+    async def _execute_bound(self, op: dict) -> None:
+        operation_id = op["operation_id"]
         adef = self.actions.get(op["action"])
         if adef is None:
             self._transition(operation_id, "failed", error_code="UNKNOWN_ACTION",
