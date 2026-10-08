@@ -15,7 +15,7 @@ from .operations import OperationError
 from .redact import redact
 from .resource_ids import registry_worktree_intent, worktree_id
 
-MIGRATION_VERSION = 2  # Renumber to the next free user_version when rebasing parallel packages.
+MIGRATION_VERSION = 4  # Delivery Part A reserves user_version 2 and 3.
 RESOURCE_TYPES = {"session", "worktree", "execution"}
 PRIVATE_FIELDS = {"text", "words", "original_words", "instructions", "excerpt", "prompt", "payload",
                   "token", "authorization", "note", "error", "lines", "messages", "interpretation",
