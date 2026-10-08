@@ -14,6 +14,7 @@ from bat_agent_connector.github import GitHubClient
 from bat_agent_connector.operations import OperationError, OperationService
 from bat_agent_connector.task_daemon import TaskDaemon
 from tests.fakegithub import TOKEN, FakeGitHub
+from tests.operation_helpers import settle_operations
 
 HEAD = "a" * 40
 MERGED = "9" * 40
@@ -73,8 +74,8 @@ async def settle(d, op_id, rounds=10):
     """Run the operation, fast-forwarding its scheduled waits, until it stops changing."""
     for _ in range(rounds):
         d.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op_id,))
-        # Finish the worker before sampling; the default five seconds is shorter than GitHub's read timeout.
-        await d.ops.drain(timeout=60)
+        # Wait for the persisted status and worker completion before sampling.
+        await settle_operations(d.ops)
         op = d.ops.get(op_id)
         if op["status"] in {"succeeded", "failed", "cancelled", "needs_attention"}:
             return op
@@ -177,6 +178,9 @@ async def test_merge_admission(make_daemon, gh, monkeypatch):
         d.ops.create(TED, action="github.pr.merge", target={"repository": "x/y", "pull_number": 1},
                      preconditions={"expected_head_sha": HEAD}, idempotency_key="k")
     assert e.value.code == "REPO_NOT_CONFIGURED"
+    # A09: configuration variants run sequentially; they cannot both own this fleet.
+    await d.fleet.close()
+    d.journal.close()
     monkeypatch.delenv("FAKE_GH_TOKEN")
     nogh = make_daemon()
     with pytest.raises(OperationError) as e:
@@ -282,6 +286,7 @@ async def test_token_is_read_per_request_and_a_refused_read_after_the_merge_requ
 async def test_a_token_missing_mid_rotation_still_sends_the_dispatch_with_the_last_good_one(make_daemon, gh,
                                                                                             monkeypatch):
     d = make_daemon()
+    d.acquire_owner()
     monkeypatch.delenv("FAKE_GH_TOKEN")  # the refresher is rewriting it
     op, _ = deploy_op(d)
     sent = await settle(d, op["operation_id"], rounds=1)
@@ -957,7 +962,7 @@ async def test_metadata_cancelled_unknown_write_stays_blocking_until_proven(make
 @pytest.mark.parametrize("version", [1, 8])
 def test_part_a_preview_migration_reopens_without_data_change(tmp_path, version):
     """Plan §09/§28: delivery DDL fills missing schema without taking a data-migration version."""
-    from bat_agent_connector.task_journal import Journal
+    from bat_agent_connector.task_journal import LATEST_DATA_STEP, Journal
     path = tmp_path / "old.db"
     j = Journal(path)
     j.db.execute("DROP TABLE pr_merge_previews")
@@ -970,7 +975,7 @@ def test_part_a_preview_migration_reopens_without_data_change(tmp_path, version)
     assert not j.db.execute(schema_query, tuple(expected)).fetchall()
     j.close()
     j = Journal(path)
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == version
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == max(version, LATEST_DATA_STEP)
     schema = j.db.execute(schema_query, tuple(expected)).fetchall()
     assert {r["name"]: r["type"] for r in schema} == expected
     doc = {"fixed": "scope"}
@@ -978,7 +983,7 @@ def test_part_a_preview_migration_reopens_without_data_change(tmp_path, version)
     j.db.execute("INSERT INTO pr_merge_previews VALUES (?,?,?,?,?,?,?)", preview)
     j.close()
     j = Journal(path)
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == version
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == max(version, LATEST_DATA_STEP)
     assert j.db.execute(schema_query, tuple(expected)).fetchall() == schema
     assert tuple(j.db.execute("SELECT * FROM pr_merge_previews").fetchone()) == preview
     assert pr_delivery.get_preview(j.db, preview[0]) == doc

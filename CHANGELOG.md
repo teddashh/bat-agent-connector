@@ -7,6 +7,81 @@
   Remove the Hermes cron-cleanup policy override; discover capabilities and preserve
   original operations/keys on reconnect or lost replies. Fleet pins and live installs are unchanged.
 
+- Bind task-effect observation history to the executing operation's persisted actor, entry point and ID.
+  An unrelated RPC caller waking the shared scheduler cannot relabel other users' task events; observation
+  context carries no authorization grants. Keep command/frame checks and transactional receipts unchanged.
+
+- Refuse BAT worktree mutations for legacy reviewers whose shared creation root is unproven in the registry,
+  including paths under managed roots. Preserve proven carrier behavior and observation identity resolution;
+  raw CLI policy does not require a task daemon or guess a journal location.
+
+- Observation cursor key validation ([design](docs/design/observation.md), plan v2 §14 (former §10/§11), B01/B02):
+  validate history integer keys and relation [integer, string] keys in the shared decoder before any journal read.
+  Reject booleans, nulls and malformed shapes with INVALID_CURSOR even for empty or fully filtered results;
+  verify HTTP/MCP/CLI parity, audit inventory/discovery/event cursors, and preserve valid snapshot paging.
+
+- Observation creation-root carriers ([design](docs/design/observation.md), plan §06/§08/§11, B01/B03/D05):
+  follow explicit shares_worktree_with, equal-path legacy failovers and proven reviewer carriers through one
+  parent rule. Remove the unwritten sharing key; non-sharing successors keep their own root and never inherit
+  old worktree identity/history, live or in step-2 replay. Require task lead/path evidence for pathless reviewers;
+  refuse BAT worktree actions without a recorded worktree even in managed roots. No new data step.
+
+- Observation worktree maker agreement ([design](docs/design/observation.md), plan §06/§08/§11, B01/B03/D05):
+  share the connector creation predicate and registry root walk with the ownership classifier, including legacy
+  batc/ branches. Retain journaled connector slots or parent slots instead of minting BAT registry IDs; missing
+  slots remain unknown. Refuse BAT worktree actions when successor/reviewer rows lose root markers, preserve
+  existing refusals, and verify live identity/history/relations and data-step-2 replay without a new migration.
+
+- Observation history privacy and occurrence bounds ([design](docs/design/observation.md), plan §08/§10/§11, B03):
+  keep reason/previous_reason only as fixed enums; omit task and operation diagnostics, titles, prose containers
+  and free-form refs recursively from history and saved snapshots while preserving recorded codes and identities.
+  Explicit unknown occurrence times never match since/until; only absent metadata uses event record time.
+  Report the exclusion rule in coverage, preserve unknown facts in unbounded reads, and document every producer
+  in the spec, API contract and both skills. Keep source journal rows and data step 2 unchanged.
+
+- Observation field freshness events ([design](docs/design/observation.md), plan §10/§11/§19, B02/B03):
+  emit session updates when fields_stale or fixed field_evidence values change, including meta failure/recovery
+  with unchanged retained values. Keep observation/activity timestamps and repeated identical polls quiet;
+  preserve freshness in HTTP/MCP/CLI history without error text. Document catch-up in the API and both skills;
+  the Dashboard Sessions list already reloads on these events. Keep session-specific stale/fresh reasons separate.
+
+- Observation operation ref positions ([design](docs/design/observation.md), plan §08/§10/§11, B01/B02/B03):
+  bound operation refs by both event and link sequence; saved facts read strictly before their historical position,
+  while live and replayed events include their own sequence. Exclude later checkpoint runs and mutable operation
+  refs from early facts, preserve unbounded catalogue membership, and bound related-event links by the captured
+  feed head. Backfill stays in data step 2 with projection failures isolated.
+
+- Observation relation closure bodies ([design](docs/design/observation.md), plan §08/§10/§11, B01/B03):
+  emit the complete final command boundary and one close timestamp in the same body stored by the relation
+  and its revision. Open/bind/close events match their revisions across replacement lifecycles; version-1
+  replay reconstructs the final linked command while keeping unknown close times null and saved events intact.
+
+- Observation saved-fact placement ([design](docs/design/observation.md), plan §08/§10/§11, B01/B03):
+  position eventless snapshots using their own timestamps and the original journal boundary, recovering
+  historical task/session/worktree links without attaching later participants. Task-source snapshots retain
+  execution links even when no relation was open or time is unknown; completed backfill retries write nothing.
+
+- Observation relation event links ([design](docs/design/observation.md), plan §08/§10/§11, B01/B03):
+  attach opened/bound/closed facts only to their named relation and session, including version-1 replay;
+  retain malformed-event evidence without guessed links. Task milestones and task-source projections use
+  relations proven open at the event sequence, excluding former participants and preserving execution paging.
+
+- Observation history roles ([design](docs/design/observation.md), plan §08/§10/§11/§15/§16, B01/B03):
+  retain lead/reviewer and other fixed roles in relation events and nested version/backfill summaries.
+  Audit the recursive whitelist to preserve bounded IDs, sequences, SHAs and boolean/state evidence, including
+  delivery head-repository identity and write acknowledgement; keep prompts, PR text and commit messages excluded.
+
+- Observation worktree relation snapshots ([design](docs/design/observation.md), plan §08/§10/§11, B01/B03):
+  retain sequenced session/worktree binding intervals instead of filtering by the current worktree pointer.
+  Late bindings stay outside existing `as_of` cursors; moves preserve earlier participation, with scoped ranges
+  and command lists across pages. Data step 2 seeds proven original sequences or the saved binding's backfill
+  link sequence once; projection failures keep the core event and expose the gap.
+
+- Observation settlement history ([design](docs/design/observation.md), plan §08/§09/§10/§11/§15, B03/C07):
+  all three metadata-settlement writers share one insert/event transaction, including acknowledged PATCH conflicts.
+  Only the first inserted receipt emits history, preserving its code without PR text; legacy receipts use the
+  same sanitized backfill. Delivery DDL checks use the journal's latest allocated data-step constant.
+
 - Record the [Tauri v2 product scope](docs/product/realignment-v2.md) and
   [integration status](docs/product/implementation-status.md) (R00). Keep the central Python backend and
   share the browser/desktop UI; exclude Hub import and redefine B05 as Connector data preservation.
@@ -16,6 +91,12 @@
   conflict settlement when an acknowledged PATCH reads back differently, releasing the PR for a fresh-digest update
   while retaining needs_attention and its audit. Resume and reconciliation use the saved conclusion without GitHub
   calls; refused readback keeps verification pending and the update lock until a successful read.
+
+- Observation history after Delivery Part A ([design](docs/design/observation.md), plan §08/§10/§11/§15/§16,
+  B01/B03): index immutable merge previews, `merge.verify` receipts and first metadata settlements using explicit
+  operation resource refs. History keeps numbers, SHAs, states and codes without PR titles/bodies; preview reuse
+  and repeated reconciliation add no events. Late links respect `as_of`, and data step 2 backfills saved delivery
+  facts once without changing their documents. Repository/PR refs alone imply no session or worktree link.
 
 - Delivery merge method ([design](docs/design/delivery.md), plan §09/§16, C05): execution, recorded steps and
   verification use the admitted preview's method across checks waits and restarts; current policy can block a PUT
@@ -65,6 +146,70 @@
   rows and throttle event reloads for sixty seconds. Checks waits use cheap head/base reads; the final scope check
   runs before the submit step so transient read failures can resume. Verification accepts related PRs merged later
   and stops updated PR pagination at admission time.
+
+- Observation Part A ([design](docs/design/observation.md), plan §08/§10/§11/§19, W03 remainder, B01/B02 server/B03):
+  journal-only session/worktree history with a fixed sequence bound, task/session relation ranges that survive warm
+  reuse, actor and version evidence, distinct unknown/loading/tab/activity states, and latest discovery scope per
+  host/profile. Polls update bounded rows; host staleness is derived without session fan-out; migration facts stay
+  out of the default events/SSE feed while its cursor advances. Shared worktree creation IDs match cleanup's contract.
+  New HTTP routes, four MCP reads (`inventory_session`, `inventory_worktree`, `resource_history`, `resource_relations`),
+  discovery via `inventory_hosts`, and CLI `inventory/history/relations`. No background Git probing. Dashboard
+  timeline, filters, scope card and browser reconnect checks remain Part B.
+
+- Operations unification Part A ([design](docs/design/operations-unification.md), plan §09/§10/§24,
+  A05/A07/A09): task submit/pause/resume/stage, scoped send/verification/request-Ted and command reconciliation
+  use OperationService with receipts committed alongside the original journal effects. Legacy task tools keep
+  their results and add operation ID/status, with optional keys and control versions. Shared coordinator gates
+  cover legacy session writes, client-resume, permission channels, approval/deferred raises and relay; paused,
+  verifying or unreconciled tasks cannot be bypassed. The canonical fleet owner lock is acquired before journal,
+  token or provider initialization; conflicts report the existing owner. No schema migration. Remaining legacy
+  operations, no-key sentinel, null effect projections and A01/A05/A08 all-entry-point coverage remain Part B.
+  Task sends that lose a pre-frame race to pause now fail with `TASK_PAUSED` and replay that refusal; resume
+  requires a new send key. Success requires the operation's accepted/settled command receipt (A05/A07, §09/§10).
+  Recovery after a cancelled/rejected command commits preserves the original refusal or local task outcome,
+  without inventing uncertainty, commands or frames; legacy coordinator sends and ticks use the same rule.
+  Locked verification, request-Ted and stage actions now recheck their state rules before the first effect,
+  preserving state refusal codes and succeeded receipt replay (A05/A07). Task-bound operations now persist
+  `external_refs.admission_binding` atomically with the operation: the admitted task version and targeted session
+  role remain fixed even when callers omit control_version. Stale execution, including pause/resume and task
+  continuation, fails CONTROL_VERSION_CONFLICT / TASK_BINDING_MISMATCH before any effect. Caller preconditions,
+  request hashes and same-key replay are unchanged; old unbound operations retain their behaviour (A05/A07,
+  §09/§10). Legacy task-owned answers without a prompt ID now resolve and journal the ask-user or permission
+  ID before dispatch, then pass it to the existing service check. Lost replies settle through the original
+  coordinator read-back after restart; a changed prompt is rejected before any frame, and a missing prompt
+  creates no command. Explicit IDs, caller params, hashes and result shapes are unchanged (A07, §09/§10).
+  Preliminary client-resume frames now check the full task guard without counting as a send command's effect.
+  Resume failures and later pre-send refusals reject the unsent command without making the task uncertain;
+  operations fail definitively with the existing code. Coordinator sends without an operation handle pre-frame
+  failures inside the tick: pause/version changes cancel the command; otherwise it is rejected and the task
+  stops at needs_ted with the code in its result/event, retaining the initial-lead disappearance rule. The next
+  daemon tick does not resend the rejected command. Lost send replies still use the original read-back,
+  including Task Service adapter sends; operation step semantics are unchanged (A05/A07, §09/§10).
+  Recovery now honors a failed task_dispatch receipt even if the process stopped before recording the command
+  rejection: it records rejected and replays the saved failure without a BAT read-back or task mutation. A
+  coordinator tick that runs first observes the same receipt. Saved successful dispatch replies use the original
+  result rules, and task/result receipts remain atomic. Unexpected errors after the prompt frame, including
+  malformed replies, stay uncertain until the original read-back proves the outcome; explicit BAT refusals are
+  failed steps with rejected commands (A05/A07/A08, §09/§10).
+  Command receipts now commit their task_id, command_id and dispatch control_version refs in the same journal
+  transaction, including prepared operator commands. Receipt replay repairs older missing links before outer
+  read-back or early result/refusal returns without repeating an effect or frame. The same mechanism protects
+  task submission, continuation and reconciliation reservation links; admission bindings and API shapes are
+  unchanged (A05/A07, §09/§10).
+
+- Trusted verification now treats a task pause, a control-version change, owner loss or a changed session binding
+  as cancellation. Cancelled runs write no evidence and keep the task's current control instead of escalating to
+  needs_ted or uncertain. Resume starts verification again, including a cancelled dependency retry; genuine
+  verifier errors retain the existing needs_ted path. Dependency and start handlers preserve control refusals,
+  and paused tasks retain their deadline exemption ([operations unification](docs/design/operations-unification.md),
+  計畫 §09/§10, A07).
+
+- Task-owned failover now requires an internal authority issued by the owning coordinator from its journaled
+  successor and handoff reservation, with all identity and frame callbacks. A public task ID, an unissued object
+  or missing callbacks cannot bypass TASK_OWNED_CONTROL_REQUIRED. Ownership and control are checked again after
+  waiting for the writer lock and before the start frame. Standalone MCP/CLI failover and the existing handoff
+  proof are unchanged; automatic mid-task failover remains disabled
+  ([operations unification](docs/design/operations-unification.md), v2 計畫 §02/§10–12, A07).
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
