@@ -65,6 +65,7 @@ metadata:
 | Persisted inventory with staleness (read, daemon) | `inventory_sessions(host?, access?, attention?, cursor?)`, `inventory_hosts()` | - |
 | Shared event log (read, daemon) | `events_list(after, limit)` | - |
 | Durable operation (write, daemon) | `operation_submit(action, idempotency_key, target, params)`, `operation_get(id)` | `batc op [ID]` |
+| Pull request before merging (read, daemon) | `github_pr_preview(repository, pull_number)` | - |
 
 `session_id` accepts a unique prefix (8 characters is usually enough). Use `next_offset` from `session_read` to page
 back in history.
@@ -146,6 +147,12 @@ the row is the last known state of an unreachable host. Operation writes need `B
 (your actions are recorded under your actor and limited to its scopes) and `confirm=true`. `session.answer` needs the
 pending prompt's `tool_use_id`. A `needs_attention` operation can be resumed with `operation_resume` once its cause is
 fixed; it reads unproven steps back and never resends them.
+
+Merging and deploying (only with the user's go-ahead for that PR and environment): read `github_pr_preview`, then
+`operation_submit(action="github.pr.merge", target={repository, pull_number}, preconditions={expected_head_sha:
+<the head_sha you reviewed>})`, or `delivery.merge_and_deploy` with `target.recipe`. `waiting_checks` and
+`waiting_external` are normal; report the reason and follow `operation_get`. A failed deploy after a merge keeps
+`external_refs.merged_sha`: retry with `deployment.start(params={source_sha: merged_sha})`, never by merging again.
 
 ## Safety rules
 
