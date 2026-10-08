@@ -2,6 +2,9 @@
 
 ## Next release (unreleased)
 
+- Cancelled combined on_merge operations, including legacy history, bind the reviewed merge result on the recipe
+  ref and retain the environment slot until its exact push run is terminal; reconciliation never merges or dispatches.
+
 - Delivery legacy recovery preserves failed/cancelled outcomes and releases unsent terminal operations; only old
   successes are unverified. In-flight legacy runs hold the real repository/environment slot across recipe aliases,
   with recorded configuration fallbacks for missing environment and mode.

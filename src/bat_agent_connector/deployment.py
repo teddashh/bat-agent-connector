@@ -833,6 +833,56 @@ def drift(ops, env, observed):
                                       {"code": "ENVIRONMENT_VERSION_DRIFT", "last_verified": current["deployment_id"]})
 
 
+async def stopped_merge(ops, dep, op):
+    """A cancelled merge can still start an on_merge run. Bind its reviewed result using reads only."""
+    from .delivery import _gh
+    s = dep["recipe_snapshot"]
+    if not s.get("repository") or not op["target"].get("pull_number"):
+        return False
+    gh = _gh(ops) if dep.get("legacy") else gh_for(ops, dep)
+    pr = await background_read(gh.pull(s["repository"], op["target"]["pull_number"]))
+    terminal = pr.get("state") == "closed"
+    uuid = (op.get("external_refs") or {}).get("merge_request_uuid")
+    if not terminal and uuid:
+        result = await background_read(gh.merge_async_result(s["repository"], op["target"]["pull_number"], uuid))
+        terminal = result.get("status") == "failed"
+    if pr.get("merged"):
+        if not s.get("mode"):
+            raise NeedsAttention("DEPLOY_VERSION_UNPROVEN", "restore the legacy recipe mode before settling this merge")
+        if s["mode"] == "on_merge":
+            step = ops.db.execute("SELECT request FROM operation_steps WHERE operation_id=? AND name='merge.submit'",
+                                  (op["operation_id"],)).fetchone()
+            request = json.loads(step[0]) if step else {}
+            head = request.get("sha") or op["preconditions"].get("expected_head_sha")
+            sha = pr.get("merge_commit_sha")
+            if not HEX40.fullmatch(str(sha or "")) or not head or (pr.get("head") or {}).get("sha") != head:
+                raise NeedsAttention("MERGE_RESULT_UNVERIFIABLE", "cancelled merge did not prove the reviewed head")
+            if request.get("method") == "merge":
+                commit = await background_read(gh.commit(s["repository"], sha))
+                parents = commit.get("parents") or []
+                if len(parents) != 2 or parents[1].get("sha") != head:
+                    raise NeedsAttention("MERGE_RESULT_UNVERIFIABLE", "cancelled merge parents do not prove the reviewed head")
+            comparison = await background_read(gh.compare(s["repository"], s["ref"], sha))
+            if comparison.get("status") not in {"identical", "behind"}:
+                raise NeedsAttention("DEPLOY_SOURCE_NOT_ON_REF", "cancelled merge result is not reachable from recipe ref")
+            if not s.get("repository_id"):
+                repository = await background_read(gh.repository(s["repository"]))
+                s = {**s, "repository_id": repository["id"], "provider_origin": gh.cfg.api_url}
+            if not s.get("workflow_id"):
+                workflow = await background_read(gh.workflow(s["repository"], s["workflow"]))
+                s = {**s, "workflow_id": workflow["id"]}
+            store.update(ops.journal, dep["deployment_id"], identity={"source_sha": sha}, recipe_snapshot=s,
+                         facts={"on_merge_pending": True, "merge_binding": {"reviewed_head_sha": head, "merged_sha": sha,
+                                                                            "recipe_ref": s["ref"]}})
+            return False
+        terminal = True
+    if terminal:
+        store.update(ops.journal, dep["deployment_id"], provider_terminal=True,
+                     facts={"merge_provider_terminal": True, "merge_commit_sha": pr.get("merge_commit_sha")})
+        release_slot(ops, dep)
+    return terminal
+
+
 async def reconcile_deployments(ops):
     """Read provider facts only. Never resume an operation or send a dispatch/merge/cancel."""
     rows = ops.db.execute("SELECT deployment_id FROM deployments ORDER BY created_at").fetchall()
@@ -857,13 +907,16 @@ async def reconcile_deployments(ops):
                         if run.get("status") == "completed":
                             settle_legacy_run(ops, dep, run)
                 elif dep.get("merge_sent") and not dep["provider_terminal"]:
-                    from .delivery import _gh
-                    number = op["target"].get("pull_number")
-                    if number and dep["recipe_snapshot"].get("repository"):
-                        pr = await background_read(_gh(ops).pull(dep["recipe_snapshot"]["repository"], number))
-                        if pr.get("merged") or pr.get("state") == "closed":
-                            store.update(ops.journal, dep["deployment_id"], provider_terminal=True, state="unverified")
-                            release_slot(ops, dep)
+                    if await stopped_merge(ops, dep, op):
+                        continue
+                    dep = get(ops, dep["deployment_id"])
+                    if dep.get("on_merge_pending"):
+                        run = await locate(ops, dep)
+                        if run:
+                            store.update(ops.journal, dep["deployment_id"], run_id=run["id"])
+                            observed = await background_read(gh_for(ops, dep).run(dep["recipe_snapshot"]["repository"], run["id"]))
+                            if observed.get("status") == "completed":
+                                settle_legacy_run(ops, get(ops, dep["deployment_id"]), observed)
                 continue
             if not dep.get("run_id"):
                 if dep.get("dispatch_sent") or dep.get("on_merge_pending"):
@@ -874,18 +927,16 @@ async def reconcile_deployments(ops):
                     else:
                         continue
                 elif merge_sent(ops, dep) and not dep.get("merged_result"):
-                    pr = await background_read(gh_for(ops, dep).pull(dep["recipe_snapshot"]["repository"], op["target"]["pull_number"]))
-                    terminal_merge = pr.get("merged") or pr.get("state") == "closed"
-                    uuid = (op.get("external_refs") or {}).get("merge_request_uuid")
-                    if not terminal_merge and uuid:
-                        result = await background_read(gh_for(ops, dep).merge_async_result(
-                            dep["recipe_snapshot"]["repository"], op["target"]["pull_number"], uuid))
-                        terminal_merge = result.get("status") == "failed"
-                    if terminal_merge:
-                        store.update(ops.journal, dep["deployment_id"], provider_terminal=True,
-                                     facts={"merge_provider_terminal": True, "merge_commit_sha": pr.get("merge_commit_sha")})
-                        release_slot(ops, dep)
-                    continue
+                    if await stopped_merge(ops, dep, op):
+                        continue
+                    dep = get(ops, dep["deployment_id"])
+                    if not dep.get("on_merge_pending"):
+                        continue
+                    run = await locate(ops, dep)
+                    if not run:
+                        continue
+                    store.update(ops.journal, dep["deployment_id"], run_id=run["id"])
+                    dep = get(ops, dep["deployment_id"])
                 elif op["status"] == "cancelled":
                     store.update(ops.journal, dep["deployment_id"], provider_terminal=True, state="cancelled")
                     release_slot(ops, dep)
