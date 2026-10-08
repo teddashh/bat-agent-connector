@@ -217,7 +217,7 @@ async def test_b03_acknowledged_conflict_settlement_is_in_history_without_pr_tex
 
 async def test_b03_delivery_snapshot_backfill_preserves_version_chain_and_private_text(make_daemon, gh, monkeypatch):
     from bat_agent_connector import observation
-    from bat_agent_connector.task_journal import Journal
+    from bat_agent_connector.task_journal import LATEST_DATA_STEP, Journal
 
     d = make_daemon()
     gh.add_pr(7, delivery_tests.HEAD, body="private body")
@@ -241,7 +241,7 @@ async def test_b03_delivery_snapshot_backfill_preserves_version_chain_and_privat
 
     monkeypatch.setattr(observation, "backfill", capture)
     j = Journal(path)
-    assert calls == [1] and j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert calls == [1] and j.db.execute("PRAGMA user_version").fetchone()[0] == LATEST_DATA_STEP
     events = Observation(j).history("session", "h1/source", limit=200)["events"]
     facts = [e for e in j.api_events(kind="history.backfilled", limit=500)["events"] if e["body"]["source_table"] in snapshots]
     assert {e["body"]["source_table"] for e in facts} == {"pr_merge_previews", "pr_metadata_settlements"}
@@ -260,7 +260,7 @@ async def test_b03_delivery_snapshot_backfill_preserves_version_chain_and_privat
     j.close()
     j = Journal(path)
     assert calls == [1] and j.api_head() == head and j.db.total_changes == 0
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == LATEST_DATA_STEP
     for table, rows in snapshots.items():
         assert [tuple(r) for r in j.db.execute(f"SELECT * FROM {table}")] == rows
     j.close()
