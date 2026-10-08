@@ -150,7 +150,7 @@ def parse_doc(text: str) -> tuple[dict, str]:
     match = re.match(r"^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n)?([\s\S]*)$", text)
     if not match:
         raise ValueError("missing frontmatter delimiters")
-    data, key = {}, None
+    data, key, block_indent = {}, None, None
     for raw in match[1].splitlines():
         line = _comment(raw).rstrip()
         if not line.strip():
@@ -158,17 +158,25 @@ def parse_doc(text: str) -> tuple[dict, str]:
         body = line.lstrip()
         if line == body:
             key, sep, value = body.partition(":")
+            key = key.strip()
+            block_indent = None
             if not sep or not key or key in data:
                 raise ValueError("invalid or duplicate frontmatter key")
             data[key] = None if not value.strip() else _value(value)
-        elif key and body.startswith("-") and (body == "-" or body.startswith("- ")):
+        else:
+            indent = len(line) - len(body)
+            if not key or (block_indent is not None and block_indent != indent):
+                raise ValueError("unsupported nested frontmatter block")
+            block_indent = indent
+        if line != body and key and body.startswith("-") and (body == "-" or body.startswith("- ")):
             if data[key] is None:
                 data[key] = []
             if not isinstance(data[key], list):
                 raise ValueError("mixed frontmatter list/map")
             data[key].append(_value(body[1:]))
-        elif key:
+        elif line != body and key:
             sub, sep, value = body.partition(":")
+            sub = sub.strip()
             if not sep or not sub:
                 raise ValueError("unsupported indented value")
             if data[key] is None:
@@ -176,8 +184,6 @@ def parse_doc(text: str) -> tuple[dict, str]:
             if not isinstance(data[key], dict) or sub in data[key]:
                 raise ValueError("mixed or duplicate frontmatter map")
             data[key][sub] = _value(value)
-        else:
-            raise ValueError("indented value without a key")
     return {k: "" if v is None else v for k, v in data.items()}, match[2]
 
 
@@ -291,7 +297,10 @@ class _Reader:
 
     def names(self, relative: str, *, optional: bool = False) -> list[str]:
         with self.open(relative, directory=True, optional=optional) as fd:
-            return sorted(os.listdir(fd), key=lambda s: s.encode()) if fd is not None else []
+            try:
+                return sorted(os.listdir(fd), key=lambda s: s.encode()) if fd is not None else []
+            except UnicodeEncodeError:
+                raise _error("IMPORT_FORMAT_INVALID", f"source filename is not UTF-8: {relative}") from None
 
     def read(self, relative: str, *, optional: bool = False) -> str | None:
         with self.open(relative, optional=optional) as fd:
@@ -416,6 +425,7 @@ def _near(items: list[str], records: dict, fixed: set[str]) -> list[str]:
 def normalize(snap: dict) -> dict:
     """Pure normalization: raw provenance remains intact; invalid structures become preview blockers."""
     records, warnings, blockers, groups = {}, list(snap["warnings"]), [], {}
+    location = "_hub"
     try:
         extras = snap["extras"]
         order = _ledger(extras["project-order.json"], {"groups": {}}, "project-order.json")
@@ -441,13 +451,14 @@ def normalize(snap: dict) -> dict:
             if not isinstance(cp, dict) or not isinstance(cp.get("hash"), str) or not re.fullmatch(r"[0-9a-f]{64}", cp["hash"]):
                 raise ValueError("invalid completion task record")
         for cp in ledger["projects"].values():
-            if not isinstance(cp, dict) or not isinstance(cp.get("phases", {}), dict):
+            if not isinstance(cp, dict) or not isinstance(cp.get("phases"), dict):
                 raise ValueError("invalid completion project record")
         for pid, p in snap["projects"].items():
+            location = f"Product/{pid}/PROJECT.md"
             data, body = parse_doc(p["text"])
             key = record_key("project", pid)
             name = wi._one_line(_scalar(data, "name", pid), "name", wi.NAME_MAX["project"])
-            records[key] = {"key": key, "kind": "project", "hub_project_id": pid, "hub_task_id": "",
+            records[key] = {"key": key, "path": location, "kind": "project", "hub_project_id": pid, "hub_task_id": "",
                             "values": {"name": name, "description": wi._text(_scalar(data, "description"), "description")},
                             "raw_parent": _scalar(data, "parent"), "raw_derived": _scalar(data, "derivedFrom"),
                             "updated": _scalar(data, "updated"), "pinned": pid in pins,
@@ -469,6 +480,7 @@ def normalize(snap: dict) -> dict:
             refs.extend({"label": k, "ref": v} for k, v in folders.items() if v)
             records[key]["snapshot"]["references"] = refs
             for tid, task in p["tasks"].items():
+                location = f"Product/{pid}/.ai/tasks/{tid}.md"
                 td, tb = parse_doc(task["text"])
                 if "id" in td and td["id"] != tid:
                     raise ValueError(f"task id differs from filename: {pid}/{tid}")
@@ -508,7 +520,7 @@ def normalize(snap: dict) -> dict:
                 kind = _scalar(td, "kind", "main") or "main"
                 if kind not in ("main", "derived"):
                     raise ValueError("unsupported task kind")
-                records[tk] = {"key": tk, "kind": "item", "hub_project_id": pid, "hub_task_id": tid,
+                records[tk] = {"key": tk, "path": location, "kind": "item", "hub_project_id": pid, "hub_task_id": tid,
                               "values": {"title": wi._one_line(_scalar(td, "title", tid), "title", wi.NAME_MAX["work_item"]),
                                   "goal": wi._text(goals[0] if goals else "", "goal"), "request": wi._text(tb, "request"),
                                   "acceptance": wi._text("\n\n".join(v for k, v in sections if k in ACCEPTANCE), "acceptance"),
@@ -615,10 +627,10 @@ def normalize(snap: dict) -> dict:
             groups[gk] = {"keys": ordered, "source_digest": _hash([(k, records[k]["pinned"]) for k in ordered])}
     except OperationError as exc:
         code = "IMPORT_LIMIT_EXCEEDED" if exc.code == "INVALID_PARAMS" else exc.code
-        blockers.append({"code": code, "message": str(exc)})
+        blockers.append({"code": code, "path": location, "message": str(exc)})
     except (ValueError, TypeError, KeyError, RecursionError) as exc:
         code = "IMPORT_RELATION_INVALID" if "relation" in str(exc) or "cyclic" in str(exc) or "levels" in str(exc) else "IMPORT_FORMAT_INVALID"
-        blockers.append({"code": code, "message": str(exc)})
+        blockers.append({"code": code, "path": location, "message": str(exc)})
     return {"records": records, "groups": groups, "warnings": warnings, "blockers": blockers}
 
 # --------------------------------------------------------------------------- journal read models and preconditions
