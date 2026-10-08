@@ -205,3 +205,27 @@ async def test_history_keyset_is_stable_offline_and_rollback_disabled_for_missin
     for cursor in ["bad", "eyJtYWxpY2lvdXMiOiJpbnB1dCJ9"]:
         with pytest.raises(OperationError):
             deployment.history(d.ops, "prod", cursor=cursor)
+
+
+async def test_issue32_artifact_retry_also_requires_source_on_recipe_ref(make_daemon, gh):
+    d = make_daemon()
+    source_on_main(gh)
+    allow(d, artifact=True)
+    artifact(gh)
+    d.ops.context["deployment_verifier"].response = {
+        "repository_id": 4242,
+        "environment": "production",
+        "source_sha": MERGED,
+        "healthy": True,
+        "artifact_id": 55,
+        "artifact_digest": gh.artifacts[55]["digest"],
+    }
+    first = await deployed(d, gh)
+    saved = deployment.status(d.ops, first["result"]["deployment_id"])
+    gh.branches["main"] = "b" * 40
+    p = await deployment.preview(d.ops, "prod")
+    e = deployment.retry_envelope(saved, p["preconditions"])
+    op = d.ops.create(TED, **e, idempotency_key="retry-off-ref")[0]
+    done = await settle(d, op["operation_id"])
+    assert done["error_code"] == "DEPLOY_SOURCE_NOT_ON_REF"
+    assert gh.count("POST", "dispatches") == 1

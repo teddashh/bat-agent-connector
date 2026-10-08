@@ -253,7 +253,7 @@ class FakeGitHub:
                     return self._send(200, {"check_runs": fake.check_runs.get(m.group(1), [])})
                 m = re.fullmatch(r"/repos/o/r/actions/workflows/([^/]+)/dispatches", path)
                 if m and method == "POST":
-                    return self._dispatch(body or {})
+                    return self._dispatch(body or {}, m.group(1))
                 m = re.fullmatch(r"/repos/o/r/actions/workflows/([^/]+)/runs", path)
                 if m and method == "GET":
                     runs = [r for r in fake.runs.values()
@@ -321,11 +321,12 @@ class FakeGitHub:
                 fake.merge_requests[uid] = req
                 return self._send(202, {"status": "pending", "details": req})
 
-            def _dispatch(self, body: dict) -> None:
+            def _dispatch(self, body: dict, workflow: str) -> None:
                 inputs = body.get("inputs") or {}
                 title = "deploy " + str(inputs.get("operation_id", ""))
                 fake.deployed_source = inputs.get("source_sha", fake.deployed_source)
-                run = fake.add_run(head_sha="d" * 40, title=title, branch=body["ref"])
+                run = fake.add_run(head_sha="d" * 40, title=title, branch=body["ref"],
+                                   workflow_id=fake.workflow_ids.get(workflow, 123))
                 if fake.dispatch_mode == "fail_500_but_started":
                     fake.dispatch_mode = "run_id"
                     return self._send(502, {"message": "Bad Gateway"})
