@@ -16,7 +16,8 @@
     "test:ui": "playwright test",
     "test:central": "node tests/central-integration.mjs",
     "tauri": "tauri",
-    "test:cleanup": "node tests/cleanup-integration.mjs"
+    "test:cleanup": "node tests/cleanup-integration.mjs",
+    "test:artifacts": "node tests/artifact-integration.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.1"

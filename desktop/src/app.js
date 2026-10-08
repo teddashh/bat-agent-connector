@@ -1,7 +1,7 @@
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
-import { connectorRequest, nativeDesktop, nativeStatus, nativeConnect, nativeDisconnect, openExternal } from "./transport/index.ts";
+import { connectorRequest, connectorUploadArtifact, nativeDesktop, nativeStatus, nativeConnect, nativeDisconnect, openExternal } from "./transport/index.ts";
 import { consumePageAsync, settleRefreshes, storageScope } from "./state/events.ts";
 
 const TOKEN_KEY = "batc.dashboard.token";
@@ -169,6 +169,199 @@ async function submit(action, target, params, preconditions, scope) {
     if (e.status && e.status < 500 && e.status !== 409) dropKey(scope, connection.namespace); // a conflict retains its original intent key
     throw e;
   }
+}
+
+// Files stay in this WebView's memory. Persist only identity-scoped references and exact operation intents.
+function attachmentDraft(scope, text, initial = [], roles = false) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const key = `batc.draft.${connection.namespace}.${scope}`;
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem(key)); } catch { /* no usable draft */ }
+  saved = saved && typeof saved === "object" ? saved : {text: text.value,
+    attachments: initial.map(ref => ({name: ref.artifact_id, ref: {...ref}}))};
+  saved.attachments ||= [];
+  for (const a of saved.attachments) delete a.busy;
+  if (typeof saved.text === "string") text.value = saved.text;
+  const files = new Map(), rows = h("div", {class: "attachment-list"});
+  const status = h("p", {class: "muted", role: "status"});
+  const supported = Boolean(state.caps?.artifacts);
+  const choose = h("input", {type: "file", multiple: true, disabled: !supported || !may("manage"), "aria-label": t("choose_attachments")});
+  const box = h("div", {class: "attachments", hidden: !supported}, h("label", {}, t("attachments"), choose),
+    h("p", {class: "muted"}, t("upload_on_choose")), rows, status);
+  const guard = (mounted = false) => {
+    assertView(connection);
+    if (mounted && !box.isConnected) throw new ApiError(0, "VIEW_CHANGED", "Attachment form changed during the request");
+  };
+  const persist = () => {
+    guard(); saved.text = text.value;
+    try { localStorage.setItem(key, JSON.stringify(saved)); } catch { /* keep the in-memory intent */ }
+  };
+  const removeStored = () => { guard(); try { localStorage.removeItem(key); } catch { /* ignore */ } };
+  text.addEventListener("input", persist);
+  const refs = () => saved.attachments.filter(a => a.ref).map(a => roles ? {...a.ref, role: a.ref.role || "input"}
+    : {artifact_id: a.ref.artifact_id, revision: a.ref.revision, digest: a.ref.digest});
+  const snapshot = () => JSON.stringify({text: text.value, attachments: refs(), fields: saved.fields});
+  const ready = () => saved.attachments.every(a => a.ref);
+  const render = () => fill(rows, ...saved.attachments.map(a => h("div", {class: "row"},
+    h("div", {class: "grow"}, a.name, a.ref ? h("div", {class: "muted"}, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`)
+      : h("div", {class: "muted"}, a.error || (files.has(a) ? t("uploading") : t("choose_again")))),
+    a.ref && roles ? h("select", {"aria-label": t("attachment_role"), onchange: e => {guard(); a.ref.role = e.target.value; persist();}},
+      ...["input", "result"].map(role => h("option", {value: role, selected: (a.ref.role || "input") === role}, t(`attachment_${role}`)))) : null,
+    !a.ref && files.has(a) && !a.busy ? h("button", {class: "secondary", onclick: () => upload(a)}, t("retry")) : null,
+    h("button", {class: "secondary", disabled: a.busy, onclick: () => {
+      guard(); saved.attachments = saved.attachments.filter(x => x !== a); files.delete(a); persist(); render();
+    }}, t("remove")))));
+  const acceptUpload = (a, op) => {
+    if (op.status !== "succeeded") return;
+    a.ref = {artifact_id: op.result.artifact_id, revision: op.result.revision, digest: op.result.digest,
+      ...(roles ? {role: "input"} : {})};
+    delete a.operation_id; delete a.key; delete a.error; delete a.request; files.delete(a); persist(); render();
+  };
+  const upload = async a => {
+    if (a.busy) return;
+    guard(); a.busy = true; delete a.error; render();
+    try {
+      const file = files.get(a), limit = Math.min(state.caps.artifacts.limits.max_file_bytes,
+        nativeDesktop ? 16 * 1024 * 1024 : Number.MAX_SAFE_INTEGER);
+      if (file.size > limit) throw new Error(`ARTIFACT_TOO_LARGE (${limit})`);
+      const bytes = await file.arrayBuffer(); guard(true);
+      const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(x => x.toString(16).padStart(2, "0")).join("");
+      guard(true);
+      const request = {action: "artifact.upload", target: {}, params: {display_name: file.name,
+        media_type: file.type || "application/octet-stream", size_bytes: file.size, expected_digest: digest}, preconditions: {}};
+      if (a.request && JSON.stringify(a.request) !== JSON.stringify(request)) throw new Error(t("attachment_file_changed"));
+      a.request ||= request; a.key ||= crypto.randomUUID(); persist();
+      let op = a.operation_id ? (await api("GET", `/operations/${a.operation_id}`)).operation : null;
+      guard(true);
+      if (op && ["failed", "cancelled"].includes(op.status)) {op = null; a.key = crypto.randomUUID(); delete a.operation_id; persist();}
+      if (!op) op = (await api("POST", "/operations?wait=3", a.request, a.key)).operation;
+      guard(true); a.operation_id = op.operation_id; persist();
+      const deadline = Date.now() + 60000;
+      const readNext = async () => {
+        if (Date.now() > deadline) throw new Error(t("attachment_pending"));
+        await sleep(400); guard(true);
+        const next = (await api("GET", `/operations/${op.operation_id}`)).operation; guard(true); return next;
+      };
+      while (["accepted", "running"].includes(op.status)) op = await readNext();
+      if (op.status === "waiting_external") {
+        if (!state.online || !state.viewReady) throw new ApiError(0, "CENTRAL_OFFLINE", t("offline_actions_paused"));
+        const epoch = state.epoch;
+        const response = await connectorUploadArtifact(op.operation_id, bytes, state.token);
+        guard(true);
+        if (epoch !== state.epoch) throw new ApiError(0, "CONNECTION_CHANGED", "Connection changed during upload");
+        if (response.status < 200 || response.status >= 300)
+          throw new ApiError(response.status, response.data.error?.code, response.data.error?.message);
+        do {op = await readNext();} while (["accepted", "running", "waiting_external"].includes(op.status));
+      }
+      if (op.status !== "succeeded") throw new Error(`${op.error_code || op.status}: ${op.status_reason || ""}`);
+      acceptUpload(a, op);
+    } catch (e) {
+      if (connection.epoch !== state.epoch || connection.generation !== generation || !box.isConnected) return;
+      a.error = e.message;
+    } finally {
+      delete a.busy;
+      if (connection.epoch === state.epoch && connection.generation === generation && box.isConnected) {persist(); render();}
+    }
+  };
+  choose.onchange = () => {
+    guard();
+    for (const file of choose.files) {
+      let a = saved.attachments.find(x => !x.ref && !files.has(x) && x.name === file.name);
+      if (!a) {a = {name: file.name}; saved.attachments.push(a);}
+      files.set(a, file); upload(a);
+    }
+    choose.value = ""; persist(); render();
+  };
+  const existing = h("select", {"aria-label": t("existing_artifact")}, h("option", {value: ""}, t("existing_artifact")));
+  box.append(h("div", {class: "actions"}, existing, h("button", {class: "secondary", onclick: async () => {
+    if (!existing.value) return;
+    const [artifactId, revision] = existing.value.split(":");
+    try {
+      guard(); const {artifact} = await api("GET", `/artifacts/${artifactId}/revisions/${revision}`); guard(true);
+      if (artifact.state !== "ready") throw new Error(t("attachments_not_ready"));
+      if (!saved.attachments.some(a => a.ref?.artifact_id === artifactId && a.ref?.revision === Number(revision)))
+        saved.attachments.push({name: artifact.display_name, ref: {artifact_id: artifactId, revision: Number(revision),
+          digest: artifact.digest, ...(roles ? {role: "input"} : {})}});
+      persist(); render();
+    } catch (e) {if (connection.epoch === state.epoch) fill(status, errorBox(e));}
+  }}, t("add_attachment"))));
+  let catalogCursor = null;
+  const more = h("button", {class: "secondary", hidden: true, onclick: async () => {
+    more.disabled = true;
+    try {await loadCatalog(catalogCursor);} catch (e) {if (box.isConnected) fill(status, errorBox(e));}
+    finally {more.disabled = false;}
+  }}, t("more"));
+  box.append(more);
+  const loadCatalog = async (cursor = "") => {
+    const page = await api("GET", `/artifacts?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`); guard(true);
+    const selected = existing.value, selectedOption = existing.selectedOptions[0];
+    if (!cursor) existing.replaceChildren(h("option", {value: ""}, t("existing_artifact")));
+    for (const {revision: r} of page.artifacts) if (r?.state === "ready" &&
+      ![...existing.options].some(o => o.value === `${r.artifact_id}:${r.revision}`))
+      existing.append(h("option", {value: `${r.artifact_id}:${r.revision}`}, `${r.display_name} · r${r.revision} · ${r.artifact_id.slice(-8)}`));
+    if (selected && ![...existing.options].some(o => o.value === selected)) existing.append(selectedOption);
+    existing.value = selected;
+    catalogCursor = page.next_cursor; more.hidden = !catalogCursor;
+  };
+  const settleSubmission = op => {
+    guard(true);
+    if (!saved.submission || !TERMINAL.includes(op.status)) return;
+    const unchanged = saved.submission.snapshot === snapshot();
+    delete saved.submission;
+    if (op.status === "succeeded" && unchanged) {text.value = ""; saved.attachments = []; saved.fields = undefined; removeStored(); render();}
+    else persist();
+  };
+  const perform = async (action, target, params, preconditions, requestScope) => {
+    guard(true);
+    const request = {action, target, params, preconditions};
+    if (saved.submission?.refused && JSON.stringify(saved.submission.request) !== JSON.stringify(request)) delete saved.submission;
+    if (!saved.submission) {
+      saved.submission = {request: structuredClone({action, target, params, preconditions}),
+        key: crypto.randomUUID(), snapshot: snapshot(), scope: requestScope}; persist();
+    }
+    const intent = saved.submission;
+    try {
+      const op = intent.operation_id ? (await api("GET", `/operations/${intent.operation_id}`)).operation
+        : (await api("POST", "/operations?wait=3", intent.request, intent.key)).operation;
+      guard(true); intent.operation_id = op.operation_id; persist(); settleSubmission(op); return op;
+    } catch (error) {
+      if (connection.epoch === state.epoch && connection.generation === generation && error.status >= 400 && error.status < 500 && error.code !== "IDEMPOTENCY_CONFLICT") {
+        intent.refused = true; persist();
+      }
+      throw error;
+    }
+  };
+  const refresh = async () => {
+    guard(true);
+    const pending = saved.attachments.filter(a => !a.ref && a.operation_id);
+    await settleRefreshes([
+      ...pending.map(async a => {const {operation} = await api("GET", `/operations/${a.operation_id}`); guard(true); acceptUpload(a, operation);}),
+      ...(saved.submission?.operation_id ? [(async () => {
+        const {operation} = await api("GET", `/operations/${saved.submission.operation_id}`); guard(true); settleSubmission(operation);
+      })()] : []),
+    ]);
+  };
+  if (supported) {
+    const unsub = onEvents(ev => {
+      if (!box.isConnected || connection.epoch !== state.epoch) {unsub(); return;}
+      if (ev.resource_type === "artifact") return settleRefreshes([refresh(), loadCatalog()]);
+      if (ev.resource_id === saved.submission?.operation_id || saved.attachments.some(a => a.operation_id === ev.resource_id)) return refresh();
+    });
+    // Start after the containing form has been mounted. These reads also recover known upload receipts.
+    queueMicrotask(() => settleRefreshes([loadCatalog(), refresh()]).catch(e => {
+      if (box.isConnected && connection.epoch === state.epoch) fill(status, errorBox(e));
+    }));
+  }
+  const bindFields = fields => {
+    for (const [name, field] of Object.entries(fields)) {
+      if (typeof saved.fields?.[name] === "string") field.value = saved.fields[name];
+      field.addEventListener("input", () => {
+        guard(); saved.fields = Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, value.value])); persist();
+      });
+    }
+  };
+  render();
+  return {box, refs, ready, perform, bindFields, pending: () => Boolean(saved.submission)};
 }
 
 // ------------------------------------------------------------------ one shared bounded event reader
@@ -510,17 +703,23 @@ function checkpointPanel(host, sid) {
     const instr = h("textarea", { placeholder: t("continue_placeholder") });
     const agent = h("select", { "aria-label": t("agent") }, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
     const out = h("div", { class: "muted" });
+    const draft = attachmentDraft(`continue.${cp.checkpoint_id}`, instr, cp.artifacts || []);
+    draft.bindFields({agent});
+    let expectedHead = null;
     const go = h("button", { class: "primary", onclick: async () => {
       if (!instr.value.trim()) return;
       go.disabled = true;
       try {
-        const op = await submit("checkpoint.continue", { checkpoint_id: cp.checkpoint_id },
-          { instructions: instr.value, agent: agent.value }, {}, `continue.${cp.checkpoint_id}`);
+        if (!draft.ready() && !draft.pending()) throw new Error(t("attachments_not_ready"));
+        if (state.caps?.artifacts && !expectedHead && !draft.pending()) throw new Error(t("source_unavailable"));
+        const op = await draft.perform("checkpoint.continue", { checkpoint_id: cp.checkpoint_id },
+            { instructions: instr.value, agent: agent.value, ...(state.caps?.artifacts ? {artifacts: draft.refs()} : {}) },
+            state.caps?.artifacts ? { expected_source_head_sha: expectedHead } : {}, `continue.${cp.checkpoint_id}`);
         out.replaceChildren(opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
       } catch (e) { out.replaceChildren(errorBox(e)); }
       go.disabled = false;
     } }, t("start_agent_work"));
-    const form = h("div", { hidden: true }, confinementNote(host, agent), instr,
+    const form = h("div", { hidden: true }, confinementNote(host, agent), instr, draft.box,
       h("div", { class: "actions" }, agent, go), out);
     return h("div", { class: "row" },
       h("div", { class: "grow" },
@@ -532,7 +731,10 @@ function checkpointPanel(host, sid) {
         preview && preview.head !== cp.commit_sha ? h("div", { class: "muted" }, t("source_advanced")) : null, form),
       h("button", { class: "secondary", disabled: !can || !mayStart,
         title: !can ? t("checkpoint_unavailable") : mayStart ? null : t("needs_start_scope"),
-        onclick: () => { form.hidden = !form.hidden; } }, t("continue_from_checkpoint")));
+        onclick: async () => { form.hidden = !form.hidden;
+          if (state.caps?.artifacts && !form.hidden && !expectedHead) { try { expectedHead = (await api("GET", `/checkpoints/${cp.checkpoint_id}?live=true`)).source.head;
+            if (!expectedHead) fill(out, h("p", { class: "error" }, t("source_unavailable"))); } catch (e) { fill(out, errorBox(e)); } }
+        } }, t("continue_from_checkpoint")));
   };
   const load = async () => {
     try {
@@ -905,10 +1107,21 @@ async function viewOperation(main, id) {
             location.hash = `#/op/${o.operation_id}`;
           } catch (e) { panel.append(errorBox(e)); }
         } }, t("retry_deploy")) : null;
-      const resume = op.status === "needs_attention"
+      const needsConfirm = op.action === "checkpoint.continue" && ["SOURCE_MOVED", "SOURCE_UNAVAILABLE"].includes(op.error_code);
+      const resume = op.status === "needs_attention" && !needsConfirm
         ? h("button", { class: "primary", title: t("resume_help"), onclick: async () => {
           try { await api("POST", `/operations/${id}/resume`, {}); render(); } catch (e) { panel.append(errorBox(e)); }
         } }, t("resume")) : null;
+      const confirmSource = op.status === "needs_attention" && needsConfirm ? h("button", { class: "primary", onclick: async () => {
+        const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+        try { const seen = (await api("GET", `/checkpoints/${op.target.checkpoint_id}?live=true`)).source.head;
+          assertView(connection);
+          if (!seen) throw new Error(t("source_unavailable"));
+          await submit("checkpoint.continue.revalidate", { operation_id: id }, { observed_source_head_sha: seen },
+            { expected_input_manifest_digest: refs.input_manifest_digest }, `revalidate.${id}.${seen}`); render();
+        } catch (e) { panel.append(errorBox(e)); }
+      } }, t("confirm_source")) : null;
+      const materialized = refs.materializations || op.result?.materializations || [];
       const opened = op.result?.session_id && op.result?.host
         ? h("a", { class: "secondary", href: `#/session/${encodeURIComponent(op.result.host)}/${encodeURIComponent(op.result.session_id)}` },
           t("open_new_session")) : null;
@@ -940,6 +1153,9 @@ async function viewOperation(main, id) {
           Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null,
           op.result ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null),
         ...(receipts || []),
+        ...(materialized.length ? [h("h2", {}, t("materializations")), ...materialized.map(m => h("div", {class: "row"},
+          h("div", {class: "grow"}, `${m.artifact_id} · r${m.revision}`, h("div", {class: "muted"}, m.managed_path)),
+          chip(t(`material_${m.state}`), m.state === "verified" ? "ok" : "")))] : []),
         ...(cleanupReceipts?.length ? [h("h2", {}, t("cleanup_open_receipts")), ...cleanupReceipts.map(r =>
           h("details", {class: "row-details"}, h("summary", {}, r.resource_id, " · ", t("cleanup_receipt_" + r.status)),
             h("pre", {class: "pre"}, JSON.stringify(r, null, 2))))] : []),
@@ -951,7 +1167,7 @@ async function viewOperation(main, id) {
         h("h2", {}, t("steps")),
         ...op.steps.map(s => h("div", { class: "row" }, h("div", { class: "grow" }, s.name),
           h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)),
-        h("div", { class: "actions" }, opened, resume, retry, cancel));
+        h("div", { class: "actions" }, opened, confirmSource, resume, retry, cancel));
     } catch (e) { fill(panel, errorBox(e)); }
   };
   await render();
@@ -1232,7 +1448,7 @@ async function viewProject(main, pid) {
           repositories: f.repositories.value.split(/[\s,]+/).filter(Boolean), task_project: f.task_project.value.trim() };
         const ok = await change(msg, "project.update", { project_id: pid }, params, { expected_version: p.version },
           `project.edit.${pid}`);
-        if (!ok && STALE.includes(lastFailure)) draft = params;
+        if (!ok && STALE.includes(op.error_code)) draft = params;
         if (ok || draft) render();
       } }, t("save"))));
     fill(head,
@@ -1361,12 +1577,20 @@ async function viewWorkItem(main, wid) {
     const v = { ...w, ...(draft || {}) };
     const f = { title: h("input", { value: v.title, maxlength: 120 }), goal: h("textarea", {}, v.goal),
       request: h("textarea", {}, v.request), acceptance: h("textarea", {}, v.acceptance) };
+    const attachment = attachmentDraft(`wi.edit.${wid}`, f.request, v.attachments || [], true);
+    attachment.bindFields(f);
     const d = drawer(h("label", {}, t("title")), f.title, h("label", {}, t("goal")), f.goal, h("label", {}, t("request")), f.request,
-      h("label", {}, t("acceptance")), f.acceptance, h("div", { class: "actions" }, h("button", { class: "primary", onclick: async () => {
+      h("label", {}, t("acceptance")), f.acceptance, attachment.box, h("div", { class: "actions" }, h("button", { class: "primary", onclick: async () => {
         const params = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, k === "title" ? el.value.trim() : el.value])
           .filter(([k, v]) => v !== w[k]));
-        if (!Object.keys(params).length) { d.close(); return; }
-        const ok = await update(params, `wi.edit.${wid}`);
+        if (!attachment.ready()) { fill(notice, h("p", { class: "error" }, t("attachments_not_ready"))); return; }
+        if (JSON.stringify(attachment.refs()) !== JSON.stringify(w.attachments || [])) params.attachments = attachment.refs();
+        if (!Object.keys(params).length && !attachment.pending()) { d.close(); return; }
+        let op;
+        try { op = await attachment.perform("work_item.update", {work_item_id: wid}, params, pre, `wi.edit.${wid}`); }
+        catch (e) { fill(notice, errorBox(e)); if (STALE.includes(e.code)) {draft = params; render();} return; }
+        const ok = op.status === "succeeded";
+        if (!ok) fill(notice, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
         if (!ok && STALE.includes(lastFailure)) draft = params;
         if (ok || draft) render();
       } }, t("save"))));
@@ -1433,33 +1657,46 @@ async function viewWorkItem(main, wid) {
 // Start agent work from a linked checkpoint, with this item's words as the instructions; the new operation is
 // linked back so the item lists the run.
 function continueFrom(w, checkpointId, notice) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const text = [w.title, w.goal, w.request && `${t("request")}:\n${w.request}`, w.acceptance && `${t("acceptance")}:\n${w.acceptance}`,
     w.steps.length ? `${t("steps_title")}:\n${w.steps.map(s => `- [${s.done ? "x" : " "}] ${s.text}`).join("\n")}` : ""]
     .filter(Boolean).join("\n\n");
   const instr = h("textarea", {}, text);
   const agent = h("select", { "aria-label": t("agent") }, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
   const out = h("div", {});
+  const draft = attachmentDraft(`continue.${checkpointId}.${w.work_item_id}`, instr, (w.attachments || []).filter(x => x.role === "input"));
+  draft.bindFields({agent});
+  let expectedHead = null;
   const go = h("button", { class: "primary", onclick: async () => {
     go.disabled = true;
     let op;
     try {
-      op = await submit("checkpoint.continue", { checkpoint_id: checkpointId }, { instructions: instr.value, agent: agent.value }, {},
-        `continue.${checkpointId}`);
+      if (!draft.ready() && !draft.pending()) throw new Error(t("attachments_not_ready"));
+      if (state.caps?.artifacts && !expectedHead && !draft.pending()) throw new Error(t("source_unavailable"));
+      op = await draft.perform("checkpoint.continue", { checkpoint_id: checkpointId },
+          { instructions: instr.value, agent: agent.value, ...(state.caps?.artifacts ? {artifacts: draft.refs(), work_item_id: w.work_item_id} : {}) },
+          state.caps?.artifacts ? { expected_source_head_sha: expectedHead, expected_work_item_fingerprint: w.completion.fingerprint } : {}, `continue.${checkpointId}`);
     } catch (e) { fill(out, errorBox(e)); go.disabled = false; return; }
+    assertView(connection);
     // Started (or refused for good): this form never starts another agent. Its result stays here; the item lists
     // the run once the form closes and the page reloads.
     fill(out, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
     if (TERMINAL.includes(op.status) && op.status !== "succeeded") return;
-    const linked = await change(notice, "work_item.link", { work_item_id: w.work_item_id }, { kind: "operation", ref: op.operation_id }, {},
-      `wi.link.${w.work_item_id}.${op.operation_id}`);
-    if (linked) out.append(" · ", t("linked_back"));
+    if (!state.caps?.artifacts) {
+      const linked = await change(notice, "work_item.link", {work_item_id: w.work_item_id}, {kind: "operation", ref: op.operation_id}, {},
+        `wi.link.${w.work_item_id}.${op.operation_id}`);
+      if (linked) out.append(" · ", t("linked_back"));
+    } else out.append(" · ", t("linked_back"));
   } }, t("start_agent_work"));
   const note = confinementNote(w.links?.find(l => l.ref === checkpointId)?.target?.host, agent);
   api("GET", `/checkpoints/${encodeURIComponent(checkpointId)}`).then(x => note.setHost(x.checkpoint.host)).catch(() => {});
-  const d = drawer(note, instr, h("div", { class: "actions" }, agent, go), out);
+  const d = drawer(note, instr, draft.box, h("div", { class: "actions" }, agent, go), out);
   // Starting needs start; linking the run back needs manage. Without both, nothing starts (an unlinked run is untracked).
   const why = !may("start") ? t("needs_start_scope") : !may("manage") ? t("needs_manage_scope") : null;
-  const open = h("button", { class: "secondary", disabled: Boolean(why), title: why, onclick: () => d.toggle.click() },
+  const open = h("button", { class: "secondary", disabled: Boolean(why), title: why, onclick: async () => { d.toggle.click();
+      if (state.caps?.artifacts && !expectedHead) { try { expectedHead = (await api("GET", `/checkpoints/${checkpointId}?live=true`)).source.head; }
+        catch (e) { fill(out, errorBox(e)); } }
+    } },
     t("start_from_checkpoint"));
   return h("div", { class: "grow" }, open, d.box);
 }

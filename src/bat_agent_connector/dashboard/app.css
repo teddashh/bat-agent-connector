@@ -114,6 +114,12 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
 
 @media (max-width: 640px) { input, select, textarea { font-size: 16px; } }
 
+/* Attachment rows use the existing compact form and row styles. */
+.attachments { margin-block: 12px; }
+.attachments input[type="file"] { width: 100%; }
+.attachment-list .grow { overflow-wrap: anywhere; min-width: 0; }
+.attachment-list select { max-width: 100px; }
+
 .delivery-card { overflow-wrap: anywhere; }
 .delivery-card label input { width: 100%; }
 .delivery-card .kv { grid-template-columns: max-content minmax(0, 1fr); }

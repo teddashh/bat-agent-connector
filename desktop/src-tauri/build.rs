@@ -5,6 +5,7 @@ fn main() {
             "connector_connect",
             "connector_disconnect",
             "connector_request",
+            "connector_upload_artifact",
             "open_external",
         ]),
     ))

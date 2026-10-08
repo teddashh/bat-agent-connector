@@ -13,6 +13,8 @@ use std::{
 use url::Url;
 use zeroize::Zeroizing;
 
+pub const MAX_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
+
 const MAX_REQUEST: usize = 1024 * 1024;
 const MAX_RESPONSE: usize = 8 * 1024 * 1024;
 
@@ -258,6 +260,38 @@ impl Bridge {
         Ok(response)
     }
 
+    pub async fn upload_artifact(
+        &self,
+        operation_id: &str,
+        bytes: &[u8],
+    ) -> Result<ConnectorResponse, String> {
+        validate_artifact_upload(operation_id, bytes.len())?;
+        if !self.verified.load(Ordering::Acquire) {
+            return Err("Connect and verify the configured central identity first".into());
+        }
+        let base = self
+            .endpoint
+            .as_ref()
+            .ok_or("Central configuration unavailable")?;
+        let url = base
+            .join(&format!("api/v1/artifacts/uploads/{operation_id}/content"))
+            .map_err(|_| "Invalid upload operation")?;
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(self.token.as_str())
+            .header("Content-Type", "application/octet-stream")
+            .body(bytes.to_vec())
+            .send()
+            .await
+            .map_err(|_| "Artifact upload interrupted; retry the original operation")?;
+        let response = Self::read_response(response).await?;
+        if response.status == 401 {
+            self.disconnect();
+        }
+        Ok(response)
+    }
+
     async fn send(&self, input: &ConnectorRequest) -> Result<ConnectorResponse, String> {
         let base = self
             .endpoint
@@ -282,10 +316,14 @@ impl Bridge {
         if let Some(key) = &input.idempotency_key {
             request = request.header("Idempotency-Key", key);
         }
-        let mut response = request
+        let response = request
             .send()
             .await
             .map_err(|_| "Central request did not complete; retry uses the same operation key")?;
+        Self::read_response(response).await
+    }
+
+    async fn read_response(mut response: reqwest::Response) -> Result<ConnectorResponse, String> {
         let status = response.status().as_u16();
         if (300..400).contains(&status) {
             return Err("Central redirects are refused".into());
@@ -310,6 +348,18 @@ impl Bridge {
         let data = serde_json::from_slice(&bytes).map_err(|_| "Central response is not JSON")?;
         Ok(ConnectorResponse { status, data })
     }
+}
+
+pub fn validate_artifact_upload(operation_id: &str, length: usize) -> Result<(), String> {
+    static OPERATION: OnceLock<Regex> = OnceLock::new();
+    if length > MAX_ARTIFACT_BYTES
+        || !OPERATION
+            .get_or_init(|| Regex::new(r"^op_[0-9a-f]{32}$").unwrap())
+            .is_match(operation_id)
+    {
+        return Err("Upload requires an operation ID and at most 16 MiB of bytes".into());
+    }
+    Ok(())
 }
 
 pub fn external_url(input: &str) -> Result<Url, String> {
@@ -354,7 +404,7 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
     static POST: OnceLock<Regex> = OnceLock::new();
     let pattern = if input.method == "GET" {
         GET.get_or_init(|| Regex::new(concat!(r"^/(?:version|capabilities|bootstrap|hosts|sessions|policy|operations|events|checkpoints|projects|work-items|integrations|integrations/candidates|",
-            r"cleanup-retained|cleanup-tombstones(?:/(?:cr|wt)_[0-9a-f]{32})?|",
+            r"cleanup-retained|cleanup-tombstones(?:/(?:cr|wt)_[0-9a-f]{32})?|artifacts(?:/art_[0-9a-f]{32}/revisions/[1-9][0-9]{0,8})?|",
             r"sessions/[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+(?:/(?:messages|checkpoint-preview|history|relations))?|",
             r"operations/op_[0-9a-f]{32}|tasks/[0-9a-f-]{8,64}(?:/(?:history|sessions))?|checkpoints/cp_[0-9a-f]{32}|",
             r"hosts/[A-Za-z0-9_.-]+/discovery|worktrees/wt_[0-9a-f]{32}(?:/(?:history|relations))?|",
@@ -544,6 +594,130 @@ mod tests {
         format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)
     }
     const CAPS: &str = r#"{"actor":"fixture-operator","api_version":1,"contract_version":"2026-10-08","scopes":["observe","operate"]}"#;
+
+    #[test]
+    fn artifact_upload_boundaries_and_read_routes_are_fixed() {
+        let operation = format!("op_{}", "a".repeat(32));
+        assert!(validate_artifact_upload(&operation, 0).is_ok());
+        assert!(validate_artifact_upload(&operation, MAX_ARTIFACT_BYTES).is_ok());
+        assert!(validate_artifact_upload(&operation, MAX_ARTIFACT_BYTES + 1).is_err());
+        for id in [
+            "https://other.example/op",
+            "../op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "op_bad",
+            "op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?token=x",
+        ] {
+            assert!(validate_artifact_upload(id, 1).is_err());
+        }
+        for path in [
+            "/artifacts?limit=200",
+            "/artifacts/art_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/revisions/1",
+        ] {
+            assert!(validate_request(&request("GET", path)).is_ok());
+        }
+        for path in [
+            "/artifacts/art_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/revisions/0",
+            "/artifacts/art_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/revisions/1/content",
+            "/artifacts/uploads/op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/content",
+        ] {
+            assert!(validate_request(&request("GET", path)).is_err());
+            assert!(validate_request(&request("POST", path)).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn artifact_binary_reaches_only_its_operation_bound_central_route() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let (send, receive) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            for reply in [
+                json_response(CAPS),
+                json_response(r#"{"operation":{"status":"running"}}"#),
+            ] {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut raw = Vec::new();
+                let mut buf = [0; 4096];
+                loop {
+                    let count = socket.read(&mut buf).unwrap();
+                    raw.extend_from_slice(&buf[..count]);
+                    if let Some(position) = raw.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&raw[..position]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length: ")
+                                    .and_then(|n| n.parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if raw.len() >= position + 4 + length {
+                            break;
+                        }
+                    }
+                    if count == 0 {
+                        break;
+                    }
+                }
+                send.send(raw).unwrap();
+                socket.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        let bridge = Bridge::new(
+            Ok(config(&endpoint)),
+            Zeroizing::new("native-fixture-token".into()),
+        );
+        bridge.connect().await.unwrap();
+        let bytes = [0, 255, 128, 13, 10, 60, 38, 34, 195, 169];
+        bridge
+            .upload_artifact("op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &bytes)
+            .await
+            .unwrap();
+        receive.recv().unwrap();
+        let raw = receive.recv().unwrap();
+        let split = raw.windows(4).position(|part| part == b"\r\n\r\n").unwrap();
+        let headers = String::from_utf8_lossy(&raw[..split]);
+        assert!(headers.starts_with(
+            "POST /api/v1/artifacts/uploads/op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/content HTTP/1.1"
+        ));
+        assert!(headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer native-fixture-token"));
+        assert!(headers
+            .to_ascii_lowercase()
+            .contains("content-type: application/octet-stream"));
+        assert_eq!(&raw[split + 4..], &bytes);
+        worker.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn binary_upload_redirect_does_not_forward_credentials() {
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let redirect = format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{}/capture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", target.local_addr().unwrap());
+        let (endpoint, requests, worker) = server(vec![json_response(CAPS), redirect]);
+        let bridge = Bridge::new(
+            Ok(config(&endpoint)),
+            Zeroizing::new("native-fixture-token".into()),
+        );
+        assert!(bridge
+            .upload_artifact("op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", b"fixture")
+            .await
+            .is_err());
+        bridge.connect().await.unwrap();
+        assert!(bridge
+            .upload_artifact("op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", b"fixture")
+            .await
+            .err()
+            .unwrap()
+            .contains("redirect"));
+        assert!(target.accept().is_err());
+        assert_eq!(requests.try_iter().count(), 2);
+        worker.join().unwrap();
+    }
 
     #[test]
     fn cleanup_routes_and_typed_previews_are_bounded() {
