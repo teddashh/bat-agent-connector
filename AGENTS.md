@@ -1,0 +1,37 @@
+# Repository guidance
+
+Read [the v2 product decisions](docs/product/realignment-v2.md),
+[implementation status](docs/product/implementation-status.md), and the applicable
+`docs/design/` contract before changing behavior. The October 8 Tauri v2 plan supersedes
+the earlier product scope; historical handoffs describe their own commits, not current requirements.
+
+- Keep Python Connector / Task Service as the central authority. Tauri is the desktop
+  client; native code owns local windows, credentials and Fleet transport only.
+- Manual BAT sessions and worktrees stay read-only. Unknown resources require existing
+  creation evidence before managed recovery. Continue from a fixed checkpoint in new
+  managed resources; never modify a person's checkout or infer ownership from its path.
+- Reuse registered actions, scopes, resource policy, coordinator gates and durable
+  operations. Preserve final-frame checks and sent-effect reconciliation when integrating
+  branches. Never repair an uncertain result by resending a start or clearing all locks.
+- Project Hub code/rules/UI may be selectively reused with attribution. Do not implement
+  Hub snapshot import, source mappings or an importer dependency. B05 now means preservation
+  of Connector's own IDs and history during schema upgrades.
+- `desktop/src` becomes the shared browser/desktop frontend. Once generated assets are
+  introduced, edit their source and regenerate; do not maintain a second Dashboard.
+- Inspect current branch/worker ownership before edits. Use isolated worktrees, leave
+  unrelated work intact, and assign one integrator for shared core files. Agent delegation
+  is allowed when the user requests it; this file does not require delegation.
+- Keep real hostnames, credentials, fingerprints and private deployment configuration out
+  of commits. Tests use mock BAT/providers and temporary repositories, never live writes.
+- Run relevant checks, then required full checks sequentially: `uv run ruff check .`,
+  `uv run pytest -q`, and the Python 3.10 suite for backend changes. Do not globally
+  monkeypatch stdlib classes. Use `settle_operations` when available for durable results.
+- New schema DDL is idempotent and does not allocate `user_version`. Data steps: 1 existing
+  event copy; 2 observation history; 3 deployment history. Coordinate any new data step.
+- Preserve English and zh-TW user flows, drafts, stable IDs and operation keys. Report
+  branch, merged, installed and live-tested status separately. CI is not native or live
+  acceptance evidence.
+
+`CONTRIBUTING.md` still applies to protocol changes and secret handling. Existing product
+actions use their established operation/scopes authorization; do not add redundant chat
+confirmation to an already authorized UI action.
