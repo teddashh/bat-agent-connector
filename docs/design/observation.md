@@ -14,6 +14,7 @@ Phase 1 規格已審查。Phase 2 分兩步：Part A（本次）實作伺服器�
 | Worktree relations 修正 | `eff252e`（#35 的審查基準）。補 seq binding intervals，固定 relations 的 as_of；不改已核准的 Part A/B、worktree ID 或資料步驟編號。 |
 | History role 摘要修正 | `7001934`（#35 的審查基準）。補遞迴摘要的 role 與下列有限 metadata；不改寫 journal 事實或資料步驟。 |
 | Relation event links 修正 | `38986e1`（#35 的審查基準）。具名 relation 事件只掛自己，execution fan-out 取原 seq 的有效 relation；live／版本 1 replay 使用同一規則。 |
+| Saved fact time 修正 | `a48dba3`（#35 的審查基準）。沒有原 event seq 的回填事實以自己的時間定位，保留 task execution link；不改 live projection，不 rebase。 |
 | 計畫 | v1.0（2026-10-06）；以章節及驗收編號引用，不複製私有計畫。 |
 | BAT | `b7419892fbc9946799b64cca24c2ec8c7fa15c42`；不代表每台主機都已安裝此版，實際 `serverVersion` 另存於掃描證據。 |
 
@@ -87,7 +88,24 @@ Phase 2 在既有 journal 寫入點補 `relation.opened`、`relation.closed`、`
 
 Task 的共同里程碑仍可掛當時所有有效 relations：只限沒有 command／branch 的 `task.*` 事件，例如 state、paused、resumed，不含 relation.*。用 `relation_revisions` 在該 seq 以前（含該 seq）的最後一份 revision，而非目前 mutable body；必須已在事件前出現，status 不是 closed，已知 start_seq < event.seq，且 end_seq 為 null 或 >= event.seq。Terminal task 的事件先掛當時仍開啟的 relations，再各自送具名 closure；之前已關閉的 session 不再收到後續里程碑。Legacy start_seq=null 不代表一直存在，以較早的 revision seq 證明當時已有這段關係。
 
-同一 seq 規則也用於 `_refs(kind="task")` 的寫入查詢：operation 的 task sources、integration preview sources／receipts、work-item task links/unlinks，以及步驟 2 的 work-item/integration receipt snapshots；不能把已結束的參與者加回新事件。Snapshot 沒有更早事件證據時，取 backfill 新事件之前的 journal boundary，只掛當時仍開啟的關係。Inventory 的 `_memberships()` 是目錄查詢，仍保留曾參與 task 的 sessions 作 current/history work-item membership；它不寫事件，也不承諾 as_of snapshot，與 projection 的事件歸屬不同。
+同一 seq 規則也用於 `_refs(kind="task")` 的 live 寫入查詢：operation 的 task sources、integration preview sources／receipts、work-item task links/unlinks；不能把已結束的參與者加回新事件。Live projection 維持 `a48dba3` 的規則。Inventory 的 `_memberships()` 是目錄查詢，仍保留曾參與 task 的 sessions 作 current/history work-item membership；它不寫事件，也不承諾 as_of snapshot，與 projection 的事件歸屬不同。
+
+沒有原 event seq 的 snapshot 以該列自己的時間定位，不使用 migration 當時的 active relations。欄位如下；沒有可用的指定欄位時，不以最新 updated_at 或其他時間補猜。
+
+| Snapshot 來源 | 使用時間 |
+|---|---|
+| `work_item_links` | `linked_at`，不是 removed_at |
+| `integration_receipts`、`operations`、`commands`、`checkpoint_runs`、`branches` | `created_at` |
+| `operation_steps` | `started_at` |
+| `checkpoints` | `captured_at` |
+| `sessions_observed` | `last_seen_at` |
+| `pr_merge_previews`、`pr_metadata_settlements` | `created_at`、`settled_at`（各自原欄位） |
+
+取 backfill 開始前的 journal boundary（原 api_events head + 1），在原 events 中找 created_at 嚴格晚於事實時間的第一個 seq；沒有更晚事件時才用該 boundary。後來產生的 backfill rows 不參與定位。Context.fact_at_seq 保存此位置，occurred_at/occurred_at_epoch 使用同一事實時間；event 排序、cursor/as_of 與 linked_at_seq 仍使用新 fact event 的 seq，不能把它冒充原本就有的 event。
+
+Snapshot 的位置在第一個更晚 event **之前**，所以取 revision.seq < fact_at_seq 的最後 revision，再套上述 open/start/end 條件；更晚才 closed 的參與者仍保留，之後才 opened 的 replacement 不加入。衍生 worktree 也讀這個位置前的 binding，不拿 session 目前的 worktree。Absent/null/空值、非數字、布林、非有限或超出可表示範圍的時間均為 unknown；上述表的 snapshot 不建立 session links，即使 operation target 明存 session 也不補猜，指定時間欄位與 context 時間為 null。明確身分及 binding 的原 IDs/證據仍保留在 snapshot/目錄；先前定義的目前 binding seed 與 tasks.external_worktree 身分事實不經 task relation 推算，維持其原 link 規則。
+
+凡 snapshot 的 source/reference 明存 task，`snapshot_refs()` 一律連該 execution；當時沒有 open relation 或時間 unknown 時仍可從 execution history 讀取。涵蓋 work-item task links、integration receipt task sources、eventless operation 的 params.sources／integration preview sources，以及 params.kind/ref 的 task reference；operation step/checkpoint/run 等經 operation 解析來源的 snapshots 也使用自己的時間。單一 execution 時 context.execution_id 同步保留，不能因當前 task 已 closed 使事實孤立。
 
 Session/worktree binding 另存 `session_worktree_bindings(session_resource_id, worktree_id, start_seq, end_seq, linked_at_seq, evidence_ref)`；PK 為 session/start_seq，只有 bind/move 改變才寫入。區間為 [start_seq, end_seq)，end_seq=null 表示尚未見到替換。首次 registry 證據發 `session.worktree_bound`；同一 binding 的重複 poll 不追加事件。原 event 的 projection、checkpoint/run/task 建立事實可直接使用其 seq；移動關閉舊 binding 並開新 binding，不能刪掉舊列。`observation_resources.worktree_id` 只作目前身分摘要，不用來篩選 snapshot 的 relations。
 
@@ -294,6 +312,8 @@ Binding table/index 為每次開啟執行的 idempotent DDL，不讀寫 user_ver
 
 步驟 2 重播已保存的具名 relation 事件時，保留其明確 IDs 及 status/end 的 revision，讓後續事件不再掛已關閉的 session；原 legacy start_seq/started_at 的 unknown 保持 null。Malformed relation 只保存上述證據，不建立 links。此修正不新增 DDL 或資料步驟，也不重跑已完成的步驟 2；投影若例外仍由既有 savepoint 保護核心寫入。
 
+Eventless facts 的時間定位與 execution links 仍屬本包資料步驟 2。完成後直接重呼 backfill 或 reopen 都不寫入；guard 只用於這個一次性資料步驟，DDL 仍每次開啟獨立執行，不占 user_version。
+
 快照來源為 tasks.external_worktree、checkpoint_runs、保存的 operation refs/steps 或 session 的目前 binding，snapshot 明存 session/worktree 對。僅目前 binding 的 fallback 來源 key 為 `session_worktree_bindings:<session resource ID>`；它的 backfill event seq 同時是 binding.start_seq、linked_at_seq 及該 event 的 resource link seq。已知舊 creation 的重複 receipt/snapshot 不把已移走的 session 移回去。Legacy relation 的開始時間仍可 unknown，但確定的 command participation 與 live projection 相同；舊 command 在 binding 的證據之前時不宣稱它屬於該 worktree。已完成步驟 2 的 journal 只安裝 DDL，不再 seed；新 binding 由之後的 writer 事實建立，未被保存的過去 binding 不推測。
 
 as_of 稽核：history 的 membership/coverage 只查 api_event_resources 的 seq/linked_at_seq，context/occurred_at 固定保存；resource envelope 為目前身分摘要，不是 membership filter。Session/execution relations 用不可變 identity columns 與 revision/command link seq；worktree relations 改用上述 binding intervals。Inventory 的 as_of 只供 events catch-up，目錄本來就不承諾 snapshot：目前 host config、provenance/access、gone/state/freshness、project/work-item/execution memberships 都可在 traversal 中變動；order=id 保證穩定 key 前進，新增列/篩選 membership 變動由 events 補讀，order=activity 仍保留動態排序限制。這些目前值不能套進 history/relations 的 snapshot membership。
@@ -351,6 +371,8 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B01、B03；§08、§11 | `test_projection_failure_keeps_core_write_and_flags_event`：task state 與 operation step 的投影例外只回滾 savepoint，核心寫入及外部 step 成功；history 顯示 projection_error，無部分 resource／relation rows。 |
 | B01、B03；§08、§10、§11 | `test_b01_b03_relation_history_keeps_roles_and_strips_free_text`：lead/reviewer 共用 session，execution/session history 的 opened/bound/closed 都保留 role；live 與版本 1 重播各驗證，nested source/result versions 的 role 保留，備註/prompt/commit message 仍移除，重開不追加事件。 |
 | B01、B03；§08、§10、§11 | `test_b01_b03_pending_replacement_closure_links_only_its_own_session`：old 已關閉、new 無 branch 且 pending 後 task 關閉；old 沒有 new 的 closure/refs，new 收自己的 closure；task-source work-item link 只到當時的 new；execution 分頁每事件一次。Live／版本 1 replay 各驗證，重投影舊 milestone 仍用原 seq 的 old。 |
+| B01、B03；§08、§10、§11 | `test_b01_b03_saved_task_facts_use_their_own_time_and_keep_execution`：版本 1 的 work-item link、integration receipt、eventless operation（sources 或 task ref）、operation step，各用自己的 linked_at/created_at/started_at。A 當時 open、之後 closed，B 後來 open；fact 只到 A 與 execution，不到 B，也不因 A 後來換 worktree 而掛新 worktree。相同 timestamp 用嚴格更晚 event；gap、無時間但 B 仍 open、原 journal 最後 event 之後，均只連 execution。Direct retry/reopen 零 writes。 |
+| B03；§08、§11 | `test_b03_saved_fact_missing_or_unusable_timestamp_never_fails_backfill`：missing/null/空字串、非數字、布林、Inf/NaN、超界日期不拋例外，不 fallback 到其他時間；context/snapshot 為 unknown、無推算 session link。Epoch 0 仍是可用時間。 |
 | B01、B03；§08、§10、§11 | `test_b01_b03_parallel_lead_reviewer_relation_events_have_exact_links`：同時開啟 lead/reviewer，共同 milestone 到兩邊；每個 opened/bound/closed 的 resource links 與 context IDs 只到自己的 session/relation，live／版本 1 replay 一致。 |
 | B03；§08、§11 | `test_b03_malformed_relation_events_log_evidence_without_links`：三種 relation 事件缺 relation_id 或 session_resource_id，log 不洩漏 body，自帶 branch/caller refs 不能補猜；核心 row/evidence 保留、無 resource links，live／版本 1 replay 一致。 |
 | B03；§08、§11、§15、§16 | `test_b03_backfilled_summary_retains_bounded_metadata_and_nested_roles`：saved_snapshot 的 enum/ID/seq/SHA/布林及 nested role 保存，混合容器、自由文字、數量/評分繼續移除。既有 `test_b01_b03_delivered_merge_history_uses_only_explicit_refs` 與 `test_b03_acknowledged_conflict_settlement_is_in_history_without_pr_text` 同時驗證 head_repo_id、files_may_be_truncated、write_acknowledged 的正式 writer 輸出及 PR 文字隔離。 |

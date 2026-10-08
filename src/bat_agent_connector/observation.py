@@ -303,13 +303,13 @@ def close_relations(journal, task_id, seq, *, role=None, except_sid=None, legacy
         index(journal.db, close_seq, "session", data["session_resource_id"])
 
 
-def open_relations(db, execution_id, seq):
+def open_relations(db, execution_id, seq, *, before=False):
     """Use revisions to prove a relation existed and was open at this event, including replay."""
     rows = db.execute("""SELECT v.body FROM relation_revisions v JOIN observation_relations r USING(relation_id)
         WHERE r.execution_id=? AND v.seq=(SELECT MAX(prior.seq) FROM relation_revisions prior
             WHERE prior.relation_id=v.relation_id AND prior.seq<=?)
         AND EXISTS(SELECT 1 FROM relation_revisions first
-            WHERE first.relation_id=v.relation_id AND first.seq<?)""", (execution_id, seq, seq))
+            WHERE first.relation_id=v.relation_id AND first.seq<?)""", (execution_id, seq - 1 if before else seq, seq))
     return [rel for row in rows if (rel := body(row[0])).get("status") != "closed"
             and (rel.get("start_seq") is None or rel["start_seq"] < seq)
             and (rel.get("end_seq") is None or rel["end_seq"] >= seq)]
@@ -338,6 +338,44 @@ def _refs(db, kind, rid, *, seq=None, include_runs=False):
         return [(r[0], r[1]) for r in db.execute("""SELECT DISTINCT resource_type,resource_id FROM api_event_resources
             WHERE seq IN (SELECT seq FROM api_events WHERE resource_type='operation' AND resource_id=?)""", (rid,))]
     return []
+
+
+FACT_TIME_FIELDS = {
+    "branches": "created_at", "operations": "created_at", "commands": "created_at",
+    "operation_steps": "started_at", "sessions_observed": "last_seen_at", "checkpoints": "captured_at",
+    "checkpoint_runs": "created_at", "integration_receipts": "created_at", "work_item_links": "linked_at",
+    "pr_merge_previews": "created_at", "pr_metadata_settlements": "settled_at",
+}
+
+
+def fact_time(table, data):
+    fields = [FACT_TIME_FIELDS[table]] if table in FACT_TIME_FIELDS else [
+        "finished_at", "settled_at", "updated_at", "captured_at", "created_at", "last_seen_at", "first_seen_at"]
+    for field in fields:
+        value = data.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            continue
+        try:
+            iso(value)
+        except (OverflowError, OSError, ValueError):
+            continue
+        return value
+    return None
+
+
+def fact_position(db, occurred_at, boundary):
+    if occurred_at is None:
+        return None
+    row = db.execute("SELECT MIN(seq) FROM api_events WHERE seq<? AND created_at>?", (boundary, occurred_at)).fetchone()
+    return row[0] if row[0] is not None else boundary
+
+
+def snapshot_refs(db, kind, rid, position):
+    if kind == "task":
+        sessions = [("session", rel["session_resource_id"]) for rel in open_relations(db, rid, position, before=True)] if position is not None else []
+        return [("execution", rid), *sessions]
+    refs = _refs(db, kind, rid, seq=position)
+    return refs if position is not None else [(typ, res) for typ, res in refs if typ != "session"]
 
 
 def record_event(journal, seq, *, legacy=False, extra=None):
@@ -480,9 +518,18 @@ def record_event(journal, seq, *, legacy=False, extra=None):
             if preview:
                 source_specs = json.loads(preview[0])
         for source in source_specs:
-            refs.extend(_refs(db, source.get("kind"), source.get("id"), seq=seq))
+            if e["kind"] == "history.backfilled":
+                position = (extra or {}).get("fact_at_seq") if extra and "fact_at_seq" in extra else fact_position(
+                    db, fact_time(b.get("source_table"), snapshot), seq)
+                refs.extend(snapshot_refs(db, source.get("kind"), source.get("id"), position))
+            else:
+                refs.extend(_refs(db, source.get("kind"), source.get("id"), seq=seq))
             if source.get("pin"):
                 ctx["source_versions"].append({"kind": "git", "sha": source["pin"], "role": "pinned"})
+        if e["kind"] == "history.backfilled" and params.get("kind") == "task":
+            position = (extra or {}).get("fact_at_seq") if extra and "fact_at_seq" in extra else fact_position(
+                db, fact_time(b.get("source_table"), snapshot), seq)
+            refs.extend(snapshot_refs(db, "task", params.get("ref"), position))
         if target.get("operation_id"):
             refs.extend(_refs(db, "operation", target["operation_id"], seq=seq))
         ctx["action"] = op["action"]
@@ -555,16 +602,27 @@ def record_event(journal, seq, *, legacy=False, extra=None):
         ctx["work_item_ids"].append(rid)
         refs.extend(_refs(db, b.get("kind"), b.get("ref"), seq=seq, include_runs=True))
     refs.extend((typ, res) for typ, res in (extra or {}).get("resources", []))
+    if e["kind"] == "history.backfilled":
+        executions = {res for typ, res in refs if typ == "execution"}
+        if len(executions) == 1:
+            ctx["execution_id"] = next(iter(executions))
     if relation_event:
         # Context and source/target inference cannot broaden a named relation event.
         refs = [(typ, res) for typ, res in refs if (typ, res) in {
             ("execution", task_id), ("session", b["session_resource_id"])}]
         ctx["relation_ids"] = [b["relation_id"]]
+    binding_seq = seq
+    if e["kind"] == "history.backfilled":
+        position = (extra or {}).get("fact_at_seq") if extra and "fact_at_seq" in extra else fact_position(
+            db, fact_time(b.get("source_table"), snapshot), seq)
+        binding_seq = position - 1 if position is not None else None
+        if position is None and b.get("source_table") in FACT_TIME_FIELDS:
+            refs = [(typ, res) for typ, res in refs if typ != "session"]
     for typ, res in list(refs):
-        if typ == "session":
+        if typ == "session" and binding_seq is not None:
             row = db.execute("""SELECT worktree_id FROM session_worktree_bindings
                 WHERE session_resource_id=? AND start_seq<=? AND linked_at_seq<=?
-                AND (end_seq IS NULL OR end_seq>?) ORDER BY start_seq DESC LIMIT 1""", (res, seq, seq, seq)).fetchone()
+                AND (end_seq IS NULL OR end_seq>?) ORDER BY start_seq DESC LIMIT 1""", (res, binding_seq, binding_seq, binding_seq)).fetchone()
             if row:
                 refs.append(("worktree", row[0]))
     if op:
@@ -615,6 +673,9 @@ def record_event(journal, seq, *, legacy=False, extra=None):
 
 def backfill(journal):
     db = journal.db
+    if db.execute("PRAGMA user_version").fetchone()[0] >= MIGRATION_VERSION:
+        return
+    boundary = journal.api_head() + 1
     saved_bindings = [(r["resource_id"], body(r["body"])["worktree_id"]) for r in db.execute(
         "SELECT * FROM observation_resources WHERE resource_type='session'") if body(r["body"]).get("worktree_id")]
     for e in db.execute("SELECT seq FROM api_events ORDER BY seq").fetchall():
@@ -624,7 +685,7 @@ def backfill(journal):
         task = dict(db.execute("SELECT * FROM tasks WHERE task_id=?", (row["task_id"],)).fetchone())
         if not db.execute("SELECT 1 FROM observation_relations WHERE execution_id=? AND session_resource_id=?",
                           (row["task_id"], f"{task['host']}/{row['session_id']}")).fetchone():
-            seq = saved_fact(journal, "branches", row["branch_id"], dict(row), [("session", f"{task['host']}/{row['session_id']}"), ("execution", row["task_id"])])
+            seq = saved_fact(journal, "branches", row["branch_id"], dict(row), [("session", f"{task['host']}/{row['session_id']}"), ("execution", row["task_id"])], boundary=boundary)
             relation(journal, task, row["session_id"], row["role"], row["branch_id"], seq, confirmed=True, branch=dict(row), legacy=True)
     for task_row in db.execute("SELECT * FROM tasks WHERE external_worktree_path IS NOT NULL ORDER BY submitted_at").fetchall():
         task_data = dict(task_row)
@@ -636,7 +697,7 @@ def backfill(journal):
         saved_fact(journal, "tasks.external_worktree", task_data["task_id"],
             {"host": task_data["host"], "task_id": task_data["task_id"], "worktree_path": task_data["external_worktree_path"],
              "branch": task_data["external_branch"], "session_id": task_data["session_id"],
-             "worktree_id": wid, "created_at": None}, refs)
+             "worktree_id": wid, "created_at": None}, refs, boundary=boundary)
     for table, pk in (("operations", "operation_id"), ("commands", "command_id"), ("operation_steps", None),
                       ("sessions_observed", None), ("checkpoints", "checkpoint_id"), ("checkpoint_runs", "operation_id"),
                       ("integration_receipts", None), ("work_item_links", "link_id")):
@@ -657,6 +718,7 @@ def backfill(journal):
                 if isinstance(data.get(name), str):
                     data[name] = summary(body(data[name]))
             refs = []
+            position = fact_position(db, fact_time(table, data), boundary)
             if data.get("host") and data.get("session_id"):
                 refs.append(("session", f"{data['host']}/{data['session_id']}"))
                 remember(db, "session", refs[0][1], host=data["host"], session_id=data["session_id"])
@@ -673,11 +735,11 @@ def backfill(journal):
                 data["worktree_id"] = wid
                 refs.append(("worktree", wid))
             if table == "work_item_links":
-                refs.extend(_refs(db, data["kind"], data["ref"], seq=journal.api_head() + 1))
+                refs.extend(snapshot_refs(db, data["kind"], data["ref"], position))
             if table == "integration_receipts":
-                refs.extend(_refs(db, data["source_kind"], data["source_id"], seq=journal.api_head() + 1))
+                refs.extend(snapshot_refs(db, data["source_kind"], data["source_id"], position))
             if data.get("operation_id"):
-                refs.extend(_refs(db, "operation", data["operation_id"], seq=journal.api_head() + 1))
+                refs.extend(snapshot_refs(db, "operation", data["operation_id"], position))
                 op = db.execute("SELECT action,target,external_refs FROM operations WHERE operation_id=?", (data["operation_id"],)).fetchone()
                 if op:
                     target, ext = body(op["target"]), body(op["external_refs"])
@@ -692,7 +754,7 @@ def backfill(journal):
                         if sid:
                             data.update(session_resource_id=f"{h}/{sid}", worktree_id=wid)
                         refs.append(("worktree", wid))
-            saved_fact(journal, table, key, summary(data), refs)
+            saved_fact(journal, table, key, data, refs, boundary=boundary)
     # Delivery's bounded snapshots are facts too; they do not imply a local session or worktree.
     for row in db.execute("SELECT * FROM pr_merge_previews").fetchall():
         if db.execute("SELECT 1 FROM api_events WHERE resource_type='pr_merge_preview' AND resource_id=?", (row["preview_id"],)).fetchone():
@@ -700,29 +762,34 @@ def backfill(journal):
         data = {**summary(body(row["document"]), pr=True), "preview_id": row["preview_id"], "created_at": row["created_at"]}
         refs = []
         for op in db.execute("SELECT operation_id FROM operations WHERE action IN ('github.pr.merge','delivery.merge_and_deploy') AND json_extract(params,'$.preview_id')=?", (row["preview_id"],)):
-            refs.extend(_refs(db, "operation", op[0], seq=journal.api_head() + 1))
-        saved_fact(journal, "pr_merge_previews", row["preview_id"], data, refs)
+            refs.extend(snapshot_refs(db, "operation", op[0], fact_position(db, fact_time("pr_merge_previews", data), boundary)))
+        saved_fact(journal, "pr_merge_previews", row["preview_id"], data, refs, boundary=boundary)
     for row in db.execute("SELECT * FROM pr_metadata_settlements").fetchall():
         if db.execute("SELECT 1 FROM api_events WHERE resource_type='operation' AND resource_id=? AND kind='delivery.metadata_settled'", (row["operation_id"],)).fetchone():
             continue
         data = {**summary(body(row["document"]), pr=True), "operation_id": row["operation_id"]}
-        saved_fact(journal, "pr_metadata_settlements", row["operation_id"], data, _refs(db, "operation", row["operation_id"], seq=journal.api_head() + 1))
+        saved_fact(journal, "pr_metadata_settlements", row["operation_id"], data,
+            snapshot_refs(db, "operation", row["operation_id"], fact_position(db, fact_time("pr_metadata_settlements", data), boundary)), boundary=boundary)
     for session_ref, wid in saved_bindings:
         current = db.execute("""SELECT worktree_id FROM session_worktree_bindings
             WHERE session_resource_id=? AND end_seq IS NULL""", (session_ref,)).fetchone()
         if not current or current[0] != wid:
             saved_fact(journal, "session_worktree_bindings", session_ref,
-                {"session_resource_id": session_ref, "worktree_id": wid}, [("session", session_ref), ("worktree", wid)])
+                {"session_resource_id": session_ref, "worktree_id": wid}, [("session", session_ref), ("worktree", wid)], boundary=boundary)
 
 
-def saved_fact(journal, table, key, data, refs):
+def saved_fact(journal, table, key, data, refs, *, boundary=None):
     source_key = f"{table}:{key}"
     old = journal.db.execute("SELECT seq FROM observation_backfill WHERE source_key=?", (source_key,)).fetchone()
     if old:
         return old[0]
     safe_data = operation_summary(journal.db, data.get("operation_id"), data)
+    occurred_at = fact_time(table, data)
+    if FACT_TIME_FIELDS.get(table) in safe_data:
+        safe_data[FACT_TIME_FIELDS[table]] = occurred_at
     context = {"backfilled": True, "resources": refs,
-        "occurred_at": iso(data.get("finished_at") or data.get("settled_at") or data.get("updated_at") or data.get("captured_at") or data.get("created_at") or data.get("last_seen_at") or data.get("first_seen_at")), "evidence": [{"table": table, "id": key}]}
+        "occurred_at": iso(occurred_at), "fact_at_seq": fact_position(journal.db, occurred_at, boundary if boundary is not None else journal.api_head() + 1),
+        "evidence": [{"table": table, "id": key}]}
     if table in {"pr_merge_previews", "pr_metadata_settlements"}:
         context["observer"] = "delivery-service"
         context["source_versions"] = [{"kind": "git", "sha": value, "role": field}

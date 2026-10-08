@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Observation saved-fact placement ([design](docs/design/observation.md), plan §08/§10/§11, B01/B03):
+  position eventless snapshots using their own timestamps and the original journal boundary, recovering
+  historical task/session/worktree links without attaching later participants. Task-source snapshots retain
+  execution links even when no relation was open or time is unknown; completed backfill retries write nothing.
+
 - Observation relation event links ([design](docs/design/observation.md), plan §08/§10/§11, B01/B03):
   attach opened/bound/closed facts only to their named relation and session, including version-1 replay;
   retain malformed-event evidence without guessed links. Task milestones and task-source projections use
