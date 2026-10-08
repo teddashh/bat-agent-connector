@@ -243,6 +243,12 @@ policy admission 仍 403、無 operation row；執行期拒絕保留 failed oper
 
 ## 尚未涵蓋
 
+Agent MCP 安裝使用 `--principal-only`：只註冊 central daemon reads、operations 與 task adapters，
+所有 calls 必須帶 `BATC_API_TOKEN`，不 fallback 本機 admin token／task capability。
+`work_status`／`work_result`／`work_events` 的 RPC 讀取亦要求 `observe`；沿用既有回傳格式。
+再加 `--read-only` 可完全隱藏寫入工具。預設 operator profile 保留舊 direct Fleet 工具，
+不代表 API principal scopes 可約束這些舊入口；agent 不使用它。詳見 [agent bundles](../agent-skills.md)。
+
 - Artifact 的 manual／managed capture 與 accept（Part B）、跨主機接續（Part C），見 [artifacts.md](artifacts.md)。Dashboard、GitHub 與 checkpoint 已有各自設計。
 
 - GitHub 部署 history／rollback／environment generation／runtime check 為 delivery Part B（第二步），尚未加入路由。Dashboard、merge、metadata、checkpoint 與 integration 入口已交付。

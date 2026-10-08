@@ -38,6 +38,9 @@ Dashboard 啟動提示依 capabilities 的 `hosts[].confinement.host_account.sta
 | CLI | `batc` |
 | Agent skill | [`skills/bat-agent-connector/SKILL.md`](skills/bat-agent-connector/SKILL.md) |
 
+Hermes 與 Grokbot 配接皆[由 canonical skill 產生](docs/agent-skills.md)。更新工作流程後重新產生，
+安裝時使用與 Connector 相同已驗證版本的 bundle。
+
 `batc inventory`、`batc history`、`batc relations` 與對應 HTTP/MCP 讀取提供持久觀測。Session 歷史只讀 journal 事實；warm reuse 保留每個 task 的關係區間，discovery 顯示最近 host/profile 掃描範圍及未掃項目。未知 actor／狀態保持 unknown，讀取不啟動 session、不背景探測 Git。詳見 [observation](docs/design/observation.md)。Dashboard 的歷史與 scope 畫面屬後續 Part B。
 
 ## 為什麼要做

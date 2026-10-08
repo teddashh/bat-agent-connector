@@ -53,6 +53,7 @@ from .task_verifier import ObservedVerifier, load_settings
 DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 # /rpc methods that share /api/v1's principals and OperationService (MCP and CLI enter here).
 API_RPC = {"op_submit": "?", "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
+           "work_status": "observe", "work_result": "observe", "work_events": "observe",
            "api_events": "observe", "inventory_sessions": "observe", "inventory_hosts": "observe",
            "inventory_session": "observe", "inventory_worktree": "observe", "resource_history": "observe", "resource_relations": "observe",
            "api_capabilities": "observe", "github_pr_preview": "observe", "github_merge_preview_get": "observe",
@@ -239,6 +240,8 @@ class TaskDaemon:
             raise OperationError("FORBIDDEN", f"{method} needs the {scope!r} scope", 403)
         entry = params.pop("entry", None)
         entry = entry if entry in {"mcp", "cli"} else "rpc"
+        if method in {"work_status", "work_result", "work_events"}:
+            return await self.call(method, params, principal=principal)
         if method == "op_submit":
             try:  # validated before anything is stored, so an error means nothing happened
                 wait = min(max(float(params.get("wait_s") or 0), 0.0), 30.0)
