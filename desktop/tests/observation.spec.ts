@@ -74,14 +74,58 @@ for (const native of [false, true]) {
     failRead = true; cursor = 4;
     await expect(page.getByText("UNAVAILABLE Session observation unavailable")).toBeVisible();
     expect(await saved(page)).toEqual(cp(3));
-    await page.getByRole("button", {name: "Send", exact: true}).click();
-    await expect(page.getByText(/CENTRAL_OFFLINE/)).toBeVisible();
+    await expect(page.getByRole("button", {name: "Send", exact: true})).toBeDisabled();
     expect(writes).toHaveLength(1);
     failRead = false;
     await expect.poll(() => saved(page), {timeout: 10000}).toEqual(cp(4));
     await expect(answer).toHaveValue("Original answer draft");
     await expect(composer).toHaveValue("Preserved session instructions");
     expect(reads).toBeGreaterThan(5); expect(errors).toEqual([]);
+  });
+
+  test(`initial message failure retains subscription and pauses controls until recovery (${native ? "native" : "browser"})`, async ({page}) => {
+    let cursor = 0, failMessages = true, reads = 0, pending: any = ask("question-1");
+    const writes: any[] = [], errors: string[] = [];
+    page.on("pageerror", e => errors.push(e.message));
+    await mount(page, native, async input => {
+      const url = new URL(input.path, "http://fixture"), path = url.pathname;
+      if (input.method === "POST") {writes.push(input); return {status: 200, data: {operation: {status: "accepted"}}};}
+      if (path === "/sessions/demo/session-1") {
+        reads++;
+        return {status: 200, data: {session: {host: "demo", session_id: "session-1", title: "Initially unavailable",
+          api_access: "managed", provenance: "connector_managed", pending}}};
+      }
+      if (path.endsWith("/messages") && failMessages)
+        return {status: 503, data: {error: {code: "UNAVAILABLE", message: "Messages temporarily unavailable"}}};
+      return {status: 200, data: path === "/capabilities" ? caps : path === "/bootstrap" ? {capabilities: caps,
+        sync: {version: 1, server_id: "server", principal_id: "principal", checkpoint: cp(0)}}
+        : path === "/events" ? {events: Number(url.searchParams.get("after")) < cursor
+          ? [{seq: cursor, resource_type: "session", resource_id: "demo/session-1", kind: "session.updated"}] : [],
+          head_cursor: cursor, next_cursor: cursor, has_more: false, sync: {checkpoint: cp(cursor)}}
+        : {messages: [], checkpoints: [], operations: [], hosts: [], sessions: [], work_items: []}};
+    });
+    await page.goto("/dashboard/#/session/demo/session-1");
+    await expect(page.getByText("UNAVAILABLE Messages temporarily unavailable")).toBeVisible();
+    const composer = page.locator("textarea").first(), answer = page.getByRole("textbox", {name: "Which branch?"});
+    await composer.fill("Initial read failure must retain these instructions");
+    await answer.fill("Retained answer");
+    await expect(page.getByRole("button", {name: "Send", exact: true})).toBeDisabled();
+    await expect(page.getByRole("button", {name: "Answer", exact: true})).toBeDisabled();
+    // With no journal event, the initial failed read itself must still recover.
+    failMessages = false;
+    await expect(page.getByRole("button", {name: "Answer", exact: true})).toBeEnabled();
+    await expect(page.getByText("UNAVAILABLE Messages temporarily unavailable")).toHaveCount(0);
+    await expect(answer).toHaveValue("Retained answer");
+    pending = {kind: "permission", toolUseId: "permission-2", toolName: "git", input_preview: "Reviewed action"};
+    cursor = 1;
+    await expect.poll(() => saved(page)).toEqual(cp(1));
+    await expect(page.getByRole("button", {name: "Allow", exact: true})).toBeVisible();
+    await expect(composer).toHaveValue("Initial read failure must retain these instructions");
+    const beforeLeaving = reads;
+    await page.goto("/dashboard/#/settings");
+    await page.waitForTimeout(1400);
+    expect(reads).toBeLessThanOrEqual(beforeLeaving + 1);
+    expect(writes).toEqual([]); expect(errors).toEqual([]);
   });
 
   test(`parent archive updates mounted controls while retaining the edit (${native ? "native" : "browser"})`, async ({page}) => {

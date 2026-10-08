@@ -801,13 +801,13 @@ async function viewSession(main, host, sid) {
   try { box.value = localStorage.getItem(draftKey) || ""; } catch { /* unavailable */ }
   box.oninput = () => { try { localStorage.setItem(draftKey, box.value); } catch { /* unavailable */ } };
   const queue = h("input", { type: "checkbox" });
-  let row, pendingIdentity, sending = false;
-  const allowed = action => row?.api_access === "managed" && may("operate")
+  let row, pendingIdentity, sending = false, readReady = false, refreshInFlight = null, readError = null;
+  const allowed = action => readReady && row?.api_access === "managed" && may("operate")
     && state.caps?.hosts?.find(item => item.host === host)?.writes !== false
     && state.caps?.actions?.find(item => item.action === action)?.allowed !== false;
   const identity = pend => pend ? JSON.stringify({kind: pend.kind, toolUseId: pend.toolUseId,
     toolName: pend.toolName, input_preview: pend.input_preview, questions: pend.questions}) : "";
-  const send = h("button", { class: "primary", onclick: async () => {
+  const send = h("button", { class: "primary", disabled: true, onclick: async () => {
     if (!box.value.trim()) return;
     const submitted = box.value;
     sending = true; send.disabled = true;
@@ -822,14 +822,14 @@ async function viewSession(main, host, sid) {
     } catch (e) { status.replaceChildren(errorBox(e)); }
     finally { sending = false; send.disabled = !allowed("session.send"); }
   } }, t("send"));
-  const stop = h("button", { class: "danger", onclick: async () => {
+  const stop = h("button", { class: "danger", disabled: true, onclick: async () => {
     try {
       assertView(connection);
       const op = await submit("session.interrupt", { host, session_id: sid }, { mode: "soft" }, {}, `interrupt.${host}.${sid}`);
       assertView(connection); status.replaceChildren(opStatus(op));
     } catch (e) { status.replaceChildren(errorBox(e)); }
   } }, t("interrupt"));
-  const composer = h("div", {}, box, h("div", { class: "actions" }, send, stop,
+  const composer = h("div", {hidden: true}, box, h("div", { class: "actions" }, send, stop,
     h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
   const readonly = h("p", { class: "note" }, t("read_only_note"));
   const controls = h("div", { class: "panel" }, pending, readonly, composer, status);
@@ -864,8 +864,8 @@ async function viewSession(main, host, sid) {
     if (pend.kind === "permission") {
       card.append(h("p", {}, h("code", {}, pend.toolName || "")), h("p", { class: "msg" }, pend.input_preview || ""),
         h("div", { class: "actions" },
-          h("button", { class: "primary", disabled: !pend.toolUseId || !allowed("session.answer"), onclick: () => answer({ permission: "allow" }) }, t("allow")),
-          h("button", { class: "danger", disabled: !pend.toolUseId || !allowed("session.answer"), onclick: () => answer({ permission: "deny" }) }, t("deny"))));
+          h("button", { class: "primary", "data-answer-action": "", disabled: !pend.toolUseId || !allowed("session.answer"), onclick: () => answer({ permission: "allow" }) }, t("allow")),
+          h("button", { class: "danger", "data-answer-action": "", disabled: !pend.toolUseId || !allowed("session.answer"), onclick: () => answer({ permission: "deny" }) }, t("deny"))));
     } else if (pend.kind === "ask_user") {
       const fields = [];
       const save = () => { try { localStorage.setItem(key, JSON.stringify({identity: current, answers: fields.map(f => f.value)})); } catch { /* unavailable */ } };
@@ -877,10 +877,15 @@ async function viewSession(main, host, sid) {
         card.append(h("p", {}, q.header ? h("strong", {}, `${q.header} · `) : null, q.question),
           picks.length ? h("div", { class: "actions" }, ...picks) : null, h("div", { class: "actions" }, input));
       }
-      card.append(h("div", { class: "actions" }, h("button", { class: "primary", disabled: !pend.toolUseId || !allowed("session.answer"),
+      card.append(h("div", { class: "actions" }, h("button", { class: "primary", "data-answer-action": "", disabled: !pend.toolUseId || !allowed("session.answer"),
         onclick: () => answer({ answers: fields.map(f => f.value) }) }, t("answer"))));
     }
     pending.append(card);
+  };
+  const updateControls = () => {
+    send.disabled = !allowed("session.send") || sending; stop.disabled = !allowed("session.interrupt");
+    for (const button of pending.querySelectorAll("[data-answer-action]"))
+      button.disabled = !row?.pending?.toolUseId || !allowed("session.answer");
   };
   const applyObservation = data => {
     const first = !row; row = data.session;
@@ -906,8 +911,7 @@ async function viewSession(main, host, sid) {
     if (data.discovery?.length) head.append(h("details", {}, h("summary", {}, t("obs_discovery")), discoveryEvidence(data.discovery)));
     const managed = row.api_access === "managed";
     composer.hidden = !managed; readonly.hidden = managed;
-    send.disabled = !allowed("session.send") || sending; stop.disabled = !allowed("session.interrupt");
-    renderPending();
+    renderPending(); updateControls();
   };
   const loadObservation = async () => {
     const data = await api("GET", path); assertView(connection); applyObservation(data);
@@ -918,16 +922,34 @@ async function viewSession(main, host, sid) {
       h("span", { class: "who" }, `${m.role || ""} · ${when(m.ts)}`), m.text || ""));
     msgs.replaceChildren(...(items.length ? items : [h("p", { class: "muted" }, t("no_messages"))]));
   };
-  const refresh = async () => {
-    try { await settleRefreshes([loadObservation(), loadMessages()]); }
-    catch (error) { status.replaceChildren(errorBox(error)); throw error; }
+  const refresh = async (fromEvent = false) => {
+    if (refreshInFlight) {
+      await refreshInFlight;
+      if (fromEvent) return refresh(true);
+      return;
+    }
+    refreshInFlight = (async () => {
+      try {
+        await settleRefreshes([loadObservation(), loadMessages()]);
+        readReady = true; updateControls(); readError?.remove(); readError = null;
+      } catch (error) {
+        readReady = false; updateControls(); readError = errorBox(error); status.replaceChildren(readError); throw error;
+      }
+    })();
+    try { await refreshInFlight; } finally { refreshInFlight = null; }
   };
-  try { await settleRefreshes([refresh(), cps.load()]); } catch { return; }
-  const reload = debounceRefresh(refresh, 500), reloadCps = debounceRefresh(cps.load, 500);
-  return onEvents(ev => { observations.changed(ev); return settleRefreshes([
+  // Keep the subscription after a partial initial failure. The view already contains controls;
+  // returning here would let later journal pages be acknowledged without refreshing them.
+  try { await settleRefreshes([refresh(), cps.load()]); } catch { /* retain the failure and drafts */ }
+  const retry = setInterval(() => {
+    if (!readReady && !refreshInFlight) refresh().catch(() => {});
+  }, 1000);
+  const reload = debounceRefresh(() => refresh(true), 500), reloadCps = debounceRefresh(cps.load, 500);
+  const off = onEvents(ev => { observations.changed(ev); return settleRefreshes([
     (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "work_item") ? reload() : Promise.resolve(),
     ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve()
   ]); });
+  return () => {clearInterval(retry); off();};
 }
 
 // A checkpoint records this session's commit and recent conversation (read-only); continuing starts a new
