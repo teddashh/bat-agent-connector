@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import api_auth, cleanup, lifecycle, orchestrate, registry
+from bat_agent_connector import api_auth, cleanup, lifecycle, orchestrate, registry, service
 from bat_agent_connector.operations import OperationError
 from tests.test_checkpoints import (  # noqa: F401 - pytest fixtures shared with real Git checkpoint tests
     LocalRunner,
@@ -358,6 +358,34 @@ async def test_e01_pending_start_stop_and_waiting_sessions_are_retained(daemon, 
     doc = await cleanup.preview(daemon.ops, CLEANER, doc["target"])
     assert any(r["code"] == "COMMAND_UNRESOLVED" for i in doc["items"] for r in i["reasons"])
     assert not doc["ready"]
+
+
+@pytest.mark.parametrize("field", service.SESSION_WAITING_FIELDS)
+async def test_e01_every_waiting_field_racing_with_stop_keeps_session_and_worktree(daemon, mock, monkeypatch, field):
+    cp, op = await setup_work(daemon, mock)
+    sid, wt = op["result"]["session_id"], Path(op["result"]["worktree_path"])
+    doc = await cleanup.preview(daemon.ops, CLEANER, {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]})
+    assert doc["ready"]
+    original = lifecycle._meta
+    async def become_waiting(client, session_id):
+        if session_id == sid:
+            mock.states[sid][field] = True
+        return await original(client, session_id)
+    monkeypatch.setattr(lifecycle, "_meta", become_waiting)
+    before = len(mock.invokes)
+    done = await apply(daemon, doc)
+    assert done["status"] == "needs_attention", done
+    session = next(r for r in cleanup.receipts(daemon.ops, done["operation_id"]) if r["plan"].get("session_id") == sid)
+    assert session["error"]["code"] == "SESSION_WAITING"
+    assert not any(i["channel"] == "claude:stop-session" for i in mock.invokes[before:])
+    assert wt.exists() and git(wt, "rev-parse", "HEAD") == cp["commit_sha"]
+
+
+def test_e01_preview_recheck_and_stop_share_waiting_fields():
+    import inspect
+    assert cleanup.service.SESSION_WAITING_FIELDS is lifecycle.service.SESSION_WAITING_FIELDS
+    for handler in (cleanup._plan, cleanup._phase_consumers, lifecycle._stop):
+        assert "service.SESSION_WAITING_FIELDS" in inspect.getsource(handler)
 
 
 async def test_e02_shared_worktree_is_one_item_and_checks_out_of_scope_consumers(daemon, mock):

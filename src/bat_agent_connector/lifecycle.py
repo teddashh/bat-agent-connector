@@ -1273,9 +1273,10 @@ async def _stop(fleet: Fleet, host: str, sid: str, audit: Audit, *, cleanup: boo
         return {"stopped": False, "reason": "started streaming again; left running"}
     if cleanup and service._state_safe(service.agent_kind(t.get("agentPreset")), meta):
         state = await c.invoke("claude:get-session-state", {"sessionId": sid})
-        if isinstance(state, dict) and any(state.get(k) for k in
-                ("isStreaming", "pendingAskUser", "pendingPermission", "queuedMessages", "queuedMessageCount")):
-            return {"stopped": False, "reason": "session became busy or waiting; preview again"}
+        if isinstance(state, dict) and state.get("isStreaming"):
+            return {"stopped": False, "code": "ACTIVE_WRITER", "reason": "session started streaming; preview again"}
+        if isinstance(state, dict) and any(state.get(k) for k in service.SESSION_WAITING_FIELDS):
+            return {"stopped": False, "code": "SESSION_WAITING", "reason": "session became waiting; preview again"}
     base = {"actor": fleet.actor, "tool": "session_cleanup", "host": host, "session_id": sid + "#stop"}
     audit.check_rate(host, sid + "#stop")
     audit.record(**base, channel="claude:stop-session", phase="attempt")

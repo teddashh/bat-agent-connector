@@ -550,10 +550,8 @@ async def _runtime(ops, item, deadline):
             state = await client.invoke("claude:get-session-state", {"sessionId": item["session_id"]})
         if isinstance(state, dict):
             # Runtime facts only: do not archive raw transcripts or prompt text in cleanup receipts.
-            state = {k: (bool(v) if k.startswith("pending") or k in {"queuedMessages", "isWaitingForInput"} else v)
-                     for k, v in state.items() if k in {"status", "sessionId", "isStreaming", "pendingAskUser",
-                         "pendingPermission", "pendingQuestion", "pendingPermissions", "pendingQuestions",
-                         "queuedMessages", "queuedMessageCount", "pendingApproval", "isWaitingForInput"}}
+            state = {k: (bool(v) if k in service.SESSION_WAITING_FIELDS else v)
+                     for k, v in state.items() if k in {"status", "sessionId", "isStreaming", *service.SESSION_WAITING_FIELDS}}
         return {"loaded": meta is not None, "cwd": (meta or {}).get("cwd"),
                 "streaming": bool((meta or {}).get("isStreaming")), "state": state}
     try:
@@ -679,9 +677,7 @@ def _plan(ops, item, choices, op_rows, pvs, own_op=None):
         if obs.get("streaming") or (isinstance(obs.get("state"), dict) and obs["state"].get("isStreaming")):
             _reason(item, "ACTIVE_WRITER")
         state = obs.get("state") or {}
-        if isinstance(state, dict) and any(state.get(k) for k in
-                ("pendingPermission", "pendingQuestion", "pendingPermissions", "pendingQuestions", "queuedMessages",
-                 "pendingApproval", "pendingAskUser", "queuedMessageCount", "isWaitingForInput")):
+        if isinstance(state, dict) and any(state.get(k) for k in service.SESSION_WAITING_FIELDS):
             _reason(item, "SESSION_WAITING")
         if obs.get("loaded") and obs.get("cwd") != item.get("path"):
             _reason(item, "BINDING_MISMATCH")
@@ -1062,6 +1058,8 @@ async def _phase_consumers(ctx, item):
             raise OperationError("PREVIEW_STALE", "a task or unresolved start needs this worktree", 409)
         runtime = await _runtime(ops, {"host": item["host"], "session_id": e["session_id"], "registry": e},
                                  time.monotonic() + READ_DEADLINE_S)
+        if any((runtime.get("state") or {}).get(k) for k in service.SESSION_WAITING_FIELDS):
+            raise OperationError("SESSION_WAITING", "a session is waiting; preview again", 409)
         if runtime.get("error") or runtime.get("loaded"):
             raise OperationError("PREVIEW_STALE", "a session still uses this worktree", 409)
 
@@ -1189,7 +1187,7 @@ async def _execute_item(ctx, item, payload):
             result = await lifecycle._stop(ops.context["fleet"], item["host"], item["session_id"],
                                           Audit(ops.context["fleet"].config.safety), cleanup=True)
             if not result.get("stopped"):
-                raise OperationError("STOP_UNPROVEN", result.get("reason", "stop was not confirmed"), 409)
+                raise OperationError(result.get("code", "STOP_UNPROVEN"), result.get("reason", "stop was not confirmed"), 409)
             if isinstance(result.get("result"), dict) and result["result"].get("ok") is False:
                 raise AmbiguousOutcome("stop acknowledgment did not confirm termination")
             return result
