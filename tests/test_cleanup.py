@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 from pathlib import Path
 
@@ -44,6 +45,16 @@ async def apply(d, doc, principal=CLEANER):
     op, _ = d.ops.create(principal, **copy.deepcopy(cleanup.apply_request(doc, "apply-" + doc["preview_id"])))
     await d.ops.drain(timeout=60)
     return d.ops.get(op["operation_id"])
+
+
+def attachment_evidence(monkeypatch, wt, names, bookkeeping=()):
+    # Simulate the artifacts package's future read of verified artifact_materializations.
+    evidence = {"replica_manifest": [{"path": name, "bytes": (wt / name).stat().st_size,
+                                     "digest": hashlib.sha256((wt / name).read_bytes()).hexdigest()} for name in names],
+                "bookkeeping_names": list(bookkeeping)}
+    monkeypatch.setattr(cleanup, "_replica_evidence", lambda ops, item: copy.deepcopy(evidence) if item["path"] == str(wt)
+                        else {"replica_manifest": [], "bookkeeping_names": []})
+    return evidence
 
 
 async def test_e01_preview_is_pure_and_signed_plan_cannot_be_changed(daemon, mock, human):
@@ -271,19 +282,27 @@ async def test_e02_shared_worktree_is_one_item_and_checks_out_of_scope_consumers
     assert "ACTIVE_WRITER" in {r["code"] for r in wts[0]["reasons"]}
 
 
-@pytest.mark.parametrize("phase", ["preserve", "discard", "remove.worktree", "remove.branch"])
-async def test_e01_lost_replies_reconcile_each_cleanup_phase(daemon, mock, phase):
+@pytest.mark.parametrize("phase", ["preserve", "discard", "discard.replica", "remove.worktree", "remove.branch"])
+async def test_e01_lost_replies_reconcile_each_cleanup_phase(daemon, mock, monkeypatch, phase):
     import base64
     import shlex
 
     from bat_agent_connector.operations import AmbiguousOutcome, OperationService
     cp, op = await setup_work(daemon, mock)
     target = {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]}
-    principal = DISCARDER if phase == "discard" else CLEANER
-    if phase == "discard":
+    loss_phase = "discard" if phase == "discard.replica" else phase
+    principal = DISCARDER if loss_phase == "discard" else CLEANER
+    if phase == "discard.replica":
+        wt = Path(op["result"]["worktree_path"])
+        (Path(op["external_refs"]["clone_path"]) / ".git/info/exclude").write_text(".batc-inputs/\n")
+        (wt / ".batc-inputs").mkdir()
+        (wt / ".batc-inputs/attachment.txt").write_text("original")
+        attachment_evidence(monkeypatch, wt, [".batc-inputs/attachment.txt"])
+        (wt / ".batc-inputs/attachment.txt").write_text("edited attachment")
+    elif phase == "discard":
         (Path(op["result"]["worktree_path"]) / "discard.txt").write_text("discard")
     doc = await cleanup.preview(daemon.ops, principal, target)
-    if phase == "discard":
+    if loss_phase == "discard":
         wt = next(i for i in doc["items"] if i["kind"] == "worktree")
         doc = await cleanup.preview(daemon.ops, principal, target, {"discard_uncommitted": [wt["resource_id"]]})
     original = daemon.ops.context["git_runner"]
@@ -292,7 +311,7 @@ async def test_e01_lost_replies_reconcile_each_cleanup_phase(daemon, mock, phase
         async def run(self, host, script, timeout_s=None):
             req = json.loads(base64.b64decode(shlex.split(script)[-1]))
             out = await original.run(host, script, timeout_s)
-            if req.get("phase") == phase and not self.lost:
+            if req.get("phase") == loss_phase and not self.lost:
                 self.lost = True
                 raise AmbiguousOutcome("lost SSH reply after effect")
             return out
@@ -411,7 +430,7 @@ async def test_e01_partial_cleanup_resumes_only_unfinished_unchanged_items(daemo
     assert any("cleaner" in r["resumed_by"] for r in cleanup.receipts(daemon.ops, done["operation_id"]))
 
 
-async def test_e01_attachment_replicas_are_removed_without_discard_scope(daemon, mock):
+async def test_e01_attachment_replicas_are_removed_without_discard_scope(daemon, mock, monkeypatch):
     cp, op = await setup_work(daemon, mock)
     wt = Path(op["result"]["worktree_path"])
     clone = Path(op["external_refs"]["clone_path"])
@@ -419,15 +438,115 @@ async def test_e01_attachment_replicas_are_removed_without_discard_scope(daemon,
     replicas = wt / ".batc-inputs"
     replicas.mkdir()
     (replicas / "attachment.txt").write_text("replica; original in artifact store")
+    books = [".batc-inputs/.owner", ".batc-inputs/.attempts/art_example-r1/.attempt-1",
+             ".batc-inputs/.attempts/art_example-r1/.closed-1"]
+    for name in books:
+        (wt / name).parent.mkdir(parents=True, exist_ok=True)
+        (wt / name).write_text("helper bookkeeping")
+    attachment_evidence(monkeypatch, wt, [".batc-inputs/attachment.txt"], books)
     doc = await cleanup.preview(daemon.ops, CLEANER, {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]})
     item = next(i for i in doc["items"] if i["kind"] == "worktree")
     assert item["decision"] == "reclaim", item
     assert not any(r["code"] == "UNCOMMITTED_CHANGES" for r in item["reasons"])
+    assert [f["path"] for f in item["observation"]["exempted_replicas"]] == [".batc-inputs/attachment.txt"]
+    assert {f["path"] for f in item["observation"]["exempted_bookkeeping"]} == set(books)
     done = await apply(daemon, doc)
     assert done["status"] == "succeeded", done
     assert not wt.exists()
     tomb = cleanup.lookup(daemon.journal.db, str(wt))[0]
     assert "originals in artifact store" in tomb["attachment_replicas"]
+
+
+async def test_e01_edited_or_extra_replica_content_counts_as_uncommitted(daemon, mock, monkeypatch):
+    cp, op = await setup_work(daemon, mock)
+    wt = Path(op["result"]["worktree_path"])
+    (Path(op["external_refs"]["clone_path"]) / ".git/info/exclude").write_text(".batc-inputs/\n")
+    (wt / ".batc-inputs").mkdir()
+    (wt / ".batc-inputs/attachment.txt").write_text("original")
+    attachment_evidence(monkeypatch, wt, [".batc-inputs/attachment.txt"])
+    (wt / ".batc-inputs/attachment.txt").write_text("edited attachment")
+    (wt / ".batc-inputs/output.txt").write_text("agent output")
+    target = {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]}
+    doc = await cleanup.preview(daemon.ops, CLEANER, target)
+    item = next(i for i in doc["items"] if i["kind"] == "worktree")
+    assert item["decision"] == "retain"
+    assert "UNCOMMITTED_CHANGES" in {r["code"] for r in item["reasons"]}
+    assert {".batc-inputs/attachment.txt", ".batc-inputs/output.txt"} <= {
+        f["path"] for f in item["observation"]["manifest"]}
+    assert not item["observation"]["exempted_replicas"]
+    with pytest.raises(OperationError, match="DISCARD_SCOPE_REQUIRED"):
+        await cleanup.preview(daemon.ops, CLEANER, target, {"discard_uncommitted": [item["resource_id"]]})
+    doc = await cleanup.preview(daemon.ops, DISCARDER, target, {"discard_uncommitted": [item["resource_id"]]})
+    done = await apply(daemon, doc, DISCARDER)
+    assert done["status"] == "succeeded", done
+    assert not wt.exists()
+    assert cleanup.lookup(daemon.journal.db, str(wt))[0]["attachment_replicas"] is None
+
+
+async def test_e01_replicas_without_manifest_are_ordinary_content(daemon, mock):
+    cp, op = await setup_work(daemon, mock)
+    wt = Path(op["result"]["worktree_path"])
+    (Path(op["external_refs"]["clone_path"]) / ".git/info/exclude").write_text(".batc-inputs/\n")
+    (wt / ".batc-inputs").mkdir()
+    (wt / ".batc-inputs/attachment.txt").write_text("no materialization evidence yet")
+    (wt / ".batc-inputs/.owner").write_text("no evidence for helper names either")
+    doc = await cleanup.preview(daemon.ops, CLEANER, {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]})
+    item = next(i for i in doc["items"] if i["kind"] == "worktree")
+    assert item["replica_evidence"]["replica_manifest"] == []
+    assert item["decision"] == "retain"
+    assert "UNCOMMITTED_CHANGES" in {r["code"] for r in item["reasons"]}
+    assert not item["observation"]["exempted_replicas"] and not item["observation"]["exempted_bookkeeping"]
+    assert {".batc-inputs", ".batc-inputs/attachment.txt", ".batc-inputs/.owner"} <= {
+        f["path"] for f in item["observation"]["manifest"]}
+
+
+async def test_e01_replica_edit_after_preview_is_stale(daemon, mock, monkeypatch):
+    cp, op = await setup_work(daemon, mock)
+    wt = Path(op["result"]["worktree_path"])
+    (Path(op["external_refs"]["clone_path"]) / ".git/info/exclude").write_text(".batc-inputs/\n")
+    (wt / ".batc-inputs").mkdir()
+    (wt / ".batc-inputs/attachment.txt").write_text("original")
+    attachment_evidence(monkeypatch, wt, [".batc-inputs/attachment.txt"])
+    doc = await cleanup.preview(daemon.ops, CLEANER, {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]})
+    assert doc["ready"]
+    calls = len(mock.invokes)
+    (wt / ".batc-inputs/attachment.txt").write_text("new content after review")
+    done = await apply(daemon, doc)
+    assert done["error_code"] == "PREVIEW_STALE", done
+    assert not any(i["channel"] == "claude:stop-session" for i in mock.invokes[calls:])
+    assert (wt / ".batc-inputs/attachment.txt").read_text() == "new content after review"
+
+
+@pytest.mark.parametrize("anomaly", ["missing", "link", "hardlink", "directory"])
+async def test_e01_replica_anomalies_require_reviewed_discard(daemon, mock, monkeypatch, tmp_path, anomaly):
+    cp, op = await setup_work(daemon, mock)
+    wt = Path(op["result"]["worktree_path"])
+    (Path(op["external_refs"]["clone_path"]) / ".git/info/exclude").write_text(".batc-inputs/\n")
+    (wt / ".batc-inputs").mkdir()
+    replica = wt / ".batc-inputs/attachment.txt"
+    replica.write_text("original content")
+    attachment_evidence(monkeypatch, wt, [".batc-inputs/attachment.txt"])
+    outside = tmp_path / "original.txt"
+    outside.write_text("original content")
+    if anomaly == "directory":
+        (wt / ".batc-inputs/unexpected/empty").mkdir(parents=True)
+    else:
+        replica.unlink()
+        if anomaly == "link":
+            replica.symlink_to(outside)
+        elif anomaly == "hardlink":
+            import os
+            os.link(outside, replica)
+    target = {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]}
+    doc = await cleanup.preview(daemon.ops, CLEANER, target)
+    item = next(i for i in doc["items"] if i["kind"] == "worktree")
+    assert item["decision"] == "retain"
+    assert "UNCOMMITTED_CHANGES" in {r["code"] for r in item["reasons"]}
+    assert any(f["type"] == anomaly for f in item["observation"]["manifest"])
+    doc = await cleanup.preview(daemon.ops, DISCARDER, target, {"discard_uncommitted": [item["resource_id"]]})
+    done = await apply(daemon, doc, DISCARDER)
+    assert done["status"] == "succeeded", done
+    assert not wt.exists() and outside.read_text() == "original content"
 
 
 async def test_e01_exact_temporary_requires_creation_markers_and_never_sweeps(daemon, mock):
@@ -442,8 +561,8 @@ async def test_e01_exact_temporary_requires_creation_markers_and_never_sweeps(da
     decoy.mkdir()
     (decoy / "context.txt").write_text("manual")
     doc = await cleanup.preview(daemon.ops, CLEANER, {"kind": "checkpoint", "checkpoint_id": cp["checkpoint_id"]})
-    item = next(i for i in doc["items"] if i["kind"] == "temporary")
-    assert item["decision"] == "reclaim", item
+    item = next(i for i in doc["items"] if i["kind"] == "temporary" and i["path"] == str(temp))
+    assert item["decision"] == "reclaim", json.dumps(item, indent=2)
     done = await apply(daemon, doc)
     assert done["status"] == "succeeded", done
     assert not temp.exists() and (decoy / "context.txt").read_text() == "manual"

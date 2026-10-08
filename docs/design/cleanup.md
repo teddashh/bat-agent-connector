@@ -127,10 +127,19 @@ discard_uncommitted 是唯一摧毀內容的 choice；overridden_reasons 顯示 
 release_undelivered 不是 discard，只有保留 commit／branch 後釋放 runtime／worktree；正常 agent 可用 cleanup
 scope 做明確 per-item release。兩者不能越過 manual／unknown／writer／command／task／其他 content consumer。
 
-Checkpoint worktree 的 `.batc-inputs/` 是 artifacts package 的 verified attachment replicas；common
-info/exclude 排除這個目錄。它不算 uncommitted user content，不要求 discard scope，也不額外 pin。
-非 force worktree remove 同時移除 replicas；artifact store 保留 originals，tombstone 註記去向。
-Tracked 或非 checkpoint 的同名內容仍按一般 manifest／保留規則判斷。
+Checkpoint worktree 的 common info/exclude 排除 `.batc-inputs/`，但忽略目錄不等於內容已驗證。
+Connector 每個 worktree 傳 `replica_manifest=[{path,bytes,digest}]`（digest 為 SHA-256）與
+`bookkeeping_names`：exact `.batc-inputs/.owner`、`.batc-inputs/.attempts/<art>-r<rev>/.attempt-N`／
+`.closed-N`。Host 只豁免未 tracked、regular、single-link 且 path／size／SHA-256 完全匹配的 replica，
+以及明列且 regular／single-link 的 helper names；必需的父目錄只是載體。所有豁免事實也納入 fingerprint。
+已編輯／新增／缺少的 replica、symlink／hardlink、其他內容或非預期目錄，都列入 preview manifest，
+按 UNCOMMITTED_CHANGES 保留；要丟棄必須明選 discard_uncommitted 且有 cleanup_discard。
+Discard 用 no-follow exact names unlink／empty-directory rmdir；缺少或本步明選移除的 replica 名稱，
+只在成功 discard receipt 後（或 exact after-state reconcile）確認接受其缺失，不豁免其他新缺失。
+Artifacts package 後續從 artifact_materializations 提供 materialization evidence，接入
+`cleanup._replica_evidence` 的純讀投影；本包預設 manifest／helper names 都為空，任何 `.batc-inputs/`
+內容都是一般內容。非 force worktree remove 同時移除已驗證 replicas；artifact store 保留 originals，
+只有實際豁免 replica 時 tombstone 才註記去向。Tracked 或非 checkpoint 同名內容仍按一般規則判斷。
 
 ### Receipt coverage（E02）
 
@@ -373,7 +382,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | TASK_OWNED／原TaskDaemon不變 | test_e01_task_owned_resources_are_retained；原test_external_cleanup_retains_unmerged_commit_and_recovers_after_restart／test_terminal_cleanup_requires_proof_before_journal_path_is_cleared |
 | legacy只讀、config解析、planner只stop、跨processguard | test_e01_legacy_apply_is_disabled_and_auto_cleanup_still_loads、test_e01_fanout_stops_planner_and_keeps_worktree、test_e01_guard_refuses_legacy_writes_on_reserved_and_cleaned_resources |
 | boundedread／serialization／deadline | test_e01_previews_serialize_per_host_and_share_read_deadline |
-| attachmentreplicas／exacttemps | test_e01_attachment_replicas_are_removed_without_discard_scope、test_e01_exact_temporary_requires_creation_markers_and_never_sweeps、test_e01_empty_integration_temporary_has_exact_intent_and_no_restore_promise |
+| attachmentreplicas只豁免exact manifest／exacttemps | test_e01_attachment_replicas_are_removed_without_discard_scope、test_e01_edited_or_extra_replica_content_counts_as_uncommitted、test_e01_replicas_without_manifest_are_ordinary_content、test_e01_replica_anomalies_require_reviewed_discard（missing/link/hardlink/directory）、test_e01_replica_edit_after_preview_is_stale、test_e01_lost_replies_reconcile_each_cleanup_phase（discard.replica）、test_e01_exact_temporary_requires_creation_markers_and_never_sweeps、test_e01_empty_integration_temporary_has_exact_intent_and_no_restore_promise |
 | acceptedauthority／載體不被guard退休 | test_e01_accepted_authority_survives_key_rotation_and_carrier_stays_usable |
 | migration原histories／DDL不占user_version／keep無sweep | test_cleanup_migration_is_atomic_additive_and_preserves_history（version 1與3、第二次open不變）、test_e01_keep_defaults_reject_purge_and_never_sweep_by_name |
 | §10三入口／§19Dashboard | test_e01_cleanup_adapters_share_the_action_contract；Playwright（含lostreply/reload同key） en/zh-TW/390px #/cleanup與workitementry／無restore／無null/undefined/[object文字 |

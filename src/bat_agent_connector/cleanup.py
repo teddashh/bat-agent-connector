@@ -682,7 +682,9 @@ def _plan(ops, item, choices, op_rows, pvs, own_op=None):
                 _reason(item, "BINDING_MISMATCH")
             if obs.get("status"):
                 _reason(item, "UNCOMMITTED_CHANGES", manifest=obs.get("manifest_digest"))
-            if obs.get("complex_state") or any(f.get("type") != "file" for f in obs.get("manifest", [])):
+            if obs.get("complex_state") or any(f.get("type") != "file" and not (
+                    (f["path"] == ".batc-inputs" or f["path"].startswith(".batc-inputs/")) and
+                    f["type"] in {"link", "hardlink", "directory", "missing"}) for f in obs.get("manifest", [])):
                 _reason(item, "RESOURCE_KIND_UNSUPPORTED")
         coverage = _coverage(ops, item, item.get("branch_observation", obs) if obs.get("exists") is False else obs)
         item["delivery"] = coverage
@@ -718,6 +720,11 @@ def _plan(ops, item, choices, op_rows, pvs, own_op=None):
     if (kind == "session" and obs.get("loaded") is False or kind in {"worktree", "temporary"} and obs.get("exists") is False) and not obs.get("error"):
         item["decision"] = "already_absent" if not item["reasons"] else "retain"
     return item
+
+
+def _replica_evidence(ops, item):
+    """Artifacts will project artifact_materializations here, keyed by this worktree's creation intent."""
+    return {"replica_manifest": [], "bookkeeping_names": []}
 
 
 async def snapshot(ops, target, choices, *, only=None, own_op=None):
@@ -764,12 +771,15 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
                 repos = {i.get("repository") for i in host_items if i["resource_id"] == only and i.get("repository")}
             for repo in sorted(repos):
                 related = [i for i in host_items if i.get("repository") == repo]
+                for i in related:
+                    if i["kind"] == "worktree" and i.get("flavor") == "checkpoint" and i.get("proven"):
+                        i["replica_evidence"] = _replica_evidence(ops, i)
                 req = {"repository": repo, "roots": list(ops.context["fleet"].config.host(host).managed_roots),
                        "paths_only": bool(only),
                        "worktrees": [i["path"] for i in related if i["kind"] == "worktree" and
                            (not only or i["resource_id"] == only or i.get("branch_id") == only)],
                        "branches": {i["branch"]: i.get("base") for i in related if i["kind"] == "worktree" and i.get("branch")},
-                       "replica_paths": [i["path"] for i in related if i.get("flavor") == "checkpoint"],
+                       "replicas": {i["path"]: i["replica_evidence"] for i in related if "replica_evidence" in i},
                        "temporaries": [i["path"] for i in related if i["kind"] == "temporary"],
                        "bases": {i["path"]: i["base"] for i in related if i["kind"] == "worktree" and i.get("base")}}
                 try:
@@ -991,7 +1001,8 @@ def _finalize(ctx, item, after):
            "after": after, "retained_ids": retained_ids, "receipt": {"operation_id": ctx.operation_id,
            "resource_id": rid}, "resumed_by": _resumed_by(ctx), "cleaned_at": time.time(),
            "pull_requests": item.get("delivery", {}).get("pull_requests", []),
-           "attachment_replicas": "removed with worktree; originals in artifact store" if item.get("flavor") == "checkpoint" else None}
+           "attachment_replicas": "removed with worktree; originals in artifact store" if
+               item.get("observation", {}).get("exempted_replicas") else None}
     with ctx.service.journal.tx():
         existing = db.execute("SELECT 1 FROM resource_tombstones WHERE resource_id=?", (rid,)).fetchone()
         if not existing:
@@ -1202,12 +1213,17 @@ async def _execute_item(ctx, item, payload):
            "temporaries": [item["path"]] if item["kind"] == "temporary" else [], "branch": item.get("branch"), "sha": sha,
            "retained_ref": retained_ref, "delivered": item.get("delivery", {}).get("delivered", False),
            "worktrees": [item["path"]] if item["kind"] == "worktree" else [],
-           "paths_only": True, "replica_paths": [item["path"]] if item.get("flavor") == "checkpoint" else [],
+           "paths_only": True, "replicas": {item["path"]: item["replica_evidence"]} if "replica_evidence" in item else {},
            "bases": {item["path"]: item["base"]} if item.get("base") and item["kind"] == "worktree" else {}}
     before = item["observation"] if item["kind"] in {"worktree", "temporary"} else None
+    discarded_replicas = sorted(set(item["observation"].get("missing_replicas", [])) | {
+        e["path"] for e in item.get("replica_evidence", {}).get("replica_manifest", [])
+        if e["path"] in item["observation"].get("extras", [])})
 
-    async def read(*, probe=False):
-        return await _host_call(ops, item["host"], {**{k: v for k, v in req.items() if k != "phase"}, "probe": probe})
+    async def read(*, probe=False, acknowledge_missing=False):
+        extra = {"acknowledged_missing_replicas": {item["path"]: discarded_replicas}} if acknowledge_missing else {}
+        return await _host_call(ops, item["host"], {**{k: v for k, v in req.items() if k != "phase"},
+                                                 **extra, "probe": probe})
 
     for phase in item["steps"]:
         if phase == "finalize":
@@ -1240,9 +1256,10 @@ async def _execute_item(ctx, item, payload):
             if phase == "remove.branch" and pinned and "refs/heads/" + item["branch"] not in observed.get("refs", {}):
                 return {"deleted": True, "sha": sha}
             if phase == "discard" and pinned:
-                wt = observed.get("worktrees", {}).get(item["path"], {})
+                settled = await read(probe=True, acknowledge_missing=True) if discarded_replicas else observed
+                wt = settled.get("worktrees", {}).get(item["path"], {})
                 if wt.get("head") == sha and wt.get("status") == "" and not wt.get("complex_state"):
-                    return {"discarded": True}
+                    return {"discarded": True, "acknowledged_missing_replicas": discarded_replicas}
             if observed.get("process_ended") and observed.get("common_dir") == req["identity"]["common_dir"]:
                 current = observed.get("worktrees", {}).get(item["path"])
                 if phase in {"preserve", "remove.worktree", "discard"} and current == request["before"]:
@@ -1275,6 +1292,7 @@ async def _execute_item(ctx, item, payload):
                     (ret_id, rid, ctx.operation_id, name, commit, item["host"], item["repository"], pin["ref"], commit,
                      pin["tree"], _hash(fact), _canonical(item["creation_evidence"]), time.time()))
         if phase == "discard":
+            req["acknowledged_missing_replicas"] = {item["path"]: result.get("acknowledged_missing_replicas", [])}
             observed = await read()
             before = observed["worktrees"][item["path"]]
     after = await read()

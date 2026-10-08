@@ -10,6 +10,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -51,30 +52,39 @@ def canonical(path, roots):
     return real
 
 
-def file_fact(path, relative):
-    s = os.lstat(path)
+def file_fact(path, relative, *, dir_fd=None):
+    s = os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
     if stat.S_ISLNK(s.st_mode):
-        return {"path": relative, "type": "link", "digest": digest(os.readlink(path)), "bytes": s.st_size}
-    if not stat.S_ISREG(s.st_mode) or s.st_nlink != 1:
+        return {"path": relative, "type": "link", "digest": digest(os.readlink(path, dir_fd=dir_fd)), "bytes": s.st_size}
+    if stat.S_ISDIR(s.st_mode):
+        return {"path": relative, "type": "directory", "mode": stat.S_IMODE(s.st_mode)}
+    if not stat.S_ISREG(s.st_mode):
         raise ValueError("DISCARD_MANIFEST_UNAVAILABLE")
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
     h = hashlib.sha256()
     with os.fdopen(fd, "rb") as f:
+        if os.fstat(f.fileno()) != s:
+            raise ValueError("PREVIEW_STALE")
         for b in iter(lambda: f.read(131072), b""):
             if time.monotonic() >= DEADLINE:
                 raise ValueError("OBSERVATION_UNAVAILABLE")
             h.update(b)
-    return {"path": relative, "type": "file", "digest": h.hexdigest(), "bytes": s.st_size,
-            "mode": stat.S_IMODE(s.st_mode)}
+    return {"path": relative, "type": "file" if s.st_nlink == 1 else "hardlink", "digest": h.hexdigest(),
+            "bytes": s.st_size, "mode": stat.S_IMODE(s.st_mode)}
 
 
-def manifest(path, *, skip_replicas=False, include_git=False):
+def manifest(path, *, include_git=False):
     # A complete exact file manifest also detects ignored files and same-status content edits.
     out = []
     for parent, dirs, files in os.walk(path, followlinks=False):
         if time.monotonic() >= DEADLINE:
             raise ValueError("OBSERVATION_UNAVAILABLE")
-        dirs[:] = sorted(d for d in dirs if (include_git or d != ".git") and not (skip_replicas and parent == path and d == ".batc-inputs"))
+        dirs[:] = sorted(d for d in dirs if include_git or d != ".git")
+        relative = os.path.relpath(parent, path)
+        if not include_git and input_path(relative):
+            out.append(file_fact(parent, relative))
+            if len(out) > 10000:
+                raise ValueError("DISCARD_MANIFEST_UNAVAILABLE: too many files")
         for d in list(dirs):
             if os.path.islink(os.path.join(parent, d)):
                 files.append(d)
@@ -89,6 +99,49 @@ def manifest(path, *, skip_replicas=False, include_git=False):
             if len(out) > 10000:
                 raise ValueError("DISCARD_MANIFEST_UNAVAILABLE: too many files")
     return out
+
+
+def input_path(path):
+    return path == ".batc-inputs" or path.startswith(".batc-inputs/")
+
+
+def replica_content(facts, evidence, tracked, acknowledged):
+    """Exempt only exact verified replicas and supplied helper names, never an entire directory."""
+    expected = {}
+    books = set(evidence.get("bookkeeping_names", []))
+    for entry in evidence.get("replica_manifest", []):
+        path = entry["path"]
+        if (not path.startswith(".batc-inputs/") or any(p in {"", ".", ".."} for p in path.split("/")) or
+                not isinstance(entry["bytes"], int) or entry["bytes"] < 0 or
+                not re.fullmatch(r"[0-9a-f]{64}", entry["digest"]) or path in expected):
+            raise ValueError("DISCARD_MANIFEST_UNAVAILABLE")
+        expected[path] = entry
+    if set(expected) & books or any(not re.fullmatch(r"\.batc-inputs/(?:\.owner|\.attempts/[^/]+-r[0-9]+/\.(?:attempt|closed)-[0-9]+)", p)
+           or any(c in {"", ".", ".."} for c in p.split("/")) for p in books):
+        raise ValueError("DISCARD_MANIFEST_UNAVAILABLE")
+    parents = set()
+    for path in set(expected) | books | {p for p in tracked if input_path(p)}:
+        while "/" in path:
+            path = path.rsplit("/", 1)[0]
+            parents.add(path)
+    ordinary, replicas, bookkeeping = [], [], []
+    seen = {f["path"] for f in facts}
+    for fact in facts:
+        path = fact["path"]
+        entry = expected.get(path)
+        if fact["type"] == "file" and path not in tracked:
+            if entry and all(fact[k] == entry[k] for k in ("bytes", "digest")):
+                replicas.append(fact)
+                continue
+            if path in books:
+                bookkeeping.append(fact)
+                continue
+        if fact["type"] == "directory" and path in parents:
+            continue
+        ordinary.append(fact)
+    missing = sorted(set(expected) - seen)
+    ordinary += [{"path": p, "type": "missing", "expected": expected[p]} for p in missing if p not in acknowledged]
+    return ordinary, replicas, bookkeeping, missing
 
 
 def identity(repo, roots):
@@ -163,15 +216,23 @@ def observe(req):
             d["status"] = git(wt, "status", "--porcelain=v1", "-z", "--untracked-files=all",
                               "--ignored=matching")
             d["diff"] = digest([git(wt, "diff", "--binary"), git(wt, "diff", "--cached", "--binary")])
-            replicas = wt in req.get("replica_paths", []) and not git(wt, "ls-files", ".batc-inputs/")
-            if replicas:
-                d["status"] = "\0".join(x for x in d["status"].split("\0") if not x.startswith("!! .batc-inputs/"))
-            d["manifest"] = manifest(wt, skip_replicas=replicas)
+            tracked = set(git(wt, "ls-files", "-z").split("\0"))
+            evidence = req.get("replicas", {}).get(wt, {})
+            acknowledged = req.get("acknowledged_missing_replicas", {}).get(wt, [])
+            d["manifest"], d["exempted_replicas"], d["exempted_bookkeeping"], d["missing_replicas"] = replica_content(
+                manifest(wt), evidence, tracked, acknowledged)
+            exempted = {f["path"] for f in d["exempted_replicas"] + d["exempted_bookkeeping"]}
+            # Git collapses ignored directories. Replace those entries with exact ordinary content, including
+            # missing expected replicas and unexpected empty directories which Git cannot report.
+            d["status"] = "".join(x + "\0" for x in d["status"].split("\0") if x and not (
+                x[:3] in {"!! ", "?? "} and input_path(x[3:].rstrip("/"))))
+            d["status"] += "".join("!! " + f["path"] + "\0" for f in d["manifest"]
+                                  if input_path(f["path"]) and f["path"] not in tracked)
             d["manifest_digest"] = digest(d["manifest"])
             d["extras"] = sorted(set(git(wt, "ls-files", "--others", "--exclude-standard", "-z").split("\0") +
                                      git(wt, "ls-files", "--others", "--ignored", "--exclude-standard", "-z").split("\0")) - {""})
-            if replicas:
-                d["extras"] = [x for x in d["extras"] if not x.startswith(".batc-inputs/")]
+            d["extras"] = sorted((set(d["extras"]) - exempted) | {
+                f["path"] for f in d["manifest"] if input_path(f["path"]) and f["type"] != "missing" and f["path"] not in tracked})
             gd = git(wt, "rev-parse", "--absolute-git-dir").strip()
             canonical(gd, roots)
             d["complex_state"] = any(os.path.lexists(os.path.join(gd, x)) for x in
@@ -226,7 +287,7 @@ def retained(repo, ref, sha):
 def exact_unlink(base, names, facts):
     by_path = {f["path"]: f for f in facts}
     # Resolve each parent with dirfds and O_NOFOLLOW. Do not follow a newly inserted directory link.
-    for name in names:
+    for name in sorted(names, key=lambda n: (by_path.get(n, {}).get("type") == "directory", -n.count("/"), n)):
         parts = name.split("/")
         if any(p in {"", ".", ".."} for p in parts):
             raise ValueError("BINDING_MISMATCH")
@@ -236,10 +297,13 @@ def exact_unlink(base, names, facts):
                 child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                 os.close(fd)
                 fd = child
-            current = file_fact(os.path.join(base, name), name)
+            current = file_fact(parts[-1], name, dir_fd=fd)
             if current != by_path.get(name):
                 raise ValueError("PREVIEW_STALE")
-            os.unlink(parts[-1], dir_fd=fd)
+            if current["type"] == "directory":
+                os.rmdir(parts[-1], dir_fd=fd)
+            else:
+                os.unlink(parts[-1], dir_fd=fd)
         finally:
             os.close(fd)
 
@@ -297,11 +361,15 @@ def mutate(req):
             os.rmdir(wt)
             return {"removed": True, "retained_commits": sorted(set(before["refs"].values()) | ({sha} if sha else set()))}
         if phase == "discard":
-            if before["complex_state"] or any(f["type"] != "file" for f in before["manifest"]):
+            if before["complex_state"] or any(f["type"] != "file" and not (
+                    input_path(f["path"]) and f["type"] in {"link", "hardlink", "directory", "missing"})
+                    for f in before["manifest"]):
                 raise ValueError("DISCARD_MANIFEST_UNAVAILABLE")
             exact_unlink(wt, before["extras"], before["manifest"])
             git(wt, "restore", "--source=" + sha, "--staged", "--worktree", "--", ".")
-            return {"discarded": True}
+            removed_replicas = {e["path"] for e in req.get("replicas", {}).get(wt, {}).get("replica_manifest", [])
+                                if e["path"] in before["extras"]}
+            return {"discarded": True, "acknowledged_missing_replicas": sorted(set(before["missing_replicas"]) | removed_replicas)}
         if phase == "remove.worktree":
             if before["status"] or before["complex_state"] or before["head"] != sha:
                 raise ValueError("PREVIEW_STALE")
