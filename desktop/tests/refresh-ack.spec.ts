@@ -61,14 +61,14 @@ for (const native of [false, true]) {
     changed = true;
     await expect.poll(() => messageReads).toBe(2);
     expect(await saved()).toEqual(checkpoint(0));
-    await page.getByRole("button", {name: "Send", exact: true}).click();
-    await expect(page.locator(".error")).toContainText("actions paused");
-    expect(writes).toHaveLength(0);
-    const originalKey = await page.evaluate(() => JSON.parse(Object.entries(localStorage)
-      .find(([key]) => key.startsWith("batc.key."))![1]).key);
     release();
     await expect(page.getByText("UNAVAILABLE View refresh unavailable")).toBeVisible();
     expect(await saved()).toEqual(checkpoint(0));
+    await page.getByRole("button", {name: "Send", exact: true}).click();
+    await expect(page.getByText("CENTRAL_OFFLINE Central offline · actions paused")).toBeVisible();
+    expect(writes).toHaveLength(0);
+    const originalKey = await page.evaluate(() => JSON.parse(Object.entries(localStorage)
+      .find(([key]) => key.startsWith("batc.key."))![1]).key);
     await expect(draft).toHaveValue("Keep this exact draft and original operation key");
     failing = false;
     await expect.poll(saved, {timeout: 10000}).toEqual(checkpoint(1));
@@ -76,6 +76,78 @@ for (const native of [false, true]) {
     await page.getByRole("button", {name: "Send", exact: true}).click();
     await expect.poll(() => writes.length).toBe(1);
     expect(writes[0].idempotency_key).toBe(originalKey);
+    expect(errors).toEqual([]);
+  });
+}
+
+for (const native of [false, true]) {
+  test(`open edit saves during deferred acknowledgment (${native ? "native" : "browser"})`, async ({page}) => {
+    const caps = {actor: "edit-fixture", scopes: ["observe", "manage"], api_version: 1,
+      contract_version: "2026-10-08", hosts: [], features: {}, actions: []};
+    const item = {work_item_id: "wi_fixture", title: "Original title", version: 1, state: "todo",
+      goal: "", request: "", acceptance: "", steps: [], completion: {display_state: "todo", fingerprint: "fixture"}};
+    const checkpoint = (cursor: number) => ({cursor, token: `edit-proof-${cursor}`});
+    let changed = false, delivered = false, reads = 0;
+    const writes: any[] = [], errors: string[] = [];
+    const dispatch = async (input: any) => {
+      const url = new URL(input.path, "http://fixture"), path = url.pathname;
+      if (input.method === "POST") {
+        writes.push(input); Object.assign(item, input.body.params, {version: 2});
+        return {status: 200, data: {operation: {operation_id: "op_" + "e".repeat(32), status: "succeeded"}}};
+      }
+      if (path === "/work-items/wi_fixture") {
+        reads++;
+        return {status: 200, data: {work_item: {...item}, project: {project_id: "p_fixture", name: "Fixture"},
+          links: [], path: [], children: [], derived: [], events: []}};
+      }
+      if (path === "/events" && changed) delivered = true;
+      return {status: 200, data: path === "/capabilities" ? caps : path === "/bootstrap" ? {capabilities: caps,
+        sync: {version: 1, server_id: "edit-server", principal_id: "edit-principal", checkpoint: checkpoint(0)}}
+        : path === "/events" ? {events: changed && url.searchParams.get("after") === "0"
+          ? [{seq: 1, kind: "work_item.updated", resource_type: "work_item", resource_id: "wi_fixture"}] : [],
+          head_cursor: changed ? 1 : 0, next_cursor: changed ? 1 : 0, has_more: false, sync: {checkpoint: checkpoint(changed ? 1 : 0)}}
+        : {operations: [], sessions: [], hosts: [], work_items: []}};
+    };
+    page.on("pageerror", error => errors.push(error.message));
+    if (native) {
+      await page.exposeFunction("fixtureConnector", dispatch);
+      await page.addInitScript(caps => {
+        Object.assign(window, {isTauri: true, __TAURI_INTERNALS__: {invoke: async (command: string, args: any) => {
+          if (command === "native_status") return {endpoint: "https://central.example/", credential_available: true};
+          if (command === "connector_connect") return caps;
+          if (command === "connector_disconnect") return null;
+          if (command === "connector_request") return (window as any).fixtureConnector(args.input);
+          throw new Error(`Unexpected command: ${command}`);
+        }}});
+      }, caps);
+    } else await page.addInitScript(() => sessionStorage.setItem("batc.dashboard.token", "fixture-token"));
+    await page.route("**/api/v1/**", async route => {
+      if (native) throw new Error("Native client must use IPC");
+      const request = route.request(), url = new URL(request.url());
+      const result = await dispatch({method: request.method(), path: url.pathname.slice("/api/v1".length) + url.search,
+        body: request.postDataJSON(), idempotency_key: request.headers()["idempotency-key"]});
+      return route.fulfill({status: result.status, json: result.data});
+    });
+    await page.goto("/dashboard/#/item/wi_fixture");
+    await expect(page.getByRole("heading", {name: "Original title"})).toBeVisible();
+    await page.getByRole("button", {name: "More", exact: true}).click();
+    await page.locator("input[maxlength='120']").fill("Saved without closing the form");
+    const saved = () => page.evaluate(() => JSON.parse(Object.entries(localStorage)
+      .find(([key]) => key.startsWith("batc.sync."))?.[1] || "null"));
+    await expect.poll(saved).toEqual(checkpoint(0));
+    changed = true;
+    await expect.poll(() => delivered).toBe(true);
+    await expect(page.locator("#live")).toContainText("Waiting to refresh");
+    expect(await saved()).toEqual(checkpoint(0));
+    const readsBefore = reads;
+    await page.getByRole("button", {name: "Save", exact: true}).click();
+    await expect.poll(() => writes.length).toBe(1);
+    expect(writes[0].body).toEqual({action: "work_item.update", target: {work_item_id: "wi_fixture"},
+      params: {title: "Saved without closing the form"}, preconditions: {expected_version: 1}});
+    expect(writes[0].idempotency_key).toBeTruthy();
+    await expect(page.getByRole("heading", {name: "Saved without closing the form"})).toBeVisible();
+    await expect.poll(saved).toEqual(checkpoint(1));
+    expect(reads).toBeGreaterThan(readsBefore);
     expect(errors).toEqual([]);
   });
 }

@@ -188,7 +188,8 @@ async function streamEvents() {
       const page = await api("GET", `/events?after=${before}&limit=100${checkpoint}`);
       if (epoch !== state.epoch || view !== generation || !state.viewReady) continue;
       cycle = {error: null}; state.refreshCycle = cycle;
-      state.online = false;
+      // A deferred render is not a connection failure: keep version-checked form saves usable.
+      // Actual event/read failures below pause mutations until a successful replay.
       live.className = "live down"; live.textContent = t("sync_waiting");
       const cursor = await consumePageAsync(page, before, ev => {
         return settleRefreshes([...state.listeners].map(fn => Promise.resolve().then(() => fn(ev))));
