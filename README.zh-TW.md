@@ -132,7 +132,8 @@ MCP `cleanup_preview`／`cleanup_apply`／`cleanup_retained`／`cleanup_tombston
 clones 與整合區，原 ID、位置、原因、回執與 PR 去向永久可查。設定僅支援
 `[cleanup] retained_refs="keep", history_retention="forever", permanent_delete=false`。本輪提供實際 retained
 內容列表；restore 與 reviewed task cleanup 在 Part B。`auto_cleanup` 保留解析但已 deprecated，不啟用任何寫入。
-舊 `batc cleanup`／`session_cleanup` 只讀評估；fanout planner 只停止，保留 worktree。
+舊 `batc cleanup`／`session_cleanup` 只讀評估，不重登記 worktree；fanout 只有確認且每個 task 都啟動成功，
+才停止 planner。未確認、失敗或未全部啟動時保留 planner 供 retry，worktree 一律保留。
 設計見 [docs/design/cleanup.md](docs/design/cleanup.md)。
 
 ## 工具一覽
@@ -162,7 +163,7 @@ clones 與整合區，原 ID、位置、原因、回執與 PR 去向永久可查
 | `session_relay(host, message, confirm, workspace? \| session_id?, brief?, earlier?, channel?, thread?, request_fanout=0, dry_run?, start_if_missing?)` | 把人的訊息原封不動轉給工作區最近一個由 connector 建立的 session（或指定的 session；在 BAT 建立的 session 一律不寫入，`start_if_missing` 改在新 worktree 開 session），可附一段標明是轉達者詮釋的摘要，以及 BAT-STATUS 結尾說明。`request_fanout=N` 會請 session 產出 `bat-fanout` 計畫。回傳組好的文字。 |
 | `fanout_plan_session(host, workspace, message, confirm, max_items=4, brief?)` | 在獨立 worktree 啟動一個 Codex 規劃 session（適用於沒有 managed session 可規劃時），由它回覆一份 `bat-fanout` 計畫。 |
 | `session_policy(host, session_id?)` | 唯讀。主機的 mutation 清單與 managed roots，或單一 session 的來源（`manual`、`connector_managed`、`unknown`）、資料夾歸屬與每個寫入動作的判定與拒絕代碼。 |
-| `fanout_from_plan(host, session_id, confirm, dry_run?, agent="codex", model?, max_items=4)` | 依該 session 最後一個 `bat-fanout` 區塊，每個任務各開一個 worktree session，prompt 原封不動，接著清掉規劃 session。 |
+| `fanout_from_plan(host, session_id, confirm, dry_run?, agent="codex", model?, max_items=4)` | 依該 session 最後一個 `bat-fanout` 區塊，每個任務各開一個 worktree session，prompt 原封不動。只有確認且每個任務都啟動成功才停止規劃 session，否則保留供 retry；worktree 一律保留。 |
 | `session_cleanup(host, confirm, dry_run=true, session_id?)` | 在硬性關卡後面，為每個受調度的 session 決定 MERGE_AND_CLEAN／CLEAN_ONLY／KEEP／ESCALATE，只讀評估；apply 回 `LEGACY_CLEANUP_DISABLED`，`auto_cleanup` 已 deprecated。詳見 docs/ORCHESTRATE.md。 |
 | `session_record_verification(host, session_id, candidate_commit, command, exit_code, environment, log_ref, confirm)` | 為主機目前乾淨的 commit 記錄一筆在外部執行的驗證；舊清理評估用它判斷完成；reviewed cleanup 依送達回執判斷。CLI：`batc record-verification`。 |
 

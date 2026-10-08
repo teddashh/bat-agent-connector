@@ -32,6 +32,8 @@
   Fan-out stops its planner only with caller confirmation and every planned task successfully started. Refused
   confirmation, a failed start or an incomplete loop keeps the planner and its plan for retry, with a reason and
   a resource-cleanup next action; its worktree always stays.
+  The legacy write-path audit also removed implicit worktree rehydration from cleanup evaluation. Missing BAT
+  worktree state now escalates without a registration frame or registry changes, even with auto_cleanup enabled.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps

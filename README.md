@@ -224,8 +224,9 @@ A ref is written before non-force removal. All `refs/batc/*`, clones and integra
 locations, reasons, receipts and PR destinations remain searchable forever. Supported settings are
 `[cleanup] retained_refs="keep", history_retention="forever", permanent_delete=false`. This release lists actual
 retained content; restore and reviewed task cleanup follow in Part B. `auto_cleanup` still parses but is deprecated
-and never enables writes. Legacy `batc cleanup` / `session_cleanup` only evaluate; fanout stops the planner and
-keeps its worktree. See [docs/design/cleanup.md](docs/design/cleanup.md).
+and never enables writes. Legacy `batc cleanup` / `session_cleanup` only evaluate, without worktree rehydration.
+Fanout stops the planner only with confirmation and every planned task started, keeping its worktree; failed
+or incomplete starts keep the planner for retry. See [docs/design/cleanup.md](docs/design/cleanup.md).
 
 ```sh
 batc resource-cleanup preview --checkpoint cp_EXAMPLE --json > preview.json
@@ -261,7 +262,7 @@ batc resource-cleanup history --original-id cp_EXAMPLE
 | `session_relay(host, message, confirm, workspace? \| session_id?, brief?, earlier?, channel?, thread?, request_fanout=0, dry_run?, start_if_missing?)` | Relays a human's message verbatim to the workspace's most recent connector-managed session (or a given one; sessions created in BAT are never written to, and `start_if_missing` starts a new worktree session instead), plus an optional brief labeled as the relayer's interpretation and the BAT-STATUS footer. `request_fanout=N` asks the session for a `bat-fanout` plan. Returns the rendered text. |
 | `fanout_plan_session(host, workspace, message, confirm, max_items=4, brief?)` | Starts a Codex planner in its own worktree (for when no managed session can plan) that answers with a `bat-fanout` plan. |
 | `session_policy(host, session_id?)` | Read. The host's mutation table and managed roots, or one session's provenance (`manual`, `connector_managed`, `unknown`), folder ownership and per-action verdicts with refusal codes. |
-| `fanout_from_plan(host, session_id, confirm, dry_run?, agent="codex", model?, max_items=4)` | Starts one worktree session per task of the last `bat-fanout` block of that session, prompts unchanged, then cleans up a planner session. |
+| `fanout_from_plan(host, session_id, confirm, dry_run?, agent="codex", model?, max_items=4)` | Starts one worktree session per task of the last `bat-fanout` block of that session, prompts unchanged. Stops a planner only with confirmation and every task started; otherwise keeps it for retry. Its worktree is kept. |
 | `session_cleanup(host, confirm, dry_run=true, session_id?)` | Decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE per orchestrated session behind hard gates, read-only evaluation; apply returns `LEGACY_CLEANUP_DISABLED`; `auto_cleanup` is deprecated. See docs/ORCHESTRATE.md. |
 | `session_record_verification(host, session_id, candidate_commit, command, exit_code, environment, log_ref, confirm)` | Records an externally run verification for the host's current clean commit; legacy read-only evaluation checks it against the candidate commit. CLI: `batc record-verification`. |
 
