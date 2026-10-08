@@ -12,7 +12,7 @@ Phase 1 規格已審查。Phase 2 分兩步：Part A（本次）實作伺服器�
 | 計畫 | v1.0（2026-10-06）；以章節及驗收編號引用，不複製私有計畫。 |
 | BAT | `b7419892fbc9946799b64cca24c2ec8c7fa15c42`；不代表每台主機都已安裝此版，實際 `serverVersion` 另存於掃描證據。 |
 
-BAT 協定判讀依據如下；Phase 2 開始時重新比對 main 的來源版本及 migration 編號，不追逐上游最新版。
+BAT 協定判讀依據如下；Phase 2 開始時重新比對 main 的來源版本及 orchestrator 配發的資料步驟編號，不追逐上游最新版。
 
 | BAT 原始碼（上述固定 commit） | 確認的邊界 |
 |---|---|
@@ -242,11 +242,9 @@ Registry identity 合併結果以 canonical JSON 比較，未變更不執行 ups
 
 ## Migration 與失敗恢復
 
-沿用 `task_journal.Journal` 的 additive migration 與 `PRAGMA user_version`；固定基準目前是 1，Phase 2 使用當時 main 的下一版，不跟平行包搶編號。新增事件 context/resource 索引、discovery latest、已知 worktree identity、relation segments 及欄位 evidence；既有 tasks、commands、events、work_item_links、checkpoint IDs 不改編。Relation segments 唯一鍵為 `(execution_id, session_resource_id, role, anchor_id)`，command-relation mapping 以 `(command_id, relation_id)` 為 key，保存 linked_at_seq；rebinding 保留舊 link，使 as_of 的 command_ids 不受最新 binding 影響；各 revision 留 seq，只有 SQLite 原 writer 寫入。
+沿用 `task_journal.Journal`；新增 tables、columns、indexes 採 idempotent DDL，每次開啟都執行，不讀寫 `PRAGMA user_version`，也不占資料步驟編號。新增事件 context/resource 索引、discovery latest、已知 worktree identity、relation segments 及欄位 evidence；既有 tasks、commands、events、work_item_links、checkpoint IDs 不改編。Relation segments 唯一鍵為 `(execution_id, session_resource_id, role, anchor_id)`，command-relation mapping 以 `(command_id, relation_id)` 為 key，保存 linked_at_seq；rebinding 保留舊 link，使 as_of 的 command_ids 不受最新 binding 影響；各 revision 留 seq，只有 SQLite 原 writer 寫入。
 
-回填在 daemon owner 內、背景 loops 開始前完成，單次版本化交易；DDL 使用 IF NOT EXISTS，版本編號在 rebase 時採 main 下一個可用 user_version。來源 key（表名／PK／事實類型）唯一，重啟重做不重複。已經有 api event 的 task／checkpoint／link／receipt 只補資源索引與可信 context，不追加同一件事的第二個 event。當舊 mutable step／receipt 只剩最後快照時，`history.backfilled` 記錄「目前保存的結果」及原 timestamp，不捏造 started → uncertain → succeeded 全序列；`history_coverage` 明列開始時間、缺少的 transitions。舊 profile／actor／range 不明保持 unknown。
-
-Delivery Part A 使用 user_version 2、3；本包使用 4。版本 3 的 journal 首次開啟仍執行 observation backfill，之後重開不再執行。
+回填在 daemon owner 內、背景 loops 開始前完成，是 orchestrator 配發的一次性資料步驟 2；backfill 與 `user_version=2` 在同一交易提交。版本 1 的 journal 執行一次，版本已為 2 時不再執行；新 journal 也以 2 結束。DDL 使用 IF NOT EXISTS，位於資料步驟的版本 gate 之外。來源 key（表名／PK／事實類型）唯一，重啟重做不重複。已經有 api event 的 task／checkpoint／link／receipt 只補資源索引與可信 context，不追加同一件事的第二個 event。當舊 mutable step／receipt 只剩最後快照時，`history.backfilled` 記錄「目前保存的結果」及原 timestamp，不捏造 started → uncertain → succeeded 全序列；`history_coverage` 明列開始時間、缺少的 transitions。舊 profile／actor／range 不明保持 unknown。
 
 已確認綁定的 operation 可能在 runs 表入帳之前中斷；讀 `external_refs`、已持久 step 及 commands 保留其身分與 uncertainty，不執行啟動補償。Context／index 在原交易內用獨立 savepoint 寫入；投影例外只回滾該投影，核心事實照常提交，context 留 `projection_error` 的例外類名並記 log，不保存訊息。History 由原寫入資源或此前已證實的資源連結顯示該事件及缺口；不留下部分 index／relation rows，也不對外宣告 journal 未提交的事件。Poll 失敗保存 failed scan，舊欄位及其他 hosts 不受影響；meta 失敗只影響該 session 的相關欄位。
 
@@ -289,7 +287,7 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B03；§08、§11 | `test_b03_unknown_human_claim_is_not_api_actor_or_git_author`、`test_b03_rpc_admin_identity_is_not_claimed_human`：自報 Ted 保持 claim，RPC admin 是 local-admin；Git author 不升為 API actor。 |
 | B02、B03；§11 | `test_b03_states_unknown_no_tab_and_field_times`：meta null／失敗、無 tab、journal-only null、離線與 gone 分軸；失敗不刷新上一個 activity 時間。Main 沒有可證明 session 終止的正式 journal source，因此 lifecycle 保持 unknown，不用 gone／turn abort 推論 ended。 |
 | B03；§08、§11 | `test_b03_backfill_hidden_idempotent_and_unknown_boundaries`、`test_b03_migration_failure_rolls_back_and_restart_recovers`、`test_b03_backfilled_occurrence_time_filters_are_not_migration_time`：舊 journal 回填、全交易失敗回滾、重啟不重複、未知 range 邊界、原發生時間與隱藏 cursor。 |
-| B03；§08、§11 | `test_b03_version_three_runs_observation_backfill_once`：版本 3 → 4 回填一次；重新開啟不增加事件或重做回填。 |
+| B03；§08、§11 | `test_b03_version_one_journal_runs_observation_backfill_once`：版本 1 → 2 回填一次；重開及已為 2 的 journal 不執行；新 journal 為 2，不重複回填。 |
 | B01、B03；§08、§11 | `test_projection_failure_keeps_core_write_and_flags_event`：task state 與 operation step 的投影例外只回滾 savepoint，核心寫入及外部 step 成功；history 顯示 projection_error，無部分 resource／relation rows。 |
 | B01–B03；§10、§11 | `test_b01_b02_b03_http_mcp_cli_contract_parity`：HTTP/實際 MCP server/CLI 經同 daemon；params、keys、cursor、context 一致；observe、404、422 契約及四個新 tools。 |
 | B03；§06、§11 | `test_b03_observation_never_starts_resumes_rehydrates_or_locks_git`：MockBat 零 write/git:status；unsafe Claude state 不呼叫，journal 讀取不讀 Fleet/registry、不寫 DB；temp repo HEAD/index/refs/files 不變且無 locks，既有 on-demand Git probe 使用 no-optional-locks。 |

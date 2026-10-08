@@ -592,8 +592,8 @@ def test_b03_migration_failure_rolls_back_and_restart_recovers(tmp_path, monkeyp
     j.close()
 
 
-def test_b03_version_three_runs_observation_backfill_once(tmp_path, monkeypatch):
-    """B03, §08/§11: delivery's version 3 does not skip observation's version 4 backfill."""
+def test_b03_version_one_journal_runs_observation_backfill_once(tmp_path, monkeypatch):
+    """B03, §08/§11: data step 2 runs once; idempotent DDL runs independently on every open."""
     from bat_agent_connector import observation
     path = tmp_path / "j.db"
     with monkeypatch.context() as legacy:
@@ -603,19 +603,19 @@ def test_b03_version_three_runs_observation_backfill_once(tmp_path, monkeypatch)
     bind(j, t, "sid")
     j.db.execute("""INSERT INTO sessions_observed(host,session_id,body,digest,provenance,api_access,first_seen_at,last_seen_at)
         VALUES('h1','saved','{}','legacy','unknown','read_only',123,124)""")
-    j.db.execute("PRAGMA user_version=3")
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == 1
     original = observation.backfill
     calls = []
 
     def capture(journal):
-        assert journal.db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert journal.db.execute("PRAGMA user_version").fetchone()[0] == 1
         calls.append("backfill")
         original(journal)
 
     monkeypatch.setattr(observation, "backfill", capture)
     j.close()
     j = Journal(path)
-    assert j.db.execute("PRAGMA user_version").fetchone()[0] == observation.MIGRATION_VERSION == 4
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == observation.MIGRATION_VERSION == 2
     assert calls == ["backfill"]
     saved = Observation(j).history("session", "h1/saved")["events"]
     assert len(saved) == 1 and saved[0]["kind"] == "history.backfilled"
@@ -629,6 +629,34 @@ def test_b03_version_three_runs_observation_backfill_once(tmp_path, monkeypatch)
         assert snapshot == [tuple(r) for r in j.db.execute("SELECT * FROM observation_backfill")]
         j.close()
     assert calls == ["backfill"]
+
+    # DDL must still install on a version-2 journal without invoking its completed data step.
+    already_path = tmp_path / "already.db"
+    with monkeypatch.context() as legacy:
+        legacy.setattr(observation, "install", lambda journal: None)
+        j = Journal(already_path)
+    task(j, "already")
+    head = j.api_head()
+    j.db.execute("PRAGMA user_version=2")
+    j.close()
+    j = Journal(already_path)
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert j.api_head() == head and calls == ["backfill"]
+    assert j.db.execute("SELECT COUNT(*) FROM observation_backfill").fetchone()[0] == 0
+    assert j.db.execute("SELECT COUNT(*) FROM api_event_context").fetchone()[0] == 0
+    j.close()
+
+    fresh_path = tmp_path / "fresh.db"
+    j = Journal(fresh_path)
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert calls == ["backfill", "backfill"]
+    assert j.api_head() == 0 and j.db.execute("SELECT COUNT(*) FROM observation_backfill").fetchone()[0] == 0
+    j.close()
+    j = Journal(fresh_path)
+    assert j.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert j.api_head() == 0 and calls == ["backfill", "backfill"]
+    assert j.db.execute("SELECT COUNT(*) FROM observation_backfill").fetchone()[0] == 0
+    j.close()
 
 
 async def test_b03_rpc_admin_identity_is_not_claimed_human(served, monkeypatch):
