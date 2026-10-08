@@ -122,6 +122,91 @@ def test_b02_pages_refresh_checkpoint_and_hidden_events_advance_without_shape_ch
     j.close()
 
 
+FILTERS = [
+    {"kind": "session.updated"},
+    {"resource_type": "session"},
+    {"resource_id": "h1/example-session"},
+    {"related_resource_type": "session"},
+    {"related_resource_id": "h1/example-session"},
+    {"related_resource_type": "session", "related_resource_id": "h1/example-session"},
+]
+
+
+@pytest.mark.parametrize("filters", FILTERS)
+@pytest.mark.parametrize("from_page", [False, True])
+def test_b02_filtered_checkpoint_refused_before_any_journal_read(tmp_path, filters, from_page):
+    j = Journal(tmp_path / "journal.db")
+    sync = dashboard_sync.checkpoint(j, VIEWER)
+    seqs = [append(j, n) for n in range(2)]
+    if from_page:
+        sync = replay(j, sync, limit=1)["sync"]
+        seqs = seqs[1:]
+    reads = []
+    j.db.set_trace_callback(reads.append)
+    try:
+        with pytest.raises(ValueError, match="checkpoint replay requires the unfiltered event feed"):
+            replay(j, sync, **filters)
+        assert reads == []  # No BEGIN, metadata, anchor, head, event read or replacement token.
+    finally:
+        j.db.set_trace_callback(None)
+    assert [e["seq"] for e in replay(j, sync)["events"]] == seqs
+    j.close()
+
+
+@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize("filter_name", ["kind", "resource_type", "resource_id", "related_resource"])
+def test_b02_filtered_page_cannot_mint_or_reuse_a_complete_feed_checkpoint(tmp_path, filter_name, empty):
+    j = Journal(tmp_path / "journal.db")
+    sync = dashboard_sync.checkpoint(j, VIEWER)
+    first = append(j, 1)
+    last = j.api_event("host", "h2", "host.reachable", {})
+    filters = {"kind": {"kind": "absent.kind" if empty else "session.updated"},
+               "resource_type": {"resource_type": "absent" if empty else "session"},
+               "resource_id": {"resource_id": "absent" if empty else "h1/example-session"},
+               "related_resource": {"related_resource_type": "session",
+                                    "related_resource_id": "absent" if empty else "h1/example-session"}}[filter_name]
+    # Legacy filtering still scans over nonmatching events, even when its result is empty.
+    filtered = dashboard_sync.event_page(j, VIEWER, sync["checkpoint"]["cursor"], **filters)
+    assert [e["seq"] for e in filtered["events"]] == ([] if empty else [first])
+    assert filtered["next_cursor"] == last and "sync" not in filtered
+    with pytest.raises(ValueError, match="unfiltered event feed"):
+        replay(j, sync, **filters)
+    # A numeric filtered cursor cannot be paired with the original signed token either.
+    with pytest.raises(dashboard_sync.ResetRequired, match="checkpoint_cursor_mismatch"):
+        dashboard_sync.event_page(j, VIEWER, filtered["next_cursor"], token=sync["checkpoint"]["token"])
+    assert [e["seq"] for e in replay(j, sync)["events"]] == [first, last]
+    j.close()
+
+
+@pytest.mark.parametrize("filters", FILTERS)
+@pytest.mark.parametrize("from_page", [False, True])
+async def test_b02_http_and_sse_reject_filtered_checkpoint_before_replay(served, filters, from_page):
+    d, port = served
+    viewer = token(d, "viewer", "observe")
+    sync = dashboard_sync.checkpoint(d.journal, VIEWER)
+    seqs = [append(d.journal, n) for n in range(2)]
+    if from_page:
+        sync = replay(d.journal, sync, limit=1)["sync"]
+        seqs = seqs[1:]
+    cp = sync["checkpoint"]
+    params = {"after": cp["cursor"], "checkpoint": cp["token"], **filters}
+    for route in ("/api/v1/events", "/api/v1/events/stream"):
+        reads = []
+        d.journal.db.set_trace_callback(reads.append)
+        try:
+            status, error = await http(port, "GET", route + "?" + urlencode(params), tok=viewer)
+            assert status == 422 and error["error"]["code"] == "INVALID_REQUEST"
+            assert "unfiltered event feed" in error["error"]["message"]
+            # Authentication still runs; continuity metadata and event queries do not.
+            assert not any("api_events" in sql or "api_sync_metadata" in sql for sql in reads)
+            assert d.api._streams == 0 and d.api._streams_by_actor == {}
+        finally:
+            d.journal.db.set_trace_callback(None)
+    status, page = await http(port, "GET", "/api/v1/events?" + urlencode({
+        "after": cp["cursor"], "checkpoint": cp["token"]}), tok=viewer)
+    assert status == 200 and [e["seq"] for e in page["events"]] == seqs
+
+
 async def test_t11_bootstrap_auth_identity_and_checkpoint_before_snapshot_reads(served, monkeypatch):
     d, port = served
     viewer = token(d, "viewer", "observe")

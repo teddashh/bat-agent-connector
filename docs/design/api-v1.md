@@ -93,6 +93,8 @@ allowed_origins = []        # 額外允許的瀏覽器 Origin（loopback 已允�
 metadata，整頁處理後一起保存 next cursor/token；舊事件回應 shape 不變。超前、retention 缺口或 anchor
 改變回 409 EVENT_CURSOR_RESET（resnapshot=true、preserve_drafts=true）；SSE 使用 sync.checkpoint／
 sync.reset control events。沒有新增 retention job，api_head 保留 allocator high-water。
+Checkpoint 續接限未篩選 feed；帶 checkpoint 同時指定任一 kind／直接或 related resource 篩選，
+JSON 與 SSE 均在事件讀取及 stream headers 前回 422 INVALID_REQUEST，不能簽發跳過非 matching 事件的 token。
 
 資源 `…/history` 使用安全的遞迴摘要：reason／previous_reason 只保留已知固定 enum 或 null；caller 的 request_ted／task result／command conflict／operation diagnostic prose 移除，保留原已記錄的機器 reason_code／error_code。所有 title、status_reason、git_author claim、scalar body/request/response/evidence 等 prose 入口排除，含 history.resource 及 saved_snapshot；來源 evidence 只留結構化表／ID／enum／hash。Scalar source 只允許固定來源 enum，ref／external_ref 只允許無空白的 ID/Git ref/URL token；原 journal 與既有 work_events 的文字不改。完整 producer/value/shape 稽核見 [observation.md](observation.md)。
 
