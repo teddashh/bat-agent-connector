@@ -148,7 +148,8 @@ async def _answer(ctx: OpContext) -> dict:
 
 
 def _admit_interrupt(ops: OperationService, principal: Principal, target: dict, params: dict, pre: dict) -> dict | None:
-    if params.get("mode", "soft") not in {"soft", "hard"}:
+    mode = params.get("mode", "soft")
+    if not isinstance(mode, str) or mode not in {"soft", "hard"}:
         raise OperationError("INVALID_PARAMS", "mode must be soft or hard", 422)
     return _admit_session(ops, principal, target, params, pre, "interrupt")
 
@@ -194,7 +195,8 @@ async def legacy_interrupt(ops: OperationService, principal: Principal, request:
     if op is None:
         fleet = _fleet(ops)
         host = intent["target"]["host"]
-        if intent["params"]["mode"] not in {"soft", "hard"}:
+        mode = intent["params"]["mode"]
+        if not isinstance(mode, str) or mode not in {"soft", "hard"}:
             raise OperationError("INVALID_PARAMS", "mode must be soft or hard", 422)
         if host not in fleet.config.hosts:
             raise OperationError("UNKNOWN_HOST", f"unknown host {host!r}", 404)
