@@ -96,13 +96,13 @@ Coordinator gate：`G`＝下面的 task-owned runtime gate；`TC`＝原 task 控
 | `worktree_merge` | `merge` | — → OP | **新增** `worktree.merge` | integrate | W，含目的端 | F |
 | `worktree_remove` | `remove-worktree` | — → OP | **新增** `worktree.remove` | operate | W | F |
 | `session_failover`（單個／`all_exhausted`，非 dry run） | `failover`（非 `--dry-run`） | — → OP | **新增** `session.failover` | start；handoff 另需 operate | S／N；force 不能取代 policy／停筆證據 | F；task 中途 failover 保持拒絕 |
-| `session_cleanup`（`dry_run=false`） | `cleanup --apply` | — → OP | **新增** `session.cleanup` | operate；有 merge 步驟另需 integrate | 每項 S／W；auto_cleanup／verification 等既有 gates | F；task-owned 為 KEEP |
+| `session_cleanup`（`dry_run=false`） | `cleanup --apply` | —；409 `LEGACY_CLEANUP_DISABLED` | 不新增 action；apply 由 cleanup package 封鎖，本包不包裝 | — | apply 不寫 BAT／Git；dry run 保持唯讀 | reviewed cleanup 交 cleanup package 的 `cleanup_preview`／`cleanup_apply`／`cleanup_restore` |
 | `session_record_verification` | `record-verification` | — → OP | **新增** `session.record_verification` | operate | 只寫 verification.json；讀乾淨候選，不授權外部 mutation | task-owned 拒絕外部證詞取代受信 verifier |
 | `fanout_plan_session` | `fanout-plan` | — → OP | **新增** `fanout.plan` | start | N；新 planner 自有 worktree | 不改來源 task；保持原 planner，不新增規劃機制 |
-| `fanout_from_plan`（非 dry run） | `fanout-start`（非 `--dry-run`） | — → OP | **新增** `fanout.start` | start；planner cleanup 另需 operate／適用 integrate | 來源只讀、逐項 N，planner cleanup 經 S／W | 清理來源時 F；不插入來源 task commands |
+| `fanout_from_plan`（非 dry run） | `fanout-start`（非 `--dry-run`） | — → OP | **新增** `fanout.start` | start | 來源只讀、逐項 N；不能經 legacy apply 清理 planner | 回報 `LEGACY_CLEANUP_DISABLED`，保留 planner 交 `cleanup_preview`；不插入來源 task commands |
 | — | `fanout PLAN --start` | — → OP | `fanout.start`，params 帶檔案讀出的固定 plan | start | 逐項 N | 同上；client 不逐項直接 session_start |
 
-`integrate` 是既有成果整合 scope；在此也用於會改 managed Git 目的端的 worktree merge，與 GitHub `merge` 分開。清理／remove 用 operate 並保留 host orchestrate tier，不新增 scope。組合 action 的額外 scopes 在寫入意圖前檢查；不能先做一部分才發現沒有權限。
+`integrate` 是既有成果整合 scope；在此也用於會改 managed Git 目的端的 worktree merge，與 GitHub `merge` 分開。worktree remove 用 operate 並保留 host orchestrate tier，不新增 scope。reviewed cleanup 的 scopes 與寫入路徑由 cleanup package 定義。組合 action 的額外 scopes 在寫入意圖前檢查；不能先做一部分才發現沒有權限。
 
 ### Task Service 與 task 專用 MCP（Part A）
 
@@ -196,10 +196,10 @@ Operation cancel/resume 保留原 endpoints、authorization 與 events；不新�
 | merge | 原 `_summ` report、merged_now、result、main_checkout_clean_after、reason、worktree_dirty_files；不得把 refusal 報成 merged_now=true。 |
 | remove-worktree | 原 report、removed、branch_deleted、rehydrated、note／reason／dirty files；delete_branch／allow_unmerged／discard_uncommitted 均保存，仍須原個別授權與安全 gate。 |
 | failover | 單項 old_session_id／new_session_id、cwd、branch、same_worktree、prompt_sent、message_id、error、skipped 等原欄位；bulk 的 failovers、count、exhausted_found、skipped_read_only、truncated_by_max_start_per_call。原 session-level「already failed over」檢查保留，但不能用它代替 operation 參數衝突檢查。 |
-| cleanup | host、dry_run、jev、decisions、counts、escalation_summary、push；保留 MERGE_AND_CLEAN／CLEAN_ONLY／KEEP／ESCALATE。partial actions 與未知 step 留在每項；不靠最後一步掩蓋已 merge。預設仍 dry run。 |
+| cleanup（只限 dry run） | host、dry_run、jev、decisions、counts、escalation_summary、push；保留唯讀的 MERGE_AND_CLEAN／CLEAN_ONLY／KEEP／ESCALATE 決策預覽。apply 維持 409 `LEGACY_CLEANUP_DISABLED`，沒有本包的 operation／effect 投影。 |
 | record-verification | verification.record 的完整證詞、verified_candidate；operation actor 取驗證身分。這是外部證詞，不能變成 Task Service 的 observed_verification。 |
 | fanout-plan | 原 start 結果＋role、max_items、next；保存 role=planner。 |
-| fanout-start | host、source_session、workspace、plan、started、planner_cleanup；原逐項 task/title/session/branch/error 保留。 |
+| fanout-start | host、source_session、workspace、plan、started、planner_cleanup；原逐項 task/title/session/branch/error 保留。planner_cleanup 回報 legacy apply 拒絕，保留 planner session 供 `cleanup_preview`，不啟動第二個 cleanup writer。 |
 | fanout --start | started、count；保留 task index／title 和原 start 結果。plan 的讀檔與純解析仍在 CLI；每項實際派送都在 daemon。 |
 | work_submit | task_id、state、submitted_at、engine、task_path、goose、continuation（適用時）；立即持久寫 task 的路徑保留。 |
 | work_pause／resume | 原 Journal.get 全部 task 欄位；paused、control_version、state 各自保留，不把 operation succeeded 解釋成 task done。 |
@@ -253,7 +253,7 @@ pending command 指待確認派送的命令，不等同 BAT pendingPermission／
 
 task.pause 是明確控制例外：先提交 pause、增版本，令未送 command 取消；abort step 只操作被綁定的 current session，即使 task 原先 verifying／pending 也能走 coordinator 停止目前回合。記下該 pause 的版本，若等待鎖期間 task 已 resume／換 session，拒絕遲到 interrupt。task.resume 只清 paused，不證明 writer 已停止；pending 命令仍先 reconcile。
 
-bulk approve、deferred raise、明確 relay target 與 implicit client-resume 都使用同一 gate。bulk 被擋的項目保留 skipped/code，不阻擋其他獨立 standalone 項目；不得把 refused task 項目帶到新 session 繼續。task-owned worktree merge/remove/failover 由 F 拒絕 `TASK_OWNED_CONTROL_REQUIRED`；legacy cleanup 繼續 KEEP。Task Service 自己的 external_worktree cleanup 保留原命名／證據與 coordinator 生命週期，不交另一個 cleanup owner。
+bulk approve、deferred raise、明確 relay target 與 implicit client-resume 都使用同一 gate。bulk 被擋的項目保留 skipped/code，不阻擋其他獨立 standalone 項目；不得把 refused task 項目帶到新 session 繼續。task-owned worktree merge/remove/failover 由 F 拒絕 `TASK_OWNED_CONTROL_REQUIRED`；legacy cleanup dry run 繼續 KEEP，apply 由 cleanup package 封鎖。Task Service 自己的 external_worktree cleanup 保留原命名／證據與 coordinator 生命週期，不交另一個 cleanup owner。
 
 ## Task operations 與 A05
 
@@ -286,11 +286,11 @@ work_submit 原已要求 key，保留其最大 256 字相容長度；一般 oper
 | send／continue／relay | target 選定、必要 `client_resume`、send；固定 message ID／prompt hash | resume 核對 meta 與 binding；send 用既有 registry turn／BAT exact echo。Codex 的一般 action 只有 timestamp 時維持 uncertain，不重送。 |
 | answer／approve-pending | pending prompt binding、每個 prompt answer、每個 permission 設定 | prompt ID 不再 pending 才能證明清除；不代表所有後續工作成功。失敗讀取不是「沒有 pending」。 |
 | permissions | Claude mode；Codex sandbox 與 approval 各一步 | 讀同 session meta 的實際 mode；證據不足時維持 uncertain。deferred raise 保存固定目標／版本；task gate 改變時拒絕，不盲目掃全 registry。 |
-| interrupt／pause abort／cleanup stop | interrupt／abort／stop 各一步；固定 task/session/version | 證明相同 session 不 streaming／不載入；查不到或 binding 不符不能算完成。已 pause 的意圖保留，不因 abort 不明而退回未 paused。 |
+| interrupt／pause abort | interrupt／abort 各一步；固定 task/session/version | 證明相同 session 不 streaming；查不到或 binding 不符不能算完成。已 pause 的意圖保留，不因 abort 不明而退回未 paused。 |
 | start／relay 新建／fanout 項目 | reserve IDs、worktree.create、start-session、選配 tab append、第一個 prompt | 核對預留 ID、creation evidence、cwd、branch。已存在只補回執；不能重新 random ID、刪已可能成功的 worktree，或回退人工 cwd。tab 整份 workspace save 的既有 race 不在此聲稱修好。 |
 | failover | 固定 source/successor、writer proof、start、獨立 handoff send | successor 存在不代表 handoff 成功；舊 writer 不明時不建第二 writer。registry starting／uncertain 不作「可再開」依據。 |
-| worktree merge／remove／cleanup | 可選 rehydrate、merge、remove、選配 branch delete、stop、registry effect，每項分開 | 保存來源／目的 commit 與 path；merge 以目的 Git 證據核對，remove 以 exact worktree 身分／存在性核對。不能因資料夾不存在就順手刪別的 branch。無法唯一歸因就 uncertain。 |
-| fanout | 固定 plan digest、每項預留 ID／steps、planner cleanup | per-item 已完成結果不重做；未證明項目維持 uncertain，不啟動更多可能重複的 writer。partial items 與原 cap 行為保留。 |
+| worktree merge／remove | 可選 rehydrate、merge、remove、選配 branch delete、stop、registry effect，每項分開 | 保存來源／目的 commit 與 path；merge 以目的 Git 證據核對，remove 以 exact worktree 身分／存在性核對。不能因資料夾不存在就順手刪別的 branch。無法唯一歸因就 uncertain。 |
+| fanout | 固定 plan digest、每項預留 ID／steps；planner cleanup 僅回報 legacy apply 拒絕 | per-item 已完成結果不重做；未證明項目維持 uncertain，不啟動更多可能重複的 writer。保留 planner session 交 `cleanup_preview`，不經 legacy apply 清理。partial items 與原 cap 行為保留。 |
 | task submit／控制／證詞 | 原 task effect＋同交易 step response；command IDs 連結 | 本地 commit 回執即完成證據；沒有回執代表交易未完成，可以重新做本地交易，不能重播已存在 external command。 |
 | task.verify | 固定 candidate、原 runner invocation、output artifact、observed verification receipt | runner 失聯／重啟後無完成證據就 needs_attention／既有 task 恢復規則，不把 invocation 再當普通本地寫入重跑，不接受 caller 填 exit code。 |
 
@@ -389,6 +389,6 @@ Phase 1 與 Phase 2 報告都跑 `uv run ruff check .`、`uv run pytest -q`；�
 - `import-bat --output PATH --force` 保留 install-time local command；它在 owner 存在前執行、只寫本機 config，不是 fleet action，本包不改。
 - operation cancel/resume 自身的 control operations，以及 api-token issue/revoke operations 不在本包；原 endpoints/RPC 已授權、留事件或立即完成短 connector-data 修改，不觸及 BAT/Git/provider。
 - 不新增 task planner、recipe/model 政策、第二個 task database、分散式 owner lease 或人工資源接管；不恢復已停用的 task 中途 failover。
-- 不完成計畫 §23 的新版 managed clone／integration area cleanup、retained refs/tombstones／restore；本包只統一現有 session_cleanup 與其政策／回執。
+- 計畫 §23 的 reviewed cleanup 由 cleanup package 的 `cleanup_preview`／`cleanup_apply`／`cleanup_restore` 負責。它以 409 `LEGACY_CLEANUP_DISABLED` 停用 legacy `session_cleanup` apply；本包不包裝該 apply，也不建立另一個 cleanup writer。
 - BAT GUI 可直接改自己的 session，connector 的鎖不能約束它；不宣稱 BAT 提供跨系統原子控制或 Codex exactly-once receipt。workspace:save race、host sandbox/ACL 與完整 A10 仍按原設計界定。
 - 不變更遠端部署、Fleet Kit、live Goose gate、人工 snapshot／附件與整合來源擴充；正式 owner 升級與備份由部署者另行執行。
