@@ -44,14 +44,29 @@ async function draftId(scope, request) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(request)));
   return `${scope}.${[...new Uint8Array(digest).slice(0, 12)].map(b => b.toString(16).padStart(2, "0")).join("")}`;
 }
-function keyFor(scope) {
-  // One idempotency key per draft: a retry of the same draft reuses it, so the action happens once.
+const TERMINAL = ["succeeded", "failed", "cancelled"];
+async function keyFor(scope) {
+  // One idempotency key per draft: a retry of the same draft reuses it, so the action happens once. The server
+  // keeps keys for good, so once the operation a key made has finished, the same draft is a new request.
   const k = `batc.key.${scope}`;
+  let saved = null;
   try {
-    let v = localStorage.getItem(k);
-    if (!v) { v = crypto.randomUUID(); localStorage.setItem(k, v); }
-    return v;
-  } catch { return crypto.randomUUID(); }
+    const raw = localStorage.getItem(k);
+    try { saved = JSON.parse(raw); } catch { saved = raw ? { key: raw } : null; } // a bare key from an older page
+  } catch { saved = null; }
+  if (saved?.key && saved.op) {
+    try {
+      const op = (await api("GET", `/operations/${saved.op}`)).operation;
+      if (TERMINAL.includes(op.status)) saved = null;
+    } catch (e) { if (e.status === 404) saved = null; } // unreachable: keep the key, a retry must not act twice
+  }
+  if (saved?.key) return saved.key;
+  const key = crypto.randomUUID();
+  try { localStorage.setItem(k, JSON.stringify({ key })); } catch { /* ignore */ }
+  return key;
+}
+function rememberOp(scope, key, op) {
+  try { localStorage.setItem(`batc.key.${scope}`, JSON.stringify({ key, op })); } catch { /* ignore */ }
 }
 function dropKey(scope) { try { localStorage.removeItem(`batc.key.${scope}`); } catch { /* ignore */ } }
 
@@ -76,11 +91,10 @@ function errorBox(e) {
 async function submit(action, target, params, preconditions, scope) {
   const request = { action, target, params, preconditions };
   scope = await draftId(scope, request);
-  const key = keyFor(scope);
+  const key = await keyFor(scope);
   try {
     const out = await api("POST", "/operations?wait=3", request, key);
-    const done = ["succeeded", "failed", "cancelled"].includes(out.operation.status);
-    if (done) dropKey(scope);
+    if (TERMINAL.includes(out.operation.status)) dropKey(scope); else rememberOp(scope, key, out.operation.operation_id);
     return out.operation;
   } catch (e) {
     if (e.status && e.status < 500) dropKey(scope); // refused, nothing stored: the next attempt is a new request
@@ -231,9 +245,10 @@ async function viewSession(main, host, sid) {
   const msgs = h("div", { class: "panel" });
   const controls = h("div", { class: "panel" });
   main.append(head, controls, h("h2", {}, t("messages")), msgs);
-  let row;
-  try { row = (await api("GET", `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`)).session; }
+  let row, from;
+  try { ({ session: row, started_from: from } = await api("GET", `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`)); }
   catch (e) { head.replaceChildren(errorBox(e)); return; }
+  if (!head.isConnected) return; // the user navigated away while this loaded; never add to the next page
   head.replaceChildren(h("h1", {}, row.title || sid), h("div", { class: "actions" }, ...sessionBadges(row)),
     h("dl", { class: "kv" },
       h("dt", {}, t("host")), h("dd", {}, row.host), h("dt", {}, t("workspace")), h("dd", {}, row.workspace || ""),
@@ -241,6 +256,11 @@ async function viewSession(main, host, sid) {
       h("dt", {}, t("agent")), h("dd", {}, [row.agent_kind, row.model].filter(Boolean).join(" · ")),
       h("dt", {}, "Provenance"), h("dd", {}, t("provenance_" + row.provenance)),
       h("dt", {}, t("observed")), h("dd", {}, when(row.observed_at))));
+  if (from) {
+    head.append(h("p", { class: "note" }, t("started_from", { commit: from.commit_sha.slice(0, 12) }), " ",
+      h("a", { href: `#/session/${encodeURIComponent(from.source_host)}/${encodeURIComponent(from.source_session_id)}` },
+        t("source_session")), " · ", h("a", { href: `#/op/${from.operation_id}` }, from.operation_id)));
+  }
   const scope = `send.${host}.${sid}`;
   const cps = checkpointPanel(host, sid);
   main.insertBefore(cps.box, msgs.previousSibling);
@@ -322,10 +342,12 @@ async function viewSession(main, host, sid) {
 // managed session at that commit in a connector clone. The person's session and folder are never written.
 function checkpointPanel(host, sid) {
   const can = (state.caps?.features?.checkpoints || []).includes(host);
+  const mayStart = (state.caps?.scopes || []).includes("start"); // continuing starts an agent: its own grant
   const list = h("div", {});
   const status = h("div", { class: "muted" });
   // A checkpoint never changes, so its row is built once: a reload on a new event keeps an open form and its draft.
   const rows = new Map();
+  let preview = null; // what the source looks like now (read-only): the commit picker and "source moved on"
   const row = cp => rows.get(cp.checkpoint_id) || rows.set(cp.checkpoint_id, buildRow(cp)).get(cp.checkpoint_id);
   const buildRow = cp => {
     const instr = h("textarea", { placeholder: t("continue_placeholder") });
@@ -341,14 +363,18 @@ function checkpointPanel(host, sid) {
       } catch (e) { out.replaceChildren(errorBox(e)); }
       go.disabled = false;
     } }, t("start_agent_work"));
-    const form = h("div", { hidden: true }, instr, h("div", { class: "actions" }, agent, go), out);
+    const form = h("div", { hidden: true }, h("p", { class: "muted" }, t("confined_note")), instr,
+      h("div", { class: "actions" }, agent, go), out);
     return h("div", { class: "row" },
       h("div", { class: "grow" },
         h("div", { class: "title" }, h("code", {}, cp.commit_sha.slice(0, 12)), " ", cp.branch || ""),
         h("div", { class: "muted" }, [when(epoch(cp.captured_at)), cp.actor,
           t("excerpt_count", { n: cp.excerpt_messages })].join(" · ")),
-        cp.dirty ? h("div", { class: "error" }, t("dirty_warning", { n: cp.dirty })) : null, form),
-      h("button", { class: "secondary", disabled: !can, title: can ? null : t("checkpoint_unavailable"),
+        cp.dirty ? h("div", { class: "error" }, t("dirty_warning", { n: cp.dirty }))
+          : cp.dirty === null ? h("div", { class: "muted" }, t("dirty_unknown")) : null,
+        preview && preview.head !== cp.commit_sha ? h("div", { class: "muted" }, t("source_advanced")) : null, form),
+      h("button", { class: "secondary", disabled: !can || !mayStart,
+        title: !can ? t("checkpoint_unavailable") : mayStart ? null : t("needs_start_scope"),
         onclick: () => { form.hidden = !form.hidden; } }, t("continue_from_checkpoint")));
   };
   const load = async () => {
@@ -359,10 +385,22 @@ function checkpointPanel(host, sid) {
         : [h("p", { class: "muted" }, t("no_checkpoints"))]));
     } catch (e) { list.replaceChildren(errorBox(e)); }
   };
+  const pick = h("select", { "aria-label": t("commit"), hidden: true });
+  const note = h("textarea", { placeholder: t("checkpoint_note_placeholder"), hidden: true });
+  const loadPreview = async () => {
+    try {
+      preview = (await api("GET", `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sid)}/checkpoint-preview`)).preview;
+      pick.replaceChildren(...preview.commits.map(c => h("option", { value: c.hash }, `${c.hash.slice(0, 10)} · ${c.message}`)));
+      pick.hidden = note.hidden = false;
+      if (preview.dirty) status.replaceChildren(h("span", { class: "error" }, t("dirty_warning", { n: preview.dirty })));
+    } catch { preview = null; } // no preview: the button records HEAD, as before
+  };
   const create = h("button", { class: "secondary", onclick: async () => {
     create.disabled = true;
     try {
-      const op = await submit("checkpoint.create", { host, session_id: sid }, { last_n: 20 }, {}, `checkpoint.${host}.${sid}`);
+      const params = { last_n: 20, ...(preview ? { commit: pick.value } : {}), ...(note.value.trim() ? { note: note.value.trim() } : {}) };
+      const op = await submit("checkpoint.create", { host, session_id: sid }, params, {}, `checkpoint.${host}.${sid}`);
+      if (op.status === "succeeded") note.value = "";
       status.replaceChildren(...[opStatus(op), op.error_code ? chip(op.error_code, "bad") : null,
         op.status_reason].filter(Boolean).flatMap(x => [x, " "]));
       await load();
@@ -370,8 +408,10 @@ function checkpointPanel(host, sid) {
     create.disabled = false;
   } }, t("create_checkpoint"));
   const box = h("div", { class: "panel" }, h("h2", {}, t("checkpoints")), h("p", { class: "muted" }, t("checkpoint_help")),
-    can ? null : h("p", { class: "muted" }, t("checkpoint_unavailable")), h("div", { class: "actions" }, create), status, list);
-  return { box, load };
+    can ? null : h("p", { class: "muted" }, t("checkpoint_unavailable")),
+    can && !mayStart ? h("p", { class: "muted" }, t("needs_start_scope")) : null, note,
+    h("div", { class: "actions" }, pick, create), status, list);
+  return { box, load: async () => { await loadPreview(); await load(); } };
 }
 
 async function viewDelivery(main) {
@@ -461,7 +501,7 @@ async function viewOperation(main, id) {
       const opened = op.result?.session_id && op.result?.host
         ? h("a", { class: "secondary", href: `#/session/${encodeURIComponent(op.result.host)}/${encodeURIComponent(op.result.session_id)}` },
           t("open_new_session")) : null;
-      const cancel = !["succeeded", "failed", "cancelled"].includes(op.status)
+      const cancel = !TERMINAL.includes(op.status)
         ? h("button", { class: "danger", onclick: async () => {
           try { await api("POST", `/operations/${id}/cancel`, {}); render(); } catch (e) { panel.append(errorBox(e)); }
         } }, t("cancel"))

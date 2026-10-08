@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import __version__, lifecycle, orchestrate, resource_policy, service, triage
+from . import __version__, api_auth, lifecycle, orchestrate, resource_policy, service, triage
 from .config import DEFAULT_BAT_PROFILES_DIR, default_config_path, load_config
 from .errors import BatError
 from .fleet import Fleet
@@ -615,12 +615,34 @@ def build_parser() -> argparse.ArgumentParser:
     t = tsp.add_parser("issue", help="issue a token for an actor (printed once)")
     t.add_argument("--actor", required=True, help="e.g. ted-dashboard, hermes, grokbot")
     t.add_argument("--scope", action="append", required=True,
-                   choices=["observe", "operate", "manage", "merge", "deploy"])
+                   choices=list(api_auth.SCOPES))
     t.add_argument("--ttl-days", type=float)
     t.add_argument("--label")
     tsp.add_parser("list", help="list actors, scopes and expiry (never tokens)")
     t = tsp.add_parser("revoke", help="revoke every token of an actor")
     t.add_argument("--actor", required=True)
+    p = sp.add_parser("checkpoint", help="record a session's commit, then continue from it in a managed session")
+    csp = p.add_subparsers(dest="checkpoint_cmd", required=True)
+    c = csp.add_parser("create", help="record a checkpoint (reads only; works on sessions created in BAT)")
+    c.add_argument("host")
+    c.add_argument("session_id")
+    c.add_argument("--commit", help="full SHA from the session's history (default: HEAD)")
+    c.add_argument("--note", help="the request this checkpoint is for, verbatim")
+    c.add_argument("--last-n", type=int, default=20, help="conversation messages to keep (0-50)")
+    c.add_argument("--key", help="idempotency key (default: a new one, printed with the result)")
+    c = csp.add_parser("continue", help="start a new managed session at the checkpoint's commit")
+    c.add_argument("checkpoint_id")
+    g = c.add_mutually_exclusive_group(required=True)
+    g.add_argument("--instructions")
+    g.add_argument("--instructions-file")
+    c.add_argument("--agent", choices=["claude", "codex"], default="claude")
+    c.add_argument("--key", help="idempotency key (default: a new one, printed with the result)")
+    c = csp.add_parser("list", help="recent checkpoints")
+    c.add_argument("--host")
+    c.add_argument("--session")
+    c.add_argument("--limit", type=int, default=20)
+    c = csp.add_parser("show", help="one checkpoint, its excerpt and the sessions started from it")
+    c.add_argument("checkpoint_id")
     p = sp.add_parser("op", help="show one operation, or list recent ones; --cancel / --resume one")
     p.add_argument("operation_id", nargs="?")
     steer = p.add_mutually_exclusive_group()
@@ -630,6 +652,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     sp.add_parser("config-path", help="print the config path")
     return ap
+
+
+def cmd_checkpoint(args) -> int:
+    import uuid
+
+    from .task_daemon import request
+
+    def submit(action: str, target: dict, params: dict) -> dict:
+        key = args.key or f"cli-{uuid.uuid4()}"
+        out = request("op_submit", action=action, idempotency_key=key, target=target, params=params, wait_s=30,
+                      entry="cli", timeout=40.0)
+        return {**out, "idempotency_key": key}
+
+    cmd = args.checkpoint_cmd
+    if cmd == "create":
+        params = {"last_n": args.last_n, **({"commit": args.commit} if args.commit else {}),
+                  **({"note": args.note} if args.note else {})}
+        out = submit("checkpoint.create", {"host": args.host, "session_id": args.session_id}, params)
+    elif cmd == "continue":
+        text = Path(args.instructions_file).read_text() if args.instructions_file else args.instructions
+        out = submit("checkpoint.continue", {"checkpoint_id": args.checkpoint_id},
+                     {"instructions": text, "agent": args.agent})
+    elif cmd == "list":
+        out = request("checkpoints_list", host=args.host, session_id=args.session, limit=args.limit, entry="cli")
+    else:
+        out = request("checkpoint_get", checkpoint_id=args.checkpoint_id, entry="cli", timeout=40.0)
+    _print(out, True)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -677,6 +727,8 @@ def main(argv: list[str] | None = None) -> int:
             out = calls[args.api_token_cmd]()
             _print(out, True)
             return 0
+        if args.cmd == "checkpoint":
+            return cmd_checkpoint(args)
         if args.cmd == "op":
             from .task_daemon import request
 

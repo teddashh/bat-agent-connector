@@ -100,6 +100,8 @@ class ApiV1:
             ("GET", r"/api/v1/events", self.events, "observe"),
             ("GET", r"/api/v1/tasks/(?P<task>[0-9a-f-]{8,64})", self.task, "observe"),
             ("GET", r"/api/v1/checkpoints", self.checkpoints, "observe"),
+            ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/checkpoint-preview", self.checkpoint_preview,
+             "observe"),
             ("GET", r"/api/v1/checkpoints/(?P<cp>cp_[0-9a-f]{32})", self.checkpoint, "observe"),
             ("GET", r"/api/v1/repositories/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pulls/(?P<number>\d{1,9})",
              self.pull_preview, "observe"),
@@ -316,7 +318,7 @@ class ApiV1:
     async def session(self, query, host, sid, **_):
         self._known_host(host)
         row = self.daemon.inventory.get_session(host, sid)
-        out = {"session": row}
+        out = {"session": row, "started_from": checkpoints.started_from(self.daemon.journal.db, host, sid)}
         if self._bool(query, "live"):
             out["policy"] = await resource_policy.session_policy(self.daemon.fleet, host, sid)
         elif row is None:
@@ -378,8 +380,16 @@ class ApiV1:
                                                  session_id=self._q(query, "session_id"),
                                                  limit=self._int(query, "limit", 50))
 
-    async def checkpoint(self, cp, **_):
-        return 200, {"checkpoint": checkpoints.get(self.daemon.journal.db, cp)}
+    async def checkpoint(self, query, cp, **_):
+        record = checkpoints.get(self.daemon.journal.db, cp)
+        out = {"checkpoint": record}
+        if self._bool(query, "live"):  # has the source moved on since? (the checkpoint itself never changes)
+            out["source"] = await checkpoints.source_head(self.daemon.ops, record)
+        return 200, out
+
+    async def checkpoint_preview(self, host, sid, **_):
+        self._known_host(host)
+        return 200, {"preview": await checkpoints.preview(self.daemon.ops, host, sid)}
 
     async def task(self, task, **_):
         return 200, {"task": await self.daemon.call("work_status", {"task_id": task})}

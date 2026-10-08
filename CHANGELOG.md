@@ -2,6 +2,42 @@
 
 ## Next release (unreleased)
 
+- BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
+  connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
+  those sessions. BAT has no record of them: `batc remove-worktree` on a checkpoint session re-registered the
+  worktree under the session's workspace folder (a person's checkout in real use, copying its env files in) and
+  removed it from there, pruning that repository. New sessions record `worktree_made_by: "connector"`; older rows
+  are recognised by their `batc/` branch.
+- Checkpoints no longer call BAT's `git:status` on the person's checkout: BAT runs a plain `git status`, which can
+  rewrite `.git/index`, and answers `[]` on failure. Uncommitted changes are counted over SSH with
+  `git --no-optional-locks status`, or reported as not observed (`dirty: null`); `dirty` is a count, not a bool.
+  Source reads go through the inventory's read-only fleet. A lost `session.start` reply is only started again when
+  no registry reservation exists (a null session meta no longer counts as proof), and a lost first instruction to
+  a Codex session is settled from its transcript. New: `GET /api/v1/sessions/{host}/{id}/checkpoint-preview`,
+  `checkpoints/{id}?live=true` (`source.advanced`), `started_from` on the session read, MCP `checkpoint_preview`,
+  `checkpoint_create`, `work_continue_from_checkpoint`, CLI `batc checkpoint`, and a commit picker and note in the
+  Dashboard. The Dashboard no longer requests `/favicon.ico`.
+- Checkpoint continuation (review fixes): BAT's start-point check is now the `verify.start` step before the
+  session starts, so a replay after the agent committed no longer ends in a false `START_MISMATCH`. Host scripts
+  for one clone are serialized with `flock`, so a re-run after a lost SSH reply waits instead of racing. The clone
+  keeps the source's origin only when it is a network URL, with credentials stripped. The clone and worktree
+  paths are checked against the managed roots before any write (`checkpoint.managed_worktree` in the mutation
+  table). A checkpoint taken inside a managed clone continues in that clone. A session that is only in the
+  registry keeps its workspace, and a checkpoint without one is refused up front (`NO_WORKSPACE`).
+- Checkpoint sessions are confined whatever the host's `default_permission_mode` (plan §06, A10): Claude starts in
+  `acceptEdits` and Codex in the `workspace-write` sandbox with `on-request` approval. The registry records
+  `write_scope: "confined"` and the permission fields from the reservation on, so a start proven by read-back, a
+  resume and a Codex failover successor keep them. `session_set_permissions` refuses allow-all for these sessions
+  and `approve_pending` skips them. The source conversation in the first instruction is marked as background.
+- `session_worktree_status` no longer reads a checkpoint session's recorded main checkout (the person's folder)
+  with BAT's `git:status`, which could rewrite their index; it says the folder is not read instead.
+- New API scope `start` for starting agent sessions; `checkpoint.continue` needs it. An `operate` token (send,
+  answer, interrupt) no longer starts sessions. Reissue the Dashboard token with `--scope start`; the Dashboard
+  disables "Start agent work" and says why when the token lacks it.
+- Dashboard: an idempotency key is reused only while the operation it created is unfinished, so the same draft
+  sent again later is a new request instead of a silent replay; a session page that finishes loading after you
+  navigated away no longer adds its Checkpoints panel to the next page.
+
 - Checkpoints (docs/design/checkpoints.md): `checkpoint.create` records any session's commit, branch, uncommitted
   change count and a fixed conversation excerpt through read channels only; `checkpoint.continue` builds a
   connector-owned clone under the first managed root (its origin is the source's origin, never the person's
