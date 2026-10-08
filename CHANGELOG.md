@@ -68,6 +68,11 @@
   as absent_at_cleanup only when its carrier is removed/already absent (or it has no own worktree); retained
   worktrees keep their resume slot. Retired IDs refuse drive/resume/same-ID start with SESSION_RETIRED.
   Legacy worktree removal records its result while preserving an already-retired runtime status.
+  Removed hosts now keep every recorded checkpoint, task, repair and registry worktree identity, including its
+  local branch and clone/area carrier. Branch identities are projected before live reads, so host removal keeps
+  their IDs stable and retains them with OBSERVATION_UNAVAILABLE. Historical host targets remain inspectable;
+  mixed-host apply still reclaims healthy-host items without any removed-host BAT or SSH call. Branch re-checks
+  read the live ref after worktree removal and normalize only dependencies with succeeded worktree receipts.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps

@@ -149,7 +149,8 @@ async def test_e01_preserve_precedes_nonforced_remove_and_cas_checks_delivered_r
     monkeypatch.setattr(cleanup, "snapshot", observe)
     done = await apply(daemon, doc)
     assert done["status"] == "succeeded", done
-    assert branch_snapshots == [None]  # only=branch has no repository projection; the planned-item fallback runs.
+    assert len(branch_snapshots) == 1 and branch_snapshots[0]["observation"] == branch["observation"]
+    assert branch_snapshots[0]["dependencies"] == branch["dependencies"]  # only settled worktree dependencies normalize.
     rows = {r["resource_id"]: r for r in cleanup.receipts(daemon.ops, done["operation_id"])}
     assert rows[wt["resource_id"]]["status"] == rows[branch["resource_id"]]["status"] == "succeeded"
     assert not Path(wt["path"]).exists()

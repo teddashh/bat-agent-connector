@@ -53,17 +53,24 @@ read adapters 使用同 daemon 的 HTTP，不為新工具修改 task RPC dispatc
 | work_item | work_item_id，include_children=false | parent_id 子樹（可含封存），有效／已移除歷史 links；derived_from 不自動展開 |
 | checkpoint | checkpoint_id | 原來源、所有 runs／continue operations／external refs／steps、共用 clone、相關 receipts |
 | integration | operation_id（preview／apply／handoff） | preview、source、receipts、repair、session、pins、area；崩潰 preview 的 prepare request 也有 area |
-| host | configured host | inventory（含 gone）、registry、已知 checkpoint／integration／task intent；不掃 managed roots 或磁碟 |
+| host | configured host，或有 creation／observation history 的原 host | inventory（含 gone）、registry、已知 checkpoint／integration／task intent；不掃 managed roots 或磁碟 |
 
 Integration apply 先由 `params.preview_id` 找原 preview；handoff 先由 `target.operation_id` 找 apply，
 再沿同一條鏈找 preview。把 preview ID 與 preview operation ID 都加入 refs，再展開所有 source IDs。
 三種 operation target 取得同一批 source／area／pins／repair／session；work-item links 的 integration
 operation 也用同一規則。只使用本次 snapshot 已載入的 operation rows，不逐 item 另查 journal。
 
-Work-item 等歷史 target 可包含已從 config 移除的 host。其 sessions_observed／links／tombstones 不消失；
+Work-item、checkpoint、integration 及 host target 可包含已從 config 移除的 host。所有 identity 都先由
+creation facts 投影：checkpoint runs／continue intents、task external worktrees、repair handoff、registry
+sessions／BAT-made carriers，以及各自的 local branch／clone／area。Host 是否 configured 不影響 ID，
+branch ID 不等待 live HEAD 才存在；sessions_observed／links／tombstones 也不消失。
 snapshot（含 only=item）只觀測目前 configured hosts，其他選中資源仍列出，observation 標
 host_configured=false，read-only／retain，沿用 OBSERVATION_UNAVAILABLE，不以 missing host 當 absent。
-同 preview 的 configured-host items 正常規劃；明確 host target 仍要求 configured host，否則 UNKNOWN_HOST。
+依賴這些內容的 item 同樣保留；apply 不送 retained item 的任何 host call。同 preview 的 configured-host
+items 正常規劃。Host target 只有 config 與既有 resource history 都找不到時才回 UNKNOWN_HOST。
+Audit：_all 的 wt／registry loop 不再用 host 設定篩 identity；registry BAT ownership 的 HostConfig 查詢
+只決定目前能否證明 managed roots，不能隱藏 worktree／branch／carrier。Host 移除時不猜原 roots 或 live
+binding，仍列 OBSERVATION_UNAVAILABLE；selection 沒有 configured-host filter。
 Audit：_terminal_observations／_runtime 在 inventory Fleet.client 前查目前設定；_host_call 在 runner lookup 前
 拒絕 unconfigured host；_phase_consumers／_execute_item／stop callback／retained read 使用同一 _host_config。
 Snapshot roots 用該輪 HostConfig，後續 adapter 仍再查 host 是否存在，config 移除不拋 ConfigError。
@@ -110,7 +117,7 @@ prepare 的 exact bare init temp。兩者需原intent、相符markers、完整Gi
 
 Checkpoint clone 檢查 batc.managed-clone／batc.source 與 creation intent，不能接管 managed root 中預先存在的 repo。
 Standalone BAT worktree 由 registry 的 created_at／branch／origin_root／worktree_path 建立記錄投影 clone，
-status 必須為 active／superseded／removed／cleaned，且非 failover_of、非 worktree_made_by=connector。
+status 必須為 active／superseded／removed／cleaned／stopped／absent_at_cleanup，且非 failover_of、非 worktree_made_by=connector。
 只有 origin_root 在 managed roots、worktree_path 符合該 origin 的 in_bat_worktrees layout，才有 ownership 證據。
 相同 SSH read／flock 內重核 batc.managed-clone、canonical common dir／config integrity、Git registration 與 recorded branch；
 carrier common dir 或 branch 不符列 BINDING_MISMATCH，不能只憑目錄形狀移除。Origin 在 managed roots 外仍列出
@@ -302,8 +309,9 @@ refs／registration／merge state、writer/pending、commands／global consumers
 choices／steps；排除 heartbeat／抓取時間／讀取次數／顯示語言。
 Apply 在首個 mutation 前重新計算**整份** snapshot；之後每 item 的 mutations 前只核對該 item／consumers
 （及自身已證實的 planned transitions）。`snapshot(only=resource_id)` 只觀測該 item 的 host，仍讀該 host
-全部 terminals／consumers；local_branch 尚未投影 observation 時，由 worktree 的 creation slot 對應 branch ID
-確定 host，不需新 journal／SSH 查詢。初始 preview 與 apply 首次驗證仍觀測所有選中 hosts。其他 host
+全部 terminals／consumers；local_branch 由 creation slot 投影 ID／host，並用同一 repository read 取得 live
+branch SHA，即使 worktree 已移除也仍重核。沒有逐 item 額外 journal 查詢。初始 preview 與 apply 首次驗證
+仍觀測所有選中 configured hosts。其他 host
 逾時不會在每個 healthy item 上重付 deadline；其資源仍保留 OBSERVATION_UNAVAILABLE。
 不 O(n²) 重讀所有剩餘資源。任何外部變動 PREVIEW_STALE，不能換 plan。
 
@@ -322,8 +330,10 @@ remove.worktree／remove.temporary → remove.branch（只有 delivered）→ fi
 Phase 分類：preserve 是 additive；stop 是 runtime；discard、remove.worktree、remove.temporary、remove.branch
 是 destructive。其他 phase：validate 是 read-only，lock.session 是 coordination（其 locked_action 執行 stop），
 verify.retained／canonical_paths／observation 是 read-only，finalize 是 journal／registry metadata，不改 Git／runtime。
-Local branch 的 only=resource_id snapshot 若無 repository projection，不重建 branch item，沿用 reviewed
-item（actual is None）；不把 worktree 已完成的 planned transition 誤判 stale。Host 在同一 flock 下、
+Local branch 的 only=resource_id snapshot 保留 creation identity，重新觀測 branch；只允許 dependencies
+刪去本 operation 已有 succeeded worktree receipt 的 IDs。增加 dependency、刪去未成功 prerequisite 或任何
+其他欄位改變仍是 PREVIEW_STALE。若無 repository projection，原 actual is None fallback 仍沿用 reviewed
+item，host CAS 與 consumer gate 仍重核。Host 在同一 flock 下、
 寫 branch retained ref 前核 exact branch SHA，移動即 PREVIEW_STALE、無 ref 寫入；刪除時仍核 checkout 與 CAS。
 
 | 副作用 | 限制 |
@@ -432,7 +442,7 @@ step definitive failed；canonical_paths／observation／verify.retained 是 rea
 | code | HTTP／下一步 |
 |---|---|
 | INVALID_TARGET／INVALID_PARAMS／INVALID_REQUEST | 422，修正輸入 |
-| NOT_FOUND／UNKNOWN_HOST | 404；原 ID有tombstone仍可查 |
+| NOT_FOUND／UNKNOWN_HOST | 404；host 既不在 config 也無 resource history，才是 UNKNOWN_HOST；原 ID有tombstone仍可查 |
 | FORBIDDEN／DISCARD_SCOPE_REQUIRED | 403；discard admission缺cleanup_discard，不用於resume |
 | PREVIEW_TOKEN_INVALID | 409，格式／signature／rotated key不符，重preview |
 | PREVIEW_MISMATCH | 409，actor／target／choices／precondition與token不符或 resumed accepted token hash 不符；完全無 step 的 run 先釋放 own guards、pending／running 改 failed，再重preview |
@@ -442,7 +452,7 @@ step definitive failed；canonical_paths／observation／verify.retained 是 rea
 | RESOURCE_CLEANED／CLEANUP_IN_PROGRESS | 409／policy refusal，原generation已清理／reserved |
 | SESSION_RETIRED | 409／policy refusal，退休的 session ID 已不占 cap，不能 drive／resume／same-ID start；以新 ID reserve，原 history／worktree 不改 |
 | 共用ownership／destination／TIER_DISABLED／NO_MANAGED_ROOT／GIT_RUNNER_UNAVAILABLE | 沿用原code，保留不越界 |
-| OBSERVATION_UNAVAILABLE | retained reason；歷史 host 不在 config 時 preview 仍成功，無 live call；直接 adapter／mutation call 回 409，未決 phase 仍保留 guard |
+| OBSERVATION_UNAVAILABLE | retained reason；歷史 host 不在 config 時保留所有 creation identities／branches／carriers，preview 仍成功，無 live call；直接 adapter／mutation call 回 409，未決 phase 仍保留 guard |
 | DISCARD_MANIFEST_UNAVAILABLE／RETAINED_REF_MISMATCH／RETAINED_CONTENT_MISSING | 409，無完整discard／保留證據，停止移除 |
 | WORKTREE_REMOVE_REFUSED／REF_CHANGED | 409，非force Git拒絕／CAS不符，保留回執重preview |
 | STOP_UNPROVEN／EXTERNAL_EFFECT_UNPROVEN／UNCERTAIN_UNRESOLVED | uncertain／needs_attention，讀回不重送 |
@@ -478,8 +488,8 @@ parent cancelled/failed把它當成沒發生。遠端程序仍在／身份不明
 ## Journal／migration
 
 原Journal、WAL/FULL、single owner。新增idempotent DDL，每次open都以BEGIN IMMEDIATE一個tx建表/index；
-不讀、不寫user_version，中斷rollback可重跑。版本號只供跨package分配的一次性data steps使用：
-main為1、delivery為2–3、observation為4。DDL若相對遞增版本會跳過其他package的data steps；
+不讀、不寫user_version，中斷rollback可重跑。版本號只供 orchestrator 跨package分配的一次性data steps使用，
+本包不假設其他package的版號。DDL若相對遞增版本會跳過其他package的data steps；
 Part A只有建表/index，不占版本號。
 不改operations table，不host calls、不刪舊rows／registry／events，不重編cursor。
 
@@ -581,7 +591,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | canonical/policy/preserve/nonforce/CAS；E01 | test_e01_every_mutation_rechecks_policy_and_canonical_destination、test_e01_preserve_precedes_nonforced_remove_and_cas_checks_delivered_refs |
 | standalone BAT creation 的 host／work-item scope、preserve／remove／branch CAS；E01/E02 | test_e01_standalone_bat_worktree_and_branch_are_reclaimed（兩種 target、session delivery receipt、兩 item succeeded、載體保留）、test_e01_standalone_bat_release_keeps_undelivered_branch |
 | standalone live carrier／branch 矛盾、managed roots 外不能回收；E01 | test_e01_standalone_bat_worktree_live_binding_mismatch_is_retained、test_e01_standalone_bat_worktree_outside_managed_roots_is_listed_and_retained |
-| 同 apply 的 worktree／branch 回執均成功；移除後 branch 移動先拒絕；E01 | test_e01_preserve_precedes_nonforced_remove_and_cas_checks_delivered_refs（branch snapshot actual is None）、test_e01_branch_moved_after_worktree_removal_is_stale（PREVIEW_STALE、所有 refs 不變） |
+| 同 apply 的 worktree／branch 回執均成功；移除後 branch 移動先拒絕；E01 | test_e01_preserve_precedes_nonforced_remove_and_cas_checks_delivered_refs（live branch snapshot，只正規化 succeeded worktree dependency）、test_e01_branch_moved_after_worktree_removal_is_stale（PREVIEW_STALE、所有 refs 不變） |
 | integration 三種 target 同 scope／handoff 完整鏈；E01/E02 | test_e01_integration_preview_apply_and_handoff_expand_to_same_resources（source／area／pins／repair／session 的所有 item fields 相等） |
 | crashedcheckpoint/handoff／未決start-stop；E01 | test_e01_crashed_continue_and_handoff_intents_are_discovered_without_adoption、test_e01_pending_start_stop_and_waiting_sessions_are_retained |
 | partsuccess/restart/lostreply；E01 | test_e01_partial_cleanup_resumes_only_unfinished_unchanged_items、test_e01_lost_replies_reconcile_each_cleanup_phase、test_e01_cancel_reconciles_sent_steps_and_releases_only_confirmed_reservations |
@@ -601,6 +611,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | boundedread／serialization／deadline | test_e01_previews_serialize_per_host_and_share_read_deadline |
 | multi-host apply 每 item 只讀自己的 host；E01/E02 | test_e01_multi_host_apply_observes_only_each_items_host（另一 host terminal read 永不回覆；healthy session／worktree／branch 均成功，unavailable 資源保留；只有初始 preview／全 plan 驗證付該 host deadline） |
 | removed host 的歷史仍可 preview／read，無 live call；E01/E02 | test_e01_removed_host_history_is_retained_without_live_calls（work-item initial／only snapshot、configured items apply 正常；SSH／terminal／runtime／guard audit；實際 retained rows 在 host 移除後列 unavailable） |
+| removed host 不漏 creation identities／branch／carrier；E01/E02／§23 inventory | test_e01_removed_host_keeps_every_creation_identity_and_apply_is_read_only（checkpoint／task／repair／registry 四種來源，work-item／checkpoint／integration／historical host targets，移除前後 ID 相同；每 item snapshot 與混合 host apply 無 removed-host client／SSH call，全部 retained；healthy session／worktree／branch 成功） |
 | attachmentreplicas只豁免exact manifest／exacttemps | test_e01_attachment_replicas_are_removed_without_discard_scope、test_e01_edited_or_extra_replica_content_counts_as_uncommitted、test_e01_replicas_without_manifest_are_ordinary_content、test_e01_replica_anomalies_require_reviewed_discard（missing/link/hardlink/directory）、test_e01_replica_edit_after_preview_is_stale、test_e01_lost_replies_reconcile_each_cleanup_phase（discard.replica）、test_e01_exact_temporary_requires_creation_markers_and_never_sweeps、test_e01_empty_integration_temporary_has_exact_intent_and_no_restore_promise |
 | acceptedauthority由server記錄／public request retry／載體不被guard退休 | test_e01_accepted_authorization_is_server_recorded（HTTP 422、persisted actor/scopes/choices、同key retry）、test_e01_accepted_authority_survives_key_rotation_and_carrier_stays_usable |
 | migration原histories／DDL不占user_version／keep無sweep | test_cleanup_migration_is_atomic_additive_and_preserves_history（version 1與3、第二次open不變）、test_e01_keep_defaults_reject_purge_and_never_sweep_by_name |
