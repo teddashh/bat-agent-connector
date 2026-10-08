@@ -120,6 +120,9 @@ guards／session markers、pending／running 回執改 failed 並保存 refusal 
 Item status=already_absent 是獨立 definitive receipt，result.items 與 summary.already_absent 分別列出，
 不算 retained。它只保存經全 plan 驗證的 absence／original IDs，沒有 per-item host call、tombstone／aliases
 或 registry cleaned mark；不是 cleanup 移除的證據。Dependencies 接受 succeeded 或 already_absent。
+沒有 reclaim item 但有可釋放 cap 的 already_absent active 非 task session（無自己的 worktree 或 carrier
+同樣 already_absent）時，preview.ready=true；同一 cleanup.apply 只結算本機 retirement／receipt。
+Preview 本身不改 registry；retained carrier、未決或已退休 row 不會單獨開啟 apply。
 Confirmed planner stop 的 registry status=stopped，已不占 host cap；ACK／read-back 未確認時不改。
 Already-absent session 的 worktree 本次 succeeded／already_absent，或沒有自己的 worktree時，status 改為
 absent_at_cleanup，retirement 記 actor／operation_id／carrier_resource_id。回執 after_state 有

@@ -226,7 +226,9 @@ item is done.
   Confirmed planner stops leave the host cap as stopped while their worktrees stay reclaimable. Reviewed
   absence leaves the cap as absent_at_cleanup when its carrier is removed/already absent or it has no
   own worktree; retained worktrees keep the resume slot. The receipt records capacity_released and
-  stopped_by_cleanup=false. Retired IDs refuse drive/resume/same-ID start with SESSION_RETIRED; start a
+  stopped_by_cleanup=false. A preview can be ready with no reclaim items when reviewed absence alone releases
+  an active session's cap. Apply that signed preview normally; it only settles local capacity and absence receipts.
+  Retired IDs refuse drive/resume/same-ID start with SESSION_RETIRED; start a
   new ID through the normal cap check. Ownership and original creation IDs remain connector-managed.
   Use cleanup_tombstones to find original IDs, location, reasons and PR destinations,
   cleanup_retained to read actual retained refs. Restore comes in Part B; no tool can revive a runtime.
