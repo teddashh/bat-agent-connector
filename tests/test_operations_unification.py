@@ -71,7 +71,7 @@ def test_a09_owner_lock_precedes_initialization_and_pointer(mock, tmp_path, monk
 
 from bat_agent_connector import api_auth, lifecycle  # noqa: E402
 from bat_agent_connector.channels import GUARDED_CHANNELS, ORCHESTRATE_CHANNELS, WRITE_CHANNELS  # noqa: E402
-from bat_agent_connector.errors import TaskControlRefused  # noqa: E402
+from bat_agent_connector.errors import ConnectionLost, InvokeTimeout, TaskControlRefused  # noqa: E402
 from bat_agent_connector.operations import OpContext, OperationError  # noqa: E402
 from tests.conftest import adopt  # noqa: E402
 
@@ -96,6 +96,59 @@ async def owned(mock, tmp_path):
 
 def writes(mock):
     return [r for r in mock.invokes if r["channel"] in WRITE_CHANNELS | ORCHESTRATE_CHANNELS | GUARDED_CHANNELS]
+
+
+@pytest.mark.parametrize("action", ["send", "answer", "interrupt", "permissions"])
+@pytest.mark.parametrize("error", [ConnectionLost, InvokeTimeout])
+@pytest.mark.parametrize("after_frame", [False, True], ids=["before_frame", "after_frame"])
+async def test_a07_failure_before_any_frame_rejects_command_without_uncertain_task(owned, mock, monkeypatch,
+                                                                                 action, error, after_frame):
+    d, tid = owned
+    prior = d.journal.get(tid)
+    mock.states[SID]["pendingAskUser"] = {"toolUseId": "ask-1", "questions": [{"question": "Choice?"}]}
+    handlers = {"send": (service.session_send, {"text": "one instruction"}),
+                "answer": (service.session_answer, {"answers": ["yes"], "tool_use_id": "ask-1"}),
+                "interrupt": (service.session_interrupt, {}),
+                "permissions": (lifecycle.session_set_permissions, {"mode": "allow_all"})}
+    fn, params = handlers[action]
+    original_lookup = service._resolve_session
+    client = d.fleet.client("h1")
+    original_roundtrip = client._roundtrip
+
+    async def fail_lookup(*args, **kwargs):
+        # The outer admission lookup succeeds; fail the lower-layer lookup after command intent.
+        if d.journal.commands(tid):
+            raise error("session lookup failed")
+        return await original_lookup(*args, **kwargs)
+
+    async def lose_reply(frame, timeout):
+        result = await original_roundtrip(frame, timeout)
+        if frame["channel"] in WRITE_CHANNELS | ORCHESTRATE_CHANNELS | GUARDED_CHANNELS:
+            raise error("write reply lost")
+        return result
+
+    with monkeypatch.context() as patch:
+        if after_frame:
+            patch.setattr(client, "_roundtrip", lose_reply)
+        else:
+            patch.setattr(service, "_resolve_session", fail_lookup)
+            patch.setattr(lifecycle, "_resolve_session", fail_lookup)
+        with pytest.raises(error):
+            await fn(d.fleet, "h1", SID, confirm=True, **params)
+    command = d.journal.commands(tid)[-1]
+    assert command["status"] == ("uncertain" if after_frame else "rejected")
+    task = d.journal.get(tid)
+    assert task["state"] == ("uncertain" if after_frame else prior["state"])
+    assert task["control_version"] == prior["control_version"]
+    assert len(writes(mock)) == int(after_frame)
+    if after_frame:
+        with pytest.raises(TaskControlRefused, match="TASK_COMMAND_PENDING"):
+            await service.session_interrupt(d.fleet, "h1", SID, confirm=True)
+        assert len(d.journal.commands(tid)) == 1
+    else:
+        await fn(d.fleet, "h1", SID, confirm=True, **params)
+        assert len(d.journal.commands(tid)) == 2
+        assert len(writes(mock)) == 1
 
 
 @pytest.mark.parametrize("action", ["send", "answer", "interrupt", "permissions"])
