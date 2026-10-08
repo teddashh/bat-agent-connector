@@ -244,7 +244,7 @@ item（actual is None）；不把 worktree 已完成的 planned transition 誤�
 | 副作用 | 限制 |
 |---|---|
 | preserve | refs/batc/retained/<resource_id>/<revision slot> CAS create，已等值成功，不同值 RETAINED_REF_MISMATCH；cat-file 可讀才算 retained |
-| stop | lifecycle._stop 新 keyword-only cleanup=False；default 保留舊行為，cleanup=True 時 no retry on disconnect、ambiguous 傳給 OpContext，pending/writer 再查；不直接 shell kill |
+| stop | lifecycle._stop 新 keyword-only cleanup=False；default 保留舊行為，cleanup=True 時 no retry on disconnect、ambiguous 傳給 OpContext。Preview／apply re-check／最後 pre-stop 共用 service.SESSION_WAITING_FIELDS；所有 pending question/permission/approval、queued message/count、input waiting 都再查，任一為真回 SESSION_WAITING、streaming 回 ACTIVE_WRITER，不送 stop；不直接 shell kill |
 | discard | preview 完整 tracked/staged/untracked/ignored manifest；tracked git restore 到 pinned HEAD，untracked no-follow exact unlink；不 clean sweep／force remove。複雜 merge/rebase 若無精確 after manifest就保留 |
 | remove worktree | HEAD retained、writer/pending/consumer 消失、dirty=0，managed clone/area 中 git worktree remove exact-path，無 force／prune／rm fallback |
 | remove branch | 只 delivered batc/cp-*／fix-*、無 checkout/consumer，retained HEAD存在，update-ref -d full-ref expected-old-SHA CAS；release 的 branch保留 |
@@ -381,6 +381,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | 計畫§23／驗收 | 測試名稱／證據 |
 |---|---|
 | 四狀態／inactive不足；E01 | test_e01_pending_start_stop_and_waiting_sessions_are_retained |
+| preview 到 stop 間任何 waiting field 改變都不 stop／remove；E01 | test_e01_every_waiting_field_racing_with_stop_keeps_session_and_worktree（共用 set 全部九個 fields）、test_e01_preview_recheck_and_stop_share_waiting_fields |
 | 父子樹、manual/unknown/active/completed與exactplan；E01 | test_e01_tree_preview_apply_matches_and_read_only_resources_survive |
 | sharedID／全域consumer、history不擋；E02 | test_e02_shared_worktree_is_one_item_and_checks_out_of_scope_consumers、test_e01_tree_preview_apply_matches_and_read_only_resources_survive |
 | receipt而非ancestor，partialpick/newtip/uncertain；E02 | test_e02_squash_and_pick_use_exact_delivery_receipt_coverage |

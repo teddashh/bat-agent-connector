@@ -21,6 +21,8 @@
   removal now returns PREVIEW_STALE before writing its retained ref.
   Integration cleanup targets resolve apply and handoff operations back to their preview using the snapshot's
   operation rows, so preview/apply/handoff targets list the same sources, areas, pins, repairs and sessions.
+  Preview, apply checks and the final pre-stop read share the complete waiting-field set; a session that becomes
+  waiting returns SESSION_WAITING and keeps its worktree.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
