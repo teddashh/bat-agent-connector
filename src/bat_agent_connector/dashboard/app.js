@@ -1169,7 +1169,9 @@ function workItemRow(w) {
 // ------------------------------------------------------------------ router
 async function viewCleanup(main, section, ident) {
   const stored = (() => { try { return JSON.parse(sessionStorage.getItem("batc.cleanup.draft") || "{}"); } catch { return {}; } })();
-  const choices = stored.choices || { discard_uncommitted: [], release_undelivered: [] };
+  const choices = section === "item" && stored.id !== ident ? { discard_uncommitted: [], release_undelivered: [] }
+    : (stored.choices || { discard_uncommitted: [], release_undelivered: [] });
+  const pending = (() => { try { return JSON.parse(sessionStorage.getItem("batc.cleanup.pending") || "null"); } catch { return null; } })();
   const kind = h("select", { "aria-label": t("cleanup_target") }, ...["work_item", "checkpoint", "integration", "host"].map(k =>
     h("option", { value: k }, t("cleanup_target_" + k))));
   kind.value = section === "item" ? "work_item" : (stored.kind || "host");
@@ -1181,7 +1183,7 @@ async function viewCleanup(main, section, ident) {
   const status = h("div", { "aria-live": "polite" });
   const historyOut = h("div", { "aria-live": "polite" });
   const retainedOut = h("div", { "aria-live": "polite" });
-  let doc = null;
+  let doc = pending;
   function changed() {
     doc = null;
     apply.disabled = true;
@@ -1191,11 +1193,12 @@ async function viewCleanup(main, section, ident) {
     childrenLabel.hidden = kind.value !== "work_item";
     fill(status, h("p", { class: "muted" }, t("cleanup_repreview")));
   }
-  kind.addEventListener("change", changed); targetId.addEventListener("input", changed); children.addEventListener("change", changed);
+  function targetChanged() { choices.discard_uncommitted = []; choices.release_undelivered = []; changed(); }
+  kind.addEventListener("change", targetChanged); targetId.addEventListener("input", targetChanged); children.addEventListener("change", targetChanged);
   childrenLabel.hidden = kind.value !== "work_item";
   function choice(item, key, label) {
     const input = h("input", { type: "checkbox", checked: choices[key].includes(item.resource_id),
-      disabled: key === "discard_uncommitted" && !may("cleanup_discard"), onchange: () => {
+      disabled: !!pending || key === "discard_uncommitted" && !may("cleanup_discard"), onchange: () => {
         choices[key] = choices[key].filter(id => id !== item.resource_id);
         if (input.checked) choices[key].push(item.resource_id);
         changed();
@@ -1224,28 +1227,52 @@ async function viewCleanup(main, section, ident) {
   const apply = h("button", { class: "primary", disabled: true, onclick: async () => {
     if (!doc || !reviewed.checked) return;
     apply.disabled = true;
+    previewButton.disabled = true; kind.disabled = true; targetId.disabled = true; children.disabled = true;
+    previewOut.querySelectorAll("input").forEach(input => { input.disabled = true; });
+    // Keep the reviewed request as well as submit()'s stable key across a lost reply or page reload.
+    try { sessionStorage.setItem("batc.cleanup.pending", JSON.stringify(doc)); } catch { /* retain in this view */ }
     try {
       const op = await submit("cleanup.apply", { preview_id: doc.preview_id }, { preview_token: doc.preview_token },
         { preview_fingerprint: doc.fingerprint }, "cleanup.apply");
       fill(status, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, t("cleanup_open_receipts")),
         ...(op.result?.items || []).map(r => h("p", {}, h("code", {}, r.resource_id), " · ", t("cleanup_receipt_" + r.status))));
+      sessionStorage.removeItem("batc.cleanup.pending");
       doc = null; reviewed.checked = false;
+      previewButton.disabled = false; kind.disabled = false; targetId.disabled = false; children.disabled = false;
       await loadHistory(); await loadRetained();
-    } catch (e) { fill(status, errorBox(e), h("p", {}, t("cleanup_repreview"))); doc = null; }
+    } catch (e) {
+      if (!e.status || e.status >= 500) {
+        fill(status, errorBox(e), h("p", {}, t("cleanup_retry_same")));
+        apply.disabled = !may("cleanup");
+        previewButton.disabled = true; kind.disabled = true; targetId.disabled = true; children.disabled = true;
+      } else {
+        sessionStorage.removeItem("batc.cleanup.pending");
+        fill(status, errorBox(e), h("p", {}, t("cleanup_repreview"))); doc = null;
+        previewButton.disabled = false; kind.disabled = false; targetId.disabled = false; children.disabled = false;
+      }
+    }
   } }, t("cleanup_apply"));
+  function renderPreview() {
+    fill(previewOut, h("h2", {}, t("cleanup_preview")), h("p", {}, t("cleanup_counts", { reclaim: doc.impact.reclaim, retain: doc.impact.retain })),
+      h("p", { class: "muted" }, t("cleanup_expires", { time: when(doc.expires_at * 1000) })),
+      ...(doc.items || []).map(resourceRow), !doc.ready ? h("p", { class: "note" }, t("cleanup_blocked")) : null);
+  }
   const previewButton = h("button", { class: "secondary", onclick: async () => {
     previewButton.disabled = true; doc = null; apply.disabled = true; reviewed.checked = false;
     const key = { work_item: "work_item_id", checkpoint: "checkpoint_id", integration: "operation_id", host: "host" }[kind.value];
     const target = { kind: kind.value, [key]: targetId.value.trim(), ...(kind.value === "work_item" ? { include_children: children.checked } : {}) };
     try {
       doc = (await api("POST", "/cleanup-previews", { target, choices })).preview;
-      fill(previewOut, h("h2", {}, t("cleanup_preview")), h("p", {}, t("cleanup_counts", { reclaim: doc.impact.reclaim, retain: doc.impact.retain })),
-        h("p", { class: "muted" }, t("cleanup_expires", { time: when(doc.expires_at * 1000) })),
-        ...(doc.items || []).map(resourceRow), !doc.ready ? h("p", { class: "note" }, t("cleanup_blocked")) : null);
+      renderPreview();
       fill(status);
     } catch (e) { fill(status, errorBox(e)); }
     finally { previewButton.disabled = false; }
   } }, t("cleanup_preview"));
+  if (pending && section !== "resource") {
+    renderPreview(); reviewed.checked = true; apply.disabled = !may("cleanup");
+    previewButton.disabled = true; kind.disabled = true; targetId.disabled = true; children.disabled = true;
+    fill(status, h("p", { class: "note" }, t("cleanup_retry_same")));
+  }
   const search = h("input", { class: "cleanup-id", "aria-label": t("cleanup_search"), placeholder: t("cleanup_search") });
   async function loadHistory(cursor = "") {
     try {
