@@ -89,6 +89,9 @@ class Journal:
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.executescript("""
             BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS confinement_host_checks (
+                host TEXT PRIMARY KEY, evidence TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS tasks (
                 task_id TEXT PRIMARY KEY, idem_key TEXT UNIQUE NOT NULL, payload_hash TEXT NOT NULL,
                 project TEXT NOT NULL, host TEXT NOT NULL, workspace TEXT NOT NULL,
@@ -323,11 +326,6 @@ class Journal:
                     task_event_id,created_at) SELECT 'task',task_id,'task.'||kind,body,event_id,created_at
                     FROM events ORDER BY event_id""")
                 self.db.execute("PRAGMA user_version=1")
-        if self.db.execute("PRAGMA user_version").fetchone()[0] < 2:
-            with self.tx():
-                self.db.execute("""CREATE TABLE IF NOT EXISTS confinement_host_checks (
-                    host TEXT PRIMARY KEY, evidence TEXT NOT NULL)""")
-                self.db.execute("PRAGMA user_version=2")
 
     def _drop_legacy_outbox(self):
         """Remove the retired chat outbox so no historical event can ever be published.

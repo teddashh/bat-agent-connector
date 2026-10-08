@@ -210,16 +210,31 @@ def test_a10_host_account_configuration_rejects_uncheckable_claims():
 def test_a10_host_evidence_migration_is_idempotent_and_persists(tmp_path):
     journal = Journal(tmp_path / "tasks.db")
     journal.db.execute("INSERT INTO confinement_host_checks VALUES(?,?)", ("h1", '{"status":"unknown"}'))
+    version = journal.db.execute("PRAGMA user_version").fetchone()[0]
     journal.close()
     journal = Journal(tmp_path / "tasks.db")
     assert journal.db.execute("SELECT evidence FROM confinement_host_checks").fetchone()[0] == '{"status":"unknown"}'
-    assert journal.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert journal.db.execute("PRAGMA user_version").fetchone()[0] == version
+    journal.close()
+
+
+def test_host_check_table_is_created_without_consuming_schema_version(tmp_path):
+    """A10: a delivery journal's version is independent of the additive evidence table."""
+    path = tmp_path / "tasks.db"
+    journal = Journal(path)
+    journal.db.execute("DROP TABLE confinement_host_checks")
+    journal.db.execute("PRAGMA user_version=3")
+    journal.close()
+    journal = Journal(path)
+    assert journal.db.execute("SELECT count(*) FROM confinement_host_checks").fetchone()[0] == 0
+    assert journal.db.execute("PRAGMA user_version").fetchone()[0] == 3
     journal.close()
 
 
 @pytest.mark.parametrize("case,expected", [("safe", "verified"), ("writable", "mismatch"),
                                           ("budget", "unknown"), ("identity", "unknown"),
                                           ("capabilities", "mismatch"), ("ancestor", "mismatch"),
+                                          ("idle", "verified"), ("permitted", "mismatch"), ("ambient", "mismatch"),
                                           ("time", "unknown"), ("process", "unknown"), ("symlink", "unknown"),
                                           ("ownership", "mismatch"), ("ancestor_owner", "mismatch")])
 def test_a10_linux_read_only_scan_uses_find_and_process_identity(tmp_path, monkeypatch, capsys, case, expected):
@@ -241,7 +256,9 @@ def test_a10_linux_read_only_scan_uses_find_and_process_identity(tmp_path, monke
     def status(parent):
         return (f"PPid:\t{parent}\nUid:\t{uid} {uid} {uid} {uid}\n"
                             f"Gid:\t{gid} {gid} {gid} {gid}\nGroups:\t{groups}\n"
-                            f"CapEff:\t{'1' if case == 'capabilities' else '0'}\n")
+                            f"CapEff:\t{'1' if case == 'capabilities' else '0'}\n"
+                            f"CapPrm:\t{'1' if case == 'permitted' else '0'}\n"
+                            f"CapAmb:\t{'1' if case == 'ambient' else '0'}\n")
 
     class Proc:
         def __init__(self, *parts):
@@ -257,7 +274,8 @@ def test_a10_linux_read_only_scan_uses_find_and_process_identity(tmp_path, monke
             return b"unidentified" if case == "process" else (
                 b"bat-server" if self.parts[1] == "1" else b"codex")
         def iterdir(self):
-            return [Proc("/proc", "1"), Proc("/proc", "2")] if self.parts == ("/proc",) else [Proc("fd")]
+            return ([Proc("/proc", "1")] if case == "idle" else [Proc("/proc", "1"), Proc("/proc", "2")]) \
+                if self.parts == ("/proc",) else [Proc("fd")]
 
     def path(*parts):
         return Proc(*parts) if str(parts[0]).startswith("/proc") else real_path(*parts)
@@ -272,6 +290,10 @@ def test_a10_linux_read_only_scan_uses_find_and_process_identity(tmp_path, monke
         exec(confinement._ACCOUNT_PROGRAM, {})
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == expected
+    if case == "idle":
+        assert result["runtimes"] == [] and result["limits"] == ["runtime_identity_inherited_unobserved"]
+        record = confinement.snapshot("claude", {"permissionMode": "acceptEdits"}, account=result)
+        assert "runtime_identity_inherited_unobserved" in record["limits"]
     if case == "ancestor_owner":
         assert result["reason"] == "owned_ancestor_can_chmod"
     root.chmod(0o700)

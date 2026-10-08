@@ -285,7 +285,13 @@ class TaskCoordinator:
                                                    role=role, agent=agent, session_id=sid)
             if started_sid != sid:
                 raise TaskIdentityMismatch("BAT start changed the reserved task session ID")
-        except Exception:
+        except Exception as exc:
+            if getattr(exc, "sent", None) is False:
+                code = getattr(exc, "code", "REFUSED")
+                self.journal.command_status(command["command_id"], "rejected")
+                self.journal._event(task["task_id"], "start_rejected", {
+                    "command_id": command["command_id"], "session_id": sid, "role": role, "code": code})
+                return self.journal.change(task["task_id"], "needs_ted", fields={"result": str(exc)})
             self.journal.command_status(command["command_id"], "uncertain")
             return self.journal.change(task["task_id"], "uncertain")
         # Evidence only; engine, recipes and command identity stay unchanged.

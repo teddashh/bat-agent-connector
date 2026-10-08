@@ -430,17 +430,25 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
     await ctx.step("verify.start", verify, reconcile=reverify)
 
     async def start() -> dict:
-        r = await orchestrate.session_start(
-            fleet, host, workspace, agent, confirm=True, prompt=None, use_worktree=False, title=title,
-            session_id=sid, retain_on_error=True, cwd_override=worktree, external_branch=branch,
-            write_scope="confined")
+        try:
+            r = await orchestrate.session_start(
+                fleet, host, workspace, agent, confirm=True, prompt=None, use_worktree=False, title=title,
+                session_id=sid, retain_on_error=True, cwd_override=worktree, external_branch=branch,
+                write_scope="confined")
+        except confinement.ConfinementRefused as exc:
+            if exc.sent is False:
+                raise NeedsAttention(exc.code, str(exc)) from exc
+            raise
         ctx.set_refs(confinement=r["confinement"])
         return {"session_id": r["session_id"], "cwd": r.get("cwd") or worktree,
                 "confinement": r["confinement"]}
 
     async def restart(_request: dict) -> dict | None:
-        if not any(e.get("session_id") == sid for e in registry.list_entries(host)):
+        entry = registry.get(host, sid)
+        if not entry or entry.get("start_sent") is False:
             return RERUN  # never reserved in the registry, so no start frame left this process
+        if not entry.get("confinement"):
+            raise NeedsAttention("CONFINEMENT_EVIDENCE_MISSING", "reserved start has no confinement evidence")
         try:
             meta = await c.invoke("claude:get-session-meta", {"sessionId": sid}, retry_on_disconnect=False)
         except Exception:  # noqa: BLE001 - unreadable: stay uncertain and read again later
@@ -448,7 +456,7 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
         if isinstance(meta, dict) and norm(meta.get("cwd")) == worktree:
             record = (registry.get(host, sid) or {}).get("confinement")
             if not record:
-                return None
+                raise NeedsAttention("CONFINEMENT_EVIDENCE_MISSING", "reserved start has no confinement evidence")
             state = confinement.verify(record, meta)
             if state["status"] == "mismatch":
                 raise NeedsAttention("CONFINEMENT_MISMATCH", state["reason"])

@@ -126,6 +126,60 @@ async def make_checkpoint(d, **params):
     return checkpoints.get(d.journal.db, op["result"]["checkpoint_id"])
 
 
+@pytest.mark.parametrize("phase", ["admission", "frame"])
+async def test_checkpoint_continue_host_account_refusal_needs_attention_and_resumes(daemon, mock, phase):
+    """A10: an unsent host-account refusal resumes the same operation and session ID."""
+    from dataclasses import replace
+
+    from tests.test_confinement import ACCOUNT, AccountRunner
+    from tests.test_confinement_recovery import RefuseAtFrame
+
+    cp = await make_checkpoint(daemon)
+    hc = daemon.fleet.config.host("h1")
+    daemon.fleet.config.hosts["h1"] = replace(hc, confinement=ACCOUNT)
+    daemon.fleet.confinement_runner = AccountRunner("unknown") if phase == "admission" else RefuseAtFrame()
+    op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"})
+    assert op["status"] == "needs_attention" and op["error_code"] == "HOST_ACCOUNT_UNVERIFIED"
+    assert "claude:start-session" not in mock.channels()
+    request = daemon.journal.db.execute("SELECT request FROM operation_steps WHERE operation_id=? AND name=?",
+                                        (op["operation_id"], "session.start")).fetchone()[0]
+    sid = json.loads(request)["session_id"]
+    daemon.fleet.confinement_runner = AccountRunner()
+    daemon.ops.resume(TED, op["operation_id"])
+    await daemon.ops.drain(timeout=30)
+    done = daemon.ops.get(op["operation_id"])
+    assert done["status"] == "succeeded", done
+    assert registry.get("h1", sid)["status"] == "active"
+    assert sum(e["session_id"] == sid for e in registry.list_entries("h1")) == 1
+    assert mock.channels().count("claude:start-session") == 1
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
+async def test_checkpoint_reconcile_legacy_reservation_requires_evidence(daemon, mock, monkeypatch):
+    """A10: an operation in flight across the upgrade needs attention instead of endless readbacks."""
+    from bat_agent_connector.errors import InvokeTimeout
+
+    cp = await make_checkpoint(daemon)
+    start = orchestrate.session_start
+
+    async def upgrade_lost_result(*args, **kwargs):
+        result = await start(*args, **kwargs)
+        registry.update("h1", result["session_id"], confinement=None)
+        raise InvokeTimeout("fixture result lost across upgrade")
+
+    monkeypatch.setattr(orchestrate, "session_start", upgrade_lost_result)
+    op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"})
+    assert op["status"] == "uncertain"
+    daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+    await daemon.ops.drain(timeout=30)
+    done = daemon.ops.get(op["operation_id"])
+    assert done["status"] == "needs_attention" and done["error_code"] == "CONFINEMENT_EVIDENCE_MISSING"
+    assert mock.channels().count("claude:start-session") == 1
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
 async def test_checkpoint_reads_a_person_session_and_writes_nothing(daemon, mock, human):
     # Same content, new mtime: the index's stat data is stale, so a plain `git status` would rewrite it.
     st = (human / "notes.txt").stat()
