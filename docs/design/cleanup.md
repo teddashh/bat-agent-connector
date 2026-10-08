@@ -29,7 +29,7 @@ BAT [ClaudeRuntimeRouter::stop_session／claude_stop_session](https://github.com
 | `integration.receipts()` 的 effective_status 含送達與 unknown | 依 exact revision coverage 判斷，不能看 ancestor／PR link／done／verified |
 | registry 沒有 delete；inventory gone 仍保留 | 不刪 registry；確認 cleanup 後標 cleaned，保存 tombstone、aliases、receipt |
 | `lifecycle.session_cleanup` 在 auto_cleanup 下 merge／remove／stop | 只讀評估；apply 回 LEGACY_CLEANUP_DISABLED。auto_cleanup 繼續解析但 deprecated |
-| `fanout_from_plan` 對 planner 呼叫上述 cleanup | caller confirm=true 且全部 planned tasks 啟動成功，才用原 stop 路徑停止 idle planner；其他情況保留 planner 供 retry，worktree 一律保留 |
+| `fanout_from_plan` 對 planner 呼叫上述 cleanup | caller confirm=true 且全部 planned tasks 啟動成功才 stop；ACK ok=true 與健康 meta read-back 不 loaded 才標 stopped、釋放 cap；其他情況保留 counted planner，worktree 一律保留 |
 | `TaskDaemon._tick_task` finally 清 terminal external worktree，留下 refs/batc/tasks/* | **保持原行為**。它是 task owner；本輪所有 task-owned 資源列 TASK_OWNED，不問 coordinator、不獨立回收 |
 | 詳情資料可能引用已移除資源 | 自有 tombstone routes 永久查詢；其他詳情最多一個 lookup 附加 cleanup context，不接管 observation 的 sessions/history |
 
@@ -217,6 +217,43 @@ per-host read lock／deadline 下重讀全部 terminals 的 live cwd／session s
 不能讓 host helper 留到 deadline 才 abort。
 Connector locks 不能保證同帳號外部 writer；觀測不足即保留，非 force remove 最後拒絕 dirty race。
 
+### Session retirement／cap 稽核
+
+Cap 只計 registry 的 active／starting。新增 stopped 與 absent_at_cleanup，表示 runtime 使用權已退休，
+不是 worktree removed／cleaned；created_at、原 ID、origin_root、path、branch、creation evidence 全部不改。
+registry.retire 在原 flock 下核同一 created_at 與已確認 status，記 retired_at／retirement={actor,reason,
+operation_id,carrier_resource_id}；planner 另記 stopped_at／stopped_by。Generation 不符回 BINDING_MISMATCH，
+不釋放別的 generation 的 slot；同值可重播，Task-owned rows 不走此 helper。
+
+| Connector 不再 live 的途徑 | 最終 registry status／是否算 cap |
+|---|---|
+| fanout planner confirmed stop | stopped／否；只在全部 starts 成功、caller confirm、stop ACK ok=true 且健康 meta read-back=null 才改。失敗、ACK 不確定、read-back 失敗／仍 loaded 均保持原 active／是 |
+| reviewed cleanup session succeeded | cleaned／否，原 finalize／tombstone 規則不變 |
+| reviewed cleanup already_absent session，carrier 本次 succeeded／already_absent | absent_at_cleanup／否，retirement 記 operation_id 與 carrier ID；只投影 absence 與 carrier receipt，不送 stop、不建 session tombstone／aliases、不標 cleaned |
+| reviewed cleanup already_absent session，無自己的 worktree | absent_at_cleanup／否，carrier ID=null；reviewed absence 釋放 runtime slot，managed root／clone 本身不移除 |
+| already_absent session 的 worktree retained／未完成 | 原 active／是；沒有退休 runtime 使用權，person 仍可 resume 此 work context。無 automatic re-reservation，故保留原 slot；若已因 planner stop 退休則維持既有非 counted status |
+| failover 同 worktree supersede | superseded／否；與 successor starting 的 reserve 同 flock，配對計一次；已存在主線行為不改 |
+| explicit worktree_remove 成功 | 原 active row 改 removed／否；已退休 row 保持 stopped／absent_at_cleanup，另記 worktree_removed。失敗也不把退休 row 改 active，避免復活舊 ID |
+| start definitive failure | failed／否；start 不確定則 uncertain，主線既有計數問題另列於尚未涵蓋，不能把未知 start 當本包 confirmed retirement |
+| explicit stop（主線其他 stop action／legacy _stop 單獨使用） | 仍 active／是；既有主線缺少 retirement。本包不改平行 operations 的 stop action，自己的 reviewed carrier cleanup 可釋放此 row |
+| BAT 自行 exit／外部 unload | 仍 active／是，保留 resume slot；既有主線不自動回寫。reviewed cleanup 成功／carrier absent 才退休，不能把單次 meta=null 當自動 housekeeping |
+
+已退休的 ID 不能透過 Connector send／client-resume／answer／permissions／interrupt 再啟動，shared policy
+回 SESSION_RETIRED；same-ID start／registry recovery 亦在原 registry flock 拒絕。人可用**新 ID**走原
+session_start／reserve cap。原 worktree 的 Git cleanup 仍可執行；新 ID 共用 retained carrier 時仍經原 cap／policy。
+Absence retirement 是 operation／carrier facts 的本機 projection，可由 cleanup run 重播；不是新增外部
+phase。即使稍後 cancel／expiry，也不把已無 carrier 的 session 重新塞回 cap，不假稱 cleanup 停止它。
+
+| Registry status reader | stopped／absent_at_cleanup 的處理 |
+|---|---|
+| reserve、list_entries(active_only)、claim_warm／handoff | cap 仍只有 active／starting，active_only 不列退休 row；warm／handoff 原 active gate 不認領退休 ID |
+| service live list／successor、triage／worktree_status | headless active list 不含退休 row；原完整 registry／ID lookup 仍在，workspace tab 仍可只讀觀測，successor 不當 active |
+| lifecycle failover／_evaluate／session_cleanup | 新 successor 用新 ID 並 reserve；不替退休 ID送訊息。read-only legacy candidates 加入退休 statuses，仍可評估原 worktree；status 不改已記錄的 supersede／removed 含義 |
+| resource_policy._UNCONFIRMED／classification | 新 statuses 不屬 failed／starting／uncertain，creation proof 仍是 connector_managed；只在 runtime mutation decision 拒絕 SESSION_RETIRED，Git worktree actions 仍依原 ownership |
+| cleanup BAT-made carrier projection | 明列兩個退休 statuses；同 birth slot／worktree ID、原 creation／layout／live carrier proof 不變 |
+| guard_new_start／observation registry_bindings（平行套件） | 此固定基準尚無這兩個 helper；reserve／ensure_existing 已拒絕 retired same-ID，rebase 保留此 gate。Observation 要沿原 creation fields 判 ownership，兩 status 不進 _UNCONFIRMED；不修改平行工作樹 |
+| Dashboard | live runtime status 與 registry status 分開；現有 receipt／result 用 JSON.stringify 原樣顯示新字串，沒有 registry enum 的翻譯／CSS 假設 |
+
 ## Preview／apply 合約（Part A）
 
 ### cleanup.preview
@@ -311,7 +348,7 @@ prerequisites：worktree 的 session stop、branch 的 worktree removal 都帶�
 | retained | 明列 retention reasons，不執行 |
 | pending／running | reclaim intent 已保存／已 reserved，尚未完成 |
 | succeeded | 實際 stop／remove 經 read-back 確認；finalize 寫 tombstone／aliases、registry cleaned |
-| already_absent | preview 與首輪全 plan 驗證證實 session 不 loaded 或 worktree／temporary 不存在，且無 retention reason；直接保存同名 definitive receipt 與原 observation／IDs，不送任何 per-item host call，不新增 tombstone／aliases／registry cleaned mark，不能聲稱是 cleanup 移除的 |
+| already_absent | preview 與首輪全 plan 驗證證實 session 不 loaded 或 worktree／temporary 不存在，且無 retention reason；保存同名 definitive receipt／原 observation／IDs，不送 per-item host call、不新增 tombstone／aliases／registry cleaned。Session carrier 已移除／absent 或無自己的 worktree時另標 absent_at_cleanup、回執 after_state 記 capacity_released／registry_status／carrier_resource_id／stopped_by_cleanup=false；carrier retained 時原 slot 留著 |
 | failed／blocked_stale | definitive refusal／item precondition 變動；已完成 effects 仍投影，runtime／destructive partial 不用這兩個 status |
 | uncertain | 未決效果或已完成 runtime／destructive 的 partial，reservation 保留 |
 | cancelled | 未送出或 additive-only 已結清，回執仍列已完成 pins；不包含 partial runtime／destructive |
@@ -403,6 +440,7 @@ step definitive failed；canonical_paths／observation／verify.retained 是 rea
 | PREVIEW_STALE | 409或operation error，live state changed；首輪回fingerprint已變，item階段回resource已變；重preview比較原預覽 |
 | PREVIEW_TOO_LARGE | 413，改較小scope，不截斷執行 |
 | RESOURCE_CLEANED／CLEANUP_IN_PROGRESS | 409／policy refusal，原generation已清理／reserved |
+| SESSION_RETIRED | 409／policy refusal，退休的 session ID 已不占 cap，不能 drive／resume／same-ID start；以新 ID reserve，原 history／worktree 不改 |
 | 共用ownership／destination／TIER_DISABLED／NO_MANAGED_ROOT／GIT_RUNNER_UNAVAILABLE | 沿用原code，保留不越界 |
 | OBSERVATION_UNAVAILABLE | retained reason；歷史 host 不在 config 時 preview 仍成功，無 live call；直接 adapter／mutation call 回 409，未決 phase 仍保留 guard |
 | DISCARD_MANIFEST_UNAVAILABLE／RETAINED_REF_MISMATCH／RETAINED_CONTENT_MISSING | 409，無完整discard／保留證據，停止移除 |
@@ -486,6 +524,7 @@ Legacy evaluation 只讀 worktree status；BAT 忘記 worktree 時不取得 muta
 worktree:rehydrate，即使 confirm=true 也不重登記；缺狀態回 ESCALATE，registry 不變。
 auto_cleanup只保留config解析，deprecated且不啟用writes；worktree_merge/remove仍是explicit動作，只共享guard。
 Fanout planner 只有 caller `confirm=true` 且每一個 planned task 都成功啟動，才經原 stop 路徑停止。
+Stop ACK ok=true 且健康 meta read-back 不 loaded 才標 stopped（含 operator），離開 cap；未確認保留原 counted row。
 未確認、任一 start failed 或 loop 提早停止，都保留 loaded planner／原 plan 供 retry；不能因 starts
 回傳 error 或只是部分成功就 stop。回 `planner_cleanup={stopped:false,reason,worktree_kept:true,
 next_action:"batc resource-cleanup"}`，reason 區分 confirmation／start failed／incomplete loop。
@@ -557,6 +596,7 @@ config/HEAD/BATframes做snapshot。所有faultintent／replay／stale／scope／
 | TASK_OWNED／原TaskDaemon不變 | test_e01_task_owned_resources_are_retained；原test_external_cleanup_retains_unmerged_commit_and_recovers_after_restart／test_terminal_cleanup_requires_proof_before_journal_path_is_cleared |
 | legacy只讀、config解析、planner只stop、跨processguard | test_e01_legacy_apply_is_disabled_and_auto_cleanup_still_loads、test_e01_fanout_stops_planner_and_keeps_worktree、test_e01_guard_refuses_legacy_writes_on_reserved_and_cleaned_resources |
 | planner stop 需確認與全數 tasks 啟動；失敗保留 plan 供 retry；E01 | test_e01_fanout_without_confirmation_keeps_planner_loaded、test_e01_fanout_failed_start_keeps_planner_for_retry（第一個／最後一個 start 失敗）、test_e01_fanout_stops_planner_and_keeps_worktree（stop frame 恰一次） |
+| retirement／cap／managed carrier 不遺失；E01/E02／§23 | test_e01_confirmed_planner_stop_frees_capacity_and_worktree_stays_reclaimable（cap=3、next start、reviewed worktree cleanup）、test_e01_unconfirmed_planner_stop_stays_counted（ACK／still loaded／read failed）、test_e01_absent_session_capacity_follows_carrier_receipt（reclaim／already absent／retained）、test_e01_absent_session_without_worktree_leaves_cap、test_e01_retired_session_refuses_send_resume_and_same_id_start（兩 statuses／generation mismatch／registry recovery）、test_e01_legacy_worktree_remove_keeps_runtime_retired（Git remove 成功／拒絕都不復活退休 runtime） |
 | legacy confirmation／read-only audit；E01 | test_e01_legacy_mutations_require_confirmation_before_writes（planner／relay／merge／remove／failover／permissions／approve／verification）、test_e01_legacy_cleanup_disabled_apply_never_writes_with_auto_cleanup、test_e01_legacy_cleanup_evaluation_never_rehydrates_worktrees（confirm=false／true 都不寫） |
 | boundedread／serialization／deadline | test_e01_previews_serialize_per_host_and_share_read_deadline |
 | multi-host apply 每 item 只讀自己的 host；E01/E02 | test_e01_multi_host_apply_observes_only_each_items_host（另一 host terminal read 永不回覆；healthy session／worktree／branch 均成功，unavailable 資源保留；只有初始 preview／全 plan 驗證付該 host deadline） |
@@ -571,6 +611,8 @@ Rewrite舊legacyapplytests，不skip；保留mutation-table、connector-made BAT
 報告uv run ruff check .／全uv run pytest -q的exactsummary；app.js用.mjs做node --check；Playwright兩語390px。
 
 ## 尚未涵蓋
+
+- **主線既有 capacity 邊界**：本包不改平行 explicit stop action 的 registry 回寫、BAT exit 的自動投影，或 uncertain start 未占 cap 的舊規則；本包新增 retirement 只依 confirmed stop／reviewed carrier facts。Task stop／cleanup 的狀態與 TaskCoordinator 改動仍由 owner 套件處理。
 
 - **Part B**：coordinator准入／reviewed taskleftovers、TaskDaemon共用finalize與舊事件backfill、restore action/tool/CLI/button。
 - **Container退休／retained store**：不屬A或B。Clone／area全刪風險較高，§23本包只回收session/worktree/temporary；另spec。

@@ -625,8 +625,12 @@ async def worktree_remove(
             still_there = bool(root) and str(root).rstrip("/") == str(wt_path).rstrip("/")
             ok = not still_there
         audit.record(**base, channel="worktree:remove", phase="result", ok=ok, still_there=still_there)
-        if registry.get(host, sid):
-            registry.update(host, sid, status="removed" if ok else "active")
+        entry = registry.get(host, sid)
+        if entry:
+            if entry.get("status") in registry.RETIRED:
+                registry.update(host, sid, worktree_removed=ok)
+            else:
+                registry.update(host, sid, status="removed" if ok else "active")
     return {
         **report,
         "removed": ok,

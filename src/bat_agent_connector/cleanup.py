@@ -441,7 +441,7 @@ def _all(ops):
         if e.get("worktree_path") and (host, e["worktree_path"]) not in worktrees:
             # A successful legacy BAT create/start records its origin root, branch and worktree path together.
             recorded = bool(e.get("created_at") and e.get("branch") and e.get("origin_root") and
-                            e.get("status") in {"active", "superseded", "removed", "cleaned"} and
+                            e.get("status") in {"active", "superseded", "removed", "cleaned", *registry.RETIRED} and
                             not e.get("failover_of") and e.get("worktree_made_by") != "connector")
             proven = bool(recorded and resource_policy.in_managed_root(fleet.config.host(host), e["origin_root"]) and
                           resource_policy.in_bat_worktrees(e["worktree_path"], e["origin_root"]))
@@ -1242,6 +1242,28 @@ def _finalize(ctx, item, after):
         db.execute("UPDATE cleanup_receipts SET retained_ids=? WHERE operation_id=? AND resource_id=?",
                    (_canonical(retained_ids), ctx.operation_id, rid))
     _mark(item, ctx.operation_id, "cleaned")
+    if item["kind"] == "worktree":
+        _retire_absent_sessions(ctx, item["resource_id"])
+
+
+def _retire_absent_sessions(ctx, carrier_id=None):
+    # Local receipt facts only; no history projection, BAT observation or new external effect.
+    rows = [{**dict(r), "plan": json.loads(r["plan"])} for r in ctx.service.db.execute(
+        "SELECT resource_id,plan,status FROM cleanup_receipts WHERE operation_id=? "
+        "AND status IN ('succeeded','already_absent')", (ctx.operation_id,))]
+    carriers = {r["resource_id"] for r in rows if r["plan"]["kind"] == "worktree" and
+                (carrier_id is None or r["resource_id"] == carrier_id)}
+    for row in rows:
+        item = row["plan"]
+        carrier = item.get("worktree_id")
+        if (item["kind"] != "session" or row["status"] != "already_absent" or
+                carrier not in carriers and (carrier is not None or item.get("registry", {}).get("worktree_path"))):
+            continue
+        registry.retire(item["host"], item["session_id"], "absent_at_cleanup",
+                        created_at=item["registry"].get("created_at"), actor=ctx.actor, operation_id=ctx.operation_id,
+                        carrier_resource_id=carrier, reason="session observed absent; no worktree or carrier removed/already absent")
+        _receipt(ctx, item, "already_absent", after={"registry_status": "absent_at_cleanup", "capacity_released": True,
+                                                   "carrier_resource_id": carrier, "stopped_by_cleanup": False})
 
 
 def _progress(ctx):
@@ -1379,6 +1401,7 @@ async def _run_plan(ctx):
     ctx.set_refs(preview_id=ctx.target["preview_id"], fingerprint=payload["fingerprint"])
     owner = _OWNER.set(ctx.operation_id)
     try:
+        _retire_absent_sessions(ctx)
         for item in doc["items"]:
             if item["decision"] != "reclaim":
                 continue
@@ -1386,6 +1409,8 @@ async def _run_plan(ctx):
                              (ctx.operation_id, item["resource_id"])).fetchone()
             if row[0] == "succeeded":
                 _mark(item, ctx.operation_id, "cleaned")
+                if item["kind"] == "worktree":
+                    _retire_absent_sessions(ctx, item["resource_id"])
                 continue
             unresolved = db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? AND name LIKE ? "
                                     "AND status IN ('started','uncertain')", (ctx.operation_id, "item." + item["resource_id"] + ".%" )).fetchone()

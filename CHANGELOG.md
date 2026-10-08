@@ -63,6 +63,11 @@
   and settle pending/running receipts with the refusal code, including expiry and token mismatch. Runs with
   steps keep their existing reconcile rules. Already-absent resources get their own receipt and summary count,
   satisfy dependencies, and make no per-item host call or false tombstone/registry cleaned mark.
+  Confirmed fan-out planner stops now retire the runtime as stopped after acknowledgement/read-back, releasing
+  its host slot while keeping creation evidence and the reclaimable worktree. Reviewed absence releases capacity
+  as absent_at_cleanup only when its carrier is removed/already absent (or it has no own worktree); retained
+  worktrees keep their resume slot. Retired IDs refuse drive/resume/same-ID start with SESSION_RETIRED.
+  Legacy worktree removal records its result while preserving an already-retired runtime status.
 
 - BAT's worktree actions (`worktree:rehydrate`, `worktree:merge`, `worktree:remove`) are refused for worktrees the
   connector made over SSH (checkpoint, conflict repair, Task Service; `NOT_A_BAT_WORKTREE`), and `batc cleanup` keeps
