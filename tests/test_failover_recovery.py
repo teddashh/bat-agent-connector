@@ -154,7 +154,7 @@ async def test_failover_recorded_permission_mismatch_is_terminal(fleet_factory, 
 
 
 @pytest.mark.parametrize("start_recovered", [True, False])
-async def test_failover_crash_before_handoff_keeps_durable_unsent_proof(fleet_factory, mock, start_recovered):
+async def test_failover_crash_before_handoff_keeps_durable_unsent_proof(fleet_factory, mock, monkeypatch, start_recovered):
     lead = _add_wt_claude(mock)
     fleet = fleet_factory(writes=True, orchestrate=True, default_permission_mode="confined",
                           safety={"write_min_interval_s": 0}, **MANAGED)
@@ -166,13 +166,18 @@ async def test_failover_crash_before_handoff_keeps_durable_unsent_proof(fleet_fa
                 await lifecycle.session_failover(fleet, "h1", lead, confirm=True, successor_session_id="successor")
             client.invoke = invoke
 
-        def crash_after_activation(prompt):
-            assert registry.get("h1", "successor")["status"] == "active"
-            raise DaemonCrash()
+        invoke_checked = client._invoke_checked
 
-        with pytest.raises(DaemonCrash):
-            await lifecycle.session_failover(fleet, "h1", lead, confirm=True, successor_session_id="successor",
-                                             before_handoff_send=crash_after_activation)
+        async def crash_before_handoff(channel, *args, **kwargs):
+            if channel == "claude:send-message":
+                assert registry.get("h1", "successor")["status"] == "active"
+                raise DaemonCrash()
+            return await invoke_checked(channel, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(client, "_invoke_checked", crash_before_handoff)
+            with pytest.raises(DaemonCrash):
+                await lifecycle.session_failover(fleet, "h1", lead, confirm=True, successor_session_id="successor")
         row = registry.get("h1", "successor")
         assert not row["start_uncertain"] and row["handoff_frame_sha256"] is None
         assert row["handoff_status"] == "pending" and not handoffs(mock)
@@ -260,6 +265,9 @@ async def test_task_failover_recovered_start_preserves_journal_and_frame_guards(
     task = journal.change(task["task_id"], "quota_limited")
     _, handoff = journal.reserve_failover(task["task_id"], lead, "successor")
     adapter = task_bat.BatTaskAdapter(fleet, journal=journal)
+    from bat_agent_connector.task_core import TaskCoordinator
+    TaskCoordinator(journal, adapter)
+    registry.update('h1', lead, task_id=task['task_id'], role='lead')
     verified = adapter._verified_failover_successor
     checks = []
 

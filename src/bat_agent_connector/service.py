@@ -7,9 +7,7 @@ results; errors are redacted.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
-import sqlite3
 import statistics
 import time
 import uuid
@@ -17,7 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from . import confinement, registry, resource_policy
+from . import confinement, registry, resource_policy, task_control
 from .client import BatClient, event_session_id
 from .errors import BatError, InvokeError, WriteRefused
 from .fleet import Fleet
@@ -42,31 +40,6 @@ def task_service_db() -> Path | None:
     except (OSError, ValueError, KeyError, TypeError):
         return None
     return db if db.is_absolute() else None
-
-
-def _task_send_block(host: str, session_id: str) -> str | None:
-    """Why a direct send to a task-service-owned session is refused, or None.
-
-    Unknown task state fails closed: a task-owned session whose journal row
-    cannot be read is treated as controlled by the service.
-    """
-    owner = registry.get(host, session_id)
-    task_id = owner.get("task_id") if owner else None
-    if not task_id:
-        return None
-    db = task_service_db()
-    if db is None:
-        return "task-owned session state is unavailable; direct sends are blocked"
-    try:
-        with contextlib.closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.2)) as conn:
-            row = conn.execute("SELECT state FROM tasks WHERE task_id=?", (task_id,)).fetchone()
-    except (OSError, sqlite3.Error):
-        row = None
-    if not row:
-        return "task-owned session state is unavailable; direct sends are blocked"
-    if row[0] == "verifying":
-        return "task-owned session is verifying; direct sends are blocked"
-    return None
 
 
 def _write_lock(host: str) -> asyncio.Lock:
@@ -991,6 +964,7 @@ def _resume_params(t: dict, ws: dict) -> dict:
     }
 
 
+@task_control.guarded("send")
 async def session_send(
     fleet: Fleet,
     host: str,
@@ -1004,6 +978,9 @@ async def session_send(
     retry_on_disconnect: bool = True,
     before_invoke: Callable[[], None] | None = None,
     initial_task_send: bool = False,
+    _task_guard: task_control.FrameGuard | None = None,
+    control_version: int | None = None,
+    operation_id: str | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
     if not isinstance(text, str) or not text.strip():
@@ -1016,9 +993,6 @@ async def session_send(
         t, ws = await _resolve_session(c, session_id)
         sid = t["id"]
         grant = await resource_policy.authorize_session(fleet, host, "session.send", t)
-        blocked = None if before_invoke is not None or initial_task_send else _task_send_block(host, sid)
-        if blocked:
-            raise WriteRefused(blocked)
         successor = next((e for e in registry.list_entries(host) if e.get("failover_of") == sid
                           and e.get("status") in ("starting", "active")
                           and e.get("handoff_status") == "sent"), None)
@@ -1053,7 +1027,9 @@ async def session_send(
                 phase="attempt",
             )
             try:
+                # Reattach checks the task binding without submitting its prompt.
                 await c.invoke("claude:client-resume", params, grant=grant,
+                               before_send=_task_guard.check if _task_guard else None,
                                frame_guard=lambda frame: confinement.guard_resume_frame(host, sid, kind or "claude", frame))
             except BatError as e:
                 audit.record(
@@ -1103,7 +1079,7 @@ async def session_send(
             r = await c.invoke(
                 "claude:send-message", {"sessionId": sid, "prompt": text, "clientMessageId": mid},
                 retry_on_disconnect=retry_on_disconnect and agent_kind(t.get("agentPreset")) == "claude",
-                before_send=before_invoke, before_frame=verify_at_frame, grant=grant,
+                before_send=_task_guard or before_invoke, before_frame=verify_at_frame, grant=grant,
             )
         except BatError as e:
             audit.record(
@@ -1119,6 +1095,8 @@ async def session_send(
             )
             raise
         r = r if isinstance(r, dict) else {"result": r}
+        if _task_guard and not isinstance(r.get("accepted", r.get("ok")), bool):
+            raise ValueError("BAT send reply has no boolean acceptance result")
         audit.record(
             actor=fleet.actor,
             tool=tool,
@@ -1178,8 +1156,11 @@ async def session_continue(
     )
 
 
+@task_control.guarded("interrupt")
 async def session_interrupt(
-    fleet: Fleet, host: str, session_id: str, mode: str = "soft", confirm: bool = False
+    fleet: Fleet, host: str, session_id: str, mode: str = "soft", confirm: bool = False,
+    _task_guard: task_control.FrameGuard | None = None, control_version: int | None = None,
+    operation_id: str | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
     if mode not in ("soft", "hard"):
@@ -1203,7 +1184,7 @@ async def session_interrupt(
             phase="attempt",
         )
         try:
-            r = await c.invoke(channel, {"sessionId": sid}, grant=grant)
+            r = await c.invoke(channel, {"sessionId": sid}, grant=grant, before_send=_task_guard)
         except BatError as e:
             audit.record(
                 actor=fleet.actor,
@@ -1231,6 +1212,7 @@ async def session_interrupt(
     return {"host": host, "session_id": sid, "mode": mode, "channel": channel, "result": r, "note": note}
 
 
+@task_control.guarded("answer")
 async def session_answer(
     fleet: Fleet,
     host: str,
@@ -1241,6 +1223,9 @@ async def session_answer(
     deny_message: str | None = None,
     tool_use_id: str | None = None,
     dont_ask_again: bool = False,
+    _task_guard: task_control.FrameGuard | None = None,
+    control_version: int | None = None,
+    operation_id: str | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
     if (answers is None) == (permission is None):
@@ -1251,9 +1236,6 @@ async def session_answer(
         t, _ = await _resolve_session(c, session_id)
         sid = t["id"]
         grant = await resource_policy.authorize_session(fleet, host, "session.answer", t)
-        blocked = _task_send_block(host, sid)
-        if blocked:
-            raise WriteRefused(blocked.replace("direct sends", "direct answers"))
         kind = agent_kind(t.get("agentPreset"))
         meta = await _meta(c, sid)
         if not _state_safe(kind, meta):
@@ -1330,7 +1312,7 @@ async def session_answer(
             **detail,
         )
         try:
-            r = await c.invoke(channel, params, grant=grant,
+            r = await c.invoke(channel, params, grant=grant, before_send=_task_guard,
                                frame_guard=lambda _: confinement.guard_answer(
                                    host, sid, detail.get("permission_tool"),
                                    dont_ask_again=dont_ask_again, allow=permission == "allow"))

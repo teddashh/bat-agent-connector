@@ -32,13 +32,14 @@ def reviewer_adapter(fleet, mock, journal, monkeypatch):
     task = journal.submit(project="p", host="h1", workspace="demo-project", original_words="Review fixture",
                           idempotency_key="review-fixture")
     journal.add_branch(task["task_id"], session_id=lead, provider="claude", role="lead", reason="start")
+    task = journal.change(task["task_id"], task["state"], fields={"session_id": lead})
     adapter = task_bat.BatTaskAdapter(fleet, ObservedVerifier(VerificationSettings()), journal)
 
     async def present(*args, **kwargs):
         return "present"
 
     monkeypatch.setattr(adapter, "session_presence", present)
-    return adapter, {**task, "session_id": lead}
+    return adapter, task
 
 
 @pytest.mark.parametrize("path", ["start", "failover", "reviewer"])
@@ -394,6 +395,8 @@ async def test_task_failover_options_mismatch_blocks_first_handoff(fleet_factory
     task = journal.change(task["task_id"], "quota_limited")
     _, handoff = journal.reserve_failover(task["task_id"], lead, "permission-successor")
     adapter = task_bat.BatTaskAdapter(fleet, journal=journal)
+    TaskCoordinator(journal, adapter)
+    registry.update('h1', lead, task_id=task['task_id'], role='lead')
     reads = 0
 
     def metadata(params):
@@ -740,6 +743,8 @@ async def test_task_failover_preframe_cancellation_recovers_reserved_start_and_h
     task = journal.change(task['task_id'], 'quota_limited')
     command, handoff = journal.reserve_failover(task['task_id'], lead, 'cancel-task-successor')
     adapter = task_bat.BatTaskAdapter(fleet, journal=journal)
+    TaskCoordinator(journal, adapter)
+    registry.update('h1', lead, task_id=task['task_id'], role='lead')
     args = {'handoff_message_id': handoff['message_id'], 'handoff_command_id': handoff['command_id']}
     pending = asyncio.create_task(adapter.failover(task, lead, 'cancel-task-successor', **args))
     try:
