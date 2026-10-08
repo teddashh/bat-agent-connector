@@ -67,6 +67,19 @@ async def test_a10_accept_edits_requires_verified_account_and_checks_are_read_on
     await f.close()
 
 
+@pytest.mark.parametrize("mode", ["plan", "dontAsk"])
+@pytest.mark.parametrize("account", [False, True])
+async def test_a10_confined_start_preserves_stronger_explicit_claude_mode(fleet_factory, mock, mode, account):
+    f = fleet_factory(writes=True, orchestrate=True, default_permission_mode="confined",
+                      confinement=ACCOUNT if account else {}, **MANAGED)
+    if account:
+        f.confinement_runner = AccountRunner()
+    r = await orchestrate.session_start(f, "h1", "demo-project", "claude", confirm=True, permission_mode=mode)
+    assert r["confinement"]["options"] == {"permissionMode": mode}
+    assert r["write_scope"] == "confined"
+    await f.close()
+
+
 @pytest.mark.parametrize("status", ["unknown", "mismatch"])
 async def test_a10_declared_unverified_account_blocks_new_start(fleet_factory, mock, status):
     f = fleet_factory(writes=True, orchestrate=True, confinement=ACCOUNT, **MANAGED)
@@ -87,6 +100,19 @@ async def test_a10_host_account_cache_expires_without_upgrading_creation(fleet_f
     assert read["confinement"] == original and read["current_verification"]["status"] == "unknown"
     assert read["current_verification"]["reason"] == "host_account_unverified"
     await f.close()
+
+
+async def test_a10_closed_host_evidence_journal_returns_unknown(fleet_factory, tmp_path):
+    f = fleet_factory(confinement=ACCOUNT)
+    journal = Journal(tmp_path / "tasks.db")
+    f.confinement_journal = journal
+    journal.close()
+    try:
+        evidence = confinement.host_capability(f, "h1")["host_account"]
+        assert evidence["declared"] and evidence["status"] == "unknown"
+        assert evidence["checked_at"] is None
+    finally:
+        await f.close()
 
 
 @pytest.mark.parametrize("force", [False, True])

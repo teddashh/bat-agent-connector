@@ -649,7 +649,8 @@ async def _failover_one(
                     started.get("sessionId") != new_sid):
                 raise WriteRefused("BAT failover start did not confirm the reserved session ID")
             meta = await _meta(c, new_sid)
-            confinement.ensure_confirmed(confinement_record, meta)
+            if not task_id or confined:
+                confinement.ensure_confirmed(confinement_record, meta)
             confinement_record = confinement.confirm(confinement_record, meta)
         except BaseException as e:
             audit.record(**base, channel="claude:start-session", phase="result", ok=False, error=_err(e))
