@@ -89,7 +89,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation("session.create", "bat", "create",
              frozenset({"claude:start-session", "worktree:create", "worktree:remove", "claude:send-message"}),
              ("session_start", "session_failover", "session_relay(start_if_missing)", "fanout_plan_session",
-              "fanout_from_plan", "batc fanout --start", "task service lead/reviewer start"),
+              "fanout_from_plan", "batc fanout --start", "task service lead/reviewer start", "checkpoint.continue"),
              "new session ID reserved in the registry first; it works in a managed root, a worktree the "
              "connector creates, or a connector-owned worktree it shares; never in a human checkout"),
     Mutation("workspace.register_tab", "bat", "tab", frozenset({"workspace:save"}),
@@ -98,6 +98,10 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation("task.external_worktree", "ssh-git", "path", frozenset(),
              ("task service start with base_branch", "task service cleanup"),
              "only <workspace>/.bat-worktrees/batc-task-<12 hex> and branch batc/task-<12 hex>"),
+    Mutation("checkpoint.managed_worktree", "ssh-git", "path", frozenset(),
+             ("checkpoint.continue",),
+             "a connector clone <managed root>/<name> (marked batc.managed-clone) that only reads the person's "
+             "repository, and the worktree <clone>/.bat-worktrees/batc-cp-<12 hex> on branch batc/cp-<12 hex>"),
 )
 BY_ACTION = {m.action: m for m in MUTATIONS}
 # The only granted write channel whose frame names no session (its terminal carries the ID).
@@ -173,6 +177,7 @@ class Classification:
     code: str | None = None  # why session-scoped writes are refused (None = allowed)
     reason: str | None = None
     worktree_path: str | None = None
+    worktree_made_by: str = "bat"  # "connector": made over SSH git (checkpoint, repair, task); BAT has no record
 
     @property
     def writable(self) -> bool:
@@ -188,6 +193,7 @@ class Classification:
             "workdir_owner": self.workdir_owner,
             "isolation": self.isolation,
             "evidence": list(self.evidence),
+            "worktree_made_by": self.worktree_made_by,
             **({"read_only_code": self.code, "read_only_reason": self.reason} if self.code else {}),
         }
 
@@ -232,6 +238,19 @@ def folder_owner(hc: HostConfig, row: dict, entries: list[dict], depth: int = 0)
     return folder_owner(hc, parent, entries, depth + 1)
 
 
+# BAT's worktree channels act on the repository BAT recorded for the session. For a worktree the connector made
+# over SSH, BAT has no record: a rehydrate would register it under the workspace folder (possibly a person's
+# checkout, copying its env files in), and a remove would prune that repository.
+BAT_WORKTREE_ACTIONS = frozenset({"worktree.rehydrate", "worktree.merge", "worktree.remove"})
+
+
+def worktree_maker(row: dict) -> str:
+    if (row.get("worktree_made_by") == "connector" or row.get("checkpoint_id") or row.get("integration_operation_id")
+            or str(row.get("branch") or "").startswith("batc/")):
+        return "connector"
+    return "bat"
+
+
 def classify(hc: HostConfig, session_id: str, *, terminal: dict | None, entries: list[dict]) -> Classification:
     """Registry and workspace-document classification; no host round trips."""
     tab = terminal if terminal and not terminal.get("_orchestrated") else None
@@ -250,6 +269,7 @@ def classify(hc: HostConfig, session_id: str, *, terminal: dict | None, entries:
         return cls
     cls.registry_status = row.get("status")
     cls.worktree_path = norm(row.get("worktree_path"))
+    cls.worktree_made_by = worktree_maker(row)
     created = _creation_evidence(row)
     if not created:
         cls.code, cls.reason = "UNKNOWN_READ_ONLY", "the connector record carries no creation evidence"
@@ -336,6 +356,9 @@ async def live_check(c, cls: Classification, *, worktree: bool = True, folder: b
 def _decide(cls: Classification, m: Mutation, live: LiveCheck | None) -> tuple[str, str] | None:
     if cls.code:
         return cls.code, cls.reason or "read-only"
+    if m.action in BAT_WORKTREE_ACTIONS and cls.worktree_made_by == "connector":
+        return ("NOT_A_BAT_WORKTREE", "the connector made this worktree over SSH and BAT has no record of it; "
+                "BAT's worktree actions would act on the workspace folder's repository")
     if live is not None:
         if live.issue:
             return live.issue
@@ -497,6 +520,18 @@ def authorize_external_worktree(hc: HostConfig, root: str, path: str, branch: st
     if not (hc.shared_clone_worktrees or in_managed_root(hc, root)):
         raise ResourceReadOnly("DESTINATION_MANUAL",
                                f"{root} is not inside a managed root and shared_clone_worktrees = false on this host")
+
+
+def check_checkpoint_worktree(hc: HostConfig, clone: str, path: str, branch: str) -> None:
+    """A checkpoint execution's clone and worktree: fixed names one level inside a managed root."""
+    c, p = norm(clone), norm(path)
+    root = next((r for r in hc.managed_roots if c and posixpath.dirname(c) == r.rstrip("/")), None)
+    name = posixpath.basename(p or "")
+    suffix = name[len("batc-cp-"):]
+    if (not root or ".." in (c or "").split("/") or p != posixpath.join(c, BAT_WORKTREES_DIR, name)
+            or not name.startswith("batc-cp-") or len(suffix) != 12
+            or any(ch not in "0123456789abcdef" for ch in suffix) or branch != f"batc/cp-{suffix}"):
+        raise ResourceReadOnly("DESTINATION_UNKNOWN", f"{path} is not a connector checkpoint worktree in a managed root")
 
 
 def check_external_worktree(root: str, path: str, branch: str, task_id: str) -> None:

@@ -50,9 +50,11 @@ READ_TOOLS = [
     "operations_list",
     "github_pr_preview",
     "checkpoints_list",
+    "checkpoint_preview",
 ]
 # Registered unless --read-only: they act as BATC_API_TOKEN's principal, whose scopes decide what is allowed.
-OPERATION_TOOLS = ["operation_submit", "operation_cancel", "operation_resume"]
+OPERATION_TOOLS = ["operation_submit", "operation_cancel", "operation_resume", "checkpoint_create",
+                   "work_continue_from_checkpoint"]
 WRITE_TOOLS = [
     "session_send",
     "session_continue",
@@ -339,8 +341,15 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             return await daemon("checkpoint_get", checkpoint_id=checkpoint_id)
         return await daemon("checkpoints_list", host=host, session_id=session_id, limit=limit)
 
+    async def checkpoint_preview(host: str, session_id: str) -> dict[str, Any]:
+        """What a checkpoint of this session would record, read with no side effects: folder, git root, branch,
+        HEAD, the last 20 commits (pick one for checkpoint_create's commit), and the number of uncommitted
+        changes (null = not observed). Uncommitted changes are never carried over; ask the person to commit
+        first if the new work needs them."""
+        return await daemon("checkpoint_preview", host=host, session_id=session_id)
+
     for fn in (capabilities_get, inventory_sessions, inventory_hosts, events_list, operation_get, operations_list,
-               github_pr_preview, checkpoints_list):
+               github_pr_preview, checkpoints_list, checkpoint_preview):
         mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
 
     if fleet.any_orchestrate:
@@ -428,6 +437,33 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             return await principal_daemon("op_submit", confirm, action=action, idempotency_key=idempotency_key,
                                           target=target, params=params, preconditions=preconditions, wait_s=wait_s)
 
+        async def checkpoint_create(host: str, session_id: str, idempotency_key: str, commit: str | None = None,
+                                    note: str | None = None, last_n: int = 20, wait_s: float = 20,
+                                    confirm: bool = False) -> dict[str, Any]:
+            """WRITE (connector records only). Record a checkpoint of any session, including one a person created
+            in BAT: its commit (default HEAD, or a full SHA from its history), branch, uncommitted-change count and
+            the last last_n messages; `note` is the person's request, verbatim. The source is only read. Returns
+            the operation; its result.checkpoint_id feeds work_continue_from_checkpoint. Requires confirm=true."""
+            params = {"last_n": last_n, **({"commit": commit} if commit else {}), **({"note": note} if note else {})}
+            return await principal_daemon("op_submit", confirm, action="checkpoint.create",
+                                          idempotency_key=idempotency_key,
+                                          target={"host": host, "session_id": session_id}, params=params,
+                                          wait_s=wait_s)
+
+        async def work_continue_from_checkpoint(checkpoint_id: str, instructions: str, idempotency_key: str,
+                                                agent: Literal["claude", "codex"] = "claude",
+                                                wait_s: float = 30, confirm: bool = False) -> dict[str, Any]:
+            """WRITE. Continue from a checkpoint in a NEW connector-managed session: a worktree is added in the
+            connector's own clone at exactly the checkpoint commit, the session starts there, and only then are
+            `instructions` sent (the person's words, verbatim). The source session is never written, stopped or
+            superseded. The new session is confined to its folder (Claude asks before writing elsewhere, Codex's
+            sandbox blocks it); leave those prompts to the person. Needs a BATC_API_TOKEN with the `start` scope.
+            Long-running: if the result is not final, follow operation_get(operation_id) and reuse the
+            same idempotency_key on retry; a new key starts a second session. Requires confirm=true."""
+            return await principal_daemon("op_submit", confirm, action="checkpoint.continue",
+                                          idempotency_key=idempotency_key, target={"checkpoint_id": checkpoint_id},
+                                          params={"instructions": instructions, "agent": agent}, wait_s=wait_s)
+
         async def operation_cancel(operation_id: str, confirm: bool = False) -> dict[str, Any]:
             """WRITE. Ask an operation to stop before its next step. A step that may already have run is read
             back first, so a cancelled operation never hides an action that happened. Requires confirm=true."""
@@ -438,7 +474,8 @@ def build_server(config: Config, *, read_only: bool = False) -> tuple[MCPServer,
             repeated and an unproven step is read back, never re-sent. Requires confirm=true."""
             return await principal_daemon("op_resume", confirm, operation_id=operation_id)
 
-        for fn in (operation_submit, operation_cancel, operation_resume):
+        for fn in (operation_submit, operation_cancel, operation_resume, checkpoint_create,
+                   work_continue_from_checkpoint):
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=op_write)
 
     if fleet.any_writes:

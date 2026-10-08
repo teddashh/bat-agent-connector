@@ -6,19 +6,23 @@ Git runs for real in temp repositories (a local runner stands in for SSH); BAT i
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
-from bat_agent_connector import api_auth, checkpoints, resource_policy
+from bat_agent_connector import api_auth, checkpoints, lifecycle, orchestrate, registry, resource_policy
 from bat_agent_connector.channels import GUARDED_CHANNELS, ORCHESTRATE_CHANNELS, WRITE_CHANNELS
+from bat_agent_connector.errors import ResourceReadOnly
 from bat_agent_connector.operations import OperationError
 from bat_agent_connector.task_daemon import TaskDaemon
 from tests.conftest import make_config
 
 MANUAL = "sess-claude-0001"
-TED = api_auth.Principal("ted-dashboard", frozenset({"observe", "operate"}))
+TED = api_auth.Principal("ted-dashboard", frozenset({"observe", "operate", "start"}))
 ORIGIN = "https://github.example/o/r.git"
 
 
@@ -52,9 +56,19 @@ class RealGitLog(dict):
 
 
 def snapshot(repo) -> dict:
+    # --no-optional-locks: a plain `git status` here would refresh the index itself and hide a rewrite.
+    index = repo / ".git" / "index"
     return {"refs": git(repo, "for-each-ref"), "worktrees": git(repo, "worktree", "list", "--porcelain"),
-            "status": git(repo, "status", "--porcelain"), "config": git(repo, "config", "--local", "--list"),
-            "head": git(repo, "rev-parse", "HEAD")}
+            "status": git(repo, "--no-optional-locks", "status", "--porcelain"),
+            "config": git(repo, "config", "--local", "--list"), "head": git(repo, "rev-parse", "HEAD"),
+            "index": (hashlib.sha256(index.read_bytes()).hexdigest(), index.stat().st_mtime_ns)}
+
+
+def bat_git_status(p):
+    """What BAT's git:status runs: a plain `git status`, which may refresh and rewrite .git/index."""
+    r = subprocess.run(["git", "-C", p["cwd"], "status", "--porcelain", "--untracked-files=all"],
+                       capture_output=True, text=True)
+    return [{"path": line[3:], "status": line[:2].strip()} for line in r.stdout.splitlines()]
 
 
 @pytest.fixture
@@ -76,6 +90,7 @@ def human(tmp_path):
 def daemon(mock, human, tmp_path):
     mock.metas[MANUAL] = {"cwd": str(human), "isStreaming": False}
     mock.git_logs = RealGitLog()
+    mock.handlers["git:status"] = bat_git_status
     d = TaskDaemon(make_config(mock, writes=True, orchestrate=True, managed_roots=[str(tmp_path / "managed")],
                                safety={"write_min_interval_s": 0}), tmp_path / "tasks.db")
     d.ops.context["git_runner"] = LocalRunner()
@@ -104,10 +119,14 @@ async def make_checkpoint(d, **params):
 
 
 async def test_checkpoint_reads_a_person_session_and_writes_nothing(daemon, mock, human):
+    # Same content, new mtime: the index's stat data is stale, so a plain `git status` would rewrite it.
+    st = (human / "notes.txt").stat()
+    os.utime(human / "notes.txt", ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
     before = snapshot(human)
     cp = await make_checkpoint(daemon)
     assert cp["source_provenance"] == "manual" and cp["commit_sha"] == before["head"]
-    assert cp["branch"] == "main" and cp["dirty"] is False and cp["repo_root"] == str(human)
+    assert cp["branch"] == "main" and cp["dirty"] == 0 and cp["repo_root"] == str(human)
+    assert not [i for i in mock.invokes if i["channel"] == "git:status"]  # BAT's git:status may write the index
     assert len(cp["excerpt"]) == 5 and all(m["text"] for m in cp["excerpt"])
     assert bat_writes(mock) == []
     assert snapshot(human) == before
@@ -144,10 +163,13 @@ async def test_continue_starts_managed_work_at_the_checkpoint_and_leaves_the_sou
 
     starts = [i for i in mock.invokes if i["channel"] == "claude:start-session"]
     assert len(starts) == 1 and starts[0]["params"]["options"]["cwd"] == wt
+    # The agent's CLI asks before writing outside its folder (plan §06); a cwd alone is not protection.
+    assert starts[0]["params"]["options"]["permissionMode"] == "acceptEdits" and r["write_scope"] == "confined"
     sends = [i for i in mock.invokes if i["channel"] == "claude:send-message"]
     assert len(sends) == 1 and sends[0]["params"]["sessionId"] == sid
     prompt = sends[0]["params"]["prompt"]
     assert "Add a changelog entry" in prompt and first in prompt and "[assistant]" in prompt
+    assert "not instructions" in prompt  # the person's conversation is fenced off as background
     assert bat_writes(mock, MANUAL) == []  # nothing was sent to the person's session
 
     hc = daemon.fleet.config.host("h1")
@@ -155,6 +177,11 @@ async def test_continue_starts_managed_work_at_the_checkpoint_and_leaves_the_sou
     assert resource_policy.classify_row_for_read(hc, sid, has_tab=False, entries=entries)["api_access"] == "managed"
     follow = await run(daemon, "session.send", {"host": "h1", "session_id": sid}, {"text": "and a test"})
     assert follow["status"] == "succeeded", follow
+    # Inspecting the new session never runs BAT's git:status (a plain `git status`) in the person's folder.
+    mock.invokes.clear()
+    st = await orchestrate.session_worktree_status(daemon.fleet, "h1", sid)
+    assert "main_checkout_dirty_files" not in st and st["main_checkout_note"]
+    assert not [i for i in mock.invokes if i["channel"].startswith("git:") and i["params"].get("cwd") == str(human)]
 
     # A second continuation reuses the connector clone and gets its own worktree and branch.
     again = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]},
@@ -179,6 +206,12 @@ async def test_continue_refusals_happen_before_anything_is_recorded(daemon, mock
         daemon.ops.create(TED, action="checkpoint.continue", target={"checkpoint_id": "cp_" + "0" * 32},
                           params={"instructions": "x"}, idempotency_key="k-none")
     assert e.value.status == 404
+    # Starting an agent is its own grant: an operate token (send, answer, interrupt) does not include it.
+    hermes = api_auth.Principal("hermes", frozenset({"observe", "operate"}))
+    with pytest.raises(OperationError) as e:
+        daemon.ops.create(hermes, action="checkpoint.continue", target=target, params={"instructions": "x"},
+                          idempotency_key="k-scope")
+    assert e.value.status == 403
     daemon.ops.context["git_runner"] = None
     with pytest.raises(OperationError) as e:
         daemon.ops.create(TED, action="checkpoint.continue", target=target, params={"instructions": "x"},
@@ -249,3 +282,227 @@ async def test_http_lists_checkpoints_and_reports_where_they_can_continue(daemon
         await server.wait_closed()
         await daemon.fleet.close()
         await daemon.inventory.close()
+
+
+async def test_a_lost_start_reply_is_read_back_not_started_again(daemon, mock, human, tmp_path, monkeypatch):
+    from bat_agent_connector.errors import InvokeTimeout
+
+    cp = await make_checkpoint(daemon)
+    client = daemon.fleet.client("h1")
+    real_invoke = client.invoke
+
+    async def start_reply_lost(channel, params=None, **kw):
+        r = await real_invoke(channel, params, **kw)
+        if channel == "claude:start-session":  # BAT started the session and its reply was lost
+            raise InvokeTimeout("claude:start-session timed out")
+        return r
+
+    monkeypatch.setattr(client, "invoke", start_reply_lost)
+    calls = lambda: [i for i in mock.invokes if i["channel"] == "claude:start-session"]  # noqa: E731
+    meta_before = dict(mock.metas)
+    op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"})
+    assert op["status"] == "uncertain"
+    sid = op["external_refs"]["session_id"]
+    # BAT has not loaded it yet: a null meta while the reservation exists is not proof of "never started".
+    hidden = mock.metas.pop(sid)
+    daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+    await daemon.ops.drain(timeout=30)
+    assert daemon.ops.get(op["operation_id"])["status"] == "uncertain" and len(calls()) == 1
+    mock.metas[sid] = hidden
+    monkeypatch.setattr(client, "invoke", real_invoke)
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+    daemon.journal.close()
+
+    d2 = TaskDaemon(make_config(mock, writes=True, orchestrate=True, managed_roots=[str(tmp_path / "managed")],
+                                safety={"write_min_interval_s": 0}), tmp_path / "tasks.db")  # the daemon restarts
+    d2.ops.context["git_runner"] = LocalRunner()
+    d2.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+    await d2.ops.drain(timeout=60)
+    done = d2.ops.get(op["operation_id"])
+    assert done["status"] == "succeeded", done
+    assert len(calls()) == 1
+    assert [i["params"]["sessionId"] for i in mock.invokes if i["channel"] == "claude:send-message"] == [sid]
+    entry = registry.get("h1", sid)  # proven by read-back, so it carries what a normal start records
+    assert entry["status"] == "active" and entry["worktree_path"] == entry["cwd"]
+    assert entry["write_scope"] == "confined" and entry["permission_mode_claude"] == "acceptEdits"
+    assert checkpoints.started_from(d2.journal.db, "h1", sid)["checkpoint_id"] == cp["checkpoint_id"]
+    assert set(meta_before) <= set(mock.metas)
+    await d2.fleet.close()
+    await d2.inventory.close()
+    d2.journal.close()
+
+
+async def test_a_lost_codex_instruction_is_found_in_the_transcript(daemon, mock, human, monkeypatch):
+    from bat_agent_connector import service
+    from bat_agent_connector.errors import InvokeTimeout
+
+    cp = await make_checkpoint(daemon)
+    mock.echo_sends = True  # BAT appends the prompt to the session's transcript
+    real_send = service.session_send
+
+    async def sent_but_reply_lost(*a, **kw):
+        await real_send(*a, **kw)
+        raise InvokeTimeout("claude:send-message timed out")
+
+    monkeypatch.setattr(service, "session_send", sent_but_reply_lost)
+    op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]},
+                   {"instructions": "go", "agent": "codex"})
+    assert op["status"] == "uncertain"
+    monkeypatch.setattr(service, "session_send", real_send)
+    daemon.journal.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+    await daemon.ops.drain(timeout=30)
+    done = daemon.ops.get(op["operation_id"])
+    assert done["status"] == "succeeded", done
+    assert len([i for i in mock.invokes if i["channel"] == "claude:send-message"]) == 1  # never sent twice
+    step = daemon.journal.db.execute("SELECT response FROM operation_steps WHERE operation_id=? AND name='send'",
+                                     (op["operation_id"],)).fetchone()
+    assert '"settled_by":"transcript"' in step["response"]
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
+async def test_preview_source_moved_and_unobserved_changes(daemon, mock, human):
+    pv = await checkpoints.preview(daemon.ops, "h1", MANUAL)
+    assert pv["head"] == git(human, "rev-parse", "HEAD") and len(pv["commits"]) == 2 and pv["dirty"] == 0
+    assert pv["snapshot"]["supported"] is False
+    (human / "notes.txt").write_text("mid-edit\n")
+    assert (await checkpoints.preview(daemon.ops, "h1", MANUAL))["dirty"] == 1
+    cp = await make_checkpoint(daemon)
+    assert cp["dirty"] == 1
+    assert (await checkpoints.source_head(daemon.ops, cp))["advanced"] is False
+    git(human, "commit", "-qam", "more work")
+    moved = await checkpoints.source_head(daemon.ops, cp)
+    assert moved["advanced"] is True and moved["head"] == git(human, "rev-parse", "HEAD")
+    assert checkpoints.get(daemon.journal.db, cp["checkpoint_id"])["commit_sha"] == cp["commit_sha"]
+    daemon.ops.context["git_runner"] = None  # no SSH: uncommitted changes are not observed, not "clean"
+    cp2 = await make_checkpoint(daemon, note="again")
+    assert cp2["dirty"] is None
+    text = checkpoints.first_prompt(cp2, worktree="/w", branch="b", instructions="x")
+    assert "were not observed" in text
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
+async def test_a_replay_after_the_agent_committed_does_not_recheck_the_moved_head(daemon, mock, human, monkeypatch):
+    from bat_agent_connector import service
+    from bat_agent_connector.errors import InvokeTimeout
+
+    cp = await make_checkpoint(daemon)
+    real_send = service.session_send
+
+    async def lost(*a, **kw):
+        raise InvokeTimeout("claude:send-message timed out")  # the reply never came; nothing proves the send
+
+    monkeypatch.setattr(service, "session_send", lost)
+    op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"})
+    assert op["status"] == "uncertain"
+    wt = op["external_refs"]["worktree_path"]
+    git(wt, "-c", "user.email=a@example.invalid", "-c", "user.name=agent", "commit", "-q", "--allow-empty", "-m",
+        "the agent already works")  # HEAD has moved past the checkpoint
+    monkeypatch.setattr(service, "session_send", real_send)
+    daemon.journal.db.execute("UPDATE operations SET next_run_at=0, uncertain_tries=99 WHERE operation_id=?",
+                              (op["operation_id"],))
+    await daemon.ops.drain(timeout=30)
+    done = daemon.ops.get(op["operation_id"])
+    assert done["error_code"] != "START_MISMATCH", done
+    assert [s["name"] for s in done["steps"]][:3] == ["worktree.prepare", "verify.start", "session.start"]
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
+async def test_the_clone_never_keeps_a_local_or_credentialed_origin(daemon, mock, human):
+    git(human, "remote", "set-url", "origin", "https://ted:ghp_secret@github.example/o/r.git")
+    cp = await make_checkpoint(daemon)
+    op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"})
+    clone = op["external_refs"]["clone_path"]
+    assert git(clone, "config", "--get", "remote.origin.url") == "https://github.example/o/r.git"
+    assert "ghp_secret" not in (subprocess.run(["git", "-C", clone, "config", "--list"], capture_output=True,
+                                               text=True).stdout)
+    other = human.parent / "local-origin"
+    subprocess.run(["git", "clone", "-q", str(human), str(other)], check=True)
+    git(other, "remote", "set-url", "origin", str(human))  # its origin is a person's folder
+    mock.metas[MANUAL] = {"cwd": str(other), "isStreaming": False}
+    cp2 = await make_checkpoint(daemon, note="other")
+    op2 = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp2["checkpoint_id"]}, {"instructions": "go"},
+                    key="local")
+    assert op2["status"] == "succeeded", op2
+    remotes = git(op2["external_refs"]["clone_path"], "remote")
+    assert "origin" not in remotes.split()  # pushes cannot land in a person's folder
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
+async def test_a_managed_session_continues_in_its_own_clone(daemon, mock, human):
+    cp = await make_checkpoint(daemon)
+    first = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]}, {"instructions": "go"})
+    wt, sid, clone = (first["result"]["worktree_path"], first["result"]["session_id"],
+                      first["external_refs"]["clone_path"])
+    Path(wt, "flag.txt").write_text("on\n")
+    git(wt, "add", "flag.txt")
+    git(wt, "-c", "user.email=a@example.invalid", "-c", "user.name=agent", "commit", "-qm", "flag")
+    agent_commit = git(wt, "rev-parse", "HEAD")
+    await daemon.inventory.refresh_host("h1")
+    op = await run(daemon, "checkpoint.create", {"host": "h1", "session_id": sid}, {"last_n": 0})
+    assert op["status"] == "succeeded", op
+    cp2 = checkpoints.get(daemon.journal.db, op["result"]["checkpoint_id"])
+    assert cp2["source_provenance"] == "connector_managed" and cp2["commit_sha"] == agent_commit
+    second = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp2["checkpoint_id"]},
+                       {"instructions": "review it", "agent": "codex"}, key="again")
+    assert second["status"] == "succeeded", second
+    assert second["external_refs"]["clone_path"] == clone  # no clone of a clone
+    assert git(second["result"]["worktree_path"], "rev-parse", "HEAD") == agent_commit
+    await daemon.fleet.close()
+    await daemon.inventory.close()
+
+
+def test_checkpoint_paths_are_fixed_names_inside_a_managed_root(tmp_path):
+    from bat_agent_connector.config import HostConfig
+    from bat_agent_connector.errors import ResourceReadOnly
+
+    hc = HostConfig(name="h1", url="wss://x/", fingerprint="0" * 64, token_ref="env:X",
+                    managed_roots=("/srv/managed",))
+    resource_policy.check_checkpoint_worktree(hc, "/srv/managed/app-1",
+                                              "/srv/managed/app-1/.bat-worktrees/batc-cp-0123456789ab",
+                                              "batc/cp-0123456789ab")
+    for clone, path, branch in [
+            ("/home/ted/app", "/home/ted/app/.bat-worktrees/batc-cp-0123456789ab", "batc/cp-0123456789ab"),
+            ("/srv/managed", "/srv/managed/.bat-worktrees/batc-cp-0123456789ab", "batc/cp-0123456789ab"),
+            ("/srv/managed/a/b", "/srv/managed/a/b/.bat-worktrees/batc-cp-0123456789ab", "batc/cp-0123456789ab"),
+            ("/srv/managed/app-1", "/srv/managed/app-1/x/batc-cp-0123456789ab", "batc/cp-0123456789ab"),
+            ("/srv/managed/app-1", "/srv/managed/app-1/.bat-worktrees/batc-cp-0123456789ab", "batc/cp-ffffffffffff")]:
+        with pytest.raises(ResourceReadOnly):
+            resource_policy.check_checkpoint_worktree(hc, clone, path, branch)
+    assert "checkpoint.continue" in resource_policy.BY_ACTION["checkpoint.managed_worktree"].entry_points
+    assert checkpoints.target_clone(("/srv/managed",), "h1", "/srv/managed/app-1/.bat-worktrees/batc-cp-1")[1]
+    assert not checkpoints.target_clone(("/srv/managed",), "h1", "/home/ted/app")[1]
+
+
+async def test_bat_worktree_actions_never_touch_a_worktree_the_connector_made(daemon, mock, human):
+    """BAT has no record of a checkpoint worktree: a rehydrate would register it under the workspace folder (a
+    person's checkout in real use) and copy its env files in, and a remove would prune that repository."""
+    cp = await make_checkpoint(daemon)
+    op = await run(daemon, "checkpoint.continue", {"checkpoint_id": cp["checkpoint_id"]},
+                   {"instructions": "Add a changelog entry", "agent": "claude"})
+    sid, wt = op["result"]["session_id"], op["result"]["worktree_path"]
+    assert registry.get("h1", sid)["worktree_made_by"] == "connector"
+    mock.invokes.clear()
+    with pytest.raises(ResourceReadOnly) as e:
+        await orchestrate.worktree_remove(daemon.fleet, "h1", sid, confirm=True, delete_branch=True)
+    assert e.value.code == "NOT_A_BAT_WORKTREE"
+    with pytest.raises(ResourceReadOnly) as e:
+        await orchestrate.worktree_merge(daemon.fleet, "h1", sid, confirm=True)
+    assert e.value.code == "NOT_A_BAT_WORKTREE"
+    out = await lifecycle.session_cleanup(daemon.fleet, "h1", dry_run=True, session_id=sid, min_idle_s=0)
+    assert out["decisions"][0]["decision"] == "KEEP" and "over SSH" in out["decisions"][0]["reasons"][0]
+    assert not [i for i in mock.invokes if i["channel"].startswith("worktree:") and i["channel"] != "worktree:status"]
+    assert git(wt, "rev-parse", "--abbrev-ref", "HEAD") == op["result"]["branch"]  # still there
+    policy = await resource_policy.session_policy(daemon.fleet, "h1", sid)
+    assert policy["worktree_made_by"] == "connector"
+    assert policy["actions"]["worktree.remove"]["code"] == "NOT_A_BAT_WORKTREE"
+    assert policy["actions"]["session.send"]["allowed"] and policy["actions"]["session.stop"]["allowed"]
+    # rows written before worktree_made_by existed are recognised by their connector branch
+    row = {**registry.get("h1", sid)}
+    row.pop("worktree_made_by")
+    assert resource_policy.worktree_maker(row) == "connector"
+    assert resource_policy.worktree_maker({"branch": "bat/worktree-0000abcd"}) == "bat"
