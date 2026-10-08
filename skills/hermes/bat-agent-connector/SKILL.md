@@ -67,7 +67,12 @@ metadata:
 | Durable operation (write, daemon) | `operation_submit(action, idempotency_key, target, params)`, `operation_get(id)` | `batc op [ID]` |
 | Pull request / fixed merge scope (read, daemon) | `github_pr_preview(repository, pull_number, method?)`, `github_merge_preview_get(preview_id)` | `batc delivery pr OWNER/REPO NUMBER [--method METHOD]` |
 | Edit PR title/body (integrate, repository opt-in) | `github_pr_update(repository, pull_number, expected_metadata_digest, idempotency_key, title?, body?, confirm)` | `batc delivery update-pr OWNER/REPO NUMBER --metadata-digest DIGEST --title TITLE --body-file FILE --key KEY` |
-| Merge reviewed scope (merge; deploy for recipe) | `github_pr_merge(preview_id, idempotency_key, recipe?, confirm)` | `batc delivery merge --preview mpv_... [--recipe NAME] --key KEY` |
+| Merge reviewed scope (merge; deploy for recipe) | `github_pr_merge(preview_id, idempotency_key, recipe?, expected_environment_generation?, expected_recipe_digest?, confirm)` | `batc delivery merge --preview mpv_... [--recipe NAME --generation N --recipe-digest DIGEST] --key KEY` |
+| Deployment preview / environment (observe) | `deployment_preview(recipe)`, `deployment_environment_get(recipe)` | `batc delivery preview NAME` |
+| Deployment history / status (observe) | `deployments_list(recipe, cursor?, limit?)`, `deployment_status(deployment_id)` | `batc delivery history NAME [--cursor CURSOR --limit 50]`, `batc delivery show DEP_ID` |
+| Deploy fixed source (deploy) | `deployment_start(recipe, source_sha, expected_environment_generation, expected_recipe_digest, idempotency_key, confirm)` | `batc delivery deploy NAME --sha SHA --generation N --recipe-digest DIGEST --key KEY` |
+| Retry saved identity (deploy) | `deployment_retry(deployment_id, expected_environment_generation, expected_recipe_digest, idempotency_key, confirm)` | `batc delivery retry NAME DEP_ID --generation N --recipe-digest DIGEST --key KEY` |
+| Roll back through same recipe (deploy) | `deployment_rollback(recipe, deployment_id, expected_environment_generation, expected_recipe_digest, idempotency_key, confirm)` | `batc delivery rollback NAME DEP_ID --generation N --recipe-digest DIGEST --key KEY` |
 | What a checkpoint would record (read, daemon) | `checkpoint_preview(host, session_id)` | - |
 | Record a checkpoint (connector records only, daemon) | `checkpoint_create(host, session_id, idempotency_key, commit?, note?, confirm=true)` | `batc checkpoint create HOST SID --note ...` |
 | Continue from it in a new managed session (daemon) | `work_continue_from_checkpoint(checkpoint_id, instructions, idempotency_key, agent?, confirm=true)` | `batc checkpoint continue CP --instructions ...` |
@@ -238,10 +243,32 @@ no bypass or automatic rebase. Pre-submit base movement requires a new preview; 
 normal and merge.verify records merged_onto_base_sha, base_moved and other_commits_count. Report those extra commits.
 waiting_checks / waiting_external are normal; follow operation_get, preserving the key on lost replies. A different
 PR swept in fails verification and combined does not dispatch. A passed combined merge deploys its actual merged SHA.
-A failed deploy after merge retains external_refs.merged_sha: retry deployment.start with source_sha=merged_sha,
-never merge again. Deployment generations/history/runtime evidence/rollback are Part B and are not available yet.
-Both new MCP wrappers require confirm=true and the client's BATC_API_TOKEN; read-only MCP does not register them.
-New delivery CLI writes also require that token and never inherit Dashboard or local-admin grants.
+A failed deploy after merge retains external_refs.merged_sha and its deployment ID: read deployment_preview and
+use deployment_retry(deployment_id, expected_environment_generation, expected_recipe_digest, idempotency_key,
+confirm=true). It starts deployment.start with the saved source/artifact identity, never merges again or selects
+main/latest. For a combined merge, review deployment_preview(recipe) too and pass its expected_environment_generation
+and expected_recipe_digest to github_pr_merge (CLI: --recipe NAME --generation N --recipe-digest DIGEST).
+
+Deployments require a configured runtime check. First read deployment_preview(recipe): check readiness, recipe digest,
+environment generation, desired/current/last_verified evidence and rollback.not_undone. A missing verification setting
+is DEPLOY_VERIFICATION_REQUIRED; ask for that recipe setting, never fall back to job success. To start, use
+deployment_start(recipe, source_sha, expected_environment_generation, expected_recipe_digest, idempotency_key,
+confirm=true). Source must be reachable from the recipe ref. Use deployment_status(deployment_id), deployments_list(recipe,
+cursor?, limit?) and deployment_environment_get(recipe) to follow history and superseded/drift states (all observe).
+The result's version_checked/health_checked says exactly what was proven; health-only success does not prove runtime
+version. Old migrated successes are unverified, never current or rollback targets.
+
+To roll back with the user's instruction for that environment, select a saved verified deployment of the SAME recipe
+and environment, review rollback readiness and not_undone limits, read a fresh deployment_preview, then call
+deployment_rollback(recipe, deployment_id, expected_environment_generation, expected_recipe_digest, idempotency_key,
+confirm=true). This creates a new operation/generation/run and redeploys the saved SHA/artifact through that recipe.
+SHA rollback rebuilds from that source; it does not promise the same binary. Artifacts must retain their original
+ID/digest/producing-run and be available, unexpired. Deleting or marking a history row inactive never changes runtime.
+Cancel stops local steps; GitHub can still merge/deploy, so the provider slot stays locked until terminal evidence.
+Reconciliation only reads. Superseded or ENVIRONMENT_VERSION_DRIFT never triggers an automatic dispatch.
+
+All delivery MCP write wrappers require confirm=true and the client's BATC_API_TOKEN; read-only MCP does not register
+them. New delivery CLI writes also require that token and never inherit Dashboard or local-admin grants.
 
 ## Safety rules
 
