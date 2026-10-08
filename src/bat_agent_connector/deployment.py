@@ -786,7 +786,13 @@ async def reconcile_deployments(ops):
                         continue
                 elif merge_sent(ops, dep) and not dep.get("merged_result"):
                     pr = await background_read(gh_for(ops, dep).pull(dep["recipe_snapshot"]["repository"], op["target"]["pull_number"]))
-                    if pr.get("merged") or pr.get("state") == "closed":
+                    terminal_merge = pr.get("merged") or pr.get("state") == "closed"
+                    uuid = (op.get("external_refs") or {}).get("merge_request_uuid")
+                    if not terminal_merge and uuid:
+                        result = await background_read(gh_for(ops, dep).merge_async_result(
+                            dep["recipe_snapshot"]["repository"], op["target"]["pull_number"], uuid))
+                        terminal_merge = result.get("status") == "failed"
+                    if terminal_merge:
                         store.update(ops.journal, dep["deployment_id"], provider_terminal=True,
                                      facts={"merge_provider_terminal": True, "merge_commit_sha": pr.get("merge_commit_sha")})
                         release_slot(ops, dep)
