@@ -2,6 +2,14 @@
 
 ## Next release (unreleased)
 
+- Host-account verification now requires an operator-declared trusted auditor SSH channel ([design](docs/design/confinement.md),
+  計畫 §06/§07/§12, A10). The auditor proves its different identity and protected login/bootstrap paths before
+  directly executing isolated Python as the BAT account through a narrow sudo rule. Returned UID/channel facts
+  must match config; same-account login output can never certify a boundary. Without a trusted alias, no in-band
+  check runs: unknown/check_channel_untrusted gives fallback_default and confined Claude uses default, never
+  acceptEdits. Old checker caches are invalidated. Existing integrity/process/root scans remain defense in depth.
+  Trusted-channel verification on real hosts and A10 still await W12.
+
 - Task Service reviewer starts send one start frame per reservation ([design](docs/design/confinement.md),
   計畫 §06/§12/§28, A10). Lost or unconfirmed replies, including `ok: false` or a different session ID, retry only
   metadata reads with bounded backoff. Unproven starts keep their reservation and leave the command and task

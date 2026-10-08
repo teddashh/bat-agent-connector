@@ -472,7 +472,7 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
         if not isinstance(confinement, dict):
             raise ConfigError(f"host {name!r}: confinement must be a table")
         allowed = {"host_account", "expected_uid", "protected_roots", "check_max_age_s",
-                   "check_timeout_s", "check_max_entries", "bat_port"}
+                   "check_timeout_s", "check_max_entries", "bat_port", "check_ssh_alias", "check_uid", "bat_account"}
         if set(confinement) - allowed or not isinstance(confinement.get("host_account", False), bool):
             raise ConfigError(f"host {name!r}: invalid confinement settings")
         if confinement.get("host_account"):
@@ -484,6 +484,16 @@ def parse_config(data: dict, path: Path | None = None) -> Config:
                                 for a in roots for b in managed_roots):
                 raise ConfigError(f"host {name!r}: protected_roots must be nonempty and separate from managed_roots")
             confinement = {**confinement, "protected_roots": list(roots)}
+        if "check_ssh_alias" in confinement:
+            alias = confinement["check_ssh_alias"]
+            account = confinement.get("bat_account")
+            auditor = confinement.get("check_uid")
+            if (not isinstance(alias, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", alias)
+                    or not isinstance(account, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", account)
+                    or type(auditor) is not int or auditor < 0 or auditor == confinement.get("expected_uid")):
+                raise ConfigError(f"host {name!r}: trusted check requires an SSH alias, BAT account and different check_uid")
+        elif "check_uid" in confinement or "bat_account" in confinement:
+            raise ConfigError(f"host {name!r}: check_uid and bat_account require check_ssh_alias")
         for key, maximum in (("check_max_age_s", 3600), ("check_timeout_s", 30),
                              ("check_max_entries", 100000), ("bat_port", 65535)):
             if key in confinement and (type(confinement[key]) is not int or not 0 < confinement[key] <= maximum):

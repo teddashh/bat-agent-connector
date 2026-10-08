@@ -151,7 +151,7 @@ Task Service 的 metadata 未包含權限欄位時只記 unknown，不改原 sta
 
 ## Host account 宣告與只讀查核
 
-新增 `HostConfig.confinement`，預設不宣告 account。以下都是範例值：
+`HostConfig.confinement` 預設不宣告 account。以下都是 placeholder：
 
 ```toml
 [hosts.buildbox]
@@ -160,32 +160,41 @@ managed_roots = ["/srv/batc-managed"]
 [hosts.buildbox.confinement]
 host_account = true
 expected_uid = 2001
+bat_account = "example-bat"
+check_ssh_alias = "example-auditor" # Ted 設好的另一帳號，不是 BAT 登入 alias
+check_uid = 2002 # auditor UID；可信 root alias 可用 0
 protected_roots = ["/srv/example-personal"]
 check_max_age_s = 300
 check_timeout_s = 10
 check_max_entries = 10000
-bat_port = 9876 # BAT 主機實際 listener port；SSH tunnel 本機 port 不是此值
+bat_port = 9876 # BAT listener port，非 SSH tunnel 本機 port
 ```
 
-沿用 `BATC_TASK_SETTINGS` 的 `[verification].ssh_hosts`，不加另一套 SSH credentials／alias。`host_account=true` 須有正整數 expected_uid、非空絕對 protected_roots 與 alias；禁止 protected roots 和 managed roots 重疊，禁止 root UID。`check_max_age_s` 須為正整數（最多 3600），預設 300。`check_timeout_s`（最多 30）、`check_max_entries`（最多 100000）及 `bat_port`（1–65535）也驗證為正整數；預設 10 秒、10000 entries、9876。讀取 claim 本身不授予 level。只讀 check 的結果參考同一 journal／inventory，新的 start 在副作用前重新查核，cache 不超過設定期限。
+Git operations 仍沿用 `BATC_TASK_SETTINGS` 的 `[verification].ssh_hosts`，帳號查核另用 check_ssh_alias；不保存新 credentials，只使用 SSH config 已有的 alias。host_account=true 須有正整數 expected_uid、非空絕對 protected_roots；禁止 roots 與 managed_roots 重疊、禁止 BAT root UID。宣告可信 alias 時，須同時填 bat_account 與不同的非負 check_uid。Alias 為非 option 的簡單 SSH 名稱，account 為不含 shell 字元的 Unix 名稱；遠端 passwd 核對名稱／UID，不取 HOME。未宣告可信 alias 的舊設定仍可載入，但不能 verified。check_max_age_s（最多 3600）、check_timeout_s（最多 30）、check_max_entries（最多 100000）及 bat_port（1–65535）均為正整數，預設 300／10／10000／9876。新的 start 在副作用前重新查核，cache 不超過期限。
 
-第一版實作 Linux POSIX 查核。SSH alias 必須直接以預期 BAT UID 執行，且能唯一觀測 BAT process 與所有已觀測 runtime descendant 的 UID／GID／supplementary groups。尚無 runtime 的 idle host 可通過；證據保存 `runtimes: []`，並加 `runtime_identity_inherited_unobserved`，表示未來子程序預期繼承 BAT 身分但尚未觀測。只讀指令使用既有 runner 的 `BatchMode` 與 timeout，不 `sudo -u` 模擬另一個人。alias 身分不符、看不到 BAT process、無法唯一對應該 BAT server、process namespace／群組不符，記 unknown，不能宣稱 host_account。
+Linux 查核必須從 Ted 宣告的可信 alias 登入另一個 auditor（建議專用帳號，或 root），不得登入 BAT 帳號。Auditor 程式核對自身 real／effective UID 等於 check_uid、與 BAT 不同，且 passwd 的 bat_account UID 等於 expected_uid；再證明 bootstrap 與 auditor 登入入口不受 BAT UID／groups 控制。**未宣告可信 alias 時直接 unknown／check_channel_untrusted，不跑 in-band check**：startup output 可以偽造，即使回 verified 也不能用。此 reason 為 ACCOUNT_HARDENING_GAPS，start_effect=fallback_default；受限 Claude 用 plain default、絕不 acceptEdits。GET 同樣立即顯示此 gap，沒有 SSH I/O。
 
-Account check 使用獨立 `SshGitRunner.run_account_check`，Git runner 原本的 `sh -lc` 不改。SSH 固定命令從 `/` 執行 `/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/python3 -I -S -B - <JSON payload>`；不另啟 login shell，Python 不載入 user site、cwd import 或 PYTHON* 設定，不寫 bytecode。所有 find 都固定 `/usr/bin/find`，不透過 PATH 找程式。不新增 interpreter／find config keys。舊 checker 的 cache signature 失效，只能重新查核。
+使用獨立 `SshGitRunner.run_account_check(..., ssh_alias=check_ssh_alias)`，絕不 fallback 到 Git／BAT alias；Git runner 原本的 sh -lc 不改。SSH 固定命令從 `/` 執行 `/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/python3 -I -S -B - <JSON payload>` 作 auditor supervisor。Bootstrap 的 Python realpath、stdlib 目錄、sudo、env、find、auditor login shell 與全部父目錄須為 root-owned、無非 root 可寫 mode；對 bootstrap／auditor 入口的 POSIX ACL 保守拒絕，不能以 auditor 自己的 access 猜 BAT 的 ACL。讀 xattr 不完整也拒絕。Auditor 的 home、startup、.pam_environment、.ssh／rc／environment／authorized_keys 及祖先須非 BAT 所有、mode 對 BAT UID／groups 不可寫，不接受 symlink；缺檔仍須查 parent。Channel proof failure 為 unknown／check_channel_untrusted，細節留 channel_reason／paths；bootstrap 不可信為 check_executable_untrusted。舊同帳號 checker 的 cache signature 失效。
 
-查核在 protected-root／process scan 前先證明 interpreter 的 realpath、stdlib 目錄、find、passwd 指定的 login shell 與各自所有父目錄為 root-owned，且 BAT UID／groups 不可寫。先以 effective-ID access 檢查 find 不可被替換，再以 GNU find -writable 核對 ACL；不可信時回 unknown／`check_executable_untrusted`，證據列 paths。Home 與 shell 只取 `pwd.getpwuid(expected_uid)`，不用 config／HOME。支援 sh／dash（.profile）、bash（.bashrc、.bash_profile、.bash_login、.profile）、zsh（.zshenv、.zprofile、.zshrc、.zlogin）；其他 shell 回 unknown／`login_shell_unsupported`。
+通過 supervisor 前置條件後，以固定 direct exec argv 送 stdin 程式：`/usr/bin/sudo -n -u example-bat -- /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/python3 -I -S -B -`。絕不 su -／sudo -i／sudo -s，不啟動 BAT 的 shell、startup 或 SSH hooks。第一階段只以 BAT UID 跑 integrity preflight，GNU find -uid／-writable 覆查兩個 passwd-derived 登入環境（含 auditor .ssh 全部 entries）的 owner／effective IDs／ACL；auditor proof 未通過便不跑 protected-root scan。第二階段才跑原 process／root scan，仍在 BAT UID，並重核 integrity。兩階段共用 entry 剩餘量與 auditor deadline。Python 不載入 user site、cwd import 或 PYTHON* 設定，不寫 bytecode；find 固定 `/usr/bin/find`。不新增 interpreter／find keys。
 
-Home 本身、.ssh 及其中全部 entries、.pam_environment 與以上 startup files 都不得由 BAT UID 擁有或可寫；owner 可 chmod，不能把當下只讀算安全。用 find -uid／-writable、相同 entry／time budget；缺檔只在 parent 不可寫時安全，home 的可替換 ancestors 也按 sticky-bit 規則查核。這些入口的 symlink 保守拒絕；不可信回 unknown／`login_environment_writable` 並列 paths。不掃 .claude／.codex／.cache 等正常 agent state 的內容。
+Ted 須在 host 自行配置並驗證以下 **限定此 argv／目標帳號的 NOPASSWD sudoers rule**（均為 placeholder，PATH 的 colon 按 sudoers 語法 escape）：
 
-**信任模型與 hardening 前置條件：** sshd 仍以帳號的 login shell -c 執行命令，可能先讀 .ssh/rc、bash／zsh startup 或 PAM environment。此同 UID check 只有在環境原本乾淨、再 harden 時才可信；它無法識別早已植入、之後變 root-owned 的惡意內容。主機操作者須從可信來源替換 home startup、.ssh 與 PAM 設定，確認沒有未信任 hook／environment，並把 home、startup files／.ssh 改成 root-owned 且 BAT 不可寫（也不得經 ACL／group／ancestor 替換）；interpreter、stdlib、find／shell 同樣使用可信系統版本。可預先建立由 BAT 帳號擁有的 .claude、.codex、.cache 等 state 子目錄；root-owned home 不阻止在這些子目錄內正常工作。本包只讀檢查，不代做 hardening，也不聲稱能從已被劫持的 shell 中證明乾淨。
+```sudoers
+example-auditor ALL=(example-bat) NOPASSWD: /usr/bin/env -i PATH=/usr/bin\:/bin LC_ALL=C /usr/bin/python3 -I -S -B -
+```
 
-固定 BAT 的 [src-tauri/src/sidecar.rs:4](https://github.com/teddashh/better-agent-terminal/blob/b7419892fbc9946799b64cca24c2ec8c7fa15c42/src-tauri/src/sidecar.rs#L4) re-export bridge；實際 `SidecarState` 位於 [src-tauri/crates/bat-agent-bridge/src/lib.rs:291](https://github.com/teddashh/better-agent-terminal/blob/b7419892fbc9946799b64cca24c2ec8c7fa15c42/src-tauri/crates/bat-agent-bridge/src/lib.rs#L291)。`call()` 在 371–390 行進入 `ensure_spawned()`，344 行才 spawn；因此不以「尚無 lazy sidecar」拒絕第一個 start。
+此 rule 允許 auditor 在 BAT 身分執行 stdin Python，不允許 root command、其他目標帳號或 shell flags；auditor credential 不能交給 BAT。即使 alias 是 root，本版仍使用同一 sudo direct exec，不使用 runuser／setpriv。結果含 checked_uid、channel.status／method=sudo_exec／ssh_alias／auditor_uid／bat_uid／bat_account 與 preflight evidence。Connector 只有在所有 identity／channel facts 符合宣告時才接受 verified；缺欄位／不相符回 unknown／check_channel_untrusted。Cache 的 verified 同樣須符合 channel facts，GET 不跑 live check。
 
-查核腳本只讀 Linux metadata，不讀人的檔案內容、不建立 probe、不寫入、不 sudo。以 `find <root> -xdev -writable`（GNU find 的 access(2) 判定，涵蓋 ACL）配 entry／time budget，首個可寫 entry 即失敗。用 -printf 計數；另用 find 的 -uid 拒絕 BAT 擁有的 entries／祖先（owner 可 chmod，不能因當下不可寫而 pass）。跨 mount／symlink、列舉錯誤或 budget 用盡回 unknown，不重實作 mode／ACL 判定。Root 的父目錄／祖先以同 UID 查 writable 與 search，並按 sticky bit／owner 決定是否可移除 child。讀 `/proc/<pid>/status` 的 Uid、Gid、Groups、CapEff／CapPrm／CapAmb；三種 capability 任一非零均 mismatch。須能唯一識別該 BAT server 與已觀測 runtime、alias UID／groups 相符，不能只靠 process 名稱或 cwd。不同身分、無法識別或權限能力不明均 unknown；root／DAC override 為 mismatch。檢查前後的 canonical path／inode 與 process 身分須一致。讀取時有 entry/time 上限，cache 的上限不取代新 start 前核對。
+原 integrity scan 作 defense in depth：Python realpath、stdlib、find、passwd login shell 與父目錄須 root-owned 且 BAT 不可寫，GNU find -writable 核對 ACL，不可信為 check_executable_untrusted。Home／shell 只取 passwd；支援 sh／dash（.profile）、bash（.bashrc、.bash_profile、.bash_login、.profile）、zsh（.zshenv、.zprofile、.zshrc、.zlogin），其他 shell 回 login_shell_unsupported。Home、.ssh 全部 entries、.pam_environment 與 startup 不得由 BAT UID 擁有或可寫；owner 可 chmod，缺檔只在 parent 不可寫時安全。Home ancestors 按 sticky-bit 規則，symlink 保守拒絕，失敗回 login_environment_writable。Auditor 的相同檢查失敗則回 check_channel_untrusted。不掃 .claude／.codex／.cache state 內容。
 
-此查核是時間點、指定 roots、目前觀測到的執行身分的證據。既有 SSH／BAT 不能完整證明未列出的所有私人資料夾、其他帳號、未來 ACL 改變、所有 hardlink 別名、遠端可寫服務、setuid／sudo／credential 可取得的權限，或之後產生的子程序都不換身分。這些列在 `limits`；有已知繞過途徑不能回 verified。不得以跑提權命令來驗證「不能提權」。不可觀測的部分由主機操作者維持帳號配置，不能改寫成工具已證實。
+**信任模型與 hardening：** check_ssh_alias 是 Ted 在 BAT 帳號之外建立並確認的信任宣告，不是從該帳號回覆推導。sshd 仍透過 auditor login shell -c，可能先執行 auditor .ssh hooks／authorized_keys command=／PAM environment；這些入口及 SSH config／credential 必須先在 BAT 權限之外保護。Supervisor checks 是對邊界的覆查，不能從已遭登入劫持的通道補證。Ted 須從可信副本替換 auditor／BAT 的 startup、SSH／PAM hooks 與系統 executables；不能保留歷史植入內容後再 harden。Auditor home／SSH 入口必須不受 BAT UID／groups／ACL／可替換 ancestor 控制。原 BAT home／startup 加固仍是 defense in depth，單靠 in-band checks 絕不能 verified。BAT home／startup／.ssh 使用 root-owned、BAT 不可寫配置；可建立 BAT 擁有的 .claude、.codex、.cache state 子目錄。本包不代建 account、credentials、sudoers 或 hardening。
 
-未宣告時跳過 check，選可達的 CLI 限制。已宣告但新 integrity 前置條件不足（上述三種 unknown reason）時，confined Claude 新 start 明示 gap，使用 plain default／prompt_gated，不送 acceptEdits，也不把宣告 roots 記成已保護；一般 default／allow_all 與 Task recipe 維持操作者既有 policy。其他 mismatch／unknown（roots 可寫、身分不符、budget／I/O 失敗等）仍回 `HOST_ACCOUNT_UNVERIFIED`。若 admission 曾 verified、已準備 host-account options，frame check 卻失去 verified，回 unsent refusal；不得把先前準備的 acceptEdits 送出去。macOS／Windows／SSH 登入為另一管理帳號的查核在本版為 unsupported，顯示原因；不假造 ACL 結果。
+固定 BAT 的 [src-tauri/src/sidecar.rs:4](https://github.com/teddashh/better-agent-terminal/blob/b7419892fbc9946799b64cca24c2ec8c7fa15c42/src-tauri/src/sidecar.rs#L4) re-export bridge；實際 [SidecarState](https://github.com/teddashh/better-agent-terminal/blob/b7419892fbc9946799b64cca24c2ec8c7fa15c42/src-tauri/crates/bat-agent-bridge/src/lib.rs#L291) 的 call 在 371–390 行進入 ensure_spawned，344 行才 spawn，不以尚無 lazy sidecar 拒絕首個 start。可唯一觀測 BAT process 與所有 runtime descendants 的 UID／GID／supplementary groups 才能驗證；尚無 runtime 的 idle host 可通過，保存 runtimes=[]／runtime_identity_inherited_unobserved，表示未來子程序身分尚未觀測。
+
+Protected-root scan 維持只讀 metadata、不讀人的檔案內容、不建立 probe、不改 account／檔案設定。sudo 僅按既定 rule 切到 BAT UID，不用來提升 BAT 權限或測提權能力。GNU `find <root> -xdev -writable` 的 access(2) 涵蓋 ACL；首個 writable／BAT-owned entry 即 mismatch（owner 可 chmod）。Cross-mount／symlink、列舉錯誤、entry／time budget 用盡回 unknown。Root ancestors 以 BAT UID 查 writable／search，依 sticky-bit／owner 判斷可否替換 child。不重實作 root 的 mode／ACL evaluator。讀 `/proc/<pid>/status` 的 Uid、Gid、Groups、CapEff／CapPrm／CapAmb；capabilities 任一非零為 mismatch，須唯一對應 BAT server 與已觀測 runtime。與 direct-exec BAT 身分／groups 不符、process 不可識別為 unknown。檢查前後 canonical path／inode／process 身分須一致。
+
+此查核只證明目前指定 roots／觀測身分，仍不能完整證明未列出私人資料夾、未來 ACL、所有 hardlink／遠端服務／setuid／sudo／credential 路徑、之後子程序不換身分。Limits 明示；已知繞過不能 verified。Ted 須維持可信通道與帳號邊界，不能把其信任宣告說成程序自證。無宣告 account 時跳過 check，選 CLI 限制。四種 hardening gaps（check_channel_untrusted、check_executable_untrusted、login_environment_writable、login_shell_unsupported）為 fallback_default，不把 declared roots 記成已保護；其他 mismatch／unknown（root、runtime、budget／I/O 等）仍拒絕新 start。Admission 曾 verified、frame check 失去 verified 時維持 unsent refusal，不能送已準備的 acceptEdits。一般 default／allow_all 與 Task recipe 不變。非 Linux 仍 unsupported。
 
 ## 輸入／輸出與前置條件
 
@@ -194,7 +203,7 @@ Home 本身、.ssh 及其中全部 entries、.pam_environment 與以上 startup 
 | 表面 | 新增輸出／既有入口 |
 |---|---|
 | Session reads | `service.sessions_list`／`session_read`、triage、`inventory`、`GET /api/v1/sessions` 與 `GET /api/v1/sessions/{host}/{id}` 的 session 列帶 write_scope、confinement、current_verification；MCP `sessions_list`／`session_read` 與 CLI `sessions`／`read` 同值。manual／unknown 不因加欄位取得寫權。 |
-| `GET /api/v1/capabilities` | `hosts[].confinement`：`agents.{claude,codex}` 的 reachable_options、requested_level、verified_level、limits／gap；`host_account` 的 declared、status、checked_at、protected_roots、evidence_ref、reason、start_effect。supported／unknown／unsupported 分開；不把 host 的 capability level 直接套到既有 session。 |
+| `GET /api/v1/capabilities` | `hosts[].confinement`：`agents.{claude,codex}` 的 reachable_options、requested_level、verified_level、limits／gap；`host_account` 的 declared、status、checked_at、protected_roots、evidence_ref、reason、start_effect、checked_uid／channel facts。supported／unknown／unsupported 分開；不把 host 的 capability level 直接套到既有 session。 |
 | Host reads | 既有 `hosts_list`／`host_status`、`GET /api/v1/hosts` 帶同一 account check 摘要。只讀刷新不新增 mutation action；離線回最後證據與 stale，不因 capabilities 載入卡住 Dashboard。 |
 | Checkpoint／repair | `checkpoint-preview` 與 capabilities 提供所選 agent 的預計限制；`checkpoint.continue`／`integration.handoff` 的結果與 operation.external_refs 帶 confinement snapshot／evidence_ref。work item 的 `continueFrom` 也使用此摘要。 |
 | 權限與 bulk | operations-unification 的 `session.permissions`／`session.approve_pending`；現有 `session_set_permissions`／`approve_pending`、CLI `permissions`／`approve-pending`。結果沿用 per-item，新增 skipped=confined 與穩定 error code；dry-run 也不顯示「would raise」受限列。 |
@@ -237,7 +246,7 @@ Phase 2 新增的副作用只有 Connector 記錄／projection、既有 managed 
 |---|---|
 | `CONFINEMENT_RAISE_REFUSED` | 不送任何 permission frame；含 force／bulk／deferred／failover。回傳原 level、禁止放寬原因與 evidence_ref。 |
 | `CONFINEMENT_UNSUPPORTED` | 所需限制在 host／agent 不可達；planner 或需保留前任限制的 successor 不啟動。一般工作可用已定義的較低候選 options，但明示 gap，不能用未知欄位碰運氣。 |
-| `check_executable_untrusted`／`login_environment_writable`／`login_shell_unsupported` | Host evidence reason（非 operation error code）：unknown，列不可信 paths／shell；confined Claude 以 plain default 啟動，creation level 為 prompt_gated。無 verified account 絕不送 acceptEdits。 |
+| `check_channel_untrusted`／`check_executable_untrusted`／`login_environment_writable`／`login_shell_unsupported` | Host evidence reason（非 operation error code）：unknown，列不可信 paths／shell；confined Claude 以 plain default 啟動，creation level 為 prompt_gated。無 verified account 絕不送 acceptEdits。 |
 | `HOST_ACCOUNT_UNVERIFIED` | 宣告與 roots／process 查核不一致或無法完成，或 frame check 失去 admission 的 verified；新 start blocked。來源與既有工作不動；明確標記 sent=false，釋放 reservation，按 caller 的 retain_on_error 決定是否沿用原 rollback。Task start command 記 rejected、task 到 needs_ted 並記 code，不 retry／read-back。Checkpoint／repair 到 NeedsAttention，同 operation 在設定修正後重跑未送步驟。 |
 | `CONFINEMENT_MISMATCH` | start 讀回／resume／permission reconcile 的 options 與意圖不同。停止新 prompt 派送，needs_attention；已 ACK 的 session 一律保留 reservation 與 worktree、記 uncertain 與 code。Start 初次讀回或 recovery 觀察到 mismatch 時保存原 creation record；其 verification=mismatch 為 terminal，下次在讀 BAT 前就拒絕，confirm 不覆寫；不能因稍後 options 相符而升級或送 handoff。非 confined 的未知 metadata 只記 unknown 並繼續；confined 的 unknown 仍拒絕。Reviewer 的未知 read 仍 best-effort；可讀 mismatch 則不得 promote／送 review prompt，command 與 task 按既有 acknowledged-but-unusable start 規則到 uncertain，原因記在 reservation 的 code／creation verification。不自動修改 live runtime 來掩飾。 |
 | `FAILOVER_SUCCESSOR_MISMATCH`／`START_SESSION_MISMATCH` | 讀回的 cwd 與 reservation 不同。用 resource_policy.norm 的絕對 POSIX 路徑正規化，先比 cwd 再比 permission options；不以 Connector 本機 realpath 解遠端 symlink。記 terminal error_code、保留原 reservation／worktree，不 promote、不送 prompt／handoff、不重新 start。後續即使 cwd 修正也不自動恢復。Failover 用前者，session_start、checkpoint continue／integration handoff 與 Task Service start recovery 用後者。 |
@@ -389,6 +398,7 @@ Mock 只能證明 Connector 的 options、gate、evidence 與顯示；不假造 
 | A10；§06、§07 | `test_a10_planner_is_read_only_never_and_successor_preserves_limits`、`test_relay_to_bat_session_starts_a_new_worktree_instead`、`test_fanout_from_planner_starts_verbatim_and_cleans_planner`、`test_c03_handoff_resolution_resumes_without_recomposing_or_receiving_twice` | 真正的 planner／relay／children／repair starts 保存 evidence；successor 不丟原限制。 |
 | A10；§06、§28 | `test_a10_task_service_keeps_engine_policy_and_reports_gap`、`test_a10_task_failover_records_missing_options_without_changing_engine`、`test_reviewer_start_polls_existing_session_after_start_timeout`、`test_bat_restart_null_meta_and_worktree_never_creates_replacement`、`test_claude_sessions_pin_opus_55_for_lead_and_reviewer`、`test_bat_warm_reuse_claims_only_clean_completed_service_session`、`test_headless_session_lookup_restored_from_task_branch_and_bat_meta` | Engine／recipe／verifier 行為不變；Task Service 的 gap 與原 snapshot、warm/recovery 證據；metadata 缺欄位／重開 journal 不增加 engine 阻擋。 |
 | A10；§06、§07、§12 | `test_account_check_remote_command_is_isolated_and_git_runner_unchanged`、`test_account_integrity_rejects_account_controlled_check_inputs`、`test_account_integrity_accepts_root_owned_nonwritable_layout`、`test_account_integrity_unknown_uses_plain_default_never_accept_edits`、`test_account_integrity_gap_at_frame_never_sends_prepared_accept_edits` | Synthetic passwd/home/executable layouts；absolute isolated command、不可替換 interpreter/find/stdlib/parents、owner/ACL/SSH/startup 入口、缺檔 parent、unsupported shell、未知 gap fallback default；第二次查核失去 verified 時零 start frame。Git SSH 不變，無 fleet host／真 home 寫入。 |
+| A10；§06、§07、§12 | `test_a10_same_account_forged_verdict_never_enables_accept_edits`、`test_a10_verified_channel_facts_must_match_declaration`、`test_a10_auditor_program_uses_exact_direct_exec_and_requires_preflight`、`test_a10_auditor_login_inputs_are_checked_as_bat_uid` | 無可信 alias 不執行可偽造的 BAT 登入；GET／start 為 check_channel_untrusted／fallback_default，Claude default。可信 alias 使用固定 sudo／env／isolated Python argv，UID／channel facts 必須相符；same UID、auditor startup 可寫在 drop 前拒絕，GNU find 再以 BAT UID／groups／ACL 覆查 auditor .ssh／startup。原 root scans 透過 channel fixtures 驗證。 |
 | A10；§06 | `test_a10_linux_read_only_scan_uses_find_and_process_identity`、`test_a10_host_account_cache_expires_without_upgrading_creation`、`test_a10_closed_host_evidence_journal_returns_unknown`、`test_a10_host_account_configuration_rejects_uncheckable_claims`、`test_a10_host_evidence_migration_is_idempotent_and_persists` | Linux /proc 身分、capability、實際 GNU find 的可寫 fixture／symlink／readonly owner 的 chmod 出口、父目錄、budget／timeout／process 不明、stale 與 journal 不可讀；不寫 probe。Exec fixture 只替換其 pathlib import，保留真 Path；Python 3.10／3.11 也跑完整 suite。ACL 使用 find 的 access 判定，完整 ACL host matrix 留 W12。 |
 | A10；§06 | `test_a10_partial_permission_ack_preserves_creation_and_reports_drift`、`test_a10_start_mismatch_stays_uncertain_and_never_sends_prompt`、`test_a10_frame_guard_catches_drift_after_first_read`、`test_a10_creation_snapshot_survives_runtime_drift_and_send_refuses` | Partial setter ACK／GUI drift／start mismatch 保留快照並顯示 current；受限 drift 不送下一 prompt。 |
 | A10；§06 | `test_a10_persistent_and_exit_plan_approvals_are_refused` | dont_ask_again、ExitPlanMode mode raise 被拒絕；deny／一般問題仍走原流程。 |
@@ -417,13 +427,13 @@ A10 的通過紀錄必須注明 level／機制與批准限制。`none`、只有 
 ## 尚未涵蓋
 
 - Start transport marker 落盤與 websocket.send 之間的 hard crash：保守保持可能已送，不以缺 meta 重送；仍需可信 absence signal／操作者確認。此 fence 只保證不重送，不保證 session 一定存在。
-- 更強的獨立 trusted account 查核：經 `sudo -n -u <bat> <python> -I -S -B -` 執行，可避開 BAT 帳號的 login startup。此包不新增 credentials／sudo 路徑。現有同 UID 查核不能偵測 hardening 前已植入、後變 root-owned 的 payload；可信替換與乾淨部署由主機操作者保證。
+- W12：真 host 的 trusted auditor alias、實際 SSH 登入 UID、sudoers 固定 argv、auditor SSH／startup／ACL 邊界與 verdict 仍待 live acceptance；本包只用 synthetic fixtures，不能宣稱這些主機已 verified。可信副本替換、未交給 BAT 的 auditor credentials 與 host setup 由 Ted 在 BAT 權限之外確認；從已遭登入劫持的 channel 不能自證乾淨。Bootstrap／auditor 的 ACL-bearing layout 本版保守 unknown，完整 ACL preflight 與 root 的 runuser／setpriv 替代路徑未實作。
 
 - 舊 active successor 的 pending 若沒有明確 null frame fence，不能證明未送，保持原 prior-successor 行為；不回填成可重送。Reserved start 沒有可比對的 permission options 時，仍無法得到 options_confirmed，維持 CONFINEMENT_START_UNSETTLED；仍有 live claim 的未送 start 則回 START_IN_PROGRESS，不為 handoff 恢復而假造證據。已記 frame hash 的 crash 結果只保證不重送，不證明 BAT 收到 prompt。
 - Failover 的 vanished proof 待釐清：既有 BatTaskAdapter.session_presence 對 null 一律 uncertain，claude:list-sessions 列 SDK history；無 tab 的 headless／unloaded session 也可存在。不得以 missing tab／null 或 history 缺項釋放可能仍在跑的 successor。已有唯讀 read-back 可恢復相符 successor，其餘保持 unsettled；需可信 host absence signal 才可重新 start。固定 BAT 的 [remote_server.rs:3174](https://github.com/teddashh/better-agent-terminal/blob/b7419892fbc9946799b64cca24c2ec8c7fa15c42/src-tauri/src/remote_server.rs#L3174) 以 cwd／agentKind 呼叫 list_sessions_native；不提供完整 live local-session-ID 清單。
 - W12 的 sandbox_evidence_file 設定、可信證據匯入、其檢查與測試延後；schema 保留 verified，但本包不把 OS sandbox 標為 verified。
 - 真 host 的 BAT／CLI 版本、OS sandbox 實際 roots／network 與實機阻擋尚未驗收。W12 要提供可核對同 runtime 的證據；沒有證據的主機保持 gap。
 - Task Service 的 allow-all engine／recipe 如何改成更強限制且保留測試，屬後續決策。這裡只保存現況與限制不足，不修改 §28 禁止增加的模型／recipe 政策。
-- 需主機操作者確認哪些 protected_roots 構成完整的私人寫入邊界、SSH alias 是否同 BAT UID。無法從現有 BAT protocol 取得完整身分或全域不可提權證明。
+- 需主機操作者確認哪些 protected_roots 構成完整的私人寫入邊界，trusted alias 是否為宣告的獨立 auditor，direct exec 是否真為 BAT UID。無法從現有 BAT protocol 取得完整身分或全域不可提權證明。
 - macOS／Windows 的 account／ACL 查核；任意 SDK sandbox、Codex writable roots／network 的 BAT pass-through；容器／新 runner／BAT 上游改動，都不在本包。
 - 原生 GUI、逐次批准與其他主機服務的外部寫入不可由 Connector 全面禁止。`cwd`、managed clone、skill 指示與任何單次檢查都不稱為完整永久保護。

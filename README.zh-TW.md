@@ -21,6 +21,8 @@ BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端�
 
 Dashboard 啟動提示依 capabilities 的 `hosts[].confinement.host_account.start_effect` 判斷：`verified` 表示帳號已查核；`recheck` 表示尚未查核或已過期，啟動時會重查；`fallback_default` 表示可降級處理的加固缺口或未宣告帳號，受限 Claude 使用 plain default；只有 `refused` 會拒絕 Claude 與 Codex 的新 start。讀取不觸發查核，reason 仍可見，不能只因 status 不是 verified 就認定無法啟動。
 
+帳號查核另需操作者設好的可信 auditor SSH alias（`check_ssh_alias`）、其 UID（`check_uid`）及目標 BAT 帳號名稱（`bat_account`）。Auditor 的登入環境不得受 BAT 帳號控制，透過限定 sudo 指令直接執行隔離的 Python，不經 BAT 的 shell 或 startup files；回覆的 UID／channel facts 也須符合設定。沒有可信通道時回 `unknown/check_channel_untrusted`、`fallback_default`，受限 Claude 用 plain default，絕不啟用 acceptEdits。原本的 BAT home／startup 加固仍是額外檢查，單靠它不能證明通道可信。設定與 sudoers 範例見[設計文件](docs/design/confinement.md)。
+
 `START_IN_PROGRESS` 表示另一程序正在 start 此 session：稍後讀回，不盲目重試；`CONFINEMENT_START_UNSETTLED` 則須讀回可能已送出的 start。
 
 內容包含四個部分：

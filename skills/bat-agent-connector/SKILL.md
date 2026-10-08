@@ -118,6 +118,10 @@ last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_cont
    For a new start, read capabilities `hosts[].confinement.host_account.start_effect` and `reason`.
    `recheck` runs a fresh check at start; `fallback_default` uses plain default for confined Claude (also the
    undeclared-account path), and `refused` blocks Claude and Codex. Never treat every non-verified status as blocked.
+   Host-account verification requires an operator-declared trusted auditor `check_ssh_alias`, a different `check_uid`
+   and `bat_account`; the checker never logs in as BAT. `check_channel_untrusted` means fallback_default, not verified.
+   No trusted channel: use Claude default; do not ask to enable acceptEdits or create an auditor/sudo rule yourself.
+   沒有可信 auditor 通道時，受限 Claude 用 default；同帳號登入回報的 verified 不算證據，也不自行改 SSH／sudo 設定。
 7. `START_IN_PROGRESS`: another process is starting this session; read it back later, do not retry blindly.
    `CONFINEMENT_START_UNSETTLED` requires read-back of a possibly sent start.
    START_IN_PROGRESS 表示另一程序正在 start 此 session；稍後讀回，不盲目重試。CONFINEMENT_START_UNSETTLED 須讀回可能已送出的 start。
