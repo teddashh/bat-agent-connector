@@ -296,8 +296,11 @@ def _admit_continue(ops: OperationService, principal: Principal, target: dict, p
         raise OperationError("INVALID_PARAMS", "expected_source_head_sha must be a full SHA", 422)
     if refs and not expected:
         raise OperationError("INVALID_PARAMS", "attachments need expected_source_head_sha", 422)
-    if refs and not ops.context["artifact_host"].available(cp["host"]):
-        raise OperationError("ARTIFACT_ADAPTER_UNAVAILABLE", "no artifact SSH adapter for this host", 409)
+    if refs:
+        adapter = ops.context["artifact_host"]
+        ready = adapter.readiness.get(cp["host"], {})
+        if not adapter.available(cp["host"]) or ready.get("ok") is False:
+            raise OperationError("ARTIFACT_ADAPTER_UNAVAILABLE", ready.get("message") or "no ready artifact SSH adapter for this host", 409)
     if params.get("target_host") or params.get("target_workspace"):
         raise OperationError("INVALID_PARAMS", "cross-host continuation is not available yet", 422)
     if params.get("work_item_id"):
@@ -320,6 +323,8 @@ def _admit_continue(ops: OperationService, principal: Principal, target: dict, p
     text = params.get("instructions")
     if not isinstance(text, str) or not text.strip() or len(text) > MAX_INSTRUCTIONS:
         raise OperationError("INVALID_PARAMS", f"instructions must be 1-{MAX_INSTRUCTIONS} characters", 422)
+    if refs and len(_input_instructions(ops.db, text, refs)) > service.MAX_PROMPT_CHARS - 1500:
+        raise OperationError("INVALID_PARAMS", "instructions and input manifest exceed the prompt limit", 422)
     if params.get("agent", "claude") not in {"claude", "codex"}:
         raise OperationError("INVALID_PARAMS", "agent must be claude or codex", 422)
     if not (cp["workspace_id"] or cp["workspace_name"]):
@@ -395,6 +400,17 @@ def prepare_script(src: str, dest: str, worktree: str, branch: str, commit: str,
 def prompt_marker(cp: dict, operation_id: str) -> str:
     """First line of the first instruction: lets a lost send be found in the new session's transcript."""
     return f"[batc checkpoint {cp['checkpoint_id']} · {operation_id}]"
+
+
+def _input_instructions(db, instructions: str, refs: list[dict]) -> str:
+    if not refs:
+        return instructions
+    lines = ["", "Verified input files (relative to your working folder):"]
+    for ref in refs:
+        row = artifacts.get(db, ref["artifact_id"], ref["revision"])
+        lines.append(f".batc-inputs/{ref['artifact_id']}-r{ref['revision']}/{row['display_name']} "
+                     f"[{ref['artifact_id']} revision {ref['revision']}, SHA-256 {ref['digest']}]")
+    return instructions + "\n".join(lines)
 
 
 def first_prompt(cp: dict, *, worktree: str, branch: str, instructions: str, marker: str | None = None) -> str:
@@ -572,16 +588,9 @@ async def _run_continue(ctx: OpContext) -> dict:
 
     agent = ctx.params.get("agent", "claude")
     marker = prompt_marker(cp, ctx.operation_id)
-    instructions = ctx.params["instructions"]
-    if refs:
-        lines = ["", "Verified input files (relative to your working folder):"]
-        for ref in refs:
-            row = artifacts.get(ops.db, ref["artifact_id"], ref["revision"])
-            lines.append(f".batc-inputs/{ref['artifact_id']}-r{ref['revision']}/{row['display_name']} "
-                         f"[{ref['artifact_id']} revision {ref['revision']}, SHA-256 {ref['digest']}]")
-        instructions += "\n".join(lines)
-        if len(instructions) > service.MAX_PROMPT_CHARS - 1500:
-            raise NeedsAttention("INVALID_PARAMS", "instructions and input manifest exceed the prompt limit")
+    instructions = _input_instructions(ops.db, ctx.params["instructions"], refs)
+    if refs and len(instructions) > service.MAX_PROMPT_CHARS - 1500:
+        raise NeedsAttention("INVALID_PARAMS", "instructions and input manifest exceed the prompt limit")
     text = first_prompt(cp, worktree=worktree, branch=branch, instructions=instructions, marker=marker)
     # origin_cwd stays the workspace folder session_start recorded: merges into it are refused
     # (DESTINATION_MANUAL), which is what a checkpoint session's work should get. Results reach a PR instead.
