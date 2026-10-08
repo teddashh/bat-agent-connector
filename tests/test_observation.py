@@ -288,8 +288,8 @@ def test_b03_worktree_binding_backfill_matches_live_and_reopens_without_writes(t
         return worktree_id("h1", "checkpoint.continue", op["operation_id"], "worktree"), binding_seq
 
     def participation(j, wid):
-        return [(j.get(r["execution_id"])["idem_key"], r["status"],
-                 [j.command_get(cid)["kind"] for cid in r["command_ids"]]) for r in relation_pages(Observation(j), wid)]
+        return sorted((j.get(r["execution_id"])["idem_key"], r["status"],
+                       [j.command_get(cid)["kind"] for cid in r["command_ids"]]) for r in relation_pages(Observation(j), wid))
 
     live = Journal(tmp_path / "live.db")
     live_wid, live_seq = populate(live)

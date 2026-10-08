@@ -11,6 +11,7 @@ Phase 1 規格已審查。Phase 2 分兩步：Part A（本次）實作伺服器�
 | Connector | `5e8e41696ebc6a1a9d3ea92ddb7a1d338537ca1b`，本工作開始時的 `HEAD` 與 `origin/main`；branch 為 `feat/observation`。套件版本仍為 `0.2.4`。本文件中的「現有」均指這個 commit。 |
 | Delivery Part A adapter | Rebase 基準 `0c13601a7316a581fc6a4a504de37035b870ee4d`（#34）。已接讀 `pr_merge_previews`、`merge.verify` step receipt 與 `pr_metadata_settlements`；其 DDL 不占資料步驟編號。 |
 | Delivery acknowledged-conflict adapter | 本輪 rebase 基準 `200636f9bcc5d5bd13b3f2963fe812ff58c0645a`（#40）。接讀 acknowledged PATCH 的 conflict settlement，原 metadata control flow 不變。 |
+| Worktree relations 修正 | `eff252e`（#35 的審查基準）。補 seq binding intervals，固定 relations 的 as_of；不改已核准的 Part A/B、worktree ID 或資料步驟編號。 |
 | 計畫 | v1.0（2026-10-06）；以章節及驗收編號引用，不複製私有計畫。 |
 | BAT | `b7419892fbc9946799b64cca24c2ec8c7fa15c42`；不代表每台主機都已安裝此版，實際 `serverVersion` 另存於掃描證據。 |
 
@@ -305,6 +306,7 @@ Phase 2 的新增 `observation.py` 與共用 `resource_ids.py`；前者只集中
 | B01；§08 | `test_b01_warm_reuse_reviewer_followup_and_command_ranges`、`test_b01_pending_bind_and_snapshot_relations`、`test_b01_warm_binding_closes_reserved_intent_without_overwriting`：兩 task 共用 session 的 ranges、舊 reviewer/replacement、follow-up、pending/bound/closed、固定 revision 分頁；原 reserved intent 正確關閉。 |
 | B01；§08、§10 | `test_b01_worktree_shared_creation_identity_and_reuse`、`test_b01_legacy_task_external_creation_keeps_shared_identity`：共享 registry 建立 slot、reviewer/failover/reuse 同 ID、同 path 新 intent 不合併；使用 cleanup 共用 hash 函式。 |
 | B01、B03；§08、§10、§11 | `test_b01_worktree_relations_exclude_late_bindings_from_existing_cursor`、`test_b01_worktree_moves_preserve_relation_ranges_across_pages`：舊 cursor 不受晚 binding 或後續 move 影響；fresh read 看新 binding；A 保留舊 relations/commands，B 只收 move 後範圍，跨頁無重複。`test_b03_worktree_binding_backfill_matches_live_and_reopens_without_writes`：版本 1 以資料步驟 2 seed，明確原 seq 與 live projection 相同；重開不改 rows/head/version。`test_b03_worktree_binding_projection_failure_preserves_core_event`：move 投影失敗回滾新列與舊 end，core row/錯誤 flag 保留。 |
+| B03；§08、§11 | `test_b03_saved_worktree_binding_uses_backfill_link_seq_without_inventing_earlier_range`：僅有目前 binding 時，以同一 backfill event/link seq 作 start；排除其前的 closed relation/commands，不推測舊事件歸屬，重開零寫入。 |
 | B01；§08 | `tests/test_resource_ids.py`：共用 root resolver 的 failover chain、reviewer lookup、warm reuse、逆序 registry、缺 parent、cycle、其他建立 intent 及原 JSON created_at 格式。 |
 | B01、B03；§08、§11 | `test_b01_b03_checkpoint_source_run_steps_and_worktree_history`、`test_b01_b03_receipt_versions_are_fixed_at_the_writer_transition`：真實 temp Git checkpoint/run 及 steps 的多資源 timeline 去重；receipt 在既有 writer 轉換時保存各版本，不以新結果改舊事件。 |
 | B01、B02；§10、§11 | `test_b01_history_as_of_late_binding_and_invalid_cursors`：history as_of 同時限制 event/linked_at；晚 binding 不進已開 snapshot，kind/order/resource/time 游標契約。 |
