@@ -142,9 +142,9 @@ No paid API key is required.
 
 The task daemon also serves `/api/v1` on its loopback port: capabilities, a persisted session inventory with
 staleness, durable operations, and one event cursor with SSE. Issue a token per client
-(`batc api-token issue --actor ted-dashboard --scope observe --scope operate --scope start --scope integrate`;
-`start` lets it start new agent sessions from checkpoints, `integrate` lets it push results to a PR's head branch) and
-send it as
+(`batc api-token issue --actor ted-dashboard --scope observe --scope operate --scope start --scope integrate --scope
+manage --scope approve`; `start` lets it start new agent sessions from checkpoints, `integrate` lets it push results
+to a PR's head branch, `manage` edits projects and work items, `approve` accepts work items as done) and send it as
 `Authorization: Bearer`. MCP clients reach the same operations with `operation_submit`, `operation_cancel` and
 `operation_resume` (`confirm=true`, and `BATC_API_TOKEN` set to the client's own token: operations never run as the
 local admin). See [docs/design/api-v1.md](docs/design/api-v1.md).
@@ -168,6 +168,11 @@ pinned by SHA) and apply the preview (`integration.apply`: one normal push of th
 branch, with the host's git credentials; never forced, and your folders are never changed). This needs
 `integrate = {hosts, remote_url}` on the repository's `[[github.repos]]` entry. See
 [docs/design/integration.md](docs/design/integration.md).
+
+Projects and work items record what is being done and why: the request verbatim, acceptance, steps, and links to
+the sessions, checkpoints, operations and PRs that carried it. An agent with `manage` can claim an item done; only
+a token with `approve` accepts it, for the content it read, and editing the content afterwards asks again. Order,
+pins, renames and archive follow Project Hub's rules. See [docs/design/work-items.md](docs/design/work-items.md).
 
 ### Connect an MCP client
 

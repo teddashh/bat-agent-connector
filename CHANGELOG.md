@@ -2,6 +2,17 @@
 
 ## Next release (unreleased)
 
+- Projects and work items (docs/design/work-items.md, plan §05/§08/§10/§19/§20, W05): connector-owned projects (tree,
+  repositories, Task Service project) and work items (goal, request verbatim, acceptance, steps, state, parent,
+  `derived_from`) with stable IDs, per-parent order with pins, archive and restore that keep an entry's slot, and
+  links to sessions, checkpoints, operations, tasks and PRs (removals kept as history). An agent's "done" is a claim;
+  `work_item.approve` accepts it against a fingerprint of the content read, editing the content asks again, and
+  `work_item.continue` sends it back. New scope `approve` (separate from `manage`). Each change is one transaction
+  recorded with its operation, so a re-run never applies twice. Routes `/api/v1/projects`, `/api/v1/work-items`;
+  `work_items` on session and operation reads; MCP `projects_list`, `project_get`, `work_items_list`,
+  `work_item_get`; CLI `batc project`, `batc item`; Dashboard Projects, project and work item screens, items waiting
+  for a decision on Pending, and starting agent work from a linked checkpoint. Rules ported from Project Hub v4.68.2
+  (MIT, THIRD_PARTY_NOTICES.md).
 - Integration into an existing PR (docs/design/integration.md, plan §14, C01-C03): `integration.preview` pins the
   PR head and chosen results (a person's checkpoint, an agent's checkpoint run, a GitHub branch) by SHA in a bare,
   identity-checked area under the host's first managed root, lists every commit and file that would enter, and

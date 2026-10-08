@@ -250,6 +250,42 @@ class Journal:
             );
             CREATE INDEX IF NOT EXISTS integration_receipts_source ON integration_receipts(repository, head_ref,
                 source_key, status);
+            -- Projects and work items (work_items.py). Archived rows stay, so an ID is never reused.
+            CREATE TABLE IF NOT EXISTS projects (
+                project_id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+                parent_id TEXT, derived_from TEXT, repositories TEXT NOT NULL DEFAULT '[]', task_project TEXT,
+                pinned INTEGER NOT NULL DEFAULT 0, archived_at REAL, archived_by TEXT,
+                version INTEGER NOT NULL DEFAULT 1, created_by TEXT NOT NULL, operation_id TEXT NOT NULL UNIQUE,
+                created_at REAL NOT NULL, updated_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS work_items (
+                work_item_id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(project_id),
+                parent_id TEXT, derived_from TEXT, title TEXT NOT NULL, goal TEXT NOT NULL DEFAULT '',
+                request TEXT NOT NULL DEFAULT '', acceptance TEXT NOT NULL DEFAULT '',
+                steps TEXT NOT NULL DEFAULT '[]', state TEXT NOT NULL DEFAULT 'todo', done_by TEXT, done_at REAL,
+                approved_fingerprint TEXT, approved_by TEXT, approved_at REAL, continued_steps TEXT,
+                pinned INTEGER NOT NULL DEFAULT 0, archived_at REAL, archived_by TEXT, archive_operation TEXT,
+                version INTEGER NOT NULL DEFAULT 1, created_by TEXT NOT NULL, operation_id TEXT NOT NULL UNIQUE,
+                created_at REAL NOT NULL, updated_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS work_items_tree ON work_items(project_id, parent_id);
+            CREATE INDEX IF NOT EXISTS work_items_changed ON work_items(updated_at);
+            -- Saved sibling order per parent ("projects" or "items:<project_id>"); "" is the top level.
+            CREATE TABLE IF NOT EXISTS tree_order (
+                scope TEXT NOT NULL, parent TEXT NOT NULL, ids TEXT NOT NULL, PRIMARY KEY(scope, parent)
+            );
+            CREATE TABLE IF NOT EXISTS work_item_links (
+                link_id INTEGER PRIMARY KEY AUTOINCREMENT, work_item_id TEXT NOT NULL, kind TEXT NOT NULL,
+                ref TEXT NOT NULL, note TEXT, linked_by TEXT NOT NULL, linked_at REAL NOT NULL,
+                link_operation TEXT NOT NULL, removed_by TEXT, removed_at REAL, remove_operation TEXT
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS work_item_links_active ON work_item_links(work_item_id, kind, ref)
+                WHERE removed_at IS NULL;
+            CREATE INDEX IF NOT EXISTS work_item_links_ref ON work_item_links(kind, ref);
+            -- One row per applied management operation, written in the same transaction as the change.
+            CREATE TABLE IF NOT EXISTS management_applied (
+                operation_id TEXT PRIMARY KEY, result TEXT NOT NULL, applied_at REAL NOT NULL
+            );
             COMMIT;
         """)
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(tasks)")}

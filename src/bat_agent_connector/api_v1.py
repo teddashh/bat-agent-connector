@@ -16,7 +16,7 @@ import time
 from importlib import resources
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import __version__, api_auth, checkpoints, integration, resource_policy, service
+from . import __version__, api_auth, checkpoints, integration, resource_policy, service, work_items
 from .errors import BatError, ResourceReadOnly
 from .operations import STATES, OperationError
 
@@ -109,6 +109,10 @@ class ApiV1:
             ("GET", r"/api/v1/integrations/previews/(?P<pv>ipv_[0-9a-f]{32})", self.integration_preview, "observe"),
             ("GET", r"/api/v1/integrations", self.integrations, "observe"),
             ("GET", r"/api/v1/integrations/(?P<op>op_[0-9a-f]{32})", self.integration, "observe"),
+            ("GET", r"/api/v1/projects", self.projects, "observe"),
+            ("GET", r"/api/v1/projects/(?P<prj>prj_[0-9a-f]{20})", self.project, "observe"),
+            ("GET", r"/api/v1/work-items", self.work_items, "observe"),
+            ("GET", r"/api/v1/work-items/(?P<wi>wi_[0-9a-f]{20})", self.work_item, "observe"),
         ]
 
     # ------------------------------------------------------------------ plumbing
@@ -290,7 +294,7 @@ class ApiV1:
         return 200, {"actor": principal.actor, "scopes": sorted(principal.scopes), "api_version": API_VERSION,
                      "contract_version": CONTRACT_VERSION, "connector": __version__, "hosts": hosts,
                      "actions": actions, "operation_statuses": list(STATES),
-                     "features": {"inventory": True, "events_stream": True, "operations": True,
+                     "features": {"inventory": True, "events_stream": True, "operations": True, "work_items": True,
                                   "github": self.daemon.ops.context.get("github") is not None,
                                   "deploy": bool(gh_cfg.recipes),
                                   "checkpoints": [h for h in fleet.config.hosts if self._can_continue(h)],
@@ -325,7 +329,9 @@ class ApiV1:
     async def session(self, query, host, sid, **_):
         self._known_host(host)
         row = self.daemon.inventory.get_session(host, sid)
-        out = {"session": row, "started_from": checkpoints.started_from(self.daemon.journal.db, host, sid)}
+        db = self.daemon.journal.db
+        out = {"session": row, "started_from": checkpoints.started_from(db, host, sid),
+               "work_items": work_items.work_items_for(db, "session", f"{host}/{sid}")}
         if self._bool(query, "live"):
             out["policy"] = await resource_policy.session_policy(self.daemon.fleet, host, sid)
         elif row is None:
@@ -366,7 +372,8 @@ class ApiV1:
         return (202 if created else 200), {"operation": op, "created": created}
 
     async def operation(self, op, **_):
-        return 200, {"operation": self.daemon.ops.get(op)}
+        return 200, {"operation": self.daemon.ops.get(op),
+                     "work_items": work_items.work_items_for(self.daemon.journal.db, "operation", op)}
 
     async def cancel_operation(self, principal, op, **_):
         return 200, {"operation": self.daemon.ops.cancel(principal, op)}
@@ -415,6 +422,24 @@ class ApiV1:
     async def checkpoint_preview(self, host, sid, **_):
         self._known_host(host)
         return 200, {"preview": await checkpoints.preview(self.daemon.ops, host, sid)}
+
+    async def projects(self, query, **_):
+        return 200, work_items.projects_list(self.daemon.journal.db,
+                                             include_archived=bool(self._bool(query, "include_archived")))
+
+    async def project(self, query, prj, **_):
+        return 200, work_items.project_get(self.daemon.journal.db, prj,
+                                           include_archived=bool(self._bool(query, "include_archived")))
+
+    async def work_items(self, query, **_):
+        before = self._q(query, "before")
+        return 200, work_items.work_items_list(
+            self.daemon.journal.db, project_id=self._q(query, "project_id"), state=self._q(query, "state"),
+            pending=self._bool(query, "pending"), include_archived=bool(self._bool(query, "include_archived")),
+            limit=self._int(query, "limit", 50), before=float(before) if before else None)
+
+    async def work_item(self, wi, **_):
+        return 200, work_items.work_item_get(self.daemon.journal.db, wi)
 
     async def task(self, task, **_):
         return 200, {"task": await self.daemon.call("work_status", {"task_id": task})}
