@@ -893,17 +893,31 @@ def page_limit(limit):
     return limit
 
 
-def cursor_read(cursor, filters, head):
+def history_cursor_key(key):
+    return type(key) is int
+
+
+def relations_cursor_key(key):
+    return type(key) is list and len(key) == 2 and type(key[0]) is int and type(key[1]) is str
+
+
+def cursor_read(cursor, filters, read_head, *, key_validator):
     fhash = hashlib.sha256(dump(filters).encode()).hexdigest()
     if not cursor:
-        return fhash, head, None
+        head = read_head()
+        return fhash, head, None, head
     try:
         value = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
-        if value["v"] != 1 or value["f"] != fhash or type(value["a"]) is not int or not 0 <= value["a"] <= head:
+        if (value["v"] != 1 or value["f"] != fhash or type(value["a"]) is not int or value["a"] < 0
+                or not key_validator(value["k"])):
             raise ValueError
-        return fhash, value["a"], value["k"]
     except (TypeError, ValueError, KeyError):
         raise OperationError("INVALID_CURSOR", "cursor does not match this resource and filters", 422) from None
+    # Validate the token and its key before even reading the journal head.
+    head = read_head()
+    if value["a"] > head:
+        raise OperationError("INVALID_CURSOR", "cursor does not match this resource and filters", 422)
+    return fhash, value["a"], value["k"], head
 
 
 def cursor_out(fhash, as_of, key):
@@ -952,7 +966,6 @@ class Observation:
         return data
 
     def history(self, resource_type, resource_id, *, cursor=None, limit=50, order="desc", kind=None, since=None, until=None):
-        resource = summary(self.resource(resource_type, resource_id))
         page_limit(limit)
         if order not in {"asc", "desc"}:
             raise OperationError("INVALID_PARAMS", "order must be asc or desc", 422)
@@ -964,8 +977,9 @@ class Observation:
                 raise OperationError("INVALID_PARAMS", "since/until must be UTC epoch seconds", 422)
         if since is not None and until is not None and since > until:
             raise OperationError("INVALID_PARAMS", "since must not exceed until", 422)
-        head = self.journal.api_head()
-        f, as_of, last = cursor_read(cursor, [resource_type, resource_id, order, sorted(kinds), since, until], head)
+        f, as_of, last, head = cursor_read(cursor, [resource_type, resource_id, order, sorted(kinds), since, until],
+                                         self.journal.api_head, key_validator=history_cursor_key)
+        resource = summary(self.resource(resource_type, resource_id))
         sql = """SELECT e.* FROM api_events e LEFT JOIN api_event_context c ON c.seq=e.seq
             WHERE e.seq<=? AND e.seq IN (
                 SELECT r.seq FROM api_event_resources r WHERE r.resource_type=? AND r.resource_id=? AND r.linked_at_seq<=?
@@ -980,8 +994,6 @@ class Observation:
         args = [as_of, resource_type, resource_id, as_of, as_of, resource_type, resource_id,
                 resource_type, resource_id, resource_type, resource_id, as_of]
         if last is not None:
-            if type(last) is not int:
-                raise OperationError("INVALID_CURSOR", "invalid history key", 422)
             sql += " AND e.seq" + (">?" if order == "asc" else "<?")
             args.append(last)
         if kinds:
@@ -1001,12 +1013,12 @@ class Observation:
                     "unknown_occurrence_times_excluded": since is not None or until is not None}}
 
     def relations(self, resource_type, resource_id, *, cursor=None, limit=50, execution_id=None, include_closed=True):
-        resource = self.resource(resource_type, resource_id)
         page_limit(limit)
         if type(include_closed) is not bool:
             raise OperationError("INVALID_PARAMS", "include_closed must be boolean", 422)
-        head = self.journal.api_head()
-        f, as_of, last = cursor_read(cursor, [resource_type, resource_id, execution_id, include_closed], head)
+        f, as_of, last, _ = cursor_read(cursor, [resource_type, resource_id, execution_id, include_closed],
+                                      self.journal.api_head, key_validator=relations_cursor_key)
+        resource = self.resource(resource_type, resource_id)
         sql = """SELECT v.body FROM relation_revisions v JOIN observation_relations r USING(relation_id)
             WHERE v.seq<=? AND v.seq=(SELECT MAX(v2.seq) FROM relation_revisions v2
             WHERE v2.relation_id=v.relation_id AND v2.seq<=?)"""
@@ -1029,8 +1041,6 @@ class Observation:
             if execution_id and r["execution_id"] != execution_id or not include_closed and r["status"] == "closed":
                 continue
             key = [r["start_seq"] or 0, r["relation_id"]]
-            if last is not None and (not isinstance(last, list) or len(last) != 2 or type(last[0]) is not int or not isinstance(last[1], str)):
-                raise OperationError("INVALID_CURSOR", "invalid relation key", 422)
             if last is not None and key <= last:
                 continue
             r["command_ids"] = [x[0] for x in self.db.execute("""SELECT cr.command_id,cr.linked_at_seq FROM command_relations cr WHERE relation_id=? AND cr.linked_at_seq<=? ORDER BY cr.rowid""", (r["relation_id"], as_of))
