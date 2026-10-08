@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Observation settlement history ([design](docs/design/observation.md), plan §08/§09/§10/§11/§15, B03/C07):
+  all three metadata-settlement writers share one insert/event transaction, including acknowledged PATCH conflicts.
+  Only the first inserted receipt emits history, preserving its code without PR text; legacy receipts use the
+  same sanitized backfill. Delivery DDL checks use the journal's latest allocated data-step constant.
+
 - Delivery acknowledged metadata conflicts ([design](docs/design/delivery.md), plan §09/§10/§15, C07): save a
   conflict settlement when an acknowledged PATCH reads back differently, releasing the PR for a fresh-digest update
   while retaining needs_attention and its audit. Resume and reconciliation use the saved conclusion without GitHub
