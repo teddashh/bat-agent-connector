@@ -432,11 +432,10 @@ class ApiV1:
                                            include_archived=bool(self._bool(query, "include_archived")))
 
     async def work_items(self, query, **_):
-        before = self._q(query, "before")
         return 200, work_items.work_items_list(
             self.daemon.journal.db, project_id=self._q(query, "project_id"), state=self._q(query, "state"),
             pending=self._bool(query, "pending"), include_archived=bool(self._bool(query, "include_archived")),
-            limit=self._int(query, "limit", 50), before=float(before) if before else None)
+            limit=self._int(query, "limit", 50), cursor=self._q(query, "cursor"))
 
     async def work_item(self, wi, **_):
         return 200, work_items.work_item_get(self.daemon.journal.db, wi)

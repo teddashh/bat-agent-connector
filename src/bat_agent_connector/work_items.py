@@ -878,6 +878,7 @@ async def _run_continue(ctx: OpContext) -> dict:
 def _check_link(ops: OperationService, target: dict, params: dict) -> tuple[dict, str, str, bool, str]:
     _only(params, ("kind", "ref", "note", "remove"))
     item = _get_item(ops.db, _target_id(target, "work_item_id", WORK_ITEM_ID), active=True)
+    _get_project(ops.db, item["project_id"], active=True)
     remove = params.get("remove", False)
     if not isinstance(remove, bool):
         raise _bad("INVALID_PARAMS", "params.remove must be true or false")
@@ -985,8 +986,10 @@ def project_get(db, project_id: str, *, include_archived: bool = False) -> dict:
 
 
 def work_items_list(db, *, project_id: str | None = None, state: str | None = None, pending: bool | None = None,
-                    include_archived: bool = False, limit: int = 50, before: float | None = None) -> dict:
-    """Work items across projects, most recently changed first (e.g. pending=true: waiting for a person)."""
+                    include_archived: bool = False, limit: int = 50, cursor: str | None = None) -> dict:
+    """Work items across projects, most recently changed first (e.g. pending=true: waiting for a person). Pages
+    continue from ``next_cursor``: the last row's change time and ID, since a subtree archive or restore gives many
+    rows the same time."""
     limit = max(1, min(LIST_MAX, int(limit)))
     if state is not None and state not in (*STATES, "awaiting_approval"):
         raise _bad("INVALID_FILTER", f"unknown state {state!r}")
@@ -1001,8 +1004,10 @@ def work_items_list(db, *, project_id: str | None = None, state: str | None = No
         sql, args = sql + " AND w.state=?", [*args, state]
     elif state in ("done", "awaiting_approval"):
         sql += " AND w.state='done'"
-    if before is not None:
-        sql, args = sql + " AND w.updated_at<?", [*args, float(before)]
+    if cursor:
+        at, wid = _cursor(cursor)
+        sql += " AND (w.updated_at<? OR (w.updated_at=? AND w.work_item_id>?))"
+        args += [at, at, wid]
     sql += " ORDER BY w.updated_at DESC, w.work_item_id"
     out, last, more = [], None, False
     for r in db.execute(sql, args):  # completion is computed, so filter it here, then page
@@ -1014,8 +1019,19 @@ def work_items_list(db, *, project_id: str | None = None, state: str | None = No
             more = True
             break
         out.append({**x, "project_name": r["project_name"]})
-        last = x["updated_at"]
-    return {"work_items": out, "next_before": last if more else None}
+        last = f"{x['updated_at']!r}|{x['work_item_id']}"
+    return {"work_items": out, "next_cursor": last if more else None}
+
+
+def _cursor(value) -> tuple[float, str]:
+    at, sep, wid = str(value).partition("|")
+    try:
+        when = float(at)
+    except ValueError:
+        when = None
+    if not sep or when is None or not WORK_ITEM_ID.fullmatch(wid):
+        raise _bad("INVALID_CURSOR", "cursor must be a next_cursor from an earlier page")
+    return when, wid
 
 
 def work_item_get(db, work_item_id: str, *, events: int = 50) -> dict:

@@ -1087,8 +1087,10 @@ function continueFrom(w, checkpointId) {
     go.disabled = false;
   } }, t("start_agent_work"));
   const d = drawer(h("p", { class: "muted" }, t("confined_note")), instr, h("div", { class: "actions" }, agent, go), out);
-  const open = h("button", { class: "secondary", disabled: !may("start"), title: may("start") ? null : t("needs_start_scope"),
-    onclick: () => d.toggle.click() }, t("start_from_checkpoint"));
+  // Starting needs start; linking the run back needs manage. Without both, nothing starts (an unlinked run is untracked).
+  const why = !may("start") ? t("needs_start_scope") : !may("manage") ? t("needs_manage_scope") : null;
+  const open = h("button", { class: "secondary", disabled: Boolean(why), title: why, onclick: () => d.toggle.click() },
+    t("start_from_checkpoint"));
   return h("div", { class: "grow" }, open, d.box);
 }
 function eventDetail(b) {

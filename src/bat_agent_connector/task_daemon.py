@@ -250,7 +250,8 @@ class TaskDaemon:
             return work_items.work_items_list(
                 self.journal.db, project_id=params.get("project_id"), state=params.get("state"),
                 pending=pending if isinstance(pending, bool) else None,
-                include_archived=bool(params.get("include_archived")), limit=int(params.get("limit") or 50))
+                include_archived=bool(params.get("include_archived")), limit=int(params.get("limit") or 50),
+                cursor=params.get("cursor"))
         if method == "work_item_get":
             return work_items.work_item_get(self.journal.db, str(params.get("work_item_id")))
         raise ValueError("unknown api method")
