@@ -230,22 +230,28 @@ async def run(ctx):
     try:
         return await _run(ctx)
     except (Cancelled, StepFailed, asyncio.CancelledError) as exc:
-        if isinstance(exc, StepFailed) and exc.code != 'CANCELLED':
-            raise
         # Only positive no-start evidence releases capacity. Unknown external
-        # effects stay unresolved; cancellation cannot hide a sent frame.
+        # effects stay unresolved; cancellation cannot hide a sent frame. Retain
+        # every proven carrier: creation ownership alone does not authorize
+        # deleting later commits, uncommitted files or another client's workspace.
         sid, host = str(uuid.uuid5(NAMESPACE, ctx.operation_id)), ctx.target['host']
         reservation, carrier = _receipt(ctx, 'session.reserve'), _receipt(ctx, 'worktree.create')
         row = registry.get(host, sid) or {}
         unresolved = ctx.service.db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? AND status IN ('started','uncertain') "
-            "AND name IN ('worktree.create','session.start','workspace.register','send','worktree.rollback')", (ctx.operation_id,)).fetchone()
+            "AND name IN ('worktree.create','session.start','workspace.register','send')", (ctx.operation_id,)).fetchone()
         if reservation and row.get('start_sent') is False and not unresolved:
+            plan = _receipt(ctx, 'source.resolve')
             fields = {'status': 'failed'}
+            expected = {'task_id': None, 'role': None, 'status': 'starting', 'start_sent': False,
+                        'cwd': plan['folder'], 'worktree_path': None, 'branch': None}
             if carrier:
-                fields.update({k: carrier[k] for k in ('cwd', 'worktree_path', 'branch')})
+                pointer = {k: carrier[k] for k in ('cwd', 'worktree_path', 'branch')}
+                fields.update(pointer)
+                if _receipt(ctx, 'carrier.record'):
+                    expected.update(pointer)
             registry.project_start(host, sid, operation_id=ctx.operation_id, created_at=reservation['created_at'],
-                expected={'task_id': None, 'role': None, 'status': 'starting', 'start_sent': False}, fields=fields)
-        if isinstance(exc, StepFailed):
+                expected=expected, fields=fields)
+        if isinstance(exc, StepFailed) and exc.code == 'CANCELLED':
             raise Cancelled() from exc
         raise
 
@@ -298,134 +304,95 @@ async def _run(ctx):
             registry.claim_unsent(host, sid)
         await ctx.step('session.reserve', reserve, request={'session_id': sid}, reconcile=reserved)
         carrier = {'cwd': plan['folder'], 'worktree_path': None, 'branch': None, 'source_branch': plan['source_branch']}
-        try:
-            if plan['use_worktree']:
-                async def create():
-                    grant = creation_grant()
-                    async def frame():
-                        await _identity(ctx, plan, client.guard_read)
-                    result = await _invoke(ctx, plan, 'carrier', client, 'worktree:create',
-                        {'sessionId': sid, 'cwd': plan['folder'], 'installPnpm': False, 'baseBranch': plan['source_branch']},
-                        grant, before_frame=frame)
-                    if not isinstance(result, dict) or result.get('success') is not True:
-                        raise NeedsAttention('START_CARRIER_UNPROVEN', 'worktree create reply did not prove success')
-                    carrier = _carrier(plan, result)
-                    try:
-                        resource_policy.check_new_worktree(grant, hc, plan['folder'], carrier['cwd'], plan['origin_root'])
-                    except ResourceReadOnly as exc:
-                        raise NeedsAttention('START_CARRIER_UNPROVEN', 'created carrier is outside the fixed destination policy') from exc
-                    return carrier
-                async def carrier_read(_):
-                    if _unsent(ctx, 'carrier'):
-                        return RERUN
-                    result = await client.invoke('worktree:status', {'sessionId': sid})
-                    if not result:
-                        return None
-                    result = _carrier(plan, result)
-                    creation_grant(result)
-                    if await _head(client.invoke, result['cwd']) != plan['base_commit']:
-                        raise NeedsAttention('START_GIT_CHANGED', 'created carrier differs from the fixed commit')
-                    return result
-                carrier = await ctx.step('worktree.create', create, request={'session_id': sid, 'cwd': plan['folder'],
-                    'branch': plan['source_branch'], 'commit': plan['base_commit']}, reconcile=carrier_read)
-                async def record_carrier():
-                    return project({k: carrier[k] for k in ('cwd', 'worktree_path', 'branch')})
-                await ctx.step('carrier.record', record_carrier, reconcile=reread)
-            options = {'cwd': carrier['cwd'], 'agentPreset': plan['preset'], 'workspaceId': plan['workspace_id'],
-                       'workspaceName': plan['workspace_name'], **plan['permission_options']}
-            if plan['model']:
-                options['model'] = plan['model']
-            if plan['use_worktree']:
-                options.update(useWorktree=True, worktreePath=carrier['cwd'], worktreeBranch=carrier['branch'])
-            def verify_started(meta):
-                fatal = (ctx.service.get(ctx.operation_id).get('external_refs') or {}).get('start_mismatch')
-                if fatal:
-                    raise NeedsAttention(fatal, 'a prior start identity mismatch needs explicit review')
+        if plan['use_worktree']:
+            async def create():
+                grant = creation_grant()
+                async def frame():
+                    await _identity(ctx, plan, client.guard_read)
+                result = await _invoke(ctx, plan, 'carrier', client, 'worktree:create',
+                    {'sessionId': sid, 'cwd': plan['folder'], 'installPnpm': False, 'baseBranch': plan['source_branch']},
+                    grant, before_frame=frame)
+                if not isinstance(result, dict) or result.get('success') is not True:
+                    raise NeedsAttention('START_CARRIER_UNPROVEN', 'worktree create reply did not prove success')
+                carrier = _carrier(plan, result)
                 try:
-                    confinement.guard_start_record(registry.get(host, sid) or {})
-                    confinement.guard_start_cwd({'cwd': carrier['cwd']}, meta)
-                    confinement.ensure_confirmed(plan['confinement'], meta, allow_unknown=plan['write_scope'] != 'confined')
-                except confinement.ConfinementRefused as exc:
-                    if exc.code in confinement.START_IDENTITY_MISMATCH_CODES or confinement.verify(plan['confinement'], meta)['status'] == 'mismatch':
-                        ctx.set_refs(start_mismatch=exc.code)
-                        reservation = _receipt(ctx, 'session.reserve')
-                        registry.project_start(host, sid, operation_id=ctx.operation_id, created_at=reservation['created_at'],
-                            expected={'status': 'starting', 'start_sent': True, 'task_id': None, 'role': None, 'cwd': carrier['cwd']},
-                            fields={'error_code': exc.code,
-                                    'confinement': confinement.confirm(plan['confinement'], meta)})
-                    raise NeedsAttention(exc.code, str(exc)) from exc
-
-            async def start_frame():
-                await _identity(ctx, plan, client.guard_read, cwd=carrier['cwd'], branch=carrier['branch'])
-                await confinement.guard_start_frame(fleet, host, plan['confinement'])
-                _guard(ctx, plan)
-            async def start():
-                result = await _invoke(ctx, plan, 'start', client, 'claude:start-session',
-                    {'sessionId': sid, 'options': options}, creation_grant(carrier), before_frame=start_frame, start=True)
-                if not isinstance(result, dict) or result.get('ok') is not True or result.get('sessionId') != sid:
-                    raise NeedsAttention('START_UNPROVEN', 'start reply did not confirm the exact reserved session')
-                return {'host': host, 'session_id': sid, 'cwd': carrier['cwd'], 'started': True}
-            async def start_read(_):
-                row = registry.get(host, sid) or {}
-                if _unsent(ctx, 'start') and row.get('start_sent') is False:
+                    resource_policy.check_new_worktree(grant, hc, plan['folder'], carrier['cwd'], plan['origin_root'])
+                except ResourceReadOnly as exc:
+                    raise NeedsAttention('START_CARRIER_UNPROVEN', 'created carrier is outside the fixed destination policy') from exc
+                return carrier
+            async def carrier_read(_):
+                if _unsent(ctx, 'carrier'):
                     return RERUN
-                meta = await service._meta(client, sid)
-                if meta is None:
+                result = await client.invoke('worktree:status', {'sessionId': sid})
+                if not result:
                     return None
-                verify_started(meta)
-                return {'host': host, 'session_id': sid, 'cwd': carrier['cwd'], 'started': True}
-            started = await ctx.step('session.start', start, request={'session_id': sid, 'cwd': carrier['cwd'],
-                                     'options': options}, reconcile=start_read)
-            ctx.set_refs(start_result={**started, **carrier, 'base_commit': plan['base_commit'],
-                                      'agent_preset': plan['preset'], 'workspace': plan['workspace_name']})
-            async def confirm():
-                meta = await service._meta(client, sid)
-                if meta is None:
-                    raise NeedsAttention('START_CONFIRMATION_UNPROVEN', 'started session identity is not readable')
-                verify_started(meta)
-                return {'confinement': confinement.confirm(plan['confinement'], meta)}
-            confirmed = await ctx.step('session.confirm', confirm, reconcile=reread)
-            async def record_start():
-                return project({'status': 'active', 'start_sent': True, 'confinement': confirmed['confinement']}, carrier=carrier)
-            await ctx.step('session.record', record_start, reconcile=reread)
-        except StepFailed:
-            row = registry.get(host, sid) or {}
-            if row.get('start_sent') is False:
-                if carrier.get('worktree_path'):
-                    async def rollback():
-                        async def frame():
-                            _guard(ctx, plan)
-                            row = registry.get(host, sid) or {}
-                            tracked = await client.guard_read('worktree:status', {'sessionId': sid})
-                            if (row.get('start_sent') is not False or row.get('worktree_path') != carrier['cwd']
-                                    or not isinstance(tracked, dict) or tracked.get('worktreePath') != carrier['cwd']
-                                    or tracked.get('branchName') != carrier['branch']):
-                                raise StepFailed('START_ROLLBACK_REFUSED', 'carrier is no longer positively unsent')
-                        result = await _invoke(ctx, plan, 'rollback', client, 'worktree:remove',
-                            {'sessionId': sid, 'deleteBranch': True}, creation_grant(carrier), before_frame=frame)
-                        if not isinstance(result, dict) or result.get('success') is not True:
-                            raise NeedsAttention('START_ROLLBACK_UNPROVEN', 'rollback ACK missing')
-                        ctx.set_refs(rollback_ack=True)
-                        if await client.invoke('git:getRoot', {'cwd': carrier['cwd']}) is not None:
-                            raise NeedsAttention('START_ROLLBACK_UNPROVEN', 'rollback path absence is not proven')
-                        return {'removed': True}
-                    async def removed(_):
-                        if _unsent(ctx, 'rollback'):
-                            return RERUN
-                        if (ctx.service.get(ctx.operation_id).get('external_refs') or {}).get('rollback_ack') is not True:
-                            return None
-                        return {'removed': True} if await client.invoke('git:getRoot', {'cwd': carrier['cwd']}) is None else None
-                    await ctx.step('worktree.rollback', rollback, request={'cwd': carrier['cwd'], 'branch': carrier['branch']},
-                                   reconcile=removed)
+                result = _carrier(plan, result)
+                creation_grant(result)
+                if await _head(client.invoke, result['cwd']) != plan['base_commit']:
+                    raise NeedsAttention('START_GIT_CHANGED', 'created carrier differs from the fixed commit')
+                return result
+            carrier = await ctx.step('worktree.create', create, request={'session_id': sid, 'cwd': plan['folder'],
+                'branch': plan['source_branch'], 'commit': plan['base_commit']}, reconcile=carrier_read)
+            async def record_carrier():
+                return project({k: carrier[k] for k in ('cwd', 'worktree_path', 'branch')})
+            await ctx.step('carrier.record', record_carrier, reconcile=reread)
+        options = {'cwd': carrier['cwd'], 'agentPreset': plan['preset'], 'workspaceId': plan['workspace_id'],
+                   'workspaceName': plan['workspace_name'], **plan['permission_options']}
+        if plan['model']:
+            options['model'] = plan['model']
+        if plan['use_worktree']:
+            options.update(useWorktree=True, worktreePath=carrier['cwd'], worktreeBranch=carrier['branch'])
+        def verify_started(meta):
+            fatal = (ctx.service.get(ctx.operation_id).get('external_refs') or {}).get('start_mismatch')
+            if fatal:
+                raise NeedsAttention(fatal, 'a prior start identity mismatch needs explicit review')
+            try:
+                confinement.guard_start_record(registry.get(host, sid) or {})
+                confinement.guard_start_cwd({'cwd': carrier['cwd']}, meta)
+                confinement.ensure_confirmed(plan['confinement'], meta, allow_unknown=plan['write_scope'] != 'confined')
+            except confinement.ConfinementRefused as exc:
+                if exc.code in confinement.START_IDENTITY_MISMATCH_CODES or confinement.verify(plan['confinement'], meta)['status'] == 'mismatch':
+                    ctx.set_refs(start_mismatch=exc.code)
                     reservation = _receipt(ctx, 'session.reserve')
-                    if not registry.project_start(host, sid, operation_id=ctx.operation_id, created_at=reservation['created_at'],
-                        expected={'task_id': None, 'role': None, 'status': 'starting', 'start_sent': False,
-                                  'cwd': carrier['cwd'], 'worktree_path': carrier['cwd'], 'branch': carrier['branch']},
-                        fields={'status': 'failed', 'cwd': plan['folder'], 'worktree_path': None, 'branch': None, 'worktree_rolled_back': True}):
-                        raise NeedsAttention('START_BINDING_CHANGED', 'rollback no longer owns the registry projection') from None
-                else:
-                    project({'status': 'failed'})
-            raise
+                    registry.project_start(host, sid, operation_id=ctx.operation_id, created_at=reservation['created_at'],
+                        expected={'status': 'starting', 'start_sent': True, 'task_id': None, 'role': None, 'cwd': carrier['cwd']},
+                        fields={'error_code': exc.code,
+                                'confinement': confinement.confirm(plan['confinement'], meta)})
+                raise NeedsAttention(exc.code, str(exc)) from exc
+
+        async def start_frame():
+            await _identity(ctx, plan, client.guard_read, cwd=carrier['cwd'], branch=carrier['branch'])
+            await confinement.guard_start_frame(fleet, host, plan['confinement'])
+            _guard(ctx, plan)
+        async def start():
+            result = await _invoke(ctx, plan, 'start', client, 'claude:start-session',
+                {'sessionId': sid, 'options': options}, creation_grant(carrier), before_frame=start_frame, start=True)
+            if not isinstance(result, dict) or result.get('ok') is not True or result.get('sessionId') != sid:
+                raise NeedsAttention('START_UNPROVEN', 'start reply did not confirm the exact reserved session')
+            return {'host': host, 'session_id': sid, 'cwd': carrier['cwd'], 'started': True}
+        async def start_read(_):
+            row = registry.get(host, sid) or {}
+            if _unsent(ctx, 'start') and row.get('start_sent') is False:
+                return RERUN
+            meta = await service._meta(client, sid)
+            if meta is None:
+                return None
+            verify_started(meta)
+            return {'host': host, 'session_id': sid, 'cwd': carrier['cwd'], 'started': True}
+        started = await ctx.step('session.start', start, request={'session_id': sid, 'cwd': carrier['cwd'],
+                                 'options': options}, reconcile=start_read)
+        ctx.set_refs(start_result={**started, **carrier, 'base_commit': plan['base_commit'],
+                                  'agent_preset': plan['preset'], 'workspace': plan['workspace_name']})
+        async def confirm():
+            meta = await service._meta(client, sid)
+            if meta is None:
+                raise NeedsAttention('START_CONFIRMATION_UNPROVEN', 'started session identity is not readable')
+            verify_started(meta)
+            return {'confinement': confinement.confirm(plan['confinement'], meta)}
+        confirmed = await ctx.step('session.confirm', confirm, reconcile=reread)
+        async def record_start():
+            return project({'status': 'active', 'start_sent': True, 'confinement': confirmed['confinement']}, carrier=carrier)
+        await ctx.step('session.record', record_start, reconcile=reread)
 
         tab = None
         if plan['register_tab']:

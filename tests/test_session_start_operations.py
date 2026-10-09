@@ -131,7 +131,7 @@ async def test_intent_only_restart_does_not_resend(daemon, mock, monkeypatch, ph
     assert phase not in mock.channels()
 
 @pytest.mark.parametrize('error', ['confinement', 'connection'])
-async def test_positive_unsent_start_rolls_back_and_clears_carrier(daemon, mock, monkeypatch, error):
+async def test_positive_unsent_start_retains_carrier_and_releases_capacity(daemon, mock, monkeypatch, error):
     from bat_agent_connector import confinement
     from bat_agent_connector.errors import ConnectionLost
     async def refuse(*args, **kwargs):
@@ -142,18 +142,34 @@ async def test_positive_unsent_start_rolls_back_and_clears_carrier(daemon, mock,
     out = await create(daemon)
     assert out['status'] == 'failed', out
     row = registry.list_entries('h1')[0]
-    assert row['start_sent'] is False and row['worktree_path'] is None and row['cwd'] == row['origin_cwd']
-    assert 'claude:start-session' not in mock.channels() and mock.channels().count('worktree:remove') == 1
+    assert row['start_sent'] is False and row['status'] == 'failed'
+    assert row['worktree_path'] == row['cwd'] == mock.worktrees[row['session_id']]['worktreePath']
+    assert 'claude:start-session' not in mock.channels() and 'worktree:remove' not in mock.channels()
+    before = len(write_frames(mock))
+    assert (await create(daemon))['operation_id'] == out['operation_id']
+    assert len(write_frames(mock)) == before
 
-async def test_noop_rollback_ack_is_not_absence(daemon, mock, monkeypatch):
+@pytest.mark.parametrize('managed', [False, True])
+async def test_new_live_consumer_after_create_is_never_removed(daemon, mock, monkeypatch, managed):
     from bat_agent_connector import confinement
     async def refuse(*a, **kw):
+        row = registry.list_entries('h1')[0]
+        path = row['worktree_path']
+        mock.ws_doc['terminals'].append({'id': 'new-consumer', 'cwd': path, 'workspaceId': 'ws-1'})
+        mock.metas['new-consumer'] = {'cwd': path, 'isStreaming': True}
+        if managed:
+            registry.reserve('h1', {'session_id': 'new-consumer', 'cwd': path, 'worktree_path': path,
+                'branch': row['branch'], 'shares_worktree_with': row['session_id'], 'agent_preset': 'claude'}, 5)
+            registry.update('h1', 'new-consumer', status='active')
         raise confinement.ConfinementRefused('HOST_ACCOUNT_UNVERIFIED', 'pre-frame', sent=False)
     monkeypatch.setattr(confinement, 'guard_start_frame', refuse)
-    mock.handlers['worktree:remove'] = lambda p: {'success': True}
     out = await create(daemon)
-    assert out['status'] == 'needs_attention' and registry.list_entries('h1')[0]['worktree_path']
-    assert mock.channels().count('worktree:remove') == 1 and 'claude:start-session' not in mock.channels()
+    assert out['status'] == 'failed' and out['error_code'] == 'HOST_ACCOUNT_UNVERIFIED'
+    row = registry.get('h1', out['external_refs']['session_id'])
+    assert row['status'] == 'failed' and row['worktree_path'] == mock.metas['new-consumer']['cwd']
+    assert mock.metas['new-consumer']['isStreaming'] is True
+    assert row['session_id'] in mock.worktrees
+    assert 'worktree:remove' not in mock.channels() and 'claude:start-session' not in mock.channels()
 
 @pytest.mark.parametrize('boundary', ['carrier', 'start', 'prompt'])
 @pytest.mark.parametrize('change', ['task', 'workspace', 'git', 'registry'])
@@ -192,7 +208,23 @@ async def test_created_commit_drift_prevents_start(daemon, mock):
     mock.handlers['git:log'] = lambda p: [{'hash': ('b' if '.bat-worktrees' in p['cwd'] else 'a') * 40}]
     out = await create(daemon)
     assert out['status'] == 'failed' and out['error_code'] == 'START_GIT_CHANGED'
-    assert 'claude:start-session' not in mock.channels()
+    row = registry.list_entries('h1')[0]
+    assert row['status'] == 'failed' and row['worktree_path'] == mock.worktrees[row['session_id']]['worktreePath']
+    assert 'claude:start-session' not in mock.channels() and 'worktree:remove' not in mock.channels()
+
+@pytest.mark.parametrize('changed', [{'cwd': '/srv/later', 'worktree_path': '/srv/later'}, {'branch': 'later-branch'}])
+async def test_failure_retention_does_not_overwrite_rebound_carrier(daemon, mock, monkeypatch, changed):
+    from bat_agent_connector import confinement
+    async def refuse(*args, **kwargs):
+        row = registry.list_entries('h1')[0]
+        registry.update('h1', row['session_id'], **changed)
+        raise confinement.ConfinementRefused('HOST_ACCOUNT_UNVERIFIED', 'pre-frame', sent=False)
+    monkeypatch.setattr(confinement, 'guard_start_frame', refuse)
+    out = await create(daemon)
+    assert out['status'] == 'failed'
+    row = registry.list_entries('h1')[0]
+    assert row['status'] == 'starting' and all(row[k] == value for k, value in changed.items())
+    assert 'claude:start-session' not in mock.channels() and 'worktree:remove' not in mock.channels()
 
 async def test_manual_no_worktree_is_never_written(daemon, mock):
     mock.ws_doc['workspaces'][0]['folderPath'] = '/home/person/repo'
@@ -267,7 +299,8 @@ async def test_confirmed_start_unknown_prompt_legacy_projection(daemon, mock, mo
     assert out['started'] is True and out['prompt_sent'] is None and out['operation_status'] == 'uncertain'
     assert out['session_id'] == registry.list_entries('h1')[0]['session_id']
 
-async def test_real_temporary_git_fixes_commit_and_preserves_source(daemon, mock, tmp_path):
+@pytest.mark.parametrize('new_content', [None, 'committed', 'uncommitted'])
+async def test_real_temporary_git_fixes_commit_and_preserves_source(daemon, mock, tmp_path, monkeypatch, new_content):
     import subprocess
 
     from tests.test_checkpoints import git, snapshot
@@ -291,15 +324,38 @@ async def test_real_temporary_git_fixes_commit_and_preserves_source(daemon, mock
         git(repo, 'worktree', 'add', '-b', branch, str(path), p['baseBranch'])
         result = {'success': True, 'worktreePath': str(path), 'branchName': branch, 'sourceBranch': p['baseBranch']}
         mock.worktrees[p['sessionId']] = result
+        if new_content:
+            (path / 'result.txt').write_text('new external result\n')
+            if new_content == 'committed':
+                git(path, 'add', 'result.txt')
+                git(path, 'commit', '-qm', 'new result')
         return result
     mock.handlers['worktree:create'] = worktree
+    if new_content == 'uncommitted':
+        from bat_agent_connector import confinement
+        async def refuse(*args, **kwargs):
+            raise confinement.ConfinementRefused('HOST_ACCOUNT_UNVERIFIED', 'pre-frame', sent=False)
+        monkeypatch.setattr(confinement, 'guard_start_frame', refuse)
     out = await create(daemon, params={'prompt': 'keep these exact words'})
-    assert out['status'] == 'succeeded', out
     after = snapshot(repo)
     # An explicitly enabled shared Git worktree adds refs/admin data; source bytes/index/HEAD remain untouched.
     assert before['index'] == after['index'] and git(repo, 'rev-parse', 'HEAD') == head
     assert (repo / 'file.txt').read_text() == 'original bytes\n'
-    assert out['result']['base_commit'] == git(out['result']['cwd'], 'rev-parse', 'HEAD') == head
+    if new_content:
+        from pathlib import Path
+        assert out['status'] == 'failed'
+        assert out['error_code'] == ('START_GIT_CHANGED' if new_content == 'committed' else 'HOST_ACCOUNT_UNVERIFIED')
+        row = registry.get('h1', out['external_refs']['session_id'])
+        assert row['status'] == 'failed' and row['worktree_path'] == row['cwd']
+        assert (Path(row['cwd']) / 'result.txt').read_text() == 'new external result\n'
+        if new_content == 'committed':
+            assert git(row['cwd'], 'rev-parse', 'HEAD') == git(repo, 'rev-parse', row['branch']) != head
+        else:
+            assert 'result.txt' in git(row['cwd'], 'status', '--porcelain')
+        assert 'worktree:remove' not in mock.channels() and 'claude:start-session' not in mock.channels()
+    else:
+        assert out['status'] == 'succeeded', out
+        assert out['result']['base_commit'] == git(out['result']['cwd'], 'rev-parse', 'HEAD') == head
 
 async def test_cli_start_adapter_preserves_prompt_identity_and_no_raw_fallback(daemon, mock, monkeypatch):
     from types import SimpleNamespace
@@ -498,32 +554,3 @@ async def test_no_worktree_refused_even_for_managed_folder_before_admission(daem
             'use_worktree': False, 'idempotency_key': 'unsafe-shared'}, entry='rpc')
     assert refused.value.code == 'START_WORKTREE_REQUIRED'
     assert not daemon.ops.list()['operations'] and not registry.list_entries('h1') and not write_frames(mock)
-
-@pytest.mark.parametrize('lost', ['remove_ack', 'absence_read'])
-async def test_rollback_recovery_requires_saved_ack_and_absence(daemon, mock, monkeypatch, lost):
-    from bat_agent_connector import confinement
-    from bat_agent_connector.errors import InvokeTimeout
-    async def refuse(*a, **kw):
-        raise confinement.ConfinementRefused('HOST_ACCOUNT_UNVERIFIED', 'pre-frame', sent=False)
-    monkeypatch.setattr(confinement, 'guard_start_frame', refuse)
-    client, original = daemon.fleet.client('h1'), daemon.fleet.client('h1').invoke
-    fired = False
-    async def loss(channel, params=None, **kwargs):
-        nonlocal fired
-        out = await original(channel, params, **kwargs)
-        if not fired and ((lost == 'remove_ack' and channel == 'worktree:remove') or
-                         (lost == 'absence_read' and channel == 'git:getRoot' and params['cwd'] in mock.removed_paths)):
-            fired = True
-            raise InvokeTimeout('fixture lost rollback evidence')
-        return out
-    monkeypatch.setattr(client, 'invoke', loss)
-    out = await create(daemon)
-    assert out['status'] == 'uncertain'
-    daemon.ops.db.execute('UPDATE operations SET next_run_at=0 WHERE operation_id=?', (out['operation_id'],))
-    await settle_operations(daemon.ops)
-    after, row = daemon.ops.get(out['operation_id']), registry.list_entries('h1')[0]
-    if lost == 'remove_ack':
-        assert after['status'] == 'uncertain' and row['worktree_path']
-    else:
-        assert after['status'] == 'failed' and row['worktree_path'] is None
-    assert mock.channels().count('worktree:remove') == 1 and 'claude:start-session' not in mock.channels()

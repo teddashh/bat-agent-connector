@@ -48,9 +48,12 @@ A persisted transport fence distinguishes positively unsent calls from unknown
 outcomes. A lost worktree reply requires matching BAT worktree identity plus Git
 read-back; missing evidence never authorizes another create. A sent start requires
 exact session/cwd/confinement read-back; it is never resent. A known created carrier
-may be rolled back only after positively unsent start failure, with remove ACK plus
-independent path absence. The positive removal ACK is itself persisted before the absence read. A lost removal ACK stays unresolved even if the path later disappears; it is never resent. Cancellation retains
-resources for reviewed cleanup when rollback cannot safely proceed.
+is retained after positively unsent failure or cancellation. Creation ownership
+alone does not prove that no other session, new commit or uncommitted result now
+uses it, so this action never removes worktrees or branches. The original durable
+source/reservation/creation receipts remain available for canonical reviewed cleanup;
+retention itself grants no cleanup authority. External consumers remain subject to
+cleanup's existing fresh dependency, content and final-frame checks.
 
 Completed receipts replay without new write authority. Local registry projections compare the original operation/incarnation and owner under the registry flock; they do not overwrite a later binding. Positively unsent cancellation records a failed reservation and retains its known carrier for reviewed cleanup; unresolved external effects retain capacity.
 
@@ -73,7 +76,7 @@ evidence. Acceptance still does not mark work done, merged or deployed.
 Focused tests use actual central HTTP/RPC admission, MockBat frames and temporary
 Git repositories. Cover scope/key replay and no-key isolation; malformed/reserved
 inputs; cap/manual/task/cleanup policy; per-frame owner/policy/workspace/commit drift;
-max_in_flight=1; worktree/start/send lost ACK and restart; positive-unsent rollback;
+max_in_flight=1; worktree/start/send lost ACK and restart; positive-unsent retention of new consumers and committed/uncommitted results;
 tab identity; original prompt; partial projection; and B2 lineage. Native or live
 host/provider acceptance is separate evidence, not implied by these fixtures.
 
