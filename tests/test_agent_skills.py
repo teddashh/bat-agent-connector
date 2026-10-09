@@ -125,6 +125,7 @@ async def test_skill_tool_references_and_recovery_parameters_match_discovered_sc
             "session_read": {"host", "session_id", "last_n", "offset", "include_tools", "max_chars", "after"},
             "session_wait": {"host", "session_id", "until", "timeout_s", "require_new", "after"},
             "session_record_verification": {"host", "session_id", "candidate_commit", "command", "exit_code", "environment", "log_ref", "confirm", "idempotency_key"},
+            "worktree_merge": {"host", "session_id", "confirm", "idempotency_key"},
             "session_cleanup": {"host", "dry_run"},
             "session_send": {"host", "session_id", "message_id", "queue", "idempotency_key", "control_version", "confirm"},
             "session_continue": {"host", "session_id", "idempotency_key", "control_version", "confirm"},

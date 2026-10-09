@@ -4,14 +4,14 @@ description: Use this when you need to check on, read, wait for, or (only when e
 version: 0.2.4
 license: MIT
 metadata:
-  workflow_version: "2026-10-08.13"
+  workflow_version: "2026-10-08.14"
   api_version: "1"
   contract_version: "2026-10-08"
   generated_by: "scripts/generate_agent_skills.py"
   generator_version: "1"
   adapter: "hermes"
   canonical_source: "skills/bat-agent-connector/SKILL.md"
-  canonical_sha256: "70b3a647c9a2f0bd5e056bdcd880874e6fb0addda3bb8967f894b789482f860b"
+  canonical_sha256: "085b27bcd9838c44d5f4f802f4f7d77c421228397719a1584a5a6c21efff733c"
   hermes:
     tags: [bat, better-agent-terminal, claude-code, codex, mcp, supervision, worktree, orchestration]
     category: autonomous-ai-agents
@@ -99,6 +99,8 @@ only when allowed in capabilities. The central `session_relay`, `fanout_plan_ses
 Central `session_read` and `session_wait` require observe and remain available with `--read-only`.
 `session_record_verification` records external testimony through the same central principal;
 Connector-only labels use `operation_submit(action="session.labels.set", ...)` with manage scope.
+`worktree_merge` also uses the central principal and requires integrate scope plus the configured
+verifier SSH host mapping; its durable workflow below preserves both carrier reservations.
 Legacy cleanup and other direct Fleet reads remain operator references; if absent from the
 advertised tools, do not bypass that boundary through legacy CLI or raw BAT.
 
@@ -112,7 +114,7 @@ returned `operation_id` and `operation_status`. Without a key, each call is inde
 the BAT message and is separate from the operation key. For an answer, supply the observed
 `tool_use_id`; the compatibility adapter binds an omitted ID to one positively identified
 pending prompt at admission and never retargets a later prompt. Task-owned controls keep
-the admitted binding/control version and may refuse stale intent. Standalone start has its own durable workflow below. Other legacy orchestration remains separate.
+the admitted binding/control version and may refuse stale intent. Standalone start and orchestration have their durable workflows below.
 Reviewed bulk approval uses the separate workflow below.
 
 Task pause/resume, stage marking, verification, human-support requests and command reconciliation
@@ -146,7 +148,7 @@ deferred flags are not authority to apply a setting under a new caller or sessio
 | Relay original text (operate; start for fallback) | `session_relay(host, message, workspace?, session_id?, idempotency_key?, control_version?, confirm=true)` | `batc relay HOST --message "text" --workspace WORKSPACE --key KEY --confirm` |
 | Start a confined planner (start) | `fanout_plan_session(host, workspace, message, idempotency_key?, confirm=true)` | `batc fanout-plan HOST WORKSPACE --message "text" --key KEY --confirm` |
 | Dispatch the fixed source plan (start + operate) | `fanout_from_plan(host, session_id, idempotency_key?, confirm=true)` | `batc fanout-start HOST SID --key KEY --confirm` |
-| Merge worktree (orchestrate) | `worktree_merge` | `batc merge ...` |
+| Merge fixed managed worktree (integrate) | `worktree_merge(host, session_id, idempotency_key?, confirm=true)` | `batc merge HOST SID --key KEY --confirm` |
 | Legacy worktree removal (disabled) | `worktree_remove` refuses; use reviewed cleanup below | `batc remove-worktree` refuses |
 | Classify sessions (quota, waiting, working, done) | `sessions_triage(host?, states?)`, `quota_sessions(host?)` | `batc triage [HOST] --state ...`, `batc quota` |
 | Preview fixed permission prompts (observe, daemon) | `approval_preview(host, workspace?)` | `batc approve-pending HOST --dry-run` |
@@ -404,13 +406,38 @@ item is done.
    vibe-partner workflow.
 5. Review: `session_worktree_status(host, sid, include_diff=true)` and `session_read`. Check tests were run and the
    change stays in scope.
-6. Merge clean ones: `worktree_merge(host, sid, confirm=true)`. It only merges into a main checkout inside a managed
-   root (the connector's own clone); in a person's checkout it refuses with `DESTINATION_MANUAL`, so leave the branch
-   for a pull request and report it. It also only merges when conflict-free and clean and otherwise explains why
-   (e.g. `diverged`: ask that session to rebase onto the source branch, then retry).
+6. Use the central managed-worktree merge workflow below when allowed. A manual destination remains read-only;
+   leave its branch for a pull request. Report dirty, diverged or unproven carriers without forcing a merge.
 7. Clean up through the reviewed preview/apply workflow below. Legacy `worktree_remove` is disabled with
    `LEGACY_WORKTREE_REMOVE_DISABLED`; its overrides cannot prove shared consumers or authorize removal.
 8. Report: tasks, branches, merged or not (and why), follow-ups.
+
+## Durable managed-worktree merge (scope integrate)
+
+Check the advertised `worktree.merge` action and `features.worktree_merge.hosts` availability first.
+Use `worktree_merge(host, session_id, confirm=true, idempotency_key=KEY)` or
+`operation_submit(action="worktree.merge", target={host, session_id}, params={}, preconditions={},
+idempotency_key=KEY, confirm=true)`. CLI: `batc merge HOST SID --key KEY --confirm`.
+The configured verifier SSH mapping supplies checked read-only Git proof; it must use the BAT Git
+account and configuration context. The helper cannot independently attest BAT's ambient environment.
+An unavailable mapping or incomplete configuration reads cause refusal; never use raw BAT,
+arbitrary shell or another host to bypass it. The host must permit orchestrate.
+
+The central owner fixes source/destination Git identity and all managed consumers, proves idle or
+positively unloaded runtime state, and reserves both carriers. Manual, unknown, task-owned,
+pending, unsettled or active consumers refuse. Dirty/diverged branches, repository filters,
+submodules, unsupported shared worktrees or failed/incomplete Git reads cannot prove a safe merge.
+An empty BAT Git status alone is not clean evidence. This action never forces, switches the
+destination branch or merges into a person's checkout. Use the existing Task Service for its work.
+
+Save the original operation, key and request. Rehydrate and merge have separate receipts. A sent
+effect without a positive ACK stays unknown and retains both reservations; never resend it, use a
+new key or clear its marker. Cancellation cannot erase it. A rehydrate ACK is retained without
+resending that effect; the merge frame still requires its own final checks and ACK. After the merge
+frame's positive ACK, recovery only finishes the original local bookkeeping. Success records BAT's acknowledgement, not a fixed merge
+commit, passed tests or deployment. A no-op retains its reason; `merged_now=null` is uncertainty.
+An omitted adapter key means an independent request; it cannot recover a lost response. Read-only
+MCP installations omit this mutation.
 
 ## Connector-only session labels (scope manage)
 

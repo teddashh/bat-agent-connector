@@ -48,7 +48,7 @@ ALLOWED = {
 }
 UNCERTAIN_RETRY_S = (30.0, 60.0, 120.0, 300.0, 600.0)
 NO_KEY_PREFIX = "batc:nokey:"
-LEGACY_SESSION_ACTIONS = frozenset({"session.record_verification", "session.failover", "fanout.plan", "fanout.start", "session.relay", "session.start", "session.send", "session.answer", "session.interrupt", "session.permissions", "session.approve_pending"})
+LEGACY_SESSION_ACTIONS = frozenset({"worktree.merge", "session.record_verification", "session.failover", "fanout.plan", "fanout.start", "session.relay", "session.start", "session.send", "session.answer", "session.interrupt", "session.permissions", "session.approve_pending"})
 LEGACY_TASK_ACTIONS = frozenset({"task.pause", "task.resume", "task.mark_stage",
                                  "task.verify", "task.request_ted", "task.command.reconcile"})
 
@@ -536,6 +536,9 @@ class OperationService:
         self._may_steer(principal, op, "cancel")
         if op["status"] in TERMINAL:
             return op
+        if op["action"] == "worktree.merge":
+            from .worktree_merge_operations import cancel
+            return cancel(self, principal, op)
         if op["action"] == "session.failover":
             from .failover_operations import cancel
             return cancel(self, principal, op)
@@ -669,7 +672,7 @@ class OperationService:
             self._transition(operation_id, "failed", error_code="UNKNOWN_ACTION",
                              reason=f"no handler for {op['action']} in this connector version")
             return
-        if op["cancel_requested"] and op["status"] not in {"running", "uncertain"} and op["action"] not in {"session.failover", "session.approve_pending", "session.relay", "fanout.plan", "fanout.start"}:
+        if op["cancel_requested"] and op["status"] not in {"running", "uncertain"} and op["action"] not in {"worktree.merge", "session.failover", "session.approve_pending", "session.relay", "fanout.plan", "fanout.start"}:
             self._transition(operation_id, "cancelled", reason="cancelled before the next step")
             return
         if op["status"] != "running":

@@ -369,7 +369,15 @@ async def _run(args) -> Any:
                                    "Read the saved operation or retry with the same explicit key") from None
             return out, None
         if c == "merge":
-            return await orchestrate.worktree_merge(fleet, args.host, args.session, args.confirm), None
+            from .task_daemon import request
+            if not args.confirm:
+                raise WriteRefused("merge needs --confirm")
+            try:
+                out = await asyncio.to_thread(request, "worktree_merge", _auth_token=os.environ.get("BATC_API_TOKEN") or None,
+                    entry="cli", host=args.host, session_id=args.session, confirm=True, idempotency_key=args.key, timeout=40)
+            except (OSError, TimeoutError):
+                raise WriteRefused("central merge reply unavailable; retain the original key and operation") from None
+            return out, None
         if c == "remove-worktree":
             return await orchestrate.worktree_remove(
                 fleet,
@@ -582,7 +590,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-worktree", action="store_true")
     p.add_argument("--key", help="stable operation key; omitted means a new independent start")
     p.add_argument("--confirm", action="store_true")
-    p = sp.add_parser("merge", help="ORCHESTRATE: merge a clean worktree branch (never forced)")
+    p = sp.add_parser("merge", help="INTEGRATE: durable managed worktree merge; verifier SSH must use BAT's Git context")
+    p.add_argument("--key", help="retain the original key after reply loss; omitted means an independent request")
     p.add_argument("host")
     p.add_argument("session")
     p.add_argument("--confirm", action="store_true")
@@ -1461,7 +1470,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         obj, render = asyncio.run(_run(args))
         _print(obj, args.json, render)
-        return 1 if args.cmd in {"record-verification", "failover", "relay", "fanout-plan", "fanout-start", "fanout", "start", "send", "continue", "interrupt", "answer", "permissions"} and obj.get("operation_status") in {"failed", "cancelled"} else 0
+        return 1 if args.cmd in {"merge", "record-verification", "failover", "relay", "fanout-plan", "fanout-start", "fanout", "start", "send", "continue", "interrupt", "answer", "permissions"} and obj.get("operation_status") in {"failed", "cancelled"} else 0
     except (BatError, ValueError, OperationError) as e:
         print(f"error: {redact(e)}", file=sys.stderr)
         return 1

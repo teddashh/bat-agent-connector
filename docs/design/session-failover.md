@@ -46,7 +46,8 @@ await 打開 authority 空窗。只有原 claim＋durable start_sent=false 的�
 ## 尚未涵蓋
 
 不啟用 Task Service mid-task failover、不搬主機、不傳 unpublished Git、不關閉人工 session、不自動清理
-共用 worktree。Native/GUI 的專用 failover chooser 與 installed/live 驗收另列；此切片交付同一中央 API/MCP/CLI。
+共用 worktree。共用 browser/native GUI 已提供單一固定 Claude 來源的 chooser，見
+[dashboard-orchestration.md](dashboard-orchestration.md)；沿用同一中央 API/MCP/CLI，installed/live 驗收另列。
 
 ## 回復與相容限制
 

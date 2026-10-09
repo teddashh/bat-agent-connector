@@ -337,7 +337,7 @@ class BatClient:
         This intentionally skips connect, retries, and semaphore acquisition;
         the outer guarded invoke already owns the connection and semaphore.
         """
-        if channel not in {"claude:get-session-meta", "claude:get-session-state", "worktree:status", "git:getRoot", "git:log", "git:branch", "workspace:load"}:
+        if channel not in {"claude:get-session-meta", "claude:get-session-state", "claude:get-worktree-status", "worktree:status", "git:getRoot", "git:log", "git:branch", "workspace:load"}:
             raise ChannelNotAllowed("guard read channel is not an identity read")
         canonical = check_allowed(channel, allow_writes=False, allow_orchestrate=False)
         frame = {"type": "invoke", "id": f"batc-{next(self._ids)}",
@@ -345,6 +345,8 @@ class BatClient:
         reply = await self._roundtrip(frame, timeout_for(canonical))
         if reply.get("type") == "invoke-error":
             raise InvokeError(f"{self.host.name}: {canonical}: {redact(reply.get('error'))}")
+        if canonical == "claude:get-session-meta" and (reply.get("type") != "invoke-result" or "result" not in reply):
+            raise InvokeError("session metadata reply does not prove presence or absence")
         return reply.get("result")
 
     async def invoke(self, channel: str, params: dict | None = None, *, timeout: float | None = None,
@@ -408,6 +410,8 @@ class BatClient:
                         await asyncio.sleep(0.5 * (attempt + 1))
                         continue
                     raise InvokeError(f"{self.host.name}: {canonical}: {err}")
+                if canonical == "claude:get-session-meta" and (reply.get("type") != "invoke-result" or "result" not in reply):
+                    raise InvokeError("session metadata reply does not prove presence or absence")
                 return reply.get("result")
             except ConnectionLost as e:
                 # Only Claude's send-message is idempotent by clientMessageId;

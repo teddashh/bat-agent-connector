@@ -26,6 +26,7 @@ pub mod supervisor_control;
 pub mod supervisor_io;
 pub mod supervisor_probe;
 pub mod supervisor_status;
+pub mod tailscale;
 pub mod tunnel;
 pub mod unconfigured;
 #[cfg(windows)]
@@ -44,6 +45,8 @@ pub mod windows_profiles;
 pub mod windows_startup;
 #[cfg(windows)]
 pub mod windows_supervisor;
+#[cfg(windows)]
+pub mod windows_tailscale;
 #[cfg(windows)]
 pub mod windows_tunnel;
 

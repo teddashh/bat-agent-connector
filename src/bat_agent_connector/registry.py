@@ -179,7 +179,7 @@ def claim_unsent(host: str, session_id: str) -> str:
 def _cleanup_guard(host: str, entry: dict) -> None:
     from .cleanup import guard
 
-    guard(host, session_id=entry.get("session_id"), path=entry.get("worktree_path") or entry.get("cwd"),
+    guard(host, session_id=entry.get("session_id"), path=entry.get("worktree_path") or entry.get("cwd") or entry.get("origin_cwd"),
           branch=entry.get("branch"))
 
 
