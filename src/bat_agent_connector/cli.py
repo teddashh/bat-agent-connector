@@ -260,14 +260,22 @@ async def _run(args) -> Any:
                 fleet, args.host, args.workspace, args.agent, states, args.jev, not args.loaded_only
             ), r_triage
         if c in ("relay", "fanout-plan"):
+            if c == "relay" and not args.dry_run and not args.confirm:
+                raise WriteRefused("relay needs --confirm")
             msg = sys.stdin.read() if args.message == "-" else args.message
             brief = json.loads(args.brief) if args.brief and args.brief.lstrip().startswith("{") else args.brief
             if c == "relay":
-                return await lifecycle.session_relay(
-                    fleet, args.host, msg, args.workspace, args.session, args.channel, args.thread,
-                    args.earlier, brief, args.fanout is not None, args.fanout, args.confirm, args.dry_run, args.queue,
-                    args.start_if_missing,
-                ), None
+                from .task_daemon import request
+                try:
+                    out = await asyncio.to_thread(request, "session_relay", _auth_token=os.environ.get("BATC_API_TOKEN") or None,
+                        host=args.host, message=msg, workspace=args.workspace, session_id=args.session, channel=args.channel,
+                        thread=args.thread, earlier=args.earlier, brief=brief, request_fanout=args.fanout is not None,
+                        max_items=args.fanout, confirm=args.confirm, dry_run=args.dry_run, queue=args.queue,
+                        start_if_missing=args.start_if_missing, idempotency_key=args.key, control_version=args.control_version,
+                        entry="cli", timeout=40)
+                except OSError:
+                    raise WriteRefused("central relay reply unavailable; retain the original explicit key and operation") from None
+                return out, None
             return await lifecycle.fanout_plan_session(
                 fleet, args.host, args.workspace, msg, args.max_items, args.channel, args.thread, args.earlier,
                 brief, args.confirm,
@@ -525,7 +533,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--earlier", action="append", help="earlier message in the thread, verbatim (repeatable)")
     p.add_argument("--fanout", type=int, metavar="N", help="ask for a bat-fanout plan of at most N items")
     p.add_argument("--queue", action="store_true")
-    p.add_argument("--start-if-missing", action="store_true", help="no session yet: start Codex in the main checkout")
+    p.add_argument("--start-if-missing", action="store_true", help="create a new managed Codex worktree if no writable target exists")
+    p.add_argument("--key", help="reuse the exact original key after a lost reply; omitted means independent call")
+    p.add_argument("--control-version", type=int)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--confirm", action="store_true")
     p = sp.add_parser("fanout-plan", help="ORCHESTRATE: start a read-only Codex planner for a bat-fanout plan")
@@ -1440,7 +1450,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         obj, render = asyncio.run(_run(args))
         _print(obj, args.json, render)
-        return 1 if args.cmd in {"start", "send", "continue", "interrupt", "answer", "permissions"} and obj["operation_status"] in {"failed", "cancelled"} else 0
+        return 1 if args.cmd in {"relay", "start", "send", "continue", "interrupt", "answer", "permissions"} and obj["operation_status"] in {"failed", "cancelled"} else 0
     except (BatError, ValueError, OperationError) as e:
         print(f"error: {redact(e)}", file=sys.stderr)
         return 1

@@ -104,6 +104,8 @@ class ApiV1:
         artifact_managed.install(daemon.ops)
         session_start_operations.install(daemon.ops)
         repository_sync.install(daemon.ops)
+        from . import orchestration_operations
+        orchestration_operations.install(daemon.ops)
 
         from . import bulk_approval
         bulk_approval.install(daemon.ops, daemon._admin_token)

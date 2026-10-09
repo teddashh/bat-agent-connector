@@ -55,7 +55,7 @@ from .task_verifier import ObservedVerifier, load_settings
 
 DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 # /rpc methods that share /api/v1's principals and OperationService (MCP and CLI enter here).
-API_RPC = {"repository_preview": "observe", "session_start": "start", "workspaces_list": "observe", "op_submit": "?", "session_interrupt": "operate", "session_send": "operate",
+API_RPC = {"session_relay": "?", "repository_preview": "observe", "session_start": "start", "workspaces_list": "observe", "op_submit": "?", "session_interrupt": "operate", "session_send": "operate",
            "session_continue": "operate", "session_answer": "operate", "session_set_permissions": "operate",
            "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
            "work_status": "observe", "work_result": "observe", "work_events": "observe",
@@ -258,6 +258,9 @@ class TaskDaemon:
             if method == "workspaces_list":
                 return await session_start_operations.workspaces(self.ops, principal, params)
             return await session_start_operations.legacy(self.ops, principal, params, entry=entry)
+        if method == "session_relay":
+            from .orchestration_operations import legacy
+            return await legacy(self.ops, principal, params, entry=entry)
         if method == "approval_preview":
             from .bulk_approval import preview
             return await preview(self.ops, principal, params)

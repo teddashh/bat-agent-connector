@@ -129,6 +129,8 @@ async def _plan(ctx, client):
 
 
 def _guard(ctx, plan, *, reserved=True):
+    from .orchestration_operations import check_child
+    check_child(ctx, start_plan=plan)
     ctx.check_cancel()
     fleet, host, sid = ctx.service.context['fleet'], plan['host'], plan['session_id']
     _tier(fleet, host)
