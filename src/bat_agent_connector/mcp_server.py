@@ -580,7 +580,9 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
         async def work_continue_from_repository(repository: str, host: str, workspace_id: str, source_ref: str,
                                                 source_sha: str, repository_id: int, binding_digest: str, prompt: str,
                                                 idempotency_key: str, agent: Literal["claude", "codex"] = "claude",
-                                                title: str | None = None, wait_s: float = 30, confirm: bool = False) -> dict[str, Any]:
+                                                title: str | None = None, wait_s: float = 30, confirm: bool = False,
+                                                model: str | None = None, artifacts: list[dict] | None = None,
+                                                project_id: str | None = None, expected_project_version: int | None = None) -> dict[str, Any]:
             """WRITE: start from a published version in a NEW managed clone/worktree/session. Requires start scope
             and confirm=true. Use exact repository_preview values; only reviewed branch heads are supported.
             No push, pull, reset, manual checkout update or source session takeover. Keep the original key and
@@ -588,8 +590,11 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             return await principal_daemon("op_submit", confirm, action="repository.continue", idempotency_key=idempotency_key,
                 target={"repository": repository, "host": host, "workspace_id": workspace_id},
                 params={"source_ref": source_ref, "source_sha": source_sha, "prompt": prompt, "agent": agent,
-                        **({"title": title} if title is not None else {})},
-                preconditions={"repository_id": repository_id, "binding_digest": binding_digest}, wait_s=wait_s)
+                        **({"title": title} if title is not None else {}), **({"model": model} if model is not None else {}),
+                        **({"artifacts": artifacts} if artifacts is not None else {}),
+                        **({"project_id": project_id} if project_id is not None else {})},
+                preconditions={"repository_id": repository_id, "binding_digest": binding_digest,
+                    **({"expected_project_version": expected_project_version} if expected_project_version is not None else {})}, wait_s=wait_s)
 
         mcp.add_tool(_wrap(work_continue_from_repository), name="work_continue_from_repository",
                      annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True))

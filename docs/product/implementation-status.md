@@ -8,6 +8,23 @@
 
 ## 目前續作
 
+### 2026-10-09 專案快速派工、進階設定與附件草稿
+
+`feat/project-quick-dispatch` 接續 #70 的 `f33b837`，推進 Project Hub 審查 P1-3。
+專案詳情新增共用 Web／Tauri 入口，限定中央明確綁定的 repository／host／workspace；
+唯一目的地自動選取，多個目的地需明確選擇。標題／模型收進進階設定，附件沿用既有草稿與
+ready revision。原請求固定專案版本、GitHub head、原文、模型、附件 digest 和 operation key。
+
+中央擴充既有 `repository.continue`，附件只寫入該操作自有的 published carrier；傳輸與每個未送出
+BAT frame 前重查專案／目的地與 bytes。回覆丟失、專案封存或 host tier 改變後仍回到原 key；
+不另建 Work Item 或 Task Service task。[合約](../design/repository-sync.md) 明列同主機未發布
+狀態仍走 checkpoint，本入口只完成已發布版本派工。CLI／MCP 接同一合約。
+
+相關 128 項後端與 57 項初次 UI 回歸已通過；實際中央的 HTTP／IPC 派工與原 published 流程亦通過。
+`test:dispatch` 已加入 desktop CI；候選完整 gate 與平台證據由 PR/checks 及
+`~/agent-work/artifacts/project-quick-dispatch-20261009/` 記錄。分支尚未合併、安裝或 live 驗收。
+P1-4 手機資訊／輸入區收合及可調側欄、P1-5 設定分組／首次使用導引仍在後續 backlog。
+
 ### 2026-10-09 共用待處理分類與工作更新已讀
 
 `feat/shared-attention-states` 接續 `dba6ccd`。首頁把待回覆／權限、完成確認、需處理操作、

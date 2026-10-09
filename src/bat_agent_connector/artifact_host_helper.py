@@ -123,12 +123,25 @@ def execute(request, stream):
             or name in {".", "..", ".git"} or not name or len(name.encode()) > 240
             or any(c in name for c in "/\\") or any(unicodedata.category(c) == "Cc" for c in name)):
         raise Refusal("DESTINATION_UNKNOWN", "invalid input identity")
-    if worktree != clone + "/.bat-worktrees/batc-cp-" + operation[3:15]:
+    published = request.get("published_binding")
+    if published is not None and (not isinstance(published, dict) or set(published) != {"binding_digest", "source_sha"}
+            or not re.fullmatch(r"[0-9a-f]{64}", str(published.get("binding_digest")))
+            or not re.fullmatch(r"[0-9a-f]{40}", str(published.get("source_sha")))
+            or os.path.basename(clone) != "batc-published-" + operation[3:]):
+        raise Refusal("BINDING_MISMATCH", "invalid published input binding")
+    prefix = "batc-published-" if published is not None else "batc-cp-"
+    if worktree != clone + "/.bat-worktrees/" + prefix + operation[3:15]:
         raise Refusal("DESTINATION_UNKNOWN", "worktree differs from continuation intent")
     clone_fd, work_fd = directory(clone), directory(worktree)
     try:
         if git(clone, "config", "--local", "--get", "batc.managed-clone") != "true":
             raise Refusal("BINDING_MISMATCH", "not a connector clone")
+        if published is not None and (git(clone, "config", "--local", "--get", "batc.role") != "published"
+                or git(clone, "config", "--local", "--get", "batc.operation") != operation
+                or git(clone, "config", "--local", "--get", "batc.binding") != published["binding_digest"]
+                or git(worktree, "rev-parse", "HEAD") != published["source_sha"]
+                or git(worktree, "branch", "--show-current") != "batc/published-" + operation[3:15]):
+            raise Refusal("BINDING_MISMATCH", "published carrier differs from the original operation")
         common = git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
         if common != clone + "/.git" or git(worktree, "rev-parse", "--show-toplevel") != worktree:
             raise Refusal("BINDING_MISMATCH", "worktree git binding differs")

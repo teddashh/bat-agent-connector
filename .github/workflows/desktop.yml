@@ -96,6 +96,7 @@ jobs:
           npm run test:approvals
           npm run test:start
           npm run test:published
+          npm run test:dispatch
           npm run test:orchestration
           npm run test:labels
           npm run test:attention

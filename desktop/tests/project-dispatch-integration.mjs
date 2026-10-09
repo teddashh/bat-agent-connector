@@ -1,0 +1,94 @@
+// Shared project composer against actual central receipts and temporary Git/artifact bytes.
+import {spawn} from 'node:child_process';
+import {createInterface} from 'node:readline';
+import {delimiter, resolve} from 'node:path';
+import {once} from 'node:events';
+import {setTimeout as delay} from 'node:timers/promises';
+import assert from 'node:assert/strict';
+import {chromium, expect} from '@playwright/test';
+const backend = resolve('..');
+const python = process.env.BATC_DISPATCH_PYTHON || resolve(backend, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+const child = spawn(python, [resolve('tests/repository-start-fixture.py')], {cwd: backend,
+  env: {...process.env, PYTHONPATH: [resolve(backend, 'src'), backend].join(delimiter)}, stdio: ['pipe', 'pipe', 'inherit']});
+const stopped = once(child, 'exit'), lines = createInterface({input: child.stdout})[Symbol.asyncIterator]();
+const next = async () => {const line = await lines.next(); if (line.done) throw Error('Dispatch fixture stopped'); return JSON.parse(line.value);};
+const control = async command => {child.stdin.write(JSON.stringify(command)+'\n'); return next();};
+const browser = await chromium.launch();
+try {
+  const fixture = await next(), origin = `http://127.0.0.1:${fixture.port}`;
+  const project = await control({action: 'prepare-project'}), posts = [], errors = [];
+  const web = await browser.newPage(), desktop = await browser.newPage();
+  for (const page of [web, desktop]) page.on('pageerror', e => errors.push(e.message));
+  await web.addInitScript(token => sessionStorage.setItem('batc.dashboard.token', token), fixture.token);
+  const central = async input => {
+    if (input.method === 'POST' && input.path.startsWith('/operations')) posts.push(input);
+    const response = await fetch(origin + '/api/v1' + input.path, {method: input.method,
+      headers: {Authorization: 'Bearer ' + fixture.token, ...(input.body ? {'Content-Type': 'application/json'} : {}),
+        ...(input.idempotency_key ? {'Idempotency-Key': input.idempotency_key} : {})},
+      body: input.body ? JSON.stringify(input.body) : undefined});
+    return {status: response.status, data: await response.json()};
+  };
+  const caps = (await central({method: 'GET', path: '/capabilities'})).data;
+  await desktop.exposeFunction('dispatchCentral', central);
+  await desktop.addInitScript(({caps, origin}) => Object.assign(window, {isTauri: true, __TAURI_INTERNALS__: {
+    invoke: async (command, args) => {
+      if (command === 'native_status') return {endpoint: origin, credential_available: true};
+      if (command === 'connector_connect') return caps;
+      if (command === 'connector_request') return window.dispatchCentral(args.input);
+      if (command === 'fleet_availability') return {configured: false, platform_supported: false};
+      throw Error('Unexpected native fixture command ' + command);
+    }
+  }}), {caps, origin});
+  await desktop.route('**/api/v1/**', () => {throw Error('Desktop must use IPC');});
+  let lose = true;
+  await web.route('**/api/v1/operations?wait=3', async route => {
+    const req = route.request(); posts.push({method: req.method(), path: '/operations?wait=3', body: req.postDataJSON(), idempotency_key: req.headers()['idempotency-key']});
+    const response = await route.fetch();
+    if (lose) {lose = false; await route.abort('failed');} else await route.fulfill({response});
+  });
+  const original = '  Keep the project request.\nUse the attached bytes.  ';
+  let count = 0;
+  for (const page of [web, desktop]) {
+    await page.goto(origin+'/dashboard/#/project/'+project.project_id);
+    await page.getByRole('link', {name: 'Quick project dispatch'}).click();
+    const form = page.locator('[data-published-start]');
+    await expect(form.getByRole('combobox', {name: 'Repository · host · workspace ID'})).toHaveValue(JSON.stringify({repository:'o/r',host:'h1',workspace_id:'ws-1'}));
+    await form.getByRole('textbox', {name: 'Published branch ref'}).fill('refs/heads/main');
+    await form.getByRole('button', {name: 'Preview published version'}).click();
+    await expect(form.locator('[data-published-preview]')).toContainText(fixture.sha);
+    await form.getByRole('textbox', {name: 'Original instructions', exact: true}).fill(original);
+    await form.getByText('Advanced settings', {exact: true}).click();
+    await form.getByRole('textbox', {name: 'Model (optional)'}).fill('selected-model');
+    const inputs = form.getByRole('combobox', {name: 'Uploaded attachment'});
+    await expect(inputs.locator('option')).toHaveCount(2);
+    await inputs.selectOption(`${project.artifact.artifact_id}:1`);
+    await form.getByRole('button', {name: 'Add attachment', exact: true}).click();
+    await expect(form.locator('.attachment-list')).toContainText('notes.txt');
+    await form.getByRole('button', {name: 'Start from this version', exact: true}).click();
+    if (page === web) {
+      await expect(form.locator('.error')).toBeVisible();
+      await control({action: 'archive-project', project_id: project.project_id, archived: true});
+      await control({action: 'writes', enabled: false}); await page.reload();
+      await form.getByRole('button', {name: 'Retry original request'}).click();
+      assert.deepEqual(posts[0], posts[1]);
+    }
+    await expect(form).toContainText('Start confirmed', {timeout: 30000});
+    const id = (await form.locator('a[href^="#/op/"]').getAttribute('href')).split('/').at(-1);
+    await page.reload(); await expect(form).toContainText('Start confirmed');
+    count++;
+    await control({action: 'verify-project', ...project, operation_id: id, operations: count, frames: count * 2,
+      status: 'succeeded', prompt: original, version: page === web ? 1 : 3});
+    if (page === web) {
+      await control({action: 'archive-project', project_id: project.project_id, archived: false});
+      await control({action: 'writes', enabled: true});
+    }
+  }
+  assert.equal(posts.length, 3); assert.notEqual(posts[1].idempotency_key, posts[2].idempotency_key);
+  assert.equal(await desktop.evaluate(() => JSON.stringify({...localStorage, ...sessionStorage}).includes('batc.dashboard.token')), false);
+  assert.deepEqual(errors, []);
+  console.log('Real central project dispatch passed: HTTP and IPC share project/version, fixed GitHub head, model and attachment bytes; reply loss replays the original key after archival/tier changes; reload only reads receipts; manual checkout and remote refs unchanged.');
+} finally {
+  await browser.close();
+  if (child.exitCode === null && child.signalCode === null) child.stdin.end(JSON.stringify({action: 'stop'})+'\n');
+  await Promise.race([stopped, delay(3000, undefined, {ref: false}).then(() => child.kill())]);
+}

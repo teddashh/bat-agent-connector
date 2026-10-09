@@ -430,7 +430,8 @@ class ApiV1:
                                  "hosts": [{"host": name, "available": self._can_continue(name),
                                      "reasons": ([] if self._can_continue(name) else ["HOST_CLEANUP_UNAVAILABLE"])}
                                      for name in fleet.config.hosts]},
-                     "features": {"dashboard_sync": {"version": 1, "bootstrap": "/api/v1/bootstrap", "checkpoint_replay": True},
+                      "features": {"dashboard_sync": {"version": 1, "bootstrap": "/api/v1/bootstrap", "checkpoint_replay": True},
+                                  "project_dispatch": {"version": 1, "artifacts": True, "model": True},
                                   "work_item_reads": {"version": 1},
                                   "repository_sync": repository_sync.capabilities(self.daemon.ops),
                                   "worktree_merge": worktree_merge_operations.capabilities(self.daemon.ops),

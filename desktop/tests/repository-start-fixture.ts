@@ -1,14 +1,19 @@
 import {expect, type Page} from '@playwright/test';
 export const publishedId = 'op_'+'a'.repeat(32), publishedSha = 'b'.repeat(40), bindingDigest = 'c'.repeat(64);
 export const selected = {repository: 'example/project', host: 'demo', workspace_id: 'demo-ws'};
+export const dispatchProject = 'prj_'+'1'.repeat(20), dispatchArtifact = {artifact_id: 'art_'+'2'.repeat(32), revision: 1, digest: '3'.repeat(64)};
 export async function publishedFixture(page: Page, native: boolean, options: any = {}) {
   const state = {actor: 'published-person', server: 'published-server', principal: 'published-principal', scopes: ['observe', 'start'],
     allowed: true, writes: true, orchestrate: true, status: 'succeeded', posts: [] as any[], previews: [] as any[], reads: [] as string[],
-    errors: [] as string[], events: [] as any[], after: 0, operation: null as any, ...options};
+    errors: [] as string[], events: [] as any[], after: 0, operation: null as any,
+    project: {project_id: dispatchProject, name: 'Dashboard project', description: 'Shared browser and desktop work',
+      repositories: ['example/project'], version: 1, archived: false, counts: {total: 0, approved: 0}}, ...options};
   const caps = () => ({actor: state.actor, scopes: state.scopes, api_version: 1, contract_version: '2026-10-08',
     hosts: ['demo', 'other'].map(host => ({host, writes: state.writes, orchestrate: state.orchestrate})),
     actions: state.absent ? [] : [{action: 'repository.continue', allowed: state.allowed}, {action: 'session.start', allowed: state.allowed}],
-    features: {repository_sync: state.unbound ? [] : [selected, {...selected, host: 'other', workspace_id: 'other-ws'}].map(b => ({...b, exact_ref_head_only: true}))}});
+    ...(state.dispatch ? {artifacts: {limits: {max_file_bytes: 1048576}}} : {}),
+    features: {...(state.dispatch && !state.oldCentral ? {project_dispatch: {version: 1, artifacts: true, model: true}} : {}),
+      repository_sync: state.unbound ? [] : (state.bindings || [selected, {...selected, host: 'other', workspace_id: 'other-ws'}]).map(b => ({...b, exact_ref_head_only: true}))}});
   const mismatch = (operation: any) => {
     const op = structuredClone(operation);
     if (state.bad === 'key') op.idempotency_key = 'wrong';
@@ -19,6 +24,8 @@ export async function publishedFixture(page: Page, native: boolean, options: any
     if (state.bad === 'result') op.result.source_sha = '0'.repeat(40);
     if (state.bad === 'refs') op.external_refs.repository_binding = '0'.repeat(64);
     if (state.bad === 'message') op.result.message_id = 'unrelated';
+    if (state.bad === 'artifacts') op.params.artifacts[0].digest = '0'.repeat(64);
+    if (state.bad === 'project') op.external_refs.project_id = 'prj_'+'0'.repeat(20);
     return op;
   };
   const dispatch = async (input: any) => {
@@ -50,6 +57,17 @@ export async function publishedFixture(page: Page, native: boolean, options: any
       return {status: 200, data: {operation: mismatch(state.operation)}};
     }
     state.reads.push(input.path);
+    if (path.startsWith('/projects/')) {
+      if (state.failProject) return {status: 503, data: {error: {code: 'READ_FAILED', message: 'Project read failed'}}};
+      const project = structuredClone({...state.project, project_id: path.split('/').at(-1)});
+      if (state.delayProject) await new Promise(resolve => {state.holdProject = resolve;});
+      return {status: 200, data: {project, path: [], sub_projects: [], work_items: [], archived: []}};
+    }
+    if (path === '/artifacts') return {status: 200, data: {artifacts: [{revision: {...dispatchArtifact, state: 'ready', display_name: 'notes.txt'}}], next_cursor: null}};
+    if (path.startsWith('/artifacts/')) {
+      if (state.delayArtifact) await new Promise(resolve => {state.holdArtifact = resolve;});
+      return {status: 200, data: {artifact: {...dispatchArtifact, state: state.unreadyArtifact ? 'reserved' : 'ready', display_name: 'notes.txt'}}};
+    }
     if (path === '/operations/'+publishedId) {
       if (state.failRead) return {status: 503, data: {error: {code: 'READ_FAILED', message: 'Published read failed'}}};
       return {status: 200, data: {operation: mismatch({...state.operation, status: state.status})}};
