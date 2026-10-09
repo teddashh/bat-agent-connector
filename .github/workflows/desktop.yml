@@ -134,12 +134,16 @@ jobs:
           name: desktop-windows-installed-fixture
           path: desktop/test-results/windows-installed/
           if-no-files-found: ignore
-      - name: Packaged Linux release WebView, close-to-tray and single-instance fixture
+      - name: Extracted Linux deb WebView, close-to-tray and single-instance fixture
         if: runner.os == 'Linux'
         timeout-minutes: 2
         env:
           BATC_NATIVE_SMOKE_ARTIFACT_DIR: test-results/native-release
-        run: xvfb-run -a -s '-screen 0 1440x900x24' dbus-run-session -- node tests/native-smoke.mjs src-tauri/target/release/better-agent-dashboard
+        run: |
+          package_root=$(mktemp -d "$RUNNER_TEMP/dashboard-deb-XXXXXX")
+          trap 'rm -rf -- "$package_root"' EXIT
+          dpkg-deb --extract src-tauri/target/release/bundle/deb/*.deb "$package_root"
+          xvfb-run -a -s '-screen 0 1440x900x24' dbus-run-session -- node tests/native-smoke.mjs "$package_root/usr/bin/better-agent-dashboard"
       - name: Preserve packaged WebView fixture evidence
         if: runner.os == 'Linux' && always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

@@ -133,7 +133,8 @@ The desktop workflow packages unsigned Windows NSIS and Linux deb artifacts for 
 After packaging, `node tests/windows-installed-smoke.mjs` installs the NSIS package on the
 disposable GitHub-hosted Windows runner. It refuses workstations, existing app state,
 registered installations and running Dashboard processes. It checks installed binary
-hashes against the build, PE/registered versions and bundled license bytes; then connects
+hashes against the build with Tauri's exact NSIS bundle marker, PE/registered versions and
+bundled license bytes; then connects
 the real WebView to an observe-only loopback fixture using a synthetic memory-only token.
 It checks WM_CLOSE hides the window without terminating its process, a second invocation
 restores that same window, and terminating/relaunching the owned process resumes polling
@@ -141,6 +142,12 @@ without changing configuration. Finally it checks silent uninstall removes the b
 and version registration. JSON receipts, process/HTTP diagnostics and window screenshots
 are uploaded as `desktop-windows-installed-fixture`, including diagnostics after failures.
 Installation uses the documented [NSIS command-line switches](https://nsis.sourceforge.io/Docs/Chapter3.html).
+The [pinned Tauri bundler](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.1/crates/tauri-bundler/src/bundle.rs)
+changes the first `__TAURI_BUNDLE_TYPE_VAR_UNK` marker to `__TAURI_BUNDLE_TYPE_VAR_NSS`
+inside the package and restores the unpatched build afterward. The fixture permits exactly
+that transform and rejects any other byte change. An Authenticode setup needs its own
+reviewed post-signing payload proof; it is not silently exempted by this unsigned/updater-only check.
+Linux CI extracts the built deb into a disposable directory and exercises its actual executable.
 This is native installed fixture evidence, not a physical tray interaction, normal Quit,
 real Credential Manager enrollment, sign-in persistence, signed updater execution or live
 central/BAT acceptance. The script never runs on an operator's existing installation.
