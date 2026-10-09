@@ -5,6 +5,7 @@ mod credentials;
 mod desktop_preferences;
 mod files;
 mod fleet;
+mod fleet_bootstrap;
 mod fleet_control;
 mod fleet_lifecycle;
 #[cfg(windows)]
@@ -86,6 +87,21 @@ async fn desktop_update(
             state.status()
         }
     }
+}
+
+#[tauri::command]
+async fn fleet_bootstrap(
+    window: WebviewWindow,
+    state: State<'_, Arc<fleet_bootstrap::Bootstrap>>,
+    control: State<'_, Arc<fleet_control::Control>>,
+    input: fleet_bootstrap::Request,
+) -> Result<serde_json::Value, String> {
+    local_main(&window)?;
+    state
+        .inner()
+        .clone()
+        .request(control.inner().clone(), input)
+        .await
 }
 
 #[tauri::command]
@@ -550,6 +566,10 @@ fn main() {
             let control = Arc::new(fleet_control::Control::new(fleet_path));
             control.set_stopping(update_pending);
             app.manage(control.clone());
+            let bootstrap = Arc::new(fleet_bootstrap::Bootstrap::default());
+            app.manage(bootstrap.clone());
+            #[cfg(windows)]
+            bootstrap.start_auto(control.clone());
             app.manage(QuitState::default());
             let mut config = app.config().app.windows[0].clone();
             config.visible = update_pending || !matches!(login_options, Some(Ok((false, false))));
@@ -652,6 +672,7 @@ fn main() {
             fleet_availability,
             fleet_request,
             fleet_control,
+            fleet_bootstrap,
             open_external
         ])
         .run(tauri::generate_context!())

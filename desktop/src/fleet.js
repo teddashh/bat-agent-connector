@@ -7,7 +7,7 @@ export async function mountFleet(main, {h, t}) {
   const content = h("div"), message = h("p", {class: "muted", role: "status"});
   panel.append(h("h2", {}, t("fleet_title")), h("p", {class: "muted"}, t("fleet_help")), content, message);
   main.append(panel);
-  let nativeCleanup;
+  let nativeCleanup, bootstrapCleanup;
   let disposed = false, busy = false, readable = false, timer, snapshot, draft, binding;
   const alive = () => !disposed && panel.isConnected;
   const key = () => `batc.desktop.fleet.selection.${binding}`;
@@ -96,12 +96,17 @@ export async function mountFleet(main, {h, t}) {
       message.textContent = t(!availability.platform_supported ? "fleet_windows" : "fleet_setup");
     } else if (availability.native_controls === true) {
       const {mountFleetDesktop} = await import("./fleet-desktop.js");
-      if (alive()) {panel.remove(); nativeCleanup = await mountFleetDesktop(main, {h, t});}
+      if (alive()) {panel.remove(); nativeCleanup = await mountFleetDesktop(main, {h, t});
+        if (availability.bootstrap_controls === true && !disposed && main.isConnected) {
+          const {mountFleetBootstrap} = await import("./fleet-bootstrap.js");
+          bootstrapCleanup = await mountFleetBootstrap(main, {h, t});
+        }
+      }
     } else {
       await read();
       const poll = async () => {if (!alive()) return; await read(); if (alive()) timer = setTimeout(poll, 5000);};
       timer = setTimeout(poll, 5000);
     }
   } catch { message.textContent = t("fleet_unavailable"); }
-  return () => {disposed = true; clearTimeout(timer); nativeCleanup?.(); panel.remove();};
+  return () => {disposed = true; clearTimeout(timer); nativeCleanup?.(); bootstrapCleanup?.(); panel.remove();};
 }

@@ -1,4 +1,6 @@
 //! Windows-only native facade. WebView fields are logical IDs and observed versions.
+#[path = "fleet_native/bootstrap.rs"]
+pub(crate) mod bootstrap;
 #[path = "fleet_native/controls.rs"]
 mod controls;
 #[path = "fleet_native/guarded.rs"]

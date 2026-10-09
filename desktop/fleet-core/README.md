@@ -6,8 +6,9 @@ The Windows OS adapter stops only explicitly verified local processes through re
 The probe module performs bounded, read-only loopback TLS/BAT and Connector capabilities requests.
 The route module probes configured TCP endpoints and a fixed trusted local Tailscale
 `status --json` command under deadlines, and keeps route/recovery decisions native-only.
-These effects are not connected to the desktop Fleet adapter or automatic startup. This source slice does not
-establish Rust Fleet parity.
+The native desktop controller wires these bounded effects through the reviewed
+supervisor and lifecycle guards. Source and synthetic fixtures do not establish
+installed Rust Fleet parity.
 
 Port basis: Fleet Kit `2ec4b11bc010bfd669040e942648c741b63d0b7c`, `client/fleet-core.ps1` and
 `client/fleet-client.ps1`. Reviewed main `4744507354466b1424b8ea369a00a94f1ca3a933` has no intervening
@@ -75,3 +76,9 @@ exchange. `windows_bootstrap` uses the trusted system SSH executable and shared 
 guard; the separately deployed Linux helper proves the existing unit/state/owner before
 a single start request. No recipe/helper is installed or enabled by this source slice.
 See [the bootstrap contract and deployment limits](../../docs/design/fleet-bootstrap.md).
+
+`bootstrap_policy` checks positive current-login tunnel ownership and fresh selected
+Connector-unavailable readiness before the desktop bootstrap controller proceeds.
+The optional trusted recipe `auto_ensure` flag enables only the original finite
+request; the shared settings UI reads its local receipt independently of central
+authentication. A healthy central endpoint needs no service repair.

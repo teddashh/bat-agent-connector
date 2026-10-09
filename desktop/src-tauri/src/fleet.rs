@@ -120,6 +120,7 @@ fn hex(s: &str, len: usize) -> bool {
 #[derive(Serialize)]
 pub struct FleetAvailability {
     pub native_controls: bool,
+    pub bootstrap_controls: bool,
     pub configured: bool,
     pub platform_supported: bool,
     pub error: Option<String>,
@@ -145,6 +146,7 @@ impl FleetBridge {
         let installation = Snapshot::load(&self.config);
         FleetAvailability {
             native_controls: cfg!(windows),
+            bootstrap_controls: cfg!(windows),
             configured: installation.is_ok(),
             platform_supported: cfg!(windows),
             error: installation

@@ -75,7 +75,7 @@ async function connectorUploadArtifact(operationId, bytes, browserToken) {
 		data: await res.json().catch(() => ({}))
 	};
 }
-var nativeDesktop, nativeFileSupport, nativeFilesStatus, nativeFilesPick, nativeFilesUpload, nativeFilesDropTarget, nativeFilesControl, nativeFilesSave, nativeFilesPreview, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal, fleetAvailability, fleetControl, fleetRequest, updateRequest;
+var nativeDesktop, nativeFileSupport, nativeFilesStatus, nativeFilesPick, nativeFilesUpload, nativeFilesDropTarget, nativeFilesControl, nativeFilesSave, nativeFilesPreview, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal, fleetAvailability, fleetBootstrap, fleetControl, fleetRequest, updateRequest;
 var init_transport = __esmMin((() => {
 	init_core();
 	nativeDesktop = isTauri();
@@ -100,6 +100,7 @@ var init_transport = __esmMin((() => {
 	nativeForgetCredential = () => invoke("connector_forget_credential");
 	openExternal = (url) => invoke("open_external", { url });
 	fleetAvailability = () => invoke("fleet_availability");
+	fleetBootstrap = (input) => invoke("fleet_bootstrap", { input });
 	fleetControl = (input) => invoke("fleet_control", { input });
 	fleetRequest = (input) => invoke("fleet_request", { input });
 	updateRequest = (input) => invoke("desktop_update", { input });
@@ -172,6 +173,31 @@ var STRINGS = {
 		update_phase_verified: "簽章與版本已驗證，可安裝此版本。",
 		update_phase_stopping_fleet: "正在準備安裝並停止本機連線…",
 		update_phase_installation_unknown: "已保存原安裝請求，等待確認安裝結果。",
+		bootstrap_title: "中央服務啟動",
+		bootstrap_help: "只查核並啟用已配置的既有 Connector 服務；不重啟服務，也不建立新的資料庫。",
+		bootstrap_configured: "已有固定啟動設定",
+		bootstrap_missing: "尚未配置啟動方式",
+		bootstrap_auto_on: "已設定不可用時自動查核啟動",
+		bootstrap_auto_off: "未啟用自動啟動",
+		bootstrap_healthy: "中央服務目前可用，不需要啟動。",
+		bootstrap_blocked: "需先確認已選連線、目前 owner 與服務不可用的最新觀測。登入、權限或版本問題不會觸發服務啟動。",
+		bootstrap_prepared: "已保存原請求，尚未傳送遠端查核。",
+		bootstrap_querying: "正在查核原請求；尚未確認服務狀態。",
+		bootstrap_ensure_requested: "已記錄啟動請求；回應未全部確認，只能查證原結果。",
+		bootstrap_needs_attention: "有限查核仍未確認結果，需檢查既有部署。原請求保留，不會再送啟動。",
+		bootstrap_service_running: "既有服務的執行身分已確認。這是服務證據，並不表示中央登入或 API 已通過。",
+		bootstrap_unknown: "結果尚未確認。請讀取原請求；重新開啟此頁不會再送啟動。",
+		bootstrap_request: "原請求",
+		bootstrap_queries: "已查核 {count}／4 次",
+		bootstrap_changed: "原請求屬於先前的固定設定，目前僅能讀取。",
+		bootstrap_prepare: "準備固定服務請求",
+		bootstrap_ensure: "查核並啟用既有服務",
+		bootstrap_reconcile: "繼續查證原結果",
+		bootstrap_read: "讀取原請求",
+		bootstrap_refresh: "更新啟動狀態",
+		bootstrap_separate: "一般中央連線與身分驗證持續獨立進行。本機回執不等於中央已接受操作。",
+		bootstrap_working: "正在查核本機回執…",
+		bootstrap_unproven: "無法確認回應與原請求一致。",
 		bulk_title: "批次核准",
 		bulk_choose_host: "選擇主機",
 		bulk_workspace: "工作區名稱或 ID（選填）",
@@ -1103,6 +1129,31 @@ var STRINGS = {
 		update_phase_verified: "The signature and version are verified. This update is ready to install.",
 		update_phase_stopping_fleet: "Preparing installation and stopping local connections…",
 		update_phase_installation_unknown: "The original installation request is saved; its outcome is not confirmed.",
+		bootstrap_title: "Central service startup",
+		bootstrap_help: "Check and ensure only the configured existing Connector service. This never restarts it or creates a new database.",
+		bootstrap_configured: "Fixed startup recipe configured",
+		bootstrap_missing: "No startup recipe configured",
+		bootstrap_auto_on: "Automatic check and ensure enabled",
+		bootstrap_auto_off: "Automatic startup disabled",
+		bootstrap_healthy: "The central service is available; no startup is needed.",
+		bootstrap_blocked: "Requires the selected connection, a proven current owner and recent service-unavailable evidence. Login, scope and version failures do not trigger startup.",
+		bootstrap_prepared: "Original request saved. No remote query has been sent.",
+		bootstrap_querying: "Checking the original request; service state is not yet confirmed.",
+		bootstrap_ensure_requested: "Startup intent recorded. The outcome is not fully confirmed; only reconcile the original result.",
+		bootstrap_needs_attention: "Bounded checks did not confirm the result. Check the existing deployment. The original request stays saved and ensure will not be sent again.",
+		bootstrap_service_running: "The existing service owner was confirmed. This service evidence does not prove central login or API compatibility.",
+		bootstrap_unknown: "Outcome not confirmed. Read the original request; reopening this page never sends ensure again.",
+		bootstrap_request: "Original request",
+		bootstrap_queries: "{count}/4 queries used",
+		bootstrap_changed: "This request belongs to an earlier fixed recipe and can only be read here.",
+		bootstrap_prepare: "Prepare fixed service request",
+		bootstrap_ensure: "Check and ensure existing service",
+		bootstrap_reconcile: "Reconcile original result",
+		bootstrap_read: "Read original request",
+		bootstrap_refresh: "Refresh startup status",
+		bootstrap_separate: "Normal central connection and identity checks continue independently. A local receipt is not a central operation acceptance.",
+		bootstrap_working: "Reading local receipts…",
+		bootstrap_unproven: "The response could not be bound to the original request.",
 		bulk_title: "Batch approvals",
 		bulk_choose_host: "Choose a host",
 		bulk_workspace: "Workspace name or ID (optional)",
@@ -2777,6 +2828,163 @@ var init_fleet_desktop = __esmMin((() => {
 	init_transport();
 }));
 //#endregion
+//#region src/fleet-bootstrap.js
+var fleet_bootstrap_exports = __exportAll({ mountFleetBootstrap: () => mountFleetBootstrap });
+async function mountFleetBootstrap(main, { h, t }) {
+	const panel = h("section", {
+		class: "panel fleet-bootstrap",
+		"aria-label": t("bootstrap_title")
+	});
+	const content = h("div"), message = h("p", {
+		class: "muted",
+		role: "status"
+	});
+	panel.append(h("h2", {}, t("bootstrap_title")), h("p", { class: "muted" }, t("bootstrap_help")), content, message);
+	if (!main.isConnected) return () => {};
+	main.prepend(panel);
+	let disposed = false, busy = false, readable = false, snapshot, original, timer;
+	const alive = () => !disposed && panel.isConnected;
+	const storage = "batc.desktop.fleet.bootstrap.original";
+	const hex = (v, n) => typeof v === "string" && new RegExp(`^[0-9a-f]{${n}}$`).test(v);
+	const valid = (value) => value && hex(value.recipe_binding, 64) && hex(value.status?.request_id, 32) && [
+		"querying",
+		"ensure_requested",
+		"needs_attention",
+		"service_running"
+	].includes(value.status.phase) && Number.isInteger(value.status.queries) && value.status.queries >= 0 && value.status.queries <= 4 && typeof value.status.ensure_requested === "boolean" && typeof value.status.ensure_accepted === "boolean" && [
+		null,
+		"unknown",
+		"stopped",
+		"transitioning",
+		"owner_present",
+		"running"
+	].includes(value.status.last_state) && (!value.status.ensure_accepted || value.status.ensure_requested);
+	const save = () => {
+		if (original) try {
+			sessionStorage.setItem(storage, JSON.stringify({
+				request_id: original.status.request_id,
+				recipe_binding: original.recipe_binding
+			}));
+		} catch {}
+	};
+	try {
+		const value = JSON.parse(sessionStorage.getItem(storage) || "null");
+		if (hex(value?.request_id, 32) && hex(value.recipe_binding, 64)) original = {
+			recipe_binding: value.recipe_binding,
+			status: { request_id: value.request_id },
+			unknown: true
+		};
+	} catch {}
+	const accept = (value, expected) => {
+		if (!valid(value) || expected && (value.status.request_id !== expected.status.request_id || value.recipe_binding !== expected.recipe_binding)) throw new Error(t("bootstrap_unproven"));
+		original = value;
+		save();
+	};
+	const current = () => readable && snapshot?.configured && snapshot.eligible && original?.recipe_binding === snapshot.recipe_binding && !original.unknown;
+	const phase = () => original?.unknown ? "unknown" : original?.status.queries === 0 ? "prepared" : original?.status.phase;
+	const readOriginal = async () => {
+		if (!original) return;
+		const expected = original;
+		original = {
+			...original,
+			unknown: true
+		};
+		save();
+		const value = await fleetBootstrap({
+			action: "receipt",
+			request_id: expected.status.request_id
+		});
+		if (alive()) {
+			if (!value) throw new Error(t("bootstrap_unproven"));
+			accept(value, expected);
+		}
+	};
+	const read = async () => {
+		readable = false;
+		const value = await fleetBootstrap({ action: "overview" });
+		if (!alive()) return;
+		if (value?.version !== 1 || typeof value.configured !== "boolean" || typeof value.auto_ensure !== "boolean" || typeof value.eligible !== "boolean" || !(value.recipe_binding === null || hex(value.recipe_binding, 64)) || value.latest !== null && !valid(value.latest)) throw new Error(t("bootstrap_unproven"));
+		snapshot = value;
+		readable = true;
+		if (!original && value.latest) accept(value.latest);
+		await readOriginal();
+	};
+	const run = async (fn) => {
+		if (!alive() || busy) return;
+		busy = true;
+		message.textContent = t("bootstrap_working");
+		render();
+		try {
+			await fn();
+			if (alive()) message.textContent = "";
+		} catch {
+			if (alive()) message.textContent = t("bootstrap_unknown");
+		} finally {
+			busy = false;
+			if (alive()) render();
+		}
+	};
+	const prepare = () => run(async () => {
+		const binding = snapshot.recipe_binding;
+		const value = await fleetBootstrap({
+			action: "prepare",
+			recipe_binding: binding
+		});
+		if (alive()) {
+			if (!valid(value) || value.recipe_binding !== binding) throw new Error(t("bootstrap_unproven"));
+			accept(value);
+		}
+	});
+	const advance = () => run(async () => {
+		if (!current()) return;
+		const expected = original;
+		original = {
+			...original,
+			unknown: true
+		};
+		save();
+		const value = await fleetBootstrap({
+			action: "advance",
+			request_id: expected.status.request_id,
+			recipe_binding: expected.recipe_binding
+		});
+		if (alive()) accept(value, expected);
+	});
+	function render() {
+		if (!alive()) return;
+		const button = (key, fn, disabled = false, primary = false) => h("button", {
+			class: primary ? "primary" : "secondary",
+			disabled: busy || disabled,
+			onclick: fn
+		}, t(key));
+		content.replaceChildren(...[
+			snapshot ? h("p", {}, t(snapshot.configured ? "bootstrap_configured" : "bootstrap_missing"), " · ", t(snapshot.auto_ensure ? "bootstrap_auto_on" : "bootstrap_auto_off")) : null,
+			snapshot?.code ? h("p", { class: "muted" }, t(snapshot.code === "BOOTSTRAP_NOT_NEEDED" ? "bootstrap_healthy" : "bootstrap_blocked")) : null,
+			original ? h("p", { class: "note" }, t("bootstrap_" + (phase() || "unknown"))) : null,
+			original ? h("p", { class: "muted bootstrap-receipt" }, t("bootstrap_request"), " ", h("code", {}, original.status.request_id), Number.isInteger(original.status.queries) ? ` · ${t("bootstrap_queries", { count: original.status.queries })}` : null) : null,
+			original && snapshot?.recipe_binding !== original.recipe_binding ? h("p", { class: "muted" }, t("bootstrap_changed")) : null,
+			h("div", { class: "actions" }, button("bootstrap_prepare", prepare, !readable || !snapshot?.eligible || !!original && phase() !== "service_running", !original), original && !["service_running"].includes(phase()) ? button(original.status.ensure_requested ? "bootstrap_reconcile" : "bootstrap_ensure", advance, !current() || original.status.queries >= 4, true) : null, original ? button("bootstrap_read", () => run(readOriginal)) : null, button("bootstrap_refresh", () => run(read))),
+			h("p", { class: "muted" }, t("bootstrap_separate"))
+		].filter(Boolean));
+	}
+	render();
+	await run(read);
+	const poll = async () => {
+		if (!alive()) return;
+		if (!busy) await run(read);
+		if (alive()) timer = setTimeout(poll, 5e3);
+	};
+	timer = setTimeout(poll, 5e3);
+	return () => {
+		disposed = true;
+		clearTimeout(timer);
+		panel.remove();
+	};
+}
+var init_fleet_bootstrap = __esmMin((() => {
+	init_transport();
+}));
+//#endregion
 //#region src/fleet.js
 init_transport();
 async function mountFleet(main, { h, t }) {
@@ -2791,7 +2999,7 @@ async function mountFleet(main, { h, t }) {
 	});
 	panel.append(h("h2", {}, t("fleet_title")), h("p", { class: "muted" }, t("fleet_help")), content, message);
 	main.append(panel);
-	let nativeCleanup;
+	let nativeCleanup, bootstrapCleanup;
 	let disposed = false, busy = false, readable = false, timer, snapshot, draft, binding;
 	const alive = () => !disposed && panel.isConnected;
 	const key = () => `batc.desktop.fleet.selection.${binding}`;
@@ -2951,6 +3159,16 @@ async function mountFleet(main, { h, t }) {
 					h,
 					t
 				});
+				if (availability.bootstrap_controls === true && !disposed && main.isConnected) {
+					const { mountFleetBootstrap } = await __vitePreload(async () => {
+						const { mountFleetBootstrap } = await Promise.resolve().then(() => (init_fleet_bootstrap(), fleet_bootstrap_exports));
+						return { mountFleetBootstrap };
+					}, void 0, import.meta.url);
+					bootstrapCleanup = await mountFleetBootstrap(main, {
+						h,
+						t
+					});
+				}
 			}
 		} else {
 			await read();
@@ -2968,6 +3186,7 @@ async function mountFleet(main, { h, t }) {
 		disposed = true;
 		clearTimeout(timer);
 		nativeCleanup?.();
+		bootstrapCleanup?.();
 		panel.remove();
 	};
 }

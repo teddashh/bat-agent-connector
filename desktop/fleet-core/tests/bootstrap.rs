@@ -364,3 +364,75 @@ async fn damaged_receipt_or_missing_positive_service_proof_never_reopens_transpo
         assert!(next.calls.is_empty());
     }
 }
+
+#[tokio::test]
+async fn prepared_native_id_survives_reopen_and_recipe_loss_without_any_transport() {
+    let (f, c, r, g) = setup();
+    let mut m = Mock::new(&f, &c, [Reply::Running]);
+    let first = Store::new(&f.0).unwrap().prepare(&r, &g, ID, &m).unwrap();
+    assert_eq!(first.status.queries, 0);
+    assert!(!first.status.ensure_requested);
+    assert!(m.calls.is_empty());
+    let reopened = Store::new(&f.0).unwrap();
+    assert_eq!(reopened.latest().unwrap().unwrap().status.request_id, ID);
+    assert!(reopened.prepare(&r, &g, &"2".repeat(32), &m).is_err());
+    reopened.advance(&r, &g, ID, &mut m).await.unwrap();
+    std::fs::remove_file(f.0.join("kit").join(RECIPE_FILE)).unwrap();
+    let receipt = reopened.status(ID).unwrap().unwrap();
+    assert_eq!(receipt.status.phase, Phase::ServiceRunning);
+    assert_eq!(receipt.recipe_binding, r.binding());
+    assert_eq!(m.calls.len(), 1);
+}
+#[test]
+fn automatic_ensure_requires_explicit_trusted_opt_in() {
+    let (f, c, r, _) = setup();
+    assert!(!r.auto_ensure());
+    let path = f.0.join("kit").join(RECIPE_FILE);
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    value["auto_ensure"] = json!(true);
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let opted = Recipe::load(&f.0.join("kit"), &c).unwrap().unwrap();
+    assert!(opted.auto_ensure());
+    assert_ne!(opted.binding(), r.binding());
+    value["auto_ensure"] = json!(1);
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(Recipe::load(&f.0.join("kit"), &c).is_err());
+}
+
+#[tokio::test]
+async fn automatic_policy_resumes_original_and_never_replaces_exhaustion_or_success() {
+    use bat_fleet_core::bootstrap_policy::{automatic, Automatic};
+    for success in [false, true] {
+        let (f, c, manual, g) = setup();
+        assert_eq!(automatic(&manual, None).unwrap(), Automatic::Hold);
+        let path = f.0.join("kit").join(RECIPE_FILE);
+        let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["auto_ensure"] = json!(true);
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let opted = Recipe::load(&f.0.join("kit"), &c).unwrap().unwrap();
+        assert_eq!(automatic(&opted, None).unwrap(), Automatic::Prepare);
+        let store = Store::new(&f.0).unwrap();
+        let mut peer = Mock::new(
+            &f,
+            &c,
+            [if success { Reply::Running } else { Reply::Lost }; 4],
+        );
+        store.prepare(&opted, &g, ID, &peer).unwrap();
+        let saved = Store::new(&f.0).unwrap().latest().unwrap().unwrap();
+        assert_eq!(
+            automatic(&opted, Some(&saved)).unwrap(),
+            Automatic::Resume(ID.into())
+        );
+        let mut changed = saved.clone();
+        changed.recipe_binding = "e".repeat(64);
+        assert_eq!(
+            automatic(&opted, Some(&changed)),
+            Err("BOOTSTRAP_UNRESOLVED")
+        );
+        store.advance(&opted, &g, ID, &mut peer).await.unwrap();
+        let terminal = Store::new(&f.0).unwrap().latest().unwrap().unwrap();
+        assert_eq!(automatic(&opted, Some(&terminal)).unwrap(), Automatic::Hold);
+        assert_eq!(terminal.status.request_id, ID);
+        assert!(peer.calls.iter().all(|action| *action == Action::Query));
+    }
+}

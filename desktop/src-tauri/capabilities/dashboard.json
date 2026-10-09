@@ -18,6 +18,7 @@
     "allow-fleet-availability",
     "allow-fleet-request",
     "allow-fleet-control",
+    "allow-fleet-bootstrap",
     "allow-native-files-status",
     "allow-native-files-pick",
     "allow-native-files-drop-target",

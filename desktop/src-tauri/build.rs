@@ -20,6 +20,7 @@ fn main() {
             "fleet_availability",
             "fleet_request",
             "fleet_control",
+            "fleet_bootstrap",
         ]),
     ))
     .expect("desktop build configuration");
