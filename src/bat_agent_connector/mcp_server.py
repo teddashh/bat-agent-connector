@@ -153,10 +153,10 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
         workspaces, terminals, agent sessions, loaded sessions and currently streaming sessions."""
         return await service.host_status(fleet, host)
 
-    async def workspaces_list(host: str | None = None) -> dict[str, Any]:
+    async def workspaces_list(host: str | None = None, limit: int = 100) -> dict[str, Any]:
         """List workspaces (name, folder, terminal and agent-session counts) on one host, or all hosts
         when host is omitted."""
-        return await service.workspaces_list(fleet, host)
+        return await daemon("workspaces_list", host=host, limit=limit)
 
     async def sessions_list(
         host: str | None = None,
@@ -280,7 +280,7 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
         quota_sessions,
         session_policy,
     ):
-        if not principal_only:
+        if not principal_only or fn is workspaces_list:
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
 
     async def work_status(task_id: str) -> dict[str, Any]:
@@ -981,26 +981,27 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             fn.__doc__ = (fn.__doc__ or "") + f" Writes are enabled for: {enabled}."
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=wr)
 
+    if not read_only and (principal_only or fleet.any_orchestrate):
+        async def session_start(host: str, workspace: str, agent: Literal["claude", "codex"] = "claude",
+            confirm: bool = False, prompt: str | None = None, model: str | None = None,
+            use_worktree: bool = True, title: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
+            """ORCHESTRATE. Central durable standalone start; requires confirm and caller start scope.
+            Each worktree/start/tab/prompt effect has a receipt. Keep the key after a lost reply;
+            no key creates an independent operation. Never falls back to direct BAT or starts a daemon."""
+            if not principal_only and not fleet.orchestrate_enabled(host):
+                raise WriteRefused("the local orchestrate tier is off for this host")
+            out = await principal_daemon("session_start", confirm, host=host, workspace=workspace,
+                agent=agent, confirm=confirm, prompt=prompt, model=model, use_worktree=use_worktree,
+                title=title, idempotency_key=idempotency_key)
+            if out["operation_status"] in {"failed", "cancelled"}:
+                raise ToolError(json.dumps(out, ensure_ascii=False))
+            return out
+        mcp.add_tool(_wrap(session_start), name="session_start",
+                     annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=False))
+
     if fleet.any_orchestrate and not principal_only:
         oenabled = ", ".join(sorted(h for h in config.hosts if fleet.orchestrate_enabled(h)))
         orc = ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=False)
-
-        async def session_start(
-            host: str,
-            workspace: str,
-            agent: Literal["claude", "codex"] = "claude",
-            confirm: bool = False,
-            prompt: str | None = None,
-            model: str | None = None,
-            use_worktree: bool = True,
-            title: str | None = None,
-        ) -> dict[str, Any]:
-            """ORCHESTRATE. Start a new agent session in a workspace, by default in its own git worktree
-            (host assigns branch bat/worktree-<id>; custom branch names are not supported by BAT), and
-            optionally send an initial prompt. Capped per host. Requires confirm=true."""
-            return await orchestrate.session_start(
-                fleet, host, workspace, agent, confirm, prompt, model, use_worktree, title
-            )
 
         async def worktree_merge(host: str, session_id: str, confirm: bool = False) -> dict[str, Any]:
             """ORCHESTRATE. Merge a session's worktree branch into its source branch (merge --no-ff) only
@@ -1108,7 +1109,6 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             return await lifecycle.fanout_from_plan(fleet, host, session_id, confirm, dry_run, agent, None, max_items)
 
         for fn in (
-            session_start,
             worktree_merge,
             worktree_remove,
             session_failover,
