@@ -105,6 +105,10 @@ impl Plan {
     pub fn name(&self) -> &str {
         &self.name
     }
+    #[cfg(windows)]
+    pub(crate) fn epoch(&self) -> &str {
+        &self.epoch
+    }
     /// Native-only argv, never a status document or log entry.
     pub fn arguments(&self) -> &[String] {
         &self.arguments
@@ -117,6 +121,7 @@ impl Plan {
 /// Err from spawn distinguishes a positive failure before launch from an uncertain child.
 pub enum SpawnFailure {
     NotStarted,
+    RolledBack,
     Unconfirmed,
 }
 pub trait Platform {
@@ -255,7 +260,7 @@ pub fn launch<P: Platform>(
     }
     let mut child = match platform.spawn(plan) {
         Ok(child) => child,
-        Err(SpawnFailure::NotStarted) => {
+        Err(SpawnFailure::NotStarted | SpawnFailure::RolledBack) => {
             remove_exact(&intent_path, &intent)?;
             return Err("TUNNEL_START_FAILED");
         }
