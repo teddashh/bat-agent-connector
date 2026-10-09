@@ -137,18 +137,51 @@ impl Platform for WindowsPlatform<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn endpoint_diagnostics(label: &str, local: SocketAddrV4) {
+        // Only addresses allocated by this fixture. Report no private endpoint data.
+        // Keep the positive production oracle below: a timeout must not become absence.
+        for timeout in [Duration::from_millis(100), Duration::from_secs(3)] {
+            let started = Instant::now();
+            let outcome = TcpStream::connect_timeout(&SocketAddr::V4(local), timeout)
+                .map(|_| ())
+                .map_err(|error| error.kind());
+            let elapsed = started.elapsed();
+            let bind = TcpListener::bind(local)
+                .map(drop)
+                .map_err(|error| error.kind());
+            eprintln!(
+                "endpoint fixture={label} budget_ms={} elapsed_ms={} connect={outcome:?} bind={bind:?}",
+                timeout.as_millis(),
+                elapsed.as_millis(),
+            );
+        }
+    }
     #[test]
     fn system_path_and_occupied_listener_are_fixed_and_read_only() {
         let path = system_ssh().unwrap();
         assert!(path.is_absolute());
         assert!(path.ends_with("OpenSSH/ssh.exe"));
+        let unused_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let SocketAddr::V4(unused) = unused_listener.local_addr().unwrap() else {
+            panic!()
+        };
+        drop(unused_listener);
+        endpoint_diagnostics("never_connected", unused);
+        let never_connected = endpoint_free(unused);
+
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let SocketAddr::V4(local) = listener.local_addr().unwrap() else {
             panic!()
         };
         assert_eq!(endpoint_free(local), Err("ENDPOINT_IN_USE"));
         drop(listener);
-        endpoint_free(local).unwrap();
+        endpoint_diagnostics("occupied_then_closed", local);
+        let occupied_then_closed = endpoint_free(local);
+        assert_eq!(
+            (never_connected, occupied_then_closed),
+            (Ok(()), Ok(())),
+            "both temporary endpoints must have positive refusal and bind evidence"
+        );
     }
     #[test]
     #[ignore = "bounded child of retained launch adapter fixture"]
