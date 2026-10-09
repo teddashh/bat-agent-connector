@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 
 import pytest
@@ -392,6 +393,25 @@ async def test_git_read_proof_refuses_repository_filter_programs_and_submodules(
     assert out['status'] == 'failed' and out['error_code'] == 'MERGE_GIT_UNAVAILABLE', out
     assert not marker.exists() and not api.write_frames(mock)
     await daemon.fleet.close()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason='root can read mode-000 fixture directories')
+@pytest.mark.parametrize('carrier', [0, 1])
+async def test_exit_zero_empty_status_with_unreadable_directory_is_not_clean(daemon, mock, carriers, carrier):
+    blocked = carriers[carrier] / 'unreadable'
+    blocked.mkdir()
+    (blocked / 'private-file').write_text('fixture bytes')
+    blocked.chmod(0)
+    try:
+        status = subprocess.run(['git', '-C', str(carriers[carrier]), 'status', '--porcelain=v1', '-z', '--untracked-files=all'],
+                                capture_output=True, check=False)
+        assert status.returncode == 0 and status.stdout == b'' and status.stderr
+        out = await create(daemon)
+        assert out['status'] == 'failed' and out['error_code'] == 'MERGE_GIT_UNAVAILABLE', out
+        assert not api.write_frames(mock)
+    finally:
+        blocked.chmod(0o700)
+        await daemon.fleet.close()
 
 
 async def test_pending_task_ssh_creation_before_carrier_projection_blocks_merge(daemon, mock, carriers, monkeypatch):
