@@ -190,7 +190,7 @@ The requested mode, full request, original key and accepted operation ID persist
 endpoint/server/principal namespace. A lost reply locks the choice and allows only the same request/key;
 an accepted operation uses GET readback on reload or refresh. Terminal results require an explicit
 "Start another change" before a new request, resetting the selection to Normal permissions. The same
-explicit reset is available for `TASK_PAUSED`, `CONTROL_VERSION_CONFLICT` and `PERMISSIONS_HOST_POLICY`
+explicit reset is available for `TASK_PAUSED`, `CONTROL_VERSION_CONFLICT`, `PERMISSIONS_HOST_POLICY` and `CONFINEMENT_RAISE_REFUSED`
 admission refusals: central checks them after existing-key replay and before inserting an operation.
 Generic authorization errors, unknown actions, key conflicts and transport failures do not prove that
 an earlier attempt was never accepted and keep the original key locked. `uncertain` and `needs_attention` retain the fixed intent
