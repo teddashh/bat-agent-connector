@@ -21,7 +21,7 @@ MCP client) and shell scripts can:
 * (opt-in) nudge a session: send a message, say "continue", interrupt it, answer its question;
 * (opt-in, separate tier) fan work out: start sessions in fresh git worktrees, review their diffs, merge the clean ones;
 * spot sessions that hit a Claude usage quota and move them to Codex in the same worktree (failover);
-* auto-approve permission prompts behind deterministic gates, and reclaim managed resources through a reviewed preview.
+* answer fixed permission prompts and change managed session modes through central operations, and reclaim managed resources through a reviewed preview.
 
 > This project is **not affiliated with or endorsed by** the BAT authors. The protocol was read from BAT's MIT-licensed
 > source (v3.2.12) and can change between BAT releases. Credit for BAT goes to TonyQ and its contributors.
@@ -165,13 +165,18 @@ Task-owned sends, answers, interrupts and permission changes pass the same coord
 with force or continue. `CONTROL_VERSION_CONFLICT` requires reading the changed state. A second daemon, even with
 a different `--db`, returns `OWNER_CONFLICT` with the existing owner; clients use that owner. This is
 [operations unification](docs/design/operations-unification.md). MCP `session_send`, `session_continue`,
-`session_answer`, `session_interrupt` and their CLI commands now use the existing daemon. MCP needs `BATC_API_TOKEN`; CLI uses it
+`session_answer`, `session_interrupt`, `session_set_permissions` and their CLI commands use the existing daemon. MCP needs `BATC_API_TOKEN`; CLI uses it
 when set, otherwise its local admin token. Both keep confirmation and host write tiers. Add `--key` (MCP:
 `idempotency_key`) to deduplicate retries; omitting it creates a distinct operation each time. Keep the returned
 operation ID after an unknown reply and read it with `batc op ID` / `operation_get`; neither adapter resends
 automatically or starts another daemon. Message IDs identify BAT prompts, separately from operation keys.
-An omitted answer prompt ID is bound once at admission; retries cannot target a newer prompt. Permissions,
-bulk approval, starts, orchestration and task no-key projection remain later Part B work.
+An omitted answer prompt ID is bound once at admission; retries cannot target a newer prompt.
+Permission changes record each Claude/Codex setting separately, retaining partial and unknown outcomes.
+A running Claude turn is refused without queuing a later change; after idle, submit a new decision with a new key.
+Historical deferred flags cannot authorize an automatic change. Legacy bulk approval apply refuses before
+answering or raising any session; use individual `session.answer` and `session.permissions` operations.
+Its dry-run preview remains available. See [session permissions](docs/design/session-permissions.md).
+Bulk approval, starts, orchestration and task no-key projection remain later Part B work.
 
 Every task is one Goose session on Opus 5.5. The `goose-session` recipe prompt tells Goose to split the work
 once, to aim for an executor mix of Grok 4.7 : Codex : Opus 5.5 = 4:2:1, and to give no new work to a model
@@ -361,8 +366,8 @@ batc resource-cleanup history --original-id cp_EXAMPLE
 | `worktree_remove(host, session_id, confirm, delete_branch=false, ...)` | Disabled compatibility entrypoint (`LEGACY_WORKTREE_REMOVE_DISABLED`). Use reviewed `cleanup_preview` → `cleanup_apply` to check every consumer and retain receipts. |
 | `sessions_triage(host?, workspace?, agent?, states?, use_jev=auto, include_unloaded=true)` | Classifies each session: `quota_exhausted`, `rate_limited_transient`, `waiting_permission`, `waiting_question`, `working`, `done_idle`, `error_other`, `unknown`, with `source` (pattern/jev), confidence, evidence line and reset time. |
 | `quota_sessions(host?)` | Shortcut: Claude sessions stopped by a usage quota. |
-| `session_set_permissions(host, session_id, mode, confirm)` | `allow_all` (host must allow it) or `default`. Claude sessions are only switched while idle (switching mid-turn would end the turn); Codex applies it from its next turn. |
-| `approve_pending(host, confirm, dry_run?)` | Approves every pending permission prompt (not questions) with "don't ask again" and raises the session to allow-all. Only on `default_permission_mode = "allow_all"` hosts. |
+| `session_set_permissions(host, session_id, mode, confirm, idempotency_key?, control_version?)` | Durable central permission change: `allow_all` (host must allow it) or `default`. Claude switches only while idle, without automatic deferral; Codex applies from its next turn. Retain the operation/key for partial or unknown outcomes. |
+| `approve_pending(host, confirm, dry_run?)` | Dry-run preview only. Combined apply refuses with `LEGACY_PERMISSION_RAISE_DISABLED` before any answer or mode change; use individual central answer/permissions actions. |
 | `session_failover(host, session_id? \| all_exhausted, confirm, dry_run?, model?, force?, instructions?, archive_only?)` | Starts a Codex session that continues a quota-stopped connector-managed Claude session: same worktree when there is one, handoff prompt with the original task, latest instruction, recent output and git state (credentials redacted). Idempotent. `model` defaults to the host's `codex_model`. `instructions` replaces the default "continue the task" steps (for example "only commit the work in progress"); `archive_only` marks the successor for preservation; reviewed release keeps its commits and branch. |
 | `session_relay(host, message, confirm, workspace? \| session_id?, brief?, earlier?, channel?, thread?, request_fanout=0, dry_run?, start_if_missing?)` | Relays a human's message verbatim to the workspace's most recent connector-managed session (or a given one; sessions created in BAT are never written to, and `start_if_missing` starts a new worktree session instead), plus an optional brief labeled as the relayer's interpretation and the BAT-STATUS footer. `request_fanout=N` asks the session for a `bat-fanout` plan. Returns the rendered text. |
 | `fanout_plan_session(host, workspace, message, confirm, max_items=4, brief?)` | Starts a Codex planner in its own worktree (for when no managed session can plan) that answers with a `bat-fanout` plan. |
@@ -396,8 +401,8 @@ batc resource-cleanup preview --host box1
 batc policy box1                                      # mutation table; `batc policy box1 1a2b3c4d` explains one session
 batc triage box1 --state quota_exhausted --state waiting_permission
 batc quota                                            # quota-stopped Claude sessions on every host
-batc approve-pending box1 --dry-run                   # then --confirm
-batc permissions box1 1a2b3c4d --mode allow_all --confirm
+batc approve-pending box1 --dry-run                   # preview only; bulk apply is disabled
+batc permissions box1 1a2b3c4d --mode default --key perm-example --confirm
 batc failover box1 --all-exhausted --dry-run          # then --confirm
 batc cleanup box1                                     # read-only evaluation; --apply returns LEGACY_CLEANUP_DISABLED
 ```

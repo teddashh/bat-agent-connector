@@ -321,8 +321,9 @@ async def test_set_permissions_and_approve_pending(fleet_factory, mock):
     mock.states["sess-codex-0002"]["pendingPermission"] = {"toolUseId": "tu1", "toolName": "Bash", "input": {"command": "pytest"}}
     mock.metas["sess-codex-0002"]["isStreaming"] = False
     f = fleet_factory(writes=True, default_permission_mode="allow_all")
-    r = await lifecycle.approve_pending(f, "h1", confirm=True)  # Ted's BAT session: skipped, never answered
-    assert r["sessions"][0]["skipped"] == "read_only" and "claude:resolve-permission" not in mock.channels()
+    with pytest.raises(WriteRefused, match="LEGACY_PERMISSION_RAISE_DISABLED"):
+        await lifecycle.approve_pending(f, "h1", confirm=True)
+    assert "claude:resolve-permission" not in mock.channels()
     with pytest.raises(ResourceReadOnly, match="MANUAL_READ_ONLY"):
         await lifecycle.session_set_permissions(f, "h1", "sess-codex-0002", confirm=True, force=True)
     assert mock.perm_calls == []
@@ -331,12 +332,12 @@ async def test_set_permissions_and_approve_pending(fleet_factory, mock):
     f = fleet_factory(writes=True, default_permission_mode="allow_all", **MANAGED_CLONE)
     dry = await lifecycle.approve_pending(f, "h1", dry_run=True)
     assert dry["count"] == 1 and "claude:resolve-permission" not in mock.channels()
-    r = await lifecycle.approve_pending(f, "h1", confirm=True)
-    item = r["sessions"][0]
-    assert item["approved"] and item["raised_to_allow_all"]
-    res = next(i for i in mock.invokes if i["channel"] == "claude:resolve-permission")["params"]["result"]
-    assert res["behavior"] == "allow" and res["dontAskAgain"] is True
-    assert [c for c, _ in mock.perm_calls] == ["claude:set-codex-sandbox-mode", "claude:set-codex-approval-policy"]
+    with pytest.raises(WriteRefused, match="LEGACY_PERMISSION_RAISE_DISABLED"):
+        await lifecycle.approve_pending(f, "h1", confirm=True)
+    assert "claude:resolve-permission" not in mock.channels() and not mock.perm_calls
+    # The private explicit answer-only path retains the individual answer gate.
+    r = await lifecycle.approve_pending(f, "h1", confirm=True, raise_to_allow_all=False)
+    assert r["sessions"][0]["approved"] and not mock.perm_calls
     await f.close()
 
 
@@ -360,9 +361,9 @@ async def test_confined_sessions_stay_confined_on_an_allow_all_host(fleet_factor
     mock.states[b["session_id"]] = {"isStreaming": False, "messages": [msg(0, "user", "task")],
                                     "pendingPermission": {"toolUseId": "tu9", "toolName": "Bash",
                                                           "input": {"command": "rm -rf /home/ted/app"}}}
-    r = await lifecycle.approve_pending(f, "h1", confirm=True)
-    mine = [x for x in r["sessions"] if x["session_id"] == b["session_id"]]
-    assert mine and mine[0]["skipped"] == "confined" and "claude:resolve-permission" not in mock.channels()
+    with pytest.raises(WriteRefused, match="LEGACY_PERMISSION_RAISE_DISABLED"):
+        await lifecycle.approve_pending(f, "h1", confirm=True)
+    assert "claude:resolve-permission" not in mock.channels()
 
     mock.states[a["session_id"]] = {"isStreaming": False,
                                     "messages": [msg(0, "user", "task"), msg(1, "assistant", QUOTA_MSG)]}

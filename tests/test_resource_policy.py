@@ -129,7 +129,7 @@ async def test_bulk_and_relay_paths_skip_bat_sessions(fleet_factory, mock):
     mock.metas["sess-codex-0002"]["isStreaming"] = False
     add_unknown_session()
     f = all_tiers(fleet_factory)
-    approved = await lifecycle.approve_pending(f, "h1", confirm=True)
+    approved = await lifecycle.approve_pending(f, "h1", confirm=True, raise_to_allow_all=False)
     assert approved["count"] == 1 and approved["sessions"][0]["skipped"] == "read_only"
     relayed = await lifecycle.session_relay(f, "h1", "do it", session_id=MANUAL, confirm=True)
     assert relayed["sent"] is False and relayed["read_only_code"] == "MANUAL_READ_ONLY"

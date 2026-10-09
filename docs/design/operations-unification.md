@@ -2,7 +2,11 @@
 
 日期：2026-10-08。對應《Better Agent Dashboard／Connector 計畫》v1.0 的 §09、§10、§24，W01／W04 剩餘工作，驗收 A01、A05、A07、A08、A09。
 
-本文依 2026-10-08 規格審查決議修訂。Part A 已實作 Task Service authority；Part B 保留第二步合約。交付狀態以本文件、測試與 api-v1/task-service 文件為準。
+本文依 2026-10-08 規格審查決議修訂。Part A 已實作 Task Service authority；Part B 分段接入中央 operations。交付狀態以本文件、測試與 api-v1/task-service 文件為準。
+
+Permissions 後續實作以 [session-permissions.md](session-permissions.md) 為現行合約：
+已註冊逐 frame durable action；combined bulk raise apply 與 historical deferred writes 停用。
+下方 Part A 表格與尚未交付的 bulk 設計保留當時脈絡，不授權舊 flag 自動派送或 bulk apply。
 
 ## 分段交付與審查決議
 
@@ -63,13 +67,13 @@ queue、answer 結果為 null；lost ACK 只讀回固定 prompt/turn，Codex 弱
 Task Service 仍擁有原 command、pause/version/binding/final frame gate，不增加第二個 writer。
 B1 的 existing-operation authorization hook 保留於 `_prepare_create`，不因共用 adapter 跳過。
 
-Permissions 的 mode 切換與可能多個 BAT frames 尚無 canonical ActionDef；resume、start、
-relay、fanout/failover 是不同副作用與 ownership 合約。此片不把它們假裝成 send/answer，
-也不宣稱所有 legacy mutation 已統一。各自先審 action/step/readback 合約再接入。
+Permissions 已接入 canonical `session.permissions`，Claude mode 與 Codex sandbox／approval
+逐 frame 保存 intent／ACK，詳見 [permissions 合約](session-permissions.md)。resume、start、
+relay、fanout/failover 仍有各自副作用與 ownership 合約；不宣稱所有 legacy mutation 已統一。
 
 ## Part A 實作對照
 
-`task_actions.py` 註冊 task.submit／pause／resume／mark_stage／verify／request_ted／command.reconcile；task_send 使用原 session.send 的 `{task_id}` target。`task_control.py` 是 service/lifecycle 的共用 gate，轉交 daemon 原 coordinator；journal 的 current session、start reservation、branch 仍是 ownership 證據。任意 callback 不再跳過 gate。只有既有 command 綁定的 send、原受信 verifier 與 pause 版本的 abort 使用內部 FrameGuard。permissions、relay、批次 approval 與 deferred raises 尚是 legacy 路徑，但 A07 已生效；cleanup 只加 ownership／stop 邊界保護，沒有 Part B step 拆分。
+`task_actions.py` 註冊 task.submit／pause／resume／mark_stage／verify／request_ted／command.reconcile；task_send 使用原 session.send 的 `{task_id}` target。`task_control.py` 是 service/lifecycle 的共用 gate，轉交 daemon 原 coordinator；journal 的 current session、start reservation、branch 仍是 ownership 證據。任意 callback 不再跳過 gate。只有既有 command 綁定的 send、原受信 verifier 與 pause 版本的 abort 使用內部 FrameGuard。Part A 當時 permissions、relay、批次 approval 與 deferred raises 尚是 legacy 路徑，cleanup 只有 ownership／stop 邊界保護。後續 permissions 已有逐 frame operation；combined bulk raise apply／historical deferred writes 已停用，reviewed cleanup 另依其合約實作。
 
 `OpContext.effect` 與原 Journal.tx 的巢狀 savepoint 保存同交易 receipt；沒有 schema migration。task/send linkage 使用 external_refs、command payload 與 operation_steps response，不新增派工資料表。pause local effect 不等待 task lock，abort step 再按 task → session → host → BAT semaphore 順序執行。受信 verifier 在啟動 runner 與保存 evidence 前重查版本；caller 不能以外部 verification 取代它。未知 send 不重送；answer/interrupt 的正面 readback 可交原 coordinator，無法證明的 permissions 保留 uncertain，原 command capability 可作一次性人工對帳。
 
@@ -467,7 +471,7 @@ work_submit 原已要求 key，保留其最大 256 字相容長度；一般 oper
 |---|---|---|
 | send／continue／relay | target 選定、必要 `client_resume`、send；固定 message ID／prompt hash | resume 核對 meta 與 binding；send 用既有 registry turn／BAT exact echo。Codex 的一般 action 只有 timestamp 時維持 uncertain，不重送。 |
 | answer／approve-pending | pending prompt binding、每個 prompt answer、每個 permission 設定 | prompt ID 不再 pending 才能證明清除；不代表所有後續工作成功。失敗讀取不是「沒有 pending」。 |
-| permissions | Claude mode；Codex sandbox 與 approval 各一步 | 讀同 session meta 的實際 mode；證據不足時維持 uncertain。deferred raise 保存固定目標／版本；task gate 改變時拒絕，不盲目掃全 registry。 |
+| permissions | Claude mode；Codex sandbox 與 approval 各一步 | 保存每個 setting 的正面 BAT 回執；相符 meta 不證明 native reconfiguration 成功，遺失回覆維持 uncertain、不重送。Claude streaming 拒絕且不排 deferred；歷史 flags 與 legacy bulk raise apply 停用。現行合約見 [session-permissions.md](session-permissions.md)。 |
 | interrupt／pause abort | interrupt／abort 各一步；固定 task/session/version | 證明相同 session 不 streaming；查不到或 binding 不符不能算完成。已 pause 的意圖保留，不因 abort 不明而退回未 paused。 |
 | task-owned session.send／answer／interrupt | operation_id 連原 task command；保留原 payload／control_version | operation 讀回先結清自己的 step；下次 coordinator.tick 在 task lock 下以原 `_reconcile_command` 的證據結清 command（send 為 accepted，其餘為 settled），將 lead task 恢復 running。operation 的證據不代替 task 回執；command 未解仍擋控制，回查不明維持 uncertain、不重送。 |
 | task-owned send 的 preliminary resume | 原 command intent；resume 使用完整 guard.check，send-message 才記 effect frame | resume reply 遺失或 resume 後的 pre-frame 拒絕：command rejected、task 不變；operation failed 並重讀原 BAT_ERROR／拒絕碼。send reply 遺失即 uncertain，沿用原 operation readback＋coordinator tick；resume 本身不作為 prompt echo 證據。Part B 的獨立 resume step 拆分仍未交付。 |
@@ -557,7 +561,7 @@ Phase 2 擴充原 owner 機制，沒有第二份 owner database／另一套 leas
 - task-operation linkage 使用現有 `external_refs`／command payload／operation_steps response；沒有第二個 task 狀態表，也沒有資料搬移。檢查 row count、operation_steps FK 與原 key 去重結果；初始化失敗 rollback，不先啟動 worker。
 - 原 `tasks.idem_key` 全域唯一保留。新版提交使用 operation 固定的內部 journal identity；這是已存在的 task receipt linkage，不是替未提供的 client key 提供去重。對原 work_submit key 的第一次升級重送，僅 local-admin 舊相容入口可按原 `Journal.submit` 的 payload_hash 核對並連到原 task，再寫新的 operation link；內容不同拒絕。無法證明原 actor 的歷史 key 不讓新的 API actor 認領。
 - 現有 continuation events／stage events／verification records 不追認為新的 action 回執。新的相同 key 只依新 operation hash 去重；不得因舊 stage 已存在就忽略 ref 不同的衝突。原一次性 reconcile capability 的期限與消耗規則保留。
-- 升級前由部署者備份中央 journal（含 WAL 一致性）、registry、設定、schema 版本與 owner pointer。spec 階段不接觸部署資料。舊 permission_raise_pending 尚無 operation：只有下一次明確 approve-pending 要求才把選定項目納入有意圖的 deferred steps，不啟動自動回填 writer。
+- 升級前由部署者備份中央 journal（含 WAL 一致性）、registry、設定、schema 版本與 owner pointer。spec 階段不接觸部署資料。舊 permission_raise_pending 尚無 operation，保留為診斷 evidence 並回 LEGACY_PERMISSION_RAISE_DISABLED；不得由 approve-pending 重新採用 actor／version。新的變更須明確提交 session.permissions，不自動回填 writer。
 
 ## 預計修改檔案
 

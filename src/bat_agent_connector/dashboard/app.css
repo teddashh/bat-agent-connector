@@ -78,6 +78,15 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .capture { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--line); }
 .capture summary { cursor: pointer; font-weight: 600; }
+.permissions { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--line); }
+.permissions summary { cursor: pointer; font-weight: 600; }
+.permissions .muted { font-size: 14px; }
+.permission-mode { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.permissions select { max-width: 100%; }
+@media (max-width: 640px) {
+  .permissions button, .permissions select { min-height: 44px; }
+  .permissions summary { min-height: 44px; padding-block: 8px; }
+}
 .capture .muted { font-size: 14px; }
 .capture-fields { display: flex; flex-wrap: wrap; gap: 8px; }
 .capture-fields label { flex: 1 1 220px; min-width: 0; }

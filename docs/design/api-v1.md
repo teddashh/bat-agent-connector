@@ -12,14 +12,21 @@
 
 遠端使用一律經 SSH forward 到 daemon 的 loopback 埠；daemon 不綁非 loopback 位址。
 
-Legacy session controls：MCP `session_send`／`session_continue`／`session_answer`／`session_interrupt`
-與對應 CLI 經同名 RPC 呼叫 `session.send`／`session.answer`／`session.interrupt` actions。
+Legacy session controls：MCP `session_send`／`session_continue`／`session_answer`／`session_interrupt`／`session_set_permissions`
+與對應 CLI 經 RPC 呼叫 `session.send`／`session.answer`／`session.interrupt`／`session.permissions` actions。
 可選 key／control_version、完整結果與 operation ID/status/code 保留；prefix 固定成 exact session ID，
 answer 省略 tool_use_id 時在 admission 固定唯一的 pending prompt。這些相容入口可省 key；
 每次建立獨立 operation，storage sentinel 在所有 operation 讀取中投影為
 `idem_key=null`、`idempotency_key=null`、`idempotency_enabled=false`。named keys 原值保留，
 `batc:nokey:` 為保留前綴；HTTP／`op_submit` 仍須明確 key。細節與尚未轉接入口見
 [operations-unification.md](operations-unification.md)。
+
+`session.permissions` 的 target 為 `{host, session_id}`、params 為 `{mode: default|allow_all}`，
+使用 operate scope 與既有 host／confinement／task gates；可含 `control_version` precondition。
+Claude mode 與 Codex sandbox／approval 分別保存 frame intent／receipt。Claude turn 進行中拒絕，
+不新增 deferred flag；idle 後需新 key 表達新的決定。歷史 deferred flags 也不以新 actor／incarnation
+自動執行；legacy bulk approval apply 在任何回答／raise 前以 `LEGACY_PERMISSION_RAISE_DISABLED` 拒絕，
+dry-run 預覽保留。完整錯誤與 recovery 合約見 [session-permissions.md](session-permissions.md)。
 
 ## 身分與權限
 
@@ -58,6 +65,7 @@ MCP 的 `operation_submit`、`operation_cancel`、`operation_resume` 要 `confir
 | `session.send` | operate | `claude:send-message`，`clientMessageId = batc-<operation_id>` | BAT 接受後寫入的 turn 紀錄；沒有紀錄時讀 BAT 的對話，找 id 等於 `clientMessageId` 的 user 訊息。Codex 不保留這個 id，回覆遺失的 Codex 送字無法證明，會停在 `uncertain`／`needs_attention` |
 | `session.answer` | operate | `claude:resolve-ask-user`／`resolve-permission`；必須帶 `tool_use_id` | 那個 tool use 已不在 pending |
 | `session.interrupt` | operate | `claude:interrupt-turn`／`abort-session` | session 已不在 streaming |
+| `session.permissions` | operate | `claude:set-permission-mode` 或分開的 `set-codex-sandbox-mode`／`set-codex-approval-policy` | 每個設定的已保存正面回執；只看到相符 metadata 不能證明 native reconfiguration 成功，未知 frame 不重送 |
 
 Session action 在建立時先用 registry 與目錄判斷來源，人工、unknown、未啟用 write tier 的主機直接回 403，不寫入 operation；執行時 `service.py` 再做一次資源政策的即時檢查。新 action 以 `ActionDef` 註冊（`api_actions.py`），之後的 GitHub merge、部署、checkpoint 都用同一套步驟與回查規則。
 

@@ -1,6 +1,18 @@
 // Display labels only. Logic and CSS never key on these strings (machine enums come from /api/v1).
 const STRINGS = {
   "zh-TW": {
+    permissions_title: "Session 權限", permissions_mode: "要求的模式", permissions_default: "一般權限",
+    permissions_allow_all: "全部允許", permissions_apply: "套用權限", permissions_check: "查回原操作",
+    permissions_new: "建立另一筆變更", permissions_retry: "重試原請求", permissions_details: "檢視操作與逐步回執",
+    permissions_help: "選擇要套用的權限。這裡不表示目前實際模式；主機政策與隔離限制仍然適用。",
+    permissions_default_help: "使用一般核准流程，保留需要確認的操作提示。",
+    permissions_allow_help: "略過 agent 的操作核准提示，包括寫入與命令執行。主機仍可拒絕此變更。",
+    permissions_unavailable: "需要最新 Session 資料、operate 權限，以及中央明確允許此操作與主機寫入。",
+    permissions_unknown: "結果尚未確認。原請求已保留。", permissions_fixed: "保留同一筆模式、Session 與操作。部分完成或結果不明時，請先檢視回執。",
+    permissions_invalid_result: "操作回應與原權限請求不符。", permissions_damaged: "已儲存的請求不完整。請先在操作紀錄確認結果。",
+    permissions_accepted: "BAT 已接受要求的設定；尚未獨立查證執行中的 agent 已套用。", permissions_next_turn: "Codex 於下一輪使用這個設定。",
+    permissions_refused: "這筆請求在受理前被拒絕。可明確建立另一筆變更；原請求不會自動重試。",
+
     capture_title: "擷取遠端檔案", capture_host: "來源主機", capture_session: "完整人工 Session ID",
     capture_path: "遠端相對檔案路徑", capture_help: "輸入一個相對於所選人工 session 資料夾的檔案路徑。讀取過程不會更動來源。",
     capture_preview: "預覽來源檔案", capture_review: "我已檢視此檔案與來源證據", capture_save: "保存已檢視的檔案",
@@ -407,6 +419,19 @@ const STRINGS = {
     integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。",
   },
   en: {
+    permissions_title: "Session permissions", permissions_mode: "Requested mode", permissions_default: "Normal permissions",
+    permissions_allow_all: "Allow all", permissions_apply: "Apply permissions", permissions_check: "Check original operation",
+    permissions_new: "Start another change", permissions_retry: "Retry original request", permissions_details: "View operation and step receipts",
+    permissions_help: "Choose the permissions to apply. This does not show the current mode; host policy and confinement limits still apply.",
+    permissions_default_help: "Use the normal approval flow, keeping prompts for actions that need confirmation.",
+    permissions_allow_help: "Bypass the agent's approval prompts, including file writes and command execution. The host may still refuse this change.",
+    permissions_unavailable: "Requires current session data, operate scope, and explicit central permission for this action and host writes.",
+    permissions_unknown: "The result is not yet confirmed. The original request is retained.", permissions_fixed: "The mode, session and operation stay fixed. Check the receipts for partial or unknown results.",
+    permissions_invalid_result: "The operation reply does not match the original permission request.", permissions_damaged: "The saved request is incomplete. Check operation history before proceeding.",
+    permissions_accepted: "BAT accepted the requested configuration; the running agent's settings have not been independently verified.",
+    permissions_next_turn: "Codex uses this setting on its next turn.",
+    permissions_refused: "This request was refused before admission. You can explicitly start another change; the original request will not retry automatically.",
+
     capture_title: "Capture a remote file", capture_host: "Source host", capture_session: "Full manual session ID",
     capture_path: "Remote relative file path", capture_help: "Enter one file path relative to the selected manual session folder. The source is read without being changed.",
     capture_preview: "Preview source file", capture_review: "I reviewed this file and its source evidence", capture_save: "Save reviewed file",

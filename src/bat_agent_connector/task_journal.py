@@ -40,7 +40,7 @@ ALLOWED = {
     "human_owned": {"running", "needs_ted", "failed"},
     "needs_ted": {"running", "accepted", "failed", "uncertain"},
     "verifying": {"dispatching", "accepted", "running", "done", "needs_ted", "uncertain", "failed"},
-    "uncertain": {"running", "accepted", "verifying", "human_owned", "done", "needs_ted", "failed"},
+    "uncertain": {"running", "accepted", "waiting_permission", "verifying", "human_owned", "done", "needs_ted", "failed"},
     "done": set(), "failed": set(),
 }
 
