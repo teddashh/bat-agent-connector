@@ -37,10 +37,10 @@ jobs:
             bundle: nsis
             artifact: desktop-Windows-unsigned
           - os: macos-15
-            bundle: dmg
+            bundle: app,dmg
             artifact: desktop-macOS-arm64-validation
           - os: macos-15-intel
-            bundle: dmg
+            bundle: app,dmg
             artifact: desktop-macOS-x64-validation
     runs-on: ${{ matrix.os }}
     defaults:
