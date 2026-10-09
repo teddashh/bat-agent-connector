@@ -2801,7 +2801,7 @@ function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, sto
 			return false;
 		}
 	};
-	const persist = () => {
+	const persist = (required = false) => {
 		guard();
 		saved.selection = [...selected].map(([item_id, mode]) => ({
 			item_id,
@@ -2809,7 +2809,9 @@ function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, sto
 		}));
 		try {
 			localStorage.setItem(storageKey, JSON.stringify(saved));
-		} catch {}
+		} catch (error) {
+			if (required) throw error;
+		}
 	};
 	const observable = () => ready() && caps()?.scopes?.includes("observe");
 	const writable = () => observable() && caps()?.scopes?.includes("operate") && caps()?.actions?.some((a) => a.action === "session.approve_pending" && a.allowed === true) && caps()?.hosts?.some((host) => host.host === (saved.intent?.request?.target.host || saved.host) && host.writes === true);
@@ -2896,9 +2898,15 @@ function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, sto
 						preconditions: { expected_fingerprint: saved.preview.fingerprint }
 					}
 				};
-				persist();
 			}
 			if (!saved.intent.request || !saved.intent.key) return;
+			try {
+				persist(true);
+			} catch (error) {
+				status.replaceChildren(errorBox(error));
+				update();
+				return;
+			}
 			busy = true;
 			const intent = saved.intent;
 			update();

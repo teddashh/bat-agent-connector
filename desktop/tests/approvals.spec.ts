@@ -82,6 +82,30 @@ async function open(page: Page, locale = 'en-US') {
 }
 for (const native of [false, true]) {
   const kind = native ? 'native' : 'browser';
+  test(`${kind}: unavailable durable storage prevents approval admission`, async ({page}) => {
+    const state = await fixture(page, native); const box = await open(page);
+    await box.getByRole('checkbox').first().check();
+    await page.evaluate(() => {
+      const original = Storage.prototype.setItem;
+      (window as any).restoreStorage = () => {Storage.prototype.setItem = original;};
+      Storage.prototype.setItem = function(key, value) {
+        if (key.startsWith('batc.approvals.')) throw new Error('Fixture storage unavailable');
+        return original.call(this, key, value);
+      };
+    });
+    await box.getByRole('button', {name: 'Approve selected requests'}).click();
+    await expect(box).toContainText('Fixture storage unavailable');
+    expect(state.posts).toEqual([]);
+    await expect(box.locator('select').first()).toBeDisabled();
+    await page.evaluate(() => (window as any).restoreStorage());
+    await box.getByRole('button', {name: 'Retry original request'}).click();
+    await expect(box).toContainText('Not all items are proven successful');
+    expect(state.posts).toHaveLength(1);
+    const saved = await page.evaluate(() => JSON.parse(localStorage.getItem(Object.keys(localStorage).find(k => k.startsWith('batc.approvals.'))!)!));
+    expect(saved.intent.key).toBe(state.posts[0].idempotency_key);
+    expect(saved.intent.request).toEqual(state.posts[0].body);
+    expect(state.errors).toEqual([]);
+  });
   test(`${kind}: explicit selection and partial receipts, no implicit mode raise`, async ({page}) => {
     const state = await fixture(page, native); const box = await open(page);
     const apply = box.getByRole('button', {name: 'Approve selected requests'});
