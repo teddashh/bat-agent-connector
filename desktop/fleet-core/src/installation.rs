@@ -152,9 +152,15 @@ impl Snapshot {
         Ok(snapshot)
     }
     pub fn verify_current(&self) -> Result<()> {
-        if read(&self.declared_path).map_err(|_| "INSTALLATION_CHANGED")? != self.bytes
-            || canonical_local(&self.declared_path).map_err(|_| "INSTALLATION_CHANGED")?
-                != self.path
+        if read(&self.declared_path).map_err(|_| "INSTALLATION_CHANGED")? != self.bytes {
+            return Err("INSTALLATION_CHANGED");
+        }
+        self.verify_layout()
+    }
+    /// Migration validates original and proposed bytes while deliberately changing the backend.
+    /// This checks the immutable installation, without comparing the intentionally replaced bytes.
+    fn verify_layout(&self) -> Result<()> {
+        if canonical_local(&self.declared_path).map_err(|_| "INSTALLATION_CHANGED")? != self.path
             || !self.script.is_file()
             || canonical_local(&self.declared_root).map_err(|_| "INSTALLATION_CHANGED")?
                 != self.root
@@ -167,6 +173,23 @@ impl Snapshot {
             return Err("INSTALLATION_CHANGED");
         }
         Ok(())
+    }
+    pub fn validate_payload(&self, bytes: &[u8], backend: Backend) -> Result<()> {
+        self.verify_layout()?;
+        let document: Document = serde_json::from_value(strict_json::parse(bytes, 16384)?)
+            .map_err(|_| "INSTALLATION_INVALID")?;
+        if document.backend != backend || canonical_local(&document.kit_root)? != self.root {
+            return Err("INSTALLATION_CHANGED");
+        }
+        Ok(())
+    }
+    pub fn backend_payload(&self, backend: Backend) -> Result<Vec<u8>> {
+        self.verify_current()?;
+        let mut value = strict_json::parse(&self.bytes, 16384)?;
+        value["backend"] = serde_json::to_value(backend).map_err(|_| "INSTALLATION_INVALID")?;
+        let bytes = serde_json::to_vec_pretty(&value).map_err(|_| "INSTALLATION_INVALID")?;
+        self.validate_payload(&bytes, backend)?;
+        Ok(bytes)
     }
     pub fn path(&self) -> &Path {
         &self.path
