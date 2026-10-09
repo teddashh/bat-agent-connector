@@ -279,12 +279,17 @@ See the upstream [DMG](https://v2.tauri.app/distribute/dmg/) and
 existing Dashboard processes. It mounts the actual DMG read-only, copies its app into a
 unique disk directory, compares every bundled file and internal symlink against the built
 app, verifies its signature, architecture, version and resources, and unmounts the image.
-It launches that copied app against an authenticated observe-only loopback fixture and
-captures the real WKWebView. A native helper hides the application, Finder/Dock activation
+It launches that copied app through NSWorkspace/Launch Services against an authenticated
+observe-only loopback fixture and captures the real WKWebView. The AppKit helper checks
+the exact bundle URL, PID and launch date before controlling the owned application.
+A native helper hides the application, Finder/Dock activation
 restores the same window/process, a second executable hands off, and a normal system Quit
 followed by relaunch resumes polling without changing configuration. Owned app/state and
 temporary files are removed on exit. No Accessibility privacy setting is changed.
 The test covers application hide/reopen, not a physical close-button or menu-bar click.
+Normal Quit requires an accepted native termination request and observed process termination;
+Launch Services does not expose the application's exit status to this fixture. Only the
+second direct executable invocation has a child-process exit-code assertion.
 
 The macOS event loop handles Dock/Finder Reopen and routes system Quit through the same
 shutdown function as tray Quit. These changes do not make the Windows Fleet supervisor,
