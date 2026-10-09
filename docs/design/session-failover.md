@@ -62,5 +62,5 @@ MCP/CLI 現在需要可用的中央 owner 與 caller credential；舊 direct tra
 這是 authority 移轉，不是缺 token 時退回 raw Fleet 的相容例外。
 
 Fence 包含固定 carrier；同 carrier 的其他 managed writer 也拒絕，避免另一 session 在判定 idle 後再送訊息。
-新建獨立 worktree 的 create 僅讀原 origin，仍走既有 ownership/claim/final gates，不因 origin 被 fenced 就失去
-獨立開工能力。原 source 或 successor 改身分、receipt owner/ACK 無法讀取時，fence 保留供 reviewed cleanup。
+新建獨立 worktree 仍走既有 ownership/claim/final gates；它會更新 Git worktree metadata，保留原 carrier
+內容，不讓新 session 在原 carrier 工作。不因 origin 被 fenced 就失去獨立開工能力。原 source 或 successor 改身分、receipt owner/ACK 無法讀取時，fence 保留供 reviewed cleanup。
