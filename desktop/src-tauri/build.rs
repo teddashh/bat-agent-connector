@@ -21,6 +21,7 @@ fn main() {
             "fleet_request",
             "fleet_control",
             "fleet_bootstrap",
+            "tailscale_control",
         ]),
     ))
     .expect("desktop build configuration");

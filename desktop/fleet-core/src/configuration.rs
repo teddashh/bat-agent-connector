@@ -22,7 +22,7 @@ pub struct Paths {
     user_ssh: PathBuf,
 }
 
-fn absolute(path: &Path) -> Result<PathBuf> {
+pub(crate) fn absolute(path: &Path) -> Result<PathBuf> {
     let mut result = PathBuf::new();
     for part in std::path::absolute(path)
         .map_err(|_| "CONFIGURATION_INVALID")?

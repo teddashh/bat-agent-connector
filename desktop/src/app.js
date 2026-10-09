@@ -6,6 +6,7 @@ import { t } from "./i18n.js";
 import { connectorRequest, connectorUploadArtifact, nativeDesktop, nativeFileSupport, nativeStatus, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal } from "./transport/index.ts";
 import { nativeAttachments } from "./native-files.js";
 import { mountFleet } from "./fleet.js";
+import { mountTailscale } from "./tailscale.js";
 import { mountUpdates } from "./updates.js";
 import { groupedSessions, matchesSession, runtimeStale, sessionActivity } from "./state/sessions.js";
 import { capturePanel } from "./capture.js";
@@ -1961,6 +1962,7 @@ function viewSettings(main) {
       } }, t("connect")),
       h("button", { class: "secondary", onclick: () => { disconnect(); route(); } }, t("disconnect"))),
     h("label", {}, remember, " ", t("remember")), h("p", { class: "muted" }, t("token_help")), info));
+  return mountTailscale(main, {h, t});
 }
 
 // Credential dialogs and protected storage stay native. A transition invalidates old async
@@ -2071,7 +2073,9 @@ async function viewNativeSettings(main) {
   } catch (error) { if (mine === generation) info.append(errorBox(error)); }
   if (mine !== generation) return;
   const disposeFleet = await mountFleet(fleetRoot, {h, t});
-  return () => {disposeFleet?.(); disposeUpdates?.();};
+  if (mine !== generation || !main.isConnected) { disposeFleet?.(); disposeUpdates?.(); return; }
+  const disposeTailscale = mountTailscale(fleetRoot, {h, t});
+  return () => {disposeFleet?.(); disposeUpdates?.(); disposeTailscale();};
 }
 
 // ------------------------------------------------------------------ projects and work items
