@@ -431,6 +431,7 @@ class ApiV1:
                                      "reasons": ([] if self._can_continue(name) else ["HOST_CLEANUP_UNAVAILABLE"])}
                                      for name in fleet.config.hosts]},
                      "features": {"dashboard_sync": {"version": 1, "bootstrap": "/api/v1/bootstrap", "checkpoint_replay": True},
+                                  "work_item_reads": {"version": 1},
                                   "repository_sync": repository_sync.capabilities(self.daemon.ops),
                                   "worktree_merge": worktree_merge_operations.capabilities(self.daemon.ops),
                                   "cleanup": True, "cleanup_task": True, "inventory": True, "session_history": True, "session_observation": {"read": True, "wait": True, "max_wait_s": 1800}, "resource_relations": True, "discovery_scope": True,
@@ -472,7 +473,8 @@ class ApiV1:
                      "snapshot": {"hosts": self.daemon.inventory.hosts_document(),
                          "sessions": self.daemon.inventory.list_sessions(order="id", include_gone=True, limit=50),
                          "projects": work_items.projects_list(db, include_archived=True),
-                         "work_items": work_items.work_items_list(db, include_archived=True, limit=50),
+                         "work_items": work_items.work_items_list(db, include_archived=True, limit=50,
+                             principal_id=sync["principal_id"]),
                          "operations": self.daemon.ops.list(limit=50)},
                      "pagination": {"atomic": False, "session_order": "id"}}
 
@@ -697,14 +699,16 @@ class ApiV1:
         return 200, work_items.project_get(self.daemon.journal.db, prj,
                                            include_archived=bool(self._bool(query, "include_archived")))
 
-    async def work_items(self, query, **_):
+    async def work_items(self, query, principal, **_):
         return 200, work_items.work_items_list(
             self.daemon.journal.db, project_id=self._q(query, "project_id"), state=self._q(query, "state"),
             pending=self._bool(query, "pending"), include_archived=bool(self._bool(query, "include_archived")),
-            limit=self._int(query, "limit", 50), cursor=self._q(query, "cursor"))
+            limit=self._int(query, "limit", 50), cursor=self._q(query, "cursor"), unread=self._bool(query, "unread"),
+            principal_id=dashboard_sync.identity(self.daemon.journal, principal)["principal_id"])
 
-    async def work_item(self, wi, **_):
-        out = work_items.work_item_get(self.daemon.journal.db, wi)
+    async def work_item(self, wi, principal, **_):
+        out = work_items.work_item_get(self.daemon.journal.db, wi,
+            principal_id=dashboard_sync.identity(self.daemon.journal, principal)["principal_id"])
         out["cleanup"] = cleanup.lookup(self.daemon.journal.db, wi)
         return 200, out
 

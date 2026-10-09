@@ -35,6 +35,7 @@ from . import (
     session_metadata,
     task_actions,
     task_control,
+    work_item_reads,
     work_items,
 )
 from .api_v1 import ApiV1, is_dashboard_path
@@ -184,7 +185,7 @@ class TaskDaemon:
         self.ops = OperationService(self.journal,
                                     actions=api_actions.ACTIONS + delivery.ACTIONS + checkpoints.ACTIONS
                                     + integration.ACTIONS + work_items.ACTIONS + task_actions.ACTIONS + artifacts.ACTIONS
-                                    + session_metadata.ACTIONS)
+                                    + session_metadata.ACTIONS + work_item_reads.ACTIONS)
         self.coordinator.operations = self.ops
         github = None
         if config.github.token_ref:
@@ -389,14 +390,18 @@ class TaskDaemon:
             return work_items.project_get(self.journal.db, str(params.get("project_id")),
                                           include_archived=bool(params.get("include_archived")))
         if method == "work_items_list":
+            from .dashboard_sync import identity
             pending = params.get("pending")
             return work_items.work_items_list(
                 self.journal.db, project_id=params.get("project_id"), state=params.get("state"),
                 pending=pending if isinstance(pending, bool) else None,
                 include_archived=bool(params.get("include_archived")), limit=int(params.get("limit") or 50),
-                cursor=params.get("cursor"))
+                cursor=params.get("cursor"), unread=params.get("unread"),
+                principal_id=identity(self.journal, principal)["principal_id"])
         if method == "work_item_get":
-            return work_items.work_item_get(self.journal.db, str(params.get("work_item_id")))
+            from .dashboard_sync import identity
+            return work_items.work_item_get(self.journal.db, str(params.get("work_item_id")),
+                                           principal_id=identity(self.journal, principal)["principal_id"])
         raise ValueError("unknown api method")
 
     async def call(self, method: str, params: dict, *, auth_token: str | None = None,

@@ -1036,11 +1036,14 @@ def project_get(db, project_id: str, *, include_archived: bool = False) -> dict:
 
 
 def work_items_list(db, *, project_id: str | None = None, state: str | None = None, pending: bool | None = None,
-                    include_archived: bool = False, limit: int = 50, cursor: str | None = None) -> dict:
+                    include_archived: bool = False, limit: int = 50, cursor: str | None = None,
+                    principal_id: str | None = None, unread: bool | None = None) -> dict:
     """Work items across projects, most recently changed first (e.g. pending=true: waiting for a person). Pages
     continue from ``next_cursor``: the last row's change time and ID, since a subtree archive or restore gives many
     rows the same time."""
     limit = max(1, min(LIST_MAX, int(limit)))
+    if unread is not None and (type(unread) is not bool or not principal_id):
+        raise _bad("INVALID_FILTER", "unread must be a boolean with an authenticated reading identity")
     if state is not None and state not in (*STATES, "awaiting_approval"):
         raise _bad("INVALID_FILTER", f"unknown state {state!r}")
     sql = """SELECT w.*, p.name AS project_name FROM work_items w JOIN projects p ON p.project_id=w.project_id
@@ -1065,6 +1068,11 @@ def work_items_list(db, *, project_id: str | None = None, state: str | None = No
         c = x["completion"]
         if (pending is not None and c["pending"] != pending) or (state and c["display_state"] != state):
             continue
+        if principal_id:
+            from .work_item_reads import reading
+            x["reading"] = reading(db, principal_id, x)
+            if unread is not None and x["reading"]["unread"] != unread:
+                continue
         if len(out) == limit:
             more = True
             break
@@ -1084,12 +1092,15 @@ def _cursor(value) -> tuple[float, str]:
     return when, wid
 
 
-def work_item_get(db, work_item_id: str, *, events: int = 50) -> dict:
+def work_item_get(db, work_item_id: str, *, events: int = 50, principal_id: str | None = None) -> dict:
     """One work item with its completion state, place in the tree, links (with what each points at now) and
     recent history."""
     if not isinstance(work_item_id, str) or not WORK_ITEM_ID.fullmatch(work_item_id):
         raise _bad("WORK_ITEM_NOT_FOUND", "no such work item", 404)
     item = _get_item(db, work_item_id)
+    if principal_id:
+        from .work_item_reads import reading
+        item["reading"] = reading(db, principal_id, item)
     project = _get_project(db, item["project_id"])
     path, seen, cur = [], {work_item_id}, item["parent_id"]
     while cur and cur not in seen:
