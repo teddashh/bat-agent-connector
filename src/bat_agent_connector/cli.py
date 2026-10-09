@@ -260,8 +260,8 @@ async def _run(args) -> Any:
                 fleet, args.host, args.workspace, args.agent, states, args.jev, not args.loaded_only
             ), r_triage
         if c in ("relay", "fanout-plan"):
-            if c == "relay" and not args.dry_run and not args.confirm:
-                raise WriteRefused("relay needs --confirm")
+            if not args.confirm and (c == "fanout-plan" or not args.dry_run):
+                raise WriteRefused(f"{c} needs --confirm")
             msg = sys.stdin.read() if args.message == "-" else args.message
             brief = json.loads(args.brief) if args.brief and args.brief.lstrip().startswith("{") else args.brief
             if c == "relay":
@@ -276,14 +276,26 @@ async def _run(args) -> Any:
                 except OSError:
                     raise WriteRefused("central relay reply unavailable; retain the original explicit key and operation") from None
                 return out, None
-            return await lifecycle.fanout_plan_session(
-                fleet, args.host, args.workspace, msg, args.max_items, args.channel, args.thread, args.earlier,
-                brief, args.confirm,
-            ), None
+            from .task_daemon import request
+            try:
+                out = await asyncio.to_thread(request, "fanout_plan_session", _auth_token=os.environ.get("BATC_API_TOKEN") or None,
+                    host=args.host, workspace=args.workspace, message=msg, max_items=args.max_items, channel=args.channel,
+                    thread=args.thread, earlier=args.earlier, brief=brief, confirm=args.confirm, idempotency_key=args.key,
+                    entry="cli", timeout=40)
+            except OSError:
+                raise WriteRefused("central planner reply unavailable; retain the original key and operation") from None
+            return out, None
         if c == "fanout-start":
-            return await lifecycle.fanout_from_plan(
-                fleet, args.host, args.session, args.confirm, args.dry_run, args.agent, None, args.max_items
-            ), None
+            from .task_daemon import request
+            if not args.confirm and not args.dry_run:
+                raise WriteRefused("fanout-start needs --confirm")
+            try:
+                out = await asyncio.to_thread(request, "fanout_from_plan", _auth_token=os.environ.get("BATC_API_TOKEN") or None,
+                    host=args.host, session_id=args.session, confirm=args.confirm, dry_run=args.dry_run,
+                    agent=args.agent, max_items=args.max_items, idempotency_key=args.key, entry="cli", timeout=40)
+            except OSError:
+                raise WriteRefused("central fanout reply unavailable; retain the original key and operation") from None
+            return out, None
         if c == "approve-pending":
             from .task_daemon import request
             token = os.environ.get("BATC_API_TOKEN")
@@ -361,35 +373,21 @@ async def _run(args) -> Any:
                 args.discard_uncommitted,
             ), None
         if c == "fanout":
+            if args.start and not args.confirm:
+                raise WriteRefused("fanout --start needs --confirm")
             plan = orchestrate.fanout_plan(orchestrate.read_plan(args.plan), max_tasks=args.max_tasks)
             if not args.start:
                 return plan, None
             if not (args.host and args.workspace):
                 raise BatError("--start needs --host and --workspace")
-            cap = fleet.config.safety.max_start_per_call
-            if plan["count"] > cap:
-                raise BatError(
-                    f"plan has {plan['count']} tasks; max_start_per_call={cap}. Use --max-tasks or split"
-                )
-            started = []
-            for tk in plan["tasks"]:
-                try:
-                    r = await orchestrate.session_start(
-                        fleet,
-                        args.host,
-                        args.workspace,
-                        args.agent,
-                        args.confirm,
-                        tk["prompt"],
-                        args.model,
-                        True,
-                        f"fanout {tk['index']}: {tk['title'][:40]}",
-                    )
-                    started.append({"task": tk["index"], "title": tk["title"], **r})
-                except BatError as e:
-                    started.append({"task": tk["index"], "title": tk["title"], "error": redact(e)})
-                    break
-            return {"started": started, "count": len(started)}, None
+            from .task_daemon import request
+            try:
+                out = await asyncio.to_thread(request, "fanout_start", _auth_token=os.environ.get("BATC_API_TOKEN") or None,
+                    host=args.host, workspace=args.workspace, plan=plan["tasks"], agent=args.agent, model=args.model,
+                    confirm=args.confirm, idempotency_key=args.key, entry="cli", timeout=40)
+            except OSError:
+                raise WriteRefused("central fanout reply unavailable; retain the fixed original plan/key and operation") from None
+            return out, None
         raise BatError(f"unknown command {c}")
     finally:
         await fleet.close()
@@ -548,6 +546,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--thread")
     p.add_argument("--earlier", action="append")
     p.add_argument("--confirm", action="store_true")
+    p.add_argument("--key", help="reuse the exact original key after a lost reply")
     p = sp.add_parser("fanout-start", help="ORCHESTRATE: start worktrees exactly per a session's bat-fanout block")
     p.add_argument("host")
     p.add_argument("session")
@@ -556,6 +555,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--confirm", action="store_true")
 
+    p.add_argument("--key", help="reuse the exact original key after a lost reply")
     p = sp.add_parser("worktrees", help="list worktree sessions on a host")
     p.add_argument("host")
     p.add_argument("--workspace")
@@ -622,6 +622,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model")
     p.add_argument("--confirm", action="store_true")
 
+    p.add_argument("--key", help="reuse the exact original key after a lost reply")
     p = sp.add_parser(
         "import-bat", help="generate hosts.toml from BAT's profiles/index.json (no tokens copied)"
     )
@@ -1450,7 +1451,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         obj, render = asyncio.run(_run(args))
         _print(obj, args.json, render)
-        return 1 if args.cmd in {"relay", "start", "send", "continue", "interrupt", "answer", "permissions"} and obj.get("operation_status") in {"failed", "cancelled"} else 0
+        return 1 if args.cmd in {"relay", "fanout-plan", "fanout-start", "fanout", "start", "send", "continue", "interrupt", "answer", "permissions"} and obj.get("operation_status") in {"failed", "cancelled"} else 0
     except (BatError, ValueError, OperationError) as e:
         print(f"error: {redact(e)}", file=sys.stderr)
         return 1

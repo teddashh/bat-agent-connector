@@ -48,7 +48,7 @@ ALLOWED = {
 }
 UNCERTAIN_RETRY_S = (30.0, 60.0, 120.0, 300.0, 600.0)
 NO_KEY_PREFIX = "batc:nokey:"
-LEGACY_SESSION_ACTIONS = frozenset({"session.relay", "session.start", "session.send", "session.answer", "session.interrupt", "session.permissions", "session.approve_pending"})
+LEGACY_SESSION_ACTIONS = frozenset({"fanout.plan", "fanout.start", "session.relay", "session.start", "session.send", "session.answer", "session.interrupt", "session.permissions", "session.approve_pending"})
 
 
 class AmbiguousOutcome(Exception):
@@ -524,7 +524,7 @@ class OperationService:
         self._may_steer(principal, op, "cancel")
         if op["status"] in TERMINAL:
             return op
-        if op["action"] == "session.relay":
+        if op["action"] in {"session.relay", "fanout.plan", "fanout.start"}:
             from .orchestration_operations import cancel
             return cancel(self, principal, op)
         if op["action"] == "session.approve_pending":
@@ -573,7 +573,7 @@ class OperationService:
         if op["action"] == "session.approve_pending":
             from .bulk_approval import resume_children
             resume_children(self, principal, op)
-        if op["action"] == "session.relay":
+        if op["action"] in {"session.relay", "fanout.plan", "fanout.start"}:
             from .orchestration_operations import resume_children
             resume_children(self, principal, op)
         self.kick()
@@ -654,7 +654,7 @@ class OperationService:
             self._transition(operation_id, "failed", error_code="UNKNOWN_ACTION",
                              reason=f"no handler for {op['action']} in this connector version")
             return
-        if op["cancel_requested"] and op["status"] not in {"running", "uncertain"} and op["action"] not in {"session.approve_pending", "session.relay"}:
+        if op["cancel_requested"] and op["status"] not in {"running", "uncertain"} and op["action"] not in {"session.approve_pending", "session.relay", "fanout.plan", "fanout.start"}:
             self._transition(operation_id, "cancelled", reason="cancelled before the next step")
             return
         if op["status"] != "running":
