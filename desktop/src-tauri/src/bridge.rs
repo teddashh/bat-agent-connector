@@ -475,7 +475,7 @@ impl Bridge {
             .try_lock()
             .map_err(|_| "Connection or enrollment already in progress")?;
         if !self.vault.supported() {
-            return Err("Protected enrollment requires Windows".into());
+            return Err("Protected enrollment is unavailable on this platform".into());
         }
         let (generation, config) = {
             let state = self.state.lock().unwrap();

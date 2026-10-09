@@ -13,7 +13,8 @@
 使用者新增 Mac 版本要求。從已合併 #68（`2d2570b`）開工，新增 Apple Silicon／Intel
 DMG、ICNS、Dock Reopen／正常 Quit 與兩種架構的 disposable native install fixture。
 Mac 候選須以自己的完整 head CI、DMG digest、WKWebView screenshots 和清理 receipts 驗證，
-不能沿用 Windows/Linux 的結果。正式 Developer ID／公證、Keychain、Mac updater 及 I／L
+不能沿用 Windows/Linux 的結果。新增 Mac 原生 secure-field／Keychain adapter 與隔離 Keychain fixtures，並備妥正式
+Developer ID／公證 candidate workflow；待各自 exact-head 結果。正式簽署執行、Mac updater 及 I／L
 仍分開追蹤；Windows Fleet supervisor 不因 Mac 可啟動就宣稱跨平台支援。
 
 #68 的固定候選 `771d0099a9cae74e3446f3121a2747439583b136` 已通過
