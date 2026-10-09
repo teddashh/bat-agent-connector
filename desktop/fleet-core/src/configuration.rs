@@ -256,10 +256,18 @@ impl Configuration {
     }
 }
 
+/// The selector and ownership scans must use identical lexical paths, including
+/// Windows 8.3 expansion. This does not resolve symlinks or reparse points.
+pub(crate) fn data_directories(roaming: &Path) -> Result<[PathBuf; 2]> {
+    Ok([
+        absolute(&roaming.join("BetterAgentTerminal"))?,
+        absolute(&roaming.join("org.tonyq.better-agent-terminal"))?,
+    ])
+}
+
 /// Re-evaluate for every use: BAT can create the new directory while Fleet is running.
 pub fn data_directory(roaming: &Path) -> Result<PathBuf> {
-    let latest = absolute(&roaming.join("BetterAgentTerminal"))?;
-    let legacy = absolute(&roaming.join("org.tonyq.better-agent-terminal"))?;
+    let [latest, legacy] = data_directories(roaming)?;
     for path in [&latest, &legacy] {
         match std::fs::metadata(path) {
             Ok(metadata) if metadata.is_dir() => return Ok(path.clone()),
