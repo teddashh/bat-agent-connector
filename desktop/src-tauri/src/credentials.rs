@@ -110,7 +110,11 @@ pub trait Vault: Send + Sync {
 }
 pub struct OsVault;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+#[path = "credentials_macos.rs"]
+mod macos;
+
+#[cfg(not(any(windows, target_os = "macos")))]
 impl Vault for OsVault {
     fn supported(&self) -> bool {
         false
@@ -119,10 +123,10 @@ impl Vault for OsVault {
         Ok(None)
     }
     fn write(&self, _: &str, _: &[u8]) -> Result<(), String> {
-        Err("Protected enrollment requires Windows".into())
+        Err("Protected enrollment is unavailable on this platform".into())
     }
     fn remove(&self, _: &str) -> Result<(), String> {
-        Err("Protected enrollment requires Windows".into())
+        Err("Protected enrollment is unavailable on this platform".into())
     }
     fn prompt(
         &self,
@@ -131,7 +135,7 @@ impl Vault for OsVault {
         _: Locale,
         _: isize,
     ) -> Result<Option<Zeroizing<String>>, String> {
-        Err("Protected enrollment requires Windows".into())
+        Err("Protected enrollment is unavailable on this platform".into())
     }
 }
 

@@ -31,11 +31,11 @@ The client loads `central.json` from the platform app configuration directory:
 
 Copy `desktop/central.example.json` there and set the actual expected API actor. Endpoint selection is trusted native configuration, never a WebView-supplied URL. The Connection screen displays the fixed configuration path; **Reload configuration** rereads only that file and disconnects before a new identity can be used. Invalid or missing configuration can be repaired without restarting. This configuration is client-local and is not another fleet host inventory. The endpoint must be an HTTPS origin or a literal loopback HTTP origin for an already authenticated SSH tunnel. The app neither creates that tunnel nor authenticates its ownership. Preserve the existing tunnel's host verification; an arbitrary loopback listener is not proof of central identity.
 
-On Windows, choose **Add credential** and enter the Connector API token in the native Windows dialog's Password field. The expected actor is fixed by configuration. Rust verifies the candidate before saving it in Windows Credential Manager for this Windows user on this computer. **Replace credential** explicitly establishes a replacement identity; cancellation, verification failure or save failure retains the previous stored record and active connection. **Forget saved credential** removes only this configuration's local record and disconnects; it does not revoke the central token or erase drafts/operation IDs. Enrollment and storage never use a WebView password field, browser storage, clipboard-reading API, shell or subprocess.
+On Windows or macOS, choose **Add credential** and enter the Connector API token in the native secure dialog. The expected actor is fixed by configuration. Rust verifies the candidate before saving it in Windows Credential Manager or the local macOS Keychain for this OS user. **Replace credential** explicitly establishes a replacement identity; cancellation, verification failure or save failure retains the previous stored record and active connection. **Forget saved credential** removes only this configuration's local record and disconnects; it does not revoke the central token or erase drafts/operation IDs. Enrollment and storage never use a WebView password field, browser storage, clipboard-reading API, shell or subprocess.
 
 Connection and enrollment read `/capabilities` and `/bootstrap`: the configured actor, API version `1`, contract version `2026-10-08`, `observe` scope and valid server/principal identity are required. A saved record pins the bootstrap identity. A changed backend/principal refuses reconnection until explicit replacement; every mutation, including binary upload, repeats identity verification before its effect request. The frontend also checks its bootstrap against the identity native just verified. These journal identities isolate credentials/drafts; they are not cryptographic transport identity and cannot prevent a trusted server or tunnel from being replaced between requests. HTTPS certificates or the verified tunnel provide that trust. Native requires bootstrap; the browser's older-server fallback remains unchanged.
 
-`BATC_DESKTOP_TOKEN` remains a deliberate memory-only compatibility source on all platforms. Rust reads and removes it before constructing the runtime. When explicitly supplied with valid startup configuration it takes priority over the saved record, without automatic fallback on authentication failure. It is never automatically persisted. Changing endpoint/actor/contract through reload discards it; invalid/missing startup configuration also discards it rather than forwarding it to a later endpoint. After its first verification, its backend/principal remains pinned for that launch, including disconnect/reconnect. Successful enrollment or forgetting clears this launch source. Do not put a token in JSON, a URL, command arguments or frontend storage. Non-Windows protected storage/enrollment is explicitly unavailable; those platforms retain the memory-only adapter.
+`BATC_DESKTOP_TOKEN` remains a deliberate memory-only compatibility source on all platforms. Rust reads and removes it before constructing the runtime. When explicitly supplied with valid startup configuration it takes priority over the saved record, without automatic fallback on authentication failure. It is never automatically persisted. Changing endpoint/actor/contract through reload discards it; invalid/missing startup configuration also discards it rather than forwarding it to a later endpoint. After its first verification, its backend/principal remains pinned for that launch, including disconnect/reconnect. Successful enrollment or forgetting clears this launch source. Do not put a token in JSON, a URL, command arguments or frontend storage. Linux protected storage/enrollment remains unavailable; Linux retains the memory-only adapter.
 
 ### Credential boundary and lifecycle
 
@@ -52,7 +52,7 @@ Tokens are bounded to 512 ASCII bearer characters and records to 2560 bytes. App
 
 All commands retain the main-window/local-origin checks. Only one connection/prompt may run at a time. Disconnect and configuration reload invalidate outstanding verification before another credential can activate or save. Responses from an older native generation cannot be adopted by the current frontend. While credential selection is pending, the shared UI pauses event processing and mutations and invalidates old asynchronous forms. Cancellation restores the original namespace; success mounts the newly verified namespace without replaying prior operations. An already sent operation cannot be unsent by disconnect; its original key/receipt remains the recovery mechanism.
 
-Verification covers loopback HTTP and injected native vault/prompt lifecycle scenarios, shared browser/native IPC fixtures, and responsive English/zh-TW screens. Windows-only dialog adapter tests inject the native dialog return, without opening a dialog or using a real credential store. Windows native compilation/packaging belongs to exact-head CI; interactive dialog, real Credential Manager persistence across Windows logins and installed acceptance are separate evidence, not inferred from these mocks. macOS protected storage and Linux protected storage are not implemented.
+Verification covers loopback HTTP and injected native vault/prompt lifecycle scenarios, shared browser/native IPC fixtures, and responsive English/zh-TW screens. Windows-only dialog adapter tests inject the native dialog return, without opening a dialog or using a real credential store. Windows native compilation/packaging belongs to exact-head CI; interactive dialog, real Credential Manager persistence across Windows logins and installed acceptance are separate evidence, not inferred from these mocks. The macOS Keychain adapter has separate real-store fixtures; Linux protected storage is not implemented.
 
 The app works without BAT installed. Configured Windows installations use the [native Fleet controls](desktop-fleet-native.md) for independent connection/window choices, reviewed BAT launch, and explicit monitor/Startup migration. Native attachments use the bounded file adapter described below. Explicit signed updates use the [native update contract](desktop-updates.md); default validation packages keep signing disabled. Missing configuration and credentials remain visible in the app.
 
@@ -288,7 +288,25 @@ The test covers application hide/reopen, not a physical close-button or menu-bar
 
 The macOS event loop handles Dock/Finder Reopen and routes system Quit through the same
 shutdown function as tray Quit. These changes do not make the Windows Fleet supervisor,
-Startup migration or Windows updater available on Mac. Mac currently uses the explicit
-memory-only credential adapter; Keychain enrollment, signed in-app updates and real
-central/BAT acceptance remain distinct implementation/acceptance work. Receipts identify
+Startup migration or Windows updater available on Mac. Mac supports Keychain enrollment through a native secure system dialog. Signed in-app
+updates and real central/BAT acceptance remain distinct implementation/acceptance work. Receipts identify
 the exact candidate and platform; adding this fixture does not itself record a passing run.
+
+### macOS Keychain
+
+The native adapter uses Core Foundation's secure text-field notification (English/zh-TW),
+with cancellation and a five-minute timeout. It runs on the enrollment worker; no token
+passes through shell arguments, a subprocess, WebView, browser storage or clipboard API.
+The existing central capability/bootstrap verification and generation fence run before
+`SecItemAdd`/`SecItemUpdate`. The fixed service is `io.betteragent.dashboard.central.v1`;
+the account is the same length-framed endpoint/actor/contract SHA-256 binding used on Windows.
+The local Keychain record contains the bounded schema, identity and token, without enabling
+iCloud synchronization. Missing items are distinct from locked/denied/unreadable failures;
+replacement does not delete the old item first. Application-owned copies are zeroized;
+Core Foundation and Security framework internal buffers are not a whole-process erasure claim.
+
+The hosted-Mac Keychain fixture creates a disposable keychain, restores the prior search
+list/default, and deletes the fixture even on failure. It verifies real create, read from
+a separate process, replacement, malformed replacement refusal and deletion. Shared bridge
+tests cover verification-before-save, cancellation and configuration changes. Interactive
+secure-field entry and signed-app Keychain access across upgrades remain user acceptance.

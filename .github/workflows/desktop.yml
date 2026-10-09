@@ -2,10 +2,10 @@ name: desktop
 
 on:
   pull_request:
-    paths: ["desktop/**", "src/**", "tests/manual/**", "scripts/check_glib_backport.py", "tests/test_release_dependencies.py", "pyproject.toml", "uv.lock", ".github/workflows/desktop.yml"]
+    paths: ["desktop/**", "src/**", "tests/manual/**", "scripts/check_glib_backport.py", "tests/test_release_dependencies.py", "pyproject.toml", "uv.lock", ".github/workflows/desktop*.yml"]
   push:
     branches: [main]
-    paths: ["desktop/**", "src/**", "tests/manual/**", "scripts/check_glib_backport.py", "tests/test_release_dependencies.py", "pyproject.toml", "uv.lock", ".github/workflows/desktop.yml"]
+    paths: ["desktop/**", "src/**", "tests/manual/**", "scripts/check_glib_backport.py", "tests/test_release_dependencies.py", "pyproject.toml", "uv.lock", ".github/workflows/desktop*.yml"]
 
 permissions:
   contents: read
@@ -117,6 +117,10 @@ jobs:
         run: python ../scripts/check_glib_backport.py --target x86_64-pc-windows-msvc
       - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets
+      - name: Actual macOS Keychain persistence (isolated disposable keychain)
+        if: runner.os == 'macOS'
+        timeout-minutes: 3
+        run: node tests/macos-keychain.mjs
       - name: GLib iterator regression with compiler optimizations
         if: runner.os == 'Linux'
         run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml --test glib_variant_iter

@@ -86,3 +86,21 @@ upgrade path, real credentials, physical tray interaction or an existing user's 
 Installed Windows updater stop/install/reopen, signing-environment execution, real release feed
 publication and installed version readback remain acceptance gates. Linux packages do not
 offer this Windows installer flow. Fixture/CI results are not installed/live evidence.
+
+## macOS signed candidates
+
+`desktop-macos-signed-candidate` accepts an exact reviewed main commit and builds both
+Apple Silicon and Intel DMGs in the `desktop-release` environment. Configure variables
+`APPLE_SIGNING_IDENTITY` (Developer ID Application) and `APPLE_TEAM_ID`, plus secrets
+`APPLE_CERTIFICATE` (base64 P12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID` and
+`APPLE_PASSWORD` (an app-specific password). The maintained identity is supplied by the
+owner; this workflow does not generate a replacement or request account passwords in chat.
+Tauri signs and notarizes, then the gate checks the expected Team ID, Developer ID chain,
+stapled ticket and Gatekeeper acceptance before exercising the exact installed DMG.
+The workflow only uploads candidate artifacts; it does not publish a release or feed.
+See [Tauri's macOS signing contract](https://v2.tauri.app/distribute/sign/macos/).
+
+Ordinary Mac CI uses ad-hoc signing and cannot pass as notarized distribution evidence.
+This signed-DMG workflow is separate from Minisign updater signing; the in-app updater
+currently remains Windows-only. Until the maintained Apple identity is configured and
+this workflow passes, Developer ID/notarization is unverified.
