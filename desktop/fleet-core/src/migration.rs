@@ -97,6 +97,17 @@ pub enum Progress {
     WaitingLaunch,
     Complete,
 }
+/// Historical local intent summary; contains no paths, process identity or original file bytes.
+#[derive(Serialize)]
+pub struct Status {
+    pub id: String,
+    pub phase: Phase,
+    pub from: Backend,
+    pub to: Backend,
+    pub autostart_entry_present: bool,
+    pub review_fingerprint: String,
+    pub restores: Option<String>,
+}
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Saved {
@@ -274,6 +285,18 @@ impl Store {
         };
         let (s, _) = self.read(&id)?;
         Ok((s.phase != Phase::Complete).then_some((id, s.phase)))
+    }
+    pub fn status(&self, id: &str) -> Result<Status> {
+        let (saved, _) = self.read(id)?;
+        Ok(Status {
+            id: saved.id,
+            phase: saved.phase,
+            from: saved.from,
+            to: saved.to,
+            autostart_entry_present: saved.next_startup.is_some(),
+            review_fingerprint: saved.review_fingerprint,
+            restores: saved.restores,
+        })
     }
     fn slots(&self) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
         io::directory(self.startup.parent().unwrap())?;
