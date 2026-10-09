@@ -677,6 +677,25 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--preview-file", required=True, help="JSON saved from capture-preview")
     c.add_argument("--key", required=True, help="reuse this key after a lost reply")
     c.add_argument("--confirm", action="store_true")
+    c = asp.add_parser("managed-capture-preview", help="review one managed file with central execution lineage")
+    c.add_argument("host")
+    c.add_argument("session_id")
+    c.add_argument("relative_path")
+    c.add_argument("--execution-operation-id")
+    c.add_argument("--task-id")
+    c.add_argument("--command-id")
+    c = asp.add_parser("managed-capture", help="save the exact reviewed managed file")
+    c.add_argument("--preview-file", required=True)
+    c.add_argument("--key", required=True)
+    c.add_argument("--confirm", action="store_true")
+    c = asp.add_parser("accept", help="record approval of an exact managed artifact revision only")
+    c.add_argument("artifact_id")
+    c.add_argument("revision", type=int)
+    c.add_argument("--digest", required=True)
+    c.add_argument("--source-fingerprint", required=True)
+    c.add_argument("--receipt", required=True)
+    c.add_argument("--key", required=True)
+    c.add_argument("--confirm", action="store_true")
     c = asp.add_parser("list")
     c.add_argument("--limit", type=int, default=50)
     c.add_argument("--cursor")
@@ -920,7 +939,18 @@ def cmd_artifact(args) -> int:
     elif args.artifact_cmd == "capture-preview":
         out = request("artifact_capture_preview", _auth_token=token, entry="cli", host=args.host,
                       session_id=args.session_id, relative_path=args.relative_path)
-    elif args.artifact_cmd == "capture":
+    elif args.artifact_cmd == "managed-capture-preview":
+        selector = {k: getattr(args, k) for k in ("execution_operation_id", "task_id", "command_id") if getattr(args, k)}
+        out = request("artifact_managed_capture_preview", _auth_token=token, entry="cli", host=args.host,
+                      session_id=args.session_id, relative_path=args.relative_path, **selector)
+    elif args.artifact_cmd == "accept":
+        if not args.confirm:
+            raise ValueError("artifact accept requires --confirm")
+        out = request("op_submit", _auth_token=token, entry="cli", action="artifact.accept",
+                      target={"artifact_id": args.artifact_id, "revision": args.revision},
+                      params={"digest": args.digest, "source_fingerprint": args.source_fingerprint, "receipt": args.receipt},
+                      preconditions={}, idempotency_key=args.key)
+    elif args.artifact_cmd in {"capture", "managed-capture"}:
         if not args.confirm:
             raise ValueError("artifact capture requires --confirm")
         with Path(args.preview_file).open("rb") as file:
@@ -929,7 +959,8 @@ def cmd_artifact(args) -> int:
             raise ValueError("capture preview exceeds its bound")
         preview = json.loads(raw)
         preview = preview.get("preview", preview)
-        out = request("op_submit", _auth_token=token, entry="cli", action="artifact.capture",
+        out = request("op_submit", _auth_token=token, entry="cli",
+                      action="artifact.capture.managed" if args.artifact_cmd == "managed-capture" else "artifact.capture",
                       target={"preview_id": preview["preview_id"]}, params={"preview_token": preview["preview_token"]},
                       preconditions={"expected_fingerprint": preview["fingerprint"]}, idempotency_key=args.key)
     elif args.artifact_cmd == "list":
@@ -1244,7 +1275,7 @@ def _mutation_requested(args) -> bool:
         return args.cancel or args.resume
     if command == "import-bat":
         return args.output != "-"
-    mutating = {"artifact": ("artifact_cmd", {"upload", "capture"}),
+    mutating = {"artifact": ("artifact_cmd", {"upload", "capture", "managed-capture", "accept"}),
                 "resource-cleanup": ("cleanup_cmd", {"apply"}),
                 "checkpoint": ("checkpoint_cmd", {"create", "continue", "revalidate"}),
                 "delivery": ("delivery_cmd", {"update-pr", "merge", "deploy", "rollback", "retry"}),

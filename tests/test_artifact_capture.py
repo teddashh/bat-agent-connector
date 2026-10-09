@@ -241,7 +241,7 @@ async def test_preview_refuses_oversized_signed_source_identity_before_returning
     async def source(*_args):
         return {**original["source"], "root": long_path, "repository_root": long_path,
                 "tab": {**original["source"]["tab"], "cwd": long_path, "worktreePath": long_path}}
-    async def read(*_args):
+    async def read(*_args, **_kwargs):
         return original["evidence"], b""
     monkeypatch.setattr(capture, "_source", source)
     monkeypatch.setattr(capture, "_read", read)

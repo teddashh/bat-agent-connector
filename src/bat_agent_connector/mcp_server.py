@@ -61,11 +61,11 @@ READ_TOOLS = [
     "projects_list",
     "project_get",
     "work_items_list",
-    "work_item_get", "artifacts_list", "artifact_get", "artifact_capture_preview", "cleanup_preview", "cleanup_retained", "cleanup_tombstones",
+    "work_item_get", "artifacts_list", "artifact_get", "artifact_capture_preview", "artifact_managed_capture_preview", "cleanup_preview", "cleanup_retained", "cleanup_tombstones",
 ]
 # Registered unless --read-only: they act as BATC_API_TOKEN's principal, whose scopes decide what is allowed.
 OPERATION_TOOLS = ["operation_submit", "operation_cancel", "operation_resume", "checkpoint_create",
-                   "work_continue_from_checkpoint", "artifact_upload", "artifact_capture", "cleanup_apply", "github_pr_update", "github_pr_merge",
+                   "work_continue_from_checkpoint", "artifact_upload", "artifact_capture", "artifact_capture_managed", "artifact_accept", "cleanup_apply", "github_pr_update", "github_pr_merge",
                    "deployment_start", "deployment_retry", "deployment_rollback"]
 WRITE_TOOLS = [
     "session_send",
@@ -512,6 +512,18 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             raise WriteRefused("artifact capture preview requires BATC_API_TOKEN; no admin fallback")
         return await daemon("artifact_capture_preview", host=host, session_id=session_id, relative_path=relative_path)
 
+    async def artifact_managed_capture_preview(host: str, session_id: str, relative_path: str,
+                                              execution_operation_id: str | None = None,
+                                              task_id: str | None = None, command_id: str | None = None) -> dict[str, Any]:
+        """READ (observe). Review managed bytes against a centrally verified execution or task command.
+        Select exactly one execution operation or task/command pair; no source writes or ownership inference."""
+        if not os.environ.get("BATC_API_TOKEN"):
+            raise WriteRefused("managed artifact preview requires BATC_API_TOKEN; no admin fallback")
+        selector = {k: v for k, v in {"execution_operation_id": execution_operation_id,
+                    "task_id": task_id, "command_id": command_id}.items() if v is not None}
+        return await daemon("artifact_managed_capture_preview", host=host, session_id=session_id,
+                            relative_path=relative_path, **selector)
+
     async def cleanup_preview(target: dict[str, Any], choices: dict[str, list[str]] | None = None) -> dict[str, Any]:
         """Pure read preview of work_item (optional include_children), checkpoint, integration or host resources.
         Lists all retention reasons, exact steps and a signed token valid for 15 minutes. Explicit per-item
@@ -540,7 +552,7 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
                github_pr_preview, github_merge_preview_get, deployment_preview, deployment_status, deployments_list,
                deployment_environment_get, checkpoints_list, checkpoint_preview, integration_candidates, integration_get,
                integrations_list, projects_list, project_get, work_items_list, work_item_get,
-               artifacts_list, artifact_get, artifact_capture_preview, cleanup_preview, cleanup_retained, cleanup_tombstones):
+               artifacts_list, artifact_get, artifact_capture_preview, artifact_managed_capture_preview, cleanup_preview, cleanup_retained, cleanup_tombstones):
         mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
 
     if not read_only and (principal_only or fleet.any_orchestrate):
@@ -672,6 +684,23 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
                                           preconditions={"expected_fingerprint": fingerprint},
                                           idempotency_key=idempotency_key)
 
+        async def artifact_capture_managed(preview_id: str, preview_token: str, fingerprint: str, idempotency_key: str,
+                                           confirm: bool = False) -> dict[str, Any]:
+            """WRITE (manage + observe). Save exactly the reviewed managed bytes and central lineage.
+            Keep the original key after a lost reply; this is not acceptance or work completion."""
+            return await principal_daemon("op_submit", confirm, action="artifact.capture.managed",
+                                          target={"preview_id": preview_id}, params={"preview_token": preview_token},
+                                          preconditions={"expected_fingerprint": fingerprint}, idempotency_key=idempotency_key)
+
+        async def artifact_accept(artifact_id: str, revision: int, digest: str, source_fingerprint: str,
+                                  receipt: str, idempotency_key: str, confirm: bool = False) -> dict[str, Any]:
+            """WRITE (approve). Record review of one exact managed artifact revision and its saved lineage.
+            Does not complete work, merge a PR or deploy. Receipt is your bounded review text."""
+            return await principal_daemon("op_submit", confirm, action="artifact.accept",
+                                          target={"artifact_id": artifact_id, "revision": revision},
+                                          params={"digest": digest, "source_fingerprint": source_fingerprint, "receipt": receipt},
+                                          preconditions={}, idempotency_key=idempotency_key)
+
         async def cleanup_apply(preview_id: str, preview_token: str, fingerprint: str, idempotency_key: str,
                                 confirm: bool = False) -> dict[str, Any]:
             """WRITE. Execute exactly the reviewed cleanup preview, using cleanup scope. On PREVIEW_STALE,
@@ -789,7 +818,7 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             return await principal_daemon("op_resume", confirm, operation_id=operation_id)
 
         for fn in (operation_submit, operation_cancel, operation_resume, checkpoint_create,
-                   work_continue_from_checkpoint, artifact_upload, artifact_capture, cleanup_apply, github_pr_update, github_pr_merge,
+                   work_continue_from_checkpoint, artifact_upload, artifact_capture, artifact_capture_managed, artifact_accept, cleanup_apply, github_pr_update, github_pr_merge,
                    deployment_start, deployment_retry, deployment_rollback):
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=op_write)
 
