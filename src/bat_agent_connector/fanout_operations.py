@@ -123,7 +123,8 @@ async def resolve(ops, action, target, params):
         meta = await service._meta(client, sid)
         source = {'session_id': sid, 'registry': before, 'terminal': {k: tab.get(k) for k in
             ('workspaceId', 'cwd', 'worktreePath', 'worktreeBranch', 'agentPreset', 'sdkSessionId')},
-            'runtime': {k: (meta or {}).get(k) for k in ('sdkSessionId', 'cwd')}, 'block': block, 'tasks': parsed['tasks'],
+            'runtime': {k: (meta or {}).get(k) for k in ('sdkSessionId', 'cwd')},
+            'runtime_loaded': isinstance(meta, dict), 'block': block, 'tasks': parsed['tasks'],
             'block_sha256': hashlib.sha256(block.encode()).hexdigest()}
         if relay.record(host, sid) != before:
             raise StepFailed('FANOUT_SOURCE_CHANGED', 'source incarnation changed while reading its plan')
@@ -214,7 +215,11 @@ async def _idle(ctx, plan, read):
         raise TaskControlRefused('FANOUT_PLANNER_CHANGED', 'planner terminal changed; retained')
     meta = await read('claude:get-session-meta', {'sessionId': sid})
     if meta is not None:
-        if not isinstance(meta, dict) or any(meta.get(k) != v for k, v in source['runtime'].items() if v is not None):
+        # Absence is part of the fixed identity. An unloaded source (or a
+        # historical receipt without positive loaded evidence) grants no right
+        # to stop a runtime which appeared while its children were starting.
+        if (source.get('runtime_loaded') is not True or not isinstance(meta, dict)
+                or any(meta.get(k) != v for k, v in source['runtime'].items())):
             raise TaskControlRefused('FANOUT_PLANNER_CHANGED', 'planner runtime identity changed; retained')
         state = await read('claude:get-session-state', {'sessionId': sid})
         if (not isinstance(meta, dict) or meta.get('isStreaming') is not False or not isinstance(state, dict)

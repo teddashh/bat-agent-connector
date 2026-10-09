@@ -445,3 +445,64 @@ async def test_retirement_checks_active_claim_under_flock(daemon, mock, monkeypa
     assert out['status'] == 'failed' and out['error_code'] == 'CONFINEMENT_START_UNSETTLED', out
     assert mock.channels().count('claude:stop-session') == 1 and registry.get('h1', SID)['status'] == 'active'
     await daemon.fleet.close()
+
+
+@pytest.mark.parametrize('initial', ['unloaded', 'missing_sdk', 'missing_cwd'])
+@pytest.mark.parametrize('boundary', ['children', 'final_frame', 'reopen'])
+async def test_new_runtime_identity_never_authorizes_planner_stop(daemon, mock, monkeypatch, initial, boundary):
+    from bat_agent_connector.operations import OperationService
+    from bat_agent_connector.task_journal import Journal
+    adopt(SID, role='planner', agent_preset='claude-code')
+    replies(mock, tasks=ITEMS[:1])
+    mock.archives[SID] = list(mock.states[SID]['messages'])
+    original_meta = dict(mock.metas[SID])
+    original_meta['sdkSessionId'] = 'original-sdk'
+    mock.metas[SID] = dict(original_meta)
+    if initial == 'unloaded':
+        mock.metas[SID] = None
+    else:
+        mock.metas[SID].pop('sdkSessionId' if initial == 'missing_sdk' else 'cwd', None)
+    def replacement():
+        sdk = original_meta['sdkSessionId'] if initial == 'missing_cwd' else 'replacement-sdk'
+        mock.metas[SID] = {**original_meta, 'sdkSessionId': sdk, 'cwd': '/srv/demo', 'isStreaming': False}
+    if boundary == 'children':
+        original = fanout.create_child
+        def create_then_replace(ctx, plan, item):
+            saved = original(ctx, plan, item)
+            replacement()
+            return saved
+        monkeypatch.setattr(fanout, 'create_child', create_then_replace)
+    elif boundary == 'final_frame':
+        # For unloaded plans there is no initial stop invocation. Make it loaded
+        # on the pre-stop meta read; partial loaded plans change inside the final
+        # callback, after the initial idle check and authorization have passed.
+        client = daemon.fleet.client('h1')
+        name = 'invoke' if initial == 'unloaded' else 'guard_read'
+        original = getattr(client, name)
+        async def read(channel, *args, **kwargs):
+            if (channel == 'claude:get-session-meta' and args[0]['sessionId'] == SID
+                    and fanout.relay.receipt(daemon.ops, oid, 'fanout.child.1')):
+                replacement()
+            return await original(channel, *args, **kwargs)
+        monkeypatch.setattr(client, name, read)
+    op, _ = daemon.ops.create(P, **intent(target={'host': 'h1', 'session_id': SID}, params={}))
+    oid = op['operation_id']
+    if boundary == 'reopen':
+        await settle_operations(daemon.ops)
+        child = next(o for o in daemon.ops.list()['operations'] if o['action'] == 'session.start')
+        assert child['status'] == 'succeeded'
+        replacement()
+        daemon.journal.close()
+        daemon.journal = Journal(daemon.journal.path)
+        reopened = OperationService(daemon.journal, actions=list(daemon.ops.actions.values()))
+        reopened.context.update(daemon.ops.context)
+        daemon.ops = reopened
+    out = await settle(daemon, oid)
+    assert out['status'] == 'succeeded', out
+    assert out['result']['started'][0]['prompt_sent'] is True
+    assert out['result']['planner_cleanup']['stopped'] is False
+    assert out['result']['planner_cleanup']['worktree_kept'] is True
+    assert registry.get('h1', SID)['status'] == 'active'
+    assert 'claude:stop-session' not in mock.channels() and 'worktree:remove' not in mock.channels()
+    assert mock.channels().count('claude:start-session') == 1
+    await daemon.fleet.close()
