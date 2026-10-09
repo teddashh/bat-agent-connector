@@ -7,23 +7,30 @@ for (const native of [false, true]) {
   test(`${transport}: definitive admission refusal permits an explicit changed draft`, async ({page}) => {
     const state = await permissionFixture(page, native, {refuse: 'TASK_PAUSED'});
     let form = await openPermissions(page);
-    for (const code of ['TASK_PAUSED', 'CONTROL_VERSION_CONFLICT', 'PERMISSIONS_HOST_POLICY']) {
+    const savedIntent = () => page.evaluate(() => JSON.parse(Object.entries(localStorage)
+      .find(([key]) => key.startsWith('batc.permissions.'))![1]).intent);
+    for (const code of ['TASK_PAUSED', 'CONTROL_VERSION_CONFLICT', 'PERMISSIONS_HOST_POLICY', 'CONFINEMENT_RAISE_REFUSED']) {
       state.refuse = code;
       await form.getByRole('combobox').selectOption('allow_all');
       await form.getByRole('button', {name: 'Apply permissions', exact: true}).click();
       await expect(form).toContainText(code);
       await expect(form.getByRole('button', {name: 'Start another change'})).toBeEnabled();
       const before = state.posts.length;
+      const refusedIntent = await savedIntent();
+      expect(refusedIntent.key).toBe(state.posts[before - 1].idempotency_key);
+      expect(refusedIntent.request).toEqual(state.posts[before - 1].body);
       await page.reload(); form = page.locator('[data-permissions]'); await form.locator('summary').click();
+      expect(await savedIntent()).toEqual(refusedIntent);
       await form.getByRole('button', {name: 'Start another change'}).click();
       await expect(form.getByRole('combobox')).toHaveValue('default');
+      expect(await savedIntent()).toBeUndefined();
       expect(state.posts).toHaveLength(before);
     }
     state.refuse = null;
     await form.getByRole('button', {name: 'Apply permissions', exact: true}).click();
     await expect(form).toContainText('BAT accepted the requested configuration');
-    expect(new Set(state.posts.map(post => post.idempotency_key)).size).toBe(4);
-    expect(state.posts[3].body.params.mode).toBe('default');
+    expect(new Set(state.posts.map(post => post.idempotency_key)).size).toBe(5);
+    expect(state.posts[4].body.params.mode).toBe('default');
   });
   test(`${transport}: auth or ambiguous failure after lost acceptance never permits a new key`, async ({page}) => {
     const state = await permissionFixture(page, native, {lost: true});

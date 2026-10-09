@@ -1913,7 +1913,8 @@ var terminal = (operation) => [
 var admissionRefusals = new Set([
 	"TASK_PAUSED",
 	"CONTROL_VERSION_CONFLICT",
-	"PERMISSIONS_HOST_POLICY"
+	"PERMISSIONS_HOST_POLICY",
+	"CONFINEMENT_RAISE_REFUSED"
 ]);
 function restore(value, target) {
 	const saved = { mode: modeValue(value?.mode) ? value.mode : "default" };
