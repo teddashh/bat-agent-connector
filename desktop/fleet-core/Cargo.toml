@@ -22,6 +22,7 @@ zeroize = "=1.9.1"
 time = { version = "=0.3.55", features = ["formatting", "parsing"] }
 
 [dev-dependencies]
+tokio = { version = "=1.53.2", features = ["test-util"] }
 rcgen = { version = "=0.14.8", default-features = false, features = ["ring"] }
 
 [target.'cfg(windows)'.dependencies]
