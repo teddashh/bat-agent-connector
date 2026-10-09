@@ -39,6 +39,13 @@ Kit's content-based binding across inventory/index and effective SSH config inpu
 effect and publication; do not label old readiness with a newly computed binding. External SSH Include
 changes remain explicit limitations until observed by the port; do not claim a complete SSH transaction.
 
+Profile records accept only the reviewed Kit/BAT keys: `id`, `name`, `type`, `createdAt`, `updatedAt`,
+`remoteHost`, `remotePort`, `remoteProfileId`, `remoteProfileName` and `remoteFingerprint`.
+Unlike the historical PowerShell object check, the Rust port rejects unknown per-profile fields,
+including in alternate indexes. Canonical root extension fields do not extend this record schema;
+a future BAT schema change requires an explicit compatibility update. Connection/pin values still
+pass the separate inventory pairing checks.
+
 Use the existing BAT data directory discovery (new and old names) and shared preference lock. Selection
 CAS compares original bytes, current configuration and owner epoch under the lock, preserving unseen
 edits. Removing a connection also removes dependent future window choices, so launch planning cannot
