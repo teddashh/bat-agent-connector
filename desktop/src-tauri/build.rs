@@ -18,6 +18,7 @@ fn main() {
             "open_external",
             "fleet_availability",
             "fleet_request",
+            "fleet_control",
         ]),
     ))
     .expect("desktop build configuration");
