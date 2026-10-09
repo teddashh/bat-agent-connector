@@ -34,6 +34,13 @@ impl ProbeCredential {
     pub fn new(token: String) -> Self {
         Self(Zeroizing::new(token))
     }
+    pub(crate) fn new_zeroizing(token: Zeroizing<String>) -> Self {
+        Self(token)
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_value(&self) -> &str {
+        &self.0
+    }
 }
 
 /// Native inventory-derived inputs, never accepted as a WebView request.

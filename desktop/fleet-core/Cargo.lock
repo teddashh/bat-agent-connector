@@ -79,6 +79,7 @@ name = "bat-fleet-core"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "libc",
  "rand",
  "rcgen",
  "regex",
@@ -91,6 +92,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "tokio",
  "tokio-rustls",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

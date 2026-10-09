@@ -12,6 +12,12 @@ Port basis: Fleet Kit `2ec4b11bc010bfd669040e942648c741b63d0b7c`, `client/fleet-
 client/tests changes. `tests/fixtures` copies only the Kit's synthetic inventory/index/SSH fixtures;
 private configuration, real host identities, credentials and pins are excluded.
 
+The native-only credential reader resolves the selected inventory's BAT profile token or Fleet
+observe DPAPI reference from fixed, bounded files. It never falls back to a desktop mutation token,
+another profile, another data directory or an environment variable. See the
+[format and evidence contract](../../docs/design/fleet-credentials.md); Windows DPAPI runtime
+compatibility remains a Windows-runner gate.
+
 Malformed existing preferences fail closed instead of silently enabling every connection. JSON field
 spelling is exact and decoded keys must be unique ignoring case. Profile IDs are also unique ignoring
 case. These stricter ambiguity rules are deliberate; ordinary reviewed fixtures remain compatible.
