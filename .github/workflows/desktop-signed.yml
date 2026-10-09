@@ -46,12 +46,13 @@ jobs:
           DESKTOP_UPDATER_PUBLIC_KEY: ${{ vars.DESKTOP_UPDATER_PUBLIC_KEY }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:DESKTOP_UPDATER_PUBLIC_KEY)) { throw 'Public updater key is required' }
+          $publicKey = $env:DESKTOP_UPDATER_PUBLIC_KEY.Trim()
           $config = @{
             bundle = @{ createUpdaterArtifacts = $true }
-            plugins = @{ updater = @{ pubkey = $env:DESKTOP_UPDATER_PUBLIC_KEY; requireSignedVersion = $true } }
+            plugins = @{ updater = @{ pubkey = $publicKey; requireSignedVersion = $true } }
           } | ConvertTo-Json -Depth 5
           [IO.File]::WriteAllText("$env:RUNNER_TEMP\dashboard-signing.json", $config)
-          [IO.File]::WriteAllText("$env:RUNNER_TEMP\dashboard-public-key.txt", $env:DESKTOP_UPDATER_PUBLIC_KEY)
+          [IO.File]::WriteAllText("$env:RUNNER_TEMP\dashboard-public-key.txt", $publicKey)
       - name: Build updater-signed NSIS candidate
         working-directory: desktop
         shell: pwsh
@@ -71,7 +72,7 @@ jobs:
           if ($files.Count -ne 1) { throw 'Exactly one NSIS artifact is required' }
           $version = (Get-Content desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
           $skill = Get-Content skills/bat-agent-connector/SKILL.md -Raw
-          $match = [regex]::Match($skill, '(?m)^  workflow_version: "([0-9.-]+)"$')
+          $match = [regex]::Match($skill, '(?m)^  workflow_version: "([0-9.-]+)"\r?$')
           if (-not $match.Success) { throw 'Canonical workflow version is missing' }
           cargo run --locked --manifest-path desktop/src-tauri/Cargo.toml --example update_manifest -- "$($files[0].FullName)" "$($files[0].FullName).sig" "$env:RUNNER_TEMP\dashboard-public-key.txt" "$version" "$env:SOURCE_SHA" "$($match.Groups[1].Value)" desktop/src-tauri/target/release/bundle/nsis/dashboard-update.json
           if ($LASTEXITCODE -ne 0) { throw 'Artifact verification failed' }

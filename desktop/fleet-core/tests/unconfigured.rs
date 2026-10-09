@@ -78,7 +78,17 @@ impl Observation for Mock {
             let mut candidate = process();
             candidate.executable =
                 "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe".into();
-            candidate.arguments = vec!["-File".into(), "C:\\OtherKit\\fleet-monitor.ps1".into()];
+            candidate.arguments = vec![
+                "-NoProfile".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                "C:\\OtherKit\\bat-connect.ps1".into(),
+                "-InventoryPath".into(),
+                "C:\\OtherKit\\fleet-inventory.json".into(),
+                "-ProfileIndexPath".into(),
+                "C:\\OtherKit\\bat-profiles\\index.json".into(),
+            ];
             candidate.login.session_id += 1;
             Ok(vec![candidate])
         } else {
@@ -197,6 +207,7 @@ fn ownership_or_unknown_launch_appearing_during_enumeration_refuses() {
         "BetterAgentTerminal/fleet-monitor.json",
         "org.tonyq.better-agent-terminal/fleet-tunnel-owners/new.json",
         "bat-fleet-monitor-launch.json",
+        "config/fleet-migrations/active.json",
     ] {
         let f = Fixture::new();
         let path = f.0.join(path);
@@ -207,6 +218,18 @@ fn ownership_or_unknown_launch_appearing_during_enumeration_refuses() {
             })
             .is_err());
         assert_eq!(std::fs::read(path).unwrap(), b"restored");
+    }
+}
+#[test]
+fn missing_configuration_does_not_erase_an_unsettled_migration() {
+    let f = Fixture::new();
+    let pointer = f.0.join("config/fleet-migrations/active.json");
+    std::fs::create_dir_all(pointer.parent().unwrap()).unwrap();
+    for bytes in [b"\"original-migration\"".as_slice(), b"partial"] {
+        std::fs::write(&pointer, bytes).unwrap();
+        assert_eq!(f.verify(&Mock::default()), Err("MIGRATION_PENDING"));
+        assert_eq!(std::fs::read(&pointer).unwrap(), bytes);
+        assert!(!f.installation().exists());
     }
 }
 #[test]

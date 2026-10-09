@@ -56,13 +56,14 @@ async fn desktop_update(
             control.set_stopping(true);
             let updates = state.inner().clone();
             let path = control.config.clone();
-            let unconfigured = control.never_configured();
             let result = tokio::task::spawn_blocking(move || {
                 #[cfg(windows)]
                 {
                     match path.try_exists() {
-                        Ok(false) if unconfigured => updates.install(&candidate_id),
-                        Ok(_) => fleet_native::with_stopped_fleet(&path, || {
+                        Ok(false) => fleet_native::with_unconfigured_fleet_absent(&path, || {
+                            updates.install(&candidate_id)
+                        }),
+                        Ok(true) => fleet_native::with_stopped_fleet(&path, || {
                             updates.install(&candidate_id)
                         }),
                         Err(_) => Err("FLEET_CONFIGURATION_UNPROVEN".into()),
@@ -70,7 +71,7 @@ async fn desktop_update(
                 }
                 #[cfg(not(windows))]
                 {
-                    let _ = (path, unconfigured);
+                    let _ = path;
                     updates.install(&candidate_id)
                 }
             })
@@ -110,10 +111,8 @@ async fn fleet_control(
 fn fleet_availability(
     window: WebviewWindow,
     state: State<'_, fleet::FleetBridge>,
-    control: State<'_, Arc<fleet_control::Control>>,
 ) -> Result<fleet::FleetAvailability, String> {
     local_main(&window)?;
-    control.observe_configuration();
     Ok(state.availability())
 }
 
@@ -126,7 +125,6 @@ async fn fleet_request(
 ) -> Result<serde_json::Value, String> {
     local_main(&window)?;
     let ticket = control.ticket();
-    control.observe_configuration();
     if control.is_stopping()
         && !matches!(
             input,
@@ -402,17 +400,16 @@ fn quit(app: &tauri::AppHandle) {
     control.set_stopping(true);
     tauri::async_runtime::spawn(async move {
         let path = control.config.clone();
-        let unconfigured = control.never_configured();
         let exit_app = app.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
             #[cfg(windows)]
             {
                 match path.try_exists() {
-                    Ok(false) if unconfigured => {
+                    Ok(false) => fleet_native::with_unconfigured_fleet_absent(&path, || {
                         exit_app.exit(0);
                         Ok(())
-                    }
-                    Ok(_) => fleet_native::with_stopped_fleet(&path, || {
+                    }),
+                    Ok(true) => fleet_native::with_stopped_fleet(&path, || {
                         exit_app.exit(0);
                         Ok(())
                     }),
@@ -421,7 +418,7 @@ fn quit(app: &tauri::AppHandle) {
             }
             #[cfg(not(windows))]
             {
-                let _ = (path, unconfigured);
+                let _ = path;
                 exit_app.exit(0);
                 Ok(())
             }
