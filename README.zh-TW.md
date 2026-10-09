@@ -161,6 +161,10 @@ bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
 
 ### Dashboard 與 `/api/v1`（選用）
 
+Web 與 Tauri 持續共用同一套介面來源，可以同時開啟。Connector 獨立提供 Web 介面與 API，
+不因關閉桌面程式而停止中央工作；本機憑證、Fleet 與視窗控制則依平台提供。
+詳見[共用前端與生命週期](docs/design/shared-frontend.md)。
+
 `batc serve` 也在同一個 loopback 埠提供 `/api/v1` 與瀏覽器 Dashboard（`http://127.0.0.1:18796/dashboard/`）：需要你處理的項目、所有 session 與其來源（人在 BAT 建立的 session 一律唯讀）、managed session 的操作、PR 合併與部署按鈕、環境卡與分頁部署歷史，以及操作紀錄。以 `batc api-token issue --actor ted-dashboard --scope observe --scope operate --scope start --scope integrate --scope manage --scope approve --scope merge --scope deploy --scope cleanup`（`merge`、`deploy` 給合併與部署按鈕）發行 token 後在 Dashboard 的「連線」輸入。專案與工作項目記下在做什麼、為什麼：需求原文、驗收、步驟，以及做這件事的 sessions、checkpoint、操作與 PR。有 `manage` 的 agent 可以回報完成；只有帶 `approve` 的 token 能確認完成，而且確認的是它讀到的內容，之後內容再改會重新等待確認。排序、固定、改名與封存沿用 Project Hub 的規則。要接續人的工作而不碰它的 session，先記下 checkpoint（`checkpoint.create`：commit 與最近對話，只讀），再從它開始 managed 工作（`checkpoint.continue`：在 Connector 自有的 clone、worktree、分支與 session 從那個 commit 開始）。需要 `managed_roots` 與主機的 SSH alias。要把成果放進既有 PR，先預覽（`integration.preview`：列出以 SHA 釘住、會進 PR 的每個 commit 與檔案），再套用預覽（`integration.apply`：以主機的 git 憑證，一般 push 組合後的 commit 到 PR 的 head 分支；不強推，也不改你的資料夾），需要在 repository 的 `[[github.repos]]` 設定 `integrate = {hosts, remote_url}`。設計見 [docs/design/api-v1.md](docs/design/api-v1.md)、[docs/design/delivery.md](docs/design/delivery.md)、[docs/design/dashboard.md](docs/design/dashboard.md)、[docs/design/checkpoints.md](docs/design/checkpoints.md)、[docs/design/integration.md](docs/design/integration.md)、[docs/design/work-items.md](docs/design/work-items.md)。
 
 

@@ -70,6 +70,28 @@ textarea { width: 100%; min-height: 80px; resize: vertical; }
   overflow-wrap: anywhere; }
 .msg.user { background: transparent; border: 1px solid var(--line); }
 .msg .who { font-size: 12px; color: var(--muted); display: block; }
+.conversation { min-width: 0; }
+.conversation-toolbar, .message-meta, .message-code-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.conversation-toolbar { margin-top: 8px; min-height: 30px; }
+.conversation-scroll { max-height: 65vh; overflow: auto; overflow-anchor: none; scrollbar-gutter: stable; }
+.conversation .msg { white-space: normal; min-width: 0; }
+.message-meta { margin-bottom: 8px; }
+.message-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.message-body { min-width: 0; }
+.message-code { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); margin: 8px 0; overflow: hidden; }
+.message-code-bar { padding: 6px 10px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.message-code pre { margin: 0; padding: 10px; overflow-x: auto; white-space: pre; overflow-wrap: normal; }
+.message-table { max-width: 100%; overflow-x: auto; margin: 8px 0; }
+.message-table table { border-collapse: collapse; background: var(--panel); }
+.message-table th, .message-table td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; min-width: 100px; white-space: pre-wrap; }
+.message-table th { background: var(--chip); }
+.conversation :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.conversation-copy textarea { display: block; margin-bottom: 8px; }
+@media (max-width: 640px) {
+  .conversation-toolbar { min-height: 44px; }
+  .conversation button.mini { height: auto; min-height: 44px; }
+  .conversation-copy textarea { font-size: 16px; }
+}
 .note { border-left: 3px solid var(--readonly); padding: 8px 12px; background: var(--chip); border-radius: 0 8px 8px 0; }
 .error { color: var(--bad); }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; }

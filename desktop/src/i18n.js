@@ -1,6 +1,10 @@
 // Display labels only. Logic and CSS never key on these strings (machine enums come from /api/v1).
 const STRINGS = {
   "zh-TW": {
+    message_code: "程式碼", message_table: "訊息表格", message_copy_code: "複製程式碼", message_copy: "複製原文",
+    message_copied: "已複製。", message_copy_source: "要複製的原文", message_copy_manual: "無法自動複製，請選取並複製以下原文。",
+    message_latest: "回到最新訊息", message_window: "最近 30 則訊息",
+    message_anchor_missing: "原本閱讀的位置已不在這次載入的訊息中。",
     tailscale_request: "原開啟請求", tailscale_title: "Tailscale", tailscale_open: "開啟 Tailscale", tailscale_refresh: "重新檢查 Tailscale",
     tailscale_browser: "請在本機的 Tailscale 完成登入。Windows 桌面版可直接開啟 Tailscale。",
     tailscale_unsupported: "此平台尚未提供 Tailscale 原生開啟功能。", tailscale_missing: "未找到標準安裝位置中的 Tailscale。請先安裝 Windows 版。",
@@ -703,6 +707,10 @@ const STRINGS = {
     integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。",
   },
   en: {
+    message_code: "Code", message_table: "Message table", message_copy_code: "Copy code", message_copy: "Copy original",
+    message_copied: "Copied.", message_copy_source: "Original text to copy", message_copy_manual: "Automatic copy is unavailable. Select and copy the original text below.",
+    message_latest: "Back to latest", message_window: "Latest 30 messages",
+    message_anchor_missing: "Your previous reading position is outside the messages currently loaded.",
     tailscale_request: "Original opening request", tailscale_title: "Tailscale", tailscale_open: "Open Tailscale", tailscale_refresh: "Refresh Tailscale status",
     tailscale_browser: "Sign in using Tailscale on this computer. The Windows desktop app can open it directly.",
     tailscale_unsupported: "Opening Tailscale is not supported on this platform yet.", tailscale_missing: "Tailscale was not found in its standard installation folder. Install the Windows app first.",

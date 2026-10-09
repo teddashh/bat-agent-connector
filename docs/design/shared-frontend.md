@@ -1,0 +1,70 @@
+# Shared Web and Tauri frontend
+
+The product owner confirmed on 2026-10-09 that Web remains a supported interface
+alongside Tauri. Both use `desktop/src`; the browser is not a frozen v1 dashboard.
+
+```mermaid
+flowchart LR
+  Source[Shared UI source] --> Web[Browser UI]
+  Source --> Desktop[Tauri bundled UI]
+  Web -->|Same-origin HTTP| Central[Python Connector / Task Service]
+  Desktop -->|Restricted Rust transport| Central
+  Desktop --> Native[Local credentials / Fleet / files / windows]
+  Central --> BAT[Selected BAT hosts and workspaces]
+```
+
+The Connector already serves `/dashboard/` and `/api/v1` from the same service.
+It runs independently of open browser tabs or desktop windows. Tauri packages its
+own static assets; it does not need a second web server or business backend.
+Fleet can manage local connections separately, so closing a connection can make
+that client unreachable without stopping central tasks.
+
+| Concern | Shared behavior | Platform difference |
+| --- | --- | --- |
+| Projects, work items, sessions, messages, pending requests | Same central reads, actions, permissions and receipts | HTTP in browser; restricted IPC/Rust transport in Tauri |
+| Operations and reconciliation | Central authority, stable IDs, original request/key, version checks | Two explicitly submitted user actions remain two intents; opening two clients does not itself dispatch work |
+| Updates from other clients | Refresh from the central event journal | Current frontend polls; event processing is not a human read receipt |
+| Credentials | Same principal/scopes contract | Browser has its own login; native uses the supported OS store / native enrollment |
+| Files | Same artifact identity, revision and digest | Browser upload/download; supported native picker, handle and Save As |
+| Fleet, tray, native updater, local BAT launch | Expose only supported capabilities | Native controls are not simulated by privileged web endpoints |
+| Drafts, focus and reading position | Same UX rules and identity isolation | Local to each browser/app; cross-device draft/read-state synchronization is not implemented |
+
+The present server checks loopback Host and same-origin requests. Existing verified
+tunnels remain the supported access path. Public/LAN web hosting needs a separate
+authenticated ingress design; this change does not relax Host, Origin or CSP.
+
+`npm run build:all` produces both the desktop bundle and generated Python-served
+browser assets. CI checks regenerated browser files for drift. An installed older
+desktop cannot change with a web deployment: API version/capability checks remain
+necessary, and missing native features need an explicit explanation. UI behavior
+tests exercise both transports; mock IPC is not real WebView/platform acceptance.
+
+## First adoption slice: conversation reading
+
+See the [Project Hub audit](../product/project-hub-frontend-audit-2026-10-09.md),
+C01/C02/C04. This implementation is independently written; upstream is the UX
+reference, not a new dependency or copied runtime.
+
+- Format fenced code and pipe tables, with limited inline code/bold. Preserve the
+  complete original message for copying; unsupported syntax remains literal text.
+  Construct DOM nodes with text content, never HTML, external links or remote images.
+  Unclosed streamed fences remain code, and code copying preserves original line endings.
+  Bound formatting work; large inputs remain fully available as plain text.
+- Keep the existing latest-30 read contract. A scrollable conversation follows new
+  output only when the reader is near its bottom. An explicit latest button resumes
+  following. Refresh captures the reading position when applying the result, not
+  before its network request; unchanged message nodes retain selection/focus.
+- Prefer supplied message IDs for reading anchors. Without IDs, match exact message
+  content/metadata and duplicate occurrence only for presentation, never as domain
+  identity. If an anchor leaves the loaded window, show that limitation rather than
+  claiming old messages were retained. Do not infer unread counts from this state.
+- Clipboard access happens only on an explicit copy click. Success follows the
+  write result; failure exposes selectable original text. Identity/navigation guards
+  prevent delayed copy UI from showing content in another mounted account/view.
+- Keep drafts, operation envelopes, pending questions, read failures and event ACK
+  barriers unchanged. Reading and copying do not issue central mutation requests.
+
+Acceptance covers English/zh-TW, browser/IPC, 390/768/1440 layouts, hostile content,
+exact copying, stream updates, rolling read windows, delayed/failed refresh, selection
+and focus, and loss of clipboard access. Native OS clipboard/keyboard acceptance is
+separate from browser and injected IPC fixtures.
