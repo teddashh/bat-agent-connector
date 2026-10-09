@@ -18,7 +18,6 @@ import shlex
 import time
 import urllib.error
 import urllib.request
-from contextlib import nullcontext
 from importlib import resources
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
@@ -1125,6 +1124,12 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None, automatic=Fa
                 if coordinator:
                     i["task_cleanup"] = coordinator.cleanup_verdict(i)
                 if automatic:
+                    verdict = i.get("task_cleanup")
+                    paused = [t["task_id"] for t in (verdict or {}).get("binding", {}).get("tasks", []) if t["paused"]]
+                    if verdict and paused:
+                        verdict["eligible"] = False
+                        verdict["reasons"].append({"code": "TASK_OWNED", "detail": "automatic cleanup retains paused tasks",
+                                                   "task_ids": paused})
                     if i["kind"] == "session":
                         i["automatic_no_stop"] = True
                     elif not (i["kind"] == "worktree" and i.get("flavor") == "task"
@@ -1372,7 +1377,7 @@ def _finalize(ctx, item, after):
         db.execute("UPDATE cleanup_receipts SET retained_ids=? WHERE operation_id=? AND resource_id=?",
                    (_canonical(retained_ids), ctx.operation_id, rid))
         task_cleanup.finalize(ctx, item, after)
-    _mark(item, ctx.operation_id, "cleaned", ops=ctx.service)
+    _mark(item, ctx.operation_id, "cleaned", **({"ops": ctx.service} if item.get("task_cleanup") else {}))
     if item["kind"] == "worktree":
         _retire_absent_sessions(ctx, item["resource_id"])
 
@@ -1578,7 +1583,8 @@ async def _run_plan(ctx):
                     "VALUES(?,?,?,?,?,?,?)", (ctx.operation_id, item["resource_id"], order, _canonical(item),
                     {"reclaim": "pending", "retain": "retained", "already_absent": "already_absent"}[item["decision"]],
                     _canonical(item.get("observation", {})), time.time()))
-    ctx.set_refs(preview_id=ctx.target["preview_id"], fingerprint=payload["fingerprint"])
+    ctx.set_refs(preview_id=ctx.target["preview_id"], fingerprint=payload["fingerprint"],
+                 **({"task_id": payload["target"]["task_id"]} if payload["target"]["kind"] == "task" else {}))
     owner = _OWNER.set(ctx.operation_id)
     try:
         _retire_absent_sessions(ctx)
@@ -1588,7 +1594,7 @@ async def _run_plan(ctx):
             row = db.execute("SELECT status FROM cleanup_receipts WHERE operation_id=? AND resource_id=?",
                              (ctx.operation_id, item["resource_id"])).fetchone()
             if row[0] == "succeeded":
-                _mark(item, ctx.operation_id, "cleaned", ops=ctx.service)
+                _mark(item, ctx.operation_id, "cleaned", **({"ops": ctx.service} if item.get("task_cleanup") else {}))
                 if item["kind"] == "worktree":
                     _retire_absent_sessions(ctx, item["resource_id"])
                 continue
@@ -1600,7 +1606,7 @@ async def _run_plan(ctx):
                               (ctx.operation_id, dep)).fetchone()[0] not in {"succeeded", "already_absent"} for dep in item["dependencies"]):
                 history = _item_history(ctx, item)
                 if unresolved or _has_irreversible(history):
-                    _mark(item, ctx.operation_id, "reserved", ops=ctx.service)
+                    _mark(item, ctx.operation_id, "reserved", **({"ops": ctx.service} if item.get("task_cleanup") else {}))
                     _receipt(ctx, item, "uncertain", after={**history, "refused_phase": "dependencies", "refused_code": "DEPENDENCY_FAILED"},
                              error={"code": "CLEANUP_PARTIAL_STATE" if _has_irreversible(history) else "UNCERTAIN_UNRESOLVED",
                                     "refused_phase": "dependencies", "refused_code": "DEPENDENCY_FAILED"})
@@ -1613,12 +1619,13 @@ async def _run_plan(ctx):
             lock = _REPO_LOCKS.setdefault((item["host"], item.get("repository") or item.get("path")), asyncio.Lock())
             async with lock:
                 try:
-                    _mark(item, ctx.operation_id, "reserved", ops=ctx.service)
+                    _mark(item, ctx.operation_id, "reserved", **({"ops": ctx.service} if item.get("task_cleanup") else {}))
                     _receipt(ctx, item, "running")
-                    manager = (ops.context["coordinator"].cleanup_authority(ctx, item)
-                               if item.get("task_cleanup") else nullcontext(None))
-                    async with manager as authority:
-                        await _execute_item(ctx, item, payload, authority=authority)
+                    if item.get("task_cleanup"):
+                        async with ops.context["coordinator"].cleanup_authority(ctx, item) as authority:
+                            await _execute_item(ctx, item, payload, authority=authority)
+                    else:
+                        await _execute_item(ctx, item, payload)
                 except (Uncertain, AmbiguousOutcome, OSError) as e:
                     _receipt(ctx, item, "uncertain")
                     _progress(ctx)
@@ -1678,7 +1685,7 @@ async def _run_plan(ctx):
             _receipt(ctx, item, status, after={**history, "cancel_requested": True, "guard_released": not keep},
                      **({"error": {"code": "CLEANUP_PARTIAL_STATE", "cancel_requested": True}} if partial else {}))
             if partial:
-                _mark(item, ctx.operation_id, "reserved", ops=ctx.service)
+                _mark(item, ctx.operation_id, "reserved", **({"ops": ctx.service} if item.get("task_cleanup") else {}))
             if not keep:
                 _release(item, ctx.operation_id)
         _progress(ctx)

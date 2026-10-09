@@ -17,7 +17,8 @@ Preview 的 `task_cleanup` 是解釋與 immutable binding，並非可轉交的�
 只有具 creation evidence 的 session／worktree 可獲准。TaskCoordinator 必須列出資源的所有
 current／historical task owners（含 commands、branches、registry 與共用 successor worktree），
 確認全部 terminal `done|failed`、固定 control_version／session／resource identity、原 owner lease、
-無 unresolved command 或仍需內容的 execution。一般 runtime gate 與裸 task ID 不能授予 cleanup。
+無 unresolved command 或仍需內容的 execution。terminal task 的殘留 paused flag 可透過 explicit reviewed cleanup 回收，但 flag／version 仍固定於 binding；
+automatic cleanup 遇到 paused owner 仍保留。一般 runtime gate 與裸 task ID 不能授予 cleanup。
 settled／rejected／cancelled command 與 operation 的 succeeded／failed 並非同一狀態集合；
 accepted send 必須有原 marker、terminal task 與另外的 live idle／content 檢查；這只證明 dispatch 已知，
 不宣稱 delivery。其他 accepted／running 或 intent／needs_review／uncertain command 一律保留。
@@ -44,7 +45,8 @@ local finalization 可補齊自己的完成紀錄，但不得修改新 incarnati
 TaskDaemon 保持原 terminal cleanup 排程，改由中央建立 server-origin 的固定 cleanup plan，
 使用同一 `cleanup.apply` operation 與 resource reservation；不新增 scheduler、公開 force 參數或
 自動 stop runtime。Automatic plan 只處理原 external worktree，clean content 與 retained commit
-證據仍必要；有 live／未知 consumer 就保留。固定 carrier key 查回原 operation，partial／unknown
+證據仍必要；有 live／未知 consumer 就保留。operation external_refs 與 task cleanup_accepted event 保存 task／operation IDs，供未完成時直接查回。
+固定 carrier key 查回原 operation，partial／unknown
 不建立新 attempt，需由既有 operation reconciliation／reviewed cleanup 處理。
 Automatic receipt 明記 `task_lifecycle`，不冒充 user-reviewed scope acceptance。
 
