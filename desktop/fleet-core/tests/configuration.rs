@@ -16,7 +16,10 @@ fn default_binding_matches_powershell_bytes_and_utf16_path_lengths_without_write
         "kit/ssh-config",
         "使用者🦀/.ssh/config",
     ] {
-        let path = fixture.0.join(relative);
+        // Windows PathBuf::join preserves embedded forward slashes. Normalize
+        // lexical components like .NET GetFullPath, without canonicalizing the
+        // deliberately absent user SSH path (or adding a verbatim prefix).
+        let path: std::path::PathBuf = fixture.0.join(relative).components().collect();
         let full = path.to_str().unwrap();
         expected.push_str(&format!("{}:{full}:", full.encode_utf16().count()));
         if path.exists() {
@@ -141,4 +144,86 @@ fn missing_required_files_refuse_and_normalized_default_path_needs_no_alternate_
         Configuration::load(fixture.paths()),
         Err("CONFIGURATION_UNREADABLE")
     ));
+}
+
+#[cfg(windows)]
+#[test]
+fn actual_system_powershell_binding_matches_normalized_native_paths() {
+    use std::{
+        io::Read,
+        process::{Child, Command, Stdio},
+        time::{Duration, Instant},
+    };
+    struct OwnedChild(Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let fixture = Fixture::new();
+    let script = fixture.0.join("configuration-binding.ps1");
+    std::fs::write(
+        &script,
+        include_bytes!("fixtures/configuration-binding.ps1"),
+    )
+    .unwrap();
+    let powershell = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    assert!(powershell.is_absolute());
+    for present in [false, true] {
+        if present {
+            let path = fixture.0.join("使用者🦀/.ssh/config");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"# synthetic user configuration\r\n").unwrap();
+        }
+        let configuration = fixture.load();
+        let mut child = OwnedChild(
+            Command::new(&powershell)
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ])
+                .arg(&script)
+                .env("BAT_FLEET_BINDING_FIXTURE", &fixture.0)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                assert!(
+                    status.success(),
+                    "read-only PowerShell binding oracle failed"
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "PowerShell oracle exceeded its deadline"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let mut output = Vec::new();
+        child
+            .0
+            .stdout
+            .take()
+            .unwrap()
+            .take(1024)
+            .read_to_end(&mut output)
+            .unwrap();
+        assert!(output.len() < 1024);
+        assert_eq!(
+            String::from_utf8(output).unwrap().trim(),
+            configuration.binding()
+        );
+        configuration.verify_current().unwrap();
+    }
 }
