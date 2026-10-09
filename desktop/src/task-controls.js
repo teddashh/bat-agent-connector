@@ -59,9 +59,9 @@ export function taskControlsPanel({h, t, api, caps, guard, ready, task, taskId, 
       }} finally {busy = false; if (live()) update();}
     })();
     try {await submission;} finally {submission = null;}
-    try {await onSettled?.();} catch (e) {showError(e);}
+    if (live()) try {await onSettled?.();} catch (e) {showError(e);}
   }}, t("task_pause"));
-  const check = h("button", {class: "secondary", onclick: () => refresh(true).catch(showError)}, t("permissions_check"));
+  const check = h("button", {class: "secondary", onclick: () => (onSettled ? onSettled() : refresh(true)).catch(showError)}, t("permissions_check"));
   const another = h("button", {class: "secondary", onclick: () => {
     if (!live() || busy || refreshing || readFailed || !writable() || !(terminal(operation) || saved.intent?.refused)) return;
     const previous = saved; saved = {abort: false};

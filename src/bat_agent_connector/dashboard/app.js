@@ -3915,7 +3915,7 @@ function taskControlsPanel({ h, t, api, caps, guard, ready, task, taskId, storag
 			} finally {
 				submission = null;
 			}
-			try {
+			if (live()) try {
 				await onSettled?.();
 			} catch (e) {
 				showError(e);
@@ -3924,7 +3924,7 @@ function taskControlsPanel({ h, t, api, caps, guard, ready, task, taskId, storag
 	}, t("task_pause"));
 	const check = h("button", {
 		class: "secondary",
-		onclick: () => refresh(true).catch(showError)
+		onclick: () => (onSettled ? onSettled() : refresh(true)).catch(showError)
 	}, t("permissions_check"));
 	const another = h("button", {
 		class: "secondary",
@@ -7806,6 +7806,7 @@ async function viewTask(main, id) {
 	});
 	main.append(head, status, panel.box, observations.box);
 	async function load() {
+		assertView(connection);
 		if (active) {
 			await active.catch(() => {});
 			assertView(connection);
