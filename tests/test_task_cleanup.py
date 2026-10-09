@@ -1,5 +1,6 @@
 """Task cleanup authority over real temporary Git and MockBat; no live writes."""
 import copy
+import json
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,7 @@ async def test_task_preview_removes_terminal_carrier_retains_branch_and_history(
     assert branch["decision"] == "retain"
     result = await apply(daemon, doc)
     assert result["status"] == "succeeded", result
+    assert result["external_refs"]["task_id"] == tid
     assert not Path(op["result"]["worktree_path"]).exists()
     assert cleanup.lookup(daemon.journal.db, tid)
     assert daemon.journal.get(tid)["state"] == "failed"
@@ -89,7 +91,11 @@ async def test_automatic_shared_finalization_preserves_original_ids_and_operatio
     tid, path, sha = await external(daemon, mock, commit=True)
     operation = await task_cleanup.automatic(daemon, daemon.journal.get(tid))
     assert operation, [(i["kind"], i["reasons"], i.get("task_cleanup")) for i in (await cleanup.preview(daemon.ops, task_cleanup.SYSTEM, {"kind": "task", "task_id": tid}, _automatic=True))["items"]]
+    assert operation["external_refs"]["task_id"] == tid
     assert (await task_cleanup.automatic(daemon, daemon.journal.get(tid)))["operation_id"] == operation["operation_id"]
+    accepted = [e for e in daemon.journal.events(tid) if e["kind"] == "cleanup_accepted"]
+    assert len(accepted) == 1
+    assert json.loads(accepted[0]["body"])["operation_id"] == operation["operation_id"]
     await settle_operations(daemon.ops, timeout=60)
     done = daemon.ops.get(operation["operation_id"])
     assert done["status"] == "succeeded", done
@@ -103,6 +109,60 @@ async def test_automatic_shared_finalization_preserves_original_ids_and_operatio
     later = await cleanup.preview(daemon.ops, CLEANER, {"kind": "task", "task_id": tid})
     old = next(i for i in later["items"] if i["kind"] == "worktree" and i.get("flavor") == "task")
     assert old["resource_id"] == history[0]["resource_id"] and old["decision"] == "retain"
+
+
+async def test_explicit_terminal_paused_cleanup_allowed_automatic_retains(daemon, mock):
+    from bat_agent_connector import task_cleanup
+    tid, path, _ = await external(daemon, mock, state="dispatching")
+    daemon.journal.pause(tid)
+    daemon.journal.change(tid, "failed")
+    task = daemon.journal.get(tid)
+    assert task["paused"]
+    assert await task_cleanup.automatic(daemon, task) is None
+    assert not daemon.journal.db.execute("SELECT 1 FROM operations WHERE action='cleanup.apply'").fetchone()
+    doc = await cleanup.preview(daemon.ops, CLEANER, {"kind": "task", "task_id": tid})
+    item = next(i for i in doc["items"] if i.get("flavor") == "task" and i["kind"] == "worktree")
+    bound = item["task_cleanup"]["binding"]["tasks"][0]
+    assert bound["paused"] and bound["control_version"] == task["control_version"]
+    assert doc["ready"], doc
+    done = await apply(daemon, doc)
+    assert done["status"] == "succeeded", done
+    assert not path.exists()
+    assert daemon.journal.get(tid)["paused"]
+    assert daemon.journal.get(tid)["external_worktree_path"] is None
+
+
+@pytest.mark.parametrize("change_head", [False, True])
+async def test_done_cleanup_requires_original_observed_verification_head(daemon, mock, change_head):
+    from tests.test_checkpoints import git
+    tid, path, sha = await external(daemon, mock, state="dispatching")
+    tree = git(path, "rev-parse", "HEAD^{tree}")
+    daemon.journal.change(tid, "accepted")
+    daemon.journal.change(tid, "verifying")
+    daemon.journal.record_observed_verification(tid, {
+        "source": "observed_runner", "candidate_commit": sha, "tree_hash": tree,
+        "command": "fixture verification", "exit_code": 0, "log_ref": "fixture:observed",
+        "output_sha256": "c" * 64})
+    daemon.journal.change(tid, "done", fields={"verification_commit": sha, "verification_tree": tree})
+    target = {"kind": "task", "task_id": tid}
+    doc = await cleanup.preview(daemon.ops, CLEANER, target)
+    assert doc["ready"], doc
+    if change_head:
+        (path / "later.txt").write_text("changed after reviewed verification")
+        git(path, "add", ".")
+        git(path, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-qm", "later")
+        fresh = await cleanup.preview(daemon.ops, CLEANER, target)
+        item = next(i for i in fresh["items"] if i.get("flavor") == "task" and i["kind"] == "worktree")
+        assert not item["task_cleanup"]["eligible"] and not fresh["ready"]
+        assert {"code": "BINDING_MISMATCH", "detail": "verified_commit_changed"} in item["task_cleanup"]["reasons"]
+    done = await apply(daemon, doc)
+    if change_head:
+        assert done["status"] == "failed" and done["error_code"] == "PREVIEW_STALE", done
+        assert path.exists() and daemon.journal.get(tid)["external_worktree_path"] == str(path)
+    else:
+        assert done["status"] == "succeeded", done
+        assert not path.exists() and daemon.journal.get(tid)["external_worktree_path"] is None
+    assert "claude:stop-session" not in mock.channels()
 
 
 async def test_default_target_keeps_guard_and_active_shared_successor_blocks_task(daemon, mock):

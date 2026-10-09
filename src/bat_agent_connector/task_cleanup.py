@@ -72,7 +72,7 @@ def verdict(coordinator, item):
         if task is None:
             refuse("TASK_OWNED", task_id=tid, detail="owner_missing")
             continue
-        if task["state"] not in TERMINAL or task["paused"]:
+        if task["state"] not in TERMINAL:
             refuse("TASK_OWNED", task_id=tid, state=task["state"], paused=bool(task["paused"]))
         commands = [dict(r) for r in ops.db.execute("SELECT * FROM commands WHERE task_id=? ORDER BY command_id", (tid,))]
         for cmd in commands:
@@ -221,8 +221,17 @@ async def automatic(daemon, task):
                                 _automatic=True)
     if not doc["ready"]:
         return None
-    operation, _ = ops.create(SYSTEM, **cleanup.apply_request(doc, key), entry="task_lifecycle")
-    return operation
+    from .observation import event_context
+    with ops.journal.tx():
+        operation, created = ops.create(SYSTEM, **cleanup.apply_request(doc, key), entry="task_lifecycle")
+        ops._merge_refs(operation["operation_id"], {"task_id": task["task_id"]})
+        if created:
+            with event_context(actor=SYSTEM.actor, entry_point="task_lifecycle", operation_id=operation["operation_id"],
+                               actor_basis="task_lifecycle", actor_evidence={"source": "coordinator_terminal_policy"}):
+                ops.journal._event(task["task_id"], "cleanup_accepted", {"operation_id": operation["operation_id"],
+                    "resource_ids": [i["resource_id"] for i in doc["items"] if i["decision"] == "reclaim"],
+                    "origin": "task_lifecycle"})
+    return ops.get(operation["operation_id"])
 
 
 def historical(ops):
