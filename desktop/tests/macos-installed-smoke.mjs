@@ -59,7 +59,18 @@ const server = createServer((req, res) => {
 function run(command, args) {
   return execFileSync(command, args, { encoding: "utf8", timeout: 60_000 });
 }
-function native(action) { return run(helper, [action, String(app.pid), installed]); }
+function native(action) { return run(helper, [action, String(app.pid), installed, String(app.launchDate)]); }
+function launch() { return JSON.parse(run(helper, ["launch", installed])); }
+async function stopApplication() {
+  if (!app || JSON.parse(native("inspect")).terminated) return;
+  try { native("quit"); } catch (error) { diagnostic += String(error); }
+  for (let count = 0; count < 50; count++) {
+    if (JSON.parse(native("inspect")).terminated) return;
+    await delay(100);
+  }
+  native("cleanup-force");
+  await until(() => JSON.parse(native("inspect")).terminated, "Owned application did not terminate");
+}
 async function until(check, message) {
   for (let count = 0; count < 150; count++) {
     if (await check()) return;
@@ -74,7 +85,7 @@ async function stopOwned(child) {
   if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   await until(() => child.exitCode !== null || child.signalCode !== null, "Owned process did not exit");
 }
-function launch() {
+function launchSecondExecutable() {
   const child = spawn(binary, [], { env: { ...process.env, BATC_DESKTOP_TOKEN: "fixture-native-token" },
     stdio: ["ignore", "pipe", "pipe"] });
   child.on("error", error => { diagnostic += String(error); });
@@ -133,9 +144,9 @@ try {
   await until(() => !JSON.parse(native("inspect")).hidden && JSON.parse(native("inspect")).windows.length === 1,
     "Finder/Dock reopen did not restore the window");
   assert.equal(JSON.parse(native("inspect")).windows[0].id, window);
-  assert.equal(app.exitCode, null);
+  assert.equal(JSON.parse(native("inspect")).terminated, false);
   steps.push("Native app hide and Finder/Dock reopen retained the original process and window");
-  const second = launch();
+  const second = launchSecondExecutable();
   try {
     await until(() => second.exitCode !== null, "Second instance did not hand off");
     assert.equal(second.exitCode, 0);
@@ -143,8 +154,7 @@ try {
   } finally { await stopOwned(second); }
   steps.push("Second executable invocation exited successfully with the original window retained");
   native("quit");
-  await until(() => app.exitCode !== null, "Normal macOS Quit did not exit");
-  assert.equal(app.exitCode, 0);
+  await until(() => JSON.parse(native("inspect")).terminated, "Normal macOS Quit did not terminate");
   const previousRequests = requests.length;
   app = launch();
   await until(() => requests.slice(previousRequests).some(item => item.path === "/api/v1/events"), "Relaunched WKWebView did not poll");
@@ -152,20 +162,20 @@ try {
   await until(() => JSON.parse(native("inspect")).windows.length === 1, "Relaunched window missing");
   run("screencapture", ["-x", "-l", String(JSON.parse(native("inspect")).windows[0].id), join(evidence, "reopened.png")]);
   native("quit");
-  await until(() => app.exitCode !== null, "Second normal Quit did not exit");
-  assert.equal(app.exitCode, 0);
+  await until(() => JSON.parse(native("inspect")).terminated, "Second normal Quit did not terminate");
   assert.deepEqual(violations, []);
   for (const path of ["/api/v1/capabilities", "/api/v1/bootstrap", "/api/v1/events"]) {
     assert(requests.some(item => item.path === path), `Missing ${path}`);
   }
   steps.push("Normal system Quit and relaunch preserved configuration and resumed WebView polling");
   receipt = { status: "passed", evidence_level: "native-installed-fixture", live_accepted: false,
+    launch_method: "NSWorkspace Launch Services", quit_method: "NSRunningApplication normal terminate request and observed termination",
     source_sha: run("git", ["rev-parse", "HEAD"]).trim(), source_tree: run("git", ["rev-parse", "HEAD^{tree}"]).trim(),
     macos: run("sw_vers", ["-productVersion"]).trim(), architecture, version: config.version,
     dmg_sha256: sha256(await readFile(dmg)), binary_sha256: sha256(await readFile(binary)), steps };
   await writeFile(join(evidence, "bundle-proof.json"), JSON.stringify(expected, null, 2));
 } finally {
-  await stopOwned(app);
+  await stopApplication();
   server.closeAllConnections();
   server.close();
   if (mounted) run("hdiutil", ["detach", mount]);
