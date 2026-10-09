@@ -21,7 +21,10 @@ Web 與 Tauri 共用 `conversation.js`／`message-format.js`，兩個 build 已�
 中英 × browser/IPC × 390/768/1440 畫面。實際 Connector＋MockBat fixture 的事件續接、
 retention reset 與草稿恢復通過；兩種 build 的 JavaScript 相同，CSS 扣除 generated notice 也相同。
 初次 clipboard fallback 測試發現 textarea 會正規化 CRLF，已修正整段手動複製並通過回歸。
-尚未合併或安裝；IPC fixture 不代表 Windows/macOS 原生剪貼簿驗收。完整 Python 檢查另留結果。
+實作提交 `e4350b9`；Ruff、generated browser drift 與 Python 3.13 全套
+**3187 passed／33 skipped** 通過（磁碟暫存 wrapper；1574.89 秒）。測試暫存已清除，
+證據保存在 `~/agent-work/artifacts/shared-conversation-reading-20261009/`。
+尚未合併或安裝；IPC fixture 不代表 Windows/macOS 原生剪貼簿驗收。
 
 ### 2026-10-09 Project Hub 前端完整複查
 
