@@ -985,6 +985,7 @@ async def session_send(
     _task_guard: task_control.FrameGuard | None = None,
     control_version: int | None = None,
     operation_id: str | None = None,
+    _exact_session_id: bool = False,
 ) -> dict:
     _guard(fleet, host, confirm)
     if not isinstance(text, str) or not text.strip():
@@ -996,6 +997,8 @@ async def session_send(
     async with _write_lock(host):
         t, ws = await _resolve_session(c, session_id)
         sid = t["id"]
+        if _exact_session_id and sid != session_id:
+            raise TaskControlRefused("TASK_BINDING_MISMATCH", "the operation's session identity no longer resolves exactly")
         grant = await resource_policy.authorize_session(fleet, host, "session.send", t)
         successor = next((e for e in registry.list_entries(host) if e.get("failover_of") == sid
                           and e.get("status") in ("starting", "active")
@@ -1233,6 +1236,7 @@ async def session_answer(
     _task_guard: task_control.FrameGuard | None = None,
     control_version: int | None = None,
     operation_id: str | None = None,
+    _exact_session_id: bool = False,
 ) -> dict:
     _guard(fleet, host, confirm)
     if (answers is None) == (permission is None):
@@ -1242,6 +1246,8 @@ async def session_answer(
     async with _write_lock(host):
         t, _ = await _resolve_session(c, session_id)
         sid = t["id"]
+        if _exact_session_id and sid != session_id:
+            raise TaskControlRefused("TASK_BINDING_MISMATCH", "the operation's session identity no longer resolves exactly")
         grant = await resource_policy.authorize_session(fleet, host, "session.answer", t)
         kind = agent_kind(t.get("agentPreset"))
         meta = await _meta(c, sid)

@@ -3,6 +3,7 @@
 import { t } from "./i18n.js";
 import { connectorRequest, connectorUploadArtifact, nativeDesktop, nativeStatus, nativeConnect, nativeDisconnect, openExternal } from "./transport/index.ts";
 import { mountFleet } from "./fleet.js";
+import { capturePanel } from "./capture.js";
 import { consumePageAsync, settleRefreshes, storageScope } from "./state/events.ts";
 
 const TOKEN_KEY = "batc.dashboard.token";
@@ -173,6 +174,12 @@ async function submit(action, target, params, preconditions, scope) {
   }
 }
 
+function manualCapture(scope, source = {}, onAttach) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  return capturePanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection), onEvents, errorBox,
+    storageKey: `batc.capture.${connection.namespace}.${scope}`, source, onAttach});
+}
+
 // Files stay in this WebView's memory. Persist only identity-scoped references and exact operation intents.
 function attachmentDraft(scope, text, initial = [], roles = false) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
@@ -294,6 +301,12 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
     finally {more.disabled = false;}
   }}, t("more"));
   box.append(more);
+  if (state.caps?.artifacts?.capture?.manual_single_file) box.append(manualCapture(scope, {}, (ref, name) => {
+    guard(true);
+    if (!saved.attachments.some(a => a.ref?.artifact_id === ref.artifact_id && a.ref?.revision === ref.revision))
+      saved.attachments.push({name, ref: {...ref, ...(roles ? {role: "input"} : {})}});
+    persist(); render();
+  }));
   const loadCatalog = async (cursor = "") => {
     const page = await api("GET", `/artifacts?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`); guard(true);
     const selected = existing.value, selectedOption = existing.selectedOptions[0];
@@ -833,7 +846,9 @@ async function viewSession(main, host, sid) {
   const composer = h("div", {hidden: true}, box, h("div", { class: "actions" }, send, stop,
     h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
   const readonly = h("p", { class: "note" }, t("read_only_note"));
-  const controls = h("div", { class: "panel" }, pending, readonly, composer, status);
+  let capture;
+  const captureSlot = h("div");
+  const controls = h("div", { class: "panel" }, pending, readonly, composer, captureSlot, status);
   const cps = checkpointPanel(host, sid);
   const observations = observationPanels("session", `${host}/${sid}`, path);
   main.append(head, controls, cps.box, h("h2", {}, t("messages")), msgs, observations.box);
@@ -911,6 +926,12 @@ async function viewSession(main, host, sid) {
     if (data.work_items?.length) head.append(linkedItems(data.work_items));
     if (data.discovery?.length) head.append(h("details", {}, h("summary", {}, t("obs_discovery")), discoveryEvidence(data.discovery)));
     const managed = row.api_access === "managed";
+    const manualSource = row.provenance === "manual" && state.caps?.artifacts?.capture?.manual_single_file;
+    if (manualSource && !capture) {
+      capture = manualCapture(`session.${JSON.stringify([host, sid])}`, {host, session_id: sid});
+      captureSlot.append(capture);
+    }
+    if (capture) capture.hidden = !manualSource;
     composer.hidden = !managed; readonly.hidden = managed;
     renderPending(); updateControls();
   };

@@ -2,6 +2,22 @@
 
 ## Next release (unreleased)
 
+- Route legacy send, continue and answer through the central durable actions with the caller's
+  authenticated authority, exact session/prompt binding, optional operation keys and complete receipts.
+  Preserve client message IDs, queue and permission-answer behavior; lost acknowledgements read back
+  the original effect. Remaining permission/start/orchestration adapters are tracked separately.
+
+- Add shared browser/Tauri manual-file preview and capture. Review a remote relative path, source,
+  size and digest, preserve the same capture after a lost reply or reload, then explicitly add its
+  immutable revision to an attachment draft. The native bridge accepts only the fixed typed preview
+  route. Actual-central fixtures now run in desktop CI alongside browser/native-transport UI tests.
+
+- Refuse legacy `worktree_remove` / `remove-worktree` with `LEGACY_WORKTREE_REMOVE_DISABLED`
+  after the existing ownership checks. An idle predecessor can share its directory with an active
+  successor, so the legacy single-session check cannot authorize deletion. Use reviewed cleanup's
+  consumer checks, retention and receipts; discard/branch overrides cannot reopen the old path.
+  Read/status tools and canonical cleanup remain available.
+
 - Add local Desktop Fleet connection controls through the existing Kit's fixed PowerShell facade.
   Restricted native IPC keeps configuration and process startup outside the webview, bounds replies and
   deadlines, and uses only the OS PowerShell's system modules. Revision-bound selection drafts survive
@@ -14,7 +30,7 @@
   HTTP, MCP and CLI use a short-lived credential-bound preview and the existing operation/store quota,
   staging and publication receipts. Reject symlinks, hardlinks, nonregular files, source changes and rebinding;
   preserve the manual checkout and recover completed captures without rereading or republishing their source.
-  This is single-file continuation data; managed-result acceptance, dirty snapshots and capture UI remain separate.
+  This is single-file continuation data; managed-result acceptance and complete dirty snapshots remain separate. The shared capture UI is described above.
 
 - Route legacy MCP/CLI interrupt through the central durable `session.interrupt` action. Preserve
   fixed session/task bindings, complete results and final-frame checks; lost replies only read back.

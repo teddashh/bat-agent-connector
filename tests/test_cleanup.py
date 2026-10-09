@@ -129,6 +129,12 @@ async def test_e01_accepted_authorization_is_server_recorded(daemon, mock):
         finished = daemon.ops.get(accepted["operation_id"])
         assert finished["status"] == "succeeded", (finished.get("error"), [(r["plan"]["kind"], r["status"], r["error"])
                                                     for r in cleanup.receipts(daemon.ops, accepted["operation_id"])])
+        accepted_run = daemon.journal.db.execute(
+            "SELECT accepted_actor,accepted_scopes,accepted_choices FROM cleanup_runs WHERE operation_id=?",
+            (accepted["operation_id"],)).fetchone()
+        assert accepted_run["accepted_actor"] == saved["_accepted_authorization"]["actor"]
+        assert json.loads(accepted_run["accepted_scopes"]) == saved["_accepted_authorization"]["scopes"]
+        assert json.loads(accepted_run["accepted_choices"]) == choices
     finally:
         server.close()
         await server.wait_closed()
@@ -533,6 +539,13 @@ async def test_e02_shared_worktree_is_one_item_and_checks_out_of_scope_consumers
     assert wts[0]["resource_id"] == worktree_id("h1", "checkpoint.continue", op["operation_id"], "worktree")
     assert "h1/reviewer" in wts[0]["original_ids"]
     assert "ACTIVE_WRITER" in {r["code"] for r in wts[0]["reasons"]}
+    assert not doc["ready"]
+    before = len(mock.invokes)
+    with pytest.raises(OperationError, match="PREVIEW_BLOCKED"):
+        await apply(daemon, doc)
+    assert not any(i["channel"] in {"worktree:remove", "worktree:rehydrate"}
+                   for i in mock.invokes[before:])
+    assert Path(path).exists()
 
 
 @pytest.mark.parametrize("phase", ["preserve", "discard", "discard.replica", "remove.worktree", "remove.branch"])

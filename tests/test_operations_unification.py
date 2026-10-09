@@ -2283,19 +2283,29 @@ async def test_a07_explicit_answer_prompt_keeps_existing_behavior(owned, mock, v
 
 
 @pytest.mark.parametrize("variant", ["ask_user", "permission"])
-async def test_a07_legacy_mcp_answer_without_prompt_id_uses_owner_resolution(owned, mock, variant):
+async def test_a07_legacy_mcp_answer_without_prompt_id_uses_owner_resolution(owned, mock, monkeypatch, variant):
     from bat_agent_connector.mcp_server import build_server
     d, tid = owned
-    params, _, prompt_id, _ = pending_answer(mock, variant)
+    params, pending_field, prompt_id, _ = pending_answer(mock, variant)
+    # The authenticated adapter may infer only one unambiguous live prompt.
+    other_field = "pendingPermission" if pending_field == "pendingAskUser" else "pendingAskUser"
+    mock.states[SID][other_field] = None
     server = await asyncio.start_server(d._handle, "127.0.0.1", 0)
     d._endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/rpc"
     d._write_owner_pointer()
+    token = api_auth.issue(d.journal.db, "legacy-mcp-answer", ["operate"])
+    monkeypatch.setenv("BATC_API_TOKEN", token)
+    monkeypatch.setenv("BATC_TASK_URL", d._endpoint)
     mcp, fleet = build_server(d.fleet.config)
     try:
         result = await mcp.call_tool("session_answer", {"host": "h1", "session_id": SID, "confirm": True, **params})
         assert not result.is_error
         assert json.loads(d.journal.commands(tid)[0]["payload"])["tool_use_id"] == prompt_id
         assert d.journal.commands(tid)[0]["status"] == "settled"
+        op = d.ops.list()["operations"][0]
+        assert op["actor"] == "legacy-mcp-answer" and op["entry"] == "mcp"
+        assert op["external_refs"]["resolved_params"] == {"tool_use_id": prompt_id}
+        assert op["external_refs"]["admission_binding"]["task_id"] == tid
         assert len(writes(mock)) == 1
     finally:
         await fleet.close()

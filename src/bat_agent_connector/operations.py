@@ -48,6 +48,7 @@ ALLOWED = {
 }
 UNCERTAIN_RETRY_S = (30.0, 60.0, 120.0, 300.0, 600.0)
 NO_KEY_PREFIX = "batc:nokey:"
+LEGACY_SESSION_ACTIONS = frozenset({"session.send", "session.answer", "session.interrupt"})
 
 
 class AmbiguousOutcome(Exception):
@@ -419,14 +420,14 @@ class OperationService:
 
     # ------------------------------------------------------------------ create / cancel
     def _prepare_create(self, principal, *, action, target=None, params=None, preconditions=None,
-                        idempotency_key, _legacy_interrupt=False):
+                        idempotency_key, _legacy_session=False):
         """Validate caller intent and replay before any asynchronous compatibility resolution."""
         adef = self.actions.get(action)
         if adef is None:
             raise OperationError("UNKNOWN_ACTION", f"unknown action {action!r}", 422)
         if not principal.allows(adef.scope):
             raise OperationError("FORBIDDEN", f"{action} needs the {adef.scope!r} scope", 403)
-        no_key = _legacy_interrupt and action == "session.interrupt" and idempotency_key is None
+        no_key = _legacy_session and action in LEGACY_SESSION_ACTIONS and idempotency_key is None
         if not no_key and (not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key.strip()) <= 200):
             raise OperationError("IDEMPOTENCY_KEY_REQUIRED", "idempotency_key must be 1-200 characters", 422)
         if isinstance(idempotency_key, str) and idempotency_key.strip().startswith(NO_KEY_PREFIX):
@@ -453,21 +454,32 @@ class OperationService:
 
     def create(self, principal: Principal, *, action: str, target: dict | None = None, params: dict | None = None,
                preconditions: dict | None = None, idempotency_key: str | None, entry: str = "http",
-               _legacy_interrupt: bool = False, _resolved_target: dict | None = None) -> tuple[dict, bool]:
+               _legacy_session: bool = False, _resolved_target: dict | None = None,
+               _resolved_params: dict | None = None) -> tuple[dict, bool]:
         """Persist intent. Private compatibility arguments are never accepted from HTTP/RPC bodies."""
         adef, target, params, preconditions, key, request_hash, existing = self._prepare_create(
             principal, action=action, target=target, params=params, preconditions=preconditions,
-            idempotency_key=idempotency_key, _legacy_interrupt=_legacy_interrupt)
+            idempotency_key=idempotency_key, _legacy_session=_legacy_session)
         if existing:
             return existing, False
-        if _resolved_target is not None and not (_legacy_interrupt and action == "session.interrupt"):
-            raise ValueError("resolved targets are limited to the legacy interrupt adapter")
-        binding = adef.admit(self, principal, _resolved_target or target, params, preconditions) if adef.admit else None
+        if (_resolved_target is not None or _resolved_params is not None) and not (
+                _legacy_session and action in LEGACY_SESSION_ACTIONS):
+            raise ValueError("resolved inputs are limited to the legacy session adapter")
+        if _resolved_params is not None and (action != "session.answer" or set(_resolved_params) != {"tool_use_id"}):
+            raise ValueError("only the legacy answer adapter may bind an observed pending prompt")
+        # Ordinary admission may enrich persisted params with server-only authority (cleanup).
+        # Only a legacy answer needs a separate view: its observed prompt is stored in refs,
+        # never added to the caller's literal params or request hash.
+        admission_params = params if _resolved_params is None else {**params, **_resolved_params}
+        binding = adef.admit(self, principal, _resolved_target or target,
+                            admission_params, preconditions) if adef.admit else None
         operation_id = "op_" + uuid.uuid4().hex
         key = key if key is not None else NO_KEY_PREFIX + operation_id
         refs = {"admission_binding": binding} if binding else {}
         if _resolved_target is not None:
             refs["resolved_target"] = _resolved_target
+        if _resolved_params is not None:
+            refs["resolved_params"] = _resolved_params
         now = time.time()
         with self.journal.tx():
             self.db.execute("""INSERT INTO operations(operation_id,actor,entry,idem_key,request_hash,action,target,

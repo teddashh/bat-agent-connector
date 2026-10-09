@@ -7,7 +7,7 @@
 ## 分段交付與審查決議
 
 - **Part A（本次）**：Task Service authority。共用 coordinator gate 先套到現有 ActionDefs 與低階 service/lifecycle 路徑（包括 client-resume、permissions、approve-pending／deferred raise、relay）；task 操作連到原 commands 與同交易回執；canonical owner lock、owner-first 初始化與 A07／A09／task A05 測試。
-- **Part B（分段交付）**：第一個切片是 legacy `session_interrupt`／CLI `interrupt` 的中央 operation 轉接、無 key sentinel／讀取投影、完整結果及未知值 null。其他 session／orchestration 轉接、外部 steps 拆分與 A01／A05／A08 全入口驗收仍待後續。
+- **Part B（分段交付）**：legacy interrupt 第一片之後，本片延伸 send／continue／answer 的中央 operation 轉接、無 key sentinel／讀取投影、完整結果及未知值 null。其餘 session／orchestration 轉接、外部 steps 拆分與 A01／A05／A08 全入口驗收仍待後續。
 - Part A 不改 `OperationService.create` 的 admission 順序或 operations schema。policy admission 拒絕仍 403、沒有 operation；執行中才發現的拒絕仍為 failed operation。
 - Part B 無 key 呼叫在原 NOT NULL 欄位保存 `batc:nokey:<operation_id>`：只作唯一的儲存值，絕不與另一要求去重。拒絕 client key 使用 `batc:nokey:` 前綴（422）；所有讀取投影 `idempotency_key: null`、`idempotency_enabled: false`。**不 rebuild operations，不需此項 schema migration**。
 - 舊 task control 沒有 key 的 RPC 在 Part A 使用每次呼叫獨立的 request key，不提供跨呼叫去重；Part B 才統一 no-key sentinel 與投影。明確給 key 的 task actions 現在即須符合 A05。
@@ -36,7 +36,36 @@ lost ACK 只以同一 session 的明確 `isStreaming=false` 結清原 step，mis
 
 CLI 共用 read-only 分類在 daemon 呼叫與輸入檔讀取之前拒絕 mutations（含 integration preview 的 Git
 準備、operations cancel/resume、task reconcile、connector-data 修改與本機初始化寫入），保留純 read／preview。
-`tests/test_interrupt_operations.py` 驗證本切片；不宣稱其他 legacy tools 已轉接，task cleanup Part B 仍未實作。
+`tests/test_interrupt_operations.py` 驗證 interrupt 第一片；send／continue／answer 的接續見下節，task cleanup Part B 仍未實作。
+
+### Part B 後續切片：send／continue／answer
+
+本次延伸同一產品的中央操作路徑；Tauri 計畫是 client/UI 方向，不另建產品或操作帳本。
+Legacy MCP／CLI 的 send、continue 使用既有 `session.send`；answer 使用 `session.answer`。
+沿用 interrupt 的 scope/confirm/tier、原 actor、named key replay 與真正 no-key 語意，無 daemon
+autostart 或 direct Fleet fallback。`message_id`、queue、answers、permission、deny_message、
+dont_ask_again 都保留；message ID 是 BAT prompt 身分，不代替中央 operation key。
+
+輸入型別在 admission 前查核；literal session selector 與 caller params 仍參與原 hash。
+中央唯讀解析完整 ID／至少六字元唯一 prefix，保存 `resolved_target`；執行和 service 重讀
+都要求完整 ID 精確相等，不能讓消失的 ID 變成另一 session 的 prefix。
+Legacy answer 可省 tool_use_id：中央須讀到對應種類的正面 pending evidence，將固定 ID
+存入 `external_refs.resolved_params`，與 task admission binding／operation 同交易提交。
+Client 未提供的 ID 不改寫原 params/hash；named-key replay 不重新觀察 prompt，執行前
+若 prompt 改變則拒絕。Raw HTTP ActionDef 仍要求明確 tool_use_id。矛盾／缺失的 prompt
+evidence 不猜測；permission 的 dont_ask_again 仍走既有 confinement policy。
+Legacy 的可選 false defaults 在 adapter 省略；跨 HTTP／MCP／CLI key replay 仍比較完全相同的
+canonical envelope，不宣稱 raw HTTP 的 omitted／explicit false 等不同 params 都會語意去重。
+
+相容結果保留完整 service receipt，加 operation ID/status/error/key 投影；operation_status_reason
+保留已保存的 redacted 原因，operate-only caller 不須另有 observe scope 才知道拒絕或未知的說明。未知 acceptance、
+queue、answer 結果為 null；lost ACK 只讀回固定 prompt/turn，Codex 弱游標不冒充 exact echo。
+Task Service 仍擁有原 command、pause/version/binding/final frame gate，不增加第二個 writer。
+B1 的 existing-operation authorization hook 保留於 `_prepare_create`，不因共用 adapter 跳過。
+
+Permissions 的 mode 切換與可能多個 BAT frames 尚無 canonical ActionDef；resume、start、
+relay、fanout/failover 是不同副作用與 ownership 合約。此片不把它們假裝成 send/answer，
+也不宣稱所有 legacy mutation 已統一。各自先審 action/step/readback 合約再接入。
 
 ## Part A 實作對照
 
@@ -124,9 +153,9 @@ Coordinator gate：`G`＝下面的 task-owned runtime gate；`TC`＝原 task 控
 | `session_relay`（非 dry run） | `relay`（非 `--dry-run`） | — → OP | **新增** `session.relay` | operate；實際建新 session 另需 start | S／N；來源只讀 | G；自動挑選仍排除 task-owned |
 | `session_start` | `start` | — → OP | **新增** `session.start` | start | N | 不接受 client 自報 task owner；由 task.submit 建 task session |
 | `worktree_merge` | `merge` | — → OP | **新增** `worktree.merge` | integrate | W，含目的端 | F |
-| `worktree_remove` | `remove-worktree` | — → OP | **新增** `worktree.remove` | operate | W | F |
+| `worktree_remove` | `remove-worktree` | —；`LEGACY_WORKTREE_REMOVE_DISABLED` | legacy 已停用；不新增平行 cleanup action，改走 reviewed cleanup.apply | cleanup 的既有 scope | 原 confirm/tier/manual/task 檢查後拒絕 | reviewed cleanup authority |
 | `session_failover`（單個／`all_exhausted`，非 dry run） | `failover`（非 `--dry-run`） | — → OP | **新增** `session.failover` | start；handoff 另需 operate | S／N；force 不能取代 policy／停筆證據 | F；task 中途 failover 保持拒絕 |
-| `session_cleanup`（`dry_run=false`） | `cleanup --apply` | —；409 `LEGACY_CLEANUP_DISABLED` | 不新增 action；apply 由 cleanup package 封鎖，本包不包裝 | — | apply 不寫 BAT／Git；dry run 保持唯讀 | reviewed cleanup 交 cleanup package 的 `cleanup_preview`／`cleanup_apply`／`cleanup_restore` |
+| `session_cleanup`（`dry_run=false`） | `cleanup --apply` | —；409 `LEGACY_CLEANUP_DISABLED` | 不新增 action；apply 由 cleanup package 封鎖，本包不包裝 | — | apply 不寫 BAT／Git；dry run 保持唯讀 | 使用現有 `cleanup_preview`／`cleanup_apply`；restore 是 optional backlog，尚無註冊 API/MCP tool |
 | `session_record_verification` | `record-verification` | — → OP | **新增** `session.record_verification` | operate | 只寫 verification.json；讀乾淨候選，不授權外部 mutation | task-owned 拒絕外部證詞取代受信 verifier |
 | `fanout_plan_session` | `fanout-plan` | — → OP | **新增** `fanout.plan` | start | N；新 planner 自有 worktree | 不改來源 task；保持原 planner，不新增規劃機制 |
 | `fanout_from_plan`（非 dry run） | `fanout-start`（非 `--dry-run`） | — → OP | **新增** `fanout.start` | start | 來源只讀、逐項 N；不能經 legacy apply 清理 planner | 保留 #38 的 confirmed all-success stop-only 與容量 retirement；planner worktree 留給 reviewed cleanup；不插入來源 task commands |
@@ -224,7 +253,7 @@ Operation cancel/resume 保留原 endpoints、authorization 與 events；不新�
 | relay | host、session_id、workspace、text、request_fanout、max_items、sent、started、read_only、read_only_code、no_session、quota_stopped、busy、replaced、next、result 與 turn 欄位按原分支保留。首次選定目標即固定；task gate 拒絕不能用 start_if_missing 偷換成另一個 task writer。 |
 | start | started、session_id、agent_preset、workspace、worktree_path、branch、source_branch、base_branch、base_commit、tab、prompt_sent、message_id、permissions、isolation、note 與原失敗結果。start 成功但 prompt 不明時保留 started=true，prompt_sent 不宣稱 true。 |
 | merge | 原 `_summ` report、merged_now、result、main_checkout_clean_after、reason、worktree_dirty_files；不得把 refusal 報成 merged_now=true。 |
-| remove-worktree | 原 report、removed、branch_deleted、rehydrated、note／reason／dirty files；delete_branch／allow_unmerged／discard_uncommitted 均保存，仍須原個別授權與安全 gate。 |
+| remove-worktree | Legacy 停用並回 `LEGACY_WORKTREE_REMOVE_DISABLED`，不產生刪除成功回執；flags 不繞過拒絕。改用 reviewed cleanup 的固定 preview、operation 與 receipts。 |
 | failover | 單項 old_session_id／new_session_id、cwd、branch、same_worktree、prompt_sent、message_id、error、skipped 等原欄位；bulk 的 failovers、count、exhausted_found、skipped_read_only、truncated_by_max_start_per_call。原 session-level「already failed over」檢查保留，但不能用它代替 operation 參數衝突檢查。 |
 | cleanup（只限 dry run） | host、dry_run、jev、decisions、counts、escalation_summary、push；保留唯讀的 MERGE_AND_CLEAN／CLEAN_ONLY／KEEP／ESCALATE 決策預覽。apply 維持 409 `LEGACY_CLEANUP_DISABLED`，沒有本包的 operation／effect 投影。 |
 | record-verification | verification.record 的完整證詞、verified_candidate；operation actor 取驗證身分。這是外部證詞，不能變成 Task Service 的 observed_verification。 |
@@ -597,6 +626,6 @@ Phase 1 與 Phase 2 報告都跑 `uv run ruff check .`、`uv run pytest -q`；�
 - `import-bat --output PATH --force` 保留 install-time local command；它在 owner 存在前執行、只寫本機 config，不是 fleet action，本包不改。
 - operation cancel/resume 自身的 control operations，以及 api-token issue/revoke operations 不在本包；原 endpoints/RPC 已授權、留事件或立即完成短 connector-data 修改，不觸及 BAT/Git/provider。
 - 不新增 task planner、recipe/model 政策、第二個 task database、分散式 owner lease 或人工資源接管；不恢復已停用的 task 中途 failover。
-- 計畫 §23 的 reviewed cleanup 由 cleanup package 的 `cleanup_preview`／`cleanup_apply`／`cleanup_restore` 負責。它以 409 `LEGACY_CLEANUP_DISABLED` 停用 legacy `session_cleanup` apply；本包不包裝該 apply，也不建立另一個 cleanup writer。
+- 計畫 §23 的 reviewed cleanup 使用已註冊的 `cleanup_preview`／`cleanup_apply`。Restore 是 optional backlog，尚無註冊 API/MCP tool。`LEGACY_CLEANUP_DISABLED` 停用 legacy `session_cleanup` apply，`LEGACY_WORKTREE_REMOVE_DISABLED` 停用直接 remove；本包不包裝這些 apply，也不建立另一個 cleanup writer。
 - BAT GUI 可直接改自己的 session，connector 的鎖不能約束它；不宣稱 BAT 提供跨系統原子控制或 Codex exactly-once receipt。workspace:save race、host sandbox/ACL 與完整 A10 仍按原設計界定。
 - 不變更遠端部署、Fleet Kit、live Goose gate、人工 snapshot／附件與整合來源擴充；正式 owner 升級與備份由部署者另行執行。

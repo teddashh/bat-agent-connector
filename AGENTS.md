@@ -1,9 +1,12 @@
 # Repository guidance
 
-Read [the v2 product decisions](docs/product/realignment-v2.md),
+Read [the shared product decisions](docs/product/realignment-v2.md),
 [implementation status](docs/product/implementation-status.md), and the applicable
-`docs/design/` contract before changing behavior. The October 8 Tauri v2 plan supersedes
-the earlier product scope; historical handoffs describe their own commits, not current requirements.
+`docs/design/` contract before changing behavior. The owner clarified that the two
+plans describe one product with revised UI direction, not separate feature releases.
+Use the October 8 Tauri plan for the shared frontend/native direction and its explicit
+architecture decisions; preserve the shared feature backlog. Historical handoffs
+describe their own commits, not current requirements.
 
 - Keep Python Connector / Task Service as the central authority. Tauri is the desktop
   client; native code owns local windows, credentials and Fleet transport only.
