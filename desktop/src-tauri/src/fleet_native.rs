@@ -400,6 +400,64 @@ pub fn with_stopped_fleet<T>(
     )
 }
 
+/// Missing installation configuration grants no ownership. Retain both account-wide mutexes
+/// and prove independent absence immediately before Quit/installation; never stop a process here.
+pub fn with_unconfigured_fleet_absent<T>(
+    path: &Path,
+    effect: impl FnOnce() -> std::result::Result<T, String>,
+) -> std::result::Result<T, String> {
+    struct Absent {
+        path: PathBuf,
+        roaming: PathBuf,
+        login: bat_fleet_core::process_adapter::LoginIdentity,
+    }
+    impl crate::fleet_lifecycle::AbsencePlatform for Absent {
+        type Launcher = LauncherMutex;
+        type Monitor = bat_fleet_core::windows::MonitorMutex;
+        fn launcher(&mut self) -> std::result::Result<Self::Launcher, String> {
+            let guard = LauncherMutex::try_acquire()
+                .map_err(String::from)?
+                .ok_or("LAUNCHER_BUSY")?;
+            if guard.login() != &self.login {
+                return Err("OTHER_LOGIN_OWNER".into());
+            }
+            Ok(guard)
+        }
+        fn monitor(&mut self) -> std::result::Result<Self::Monitor, String> {
+            let guard = bat_fleet_core::windows::MonitorMutex::try_acquire()
+                .map_err(String::from)?
+                .ok_or("FLEET_STOP_UNCONFIRMED")?;
+            if guard.login() != &self.login {
+                return Err("OTHER_LOGIN_OWNER".into());
+            }
+            Ok(guard)
+        }
+        fn verify_absence(&self) -> std::result::Result<(), String> {
+            if bat_fleet_core::windows::current_login().map_err(String::from)? != self.login
+                || directory("APPDATA").map_err(String::from)? != self.roaming
+            {
+                return Err("OTHER_LOGIN_OWNER".into());
+            }
+            bat_fleet_core::unconfigured::verify_absence(
+                &self.path,
+                &self.roaming,
+                &WindowsMonitorObservation,
+            )
+            .map_err(String::from)
+        }
+    }
+    if !path.is_absolute() || !bat_fleet_core::installation::local_path(path) {
+        return Err("INSTALLATION_INVALID".into());
+    }
+    let mut platform = Absent {
+        // canonical_local requires an existing file; absence is the exact proof below.
+        path: path.to_path_buf(),
+        roaming: directory("APPDATA").map_err(String::from)?,
+        login: bat_fleet_core::windows::current_login().map_err(String::from)?,
+    };
+    crate::fleet_lifecycle::with_absent(&mut platform, effect)
+}
+
 /// Read-only fixed login policy before constructing Tauri or enforcing a single instance.
 pub fn login_options(path: &Path) -> Result<(bool, bool)> {
     let c = Context::load(Snapshot::load(path)?)?;

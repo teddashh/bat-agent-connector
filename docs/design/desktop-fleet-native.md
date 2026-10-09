@@ -83,6 +83,17 @@ window close or central shutdown is available. Unconfirmed shutdown keeps Dashbo
 open with an actionable error. A previously observed installation that is deleted
 cannot be mistaken for a never-configured Dashboard.
 
+Missing `fleet.json` also requires independent absence proof after a Dashboard
+restart. `with_unconfigured_fleet_absent(path, effect)` holds the same Launcher
+and Monitor mutexes, checks the fixed account launch journal and both BAT data
+directories, and refuses unknown process enumeration or unrecorded legacy Fleet
+monitor candidates. A completed launch journal is allowed only when its exact child
+is proven absent. Any remaining monitor/tunnel ownership or intent file requires
+restoring the trusted configuration for ordinary recovery; this path never deletes
+evidence or stops a process. It rechecks that configuration is absent immediately
+before the effect and keeps both mutexes held through the effect. The fresh
+Dashboard-only case does not require a BAT executable or create Fleet state.
+
 ## Verification limits
 
 Tests use temporary preferences/configuration, injected ownership/receipts, synthetic
