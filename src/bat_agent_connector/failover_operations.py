@@ -273,7 +273,13 @@ async def resolve(ops, target, params, sid, *, operation_id, index):
     return plan
 
 
-def guard(ops, plan, *, reserved, ctx=None):
+def _carrier_registry_ids(plan):
+    return {r['session_id'] for r in _rows() if r.get('host') == plan['host']
+            and r.get('session_id') != plan['session_id']
+            and resource_policy.norm(r.get('worktree_path') or r.get('cwd')) == resource_policy.norm(plan['cwd'])}
+
+
+def guard(ops, plan, *, reserved, ctx=None, consumers=None):
     fleet, host, sid = ops.context['fleet'], plan['host'], plan['source_session_id']
     if ctx:
         ctx.check_cancel()
@@ -283,6 +289,10 @@ def guard(ops, plan, *, reserved, ctx=None):
         raise StepFailed('FAILOVER_POLICY_CHANGED', 'fixed host profile/permission policy changed')
     task_control.refuse_owned(fleet, host, sid)
     task_control.refuse_owned(fleet, host, plan['session_id'])
+    from .task_cleanup import owners
+    task_ids, _, _ = owners(ops, {'host': host, 'path': plan['cwd'], 'session_id': sid}, entries=_rows())
+    if task_ids:
+        raise StepFailed('TASK_OWNED_CONTROL_REQUIRED', 'a durable task owns this carrier; use the Task Service')
     expected = dict(plan['registry'])
     if reserved:
         row = registry.get(host, plan['session_id']) or {}
@@ -297,6 +307,13 @@ def guard(ops, plan, *, reserved, ctx=None):
             expected.update(status='superseded', superseded_by=plan['session_id'])
     if _source_record(host, sid) != expected:
         raise StepFailed('FAILOVER_BINDING_CHANGED', 'original source incarnation changed')
+    if consumers is not None:
+        if _carrier_registry_ids(plan) - consumers.keys():
+            raise StepFailed('FAILOVER_SHARED_CARRIER', 'a new carrier consumer has no stopped-writer proof')
+        for other, binding in consumers.items():
+            task_control.refuse_owned(fleet, host, other)
+            if _source_record(host, other) != binding:
+                raise StepFailed('FAILOVER_SHARED_CARRIER', 'a shared carrier consumer changed after its idle read')
     from .cleanup import guard as cleanup_guard
     cleanup_guard(host, session_id=sid, path=plan['cwd'], branch=plan['branch'])
     cleanup_guard(host, session_id=plan['session_id'], path=plan['cwd'], branch=plan['branch'])
@@ -338,10 +355,10 @@ async def identity(ops, plan, read, *, reserved, ctx=None):
             raise StepFailed('FAILOVER_SOURCE_CHANGED', 'original BAT worktree binding changed')
     consumers = {t['id'] for t in doc['terminals'] if t.get('id') and
                  resource_policy.norm(t.get('worktreePath') or t.get('cwd')) == resource_policy.norm(plan['cwd'])}
-    consumers.update(r['session_id'] for r in _rows() if r.get('host') == plan['host'] and
-                     resource_policy.norm(r.get('worktree_path') or r.get('cwd')) == resource_policy.norm(plan['cwd']))
+    consumers.update(_carrier_registry_ids(plan))
     consumers.discard(plan['session_id'])
     consumers.add(plan['source_session_id'])
+    bindings = {sid: _source_record(plan['host'], sid) for sid in consumers}
     for sid in sorted(consumers):
         task_control.refuse_owned(ops.context['fleet'], plan['host'], sid)
         if sid != plan['source_session_id']:
@@ -353,7 +370,8 @@ async def identity(ops, plan, read, *, reserved, ctx=None):
                     or row.get('start_uncertain') or row.get('handoff_status') in {'pending', 'uncertain'}):
                 raise StepFailed('FAILOVER_SHARED_CARRIER', 'another manual, unknown or unsettled consumer shares this carrier')
         await _idle(read, sid, saved=plan if sid == plan['source_session_id'] else None)
-    guard(ops, plan, reserved=reserved, ctx=ctx)
+    guard(ops, plan, reserved=reserved, ctx=ctx, consumers=bindings)
+    return bindings
 
 
 async def _invoke(ctx, plan, name, channel, params, *, handoff=False):
@@ -362,6 +380,7 @@ async def _invoke(ctx, plan, name, channel, params, *, handoff=False):
     base = {'actor': ctx.actor, 'tool': 'api:session.failover', 'host': host, 'session_id': sid}
     ctx.set_refs(**{name + '_sent': False})
     sent = False
+    bindings = None
     def fence():
         nonlocal sent
         # Mark conservatively before either durable write. A partial local failure
@@ -373,11 +392,12 @@ async def _invoke(ctx, plan, name, channel, params, *, handoff=False):
             registry.update(host, sid, start_sent=True)
         ctx.set_refs(**{name + '_sent': True})
     async def final():
+        nonlocal bindings
         if not handoff:
             # Trust verification can await host I/O. Read the final carrier and
             # stopped-writer evidence after it, then finish with synchronous gates.
             await confinement.guard_start_frame(fleet, host, plan['confinement'])
-        await identity(ctx.service, plan, client.guard_read, reserved=True, ctx=ctx)
+        bindings = await identity(ctx.service, plan, client.guard_read, reserved=True, ctx=ctx)
         if handoff:
             meta = await _idle(client.guard_read, sid)
             confirmed = _receipt(ctx, name.removesuffix('handoff') + 'confirm')
@@ -385,13 +405,17 @@ async def _invoke(ctx, plan, name, channel, params, *, handoff=False):
                 raise StepFailed('FAILOVER_RUNTIME_CHANGED', 'successor runtime differs from its original confirmation')
             confinement.guard_start_cwd({'cwd': plan['cwd']}, meta)
             confinement.ensure_confirmed(plan['confinement'], meta, allow_unknown=False)
-        guard(ctx.service, plan, reserved=True, ctx=ctx)
+        gate()
+    def gate():
+        if bindings is None:
+            raise StepFailed('FAILOVER_WRITER_UNPROVEN', 'final carrier consumer evidence is unavailable')
+        guard(ctx.service, plan, reserved=True, ctx=ctx, consumers=bindings)
     try:
         audit.check_rate(host, sid, initial_task_send=handoff)
         audit.record(**base, channel=channel, phase='attempt', operation_id=ctx.operation_id)
         grant = await resource_policy.authorize_shared_session(fleet, host, sid, plan['terminal'])
         result = await client.invoke(channel, params, grant=grant, retry_on_disconnect=False,
-            before_frame=final, before_send=lambda: guard(ctx.service, plan, reserved=True, ctx=ctx), on_transport=fence)
+            before_frame=final, before_send=gate, on_transport=fence)
         audit.record(**base, channel=channel, phase='result', ok=True)
         return result
     except (Exception, asyncio.CancelledError) as exc:
