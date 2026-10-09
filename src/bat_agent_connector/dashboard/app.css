@@ -76,6 +76,14 @@ textarea { width: 100%; min-height: 80px; resize: vertical; }
 .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.capture { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--line); }
+.capture summary { cursor: pointer; font-weight: 600; }
+.capture .muted { font-size: 14px; }
+.capture-fields { display: flex; flex-wrap: wrap; gap: 8px; }
+.capture-fields label { flex: 1 1 220px; min-width: 0; }
+.capture-fields input, .capture-fields select { display: block; width: 100%; }
+.capture .kv { grid-template-columns: minmax(0, 120px) minmax(0, 1fr); }
+.capture-choice { display: flex; align-items: center; gap: 8px; min-height: 44px; }
 .fleet-choice { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; }
 .chip.info { color: var(--info); border: 1px solid var(--info); background: transparent; }
 .note.ok { border-left-color: var(--ok); } .note.warn { border-left-color: var(--warn); }
