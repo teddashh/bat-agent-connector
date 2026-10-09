@@ -74,6 +74,11 @@ for (const native of [false, true]) {
       await expect(page.getByRole('link', {name: 'Review delivery'})).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.screenshot({path: `test-results/attention-${transport}-${locale}-${width}.png`, fullPage: true});
+      await page.goto('/dashboard/#/item/' + fixture.data.items[0].work_item_id);
+      await page.getByRole('button', {name: locale === 'zh-TW' ? '標記此版本已讀' : 'Mark this version read'}).click();
+      await expect(page.locator('.reading-state')).toContainText(locale === 'zh-TW' ? '此版本已讀' : 'This version is read');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({path: `test-results/reading-${transport}-${locale}-${width}.png`, fullPage: true});
     });
   }
 }

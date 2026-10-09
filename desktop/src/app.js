@@ -2428,6 +2428,7 @@ async function viewWorkItem(main, wid) {
     renderQueue = work; return work;
   };
   const renderNow = async (fromEvent = false) => {
+    if (!panel.isConnected) return;
     const opens = drawerOpens;
     let data;
     try { data = await api("GET", `/work-items/${wid}`); }
