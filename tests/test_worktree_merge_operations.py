@@ -162,7 +162,7 @@ async def test_positive_managed_idle_and_all_consumers_required(daemon, mock, ca
     await daemon.fleet.close()
 
 
-@pytest.mark.parametrize('change', ['task', 'registry', 'new_neighbor', 'head', 'dirty'])
+@pytest.mark.parametrize('change', ['task', 'registry', 'new_neighbor', 'head', 'dirty', 'owner'])
 async def test_final_awaited_reads_followed_by_synchronous_owner_gate(daemon, mock, carriers, monkeypatch, change):
     origin, source = carriers
     original = merge.proof
@@ -172,7 +172,9 @@ async def test_final_awaited_reads_followed_by_synchronous_owner_gate(daemon, mo
         p = await original(*args, **kwargs)
         count += 1
         if count == 3:  # final frame's last asynchronous proof
-            if change == 'task':
+            if change == 'owner':
+                monkeypatch.setattr(daemon.journal, 'owner_valid', lambda: False)
+            elif change == 'task':
                 t = daemon.journal.submit(project='p', host='h1', workspace='merge-fixture', original_words='new', idempotency_key='new-task')
                 daemon.journal.db.execute('UPDATE tasks SET session_id=?,paused=1 WHERE task_id=?', (SID, t['task_id']))
             elif change == 'registry':
@@ -293,6 +295,8 @@ def test_helper_checks_status_process_failure_and_timeout(tmp_path, monkeypatch)
     class ProcessModule:
         @staticmethod
         def Popen(*args, **kwargs):
+            assert args[0][:5] == ['git', '--no-optional-locks', '-c', 'core.hooksPath=/dev/null', '-c']
+            assert kwargs['env']['GIT_OPTIONAL_LOCKS'] == '0'
             return Failing()
     monkeypatch.setattr(helper, 'subprocess', ProcessModule)
     with pytest.raises(ValueError, match='MERGE_GIT_UNAVAILABLE'):
@@ -308,3 +312,168 @@ def test_helper_checks_status_process_failure_and_timeout(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match='MERGE_GIT_UNAVAILABLE'):
         helper.git(str(tmp_path), 'status', '--porcelain=v1')
     assert process.killed
+
+
+async def test_default_headless_session_resolves_without_inventing_tabs(daemon, mock, carriers):
+    mock.ws_doc['terminals'] = [t for t in mock.ws_doc['terminals'] if t.get('id') != SID]
+    before = json.dumps(mock.ws_doc)
+    out = await create(daemon, target={'host': 'h1', 'session_id': 'merge-managed'})
+    assert out['status'] == 'succeeded', out
+    assert out['result']['session_id'] == SID and out['result']['merged_now'] is True
+    assert json.dumps(mock.ws_doc) == before
+    assert [f['channel'] for f in api.write_frames(mock)] == ['worktree:merge']
+    await daemon.fleet.close()
+
+
+@pytest.mark.parametrize('bad', ['missing_runtime', 'changed_runtime', 'missing_preset'])
+async def test_headless_requires_positive_registry_and_runtime_binding(daemon, mock, carriers, bad):
+    mock.ws_doc['terminals'] = [t for t in mock.ws_doc['terminals'] if t.get('id') != SID]
+    if bad == 'missing_runtime':
+        del mock.metas[SID]
+    elif bad == 'changed_runtime':
+        mock.metas[SID]['cwd'] = str(carriers[0])
+    else:
+        registry.update('h1', SID, agent_preset=None)
+    out = await create(daemon)
+    assert out['status'] == 'failed' and not api.write_frames(mock), out
+    await daemon.fleet.close()
+
+
+async def test_outside_linked_worktree_shared_git_directory_is_refused(daemon, mock, carriers, tmp_path):
+    git(carriers[0], 'worktree', 'add', '-b', 'other', str(tmp_path / 'outside-consumer'))
+    out = await create(daemon)
+    assert out['status'] == 'failed' and not api.write_frames(mock), out
+    await daemon.fleet.close()
+
+
+@pytest.mark.parametrize('program', ['clean', 'process', 'include', 'multiline', 'submodule'])
+async def test_git_read_proof_refuses_repository_filter_programs_and_submodules(daemon, mock, carriers, tmp_path, program):
+    import shlex
+    origin, source = carriers
+    marker = tmp_path / 'filter-must-not-run'
+    if program == 'submodule':
+        git(source, 'update-index', '--add', '--cacheinfo', '160000,' + git(origin, 'rev-parse', 'HEAD') + ',nested')
+    else:
+        (source / '.gitattributes').write_text('feature filter=proof\n')
+        git(source, 'add', '.gitattributes')
+        git(source, 'commit', '-m', 'fixture attributes')
+        # Install after the commit; only the helper's status could execute it.
+        command = 'touch ' + shlex.quote(str(marker)) + '; cat'
+        if program == 'include':
+            config = tmp_path / 'included-filter.conf'
+            config.write_text('')
+            git(source, 'config', '--file', str(config), 'filter.proof.clean', command)
+            git(source, 'config', 'include.path', str(config))
+        else:
+            git(source, 'config', 'filter.proof.' + ('clean' if program == 'multiline' else program),
+                '\n' + command if program == 'multiline' else command)
+        (source / 'feature').write_text('other result')  # same size as "fixed result"
+    out = await create(daemon)
+    assert out['status'] == 'failed' and out['error_code'] == 'MERGE_GIT_UNAVAILABLE', out
+    assert not marker.exists() and not api.write_frames(mock)
+    await daemon.fleet.close()
+
+
+async def test_pending_task_ssh_creation_before_carrier_projection_blocks_merge(daemon, mock, carriers, monkeypatch):
+    task = daemon.journal.submit(project='p', host='h1', workspace='merge-fixture', original_words='work', idempotency_key='task')
+    daemon.journal.db.execute("UPDATE tasks SET state='dispatching',base_branch='main' WHERE task_id=?", (task['task_id'],))
+    task = daemon.journal.get(task['task_id'])
+    daemon.journal.command(task['task_id'], 'start_lead', 'pending-new-sid', {'agent': 'claude'}, 'start')
+    entered, finish = asyncio.Event(), asyncio.Event()
+    async def held_ssh(*args, **kwargs):
+        entered.set()
+        await finish.wait()
+        raise ValueError('fixture stops before external Git effect')
+    monkeypatch.setattr(daemon.adapter, '_ssh_script', held_ssh)
+    pending = asyncio.create_task(daemon.adapter._ensure_external_worktree(task))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert daemon.journal.get(task['task_id'])['external_worktree_path'] is None
+        out = await create(daemon)
+        assert out['status'] == 'failed' and out['error_code'] == 'MERGE_WRITER_UNPROVEN', out
+        assert not api.write_frames(mock) and not merge._document().get('carrier_writers')
+    finally:
+        finish.set()
+        with pytest.raises(ValueError, match='fixture stops'):
+            await pending
+        await daemon.fleet.close()
+
+
+@pytest.mark.parametrize('first', ['http', 'rpc', 'mcp', 'cli'])
+async def test_actual_adapters_replay_original_key_after_tier_change(served, mock, carriers, monkeypatch, capsys, first):
+    from bat_agent_connector import cli
+    from bat_agent_connector.mcp_server import build_server
+    from tests.test_interrupt_operations import mcp_result, rpc
+    d, port = served
+    token = api.token(d, P.actor, 'observe', 'integrate')
+    monkeypatch.setenv('BATC_TASK_URL', f'http://127.0.0.1:{port}/rpc')
+    monkeypatch.setenv('BATC_API_TOKEN', token)
+    monkeypatch.setattr(cli, 'load_config', lambda _: d.fleet.config)
+    server, local = build_server(d.fleet.config, principal_only=True)
+    params = {'host': 'h1', 'session_id': SID, 'confirm': True, 'idempotency_key': 'merge-key'}
+    async def call(door):
+        if door == 'http':
+            status, out = await api.http(port, 'POST', '/api/v1/operations', tok=token, body=intent())
+            assert status in {200, 202}, out
+            return out['operation']['operation_id']
+        if door == 'rpc':
+            status, out = await rpc(port, token, 'worktree_merge', params)
+            assert status == 200, out
+            out = out['result']
+        elif door == 'mcp':
+            out = await mcp_result(server, 'worktree_merge', params)
+        else:
+            rc = await asyncio.to_thread(cli.main, ['--json', 'merge', 'h1', SID, '--confirm', '--key', 'merge-key'])
+            assert rc == 0
+            out = json.loads(capsys.readouterr().out)
+        assert out['idempotency_key'] == 'merge-key'
+        return out['operation_id']
+    try:
+        oid = await call(first)
+        await settle_operations(d.ops)
+        assert d.ops.get(oid)['status'] == 'succeeded'
+        d.fleet.config.host('h1').orchestrate = False
+        d.ops.context['git_runner'] = None
+        for door in ('http', 'rpc', 'mcp', 'cli'):
+            assert await call(door) == oid
+        assert mock.channels().count('worktree:merge') == 1
+    finally:
+        await local.close()
+
+
+async def test_no_key_is_independent_and_scope_replay_controls_stay_original_actor(daemon, mock, carriers):
+    request = {'host': 'h1', 'session_id': SID, 'confirm': True}
+    first = await merge.legacy(daemon.ops, P, request, entry='rpc')
+    second = await merge.legacy(daemon.ops, P, request, entry='rpc')
+    assert first['operation_status'] == second['operation_status'] == 'succeeded'
+    assert first['operation_id'] != second['operation_id']
+    assert first['idempotency_key'] is second['idempotency_key'] is None
+    assert not first['idempotency_enabled'] and not second['idempotency_enabled']
+    assert mock.channels().count('worktree:merge') == 1  # second request truthfully observes already merged
+    op, _ = daemon.ops.create(P, **intent())
+    for caller in (api_auth.Principal(P.actor, frozenset({'observe'})), api_auth.Principal('different', P.scopes)):
+        with pytest.raises(OperationError, match='FORBIDDEN'):
+            daemon.ops.cancel(caller, op['operation_id'])
+    with pytest.raises(OperationError, match='IDEMPOTENCY_KEY_REQUIRED'):
+        daemon.ops.create(P, **intent(idempotency_key=None))
+    await settle_operations(daemon.ops)
+    await daemon.fleet.close()
+
+
+async def test_cli_failed_refusal_exits_nonzero_and_readonly_never_contacts_central(served, mock, carriers, monkeypatch, capsys):
+    from bat_agent_connector import cli
+    d, port = served
+    monkeypatch.setenv('BATC_TASK_URL', f'http://127.0.0.1:{port}/rpc')
+    monkeypatch.setenv('BATC_API_TOKEN', api.token(d, P.actor, 'integrate'))
+    monkeypatch.setattr(cli, 'load_config', lambda _: d.fleet.config)
+    mock.metas[SID]['isStreaming'] = True
+    args = ['--json', 'merge', 'h1', SID, '--confirm', '--key', 'cli-failed']
+    assert await asyncio.to_thread(cli.main, args) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out['operation_error_code'] == 'MERGE_WRITER_UNPROVEN'
+    assert await asyncio.to_thread(cli.main, args) == 1
+    assert json.loads(capsys.readouterr().out)['operation_id'] == out['operation_id']
+    count = d.ops.db.execute('SELECT COUNT(*) FROM operations').fetchone()[0]
+    assert await asyncio.to_thread(cli.main, ['--read-only', *args]) == 1
+    assert count == d.ops.db.execute('SELECT COUNT(*) FROM operations').fetchone()[0]
+    assert not api.write_frames(mock)

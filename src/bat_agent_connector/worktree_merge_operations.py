@@ -160,7 +160,17 @@ def _registry_consumers(host, roots):
 
 def _activity(ops, plan, own_op):
     from .cleanup import _consumers
+    from .task_cleanup import command_unresolved
     rows = [ops._decode(r) for r in ops.db.execute('SELECT * FROM operations')]
+    # base_branch task creation can be in SSH before its carrier path is projected.
+    # The durable start command and fixed workspace still precede that effect.
+    for row in ops.db.execute('SELECT * FROM tasks WHERE host=?', (plan['host'],)):
+        task = dict(row)
+        if task['workspace'] not in {plan['workspace_id'], plan['workspace_name']}:
+            continue
+        if any(command_unresolved(dict(c), task) for c in ops.db.execute(
+                "SELECT * FROM commands WHERE task_id=? AND kind IN ('start_lead','start_reviewer')", (task['task_id'],))):
+            raise StepFailed('MERGE_WRITER_UNPROVEN', 'an unresolved task start may already be creating a shared-repository worktree')
     for path in plan['roots']:
         item = {'host': plan['host'], 'path': path, 'kind': 'worktree', 'original_ids': list(plan['consumers']),
                 'consumers': [], 'reasons': [], 'registry': {}}
@@ -172,6 +182,8 @@ def _activity(ops, plan, own_op):
 def guard(ops, plan, *, ctx=None, reserved=False):
     if ctx:
         ctx.check_cancel()
+    if not getattr(ops.journal, 'owner_valid', lambda: False)():
+        raise StepFailed('MERGE_OWNER_LOST', 'central owner lease is no longer valid')
     fleet, host = ops.context['fleet'], plan['host']
     _tier(fleet, host)
     hc = fleet.config.host(host)
@@ -276,7 +288,9 @@ async def prepare(ctx):
     report['rehydrated'] = False
     plan = {'operation_id': ctx.operation_id, 'host': host, 'session_id': sid, 'source': source, 'destination': destination,
             'roots': [source, destination], 'profile_id': hc.profile_id, 'managed_roots': list(hc.managed_roots),
-            'workspace_id': tab['workspaceId'], 'terminal': {k: tab.get(k) for k in TERMINAL_FIELDS},
+            'workspace_id': tab['workspaceId'],
+            'workspace_name': next((w.get('name') for w in doc['workspaces'] if w.get('id') == tab['workspaceId']), None),
+            'terminal': {k: tab.get(k) for k in TERMINAL_FIELDS},
             'worktree': {k: wt.get(k) for k in ('worktreePath', 'branchName', 'sourceBranch')},
             'git': evidence, 'rehydrate': rehydrate, 'report': report}
     if evidence['source']['branch'] != wt['branchName'] or evidence['destination']['branch'] != wt['sourceBranch']:
@@ -295,10 +309,10 @@ async def prepare(ctx):
     plan['consumers'] = {other: _binding(host, other) for other in consumers}
     plan['runtime'] = {}
     for other in sorted(consumers):
-        terminal = plan['terminals'].get(other)
+        terminal = plan['terminals'].get(other) or service.registry_terminal(registry.get(host, other) or {})
         cls = resource_policy.classify(hc, other, terminal=terminal, entries=_document()['sessions'])
-        if cls.code or terminal is None:
-            raise StepFailed('MERGE_CONSUMER_UNPROVEN', 'every carrier consumer needs a managed live terminal binding')
+        if cls.code or service.agent_kind(terminal.get('agentPreset')) not in {'claude', 'codex'}:
+            raise StepFailed('MERGE_CONSUMER_UNPROVEN', 'every carrier consumer needs a managed creation and runtime binding')
         plan['runtime'][other] = await _idle(client.invoke, other)
         if plan['runtime'][other]['cwd'] != (terminal.get('worktreePath') or terminal.get('cwd')):
             raise StepFailed('MERGE_RUNTIME_CHANGED', 'consumer runtime is not in its registered carrier')
