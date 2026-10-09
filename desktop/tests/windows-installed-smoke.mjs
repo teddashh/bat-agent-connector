@@ -4,12 +4,15 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { nsisBundleProof } from "./windows-bundle.mjs";
 
 assert.equal(process.platform, "win32", "Windows runner required");
 assert.equal(process.env.GITHUB_ACTIONS, "true", "GitHub Actions required");
 assert.equal(process.env.RUNNER_ENVIRONMENT, "github-hosted", "Disposable hosted runner required");
 const evidence = resolve("test-results/windows-installed");
 await mkdir(evidence, { recursive: true });
+const proof = nsisBundleProof(await readFile("src-tauri/target/release/better-agent-dashboard.exe"));
+await writeFile(resolve(evidence, "bundle-proof.json"), JSON.stringify(proof, null, 2));
 const caps = { actor: "fixture-operator", scopes: ["observe"], api_version: 1,
   contract_version: "2026-10-08", features: {}, actions: [], hosts: [] };
 const checkpoint = { cursor: 0, token: "fixture-checkpoint" };

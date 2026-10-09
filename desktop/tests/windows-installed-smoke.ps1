@@ -119,10 +119,15 @@ try {
     # NSIS /D must be last and unquoted, even when the path contains spaces.
     Run-Installer $installer "/S /D=$installDir"
     if (-not (Test-Path -LiteralPath $binary)) { throw 'Installed executable missing' }
-    $builtHash = (Get-FileHash $built -Algorithm SHA256).Hash
-    $installedHash = (Get-FileHash $binary -Algorithm SHA256).Hash
-    if ($builtHash -cne $installedHash) { throw 'Installed bytes differ from the reviewed build' }
-    $receipt.installed_binary_sha256 = $installedHash.ToLowerInvariant()
+    $proof = Get-Content (Join-Path $Evidence 'bundle-proof.json') -Raw | ConvertFrom-Json
+    $builtHash = (Get-FileHash $built -Algorithm SHA256).Hash.ToLowerInvariant()
+    $installedHash = (Get-FileHash $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+    $receipt.built_binary_sha256 = $builtHash
+    $receipt.installed_binary_sha256 = $installedHash
+    $receipt.bundle_proof = $proof
+    if ($builtHash -cne $proof.built_sha256 -or $installedHash -cne $proof.expected_installed_sha256) {
+        throw 'Installed bytes differ from the reviewed build with its exact NSIS bundle marker'
+    }
     $version = (Get-Item -LiteralPath $binary).VersionInfo.ProductVersion
     if ($version -cne $config.version) { throw "Installed PE version mismatch: $version" }
     $registered = @(Get-Registration)
