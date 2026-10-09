@@ -1,5 +1,6 @@
 //! Fleet local contracts. This crate contains no central task authority and no IPC.
 //! Configuration is native-only; callers project an explicitly safe status model.
+pub mod configuration;
 pub mod inventory;
 pub mod ownership;
 pub mod selection;
