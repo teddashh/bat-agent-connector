@@ -19,6 +19,7 @@
     "allow-fleet-request",
     "allow-fleet-control",
     "allow-fleet-bootstrap",
+    "allow-tailscale-control",
     "allow-native-files-status",
     "allow-native-files-pick",
     "allow-native-files-drop-target",

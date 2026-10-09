@@ -226,3 +226,13 @@ Browser and mocked-native fixtures cover lost replies, mode edits, accepted/unkn
 and identity boundaries, malformed storage, and en/zh-TW layouts at 390/768/1440. Actual-central permission
 validation follows the backend integration; these synthetic fixtures do not establish Windows WebView
 or live host acceptance.
+
+## Tailscale sign-in recovery (T10)
+
+Connection settings reuses the existing compact panel/actions for sanitized Tailscale
+login state, explicit Windows tray-app opening and diagnosis after focus returns.
+The fixed native command preserves original local request receipts and shares the
+Launcher/monotonic Quit-update fence. It does not change network configuration,
+Fleet selection or central credentials. Browser/unsupported/missing installations
+remain explicit; installed Windows sign-in and tray behavior are not yet proven.
+See [the exact T10 adapter contract](tailscale-recovery.md).
