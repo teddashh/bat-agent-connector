@@ -52,8 +52,8 @@ export function approvalsPanel({h, t, api, caps, guard, ready, errorBox, opStatu
     }
   }
   const current = () => {try {guard(); return true;} catch {return false;}};
-  const persist = () => {guard(); saved.selection = [...selected].map(([item_id, mode]) => ({item_id, mode}));
-    try {localStorage.setItem(storageKey, JSON.stringify(saved));} catch { /* memory only */ }};
+  const persist = (required = false) => {guard(); saved.selection = [...selected].map(([item_id, mode]) => ({item_id, mode}));
+    try {localStorage.setItem(storageKey, JSON.stringify(saved));} catch (error) {if (required) throw error;}};
   const observable = () => ready() && caps()?.scopes?.includes("observe");
   const writable = () => observable() && caps()?.scopes?.includes("operate") &&
     caps()?.actions?.some(a => a.action === "session.approve_pending" && a.allowed === true) &&
@@ -90,9 +90,9 @@ export function approvalsPanel({h, t, api, caps, guard, ready, errorBox, opStatu
       const selection = saved.preview.items.filter(i => selected.has(i.item_id)).map(i => ({item_id: i.item_id, mode: selected.get(i.item_id)}));
       saved.intent = {key: crypto.randomUUID(), operation_id: null, request: {action: "session.approve_pending", target: {host: saved.preview.host},
         params: {preview_token: saved.preview.preview_token, selection}, preconditions: {expected_fingerprint: saved.preview.fingerprint}}};
-      persist();
     }
     if (!saved.intent.request || !saved.intent.key) return;
+    try {persist(true);} catch (error) {status.replaceChildren(errorBox(error)); update(); return;}
     busy = true; const intent = saved.intent; update();
     submission = (async () => {
       try {const data = await api("POST", "/operations?wait=3", intent.request, intent.key); guard(); accept(data.operation);}
