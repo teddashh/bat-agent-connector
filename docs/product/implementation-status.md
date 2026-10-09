@@ -23,20 +23,29 @@ cleanup、native files 及獨立 reviewer 的固定 bytes/revision。Local full 
 私有 installer #10 已合併 `67be22ea748c49e055a58e9fb72ef0c91d8b2161`，pin 此候選／`.8`；17 temporary tests
 在 3.13／3.10 通過，真 source verify-only 通過，沒有修改 live 安裝。Linux GLib release gate #53 仍開啟。
 
-後續候選分開追蹤，尚不計入 main／installed 完成：
+後續主線與候選分開追蹤，不計為 installed 完成：
 
-- [#62](https://github.com/teddashh/bat-agent-connector/pull/62)：明確 repository binding、GitHub numeric ID、
-  固定 ref/head 與 fresh managed carrier，共用 published-start UI，canonical `.9`。原候選獨立審查通過；
-  加入 #61 Windows parity 後為 `927053d`，exact-head CI／full checks 以 PR 最新證據為準。
-- Central relay、fanout planner／fixed-plan dispatch、standalone Claude→Codex failover、獨立 omitted-key task controls
-  已收進 orchestration 整合工作線。Failover 原始 receipts 與 carrier writer fence、rollback owner CAS、所有 shared
-  consumers 的最後 frame checks 已獨立審查；fanout 不退休重新載入的 runtime。Canonical `.11` 與 generated adapters
-  同步。整合 focused tests 3.13／3.10 各 **490 passed**；full／exact-head CI 仍是合併條件。
-- Native Fleet choices、profile launch、Startup/backend migration、login picker、owned Quit 與 queued IPC Ticket fences
-  在桌面整合線。Bootstrap fixed request／original receipt／opt-in auto 與更新器 signed bytes／durable installation intent
-  分別完成 fixture/source review，整合及 exact Windows build 仍須查核。缺設定檔不代表背景 Fleet 已停止。
-- Principal-only transcript／wait 的中央 read adapters 正在獨立工作線；不允許因工具缺少就走 raw BAT／legacy CLI。
-  專用 orchestration GUI 及原計畫 installed/live 46 項矩陣仍須完成對照，不能由 backend 測試數推定產品全數完成。
+- [#62](https://github.com/teddashh/bat-agent-connector/pull/62) 已合併為 `c9ed361067e84f092ddabe2a3c057e4e1db688b5`。
+  候選 `927053dd6e6e87185f013c4bfd7834054de179ba` 與 merge 的 tree 同為 `e4a8e281015c2b376623ce91911feb9fab7e9743`。
+  明確 repository binding、GitHub numeric ID、固定 ref/head 與 fresh managed carrier、published-start UI 及 `.9` 已在 main。
+  Exact CI Python 3.10–3.13 各 **2725 passed／33 skipped**，兩平台 desktop／unsigned packaging 通過。
+  Local 3.13 full 先有 operation settlement timeout，重跑另有兩項 subprocess deadline failure；沒有宣稱 local full 綠燈。
+  原碼 targeted integration 1、subprocess 3 通過；本機高負載下停止重複全套，以四版 exact-head CI 作完整驗證。
+- [#63](https://github.com/teddashh/bat-agent-connector/pull/63) 已合併為 `a14a9ddb36f203ad4116252457f5fd2c0f90825f`。
+  候選 `3835b14dbaf2a5241461c5db2f780f0b56407114` 與 merge tree 同為 `192fd59c88cde19b54668c21add3d397453e6e55`。
+  Central relay、fanout planner／fixed-plan dispatch、standalone Claude→Codex failover、omitted-key task controls 與 `.11`
+  已在 main。Exact CI Python 3.10–3.13 各 **2888 passed／33 skipped**，Windows／Linux desktop packaging 通過。
+  Focused 490 在 3.13／3.10 通過；舊 principal fixture 斷言已修。兩次主動中止的 local full 不計通過，第二次是在 CI 四版通過後停止重複驗證。
+- [#64](https://github.com/teddashh/bat-agent-connector/pull/64) 是 native Fleet／bootstrap／signed update 整合候選，仍未合併。
+  `a9e7413` 的四版 Python full CI、Windows app Clippy／tests 通過，Windows Fleet core 的空閒 port proof 失敗。
+  真 Windows fixture 證明：空閒 endpoint 的 connect 在 100 ms timeout，而約 2 s 才回 ConnectionRefused；bind 成功。
+  專用早期 Windows job 保留正面 refusal＋bind oracle；修正與完整 CI 尚須收斂。不能以增加測試容忍或接受 unknown 代替 proof。
+  原 local evidence：416 UI、12 state、218 Linux Fleet core、78 app Rust／1 fixture-only ignored、release verifier example 1；bootstrap 44 在兩版 Python 通過。
+- `integrate/dashboard-release` 已累加 principal transcript／wait、canonical `.12`、task pause/resume、操作紀錄分頁及 session→明確 BAT profile 入口。
+  Observation author 467 在兩版 Python 通過；root 整合 86 在兩版通過。Task root 34 UI＋actual central fixture 通過；
+  session BAT＋start root 52 UI 通過。獨立審查修正重開後的未送出 preview，不以遺失 receipt 授權重複啟動。
+  專用 orchestration GUI、A03 Connector-local labels 及最後兩個 legacy mutations（worktree merge／verification testimony）仍在收尾。
+  同候選完整 UI／backend／Windows 矩陣與 installer pin 以後續候選為準；這些分層結果不是整套產品完成證據。
 
 以上沒有正式簽章身分、release feed 發布、Windows installed 或 live host/provider writes 的完成宣稱。
 本機 fixtures 不代替 PID／account／Startup／原生視窗及完整產品展示。GitHub Codex review quota 用盡，
