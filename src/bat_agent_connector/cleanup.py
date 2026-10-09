@@ -468,6 +468,17 @@ def _all(ops):
             w = wt(historical_item["host"], historical_item["repository"], path, historical_item["branch"],
                    historical_item["creation_evidence"]["intent"], "task", historical_item["base"], historical_item["original_ids"])
             w.update(task_owned=True, historical_cleanup=True)
+    from .start_resources import carriers
+    for created in carriers(ops, op_rows, regs):
+        host, path = created["host"], created["path"]
+        w = wt(host, created["repository"], path, created["branch"], created["intent"], "bat", created["base"],
+               [created["operation_id"], host + "/" + created["session_id"]])
+        hc = fleet.config.hosts.get(host)
+        w["proven"] = bool(hc and resource_policy.in_managed_root(hc, created["repository"])
+                           and resource_policy.in_bat_worktrees(path, created["repository"]))
+        w["creation_evidence"]["start_operation_id"] = created["operation_id"]
+        if created["binding_mismatch"]:
+            _reason(w, "BINDING_MISMATCH", detail="standalone start registry incarnation changed")
     for e in regs:
         host, sid = e.get("host"), e.get("session_id")
         if not host or not sid:

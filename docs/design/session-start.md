@@ -52,7 +52,10 @@ is retained after positively unsent failure or cancellation. Creation ownership
 alone does not prove that no other session, new commit or uncommitted result now
 uses it, so this action never removes worktrees or branches. The original durable
 source/reservation/creation receipts remain available for canonical reviewed cleanup;
-retention itself grants no cleanup authority. External consumers remain subject to
+retention itself grants no cleanup authority. Cleanup projects these positive receipts with
+the original registry resource ID even if the failed local row is missing. A changed
+registry incarnation remains blocked. Missing managed-clone markers, live consumers
+and new committed or uncommitted results retain their existing cleanup protections. External consumers remain subject to
 cleanup's existing fresh dependency, content and final-frame checks.
 
 Completed receipts replay without new write authority. Local registry projections compare the original operation/incarnation and owner under the registry flock; they do not overwrite a later binding. Positively unsent cancellation records a failed reservation and retains its known carrier for reviewed cleanup; unresolved external effects retain capacity.
