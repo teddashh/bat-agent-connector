@@ -9,6 +9,7 @@ import { capturePanel } from "./capture.js";
 import { permissionsPanel } from "./permissions.js";
 import { approvalsPanel } from "./approvals.js";
 import { sessionStartPanel } from "./session-start.js";
+import { mountArtifactReview } from "./artifact-review.js";
 import { consumePageAsync, settleRefreshes, storageScope } from "./state/events.ts";
 
 const TOKEN_KEY = "batc.dashboard.token";
@@ -922,6 +923,8 @@ async function viewObservedResource(main, type, id) {
         h("p", {class: "muted"}, t("obs_known_identity")),
         type === "execution" && state.caps?.features?.cleanup_task === true ?
           h("p", {}, h("a", {href: `#/cleanup/task/${encodeURIComponent(id)}`}, t("cleanup_task_preview"))) : null,
+        type === "execution" && state.caps?.artifacts?.capture?.managed_single_file === true ?
+          h("p", {}, h("a", {href: `#/artifact-review/task/${encodeURIComponent(id)}`}, t("ar_open"))) : null,
         h("pre", {class: "pre"}, JSON.stringify(resource, null, 2)));
     } catch (error) {head.append(errorBox(error));}
   };
@@ -1062,6 +1065,8 @@ async function viewSession(main, host, sid) {
     if (data.work_items?.length) head.append(linkedItems(data.work_items));
     if (data.discovery?.length) head.append(h("details", {}, h("summary", {}, t("obs_discovery")), discoveryEvidence(data.discovery)));
     const managed = row.api_access === "managed";
+    if (managed && row.provenance === "connector_managed" && state.caps?.artifacts?.capture?.managed_single_file)
+      head.append(h("p", {}, h("a", {href: `#/artifact-review/session/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`}, t("ar_open"))));
     if (managed && row.provenance === "connector_managed" && !permissions) {
       permissions = permissionsPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
         errorBox, opStatus, storageKey: `batc.permissions.${connection.namespace}.${JSON.stringify([host, sid])}`,
@@ -1844,7 +1849,14 @@ async function viewOperation(main, id) {
         h("h2", {}, t("steps")),
         ...op.steps.map(s => h("div", { class: "row" }, h("div", { class: "grow" }, s.name),
           h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)),
-        h("div", { class: "actions" }, opened, confirmSource, resume, retry, cancel));
+        h("div", { class: "actions" }, opened,
+          ["artifact.capture.managed", "artifact.accept"].includes(op.action) && op.status === "succeeded" &&
+          /^art_[0-9a-f]{32}$/.test(op.result?.artifact_id) && Number.isSafeInteger(op.result?.revision) && op.result.revision > 0
+            ? h("a", {href: `#/artifact-review/artifact/${op.result.artifact_id}/${op.result.revision}`}, t("ar_review_title")) : null,
+          state.caps?.artifacts?.capture?.managed_single_file && op.status === "succeeded" &&
+          ["checkpoint.continue", "integration.handoff", "session.send"].includes(op.action)
+            ? h("a", {href: `#/artifact-review/operation/${op.operation_id}`}, t("ar_open")) : null,
+          confirmSource, resume, retry, cancel));
     } catch (e) { fill(panel, errorBox(e)); }
   };
   await render();
@@ -2780,7 +2792,15 @@ async function viewStart(main) {
   return onEvents(ev => {if (["operation", "host", "session"].includes(ev.resource_type)) return panel.refresh(true);});
 }
 
-const NAV = [["home", "nav_home"], ["projects", "nav_projects"], ["sessions", "nav_sessions"], ["delivery", "nav_delivery"],
+async function viewArtifactReview(main, kind, first, second) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const context = kind === "session" ? {kind, host: first, session_id: second} : kind === "task" ? {kind, task_id: first}
+    : kind === "operation" ? {kind, operation_id: first} : kind === "artifact" ? {kind, artifact_id: first, revision: Number(second)} : {kind: "catalog"};
+  return mountArtifactReview({main, h, t, api, caps: () => state.caps, guard: () => assertView(connection), onEvents,
+    errorBox, opStatus, context, storageKey: `batc.artifact-review.${connection.namespace}.${JSON.stringify(context)}`});
+}
+
+const NAV = [["home", "nav_home"], ["projects", "nav_projects"], ["sessions", "nav_sessions"], ["artifact-review", "ar_nav"], ["delivery", "nav_delivery"],
   ["operations", "nav_operations"], ["cleanup", "nav_cleanup"], ["settings", "nav_settings"]];
 let teardown = null;
 let generation = 0;
@@ -2797,6 +2817,7 @@ async function route() {
   if (!state.token && name !== "settings") { main.append(h("p", { class: "note" }, t(nativeDesktop ? "desktop_connect_needed" : "need_token"))); viewSettings(main); return; }
   const views = { home: viewHome, projects: viewProjects, project: viewProject, item: viewWorkItem, sessions: viewSessions,
     cleanup: viewCleanup, approvals: viewApprovals, delivery: viewDelivery, operations: viewOperations, session: viewSession, start: viewStart, op: viewOperation, settings: viewSettings,
+    "artifact-review": viewArtifactReview,
     host: viewHostDiscovery, task: (main, id) => viewObservedResource(main, "execution", id),
     worktree: (main, id) => viewObservedResource(main, "worktree", id) };
   const off = await (views[name] || viewHome)(main, ...rest);
