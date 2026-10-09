@@ -361,7 +361,7 @@ GUI tab 非必要，headless session 仍需 registry creation 與正面 live cwd
 實際觀察 HEAD 及 bounded review receipt。接受的是這版內容的人工 review；不標記 work/task complete、
 merged、deployed 或測試通過。已接受的 revision 不會因 latest 或 live 來源前進而換內容。
 
-HTTP/RPC/MCP/CLI adapters 已接同一中央 action；共用 UI 與 installed/live 證據另行驗證。
+HTTP/RPC/MCP/CLI adapters 已接同一中央 action；共用 UI 已接 managed capture／固定 revision acceptance，installed/live 證據另行驗證。
 
 ## 主機與 repository 同步（Part C，依產品負責人澄清校正）
 
@@ -370,7 +370,8 @@ HTTP/RPC/MCP/CLI adapters 已接同一中央 action；共用 UI 與 installed/li
 需要另一主機取得程式碼，使用該 workspace 已綁定的 GitHub repository 與已發布 branch/commit。
 中央同步使用 fetch 後驗證固定 SHA，不在人工目錄執行 pull/merge，不換成 branch 最新 SHA。
 
-尚缺的 repository 綁定／同步能力需要依此定義合約與驗證，不能只加 target 下拉選單。
+已實作明確 repository binding、numeric GitHub identity、published SHA preview 與 fresh managed carrier；
+合約見 [repository-sync.md](repository-sync.md)，browser/native 共用 published-start 表單。
 目標需 managed root、對應 BAT workspace、host readiness 與 caller 權限；同名路徑或 repository
 名稱不能授權操作。固定 commit 不可取得時保留原選擇並停止，不讓 Agent 碰人工來源。
 
@@ -379,7 +380,7 @@ HTTP/RPC/MCP/CLI adapters 已接同一中央 action；共用 UI 與 installed/li
 
 ## 尚未涵蓋
 
-- B1 的 HTTP/MCP/CLI 與共用 browser／desktop 人工相對檔案路徑表單已實作，未宣稱 OS 檔案選擇器或實機驗收。B2 backend 已實作且 UI 另行整合；明確 repository 的已發布版本同步仍需完成，不包含直接未發布 Git pack relay。
+- B1 的 HTTP/MCP/CLI 與共用 browser／desktop 人工相對檔案路徑表單已實作，未宣稱 OS 檔案選擇器或實機驗收。B2 backend／共用 UI 與明確 repository 的已發布版本同步已整合；native 選檔、上傳與 Save As 有獨立 fixtures。Installed/live 驗收仍待完成，不包含直接未發布 Git pack relay。
 - 完整dirty snapshot、任意目錄解壓、可執行附件／URL下載、非checkpoint的Task Service附件派工不在A。舊context_refs字串不提供readiness。
 - Artifact deletion、retention期限／read model／server draft holds屬未來artifact cleanup。目前store只留內容／拒絕超額，cleanup對artifact保持RESOURCE_KIND_UNSUPPORTED。
 - GitHub Actions build artifacts／deploy promotion與本store分開；若日後橋接需兩邊ID／digest證據，不能互換。

@@ -173,7 +173,9 @@ central origin. No arbitrary filesystem or shell command is added.
 MockBat. It checks binary content, accepted readback after reload, unchanged source bytes/index/refs, and no
 BAT writes or inferred project/work-item ownership. Browser/native IPC fixtures cover recovery, identity and
 scope boundaries plus en/zh-TW layouts at 390/768/1440. Windows WebView and live remote host acceptance remain
-pending, as do full dirty snapshots, managed-result capture/acceptance and cross-host continuation.
+pending. Managed-result capture/acceptance and explicitly bound published-version continuation now have
+separate central actions and shared UI (see artifacts.md and repository-sync.md); full dirty directory
+snapshots and direct unpublished Git transport are not exposed.
 
 ## Observation UI (R04)
 
