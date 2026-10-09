@@ -18,6 +18,8 @@ pub mod tunnel;
 #[cfg(windows)]
 pub mod windows;
 #[cfg(windows)]
+pub mod windows_launcher;
+#[cfg(windows)]
 pub mod windows_tunnel;
 
 pub type Result<T> = std::result::Result<T, &'static str>;
