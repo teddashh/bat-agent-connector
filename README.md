@@ -89,8 +89,11 @@ Accepted operations remain recoverable after preview expiry. Capture refuses sou
 one file, not a dirty snapshot. Managed files use `artifact managed-capture-preview` with a central execution
 operation or task/command selector, then `artifact managed-capture`. `artifact accept` (approve scope) records
 review of one exact revision and its saved lineage without completing a task, merging or deploying.
-Another host must obtain published code through an explicitly bound repository; direct transfer of unpublished
-Git objects is outside the delivery scope. Repository synchronization remains follow-up work.
+Another host obtains published code through an explicitly bound repository. In Sessions, choose
+**Start from a published version**, review a branch's fixed commit, then create a new managed session.
+The `repository_preview` / `work_continue_from_repository` MCP tools and `batc repository` commands
+use the same central operation and saved key. No human checkout is pulled or reset, and unpublished
+Git objects remain on their source host. See [repository synchronization](docs/design/repository-sync.md).
 The shared Artifacts view provides managed capture and exact-revision review with saved operation recovery.
 Sessions offers a central managed start form and fixed-selection batch approvals; reviewed cleanup also
 covers eligible Task Service resources. Native files use OS pickers, bounded previews and Save As.

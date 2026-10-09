@@ -63,6 +63,50 @@ pub struct ConnectorRequest {
     pub idempotency_key: Option<String>,
 }
 
+// Only logical selection crosses IPC; central owns Git URLs, paths and credentials.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepositoryPreviewRequest {
+    repository: String,
+    host: String,
+    workspace_id: String,
+    source_ref: String,
+}
+
+fn validate_repository_preview(body: Option<&Value>) -> Result<(), String> {
+    let doc: RepositoryPreviewRequest =
+        serde_json::from_value(body.cloned().ok_or("Repository preview body is required")?)
+            .map_err(|_| "Invalid typed repository preview request")?;
+    let logical = |s: &str| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control);
+    let branch = doc.source_ref.strip_prefix("refs/heads/").unwrap_or("");
+    if !logical(&doc.repository)
+        || !Regex::new(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+            .unwrap()
+            .is_match(&doc.repository)
+        || !logical(&doc.host)
+        || !doc
+            .host
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c))
+        || !logical(&doc.workspace_id)
+        || branch.is_empty()
+        || branch.len() > 200
+        || branch.starts_with('-')
+        || branch.ends_with(['.', '/'])
+        || branch.contains("..")
+        || branch.contains("//")
+        || branch
+            .split('/')
+            .any(|s| s.starts_with('.') || s.ends_with(".lock"))
+        || !branch
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._/-".contains(&c))
+    {
+        return Err("Invalid repository, workspace or published branch identity".into());
+    }
+    Ok(())
+}
+
 // Cleanup previews only describe existing central IDs. They cannot carry headers,
 // host paths, commands, credential material, or an altered cleanup apply envelope.
 #[derive(Deserialize)]
@@ -955,7 +999,7 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             r"delivery/previews/mpv_[0-9a-f]{32}|integrations/previews/ipv_[0-9a-f]{32}|integrations/op_[0-9a-f]{32})$")).unwrap())
     } else if input.method == "POST" {
         POST.get_or_init(|| {
-            Regex::new(r"^/(?:approval-previews|artifact-capture-previews|artifact-managed-capture-previews|cleanup-previews|operations(?:/op_[0-9a-f]{32}/(?:cancel|resume))?)$")
+            Regex::new(r"^/(?:repository-previews|approval-previews|artifact-capture-previews|artifact-managed-capture-previews|cleanup-previews|operations(?:/op_[0-9a-f]{32}/(?:cancel|resume))?)$")
                 .unwrap()
         })
     } else {
@@ -969,6 +1013,12 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             return Err("Capture preview accepts no query or operation key".into());
         }
         validate_capture_preview(input.body.as_ref())?;
+    }
+    if path == "/repository-previews" {
+        if input.path != path || input.idempotency_key.is_some() {
+            return Err("Repository preview accepts no query or operation key".into());
+        }
+        validate_repository_preview(input.body.as_ref())?;
     }
     if path == "/approval-previews" {
         if input.path != path || input.idempotency_key.is_some() {
@@ -1191,6 +1241,46 @@ mod tests {
             body: None,
             idempotency_key: None,
         }
+    }
+
+    #[test]
+    fn repository_preview_has_only_fixed_logical_selection() {
+        let valid = serde_json::json!({"repository":"example/project", "host":"demo", "workspace_id":"ws-1", "source_ref":"refs/heads/topic/version"});
+        let mut input = request("POST", "/repository-previews");
+        input.body = Some(valid.clone());
+        assert!(validate_request(&input).is_ok());
+        for (field, value) in [
+            (
+                "repository",
+                serde_json::json!("https://github.com/example/project"),
+            ),
+            ("host", serde_json::json!("host/other")),
+            ("workspace_id", serde_json::json!({"path":"/tmp"})),
+            ("source_ref", serde_json::json!("main")),
+            ("source_ref", serde_json::json!("refs/heads/../../main")),
+            ("source_ref", serde_json::json!("refs/heads/main.lock")),
+            ("source_ref", serde_json::json!("refs/heads/.hidden")),
+            ("remote_url", serde_json::json!("https://other")),
+            ("force", serde_json::json!(true)),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            input.body = Some(invalid);
+            assert!(validate_request(&input).is_err(), "{field}");
+        }
+        input.body = Some(valid);
+        for path in [
+            "/repository-previews?",
+            "/repository-previews?host=other",
+            "/repository-previews/other",
+        ] {
+            input.path = path.into();
+            assert!(validate_request(&input).is_err());
+        }
+        input.path = "/repository-previews".into();
+        input.idempotency_key = Some("unexpected".into());
+        assert!(validate_request(&input).is_err());
+        assert!(validate_request(&request("GET", "/repository-previews")).is_err());
     }
 
     #[test]

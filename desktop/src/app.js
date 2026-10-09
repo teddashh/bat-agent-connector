@@ -10,6 +10,7 @@ import { capturePanel } from "./capture.js";
 import { permissionsPanel } from "./permissions.js";
 import { approvalsPanel } from "./approvals.js";
 import { sessionStartPanel } from "./session-start.js";
+import { repositoryStartPanel } from "./repository-start.js";
 import { mountArtifactReview, managedCaptureExecution } from "./artifact-review.js";
 import { consumePageAsync, settleRefreshes, storageScope } from "./state/events.ts";
 
@@ -642,7 +643,8 @@ async function viewSessions(main) {
     h("summary", {}, t("sessions_workspaces")), h("p", {class: "muted"}, t("sessions_scope_note")), navigation,
     h("a", {class: "session-project-link", href: "#/projects"}, t("sessions_projects")));
   main.append(h("div", {class: "session-heading"}, h("h1", {}, t("sessions_title")),
-    state.caps?.actions?.some(a => a.action === "session.start") ? h("a", {href: "#/start"}, t("start_title_page")) : null),
+    state.caps?.actions?.some(a => a.action === "session.start") ? h("a", {href: "#/start"}, t("start_title_page")) : null,
+    state.caps?.features?.repository_sync?.length ? h("a", {href: "#/published"}, t("pub_title")) : null),
     h("p", {class: "muted"}, t("sessions_intro")),
     h("div", {class: "filters session-filters"}, search, hostSel, accessSel,
       state.caps?.actions?.some(a => a.action === "session.approve_pending") ? h("a", {href: "#/approvals"}, t("bulk_title")) : null), status,
@@ -2790,8 +2792,20 @@ async function viewStart(main) {
     ready: () => state.online && !state.nativeBusy, errorBox, opStatus,
     storageKey: `batc.start.${connection.namespace}`});
   main.append(h("a", {href: "#/sessions"}, t("nav_sessions")), h("h1", {}, t("start_title_page")),
-    h("p", {class: "muted"}, t("start_intro")), panel.box);
+    h("p", {class: "muted"}, t("start_intro")),
+    state.caps?.features?.repository_sync?.length ? h("p", {}, h("a", {href: "#/published"}, t("pub_title"))) : null, panel.box);
   try {await panel.init();} catch { /* panel retains the original intent and shows the read error */ }
+  assertView(connection);
+  return onEvents(ev => {if (["operation", "host", "session"].includes(ev.resource_type)) return panel.refresh(true);});
+}
+
+async function viewPublished(main) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const panel = repositoryStartPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    ready: () => state.online && !state.nativeBusy, errorBox, opStatus, storageKey: `batc.published.${connection.namespace}`});
+  main.append(h("a", {href: "#/sessions"}, t("nav_sessions")), h("h1", {}, t("pub_title")),
+    h("p", {class: "muted"}, t("pub_intro")), panel.box);
+  try {await panel.init();} catch { /* original intent and read error remain visible */ }
   assertView(connection);
   return onEvents(ev => {if (["operation", "host", "session"].includes(ev.resource_type)) return panel.refresh(true);});
 }
@@ -2821,7 +2835,7 @@ async function route() {
   main.replaceChildren();
   if (!state.token && name !== "settings") { main.append(h("p", { class: "note" }, t(nativeDesktop ? "desktop_connect_needed" : "need_token"))); viewSettings(main); return; }
   const views = { home: viewHome, projects: viewProjects, project: viewProject, item: viewWorkItem, sessions: viewSessions,
-    cleanup: viewCleanup, approvals: viewApprovals, delivery: viewDelivery, operations: viewOperations, session: viewSession, start: viewStart, op: viewOperation, settings: viewSettings,
+    cleanup: viewCleanup, approvals: viewApprovals, delivery: viewDelivery, operations: viewOperations, session: viewSession, start: viewStart, published: viewPublished, op: viewOperation, settings: viewSettings,
     "artifact-review": viewArtifactReview,
     host: viewHostDiscovery, task: (main, id) => viewObservedResource(main, "execution", id),
     worktree: (main, id) => viewObservedResource(main, "worktree", id) };

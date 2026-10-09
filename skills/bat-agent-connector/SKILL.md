@@ -4,7 +4,7 @@ description: Use this when you need to check on, read, wait for, or (only when e
 version: 0.2.4
 license: MIT
 metadata:
-  workflow_version: "2026-10-08.8"
+  workflow_version: "2026-10-08.9"
   api_version: "1"
   contract_version: "2026-10-08"
 ---
@@ -141,6 +141,8 @@ deferred flags are not authority to apply a setting under a new caller or sessio
 | What a checkpoint would record (read, daemon) | `checkpoint_preview(host, session_id)` | - |
 | Record a checkpoint (connector records only, daemon) | `checkpoint_create(host, session_id, idempotency_key, commit?, note?, confirm=true)` | `batc checkpoint create HOST SID --note ...` |
 | Continue from it in a new managed session (daemon) | `work_continue_from_checkpoint(checkpoint_id, instructions, idempotency_key, agent?, confirm=true)` | `batc checkpoint continue CP --instructions ...` |
+| Review a published branch head (observe) | `repository_preview(repository, host, workspace_id, source_ref)` | `batc repository preview REPO HOST WORKSPACE --ref refs/heads/BRANCH` |
+| Start from that fixed published version (start) | `work_continue_from_repository(repository, host, workspace_id, source_ref, source_sha, repository_id, binding_digest, prompt, idempotency_key, confirm=true)` | `batc repository continue REPO HOST WORKSPACE --ref REF --sha SHA --repository-id ID --binding-digest DIGEST --prompt TEXT --key KEY --confirm` |
 | Checkpoints and the sessions started from them (read, daemon) | `checkpoints_list(host?, session_id?, checkpoint_id?)` | `batc checkpoint list`, `batc checkpoint show CP` |
 | Projects and work items (read, daemon) | `projects_list()`, `project_get(project_id)`, `work_items_list(project_id?, state?, pending?)`, `work_item_get(work_item_id)` | `batc project list`, `batc item show WI` |
 | Change a work item (scope manage, daemon) | `operation_submit(action="work_item.update", ..., preconditions={expected_version})` | `batc item update WI --check 1 --state done` |
@@ -219,6 +221,28 @@ after every planned task starts. Refused or incomplete fan-out keeps the planner
 always stays for `batc resource-cleanup`. After a relay or send, pass its `turn_marker` as `after=` to `session_wait` and `session_read`. For Claude, this matches BAT's exact echo ID. Check `turn_phase` and `turn_attribution`; queued output stays unconfirmed until the previous-turn boundary is observed. BAT Codex currently uses a weaker timestamp fallback, so do not claim its output is definitively tied to the send.
 Read the session's
 last `BAT-STATUS:` line: MILESTONE → report, CONTINUE → nudge (`session_continue`), NEED-<HUMAN> → ask the human.
+
+## Start from an explicitly published GitHub version
+
+Read `capabilities_get()` and choose an exact `features.repository_sync` repository/host/workspace
+binding. Preview with `repository_preview(repository, host, workspace_id, source_ref)` using a full
+`refs/heads/...` ref. This flow supports the reviewed branch head only. Keep the returned full SHA,
+numeric repository ID and binding digest; a branch moving before fetch requires a fresh preview.
+
+Within the user's requested scope, call `work_continue_from_repository` with those exact values,
+the original prompt and a saved key. The generic action is `repository.continue`, target
+`{repository, host, workspace_id}`, params `{source_ref, source_sha, agent, prompt, title?}`, and
+preconditions `{repository_id, binding_digest}`. It fetches the published version into a new managed
+clone/worktree/session on that host. It does not publish source commits, pull/reset a person's checkout,
+move unpublished work, or take over a session on another machine. Same-host unpublished committed
+work continues through the checkpoint workflow below.
+
+Retain the complete request, key and operation ID. After acceptance, use `operation_get`; a lost
+reply before receiving the ID may be recovered with the identical request/key. Policy changes do
+not authorize a replacement start. An uncertain start/send remains uncertain; never delete its
+carrier or change the key to repair it. A succeeded result records the new session and accepted
+prompt message, not completion of the requested coding work. Its managed result can later enter
+the existing artifact review and integration flow.
 
 ## Checkpoint workflow (an agent continues a person's work)
 

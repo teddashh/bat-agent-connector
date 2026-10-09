@@ -55,6 +55,7 @@ READ_TOOLS = [
     "deployment_preview", "deployment_status", "deployments_list", "deployment_environment_get",
     "checkpoints_list",
     "checkpoint_preview",
+    "repository_preview",
     "integration_candidates",
     "integration_get",
     "integrations_list",
@@ -65,7 +66,7 @@ READ_TOOLS = [
 ]
 # Registered unless --read-only: they act as BATC_API_TOKEN's principal, whose scopes decide what is allowed.
 OPERATION_TOOLS = ["approve_pending", "operation_submit", "operation_cancel", "operation_resume", "checkpoint_create",
-                   "work_continue_from_checkpoint", "artifact_upload", "artifact_capture", "artifact_capture_managed", "artifact_accept", "cleanup_apply", "github_pr_update", "github_pr_merge",
+                   "work_continue_from_checkpoint", "work_continue_from_repository", "artifact_upload", "artifact_capture", "artifact_capture_managed", "artifact_accept", "cleanup_apply", "github_pr_update", "github_pr_merge",
                    "deployment_start", "deployment_retry", "deployment_rollback"]
 WRITE_TOOLS = [
     "session_send",
@@ -453,6 +454,11 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
         first if the new work needs them."""
         return await daemon("checkpoint_preview", host=host, session_id=session_id)
 
+    async def repository_preview(repository: str, host: str, workspace_id: str, source_ref: str) -> dict[str, Any]:
+        """Read the explicitly bound repository/workspace and published refs/heads/... head. No host writes.
+        Keep source_sha, repository_id and binding_digest for work_continue_from_repository; never replace SHA on retry."""
+        return await daemon("repository_preview", repository=repository, host=host, workspace_id=workspace_id, source_ref=source_ref)
+
     async def integration_candidates(host: str, limit: int = 20) -> dict[str, Any]:
         """Results that can go into a PR from this host: agent results (checkpoint runs, by operation id),
         people's checkpoints, and where each was already delivered. Journal and inventory only."""
@@ -558,10 +564,28 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
     for fn in (capabilities_get, inventory_sessions, inventory_hosts, inventory_session, inventory_worktree,
                resource_history, resource_relations, events_list, operation_get, operations_list,
                github_pr_preview, github_merge_preview_get, deployment_preview, deployment_status, deployments_list,
-               deployment_environment_get, checkpoints_list, checkpoint_preview, integration_candidates, integration_get,
+               deployment_environment_get, checkpoints_list, checkpoint_preview, repository_preview, integration_candidates, integration_get,
                integrations_list, projects_list, project_get, work_items_list, work_item_get,
                artifacts_list, artifact_get, artifact_capture_preview, artifact_managed_capture_preview, approval_preview, cleanup_preview, cleanup_retained, cleanup_tombstones):
         mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro)
+
+    if not read_only:
+        async def work_continue_from_repository(repository: str, host: str, workspace_id: str, source_ref: str,
+                                                source_sha: str, repository_id: int, binding_digest: str, prompt: str,
+                                                idempotency_key: str, agent: Literal["claude", "codex"] = "claude",
+                                                title: str | None = None, wait_s: float = 30, confirm: bool = False) -> dict[str, Any]:
+            """WRITE: start from a published version in a NEW managed clone/worktree/session. Requires start scope
+            and confirm=true. Use exact repository_preview values; only reviewed branch heads are supported.
+            No push, pull, reset, manual checkout update or source session takeover. Keep the original key and
+            operation ID after lost replies; a new key creates a separate session. No unpublished Git transfer."""
+            return await principal_daemon("op_submit", confirm, action="repository.continue", idempotency_key=idempotency_key,
+                target={"repository": repository, "host": host, "workspace_id": workspace_id},
+                params={"source_ref": source_ref, "source_sha": source_sha, "prompt": prompt, "agent": agent,
+                        **({"title": title} if title is not None else {})},
+                preconditions={"repository_id": repository_id, "binding_digest": binding_digest}, wait_s=wait_s)
+
+        mcp.add_tool(_wrap(work_continue_from_repository), name="work_continue_from_repository",
+                     annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True))
 
     if not read_only and (principal_only or fleet.any_orchestrate):
         task_write = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)

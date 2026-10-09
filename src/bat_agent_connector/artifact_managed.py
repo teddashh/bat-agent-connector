@@ -10,7 +10,7 @@ from . import artifacts, checkpoints, registry, resource_policy, service
 from .errors import BatError
 from .operations import ActionDef, OperationError
 
-EXECUTIONS = frozenset({"checkpoint.continue", "integration.handoff", "session.send", "session.start"})
+EXECUTIONS = frozenset({"checkpoint.continue", "integration.handoff", "session.send", "session.start", "repository.continue"})
 
 
 def install(ops):
@@ -104,6 +104,13 @@ def lineage(ops, host, sid, entry, selector):
             incarnation_matches = (entry.get("start_operation_id") == oid and reservation and reserved
                 and reservation.get("session_id") == sid and reserved.get("session_id") == sid
                 and reserved.get("created_at") == entry["created_at"])
+        elif op["action"] == "repository.continue":
+            from .repository_sync import carriers
+            proof = next(carriers(ops, [op]), None)
+            incarnation_matches = (proof and proof["carrier_proven"] and entry.get("start_operation_id") == oid
+                and entry.get("repository_binding") == proof["binding_digest"]
+                and entry.get("published_sha") == proof["source_sha"]
+                and refs.get("repository_reservation") == {"session_id": sid, "created_at": entry["created_at"]})
         else:
             incarnation_matches = start_time and start_time["finished_at"] and start_time["started_at"] <= entry["created_at"] <= start_time["finished_at"]
         if (not start_time or not start_time["finished_at"] or not incarnation_matches
