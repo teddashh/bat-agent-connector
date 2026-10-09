@@ -20,7 +20,7 @@ from .operations import RERUN, ActionDef, Cancelled, NeedsAttention, OperationEr
 from .relay import build_relay
 
 ACTION = 'session.relay'
-PARENTS = frozenset({ACTION})
+PARENTS = frozenset({ACTION, 'fanout.plan', 'fanout.start'})
 FIELDS = {'message', 'channel', 'thread', 'earlier', 'brief', 'request_fanout', 'max_items', 'queue', 'start_if_missing'}
 BINDING_FIELDS = (*session_permissions.BINDING_FIELDS, 'workspace_id', 'origin_cwd', 'origin_root', 'branch',
                   'superseded_by', 'failover_of')
@@ -186,6 +186,9 @@ def child_plan(ctx, *, allow_cancel=False):
     if not link:
         return None
     parent = ctx.service._row(link.get('parent_id'))
+    if parent and parent['action'] in {'fanout.plan', 'fanout.start'}:
+        from .fanout_operations import child_plan as fanout_child
+        return fanout_child(ctx, link, parent, allow_cancel=allow_cancel)
     plan = receipt(ctx.service, link.get('parent_id'), 'relay.resolve') if parent else None
     saved = receipt(ctx.service, link.get('parent_id'), 'relay.child') if parent else None
     if (not parent or parent['action'] not in PARENTS or parent['actor'] != ctx.actor or not plan or
@@ -253,7 +256,11 @@ def authorize_child(ops, caller, op, verb):
     parent = ops._row(link.get('parent_id'))
     if not parent or parent['action'] not in PARENTS or parent['actor'] != caller.actor:
         raise OperationError('FORBIDDEN', 'relay child controls retain the original actor', 403)
-    require(caller, parent['params'])
+    if parent['action'] != ACTION:
+        from .fanout_operations import authorize_existing
+        authorize_existing(ops, caller, parent, verb)
+    else:
+        require(caller, parent['params'])
     if verb == 'resume' and parent['cancel_requested']:
         raise OperationError('RELAY_CANCEL_REQUESTED', 'cancelled relay cannot resume unsent child work', 409)
 
@@ -329,12 +336,15 @@ async def run(ctx):
 def cancel(ops, caller, op):
     with ops.journal.tx():
         ops.db.execute('UPDATE operations SET cancel_requested=1 WHERE operation_id=?', (op['operation_id'],))
-        ops._transition(op['operation_id'], 'running', reason='cancelling original relay child; retaining receipts', actor=caller.actor)
+        ops._transition(op['operation_id'], 'running', reason='cancelling original orchestration children; retaining receipts', actor=caller.actor)
     ops.kick()
     return ops.get(op['operation_id'], steps=False)
 
 
 def resume_children(ops, caller, op):
+    if op['action'] != ACTION:
+        from .fanout_operations import resume_children as fanout_resume
+        return fanout_resume(ops, caller, op)
     saved = receipt(ops, op['operation_id'], 'relay.child')
     if not op['cancel_requested'] and saved and ops._row(saved['operation_id'])['status'] == 'needs_attention':
         ops.resume(caller, saved['operation_id'])

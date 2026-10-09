@@ -118,14 +118,19 @@ async def _plan(ctx, client):
     use = p.get('use_worktree', True)
     grant = resource_policy.authorize_new_session(hc, sid, folder=folder, use_worktree=use, git_roots={resource_policy.norm(folder): root})
     agent = p.get('agent', 'claude')
-    permissions, scope, record = await confinement.start_decision(fleet, host, agent)
+    from .orchestration_operations import child_plan
+    parent_plan = child_plan(ctx)
+    role = (parent_plan or {}).get('role')
+    if role not in (None, 'planner') or role == 'planner' and agent != 'codex':
+        raise StepFailed('START_BINDING_CHANGED', 'invalid internal planner creation binding')
+    permissions, scope, record = await confinement.start_decision(fleet, host, agent, planner=role == 'planner')
     return {'host': host, 'session_id': sid, 'workspace_id': workspace['id'], 'workspace_name': workspace.get('name'),
             'folder': folder, 'origin_root': root, 'source_branch': branch, 'base_commit': await _head(client.invoke, folder),
             'agent': agent, 'preset': PRESETS[(agent, use)], 'use_worktree': use,
             'model': p.get('model') or (hc.codex_model if agent == 'codex' else None), 'title': p.get('title'),
             'permission_policy': hc.default_permission_mode, 'permission_options': permissions, 'write_scope': scope,
             'confinement': record, 'isolation': grant.isolation, 'register_tab': hc.orchestrate_register_tabs,
-            'profile_id': hc.profile_id}
+            'profile_id': hc.profile_id, 'role': role}
 
 
 def _guard(ctx, plan, *, reserved=True):
@@ -145,6 +150,7 @@ def _guard(ctx, plan, *, reserved=True):
         if (row.get('start_operation_id') != ctx.operation_id or row.get('status') in registry.RETIRED
                 or (reserved_receipt and row.get('created_at') != reserved_receipt['created_at'])
                 or row.get('workspace_id') != plan['workspace_id'] or row.get('origin_cwd') != plan['folder']
+                or row.get('role') != plan.get('role')
                 or row.get('agent_preset') != plan['preset'] or row.get('write_scope') != plan['write_scope']
                 or any(row.get(k) != v for k, v in registry_permission_fields(plan['permission_options']).items())):
             raise StepFailed('START_BINDING_CHANGED', 'the reserved standalone session changed')
@@ -244,7 +250,7 @@ async def run(ctx):
         if reservation and row.get('start_sent') is False and not unresolved:
             plan = _receipt(ctx, 'source.resolve')
             fields = {'status': 'failed'}
-            expected = {'task_id': None, 'role': None, 'status': 'starting', 'start_sent': False,
+            expected = {'task_id': None, 'role': plan.get('role'), 'status': 'starting', 'start_sent': False,
                         'cwd': plan['folder'], 'worktree_path': None, 'branch': None}
             if carrier:
                 pointer = {k: carrier[k] for k in ('cwd', 'worktree_path', 'branch')}
@@ -275,7 +281,7 @@ async def _run(ctx):
 
     def project(fields, *, carrier=None, status='starting'):
         reservation = _receipt(ctx, 'session.reserve')
-        expected = {'status': status, 'start_sent': False if not carrier else True, 'task_id': None, 'role': None,
+        expected = {'status': status, 'start_sent': False if not carrier else True, 'task_id': None, 'role': plan.get('role'),
             'workspace_id': plan['workspace_id'], 'agent_preset': plan['preset'], 'write_scope': plan['write_scope'],
             'cwd': carrier['cwd'] if carrier else plan['folder'],
             **registry_permission_fields(plan['permission_options'])}
@@ -291,7 +297,7 @@ async def _run(ctx):
                 'workspace_name': plan['workspace_name'], 'agent_preset': plan['preset'],
                 'origin_cwd': plan['folder'], 'origin_root': plan['origin_root'], 'cwd': plan['folder'],
                 'model': plan['model'], 'title': plan['title'], 'isolation': plan['isolation'],
-                'start_sent': False, 'start_operation_id': ctx.operation_id,
+                'start_sent': False, 'start_operation_id': ctx.operation_id, 'role': plan.get('role'),
                 'confinement': plan['confinement'], 'write_scope': plan['write_scope'],
                 **registry_permission_fields(plan['permission_options'])}, hc.orchestrate_max_sessions)
             return {'session_id': sid, 'created_at': registry.get(host, sid)['created_at']}
@@ -357,7 +363,7 @@ async def _run(ctx):
                     ctx.set_refs(start_mismatch=exc.code)
                     reservation = _receipt(ctx, 'session.reserve')
                     registry.project_start(host, sid, operation_id=ctx.operation_id, created_at=reservation['created_at'],
-                        expected={'status': 'starting', 'start_sent': True, 'task_id': None, 'role': None, 'cwd': carrier['cwd']},
+                        expected={'status': 'starting', 'start_sent': True, 'task_id': None, 'role': plan.get('role'), 'cwd': carrier['cwd']},
                         fields={'error_code': exc.code,
                                 'confinement': confinement.confirm(plan['confinement'], meta)})
                 raise NeedsAttention(exc.code, str(exc)) from exc

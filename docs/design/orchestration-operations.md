@@ -54,3 +54,33 @@ Task control 的 no-key null projection 可獨立接續，保留 task_send 的�
 驗證使用 MockBat／臨時 Git／中央 HTTP-RPC-MCP-CLI：scope、named/no-key、exact prefix、workspace choice、manual
 不變、owner/version race、lost child reply、重啟、parent cancel/resume、逐 effect receipt 與 zero resend。後端與 UI
 分開；full CI 由整合者序列執行，測試不代表 installed/live host 驗收。
+
+## 第二片：固定 fan-out（實作前合約）
+
+`fanout.plan`（start）target 固定 host/workspace；params 是原 message、brief、earlier、channel、thread、max_items。
+純讀 resolve receipt 固定 workspace ID／folder／Git root、branch、HEAD 與 planner 完整 prompt。唯一 start child
+透過 server-only parent receipt 選用 Codex read-only sandbox、never approval 和 role=planner；公開 session.start
+仍不接受 role／permission override。role 隨最初 reservation 保存，不能在 initial prompt 未完成時被 main relay 選中。
+
+`fanout.start` target 有 host，加上 source session_id 或 workspace。來源 session 的模式需要 start＋operate；
+純 caller-reviewed `params.plan=[{index,title,prompt,area?}]` 的模式只需 start，沒有 source stop 權限。
+前者 resolve 時一次讀原 session 最近回覆，固定 exact full ID、選中 block／digest、每項原字句、來源 incarnation
+和 destination workspace Git identity；後者直接保存 caller literal plan。agent=claude|codex、model、max_items
+保留原語意與每次 cap。Read dry-run（observe）不寫 registry／operation，apply 不可暗中換 source 或較新 plan。
+Source-session 的每項 prompt 保留原文加既有 BAT-STATUS footer；file plan 保留已解析 prompt，不另改寫。
+
+每項依序建立單一 `session.start` child，同 journal transaction 保存 link／intent receipt。只在前項正向證明
+prompt acceptance 後派下一項；部分失敗／未知停止新派送，保存每項 operation/session/carrier evidence。
+Parent cancel 逐一取消已建立 child 的未送工作；sent unknown 不隱藏，resume 僅續讀原 children，永不另挑 plan。
+控制／replay 保留最初 actor 及目前所需 caller scopes；children 私有 no-key identity 不暴露作 caller retry key。
+
+只有所有子項正向完成、原 source 的 creation/role=planner/standalone binding 未變、無 successor／active writer／
+pending prompt 且目前允許 orchestrate 時，獨立 `planner.stop` step 才可送一個 stop frame。每個 await 後重查原 binding、
+取消與 resource policy；stop ACK 與 unloaded readback 分開保存。Sent/unknown stop 永不重送；之後 meta=None 只能
+證明原被綁定 runtime 已不 loaded，不能聲稱由本操作唯一造成。原 reservation 在 stop 有 ACK／readback 且 registry
+CAS 仍屬此 incarnation 時才 retire；不刪 worktree／branch／tab，不採用 task-owned session，不釋放 shared successor。
+若原 planner 已被後續擁有者替換，保留 child successes 並顯式回報 retained，不覆蓋較新 record。
+
+MCP fanout_plan_session／fanout_from_plan 與 CLI fanout-plan／fanout-start／fanout PLAN --start 全進入中央；
+保留 confirm、read-only、optional explicit key、無 key 各自獨立。CLI 解析檔案本身純本機，未 --start 不呼叫寫 API。
+Standalone failover／task no-key 仍是下一片，不借此開回 raw fallback 或 parallel authority。

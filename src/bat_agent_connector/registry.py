@@ -472,7 +472,8 @@ def project_permissions(host, session_id, expected, operation_id, fields):
 
 
 def retire(host: str, session_id: str, status: str, *, created_at, actor: str, reason: str,
-           operation_id: str | None = None, carrier_resource_id: str | None = None) -> dict:
+           operation_id: str | None = None, carrier_resource_id: str | None = None,
+           expected: dict | None = None) -> dict:
     """Release capacity for a confirmed runtime generation without retiring its worktree/history."""
     if status not in RETIRED:
         raise ValueError("invalid session retirement status")
@@ -504,6 +505,12 @@ def retire(host: str, session_id: str, status: str, *, created_at, actor: str, r
                           "carrier_resource_id": carrier_resource_id}
             if e.get("status") == status and e.get("retirement") == retirement:
                 return {**result, "capacity_released": True}
+            if expected is not None:
+                if any(e.get(k) != v for k, v in expected.items()):
+                    return {**result, "capacity_reason": "generation_changed"}
+                refuse_start_claim(p, host, session_id)
+                from .cleanup import guard
+                guard(host, session_id=session_id, path=e.get("worktree_path") or e.get("cwd"), branch=e.get("branch"))
             if e.get("status") != "active":
                 return {**result, "capacity_reason": "not_counted"}
             e.update(status=status, retired_at=time.time(), retirement=retirement, updated_at=time.time())

@@ -106,6 +106,8 @@ class ApiV1:
         repository_sync.install(daemon.ops)
         from . import orchestration_operations
         orchestration_operations.install(daemon.ops)
+        from . import fanout_operations
+        fanout_operations.install(daemon.ops)
 
         from . import bulk_approval
         bulk_approval.install(daemon.ops, daemon._admin_token)
