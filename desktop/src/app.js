@@ -2851,7 +2851,7 @@ async function viewStart(main) {
     storageKey: `batc.start.${connection.namespace}`});
   main.append(h("a", {href: "#/sessions"}, t("nav_sessions")), h("h1", {}, t("start_title_page")),
     h("p", {class: "muted"}, t("start_intro")),
-    state.caps?.features?.repository_sync?.length ? h("p", {}, h("a", {href: "#/published"}, t("pub_title"))) : null, panel.box);
+    ...(state.caps?.features?.repository_sync?.length ? [h("p", {}, h("a", {href: "#/published"}, t("pub_title")))] : []), panel.box);
   try {await panel.init();} catch { /* panel retains the original intent and shows the read error */ }
   assertView(connection);
   return onEvents(ev => {if (["operation", "host", "session"].includes(ev.resource_type)) return panel.refresh(true);});

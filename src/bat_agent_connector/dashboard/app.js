@@ -10636,7 +10636,7 @@ async function viewStart(main) {
 		opStatus,
 		storageKey: `batc.start.${connection.namespace}`
 	});
-	main.append(h("a", { href: "#/sessions" }, t("nav_sessions")), h("h1", {}, t("start_title_page")), h("p", { class: "muted" }, t("start_intro")), state.caps?.features?.repository_sync?.length ? h("p", {}, h("a", { href: "#/published" }, t("pub_title"))) : null, panel.box);
+	main.append(h("a", { href: "#/sessions" }, t("nav_sessions")), h("h1", {}, t("start_title_page")), h("p", { class: "muted" }, t("start_intro")), ...state.caps?.features?.repository_sync?.length ? [h("p", {}, h("a", { href: "#/published" }, t("pub_title")))] : [], panel.box);
 	try {
 		await panel.init();
 	} catch {}
