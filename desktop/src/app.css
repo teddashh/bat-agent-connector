@@ -78,6 +78,11 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 .capture { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--line); }
 .capture summary { cursor: pointer; font-weight: 600; }
 .permissions { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--line); }
+.bulk-prompt { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow-y: auto; }
+.bulk-item select { max-width: 100%; }
+.bulk-evidence { margin: 8px 0 12px; font-size: 13px; }
+.bulk-evidence summary { cursor: pointer; color: var(--muted); }
+.bulk-receipt { overflow-wrap: anywhere; }
 .permissions summary { cursor: pointer; font-weight: 600; }
 .permissions .muted { font-size: 14px; }
 .permission-mode { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

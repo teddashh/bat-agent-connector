@@ -6,6 +6,7 @@ import { mountFleet } from "./fleet.js";
 import { groupedSessions, matchesSession, runtimeStale, sessionActivity } from "./state/sessions.js";
 import { capturePanel } from "./capture.js";
 import { permissionsPanel } from "./permissions.js";
+import { approvalsPanel } from "./approvals.js";
 import { consumePageAsync, settleRefreshes, storageScope } from "./state/events.ts";
 
 const TOKEN_KEY = "batc.dashboard.token";
@@ -608,7 +609,8 @@ async function viewSessions(main) {
     h("summary", {}, t("sessions_workspaces")), h("p", {class: "muted"}, t("sessions_scope_note")), navigation,
     h("a", {class: "session-project-link", href: "#/projects"}, t("sessions_projects")));
   main.append(h("h1", {}, t("sessions_title")), h("p", {class: "muted"}, t("sessions_intro")),
-    h("div", {class: "filters session-filters"}, search, hostSel, accessSel), status,
+    h("div", {class: "filters session-filters"}, search, hostSel, accessSel,
+      state.caps?.actions?.some(a => a.action === "session.approve_pending") ? h("a", {href: "#/approvals"}, t("bulk_title")) : null), status,
     h("div", {class: "session-layout"}, scope, h("section", {"aria-label": t("sessions_title"), class: "session-results"}, count, list,
       h("div", {class: "session-pagination"}, more, h("span", {class: "muted"}, t("sessions_page_note"))))));
   try {
@@ -2723,6 +2725,16 @@ async function viewCleanup(main, section, ident) {
   return onEvents(ev => { if (["cleanup", "operation"].includes(ev.resource_type)) return refresh(); });
 }
 
+async function viewApprovals(main) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const panel = approvalsPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    ready: () => state.online && !state.nativeBusy, errorBox, opStatus,
+    storageKey: `batc.approvals.${connection.namespace}`});
+  main.append(h("a", {href: "#/sessions"}, t("sessions_title")), h("h1", {}, t("bulk_title")), panel.box);
+  try {await panel.refresh();} catch { /* panel retains its fixed intent and displays the read error */ }
+  return onEvents(event => event.resource_type === "operation" ? panel.refresh(true) : panel.update());
+}
+
 const NAV = [["home", "nav_home"], ["projects", "nav_projects"], ["sessions", "nav_sessions"], ["delivery", "nav_delivery"],
   ["operations", "nav_operations"], ["cleanup", "nav_cleanup"], ["settings", "nav_settings"]];
 let teardown = null;
@@ -2739,7 +2751,7 @@ async function route() {
   main.replaceChildren();
   if (!state.token && name !== "settings") { main.append(h("p", { class: "note" }, t(nativeDesktop ? "desktop_connect_needed" : "need_token"))); viewSettings(main); return; }
   const views = { home: viewHome, projects: viewProjects, project: viewProject, item: viewWorkItem, sessions: viewSessions,
-    cleanup: viewCleanup, delivery: viewDelivery, operations: viewOperations, session: viewSession, op: viewOperation, settings: viewSettings,
+    cleanup: viewCleanup, approvals: viewApprovals, delivery: viewDelivery, operations: viewOperations, session: viewSession, op: viewOperation, settings: viewSettings,
     host: viewHostDiscovery, task: (main, id) => viewObservedResource(main, "execution", id),
     worktree: (main, id) => viewObservedResource(main, "worktree", id) };
   const off = await (views[name] || viewHome)(main, ...rest);

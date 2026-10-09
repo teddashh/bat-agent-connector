@@ -69,6 +69,24 @@ Parent replay/resume/cancel 要求目前 operate+observe 與原 authenticated cr
 不能以另一個只有 operate 的 credential 經 child 繞過組合 scope。中央 worker 只依受理的有限
 operate/observe authority 管理原 children，不建立 admin principal 或跨 caller fallback。
 
+## 共用 Dashboard
+
+工作階段清單連到獨立且精簡的批次核准頁。Host 必選、workspace 可選，使用上述 observe preview，
+逐筆展示完整 prompt、完整 session ID、不可選原因及模式；初次預覽不預選任何項目。每筆明示
+`dont_ask_again=true` 的持續授權語意，模式預設不變更，不能把此操作表示為單次 allow。
+超過 50 個 session 時顯示只檢查部分的提示，不把已載入數量當總量。
+
+預覽、草稿選擇及受理前固定 request/key 存在既有 endpoint/server/principal namespace。
+更換 host/workspace 會使尚未送出的 preview 失效；已送出請求鎖定範圍，回覆遺失只重試原 key，
+有 operation ID 只 GET 查回。核對 action、actor、target、完整 params/preconditions、key 與原 ID
+才接受回應。結果畫面同時顯示父狀態與逐筆 child receipts，不以父 succeeded 推論全部成功。
+只有 terminal readback 或中央確定受理前的 preview/mode 拒絕才允許明確開始另一批；一般 auth、
+transport、conflict 保留原意圖。取消/恢復沿用 operation 詳情頁，沒有另一套批次控制流程。
+事件等候尚未收到回覆的 POST，再讀原 operation，失敗不推進 cursor。新 prompt 不加入舊選擇。
+
+Native transport 僅增加固定 `/approval-previews` POST，拒絕 query、key、未知欄位與非字串 scope。
+沒有新增直接 BAT 權限。Browser/native fixtures 與本機包測試不是真 Windows 或 live 接受證據。
+
 ## 尚未涵蓋
 
 不處理 ask-user 自動作答、任意工具規則、批次 deny、跨 host 原子交易、歷史 deferred adoption、
