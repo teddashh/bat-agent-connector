@@ -2675,7 +2675,9 @@ async function viewCleanup(main, section, ident) {
         h("a", { href: `#/cleanup/resource/${x.resource_id}` }, t("cleanup_kind_" + x.kind)),
         h("div", { class: "cleanup-binding" }, x.host, " ", x.path || x.ref || ""),
         h("p", { class: "muted" }, x.actor, " · ", when(x.cleaned_at * 1000)),
-        h("p", {}, t("cleanup_reason_reviewed")), ...(x.pull_requests || []).map(pr => h("p", {}, `${pr.repository} #${pr.pull_number}`))));
+        h("p", {}, t(({reviewed_cleanup: "cleanup_reason_reviewed", task_lifecycle: "cleanup_reason_automatic",
+          historical_task_cleanup: "cleanup_reason_historical"})[x.reason] || "cleanup_reason_recorded")),
+        ...(x.pull_requests || []).map(pr => h("p", {}, `${pr.repository} #${pr.pull_number}`))));
       if (cursor) historyOut.append(...rows); else fill(historyOut, ...rows, rows.length ? null : h("p", { class: "muted" }, t("cleanup_empty_history")));
       if (result.next_cursor) historyOut.append(h("button", { class: "secondary", onclick: e => {
         e.currentTarget.remove(); loadHistory(result.next_cursor);

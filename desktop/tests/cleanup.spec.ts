@@ -58,6 +58,16 @@ async function setup(page: Page, native: boolean, custom: (input: any, url: URL)
 }
 
 for (const native of [false, true]) {
+  test(`cleanup history distinguishes task lifecycle from reviewed authority (${native ? 'native' : 'browser'})`, async ({page}) => {
+    await setup(page, native, (_, url) => url.pathname === '/cleanup-tombstones' ? {status: 200, data: {
+      tombstones: ['reviewed_cleanup', 'task_lifecycle', 'historical_task_cleanup'].map((reason, index) => ({...item,
+        resource_id: 'wt_' + String(index).repeat(32), actor: reason === 'historical_task_cleanup' ? null : 'fixture',
+        reason, cleaned_at: 1})), next_cursor: null}} : null);
+    await page.goto('/dashboard/#/cleanup');
+    await expect(page.getByText('Removed by a reviewed cleanup operation.', {exact: true})).toHaveCount(1);
+    await expect(page.getByText('Automatically cleaned by the task service', {exact: false})).toBeVisible();
+    await expect(page.getByText('Historical record from an earlier task cleanup event', {exact: false})).toBeVisible();
+  });
   test(`task cleanup keeps coordinator verdict and refuses dirty-task discard (${native ? 'native' : 'browser'})`, async ({page}) => {
     const tid = '11111111-2222-4333-8444-555555555555', previews: any[] = [];
     await setup(page, native, (input, url) => {
