@@ -273,3 +273,10 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
 .fleet-bootstrap .muted { font-size: 14px; }
 .fleet-bootstrap button { min-height: 44px; }
 .bootstrap-receipt { overflow-wrap: anywhere; }
+
+.session-bat { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 4px; overflow-wrap: anywhere; }
+.session-bat .muted { font-size: 14px; }
+.session-bat select { max-width: 100%; }
+.session-bat button, .session-bat select { min-height: 44px; }
+.session-bat [role="status"]:empty { display: none; }
+@media (max-width: 640px) { .session-bat select, .session-bat textarea { font-size: 16px; } }
