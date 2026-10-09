@@ -7,6 +7,16 @@ mod support;
 use support::Fixture;
 
 fn binding_preimage(fixture: &Fixture) -> String {
+    // Independent expected existing root: the final path of this synthetic
+    // directory expands 8.3 aliases. Production deliberately does not use
+    // canonicalize because arbitrary configured paths can contain reparse points.
+    #[cfg(windows)]
+    let root = {
+        let canonical = fixture.0.canonicalize().unwrap();
+        std::path::PathBuf::from(canonical.to_str().unwrap().strip_prefix(r"\\?\").unwrap())
+    };
+    #[cfg(not(windows))]
+    let root = fixture.0.clone();
     let mut expected = String::from("desktop-configuration-v1\n");
     for relative in [
         "kit/fleet-inventory.json",
@@ -17,7 +27,7 @@ fn binding_preimage(fixture: &Fixture) -> String {
         // Windows PathBuf::join preserves embedded forward slashes. Normalize
         // lexical components like .NET GetFullPath, without canonicalizing the
         // deliberately absent user SSH path (or adding a verbatim prefix).
-        let path: std::path::PathBuf = fixture.0.join(relative).components().collect();
+        let path: std::path::PathBuf = root.join(relative).components().collect();
         let full = path.to_str().unwrap();
         expected.push_str(&format!("{}:{full}:", full.encode_utf16().count()));
         if path.exists() {
@@ -168,6 +178,17 @@ fn actual_system_powershell_binding_matches_normalized_native_paths() {
         }
     }
     let fixture = Fixture::new();
+    let short_root = {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        let input: Vec<u16> = fixture.0.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut output = vec![0u16; 32768];
+        let count =
+            unsafe { GetShortPathNameW(input.as_ptr(), output.as_mut_ptr(), output.len() as u32) }
+                as usize;
+        assert!(count > 0 && count < output.len());
+        std::path::PathBuf::from(std::ffi::OsString::from_wide(&output[..count]))
+    };
     let script = fixture.0.join("configuration-binding.ps1");
     std::fs::write(
         &script,
@@ -183,7 +204,17 @@ fn actual_system_powershell_binding_matches_normalized_native_paths() {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, b"# synthetic user configuration\r\n").unwrap();
         }
-        let configuration = fixture.load();
+        let configuration = Configuration::load(
+            Paths::new(
+                &short_root.join("kit"),
+                &short_root.join("使用者🦀"),
+                None,
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(configuration.binding(), fixture.load().binding());
         let mut child = OwnedChild(
             Command::new(&powershell)
                 .args([
@@ -194,7 +225,7 @@ fn actual_system_powershell_binding_matches_normalized_native_paths() {
                     "-File",
                 ])
                 .arg(&script)
-                .env("BAT_FLEET_BINDING_FIXTURE", &fixture.0)
+                .env("BAT_FLEET_BINDING_FIXTURE", &short_root)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
