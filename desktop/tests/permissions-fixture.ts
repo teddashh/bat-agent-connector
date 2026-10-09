@@ -16,9 +16,11 @@ export async function permissionFixture(page: Page, native: boolean, options: an
       api_access: state.apiAccess, provenance: state.provenance, streaming: state.streaming, control_version: state.controlVersion};
     if (input.method === 'POST') {
       state.posts.push(input);
+      if (state.refuse) return {status: state.refuse === 'PERMISSIONS_HOST_POLICY' ? 403 : 409,
+        data: {error: {code: state.refuse, message: 'Fixture refusal: '+state.refuse}}};
       const previous = state.operation;
       if (!previous || previous.key !== input.idempotency_key) state.operation = {key: input.idempotency_key,
-        operation_id: operationId, action: 'session.permissions', target: input.body.target, params: input.body.params,
+        operation_id: operationId, idempotency_key: input.idempotency_key, action: 'session.permissions', target: input.body.target, params: input.body.params,
         status: state.status, error_code: state.status === 'failed' ? 'PERMISSIONS_STREAMING' : null,
         status_reason: state.status === 'failed' ? 'Claude is streaming. Wait for idle and submit a new operation.' : '',
         steps: [{name: 'permission_frame', status: state.status === 'uncertain' ? 'uncertain' : 'succeeded'}],
@@ -28,6 +30,7 @@ export async function permissionFixture(page: Page, native: boolean, options: an
       const operation = {...state.operation};
       if (state.badTarget) operation.target = {host: 'other', session_id: 'other-session'};
       if (state.badMode) operation.params = {mode: 'default'};
+      if (state.badKey) operation.idempotency_key = 'another-identical-request';
       return {status: 200, data: {operation}};
     }
     state.reads.push(input.path);

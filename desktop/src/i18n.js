@@ -11,6 +11,7 @@ const STRINGS = {
     permissions_unknown: "結果尚未確認。原請求已保留。", permissions_fixed: "保留同一筆模式、Session 與操作。部分完成或結果不明時，請先檢視回執。",
     permissions_invalid_result: "操作回應與原權限請求不符。", permissions_damaged: "已儲存的請求不完整。請先在操作紀錄確認結果。",
     permissions_accepted: "BAT 已接受要求的設定；尚未獨立查證執行中的 agent 已套用。", permissions_next_turn: "Codex 於下一輪使用這個設定。",
+    permissions_refused: "這筆請求在受理前被拒絕。可明確建立另一筆變更；原請求不會自動重試。",
 
     capture_title: "擷取遠端檔案", capture_host: "來源主機", capture_session: "完整人工 Session ID",
     capture_path: "遠端相對檔案路徑", capture_help: "輸入一個相對於所選人工 session 資料夾的檔案路徑。讀取過程不會更動來源。",
@@ -429,6 +430,7 @@ const STRINGS = {
     permissions_invalid_result: "The operation reply does not match the original permission request.", permissions_damaged: "The saved request is incomplete. Check operation history before proceeding.",
     permissions_accepted: "BAT accepted the requested configuration; the running agent's settings have not been independently verified.",
     permissions_next_turn: "Codex uses this setting on its next turn.",
+    permissions_refused: "This request was refused before admission. You can explicitly start another change; the original request will not retry automatically.",
 
     capture_title: "Capture a remote file", capture_host: "Source host", capture_session: "Full manual session ID",
     capture_path: "Remote relative file path", capture_help: "Enter one file path relative to the selected manual session folder. The source is read without being changed.",

@@ -21,6 +21,7 @@ var STRINGS = {
 		permissions_damaged: "已儲存的請求不完整。請先在操作紀錄確認結果。",
 		permissions_accepted: "BAT 已接受要求的設定；尚未獨立查證執行中的 agent 已套用。",
 		permissions_next_turn: "Codex 於下一輪使用這個設定。",
+		permissions_refused: "這筆請求在受理前被拒絕。可明確建立另一筆變更；原請求不會自動重試。",
 		capture_title: "擷取遠端檔案",
 		capture_host: "來源主機",
 		capture_session: "完整人工 Session ID",
@@ -675,6 +676,7 @@ var STRINGS = {
 		permissions_damaged: "The saved request is incomplete. Check operation history before proceeding.",
 		permissions_accepted: "BAT accepted the requested configuration; the running agent's settings have not been independently verified.",
 		permissions_next_turn: "Codex uses this setting on its next turn.",
+		permissions_refused: "This request was refused before admission. You can explicitly start another change; the original request will not retry automatically.",
 		capture_title: "Capture a remote file",
 		capture_host: "Source host",
 		capture_session: "Full manual session ID",
@@ -1908,6 +1910,11 @@ var terminal = (operation) => [
 	"failed",
 	"cancelled"
 ].includes(operation?.status);
+var admissionRefusals = new Set([
+	"TASK_PAUSED",
+	"CONTROL_VERSION_CONFLICT",
+	"PERMISSIONS_HOST_POLICY"
+]);
 function restore(value, target) {
 	const saved = { mode: modeValue(value?.mode) ? value.mode : "default" };
 	if (!record(value) || !value.intent) return saved;
@@ -1923,6 +1930,7 @@ function restore(value, target) {
 		} : null,
 		operation_id: operationId(intent.operation_id) ? intent.operation_id : null
 	};
+	if (valid && !saved.intent.operation_id && admissionRefusals.has(intent.refused)) saved.intent.refused = intent.refused;
 	if (valid) saved.mode = request.params.mode;
 	return saved;
 }
@@ -1931,7 +1939,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 	try {
 		raw = JSON.parse(localStorage.getItem(storageKey));
 	} catch {}
-	let saved = restore(raw, target), operation = null, busy = false, refreshing = null, readFailed = false;
+	let saved = restore(raw, target), operation = null, busy = false, refreshing = null, submission = null, readFailed = false;
 	const mode = h("select", { "aria-label": t("permissions_mode") }, ...["default", "allow_all"].map((value) => h("option", { value }, t("permissions_" + value))));
 	mode.value = saved.mode;
 	const message = h("div", { role: "status" }), result = h("div", { "data-permission-result": "" });
@@ -1953,7 +1961,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 	const writable = () => ready() && session()?.api_access === "managed" && session()?.provenance === "connector_managed" && (caps()?.scopes || []).includes("operate") && caps()?.hosts?.some((host) => host.host === target.host && host.writes === true) && caps()?.actions?.some((action) => action.action === "session.permissions" && action.allowed === true);
 	const accept = (candidate) => {
 		guard();
-		if (!saved.intent || !operationId(candidate?.operation_id) || candidate.action !== "session.permissions" || candidate.target?.host !== target.host || candidate.target?.session_id !== target.session_id || !modeValue(candidate.params?.mode) || saved.intent.request && candidate.params.mode !== saved.intent.request.params.mode || saved.intent.operation_id && candidate.operation_id !== saved.intent.operation_id) throw new Error(t("permissions_invalid_result"));
+		if (!saved.intent || !operationId(candidate?.operation_id) || candidate.action !== "session.permissions" || candidate.target?.host !== target.host || candidate.target?.session_id !== target.session_id || !modeValue(candidate.params?.mode) || saved.intent.request && candidate.params.mode !== saved.intent.request.params.mode || saved.intent.key && candidate.idempotency_key !== saved.intent.key || saved.intent.operation_id && candidate.operation_id !== saved.intent.operation_id) throw new Error(t("permissions_invalid_result"));
 		operation = candidate;
 		saved.intent.operation_id = candidate.operation_id;
 		saved.mode = candidate.params.mode;
@@ -1966,7 +1974,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 	const apply = h("button", {
 		class: "secondary",
 		onclick: async () => {
-			if (!current() || busy || readFailed || !writable() || saved.intent?.operation_id || saved.intent && !saved.intent.request) return;
+			if (!current() || busy || readFailed || !writable() || saved.intent?.operation_id || saved.intent && (!saved.intent.request || saved.intent.refused)) return;
 			busy = true;
 			if (!saved.intent) {
 				saved.intent = {
@@ -1983,15 +1991,28 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 			}
 			const intent = saved.intent;
 			update();
+			submission = (async () => {
+				try {
+					const response = await api("POST", "/operations?wait=3", intent.request, intent.key);
+					guard();
+					if (saved.intent === intent) accept(response.operation);
+				} catch (error) {
+					if (current()) {
+						if (error.status >= 400 && error.status < 500 && admissionRefusals.has(error.code)) {
+							intent.refused = error.code;
+							persist();
+						}
+						message.replaceChildren(errorBox(error));
+					}
+				} finally {
+					busy = false;
+					if (current()) update();
+				}
+			})();
 			try {
-				const response = await api("POST", "/operations?wait=3", intent.request, intent.key);
-				guard();
-				if (saved.intent === intent) accept(response.operation);
-			} catch (error) {
-				if (current()) message.replaceChildren(errorBox(error));
+				await submission;
 			} finally {
-				busy = false;
-				if (current()) update();
+				submission = null;
 			}
 		}
 	}, t("permissions_apply"));
@@ -2002,7 +2023,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 	const another = h("button", {
 		class: "secondary",
 		onclick: () => {
-			if (!current() || busy || refreshing || readFailed || !terminal(operation) || !writable()) return;
+			if (!current() || busy || refreshing || readFailed || !(terminal(operation) || saved.intent?.refused) || !writable()) return;
 			saved = { mode: "default" };
 			mode.value = saved.mode;
 			operation = null;
@@ -2028,18 +2049,18 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 		const managed = session()?.api_access === "managed" && session()?.provenance === "connector_managed";
 		box.hidden = !managed;
 		mode.disabled = busy || Boolean(saved.intent);
-		apply.hidden = Boolean(saved.intent?.operation_id);
+		apply.hidden = Boolean(saved.intent?.operation_id || saved.intent?.refused);
 		apply.disabled = busy || readFailed || !writable() || Boolean(saved.intent && !saved.intent.request);
 		apply.textContent = t(saved.intent ? "permissions_retry" : "permissions_apply");
 		check.hidden = !saved.intent?.operation_id;
 		check.disabled = busy || Boolean(refreshing);
-		another.hidden = !terminal(operation);
+		another.hidden = !(terminal(operation) || saved.intent?.refused);
 		another.disabled = busy || Boolean(refreshing) || readFailed || !writable();
 		explanation.textContent = t(saved.mode === "allow_all" ? "permissions_allow_help" : "permissions_default_help");
 		restriction.textContent = writable() ? "" : t("permissions_unavailable");
 		result.replaceChildren();
 		if (saved.intent) {
-			result.append(h("p", {}, operation ? opStatus(operation) : t("permissions_unknown"), " ", saved.intent.operation_id ? h("a", { href: `#/op/${saved.intent.operation_id}` }, t("permissions_details")) : null, operation?.status_reason ? ` · ${operation.status_reason}` : ""));
+			result.append(h("p", {}, operation ? opStatus(operation) : t(saved.intent.refused ? "permissions_refused" : "permissions_unknown"), " ", saved.intent.operation_id ? h("a", { href: `#/op/${saved.intent.operation_id}` }, t("permissions_details")) : null, operation?.status_reason ? ` · ${operation.status_reason}` : ""));
 			result.append(h("p", { class: "muted" }, t("permissions_fixed")));
 			if (operation?.status === "succeeded") result.append(h("p", { class: "muted" }, t("permissions_accepted"), operation.result?.agent_kind === "codex" ? " " + t("permissions_next_turn") : ""));
 			if (!saved.intent.request && !saved.intent.operation_id) result.append(h("p", { class: "error" }, t("permissions_damaged")));
@@ -2053,6 +2074,10 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 		}
 	}
 	async function refresh(fresh = false) {
+		if (submission) {
+			await submission;
+			guard();
+		}
 		if (refreshing) {
 			await refreshing;
 			if (fresh) return refresh(true);

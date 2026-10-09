@@ -3,6 +3,9 @@ const record = value => value && typeof value === "object" && !Array.isArray(val
 const modeValue = value => ["default", "allow_all"].includes(value);
 const operationId = value => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
 const terminal = operation => ["succeeded", "failed", "cancelled"].includes(operation?.status);
+// These admission gates run after key replay and before INSERT. Generic auth/4xx and
+// transport failures can precede replay of an accepted request, so are never reset proof.
+const admissionRefusals = new Set(["TASK_PAUSED", "CONTROL_VERSION_CONFLICT", "PERMISSIONS_HOST_POLICY"]);
 function restore(value, target) {
   const saved = {mode: modeValue(value?.mode) ? value.mode : "default"};
   if (!record(value) || !value.intent) return saved;
@@ -15,13 +18,14 @@ function restore(value, target) {
   saved.intent = {key: valid ? intent.key : null, request: valid ? {action: "session.permissions",
     target: {...target}, params: {mode: request.params.mode}, preconditions: {}} : null,
     operation_id: operationId(intent.operation_id) ? intent.operation_id : null};
+  if (valid && !saved.intent.operation_id && admissionRefusals.has(intent.refused)) saved.intent.refused = intent.refused;
   if (valid) saved.mode = request.params.mode;
   return saved;
 }
 export function permissionsPanel({h, t, api, caps, guard, errorBox, opStatus, storageKey, target, session, ready}) {
   let raw;
   try {raw = JSON.parse(localStorage.getItem(storageKey));} catch { /* memory only */ }
-  let saved = restore(raw, target), operation = null, busy = false, refreshing = null, readFailed = false;
+  let saved = restore(raw, target), operation = null, busy = false, refreshing = null, submission = null, readFailed = false;
   const mode = h("select", {"aria-label": t("permissions_mode")},
     ...["default", "allow_all"].map(value => h("option", {value}, t("permissions_" + value))));
   mode.value = saved.mode;
@@ -38,6 +42,7 @@ export function permissionsPanel({h, t, api, caps, guard, errorBox, opStatus, st
     if (!saved.intent || !operationId(candidate?.operation_id) || candidate.action !== "session.permissions" ||
         candidate.target?.host !== target.host || candidate.target?.session_id !== target.session_id ||
         !modeValue(candidate.params?.mode) || (saved.intent.request && candidate.params.mode !== saved.intent.request.params.mode) ||
+        (saved.intent.key && candidate.idempotency_key !== saved.intent.key) ||
         (saved.intent.operation_id && candidate.operation_id !== saved.intent.operation_id))
       throw new Error(t("permissions_invalid_result"));
     operation = candidate; saved.intent.operation_id = candidate.operation_id;
@@ -46,7 +51,7 @@ export function permissionsPanel({h, t, api, caps, guard, errorBox, opStatus, st
   };
   const apply = h("button", {class: "secondary", onclick: async () => {
     if (!current() || busy || readFailed || !writable() || saved.intent?.operation_id ||
-        (saved.intent && !saved.intent.request)) return;
+        (saved.intent && (!saved.intent.request || saved.intent.refused))) return;
     busy = true;
     if (!saved.intent) {
       // Session observations currently expose no authoritative control_version. Central admission
@@ -56,15 +61,24 @@ export function permissionsPanel({h, t, api, caps, guard, errorBox, opStatus, st
       persist();
     }
     const intent = saved.intent; update();
-    try {
-      const response = await api("POST", "/operations?wait=3", intent.request, intent.key); guard();
-      if (saved.intent === intent) accept(response.operation);
-    } catch (error) {if (current()) message.replaceChildren(errorBox(error));}
-    finally {busy = false; if (current()) update();}
+    submission = (async () => {
+      try {
+        const response = await api("POST", "/operations?wait=3", intent.request, intent.key); guard();
+        if (saved.intent === intent) accept(response.operation);
+      } catch (error) {
+        if (current()) {
+          if (error.status >= 400 && error.status < 500 && admissionRefusals.has(error.code)) {
+            intent.refused = error.code; persist();
+          }
+          message.replaceChildren(errorBox(error));
+        }
+      } finally {busy = false; if (current()) update();}
+    })();
+    try {await submission;} finally {submission = null;}
   }}, t("permissions_apply"));
   const check = h("button", {class: "secondary", onclick: () => refresh(true).catch(showError)}, t("permissions_check"));
   const another = h("button", {class: "secondary", onclick: () => {
-    if (!current() || busy || refreshing || readFailed || !terminal(operation) || !writable()) return;
+    if (!current() || busy || refreshing || readFailed || !(terminal(operation) || saved.intent?.refused) || !writable()) return;
     saved = {mode: "default"}; mode.value = saved.mode; operation = null; persist(); message.replaceChildren(); update();
   }}, t("permissions_new"));
   const box = h("details", {class: "permissions", "data-permissions": ""}, h("summary", {}, t("permissions_title")),
@@ -79,16 +93,16 @@ export function permissionsPanel({h, t, api, caps, guard, errorBox, opStatus, st
     const managed = session()?.api_access === "managed" && session()?.provenance === "connector_managed";
     box.hidden = !managed;
     mode.disabled = busy || Boolean(saved.intent);
-    apply.hidden = Boolean(saved.intent?.operation_id);
+    apply.hidden = Boolean(saved.intent?.operation_id || saved.intent?.refused);
     apply.disabled = busy || readFailed || !writable() || Boolean(saved.intent && !saved.intent.request);
     apply.textContent = t(saved.intent ? "permissions_retry" : "permissions_apply");
     check.hidden = !saved.intent?.operation_id; check.disabled = busy || Boolean(refreshing);
-    another.hidden = !terminal(operation); another.disabled = busy || Boolean(refreshing) || readFailed || !writable();
+    another.hidden = !(terminal(operation) || saved.intent?.refused); another.disabled = busy || Boolean(refreshing) || readFailed || !writable();
     explanation.textContent = t(saved.mode === "allow_all" ? "permissions_allow_help" : "permissions_default_help");
     restriction.textContent = writable() ? "" : t("permissions_unavailable");
     result.replaceChildren();
     if (saved.intent) {
-      result.append(h("p", {}, operation ? opStatus(operation) : t("permissions_unknown"), " ",
+      result.append(h("p", {}, operation ? opStatus(operation) : t(saved.intent.refused ? "permissions_refused" : "permissions_unknown"), " ",
         saved.intent.operation_id ? h("a", {href: `#/op/${saved.intent.operation_id}`}, t("permissions_details")) : null,
         operation?.status_reason ? ` · ${operation.status_reason}` : ""));
       result.append(h("p", {class: "muted"}, t("permissions_fixed")));
@@ -99,6 +113,9 @@ export function permissionsPanel({h, t, api, caps, guard, errorBox, opStatus, st
   }
   function showError(error) {if (current()) {readFailed = true; message.replaceChildren(errorBox(error)); update();}}
   async function refresh(fresh = false) {
+    // An operation event may precede the first POST reply. Wait for its identity,
+    // then read again before acknowledging the event rather than keeping an older reply snapshot.
+    if (submission) {await submission; guard();}
     if (refreshing) {await refreshing; if (fresh) return refresh(true); return;}
     if (!saved.intent?.operation_id) return;
     const intent = saved.intent;
