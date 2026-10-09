@@ -87,3 +87,38 @@ Protocol shapes reuse the repository’s [BAT 3.2.12 source table](../ORCHESTRAT
 (`src-tauri/src/commands/worktree.rs`, `remote_server.rs`,
 `node-sidecar/src/handlers/claude-session.mjs`) and
 [pinned protocol/permission notes](../PROTOCOL.md). No new BAT channel is introduced.
+
+## Shared start form
+
+The Sessions page links to `#/start`. The shared browser/native form uses the existing
+Dashboard panels, fields, colors and responsive spacing. Select a configured host,
+then one exact workspace ID returned by `GET /api/v1/workspaces?host=…&limit=200`.
+No first workspace is implicitly selected. A truncated listing is explicitly labeled;
+failed, ambiguous or wrong-host discovery cannot enable a new start. Agent, optional
+model/title and original instructions are explicit; the supported new-worktree option
+is fixed, with no unsupported shared-folder checkbox.
+
+The draft and operation envelope/key are scoped to the verified backend/principal.
+The original text is not trimmed or rewritten. Storage must succeed before the first
+POST. A lost reply freezes the original request for explicit same-key retry; replay
+remains available when the host tier has changed, since central checks an accepted key
+before new admission. Only this action's proven post-replay tier/worktree admission
+refusals permit an explicit replacement draft. Generic authentication failures and
+key conflicts preserve the original intent. Accepted reloads and event refreshes use
+GET only. A response must match actor, key, full request and known operation ID; a
+positive start result must also match its host and recorded session identity.
+
+Start confirmation and initial-prompt acceptance are displayed separately. A known
+start with an unproven prompt stays partial, links to step receipts and cannot silently
+open a replacement session. Event refresh joins a held first submission, then rereads
+the accepted operation before advancing its checkpoint. A read failure retains the
+original draft and blocks another submission until read-back succeeds.
+
+Native adds only a fixed GET `/workspaces` route with bounded, non-duplicate host/limit
+query fields, no body or operation key. It uses the existing verified credential and
+central transport. Shared transport fixtures cover browser/native replay, malformed
+receipts, principal/backend isolation, stale workspace responses and event ordering.
+`npm run test:start` exercises the actual central API, operation service and MockBat:
+original prompts, lost reply replay before changed tier, accepted reload, and an
+unknown Codex send without resend. Temporary fixture evidence is not installed or
+live-host acceptance.

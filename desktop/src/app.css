@@ -246,3 +246,13 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
 .file-preview { margin-top: 12px; }
 .file-preview pre { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .file-preview img { max-width: 100%; max-height: 320px; object-fit: contain; }
+/* Standalone start reuses shared panels, fields and the compact inventory heading. */
+.session-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.session-start .muted { font-size: 14px; }
+.session-start > .panel > label { display: block; margin-top: 14px; }
+.session-start textarea { display: block; margin-top: 4px; }
+.session-start select, .session-start input { min-width: 0; max-width: 100%; }
+.session-start [data-start-result] { overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .session-start button, .session-start select, .session-start input, .session-heading > a { min-height: 44px; align-content: center; }
+}

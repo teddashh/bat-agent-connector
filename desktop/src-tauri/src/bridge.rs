@@ -903,7 +903,7 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
     static GET: OnceLock<Regex> = OnceLock::new();
     static POST: OnceLock<Regex> = OnceLock::new();
     let pattern = if input.method == "GET" {
-        GET.get_or_init(|| Regex::new(concat!(r"^/(?:version|capabilities|bootstrap|hosts|sessions|policy|operations|events|checkpoints|projects|work-items|integrations|integrations/candidates|",
+        GET.get_or_init(|| Regex::new(concat!(r"^/(?:version|capabilities|bootstrap|hosts|workspaces|sessions|policy|operations|events|checkpoints|projects|work-items|integrations|integrations/candidates|",
             r"cleanup-retained|cleanup-tombstones(?:/(?:cr|wt)_[0-9a-f]{32})?|artifacts(?:/art_[0-9a-f]{32}/revisions/[1-9][0-9]{0,8})?|",
             r"sessions/[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+(?:/(?:messages|checkpoint-preview|history|relations))?|",
             r"operations/op_[0-9a-f]{32}|tasks/[0-9a-f-]{8,64}(?:/(?:history|sessions))?|checkpoints/cp_[0-9a-f]{32}|",
@@ -962,10 +962,33 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
         }
     }
     let cleanup = path.starts_with("/cleanup-");
+    if path == "/workspaces" && input.idempotency_key.is_some() {
+        return Err("Workspace discovery accepts no operation key".into());
+    }
     let mut query_keys = std::collections::HashSet::new();
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         if key.chars().chain(value.chars()).any(char::is_control) {
             return Err("Control characters in central query are refused".into());
+        }
+        if path == "/workspaces" {
+            let valid = match key.as_ref() {
+                "host" => {
+                    !value.is_empty()
+                        && value.len() <= 256
+                        && value
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+                }
+                "limit" => {
+                    value.bytes().all(|b| b.is_ascii_digit())
+                        && value.parse::<u16>().is_ok_and(|n| (1..=200).contains(&n))
+                }
+                _ => false,
+            };
+            if !valid || !query_keys.insert(key.to_string()) {
+                return Err("Workspace query parameter is invalid".into());
+            }
+            continue;
         }
         if cleanup {
             let allowed = match path {
@@ -1076,6 +1099,42 @@ mod tests {
         sync::mpsc,
         thread,
     };
+
+    #[test]
+    fn workspace_discovery_has_fixed_bounded_read_contract() {
+        for path in [
+            "/workspaces",
+            "/workspaces?host=build-east&limit=200",
+            "/workspaces?limit=1",
+        ] {
+            assert!(validate_request(&request("GET", path)).is_ok(), "{path}");
+            assert!(validate_request(&request("POST", path)).is_err(), "{path}");
+        }
+        for path in [
+            "/workspaces?host=",
+            "/workspaces?host=a&host=b",
+            "/workspaces?limit=0",
+            "/workspaces?limit=201",
+            "/workspaces?limit=1&limit=2",
+            "/workspaces?limit=abc",
+            "/workspaces?limit=%2B1",
+            "/workspaces?host=../other",
+            "/workspaces?host=https%3A%2F%2Fother",
+            "/workspaces?host=x%0Ay",
+            "/workspaces?session_id=x",
+            "/workspaces?path=x",
+            "/%77orkspaces",
+            "/workspaces/other",
+        ] {
+            assert!(validate_request(&request("GET", path)).is_err(), "{path}");
+        }
+        let mut input = request("GET", "/workspaces?host=demo");
+        input.body = Some(serde_json::json!({"host":"other"}));
+        assert!(validate_request(&input).is_err());
+        input.body = None;
+        input.idempotency_key = Some("not-a-write".into());
+        assert!(validate_request(&input).is_err());
+    }
 
     fn request(method: &str, path: &str) -> ConnectorRequest {
         ConnectorRequest {

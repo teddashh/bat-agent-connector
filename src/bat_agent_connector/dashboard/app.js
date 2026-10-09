@@ -30,6 +30,35 @@ var STRINGS = {
 		bulk_answer: "核准",
 		bulk_permissions: "權限",
 		bulk_full_prompt: "完整請求與識別資料",
+		start_title_page: "開始新工作階段",
+		start_intro: "在選定主機與工作區建立獨立的受管理工作階段。",
+		start_choose_host: "選擇主機",
+		start_workspace: "工作區",
+		start_choose_workspace: "選擇工作區",
+		start_agent: "Agent",
+		start_model: "模型（選填）",
+		start_model_default: "使用主機或 agent 的預設模型",
+		start_title: "標題（選填）",
+		start_prompt: "原始指示（選填）",
+		start_reload_workspaces: "重新讀取工作區",
+		start_loading_workspaces: "正在讀取中央工作區清單…",
+		start_discovery_failed: "工作區清單尚未確認。請重新讀取後再選擇。",
+		start_no_workspaces: "此主機目前未傳回工作區。",
+		start_truncated: "只顯示前 200 個工作區；此清單不代表所有工作區。",
+		start_workspace_help: "使用中央傳回的固定工作區 ID；主機仍會檢查儲存庫與權限。",
+		start_isolation: "使用新 worktree。此操作不會接管既有人工或任務工作階段。",
+		start_prompt_help: "原文會完整保留。留白只啟動工作階段，不會自動產生指示。",
+		start_apply: "開始工作階段",
+		start_new: "準備另一個工作階段",
+		start_unavailable: "需要 observe 與 start 權限，以及中央允許啟動的主機。",
+		start_invalid_result: "操作回應與原啟動請求不符。",
+		start_unknown: "提交結果尚未確認；原請求與 key 已保留。",
+		start_fixed: "主機、工作區、選項與原文已固定。查回不會重新啟動；結果不明時只能重試同一筆請求。",
+		start_refused: "請求在受理前被拒絕。可明確準備另一筆請求。",
+		start_started: "已確認啟動：",
+		start_without_prompt: "未要求傳送初始指示。",
+		start_prompt_accepted: "已確認初始指示被接受。",
+		start_prompt_unknown: "已啟動，但初始指示是否被接受尚未確認。請檢視逐步回執；不要另開工作階段重送。",
 		sessions_label: "標題",
 		sessions_workspace: "工作區",
 		sessions_workspace_id: "工作區 ID",
@@ -796,6 +825,35 @@ var STRINGS = {
 		bulk_answer: "Approval",
 		bulk_permissions: "Permissions",
 		bulk_full_prompt: "Full request and identity",
+		start_title_page: "Start a new session",
+		start_intro: "Create a standalone managed session on the host and workspace you choose.",
+		start_choose_host: "Choose a host",
+		start_workspace: "Workspace",
+		start_choose_workspace: "Choose a workspace",
+		start_agent: "Agent",
+		start_model: "Model (optional)",
+		start_model_default: "Use the host or agent default",
+		start_title: "Title (optional)",
+		start_prompt: "Original instructions (optional)",
+		start_reload_workspaces: "Reload workspaces",
+		start_loading_workspaces: "Reading central workspaces…",
+		start_discovery_failed: "Workspace discovery is unconfirmed. Reload before selecting.",
+		start_no_workspaces: "This host returned no workspaces.",
+		start_truncated: "Only the first 200 workspaces are shown; this is not a complete listing.",
+		start_workspace_help: "Uses the exact workspace ID returned by central. Host repository and policy checks still apply.",
+		start_isolation: "Uses a new worktree. This action does not adopt an existing manual or task session.",
+		start_prompt_help: "Your original text is preserved. Leave this empty to start without sending instructions.",
+		start_apply: "Start session",
+		start_new: "Prepare another session",
+		start_unavailable: "Requires observe and start scopes, and a host central permits for starting sessions.",
+		start_invalid_result: "The operation response does not match the original start request.",
+		start_unknown: "Submission is unconfirmed; the original request and key are preserved.",
+		start_fixed: "Host, workspace, options and original text are fixed. Read-back never starts again; an unknown submission can only retry the same request.",
+		start_refused: "This request was refused before admission. You can explicitly prepare another request.",
+		start_started: "Start confirmed:",
+		start_without_prompt: "No initial instructions were requested.",
+		start_prompt_accepted: "Initial instructions were accepted.",
+		start_prompt_unknown: "Started, but acceptance of the initial instructions is unconfirmed. Check the step receipts; do not resend by starting another session.",
 		sessions_label: "Title",
 		sessions_workspace: "Workspace",
 		sessions_workspace_id: "Workspace ID",
@@ -2052,9 +2110,9 @@ async function mountFleet(main, { h, t }) {
 }
 //#endregion
 //#region src/state/sessions.js
-var text = (value) => typeof value === "string" ? value : "";
+var text$1 = (value) => typeof value === "string" ? value : "";
 function workspaceGroup(session) {
-	const host = text(session.host), id = text(session.workspace_id), name = text(session.workspace);
+	const host = text$1(session.host), id = text$1(session.workspace_id), name = text$1(session.workspace);
 	return {
 		key: JSON.stringify([
 			host,
@@ -2088,7 +2146,7 @@ function matchesSession(session, query) {
 		session.agent_kind,
 		session.model,
 		session.worktree_branch
-	].map(text).join("\n").toLocaleLowerCase();
+	].map(text$1).join("\n").toLocaleLowerCase();
 	return query.trim().toLocaleLowerCase().split(/\s+/).every((word) => haystack.includes(word));
 }
 function runtimeStale(session) {
@@ -2128,7 +2186,7 @@ function sessionActivity(session) {
 //#region src/capture.js
 var record$1 = (value) => value && typeof value === "object" && !Array.isArray(value);
 var digest = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
-var operationId$1 = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
+var operationId$2 = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
 var previewId = (value) => typeof value === "string" && /^acpv_[0-9a-f]{32}$/.test(value);
 var previewToken = (value) => typeof value === "string" && value.length > 0 && value.length <= 24576;
 var validPreview$1 = (doc) => record$1(doc) && record$1(doc.source) && record$1(doc.evidence) && [
@@ -2155,10 +2213,10 @@ function restore$1(value, source) {
 	if (validPreview$1(value.preview)) saved.preview = value.preview;
 	const intent = value.intent, request = intent?.request;
 	const usable = request?.action === "artifact.capture" && previewId(request.target?.preview_id) && previewToken(request.params?.preview_token) && digest(request.preconditions?.expected_fingerprint) && typeof intent.key === "string" && intent.key.length > 0 && intent.key.length <= 200;
-	if (usable || operationId$1(intent?.operation_id)) saved.intent = {
+	if (usable || operationId$2(intent?.operation_id)) saved.intent = {
 		key: usable ? intent.key : null,
 		request: usable ? request : null,
-		operation_id: operationId$1(intent.operation_id) ? intent.operation_id : null,
+		operation_id: operationId$2(intent.operation_id) ? intent.operation_id : null,
 		reviewed_digest: digest(intent.reviewed_digest) ? intent.reviewed_digest : saved.preview?.evidence.digest
 	};
 	return saved;
@@ -2259,7 +2317,7 @@ function capturePanel({ h, t, api, caps, guard, onEvents, errorBox, storageKey, 
 	const accept = async (operation) => {
 		guard();
 		const intent = saved.intent;
-		if (!intent || !operationId$1(operation?.operation_id) || operation.action !== "artifact.capture" || intent.operation_id && intent.operation_id !== operation.operation_id || intent.request && operation.target?.preview_id !== intent.request.target.preview_id) throw new Error(t("capture_invalid_result"));
+		if (!intent || !operationId$2(operation?.operation_id) || operation.action !== "artifact.capture" || intent.operation_id && intent.operation_id !== operation.operation_id || intent.request && operation.target?.preview_id !== intent.request.target.preview_id) throw new Error(t("capture_invalid_result"));
 		saved.operation = operation;
 		saved.intent.operation_id = operation.operation_id;
 		persist();
@@ -2477,13 +2535,13 @@ function capturePanel({ h, t, api, caps, guard, onEvents, errorBox, storageKey, 
 //#region src/permissions.js
 var record = (value) => value && typeof value === "object" && !Array.isArray(value);
 var modeValue = (value) => ["default", "allow_all"].includes(value);
-var operationId = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
-var terminal$1 = (operation) => [
+var operationId$1 = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
+var terminal$2 = (operation) => [
 	"succeeded",
 	"failed",
 	"cancelled"
 ].includes(operation?.status);
-var admissionRefusals = new Set([
+var admissionRefusals$1 = new Set([
 	"TASK_PAUSED",
 	"CONTROL_VERSION_CONFLICT",
 	"PERMISSIONS_HOST_POLICY",
@@ -2502,9 +2560,9 @@ function restore(value, target) {
 			params: { mode: request.params.mode },
 			preconditions: {}
 		} : null,
-		operation_id: operationId(intent.operation_id) ? intent.operation_id : null
+		operation_id: operationId$1(intent.operation_id) ? intent.operation_id : null
 	};
-	if (valid && !saved.intent.operation_id && admissionRefusals.has(intent.refused)) saved.intent.refused = intent.refused;
+	if (valid && !saved.intent.operation_id && admissionRefusals$1.has(intent.refused)) saved.intent.refused = intent.refused;
 	if (valid) saved.mode = request.params.mode;
 	return saved;
 }
@@ -2535,7 +2593,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 	const writable = () => ready() && session()?.api_access === "managed" && session()?.provenance === "connector_managed" && (caps()?.scopes || []).includes("operate") && caps()?.hosts?.some((host) => host.host === target.host && host.writes === true) && caps()?.actions?.some((action) => action.action === "session.permissions" && action.allowed === true);
 	const accept = (candidate) => {
 		guard();
-		if (!saved.intent || !operationId(candidate?.operation_id) || candidate.action !== "session.permissions" || candidate.target?.host !== target.host || candidate.target?.session_id !== target.session_id || !modeValue(candidate.params?.mode) || saved.intent.request && candidate.params.mode !== saved.intent.request.params.mode || saved.intent.key && candidate.idempotency_key !== saved.intent.key || saved.intent.operation_id && candidate.operation_id !== saved.intent.operation_id) throw new Error(t("permissions_invalid_result"));
+		if (!saved.intent || !operationId$1(candidate?.operation_id) || candidate.action !== "session.permissions" || candidate.target?.host !== target.host || candidate.target?.session_id !== target.session_id || !modeValue(candidate.params?.mode) || saved.intent.request && candidate.params.mode !== saved.intent.request.params.mode || saved.intent.key && candidate.idempotency_key !== saved.intent.key || saved.intent.operation_id && candidate.operation_id !== saved.intent.operation_id) throw new Error(t("permissions_invalid_result"));
 		operation = candidate;
 		saved.intent.operation_id = candidate.operation_id;
 		saved.mode = candidate.params.mode;
@@ -2572,7 +2630,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 					if (saved.intent === intent) accept(response.operation);
 				} catch (error) {
 					if (current()) {
-						if (error.status >= 400 && error.status < 500 && admissionRefusals.has(error.code)) {
+						if (error.status >= 400 && error.status < 500 && admissionRefusals$1.has(error.code)) {
 							intent.refused = error.code;
 							persist();
 						}
@@ -2597,7 +2655,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 	const another = h("button", {
 		class: "secondary",
 		onclick: () => {
-			if (!current() || busy || refreshing || readFailed || !(terminal$1(operation) || saved.intent?.refused) || !writable()) return;
+			if (!current() || busy || refreshing || readFailed || !(terminal$2(operation) || saved.intent?.refused) || !writable()) return;
 			saved = { mode: "default" };
 			mode.value = saved.mode;
 			operation = null;
@@ -2628,7 +2686,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 		apply.textContent = t(saved.intent ? "permissions_retry" : "permissions_apply");
 		check.hidden = !saved.intent?.operation_id;
 		check.disabled = busy || Boolean(refreshing);
-		another.hidden = !(terminal$1(operation) || saved.intent?.refused);
+		another.hidden = !(terminal$2(operation) || saved.intent?.refused);
 		another.disabled = busy || Boolean(refreshing) || readFailed || !writable();
 		explanation.textContent = t(saved.mode === "allow_all" ? "permissions_allow_help" : "permissions_default_help");
 		restriction.textContent = writable() ? "" : t("permissions_unavailable");
@@ -2684,18 +2742,18 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 }
 //#endregion
 //#region src/approvals.js
-var object = (value) => value && typeof value === "object" && !Array.isArray(value);
+var object$1 = (value) => value && typeof value === "object" && !Array.isArray(value);
 var opId = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
 var mode = (value) => value === null || value === "default" || value === "allow_all";
-var terminal = (op) => [
+var terminal$1 = (op) => [
 	"succeeded",
 	"failed",
 	"cancelled"
 ].includes(op?.status);
-var equal = (a, b) => {
+var equal$1 = (a, b) => {
 	if (a === b) return true;
-	if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => equal(v, b[i]));
-	return object(a) && object(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal(a[k], b[k]));
+	if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => equal$1(v, b[i]));
+	return object$1(a) && object$1(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$1(a[k], b[k]));
 };
 var refusedBeforeAdmission = new Set([
 	"BULK_PREVIEW_INVALID",
@@ -2706,13 +2764,13 @@ var refusedBeforeAdmission = new Set([
 	"BULK_BINDING_CHANGED"
 ]);
 function validPreview(p) {
-	return object(p) && typeof p.host === "string" && p.host.length > 0 && (p.workspace === null || typeof p.workspace === "string") && typeof p.preview_token === "string" && p.preview_token.startsWith("bap1.") && p.preview_token.length <= 262144 && /^[0-9a-f]{64}$/.test(p.fingerprint) && Number.isFinite(p.expires_at) && equal(p.answer, {
+	return object$1(p) && typeof p.host === "string" && p.host.length > 0 && (p.workspace === null || typeof p.workspace === "string") && typeof p.preview_token === "string" && p.preview_token.startsWith("bap1.") && p.preview_token.length <= 262144 && /^[0-9a-f]{64}$/.test(p.fingerprint) && Number.isFinite(p.expires_at) && equal$1(p.answer, {
 		permission: "allow",
 		dont_ask_again: true
-	}) && Array.isArray(p.items) && p.items.length <= 50 && new Set(p.items.map((i) => i?.item_id)).size === p.items.length && p.items.every((i) => object(i) && /^bapi_[0-9a-f]{24}$/.test(i.item_id) && i.host === p.host && typeof i.session_id === "string" && typeof i.eligible === "boolean" && (!i.eligible || object(i.prompt) && typeof i.prompt.toolUseId === "string" && Array.isArray(i.allowed_modes) && i.allowed_modes.includes(null) && i.allowed_modes.every(mode)));
+	}) && Array.isArray(p.items) && p.items.length <= 50 && new Set(p.items.map((i) => i?.item_id)).size === p.items.length && p.items.every((i) => object$1(i) && /^bapi_[0-9a-f]{24}$/.test(i.item_id) && i.host === p.host && typeof i.session_id === "string" && typeof i.eligible === "boolean" && (!i.eligible || object$1(i.prompt) && typeof i.prompt.toolUseId === "string" && Array.isArray(i.allowed_modes) && i.allowed_modes.includes(null) && i.allowed_modes.every(mode)));
 }
-function validRequest(r) {
-	return r?.action === "session.approve_pending" && typeof r.target?.host === "string" && Object.keys(r.target).length === 1 && typeof r.params?.preview_token === "string" && Object.keys(r.params).length === 2 && Array.isArray(r.params.selection) && r.params.selection.length > 0 && r.params.selection.length <= 50 && r.params.selection.every((s) => object(s) && Object.keys(s).length === 2 && /^bapi_[0-9a-f]{24}$/.test(s.item_id) && mode(s.mode)) && new Set(r.params.selection.map((s) => s.item_id)).size === r.params.selection.length && object(r.preconditions) && Object.keys(r.preconditions).length === 1 && /^[0-9a-f]{64}$/.test(r.preconditions.expected_fingerprint);
+function validRequest$1(r) {
+	return r?.action === "session.approve_pending" && typeof r.target?.host === "string" && Object.keys(r.target).length === 1 && typeof r.params?.preview_token === "string" && Object.keys(r.params).length === 2 && Array.isArray(r.params.selection) && r.params.selection.length > 0 && r.params.selection.length <= 50 && r.params.selection.every((s) => object$1(s) && Object.keys(s).length === 2 && /^bapi_[0-9a-f]{24}$/.test(s.item_id) && mode(s.mode)) && new Set(r.params.selection.map((s) => s.item_id)).size === r.params.selection.length && object$1(r.preconditions) && Object.keys(r.preconditions).length === 1 && /^[0-9a-f]{64}$/.test(r.preconditions.expected_fingerprint);
 }
 function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, storageKey }) {
 	let raw;
@@ -2725,7 +2783,7 @@ function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, sto
 	};
 	if (validPreview(raw?.preview) && raw.preview.host === saved.host && (raw.preview.workspace || "") === saved.workspace) saved.preview = raw.preview;
 	if (raw?.intent) saved.intent = {
-		request: validRequest(raw.intent.request) ? raw.intent.request : null,
+		request: validRequest$1(raw.intent.request) ? raw.intent.request : null,
 		key: typeof raw.intent.key === "string" && raw.intent.key.length > 0 && raw.intent.key.length <= 200 ? raw.intent.key : null,
 		operation_id: opId(raw.intent.operation_id) ? raw.intent.operation_id : null,
 		refused: refusedBeforeAdmission.has(raw.intent.refused) && !raw.intent.operation_id ? raw.intent.refused : null
@@ -2733,7 +2791,7 @@ function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, sto
 	let operation = null, busy = false, submission = null, refreshing = null, readFailed = false;
 	const selected = new Map(), controls = [];
 	if (saved.preview && !saved.intent && Array.isArray(raw?.selection)) {
-		for (const s of raw.selection) if (object(s) && saved.preview.items.some((i) => i.eligible && i.item_id === s.item_id && i.allowed_modes.includes(s.mode))) selected.set(s.item_id, s.mode);
+		for (const s of raw.selection) if (object$1(s) && saved.preview.items.some((i) => i.eligible && i.item_id === s.item_id && i.allowed_modes.includes(s.mode))) selected.set(s.item_id, s.mode);
 	}
 	const current = () => {
 		try {
@@ -2799,7 +2857,7 @@ function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, sto
 	const accept = (candidate) => {
 		guard();
 		const intent = saved.intent;
-		if (!intent || !opId(candidate?.operation_id) || !intent.request || !intent.key || candidate.actor !== caps()?.actor || candidate.idempotency_key !== intent.key || !equal({
+		if (!intent || !opId(candidate?.operation_id) || !intent.request || !intent.key || candidate.actor !== caps()?.actor || candidate.idempotency_key !== intent.key || !equal$1({
 			action: candidate.action,
 			target: candidate.target,
 			params: candidate.params,
@@ -2876,7 +2934,7 @@ function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, sto
 	const another = h("button", {
 		class: "secondary",
 		onclick: () => {
-			if (!current() || busy || refreshing || readFailed || !(terminal(operation) || saved.intent?.refused)) return;
+			if (!current() || busy || refreshing || readFailed || !(terminal$1(operation) || saved.intent?.refused)) return;
 			delete saved.intent;
 			delete saved.preview;
 			selected.clear();
@@ -2962,7 +3020,7 @@ function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, sto
 		apply.disabled = busy || readFailed || !writable() || (fixed ? !saved.intent.request || !saved.intent.key : !selected.size || expired);
 		check.hidden = !saved.intent?.operation_id;
 		check.disabled = busy || Boolean(refreshing);
-		another.hidden = !(terminal(operation) || saved.intent?.refused);
+		another.hidden = !(terminal$1(operation) || saved.intent?.refused);
 		another.disabled = busy || Boolean(refreshing) || readFailed;
 		summary.textContent = fixed ? t(saved.intent.refused ? "bulk_refused" : "bulk_fixed") : expired ? t("bulk_expired") : t("bulk_selected", { count: selected.size });
 		result.replaceChildren();
@@ -3014,6 +3072,370 @@ function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, sto
 		box,
 		update,
 		refresh
+	};
+}
+//#endregion
+//#region src/session-start.js
+var object = (v) => v && typeof v === "object" && !Array.isArray(v);
+var operationId = (v) => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
+var terminal = (op) => [
+	"succeeded",
+	"failed",
+	"cancelled"
+].includes(op?.status);
+var equal = (a, b) => a === b || object(a) && object(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal(a[k], b[k]));
+var text = (v, max) => typeof v === "string" && v.trim().length > 0 && v.length <= max;
+var fields = [
+	"host",
+	"workspace",
+	"agent",
+	"model",
+	"title",
+	"prompt"
+];
+var admissionRefusals = new Set(["TIER_DISABLED", "START_WORKTREE_REQUIRED"]);
+function validRequest(r) {
+	return r?.action === "session.start" && object(r.target) && Object.keys(r.target).length === 2 && text(r.target.host, 256) && text(r.target.workspace, 256) && object(r.params) && Object.keys(r.params).every((k) => [
+		"agent",
+		"model",
+		"title",
+		"prompt",
+		"use_worktree"
+	].includes(k)) && ["claude", "codex"].includes(r.params.agent) && r.params.use_worktree === true && [
+		"model",
+		"title",
+		"prompt"
+	].every((k) => !(k in r.params) || text(r.params[k], k === "prompt" ? 2e4 : 256)) && object(r.preconditions) && Object.keys(r.preconditions).length === 0;
+}
+function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, storageKey }) {
+	let raw;
+	try {
+		raw = JSON.parse(localStorage.getItem(storageKey));
+	} catch {}
+	let saved = Object.fromEntries(fields.map((k) => [k, typeof raw?.[k] === "string" ? raw[k] : k === "agent" ? "claude" : ""]));
+	if (!["claude", "codex"].includes(saved.agent)) saved.agent = "claude";
+	if (raw?.intent) {
+		const valid = validRequest(raw.intent.request) && text(raw.intent.key, 200);
+		saved.intent = {
+			request: valid ? raw.intent.request : null,
+			key: valid ? raw.intent.key : null,
+			operation_id: operationId(raw.intent.operation_id) ? raw.intent.operation_id : null,
+			refused: !raw.intent.operation_id && admissionRefusals.has(raw.intent.refused) ? raw.intent.refused : null
+		};
+		if (valid) Object.assign(saved, raw.intent.request.target, {
+			model: "",
+			title: "",
+			prompt: ""
+		}, raw.intent.request.params);
+	}
+	let operation = null, busy = false, submission = null, refreshing = null, readFailed = false;
+	let workspaces = [], discovery = 0, discovering = false, discoveredHost = "";
+	const current = () => {
+		try {
+			guard();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const persist = () => {
+		guard();
+		localStorage.setItem(storageKey, JSON.stringify(saved));
+	};
+	const observe = () => caps()?.scopes?.includes("observe");
+	const allowed = () => observe() && caps()?.scopes?.includes("start") && caps()?.actions?.some((a) => a.action === "session.start" && a.allowed === true);
+	const hostAllowed = () => caps()?.hosts?.some((x) => x.host === saved.host && x.writes === true && x.orchestrate === true);
+	const status = h("div", { role: "status" }), result = h("div", { "data-start-result": "" }), discoveryStatus = h("p", {
+		class: "muted",
+		role: "status"
+	});
+	const host = h("select", { "aria-label": t("host") }, h("option", { value: "" }, t("start_choose_host")), ...(caps()?.hosts || []).map((x) => h("option", { value: x.host }, x.host)));
+	if (saved.host && ![...host.options].some((o) => o.value === saved.host)) host.append(h("option", { value: saved.host }, saved.host));
+	const workspace = h("select", { "aria-label": t("start_workspace") });
+	const agent = h("select", { "aria-label": t("start_agent") }, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
+	const model = h("input", {
+		"aria-label": t("start_model"),
+		maxlength: 256,
+		placeholder: t("start_model_default")
+	});
+	const title = h("input", {
+		"aria-label": t("start_title"),
+		maxlength: 256
+	});
+	const prompt = h("textarea", {
+		"aria-label": t("start_prompt"),
+		maxlength: 2e4,
+		rows: 6
+	});
+	const inputs = {
+		host,
+		workspace,
+		agent,
+		model,
+		title,
+		prompt
+	};
+	const fill = () => {
+		for (const [k, el] of Object.entries(inputs)) el.value = saved[k];
+	};
+	const showError = (e) => {
+		if (current()) status.replaceChildren(errorBox(e));
+	};
+	function renderWorkspaces() {
+		workspace.replaceChildren(h("option", { value: "" }, t("start_choose_workspace")), ...workspaces.map((w) => h("option", { value: w.workspace_id }, `${w.name || w.workspace_id} · ${w.workspace_id}`)));
+		if (saved.workspace && ![...workspace.options].some((o) => o.value === saved.workspace)) workspace.append(h("option", { value: saved.workspace }, saved.workspace));
+		workspace.value = saved.workspace;
+	}
+	async function discover() {
+		if (!current() || saved.intent || !observe() || !saved.host) return;
+		const expected = ++discovery, selectedHost = saved.host;
+		discovering = true;
+		discoveredHost = "";
+		workspaces = [];
+		renderWorkspaces();
+		update();
+		discoveryStatus.textContent = t("start_loading_workspaces");
+		try {
+			const doc = await api("GET", `/workspaces?host=${encodeURIComponent(selectedHost)}&limit=200`);
+			guard();
+			if (expected !== discovery || saved.host !== selectedHost || saved.intent) return;
+			if (!Array.isArray(doc.workspaces) || doc.workspaces.length > 200 || typeof doc.has_more !== "boolean" || !object(doc.errors) || Object.keys(doc.errors).length || doc.workspaces.some((w) => !object(w) || w.host !== selectedHost || !text(w.workspace_id, 256) || typeof w.folder !== "string") || new Set(doc.workspaces.map((w) => w.workspace_id)).size !== doc.workspaces.length) throw new Error(t("start_discovery_failed"));
+			workspaces = doc.workspaces;
+			discoveredHost = selectedHost;
+			renderWorkspaces();
+			discoveryStatus.textContent = t(doc.has_more ? "start_truncated" : !workspaces.length ? "start_no_workspaces" : "start_workspace_help");
+		} catch (e) {
+			if (current() && expected === discovery) {
+				discoveryStatus.textContent = t("start_discovery_failed");
+				showError(e);
+			}
+		} finally {
+			if (expected === discovery && current()) {
+				discovering = false;
+				update();
+			}
+		}
+	}
+	const reload = h("button", {
+		class: "secondary",
+		onclick: discover
+	}, t("start_reload_workspaces"));
+	const accept = (candidate) => {
+		guard();
+		const intent = saved.intent;
+		if (!intent || !intent.request || !intent.key || !operationId(candidate?.operation_id) || candidate.actor !== caps()?.actor || candidate.idempotency_key !== intent.key || !equal({
+			action: candidate.action,
+			target: candidate.target,
+			params: candidate.params,
+			preconditions: candidate.preconditions
+		}, intent.request) || intent.operation_id && intent.operation_id !== candidate.operation_id) throw new Error(t("start_invalid_result"));
+		for (const proof of [candidate.result, candidate.external_refs?.start_result]) if (proof?.started === true && (proof.host !== intent.request.target.host || !text(proof.session_id, 256) || proof.session_id !== candidate.external_refs?.session_id)) throw new Error(t("start_invalid_result"));
+		operation = candidate;
+		intent.operation_id = candidate.operation_id;
+		readFailed = false;
+		persist();
+		status.replaceChildren();
+		update();
+	};
+	function request() {
+		const params = {
+			agent: saved.agent,
+			use_worktree: true
+		};
+		for (const key of [
+			"model",
+			"title",
+			"prompt"
+		]) if (saved[key] !== "") params[key] = saved[key];
+		return {
+			action: "session.start",
+			target: {
+				host: saved.host,
+				workspace: saved.workspace
+			},
+			params,
+			preconditions: {}
+		};
+	}
+	const apply = h("button", {
+		class: "primary",
+		onclick: async () => {
+			if (!current() || busy || readFailed || !ready() || !allowed() || saved.intent?.operation_id || saved.intent?.refused) return;
+			if (!saved.intent) {
+				if (!hostAllowed() || discoveredHost !== saved.host || !workspaces.some((w) => w.workspace_id === saved.workspace) || !validRequest(request())) return;
+				saved.intent = {
+					request: request(),
+					key: crypto.randomUUID(),
+					operation_id: null
+				};
+			}
+			if (!saved.intent.request || !saved.intent.key) return;
+			try {
+				persist();
+			} catch (e) {
+				showError(e);
+				update();
+				return;
+			}
+			busy = true;
+			update();
+			const intent = saved.intent;
+			submission = (async () => {
+				try {
+					const data = await api("POST", "/operations?wait=3", intent.request, intent.key);
+					guard();
+					accept(data.operation);
+				} catch (e) {
+					if (current()) {
+						if (e.status >= 400 && e.status < 500 && admissionRefusals.has(e.code)) {
+							intent.refused = e.code;
+							try {
+								persist();
+							} catch {}
+						}
+						showError(e);
+					}
+				} finally {
+					busy = false;
+					if (current()) update();
+				}
+			})();
+			try {
+				await submission;
+			} finally {
+				submission = null;
+			}
+		}
+	}, t("start_apply"));
+	const check = h("button", {
+		class: "secondary",
+		onclick: () => refresh(true).catch(() => {})
+	}, t("permissions_check"));
+	const another = h("button", {
+		class: "secondary",
+		onclick: async () => {
+			if (!current() || busy || refreshing || readFailed || !(terminal(operation) || saved.intent?.refused)) return;
+			const previous = saved;
+			saved = {
+				host: saved.host,
+				workspace: "",
+				agent: "claude",
+				model: "",
+				title: "",
+				prompt: ""
+			};
+			try {
+				persist();
+			} catch (e) {
+				saved = previous;
+				showError(e);
+				return;
+			}
+			operation = null;
+			status.replaceChildren();
+			fill();
+			renderWorkspaces();
+			update();
+			await discover();
+		}
+	}, t("start_new"));
+	for (const [key, el] of Object.entries(inputs)) el.addEventListener(key === "host" || key === "workspace" || key === "agent" ? "change" : "input", () => {
+		if (!current() || saved.intent || busy) {
+			fill();
+			return;
+		}
+		saved[key] = el.value;
+		if (key === "host") {
+			saved.workspace = "";
+			discoveredHost = "";
+			workspaces = [];
+			discovery++;
+			renderWorkspaces();
+		}
+		try {
+			persist();
+		} catch (e) {
+			showError(e);
+		}
+		update();
+		if (key === "host") discover();
+	});
+	const label = (name, control) => h("label", {}, t(name), control);
+	const box = h("section", {
+		class: "session-start",
+		"data-session-start": ""
+	}, h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("host", host), label("start_workspace", workspace)), h("div", { class: "actions" }, reload), discoveryStatus, h("p", { class: "muted" }, t("start_isolation"))), h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("start_agent", agent), label("start_model", model), label("start_title", title)), label("start_prompt", prompt), h("p", { class: "muted" }, t("start_prompt_help"))), h("div", { class: "actions" }, apply, check, another), result, status);
+	function update() {
+		const fixed = Boolean(saved.intent);
+		for (const el of Object.values(inputs)) el.disabled = busy || fixed;
+		workspace.disabled ||= discovering || !saved.host;
+		reload.hidden = fixed;
+		reload.disabled = discovering || !observe() || !saved.host;
+		apply.hidden = Boolean(saved.intent?.operation_id || saved.intent?.refused);
+		apply.textContent = t(fixed ? "permissions_retry" : "start_apply");
+		apply.disabled = busy || readFailed || !ready() || !allowed() || (fixed ? !saved.intent.request || !saved.intent.key : !hostAllowed() || discoveredHost !== saved.host || !workspaces.some((w) => w.workspace_id === saved.workspace) || !validRequest(request()));
+		check.hidden = !saved.intent?.operation_id;
+		check.disabled = busy || Boolean(refreshing);
+		another.hidden = !(terminal(operation) || saved.intent?.refused);
+		another.disabled = busy || Boolean(refreshing) || readFailed;
+		result.replaceChildren();
+		if (!allowed()) result.append(h("p", { class: "muted" }, t("start_unavailable")));
+		if (!fixed) return;
+		result.append(h("p", {}, operation ? opStatus(operation) : t(saved.intent.refused ? "start_refused" : "start_unknown"), " ", saved.intent.operation_id ? h("a", { href: `#/op/${saved.intent.operation_id}` }, t("permissions_details")) : null, operation?.status_reason ? ` · ${operation.status_reason}` : ""));
+		result.append(h("p", { class: "muted" }, t("start_fixed")));
+		if (!saved.intent.request || !saved.intent.key) result.append(h("p", { class: "error" }, t("permissions_damaged")));
+		const proof = operation?.result?.started === true ? operation.result : operation?.external_refs?.start_result;
+		if (proof?.started === true) {
+			result.append(h("p", {}, t("start_started"), " ", h("a", { href: `#/session/${encodeURIComponent(proof.host)}/${encodeURIComponent(proof.session_id)}` }, proof.session_id)));
+			const sent = operation?.result?.prompt_sent;
+			result.append(h("p", { class: "muted" }, t(!saved.intent.request?.params.prompt ? "start_without_prompt" : sent === true ? "start_prompt_accepted" : "start_prompt_unknown")));
+		}
+	}
+	async function refresh(fresh = false) {
+		if (submission) {
+			await submission;
+			guard();
+		}
+		if (refreshing) {
+			await refreshing;
+			if (fresh) return refresh(true);
+			return;
+		}
+		if (!saved.intent?.operation_id) {
+			update();
+			return;
+		}
+		refreshing = (async () => {
+			const doc = await api("GET", `/operations/${saved.intent.operation_id}`);
+			guard();
+			accept(doc.operation);
+		})();
+		update();
+		try {
+			await refreshing;
+		} catch (e) {
+			if (current()) {
+				readFailed = true;
+				showError(e);
+				update();
+			}
+			throw e;
+		} finally {
+			refreshing = null;
+			if (current()) update();
+		}
+	}
+	renderWorkspaces();
+	fill();
+	update();
+	return {
+		box,
+		update,
+		refresh,
+		init: async () => {
+			if (saved.intent) await refresh();
+			else await discover();
+		}
 	};
 }
 //#endregion
@@ -4016,7 +4438,7 @@ async function viewSessions(main) {
 		class: "session-project-link",
 		href: "#/projects"
 	}, t("sessions_projects")));
-	main.append(h("h1", {}, t("sessions_title")), h("p", { class: "muted" }, t("sessions_intro")), h("div", { class: "filters session-filters" }, search, hostSel, accessSel, state.caps?.actions?.some((a) => a.action === "session.approve_pending") ? h("a", { href: "#/approvals" }, t("bulk_title")) : null), status, h("div", { class: "session-layout" }, scope, h("section", {
+	main.append(h("div", { class: "session-heading" }, h("h1", {}, t("sessions_title")), state.caps?.actions?.some((a) => a.action === "session.start") ? h("a", { href: "#/start" }, t("start_title_page")) : null), h("p", { class: "muted" }, t("sessions_intro")), h("div", { class: "filters session-filters" }, search, hostSel, accessSel, state.caps?.actions?.some((a) => a.action === "session.approve_pending") ? h("a", { href: "#/approvals" }, t("bulk_title")) : null), status, h("div", { class: "session-layout" }, scope, h("section", {
 		"aria-label": t("sessions_title"),
 		class: "session-results"
 	}, count, list, h("div", { class: "session-pagination" }, more, h("span", { class: "muted" }, t("sessions_page_note"))))));
@@ -7111,6 +7533,36 @@ async function viewApprovals(main) {
 	} catch {}
 	return onEvents((event) => event.resource_type === "operation" ? panel.refresh(true) : panel.update());
 }
+async function viewStart(main) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	const panel = sessionStartPanel({
+		h,
+		t,
+		api,
+		caps: () => state.caps,
+		guard: () => assertView(connection),
+		ready: () => state.online && !state.nativeBusy,
+		errorBox,
+		opStatus,
+		storageKey: `batc.start.${connection.namespace}`
+	});
+	main.append(h("a", { href: "#/sessions" }, t("nav_sessions")), h("h1", {}, t("start_title_page")), h("p", { class: "muted" }, t("start_intro")), panel.box);
+	try {
+		await panel.init();
+	} catch {}
+	assertView(connection);
+	return onEvents((ev) => {
+		if ([
+			"operation",
+			"host",
+			"session"
+		].includes(ev.resource_type)) return panel.refresh(true);
+	});
+}
 var NAV = [
 	["home", "nav_home"],
 	["projects", "nav_projects"],
@@ -7153,6 +7605,7 @@ async function route() {
 		delivery: viewDelivery,
 		operations: viewOperations,
 		session: viewSession,
+		start: viewStart,
 		op: viewOperation,
 		settings: viewSettings,
 		host: viewHostDiscovery,

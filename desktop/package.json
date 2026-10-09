@@ -24,7 +24,8 @@
     "test:capture": "node tests/capture-integration.mjs",
     "test:permissions": "node tests/permissions-integration.mjs",
     "test:approvals": "node tests/approvals-integration.mjs",
-    "test:native-files": "node tests/native-files-integration.mjs"
+    "test:native-files": "node tests/native-files-integration.mjs",
+    "test:start": "node tests/session-start-integration.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.1"
