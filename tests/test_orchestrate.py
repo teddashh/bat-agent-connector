@@ -174,21 +174,20 @@ async def test_merge_rules(fleet_factory, mock):
     await f.close()
 
 
-async def test_remove_rules(fleet_factory, mock):
+async def test_legacy_remove_requires_reviewed_cleanup_even_when_clean(fleet_factory, mock):
     f = fleet_factory(writes=True, orchestrate=True, safety={"write_min_interval_s": 0})
     r = await _wt_session(f, mock, "ahead")
     mock.git_status[r["worktree_path"]] = [{"status": "M", "file": "a.py"}]
-    x = await orchestrate.worktree_remove(f, "h1", r["session_id"], confirm=True)
-    assert x["removed"] is False and "uncommitted" in x["reason"]
+    with pytest.raises(ResourceReadOnly, match="LEGACY_WORKTREE_REMOVE_DISABLED"):
+        await orchestrate.worktree_remove(f, "h1", r["session_id"], confirm=True)
     mock.git_status[r["worktree_path"]] = []
-    x = await orchestrate.worktree_remove(f, "h1", r["session_id"], confirm=True, delete_branch=True)
-    assert x["removed"] is False and "unmerged" in x["reason"]
+    with pytest.raises(ResourceReadOnly, match="LEGACY_WORKTREE_REMOVE_DISABLED"):
+        await orchestrate.worktree_remove(f, "h1", r["session_id"], confirm=True, delete_branch=True)
     assert "worktree:remove" not in mock.channels()
-    x = await orchestrate.worktree_remove(f, "h1", r["session_id"], confirm=True)  # keep branch
-    assert x["removed"] and not x["branch_deleted"]
-    inv = [i for i in mock.invokes if i["channel"] == "worktree:remove"][-1]
-    assert inv["params"]["deleteBranch"] is False
-    assert registry.get("h1", r["session_id"])["status"] == "removed"
+    with pytest.raises(ResourceReadOnly, match="LEGACY_WORKTREE_REMOVE_DISABLED"):
+        await orchestrate.worktree_remove(f, "h1", r["session_id"], confirm=True)
+    assert "worktree:rehydrate" not in mock.channels()
+    assert registry.get("h1", r["session_id"])["status"] == "active"
     await f.close()
 
 
@@ -199,15 +198,22 @@ def test_fanout_plan():
     assert "with tests" in r["tasks"][0]["prompt"] and "Do not merge" in r["tasks"][0]["prompt"]
 
 
-async def test_remove_registers_worktree_first(fleet_factory, mock):
-    """BAT's worktree:remove silently succeeds without a record for the session: register it first, then verify."""
+@pytest.mark.parametrize("runtime_knows_worktree", [False, True])
+async def test_legacy_remove_refuses_before_either_rehydrate_path(fleet_factory, mock, runtime_knows_worktree):
+    """Both _wt_status's early rehydrate and the later explicit repair must remain read-only."""
     f = fleet_factory(writes=True, orchestrate=True)
     r = await orchestrate.session_start(f, "h1", "demo-project", "codex", confirm=True)
     sid = r["session_id"]
-    mock.codex_worktrees[sid] = mock.worktrees.pop(sid)  # only the Codex runtime knows the worktree
-    out = await orchestrate.worktree_remove(f, "h1", sid, confirm=True)
-    assert out["removed"] is True and out["rehydrated"] is True
-    assert "worktree:rehydrate" in mock.channels()
+    original = mock.worktrees.pop(sid)
+    if runtime_knows_worktree:
+        mock.codex_worktrees[sid] = original
+    with pytest.raises(ResourceReadOnly, match="LEGACY_WORKTREE_REMOVE_DISABLED"):
+        await orchestrate.worktree_remove(f, "h1", sid, confirm=True)
+    assert "worktree:rehydrate" not in mock.channels() and "worktree:remove" not in mock.channels()
+    # The existing status reader still works without repairing a missing BAT registration.
+    status = await orchestrate.session_worktree_status(f, "h1", sid)
+    assert status["session_id"] == sid
+    assert "worktree:rehydrate" not in mock.channels() and "worktree:remove" not in mock.channels()
     await f.close()
 
 @pytest.mark.asyncio
