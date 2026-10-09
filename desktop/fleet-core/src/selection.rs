@@ -14,6 +14,14 @@ pub struct Preferences {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub known: Option<Vec<String>>,
 }
+/// IPC may carry these logical choices; private snapshots and native paths never do.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Choices {
+    pub connections: Vec<String>,
+    pub profiles: Vec<String>,
+    pub dashboard: bool,
+}
 fn names(inv: &Inventory, field: &str) -> Vec<String> {
     inv.hosts()
         .iter()
@@ -30,6 +38,30 @@ fn canonical(values: &[String], allowed: &[String]) -> Vec<String> {
         .collect()
 }
 impl Preferences {
+    /// An explicit complete picker choice. Prerequisites are returned by launch_plan,
+    /// not silently written into the independent saved connection selection.
+    pub fn choose(inv: &Inventory, chosen: &Choices) -> Result<Self> {
+        let mut allowed_connections = names(inv, "name");
+        allowed_connections.push("connector".into());
+        let mut allowed_profiles = names(inv, "profile");
+        allowed_profiles.push("default".into());
+        let connections = canonical(&chosen.connections, &allowed_connections);
+        let profiles = canonical(&chosen.profiles, &allowed_profiles);
+        if connections.len() != chosen.connections.len()
+            || profiles.len() != chosen.profiles.len()
+            || (chosen.dashboard || connections.iter().any(|n| n == "connector"))
+                && !inv.connector()["ssh_alias"].is_string()
+        {
+            return Err("SELECTION_INVALID");
+        }
+        Ok(Self {
+            version: 1,
+            connections,
+            profiles,
+            dashboard: chosen.dashboard,
+            known: Some(names(inv, "name")),
+        })
+    }
     pub fn defaults(inv: &Inventory) -> Self {
         Self {
             version: 1,
