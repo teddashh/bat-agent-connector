@@ -207,6 +207,9 @@ var STRINGS = {
 		"cleanup_empty_retained": "還沒有已記錄的保留內容。",
 		"cleanup_unavailable": "無法驗證主機或保留 objects。",
 		"cleanup_reason_reviewed": "由審閱後的整理操作移除。",
+		"cleanup_reason_automatic": "由任務服務自動整理，保留內容與操作回執。",
+		"cleanup_reason_historical": "依過往任務整理事件保存的歷史紀錄；並非本次審閱操作。",
+		"cleanup_reason_recorded": "已有整理紀錄，詳細來源請見回執。",
 		"cleanup_choice_UNCOMMITTED_CHANGES": "已選擇永久丟棄未提交內容。",
 		"cleanup_choice_RESULTS_NOT_DELIVERED": "已選擇釋放；保留尚未送達的 commits 與 branch。",
 		"cleanup_kind_session": "Session",
@@ -916,6 +919,9 @@ var STRINGS = {
 		"cleanup_empty_retained": "No retained content recorded yet.",
 		"cleanup_unavailable": "Host or retained objects could not be verified.",
 		"cleanup_reason_reviewed": "Removed by a reviewed cleanup operation.",
+		"cleanup_reason_automatic": "Automatically cleaned by the task service, with retained content and operation receipts.",
+		"cleanup_reason_historical": "Historical record from an earlier task cleanup event; no current reviewed operation is implied.",
+		"cleanup_reason_recorded": "Cleanup was recorded; inspect its receipt for the original source.",
 		"cleanup_choice_UNCOMMITTED_CHANGES": "You chose permanent discard of uncommitted content.",
 		"cleanup_choice_RESULTS_NOT_DELIVERED": "You chose release; undelivered commits and branch are kept.",
 		"cleanup_kind_session": "Session",
@@ -6229,7 +6235,11 @@ async function viewCleanup(main, section, ident) {
 		try {
 			const result = await api("GET", `/cleanup-tombstones?query=${encodeURIComponent(search.value)}&cursor=${encodeURIComponent(cursor)}`);
 			assertView(connection);
-			const rows = (result.tombstones || []).map((x) => h("article", { class: "cleanup-resource" }, h("a", { href: `#/cleanup/resource/${x.resource_id}` }, t("cleanup_kind_" + x.kind)), h("div", { class: "cleanup-binding" }, x.host, " ", x.path || x.ref || ""), h("p", { class: "muted" }, x.actor, " · ", when(x.cleaned_at * 1e3)), h("p", {}, t("cleanup_reason_reviewed")), ...(x.pull_requests || []).map((pr) => h("p", {}, `${pr.repository} #${pr.pull_number}`))));
+			const rows = (result.tombstones || []).map((x) => h("article", { class: "cleanup-resource" }, h("a", { href: `#/cleanup/resource/${x.resource_id}` }, t("cleanup_kind_" + x.kind)), h("div", { class: "cleanup-binding" }, x.host, " ", x.path || x.ref || ""), h("p", { class: "muted" }, x.actor, " · ", when(x.cleaned_at * 1e3)), h("p", {}, t({
+				reviewed_cleanup: "cleanup_reason_reviewed",
+				task_lifecycle: "cleanup_reason_automatic",
+				historical_task_cleanup: "cleanup_reason_historical"
+			}[x.reason] || "cleanup_reason_recorded")), ...(x.pull_requests || []).map((pr) => h("p", {}, `${pr.repository} #${pr.pull_number}`))));
 			if (cursor) historyOut.append(...rows);
 			else fill(historyOut, ...rows, rows.length ? null : h("p", { class: "muted" }, t("cleanup_empty_history")));
 			if (result.next_cursor) historyOut.append(h("button", {
