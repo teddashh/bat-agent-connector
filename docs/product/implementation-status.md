@@ -10,7 +10,7 @@
 
 最新追蹤 [#59](https://github.com/teddashh/bat-agent-connector/issues/59)。#58 已合併到 main
 `e495d70d8dae6b7dc415adc44a23eb1bcf64dd7d`。Native credentials、durable bulk approval、managed
-artifact capture/accept 已加入 `integrate/product-completion` 候選工作線，未宣稱已合併或實機通過。
+artifact capture/accept 已加入 `integrate/completion-candidate` 候選工作線，未宣稱已合併或實機通過。
 Project Hub 的清楚 session 整理已列為共用 UI 方向，依實際 host／workspace 分組，不猜測專案歸屬。
 產品負責人補充原始對話並
 澄清 workspace／repository 與 GitHub 同步模式，見 [共同依據](realignment-v2.md#原始需求與後續澄清)。
@@ -35,6 +35,11 @@ Project Hub 的清楚 session 整理已列為共用 UI 方向，依實際 host�
 - B2／bulk／canonical `.7` 的整合 123 cases 通過；API/MCP/RPC unions 與 generated skills 經獨立審查。
   本機後端驗證使用獨立 `/dev/shm` Git／bytes／SQLite fixtures 避開磁碟排程壅塞，並非斷電持久性證明。
   最後候選仍須完整 checks、exact-head CI、Windows packaging；installer 尚未 pin 本輪候選。
+- Session 整理 `c6c148a`：依記錄中的 host／workspace 分組、已載入範圍搜尋與筆數、compact rows，
+  詳情保留完整 ID／狀態證據，長名稱不溢出。獨立畫面／source review 修正 runtime fields stale
+  仍顯示目前 streaming 的誤判。175 shared UI 在最後文字與展開細節調整前通過；最終 34 focused UI、
+  12 state、真中央 MockBat observation fixture、desktop／browser builds 與 generated drift 通過。
+  Root 已檢視 en／zh-TW 的桌面、平板、手機及極長名稱截圖；整組候選 UI 與 backend full 正在驗證。
 
 以下保留 #57 的權限工作紀錄：
 
