@@ -31,6 +31,7 @@ from . import (
     pr_delivery,
     resource_policy,
     service,
+    session_start_operations,
     work_items,
 )
 from .errors import BatError, ResourceReadOnly
@@ -100,6 +101,7 @@ class ApiV1:
         cleanup.install(daemon.ops, daemon._admin_token)
         artifact_capture.install(daemon.ops, daemon._admin_token)
         artifact_managed.install(daemon.ops)
+        session_start_operations.install(daemon.ops)
 
         from . import bulk_approval
         bulk_approval.install(daemon.ops, daemon._admin_token)
@@ -114,6 +116,7 @@ class ApiV1:
             ("GET", r"/api/v1/cleanup-tombstones/(?P<rid>(?:cr|wt)_[0-9a-f]{32})", self.cleanup_tombstone, "observe"),
             ("GET", r"/api/v1/version", self.version, None),
             ("GET", r"/api/v1/capabilities", self.capabilities, "observe"),
+            ("GET", r"/api/v1/workspaces", self.workspaces, "observe"),
             ("POST", r"/api/v1/artifacts", self.create_artifact, "manage"),
             ("POST", r"/api/v1/artifact-capture-previews", self.artifact_capture_preview, "observe"),
             ("POST", r"/api/v1/artifact-managed-capture-previews", self.artifact_managed_capture_preview, "observe"),
@@ -362,6 +365,16 @@ class ApiV1:
     # ------------------------------------------------------------------ routes
     async def version(self, **_):
         return 200, {"connector": __version__, "api_version": API_VERSION, "contract_version": CONTRACT_VERSION}
+
+    async def workspaces(self, principal, query, **_):
+        request = {"host": self._q(query, "host")}
+        limit = self._q(query, "limit")
+        if limit is not None:
+            try:
+                request["limit"] = int(limit)
+            except ValueError:
+                raise OperationError("INVALID_PARAMS", "limit must be 1-200", 422) from None
+        return 200, await session_start_operations.workspaces(self.daemon.ops, principal, request)
 
     async def capabilities(self, principal, **_):
         fleet = self.daemon.fleet

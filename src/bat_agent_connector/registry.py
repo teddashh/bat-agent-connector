@@ -433,6 +433,27 @@ def update(host: str, session_id: str, **fields) -> None:
         _write(p, items)
 
 
+def project_start(host, session_id, *, operation_id, created_at, expected, fields):
+    """Project one start receipt without replacing a later incarnation or owner.
+
+    Repeating an already matching projection is read-only. Otherwise the entire
+    expected standalone binding must still match under the registry flock.
+    """
+    p = registry_path()
+    with _locked(p):
+        items = _read(p)
+        row = next((e for e in items if e.get("host") == host and e.get("session_id") == session_id), None)
+        if not row or row.get("start_operation_id") != operation_id or row.get("created_at") != created_at:
+            return False
+        if all(row.get(key) == value for key, value in fields.items()):
+            return True
+        if any(row.get(key) != value for key, value in expected.items()):
+            return False
+        row.update(fields, updated_at=time.time())
+        _write(p, items)
+        return True
+
+
 def project_permissions(host, session_id, expected, operation_id, fields):
     """Idempotent projection after all ACKs; never overwrite newer ownership or policy."""
     p = registry_path()
