@@ -353,17 +353,23 @@ B2 才擴充 capture 為 managed-result 並新增 artifact_accept；B1 不接受
 
 Managed-result保存既有execution operation或task/command ID、session、實際commit／hash。不能信client自報lineage。artifact.accept用approve保存精確revision/digest／execution／session／commit／驗收receipt，不等同work completion、merge或deploy。B的schema／scope／失敗恢復與A03tests在實作前再審。
 
-## 跨主機接續（Part C，後續審查）
+## 主機與 repository 同步（Part C，依產品負責人澄清校正）
 
-C才新增target host/workspace選擇。任何writes+orchestrate+managed_roots+alias的host可作target，另需BAT workspace／helper readiness。來源的network origin在checkpoint create記下，沿用prepare_script的credential stripping但只允許https/ssh；不新增repository_routes配置，不用target上的來源本機絕對路徑。
+以[原始需求與後續澄清](../product/realignment-v2.md#原始需求與後續澄清)為準。正常 checkpoint
+接續留在原 BAT 主機的獨立 managed 工作區。其他主機不自動接續 workspace；若使用者明確
+需要另一主機取得程式碼，使用該 workspace 已綁定的 GitHub repository 與已發布 branch/commit。
+中央同步使用 fetch 後驗證固定 SHA，不在人工目錄執行 pull/merge，不換成 branch 最新 SHA。
 
-目的clone marker記source host/root；fetch原SHA／cat-file／BAT起點查證，再用A的attachment gates。同名repository／marker不符拒絕。無network origin或原SHA取不到回COMMIT_UNAVAILABLE，保留原工作／選擇；不能換branch最新SHA。來源host away時，SOURCE_UNAVAILABLE必須可由人明確確認固定inputs，不成死路；confirmation需記「unobservable」證據，具體合約C再審。
+尚缺的 repository 綁定／同步能力需要依此定義合約與驗證，不能只加 target 下拉選單。
+目標需 managed root、對應 BAT workspace、host readiness 與 caller 權限；同名路徑或 repository
+名稱不能授權操作。固定 commit 不可取得時保留原選擇並停止，不讓 Agent 碰人工來源。
 
-未發布commit的bundle仍是follow-up：只讀來源匯出到Connector storage、固定SHA／bundlehash／完整性與大小，受限adapter送target，驗證後fetch；不在人的repo建檔、refs或lock。任何錯誤blocked；B/C實作前核對origin契約／bundle容量／敏感歷史。
+直接 Git pack/bundle relay 及未發布成果跨主機搬運不列交付條件。既有固定 artifact bytes
+上傳、managed capture/accept、下載與 materialization 仍是產品能力；它們不會搬動或接管原 workspace。
 
 ## 尚未涵蓋
 
-- B1 的 HTTP/MCP/CLI 與共用 browser／desktop 人工相對檔案路徑表單已實作，未宣稱 OS 檔案選擇器或實機驗收。B2（managed成果capture／accept）與 C（target選擇／跨hostfetch）後續再審。
+- B1 的 HTTP/MCP/CLI 與共用 browser／desktop 人工相對檔案路徑表單已實作，未宣稱 OS 檔案選擇器或實機驗收。B2（managed成果capture／accept）與明確 repository 的已發布版本同步仍需完成；不包含直接未發布 Git pack relay。
 - 完整dirty snapshot、任意目錄解壓、可執行附件／URL下載、非checkpoint的Task Service附件派工不在A。舊context_refs字串不提供readiness。
 - Artifact deletion、retention期限／read model／server draft holds屬未來artifact cleanup。目前store只留內容／拒絕超額，cleanup對artifact保持RESOURCE_KIND_UNSUPPORTED。
 - GitHub Actions build artifacts／deploy promotion與本store分開；若日後橋接需兩邊ID／digest證據，不能互換。
