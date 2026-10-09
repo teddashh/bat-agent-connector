@@ -14,6 +14,7 @@ import { permissionsPanel } from "./permissions.js";
 import { approvalsPanel } from "./approvals.js";
 import { sessionStartPanel } from "./session-start.js";
 import { sessionBatPanel } from "./session-bat.js";
+import { orchestrationPanel, orchestrationActions } from "./orchestration.js";
 import { repositoryStartPanel } from "./repository-start.js";
 import { mountArtifactReview, managedCaptureExecution } from "./artifact-review.js";
 import { consumePageAsync, settleRefreshes, storageScope } from "./state/events.ts";
@@ -652,7 +653,8 @@ async function viewSessions(main) {
     h("a", {class: "session-project-link", href: "#/projects"}, t("sessions_projects")));
   main.append(h("div", {class: "session-heading"}, h("h1", {}, t("sessions_title")),
     state.caps?.actions?.some(a => a.action === "session.start") ? h("a", {href: "#/start"}, t("start_title_page")) : null,
-    state.caps?.features?.repository_sync?.length ? h("a", {href: "#/published"}, t("pub_title")) : null),
+    state.caps?.features?.repository_sync?.length ? h("a", {href: "#/published"}, t("pub_title")) : null,
+    state.caps?.actions?.some(a => Object.values(orchestrationActions).includes(a.action)) ? h("a", {href: "#/orchestrate/relay"}, t("orch_title")) : null),
     h("p", {class: "muted"}, t("sessions_intro")),
     h("div", {class: "filters session-filters"}, search, hostSel, accessSel,
       state.caps?.actions?.some(a => a.action === "session.approve_pending") ? h("a", {href: "#/approvals"}, t("bulk_title")) : null), status,
@@ -1127,6 +1129,13 @@ async function viewSession(main, host, sid) {
     const managed = row.api_access === "managed";
     if (managed && row.provenance === "connector_managed" && state.caps?.artifacts?.capture?.managed_single_file)
       head.append(h("p", {}, h("a", {href: `#/artifact-review/session/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`}, t("ar_open"))));
+    if (managed && row.provenance === "connector_managed") {
+      const links = [];
+      if (state.caps?.actions?.some(a => a.action === "session.relay")) links.push(h("a", {href: `#/orchestrate/relay/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`}, t("orch_relay")));
+      if (row.agent_kind === "claude" && !data.relations_summary?.length && state.caps?.actions?.some(a => a.action === "session.failover"))
+        links.push(h("a", {href: `#/orchestrate/failover/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`}, t("orch_failover")));
+      if (links.length) head.append(h("div", {class: "actions"}, ...links));
+    }
     if (managed && row.provenance === "connector_managed" && !permissions) {
       permissions = permissionsPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
         errorBox, opStatus, storageKey: `batc.permissions.${connection.namespace}.${JSON.stringify([host, sid])}`,
@@ -2861,6 +2870,22 @@ async function viewStart(main) {
   return onEvents(ev => {if (["operation", "host", "session"].includes(ev.resource_type)) return panel.refresh(true);});
 }
 
+async function viewOrchestration(main, selectedMode = "relay", host, sid) {
+  const mode = Object.hasOwn(orchestrationActions, selectedMode) ? selectedMode : "relay";
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const context = host && sid ? {host, session_id: sid} : {};
+  const panel = orchestrationPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    ready: () => state.online && !state.nativeBusy, errorBox, opStatus, mode, context,
+    storageKey: `batc.orchestrate.${connection.namespace}.${mode}.${JSON.stringify(context)}`});
+  main.append(h("a", {href: "#/sessions"}, t("nav_sessions")), h("h1", {}, t("orch_title")),
+    h("nav", {class: "orch-modes", "aria-label": t("orch_title")}, ...Object.keys(orchestrationActions).map(key =>
+      h("a", {href: `#/orchestrate/${key}`, "aria-current": key === mode ? "page" : null}, t("orch_" + key)))),
+    h("h2", {}, t("orch_" + mode)), panel.box);
+  try {await panel.init();} catch { /* preserve the original intent and show the read error */ }
+  assertView(connection);
+  return onEvents(event => {if (["operation", "session", "host"].includes(event.resource_type)) return panel.refresh(true);});
+}
+
 async function viewPublished(main) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const panel = repositoryStartPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
@@ -2897,7 +2922,7 @@ async function route() {
   main.replaceChildren();
   if (!state.token && name !== "settings") { main.append(h("p", { class: "note" }, t(nativeDesktop ? "desktop_connect_needed" : "need_token"))); viewSettings(main); return; }
   const views = { home: viewHome, projects: viewProjects, project: viewProject, item: viewWorkItem, sessions: viewSessions,
-    cleanup: viewCleanup, approvals: viewApprovals, delivery: viewDelivery, operations: viewOperations, session: viewSession, start: viewStart, published: viewPublished, op: viewOperation, settings: viewSettings,
+    cleanup: viewCleanup, approvals: viewApprovals, delivery: viewDelivery, operations: viewOperations, session: viewSession, start: viewStart, published: viewPublished, orchestrate: viewOrchestration, op: viewOperation, settings: viewSettings,
     "artifact-review": viewArtifactReview,
     host: viewHostDiscovery, task: viewTask,
     worktree: (main, id) => viewObservedResource(main, "worktree", id) };

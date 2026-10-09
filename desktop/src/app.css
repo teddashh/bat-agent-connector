@@ -279,3 +279,23 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
 .session-bat button, .session-bat select { min-height: 44px; }
 .session-bat [role="status"]:empty { display: none; }
 @media (max-width: 640px) { .session-bat select, .session-bat textarea { font-size: 16px; } }
+/* Explicit orchestration forms reuse the shared panels, fields and status tones. */
+.orch-modes { display:flex; gap:8px 16px; flex-wrap:wrap; margin:12px 0; }
+.orch-modes a[aria-current="page"] { font-weight:600; color:var(--text); text-decoration-thickness:2px; }
+.orchestration { max-width:820px; }
+.orchestration .muted { font-size:14px; }
+.orchestration label { display:block; }
+.orchestration label > input:not([type="checkbox"]), .orchestration label > select { display:block; width:100%; }
+.orchestration label > input[type="number"] { max-width:160px; }
+.orchestration textarea { margin-top:4px; }
+.orchestration .orch-check { display:flex; align-items:flex-start; gap:8px; margin:12px 0; }
+.orchestration .orch-check input { flex:none; margin-top:5px; }
+.orch-item { border-top:1px solid var(--line); margin-top:14px; padding-top:4px; }
+.orch-item label { margin-top:8px; }
+.orchestration li, .orchestration code { overflow-wrap:anywhere; }
+@media(max-width:640px) {
+  .orch-modes a { min-height:44px; display:flex; align-items:center; }
+  .orchestration button { min-height:44px; }
+  .orchestration .orch-check { min-height:44px; }
+  .orchestration input, .orchestration select, .orchestration textarea { font-size:16px; }
+}

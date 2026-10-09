@@ -260,6 +260,57 @@ var STRINGS = {
 		operations_invalid_page: "分頁回應無效；保留已載入的操作。",
 		operations_view_attention: "查看需要處理的操作",
 		operations_view_active: "查看待確認的操作",
+		orch_waiting_children: "正在查回原有子操作",
+		orch_body_limit: "完整請求超過中央的 200,000 位元組上限。請縮短項目原文；目前尚未提交。",
+		orch_title: "安排工作執行",
+		orch_relay: "轉交原始指示",
+		orch_planner: "啟動規劃者",
+		orch_items: "執行已檢視項目",
+		orch_failover: "改由 Codex 接續",
+		orch_help_relay: "將你的原文與中央整理的轉交背景送往一個固定的受管理工作階段。若它無法接收，這個表單不會另建替代工作階段。",
+		orch_help_planner: "在新 worktree 啟動一個唯讀 Codex 規劃者。讀取回覆後，再另外輸入並逐項檢視要執行的工作。",
+		orch_help_items: "依下列逐項原文建立各自獨立的受管理 worktree。不會自動匯入規劃者回覆，也不會停止規劃者。",
+		orch_help_failover: "由 Codex 接續一個閒置且配額耗盡的受管理 Claude 工作階段。中央會檢查所有寫入者與任務擁有權；保留來源分頁與 worktree，不提供強制或任務中途切換。",
+		orch_preparation: "請檢視這些選定輸入。提交後，中央才會準備並記錄固定的轉交背景、計畫或交接內容；此頁不是對話或交接內容的預覽。",
+		orch_session: "固定的受管理工作階段",
+		orch_choose_session: "選擇受管理工作階段",
+		orch_message: "原始指示",
+		orch_instructions: "補充交接指示（選填）",
+		orch_max_items: "規劃項目上限（1–16）",
+		orch_item_title: "項目 {n} 標題",
+		orch_item_prompt: "項目 {n} 指示",
+		orch_item: "項目 {n}",
+		orch_title_label: "標題",
+		orch_prompt_label: "完整指示原文",
+		orch_remove_item: "移除項目 {n}",
+		orch_add_item: "新增另一個項目",
+		orch_reload: "重新讀取可用目標",
+		orch_loading: "正在讀取中央目標…",
+		orch_selection_help: "只選用最新觀測的 Connector 管理工作階段或中央固定工作區 ID。中央仍會在產生影響前重新檢查政策。",
+		orch_truncated: "只顯示前 200 筆，並非完整清單。可從「工作階段」開啟未列於此頁的固定工作階段。",
+		orch_empty: "此主機未傳回可選目標。人工、過期、來源不明，以及有任務關聯的切換來源均不列入。",
+		orch_discovery_failed: "目標識別尚未確認。請重新讀取後再提交。",
+		orch_review_relay: "我已檢視這個固定工作階段與原始指示。",
+		orch_review_planner: "我已檢視工作區、原始指示與規劃項目上限。",
+		orch_review_items: "我已檢視工作區、agent 與上述每一項完整原文。",
+		orch_review_failover: "我已檢視這個固定 Claude 來源。配額、閒置或共用擁有權檢查未通過時，中央會拒絕執行。",
+		orch_apply_relay: "轉交至此工作階段",
+		orch_apply_planner: "啟動規劃者",
+		orch_apply_items: "執行已檢視項目",
+		orch_apply_failover: "要求由 Codex 接續",
+		orch_new: "準備另一筆請求",
+		orch_invalid_result: "操作回應與原請求或識別不符。",
+		orch_unavailable: "需要 {scopes} 權限與中央明確允許此功能；新請求也需要最新目標與主機可寫證據。",
+		orch_fixed: "保留原輸入與 key。受理後的查回只讀取這筆操作；結果不明不代表可以另送新請求或另建子操作。",
+		orch_partial: "尚未證明整筆請求完成。進一步操作前，請檢視原操作與逐項回執。",
+		orch_receipts: "個別操作回執",
+		orch_child: "轉交訊息操作",
+		orch_steps: "準備與執行回執",
+		orch_item_progress: "已確認 {total} 個檢視項目中的 {count} 個接受初始指示；不代表任務完成。",
+		orch_relay_accepted: "目標已接受轉交指示；不代表工作已完成。",
+		orch_planner_started: "規劃者已接受指示，請讀取其回覆：",
+		orch_handoff_accepted: "Codex 已接受交接指示：",
+		orch_successor_unconfirmed: "已保留接續者識別，但尚未證明交接指示已被接受：",
 		bulk_title: "批次核准",
 		bulk_choose_host: "選擇主機",
 		bulk_workspace: "工作區名稱或 ID（選填）",
@@ -1278,6 +1329,57 @@ var STRINGS = {
 		operations_invalid_page: "Invalid page response; loaded operations are retained.",
 		operations_view_attention: "View operations needing attention",
 		operations_view_active: "View operations awaiting confirmation",
+		orch_waiting_children: "Waiting for original child operations",
+		orch_body_limit: "The complete request exceeds central's 200,000-byte limit. Shorten the item instructions; nothing has been submitted.",
+		orch_title: "Orchestrate work",
+		orch_relay: "Relay instructions",
+		orch_planner: "Start a planner",
+		orch_items: "Start reviewed items",
+		orch_failover: "Continue with Codex",
+		orch_help_relay: "Send your original words with central relay context to one exact managed session. If it cannot receive them, this form does not create a replacement.",
+		orch_help_planner: "Start one read-only Codex planner in a new worktree. Read its response, then enter and review the individual work items separately.",
+		orch_help_items: "Start an independent managed worktree for each literal item below. No planner response is automatically imported, and this form does not stop a planner.",
+		orch_help_failover: "Continue one idle, quota-exhausted managed Claude session with Codex. Central checks all writers and task ownership. The source tab and worktree remain; no force or task failover is offered.",
+		orch_preparation: "Review these selected inputs. Central prepares and records the exact relay context, plan or handoff after submission; this page is not a transcript or handoff preview.",
+		orch_session: "Exact managed session",
+		orch_choose_session: "Choose a managed session",
+		orch_message: "Original instructions",
+		orch_instructions: "Additional handoff instructions (optional)",
+		orch_max_items: "Planner item limit (1–16)",
+		orch_item_title: "Item {n} title",
+		orch_item_prompt: "Item {n} instructions",
+		orch_item: "Item {n}",
+		orch_title_label: "Title",
+		orch_prompt_label: "Literal instructions",
+		orch_remove_item: "Remove item {n}",
+		orch_add_item: "Add another item",
+		orch_reload: "Reload available targets",
+		orch_loading: "Reading central targets…",
+		orch_selection_help: "Only fresh Connector-managed sessions or exact central workspace IDs are selectable. Central rechecks policy before any effect.",
+		orch_truncated: "Showing the first 200 records only. This is not a complete inventory. Open an exact session from Sessions if it is not in this page.",
+		orch_empty: "No eligible targets were returned for this host. Manual, stale, unknown and task-linked failover sources are excluded.",
+		orch_discovery_failed: "Target identity is unconfirmed. Reload the targets before submitting.",
+		orch_review_relay: "I reviewed this exact session and the original instructions.",
+		orch_review_planner: "I reviewed the workspace, original instructions and planner limit.",
+		orch_review_items: "I reviewed the workspace, agent and every literal item above.",
+		orch_review_failover: "I reviewed this exact Claude source. Central may refuse if quota, idle or shared ownership checks fail.",
+		orch_apply_relay: "Relay to this session",
+		orch_apply_planner: "Start planner",
+		orch_apply_items: "Start reviewed items",
+		orch_apply_failover: "Request Codex continuation",
+		orch_new: "Prepare another request",
+		orch_invalid_result: "Operation response does not match the original request and identity.",
+		orch_unavailable: "Requires {scopes} scopes and explicit central capability. New requests also require current target and host write evidence.",
+		orch_fixed: "The original inputs and key stay fixed. Accepted recovery only reads this operation. An unknown result does not authorize a new request or another child.",
+		orch_partial: "Completion is not proven for the whole request. Inspect the original operation and individual receipts before any further action.",
+		orch_receipts: "Individual operation receipts",
+		orch_child: "Relayed message operation",
+		orch_steps: "Preparation and effect receipts",
+		orch_item_progress: "Initial instructions confirmed for {count} of {total} reviewed items. This is not task completion.",
+		orch_relay_accepted: "The target accepted the relayed instructions. This does not mean its work is complete.",
+		orch_planner_started: "Planner instructions accepted. Read its response:",
+		orch_handoff_accepted: "Codex handoff accepted:",
+		orch_successor_unconfirmed: "Successor identity retained; handoff acceptance is not yet proven:",
 		bulk_title: "Batch approvals",
 		bulk_choose_host: "Choose a host",
 		bulk_workspace: "Workspace name or ID (optional)",
@@ -3415,9 +3517,9 @@ async function mountUpdates(main, { h, t }) {
 }
 //#endregion
 //#region src/state/sessions.js
-var text$2 = (value) => typeof value === "string" ? value : "";
+var text$3 = (value) => typeof value === "string" ? value : "";
 function workspaceGroup(session) {
-	const host = text$2(session.host), id = text$2(session.workspace_id), name = text$2(session.workspace);
+	const host = text$3(session.host), id = text$3(session.workspace_id), name = text$3(session.workspace);
 	return {
 		key: JSON.stringify([
 			host,
@@ -3451,7 +3553,7 @@ function matchesSession(session, query) {
 		session.agent_kind,
 		session.model,
 		session.worktree_branch
-	].map(text$2).join("\n").toLocaleLowerCase();
+	].map(text$3).join("\n").toLocaleLowerCase();
 	return query.trim().toLocaleLowerCase().split(/\s+/).every((word) => haystack.includes(word));
 }
 function runtimeStale(session) {
@@ -3838,17 +3940,17 @@ function capturePanel({ h, t, api, caps, guard, onEvents, errorBox, storageKey, 
 }
 //#endregion
 //#region src/task-controls.js
-var object$3 = (value) => value && typeof value === "object" && !Array.isArray(value);
-var opId$1 = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
+var object$4 = (value) => value && typeof value === "object" && !Array.isArray(value);
+var opId$2 = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
 var version = (value) => Number.isSafeInteger(value) && value >= 0;
-var equal$4 = (a, b) => a === b || object$3(a) && object$3(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$4(a[k], b[k]));
-var terminal$5 = (op) => [
+var equal$5 = (a, b) => a === b || object$4(a) && object$4(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$5(a[k], b[k]));
+var terminal$6 = (op) => [
 	"succeeded",
 	"failed",
 	"cancelled"
 ].includes(op?.status);
 function valid(request, id) {
-	return ["task.pause", "task.resume"].includes(request?.action) && equal$4(request.target, { task_id: id }) && object$3(request.params) && (request.action === "task.pause" ? typeof request.params.abort_current === "boolean" && Object.keys(request.params).length === 1 : Object.keys(request.params).length === 0) && object$3(request.preconditions) && Object.keys(request.preconditions).length === 1 && version(request.preconditions.control_version);
+	return ["task.pause", "task.resume"].includes(request?.action) && equal$5(request.target, { task_id: id }) && object$4(request.params) && (request.action === "task.pause" ? typeof request.params.abort_current === "boolean" && Object.keys(request.params).length === 1 : Object.keys(request.params).length === 0) && object$4(request.preconditions) && Object.keys(request.preconditions).length === 1 && version(request.preconditions.control_version);
 }
 function taskControlsPanel({ h, t, api, caps, guard, ready, task, taskId, storageKey, errorBox, opStatus, onSettled }) {
 	let raw;
@@ -3861,7 +3963,7 @@ function taskControlsPanel({ h, t, api, caps, guard, ready, task, taskId, storag
 		saved.intent = {
 			request: proven ? raw.intent.request : null,
 			key: proven ? raw.intent.key : null,
-			operation_id: opId$1(raw.intent.operation_id) ? raw.intent.operation_id : null
+			operation_id: opId$2(raw.intent.operation_id) ? raw.intent.operation_id : null
 		};
 		if (proven && !saved.intent.operation_id && raw.intent.refused === "CONTROL_VERSION_CONFLICT") saved.intent.refused = raw.intent.refused;
 		if (proven) saved.abort = raw.intent.request.params.abort_current === true;
@@ -3901,7 +4003,7 @@ function taskControlsPanel({ h, t, api, caps, guard, ready, task, taskId, storag
 	const accept = (candidate) => {
 		guard();
 		const intent = saved.intent;
-		if (!intent || !opId$1(candidate?.operation_id) || !["task.pause", "task.resume"].includes(candidate.action) || candidate.target?.task_id !== taskId || candidate.actor !== caps()?.actor || intent.operation_id && candidate.operation_id !== intent.operation_id || intent.key && candidate.idempotency_key !== intent.key || intent.request && !equal$4({
+		if (!intent || !opId$2(candidate?.operation_id) || !["task.pause", "task.resume"].includes(candidate.action) || candidate.target?.task_id !== taskId || candidate.actor !== caps()?.actor || intent.operation_id && candidate.operation_id !== intent.operation_id || intent.key && candidate.idempotency_key !== intent.key || intent.request && !equal$5({
 			action: candidate.action,
 			target: candidate.target,
 			params: candidate.params,
@@ -3981,7 +4083,7 @@ function taskControlsPanel({ h, t, api, caps, guard, ready, task, taskId, storag
 	const another = h("button", {
 		class: "secondary",
 		onclick: () => {
-			if (!live() || busy || refreshing || readFailed || !writable() || !(terminal$5(operation) || saved.intent?.refused)) return;
+			if (!live() || busy || refreshing || readFailed || !writable() || !(terminal$6(operation) || saved.intent?.refused)) return;
 			const previous = saved;
 			saved = { abort: false };
 			try {
@@ -4024,7 +4126,7 @@ function taskControlsPanel({ h, t, api, caps, guard, ready, task, taskId, storag
 		apply.textContent = t(fixed ? "permissions_retry" : action() === "task.pause" ? "task_pause" : "task_resume");
 		check.hidden = !saved.intent?.operation_id;
 		check.disabled = busy || Boolean(refreshing);
-		another.hidden = !(terminal$5(operation) || saved.intent?.refused);
+		another.hidden = !(terminal$6(operation) || saved.intent?.refused);
 		another.disabled = busy || Boolean(refreshing) || readFailed || !writable();
 		restriction.textContent = writable() ? "" : t("task_control_unavailable");
 		result.replaceChildren();
@@ -4163,12 +4265,12 @@ function operationList({ h, t, api, guard, row, statuses }) {
 var record$1 = (value) => value && typeof value === "object" && !Array.isArray(value);
 var modeValue = (value) => ["default", "allow_all"].includes(value);
 var operationId$1 = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
-var terminal$4 = (operation) => [
+var terminal$5 = (operation) => [
 	"succeeded",
 	"failed",
 	"cancelled"
 ].includes(operation?.status);
-var admissionRefusals$1 = new Set([
+var admissionRefusals$2 = new Set([
 	"TASK_PAUSED",
 	"CONTROL_VERSION_CONFLICT",
 	"PERMISSIONS_HOST_POLICY",
@@ -4189,7 +4291,7 @@ function restore$1(value, target) {
 		} : null,
 		operation_id: operationId$1(intent.operation_id) ? intent.operation_id : null
 	};
-	if (valid && !saved.intent.operation_id && admissionRefusals$1.has(intent.refused)) saved.intent.refused = intent.refused;
+	if (valid && !saved.intent.operation_id && admissionRefusals$2.has(intent.refused)) saved.intent.refused = intent.refused;
 	if (valid) saved.mode = request.params.mode;
 	return saved;
 }
@@ -4257,7 +4359,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 					if (saved.intent === intent) accept(response.operation);
 				} catch (error) {
 					if (current()) {
-						if (error.status >= 400 && error.status < 500 && admissionRefusals$1.has(error.code)) {
+						if (error.status >= 400 && error.status < 500 && admissionRefusals$2.has(error.code)) {
 							intent.refused = error.code;
 							persist();
 						}
@@ -4282,7 +4384,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 	const another = h("button", {
 		class: "secondary",
 		onclick: () => {
-			if (!current() || busy || refreshing || readFailed || !(terminal$4(operation) || saved.intent?.refused) || !writable()) return;
+			if (!current() || busy || refreshing || readFailed || !(terminal$5(operation) || saved.intent?.refused) || !writable()) return;
 			saved = { mode: "default" };
 			mode.value = saved.mode;
 			operation = null;
@@ -4313,7 +4415,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 		apply.textContent = t(saved.intent ? "permissions_retry" : "permissions_apply");
 		check.hidden = !saved.intent?.operation_id;
 		check.disabled = busy || Boolean(refreshing);
-		another.hidden = !(terminal$4(operation) || saved.intent?.refused);
+		another.hidden = !(terminal$5(operation) || saved.intent?.refused);
 		another.disabled = busy || Boolean(refreshing) || readFailed || !writable();
 		explanation.textContent = t(saved.mode === "allow_all" ? "permissions_allow_help" : "permissions_default_help");
 		restriction.textContent = writable() ? "" : t("permissions_unavailable");
@@ -4369,18 +4471,18 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 }
 //#endregion
 //#region src/approvals.js
-var object$2 = (value) => value && typeof value === "object" && !Array.isArray(value);
-var opId = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
+var object$3 = (value) => value && typeof value === "object" && !Array.isArray(value);
+var opId$1 = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
 var mode = (value) => value === null || value === "default" || value === "allow_all";
-var terminal$3 = (op) => [
+var terminal$4 = (op) => [
 	"succeeded",
 	"failed",
 	"cancelled"
 ].includes(op?.status);
-var equal$3 = (a, b) => {
+var equal$4 = (a, b) => {
 	if (a === b) return true;
-	if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => equal$3(v, b[i]));
-	return object$2(a) && object$2(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$3(a[k], b[k]));
+	if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => equal$4(v, b[i]));
+	return object$3(a) && object$3(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$4(a[k], b[k]));
 };
 var refusedBeforeAdmission = new Set([
 	"BULK_PREVIEW_INVALID",
@@ -4391,13 +4493,13 @@ var refusedBeforeAdmission = new Set([
 	"BULK_BINDING_CHANGED"
 ]);
 function validPreview$2(p) {
-	return object$2(p) && typeof p.host === "string" && p.host.length > 0 && (p.workspace === null || typeof p.workspace === "string") && typeof p.preview_token === "string" && p.preview_token.startsWith("bap1.") && p.preview_token.length <= 262144 && /^[0-9a-f]{64}$/.test(p.fingerprint) && Number.isFinite(p.expires_at) && equal$3(p.answer, {
+	return object$3(p) && typeof p.host === "string" && p.host.length > 0 && (p.workspace === null || typeof p.workspace === "string") && typeof p.preview_token === "string" && p.preview_token.startsWith("bap1.") && p.preview_token.length <= 262144 && /^[0-9a-f]{64}$/.test(p.fingerprint) && Number.isFinite(p.expires_at) && equal$4(p.answer, {
 		permission: "allow",
 		dont_ask_again: true
-	}) && Array.isArray(p.items) && p.items.length <= 50 && new Set(p.items.map((i) => i?.item_id)).size === p.items.length && p.items.every((i) => object$2(i) && /^bapi_[0-9a-f]{24}$/.test(i.item_id) && i.host === p.host && typeof i.session_id === "string" && typeof i.eligible === "boolean" && (!i.eligible || object$2(i.prompt) && typeof i.prompt.toolUseId === "string" && Array.isArray(i.allowed_modes) && i.allowed_modes.includes(null) && i.allowed_modes.every(mode)));
+	}) && Array.isArray(p.items) && p.items.length <= 50 && new Set(p.items.map((i) => i?.item_id)).size === p.items.length && p.items.every((i) => object$3(i) && /^bapi_[0-9a-f]{24}$/.test(i.item_id) && i.host === p.host && typeof i.session_id === "string" && typeof i.eligible === "boolean" && (!i.eligible || object$3(i.prompt) && typeof i.prompt.toolUseId === "string" && Array.isArray(i.allowed_modes) && i.allowed_modes.includes(null) && i.allowed_modes.every(mode)));
 }
-function validRequest$2(r) {
-	return r?.action === "session.approve_pending" && typeof r.target?.host === "string" && Object.keys(r.target).length === 1 && typeof r.params?.preview_token === "string" && Object.keys(r.params).length === 2 && Array.isArray(r.params.selection) && r.params.selection.length > 0 && r.params.selection.length <= 50 && r.params.selection.every((s) => object$2(s) && Object.keys(s).length === 2 && /^bapi_[0-9a-f]{24}$/.test(s.item_id) && mode(s.mode)) && new Set(r.params.selection.map((s) => s.item_id)).size === r.params.selection.length && object$2(r.preconditions) && Object.keys(r.preconditions).length === 1 && /^[0-9a-f]{64}$/.test(r.preconditions.expected_fingerprint);
+function validRequest$3(r) {
+	return r?.action === "session.approve_pending" && typeof r.target?.host === "string" && Object.keys(r.target).length === 1 && typeof r.params?.preview_token === "string" && Object.keys(r.params).length === 2 && Array.isArray(r.params.selection) && r.params.selection.length > 0 && r.params.selection.length <= 50 && r.params.selection.every((s) => object$3(s) && Object.keys(s).length === 2 && /^bapi_[0-9a-f]{24}$/.test(s.item_id) && mode(s.mode)) && new Set(r.params.selection.map((s) => s.item_id)).size === r.params.selection.length && object$3(r.preconditions) && Object.keys(r.preconditions).length === 1 && /^[0-9a-f]{64}$/.test(r.preconditions.expected_fingerprint);
 }
 function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, storageKey }) {
 	let raw;
@@ -4410,15 +4512,15 @@ function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, sto
 	};
 	if (validPreview$2(raw?.preview) && raw.preview.host === saved.host && (raw.preview.workspace || "") === saved.workspace) saved.preview = raw.preview;
 	if (raw?.intent) saved.intent = {
-		request: validRequest$2(raw.intent.request) ? raw.intent.request : null,
+		request: validRequest$3(raw.intent.request) ? raw.intent.request : null,
 		key: typeof raw.intent.key === "string" && raw.intent.key.length > 0 && raw.intent.key.length <= 200 ? raw.intent.key : null,
-		operation_id: opId(raw.intent.operation_id) ? raw.intent.operation_id : null,
+		operation_id: opId$1(raw.intent.operation_id) ? raw.intent.operation_id : null,
 		refused: refusedBeforeAdmission.has(raw.intent.refused) && !raw.intent.operation_id ? raw.intent.refused : null
 	};
 	let operation = null, busy = false, submission = null, refreshing = null, readFailed = false;
 	const selected = new Map(), controls = [];
 	if (saved.preview && !saved.intent && Array.isArray(raw?.selection)) {
-		for (const s of raw.selection) if (object$2(s) && saved.preview.items.some((i) => i.eligible && i.item_id === s.item_id && i.allowed_modes.includes(s.mode))) selected.set(s.item_id, s.mode);
+		for (const s of raw.selection) if (object$3(s) && saved.preview.items.some((i) => i.eligible && i.item_id === s.item_id && i.allowed_modes.includes(s.mode))) selected.set(s.item_id, s.mode);
 	}
 	const current = () => {
 		try {
@@ -4486,7 +4588,7 @@ function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, sto
 	const accept = (candidate) => {
 		guard();
 		const intent = saved.intent;
-		if (!intent || !opId(candidate?.operation_id) || !intent.request || !intent.key || candidate.actor !== caps()?.actor || candidate.idempotency_key !== intent.key || !equal$3({
+		if (!intent || !opId$1(candidate?.operation_id) || !intent.request || !intent.key || candidate.actor !== caps()?.actor || candidate.idempotency_key !== intent.key || !equal$4({
 			action: candidate.action,
 			target: candidate.target,
 			params: candidate.params,
@@ -4569,7 +4671,7 @@ function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, sto
 	const another = h("button", {
 		class: "secondary",
 		onclick: () => {
-			if (!current() || busy || refreshing || readFailed || !(terminal$3(operation) || saved.intent?.refused)) return;
+			if (!current() || busy || refreshing || readFailed || !(terminal$4(operation) || saved.intent?.refused)) return;
 			delete saved.intent;
 			delete saved.preview;
 			selected.clear();
@@ -4655,7 +4757,7 @@ function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, sto
 		apply.disabled = busy || readFailed || !writable() || (fixed ? !saved.intent.request || !saved.intent.key : !selected.size || expired);
 		check.hidden = !saved.intent?.operation_id;
 		check.disabled = busy || Boolean(refreshing);
-		another.hidden = !(terminal$3(operation) || saved.intent?.refused);
+		another.hidden = !(terminal$4(operation) || saved.intent?.refused);
 		another.disabled = busy || Boolean(refreshing) || readFailed;
 		summary.textContent = fixed ? t(saved.intent.refused ? "bulk_refused" : "bulk_fixed") : expired ? t("bulk_expired") : t("bulk_selected", { count: selected.size });
 		result.replaceChildren();
@@ -4665,7 +4767,7 @@ function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, sto
 		if (!operation) return;
 		const items = operation.result?.items || operation.external_refs?.bulk_items || [];
 		result.append(h("p", { class: "muted" }, t(operation.result?.all_succeeded === true ? "bulk_all_proven" : "bulk_partial")));
-		for (const item of items) result.append(h("div", { class: "row bulk-receipt" }, h("div", { class: "grow" }, item.session_id, h("div", { class: "muted" }, t(item.complete === true ? "bulk_item_complete" : "bulk_item_incomplete"))), ...["answer", "permissions"].filter((phase) => item[phase]).map((phase) => h("span", {}, t("bulk_" + phase), ": ", opId(item[phase].operation_id) ? h("a", { href: `#/op/${item[phase].operation_id}` }, item[phase].status || t("obs_unknown")) : item[phase].status || t("obs_unknown"), item[phase].code ? ` · ${item[phase].code}` : ""))));
+		for (const item of items) result.append(h("div", { class: "row bulk-receipt" }, h("div", { class: "grow" }, item.session_id, h("div", { class: "muted" }, t(item.complete === true ? "bulk_item_complete" : "bulk_item_incomplete"))), ...["answer", "permissions"].filter((phase) => item[phase]).map((phase) => h("span", {}, t("bulk_" + phase), ": ", opId$1(item[phase].operation_id) ? h("a", { href: `#/op/${item[phase].operation_id}` }, item[phase].status || t("obs_unknown")) : item[phase].status || t("obs_unknown"), item[phase].code ? ` · ${item[phase].code}` : ""))));
 	}
 	async function refresh(fresh = false) {
 		if (submission) {
@@ -4711,15 +4813,15 @@ function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, sto
 }
 //#endregion
 //#region src/session-start.js
-var object$1 = (v) => v && typeof v === "object" && !Array.isArray(v);
+var object$2 = (v) => v && typeof v === "object" && !Array.isArray(v);
 var operationId = (v) => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
-var terminal$2 = (op) => [
+var terminal$3 = (op) => [
 	"succeeded",
 	"failed",
 	"cancelled"
 ].includes(op?.status);
-var equal$2 = (a, b) => a === b || object$1(a) && object$1(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$2(a[k], b[k]));
-var text$1 = (v, max) => typeof v === "string" && v.trim().length > 0 && v.length <= max;
+var equal$3 = (a, b) => a === b || object$2(a) && object$2(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$3(a[k], b[k]));
+var text$2 = (v, max) => typeof v === "string" && v.trim().length > 0 && v.length <= max;
 var fields = [
 	"host",
 	"workspace",
@@ -4728,9 +4830,9 @@ var fields = [
 	"title",
 	"prompt"
 ];
-var admissionRefusals = new Set(["TIER_DISABLED", "START_WORKTREE_REQUIRED"]);
-function validRequest$1(r) {
-	return r?.action === "session.start" && object$1(r.target) && Object.keys(r.target).length === 2 && text$1(r.target.host, 256) && text$1(r.target.workspace, 256) && object$1(r.params) && Object.keys(r.params).every((k) => [
+var admissionRefusals$1 = new Set(["TIER_DISABLED", "START_WORKTREE_REQUIRED"]);
+function validRequest$2(r) {
+	return r?.action === "session.start" && object$2(r.target) && Object.keys(r.target).length === 2 && text$2(r.target.host, 256) && text$2(r.target.workspace, 256) && object$2(r.params) && Object.keys(r.params).every((k) => [
 		"agent",
 		"model",
 		"title",
@@ -4740,7 +4842,7 @@ function validRequest$1(r) {
 		"model",
 		"title",
 		"prompt"
-	].every((k) => !(k in r.params) || text$1(r.params[k], k === "prompt" ? 2e4 : 256)) && object$1(r.preconditions) && Object.keys(r.preconditions).length === 0;
+	].every((k) => !(k in r.params) || text$2(r.params[k], k === "prompt" ? 2e4 : 256)) && object$2(r.preconditions) && Object.keys(r.preconditions).length === 0;
 }
 function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, storageKey }) {
 	let raw;
@@ -4750,12 +4852,12 @@ function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, 
 	let saved = Object.fromEntries(fields.map((k) => [k, typeof raw?.[k] === "string" ? raw[k] : k === "agent" ? "claude" : ""]));
 	if (!["claude", "codex"].includes(saved.agent)) saved.agent = "claude";
 	if (raw?.intent) {
-		const valid = validRequest$1(raw.intent.request) && text$1(raw.intent.key, 200);
+		const valid = validRequest$2(raw.intent.request) && text$2(raw.intent.key, 200);
 		saved.intent = {
 			request: valid ? raw.intent.request : null,
 			key: valid ? raw.intent.key : null,
 			operation_id: operationId(raw.intent.operation_id) ? raw.intent.operation_id : null,
-			refused: !raw.intent.operation_id && admissionRefusals.has(raw.intent.refused) ? raw.intent.refused : null
+			refused: !raw.intent.operation_id && admissionRefusals$1.has(raw.intent.refused) ? raw.intent.refused : null
 		};
 		if (valid) Object.assign(saved, raw.intent.request.target, {
 			model: "",
@@ -4834,7 +4936,7 @@ function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, 
 			const doc = await api("GET", `/workspaces?host=${encodeURIComponent(selectedHost)}&limit=200`);
 			guard();
 			if (expected !== discovery || saved.host !== selectedHost || saved.intent) return;
-			if (!Array.isArray(doc.workspaces) || doc.workspaces.length > 200 || typeof doc.has_more !== "boolean" || !object$1(doc.errors) || Object.keys(doc.errors).length || doc.workspaces.some((w) => !object$1(w) || w.host !== selectedHost || !text$1(w.workspace_id, 256) || typeof w.folder !== "string") || new Set(doc.workspaces.map((w) => w.workspace_id)).size !== doc.workspaces.length) throw new Error(t("start_discovery_failed"));
+			if (!Array.isArray(doc.workspaces) || doc.workspaces.length > 200 || typeof doc.has_more !== "boolean" || !object$2(doc.errors) || Object.keys(doc.errors).length || doc.workspaces.some((w) => !object$2(w) || w.host !== selectedHost || !text$2(w.workspace_id, 256) || typeof w.folder !== "string") || new Set(doc.workspaces.map((w) => w.workspace_id)).size !== doc.workspaces.length) throw new Error(t("start_discovery_failed"));
 			workspaces = doc.workspaces;
 			discoveredHost = selectedHost;
 			renderWorkspaces();
@@ -4858,13 +4960,13 @@ function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, 
 	const accept = (candidate) => {
 		guard();
 		const intent = saved.intent;
-		if (!intent || !intent.request || !intent.key || !operationId(candidate?.operation_id) || candidate.actor !== caps()?.actor || candidate.idempotency_key !== intent.key || !equal$2({
+		if (!intent || !intent.request || !intent.key || !operationId(candidate?.operation_id) || candidate.actor !== caps()?.actor || candidate.idempotency_key !== intent.key || !equal$3({
 			action: candidate.action,
 			target: candidate.target,
 			params: candidate.params,
 			preconditions: candidate.preconditions
 		}, intent.request) || intent.operation_id && intent.operation_id !== candidate.operation_id) throw new Error(t("start_invalid_result"));
-		for (const proof of [candidate.result, candidate.external_refs?.start_result]) if (proof?.started === true && (proof.host !== intent.request.target.host || !text$1(proof.session_id, 256) || proof.session_id !== candidate.external_refs?.session_id)) throw new Error(t("start_invalid_result"));
+		for (const proof of [candidate.result, candidate.external_refs?.start_result]) if (proof?.started === true && (proof.host !== intent.request.target.host || !text$2(proof.session_id, 256) || proof.session_id !== candidate.external_refs?.session_id)) throw new Error(t("start_invalid_result"));
 		operation = candidate;
 		intent.operation_id = candidate.operation_id;
 		readFailed = false;
@@ -4897,7 +4999,7 @@ function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, 
 		onclick: async () => {
 			if (!current() || busy || readFailed || !ready() || !allowed() || saved.intent?.operation_id || saved.intent?.refused) return;
 			if (!saved.intent) {
-				if (!hostAllowed() || discoveredHost !== saved.host || !workspaces.some((w) => w.workspace_id === saved.workspace) || !validRequest$1(request())) return;
+				if (!hostAllowed() || discoveredHost !== saved.host || !workspaces.some((w) => w.workspace_id === saved.workspace) || !validRequest$2(request())) return;
 				saved.intent = {
 					request: request(),
 					key: crypto.randomUUID(),
@@ -4922,7 +5024,7 @@ function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, 
 					accept(data.operation);
 				} catch (e) {
 					if (current()) {
-						if (e.status >= 400 && e.status < 500 && admissionRefusals.has(e.code)) {
+						if (e.status >= 400 && e.status < 500 && admissionRefusals$1.has(e.code)) {
 							intent.refused = e.code;
 							try {
 								persist();
@@ -4949,7 +5051,7 @@ function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, 
 	const another = h("button", {
 		class: "secondary",
 		onclick: async () => {
-			if (!current() || busy || refreshing || readFailed || !(terminal$2(operation) || saved.intent?.refused)) return;
+			if (!current() || busy || refreshing || readFailed || !(terminal$3(operation) || saved.intent?.refused)) return;
 			const previous = saved;
 			saved = {
 				host: saved.host,
@@ -5008,10 +5110,10 @@ function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, 
 		reload.disabled = discovering || !observe() || !saved.host;
 		apply.hidden = Boolean(saved.intent?.operation_id || saved.intent?.refused);
 		apply.textContent = t(fixed ? "permissions_retry" : "start_apply");
-		apply.disabled = busy || readFailed || !ready() || !allowed() || (fixed ? !saved.intent.request || !saved.intent.key : !hostAllowed() || discoveredHost !== saved.host || !workspaces.some((w) => w.workspace_id === saved.workspace) || !validRequest$1(request()));
+		apply.disabled = busy || readFailed || !ready() || !allowed() || (fixed ? !saved.intent.request || !saved.intent.key : !hostAllowed() || discoveredHost !== saved.host || !workspaces.some((w) => w.workspace_id === saved.workspace) || !validRequest$2(request()));
 		check.hidden = !saved.intent?.operation_id;
 		check.disabled = busy || Boolean(refreshing);
-		another.hidden = !(terminal$2(operation) || saved.intent?.refused);
+		another.hidden = !(terminal$3(operation) || saved.intent?.refused);
 		another.disabled = busy || Boolean(refreshing) || readFailed;
 		result.replaceChildren();
 		if (!allowed()) result.append(h("p", { class: "muted" }, t("start_unavailable")));
@@ -5292,6 +5394,554 @@ function sessionBatPanel({ h, t, guard, storageKey, session }) {
 		dispose: () => {
 			disposed = true;
 		}
+	};
+}
+//#endregion
+//#region src/orchestration.js
+var object$1 = (v) => v && typeof v === "object" && !Array.isArray(v);
+var text$1 = (v, max = 256) => typeof v === "string" && v.trim().length > 0 && v.length <= max;
+var opId = (v) => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
+var equal$2 = (a, b) => a === b || Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => equal$2(v, b[i])) || object$1(a) && object$1(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$2(a[k], b[k]));
+var terminal$2 = (op) => [
+	"succeeded",
+	"failed",
+	"cancelled"
+].includes(op?.status);
+var orchestrationActions = {
+	relay: "session.relay",
+	planner: "fanout.plan",
+	items: "fanout.start",
+	failover: "session.failover"
+};
+var scopes = (mode) => mode === "relay" ? ["observe", "operate"] : mode === "failover" ? [
+	"observe",
+	"start",
+	"operate"
+] : ["observe", "start"];
+var sessionMode = (mode) => ["relay", "failover"].includes(mode);
+var managed = (row) => row?.api_access === "managed" && row.provenance === "connector_managed" && row.stale === false && row.scope_status === "current" && ["claude", "codex"].includes(row.agent_kind);
+var failoverSource = (row) => managed(row) && row.agent_kind === "claude" && row.streaming === false && !row.task_id && Array.isArray(row.relations) && row.relations.length === 0;
+var admissionRefusals = new Set([
+	"TIER_DISABLED",
+	"START_WORKTREE_REQUIRED",
+	"FANOUT_CAP"
+]);
+var withinBodyLimit = (r) => new TextEncoder().encode(JSON.stringify(r)).length <= 2e5;
+function validRequest$1(r, mode) {
+	if (!object$1(r) || r.action !== orchestrationActions[mode] || !object$1(r.target) || !object$1(r.params) || !object$1(r.preconditions) || Object.keys(r.preconditions).length || Object.keys(r.target).length !== 2 || !text$1(r.target.host) || !text$1(r.target[sessionMode(mode) ? "session_id" : "workspace"]) || !withinBodyLimit(r)) return false;
+	const p = r.params, keys = Object.keys(p);
+	if (mode === "relay") return keys.length === 3 && text$1(p.message, 12e3) && typeof p.queue === "boolean" && p.start_if_missing === false;
+	if (mode === "planner") return keys.length === 2 && text$1(p.message, 12e3) && Number.isInteger(p.max_items) && p.max_items >= 1 && p.max_items <= 16;
+	if (mode === "failover") return keys.every((k) => ["tail_messages", "instructions"].includes(k)) && p.tail_messages === 12 && (!("instructions" in p) || text$1(p.instructions, 4e3));
+	return keys.length === 2 && ["claude", "codex"].includes(p.agent) && Array.isArray(p.plan) && p.plan.length >= 1 && p.plan.length <= 16 && p.plan.every((v, i) => object$1(v) && Object.keys(v).length === 3 && v.index === i + 1 && text$1(v.title, 200) && text$1(v.prompt, 19e3));
+}
+function orchestrationPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, storageKey, mode, context = {} }) {
+	if (!Object.hasOwn(orchestrationActions, mode)) throw new Error("Unknown orchestration form");
+	let raw;
+	try {
+		raw = JSON.parse(localStorage.getItem(storageKey));
+	} catch {}
+	let saved = {
+		host: typeof raw?.host === "string" ? raw.host : context.host || "",
+		selection: typeof raw?.selection === "string" ? raw.selection : context.session_id || "",
+		message: typeof raw?.message === "string" ? raw.message : "",
+		queue: raw?.queue === true,
+		agent: raw?.agent === "claude" ? "claude" : "codex",
+		max_items: Number.isInteger(raw?.max_items) ? raw.max_items : 3,
+		items: Array.isArray(raw?.items) && raw.items.length >= 1 && raw.items.length <= 16 ? raw.items.map((v) => ({
+			title: typeof v?.title === "string" ? v.title : "",
+			prompt: typeof v?.prompt === "string" ? v.prompt : ""
+		})) : [{
+			title: "",
+			prompt: ""
+		}]
+	};
+	if (raw?.intent) {
+		const valid = validRequest$1(raw.intent.request, mode) && text$1(raw.intent.key, 200);
+		saved.intent = {
+			request: valid ? raw.intent.request : null,
+			key: valid ? raw.intent.key : null,
+			operation_id: opId(raw.intent.operation_id) ? raw.intent.operation_id : null,
+			refused: !raw.intent.operation_id && admissionRefusals.has(raw.intent.refused) ? raw.intent.refused : null
+		};
+		if (valid) {
+			const r = raw.intent.request;
+			Object.assign(saved, {
+				host: r.target.host,
+				selection: r.target.session_id || r.target.workspace,
+				message: r.params.message || r.params.instructions || "",
+				queue: r.params.queue === true,
+				max_items: r.params.max_items || 3,
+				agent: r.params.agent || "codex",
+				items: r.params.plan || saved.items
+			});
+		}
+	}
+	let operation = null, busy = false, submission = null, refreshing = null, readFailed = false, rows = [], selected = null;
+	let discovering = false, discovery = 0, discoveredHost = "", reviewed = false;
+	const current = () => {
+		try {
+			guard();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const persist = () => {
+		guard();
+		localStorage.setItem(storageKey, JSON.stringify(saved));
+	};
+	const allowed = () => scopes(mode).every((s) => caps()?.scopes?.includes(s)) && caps()?.actions?.some((a) => a.action === orchestrationActions[mode] && a.allowed === true);
+	const hostAllowed = () => caps()?.hosts?.some((row) => row.host === saved.host && row.writes === true && (mode === "relay" || row.orchestrate === true));
+	const proofOf = (op) => op?.result || op?.external_refs?.[mode === "relay" ? "relay_result" : mode === "failover" ? "failover_result" : "fanout_result"] || {};
+	const childrenOf = (op) => {
+		const rows = op?.external_refs?.fanout_result?.started ?? proofOf(op).started;
+		return Array.isArray(rows) ? rows : [];
+	};
+	const mayReplace = () => {
+		if (!terminal$2(operation)) return false;
+		const statuses = [proofOf(operation).child_operation_status, ...childrenOf(operation).map((row) => row.operation_status)].filter(Boolean);
+		return !(operation.steps || []).some((step) => ["started", "uncertain"].includes(step.status)) && statuses.every((status) => [
+			"succeeded",
+			"failed",
+			"cancelled"
+		].includes(status));
+	};
+	const selectedAllowed = () => discoveredHost === saved.host && (sessionMode(mode) ? selected?.host === saved.host && selected.session_id === saved.selection && (mode === "failover" ? failoverSource(selected) : managed(selected)) : rows.some((row) => row.workspace_id === saved.selection));
+	const status = h("div", { role: "status" }), result = h("div", { "data-orchestration-result": "" }), discoveryStatus = h("p", {
+		class: "muted",
+		role: "status"
+	}), identity = h("p", { class: "muted" });
+	const host = h("select", { "aria-label": t("host") }, h("option", { value: "" }, t("start_choose_host")), ...(caps()?.hosts || []).map((row) => h("option", { value: row.host }, row.host)));
+	if (saved.host && ![...host.options].some((o) => o.value === saved.host)) host.append(h("option", { value: saved.host }, saved.host));
+	const selection = h("select", { "aria-label": t(sessionMode(mode) ? "orch_session" : "start_workspace") });
+	const message = h("textarea", {
+		"aria-label": t(mode === "failover" ? "orch_instructions" : "orch_message"),
+		rows: 5,
+		maxlength: mode === "failover" ? 4e3 : 12e3
+	});
+	const queue = h("input", { type: "checkbox" }), agent = h("select", { "aria-label": t("start_agent") }, h("option", { value: "codex" }, "Codex"), h("option", { value: "claude" }, "Claude"));
+	const maximum = h("input", {
+		type: "number",
+		min: 1,
+		max: 16,
+		"aria-label": t("orch_max_items")
+	});
+	const review = h("input", { type: "checkbox" }), items = h("div", { "data-orchestration-items": "" });
+	const label = (key, input) => h("label", {}, t(key), input);
+	const inputs = {
+		host,
+		selection,
+		message,
+		queue,
+		agent,
+		maximum
+	};
+	function fill() {
+		host.value = saved.host;
+		selection.value = saved.selection;
+		message.value = saved.message;
+		queue.checked = saved.queue;
+		agent.value = saved.agent;
+		maximum.value = saved.max_items;
+	}
+	const showError = (error) => {
+		if (current()) status.replaceChildren(errorBox(error));
+	};
+	function renderSelection() {
+		const id = (row) => sessionMode(mode) ? row.session_id : row.workspace_id;
+		selection.replaceChildren(h("option", { value: "" }, t(sessionMode(mode) ? "orch_choose_session" : "start_choose_workspace")), ...rows.map((row) => h("option", { value: id(row) }, (row.title || row.name) && (row.title || row.name) !== id(row) ? `${row.title || row.name} · ${id(row)}` : id(row))));
+		if (saved.selection && ![...selection.options].some((o) => o.value === saved.selection)) selection.append(h("option", { value: saved.selection }, saved.selection));
+		selection.value = saved.selection;
+	}
+	async function readSelected(serial = discovery) {
+		selected = null;
+		if (!sessionMode(mode) || !saved.selection || saved.intent) return;
+		const fixed = {
+			host: saved.host,
+			session_id: saved.selection
+		};
+		const doc = await api("GET", `/sessions/${encodeURIComponent(fixed.host)}/${encodeURIComponent(fixed.session_id)}`);
+		guard();
+		if (serial !== discovery || saved.intent || saved.host !== fixed.host || saved.selection !== fixed.session_id) return;
+		if (doc?.session?.host !== fixed.host || doc.session.session_id !== fixed.session_id || !Array.isArray(doc.relations_summary)) throw new Error(t("orch_discovery_failed"));
+		selected = {
+			...doc.session,
+			relations: doc.relations_summary
+		};
+	}
+	async function discover() {
+		if (!current() || saved.intent || !caps()?.scopes?.includes("observe") || !saved.host) return;
+		const mine = ++discovery, expectedHost = saved.host;
+		discovering = true;
+		selected = null;
+		discoveredHost = "";
+		rows = [];
+		renderSelection();
+		update();
+		discoveryStatus.textContent = t("orch_loading");
+		try {
+			const doc = await api("GET", sessionMode(mode) ? `/sessions?host=${encodeURIComponent(expectedHost)}&access=managed&provenance=connector_managed&limit=200` : `/workspaces?host=${encodeURIComponent(expectedHost)}&limit=200`);
+			guard();
+			if (mine !== discovery || expectedHost !== saved.host || saved.intent) return;
+			const list = doc[sessionMode(mode) ? "sessions" : "workspaces"], id = sessionMode(mode) ? "session_id" : "workspace_id";
+			if (!Array.isArray(list) || list.length > 200 || list.some((row) => row?.host !== expectedHost || !text$1(row?.[id])) || new Set(list.map((row) => row[id])).size !== list.length || !sessionMode(mode) && (!object$1(doc.errors) || Object.keys(doc.errors).length || typeof doc.has_more !== "boolean") || sessionMode(mode) && doc.next_cursor !== null && !text$1(doc.next_cursor, 8192)) throw new Error(t("orch_discovery_failed"));
+			rows = sessionMode(mode) ? list.filter((row) => mode === "failover" ? failoverSource(row) : managed(row)) : list;
+			discoveredHost = expectedHost;
+			renderSelection();
+			await readSelected(mine);
+			guard();
+			if (mine === discovery) readFailed = false;
+			if (mine === discovery) discoveryStatus.textContent = t(doc.next_cursor || doc.has_more ? "orch_truncated" : rows.length ? "orch_selection_help" : "orch_empty");
+		} catch (error) {
+			if (current() && mine === discovery) {
+				discoveredHost = "";
+				selected = null;
+				discoveryStatus.textContent = t("orch_discovery_failed");
+				showError(error);
+			}
+			throw error;
+		} finally {
+			if (current() && mine === discovery) {
+				discovering = false;
+				update();
+			}
+		}
+	}
+	const reload = h("button", {
+		class: "secondary",
+		onclick: () => discover().catch(() => {})
+	}, t("orch_reload"));
+	const changed = () => {
+		reviewed = false;
+		review.checked = false;
+		try {
+			persist();
+		} catch (e) {
+			showError(e);
+		}
+		update();
+	};
+	for (const [key, input] of Object.entries(inputs)) input.addEventListener([
+		"host",
+		"selection",
+		"queue",
+		"agent"
+	].includes(key) ? "change" : "input", () => {
+		if (!current() || busy || saved.intent) {
+			fill();
+			return;
+		}
+		if (key === "maximum") saved.max_items = Number(input.value);
+		else saved[key] = key === "queue" ? input.checked : input.value;
+		if (key === "host") {
+			saved.selection = "";
+			selected = null;
+			discovering = false;
+			rows = [];
+			discoveredHost = "";
+			++discovery;
+			renderSelection();
+		}
+		changed();
+		if (key === "host") discover().catch(() => {});
+		if (key === "selection") {
+			const mine = ++discovery;
+			discovering = true;
+			selected = null;
+			update();
+			readSelected(mine).catch((error) => {
+				if (current() && mine === discovery) showError(error);
+			}).finally(() => {
+				if (current() && mine === discovery) {
+					discovering = false;
+					update();
+				}
+			});
+		}
+	});
+	function renderItems() {
+		items.replaceChildren(...saved.items.map((item, index) => {
+			const title = h("input", {
+				"aria-label": t("orch_item_title", { n: index + 1 }),
+				maxlength: 200
+			}), prompt = h("textarea", {
+				"aria-label": t("orch_item_prompt", { n: index + 1 }),
+				rows: 4,
+				maxlength: 19e3
+			});
+			title.value = item.title;
+			prompt.value = item.prompt;
+			for (const [key, el] of [["title", title], ["prompt", prompt]]) el.addEventListener("input", () => {
+				if (!current() || saved.intent || busy) {
+					el.value = item[key];
+					return;
+				}
+				item[key] = el.value;
+				changed();
+			});
+			const remove = h("button", {
+				class: "secondary",
+				onclick: () => {
+					if (!current() || saved.intent || busy || saved.items.length < 2) return;
+					saved.items.splice(index, 1);
+					renderItems();
+					changed();
+				}
+			}, t("orch_remove_item", { n: index + 1 }));
+			return h("section", { class: "orch-item" }, h("h2", {}, t("orch_item", { n: index + 1 })), label("orch_title_label", title), label("orch_prompt_label", prompt), h("div", { class: "actions" }, remove));
+		}));
+	}
+	const add = h("button", {
+		class: "secondary",
+		onclick: () => {
+			if (!current() || saved.intent || busy || saved.items.length >= 16) return;
+			saved.items.push({
+				title: "",
+				prompt: ""
+			});
+			renderItems();
+			changed();
+		}
+	}, t("orch_add_item"));
+	review.addEventListener("change", () => {
+		reviewed = review.checked;
+		update();
+	});
+	function request() {
+		const target = {
+			host: saved.host,
+			[sessionMode(mode) ? "session_id" : "workspace"]: saved.selection
+		};
+		const params = mode === "relay" ? {
+			message: saved.message,
+			queue: saved.queue,
+			start_if_missing: false
+		} : mode === "planner" ? {
+			message: saved.message,
+			max_items: saved.max_items
+		} : mode === "items" ? {
+			agent: saved.agent,
+			plan: saved.items.map((item, i) => ({
+				index: i + 1,
+				title: item.title,
+				prompt: item.prompt
+			}))
+		} : {
+			tail_messages: 12,
+			...saved.message !== "" ? { instructions: saved.message } : {}
+		};
+		return {
+			action: orchestrationActions[mode],
+			target,
+			params,
+			preconditions: {}
+		};
+	}
+	function accept(candidate) {
+		guard();
+		const intent = saved.intent;
+		if (!intent?.request || !intent.key || !opId(candidate?.operation_id) || candidate.actor !== caps()?.actor || candidate.idempotency_key !== intent.key || !equal$2({
+			action: candidate.action,
+			target: candidate.target,
+			params: candidate.params,
+			preconditions: candidate.preconditions
+		}, intent.request) || intent.operation_id && intent.operation_id !== candidate.operation_id) throw new Error(t("orch_invalid_result"));
+		const proof = proofOf(candidate);
+		if (!object$1(proof) || proof.host !== void 0 && proof.host !== intent.request.target.host || mode === "relay" && proof.session_id !== void 0 && proof.session_id !== intent.request.target.session_id || mode === "failover" && proof.old_session_id !== void 0 && proof.old_session_id !== intent.request.target.session_id || proof.started !== void 0 && !(mode === "planner" && proof.started === true) && (!Array.isArray(proof.started) || proof.started.length > 16 || proof.started.some((row) => !object$1(row))) || !Array.isArray(candidate.steps)) throw new Error(t("orch_invalid_result"));
+		operation = candidate;
+		intent.operation_id = candidate.operation_id;
+		readFailed = false;
+		persist();
+		status.replaceChildren();
+		update();
+	}
+	const apply = h("button", {
+		class: "primary",
+		onclick: async () => {
+			if (!current() || busy || readFailed || !ready() || !allowed() || saved.intent?.operation_id || saved.intent?.refused) return;
+			if (!saved.intent) {
+				if (discovering || !hostAllowed() || !selectedAllowed() || !validRequest$1(request(), mode) || !reviewed) return;
+				saved.intent = {
+					request: request(),
+					key: crypto.randomUUID(),
+					operation_id: null
+				};
+			}
+			if (!saved.intent.request || !saved.intent.key) return;
+			try {
+				persist();
+			} catch (e) {
+				showError(e);
+				update();
+				return;
+			}
+			busy = true;
+			update();
+			const intent = saved.intent;
+			submission = (async () => {
+				try {
+					const doc = await api("POST", "/operations?wait=3", intent.request, intent.key);
+					guard();
+					accept(doc.operation);
+				} catch (error) {
+					if (current()) {
+						if (error.status >= 400 && error.status < 500 && admissionRefusals.has(error.code)) {
+							intent.refused = error.code;
+							try {
+								persist();
+							} catch {}
+						}
+						showError(error);
+					}
+				} finally {
+					busy = false;
+					if (current()) update();
+				}
+			})();
+			try {
+				await submission;
+			} finally {
+				submission = null;
+			}
+		}
+	}, t("orch_apply_" + mode));
+	const check = h("button", {
+		class: "secondary",
+		onclick: () => refresh(true).catch(() => {})
+	}, t("permissions_check"));
+	const another = h("button", {
+		class: "secondary",
+		onclick: async () => {
+			if (!current() || busy || refreshing || readFailed || !(mayReplace() || saved.intent?.refused)) return;
+			const previous = saved;
+			saved = {
+				...saved,
+				message: "",
+				queue: false,
+				items: [{
+					title: "",
+					prompt: ""
+				}]
+			};
+			delete saved.intent;
+			try {
+				persist();
+			} catch (error) {
+				saved = previous;
+				showError(error);
+				return;
+			}
+			operation = null;
+			reviewed = false;
+			review.checked = false;
+			status.replaceChildren();
+			fill();
+			renderItems();
+			update();
+			await discover().catch(() => {});
+		}
+	}, t("orch_new"));
+	const editor = mode === "items" ? h("div", { class: "panel" }, label("start_agent", agent), items, h("div", { class: "actions" }, add)) : h("div", { class: "panel" }, label(mode === "failover" ? "orch_instructions" : "orch_message", message), ...mode === "relay" ? [h("label", { class: "orch-check" }, queue, " ", t("queue_behind"))] : [], ...mode === "planner" ? [label("orch_max_items", maximum)] : []);
+	const reviewLine = h("label", { class: "orch-check" }, review, " ", t("orch_review_" + mode));
+	const box = h("section", {
+		class: "orchestration",
+		"data-orchestration": mode
+	}, h("p", { class: "muted" }, t("orch_help_" + mode)), h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("host", host), label(sessionMode(mode) ? "orch_session" : "start_workspace", selection)), h("div", { class: "actions" }, reload), discoveryStatus, identity), editor, h("p", { class: "muted" }, t("orch_preparation")), reviewLine, h("div", { class: "actions" }, apply, check, another), result, status);
+	function renderResult() {
+		result.replaceChildren();
+		if (!saved.intent && !withinBodyLimit(request())) result.append(h("p", { class: "error" }, t("orch_body_limit")));
+		if (!allowed()) result.append(h("p", { class: "muted" }, t("orch_unavailable", { scopes: scopes(mode).join(" + ") })));
+		if (!saved.intent) return;
+		const intent = saved.intent;
+		result.append(h("p", {}, operation ? operation.status === "waiting_external" ? t("orch_waiting_children") : opStatus(operation) : t(intent.refused ? "start_refused" : "start_unknown"), " ", ...intent.operation_id ? [h("a", { href: `#/op/${intent.operation_id}` }, t("permissions_details"))] : [], operation?.status_reason ? ` · ${operation.status_reason}` : ""));
+		result.append(h("p", { class: "muted" }, t("orch_fixed")));
+		if (!intent.request || !intent.key) result.append(h("p", { class: "error" }, t("permissions_damaged")));
+		if (!operation) return;
+		const proof = proofOf(operation);
+		if (operation.status !== "succeeded") result.append(h("p", { class: "note" }, t("orch_partial")));
+		const links = new Map();
+		if (opId(proof.child_operation_id)) links.set(proof.child_operation_id, t("orch_child"));
+		for (const row of childrenOf(operation)) if (opId(row.operation_id)) links.set(row.operation_id, `${row.task}. ${row.title} · ${row.operation_status}`);
+		for (const step of operation.steps || []) if (opId(step.response?.operation_id)) links.set(step.response.operation_id, links.get(step.response.operation_id) || step.name);
+		if (links.size) result.append(h("h2", {}, t("orch_receipts")), h("ul", {}, ...[...links].map(([id, label]) => h("li", {}, h("a", { href: `#/op/${id}` }, label)))));
+		if (mode === "items") result.append(h("p", { class: "muted" }, t("orch_item_progress", {
+			count: childrenOf(operation).filter((row) => row.prompt_sent === true).length,
+			total: intent.request?.params.plan.length || 0
+		})));
+		if (mode === "relay" && proof.sent === true) result.append(h("p", {}, t("orch_relay_accepted")));
+		if (mode === "planner" && proof.prompt_sent === true && text$1(proof.session_id)) result.append(h("p", {}, t("orch_planner_started"), " ", h("a", { href: `#/session/${encodeURIComponent(intent.request.target.host)}/${encodeURIComponent(proof.session_id)}` }, proof.session_id)));
+		if (mode === "failover") {
+			const sid = proof.new_session_id || proof.pending_successor;
+			if (text$1(sid)) result.append(h("p", {}, t(proof.prompt_sent === true ? "orch_handoff_accepted" : "orch_successor_unconfirmed"), " ", h("a", { href: `#/session/${encodeURIComponent(intent.request.target.host)}/${encodeURIComponent(sid)}` }, sid)));
+		}
+		if (operation.steps?.length) result.append(h("details", {}, h("summary", {}, t("orch_steps")), h("ul", {}, ...operation.steps.map((step) => h("li", {}, `${step.name} · ${step.status}`)))));
+	}
+	function update() {
+		const fixed = Boolean(saved.intent);
+		for (const el of Object.values(inputs)) el.disabled = busy || fixed;
+		selection.disabled ||= discovering || !saved.host;
+		for (const el of items.querySelectorAll("input,textarea,button")) el.disabled = busy || fixed || el.tagName === "BUTTON" && saved.items.length === 1;
+		add.disabled = busy || fixed || saved.items.length >= 16;
+		add.hidden = fixed;
+		reload.hidden = fixed;
+		reload.disabled = discovering || !saved.host || !caps()?.scopes?.includes("observe");
+		review.disabled = fixed || busy;
+		reviewLine.hidden = fixed;
+		apply.hidden = Boolean(saved.intent?.operation_id || saved.intent?.refused);
+		apply.textContent = t(fixed ? "permissions_retry" : "orch_apply_" + mode);
+		apply.disabled = busy || readFailed || !ready() || !allowed() || (fixed ? !saved.intent.request || !saved.intent.key : discovering || !reviewed || !hostAllowed() || !selectedAllowed() || !validRequest$1(request(), mode));
+		check.hidden = !saved.intent?.operation_id;
+		check.disabled = busy || Boolean(refreshing);
+		another.hidden = !(mayReplace() || saved.intent?.refused);
+		another.disabled = busy || Boolean(refreshing) || readFailed;
+		identity.replaceChildren();
+		identity.hidden = !saved.selection;
+		if (saved.selection) identity.append(t(sessionMode(mode) ? "sessions_id" : "sessions_workspace_id"), ": ", h("code", {}, saved.selection));
+		renderResult();
+	}
+	async function refresh(fresh = false) {
+		if (submission) {
+			await submission;
+			guard();
+		}
+		if (refreshing) {
+			await refreshing;
+			if (fresh) return refresh(true);
+			return;
+		}
+		refreshing = (async () => {
+			if (saved.intent?.operation_id) {
+				const doc = await api("GET", `/operations/${saved.intent.operation_id}`);
+				guard();
+				accept(doc.operation);
+			} else if (!saved.intent) await discover();
+			else update();
+		})();
+		update();
+		try {
+			await refreshing;
+		} catch (error) {
+			if (current()) {
+				readFailed = true;
+				showError(error);
+				update();
+			}
+			throw error;
+		} finally {
+			refreshing = null;
+			if (current()) update();
+		}
+	}
+	renderSelection();
+	renderItems();
+	fill();
+	update();
+	return {
+		box,
+		update,
+		refresh,
+		init: refresh
 	};
 }
 //#endregion
@@ -7670,7 +8320,7 @@ async function viewSessions(main) {
 		class: "session-project-link",
 		href: "#/projects"
 	}, t("sessions_projects")));
-	main.append(h("div", { class: "session-heading" }, h("h1", {}, t("sessions_title")), state.caps?.actions?.some((a) => a.action === "session.start") ? h("a", { href: "#/start" }, t("start_title_page")) : null, state.caps?.features?.repository_sync?.length ? h("a", { href: "#/published" }, t("pub_title")) : null), h("p", { class: "muted" }, t("sessions_intro")), h("div", { class: "filters session-filters" }, search, hostSel, accessSel, state.caps?.actions?.some((a) => a.action === "session.approve_pending") ? h("a", { href: "#/approvals" }, t("bulk_title")) : null), status, h("div", { class: "session-layout" }, scope, h("section", {
+	main.append(h("div", { class: "session-heading" }, h("h1", {}, t("sessions_title")), state.caps?.actions?.some((a) => a.action === "session.start") ? h("a", { href: "#/start" }, t("start_title_page")) : null, state.caps?.features?.repository_sync?.length ? h("a", { href: "#/published" }, t("pub_title")) : null, state.caps?.actions?.some((a) => Object.values(orchestrationActions).includes(a.action)) ? h("a", { href: "#/orchestrate/relay" }, t("orch_title")) : null), h("p", { class: "muted" }, t("sessions_intro")), h("div", { class: "filters session-filters" }, search, hostSel, accessSel, state.caps?.actions?.some((a) => a.action === "session.approve_pending") ? h("a", { href: "#/approvals" }, t("bulk_title")) : null), status, h("div", { class: "session-layout" }, scope, h("section", {
 		"aria-label": t("sessions_title"),
 		class: "session-results"
 	}, count, list, h("div", { class: "session-pagination" }, more, h("span", { class: "muted" }, t("sessions_page_note"))))));
@@ -8405,6 +9055,12 @@ async function viewSession(main, host, sid) {
 		if (data.discovery?.length) head.append(h("details", {}, h("summary", {}, t("obs_discovery")), discoveryEvidence(data.discovery)));
 		const managed = row.api_access === "managed";
 		if (managed && row.provenance === "connector_managed" && state.caps?.artifacts?.capture?.managed_single_file) head.append(h("p", {}, h("a", { href: `#/artifact-review/session/${encodeURIComponent(host)}/${encodeURIComponent(sid)}` }, t("ar_open"))));
+		if (managed && row.provenance === "connector_managed") {
+			const links = [];
+			if (state.caps?.actions?.some((a) => a.action === "session.relay")) links.push(h("a", { href: `#/orchestrate/relay/${encodeURIComponent(host)}/${encodeURIComponent(sid)}` }, t("orch_relay")));
+			if (row.agent_kind === "claude" && !data.relations_summary?.length && state.caps?.actions?.some((a) => a.action === "session.failover")) links.push(h("a", { href: `#/orchestrate/failover/${encodeURIComponent(host)}/${encodeURIComponent(sid)}` }, t("orch_failover")));
+			if (links.length) head.append(h("div", { class: "actions" }, ...links));
+		}
 		if (managed && row.provenance === "connector_managed" && !permissions) {
 			permissions = permissionsPanel({
 				h,
@@ -10932,6 +11588,49 @@ async function viewStart(main) {
 		].includes(ev.resource_type)) return panel.refresh(true);
 	});
 }
+async function viewOrchestration(main, selectedMode = "relay", host, sid) {
+	const mode = Object.hasOwn(orchestrationActions, selectedMode) ? selectedMode : "relay";
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	const context = host && sid ? {
+		host,
+		session_id: sid
+	} : {};
+	const panel = orchestrationPanel({
+		h,
+		t,
+		api,
+		caps: () => state.caps,
+		guard: () => assertView(connection),
+		ready: () => state.online && !state.nativeBusy,
+		errorBox,
+		opStatus,
+		mode,
+		context,
+		storageKey: `batc.orchestrate.${connection.namespace}.${mode}.${JSON.stringify(context)}`
+	});
+	main.append(h("a", { href: "#/sessions" }, t("nav_sessions")), h("h1", {}, t("orch_title")), h("nav", {
+		class: "orch-modes",
+		"aria-label": t("orch_title")
+	}, ...Object.keys(orchestrationActions).map((key) => h("a", {
+		href: `#/orchestrate/${key}`,
+		"aria-current": key === mode ? "page" : null
+	}, t("orch_" + key)))), h("h2", {}, t("orch_" + mode)), panel.box);
+	try {
+		await panel.init();
+	} catch {}
+	assertView(connection);
+	return onEvents((event) => {
+		if ([
+			"operation",
+			"session",
+			"host"
+		].includes(event.resource_type)) return panel.refresh(true);
+	});
+}
 async function viewPublished(main) {
 	const connection = {
 		epoch: state.epoch,
@@ -11046,6 +11745,7 @@ async function route() {
 		session: viewSession,
 		start: viewStart,
 		published: viewPublished,
+		orchestrate: viewOrchestration,
 		op: viewOperation,
 		settings: viewSettings,
 		"artifact-review": viewArtifactReview,
