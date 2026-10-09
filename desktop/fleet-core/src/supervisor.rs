@@ -866,7 +866,7 @@ impl<E: Effects, F: ProbeFactory, R: RouteProbe + Send + 'static> Supervisor<E, 
                 }
             }
         }
-        for dir in files::directories(&self.options.roaming) {
+        for dir in files::directories(&self.options.roaming)? {
             let intent_dir = dir.join("fleet-tunnel-intents");
             match std::fs::read_dir(intent_dir) {
                 Ok(entries) => {

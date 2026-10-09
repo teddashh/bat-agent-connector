@@ -14,11 +14,8 @@ use std::{
 };
 
 pub(crate) const BOUND: usize = 262144;
-pub(crate) fn directories(roaming: &Path) -> [PathBuf; 2] {
-    [
-        roaming.join("BetterAgentTerminal"),
-        roaming.join("org.tonyq.better-agent-terminal"),
-    ]
+pub(crate) fn directories(roaming: &Path) -> Result<[PathBuf; 2]> {
+    crate::configuration::data_directories(roaming)
 }
 fn regular(metadata: &std::fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
@@ -163,7 +160,7 @@ impl MonitorLease {
         }
         prove_absence()?;
         let mut previous = Vec::new();
-        for dir in directories(roaming) {
+        for dir in directories(roaming)? {
             match dir.symlink_metadata() {
                 Ok(metadata) if metadata.is_dir() && regular(&metadata) => (),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
@@ -301,7 +298,7 @@ pub(crate) fn scan(roaming: &Path, lease: &MonitorLease) -> Result<TunnelFiles> 
         owners: Vec::new(),
         blocked: Vec::new(),
     };
-    for dir in directories(roaming) {
+    for dir in directories(roaming)? {
         let pointer = lease.previous_pointer(&dir)?;
         for (child, intent) in [
             ("fleet-tunnel-owners", false),
