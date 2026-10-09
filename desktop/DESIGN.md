@@ -1,0 +1,37 @@
+# Shared dashboard design
+
+This is an operational console: compact, factual and legible. Preserve the existing
+browser and native shared source in `src/`; do not introduce a parallel visual theme.
+
+## Palette and type
+
+Use the semantic variables in `src/app.css`, including its dark theme. Light values:
+background `--bg: #f6f7f9`, panel `--panel: #fff`, text `--text: #1d2330`, secondary
+`--muted: #5d6676`, border `--line: #dfe3ea`, action `--accent: #2f5bd3`, action text
+`--accent-text: #fff`. Reuse `--ok`, `--warn`, `--bad`, `--info` for evidence states.
+System UI / Segoe UI / Noto Sans TC is the shared stack; body is 15px/1.5,
+page headings 20px and section headings 16px. Supporting orchestration text is 14px.
+
+## Components and layout
+
+Reuse `.panel` (14px padding, 10px radius, 1px border), `.capture-fields` (8px gap,
+wrapping 220px field basis), `.actions` (8px gap) and the primary/secondary/danger
+button variants (8px radius, 8px 14px padding). One primary submission per form.
+Use the existing 1100px main container; long instruction forms may narrow to 820px.
+No new shadows or floating layers. Place status and recovery beside the original
+request. Exact IDs and literal inputs must wrap, never disappear behind ellipsis.
+
+## Interaction and responsive behavior
+
+At 640px, forms wrap to one column, action targets are at least 44px and editable
+controls are 16px to avoid mobile zoom. Preserve focused drafts during event reads.
+Show disabled controls with a concrete scope or evidence explanation. Mark partial
+inventory and unknown receipts honestly. Text, icons and color must not imply a
+successful effect without central evidence. Never render agent-provided markup.
+
+## Agent guide
+
+Extract existing CSS tokens before adding UI. Use a compact selection panel and
+instruction section for a new action; use receipt links for multi-effect outcomes.
+Avoid decorative cards, oversized headings, extra primary buttons or a second font.
+Check both locales and 390/768/1440 widths with real screenshots before delivery.
