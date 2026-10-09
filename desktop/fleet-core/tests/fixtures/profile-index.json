@@ -1,0 +1,45 @@
+{
+  "profiles": [
+    {
+      "id": "profile-1",
+      "type": "remote",
+      "remoteHost": "127.0.0.1",
+      "remotePort": 19001,
+      "remoteProfileId": "default",
+      "remoteFingerprint": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"
+    },
+    {
+      "id": "profile-2",
+      "type": "remote",
+      "remoteHost": "127.0.0.2",
+      "remotePort": 19002,
+      "remoteProfileId": "default",
+      "remoteFingerprint": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"
+    },
+    {
+      "id": "profile-3",
+      "type": "remote",
+      "remoteHost": "127.0.0.3",
+      "remotePort": 19003,
+      "remoteProfileId": "default",
+      "remoteFingerprint": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"
+    },
+    {
+      "id": "profile-4",
+      "type": "remote",
+      "remoteHost": "127.0.0.4",
+      "remotePort": 19004,
+      "remoteProfileId": "default",
+      "remoteFingerprint": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"
+    },
+    {
+      "id": "profile-5",
+      "type": "remote",
+      "remoteHost": "127.0.0.5",
+      "remotePort": 19005,
+      "remoteProfileId": "default",
+      "remoteFingerprint": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"
+    }
+  ],
+  "activeProfileIds": []
+}
