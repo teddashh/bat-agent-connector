@@ -12,6 +12,8 @@ pub mod ownership;
 pub mod probe;
 mod probe_wire;
 pub mod process_adapter;
+mod profile_files;
+pub mod profile_launch;
 pub mod route;
 mod route_probe;
 pub mod selection;
@@ -33,6 +35,8 @@ pub mod windows_migration;
 pub mod windows_monitor_launch;
 #[cfg(windows)]
 pub mod windows_startup;
+#[cfg(windows)]
+pub mod windows_profiles;
 #[cfg(windows)]
 pub mod windows_supervisor;
 #[cfg(windows)]

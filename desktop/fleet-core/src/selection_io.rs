@@ -2,7 +2,7 @@
 use crate::{
     configuration::{data_directory, Configuration},
     digest,
-    selection::Preferences,
+    selection::{launch_plan, Choices, Preferences},
     Result,
 };
 use std::{
@@ -98,6 +98,46 @@ impl Snapshot {
 pub struct Store {
     roaming: PathBuf,
 }
+/// Opaque native capability. Never reconstruct this from a WebView document.
+pub struct ChoicePreview {
+    expected: Snapshot,
+    preferences: Preferences,
+    epoch: Option<String>,
+}
+#[derive(serde::Serialize)]
+pub struct ChoiceSummary {
+    pub choices: Choices,
+    pub effective_connections: Vec<String>,
+    pub added_connections: Vec<String>,
+    pub selection_revision: String,
+    pub configuration_binding: String,
+    pub monitor_epoch: Option<String>,
+}
+impl ChoicePreview {
+    pub fn summary(&self, configuration: &Configuration) -> Result<ChoiceSummary> {
+        if self.expected.configuration_binding != configuration.binding() {
+            return Err("CONFIGURATION_CHANGED");
+        }
+        let plan = launch_plan(&configuration.inventory, &self.preferences);
+        Ok(ChoiceSummary {
+            added_connections: plan
+                .connect
+                .iter()
+                .filter(|name| !self.preferences.connections.contains(name))
+                .cloned()
+                .collect(),
+            effective_connections: plan.connect,
+            choices: Choices {
+                connections: self.preferences.connections.clone(),
+                profiles: self.preferences.profiles.clone(),
+                dashboard: self.preferences.dashboard,
+            },
+            selection_revision: self.expected.revision.clone(),
+            configuration_binding: self.expected.configuration_binding.clone(),
+            monitor_epoch: self.epoch.clone(),
+        })
+    }
+}
 impl Store {
     pub fn new(roaming: PathBuf) -> Self {
         Self { roaming }
@@ -155,6 +195,56 @@ impl Store {
         expected: &Snapshot,
         connections: &[String],
         epoch: Option<&str>,
+        owner: impl FnMut() -> Result<Option<String>>,
+    ) -> Result<Snapshot> {
+        let preferences = expected
+            .preferences
+            .set_connections(&configuration.inventory, connections)?;
+        self.write_preferences(configuration, expected, preferences, epoch, owner)
+    }
+    pub fn preview_choices(
+        &self,
+        configuration: &Configuration,
+        expected: &Snapshot,
+        choices: &Choices,
+        epoch: Option<&str>,
+    ) -> Result<ChoicePreview> {
+        if epoch.is_some_and(|e| !crate::ownership::epoch_valid(e)) {
+            return Err("INVALID_REQUEST");
+        }
+        configuration.verify_current()?;
+        if expected.configuration_binding != configuration.binding() {
+            return Err("CONFIGURATION_CHANGED");
+        }
+        if !expected.same_snapshot(&self.read(configuration)?) {
+            return Err("SELECTION_CHANGED");
+        }
+        Ok(ChoicePreview {
+            expected: expected.clone(),
+            preferences: Preferences::choose(&configuration.inventory, choices)?,
+            epoch: epoch.map(Into::into),
+        })
+    }
+    pub fn apply_choices(
+        &self,
+        configuration: &Configuration,
+        preview: &ChoicePreview,
+        owner: impl FnMut() -> Result<Option<String>>,
+    ) -> Result<Snapshot> {
+        self.write_preferences(
+            configuration,
+            &preview.expected,
+            preview.preferences.clone(),
+            preview.epoch.as_deref(),
+            owner,
+        )
+    }
+    fn write_preferences(
+        &self,
+        configuration: &Configuration,
+        expected: &Snapshot,
+        preferences: Preferences,
+        epoch: Option<&str>,
         mut owner: impl FnMut() -> Result<Option<String>>,
     ) -> Result<Snapshot> {
         if epoch.is_some_and(|value| !crate::ownership::epoch_valid(value)) {
@@ -197,9 +287,6 @@ impl Store {
             Ok(())
         };
         check()?;
-        let preferences = expected
-            .preferences
-            .set_connections(&configuration.inventory, connections)?;
         let bytes = preferences.persisted(&configuration.inventory)?;
         let (temporary, mut file) = temporary(&directory)?;
         let result = (|| {
