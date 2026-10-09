@@ -3,9 +3,12 @@
 pub mod configuration;
 pub mod inventory;
 pub mod ownership;
+pub mod process_adapter;
 pub mod selection;
 pub mod selection_io;
 pub mod strict_json;
+#[cfg(windows)]
+pub mod windows;
 
 pub type Result<T> = std::result::Result<T, &'static str>;
 
