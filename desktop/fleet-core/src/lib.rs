@@ -3,6 +3,7 @@
 pub mod configuration;
 pub mod credential;
 pub mod discovery;
+pub mod installation;
 pub mod inventory;
 pub mod ownership;
 pub mod probe;
