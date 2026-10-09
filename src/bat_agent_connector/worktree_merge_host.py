@@ -14,14 +14,17 @@ LIMIT = 262144
 DEADLINE = float('inf')
 
 
-def git(path, *args, codes=(0,)):
+def git(path, *args, codes=(0,), config_context=False):
     env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
-    env.update(GIT_OPTIONAL_LOCKS='0', GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null', GIT_TERMINAL_PROMPT='0')
+    env.update(GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0')
+    argv = ['git', '--no-optional-locks']
+    if not config_context:
+        env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null')
+        argv += ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'gc.auto=0']
     # Files avoid unbounded communicate() allocations; no data is stored in either carrier.
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         p = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-            ['git', '--no-optional-locks', '-c', 'core.hooksPath=/dev/null',  # noqa: S607 - host Git
-            '-c', 'core.fsmonitor=false', '-c', 'gc.auto=0', '-C', path, *args],
+            [*argv, '-C', path, *args],
             env=env, stdout=out, stderr=err)  # noqa: S603, S607 - fixed argv, no shell
         try:
             while p.poll() is None:
@@ -64,6 +67,24 @@ def identity(path, roots):
             'directory': [s.st_dev, s.st_ino], 'common_directory': [c.st_dev, c.st_ino]}
 
 
+def no_context_programs(path):
+    # The configured SSH mapping must represent BAT's account/config context.
+    # This cannot attest another process's environment. Refuse overlays rather
+    # than silently sanitizing away a config path, injected config or diff helper.
+    allowed = {'GIT_OPTIONAL_LOCKS', 'GIT_TERMINAL_PROMPT'}
+    if os.environ.get('GIT_PAGER') in {'', 'cat'}:
+        allowed.add('GIT_PAGER')  # fixed literal passthrough; all proof output is piped
+    if any(k.startswith('GIT_') and k not in allowed for k in os.environ):
+        raise ValueError('MERGE_GIT_UNAVAILABLE')
+    # config --includes reads effective system/global/repository/worktree config;
+    # it executes none of the configured programs. Return names only, never values.
+    _, configured = git(path, 'config', '--includes', '--name-only', '--get-regexp',
+                        r'^(filter\..*\.(clean|process)|diff\.(external|.*\.(command|textconv))|core\.fsmonitor)$',
+                        codes=(0, 1), config_context=True)
+    if configured.strip():
+        raise ValueError('MERGE_GIT_UNAVAILABLE')
+
+
 def no_repository_programs(path):
     # Git status can execute clean/process filters while hashing same-size edits.
     # Refuse them before status rather than invoking repository-provided commands.
@@ -84,6 +105,9 @@ def observe(req):
     if any(not isinstance(r, str) or not r.startswith('/') or os.path.realpath(r) != r for r in roots):
         raise ValueError('MERGE_GIT_BINDING_CHANGED')
     paths = [req['source'], req['destination']]
+    for p in paths:
+        canonical(p, roots)
+        no_context_programs(p)
     before = [identity(p, roots) for p in paths]
     if paths[0] == paths[1] or before[0]['common_dir'] != before[1]['common_dir'] or before[0]['branch'] == before[1]['branch']:
         raise ValueError('MERGE_GIT_BINDING_CHANGED')

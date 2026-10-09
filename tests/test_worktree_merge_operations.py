@@ -88,6 +88,9 @@ def reopen(d):
     ops.context.update(d.ops.context)
     d.ops = ops
     d.coordinator.journal = d.adapter.journal = d.journal
+    d.journal.on_close = d.release_owner
+    d.journal.owner_valid = d._owns_fleet
+    d.acquire_owner()
 
 
 async def test_merge_exact_receipts_real_git_and_named_replay(daemon, mock, carriers):
@@ -172,7 +175,7 @@ async def test_final_awaited_reads_followed_by_synchronous_owner_gate(daemon, mo
         nonlocal count
         p = await original(*args, **kwargs)
         count += 1
-        if count == 3:  # final frame's last asynchronous proof
+        if count == 5:  # final frame's last asynchronous proof, after BAT status
             if change == 'owner':
                 monkeypatch.setattr(daemon.journal, 'owner_valid', lambda: False)
             elif change == 'reader':
@@ -207,7 +210,7 @@ async def test_cancel_during_final_proof_is_definitively_unsent_and_releases_car
         nonlocal calls
         p = await original(*a, **kw)
         calls += 1
-        if calls == 3:
+        if calls == 5:
             oid = daemon.ops.db.execute("SELECT operation_id FROM operations WHERE action='worktree.merge'").fetchone()[0]
             daemon.ops.cancel(P, oid)
         return p
@@ -242,8 +245,9 @@ async def test_lost_ack_cancel_reopen_retains_both_carriers_without_resend(daemo
     for path in (origin, source, origin / 'new-subdir'):
         with pytest.raises(ResourceReadOnly, match='MERGE_RESERVED'):
             merge.check_writer('h1', 'new-session', workdir=str(path))
-    with pytest.raises(ResourceReadOnly, match='MERGE_RESERVED'):
-        registry.reserve('h1', {'session_id': 'new-session', 'cwd': str(origin)}, 10)
+    for binding in ({'cwd': str(origin)}, {'origin_cwd': str(origin)}):
+        with pytest.raises(ResourceReadOnly, match='MERGE_RESERVED'):
+            registry.reserve('h1', {'session_id': 'new-session', **binding}, 10)
     with pytest.raises(ResourceReadOnly, match='MERGE_RESERVED'):
         await service.session_send(daemon.fleet, 'h1', SID, 'later', confirm=True)
     tab = next(t for t in mock.ws_doc['terminals'] if t.get('id') == SID)
@@ -346,17 +350,81 @@ async def test_default_headless_session_resolves_without_inventing_tabs(daemon, 
     await daemon.fleet.close()
 
 
-@pytest.mark.parametrize('bad', ['missing_runtime', 'changed_runtime', 'missing_preset'])
+@pytest.mark.parametrize('bad', ['malformed_runtime', 'changed_runtime', 'missing_preset'])
 async def test_headless_requires_positive_registry_and_runtime_binding(daemon, mock, carriers, bad):
     mock.ws_doc['terminals'] = [t for t in mock.ws_doc['terminals'] if t.get('id') != SID]
-    if bad == 'missing_runtime':
-        del mock.metas[SID]
+    if bad == 'malformed_runtime':
+        mock.metas[SID] = {}
     elif bad == 'changed_runtime':
         mock.metas[SID]['cwd'] = str(carriers[0])
     else:
         registry.update('h1', SID, agent_preset=None)
     out = await create(daemon)
     assert out['status'] == 'failed' and not api.write_frames(mock), out
+    if bad == 'malformed_runtime':
+        assert 'claude:get-session-state' not in mock.channels()
+    await daemon.fleet.close()
+
+
+@pytest.mark.parametrize('headless', [False, True])
+@pytest.mark.parametrize('status', ['active', 'stopped'])
+async def test_positively_unloaded_managed_carrier_can_merge(daemon, mock, carriers, headless, status):
+    if headless:
+        mock.ws_doc['terminals'] = [t for t in mock.ws_doc['terminals'] if t.get('id') != SID]
+    del mock.metas[SID]
+    registry.update('h1', SID, status=status)
+    out = await create(daemon)
+    assert out['status'] == 'succeeded' and out['result']['merged_now'] is True, out
+    assert 'claude:get-session-state' not in mock.channels()
+    assert mock.channels().count('worktree:merge') == 1
+    await daemon.fleet.close()
+
+
+@pytest.mark.parametrize('reload', [False, True])
+async def test_unloaded_binding_survives_reopen_and_refuses_replacement(daemon, mock, carriers, monkeypatch, reload):
+    del mock.metas[SID]
+    original = merge.reserve
+    def fail(*a, **kw):
+        raise OSError('fixture interruption before reservation')
+    monkeypatch.setattr(merge, 'reserve', fail)
+    out = await create(daemon)
+    assert out['status'] == 'uncertain' and not api.write_frames(mock), out
+    monkeypatch.setattr(merge, 'reserve', original)
+    if reload:
+        mock.metas[SID] = {'cwd': str(carriers[1]), 'sdkSessionId': 'replacement', 'isStreaming': False}
+    reopen(daemon)
+    daemon.journal.owner_valid = daemon._owns_fleet
+    daemon.ops.db.execute('UPDATE operations SET next_run_at=0 WHERE operation_id=?', (out['operation_id'],))
+    await settle_operations(daemon.ops)
+    current = daemon.ops.get(out['operation_id'])
+    assert current['status'] == ('failed' if reload else 'succeeded'), current
+    assert mock.channels().count('worktree:merge') == (0 if reload else 1)
+    await daemon.fleet.close()
+
+
+@pytest.mark.parametrize('reply', [{'type': 'invoke-result'}, {'type': 'unexpected', 'result': None},
+                                  {'type': 'invoke-error', 'error': 'metadata unavailable'}])
+async def test_malformed_final_metadata_does_not_prove_unloaded(daemon, mock, carriers, monkeypatch, reply):
+    del mock.metas[SID]
+    client = daemon.fleet.client('h1')
+    roundtrip, guard_read = client._roundtrip, client.guard_read
+    final_read = False
+    async def fake(frame, *args, **kwargs):
+        if final_read and frame['channel'] == 'claude:get-session-meta':
+            return reply
+        return await roundtrip(frame, *args, **kwargs)
+    async def guarded(*args, **kwargs):
+        nonlocal final_read
+        final_read = True
+        try:
+            return await guard_read(*args, **kwargs)
+        finally:
+            final_read = False
+    monkeypatch.setattr(client, '_roundtrip', fake)
+    monkeypatch.setattr(client, 'guard_read', guarded)
+    out = await create(daemon)
+    assert out['status'] == 'failed' and not api.write_frames(mock), out
+    assert not merge._document().get('carrier_writers')
     await daemon.fleet.close()
 
 
@@ -392,6 +460,84 @@ async def test_git_read_proof_refuses_repository_filter_programs_and_submodules(
     out = await create(daemon)
     assert out['status'] == 'failed' and out['error_code'] == 'MERGE_GIT_UNAVAILABLE', out
     assert not marker.exists() and not api.write_frames(mock)
+    await daemon.fleet.close()
+
+
+@pytest.mark.parametrize('location', ['local', 'include', 'global', 'global_include', 'worktree'])
+@pytest.mark.parametrize('program', ['external', 'command', 'textconv'])
+async def test_effective_git_diff_programs_refuse_before_bat_status(daemon, mock, carriers, tmp_path, monkeypatch, location, program):
+    import shlex
+    origin, source = carriers
+    marker = tmp_path / 'diff-must-not-run'
+    script = tmp_path / 'fixture-diff.sh'
+    script.write_text('touch ' + shlex.quote(str(marker)) + '\nprintf fixture\n')
+    key = 'diff.external' if program == 'external' else 'diff.proof.' + program
+    if program != 'external':
+        (origin / '.git' / 'info' / 'attributes').write_text('feature diff=proof\n')
+    args = []
+    if location == 'include':
+        config = tmp_path / 'included-diff.conf'
+        git(origin, 'config', 'include.path', str(config))
+        args = ['--file', str(config)]
+    elif location in {'global', 'global_include'}:
+        xdg = tmp_path / 'git-context'
+        (xdg / 'git').mkdir(parents=True)
+        monkeypatch.setenv('XDG_CONFIG_HOME', str(xdg))
+        config = xdg / 'git' / 'config'
+        if location == 'global_include':
+            included = tmp_path / 'included-global-diff.conf'
+            git(origin, 'config', '--file', str(config), 'include.path', str(included))
+            config = included
+        args = ['--file', str(config)]
+    elif location == 'worktree':
+        git(origin, 'config', 'extensions.worktreeConfig', 'true')
+        args = ['--worktree']
+    git(origin, 'config', *args, key, 'sh ' + shlex.quote(str(script)))
+    # Prove the pinned BAT diff argv really would execute this temporary helper.
+    git(origin, 'diff', 'main...bat/feature')
+    assert marker.exists()
+    marker.unlink()
+    status = dict(mock.worktrees[SID])
+    def bat_status(_):
+        git(origin, 'diff', 'main...bat/feature')
+        return status
+    mock.handlers['worktree:status'] = bat_status
+    out = await create(daemon)
+    assert out['status'] == 'failed' and out['error_code'] == 'MERGE_GIT_UNAVAILABLE', out
+    assert 'worktree:status' not in mock.channels()
+    assert not marker.exists() and not api.write_frames(mock)
+    await daemon.fleet.close()
+
+
+@pytest.mark.parametrize('key,value', [('GIT_EXTERNAL_DIFF', 'fixture-command'), ('GIT_DIFF_OPTS', '-u'),
+                                    ('GIT_CONFIG_PARAMETERS', "'diff.external=fixture-command'"),
+                                    ('GIT_CONFIG_COUNT', '0'), ('GIT_CONFIG_GLOBAL', '/fixture-config')])
+async def test_ambient_git_overrides_are_not_silently_sanitized(daemon, mock, carriers, monkeypatch, key, value):
+    monkeypatch.setenv(key, value)
+    out = await create(daemon)
+    assert out['status'] == 'failed' and out['error_code'] == 'MERGE_GIT_UNAVAILABLE', out
+    assert 'worktree:status' not in mock.channels() and not api.write_frames(mock)
+    await daemon.fleet.close()
+
+
+async def test_new_diff_program_before_final_frame_refuses_before_another_status(daemon, mock, carriers, tmp_path, monkeypatch):
+    import shlex
+    marker = tmp_path / 'late-diff-must-not-run'
+    original = merge.proof
+    calls, status_count = 0, None
+    async def add_program(*a, **kw):
+        nonlocal calls, status_count
+        result = await original(*a, **kw)
+        calls += 1
+        if calls == 3:  # final preparation proof; the later frame must inspect again
+            git(carriers[0], 'config', 'diff.external', 'touch ' + shlex.quote(str(marker)))
+            status_count = mock.channels().count('worktree:status')
+        return result
+    monkeypatch.setattr(merge, 'proof', add_program)
+    out = await create(daemon)
+    assert out['status'] == 'failed' and not api.write_frames(mock), out
+    assert status_count is not None and mock.channels().count('worktree:status') == status_count
+    assert not marker.exists() and not merge._document().get('carrier_writers')
     await daemon.fleet.close()
 
 
@@ -437,6 +583,23 @@ async def test_pending_task_ssh_creation_before_carrier_projection_blocks_merge(
         with pytest.raises(ValueError, match='fixture stops'):
             await pending
         await daemon.fleet.close()
+
+
+async def test_pending_normal_task_workspace_alias_is_not_missed(daemon, mock, carriers):
+    task = daemon.journal.submit(project='p', host='h1', workspace='FiXtUrE', original_words='work', idempotency_key='task')
+    daemon.journal.command(task['task_id'], 'start_lead', 'pending-new-sid', {'agent': 'claude'}, 'start')
+    out = await create(daemon)
+    assert out['status'] == 'failed' and out['error_code'] == 'MERGE_WRITER_UNPROVEN', out
+    assert not api.write_frames(mock)
+    await daemon.fleet.close()
+
+
+async def test_precarrier_start_origin_is_an_unresolved_consumer(daemon, mock, carriers):
+    registry.reserve('h1', {'session_id': 'pending-start', 'origin_cwd': str(carriers[0]),
+                           'workspace_id': 'ws-merge', 'agent_preset': 'claude-code-worktree'}, 10)
+    out = await create(daemon)
+    assert out['status'] == 'failed' and not api.write_frames(mock), out
+    await daemon.fleet.close()
 
 
 @pytest.mark.parametrize('first', ['http', 'rpc', 'mcp', 'cli'])
