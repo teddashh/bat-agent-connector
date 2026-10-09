@@ -277,9 +277,23 @@ async def _run(args) -> Any:
                 fleet, args.host, args.session, args.confirm, args.dry_run, args.agent, None, args.max_items
             ), None
         if c == "approve-pending":
-            return await lifecycle.approve_pending(
-                fleet, args.host, args.confirm, args.dry_run, args.workspace
-            ), None
+            from .task_daemon import request
+            token = os.environ.get("BATC_API_TOKEN")
+            if not token:
+                raise WriteRefused("approval preview/apply requires this client's BATC_API_TOKEN")
+            if args.dry_run:
+                return await asyncio.to_thread(request, "approval_preview", _auth_token=token,
+                    entry="cli", host=args.host, workspace=args.workspace, timeout=40), None
+            if not args.confirm or not fleet.writes_enabled(args.host):
+                raise WriteRefused("bulk apply requires --confirm and the local write tier")
+            if not args.preview_file or args.selection is None:
+                raise OperationError("BULK_PREVIEW_REQUIRED", "use --dry-run, then --preview-file and explicit --selection JSON", 422)
+            doc = json.loads(Path(args.preview_file).read_text())
+            selection = json.loads(args.selection)
+            return await asyncio.to_thread(request, "approve_pending", _auth_token=token,
+                entry="cli", host=args.host, workspace=args.workspace, confirm=True, timeout=40,
+                preview_token=doc.get("preview_token"), expected_fingerprint=doc.get("fingerprint"),
+                selection=selection, idempotency_key=args.key), None
         if c == "failover":
             return await lifecycle.session_failover(
                 fleet,
@@ -488,11 +502,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--confirm", action="store_true")
     p.add_argument("--key", help="reuse for retries; omitted means each call is independent")
     p.add_argument("--control-version", type=int, help="expected owning task control version")
-    p = sp.add_parser("approve-pending", help="preview pending prompts with --dry-run; bulk apply disabled")
+    p = sp.add_parser("approve-pending", help="review with --dry-run, then apply an explicit preview selection")
     p.add_argument("host")
     p.add_argument("--workspace")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--confirm", action="store_true")
+    p.add_argument("--preview-file", help="JSON saved from --dry-run")
+    p.add_argument("--selection", help='JSON [{"item_id":"...","mode":null|"default"|"allow_all"}]')
+    p.add_argument("--key", help="reuse for retry; omitted means an independent batch")
 
     p = sp.add_parser("relay", help="WRITE: send a task verbatim + a labeled brief to a session (default: main)")
     p.add_argument("host")

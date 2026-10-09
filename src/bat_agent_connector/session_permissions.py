@@ -275,6 +275,10 @@ async def execute(ctx, fleet, host, sid, mode, guard):
         grant = await resource_policy.authorize_session(fleet, host, "session.permissions", terminal)
         _check_owner(ctx, fleet, host, sid)
         plan = saved_plan(ctx)
+        from .bulk_approval import check_child
+        if bulk_item := check_child(ctx):
+            if service.agent_kind(terminal.get("agentPreset")) != bulk_item["agent_kind"]:
+                raise TaskControlRefused("BULK_BINDING_CHANGED", "reviewed permission agent kind changed")
         if plan is None:
             kind = service.agent_kind(terminal.get("agentPreset"))
             meta = await service._meta(client, sid)
@@ -300,6 +304,8 @@ async def execute(ctx, fleet, host, sid, mode, guard):
                 sent = False
 
                 def check():
+                    from .bulk_approval import check_child
+                    check_child(ctx)
                     _check_owner(ctx, fleet, host, sid)
                     if guard:
                         guard.check()
@@ -321,6 +327,9 @@ async def execute(ctx, fleet, host, sid, mode, guard):
                         result = await client.guard_read(channel, params)
                         if channel == "claude:get-session-meta":
                             _loaded(result, plan["agent_kind"])
+                            from .bulk_approval import check_child, check_meta
+                            if bulk_item := check_child(ctx):
+                                check_meta(bulk_item, result)
                             if any(result.get(k) != value for k, value in plan["runtime_identity"].items() if value is not None):
                                 raise TaskControlRefused("TASK_BINDING_MISMATCH", "permission runtime identity changed")
                             if result.get("agentPreset") and service.agent_kind(result["agentPreset"]) != plan["agent_kind"]:

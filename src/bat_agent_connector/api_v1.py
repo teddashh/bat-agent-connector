@@ -100,10 +100,14 @@ class ApiV1:
         cleanup.install(daemon.ops, daemon._admin_token)
         artifact_capture.install(daemon.ops, daemon._admin_token)
         artifact_managed.install(daemon.ops)
+
+        from . import bulk_approval
+        bulk_approval.install(daemon.ops, daemon._admin_token)
         self.allowed_origins = allowed_origins
         self._streams = 0
         self._streams_by_actor: dict[str, int] = {}
         self.routes = [
+            ("POST", r"/api/v1/approval-previews", self.approval_preview, "observe"),
             ("POST", r"/api/v1/cleanup-previews", self.cleanup_preview, "observe"),
             ("GET", r"/api/v1/cleanup-retained", self.cleanup_retained, "observe"),
             ("GET", r"/api/v1/cleanup-tombstones", self.cleanup_tombstones, "observe"),
@@ -364,7 +368,7 @@ class ApiV1:
         gh_cfg = self.daemon.ops.context["github_config"]
         actions = [{"action": a.name, "scope": a.scope, "summary": a.summary, "allowed": principal.allows(a.scope)
                                and (a.name != "delivery.merge_and_deploy" or principal.allows("deploy"))
-                               and (a.name not in {"artifact.capture", "artifact.capture.managed"} or principal.allows("observe"))}
+                               and (a.name not in {"artifact.capture", "artifact.capture.managed", "session.approve_pending"} or principal.allows("observe"))}
                    for a in self.daemon.ops.actions.values()]
         hosts = [{"host": h, "observe": True, "writes": fleet.writes_enabled(h),
                   "orchestrate": fleet.orchestrate_enabled(h),
@@ -413,6 +417,10 @@ class ApiV1:
                                                            "health_required": r.verification.health_required} if r.verification else None,
                                          "rollback": {"supported": r.rollback.supported, "identity": r.rollback.identity,
                                                       "not_undone": list(r.rollback.not_undone)}} for r in gh_cfg.recipes.values()]}
+
+    async def approval_preview(self, principal, body, **_):
+        from .bulk_approval import preview
+        return 200, await preview(self.daemon.ops, principal, body)
 
     async def bootstrap(self, principal, **_):
         # Cursor first. The following existing read models are live pages, not an atomic snapshot.
