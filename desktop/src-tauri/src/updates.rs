@@ -396,6 +396,42 @@ impl Updates {
         self.status()
     }
 
+    pub fn begin_install(&self, candidate_id: &str) -> Result<(), String> {
+        self.ready()?;
+        let pending = self
+            .pending
+            .lock()
+            .map_err(|_| "UPDATE_STATE_UNAVAILABLE")?;
+        let pending = pending
+            .as_ref()
+            .filter(|p| p.view.candidate_id == candidate_id)
+            .ok_or("UPDATE_CANDIDATE_CHANGED")?;
+        if pending.bytes.is_none() {
+            return Err("UPDATE_DOWNLOAD_REQUIRED".into());
+        }
+        self.phase("stopping_fleet", None)
+    }
+
+    pub fn install_returned(&self) -> Result<bool, String> {
+        let unsettled = read_intent(&self.directory, &self.version)?.is_some();
+        self.phase(
+            if unsettled {
+                "installation_unknown"
+            } else {
+                "verified"
+            },
+            Some(
+                if unsettled {
+                    "UPDATE_INSTALLATION_UNSETTLED"
+                } else {
+                    "UPDATE_FLEET_STOP_REFUSED"
+                }
+                .into(),
+            ),
+        )?;
+        Ok(unsettled)
+    }
+
     /// Caller holds the native lifecycle gate and proven local Fleet absence through this closure.
     /// No bytes leave Rust; the only installer input is the official plugin's verified download.
     pub fn install(&self, candidate_id: &str) -> Result<(), String> {
