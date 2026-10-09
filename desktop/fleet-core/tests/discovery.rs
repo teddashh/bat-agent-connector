@@ -18,12 +18,9 @@ struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
         let p = std::env::temp_dir().join(format!(
-            "bac-discovery-{}-{}",
+            "bac-discovery-{}-{:032x}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            rand::random::<u128>()
         ));
         std::fs::create_dir(&p).unwrap();
         Self(p)
