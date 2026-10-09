@@ -1,5 +1,16 @@
 # Third-party notices
 
+## gtk-rs GLib
+
+`desktop/vendor/glib-0.18.5` contains the gtk-rs Project Developers' MIT-licensed
+GLib bindings, with the upstream mutable out-parameter fix backported from
+`b5a4071e439bef2b5eea76c3aa25e5ae84839e34`. Source, exact archive/hash and the full
+modification record are in [desktop/vendor/README.md](desktop/vendor/README.md).
+The original license is preserved in
+[desktop/vendor/glib-0.18.5/LICENSE](desktop/vendor/glib-0.18.5/LICENSE) and included
+in desktop packages as `third-party/glib/LICENSE`, together with the original
+`COPYRIGHT` notice.
+
 ## Project Hub
 
 The project and work item rules in `src/bat_agent_connector/work_items.py` are ported from Project Hub v4.68.2

@@ -1,3 +1,6 @@
 # Canonical frontend and generated browser assets must build identically on Windows and Linux.
 desktop/** text=auto eol=lf
+# The third-party inventory verifies the original published archive byte-for-byte.
+desktop/vendor/glib-0.18.5/** -text
+desktop/vendor/glib-0.18.5/LICENSE whitespace=-blank-at-eof
 src/bat_agent_connector/dashboard/** text eol=lf
