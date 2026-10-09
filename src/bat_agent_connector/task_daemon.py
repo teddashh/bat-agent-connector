@@ -55,7 +55,7 @@ from .task_verifier import ObservedVerifier, load_settings
 DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 # /rpc methods that share /api/v1's principals and OperationService (MCP and CLI enter here).
 API_RPC = {"op_submit": "?", "session_interrupt": "operate", "session_send": "operate",
-           "session_continue": "operate", "session_answer": "operate",
+           "session_continue": "operate", "session_answer": "operate", "session_set_permissions": "operate",
            "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
            "work_status": "observe", "work_result": "observe", "work_events": "observe",
            "api_events": "observe", "inventory_sessions": "observe", "inventory_hosts": "observe",
