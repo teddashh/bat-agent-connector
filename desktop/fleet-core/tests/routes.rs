@@ -1,0 +1,562 @@
+use bat_fleet_core::{
+    inventory::{Endpoint, Inventory},
+    ownership::ProbeGeneration,
+    route::*,
+};
+use serde_json::{json, Value};
+use std::{sync::Mutex, time::Duration};
+use tokio::time::Instant;
+fn generation() -> ProbeGeneration {
+    ProbeGeneration {
+        epoch: "fixture-epoch".into(),
+        configuration_binding: "fixture-binding".into(),
+        selection_revision: "fixture-revision".into(),
+        generation: 1,
+    }
+}
+fn routes(kinds: &[&str]) -> Routes {
+    let mut doc: Value = serde_json::from_slice(include_bytes!("fixtures/inventory.json")).unwrap();
+    doc["hosts"][0]["routes"] =
+        json!(kinds.iter().map(|kind|match *kind{
+        "direct"=>json!({"kind":"direct","alias":"fixture-direct","probe":"100.64.0.1:22"}),
+        "lan"=>json!({"kind":"lan","alias":"fixture-lan","probe":"192.0.2.1:22"}),
+        _=>json!({"kind":"cf","alias":"fixture-cf","access_host":"node-1.example.invalid"})
+    }).collect::<Vec<_>>());
+    doc["hosts"][0]["provision_route"] = json!(kinds[0]);
+    Routes::from_inventory(
+        &Inventory::parse(&serde_json::to_vec(&doc).unwrap()).unwrap(),
+        "node-1",
+    )
+    .unwrap()
+}
+struct Mock {
+    direct: bool,
+    direct_tcp: bool,
+    lan: bool,
+    calls: Mutex<Vec<&'static str>>,
+    hang: bool,
+}
+impl Mock {
+    fn new(direct: bool, direct_tcp: bool, lan: bool) -> Self {
+        Self {
+            direct,
+            direct_tcp,
+            lan,
+            calls: Mutex::new(Vec::new()),
+            hang: false,
+        }
+    }
+}
+impl RouteProbe for Mock {
+    fn tailscale_direct<'a>(&'a self, _: &'a str, _: Instant) -> ProbeFuture<'a> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push("tailscale");
+            if self.hang {
+                std::future::pending().await
+            } else {
+                self.direct
+            }
+        })
+    }
+    fn tcp<'a>(&'a self, ep: &'a Endpoint, _: Instant) -> ProbeFuture<'a> {
+        Box::pin(async move {
+            if ep.address.starts_with("100.") {
+                self.calls.lock().unwrap().push("direct_tcp");
+                self.direct_tcp
+            } else {
+                self.calls.lock().unwrap().push("lan_tcp");
+                self.lan
+            }
+        })
+    }
+}
+async fn choice(routes: &Routes, policy: &HostPolicy, probe: &Mock, now: u64) -> RouteChoice {
+    select(
+        routes,
+        policy,
+        probe,
+        generation(),
+        now,
+        Duration::from_secs(1),
+    )
+    .await
+    .ok()
+    .unwrap()
+}
+#[test]
+fn tailscale_requires_online_curaddr_exact_unique_peer_not_derp_or_tcp_speed() {
+    let valid = json!({"Peer":{"id":{"TailscaleIPs":["100.64.0.1"],"Online":true,"CurAddr":"203.0.113.1:1234","Relay":"fixture-derp"}}});
+    assert!(tailscale_direct(
+        &serde_json::to_vec(&valid).unwrap(),
+        "100.64.0.1"
+    ));
+    for field in [
+        "offline",
+        "unknown_online",
+        "derp",
+        "numeric_addr",
+        "spaces",
+        "wrong_ip",
+        "duplicates",
+        "missing",
+    ] {
+        let mut v = valid.clone();
+        match field {
+            "offline" => v["Peer"]["id"]["Online"] = json!(false),
+            "unknown_online" => v["Peer"]["id"]["Online"] = json!("true"),
+            "derp" => v["Peer"]["id"]["CurAddr"] = json!(""),
+            "numeric_addr" => v["Peer"]["id"]["CurAddr"] = json!(123),
+            "spaces" => v["Peer"]["id"]["CurAddr"] = json!(" "),
+            "wrong_ip" => v["Peer"]["id"]["TailscaleIPs"] = json!(["100.64.0.2"]),
+            "duplicates" => v["Peer"]["other"] = v["Peer"]["id"].clone(),
+            _ => v["Peer"] = Value::Null,
+        };
+        assert!(
+            !tailscale_direct(&serde_json::to_vec(&v).unwrap(), "100.64.0.1"),
+            "{field}"
+        );
+    }
+    for raw in [
+        b"{\"Peer\":{},\"peer\":{}}".as_slice(),
+        b"secret malformed JSON",
+        b"null",
+        &[0xff],
+    ] {
+        assert!(!tailscale_direct(raw, "100.64.0.1"));
+    }
+    assert!(!tailscale_direct(
+        &vec![b' '; 1024 * 1024 + 1],
+        "100.64.0.1"
+    ));
+}
+#[tokio::test]
+async fn ordered_eligibility_and_short_circuit_never_infer_direct_from_tcp() {
+    for (ts, tcp, lan, expected) in [
+        (true, true, true, RouteKind::Direct),
+        (true, false, true, RouteKind::Lan),
+        (false, true, true, RouteKind::Lan),
+        (false, true, false, RouteKind::Cf),
+    ] {
+        let routes = routes(&["direct", "lan", "cf"]);
+        let policy = HostPolicy::new(&routes, generation());
+        let probe = Mock::new(ts, tcp, lan);
+        let selected = choice(&routes, &policy, &probe, 1000).await;
+        assert_eq!(selected.kind(), expected);
+        if !ts {
+            assert!(!probe.calls.lock().unwrap().contains(&"direct_tcp"));
+        }
+        assert!(selected
+            .alias(&policy, &generation(), 1000)
+            .unwrap()
+            .starts_with("fixture-"));
+    }
+}
+#[tokio::test]
+async fn direct_only_and_no_cf_have_no_legacy_unproven_default() {
+    for kinds in [&["direct"][..], &["direct", "lan"][..]] {
+        let routes = routes(kinds);
+        let policy = HostPolicy::new(&routes, generation());
+        let probe = Mock::new(false, true, false);
+        assert!(matches!(
+            select(
+                &routes,
+                &policy,
+                &probe,
+                generation(),
+                0,
+                Duration::from_secs(1)
+            )
+            .await,
+            Err("ROUTE_UNAVAILABLE")
+        ));
+        assert!(!probe.calls.lock().unwrap().contains(&"direct_tcp"));
+    }
+    let routes = routes(&["lan"]);
+    let policy = HostPolicy::new(&routes, generation());
+    assert_eq!(
+        choice(&routes, &policy, &Mock::new(false, false, true), 0)
+            .await
+            .kind(),
+        RouteKind::Lan
+    );
+}
+async fn fail(
+    routes: &Routes,
+    policy: &mut HostPolicy,
+    probe: &Mock,
+    start: u64,
+    lived: u64,
+    deliberate: bool,
+) -> (Run, Exit) {
+    let selected = choice(routes, policy, probe, start).await;
+    let run = policy.started(&selected, &generation(), start).unwrap();
+    let result = policy.exited(&run, start + lived, deliberate).unwrap();
+    (run, result)
+}
+#[tokio::test]
+async fn three_fast_failures_demote_for_ten_minutes_and_duplicate_exits_do_not_count() {
+    let routes = routes(&["direct", "lan", "cf"]);
+    let mut policy = HostPolicy::new(&routes, generation());
+    let probe = Mock::new(true, true, true);
+    for index in 0..3 {
+        let (run, result) = fail(&routes, &mut policy, &probe, index * 100, 99, false).await;
+        assert_eq!(
+            result,
+            if index == 2 {
+                Exit::Demoted
+            } else {
+                Exit::FastFailure
+            }
+        );
+        assert_eq!(
+            policy.exited(&run, index * 100 + 99, false).unwrap(),
+            Exit::Ignored
+        );
+    }
+    assert_eq!(
+        choice(&routes, &policy, &probe, 300).await.kind(),
+        RouteKind::Lan
+    );
+    assert_eq!(
+        choice(&routes, &policy, &probe, 600298).await.kind(),
+        RouteKind::Lan
+    );
+    assert_eq!(
+        choice(&routes, &policy, &probe, 600299).await.kind(),
+        RouteKind::Direct
+    );
+}
+#[tokio::test]
+async fn demotion_fallback_checks_eligibility_and_all_blocked_keep_best_eligible() {
+    let routes = routes(&["direct", "lan", "cf"]);
+    let mut policy = HostPolicy::new(&routes, generation());
+    let cf = Mock::new(false, true, false);
+    for n in 0..3 {
+        fail(&routes, &mut policy, &cf, n * 10, 1, false).await;
+    }
+    // CF is demoted; direct TCP could be fast, but Tailscale says DERP. It stays CF.
+    assert_eq!(
+        choice(&routes, &policy, &cf, 100).await.kind(),
+        RouteKind::Cf
+    );
+    let both = Mock::new(true, true, true);
+    for n in 0..3 {
+        fail(&routes, &mut policy, &both, 100 + n * 10, 1, false).await;
+    }
+    assert_eq!(
+        choice(&routes, &policy, &both, 200).await.kind(),
+        RouteKind::Lan
+    );
+    for n in 0..3 {
+        fail(&routes, &mut policy, &both, 200 + n * 10, 1, false).await;
+    }
+    assert_eq!(
+        choice(&routes, &policy, &both, 300).await.kind(),
+        RouteKind::Direct
+    );
+}
+#[tokio::test]
+async fn fifteen_second_run_resets_fast_failure_and_deliberate_stop_does_not_count() {
+    let routes = routes(&["direct", "cf"]);
+    let mut policy = HostPolicy::new(&routes, generation());
+    let probe = Mock::new(true, true, false);
+    fail(&routes, &mut policy, &probe, 0, 1, false).await;
+    fail(&routes, &mut policy, &probe, 10, 1, false).await;
+    assert_eq!(
+        fail(&routes, &mut policy, &probe, 20, 0, true).await.1,
+        Exit::Deliberate
+    );
+    assert_eq!(
+        fail(&routes, &mut policy, &probe, 30, 15000, false).await.1,
+        Exit::Normal
+    );
+    assert_eq!(
+        fail(&routes, &mut policy, &probe, 15040, 14999, false)
+            .await
+            .1,
+        Exit::FastFailure
+    );
+    assert_eq!(
+        choice(&routes, &policy, &probe, 40000).await.kind(),
+        RouteKind::Direct
+    );
+    let mut fresh = HostPolicy::new(&routes, generation());
+    fail(&routes, &mut fresh, &probe, 0, 1, true).await;
+    assert!(fresh.recovery_due(1));
+}
+#[tokio::test]
+async fn existing_bounded_recovery_is_reset_only_by_positive_sixty_second_liveness() {
+    let routes = routes(&["cf"]);
+    let mut policy = HostPolicy::new(&routes, generation());
+    let probe = Mock::new(false, false, false);
+    fail(&routes, &mut policy, &probe, 0, 1, false).await;
+    assert!(!policy.recovery_due(5000));
+    assert!(policy.recovery_due(5001));
+    policy.take_recovery_attempt(5001).unwrap();
+    assert!(!policy.recovery_due(20000));
+    policy.take_recovery_attempt(20001).unwrap();
+    assert!(!policy.recovery_due(65000));
+    policy.take_recovery_attempt(65001).unwrap();
+    assert!(policy.recovery_exhausted());
+    assert!(policy.take_recovery_attempt(110001).is_err());
+    let selected = choice(&routes, &policy, &probe, 65001).await;
+    let run = policy.started(&selected, &generation(), 65001).unwrap();
+    assert!(!policy.observed_alive(&run, 125000).unwrap());
+    assert!(policy.recovery_exhausted());
+    assert!(policy.observed_alive(&run, 125001).unwrap());
+    assert!(!policy.recovery_exhausted());
+    assert_eq!(policy.exited(&run, 125002, false).unwrap(), Exit::Normal);
+    assert!(!policy.recovery_due(130001));
+    assert!(policy.recovery_due(130002));
+}
+#[tokio::test]
+async fn selection_binds_generation_policy_and_age_and_wrong_run_cannot_change_host() {
+    let routes = routes(&["direct", "cf"]);
+    let mut policy = HostPolicy::new(&routes, generation());
+    let probe = Mock::new(true, true, false);
+    let selected = choice(&routes, &policy, &probe, 100).await;
+    for now in [99, 60101] {
+        assert!(matches!(
+            selected.alias(&policy, &generation(), now),
+            Err("ROUTE_STALE")
+        ));
+    }
+    assert!(selected.alias(&policy, &generation(), 60100).is_ok());
+    for field in 0..4 {
+        let mut changed = generation();
+        match field {
+            0 => changed.epoch.push('x'),
+            1 => changed.configuration_binding.push('x'),
+            2 => changed.selection_revision.push('x'),
+            _ => changed.generation += 1,
+        };
+        assert!(selected.alias(&policy, &changed, 100).is_err());
+    }
+    let run = policy.started(&selected, &generation(), 100).unwrap();
+    assert!(selected.alias(&policy, &generation(), 100).is_err());
+    assert!(policy.exited(&run, 99, false).is_err());
+    assert!(policy.observed_alive(&run, 99).is_err());
+    let other = routes_for_other();
+    let mut other_policy = HostPolicy::new(&other, generation());
+    assert_eq!(
+        other_policy.exited(&run, 100, false).unwrap(),
+        Exit::Ignored
+    );
+}
+fn routes_for_other() -> Routes {
+    Routes::from_inventory(
+        &Inventory::parse(include_bytes!("fixtures/inventory.json")).unwrap(),
+        "node-2",
+    )
+    .unwrap()
+}
+#[tokio::test]
+async fn total_deadline_and_independent_host_futures_do_not_wait_on_blocked_peer() {
+    let routes = routes(&["direct", "lan", "cf"]);
+    let policy = HostPolicy::new(&routes, generation());
+    let mut slow = Mock::new(false, false, false);
+    slow.hang = true;
+    let fast = Mock::new(true, true, true);
+    let pending = select(
+        &routes,
+        &policy,
+        &slow,
+        generation(),
+        0,
+        Duration::from_millis(150),
+    );
+    tokio::pin!(pending);
+    let quick = select(
+        &routes,
+        &policy,
+        &fast,
+        generation(),
+        0,
+        Duration::from_secs(1),
+    );
+    tokio::select! {result=quick=>assert_eq!(result.ok().unwrap().kind(),RouteKind::Direct),_= &mut pending=>panic!("blocked peer must not serialize the fast host")}
+    assert!(matches!(pending.await, Err("ROUTE_PROBE_TIMEOUT")));
+    assert!(slow.calls.lock().unwrap().contains(&"lan_tcp"));
+}
+#[tokio::test]
+async fn connector_alias_is_fixed_and_local_connector_does_not_invent_tunnel() {
+    let mut doc: Value = serde_json::from_slice(include_bytes!("fixtures/inventory.json")).unwrap();
+    let inv = Inventory::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let routes = Routes::from_inventory(&inv, "connector").unwrap();
+    let policy = HostPolicy::new(&routes, generation());
+    assert!(matches!(
+        select(
+            &routes,
+            &policy,
+            &Mock::new(true, true, true),
+            generation(),
+            0,
+            Duration::from_secs(1)
+        )
+        .await,
+        Err("ROUTE_UNAVAILABLE")
+    ));
+    doc["connector"]["ssh_alias"] = json!("fixture-connector");
+    let inv = Inventory::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let routes = Routes::from_inventory(&inv, "connector").unwrap();
+    let policy = HostPolicy::new(&routes, generation());
+    let selected = choice(&routes, &policy, &Mock::new(false, false, false), 0).await;
+    assert_eq!(selected.kind(), RouteKind::Configured);
+    assert_eq!(
+        selected.alias(&policy, &generation(), 0).unwrap(),
+        "fixture-connector"
+    );
+}
+
+#[tokio::test]
+async fn recreated_policy_does_not_reuse_a_choice_or_run_from_same_generation() {
+    let routes = routes(&["cf"]);
+    let mut old = HostPolicy::new(&routes, generation());
+    let probe = Mock::new(false, false, false);
+    let old_choice = choice(&routes, &old, &probe, 0).await;
+    let old_run = old.started(&old_choice, &generation(), 0).unwrap();
+    let mut new = HostPolicy::new(&routes, generation());
+    assert!(old_choice.alias(&new, &generation(), 0).is_err());
+    let new_choice = choice(&routes, &new, &probe, 0).await;
+    let new_run = new.started(&new_choice, &generation(), 0).unwrap();
+    assert_eq!(new.exited(&old_run, 1, false).unwrap(), Exit::Ignored);
+    assert_eq!(new.exited(&new_run, 1, false).unwrap(), Exit::FastFailure);
+}
+
+#[tokio::test]
+async fn owned_selection_worker_cannot_publish_after_preference_generation_changes() {
+    let routes = routes(&["direct", "cf"]);
+    let mut policy = HostPolicy::new(&routes, generation());
+    let request = SelectionRequest::new(&routes, &policy, generation(), 100).unwrap();
+    // The worker owns immutable input and does not hold a borrow of the supervisor.
+    let worker = tokio::spawn(async move {
+        request
+            .run(&Mock::new(true, true, false), Duration::from_secs(1))
+            .await
+    });
+    let mut next = generation();
+    next.generation += 1;
+    next.selection_revision.push('2');
+    policy
+        .update_selection_generation(&generation(), next.clone())
+        .unwrap();
+    let old = worker.await.unwrap().ok().unwrap();
+    assert!(matches!(old.alias(&policy, &next, 100), Err("ROUTE_STALE")));
+    let current = SelectionRequest::new(&routes, &policy, next.clone(), 100)
+        .unwrap()
+        .run(&Mock::new(true, true, false), Duration::from_secs(1))
+        .await
+        .ok()
+        .unwrap();
+    assert_eq!(
+        current.alias(&policy, &next, 100).unwrap(),
+        "fixture-direct"
+    );
+    // A stale writer, epoch/source change, or non-monotonic counter cannot advance it.
+    assert!(policy
+        .update_selection_generation(&generation(), next.clone())
+        .is_err());
+    for field in 0..4 {
+        let mut changed = next.clone();
+        changed.generation += 1;
+        match field {
+            0 => changed.epoch.push('x'),
+            1 => changed.configuration_binding.push('x'),
+            2 => changed.generation = next.generation - 1,
+            _ => {
+                changed.generation = next.generation;
+                changed.selection_revision.push('x');
+            }
+        }
+        assert!(policy.update_selection_generation(&next, changed).is_err());
+    }
+    policy
+        .update_selection_generation(&next, next.clone())
+        .unwrap();
+    assert!(current.alias(&policy, &next, 100).is_ok());
+}
+
+#[tokio::test]
+async fn preference_update_preserves_owned_run_and_exhausted_recovery_until_stable() {
+    let routes = routes(&["cf"]);
+    let mut policy = HostPolicy::new(&routes, generation());
+    let probe = Mock::new(false, false, false);
+    fail(&routes, &mut policy, &probe, 0, 1, false).await;
+    for now in [5001, 20001, 65001] {
+        policy.take_recovery_attempt(now).unwrap();
+    }
+    let selected = choice(&routes, &policy, &probe, 65001).await;
+    let run = policy.started(&selected, &generation(), 65001).unwrap();
+    assert!(!policy.recovery_due(200000));
+    assert!(matches!(
+        SelectionRequest::new(&routes, &policy, generation(), 65001),
+        Err("ROUTE_RUN_ACTIVE")
+    ));
+    let mut next = generation();
+    next.generation += 1;
+    next.selection_revision.push('x');
+    policy
+        .update_selection_generation(&generation(), next.clone())
+        .unwrap();
+    assert!(policy.recovery_exhausted());
+    assert!(!policy.observed_alive(&run, 125000).unwrap());
+    assert!(policy.observed_alive(&run, 125001).unwrap());
+    assert!(!policy.recovery_exhausted());
+    assert_eq!(policy.exited(&run, 125002, false).unwrap(), Exit::Normal);
+    assert!(!policy.recovery_due(130001));
+    assert!(policy.recovery_due(130002));
+    assert!(SelectionRequest::new(&routes, &policy, next, 130002).is_ok());
+}
+
+#[tokio::test]
+async fn preference_update_preserves_fast_failure_counts_and_alias_demotion() {
+    let routes = routes(&["direct", "cf"]);
+    let mut policy = HostPolicy::new(&routes, generation());
+    let probe = Mock::new(true, true, false);
+    for now in [0, 10] {
+        fail(&routes, &mut policy, &probe, now, 1, false).await;
+    }
+    let mut next = generation();
+    next.generation += 1;
+    next.selection_revision.push('x');
+    policy
+        .update_selection_generation(&generation(), next.clone())
+        .unwrap();
+    let selected = SelectionRequest::new(&routes, &policy, next.clone(), 20)
+        .unwrap()
+        .run(&probe, Duration::from_secs(1))
+        .await
+        .ok()
+        .unwrap();
+    let run = policy.started(&selected, &next, 20).unwrap();
+    assert_eq!(policy.exited(&run, 21, false).unwrap(), Exit::Demoted);
+    let mut later = next.clone();
+    later.generation += 1;
+    policy
+        .update_selection_generation(&next, later.clone())
+        .unwrap();
+    let selected = SelectionRequest::new(&routes, &policy, later.clone(), 22)
+        .unwrap()
+        .run(&probe, Duration::from_secs(1))
+        .await
+        .ok()
+        .unwrap();
+    assert_eq!(selected.kind(), RouteKind::Cf);
+    assert!(selected.alias(&policy, &later, 22).is_ok());
+    // Keeping aliases/name while changing an endpoint does not preserve source identity.
+    let mut doc: Value = serde_json::from_slice(include_bytes!("fixtures/inventory.json")).unwrap();
+    doc["hosts"][0]["routes"] = json!([
+        {"kind":"direct","alias":"fixture-direct","probe":"100.64.0.1:23"},
+        {"kind":"cf","alias":"fixture-cf","access_host":"node-1.example.invalid"}
+    ]);
+    doc["hosts"][0]["probe"] = json!("100.64.0.1:23");
+    let changed = Routes::from_inventory(
+        &Inventory::parse(&serde_json::to_vec(&doc).unwrap()).unwrap(),
+        "node-1",
+    )
+    .unwrap();
+    assert!(matches!(
+        SelectionRequest::new(&changed, &policy, later, 22),
+        Err("ROUTE_CONFIGURATION_CHANGED")
+    ));
+}
