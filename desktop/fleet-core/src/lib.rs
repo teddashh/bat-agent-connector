@@ -25,6 +25,7 @@ pub mod supervisor_io;
 pub mod supervisor_probe;
 pub mod supervisor_status;
 pub mod tunnel;
+pub mod unconfigured;
 #[cfg(windows)]
 pub mod windows;
 #[cfg(windows)]
@@ -34,9 +35,9 @@ pub mod windows_migration;
 #[cfg(windows)]
 pub mod windows_monitor_launch;
 #[cfg(windows)]
-pub mod windows_startup;
-#[cfg(windows)]
 pub mod windows_profiles;
+#[cfg(windows)]
+pub mod windows_startup;
 #[cfg(windows)]
 pub mod windows_supervisor;
 #[cfg(windows)]

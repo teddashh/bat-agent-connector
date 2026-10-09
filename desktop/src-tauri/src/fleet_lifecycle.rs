@@ -64,6 +64,23 @@ pub trait Platform {
     fn elapsed(&self) -> Duration;
     fn wait(&mut self);
 }
+pub trait AbsencePlatform {
+    type Launcher;
+    type Monitor;
+    fn launcher(&mut self) -> Result<Self::Launcher, String>;
+    fn monitor(&mut self) -> Result<Self::Monitor, String>;
+    fn verify_absence(&self) -> Result<(), String>;
+}
+/// No configuration means no authority to stop anything. Prove independent absence instead.
+pub fn with_absent<P: AbsencePlatform, T>(
+    platform: &mut P,
+    effect: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _launcher = platform.launcher()?;
+    let _monitor = platform.monitor()?;
+    platform.verify_absence()?;
+    effect()
+}
 pub fn with_stopped<P: Platform, T>(
     platform: &mut P,
     effect: impl FnOnce() -> Result<T, String>,
@@ -217,6 +234,66 @@ mod tests {
             panic!("effect forbidden")
         })
         .is_err());
+    }
+    struct Absent {
+        guards: Rc<Cell<usize>>,
+        refusal: u8,
+    }
+    impl AbsencePlatform for Absent {
+        type Launcher = Guard;
+        type Monitor = Guard;
+        fn launcher(&mut self) -> Result<Guard, String> {
+            if self.refusal == 1 {
+                return Err("LAUNCHER_BUSY".into());
+            }
+            self.guards.set(self.guards.get() + 1);
+            Ok(Guard(self.guards.clone()))
+        }
+        fn monitor(&mut self) -> Result<Guard, String> {
+            assert_eq!(self.guards.get(), 1);
+            if self.refusal == 2 {
+                return Err("FLEET_STOP_UNCONFIRMED".into());
+            }
+            self.guards.set(self.guards.get() + 1);
+            Ok(Guard(self.guards.clone()))
+        }
+        fn verify_absence(&self) -> Result<(), String> {
+            assert_eq!(self.guards.get(), 2);
+            if self.refusal == 3 {
+                Err("FLEET_ABSENCE_UNPROVEN".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+    #[test]
+    fn missing_configuration_still_holds_both_guards_through_effect() {
+        let guards = Rc::new(Cell::new(0));
+        let mut platform = Absent {
+            guards: guards.clone(),
+            refusal: 0,
+        };
+        with_absent(&mut platform, || {
+            assert_eq!(guards.get(), 2);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(guards.get(), 0);
+    }
+    #[test]
+    fn missing_configuration_unknown_mutex_or_ownership_never_runs_effect() {
+        for refusal in 1..=3 {
+            let guards = Rc::new(Cell::new(0));
+            let mut platform = Absent {
+                guards: guards.clone(),
+                refusal,
+            };
+            assert!(with_absent(&mut platform, || -> Result<(), String> {
+                panic!("effect forbidden")
+            })
+            .is_err());
+            assert_eq!(guards.get(), 0);
+        }
     }
 }
 
