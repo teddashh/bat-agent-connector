@@ -42,15 +42,21 @@ fn migration_store(c: &Context) -> Result<migration::Store> {
         &bat_fleet_core::windows_startup::startup_directory()?,
     )
 }
-fn migration_platform(c: &Context) -> Result<WindowsMigration> {
-    WindowsMigration::new(
-        c.installation.clone(),
-        c.paths.clone(),
-        c.roaming.clone(),
-        c.quit_file.clone(),
-        PathBuf::from(c.native.executable()),
-        system_directory()?,
-    )
+fn migration_platform<'a>(
+    c: &Context,
+    ticket: &'a Ticket,
+) -> Result<Guarded<'a, WindowsMigration>> {
+    Ok(Guarded {
+        inner: WindowsMigration::new(
+            c.installation.clone(),
+            c.paths.clone(),
+            c.roaming.clone(),
+            c.quit_file.clone(),
+            PathBuf::from(c.native.executable()),
+            system_directory()?,
+        )?,
+        ticket,
+    })
 }
 fn system_directory() -> Result<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
@@ -92,13 +98,13 @@ fn overview(c: &Context) -> Result<Value> {
     value["control_version"] = json!(1);
     Ok(value)
 }
-fn ensure(c: &Context, launcher: &LauncherMutex) -> Result<()> {
+fn ensure(c: &Context, launcher: &LauncherMutex, ticket: &Ticket) -> Result<()> {
     verify_no_migration(&c.installation)?;
     verify_control_owner(&c.installation, true)?;
     if c.installation.backend() == Backend::Rust {
-        c.ensure(launcher)
+        c.ensure(launcher, ticket)
     } else {
-        crate::fleet::ensure_powershell(c.installation.clone(), c.configuration.binding())
+        crate::fleet::ensure_powershell(c.installation.clone(), c.configuration.binding(), ticket)
             .map_err(|_| "MONITOR_START_UNPROVEN")
     }
 }
@@ -138,7 +144,7 @@ fn ready(c: &Context, selection: &Selection) -> Result<()> {
     Ok(())
 }
 struct ReadyProfiles<'a> {
-    native: WindowsProfiles<'a>,
+    native: Guarded<'a, WindowsProfiles<'a>>,
     context: &'a Context,
     selection: &'a Selection,
 }
@@ -183,7 +189,7 @@ impl Controller {
             Ok(())
         }
     }
-    pub fn request(&mut self, path: &Path, input: Request) -> Result<Value> {
+    pub fn request(&mut self, path: &Path, input: Request, ticket: &Ticket) -> Result<Value> {
         match input {
             Request::Discard { preview_id } => {
                 self.choices.remove(&preview_id);
@@ -194,22 +200,30 @@ impl Controller {
             Request::ApplyChoices { preview_id } => {
                 let saved = self.choices.get(&preview_id).ok_or("PREVIEW_EXPIRED")?;
                 let c = &saved.context;
-                let _launcher = LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY")?;
+                let _launcher =
+                    ticket.acquire(|| LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY"))?;
                 verify_no_migration(&c.installation)?;
                 c.verify(c.configuration.binding())?;
                 Store::new(c.roaming.clone()).apply_choices(
                     &c.configuration,
                     &saved.preview,
-                    || c.owner_epoch(),
+                    || {
+                        ticket.verify()?;
+                        c.owner_epoch()
+                    },
                 )?;
                 overview(c)
             }
             Request::Launch { preview_id } => {
                 let saved = self.launches.get(&preview_id).ok_or("PREVIEW_EXPIRED")?;
                 let c = &saved.context;
-                let launcher = LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY")?;
+                let launcher =
+                    ticket.acquire(|| LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY"))?;
                 verify_no_migration(&c.installation)?;
-                let mut native = WindowsProfiles::new(&launcher, &c.installation);
+                let mut native = Guarded {
+                    inner: WindowsProfiles::new(&launcher, &c.installation),
+                    ticket,
+                };
                 // Durable readback precedes fresh readiness; never resend after a lost reply.
                 if saved.preview.summary().opens_bat {
                     if let Some(receipt) =
@@ -222,7 +236,12 @@ impl Controller {
                     .connect
                     .is_empty()
                 {
-                    ensure(c, &launcher)?;
+                    crate::fleet_readiness::with_current_selection(
+                        &c.configuration,
+                        &Store::new(c.roaming.clone()),
+                        &saved.selection,
+                        || ensure(c, &launcher, ticket),
+                    )?;
                 }
                 let summary = saved.preview.summary();
                 let outcome = if !summary.opens_bat || summary.already_running {
@@ -264,7 +283,7 @@ impl Controller {
                     return Err("MIGRATION_CHANGED");
                 }
                 let store = migration_store(&saved.context)?;
-                let mut platform = migration_platform(&saved.context)?;
+                let mut platform = migration_platform(&saved.context, ticket)?;
                 store.begin(
                     &mut platform,
                     &preview_id,
@@ -315,7 +334,8 @@ impl Controller {
                     }
                     Request::PreviewLaunch {} => {
                         self.bound()?;
-                        let launcher = LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY")?;
+                        let launcher = ticket
+                            .acquire(|| LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY"))?;
                         verify_no_migration(&c.installation)?;
                         let store = Store::new(c.roaming.clone());
                         let selection = store.read(&c.configuration)?;
@@ -341,7 +361,8 @@ impl Controller {
                         Ok(value)
                     }
                     Request::LaunchStatus { launch_id } => {
-                        let launcher = LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY")?;
+                        let launcher = ticket
+                            .acquire(|| LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY"))?;
                         let platform = WindowsProfiles::new(&launcher, &c.installation);
                         safe(profile_launch::read_receipt(
                             &c.roaming, &launch_id, &platform,
@@ -350,7 +371,7 @@ impl Controller {
                     Request::PreviewMigration { backend, autostart } => {
                         self.bound()?;
                         let store = migration_store(&c)?;
-                        let mut platform = migration_platform(&c)?;
+                        let mut platform = migration_platform(&c, ticket)?;
                         let preview = store.preview(&mut platform, c.installation.backend())?;
                         let id = id();
                         let value = json!({"preview_id":id,"fingerprint":preview.fingerprint(),"from":preview.backend(),"to":backend,"autostart_before":preview.autostart_entry_present(),"autostart":autostart});
@@ -369,7 +390,7 @@ impl Controller {
                     }
                     Request::AdvanceMigration { migration_id } => {
                         let store = migration_store(&c)?;
-                        store.advance(&mut migration_platform(&c)?, &migration_id)?;
+                        store.advance(&mut migration_platform(&c, ticket)?, &migration_id)?;
                         safe(store.status(&migration_id)?)
                     }
                     Request::MigrationStatus { migration_id } => {
@@ -380,21 +401,29 @@ impl Controller {
                         restore_id,
                     } => {
                         let store = migration_store(&c)?;
-                        store.restore(&mut migration_platform(&c)?, &source_id, &restore_id)?;
+                        store.restore(
+                            &mut migration_platform(&c, ticket)?,
+                            &source_id,
+                            &restore_id,
+                        )?;
                         safe(store.status(&restore_id)?)
                     }
                     Request::SaveLogin {
                         expected_revision,
                         show_picker,
                     } => {
-                        let _launcher = LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY")?;
+                        let _launcher = ticket
+                            .acquire(|| LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY"))?;
                         verify_no_migration(&c.installation)?;
                         safe(
                             desktop_preferences::save(
                                 &c.roaming,
                                 &expected_revision,
                                 show_picker,
-                                || c.installation.verify_current().map_err(String::from),
+                                || {
+                                    ticket.verify().map_err(String::from)?;
+                                    c.installation.verify_current().map_err(String::from)
+                                },
                             )
                             .map_err(|_| "LOGIN_PREFERENCES_CHANGED")?,
                         )

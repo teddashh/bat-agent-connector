@@ -30,6 +30,19 @@ pub fn profiles_ready(
     }
     Ok(())
 }
+/// The original private snapshot must be current before any monitor/connection effect.
+pub fn with_current_selection<T>(
+    configuration: &bat_fleet_core::configuration::Configuration,
+    store: &bat_fleet_core::selection_io::Store,
+    expected: &bat_fleet_core::selection_io::Snapshot,
+    effect: impl FnOnce() -> bat_fleet_core::Result<T>,
+) -> bat_fleet_core::Result<T> {
+    configuration.verify_current()?;
+    if !expected.same_snapshot(&store.read(configuration)?) {
+        return Err("SELECTION_CHANGED");
+    }
+    effect()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,6 +74,61 @@ mod tests {
                 10_000
             )
             .is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "../../fleet-core/tests/support/mod.rs"]
+mod selection_fixture;
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use bat_fleet_core::selection_io::Store;
+    #[test]
+    fn stale_primary_or_private_legacy_selection_never_ensures_monitor() {
+        for legacy in [false, true] {
+            let fixture = selection_fixture::Fixture::new();
+            let cfg = fixture.load();
+            let store = Store::new(fixture.0.clone());
+            let directory = fixture.0.join("BetterAgentTerminal");
+            std::fs::create_dir_all(&directory).unwrap();
+            if legacy {
+                std::fs::write(
+                    directory.join("open-bat-selection.json"),
+                    br#"{"profile-2":true}"#,
+                )
+                .unwrap();
+            }
+            let saved = store.read(&cfg).unwrap();
+            if legacy {
+                std::fs::write(
+                    directory.join("open-bat-selection.json"),
+                    br#"{"profile-3":true}"#,
+                )
+                .unwrap();
+                assert_eq!(saved.revision, store.read(&cfg).unwrap().revision);
+            } else {
+                store
+                    .set_connections(&cfg, &saved, &["node-2".into()], None, || Ok(None))
+                    .unwrap();
+            }
+            let mut ensures = 0;
+            assert_eq!(
+                with_current_selection(&cfg, &store, &saved, || {
+                    ensures += 1;
+                    Ok(())
+                }),
+                Err("SELECTION_CHANGED")
+            );
+            assert_eq!(ensures, 0);
+            let current = store.read(&cfg).unwrap();
+            with_current_selection(&cfg, &store, &current, || {
+                ensures += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(ensures, 1);
         }
     }
 }
