@@ -38,6 +38,14 @@ Canonical workflow 是 `2026-10-08.4`；S 列 `.3` 僅描述獨立 PR 的歷史 
 先前 439 focused、5 真中央 fixtures 與獨立審查仍保留其證據層級；沒有升格為 I/L。
 #48/#49/#50 舊 CI 的 canonical-source/data-step fixture failures 已在候選修正，原失敗紀錄保留。
 
+## 共用產品續作證據
+
+[#55](https://github.com/teddashh/bat-agent-connector/issues/55) 的關聯 PR 保存本輪 exact-head CI、review、合併與 pin。
+`c7525c3` 補 A01/A05/A07 的 send/continue/answer 全入口 fixture；`a866510` 補 B1 UI/native preview allowlist、
+reload/lost reply 與真中央唯讀 bytes/index/refs fixture；`2fc8fd8` 關閉 A01/E01/E02 的 unsafe legacy removal。
+[目前實作狀態](implementation-status.md#目前續作) 保留 focused 失敗／修正／重跑與完整 UI 結果。
+這些是 F／N 子集，沒有把 46 項改成 I／L 通過；歷史表格的「尚缺」描述各列固定 commit 的快照。
+
 ## 46 項對照
 
 每列的「已有證據」只涵蓋明寫的範圍；「尚缺」包括實作缺口及候選版的驗收前置條件。

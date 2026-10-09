@@ -8,13 +8,20 @@
 
 ## 目前續作
 
-追蹤 [#55](https://github.com/teddashh/bat-agent-connector/issues/55)，從 main `0c7c8fb` 開隔離工作線：
+追蹤 [#55](https://github.com/teddashh/bat-agent-connector/issues/55)，基底 main `0c7c8fb`。
+以下三個提交已整合到同一候選工作線；最新整組 CI、合併與 installer pin 證據見該 issue 關聯 PR。
 
-- R01：legacy send／continue／answer 接同一 durable operations，保留原 caller、message/prompt ID、queue、完整 receipt 及未知結果查回。
-- R05 B1：共用 browser／Tauri UI 接既有 remote single-file preview／capture；明示 host、完整 session ID 與相對遠端路徑，來源唯讀。
-- R08 相容入口：補 legacy worktree removal 對共用 live consumers 的證據檢查；其餘 mutation 入口盤點留在同一 backlog。
+| 包 | 提交與行為 | 這次 fixture／review 證據 |
+| --- | --- | --- |
+| R01 | `c7525c3`：legacy send／continue／answer 共用 durable operations；原 caller、完整 session/prompt、message ID、queue、dont_ask_again、完整 receipt 與 no-key 語意保留 | 94 個新案例含真 HTTP/MCP/CLI、lost ACK／restart、task final-frame、無 token／owner 拒絕。3.13 focused 曾 590 pass／1 個既有 verifier 5 秒進入等待 timeout；未改原碼的 12-case family 重跑通過，不當作 full 綠燈。 |
+| R05 B1 UI | `a866510`：共用 browser／Tauri remote-file preview/capture；明示 host、完整 manual session ID 與相對路徑；保存原 intent/key 並明確加入附件草稿 | 101 UI（含 27 新 capture）、8 state、21 Linux Rust、fmt/Clippy/release check、真中央 temporary-source fixture；bytes/index/refs 不變、零 BAT writes。獨立 exact-head review 無 findings。 |
+| Legacy removal | `2fc8fd8`：人工／task policy 後停用 unsafe `worktree_remove`，回 `LEGACY_WORKTREE_REMOVE_DISABLED`；改用既有 reviewed cleanup | 基底 active-successor regression 重現；所有 override 零 rehydrate/remove；canonical cleanup shared consumer 拒絕與 eligible removal 仍測到。Focused 3.13 112 通過；新增 apply 斷言原預期錯誤，改為既有 PREVIEW_BLOCKED 拒絕後兩 Python 版本 exact case 通過。 |
 
-以上為進行中實作，尚未新增合併或驗收宣稱；完整交付仍依 46 項矩陣。
+UI 曾有 100 pass／1 timeout：不支援 capture 的 session 過早建立隱藏 summary；修為 positively manual 且 capability 支援才掛載，最後整組 101 通過。
+兩個既有 MCP fixtures 已改用 caller token 並只提供一種 pending prompt，保留原 task command assertions，另驗 operation actor/binding。
+Canonical workflow 更新為 `2026-10-08.5`，Hermes／Grokbot 從同一 source 產生；installer 仍須 pin 已審完整候選，不能只比 package version。
+Desktop CI 現在也跑六組 actual-central fixtures，保存合成 UI 證據；完整交付仍依 46 項矩陣，沒有 Windows installed/live 宣稱。
+下一個 R01 contract 是 permissions 的逐 frame receipts 與 deferred identity，詳見 [mutation 盤點](../design/legacy-mutation-audit.md)。
 
 ## 本輪收斂結果（2026-10-08 23:26 UTC）
 
@@ -55,11 +62,11 @@
 | 包 | 整合 owner / 工作線 | 交付與依賴 | 現況 |
 | --- | --- | --- | --- |
 | R00 | Codex 主協調 | 決策、scope、狀態、中央/native 邊界 | 本分支文件 |
-| R01 | Codex 主協調；既有 ops/confinement workers 完成當輪修正 | #36 → #37；legacy operations Part B；shared operation/task gates | #36/#37 main；#49 第一片已合併 |
+| R01 | Codex 主協調；既有 ops/confinement workers 完成當輪修正 | #36 → #37；legacy operations Part B；shared operation/task gates | #36/#37/#49 main；本輪加 send/continue/answer，其餘依盤點 |
 | R02 | Codex desktop worker | `desktop/**`、共用 UI source、受限 transport、window/tray；依 R00 | #44 已合併；installed 驗收待做 |
 | R03 | Codex 主協調（待 R02 bridge） | Fleet inventory/PS adapter → Rust parity、ownership、bootstrap | #45 PS adapter 已合併；Rust parity 尚缺 |
 | R04 | Codex 主協調；observation worker 完成修正 | #35 read models → 共用 frontend state/history/relations | #35 main；#48 frontend 已合併 |
-| R05 | Codex 主協調；保留 artifacts 分支 | fixed checkpoint、artifact bytes/manifest、跨 host；依 R01/R02/R08 接口 | checkpoint main；#46/#50 已合併，B2/C 尚缺 |
+| R05 | Codex 主協調；保留 artifacts 分支 | fixed checkpoint、artifact bytes/manifest、跨 host；依 R01/R02/R08 接口 | checkpoint/#46/#50 main；本輪補 B1 UI，B2/C 尚缺 |
 | R06 | Codex 主協調 | 既有 project/work_items、completion + R04 詳情；無 importer | 基礎 main；桌面 history/details 已合併，剩餘能力待驗收 |
 | R07 | Codex 主協調；保留 delivery 分支 | integration、cancel 追蹤、composite scopes、source SHA/recipe、UI；依 R01 | Part A main；#47 Part B 已合併 |
 | R08 | Codex 主協調；cleanup worker 完成修正 | #38 + R01/R04/R05 引用、task cleanup、recovery | #38 main；task-owned cleanup 仍保留 |
