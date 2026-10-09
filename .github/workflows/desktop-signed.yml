@@ -76,6 +76,17 @@ jobs:
           if (-not $match.Success) { throw 'Canonical workflow version is missing' }
           cargo run --locked --manifest-path desktop/src-tauri/Cargo.toml --example update_manifest -- "$($files[0].FullName)" "$($files[0].FullName).sig" "$env:RUNNER_TEMP\dashboard-public-key.txt" "$version" "$env:SOURCE_SHA" "$($match.Groups[1].Value)" desktop/src-tauri/target/release/bundle/nsis/dashboard-update.json
           if ($LASTEXITCODE -ne 0) { throw 'Artifact verification failed' }
+      - name: Install and exercise the signed candidate on the disposable runner
+        working-directory: desktop
+        timeout-minutes: 5
+        run: node tests/windows-installed-smoke.mjs
+      - name: Preserve installed signed-candidate fixture evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: dashboard-signed-installed-fixture-${{ inputs.source_sha }}
+          path: desktop/test-results/windows-installed/
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: dashboard-updater-signed-${{ inputs.source_sha }}
