@@ -8,6 +8,7 @@ import { groupedSessions, matchesSession, runtimeStale, sessionActivity } from "
 import { capturePanel } from "./capture.js";
 import { permissionsPanel } from "./permissions.js";
 import { approvalsPanel } from "./approvals.js";
+import { sessionStartPanel } from "./session-start.js";
 import { consumePageAsync, settleRefreshes, storageScope } from "./state/events.ts";
 
 const TOKEN_KEY = "batc.dashboard.token";
@@ -638,7 +639,9 @@ async function viewSessions(main) {
   const scope = h("details", {class: "panel session-scope", open: matchMedia("(min-width: 901px)").matches},
     h("summary", {}, t("sessions_workspaces")), h("p", {class: "muted"}, t("sessions_scope_note")), navigation,
     h("a", {class: "session-project-link", href: "#/projects"}, t("sessions_projects")));
-  main.append(h("h1", {}, t("sessions_title")), h("p", {class: "muted"}, t("sessions_intro")),
+  main.append(h("div", {class: "session-heading"}, h("h1", {}, t("sessions_title")),
+    state.caps?.actions?.some(a => a.action === "session.start") ? h("a", {href: "#/start"}, t("start_title_page")) : null),
+    h("p", {class: "muted"}, t("sessions_intro")),
     h("div", {class: "filters session-filters"}, search, hostSel, accessSel,
       state.caps?.actions?.some(a => a.action === "session.approve_pending") ? h("a", {href: "#/approvals"}, t("bulk_title")) : null), status,
     h("div", {class: "session-layout"}, scope, h("section", {"aria-label": t("sessions_title"), class: "session-results"}, count, list,
@@ -2765,6 +2768,18 @@ async function viewApprovals(main) {
   return onEvents(event => event.resource_type === "operation" ? panel.refresh(true) : panel.update());
 }
 
+async function viewStart(main) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const panel = sessionStartPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    ready: () => state.online && !state.nativeBusy, errorBox, opStatus,
+    storageKey: `batc.start.${connection.namespace}`});
+  main.append(h("a", {href: "#/sessions"}, t("nav_sessions")), h("h1", {}, t("start_title_page")),
+    h("p", {class: "muted"}, t("start_intro")), panel.box);
+  try {await panel.init();} catch { /* panel retains the original intent and shows the read error */ }
+  assertView(connection);
+  return onEvents(ev => {if (["operation", "host", "session"].includes(ev.resource_type)) return panel.refresh(true);});
+}
+
 const NAV = [["home", "nav_home"], ["projects", "nav_projects"], ["sessions", "nav_sessions"], ["delivery", "nav_delivery"],
   ["operations", "nav_operations"], ["cleanup", "nav_cleanup"], ["settings", "nav_settings"]];
 let teardown = null;
@@ -2781,7 +2796,7 @@ async function route() {
   main.replaceChildren();
   if (!state.token && name !== "settings") { main.append(h("p", { class: "note" }, t(nativeDesktop ? "desktop_connect_needed" : "need_token"))); viewSettings(main); return; }
   const views = { home: viewHome, projects: viewProjects, project: viewProject, item: viewWorkItem, sessions: viewSessions,
-    cleanup: viewCleanup, approvals: viewApprovals, delivery: viewDelivery, operations: viewOperations, session: viewSession, op: viewOperation, settings: viewSettings,
+    cleanup: viewCleanup, approvals: viewApprovals, delivery: viewDelivery, operations: viewOperations, session: viewSession, start: viewStart, op: viewOperation, settings: viewSettings,
     host: viewHostDiscovery, task: (main, id) => viewObservedResource(main, "execution", id),
     worktree: (main, id) => viewObservedResource(main, "worktree", id) };
   const off = await (views[name] || viewHome)(main, ...rest);
