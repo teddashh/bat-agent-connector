@@ -1,3 +1,4 @@
+import {readArtifactContent} from "./transport/artifact-content.ts";
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
@@ -2796,7 +2797,8 @@ async function viewArtifactReview(main, kind, first, second) {
   const context = kind === "session" ? {kind, host: first, session_id: second} : kind === "task" ? {kind, task_id: first}
     : kind === "operation" ? {kind, operation_id: first} : kind === "artifact" ? {kind, artifact_id: first, revision: Number(second)} : {kind: "catalog"};
   return mountArtifactReview({main, h, t, api, caps: () => state.caps, guard: () => assertView(connection), onEvents,
-    errorBox, opStatus, context, storageKey: `batc.artifact-review.${connection.namespace}.${JSON.stringify(context)}`});
+    errorBox, opStatus, context, readBrowser: (ref, size, signal) => {assertView(connection); return readArtifactContent(ref, size, state.token, signal);},
+    storageKey: `batc.artifact-review.${connection.namespace}.${JSON.stringify(context)}`});
 }
 
 const NAV = [["home", "nav_home"], ["projects", "nav_projects"], ["sessions", "nav_sessions"], ["artifact-review", "ar_nav"], ["delivery", "nav_delivery"],

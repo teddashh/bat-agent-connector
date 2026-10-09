@@ -1,3 +1,4 @@
+import {artifactContent} from "./artifact-content.js";
 // Managed capture and exact-revision review are separate central operations.
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const ordered = value => record(value) ? Object.fromEntries(Object.keys(value).sort().map(k => [k, ordered(value[k])])) : Array.isArray(value) ? value.map(ordered) : value;
@@ -56,12 +57,13 @@ function restore(raw) {
   return saved;
 }
 
-export async function mountArtifactReview({main, h, t, api, caps, guard, onEvents, errorBox, opStatus, storageKey, context}) {
+export async function mountArtifactReview({main, h, t, api, caps, guard, onEvents, errorBox, opStatus, storageKey, context, readBrowser}) {
   const container = h('div', {class: 'artifact-review'});
   main.append(container);
   let raw; try {raw = JSON.parse(localStorage.getItem(storageKey));} catch { /* keep a new draft */ }
   let saved = restore(raw), source = null, artifact = null, busy = false, readFailed = false, disposed = false;
-  let refreshing = null, submission = null, revision = 0, catalogCursor = null;
+  let refreshing = null, submission = null, revision = 0, catalogCursor = null, catalogReading = null, catalogPages = 0;
+  let catalogRows = new Map();
   const operations = {capture: null, accept: null}, candidates = new Map(), pages = new Map();
   const notice = h('div', {role: 'status'}), sourceBox = h('div'), evidence = h('div'), outcome = h('div');
   const catalog = h('div'), reviewFacts = h('div'), catalogNotice = h('div');
@@ -125,6 +127,7 @@ export async function mountArtifactReview({main, h, t, api, caps, guard, onEvent
         !equal(proof.source, intent.expected.source) || !equal(proof.evidence, intent.expected.evidence) || proof.relative_path !== intent.expected.relative_path)
       throw new Error(t('ar_invalid_result'));
     artifact = row;
+    await loadCatalog();
   }
   async function adopt(kind, op) {
     guard(); const intent = saved[kind];
@@ -215,8 +218,9 @@ export async function mountArtifactReview({main, h, t, api, caps, guard, onEvent
     saved.accept = null; operations.accept = null; persist(); render();
   }}, t('ar_new_review'));
   const moreExecutions = h('button', {class: 'secondary', onclick: () => loadExecutions(true).catch(showError)}, t('ar_more_executions'));
+  const content = artifactContent({h, t, api, guard, getArtifact: () => artifact, canRead: () => scope('observe') && !readFailed, validArtifact, readBrowser});
   const reviewPanel = h('section', {class: 'panel', 'data-artifact-accept': ''}, h('h2', {}, t('ar_review_title')), reviewFacts,
-    h('p', {class: 'muted'}, t('ar_accept_help')), h('label', {}, t('ar_receipt'), receipt),
+    content.box, h('p', {class: 'muted'}, t('ar_accept_help')), h('label', {}, t('ar_receipt'), receipt),
     h('p', {class: 'muted'}, t('ar_approve_scope')), h('div', {class: 'actions'}, accept, newReview));
   const capturePanel = h('section', {class: 'panel', 'data-managed-capture': ''}, h('h2', {}, t('ar_capture_title')), sourceBox,
     h('div', {class: 'capture-fields'}, h('label', {}, t('ar_execution'), choice), h('label', {}, t('capture_path'), path)), custom,
@@ -228,6 +232,7 @@ export async function mountArtifactReview({main, h, t, api, caps, guard, onEvent
     h('div', {class: 'actions'}, check), outcome, notice, catalogPanel);
 
   function update() {
+    content.update();
     const fixed = busy || frozen();
     for (const field of [path, choice, customType, customId]) field.disabled = fixed;
     customTask.disabled = fixed || customType.value !== 'command';
@@ -336,13 +341,31 @@ export async function mountArtifactReview({main, h, t, api, caps, guard, onEvent
     artifact = row; render();
   }
   async function loadCatalog(more = false) {
-    const data = await api('GET', `/artifacts?limit=30${more && catalogCursor ? `&cursor=${encodeURIComponent(catalogCursor)}` : ''}`); guard();
-    const rows = (data.artifacts || []).map(a => a.revision).filter(row => validArtifact(row));
-    if (!more) catalog.replaceChildren();
-    for (const row of rows) catalog.append(h('div', {class: 'row'}, h('a', {class: 'title', href: `#/artifact-review/artifact/${row.artifact_id}/${row.revision}`},
-      `${row.display_name || row.artifact_id} · r${row.revision}`), h('code', {}, row.digest)));
-    catalogCursor = data.next_cursor; moreArtifacts.hidden = !catalogCursor;
-    if (!catalog.children.length) catalog.append(h('p', {class: 'muted'}, t('ar_no_artifacts')));
+    if (catalogReading) {await catalogReading; guard(); return loadCatalog(more);}
+    if (more && !catalogCursor) return;
+    catalogReading = (async () => {
+      let cursor = more ? catalogCursor : null, readPages = 0;
+      const rows = more ? new Map(catalogRows) : new Map(), seen = new Set();
+      // Refresh every loaded page from its first cursor; retain the old display until all settle.
+      for (let index = 0; index < (more ? 1 : Math.max(1, catalogPages)); index++) {
+        if (seen.has(cursor)) throw new Error(t('ar_invalid_result'));
+        seen.add(cursor);
+        const data = await api('GET', `/artifacts?limit=30${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`); guard();
+        if (!Array.isArray(data.artifacts) || data.next_cursor != null && (typeof data.next_cursor !== 'string' || !data.next_cursor))
+          throw new Error(t('ar_invalid_result'));
+        for (const row of data.artifacts.map(a => a.revision).filter(row => validArtifact(row))) rows.set(`${row.artifact_id}:${row.revision}`, row);
+        cursor = data.next_cursor ?? null; readPages++;
+        if (!cursor) break;
+      }
+      guard(); catalogRows = rows; catalogCursor = cursor; catalogPages = (more ? catalogPages : 0) + readPages;
+      catalog.replaceChildren(...[...rows.values()].map(row => h('div', {class: 'row'}, h('a', {class: 'title', href: `#/artifact-review/artifact/${row.artifact_id}/${row.revision}`},
+        `${row.display_name || row.artifact_id} · r${row.revision}`), h('code', {}, row.digest))));
+      moreArtifacts.hidden = !catalogCursor; catalogNotice.replaceChildren();
+      if (!rows.size) catalog.append(h('p', {class: 'muted'}, t('ar_no_artifacts')));
+    })(); moreArtifacts.disabled = true;
+    try {await catalogReading;}
+    catch (error) {if (currentView()) catalogNotice.replaceChildren(errorBox(error)); throw error;}
+    finally {catalogReading = null; moreArtifacts.disabled = false;}
   }
   async function refresh(fresh = false) {
     if (submission) {await submission; guard();}
@@ -359,9 +382,14 @@ export async function mountArtifactReview({main, h, t, api, caps, guard, onEvent
     try {await refreshing;} catch (error) {if (currentView()) {readFailed = true; showError(error);} throw error;}
     finally {refreshing = null; if (currentView()) update();}
   }
-  const off = onEvents(event => {
+  const off = onEvents(async event => {
     if (!currentView()) return;
-    if (event.resource_id === saved.capture?.operation_id || event.resource_id === saved.accept?.operation_id || event.resource_id === artifact?.artifact_id) return refresh(true);
+    const reads = [];
+    if (event.resource_id === saved.capture?.operation_id || event.resource_id === saved.accept?.operation_id ||
+        event.resource_id === artifact?.artifact_id || context.kind === 'artifact' && event.resource_id === context.artifact_id) reads.push(refresh(true));
+    if (event.resource_type === 'artifact') reads.push(loadCatalog());
+    const settled = await Promise.allSettled(reads);
+    for (const result of settled) if (result.status === 'rejected') throw result.reason;
   });
   if (saved.capture?.expected?.source) source = {host: saved.capture.expected.source.host, session_id: saved.capture.expected.source.session_id};
   renderChoice();
@@ -380,5 +408,5 @@ export async function mountArtifactReview({main, h, t, api, caps, guard, onEvent
     update();
     if ((saved.capture?.operation_id && active('capture')) || (saved.accept?.operation_id && active('accept'))) refresh().catch(showError);
   }, 1000);
-  return () => {disposed = true; clearInterval(timer); off();};
+  return () => {disposed = true; clearInterval(timer); content.dispose(); off();};
 }
