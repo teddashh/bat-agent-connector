@@ -48,8 +48,18 @@ try {
   await page.getByRole("link", {name: "h1", exact: true}).click();
   await expect(page.getByRole("heading", {name: "h1 · Discovery coverage"})).toBeVisible();
   await expect(page.getByText("Outside this scan", {exact: true})).toBeVisible();
+  await page.getByRole("link", {name: "Sessions", exact: true}).click();
+  const inventoryRow = page.locator('[data-resource-id="h1/sess-claude-0001"]');
+  await expect(inventoryRow).toBeVisible();
+  await expect(inventoryRow).toContainText("Connector-managed");
+  await expect(inventoryRow).toContainText("asking you");
+  await page.getByRole("searchbox", {name: "Search loaded sessions"}).fill("sess-claude-0001");
+  await expect(page.locator(".session-inventory [data-resource-id]")).toHaveCount(1);
+  await inventoryRow.locator("summary").first().click();
+  await expect(inventoryRow.getByText("sess-claude-0001", {exact: true})).toBeVisible();
+  await expect(page.getByRole("navigation", {name: "Loaded workspaces"})).toContainText("h1");
   assert.deepEqual(errors, []);
-  console.log("Actual central + shared UI: pending controls, fixed history pagination, execution/worktree relations and discovery passed");
+  console.log("Actual central + shared UI: pending controls, fixed history pagination, execution/worktree relations, discovery and grouped session inventory passed");
 } finally {
   await browser.close(); child.stdin.end(JSON.stringify({action: "stop"}) + "\n");
   await Promise.race([once(child, "exit"), delay(3000, undefined, {ref: false}).then(() => child.kill())]);
