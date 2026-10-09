@@ -179,6 +179,16 @@ test('content size and PNG pixel bounds refuse before unsafe allocation',async({
 test('native sanitized PNG preview uses exact ref without browser content requests',async({page})=>{
  const state=await contentFixture(page,true,{nativePreview:{media_type:'image/png',base64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='}});await page.goto('/dashboard/#/artifact-review/artifact/'+artifactId+'/1');await page.getByRole('button',{name:'Preview',exact:true}).click();await expect(page.locator('.artifact-content canvas')).toBeVisible();expect(await page.locator('.artifact-content canvas').evaluate((canvas:any)=>[...canvas.getContext('2d').getImageData(0,0,1,1).data])).toEqual([255,0,0,255]);expect(state.contentRequests).toHaveLength(0);expect(state.writes).toHaveLength(0);
 });
+for(const malformed of ['second-IHDR','after-IEND','missing-IEND','PLTE-after-IDAT','split-IDAT'])test(`malformed PNG ${malformed} is refused before decoding`,async({page})=>{
+ const good=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==','base64');let content:Buffer;
+ if(malformed==='second-IHDR'){const duplicate=Buffer.from(good.subarray(8,33));duplicate.writeUInt32BE(2000000,8);content=Buffer.concat([good.subarray(0,33),duplicate,good.subarray(33)]);}
+ else if(malformed==='after-IEND')content=Buffer.concat([good,good.subarray(8,33)]);
+ else if(malformed==='missing-IEND')content=good.subarray(0,-12);
+ else if(malformed==='PLTE-after-IDAT'){const chunk=Buffer.alloc(15);chunk.writeUInt32BE(3);chunk.write('PLTE',4);content=Buffer.concat([good.subarray(0,-12),chunk,good.subarray(-12)]);}
+ else{const gap=Buffer.alloc(12);gap.write('tEXt',4);content=Buffer.concat([good.subarray(0,-12),gap,good.subarray(33,-12),good.subarray(-12)]);}
+ await page.addInitScript(()=>{const original=window.createImageBitmap;(window as any).decodeCalls=0;window.createImageBitmap=((...args:any[])=>{(window as any).decodeCalls++;return (original as any)(...args);}) as any;});
+ const state=await contentFixture(page,false,{content});await page.goto('/dashboard/#/artifact-review/artifact/'+artifactId+'/1');await page.getByRole('button',{name:'Preview',exact:true}).click();await expect(page.locator('.artifact-content')).toContainText('Preview is unavailable');expect(await page.evaluate(()=>(window as any).decodeCalls)).toBe(0);await expect(page.locator('.artifact-content canvas')).toHaveCount(0);expect(state.writes).toHaveLength(0);
+});
 for(const locale of ['en-US','zh-TW']) test.describe(`managed artifact review ${locale}`,()=>{
  test.use({locale});
  for(const width of [390,768,1440]) test(`fits ${width} with exact source evidence`,async({page})=>{
