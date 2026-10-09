@@ -173,6 +173,32 @@ var STRINGS = {
 		obs_scope_earlier_history: "較早的歷程",
 		parent_archived: "這個項目或所屬專案已封存；編輯草稿仍保留。",
 		pending_changed: "待回覆的問題已改變；草稿仍保留。請查看目前的要求後重新作答。",
+		files_unavailable: "目前連線無法取回原傳輸。從草稿移除不會取消上傳。",
+		files_choose: "選擇檔案",
+		files_help: "檔案內容會在選取時固定；完成驗證後即可加入附件。",
+		files_drop: "啟用拖放",
+		files_drop_help: "將檔案拖入視窗，再按「上傳」加入這份草稿。",
+		files_upload: "上傳",
+		files_progress: "本機傳輸進度",
+		files_stop: "停止傳輸",
+		files_retry: "重試原傳輸",
+		files_check: "查回結果",
+		files_cancel: "取消上傳",
+		files_discard: "清除本機紀錄",
+		files_save: "另存新檔",
+		files_preview: "預覽",
+		files_selected: "已選取",
+		files_checking: "查核原操作",
+		files_uploading: "傳送中",
+		files_verifying: "驗證中",
+		files_downloading: "下載中",
+		files_saving: "儲存中",
+		files_ready: "已驗證",
+		files_saved: "已儲存",
+		files_stopped: "已停止，結果保留",
+		files_failed: "操作失敗",
+		files_cancelled: "已取消",
+		files_receipt_mismatch: "傳輸紀錄與原檔案不符，未加入附件。",
 		attachment_file_changed: "請重新選擇相同檔案以查回原上傳；不同內容請先移除這一項。",
 		attachment_pending: "上傳結果仍待確認。請以相同檔案重試原操作。",
 		existing_artifact: "已上傳附件",
@@ -913,6 +939,32 @@ var STRINGS = {
 		obs_scope_earlier_history: "Earlier history",
 		parent_archived: "This item or its project is archived. Your edit draft is retained.",
 		pending_changed: "The pending request changed. Your draft is retained; review the current request before answering.",
+		files_unavailable: "The original transfer is unavailable on this connection. Removing it from the draft does not cancel the upload.",
+		files_choose: "Choose files",
+		files_help: "Selection fixes the file contents. Verified uploads become attachments.",
+		files_drop: "Enable file drop",
+		files_drop_help: "Drop files into this window, then choose Upload to add them to this draft.",
+		files_upload: "Upload",
+		files_progress: "Local transfer progress",
+		files_stop: "Stop transfer",
+		files_retry: "Retry original transfer",
+		files_check: "Check result",
+		files_cancel: "Cancel upload",
+		files_discard: "Clear local receipt",
+		files_save: "Save As",
+		files_preview: "Preview",
+		files_selected: "Selected",
+		files_checking: "Checking original operation",
+		files_uploading: "Sending",
+		files_verifying: "Verifying",
+		files_downloading: "Downloading",
+		files_saving: "Saving",
+		files_ready: "Verified",
+		files_saved: "Saved",
+		files_stopped: "Stopped; original result retained",
+		files_failed: "Operation failed",
+		files_cancelled: "Cancelled",
+		files_receipt_mismatch: "The transfer receipt does not match the original file. Attachment was not added.",
 		attachment_file_changed: "Choose the same file to recover this upload; remove this entry before choosing different content.",
 		attachment_pending: "Upload outcome is still pending. Retry the original operation with the same file.",
 		existing_artifact: "Uploaded attachment",
@@ -1495,7 +1547,25 @@ function isTauri() {
 //#endregion
 //#region src/transport/index.ts
 var nativeDesktop = isTauri();
-var nativeStatus = () => invoke("native_status");
+var nativeFileSupport = false;
+async function nativeStatus() {
+	const status = await invoke("native_status");
+	nativeFileSupport = status.file_transfers === true;
+	return status;
+}
+var nativeFilesStatus = () => invoke("native_files_status");
+var nativeFilesPick = (draftId) => invoke("native_files_pick", { draftId });
+var nativeFilesUpload = (handleId) => invoke("native_files_upload", { handleId });
+var nativeFilesDropTarget = (draftId, enabled) => invoke("native_files_drop_target", {
+	draftId,
+	enabled
+});
+var nativeFilesControl = (transferId, action) => invoke("native_files_control", {
+	transferId,
+	action
+});
+var nativeFilesSave = (reference) => invoke("native_files_save", { reference });
+var nativeFilesPreview = (reference) => invoke("native_files_preview", { reference });
 var nativeConnect = () => invoke("connector_connect");
 var nativeDisconnect = () => invoke("connector_disconnect");
 var nativeEnroll = () => invoke("connector_enroll", { locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US" });
@@ -1542,6 +1612,262 @@ async function connectorUploadArtifact(operationId, bytes, browserToken) {
 	return {
 		status: res.status,
 		data: await res.json().catch(() => ({}))
+	};
+}
+//#endregion
+//#region src/native-files.js
+var pending = new Set([
+	"checking",
+	"uploading",
+	"verifying",
+	"downloading",
+	"saving"
+]);
+var fixedRef = (ref) => ({
+	artifact_id: ref.artifact_id,
+	revision: ref.revision,
+	digest: ref.digest
+});
+var sameRef = (a, b) => a && b && a.artifact_id === b.artifact_id && a.revision === b.revision && a.digest === b.digest;
+function nativeAttachments({ h, t, guard, canWrite, draftId, onReceipt, onDiscard, onVisibility, attached }) {
+	const rows = h("div", { class: "native-transfers" }), notice = h("p", {
+		class: "muted",
+		role: "status"
+	});
+	const preview = h("div", {
+		class: "file-preview",
+		hidden: true
+	});
+	const box = h("div", { class: "native-files" }, rows, notice, preview);
+	const known = new Map(), downloads = new Set();
+	let armed = false, refreshing, picking = false, objectUrl = null, stopped = false;
+	const live = () => {
+		guard();
+		if (!box.isConnected) throw new Error("Attachment form changed");
+	};
+	const failure = (error) => {
+		try {
+			live();
+			notice.textContent = String(error?.message || error);
+		} catch {}
+	};
+	const writable = () => {
+		live();
+		if (!canWrite()) throw new Error(t("offline_actions_paused"));
+	};
+	const act = async (receipt, action) => {
+		try {
+			live();
+			if (["retry", "cancel_upload"].includes(action) && receipt.direction === "upload") writable();
+			await nativeFilesControl(receipt.transfer_id, action);
+			live();
+			if (action === "discard_local") onDiscard(receipt.transfer_id);
+			await refresh();
+		} catch (error) {
+			failure(error);
+		}
+	};
+	const render = () => {
+		rows.replaceChildren(...[...known.values()].filter((r) => r.direction === "download" || !attached(r.transfer_id)).map((r) => {
+			const active = pending.has(r.stage), percent = r.size_bytes ? Math.min(100, Math.floor(r.transferred_bytes / r.size_bytes * 100)) : 0;
+			return h("div", { class: "file-transfer" }, h("div", { class: "row" }, h("div", { class: "grow" }, r.display_name, h("div", { class: "muted" }, `${t(`files_${r.stage}`)} · ${r.transferred_bytes} / ${r.size_bytes} B`)), r.operation_id ? h("a", { href: `#/op/${r.operation_id}` }, t("dep_operation_details")) : null), active ? h("progress", {
+				max: 100,
+				value: percent,
+				"aria-label": t("files_progress")
+			}) : null, r.error ? h("p", { class: "muted" }, r.error) : null, h("div", { class: "actions" }, active ? h("button", {
+				class: "secondary",
+				onclick: () => act(r, "stop")
+			}, t("files_stop")) : null, !active && ![
+				"ready",
+				"saved",
+				"failed",
+				"cancelled"
+			].includes(r.stage) ? h("button", {
+				class: "secondary",
+				disabled: r.direction === "upload" && !canWrite(),
+				onclick: () => act(r, "retry")
+			}, t(r.stage === "selected" ? "files_upload" : "files_retry")) : null, !active && r.direction === "upload" && r.stage !== "selected" && ![
+				"ready",
+				"failed",
+				"cancelled"
+			].includes(r.stage) ? h("button", {
+				class: "secondary",
+				onclick: () => act(r, "check")
+			}, t("files_check")) : null, !active && r.operation_id && ![
+				"succeeded",
+				"failed",
+				"cancelled"
+			].includes(r.operation_status) ? h("button", {
+				class: "secondary",
+				disabled: !canWrite(),
+				onclick: () => act(r, "cancel_upload")
+			}, t("files_cancel")) : null, !active && (r.direction === "download" || r.stage === "selected" || [
+				"ready",
+				"failed",
+				"cancelled"
+			].includes(r.stage)) ? h("button", {
+				class: "secondary",
+				onclick: async () => {
+					await act(r, "discard_local");
+				}
+			}, t("files_discard")) : null));
+		}));
+	};
+	const adopt = (r) => {
+		if (!/^file_[0-9a-f]{32}$/.test(r?.transfer_id) || !/^[0-9a-f]{64}$/.test(r.digest) || !Number.isSafeInteger(r.size_bytes) || r.size_bytes < 0 || r.size_bytes > 16777216 || typeof r.display_name !== "string") throw new Error(t("files_receipt_mismatch"));
+		const previous = known.get(r.transfer_id);
+		if (previous && [
+			"intent_key",
+			"direction",
+			"draft_id",
+			"display_name",
+			"size_bytes",
+			"digest"
+		].some((k) => previous[k] !== r[k])) throw new Error(t("files_receipt_mismatch"));
+		if (r.direction === "upload" && r.draft_id !== draftId) return;
+		if (r.stage === "ready" && (r.operation_status !== "succeeded" || !r.operation_id || r.artifact?.digest !== r.digest || !/^art_[0-9a-f]{32}$/.test(r.artifact?.artifact_id) || !Number.isSafeInteger(r.artifact?.revision))) throw new Error(t("files_receipt_mismatch"));
+		known.set(r.transfer_id, r);
+		if (r.direction === "upload" && JSON.stringify(previous) !== JSON.stringify(r)) onReceipt(r);
+	};
+	const refresh = async () => {
+		if (refreshing) return refreshing;
+		const task = (async () => {
+			live();
+			const status = await nativeFilesStatus();
+			live();
+			const previousKeys = [...known.keys()].join(","), current = new Set();
+			for (const receipt of status.transfers) if (receipt.direction === "upload" && receipt.draft_id === draftId || receipt.direction === "download" && (receipt.stage !== "saved" || downloads.has(receipt.transfer_id))) {
+				current.add(receipt.transfer_id);
+				adopt(receipt);
+			}
+			for (const id of known.keys()) if (!current.has(id)) known.delete(id);
+			if ([...known.keys()].join(",") !== previousKeys) onVisibility();
+			if (status.drop_error) notice.textContent = status.drop_error;
+			render();
+		})();
+		refreshing = task;
+		try {
+			await task;
+		} finally {
+			if (refreshing === task) refreshing = null;
+		}
+	};
+	const pick = async () => {
+		if (picking) return;
+		try {
+			writable();
+			picking = true;
+			const receipts = await nativeFilesPick(draftId);
+			live();
+			for (const receipt of receipts) {
+				adopt(receipt);
+				writable();
+				await nativeFilesUpload(receipt.transfer_id);
+				live();
+			}
+			await refresh();
+		} catch (error) {
+			failure(error);
+			await refresh().catch(failure);
+		} finally {
+			picking = false;
+		}
+	};
+	const drop = h("button", {
+		class: "secondary",
+		"aria-pressed": false,
+		onclick: async () => {
+			try {
+				writable();
+				armed = !armed;
+				await nativeFilesDropTarget(draftId, armed);
+				live();
+				drop.setAttribute("aria-pressed", String(armed));
+				notice.textContent = armed ? t("files_drop_help") : "";
+			} catch (error) {
+				armed = false;
+				failure(error);
+			}
+		}
+	}, t("files_drop"));
+	const closePreview = () => {
+		preview.replaceChildren();
+		preview.hidden = true;
+		if (objectUrl) URL.revokeObjectURL(objectUrl);
+		objectUrl = null;
+	};
+	const actions = (ref) => h("span", { class: "actions file-actions" }, h("button", {
+		class: "secondary",
+		onclick: async () => {
+			try {
+				live();
+				const expected = fixedRef(ref), receipt = await nativeFilesSave(expected);
+				live();
+				if (!receipt) return;
+				if (receipt.direction !== "download" || !sameRef(receipt.artifact, expected)) throw new Error(t("files_receipt_mismatch"));
+				downloads.add(receipt.transfer_id);
+				adopt(receipt);
+				render();
+			} catch (error) {
+				failure(error);
+			}
+		}
+	}, t("files_save")), h("button", {
+		class: "secondary",
+		onclick: async () => {
+			try {
+				live();
+				const content = await nativeFilesPreview(fixedRef(ref));
+				live();
+				closePreview();
+				let view;
+				if (content.media_type === "text/plain" && typeof content.text === "string" && content.text.length <= 262144) view = h("pre", {}, content.text);
+				else if (content.media_type === "image/png" && typeof content.base64 === "string" && content.base64.length <= 28e5) {
+					const bytes = Uint8Array.from(atob(content.base64), (c) => c.charCodeAt(0));
+					objectUrl = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
+					view = h("img", {
+						src: objectUrl,
+						alt: t("files_preview")
+					});
+				} else throw new Error(t("files_receipt_mismatch"));
+				preview.hidden = false;
+				preview.append(h("div", { class: "actions" }, h("strong", {}, t("files_preview")), h("button", {
+					class: "secondary",
+					onclick: closePreview
+				}, t("close"))), view);
+			} catch (error) {
+				failure(error);
+			}
+		}
+	}, t("files_preview")));
+	const tick = async () => {
+		try {
+			live();
+			await refresh();
+			if (armed) {
+				writable();
+				await nativeFilesDropTarget(draftId, box.getClientRects().length > 0 && document.visibilityState === "visible");
+			}
+		} catch (error) {
+			try {
+				live();
+				failure(error);
+			} catch {
+				stopped = true;
+				closePreview();
+				await nativeFilesDropTarget(draftId, false).catch(() => {});
+			}
+		}
+		if (!stopped) setTimeout(tick, 1e3);
+	};
+	queueMicrotask(tick);
+	return {
+		box,
+		pick,
+		drop,
+		actions,
+		refresh,
+		has: (id) => known.has(id)
 	};
 }
 //#endregion
@@ -2996,7 +3322,8 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 			ref: { ...ref }
 		}))
 	};
-	saved.attachments ||= [];
+	if (!Array.isArray(saved.attachments)) saved.attachments = [];
+	saved.attachments = saved.attachments.filter((a) => a && typeof a === "object");
 	for (const a of saved.attachments) delete a.busy;
 	if (typeof saved.text === "string") text.value = saved.text;
 	const files = new Map(), rows = h("div", { class: "attachment-list" });
@@ -3004,8 +3331,14 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 		class: "muted",
 		role: "status"
 	});
-	const supported = Boolean(state.caps?.artifacts);
-	const choose = h("input", {
+	const supported = Boolean(state.caps?.artifacts), nativeFiles = nativeDesktop && nativeFileSupport;
+	const nativeUploadAllowed = state.caps?.actions?.some((a) => a.action === "artifact.upload" && a.allowed === true);
+	let native;
+	const choose = nativeFiles ? h("button", {
+		class: "secondary",
+		disabled: !supported || !may("manage") || !nativeUploadAllowed,
+		onclick: () => native.pick()
+	}, t("files_choose")) : h("input", {
 		type: "file",
 		multiple: true,
 		disabled: !supported || !may("manage"),
@@ -3014,7 +3347,7 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 	const box = h("div", {
 		class: "attachments",
 		hidden: !supported
-	}, h("label", {}, t("attachments"), choose), h("p", { class: "muted" }, t("upload_on_choose")), rows, status);
+	}, nativeFiles ? h("div", { class: "actions" }, h("strong", {}, t("attachments")), choose) : h("label", {}, t("attachments"), choose), h("p", { class: "muted" }, t(nativeFiles ? "files_help" : "upload_on_choose")), rows, status);
 	const guard = (mounted = false) => {
 		assertView(connection);
 		if (mounted && !box.isConnected) throw new ApiError(0, "VIEW_CHANGED", "Attachment form changed during the request");
@@ -3047,7 +3380,7 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 		fields: saved.fields
 	});
 	const ready = () => saved.attachments.every((a) => a.ref);
-	const render = () => fill(rows, ...saved.attachments.map((a) => h("div", { class: "row" }, h("div", { class: "grow" }, a.name, a.ref ? h("div", { class: "muted" }, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`) : h("div", { class: "muted" }, a.error || (files.has(a) ? t("uploading") : t("choose_again")))), a.ref && roles ? h("select", {
+	const render = () => fill(rows, ...saved.attachments.filter((a) => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map((a) => h("div", { class: "row" }, h("div", { class: "grow" }, a.name, a.ref ? h("div", { class: "muted" }, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`) : h("div", { class: "muted" }, a.error || (a.native_handle ? t("files_unavailable") : files.has(a) ? t("uploading") : t("choose_again")))), a.ref && roles ? h("select", {
 		"aria-label": t("attachment_role"),
 		onchange: (e) => {
 			guard();
@@ -3057,7 +3390,7 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 	}, ...["input", "result"].map((role) => h("option", {
 		value: role,
 		selected: (a.ref.role || "input") === role
-	}, t(`attachment_${role}`)))) : null, !a.ref && files.has(a) && !a.busy ? h("button", {
+	}, t(`attachment_${role}`)))) : null, a.ref && native ? native.actions(a.ref) : null, !a.ref && files.has(a) && !a.busy ? h("button", {
 		class: "secondary",
 		onclick: () => upload(a)
 	}, t("retry")) : null, h("button", {
@@ -3065,12 +3398,65 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 		disabled: a.busy,
 		onclick: () => {
 			guard();
+			if (a.native_handle) {
+				saved.native_ignored ||= [];
+				saved.native_ignored.push(a.native_handle);
+			}
 			saved.attachments = saved.attachments.filter((x) => x !== a);
 			files.delete(a);
 			persist();
 			render();
 		}
 	}, t("remove")))));
+	if (nativeFiles) {
+		if (!Array.isArray(saved.native_ignored)) saved.native_ignored = [];
+		saved.native_ignored = saved.native_ignored.filter((id) => typeof id === "string" && /^file_[0-9a-f]{32}$/.test(id));
+		if (typeof saved.native_draft !== "string" || !/^[0-9a-f-]{36}$/.test(saved.native_draft)) saved.native_draft = saved.attachments.find((a) => typeof a.native_receipt?.draft_id === "string" && /^[0-9a-f-]{36}$/.test(a.native_receipt.draft_id))?.native_receipt.draft_id || crypto.randomUUID();
+		native = nativeAttachments({
+			h,
+			t,
+			guard: () => guard(true),
+			canWrite: () => state.online && state.viewReady && may("manage") && nativeUploadAllowed,
+			draftId: saved.native_draft,
+			onVisibility: render,
+			onDiscard: (id) => {
+				guard(true);
+				saved.attachments = saved.attachments.filter((a) => a.native_handle !== id || a.ref);
+				persist();
+				render();
+			},
+			attached: (id) => saved.attachments.some((a) => a.native_handle === id && a.ref) || saved.native_ignored?.includes(id),
+			onReceipt: (receipt) => {
+				guard(true);
+				if (saved.native_ignored?.includes(receipt.transfer_id)) return;
+				let a = saved.attachments.find((a) => a.native_handle === receipt.transfer_id);
+				if (a?.native_receipt && [
+					"intent_key",
+					"display_name",
+					"size_bytes",
+					"digest"
+				].some((field) => a.native_receipt[field] !== receipt[field])) throw new Error(t("files_receipt_mismatch"));
+				if (a && JSON.stringify(a.native_receipt) === JSON.stringify(receipt)) return;
+				if (!a) {
+					a = {
+						name: receipt.display_name,
+						native_handle: receipt.transfer_id
+					};
+					saved.attachments.push(a);
+				}
+				a.native_receipt = receipt;
+				if (receipt.stage === "ready") a.ref = {
+					...receipt.artifact,
+					...roles ? { role: a.ref?.role || "input" } : {}
+				};
+				persist();
+				render();
+			}
+		});
+		choose.after(native.drop);
+		box.insertBefore(native.box, rows);
+		persist();
+	}
 	const acceptUpload = (a, op) => {
 		if (op.status !== "succeeded") return;
 		a.ref = {
@@ -3165,7 +3551,7 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 			}
 		}
 	};
-	choose.onchange = () => {
+	if (!nativeFiles) choose.onchange = () => {
 		guard();
 		for (const file of choose.files) {
 			let a = saved.attachments.find((x) => !x.ref && !files.has(x) && x.name === file.name);
@@ -3300,15 +3686,20 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 	};
 	const refresh = async () => {
 		guard(true);
-		await settleRefreshes([...saved.attachments.filter((a) => !a.ref && a.operation_id).map(async (a) => {
-			const { operation } = await api("GET", `/operations/${a.operation_id}`);
-			guard(true);
-			acceptUpload(a, operation);
-		}), ...saved.submission?.operation_id ? [(async () => {
-			const { operation } = await api("GET", `/operations/${saved.submission.operation_id}`);
-			guard(true);
-			settleSubmission(operation);
-		})()] : []]);
+		const pending = saved.attachments.filter((a) => !a.ref && a.operation_id);
+		await settleRefreshes([
+			...native ? [native.refresh()] : [],
+			...pending.map(async (a) => {
+				const { operation } = await api("GET", `/operations/${a.operation_id}`);
+				guard(true);
+				acceptUpload(a, operation);
+			}),
+			...saved.submission?.operation_id ? [(async () => {
+				const { operation } = await api("GET", `/operations/${saved.submission.operation_id}`);
+				guard(true);
+				settleSubmission(operation);
+			})()] : []
+		]);
 	};
 	if (supported) {
 		const unsub = onEvents((ev) => {

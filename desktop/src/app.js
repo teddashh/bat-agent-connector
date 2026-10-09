@@ -1,7 +1,8 @@
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
-import { connectorRequest, connectorUploadArtifact, nativeDesktop, nativeStatus, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal } from "./transport/index.ts";
+import { connectorRequest, connectorUploadArtifact, nativeDesktop, nativeFileSupport, nativeStatus, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal } from "./transport/index.ts";
+import { nativeAttachments } from "./native-files.js";
 import { mountFleet } from "./fleet.js";
 import { groupedSessions, matchesSession, runtimeStale, sessionActivity } from "./state/sessions.js";
 import { capturePanel } from "./capture.js";
@@ -184,7 +185,7 @@ function manualCapture(scope, source = {}, onAttach) {
     storageKey: `batc.capture.${connection.namespace}.${scope}`, source, onAttach});
 }
 
-// Files stay in this WebView's memory. Persist only identity-scoped references and exact operation intents.
+// Browser bytes stay in memory; native bytes and exact transfer intents stay in the Rust spool.
 function attachmentDraft(scope, text, initial = [], roles = false) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const key = `batc.draft.${connection.namespace}.${scope}`;
@@ -192,15 +193,18 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
   try { saved = JSON.parse(localStorage.getItem(key)); } catch { /* no usable draft */ }
   saved = saved && typeof saved === "object" ? saved : {text: text.value,
     attachments: initial.map(ref => ({name: ref.artifact_id, ref: {...ref}}))};
-  saved.attachments ||= [];
+  if (!Array.isArray(saved.attachments)) saved.attachments = [];
+  saved.attachments = saved.attachments.filter(a => a && typeof a === "object");
   for (const a of saved.attachments) delete a.busy;
   if (typeof saved.text === "string") text.value = saved.text;
   const files = new Map(), rows = h("div", {class: "attachment-list"});
   const status = h("p", {class: "muted", role: "status"});
-  const supported = Boolean(state.caps?.artifacts);
-  const choose = h("input", {type: "file", multiple: true, disabled: !supported || !may("manage"), "aria-label": t("choose_attachments")});
-  const box = h("div", {class: "attachments", hidden: !supported}, h("label", {}, t("attachments"), choose),
-    h("p", {class: "muted"}, t("upload_on_choose")), rows, status);
+  const supported = Boolean(state.caps?.artifacts), nativeFiles = nativeDesktop && nativeFileSupport;
+  const nativeUploadAllowed = state.caps?.actions?.some(a => a.action === "artifact.upload" && a.allowed === true);
+  let native;
+  const choose = nativeFiles ? h("button", {class: "secondary", disabled: !supported || !may("manage") || !nativeUploadAllowed, onclick: () => native.pick()}, t("files_choose")) : h("input", {type: "file", multiple: true, disabled: !supported || !may("manage"), "aria-label": t("choose_attachments")});
+  const box = h("div", {class: "attachments", hidden: !supported}, nativeFiles ? h("div", {class: "actions"}, h("strong", {}, t("attachments")), choose) : h("label", {}, t("attachments"), choose),
+    h("p", {class: "muted"}, t(nativeFiles ? "files_help" : "upload_on_choose")), rows, status);
   const guard = (mounted = false) => {
     assertView(connection);
     if (mounted && !box.isConnected) throw new ApiError(0, "VIEW_CHANGED", "Attachment form changed during the request");
@@ -215,15 +219,40 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
     : {artifact_id: a.ref.artifact_id, revision: a.ref.revision, digest: a.ref.digest});
   const snapshot = () => JSON.stringify({text: text.value, attachments: refs(), fields: saved.fields});
   const ready = () => saved.attachments.every(a => a.ref);
-  const render = () => fill(rows, ...saved.attachments.map(a => h("div", {class: "row"},
+  const render = () => fill(rows, ...saved.attachments.filter(a => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map(a => h("div", {class: "row"},
     h("div", {class: "grow"}, a.name, a.ref ? h("div", {class: "muted"}, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`)
-      : h("div", {class: "muted"}, a.error || (files.has(a) ? t("uploading") : t("choose_again")))),
+      : h("div", {class: "muted"}, a.error || (a.native_handle ? t("files_unavailable") : files.has(a) ? t("uploading") : t("choose_again")))),
     a.ref && roles ? h("select", {"aria-label": t("attachment_role"), onchange: e => {guard(); a.ref.role = e.target.value; persist();}},
       ...["input", "result"].map(role => h("option", {value: role, selected: (a.ref.role || "input") === role}, t(`attachment_${role}`)))) : null,
+    a.ref && native ? native.actions(a.ref) : null,
     !a.ref && files.has(a) && !a.busy ? h("button", {class: "secondary", onclick: () => upload(a)}, t("retry")) : null,
     h("button", {class: "secondary", disabled: a.busy, onclick: () => {
-      guard(); saved.attachments = saved.attachments.filter(x => x !== a); files.delete(a); persist(); render();
+      guard(); if (a.native_handle) {saved.native_ignored ||= []; saved.native_ignored.push(a.native_handle);}
+      saved.attachments = saved.attachments.filter(x => x !== a); files.delete(a); persist(); render();
     }}, t("remove")))));
+  if (nativeFiles) {
+    if (!Array.isArray(saved.native_ignored)) saved.native_ignored = [];
+    saved.native_ignored = saved.native_ignored.filter(id => typeof id === "string" && /^file_[0-9a-f]{32}$/.test(id));
+    if (typeof saved.native_draft !== "string" || !/^[0-9a-f-]{36}$/.test(saved.native_draft))
+      saved.native_draft = saved.attachments.find(a => typeof a.native_receipt?.draft_id === "string" && /^[0-9a-f-]{36}$/.test(a.native_receipt.draft_id))?.native_receipt.draft_id || crypto.randomUUID();
+    native = nativeAttachments({h, t, guard: () => guard(true),
+      canWrite: () => state.online && state.viewReady && may("manage") && nativeUploadAllowed, draftId: saved.native_draft,
+      onVisibility: render,
+      onDiscard: id => {guard(true); saved.attachments = saved.attachments.filter(a => a.native_handle !== id || a.ref); persist(); render();},
+      attached: id => saved.attachments.some(a => a.native_handle === id && a.ref) || saved.native_ignored?.includes(id),
+      onReceipt: receipt => {
+        guard(true);
+        if (saved.native_ignored?.includes(receipt.transfer_id)) return;
+        let a = saved.attachments.find(a => a.native_handle === receipt.transfer_id);
+        if (a?.native_receipt && ["intent_key", "display_name", "size_bytes", "digest"].some(field => a.native_receipt[field] !== receipt[field])) throw new Error(t("files_receipt_mismatch"));
+        if (a && JSON.stringify(a.native_receipt) === JSON.stringify(receipt)) return;
+        if (!a) {a = {name: receipt.display_name, native_handle: receipt.transfer_id}; saved.attachments.push(a);}
+        a.native_receipt = receipt;
+        if (receipt.stage === "ready") a.ref = {...receipt.artifact, ...(roles ? {role: a.ref?.role || "input"} : {})};
+        persist(); render();
+      }});
+    choose.after(native.drop); box.insertBefore(native.box, rows); persist();
+  }
   const acceptUpload = (a, op) => {
     if (op.status !== "succeeded") return;
     a.ref = {artifact_id: op.result.artifact_id, revision: op.result.revision, digest: op.result.digest,
@@ -276,7 +305,7 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
       if (connection.epoch === state.epoch && connection.generation === generation && box.isConnected) {persist(); render();}
     }
   };
-  choose.onchange = () => {
+  if (!nativeFiles) choose.onchange = () => {
     guard();
     for (const file of choose.files) {
       let a = saved.attachments.find(x => !x.ref && !files.has(x) && x.name === file.name);
@@ -354,6 +383,7 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
     guard(true);
     const pending = saved.attachments.filter(a => !a.ref && a.operation_id);
     await settleRefreshes([
+      ...(native ? [native.refresh()] : []),
       ...pending.map(async a => {const {operation} = await api("GET", `/operations/${a.operation_id}`); guard(true); acceptUpload(a, operation);}),
       ...(saved.submission?.operation_id ? [(async () => {
         const {operation} = await api("GET", `/operations/${saved.submission.operation_id}`); guard(true); settleSubmission(operation);
