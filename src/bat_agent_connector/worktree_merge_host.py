@@ -1,0 +1,98 @@
+"""Fixed read-only Git proof over the existing verifier SSH runner. No caller commands."""
+from __future__ import annotations
+
+import base64
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+LIMIT = 262144
+DEADLINE = float('inf')
+
+
+def git(path, *args, codes=(0,)):
+    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    env.update(GIT_OPTIONAL_LOCKS='0', GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null', GIT_TERMINAL_PROMPT='0')
+    # Files avoid unbounded communicate() allocations; no data is stored in either carrier.
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        p = subprocess.Popen(['git',  # noqa: S603, S607 - fixed argv, no shell '--no-optional-locks', '-c', 'core.hooksPath=/dev/null',
+            '-c', 'core.fsmonitor=false', '-c', 'gc.auto=0', '-C', path, *args],
+            env=env, stdout=out, stderr=err)  # noqa: S603, S607 - fixed argv, no shell
+        try:
+            while p.poll() is None:
+                if time.monotonic() >= DEADLINE or os.fstat(out.fileno()).st_size > LIMIT or os.fstat(err.fileno()).st_size > LIMIT:
+                    raise ValueError('MERGE_GIT_UNAVAILABLE')
+                time.sleep(.01)
+            if p.returncode not in codes or os.fstat(out.fileno()).st_size > LIMIT:
+                raise ValueError('MERGE_GIT_UNAVAILABLE')
+            out.seek(0)
+            return p.returncode, out.read(LIMIT + 1).decode('utf-8', errors='strict')
+        finally:
+            if p.poll() is None:
+                p.kill()
+            p.wait()
+
+
+def canonical(path, roots):
+    if (not isinstance(path, str) or len(path) > 4096 or not path.startswith('/') or '\0' in path
+            or '..' in path.split('/') or os.path.realpath(path) != path
+            or not any(path == r or path.startswith(r.rstrip('/') + '/') for r in roots)):
+        raise ValueError('MERGE_GIT_BINDING_CHANGED')
+    return path
+
+
+def identity(path, roots):
+    canonical(path, roots)
+    root = git(path, 'rev-parse', '--show-toplevel')[1].strip()
+    common = git(path, 'rev-parse', '--path-format=absolute', '--git-common-dir')[1].strip()
+    canonical(common, roots)
+    if root != path:
+        raise ValueError('MERGE_GIT_BINDING_CHANGED')
+    branch = git(path, 'symbolic-ref', '--short', 'HEAD')[1].strip()
+    head = git(path, 'rev-parse', '--verify', 'HEAD')[1].strip()
+    if not branch or len(branch) > 256 or not re.fullmatch('[0-9a-f]{40,64}', head):
+        raise ValueError('MERGE_GIT_UNAVAILABLE')
+    s, c = os.stat(path), os.stat(common)
+    return {'root': root, 'common_dir': common, 'head': head, 'branch': branch,
+            'directory': [s.st_dev, s.st_ino], 'common_directory': [c.st_dev, c.st_ino]}
+
+
+def observe(req):
+    roots = req['roots']
+    if not isinstance(roots, list) or not roots or len(roots) > 100:
+        raise ValueError('MERGE_GIT_UNAVAILABLE')
+    if any(not isinstance(r, str) or not r.startswith('/') or os.path.realpath(r) != r for r in roots):
+        raise ValueError('MERGE_GIT_BINDING_CHANGED')
+    paths = [req['source'], req['destination']]
+    before = [identity(p, roots) for p in paths]
+    if paths[0] == paths[1] or before[0]['common_dir'] != before[1]['common_dir'] or before[0]['branch'] == before[1]['branch']:
+        raise ValueError('MERGE_GIT_BINDING_CHANGED')
+    clean = [git(p, 'status', '--porcelain=v1', '-z', '--untracked-files=all')[1] == '' for p in paths]
+    ahead = git(paths[0], 'merge-base', '--is-ancestor', before[1]['head'], before[0]['head'], codes=(0, 1))[0] == 0
+    merged = git(paths[0], 'merge-base', '--is-ancestor', before[0]['head'], before[1]['head'], codes=(0, 1))[0] == 0
+    if [identity(p, roots) for p in paths] != before:
+        raise ValueError('MERGE_GIT_BINDING_CHANGED')
+    return {'version': 1, 'source': {**before[0], 'clean': clean[0]},
+            'destination': {**before[1], 'clean': clean[1]}, 'kind': 'merged' if merged else 'ahead' if ahead else 'diverged'}
+
+
+def main():
+    global DEADLINE
+    DEADLINE = time.monotonic() + 20
+    try:
+        if len(sys.argv) != 2 or len(sys.argv[1]) > 32768:
+            raise ValueError('MERGE_GIT_UNAVAILABLE')
+        req = json.loads(base64.b64decode(sys.argv[1], validate=True))
+        result = observe(req)
+        print(json.dumps({'ok': True, 'proof': result}, separators=(',', ':')))
+    except Exception as exc:  # noqa: BLE001 - bounded fixed errors only, no paths/stderr/config leak
+        code = str(exc) if isinstance(exc, ValueError) and str(exc) in {'MERGE_GIT_UNAVAILABLE', 'MERGE_GIT_BINDING_CHANGED'} else 'MERGE_GIT_UNAVAILABLE'
+        print(json.dumps({'ok': False, 'code': code}))
+
+
+if __name__ == '__main__':
+    main()
