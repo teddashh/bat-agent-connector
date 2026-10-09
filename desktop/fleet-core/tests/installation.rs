@@ -85,6 +85,35 @@ fn unknown_keys_duplicate_keys_unknown_backend_and_unbounded_config_refuse() {
 }
 
 #[test]
+fn migration_payload_changes_only_backend_and_retains_installation_identity() {
+    let f = Fixture::new();
+    let snapshot = Snapshot::load(&f.path()).unwrap();
+    let original = std::fs::read(f.path()).unwrap();
+    let next = snapshot.backend_payload(Backend::Rust).unwrap();
+    snapshot.validate_payload(&next, Backend::Rust).unwrap();
+    assert!(snapshot
+        .validate_payload(&next, Backend::Powershell)
+        .is_err());
+    std::fs::write(f.path(), &next).unwrap();
+    assert_eq!(snapshot.verify_current(), Err("INSTALLATION_CHANGED"));
+    snapshot
+        .validate_payload(&original, Backend::Powershell)
+        .unwrap();
+    snapshot.validate_payload(&next, Backend::Rust).unwrap();
+    let mut different: serde_json::Value = serde_json::from_slice(&next).unwrap();
+    different["kit_root"] = json!(f.0.join("kit/client"));
+    assert!(snapshot
+        .validate_payload(&serde_json::to_vec(&different).unwrap(), Backend::Rust)
+        .is_err());
+    std::fs::rename(
+        f.0.join("kit/client/fleet-desktop.ps1"),
+        f.0.join("kit/client/changed.ps1"),
+    )
+    .unwrap();
+    assert!(snapshot.validate_payload(&next, Backend::Rust).is_err());
+}
+
+#[test]
 fn missing_or_replaced_required_installation_paths_refuse() {
     let f = Fixture::new();
     let snapshot = Snapshot::load(&f.path()).unwrap();
