@@ -231,6 +231,7 @@ async def test_authority_refusals_create_no_permission_operation(daemon, mock, c
     if case == "scope":
         principal = api_auth.Principal("reader", frozenset({"observe"}))
     if case == "confined":
+        daemon.fleet.config.host("h1").default_permission_mode = "allow_all"
         registry.update("h1", CLAUDE, write_scope="confined")
     mode = "allow_all" if case in {"host_policy", "confined"} else "default"
     with pytest.raises((OperationError, BatError)):
@@ -508,3 +509,76 @@ async def test_partial_ack_cancel_preserves_partial_command_evidence(owned, mock
     assert d.journal.commands(tid)[0]["status"] == "uncertain"
     assert d.journal.get(tid)["state"] == "uncertain"
     assert out["external_refs"]["permission_frames"][0]["acknowledged"] is True
+
+
+async def test_codex_batch_checks_rate_once_but_audits_each_frame(daemon, mock):
+    from bat_agent_connector.safety import Audit
+    adopt(CODEX, agent_preset="codex-agent")
+    daemon.fleet.config.safety.write_min_interval_s = 3600
+    daemon.fleet.config.safety.max_writes_per_hour = 1
+    op, _ = daemon.ops.create(PERSON, **intent(CODEX))
+    await settle_operations(daemon.ops)
+    assert daemon.ops.get(op["operation_id"])["status"] == "succeeded"
+    assert len(api.write_frames(mock)) == 2
+    attempts = [r for r in Audit(daemon.fleet.config.safety)._tail() if r.get("phase") == "attempt"]
+    assert len(attempts) == 2
+    await daemon.fleet.close()
+
+
+@pytest.mark.parametrize("task_owned", [False, True])
+@pytest.mark.parametrize("phase", ["connect", "guard_read"])
+@pytest.mark.parametrize("error", ["connection", "timeout", "oserror", "async_timeout"])
+async def test_observed_pretransport_failure_is_definitive_and_keeps_task_usable(
+        owned, mock, monkeypatch, task_owned, phase, error):
+    from bat_agent_connector.errors import ConnectionLost, InvokeTimeout
+    d, tid = owned
+    sid = CLAUDE if task_owned else CODEX
+    if not task_owned:
+        adopt(CODEX, agent_preset="codex-agent")
+    client = d.fleet.client("h1")
+    import asyncio
+    exception = {"connection": ConnectionLost, "timeout": InvokeTimeout, "oserror": OSError,
+                 "async_timeout": asyncio.TimeoutError}[error]
+    async def fail(*_args, **_kwargs):
+        raise exception("fixture failed before setter transport")
+    original = client.invoke
+    async def invoke(channel, params=None, **kwargs):
+        if channel.startswith("claude:set-"):
+            with monkeypatch.context() as patch:
+                patch.setattr(client, "connect" if phase == "connect" else "guard_read", fail)
+                return await original(channel, params, **kwargs)
+        return await original(channel, params, **kwargs)
+    monkeypatch.setattr(client, "invoke", invoke)
+    op, _ = d.ops.create(PERSON, **intent(sid))
+    await settle_operations(d.ops)
+    out = d.ops.get(op["operation_id"])
+    assert out["status"] == "failed" and out["error_code"] == "PERMISSIONS_NOT_SENT", out
+    assert not api.write_frames(mock)
+    if task_owned:
+        assert d.journal.commands(tid)[0]["status"] == "rejected" and d.journal.get(tid)["state"] == "accepted"
+    monkeypatch.setattr(client, "invoke", original)
+    next_op, _ = d.ops.create(PERSON, **intent(sid, key="fresh-after-proven-no-send"))
+    await settle_operations(d.ops)
+    assert d.ops.get(next_op["operation_id"])["status"] == "succeeded"
+
+
+async def test_intent_only_process_interruption_cannot_reconstruct_no_send(owned, mock, monkeypatch):
+    import asyncio
+    d, tid = owned
+    start = d.ops._step_start
+    def crash(op_id, name, request):
+        start(op_id, name, request)
+        if name == "permissions.mode":
+            raise asyncio.CancelledError("process interruption loses volatile transport marker")
+    monkeypatch.setattr(d.ops, "_step_start", crash)
+    op, _ = d.ops.create(PERSON, **intent(CLAUDE))
+    with pytest.raises(asyncio.CancelledError):
+        await d.ops._execute(op["operation_id"])
+    assert not api.write_frames(mock)
+    command_id = d.journal.commands(tid)[0]["command_id"]
+    async with task_tests.restarted_daemon(d) as restarted:
+        await restarted.coordinator.tick(tid)
+        await settle_operations(restarted.ops)
+        out = restarted.ops.get(op["operation_id"])
+        assert out["status"] == "uncertain" and not api.write_frames(mock)
+        assert restarted.journal.command_get(command_id)["status"] == "uncertain"

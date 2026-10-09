@@ -884,9 +884,9 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
         async def approve_pending(
             host: str, confirm: bool = False, dry_run: bool = False, workspace: str | None = None
         ) -> dict[str, Any]:
-            """WRITE. Approve every pending PERMISSION prompt (not ask-user questions) on a host and raise those
-            sessions to allow_all so they stop asking. Only on hosts with default_permission_mode = "allow_all".
-            Requires confirm=true (or dry_run=true to list)."""
+            """Preview pending permission prompts with dry_run=true. Bulk apply is disabled before any answer
+            or permission change. Use individual session_answer and session_set_permissions operations.
+            Listing retains the configured allow_all host policy requirement."""
             return await lifecycle.approve_pending(fleet, host, confirm, dry_run, workspace)
 
         async def session_relay(

@@ -40,6 +40,9 @@ frame 不構成另一個 request 的 interval，但仍計入 hourly budget。
 Registry projection 使用原 creation/binding/options 的 CAS；若有後來的 owner/policy，記錄 skipped，
 不得覆蓋。沒有 ACK 的 step 保持 uncertain；操作 resume 只延續同一 plan／steps，不挑新 session。
 尚未送出的後續 frame 仍受原 task gate 約束，不能用成功前綴繞過 pause/version。
+目前 worker 在 connect／guard_read 失敗且 on_transport 未觸發時有明確 no-send 證據，
+保存 PERMISSIONS_NOT_SENT failed receipt，可在排除連線問題後提交新 key；若已有 ACK 前綴，
+原 command 保留 partial/uncertain 證據。Process interruption 只留下 intent 時沒有這項證據，仍不可重送。
 
 ## BAT 證據與成功的界線
 

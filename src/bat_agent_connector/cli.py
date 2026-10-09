@@ -488,7 +488,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--confirm", action="store_true")
     p.add_argument("--key", help="reuse for retries; omitted means each call is independent")
     p.add_argument("--control-version", type=int, help="expected owning task control version")
-    p = sp.add_parser("approve-pending", help="WRITE: approve all pending permission prompts on a host")
+    p = sp.add_parser("approve-pending", help="preview pending prompts with --dry-run; bulk apply disabled")
     p.add_argument("host")
     p.add_argument("--workspace")
     p.add_argument("--dry-run", action="store_true")

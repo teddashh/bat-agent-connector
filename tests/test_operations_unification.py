@@ -1154,7 +1154,7 @@ async def test_a07_approve_pending_deferred_raise_and_relay_do_not_jump_pause(ow
     with pytest.raises(WriteRefused, match="LEGACY_PERMISSION_RAISE_DISABLED"):
         await lifecycle.approve_pending(d.fleet, "h1", confirm=True)
     result = await lifecycle._raise_deferred(d.fleet, "h1", False)
-    assert result[0]["code"] == "LEGACY_PERMISSION_RAISE_DISABLED"
+    assert result[0]["error_code"] == "LEGACY_PERMISSION_RAISE_DISABLED"
     assert registry.get("h1", SID)["permission_raise_pending"] == "allow_all"
     assert not writes(mock)
     with pytest.raises(TaskControlRefused, match="TASK_PAUSED"):
