@@ -1,5 +1,5 @@
 // Linux native smoke, against an in-process HTTP fixture only. No BAT or real central credentials.
-// Run after `npm run tauri -- build --debug --bundles deb` under xvfb-run + dbus-run-session.
+// Run a built app under xvfb-run + dbus-run-session. Pass the release binary for packaging CI.
 import { createServer } from "node:http";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,6 +9,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import assert from "node:assert/strict";
 
 const root = await mkdtemp(join(tmpdir(), "batc-native-smoke-"));
+const evidence = process.env.BATC_NATIVE_SMOKE_ARTIFACT_DIR
+  ? resolve(process.env.BATC_NATIVE_SMOKE_ARTIFACT_DIR) : root;
+await mkdir(evidence, {recursive: true});
 const caps = {actor: "fixture-operator", scopes: ["observe"], api_version: 1, contract_version: "2026-10-08",
   features: {}, actions: [], hosts: []};
 const checkpoint = {cursor: 0, token: "fixture-checkpoint"};
@@ -31,7 +34,7 @@ await writeFile(join(configDir, "central.json"), JSON.stringify({endpoint: `http
   expected_actor: "fixture-operator", contract_version: "2026-10-08"}));
 const env = {...process.env, XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"),
   BATC_DESKTOP_TOKEN: "fixture-native-token", WEBKIT_DISABLE_DMABUF_RENDERER: "1"};
-const binary = resolve("src-tauri/target/debug/better-agent-dashboard");
+const binary = resolve(process.argv[2] || "src-tauri/target/debug/better-agent-dashboard");
 const app = spawn(binary, [], {env, stdio: ["ignore", "pipe", "pipe"]});
 let diagnostic = "";
 app.stderr.on("data", data => { diagnostic += data; });
@@ -45,7 +48,7 @@ try {
   const window = execFileSync("xdotool", ["search", "--onlyvisible", "--name", "^Better Agent Dashboard$"]).toString().trim();
   assert(window && !window.includes("\n"), "expected one visible Dashboard window");
   await delay(500);
-  execFileSync("python3", ["-c", "from PIL import ImageGrab; import sys; ImageGrab.grab().save(sys.argv[1])", join(root, "native.png")], {env});
+  execFileSync("python3", ["-c", "from PIL import ImageGrab; import sys; ImageGrab.grab().save(sys.argv[1])", join(evidence, "native.png")], {env});
   // Send the same WM_DELETE_WINDOW message as a window manager's Close action.
   execFileSync("python3", ["-c", `
 import ctypes as c, sys
@@ -73,8 +76,10 @@ x.XFlush(d)
   assert.equal(exit, 0, "second app must hand off to the existing instance and exit");
   const windows = execFileSync("xdotool", ["search", "--onlyvisible", "--name", "^Better Agent Dashboard$"]).toString().trim();
   assert.equal(windows, window);
-  console.log(JSON.stringify({artifact: join(root, "native.png"), close_to_tray: "window hidden, process retained",
-    single_instance: "passed, hidden window restored", requests: [...new Set(paths)]}));
+  const result = {binary, artifact: join(evidence, "native.png"), close_to_tray: "window hidden, process retained",
+    single_instance: "passed, hidden window restored", requests: [...new Set(paths)]};
+  await writeFile(join(evidence, "result.json"), JSON.stringify(result, null, 2));
+  console.log(JSON.stringify(result));
 } finally {
   app.kill();
   server.close();
