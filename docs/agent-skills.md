@@ -41,9 +41,10 @@ runtime's standard MCP client settings; for clients using `mcpServers`:
 Every call requires `BATC_API_TOKEN`; missing credentials never fall back to the
 local admin file or a task capability. The daemon checks the caller's action
 scopes and its own host configuration. Direct Fleet tools such as `session_send`,
-`session_start`, relay, fan-out, permissions and legacy cleanup are omitted even
+relay, fan-out, permissions and legacy cleanup are omitted even
 when the MCP host configuration enables writes. Use advertised central actions
-through `operation_submit`; unavailable legacy behavior remains unavailable.
+through `operation_submit`; `session_start` and `workspaces_list` now have central principal adapters.
+Unavailable legacy behavior remains unavailable.
 Task status/result/events reads require `observe` and carry the same token.
 
 For an observation-only installation, use
@@ -64,7 +65,8 @@ need neither Hermes nor an open Tauri window.
 Distinguish checkout SHA (`git rev-parse HEAD`), installed executable version
 (`batc --version`), MCP initialization `serverInfo`, daemon
 `GET /api/v1/version`, caller `capabilities_get()`, and bundle metadata/digest.
-The current API has no unique server ID or skill-version endpoint. A matching
+The dashboard bootstrap also exposes server/principal identity; the version endpoint alone does not.
+There is no skill-version endpoint. A matching
 release number does not prove the checkout is installed; confirm the executable
 path and deployment pin independently. This change does not update a fleet
 installer pin or certify a live installation.
