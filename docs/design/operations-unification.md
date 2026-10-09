@@ -467,7 +467,7 @@ work_submit 原已要求 key，保留其最大 256 字相容長度；一般 oper
 |---|---|---|
 | send／continue／relay | target 選定、必要 `client_resume`、send；固定 message ID／prompt hash | resume 核對 meta 與 binding；send 用既有 registry turn／BAT exact echo。Codex 的一般 action 只有 timestamp 時維持 uncertain，不重送。 |
 | answer／approve-pending | pending prompt binding、每個 prompt answer、每個 permission 設定 | prompt ID 不再 pending 才能證明清除；不代表所有後續工作成功。失敗讀取不是「沒有 pending」。 |
-| permissions | Claude mode；Codex sandbox 與 approval 各一步 | 讀同 session meta 的實際 mode；證據不足時維持 uncertain。deferred raise 保存固定目標／版本；task gate 改變時拒絕，不盲目掃全 registry。 |
+| permissions | Claude mode；Codex sandbox 與 approval 各一步 | 保存每個 setting 的正面 BAT 回執；相符 meta 不證明 native reconfiguration 成功，遺失回覆維持 uncertain、不重送。Claude streaming 拒絕且不排 deferred；歷史 flags 與 legacy bulk raise apply 停用。現行合約見 [session-permissions.md](session-permissions.md)。 |
 | interrupt／pause abort | interrupt／abort 各一步；固定 task/session/version | 證明相同 session 不 streaming；查不到或 binding 不符不能算完成。已 pause 的意圖保留，不因 abort 不明而退回未 paused。 |
 | task-owned session.send／answer／interrupt | operation_id 連原 task command；保留原 payload／control_version | operation 讀回先結清自己的 step；下次 coordinator.tick 在 task lock 下以原 `_reconcile_command` 的證據結清 command（send 為 accepted，其餘為 settled），將 lead task 恢復 running。operation 的證據不代替 task 回執；command 未解仍擋控制，回查不明維持 uncertain、不重送。 |
 | task-owned send 的 preliminary resume | 原 command intent；resume 使用完整 guard.check，send-message 才記 effect frame | resume reply 遺失或 resume 後的 pre-frame 拒絕：command rejected、task 不變；operation failed 並重讀原 BAT_ERROR／拒絕碼。send reply 遺失即 uncertain，沿用原 operation readback＋coordinator tick；resume 本身不作為 prompt echo 證據。Part B 的獨立 resume step 拆分仍未交付。 |

@@ -4,7 +4,7 @@ description: Use this when you need to check on, read, wait for, or (only when e
 version: 0.2.4
 license: MIT
 metadata:
-  workflow_version: "2026-10-08.5"
+  workflow_version: "2026-10-08.6"
   api_version: "1"
   contract_version: "2026-10-08"
 ---
@@ -66,13 +66,13 @@ This is also a compatibility reference for operator installations. In the agent 
 only central daemon tools (including artifacts and reviewed cleanup) and task adapters are advertised; the direct Fleet rows are
 legacy references, not agent instructions. Use `inventory_hosts` / `inventory_sessions`
 and `inventory_session` for observation, `work_status` for task detail and central
-`operation_submit` actions such as `session.send`, `session.answer` and `session.interrupt`
+`operation_submit` actions such as `session.send`, `session.answer`, `session.interrupt` and `session.permissions`
 only when allowed in capabilities. Preserve their operation IDs and keys. Transcript/wait,
-raw start, relay, fan-out, permissions and legacy cleanup have no advertised agent adapter
+raw start, relay, fan-out and legacy cleanup have no advertised agent adapter
 here; do not execute the corresponding legacy workflows or CLI commands.
 
-For operator installations that expose `session_send`, `session_continue`, `session_answer`
-or `session_interrupt`, these adapters now enter the same central operation service using
+For operator installations that expose `session_send`, `session_continue`, `session_answer`,
+`session_interrupt` or `session_set_permissions`, these adapters enter the same central operation service using
 the caller's `BATC_API_TOKEN`. They require the configured central owner; a connection
 failure does not authorize a direct BAT fallback or starting another daemon. Supply an
 `idempotency_key` (CLI `--key`) when retries must recover the same intent, and save the
@@ -82,7 +82,15 @@ the BAT message and is separate from the operation key. For an answer, supply th
 `tool_use_id`; the compatibility adapter binds an omitted ID to one positively identified
 pending prompt at admission and never retargets a later prompt. Task-owned controls keep
 the admitted binding/control version and may refuse stale intent. This coverage does not
-make legacy permissions, bulk approval, start or orchestration durable operations.
+make bulk approval, start or orchestration durable operations.
+
+For a permission change, submit `session.permissions` with the exact host/session target and
+`params={mode: "default" | "allow_all"}`. `allow_all` bypasses ordinary approval prompts and
+still requires the host policy and confinement checks to permit it. Keep the same key and
+operation ID after an unknown result: Codex's sandbox and approval settings have separate
+receipts, and success for one does not prove the other. A Claude turn-in-flight refusal does
+not queue a later change. Once idle, make an authorized new request with a new key. Historical
+deferred flags are not authority to apply a setting under a new caller or session incarnation.
 
 | Goal | MCP tool | CLI |
 |---|---|---|
@@ -101,8 +109,8 @@ make legacy permissions, bulk approval, start or orchestration durable operation
 | Merge worktree (orchestrate) | `worktree_merge` | `batc merge ...` |
 | Legacy worktree removal (disabled) | `worktree_remove` refuses; use reviewed cleanup below | `batc remove-worktree` refuses |
 | Classify sessions (quota, waiting, working, done) | `sessions_triage(host?, states?)`, `quota_sessions(host?)` | `batc triage [HOST] --state ...`, `batc quota` |
-| Approve pending permission prompts (write) | `approve_pending(host, confirm=true, dry_run?)` | `batc approve-pending HOST --confirm` |
-| Change a session's permissions (write) | `session_set_permissions(host, session_id, mode, confirm=true)` | `batc permissions HOST SID --mode allow_all --confirm` |
+| Preview legacy bulk approval (apply disabled) | `approve_pending(host, dry_run=true)` | `batc approve-pending HOST --dry-run` |
+| Change a session's permissions (write, daemon) | `session_set_permissions(host, session_id, mode, idempotency_key?, control_version?, confirm=true)` | `batc permissions HOST SID --mode default --key KEY --confirm` |
 | Move a quota-stopped Claude session to Codex (orchestrate) | `session_failover(host, session_id \| all_exhausted=true, confirm=true, dry_run?)` | `batc failover HOST [SID] --all-exhausted --confirm` |
 | Reviewed resource cleanup (daemon, cleanup scope) | `cleanup_preview` → `cleanup_apply(confirm=true)` | `batc resource-cleanup preview` → `apply --confirm` |
 | Retained content / permanent cleanup history (observe) | `cleanup_retained`, `cleanup_tombstones` | `batc resource-cleanup retained`, `history` |
@@ -296,9 +304,11 @@ item is done.
   uses the host's `codex_model`. Report old → new session id, then track the new one. To keep a superseded
   session's uncommitted work without continuing it, fail it over with `force`, `archive_only=true` and
   `instructions` that say to only commit it; reviewed cleanup can release it while keeping its commits and branch.
-- **Permissions**: on hosts with `default_permission_mode = "allow_all"`, `approve_pending` answers permission prompts
-  (not questions) with "don't ask again" and raises the session to allow-all. Claude sessions are raised only when
-  idle; Codex from its next turn. Confined sessions are skipped: never request a raise, persistent approval or
+- **Permissions**: legacy `approve_pending` apply refuses with `LEGACY_PERMISSION_RAISE_DISABLED`
+  before answering or raising any session; dry-run remains a preview. Answer one fixed pending prompt
+  through `session.answer`, and use `session.permissions` for an explicit mode change when authorized.
+  Claude must be idle; a running turn is not an automatic deferred request. Codex changes apply from its next turn.
+  Confined sessions are skipped: never request a raise, persistent approval or
   mode-widening ExitPlanMode answer for them; report blocked tests with their confinement evidence.
 ## Reviewed cleanup (scope cleanup)
 
