@@ -1,0 +1,236 @@
+{
+  "schema_version": 1,
+  "fleet_version": "3.2.5",
+  "direct_probe_ms": 600,
+  "cloudflare_access_hosts": [
+    "node-1.example.invalid",
+    "node-3.example.invalid",
+    "node-4.example.invalid",
+    "node-5.example.invalid",
+    "node-2.example.invalid"
+  ],
+  "credentials": {
+    "connector-observe": {
+      "kind": "windows-dpapi",
+      "name": "connector-observe"
+    },
+    "bat-node-1": {
+      "kind": "bat-profile-token",
+      "profile_id": "profile-1"
+    },
+    "bat-node-2": {
+      "kind": "bat-profile-token",
+      "profile_id": "profile-2"
+    },
+    "bat-node-3": {
+      "kind": "bat-profile-token",
+      "profile_id": "profile-3"
+    },
+    "bat-node-4": {
+      "kind": "bat-profile-token",
+      "profile_id": "profile-4"
+    },
+    "bat-node-5": {
+      "kind": "bat-profile-token",
+      "profile_id": "profile-5"
+    }
+  },
+  "fingerprints": {
+    "pin-node-1": {
+      "kind": "bat-profile-pin",
+      "profile_id": "profile-1"
+    },
+    "pin-node-2": {
+      "kind": "bat-profile-pin",
+      "profile_id": "profile-2"
+    },
+    "pin-node-3": {
+      "kind": "bat-profile-pin",
+      "profile_id": "profile-3"
+    },
+    "pin-node-4": {
+      "kind": "bat-profile-pin",
+      "profile_id": "profile-4"
+    },
+    "pin-node-5": {
+      "kind": "bat-profile-pin",
+      "profile_id": "profile-5"
+    }
+  },
+  "hosts": [
+    {
+      "name": "node-1",
+      "profile": "profile-1",
+      "label": "Fixture 1",
+      "local": "127.0.0.1:19001",
+      "target": "127.0.0.1:9000",
+      "probe": "100.64.0.1:22",
+      "routes": [
+        {
+          "kind": "direct",
+          "alias": "node-1-direct",
+          "probe": "100.64.0.1:22"
+        },
+        {
+          "kind": "cf",
+          "alias": "node-1-cf",
+          "access_host": "node-1.example.invalid"
+        }
+      ],
+      "provision_route": "cf",
+      "bat": {
+        "remote_profile_id": "default",
+        "credential_ref": "bat-node-1",
+        "fingerprint_ref": "pin-node-1",
+        "protocol": "bat-remote/v2",
+        "min_version": "3.2.5"
+      },
+      "workspace_bindings": [],
+      "connector_endpoint": null
+    },
+    {
+      "name": "node-2",
+      "profile": "profile-2",
+      "label": "Fixture 2",
+      "local": "127.0.0.2:19002",
+      "target": "192.0.2.2:9000",
+      "probe": "100.64.0.2:22",
+      "routes": [
+        {
+          "kind": "direct",
+          "alias": "node-2-direct",
+          "probe": "100.64.0.2:22"
+        },
+        {
+          "kind": "cf",
+          "alias": "node-2-cf",
+          "access_host": "node-2.example.invalid"
+        }
+      ],
+      "provision_route": "cf",
+      "bat": {
+        "remote_profile_id": "default",
+        "credential_ref": "bat-node-2",
+        "fingerprint_ref": "pin-node-2",
+        "protocol": "bat-remote/v2",
+        "min_version": "3.2.5"
+      },
+      "workspace_bindings": [],
+      "connector_endpoint": null
+    },
+    {
+      "name": "node-3",
+      "profile": "profile-3",
+      "label": "Fixture 3",
+      "local": "127.0.0.3:19003",
+      "target": "127.0.0.1:9000",
+      "probe": "100.64.0.3:22",
+      "routes": [
+        {
+          "kind": "direct",
+          "alias": "node-3-direct",
+          "probe": "100.64.0.3:22"
+        },
+        {
+          "kind": "cf",
+          "alias": "node-3-cf",
+          "access_host": "node-3.example.invalid"
+        }
+      ],
+      "provision_route": "cf",
+      "bat": {
+        "remote_profile_id": "default",
+        "credential_ref": "bat-node-3",
+        "fingerprint_ref": "pin-node-3",
+        "protocol": "bat-remote/v2",
+        "min_version": "3.2.5"
+      },
+      "workspace_bindings": [],
+      "connector_endpoint": null
+    },
+    {
+      "name": "node-4",
+      "profile": "profile-4",
+      "label": "Fixture 4",
+      "local": "127.0.0.4:19004",
+      "target": "127.0.0.1:9000",
+      "probe": "192.0.2.4:22",
+      "routes": [
+        {
+          "kind": "cf",
+          "alias": "node-4-cf",
+          "access_host": "node-4.example.invalid"
+        }
+      ],
+      "provision_route": "cf",
+      "bat": {
+        "remote_profile_id": "default",
+        "credential_ref": "bat-node-4",
+        "fingerprint_ref": "pin-node-4",
+        "protocol": "bat-remote/v2",
+        "min_version": "3.2.5"
+      },
+      "workspace_bindings": [],
+      "connector_endpoint": null
+    },
+    {
+      "name": "node-5",
+      "profile": "profile-5",
+      "label": "Fixture 5",
+      "local": "127.0.0.5:19005",
+      "target": "127.0.0.1:9000",
+      "probe": "100.64.0.5:22",
+      "routes": [
+        {
+          "kind": "direct",
+          "alias": "node-5-direct",
+          "probe": "100.64.0.5:22"
+        },
+        {
+          "kind": "lan",
+          "alias": "node-5-lan",
+          "probe": "192.0.2.5:22"
+        },
+        {
+          "kind": "cf",
+          "alias": "node-5-cf",
+          "access_host": "node-5.example.invalid"
+        }
+      ],
+      "provision_route": "cf",
+      "bat": {
+        "remote_profile_id": "default",
+        "credential_ref": "bat-node-5",
+        "fingerprint_ref": "pin-node-5",
+        "protocol": "bat-remote/v2",
+        "min_version": "3.2.5"
+      },
+      "workspace_bindings": [],
+      "connector_endpoint": null
+    }
+  ],
+  "provisioning_profiles": [
+    "profile-5",
+    "profile-4",
+    "profile-3",
+    "profile-2",
+    "profile-1"
+  ],
+  "connector": {
+    "name": "connector",
+    "label": "Fixture Dashboard",
+    "local": "127.0.0.1:19796",
+    "target": "127.0.0.1:8796",
+    "ssh_alias": null,
+    "dashboard_path": "/dashboard/",
+    "credential_ref": "connector-observe",
+    "supported_api_versions": [
+      1
+    ],
+    "min_contract_version": "2026-10-08",
+    "required_features": [
+      "inventory",
+      "events_stream"
+    ]
+  }
+}
