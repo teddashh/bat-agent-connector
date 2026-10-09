@@ -363,7 +363,7 @@ impl Bridge {
             credential_source: if env {
                 Some("launch_environment")
             } else if saved {
-                Some("windows_credential_manager")
+                Some(self.vault.source())
             } else {
                 None
             },
@@ -1893,6 +1893,9 @@ mod tests {
         prompt_started: Mutex<Option<mpsc::Sender<()>>>,
     }
     impl Vault for MockVault {
+        fn source(&self) -> &'static str {
+            "windows_credential_manager"
+        }
         fn supported(&self) -> bool {
             true
         }
