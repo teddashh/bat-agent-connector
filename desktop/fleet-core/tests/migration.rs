@@ -1,5 +1,5 @@
 use bat_fleet_core::{
-    discovery::{Backend, MonitorIdentity, Ownership},
+    discovery::{Backend, MonitorIdentity, Observation, Ownership},
     migration::{Owner, Phase, Platform, Progress, Store},
     process_adapter::{LoginIdentity, ProcessSnapshot},
     Result,
@@ -88,6 +88,8 @@ struct Fake {
     monitor: Rc<Cell<bool>>,
     events: RefCell<Vec<&'static str>>,
     new_owner_on_guard: bool,
+    unpublished: Option<ProcessSnapshot>,
+    launch_fence: Option<PathBuf>,
 }
 impl Fake {
     fn new() -> Self {
@@ -101,7 +103,23 @@ impl Fake {
             monitor: Rc::new(Cell::new(false)),
             events: RefCell::new(vec![]),
             new_owner_on_guard: false,
+            unpublished: None,
+            launch_fence: None,
         }
+    }
+}
+impl Observation for Fake {
+    fn current_login(&self) -> Result<LoginIdentity> {
+        Ok(login())
+    }
+    fn state(&self, _: u32) -> bat_fleet_core::ownership::ProcessState {
+        bat_fleet_core::ownership::ProcessState::Unknown
+    }
+    fn observe(&self, pid: u32) -> Result<Option<ProcessSnapshot>> {
+        Ok(self.unpublished.as_ref().filter(|p| p.pid == pid).cloned())
+    }
+    fn legacy_candidates(&self) -> Result<Vec<ProcessSnapshot>> {
+        Ok(vec![])
     }
 }
 impl Platform for Fake {
@@ -125,6 +143,11 @@ impl Platform for Fake {
         if self.unknown {
             Err("OWNER_UNPROVEN")
         } else {
+            if self.owner.is_none() {
+                if let Some(path) = &self.launch_fence {
+                    bat_fleet_core::monitor_launch::verify_absence(path, self)?;
+                }
+            }
             Ok(self.owner.clone())
         }
     }
@@ -525,5 +548,59 @@ fn malformed_complete_receipt_and_changed_configuration_refuse_without_effects()
         }
         assert!(t.store().advance(&mut p, ID).is_err());
         assert_eq!(p.quit + p.launched, 0);
+    }
+}
+
+#[test]
+fn unpublished_launch_fence_blocks_migration_before_configuration_or_startup_writes() {
+    for born in [false, true] {
+        let t = Temp::new();
+        let mut platform = Fake::new();
+        begin(&t, &mut platform);
+        assert_eq!(
+            t.store().advance(&mut platform, ID),
+            Ok(Progress::WaitingExit)
+        );
+        platform.owner = None;
+        let path = t.0.join("bat-fleet-monitor-launch.json");
+        let child = ProcessSnapshot {
+            pid: 42,
+            created_filetime: 123456789,
+            executable: "C:\\Apps\\Dashboard.exe".into(),
+            arguments: vec![
+                "--fleet-supervisor".into(),
+                "--fleet-config".into(),
+                "C:\\Config\\fleet.json".into(),
+            ],
+            login: login(),
+        };
+        let doc = json!({"schema_version":1,"configuration_binding":"a".repeat(64),
+            "executable":child.executable,"arguments":child.arguments,
+            "owner_sid":login().owner_sid,"session_id":login().session_id,
+            "child":born.then(||json!({"pid":child.pid,"created_filetime":child.created_filetime.to_string()}))});
+        let original = serde_json::to_vec(&doc).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        platform.launch_fence = Some(path.clone());
+        platform.unpublished = born.then_some(child);
+        assert_eq!(
+            t.store().advance(&mut platform, ID),
+            Err(if born {
+                "MONITOR_STARTING"
+            } else {
+                "MONITOR_LAUNCH_UNCONFIRMED"
+            })
+        );
+        assert_eq!(
+            std::fs::read(t.0.join("fleet.json")).unwrap(),
+            config(Backend::Powershell)
+        );
+        assert_eq!(
+            std::fs::read(t.0.join("Startup/Open BAT.lnk")).unwrap(),
+            b"powershell"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), original);
+        assert_eq!(platform.launched, 0);
+        let receipt: Value = serde_json::from_slice(&std::fs::read(t.journal()).unwrap()).unwrap();
+        assert_eq!(receipt["phase"], "quit_requested");
     }
 }

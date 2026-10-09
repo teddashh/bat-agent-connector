@@ -262,3 +262,56 @@ fn other_login_and_corrupt_intent_refuse_without_changes() {
     assert!(start(&f, &mut m).is_err());
     assert_eq!(m.launches, 1);
 }
+
+#[test]
+fn migration_absence_guard_preserves_unknown_or_live_unpublished_launch_fence() {
+    let f = Fixture::new();
+    let mut m = Mock {
+        fail: 1,
+        ..Mock::default()
+    };
+    assert!(start(&f, &mut m).is_err());
+    let original = std::fs::read(f.path()).unwrap();
+    assert_eq!(
+        bat_fleet_core::monitor_launch::verify_absence(&f.path(), &m),
+        Err("MONITOR_LAUNCH_UNCONFIRMED")
+    );
+    assert_eq!(std::fs::read(f.path()).unwrap(), original);
+    // Reproduce the same positively recorded child form written by ensure after spawn.
+    std::fs::remove_file(f.path()).unwrap();
+    m.fail = 0;
+    start(&f, &mut m).unwrap();
+    let born = std::fs::read(f.path()).unwrap();
+    assert_eq!(
+        bat_fleet_core::monitor_launch::verify_absence(&f.path(), &m),
+        Err("MONITOR_STARTING")
+    );
+    m.unknown = true;
+    assert_eq!(
+        bat_fleet_core::monitor_launch::verify_absence(&f.path(), &m),
+        Err("OWNER_UNPROVEN")
+    );
+    m.unknown = false;
+    m.alive = false;
+    assert_eq!(
+        bat_fleet_core::monitor_launch::verify_absence(&f.path(), &m),
+        Ok(())
+    );
+    m.other_login = true;
+    assert_eq!(
+        bat_fleet_core::monitor_launch::verify_absence(&f.path(), &m),
+        Err("OTHER_LOGIN_OWNER")
+    );
+    m.other_login = false;
+    m.alive = true;
+    m.birth = Some(process().created_filetime + 1);
+    assert_eq!(
+        bat_fleet_core::monitor_launch::verify_absence(&f.path(), &m),
+        Ok(())
+    );
+    assert_eq!(std::fs::read(f.path()).unwrap(), born);
+    assert_eq!(m.launches, 2);
+    std::fs::write(f.path(), b"malformed").unwrap();
+    assert!(bat_fleet_core::monitor_launch::verify_absence(&f.path(), &m).is_err());
+    assert_eq!(std::fs::read(f.path()).unwrap(), b"malformed");
+}

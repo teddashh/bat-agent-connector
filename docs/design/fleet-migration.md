@@ -70,6 +70,52 @@ no real Startup, registry, monitor, account credential or live tunnel is changed
   `windows_startup::Codec` reads/renders in-memory ShellLink bytes. Only the separate native
   `startup_directory()` queries the OS folder; tests never call it or write installed entries.
 
+## Native Windows platform
+
+`windows_migration::WindowsMigration::new(installation, paths, roaming, quit_file,
+current_executable, system_directory)` implements the core `Platform`. All inputs
+come from trusted native installation/OS discovery; `paths` belongs to the captured
+installation's `client_root`. The system directory comes from `GetSystemDirectoryW`,
+not PATH or an environment-selected executable. This is not an IPC interface.
+
+Keep the adapter on one dedicated blocking thread. `Store` owns returned `Rc` launcher
+and monitor guards; the adapter keeps only weak references and requires a live launcher
+guard for effects. Launch uses that existing guard without re-entry. The Monitor guard
+is released only at the core's persisted `LaunchRequested` boundary.
+
+Discovery uses both BAT directories and exact process/login/epoch/configuration evidence.
+Before accepting no owner, it also calls `monitor_launch::verify_absence` on the fixed
+roaming `bat-fleet-monitor-launch.json`: an unknown or still-live unpublished child
+blocks migration **before config/startup writes**. A historical other-login intent is
+also refused, even if its child ended. This guard never edits or replays a launch receipt.
+Normal quit delegates to `supervisor_control::request_quit` after matching the core's
+accepted owner; no forced termination exists in this adapter.
+
+Original and proposed config payloads are validated against the same installation
+layout through `Snapshot::validate_payload`. After the intentional backend replacement,
+launch loads a fresh snapshot of those bytes and rechecks the same client/script/executable
+paths and unchanged Kit configuration. It does not require the old config bytes to remain.
+Native launch reuses `monitor_launch::ensure` and `WindowsLaunch`, including its retained
+child birth fence. PS reverse starts only fixed system Windows PowerShell with reviewed
+`-ExecutionPolicy Bypass -NoProfile -File <client/bat-connect.ps1> -InventoryPath ...
+-ProfileIndexPath ...` arguments and the client working directory. It does not run the
+login VBS/updater or a shell command string. The inherited environment is restricted to
+Windows identity/storage/routing variables; PSModulePath and Windows system roots are
+fixed from the trusted system directory. BAT/Connector tokens and proxy credentials
+are not inherited.
+
+Each launch polls exact retained child PID/birth/executable/argv/login and a published
+owner epoch for at most five seconds between local queries. Local Windows inspection
+calls themselves are synchronous; this is not a hard interruption of an OS API. A different
+owner, failed query or absent receipt remains an error/unknown result. No error kills a
+monitor or retries a spawn. Once `LaunchRequested` is persisted, a later `Store::advance`
+uses discovery only, including after the adapter process restarts.
+
+Pure launch-plan/environment/readback tests use synthetic arguments, owners and clocks.
+The migration/launch-journal integration fixture proves unpublished-child refusal leaves
+both original slots unchanged. Windows cross-compilation validates the native adapter API;
+it does not execute a real migration, PS monitor, installed Startup entry or live tunnel.
+
 Windows fixture bodies include COM round trips and an actual system PowerShell/WScript.Shell
 creation oracle, all targeting temporary synthetic files. Local Linux tests and Windows
 cross-compilation are separate from execution of those Windows fixtures and installed
