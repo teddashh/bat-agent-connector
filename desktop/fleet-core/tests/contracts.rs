@@ -104,6 +104,30 @@ fn rejects_unknowns_route_reordering_identity_collisions_and_credential_drift() 
 }
 
 #[test]
+fn profile_record_schema_rejects_unknown_fields_even_with_allowed_root_extensions() {
+    let original: Value =
+        serde_json::from_slice(include_bytes!("fixtures/profile-index.json")).unwrap();
+    for field in ["command", "sshAlias", "remoteHostOverride", "Name"] {
+        let mut doc = original.clone();
+        doc["profiles"][0][field] = json!("unexpected");
+        assert!(
+            ProfileIndex::parse(&serde_json::to_vec(&doc).unwrap(), &[field]).is_err(),
+            "{field}"
+        );
+    }
+    let mut doc = original;
+    for (field, value) in [
+        ("name", json!("Synthetic profile")),
+        ("remoteProfileName", json!("Default")),
+        ("createdAt", json!(123)),
+        ("updatedAt", json!(124)),
+    ] {
+        doc["profiles"][0][field] = value;
+    }
+    assert!(ProfileIndex::parse(&serde_json::to_vec(&doc).unwrap(), &[]).is_ok());
+}
+
+#[test]
 fn changed_profiles_pins_and_missing_ssh_alias_never_validate() {
     let inv = parse(&inventory_value());
     let original = ProfileIndex::parse(include_bytes!("fixtures/profile-index.json"), &[]).unwrap();

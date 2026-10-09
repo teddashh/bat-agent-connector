@@ -227,3 +227,26 @@ fn actual_system_powershell_binding_matches_normalized_native_paths() {
         configuration.verify_current().unwrap();
     }
 }
+
+#[test]
+fn alternate_profile_index_cannot_extend_the_profile_record_schema() {
+    let fixture = Fixture::new();
+    let alternate = fixture.0.join("alternate-index.json");
+    let mut document: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(fixture.0.join("kit/bat-profiles/index.json")).unwrap(),
+    )
+    .unwrap();
+    document["profiles"][0]["command"] = serde_json::json!("unexpected");
+    std::fs::write(&alternate, serde_json::to_vec(&document).unwrap()).unwrap();
+    let paths = Paths::new(
+        &fixture.0.join("kit"),
+        &fixture.0.join("使用者🦀"),
+        None,
+        Some(&alternate),
+    )
+    .unwrap();
+    assert!(matches!(
+        Configuration::load(paths),
+        Err("PROFILE_INDEX_INVALID")
+    ));
+}
