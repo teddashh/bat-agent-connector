@@ -308,7 +308,7 @@ item is done.
   before answering or raising any session; dry-run remains a preview. Answer one fixed pending prompt
   through `session.answer`, and use `session.permissions` for an explicit mode change when authorized.
   Claude must be idle; a running turn is not an automatic deferred request. Codex changes apply from its next turn.
-  Confined sessions are skipped: never request a raise, persistent approval or
+  For confined sessions, never request a raise, persistent approval or
   mode-widening ExitPlanMode answer for them; report blocked tests with their confinement evidence.
 ## Reviewed cleanup (scope cleanup)
 
