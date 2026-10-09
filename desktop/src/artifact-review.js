@@ -9,7 +9,9 @@ const aid = value => typeof value === 'string' && /^art_[0-9a-f]{32}$/.test(valu
 const tid = value => typeof value === 'string' && /^[0-9a-f-]{8,64}$/.test(value);
 const commandId = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f-\x9f]/.test(value);
 const terminal = op => ['succeeded', 'failed', 'cancelled'].includes(op?.status);
-const executions = ['checkpoint.continue', 'integration.handoff', 'session.send'];
+const executions = ['checkpoint.continue', 'integration.handoff', 'session.send', 'session.start'];
+export const managedCaptureExecution = op => oid(op?.operation_id) && op.status === 'succeeded' && executions.includes(op.action) &&
+  (op.action !== 'session.start' || op.result?.started === true && op.result.prompt_sent === true && op.result.message_id === `batc-${op.operation_id}`);
 const safePath = path => typeof path === 'string' && path && new TextEncoder().encode(path).length <= 4096 &&
   !/[\\\x00-\x1f\x7f-\x9f]/.test(path) && path.split('/').every(p => p && p !== '.' && p !== '..' && p.toLowerCase() !== '.git');
 const selectorValid = s => record(s) && (equal(Object.keys(s).sort(), ['execution_operation_id']) && oid(s.execution_operation_id) ||
@@ -285,7 +287,7 @@ export async function mountArtifactReview({main, h, t, api, caps, guard, onEvent
       pages.set(result.action, result.data.next_before ?? null);
       for (const op of result.data.operations || []) {
         const bound = sourceFromOperation(op);
-        if (oid(op.operation_id) && executions.includes(op.action) && op.status === 'succeeded' && bound?.host === source.host && bound.session_id === source.session_id) {
+        if (managedCaptureExecution(op) && bound?.host === source.host && bound.session_id === source.session_id) {
           const selector = {execution_operation_id: op.operation_id}; candidates.set(stable(selector), {selector, label: `${op.action} · ${op.operation_id}`});
         }
       }
@@ -300,7 +302,7 @@ export async function mountArtifactReview({main, h, t, api, caps, guard, onEvent
       bound = {host: task.host, session_id: task.session_id}; customTask.value = task.task_id;
     } else if (context.kind === 'operation') {
       const op = (await api('GET', `/operations/${context.operation_id}`)).operation;
-      if (op?.operation_id !== context.operation_id || !executions.includes(op.action) || op.status !== 'succeeded') throw new Error(t('ar_source_unavailable'));
+      if (op?.operation_id !== context.operation_id || !managedCaptureExecution(op)) throw new Error(t('ar_source_unavailable'));
       bound = sourceFromOperation(op);
       if (!saved.selector) saved.selector = {execution_operation_id: context.operation_id};
     } else if (context.kind === 'session') bound = context;

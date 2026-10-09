@@ -9,7 +9,7 @@ import { capturePanel } from "./capture.js";
 import { permissionsPanel } from "./permissions.js";
 import { approvalsPanel } from "./approvals.js";
 import { sessionStartPanel } from "./session-start.js";
-import { mountArtifactReview } from "./artifact-review.js";
+import { mountArtifactReview, managedCaptureExecution } from "./artifact-review.js";
 import { consumePageAsync, settleRefreshes, storageScope } from "./state/events.ts";
 
 const TOKEN_KEY = "batc.dashboard.token";
@@ -1853,8 +1853,7 @@ async function viewOperation(main, id) {
           ["artifact.capture.managed", "artifact.accept"].includes(op.action) && op.status === "succeeded" &&
           /^art_[0-9a-f]{32}$/.test(op.result?.artifact_id) && Number.isSafeInteger(op.result?.revision) && op.result.revision > 0
             ? h("a", {href: `#/artifact-review/artifact/${op.result.artifact_id}/${op.result.revision}`}, t("ar_review_title")) : null,
-          state.caps?.artifacts?.capture?.managed_single_file && op.status === "succeeded" &&
-          ["checkpoint.continue", "integration.handoff", "session.send"].includes(op.action)
+          state.caps?.artifacts?.capture?.managed_single_file && managedCaptureExecution(op)
             ? h("a", {href: `#/artifact-review/operation/${op.operation_id}`}, t("ar_open")) : null,
           confirmSource, resume, retry, cancel));
     } catch (e) { fill(panel, errorBox(e)); }

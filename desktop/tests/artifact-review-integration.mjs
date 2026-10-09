@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import {chromium,expect} from '@playwright/test';
 const backend=resolve(process.env.BATC_ARTIFACT_REVIEW_ROOT||'..');
 const python=process.env.BATC_ARTIFACT_REVIEW_PYTHON||resolve('../.venv',process.platform==='win32'?'Scripts/python.exe':'bin/python');
-const child=spawn(python,[resolve('tests/artifact-review-fixture.py')],{cwd:backend,env:{...process.env,PYTHONPATH:[resolve(backend,'src'),backend].join(delimiter)},stdio:['pipe','pipe','inherit']});
+const child=spawn(python,[resolve('tests/artifact-review-fixture.py'),...(process.argv.includes('--start')?['--start']:[])],{cwd:backend,env:{...process.env,PYTHONPATH:[resolve(backend,'src'),backend].join(delimiter)},stdio:['pipe','pipe','inherit']});
 const stopped=once(child,'exit'),lines=createInterface({input:child.stdout})[Symbol.asyncIterator]();
 const next=async()=>{const row=await lines.next();if(row.done)throw new Error('Managed artifact fixture stopped');return JSON.parse(row.value);};
 const browser=await chromium.launch();
