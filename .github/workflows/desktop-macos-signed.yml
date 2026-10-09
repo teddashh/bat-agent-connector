@@ -67,7 +67,7 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-        run: npm run tauri -- build --bundles dmg -- --locked
+        run: npm run tauri -- build --bundles app,dmg -- --locked
       - name: Verify Developer ID, notarization ticket and Gatekeeper
         working-directory: desktop
         env:
