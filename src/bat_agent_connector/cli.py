@@ -326,8 +326,10 @@ async def _run(args) -> Any:
             ), None
         if c == "start":
             from .task_daemon import request
-            if not args.confirm or not fleet.orchestrate_enabled(args.host):
-                raise WriteRefused("start needs --confirm and an enabled local orchestrate tier")
+            if not args.confirm:
+                raise WriteRefused("start needs --confirm")
+            # Central admission checks current tiers after replaying an existing key.
+            # A changed local tier must not hide a previously accepted start receipt.
             prompt = sys.stdin.read() if args.prompt == "-" else args.prompt
             try:
                 out = await asyncio.to_thread(request, "session_start", _auth_token=os.environ.get("BATC_API_TOKEN"),
