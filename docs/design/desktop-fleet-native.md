@@ -40,7 +40,7 @@ its existing central functionality and never offers native controls.
 `fleet_control` is distinct from the existing six `fleet_request` actions. It accepts
 only typed logical IDs, booleans, known backend enums, observed hashes/epochs and
 opaque 32-hex handles. No caller-supplied path, PID, executable, argv, token or URL is
-accepted. At most 32 original choice/launch/migration previews are retained in Rust.
+accepted. At most 32 original choice/launch/migration previews are retained in Rust. Both IPC paths capture a monotonic lifecycle ticket before scheduling. The same ticket is rechecked after acquiring Launcher and at final profile, monitor, migration, preference and PowerShell effects; resetting the stopping flag never revives a queued pre-stop request.
 
 | Action | Native state and effect |
 | --- | --- |
@@ -55,7 +55,7 @@ accepted. At most 32 original choice/launch/migration previews are retained in R
 
 Remote profile launch requires the selected host's fresh, authenticated TLS/BAT/
 workspace evidence, the current monitor incarnation and applied selection revision.
-Readiness is rechecked immediately before profile effects. A TCP listener alone,
+The original private selection snapshot (including legacy bytes) is checked before ensuring any monitor or connection. Readiness and selection are checked again immediately before profile effects. A TCP listener alone,
 stale fields, future timestamps or another generation never suffice. Existing BAT
 processes are preserved; Dashboard-only choices do not resolve a BAT executable.
 A `started` receipt proves process creation, not rendered windows or live connection.

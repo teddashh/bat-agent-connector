@@ -1,6 +1,54 @@
 #![cfg_attr(not(any(windows, test)), allow(dead_code))]
 //! Shared Quit/update fence. Effects run only after normal owned shutdown and exclusion.
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+};
 use std::time::Duration;
+#[derive(Default)]
+pub struct Tickets {
+    generation: AtomicU64,
+    stopping: AtomicBool,
+}
+#[derive(Clone)]
+pub struct Ticket {
+    gate: Arc<Tickets>,
+    generation: u64,
+}
+impl Tickets {
+    pub fn capture(self: &Arc<Self>) -> Ticket {
+        Ticket {
+            gate: self.clone(),
+            generation: self.generation.load(Ordering::SeqCst),
+        }
+    }
+    pub fn set_stopping(&self, value: bool) {
+        self.stopping.store(value, Ordering::SeqCst);
+        if value {
+            self.generation.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+impl Ticket {
+    pub fn verify(&self) -> bat_fleet_core::Result<()> {
+        if self.gate.stopping.load(Ordering::SeqCst)
+            || self.generation != self.gate.generation.load(Ordering::SeqCst)
+        {
+            Err("FLEET_STOP_REQUESTED")
+        } else {
+            Ok(())
+        }
+    }
+    /// Acquire first: scheduling and lock waits may have crossed a stop/reset.
+    pub fn acquire<T>(
+        &self,
+        acquire: impl FnOnce() -> bat_fleet_core::Result<T>,
+    ) -> bat_fleet_core::Result<T> {
+        let guard = acquire()?;
+        self.verify()?;
+        Ok(guard)
+    }
+}
 pub trait Platform {
     type Owner: Clone;
     type Launcher;
@@ -169,5 +217,56 @@ mod tests {
             panic!("effect forbidden")
         })
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod ticket_tests {
+    use super::*;
+    #[test]
+    fn queued_before_stop_stays_invalid_after_reset_for_both_dispatch_paths() {
+        let gate = Arc::new(Tickets::default());
+        let launcher = Arc::new(std::sync::Mutex::new(()));
+        let held = launcher.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let effects = Arc::new(AtomicU64::new(0));
+        let mut workers = vec![];
+        for _dispatch in ["fleet_request", "fleet_control"] {
+            let ticket = gate.capture();
+            let launcher = launcher.clone();
+            let tx = tx.clone();
+            let effects = effects.clone();
+            workers.push(std::thread::spawn(move || {
+                ticket.verify().unwrap();
+                tx.send(()).unwrap();
+                let result = ticket.acquire(|| Ok(launcher.lock().unwrap()));
+                if result.is_ok() {
+                    effects.fetch_add(1, Ordering::SeqCst);
+                }
+                result.map(|_| ())
+            }));
+        }
+        rx.recv().unwrap();
+        rx.recv().unwrap();
+        gate.set_stopping(true);
+        gate.set_stopping(false);
+        drop(held);
+        for worker in workers {
+            assert_eq!(worker.join().unwrap(), Err("FLEET_STOP_REQUESTED"));
+        }
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+        let _current = gate
+            .capture()
+            .acquire(|| Ok(launcher.lock().unwrap()))
+            .unwrap();
+    }
+    #[test]
+    fn stop_after_readonly_preflight_is_rechecked_at_effect() {
+        let gate = Arc::new(Tickets::default());
+        let original = gate.capture();
+        original.acquire(|| Ok(())).unwrap();
+        gate.set_stopping(true);
+        gate.set_stopping(false);
+        assert_eq!(original.verify(), Err("FLEET_STOP_REQUESTED"));
     }
 }

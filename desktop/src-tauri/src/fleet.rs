@@ -152,8 +152,13 @@ impl FleetBridge {
                 .map(|code| format!("Fleet configuration unavailable ({code})")),
         }
     }
-    pub async fn request(&self, input: FleetRequest) -> Result<Value, String> {
+    pub async fn request(
+        &self,
+        input: FleetRequest,
+        ticket: crate::fleet_lifecycle::Ticket,
+    ) -> Result<Value, String> {
         // Validate before any local effect; IPC never supplies paths, PID, commands or credentials.
+        let _ = &ticket;
         let id = format!("desktop_{}", REQUEST.fetch_add(1, Ordering::Relaxed));
         let request = input.envelope(&id)?;
         let _guard = self
@@ -166,7 +171,7 @@ impl FleetBridge {
             #[cfg(windows)]
             {
                 return tokio::task::spawn_blocking(move || {
-                    crate::fleet_native::request(installation, input)
+                    crate::fleet_native::request(installation, input, &ticket)
                 })
                 .await
                 .map_err(|_| "Fleet outcome unknown; read status before retrying")?;
@@ -186,9 +191,12 @@ impl FleetBridge {
             return tokio::task::spawn_blocking(move || {
                 // The Kit's desktop facade does not hold its launcher mutex. Keep it on this
                 // blocking thread through validation, subprocess effect and bounded readback.
-                let _launcher = bat_fleet_core::windows_launcher::LauncherMutex::try_acquire()
-                    .map_err(native_error)?
-                    .ok_or_else(|| native_error("LAUNCHER_BUSY"))?;
+                let _launcher = ticket
+                    .acquire(|| {
+                        bat_fleet_core::windows_launcher::LauncherMutex::try_acquire()?
+                            .ok_or("LAUNCHER_BUSY")
+                    })
+                    .map_err(native_error)?;
                 installation.verify_current().map_err(native_error)?;
                 crate::fleet_native::verify_no_migration(&installation).map_err(native_error)?;
                 crate::fleet_native::verify_control_owner(
@@ -200,18 +208,19 @@ impl FleetBridge {
                     .enable_all()
                     .build()
                     .map_err(|_| native_error("SUPERVISOR_UNAVAILABLE"))?;
-                runtime.block_on(powershell_request(installation, request, id))
+                runtime.block_on(powershell_request(installation, request, id, Some(ticket)))
             })
             .await
             .map_err(|_| native_error("OUTCOME_UNKNOWN"))?;
         }
-        powershell_request(installation, request, id).await
+        powershell_request(installation, request, id, None).await
     }
 }
 async fn powershell_request(
     installation: Snapshot,
     request: Value,
     id: String,
+    ticket: Option<crate::fleet_lifecycle::Ticket>,
 ) -> Result<Value, String> {
     let script = powershell_path(installation.script().to_path_buf())?;
     let executable = powershell()?;
@@ -224,12 +233,19 @@ async fn powershell_request(
     if request["action"] == "contract" {
         return Ok(result);
     }
+    if let Some(ticket) = &ticket {
+        ticket.verify().map_err(native_error)?;
+    }
     let result = call(&executable, &script, &request, Duration::from_secs(35)).await?;
     installation.verify_current().map_err(native_error)?;
     Ok(result)
 }
 #[cfg(windows)]
-pub(crate) fn ensure_powershell(installation: Snapshot, binding: &str) -> Result<(), String> {
+pub(crate) fn ensure_powershell(
+    installation: Snapshot,
+    binding: &str,
+    ticket: &crate::fleet_lifecycle::Ticket,
+) -> Result<(), String> {
     let id = uuid::Uuid::new_v4().simple().to_string();
     let request = FleetRequest::EnsureMonitor {
         expected_configuration_binding: binding.into(),
@@ -240,7 +256,12 @@ pub(crate) fn ensure_powershell(installation: Snapshot, binding: &str) -> Result
         .build()
         .map_err(|_| native_error("SUPERVISOR_UNAVAILABLE"))?;
     runtime
-        .block_on(powershell_request(installation, request, id))
+        .block_on(powershell_request(
+            installation,
+            request,
+            id,
+            Some(ticket.clone()),
+        ))
         .map(|_| ())
 }
 fn native_error(code: &str) -> String {
@@ -891,7 +912,12 @@ mod tests {
         .unwrap();
         let bridge = FleetBridge::load(&temp.0);
         // Synthetic process fixture has no inventory, credentials or mutation implementation.
-        let result = bridge.request(FleetRequest::Contract {}).await;
+        let result = bridge
+            .request(
+                FleetRequest::Contract {},
+                std::sync::Arc::new(crate::fleet_lifecycle::Tickets::default()).capture(),
+            )
+            .await;
         if result.is_err() {
             // Synthetic diagnostics only: distinguish pipe, console and environment startup.
             // No inventory, credentials or controls are implemented by this script.

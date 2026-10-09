@@ -1,7 +1,10 @@
 //! Windows-only native facade. WebView fields are logical IDs and observed versions.
 #[path = "fleet_native/controls.rs"]
 mod controls;
+#[path = "fleet_native/guarded.rs"]
+mod guarded;
 use crate::fleet::{sanitize_result, FleetRequest};
+use crate::fleet_lifecycle::Ticket;
 use bat_fleet_core::{
     configuration::{Configuration, Paths},
     discovery::{self, Backend, DiscoveryConfig, NativeIdentity, Ownership},
@@ -16,6 +19,7 @@ use bat_fleet_core::{
     Result,
 };
 pub use controls::Controller;
+use guarded::Guarded;
 use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
@@ -177,20 +181,23 @@ impl Context {
             "readiness":{"state":if fresh{"fresh"}else if snapshot.is_some(){"stale"}else{"unavailable"},
                 "observed_at":snapshot.as_ref().map(|s| &s.observed_at),"hosts":hosts,"connector":connector}}))
     }
-    fn ensure(&self, launcher: &LauncherMutex) -> Result<()> {
+    fn ensure(&self, launcher: &LauncherMutex, ticket: &Ticket) -> Result<()> {
         verify_no_migration(&self.installation)?;
         self.verify(self.configuration.binding())?;
         let outcome = monitor_launch::ensure(
             &self.roaming.join("bat-fleet-monitor-launch.json"),
             &self.native,
             self.configuration.binding(),
-            &mut WindowsLaunch::new(
-                launcher,
-                &self.installation,
-                &self.configuration,
-                &self.discovery,
-                &self.native,
-            ),
+            &mut Guarded {
+                inner: WindowsLaunch::new(
+                    launcher,
+                    &self.installation,
+                    &self.configuration,
+                    &self.discovery,
+                    &self.native,
+                ),
+                ticket,
+            },
         )?;
         if matches!(outcome, monitor_launch::Outcome::Running(_)) {
             return Ok(());
@@ -224,7 +231,11 @@ impl Context {
     }
 }
 
-pub fn request(installation: Snapshot, input: FleetRequest) -> std::result::Result<Value, String> {
+pub fn request(
+    installation: Snapshot,
+    input: FleetRequest,
+    ticket: &Ticket,
+) -> std::result::Result<Value, String> {
     let result = (|| -> Result<(&str, Value)> {
         let context = Context::load(installation)?;
         match input {
@@ -236,26 +247,27 @@ pub fn request(installation: Snapshot, input: FleetRequest) -> std::result::Resu
             FleetRequest::ValidateConfiguration {} => Ok(("validate_configuration", context.configuration())),
             FleetRequest::Status {} => Ok(("status", context.status()?)),
             FleetRequest::SetConnections { connections, expected_configuration_binding, expected_selection_revision, expected_monitor_epoch } => {
-                let _launcher = LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY")?;
+                let _launcher = ticket.acquire(|| LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY"))?;
                 verify_no_migration(&context.installation)?;
                 context.verify(&expected_configuration_binding)?;
                 let store = Store::new(context.roaming.clone());
                 let snapshot = store.read(&context.configuration)?;
                 if snapshot.revision != expected_selection_revision { return Err("SELECTION_CHANGED"); }
                 store.set_connections(&context.configuration, &snapshot, &connections, expected_monitor_epoch.as_deref(),
-                    || context.owner_epoch())?;
+                    || { ticket.verify()?; context.owner_epoch() })?;
                 Ok(("set_connections", context.status()?))
             }
             FleetRequest::EnsureMonitor { expected_configuration_binding } => {
                 context.verify(&expected_configuration_binding)?;
-                let launcher = LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY")?;
-                context.ensure(&launcher)?;
+                let launcher = ticket.acquire(|| LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY"))?;
+                context.ensure(&launcher, ticket)?;
                 Ok(("ensure_monitor", context.status()?))
             }
             FleetRequest::QuitOwned { expected_configuration_binding, expected_monitor_epoch } => {
-                let _launcher = LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY")?;
+                let _launcher = ticket.acquire(|| LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY"))?;
                 verify_no_migration(&context.installation)?;
                 context.verify(&expected_configuration_binding)?;
+                ticket.verify()?;
                 context.quit(&expected_monitor_epoch)?;
                 Ok(("quit_owned", json!({"requested":true,"monitor_epoch":expected_monitor_epoch,"state":"quit_requested"})))
             }

@@ -126,6 +126,7 @@ async fn fleet_request(
     input: fleet::FleetRequest,
 ) -> Result<serde_json::Value, String> {
     local_main(&window)?;
+    let ticket = control.ticket();
     control.observe_configuration();
     if control.is_stopping()
         && !matches!(
@@ -140,7 +141,7 @@ async fn fleet_request(
     if matches!(input, fleet::FleetRequest::QuitOwned { .. }) {
         control.cancel_login();
     }
-    state.request(input).await
+    state.request(input, ticket).await
 }
 
 #[tauri::command]

@@ -111,6 +111,7 @@ impl Request {
 #[cfg_attr(not(windows), allow(dead_code))]
 pub struct Control {
     login: std::sync::Mutex<Value>,
+    tickets: Arc<crate::fleet_lifecycle::Tickets>,
     configured_seen: std::sync::atomic::AtomicBool,
     stopping: std::sync::atomic::AtomicBool,
     generation: std::sync::atomic::AtomicU64,
@@ -126,6 +127,7 @@ impl Control {
             config,
             configured_seen: std::sync::atomic::AtomicBool::new(seen),
             login: std::sync::Mutex::new(Value::Null),
+            tickets: Arc::new(crate::fleet_lifecycle::Tickets::default()),
             stopping: std::sync::atomic::AtomicBool::new(false),
             generation: std::sync::atomic::AtomicU64::new(0),
             login_running: std::sync::atomic::AtomicBool::new(false),
@@ -145,7 +147,11 @@ impl Control {
             .configured_seen
             .load(std::sync::atomic::Ordering::SeqCst)
     }
+    pub fn ticket(&self) -> crate::fleet_lifecycle::Ticket {
+        self.tickets.capture()
+    }
     pub fn set_stopping(&self, value: bool) {
+        self.tickets.set_stopping(value);
         self.stopping
             .store(value, std::sync::atomic::Ordering::SeqCst);
         if value {
@@ -172,10 +178,11 @@ impl Control {
             return;
         }
         let generation = self.generation.load(Ordering::SeqCst);
+        let ticket = self.ticket();
         std::thread::spawn(move || {
             let result = (|| -> Result<Value, &'static str> {
                 let preview = self.state.lock().map_err(|_| "FLEET_CONTROL_BUSY")?
-                    .request(&self.config, Request::PreviewLaunch {})?;
+                    .request(&self.config, Request::PreviewLaunch {}, &ticket)?;
                 let id = preview["preview_id"].as_str().ok_or("FLEET_RESPONSE_INVALID")?.to_owned();
                 *self.login.lock().map_err(|_| "FLEET_CONTROL_BUSY")? = serde_json::json!({"preview_id":id,"summary":preview["summary"],"configuration_binding":preview["configuration_binding"],"state":"waiting"});
                 let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -184,7 +191,7 @@ impl Control {
                     let result = {
                         let mut state = self.state.lock().map_err(|_| "FLEET_CONTROL_BUSY")?;
                         if self.stopping.load(Ordering::SeqCst) || generation != self.generation.load(Ordering::SeqCst) { return Ok(serde_json::json!({"preview_id":id,"summary":preview["summary"],"configuration_binding":preview["configuration_binding"],"state":"attention","code":"FLEET_STOP_REQUESTED"})); }
-                        state.request(&self.config, Request::Launch {preview_id:id.clone()})
+                        state.request(&self.config, Request::Launch {preview_id:id.clone()}, &ticket)
                     };
                     match result {
                         Err("BAT_READINESS_PENDING" | "MONITOR_STARTING") if std::time::Instant::now() < until =>
@@ -201,6 +208,7 @@ impl Control {
         });
     }
     pub async fn request(self: Arc<Self>, input: Request) -> Result<Value, String> {
+        let ticket = self.ticket();
         input.validate()?;
         self.observe_configuration();
         if self.stopping.load(std::sync::atomic::Ordering::SeqCst)
@@ -228,9 +236,11 @@ impl Control {
                 }
                 let mut state = self.state.try_lock().map_err(|_| "FLEET_CONTROL_BUSY")?;
                 let overview = matches!(input, Request::Overview {});
-                let mut value = state.request(&self.config, input).map_err(|code| {
-                    format!("Fleet refused ({code}); read the original receipt before retrying")
-                })?;
+                let mut value = state
+                    .request(&self.config, input, &ticket)
+                    .map_err(|code| {
+                        format!("Fleet refused ({code}); read the original receipt before retrying")
+                    })?;
                 if overview {
                     value["login_launch"] =
                         self.login.lock().map_err(|_| "FLEET_CONTROL_BUSY")?.clone();
@@ -242,7 +252,7 @@ impl Control {
         }
         #[cfg(not(windows))]
         {
-            let _ = &self.config;
+            let _ = (&self.config, ticket);
             Err("Fleet desktop control requires Windows".into())
         }
     }
