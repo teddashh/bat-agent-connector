@@ -124,3 +124,17 @@ Session card 依 creation snapshot 顯示 level；OS sandbox 最多 options_conf
 temporary MockBat，檢查 lost reply 的原 key/version replay、暫停／恢復、明確 interrupt 的單一 BAT frame、
 受理前版本 race、逐步收據及超過 100 筆操作的分頁。Browser/native IPC mock tests 另涵蓋權限、identity、
 事件／分頁競爭、讀取失敗及雙語 390/768/1440。沒有 live host、真實 native 安裝或全產品驗收的宣稱。
+
+## Connector 工作階段標籤（A03）
+
+沿用現有 panel、chip、actions 和 details，不改工作區導覽或 BAT 標題。詳情提供標籤摘要與
+預設收起的「編輯標籤」；每行一個，最多 8 個、每個 40 個字。列表最多顯示兩個，其餘用
+數量提示；既有「已載入」搜尋也比對標籤，不宣稱搜尋所有主機或未載入頁面。
+
+標籤是中央自己的 metadata。具正向 `session.labels.set` capability 與 `manage` scope 才能
+儲存；人工、unknown、已不在主機上的已知 session 也可以整理，無須 host writes。
+讀取不到 metadata 不視為空清單，停用儲存並保留草稿。完整 session ID、Connector
+metadata 版本、原操作 key 與回執固定；版本衝突須明確檢視目前標籤後再準備變更，不能
+自動換 key 或覆寫草稿。回覆遺失重送原 envelope，accepted 後只查原 operation。
+事件等待原送出完成與最新 metadata／回執讀取，失敗不確認 cursor。身份隔離沿用
+backend／principal namespace。中央資料與 atomic receipt 合約見 [session-labels.md](session-labels.md)。

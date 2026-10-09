@@ -32,6 +32,7 @@ from . import (
     pr_delivery,
     registry,
     service,
+    session_metadata,
     task_actions,
     task_control,
     work_items,
@@ -182,7 +183,8 @@ class TaskDaemon:
         # the inventory observes through its own read-only fleet.
         self.ops = OperationService(self.journal,
                                     actions=api_actions.ACTIONS + delivery.ACTIONS + checkpoints.ACTIONS
-                                    + integration.ACTIONS + work_items.ACTIONS + task_actions.ACTIONS + artifacts.ACTIONS)
+                                    + integration.ACTIONS + work_items.ACTIONS + task_actions.ACTIONS + artifacts.ACTIONS
+                                    + session_metadata.ACTIONS)
         self.coordinator.operations = self.ops
         github = None
         if config.github.token_ref:

@@ -451,8 +451,11 @@ class OperationService:
         missing = [k for k in adef.target_keys if not isinstance(target.get(k), str) or not target[k]]
         if missing:
             raise OperationError("INVALID_TARGET", f"target needs {', '.join(missing)}", 422)
-        request_hash = hashlib.sha256(_canonical({"action": action, "target": target, "params": params,
-                                                  "preconditions": preconditions}).encode()).hexdigest()
+        try:
+            request_hash = hashlib.sha256(_canonical({"action": action, "target": target, "params": params,
+                                                      "preconditions": preconditions}).encode()).hexdigest()
+        except UnicodeEncodeError:
+            raise OperationError("INVALID_REQUEST", "request text must contain valid Unicode characters", 422) from None
         key = None if no_key else idempotency_key.strip()
         existing = self.db.execute("SELECT * FROM operations WHERE actor=? AND idem_key=?",
                                    (principal.actor, key)).fetchone()

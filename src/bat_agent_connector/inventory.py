@@ -385,6 +385,7 @@ class Inventory:
         return False, None
 
     def _session_out(self, r, hosts: dict, now: float) -> dict:
+        from .session_metadata import read as metadata
         body = json.loads(r["body"])
         if "confinement" not in body:
             body.update(confinement.session_fields(r["host"], r["session_id"],
@@ -410,6 +411,7 @@ class Inventory:
             current.update(status="unknown", reason="inventory_stale")
         body["current_verification"] = current
         return {**body, "host": r["host"], "session_id": r["session_id"], "last_activity_ms": activity,
+                "connector_metadata": metadata(self.db, r["host"], r["session_id"]),
                 "last_activity_at": _iso(activity / 1000) if activity else None,
                 "first_seen_at": _iso(r["first_seen_at"]), "observed_at": _iso(r["last_seen_at"]),
                 "gone_at": _iso(r["gone_at"]), "stale": stale, "stale_reason": reason, "resource_id": f"{r['host']}/{r['session_id']}",
@@ -445,6 +447,7 @@ class Inventory:
         return [body(r[0]) for r in self.db.execute("SELECT body FROM observation_relations WHERE session_resource_id=? ORDER BY rowid", (rid,))]
 
     def get_session(self, host: str, session_id: str, now: float | None = None) -> dict | None:
+        from .session_metadata import read as metadata
         r = self.db.execute("SELECT * FROM sessions_observed WHERE host=? AND session_id=?",
                             (host, session_id)).fetchone()
         if r is None:
@@ -454,6 +457,7 @@ class Inventory:
             data = {**body(identity[0]), "host": host, "session_id": session_id, "resource_id": f"{host}/{session_id}", "observation": "unknown", "has_tab": None,
                     "loaded": None, "streaming": None, "provenance": "unknown", "api_access": "read_only", "read_only_code": "UNKNOWN_READ_ONLY"}
             data["state"] = self._state(data, host, {}, None, True, "never_observed")
+            data["connector_metadata"] = metadata(self.db, host, session_id)
             data["relations"] = self._relation_summary(data["resource_id"])
             data["scope_status"] = "current" if host in self.config.hosts else "outside_current_config"
             data.update(confinement.session_fields(host, session_id,
@@ -463,14 +467,14 @@ class Inventory:
         return self._session_out(r, hosts, now or time.time())
 
     def session_document(self, host, session_id):
-        from . import checkpoints, cleanup, work_items
+        from . import checkpoints, cleanup, session_metadata, work_items
         from .operations import OperationError
         row = self.get_session(host, session_id)
         cleaned = cleanup.lookup(self.db, f"{host}/{session_id}", host)
         if row is None and not cleaned:
             raise OperationError("NOT_FOUND", "session has no journal evidence", 404)
         discovery = [body(r[0]) for r in self.db.execute("SELECT body FROM discovery_latest WHERE host=?", (host,))]
-        return {"session": row, "started_from": checkpoints.started_from(self.db, host, session_id),
+        return {"session": row, "connector_metadata": session_metadata.read(self.db, host, session_id), "started_from": checkpoints.started_from(self.db, host, session_id),
                 "work_items": work_items.work_items_for(self.db, "session", f"{host}/{session_id}"),
                 "discovery": discovery, "relations_summary": row["relations"] if row else [],
                 "history_available": True, "cleanup": cleaned}

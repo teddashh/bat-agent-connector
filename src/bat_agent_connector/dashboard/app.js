@@ -18,6 +18,285 @@ var __exportAll = (all, no_symbols) => {
 	if (!no_symbols) __defProp(target, Symbol.toStringTag, { value: "Module" });
 	return target;
 };
+//#endregion
+//#region src/session-labels.js
+var object$5 = (v) => v && typeof v === "object" && !Array.isArray(v);
+var version$1 = (v) => Number.isSafeInteger(v) && v >= 0;
+var opId$3 = (v) => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
+var equal$6 = (a, b) => a === b || Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => equal$6(v, b[i])) || object$5(a) && object$5(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$6(a[k], b[k]));
+function validLabels(v) {
+	return Array.isArray(v) && v.length <= 8 && new Set(v).size === v.length && v.every((x) => typeof x === "string" && x === x.trim() && [...x].length >= 1 && [...x].length <= 40 && !/[\p{C}\u2028\u2029]/u.test(x));
+}
+var metadata = (v) => object$5(v) && version$1(v.version) && validLabels(v.labels);
+function sessionLabelsPanel({ h, t, api, caps, guard, target, storageKey, errorBox, opStatus }) {
+	const path = `/sessions/${encodeURIComponent(target.host)}/${encodeURIComponent(target.session_id)}`;
+	const valid = (request) => request?.action === "session.labels.set" && equal$6(request.target, target) && object$5(request.params) && Object.keys(request.params).length === 1 && validLabels(request.params.labels) && object$5(request.preconditions) && Object.keys(request.preconditions).length === 1 && version$1(request.preconditions.expected_version);
+	let saved = {}, current = null, operation = null, busy = false, submission = null, refreshing = null, readable = false, damaged = false;
+	try {
+		const raw = JSON.parse(localStorage.getItem(storageKey));
+		if (raw && typeof raw.text === "string" && raw.text.length <= 1e3 && version$1(raw.base_version)) saved = {
+			text: raw.text,
+			base_version: raw.base_version
+		};
+		if (raw?.intent) {
+			const proven = valid(raw.intent.request) && typeof raw.intent.key === "string" && raw.intent.key.length > 0 && raw.intent.key.length <= 200;
+			saved.intent = {
+				request: proven ? raw.intent.request : null,
+				key: proven ? raw.intent.key : null,
+				operation_id: opId$3(raw.intent.operation_id) ? raw.intent.operation_id : null
+			};
+			if (proven) {
+				saved.text = raw.intent.request.params.labels.join("\n");
+				saved.base_version = raw.intent.request.preconditions.expected_version;
+			}
+			if (proven && !saved.intent.operation_id && raw.intent.refused === "METADATA_VERSION_CONFLICT") saved.intent.refused = raw.intent.refused;
+		} else if (raw && !Object.hasOwn(saved, "text")) damaged = true;
+	} catch {
+		damaged = true;
+	}
+	const live = () => {
+		try {
+			guard();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const persist = () => {
+		guard();
+		localStorage.setItem(storageKey, JSON.stringify(saved));
+	};
+	const permitted = () => caps()?.scopes?.includes("manage") && caps()?.actions?.some((a) => a.action === "session.labels.set" && a.allowed === true);
+	const terminal = () => [
+		"succeeded",
+		"failed",
+		"cancelled"
+	].includes(operation?.status);
+	const input = h("textarea", {
+		"aria-label": t("labels_input"),
+		rows: 3,
+		maxlength: 1e3
+	});
+	input.value = saved.text || "";
+	const tags = h("div", { class: "actions" }), message = h("div", { role: "status" }), result = h("div"), restriction = h("p", { class: "muted" });
+	const error = (e) => {
+		if (live()) {
+			message.replaceChildren(errorBox(e));
+			update();
+		}
+	};
+	const parsed = () => input.value.trim() === "" ? [] : input.value.split("\n").map((v) => v.trim());
+	const accept = (candidate) => {
+		guard();
+		const intent = saved.intent;
+		if (!intent || !opId$3(candidate?.operation_id) || candidate.action !== "session.labels.set" || !equal$6(candidate.target, target) || candidate.actor !== caps()?.actor || intent.operation_id && candidate.operation_id !== intent.operation_id || intent.key && candidate.idempotency_key !== intent.key || intent.request && !equal$6({
+			action: candidate.action,
+			target: candidate.target,
+			params: candidate.params,
+			preconditions: candidate.preconditions
+		}, intent.request)) throw Error(t("labels_wrong_receipt"));
+		if (candidate.status === "succeeded" && (!equal$6({
+			host: candidate.result?.host,
+			session_id: candidate.result?.session_id
+		}, target) || !metadata(candidate.result?.connector_metadata) || intent.request && (!equal$6(candidate.result.connector_metadata.labels, intent.request.params.labels) || candidate.result.connector_metadata.version !== intent.request.preconditions.expected_version + 1))) throw Error(t("labels_wrong_receipt"));
+		operation = candidate;
+		intent.operation_id = candidate.operation_id;
+		persist();
+		update();
+	};
+	const apply = h("button", {
+		class: "secondary",
+		onclick: async () => {
+			if (!live() || busy || refreshing || !readable || !permitted() || damaged || saved.intent?.operation_id || saved.intent && (!saved.intent.request || saved.intent.refused)) return;
+			const values = parsed();
+			if (!validLabels(values)) {
+				error(Error(t("labels_limits")));
+				return;
+			}
+			const previous = saved;
+			if (!saved.intent) saved = {
+				text: input.value,
+				base_version: saved.base_version ?? current.version,
+				intent: {
+					key: crypto.randomUUID(),
+					operation_id: null,
+					request: {
+						action: "session.labels.set",
+						target: { ...target },
+						params: { labels: values },
+						preconditions: { expected_version: saved.base_version ?? current.version }
+					}
+				}
+			};
+			try {
+				persist();
+			} catch (e) {
+				saved = previous;
+				error(e);
+				return;
+			}
+			busy = true;
+			update();
+			const intent = saved.intent;
+			submission = (async () => {
+				try {
+					const data = await api("POST", "/operations?wait=3", intent.request, intent.key);
+					guard();
+					accept(data.operation);
+					message.replaceChildren();
+				} catch (e) {
+					if (live()) {
+						if (e.code === "METADATA_VERSION_CONFLICT" && e.status === 409) {
+							intent.refused = e.code;
+							try {
+								persist();
+							} catch {}
+						}
+						error(e);
+					}
+				} finally {
+					busy = false;
+					if (live()) update();
+				}
+			})();
+			try {
+				await submission;
+			} finally {
+				submission = null;
+			}
+			if (live()) try {
+				await refresh(true);
+			} catch (e) {
+				error(e);
+			}
+		}
+	}, t("labels_save"));
+	const check = h("button", {
+		class: "secondary",
+		onclick: () => refresh(true).catch(error)
+	}, t("permissions_check"));
+	const renew = h("button", {
+		class: "secondary",
+		onclick: () => {
+			if (!live() || busy || refreshing || !readable || !permitted() || saved.intent && !terminal() && !saved.intent.refused) return;
+			const previous = saved;
+			const text = operation?.status === "succeeded" ? current.labels.join("\n") : saved.text ?? current.labels.join("\n");
+			saved = {
+				text,
+				base_version: current.version
+			};
+			try {
+				persist();
+			} catch (e) {
+				saved = previous;
+				error(e);
+				return;
+			}
+			damaged = false;
+			operation = null;
+			input.value = text;
+			message.replaceChildren();
+			update();
+		}
+	}, t("labels_review_current"));
+	input.oninput = () => {
+		if (!live() || saved.intent || !readable) {
+			input.value = saved.text || "";
+			return;
+		}
+		saved = {
+			text: input.value,
+			base_version: saved.base_version ?? current.version
+		};
+		try {
+			persist();
+		} catch (e) {
+			error(e);
+		}
+		update();
+	};
+	const editor = h("details", {}, h("summary", {}, t("labels_edit")));
+	let mounted = false;
+	editor.addEventListener("toggle", () => {
+		if (editor.open && !mounted) {
+			editor.append(h("p", { class: "muted" }, t("labels_help")), h("label", {}, t("labels_input"), input), h("p", { class: "muted" }, t("labels_limits")), h("div", { class: "actions" }, apply, check, renew), restriction, result, message);
+			mounted = true;
+			update();
+		}
+	});
+	const box = h("section", {
+		class: "panel",
+		"data-session-labels": ""
+	}, h("h2", {}, t("labels_title")), tags, editor);
+	function update() {
+		if (!live()) return;
+		const fixed = Boolean(saved.intent);
+		tags.replaceChildren(...current?.labels.length ? current.labels.map((v) => h("span", { class: "chip" }, v)) : [h("span", { class: "muted" }, t(current ? "labels_empty" : "labels_unreadable"))]);
+		input.disabled = fixed || busy || Boolean(refreshing) || !readable || !permitted() || damaged;
+		apply.hidden = Boolean(saved.intent?.operation_id || saved.intent?.refused);
+		apply.disabled = busy || Boolean(refreshing) || !readable || !permitted() || damaged || Boolean(fixed && !saved.intent.request) || !validLabels(parsed());
+		apply.textContent = t(fixed ? "permissions_retry" : "labels_save");
+		check.textContent = t(fixed ? "permissions_check" : "labels_refresh");
+		check.disabled = busy || Boolean(refreshing);
+		renew.hidden = fixed ? !terminal() && !saved.intent.refused : !damaged && !(current && saved.base_version !== void 0 && saved.base_version !== current.version);
+		renew.disabled = busy || Boolean(refreshing) || !readable || !permitted();
+		restriction.textContent = !permitted() ? t("labels_scope") : !readable ? t("labels_unreadable") : saved.base_version !== void 0 && saved.base_version !== current.version ? t("labels_changed") : "";
+		result.replaceChildren();
+		if (fixed) {
+			result.append(h("p", {}, operation ? opStatus(operation) : t(saved.intent.refused ? "labels_refused" : "permissions_unknown"), " ", saved.intent.operation_id ? h("a", { href: `#/op/${saved.intent.operation_id}` }, t("permissions_details")) : null), h("p", { class: "muted" }, t("labels_fixed", { version: saved.intent.request?.preconditions.expected_version ?? "?" })));
+			if (operation?.status === "succeeded") result.append(h("p", {}, t("labels_saved")));
+			if (!saved.intent.request && !saved.intent.operation_id) result.append(h("p", { class: "error" }, t("permissions_damaged")));
+		}
+		if (damaged) result.append(h("p", { class: "error" }, t("labels_damaged")));
+	}
+	async function refresh(fresh = false) {
+		guard();
+		if (!caps()?.actions?.some((a) => a.action === "session.labels.set")) {
+			readable = false;
+			update();
+			return;
+		}
+		if (submission) {
+			await submission;
+			guard();
+		}
+		if (refreshing) {
+			await refreshing;
+			if (fresh) return refresh(true);
+			return;
+		}
+		refreshing = (async () => {
+			if (saved.intent?.operation_id) {
+				const data = await api("GET", `/operations/${saved.intent.operation_id}`);
+				guard();
+				accept(data.operation);
+			}
+			const data = await api("GET", path);
+			guard();
+			if (!(data.session?.host === target.host && data.session?.session_id === target.session_id || !data.session && data.cleanup?.some((item) => item.kind === "session" && item.host === target.host && item.session_id === target.session_id)) || !metadata(data.connector_metadata)) throw Error(t("labels_unreadable"));
+			current = data.connector_metadata;
+			readable = true;
+			if (!Object.hasOwn(saved, "text") && !saved.intent && !damaged) input.value = current.labels.join("\n");
+		})();
+		update();
+		try {
+			await refreshing;
+		} catch (e) {
+			readable = false;
+			error(e);
+			throw e;
+		} finally {
+			refreshing = null;
+			if (live()) update();
+		}
+	}
+	update();
+	return {
+		box,
+		refresh,
+		update
+	};
+}
 var init_tslib_es6 = __esmMin((() => {}));
 async function invoke(cmd, args = {}, options) {
 	return window.__TAURI_INTERNALS__.invoke(cmd, args, options);
@@ -175,6 +454,23 @@ var STRINGS = {
 		bat_unknown: "結果尚未確認。查回原請求，不會自動再開啟 BAT。",
 		bat_no_receipt: "尚未找到原開啟回執。保留原請求；重新啟動程式不會自動重送。",
 		bat_saved_invalid: "已儲存的開啟請求不完整，無法安全建立另一筆。請先查明原啟動狀態。",
+		labels_refresh: "重新讀取標籤",
+		labels_title: "標籤",
+		labels_edit: "編輯標籤",
+		labels_input: "標籤（每行一個）",
+		labels_help: "標籤只用於 Dashboard 整理，不會修改 BAT 標題或工作階段。",
+		labels_limits: "最多 8 個標籤，每個最多 40 個字；空白清單可清除標籤。",
+		labels_empty: "尚無標籤",
+		labels_save: "儲存標籤",
+		labels_saved: "已儲存這次標籤變更。",
+		labels_scope: "需要 manage 權限才能編輯標籤。",
+		labels_unreadable: "尚未讀到可確認的標籤資料，暫時無法儲存。",
+		labels_changed: "標籤已有新版本，原草稿保留。請檢視目前標籤後再準備變更。",
+		labels_review_current: "檢視目前版本並準備變更",
+		labels_refused: "原請求因版本變更被拒絕，尚未套用。",
+		labels_fixed: "原請求固定使用標籤版本 {version}。",
+		labels_wrong_receipt: "回執與原標籤請求不符。",
+		labels_damaged: "儲存的草稿無法讀取。請檢視目前版本後明確重新準備變更。",
 		update_title: "桌面更新",
 		update_current: "目前版本：{version}",
 		update_candidate: "可用版本",
@@ -1244,6 +1540,23 @@ var STRINGS = {
 		bat_unknown: "The outcome is unconfirmed. Read the original request; BAT will not reopen automatically.",
 		bat_no_receipt: "No original launch receipt was found. The request is retained; restarting the app will not resend it automatically.",
 		bat_saved_invalid: "The saved launch request is incomplete. Establish the original launch outcome before creating another.",
+		labels_refresh: "Refresh labels",
+		labels_title: "Labels",
+		labels_edit: "Edit labels",
+		labels_input: "Labels (one per line)",
+		labels_help: "Labels organize the Dashboard. They do not change the BAT title or session.",
+		labels_limits: "Up to 8 labels, 40 characters each. An empty list clears labels.",
+		labels_empty: "No labels yet",
+		labels_save: "Save labels",
+		labels_saved: "This label change was saved.",
+		labels_scope: "Editing labels requires manage permission.",
+		labels_unreadable: "Confirmed label data is unavailable. Saving is disabled.",
+		labels_changed: "Labels have a newer version. Your draft is preserved; review the current labels before preparing a change.",
+		labels_review_current: "Review current version and prepare change",
+		labels_refused: "The original request was refused because labels changed. It was not applied.",
+		labels_fixed: "The original request uses label version {version}.",
+		labels_wrong_receipt: "The receipt does not match the original label request.",
+		labels_damaged: "The saved draft could not be read. Review the current version before explicitly preparing a change.",
 		update_title: "Desktop updates",
 		update_current: "Current version: {version}",
 		update_candidate: "Available version",
@@ -3552,7 +3865,8 @@ function matchesSession(session, query) {
 		session.workspace_id,
 		session.agent_kind,
 		session.model,
-		session.worktree_branch
+		session.worktree_branch,
+		...Array.isArray(session.connector_metadata?.labels) ? session.connector_metadata.labels : []
 	].map(text$3).join("\n").toLocaleLowerCase();
 	return query.trim().toLocaleLowerCase().split(/\s+/).every((word) => haystack.includes(word));
 }
@@ -8380,7 +8694,13 @@ async function viewSessions(main) {
 			class: "title",
 			title: session.title || session.session_id,
 			href: `#/session/${encodeURIComponent(session.host)}/${encodeURIComponent(session.session_id)}`
-		}, session.title || session.session_id), chip(t(activity.key), activity.tone)), h("div", { class: "session-entry-meta" }, h("span", { class: session.api_access === "managed" ? "" : "session-readonly" }, session.provenance === "connector_managed" && session.api_access === "managed" ? t(access) : `${t(origin)} · ${t(access)}`), h("span", {}, [session.agent_kind, session.worktree_branch].filter(Boolean).join(" · "))), runtimeStale(session) ? h("p", { class: "session-stale muted" }, t("sessions_stale"), " · ", session.stale_reason === "gone" ? t("sessions_not_seen") : session.stale_reason ? t("stale_reason_" + session.stale_reason) : t("sessions_runtime_stale")) : null, details);
+		}, session.title || session.session_id), chip(t(activity.key), activity.tone)), h("div", { class: "session-entry-meta" }, h("span", { class: session.api_access === "managed" ? "" : "session-readonly" }, session.provenance === "connector_managed" && session.api_access === "managed" ? t(access) : `${t(origin)} · ${t(access)}`), h("span", {}, [session.agent_kind, session.worktree_branch].filter(Boolean).join(" · "))), runtimeStale(session) ? h("p", { class: "session-stale muted" }, t("sessions_stale"), " · ", session.stale_reason === "gone" ? t("sessions_not_seen") : session.stale_reason ? t("stale_reason_" + session.stale_reason) : t("sessions_runtime_stale")) : null, validLabels(session.connector_metadata?.labels) && session.connector_metadata.labels.length ? h("div", {
+			class: "actions session-entry-meta",
+			"aria-label": t("labels_title")
+		}, ...session.connector_metadata.labels.slice(0, 2).map((v) => chip(v)), session.connector_metadata.labels.length > 2 ? h("span", {
+			class: "muted",
+			title: session.connector_metadata.labels.join(" · ")
+		}, `+${session.connector_metadata.labels.length - 2}`) : null) : null, details);
 	};
 	const render = () => {
 		assertView(connection);
@@ -8936,9 +9256,23 @@ async function viewSession(main, host, sid) {
 	let capture, permissions, batHandoff;
 	const captureSlot = h("div"), permissionsSlot = h("div");
 	const controls = h("div", { class: "panel" }, pending, readonly, composer, permissionsSlot, captureSlot, status);
+	const labels = sessionLabelsPanel({
+		h,
+		t,
+		api,
+		caps: () => state.caps,
+		guard: () => assertView(connection),
+		target: {
+			host,
+			session_id: sid
+		},
+		storageKey: `batc.labels.${connection.namespace}.${JSON.stringify([host, sid])}`,
+		errorBox,
+		opStatus
+	});
 	const cps = checkpointPanel(host, sid);
 	const observations = observationPanels("session", `${host}/${sid}`, path);
-	main.append(head, controls, cps.box, h("h2", {}, t("messages")), msgs, observations.box);
+	main.append(head, labels.box, controls, cps.box, h("h2", {}, t("messages")), msgs, observations.box);
 	const renderPending = () => {
 		const pend = row.api_access === "managed" ? row.pending : null;
 		const current = identity(pend);
@@ -9029,7 +9363,13 @@ async function viewSession(main, host, sid) {
 	};
 	const applyObservation = (data) => {
 		const first = !row;
-		row = data.session;
+		row = data.session || (data.cleanup?.length ? {
+			host,
+			session_id: sid,
+			provenance: "unknown",
+			api_access: "read_only"
+		} : null);
+		if (!row) throw new Error(t("obs_unknown"));
 		rememberObservation("session", `${host}/${sid}`, data, [
 			`host:${host}`,
 			...(data.work_items || []).map((item) => `work_item:${item.work_item_id}`),
@@ -9134,7 +9474,11 @@ async function viewSession(main, host, sid) {
 		}
 	};
 	try {
-		await settleRefreshes([refresh(), cps.load()]);
+		await settleRefreshes([
+			refresh(),
+			cps.load(),
+			labels.refresh()
+		]);
 	} catch {}
 	const retry = setInterval(() => {
 		if (!readReady && !refreshInFlight) refresh().catch(() => {});
@@ -9145,7 +9489,8 @@ async function viewSession(main, host, sid) {
 		return settleRefreshes([
 			observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "work_item" ? reload() : Promise.resolve(),
 			ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve(),
-			ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve()
+			ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve(),
+			observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation" ? labels.refresh(true) : Promise.resolve()
 		]);
 	});
 	return () => {

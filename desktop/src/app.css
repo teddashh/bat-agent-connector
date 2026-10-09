@@ -299,3 +299,5 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
   .orchestration .orch-check { min-height:44px; }
   .orchestration input, .orchestration select, .orchestration textarea { font-size:16px; }
 }
+/* Local labels can contain long Unicode text without widening session rows. */
+[data-session-labels] .chip, .session-entry-meta .chip { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
