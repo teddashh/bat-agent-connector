@@ -1,5 +1,6 @@
 //! Fleet local contracts. This crate contains no central task authority and no IPC.
 //! Configuration is native-only; callers project an explicitly safe status model.
+pub mod bootstrap;
 pub mod configuration;
 pub mod credential;
 pub mod discovery;
@@ -28,6 +29,8 @@ pub mod tunnel;
 pub mod unconfigured;
 #[cfg(windows)]
 pub mod windows;
+#[cfg(windows)]
+pub mod windows_bootstrap;
 #[cfg(windows)]
 pub mod windows_launcher;
 #[cfg(any(windows, test))]

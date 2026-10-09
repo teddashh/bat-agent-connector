@@ -1,0 +1,5 @@
+#!/usr/bin/python3 -I
+"""Fixed bootstrap helper entry; installing/configuring it is a separate action."""
+from bat_agent_connector.fleet_bootstrap import main
+
+raise SystemExit(main())

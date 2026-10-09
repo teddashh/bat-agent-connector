@@ -69,3 +69,9 @@ normal-owner exit proof; it never retries an uncertain launch. The fixed Windows
 codec reads/writes only the reviewed Open BAT shortcut via the caller's local journal
 flow. These modules require the native facade's guarded hooks and are not wired into
 automatic startup by this library. See [migration contract](../../docs/design/fleet-migration.md).
+
+The opt-in `bootstrap` module records a local request before a fixed SSH query/ensure
+exchange. `windows_bootstrap` uses the trusted system SSH executable and shared launcher
+guard; the separately deployed Linux helper proves the existing unit/state/owner before
+a single start request. No recipe/helper is installed or enabled by this source slice.
+See [the bootstrap contract and deployment limits](../../docs/design/fleet-bootstrap.md).
