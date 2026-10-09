@@ -18,11 +18,21 @@ import shlex
 import time
 import urllib.error
 import urllib.request
+from contextlib import nullcontext
 from importlib import resources
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
-from . import checkpoints, integration, lifecycle, registry, resource_policy, service, task_control
+from . import (
+    checkpoints,
+    integration,
+    lifecycle,
+    registry,
+    resource_policy,
+    service,
+    task_cleanup,
+    task_control,
+)
 from .api_auth import SCOPES
 from .cleanup_host import temporary_subset as _temporary_subset
 from .config import state_dir
@@ -65,7 +75,7 @@ REASONS = {
     "COMMAND_UNRESOLVED": "A command or external step has an unresolved outcome.",
     "ACTIVE_EXECUTION": "Another execution still needs this resource.",
     "CONTENT_REQUIRED": "An active integration preview or execution needs the content.",
-    "TASK_OWNED": "The Task Service reclaims this resource; reviewed task cleanup comes later.",
+    "TASK_OWNED": "The TaskCoordinator has not authorized this resource; use a task cleanup preview.",
     "UNCOMMITTED_CHANGES": "Uncommitted tracked, staged, untracked or ignored content exists.",
     "RESULTS_NOT_DELIVERED": "Delivery receipts do not cover all result commits.",
     "DELIVERY_UNCERTAIN": "Delivery has an unresolved outcome.",
@@ -155,7 +165,7 @@ def guard(host=None, *, session_id=None, path=None, branch=None):
             raise ResourceReadOnly("CLEANUP_IN_PROGRESS", "resource is reserved by " + g["operation_id"])
 
 
-def _mark(item, op_id, status):
+def _mark(item, op_id, status, *, ops=None):
     path = registry.registry_path()
     with registry._locked(path):
         d = _registry_document()
@@ -166,6 +176,8 @@ def _mark(item, op_id, status):
         if old and old["operation_id"] != op_id:
             raise ResourceReadOnly("CLEANUP_IN_PROGRESS", "resource has another cleanup owner")
         guard(item["host"], session_id=item.get("session_id"), path=item.get("path"), branch=item.get("branch"))
+        if status == "reserved" and item.get("task_cleanup"):
+            task_cleanup.check(ops, item)
         sessions = {item["session_id"]} if item.get("session_id") else set()
         if item["kind"] != "session" and item.get("path"):
             sessions.update(e["session_id"] for e in d.get("sessions", []) if e.get("host") == item["host"]
@@ -179,6 +191,11 @@ def _mark(item, op_id, status):
         }
         for e in d.get("sessions", []):
             if e.get("host") == item["host"] and e.get("session_id") == item.get("session_id"):
+                if status == "cleaned" and item.get("task_cleanup"):
+                    bound = next((b for b in item["task_cleanup"]["binding"]["sessions"]
+                                  if b["session_id"] == e["session_id"]), None)
+                    if not bound or any(e.get(k) != v for k, v in bound.items()):
+                        continue
                 e["cleanup_reservation"] = op_id if status == "reserved" else None
                 if status == "cleaned":
                     e.update(status="cleaned", tombstone_resource_id=item["resource_id"])
@@ -235,10 +252,12 @@ def _target(ops, value):
     if not isinstance(value, dict):
         raise OperationError("INVALID_TARGET", "target must be an object", 422)
     kind = value.get("kind")
+    if not isinstance(kind, str):
+        raise OperationError("INVALID_TARGET", "target kind must be a string", 422)
     key = {"work_item": "work_item_id", "checkpoint": "checkpoint_id", "integration": "operation_id",
-           "host": "host"}.get(kind)
+           "host": "host", "task": "task_id"}.get(kind)
     if not key or set(value) - {"kind", key, "include_children"} or not isinstance(value.get(key), str):
-        raise OperationError("INVALID_TARGET", "choose work_item, checkpoint, integration or host", 422)
+        raise OperationError("INVALID_TARGET", "choose work_item, checkpoint, integration, host or task", 422)
     if "include_children" in value and (kind != "work_item" or not isinstance(value["include_children"], bool)):
         raise OperationError("INVALID_TARGET", "include_children applies only to work_item", 422)
     if kind == "host":
@@ -252,7 +271,7 @@ def _target(ops, value):
             if not known:
                 raise OperationError("UNKNOWN_HOST", "host has no configuration or resource history", 404)
     else:
-        table = {"work_item": "work_items", "checkpoint": "checkpoints", "integration": "operations"}[kind]
+        table = {"work_item": "work_items", "checkpoint": "checkpoints", "integration": "operations", "task": "tasks"}[kind]
         row = ops.db.execute(f"SELECT * FROM {table} WHERE {key}=?", (value[key],)).fetchone()  # noqa: S608
         if not row or (kind == "integration" and not row["action"].startswith("integration.")):
             raise OperationError("NOT_FOUND", "cleanup target was not found", 404)
@@ -444,6 +463,12 @@ def _all(ops):
                    task["external_branch"], task["task_id"], "task", task["base_commit"], [task["task_id"]])
             if w:
                 w["task_owned"] = True
+    for historical_item, _, _ in task_cleanup.historical(ops):
+        path = historical_item["path"]
+        if (historical_item["host"], path) not in worktrees:
+            w = wt(historical_item["host"], historical_item["repository"], path, historical_item["branch"],
+                   historical_item["creation_evidence"]["intent"], "task", historical_item["base"], historical_item["original_ids"])
+            w.update(task_owned=True, historical_cleanup=True)
     for e in regs:
         host, sid = e.get("host"), e.get("session_id")
         if not host or not sid:
@@ -505,6 +530,12 @@ def _all(ops):
             if path and i["host"] == host and i.get("path") == path:
                 i["task_owned"] = True
                 alias(i, task["task_id"])
+    for item in items.values():
+        if item["kind"] in {"session", "worktree"}:
+            owner_ids, _, _ = task_cleanup.owners(ops, item, regs)
+            if owner_ids:
+                item["task_owned"] = True
+                alias(item, *owner_ids)
     links = [dict(r) for r in db.execute("SELECT * FROM work_item_links")]
     # A recorded branch has an identity even when its host/HEAD cannot be observed.
     for w in worktrees.values():
@@ -522,7 +553,7 @@ def _selection(ops, target, items, pvs, links, op_rows):
     kind = target["kind"]
     if kind == "host":
         return {rid for rid, i in items.items() if i["host"] == target["host"]}, []
-    key = target.get("checkpoint_id") or target.get("operation_id") or target.get("work_item_id")
+    key = target.get("checkpoint_id") or target.get("operation_id") or target.get("work_item_id") or target.get("task_id")
     refs, wi_ids = {key}, []
     if kind == "work_item":
         wi_ids = [key]
@@ -786,7 +817,10 @@ def _consumers(ops, item, op_rows, pvs, own_op=None):
             fact = {"kind": "operation", "id": op["operation_id"], "status": op["status"]}
             item["consumers"].append(fact)
             _reason(item, "ACTIVE_EXECUTION", **fact)
-    for command in ops.db.execute("SELECT * FROM commands WHERE status NOT IN ('succeeded','failed','cancelled')"):
+    for command in ops.db.execute("SELECT * FROM commands"):
+        task = ops.db.execute("SELECT state FROM tasks WHERE task_id=?", (command["task_id"],)).fetchone()
+        if not task_cleanup.command_unresolved(dict(command), dict(task) if task else None):
+            continue
         if (command["session_id"] and item["host"] + "/" + command["session_id"] in ids or
                 command["task_id"] in ids):
             _reason(item, "COMMAND_UNRESOLVED", command_id=command["command_id"], status=command["status"])
@@ -814,10 +848,18 @@ def _plan(ops, item, choices, op_rows, pvs, own_op=None):
     item["steps"] = []
     item["overridden_reasons"] = []
     kind, obs = item["kind"], item.get("observation") or {}
+    if item.get("historical_cleanup"):
+        _reason(item, "RESOURCE_CLEANED")
     if not item.get("proven"):
         _reason(item, "MANUAL_READ_ONLY" if item.get("provenance") == "manual" else "UNKNOWN_READ_ONLY")
     if item.get("task_owned"):
-        _reason(item, "TASK_OWNED")
+        verdict = item.get("task_cleanup")
+        if not verdict or not verdict["eligible"]:
+            _reason(item, "TASK_OWNED")
+            for reason in (verdict or {}).get("reasons", []):
+                _reason(item, **reason)
+        if item["kind"] == "local_branch":
+            _reason(item, "RETAINED_CONTENT_STORE")
     if kind in {"clone", "integration_area", "git_pin", "retained_ref"}:
         _reason(item, "RETAINED_CONTENT_STORE")
     if kind == "remote":
@@ -852,6 +894,8 @@ def _plan(ops, item, choices, op_rows, pvs, own_op=None):
             _reason(item, "SESSION_WAITING")
         if obs.get("loaded") and obs.get("cwd") != item.get("path"):
             _reason(item, "BINDING_MISMATCH")
+        if item.get("automatic_no_stop") and obs.get("loaded"):
+            _reason(item, "ACTIVE_EXECUTION", detail="automatic cleanup does not stop a runtime")
         if obs.get("loaded") and not item["reasons"]:
             item["steps"] = ["stop", "finalize"]
     if kind in {"worktree", "local_branch"}:
@@ -871,7 +915,8 @@ def _plan(ops, item, choices, op_rows, pvs, own_op=None):
         for code, choice in (("UNCOMMITTED_CHANGES", "discard_uncommitted"),
                              ("RESULTS_NOT_DELIVERED", "release_undelivered")):
             if (item["resource_id"] in choices[choice] and kind == "worktree" and
-                    item.get("proven") and not item.get("task_owned")):
+                    item.get("proven") and (not item.get("task_owned") or
+                        choice == "release_undelivered" and item.get("task_cleanup", {}).get("eligible"))):
                 matched = [r for r in item["reasons"] if r["code"] == code]
                 item["overridden_reasons"].extend(matched)
                 item["reasons"] = [r for r in item["reasons"] if r["code"] != code]
@@ -906,7 +951,7 @@ def _replica_evidence(ops, item):
     return replica_evidence(ops, item)
 
 
-async def snapshot(ops, target, choices, *, only=None, own_op=None):
+async def snapshot(ops, target, choices, *, only=None, own_op=None, automatic=False):
     items, op_rows, pvs, worktrees, containers, links = _all(ops)
     selected, wi_ids = _selection(ops, target, items, pvs, links, op_rows)
     configured = ops.context["fleet"].config.hosts
@@ -997,6 +1042,12 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
                         i["branch_observation"] = read.get("branches", {}).get(i.get("branch"), {})
                         i["observation"] = read.get("worktrees", {}).get(i["path"], {"error": read.get("error") or
                                                                                   "OBSERVATION_UNAVAILABLE"})
+                        if i.get("flavor") == "task" and i["observation"].get("exists") is False:
+                            suffix = i["creation_evidence"]["intent"].replace("-", "")[:12]
+                            ref = "refs/batc/tasks/" + suffix
+                            head = i["branch_observation"].get("head")
+                            if head and read.get("refs", {}).get(ref) == head:
+                                i["retained_proof"] = {"ref": ref, "sha": head}
                         # Markers must also match original creation, not just the directory shape.
                         markers = read.get("markers", {})
                         src = i.get("source")
@@ -1067,10 +1118,31 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None):
         i["branch_id"] = b["resource_id"]
         items[b["resource_id"]] = b
         selected.add(b["resource_id"])
+    if target["kind"] == "task":
+        for i in items.values():
+            if i.get("task_owned"):
+                coordinator = ops.context.get("coordinator")
+                if coordinator:
+                    i["task_cleanup"] = coordinator.cleanup_verdict(i)
+                if automatic:
+                    if i["kind"] == "session":
+                        i["automatic_no_stop"] = True
+                    elif not (i["kind"] == "worktree" and i.get("flavor") == "task"
+                              and i["creation_evidence"]["intent"] == target["task_id"]):
+                        i.pop("task_cleanup", None)
     planning = selected | {items[r]["worktree_id"] for r in selected if items[r]["kind"] == "local_branch"}
     for i in items.values():
         if i["resource_id"] in planning or i["kind"] == "session":
             _plan(ops, i, choices, op_rows, pvs, own_op)
+            if automatic and i.get("task_cleanup", {}).get("eligible"):
+                released = [r for r in i["reasons"] if r["code"] == "RESULTS_NOT_DELIVERED"]
+                i["overridden_reasons"].extend(released)
+                i["reasons"] = [r for r in i["reasons"] if r["code"] != "RESULTS_NOT_DELIVERED"]
+                if not i["reasons"] and i.get("observation", {}).get("exists"):
+                    i.update(decision="reclaim", steps=["preserve", "remove.worktree", "finalize"])
+            if (i.get("task_cleanup", {}).get("eligible") and not i["reasons"] and i.get("retained_proof")
+                    and i.get("observation", {}).get("exists") is False):
+                i.update(decision="reclaim", steps=["finalize"])
     for rid in sorted(planning, key=lambda r: {"worktree": 0, "local_branch": 1}.get(items[r]["kind"], 2)):
         i = items[rid]
         if i["kind"] == "worktree":
@@ -1130,7 +1202,7 @@ def _capacity_ready(items):
     for item in items:
         entry = item.get("registry", {})
         if (item["kind"] != "session" or item["decision"] != "already_absent" or
-                entry.get("status") != "active" or item.get("task_owned")):
+                entry.get("status") != "active" or item.get("task_owned") and not item.get("task_cleanup", {}).get("eligible")):
             continue
         carrier = item.get("worktree_id")
         if carrier in absent_carriers or carrier is None and not entry.get("worktree_path"):
@@ -1138,16 +1210,20 @@ def _capacity_ready(items):
     return False
 
 
-async def preview(ops, principal, target, choices=None):
+async def preview(ops, principal, target, choices=None, *, _automatic=False):
     if not principal.allows("observe"):
         raise OperationError("FORBIDDEN", "preview needs observe", 403)
     target, choices = _target(ops, target), _choices(choices, principal)
-    doc = await snapshot(ops, target, choices)
+    if _automatic and (principal is not task_cleanup.SYSTEM or target["kind"] != "task"):
+        raise OperationError("FORBIDDEN", "automatic cleanup is coordinator-only", 403)
+    doc = await snapshot(ops, target, choices, automatic=_automatic)
     fingerprint = _hash(doc)
     now = int(time.time())
     payload = {"actor": principal.actor, "target": target, "choices": choices, "fingerprint": fingerprint,
                "config_digest": doc["config_digest"], "contract_version": VERSION, "iat": now, "exp": now + TTL_S,
                "ready": any(i["decision"] == "reclaim" for i in doc["items"]) or _capacity_ready(doc["items"])}
+    if _automatic:
+        payload["origin"] = "task_lifecycle"
     raw = _canonical(payload).encode()
     if len(raw) > MAX_TOKEN_BYTES:
         raise OperationError("PREVIEW_TOO_LARGE", "preview token is too large", 413)
@@ -1169,6 +1245,8 @@ def _admit(ops, principal, target, params, pre):
     if (payload["actor"] != principal.actor or target["preview_id"] != "clpv_" + _hash(payload)[:32] or
             pre["preview_fingerprint"] != payload["fingerprint"]):
         raise OperationError("PREVIEW_MISMATCH", "actor, preview ID or fingerprint differs", 409)
+    if payload.get("origin") == "task_lifecycle" and principal is not task_cleanup.SYSTEM:
+        raise OperationError("FORBIDDEN", "automatic cleanup is coordinator-only", 403)
     _choices(payload["choices"], principal)
     if not payload["ready"]:
         raise OperationError("PREVIEW_BLOCKED", "preview has no reclaimable resources", 409)
@@ -1176,6 +1254,8 @@ def _admit(ops, principal, target, params, pre):
     # This server-only field records acceptance authority without changing OperationService or its table.
     params["_accepted_authorization"] = {"actor": principal.actor,
         "scopes": sorted(SCOPES if principal.admin else principal.scopes), "choices": payload["choices"]}
+    if payload.get("origin") == "task_lifecycle":
+        params["_accepted_authorization"]["origin"] = "task_lifecycle"
 
 
 def apply_request(doc, key):
@@ -1269,7 +1349,7 @@ def _finalize(ctx, item, after):
     db, rid = ctx.service.db, item["resource_id"]
     retained_ids = [r[0] for r in db.execute("SELECT retained_id FROM cleanup_retained WHERE operation_id=? "
                                           "AND resource_id=?", (ctx.operation_id, rid))]
-    doc = {**item, "operation_id": ctx.operation_id, "actor": ctx.actor, "reason": "reviewed_cleanup",
+    doc = {**item, "operation_id": ctx.operation_id, "actor": ctx.actor, "reason": ctx.params["_accepted_authorization"].get("origin", "reviewed_cleanup"),
            "accepted_authorization": ctx.params["_accepted_authorization"], "last_observation": item.get("observation"),
            "after": after, "retained_ids": retained_ids, "receipt": {"operation_id": ctx.operation_id,
            "resource_id": rid}, **_item_history(ctx, item), "resumed_by": _resumed_by(ctx), "cleaned_at": time.time(),
@@ -1291,7 +1371,8 @@ def _finalize(ctx, item, after):
         _receipt(ctx, item, "succeeded", after=after, settled_by="read_back")
         db.execute("UPDATE cleanup_receipts SET retained_ids=? WHERE operation_id=? AND resource_id=?",
                    (_canonical(retained_ids), ctx.operation_id, rid))
-    _mark(item, ctx.operation_id, "cleaned")
+        task_cleanup.finalize(ctx, item, after)
+    _mark(item, ctx.operation_id, "cleaned", ops=ctx.service)
     if item["kind"] == "worktree":
         _retire_absent_sessions(ctx, item["resource_id"])
 
@@ -1315,6 +1396,15 @@ def _retire_absent_sessions(ctx, carrier_id=None):
             owner = task_control.owner_task(ctx.service.context["fleet"], item["host"], item["session_id"])
         except (ResourceReadOnly, registry.RegistryInvariantError, OSError) as error:
             _receipt(ctx, item, row["status"], after=_capacity_failure(error))
+            continue
+        if (owner and row["status"] == "already_absent" and item.get("task_cleanup", {}).get("eligible")
+                and (carrier in carriers or carrier is None and not entry.get("worktree_path"))):
+            try:
+                capacity = task_cleanup.retire_absent(ctx, item)
+            except (ResourceReadOnly, registry.RegistryInvariantError, OSError) as error:
+                capacity = _capacity_failure(error)
+            _receipt(ctx, item, row["status"], after={**capacity, "carrier_resource_id": carrier,
+                                                   "stopped_by_cleanup": False})
             continue
         if owner and row["status"] in {"retained", "already_absent"}:
             _receipt(ctx, item, row["status"], after={"capacity_released": False,
@@ -1361,6 +1451,8 @@ def _progress(ctx):
 async def _phase_consumers(ctx, item):
     ops = ctx.service
     _host_config(ops, item["host"])
+    if item.get("task_cleanup"):
+        task_cleanup.check(ops, item)
     probe = {**item, "reasons": [], "consumers": []}
     _consumers(ops, probe, [ops._decode(r) for r in ops.db.execute("SELECT * FROM operations")],
                {r["preview_id"]: dict(r) for r in ops.db.execute("SELECT * FROM integration_previews")}, ctx.operation_id)
@@ -1395,7 +1487,9 @@ async def _phase_consumers(ctx, item):
             recorded = e.get("worktree_path") or e.get("cwd")
             if not _inside(path, runtime.get("cwd")) and not _inside(path, recorded):
                 continue
-            if (task_control.owner_task(ops.context["fleet"], host, sid)
+            task_owner = task_control.owner_task(ops.context["fleet"], host, sid)
+            allowed_owner = bool(item.get("task_cleanup", {}).get("eligible") and task_owner in item["task_cleanup"]["task_ids"])
+            if (task_owner and not allowed_owner
                     or e.get("status") in {"starting", "uncertain"} or e.get("handoff_status") == "pending"):
                 raise OperationError("PREVIEW_STALE", "a task or unresolved start needs this worktree", 409)
             state = runtime.get("state") or {}
@@ -1405,6 +1499,8 @@ async def _phase_consumers(ctx, item):
                 raise OperationError("SESSION_WAITING", "a session is waiting; preview again", 409)
             if runtime.get("loaded") and not (sid in allowed and recorded == allowed[sid] == runtime.get("cwd")):
                 raise OperationError("PREVIEW_STALE", "an unreviewed session uses this worktree", 409)
+        if item.get("task_cleanup"):
+            task_cleanup.check(ops, item)
     except asyncio.TimeoutError:
         raise OperationError("OBSERVATION_UNAVAILABLE", "live consumer read deadline expired; preview again", 409) from None
     finally:
@@ -1467,7 +1563,8 @@ async def _run_plan(ctx):
         payload = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
         if time.time() >= payload["exp"]:
             raise OperationError("PREVIEW_EXPIRED", "preview expired before execution", 409)
-        doc = await snapshot(ops, payload["target"], payload["choices"], own_op=ctx.operation_id)
+        doc = await snapshot(ops, payload["target"], payload["choices"], own_op=ctx.operation_id,
+                             automatic=payload.get("origin") == "task_lifecycle")
         if _hash(doc) != payload["fingerprint"]:
             raise OperationError("PREVIEW_STALE", "live resources or consumers changed; preview again", 409)
         with ops.journal.tx():
@@ -1491,7 +1588,7 @@ async def _run_plan(ctx):
             row = db.execute("SELECT status FROM cleanup_receipts WHERE operation_id=? AND resource_id=?",
                              (ctx.operation_id, item["resource_id"])).fetchone()
             if row[0] == "succeeded":
-                _mark(item, ctx.operation_id, "cleaned")
+                _mark(item, ctx.operation_id, "cleaned", ops=ctx.service)
                 if item["kind"] == "worktree":
                     _retire_absent_sessions(ctx, item["resource_id"])
                 continue
@@ -1503,7 +1600,7 @@ async def _run_plan(ctx):
                               (ctx.operation_id, dep)).fetchone()[0] not in {"succeeded", "already_absent"} for dep in item["dependencies"]):
                 history = _item_history(ctx, item)
                 if unresolved or _has_irreversible(history):
-                    _mark(item, ctx.operation_id, "reserved")
+                    _mark(item, ctx.operation_id, "reserved", ops=ctx.service)
                     _receipt(ctx, item, "uncertain", after={**history, "refused_phase": "dependencies", "refused_code": "DEPENDENCY_FAILED"},
                              error={"code": "CLEANUP_PARTIAL_STATE" if _has_irreversible(history) else "UNCERTAIN_UNRESOLVED",
                                     "refused_phase": "dependencies", "refused_code": "DEPENDENCY_FAILED"})
@@ -1516,9 +1613,12 @@ async def _run_plan(ctx):
             lock = _REPO_LOCKS.setdefault((item["host"], item.get("repository") or item.get("path")), asyncio.Lock())
             async with lock:
                 try:
-                    _mark(item, ctx.operation_id, "reserved")
+                    _mark(item, ctx.operation_id, "reserved", ops=ctx.service)
                     _receipt(ctx, item, "running")
-                    await _execute_item(ctx, item, payload)
+                    manager = (ops.context["coordinator"].cleanup_authority(ctx, item)
+                               if item.get("task_cleanup") else nullcontext(None))
+                    async with manager as authority:
+                        await _execute_item(ctx, item, payload, authority=authority)
                 except (Uncertain, AmbiguousOutcome, OSError) as e:
                     _receipt(ctx, item, "uncertain")
                     _progress(ctx)
@@ -1578,7 +1678,7 @@ async def _run_plan(ctx):
             _receipt(ctx, item, status, after={**history, "cancel_requested": True, "guard_released": not keep},
                      **({"error": {"code": "CLEANUP_PARTIAL_STATE", "cancel_requested": True}} if partial else {}))
             if partial:
-                _mark(item, ctx.operation_id, "reserved")
+                _mark(item, ctx.operation_id, "reserved", ops=ctx.service)
             if not keep:
                 _release(item, ctx.operation_id)
         _progress(ctx)
@@ -1629,14 +1729,15 @@ def _partial_attention(ctx, item, evidence):
     raise NeedsAttention("CLEANUP_PARTIAL_STATE", "partial cleanup remains reserved; inspect removed/changed/remaining evidence")
 
 
-async def _execute_item(ctx, item, payload):
+async def _execute_item(ctx, item, payload, *, authority=None):
     """Validate once per item; named phases reconcile their own exact effects after a restart."""
     ops, rid = ctx.service, item["resource_id"]
     hc = _host_config(ops, item["host"])
     begun = ops.db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? AND name LIKE ?",
                            (ctx.operation_id, "item." + rid + ".%" )).fetchone()
     if not begun:
-        current = await snapshot(ops, payload["target"], payload["choices"], only=rid, own_op=ctx.operation_id)
+        current = await snapshot(ops, payload["target"], payload["choices"], only=rid, own_op=ctx.operation_id,
+                                 automatic=payload.get("origin") == "task_lifecycle")
         actual = next((i for i in current["items"] if i["resource_id"] == rid), None)
         # Earlier planned session stops / worktree removals change dependencies, never the item's content.
         if item["kind"] == "local_branch" and actual is None:
@@ -1652,6 +1753,9 @@ async def _execute_item(ctx, item, payload):
                 actual["dependencies"] = item["dependencies"]
         if actual != item:
             raise OperationError("PREVIEW_STALE", "resource or its consumers changed", 409)
+    if item.get("task_cleanup") and item["steps"] == ["finalize"]:
+        await task_cleanup.finalize_absent(ctx, item)
+        return
     if item["kind"] == "session":
         async def stop():
             result = None
@@ -1670,7 +1774,8 @@ async def _execute_item(ctx, item, payload):
                 nonlocal result
                 _host_config(ops, item["host"])
                 result = await lifecycle._stop(ops.context["fleet"], item["host"], item["session_id"],
-                                              Audit(ops.context["fleet"].config.safety), cleanup=True)
+                                              Audit(ops.context["fleet"].config.safety), cleanup=True,
+                                              **({"_task_cleanup": authority} if authority else {}))
                 if not result.get("stopped"):
                     raise OperationError(result.get("code", "STOP_UNPROVEN"), result.get("reason", "stop was not confirmed"), 409)
                 if isinstance(result.get("result"), dict) and result["result"].get("ok") is False:
@@ -1937,6 +2042,10 @@ async def retained(ops, *, host=None, resource_id=None, query=None, limit=50, cu
     rows = [r for r in rows if (not host or r["host"] == host) and (not resource_id or r["resource_id"] == resource_id)
             and (not query or query.casefold() in _canonical(r).casefold()) and (not cursor or r["retained_id"] > cursor)]
     page = rows[:limit]
+    for row in page:
+        if row["step"] == "historical":
+            row["operation_id"] = None
+            row["task_event_id"] = json.loads(row["creation_evidence"]).get("task_event_id")
     available, unavailable = [], []
     groups = {}
     for r in page:
@@ -1987,4 +2096,4 @@ def read_path(name, **filters):
 
 
 ACTIONS = [ActionDef("cleanup.apply", "cleanup", "Apply exactly a reviewed cleanup preview", _run,
-                     admit=_admit, target_keys=("preview_id",))]
+                     admit=_admit, target_keys=("preview_id",), authorize_existing=task_cleanup.authorize_existing)]

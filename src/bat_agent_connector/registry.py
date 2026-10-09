@@ -500,6 +500,8 @@ def claim_warm(host: str, session_id: str, *, previous_task_id: str, task_id: st
 
     p = registry_path()
     with _locked(p):
+        from .cleanup import guard
+        guard(host, session_id=session_id, path=cwd, branch=branch)
         items = _read(p)
         matches = [e for e in items if e.get("host") == host and e.get("session_id") == session_id]
         if (len(matches) != 1 or matches[0].get("task_id") != previous_task_id

@@ -997,10 +997,21 @@ class Journal:
         with self.tx():
             task = self.get(task_id)
             suffix = task_id.replace("-", "")[:12]
+            shared = False
+            if proof.get("operation_id") and proof.get("resource_id"):
+                receipt = self.db.execute("SELECT status,plan FROM cleanup_receipts WHERE operation_id=? AND resource_id=?",
+                    (proof["operation_id"], proof["resource_id"])).fetchone()
+                retained = self.db.execute("SELECT 1 FROM cleanup_retained WHERE operation_id=? AND resource_id=? "
+                    "AND ref=? AND commit_sha=?", (proof["operation_id"], proof["resource_id"],
+                    proof.get("retained_ref"), proof.get("commit"))).fetchone()
+                plan = json.loads(receipt["plan"]) if receipt else {}
+                shared = bool(receipt and receipt["status"] == "succeeded" and retained
+                    and plan.get("flavor") == "task" and plan.get("creation_evidence", {}).get("intent") == task_id
+                    and plan.get("path") == proof.get("path") and plan.get("branch") == proof.get("branch"))
             if (task["state"] not in TERMINAL or not task["external_worktree_path"]
                     or proof.get("path") != task["external_worktree_path"]
                     or proof.get("branch") != task["external_branch"]
-                    or proof.get("retained_ref") != f"refs/batc/tasks/{suffix}"
+                    or not shared and proof.get("retained_ref") != f"refs/batc/tasks/{suffix}"
                     or not isinstance(proof.get("commit"), str)
                     or not re.fullmatch(r"[0-9a-f]{40}", proof["commit"])
                     or proof.get("mode") not in {"removed", "already_removed"}

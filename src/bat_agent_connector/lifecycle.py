@@ -1413,7 +1413,12 @@ async def _evaluate(
     )
 
 
-async def _stop(fleet: Fleet, host: str, sid: str, audit: Audit, *, cleanup: bool = False) -> dict:
+async def _stop(fleet: Fleet, host: str, sid: str, audit: Audit, *, cleanup: bool = False, _task_cleanup=None) -> dict:
+    if _task_cleanup is not None:
+        from .task_cleanup import Authority
+        if type(_task_cleanup) is not Authority or not cleanup:
+            raise ResourceReadOnly("TASK_OWNED", "invalid coordinator cleanup capability")
+        _task_cleanup.check(fleet, host, sid)
     c = fleet.client(host)
     t, _ = await _resolve_session(c, sid)
     try:
@@ -1435,10 +1440,20 @@ async def _stop(fleet: Fleet, host: str, sid: str, audit: Audit, *, cleanup: boo
     base = {"actor": fleet.actor, "tool": "session_cleanup", "host": host, "session_id": sid + "#stop"}
     audit.check_rate(host, sid + "#stop")
     audit.record(**base, channel="claude:stop-session", phase="attempt")
+    sent = False
+    def transported():
+        nonlocal sent
+        sent = True
+    kwargs = {"before_frame": lambda: _task_cleanup.before_frame(fleet, host, sid),
+              "on_transport": transported} if _task_cleanup is not None else {}
     try:
         r = await c.invoke("claude:stop-session", {"sessionId": sid}, grant=grant, retry_on_disconnect=not cleanup,
-                           before_send=lambda: task_control.refuse_owned(fleet, host, sid))
+                           before_send=lambda: (_task_cleanup.check(fleet, host, sid) if _task_cleanup is not None
+                                                else task_control.refuse_owned(fleet, host, sid)), **kwargs)
     except BatError as e:
+        if _task_cleanup is not None and not sent:
+            from .operations import OperationError
+            raise OperationError("TASK_CLEANUP_STOP_NOT_SENT", "task stop was refused before transport", 409) from e
         if cleanup:
             raise
         audit.record(**base, channel="claude:stop-session", phase="result", ok=False, error=_err(e))
