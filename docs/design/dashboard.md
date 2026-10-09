@@ -92,7 +92,8 @@ Session card 依 creation snapshot 顯示 level；OS sandbox 最多 options_conf
 
 - Worktree、diff、檔案瀏覽。Fleet Kit 的連線選擇已由 Windows [PS adapter](desktop-fleet.md) 與桌面設定頁提供；Rust parity 與實機驗收仍待完成。
 - 推播通知。
-- #35 history／relations／discovery read models 已有中央合約；其完整 UI 呈現、已開 session 的 pending 控制刷新、linked operation／parent project invalidation 仍屬 R04 待完成範圍。
+- History／relations／discovery 與已開 session 的 pending 刷新、linked operation／parent project invalidation
+  已有共用 UI／fixture；同候選的實機驗收仍待完成，見 [implementation status](../product/implementation-status.md)。
 - Windows 真實 tray、cross-session ownership、native files、Fleet parity、OS credential enrollment 與 signed updates 未因桌面殼可編譯而視為驗收完成。
 
 ## 測試
