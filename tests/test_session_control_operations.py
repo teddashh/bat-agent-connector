@@ -98,6 +98,48 @@ async def test_named_keys_share_canonical_action_across_real_transports(served, 
         await fleet.close()
 
 
+@pytest.mark.parametrize("door", ["cli", "mcp"])
+async def test_failed_control_receipt_keeps_actionable_reason_on_keyed_replay(
+        served, mock, monkeypatch, capsys, door):
+    from tests.test_mcp_principal import call
+    d, port = served
+    adopt(SID)
+    mock.metas[SID]["isStreaming"] = True
+    # This principal cannot use operation GET to recover an omitted failure explanation.
+    token = api.token(d, "caller", "operate")
+    monkeypatch.setenv("BATC_TASK_URL", f"http://127.0.0.1:{port}/rpc")
+    monkeypatch.setenv("BATC_API_TOKEN", token)
+    monkeypatch.setattr(cli, "load_config", lambda _: d.fleet.config)
+    server, fleet = build_server(d.fleet.config)
+
+    async def attempt():
+        if door == "mcp":
+            return await call(server, "session_send", request("send", idempotency_key="refused-control"))
+        code = await asyncio.to_thread(cli.main, ["--json", "send", "h1", SID, "reviewed prompt",
+                                                 "--confirm", "--key", "refused-control"])
+        assert code == 1
+        return capsys.readouterr().out
+
+    try:
+        first = await attempt()
+        op = d.ops.list()["operations"][0]
+        assert op["status"] == "failed" and op["error_code"] == "REFUSED"
+        assert "pass queue=true" in op["status_reason"]
+        assert "operation_status_reason" in first and op["status_reason"] in first
+        assert op["operation_id"] in first
+        assert (await api.http(port, "GET", "/api/v1/operations/" + op["operation_id"], tok=token))[0] == 403
+        mock.metas[SID]["isStreaming"] = False
+
+        async def unexpected(*_a, **_kw):
+            pytest.fail("a named replay observed the changed session instead of returning its receipt")
+        monkeypatch.setattr(service, "_resolve_session", unexpected)
+        replay = await attempt()
+        assert op["status_reason"] in replay and op["operation_id"] in replay
+        assert len(d.ops.list()["operations"]) == 1 and not api.write_frames(mock)
+    finally:
+        await fleet.close()
+
+
 @pytest.mark.parametrize("kind", ["send", "continue", "answer"])
 async def test_true_no_key_operations_and_prefix_history_are_durable(daemon, mock, kind):
     adopt(SID)
