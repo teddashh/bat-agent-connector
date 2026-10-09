@@ -50,7 +50,9 @@ reads remain available with `--read-only`; CLI read/wait likewise require `BATC_
 and never fall back to local admin or direct Fleet. External verification testimony has a central
 `session_record_verification` adapter; it cannot create trusted task verification. Connector-only
 labels use the advertised `session.labels.set` action and an explicit metadata version. Both keep
-the original key after reply loss. Unavailable legacy behavior remains unavailable.
+the original key after reply loss. `worktree_merge` requires integrate scope and the configured
+verifier SSH host mapping; it fixes both managed carriers and retains their reservations after
+an unknown ACK. Its central adapter has no direct BAT fallback. Unavailable legacy behavior remains unavailable.
 
 For an observation-only installation, use
 `["--principal-only", "--read-only"]`: write tools are omitted entirely, so adding
@@ -86,6 +88,7 @@ These are skill review scenarios, not claims of model or live-host execution.
 | --- | --- | --- |
 | Reconnect with a saved task/work-item/operation and a stale, absent session tab | Verify endpoint/actor/capabilities, read the saved records and original operation; preserve IDs | New task/session, treating absence as death, clearing claims |
 | Write reply lost; known operation is `uncertain` | `operation_get(operation_id)`; retain key/request/refs while daemon reconciles | New key or direct BAT resend |
+| Managed worktree merge has an unknown ACK | Read the original operation and preserve both carrier reservations; report uncertainty | Resending merge/rehydrate, clearing reservations or assuming a changed HEAD proves success |
 | Reply lost before receiving an operation ID | Inspect `operations_list`; recover with identical request/key/actor if needed | Changed preconditions under old key or a fresh key |
 | Start the published version on another host | Choose an explicit repository/host/workspace binding, preview the branch head, retain its SHA/repository ID/binding digest and use one saved start key | Implicit takeover, pulling a human checkout, direct unpublished Git transport |
 | Continue a manual session that has uncommitted edits | Read checkpoint preview/runs; have the person commit required edits; continue the fixed checkpoint into new managed work within existing authorization | Writing/interrupting/cleaning the human source or treating its path as ownership |

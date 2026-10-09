@@ -14,6 +14,7 @@ from bat_agent_connector.errors import (
     AuthError,
     ChannelNotAllowed,
     FingerprintMismatch,
+    InvokeError,
     ResourceReadOnly,
     TaskDispatchCancelled,
 )
@@ -22,6 +23,29 @@ from tests.conftest import make_config
 from tests.mockbat import TOKEN
 
 SEND = BY_ACTION["session.send"].channels
+
+
+@pytest.mark.parametrize('method', ['invoke', 'guard_read'])
+@pytest.mark.parametrize('reply', [{'type': 'invoke-result'}, {'type': 'other', 'result': None},
+                                  {'type': 'invoke-error', 'error': 'fixture unavailable'},
+                                  {'type': 'invoke-result', 'result': None}])
+async def test_metadata_absence_requires_explicit_successful_null(mock, monkeypatch, method, reply):
+    client = client_for(mock)
+    original = client._roundtrip
+    async def response(frame, *args, **kwargs):
+        if frame.get('channel') == 'claude:get-session-meta':
+            return reply
+        return await original(frame, *args, **kwargs)
+    monkeypatch.setattr(client, '_roundtrip', response)
+    try:
+        call = getattr(client, method)
+        if reply == {'type': 'invoke-result', 'result': None}:
+            assert await call('claude:get-session-meta', {'sessionId': 'fixture'}) is None
+        else:
+            with pytest.raises(InvokeError):
+                await call('claude:get-session-meta', {'sessionId': 'fixture'})
+    finally:
+        await client.close()
 
 
 def client_for(mock, **kw):

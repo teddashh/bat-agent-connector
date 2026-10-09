@@ -11,6 +11,7 @@ mod fleet_lifecycle;
 #[cfg(windows)]
 mod fleet_native;
 mod fleet_readiness;
+mod tailscale_control;
 mod updates;
 
 use bridge::{Bridge, ConnectorRequest, ConnectorResponse, NativeStatus};
@@ -102,6 +103,16 @@ async fn fleet_bootstrap(
         .clone()
         .request(control.inner().clone(), input)
         .await
+}
+
+#[tauri::command]
+async fn tailscale_control(
+    window: WebviewWindow,
+    control: State<'_, Arc<fleet_control::Control>>,
+    input: tailscale_control::Request,
+) -> Result<serde_json::Value, String> {
+    local_main(&window)?;
+    tailscale_control::request(control.inner().clone(), input).await
 }
 
 #[tauri::command]
@@ -673,6 +684,7 @@ fn main() {
             fleet_request,
             fleet_control,
             fleet_bootstrap,
+            tailscale_control,
             open_external
         ])
         .run(tauri::generate_context!())

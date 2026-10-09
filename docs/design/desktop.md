@@ -173,7 +173,9 @@ central origin. No arbitrary filesystem or shell command is added.
 MockBat. It checks binary content, accepted readback after reload, unchanged source bytes/index/refs, and no
 BAT writes or inferred project/work-item ownership. Browser/native IPC fixtures cover recovery, identity and
 scope boundaries plus en/zh-TW layouts at 390/768/1440. Windows WebView and live remote host acceptance remain
-pending, as do full dirty snapshots, managed-result capture/acceptance and cross-host continuation.
+pending. Managed-result capture/acceptance and explicitly bound published-version continuation now have
+separate central actions and shared UI (see artifacts.md and repository-sync.md); full dirty directory
+snapshots and direct unpublished Git transport are not exposed.
 
 ## Observation UI (R04)
 
@@ -224,3 +226,13 @@ Browser and mocked-native fixtures cover lost replies, mode edits, accepted/unkn
 and identity boundaries, malformed storage, and en/zh-TW layouts at 390/768/1440. Actual-central permission
 validation follows the backend integration; these synthetic fixtures do not establish Windows WebView
 or live host acceptance.
+
+## Tailscale sign-in recovery (T10)
+
+Connection settings reuses the existing compact panel/actions for sanitized Tailscale
+login state, explicit Windows tray-app opening and diagnosis after focus returns.
+The fixed native command preserves original local request receipts and shares the
+Launcher/monotonic Quit-update fence. It does not change network configuration,
+Fleet selection or central credentials. Browser/unsupported/missing installations
+remain explicit; installed Windows sign-in and tray behavior are not yet proven.
+See [the exact T10 adapter contract](tailscale-recovery.md).

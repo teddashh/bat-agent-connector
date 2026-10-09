@@ -16,7 +16,7 @@
 - Session 標題、訊息、PR 標題等外部文字一律以 `textContent` 寫入（`desktop/src/app.js` 的 `h()`），不經 HTML 解析。
 - Host 必須是 loopback，與 `/api/v1` 同一條規則（擋 DNS rebinding）。
 - Browser token 預設只存在 `sessionStorage`；勾選「在這台電腦記住」才寫入 `localStorage`。不用 cookie，所以不依賴 cookie 型 CSRF 防護。
-- Tauri 只載入打包的 frontend，透過限縮 native command 連受信配置中的中央服務。Token 留在 Rust memory，不進 WebView storage；目前原生憑證注入使用啟動環境變數，OS 保護儲存 enrollment 尚未提供。中央 actor／API／contract mismatch 拒絕連線，原生 HTTP 不跟隨 redirect。GitHub HTTPS links 由受限 native action 開系統瀏覽器。完整邊界見 [desktop.md](desktop.md)。
+- Tauri 只載入打包的 frontend，透過限縮 native command 連受信配置中的中央服務。Token 留在 Rust，不進 WebView storage；Windows 使用原生憑證對話框與 Credential Manager enrollment，啟動環境變數仍是相容輸入。Linux 目前使用 native-memory adapter，不能當成跨平台 OS vault 驗收。中央 actor／API／contract mismatch 拒絕連線，原生 HTTP 不跟隨 redirect。GitHub HTTPS links 由受限 native action 開系統瀏覽器。完整邊界見 [desktop.md](desktop.md)。
 
 ## 畫面
 

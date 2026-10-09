@@ -50,6 +50,8 @@ export type FleetBootstrapRequest = {action: "overview"}
   | {action: "advance"; recipe_binding: string; request_id: string}
   | {action: "receipt"; request_id: string};
 export const fleetBootstrap = (input: FleetBootstrapRequest) => invoke<any>("fleet_bootstrap", {input});
+export type TailscaleRequest = {action: "status"} | {action: "open" | "receipt"; request_id: string};
+export const tailscaleControl = (input: TailscaleRequest) => invoke<any>("tailscale_control", {input});
 export const fleetControl = (input: FleetControlRequest) => invoke<any>("fleet_control", {input});
 export const fleetRequest = (input: FleetRequest) => invoke<any>("fleet_request", {input});
 export type UpdateRequest = {action: "status" | "check"} | {action: "download" | "install"; candidate_id: string};

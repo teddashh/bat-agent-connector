@@ -1092,17 +1092,25 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
         mcp.add_tool(_wrap(session_start), name="session_start",
                      annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=False))
 
+    if not read_only:
+        async def worktree_merge(host: str, session_id: str, confirm: bool = False,
+                                 idempotency_key: str | None = None) -> dict[str, Any]:
+            """INTEGRATE. Central durable merge of one managed worktree into its managed source checkout.
+            Requires confirm and integrate scope; verifier SSH must map to BAT's Git account/configuration context.
+            Fixed source/destination and idle consumers are reserved; never forces or writes a manual/task carrier.
+            Rehydrate and merge have separate receipts. Unknown ACK retains both reservations and is never resent.
+            Keep the original key/operation after reply loss; omitted key is an independent request. No raw fallback."""
+            out = await principal_daemon("worktree_merge", confirm, host=host, session_id=session_id,
+                                         confirm=confirm, idempotency_key=idempotency_key)
+            if out.get("operation_status") in {"failed", "cancelled"}:
+                raise ToolError(json.dumps(out, ensure_ascii=False))
+            return out
+        mcp.add_tool(_wrap(worktree_merge), name="worktree_merge",
+                     annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=False))
+
     if fleet.any_orchestrate and not principal_only:
         oenabled = ", ".join(sorted(h for h in config.hosts if fleet.orchestrate_enabled(h)))
         orc = ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=False)
-
-        async def worktree_merge(host: str, session_id: str, confirm: bool = False) -> dict[str, Any]:
-            """ORCHESTRATE. Merge a session's worktree branch into its source branch (merge --no-ff) only
-            when the main checkout is inside a managed root (never a human checkout), it is conflict-free
-            (branch strictly ahead), the worktree has no uncommitted changes, the main checkout is clean and
-            on the source branch, and the session is idle. Otherwise it reports why and changes nothing.
-            Never forces. Requires confirm=true."""
-            return await orchestrate.worktree_merge(fleet, host, session_id, confirm)
 
         async def worktree_remove(
             host: str,
@@ -1130,7 +1138,6 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
 
 
         for fn in (
-            worktree_merge,
             worktree_remove,
             session_cleanup,
         ):

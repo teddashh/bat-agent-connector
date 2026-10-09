@@ -354,7 +354,7 @@ async function connectorUploadArtifact(operationId, bytes, browserToken) {
 		data: await res.json().catch(() => ({}))
 	};
 }
-var nativeDesktop, nativeFileSupport, nativeFilesStatus, nativeFilesPick, nativeFilesUpload, nativeFilesDropTarget, nativeFilesControl, nativeFilesSave, nativeFilesPreview, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal, fleetAvailability, fleetBootstrap, fleetControl, fleetRequest, updateRequest;
+var nativeDesktop, nativeFileSupport, nativeFilesStatus, nativeFilesPick, nativeFilesUpload, nativeFilesDropTarget, nativeFilesControl, nativeFilesSave, nativeFilesPreview, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal, fleetAvailability, fleetBootstrap, tailscaleControl, fleetControl, fleetRequest, updateRequest;
 var init_transport = __esmMin((() => {
 	init_core();
 	nativeDesktop = isTauri();
@@ -380,6 +380,7 @@ var init_transport = __esmMin((() => {
 	openExternal = (url) => invoke("open_external", { url });
 	fleetAvailability = () => invoke("fleet_availability");
 	fleetBootstrap = (input) => invoke("fleet_bootstrap", { input });
+	tailscaleControl = (input) => invoke("tailscale_control", { input });
 	fleetControl = (input) => invoke("fleet_control", { input });
 	fleetRequest = (input) => invoke("fleet_request", { input });
 	updateRequest = (input) => invoke("desktop_update", { input });
@@ -428,6 +429,28 @@ async function readArtifactContent(reference, size, token, signal) {
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		tailscale_request: "原開啟請求",
+		tailscale_title: "Tailscale",
+		tailscale_open: "開啟 Tailscale",
+		tailscale_refresh: "重新檢查 Tailscale",
+		tailscale_browser: "請在本機的 Tailscale 完成登入。Windows 桌面版可直接開啟 Tailscale。",
+		tailscale_unsupported: "此平台尚未提供 Tailscale 原生開啟功能。",
+		tailscale_missing: "未找到標準安裝位置中的 Tailscale。請先安裝 Windows 版。",
+		tailscale_incomplete: "Tailscale 安裝不完整。請檢查 Windows 版安裝。",
+		tailscale_unknown: "目前無法確認 Tailscale 狀態。",
+		tailscale_needs_login: "Tailscale 需要登入。",
+		tailscale_needs_approval: "此裝置仍需管理員核准。",
+		tailscale_stopped: "Tailscale 已停止連線。",
+		tailscale_starting: "Tailscale 正在連線。",
+		tailscale_running: "Tailscale 正在執行。各主機連線狀態請見 Fleet。",
+		tailscale_help: "開啟後，從 Windows 通知區的 Tailscale 圖示選擇登入。返回這裡時會重新檢查狀態。",
+		tailscale_uncertain: "開啟結果尚未確認。請先查看通知區；原請求已保留，不會自動再次開啟。",
+		tailscale_started: "已啟動 Tailscale 程式。請查看通知區；這不代表已完成登入。",
+		tailscale_not_started: "此次請求未啟動 Tailscale。",
+		tailscale_retry: "查回或重試原請求",
+		tailscale_new: "準備另一次開啟",
+		tailscale_damaged: "儲存的請求無法讀取。請先在 Tailscale 中確認狀態。",
+		tailscale_read_failed: "無法確認最新狀態或開啟結果。請重新檢查；原請求保留。",
 		bat_review_again: "重新預覽原選擇",
 		bat_preview_expired: "此預覽尚未送出。重新開啟頁面後，須明確重新預覽原 profile，才能啟動 BAT。",
 		bat_handoff: "在 BAT 中查看",
@@ -1514,6 +1537,28 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		tailscale_request: "Original opening request",
+		tailscale_title: "Tailscale",
+		tailscale_open: "Open Tailscale",
+		tailscale_refresh: "Refresh Tailscale status",
+		tailscale_browser: "Sign in using Tailscale on this computer. The Windows desktop app can open it directly.",
+		tailscale_unsupported: "Opening Tailscale is not supported on this platform yet.",
+		tailscale_missing: "Tailscale was not found in its standard installation folder. Install the Windows app first.",
+		tailscale_incomplete: "The Tailscale installation is incomplete. Check the Windows installation.",
+		tailscale_unknown: "Tailscale status could not be confirmed.",
+		tailscale_needs_login: "Tailscale needs sign-in.",
+		tailscale_needs_approval: "This device still needs administrator approval.",
+		tailscale_stopped: "Tailscale is disconnected.",
+		tailscale_starting: "Tailscale is connecting.",
+		tailscale_running: "Tailscale is running. See Fleet for each host’s connection status.",
+		tailscale_help: "After opening, choose Log in from the Tailscale icon in the Windows notification area. Status refreshes when you return here.",
+		tailscale_uncertain: "Opening is unconfirmed. Check the notification area first; the original request is kept and will not be opened again automatically.",
+		tailscale_started: "The Tailscale process started. Check the notification area; sign-in is not yet confirmed.",
+		tailscale_not_started: "This request did not start Tailscale.",
+		tailscale_retry: "Check or retry original request",
+		tailscale_new: "Prepare another opening",
+		tailscale_damaged: "The saved request could not be read. Check the Tailscale app first.",
+		tailscale_read_failed: "The latest status or opening result could not be confirmed. Refresh to check; the original request is kept.",
 		bat_review_again: "Review original choice again",
 		bat_preview_expired: "This preview was never submitted. Explicitly review the original profile again after reopening before launching BAT.",
 		bat_handoff: "View in BAT",
@@ -3726,6 +3771,182 @@ async function mountFleet(main, { h, t }) {
 		clearTimeout(timer);
 		nativeCleanup?.();
 		bootstrapCleanup?.();
+		panel.remove();
+	};
+}
+//#endregion
+//#region src/tailscale.js
+init_transport();
+function mountTailscale(main, { h, t }) {
+	const panel = h("section", {
+		class: "panel",
+		"aria-label": t("tailscale_title")
+	});
+	const content = h("div"), message = h("p", {
+		class: "muted",
+		role: "status"
+	});
+	panel.append(h("h2", {}, t("tailscale_title")), content, message);
+	main.append(panel);
+	let disposed = false, busy = false, pending = false, readable = false, snapshot, intent, receipt, damaged = false;
+	const alive = () => !disposed && panel.isConnected;
+	const hex = (value, size) => typeof value === "string" && new RegExp(`^[0-9a-f]{${size}}$`).test(value);
+	const validReceipt = (value) => value && hex(value.request_id, 32) && [
+		"uncertain",
+		"started",
+		"not_started"
+	].includes(value.phase);
+	const key = () => `batc.desktop.tailscale.${snapshot.scope}`;
+	const accept = (value, scope, id) => {
+		if (value?.version !== 1 || value.scope !== scope || value.receipt !== null && (!validReceipt(value.receipt) || value.receipt.request_id !== id)) throw Error("invalid");
+		receipt = value.receipt;
+	};
+	const save = () => {
+		if (intent) localStorage.setItem(key(), JSON.stringify({ request_id: intent }));
+		else localStorage.removeItem(key());
+	};
+	const render = () => {
+		if (!alive()) return;
+		const native = nativeDesktop && snapshot?.supported === true;
+		const state = !nativeDesktop ? "browser" : snapshot?.supported === false ? "unsupported" : !readable ? "unknown" : snapshot.installation !== "available" ? snapshot.installation : snapshot.login;
+		const unknown = intent && (!receipt || receipt.phase === "uncertain");
+		content.replaceChildren(...[
+			h("p", {}, t("tailscale_" + state)),
+			native ? h("p", { class: "muted" }, t("tailscale_help")) : null,
+			intent ? h("p", { class: "muted" }, t("tailscale_" + (receipt?.phase || "uncertain"))) : null,
+			intent ? h("details", {}, h("summary", {}, t("tailscale_request")), h("code", {}, intent)) : null,
+			damaged ? h("p", { class: "error" }, t("tailscale_damaged")) : null,
+			nativeDesktop ? h("div", { class: "actions" }, h("button", {
+				class: "secondary",
+				disabled: busy || !native || !readable || !snapshot.can_open || damaged || !!intent,
+				onclick: () => run(async () => {
+					intent = crypto.randomUUID().replaceAll("-", "");
+					receipt = null;
+					save();
+					await open();
+				})
+			}, t("tailscale_open")), unknown && !receipt && !damaged ? h("button", {
+				class: "secondary",
+				disabled: busy || !readable || !snapshot?.can_open,
+				onclick: () => run(open)
+			}, t("tailscale_retry")) : null, receipt && receipt.phase !== "uncertain" ? h("button", {
+				class: "secondary",
+				disabled: busy,
+				onclick: () => run(async () => {
+					const previous = intent;
+					intent = null;
+					try {
+						save();
+					} catch (error) {
+						intent = previous;
+						throw error;
+					}
+					receipt = null;
+				})
+			}, t("tailscale_new")) : null, h("button", {
+				class: "secondary",
+				disabled: busy,
+				onclick: refresh
+			}, t("tailscale_refresh"))) : null
+		].filter(Boolean));
+	};
+	const read = async () => {
+		const value = await tailscaleControl({ action: "status" });
+		if (!alive()) return;
+		if (value?.version !== 1 || typeof value.supported !== "boolean" || typeof value.can_open !== "boolean" || ![
+			"missing",
+			"incomplete",
+			"available",
+			"unknown"
+		].includes(value.installation) || ![
+			"unknown",
+			"needs_login",
+			"needs_approval",
+			"stopped",
+			"starting",
+			"running"
+		].includes(value.login) || value.latest !== null && !validReceipt(value.latest) || value.supported && !hex(value.scope, 64)) throw Error("invalid");
+		if (value.scope !== snapshot?.scope) {
+			intent = receipt = null;
+			damaged = false;
+			snapshot = value;
+			if (value.supported) try {
+				const saved = JSON.parse(localStorage.getItem(key()) || "null");
+				if (saved && hex(saved.request_id, 32)) intent = saved.request_id;
+				else if (saved) damaged = true;
+			} catch {
+				damaged = true;
+			}
+		}
+		snapshot = value;
+		if (value.latest?.phase === "uncertain" && (!intent || intent !== value.latest.request_id)) {
+			intent = value.latest.request_id;
+			receipt = value.latest;
+			save();
+		}
+		if (intent) {
+			const result = await tailscaleControl({
+				action: "receipt",
+				request_id: intent
+			});
+			if (!alive()) return;
+			accept(result, value.scope, intent);
+		}
+		readable = true;
+	};
+	const open = async () => {
+		if (!intent || !snapshot?.supported || damaged) return;
+		save();
+		const scope = snapshot.scope, id = intent;
+		const value = await tailscaleControl({
+			action: "open",
+			request_id: id
+		});
+		if (!alive()) return;
+		accept(value, scope, id);
+		pending = true;
+	};
+	const run = async (action) => {
+		if (!alive() || busy) return;
+		busy = true;
+		message.textContent = "";
+		render();
+		try {
+			await action();
+		} catch {
+			if (alive()) {
+				readable = false;
+				message.textContent = t("tailscale_read_failed");
+			}
+		} finally {
+			busy = false;
+			render();
+			if (pending && alive()) {
+				pending = false;
+				refresh();
+			}
+		}
+	};
+	const refresh = () => {
+		if (busy) {
+			pending = true;
+			return;
+		}
+		return run(read);
+	};
+	const returned = () => {
+		if (document.visibilityState === "visible" && alive()) refresh();
+	};
+	render();
+	if (nativeDesktop) {
+		window.addEventListener("focus", returned);
+		document.addEventListener("visibilitychange", returned);
+		refresh();
+	}
+	return () => {
+		disposed = true;
+		window.removeEventListener("focus", returned);
+		document.removeEventListener("visibilitychange", returned);
 		panel.remove();
 	};
 }
@@ -10536,6 +10757,10 @@ function viewSettings(main) {
 			route();
 		}
 	}, t("disconnect"))), h("label", {}, remember, " ", t("remember")), h("p", { class: "muted" }, t("token_help")), info));
+	return mountTailscale(main, {
+		h,
+		t
+	});
 }
 async function nativeTransition(kind) {
 	if (state.nativeBusy && kind !== "disconnect") return;
@@ -10673,9 +10898,19 @@ async function viewNativeSettings(main) {
 		h,
 		t
 	});
+	if (mine !== generation || !main.isConnected) {
+		disposeFleet?.();
+		disposeUpdates?.();
+		return;
+	}
+	const disposeTailscale = mountTailscale(fleetRoot, {
+		h,
+		t
+	});
 	return () => {
 		disposeFleet?.();
 		disposeUpdates?.();
+		disposeTailscale();
 	};
 }
 var may = (scope) => (state.caps?.scopes || []).includes(scope);

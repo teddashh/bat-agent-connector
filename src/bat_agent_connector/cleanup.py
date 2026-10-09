@@ -144,8 +144,11 @@ def _registry_document():
     return d
 
 
-def guard(host=None, *, session_id=None, path=None, branch=None):
+def guard(host=None, *, session_id=None, path=None, branch=None, writer=True):
     """One refusal helper for every process; it never grants ownership and never creates a file."""
+    if writer:
+        from .worktree_merge_operations import check_writer
+        check_writer(host, session_id, workdir=path)
     for g in _registry_document().get("cleanup_guards", {}).values():
         if host is not None and g.get("host") != host:
             continue
