@@ -86,13 +86,25 @@ fn endpoint_free(local: SocketAddrV4) -> Result<()> {
     if !local.ip().is_loopback() || local.port() == 0 {
         return Err("INVENTORY_INVALID");
     }
-    match TcpStream::connect_timeout(&SocketAddr::V4(local), Duration::from_millis(100)) {
+    endpoint_proof(
+        |timeout| TcpStream::connect_timeout(&SocketAddr::V4(local), timeout).map(drop),
+        || TcpListener::bind(local).map(drop),
+    )
+}
+fn endpoint_proof(
+    connect: impl FnOnce(Duration) -> std::io::Result<()>,
+    bind: impl FnOnce() -> std::io::Result<()>,
+) -> Result<()> {
+    // Windows can take about two seconds to return WSAECONNREFUSED even on a
+    // closed loopback endpoint. A 100 ms deadline rejected every free endpoint
+    // in the actual Windows oracle. Timeout is still unknown, never absence.
+    match connect(Duration::from_secs(3)) {
         Err(error) if error.kind() == ErrorKind::ConnectionRefused => (),
         _ => return Err("ENDPOINT_IN_USE"),
     }
     // A connect refusal is not enough: independently prove a bind can be obtained.
     // SSH's ExitOnForwardFailure still handles an external listener winning after this check.
-    drop(TcpListener::bind(local).map_err(|_| "ENDPOINT_IN_USE")?);
+    bind().map_err(|_| "ENDPOINT_IN_USE")?;
     Ok(())
 }
 impl Platform for WindowsPlatform<'_> {
@@ -137,6 +149,37 @@ impl Platform for WindowsPlatform<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn endpoint_proof_requires_refusal_and_bind_with_a_bounded_windows_budget() {
+        let refused = |timeout| {
+            assert_eq!(timeout, Duration::from_secs(3));
+            Err(std::io::Error::from(ErrorKind::ConnectionRefused))
+        };
+        assert_eq!(endpoint_proof(refused, || Ok(())), Ok(()));
+        assert_eq!(
+            endpoint_proof(refused, || Err(std::io::Error::from(ErrorKind::AddrInUse))),
+            Err("ENDPOINT_IN_USE")
+        );
+        assert_eq!(
+            endpoint_proof(|_| Ok(()), || panic!("connected endpoint cannot be absent")),
+            Err("ENDPOINT_IN_USE")
+        );
+        for kind in [
+            ErrorKind::TimedOut,
+            ErrorKind::WouldBlock,
+            ErrorKind::PermissionDenied,
+            ErrorKind::AddrNotAvailable,
+            ErrorKind::ConnectionReset,
+        ] {
+            assert_eq!(
+                endpoint_proof(
+                    |_| Err(std::io::Error::from(kind)),
+                    || panic!("unknown connection outcome cannot become bind-only proof"),
+                ),
+                Err("ENDPOINT_IN_USE")
+            );
+        }
+    }
     fn endpoint_diagnostics(label: &str, local: SocketAddrV4) {
         // Only addresses allocated by this fixture. Report no private endpoint data.
         // Keep the positive production oracle below: a timeout must not become absence.
