@@ -15,6 +15,8 @@ use tokio::{
 };
 
 const TOKEN: &str = "fixture-token-never-log";
+// macOS assigns 127.0.0.1, not every address in 127/8. Ephemeral ports isolate peers.
+const LOOPBACK: &str = "127.0.0.1:0";
 fn generation() -> ProbeGeneration {
     ProbeGeneration {
         epoch: "test-epoch".into(),
@@ -123,7 +125,7 @@ impl Peer {
     }
 }
 async fn peer(mode: &'static str) -> Peer {
-    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let listener = TcpListener::bind(LOOPBACK).await.unwrap();
     let addr = endpoint(&listener);
     let cert = rcgen::generate_simple_self_signed(vec!["fixture.invalid".into()]).unwrap();
     let pin = digest(cert.cert.der());
@@ -437,7 +439,7 @@ async fn bat_deadline_does_not_restart_at_workspace_and_cancel_drops_socket() {
     assert!(!out.workspace);
     peer.finish().await;
 
-    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let listener = TcpListener::bind(LOOPBACK).await.unwrap();
     let config = bat_config(endpoint(&listener), "00".repeat(32));
     let (accepted, connected) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
@@ -495,7 +497,7 @@ async fn http_peer(
     extra: String,
     drip: bool,
 ) -> (ConnectorProbeConfig, JoinHandle<String>) {
-    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let listener = TcpListener::bind(LOOPBACK).await.unwrap();
     let config = connector_config(endpoint(&listener));
     let task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -615,7 +617,7 @@ async fn connector_http_failures_duplicate_json_utf8_and_body_bounds_are_closed(
 }
 #[tokio::test]
 async fn connector_does_not_follow_redirect_or_forward_observe_token() {
-    let destination = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let destination = TcpListener::bind(LOOPBACK).await.unwrap();
     let (config, task) = http_peer(
         302,
         vec![],
@@ -646,7 +648,7 @@ async fn connector_total_body_deadline_and_missing_credential_never_fallback() {
     assert_eq!(out.code, Some("PROBE_TIMEOUT"));
     assert!(start.elapsed() < Duration::from_secs(1));
     task.await.unwrap();
-    let listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let listener = TcpListener::bind(LOOPBACK).await.unwrap();
     let config = connector_config(endpoint(&listener));
     let out = connector_probe(
         &config,
@@ -675,7 +677,7 @@ async fn configuration_bounds_precede_network_and_readiness_cannot_relabel_old_r
     )
     .await;
     assert_eq!(out.code, Some("INVENTORY_INVALID"));
-    let closed = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let closed = TcpListener::bind(LOOPBACK).await.unwrap();
     config.endpoint = endpoint(&closed);
     drop(closed);
     let down = bat_probe(
