@@ -566,3 +566,64 @@ async def test_standalone_initial_read_loss_is_proven_unsent(daemon, mock, monke
     assert out["status"] == "succeeded" and item["answer"]["code"] == "BULK_NOT_SENT", out
     assert not item["answer"]["unproven"] and not api.write_frames(mock)
     await daemon.fleet.close()
+
+
+@pytest.mark.parametrize("second_due,expected", [(120, 30), (12, 12), (None, 1)])
+async def test_parent_wait_follows_earliest_child_deadline_with_bounds(daemon, mock, second_due, expected):
+    import time
+
+    from bat_agent_connector.operations import OpContext, Wait
+    adopt(SID, agent_preset="codex-agent")
+    adopt(api.MANUAL)
+    pending(mock)
+    pending(mock, api.MANUAL)
+    _, principal = caller(daemon)
+    doc = await bulk_approval.preview(daemon.ops, principal, {"host": "h1"})
+    body = request(doc)
+    body["params"]["selection"] = [{"item_id": i["item_id"], "mode": None} for i in doc["items"] if i["eligible"]]
+    op, _ = daemon.ops.create(principal, **body)
+    with pytest.raises(Wait):
+        await bulk_approval.run(OpContext(daemon.ops, daemon.ops._row(op["operation_id"])))
+    children = list(daemon.ops.get(op["operation_id"])["external_refs"]["bulk_children"].values())
+    for child, delay in zip(children, (600, second_due)):
+        if delay is not None:
+            daemon.ops._transition(child, "running")
+            daemon.ops._transition(child, "uncertain", next_run_at=time.time() + delay)
+    with pytest.raises(Wait) as waiting:
+        await bulk_approval.run(OpContext(daemon.ops, daemon.ops._row(op["operation_id"])))
+    assert expected - 1 <= waiting.value.delay_s <= expected
+    assert len(daemon.ops.list()["operations"]) == 3 and not api.write_frames(mock)
+    await daemon.fleet.close()
+
+
+@pytest.mark.parametrize("control", ["cancel", "resume"])
+async def test_explicit_parent_controls_clear_wait_deadline(daemon, mock, control):
+    import time
+
+    from bat_agent_connector.operations import OpContext, Wait
+    adopt(SID, agent_preset="codex-agent")
+    pending(mock)
+    _, principal = caller(daemon)
+    doc = await bulk_approval.preview(daemon.ops, principal, {"host": "h1"})
+    op, _ = daemon.ops.create(principal, **request(doc))
+    with pytest.raises(Wait):
+        await bulk_approval.run(OpContext(daemon.ops, daemon.ops._row(op["operation_id"])))
+    child = next(iter(daemon.ops.get(op["operation_id"])["external_refs"]["bulk_children"].values()))
+    daemon.ops._transition(child, "running")
+    daemon.ops._transition(child, "uncertain", next_run_at=time.time() + 600)
+    await daemon.ops._execute(op["operation_id"])
+    assert daemon.ops.get(op["operation_id"])["next_run_at"] >= time.time() + 28
+    if control == "resume":
+        daemon.ops._transition(child, "needs_attention")
+        await daemon.ops._execute(op["operation_id"])
+        assert daemon.ops.get(op["operation_id"])["status"] == "needs_attention"
+    result = getattr(daemon.ops, control)(principal, op["operation_id"])
+    assert result["status"] == "running" and result["next_run_at"] <= time.time()
+    if control == "resume":
+        resumed = daemon.ops.get(child)
+        assert resumed["status"] == "running" and resumed["next_run_at"] <= time.time()
+    else:
+        result = await settle_batch(daemon, op["operation_id"])
+        assert result["status"] == "cancelled" and daemon.ops.get(child)["status"] == "cancelled"
+        assert not api.write_frames(mock)
+    await daemon.fleet.close()
