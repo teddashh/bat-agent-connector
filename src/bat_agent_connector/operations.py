@@ -48,7 +48,7 @@ ALLOWED = {
 }
 UNCERTAIN_RETRY_S = (30.0, 60.0, 120.0, 300.0, 600.0)
 NO_KEY_PREFIX = "batc:nokey:"
-LEGACY_SESSION_ACTIONS = frozenset({"fanout.plan", "fanout.start", "session.relay", "session.start", "session.send", "session.answer", "session.interrupt", "session.permissions", "session.approve_pending"})
+LEGACY_SESSION_ACTIONS = frozenset({"session.failover", "fanout.plan", "fanout.start", "session.relay", "session.start", "session.send", "session.answer", "session.interrupt", "session.permissions", "session.approve_pending"})
 LEGACY_TASK_ACTIONS = frozenset({"task.pause", "task.resume", "task.mark_stage",
                                  "task.verify", "task.request_ted", "task.command.reconcile"})
 
@@ -220,12 +220,15 @@ class OpContext:
             self.set_refs(**values)
 
     async def step(self, name: str, fn: Callable[[], Awaitable[dict]], *, request: dict | None = None,
-                   reconcile: Callable[[dict], Awaitable[dict | None]] | None = None) -> dict:
+                   reconcile: Callable[[dict], Awaitable[dict | None]] | None = None,
+                   receipt_only: bool = False) -> dict:
         """Run one external call exactly once from this record's point of view.
 
         A finished step returns its stored response. A step whose earlier run never recorded an outcome (process
         restart, timeout, lost connection) is ``uncertain``: ``reconcile`` reads the outside world back and returns
         the response, or None when the outcome still cannot be proven. The call is never repeated.
+        Internal receipt_only permits proven local bookkeeping after cancellation,
+        never a BAT/provider effect. Its caller must first prove every required ACK.
         """
         db = self.service.db
         row = db.execute("SELECT * FROM operation_steps WHERE operation_id=? AND name=?",
@@ -248,14 +251,16 @@ class OpContext:
                 self.service._step_done(self.operation_id, name, recovered, reconciled=True)
                 return recovered
             try:  # proven not to have happened: a cancel requested meanwhile stops here instead of sending it now
-                self.check_cancel()
+                if not receipt_only:
+                    self.check_cancel()
             except Cancelled:
                 self.service._step_status(self.operation_id, name, "failed",
                                           error={"code": "CANCELLED", "message": "proven not sent; cancelled"})
                 raise
             self.service._step_restart(self.operation_id, name, request or {})
         else:
-            self.check_cancel()
+            if not receipt_only:
+                self.check_cancel()
             self.service._step_start(self.operation_id, name, request or {})
         try:
             response = await fn()
@@ -528,6 +533,9 @@ class OperationService:
         self._may_steer(principal, op, "cancel")
         if op["status"] in TERMINAL:
             return op
+        if op["action"] == "session.failover":
+            from .failover_operations import cancel
+            return cancel(self, principal, op)
         if op["action"] in {"session.relay", "fanout.plan", "fanout.start"}:
             from .orchestration_operations import cancel
             return cancel(self, principal, op)
@@ -658,7 +666,7 @@ class OperationService:
             self._transition(operation_id, "failed", error_code="UNKNOWN_ACTION",
                              reason=f"no handler for {op['action']} in this connector version")
             return
-        if op["cancel_requested"] and op["status"] not in {"running", "uncertain"} and op["action"] not in {"session.approve_pending", "session.relay", "fanout.plan", "fanout.start"}:
+        if op["cancel_requested"] and op["status"] not in {"running", "uncertain"} and op["action"] not in {"session.failover", "session.approve_pending", "session.relay", "fanout.plan", "fanout.start"}:
             self._transition(operation_id, "cancelled", reason="cancelled before the next step")
             return
         if op["status"] != "running":

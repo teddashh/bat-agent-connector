@@ -1006,6 +1006,28 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
                          annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=False))
 
     if not read_only:
+        async def session_failover(host: str, session_id: str | None = None, confirm: bool = False,
+            all_exhausted: bool = False, dry_run: bool = False, model: str | None = None, force: bool = False,
+            workspace: str | None = None, instructions: str | None = None, archive_only: bool = False,
+            tail_messages: int = 12, idempotency_key: str | None = None) -> dict[str, Any]:
+            """ORCHESTRATE. Central durable standalone Claude-to-Codex continuation in the fixed managed
+            carrier. Requires start+operate and confirm; dry_run requires observe. Exact source, prompt and
+            successor stay fixed. force only bypasses quota classification, never writer/task/confinement
+            gates. Old source stays readable/stoppable; its writes are fenced while the successor owns the
+            carrier. Lost handoff reply never resends. Preserve original key/operation; no key creates an
+            independent request. Existing successors return evidence, never adopted. No direct fallback.
+            archive_only retains existing archive policy; reclaim resources through reviewed cleanup."""
+            out = await principal_daemon("session_failover", confirm or dry_run, host=host, session_id=session_id,
+                confirm=confirm, all_exhausted=all_exhausted, dry_run=dry_run, model=model, force=force,
+                workspace=workspace, instructions=instructions, archive_only=archive_only, tail_messages=tail_messages,
+                idempotency_key=idempotency_key)
+            if out.get("operation_status") in {"failed", "cancelled"}:
+                raise ToolError(json.dumps(out, ensure_ascii=False))
+            return out
+        mcp.add_tool(_wrap(session_failover), name="session_failover",
+                     annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=False))
+
+    if not read_only:
         async def session_relay(host: str, message: str, workspace: str | None = None,
             session_id: str | None = None, channel: str | None = None, thread: str | None = None,
             earlier: list[str] | None = None, brief: dict | str | None = None,
@@ -1073,33 +1095,6 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
                 fleet, host, session_id, confirm, delete_branch, allow_unmerged, discard_uncommitted
             )
 
-        async def session_failover(
-            host: str,
-            session_id: str | None = None,
-            confirm: bool = False,
-            all_exhausted: bool = False,
-            dry_run: bool = False,
-            model: str | None = None,
-            force: bool = False,
-            workspace: str | None = None,
-            instructions: str | None = None,
-            archive_only: bool = False,
-        ) -> dict[str, Any]:
-            """ORCHESTRATE. Continue a connector-managed Claude session that is stuck on its usage quota with a NEW
-            Codex session in the same connector-owned worktree and branch, sending a handoff prompt
-            (original task, latest instruction, recent output, git state). The old session is not touched.
-            Pass session_id, or all_exhausted=true for every quota-exhausted Claude session on the host
-            (max_start_per_call). Refuses sessions that do not look exhausted unless force=true. Idempotent per
-            old session. model defaults to the host's codex_model. instructions (single session only) replace the
-            default "continue the task" steps, e.g. "only commit the work in progress"; archive_only=true means
-            the session is marked archive-only. Reclaim its resources through cleanup_preview and cleanup_apply;
-            release_undelivered preserves its commits and branch. Returns old/new session ids, cwd, branch, same_worktree.
-            Requires confirm=true."""
-            return await lifecycle.session_failover(
-                fleet, host, session_id, confirm, all_exhausted, dry_run, model, force, 12, workspace,
-                instructions, archive_only,
-            )
-
         async def session_cleanup(
             host: str, confirm: bool = False, dry_run: bool = True, session_id: str | None = None
         ) -> dict[str, Any]:
@@ -1122,7 +1117,6 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
         for fn in (
             worktree_merge,
             worktree_remove,
-            session_failover,
             session_cleanup,
             session_record_verification,
         ):

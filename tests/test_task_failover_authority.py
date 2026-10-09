@@ -9,8 +9,11 @@ from bat_agent_connector import cli, lifecycle, registry, task_control
 from bat_agent_connector.errors import TaskControlRefused
 from bat_agent_connector.mcp_server import build_server
 from bat_agent_connector.task_daemon import TaskDaemon
+from tests import test_api_v1 as api
 from tests.conftest import make_config
 from tests.test_lifecycle import _add_wt_claude
+
+daemon, served = api.daemon, api.served
 
 
 @pytest.fixture
@@ -143,10 +146,13 @@ async def test_a07_coordinator_failover_uses_reserved_authority_end_to_end(failo
 
 
 @pytest.mark.parametrize("door", ["mcp", "cli"])
-async def test_a07_standalone_failover_transport_contract_is_unchanged(mock, monkeypatch, door):
+async def test_a07_standalone_failover_arguments_use_the_central_owner(served, mock, monkeypatch, door):
     sid = _add_wt_claude(mock)
-    config = make_config(mock, writes=True, orchestrate=True, managed_roots=["/srv/demo"],
-                         safety={"write_min_interval_s": 0})
+    d, port = served
+    config = d.fleet.config
+    mock.handlers['git:log'] = lambda p: [{'hash': 'a' * 40}]
+    monkeypatch.setenv('BATC_TASK_URL', f'http://127.0.0.1:{port}/rpc')
+    monkeypatch.setenv('BATC_API_TOKEN', api.token(d, 'standalone-failover', 'start', 'operate'))
     if door == "mcp":
         server, fleet = build_server(config)
         try:
