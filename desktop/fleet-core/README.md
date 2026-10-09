@@ -1,8 +1,10 @@
 # Native Fleet core
 
 Internal Rust library for the existing Fleet inventory, profile pairing, independent local selections,
-bounded configuration snapshots, process identity decisions and bounded recovery. It performs no process or network effects and is not
-yet connected to the desktop Fleet adapter. This source slice does not establish Rust Fleet parity.
+bounded configuration snapshots, locked selection updates, process identity decisions and bounded recovery.
+The Windows OS adapter can stop only explicitly
+verified local processes through retained handles; it has no network or automatic startup effects and
+is not yet connected to the desktop Fleet adapter. This source slice does not establish Rust Fleet parity.
 
 Port basis: Fleet Kit `2ec4b11bc010bfd669040e942648c741b63d0b7c`, `client/fleet-core.ps1` and
 `client/fleet-client.ps1`. Reviewed main `4744507354466b1424b8ea369a00a94f1ca3a933` has no intervening
@@ -33,3 +35,11 @@ file and atomically replaces only `fleet-client.json`. Unknown ownership and dir
 The public preference revision remains the PowerShell primary-byte digest; callers must retain the
 private Snapshot too, so changes to legacy choices cannot hide behind an absent primary file.
 Windows uses `windows::PreferenceLock` from the companion OS adapter; Unix fixtures use File locking.
+
+Windows boundaries are in `windows` and tested independently from the platform-neutral
+`process_adapter` decisions. `MonitorMutex::try_acquire()` uses the PowerShell account mutex and
+must stay on one supervisor thread. `PreferenceLock::{try_acquire,acquire}` opens the same `.lock`
+sidecar with zero sharing; keep the guard alive through the entire preference CAS/publication.
+Process arguments and paths remain native-only evidence, never frontend status. See
+[the Windows adapter contract](../../docs/design/fleet-windows.md) for the exact interfaces,
+legacy creation-time format, NT command-line limitations and pending Windows execution evidence.
