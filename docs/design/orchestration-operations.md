@@ -84,3 +84,10 @@ CAS 仍屬此 incarnation 時才 retire；不刪 worktree／branch／tab，不�
 MCP fanout_plan_session／fanout_from_plan 與 CLI fanout-plan／fanout-start／fanout PLAN --start 全進入中央；
 保留 confirm、read-only、optional explicit key、無 key 各自獨立。CLI 解析檔案本身純本機，未 --start 不呼叫寫 API。
 Standalone failover／task no-key 仍是下一片，不借此開回 raw fallback 或 parallel authority。
+
+### Planner runtime 的缺值也是固定身分
+
+來源選定時保存 `runtime_loaded` 與 SDK/cwd 的完整投影（包含 null）。原先 unloaded 或歷史 receipt
+沒有正向 loaded 證據時，後來出現的 runtime 不可被本操作 stop；partial metadata 的缺值後來補上也視為
+身分改變。這項比較在初次 stop 檢查、最後 frame 及重啟讀回皆成立。已成功的 children 保留，cleanup
+回報 retained，worktree 與 capacity 不自動退休；穩定的 unloaded readback 仍可用於原操作的退休證據。
