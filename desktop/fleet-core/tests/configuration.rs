@@ -6,7 +6,7 @@ use std::path::Path;
 mod support;
 use support::Fixture;
 
-fn binding_preimage(fixture: &Fixture) -> String {
+fn expected_root(fixture: &Fixture) -> std::path::PathBuf {
     // Independent expected existing root: the final path of this synthetic
     // directory expands 8.3 aliases. Production deliberately does not use
     // canonicalize because arbitrary configured paths can contain reparse points.
@@ -17,6 +17,11 @@ fn binding_preimage(fixture: &Fixture) -> String {
     };
     #[cfg(not(windows))]
     let root = fixture.0.clone();
+    root
+}
+
+fn binding_preimage(fixture: &Fixture) -> String {
+    let root = expected_root(fixture);
     let mut expected = String::from("desktop-configuration-v1\n");
     for relative in [
         "kit/fleet-inventory.json",
@@ -131,8 +136,9 @@ fn bom_is_parsed_but_still_changes_binding_and_oversized_or_malformed_data_refus
 #[test]
 fn data_directory_rechecks_migration_and_refuses_file_instead_of_directory() {
     let fixture = Fixture::new();
-    let old = fixture.0.join("org.tonyq.better-agent-terminal");
-    let new = fixture.0.join("BetterAgentTerminal");
+    let root = expected_root(&fixture);
+    let old = root.join("org.tonyq.better-agent-terminal");
+    let new = root.join("BetterAgentTerminal");
     assert_eq!(data_directory(&fixture.0).unwrap(), new);
     assert!(!new.exists());
     std::fs::create_dir(&old).unwrap();
