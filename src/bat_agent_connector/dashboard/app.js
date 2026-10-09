@@ -2,6 +2,35 @@
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		sessions_label: "標題",
+		sessions_workspace: "工作區",
+		sessions_workspace_id: "工作區 ID",
+		sessions_id: "工作階段 ID",
+		sessions_title: "工作階段",
+		sessions_intro: "依主機與工作區整理工作階段，保留人工工作與過往紀錄。",
+		sessions_search: "搜尋已載入的工作階段",
+		sessions_workspaces: "已載入的工作區",
+		sessions_scope_note: "數量只計算已載入的頁面。",
+		sessions_all_loaded: "全部已載入",
+		sessions_loaded_count: "{count} 筆",
+		sessions_projects: "前往專案與工作項目",
+		sessions_workspace_unknown: "工作區未記錄",
+		sessions_workspace_unverified: "未記錄工作區 ID",
+		sessions_scope_missing: "所選工作區目前沒有資料",
+		sessions_no_matches: "目前範圍沒有符合的工作階段。",
+		sessions_more_hint: "還有頁面尚未載入。可載入更多，或調整搜尋與篩選。",
+		sessions_empty_hint: "可調整搜尋、主機或存取方式；未出現在這裡不代表工作已結束。",
+		sessions_showing: "顯示 {shown} 筆 · 已載入 {loaded} 筆",
+		sessions_page_note: "搜尋與工作區選擇只套用到已載入頁面。",
+		sessions_manual: "人工建立",
+		sessions_connector: "Connector 建立",
+		sessions_origin_unknown: "來源未確認",
+		sessions_access_unknown: "存取方式未確認",
+		sessions_details: "狀態與紀錄",
+		sessions_runtime_stale: "活動與待回覆資訊尚未重新確認。",
+		sessions_not_seen: "最近掃描未見",
+		sessions_stale: "觀測待更新",
+		sessions_activity_unknown: "活動狀態未確認",
 		permissions_title: "Session 權限",
 		permissions_mode: "要求的模式",
 		permissions_default: "一般權限",
@@ -297,12 +326,30 @@ var STRINGS = {
 		dep_generation: "環境第 {generation} 代",
 		offline_actions_paused: "中央離線，暫停操作",
 		sync_waiting: "等待更新，草稿已保留",
+		desktop_add_credential: "新增憑證",
+		desktop_replace_credential: "更換憑證",
+		desktop_forget_credential: "移除此電腦儲存的憑證",
+		desktop_reload_configuration: "重新載入設定",
+		desktop_connecting: "正在處理連線…",
+		desktop_endpoint: "中央位置",
+		desktop_expected_actor: "預期身分",
+		desktop_configuration_file: "設定檔",
+		desktop_credential_source: "憑證來源",
+		desktop_source_launch_environment: "本次啟動的記憶體憑證",
+		desktop_source_windows_credential_manager: "Windows 認證管理員",
+		desktop_enrollment_help: "在 Windows 對話框的密碼欄輸入 Connector API token。驗證身分後，才會儲存供此 Windows 帳戶下次使用。",
+		desktop_enrollment_unsupported: "此平台尚未支援保護儲存與憑證輸入。可使用啟動時提供的記憶體憑證；不會儲存至磁碟。",
+		desktop_forget_help: "只移除此電腦的已儲存憑證並中斷連線；不會撤銷中央 token。草稿與原操作識別仍保留。",
+		desktop_forgotten: "已移除本機憑證並中斷連線。",
+		desktop_reloaded: "已重新載入設定。請驗證連線；原草稿仍保留。",
+		desktop_disconnected: "已中斷連線；中央工作仍繼續。",
+		desktop_enrollment_cancelled: "已取消憑證輸入，保留原連線。",
 		desktop_connection: "桌面中央連線",
 		desktop_local: "本機功能",
 		desktop_connect_needed: "請連到已配置的中央 Connector。",
 		desktop_polling: "已連線 · 每秒更新",
 		desktop_config_needed: "尚未配置中央連線。",
-		desktop_credential_missing: "本機憑證尚未提供，請依桌面安裝說明設定後重新啟動。",
+		desktop_credential_missing: "尚未提供可用的本機憑證。",
 		desktop_credential_help: "中央位置與身份由本機設定指定；憑證保留在原生程式，不存入此畫面。",
 		desktop_dashboard_only: "Dashboard 無需安裝 BAT。本機 Fleet 可使用已配置的 Kit 管理連線。開啟 BAT、原生附件、登入自啟與更新尚未提供。關閉視窗會留在系統匣；退出程式不會停止中央工作或 Fleet。",
 		fleet_title: "本機 Fleet 連線",
@@ -457,7 +504,7 @@ var STRINGS = {
 		ev_work_item_pinned: "固定",
 		ev_work_item_unpinned: "取消固定",
 		nav_home: "待處理",
-		nav_sessions: "Sessions",
+		nav_sessions: "工作階段",
 		nav_delivery: "成果與 GitHub",
 		nav_operations: "操作紀錄",
 		nav_settings: "連線",
@@ -657,6 +704,35 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		sessions_label: "Title",
+		sessions_workspace: "Workspace",
+		sessions_workspace_id: "Workspace ID",
+		sessions_id: "Session ID",
+		sessions_title: "Sessions",
+		sessions_intro: "Browse sessions by host and workspace, with manual work and earlier records kept in view.",
+		sessions_search: "Search loaded sessions",
+		sessions_workspaces: "Loaded workspaces",
+		sessions_scope_note: "Counts cover loaded pages only.",
+		sessions_all_loaded: "All loaded sessions",
+		sessions_loaded_count: "{count} loaded",
+		sessions_projects: "Projects and work items",
+		sessions_workspace_unknown: "Workspace not recorded",
+		sessions_workspace_unverified: "No recorded workspace ID",
+		sessions_scope_missing: "Selected workspace is not in this view",
+		sessions_no_matches: "No matching sessions in this view.",
+		sessions_more_hint: "More pages are available. Load more, or adjust your search and filters.",
+		sessions_empty_hint: "Adjust your search, host or access filter. Absence from this view does not mean work has ended.",
+		sessions_showing: "Showing {shown} · {loaded} loaded",
+		sessions_page_note: "Search and workspace selection cover loaded pages only.",
+		sessions_manual: "Manual",
+		sessions_connector: "Connector created",
+		sessions_origin_unknown: "Origin unknown",
+		sessions_access_unknown: "Access unknown",
+		sessions_details: "Status and records",
+		sessions_runtime_stale: "Activity and pending requests have not been rechecked.",
+		sessions_not_seen: "Not in latest scan",
+		sessions_stale: "Observation needs updating",
+		sessions_activity_unknown: "Activity unknown",
 		permissions_title: "Session permissions",
 		permissions_mode: "Requested mode",
 		permissions_default: "Normal permissions",
@@ -952,12 +1028,30 @@ var STRINGS = {
 		dep_generation: "Environment generation {generation}",
 		offline_actions_paused: "Central offline · actions paused",
 		sync_waiting: "Waiting to refresh · draft preserved",
+		desktop_add_credential: "Add credential",
+		desktop_replace_credential: "Replace credential",
+		desktop_forget_credential: "Forget saved credential",
+		desktop_reload_configuration: "Reload configuration",
+		desktop_connecting: "Connection in progress…",
+		desktop_endpoint: "Central address",
+		desktop_expected_actor: "Expected identity",
+		desktop_configuration_file: "Configuration file",
+		desktop_credential_source: "Credential source",
+		desktop_source_launch_environment: "Memory-only launch credential",
+		desktop_source_windows_credential_manager: "Windows Credential Manager",
+		desktop_enrollment_help: "Enter the Connector API token in the Windows dialog’s Password field. After identity verification, it is saved for this Windows account’s next login.",
+		desktop_enrollment_unsupported: "Protected storage and credential entry are not available on this platform yet. A launch credential can be used in memory; it is never saved to disk.",
+		desktop_forget_help: "Removes this computer’s saved credential and disconnects; it does not revoke the central token. Drafts and original operation IDs stay saved.",
+		desktop_forgotten: "Saved credential removed and disconnected.",
+		desktop_reloaded: "Configuration reloaded. Verify the connection to continue; existing drafts stay saved.",
+		desktop_disconnected: "Disconnected. Central work continues.",
+		desktop_enrollment_cancelled: "Credential entry cancelled. The existing connection is unchanged.",
 		desktop_connection: "Desktop central connection",
 		desktop_local: "Local capabilities",
 		desktop_connect_needed: "Connect to the configured central Connector.",
 		desktop_polling: "connected · updates every second",
 		desktop_config_needed: "Central connection is not configured.",
-		desktop_credential_missing: "Native credential unavailable. Follow desktop setup and restart the app.",
+		desktop_credential_missing: "No native credential is available yet.",
 		desktop_credential_help: "The central address and expected identity come from local configuration. Credentials stay in the native app, outside this page.",
 		desktop_dashboard_only: "Dashboard is available without BAT installed. Local Fleet connections use your configured Kit. Opening BAT, native attachments, login autostart and updates are not available yet. Closing the window keeps the app in the tray; quitting does not stop central work or Fleet.",
 		fleet_title: "Local Fleet connections",
@@ -1328,6 +1422,9 @@ var nativeDesktop = isTauri();
 var nativeStatus = () => invoke("native_status");
 var nativeConnect = () => invoke("connector_connect");
 var nativeDisconnect = () => invoke("connector_disconnect");
+var nativeEnroll = () => invoke("connector_enroll", { locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US" });
+var nativeReloadConfiguration = () => invoke("connector_reload_configuration");
+var nativeForgetCredential = () => invoke("connector_forget_credential");
 var openExternal = (url) => invoke("open_external", { url });
 var fleetAvailability = () => invoke("fleet_availability");
 var fleetRequest = (input) => invoke("fleet_request", { input });
@@ -1549,6 +1646,80 @@ async function mountFleet(main, { h, t }) {
 		disposed = true;
 		clearTimeout(timer);
 		panel.remove();
+	};
+}
+//#endregion
+//#region src/state/sessions.js
+var text = (value) => typeof value === "string" ? value : "";
+function workspaceGroup(session) {
+	const host = text(session.host), id = text(session.workspace_id), name = text(session.workspace);
+	return {
+		key: JSON.stringify([
+			host,
+			id ? "id" : name ? "label" : "unknown",
+			id || name
+		]),
+		host,
+		id,
+		name
+	};
+}
+function groupedSessions(sessions) {
+	const groups = new Map();
+	for (const session of sessions) {
+		const group = workspaceGroup(session);
+		if (!groups.has(group.key)) groups.set(group.key, {
+			...group,
+			sessions: []
+		});
+		groups.get(group.key).sessions.push(session);
+	}
+	return [...groups.values()].sort((a, b) => a.host.localeCompare(b.host) || (a.name || a.id).localeCompare(b.name || b.id) || a.key.localeCompare(b.key));
+}
+function matchesSession(session, query) {
+	const haystack = [
+		session.title,
+		session.session_id,
+		session.host,
+		session.workspace,
+		session.workspace_id,
+		session.agent_kind,
+		session.model,
+		session.worktree_branch
+	].map(text).join("\n").toLocaleLowerCase();
+	return query.trim().toLocaleLowerCase().split(/\s+/).every((word) => haystack.includes(word));
+}
+function runtimeStale(session) {
+	return Boolean(session.stale || session.fields_stale || session.state?.evidence?.activity?.stale);
+}
+function sessionActivity(session) {
+	if (session.pending) return {
+		key: "pending_" + session.pending.kind,
+		tone: "stale"
+	};
+	if (session.state?.lifecycle === "ended") return {
+		key: "obs_value_ended",
+		tone: ""
+	};
+	if (session.gone_at || ["gone", "missing"].includes(session.state?.enumeration)) return {
+		key: "sessions_not_seen",
+		tone: "stale"
+	};
+	if (runtimeStale(session)) return {
+		key: "sessions_stale",
+		tone: "stale"
+	};
+	if (session.streaming === true) return {
+		key: "obs_value_streaming",
+		tone: "info"
+	};
+	if (session.streaming === false) return {
+		key: "obs_value_not_streaming",
+		tone: ""
+	};
+	return {
+		key: "sessions_activity_unknown",
+		tone: ""
 	};
 }
 //#endregion
@@ -2175,6 +2346,9 @@ var state = {
 	sync: null,
 	endpoint: "",
 	connectionError: null,
+	nativeBusy: false,
+	nativeAttempt: 0,
+	connectionNotice: null,
 	refreshCycle: null
 };
 async function activate(caps, endpoint = location.origin, reset = false) {
@@ -2190,11 +2364,11 @@ async function activate(caps, endpoint = location.origin, reset = false) {
 	try {
 		bootstrap = await api("GET", "/bootstrap");
 	} catch (e) {
-		if (e.status !== 404) throw e;
+		if (nativeDesktop || e.status !== 404) throw e;
 	}
 	if (bootstrap) {
 		const sync = bootstrap.sync;
-		if (sync?.version !== 1 || !sync.server_id || !sync.principal_id || !Number.isSafeInteger(sync.checkpoint?.cursor) || sync.checkpoint.cursor < 0 || !sync.checkpoint.token || bootstrap.capabilities?.actor !== caps.actor) throw new Error("Invalid central bootstrap identity");
+		if (sync?.version !== 1 || !sync.server_id || !sync.principal_id || !Number.isSafeInteger(sync.checkpoint?.cursor) || sync.checkpoint.cursor < 0 || !sync.checkpoint.token || bootstrap.capabilities?.actor !== caps.actor || caps.desktop_identity && (caps.desktop_identity.server_id !== sync.server_id || caps.desktop_identity.principal_id !== sync.principal_id)) throw new Error("Invalid central bootstrap identity");
 		state.caps = bootstrap.capabilities;
 		state.namespace = storageScope(endpoint, caps.actor, sync.server_id, sync.principal_id);
 		state.sync = sync.checkpoint;
@@ -2338,7 +2512,7 @@ var ApiError = class extends Error {
 };
 async function api(method, path, body, key) {
 	if (!state.token) throw new ApiError(401, "UNAUTHORIZED", t("need_token"));
-	if (method === "POST" && (!state.online || !state.viewReady)) throw new ApiError(0, "CENTRAL_OFFLINE", t("offline_actions_paused"));
+	if (method === "POST" && (state.nativeBusy || !state.online || !state.viewReady)) throw new ApiError(0, "CENTRAL_OFFLINE", t("offline_actions_paused"));
 	const epoch = state.epoch;
 	const { status, data } = await connectorRequest(method, path, body, key, state.token);
 	if (epoch !== state.epoch) throw new ApiError(0, "CONNECTION_CHANGED", "Connection changed while the request was in flight");
@@ -2766,7 +2940,7 @@ function onEvents(fn) {
 async function streamEvents() {
 	const live = document.getElementById("live");
 	for (;;) {
-		if (!state.token || !state.viewReady) {
+		if (state.nativeBusy || !state.token || !state.viewReady) {
 			live.className = "live down";
 			live.textContent = state.token ? t("sync_waiting") : "";
 			await sleep(1e3);
@@ -3014,26 +3188,147 @@ async function viewSessions(main) {
 	const q = new URLSearchParams(sessionStorage.getItem(storageKey) || "");
 	const hostSel = h("select", { "aria-label": t("host") }, h("option", { value: "" }, t("all_hosts")));
 	const accessSel = h("select", { "aria-label": t("all_access") }, h("option", { value: "" }, t("all_access")), h("option", { value: "managed" }, t("only_managed")), h("option", { value: "read_only" }, t("only_read_only")));
-	const list = h("div", { class: "panel" }), status = h("div", {});
+	const search = h("input", {
+		type: "search",
+		"aria-label": t("sessions_search"),
+		placeholder: t("sessions_search")
+	});
+	search.value = q.get("search") || "";
+	let selected = q.get("workspace") || "", cursor = null, pages = 1, serial = Promise.resolve(), revision = 0;
+	const rows = new Map(), expanded = new Set();
+	const list = h("div", { class: "session-inventory" }), status = h("div", {}), count = h("p", {
+		class: "muted",
+		"aria-live": "polite"
+	});
 	const more = h("button", {
 		class: "secondary",
 		hidden: true
 	}, t("load_more"));
-	main.append(h("h1", {}, t("nav_sessions")), h("p", { class: "muted" }, t("obs_inventory_note")), h("div", { class: "filters" }, hostSel, accessSel), status, list, more);
+	const navigation = h("nav", {
+		"aria-label": t("sessions_workspaces"),
+		class: "session-workspaces"
+	});
+	const scope = h("details", {
+		class: "panel session-scope",
+		open: matchMedia("(min-width: 901px)").matches
+	}, h("summary", {}, t("sessions_workspaces")), h("p", { class: "muted" }, t("sessions_scope_note")), navigation, h("a", {
+		class: "session-project-link",
+		href: "#/projects"
+	}, t("sessions_projects")));
+	main.append(h("h1", {}, t("sessions_title")), h("p", { class: "muted" }, t("sessions_intro")), h("div", { class: "filters session-filters" }, search, hostSel, accessSel), status, h("div", { class: "session-layout" }, scope, h("section", {
+		"aria-label": t("sessions_title"),
+		class: "session-results"
+	}, count, list, h("div", { class: "session-pagination" }, more, h("span", { class: "muted" }, t("sessions_page_note"))))));
 	try {
 		const hosts = (await api("GET", "/hosts")).hosts;
 		assertView(connection);
 		for (const x of hosts) hostSel.append(h("option", { value: x.host }, x.host));
-		main.append(h("div", { class: "actions" }, ...hosts.map((x) => h("a", { href: `#/host/${encodeURIComponent(x.host)}` }, x.host, " · ", t("obs_discovery")))));
 	} catch (e) {
 		status.replaceChildren(errorBox(e));
 		return;
 	}
 	hostSel.value = q.get("host") || "";
 	accessSel.value = q.get("access") || "";
-	let cursor = null, pages = 1, serial = Promise.resolve();
-	const rows = new Map();
-	const read = async (mode) => {
+	const save = () => {
+		assertView(connection);
+		const values = new URLSearchParams({
+			host: hostSel.value,
+			access: accessSel.value,
+			search: search.value,
+			workspace: selected
+		});
+		sessionStorage.setItem(storageKey, values.toString());
+	};
+	const row = (session) => {
+		const id = `${session.host}/${session.session_id}`, activity = sessionActivity(session);
+		const origin = session.provenance === "manual" ? "sessions_manual" : session.provenance === "connector_managed" ? "sessions_connector" : "sessions_origin_unknown";
+		const access = session.api_access === "managed" ? "managed" : session.api_access === "read_only" ? "read_only" : "sessions_access_unknown";
+		const evidence = () => [
+			h("dl", { class: "kv" }, h("dt", {}, t("sessions_label")), h("dd", {}, session.title || session.session_id), h("dt", {}, t("sessions_workspace")), h("dd", {}, session.workspace || t("sessions_workspace_unknown")), h("dt", {}, t("sessions_workspace_id")), h("dd", {}, h("code", {}, session.workspace_id || t("obs_unknown"))), h("dt", {}, t("sessions_id")), h("dd", {}, h("code", {}, session.session_id)), h("dt", {}, t("activity")), h("dd", {}, observationTime(session.last_activity_at)), h("dt", {}, t("observed")), h("dd", {}, observationTime(session.observed_at))),
+			h("p", { class: "muted" }, confinementLabel(session)),
+			confinementDetails(session),
+			observationState(session)
+		];
+		const details = h("details", {
+			class: "session-row-details",
+			open: expanded.has(id)
+		}, h("summary", {}, t("sessions_details")));
+		let mounted = false;
+		const mountEvidence = () => {
+			if (!mounted) {
+				details.append(...evidence());
+				mounted = true;
+			}
+		};
+		if (expanded.has(id)) mountEvidence();
+		details.addEventListener("toggle", () => {
+			if (!details.isConnected) return;
+			if (details.open) {
+				expanded.add(id);
+				mountEvidence();
+			} else expanded.delete(id);
+		});
+		return h("article", {
+			class: "session-entry",
+			"data-resource-id": id
+		}, h("div", { class: "session-entry-heading" }, h("a", {
+			class: "title",
+			title: session.title || session.session_id,
+			href: `#/session/${encodeURIComponent(session.host)}/${encodeURIComponent(session.session_id)}`
+		}, session.title || session.session_id), chip(t(activity.key), activity.tone)), h("div", { class: "session-entry-meta" }, h("span", { class: session.api_access === "managed" ? "" : "session-readonly" }, session.provenance === "connector_managed" && session.api_access === "managed" ? t(access) : `${t(origin)} · ${t(access)}`), h("span", {}, [session.agent_kind, session.worktree_branch].filter(Boolean).join(" · "))), runtimeStale(session) ? h("p", { class: "session-stale muted" }, t("sessions_stale"), " · ", session.stale_reason === "gone" ? t("sessions_not_seen") : session.stale_reason ? t("stale_reason_" + session.stale_reason) : t("sessions_runtime_stale")) : null, details);
+	};
+	const render = () => {
+		assertView(connection);
+		const groups = groupedSessions([...rows.values()]);
+		const choose = (key) => {
+			selected = key;
+			save();
+			render();
+		};
+		const workspaceName = (group) => group.name || group.id || t("sessions_workspace_unknown");
+		const navButton = (label, key, n) => h("button", {
+			class: "session-scope-button",
+			"aria-pressed": String(selected === key),
+			"data-workspace-key": key,
+			title: label,
+			onclick: () => choose(key)
+		}, h("span", {}, label), h("span", { class: "muted" }, t("sessions_loaded_count", { count: n })));
+		const links = [navButton(t("sessions_all_loaded"), "", rows.size)];
+		const labels = new Map();
+		const labelKey = (group) => JSON.stringify([group.host, workspaceName(group)]);
+		for (const group of groups) labels.set(labelKey(group), (labels.get(labelKey(group)) || 0) + 1);
+		let lastHost;
+		for (const group of groups) {
+			if (group.host !== lastHost) {
+				links.push(h("a", {
+					class: "session-host-link",
+					href: `#/host/${encodeURIComponent(group.host)}`,
+					title: t("obs_discovery")
+				}, group.host));
+				lastHost = group.host;
+			}
+			const sameName = labels.get(labelKey(group)) > 1;
+			links.push(navButton(workspaceName(group) + (sameName && group.id ? ` · ${group.id}` : ""), group.key, group.sessions.length));
+		}
+		if (selected && !groups.some((group) => group.key === selected)) links.push(navButton(t("sessions_scope_missing"), selected, 0));
+		const focusedKey = navigation.contains(document.activeElement) ? document.activeElement.dataset.workspaceKey : void 0;
+		navigation.replaceChildren(...links);
+		if (focusedKey !== void 0) [...navigation.querySelectorAll("button")].find((button) => button.dataset.workspaceKey === focusedKey)?.focus({ preventScroll: true });
+		let visible = 0;
+		const sections = groups.filter((group) => !selected || selected === group.key).flatMap((group) => {
+			const sessions = group.sessions.filter((session) => matchesSession(session, search.value));
+			if (!sessions.length) return [];
+			visible += sessions.length;
+			return [h("section", { class: "panel session-group" }, h("header", { class: "session-group-heading" }, h("h2", { title: workspaceName(group) }, workspaceName(group)), h("span", { class: "muted" }, group.host), group.name && group.id && labels.get(labelKey(group)) > 1 ? h("code", { class: "muted" }, group.id) : null, group.name && !group.id ? h("span", { class: "muted" }, t("sessions_workspace_unverified")) : null), ...sessions.map(row))];
+		});
+		list.replaceChildren(...sections.length ? sections : [h("div", { class: "panel" }, h("p", {}, t("sessions_no_matches")), h("p", { class: "muted" }, cursor ? t("sessions_more_hint") : t("sessions_empty_hint")))]);
+		count.textContent = t("sessions_showing", {
+			shown: visible,
+			loaded: rows.size
+		});
+	};
+	const read = async (mode, expectedRevision) => {
+		if (expectedRevision !== revision) return;
 		const p = new URLSearchParams({
 			limit: "50",
 			order: "id",
@@ -3041,44 +3336,43 @@ async function viewSessions(main) {
 		});
 		if (hostSel.value) p.set("host", hostSel.value);
 		if (accessSel.value) p.set("access", accessSel.value);
-		sessionStorage.setItem(storageKey, p.toString());
+		save();
 		more.disabled = true;
 		try {
 			assertView(connection);
-			const before = scrollY, anchor = [...list.children].find((node) => node.getBoundingClientRect().bottom > 110);
+			const before = scrollY, anchor = [...list.querySelectorAll("[data-resource-id]")].find((node) => node.getBoundingClientRect().bottom > 110);
 			const anchorID = anchor?.dataset.resourceId, offset = anchor?.getBoundingClientRect().top;
 			const observed = new Map(mode === "more" ? rows : []);
 			let next = mode === "more" ? cursor : null;
-			const count = mode === "refresh" ? pages : 1;
+			const total = mode === "refresh" ? pages : 1;
 			let readPages = 0;
-			for (let page = 0; page < count; page++) {
+			for (let page = 0; page < total; page++) {
 				const query = new URLSearchParams(p);
 				if (next) query.set("cursor", next);
 				const result = await api("GET", `/sessions?${query}`);
 				assertView(connection);
-				for (const session of result.sessions) {
-					const id = `${session.host}/${session.session_id}`;
-					observed.set(id, session);
-					rememberObservation("session", id, { session }, [`host:${session.host}`]);
-				}
+				if (expectedRevision !== revision) return;
+				for (const session of result.sessions) observed.set(`${session.host}/${session.session_id}`, session);
 				readPages++;
 				if (result.next_cursor && result.next_cursor === next) throw new Error("Inventory cursor did not advance");
 				next = result.next_cursor;
 				if (!next) break;
 			}
 			rows.clear();
-			for (const [id, session] of observed) rows.set(id, session);
-			const nodes = [...rows].map(([id, session]) => {
-				const node = sessionRow(session);
-				node.dataset.resourceId = id;
-				return node;
-			});
-			list.replaceChildren(...nodes);
+			for (const [id, session] of observed) {
+				rows.set(id, session);
+				rememberObservation("session", id, { session }, [`host:${session.host}`]);
+			}
 			cursor = next;
 			more.hidden = !cursor;
 			pages = mode === "more" ? pages + readPages : readPages;
+			const focused = document.activeElement;
+			const focusedID = list.contains(focused) ? focused.closest("[data-resource-id]")?.dataset.resourceId : null;
+			const focusedPart = focused?.tagName === "SUMMARY" ? "summary" : focused?.classList.contains("title") ? "a.title" : null;
+			render();
 			status.replaceChildren();
-			const current = [...list.children].find((node) => node.dataset.resourceId === anchorID);
+			if (focusedID && focusedPart && document.activeElement === document.body) [...list.querySelectorAll("[data-resource-id]")].find((node) => node.dataset.resourceId === focusedID)?.querySelector(focusedPart)?.focus({ preventScroll: true });
+			const current = [...list.querySelectorAll("[data-resource-id]")].find((node) => node.dataset.resourceId === anchorID);
 			if (mode === "refresh" && current && Math.abs(scrollY - before) < 1) scrollBy(0, current.getBoundingClientRect().top - offset);
 		} catch (e) {
 			status.replaceChildren(errorBox(e));
@@ -3086,11 +3380,25 @@ async function viewSessions(main) {
 			more.disabled = false;
 		}
 	};
-	const load = (mode) => {
-		serial = serial.then(() => read(mode));
-		return serial;
+	const load = async (mode) => {
+		const expected = revision;
+		serial = serial.then(() => read(mode, expected));
+		let pending;
+		do {
+			pending = serial;
+			await pending;
+		} while (pending !== serial);
 	};
-	hostSel.onchange = accessSel.onchange = () => load("reset");
+	hostSel.onchange = accessSel.onchange = () => {
+		revision++;
+		selected = "";
+		save();
+		return load("reset");
+	};
+	search.oninput = () => {
+		save();
+		render();
+	};
 	more.onclick = () => load("more");
 	await load("reset");
 	const reload = debounceRefresh(() => load("refresh"), 500);
@@ -4653,51 +4961,128 @@ function viewSettings(main) {
 		}
 	}, t("disconnect"))), h("label", {}, remember, " ", t("remember")), h("p", { class: "muted" }, t("token_help")), info));
 }
-async function viewNativeSettings(main) {
-	const info = h("p", { class: "muted" });
-	const endpoint = h("p", { class: "muted" });
-	const fleetRoot = h("div");
-	const connect = h("button", {
-		class: "primary",
-		onclick: async () => {
-			connect.disabled = true;
-			try {
-				const status = await nativeStatus();
-				const caps = await nativeConnect();
+async function nativeTransition(kind) {
+	if (state.nativeBusy && kind !== "disconnect") return;
+	const attempt = ++state.nativeAttempt;
+	const previousOnline = state.online;
+	const previousToken = state.token;
+	state.nativeBusy = true;
+	state.epoch++;
+	state.online = false;
+	state.connectionError = null;
+	state.connectionNotice = null;
+	try {
+		if (kind === "disconnect" || kind === "reload" || kind === "forget") {
+			disconnect();
+			if (kind === "disconnect") await nativeDisconnect();
+			else if (kind === "reload") await nativeReloadConfiguration();
+			else await nativeForgetCredential();
+			if (attempt === state.nativeAttempt) state.connectionNotice = t(kind === "forget" ? "desktop_forgotten" : kind === "reload" ? "desktop_reloaded" : "desktop_disconnected");
+		} else {
+			const status = await nativeStatus();
+			if (attempt !== state.nativeAttempt) return;
+			const caps = kind === "enroll" ? await nativeEnroll() : await nativeConnect();
+			if (attempt !== state.nativeAttempt) return;
+			if (!caps) {
+				state.online = previousOnline;
+				state.connectionNotice = t("desktop_enrollment_cancelled");
+			} else {
 				state.token = "native-credential";
-				await activate(caps, status.endpoint);
-				location.hash = "#/home";
-				route();
-			} catch (e) {
-				disconnect();
-				info.replaceChildren(errorBox(e));
-			} finally {
-				connect.disabled = false;
+				try {
+					await activate(caps, status.endpoint);
+				} catch (error) {
+					if (attempt === state.nativeAttempt) {
+						await nativeDisconnect();
+						disconnect();
+					}
+					throw error;
+				}
+				if (kind === "connect" && attempt === state.nativeAttempt) location.hash = "#/home";
 			}
 		}
-	}, t("connect"));
-	main.append(h("h1", {}, t("nav_settings")), h("div", { class: "panel" }, h("h2", {}, t("desktop_connection")), endpoint, h("p", { class: "muted" }, t("desktop_credential_help")), h("div", { class: "actions" }, connect, h("button", {
-		class: "secondary",
-		onclick: async () => {
-			await nativeDisconnect();
-			disconnect();
-			route();
+	} catch (error) {
+		if (attempt !== state.nativeAttempt) return;
+		state.connectionError = error;
+		if (state.token === previousToken) state.online = previousOnline;
+	} finally {
+		if (attempt === state.nativeAttempt) {
+			state.nativeBusy = false;
+			await route();
 		}
-	}, t("disconnect"))), info), h("div", { class: "panel" }, h("h2", {}, t("desktop_local")), h("p", { class: "note" }, t("desktop_dashboard_only"))), fleetRoot);
-	if (state.caps) info.textContent = t("connected_as", {
-		actor: state.caps.actor,
-		scopes: state.caps.scopes.join(", ")
-	});
-	try {
-		if (!state.caps && state.connectionError) info.replaceChildren(errorBox(state.connectionError));
-		const status = await nativeStatus();
-		endpoint.textContent = status.endpoint || t("desktop_config_needed");
-		if (status.error) info.textContent = status.error;
-		else if (!status.credential_available) info.textContent = t("desktop_credential_missing");
-		connect.disabled = !!status.error || !status.credential_available;
-	} catch (e) {
-		info.replaceChildren(errorBox(e));
 	}
+}
+async function viewNativeSettings(main) {
+	const mine = generation;
+	const info = h("div", { "aria-live": "polite" });
+	const details = h("dl", { class: "kv" });
+	const help = h("p", { class: "muted" }, t("desktop_credential_help"));
+	const platform = h("p", { class: "muted" });
+	const fleetRoot = h("div");
+	const controls = [];
+	const action = (kind, label, cls = "secondary") => {
+		const button = h("button", {
+			class: cls,
+			disabled: true,
+			onclick: () => {
+				for (const control of controls) control.disabled = true;
+				if (kind === "connect" || kind === "enroll") leave.disabled = false;
+				info.textContent = t("desktop_connecting");
+				return nativeTransition(kind);
+			}
+		}, t(label));
+		controls.push(button);
+		return button;
+	};
+	const connect = action("connect", "connect", "primary");
+	const enroll = action("enroll", "desktop_add_credential");
+	const reload = action("reload", "desktop_reload_configuration");
+	const forget = action("forget", "desktop_forget_credential");
+	const leave = action("disconnect", "disconnect");
+	const actions = h("div", { class: "actions" }, connect, enroll, reload, leave);
+	const saved = h("div", {}, h("p", { class: "muted" }, t("desktop_forget_help")), forget);
+	main.append(h("h1", {}, t("nav_settings")), h("section", {
+		class: "panel native-connection",
+		"aria-label": t("desktop_connection")
+	}, h("h2", {}, t("desktop_connection")), details, help, platform, actions, info, saved), h("div", { class: "panel" }, h("h2", {}, t("desktop_local")), h("p", { class: "note" }, t("desktop_dashboard_only"))), fleetRoot);
+	const showInfo = () => {
+		info.replaceChildren();
+		if (state.caps) info.append(h("p", {}, t("connected_as", {
+			actor: state.caps.actor,
+			scopes: state.caps.scopes.join(", ")
+		})));
+		if (state.connectionNotice) info.append(h("p", {}, state.connectionNotice));
+		if (state.connectionError) info.append(errorBox(state.connectionError));
+		if (state.nativeBusy) info.append(h("p", {}, t("desktop_connecting")));
+	};
+	showInfo();
+	try {
+		const status = await nativeStatus();
+		if (mine !== generation || !main.contains(details)) return;
+		const row = (label, value) => {
+			if (value) details.append(h("dt", {}, t(label)), h("dd", {}, value));
+		};
+		row("desktop_endpoint", status.endpoint || t("desktop_config_needed"));
+		row("desktop_expected_actor", status.expected_actor);
+		row("desktop_configuration_file", status.configuration_file);
+		if (status.credential_source) row("desktop_credential_source", t("desktop_source_" + status.credential_source));
+		if (status.error) info.append(errorBox(new Error(status.error)));
+		else if (!status.credential_available) info.append(h("p", {}, t("desktop_credential_missing")));
+		platform.textContent = status.enrollment_supported === true ? t("desktop_enrollment_help") : status.enrollment_supported === false ? t("desktop_enrollment_unsupported") : "";
+		connect.disabled = state.nativeBusy || !!status.error || !status.credential_available;
+		enroll.hidden = status.enrollment_supported !== true;
+		enroll.textContent = t(status.credential_saved ? "desktop_replace_credential" : "desktop_add_credential");
+		enroll.disabled = state.nativeBusy || !status.endpoint || !status.expected_actor;
+		enroll.className = status.credential_available ? "secondary" : "primary";
+		if (!status.credential_available) connect.className = "secondary";
+		reload.hidden = !status.configuration_reload;
+		reload.disabled = state.nativeBusy || !status.configuration_reload;
+		leave.disabled = !state.token && !state.nativeBusy;
+		saved.hidden = !status.credential_saved;
+		forget.disabled = state.nativeBusy || !status.credential_saved;
+	} catch (error) {
+		if (mine === generation) info.append(errorBox(error));
+	}
+	if (mine !== generation) return;
 	return mountFleet(fleetRoot, {
 		h,
 		t
@@ -5847,16 +6232,29 @@ async function route() {
 	state.viewReady = true;
 }
 async function start() {
+	window.addEventListener("hashchange", route);
 	if (nativeDesktop) {
 		clearToken();
+		const attempt = ++state.nativeAttempt;
 		try {
 			const status = await nativeStatus();
-			const caps = await nativeConnect();
-			state.token = "native-credential";
-			await activate(caps, status.endpoint);
+			if (!status.error && status.credential_available) {
+				state.nativeBusy = true;
+				route().catch(() => {});
+				const caps = await nativeConnect();
+				if (attempt === state.nativeAttempt) {
+					state.token = "native-credential";
+					await activate(caps, status.endpoint);
+				}
+			}
 		} catch (error) {
-			disconnect();
-			state.connectionError = error;
+			if (attempt === state.nativeAttempt) {
+				disconnect();
+				state.connectionError = error;
+				await nativeDisconnect().catch(() => {});
+			}
+		} finally {
+			if (attempt === state.nativeAttempt) state.nativeBusy = false;
 		}
 	} else {
 		state.token = loadToken();
@@ -5866,7 +6264,6 @@ async function start() {
 			state.token = null;
 		}
 	}
-	window.addEventListener("hashchange", route);
 	await route();
 	streamEvents();
 }

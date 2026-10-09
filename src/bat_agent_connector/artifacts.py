@@ -121,6 +121,9 @@ def get(db, artifact_id, revision) -> dict:
     source = db.execute("SELECT document FROM artifact_capture_sources WHERE operation_id=?",
                         (out["operation_id"],)).fetchone()
     out["source"] = json.loads(source[0]) if source else {"kind": "upload", "operation_id": out["operation_id"]}
+    out["acceptances"] = [json.loads(r[0]) for r in db.execute(
+        "SELECT document FROM artifact_acceptances WHERE artifact_id=? AND revision=? ORDER BY operation_id",
+        (artifact_id, revision))]
     out["content_url"] = f"/api/v1/artifacts/{artifact_id}/revisions/{revision}/content"
     out["materializations"] = materializations(db, artifact_id=artifact_id, revision=revision)
     return out

@@ -6,6 +6,10 @@ Tauri 第二版計畫 §24，保留 **A01–A10、B01–B05、C01–C07、D01–
 兩份計畫對應同一產品與功能 backlog；Tauri 是更新的介面方向。
 此表不是通過清單：**尚未建立同一候選版本的 installed／live 證據，M1、M2、M3 及完整產品交付均未完成。**
 
+範圍依產品負責人提供的原始對話與後續澄清校正，見 [共同依據](realignment-v2.md#原始需求與後續澄清)。
+程式碼的跨主機同步只針對明確 repository 的已發布 commit；直接搬運未發布 Git objects 不列交付 gate。
+附件 bytes/materialization、同主機固定 checkpoint、人工保護與各情境其餘驗收仍保留，沒有新增通過宣稱。
+
 ## 證據層級與版本
 
 - **主線／分支**：程式所在位置；有程式或測試來源不等於已驗收。本輪彙整已記錄測試與審查證據；本文件更新沒有重跑測試。
@@ -46,6 +50,12 @@ reload/lost reply 與真中央唯讀 bytes/index/refs fixture；`2fc8fd8` 關閉
 [目前實作狀態](implementation-status.md#目前續作) 保留 focused 失敗／修正／重跑與完整 UI 結果。
 這些是 F／N 子集，沒有把 46 項改成 I／L 通過；歷史表格的「尚缺」描述各列固定 commit 的快照。
 
+[#59](https://github.com/teddashh/bat-agent-connector/issues/59) 的候選工作線另加入 Windows 原生憑證
+註冊／保存、固定 bulk approval、managed artifact capture／accept，以及共用 session 清單整理。
+來源、peer findings／修正及分層測試見目前實作狀態；未把 branch 的能力或 isolated fixtures 當作
+已合併、installed 或 live。Native files、start／orchestration、task cleanup、Rust Fleet parity
+及同 RC 的實機矩陣仍是後續工作。
+
 ## 46 項對照
 
 每列的「已有證據」只涵蓋明寫的範圍；「尚缺」包括實作缺口及候選版的驗收前置條件。
@@ -61,7 +71,7 @@ reload/lost reply 與真中央唯讀 bytes/index/refs fixture；`2fc8fd8` 關閉
 | A04 人工／managed 同時新增 tab | M `test_orchestrate.py` 的 append/recheck/concurrent GUI cases；Task Service 預設 headless 邊界。 | **尚未消除 BAT `workspace:save` 整份覆寫 race**。正式路徑須證明原子能力或採 dedicated/headless，不能把「已知 race」當通過。 |
 | A05 同 actor/key 重送與同 key 改內容 | M `test_api_v1.py`、`test_operations_unification.py`；I named-key 跨真 HTTP/MCP/CLI、no-key 明示、固定 prefix；A/B1 upload/capture replay。 | R01 Part B 其餘 mutation 的全入口統一；同 RC 跨兩個 client replay/conflict，保留同 operation／effect。 |
 | A06 Start 送出前、lost ACK、ACK 後讀取失敗、重啟 | M `test_start_rollback.py`、`test_start_claims.py`、`test_confinement_recovery.py`、`test_operation_confinement.py`。 | 真 BAT 各失敗窗口與重啟；原 reservation/session/worktree、sent/readback receipt 不丟，不第二次 start。 |
-| A07 paused/verifying/pending，入列後 binding/version 改變 | M `test_operations_unification.py`、`test_task_start_confinement.py`、`test_task_failover_authority.py`；I final-frame 回歸。#56 已整合 send/continue/answer，#57 接 permissions 逐 frame 與 recovery；精確驗證見各 PR。 | 剩餘 legacy bulk/start/orchestration 與同 RC 組合驗收；真 frame 前的暫停競態。 |
+| A07 paused/verifying/pending，入列後 binding/version 改變 | M `test_operations_unification.py`、`test_task_start_confinement.py`、`test_task_failover_authority.py`；I final-frame 回歸。#56 已整合 send/continue/answer，#57 接 permissions；#59 候選增加 `test_bulk_approval.py` 固定 prompt／partial ACK／parent cancel。 | 剩餘 legacy start/orchestration 與同 RC 組合驗收；bulk 完整 UI／真 frame 前的暫停競態。 |
 | A08 人工接續與 managed failover writer 不明 | M `test_checkpoints.py`、`test_failover_recovery.py`、`test_confinement_recovery.py`；I lost interrupt ACK 只讀回。 | 人工固定 checkpoint 新資源、managed 未知 writer 不增第二 writer 的真 BAT 失聯／恢復；全 legacy Part B 尚缺。 |
 | A09 多 client／同 fleet 不同 journal 第二 daemon | M `test_operations_unification.py` 的 `test_a09_*`：owner-first flock、失 lease frame fence、共用中央 owner。 | 實際兩個 client／第二 daemon 啟動與中央重啟；Fleet 本機 owner 是另一層，不能互相代替。 |
 | A10 Agent 寫 protected roots | M `test_confinement_closure.py`／`test_confinement_channel.py` 與 pre-interpreter proof、recorded/current evidence。 | **缺 W12 真 runtime 隔離證據**；逐 host/BAT/agent 版本測 outside-write 拒絕。Claude default/options、Codex workspace-write 或 prompt 均不算隔離證明。 |
@@ -73,14 +83,14 @@ reload/lost reply 與真中央唯讀 bytes/index/refs fixture；`2fc8fd8` 關閉
 | B01 多 sessions、無 tab、跨時期工作關聯 | M `test_observation.py` 的 B01、`test_inventory_cursors.py`；O `desktop/tests/observation.spec.ts` 穩定 ID 分頁/history。 | 同 RC 真多 session、warm reuse／歷史工作切換；UI 與 API 各頁時間／關聯一致。 |
 | B02 Host 離線、SSE 中斷、client 重開、retention reset | M observation freshness；U `test_dashboard_sync.py`、`desktop/tests/events.test.ts`／`recovery.spec.ts`／`refresh-ack.spec.ts`、`central-integration.mjs`。 | 真中央斷線／休眠／reset，另一 host 正常、草稿不丟。桌面目前以 journal polling 接續；不得宣稱原生 SSE 訂閱已實作。 |
 | B03 Actor／provenance 無證據 | M `test_observation.py` 的 B03、`test_observation_facts.py`；O state axes／unknown presentation。 | 真資料缺證據時保持 unknown/stale，不以顯示值授權；不同 agent actor 的 UI 證據。 |
-| B04 傳輸中斷、digest 錯、來源選後更新 | A `test_artifacts.py` 的 B04：暫存真 bytes、materialize/readback、ready 前不送首指令、同 parent 恢復。 | **跨 host Git objects/materialization Part C 未實作**；B2 managed capture/accept 仍缺；真 SSH 與 native 中斷後固定 refs/ID 驗收。 |
+| B04 傳輸中斷、digest 錯、來源選後更新 | A `test_artifacts.py` 的 B04：暫存真 bytes、materialize/readback、ready 前不送首指令、同 parent 恢復；#59 候選 `test_artifact_managed.py` 加固定 managed lineage／revision acceptance。 | B2 共用 UI、真 SSH 與 native 中斷後固定 refs/ID 驗收。程式碼同步依明確 repository 的已發布 commit 驗證，直接未發布 Git relay 不列 gate。 |
 | B05 Connector 自有 schema／registry／資料升級重開 | M observation step 2/backfill；A `test_artifacts.py::test_artifact_migration_preserves_existing_journal_and_empty_manifests`；D `test_deployment_history.py` step 1→2→3。 | 同 RC 用去識別舊 Connector fixture 升級再重開，比對 IDs/樹/links/provenance/歷史及 rollback；**不讀 Hub snapshot，不引入 #39**。 |
 
 ### C：同 PR 整合與 merge
 
 | ID／情境 | 已有實作與測試來源 | 尚缺／完成條件 |
 | --- | --- | --- |
-| C01 人工＋兩個 AI 成果更新同 PR | M `test_integration.py` 的 C01：暫存真 Git、managed integration area、人工來源不變。 | 真人工專案＋兩個獨立 managed 工作同 PR；來源覆蓋及跨 host 所需 objects 完整，人工 HEAD/index/files 不變。 |
+| C01 人工＋兩個 AI 成果更新同 PR | M `test_integration.py` 的 C01：暫存真 Git、managed integration area、人工來源不變。 | 真人工專案＋兩個獨立 managed 工作同 PR；固定來源完整、人工 HEAD/index/files 不變。若明確使用其他主機，只同步綁定 repository 的已發布 commit，不以跨主機搬運未發布內容作完成條件。 |
 | C02 Preview 後 source／PR head／scope 變動 | M `test_integration.py` 的 C02、`test_delivery.py` scope-change：拒絕舊意圖、非 force push。 | 真 provider 競態及 Tauri 差異顯示；固定來源、不以新 branch head 替代。 |
 | C03 中途衝突／push lost ACK | M `test_integration.py` 的 C03：compose receipts、resolver handoff、遠端讀回、重啟不重複 push。 | 真 Git remote 的衝突／失聯／讀回與 UI 續做；仍只寫 managed integration 區。 |
 | C04 Merge queue／accepted／existing request | M `test_delivery.py` 的 C04、`pr_delivery.py`；保留 #40 metadata settlement。 | 選定 repo 的真 queue/provider 行為與 exact intent；queued/accepted 不顯示 merged。 |
@@ -124,7 +134,7 @@ reload/lost reply 與真中央唯讀 bytes/index/refs fixture；`2fc8fd8` 關閉
 | T08 原生選檔／拖放／上下傳中斷／同名目的地 | A `desktop/tests/artifacts.spec.ts`、`artifact-integration.mjs`、Rust operation-bound binary upload；`test_artifacts.py` download API。 | **完整 native file/save/download adapter、拖放與同名檔案政策未交付**；真 bytes/digest、重試與人工來源不變。WebView upload fixture 不等於整項通過。 |
 | T09 Client 更新／睡眠／crash／切網路 | U `desktop/tests/recovery.spec.ts`／`account-switch.spec.ts`／`dashboard.spec.ts` 的 lost reply/drafts；M durable operations。 | 真 Windows suspend/network/crash 與安裝更新；原 ID 查回、中央 task 不停。簽章 updater 尚未提供。 |
 | T10 Tailscale 未登入、中央停止、固定 bootstrap | K 分層 readiness；U/F 顯示連線／配置失敗，native 不自動建中央 journal。 | **Tauri 登入/固定 ensure bootstrap 流程尚未交付**；先配置明確 recipe，有限恢復，零第二 owner／空 journal。 |
-| T11 帳號／backend 切換與 scope 隔離 | U `test_dashboard_sync.py` T11、`desktop/tests/account-switch.spec.ts`；F local DTO 不含中央 token；S principal-only。 | **OS 保護 credential enrollment/storage 尚未實作**；目前啟動環境變數→Rust memory 是暫時 adapter。真切換/重啟隔離與 Fleet observe 身分待驗。 |
+| T11 帳號／backend 切換與 scope 隔離 | U `test_dashboard_sync.py` T11、`desktop/tests/account-switch.spec.ts`；F local DTO 不含中央 token；S principal-only；#59 候選 `credentials.rs`／`native-credentials.spec.ts` 增加 Windows vault 與身分驗證。 | Windows 原生對話框／Credential Manager 真保存、切換／重啟隔離與 Fleet observe 身分待驗；Linux 尚用 native-memory adapter。 |
 | T12 Canonical desktop/browser、build/update/signature | U `desktop/src`＋`build:all`／`check:browser`、locked dependencies；S generator/version checks；F packaging CI。 | 最終單一整合 source/pins、可重建產物、簽章與更新相容／回退；不能把 unsigned NSIS/deb 或兩個分支各綠當正式發行。另有 [Linux GLib advisory gate #53](https://github.com/teddashh/bat-agent-connector/issues/53)，須已審修正後才作 Linux production distribution。 |
 
 ## 同一候選版本的可重現驗收

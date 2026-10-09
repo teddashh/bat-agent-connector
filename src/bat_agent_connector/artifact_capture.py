@@ -94,7 +94,8 @@ async def _source(ops, host, sid):
             "configuration_binding": artifacts.manifest_digest(settings), "provenance": "manual"}
 
 
-async def _read(ops, source, path, mode, expected=None):
+async def _read(ops, source, path, mode, expected=None, *, source_reader=None):
+    source_reader = source_reader or _source
     request = {"mode": mode, "root": source["root"], "repository_root": source["repository_root"],
                "relative_path": path, "max_file_bytes": ops.context["artifact_store"].settings.max_file_bytes}
     if expected is not None:
@@ -103,11 +104,11 @@ async def _read(ops, source, path, mode, expected=None):
         raise OperationError("CAPTURE_BUSY", "capture read slots are busy; retry later", 409)
     async with ops.context["capture_slots"]:
         # Revalidate after waiting for a read slot, immediately before opening source bytes.
-        if await _source(ops, source["host"], source["session_id"]) != source:
-            raise OperationError("SOURCE_CHANGED", "manual source binding changed; preview again", 409)
+        if await source_reader(ops, source["host"], source["session_id"]) != source:
+            raise OperationError("SOURCE_CHANGED", "source binding changed; preview again", 409)
         result, data = await ops.context["artifact_host"].capture(source["host"], request)
-        if await _source(ops, source["host"], source["session_id"]) != source:
-            raise OperationError("SOURCE_CHANGED", "manual source binding changed while read", 409)
+        if await source_reader(ops, source["host"], source["session_id"]) != source:
+            raise OperationError("SOURCE_CHANGED", "source binding changed while read", 409)
     if result.get("ok") is not True:
         code = result.get("code") if result.get("code") in ERRORS else "SOURCE_UNAVAILABLE"
         raise OperationError(code, "capture refused; inspect the source and preview again", 409)
@@ -129,14 +130,20 @@ async def _read(ops, source, path, mode, expected=None):
 async def preview(ops, principal, request):
     if not principal.allows("observe"):
         raise OperationError("FORBIDDEN", "capture preview requires observe", 403)
-    identity = _principal(ops, principal)
+    _principal(ops, principal)
     if not isinstance(request, dict) or set(request) != {"host", "session_id", "relative_path"}:
         raise OperationError("INVALID_PARAMS", "preview needs host, session_id and relative_path only", 422)
     path = _path(request["relative_path"])
     artifacts.safe_name(path.rsplit("/", 1)[-1])
     source = await _source(ops, request["host"], request["session_id"])
+    return await preview_source(ops, principal, source, path)
+
+
+async def preview_source(ops, principal, source, path, *, source_reader=None):
+    """Sign only a centrally resolved source; callers supply a fixed read-only resolver."""
+    identity = _principal(ops, principal)
     try:
-        evidence, _ = await _read(ops, source, path, "preview")
+        evidence, _ = await _read(ops, source, path, "preview", source_reader=source_reader)
     except AmbiguousOutcome:
         raise OperationError("SOURCE_UNAVAILABLE", "source read did not complete; preview again", 409) from None
     document = {"source": source, "relative_path": path, "evidence": evidence}
@@ -178,7 +185,7 @@ def upload_params(document):
             "expected_digest": evidence["digest"]}
 
 
-def _admit(ops, principal, target, params, pre):
+def _admit(ops, principal, target, params, pre, *, provenance="manual"):
     if not principal.allows("observe"):
         raise OperationError("FORBIDDEN", "capture requires manage and observe", 403)
     if set(target) != {"preview_id"} or set(params) != {"preview_token"} or set(pre) != {"expected_fingerprint"}:
@@ -187,6 +194,8 @@ def _admit(ops, principal, target, params, pre):
     if (claims["principal"] != _principal(ops, principal) or claims["actor"] != principal.actor
             or target["preview_id"] != preview_id or pre["expected_fingerprint"] != claims["fingerprint"]):
         raise OperationError("PREVIEW_MISMATCH", "preview identity or reviewed fingerprint differs", 409)
+    if claims["document"]["source"].get("provenance") != provenance:
+        raise OperationError("PREVIEW_MISMATCH", "preview source does not match this capture action", 409)
     ops.context["artifact_store"].validate_upload({}, upload_params(claims["document"]), {})
     return {"capture": claims["document"], "preview_id": preview_id, "fingerprint": claims["fingerprint"],
             "principal": claims["principal"]}
@@ -201,7 +210,7 @@ def _authorize_existing(ops, principal, op, verb):
         raise OperationError("FORBIDDEN", f"capture {verb} requires the original authenticated credential", 403)
 
 
-async def _run(ctx):
+async def _run(ctx, *, source_reader=None, proof_kind="manual_capture"):
     store = ctx.service.context["artifact_store"]
     binding = ctx.admission_binding
     if not binding or not isinstance(binding.get("capture"), dict):
@@ -234,12 +243,12 @@ async def _run(ctx):
 
     async def receive():
         evidence, data = await _read(ctx.service, document["source"], document["relative_path"],
-                                     "capture", document["evidence"])
+                                     "capture", document["evidence"], source_reader=source_reader)
         try:
             ctx.check_cancel()
         except Cancelled:
             return {"captured": False, "cancelled_before_staging": True}
-        proof = {"kind": "manual_capture", "operation_id": ctx.operation_id, "actor": ctx.actor,
+        proof = {"kind": proof_kind, "operation_id": ctx.operation_id, "actor": ctx.actor,
                  "preview_id": binding["preview_id"], "fingerprint": binding["fingerprint"],
                  "source": document["source"], "relative_path": document["relative_path"],
                  "evidence": evidence, "captured_at": time.time(), "snapshot": False}

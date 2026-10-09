@@ -277,9 +277,23 @@ async def _run(args) -> Any:
                 fleet, args.host, args.session, args.confirm, args.dry_run, args.agent, None, args.max_items
             ), None
         if c == "approve-pending":
-            return await lifecycle.approve_pending(
-                fleet, args.host, args.confirm, args.dry_run, args.workspace
-            ), None
+            from .task_daemon import request
+            token = os.environ.get("BATC_API_TOKEN")
+            if not token:
+                raise WriteRefused("approval preview/apply requires this client's BATC_API_TOKEN")
+            if args.dry_run:
+                return await asyncio.to_thread(request, "approval_preview", _auth_token=token,
+                    entry="cli", host=args.host, workspace=args.workspace, timeout=40), None
+            if not args.confirm or not fleet.writes_enabled(args.host):
+                raise WriteRefused("bulk apply requires --confirm and the local write tier")
+            if not args.preview_file or args.selection is None:
+                raise OperationError("BULK_PREVIEW_REQUIRED", "use --dry-run, then --preview-file and explicit --selection JSON", 422)
+            doc = json.loads(Path(args.preview_file).read_text())
+            selection = json.loads(args.selection)
+            return await asyncio.to_thread(request, "approve_pending", _auth_token=token,
+                entry="cli", host=args.host, workspace=args.workspace, confirm=True, timeout=40,
+                preview_token=doc.get("preview_token"), expected_fingerprint=doc.get("fingerprint"),
+                selection=selection, idempotency_key=args.key), None
         if c == "failover":
             return await lifecycle.session_failover(
                 fleet,
@@ -488,11 +502,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--confirm", action="store_true")
     p.add_argument("--key", help="reuse for retries; omitted means each call is independent")
     p.add_argument("--control-version", type=int, help="expected owning task control version")
-    p = sp.add_parser("approve-pending", help="preview pending prompts with --dry-run; bulk apply disabled")
+    p = sp.add_parser("approve-pending", help="review with --dry-run, then apply an explicit preview selection")
     p.add_argument("host")
     p.add_argument("--workspace")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--confirm", action="store_true")
+    p.add_argument("--preview-file", help="JSON saved from --dry-run")
+    p.add_argument("--selection", help='JSON [{"item_id":"...","mode":null|"default"|"allow_all"}]')
+    p.add_argument("--key", help="reuse for retry; omitted means an independent batch")
 
     p = sp.add_parser("relay", help="WRITE: send a task verbatim + a labeled brief to a session (default: main)")
     p.add_argument("host")
@@ -676,6 +693,25 @@ def build_parser() -> argparse.ArgumentParser:
     c = asp.add_parser("capture", help="save the exact reviewed manual file as an immutable artifact")
     c.add_argument("--preview-file", required=True, help="JSON saved from capture-preview")
     c.add_argument("--key", required=True, help="reuse this key after a lost reply")
+    c.add_argument("--confirm", action="store_true")
+    c = asp.add_parser("managed-capture-preview", help="review one managed file with central execution lineage")
+    c.add_argument("host")
+    c.add_argument("session_id")
+    c.add_argument("relative_path")
+    c.add_argument("--execution-operation-id")
+    c.add_argument("--task-id")
+    c.add_argument("--command-id")
+    c = asp.add_parser("managed-capture", help="save the exact reviewed managed file")
+    c.add_argument("--preview-file", required=True)
+    c.add_argument("--key", required=True)
+    c.add_argument("--confirm", action="store_true")
+    c = asp.add_parser("accept", help="record approval of an exact managed artifact revision only")
+    c.add_argument("artifact_id")
+    c.add_argument("revision", type=int)
+    c.add_argument("--digest", required=True)
+    c.add_argument("--source-fingerprint", required=True)
+    c.add_argument("--receipt", required=True)
+    c.add_argument("--key", required=True)
     c.add_argument("--confirm", action="store_true")
     c = asp.add_parser("list")
     c.add_argument("--limit", type=int, default=50)
@@ -920,7 +956,18 @@ def cmd_artifact(args) -> int:
     elif args.artifact_cmd == "capture-preview":
         out = request("artifact_capture_preview", _auth_token=token, entry="cli", host=args.host,
                       session_id=args.session_id, relative_path=args.relative_path)
-    elif args.artifact_cmd == "capture":
+    elif args.artifact_cmd == "managed-capture-preview":
+        selector = {k: getattr(args, k) for k in ("execution_operation_id", "task_id", "command_id") if getattr(args, k)}
+        out = request("artifact_managed_capture_preview", _auth_token=token, entry="cli", host=args.host,
+                      session_id=args.session_id, relative_path=args.relative_path, **selector)
+    elif args.artifact_cmd == "accept":
+        if not args.confirm:
+            raise ValueError("artifact accept requires --confirm")
+        out = request("op_submit", _auth_token=token, entry="cli", action="artifact.accept",
+                      target={"artifact_id": args.artifact_id, "revision": args.revision},
+                      params={"digest": args.digest, "source_fingerprint": args.source_fingerprint, "receipt": args.receipt},
+                      preconditions={}, idempotency_key=args.key)
+    elif args.artifact_cmd in {"capture", "managed-capture"}:
         if not args.confirm:
             raise ValueError("artifact capture requires --confirm")
         with Path(args.preview_file).open("rb") as file:
@@ -929,7 +976,8 @@ def cmd_artifact(args) -> int:
             raise ValueError("capture preview exceeds its bound")
         preview = json.loads(raw)
         preview = preview.get("preview", preview)
-        out = request("op_submit", _auth_token=token, entry="cli", action="artifact.capture",
+        out = request("op_submit", _auth_token=token, entry="cli",
+                      action="artifact.capture.managed" if args.artifact_cmd == "managed-capture" else "artifact.capture",
                       target={"preview_id": preview["preview_id"]}, params={"preview_token": preview["preview_token"]},
                       preconditions={"expected_fingerprint": preview["fingerprint"]}, idempotency_key=args.key)
     elif args.artifact_cmd == "list":
@@ -1244,7 +1292,7 @@ def _mutation_requested(args) -> bool:
         return args.cancel or args.resume
     if command == "import-bat":
         return args.output != "-"
-    mutating = {"artifact": ("artifact_cmd", {"upload", "capture"}),
+    mutating = {"artifact": ("artifact_cmd", {"upload", "capture", "managed-capture", "accept"}),
                 "resource-cleanup": ("cleanup_cmd", {"apply"}),
                 "checkpoint": ("checkpoint_cmd", {"create", "continue", "revalidate"}),
                 "delivery": ("delivery_cmd", {"update-pr", "merge", "deploy", "rollback", "retry"}),

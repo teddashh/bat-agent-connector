@@ -26,13 +26,37 @@
 | 專案 | 專案樹與各專案的進度 | `projects` | 新增、改名、子專案、上下移、固定、封存與復原 |
 | 專案詳情 | 說明、repositories、子專案、工作項目樹（狀態、步驟進度、等你決定） | `projects/{id}` | 新增項目、子項目、分支；上下移、固定、封存（連同子項目）與復原；編輯專案 |
 | 工作項目 | 目標、需求原文、驗收、步驟、完成狀態、連結（附現況）、子項目與分支、紀錄 | `work-items/{id}` | 編輯、勾步驟、改狀態、確認完成或退回、連結與移除、從已連結的 checkpoint 派工（[work-items.md](work-items.md)） |
-| Sessions | 依主機與存取方式篩選；每列標出 Connector 管理或 API 唯讀、資料過期原因 | `sessions`（keyset 分頁） | — |
+| 工作階段 | 主機／工作區導覽、已載入範圍搜尋；保留來源、存取方式、活動與過往紀錄 | `sessions`（keyset 分頁） | — |
 | Session | 基本資料、來源、相關工作項目、最近訊息、checkpoint | `sessions/{host}/{sid}`、`…/messages`、`checkpoints` | Managed：送出（session 執行中預設排隊）、中斷、回答問題或權限。人工建立：唯讀說明。任何 session：記下目前版本，從版本開始 agent 工作（[checkpoints.md](checkpoints.md)） |
 | 成果與 GitHub | 環境的選定／觀測／最後驗證版本、游標分頁部署歷史；PR 的 head／base、checks、可合併狀態 | `deployment-environments`、`deployment-environments/history`、`deployments/{id}`、`repositories/{o}/{r}/pulls/{n}` | 以 `deployments/preview` 固定環境代數與 recipe digest 後回退或重試固定版本；合併、合併並部署、部署已合併版本 |
 | 操作紀錄／操作 | 狀態、原因、步驟、`external_refs`、結果 | `operations`、`operations/{id}` | 取消；`needs_attention` 時重新執行（resume）；合併並部署失敗時以 `merged_sha` 重試部署 |
 | 連線 | Browser 輸入 API token；Tauri 顯示配置位置、原生憑證狀態；兩者顯示 actor 與 scopes | `capabilities`、`bootstrap` | 連線、斷線 |
 
 Token 缺少某個 scope（`start`、`integrate`、`manage`、`approve`）時，對應的按鈕停用並說明要用哪個 scope 重新發 token。這只是提示：授權只在後端判斷，送出的請求仍可能回 403。
+
+## 工作階段列表的資訊層級
+
+參考 Project Hub `a277d2ed5ce439c248fc32fa8ff9fa4124a06027` 的緊湊側欄與主內容層級
+（`hub/public/app.js`、`app.css`、`hierarchy.js` 與公開截圖），沿用本產品的元件、色彩與字體；
+此整理未複製上游程式碼。BAT 仍是 agent 的執行介面，中央資源與操作合約不變。
+
+- 頂部保留中央的主機與存取方式篩選；搜尋僅比對已載入列的標題、完整 session ID、主機、工作區、
+  workspace ID、agent、model 與 branch。側欄及列數都明示「已載入」，不是主機或專案總數。
+- 桌面使用 220px 工作區導覽與內容欄；900px 以下改為可展開的工作區選擇，避免擠壓內容。
+  分組使用 `(host, workspace_id)`；ID 未記錄時才按實際 workspace 標籤分組，並標出未記錄 ID。
+  標籤也未知時為該主機的未記錄範圍，不推測為同一 repository 或 project。相同名稱的不同 ID／主機不合併。
+- 群組標頭顯示工作區與主機；同主機有重複名稱或缺少名稱時才顯示 ID，完整 ID 保留於展開證據。每列以標題、待回覆／活動狀態為第一層，來源、存取方式、agent／branch
+  為第二層。狀態與紀錄按需展開完整 ID、時間、隔離與分項狀態證據；session 連結仍開啟原有訊息、歷程與操作。
+  主機連結前往既有 discovery，專案連結前往既有專案頁，不建立推測的專案關係。
+- `fields_stale` 或活動證據過期時不宣稱仍在輸出；舊 pending 保留提醒但明示尚未重新確認。
+  未輸出、未載入、最近掃描未見均不代表結束或工作完成；只有中央明示 `lifecycle=ended` 才顯示結束。
+  手動來源及唯讀界線保留，沒有新增封存、刪除、掃描或背景寫入。
+- 沿用 15px 本文字型、14px 群組標題、12–13px 次要證據，以及既有 `--panel`／`--line`／`--chip`／
+  `--muted`／狀態色。行距與 padding 保持緊湊，行動版表單與展開控制至少 44px；不引入新配色。
+- 維持 `order=id&include_gone=true` 的中央 keyset 分頁；刷新重新讀已載入頁數並以 `(host, session_id)` 去重，
+  保留可見列的捲動位置與已展開證據。多頁仍非原子快照。搜尋與工作區選擇保存在既有身份分區的
+  sessionStorage；換 backend／principal 不帶入。所選範圍暫時沒有資料時不自動擴大到全部。
+  較舊篩選的在途回應不覆蓋新選擇，事件等待排隊的最新讀取；失敗仍不確認 event checkpoint。
 
 ## 冪等與即時更新
 
@@ -68,7 +92,8 @@ Session card 依 creation snapshot 顯示 level；OS sandbox 最多 options_conf
 
 - Worktree、diff、檔案瀏覽。Fleet Kit 的連線選擇已由 Windows [PS adapter](desktop-fleet.md) 與桌面設定頁提供；Rust parity 與實機驗收仍待完成。
 - 推播通知。
-- #35 history／relations／discovery read models 已有中央合約；其完整 UI 呈現、已開 session 的 pending 控制刷新、linked operation／parent project invalidation 仍屬 R04 待完成範圍。
+- History／relations／discovery 與已開 session 的 pending 刷新、linked operation／parent project invalidation
+  已有共用 UI／fixture；同候選的實機驗收仍待完成，見 [implementation status](../product/implementation-status.md)。
 - Windows 真實 tray、cross-session ownership、native files、Fleet parity、OS credential enrollment 與 signed updates 未因桌面殼可編譯而視為驗收完成。
 
 ## 測試

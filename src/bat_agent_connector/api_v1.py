@@ -20,6 +20,7 @@ from . import (
     __version__,
     api_auth,
     artifact_capture,
+    artifact_managed,
     artifacts,
     checkpoints,
     cleanup,
@@ -98,10 +99,15 @@ class ApiV1:
         self.daemon = daemon
         cleanup.install(daemon.ops, daemon._admin_token)
         artifact_capture.install(daemon.ops, daemon._admin_token)
+        artifact_managed.install(daemon.ops)
+
+        from . import bulk_approval
+        bulk_approval.install(daemon.ops, daemon._admin_token)
         self.allowed_origins = allowed_origins
         self._streams = 0
         self._streams_by_actor: dict[str, int] = {}
         self.routes = [
+            ("POST", r"/api/v1/approval-previews", self.approval_preview, "observe"),
             ("POST", r"/api/v1/cleanup-previews", self.cleanup_preview, "observe"),
             ("GET", r"/api/v1/cleanup-retained", self.cleanup_retained, "observe"),
             ("GET", r"/api/v1/cleanup-tombstones", self.cleanup_tombstones, "observe"),
@@ -110,6 +116,7 @@ class ApiV1:
             ("GET", r"/api/v1/capabilities", self.capabilities, "observe"),
             ("POST", r"/api/v1/artifacts", self.create_artifact, "manage"),
             ("POST", r"/api/v1/artifact-capture-previews", self.artifact_capture_preview, "observe"),
+            ("POST", r"/api/v1/artifact-managed-capture-previews", self.artifact_managed_capture_preview, "observe"),
             ("GET", r"/api/v1/artifacts", self.artifacts, "observe"),
             ("GET", r"/api/v1/artifacts/(?P<aid>art_[0-9a-f]{32})/revisions/(?P<revision>[1-9][0-9]*)", self.artifact, "observe"),
             ("GET", r"/api/v1/bootstrap", self.bootstrap, "observe"),
@@ -361,7 +368,7 @@ class ApiV1:
         gh_cfg = self.daemon.ops.context["github_config"]
         actions = [{"action": a.name, "scope": a.scope, "summary": a.summary, "allowed": principal.allows(a.scope)
                                and (a.name != "delivery.merge_and_deploy" or principal.allows("deploy"))
-                               and (a.name != "artifact.capture" or principal.allows("observe"))}
+                               and (a.name not in {"artifact.capture", "artifact.capture.managed", "session.approve_pending"} or principal.allows("observe"))}
                    for a in self.daemon.ops.actions.values()]
         hosts = [{"host": h, "observe": True, "writes": fleet.writes_enabled(h),
                   "orchestrate": fleet.orchestrate_enabled(h),
@@ -372,7 +379,8 @@ class ApiV1:
         return 200, {"actor": principal.actor, "scopes": sorted(principal.scopes), "api_version": API_VERSION,
                      "contract_version": CONTRACT_VERSION, "connector": __version__, "hosts": hosts,
                      "artifacts": {"limits": self.daemon.artifact_store.settings.limits(),
-                                   "capture": {"manual_single_file": True, "snapshot": False,
+                                   "capture": {"manual_single_file": True, "managed_single_file": True, "snapshot": False,
+                                               "managed_selectors": ["execution_operation_id", "task_command"],
                                                "preview_ttl_s": artifact_capture.TTL_S},
                                    "hosts": [{"host": h, "configured": self.daemon.ops.context["artifact_host"].available(h),
                                               "readiness": self.daemon.ops.context["artifact_host"].readiness.get(h)} for h in fleet.config.hosts]},
@@ -409,6 +417,10 @@ class ApiV1:
                                                            "health_required": r.verification.health_required} if r.verification else None,
                                          "rollback": {"supported": r.rollback.supported, "identity": r.rollback.identity,
                                                       "not_undone": list(r.rollback.not_undone)}} for r in gh_cfg.recipes.values()]}
+
+    async def approval_preview(self, principal, body, **_):
+        from .bulk_approval import preview
+        return 200, await preview(self.daemon.ops, principal, body)
 
     async def bootstrap(self, principal, **_):
         # Cursor first. The following existing read models are live pages, not an atomic snapshot.
@@ -548,6 +560,9 @@ class ApiV1:
                     "params": body.get("params", {}), "preconditions": body.get("preconditions", {}),
                     "idempotency_key": body.get("idempotency_key")}
         return await self.create_operation(principal, query, envelope, headers)
+
+    async def artifact_managed_capture_preview(self, principal, body, **_):
+        return 200, {"preview": await artifact_managed.preview(self.daemon.ops, principal, body)}
 
     async def artifact_capture_preview(self, principal, body, **_):
         return 200, {"preview": await artifact_capture.preview(self.daemon.ops, principal, body)}

@@ -26,6 +26,11 @@ v1/v2 是同一產品與共同功能 backlog；Tauri 是 UI／client 計畫修�
 
 ## Permissions 的固定合約
 
+後續 #59 已加入[固定 bulk approval](bulk-approval.md)：公開 MCP/CLI/HTTP 共用
+`session.approve_pending` parent、原 answer／permissions children、固定 prompt 與 partial receipts。
+沒有選定 preview 的 apply 拒絕，歷史 deferred flags 與舊內部 raise 路徑仍不啟用。
+本表上方保留原基底盤點；此進展不代表 start／relay／fanout 或 task cleanup 已完成。
+
 本輪接續追蹤 [#57](https://github.com/teddashh/bat-agent-connector/issues/57)，實作與回復細節見
 [session-permissions.md](session-permissions.md)。以下保留接手時的需求與舊問題；新路徑不產生
 deferred flag，歷史 flag 及 legacy bulk-raise apply 在任何 BAT effect 前拒絕。

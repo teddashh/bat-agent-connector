@@ -65,15 +65,17 @@ Operation detail 的逐 step status/error 與 external_refs.permission_frames、
 
 ## Legacy bulk/deferred 相容界線
 
-`approve_pending` apply 若 `raise_to_allow_all=true`，在回答任何 prompt 前回
+舊內部 `lifecycle.approve_pending` apply 若 `raise_to_allow_all=true`，在回答任何 prompt 前回
 `LEGACY_PERMISSION_RAISE_DISABLED`，指向逐項 `session.answer`／`session.permissions`。
-Dry-run 保留；內部明確 answer-only false 不變，不新增 public bulk knobs 或宣稱 bulk 已 durable。
+此內部路徑的 dry-run 保留，明確 answer-only false 不變。公開 MCP/CLI 的 `approve_pending`
+現接[固定 bulk preview／child operations](bulk-approval.md)；apply 必須有原 preview 與明確 selection，
+不再呼叫這條舊 raise 路徑。Parent 使用 operate + observe，各 permission child 仍受本合約約束。
 歷史 `permission_raise_pending` 只提供待處理診斷；`_raise_deferred` 永不重新採用舊 actor/version
 或偷偷產生新 operation，不 auto-apply；回同一 refusal code。新 permissions 不再寫入這種旗標。
 
 ## 尚未涵蓋
 
-不做 bulk prompt plan、Goose/Task Service 新引擎、raw channel／任意 options、跨 host permission
+本合約不定義 bulk prompt plan（另見 bulk 合約）、Goose/Task Service 新引擎、raw channel／任意 options、跨 host permission
 交易、native enforcement 或另一個持久化權威。外部 BAT GUI 不參與 Connector 鎖；每個 frame 前
 的讀取不能宣稱跨系統原子隔離。Windows installed/live、實際 host confinement 與完整 46 項同 RC
 驗收仍需分別留證；mock/CI 不代表正式安裝或真 provider 寫入已驗。

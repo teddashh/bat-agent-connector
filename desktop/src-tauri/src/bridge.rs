@@ -1,13 +1,12 @@
+use crate::credentials::{self, Identity, Locale, OsVault, Record, Vault};
 use regex::Regex;
 use reqwest::{redirect::Policy, Client, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    path::Path,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        OnceLock,
-    },
+    io::Read,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 use url::Url;
@@ -18,7 +17,7 @@ pub const MAX_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REQUEST: usize = 1024 * 1024;
 const MAX_RESPONSE: usize = 8 * 1024 * 1024;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub endpoint: String,
@@ -30,7 +29,9 @@ impl Config {
     pub fn validate(&self) -> Result<Url, String> {
         let url = Url::parse(&self.endpoint).map_err(|_| "Invalid central endpoint")?;
         let loopback = matches!(url.host_str(), Some("127.0.0.1" | "[::1]"));
-        if !(url.scheme() == "https" || url.scheme() == "http" && loopback)
+        if self.endpoint.len() > 512
+            || self.endpoint.chars().any(char::is_control)
+            || !(url.scheme() == "https" || url.scheme() == "http" && loopback)
             || url.host_str().is_none()
             || !url.username().is_empty()
             || url.password().is_some()
@@ -42,6 +43,7 @@ impl Config {
         }
         if self.expected_actor.trim().is_empty()
             || self.expected_actor.len() > 200
+            || self.expected_actor.chars().any(char::is_control)
             || self.contract_version != "2026-10-08"
         {
             return Err(
@@ -150,45 +152,100 @@ pub struct ConnectorResponse {
 #[derive(Serialize)]
 pub struct NativeStatus {
     pub endpoint: Option<String>,
+    pub expected_actor: Option<String>,
     pub error: Option<String>,
     pub credential_available: bool,
+    pub credential_source: Option<&'static str>,
+    pub credential_saved: bool,
+    pub enrollment_supported: bool,
+    pub configuration_reload: bool,
+    pub configuration_file: Option<String>,
+    pub connected: bool,
+}
+
+#[derive(Clone)]
+struct Active {
+    config: Config,
+    record: Record,
+}
+struct ConnectionState {
+    generation: u64,
+    config: Result<Config, String>,
+    environment: Option<Zeroizing<String>>,
+    environment_identity: Option<Identity>,
+    active: Option<Active>,
 }
 
 pub struct Bridge {
-    config: Option<Config>,
-    endpoint: Option<Url>,
-    // Never serialized, logged, or returned by an IPC command.
-    token: Zeroizing<String>,
+    state: Mutex<ConnectionState>,
+    configuration_file: Option<PathBuf>,
+    vault: Arc<dyn Vault>,
+    // One prompt/connection attempt at a time. Disconnect/reload can invalidate a pending attempt.
+    connecting: tokio::sync::Mutex<()>,
     client: Client,
-    verified: AtomicBool,
-    error: Option<String>,
+}
+
+fn read_configuration(path: &Path) -> Result<Config, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|_| "Create central.json in the app configuration directory")?;
+    let mut bytes = Vec::new();
+    file.take(16_385)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Unable to read central configuration")?;
+    if bytes.len() > 16_384 {
+        return Err("Central configuration exceeds its bound".into());
+    }
+    let config: Config =
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid central configuration")?;
+    normalize(config)
+}
+fn normalize(mut config: Config) -> Result<Config, String> {
+    config.endpoint = config.validate()?.to_string();
+    Ok(config)
+}
+fn binding(config: &Config) -> String {
+    credentials::binding(
+        &config.endpoint,
+        &config.expected_actor,
+        &config.contract_version,
+    )
+}
+fn get(path: &str) -> ConnectorRequest {
+    ConnectorRequest {
+        method: "GET".into(),
+        path: path.into(),
+        body: None,
+        idempotency_key: None,
+    }
 }
 
 impl Bridge {
     pub fn load(config_dir: &Path, token: Zeroizing<String>) -> Self {
-        let result = std::fs::read(config_dir.join("central.json"))
-            .map_err(|_| "Create central.json in the app configuration directory".to_owned())
-            .and_then(|bytes| {
-                if bytes.len() > 16384 {
-                    return Err("Central configuration is too large".into());
-                }
-                serde_json::from_slice::<Config>(&bytes)
-                    .map_err(|_| "Invalid central.json configuration".into())
-            });
-        Self::new(result, token)
+        let path = config_dir.join("central.json");
+        let mut bridge = Self::new(read_configuration(&path), token);
+        bridge.configuration_file = Some(path);
+        bridge
     }
-
     fn new(config: Result<Config, String>, token: Zeroizing<String>) -> Self {
-        let (config, endpoint, error) = match config.and_then(|c| c.validate().map(|u| (c, u))) {
-            Ok((c, u)) => (Some(c), Some(u), None),
-            Err(e) => (None, None, Some(e)),
+        let config = config.and_then(normalize);
+        // An environment credential without a valid original endpoint must never be forwarded
+        // to whatever endpoint is configured later. The launcher can retry with valid configuration.
+        let environment = if config.is_ok() && !token.is_empty() {
+            Some(token)
+        } else {
+            None
         };
         Self {
-            config,
-            endpoint,
-            token,
-            error,
-            verified: AtomicBool::new(false),
+            state: Mutex::new(ConnectionState {
+                generation: 0,
+                config,
+                environment,
+                environment_identity: None,
+                active: None,
+            }),
+            configuration_file: None,
+            vault: Arc::new(OsVault),
+            connecting: tokio::sync::Mutex::new(()),
             client: Client::builder()
                 .redirect(Policy::none())
                 .no_proxy()
@@ -198,118 +255,360 @@ impl Bridge {
                 .expect("native HTTP client"),
         }
     }
-
     pub fn status(&self) -> NativeStatus {
+        let state = self.state.lock().unwrap();
+        let config = state.config.as_ref().ok();
+        let stored = config.map(|config| self.vault.read(&binding(config)));
+        let saved = matches!(&stored, Some(Ok(Some(_))));
+        let store_error = match stored {
+            Some(Err(error)) => Some(error),
+            Some(Ok(Some(bytes))) => Record::decode(&bytes, &binding(config.unwrap())).err(),
+            _ => None,
+        };
+        let env = state.environment.is_some();
         NativeStatus {
-            endpoint: self.endpoint.as_ref().map(ToString::to_string),
-            error: self.error.clone(),
-            credential_available: !self.token.is_empty(),
+            endpoint: config.map(|c| c.endpoint.clone()),
+            expected_actor: config.map(|c| c.expected_actor.clone()),
+            error: state
+                .config
+                .as_ref()
+                .err()
+                .cloned()
+                .or(if env { None } else { store_error }),
+            credential_available: env || saved,
+            credential_source: if env {
+                Some("launch_environment")
+            } else if saved {
+                Some("windows_credential_manager")
+            } else {
+                None
+            },
+            credential_saved: saved,
+            enrollment_supported: self.vault.supported(),
+            configuration_reload: self.configuration_file.is_some(),
+            configuration_file: self
+                .configuration_file
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            connected: state.active.is_some(),
         }
     }
-
     pub fn disconnect(&self) {
-        self.verified.store(false, Ordering::Release);
+        let mut state = self.state.lock().unwrap();
+        state.generation += 1;
+        state.active = None;
     }
-
-    pub async fn connect(&self) -> Result<Value, String> {
-        self.disconnect();
-        let response = self
-            .send(&ConnectorRequest {
-                method: "GET".into(),
-                path: "/capabilities".into(),
-                body: None,
-                idempotency_key: None,
-            })
-            .await?;
-        if response.status != 200 {
-            return Err(format!(
-                "Central authentication refused ({})",
-                response.status
-            ));
+    fn unchanged(&self, generation: u64) -> Result<(), String> {
+        if self.state.lock().unwrap().generation != generation {
+            return Err(
+                "Native connection changed; read the original operation before retrying".into(),
+            );
         }
-        let caps = response.data;
-        let config = self
-            .config
+        Ok(())
+    }
+    pub fn reload_configuration(&self) -> Result<NativeStatus, String> {
+        let path = self
+            .configuration_file
             .as_ref()
-            .ok_or("Central configuration unavailable")?;
-        if caps["actor"].as_str() != Some(config.expected_actor.as_str())
-            || caps["api_version"].as_u64() != Some(1)
-            || caps["contract_version"].as_str() != Some(config.contract_version.as_str())
-            || !caps["scopes"]
-                .as_array()
-                .is_some_and(|s| s.iter().any(|v| v == "observe"))
+            .ok_or("Configuration reload is unavailable")?;
+        {
+            let mut state = self.state.lock().unwrap();
+            state.generation += 1;
+            state.active = None;
+            let config = read_configuration(path);
+            if state.config.as_ref().ok().map(binding) != config.as_ref().ok().map(binding) {
+                state.environment = None;
+                state.environment_identity = None; // never move a launch credential to a newly configured origin/account
+            }
+            state.config = config;
+        }
+        Ok(self.status())
+    }
+    pub fn forget_credential(&self) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap();
+        let config = state.config.as_ref().map_err(Clone::clone)?;
+        self.vault.remove(&binding(config))?;
+        state.generation += 1;
+        state.active = None;
+        state.environment = None;
+        state.environment_identity = None; // explicit forget must not silently fall back to the launch credential
+        Ok(())
+    }
+    pub async fn connect(&self) -> Result<Value, String> {
+        let _guard = self
+            .connecting
+            .try_lock()
+            .map_err(|_| "Connection or enrollment already in progress")?;
+        let (generation, config, token, expected) = {
+            let state = self.state.lock().unwrap();
+            let config = state.config.as_ref().map_err(Clone::clone)?.clone();
+            if let Some(token) = &state.environment {
+                (
+                    state.generation,
+                    config,
+                    token.clone(),
+                    state.environment_identity.clone(),
+                )
+            } else {
+                let bytes = self
+                    .vault
+                    .read(&binding(&config))?
+                    .ok_or("Native credential unavailable; add a credential in Settings")?;
+                let record = Record::decode(&bytes, &binding(&config))?;
+                (
+                    state.generation,
+                    config,
+                    record.token,
+                    Some(record.identity),
+                )
+            }
+        };
+        let (caps, identity) = self
+            .verify(&config, &token, expected.as_ref(), generation)
+            .await?;
+        let mut state = self.state.lock().unwrap();
+        if state.generation != generation {
+            return Err("Connection changed during verification".into());
+        }
+        state.generation += 1;
+        if state.environment.is_some() {
+            state.environment_identity = Some(identity.clone());
+        }
+        state.active = Some(Active {
+            record: Record {
+                version: 1,
+                binding: binding(&config),
+                identity,
+                token,
+            },
+            config,
+        });
+        Ok(caps)
+    }
+    pub async fn enroll(&self, locale: Locale, parent: isize) -> Result<Option<Value>, String> {
+        let _guard = self
+            .connecting
+            .try_lock()
+            .map_err(|_| "Connection or enrollment already in progress")?;
+        if !self.vault.supported() {
+            return Err("Protected enrollment requires Windows".into());
+        }
+        let (generation, config) = {
+            let state = self.state.lock().unwrap();
+            (
+                state.generation,
+                state.config.as_ref().map_err(Clone::clone)?.clone(),
+            )
+        };
+        let vault = self.vault.clone();
+        let prompt_config = config.clone();
+        let token = tauri::async_runtime::spawn_blocking(move || {
+            vault.prompt(
+                &prompt_config.expected_actor,
+                &prompt_config.endpoint,
+                locale,
+                parent,
+            )
+        })
+        .await
+        .map_err(|_| "Native credential dialog did not complete")??;
+        self.unchanged(generation)?;
+        let Some(token) = token else {
+            return Ok(None);
+        };
+        let (caps, identity) = self.verify(&config, &token, None, generation).await?;
+        let record = Record {
+            version: 1,
+            binding: binding(&config),
+            identity,
+            token,
+        };
+        let bytes = record.encode()?;
+        let mut state = self.state.lock().unwrap();
+        if state.generation != generation {
+            return Err("Connection changed; credential was not saved".into());
+        }
+        // Save only after verified identity and while generation cannot change. Save failure keeps
+        // the old active connection and protected record. Explicit replacement may establish a new principal.
+        self.vault.write(&record.binding, &bytes)?;
+        state.generation += 1;
+        state.environment = None;
+        state.environment_identity = None;
+        state.active = Some(Active { config, record });
+        Ok(Some(caps))
+    }
+    fn verify_caps(config: &Config, caps: &Value) -> Result<(), String> {
+        if caps.get("actor").and_then(Value::as_str) != Some(config.expected_actor.as_str())
+            || caps.get("api_version").and_then(Value::as_u64) != Some(1)
+            || caps.get("contract_version").and_then(Value::as_str)
+                != Some(config.contract_version.as_str())
+            || !caps
+                .get("scopes")
+                .and_then(Value::as_array)
+                .is_some_and(|scopes| scopes.iter().any(|scope| scope == "observe"))
         {
             return Err(
-                "Central identity, API contract, or observe scope does not match configuration"
+                "Central identity, contract or observe scope does not match trusted configuration"
                     .into(),
             );
         }
-        self.verified.store(true, Ordering::Release);
-        Ok(caps)
+        Ok(())
     }
-
+    fn bootstrap_identity(config: &Config, data: &Value) -> Result<Identity, String> {
+        Self::verify_caps(config, &data["capabilities"])?;
+        if data["sync"]["version"] != 1 {
+            return Err("Central bootstrap identity is required".into());
+        }
+        let identity = Identity {
+            server_id: data["sync"]["server_id"]
+                .as_str()
+                .ok_or("Missing central server identity")?
+                .into(),
+            principal_id: data["sync"]["principal_id"]
+                .as_str()
+                .ok_or("Missing central principal identity")?
+                .into(),
+        };
+        identity.validate()?;
+        Ok(identity)
+    }
+    async fn verify(
+        &self,
+        config: &Config,
+        token: &str,
+        expected: Option<&Identity>,
+        generation: u64,
+    ) -> Result<(Value, Identity), String> {
+        self.unchanged(generation)?;
+        credentials::validate_token(token)?;
+        let response = self.send(config, token, &get("/capabilities")).await?;
+        if response.status != 200 {
+            return Err(
+                "Central authentication failed; check the credential and connection".into(),
+            );
+        }
+        self.unchanged(generation)?;
+        Self::verify_caps(config, &response.data)?;
+        let bootstrap = self.send(config, token, &get("/bootstrap")).await?;
+        if bootstrap.status != 200 {
+            return Err("Central bootstrap identity could not be verified".into());
+        }
+        self.unchanged(generation)?;
+        let identity = Self::bootstrap_identity(config, &bootstrap.data)?;
+        if expected.is_some_and(|known| known != &identity) {
+            return Err("Saved backend or principal identity changed; explicitly replace the credential to accept this identity".into());
+        }
+        let mut caps = bootstrap.data["capabilities"].clone();
+        caps["desktop_identity"] = serde_json::to_value(&identity).unwrap();
+        Ok((caps, identity))
+    }
+    fn active(&self) -> Result<(u64, Active), String> {
+        let state = self.state.lock().unwrap();
+        Ok((
+            state.generation,
+            state
+                .active
+                .clone()
+                .ok_or("Connect and verify the configured central identity first")?,
+        ))
+    }
+    fn invalidate(&self, generation: u64) {
+        let mut state = self.state.lock().unwrap();
+        if state.generation == generation {
+            state.generation += 1;
+            state.active = None;
+        }
+    }
     pub async fn request(&self, input: ConnectorRequest) -> Result<ConnectorResponse, String> {
         validate_request(&input)?;
-        if !self.verified.load(Ordering::Acquire) {
-            return Err("Connect and verify the configured central identity first".into());
+        let (generation, active) = self.active()?;
+        if input.method == "POST" {
+            // Recheck identity before mutations, including reconnects of an existing loopback tunnel.
+            if let Err(error) = self
+                .verify(
+                    &active.config,
+                    &active.record.token,
+                    Some(&active.record.identity),
+                    generation,
+                )
+                .await
+            {
+                self.invalidate(generation);
+                return Err(error);
+            }
         }
-        let response = self.send(&input).await?;
+        self.unchanged(generation)?;
+        let response = self
+            .send(&active.config, &active.record.token, &input)
+            .await?;
+        self.unchanged(generation)?;
         if response.status == 401 {
-            self.disconnect();
+            self.invalidate(generation);
+        }
+        if input.path == "/bootstrap" && response.status == 200 {
+            let identity = Self::bootstrap_identity(&active.config, &response.data);
+            if identity.as_ref().ok() != Some(&active.record.identity) {
+                self.invalidate(generation);
+                return Err(
+                    "Central backend or principal identity changed; reconnect explicitly".into(),
+                );
+            }
         }
         Ok(response)
     }
-
     pub async fn upload_artifact(
         &self,
         operation_id: &str,
         bytes: &[u8],
     ) -> Result<ConnectorResponse, String> {
         validate_artifact_upload(operation_id, bytes.len())?;
-        if !self.verified.load(Ordering::Acquire) {
-            return Err("Connect and verify the configured central identity first".into());
+        let (generation, active) = self.active()?;
+        if let Err(error) = self
+            .verify(
+                &active.config,
+                &active.record.token,
+                Some(&active.record.identity),
+                generation,
+            )
+            .await
+        {
+            self.invalidate(generation);
+            return Err(error);
         }
-        let base = self
-            .endpoint
-            .as_ref()
-            .ok_or("Central configuration unavailable")?;
-        let url = base
+        self.unchanged(generation)?;
+        let url = active
+            .config
+            .validate()?
             .join(&format!("api/v1/artifacts/uploads/{operation_id}/content"))
             .map_err(|_| "Invalid upload operation")?;
         let response = self
             .client
             .post(url)
-            .bearer_auth(self.token.as_str())
+            .bearer_auth(active.record.token.as_str())
             .header("Content-Type", "application/octet-stream")
             .body(bytes.to_vec())
             .send()
             .await
             .map_err(|_| "Artifact upload interrupted; retry the original operation")?;
         let response = Self::read_response(response).await?;
+        self.unchanged(generation)?;
         if response.status == 401 {
-            self.disconnect();
+            self.invalidate(generation);
         }
         Ok(response)
     }
-
-    async fn send(&self, input: &ConnectorRequest) -> Result<ConnectorResponse, String> {
-        let base = self
-            .endpoint
-            .as_ref()
-            .ok_or("Central configuration unavailable")?;
-        if self.token.is_empty() {
-            return Err(
-                "Native credential unavailable; set BATC_DESKTOP_TOKEN before launching".into(),
-            );
-        }
-        let url = base
+    async fn send(
+        &self,
+        config: &Config,
+        token: &str,
+        input: &ConnectorRequest,
+    ) -> Result<ConnectorResponse, String> {
+        let url = config
+            .validate()?
             .join(&format!("api/v1{}", input.path))
             .map_err(|_| "Invalid central route")?;
         let method = Method::from_bytes(input.method.as_bytes()).map_err(|_| "Invalid method")?;
-        let mut request = self
-            .client
-            .request(method, url)
-            .bearer_auth(self.token.as_str());
+        let mut request = self.client.request(method, url).bearer_auth(token);
         if let Some(body) = &input.body {
             request = request.json(body);
         }
@@ -640,6 +939,14 @@ mod tests {
     }
     const CAPS: &str = r#"{"actor":"fixture-operator","api_version":1,"contract_version":"2026-10-08","scopes":["observe","operate"]}"#;
 
+    fn bootstrap_response(server_id: &str, principal_id: &str) -> String {
+        json_response(
+            &serde_json::json!({"capabilities": serde_json::from_str::<Value>(CAPS).unwrap(),
+            "sync": {"version": 1, "server_id":server_id, "principal_id":principal_id}})
+            .to_string(),
+        )
+    }
+
     #[test]
     fn artifact_upload_boundaries_and_read_routes_are_fixed() {
         let operation = format!("op_{}", "a".repeat(32));
@@ -678,6 +985,9 @@ mod tests {
         let worker = thread::spawn(move || {
             for reply in [
                 json_response(CAPS),
+                bootstrap_response("fixture", "principal"),
+                json_response(CAPS),
+                bootstrap_response("fixture", "principal"),
                 json_response(r#"{"operation":{"status":"running"}}"#),
             ] {
                 let (mut socket, _) = listener.accept().unwrap();
@@ -721,7 +1031,9 @@ mod tests {
             .upload_artifact("op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &bytes)
             .await
             .unwrap();
-        receive.recv().unwrap();
+        for _ in 0..4 {
+            receive.recv().unwrap();
+        }
         let raw = receive.recv().unwrap();
         let split = raw.windows(4).position(|part| part == b"\r\n\r\n").unwrap();
         let headers = String::from_utf8_lossy(&raw[..split]);
@@ -743,7 +1055,13 @@ mod tests {
         let target = TcpListener::bind("127.0.0.1:0").unwrap();
         target.set_nonblocking(true).unwrap();
         let redirect = format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{}/capture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", target.local_addr().unwrap());
-        let (endpoint, requests, worker) = server(vec![json_response(CAPS), redirect]);
+        let (endpoint, requests, worker) = server(vec![
+            json_response(CAPS),
+            bootstrap_response("fixture", "principal"),
+            json_response(CAPS),
+            bootstrap_response("fixture", "principal"),
+            redirect,
+        ]);
         let bridge = Bridge::new(
             Ok(config(&endpoint)),
             Zeroizing::new("native-fixture-token".into()),
@@ -760,7 +1078,7 @@ mod tests {
             .unwrap()
             .contains("redirect"));
         assert!(target.accept().is_err());
-        assert_eq!(requests.try_iter().count(), 2);
+        assert_eq!(requests.try_iter().count(), 5);
         worker.join().unwrap();
     }
 
@@ -1030,6 +1348,9 @@ mod tests {
     async fn native_credentials_and_original_operation_envelope_reach_only_the_fixed_central() {
         let (endpoint, received, handle) = server(vec![
             json_response(CAPS),
+            bootstrap_response("fixture", "principal"),
+            json_response(CAPS),
+            bootstrap_response("fixture", "principal"),
             json_response(r#"{"operation":{"operation_id":"op_fixture","status":"accepted"}}"#),
         ]);
         let bridge = Bridge::new(
@@ -1047,6 +1368,9 @@ mod tests {
             "accepted"
         );
         let first = received.recv().unwrap();
+        for _ in 0..3 {
+            received.recv().unwrap();
+        }
         let second = received.recv().unwrap();
         assert!(first
             .to_lowercase()
@@ -1079,5 +1403,416 @@ mod tests {
         assert!(bridge.connect().await.unwrap_err().contains("redirects"));
         assert!(target.accept().is_err());
         handle.join().unwrap();
+    }
+    #[derive(Default)]
+    struct MockVault {
+        records: Mutex<std::collections::HashMap<String, Vec<u8>>>,
+        answer: Mutex<Option<String>>,
+        fail_save: std::sync::atomic::AtomicBool,
+        fail_remove: std::sync::atomic::AtomicBool,
+        prompt_release: Mutex<Option<mpsc::Receiver<()>>>,
+        prompt_started: Mutex<Option<mpsc::Sender<()>>>,
+    }
+    impl Vault for MockVault {
+        fn supported(&self) -> bool {
+            true
+        }
+        fn read(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
+            Ok(self
+                .records
+                .lock()
+                .unwrap()
+                .get(key)
+                .cloned()
+                .map(Zeroizing::new))
+        }
+        fn write(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
+            if self.fail_save.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("Fixture save refused".into());
+            }
+            self.records
+                .lock()
+                .unwrap()
+                .insert(key.into(), bytes.to_vec());
+            Ok(())
+        }
+        fn remove(&self, key: &str) -> Result<(), String> {
+            if self.fail_remove.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("Fixture remove refused".into());
+            }
+            self.records.lock().unwrap().remove(key);
+            Ok(())
+        }
+        fn prompt(
+            &self,
+            actor: &str,
+            endpoint: &str,
+            _: Locale,
+            _: isize,
+        ) -> Result<Option<Zeroizing<String>>, String> {
+            assert_eq!(actor, "fixture-operator");
+            assert!(endpoint.starts_with("http://127.0.0.1:"));
+            if let Some(send) = self.prompt_started.lock().unwrap().take() {
+                send.send(()).unwrap();
+            }
+            if let Some(receive) = self.prompt_release.lock().unwrap().take() {
+                receive.recv().unwrap();
+            }
+            Ok(self.answer.lock().unwrap().clone().map(Zeroizing::new))
+        }
+    }
+    fn credential_bridge(endpoint: &str, vault: Arc<MockVault>) -> Bridge {
+        let mut bridge = Bridge::new(Ok(config(endpoint)), Zeroizing::new(String::new()));
+        bridge.vault = vault;
+        bridge
+    }
+    fn saved(vault: &MockVault, endpoint: &str, token: &str) -> Vec<u8> {
+        let key = binding(&config(endpoint));
+        let record = Record {
+            version: 1,
+            binding: key.clone(),
+            token: Zeroizing::new(token.into()),
+            identity: Identity {
+                server_id: "fixture".into(),
+                principal_id: "principal".into(),
+            },
+        };
+        let bytes = record.encode().unwrap().to_vec();
+        vault.write(&key, &bytes).unwrap();
+        bytes
+    }
+
+    #[tokio::test]
+    async fn enrollment_is_verified_before_persistence_and_survives_native_restart() {
+        let (endpoint, requests, server) = server(vec![
+            json_response(CAPS),
+            bootstrap_response("fixture", "principal"),
+            json_response(CAPS),
+            bootstrap_response("fixture", "principal"),
+        ]);
+        let vault = Arc::new(MockVault::default());
+        *vault.answer.lock().unwrap() = Some("new-synthetic-token".into());
+        let bridge = credential_bridge(&endpoint, vault.clone());
+        assert!(!bridge.status().credential_available);
+        let caps = bridge.enroll(Locale::English, 0).await.unwrap().unwrap();
+        assert_eq!(caps["desktop_identity"]["principal_id"], "principal");
+        assert!(bridge.status().connected);
+        assert_eq!(
+            bridge.status().credential_source,
+            Some("windows_credential_manager")
+        );
+        let status = serde_json::to_string(&bridge.status()).unwrap();
+        assert!(!status.contains("new-synthetic-token"));
+        assert!(!caps.to_string().contains("new-synthetic-token"));
+        drop(bridge);
+        let restarted = credential_bridge(&endpoint, vault);
+        assert!(!restarted.status().connected);
+        restarted.connect().await.unwrap();
+        assert!(restarted.status().connected);
+        for raw in requests.try_iter() {
+            assert!(raw
+                .to_ascii_lowercase()
+                .contains("authorization: bearer new-synthetic-token"));
+        }
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_invalid_or_unsavable_replacement_keeps_old_record_and_connection() {
+        let (endpoint, _, server) = server(vec![
+            json_response(CAPS),
+            bootstrap_response("fixture", "principal"),
+            json_response(&CAPS.replace("fixture-operator", "wrong-actor")),
+            json_response(CAPS),
+            bootstrap_response("fixture", "principal"),
+        ]);
+        let vault = Arc::new(MockVault::default());
+        let original = saved(&vault, &endpoint, "old-synthetic-token");
+        let bridge = credential_bridge(&endpoint, vault.clone());
+        bridge.connect().await.unwrap();
+        assert!(bridge
+            .enroll(Locale::TraditionalChinese, 0)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(bridge.status().connected);
+        *vault.answer.lock().unwrap() = Some("wrong-synthetic-token".into());
+        assert!(bridge.enroll(Locale::English, 0).await.is_err());
+        assert!(bridge.status().connected);
+        assert_eq!(
+            vault
+                .read(&binding(&config(&endpoint)))
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            &original
+        );
+        vault
+            .fail_save
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        *vault.answer.lock().unwrap() = Some("valid-unsaved-token".into());
+        assert!(bridge
+            .enroll(Locale::English, 0)
+            .await
+            .unwrap_err()
+            .contains("save refused"));
+        assert!(bridge.status().connected);
+        assert_eq!(
+            bridge.active().unwrap().1.record.token.as_str(),
+            "old-synthetic-token"
+        );
+        assert_eq!(
+            vault
+                .read(&binding(&config(&endpoint)))
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            &original
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn saved_identity_change_refuses_reconnect_and_mutation_without_fallback() {
+        for on_reconnect in [true, false] {
+            let mut replies = vec![];
+            if !on_reconnect {
+                replies.extend([
+                    json_response(CAPS),
+                    bootstrap_response("fixture", "principal"),
+                ]);
+            }
+            replies.extend([
+                json_response(CAPS),
+                bootstrap_response("replacement", "principal"),
+            ]);
+            let (endpoint, requests, server) = server(replies);
+            let vault = Arc::new(MockVault::default());
+            saved(&vault, &endpoint, "bound-token");
+            let bridge = credential_bridge(&endpoint, vault);
+            if on_reconnect {
+                assert!(bridge
+                    .connect()
+                    .await
+                    .unwrap_err()
+                    .contains("identity changed"));
+            } else {
+                bridge.connect().await.unwrap();
+                let mut mutation = request("POST", "/operations");
+                mutation.body = Some(
+                    serde_json::json!({"action":"session.send", "target":{}, "params":{}, "preconditions":{}}),
+                );
+                mutation.idempotency_key = Some("original-intent".into());
+                assert!(bridge
+                    .request(mutation)
+                    .await
+                    .err()
+                    .unwrap()
+                    .contains("identity changed"));
+            }
+            assert!(!bridge.status().connected);
+            assert!(requests.try_iter().all(|raw| raw.starts_with("GET ")));
+            server.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_principal_mismatch_and_contract_missing_cannot_enroll() {
+        for response in [
+            bootstrap_response("fixture", "principal").replace("fixture-operator", "wrong-actor"),
+            json_response(r#"{"capabilities":{},"sync":{"version":1}}"#),
+        ] {
+            let (endpoint, _, server) = server(vec![json_response(CAPS), response]);
+            let vault = Arc::new(MockVault::default());
+            *vault.answer.lock().unwrap() = Some("synthetic-token".into());
+            let bridge = credential_bridge(&endpoint, vault.clone());
+            assert!(bridge.enroll(Locale::English, 0).await.is_err());
+            assert!(vault.records.lock().unwrap().is_empty());
+            assert!(!bridge.status().connected);
+            server.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_during_native_prompt_prevents_network_save_and_activation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let vault = Arc::new(MockVault::default());
+        *vault.answer.lock().unwrap() = Some("synthetic-token".into());
+        let (release, held) = mpsc::channel();
+        let (started, receive) = mpsc::channel();
+        *vault.prompt_release.lock().unwrap() = Some(held);
+        *vault.prompt_started.lock().unwrap() = Some(started);
+        let bridge = Arc::new(credential_bridge(&endpoint, vault.clone()));
+        let enrolling = bridge.clone();
+        let task = tokio::spawn(async move { enrolling.enroll(Locale::English, 0).await });
+        tokio::task::spawn_blocking(move || receive.recv_timeout(Duration::from_secs(5)).unwrap())
+            .await
+            .unwrap();
+        assert!(bridge
+            .connect()
+            .await
+            .unwrap_err()
+            .contains("already in progress"));
+        bridge.disconnect();
+        release.send(()).unwrap();
+        assert!(task.await.unwrap().is_err());
+        assert!(vault.records.lock().unwrap().is_empty());
+        assert!(!bridge.status().connected);
+        assert!(listener.accept().is_err());
+    }
+
+    #[tokio::test]
+    async fn forget_failure_preserves_connection_and_success_cannot_fall_back_to_environment() {
+        let (endpoint, _, server) = server(vec![
+            json_response(CAPS),
+            bootstrap_response("fixture", "principal"),
+        ]);
+        let vault = Arc::new(MockVault::default());
+        saved(&vault, &endpoint, "stored-token");
+        let mut bridge = Bridge::new(Ok(config(&endpoint)), Zeroizing::new("launch-token".into()));
+        bridge.vault = vault.clone();
+        bridge.connect().await.unwrap();
+        vault
+            .fail_remove
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(bridge.forget_credential().is_err());
+        assert!(bridge.status().connected);
+        vault
+            .fail_remove
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        bridge.forget_credential().unwrap();
+        assert!(!bridge.status().connected);
+        assert!(!bridge.status().credential_available);
+        assert!(bridge.connect().await.is_err());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn trusted_configuration_reload_cannot_forward_a_launch_token_to_another_endpoint() {
+        let root = std::env::temp_dir().join(format!(
+            "batc-credential-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("central.json");
+        let write = |endpoint: &str| {
+            std::fs::write(&path, format!(r#"{{"endpoint":"{endpoint}","expected_actor":"fixture-operator","contract_version":"2026-10-08"}}"#)).unwrap()
+        };
+        write("https://first.example/");
+        let mut bridge = Bridge::load(&root, Zeroizing::new("synthetic-launch-token".into()));
+        bridge.vault = Arc::new(MockVault::default());
+        assert!(bridge.status().credential_available);
+        bridge.reload_configuration().unwrap();
+        assert!(bridge.status().credential_available);
+        write("https://second.example/");
+        let status = bridge.reload_configuration().unwrap();
+        assert_eq!(status.endpoint.as_deref(), Some("https://second.example/"));
+        assert!(!status.credential_available);
+        assert!(!status.connected);
+        std::fs::write(&path, vec![b'x'; 16_385]).unwrap();
+        assert!(bridge
+            .reload_configuration()
+            .unwrap()
+            .error
+            .unwrap()
+            .contains("bound"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn launch_credential_keeps_first_backend_identity_across_disconnect() {
+        let (endpoint, requests, server) = server(vec![
+            json_response(CAPS),
+            bootstrap_response("fixture", "principal"),
+            json_response(CAPS),
+            bootstrap_response("different-server", "principal"),
+        ]);
+        let mut bridge = Bridge::new(
+            Ok(config(&endpoint)),
+            Zeroizing::new("launch-fixture".into()),
+        );
+        bridge.vault = Arc::new(MockVault::default());
+        bridge.connect().await.unwrap();
+        bridge.disconnect();
+        assert!(bridge
+            .connect()
+            .await
+            .unwrap_err()
+            .contains("identity changed"));
+        assert!(!bridge.status().connected);
+        assert!(requests.try_iter().all(|raw| raw.starts_with("GET ")));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnect_during_verification_prevents_bootstrap_and_activation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let (started, received) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let count = socket.read(&mut request).unwrap();
+            assert!(count > 0);
+            started.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            socket.write_all(json_response(CAPS).as_bytes()).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            listener
+        });
+        let mut bridge = Bridge::new(
+            Ok(config(&endpoint)),
+            Zeroizing::new("launch-fixture".into()),
+        );
+        bridge.vault = Arc::new(MockVault::default());
+        let bridge = Arc::new(bridge);
+        let pending = bridge.clone();
+        let connect = tokio::spawn(async move { pending.connect().await });
+        tokio::task::spawn_blocking(move || received.recv_timeout(Duration::from_secs(5)).unwrap())
+            .await
+            .unwrap();
+        bridge.disconnect();
+        release.send(()).unwrap();
+        assert!(connect.await.unwrap().is_err());
+        assert!(!bridge.status().connected);
+        assert!(server.join().unwrap().accept().is_err());
+    }
+
+    #[tokio::test]
+    async fn protected_record_damage_is_refused_before_any_network_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let vault = Arc::new(MockVault::default());
+        let wrong = saved(&vault, "https://other.example/", "synthetic-token");
+        vault
+            .records
+            .lock()
+            .unwrap()
+            .insert(binding(&config(&endpoint)), wrong);
+        let bridge = credential_bridge(&endpoint, vault.clone());
+        assert!(bridge
+            .status()
+            .error
+            .unwrap()
+            .contains("another configuration"));
+        assert!(bridge.connect().await.is_err());
+        vault
+            .records
+            .lock()
+            .unwrap()
+            .insert(binding(&config(&endpoint)), b"broken".to_vec());
+        assert!(bridge.connect().await.is_err());
+        assert!(listener.accept().is_err());
+        assert!(!bridge.status().connected);
     }
 }

@@ -8,6 +8,41 @@
 
 ## 目前續作
 
+最新追蹤 [#59](https://github.com/teddashh/bat-agent-connector/issues/59)。#58 已合併到 main
+`e495d70d8dae6b7dc415adc44a23eb1bcf64dd7d`。Native credentials、durable bulk approval、managed
+artifact capture/accept 已加入 `integrate/completion-candidate` 候選工作線，未宣稱已合併或實機通過。
+Project Hub 的清楚 session 整理已列為共用 UI 方向，依實際 host／workspace 分組，不猜測專案歸屬。
+產品負責人補充原始對話並
+澄清 workspace／repository 與 GitHub 同步模式，見 [共同依據](realignment-v2.md#原始需求與後續澄清)。
+直接未發布 Git-pack transport 實驗留在本機獨立分支，沒有合入；此能力不再列交付缺口。
+一般附件及成果操作保留，明確 repository 的已發布版本同步仍須查核；不因此宣告 M1–M3 完成。
+
+本輪候選來源與審查：
+
+- Native credentials `67223d0`：Windows 原生憑證對話框／Credential Manager、固定 endpoint／actor／
+  contract 及中央身分驗證、可恢復連線。獨立審查找到 native bootstrap 404 誤入 legacy namespace，
+  及手動連線時 Disable Disconnect；`8aff900` 修正，51 focused UI cases 通過。原 head 的 156 UI、
+  32 Linux Rust、8 state 與 Windows 模組 typecheck 是分層 fixture 證據；完整 Windows build 交 CI，
+  沒有原生對話框／Credential Manager 實機驗收。
+- Managed artifacts `9de3572`：獨立 preview、中央 accepted execution／command lineage、固定 bytes／HEAD，
+  `artifact.capture.managed` 與精確 revision 的 `artifact.accept`。獨立審查無 findings；整合 B1／B2
+  119 cases 通過。原工作線的 Python 3.13 B1 instrumentation stub 曾漏 optional keyword，僅修 fixture
+  signature 後通過；未抹去先前失敗。不標記工作完成或交付，UI 仍需接入。
+- Bulk approval `afa9161`：明確選定 preview、原 answer／permissions children、逐項 partial receipts、
+  送出前重新核對 prompt／owner／取消狀態。獨立審查無 production findings；同一 focused regression set
+  Python 3.13／3.10 各 753 passed。`7732a1a` 依 child deadline 限制 parent polling，71 focused
+  cases 在兩版本均通過，明確取消／恢復仍立即喚醒。原內部 deferred raise 保持停用；公開入口缺 preview 時拒絕。
+- B2／bulk／canonical `.7` 的整合 123 cases 通過；API/MCP/RPC unions 與 generated skills 經獨立審查。
+  本機後端驗證使用獨立 `/dev/shm` Git／bytes／SQLite fixtures 避開磁碟排程壅塞，並非斷電持久性證明。
+  最後候選仍須完整 checks、exact-head CI、Windows packaging；installer 尚未 pin 本輪候選。
+- Session 整理 `c6c148a`：依記錄中的 host／workspace 分組、已載入範圍搜尋與筆數、compact rows，
+  詳情保留完整 ID／狀態證據，長名稱不溢出。獨立畫面／source review 修正 runtime fields stale
+  仍顯示目前 streaming 的誤判。175 shared UI 在最後文字與展開細節調整前通過；最終 34 focused UI、
+  12 state、真中央 MockBat observation fixture、desktop／browser builds 與 generated drift 通過。
+  Root 已檢視 en／zh-TW 的桌面、平板、手機及極長名稱截圖；整組候選 UI 與 backend full 正在驗證。
+
+以下保留 #57 的權限工作紀錄：
+
 追蹤 [#57](https://github.com/teddashh/bat-agent-connector/issues/57)，基底 main `565a7d5`（#56）。
 R01 `session.permissions` 接中央 authority，Claude／Codex 每個 setting 保存 intent／receipt，
 保留 task incarnation／control version、confinement 與 host policy；sent error／lost ACK 不以相符
@@ -84,7 +119,7 @@ Desktop CI 現在也跑六組 actual-central fixtures，保存合成 UI 證據�
 | R02 | Codex desktop worker | `desktop/**`、共用 UI source、受限 transport、window/tray；依 R00 | #44 已合併；installed 驗收待做 |
 | R03 | Codex 主協調（待 R02 bridge） | Fleet inventory/PS adapter → Rust parity、ownership、bootstrap | #45 PS adapter 已合併；Rust parity 尚缺 |
 | R04 | Codex 主協調；observation worker 完成修正 | #35 read models → 共用 frontend state/history/relations | #35 main；#48 frontend 已合併 |
-| R05 | Codex 主協調；保留 artifacts 分支 | fixed checkpoint、artifact bytes/manifest、跨 host；依 R01/R02/R08 接口 | checkpoint/#46/#50 main；本輪補 B1 UI，B2/C 尚缺 |
+| R05 | Codex 主協調；保留 artifacts 分支 | fixed checkpoint、artifact bytes/manifest、明確 repository 的已發布版本同步；依 R01/R02/R08 接口 | checkpoint/#46/#50/B1 UI main；B2 工作線續作，repository 同步待查核；直接未發布 Git relay 已排除 |
 | R06 | Codex 主協調 | 既有 project/work_items、completion + R04 詳情；無 importer | 基礎 main；桌面 history/details 已合併，剩餘能力待驗收 |
 | R07 | Codex 主協調；保留 delivery 分支 | integration、cancel 追蹤、composite scopes、source SHA/recipe、UI；依 R01 | Part A main；#47 Part B 已合併 |
 | R08 | Codex 主協調；cleanup worker 完成修正 | #38 + R01/R04/R05 引用、task cleanup、recovery | #38 main；task-owned cleanup 仍保留 |
