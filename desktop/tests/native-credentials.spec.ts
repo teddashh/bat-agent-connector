@@ -39,6 +39,7 @@ async function setup(page: any, options: any = {}) {
         if (path.includes('/relations')) return {status: 200, data: {relations: [], next_cursor: null}};
         if (path.startsWith('/checkpoints')) return {status: 200, data: {checkpoints: []}};
         const checkpoint = {cursor: 0, token: 'synthetic-checkpoint'};
+        if (path === '/bootstrap' && fixture.missingBootstrap) return {status: 404, data: {error: {code: 'NOT_FOUND', message: 'Fixture bootstrap unavailable'}}};
         if (path === '/bootstrap') return {status: 200, data: {capabilities: caps(fixture.principal), sync: {version: 1,
           server_id: 'fixture-server', principal_id: fixture.wrongBootstrap ? 'wrong-principal' : fixture.principal, checkpoint}}};
         if (path.startsWith('/events')) return {status: 200, data: {events: [], next_cursor: 0, head_cursor: 0, sync: {checkpoint}}};
@@ -120,19 +121,58 @@ test('configuration reload disconnects and waits for explicit verification witho
     .toEqual([{command: 'connector_reload_configuration', args: {}}]);
 });
 
-test('disconnect during delayed enrollment ignores a late successful response', async ({page}) => {
-  await setup(page, {available: true, saved: true, delay: true});
-  await page.getByRole('button', {name: 'Replace credential', exact: true}).click();
-  await expect.poll(() => page.evaluate(() => typeof (window as any).__credentialFixture.release)).toBe('function');
-  await page.getByRole('link', {name: 'Sessions', exact: true}).click();
-  await page.getByRole('link', {name: 'Connection', exact: true}).click();
-  await page.getByRole('button', {name: 'Disconnect', exact: true}).click();
-  await expect(page.getByText(/Connected as/)).toHaveCount(0);
-  await page.evaluate(() => (window as any).__credentialFixture.release());
-  await expect(page.getByText('Disconnected. Central work continues.')).toBeVisible();
-  await expect(page.getByText(/Connected as/)).toHaveCount(0);
-  expect(await page.evaluate(() => (window as any).__credentialFixture.calls.filter((c: any) => c.command === 'connector_request' && c.args.input.path === '/bootstrap').length)).toBe(1);
-});
+for (const kind of ['connect', 'enroll']) {
+  test(`disconnect stays available during manual ${kind} and ignores a late successful response`, async ({page}) => {
+    await setup(page, {available: true, saved: true});
+    await expect(page.getByText(/Connected as fixture-operator/)).toBeVisible();
+    await page.evaluate(kind => {
+      const fixture = (window as any).__credentialFixture;
+      if (kind === 'connect') fixture.delayConnect = true; else fixture.delay = true;
+    }, kind);
+    await page.getByRole('button', {name: kind === 'connect' ? 'Connect' : 'Replace credential', exact: true}).click();
+    await expect.poll(() => page.evaluate(kind => typeof (window as any).__credentialFixture[kind === 'connect' ? 'releaseConnect' : 'release'], kind)).toBe('function');
+    const disconnect = page.getByRole('button', {name: 'Disconnect', exact: true});
+    await expect(disconnect).toBeEnabled(); // no navigation or rerender is needed to cancel
+    await disconnect.click();
+    await expect(page.getByText('Disconnected. Central work continues.')).toBeVisible();
+    await expect(page.getByText(/Connected as/)).toHaveCount(0);
+    await page.evaluate(kind => (window as any).__credentialFixture[kind === 'connect' ? 'releaseConnect' : 'release'](), kind);
+    await expect(page.getByText('Disconnected. Central work continues.')).toBeVisible();
+    await expect(page.getByText(/Connected as/)).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).__credentialFixture.calls.filter((c: any) => c.command === 'connector_request' && c.args.input.path === '/bootstrap').length)).toBe(1);
+    expect(await page.evaluate(() => (window as any).__credentialFixture.calls.filter((c: any) => c.command === 'connector_disconnect').length)).toBe(1);
+  });
+}
+
+for (const entry of ['startup', 'connect', 'enroll']) {
+  test(`native ${entry} refuses missing mounted bootstrap and recovers without a legacy namespace`, async ({page}) => {
+    await setup(page, {available: entry !== 'enroll', saved: entry !== 'enroll', missingBootstrap: entry === 'startup'});
+    let original: Record<string, string> = {};
+    if (entry === 'connect') {
+      await expect(page.getByText(/Connected as fixture-operator/)).toBeVisible();
+      await expect.poll(() => page.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('batc.sync.')).length)).toBe(1);
+      original = await page.evaluate(() => Object.fromEntries(Object.entries(localStorage)));
+    }
+    if (entry !== 'startup') {
+      await page.evaluate(() => {(window as any).__credentialFixture.missingBootstrap = true;});
+      await page.getByRole('button', {name: entry === 'connect' ? 'Connect' : 'Add credential', exact: true}).click();
+    }
+    await expect(page.getByText('Fixture bootstrap unavailable', {exact: false})).toBeVisible();
+    await expect(page.getByText(/Connected as/)).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).__credentialFixture.connected)).toBe(false);
+    expect(await page.evaluate(() => (window as any).__credentialFixture.calls.filter((c: any) => c.command === 'connector_disconnect').length)).toBe(1);
+    expect(await page.evaluate(() => Object.keys(localStorage).some(k => k.includes(':legacy:')))).toBe(false);
+    expect(await page.evaluate(() => (window as any).__credentialFixture.calls.some((c: any) => c.command === 'connector_request' && c.args.input.method === 'POST'))).toBe(false);
+    for (const [key, value] of Object.entries(original)) expect(await page.evaluate(k => localStorage.getItem(k), key)).toBe(value);
+    await page.evaluate(() => {(window as any).__credentialFixture.missingBootstrap = false;});
+    await page.getByRole('button', {name: 'Connect', exact: true}).click();
+    await expect(page).toHaveURL(/#\/home$/);
+    await page.getByRole('link', {name: 'Connection', exact: true}).click();
+    await expect(page.getByText(/Connected as fixture-operator/)).toBeVisible();
+    await expect.poll(() => page.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('batc.sync.')).length)).toBe(1);
+    expect(await page.evaluate(() => Object.keys(localStorage).some(k => k.includes(':legacy:')))).toBe(false);
+  });
+}
 
 test('forget removes only the local credential and never calls a central mutation', async ({page}) => {
   await setup(page, {available: true, saved: true});
