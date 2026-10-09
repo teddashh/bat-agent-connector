@@ -1,16 +1,46 @@
 //! Fleet local contracts. This crate contains no central task authority and no IPC.
 //! Configuration is native-only; callers project an explicitly safe status model.
 pub mod configuration;
+pub mod credential;
+pub mod discovery;
+pub mod installation;
 pub mod inventory;
+pub mod migration;
+mod migration_io;
+pub mod monitor_launch;
 pub mod ownership;
 pub mod probe;
 mod probe_wire;
 pub mod process_adapter;
+mod profile_files;
+pub mod profile_launch;
+pub mod route;
+mod route_probe;
 pub mod selection;
 pub mod selection_io;
 pub mod strict_json;
+pub mod supervisor;
+pub mod supervisor_control;
+pub mod supervisor_io;
+pub mod supervisor_probe;
+pub mod supervisor_status;
+pub mod tunnel;
 #[cfg(windows)]
 pub mod windows;
+#[cfg(windows)]
+pub mod windows_launcher;
+#[cfg(any(windows, test))]
+pub mod windows_migration;
+#[cfg(windows)]
+pub mod windows_monitor_launch;
+#[cfg(windows)]
+pub mod windows_startup;
+#[cfg(windows)]
+pub mod windows_profiles;
+#[cfg(windows)]
+pub mod windows_supervisor;
+#[cfg(windows)]
+pub mod windows_tunnel;
 
 pub type Result<T> = std::result::Result<T, &'static str>;
 

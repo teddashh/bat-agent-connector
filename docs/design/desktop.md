@@ -54,7 +54,7 @@ All commands retain the main-window/local-origin checks. Only one connection/pro
 
 Verification covers loopback HTTP and injected native vault/prompt lifecycle scenarios, shared browser/native IPC fixtures, and responsive English/zh-TW screens. Windows-only dialog adapter tests inject the native dialog return, without opening a dialog or using a real credential store. Windows native compilation/packaging belongs to exact-head CI; interactive dialog, real Credential Manager persistence across Windows logins and installed acceptance are separate evidence, not inferred from these mocks. macOS protected storage and Linux protected storage are not implemented.
 
-The app works without BAT installed. Configured Windows installations can manage local connections through the [Fleet Kit adapter](desktop-fleet.md). Opening BAT, native attachments, autostart and updates remain unavailable. Missing configuration and credentials remain visible in the app.
+The app works without BAT installed. Configured Windows installations use the [native Fleet controls](desktop-fleet-native.md) for independent connection/window choices, reviewed BAT launch, and explicit monitor/Startup migration. Native attachments use the bounded file adapter described below. Signed updates remain a separate release lane. Missing configuration and credentials remain visible in the app.
 
 ## Native boundary
 
@@ -120,7 +120,7 @@ npm run tauri -- build --debug --bundles deb
 xvfb-run -a -s '-screen 0 1440x900x24' dbus-run-session -- node tests/native-smoke.mjs
 ```
 
-The app bundles frontend assets and does not require Vite in production. Closing the main window hides it; the tray offers Open Dashboard and Quit Dashboard. Quitting does not stop central tasks or Fleet. The single-instance plugin focuses the existing window in the current desktop session. This plugin is not the Fleet cross-Windows-session ownership protocol; another interactive Windows session is not yet fenced. Fleet monitor control delegates ownership checks to the existing Kit; native Rust does not create a second supervisor.
+The app bundles frontend assets and does not require Vite in production. Closing the main window hides it; the tray offers Open Dashboard and Quit Dashboard. Explicit Quit uses [normal exact-owner Fleet shutdown](desktop-fleet-native.md), refuses unconfirmed/foreign ownership, and leaves central work and manual BAT windows alone. The single-instance plugin focuses the current desktop window; Fleet separately enforces the shared cross-session ownership protocol. Fixed native supervisor/login CLI dispatch precedes the WebView and single-instance plugin. Native and PowerShell backends are mutually exclusive under the same ownership guards.
 
 The desktop workflow packages unsigned Windows NSIS and Linux deb artifacts for validation. Signing, updater channels, macOS packages and release publishing are not configured.
 
@@ -128,7 +128,7 @@ The desktop workflow packages unsigned Windows NSIS and Linux deb artifacts for 
 
 On the Linux development host: both frontend builds, Rust compilation/tests/clippy, existing Python static allowlist/CSP test, and Chromium browser/IPC-mock tests passed. The separate `test:central` integration uses the real Python HTTP API and journal with MockBat: signed checkpoint replay, actual retention reset, and draft recovery passed through the generated browser UI. Browser screenshots at 390/768/1440 preserve the original dashboard layout. A debug deb was built. The genuine packaged Linux WebKit view read a loopback fixture's capabilities/bootstrap/data/events without Vite; a window-manager close event hid it while retaining the process, and a second app invocation exited and restored the same window. This verifies close handling and instance handoff, but not a physical tray interaction. These are fixture results, not live BAT/central service acceptance.
 
-Windows installation, actual Windows tray behavior, cross-session fencing, production credentials, native files, Fleet parity, autostart, signed updates, and end-to-end work against real central/BAT hosts remain unvalidated or unimplemented. The foundation and follow-up slices do not claim M1 or complete product acceptance.
+Installed Windows tray/sign-in behavior, native profile restoration, cross-session ownership, production credentials, native files, real Startup migration and end-to-end work against real central/BAT hosts remain acceptance gates. Their fixture and compile evidence is distinct from installed validation; signed update release configuration remains a separate lane. The foundation and follow-up slices do not claim M1 or complete product acceptance.
 
 Implementation references: [Tauri capabilities and application commands](https://v2.tauri.app/security/capabilities/), [tray](https://v2.tauri.app/learn/system-tray/), [single instance](https://v2.tauri.app/plugin/single-instance/), [system opener](https://v2.tauri.app/plugin/opener/), [Windows installers](https://v2.tauri.app/distribute/windows-installer/).
 

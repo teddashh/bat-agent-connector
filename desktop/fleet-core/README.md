@@ -4,13 +4,21 @@ Internal Rust library for the existing Fleet inventory, profile pairing, indepen
 bounded configuration snapshots, locked selection updates, process identity decisions and bounded recovery.
 The Windows OS adapter stops only explicitly verified local processes through retained handles.
 The probe module performs bounded, read-only loopback TLS/BAT and Connector capabilities requests.
-Neither is connected to the desktop Fleet adapter or automatic startup. This source slice does not
+The route module probes configured TCP endpoints and a fixed trusted local Tailscale
+`status --json` command under deadlines, and keeps route/recovery decisions native-only.
+These effects are not connected to the desktop Fleet adapter or automatic startup. This source slice does not
 establish Rust Fleet parity.
 
 Port basis: Fleet Kit `2ec4b11bc010bfd669040e942648c741b63d0b7c`, `client/fleet-core.ps1` and
 `client/fleet-client.ps1`. Reviewed main `4744507354466b1424b8ea369a00a94f1ca3a933` has no intervening
 client/tests changes. `tests/fixtures` copies only the Kit's synthetic inventory/index/SSH fixtures;
 private configuration, real host identities, credentials and pins are excluded.
+
+The native-only credential reader resolves the selected inventory's BAT profile token or Fleet
+observe DPAPI reference from fixed, bounded files. It never falls back to a desktop mutation token,
+another profile, another data directory or an environment variable. See the
+[format and evidence contract](../../docs/design/fleet-credentials.md); Windows DPAPI runtime
+compatibility remains a Windows-runner gate.
 
 Malformed existing preferences fail closed instead of silently enabling every connection. JSON field
 spelling is exact and decoded keys must be unique ignoring case. Profile IDs are also unique ignoring
@@ -49,3 +57,15 @@ sidecar with zero sharing; keep the guard alive through the entire preference CA
 Process arguments and paths remain native-only evidence, never frontend status. See
 [the Windows adapter contract](../../docs/design/fleet-windows.md) for the exact interfaces,
 legacy creation-time format, NT command-line limitations and pending Windows execution evidence.
+
+`route::SelectionRequest` lets independent background workers probe an immutable snapshot.
+A result's alias is available only after current generation/policy validation; the supervisor
+still revalidates configuration before launch. Selection updates preserve an owned Run and
+recovery history, while source changes require a fresh policy after owned stop. See
+[route policy and intentional Kit corrections](../../docs/design/fleet-routes.md).
+
+`migration` records explicit backend/autostart transitions with exact original bytes and
+normal-owner exit proof; it never retries an uncertain launch. The fixed Windows startup
+codec reads/writes only the reviewed Open BAT shortcut via the caller's local journal
+flow. These modules require the native facade's guarded hooks and are not wired into
+automatic startup by this library. See [migration contract](../../docs/design/fleet-migration.md).
