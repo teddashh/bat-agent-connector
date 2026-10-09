@@ -145,9 +145,19 @@ async fn native_tcp_is_bounded_and_missing_executable_never_searches_path() {
             .await
     );
     drop(listener);
+    // A just-released listener is not a reliable absence oracle: close propagation
+    // and ephemeral-port reuse can race the next connect. Reserve a socket without
+    // listening, keeping its port unavailable to another fixture throughout the probe.
+    let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+    reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let closed = Endpoint {
+        address: "127.0.0.1".into(),
+        port: reserved.local_addr().unwrap().port(),
+    };
     assert!(
         !probe
-            .tcp(&ep, Deadline::now() + Duration::from_secs(1))
+            .tcp(&closed, Deadline::now() + Duration::from_secs(1))
             .await
     );
+    drop(reserved);
 }
