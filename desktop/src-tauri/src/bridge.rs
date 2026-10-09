@@ -849,6 +849,48 @@ fn validate_capture_preview(body: Option<&Value>) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedCapturePreviewRequest {
+    host: String,
+    session_id: String,
+    relative_path: String,
+    execution_operation_id: Option<String>,
+    task_id: Option<String>,
+    command_id: Option<String>,
+}
+
+fn validate_managed_capture_preview(body: Option<&Value>) -> Result<(), String> {
+    let value = body.ok_or("Managed capture preview body is required")?;
+    let doc: ManagedCapturePreviewRequest = serde_json::from_value(value.clone())
+        .map_err(|_| "Invalid typed managed capture preview request")?;
+    validate_capture_preview(Some(&serde_json::json!({
+        "host": doc.host, "session_id": doc.session_id, "relative_path": doc.relative_path
+    })))?;
+    // Exact selector field sets also reject explicit nulls and mixed selector kinds.
+    let fields = value.as_object().ok_or("Invalid managed capture fields")?;
+    let valid = match (&doc.execution_operation_id, &doc.task_id, &doc.command_id) {
+        (Some(operation), None, None) => {
+            fields.len() == 4
+                && Regex::new(r"^op_[0-9a-f]{32}$")
+                    .unwrap()
+                    .is_match(operation)
+        }
+        (None, Some(task), Some(command)) => {
+            fields.len() == 5
+                && Regex::new(r"^[0-9a-f-]{8,64}$").unwrap().is_match(task)
+                && !command.is_empty()
+                && command.len() <= 256
+                && !command.chars().any(char::is_control)
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err("Select one exact execution operation or task command".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub fn validate_artifact_upload(operation_id: &str, length: usize) -> Result<(), String> {
     static OPERATION: OnceLock<Regex> = OnceLock::new();
@@ -913,7 +955,7 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             r"delivery/previews/mpv_[0-9a-f]{32}|integrations/previews/ipv_[0-9a-f]{32}|integrations/op_[0-9a-f]{32})$")).unwrap())
     } else if input.method == "POST" {
         POST.get_or_init(|| {
-            Regex::new(r"^/(?:approval-previews|artifact-capture-previews|cleanup-previews|operations(?:/op_[0-9a-f]{32}/(?:cancel|resume))?)$")
+            Regex::new(r"^/(?:approval-previews|artifact-capture-previews|artifact-managed-capture-previews|cleanup-previews|operations(?:/op_[0-9a-f]{32}/(?:cancel|resume))?)$")
                 .unwrap()
         })
     } else {
@@ -960,6 +1002,12 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
         {
             return Err("Invalid approval preview scope".into());
         }
+    }
+    if path == "/artifact-managed-capture-previews" {
+        if input.path != path || input.idempotency_key.is_some() {
+            return Err("Managed capture preview accepts no query or operation key".into());
+        }
+        validate_managed_capture_preview(input.body.as_ref())?;
     }
     let cleanup = path.starts_with("/cleanup-");
     if path == "/workspaces" && input.idempotency_key.is_some() {
@@ -2153,5 +2201,46 @@ mod tests {
         assert!(bridge.connect().await.is_err());
         assert!(listener.accept().is_err());
         assert!(!bridge.status().connected);
+    }
+    #[test]
+    fn managed_capture_preview_keeps_exact_selector_and_read_boundary() {
+        let mut input = request("POST", "/artifact-managed-capture-previews");
+        let operation = serde_json::json!({"host":"demo", "session_id":"managed-session",
+                "relative_path":"result/report.txt", "execution_operation_id":"op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"});
+        let command = serde_json::json!({"host":"demo", "session_id":"managed-session",
+                "relative_path":"result/report.txt", "task_id":"11111111-2222-4333-8444-555555555555", "command_id":"cmd-original"});
+        for value in [&operation, &command] {
+            input.body = Some(value.clone());
+            assert!(validate_request(&input).is_ok());
+        }
+        for (field, value) in [
+            ("relative_path", serde_json::json!("../outside")),
+            ("relative_path", serde_json::json!(".git/config")),
+            ("execution_operation_id", serde_json::json!(null)),
+            ("execution_operation_id", serde_json::json!("short")),
+            ("task_id", serde_json::json!("11111111")),
+            ("command_id", serde_json::json!(null)),
+            ("lineage", serde_json::json!({"kind":"execution_operation"})),
+            ("force", serde_json::json!(true)),
+            ("headers", serde_json::json!({"Authorization":"fixture"})),
+        ] {
+            let mut bad = operation.clone();
+            bad[field] = value;
+            input.body = Some(bad);
+            assert!(validate_request(&input).is_err());
+        }
+        input.body = Some(operation);
+        for path in [
+            "/artifact-managed-capture-previews?",
+            "/artifact-managed-capture-previews?host=demo",
+            "/artifact-managed-capture-previews/other",
+        ] {
+            input.path = path.into();
+            assert!(validate_request(&input).is_err());
+        }
+        input.path = "/artifact-managed-capture-previews".into();
+        input.idempotency_key = Some("not-an-operation".into());
+        assert!(validate_request(&input).is_err());
+        assert!(validate_request(&request("GET", "/artifact-managed-capture-previews")).is_err());
     }
 }

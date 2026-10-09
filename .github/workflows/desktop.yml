@@ -67,6 +67,7 @@ jobs:
           npm run test:delivery
           npm run test:observation
           npm run test:capture
+          npm run test:artifact-review
           npm run test:permissions
           npm run test:approvals
           npm run test:start
