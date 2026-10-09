@@ -11,8 +11,8 @@ async function setup(page: any, options: any = {}) {
       fixture.calls.push({command, args: args ?? null});
       if (command === 'native_status') return {endpoint: fixture.endpoint ?? 'https://central.example/', expected_actor: 'fixture-operator',
         credential_available: fixture.available, credential_saved: fixture.saved, enrollment_supported: fixture.supported,
-        configuration_reload: true, configuration_file: 'C:\\Users\\fixture\\AppData\\Roaming\\io.betteragent.dashboard\\central.json',
-        credential_source: fixture.available ? fixture.saved ? 'windows_credential_manager' : 'launch_environment' : null,
+        configuration_reload: true, configuration_file: fixture.configPath ?? 'C:\\Users\\fixture\\AppData\\Roaming\\io.betteragent.dashboard\\central.json',
+        credential_source: fixture.available ? fixture.saved ? fixture.store ?? 'windows_credential_manager' : 'launch_environment' : null,
         connected: fixture.connected};
       if (command === 'connector_connect') {if (fixture.delayConnect) await new Promise(resolve => {fixture.releaseConnect = resolve;}); if (!fixture.available) throw new Error('Fixture credential unavailable'); fixture.connected = true; return caps(fixture.principal);}
       if (command === 'connector_enroll') {
@@ -235,3 +235,21 @@ test('slow startup renders recovery controls and discards verification completed
   await expect(page.getByText(/Connected as fixture-operator/)).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).__credentialFixture.calls.filter((c: any) => c.command === 'connector_request' && c.args.input.path === '/bootstrap'))).toEqual([]);
 });
+
+for (const locale of ['en-US', 'zh-TW']) for (const width of [390, 768, 1440]) {
+  test(`macOS Keychain enrollment uses native input ${locale} ${width}`, async ({browser}) => {
+    const context = await browser.newContext({locale, viewport: {width, height: 900}});
+    const page = await context.newPage();
+    await setup(page, {store: 'macos_keychain',
+      configPath: '/Users/fixture/Library/Application Support/io.betteragent.dashboard/central.json'});
+    await page.getByRole('button', {name: locale === 'en-US' ? 'Add credential' : '新增憑證', exact: true}).click();
+    await expect(page.getByText(locale === 'en-US' ? 'macOS Keychain' : 'macOS 鑰匙圈', {exact: true})).toBeVisible();
+    await expect(page.locator('input[type=password]')).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(await page.evaluate(() => (window as any).__credentialFixture.calls.filter((c: any) => c.command === 'connector_enroll')))
+      .toEqual([{command: 'connector_enroll', args: {locale}}]);
+    await mkdir('test-results/macos-credentials', {recursive: true});
+    await page.screenshot({path: `test-results/macos-credentials/settings-${locale}-${width}.png`, fullPage: true});
+    await context.close();
+  });
+}

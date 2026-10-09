@@ -97,6 +97,7 @@ pub enum Locale {
 
 pub trait Vault: Send + Sync {
     fn supported(&self) -> bool;
+    fn source(&self) -> &'static str;
     fn read(&self, binding: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String>;
     fn write(&self, binding: &str, bytes: &[u8]) -> Result<(), String>;
     fn remove(&self, binding: &str) -> Result<(), String>;
@@ -118,6 +119,9 @@ mod macos;
 impl Vault for OsVault {
     fn supported(&self) -> bool {
         false
+    }
+    fn source(&self) -> &'static str {
+        "native_memory"
     }
     fn read(&self, _: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
         Ok(None)
@@ -182,6 +186,9 @@ mod windows {
     impl Vault for OsVault {
         fn supported(&self) -> bool {
             true
+        }
+        fn source(&self) -> &'static str {
+            "windows_credential_manager"
         }
         fn read(&self, binding: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
             let name = target(binding)?;

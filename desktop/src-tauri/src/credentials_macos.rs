@@ -25,6 +25,9 @@ impl Vault for OsVault {
     fn supported(&self) -> bool {
         true
     }
+    fn source(&self) -> &'static str {
+        "macos_keychain"
+    }
     fn read(&self, binding: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
         let options = PasswordOptions::new_generic_password(SERVICE, reference(binding)?);
         match generic_password(options) {
