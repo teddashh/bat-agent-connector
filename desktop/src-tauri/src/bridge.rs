@@ -90,6 +90,9 @@ enum CleanupTarget {
     Integration {
         operation_id: String,
     },
+    Task {
+        task_id: String,
+    },
 }
 
 #[derive(Default, Deserialize)]
@@ -128,6 +131,9 @@ fn validate_cleanup_preview(body: Option<&Value>) -> Result<(), String> {
         CleanupTarget::Integration { operation_id } => Regex::new(r"^op_[0-9a-f]{32}$")
             .unwrap()
             .is_match(&operation_id),
+        CleanupTarget::Task { task_id } => {
+            Regex::new(r"^[0-9a-f-]{8,64}$").unwrap().is_match(&task_id)
+        }
     };
     let resource = Regex::new(r"^(?:cr|wt)_[0-9a-f]{32}$").unwrap();
     if !valid_id
@@ -1175,6 +1181,10 @@ mod tests {
             serde_json::json!({"target":{"kind":"host","host":"demo"},"headers":{"Authorization":"fake"}}),
             serde_json::json!({"target":{"kind":"host","host":"demo"},"choices":{"discard_uncommitted":["/tmp/path"]}}),
             serde_json::json!({"target":{"kind":"host","host":"demo"},"choices":{"release_undelivered":vec![rid;501]}}),
+            serde_json::json!({"target":{"kind":"task","task_id":"../file"}}),
+            serde_json::json!({"target":{"kind":"task","task_id":"11111111-2222-4333-8444-555555555555","force":true}}),
+            serde_json::json!({"target":{"kind":"task","task_id":"11111111-2222-4333-8444-555555555555","include_children":true}}),
+            serde_json::json!({"target":{"kind":"task","task_id":"11111111-2222-4333-8444-555555555555"},"origin":"task_lifecycle"}),
         ] {
             preview.body = Some(body);
             assert!(validate_request(&preview).is_err());
@@ -1183,6 +1193,7 @@ mod tests {
             serde_json::json!({"kind":"work_item","work_item_id":"wi_aaaaaaaaaaaaaaaaaaaa","include_children":true}),
             serde_json::json!({"kind":"checkpoint","checkpoint_id":"cp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}),
             serde_json::json!({"kind":"integration","operation_id":"op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}),
+            serde_json::json!({"kind":"task","task_id":"11111111-2222-4333-8444-555555555555"}),
         ] {
             preview.body = Some(serde_json::json!({"target":target}));
             assert!(validate_request(&preview).is_ok());

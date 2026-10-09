@@ -885,6 +885,8 @@ async function viewObservedResource(main, type, id) {
       const resource = data[type === "execution" ? "task" : "worktree"];
       head.replaceChildren(h("h1", {}, t(type === "execution" ? "obs_execution" : "obs_worktree")), h("code", {}, id),
         h("p", {class: "muted"}, t("obs_known_identity")),
+        type === "execution" && state.caps?.features?.cleanup_task === true ?
+          h("p", {}, h("a", {href: `#/cleanup/task/${encodeURIComponent(id)}`}, t("cleanup_task_preview"))) : null,
         h("pre", {class: "pre"}, JSON.stringify(resource, null, 2)));
     } catch (error) {head.append(errorBox(error));}
   };
@@ -2476,19 +2478,41 @@ async function viewCleanup(main, section, ident) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const draftKey = `batc.cleanup.draft.${connection.namespace}`;
   const pendingKey = `batc.cleanup.pending.${connection.namespace}`;
+  const intentKey = `batc.cleanup.intent.${connection.namespace}`;
+  const readStored = key => {
+    try {return JSON.parse(localStorage.getItem(key) || sessionStorage.getItem(key) || "null");} catch {return null;}
+  };
   const persist = (key, value) => {
     assertView(connection);
-    try { if (value === null) sessionStorage.removeItem(key); else sessionStorage.setItem(key, JSON.stringify(value)); }
+    try {
+      // Retain old per-tab entries for compatibility while native restarts use the durable namespace.
+      for (const storage of [localStorage, sessionStorage]) {
+        if (value === null) storage.removeItem(key); else storage.setItem(key, JSON.stringify(value));
+      }
+    }
     catch (error) { if (error.code) throw error; /* this view retains the request */ }
   };
-  const stored = (() => { try { return JSON.parse(sessionStorage.getItem(draftKey) || "{}"); } catch { return {}; } })();
-  const choices = section === "item" && stored.id !== ident ? { discard_uncommitted: [], release_undelivered: [] }
+  const stored = readStored(draftKey) || {};
+  const choices = ["item", "task"].includes(section) && stored.id !== ident ? { discard_uncommitted: [], release_undelivered: [] }
     : (stored.choices || { discard_uncommitted: [], release_undelivered: [] });
-  const pending = (() => { try { return JSON.parse(sessionStorage.getItem(pendingKey) || "null"); } catch { return null; } })();
-  const kind = h("select", { "aria-label": t("cleanup_target") }, ...["work_item", "checkpoint", "integration", "host"].map(k =>
+  const pending = readStored(pendingKey);
+  let intent = readStored(intentKey);
+  if (intent) {
+    const request = intent.request;
+    const valid = request?.action === "cleanup.apply" && request.target?.preview_id === pending?.preview_id &&
+      request.params?.preview_token === pending?.preview_token && request.preconditions?.preview_fingerprint === pending?.fingerprint &&
+      typeof intent.key === "string" && intent.key.length > 0 && intent.key.length <= 200 && pending;
+    intent = {key: valid ? intent.key : null, request: valid ? {action: "cleanup.apply", target: {preview_id: pending.preview_id},
+      params: {preview_token: pending.preview_token}, preconditions: {preview_fingerprint: pending.fingerprint}} : null,
+      operation_id: typeof intent.operation_id === "string" && /^op_[0-9a-f]{32}$/.test(intent.operation_id) ? intent.operation_id : null,
+      refused: valid && ["PREVIEW_TOKEN_INVALID", "PREVIEW_EXPIRED", "PREVIEW_MISMATCH", "PREVIEW_BLOCKED"].includes(intent.refused) ? intent.refused : null};
+  }
+  let operation = null, operationRead = null, submission = null, readFailed = false;
+  const supportsTask = state.caps?.features?.cleanup_task === true;
+  const kind = h("select", { "aria-label": t("cleanup_target") }, ...["work_item", "checkpoint", "integration", "host", ...(supportsTask || pending?.target?.kind === "task" ? ["task"] : [])].map(k =>
     h("option", { value: k }, t("cleanup_target_" + k))));
-  kind.value = section === "item" ? "work_item" : (stored.kind || "host");
-  const targetId = h("input", { value: section === "item" ? ident : (stored.id || ""), "aria-label": t("cleanup_id"),
+  kind.value = section === "item" ? "work_item" : section === "task" && supportsTask ? "task" : (stored.kind || "host");
+  const targetId = h("input", { value: ["item", "task"].includes(section) ? ident : (stored.id || ""), "aria-label": t("cleanup_id"),
     placeholder: t("cleanup_id"), class: "cleanup-id" });
   const children = h("input", { type: "checkbox", checked: stored.children || false });
   const childrenLabel = h("label", { class: "cleanup-choice" }, children, t("cleanup_children"));
@@ -2520,7 +2544,7 @@ async function viewCleanup(main, section, ident) {
   }
   function resourceRow(item) {
     const codes = (item.reasons || []).map(r => r.code);
-    const eligible = item.proven && item.kind === "worktree" && !item.task_owned;
+    const eligible = item.proven && item.kind === "worktree" && (!item.task_owned || item.task_cleanup?.eligible === true);
     return h("article", { class: "cleanup-resource" },
       h("div", { class: "row" }, h("strong", { class: "grow" }, t("cleanup_kind_" + item.kind)),
         chip(t("cleanup_decision_" + item.decision), item.decision === "reclaim" ? "ok" : "")),
@@ -2531,14 +2555,56 @@ async function viewCleanup(main, section, ident) {
       ...(item.overridden_reasons || []).map(r => h("p", { class: "muted" }, t("cleanup_choice_" + r.code))),
       item.steps?.length ? h("p", {}, t("cleanup_plan"), ": ", item.steps.map(x => t("cleanup_step_" + x)).join(" → ")) : null,
       eligible && codes.includes("RESULTS_NOT_DELIVERED") ? choice(item, "release_undelivered", t("cleanup_release")) : null,
-      eligible && codes.includes("UNCOMMITTED_CHANGES") ? choice(item, "discard_uncommitted", t("cleanup_discard")) : null,
+      eligible && !item.task_owned && codes.includes("UNCOMMITTED_CHANGES") ? choice(item, "discard_uncommitted", t("cleanup_discard")) : null,
       h("details", {}, h("summary", {}, t("cleanup_evidence")), h("pre", { class: "pre" }, JSON.stringify({
         resource_id: item.resource_id, original_ids: item.original_ids, reasons: item.reasons,
-        consumers: item.consumers, delivery: item.delivery, manifest: item.observation?.manifest }, null, 2))));
+        consumers: item.consumers, task_cleanup: item.task_cleanup, delivery: item.delivery, manifest: item.observation?.manifest }, null, 2))));
   }
-  const reviewed = h("input", { type: "checkbox", onchange: () => { apply.disabled = !doc?.ready || !may("cleanup") || !reviewed.checked; } });
+  const reviewed = h("input", { type: "checkbox", onchange: () => { apply.disabled = busy || readFailed || Boolean(intent?.operation_id) || !doc?.ready || !may("cleanup") || !reviewed.checked; } });
+  function acceptCleanup(op) {
+    assertView(connection);
+    if (!intent || !/^op_[0-9a-f]{32}$/.test(op?.operation_id) || op.action !== "cleanup.apply" ||
+        op.actor !== state.caps.actor || op.idempotency_key !== intent.key ||
+        !intent.request || op.target?.preview_id !== intent.request.target.preview_id ||
+        op.params?.preview_token !== intent.request.params.preview_token ||
+        op.preconditions?.preview_fingerprint !== intent.request.preconditions.preview_fingerprint ||
+        (intent.operation_id && intent.operation_id !== op.operation_id)) throw new Error(t("cleanup_invalid_result"));
+    operation = op; intent.operation_id = op.operation_id; persist(intentKey, intent); readFailed = false;
+    fill(status, opStatus(op), " ", h("a", {href: `#/op/${op.operation_id}`}, t("cleanup_open_receipts")),
+      ...(op.result?.items || []).map(r => h("p", {}, h("code", {}, r.resource_id), " · ", t("cleanup_receipt_" + r.status))));
+    cleanupControls();
+  }
+  function cleanupControls() {
+    const fixed = Boolean(intent || pendingRequest);
+    kind.disabled = targetId.disabled = children.disabled = busy || fixed;
+    previewButton.disabled = busy || fixed || section === "task" && !supportsTask;
+    apply.hidden = Boolean(intent?.operation_id || intent?.refused);
+    apply.disabled = busy || readFailed || Boolean(intent && !intent.request) || !doc?.ready || !reviewed.checked || !may("cleanup");
+    check.hidden = !intent?.operation_id; check.disabled = busy || Boolean(operationRead);
+    another.hidden = !(TERMINAL.includes(operation?.status) || intent?.refused);
+    another.disabled = busy || readFailed || Boolean(operationRead);
+  }
+  async function refreshCleanup(fresh = false) {
+    if (submission) {await submission; assertView(connection);}
+    if (operationRead) {await operationRead; if (fresh) return refreshCleanup(true); return;}
+    if (!intent?.operation_id) return;
+    operationRead = (async () => {const data = await api("GET", `/operations/${intent.operation_id}`); acceptCleanup(data.operation);})();
+    cleanupControls();
+    try {await operationRead;}
+    catch (e) {assertView(connection); readFailed = true; fill(status, errorBox(e),
+      h("a", {href: `#/op/${intent.operation_id}`}, t("cleanup_open_receipts"))); throw e;}
+    finally {operationRead = null; cleanupControls();}
+  }
+  const check = h("button", {class: "secondary", hidden: true, onclick: () => refreshCleanup(true).catch(() => {})}, t("cleanup_check"));
+  const another = h("button", {class: "secondary", hidden: true, onclick: () => {
+    assertView(connection);
+    if (busy || readFailed || operationRead || !(TERMINAL.includes(operation?.status) || intent?.refused)) return;
+    intent = operation = doc = null; pendingRequest = false;
+    persist(intentKey, null); persist(pendingKey, null); reviewed.checked = false;
+    previewOut.replaceChildren(); status.replaceChildren(); cleanupControls();
+  }}, t("cleanup_new"));
   const apply = h("button", { class: "primary", disabled: true, onclick: async () => {
-    if (busy || !doc || !reviewed.checked) return;
+    if (busy || readFailed || !doc || !reviewed.checked || intent?.operation_id || intent?.refused || intent && !intent.request) return;
     assertView(connection);
     const reviewedDoc = doc; busy = true; pendingRequest = true;
     apply.disabled = true;
@@ -2546,28 +2612,30 @@ async function viewCleanup(main, section, ident) {
     previewOut.querySelectorAll("input").forEach(input => { input.disabled = true; });
     // Keep the reviewed request as well as submit()'s stable key across a lost reply or page reload.
     persist(pendingKey, reviewedDoc);
+    let finish;
+    submission = new Promise(resolve => {finish = resolve;});
     try {
-      const op = await submit("cleanup.apply", { preview_id: reviewedDoc.preview_id }, { preview_token: reviewedDoc.preview_token },
-        { preview_fingerprint: reviewedDoc.fingerprint }, "cleanup.apply");
+      if (!intent) {
+        const request = {action: "cleanup.apply", target: {preview_id: reviewedDoc.preview_id},
+          params: {preview_token: reviewedDoc.preview_token}, preconditions: {preview_fingerprint: reviewedDoc.fingerprint}};
+        // Adopt the exact old UI key when reopening a legacy pending preview. Generic auth errors
+        // after an earlier lost reply cannot prove that this key was never accepted.
+        const scope = await draftId("cleanup.apply", request);
+        intent = {request, key: await keyFor(scope, connection), operation_id: null}; persist(intentKey, intent);
+      }
+      const data = await api("POST", "/operations?wait=3", intent.request, intent.key);
       assertView(connection);
-      fill(status, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, t("cleanup_open_receipts")),
-        ...(op.result?.items || []).map(r => h("p", {}, h("code", {}, r.resource_id), " · ", t("cleanup_receipt_" + r.status))));
-      persist(pendingKey, null); pendingRequest = false;
-      doc = null; reviewed.checked = false;
-      previewButton.disabled = false; kind.disabled = false; targetId.disabled = false; children.disabled = false;
+      acceptCleanup(data.operation);
       await loadHistory(); await loadRetained();
     } catch (e) {
       if (connection.epoch !== state.epoch || connection.namespace !== state.namespace || connection.generation !== generation) return;
-      if (!e.status || e.status >= 500) {
-        fill(status, errorBox(e), h("p", {}, t("cleanup_retry_same")));
-        apply.disabled = !may("cleanup");
-        previewButton.disabled = true; kind.disabled = true; targetId.disabled = true; children.disabled = true;
-      } else {
-        persist(pendingKey, null); pendingRequest = false;
-        fill(status, errorBox(e), h("p", {}, t("cleanup_repreview"))); doc = null;
-        previewButton.disabled = false; kind.disabled = false; targetId.disabled = false; children.disabled = false;
+      if (intent && !intent.operation_id && e.status >= 400 && e.status < 500 &&
+          ["PREVIEW_TOKEN_INVALID", "PREVIEW_EXPIRED", "PREVIEW_MISMATCH", "PREVIEW_BLOCKED"].includes(e.code)) {
+        intent.refused = e.code; persist(intentKey, intent);
       }
-    } finally { busy = false; }
+      fill(status, errorBox(e), h("p", {}, t(intent?.refused ? "cleanup_repreview" : "cleanup_retry_same")));
+    } finally { busy = false; finish(); submission = null;
+      if (connection.epoch === state.epoch && connection.generation === generation) cleanupControls(); }
   } }, t("cleanup_apply"));
   function renderPreview() {
     fill(previewOut, h("h2", {}, t("cleanup_preview")), h("p", {}, t("cleanup_counts", { reclaim: doc.impact.reclaim, retain: doc.impact.retain })),
@@ -2578,7 +2646,7 @@ async function viewCleanup(main, section, ident) {
     assertView(connection);
     const revision = ++previewRevision;
     previewButton.disabled = true; doc = null; apply.disabled = true; reviewed.checked = false;
-    const key = { work_item: "work_item_id", checkpoint: "checkpoint_id", integration: "operation_id", host: "host" }[kind.value];
+    const key = { work_item: "work_item_id", checkpoint: "checkpoint_id", integration: "operation_id", host: "host", task: "task_id" }[kind.value];
     const target = { kind: kind.value, [key]: targetId.value.trim(), ...(kind.value === "work_item" ? { include_children: children.checked } : {}) };
     try {
       const result = await api("POST", "/cleanup-previews", { target, choices: structuredClone(choices) });
@@ -2591,7 +2659,7 @@ async function viewCleanup(main, section, ident) {
   } }, t("cleanup_preview"));
   if (pending && section !== "resource") {
     kind.value = pending.target.kind;
-    targetId.value = pending.target[{work_item: "work_item_id", checkpoint: "checkpoint_id", integration: "operation_id", host: "host"}[kind.value]];
+    targetId.value = pending.target[{work_item: "work_item_id", checkpoint: "checkpoint_id", integration: "operation_id", host: "host", task: "task_id"}[kind.value]];
     children.checked = !!pending.target.include_children;
     childrenLabel.hidden = kind.value !== "work_item";
     renderPreview(); reviewed.checked = true; apply.disabled = !may("cleanup");
@@ -2629,7 +2697,8 @@ async function viewCleanup(main, section, ident) {
       } }, t("more")));
     } catch (e) { fill(retainedOut, errorBox(e)); }
   }
-  main.append(h("h1", {}, t("nav_cleanup")), h("p", { class: "muted" }, t("cleanup_intro")));
+  main.append(h("h1", {}, t("nav_cleanup")), h("p", { class: "muted" }, t("cleanup_intro")),
+    section === "task" || supportsTask ? h("p", {class: "muted"}, t("cleanup_task_help")) : null);
   if (section === "resource") {
     try {
       const data = await api("GET", `/cleanup-tombstones/${encodeURIComponent(ident)}`);
@@ -2641,12 +2710,14 @@ async function viewCleanup(main, section, ident) {
   main.append(h("div", { class: "panel" }, h("h2", {}, t("cleanup_target")), h("div", { class: "filters" }, kind, targetId),
     childrenLabel, h("div", { class: "actions" }, previewButton)), previewOut,
     h("div", { class: "panel" }, h("label", { class: "cleanup-choice" }, reviewed, t("cleanup_reviewed")),
-      !may("cleanup") ? h("p", { class: "muted" }, t("cleanup_scope")) : null, h("div", { class: "actions" }, apply), status),
+      !may("cleanup") ? h("p", { class: "muted" }, t("cleanup_scope")) : null, h("div", { class: "actions" }, apply, check, another), status),
     h("h2", {}, t("cleanup_history")), h("div", { class: "panel" }, h("form", { class: "filters", onsubmit: e => { e.preventDefault(); loadHistory(); } },
       search, h("button", { class: "secondary", type: "submit" }, t("cleanup_search_button"))), historyOut),
     h("h2", {}, t("cleanup_retained")), h("p", { class: "muted" }, t("cleanup_retained_help")), h("div", { class: "panel" }, retainedOut));
+  cleanupControls();
   await loadHistory(); await loadRetained();
-  const refresh = debounceRefresh(() => settleRefreshes([loadHistory(), loadRetained()]), 500);
+  try {await refreshCleanup();} catch { /* keep the exact accepted intent and show read error */ }
+  const refresh = debounceRefresh(() => settleRefreshes([loadHistory(), loadRetained(), refreshCleanup(true)]), 500);
   return onEvents(ev => { if (["cleanup", "operation"].includes(ev.resource_type)) return refresh(); });
 }
 
