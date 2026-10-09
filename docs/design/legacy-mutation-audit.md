@@ -64,4 +64,4 @@ final-frame read-channel 擴充，仍未補齊 reviewed retention/receipts，因
 
 BAT GUI／外部 client 不參與 Connector 鎖，不能把既有 readback 說成已阻止所有外部 workspace race。
 Retained-content restore 仍是可選 backlog，不是已存在的工具
-或正式 v1 gate；operations-unification 的歷史清單不可用來宣告其可呼叫。
+或完整產品交付 gate；operations-unification 的歷史清單不可用來宣告其可呼叫。
