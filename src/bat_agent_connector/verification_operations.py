@@ -15,8 +15,9 @@ TAB = ("id", "workspaceId", "cwd", "worktreePath", "worktreeBranch", "agentPrese
 
 
 def install(ops):
-    ops.register(ActionDef(ACTION, "operate", "Record external clean-candidate testimony",
-                           run, admit, ("host", "session_id"), authorize_existing))
+    if ACTION not in ops.actions:
+        ops.register(ActionDef(ACTION, "operate", "Record external clean-candidate testimony",
+                               run, admit, ("host", "session_id"), authorize_existing))
 
 
 def validate(target, params, pre):
