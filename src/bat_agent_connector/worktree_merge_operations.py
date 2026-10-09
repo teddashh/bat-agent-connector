@@ -8,6 +8,7 @@ import contextvars
 import hashlib
 import importlib.resources
 import json
+import re
 import shlex
 import time
 
@@ -44,6 +45,12 @@ def install(ops):
 def available(ops, host):
     runner = ops.context.get('git_runner')
     return bool(runner and runner.available(host))
+
+
+def _reader_binding(ops, host):
+    runner = ops.context.get('git_runner')
+    return _digest({'implementation': type(runner).__module__ + '.' + type(runner).__qualname__,
+                    'alias': getattr(runner, 'aliases', {}).get(host)})
 
 
 def capabilities(ops):
@@ -99,16 +106,32 @@ def check_writer(host=None, sid=None, channel=None, *, workdir=None):
     doc = _document()
     current = next((r for r in doc['sessions'] if r.get('host') == host and r.get('session_id') == sid), {})
     paths = [workdir, current.get('worktree_path'), current.get('cwd'), current.get('origin_cwd')]
-    for marker in doc.get('carrier_writers', {}).values():
-        if (not isinstance(marker, dict) or not isinstance(marker.get('roots'), list)
-                or any(not isinstance(p, str) or not p.startswith('/') for p in marker['roots'])
-                or not marker.get('operation_id') or not isinstance(marker.get('session_ids'), list)):
+    for key, marker in doc.get('carrier_writers', {}).items():
+        if not _valid_marker(key, marker):
             raise ResourceReadOnly('MERGE_RESERVED', 'carrier reservation is invalid; inspect its original operation')
         if host is not None and marker.get('host') != host:
             continue
         if sid in marker['session_ids'] or any(_inside(p, marker['roots']) for p in paths):
             if not _owned(marker):
                 raise ResourceReadOnly('MERGE_RESERVED', 'carrier is reserved by operation ' + marker['operation_id'])
+
+
+def _valid_marker(key, marker):
+    if not isinstance(marker, dict) or set(marker) != {'version', 'operation_id', 'actor', 'journal_path', 'host',
+                                                       'roots', 'session_ids', 'plan_sha256'}:
+        return False
+    if (type(marker['version']) is not int or marker['version'] != 1
+            or not isinstance(key, str) or not re.fullmatch(r'op_[0-9a-f]{32}', key) or marker['operation_id'] != key
+            or any(not isinstance(marker[k], str) or not marker[k].strip() or len(marker[k]) > 256 for k in ('host', 'actor'))
+            or not isinstance(marker['plan_sha256'], str) or not re.fullmatch(r'[0-9a-f]{64}', marker['plan_sha256'])):
+        return False
+    def path(p):
+        return isinstance(p, str) and len(p) <= 4096 and '\0' not in p and resource_policy.norm(p) == p and p != '/'
+    return (path(marker['journal_path']) and isinstance(marker['roots'], list) and len(marker['roots']) == 2
+            and all(path(p) for p in marker['roots']) and len(set(marker['roots'])) == 2
+            and isinstance(marker['session_ids'], list) and bool(marker['session_ids'])
+            and all(isinstance(s, str) and s.strip() == s and 1 <= len(s) <= 256 for s in marker['session_ids'])
+            and len(set(marker['session_ids'])) == len(marker['session_ids']))
 
 
 @contextlib.contextmanager
@@ -189,6 +212,8 @@ def guard(ops, plan, *, ctx=None, reserved=False):
     hc = fleet.config.host(host)
     if hc.profile_id != plan['profile_id'] or list(hc.managed_roots) != plan['managed_roots']:
         raise StepFailed('MERGE_BINDING_CHANGED', 'fixed host profile or managed roots changed')
+    if not available(ops, host) or _reader_binding(ops, host) != plan['git_reader_binding']:
+        raise StepFailed('MERGE_BINDING_CHANGED', 'configured Git reader binding changed')
     if _registry_consumers(host, plan['roots']) != set(plan['consumers']):
         raise StepFailed('MERGE_CONSUMER_CHANGED', 'carrier consumers changed after preparation')
     from .cleanup import guard as cleanup_guard
@@ -288,6 +313,7 @@ async def prepare(ctx):
     report['rehydrated'] = False
     plan = {'operation_id': ctx.operation_id, 'host': host, 'session_id': sid, 'source': source, 'destination': destination,
             'roots': [source, destination], 'profile_id': hc.profile_id, 'managed_roots': list(hc.managed_roots),
+            'git_reader_binding': _reader_binding(ops, host),
             'workspace_id': tab['workspaceId'],
             'workspace_name': next((w.get('name') for w in doc['workspaces'] if w.get('id') == tab['workspaceId']), None),
             'terminal': {k: tab.get(k) for k in TERMINAL_FIELDS},
@@ -386,13 +412,19 @@ async def invoke(ctx, plan, name, channel, params):
         audit.record(**base, channel=channel, phase='result', ok=False, error=type(exc).__name__)
         if sent:
             raise AmbiguousOutcome('sent merge effect is unproven; retain original receipts and both carriers') from exc
+        if isinstance(exc, Cancelled):
+            raise StepFailed('CANCELLED', 'cancelled before merge transport') from exc
         raise StepFailed(getattr(exc, 'code', None) or 'MERGE_NOT_SENT', 'merge frame was not sent: ' + str(exc)) from exc
 
 
 async def run(ctx):
     async def reread(_):
         return RERUN
-    plan = await ctx.step(PLAN, lambda: prepare(ctx), reconcile=reread)
+    try:
+        plan = await ctx.step(PLAN, lambda: prepare(ctx), reconcile=reread)
+    except StepFailed:
+        ctx.check_cancel()  # preparation contains no mutation; report requested cancellation truthfully
+        raise
     if plan.get('noop'):
         return {**plan['report'], 'merged_now': False, 'reason': plan['noop']}
     async def local_release():
@@ -418,6 +450,7 @@ async def run(ctx):
                 await ctx.step('merge.release', local_release, reconcile=reread, receipt_only=True)
             except (StepFailed, Cancelled):
                 release(ctx, plan)
+                ctx.check_cancel()
                 raise
     result = {**plan['report'], 'rehydrated': plan['rehydrate'], 'merged_now': True,
               'result': ack['ack'], 'main_checkout_clean_after': None,

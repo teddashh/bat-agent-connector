@@ -162,7 +162,7 @@ async def test_positive_managed_idle_and_all_consumers_required(daemon, mock, ca
     await daemon.fleet.close()
 
 
-@pytest.mark.parametrize('change', ['task', 'registry', 'new_neighbor', 'head', 'dirty', 'owner'])
+@pytest.mark.parametrize('change', ['task', 'registry', 'new_neighbor', 'head', 'dirty', 'owner', 'reader'])
 async def test_final_awaited_reads_followed_by_synchronous_owner_gate(daemon, mock, carriers, monkeypatch, change):
     origin, source = carriers
     original = merge.proof
@@ -174,6 +174,8 @@ async def test_final_awaited_reads_followed_by_synchronous_owner_gate(daemon, mo
         if count == 3:  # final frame's last asynchronous proof
             if change == 'owner':
                 monkeypatch.setattr(daemon.journal, 'owner_valid', lambda: False)
+            elif change == 'reader':
+                daemon.ops.context['git_runner'].aliases = {'h1': 'different-fixture-reader'}
             elif change == 'task':
                 t = daemon.journal.submit(project='p', host='h1', workspace='merge-fixture', original_words='new', idempotency_key='new-task')
                 daemon.journal.db.execute('UPDATE tasks SET session_id=?,paused=1 WHERE task_id=?', (SID, t['task_id']))
@@ -194,6 +196,24 @@ async def test_final_awaited_reads_followed_by_synchronous_owner_gate(daemon, mo
     out = await create(daemon)
     assert out['status'] in {'failed', 'needs_attention'}, out
     assert not api.write_frames(mock)
+    await daemon.fleet.close()
+
+
+async def test_cancel_during_final_proof_is_definitively_unsent_and_releases_carriers(daemon, mock, carriers, monkeypatch):
+    original = merge.proof
+    calls = 0
+    async def cancel_after_proof(*a, **kw):
+        nonlocal calls
+        p = await original(*a, **kw)
+        calls += 1
+        if calls == 3:
+            oid = daemon.ops.db.execute("SELECT operation_id FROM operations WHERE action='worktree.merge'").fetchone()[0]
+            daemon.ops.cancel(P, oid)
+        return p
+    monkeypatch.setattr(merge, 'proof', cancel_after_proof)
+    out = await create(daemon)
+    assert out['status'] == 'cancelled', out
+    assert not api.write_frames(mock) and not merge._document().get('carrier_writers')
     await daemon.fleet.close()
 
 
@@ -477,3 +497,22 @@ async def test_cli_failed_refusal_exits_nonzero_and_readonly_never_contacts_cent
     assert await asyncio.to_thread(cli.main, ['--read-only', *args]) == 1
     assert count == d.ops.db.execute('SELECT COUNT(*) FROM operations').fetchone()[0]
     assert not api.write_frames(mock)
+
+
+@pytest.mark.parametrize('field,value', [('roots', []), ('host', None), ('actor', ''), ('journal_path', 'relative.db'),
+                                       ('version', True), ('session_ids', []), ('plan_sha256', 'bad'), ('operation_id', 'other')])
+async def test_present_malformed_reservation_fails_closed_before_stale_grant_frame(daemon, mock, carriers, field, value):
+    tab = next(t for t in mock.ws_doc['terminals'] if t.get('id') == SID)
+    grant = await resource_policy.authorize_session(daemon.fleet, 'h1', 'session.send', tab)
+    path = registry.registry_path()
+    doc = json.loads(path.read_text())
+    op_id = 'op_' + 'a' * 32
+    marker = {'version': 1, 'operation_id': op_id, 'actor': 'original', 'journal_path': str(daemon.journal.path.resolve()),
+              'host': 'h1', 'roots': list(map(str, carriers)), 'session_ids': [SID], 'plan_sha256': 'b' * 64}
+    marker[field] = value
+    doc['carrier_writers'] = {op_id: marker}
+    registry._write_document(path, doc)
+    with pytest.raises(ResourceReadOnly, match='MERGE_RESERVED'):
+        await daemon.fleet.client('h1').invoke('claude:send-message', {'sessionId': SID, 'prompt': 'must not send'}, grant=grant)
+    assert not api.write_frames(mock)
+    await daemon.fleet.close()
