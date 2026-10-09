@@ -23,6 +23,8 @@ jobs:
           toolchain: "1.98.1"
       - name: Temporary loopback absence oracle (no installed services)
         run: cargo test --locked --manifest-path desktop/fleet-core/Cargo.toml --lib windows_tunnel::tests::system_path_and_occupied_listener_are_fixed_and_read_only -- --exact --nocapture
+      - name: Supervisor ownership and restart fixtures (temporary files and fake processes)
+        run: cargo test --locked --manifest-path desktop/fleet-core/Cargo.toml --test supervisor
   build:
     strategy:
       fail-fast: false

@@ -95,6 +95,15 @@ test. The two synchronous checks before tunnel spawn add at most six seconds of
 connection waiting per launch on the supervisor thread. Route/readiness probe
 deadlines remain independent; no SSH child is spawned by this oracle.
 
+Supervisor ownership scans use the same lexical absolute-path and Windows 8.3
+expansion as selection and launch. A short `%TEMP%`/roaming spelling must identify
+the same monitor and child receipts as its expanded spelling. Previously, raw scan
+paths made an owned child look foreign and lost the expected monitor bytes during
+restart (Windows run `37912661759`). Shared normalization preserves the existing
+reparse-point checks; it does not canonicalize through links. A temporary fixture
+checks equivalent paths through readiness, orphan recovery on restart and owned
+shutdown. The early Windows job also runs the complete supervisor fixture target.
+
 Linux executes pure record/decision tests, including denied access, other login, PID reuse during
 parent checks, changed final evidence, unknown exit and legacy record recovery. Windows compile
 checks include the OS adapter and test source. Windows runtime fixtures use only owned test children,

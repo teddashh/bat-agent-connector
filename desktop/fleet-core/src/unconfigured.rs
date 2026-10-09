@@ -48,7 +48,7 @@ fn migration_absent(installation: &Path) -> Result<()> {
 }
 
 fn ownership_absent(roaming: &Path) -> Result<()> {
-    for directory in supervisor_io::directories(roaming) {
+    for directory in supervisor_io::directories(roaming)? {
         if !plain_directory(&directory)? {
             continue;
         }
