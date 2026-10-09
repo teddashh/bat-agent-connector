@@ -2375,7 +2375,9 @@ var refusedBeforeAdmission = new Set([
 	"BULK_PREVIEW_INVALID",
 	"BULK_PREVIEW_EXPIRED",
 	"BULK_PREVIEW_MISMATCH",
-	"BULK_MODE_REFUSED"
+	"BULK_MODE_REFUSED",
+	"CONTROL_VERSION_CONFLICT",
+	"BULK_BINDING_CHANGED"
 ]);
 function validPreview(p) {
 	return object(p) && typeof p.host === "string" && p.host.length > 0 && (p.workspace === null || typeof p.workspace === "string") && typeof p.preview_token === "string" && p.preview_token.startsWith("bap1.") && p.preview_token.length <= 262144 && /^[0-9a-f]{64}$/.test(p.fingerprint) && Number.isFinite(p.expires_at) && equal(p.answer, {
