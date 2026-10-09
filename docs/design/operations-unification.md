@@ -17,6 +17,20 @@ children。下方 Part A 表格與早期 bulk 設計保留當時脈絡，不授�
 - Part B 無 key 呼叫在原 NOT NULL 欄位保存 `batc:nokey:<operation_id>`：只作唯一的儲存值，絕不與另一要求去重。拒絕 client key 使用 `batc:nokey:` 前綴（422）；所有讀取投影 `idempotency_key: null`、`idempotency_enabled: false`。**不 rebuild operations，不需此項 schema migration**。
 - 舊 task control 沒有 key 的 RPC 在 Part A 使用每次呼叫獨立的 request key，不提供跨呼叫去重；Part B 才統一 no-key sentinel 與投影。明確給 key 的 task actions 現在即須符合 A05。
 
+### Part B 接續：task control 的 key 投影
+
+`work_pause`、`work_resume`、`work_mark_stage`、`task_run_verification`、`task_request_ted` 與
+`work_reconcile` 省略 key 時，每次建立獨立 operation，沿用既有 NOT NULL sentinel；RPC/MCP 結果與
+HTTP／CLI 查回均回 `idempotency_key=null`、`idempotency_enabled=false`。不再把隨機生成的
+`legacy-request:` 字串呈現為 caller 可依賴的 key。只有 private task adapter 能啟用此 admission，
+raw HTTP／`op_submit` 仍要求明確 key；caller 自帶的保留前綴仍拒絕。原 action scopes、task version、
+command capability、task effect 與 receipt 交易完全沿用。
+
+`task_send` 的 caller `step_id` 繼續明列映射為原 `task-step:<task_id>:<step_id>` key，保留同 step
+重送與不同文字衝突；不是 no-key 呼叫。`work_submit` 保留必填 key，包括既有 201–256 字的相容映射。
+舊 operation 的 `legacy-request:` key、operation/task/command IDs 及 receipts 保持原狀，不回填或
+搬遷 schema。未取得 operation ID 的無 key timeout 仍不能安全重送；取得 ID 後先查回原 operation。
+
 ### Part B 第一個切片：interrupt
 
 `session_interrupt` MCP 與 `batc interrupt` 現在只呼叫既有 owner 的 `/rpc session_interrupt`，

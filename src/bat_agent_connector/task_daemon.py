@@ -672,11 +672,10 @@ class TaskDaemon:
         params = dict(params)
         entry = params.pop("entry", "rpc")
         key = params.pop("idempotency_key", None)
-        # Part A preserves create() and its schema. Unkeyed old controls never deduplicate.
+        # task_send retains its existing step identity. Other omitted keys are genuinely unkeyed;
+        # only the private compatibility admission may allocate a non-deduplicating sentinel.
         if method == "task_send" and key is None:
             key = "task-step:" + str(params.get("task_id")) + ":" + str(params.get("step_id"))
-        if key is None:
-            key = "legacy-request:" + secrets.token_hex(16)
         client_key = key
         if isinstance(key, str) and key.strip().startswith(NO_KEY_PREFIX):
             # Check the original legacy key before the 201–256 character compatibility hash.
@@ -707,8 +706,8 @@ class TaskDaemon:
             with self.journal.tx():
                 op, _ = self.ops.create(principal, action=task_actions.METHODS[method], target=target,
                                        params=params, preconditions=pre, idempotency_key=key,
-                                       entry=entry if entry in {"mcp", "cli"} else "rpc")
-                if method == "work_submit" and principal.admin and self.journal.by_idempotency_key(client_key):
+                                       entry=entry if entry in {"mcp", "cli"} else "rpc", _legacy_task=True)
+                if method == "work_submit" and client_key is not None and principal.admin and self.journal.by_idempotency_key(client_key):
                     OpContext(self.ops, self.ops._row(op["operation_id"])).effect("legacy_task_key", lambda: {"key": client_key})
         except OperationError as exc:
             raise LegacyTaskError(exc.code, exc.message, exc.status) from None
@@ -722,7 +721,8 @@ class TaskDaemon:
                                               "AND name='task_pause' AND status='succeeded'", (op["operation_id"],)).fetchone()
             if receipt:
                 result = json.loads(receipt["response"])
-        return {**result, "operation_id": op["operation_id"], "operation_status": op["status"]}
+        return {**result, "operation_id": op["operation_id"], "operation_status": op["status"],
+                "idempotency_key": op["idempotency_key"], "idempotency_enabled": op["idempotency_enabled"]}
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:

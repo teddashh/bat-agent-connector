@@ -49,6 +49,8 @@ ALLOWED = {
 UNCERTAIN_RETRY_S = (30.0, 60.0, 120.0, 300.0, 600.0)
 NO_KEY_PREFIX = "batc:nokey:"
 LEGACY_SESSION_ACTIONS = frozenset({"fanout.plan", "fanout.start", "session.relay", "session.start", "session.send", "session.answer", "session.interrupt", "session.permissions", "session.approve_pending"})
+LEGACY_TASK_ACTIONS = frozenset({"task.pause", "task.resume", "task.mark_stage",
+                                 "task.verify", "task.request_ted", "task.command.reconcile"})
 
 
 class AmbiguousOutcome(Exception):
@@ -424,14 +426,16 @@ class OperationService:
 
     # ------------------------------------------------------------------ create / cancel
     def _prepare_create(self, principal, *, action, target=None, params=None, preconditions=None,
-                        idempotency_key, _legacy_session=False):
+                        idempotency_key, _legacy_session=False, _legacy_task=False):
         """Validate caller intent and replay before any asynchronous compatibility resolution."""
         adef = self.actions.get(action)
         if adef is None:
             raise OperationError("UNKNOWN_ACTION", f"unknown action {action!r}", 422)
         if not principal.allows(adef.scope):
             raise OperationError("FORBIDDEN", f"{action} needs the {adef.scope!r} scope", 403)
-        no_key = _legacy_session and action in LEGACY_SESSION_ACTIONS and idempotency_key is None
+        no_key = idempotency_key is None and (
+            _legacy_session and action in LEGACY_SESSION_ACTIONS
+            or _legacy_task and action in LEGACY_TASK_ACTIONS)
         if not no_key and (not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key.strip()) <= 200):
             raise OperationError("IDEMPOTENCY_KEY_REQUIRED", "idempotency_key must be 1-200 characters", 422)
         if isinstance(idempotency_key, str) and idempotency_key.strip().startswith(NO_KEY_PREFIX):
@@ -464,11 +468,11 @@ class OperationService:
     def create(self, principal: Principal, *, action: str, target: dict | None = None, params: dict | None = None,
                preconditions: dict | None = None, idempotency_key: str | None, entry: str = "http",
                _legacy_session: bool = False, _resolved_target: dict | None = None,
-               _resolved_params: dict | None = None) -> tuple[dict, bool]:
+               _resolved_params: dict | None = None, _legacy_task: bool = False) -> tuple[dict, bool]:
         """Persist intent. Private compatibility arguments are never accepted from HTTP/RPC bodies."""
         adef, target, params, preconditions, key, request_hash, existing = self._prepare_create(
             principal, action=action, target=target, params=params, preconditions=preconditions,
-            idempotency_key=idempotency_key, _legacy_session=_legacy_session)
+            idempotency_key=idempotency_key, _legacy_session=_legacy_session, _legacy_task=_legacy_task)
         if existing:
             return existing, False
         if (_resolved_target is not None or _resolved_params is not None) and not (
