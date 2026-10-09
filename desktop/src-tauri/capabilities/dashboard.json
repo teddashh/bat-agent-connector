@@ -16,6 +16,7 @@
     "allow-open-external",
     "allow-fleet-availability",
     "allow-fleet-request",
+    "allow-fleet-control",
     "allow-native-files-status",
     "allow-native-files-pick",
     "allow-native-files-drop-target",

@@ -1,4 +1,5 @@
-//! Local Fleet transport. The installed Kit remains the only monitor/tunnel owner.
+//! Fixed local Fleet transport. The configured backend remains the only tunnel owner.
+use bat_fleet_core::{discovery::Backend, installation::Snapshot};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -25,12 +26,6 @@ const ACTIONS: [&str; 6] = [
     "quit_owned",
 ];
 static REQUEST: AtomicU64 = AtomicU64::new(1);
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Config {
-    kit_root: PathBuf,
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -124,109 +119,139 @@ fn hex(s: &str, len: usize) -> bool {
 
 #[derive(Serialize)]
 pub struct FleetAvailability {
+    pub native_controls: bool,
     pub configured: bool,
     pub platform_supported: bool,
     pub error: Option<String>,
 }
 
 pub struct FleetBridge {
-    script: Result<PathBuf, String>,
+    config: PathBuf,
     serial: Mutex<()>,
 }
 
 impl FleetBridge {
+    #[cfg(all(test, windows))]
     pub fn load(config_dir: &Path) -> Self {
-        let script = load_script(&config_dir.join("fleet.json"));
+        Self::load_path(config_dir.join("fleet.json"))
+    }
+    pub fn load_path(config: PathBuf) -> Self {
         Self {
-            script,
+            config,
             serial: Mutex::new(()),
         }
     }
     pub fn availability(&self) -> FleetAvailability {
+        let installation = Snapshot::load(&self.config);
         FleetAvailability {
-            configured: self.script.is_ok(),
+            native_controls: cfg!(windows),
+            configured: installation.is_ok(),
             platform_supported: cfg!(windows),
-            error: self.script.as_ref().err().cloned(),
+            error: installation
+                .err()
+                .map(|code| format!("Fleet configuration unavailable ({code})")),
         }
     }
     pub async fn request(&self, input: FleetRequest) -> Result<Value, String> {
-        // Validate before spawning; never accept a shell, path, PID or credentials from IPC.
+        // Validate before any local effect; IPC never supplies paths, PID, commands or credentials.
         let id = format!("desktop_{}", REQUEST.fetch_add(1, Ordering::Relaxed));
         let request = input.envelope(&id)?;
-        let script = self.script.as_ref().map_err(Clone::clone)?;
-        let executable = powershell()?;
-        // Refuse competing calls rather than queue a mutation against an aging snapshot.
         let _guard = self
             .serial
             .try_lock()
             .map_err(|_| "Fleet request already in progress; read status before retrying")?;
-        let contract_id = format!("{id}_contract");
-        let contract = json!({"schema_version":1,"request_id":contract_id,"action":"contract"});
-        let result = call(&executable, script, &contract, Duration::from_secs(10)).await?;
-        verify_contract(&result)?;
-        if matches!(input, FleetRequest::Contract {}) {
-            return Ok(result);
+        // Migration may change backend while the Dashboard remains open. Capture fresh trusted bytes.
+        let installation = Snapshot::load(&self.config).map_err(native_error)?;
+        if installation.backend() == Backend::Rust {
+            #[cfg(windows)]
+            {
+                return tokio::task::spawn_blocking(move || {
+                    crate::fleet_native::request(installation, input)
+                })
+                .await
+                .map_err(|_| "Fleet outcome unknown; read status before retrying")?;
+            }
+            #[cfg(not(windows))]
+            {
+                return Err("Fleet desktop control requires Windows".into());
+            }
         }
-        call(&executable, script, &request, Duration::from_secs(35)).await
+        #[cfg(windows)]
+        if matches!(
+            input,
+            FleetRequest::SetConnections { .. }
+                | FleetRequest::EnsureMonitor { .. }
+                | FleetRequest::QuitOwned { .. }
+        ) {
+            return tokio::task::spawn_blocking(move || {
+                // The Kit's desktop facade does not hold its launcher mutex. Keep it on this
+                // blocking thread through validation, subprocess effect and bounded readback.
+                let _launcher = bat_fleet_core::windows_launcher::LauncherMutex::try_acquire()
+                    .map_err(native_error)?
+                    .ok_or_else(|| native_error("LAUNCHER_BUSY"))?;
+                installation.verify_current().map_err(native_error)?;
+                crate::fleet_native::verify_no_migration(&installation).map_err(native_error)?;
+                crate::fleet_native::verify_control_owner(
+                    &installation,
+                    matches!(input, FleetRequest::EnsureMonitor { .. }),
+                )
+                .map_err(native_error)?;
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|_| native_error("SUPERVISOR_UNAVAILABLE"))?;
+                runtime.block_on(powershell_request(installation, request, id))
+            })
+            .await
+            .map_err(|_| native_error("OUTCOME_UNKNOWN"))?;
+        }
+        powershell_request(installation, request, id).await
     }
 }
-
-fn load_script(config: &Path) -> Result<PathBuf, String> {
-    use std::io::Read;
-    let file = std::fs::File::open(config)
-        .map_err(|_| "Fleet is not configured; set the trusted Kit installation in fleet.json")?;
-    let mut bytes = Vec::new();
-    file.take(16_385)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Unable to read Fleet configuration")?;
-    if bytes.len() > 16_384 {
-        return Err("Fleet configuration exceeds its bound".into());
+async fn powershell_request(
+    installation: Snapshot,
+    request: Value,
+    id: String,
+) -> Result<Value, String> {
+    let script = powershell_path(installation.script().to_path_buf())?;
+    let executable = powershell()?;
+    let contract_id = format!("{id}_contract");
+    let contract = json!({"schema_version":1,"request_id":contract_id,"action":"contract"});
+    installation.verify_current().map_err(native_error)?;
+    let result = call(&executable, &script, &contract, Duration::from_secs(10)).await?;
+    verify_contract(&result)?;
+    installation.verify_current().map_err(native_error)?;
+    if request["action"] == "contract" {
+        return Ok(result);
     }
-    let config: Config =
-        serde_json::from_slice(&bytes).map_err(|_| "Invalid Fleet configuration")?;
-    if !config.kit_root.is_absolute() || !local_path(&config.kit_root) {
-        return Err("Fleet Kit must use an absolute local installation directory".into());
-    }
-    let root = config
-        .kit_root
-        .canonicalize()
-        .map_err(|_| "Fleet Kit installation is unavailable")?;
-    if !local_path(&root) {
-        return Err("Fleet Kit must remain on a local drive".into());
-    }
-    let script = root
-        .join("client/fleet-desktop.ps1")
-        .canonicalize()
-        .map_err(|_| "Fleet Kit desktop adapter is unavailable")?;
-    if !script.starts_with(&root) || !script.is_file() || !local_path(&script) {
-        return Err("Fleet adapter is outside its installation".into());
-    }
-    powershell_path(script)
+    let result = call(&executable, &script, &request, Duration::from_secs(35)).await?;
+    installation.verify_current().map_err(native_error)?;
+    Ok(result)
 }
-
 #[cfg(windows)]
-fn local_path(path: &Path) -> bool {
-    use std::path::{Component, Prefix};
-    let drive = match path.components().next() {
-        Some(Component::Prefix(p)) => match p.kind() {
-            Prefix::Disk(d) | Prefix::VerbatimDisk(d) => d,
-            _ => return false,
-        },
-        _ => return false,
-    };
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetDriveTypeW(root: *const u16) -> u32;
+pub(crate) fn ensure_powershell(installation: Snapshot, binding: &str) -> Result<(), String> {
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let request = FleetRequest::EnsureMonitor {
+        expected_configuration_binding: binding.into(),
     }
-    let root = [drive as u16, b':' as u16, b'\\' as u16, 0];
-    // Exclude UNC, device namespaces and mapped network drives, before and after resolving links.
-    matches!(unsafe { GetDriveTypeW(root.as_ptr()) }, 2 | 3 | 6)
+    .envelope(&id)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| native_error("SUPERVISOR_UNAVAILABLE"))?;
+    runtime
+        .block_on(powershell_request(installation, request, id))
+        .map(|_| ())
 }
-#[cfg(not(windows))]
-fn local_path(path: &Path) -> bool {
-    let s = path.to_string_lossy();
-    !s.starts_with("\\\\") && !s.starts_with("//")
+fn native_error(code: &str) -> String {
+    format!("Fleet refused the request ({code}); read status before retrying")
 }
+#[cfg(test)]
+fn load_script(config: &Path) -> Result<PathBuf, String> {
+    let installation = Snapshot::load(config).map_err(native_error)?;
+    powershell_path(installation.script().to_path_buf())
+}
+
 #[cfg(windows)]
 fn powershell_path(path: PathBuf) -> Result<PathBuf, String> {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -472,7 +497,7 @@ fn parse_response(bytes: &[u8], request: &Value) -> Result<Value, String> {
 }
 
 // Construct the output field by field; additions to the Kit contract never silently enter IPC.
-fn sanitize_result(value: &Value, action: &str) -> Result<Value, String> {
+pub(crate) fn sanitize_result(value: &Value, action: &str) -> Result<Value, String> {
     let invalid = || "Invalid Fleet result; read status before retrying".to_owned();
     match action {
         "contract" => {
@@ -833,7 +858,10 @@ mod tests {
             r"\\?\UNC\server\share\kit",
             r"\\.\PhysicalDrive0",
         ] {
-            assert!(!local_path(Path::new(path)), "{path}");
+            assert!(
+                !bat_fleet_core::installation::local_path(Path::new(path)),
+                "{path}"
+            );
         }
         assert_eq!(
             powershell_path(PathBuf::from(r"\\?\C:\Tools\kit\client\fleet-desktop.ps1")).unwrap(),
@@ -868,10 +896,10 @@ mod tests {
             // Synthetic diagnostics only: distinguish pipe, console and environment startup.
             // No inventory, credentials or controls are implemented by this script.
             let executable = powershell().unwrap();
-            let script = bridge.script.as_ref().unwrap();
+            let script = load_script(&bridge.config).unwrap();
             for probe in ["null-input", "console", "windows-environment"] {
                 let _ = std::fs::remove_file(root.join("client/phase.txt"));
-                let mut command = adapter_command(&executable, script).unwrap();
+                let mut command = adapter_command(&executable, &script).unwrap();
                 let outcome = if probe == "null-input" {
                     command
                         .stdin(Stdio::null())

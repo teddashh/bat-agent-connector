@@ -1,40 +1,40 @@
+// Generated from desktop/src. Run: cd desktop && npm ci && npm run build:browser. Do not edit.
+//#region \0rolldown/runtime.js
+var __defProp = Object.defineProperty;
+var __esmMin = (fn, res, err) => () => {
+	if (err) throw err[0];
+	try {
+		return fn && (res = fn(fn = 0)), res;
+	} catch (e) {
+		throw err = [e], e;
+	}
+};
+var __exportAll = (all, no_symbols) => {
+	let target = {};
+	for (var name in all) __defProp(target, name, {
+		get: all[name],
+		enumerable: true
+	});
+	if (!no_symbols) __defProp(target, Symbol.toStringTag, { value: "Module" });
+	return target;
+};
+var init_tslib_es6 = __esmMin((() => {}));
 async function invoke(cmd, args = {}, options) {
 	return window.__TAURI_INTERNALS__.invoke(cmd, args, options);
 }
 function isTauri() {
 	return !!(globalThis || window).isTauri;
 }
+var init_core = __esmMin((() => {
+	init_tslib_es6();
+}));
 //#endregion
 //#region src/transport/index.ts
-var nativeDesktop = isTauri();
-var nativeFileSupport = false;
 async function nativeStatus() {
 	const status = await invoke("native_status");
 	nativeFileSupport = status.file_transfers === true;
 	return status;
 }
-var nativeFilesStatus = () => invoke("native_files_status");
-var nativeFilesPick = (draftId) => invoke("native_files_pick", { draftId });
-var nativeFilesUpload = (handleId) => invoke("native_files_upload", { handleId });
-var nativeFilesDropTarget = (draftId, enabled) => invoke("native_files_drop_target", {
-	draftId,
-	enabled
-});
-var nativeFilesControl = (transferId, action) => invoke("native_files_control", {
-	transferId,
-	action
-});
-var nativeFilesSave = (reference) => invoke("native_files_save", { reference });
-var nativeFilesPreview = (reference) => invoke("native_files_preview", { reference });
-var nativeConnect = () => invoke("connector_connect");
-var nativeDisconnect = () => invoke("connector_disconnect");
-var nativeEnroll = () => invoke("connector_enroll", { locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US" });
-var nativeReloadConfiguration = () => invoke("connector_reload_configuration");
-var nativeForgetCredential = () => invoke("connector_forget_credential");
-var openExternal = (url) => invoke("open_external", { url });
-var fleetAvailability = () => invoke("fleet_availability");
-var fleetRequest = (input) => invoke("fleet_request", { input });
-var updateRequest = (input) => invoke("desktop_update", { input });
 async function connectorRequest(method, path, body, key, browserToken) {
 	if (nativeDesktop) return invoke("connector_request", { input: {
 		method,
@@ -75,6 +75,38 @@ async function connectorUploadArtifact(operationId, bytes, browserToken) {
 		data: await res.json().catch(() => ({}))
 	};
 }
+var nativeDesktop, nativeFileSupport, nativeFilesStatus, nativeFilesPick, nativeFilesUpload, nativeFilesDropTarget, nativeFilesControl, nativeFilesSave, nativeFilesPreview, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal, fleetAvailability, fleetControl, fleetRequest, updateRequest;
+var init_transport = __esmMin((() => {
+	init_core();
+	nativeDesktop = isTauri();
+	nativeFileSupport = false;
+	nativeFilesStatus = () => invoke("native_files_status");
+	nativeFilesPick = (draftId) => invoke("native_files_pick", { draftId });
+	nativeFilesUpload = (handleId) => invoke("native_files_upload", { handleId });
+	nativeFilesDropTarget = (draftId, enabled) => invoke("native_files_drop_target", {
+		draftId,
+		enabled
+	});
+	nativeFilesControl = (transferId, action) => invoke("native_files_control", {
+		transferId,
+		action
+	});
+	nativeFilesSave = (reference) => invoke("native_files_save", { reference });
+	nativeFilesPreview = (reference) => invoke("native_files_preview", { reference });
+	nativeConnect = () => invoke("connector_connect");
+	nativeDisconnect = () => invoke("connector_disconnect");
+	nativeEnroll = () => invoke("connector_enroll", { locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US" });
+	nativeReloadConfiguration = () => invoke("connector_reload_configuration");
+	nativeForgetCredential = () => invoke("connector_forget_credential");
+	openExternal = (url) => invoke("open_external", { url });
+	fleetAvailability = () => invoke("fleet_availability");
+	fleetControl = (input) => invoke("fleet_control", { input });
+	fleetRequest = (input) => invoke("fleet_request", { input });
+	updateRequest = (input) => invoke("desktop_update", { input });
+}));
+//#endregion
+//#region src/transport/artifact-content.ts
+init_transport();
 async function readArtifactContent(reference, size, token, signal) {
 	if (nativeDesktop || !/^art_[0-9a-f]{32}$/.test(reference.artifact_id) || !Number.isSafeInteger(reference.revision) || reference.revision < 1 || !/^[0-9a-f]{64}$/.test(reference.digest) || !Number.isSafeInteger(size) || size < 0 || size > 16777216) throw new Error("Artifact content exceeds the supported bound or has an invalid reference");
 	const response = await fetch(`/api/v1/artifacts/${reference.artifact_id}/revisions/${reference.revision}/content`, {
@@ -643,7 +675,58 @@ var STRINGS = {
 		desktop_config_needed: "尚未配置中央連線。",
 		desktop_credential_missing: "尚未提供可用的本機憑證。",
 		desktop_credential_help: "中央位置與身份由本機設定指定；憑證保留在原生程式，不存入此畫面。",
-		desktop_dashboard_only: "Dashboard 無需安裝 BAT。本機 Fleet 可使用已配置的 Kit 管理連線。開啟 BAT、原生附件、登入自啟與更新尚未提供。關閉視窗會留在系統匣；退出程式不會停止中央工作或 Fleet。",
+		desktop_dashboard_only: "Dashboard 無需安裝 BAT。Windows 可在本機 Fleet 控制中檢視連線、視窗與登入啟動。關閉視窗會留在系統匣；退出程式會等待所屬 Fleet 連線停止。中央工作仍獨立執行。",
+		fleet_login_waiting: "正在等待所選 BAT 工作區就緒，Dashboard 可繼續使用。",
+		fleet_login_attention: "登入啟動需要檢查。請先讀取原始啟動結果，再重試。",
+		fleet_login_complete: "已處理登入啟動選擇。這不代表 BAT 視窗或工作區已開啟。",
+		fleet_retry_migration: "重試相同設定變更",
+		fleet_desktop_title: "本機 Fleet 與視窗",
+		fleet_independent: "分別選擇連線、BAT 視窗與 Dashboard。儲存選擇不會立即開啟視窗。",
+		fleet_connections: "連線",
+		fleet_windows_title: "要開啟的視窗",
+		fleet_dashboard_choice: "開啟 Dashboard",
+		fleet_local_bat: "本機 BAT 視窗",
+		fleet_selection_help: "遠端 BAT 視窗需要各自已通過驗證的連線；其他主機連線時，Dashboard 仍可使用。",
+		fleet_review_choices: "檢視選擇",
+		fleet_save_choices: "儲存已檢視的選擇",
+		fleet_prerequisites: "另外需要的連線：{names}。",
+		fleet_none: "無",
+		fleet_launch_title: "開啟已儲存的選擇",
+		fleet_launch_help: "選定的連線就緒後才開啟 BAT 視窗。已開啟的 BAT 視窗會保持原狀。",
+		fleet_review_launch: "檢視啟動內容",
+		fleet_launch_apply: "開啟已儲存的選擇",
+		fleet_retry_launch: "重試原啟動要求",
+		fleet_launch_review: "請檢視已儲存的視窗選擇，再開啟。",
+		fleet_local_anchor: "若只選遠端設定，BAT 可能也會開啟一個本機視窗。",
+		fleet_launch_no_bat: "未要求開啟 BAT 視窗；連線選擇仍獨立生效。",
+		fleet_launch_already_running: "BAT 已在執行，原有視窗與設定均已保留。",
+		fleet_launch_started: "BAT 程序已啟動，請在其視窗確認連線狀態。",
+		fleet_launch_uncertain: "啟動結果尚未確認。再次要求啟動前，請讀取原回執。",
+		fleet_launch_not_started: "BAT 未啟動。若要提出新的啟動要求，請重新檢視。",
+		fleet_new_launch: "檢視新的啟動要求",
+		fleet_login_title: "登入 Windows 時",
+		fleet_login_picker: "登入後先顯示選擇，再啟動",
+		fleet_backend_title: "連線監控與自動啟動",
+		fleet_backend_help: "變更前先檢視目前的監控與登入啟動項目。原設定會保留，供你明確選擇還原。",
+		fleet_backend_rust: "原生監控",
+		fleet_backend_powershell: "PowerShell 監控",
+		fleet_autostart: "登入 Windows 時啟動 Fleet",
+		fleet_review_migration: "檢視監控與啟動設定",
+		fleet_apply_migration: "套用已檢視的轉換",
+		fleet_continue_migration: "繼續原轉換",
+		fleet_restore_migration: "還原原設定",
+		fleet_new_migration: "檢視新的轉換",
+		fleet_migration_review: "監控：{from} → {to}。登入啟動：{before} → {after}。",
+		fleet_enabled: "啟用",
+		fleet_disabled: "停用",
+		fleet_migration_unknown: "轉換已受理或結果未明。請讀取原回執。",
+		fleet_migration_prepared: "轉換已儲存；繼續以要求監控正常結束。",
+		fleet_migration_quit_requested: "已要求正常結束；監控退出後可繼續。",
+		fleet_migration_stopped: "原監控已停止，轉換進行中。",
+		fleet_migration_startup_written: "登入啟動項目已儲存，請繼續原轉換。",
+		fleet_migration_config_written: "監控設定已儲存，請繼續原轉換。",
+		fleet_migration_launch_requested: "已要求啟動新監控；請讀取其結果，不會重複啟動。",
+		fleet_migration_complete: "轉換完成。原設定已保留，可明確選擇還原。",
 		fleet_title: "本機 Fleet 連線",
 		fleet_help: "選擇這台電腦需要的連線；連線選擇與實際就緒狀態分開顯示。",
 		fleet_apply: "儲存連線選擇",
@@ -1523,7 +1606,58 @@ var STRINGS = {
 		desktop_config_needed: "Central connection is not configured.",
 		desktop_credential_missing: "No native credential is available yet.",
 		desktop_credential_help: "The central address and expected identity come from local configuration. Credentials stay in the native app, outside this page.",
-		desktop_dashboard_only: "Dashboard is available without BAT installed. Local Fleet connections use your configured Kit. Opening BAT, native attachments, login autostart and updates are not available yet. Closing the window keeps the app in the tray; quitting does not stop central work or Fleet.",
+		desktop_dashboard_only: "Dashboard is available without BAT installed. On Windows, use the local Fleet controls to review connections, windows and login startup. Closing the window keeps the app in the tray; Quit waits for owned Fleet connections to stop. Central work continues independently.",
+		fleet_login_waiting: "Waiting for selected BAT workspaces; Dashboard remains available.",
+		fleet_login_attention: "Login startup needs attention. Read the original launch result before retrying.",
+		fleet_login_complete: "Login choices were processed. This does not prove BAT windows or workspaces opened.",
+		fleet_retry_migration: "Retry the same change",
+		fleet_desktop_title: "Local Fleet and windows",
+		fleet_independent: "Choose connections, BAT windows and Dashboard separately. Saving choices does not open windows.",
+		fleet_connections: "Connections",
+		fleet_windows_title: "Windows to open",
+		fleet_dashboard_choice: "Open Dashboard",
+		fleet_local_bat: "Local BAT window",
+		fleet_selection_help: "Selected remote windows need their own authenticated connection. Dashboard remains usable while other hosts connect.",
+		fleet_review_choices: "Review choices",
+		fleet_save_choices: "Save reviewed choices",
+		fleet_prerequisites: "Connections also needed: {names}.",
+		fleet_none: "none",
+		fleet_launch_title: "Open saved selection",
+		fleet_launch_help: "BAT windows open only when their selected connections are ready. Existing BAT windows stay as they are.",
+		fleet_review_launch: "Review launch",
+		fleet_launch_apply: "Open saved selection",
+		fleet_retry_launch: "Retry original launch",
+		fleet_launch_review: "The saved window selection is ready for review.",
+		fleet_local_anchor: "BAT may also open a local window when all selected profiles are remote.",
+		fleet_launch_no_bat: "No BAT window requested. Selected connections remain independent.",
+		fleet_launch_already_running: "BAT is already running; its windows and profile settings were preserved.",
+		fleet_launch_started: "BAT process started. Check its windows for connection status.",
+		fleet_launch_uncertain: "Launch outcome not yet confirmed. Read the original receipt before another request.",
+		fleet_launch_not_started: "BAT did not start. A new review is required to try a different launch.",
+		fleet_new_launch: "New launch review",
+		fleet_login_title: "At Windows sign-in",
+		fleet_login_picker: "Show these choices before launching at sign-in",
+		fleet_backend_title: "Connection monitor and startup",
+		fleet_backend_help: "Review the current monitor and startup entry before changing them. The original settings remain available for an explicit restore.",
+		fleet_backend_rust: "Native monitor",
+		fleet_backend_powershell: "PowerShell monitor",
+		fleet_autostart: "Start Fleet at Windows sign-in",
+		fleet_review_migration: "Review monitor and startup",
+		fleet_apply_migration: "Apply reviewed transition",
+		fleet_continue_migration: "Continue original transition",
+		fleet_restore_migration: "Restore original settings",
+		fleet_new_migration: "New transition review",
+		fleet_migration_review: "Monitor: {from} → {to}. Login startup: {before} → {after}.",
+		fleet_enabled: "enabled",
+		fleet_disabled: "disabled",
+		fleet_migration_unknown: "Transition accepted or unconfirmed. Read its original receipt.",
+		fleet_migration_prepared: "Transition saved. Continue to request normal monitor shutdown.",
+		fleet_migration_quit_requested: "Normal shutdown requested. Continue after the monitor exits.",
+		fleet_migration_stopped: "Original monitor stopped. Transition is in progress.",
+		fleet_migration_startup_written: "Startup entry saved. Continue the original transition.",
+		fleet_migration_config_written: "Monitor setting saved. Continue the original transition.",
+		fleet_migration_launch_requested: "Replacement requested. Read back its exact owner; it will not be launched twice.",
+		fleet_migration_complete: "Transition complete. Original settings are retained for restore.",
 		fleet_title: "Local Fleet connections",
 		fleet_help: "Choose connections for this computer. Your selection and observed readiness are shown separately.",
 		fleet_apply: "Save connections",
@@ -1882,6 +2016,7 @@ function t(key, vars = {}) {
 }
 //#endregion
 //#region src/native-files.js
+init_transport();
 var pending$1 = new Set([
 	"checking",
 	"uploading",
@@ -2137,7 +2272,513 @@ function nativeAttachments({ h, t, guard, canWrite, draftId, onReceipt, onDiscar
 	};
 }
 //#endregion
+//#region \0vite/preload-helper.js
+var scriptRel = (function detectScriptRel() {
+	const relList = typeof document !== "undefined" && document.createElement("link").relList;
+	return relList && relList.supports && relList.supports("modulepreload") ? "modulepreload" : "preload";
+})();
+var assetsURL = function(dep, importerUrl) {
+	return new URL(dep, importerUrl).href;
+};
+var seen = {};
+var isCssPreloadUrl = function isCssPreloadUrl(url) {
+	return url.pathname.endsWith(".css");
+};
+var preloadOnce = function preloadOnce(seen, href, preload) {
+	if (href in seen) return seen[href];
+	const promise = preload();
+	if (!promise) {
+		seen[href] = void 0;
+		return;
+	}
+	const preloadPromise = promise.then(() => {
+		seen[href] = void 0;
+	}, (err) => {
+		seen[href] = void 0;
+		throw err;
+	});
+	seen[href] = preloadPromise;
+	return preloadPromise;
+};
+var __vitePreload = function preload(baseModule, deps, importerUrl) {
+	let promise = Promise.resolve();
+	if (deps && deps.length > 0) {
+		let preloadedHrefs;
+		const cspNonceMeta = document.querySelector("meta[property=csp-nonce]");
+		const cspNonce = cspNonceMeta?.nonce || cspNonceMeta?.getAttribute("nonce");
+		function allSettled(promises) {
+			return Promise.all(promises.map((p) => Promise.resolve(p).then((value) => ({
+				status: "fulfilled",
+				value
+			}), (reason) => ({
+				status: "rejected",
+				reason
+			}))));
+		}
+		function importMetaResolve(specifier) {
+			if (import.meta.resolve) return new URL(import.meta.resolve(specifier));
+			return new URL(specifier, import.meta.url);
+		}
+		promise = allSettled(deps.map((depString) => {
+			depString = assetsURL(depString, importerUrl);
+			const dep = importMetaResolve(depString);
+			const isCss = isCssPreloadUrl(dep);
+			return preloadOnce(seen, dep.href, () => {
+				if (preloadedHrefs === void 0) {
+					preloadedHrefs = {
+						all: new Set(),
+						styles: new Set()
+					};
+					const links = document.getElementsByTagName("link");
+					for (let i = links.length - 1; i >= 0; i--) {
+						const link = links[i];
+						preloadedHrefs.all.add(link.href);
+						if (link.rel === "stylesheet") preloadedHrefs.styles.add(link.href);
+					}
+				}
+				if ((isCss ? preloadedHrefs.styles : preloadedHrefs.all).has(dep.href)) return;
+				const link = document.createElement("link");
+				link.rel = isCss ? "stylesheet" : scriptRel;
+				if (!isCss) link.as = "script";
+				link.crossOrigin = "";
+				link.href = dep.href;
+				if (cspNonce) link.setAttribute("nonce", cspNonce);
+				document.head.appendChild(link);
+				if (isCss) return new Promise((res, rej) => {
+					link.addEventListener("load", res);
+					link.addEventListener("error", () => rej(new Error(`Unable to preload CSS for ${dep}`)));
+				});
+			});
+		}).filter((p) => p !== void 0));
+	}
+	function handlePreloadError(err) {
+		const e = new Event("vite:preloadError", { cancelable: true });
+		e.payload = err;
+		window.dispatchEvent(e);
+		if (!e.defaultPrevented) throw err;
+	}
+	return promise.then((res) => {
+		for (const item of res || []) {
+			if (item.status !== "rejected") continue;
+			handlePreloadError(item.reason);
+		}
+		return baseModule().catch(handlePreloadError);
+	});
+};
+//#endregion
+//#region src/fleet-desktop.js
+var fleet_desktop_exports = __exportAll({ mountFleetDesktop: () => mountFleetDesktop });
+async function mountFleetDesktop(main, { h, t }) {
+	const panel = h("section", {
+		class: "panel fleet-desktop",
+		"aria-label": t("fleet_desktop_title")
+	});
+	const content = h("div"), message = h("p", {
+		class: "muted",
+		role: "status"
+	});
+	panel.append(h("h2", {}, t("fleet_desktop_title")), h("p", { class: "muted" }, t("fleet_independent")), content, message);
+	if (!main.isConnected) return () => {};
+	main.append(panel);
+	let disposed = false, busy = false, readable = false, snapshot, draft, binding, choicePreview, launch, migration, timer;
+	let backend = "rust", autostart = false;
+	const alive = () => !disposed && panel.isConnected;
+	const key = () => `batc.desktop.fleet.controls.${binding}`;
+	const choices = (value) => ({
+		connections: [...value.connections],
+		profiles: [...value.profiles],
+		dashboard: value.dashboard
+	});
+	const equivalent = (a, b) => a && b && a.dashboard === b.dashboard && ["connections", "profiles"].every((k) => Array.isArray(a[k]) && Array.isArray(b[k]) && [...a[k]].sort().join("\0") === [...b[k]].sort().join("\0"));
+	const validId = (id) => typeof id === "string" && /^[0-9a-f]{32}$/.test(id);
+	const validSummary = (s, id) => s?.launch_id === id && Array.isArray(s.profiles) && s.profiles.every((v) => typeof v === "string") && typeof s.dashboard === "boolean" && typeof s.opens_bat === "boolean";
+	const knownLaunch = () => [
+		"started",
+		"not_started",
+		"no_bat",
+		"already_running"
+	].includes(launch?.receipt?.state);
+	const acceptLaunch = (value) => {
+		if (!launch || !value) return;
+		const receipt = value.summary || value;
+		if (receipt.launch_id !== launch.preview_id || !Array.isArray(receipt.profiles) || typeof receipt.dashboard !== "boolean" || launch.summary && (JSON.stringify(receipt.profiles) !== JSON.stringify(launch.summary.profiles) || receipt.dashboard !== launch.summary.dashboard)) throw new Error(t("fleet_unknown"));
+		if (![
+			"prepared",
+			"uncertain",
+			"started",
+			"not_started",
+			"no_bat",
+			"already_running"
+		].includes(value.state)) throw new Error(t("fleet_unknown"));
+		launch.receipt = value;
+	};
+	const acceptMigration = (value) => {
+		if (!migration || value?.id !== migration.preview_id || typeof value.phase !== "string") throw new Error(t("fleet_unknown"));
+		migration.receipt = value;
+	};
+	const save = () => {
+		try {
+			sessionStorage.setItem(key(), JSON.stringify({
+				draft,
+				launch,
+				migration
+			}));
+		} catch {}
+	};
+	const enabled = () => readable && !busy && snapshot?.configuration.valid && !snapshot.pending_migration && (snapshot.monitor.state === "stopped" || snapshot.monitor.controllable);
+	const stale = () => draft && (draft.revision !== snapshot.selection.revision || draft.epoch !== snapshot.monitor.epoch);
+	const discardPreview = () => {
+		if (choicePreview) fleetControl({
+			action: "discard",
+			preview_id: choicePreview.preview_id
+		}).catch(() => {});
+		choicePreview = null;
+	};
+	const edit = (field, value) => {
+		if (!enabled() || stale()) return;
+		discardPreview();
+		draft ||= {
+			...choices(snapshot.selection),
+			revision: snapshot.selection.revision,
+			epoch: snapshot.monitor.epoch
+		};
+		draft[field] = value;
+		if (equivalent(draft, snapshot.selection)) draft = null;
+		save();
+		render();
+	};
+	const accept = (value) => {
+		if (value?.control_version !== 1 || !value.configuration?.binding || !Array.isArray(value.profiles) || !Array.isArray(value.selection?.profiles) || typeof value.selection.dashboard !== "boolean" || !value.monitor || !value.login || !value.readiness) throw new Error(t("fleet_unavailable"));
+		if (binding !== value.configuration.binding) {
+			binding = value.configuration.binding;
+			backend = value.backend;
+			draft = choicePreview = launch = migration = null;
+			try {
+				const old = JSON.parse(sessionStorage.getItem(key()) || "null");
+				if (old?.draft && Array.isArray(old.draft.connections) && Array.isArray(old.draft.profiles) && [...old.draft.connections, ...old.draft.profiles].every((v) => typeof v === "string") && typeof old.draft.dashboard === "boolean") draft = old.draft;
+				if (validId(old?.launch?.preview_id)) launch = {
+					preview_id: old.launch.preview_id,
+					attempted: old.launch.attempted === true,
+					summary: validSummary(old.launch.summary, old.launch.preview_id) ? old.launch.summary : null,
+					receipt: null
+				};
+				if (launch?.summary && ["no_bat", "already_running"].includes(old?.launch?.receipt?.state)) acceptLaunch(old.launch.receipt);
+				if (validId(old?.migration?.preview_id) && (old.migration.accepted === true || /^[0-9a-f]{64}$/.test(old.migration.fingerprint))) migration = {
+					...old.migration,
+					receipt: null
+				};
+			} catch {}
+		}
+		snapshot = value;
+		readable = true;
+		const automatic = value.login_launch;
+		if (!launch && automatic?.configuration_binding === binding && validId(automatic.preview_id) && validSummary(automatic.summary, automatic.preview_id)) {
+			launch = {
+				preview_id: automatic.preview_id,
+				summary: automatic.summary,
+				attempted: true
+			};
+			if (automatic.receipt) acceptLaunch(automatic.receipt);
+			save();
+		}
+		if (draft && equivalent(draft, value.selection)) {
+			draft = null;
+			discardPreview();
+			save();
+		}
+		if (validId(value.pending_migration) && migration?.preview_id !== value.pending_migration) {
+			migration = {
+				preview_id: value.pending_migration,
+				accepted: true
+			};
+			save();
+		}
+	};
+	const run = async (fn) => {
+		if (!alive() || busy) return;
+		busy = true;
+		message.textContent = t("fleet_working");
+		render();
+		try {
+			await fn();
+			if (alive()) message.textContent = "";
+		} catch (error) {
+			if (alive()) message.textContent = `${t("fleet_unknown")} ${String(error)}`;
+		} finally {
+			busy = false;
+			if (alive()) {
+				save();
+				render();
+			}
+		}
+	};
+	const read = async () => {
+		try {
+			const value = await fleetControl({ action: "overview" });
+			if (!alive()) return;
+			accept(value);
+			if (launch?.attempted) {
+				const receipt = await fleetControl({
+					action: "launch_status",
+					launch_id: launch.preview_id
+				});
+				if (alive() && receipt) acceptLaunch(receipt);
+			}
+			if (migration?.accepted) {
+				const receipt = await fleetControl({
+					action: "migration_status",
+					migration_id: migration.preview_id
+				});
+				if (alive()) acceptMigration(receipt);
+			}
+		} catch (error) {
+			readable = false;
+			throw error;
+		}
+	};
+	const reviewChoices = () => run(async () => {
+		const value = await fleetControl({
+			action: "preview_choices",
+			choices: choices(draft),
+			configuration_binding: binding,
+			selection_revision: draft.revision,
+			monitor_epoch: draft.epoch
+		});
+		if (alive()) {
+			if (!validId(value.preview_id) || !equivalent(value.summary?.choices, draft)) throw new Error(t("fleet_unknown"));
+			choicePreview = value;
+		}
+	});
+	const launchApply = () => run(async () => {
+		launch.attempted = true;
+		save();
+		const value = await fleetControl({
+			action: "launch",
+			preview_id: launch.preview_id
+		});
+		if (alive()) acceptLaunch(value);
+	});
+	const label = (id) => id === "default" ? t("fleet_local_bat") : snapshot.profiles.find((row) => row.id === id)?.label || snapshot.configuration.connections.find((row) => row.name === id)?.label || id;
+	const render = () => {
+		if (!alive() || !snapshot) return;
+		const focus = document.activeElement?.dataset?.fleetChoice;
+		const selected = draft || snapshot.selection, ready = new Map([...snapshot.readiness.hosts, snapshot.readiness.connector].filter(Boolean).map((row) => [row.name, row]));
+		const checkbox = (field, id, text) => h("label", { class: "fleet-choice" }, h("input", {
+			type: "checkbox",
+			checked: field === "dashboard" ? selected.dashboard : selected[field].includes(id),
+			"data-fleet-choice": field + ":" + id,
+			disabled: !enabled() || !!stale(),
+			onchange: (e) => edit(field, field === "dashboard" ? e.target.checked : e.target.checked ? [...selected[field], id] : selected[field].filter((v) => v !== id))
+		}), " ", text);
+		const button = (text, fn, disabled = false, primary = false) => h("button", {
+			class: primary ? "primary" : "secondary",
+			disabled: busy || disabled,
+			onclick: fn
+		}, t(text));
+		const fields = [
+			h("p", {}, t("fleet_monitor_" + snapshot.monitor.state), " · ", t("fleet_" + snapshot.readiness.state)),
+			snapshot.monitor.state === "running" && !snapshot.monitor.controllable ? h("p", { class: "note" }, t("fleet_other_owner")) : null,
+			snapshot.login_launch ? h("p", { class: "note" }, t("fleet_login_" + snapshot.login_launch.state), snapshot.login_launch.code ? ` (${snapshot.login_launch.code})` : null) : null,
+			h("div", { class: "actions" }, button("fleet_start", () => run(async () => {
+				await fleetRequest({
+					action: "ensure_monitor",
+					expected_configuration_binding: binding
+				});
+				await read();
+			}), !enabled() || !!draft || snapshot.monitor.state !== "stopped"), button("fleet_quit", () => run(async () => {
+				await fleetRequest({
+					action: "quit_owned",
+					expected_configuration_binding: binding,
+					expected_monitor_epoch: snapshot.monitor.epoch
+				});
+				await read();
+			}), !enabled() || !!draft || !snapshot.monitor.controllable)),
+			h("h3", {}, t("fleet_connections")),
+			h("div", { class: "fleet-options" }, ...snapshot.configuration.connections.map((row) => h("div", { class: "row" }, h("div", { class: "grow" }, checkbox("connections", row.name, row.label)), h("span", { class: "chip" }, t("fleet_" + (ready.get(row.name)?.level || "unavailable")))))),
+			h("h3", {}, t("fleet_windows_title")),
+			h("div", { class: "fleet-options" }, ...snapshot.profiles.map((row) => h("div", { class: "row" }, checkbox("profiles", row.id, label(row.id)))), h("div", { class: "row" }, checkbox("dashboard", "dashboard", t("fleet_dashboard_choice")))),
+			h("p", { class: "muted" }, t("fleet_selection_help")),
+			stale() ? h("p", { class: "error" }, t("fleet_changed")) : null,
+			choicePreview ? h("p", { class: "note" }, t("fleet_prerequisites", { names: choicePreview.summary.added_connections.map(label).join(", ") || t("fleet_none") })) : null,
+			h("div", { class: "actions" }, button(choicePreview ? "fleet_save_choices" : "fleet_review_choices", () => choicePreview ? run(async () => {
+				await fleetControl({
+					action: "apply_choices",
+					preview_id: choicePreview.preview_id
+				});
+				await read();
+			}) : reviewChoices(), !enabled() || !draft || !!stale(), true), button("fleet_use_current", () => {
+				draft = null;
+				discardPreview();
+				save();
+				render();
+			}, !draft), button("fleet_refresh", () => run(read))),
+			h("h3", {}, t("fleet_launch_title")),
+			h("p", { class: "muted" }, t("fleet_launch_help")),
+			launch ? h("p", { class: "note" }, launch.receipt ? t("fleet_launch_" + (launch.receipt.state === "prepared" ? "uncertain" : launch.receipt.state || "uncertain")) : t(launch.attempted ? "fleet_launch_uncertain" : "fleet_launch_review")) : null,
+			launch?.summary?.bat_may_open_local_window ? h("p", { class: "muted" }, t("fleet_local_anchor")) : null,
+			h("div", { class: "actions" }, button("fleet_review_launch", () => run(async () => {
+				const value = await fleetControl({ action: "preview_launch" });
+				if (alive()) {
+					if (!validId(value.preview_id) || !validSummary(value.summary, value.preview_id)) throw new Error(t("fleet_unknown"));
+					launch = value;
+				}
+			}), !enabled() || !!draft || !!launch?.attempted), launch && !launch.receipt && launch.summary ? button(launch.attempted ? "fleet_retry_launch" : "fleet_launch_apply", launchApply, !enabled() || !!draft || snapshot.login_launch?.state === "waiting") : null, launch ? button("fleet_refresh", () => run(read)) : null, knownLaunch() ? button("fleet_new_launch", () => {
+				fleetControl({
+					action: "discard",
+					preview_id: launch.preview_id
+				}).catch(() => {});
+				launch = null;
+				save();
+				render();
+			}) : null, launch && !launch.attempted ? button("cancel", () => {
+				fleetControl({
+					action: "discard",
+					preview_id: launch.preview_id
+				}).catch(() => {});
+				launch = null;
+				save();
+				render();
+			}) : null),
+			h("h3", {}, t("fleet_login_title")),
+			h("label", { class: "fleet-choice" }, h("input", {
+				type: "checkbox",
+				checked: snapshot.login.show_picker,
+				disabled: !enabled(),
+				"data-fleet-login": "picker",
+				onchange: (e) => run(async () => {
+					const value = await fleetControl({
+						action: "save_login",
+						expected_revision: snapshot.login.revision,
+						show_picker: e.target.checked
+					});
+					if (alive()) snapshot.login = value;
+				})
+			}), " ", t("fleet_login_picker")),
+			h("h3", {}, t("fleet_backend_title")),
+			h("p", { class: "muted" }, t("fleet_backend_help")),
+			h("div", { class: "actions" }, h("select", {
+				value: backend,
+				disabled: busy || !!migration,
+				"aria-label": t("fleet_backend_title"),
+				onchange: (e) => {
+					backend = e.target.value;
+				}
+			}, h("option", {
+				value: "rust",
+				selected: backend === "rust"
+			}, t("fleet_backend_rust")), h("option", {
+				value: "powershell",
+				selected: backend === "powershell"
+			}, t("fleet_backend_powershell"))), h("label", { class: "fleet-choice" }, h("input", {
+				type: "checkbox",
+				checked: autostart,
+				disabled: busy || !!migration,
+				onchange: (e) => {
+					autostart = e.target.checked;
+				},
+				"data-fleet-autostart": "enabled"
+			}), " ", t("fleet_autostart"))),
+			migration ? h("p", { class: "note" }, migration.receipt ? t("fleet_migration_" + migration.receipt.phase) : t(migration.accepted ? "fleet_migration_unknown" : "fleet_migration_review", {
+				from: t("fleet_backend_" + migration.from),
+				to: t("fleet_backend_" + migration.to),
+				before: t(migration.autostart_before ? "fleet_enabled" : "fleet_disabled"),
+				after: t(migration.autostart ? "fleet_enabled" : "fleet_disabled")
+			})) : null,
+			h("div", { class: "actions" }, button("fleet_review_migration", () => run(async () => {
+				const value = await fleetControl({
+					action: "preview_migration",
+					backend,
+					autostart
+				});
+				if (alive()) {
+					if (!validId(value.preview_id) || typeof value.fingerprint !== "string") throw new Error(t("fleet_unknown"));
+					migration = value;
+				}
+			}), !enabled() || !!migration), migration && !migration.accepted ? button("fleet_apply_migration", () => run(async () => {
+				migration.accepted = true;
+				save();
+				const value = await fleetControl({
+					action: "apply_migration",
+					preview_id: migration.preview_id,
+					fingerprint: migration.fingerprint
+				});
+				if (alive()) acceptMigration(value);
+				await read();
+			}), !readable) : null, migration?.accepted && migration.receipt && migration.receipt.phase !== "complete" ? button("fleet_continue_migration", () => run(async () => {
+				const value = await fleetControl({
+					action: "advance_migration",
+					migration_id: migration.preview_id
+				});
+				if (alive()) acceptMigration(value);
+				await read();
+			}), !readable) : null, migration?.accepted ? button("fleet_refresh", () => run(read)) : null, migration?.accepted && !migration.receipt ? button("fleet_retry_migration", () => run(async () => {
+				const value = await fleetControl(migration.restore_source ? {
+					action: "restore_migration",
+					source_id: migration.restore_source,
+					restore_id: migration.preview_id
+				} : {
+					action: "apply_migration",
+					preview_id: migration.preview_id,
+					fingerprint: migration.fingerprint
+				});
+				if (alive()) acceptMigration(value);
+				await read();
+			}), !migration.restore_source && !migration.fingerprint) : null, migration?.receipt?.phase === "complete" ? button("fleet_new_migration", () => {
+				fleetControl({
+					action: "discard",
+					preview_id: migration.preview_id
+				}).catch(() => {});
+				migration = null;
+				save();
+				render();
+			}) : null, migration && !migration.accepted ? button("cancel", () => {
+				fleetControl({
+					action: "discard",
+					preview_id: migration.preview_id
+				}).catch(() => {});
+				migration = null;
+				save();
+				render();
+			}) : null, migration?.receipt?.phase === "complete" ? button("fleet_restore_migration", () => run(async () => {
+				const source = migration.preview_id;
+				const restoreId = crypto.randomUUID().replaceAll("-", "");
+				migration = {
+					preview_id: restoreId,
+					accepted: true,
+					restore_source: source
+				};
+				save();
+				const value = await fleetControl({
+					action: "restore_migration",
+					source_id: source,
+					restore_id: restoreId
+				});
+				if (alive()) acceptMigration(value);
+				await read();
+			}), !readable) : null)
+		];
+		content.replaceChildren(...fields.filter(Boolean));
+		if (focus) [...content.querySelectorAll("input")].find((input) => input.dataset.fleetChoice === focus)?.focus();
+	};
+	await run(read);
+	const poll = async () => {
+		if (!alive()) return;
+		if (!busy) await run(read);
+		if (alive()) timer = setTimeout(poll, 5e3);
+	};
+	timer = setTimeout(poll, 5e3);
+	return () => {
+		disposed = true;
+		clearTimeout(timer);
+		panel.remove();
+	};
+}
+var init_fleet_desktop = __esmMin((() => {
+	init_transport();
+}));
+//#endregion
 //#region src/fleet.js
+init_transport();
 async function mountFleet(main, { h, t }) {
 	if (!main.isConnected) return () => {};
 	const panel = h("section", {
@@ -2150,6 +2791,7 @@ async function mountFleet(main, { h, t }) {
 	});
 	panel.append(h("h2", {}, t("fleet_title")), h("p", { class: "muted" }, t("fleet_help")), content, message);
 	main.append(panel);
+	let nativeCleanup;
 	let disposed = false, busy = false, readable = false, timer, snapshot, draft, binding;
 	const alive = () => !disposed && panel.isConnected;
 	const key = () => `batc.desktop.fleet.selection.${binding}`;
@@ -2298,7 +2940,19 @@ async function mountFleet(main, { h, t }) {
 			disposed = true;
 		};
 		if (!availability.configured || !availability.platform_supported) message.textContent = t(!availability.platform_supported ? "fleet_windows" : "fleet_setup");
-		else {
+		else if (availability.native_controls === true) {
+			const { mountFleetDesktop } = await __vitePreload(async () => {
+				const { mountFleetDesktop } = await Promise.resolve().then(() => (init_fleet_desktop(), fleet_desktop_exports));
+				return { mountFleetDesktop };
+			}, void 0, import.meta.url);
+			if (alive()) {
+				panel.remove();
+				nativeCleanup = await mountFleetDesktop(main, {
+					h,
+					t
+				});
+			}
+		} else {
 			await read();
 			const poll = async () => {
 				if (!alive()) return;
@@ -2313,11 +2967,13 @@ async function mountFleet(main, { h, t }) {
 	return () => {
 		disposed = true;
 		clearTimeout(timer);
+		nativeCleanup?.();
 		panel.remove();
 	};
 }
 //#endregion
 //#region src/updates.js
+init_transport();
 async function mountUpdates(main, { h, t }) {
 	const panel = h("section", {
 		class: "panel",
@@ -4124,6 +4780,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 }
 //#endregion
 //#region src/artifact-content.js
+init_transport();
 var reference = (row) => ({
 	artifact_id: row.artifact_id,
 	revision: row.revision,
@@ -5178,6 +5835,7 @@ function storageScope(endpoint, actor, server = "legacy", principal = actor) {
 }
 //#endregion
 //#region src/app.js
+init_transport();
 var TOKEN_KEY = "batc.dashboard.token";
 var state = {
 	token: null,

@@ -39,6 +39,43 @@ fn absolute(path: &Path) -> Result<PathBuf> {
     if !result.is_absolute() || result.to_str().is_none() {
         return Err("CONFIGURATION_INVALID");
     }
+    #[cfg(windows)]
+    {
+        result = expand_short_names(&result)?;
+    }
+    Ok(result)
+}
+#[cfg(windows)]
+fn expand_short_names(path: &Path) -> Result<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+    // Windows PowerShell/.NET GetFullPath expands existing 8.3 components,
+    // including parents of an absent user SSH file. GetFullPathNameW alone
+    // (used by std::path::absolute) does not. Do not canonicalize: that would
+    // follow reparse points and introduce a verbatim prefix unlike the Kit.
+    let mut result = PathBuf::new();
+    for part in path.components() {
+        result.push(part.as_os_str());
+        if !part.as_os_str().encode_wide().any(|c| c == u16::from(b'~')) {
+            continue;
+        }
+        let input: Vec<u16> = result.as_os_str().encode_wide().chain(Some(0)).collect();
+        if input.len() > 32768 {
+            return Err("CONFIGURATION_INVALID");
+        }
+        let mut buffer = vec![0u16; 32768];
+        let count =
+            unsafe { GetLongPathNameW(input.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) }
+                as usize;
+        if count >= buffer.len() {
+            return Err("CONFIGURATION_INVALID");
+        }
+        // Like .NET's TryExpandShortFileName, retain an unexpandable component;
+        // paths may legitimately end in names that do not exist yet.
+        if count != 0 {
+            result = std::ffi::OsString::from_wide(&buffer[..count]).into();
+        }
+    }
     Ok(result)
 }
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -199,6 +236,13 @@ impl Configuration {
         };
         value.verify_current()?;
         Ok(value)
+    }
+    /// Effective paths from the validated pairing, for native monitor identity checks.
+    pub fn inventory_path(&self) -> &Path {
+        &self.paths.inventory
+    }
+    pub fn profile_index_path(&self) -> &Path {
+        &self.paths.index
     }
     pub fn binding(&self) -> &str {
         &self.binding

@@ -472,5 +472,77 @@ impl PreferenceLock {
     }
 }
 
+/// OS observer for read-only discovery. No process enumeration occurs until explicitly called.
+pub struct WindowsMonitorObservation;
+impl crate::discovery::Observation for WindowsMonitorObservation {
+    fn current_login(&self) -> Result<LoginIdentity> {
+        current_login()
+    }
+    fn state(&self, pid: u32) -> ProcessState {
+        process_state(pid)
+    }
+    fn observe(&self, pid: u32) -> Result<Option<ProcessSnapshot>> {
+        WindowsProcess::observe(pid)
+    }
+    fn legacy_candidates(&self) -> Result<Vec<ProcessSnapshot>> {
+        let owner = current_login()?;
+        let mut result = Vec::new();
+        for pid in powershell_pids()? {
+            let Some(process) = WindowsProcess::open(pid, false)? else {
+                continue;
+            };
+            let identity = login(process.handle.0)?;
+            if identity.owner_sid != owner.owner_sid {
+                continue;
+            }
+            match process.snapshot() {
+                Ok(snapshot) => result.push(snapshot),
+                Err(_) if !running(process.handle.0)? => continue,
+                Err(error) => return Err(error),
+            }
+            if result.len() > 1024 {
+                return Err("OWNER_UNPROVEN");
+            }
+        }
+        Ok(result)
+    }
+}
+fn powershell_pids() -> Result<Vec<u32>> {
+    unsafe {
+        let snapshot = Handle::new(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0))?;
+        let mut row: PROCESSENTRY32W = zeroed();
+        row.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snapshot.0, &mut row) == 0 {
+            return if GetLastError() == ERROR_NO_MORE_FILES {
+                Ok(vec![])
+            } else {
+                Err("OWNER_UNPROVEN")
+            };
+        }
+        let mut pids = Vec::new();
+        for _ in 0..100_000 {
+            let length = row
+                .szExeFile
+                .iter()
+                .position(|n| *n == 0)
+                .ok_or("OWNER_UNPROVEN")?;
+            let name =
+                String::from_utf16(&row.szExeFile[..length]).map_err(|_| "OWNER_UNPROVEN")?;
+            if name.eq_ignore_ascii_case("powershell.exe") || name.eq_ignore_ascii_case("pwsh.exe")
+            {
+                pids.push(row.th32ProcessID);
+            }
+            if Process32NextW(snapshot.0, &mut row) == 0 {
+                return if GetLastError() == ERROR_NO_MORE_FILES {
+                    Ok(pids)
+                } else {
+                    Err("OWNER_UNPROVEN")
+                };
+            }
+        }
+        Err("OWNER_UNPROVEN")
+    }
+}
+
 #[cfg(test)]
 mod tests;
