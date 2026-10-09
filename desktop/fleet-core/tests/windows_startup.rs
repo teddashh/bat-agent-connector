@@ -1,5 +1,5 @@
 #![cfg(windows)]
-use bat_fleet_core::{discovery::Backend, windows_startup::Codec};
+use bat_fleet_core::{discovery::Backend, installation::canonical_local, windows_startup::Codec};
 use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -62,6 +62,8 @@ fn temporary_links_round_trip_exact_fixed_commands_and_reject_foreign_sources() 
 }
 #[test]
 fn real_wscript_shell_shortcut_uses_kit_format_but_modified_arguments_refuse() {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
     struct Owned(Child);
     impl Drop for Owned {
         fn drop(&mut self) {
@@ -78,53 +80,113 @@ fn real_wscript_shell_shortcut_uses_kit_format_but_modified_arguments_refuse() {
         br#"$ErrorActionPreference='Stop'
 $r=$env:BAT_FLEET_STARTUP_FIXTURE
 $ws=New-Object -ComObject WScript.Shell
-$sc=$ws.CreateShortcut((Join-Path $r 'fixture.lnk'))
-$sc.TargetPath=Join-Path $r 'system\wscript.exe'
-$vbs=Join-Path $r 'kit\client\Open BAT.vbs'
-$extra=$env:BAT_FLEET_STARTUP_EXTRA
-if ($extra -eq 'case') {$vbs=$vbs.ToUpperInvariant();$extra=''}
-$sc.Arguments='"'+$vbs+'"'+$extra
-$sc.WorkingDirectory=Join-Path $r 'kit\client'
+$link=Join-Path $r 'fixture.lnk'
+$sc=$ws.CreateShortcut($link)
+$case=$env:BAT_FLEET_STARTUP_CASE
+if ($env:BAT_FLEET_STARTUP_BACKEND -eq 'powershell') {
+    $sc.TargetPath=Join-Path $r 'system\wscript.exe'
+    $argument=Join-Path $r 'kit\client\Open BAT.vbs'
+    $working=Join-Path $r 'kit\client'
+    if ($case -eq 'reparse') {
+        $alias=Join-Path $r 'client-alias'
+        if (-not (Test-Path $alias)) {New-Item -ItemType Junction -Path $alias -Target $working | Out-Null}
+        $working=$alias
+        $argument=Join-Path $alias 'Open BAT.vbs'
+    }
+    $prefix=''
+} else {
+    $sc.TargetPath=Join-Path $r 'app\dashboard.exe'
+    $argument=Join-Path $r 'fleet.json'
+    $working=Join-Path $r 'app'
+    $prefix='--fleet-login --fleet-config '
+}
+if ($case -eq 'case') {$argument=$argument.ToUpperInvariant();$working=$working.ToUpperInvariant()}
+$sc.Arguments=$prefix+'"'+$argument+'"'
+if ($case -eq 'extra') {$sc.Arguments+=' --unexpected'}
+if ($case -eq 'foreign-target') {$sc.TargetPath=Join-Path $r 'other\foreign.exe'}
+if ($case -eq 'foreign-cwd') {$working=Join-Path $r 'other'}
+$sc.WorkingDirectory=$working
 $sc.Description='Synthetic Kit startup, never executed'
 $sc.Save()
+$read=$ws.CreateShortcut($link)
+$diagnostic=@{target=$read.TargetPath;arguments=$read.Arguments;working=$read.WorkingDirectory} | ConvertTo-Json -Compress
+[IO.File]::WriteAllText((Join-Path $r 'fixture-diagnostic.json'),$diagnostic)
 "#,
     )
     .unwrap();
     let exe = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
         .join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    for extra in ["", "case", " --unexpected"] {
-        let mut child = Owned(
-            Command::new(&exe)
-                .args([
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                ])
-                .arg(&script)
-                .env("BAT_FLEET_STARTUP_FIXTURE", &t.0)
-                .env("BAT_FLEET_STARTUP_EXTRA", extra)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        );
-        let until = Instant::now() + Duration::from_secs(30);
-        loop {
-            if let Some(status) = child.0.try_wait().unwrap() {
-                assert!(status.success());
-                break;
+    let long_root = canonical_local(&t.0).unwrap();
+    let input: Vec<u16> = long_root.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut output = vec![0u16; 32768];
+    let count =
+        unsafe { GetShortPathNameW(input.as_ptr(), output.as_mut_ptr(), output.len() as u32) }
+            as usize;
+    assert!(count > 0 && count < output.len());
+    let short_root = PathBuf::from(std::ffi::OsString::from_wide(&output[..count]));
+    for backend in [Backend::Powershell, Backend::Rust] {
+        for (spelling, root) in [("long", &long_root), ("short", &short_root)] {
+            for case in [
+                "exact",
+                "case",
+                "extra",
+                "foreign-target",
+                "foreign-cwd",
+                "reparse",
+            ] {
+                if backend == Backend::Rust && case == "reparse" {
+                    continue; // the PS case proves directory aliases are not resolved into ownership
+                }
+                let mut child = Owned(
+                    Command::new(&exe)
+                        .args([
+                            "-NoProfile",
+                            "-NonInteractive",
+                            "-ExecutionPolicy",
+                            "Bypass",
+                            "-File",
+                        ])
+                        .arg(&script)
+                        .env("BAT_FLEET_STARTUP_FIXTURE", root)
+                        .env("BAT_FLEET_STARTUP_CASE", case)
+                        .env(
+                            "BAT_FLEET_STARTUP_BACKEND",
+                            if backend == Backend::Powershell {
+                                "powershell"
+                            } else {
+                                "rust"
+                            },
+                        )
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .unwrap(),
+                );
+                let until = Instant::now() + Duration::from_secs(30);
+                loop {
+                    if let Some(status) = child.0.try_wait().unwrap() {
+                        assert!(
+                            status.success(),
+                            "fixture creation failed: {backend:?}/{spelling}/{case}"
+                        );
+                        break;
+                    }
+                    assert!(Instant::now() < until);
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let bytes = std::fs::read(t.0.join("fixture.lnk")).unwrap();
+                let actual = c.classify(&bytes);
+                let expected = if matches!(case, "exact" | "case") {
+                    Ok(backend)
+                } else {
+                    Err("STARTUP_UNOWNED")
+                };
+                assert_eq!(actual, expected,
+                    "synthetic fixture {backend:?}/{spelling}/{case}, flags={:#x}, WScript fields={}",
+                    u32::from_le_bytes(bytes[20..24].try_into().unwrap()),
+                    std::fs::read_to_string(t.0.join("fixture-diagnostic.json")).unwrap());
             }
-            assert!(Instant::now() < until);
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let bytes = std::fs::read(t.0.join("fixture.lnk")).unwrap();
-        if extra.is_empty() || extra == "case" {
-            assert_eq!(c.classify(&bytes), Ok(Backend::Powershell));
-        } else {
-            assert!(c.classify(&bytes).is_err());
         }
     }
 }
