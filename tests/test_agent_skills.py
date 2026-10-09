@@ -122,6 +122,8 @@ async def test_skill_tool_references_and_recovery_parameters_match_discovered_sc
             "work_continue_from_checkpoint": {"checkpoint_id", "instructions", "idempotency_key", "confirm"},
             "repository_preview": {"repository", "host", "workspace_id", "source_ref"},
             "work_continue_from_repository": {"repository", "host", "workspace_id", "source_ref", "source_sha", "repository_id", "binding_digest", "prompt", "idempotency_key", "confirm"},
+            "session_read": {"host", "session_id", "last_n", "offset", "include_tools", "max_chars", "after"},
+            "session_wait": {"host", "session_id", "until", "timeout_s", "require_new", "after"},
             "session_cleanup": {"host", "dry_run"},
             "session_send": {"host", "session_id", "message_id", "queue", "idempotency_key", "control_version", "confirm"},
             "session_continue": {"host", "session_id", "idempotency_key", "control_version", "confirm"},
