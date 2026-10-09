@@ -8,6 +8,15 @@
 
 ## 目前續作
 
+最新追蹤 [#59](https://github.com/teddashh/bat-agent-connector/issues/59)。#58 已合併到 main
+`e495d70d8dae6b7dc415adc44a23eb1bcf64dd7d`。Native credentials、durable bulk approval、managed
+artifact capture/accept 在隔離工作線續作，未宣稱已合併或實機通過。產品負責人補充原始對話並
+澄清 workspace／repository 與 GitHub 同步模式，見 [共同依據](realignment-v2.md#原始需求與後續澄清)。
+直接未發布 Git-pack transport 實驗留在本機獨立分支，沒有合入；此能力不再列交付缺口。
+一般附件及成果操作保留，明確 repository 的已發布版本同步仍須查核；不因此宣告 M1–M3 完成。
+
+以下保留 #57 的權限工作紀錄：
+
 追蹤 [#57](https://github.com/teddashh/bat-agent-connector/issues/57)，基底 main `565a7d5`（#56）。
 R01 `session.permissions` 接中央 authority，Claude／Codex 每個 setting 保存 intent／receipt，
 保留 task incarnation／control version、confinement 與 host policy；sent error／lost ACK 不以相符
@@ -84,7 +93,7 @@ Desktop CI 現在也跑六組 actual-central fixtures，保存合成 UI 證據�
 | R02 | Codex desktop worker | `desktop/**`、共用 UI source、受限 transport、window/tray；依 R00 | #44 已合併；installed 驗收待做 |
 | R03 | Codex 主協調（待 R02 bridge） | Fleet inventory/PS adapter → Rust parity、ownership、bootstrap | #45 PS adapter 已合併；Rust parity 尚缺 |
 | R04 | Codex 主協調；observation worker 完成修正 | #35 read models → 共用 frontend state/history/relations | #35 main；#48 frontend 已合併 |
-| R05 | Codex 主協調；保留 artifacts 分支 | fixed checkpoint、artifact bytes/manifest、跨 host；依 R01/R02/R08 接口 | checkpoint/#46/#50 main；本輪補 B1 UI，B2/C 尚缺 |
+| R05 | Codex 主協調；保留 artifacts 分支 | fixed checkpoint、artifact bytes/manifest、明確 repository 的已發布版本同步；依 R01/R02/R08 接口 | checkpoint/#46/#50/B1 UI main；B2 工作線續作，repository 同步待查核；直接未發布 Git relay 已排除 |
 | R06 | Codex 主協調 | 既有 project/work_items、completion + R04 詳情；無 importer | 基礎 main；桌面 history/details 已合併，剩餘能力待驗收 |
 | R07 | Codex 主協調；保留 delivery 分支 | integration、cancel 追蹤、composite scopes、source SHA/recipe、UI；依 R01 | Part A main；#47 Part B 已合併 |
 | R08 | Codex 主協調；cleanup worker 完成修正 | #38 + R01/R04/R05 引用、task cleanup、recovery | #38 main；task-owned cleanup 仍保留 |

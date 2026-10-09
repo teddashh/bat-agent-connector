@@ -6,6 +6,10 @@ Tauri 第二版計畫 §24，保留 **A01–A10、B01–B05、C01–C07、D01–
 兩份計畫對應同一產品與功能 backlog；Tauri 是更新的介面方向。
 此表不是通過清單：**尚未建立同一候選版本的 installed／live 證據，M1、M2、M3 及完整產品交付均未完成。**
 
+範圍依產品負責人提供的原始對話與後續澄清校正，見 [共同依據](realignment-v2.md#原始需求與後續澄清)。
+程式碼的跨主機同步只針對明確 repository 的已發布 commit；直接搬運未發布 Git objects 不列交付 gate。
+附件 bytes/materialization、同主機固定 checkpoint、人工保護與各情境其餘驗收仍保留，沒有新增通過宣稱。
+
 ## 證據層級與版本
 
 - **主線／分支**：程式所在位置；有程式或測試來源不等於已驗收。本輪彙整已記錄測試與審查證據；本文件更新沒有重跑測試。
@@ -73,14 +77,14 @@ reload/lost reply 與真中央唯讀 bytes/index/refs fixture；`2fc8fd8` 關閉
 | B01 多 sessions、無 tab、跨時期工作關聯 | M `test_observation.py` 的 B01、`test_inventory_cursors.py`；O `desktop/tests/observation.spec.ts` 穩定 ID 分頁/history。 | 同 RC 真多 session、warm reuse／歷史工作切換；UI 與 API 各頁時間／關聯一致。 |
 | B02 Host 離線、SSE 中斷、client 重開、retention reset | M observation freshness；U `test_dashboard_sync.py`、`desktop/tests/events.test.ts`／`recovery.spec.ts`／`refresh-ack.spec.ts`、`central-integration.mjs`。 | 真中央斷線／休眠／reset，另一 host 正常、草稿不丟。桌面目前以 journal polling 接續；不得宣稱原生 SSE 訂閱已實作。 |
 | B03 Actor／provenance 無證據 | M `test_observation.py` 的 B03、`test_observation_facts.py`；O state axes／unknown presentation。 | 真資料缺證據時保持 unknown/stale，不以顯示值授權；不同 agent actor 的 UI 證據。 |
-| B04 傳輸中斷、digest 錯、來源選後更新 | A `test_artifacts.py` 的 B04：暫存真 bytes、materialize/readback、ready 前不送首指令、同 parent 恢復。 | **跨 host Git objects/materialization Part C 未實作**；B2 managed capture/accept 仍缺；真 SSH 與 native 中斷後固定 refs/ID 驗收。 |
+| B04 傳輸中斷、digest 錯、來源選後更新 | A `test_artifacts.py` 的 B04：暫存真 bytes、materialize/readback、ready 前不送首指令、同 parent 恢復。 | B2 managed capture/accept 尚待整合；真 SSH 與 native 中斷後固定 refs/ID 驗收。程式碼同步依明確 repository 的已發布 commit 驗證，直接未發布 Git relay 不列 gate。 |
 | B05 Connector 自有 schema／registry／資料升級重開 | M observation step 2/backfill；A `test_artifacts.py::test_artifact_migration_preserves_existing_journal_and_empty_manifests`；D `test_deployment_history.py` step 1→2→3。 | 同 RC 用去識別舊 Connector fixture 升級再重開，比對 IDs/樹/links/provenance/歷史及 rollback；**不讀 Hub snapshot，不引入 #39**。 |
 
 ### C：同 PR 整合與 merge
 
 | ID／情境 | 已有實作與測試來源 | 尚缺／完成條件 |
 | --- | --- | --- |
-| C01 人工＋兩個 AI 成果更新同 PR | M `test_integration.py` 的 C01：暫存真 Git、managed integration area、人工來源不變。 | 真人工專案＋兩個獨立 managed 工作同 PR；來源覆蓋及跨 host 所需 objects 完整，人工 HEAD/index/files 不變。 |
+| C01 人工＋兩個 AI 成果更新同 PR | M `test_integration.py` 的 C01：暫存真 Git、managed integration area、人工來源不變。 | 真人工專案＋兩個獨立 managed 工作同 PR；固定來源完整、人工 HEAD/index/files 不變。若明確使用其他主機，只同步綁定 repository 的已發布 commit，不以跨主機搬運未發布內容作完成條件。 |
 | C02 Preview 後 source／PR head／scope 變動 | M `test_integration.py` 的 C02、`test_delivery.py` scope-change：拒絕舊意圖、非 force push。 | 真 provider 競態及 Tauri 差異顯示；固定來源、不以新 branch head 替代。 |
 | C03 中途衝突／push lost ACK | M `test_integration.py` 的 C03：compose receipts、resolver handoff、遠端讀回、重啟不重複 push。 | 真 Git remote 的衝突／失聯／讀回與 UI 續做；仍只寫 managed integration 區。 |
 | C04 Merge queue／accepted／existing request | M `test_delivery.py` 的 C04、`pr_delivery.py`；保留 #40 metadata settlement。 | 選定 repo 的真 queue/provider 行為與 exact intent；queued/accepted 不顯示 merged。 |
