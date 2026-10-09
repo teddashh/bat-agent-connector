@@ -5,6 +5,36 @@ const form = (page: any) => page.locator('[data-task-controls]');
 const open = async (page: any) => {await page.goto('/dashboard/#/task/'+taskId); await expect(form(page)).toBeVisible();};
 for (const native of [false,true]) {
   const mode = native ? 'native' : 'browser';
+  test(`${mode}: explicit receipt check also refreshes task state when no event arrives`, async ({page}) => {
+    const state=await taskFixture(page,native,{status:'running'}); await open(page);
+    await form(page).getByRole('button',{name:'Pause dispatch',exact:true}).click();
+    await expect(form(page).locator('.status-running')).toBeVisible();
+    await expect.poll(()=>state.reads.filter((p:string)=>p==='/tasks/'+taskId).length).toBeGreaterThanOrEqual(2);
+    state.status='succeeded'; state.paused=true; state.version=8;
+    await form(page).getByRole('button',{name:'Check original operation'}).click();
+    await expect(form(page)).toContainText('control operation completed');
+    await form(page).getByRole('button',{name:'Prepare another control'}).click();
+    await expect(form(page).getByRole('button',{name:'Resume dispatch',exact:true})).toBeVisible();
+    expect(state.posts).toHaveLength(1);
+  });
+  test(`${mode}: late response cannot read the old task through a new principal`, async ({page}) => {
+    const state=await taskFixture(page,native,{delayPost:true}); await open(page);
+    await form(page).getByRole('button',{name:'Pause dispatch',exact:true}).click();
+    await expect.poll(()=>Boolean(state.holdPost)).toBe(true);
+    await page.goto('/dashboard/#/settings');
+    await page.getByRole('button',{name:'Disconnect',exact:true}).click();
+    state.principal='another-principal';
+    if(!native) await page.locator('input[type=password]').fill('other-token');
+    await page.getByRole('button',{name:'Connect',exact:true}).click();
+    await expect(page).toHaveURL(/#\/home$/);
+    const reads=state.reads.filter((p:string)=>p==='/tasks/'+taskId).length;
+    state.holdPost();
+    // Drain the original callback after native/browser transport resolves.
+    await page.waitForTimeout(300);
+    expect(state.reads.filter((p:string)=>p==='/tasks/'+taskId)).toHaveLength(reads);
+    expect(await page.evaluate(()=>Object.entries(localStorage).filter(([key])=>key.startsWith('batc.task-control.'))
+      .map(([,value])=>JSON.parse(value).intent?.operation_id))).toEqual([null]);
+  });
   test(`${mode}: pause and explicit resume bind observed versions without reapplying`, async ({page}) => {
     const state = await taskFixture(page,native); await open(page);
     await expect(form(page).getByRole('checkbox')).not.toBeChecked();

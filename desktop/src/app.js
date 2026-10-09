@@ -930,6 +930,7 @@ async function viewTask(main, id) {
     onSettled: () => load()});
   main.append(head, status, panel.box, observations.box);
   async function load() {
+    assertView(connection);
     if (active) {await active.catch(() => {}); assertView(connection); return load();}
     active = (async () => {
       const operation = panel.refresh(true);
