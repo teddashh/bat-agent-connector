@@ -48,7 +48,7 @@ ALLOWED = {
 }
 UNCERTAIN_RETRY_S = (30.0, 60.0, 120.0, 300.0, 600.0)
 NO_KEY_PREFIX = "batc:nokey:"
-LEGACY_SESSION_ACTIONS = frozenset({"session.send", "session.answer", "session.interrupt"})
+LEGACY_SESSION_ACTIONS = frozenset({"session.send", "session.answer", "session.interrupt", "session.permissions"})
 
 
 class AmbiguousOutcome(Exception):
@@ -122,8 +122,9 @@ def _canonical(value: Any) -> str:
 
 def _error_code(exc: BaseException) -> str:
     from .confinement import ConfinementRefused
+    from .session_permissions import PermissionsRefused
 
-    if isinstance(exc, ConfinementRefused | ResourceReadOnly | TaskControlRefused):
+    if isinstance(exc, ConfinementRefused | ResourceReadOnly | TaskControlRefused | PermissionsRefused):
         return exc.code
     if isinstance(exc, StepFailed | NeedsAttention | OperationError):
         return exc.code
@@ -180,12 +181,14 @@ class OpContext:
         self.service._merge_refs(self.operation_id, refs)
 
     def effect(self, name: str, fn: Callable[[], dict], *, request: dict | None = None,
-               refs: dict | Callable[[dict], dict] | None = None) -> dict:
+               refs: dict | Callable[[dict], dict] | None = None, receipt_only: bool = False) -> dict:
         """Commit a local task effect and its receipt in one journal transaction.
 
         A started receipt without a result proves the effect transaction rolled back. Replaying the
         original journal method is safe; no BAT/provider call may run inside this callback. Refs commit with
         the receipt; replay repairs their missing values without running the effect again.
+        receipt_only permits bookkeeping after cancellation only when the caller has already
+        proven every external effect; it must never authorize a new external action.
         """
         row = self.service.db.execute("SELECT * FROM operation_steps WHERE operation_id=? AND name=?",
                                       (self.operation_id, name)).fetchone()
@@ -194,7 +197,8 @@ class OpContext:
             result = json.loads(row["response"] or "{}")
             self._effect_refs(result, refs)
             return result
-        self.check_cancel()
+        if not receipt_only:
+            self.check_cancel()
         if row is None:
             self.service._step_start(self.operation_id, name, request or {})
         with self.service.journal.tx():

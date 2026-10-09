@@ -871,12 +871,15 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
                                          tool_use_id=tool_use_id, dont_ask_again=dont_ask_again)
 
         async def session_set_permissions(
-            host: str, session_id: str, mode: Literal["allow_all", "default"] = "allow_all", confirm: bool = False
+            host: str, session_id: str, mode: Literal["allow_all", "default"] = "allow_all", confirm: bool = False,
+            idempotency_key: str | None = None, control_version: int | None = None,
         ) -> dict[str, Any]:
-            """WRITE. Switch a live session's permission mode. allow_all = like BAT's GUI with bypass permissions
-            (Claude bypassPermissions; Codex sandbox danger-full-access + approval never). Raising to allow_all
-            only works on hosts configured with default_permission_mode = "allow_all". Requires confirm=true."""
-            return await lifecycle.session_set_permissions(fleet, host, session_id, mode, confirm)
+            """WRITE. Request a durable BAT permission configuration (not proof of live SDK/OS enforcement).
+            allow_all requires host default_permission_mode=allow_all; Claude must be positively idle.
+            Requires confirm=true and BATC_API_TOKEN. Reuse an explicit key on retry; no key is independent.
+            Each setter has its own receipt; unknown ACKs are never resent. No deferred permission raises."""
+            return await session_control("session_set_permissions", host, session_id, confirm, idempotency_key,
+                                         control_version, mode=mode)
 
         async def approve_pending(
             host: str, confirm: bool = False, dry_run: bool = False, workspace: str | None = None
