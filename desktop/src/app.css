@@ -37,6 +37,7 @@ h2 { font-size: 16px; margin: 18px 0 8px; }
 .attention-footer { margin-top: 12px; }
 .attention-section[data-fresh="false"] .attention-footer { color: var(--warn); }
 .reading-state p { margin-bottom: 0; }
+.reading-state .actions { align-items: center; }
 @media (max-width: 600px) {
   .attention-tabs button, .attention-footer button, .reading-state button { min-height: 44px; }
 }

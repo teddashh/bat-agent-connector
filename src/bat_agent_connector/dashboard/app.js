@@ -11921,6 +11921,7 @@ async function viewWorkItem(main, wid) {
 		return work;
 	};
 	const renderNow = async (fromEvent = false) => {
+		if (!panel.isConnected) return;
 		const opens = drawerOpens;
 		let data;
 		try {
