@@ -467,8 +467,12 @@ class OperationService:
             raise ValueError("resolved inputs are limited to the legacy session adapter")
         if _resolved_params is not None and (action != "session.answer" or set(_resolved_params) != {"tool_use_id"}):
             raise ValueError("only the legacy answer adapter may bind an observed pending prompt")
+        # Ordinary admission may enrich persisted params with server-only authority (cleanup).
+        # Only a legacy answer needs a separate view: its observed prompt is stored in refs,
+        # never added to the caller's literal params or request hash.
+        admission_params = params if _resolved_params is None else {**params, **_resolved_params}
         binding = adef.admit(self, principal, _resolved_target or target,
-                            {**params, **(_resolved_params or {})}, preconditions) if adef.admit else None
+                            admission_params, preconditions) if adef.admit else None
         operation_id = "op_" + uuid.uuid4().hex
         key = key if key is not None else NO_KEY_PREFIX + operation_id
         refs = {"admission_binding": binding} if binding else {}

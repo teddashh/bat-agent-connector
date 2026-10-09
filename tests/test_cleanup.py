@@ -129,6 +129,12 @@ async def test_e01_accepted_authorization_is_server_recorded(daemon, mock):
         finished = daemon.ops.get(accepted["operation_id"])
         assert finished["status"] == "succeeded", (finished.get("error"), [(r["plan"]["kind"], r["status"], r["error"])
                                                     for r in cleanup.receipts(daemon.ops, accepted["operation_id"])])
+        accepted_run = daemon.journal.db.execute(
+            "SELECT accepted_actor,accepted_scopes,accepted_choices FROM cleanup_runs WHERE operation_id=?",
+            (accepted["operation_id"],)).fetchone()
+        assert accepted_run["accepted_actor"] == saved["_accepted_authorization"]["actor"]
+        assert json.loads(accepted_run["accepted_scopes"]) == saved["_accepted_authorization"]["scopes"]
+        assert json.loads(accepted_run["accepted_choices"]) == choices
     finally:
         server.close()
         await server.wait_closed()
