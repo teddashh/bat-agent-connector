@@ -13,8 +13,8 @@ served = api.served
 
 LEGACY = {"hosts_list", "session_read", "sessions_list", "session_send", "session_continue",
           "session_interrupt", "session_answer", "session_set_permissions",
-          "session_relay", "session_failover", "session_cleanup", "worktree_merge",
-          "worktree_remove", "session_record_verification", "fanout_plan_session", "fanout_from_plan"}
+          "session_cleanup", "worktree_merge", "worktree_remove", "session_record_verification"}
+CENTRAL_ORCHESTRATION = {"session_relay", "session_failover", "fanout_plan_session", "fanout_from_plan"}
 TASK_WRITES = {"work_submit", "work_pause", "work_resume", "work_mark_stage"}
 
 
@@ -37,9 +37,9 @@ async def test_agent_profile_omits_all_direct_fleet_tools_even_on_privileged_hos
         assert ("session_start" in names) is (not read_only)
         assert "workspaces_list" in names
         if read_only:
-            assert not names & (TASK_WRITES | set(OPERATION_TOOLS))
+            assert not names & (TASK_WRITES | set(OPERATION_TOOLS) | CENTRAL_ORCHESTRATION)
         else:
-            assert TASK_WRITES | set(OPERATION_TOOLS) <= names
+            assert TASK_WRITES | set(OPERATION_TOOLS) | CENTRAL_ORCHESTRATION <= names
         assert not mock.invokes
     finally:
         await fleet.close()
@@ -65,8 +65,14 @@ async def test_observe_only_agent_can_read_but_cannot_submit_or_bypass_operation
         ]:
             assert "FORBIDDEN" in await call(server, "operation_submit", {
                 "action": action, "target": target, "params": params, "idempotency_key": action, "confirm": True})
-        for name in ("session_send", "fanout_from_plan"):
-            assert "Unknown tool" in await call(server, name, {})
+        assert "Unknown tool" in await call(server, "session_send", {})
+        for name, args in [
+            ("session_relay", {"host": "h1", "session_id": api.MANUAL, "message": "refused"}),
+            ("session_failover", {"host": "h1", "session_id": api.MANUAL}),
+            ("fanout_plan_session", {"host": "h1", "workspace": "ws-1", "message": "refused"}),
+            ("fanout_from_plan", {"host": "h1", "session_id": api.MANUAL}),
+        ]:
+            assert "FORBIDDEN" in await call(server, name, {**args, "confirm": True})
         assert "FORBIDDEN" in await call(server, "session_start", {"host": "h1", "workspace": "ws-1", "confirm": True})
         assert not d.journal.db.execute("SELECT 1 FROM operations").fetchone()
         assert not api.write_frames(mock)
