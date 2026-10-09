@@ -89,7 +89,7 @@ Token 參照（token 值本身永遠不會存進設定檔、寫進記錄，或�
 |---|---|---|
 | read（永遠開啟） | - | `hosts_list`、`host_status`、`workspaces_list`、`sessions_list`、`session_read`、`session_wait`、`worktree_status`、`session_worktree_status`、`sessions_triage`、`quota_sessions`、`session_policy`、`work_status`、`work_result`、`work_events` |
 | write | 每台主機設 `writes = true` | `session_send`、`session_continue`、`session_interrupt`、`session_answer`、`session_set_permissions`、`approve_pending`、`session_relay` |
-| orchestrate | 每台主機設 `writes = true` **且** `orchestrate = true` | `session_start`、`worktree_merge`、`worktree_remove`、`session_failover`、`session_record_verification`、`session_cleanup`、`fanout_plan_session`、`fanout_from_plan`、`work_submit`、`work_pause`、`work_resume`、`work_mark_stage` |
+| orchestrate | 每台主機設 `writes = true` **且** `orchestrate = true` | `session_start`、`worktree_merge`、`session_failover`、`session_record_verification`、`session_cleanup`、`fanout_plan_session`、`fanout_from_plan`、`work_submit`、`work_pause`、`work_resume`、`work_mark_stage` |
 
 write 與 orchestrate 的工具沒開啟時根本不會註冊；開啟後每次呼叫都要帶 `confirm=true`，有速率限制，並附加寫進稽核記錄（`~/.local/state/bat-agent-connector/audit.jsonl`；訊息內容只記雜湊值與長度，除非你選擇保留一小段預覽）。MCP 伺服器或 CLI 加上 `--read-only`，不管設定檔怎麼寫，這兩層都會關閉。通道白名單在客戶端核心裡強制執行，位於 MCP 層之下：reset、kill、fork、PTY 寫入、檔案操作、設定、工作區編輯（只能附加的分頁登記 helper 除外）、安裝、更新與帳號變更，一律不會送出。
 
@@ -103,11 +103,12 @@ Task-bound operations 在 admission 固定 task 版本，省略 `control_version
 
 Task mutations 現在保存 operation，原結果新增 `operation_id`／`operation_status`。重試保留同一 key；key 以驗證 actor 為範圍，無 key 的舊 task controls 每次是獨立要求。task-owned 的 send／answer／interrupt／permissions，包括 legacy tools，都經同一 coordinator；`TASK_PAUSED`、`TASK_VERIFYING`、`TASK_COMMAND_PENDING` 表示停止並讀 work_status，不用 force／continue 插隊。`CONTROL_VERSION_CONFLICT` 要先讀變更後狀態。第二個 daemon 即使指定不同 --db，也回 `OWNER_CONFLICT` 與既有 owner 資訊；client 連原 owner。詳見[統一操作](docs/design/operations-unification.md)。
 
-Part B 第一個切片將 MCP `session_interrupt`／CLI `interrupt` 接到既有 daemon。MCP 必須設定自己的
+MCP `session_send`／`session_continue`／`session_answer`／`session_interrupt` 與對應 CLI 已接到既有 daemon。MCP 必須設定自己的
 `BATC_API_TOKEN`；CLI 優先用此 token，未設定才沿用本機 admin token，兩者仍需 confirm 與 host write tier。
 用 `--key`（MCP：`idempotency_key`）保留重試身分；省略時每次都是獨立 operation。未知回覆後保存
-operation ID，透過 `batc op ID`／`operation_get` 查回，不自動重送或另啟 daemon。其他 legacy operations
-與 task 的 no-key 投影仍待 Part B 後續。
+operation ID，透過 `batc op ID`／`operation_get` 查回，不自動重送或另啟 daemon。Message ID 是 BAT 訊息身分，
+與 operation key 分開；answer 省略 prompt ID 時在 admission 固定，重試不改答後來的 prompt。
+Permissions、bulk approval、starts、orchestration 與 task 的 no-key 投影仍待 Part B 後續。
 
 每個任務就是一個跑在 Opus 5.5 上的 Goose session。`goose-session` recipe 的 prompt 會指示 Goose 一開始拆一次工作，以 Grok 4.7 : Codex : Opus 5.5 = 4:2:1 的比例為目標分配執行者，而且不把新工作交給每週額度剩餘在 15% 以下（含）的模型。這些是寫在 prompt 裡的指示，不是服務會強制執行的規則：服務不會統計分派次數，也不會讀取額度。這個服務本身不做路由、不做審查，也不做 failover。驗證結果以可信任的測試為準；程式碼沒過，就退回同一個 session 在有限次數內重做，預算用完則標為 `needs_ted`。Ted 之後補充的指示，會接在同一個任務上繼續（同一個 session，不重新規劃，也不開新任務）。這條路徑不經過 Jev。只有當調度者送出已經拆好的任務，並指定 `executor_model`（`grok`、`codex` 或 `claude`）而跳過 Opus 規劃時，才會用到 Jev。Goose 本身有一個開關，預設關閉（`GooseConfig.enabled`）；關閉期間，任務會一直排隊，不會啟動任何東西。
 
@@ -188,13 +189,13 @@ PR metadata 使用獨立 action `github.pr.update`：既有 integrate scope，�
 | `session_wait(host, session_id, until=attention, timeout_s=120, require_new=false, after=null)` | 等到這一輪結束、出現問題或權限請求，或發生錯誤。`after=<turn_marker>`（來自 `session_send`／`session_relay`）會對應 Claude 的 echo，回報 accepted／running／terminal 階段；過時的閒置狀態不算數。BAT 的 Codex 不會回傳 `clientMessageId`，所以改用較弱的時間戳備援。 |
 | `worktree_status(host, workspace?)` | worktree session：分支、來源分支、merge 狀態、diff 統計。 |
 | `session_worktree_status(host, session_id, include_diff?)` | 單一 session 的同樣資訊，另加尚未提交的檔案與主要 checkout 的狀態。 |
-| `session_send(host, session_id, text, confirm, message_id?, queue?)` | 送出訊息；session 尚未載入時，會先由客戶端恢復它；以 `message_id` 保證冪等。 |
+| `session_send(host, session_id, text, confirm, message_id?, queue?)` | 經中央 operation 送出；session 尚未載入時先恢復。以 `idempotency_key` 查回同一操作；`message_id` 是 BAT 訊息身分。 |
 | `session_continue(host, session_id, confirm, text="continue")` | 推一下。 |
 | `session_interrupt(host, session_id, mode=soft\|hard, confirm)` | soft 是 Claude 的 interrupt-turn，hard 是 abort（Codex 一律 hard）。session 會保留。 |
 | `session_answer(host, session_id, confirm, answers? \| permission?)` | 回答待處理的 ask-user 問題或權限請求。 |
 | `session_start(host, workspace, agent, confirm, prompt?, model?, use_worktree=true)` | 啟動 session（預設開在新的 worktree；分支由 BAT 命名為 `bat/worktree-<id>`）。每台主機有數量上限。 |
 | `worktree_merge(host, session_id, confirm)` | 只 merge 到位於 managed root 內的主 checkout，而且要能證明沒有衝突、乾淨；否則回報原因。 |
-| `worktree_remove(host, session_id, confirm, delete_branch=false, ...)` | 移除 worktree 資料夾；預設保留分支；遇到未提交或未 merge 的工作會拒絕，除非明確指示。 |
+| `worktree_remove(host, session_id, confirm, delete_branch=false, ...)` | 停用的相容入口（`LEGACY_WORKTREE_REMOVE_DISABLED`）；改用 reviewed `cleanup_preview` → `cleanup_apply`，檢查所有 consumers 並保存 receipts。 |
 | `sessions_triage(host?, workspace?, agent?, states?, use_jev=auto, include_unloaded=true)` | 把每個 session 分類為 `quota_exhausted`、`rate_limited_transient`、`waiting_permission`、`waiting_question`、`working`、`done_idle`、`error_other`、`unknown`，並附上 `source`（pattern／jev）、信心值、判斷依據的那一行，以及額度重置時間。 |
 | `quota_sessions(host?)` | 捷徑：因用量額度而停下的 Claude session。 |
 | `session_set_permissions(host, session_id, mode, confirm)` | `allow_all`（主機必須允許）或 `default`。Claude session 只在閒置時切換（這一輪進行中切換會讓這一輪結束）；Codex 從下一輪開始套用。 |
@@ -226,7 +227,8 @@ batc answer box1 1a2b3c4d --answer "Which database?=postgres" --confirm
 batc fanout PLAN.md                                   # dry run：拆成各個任務的 prompt
 batc fanout PLAN.md --start --host box1 --workspace api --confirm
 batc merge box1 1a2b3c4d --confirm
-batc remove-worktree box1 1a2b3c4d --confirm
+# 檢視 reviewed cleanup，再套用固定 preview
+batc resource-cleanup preview --host box1
 # 生命週期
 batc triage box1 --state quota_exhausted --state waiting_permission
 batc quota                                            # 所有主機上因額度停下的 Claude session

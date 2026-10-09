@@ -98,7 +98,8 @@ make legacy permissions, bulk approval, start or orchestration durable operation
 | Interrupt (write) | `session_interrupt(mode=soft/hard, confirm=true)` | `batc interrupt HOST SID --mode soft --confirm` |
 | Answer a question (write) | `session_answer(answers=[...] or permission=allow/deny, confirm=true)` | `batc answer HOST SID --answer "Q=A" --confirm` |
 | Start worktree session (orchestrate) | `session_start(host, workspace, agent, prompt, confirm=true)` | `batc start HOST WORKSPACE --prompt ... --confirm` |
-| Merge / remove worktree (orchestrate) | `worktree_merge`, `worktree_remove` | `batc merge ...`, `batc remove-worktree ...` |
+| Merge worktree (orchestrate) | `worktree_merge` | `batc merge ...` |
+| Legacy worktree removal (disabled) | `worktree_remove` refuses; use reviewed cleanup below | `batc remove-worktree` refuses |
 | Classify sessions (quota, waiting, working, done) | `sessions_triage(host?, states?)`, `quota_sessions(host?)` | `batc triage [HOST] --state ...`, `batc quota` |
 | Approve pending permission prompts (write) | `approve_pending(host, confirm=true, dry_run?)` | `batc approve-pending HOST --confirm` |
 | Change a session's permissions (write) | `session_set_permissions(host, session_id, mode, confirm=true)` | `batc permissions HOST SID --mode allow_all --confirm` |
@@ -282,7 +283,8 @@ item is done.
    root (the connector's own clone); in a person's checkout it refuses with `DESTINATION_MANUAL`, so leave the branch
    for a pull request and report it. It also only merges when conflict-free and clean and otherwise explains why
    (e.g. `diverged`: ask that session to rebase onto the source branch, then retry).
-7. Clean up: `worktree_remove(host, sid, confirm=true)` after merging (branch kept unless `delete_branch=true`).
+7. Clean up through the reviewed preview/apply workflow below. Legacy `worktree_remove` is disabled with
+   `LEGACY_WORKTREE_REMOVE_DISABLED`; its overrides cannot prove shared consumers or authorize removal.
 8. Report: tasks, branches, merged or not (and why), follow-ups.
 
 ## Legacy operator reference: lifecycle workflows
