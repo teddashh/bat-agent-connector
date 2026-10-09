@@ -4,7 +4,9 @@ Internal Rust library for the existing Fleet inventory, profile pairing, indepen
 bounded configuration snapshots, locked selection updates, process identity decisions and bounded recovery.
 The Windows OS adapter stops only explicitly verified local processes through retained handles.
 The probe module performs bounded, read-only loopback TLS/BAT and Connector capabilities requests.
-Neither is connected to the desktop Fleet adapter or automatic startup. This source slice does not
+The route module probes configured TCP endpoints and a fixed trusted local Tailscale
+`status --json` command under deadlines, and keeps route/recovery decisions native-only.
+These effects are not connected to the desktop Fleet adapter or automatic startup. This source slice does not
 establish Rust Fleet parity.
 
 Port basis: Fleet Kit `2ec4b11bc010bfd669040e942648c741b63d0b7c`, `client/fleet-core.ps1` and
@@ -55,3 +57,9 @@ sidecar with zero sharing; keep the guard alive through the entire preference CA
 Process arguments and paths remain native-only evidence, never frontend status. See
 [the Windows adapter contract](../../docs/design/fleet-windows.md) for the exact interfaces,
 legacy creation-time format, NT command-line limitations and pending Windows execution evidence.
+
+`route::SelectionRequest` lets independent background workers probe an immutable snapshot.
+A result's alias is available only after current generation/policy validation; the supervisor
+still revalidates configuration before launch. Selection updates preserve an owned Run and
+recovery history, while source changes require a fresh policy after owned stop. See
+[route policy and intentional Kit corrections](../../docs/design/fleet-routes.md).
