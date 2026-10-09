@@ -26,6 +26,8 @@ TTL = 600
 MAX_ITEMS = 50
 MAX_TOKEN = 98304
 MAX_PREVIEW = 262144
+MIN_PARENT_WAIT_S = 1.0
+MAX_PARENT_WAIT_S = 30.0
 REGISTRY_FIELDS = session_permissions.BINDING_FIELDS
 
 
@@ -358,7 +360,7 @@ def child_view(ops, saved):
 async def run(ctx):
     cancelled = ctx.service._row(ctx.operation_id)["cancel_requested"]
     principal = api_auth.Principal(ctx.actor, frozenset(binding(ctx.op)["accepted_scopes"]))
-    rows, waiting, unresolved = [], False, False
+    rows, delays, unresolved = [], [], False
     for item in binding(ctx.op)["items"]:
         row = {"item_id": item["item_id"], "host": item["host"], "session_id": item["session_id"],
                "tool_use_id": item["tool_use_id"], "mode": item["mode"]}
@@ -378,15 +380,20 @@ async def run(ctx):
             if view:
                 status = view.get("status")
                 if status in {"accepted", "running", "uncertain", "waiting_checks", "waiting_external"}:
-                    waiting = True
+                    child = ctx.service._row(view["operation_id"])
+                    due = child["next_run_at"] if status not in {"accepted", "running"} else None
+                    # Follow the earliest persisted child deadline, while keeping bounded
+                    # visibility of manual child controls. Parent controls clear their due time.
+                    delays.append(max(MIN_PARENT_WAIT_S, min(MAX_PARENT_WAIT_S,
+                        due - time.time() if due is not None else MIN_PARENT_WAIT_S)))
                 if status == "needs_attention" or (status in {"failed", "cancelled"} and view.get("unproven")):
                     unresolved = True
         row["approved"] = bool(row["answer"] and row["answer"].get("acknowledged") is True)
         row["complete"] = row["approved"] and (item["mode"] is None or bool(row["permissions"] and row["permissions"].get("acknowledged")))
         rows.append(row)
     ctx.set_refs(bulk_items=rows)
-    if waiting:
-        raise Wait("waiting_external", "reading the original bulk child operations", delay_s=0.2)
+    if delays:
+        raise Wait("waiting_external", "reading the original bulk child operations", delay_s=min(delays))
     if unresolved:
         raise NeedsAttention("BULK_CHILD_UNSETTLED", "inspect the original child receipts; no ambiguous frame will be resent")
     if cancelled:

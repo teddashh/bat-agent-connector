@@ -54,6 +54,8 @@ Permissions 沿用逐 channel ACK；Claude streaming 不 deferred，historical f
 Parent result 的 all_succeeded/counts/items 區分批次已處理與所有項目同意，不能只看 parent succeeded。
 未證明 child 仍可 readback／needs_attention；parent 不宣稱全成功。Resume 只接續同一 children，
 已失敗項目需要新的 reviewed request，不在原 parent 偷換 key 或 prompt。
+Parent 依最早 child 的既有 next_run_at 等待（1–30 秒）；active child 使用 1 秒。
+不在 child 等待 30–600 秒時以 0.2 秒重寫父 journal；明確 parent cancel/resume 清除到期時間，立即喚醒。
 
 ## 取消與授權
 
