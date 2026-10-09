@@ -32,5 +32,21 @@ uncooperative local editor replacing ancestor paths or files during the final co
 Temporary-directory tests cover unchanged owner publication, occupied/foreign resources,
 positive and uncertain spawn failures, selection/configuration changes, held-child rollback,
 unknown exit, data-directory mismatch and an old plan presented with a fresh disconnected
-selection. The concrete Windows spawn/monitor-record adapter, lifecycle stop/recovery, route
-worker integration and desktop supervisor remain required before runtime activation.
+selection.
+
+The concrete Windows adapter in `windows_tunnel` holds the existing monitor mutex and
+rediscovers the exact current native process/epoch before effects. It obtains the system
+SSH image through [GetSystemDirectoryW](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsystemdirectoryw),
+uses ordinary argument-vector escaping with `CREATE_NO_WINDOW`, and inherits the trusted
+native environment needed by configured SSH routes. No PATH-based SSH lookup, shell,
+raw command string or remote diagnostic text is exposed to the WebView.
+
+A retained launch-handle duplication failure attempts a bounded rollback through the
+original Child handle; only a positively ended child releases its intent. Local listener
+checks require both connection refusal and a successful temporary bind. `ExitOnForwardFailure`
+handles a listener appearing after the check; this is not a transaction with unrelated apps.
+Native fixtures operate only a temporary loopback listener and the test's own bounded child.
+Linux Clippy and an isolated MSVC exact-module/test-source compile pass; the harness excludes
+network dependencies whose Windows C toolchain is unavailable locally. It is not Windows
+execution evidence. Lifecycle stop/recovery, route worker integration and the desktop
+supervisor remain required before runtime activation.
