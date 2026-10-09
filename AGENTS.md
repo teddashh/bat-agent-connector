@@ -45,3 +45,15 @@ read-only checkpoint continuation. Do not revive excluded work from the older pl
 `CONTRIBUTING.md` still applies to protocol changes and secret handling. Existing product
 actions use their established operation/scopes authorization; do not add redundant chat
 confirmation to an already authorized UI action.
+
+## Local test temporary data (Castle1 memory rule, 2026-10-09)
+
+- Never put pytest basetemps, fixtures, SQLite/Git scratch or other test data in
+  `/dev/shm` or any tmpfs. Leftover RAM-backed fixtures contributed to a host-wide OOM.
+- Run local pytest through `pytest-disktmp uv run pytest -q ...` (also supports
+  `uv run --python 3.10 pytest ...`). The wrapper creates a unique disk basetemp under
+  `~/agent-work/tmp/pytest/` and removes it on exit.
+- If a basetemp must be supplied directly, use a unique directory under
+  `~/agent-work/tmp/pytest/` and remove that directory when the run finishes.
+- Stop and remove task-owned test databases and containers after the task; do not leave
+  them running or remove another task's resources.
