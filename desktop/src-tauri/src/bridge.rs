@@ -201,6 +201,7 @@ pub struct ConnectorResponse {
 
 #[derive(Serialize)]
 pub struct NativeStatus {
+    pub updates: bool,
     pub file_transfers: bool,
     pub endpoint: Option<String>,
     pub expected_actor: Option<String>,
@@ -348,6 +349,7 @@ impl Bridge {
         };
         let env = state.environment.is_some();
         NativeStatus {
+            updates: true,
             file_transfers: true,
             endpoint: config.map(|c| c.endpoint.clone()),
             expected_actor: config.map(|c| c.expected_actor.clone()),

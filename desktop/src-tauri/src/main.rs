@@ -4,6 +4,7 @@ mod bridge;
 mod credentials;
 mod files;
 mod fleet;
+mod updates;
 
 use bridge::{Bridge, ConnectorRequest, ConnectorResponse, NativeStatus};
 use std::sync::Arc;
