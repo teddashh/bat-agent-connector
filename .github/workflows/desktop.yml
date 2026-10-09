@@ -68,6 +68,7 @@ jobs:
           npm run test:observation
           npm run test:capture
           npm run test:artifact-review
+          npm run test:artifact-review -- --start
           npm run test:permissions
           npm run test:approvals
           npm run test:start
@@ -84,6 +85,11 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Native Fleet contracts, wire peers and owned Windows process fixtures
+        run: |
+          cargo fmt --manifest-path fleet-core/Cargo.toml --check
+          cargo clippy --locked --manifest-path fleet-core/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path fleet-core/Cargo.toml
       - name: Native file adapter with actual central service
         if: runner.os == 'Linux'
         timeout-minutes: 10

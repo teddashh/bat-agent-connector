@@ -10,6 +10,10 @@
 [實作狀態](docs/product/implementation-status.md)。桌面版共用 Dashboard frontend 與既有 Python 後端。
 兩份計畫是同一產品的 UI 修訂，共用功能 backlog；不提供 Project Hub 匯入，保留既有專案與工作項目管理。
 
+共用介面可建立中央 managed session、檢視並批次核准選定的請求，以及擷取成果與留下固定版本的審核紀錄。
+操作在重開後保留原始請求與 operation，整理也支援符合條件的 Task Service 資源。
+桌面檔案操作由 Rust 管理選檔、拖放上傳、有限大小的預覽與另存新檔；原生 Fleet 的 runtime／遷移仍在整合。
+
 BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端機 app，在你自己的機器上執行 Claude Code 與 Codex 的 agent session，並依工作區（workspace）分組。它有一套遠端協定 `bat-remote/v2`，BAT 自己的桌面介面和手機客戶端都走這套協定。本專案實作同一套協定，讓「其他」agent（Claude Code、Codex、Cursor、Hermes 或任何 MCP 客戶端）以及 shell 腳本可以：
 
 * 看到有哪些 agent session、哪些正在跑或卡在問題上，以及它們最近說了什麼；
