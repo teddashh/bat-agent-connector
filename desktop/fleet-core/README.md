@@ -1,7 +1,7 @@
 # Native Fleet core
 
 Internal Rust library for the existing Fleet inventory, profile pairing, independent local selections,
-process identity decisions and bounded recovery. It performs no process or network effects and is not
+bounded configuration snapshots, process identity decisions and bounded recovery. It performs no process or network effects and is not
 yet connected to the desktop Fleet adapter. This source slice does not establish Rust Fleet parity.
 
 Port basis: Fleet Kit `2ec4b11bc010bfd669040e942648c741b63d0b7c`, `client/fleet-core.ps1` and
@@ -19,3 +19,10 @@ monitor ended before orphan recovery. Full Windows mutex/process/probe/migration
 
 Run `cargo test --locked --manifest-path desktop/fleet-core/Cargo.toml` from the repository root.
 The parser uses Serde's [Visitor](https://docs.rs/serde/1.0.229/serde/de/trait.Visitor.html) interface.
+
+`Configuration` reads bounded UTF-8 (optional BOM) Kit inventory/index/SSH files and retains the exact
+bytes used for validation. The default four-input binding matches the PowerShell facade, including
+UTF-16 path lengths; an alternate profile index also binds the trusted canonical schema/pin source.
+Read failures or byte changes invalidate old evidence. This is a local snapshot check, not an atomic
+transaction with external editors. SSH Include expansion is not added by this loader.
+`data_directory` rechecks both BAT directory names on every call and creates neither.
