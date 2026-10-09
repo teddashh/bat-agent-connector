@@ -70,9 +70,10 @@ async def main():
         contents = (path / "result.bin").read_bytes()
         source_before, human_before, writes_before = worktree_snapshot(path), snapshot(human), len(bat_writes(mock))
         token = api_auth.issue(daemon.journal.db, "artifact-review-browser", ["observe", "manage", "approve"])
+        reviewer = api_auth.issue(daemon.journal.db, "artifact-review-approver", ["observe", "approve"])
         server = await asyncio.start_server(daemon._handle, "127.0.0.1", 0)
         worker = asyncio.create_task(daemon.ops.loop(0.1))
-        print(json.dumps({"port": server.sockets[0].getsockname()[1], "token": token, "session_id": sid,
+        print(json.dumps({"port": server.sockets[0].getsockname()[1], "token": token, "reviewer": reviewer, "session_id": sid,
                           "execution_id": operation["operation_id"], "digest": hashlib.sha256(contents).hexdigest()}), flush=True)
         try:
             while line := await asyncio.to_thread(sys.stdin.readline):
@@ -85,6 +86,7 @@ async def main():
                 review = daemon.ops.get(command["accept_id"])
                 assert capture["action"] == "artifact.capture.managed" and capture["status"] == "succeeded", capture
                 assert review["action"] == "artifact.accept" and review["status"] == "succeeded", review
+                assert review["actor"] == "artifact-review-approver"
                 ref = capture["result"]
                 row = artifacts.get(daemon.journal.db, ref["artifact_id"], ref["revision"])
                 assert row["source"]["kind"] == "managed_capture"

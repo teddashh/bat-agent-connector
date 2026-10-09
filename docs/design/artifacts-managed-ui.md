@@ -42,3 +42,22 @@ lineage is accepted. Existing manual capture remains separate.
 Validation uses mock browser/native transports and an actual central temporary Git /
 MockBat fixture for capture, lost replies, ready readback and acceptance. Screenshots
 check 390/768/1440 widths. Builds and fixtures do not claim installed/live acceptance.
+
+
+The exact revision panel exposes Preview and Download / native Save As to observe
+callers, including approve-only reviewers. It checks fresh ready metadata against the
+original ref before reading. Desktop uses the existing Rust file manager for byte,
+digest, path and credential ownership. Only matching download receipts appear here;
+stop/retry/reload keep the original native handle and never cancel an upload.
+Browser uses the fixed same-origin authenticated content route, refuses redirects,
+reads at most the declared 16 MiB bound and verifies SHA-256 before a download or
+preview. Credentials never appear in URLs. Text is literal UTF-8 (256 KiB); static
+PNG is bounded to 2 MiB and one megapixel and displayed only as decoded canvas pixels. No
+HTML/SVG rendering, OS opening, source-path reads or acceptance POST is needed.
+
+Artifact events refresh the catalog from its first cursor through the number of pages
+already loaded, publishing the refreshed rows only after every page settles. Exact
+revision keys remove duplicates across pages; this is not an atomic multi-page
+snapshot or a completeness claim. Failed reads retain the old rows and withhold the
+event checkpoint. A fixed revision route also matches events while its initial read
+is unavailable, preserving the review draft during recovery.

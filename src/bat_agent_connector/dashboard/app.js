@@ -1,4 +1,117 @@
-// Generated from desktop/src. Run: cd desktop && npm ci && npm run build:browser. Do not edit.
+async function invoke(cmd, args = {}, options) {
+	return window.__TAURI_INTERNALS__.invoke(cmd, args, options);
+}
+function isTauri() {
+	return !!(globalThis || window).isTauri;
+}
+//#endregion
+//#region src/transport/index.ts
+var nativeDesktop = isTauri();
+var nativeFileSupport = false;
+async function nativeStatus() {
+	const status = await invoke("native_status");
+	nativeFileSupport = status.file_transfers === true;
+	return status;
+}
+var nativeFilesStatus = () => invoke("native_files_status");
+var nativeFilesPick = (draftId) => invoke("native_files_pick", { draftId });
+var nativeFilesUpload = (handleId) => invoke("native_files_upload", { handleId });
+var nativeFilesDropTarget = (draftId, enabled) => invoke("native_files_drop_target", {
+	draftId,
+	enabled
+});
+var nativeFilesControl = (transferId, action) => invoke("native_files_control", {
+	transferId,
+	action
+});
+var nativeFilesSave = (reference) => invoke("native_files_save", { reference });
+var nativeFilesPreview = (reference) => invoke("native_files_preview", { reference });
+var nativeConnect = () => invoke("connector_connect");
+var nativeDisconnect = () => invoke("connector_disconnect");
+var nativeEnroll = () => invoke("connector_enroll", { locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US" });
+var nativeReloadConfiguration = () => invoke("connector_reload_configuration");
+var nativeForgetCredential = () => invoke("connector_forget_credential");
+var openExternal = (url) => invoke("open_external", { url });
+var fleetAvailability = () => invoke("fleet_availability");
+var fleetRequest = (input) => invoke("fleet_request", { input });
+async function connectorRequest(method, path, body, key, browserToken) {
+	if (nativeDesktop) return invoke("connector_request", { input: {
+		method,
+		path,
+		body: body ?? null,
+		idempotency_key: key ?? null
+	} });
+	const headers = { Authorization: `Bearer ${browserToken}` };
+	if (body !== void 0) headers["Content-Type"] = "application/json";
+	if (key) headers["Idempotency-Key"] = key;
+	const res = await fetch(`/api/v1${path}`, {
+		method,
+		headers,
+		body: body === void 0 ? void 0 : JSON.stringify(body)
+	});
+	return {
+		status: res.status,
+		data: await res.json().catch(() => ({}))
+	};
+}
+async function connectorUploadArtifact(operationId, bytes, browserToken) {
+	if (!/^op_[0-9a-f]{32}$/.test(operationId)) throw new Error("Invalid artifact upload operation ID");
+	if (nativeDesktop) {
+		if (bytes.byteLength > 16777216) throw new Error("Artifact exceeds the native 16 MiB upload limit");
+		return invoke("connector_upload_artifact", bytes, { headers: { "x-batc-upload-operation": operationId } });
+	}
+	const res = await fetch(`/api/v1/artifacts/uploads/${operationId}/content`, {
+		method: "POST",
+		redirect: "error",
+		headers: {
+			Authorization: `Bearer ${browserToken}`,
+			"Content-Type": "application/octet-stream"
+		},
+		body: bytes
+	});
+	return {
+		status: res.status,
+		data: await res.json().catch(() => ({}))
+	};
+}
+async function readArtifactContent(reference, size, token, signal) {
+	if (nativeDesktop || !/^art_[0-9a-f]{32}$/.test(reference.artifact_id) || !Number.isSafeInteger(reference.revision) || reference.revision < 1 || !/^[0-9a-f]{64}$/.test(reference.digest) || !Number.isSafeInteger(size) || size < 0 || size > 16777216) throw new Error("Artifact content exceeds the supported bound or has an invalid reference");
+	const response = await fetch(`/api/v1/artifacts/${reference.artifact_id}/revisions/${reference.revision}/content`, {
+		method: "GET",
+		headers: { Authorization: `Bearer ${token}` },
+		redirect: "error",
+		cache: "no-store",
+		credentials: "omit",
+		mode: "same-origin",
+		signal: AbortSignal.any([signal, AbortSignal.timeout(3e4)])
+	});
+	if (response.status !== 200 || response.redirected || response.headers.get("Content-Length") !== String(size) || !response.body) {
+		await response.body?.cancel();
+		throw new Error("Artifact content response does not match the exact revision");
+	}
+	const bytes = new Uint8Array(size), reader = response.body.getReader();
+	let offset = 0;
+	try {
+		for (;;) {
+			const part = await reader.read();
+			if (part.done) break;
+			if (offset + part.value.length > size) throw new Error("Artifact content exceeds its declared size");
+			bytes.set(part.value, offset);
+			offset += part.value.length;
+		}
+		if (offset !== size) throw new Error("Artifact content is incomplete");
+	} catch (error) {
+		await reader.cancel().catch(() => {});
+		throw error;
+	} finally {
+		reader.releaseLock();
+	}
+	const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((value) => value.toString(16).padStart(2, "0")).join("");
+	signal.throwIfAborted();
+	if (hash !== reference.digest) throw new Error("Artifact content digest does not match the exact revision");
+	return bytes;
+}
+//#endregion
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
@@ -108,6 +221,15 @@ var STRINGS = {
 		permissions_accepted: "BAT 已接受要求的設定；尚未獨立查證執行中的 agent 已套用。",
 		permissions_next_turn: "Codex 於下一輪使用這個設定。",
 		permissions_refused: "這筆請求在受理前被拒絕。可明確建立另一筆變更；原請求不會自動重試。",
+		ar_content_download: "下載此版本",
+		ar_content_downloaded: "已驗證此版本的 SHA-256，並交由瀏覽器下載。",
+		ar_content_help: "讀取固定版本，不會建立審閱記錄。文字預覽最多 256 KiB；靜態 PNG 最多 2 MiB／100 萬像素；下載最多 16 MiB。",
+		ar_content_changed: "檔案回覆與固定版本不符。請重新查核原操作。",
+		ar_content_limit: "此檔案超過 16 MiB 的用戶端讀取上限。",
+		ar_content_reading: "正在讀取與查核固定版本…",
+		ar_content_verified: "此預覽來自 SHA-256 已驗證的固定版本。",
+		ar_content_preview_limit: "此檔案不支援預覽，請下載或另存新檔後檢視。",
+		ar_content_native_unavailable: "這個桌面版本未提供原生檔案讀取功能。",
 		ar_nav: "附件成果",
 		ar_title: "附件成果與審閱",
 		ar_open: "擷取與審閱這次執行的檔案",
@@ -887,6 +1009,15 @@ var STRINGS = {
 		start_without_prompt: "No initial instructions were requested.",
 		start_prompt_accepted: "Initial instructions were accepted.",
 		start_prompt_unknown: "Started, but acceptance of the initial instructions is unconfirmed. Check the step receipts; do not resend by starting another session.",
+		ar_content_download: "Download this revision",
+		ar_content_downloaded: "SHA-256 verified; download handed to the browser.",
+		ar_content_help: "Read this fixed revision without recording a review. Preview: UTF-8 text up to 256 KiB; static PNG up to 2 MiB / one megapixel. Download: up to 16 MiB.",
+		ar_content_changed: "The file response does not match the fixed revision. Check the original operation again.",
+		ar_content_limit: "This file exceeds the client's 16 MiB read limit.",
+		ar_content_reading: "Reading and verifying the fixed revision…",
+		ar_content_verified: "This preview comes from the SHA-256 verified fixed revision.",
+		ar_content_preview_limit: "Preview is unavailable for this file. Download or Save As to inspect it.",
+		ar_content_native_unavailable: "This desktop version does not provide native file reading.",
 		ar_nav: "Artifacts",
 		ar_title: "Artifacts and review",
 		ar_open: "Capture and review this execution's file",
@@ -1662,85 +1793,9 @@ var lang = (navigator.language || "zh-TW").toLowerCase().startsWith("zh") ? "zh-
 function t(key, vars = {}) {
 	return (STRINGS[lang][key] ?? STRINGS["zh-TW"][key] ?? key).replace(/\{(\w+)\}/g, (_, k) => String(vars[k] ?? ""));
 }
-async function invoke(cmd, args = {}, options) {
-	return window.__TAURI_INTERNALS__.invoke(cmd, args, options);
-}
-function isTauri() {
-	return !!(globalThis || window).isTauri;
-}
-//#endregion
-//#region src/transport/index.ts
-var nativeDesktop = isTauri();
-var nativeFileSupport = false;
-async function nativeStatus() {
-	const status = await invoke("native_status");
-	nativeFileSupport = status.file_transfers === true;
-	return status;
-}
-var nativeFilesStatus = () => invoke("native_files_status");
-var nativeFilesPick = (draftId) => invoke("native_files_pick", { draftId });
-var nativeFilesUpload = (handleId) => invoke("native_files_upload", { handleId });
-var nativeFilesDropTarget = (draftId, enabled) => invoke("native_files_drop_target", {
-	draftId,
-	enabled
-});
-var nativeFilesControl = (transferId, action) => invoke("native_files_control", {
-	transferId,
-	action
-});
-var nativeFilesSave = (reference) => invoke("native_files_save", { reference });
-var nativeFilesPreview = (reference) => invoke("native_files_preview", { reference });
-var nativeConnect = () => invoke("connector_connect");
-var nativeDisconnect = () => invoke("connector_disconnect");
-var nativeEnroll = () => invoke("connector_enroll", { locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US" });
-var nativeReloadConfiguration = () => invoke("connector_reload_configuration");
-var nativeForgetCredential = () => invoke("connector_forget_credential");
-var openExternal = (url) => invoke("open_external", { url });
-var fleetAvailability = () => invoke("fleet_availability");
-var fleetRequest = (input) => invoke("fleet_request", { input });
-async function connectorRequest(method, path, body, key, browserToken) {
-	if (nativeDesktop) return invoke("connector_request", { input: {
-		method,
-		path,
-		body: body ?? null,
-		idempotency_key: key ?? null
-	} });
-	const headers = { Authorization: `Bearer ${browserToken}` };
-	if (body !== void 0) headers["Content-Type"] = "application/json";
-	if (key) headers["Idempotency-Key"] = key;
-	const res = await fetch(`/api/v1${path}`, {
-		method,
-		headers,
-		body: body === void 0 ? void 0 : JSON.stringify(body)
-	});
-	return {
-		status: res.status,
-		data: await res.json().catch(() => ({}))
-	};
-}
-async function connectorUploadArtifact(operationId, bytes, browserToken) {
-	if (!/^op_[0-9a-f]{32}$/.test(operationId)) throw new Error("Invalid artifact upload operation ID");
-	if (nativeDesktop) {
-		if (bytes.byteLength > 16777216) throw new Error("Artifact exceeds the native 16 MiB upload limit");
-		return invoke("connector_upload_artifact", bytes, { headers: { "x-batc-upload-operation": operationId } });
-	}
-	const res = await fetch(`/api/v1/artifacts/uploads/${operationId}/content`, {
-		method: "POST",
-		redirect: "error",
-		headers: {
-			Authorization: `Bearer ${browserToken}`,
-			"Content-Type": "application/octet-stream"
-		},
-		body: bytes
-	});
-	return {
-		status: res.status,
-		data: await res.json().catch(() => ({}))
-	};
-}
 //#endregion
 //#region src/native-files.js
-var pending = new Set([
+var pending$1 = new Set([
 	"checking",
 	"uploading",
 	"verifying",
@@ -1793,7 +1848,7 @@ function nativeAttachments({ h, t, guard, canWrite, draftId, onReceipt, onDiscar
 	};
 	const render = () => {
 		rows.replaceChildren(...[...known.values()].filter((r) => r.direction === "download" || !attached(r.transfer_id)).map((r) => {
-			const active = pending.has(r.stage), percent = r.size_bytes ? Math.min(100, Math.floor(r.transferred_bytes / r.size_bytes * 100)) : 0;
+			const active = pending$1.has(r.stage), percent = r.size_bytes ? Math.min(100, Math.floor(r.transferred_bytes / r.size_bytes * 100)) : 0;
 			return h("div", { class: "file-transfer" }, h("div", { class: "row" }, h("div", { class: "grow" }, r.display_name, h("div", { class: "muted" }, `${t(`files_${r.stage}`)} · ${r.transferred_bytes} / ${r.size_bytes} B`)), r.operation_id ? h("a", { href: `#/op/${r.operation_id}` }, t("dep_operation_details")) : null), active ? h("progress", {
 				max: 100,
 				value: percent,
@@ -3513,6 +3568,262 @@ function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, 
 	};
 }
 //#endregion
+//#region src/artifact-content.js
+var reference = (row) => ({
+	artifact_id: row.artifact_id,
+	revision: row.revision,
+	digest: row.digest
+});
+var same = (a, b) => a && b && a.artifact_id === b.artifact_id && a.revision === b.revision && a.digest === b.digest;
+var pending = new Set(["downloading", "saving"]);
+var textLimit = 262144;
+var pngLimit = 2097152;
+var contentLimit = 16777216;
+async function browserPreview(bytes) {
+	if (bytes.slice(0, 8).every((byte, i) => byte === [
+		137,
+		80,
+		78,
+		71,
+		13,
+		10,
+		26,
+		10
+	][i]) && bytes.length >= 33) {
+		if (bytes.length > pngLimit) throw new Error("PREVIEW_UNSUPPORTED");
+		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+		const width = view.getUint32(16), height = view.getUint32(20);
+		if (view.getUint32(8) !== 13 || String.fromCharCode(...bytes.slice(12, 16)) !== "IHDR" || !width || !height || width * height > 1048576) throw new Error("PREVIEW_UNSUPPORTED");
+		const chunks = [bytes.slice(0, 8)];
+		for (let offset = 8; offset < bytes.length;) {
+			if (offset + 12 > bytes.length) throw new Error("PREVIEW_UNSUPPORTED");
+			const length = view.getUint32(offset), end = offset + length + 12;
+			const kind = String.fromCharCode(...bytes.slice(offset + 4, offset + 8));
+			if (end > bytes.length || kind === "acTL") throw new Error("PREVIEW_UNSUPPORTED");
+			if ([
+				"IHDR",
+				"PLTE",
+				"IDAT",
+				"IEND",
+				"tRNS"
+			].includes(kind)) chunks.push(bytes.slice(offset, end));
+			else if (/^[A-Z]/.test(kind)) throw new Error("PREVIEW_UNSUPPORTED");
+			offset = end;
+		}
+		const bitmap = await createImageBitmap(new Blob(chunks, { type: "image/png" }));
+		try {
+			if (bitmap.width !== width || bitmap.height !== height) throw new Error("PREVIEW_UNSUPPORTED");
+			const canvas = document.createElement("canvas");
+			canvas.width = width;
+			canvas.height = height;
+			canvas.getContext("2d").drawImage(bitmap, 0, 0);
+			return { canvas };
+		} finally {
+			bitmap.close();
+		}
+	}
+	if (bytes.length > textLimit) throw new Error("PREVIEW_UNSUPPORTED");
+	let text;
+	try {
+		text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+	} catch {
+		throw new Error("PREVIEW_UNSUPPORTED");
+	}
+	if (text.includes("\0")) throw new Error("PREVIEW_UNSUPPORTED");
+	return { text };
+}
+function artifactContent({ h, t, api, guard, getArtifact, canRead, validArtifact, readBrowser }) {
+	const status = h("p", {
+		class: "muted",
+		role: "status"
+	}), transfers = h("div"), preview = h("div", {
+		class: "file-preview",
+		hidden: true
+	});
+	const box = h("div", { class: "artifact-content" }), receipts = new Map(), controller = new AbortController();
+	let current = null, busy = false, disposed = false, timer, readingStatus = null;
+	const live = (expected) => {
+		guard();
+		if (disposed || !canRead() || expected && !same(expected, getArtifact())) throw new Error(t("ar_content_changed"));
+	};
+	const fail = (error) => {
+		try {
+			guard();
+			if (!disposed) status.textContent = error.message === "PREVIEW_UNSUPPORTED" ? t("ar_content_preview_limit") : error.message;
+		} catch {}
+	};
+	const close = () => {
+		preview.replaceChildren();
+		preview.hidden = true;
+	};
+	const receiptValid = (value) => /^file_[0-9a-f]{32}$/.test(value?.transfer_id) && value.direction === "download" && same(value.artifact, current) && value.digest === current.digest && value.size_bytes === current.size_bytes && [
+		"downloading",
+		"saving",
+		"saved",
+		"stopped",
+		"failed",
+		"cancelled"
+	].includes(value.stage) && Number.isSafeInteger(value.transferred_bytes) && value.transferred_bytes >= 0 && value.transferred_bytes <= value.size_bytes;
+	const adopt = (value) => {
+		if (!receiptValid(value)) throw new Error(t("ar_content_changed"));
+		const previous = receipts.get(value.transfer_id);
+		if (previous && [
+			"display_name",
+			"digest",
+			"size_bytes",
+			"direction"
+		].some((key) => previous[key] !== value[key])) throw new Error(t("ar_content_changed"));
+		receipts.set(value.transfer_id, value);
+	};
+	async function control(receipt, action) {
+		try {
+			live(receipt.artifact);
+			await nativeFilesControl(receipt.transfer_id, action);
+			live(receipt.artifact);
+			await refresh();
+		} catch (error) {
+			fail(error);
+		}
+	}
+	function renderTransfers() {
+		transfers.replaceChildren(...[...receipts.values()].map((row) => h("div", { class: "file-transfer" }, h("div", { class: "muted" }, `${t(`files_${row.stage}`)} · ${row.transferred_bytes} / ${row.size_bytes} B`), row.error ? h("p", { class: "muted" }, row.error) : null, h("div", { class: "actions" }, pending.has(row.stage) ? h("button", {
+			class: "secondary",
+			onclick: () => control(row, "stop")
+		}, t("files_stop")) : [row.stage === "stopped" || row.stage === "failed" ? h("button", {
+			class: "secondary",
+			onclick: () => control(row, "retry")
+		}, t("files_retry")) : null, h("button", {
+			class: "secondary",
+			onclick: () => control(row, "discard_local")
+		}, t("files_discard"))]))));
+	}
+	async function refresh() {
+		if (readingStatus) return readingStatus;
+		const expected = current;
+		readingStatus = (async () => {
+			live(expected);
+			const doc = await nativeFilesStatus();
+			live(expected);
+			const found = new Set();
+			for (const row of doc.transfers || []) if (row.direction === "download" && same(row.artifact, expected)) {
+				adopt(row);
+				found.add(row.transfer_id);
+			}
+			for (const id of receipts.keys()) if (!found.has(id)) receipts.delete(id);
+			renderTransfers();
+			clearTimeout(timer);
+			if ([...receipts.values()].some((row) => pending.has(row.stage))) timer = setTimeout(() => refresh().catch(fail), 1e3);
+		})();
+		try {
+			await readingStatus;
+		} finally {
+			readingStatus = null;
+		}
+	}
+	async function fresh() {
+		live();
+		const expected = getArtifact();
+		if (!expected || !Number.isSafeInteger(expected.size_bytes) || expected.size_bytes < 0 || expected.size_bytes > contentLimit) throw new Error(t("ar_content_limit"));
+		const { artifact: row } = await api("GET", `/artifacts/${expected.artifact_id}/revisions/${expected.revision}`);
+		live(expected);
+		if (!validArtifact(row, reference(expected)) || row.size_bytes !== expected.size_bytes || row.operation_id !== expected.operation_id || row.source?.fingerprint !== expected.source?.fingerprint) throw new Error(t("ar_content_changed"));
+		return row;
+	}
+	async function perform(action) {
+		if (busy) return;
+		busy = true;
+		update();
+		status.textContent = t("ar_content_reading");
+		try {
+			const row = await fresh(), ref = reference(row);
+			if (action === "preview") {
+				if (row.size_bytes > pngLimit) throw new Error("PREVIEW_UNSUPPORTED");
+				let content;
+				if (nativeDesktop) {
+					const result = await nativeFilesPreview(ref);
+					live(ref);
+					if (result.media_type === "text/plain" && typeof result.text === "string" && new TextEncoder().encode(result.text).length <= textLimit && !result.text.includes("\0")) content = { text: result.text };
+					else if (result.media_type === "image/png" && typeof result.base64 === "string" && result.base64.length <= 28e5) content = await browserPreview(Uint8Array.from(atob(result.base64), (c) => c.charCodeAt(0)));
+					else throw new Error(t("ar_content_changed"));
+				} else content = await browserPreview(await readBrowser(ref, row.size_bytes, controller.signal));
+				live(ref);
+				close();
+				let body;
+				if (content.canvas) {
+					body = content.canvas;
+					body.setAttribute("role", "img");
+					body.setAttribute("aria-label", t("files_preview"));
+				} else body = h("pre", {}, content.text);
+				preview.hidden = false;
+				preview.append(h("div", { class: "actions" }, h("strong", {}, t("files_preview")), h("button", {
+					class: "secondary",
+					onclick: close
+				}, t("close"))), body);
+				status.textContent = t("ar_content_verified");
+			} else if (nativeDesktop) {
+				const receipt = await nativeFilesSave(ref);
+				live(ref);
+				status.textContent = "";
+				if (receipt) {
+					adopt(receipt);
+					renderTransfers();
+					await refresh();
+				}
+			} else {
+				const bytes = await readBrowser(ref, row.size_bytes, controller.signal);
+				live(ref);
+				const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+				const link = document.createElement("a");
+				link.href = url;
+				link.download = String(row.display_name || row.artifact_id).replace(/[\\/\x00-\x1f\x7f]/g, "_").slice(0, 200) || row.artifact_id;
+				link.click();
+				setTimeout(() => URL.revokeObjectURL(url), 1e3);
+				status.textContent = t("ar_content_downloaded");
+			}
+		} catch (error) {
+			fail(error);
+		} finally {
+			busy = false;
+			update();
+		}
+	}
+	const peek = h("button", {
+		class: "secondary",
+		onclick: () => perform("preview")
+	}, t("files_preview"));
+	const save = h("button", {
+		class: "secondary",
+		onclick: () => perform("save")
+	}, t(nativeDesktop ? "files_save" : "ar_content_download"));
+	box.append(h("div", { class: "actions" }, peek, save), h("p", { class: "muted" }, t("ar_content_help")), status, preview, transfers);
+	function update() {
+		if (disposed) return;
+		const next = getArtifact(), changed = !same(current, next);
+		if (changed) {
+			current = next;
+			close();
+			receipts.clear();
+			renderTransfers();
+			clearTimeout(timer);
+			status.textContent = "";
+		}
+		box.hidden = !next;
+		peek.disabled = save.disabled = busy || !next || !canRead() || nativeDesktop && !nativeFileSupport;
+		if (next && nativeDesktop && !nativeFileSupport) status.textContent = t("ar_content_native_unavailable");
+		if (changed && next && nativeDesktop && nativeFileSupport) queueMicrotask(() => refresh().catch(fail));
+	}
+	return {
+		box,
+		update,
+		dispose() {
+			disposed = true;
+			controller.abort();
+			clearTimeout(timer);
+			close();
+		}
+	};
+}
+//#endregion
 //#region src/artifact-review.js
 var record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 var ordered = (value) => record(value) ? Object.fromEntries(Object.keys(value).sort().map((k) => [k, ordered(value[k])])) : Array.isArray(value) ? value.map(ordered) : value;
@@ -3583,7 +3894,7 @@ function restore(raw) {
 	}
 	return saved;
 }
-async function mountArtifactReview({ main, h, t, api, caps, guard, onEvents, errorBox, opStatus, storageKey, context }) {
+async function mountArtifactReview({ main, h, t, api, caps, guard, onEvents, errorBox, opStatus, storageKey, context, readBrowser }) {
 	const container = h("div", { class: "artifact-review" });
 	main.append(container);
 	let raw;
@@ -3591,7 +3902,8 @@ async function mountArtifactReview({ main, h, t, api, caps, guard, onEvents, err
 		raw = JSON.parse(localStorage.getItem(storageKey));
 	} catch {}
 	let saved = restore(raw), source = null, artifact = null, busy = false, readFailed = false, disposed = false;
-	let refreshing = null, submission = null, revision = 0, catalogCursor = null;
+	let refreshing = null, submission = null, revision = 0, catalogCursor = null, catalogReading = null, catalogPages = 0;
+	let catalogRows = new Map();
 	const operations = {
 		capture: null,
 		accept: null
@@ -3721,6 +4033,7 @@ async function mountArtifactReview({ main, h, t, api, caps, guard, onEvents, err
 		const proof = row?.source;
 		if (!validArtifact(row, refOf(ref)) || proof.operation_id !== op.operation_id || proof.fingerprint !== intent.request.preconditions.expected_fingerprint || !equal(proof.source, intent.expected.source) || !equal(proof.evidence, intent.expected.evidence) || proof.relative_path !== intent.expected.relative_path) throw new Error(t("ar_invalid_result"));
 		artifact = row;
+		await loadCatalog();
 	}
 	async function adopt(kind, op) {
 		guard();
@@ -3938,10 +4251,20 @@ async function mountArtifactReview({ main, h, t, api, caps, guard, onEvents, err
 		class: "secondary",
 		onclick: () => loadExecutions(true).catch(showError)
 	}, t("ar_more_executions"));
+	const content = artifactContent({
+		h,
+		t,
+		api,
+		guard,
+		getArtifact: () => artifact,
+		canRead: () => scope("observe") && !readFailed,
+		validArtifact,
+		readBrowser
+	});
 	const reviewPanel = h("section", {
 		class: "panel",
 		"data-artifact-accept": ""
-	}, h("h2", {}, t("ar_review_title")), reviewFacts, h("p", { class: "muted" }, t("ar_accept_help")), h("label", {}, t("ar_receipt"), receipt), h("p", { class: "muted" }, t("ar_approve_scope")), h("div", { class: "actions" }, accept, newReview));
+	}, h("h2", {}, t("ar_review_title")), reviewFacts, content.box, h("p", { class: "muted" }, t("ar_accept_help")), h("label", {}, t("ar_receipt"), receipt), h("p", { class: "muted" }, t("ar_approve_scope")), h("div", { class: "actions" }, accept, newReview));
 	const capturePanel = h("section", {
 		class: "panel",
 		"data-managed-capture": ""
@@ -3954,6 +4277,7 @@ async function mountArtifactReview({ main, h, t, api, caps, guard, onEvents, err
 	const catalogPanel = h("section", { class: "panel" }, h("h2", {}, t("ar_catalog")), catalog, catalogNotice, h("div", { class: "actions" }, moreArtifacts));
 	container.append(h("h1", {}, t("ar_title")), h("p", { class: "muted" }, t("ar_help")), capturePanel, reviewPanel, h("div", { class: "actions" }, check), outcome, notice, catalogPanel);
 	function update() {
+		content.update();
 		const fixed = busy || frozen();
 		for (const field of [
 			path,
@@ -4099,17 +4423,48 @@ async function mountArtifactReview({ main, h, t, api, caps, guard, onEvents, err
 		render();
 	}
 	async function loadCatalog(more = false) {
-		const data = await api("GET", `/artifacts?limit=30${more && catalogCursor ? `&cursor=${encodeURIComponent(catalogCursor)}` : ""}`);
-		guard();
-		const rows = (data.artifacts || []).map((a) => a.revision).filter((row) => validArtifact(row));
-		if (!more) catalog.replaceChildren();
-		for (const row of rows) catalog.append(h("div", { class: "row" }, h("a", {
-			class: "title",
-			href: `#/artifact-review/artifact/${row.artifact_id}/${row.revision}`
-		}, `${row.display_name || row.artifact_id} · r${row.revision}`), h("code", {}, row.digest)));
-		catalogCursor = data.next_cursor;
-		moreArtifacts.hidden = !catalogCursor;
-		if (!catalog.children.length) catalog.append(h("p", { class: "muted" }, t("ar_no_artifacts")));
+		if (catalogReading) {
+			await catalogReading;
+			guard();
+			return loadCatalog(more);
+		}
+		if (more && !catalogCursor) return;
+		catalogReading = (async () => {
+			let cursor = more ? catalogCursor : null, readPages = 0;
+			const rows = more ? new Map(catalogRows) : new Map(), seen = new Set();
+			for (let index = 0; index < (more ? 1 : Math.max(1, catalogPages)); index++) {
+				if (seen.has(cursor)) throw new Error(t("ar_invalid_result"));
+				seen.add(cursor);
+				const data = await api("GET", `/artifacts?limit=30${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+				guard();
+				if (!Array.isArray(data.artifacts) || data.next_cursor != null && (typeof data.next_cursor !== "string" || !data.next_cursor)) throw new Error(t("ar_invalid_result"));
+				for (const row of data.artifacts.map((a) => a.revision).filter((row) => validArtifact(row))) rows.set(`${row.artifact_id}:${row.revision}`, row);
+				cursor = data.next_cursor ?? null;
+				readPages++;
+				if (!cursor) break;
+			}
+			guard();
+			catalogRows = rows;
+			catalogCursor = cursor;
+			catalogPages = (more ? catalogPages : 0) + readPages;
+			catalog.replaceChildren(...[...rows.values()].map((row) => h("div", { class: "row" }, h("a", {
+				class: "title",
+				href: `#/artifact-review/artifact/${row.artifact_id}/${row.revision}`
+			}, `${row.display_name || row.artifact_id} · r${row.revision}`), h("code", {}, row.digest))));
+			moreArtifacts.hidden = !catalogCursor;
+			catalogNotice.replaceChildren();
+			if (!rows.size) catalog.append(h("p", { class: "muted" }, t("ar_no_artifacts")));
+		})();
+		moreArtifacts.disabled = true;
+		try {
+			await catalogReading;
+		} catch (error) {
+			if (currentView()) catalogNotice.replaceChildren(errorBox(error));
+			throw error;
+		} finally {
+			catalogReading = null;
+			moreArtifacts.disabled = false;
+		}
 	}
 	async function refresh(fresh = false) {
 		if (submission) {
@@ -4146,9 +4501,13 @@ async function mountArtifactReview({ main, h, t, api, caps, guard, onEvents, err
 			if (currentView()) update();
 		}
 	}
-	const off = onEvents((event) => {
+	const off = onEvents(async (event) => {
 		if (!currentView()) return;
-		if (event.resource_id === saved.capture?.operation_id || event.resource_id === saved.accept?.operation_id || event.resource_id === artifact?.artifact_id) return refresh(true);
+		const reads = [];
+		if (event.resource_id === saved.capture?.operation_id || event.resource_id === saved.accept?.operation_id || event.resource_id === artifact?.artifact_id || context.kind === "artifact" && event.resource_id === context.artifact_id) reads.push(refresh(true));
+		if (event.resource_type === "artifact") reads.push(loadCatalog());
+		const settled = await Promise.allSettled(reads);
+		for (const result of settled) if (result.status === "rejected") throw result.reason;
 	});
 	if (saved.capture?.expected?.source) source = {
 		host: saved.capture.expected.source.host,
@@ -4183,6 +4542,7 @@ async function mountArtifactReview({ main, h, t, api, caps, guard, onEvents, err
 	return () => {
 		disposed = true;
 		clearInterval(timer);
+		content.dispose();
 		off();
 	};
 }
@@ -8344,6 +8704,10 @@ async function viewArtifactReview(main, kind, first, second) {
 		errorBox,
 		opStatus,
 		context,
+		readBrowser: (ref, size, signal) => {
+			assertView(connection);
+			return readArtifactContent(ref, size, state.token, signal);
+		},
 		storageKey: `batc.artifact-review.${connection.namespace}.${JSON.stringify(context)}`
 	});
 }

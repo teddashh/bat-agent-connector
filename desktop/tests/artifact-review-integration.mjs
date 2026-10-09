@@ -1,5 +1,6 @@
 // Exact shared UI against real central managed capture and review, without live providers.
 import {spawn} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import {createInterface} from 'node:readline';
 import {readFile,mkdir} from 'node:fs/promises';
 import {delimiter,resolve} from 'node:path';
@@ -21,7 +22,7 @@ try {
   const response=await route.fetch();if(!lost.has(body.action)){lost.add(body.action);await route.abort('failed');}else await route.fulfill({response});
  });
  await page.route('**/dashboard/**',async route=>{const path=new URL(route.request().url()).pathname,file=path==='/dashboard/'?'index.html':path.slice('/dashboard/'.length);if(!['index.html','app.js','app.css','i18n.js'].includes(file))return route.abort();await route.fulfill({body:await readFile(resolve('../src/bat_agent_connector/dashboard',file)),contentType:file.endsWith('html')?'text/html':file.endsWith('css')?'text/css':'text/javascript'});});
- await page.addInitScript(token=>sessionStorage.setItem('batc.dashboard.token',token),fixture.token);
+ await page.addInitScript(token=>{if(!sessionStorage.getItem('batc.dashboard.token'))sessionStorage.setItem('batc.dashboard.token',token);},fixture.token);
  await page.goto(origin+'/dashboard/#/artifact-review/session/h1/'+fixture.session_id);
  let capture=page.locator('[data-managed-capture]');
  await capture.getByRole('combobox',{name:'Central execution evidence'}).selectOption(JSON.stringify({execution_operation_id:fixture.execution_id}));
@@ -29,13 +30,17 @@ try {
  await capture.getByRole('checkbox').check();await capture.getByRole('button',{name:'Save reviewed file',exact:true}).click();await expect(page.locator('.error')).toBeVisible();
  await page.reload();capture=page.locator('[data-managed-capture]');await capture.getByRole('button',{name:'Check original capture',exact:true}).click();await expect(page.locator('[data-artifact-ready]')).toBeVisible({timeout:30000});
  const captureId=(await page.locator('a[href^="#/op/"]').first().getAttribute('href')).split('/').at(-1);
+ const exactRoute=await page.getByRole('link',{name:'result.bin · r1',exact:true}).getAttribute('href');
+ await page.goto(origin+'/dashboard/#/settings');await page.getByRole('button',{name:'Disconnect',exact:true}).click();await page.getByPlaceholder('batc_…').fill(fixture.reviewer);await page.getByRole('button',{name:'Connect',exact:true}).click();await expect(page).toHaveURL(/#\/home$/);await page.goto(origin+'/dashboard/'+exactRoute);
+ await page.getByRole('button',{name:'Preview',exact:true}).click();await expect(page.locator('.artifact-content')).toContainText('Preview is unavailable');
+ const download=page.waitForEvent('download');await page.getByRole('button',{name:'Download this revision',exact:true}).click();const downloaded=await readFile(await (await download).path());assert.equal(createHash('sha256').update(downloaded).digest('hex'),fixture.digest);assert.equal(writes.length,2);
  let review=page.locator('[data-artifact-accept]');await review.getByRole('textbox').fill('Reviewed this exact binary fixture against the expected result.');await review.getByRole('button',{name:'Record review of this revision',exact:true}).click();await expect(page.locator('.error')).toBeVisible();
  await page.reload();review=page.locator('[data-artifact-accept]');await review.getByRole('button',{name:'Check original review submission',exact:true}).click();await expect(page.locator('[data-artifact-accepted]')).toBeVisible({timeout:30000});
  const ids=await page.locator('a[href^="#/op/"]').evaluateAll(nodes=>nodes.map(n=>n.getAttribute('href').split('/').at(-1)));const acceptId=ids.find(id=>id!==captureId);
  assert.ok(acceptId);await page.reload();await expect(page.locator('[data-artifact-accepted]')).toBeVisible();assert.equal(writes.length,4);assert.deepEqual(writes[1],writes[0]);assert.deepEqual(writes[3],writes[2]);assert.deepEqual(errors,[]);
  child.stdin.write(JSON.stringify({action:'verify',capture_id:captureId,accept_id:acceptId})+'\n');assert.equal((await next()).verified,true);
  await mkdir('test-results',{recursive:true});for(const width of [1440,768,390]){await page.setViewportSize({width,height:900});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await page.screenshot({path:`test-results/artifact-review-real-${width}.png`,fullPage:true});}
- console.log('Real central managed capture and acceptance: exact binary revision, separate lost-reply replay keys, GET-only reload, one review receipt, source/index/refs and task/work state unchanged passed');
+ console.log('Real central managed capture and acceptance: exact binary revision read by an observe/approve-only reviewer, separate lost-reply replay keys, GET-only reload, one review receipt, source/index/refs and task/work state unchanged passed');
 } finally {
  await browser.close();if(child.exitCode===null&&child.signalCode===null)child.stdin.end(JSON.stringify({action:'stop'})+'\n');await Promise.race([stopped,delay(3000,undefined,{ref:false}).then(()=>child.kill())]);
 }
