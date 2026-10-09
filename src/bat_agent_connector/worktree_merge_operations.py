@@ -10,6 +10,7 @@ import importlib.resources
 import json
 import re
 import shlex
+import sqlite3
 import time
 
 from . import registry, resource_policy, service, task_control
@@ -444,6 +445,18 @@ async def invoke(ctx, plan, name, channel, params):
         raise StepFailed(getattr(exc, 'code', None) or 'MERGE_NOT_SENT', 'merge frame was not sent: ' + str(exc)) from exc
 
 
+async def remote_step(ctx, plan, name, channel, params):
+    try:
+        return await ctx.step(name, lambda: invoke(ctx, plan, name, channel, params),
+                              request={'channel': channel, 'params': params})
+    except (OSError, sqlite3.Error) as exc:
+        # step's response write follows its callback exception boundary. Its
+        # persisted intent may already have reached BAT; preserve it and the
+        # reservation even if the local ACK transaction could not be recorded.
+        raise NeedsAttention('MERGE_RECEIPT_UNAVAILABLE',
+                             'merge receipt storage is unavailable; retain original steps and carrier reservations, never resend') from exc
+
+
 async def run(ctx):
     async def reread(_):
         return RERUN
@@ -469,11 +482,9 @@ async def run(ctx):
                     if plan['rehydrate']:
                         params = {'sessionId': plan['session_id'], 'cwd': plan['destination'], 'worktreePath': plan['source'],
                                   'branchName': plan['worktree']['branchName']}
-                        await ctx.step('rehydrate.frame', lambda: invoke(ctx, plan, 'rehydrate.frame', 'worktree:rehydrate', params),
-                                       request={'channel': 'worktree:rehydrate', 'params': params})
+                        await remote_step(ctx, plan, 'rehydrate.frame', 'worktree:rehydrate', params)
                     params = {'sessionId': plan['session_id'], 'strategy': 'merge'}
-                    ack = await ctx.step('merge.frame', lambda: invoke(ctx, plan, 'merge.frame', 'worktree:merge', params),
-                                         request={'channel': 'worktree:merge', 'params': params})
+                    ack = await remote_step(ctx, plan, 'merge.frame', 'worktree:merge', params)
                 await ctx.step('merge.release', local_release, reconcile=reread, receipt_only=True)
             except (StepFailed, Cancelled):
                 release(ctx, plan)
@@ -489,7 +500,9 @@ async def run(ctx):
 def cancel(ops, caller, op):
     ops.db.execute('UPDATE operations SET cancel_requested=1,next_run_at=0,updated_at=? WHERE operation_id=?', (time.time(), op['operation_id']))
     pending = ops.db.execute("SELECT 1 FROM operation_steps WHERE operation_id=? AND status IN ('started','uncertain')", (op['operation_id'],)).fetchone()
-    if op['status'] == 'needs_attention' and pending:
+    if op['status'] == 'needs_attention':
+        # Even a completed ACK can precede a local storage exception. Re-enter
+        # original receipts; cancellation still forbids every new remote step.
         ops._transition(op['operation_id'], 'running', actor=caller.actor, reason='reading original merge receipts after cancellation')
     elif op['status'] in {'accepted', 'waiting_checks', 'waiting_external'} and not pending:
         ops._transition(op['operation_id'], 'cancelled', actor=caller.actor, reason='cancelled before merge effect')
