@@ -115,10 +115,16 @@ npm run tauri -- build --bundles nsis
 # Linux, with WebKitGTK 4.1 and AppIndicator development packages
 npm run tauri -- build --bundles deb
 
-# Local native fixture smoke after a debug package build (Linux + Pillow/xdotool/Xvfb)
-npm run tauri -- build --debug --bundles deb
-xvfb-run -a -s '-screen 0 1440x900x24' dbus-run-session -- node tests/native-smoke.mjs
+# Native fixture smoke of that release package (Linux + Pillow/xdotool/Xvfb)
+xvfb-run -a -s '-screen 0 1440x900x24' dbus-run-session -- node tests/native-smoke.mjs src-tauri/target/release/better-agent-dashboard
 ```
+
+Linux builds select the exact upstream GLib backport described in
+[`desktop/vendor/README.md`](../../desktop/vendor/README.md). Desktop CI verifies
+all vendored bytes and the target dependency graph, exercises the affected
+iterator with release optimization, and runs the packaged release WebView against
+an isolated HTTP fixture. Windows remains on its GLib-free dependency graph.
+These checks are native fixture evidence; installed/live acceptance remains separate.
 
 The app bundles frontend assets and does not require Vite in production. Closing the main window hides it; the tray offers Open Dashboard and Quit Dashboard. Explicit Quit uses [normal exact-owner Fleet shutdown](desktop-fleet-native.md), refuses unconfirmed/foreign ownership, and leaves central work and manual BAT windows alone. The single-instance plugin focuses the current desktop window; Fleet separately enforces the shared cross-session ownership protocol. Fixed native supervisor/login CLI dispatch precedes the WebView and single-instance plugin. Native and PowerShell backends are mutually exclusive under the same ownership guards.
 

@@ -21,6 +21,10 @@
     "active": true,
     "targets": ["nsis", "deb"],
     "shortDescription": "Desktop client for the existing BAT Agent Connector",
+    "resources": {
+      "../vendor/glib-0.18.5/LICENSE": "third-party/glib/LICENSE",
+      "../vendor/glib-0.18.5/COPYRIGHT": "third-party/glib/COPYRIGHT"
+    },
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"]
   },
   "plugins": {"updater": {"pubkey": "", "requireSignedVersion": true, "windows": {"installMode": "passive"}}}

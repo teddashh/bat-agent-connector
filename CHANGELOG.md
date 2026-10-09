@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Backport the official GLib iterator fix for RUSTSEC-2024-0429 into the Linux
+  desktop dependency graph. Preserve the original crate version/license and exact
+  source inventory; require resolved-source verification, an optimized iterator
+  regression, and a packaged release WebView smoke test in desktop CI.
+
 - Add published-version starts through explicit repository/host/workspace bindings. Preview the
   exact branch head, fetch its fixed SHA into a fresh managed carrier, and recover the original
   operation after lost replies. Shared browser/Tauri UI, CLI, MCP and canonical workflow `.9`

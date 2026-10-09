@@ -2,10 +2,10 @@ name: desktop
 
 on:
   pull_request:
-    paths: ["desktop/**", "src/**", "tests/manual/**", "pyproject.toml", "uv.lock", ".github/workflows/desktop.yml"]
+    paths: ["desktop/**", "src/**", "tests/manual/**", "scripts/check_glib_backport.py", "tests/test_release_dependencies.py", "pyproject.toml", "uv.lock", ".github/workflows/desktop.yml"]
   push:
     branches: [main]
-    paths: ["desktop/**", "src/**", "tests/manual/**", "pyproject.toml", "uv.lock", ".github/workflows/desktop.yml"]
+    paths: ["desktop/**", "src/**", "tests/manual/**", "scripts/check_glib_backport.py", "tests/test_release_dependencies.py", "pyproject.toml", "uv.lock", ".github/workflows/desktop.yml"]
 
 permissions:
   contents: read
@@ -53,7 +53,7 @@ jobs:
           components: rustfmt, clippy
       - name: Linux native build libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xvfb xdotool x11-utils dbus-x11 python3-pil
       - run: npm ci
       - run: npm run build:all
       - name: Check generated browser assets
@@ -101,8 +101,17 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - name: Verify reviewed GLib source and actual Linux dependency graph
+        if: runner.os == 'Linux'
+        run: python3 ../scripts/check_glib_backport.py --target x86_64-unknown-linux-gnu
+      - name: Verify GLib is absent from the Windows dependency graph
+        if: runner.os == 'Windows'
+        run: python ../scripts/check_glib_backport.py --target x86_64-pc-windows-msvc
       - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets
+      - name: GLib iterator regression with compiler optimizations
+        if: runner.os == 'Linux'
+        run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml --test glib_variant_iter
       - name: Native Fleet contracts, wire peers and owned Windows process fixtures
         run: |
           cargo fmt --manifest-path fleet-core/Cargo.toml --check
@@ -114,6 +123,19 @@ jobs:
         run: npm run test:native-files
       - name: Package app (unsigned validation artifact)
         run: npm run tauri -- build --bundles ${{ matrix.bundle }} -- --locked
+      - name: Packaged Linux release WebView, close-to-tray and single-instance fixture
+        if: runner.os == 'Linux'
+        timeout-minutes: 2
+        env:
+          BATC_NATIVE_SMOKE_ARTIFACT_DIR: test-results/native-release
+        run: xvfb-run -a -s '-screen 0 1440x900x24' dbus-run-session -- node tests/native-smoke.mjs src-tauri/target/release/better-agent-dashboard
+      - name: Preserve packaged WebView fixture evidence
+        if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: desktop-native-release-fixture
+          path: desktop/test-results/native-release/
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: desktop-${{ runner.os }}-unsigned
