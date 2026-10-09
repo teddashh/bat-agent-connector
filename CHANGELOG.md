@@ -2,6 +2,12 @@
 
 ## Next release (unreleased)
 
+- Refuse legacy `worktree_remove` / `remove-worktree` with `LEGACY_WORKTREE_REMOVE_DISABLED`
+  after the existing ownership checks. An idle predecessor can share its directory with an active
+  successor, so the legacy single-session check cannot authorize deletion. Use reviewed cleanup's
+  consumer checks, retention and receipts; discard/branch overrides cannot reopen the old path.
+  Read/status tools and canonical cleanup remain available.
+
 - Add local Desktop Fleet connection controls through the existing Kit's fixed PowerShell facade.
   Restricted native IPC keeps configuration and process startup outside the webview, bounds replies and
   deadlines, and uses only the OS PowerShell's system modules. Revision-bound selection drafts survive

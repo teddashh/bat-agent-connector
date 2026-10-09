@@ -153,26 +153,21 @@ async def test_e01_absent_session_without_worktree_leaves_cap(daemon, mock, huma
     assert registry.get("h1", live["session_id"])["status"] == "cleaned"
 
 
-@pytest.mark.parametrize("removed", [True, False])
-async def test_e01_legacy_worktree_remove_keeps_runtime_retired(daemon, mock, human, tmp_path, removed):
+async def test_e01_disabled_legacy_worktree_remove_keeps_runtime_retired(daemon, mock, human, tmp_path):
     repo, start = await standalone_worktree(daemon, mock, human, tmp_path)
     sid, path = start["session_id"], Path(start["worktree_path"])
     registry.retire("h1", sid, "stopped", created_at=registry.get("h1", sid)["created_at"],
                     actor="person", reason="confirmed stop")
     mock.metas[sid] = None
 
-    def remove(p):
-        if removed:
-            git(repo, "worktree", "remove", str(path))
-            mock.worktrees.pop(sid, None)
-        return {"success": removed}
-
-    mock.handlers["worktree:remove"] = remove
     mock.handlers["git:getRoot"] = lambda p: git(p["cwd"], "rev-parse", "--show-toplevel") if Path(p["cwd"]).exists() else None
-    result = await orchestrate.worktree_remove(daemon.fleet, "h1", sid, confirm=True)
-    assert result["removed"] is removed
+    before = len(mock.invokes)
+    with pytest.raises(ResourceReadOnly, match="LEGACY_WORKTREE_REMOVE_DISABLED"):
+        await orchestrate.worktree_remove(daemon.fleet, "h1", sid, confirm=True)
+    assert path.exists()
+    assert not any(i["channel"] in {"worktree:remove", "worktree:rehydrate"} for i in mock.invokes[before:])
     row = registry.get("h1", sid)
-    assert row["status"] == "stopped" and row["worktree_removed"] is removed
+    assert row["status"] == "stopped" and not row.get("worktree_removed")
     with pytest.raises(ResourceReadOnly, match="SESSION_RETIRED"):
         await service.session_send(daemon.fleet, "h1", sid, "resume", confirm=True, ensure_loaded=True)
     assert not registry.list_entries("h1", active_only=True)
