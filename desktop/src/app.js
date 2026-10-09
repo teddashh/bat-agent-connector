@@ -4,6 +4,7 @@ import { t } from "./i18n.js";
 import { connectorRequest, connectorUploadArtifact, nativeDesktop, nativeStatus, nativeConnect, nativeDisconnect, openExternal } from "./transport/index.ts";
 import { mountFleet } from "./fleet.js";
 import { capturePanel } from "./capture.js";
+import { permissionsPanel } from "./permissions.js";
 import { consumePageAsync, settleRefreshes, storageScope } from "./state/events.ts";
 
 const TOKEN_KEY = "batc.dashboard.token";
@@ -846,9 +847,9 @@ async function viewSession(main, host, sid) {
   const composer = h("div", {hidden: true}, box, h("div", { class: "actions" }, send, stop,
     h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
   const readonly = h("p", { class: "note" }, t("read_only_note"));
-  let capture;
-  const captureSlot = h("div");
-  const controls = h("div", { class: "panel" }, pending, readonly, composer, captureSlot, status);
+  let capture, permissions;
+  const captureSlot = h("div"), permissionsSlot = h("div");
+  const controls = h("div", { class: "panel" }, pending, readonly, composer, permissionsSlot, captureSlot, status);
   const cps = checkpointPanel(host, sid);
   const observations = observationPanels("session", `${host}/${sid}`, path);
   main.append(head, controls, cps.box, h("h2", {}, t("messages")), msgs, observations.box);
@@ -899,6 +900,7 @@ async function viewSession(main, host, sid) {
     pending.append(card);
   };
   const updateControls = () => {
+    permissions?.update();
     send.disabled = !allowed("session.send") || sending; stop.disabled = !allowed("session.interrupt");
     for (const button of pending.querySelectorAll("[data-answer-action]"))
       button.disabled = !row?.pending?.toolUseId || !allowed("session.answer");
@@ -926,6 +928,12 @@ async function viewSession(main, host, sid) {
     if (data.work_items?.length) head.append(linkedItems(data.work_items));
     if (data.discovery?.length) head.append(h("details", {}, h("summary", {}, t("obs_discovery")), discoveryEvidence(data.discovery)));
     const managed = row.api_access === "managed";
+    if (managed && row.provenance === "connector_managed" && !permissions) {
+      permissions = permissionsPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+        errorBox, opStatus, storageKey: `batc.permissions.${connection.namespace}.${JSON.stringify([host, sid])}`,
+        target: {host, session_id: sid}, session: () => row, ready: () => readReady});
+      permissionsSlot.append(permissions.box);
+    }
     const manualSource = row.provenance === "manual" && state.caps?.artifacts?.capture?.manual_single_file;
     if (manualSource && !capture) {
       capture = manualCapture(`session.${JSON.stringify([host, sid])}`, {host, session_id: sid});
@@ -953,6 +961,7 @@ async function viewSession(main, host, sid) {
     refreshInFlight = (async () => {
       try {
         await settleRefreshes([loadObservation(), loadMessages()]);
+        await permissions?.refresh(fromEvent);
         readReady = true; updateControls(); readError?.remove(); readError = null;
       } catch (error) {
         readReady = false; updateControls(); readError = errorBox(error); status.replaceChildren(readError); throw error;
@@ -969,7 +978,8 @@ async function viewSession(main, host, sid) {
   const reload = debounceRefresh(() => refresh(true), 500), reloadCps = debounceRefresh(cps.load, 500);
   const off = onEvents(ev => { observations.changed(ev); return settleRefreshes([
     (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "work_item") ? reload() : Promise.resolve(),
-    ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve()
+    ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve(),
+    ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve()
   ]); });
   return () => {clearInterval(retry); off();};
 }

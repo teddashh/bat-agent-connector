@@ -166,3 +166,41 @@ Connection-scoped resource records are indexed by stable ID with explicit parent
 `npm run test:observation` checks the generated shared UI against actual central HTTP, the journal and MockBat: a newly observed pending question, fixed history pagination, execution/worktree relations and discovery. `BATC_OBSERVATION_PYTHON` can select an already prepared Python environment; the fixture always imports this checkout. Chromium browser/native IPC fixtures cover failed reads, stale pending refusal, linked completion, later parent archive, stable-ID inventory pages, and English/zh-TW layouts at 390/768/1440. These are fixtures, not live host acceptance. Native route permissions already cover these read-only endpoints.
 
 Remaining R04 limits: history exposes kind and relation execution/closed filters but no time-range picker, event-type catalog or saved multi-resource queries. Inventory refreshes the loaded window rather than maintaining a persistent offline resource database; selected history state is retained while mounted, not across route changes. General project tree refreshes still defer under open drawers; central version/policy guards remain authoritative. Principal/backend switches and continuity resets continue to preserve only drafts in their own namespace. Pending preflight reads the latest persisted observation; central must still reject a changed live BAT tool-use ID. Native event streaming and full M1/T07 live acceptance remain unclaimed.
+
+## Managed session permission requests
+
+The shared session detail has a compact permission form only for positively observed Connector-managed
+sessions. Applying requires successful current session reads, `operate` scope, an explicit allowed
+`session.permissions` capability, and `writes: true` for the selected host. Missing evidence disables
+the action; manual and unknown sessions never mount it. Central resource policy, confinement and task
+coordination remain authoritative. There is no force control or native policy bypass.
+
+Normal permissions and Allow all are requested modes, not observations of the running agent. The form
+explains that Allow all bypasses agent approval prompts for file writes and commands. A successful
+operation means BAT accepted the requested configuration, not independent proof of live enforcement;
+Codex settings take effect on its next turn. Streaming Claude is refused with `PERMISSIONS_STREAMING`;
+after idle, the user must explicitly start a new change. The UI never queues a deferred permission change.
+
+The existing typed `/operations` transport sends `session.permissions`, the exact host/full session ID,
+and `{mode: "default" | "allow_all"}`. Current session observations expose no authoritative task
+`control_version`, so the UI omits that optional precondition; central admission binds the incarnation.
+It never substitutes an unrelated resource or event version. No new Rust command or URL permission is added.
+
+The requested mode, full request, original key and accepted operation ID persist in the existing
+endpoint/server/principal namespace. A lost reply locks the choice and allows only the same request/key;
+an accepted operation uses GET readback on reload or refresh. Terminal results require an explicit
+"Start another change" before a new request, resetting the selection to Normal permissions. The same
+explicit reset is available for `TASK_PAUSED`, `CONTROL_VERSION_CONFLICT` and `PERMISSIONS_HOST_POLICY`
+admission refusals: central checks them after existing-key replay and before inserting an operation.
+Generic authorization errors, unknown actions, key conflicts and transport failures do not prove that
+an earlier attempt was never accepted and keep the original key locked. `uncertain` and `needs_attention` retain the fixed intent
+and link to the existing operation page's per-frame steps, refs and result. Response action, target,
+requested mode, original key and accepted ID must match before the form stores success. Damaged saved requests
+preserve a recoverable accepted ID instead of generating another operation. Event acknowledgment waits
+for required operation reads, including a submission whose first reply has not arrived yet; failed reads
+keep the cursor and disable another change.
+
+Browser and mocked-native fixtures cover lost replies, mode edits, accepted/unknown recovery, capability
+and identity boundaries, malformed storage, and en/zh-TW layouts at 390/768/1440. Actual-central permission
+validation follows the backend integration; these synthetic fixtures do not establish Windows WebView
+or live host acceptance.
