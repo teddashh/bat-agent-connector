@@ -18,7 +18,10 @@ const id = "io.betteragent.dashboard";
 const statePaths = [join(homedir(), "Library/Application Support", id),
   join(homedir(), "Library/Caches", id), join(homedir(), "Library/WebKit", id),
   join(homedir(), "Library/Preferences", `${id}.plist`),
-  join(homedir(), "Library/Saved Application State", `${id}.savedState`)];
+  join(homedir(), "Library/Saved Application State", `${id}.savedState`),
+  // Pinned single-instance plugin uses this fixed disk-backed Unix socket on macOS.
+  // Refuse an existing socket and remove only the one this isolated fixture creates.
+  "/tmp/io_betteragent_dashboard_si.sock"];
 for (const path of [...statePaths, `/Applications/Better Agent Dashboard.app`,
   join(homedir(), "Applications/Better Agent Dashboard.app")]) {
   await assert.rejects(access(path), { code: "ENOENT" }, `Refusing pre-existing app/state: ${path}`);
