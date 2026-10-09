@@ -6,9 +6,7 @@ use std::path::Path;
 mod support;
 use support::Fixture;
 
-#[test]
-fn default_binding_matches_powershell_bytes_and_utf16_path_lengths_without_writes() {
-    let fixture = Fixture::new();
+fn binding_preimage(fixture: &Fixture) -> String {
     let mut expected = String::from("desktop-configuration-v1\n");
     for relative in [
         "kit/fleet-inventory.json",
@@ -31,6 +29,13 @@ fn default_binding_matches_powershell_bytes_and_utf16_path_lengths_without_write
             expected.push_str("absent\n");
         }
     }
+    expected
+}
+
+#[test]
+fn default_binding_matches_powershell_bytes_and_utf16_path_lengths_without_writes() {
+    let fixture = Fixture::new();
+    let expected = binding_preimage(&fixture);
     let before = std::fs::read(fixture.0.join("kit/fleet-inventory.json")).unwrap();
     let configuration = fixture.load();
     assert_eq!(configuration.binding(), digest(expected.as_bytes()));
@@ -149,6 +154,7 @@ fn missing_required_files_refuse_and_normalized_default_path_needs_no_alternate_
 #[cfg(windows)]
 #[test]
 fn actual_system_powershell_binding_matches_normalized_native_paths() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
     use std::{
         io::Read,
         process::{Child, Command, Stdio},
@@ -216,12 +222,21 @@ fn actual_system_powershell_binding_matches_normalized_native_paths() {
             .stdout
             .take()
             .unwrap()
-            .take(1024)
+            .take(32_769)
             .read_to_end(&mut output)
             .unwrap();
-        assert!(output.len() < 1024);
+        assert!(output.len() <= 32_768);
+        let response: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let preimage = STANDARD
+            .decode(response["preimage_base64"].as_str().unwrap())
+            .unwrap();
+        let preimage = String::from_utf8(preimage).unwrap();
+        assert_eq!(digest(preimage.as_bytes()), response["binding"]);
+        // Diagnostic input is exclusively this temporary fixture. A failed oracle
+        // identifies the path/length/content divergence rather than just two hashes.
+        assert_eq!(preimage, binding_preimage(&fixture));
         assert_eq!(
-            String::from_utf8(output).unwrap().trim(),
+            response["binding"].as_str().unwrap(),
             configuration.binding()
         );
         configuration.verify_current().unwrap();
