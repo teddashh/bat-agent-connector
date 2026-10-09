@@ -687,6 +687,22 @@ fn main() {
             tailscale_control,
             open_external
         ])
-        .run(tauri::generate_context!())
-        .expect("desktop application startup");
+        .build(tauri::generate_context!())
+        .expect("desktop application startup")
+        .run(|_app, _event| {
+            #[cfg(target_os = "macos")]
+            match _event {
+                // Finder/Dock activation reaches the existing process without spawning
+                // another executable, so the single-instance callback alone is insufficient.
+                tauri::RunEvent::Reopen { .. } => show(_app),
+                // Cmd+Q and the system Quit Apple event use the same shutdown path as tray Quit.
+                tauri::RunEvent::ExitRequested {
+                    code: None, api, ..
+                } => {
+                    api.prevent_exit();
+                    quit(_app);
+                }
+                _ => {}
+            }
+        });
 }
