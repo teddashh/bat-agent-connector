@@ -1,0 +1,93 @@
+// Native fixture helper: only this test's bundle, PID and launch identity.
+// No Accessibility changes, AppleScript, arbitrary keystrokes or PID kills.
+import AppKit
+import CoreGraphics
+import ApplicationServices
+
+let fixtureApplication = NSApplication.shared
+fixtureApplication.setActivationPolicy(.accessory)
+let args = CommandLine.arguments
+let identifier = "io.betteragent.dashboard"
+func fail(_ message: String) -> Never {
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+    exit(1)
+}
+func emit(_ value: [String: Any]) {
+    print(String(data: try! JSONSerialization.data(withJSONObject: value), encoding: .utf8)!)
+}
+func perform() {
+    if args.count == 2 && args[1] == "existing" {
+        print(NSRunningApplication.runningApplications(withBundleIdentifier: identifier).count)
+        exit(0)
+    }
+    if args.count == 3 && args[1] == "launch" {
+        guard NSRunningApplication.runningApplications(withBundleIdentifier: identifier).isEmpty
+        else { fail("Refusing an existing Dashboard process") }
+        let url = URL(fileURLWithPath: args[2]).standardizedFileURL
+        guard Bundle(url: url)?.bundleIdentifier == identifier else { fail("Wrong fixture bundle") }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        configuration.addsToRecentItems = false
+        configuration.promptsUserIfNeeded = false
+        configuration.environment = ["BATC_DESKTOP_TOKEN": "fixture-native-token"]
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { app, error in
+            guard error == nil, let app, app.bundleURL?.standardizedFileURL == url,
+                  app.bundleIdentifier == identifier, let date = app.launchDate
+            else { fail("Launch Services did not return the requested fixture app: \(String(describing: error))") }
+            emit(["pid": app.processIdentifier, "launchDate": date.timeIntervalSince1970])
+            exit(0)
+        }
+        return
+    }
+    guard args.count == 5, let pid = Int32(args[2]), let launchDate = Double(args[4])
+    else { fail("Invalid fixture identity") }
+    let running = NSRunningApplication(processIdentifier: pid)
+    if running == nil || running!.isTerminated {
+        guard args[1] == "inspect" else { fail("Fixture app already terminated") }
+        emit(["terminated": true, "windows": []])
+        exit(0)
+    }
+    guard let app = running, app.bundleIdentifier == identifier,
+          app.bundleURL?.standardizedFileURL.path == URL(fileURLWithPath: args[3]).standardizedFileURL.path,
+          app.launchDate?.timeIntervalSince1970 == launchDate
+    else { fail("Fixture app identity does not match") }
+    let state = "finished=\(app.isFinishedLaunching) policy=\(app.activationPolicy.rawValue) hidden=\(app.isHidden) terminated=\(app.isTerminated)"
+    switch args[1] {
+    case "hide":
+        // Hosted macOS can report false while the asynchronous hide still completes.
+        // Record that return value; the caller must prove hidden state and no windows.
+        emit(["reportedSuccess": app.hide()])
+    case "close":
+        guard AXIsProcessTrusted() else { fail("Existing Accessibility trust is required; fixture does not change privacy settings") }
+        let application = AXUIElementCreateApplication(pid)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement], windows.count == 1
+        else { fail("Expected one owned Accessibility window") }
+        var button: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(windows[0], kAXCloseButtonAttribute as CFString, &button) == .success,
+              let button, AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString) == .success
+        else { fail("Owned native close-button action failed") }
+    case "quit":
+        guard app.terminate() else { fail("Native Quit request refused: \(state)") }
+    case "cleanup-force":
+        // Failure cleanup only; the successful lifecycle never uses forced termination.
+        guard app.forceTerminate() else { fail("Owned fixture cleanup refused: \(state)") }
+    case "inspect":
+        let windows = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []).filter {
+                ($0[kCGWindowOwnerPID as String] as? Int32) == pid
+                    && ($0[kCGWindowLayer as String] as? Int) == 0
+                    && (($0[kCGWindowBounds as String] as? [String: Any])?["Width"] as? Double ?? 0) > 300
+            }
+        emit(["pid": pid, "hidden": app.isHidden, "terminated": app.isTerminated,
+            "finishedLaunching": app.isFinishedLaunching, "activationPolicy": app.activationPolicy.rawValue,
+            "windows": windows.map { ["id": $0[kCGWindowNumber as String] ?? 0,
+                                      "bounds": $0[kCGWindowBounds as String] ?? [:]] }])
+    default: fail("Unknown fixture command")
+    }
+    exit(0)
+}
+// Application operations run inside AppKit's event loop, after launch registration.
+DispatchQueue.main.async { perform() }
+fixtureApplication.run()

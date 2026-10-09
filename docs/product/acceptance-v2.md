@@ -1,9 +1,10 @@
 # Better Agent Dashboard／Connector：R10 驗收證據矩陣
 
-歷史基線：2026-10-08 23:26 UTC，`6d88f4d`（#51 merge）；2026-10-09 main 已合併 #64–#67；固定候選與 GLib gate closure 見 [目前實作狀態](implementation-status.md#2026-10-09-發行門檻收斂)。依產品負責人提供的
+歷史基線：2026-10-08 23:26 UTC，`6d88f4d`（#51 merge）；2026-10-09 main 已合併 #64–#68；固定候選與 GLib gate closure 見 [目前實作狀態](implementation-status.md#2026-10-09-發行門檻收斂)。依產品負責人提供的
 Tauri 第二版計畫 §24，保留 **A01–A10、B01–B05、C01–C07、D01–D06、E01–E06、T01–T12，共 46 項**。
 範圍見 [realignment-v2.md](realignment-v2.md)，進度見 [implementation-status.md](implementation-status.md)。
 兩份計畫對應同一產品與功能 backlog；Tauri 是更新的介面方向。
+使用者另要求 macOS：Apple Silicon／Intel DMG 與各自 native fixture 納入平台 gate；Mac 的 Keychain、更新、公證與 I／L 證據分開追蹤，不能繼承 Windows 結果。
 此表不是通過清單：**尚未建立同一候選版本的 installed／live 證據，M1、M2、M3 及完整產品交付均未完成。**
 
 範圍依產品負責人提供的原始對話與後續澄清校正，見 [共同依據](realignment-v2.md#原始需求與後續澄清)。
@@ -162,7 +163,7 @@ reload/lost reply 與真中央唯讀 bytes/index/refs fixture；`2fc8fd8` 關閉
 # Repository root；full Python matrix 由 CI 的各 interpreter 執行
 uv sync --locked --extra dev
 uv run ruff check .
-uv run pytest -q
+pytest-disktmp uv run pytest -q
 python3 scripts/generate_agent_skills.py --check
 
 # Shared frontend；先依 CI 安裝 Playwright/browser 與 native build prerequisites
