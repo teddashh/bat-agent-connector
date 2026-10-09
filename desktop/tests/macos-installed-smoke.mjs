@@ -117,7 +117,10 @@ try {
   await writeFile(join(statePaths[0], "central.json"), configuration, { flag: "wx", mode: 0o600 });
   app = launch();
   await until(() => requests.some(item => item.path === "/api/v1/events"), "Installed WKWebView did not poll");
-  await until(() => JSON.parse(native("inspect")).windows.length === 1, "Expected one native window");
+  await until(() => {
+    const state = JSON.parse(native("inspect"));
+    return state.finishedLaunching && state.windows.length === 1;
+  }, "Expected a fully launched native window");
   const window = JSON.parse(native("inspect")).windows[0].id;
   run("screencapture", ["-x", "-l", String(window), join(evidence, "installed.png")]);
   steps.push("Installed WKWebView authenticated, bootstrapped and polled the observe-only fixture");
