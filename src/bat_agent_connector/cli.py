@@ -642,7 +642,7 @@ def build_parser() -> argparse.ArgumentParser:
     csp = p.add_subparsers(dest="cleanup_cmd", required=True)
     c = csp.add_parser("preview", help="pure read; signed plan expires after 15 minutes")
     targets = c.add_mutually_exclusive_group(required=True)
-    for flag in ("item", "checkpoint", "integration", "host"):
+    for flag in ("item", "checkpoint", "integration", "host", "task"):
         targets.add_argument("--" + flag)
     c.add_argument("--include-children", action="store_true")
     c.add_argument("--discard-uncommitted", action="append", default=[], metavar="RESOURCE_ID",
@@ -1032,7 +1032,8 @@ def cmd_resource_cleanup(args) -> int:
     if args.cleanup_cmd == "preview":
         kind, key, value = next((kind, key, getattr(args, flag)) for flag, kind, key in
             (("item", "work_item", "work_item_id"), ("checkpoint", "checkpoint", "checkpoint_id"),
-             ("integration", "integration", "operation_id"), ("host", "host", "host")) if getattr(args, flag))
+             ("integration", "integration", "operation_id"), ("host", "host", "host"),
+             ("task", "task", "task_id")) if getattr(args, flag))
         target = {"kind": kind, key: value}
         if args.include_children:
             target["include_children"] = True

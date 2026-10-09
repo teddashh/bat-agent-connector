@@ -531,7 +531,9 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
         return await daemon("approval_preview", host=host, workspace=workspace)
 
     async def cleanup_preview(target: dict[str, Any], choices: dict[str, list[str]] | None = None) -> dict[str, Any]:
-        """Pure read preview of work_item (optional include_children), checkpoint, integration or host resources.
+        """READ ONLY: target can also be {kind: task, task_id: full task ID}.
+
+        Pure read preview of work_item (optional include_children), checkpoint, integration or host resources.
         Lists all retention reasons, exact steps and a signed token valid for 15 minutes. Explicit per-item
         release_undelivered keeps commits and branches, needing cleanup. Never request cleanup_discard as an agent."""
         return await cleanup_read("/api/v1/cleanup-previews", body={"target": target, "choices": choices or {}})

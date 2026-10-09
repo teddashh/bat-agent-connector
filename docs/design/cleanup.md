@@ -605,12 +605,16 @@ Dashboard #/cleanup、#/cleanup/resource/ID：scope／子工作、真resource與
 工作detail有預填work_item的整理entry；沒有restorebutton。Stale顯示拒絕原因、留choices草稿、重preview以比較差異；
 lostreply保留reviewed document與key，reload後用同token/key查回原op；未知回覆時不能另開preview。Reuse原tokens/components、兩語i18n、fill()、CSP、focus/live-updatehold；390px驗證。
 
-## Part B：reviewed task cleanup與restore（第二步，尚未實作）
+## Part B：reviewed task cleanup 與 optional restore
+
+本分支的 bounded task cleanup 已依 [task-cleanup.md](task-cleanup.md) 實作：明確 task target、
+coordinator authority／all-owner reservation、原 automatic lifecycle 共用 operation/finalize、歷史 backfill。
+其他 target 的 TASK_OWNED 保留；task branches／dirty carriers 保留。以下 restore 設計仍未實作，依最新產品決策不阻擋此片。
 
 TaskCoordinator在task state/control_version／pending commands／warm claim／writer lock下先決定eligibility，
 允許terminal且全部content需求釋放後才准reviewed leftovers。TaskDaemon原terminalcleanup不取消，
 而是把原proof透過sharedfinalize寫同receipt/tombstone/retained；舊事件only可信evidencebackfill。
-TASK_OWNED在這階段才改為實際coordinator verdict，不在Part A假稱問過owner。
+只有明確 task target 的 TASK_OWNED 改為實際 coordinator verdict；其他入口不可繞過 owner。
 
 cleanup.restore註冊獨立ActionDef，需cleanup，target retained_id、mode managed_worktree、expected_retained_digest、key。
 只從實際ref/objects與exactSHA，在同host managed clone/area固定新wt/batc-restore-<op>/batc/restore-<op>

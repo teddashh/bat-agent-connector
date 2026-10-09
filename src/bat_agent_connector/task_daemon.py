@@ -208,6 +208,8 @@ class TaskDaemon:
         self.inventory.fleet.confinement_runner = self.fleet.confinement_runner
         self.inventory.fleet.confinement_journal = self.journal
         self.api = ApiV1(self, allowed_origins=config.api.allowed_origins)
+        from . import task_cleanup
+        task_cleanup.backfill(self.ops)
         self._initialized = True
 
     @staticmethod
@@ -945,9 +947,12 @@ class TaskDaemon:
                 current = self.journal.get(task_id)
                 if (self.journal.owner_valid() and current["state"] in {"done", "failed"}
                         and current.get("external_worktree_path")):
-                    proof = await self.adapter.cleanup_external_worktree(current)
-                    self.journal.complete_external_cleanup(task_id, proof)
-                    self._cleanup_retry_after.pop(task_id, None)
+                    from . import task_cleanup
+                    await task_cleanup.automatic(self, current)
+                    if self.journal.get(task_id).get("external_worktree_path"):
+                        self._cleanup_retry_after[task_id] = time.monotonic() + 60
+                    else:
+                        self._cleanup_retry_after.pop(task_id, None)
             except Exception as cleanup_exc:  # noqa: BLE001 - retain pointer and retry after backoff
                 self._cleanup_retry_after[task_id] = time.monotonic() + 60
                 logging.warning("Task %s external worktree cleanup failed: %s",

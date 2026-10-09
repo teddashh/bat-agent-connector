@@ -3715,35 +3715,28 @@ async def test_external_cleanup_retains_unmerged_commit_and_recovers_after_resta
 
 
 @pytest.mark.asyncio
-async def test_terminal_cleanup_requires_proof_before_journal_path_is_cleared(mock, tmp_path, monkeypatch):
+async def test_terminal_cleanup_requires_shared_finalization_before_pointer_is_cleared(mock, tmp_path, monkeypatch):
+    from bat_agent_connector import task_cleanup
     daemon = TaskDaemon(make_config(mock, writes=True, orchestrate=True), tmp_path / "tasks.db")
     task = submit(daemon.journal)
     suffix = task["task_id"].replace("-", "")[:12]
     path = f"/srv/project/.bat-worktrees/batc-task-{suffix}"
-    branch = f"batc/task-{suffix}"
     daemon.journal.change(task["task_id"], "dispatching", fields={
-        "external_worktree_path": path, "external_branch": branch})
+        "external_worktree_path": path, "external_branch": f"batc/task-{suffix}"})
     daemon.journal.change(task["task_id"], "failed")
-    proof = {"path": path, "branch": branch, "retained_ref": f"refs/batc/tasks/{suffix}",
-             "commit": "a" * 40, "mode": "removed"}
-
-    async def no_proof(_task):
-        return None
-
-    monkeypatch.setattr(daemon.adapter, "cleanup_external_worktree", no_proof)
+    async def legacy_remover(_task):
+        pytest.fail("daemon must not call the independent legacy remover")
+    monkeypatch.setattr(daemon.adapter, "cleanup_external_worktree", legacy_remover)
+    calls = []
+    async def scheduled(_daemon, fixed_task):
+        calls.append(fixed_task["task_id"])
+        return {"status": "succeeded"}  # A return value is not a durable shared receipt.
+    monkeypatch.setattr(task_cleanup, "automatic", scheduled)
     await daemon._tick_task(task["task_id"])
+    assert calls == [task["task_id"]]
     assert daemon.journal.get(task["task_id"])["external_worktree_path"] == path
     assert task["task_id"] in daemon._cleanup_retry_after
-
-    async def retained(_task):
-        return proof
-
-    monkeypatch.setattr(daemon.adapter, "cleanup_external_worktree", retained)
-    await daemon._tick_task(task["task_id"])
-    assert daemon.journal.get(task["task_id"])["external_worktree_path"] is None
-    assert task["task_id"] not in daemon._cleanup_retry_after
-    assert any(e["kind"] == "external_worktree_retained"
-               for e in daemon.journal.events(task["task_id"]))
+    assert not any(e["kind"] == "external_worktree_retained" for e in daemon.journal.events(task["task_id"]))
     daemon.journal.close()
 
 @pytest.mark.asyncio
