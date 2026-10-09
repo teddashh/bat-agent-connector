@@ -15,7 +15,8 @@ metadata 當成功證據。共用 UI 只對 positively managed 且 action／writ
 保存要求的 mode、key／operation，未知結果不自動換 key。Claude streaming 不排 deferred；歷史 flag
 與 legacy bulk-raise apply 停用，preview 保留。完整合約見 [session permissions](../design/session-permissions.md)。
 Canonical workflow 為 `2026-10-08.6`；最新候選 SHA、exact-head CI、peer review、merge 與 installer pin
-證據以 #57 關聯 PR 為準，不把功能清單當作 installed/live 驗收。
+證據以 #57 關聯 PR 為準，不把功能清單當作 installed/live 驗收；
+[本輪交接](../handoff/2026-10-08-permissions.md) 保留實作與失敗修正脈絡。
 
 ## 上一輪續作（#56 已合併）
 
