@@ -41,7 +41,8 @@ Installer 仍要 pin 完整 code SHA，不能只比 package version；保留 dra
 - UI `9340a345b4205c61569f490d1f724707f1ead603` 的三個 peer findings：明確 admission refusal
   鎖死草稿、receipt 未核對原 key、completion event 早於 POST reply 時留舊狀態。
   `c196cc12c7a001f99518db62c142c01adf554fd8` 修正並通過獨立複查。
-  該 head 的 141 shared UI cases（40 permissions）、8 state tests、兩個 builds／browser drift check 通過。
+  141 shared UI cases（40 permissions）在 fixture-only `17be7b0` 後通過，runtime 與 `c196cc1` 相同。
+  8 state tests 先前通過，本輪未變更其 source／tests；兩個 builds／browser drift check 另有重跑。
   後續 `3e747b2c36eb773e4b980dd734e42bedd0323daf` 加 confinement admission refusal 的明確 reset；
   六個 targeted safety cases／builds 通過，獨立複查無 findings；完整整合 UI 以最後 CI 為準。
 - Actual-central fixture `17be7b052c50b0cdd3cc8c7cac4848f8b96682c3` 獨立 review 無 findings。
@@ -58,6 +59,12 @@ Installer 仍要 pin 完整 code SHA，不能只比 package version；保留 dra
   與 admitted task owner（含原本沒有 owner）變動的零 frame 拒絕。
   該 exact head 獨立 peer review 無剩餘 findings。最後 broader focused、整合 fixture 與同一候選完整四版
   CI 結果見 #57；不把前一 head 的 scoped checks 冒稱為最後候選 full。
+  `552c3fd` 的 Python 3.10 broader set **913 passed**（4m54s）。
+- 整合 `91a025b0e5b98123bb489fab2f693c7d5392f415` 的 actual-central permissions fixture 通過，
+  明確取消 source/Python overrides，只有該 checkout 的 source、venv 與 generated assets；前後 worktree 乾淨。
+  同 head 的 17 skill/principal/dashboard checks 通過；pytest 對既存 temporary garbage 目錄的清理
+  留下三個警告，沒有 assertion failure。其後只有本交接的 evidence attribution 修正，runtime 未變；最後 CI
+  仍必須對完整最終 head 執行。未刪除其他工作留下的 temporary resources。
 - 保留的開發失敗：初版 44 cases 中兩個拒絕碼被 generic REFUSED 吞掉，actual-central fixture
   同樣抓到 streaming code mismatch；另查出 admission host-policy 變成 502 BAT_ERROR。
   已補明確 runtime code 與 admission 403 regression，未降低 assertions。Root 查出 durable 分支
