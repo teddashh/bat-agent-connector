@@ -297,12 +297,30 @@ var STRINGS = {
 		dep_generation: "環境第 {generation} 代",
 		offline_actions_paused: "中央離線，暫停操作",
 		sync_waiting: "等待更新，草稿已保留",
+		desktop_add_credential: "新增憑證",
+		desktop_replace_credential: "更換憑證",
+		desktop_forget_credential: "移除此電腦儲存的憑證",
+		desktop_reload_configuration: "重新載入設定",
+		desktop_connecting: "正在處理連線…",
+		desktop_endpoint: "中央位置",
+		desktop_expected_actor: "預期身分",
+		desktop_configuration_file: "設定檔",
+		desktop_credential_source: "憑證來源",
+		desktop_source_launch_environment: "本次啟動的記憶體憑證",
+		desktop_source_windows_credential_manager: "Windows 認證管理員",
+		desktop_enrollment_help: "在 Windows 對話框的密碼欄輸入 Connector API token。驗證身分後，才會儲存供此 Windows 帳戶下次使用。",
+		desktop_enrollment_unsupported: "此平台尚未支援保護儲存與憑證輸入。可使用啟動時提供的記憶體憑證；不會儲存至磁碟。",
+		desktop_forget_help: "只移除此電腦的已儲存憑證並中斷連線；不會撤銷中央 token。草稿與原操作識別仍保留。",
+		desktop_forgotten: "已移除本機憑證並中斷連線。",
+		desktop_reloaded: "已重新載入設定。請驗證連線；原草稿仍保留。",
+		desktop_disconnected: "已中斷連線；中央工作仍繼續。",
+		desktop_enrollment_cancelled: "已取消憑證輸入，保留原連線。",
 		desktop_connection: "桌面中央連線",
 		desktop_local: "本機功能",
 		desktop_connect_needed: "請連到已配置的中央 Connector。",
 		desktop_polling: "已連線 · 每秒更新",
 		desktop_config_needed: "尚未配置中央連線。",
-		desktop_credential_missing: "本機憑證尚未提供，請依桌面安裝說明設定後重新啟動。",
+		desktop_credential_missing: "尚未提供可用的本機憑證。",
 		desktop_credential_help: "中央位置與身份由本機設定指定；憑證保留在原生程式，不存入此畫面。",
 		desktop_dashboard_only: "Dashboard 無需安裝 BAT。本機 Fleet 可使用已配置的 Kit 管理連線。開啟 BAT、原生附件、登入自啟與更新尚未提供。關閉視窗會留在系統匣；退出程式不會停止中央工作或 Fleet。",
 		fleet_title: "本機 Fleet 連線",
@@ -952,12 +970,30 @@ var STRINGS = {
 		dep_generation: "Environment generation {generation}",
 		offline_actions_paused: "Central offline · actions paused",
 		sync_waiting: "Waiting to refresh · draft preserved",
+		desktop_add_credential: "Add credential",
+		desktop_replace_credential: "Replace credential",
+		desktop_forget_credential: "Forget saved credential",
+		desktop_reload_configuration: "Reload configuration",
+		desktop_connecting: "Connection in progress…",
+		desktop_endpoint: "Central address",
+		desktop_expected_actor: "Expected identity",
+		desktop_configuration_file: "Configuration file",
+		desktop_credential_source: "Credential source",
+		desktop_source_launch_environment: "Memory-only launch credential",
+		desktop_source_windows_credential_manager: "Windows Credential Manager",
+		desktop_enrollment_help: "Enter the Connector API token in the Windows dialog’s Password field. After identity verification, it is saved for this Windows account’s next login.",
+		desktop_enrollment_unsupported: "Protected storage and credential entry are not available on this platform yet. A launch credential can be used in memory; it is never saved to disk.",
+		desktop_forget_help: "Removes this computer’s saved credential and disconnects; it does not revoke the central token. Drafts and original operation IDs stay saved.",
+		desktop_forgotten: "Saved credential removed and disconnected.",
+		desktop_reloaded: "Configuration reloaded. Verify the connection to continue; existing drafts stay saved.",
+		desktop_disconnected: "Disconnected. Central work continues.",
+		desktop_enrollment_cancelled: "Credential entry cancelled. The existing connection is unchanged.",
 		desktop_connection: "Desktop central connection",
 		desktop_local: "Local capabilities",
 		desktop_connect_needed: "Connect to the configured central Connector.",
 		desktop_polling: "connected · updates every second",
 		desktop_config_needed: "Central connection is not configured.",
-		desktop_credential_missing: "Native credential unavailable. Follow desktop setup and restart the app.",
+		desktop_credential_missing: "No native credential is available yet.",
 		desktop_credential_help: "The central address and expected identity come from local configuration. Credentials stay in the native app, outside this page.",
 		desktop_dashboard_only: "Dashboard is available without BAT installed. Local Fleet connections use your configured Kit. Opening BAT, native attachments, login autostart and updates are not available yet. Closing the window keeps the app in the tray; quitting does not stop central work or Fleet.",
 		fleet_title: "Local Fleet connections",
@@ -1328,6 +1364,9 @@ var nativeDesktop = isTauri();
 var nativeStatus = () => invoke("native_status");
 var nativeConnect = () => invoke("connector_connect");
 var nativeDisconnect = () => invoke("connector_disconnect");
+var nativeEnroll = () => invoke("connector_enroll", { locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US" });
+var nativeReloadConfiguration = () => invoke("connector_reload_configuration");
+var nativeForgetCredential = () => invoke("connector_forget_credential");
 var openExternal = (url) => invoke("open_external", { url });
 var fleetAvailability = () => invoke("fleet_availability");
 var fleetRequest = (input) => invoke("fleet_request", { input });
@@ -2175,6 +2214,9 @@ var state = {
 	sync: null,
 	endpoint: "",
 	connectionError: null,
+	nativeBusy: false,
+	nativeAttempt: 0,
+	connectionNotice: null,
 	refreshCycle: null
 };
 async function activate(caps, endpoint = location.origin, reset = false) {
@@ -2194,7 +2236,7 @@ async function activate(caps, endpoint = location.origin, reset = false) {
 	}
 	if (bootstrap) {
 		const sync = bootstrap.sync;
-		if (sync?.version !== 1 || !sync.server_id || !sync.principal_id || !Number.isSafeInteger(sync.checkpoint?.cursor) || sync.checkpoint.cursor < 0 || !sync.checkpoint.token || bootstrap.capabilities?.actor !== caps.actor) throw new Error("Invalid central bootstrap identity");
+		if (sync?.version !== 1 || !sync.server_id || !sync.principal_id || !Number.isSafeInteger(sync.checkpoint?.cursor) || sync.checkpoint.cursor < 0 || !sync.checkpoint.token || bootstrap.capabilities?.actor !== caps.actor || caps.desktop_identity && (caps.desktop_identity.server_id !== sync.server_id || caps.desktop_identity.principal_id !== sync.principal_id)) throw new Error("Invalid central bootstrap identity");
 		state.caps = bootstrap.capabilities;
 		state.namespace = storageScope(endpoint, caps.actor, sync.server_id, sync.principal_id);
 		state.sync = sync.checkpoint;
@@ -2338,7 +2380,7 @@ var ApiError = class extends Error {
 };
 async function api(method, path, body, key) {
 	if (!state.token) throw new ApiError(401, "UNAUTHORIZED", t("need_token"));
-	if (method === "POST" && (!state.online || !state.viewReady)) throw new ApiError(0, "CENTRAL_OFFLINE", t("offline_actions_paused"));
+	if (method === "POST" && (state.nativeBusy || !state.online || !state.viewReady)) throw new ApiError(0, "CENTRAL_OFFLINE", t("offline_actions_paused"));
 	const epoch = state.epoch;
 	const { status, data } = await connectorRequest(method, path, body, key, state.token);
 	if (epoch !== state.epoch) throw new ApiError(0, "CONNECTION_CHANGED", "Connection changed while the request was in flight");
@@ -2766,7 +2808,7 @@ function onEvents(fn) {
 async function streamEvents() {
 	const live = document.getElementById("live");
 	for (;;) {
-		if (!state.token || !state.viewReady) {
+		if (state.nativeBusy || !state.token || !state.viewReady) {
 			live.className = "live down";
 			live.textContent = state.token ? t("sync_waiting") : "";
 			await sleep(1e3);
@@ -4653,51 +4695,127 @@ function viewSettings(main) {
 		}
 	}, t("disconnect"))), h("label", {}, remember, " ", t("remember")), h("p", { class: "muted" }, t("token_help")), info));
 }
-async function viewNativeSettings(main) {
-	const info = h("p", { class: "muted" });
-	const endpoint = h("p", { class: "muted" });
-	const fleetRoot = h("div");
-	const connect = h("button", {
-		class: "primary",
-		onclick: async () => {
-			connect.disabled = true;
-			try {
-				const status = await nativeStatus();
-				const caps = await nativeConnect();
+async function nativeTransition(kind) {
+	if (state.nativeBusy && kind !== "disconnect") return;
+	const attempt = ++state.nativeAttempt;
+	const previousOnline = state.online;
+	const previousToken = state.token;
+	state.nativeBusy = true;
+	state.epoch++;
+	state.online = false;
+	state.connectionError = null;
+	state.connectionNotice = null;
+	try {
+		if (kind === "disconnect" || kind === "reload" || kind === "forget") {
+			disconnect();
+			if (kind === "disconnect") await nativeDisconnect();
+			else if (kind === "reload") await nativeReloadConfiguration();
+			else await nativeForgetCredential();
+			if (attempt === state.nativeAttempt) state.connectionNotice = t(kind === "forget" ? "desktop_forgotten" : kind === "reload" ? "desktop_reloaded" : "desktop_disconnected");
+		} else {
+			const status = await nativeStatus();
+			if (attempt !== state.nativeAttempt) return;
+			const caps = kind === "enroll" ? await nativeEnroll() : await nativeConnect();
+			if (attempt !== state.nativeAttempt) return;
+			if (!caps) {
+				state.online = previousOnline;
+				state.connectionNotice = t("desktop_enrollment_cancelled");
+			} else {
 				state.token = "native-credential";
-				await activate(caps, status.endpoint);
-				location.hash = "#/home";
-				route();
-			} catch (e) {
-				disconnect();
-				info.replaceChildren(errorBox(e));
-			} finally {
-				connect.disabled = false;
+				try {
+					await activate(caps, status.endpoint);
+				} catch (error) {
+					if (attempt === state.nativeAttempt) {
+						await nativeDisconnect();
+						disconnect();
+					}
+					throw error;
+				}
+				if (kind === "connect" && attempt === state.nativeAttempt) location.hash = "#/home";
 			}
 		}
-	}, t("connect"));
-	main.append(h("h1", {}, t("nav_settings")), h("div", { class: "panel" }, h("h2", {}, t("desktop_connection")), endpoint, h("p", { class: "muted" }, t("desktop_credential_help")), h("div", { class: "actions" }, connect, h("button", {
-		class: "secondary",
-		onclick: async () => {
-			await nativeDisconnect();
-			disconnect();
-			route();
+	} catch (error) {
+		if (attempt !== state.nativeAttempt) return;
+		state.connectionError = error;
+		if (state.token === previousToken) state.online = previousOnline;
+	} finally {
+		if (attempt === state.nativeAttempt) {
+			state.nativeBusy = false;
+			await route();
 		}
-	}, t("disconnect"))), info), h("div", { class: "panel" }, h("h2", {}, t("desktop_local")), h("p", { class: "note" }, t("desktop_dashboard_only"))), fleetRoot);
-	if (state.caps) info.textContent = t("connected_as", {
-		actor: state.caps.actor,
-		scopes: state.caps.scopes.join(", ")
-	});
-	try {
-		if (!state.caps && state.connectionError) info.replaceChildren(errorBox(state.connectionError));
-		const status = await nativeStatus();
-		endpoint.textContent = status.endpoint || t("desktop_config_needed");
-		if (status.error) info.textContent = status.error;
-		else if (!status.credential_available) info.textContent = t("desktop_credential_missing");
-		connect.disabled = !!status.error || !status.credential_available;
-	} catch (e) {
-		info.replaceChildren(errorBox(e));
 	}
+}
+async function viewNativeSettings(main) {
+	const mine = generation;
+	const info = h("div", { "aria-live": "polite" });
+	const details = h("dl", { class: "kv" });
+	const help = h("p", { class: "muted" }, t("desktop_credential_help"));
+	const platform = h("p", { class: "muted" });
+	const fleetRoot = h("div");
+	const controls = [];
+	const action = (kind, label, cls = "secondary") => {
+		const button = h("button", {
+			class: cls,
+			disabled: true,
+			onclick: () => {
+				for (const control of controls) control.disabled = true;
+				info.textContent = t("desktop_connecting");
+				return nativeTransition(kind);
+			}
+		}, t(label));
+		controls.push(button);
+		return button;
+	};
+	const connect = action("connect", "connect", "primary");
+	const enroll = action("enroll", "desktop_add_credential");
+	const reload = action("reload", "desktop_reload_configuration");
+	const forget = action("forget", "desktop_forget_credential");
+	const leave = action("disconnect", "disconnect");
+	const actions = h("div", { class: "actions" }, connect, enroll, reload, leave);
+	const saved = h("div", {}, h("p", { class: "muted" }, t("desktop_forget_help")), forget);
+	main.append(h("h1", {}, t("nav_settings")), h("section", {
+		class: "panel native-connection",
+		"aria-label": t("desktop_connection")
+	}, h("h2", {}, t("desktop_connection")), details, help, platform, actions, info, saved), h("div", { class: "panel" }, h("h2", {}, t("desktop_local")), h("p", { class: "note" }, t("desktop_dashboard_only"))), fleetRoot);
+	const showInfo = () => {
+		info.replaceChildren();
+		if (state.caps) info.append(h("p", {}, t("connected_as", {
+			actor: state.caps.actor,
+			scopes: state.caps.scopes.join(", ")
+		})));
+		if (state.connectionNotice) info.append(h("p", {}, state.connectionNotice));
+		if (state.connectionError) info.append(errorBox(state.connectionError));
+		if (state.nativeBusy) info.append(h("p", {}, t("desktop_connecting")));
+	};
+	showInfo();
+	try {
+		const status = await nativeStatus();
+		if (mine !== generation || !main.contains(details)) return;
+		const row = (label, value) => {
+			if (value) details.append(h("dt", {}, t(label)), h("dd", {}, value));
+		};
+		row("desktop_endpoint", status.endpoint || t("desktop_config_needed"));
+		row("desktop_expected_actor", status.expected_actor);
+		row("desktop_configuration_file", status.configuration_file);
+		if (status.credential_source) row("desktop_credential_source", t("desktop_source_" + status.credential_source));
+		if (status.error) info.append(errorBox(new Error(status.error)));
+		else if (!status.credential_available) info.append(h("p", {}, t("desktop_credential_missing")));
+		platform.textContent = status.enrollment_supported === true ? t("desktop_enrollment_help") : status.enrollment_supported === false ? t("desktop_enrollment_unsupported") : "";
+		connect.disabled = state.nativeBusy || !!status.error || !status.credential_available;
+		enroll.hidden = status.enrollment_supported !== true;
+		enroll.textContent = t(status.credential_saved ? "desktop_replace_credential" : "desktop_add_credential");
+		enroll.disabled = state.nativeBusy || !status.endpoint || !status.expected_actor;
+		enroll.className = status.credential_available ? "secondary" : "primary";
+		if (!status.credential_available) connect.className = "secondary";
+		reload.hidden = !status.configuration_reload;
+		reload.disabled = state.nativeBusy || !status.configuration_reload;
+		leave.disabled = !state.token && !state.nativeBusy;
+		saved.hidden = !status.credential_saved;
+		forget.disabled = state.nativeBusy || !status.credential_saved;
+	} catch (error) {
+		if (mine === generation) info.append(errorBox(error));
+	}
+	if (mine !== generation) return;
 	return mountFleet(fleetRoot, {
 		h,
 		t
@@ -5847,16 +5965,28 @@ async function route() {
 	state.viewReady = true;
 }
 async function start() {
+	window.addEventListener("hashchange", route);
 	if (nativeDesktop) {
 		clearToken();
+		const attempt = ++state.nativeAttempt;
 		try {
 			const status = await nativeStatus();
-			const caps = await nativeConnect();
-			state.token = "native-credential";
-			await activate(caps, status.endpoint);
+			if (!status.error && status.credential_available) {
+				state.nativeBusy = true;
+				route().catch(() => {});
+				const caps = await nativeConnect();
+				if (attempt === state.nativeAttempt) {
+					state.token = "native-credential";
+					await activate(caps, status.endpoint);
+				}
+			}
 		} catch (error) {
-			disconnect();
-			state.connectionError = error;
+			if (attempt === state.nativeAttempt) {
+				disconnect();
+				state.connectionError = error;
+			}
+		} finally {
+			if (attempt === state.nativeAttempt) state.nativeBusy = false;
 		}
 	} else {
 		state.token = loadToken();
@@ -5866,7 +5996,6 @@ async function start() {
 			state.token = null;
 		}
 	}
-	window.addEventListener("hashchange", route);
 	await route();
 	streamEvents();
 }

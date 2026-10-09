@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-connector-enroll"
+description = "Enables the connector_enroll command without any pre-configured scope."
+commands.allow = ["connector_enroll"]
+
+[[permission]]
+identifier = "deny-connector-enroll"
+description = "Denies the connector_enroll command without any pre-configured scope."
+commands.deny = ["connector_enroll"]

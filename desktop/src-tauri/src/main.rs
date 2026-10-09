@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bridge;
+mod credentials;
 mod fleet;
 
 use bridge::{Bridge, ConnectorRequest, ConnectorResponse, NativeStatus};
@@ -77,6 +78,38 @@ fn connector_disconnect(window: WebviewWindow, state: State<'_, Bridge>) -> Resu
     local_main(&window)?;
     state.disconnect();
     Ok(())
+}
+
+#[tauri::command]
+fn connector_reload_configuration(
+    window: WebviewWindow,
+    state: State<'_, Bridge>,
+) -> Result<NativeStatus, String> {
+    local_main(&window)?;
+    state.reload_configuration()
+}
+
+#[tauri::command]
+fn connector_forget_credential(
+    window: WebviewWindow,
+    state: State<'_, Bridge>,
+) -> Result<(), String> {
+    local_main(&window)?;
+    state.forget_credential()
+}
+
+#[tauri::command]
+async fn connector_enroll(
+    window: WebviewWindow,
+    state: State<'_, Bridge>,
+    locale: credentials::Locale,
+) -> Result<Option<serde_json::Value>, String> {
+    local_main(&window)?;
+    #[cfg(windows)]
+    let parent = window.hwnd().map_err(|_| "Native window unavailable")?.0 as isize;
+    #[cfg(not(windows))]
+    let parent = 0;
+    state.enroll(locale, parent).await
 }
 
 #[tauri::command]
@@ -173,6 +206,9 @@ fn main() {
             native_status,
             connector_connect,
             connector_disconnect,
+            connector_reload_configuration,
+            connector_forget_credential,
+            connector_enroll,
             connector_request,
             connector_upload_artifact,
             fleet_availability,

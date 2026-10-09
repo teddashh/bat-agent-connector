@@ -173,3 +173,8 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
 .observation-record .actions { margin-top: 0; }
 .observation-evidence { margin-top: 10px; overflow-wrap: anywhere; }
 .observation-evidence .kv { grid-template-columns: minmax(80px, max-content) minmax(0, 1fr); }
+
+/* Connection setup shares the existing panel, key/value and action components. */
+.native-connection .kv { grid-template-columns: max-content minmax(0, 1fr); }
+.native-connection .muted { font-size: 14px; max-width: 75ch; }
+@media (max-width: 640px) { .native-connection button { min-height: 44px; } }
