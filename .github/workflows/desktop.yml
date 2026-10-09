@@ -77,6 +77,7 @@ jobs:
           npm run test:central
           npm run test:cleanup
           npm run test:task-cleanup
+          npm run test:task-controls
           npm run test:artifacts
           npm run test:delivery
           npm run test:observation
@@ -87,6 +88,8 @@ jobs:
           npm run test:approvals
           npm run test:start
           npm run test:published
+          npm run test:orchestration
+          npm run test:labels
       - name: Preserve shared UI fixture evidence
         if: runner.os == 'Linux' && always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

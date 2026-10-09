@@ -1,3 +1,4 @@
+import {sessionLabelsPanel, validLabels} from "./session-labels.js";
 import {readArtifactContent} from "./transport/artifact-content.ts";
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
@@ -8,9 +9,13 @@ import { mountFleet } from "./fleet.js";
 import { mountUpdates } from "./updates.js";
 import { groupedSessions, matchesSession, runtimeStale, sessionActivity } from "./state/sessions.js";
 import { capturePanel } from "./capture.js";
+import { taskControlsPanel } from "./task-controls.js";
+import { operationList } from "./operation-list.js";
 import { permissionsPanel } from "./permissions.js";
 import { approvalsPanel } from "./approvals.js";
 import { sessionStartPanel } from "./session-start.js";
+import { sessionBatPanel } from "./session-bat.js";
+import { orchestrationPanel, orchestrationActions } from "./orchestration.js";
 import { repositoryStartPanel } from "./repository-start.js";
 import { mountArtifactReview, managedCaptureExecution } from "./artifact-review.js";
 import { consumePageAsync, settleRefreshes, storageScope } from "./state/events.ts";
@@ -613,12 +618,16 @@ async function viewHome(main) {
           ...bad.map(x => h("div", { class: "row" }, h("span", { class: "light bad" }),
             h("div", { class: "grow" }, h("div", { class: "title" }, `${t("unreachable_hosts")}: ${x.host}`),
               h("div", { class: "muted" }, x.error || t("stale_reason_" + x.stale_reason))))),
-          ...decide.work_items.map(workItemRow), ...sessions.sessions.map(sessionRow), ...ops.operations.map(opRow)];
-        panel.replaceChildren(...(rows.length ? rows : [h("p", { class: "muted" }, t("empty_needs_you"))]));
+          ...decide.work_items.map(workItemRow), ...sessions.sessions.map(sessionRow), ...ops.operations.map(opRow),
+          h("p", {class: "muted"}, t("operations_loaded", {count: ops.operations.length}), " · ",
+            h("a", {href: "#/operations/attention"}, t("operations_view_attention")))];
+        panel.replaceChildren(...(rows.length > 1 ? rows : [h("p", { class: "muted" }, t("empty_needs_you")), ...rows]));
       } else {
         const ops = await api("GET", "/operations?status=accepted,running,waiting_checks,waiting_external&limit=50");
         panel.replaceChildren(...(ops.operations.length ? ops.operations.map(opRow)
-          : [h("p", { class: "muted" }, t("empty_to_confirm"))]));
+          : [h("p", { class: "muted" }, t("empty_to_confirm"))]),
+          h("p", {class: "muted"}, t("operations_loaded", {count: ops.operations.length}), " · ",
+            h("a", {href: "#/operations/active"}, t("operations_view_active"))));
       }
     } catch (e) { panel.replaceChildren(errorBox(e)); }
   };
@@ -645,7 +654,8 @@ async function viewSessions(main) {
     h("a", {class: "session-project-link", href: "#/projects"}, t("sessions_projects")));
   main.append(h("div", {class: "session-heading"}, h("h1", {}, t("sessions_title")),
     state.caps?.actions?.some(a => a.action === "session.start") ? h("a", {href: "#/start"}, t("start_title_page")) : null,
-    state.caps?.features?.repository_sync?.length ? h("a", {href: "#/published"}, t("pub_title")) : null),
+    state.caps?.features?.repository_sync?.length ? h("a", {href: "#/published"}, t("pub_title")) : null,
+    state.caps?.actions?.some(a => Object.values(orchestrationActions).includes(a.action)) ? h("a", {href: "#/orchestrate/relay"}, t("orch_title")) : null),
     h("p", {class: "muted"}, t("sessions_intro")),
     h("div", {class: "filters session-filters"}, search, hostSel, accessSel,
       state.caps?.actions?.some(a => a.action === "session.approve_pending") ? h("a", {href: "#/approvals"}, t("bulk_title")) : null), status,
@@ -691,6 +701,9 @@ async function viewSessions(main) {
         h("span", {}, [session.agent_kind, session.worktree_branch].filter(Boolean).join(" · "))),
       runtimeStale(session) ? h("p", {class: "session-stale muted"}, t("sessions_stale"), " · ",
         session.stale_reason === "gone" ? t("sessions_not_seen") : session.stale_reason ? t("stale_reason_" + session.stale_reason) : t("sessions_runtime_stale")) : null,
+      validLabels(session.connector_metadata?.labels) && session.connector_metadata.labels.length ? h("div", {class: "actions session-entry-meta", "aria-label": t("labels_title")},
+        ...session.connector_metadata.labels.slice(0, 2).map(v => chip(v)),
+        session.connector_metadata.labels.length > 2 ? h("span", {class: "muted", title: session.connector_metadata.labels.join(" · ")}, `+${session.connector_metadata.labels.length - 2}`) : null) : null,
       details);
   };
   const render = () => {
@@ -913,6 +926,52 @@ function observationPanels(type, id, path) {
   return {box: h("div", {}, history.box, relations.box), changed: event => {history.changed(event); relations.changed(event);}};
 }
 
+async function viewTask(main, id) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const head = h("div", {class: "panel"}), status = h("div", {role: "status"});
+  const observations = observationPanels("execution", id, `/tasks/${encodeURIComponent(id)}`);
+  let task = null, readReady = false, active = null, retry;
+  const panel = taskControlsPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection), taskId: id,
+    task: () => task, ready: () => readReady && state.online && !state.nativeBusy,
+    storageKey: `batc.task-control.${connection.namespace}.${id}`, errorBox, opStatus,
+    onSettled: () => load()});
+  main.append(head, status, panel.box, observations.box);
+  async function load() {
+    assertView(connection);
+    if (active) {await active.catch(() => {}); assertView(connection); return load();}
+    active = (async () => {
+      const operation = panel.refresh(true);
+      const observation = operation.catch(() => {}).then(() => api("GET", `/tasks/${encodeURIComponent(id)}`));
+      await settleRefreshes([observation, operation]);
+      const data = await observation;
+      assertView(connection);
+      if (data.task?.task_id !== id) throw new Error(t("task_control_invalid"));
+      task = data.task;
+      head.replaceChildren(h("h1", {}, t("task_title")), h("p", {}, task.project || id),
+        h("p", {class: "actions"}, chip(t([true, false, 0, 1].includes(task.paused) ? task.paused ? "task_paused" : "task_dispatch_enabled" : "task_unknown")),
+          chip(["queued", "dispatching", "accepted", "running", "waiting_permission", "quota_limited", "human_owned", "needs_ted", "verifying", "done", "failed", "uncertain"].includes(task.state) ? t("task_state_" + task.state) : task.state || "?")),
+        h("p", {class: "muted"}, task.host || "", " · ", h("code", {}, id)),
+        ...(task.host && task.session_id ? [h("p", {}, h("a", {href: `#/session/${encodeURIComponent(task.host)}/${encodeURIComponent(task.session_id)}`}, t("task_open_session")))] : []),
+        ...(state.caps?.features?.cleanup_task === true ? [h("p", {}, h("a", {href: `#/cleanup/task/${encodeURIComponent(id)}`}, t("cleanup_task_preview")))] : []),
+        ...(state.caps?.artifacts?.capture?.managed_single_file === true ? [h("p", {}, h("a", {href: `#/artifact-review/task/${encodeURIComponent(id)}`}, t("ar_open")))] : []),
+        h("details", {}, h("summary", {}, t("task_evidence")), h("pre", {class: "pre"}, JSON.stringify(task, null, 2))));
+      status.replaceChildren(); readReady = true; clearTimeout(retry);
+    })();
+    try {await active;} catch (error) {
+      if (connection.generation === generation && connection.epoch === state.epoch) {
+        readReady = false; status.replaceChildren(errorBox(error));
+        clearTimeout(retry); retry = setTimeout(() => load().catch(() => {}), 3000);
+      }
+      throw error;
+    } finally {active = null; panel.update();}
+  }
+  await load().catch(() => {});
+  const refresh = debounceRefresh(load, 500);
+  const off = onEvents(event => {observations.changed(event);
+    if (["execution", "task", "operation", "session"].includes(event.resource_type)) return refresh();});
+  return () => {clearTimeout(retry); off();};
+}
+
 async function viewObservedResource(main, type, id) {
   const path = type === "execution" ? `/tasks/${encodeURIComponent(id)}` : `/worktrees/${encodeURIComponent(id)}`;
   const head = h("div", {class: "panel"});
@@ -988,12 +1047,14 @@ async function viewSession(main, host, sid) {
   const composer = h("div", {hidden: true}, box, h("div", { class: "actions" }, send, stop,
     h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
   const readonly = h("p", { class: "note" }, t("read_only_note"));
-  let capture, permissions;
+  let capture, permissions, batHandoff;
   const captureSlot = h("div"), permissionsSlot = h("div");
   const controls = h("div", { class: "panel" }, pending, readonly, composer, permissionsSlot, captureSlot, status);
+  const labels = sessionLabelsPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    target: {host, session_id: sid}, storageKey: `batc.labels.${connection.namespace}.${JSON.stringify([host, sid])}`, errorBox, opStatus});
   const cps = checkpointPanel(host, sid);
   const observations = observationPanels("session", `${host}/${sid}`, path);
-  main.append(head, controls, cps.box, h("h2", {}, t("messages")), msgs, observations.box);
+  main.append(head, labels.box, controls, cps.box, h("h2", {}, t("messages")), msgs, observations.box);
   const renderPending = () => {
     const pend = row.api_access === "managed" ? row.pending : null;
     const current = identity(pend);
@@ -1047,7 +1108,9 @@ async function viewSession(main, host, sid) {
       button.disabled = !row?.pending?.toolUseId || !allowed("session.answer");
   };
   const applyObservation = data => {
-    const first = !row; row = data.session;
+    const first = !row;
+    row = data.session || (data.cleanup?.length ? {host, session_id: sid, provenance: "unknown", api_access: "read_only"} : null);
+    if (!row) throw new Error(t("obs_unknown"));
     rememberObservation("session", `${host}/${sid}`, data, [`host:${host}`,
       ...(data.work_items || []).map(item => `work_item:${item.work_item_id}`),
       ...(data.relations_summary || []).flatMap(relation => [`execution:${relation.execution_id}`, `task:${relation.execution_id}`]),
@@ -1060,6 +1123,9 @@ async function viewSession(main, host, sid) {
         h("dt", {}, t("agent")), h("dd", {}, [row.agent_kind, row.model].filter(Boolean).join(" · ")),
         h("dt", {}, "Provenance"), h("dd", {}, t("provenance_" + row.provenance)),
         h("dt", {}, t("observed")), h("dd", {}, observationTime(row.observed_at))), observationState(row), confinementDetails(row));
+    if (!batHandoff) batHandoff = sessionBatPanel({h, t, guard: () => assertView(connection), session: () => row,
+      storageKey: `batc.session-bat.${connection.namespace}.${JSON.stringify([host, sid])}`});
+    head.append(batHandoff.box); batHandoff.update();
     if (data.started_from) {
       const from = data.started_from;
       head.append(h("p", { class: "note" }, t("started_from", { commit: from.commit_sha.slice(0, 12) }), " ",
@@ -1071,6 +1137,13 @@ async function viewSession(main, host, sid) {
     const managed = row.api_access === "managed";
     if (managed && row.provenance === "connector_managed" && state.caps?.artifacts?.capture?.managed_single_file)
       head.append(h("p", {}, h("a", {href: `#/artifact-review/session/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`}, t("ar_open"))));
+    if (managed && row.provenance === "connector_managed") {
+      const links = [];
+      if (state.caps?.actions?.some(a => a.action === "session.relay")) links.push(h("a", {href: `#/orchestrate/relay/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`}, t("orch_relay")));
+      if (row.agent_kind === "claude" && !data.relations_summary?.length && state.caps?.actions?.some(a => a.action === "session.failover"))
+        links.push(h("a", {href: `#/orchestrate/failover/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`}, t("orch_failover")));
+      if (links.length) head.append(h("div", {class: "actions"}, ...links));
+    }
     if (managed && row.provenance === "connector_managed" && !permissions) {
       permissions = permissionsPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
         errorBox, opStatus, storageKey: `batc.permissions.${connection.namespace}.${JSON.stringify([host, sid])}`,
@@ -1114,7 +1187,7 @@ async function viewSession(main, host, sid) {
   };
   // Keep the subscription after a partial initial failure. The view already contains controls;
   // returning here would let later journal pages be acknowledged without refreshing them.
-  try { await settleRefreshes([refresh(), cps.load()]); } catch { /* retain the failure and drafts */ }
+  try { await settleRefreshes([refresh(), cps.load(), labels.refresh()]); } catch { /* retain the failure and drafts */ }
   const retry = setInterval(() => {
     if (!readReady && !refreshInFlight) refresh().catch(() => {});
   }, 1000);
@@ -1122,9 +1195,10 @@ async function viewSession(main, host, sid) {
   const off = onEvents(ev => { observations.changed(ev); return settleRefreshes([
     (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "work_item") ? reload() : Promise.resolve(),
     ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve(),
-    ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve()
+    ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve(),
+    (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation") ? labels.refresh(true) : Promise.resolve()
   ]); });
-  return () => {clearInterval(retry); off();};
+  return () => {clearInterval(retry); off(); batHandoff?.dispose();};
 }
 
 // A checkpoint records this session's commit and recent conversation (read-only); continuing starts a new
@@ -1763,16 +1837,16 @@ function integrationStatus(op, act) {
   return out;
 }
 
-async function viewOperations(main) {
-  const list = h("div", { class: "panel" });
-  main.append(h("h1", {}, t("nav_operations")), list);
-  const render = async () => {
-    try { list.replaceChildren(...(await api("GET", "/operations?limit=100")).operations.map(opRow)); }
-    catch (e) { list.replaceChildren(errorBox(e)); }
-  };
-  await render();
-  const reload = debounceRefresh(render, 500);
-  return onEvents(ev => { if (ev.resource_type === "operation") return reload(); });
+async function viewOperations(main, filter = "all") {
+  const statuses = {attention: "needs_attention,uncertain", active: "accepted,running,waiting_checks,waiting_external"}[filter];
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const list = operationList({h, t, api, guard: () => assertView(connection), row: opRow, statuses});
+  main.append(h("h1", {}, t("nav_operations")),
+    h("div", {class: "actions"}, ...[["all", "operations_all"], ["attention", "tab_needs_you"], ["active", "tab_to_confirm"]].map(([id, label]) =>
+      h("a", {href: `#/operations/${id}`, class: filter === id ? "on" : ""}, t(label)))), list.box);
+  await list.load().catch(() => {});
+  const reload = debounceRefresh(() => list.load(), 500);
+  return onEvents(ev => {if (ev.resource_type === "operation") return reload();});
 }
 
 async function viewOperation(main, id) {
@@ -2799,10 +2873,26 @@ async function viewStart(main) {
     storageKey: `batc.start.${connection.namespace}`});
   main.append(h("a", {href: "#/sessions"}, t("nav_sessions")), h("h1", {}, t("start_title_page")),
     h("p", {class: "muted"}, t("start_intro")),
-    state.caps?.features?.repository_sync?.length ? h("p", {}, h("a", {href: "#/published"}, t("pub_title"))) : null, panel.box);
+    ...(state.caps?.features?.repository_sync?.length ? [h("p", {}, h("a", {href: "#/published"}, t("pub_title")))] : []), panel.box);
   try {await panel.init();} catch { /* panel retains the original intent and shows the read error */ }
   assertView(connection);
   return onEvents(ev => {if (["operation", "host", "session"].includes(ev.resource_type)) return panel.refresh(true);});
+}
+
+async function viewOrchestration(main, selectedMode = "relay", host, sid) {
+  const mode = Object.hasOwn(orchestrationActions, selectedMode) ? selectedMode : "relay";
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const context = host && sid ? {host, session_id: sid} : {};
+  const panel = orchestrationPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    ready: () => state.online && !state.nativeBusy, errorBox, opStatus, mode, context,
+    storageKey: `batc.orchestrate.${connection.namespace}.${mode}.${JSON.stringify(context)}`});
+  main.append(h("a", {href: "#/sessions"}, t("nav_sessions")), h("h1", {}, t("orch_title")),
+    h("nav", {class: "orch-modes", "aria-label": t("orch_title")}, ...Object.keys(orchestrationActions).map(key =>
+      h("a", {href: `#/orchestrate/${key}`, "aria-current": key === mode ? "page" : null}, t("orch_" + key)))),
+    h("h2", {}, t("orch_" + mode)), panel.box);
+  try {await panel.init();} catch { /* preserve the original intent and show the read error */ }
+  assertView(connection);
+  return onEvents(event => {if (["operation", "session", "host"].includes(event.resource_type)) return panel.refresh(true);});
 }
 
 async function viewPublished(main) {
@@ -2841,9 +2931,9 @@ async function route() {
   main.replaceChildren();
   if (!state.token && name !== "settings") { main.append(h("p", { class: "note" }, t(nativeDesktop ? "desktop_connect_needed" : "need_token"))); viewSettings(main); return; }
   const views = { home: viewHome, projects: viewProjects, project: viewProject, item: viewWorkItem, sessions: viewSessions,
-    cleanup: viewCleanup, approvals: viewApprovals, delivery: viewDelivery, operations: viewOperations, session: viewSession, start: viewStart, published: viewPublished, op: viewOperation, settings: viewSettings,
+    cleanup: viewCleanup, approvals: viewApprovals, delivery: viewDelivery, operations: viewOperations, session: viewSession, start: viewStart, published: viewPublished, orchestrate: viewOrchestration, op: viewOperation, settings: viewSettings,
     "artifact-review": viewArtifactReview,
-    host: viewHostDiscovery, task: (main, id) => viewObservedResource(main, "execution", id),
+    host: viewHostDiscovery, task: viewTask,
     worktree: (main, id) => viewObservedResource(main, "worktree", id) };
   const off = await (views[name] || viewHome)(main, ...rest);
   if (mine !== generation) { if (off) off(); return; } // the user navigated away while this view loaded

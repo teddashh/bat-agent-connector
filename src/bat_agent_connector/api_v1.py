@@ -108,11 +108,15 @@ class ApiV1:
         orchestration_operations.install(daemon.ops)
         from . import fanout_operations
         fanout_operations.install(daemon.ops)
+        from . import verification_operations
+        verification_operations.install(daemon.ops)
         from . import failover_operations
         failover_operations.install(daemon.ops)
 
         from . import bulk_approval
         bulk_approval.install(daemon.ops, daemon._admin_token)
+        from .session_observation import SessionObservation
+        self.session_observation = SessionObservation(daemon)
         self.allowed_origins = allowed_origins
         self._streams = 0
         self._streams_by_actor: dict[str, int] = {}
@@ -136,6 +140,7 @@ class ApiV1:
             ("GET", r"/api/v1/sessions", self.sessions, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)", self.session, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/messages", self.messages, "observe"),
+            ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/wait", self.session_wait, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/history", self.session_history, "observe"),
             ("GET", r"/api/v1/sessions/(?P<host>[^/]+)/(?P<sid>[^/]+)/relations", self.session_relations, "observe"),
             ("GET", r"/api/v1/hosts/(?P<host>[^/]+)/discovery", self.discovery, "observe"),
@@ -253,6 +258,11 @@ class ApiV1:
                     raise ApiError(401, "UNAUTHORIZED", "a valid bearer token is required")
                 if scope and not principal.allows(scope):
                     raise ApiError(403, "FORBIDDEN", f"this route needs the {scope!r} scope")
+            if fn in {self.messages, self.session_wait}:
+                from .session_observation import authorizer
+                query = parse_qs(parts.query, keep_blank_values=True)
+                kwargs.update(reader=reader, writer=writer,
+                              check_authorization=authorizer(self.daemon, token, principal))
             status, payload = await fn(principal=principal, query=query, body=body, headers=headers, **kwargs)
         except dashboard_sync.ResetRequired as e:
             status, payload = 409, e.document()
@@ -419,7 +429,7 @@ class ApiV1:
                                      for name in fleet.config.hosts]},
                      "features": {"dashboard_sync": {"version": 1, "bootstrap": "/api/v1/bootstrap", "checkpoint_replay": True},
                                   "repository_sync": repository_sync.capabilities(self.daemon.ops),
-                                  "cleanup": True, "cleanup_task": True, "inventory": True, "session_history": True, "resource_relations": True, "discovery_scope": True,
+                                  "cleanup": True, "cleanup_task": True, "inventory": True, "session_history": True, "session_observation": {"read": True, "wait": True, "max_wait_s": 1800}, "resource_relations": True, "discovery_scope": True,
                                   "worktree_history": {"known_bindings_only": True}, "history": {"source": "journal", "legacy_transitions": "may_be_incomplete", "optional_adapters": ["delivery_part_a", "delivery_part_b"],
                                       "observed_event_kinds": [r[0] for r in self.daemon.journal.db.execute("SELECT DISTINCT kind FROM api_events ORDER BY kind")]}, "events_stream": True, "operations": True, "work_items": True,
                                   "github": self.daemon.ops.context.get("github") is not None,
@@ -539,13 +549,17 @@ class ApiV1:
     async def discovery(self, query, host, **_):
         return 200, self.daemon.inventory.discovery(host, after=self._int(query, "after", 0), limit=self._int(query, "limit", 20))
 
-    async def messages(self, query, host, sid, **_):
-        self._known_host(host)
-        read = await service.session_read(
-            self.daemon.inventory.fleet, host, sid, last_n=self._int(query, "last_n", 20),
-            offset=self._int(query, "offset", 0), include_tools=bool(self._bool(query, "include_tools")),
-            max_chars=self._int(query, "max_chars", 12_000), after=self._q(query, "after"))
-        return 200, read
+    async def messages(self, query, host, sid, principal, reader=None, writer=None, check_authorization=None, **_):
+        from .session_observation import query_params
+        return 200, await self.session_observation.request(principal, "session_read",
+            query_params("session_read", host, sid, query), reader=reader, writer=writer,
+            check_authorization=check_authorization)
+
+    async def session_wait(self, query, host, sid, principal, reader=None, writer=None, check_authorization=None, **_):
+        from .session_observation import query_params
+        return 200, await self.session_observation.request(principal, "session_wait",
+            query_params("session_wait", host, sid, query), reader=reader, writer=writer,
+            check_authorization=check_authorization)
 
     async def policy(self, query, **_):
         host = self._q(query, "host")

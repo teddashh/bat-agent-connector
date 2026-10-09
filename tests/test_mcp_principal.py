@@ -11,10 +11,11 @@ from tests import test_api_v1 as api
 daemon = api.daemon
 served = api.served
 
-LEGACY = {"hosts_list", "session_read", "sessions_list", "session_send", "session_continue",
+LEGACY = {"hosts_list", "sessions_list", "session_send", "session_continue",
           "session_interrupt", "session_answer", "session_set_permissions",
-          "session_cleanup", "worktree_merge", "worktree_remove", "session_record_verification"}
-CENTRAL_ORCHESTRATION = {"session_relay", "session_failover", "fanout_plan_session", "fanout_from_plan"}
+          "session_cleanup", "worktree_merge", "worktree_remove"}
+CENTRAL_ORCHESTRATION = {"session_relay", "session_failover", "fanout_plan_session", "fanout_from_plan",
+                         "session_record_verification"}
 TASK_WRITES = {"work_submit", "work_pause", "work_resume", "work_mark_stage"}
 
 
@@ -35,7 +36,7 @@ async def test_agent_profile_omits_all_direct_fleet_tools_even_on_privileged_hos
         assert not names & LEGACY
         assert {"capabilities_get", "inventory_sessions", "work_status", "work_result", "work_events"} <= names
         assert ("session_start" in names) is (not read_only)
-        assert "workspaces_list" in names
+        assert {"workspaces_list", "session_read", "session_wait"} <= names
         if read_only:
             assert not names & (TASK_WRITES | set(OPERATION_TOOLS) | CENTRAL_ORCHESTRATION)
         else:

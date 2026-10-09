@@ -22,12 +22,15 @@
     "test:artifacts": "node tests/artifact-integration.mjs",
     "test:observation": "node tests/observation-integration.mjs",
     "test:capture": "node tests/capture-integration.mjs",
+    "test:task-controls": "node tests/task-controls-integration.mjs",
     "test:permissions": "node tests/permissions-integration.mjs",
     "test:approvals": "node tests/approvals-integration.mjs",
     "test:native-files": "node tests/native-files-integration.mjs",
     "test:published": "node tests/repository-start-integration.mjs",
     "test:start": "node tests/session-start-integration.mjs",
-    "test:artifact-review": "node tests/artifact-review-integration.mjs"
+    "test:artifact-review": "node tests/artifact-review-integration.mjs",
+    "test:orchestration": "node tests/orchestration-integration.mjs",
+    "test:labels": "node tests/session-labels-integration.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.1"

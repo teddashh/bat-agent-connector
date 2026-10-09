@@ -48,7 +48,7 @@ ALLOWED = {
 }
 UNCERTAIN_RETRY_S = (30.0, 60.0, 120.0, 300.0, 600.0)
 NO_KEY_PREFIX = "batc:nokey:"
-LEGACY_SESSION_ACTIONS = frozenset({"session.failover", "fanout.plan", "fanout.start", "session.relay", "session.start", "session.send", "session.answer", "session.interrupt", "session.permissions", "session.approve_pending"})
+LEGACY_SESSION_ACTIONS = frozenset({"session.record_verification", "session.failover", "fanout.plan", "fanout.start", "session.relay", "session.start", "session.send", "session.answer", "session.interrupt", "session.permissions", "session.approve_pending"})
 LEGACY_TASK_ACTIONS = frozenset({"task.pause", "task.resume", "task.mark_stage",
                                  "task.verify", "task.request_ted", "task.command.reconcile"})
 
@@ -451,8 +451,11 @@ class OperationService:
         missing = [k for k in adef.target_keys if not isinstance(target.get(k), str) or not target[k]]
         if missing:
             raise OperationError("INVALID_TARGET", f"target needs {', '.join(missing)}", 422)
-        request_hash = hashlib.sha256(_canonical({"action": action, "target": target, "params": params,
-                                                  "preconditions": preconditions}).encode()).hexdigest()
+        try:
+            request_hash = hashlib.sha256(_canonical({"action": action, "target": target, "params": params,
+                                                      "preconditions": preconditions}).encode()).hexdigest()
+        except UnicodeEncodeError:
+            raise OperationError("INVALID_REQUEST", "request text must contain valid Unicode characters", 422) from None
         key = None if no_key else idempotency_key.strip()
         existing = self.db.execute("SELECT * FROM operations WHERE actor=? AND idem_key=?",
                                    (principal.actor, key)).fetchone()
