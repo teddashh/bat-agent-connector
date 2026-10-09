@@ -8,7 +8,10 @@ const equal = (a, b) => {
   if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => equal(v, b[i]));
   return object(a) && object(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every(k => equal(a[k], b[k]));
 };
-const refusedBeforeAdmission = new Set(["BULK_PREVIEW_INVALID", "BULK_PREVIEW_EXPIRED", "BULK_PREVIEW_MISMATCH", "BULK_MODE_REFUSED"]);
+// OperationService replays an accepted key before these static admission checks.
+// These exact errors prove this selection was not accepted; auth/conflict errors do not.
+const refusedBeforeAdmission = new Set(["BULK_PREVIEW_INVALID", "BULK_PREVIEW_EXPIRED", "BULK_PREVIEW_MISMATCH", "BULK_MODE_REFUSED",
+  "CONTROL_VERSION_CONFLICT", "BULK_BINDING_CHANGED"]);
 function validPreview(p) {
   return object(p) && typeof p.host === "string" && p.host.length > 0 &&
     (p.workspace === null || typeof p.workspace === "string") && typeof p.preview_token === "string" &&

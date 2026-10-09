@@ -178,6 +178,27 @@ for (const native of [false, true]) {
     }
     expect(new Set(state.posts.map(p => p.idempotency_key)).size).toBe(1);
   });
+  for (const code of ['CONTROL_VERSION_CONFLICT', 'BULK_BINDING_CHANGED']) test(`${kind}: ${code} permits explicit reviewed replacement only`, async ({page}) => {
+    const state = await fixture(page, native, {refuse: code}); const box = await open(page);
+    await box.getByRole('checkbox').first().check(); await box.getByRole('button', {name: 'Approve selected requests'}).click();
+    await expect(box).toContainText(code);
+    const before = await page.evaluate(() => JSON.parse(Object.entries(localStorage).find(([k]) => k.startsWith('batc.approvals.'))![1]).intent);
+    await page.reload();
+    await expect(box.getByRole('button', {name: 'Review another batch'})).toBeVisible();
+    expect(state.posts).toHaveLength(1); expect(state.operation).toBeNull();
+    const stored = await page.evaluate(() => JSON.parse(Object.entries(localStorage).find(([k]) => k.startsWith('batc.approvals.'))![1]).intent);
+    expect(stored.request).toEqual(before.request); expect(stored.key).toBe(before.key);
+    await expect(box.getByRole('button', {name: 'Preview pending requests'})).toBeDisabled();
+    await box.getByRole('button', {name: 'Review another batch'}).click();
+    state.refuse = null; await box.getByRole('button', {name: 'Preview pending requests'}).click();
+    await expect(box.getByRole('checkbox').first()).not.toBeChecked();
+    await box.getByRole('checkbox').first().check();
+    await box.getByRole('combobox', {name: 'Subsequent permission mode for managed-session-1'}).selectOption('default');
+    await box.getByRole('button', {name: 'Approve selected requests'}).click();
+    await expect(box.getByRole('button', {name: 'Check batch outcome'})).toBeVisible();
+    expect(state.posts[1].idempotency_key).not.toBe(state.posts[0].idempotency_key);
+    expect(state.posts[1].body.params.selection).toEqual([{item_id: item, mode: 'default'}]);
+  });
   test(`${kind}: late preview cannot write into a different page or create an operation`, async ({page}) => {
     const state = await fixture(page, native, {delayPreview: true});
     await page.goto('/dashboard/#/approvals');
