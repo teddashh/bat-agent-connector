@@ -1,0 +1,515 @@
+//! Native-only, explicit signed updates. Nothing accepts a caller URL, key or installer path.
+use base64::Engine;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{
+    fs::OpenOptions,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::Duration,
+};
+use tauri_plugin_updater::{Update, UpdaterExt};
+
+const FEED: &str = "https://github.com/teddashh/bat-agent-connector/releases/latest/download/dashboard-update.json";
+const TARGET: &str = "windows-x86_64-nsis";
+const MAX_DOWNLOAD: usize = 128 * 1024 * 1024;
+const CONTRACT: &str = "2026-10-08";
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Request {
+    Status {},
+    Check {},
+    Download { candidate_id: String },
+    Install { candidate_id: String },
+}
+
+#[derive(Clone, Serialize)]
+pub struct Candidate {
+    pub candidate_id: String,
+    pub version: String,
+    pub source_sha: String,
+    pub workflow_version: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct Status {
+    pub current_version: String,
+    pub available: bool,
+    pub phase: &'static str,
+    pub code: Option<String>,
+    pub candidate: Option<Candidate>,
+    pub installation: Option<Intent>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Intent {
+    schema: u32,
+    from_version: String,
+    to_version: String,
+    candidate_id: String,
+    source_sha: String,
+    artifact_sha256: String,
+}
+
+struct Pending {
+    view: Candidate,
+    update: Update,
+    bytes: Option<Vec<u8>>,
+}
+
+pub struct Updates {
+    version: String,
+    pubkey: Result<String, String>,
+    supported: bool,
+    directory: PathBuf,
+    pub serial: tokio::sync::Mutex<()>,
+    status: Mutex<Status>,
+    pending: Mutex<Option<Pending>>,
+}
+
+fn key(config: &serde_json::Value) -> Result<String, String> {
+    if config.get("requireSignedVersion").and_then(|v| v.as_bool()) != Some(true)
+        || [
+            "dangerousInsecureTransportProtocol",
+            "dangerousAcceptInvalidCerts",
+            "dangerousAcceptInvalidHostnames",
+        ]
+        .iter()
+        .any(|k| config.get(k).and_then(|v| v.as_bool()) == Some(true))
+    {
+        return Err("UPDATE_CONFIGURATION_INVALID".into());
+    }
+    let value = config
+        .get("pubkey")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if value.is_empty() {
+        return Err("UPDATE_SIGNING_NOT_CONFIGURED".into());
+    }
+    if value.len() > 4096 {
+        return Err("UPDATE_CONFIGURATION_INVALID".into());
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|_| "UPDATE_CONFIGURATION_INVALID")?;
+    let decoded = std::str::from_utf8(&decoded).map_err(|_| "UPDATE_CONFIGURATION_INVALID")?;
+    minisign_verify::PublicKey::decode(decoded).map_err(|_| "UPDATE_CONFIGURATION_INVALID")?;
+    Ok(value.to_owned())
+}
+
+fn safe_url(url: &url::Url) -> bool {
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none_or(|p| p == 443)
+        && matches!(
+            url.host_str(),
+            Some(
+                "github.com"
+                    | "release-assets.githubusercontent.com"
+                    | "objects.githubusercontent.com"
+            )
+        )
+}
+
+fn metadata(update: &Update) -> Result<Candidate, String> {
+    let meta = update
+        .raw_json
+        .get("bat_dashboard")
+        .ok_or("UPDATE_METADATA_INCOMPATIBLE")?;
+    let source = meta
+        .get("source_sha")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let workflow = meta
+        .get("workflow_version")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if meta.get("api_version").and_then(|v| v.as_u64()) != Some(1)
+        || meta.get("contract_version").and_then(|v| v.as_str()) != Some(CONTRACT)
+        || source.len() != 40
+        || !source.bytes().all(|b| b.is_ascii_hexdigit())
+        || workflow.len() > 64
+        || !workflow.starts_with("2026-10-08.")
+        || update.version.len() > 128
+        || update.signature.len() > 8192
+        || !safe_url(&update.download_url)
+        || update.download_url.host_str() != Some("github.com")
+        || !update
+            .download_url
+            .path()
+            .starts_with("/teddashh/bat-agent-connector/releases/download/")
+        || !update.download_url.path().ends_with(".exe")
+        || update.download_url.query().is_some()
+        || update.download_url.fragment().is_some()
+    {
+        return Err("UPDATE_METADATA_INCOMPATIBLE".into());
+    }
+    Ok(Candidate {
+        candidate_id: uuid::Uuid::new_v4().to_string(),
+        version: update.version.clone(),
+        source_sha: source.into(),
+        workflow_version: workflow.into(),
+    })
+}
+
+fn marker_path(directory: &Path, version: &str) -> PathBuf {
+    directory.join(format!("{:x}.json", Sha256::digest(version.as_bytes())))
+}
+
+fn read_intent(directory: &Path, version: &str) -> Result<Option<Intent>, String> {
+    let path = marker_path(directory, version);
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("UPDATE_RECEIPT_UNREADABLE".into()),
+    };
+    if !meta.is_file() || meta.len() > 8192 {
+        return Err("UPDATE_RECEIPT_UNREADABLE".into());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(8193).read_to_end(&mut bytes))
+        .map_err(|_| "UPDATE_RECEIPT_UNREADABLE")?;
+    let intent: Intent = serde_json::from_slice(&bytes).map_err(|_| "UPDATE_RECEIPT_UNREADABLE")?;
+    if intent.schema != 1 || intent.from_version != version {
+        return Err("UPDATE_RECEIPT_UNREADABLE".into());
+    }
+    Ok(Some(intent))
+}
+
+fn write_intent(directory: &Path, intent: &Intent) -> Result<(), String> {
+    std::fs::create_dir_all(directory).map_err(|_| "UPDATE_RECEIPT_UNWRITABLE")?;
+    let bytes = serde_json::to_vec(intent).map_err(|_| "UPDATE_RECEIPT_UNWRITABLE")?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker_path(directory, &intent.from_version))
+        .map_err(|_| "UPDATE_INSTALLATION_UNSETTLED")?;
+    // Even a partial intent blocks a repeat. Never erase a possibly sent installer invocation.
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| "UPDATE_RECEIPT_UNWRITABLE")?;
+    #[cfg(unix)]
+    std::fs::File::open(directory)
+        .and_then(|d| d.sync_all())
+        .map_err(|_| "UPDATE_RECEIPT_UNWRITABLE")?;
+    Ok(())
+}
+
+impl Updates {
+    pub fn new(directory: PathBuf, version: String, config: serde_json::Value) -> Self {
+        let pubkey = key(&config);
+        let supported = cfg!(all(windows, target_arch = "x86_64"));
+        let code = if !supported {
+            Some("UPDATE_PLATFORM_UNSUPPORTED".into())
+        } else {
+            pubkey.as_ref().err().cloned()
+        };
+        Self {
+            status: Mutex::new(Status {
+                current_version: version.clone(),
+                available: supported && pubkey.is_ok(),
+                phase: "idle",
+                code,
+                candidate: None,
+                installation: None,
+            }),
+            version,
+            pubkey,
+            supported,
+            directory,
+            serial: tokio::sync::Mutex::new(()),
+            pending: Mutex::new(None),
+        }
+    }
+
+    pub fn status(&self) -> Result<Status, String> {
+        let mut view = self
+            .status
+            .lock()
+            .map_err(|_| "UPDATE_STATE_UNAVAILABLE")?
+            .clone();
+        if let Some(intent) = read_intent(&self.directory, &self.version)? {
+            view.phase = "installation_unknown";
+            view.code = Some("UPDATE_INSTALLATION_UNSETTLED".into());
+            view.installation = Some(intent);
+        }
+        Ok(view)
+    }
+
+    fn ready(&self) -> Result<(), String> {
+        if !self.supported {
+            return Err("UPDATE_PLATFORM_UNSUPPORTED".into());
+        }
+        self.pubkey.as_ref().map_err(Clone::clone)?;
+        if read_intent(&self.directory, &self.version)?.is_some() {
+            return Err("UPDATE_INSTALLATION_UNSETTLED".into());
+        }
+        Ok(())
+    }
+
+    fn phase(&self, phase: &'static str, code: Option<String>) -> Result<(), String> {
+        let mut view = self.status.lock().map_err(|_| "UPDATE_STATE_UNAVAILABLE")?;
+        view.phase = phase;
+        view.code = code;
+        Ok(())
+    }
+
+    pub async fn check(&self, app: &tauri::AppHandle) -> Result<Status, String> {
+        self.ready()?;
+        // Endpoint, proxy policy, keys, target and arguments are native/build-owned.
+        let updater = app
+            .updater_builder()
+            .endpoints(vec![FEED
+                .parse()
+                .map_err(|_| "UPDATE_CONFIGURATION_INVALID")?])
+            .map_err(|_| "UPDATE_CONFIGURATION_INVALID")?
+            .pubkey(self.pubkey.as_ref().map_err(Clone::clone)?)
+            .target(TARGET)
+            .clear_headers()
+            .clear_installer_args()
+            .no_proxy()
+            .version_comparator(|current, release| release.version > current)
+            .timeout(Duration::from_secs(30))
+            .configure_client(|client| {
+                client
+                    .https_only(true)
+                    .redirect(updater_http::redirect::Policy::custom(|attempt| {
+                        if attempt.previous().len() < 5 && safe_url(attempt.url()) {
+                            attempt.follow()
+                        } else {
+                            attempt.stop()
+                        }
+                    }))
+            })
+            .build()
+            .map_err(|_| "UPDATE_CONFIGURATION_INVALID")?;
+        self.phase("checking", None)?;
+        let result = tokio::time::timeout(Duration::from_secs(35), updater.check()).await;
+        let update = match result {
+            Ok(Ok(update)) => update,
+            _ => {
+                self.phase("check_failed", Some("UPDATE_CHECK_FAILED".into()))?;
+                return self.status();
+            }
+        };
+        let pending = match update {
+            Some(mut update) => {
+                let view = match metadata(&update) {
+                    Ok(view) => view,
+                    Err(code) => {
+                        self.phase("check_failed", Some(code))?;
+                        return self.status();
+                    }
+                };
+                update.timeout = Some(Duration::from_secs(180));
+                Some(Pending {
+                    view,
+                    update,
+                    bytes: None,
+                })
+            }
+            None => None,
+        };
+        let view = pending.as_ref().map(|p| p.view.clone());
+        *self
+            .pending
+            .lock()
+            .map_err(|_| "UPDATE_STATE_UNAVAILABLE")? = pending;
+        self.status
+            .lock()
+            .map_err(|_| "UPDATE_STATE_UNAVAILABLE")?
+            .candidate = view;
+        self.phase(
+            if self
+                .pending
+                .lock()
+                .map_err(|_| "UPDATE_STATE_UNAVAILABLE")?
+                .is_some()
+            {
+                "available"
+            } else {
+                "up_to_date"
+            },
+            None,
+        )?;
+        self.status()
+    }
+
+    pub async fn download(&self, candidate_id: &str) -> Result<Status, String> {
+        self.ready()?;
+        let update = {
+            let pending = self
+                .pending
+                .lock()
+                .map_err(|_| "UPDATE_STATE_UNAVAILABLE")?;
+            let pending = pending
+                .as_ref()
+                .filter(|p| p.view.candidate_id == candidate_id)
+                .ok_or("UPDATE_CANDIDATE_CHANGED")?;
+            if pending.bytes.is_some() {
+                self.phase("verified", None)?;
+                return self.status();
+            }
+            pending.update.clone()
+        };
+        self.phase("downloading", None)?;
+        let exceeded = tokio::sync::Notify::new();
+        let mut count = 0usize;
+        let download = update.download(
+            |chunk, total| {
+                count = count.saturating_add(chunk);
+                if count > MAX_DOWNLOAD || total.is_some_and(|n| n > MAX_DOWNLOAD as u64) {
+                    exceeded.notify_one();
+                }
+            },
+            || {},
+        );
+        let bytes = tokio::select! {
+            biased;
+            _ = exceeded.notified() => Err("UPDATE_DOWNLOAD_TOO_LARGE"),
+            result = tokio::time::timeout(Duration::from_secs(185), download) => match result {
+                Ok(Ok(bytes)) if bytes.len() <= MAX_DOWNLOAD => Ok(bytes),
+                Ok(Ok(_)) => Err("UPDATE_DOWNLOAD_TOO_LARGE"),
+                _ => Err("UPDATE_SIGNATURE_OR_DOWNLOAD_FAILED"),
+            }
+        };
+        match bytes {
+            Ok(bytes) => {
+                let mut pending = self
+                    .pending
+                    .lock()
+                    .map_err(|_| "UPDATE_STATE_UNAVAILABLE")?;
+                pending
+                    .as_mut()
+                    .filter(|p| p.view.candidate_id == candidate_id)
+                    .ok_or("UPDATE_CANDIDATE_CHANGED")?
+                    .bytes = Some(bytes);
+                self.phase("verified", None)?;
+            }
+            Err(code) => self.phase("download_failed", Some(code.into()))?,
+        }
+        self.status()
+    }
+
+    /// Caller holds the native lifecycle gate and proven local Fleet absence through this closure.
+    /// No bytes leave Rust; the only installer input is the official plugin's verified download.
+    pub fn install(&self, candidate_id: &str) -> Result<(), String> {
+        self.ready()?;
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| "UPDATE_STATE_UNAVAILABLE")?;
+        let pending = pending
+            .as_mut()
+            .filter(|p| p.view.candidate_id == candidate_id)
+            .ok_or("UPDATE_CANDIDATE_CHANGED")?;
+        let bytes = pending.bytes.as_ref().ok_or("UPDATE_DOWNLOAD_REQUIRED")?;
+        let intent = Intent {
+            schema: 1,
+            from_version: self.version.clone(),
+            to_version: pending.view.version.clone(),
+            candidate_id: pending.view.candidate_id.clone(),
+            source_sha: pending.view.source_sha.clone(),
+            artifact_sha256: format!("{:x}", Sha256::digest(bytes)),
+        };
+        write_intent(&self.directory, &intent)?;
+        self.phase("installation_unknown", None)?;
+        // Windows exits only after starting the installer. Neither that nor a successful return proves installation.
+        pending
+            .update
+            .install(bytes)
+            .map_err(|_| "UPDATE_INSTALLATION_UNSETTLED".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn intent() -> Intent {
+        Intent {
+            schema: 1,
+            from_version: "0.1.0".into(),
+            to_version: "0.2.0".into(),
+            candidate_id: "fixed-candidate".into(),
+            source_sha: "a".repeat(40),
+            artifact_sha256: "b".repeat(64),
+        }
+    }
+
+    #[test]
+    fn typed_requests_cannot_supply_native_inputs() {
+        for value in [
+            r#"{"action":"check","url":"https://other.invalid"}"#,
+            r#"{"action":"install","candidate_id":"one","path":"installer.exe"}"#,
+            r#"{"action":"download","candidate_id":"one","pubkey":"other"}"#,
+        ] {
+            assert!(serde_json::from_str::<Request>(value).is_err());
+        }
+        assert!(
+            serde_json::from_str::<Request>(r#"{"action":"install","candidate_id":"one"}"#).is_ok()
+        );
+    }
+
+    #[test]
+    fn unsigned_or_unsafe_configuration_is_disabled() {
+        assert_eq!(
+            key(&serde_json::json!({"pubkey":"", "requireSignedVersion":true})).unwrap_err(),
+            "UPDATE_SIGNING_NOT_CONFIGURED"
+        );
+        assert!(key(&serde_json::json!({"pubkey":"bad", "requireSignedVersion":true})).is_err());
+        assert!(key(&serde_json::json!({"pubkey":"", "requireSignedVersion":false})).is_err());
+        assert!(key(&serde_json::json!({"pubkey":"", "requireSignedVersion":true, "dangerousAcceptInvalidCerts":true})).is_err());
+    }
+
+    #[test]
+    fn network_targets_are_public_fixed_https_origins() {
+        for address in [
+            "http://github.com/",
+            "https://user@github.com/",
+            "https://github.com:444/",
+            "https://github.com.attacker.invalid/",
+            "https://127.0.0.1/",
+            "file:///tmp/release",
+        ] {
+            assert!(!safe_url(&address.parse().unwrap()), "{address}");
+        }
+        assert!(safe_url(&FEED.parse().unwrap()));
+        assert!(safe_url(
+            &"https://release-assets.githubusercontent.com/asset?token=temporary"
+                .parse()
+                .unwrap()
+        ));
+    }
+
+    #[test]
+    fn durable_intent_prevents_retry_after_reopen_without_claiming_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("updates");
+        assert!(read_intent(&path, "0.1.0").unwrap().is_none());
+        write_intent(&path, &intent()).unwrap();
+        assert!(write_intent(&path, &intent()).is_err());
+        let updates = Updates::new(path.clone(), "0.1.0".into(), serde_json::Value::Null);
+        let view = updates.status().unwrap();
+        assert_eq!(view.phase, "installation_unknown");
+        assert_eq!(view.installation.unwrap().to_version, "0.2.0");
+        // A new binary version is its own future update epoch. The original receipt remains immutable.
+        assert!(read_intent(&path, "0.2.0").unwrap().is_none());
+        assert!(read_intent(&path, "0.1.0").unwrap().is_some());
+    }
+
+    #[test]
+    fn partial_or_unknown_receipt_is_never_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = marker_path(dir.path(), "0.1.0");
+        std::fs::write(&path, b"{").unwrap();
+        assert!(read_intent(dir.path(), "0.1.0").is_err());
+        assert!(write_intent(dir.path(), &intent()).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"{");
+    }
+}

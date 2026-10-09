@@ -34,6 +34,7 @@ var nativeForgetCredential = () => invoke("connector_forget_credential");
 var openExternal = (url) => invoke("open_external", { url });
 var fleetAvailability = () => invoke("fleet_availability");
 var fleetRequest = (input) => invoke("fleet_request", { input });
+var updateRequest = (input) => invoke("desktop_update", { input });
 async function connectorRequest(method, path, body, key, browserToken) {
 	if (nativeDesktop) return invoke("connector_request", { input: {
 		method,
@@ -115,6 +116,30 @@ async function readArtifactContent(reference, size, token, signal) {
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		update_title: "桌面更新",
+		update_current: "目前版本：{version}",
+		update_candidate: "可用版本",
+		update_check: "檢查更新",
+		update_download: "下載並驗證",
+		update_install: "安裝並重新啟動",
+		update_read: "查詢更新狀態",
+		update_unsigned: "此測試安裝包尚未啟用簽章更新。",
+		update_platform: "此平台尚未提供桌面更新。",
+		update_help: "驗證通過後才能安裝。安裝時會暫停本機連線；遠端工作會持續執行。",
+		update_problem: "更新暫時無法繼續：",
+		update_read_failed: "無法確認更新狀態，請重新查詢。",
+		update_unknown: "安裝結果尚未確認。請查詢狀態；不會自動再次安裝。",
+		update_requested: "已要求安裝 {version}。請重新開啟程式確認版本；若仍是舊版，請檢查安裝程式的結果。",
+		update_phase_idle: "尚未檢查更新。",
+		update_phase_checking: "正在檢查更新…",
+		update_phase_available: "有新版本可下載。",
+		update_phase_up_to_date: "目前沒有較新的版本。",
+		update_phase_check_failed: "檢查更新未成功。",
+		update_phase_downloading: "正在下載並驗證簽章…",
+		update_phase_download_failed: "下載或簽章驗證未成功。",
+		update_phase_verified: "簽章與版本已驗證，可安裝此版本。",
+		update_phase_stopping_fleet: "正在準備安裝並停止本機連線…",
+		update_phase_installation_unknown: "已保存原安裝請求，等待確認安裝結果。",
 		bulk_title: "批次核准",
 		bulk_choose_host: "選擇主機",
 		bulk_workspace: "工作區名稱或 ID（選填）",
@@ -971,6 +996,30 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		update_title: "Desktop updates",
+		update_current: "Current version: {version}",
+		update_candidate: "Available version",
+		update_check: "Check for updates",
+		update_download: "Download and verify",
+		update_install: "Install and restart",
+		update_read: "Read update status",
+		update_unsigned: "Signed updates are not enabled for this test package.",
+		update_platform: "Desktop updates are not available on this platform.",
+		update_help: "Installation requires a verified download. Local connections pause during installation; remote work keeps running.",
+		update_problem: "Update cannot continue:",
+		update_read_failed: "Update status is unavailable. Read the status again.",
+		update_unknown: "The installation outcome is unknown. Read status; installation will not be repeated automatically.",
+		update_requested: "Installation of {version} was requested. Reopen the app to check its version; if it is unchanged, check the installer result.",
+		update_phase_idle: "Updates have not been checked.",
+		update_phase_checking: "Checking for updates…",
+		update_phase_available: "A new version is available to download.",
+		update_phase_up_to_date: "No newer version is currently available.",
+		update_phase_check_failed: "The update check did not succeed.",
+		update_phase_downloading: "Downloading and verifying the signature…",
+		update_phase_download_failed: "Download or signature verification did not succeed.",
+		update_phase_verified: "The signature and version are verified. This update is ready to install.",
+		update_phase_stopping_fleet: "Preparing installation and stopping local connections…",
+		update_phase_installation_unknown: "The original installation request is saved; its outcome is not confirmed.",
 		bulk_title: "Batch approvals",
 		bulk_choose_host: "Choose a host",
 		bulk_workspace: "Workspace name or ID (optional)",
@@ -2264,6 +2313,104 @@ async function mountFleet(main, { h, t }) {
 	return () => {
 		disposed = true;
 		clearTimeout(timer);
+		panel.remove();
+	};
+}
+//#endregion
+//#region src/updates.js
+async function mountUpdates(main, { h, t }) {
+	const panel = h("section", {
+		class: "panel",
+		"aria-label": t("update_title")
+	});
+	const content = h("div"), message = h("p", {
+		role: "status",
+		class: "muted"
+	});
+	panel.append(h("h2", {}, t("update_title")), content, message);
+	main.append(panel);
+	let disposed = false, busy = false, readable = false, value;
+	const active = () => !disposed && panel.isConnected;
+	const phases = new Set([
+		"idle",
+		"checking",
+		"available",
+		"up_to_date",
+		"check_failed",
+		"downloading",
+		"download_failed",
+		"verified",
+		"stopping_fleet",
+		"installation_unknown"
+	]);
+	const render = () => {
+		if (!active()) return;
+		if (!value) {
+			content.replaceChildren(h("button", {
+				class: "secondary",
+				disabled: busy,
+				onclick: () => request({ action: "status" })
+			}, t("update_read")));
+			return;
+		}
+		const blocked = busy || !readable || !value.available || [
+			"checking",
+			"downloading",
+			"stopping_fleet",
+			"installation_unknown"
+		].includes(value.phase);
+		const candidate = value.candidate;
+		content.replaceChildren(h("p", {}, t("update_current", { version: value.current_version })), h("p", { class: "muted" }, !value.available ? t(value.code === "UPDATE_PLATFORM_UNSUPPORTED" ? "update_platform" : "update_unsigned") : t("update_phase_" + value.phase)), ...candidate ? [h("dl", { class: "kv" }, h("dt", {}, t("update_candidate")), h("dd", {}, candidate.version), h("dt", {}, t("pub_sha")), h("dd", { class: "mono" }, candidate.source_sha))] : [], ...value.installation ? [h("p", {}, t("update_requested", { version: value.installation.to_version }))] : [], ...value.available ? [h("p", { class: "muted" }, t("update_help")), h("div", { class: "actions" }, h("button", {
+			class: candidate ? "secondary" : "primary",
+			disabled: blocked,
+			onclick: () => request({ action: "check" })
+		}, t("update_check")), ...candidate ? [h("button", {
+			class: "primary",
+			disabled: blocked || value.phase === "verified",
+			onclick: () => request({
+				action: "download",
+				candidate_id: candidate.candidate_id
+			})
+		}, t("update_download")), h("button", {
+			class: value.phase === "verified" ? "primary" : "secondary",
+			disabled: blocked || value.phase !== "verified",
+			onclick: () => request({
+				action: "install",
+				candidate_id: candidate.candidate_id
+			})
+		}, t("update_install"))] : [], h("button", {
+			class: "secondary",
+			disabled: busy,
+			onclick: () => request({ action: "status" })
+		}, t("update_read")))] : []);
+	};
+	const request = async (input) => {
+		if (busy || !active()) return;
+		busy = true;
+		readable = false;
+		message.textContent = "";
+		render();
+		try {
+			const next = await updateRequest(input);
+			if (!active()) return;
+			if (!next || typeof next.current_version !== "string" || typeof next.available !== "boolean" || !phases.has(next.phase) || next.candidate && [
+				"candidate_id",
+				"version",
+				"source_sha"
+			].some((k) => typeof next.candidate[k] !== "string")) throw new Error("UPDATE_STATUS_INVALID");
+			value = next;
+			readable = true;
+			if (next.code && next.available && !next.installation) message.textContent = `${t("update_problem")} ${next.code}`;
+		} catch {
+			if (active()) message.textContent = t(input.action === "install" ? "update_unknown" : "update_read_failed");
+		} finally {
+			busy = false;
+			render();
+		}
+	};
+	await request({ action: "status" });
+	return () => {
+		disposed = true;
 		panel.remove();
 	};
 }
@@ -7782,6 +7929,8 @@ async function viewNativeSettings(main) {
 	const help = h("p", { class: "muted" }, t("desktop_credential_help"));
 	const platform = h("p", { class: "muted" });
 	const fleetRoot = h("div");
+	const updateRoot = h("div");
+	let disposeUpdates;
 	const controls = [];
 	const action = (kind, label, cls = "secondary") => {
 		const button = h("button", {
@@ -7807,7 +7956,7 @@ async function viewNativeSettings(main) {
 	main.append(h("h1", {}, t("nav_settings")), h("section", {
 		class: "panel native-connection",
 		"aria-label": t("desktop_connection")
-	}, h("h2", {}, t("desktop_connection")), details, help, platform, actions, info, saved), h("div", { class: "panel" }, h("h2", {}, t("desktop_local")), h("p", { class: "note" }, t("desktop_dashboard_only"))), fleetRoot);
+	}, h("h2", {}, t("desktop_connection")), details, help, platform, actions, info, saved), h("div", { class: "panel" }, h("h2", {}, t("desktop_local")), h("p", { class: "note" }, t("desktop_dashboard_only"))), fleetRoot, updateRoot);
 	const showInfo = () => {
 		info.replaceChildren();
 		if (state.caps) info.append(h("p", {}, t("connected_as", {
@@ -7822,6 +7971,14 @@ async function viewNativeSettings(main) {
 	try {
 		const status = await nativeStatus();
 		if (mine !== generation || !main.contains(details)) return;
+		if (status.updates === true) disposeUpdates = await mountUpdates(updateRoot, {
+			h,
+			t
+		});
+		if (mine !== generation || !main.contains(details)) {
+			disposeUpdates?.();
+			return;
+		}
 		const row = (label, value) => {
 			if (value) details.append(h("dt", {}, t(label)), h("dd", {}, value));
 		};
@@ -7847,10 +8004,14 @@ async function viewNativeSettings(main) {
 		if (mine === generation) info.append(errorBox(error));
 	}
 	if (mine !== generation) return;
-	return mountFleet(fleetRoot, {
+	const disposeFleet = await mountFleet(fleetRoot, {
 		h,
 		t
 	});
+	return () => {
+		disposeFleet?.();
+		disposeUpdates?.();
+	};
 }
 var may = (scope) => (state.caps?.scopes || []).includes(scope);
 function fill(el, ...kids) {

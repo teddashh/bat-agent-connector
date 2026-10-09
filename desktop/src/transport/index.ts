@@ -3,6 +3,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 export const nativeDesktop = isTauri();
 export interface ConnectorResponse { status: number; data: any }
 export interface NativeStatus {
+  updates?: boolean;
   endpoint: string | null; error: string | null; credential_available: boolean;
   expected_actor?: string; credential_source?: "launch_environment" | "windows_credential_manager" | null;
   credential_saved?: boolean; enrollment_supported?: boolean; configuration_reload?: boolean;
@@ -35,6 +36,8 @@ export type FleetRequest = {action: "status" | "contract" | "validate_configurat
   | {action: "ensure_monitor"; expected_configuration_binding: string}
   | {action: "quit_owned"; expected_configuration_binding: string; expected_monitor_epoch: string};
 export const fleetRequest = (input: FleetRequest) => invoke<any>("fleet_request", {input});
+export type UpdateRequest = {action: "status" | "check"} | {action: "download" | "install"; candidate_id: string};
+export const updateRequest = (input: UpdateRequest) => invoke<any>("desktop_update", {input});
 
 export async function connectorRequest(method: string, path: string, body: unknown, key: string | undefined,
   browserToken: string): Promise<ConnectorResponse> {
