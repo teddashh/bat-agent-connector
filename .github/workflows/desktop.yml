@@ -123,6 +123,17 @@ jobs:
         run: npm run test:native-files
       - name: Package app (unsigned validation artifact)
         run: npm run tauri -- build --bundles ${{ matrix.bundle }} -- --locked
+      - name: Installed Windows NSIS, WebView, close and reopen fixture
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        run: node tests/windows-installed-smoke.mjs
+      - name: Preserve installed Windows fixture evidence
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: desktop-windows-installed-fixture
+          path: desktop/test-results/windows-installed/
+          if-no-files-found: ignore
       - name: Packaged Linux release WebView, close-to-tray and single-instance fixture
         if: runner.os == 'Linux'
         timeout-minutes: 2
