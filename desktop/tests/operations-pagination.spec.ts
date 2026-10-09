@@ -63,8 +63,8 @@ for(const native of [false,true]) {
     await page.getByRole('button',{name:'Load earlier operations'}).click();
     await expect(page.getByText('Historical receipt 7',{exact:true})).toBeVisible();
     await page.goto('/dashboard/#/home');
-    await page.getByRole('button',{name:'To confirm',exact:true}).click();
-    await page.getByRole('link',{name:'View operations awaiting confirmation'}).click();
+    await page.getByRole('button',{name:'Active operations',exact:true}).click();
+    await page.getByRole('link',{name:'View active operations'}).click();
     await expect(page.getByText('Historical receipt 2',{exact:true})).toBeVisible();
     await expect(page.getByText('Historical receipt 1',{exact:true})).toHaveCount(0);
   });

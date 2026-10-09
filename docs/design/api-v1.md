@@ -173,7 +173,7 @@ History／relations 的 opaque cursor 在任何 journal read 前驗證 version�
 | `GET /api/v1/cleanup-retained` | observe | 實際可讀 refs／objects 與 unavailable；host/resource_id/query/limit/cursor；Part A 無 restore |
 | `GET /api/v1/cleanup-tombstones`、`/{resource_id}` | observe | query/original_id/host/work_item_id/kind/limit/cursor；永久原 ID aliases、位置、原因、PR、receipts |
 | `GET /api/v1/projects`、`/projects/{prj_id}` | observe | 專案樹與統計；一個專案與它的工作項目樹（[work-items.md](work-items.md)） |
-| `GET /api/v1/work-items`、`/work-items/{wi_id}` | observe | 跨專案的工作項目（`pending=true`：等人決定）；一個項目與它的完成狀態、連結、紀錄 |
+| `GET /api/v1/work-items`、`/work-items/{wi_id}` | observe | 跨專案工作項目（`pending=true`：等人決定；`unread=true`：此 principal 尚未標記的工作版本）；詳情含獨立的 completion 與 reading，見 [閱讀合約](work-item-reading.md) |
 
 錯誤格式為 `{"error": {"code", "message"}}`：401 未驗證、403 權限或資源唯讀（代碼同 resource-policy）、404、405、409 冪等衝突、422 參數錯誤、502 BAT 錯誤。
 

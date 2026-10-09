@@ -27,7 +27,8 @@ that client unreachable without stopping central tasks.
 | Credentials | Same principal/scopes contract | Browser has its own login; native uses the supported OS store / native enrollment |
 | Files | Same artifact identity, revision and digest | Browser upload/download; supported native picker, handle and Save As |
 | Fleet, tray, native updater, local BAT launch | Expose only supported capabilities | Native controls are not simulated by privileged web endpoints |
-| Drafts, focus and reading position | Same UX rules and identity isolation | Local to each browser/app; cross-device draft/read-state synchronization is not implemented |
+| Work-item reading markers | Explicit versioned reads in the central journal; independent of approval | Same effective principal shares markers across Web/Tauri; no chat unread count |
+| Drafts, focus and conversation reading position | Same UX rules and identity isolation | Local to each browser/app; cross-device draft/conversation-position synchronization is not implemented |
 
 The present server checks loopback Host and same-origin requests. Existing verified
 tunnels remain the supported access path. Public/LAN web hosting needs a separate
@@ -68,3 +69,14 @@ Acceptance covers English/zh-TW, browser/IPC, 390/768/1440 layouts, hostile cont
 exact copying, stream updates, rolling read windows, delayed/failed refresh, selection
 and focus, and loss of clipboard access. Native OS clipboard/keyboard acceptance is
 separate from browser and injected IPC fixtures.
+
+## Attention and work updates
+
+The shared home separates replies/permissions, completion review, operation problems
+and host connections. Active operations have their own tab. Unread work updates use
+[central versioned reading markers](work-item-reading.md); only an explicit click in
+work-item detail marks the displayed version read. Reading in either client refreshes
+the other, without approving the item or clearing pending requests. Lists show loaded
+counts, retain their paging depth on refresh, and keep prior rows with a stale-read
+notice on failure. This capability is additive; older centrals keep the attention
+categories without offering unsupported reading controls.

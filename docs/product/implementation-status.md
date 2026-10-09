@@ -8,6 +8,26 @@
 
 ## 目前續作
 
+### 2026-10-09 共用待處理分類與工作更新已讀
+
+`feat/shared-attention-states` 接續 `dba6ccd`。首頁把待回覆／權限、完成確認、需處理操作、
+主機連線分組，原「待確認」分頁改為「執行中操作」；各組明示已載入數量、可繼續分頁，
+讀取失敗保留舊資料並阻擋事件 checkpoint 前進。
+
+[工作更新閱讀合約](../design/work-item-reading.md) 使用中央 journal 的 principal/work-item
+版本標記與 `work_item.read` durable action。Web／Tauri 同一身分同步；只有詳情的明確點擊
+才標記已讀，不改 completion、pending、工作項目版本或來源資源。CLI／MCP 讀取亦接同一
+principal 與 unread filter；Rust bridge 只允許 work-items 的布林 unread query。
+
+這完成 P1-2 的狀態分離與「未讀工作更新」範圍。完整聊天訊息未讀數與跨入口對話閱讀位置
+仍未實作，不能從局部訊息摘要、最後活動時間或 event ACK 推算。
+
+分支已通過 107 項後端相關測試、30 項 Rust bridge 測試、20 項 Node 測試及實際中央 fixture。
+另驗證 14 項身份切換、延遲回覆與草稿保留回歸：初次完整 UI run 抓出的舊首頁請求晚到問題
+已修正。`test:attention` 已加入 desktop CI；完整 shared UI 與 Python 3.13／3.10 gate 的
+候選結果另由 PR/checks 與 `~/agent-work/artifacts/shared-attention-states-20261009/` 記錄。
+尚未合併、安裝或進行 Mac/Windows 實機驗收。
+
 ### 2026-10-09 共用 Web／Tauri 與對話閱讀
 
 使用者確認 Web 要持續與 Tauri 對齊。[共用前端設計](../design/shared-frontend.md) 明列

@@ -33,6 +33,14 @@ h2 { font-size: 16px; margin: 18px 0 8px; }
 .tabs button { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 6px 12px;
   border-radius: 999px; cursor: pointer; }
 .tabs button.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.attention-tabs { flex-wrap: wrap; }
+.attention-section h2 { margin-top: 0; }
+.attention-footer { margin-top: 12px; }
+.attention-section[data-fresh="false"] .attention-footer { color: var(--warn); }
+.reading-state p { margin-bottom: 0; }
+@media (max-width: 600px) {
+  .attention-tabs button, .attention-footer button, .reading-state button { min-height: 44px; }
+}
 .row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .row:last-child { border-bottom: 0; }
 .row .grow { flex: 1 1 260px; min-width: 0; }
