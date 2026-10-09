@@ -2,6 +2,34 @@
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		capture_title: "擷取遠端檔案",
+		capture_host: "來源主機",
+		capture_session: "完整人工 Session ID",
+		capture_path: "遠端相對檔案路徑",
+		capture_help: "輸入一個相對於所選人工 session 資料夾的檔案路徑。讀取過程不會更動來源。",
+		capture_preview: "預覽來源檔案",
+		capture_review: "我已檢視此檔案與來源證據",
+		capture_save: "保存已檢視的檔案",
+		capture_check: "查回原擷取操作",
+		capture_new: "擷取另一個檔案",
+		capture_attach: "加入目前附件草稿",
+		capture_attached: "已加入附件草稿。儲存工作項目或派工後才會套用。",
+		capture_name: "檔名",
+		capture_bytes: "位元組",
+		capture_source: "來源",
+		capture_root: "Session 資料夾",
+		capture_repository: "儲存庫",
+		capture_expiry: "預覽有效期限",
+		capture_single_file: "只擷取這一個檔案；不包含其他尚未提交的變更。",
+		capture_expired: "預覽已過期。請重新預覽與檢視；尚未提交擷取。",
+		capture_fixed: "保留原預覽與操作識別；查回不會改取較新的內容。",
+		capture_unknown: "提交結果尚未確認。請查回同一筆擷取；原草稿與操作 key 已保留。",
+		capture_saved: "已保存固定附件版本，可在附件選擇中使用：",
+		capture_scope_observe: "預覽需要 observe 權限。",
+		capture_scope_manage: "保存需要 manage 與 observe 權限及中央擷取能力。",
+		capture_manual_only: "來源必須是中央明確觀測為人工建立的完整 session。",
+		capture_invalid_preview: "中央預覽與選定來源不符。",
+		capture_invalid_result: "無法查證已保存附件的固定版本與擷取來源。",
 		obs_unknown: "未知",
 		obs_state_evidence: "分項狀態與證據",
 		obs_lifecycle_note: "閒置、未載入或沒有分頁都不代表結束；沒有結束證據就保留未知。",
@@ -609,6 +637,34 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		capture_title: "Capture a remote file",
+		capture_host: "Source host",
+		capture_session: "Full manual session ID",
+		capture_path: "Remote relative file path",
+		capture_help: "Enter one file path relative to the selected manual session folder. The source is read without being changed.",
+		capture_preview: "Preview source file",
+		capture_review: "I reviewed this file and its source evidence",
+		capture_save: "Save reviewed file",
+		capture_check: "Check original capture",
+		capture_new: "Capture another file",
+		capture_attach: "Add to attachment draft",
+		capture_attached: "Added to the attachment draft. Save the work item or start the work to apply it.",
+		capture_name: "Filename",
+		capture_bytes: "Bytes",
+		capture_source: "Source",
+		capture_root: "Session folder",
+		capture_repository: "Repository",
+		capture_expiry: "Preview expires",
+		capture_single_file: "Only this file is captured; other uncommitted changes are excluded.",
+		capture_expired: "Preview expired. Preview and review again; capture has not been submitted.",
+		capture_fixed: "The original preview and operation identity are retained. Read-back does not select newer content.",
+		capture_unknown: "Submission outcome is unknown. Check the same capture; its draft and operation key are retained.",
+		capture_saved: "Saved a fixed attachment revision, available in attachment selection:",
+		capture_scope_observe: "Preview requires observe scope.",
+		capture_scope_manage: "Saving requires manage and observe scopes and central capture capability.",
+		capture_manual_only: "The source must be a full session explicitly observed as manually created.",
+		capture_invalid_preview: "Central preview does not match the selected source.",
+		capture_invalid_result: "Unable to verify the saved attachment revision and capture source.",
 		obs_unknown: "unknown",
 		obs_state_evidence: "State and evidence",
 		obs_lifecycle_note: "Idle, unloaded and no tab do not mean ended. Lifecycle stays unknown without end evidence.",
@@ -1456,6 +1512,355 @@ async function mountFleet(main, { h, t }) {
 	};
 }
 //#endregion
+//#region src/capture.js
+var record = (value) => value && typeof value === "object" && !Array.isArray(value);
+var digest = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+var operationId = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
+var previewId = (value) => typeof value === "string" && /^acpv_[0-9a-f]{32}$/.test(value);
+var previewToken = (value) => typeof value === "string" && value.length > 0 && value.length <= 24576;
+var validPreview = (doc) => record(doc) && record(doc.source) && record(doc.evidence) && [
+	doc.relative_path,
+	doc.source.host,
+	doc.source.session_id,
+	doc.source.root,
+	doc.source.repository_root,
+	doc.evidence.head_sha
+].every((value) => typeof value === "string" && value.length > 0) && doc.source.provenance === "manual" && doc.snapshot === false && Number.isFinite(doc.expires_at) && previewId(doc.preview_id) && previewToken(doc.preview_token) && digest(doc.fingerprint) && digest(doc.evidence.digest) && Number.isSafeInteger(doc.evidence.size_bytes) && doc.evidence.size_bytes >= 0;
+function restore(value, source) {
+	const saved = { input: {
+		...source,
+		relative_path: ""
+	} };
+	if (!record(value)) return saved;
+	if (record(value.input)) {
+		for (const key of [
+			"host",
+			"session_id",
+			"relative_path"
+		]) if (typeof value.input[key] === "string") saved.input[key] = value.input[key];
+	}
+	if (validPreview(value.preview)) saved.preview = value.preview;
+	const intent = value.intent, request = intent?.request;
+	const usable = request?.action === "artifact.capture" && previewId(request.target?.preview_id) && previewToken(request.params?.preview_token) && digest(request.preconditions?.expected_fingerprint) && typeof intent.key === "string" && intent.key.length > 0 && intent.key.length <= 200;
+	if (usable || operationId(intent?.operation_id)) saved.intent = {
+		key: usable ? intent.key : null,
+		request: usable ? request : null,
+		operation_id: operationId(intent.operation_id) ? intent.operation_id : null,
+		reviewed_digest: digest(intent.reviewed_digest) ? intent.reviewed_digest : saved.preview?.evidence.digest
+	};
+	return saved;
+}
+function capturePanel({ h, t, api, caps, guard, onEvents, errorBox, storageKey, source = {}, onAttach }) {
+	let saved;
+	try {
+		saved = JSON.parse(localStorage.getItem(storageKey));
+	} catch {}
+	saved = restore(saved, source);
+	let busy = false, revision = 0, disposed = false, refreshing = null;
+	const host = h("select", { "aria-label": t("capture_host") }, h("option", { value: "" }, t("capture_host")), ...(caps()?.hosts || []).map((item) => h("option", { value: item.host }, item.host)));
+	const session = h("input", {
+		"aria-label": t("capture_session"),
+		placeholder: "sess-…",
+		maxlength: 256
+	});
+	const path = h("input", {
+		"aria-label": t("capture_path"),
+		placeholder: "notes/input.txt"
+	});
+	host.value = saved.input.host || "";
+	session.value = saved.input.session_id || "";
+	path.value = saved.input.relative_path || "";
+	const notice = h("div", { role: "status" }), evidence = h("div", { "data-capture-evidence": "" });
+	const reviewed = h("input", {
+		type: "checkbox",
+		onchange: () => update()
+	});
+	const review = h("label", { class: "capture-choice" }, reviewed, " ", t("capture_review"));
+	const persist = () => {
+		guard();
+		try {
+			localStorage.setItem(storageKey, JSON.stringify(saved));
+		} catch {}
+	};
+	const current = () => ({
+		host: host.value,
+		session_id: session.value.trim(),
+		relative_path: path.value
+	});
+	const scopes = () => caps()?.scopes || [];
+	const supported = () => caps()?.artifacts?.capture?.manual_single_file === true;
+	const mayPreview = () => supported() && scopes().includes("observe");
+	const mayCapture = () => mayPreview() && scopes().includes("manage") && caps()?.actions?.some((item) => item.action === "artifact.capture" && item.allowed === true);
+	const expired = () => !saved.preview || saved.preview.expires_at * 1e3 <= Date.now();
+	const settled = () => [
+		"succeeded",
+		"failed",
+		"cancelled"
+	].includes(saved.operation?.status);
+	const active = () => Boolean(saved.intent && (!settled() || saved.operation.status === "succeeded" && !saved.result) && !saved.refused);
+	const currentView = () => {
+		try {
+			guard();
+			return !disposed;
+		} catch {
+			return false;
+		}
+	};
+	const validInput = (input) => input.host && input.session_id.length >= 6 && input.session_id.length <= 256 && !/[\x00-\x1f\x7f-\x9f/\\]/.test(input.session_id) && input.relative_path && new TextEncoder().encode(input.relative_path).length <= 4096 && !/[\\\x00-\x1f\x7f-\x9f]/.test(input.relative_path) && input.relative_path.split("/").every((part) => part && part !== "." && part !== ".." && part.toLowerCase() !== ".git");
+	const showError = (error) => {
+		if (currentView()) notice.replaceChildren(errorBox(error));
+	};
+	const preview = h("button", {
+		class: "secondary",
+		onclick: async () => {
+			const input = current();
+			guard();
+			if (busy || saved.intent || !mayPreview() || !validInput(input)) return;
+			const ticket = ++revision;
+			busy = true;
+			saved.preview = null;
+			reviewed.checked = false;
+			persist();
+			render();
+			try {
+				const row = (await api("GET", `/sessions/${encodeURIComponent(input.host)}/${encodeURIComponent(input.session_id)}`)).session;
+				guard();
+				if (ticket !== revision) return;
+				if (row?.provenance !== "manual" || row.host !== input.host || row.session_id !== input.session_id) throw new Error(t("capture_manual_only"));
+				const response = await api("POST", "/artifact-capture-previews", input);
+				guard();
+				if (ticket !== revision) return;
+				const doc = response.preview;
+				if (!validPreview(doc) || doc.source.host !== input.host || doc.source.session_id !== input.session_id || doc.relative_path !== input.relative_path) throw new Error(t("capture_invalid_preview"));
+				saved.preview = doc;
+				persist();
+				notice.replaceChildren();
+			} catch (error) {
+				if (ticket === revision) showError(error);
+			} finally {
+				busy = false;
+				render();
+			}
+		}
+	}, t("capture_preview"));
+	const accept = async (operation) => {
+		guard();
+		const intent = saved.intent;
+		if (!intent || !operationId(operation?.operation_id) || operation.action !== "artifact.capture" || intent.operation_id && intent.operation_id !== operation.operation_id || intent.request && operation.target?.preview_id !== intent.request.target.preview_id) throw new Error(t("capture_invalid_result"));
+		saved.operation = operation;
+		saved.intent.operation_id = operation.operation_id;
+		persist();
+		if (operation.status === "succeeded") {
+			const ref = operation.result;
+			if (!/^art_[0-9a-f]{32}$/.test(ref?.artifact_id) || !Number.isSafeInteger(ref.revision) || ref.revision < 1 || !digest(ref.digest) || ref.digest !== intent.reviewed_digest) throw new Error(t("capture_invalid_result"));
+			const { artifact } = await api("GET", `/artifacts/${ref.artifact_id}/revisions/${ref.revision}`);
+			guard();
+			if (saved.intent !== intent) return;
+			if (artifact.artifact_id !== ref.artifact_id || artifact.revision !== ref.revision || artifact.state !== "ready" || artifact.digest !== ref.digest || artifact.source?.kind !== "manual_capture" || artifact.source.operation_id !== operation.operation_id) throw new Error(t("capture_invalid_result"));
+			saved.result = {
+				artifact_id: ref.artifact_id,
+				revision: ref.revision,
+				digest: ref.digest
+			};
+			persist();
+		}
+		render();
+	};
+	const apply = h("button", {
+		class: "secondary",
+		onclick: async () => {
+			guard();
+			if (busy || !mayCapture() || settled() && (saved.operation.status !== "succeeded" || saved.result) || saved.refused) return;
+			if (!saved.intent) {
+				if (expired() || !reviewed.checked) return;
+				const doc = saved.preview;
+				saved.intent = {
+					key: crypto.randomUUID(),
+					reviewed_digest: doc.evidence.digest,
+					request: {
+						action: "artifact.capture",
+						target: { preview_id: doc.preview_id },
+						params: { preview_token: doc.preview_token },
+						preconditions: { expected_fingerprint: doc.fingerprint }
+					}
+				};
+				persist();
+			}
+			busy = true;
+			update();
+			try {
+				const intent = saved.intent;
+				const result = intent.operation_id ? await api("GET", `/operations/${intent.operation_id}`) : await api("POST", "/operations?wait=3", intent.request, intent.key);
+				guard();
+				await accept(result.operation);
+				notice.replaceChildren();
+			} catch (error) {
+				if (!currentView()) return;
+				if (!saved.intent.operation_id && [
+					"PREVIEW_EXPIRED",
+					"PREVIEW_TOKEN_INVALID",
+					"PREVIEW_MISMATCH",
+					"INVALID_PARAMS"
+				].includes(error.code)) saved.refused = true;
+				persist();
+				showError(error);
+			} finally {
+				busy = false;
+				render();
+			}
+		}
+	}, t("capture_save"));
+	const reset = h("button", {
+		class: "secondary",
+		onclick: () => {
+			guard();
+			if (busy || refreshing || active()) return;
+			saved = { input: current() };
+			reviewed.checked = false;
+			revision++;
+			persist();
+			notice.replaceChildren();
+			render();
+		}
+	}, t("capture_new"));
+	const attach = onAttach ? h("button", {
+		class: "secondary",
+		onclick: () => {
+			guard();
+			if (saved.result) {
+				onAttach({ ...saved.result }, (saved.preview?.relative_path || saved.input.relative_path).split("/").at(-1));
+				notice.textContent = t("capture_attached");
+			}
+		}
+	}, t("capture_attach")) : null;
+	const box = h("details", {
+		class: "capture",
+		"data-capture": "",
+		hidden: !supported()
+	}, h("summary", {}, t("capture_title")), h("p", { class: "muted" }, t("capture_help")), h("div", { class: "capture-fields" }, h("label", {}, t("capture_host"), host), h("label", {}, t("capture_session"), session), h("label", {}, t("capture_path"), path)), h("div", { class: "actions" }, preview), evidence, review, h("div", { class: "actions" }, apply, attach, reset), notice);
+	function update() {
+		const frozen = busy || Boolean(saved.intent);
+		for (const field of [
+			host,
+			session,
+			path
+		]) field.disabled = frozen;
+		preview.disabled = busy || Boolean(saved.intent) || !mayPreview() || !validInput(current());
+		review.hidden = !saved.preview || Boolean(saved.intent);
+		reviewed.disabled = expired();
+		apply.hidden = settled() && (saved.operation.status !== "succeeded" || saved.result);
+		apply.textContent = saved.intent ? t("capture_check") : t("capture_save");
+		apply.disabled = busy || !mayCapture() || Boolean(saved.refused) || !saved.intent && (expired() || !reviewed.checked);
+		reset.hidden = !saved.intent;
+		reset.disabled = busy || Boolean(refreshing) || active();
+		if (attach) {
+			attach.hidden = !saved.result;
+			attach.disabled = busy;
+		}
+		const expiry = evidence.querySelector("[data-capture-expiry]");
+		if (expiry) expiry.textContent = saved.intent ? t("capture_fixed") : expired() ? t("capture_expired") : t("capture_single_file");
+	}
+	function render() {
+		if (disposed) return;
+		evidence.replaceChildren();
+		if (!mayPreview()) evidence.append(h("p", { class: "muted" }, t("capture_scope_observe")));
+		else if (!mayCapture()) evidence.append(h("p", { class: "muted" }, t("capture_scope_manage")));
+		const doc = saved.preview;
+		if (doc) {
+			const facts = [
+				[t("capture_name"), doc.relative_path.split("/").at(-1)],
+				[t("capture_bytes"), String(doc.evidence.size_bytes)],
+				["SHA-256", doc.evidence.digest],
+				[t("capture_source"), `${doc.source.host} / ${doc.source.session_id}`],
+				[t("capture_path"), doc.relative_path],
+				[t("capture_root"), doc.source.root],
+				[t("capture_repository"), doc.source.repository_root],
+				["HEAD", doc.evidence.head_sha],
+				[t("capture_expiry"), new Date(doc.expires_at * 1e3).toLocaleString()]
+			];
+			evidence.append(h("dl", { class: "kv" }, ...facts.flatMap(([label, value]) => [h("dt", {}, label), h("dd", {}, h("code", {}, value))])), h("p", {
+				class: "muted",
+				"data-capture-expiry": ""
+			}));
+		}
+		if (saved.intent) evidence.append(h("p", {}, saved.operation ? `${t("op_" + saved.operation.status)} ` : t("capture_unknown"), saved.intent.operation_id ? h("a", { href: `#/op/${saved.intent.operation_id}` }, saved.intent.operation_id) : null, saved.operation?.status_reason ? ` · ${saved.operation.status_reason}` : ""));
+		if (saved.result) evidence.append(h("p", { class: "pre" }, t("capture_saved"), " ", `${saved.result.artifact_id} · r${saved.result.revision} · ${saved.result.digest}`));
+		update();
+	}
+	for (const field of [
+		host,
+		session,
+		path
+	]) field.addEventListener("input", () => {
+		guard();
+		if (saved.intent) return;
+		revision++;
+		saved.input = current();
+		saved.preview = null;
+		reviewed.checked = false;
+		persist();
+		render();
+	});
+	const refresh = async (fresh = false) => {
+		if (!saved.intent?.operation_id) return;
+		if (refreshing) {
+			await refreshing;
+			if (!fresh) return;
+			guard();
+			return refresh(true);
+		}
+		const id = saved.intent.operation_id;
+		refreshing = (async () => {
+			while (busy) {
+				await new Promise((resolve) => setTimeout(resolve, 25));
+				guard();
+			}
+			const { operation } = await api("GET", `/operations/${id}`);
+			guard();
+			if (saved.intent?.operation_id === id) await accept(operation);
+		})();
+		try {
+			await refreshing;
+		} finally {
+			refreshing = null;
+		}
+	};
+	const off = onEvents((event) => {
+		if (!box.isConnected) {
+			off();
+			return;
+		}
+		if (!currentView()) {
+			off();
+			return;
+		}
+		if (event.resource_id === saved.intent?.operation_id || event.resource_id === saved.result?.artifact_id) return refresh(true);
+	});
+	const timer = setInterval(() => {
+		if (!box.isConnected) {
+			disposed = true;
+			clearInterval(timer);
+			off();
+			return;
+		}
+		try {
+			guard();
+		} catch {
+			disposed = true;
+			clearInterval(timer);
+			off();
+			return;
+		}
+		update();
+		if (saved.intent?.operation_id && (active() || saved.operation?.status === "succeeded" && !saved.result)) refresh().catch(showError);
+	}, 1e3);
+	queueMicrotask(() => {
+		if (box.isConnected && saved.intent?.operation_id) refresh().catch(showError);
+	});
+	render();
+	return box;
+}
+//#endregion
 //#region src/state/events.ts
 function consumePage(page, cursor, emit) {
 	if (page.reset_required || page.reset || page.head_cursor < cursor) {
@@ -1721,6 +2126,25 @@ async function submit(action, target, params, preconditions, scope) {
 		throw e;
 	}
 }
+function manualCapture(scope, source = {}, onAttach) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	return capturePanel({
+		h,
+		t,
+		api,
+		caps: () => state.caps,
+		guard: () => assertView(connection),
+		onEvents,
+		errorBox,
+		storageKey: `batc.capture.${connection.namespace}.${scope}`,
+		source,
+		onAttach
+	});
+}
 function attachmentDraft(scope, text, initial = [], roles = false) {
 	const connection = {
 		epoch: state.epoch,
@@ -1966,6 +2390,18 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 		}
 	}, t("more"));
 	box.append(more);
+	if (state.caps?.artifacts?.capture?.manual_single_file) box.append(manualCapture(scope, {}, (ref, name) => {
+		guard(true);
+		if (!saved.attachments.some((a) => a.ref?.artifact_id === ref.artifact_id && a.ref?.revision === ref.revision)) saved.attachments.push({
+			name,
+			ref: {
+				...ref,
+				...roles ? { role: "input" } : {}
+			}
+		});
+		persist();
+		render();
+	}));
 	const loadCatalog = async (cursor = "") => {
 		const page = await api("GET", `/artifacts?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
 		guard(true);
@@ -2742,7 +3178,9 @@ async function viewSession(main, host, sid) {
 	}, t("interrupt"));
 	const composer = h("div", { hidden: true }, box, h("div", { class: "actions" }, send, stop, h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
 	const readonly = h("p", { class: "note" }, t("read_only_note"));
-	const controls = h("div", { class: "panel" }, pending, readonly, composer, status);
+	let capture;
+	const captureSlot = h("div");
+	const controls = h("div", { class: "panel" }, pending, readonly, composer, captureSlot, status);
 	const cps = checkpointPanel(host, sid);
 	const observations = observationPanels("session", `${host}/${sid}`, path);
 	main.append(head, controls, cps.box, h("h2", {}, t("messages")), msgs, observations.box);
@@ -2851,6 +3289,15 @@ async function viewSession(main, host, sid) {
 		if (data.work_items?.length) head.append(linkedItems(data.work_items));
 		if (data.discovery?.length) head.append(h("details", {}, h("summary", {}, t("obs_discovery")), discoveryEvidence(data.discovery)));
 		const managed = row.api_access === "managed";
+		const manualSource = row.provenance === "manual" && state.caps?.artifacts?.capture?.manual_single_file;
+		if (manualSource && !capture) {
+			capture = manualCapture(`session.${JSON.stringify([host, sid])}`, {
+				host,
+				session_id: sid
+			});
+			captureSlot.append(capture);
+		}
+		if (capture) capture.hidden = !manualSource;
 		composer.hidden = !managed;
 		readonly.hidden = managed;
 		renderPending();

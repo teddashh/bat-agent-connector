@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from . import confinement, registry, resource_policy, task_control
-from .errors import BatError, WriteRefused
+from .errors import BatError, ResourceReadOnly, WriteRefused
 from .fleet import Fleet
 from .resource_policy import WriteGrant
 from .safety import Audit
@@ -635,96 +635,23 @@ async def worktree_remove(
     allow_unmerged: bool = False,
     discard_uncommitted: bool = False,
 ) -> dict:
+    """Refuse legacy deletion; resource cleanup owns reviewed destructive effects.
+
+    Keep the original tier, source policy and Task Service boundary before reporting
+    the unavailable compatibility action. Neither discard nor unmerged overrides can
+    replace the canonical consumer, retention and durable-receipt checks.
+    """
     _guard(fleet, host, confirm)
     c = fleet.client(host)
-    audit = Audit(fleet.config.safety)
     async with _write_lock(host):
         t, _ = await _resolve_session(c, session_id)
-        sid = t["id"]
-        grant = await resource_policy.authorize_session(fleet, host, "worktree.remove", t)
-        task_control.refuse_owned(fleet, host, sid)
-        audit.check_rate(host, sid + "#remove")
-        st, rehydrated = await _wt_status(c, t, rehydrate=grant)
-        if not st:
-            raise WriteRefused("host does not track a worktree for this session")
-        report = _summ(host, t, st, False, 0)
-        meta = await _meta(c, sid)
-        if (meta or {}).get("isStreaming"):
-            return {
-                **report,
-                "removed": False,
-                "reason": "session is still streaming; interrupt or wait first",
-            }
-        dirty = await _git_dirty(c, st.get("worktreePath"))
-        if dirty is None and not discard_uncommitted:
-            return {
-                **report,
-                "removed": False,
-                "reason": "cannot read worktree git status; pass discard_uncommitted=true to override",
-            }
-        if dirty and not discard_uncommitted:
-            return {
-                **report,
-                "removed": False,
-                "worktree_dirty_files": len(dirty),
-                "reason": "worktree has uncommitted changes; BAT force-removes the folder. Pass discard_uncommitted=true to accept losing them",
-            }
-        kind = st.get("mergedKind")
-        has_unmerged = kind in ("ahead", "diverged")
-        if delete_branch and has_unmerged and not allow_unmerged:
-            return {
-                **report,
-                "removed": False,
-                "reason": f"branch has unmerged commits ({kind}); keep the branch (delete_branch=false) or pass allow_unmerged=true",
-            }
-        base = {"actor": fleet.actor, "tool": "worktree_remove", "host": host, "session_id": sid + "#remove"}
-        audit.record(
-            **base,
-            channel="worktree:remove",
-            phase="attempt",
-            delete_branch=delete_branch,
-            unmerged=has_unmerged,
-            dirty=len(dirty or []),
+        await resource_policy.authorize_session(fleet, host, "worktree.remove", t)
+        task_control.refuse_owned(fleet, host, t["id"])
+        raise ResourceReadOnly(
+            "LEGACY_WORKTREE_REMOVE_DISABLED",
+            "legacy worktree removal cannot prove shared consumers and retained content; "
+            "use cleanup_preview and cleanup_apply, or batc resource-cleanup preview/apply",
         )
-        wt_path = st.get("worktreePath") or t.get("worktreePath")
-        branch = st.get("branchName") or t.get("worktreeBranch")
-        # BAT's worktree:remove silently "succeeds" when its worktree manager has no record for the session
-        # (e.g. a failover session that reused an existing worktree, or after a host restart). Register first.
-        if not isinstance(await c.invoke("worktree:status", {"sessionId": sid}), dict) and wt_path and branch:
-            e = registry.get(host, sid) or {}
-            await c.invoke(
-                "worktree:rehydrate",
-                {
-                    "sessionId": sid,
-                    "cwd": e.get("origin_cwd") or t.get("_origin_cwd") or t.get("cwd"),
-                    "worktreePath": wt_path,
-                    "branchName": branch,
-                },
-                grant=grant,
-            )
-            rehydrated = True
-        r = await c.invoke("worktree:remove", {"sessionId": sid, "deleteBranch": bool(delete_branch)}, grant=grant)
-        ok = isinstance(r, dict) and r.get("success") is True
-        still_there = False
-        if ok and wt_path:
-            root = await c.invoke("git:getRoot", {"cwd": wt_path})
-            still_there = bool(root) and str(root).rstrip("/") == str(wt_path).rstrip("/")
-            ok = not still_there
-        audit.record(**base, channel="worktree:remove", phase="result", ok=ok, still_there=still_there)
-        entry = registry.get(host, sid)
-        if entry:
-            if entry.get("status") in registry.RETIRED:
-                registry.update(host, sid, worktree_removed=ok)
-            else:
-                registry.update(host, sid, status="removed" if ok else "active")
-    return {
-        **report,
-        "removed": ok,
-        **({"reason": "host reported success but the worktree folder is still there"} if still_there else {}),
-        "branch_deleted": bool(delete_branch and ok),
-        "rehydrated": rehydrated,
-        "note": "the agent session itself is not stopped (the connector never exposes stop/reset)",
-    }
 
 
 # --------------------------------------------------------------------------- fan-out planning (CLI/skill helper)

@@ -54,7 +54,9 @@ from .task_verifier import ObservedVerifier, load_settings
 
 DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 # /rpc methods that share /api/v1's principals and OperationService (MCP and CLI enter here).
-API_RPC = {"op_submit": "?", "session_interrupt": "operate", "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
+API_RPC = {"op_submit": "?", "session_interrupt": "operate", "session_send": "operate",
+           "session_continue": "operate", "session_answer": "operate",
+           "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
            "work_status": "observe", "work_result": "observe", "work_events": "observe",
            "api_events": "observe", "inventory_sessions": "observe", "inventory_hosts": "observe",
            "inventory_session": "observe", "inventory_worktree": "observe", "resource_history": "observe", "resource_relations": "observe",
@@ -245,8 +247,8 @@ class TaskDaemon:
             raise OperationError("FORBIDDEN", f"{method} needs the {scope!r} scope", 403)
         entry = params.pop("entry", None)
         entry = entry if entry in {"mcp", "cli"} else "rpc"
-        if method == "session_interrupt":
-            return await api_actions.legacy_interrupt(self.ops, principal, params, entry=entry)
+        if method in api_actions.LEGACY_SESSION_METHODS:
+            return await api_actions.legacy_session_control(self.ops, principal, method, params, entry=entry)
         if method in {"work_status", "work_result", "work_events"}:
             return await self.call(method, params, principal=principal)
         if method == "op_submit":

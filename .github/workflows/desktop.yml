@@ -2,10 +2,10 @@ name: desktop
 
 on:
   pull_request:
-    paths: ["desktop/**", "src/bat_agent_connector/dashboard/**", ".github/workflows/desktop.yml"]
+    paths: ["desktop/**", "src/**", "tests/manual/**", "pyproject.toml", "uv.lock", ".github/workflows/desktop.yml"]
   push:
     branches: [main]
-    paths: ["desktop/**", "src/bat_agent_connector/dashboard/**", ".github/workflows/desktop.yml"]
+    paths: ["desktop/**", "src/**", "tests/manual/**", "pyproject.toml", "uv.lock", ".github/workflows/desktop.yml"]
 
 permissions:
   contents: read
@@ -48,6 +48,34 @@ jobs:
       - name: Shared browser and native-transport UI tests
         if: runner.os == 'Linux'
         run: npx playwright install --with-deps chromium && npm run test:ui
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        if: runner.os == 'Linux'
+        with:
+          python-version: "3.13"
+      - name: Prepare central service fixtures
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: uv sync --locked --extra dev
+      - name: Shared UI with actual central service (temporary resources only)
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          npm run test:central
+          npm run test:cleanup
+          npm run test:artifacts
+          npm run test:delivery
+          npm run test:observation
+          npm run test:capture
+      - name: Preserve shared UI fixture evidence
+        if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: desktop-shared-ui-fixtures
+          path: |
+            desktop/test-results/
+            desktop/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
