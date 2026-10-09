@@ -1,0 +1,33 @@
+# 共用產品續作交接
+
+接續 [前輪整合](2026-10-08-tauri-v2.md)；追蹤 [#55](https://github.com/teddashh/bat-agent-connector/issues/55)。
+產品負責人澄清 v1/v2 是同一產品、不同 UI 設計修訂，共用功能 backlog。Tauri 介面、中央 Python authority、人工唯讀、排除 Hub importer 的既定決策保留。
+最新 exact-head CI、合併與 private installer pin 證據在 #55 關聯 PR，不能把以下個別分支結果當整組 full。
+
+## 已整合來源
+
+- `c7525c33673cd945e6b7ba7ee1aa2094b9c8b935` + `57de0201f8cf49f366ba01807e7944afbc098f38`：legacy send/continue/answer 共用中央 actions，完整 session/prompt 綁定、caller token、no-key、完整結果與拒絕理由。MCP 需自身 token；CLI 保留明確 token 優先的既有本機 admin 相容模式，agent 不借此升權。
+- `a8665102348440e9117b901bde5ffcb8a09ca15f`：B1 共用 capture UI、受限 native preview route、scope/backend 隔離草稿與固定 key/readback；來源是相對遠端路徑，不是本機 chooser。
+- `2fc8fd82f3a33e471b5feda7dd896ae383ceb248`：停用 unsafe legacy worktree remove，指向 reviewed cleanup。原 confirm/tier/manual/task gate 保留，全部 override 也零 rehydrate/remove。
+- Canonical workflow `2026-10-08.5`；digest `88ea453c65513563ed6af392b30a8360b322b6273e6a8ac0e5a2bbce91e029f7`。同一 source 生成 Hermes/Grokbot，installer pin 要完整 code SHA，不能僅對 package `0.2.4`。
+
+## 驗證與保留的失敗
+
+- Capture 最終整組 101 shared UI、8 state、21 Linux Rust、fmt/Clippy/release check 與真中央 temporary-source fixture 通過。讀回 binary artifact，manual bytes/index/refs 不變，零 BAT writes／推論專案歸屬。獨立審查 exact head 無 findings。
+- 舊 UI full 的 100 pass／1 timeout 是不可用 capture 過早建立 hidden summary；已修為 positively manual + capability 後才掛載，完整 101 重跑通過。
+- Controls `c7525c3` broad focused：3.10 591 通過；3.13 590 pass／1 既有 verifier entered.wait 五秒 timeout；未改 source 的 12-case family 在 2.42 秒通過。沒有把 retry 稱為 full 綠，也沒有提高 timeout。
+- 兩個舊 MCP fixtures 缺 token 且同時提供兩種 pending prompts；改成自身 caller token／唯一 prompt，保留 task command assertions 並新增 actor/binding assertions。
+- Peer P2 是 compatibility receipt 漏掉已保存的 status reason，導致 operate-only caller 看不到拒絕指引；`57de020` 補 projection 及真 CLI/MCP same-key replay，controls+interrupt 154 案例在 3.13/3.10 均通過。
+- Legacy removal 基底 regression 已重現 active successor 的共用 worktree 可被刪。Focused 3.13 112 pass；新增 canonical apply assertion 曾誤期待 retained receipt，實際 API 正確回 PREVIEW_BLOCKED；修正 assertion 後兩版本 exact case 通過。沒有改 canonical cleanup production code。
+- Root 整合另驗 17 skill-schema/principal/dashboard cases、generated browser/skills、Ruff、secret scan。Generic skill validator 不認既有 top-level `version`，保留 installer 相容欄位；repo generator/contract tests 驗實際版本與 digest，移除該欄位的暫存 shape check 另通過，不冒稱原 validator 直接通過。
+
+Desktop CI 現在跑 `test:central/cleanup/artifacts/delivery/observation/capture` 六組 actual-central fixtures，仍是 MockBat/temporary Git，不是 live acceptance。Python 四版 full、Windows/Linux package/native CI 以同一 PR head 為 merge gate。
+
+## 下一步
+
+1. 依 [legacy mutation audit](../design/legacy-mutation-audit.md) 補 `session.permissions`：Codex sandbox/approval 各自 durable receipt；deferred flag 不能遺失原 actor/operation/control version。不可整包一個 step 後讓舊 flag 另行寫入。
+2. R05 B2 managed capture/accept、C 跨 host Git；native file/save/download、Task Service integration/cleanup、Rust Fleet parity 仍在同一 backlog。
+3. 固定下一候選 code/skill/installer pins，維持唯一 owner。既有 installer 可做 verify-only/mock 驗證；本輪沒有真安裝、host/provider writes。
+4. Windows installed/WebView/tray/credentials、逐 host confinement、同 RC 的 46 項 I/L 驗收仍缺；Linux production gate #53 保留。
+
+原 checkout 與 Claude worktrees 保留。新工作線在 `~/agent-work/bac-v2/continuation`、`ops-controls`、`capture-ui`、`remove-guard`；installer pin 工作線另在 `installer-next`。共用核心由主協調整合，full local tests 使用原共用 lock。Bot quota 不當乾淨 verdict；本輪使用獨立 Codex peer review。
