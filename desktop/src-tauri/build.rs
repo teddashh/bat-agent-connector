@@ -1,6 +1,7 @@
 fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
+            "desktop_update",
             "native_files_status",
             "native_files_pick",
             "native_files_drop_target",
@@ -18,6 +19,8 @@ fn main() {
             "open_external",
             "fleet_availability",
             "fleet_request",
+            "fleet_control",
+            "fleet_bootstrap",
         ]),
     ))
     .expect("desktop build configuration");

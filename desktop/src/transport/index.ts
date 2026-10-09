@@ -3,6 +3,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 export const nativeDesktop = isTauri();
 export interface ConnectorResponse { status: number; data: any }
 export interface NativeStatus {
+  updates?: boolean;
   endpoint: string | null; error: string | null; credential_available: boolean;
   expected_actor?: string; credential_source?: "launch_environment" | "windows_credential_manager" | null;
   credential_saved?: boolean; enrollment_supported?: boolean; configuration_reload?: boolean;
@@ -29,12 +30,29 @@ export const nativeEnroll = () => invoke<any | null>("connector_enroll", {
 export const nativeReloadConfiguration = () => invoke<NativeStatus>("connector_reload_configuration");
 export const nativeForgetCredential = () => invoke<void>("connector_forget_credential");
 export const openExternal = (url: string) => invoke<void>("open_external", { url });
-export const fleetAvailability = () => invoke<{configured: boolean; platform_supported: boolean; error?: string}>("fleet_availability");
+export const fleetAvailability = () => invoke<{configured: boolean; platform_supported: boolean; native_controls?: boolean; bootstrap_controls?: boolean; error?: string}>("fleet_availability");
 export type FleetRequest = {action: "status" | "contract" | "validate_configuration"}
   | {action: "set_connections"; connections: string[]; expected_configuration_binding: string; expected_selection_revision: string; expected_monitor_epoch: string | null}
   | {action: "ensure_monitor"; expected_configuration_binding: string}
   | {action: "quit_owned"; expected_configuration_binding: string; expected_monitor_epoch: string};
+export type FleetControlRequest = {action: "overview" | "preview_launch"}
+  | {action: "preview_choices"; choices: {connections: string[]; profiles: string[]; dashboard: boolean}; configuration_binding: string; selection_revision: string; monitor_epoch: string | null}
+  | {action: "apply_choices" | "launch" | "discard"; preview_id: string}
+  | {action: "launch_status"; launch_id: string}
+  | {action: "preview_migration"; backend: "rust" | "powershell"; autostart: boolean}
+  | {action: "apply_migration"; preview_id: string; fingerprint: string}
+  | {action: "advance_migration" | "migration_status"; migration_id: string}
+  | {action: "restore_migration"; source_id: string; restore_id: string}
+  | {action: "save_login"; expected_revision: string; show_picker: boolean};
+export type FleetBootstrapRequest = {action: "overview"}
+  | {action: "prepare"; recipe_binding: string}
+  | {action: "advance"; recipe_binding: string; request_id: string}
+  | {action: "receipt"; request_id: string};
+export const fleetBootstrap = (input: FleetBootstrapRequest) => invoke<any>("fleet_bootstrap", {input});
+export const fleetControl = (input: FleetControlRequest) => invoke<any>("fleet_control", {input});
 export const fleetRequest = (input: FleetRequest) => invoke<any>("fleet_request", {input});
+export type UpdateRequest = {action: "status" | "check"} | {action: "download" | "install"; candidate_id: string};
+export const updateRequest = (input: UpdateRequest) => invoke<any>("desktop_update", {input});
 
 export async function connectorRequest(method: string, path: string, body: unknown, key: string | undefined,
   browserToken: string): Promise<ConnectorResponse> {

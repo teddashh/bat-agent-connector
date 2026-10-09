@@ -1,0 +1,87 @@
+name: desktop-signed-candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Reviewed 40-character commit already on main
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: windows-latest
+    environment: desktop-release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require a reviewed immutable main commit
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          if ($env:SOURCE_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'An exact source SHA is required' }
+          if ((git rev-parse HEAD) -cne $env:SOURCE_SHA) { throw 'Source SHA changed' }
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate must already be on main' }
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: "1.98.1"
+      - run: npm ci
+        working-directory: desktop
+      - name: Prepare public signing configuration
+        shell: pwsh
+        env:
+          DESKTOP_UPDATER_PUBLIC_KEY: ${{ vars.DESKTOP_UPDATER_PUBLIC_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:DESKTOP_UPDATER_PUBLIC_KEY)) { throw 'Public updater key is required' }
+          $publicKey = $env:DESKTOP_UPDATER_PUBLIC_KEY.Trim()
+          $config = @{
+            bundle = @{ createUpdaterArtifacts = $true }
+            plugins = @{ updater = @{ pubkey = $publicKey; requireSignedVersion = $true } }
+          } | ConvertTo-Json -Depth 5
+          [IO.File]::WriteAllText("$env:RUNNER_TEMP\dashboard-signing.json", $config)
+          [IO.File]::WriteAllText("$env:RUNNER_TEMP\dashboard-public-key.txt", $publicKey)
+      - name: Build updater-signed NSIS candidate
+        working-directory: desktop
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) { throw 'Signing key is required' }
+          npm run tauri -- build --config "$env:RUNNER_TEMP\dashboard-signing.json" --bundles nsis -- --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Signed build failed' }
+      - name: Verify bytes, key and signed version before generating feed
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          $files = @(Get-ChildItem desktop/src-tauri/target/release/bundle/nsis/*.exe)
+          if ($files.Count -ne 1) { throw 'Exactly one NSIS artifact is required' }
+          $version = (Get-Content desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $skill = Get-Content skills/bat-agent-connector/SKILL.md -Raw
+          $match = [regex]::Match($skill, '(?m)^  workflow_version: "([0-9.-]+)"\r?$')
+          if (-not $match.Success) { throw 'Canonical workflow version is missing' }
+          cargo run --locked --manifest-path desktop/src-tauri/Cargo.toml --example update_manifest -- "$($files[0].FullName)" "$($files[0].FullName).sig" "$env:RUNNER_TEMP\dashboard-public-key.txt" "$version" "$env:SOURCE_SHA" "$($match.Groups[1].Value)" desktop/src-tauri/target/release/bundle/nsis/dashboard-update.json
+          if ($LASTEXITCODE -ne 0) { throw 'Artifact verification failed' }
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: dashboard-updater-signed-${{ inputs.source_sha }}
+          path: |
+            desktop/src-tauri/target/release/bundle/nsis/*.exe
+            desktop/src-tauri/target/release/bundle/nsis/*.exe.sig
+            desktop/src-tauri/target/release/bundle/nsis/dashboard-update.json
+          if-no-files-found: error
+          retention-days: 14

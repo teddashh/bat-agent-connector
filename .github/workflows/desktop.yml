@@ -11,6 +11,20 @@ permissions:
   contents: read
 
 jobs:
+  windows-endpoint-oracle:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: "1.98.1"
+      - name: Temporary loopback absence oracle (no installed services)
+        run: cargo test --locked --manifest-path desktop/fleet-core/Cargo.toml --lib windows_tunnel::tests::system_path_and_occupied_listener_are_fixed_and_read_only -- --exact --nocapture
+      - name: Fleet contracts and owned Windows fixtures (continue through independent targets)
+        run: cargo test --locked --manifest-path desktop/fleet-core/Cargo.toml --no-fail-fast
   build:
     strategy:
       fail-fast: false
@@ -85,12 +99,12 @@ jobs:
           retention-days: 7
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets
       - name: Native Fleet contracts, wire peers and owned Windows process fixtures
         run: |
           cargo fmt --manifest-path fleet-core/Cargo.toml --check
           cargo clippy --locked --manifest-path fleet-core/Cargo.toml --all-targets -- -D warnings
-          cargo test --locked --manifest-path fleet-core/Cargo.toml
+          cargo test --locked --manifest-path fleet-core/Cargo.toml --no-fail-fast
       - name: Native file adapter with actual central service
         if: runner.os == 'Linux'
         timeout-minutes: 10

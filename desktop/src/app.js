@@ -5,6 +5,7 @@ import { t } from "./i18n.js";
 import { connectorRequest, connectorUploadArtifact, nativeDesktop, nativeFileSupport, nativeStatus, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal } from "./transport/index.ts";
 import { nativeAttachments } from "./native-files.js";
 import { mountFleet } from "./fleet.js";
+import { mountUpdates } from "./updates.js";
 import { groupedSessions, matchesSession, runtimeStale, sessionActivity } from "./state/sessions.js";
 import { capturePanel } from "./capture.js";
 import { permissionsPanel } from "./permissions.js";
@@ -1937,6 +1938,8 @@ async function viewNativeSettings(main) {
   const help = h("p", {class: "muted"}, t("desktop_credential_help"));
   const platform = h("p", {class: "muted"});
   const fleetRoot = h("div");
+  const updateRoot = h("div");
+  let disposeUpdates;
   const controls = [];
   const action = (kind, label, cls = "secondary") => {
     const button = h("button", {class: cls, disabled: true, onclick: () => {
@@ -1957,7 +1960,7 @@ async function viewNativeSettings(main) {
   main.append(h("h1", {}, t("nav_settings")), h("section", {class: "panel native-connection", "aria-label": t("desktop_connection")},
     h("h2", {}, t("desktop_connection")), details, help, platform, actions, info, saved),
     h("div", {class: "panel"}, h("h2", {}, t("desktop_local")),
-      h("p", {class: "note"}, t("desktop_dashboard_only"))), fleetRoot);
+      h("p", {class: "note"}, t("desktop_dashboard_only"))), fleetRoot, updateRoot);
   const showInfo = () => {
     info.replaceChildren();
     if (state.caps) info.append(h("p", {}, t("connected_as", {actor: state.caps.actor, scopes: state.caps.scopes.join(", ")})));
@@ -1969,6 +1972,8 @@ async function viewNativeSettings(main) {
   try {
     const status = await nativeStatus();
     if (mine !== generation || !main.contains(details)) return;
+    if (status.updates === true) disposeUpdates = await mountUpdates(updateRoot, {h, t});
+    if (mine !== generation || !main.contains(details)) { disposeUpdates?.(); return; }
     const row = (label, value) => { if (value) details.append(h("dt", {}, t(label)), h("dd", {}, value)); };
     row("desktop_endpoint", status.endpoint || t("desktop_config_needed"));
     row("desktop_expected_actor", status.expected_actor);
@@ -1991,7 +1996,8 @@ async function viewNativeSettings(main) {
     forget.disabled = state.nativeBusy || !status.credential_saved;
   } catch (error) { if (mine === generation) info.append(errorBox(error)); }
   if (mine !== generation) return;
-  return mountFleet(fleetRoot, {h, t});
+  const disposeFleet = await mountFleet(fleetRoot, {h, t});
+  return () => {disposeFleet?.(); disposeUpdates?.();};
 }
 
 // ------------------------------------------------------------------ projects and work items

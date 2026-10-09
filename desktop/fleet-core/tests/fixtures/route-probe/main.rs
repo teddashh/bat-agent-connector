@@ -1,0 +1,56 @@
+//! Standalone synthetic executable double. Never links or invokes real Tailscale.
+use std::{
+    fs,
+    io::{self, Write},
+    time::Duration,
+};
+fn main() {
+    let directory = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_owned();
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let allowed = std::env::vars_os().all(|(key, _)| {
+        ["SystemRoot", "WINDIR"]
+            .iter()
+            .any(|name| key.to_string_lossy().eq_ignore_ascii_case(name))
+    });
+    fs::write(
+        directory.join("argv-ok"),
+        if args == ["status", "--json"] && allowed {
+            "yes"
+        } else {
+            "no"
+        },
+    )
+    .unwrap();
+    fs::write(directory.join("started"), "yes").unwrap();
+    let mode = fs::read_to_string(directory.join("mode")).unwrap();
+    match mode.as_str() {
+        "hang" => {
+            std::thread::sleep(Duration::from_millis(800));
+            fs::write(directory.join("finished"), "bad").unwrap();
+        }
+        "oversized" => {
+            let mut out = io::stdout().lock();
+            for _ in 0..300 {
+                if out.write_all(&[b'x'; 8192]).is_err() {
+                    return;
+                }
+            }
+            return;
+        }
+        "invalid_utf8" => {
+            let _ = io::stdout().write_all(&[255]);
+            return;
+        }
+        "invalid_json" => {
+            println!("fixture-private-malformed-text");
+            return;
+        }
+        "exit_nonzero" => std::process::exit(3),
+        _ => (),
+    }
+    println!("{{\"Peer\":{{\"fixture\":{{\"TailscaleIPs\":[\"100.64.0.1\"],\"Online\":true,\"CurAddr\":\"203.0.113.1:1234\"}}}}}}");
+}
