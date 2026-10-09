@@ -19,7 +19,8 @@
     "tauri": "tauri",
     "test:cleanup": "node tests/cleanup-integration.mjs",
     "test:artifacts": "node tests/artifact-integration.mjs",
-    "test:observation": "node tests/observation-integration.mjs"
+    "test:observation": "node tests/observation-integration.mjs",
+    "test:capture": "node tests/capture-integration.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.1"

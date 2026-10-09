@@ -350,6 +350,43 @@ impl Bridge {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapturePreviewRequest {
+    host: String,
+    session_id: String,
+    relative_path: String,
+}
+
+fn validate_capture_preview(body: Option<&Value>) -> Result<(), String> {
+    let doc: CapturePreviewRequest =
+        serde_json::from_value(body.cloned().ok_or("Capture preview body is required")?)
+            .map_err(|_| "Invalid typed capture preview request")?;
+    if doc.host.is_empty()
+        || doc.host.len() > 200
+        || !doc
+            .host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+        || !(6..=256).contains(&doc.session_id.len())
+        || doc.session_id.chars().any(char::is_control)
+        || doc.session_id.contains(['/', '\\'])
+        || doc.relative_path.is_empty()
+        || doc.relative_path.len() > 4096
+        || doc.relative_path.contains('\\')
+        || doc.relative_path.chars().any(char::is_control)
+        || doc
+            .relative_path
+            .split('/')
+            .any(|p| p.is_empty() || p == "." || p == ".." || p.eq_ignore_ascii_case(".git"))
+    {
+        return Err(
+            "Capture requires a host, full session ID and one safe relative file path".into(),
+        );
+    }
+    Ok(())
+}
+
 pub fn validate_artifact_upload(operation_id: &str, length: usize) -> Result<(), String> {
     static OPERATION: OnceLock<Regex> = OnceLock::new();
     if length > MAX_ARTIFACT_BYTES
@@ -413,7 +450,7 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             r"delivery/previews/mpv_[0-9a-f]{32}|integrations/previews/ipv_[0-9a-f]{32}|integrations/op_[0-9a-f]{32})$")).unwrap())
     } else if input.method == "POST" {
         POST.get_or_init(|| {
-            Regex::new(r"^/(?:cleanup-previews|operations(?:/op_[0-9a-f]{32}/(?:cancel|resume))?)$")
+            Regex::new(r"^/(?:artifact-capture-previews|cleanup-previews|operations(?:/op_[0-9a-f]{32}/(?:cancel|resume))?)$")
                 .unwrap()
         })
     } else {
@@ -421,6 +458,12 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
     };
     if !pattern.is_match(path) {
         return Err("Central route is not allowed".into());
+    }
+    if path == "/artifact-capture-previews" {
+        if input.path != path || input.idempotency_key.is_some() {
+            return Err("Capture preview accepts no query or operation key".into());
+        }
+        validate_capture_preview(input.body.as_ref())?;
     }
     let cleanup = path.starts_with("/cleanup-");
     let mut query_keys = std::collections::HashSet::new();
@@ -719,6 +762,65 @@ mod tests {
         assert!(target.accept().is_err());
         assert_eq!(requests.try_iter().count(), 2);
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn capture_preview_has_one_fixed_route_and_typed_relative_source() {
+        let mut input = request("POST", "/artifact-capture-previews");
+        for path in [
+            "notes/input.txt",
+            "資料/輸入 1.txt",
+            "odd/%2e%2e.txt",
+            "a:b/file.txt",
+        ] {
+            input.body = Some(
+                serde_json::json!({"host":"demo", "session_id":"session-full-id", "relative_path":path}),
+            );
+            assert!(validate_request(&input).is_ok(), "{path}");
+        }
+        for path in [
+            "",
+            "/etc/passwd",
+            "../a",
+            "a/../b",
+            "a//b",
+            "a/",
+            ".git/config",
+            "a/.GIT/x",
+            "a\\b",
+            "a\u{0085}b",
+        ] {
+            input.body = Some(
+                serde_json::json!({"host":"demo", "session_id":"session-full-id", "relative_path":path}),
+            );
+            assert!(validate_request(&input).is_err(), "{path}");
+        }
+        for body in [
+            serde_json::json!({"host":"demo", "session_id":"short", "relative_path":"a"}),
+            serde_json::json!({"host":"https://example.invalid", "session_id":"session-1", "relative_path":"a"}),
+            serde_json::json!({"host":"demo", "session_id":"session-1", "relative_path":"a", "headers":{"Authorization":"fake"}}),
+            serde_json::json!({"host":"demo", "session_id":"session-1", "relative_path":"資料".repeat(1366)}),
+            serde_json::json!({"host":"demo", "session_id":"session-1", "relative_path":true}),
+        ] {
+            input.body = Some(body);
+            assert!(validate_request(&input).is_err());
+        }
+        input.body = Some(
+            serde_json::json!({"host":"demo", "session_id":"session-1", "relative_path":"notes.txt"}),
+        );
+        for path in [
+            "/artifact-capture-previews?",
+            "/artifact-capture-previews?host=other",
+            "/artifact-capture-previews/other",
+            "/%61rtifact-capture-previews",
+        ] {
+            input.path = path.into();
+            assert!(validate_request(&input).is_err());
+        }
+        input.path = "/artifact-capture-previews".into();
+        input.idempotency_key = Some("wrong-key".into());
+        assert!(validate_request(&input).is_err());
+        assert!(validate_request(&request("GET", "/artifact-capture-previews")).is_err());
     }
 
     #[test]
