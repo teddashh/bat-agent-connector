@@ -4,8 +4,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -37,7 +41,42 @@ class LocalRunner:
 
 
 @pytest.fixture
-def carriers(daemon, mock, tmp_path):
+def host_git_context(tmp_path, monkeypatch):
+    """A synthetic BAT/SSH account, with real Git and no CI/user config inheritance.
+
+    Hosted runners install system Git LFS filters. Production must refuse those;
+    positive fixtures instead need their own account config. Only Git's default
+    config locations change here, never its argv, exit/stderr or sanitization.
+    """
+    real_git = shutil.which('git')
+    assert real_git
+    for key in list(os.environ):
+        if key.startswith('GIT_'):
+            monkeypatch.delenv(key)
+    context = tmp_path / 'host-git-context'
+    (context / 'git').mkdir(parents=True)
+    system = context / 'system.config'
+    global_config = context / 'git' / 'config'
+    system.write_text('')
+    global_config.write_text('')
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(context))
+    # /dev/shm basetemps may be noexec. Only this disposable launcher uses /tmp;
+    # config and repositories still live in the isolated pytest fixture directory.
+    with tempfile.TemporaryDirectory(prefix='bac-merge-git-', dir='/tmp') as launchers:
+        launcher = Path(launchers) / 'git'
+        launcher.write_text(
+            f'#!{sys.executable}\n'
+            'import os, sys\n'
+            f'os.environ.setdefault("GIT_CONFIG_SYSTEM", {str(system)!r})\n'
+            'os.environ.setdefault("GIT_CONFIG_GLOBAL", os.path.join(os.environ["XDG_CONFIG_HOME"], "git", "config"))\n'
+            f'os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n')
+        launcher.chmod(0o700)
+        monkeypatch.setenv('PATH', launchers + os.pathsep + os.environ['PATH'])
+        yield {'system': system, 'global': global_config}
+
+
+@pytest.fixture
+def carriers(daemon, mock, tmp_path, host_git_context):
     origin, source = tmp_path / 'clone', tmp_path / 'worktree'
     origin.mkdir()
     git(origin, 'init', '-b', 'main')
@@ -584,6 +623,23 @@ async def test_effective_git_diff_programs_refuse_before_bat_status(daemon, mock
     assert out['status'] == 'failed' and out['error_code'] == 'MERGE_GIT_UNAVAILABLE', out
     assert 'worktree:status' not in mock.channels()
     assert not marker.exists() and not api.write_frames(mock)
+    await daemon.fleet.close()
+
+
+@pytest.mark.parametrize('scope', ['system', 'global'])
+async def test_effective_host_lfs_filters_refuse_even_without_attributes(daemon, mock, carriers, host_git_context, scope):
+    config = host_git_context[scope]
+    git(carriers[0], 'config', '--file', str(config), 'filter.lfs.clean', 'git-lfs clean -- %f')
+    git(carriers[0], 'config', '--file', str(config), 'filter.lfs.process', 'git-lfs filter-process')
+    pattern = r'^filter\.lfs\.(clean|process)$'
+    # The fixture must expose account filters to the ambient-context inspection,
+    # but respect the helper's explicit system/global disabling for later reads.
+    assert helper.git(str(carriers[0]), 'config', '--name-only', '--get-regexp', pattern,
+                      config_context=True)[1].splitlines() == ['filter.lfs.clean', 'filter.lfs.process']
+    assert helper.git(str(carriers[0]), 'config', '--name-only', '--get-regexp', pattern, codes=(0, 1)) == (1, '')
+    out = await create(daemon)
+    assert out['status'] == 'failed' and out['error_code'] == 'MERGE_GIT_UNAVAILABLE', out
+    assert 'worktree:status' not in mock.channels() and not api.write_frames(mock)
     await daemon.fleet.close()
 
 
