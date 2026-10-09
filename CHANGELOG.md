@@ -2,6 +2,11 @@
 
 ## Next release (unreleased)
 
+- Add published-version starts through explicit repository/host/workspace bindings. Preview the
+  exact branch head, fetch its fixed SHA into a fresh managed carrier, and recover the original
+  operation after lost replies. Shared browser/Tauri UI, CLI, MCP and canonical workflow `.9`
+  preserve the same request; human checkouts and remote refs remain unchanged.
+
 - Add central durable `session.start`, exact workspace discovery and a shared start form. Save
   the original request before submission; reconcile unknown start/send outcomes and preserve retained
   worktrees for reviewed cleanup. Publish the same workflow in canonical agent skill `.8`.

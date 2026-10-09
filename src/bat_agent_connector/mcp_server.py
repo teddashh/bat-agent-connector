@@ -66,7 +66,7 @@ READ_TOOLS = [
 ]
 # Registered unless --read-only: they act as BATC_API_TOKEN's principal, whose scopes decide what is allowed.
 OPERATION_TOOLS = ["approve_pending", "operation_submit", "operation_cancel", "operation_resume", "checkpoint_create",
-                   "work_continue_from_checkpoint", "artifact_upload", "artifact_capture", "artifact_capture_managed", "artifact_accept", "cleanup_apply", "github_pr_update", "github_pr_merge",
+                   "work_continue_from_checkpoint", "work_continue_from_repository", "artifact_upload", "artifact_capture", "artifact_capture_managed", "artifact_accept", "cleanup_apply", "github_pr_update", "github_pr_merge",
                    "deployment_start", "deployment_retry", "deployment_rollback"]
 WRITE_TOOLS = [
     "session_send",
