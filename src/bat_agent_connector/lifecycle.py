@@ -223,8 +223,10 @@ async def approve_pending(
     workspace: str | None = None,
     raise_to_allow_all: bool = True,
 ) -> dict:
-    """Approve every pending PERMISSION prompt on a host (not ask-user questions), then raise the
-    session to allow-all so it stops asking. Only on hosts with default_permission_mode=allow_all."""
+    """Preview pending prompts; public bulk apply is disabled before answering or raising modes.
+
+    Only the explicit internal answer-only path remains; it keeps each session's answer guards.
+    """
     from .triage import sessions_triage
 
     hc = fleet.config.host(host)
@@ -271,15 +273,6 @@ async def approve_pending(
             item.update(approved=False, error=_err(e))
             out.append(item)
             continue
-        if raise_to_allow_all:
-            try:
-                await session_set_permissions(fleet, host, row["session_id"], "allow_all", confirm=True)
-                item["raised_to_allow_all"] = True
-            except TurnInFlight:
-                item["raised_to_allow_all"] = "deferred (Claude turn in flight; raised when idle)"
-            except BatError as e:
-                item["raised_to_allow_all"] = False
-                item["raise_error"] = _err(e)
         out.append(item)
     raised = []
     if raise_to_allow_all:
