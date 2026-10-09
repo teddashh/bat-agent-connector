@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { access, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -24,7 +24,7 @@ const statePaths = [join(homedir(), "Library/Application Support", id),
   "/tmp/io_betteragent_dashboard_si.sock"];
 for (const path of [...statePaths, `/Applications/Better Agent Dashboard.app`,
   join(homedir(), "Applications/Better Agent Dashboard.app")]) {
-  await assert.rejects(access(path), { code: "ENOENT" }, `Refusing pre-existing app/state: ${path}`);
+  await assert.rejects(lstat(path), { code: "ENOENT" }, `Refusing pre-existing app/state: ${path}`);
 }
 const root = await mkdtemp(join(process.env.RUNNER_TEMP, "dashboard-macos-"));
 const helper = join(root, "window-fixture");
@@ -138,14 +138,26 @@ try {
   const window = JSON.parse(native("inspect")).windows[0].id;
   run("screencapture", ["-x", "-l", String(window), join(evidence, "installed.png")]);
   steps.push("Installed WKWebView authenticated, bootstrapped and polled the observe-only fixture");
-  native("hide");
-  await until(() => JSON.parse(native("inspect")).hidden, "Native hide did not complete");
+  const hideRequest = JSON.parse(native("hide"));
+  await until(() => {
+    const state = JSON.parse(native("inspect"));
+    return state.hidden && state.windows.length === 0 && !state.terminated;
+  }, "Native hide did not complete");
   run("open", ["-a", installed]);
   await until(() => !JSON.parse(native("inspect")).hidden && JSON.parse(native("inspect")).windows.length === 1,
     "Finder/Dock reopen did not restore the window");
   assert.equal(JSON.parse(native("inspect")).windows[0].id, window);
   assert.equal(JSON.parse(native("inspect")).terminated, false);
   steps.push("Native app hide and Finder/Dock reopen retained the original process and window");
+  native("close");
+  await until(() => {
+    const state = JSON.parse(native("inspect"));
+    return state.windows.length === 0 && !state.terminated;
+  }, "Native close button did not hide the window and retain the app");
+  run("open", ["-a", installed]);
+  await until(() => JSON.parse(native("inspect")).windows.length === 1, "Reopen after native close did not restore the window");
+  assert.equal(JSON.parse(native("inspect")).windows[0].id, window);
+  steps.push("Native Accessibility close-button action hid the window; Finder/Dock restored the same process and window");
   const second = launchSecondExecutable();
   try {
     await until(() => second.exitCode !== null, "Second instance did not hand off");
@@ -169,6 +181,7 @@ try {
   }
   steps.push("Normal system Quit and relaunch preserved configuration and resumed WebView polling");
   receipt = { status: "passed", evidence_level: "native-installed-fixture", live_accepted: false,
+    hide_request_reported_success: hideRequest.reportedSuccess,
     launch_method: "NSWorkspace Launch Services", quit_method: "NSRunningApplication normal terminate request and observed termination",
     source_sha: run("git", ["rev-parse", "HEAD"]).trim(), source_tree: run("git", ["rev-parse", "HEAD^{tree}"]).trim(),
     macos: run("sw_vers", ["-productVersion"]).trim(), architecture, version: config.version,
@@ -184,8 +197,8 @@ try {
   await writeFile(join(evidence, "fixture.json"), JSON.stringify({ requests, violations, steps }, null, 2));
   await writeFile(join(evidence, "process.log"), diagnostic);
 }
-await assert.rejects(access(root), { code: "ENOENT" });
-for (const path of statePaths) await assert.rejects(access(path), { code: "ENOENT" });
+await assert.rejects(lstat(root), { code: "ENOENT" });
+for (const path of statePaths) await assert.rejects(lstat(path), { code: "ENOENT" });
 steps.push("Owned app and state removed, disk image detached and disk temporary directory removed");
 receipt.temporary_data_removed = true;
 await writeFile(join(evidence, "result.json"), JSON.stringify(receipt, null, 2));

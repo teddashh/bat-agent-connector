@@ -2,6 +2,7 @@
 // No Accessibility changes, AppleScript, arbitrary keystrokes or PID kills.
 import AppKit
 import CoreGraphics
+import ApplicationServices
 
 let fixtureApplication = NSApplication.shared
 fixtureApplication.setActivationPolicy(.accessory)
@@ -53,7 +54,20 @@ func perform() {
     let state = "finished=\(app.isFinishedLaunching) policy=\(app.activationPolicy.rawValue) hidden=\(app.isHidden) terminated=\(app.isTerminated)"
     switch args[1] {
     case "hide":
-        guard app.hide() else { fail("Native hide request refused: \(state)") }
+        // Hosted macOS can report false while the asynchronous hide still completes.
+        // Record that return value; the caller must prove hidden state and no windows.
+        emit(["reportedSuccess": app.hide()])
+    case "close":
+        guard AXIsProcessTrusted() else { fail("Existing Accessibility trust is required; fixture does not change privacy settings") }
+        let application = AXUIElementCreateApplication(pid)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement], windows.count == 1
+        else { fail("Expected one owned Accessibility window") }
+        var button: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(windows[0], kAXCloseButtonAttribute as CFString, &button) == .success,
+              let button, AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString) == .success
+        else { fail("Owned native close-button action failed") }
     case "quit":
         guard app.terminate() else { fail("Native Quit request refused: \(state)") }
     case "cleanup-force":

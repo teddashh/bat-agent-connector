@@ -282,11 +282,14 @@ app, verifies its signature, architecture, version and resources, and unmounts t
 It launches that copied app through NSWorkspace/Launch Services against an authenticated
 observe-only loopback fixture and captures the real WKWebView. The AppKit helper checks
 the exact bundle URL, PID and launch date before controlling the owned application.
-A native helper hides the application, Finder/Dock activation
-restores the same window/process, a second executable hands off, and a normal system Quit
+A native helper requests hide and the fixture proves the actual hidden/window state
+(the hosted OS can return false even when asynchronous hide succeeds). Finder/Dock
+activation restores the same window/process. The native Accessibility close-button action
+then hides that window and Finder/Dock restores it again. A second executable hands off, and a normal system Quit
 followed by relaunch resumes polling without changing configuration. Owned app/state and
 temporary files are removed on exit. No Accessibility privacy setting is changed.
-The test covers application hide/reopen, not a physical close-button or menu-bar click.
+The close-button action requires existing Accessibility trust; physical pointer and
+menu-bar interaction remain manual acceptance.
 Normal Quit requires an accepted native termination request and observed process termination;
 Launch Services does not expose the application's exit status to this fixture. Only the
 second direct executable invocation has a child-process exit-code assertion.
