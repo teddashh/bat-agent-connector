@@ -94,7 +94,7 @@ MUTATIONS: tuple[Mutation, ...] = (
              frozenset({"claude:start-session", "worktree:create", "worktree:remove", "claude:send-message"}),
              ("session_start", "session_failover", "session_relay(start_if_missing)", "fanout_plan_session",
               "fanout_from_plan", "batc fanout --start", "task service lead/reviewer start", "checkpoint.continue",
-              "integration.handoff"),
+              "integration.handoff", "repository.continue"),
              "new session ID reserved in the registry first; it works in a managed root, a worktree the "
              "connector creates, or a connector-owned worktree it shares; never in a human checkout"),
     Mutation("workspace.register_tab", "bat", "tab", frozenset({"workspace:save"}),
@@ -109,6 +109,9 @@ MUTATIONS: tuple[Mutation, ...] = (
              "repository, and the worktree <clone>/.bat-worktrees/batc-cp-<12 hex> on branch batc/cp-<12 hex>"),
     Mutation("artifact.storage", "connector-storage", "path", frozenset(), ("artifact.upload", "artifact.capture"),
              "configured connector-owned storage; no symlinks or adoption of unknown content"),
+    Mutation("repository.managed_worktree", "ssh-git", "path", frozenset(), ("repository.continue",),
+             "fixed published GitHub SHA in a fresh operation-owned clone/worktree under a managed root; "
+             "explicit repository/host/workspace binding and marker checks; no manual checkout writes or push"),
     Mutation("artifact.materialize", "ssh-files", "path", frozenset(), ("checkpoint.continue",),
              "only .batc-inputs in the continuation's fixed managed worktree; no-follow host read-back"),
     Mutation("integration.area", "ssh-git", "path", frozenset(),
@@ -590,6 +593,18 @@ def check_checkpoint_worktree(hc: HostConfig, clone: str, path: str, branch: str
             or not name.startswith("batc-cp-") or len(suffix) != 12
             or any(ch not in "0123456789abcdef" for ch in suffix) or branch != f"batc/cp-{suffix}"):
         raise ResourceReadOnly("DESTINATION_UNKNOWN", f"{path} is not a connector checkpoint worktree in a managed root")
+
+
+def check_published_worktree(hc: HostConfig, clone: str, path: str, branch: str) -> None:
+    from .cleanup import guard
+    guard(hc.name, path=path, branch=branch)
+    c, p = norm(clone), norm(path)
+    name = posixpath.basename(c or "")
+    suffix = name.removeprefix("batc-published-")
+    if (not re.fullmatch(r"[0-9a-f]{32}", suffix) or
+            posixpath.dirname(c or "") not in tuple(r.rstrip("/") for r in hc.managed_roots) or
+            p != c + "/.bat-worktrees/batc-published-" + suffix[:12] or branch != "batc/published-" + suffix[:12]):
+        raise ResourceReadOnly("DESTINATION_UNKNOWN", "not an operation-owned published repository carrier")
 
 
 # --------------------------------------------------------------------------- integration (W06)

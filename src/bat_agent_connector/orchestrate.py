@@ -166,7 +166,7 @@ async def session_worktree_status(
     d["worktree_dirty_files"] = None if dirty is None else len(dirty)
     d["worktree_dirty_preview"] = [f"{e.get('status')} {e.get('file')}" for e in (dirty or [])[:20]]
     origin = _origin_cwd(t, ws)
-    if origin and (registry.get(host, t["id"]) or {}).get("checkpoint_id"):
+    if origin and any((registry.get(host, t["id"]) or {}).get(k) for k in ("checkpoint_id", "published_sha")):
         # A checkpoint session's recorded main checkout is the person's folder: merges into it are refused, and
         # BAT's git:status there could rewrite their index (a plain `git status`), so it is not read at all.
         d["main_checkout_note"] = "not read: the person's folder (checkpoint sessions never merge into it)"
@@ -245,6 +245,9 @@ async def session_start(
     write_scope: str | None = None,
     confinement_role: str | None = None,
     _task_start_guard: Callable[[], None] | None = None,
+    _start_frame_check=None,
+    _creation_fields: dict | None = None,
+    _on_reservation: Callable[[dict], None] | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
     if write_scope not in (None, "confined"):
@@ -306,6 +309,7 @@ async def session_start(
                 "title": title,
                 "isolation": grant.isolation,
                 "start_sent": False,
+                **(_creation_fields or {}),
                 # Preserve a retained carrier until its identity has been rechecked or removal confirmed.
                 **({k: previous[k] for k in ("cwd", "worktree_path", "branch", "worktree_rolled_back",
                                              "rolled_back_worktree_path", "rolled_back_branch") if k in previous}
@@ -318,6 +322,8 @@ async def session_start(
             },
             hc.orchestrate_max_sessions,
         )
+        if _on_reservation:
+            _on_reservation(registry.get(host, sid))
         if task_id:
             confinement.record_task_start(getattr(fleet, "confinement_journal", None), task_id, sid,
                                           registry.get(host, sid))
@@ -400,6 +406,8 @@ async def session_start(
                             branch=external_branch if cwd_override else wt.get("branchName"))
             audit.record(**base, channel="claude:start-session", phase="attempt", preset=preset)
             async def before_start_frame():
+                if _start_frame_check:
+                    await _start_frame_check()
                 if _task_start_guard:
                     _task_start_guard()
                 try:
@@ -458,7 +466,7 @@ async def session_start(
             worktree_path=cwd if cwd_override else wt.get("worktreePath"),
             branch=external_branch if cwd_override else wt.get("branchName"),
             **({"worktree_made_by": "connector"} if cwd_override else {}),
-            origin_root=git_roots.get(resource_policy.norm(folder)),
+            origin_root=(_creation_fields or {}).get("origin_root", git_roots.get(resource_policy.norm(folder))),
             **registry_permission_fields(opts),
             confinement=confinement_record,
         )
@@ -483,7 +491,9 @@ async def session_start(
                 term.update(worktreePath=wt["worktreePath"], worktreeBranch=wt.get("branchName"))
             try:
                 tab = await c.append_workspace_terminal(hc.profile_id, term,
-                                                        grant=resource_policy.authorize_register_tab(host, sid))
+                                                        grant=resource_policy.authorize_register_tab(host, sid),
+                                                        before_send=_task_start_guard if _start_frame_check else None,
+                                                        before_frame=_start_frame_check)
             except BatError as e:
                 tab = {"appended": False, "error": _err(e)}
             audit.record(

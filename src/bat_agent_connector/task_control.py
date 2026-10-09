@@ -282,6 +282,8 @@ def guarded(action):
             sid = tab["id"]
             await resource_policy.authorize_session(fleet, host, "session." + action, tab)
             task_id = owner_task(fleet, host, sid)
+            if task_id and values.get("_before_frame") is not None:
+                raise TaskControlRefused("TASK_OWNED", "standalone operation cannot adopt a task-owned session")
             if not task_id:
                 return await fn(*args, **kwargs)
             coordinator = getattr(fleet, "task_coordinator", None)

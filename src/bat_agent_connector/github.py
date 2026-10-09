@@ -104,6 +104,9 @@ class GitHubClient:
     async def repository(self, repository: str):
         return await self.call("GET", self._repo(repository))
 
+    async def branch_ref(self, repository: str, branch: str):
+        return await self.call("GET", f"{self._repo(repository)}/git/ref/heads/{quote(branch, safe='')}")
+
     async def update_pull(self, repository: str, number: int, fields: dict):
         return await self.call("PATCH", f"{self._repo(repository)}/pulls/{int(number)}", fields)
 

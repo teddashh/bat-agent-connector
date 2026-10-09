@@ -493,7 +493,10 @@ def first_prompt(cp: dict, *, worktree: str, branch: str, instructions: str, mar
 
 async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent: str, worktree: str, branch: str,
                             head: str, title: str, text: str, marker: str, registry_fields: dict,
-                            before_send: Callable[[], Awaitable[None]] | None = None) -> dict:
+                            before_send: Callable[[], Awaitable[None]] | None = None,
+                            frame_check: Callable[[], Awaitable[None]] | None = None,
+                            final_check: Callable[[], None] | None = None,
+                            creation_fields: dict | None = None) -> dict:
     """Start a confined managed session in a connector worktree and send its first instruction, as recorded steps.
 
     ``verify.start``: BAT itself sees the folder at ``head`` (a step, so a replay after the agent committed returns
@@ -520,11 +523,15 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
     await ctx.step("verify.start", verify, reconcile=reverify)
 
     async def start() -> dict:
+        def record_reservation(entry):
+            ctx.set_refs(repository_reservation={"session_id": sid, "created_at": entry["created_at"]})
         try:
             r = await orchestrate.session_start(
                 fleet, host, workspace, agent, confirm=True, prompt=None, use_worktree=False, title=title,
                 session_id=sid, retain_on_error=True, cwd_override=worktree, external_branch=branch,
-                write_scope="confined")
+                write_scope="confined", _task_start_guard=final_check,
+                _start_frame_check=frame_check, _creation_fields=creation_fields,
+                _on_reservation=record_reservation if creation_fields is not None else None)
         except confinement.ConfinementRefused as exc:
             if (exc.sent is False or exc.code in confinement.START_IDENTITY_MISMATCH_CODES
                     or exc.code in {"CONFINEMENT_MISMATCH", "CONFINEMENT_START_UNSETTLED", "START_IN_PROGRESS"}):
@@ -536,6 +543,14 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
 
     async def restart(_request: dict) -> dict | None:
         entry = registry.get(host, sid)
+        if creation_fields is not None:
+            reserved = (ops.get(ctx.operation_id).get("external_refs") or {}).get("repository_reservation")
+            if not entry or not reserved or reserved != {"session_id": sid, "created_at": entry.get("created_at")}:
+                raise NeedsAttention("REPOSITORY_START_UNPROVEN", "original published start reservation is unavailable")
+            if entry.get("task_id") or entry.get("status") not in {"starting", "uncertain", "active", "failed"}:
+                raise NeedsAttention("REPOSITORY_BINDING_CHANGED", "published start no longer owns the original runtime")
+        if creation_fields is not None and entry and any(entry.get(k) != v for k, v in creation_fields.items()):
+            raise NeedsAttention("REPOSITORY_BINDING_CHANGED", "published start reservation no longer matches its operation")
         if not entry or entry.get("start_sent") is False:
             return RERUN  # never reserved in the registry, so no start frame left this process
         if not entry.get("confinement"):
@@ -583,12 +598,15 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
     await ctx.step("session.start", start, request={"session_id": sid, "cwd": worktree, "agent": agent,
                                                  "write_scope": "confined"},
                    reconcile=restart)
-    registry.update(host, sid, **registry_fields)
+    if creation_fields is None:
+        registry.update(host, sid, **registry_fields)
     mid = "batc-" + ctx.operation_id
 
     async def send() -> dict:
         r = await service.session_send(fleet, host, sid, text, confirm=True, message_id=mid,
-                                       tool="api:" + ctx.actor, retry_on_disconnect=False)
+                                       tool="api:" + ctx.actor, retry_on_disconnect=False,
+                                       ensure_loaded=frame_check is None, before_invoke=final_check,
+                                       _before_frame=frame_check)
         return {"message_id": mid, "accepted": r.get("accepted"), "turn_marker": r.get("turn_marker")}
 
     async def resend(_request: dict) -> dict | None:

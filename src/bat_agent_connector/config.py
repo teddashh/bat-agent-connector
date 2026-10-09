@@ -263,6 +263,13 @@ class IntegrateConfig:
 
 
 @dataclass(frozen=True)
+class RepositorySyncConfig:
+    remote_url: str
+    bindings: tuple[tuple[str, str], ...]
+    fetch_timeout_s: float = 1800.0
+
+
+@dataclass(frozen=True)
 class GitHubRepo:
     repository: str  # owner/name
     allow_merge: bool = True
@@ -270,6 +277,7 @@ class GitHubRepo:
     default_merge_method: str = "squash"
     integrate: IntegrateConfig | None = None
     allow_pr_update: bool = False
+    sync: RepositorySyncConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -423,6 +431,32 @@ def _integrate(r: dict, repository: str, api_url: str, host_names: set[str]) -> 
                            workspace)
 
 
+def _repository_sync(r, repository, api_url, host_names):
+    raw = r.get("sync")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) - {"remote_url", "bindings", "fetch_timeout_s"}:
+        raise ConfigError(f"[[github.repos]] {repository}: invalid sync table")
+    bindings = raw.get("bindings")
+    if not isinstance(bindings, list) or not bindings or len(bindings) > 200:
+        raise ConfigError(f"[[github.repos]] {repository}: sync.bindings must contain 1-200 exact host/workspace IDs")
+    out = []
+    for b in bindings:
+        if (not isinstance(b, dict) or set(b) != {"host", "workspace_id"}
+                or not isinstance(b["host"], str) or b["host"] not in host_names
+                or not isinstance(b["workspace_id"], str) or not 1 <= len(b["workspace_id"]) <= 256
+                or b["workspace_id"] != b["workspace_id"].strip() or any(ord(c) < 32 for c in b["workspace_id"])):
+            raise ConfigError(f"[[github.repos]] {repository}: invalid exact sync binding")
+        pair = b["host"], b["workspace_id"]
+        if pair in out:
+            raise ConfigError(f"[[github.repos]] {repository}: repeated sync binding")
+        out.append(pair)
+    timeout = raw.get("fetch_timeout_s", 1800)
+    if type(timeout) not in (int, float) or not 60 <= timeout <= 7200:
+        raise ConfigError(f"[[github.repos]] {repository}: sync.fetch_timeout_s must be 60-7200")
+    return RepositorySyncConfig(_integrate_url(raw.get("remote_url"), repository, api_url), tuple(out), float(timeout))
+
+
 def parse_github(data: dict) -> GitHubConfig:
     g = data.get("github") or {}
     interval = g.get("deployment_reconcile_interval_s", 300)
@@ -449,7 +483,14 @@ def parse_github(data: dict) -> GitHubConfig:
             raise ConfigError(f"[[github.repos]] {name}: default_merge_method must be one of merge_methods")
         repos[name.lower()] = GitHubRepo(name, bool(r.get("allow_merge", True)), methods, default,
                                          _integrate(r, name, api_url, set((data.get("hosts") or {}).keys())),
-                                         bool(r.get("allow_pr_update", False)))
+                                         bool(r.get("allow_pr_update", False)),
+                                         _repository_sync(r, name, api_url, set((data.get("hosts") or {}).keys())))
+    bound = set()
+    for repo in repos.values():
+        for pair in repo.sync.bindings if repo.sync else ():
+            if pair in bound:
+                raise ConfigError("a host/workspace ID may have only one github.repos sync binding")
+            bound.add(pair)
     recipes: dict[str, DeployRecipe] = {}
     for r in (data.get("deploy") or {}).get("recipes") or []:
         name = str(r.get("name") or "")
