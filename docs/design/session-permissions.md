@@ -28,7 +28,8 @@ permissions command。Claude 一個 mode frame；Codex sandbox、approval 各一
 原 session/runtime binding、confinement、task pause/version/owner。使用既有 guard_read 在 client
 semaphore 內讀 identity，然後同步執行最後 gates；`on_transport` 才記錄真的送達 transport 的界線。
 Claude 必須有正面 idle evidence；streaming 回 `PERMISSIONS_STREAMING`，不保存 deferred raise。
-不把缺少 streaming 欄位視為 idle，不暴露 force。
+不把缺少 streaming 欄位視為 idle，不暴露 force。未知 agent preset 回 PERMISSIONS_AGENT_UNSUPPORTED，
+不套用 Codex setter；admission 沒有 task owner 也必須保持沒有，不能在執行時自動採用新 owner。
 Audit 以原 actor/operation ID 記錄各實際 dispatch 的 attempt/result；同一輪 Codex batch 只檢查 rate 一次。
 恢復時，已 ACK 的 frames 不重記 attempt；新的未送出 frame 再查 hourly budget，同 operation 的先前
 frame 不構成另一個 request 的 interval，但仍計入 hourly budget。
@@ -40,6 +41,9 @@ frame 不構成另一個 request 的 interval，但仍計入 hourly budget。
 Registry projection 使用原 creation/binding/options 的 CAS；若有後來的 owner/policy，記錄 skipped，
 不得覆蓋。沒有 ACK 的 step 保持 uncertain；操作 resume 只延續同一 plan／steps，不挑新 session。
 尚未送出的後續 frame 仍受原 task gate 約束，不能用成功前綴繞過 pause/version。
+若全部精確 channel/params 的 true ACK 已存在，但 local bookkeeping 多次失敗導致 needs_attention，
+cancel 只排程原 operation 的 receipt completion；partial/unknown 維持一般 cancel 的未證明 outcome 證據。
+Admission host policy／confinement refusal 均為帶原明確 code 的 HTTP 403，且不建立 operation。
 目前 worker 在 connect／guard_read 失敗且 on_transport 未觸發時有明確 no-send 證據，
 保存 PERMISSIONS_NOT_SENT failed receipt，可在排除連線問題後提交新 key；若已有 ACK 前綴，
 原 command 保留 partial/uncertain 證據。Process interruption 只留下 intent 時沒有這項證據，仍不可重送。

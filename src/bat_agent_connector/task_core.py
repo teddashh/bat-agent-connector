@@ -178,6 +178,9 @@ class TaskCoordinator:
             from .task_control import check_binding
             context = OpContext(self.operations, self.operations._row(params["operation_id"]))
             check_binding(context)
+            if action == "permissions":
+                from .session_permissions import _check_owner
+                _check_owner(context, self.adapter.fleet, host, sid)
             if context.admission_binding and context.admission_binding["task_id"] != task_id:
                 raise TaskControlRefused("TASK_BINDING_MISMATCH", "session task owner changed since admission")
             params = {**params, "control_version": context.effective_preconditions.get("control_version")}
