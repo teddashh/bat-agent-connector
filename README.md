@@ -7,7 +7,7 @@
 **Project page:** https://teddashh.github.io/bat-agent-connector/
 
 **Development direction:** [Shared product and Tauri UI decisions](docs/product/realignment-v2.md) and
-[implementation status](docs/product/implementation-status.md). The desktop client will share the Dashboard
+[implementation status](docs/product/implementation-status.md). The desktop client shares the Dashboard
 frontend and the existing Python backend. Both plans describe one product with revised UI direction and a shared
 feature backlog. Project Hub import is excluded; project/work-item management remains.
 
@@ -90,7 +90,10 @@ one file, not a dirty snapshot. Managed files use `artifact managed-capture-prev
 operation or task/command selector, then `artifact managed-capture`. `artifact accept` (approve scope) records
 review of one exact revision and its saved lineage without completing a task, merging or deploying.
 Another host must obtain published code through an explicitly bound repository; direct transfer of unpublished
-Git objects is outside the delivery scope. Repository synchronization and managed capture/accept UI remain follow-up work.
+Git objects is outside the delivery scope. Repository synchronization remains follow-up work.
+The shared Artifacts view provides managed capture and exact-revision review with saved operation recovery.
+Sessions offers a central managed start form and fixed-selection batch approvals; reviewed cleanup also
+covers eligible Task Service resources. Native files use OS pickers, bounded previews and Save As.
 See [the artifact design](docs/design/artifacts.md).
 
 ## Install
