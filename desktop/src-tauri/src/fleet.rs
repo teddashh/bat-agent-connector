@@ -119,6 +119,7 @@ fn hex(s: &str, len: usize) -> bool {
 
 #[derive(Serialize)]
 pub struct FleetAvailability {
+    pub native_controls: bool,
     pub configured: bool,
     pub platform_supported: bool,
     pub error: Option<String>,
@@ -130,6 +131,7 @@ pub struct FleetBridge {
 }
 
 impl FleetBridge {
+    #[cfg(all(test, windows))]
     pub fn load(config_dir: &Path) -> Self {
         Self::load_path(config_dir.join("fleet.json"))
     }
@@ -142,6 +144,7 @@ impl FleetBridge {
     pub fn availability(&self) -> FleetAvailability {
         let installation = Snapshot::load(&self.config);
         FleetAvailability {
+            native_controls: cfg!(windows),
             configured: installation.is_ok(),
             platform_supported: cfg!(windows),
             error: installation
@@ -188,6 +191,11 @@ impl FleetBridge {
                     .ok_or_else(|| native_error("LAUNCHER_BUSY"))?;
                 installation.verify_current().map_err(native_error)?;
                 crate::fleet_native::verify_no_migration(&installation).map_err(native_error)?;
+                crate::fleet_native::verify_control_owner(
+                    &installation,
+                    matches!(input, FleetRequest::EnsureMonitor { .. }),
+                )
+                .map_err(native_error)?;
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -219,6 +227,21 @@ async fn powershell_request(
     let result = call(&executable, &script, &request, Duration::from_secs(35)).await?;
     installation.verify_current().map_err(native_error)?;
     Ok(result)
+}
+#[cfg(windows)]
+pub(crate) fn ensure_powershell(installation: Snapshot, binding: &str) -> Result<(), String> {
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let request = FleetRequest::EnsureMonitor {
+        expected_configuration_binding: binding.into(),
+    }
+    .envelope(&id)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| native_error("SUPERVISOR_UNAVAILABLE"))?;
+    runtime
+        .block_on(powershell_request(installation, request, id))
+        .map(|_| ())
 }
 fn native_error(code: &str) -> String {
     format!("Fleet refused the request ({code}); read status before retrying")

@@ -1,4 +1,6 @@
 //! Windows-only native facade. WebView fields are logical IDs and observed versions.
+#[path = "fleet_native/controls.rs"]
+mod controls;
 use crate::fleet::{sanitize_result, FleetRequest};
 use bat_fleet_core::{
     configuration::{Configuration, Paths},
@@ -13,6 +15,7 @@ use bat_fleet_core::{
     windows_monitor_launch::WindowsLaunch,
     Result,
 };
+pub use controls::Controller;
 use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
@@ -105,12 +108,16 @@ impl Context {
     }
     fn owner_epoch(&self) -> Result<Option<String>> {
         self.verify(self.configuration.binding())?;
-        discovery::discover(&self.discovery, &WindowsMonitorObservation)?
+        let owner = discovery::discover(&self.discovery, &WindowsMonitorObservation)?;
+        if owner.is_none() {
+            monitor_launch::verify_absence(
+                &self.roaming.join("bat-fleet-monitor-launch.json"),
+                &WindowsMonitorObservation,
+            )?;
+        }
+        owner
             .map(|owner| {
-                if owner.ownership != Ownership::CurrentLogin
-                    || owner.backend != Backend::Rust
-                    || owner.legacy
-                {
+                if owner.ownership != Ownership::CurrentLogin || owner.legacy {
                     return Err("OWNER_UNPROVEN");
                 }
                 owner.instance.ok_or("OWNER_UNPROVEN")
@@ -120,6 +127,12 @@ impl Context {
     fn status(&self) -> Result<Value> {
         self.verify(self.configuration.binding())?;
         let owner = discovery::discover(&self.discovery, &WindowsMonitorObservation)?;
+        if owner.is_none() {
+            monitor_launch::verify_absence(
+                &self.roaming.join("bat-fleet-monitor-launch.json"),
+                &WindowsMonitorObservation,
+            )?;
+        }
         let selected = Store::new(self.roaming.clone()).read(&self.configuration)?;
         // Unreadable/invalid readiness never grants control or readiness; identity failures still refuse.
         let now = now_ms()?;
@@ -158,7 +171,7 @@ impl Context {
             "monitor":{"state":if owner.is_some(){"running"}else{"stopped"},
                 "epoch":owner.as_ref().and_then(|o| o.instance.as_deref()),
                 "controllable":owner.as_ref().is_some_and(|o| o.ownership == Ownership::CurrentLogin && !o.legacy
-                    && o.backend == Backend::Rust && o.instance.is_some())},
+                    && o.instance.is_some())},
             "selection":{"revision":selected.revision,"connections":selected.preferences().connections,
                 "applied_revision":snapshot.as_ref().map(|s| &s.applied_selection_revision)},
             "readiness":{"state":if fresh{"fresh"}else if snapshot.is_some(){"stale"}else{"unavailable"},
@@ -293,6 +306,107 @@ pub fn verify_no_migration(installation: &Snapshot) -> Result<()> {
     )?;
     if store.pending()?.is_some() {
         return Err("MIGRATION_PENDING");
+    }
+    Ok(())
+}
+
+/// Blocking lifecycle fence shared by explicit Quit and a caller-owned installer.
+/// The closure runs on this thread while Launcher and Monitor guards remain held.
+pub fn with_stopped_fleet<T>(
+    path: &Path,
+    effect: impl FnOnce() -> std::result::Result<T, String>,
+) -> std::result::Result<T, String> {
+    struct Stop {
+        context: Context,
+        began: Instant,
+    }
+    impl crate::fleet_lifecycle::Platform for Stop {
+        type Owner = discovery::MonitorIdentity;
+        type Launcher = LauncherMutex;
+        type Monitor = bat_fleet_core::windows::MonitorMutex;
+        fn launcher(&mut self) -> std::result::Result<Self::Launcher, String> {
+            LauncherMutex::try_acquire()
+                .map_err(String::from)?
+                .ok_or("LAUNCHER_BUSY".into())
+        }
+        fn monitor(&mut self) -> std::result::Result<Self::Monitor, String> {
+            bat_fleet_core::windows::MonitorMutex::try_acquire()
+                .map_err(String::from)?
+                .ok_or("FLEET_STOP_UNCONFIRMED".into())
+        }
+        fn verify(&self) -> std::result::Result<(), String> {
+            self.context
+                .verify(self.context.configuration.binding())
+                .and_then(|_| verify_no_migration(&self.context.installation))
+                .map_err(String::from)
+        }
+        fn owner(&self) -> std::result::Result<Option<Self::Owner>, String> {
+            discovery::discover(&self.context.discovery, &WindowsMonitorObservation)
+                .map_err(String::from)
+        }
+        fn allowed(&self, owner: &Self::Owner) -> bool {
+            owner.ownership == Ownership::CurrentLogin && !owner.legacy && owner.instance.is_some()
+        }
+        fn same(&self, a: &Self::Owner, b: &Self::Owner) -> bool {
+            a.process == b.process
+                && a.instance == b.instance
+                && a.backend == b.backend
+                && a.directories == b.directories
+        }
+        fn quit(&self, owner: &Self::Owner) -> std::result::Result<(), String> {
+            supervisor_control::request_quit(
+                &self.context.configuration,
+                &self.context.discovery,
+                &WindowsMonitorObservation,
+                &self.context.quit_file,
+                owner,
+            )
+            .map_err(String::from)
+        }
+        fn launch_absent(&self) -> std::result::Result<(), String> {
+            monitor_launch::verify_absence(
+                &self.context.roaming.join("bat-fleet-monitor-launch.json"),
+                &WindowsMonitorObservation,
+            )
+            .map_err(String::from)
+        }
+        fn elapsed(&self) -> Duration {
+            self.began.elapsed()
+        }
+        fn wait(&mut self) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    let context =
+        Context::load(Snapshot::load(path).map_err(String::from)?).map_err(String::from)?;
+    crate::fleet_lifecycle::with_stopped(
+        &mut Stop {
+            context,
+            began: Instant::now(),
+        },
+        effect,
+    )
+}
+
+/// Read-only fixed login policy before constructing Tauri or enforcing a single instance.
+pub fn login_options(path: &Path) -> Result<(bool, bool)> {
+    let c = Context::load(Snapshot::load(path)?)?;
+    verify_no_migration(&c.installation)?;
+    let picker =
+        crate::desktop_preferences::load(&c.roaming).map_err(|_| "LOGIN_PREFERENCES_INVALID")?;
+    let selection = Store::new(c.roaming.clone()).read(&c.configuration)?;
+    Ok((picker.show_picker, selection.preferences().dashboard))
+}
+
+/// The legacy fixed PS facade shares native unpublished-launch ambiguity as well as migration exclusion.
+pub fn verify_control_owner(installation: &Snapshot, starting: bool) -> Result<()> {
+    let c = Context::load(installation.clone())?;
+    c.owner_epoch()?;
+    if starting
+        && discovery::discover(&c.discovery, &WindowsMonitorObservation)?
+            .is_some_and(|owner| owner.backend != c.installation.backend())
+    {
+        return Err("BACKEND_OWNER_CHANGED");
     }
     Ok(())
 }
