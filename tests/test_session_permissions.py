@@ -582,3 +582,115 @@ async def test_intent_only_process_interruption_cannot_reconstruct_no_send(owned
         out = restarted.ops.get(op["operation_id"])
         assert out["status"] == "uncertain" and not api.write_frames(mock)
         assert restarted.journal.command_get(command_id)["status"] == "uncertain"
+
+
+async def test_http_confined_raise_refusal_preserves_explicit_code(served, mock):
+    d, port = served
+    adopt(CLAUDE, write_scope="confined")
+    d.fleet.config.host("h1").default_permission_mode = "allow_all"
+    code, body = await api.http(port, "POST", "/api/v1/operations", tok=api.token(d, "confined", "operate"),
+                               body=intent(CLAUDE, mode="allow_all"))
+    assert code == 403 and body["error"]["code"] == "CONFINEMENT_RAISE_REFUSED", body
+    assert not d.ops.list()["operations"] and not api.write_frames(mock)
+
+
+@pytest.mark.parametrize("changed", [False, True])
+async def test_needs_attention_all_ack_cancel_finishes_original_receipts(owned, mock, monkeypatch, changed):
+    from bat_agent_connector.operations import OpContext
+    d, tid = owned
+    adopt(CODEX, task_id=tid, role="lead", agent_preset="codex-agent")
+    d.journal.db.execute("UPDATE tasks SET session_id=? WHERE task_id=?", (CODEX, tid))
+    done, effect = d.ops._step_done, OpContext.effect
+    def crash(op_id, name, response, **kw):
+        done(op_id, name, response, **kw)
+        if name == "permissions.approval":
+            raise OSError("fixture after last ACK before command settlement")
+    def fail_local(ctx, name, fn, **kw):
+        if name == "permissions.command_result":
+            raise OSError("fixture unavailable local bookkeeping")
+        return effect(ctx, name, fn, **kw)
+    monkeypatch.setattr(d.ops, "_step_done", crash)
+    monkeypatch.setattr(OpContext, "effect", fail_local)
+    op, _ = d.ops.create(PERSON, **intent(CODEX))
+    for _ in range(6):
+        d.ops.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+        await settle_operations(d.ops)
+    assert d.ops.get(op["operation_id"])["status"] == "needs_attention"
+    assert d.journal.commands(tid)[0]["status"] == "uncertain"
+    monkeypatch.setattr(OpContext, "effect", effect)
+    if changed:
+        d.journal.pause(tid)
+        d.journal.resume(tid)
+    before = d.journal.get(tid)
+    async def forbidden(*_a, **_kw):
+        pytest.fail("receipt completion must not read BAT or dispatch")
+    monkeypatch.setattr(d.fleet.client("h1"), "invoke", forbidden)
+    cancelled = d.ops.cancel(PERSON, op["operation_id"])
+    assert cancelled["cancel_requested"] and cancelled["status"] == "running"
+    await settle_operations(d.ops)
+    result = d.ops.get(op["operation_id"])
+    assert result["status"] == "succeeded" and len(api.write_frames(mock)) == 2
+    assert d.journal.commands(tid)[0]["status"] == "settled"
+    if changed:
+        assert d.journal.get(tid) == before and not result["result"]["registry_projection"]["updated"]
+    else:
+        assert d.journal.get(tid)["state"] == "accepted"
+
+
+async def test_unknown_agent_does_not_receive_codex_permission_setters(daemon, mock):
+    adopt(CODEX, agent_preset="custom-agent")
+    next(t for t in mock.ws_doc["terminals"] if t["id"] == CODEX)["agentPreset"] = "custom-agent"
+    op, _ = daemon.ops.create(PERSON, **intent(CODEX))
+    await settle_operations(daemon.ops)
+    assert daemon.ops.get(op["operation_id"])["error_code"] == "PERMISSIONS_AGENT_UNSUPPORTED"
+    assert not api.write_frames(mock)
+    await daemon.fleet.close()
+
+
+@pytest.mark.parametrize("during_read", [False, True])
+async def test_standalone_admission_cannot_adopt_a_later_task_owner(owned, mock, monkeypatch, during_read):
+    d, tid = owned
+    adopt(CODEX, agent_preset="codex-agent")
+    op, _ = d.ops.create(PERSON, **intent(CODEX))
+    assert not (op["external_refs"] or {}).get("admission_binding")
+    def claim():
+        registry.update("h1", CODEX, task_id=tid, role="lead")
+        d.journal.db.execute("UPDATE tasks SET session_id=? WHERE task_id=?", (CODEX, tid))
+    if during_read:
+        client = d.fleet.client("h1")
+        original = client.invoke
+        async def invoke(channel, params=None, **kw):
+            result = await original(channel, params, **kw)
+            if channel == "claude:get-session-meta":
+                claim()
+            return result
+        monkeypatch.setattr(client, "invoke", invoke)
+    else:
+        claim()
+    await settle_operations(d.ops)
+    assert d.ops.get(op["operation_id"])["error_code"] == "TASK_BINDING_MISMATCH"
+    assert not api.write_frames(mock) and not d.journal.commands(tid)
+
+
+async def test_needs_attention_unknown_ack_cancel_keeps_normal_uncertainty_evidence(owned, mock, monkeypatch):
+    d, tid = owned
+    adopt(CODEX, task_id=tid, role="lead", agent_preset="codex-agent")
+    d.journal.db.execute("UPDATE tasks SET session_id=? WHERE task_id=?", (CODEX, tid))
+    client, original = d.fleet.client("h1"), d.fleet.client("h1")._roundtrip
+    async def lose(frame, timeout, **kw):
+        result = await original(frame, timeout, **kw)
+        if frame["channel"] == "claude:set-codex-approval-policy":
+            return {**result, "result": False}
+        return result
+    monkeypatch.setattr(client, "_roundtrip", lose)
+    op, _ = d.ops.create(PERSON, **intent(CODEX))
+    for _ in range(6):
+        d.ops.db.execute("UPDATE operations SET next_run_at=0 WHERE operation_id=?", (op["operation_id"],))
+        await settle_operations(d.ops)
+    assert d.ops.get(op["operation_id"])["status"] == "needs_attention"
+    cancelled = d.ops.cancel(PERSON, op["operation_id"])
+    assert cancelled["status"] == "cancelled" and "never proven" in cancelled["status_reason"]
+    await settle_operations(d.ops)
+    assert len(api.write_frames(mock)) == 2
+    assert d.journal.commands(tid)[0]["status"] == "uncertain"
+    assert [f["acknowledged"] for f in cancelled["external_refs"]["permission_frames"]] == [True, None]

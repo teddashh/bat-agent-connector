@@ -44,7 +44,7 @@ def admit(ops, principal, target, params, pre):
     host, sid = target["host"], target["session_id"]
     try:
         _policy(ops.context["fleet"], host, sid, params["mode"])
-    except PermissionsRefused as exc:
+    except (PermissionsRefused, confinement.ConfinementRefused) as exc:
         raise OperationError(exc.code, str(exc), 403) from exc
     for row in ops.db.execute("SELECT operation_id,target,external_refs,status FROM operations WHERE action='session.permissions'"):
         refs = json.loads(row["external_refs"] or "{}")
@@ -69,6 +69,8 @@ def _snapshot(row):
 
 
 def _loaded(meta, kind, *, force=False):
+    if kind not in {"claude", "codex"}:
+        raise PermissionsRefused("PERMISSIONS_AGENT_UNSUPPORTED", "only Claude and Codex permission configurations are supported")
     if not isinstance(meta, dict):
         raise PermissionsRefused("PERMISSIONS_UNLOADED", "session is not loaded; no permission frame was sent")
     if kind == "claude" and not force:
@@ -159,6 +161,26 @@ def _calls_proven(ctx, plan):
                and json.loads(r["response"]).get("result") is True for c in plan["calls"])
 
 
+def complete_receipts(ops, op):
+    """A cancelled needs_attention operation may only finish already-proven local bookkeeping."""
+    from .operations import OpContext
+    ctx = OpContext(ops, op)
+    plan = saved_plan(ctx)
+    if not plan or not _calls_proven(ctx, plan):
+        return False
+    try:
+        _command(ctx, plan)
+    except NeedsAttention:
+        return False
+    return True
+
+
+def _check_owner(ctx, fleet, host, sid):
+    expected = (ctx.admission_binding or {}).get("task_id")
+    if task_control.owner_task(fleet, host, sid) != expected:
+        raise TaskControlRefused("TASK_BINDING_MISMATCH", "permission task owner changed since admission")
+
+
 def _command(ctx, plan):
     refs = ctx.service._row(ctx.operation_id)["external_refs"] or {}
     cid = refs.get("command_id")
@@ -235,6 +257,7 @@ async def _run(ctx):
         # The fixed plan is committed before any setter intent; no plan proves no setter was dispatched.
         recover_unsent_command(ctx, {"session_id": target["session_id"], "mode": params["mode"], "calls": []})
     task_control.check_binding(ctx)
+    _check_owner(ctx, ctx.service.context["fleet"], target["host"], target["session_id"])
     await lifecycle.session_set_permissions(ctx.service.context["fleet"], target["host"], target["session_id"],
         params["mode"], confirm=True, control_version=ctx.effective_preconditions.get("control_version"),
         operation_id=ctx.operation_id, _exact_session_id=True, _operation_context=ctx)
@@ -250,6 +273,7 @@ async def execute(ctx, fleet, host, sid, mode, guard):
             raise TaskControlRefused("TASK_BINDING_MISMATCH", "permission session no longer resolves exactly")
         client = fleet.client(host)
         grant = await resource_policy.authorize_session(fleet, host, "session.permissions", terminal)
+        _check_owner(ctx, fleet, host, sid)
         plan = saved_plan(ctx)
         if plan is None:
             kind = service.agent_kind(terminal.get("agentPreset"))
@@ -276,6 +300,7 @@ async def execute(ctx, fleet, host, sid, mode, guard):
                 sent = False
 
                 def check():
+                    _check_owner(ctx, fleet, host, sid)
                     if guard:
                         guard.check()
                     _policy(fleet, host, sid, mode, plan["options"])

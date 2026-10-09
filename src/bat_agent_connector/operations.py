@@ -522,6 +522,15 @@ class OperationService:
                 return self._transition(operation_id, "cancelled", actor=principal.actor,
                                         reason=f"cancelled by {principal.actor} before the next step")
             if op["status"] == "needs_attention":
+                if op["action"] == "session.permissions":
+                    from .session_permissions import complete_receipts
+                    if complete_receipts(self, op):
+                        # Every exact setter ACK is durable. Cancellation cannot erase those effects;
+                        # schedule only the original handler's proven receipt-completion path.
+                        self._transition(operation_id, "running", actor=principal.actor,
+                                         reason="finishing accepted permission receipts after cancellation")
+                        self.kick()
+                        return self.get(operation_id, steps=False)
                 open_steps = [r["name"] for r in self.db.execute(
                     "SELECT name FROM operation_steps WHERE operation_id=? AND status IN ('started','uncertain')",
                     (operation_id,))]
