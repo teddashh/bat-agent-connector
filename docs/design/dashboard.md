@@ -4,6 +4,9 @@
 
 ## 形式
 
+Web 與 Tauri 都是持續支援的入口；共用畫面、中央資料與操作，平台專屬能力按需提供。
+同時開啟、獨立生命週期、草稿與版本對齊的決策見 [共用前端設計](shared-frontend.md)。
+
 `desktop/src` 是 browser 與 Tauri 唯一共用 UI source，保留原有 JavaScript、CSS、DOM helpers 與表單；transport/state helpers 使用 TypeScript。`cd desktop && npm ci && npm run build:all` 以 Vite 產生 packaged desktop assets 與 Python browser assets。Tauri 正式執行不需要 Vite server。
 
 `batc serve` 仍在同一個 loopback 埠提供 `/dashboard/`（`http://127.0.0.1:18796/dashboard/`，`/` 會轉到這裡）。套件的 `dashboard/` 仍只提供 `index.html`、`app.js`、`i18n.js`、`app.css` 四檔；它們由共用 source 產生，禁止手改。翻譯已 bundle 入 app.js，i18n.js 保留相容 stub。其他路徑一律 404。JavaScript/Cargo lockfiles 固定依賴，CI 重建並檢查 generated drift。
@@ -59,6 +62,10 @@ Token 缺少某個 scope（`start`、`integrate`、`manage`、`approve`）時，
   較舊篩選的在途回應不覆蓋新選擇，事件等待排隊的最新讀取；失敗仍不確認 event checkpoint。
 
 ## 冪等與即時更新
+
+Session 訊息以共用安全 DOM renderer 顯示程式碼區塊與表格，提供整段原文／程式碼複製、
+複製失敗時的手動選取，以及不打斷向上閱讀的更新。沿用最近 30 則訊息範圍；閱讀位置離開
+已載入視窗時明示限制。「回到最新訊息」恢復跟隨，閱讀位置不當作中央 ACK 或跨裝置已讀狀態。
 
 - 每個草稿（例如「對這個 session 送字」「以這個 head 合併這個 PR」）在身份分區的 `localStorage` 有一把 `Idempotency-Key`；保存原 operation ID 以便查回。回應遺失後重開再重按仍使用相同 key。操作結束或請求被拒（4xx，409 除外）後才換新鑰匙。舊版無身份分區的資料保留原處，不自動指派給另一個 backend／actor；不明舊操作須先對帳。
 - 專案與工作項目的修改帶上頁面讀到的版本、指紋、兄弟順序或固定狀態；別人先改了就回 409，畫面說明並重新載入，不覆蓋對方。編輯欄的草稿留在重新載入後的表單裡。說明顯示在頁面上方，不會被重畫掉。

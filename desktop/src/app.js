@@ -1,5 +1,6 @@
 import {sessionLabelsPanel, validLabels} from "./session-labels.js";
 import {readArtifactContent} from "./transport/artifact-content.ts";
+import {conversationPanel} from "./conversation.js";
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
@@ -1010,7 +1011,8 @@ async function viewHostDiscovery(main, host) {
 async function viewSession(main, host, sid) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const path = `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`;
-  const head = h("div", { class: "panel" }), msgs = h("div", { class: "panel" });
+  const head = h("div", { class: "panel" });
+  const conversation = conversationPanel({h, t, when, guard: () => assertView(connection)});
   const pending = h("div", { "data-pending-controls": "" }), status = h("div", { class: "muted" });
   const scope = `send.${host}.${sid}`, draftKey = `batc.draft.${connection.namespace}.${scope}`;
   const box = h("textarea", { placeholder: t("send_placeholder") });
@@ -1055,7 +1057,7 @@ async function viewSession(main, host, sid) {
     target: {host, session_id: sid}, storageKey: `batc.labels.${connection.namespace}.${JSON.stringify([host, sid])}`, errorBox, opStatus});
   const cps = checkpointPanel(host, sid);
   const observations = observationPanels("session", `${host}/${sid}`, path);
-  main.append(head, labels.box, controls, cps.box, h("h2", {}, t("messages")), msgs, observations.box);
+  main.append(head, labels.box, controls, cps.box, h("h2", {}, t("messages")), conversation.box, observations.box);
   const renderPending = () => {
     const pend = row.api_access === "managed" ? row.pending : null;
     const current = identity(pend);
@@ -1165,9 +1167,7 @@ async function viewSession(main, host, sid) {
   };
   const loadMessages = async () => {
     const read = await api("GET", `${path}/messages?last_n=30`); assertView(connection);
-    const items = read.messages.map(m => h("div", { class: `msg ${m.role === "user" ? "user" : ""}` },
-      h("span", { class: "who" }, `${m.role || ""} · ${when(m.ts)}`), m.text || ""));
-    msgs.replaceChildren(...(items.length ? items : [h("p", { class: "muted" }, t("no_messages"))]));
+    conversation.update(read.messages);
   };
   const refresh = async (fromEvent = false) => {
     if (refreshInFlight) {
@@ -1199,7 +1199,7 @@ async function viewSession(main, host, sid) {
     ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve(),
     (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation") ? labels.refresh(true) : Promise.resolve()
   ]); });
-  return () => {clearInterval(retry); off(); batHandoff?.dispose();};
+  return () => {clearInterval(retry); off(); batHandoff?.dispose(); conversation.dispose();};
 }
 
 // A checkpoint records this session's commit and recent conversation (read-only); continuing starts a new

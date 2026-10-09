@@ -8,6 +8,21 @@
 
 ## 目前續作
 
+### 2026-10-09 共用 Web／Tauri 與對話閱讀
+
+使用者確認 Web 要持續與 Tauri 對齊。[共用前端設計](../design/shared-frontend.md) 明列
+單一 UI source、中央服務獨立運作、平台能力差異、草稿與版本相容；既有 `/dashboard/`
+由 Connector 提供，無須另建第二套服務或維持舊 UI。
+
+`feat/shared-conversation-reading` 完成審查 P1-1：安全程式碼／表格呈現、原文複製與失敗備援、
+串流／刷新保留閱讀位置及「回到最新訊息」。沿用最近 30 則讀取；未加跨裝置已讀狀態。
+Web 與 Tauri 共用 `conversation.js`／`message-format.js`，兩個 build 已更新。
+分支已有 20 項 Node、616 項 shared UI 通過；包含 25 項新增閱讀／雙入口案例及
+中英 × browser/IPC × 390/768/1440 畫面。實際 Connector＋MockBat fixture 的事件續接、
+retention reset 與草稿恢復通過；兩種 build 的 JavaScript 相同，CSS 扣除 generated notice 也相同。
+初次 clipboard fallback 測試發現 textarea 會正規化 CRLF，已修正整段手動複製並通過回歸。
+尚未合併或安裝；IPC fixture 不代表 Windows/macOS 原生剪貼簿驗收。完整 Python 檢查另留結果。
+
 ### 2026-10-09 Project Hub 前端完整複查
 
 已重新核對上游最新 `main` v4.90.0（`a277d2ed5ce439c248fc32fa8ff9fa4124a06027`），

@@ -426,9 +426,289 @@ async function readArtifactContent(reference, size, token, signal) {
 	return bytes;
 }
 //#endregion
+//#region src/message-format.js
+var lineText = (line) => line.replace(/\r?\n$/, "");
+function tableCells(line) {
+	let text = line.trim(), cell = "", ticks = 0, separators = 0;
+	const cells = [];
+	if (text.startsWith("|")) text = text.slice(1);
+	for (let i = 0; i < text.length; i++) {
+		const char = text[i];
+		if (char === "\\" && text[i + 1] === "|") {
+			cell += "|";
+			i++;
+			continue;
+		}
+		if (char === "`") {
+			let end = i + 1;
+			while (text[end] === "`") end++;
+			const count = end - i;
+			if (!ticks) ticks = count;
+			else if (ticks === count) ticks = 0;
+			cell += text.slice(i, end);
+			i = end - 1;
+			continue;
+		}
+		if (char === "|" && !ticks) {
+			cells.push(cell.trim());
+			cell = "";
+			separators++;
+		} else cell += char;
+	}
+	if (cell || !text.endsWith("|")) cells.push(cell.trim());
+	return separators ? cells : null;
+}
+function messageBlocks(source) {
+	if (source.length > 2e5) return [{
+		kind: "text",
+		text: source
+	}];
+	const lines = source.match(/[^\n]*\n|[^\n]+$/g) || [];
+	if (lines.length > 4e3) return [{
+		kind: "text",
+		text: source
+	}];
+	const blocks = [], plain = [];
+	const flush = () => {
+		if (plain.length) blocks.push({
+			kind: "text",
+			text: plain.splice(0).join("")
+		});
+	};
+	for (let i = 0; i < lines.length;) {
+		const fence = /^ {0,3}(`{3,}|~{3,})([^\r\n]*)$/.exec(lineText(lines[i]));
+		if (fence && !(fence[1][0] === "`" && fence[2].includes("`"))) {
+			flush();
+			const endFence = new RegExp(`^ {0,3}${fence[1][0]}{${fence[1].length},}[ \\t]*$`);
+			const body = [];
+			i++;
+			while (i < lines.length && !endFence.test(lineText(lines[i]))) body.push(lines[i++]);
+			if (i < lines.length) i++;
+			blocks.push({
+				kind: "code",
+				language: fence[2].trim(),
+				text: body.join("")
+			});
+			continue;
+		}
+		const header = tableCells(lineText(lines[i])), divider = i + 1 < lines.length ? tableCells(lineText(lines[i + 1])) : null;
+		if (header?.length && header.length <= 40 && divider?.length === header.length && divider.every((cell) => /^:?-{3,}:?$/.test(cell))) {
+			flush();
+			const rows = [];
+			i += 2;
+			while (i < lines.length && rows.length < 100) {
+				const cells = tableCells(lineText(lines[i]));
+				if (!cells || cells.length !== header.length) break;
+				rows.push(cells);
+				i++;
+			}
+			blocks.push({
+				kind: "table",
+				header,
+				rows
+			});
+			continue;
+		}
+		plain.push(lines[i++]);
+	}
+	flush();
+	return blocks;
+}
+function inline(h, text) {
+	if (text.length > 8192) return [text];
+	const nodes = [];
+	let from = 0;
+	for (const match of text.matchAll(/`([^`\n]+)`|\*\*([^*\n]+)\*\*/g)) {
+		nodes.push(text.slice(from, match.index), h(match[1] === void 0 ? "strong" : "code", {}, match[1] ?? match[2]));
+		from = match.index + match[0].length;
+	}
+	nodes.push(text.slice(from));
+	return nodes;
+}
+function renderMessage(h, t, source, copy) {
+	return messageBlocks(source).map((block) => {
+		if (block.kind === "code") return h("div", { class: "message-code" }, h("div", { class: "message-code-bar" }, h("span", { class: "muted" }, block.language || t("message_code")), h("button", {
+			class: "mini",
+			type: "button",
+			onclick: () => copy(block.text)
+		}, t("message_copy_code"))), h("pre", {
+			tabindex: "0",
+			"aria-label": t("message_code")
+		}, h("code", {}, block.text)));
+		if (block.kind === "table") return h("div", {
+			class: "message-table",
+			tabindex: "0",
+			role: "region",
+			"aria-label": t("message_table")
+		}, h("table", {}, h("thead", {}, h("tr", {}, ...block.header.map((cell) => h("th", { scope: "col" }, ...inline(h, cell))))), h("tbody", {}, ...block.rows.map((row) => h("tr", {}, ...row.map((cell) => h("td", {}, ...inline(h, cell))))))));
+		return h("div", { class: "message-text" }, ...inline(h, block.text));
+	});
+}
+//#endregion
+//#region src/conversation.js
+function conversationPanel({ h, t, when, guard }) {
+	const viewport = h("div", {
+		class: "conversation-scroll",
+		tabindex: "0",
+		role: "region",
+		"aria-label": t("messages")
+	});
+	const status = h("span", {
+		class: "muted",
+		role: "status"
+	}), fallback = h("div", { class: "conversation-copy" });
+	const notice = h("p", {
+		class: "muted",
+		role: "status",
+		hidden: true
+	}, t("message_anchor_missing"));
+	const latest = h("button", {
+		class: "mini",
+		type: "button",
+		hidden: true,
+		onclick: () => {
+			viewport.scrollTop = viewport.scrollHeight;
+			notice.hidden = true;
+			indicator();
+		}
+	}, t("message_latest"));
+	const box = h("section", { class: "panel conversation" }, h("div", { class: "muted" }, t("message_window")), notice, viewport, h("div", { class: "conversation-toolbar" }, status, latest), fallback);
+	let rows = new Map(), initialized = false, disposed = false, copyAttempt = 0;
+	const alive = () => {
+		if (disposed) return false;
+		try {
+			guard();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const atBottom = () => viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 48;
+	const indicator = () => {
+		latest.hidden = atBottom();
+	};
+	viewport.addEventListener("scroll", indicator, { passive: true });
+	const copy = async (text) => {
+		if (!alive()) return;
+		const attempt = ++copyAttempt;
+		status.textContent = "";
+		fallback.replaceChildren();
+		try {
+			await navigator.clipboard.writeText(text);
+			if (alive() && attempt === copyAttempt) status.textContent = t("message_copied");
+		} catch {
+			if (!alive() || attempt !== copyAttempt) return;
+			const input = h("textarea", {
+				readonly: true,
+				"aria-label": t("message_copy_source")
+			}, text);
+			input.addEventListener("copy", (event) => {
+				if (alive() && event.clipboardData && input.selectionStart === 0 && input.selectionEnd === input.value.length) {
+					event.clipboardData.setData("text/plain", text);
+					event.preventDefault();
+				}
+			});
+			fallback.replaceChildren(h("p", { class: "muted" }, t("message_copy_manual")), input, h("button", {
+				class: "mini",
+				type: "button",
+				onclick: () => fallback.replaceChildren()
+			}, t("cancel")));
+			input.focus();
+			input.select();
+		}
+	};
+	const update = (messages) => {
+		if (!alive()) return;
+		const top = viewport.getBoundingClientRect().top;
+		const anchor = [...rows.entries()].find(([, row]) => row.node.getBoundingClientRect().bottom > top);
+		const selection = window.getSelection();
+		const readingSelection = selection && !selection.isCollapsed && viewport.contains(selection.anchorNode);
+		const follow = !initialized || atBottom() && !readingSelection;
+		const offset = anchor ? anchor[1].node.getBoundingClientRect().top - top : 0, scrollTop = viewport.scrollTop;
+		const next = new Map(), occurrences = new Map();
+		for (const message of messages) {
+			const text = typeof message.text === "string" ? message.text : "";
+			const identity = JSON.stringify(message.id != null ? ["id", message.id] : [
+				"text",
+				message.role,
+				message.ts,
+				text
+			]);
+			const occurrence = occurrences.get(identity) || 0;
+			occurrences.set(identity, occurrence + 1);
+			const key = JSON.stringify([identity, occurrence]);
+			let row = rows.get(key);
+			if (!row) {
+				row = {
+					text: null,
+					meta: null,
+					body: h("div", { class: "message-body" }),
+					who: h("span", { class: "who" })
+				};
+				row.node = h("article", { class: "msg" }, h("div", { class: "message-meta" }, row.who, h("button", {
+					class: "mini",
+					type: "button",
+					onclick: () => copy(row.text)
+				}, t("message_copy"))), row.body);
+			}
+			const meta = `${message.role || ""} · ${when(message.ts)}`;
+			if (row.meta !== meta) {
+				row.who.textContent = meta;
+				row.meta = meta;
+			}
+			row.node.className = `msg${message.role === "user" ? " user" : ""}`;
+			if (row.text !== text) {
+				row.body.replaceChildren(...renderMessage(h, t, text, copy));
+				row.text = text;
+			}
+			next.set(key, row);
+		}
+		const retained = new Set([...next.values()].map((row) => row.node));
+		for (const node of [...viewport.childNodes]) if (!retained.has(node)) node.remove();
+		let position = viewport.firstChild;
+		for (const row of next.values()) if (row.node === position) position = position.nextSibling;
+		else viewport.insertBefore(row.node, position);
+		while (position) {
+			const old = position;
+			position = old.nextSibling;
+			old.remove();
+		}
+		if (!next.size) viewport.replaceChildren(h("p", { class: "muted" }, t("no_messages")));
+		if (follow) {
+			viewport.scrollTop = viewport.scrollHeight;
+			notice.hidden = true;
+		} else if (anchor && next.has(anchor[0])) viewport.scrollTop += next.get(anchor[0]).node.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset;
+		else {
+			viewport.scrollTop = scrollTop;
+			if (anchor) notice.hidden = false;
+		}
+		rows = next;
+		initialized = true;
+		indicator();
+	};
+	return {
+		box,
+		update,
+		dispose() {
+			disposed = true;
+			viewport.removeEventListener("scroll", indicator);
+		}
+	};
+}
+//#endregion
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		message_code: "程式碼",
+		message_table: "訊息表格",
+		message_copy_code: "複製程式碼",
+		message_copy: "複製原文",
+		message_copied: "已複製。",
+		message_copy_source: "要複製的原文",
+		message_copy_manual: "無法自動複製，請選取並複製以下原文。",
+		message_latest: "回到最新訊息",
+		message_window: "最近 30 則訊息",
+		message_anchor_missing: "原本閱讀的位置已不在這次載入的訊息中。",
 		tailscale_request: "原開啟請求",
 		tailscale_title: "Tailscale",
 		tailscale_open: "開啟 Tailscale",
@@ -1538,6 +1818,16 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		message_code: "Code",
+		message_table: "Message table",
+		message_copy_code: "Copy code",
+		message_copy: "Copy original",
+		message_copied: "Copied.",
+		message_copy_source: "Original text to copy",
+		message_copy_manual: "Automatic copy is unavailable. Select and copy the original text below.",
+		message_latest: "Back to latest",
+		message_window: "Latest 30 messages",
+		message_anchor_missing: "Your previous reading position is outside the messages currently loaded.",
 		tailscale_request: "Original opening request",
 		tailscale_title: "Tailscale",
 		tailscale_open: "Open Tailscale",
@@ -9402,7 +9692,13 @@ async function viewSession(main, host, sid) {
 		generation
 	};
 	const path = `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`;
-	const head = h("div", { class: "panel" }), msgs = h("div", { class: "panel" });
+	const head = h("div", { class: "panel" });
+	const conversation = conversationPanel({
+		h,
+		t,
+		when,
+		guard: () => assertView(connection)
+	});
 	const pending = h("div", { "data-pending-controls": "" }), status = h("div", { class: "muted" });
 	const scope = `send.${host}.${sid}`, draftKey = `batc.draft.${connection.namespace}.${scope}`;
 	const box = h("textarea", { placeholder: t("send_placeholder") });
@@ -9495,7 +9791,7 @@ async function viewSession(main, host, sid) {
 	});
 	const cps = checkpointPanel(host, sid);
 	const observations = observationPanels("session", `${host}/${sid}`, path);
-	main.append(head, labels.box, controls, cps.box, h("h2", {}, t("messages")), msgs, observations.box);
+	main.append(head, labels.box, controls, cps.box, h("h2", {}, t("messages")), conversation.box, observations.box);
 	const renderPending = () => {
 		const pend = row.api_access === "managed" ? row.pending : null;
 		const current = identity(pend);
@@ -9665,8 +9961,7 @@ async function viewSession(main, host, sid) {
 	const loadMessages = async () => {
 		const read = await api("GET", `${path}/messages?last_n=30`);
 		assertView(connection);
-		const items = read.messages.map((m) => h("div", { class: `msg ${m.role === "user" ? "user" : ""}` }, h("span", { class: "who" }, `${m.role || ""} · ${when(m.ts)}`), m.text || ""));
-		msgs.replaceChildren(...items.length ? items : [h("p", { class: "muted" }, t("no_messages"))]);
+		conversation.update(read.messages);
 	};
 	const refresh = async (fromEvent = false) => {
 		if (refreshInFlight) {
@@ -9720,6 +10015,7 @@ async function viewSession(main, host, sid) {
 		clearInterval(retry);
 		off();
 		batHandoff?.dispose();
+		conversation.dispose();
 	};
 }
 function checkpointPanel(host, sid) {
