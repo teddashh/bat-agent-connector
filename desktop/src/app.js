@@ -3,6 +3,7 @@
 import { t } from "./i18n.js";
 import { connectorRequest, connectorUploadArtifact, nativeDesktop, nativeStatus, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal } from "./transport/index.ts";
 import { mountFleet } from "./fleet.js";
+import { groupedSessions, matchesSession, runtimeStale, sessionActivity } from "./state/sessions.js";
 import { capturePanel } from "./capture.js";
 import { permissionsPanel } from "./permissions.js";
 import { consumePageAsync, settleRefreshes, storageScope } from "./state/events.ts";
@@ -596,60 +597,155 @@ async function viewSessions(main) {
   const hostSel = h("select", {"aria-label": t("host")}, h("option", { value: "" }, t("all_hosts")));
   const accessSel = h("select", {"aria-label": t("all_access")}, h("option", { value: "" }, t("all_access")),
     h("option", { value: "managed" }, t("only_managed")), h("option", { value: "read_only" }, t("only_read_only")));
-  const list = h("div", { class: "panel" }), status = h("div", {});
-  const more = h("button", { class: "secondary", hidden: true }, t("load_more"));
-  main.append(h("h1", {}, t("nav_sessions")), h("p", {class: "muted"}, t("obs_inventory_note")),
-    h("div", { class: "filters" }, hostSel, accessSel), status, list, more);
+  const search = h("input", {type: "search", "aria-label": t("sessions_search"), placeholder: t("sessions_search")});
+  search.value = q.get("search") || "";
+  let selected = q.get("workspace") || "", cursor = null, pages = 1, serial = Promise.resolve(), revision = 0;
+  const rows = new Map(), expanded = new Set();
+  const list = h("div", {class: "session-inventory"}), status = h("div", {}), count = h("p", {class: "muted", "aria-live": "polite"});
+  const more = h("button", {class: "secondary", hidden: true}, t("load_more"));
+  const navigation = h("nav", {"aria-label": t("sessions_workspaces"), class: "session-workspaces"});
+  const scope = h("details", {class: "panel session-scope", open: matchMedia("(min-width: 901px)").matches},
+    h("summary", {}, t("sessions_workspaces")), h("p", {class: "muted"}, t("sessions_scope_note")), navigation,
+    h("a", {class: "session-project-link", href: "#/projects"}, t("sessions_projects")));
+  main.append(h("h1", {}, t("sessions_title")), h("p", {class: "muted"}, t("sessions_intro")),
+    h("div", {class: "filters session-filters"}, search, hostSel, accessSel), status,
+    h("div", {class: "session-layout"}, scope, h("section", {"aria-label": t("sessions_title"), class: "session-results"}, count, list,
+      h("div", {class: "session-pagination"}, more, h("span", {class: "muted"}, t("sessions_page_note"))))));
   try {
     const hosts = (await api("GET", "/hosts")).hosts; assertView(connection);
-    for (const x of hosts) hostSel.append(h("option", { value: x.host }, x.host));
-    main.append(h("div", {class: "actions"}, ...hosts.map(x => h("a", {href: `#/host/${encodeURIComponent(x.host)}`}, x.host, " · ", t("obs_discovery")))));
+    for (const x of hosts) hostSel.append(h("option", {value: x.host}, x.host));
   } catch (e) { status.replaceChildren(errorBox(e)); return; }
   hostSel.value = q.get("host") || ""; accessSel.value = q.get("access") || "";
-  let cursor = null, pages = 1, serial = Promise.resolve();
-  const rows = new Map();
-  const read = async mode => {
-    const p = new URLSearchParams({ limit: "50", order: "id", include_gone: "true" });
+  const save = () => {
+    assertView(connection);
+    const values = new URLSearchParams({host: hostSel.value, access: accessSel.value, search: search.value, workspace: selected});
+    sessionStorage.setItem(storageKey, values.toString());
+  };
+  const row = session => {
+    const id = `${session.host}/${session.session_id}`, activity = sessionActivity(session);
+    const origin = session.provenance === "manual" ? "sessions_manual" : session.provenance === "connector_managed"
+      ? "sessions_connector" : "sessions_origin_unknown";
+    const access = session.api_access === "managed" ? "managed" : session.api_access === "read_only" ? "read_only" : "sessions_access_unknown";
+    const evidence = () => [
+      h("dl", {class: "kv"}, h("dt", {}, t("sessions_label")), h("dd", {}, session.title || session.session_id),
+        h("dt", {}, t("sessions_workspace")), h("dd", {}, session.workspace || t("sessions_workspace_unknown")),
+        h("dt", {}, t("sessions_workspace_id")), h("dd", {}, h("code", {}, session.workspace_id || t("obs_unknown"))),
+        h("dt", {}, t("sessions_id")), h("dd", {}, h("code", {}, session.session_id)),
+        h("dt", {}, t("activity")), h("dd", {}, observationTime(session.last_activity_at)),
+        h("dt", {}, t("observed")), h("dd", {}, observationTime(session.observed_at))),
+      h("p", {class: "muted"}, confinementLabel(session)), confinementDetails(session), observationState(session)];
+    const details = h("details", {class: "session-row-details", open: expanded.has(id)}, h("summary", {}, t("sessions_details")));
+    let mounted = false;
+    const mountEvidence = () => {if (!mounted) {details.append(...evidence()); mounted = true;}};
+    if (expanded.has(id)) mountEvidence();
+    details.addEventListener("toggle", () => {
+      if (!details.isConnected) return;
+      if (details.open) {expanded.add(id); mountEvidence();} else expanded.delete(id);
+    });
+    return h("article", {class: "session-entry", "data-resource-id": id},
+      h("div", {class: "session-entry-heading"},
+        h("a", {class: "title", title: session.title || session.session_id, href: `#/session/${encodeURIComponent(session.host)}/${encodeURIComponent(session.session_id)}`}, session.title || session.session_id),
+        chip(t(activity.key), activity.tone)),
+      h("div", {class: "session-entry-meta"},
+        h("span", {class: session.api_access === "managed" ? "" : "session-readonly"}, session.provenance === "connector_managed" && session.api_access === "managed" ? t(access) : `${t(origin)} · ${t(access)}`),
+        h("span", {}, [session.agent_kind, session.worktree_branch].filter(Boolean).join(" · "))),
+      runtimeStale(session) ? h("p", {class: "session-stale muted"}, t("sessions_stale"), " · ",
+        session.stale_reason === "gone" ? t("sessions_not_seen") : session.stale_reason ? t("stale_reason_" + session.stale_reason) : t("sessions_runtime_stale")) : null,
+      details);
+  };
+  const render = () => {
+    assertView(connection);
+    const groups = groupedSessions([...rows.values()]);
+    const choose = key => {selected = key; save(); render();};
+    const workspaceName = group => group.name || group.id || t("sessions_workspace_unknown");
+    const navButton = (label, key, n) => h("button", {class: "session-scope-button", "aria-pressed": String(selected === key),
+      "data-workspace-key": key, title: label, onclick: () => choose(key)}, h("span", {}, label), h("span", {class: "muted"}, t("sessions_loaded_count", {count: n})));
+    const links = [navButton(t("sessions_all_loaded"), "", rows.size)];
+    const labels = new Map();
+    const labelKey = group => JSON.stringify([group.host, workspaceName(group)]);
+    for (const group of groups) labels.set(labelKey(group), (labels.get(labelKey(group)) || 0) + 1);
+    let lastHost;
+    for (const group of groups) {
+      if (group.host !== lastHost) {
+        links.push(h("a", {class: "session-host-link", href: `#/host/${encodeURIComponent(group.host)}`, title: t("obs_discovery")}, group.host));
+        lastHost = group.host;
+      }
+      const sameName = labels.get(labelKey(group)) > 1;
+      links.push(navButton(workspaceName(group) + (sameName && group.id ? ` · ${group.id}` : ""), group.key, group.sessions.length));
+    }
+    // Keep an unavailable selection explicit; a refresh must not silently broaden its scope.
+    if (selected && !groups.some(group => group.key === selected)) links.push(navButton(t("sessions_scope_missing"), selected, 0));
+    const focusedKey = navigation.contains(document.activeElement) ? document.activeElement.dataset.workspaceKey : undefined;
+    navigation.replaceChildren(...links);
+    if (focusedKey !== undefined) [...navigation.querySelectorAll("button")].find(button => button.dataset.workspaceKey === focusedKey)?.focus({preventScroll: true});
+    let visible = 0;
+    const sections = groups.filter(group => !selected || selected === group.key).flatMap(group => {
+      const sessions = group.sessions.filter(session => matchesSession(session, search.value));
+      if (!sessions.length) return [];
+      visible += sessions.length;
+      return [h("section", {class: "panel session-group"},
+        h("header", {class: "session-group-heading"}, h("h2", {title: workspaceName(group)}, workspaceName(group)),
+          h("span", {class: "muted"}, group.host),
+          group.name && group.id && labels.get(labelKey(group)) > 1 ? h("code", {class: "muted"}, group.id) : null,
+          group.name && !group.id ? h("span", {class: "muted"}, t("sessions_workspace_unverified")) : null), ...sessions.map(row))];
+    });
+    list.replaceChildren(...(sections.length ? sections : [h("div", {class: "panel"}, h("p", {}, t("sessions_no_matches")),
+      h("p", {class: "muted"}, cursor ? t("sessions_more_hint") : t("sessions_empty_hint")))]));
+    count.textContent = t("sessions_showing", {shown: visible, loaded: rows.size});
+  };
+  const read = async (mode, expectedRevision) => {
+    if (expectedRevision !== revision) return;
+    const p = new URLSearchParams({limit: "50", order: "id", include_gone: "true"});
     if (hostSel.value) p.set("host", hostSel.value);
     if (accessSel.value) p.set("access", accessSel.value);
-    sessionStorage.setItem(storageKey, p.toString());
-    more.disabled = true;
+    save(); more.disabled = true;
     try {
       assertView(connection);
-      const before = scrollY, anchor = [...list.children].find(node => node.getBoundingClientRect().bottom > 110);
+      const before = scrollY, anchor = [...list.querySelectorAll("[data-resource-id]")].find(node => node.getBoundingClientRect().bottom > 110);
       const anchorID = anchor?.dataset.resourceId, offset = anchor?.getBoundingClientRect().top;
       const observed = new Map(mode === "more" ? rows : []);
       let next = mode === "more" ? cursor : null;
-      const count = mode === "refresh" ? pages : 1;
+      const total = mode === "refresh" ? pages : 1;
       let readPages = 0;
-      for (let page = 0; page < count; page++) {
+      for (let page = 0; page < total; page++) {
         const query = new URLSearchParams(p); if (next) query.set("cursor", next);
         const result = await api("GET", `/sessions?${query}`); assertView(connection);
-        for (const session of result.sessions) {
-          const id = `${session.host}/${session.session_id}`;
-          observed.set(id, session); rememberObservation("session", id, {session}, [`host:${session.host}`]);
-        }
+        if (expectedRevision !== revision) return;
+        for (const session of result.sessions) observed.set(`${session.host}/${session.session_id}`, session);
         readPages++;
         if (result.next_cursor && result.next_cursor === next) throw new Error("Inventory cursor did not advance");
         next = result.next_cursor; if (!next) break;
       }
-      rows.clear(); for (const [id, session] of observed) rows.set(id, session);
-      const nodes = [...rows].map(([id, session]) => {const node = sessionRow(session); node.dataset.resourceId = id; return node;});
-      list.replaceChildren(...nodes);
+      rows.clear();
+      for (const [id, session] of observed) {rows.set(id, session); rememberObservation("session", id, {session}, [`host:${session.host}`]);}
       cursor = next; more.hidden = !cursor;
       pages = mode === "more" ? pages + readPages : readPages;
-      status.replaceChildren();
-      const current = [...list.children].find(node => node.dataset.resourceId === anchorID);
+      const focused = document.activeElement;
+      const focusedID = list.contains(focused) ? focused.closest("[data-resource-id]")?.dataset.resourceId : null;
+      const focusedPart = focused?.tagName === "SUMMARY" ? "summary" : focused?.classList.contains("title") ? "a.title" : null;
+      render(); status.replaceChildren();
+      if (focusedID && focusedPart && document.activeElement === document.body) {
+        [...list.querySelectorAll("[data-resource-id]")].find(node => node.dataset.resourceId === focusedID)
+          ?.querySelector(focusedPart)?.focus({preventScroll: true});
+      }
+      const current = [...list.querySelectorAll("[data-resource-id]")].find(node => node.dataset.resourceId === anchorID);
       if (mode === "refresh" && current && Math.abs(scrollY - before) < 1) scrollBy(0, current.getBoundingClientRect().top - offset);
     } catch (e) { status.replaceChildren(errorBox(e)); }
     finally {more.disabled = false;}
   };
-  const load = mode => {serial = serial.then(() => read(mode)); return serial;};
-  hostSel.onchange = accessSel.onchange = () => load("reset");
+  const load = async mode => {
+    const expected = revision;
+    serial = serial.then(() => read(mode, expected));
+    // An event cannot acknowledge an obsolete read while a newer filter read is queued.
+    let pending;
+    do {pending = serial; await pending;} while (pending !== serial);
+  };
+  hostSel.onchange = accessSel.onchange = () => {revision++; selected = ""; save(); return load("reset");};
+  search.oninput = () => {save(); render();};
   more.onclick = () => load("more");
   await load("reset");
   const reload = debounceRefresh(() => load("refresh"), 500);
-  return onEvents(ev => { if (["session", "host", "execution", "task"].includes(ev.resource_type)) return reload(); });
+  return onEvents(ev => {if (["session", "host", "execution", "task"].includes(ev.resource_type)) return reload();});
 }
 
 const observationTime = value => value === null || value === undefined || value === "" ? t("obs_unknown")
