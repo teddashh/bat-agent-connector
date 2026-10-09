@@ -39,12 +39,21 @@ cleanup、native files 及獨立 reviewer 的固定 bytes/revision。Local full 
 - [#64](https://github.com/teddashh/bat-agent-connector/pull/64) 是 native Fleet／bootstrap／signed update 整合候選，仍未合併。
   `a9e7413` 的四版 Python full CI、Windows app Clippy／tests 通過，Windows Fleet core 的空閒 port proof 失敗。
   真 Windows fixture 證明：空閒 endpoint 的 connect 在 100 ms timeout，而約 2 s 才回 ConnectionRefused；bind 成功。
-  專用早期 Windows job 保留正面 refusal＋bind oracle；修正與完整 CI 尚須收斂。不能以增加測試容忍或接受 unknown 代替 proof。
+  `b4a46b4` 將 production connect budget 改為 3 s，仍需正面 refusal＋bind；Windows oracle 已通過。
+  完整 Windows CI 隨後暴露 17 個 supervisor failures：掃描保留短路徑、selection/launch 已展開，造成同一 receipt 被當 foreign。
+  `804f483` 統一路徑解析；portable regression 確認舊邏輯失敗、修正後通過，configuration/supervisor/unconfigured 共 42 tests、Clippy/fmt 通過，獨立 review 無 findings。
+  已推送同 head Windows 完整矩陣；沒有把早期 oracle 或 Linux fixtures 當完整 Windows 通過。
   原 local evidence：416 UI、12 state、218 Linux Fleet core、78 app Rust／1 fixture-only ignored、release verifier example 1；bootstrap 44 在兩版 Python 通過。
-- `integrate/dashboard-release` 已累加 principal transcript／wait、canonical `.12`、task pause/resume、操作紀錄分頁及 session→明確 BAT profile 入口。
+- `integrate/dashboard-release` 已累加 principal transcript／wait、canonical `.13`、task pause/resume、操作紀錄分頁及 session→明確 BAT profile 入口。
   Observation author 467 在兩版 Python 通過；root 整合 86 在兩版通過。Task root 34 UI＋actual central fixture 通過；
   session BAT＋start root 52 UI 通過。獨立審查修正重開後的未送出 preview，不以遺失 receipt 授權重複啟動。
-  專用 orchestration GUI、A03 Connector-local labels 及最後兩個 legacy mutations（worktree merge／verification testimony）仍在收尾。
+  `8621dc4` 合入四個 orchestration 表單：relay、planner、明確逐項 fanout、單一 Claude→Codex 接續。共用 UI 516、state 12 全通過。
+  Actual-central fixture 在一般暫存磁碟遇到 5 s UI 等待失敗；原碼在 `/dev/shm` 暫存重跑通過，未放寬 production/test deadlines。
+  `c3d7143` 合入 A03 labels：純中央 metadata、版本 CAS、完整 SID、人工／unknown／retained 支援、原 receipt 與 loaded-only 搜尋。
+  Peer/root 找到的 cleanup alias kind 已修；author 40 最終 UI、25 最終 focused backend、真中央人工 Git bytes 不變 fixture 通過。
+  `5a9a143` 合入 verification testimony：operate scope、各入口同中央、不可變 JSON operation receipt、原 timestamp recovery；不授予 trusted Task Service verification。
+  Root 合併 labels／verification／principal／lifecycle／canonical 152 tests 在 Python 3.13／3.10 均通過，另 3 trusted verifier cases 通過；labels／BAT／task／refresh 91 UI 通過，最終 candidate CI 另記。
+  `worktree.merge` 的最後 legacy mutation 尚在收尾，含雙 carrier 排他與 checked-exit Git proof。
   同候選完整 UI／backend／Windows 矩陣與 installer pin 以後續候選為準；這些分層結果不是整套產品完成證據。
 
 以上沒有正式簽章身分、release feed 發布、Windows installed 或 live host/provider writes 的完成宣稱。
