@@ -4,6 +4,7 @@ pub mod configuration;
 pub mod inventory;
 pub mod ownership;
 pub mod selection;
+pub mod selection_io;
 pub mod strict_json;
 
 pub type Result<T> = std::result::Result<T, &'static str>;

@@ -2,56 +2,9 @@ use bat_fleet_core::{
     configuration::{data_directory, Configuration, Paths},
     digest,
 };
-use std::{
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-};
-
-struct Fixture(PathBuf);
-impl Fixture {
-    fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "bac-fleet-config-{}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&root).unwrap();
-        std::fs::create_dir_all(root.join("kit/bat-profiles")).unwrap();
-        std::fs::create_dir(root.join("使用者🦀")).unwrap();
-        std::fs::write(
-            root.join("kit/fleet-inventory.json"),
-            include_bytes!("fixtures/inventory.json"),
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("kit/bat-profiles/index.json"),
-            include_bytes!("fixtures/profile-index.json"),
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("kit/ssh-config"),
-            include_bytes!("fixtures/ssh-config"),
-        )
-        .unwrap();
-        Self(root)
-    }
-    fn paths(&self) -> Paths {
-        Paths::new(&self.0.join("kit"), &self.0.join("使用者🦀"), None, None).unwrap()
-    }
-    fn load(&self) -> Configuration {
-        Configuration::load(self.paths()).unwrap()
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use std::path::Path;
+mod support;
+use support::Fixture;
 
 #[test]
 fn default_binding_matches_powershell_bytes_and_utf16_path_lengths_without_writes() {
