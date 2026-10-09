@@ -546,3 +546,57 @@ async def test_proven_unsent_rollback_never_overwrites_newer_registry_binding(da
     for key in ('role', 'agent_params', 'cwd'):
         assert successor.get(key) == newer['successor'].get(key)
     await daemon.fleet.close()
+
+
+@pytest.mark.parametrize('change', ['task_owner', 'journal_owner', 'path_owner', 'registry_binding', 'new_consumer'])
+@pytest.mark.parametrize('boundary', ['last_read', 'before_send'])
+async def test_final_frame_rechecks_every_shared_consumer_and_detects_new_consumers(daemon, mock, monkeypatch, change, boundary):
+    from tests.conftest import adopt
+    other = 'managed-shared-carrier'
+    adopt(other, cwd='/srv/demo/.bat-worktrees/abc', worktree_path='/srv/demo/.bat-worktrees/abc', origin_cwd='/srv/demo', branch='bat/worktree-abc')
+    mock.metas[other] = None
+    daemon.fleet.config.host('h1').orchestrate_max_sessions = 3
+    client = daemon.fleet.client('h1')
+    changed = False
+    def mutate():
+        nonlocal changed
+        if changed:
+            return
+        changed = True
+        if change in {'task_owner', 'journal_owner', 'path_owner'}:
+            task = daemon.journal.submit(project='p', host='h1', workspace='demo-project', original_words='new owner', idempotency_key='last-read-owner')
+            if change == 'path_owner':
+                daemon.journal.db.execute('UPDATE tasks SET external_worktree_path=?,paused=1 WHERE task_id=?', ('/srv/demo/.bat-worktrees/abc', task['task_id']))
+            else:
+                daemon.journal.db.execute('UPDATE tasks SET session_id=?,paused=1 WHERE task_id=?', (other, task['task_id']))
+            if change == 'task_owner':
+                registry.update('h1', other, task_id=task['task_id'], role='lead')
+        elif change == 'registry_binding':
+            registry.update('h1', other, role='changed')
+        else:
+            adopt('new-carrier-consumer', cwd='/srv/demo/.bat-worktrees/abc', worktree_path='/srv/demo/.bat-worktrees/abc', origin_cwd='/srv/demo', branch='bat/worktree-abc')
+            mock.metas['new-carrier-consumer'] = None
+    if boundary == 'last_read':
+        original = client.guard_read
+        async def read(channel, params):
+            result = await original(channel, params)
+            if channel == 'claude:get-session-state' and params['sessionId'] == SID:
+                mutate()
+            return result
+        monkeypatch.setattr(client, 'guard_read', read)
+    else:
+        original = client.invoke
+        async def invoke(channel, *args, **kwargs):
+            if channel == 'claude:start-session':
+                prior = kwargs['before_send']
+                def gate():
+                    mutate()
+                    prior()
+                kwargs['before_send'] = gate
+            return await original(channel, *args, **kwargs)
+        monkeypatch.setattr(client, 'invoke', invoke)
+    out = await create(daemon)
+    assert changed and out['status'] == 'failed', out
+    assert not api.write_frames(mock)
+    assert registry.get('h1', SID)['status'] == 'active'
+    await daemon.fleet.close()
