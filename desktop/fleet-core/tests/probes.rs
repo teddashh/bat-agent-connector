@@ -686,7 +686,10 @@ async fn configuration_bounds_precede_network_and_readiness_cannot_relabel_old_r
         Duration::from_secs(1),
     )
     .await;
-    assert_eq!(down.code, Some("TUNNEL_DOWN"));
+    // Windows can finish the one-second probe budget before TCP reports a
+    // refused connection. Either result positively denies tunnel readiness;
+    // this test does not require an OS-specific refusal latency.
+    assert!(matches!(down.code, Some("TUNNEL_DOWN" | "PROBE_TIMEOUT")));
     assert!(!down.tunnel);
     for duration in [Duration::ZERO, Duration::from_secs(31)] {
         let out = bat_probe(
