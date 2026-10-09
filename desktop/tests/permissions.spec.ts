@@ -4,6 +4,70 @@ import {permissionFixture, openPermissions, operationId} from './permissions-fix
 
 for (const native of [false, true]) {
   const transport = native ? 'native' : 'browser';
+  test(`${transport}: definitive admission refusal permits an explicit changed draft`, async ({page}) => {
+    const state = await permissionFixture(page, native, {refuse: 'TASK_PAUSED'});
+    let form = await openPermissions(page);
+    for (const code of ['TASK_PAUSED', 'CONTROL_VERSION_CONFLICT', 'PERMISSIONS_HOST_POLICY']) {
+      state.refuse = code;
+      await form.getByRole('combobox').selectOption('allow_all');
+      await form.getByRole('button', {name: 'Apply permissions', exact: true}).click();
+      await expect(form).toContainText(code);
+      await expect(form.getByRole('button', {name: 'Start another change'})).toBeEnabled();
+      const before = state.posts.length;
+      await page.reload(); form = page.locator('[data-permissions]'); await form.locator('summary').click();
+      await form.getByRole('button', {name: 'Start another change'}).click();
+      await expect(form.getByRole('combobox')).toHaveValue('default');
+      expect(state.posts).toHaveLength(before);
+    }
+    state.refuse = null;
+    await form.getByRole('button', {name: 'Apply permissions', exact: true}).click();
+    await expect(form).toContainText('BAT accepted the requested configuration');
+    expect(new Set(state.posts.map(post => post.idempotency_key)).size).toBe(4);
+    expect(state.posts[3].body.params.mode).toBe('default');
+  });
+  test(`${transport}: auth or ambiguous failure after lost acceptance never permits a new key`, async ({page}) => {
+    const state = await permissionFixture(page, native, {lost: true});
+    const form = await openPermissions(page);
+    await form.getByRole('button', {name: 'Apply permissions', exact: true}).click();
+    await expect(form).toContainText('Lost permission reply');
+    for (const code of ['FORBIDDEN', 'UNKNOWN_ACTION', 'IDEMPOTENCY_CONFLICT']) {
+      state.refuse = code;
+      await form.getByRole('button', {name: 'Retry original request'}).click();
+      await expect(form).toContainText(code);
+      await expect(form.getByRole('button', {name: 'Start another change'})).toBeHidden();
+      await expect(form.getByRole('combobox')).toBeDisabled();
+    }
+    expect(new Set(state.posts.map(post => post.idempotency_key)).size).toBe(1);
+  });
+  test(`${transport}: same body from a different operation key cannot be accepted`, async ({page}) => {
+    const state = await permissionFixture(page, native, {badKey: true});
+    const form = await openPermissions(page);
+    await form.getByRole('button', {name: 'Apply permissions', exact: true}).click();
+    await expect(form).toContainText('does not match');
+    await expect(form.getByRole('link', {name: 'View operation and step receipts'})).toHaveCount(0);
+    await expect(form.getByRole('button', {name: 'Start another change'})).toBeHidden();
+    state.badKey = false;
+    await form.getByRole('button', {name: 'Retry original request'}).click();
+    await expect(form).toContainText('BAT accepted the requested configuration');
+    expect(state.posts[1]).toEqual(state.posts[0]);
+  });
+  test(`${transport}: event preceding first reply waits for identity then fresh operation read`, async ({page}) => {
+    const state = await permissionFixture(page, native, {status: 'running', delayPost: true});
+    const form = await openPermissions(page);
+    await form.getByRole('button', {name: 'Apply permissions', exact: true}).click();
+    await expect.poll(() => Boolean(state.holdPost)).toBe(true);
+    state.status = 'succeeded'; state.failRead = true;
+    state.events.push({seq: 1, kind: 'operation.succeeded', resource_type: 'operation', resource_id: operationId});
+    await expect.poll(() => state.delivered).toBe(true);
+    expect(state.after).toBe(0);
+    state.holdPost();
+    await expect(form).toContainText('Permission read failed');
+    expect(state.after).toBe(0);
+    state.failRead = false;
+    await expect(form).toContainText('BAT accepted the requested configuration');
+    await expect.poll(() => state.after).toBe(1);
+    expect(state.posts).toHaveLength(1);
+  });
   test(`${transport}: new changes start with normal permissions and require a fresh explicit apply`, async ({page}) => {
     const state = await permissionFixture(page, native);
     const form = await openPermissions(page);
