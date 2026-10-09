@@ -63,6 +63,7 @@ jobs:
           npm run test:central
           npm run test:cleanup
           npm run test:task-cleanup
+          npm run test:task-controls
           npm run test:artifacts
           npm run test:delivery
           npm run test:observation
