@@ -981,15 +981,14 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             fn.__doc__ = (fn.__doc__ or "") + f" Writes are enabled for: {enabled}."
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=wr)
 
-    if not read_only and (principal_only or fleet.any_orchestrate):
+    if not read_only:
         async def session_start(host: str, workspace: str, agent: Literal["claude", "codex"] = "claude",
             confirm: bool = False, prompt: str | None = None, model: str | None = None,
             use_worktree: bool = True, title: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
             """ORCHESTRATE. Central durable standalone start; requires confirm and caller start scope.
             Each worktree/start/tab/prompt effect has a receipt. Keep the key after a lost reply;
             no key creates an independent operation. Never falls back to direct BAT or starts a daemon."""
-            if not principal_only and not fleet.orchestrate_enabled(host):
-                raise WriteRefused("the local orchestrate tier is off for this host")
+            # Confirm/scope still apply; only central can distinguish replay from new admission.
             out = await principal_daemon("session_start", confirm, host=host, workspace=workspace,
                 agent=agent, confirm=confirm, prompt=prompt, model=model, use_worktree=use_worktree,
                 title=title, idempotency_key=idempotency_key)
