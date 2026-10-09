@@ -5,8 +5,9 @@
 本文依 2026-10-08 規格審查決議修訂。Part A 已實作 Task Service authority；Part B 分段接入中央 operations。交付狀態以本文件、測試與 api-v1/task-service 文件為準。
 
 Permissions 後續實作以 [session-permissions.md](session-permissions.md) 為現行合約：
-已註冊逐 frame durable action；combined bulk raise apply 與 historical deferred writes 停用。
-下方 Part A 表格與尚未交付的 bulk 設計保留當時脈絡，不授權舊 flag 自動派送或 bulk apply。
+已註冊逐 frame durable action；舊 lifecycle combined raise 與 historical deferred writes 停用。
+公開 bulk 現依 [bulk-approval.md](bulk-approval.md) 使用固定預覽、明確選項及既有 answer／permissions
+children。下方 Part A 表格與早期 bulk 設計保留當時脈絡，不授權舊 flag 自動派送或無預覽 apply。
 
 ## 分段交付與審查決議
 
