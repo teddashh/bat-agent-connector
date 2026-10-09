@@ -44,9 +44,11 @@ is preserved. The Connector's independent probe does not depend on that BAT inde
 Missing probe credentials prevent readiness but do not revoke a selected, configured
 SSH connection. Neither case triggers profile repair or a fallback credential.
 
-At most three BAT workers and one independent Connector worker run concurrently.
-Route selection and readiness are bounded and cancellable. Route eligibility and
-retry/demotion policy come from the shared route module; TCP alone never means ready.
+At most three BAT readiness workers and three BAT route-selection workers run
+concurrently, with one independent Connector worker. Pending readiness cannot
+occupy another host's route slot. Route selection and readiness are bounded and
+cancellable. Route eligibility and retry/demotion policy come from the shared route
+module; TCP alone never means ready.
 Completed results retain their original epoch/configuration/selection/generation and
 observation time. Old, cancelled, future or more-than-60-second-old observations
 cannot become fresh by republishing the status file. Unrelated preference changes
@@ -58,6 +60,9 @@ paths, arguments, credentials and remote diagnostic bodies never enter status. T
 current desired revision remains distinct from the last applied revision. An invalid
 configuration leaves existing ownership evidence intact and cannot relabel old
 readiness with a new binding.
+The status reader also accepts the Kit's sparse `layers` objects, including an empty
+object for an off connection. Omitted booleans remain false; unknown fields, duplicate
+keys, wrong types and mismatched schema/configuration/epoch still refuse.
 
 The fixed shared quit file is consumed only for the exact current PID and epoch.
 Unrelated or malformed bytes remain untouched. Quit cancels workers and stops only
@@ -70,8 +75,12 @@ an atomic transaction against an uncooperative editor replacing ancestor paths.
 Stop intent records persist the original record digest before termination. On restart,
 a matching intent permits only positive-death cleanup; an unknown still-live result
 does not resend termination. Another login's files remain read-only even if their
-recorded PID is now absent. Retained launch intents without a complete matching child
-receipt never authorize an automatic retry. Legacy parent pointers are available from
+recorded PID is now absent. Once exit is proven, matching launch and stop intents are
+retired before the full owner receipt. Every intervening process-crash cut point thus
+retains the child's original identity for recovery; failed intent retirement retains
+that receipt as well. An unrelated intent is never cleared by filename alone.
+Retained launch intents without a complete matching child receipt never authorize an
+automatic retry. Legacy parent pointers are available from
 the previous monitor bytes during this run; if old records lack durable parent evidence
 after a crash, they remain unknown and require explicit recovery, never inferred ownership.
 
