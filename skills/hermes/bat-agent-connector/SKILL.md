@@ -4,14 +4,14 @@ description: Use this when you need to check on, read, wait for, or (only when e
 version: 0.2.4
 license: MIT
 metadata:
-  workflow_version: "2026-10-08.10"
+  workflow_version: "2026-10-08.11"
   api_version: "1"
   contract_version: "2026-10-08"
   generated_by: "scripts/generate_agent_skills.py"
   generator_version: "1"
   adapter: "hermes"
   canonical_source: "skills/bat-agent-connector/SKILL.md"
-  canonical_sha256: "8709416916f66a0deb4606c4890360ec171d2166905b980ebd9c21c5f1c12f99"
+  canonical_sha256: "8df54c475c3f6bd30282743f98e69ea7a383da7d337a5b79bbeff435b15b0589"
   hermes:
     tags: [bat, better-agent-terminal, claude-code, codex, mcp, supervision, worktree, orchestration]
     category: autonomous-ai-agents
@@ -95,7 +95,7 @@ legacy references, not agent instructions. Use `inventory_hosts` / `inventory_se
 and `inventory_session` for observation, `work_status` for task detail and central
 `operation_submit` actions such as `session.start`, `session.send`, `session.answer`, `session.interrupt` and `session.permissions`
 only when allowed in capabilities. The central `session_relay`, `fanout_plan_session` and
-`fanout_from_plan` adapters also retain this principal. Preserve their operation IDs and keys.
+`fanout_from_plan` and `session_failover` adapters also retain this principal. Preserve their operation IDs and keys.
 Direct transcript/wait and legacy cleanup tools remain operator references; if absent from
 the advertised tools, do not bypass that boundary through legacy CLI or raw BAT.
 
@@ -149,7 +149,7 @@ deferred flags are not authority to apply a setting under a new caller or sessio
 | Preview fixed permission prompts (observe, daemon) | `approval_preview(host, workspace?)` | `batc approve-pending HOST --dry-run` |
 | Approve an explicit reviewed selection (operate + observe, daemon) | `approve_pending(host, preview_token, selection, expected_fingerprint, idempotency_key?, confirm=true)` | `batc approve-pending HOST --preview-file FILE --selection JSON --key KEY --confirm` |
 | Change a session's permissions (write, daemon) | `session_set_permissions(host, session_id, mode, idempotency_key?, control_version?, confirm=true)` | `batc permissions HOST SID --mode default --key KEY --confirm` |
-| Move a quota-stopped Claude session to Codex (orchestrate) | `session_failover(host, session_id \| all_exhausted=true, confirm=true, dry_run?)` | `batc failover HOST [SID] --all-exhausted --confirm` |
+| Continue a fixed standalone Claude source with Codex (start + operate) | `session_failover(host, session_id \| all_exhausted=true, confirm=true, dry_run?, tail_messages?, idempotency_key?)` | `batc failover HOST [SID] --all-exhausted --key KEY --confirm` |
 | Reviewed resource cleanup (daemon, cleanup scope) | `cleanup_preview` → `cleanup_apply(confirm=true)` | `batc resource-cleanup preview` → `apply --confirm` |
 | Retained content / permanent cleanup history (observe) | `cleanup_retained`, `cleanup_tombstones` | `batc resource-cleanup retained`, `history` |
 | Legacy evaluation only | `session_cleanup(host, dry_run=true)` | `batc cleanup HOST` |
@@ -393,13 +393,24 @@ item is done.
    `LEGACY_WORKTREE_REMOVE_DISABLED`; its overrides cannot prove shared consumers or authorize removal.
 8. Report: tasks, branches, merged or not (and why), follow-ups.
 
-## Legacy operator reference: lifecycle workflows
+## Session lifecycle workflows
 
 - **Quota failover**: `quota_sessions` lists Claude sessions stopped by a usage limit (with the reset time). Only
   connector-managed sessions can be failed over; for a person's BAT session report the limit and, if asked, start a
   new managed worktree session for the remaining work. Before a failover, check that no other session in the same workspace already carries that task on (duplicate work). Dry run
-  first, then `session_failover(confirm=true)`. The Codex successor reuses the same worktree when there is one and
-  uses the host's `codex_model`. Report old → new session id, then track the new one. To keep a superseded
+  first (`observe`), then `session_failover(confirm=true, idempotency_key=...)` (`start` + `operate`).
+  The central operation freezes the exact source incarnation, root/branch/HEAD, original handoff text,
+  successor ID and each start/handoff receipt. It reuses the proven managed carrier on the same host;
+  an unavailable worktree cannot fall back to the person's checkout. All known shared consumers must have
+  positive stopped-writer evidence. Task-owned sources or carriers refuse; no bare task ID grants authority.
+  The old source remains readable, stoppable and interruptible, while its writes remain fenced. The old tab,
+  worktree and branch are retained for reviewed cleanup. A successful start or matching metadata does not
+  prove the handoff was accepted. An uncertain handoff retains its original key, operation and resources and
+  must not be resent; resume is possible only when the original receipt positively proves no handoff frame
+  was sent. Cancellation after a positive ACK may finish local receipt bookkeeping without another frame.
+  Without a key, each call is independent; keep the returned operation ID. Batch selection is bounded and
+  fixed before dispatch; a retry does not select newer sessions or text. Report old → new session id and
+  actual operation status, then track the successor. To keep a superseded
   session's uncommitted work without continuing it, fail it over with `force`, `archive_only=true` and
   `instructions` that say to only commit it; reviewed cleanup can release it while keeping its commits and branch.
 - **Permissions**: answer one fixed pending prompt through `session.answer`, and use `session.permissions`
