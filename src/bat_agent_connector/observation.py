@@ -578,7 +578,7 @@ def record_event(journal, seq, *, legacy=False, extra=None):
     if op:
         target = body(op["target"])
         resolved = body(body(op["external_refs"]).get("resolved_target"))
-        if op["action"] == "session.interrupt" and all(
+        if op["action"] in {"session.send", "session.answer", "session.interrupt"} and all(
                 isinstance(resolved.get(key), str) and resolved[key] for key in ("host", "session_id")):
             # This binding is committed with admission, before the first event. It is safe
             # during historical replay too; the literal prefix remains the request/hash.

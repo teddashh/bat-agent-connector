@@ -227,43 +227,33 @@ async def _run(args) -> Any:
             return await service.session_wait(
                 fleet, args.host, args.session, args.until, args.timeout, args.require_new, after=args.after
             ), None
-        if c == "send":
-            text = sys.stdin.read() if args.text == "-" else args.text
-            return await service.session_send(
-                fleet, args.host, args.session, text, args.confirm, args.message_id, True, args.queue
-            ), None
-        if c == "continue":
-            return await service.session_continue(
-                fleet, args.host, args.session, args.confirm, args.text, args.queue
-            ), None
-        if c == "interrupt":
+        if c in {"send", "continue", "interrupt", "answer"}:
             from .task_daemon import request
 
             if not args.confirm or not fleet.writes_enabled(args.host):
-                raise WriteRefused("interrupt needs --confirm and an enabled local write tier")
-            params = {"host": args.host, "session_id": args.session, "mode": args.mode,
+                raise WriteRefused(f"{c} needs --confirm and an enabled local write tier")
+            params = {"host": args.host, "session_id": args.session,
                       "confirm": True, "idempotency_key": args.key}
             if args.control_version is not None:
                 params["control_version"] = args.control_version
+            if c in {"send", "continue"}:
+                params.update(text=sys.stdin.read() if c == "send" and args.text == "-" else args.text,
+                              queue=args.queue)
+                if c == "send":
+                    params["message_id"] = args.message_id
+            elif c == "answer":
+                params.update(answers=_parse_answers(args.answer), permission=args.permission,
+                              deny_message=args.deny_message, tool_use_id=args.tool_use_id,
+                              dont_ask_again=args.dont_ask_again)
+            else:
+                params["mode"] = args.mode
             try:
-                out = await asyncio.to_thread(request, "session_interrupt", entry="cli", timeout=40,
+                out = await asyncio.to_thread(request, "session_" + c, entry="cli", timeout=40,
                                               _auth_token=os.environ.get("BATC_API_TOKEN") or None, **params)
             except OSError:
-                raise WriteRefused("central interrupt request failed; its outcome may be unknown. "
+                raise WriteRefused(f"central {c} request failed; its outcome may be unknown. "
                                    "Read the saved operation or retry with the same explicit key") from None
             return out, None
-        if c == "answer":
-            return await service.session_answer(
-                fleet,
-                args.host,
-                args.session,
-                args.confirm,
-                _parse_answers(args.answer),
-                args.permission,
-                args.deny_message,
-                args.tool_use_id,
-                args.dont_ask_again,
-            ), None
         if c in ("triage", "quota"):
             states = ["quota_exhausted"] if c == "quota" else args.state
             return await triage.sessions_triage(
@@ -454,12 +444,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--confirm", action="store_true")
     p.add_argument("--message-id")
     p.add_argument("--queue", action="store_true", help="queue behind a running turn")
+    p.add_argument("--key", help="reuse for retries; omitted means no cross-call deduplication")
+    p.add_argument("--control-version", type=int, help="expected owning task control version")
     p = sp.add_parser("continue", help="WRITE: nudge a session with 'continue'")
     p.add_argument("host")
     p.add_argument("session")
     p.add_argument("--text", default="continue")
     p.add_argument("--confirm", action="store_true")
     p.add_argument("--queue", action="store_true")
+    p.add_argument("--key", help="reuse for retries; omitted means no cross-call deduplication")
+    p.add_argument("--control-version", type=int, help="expected owning task control version")
     p = sp.add_parser("interrupt", help="WRITE: interrupt the running turn")
     p.add_argument("host")
     p.add_argument("session")
@@ -476,6 +470,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tool-use-id")
     p.add_argument("--dont-ask-again", action="store_true", help="Codex: accept for the rest of the session")
     p.add_argument("--confirm", action="store_true")
+    p.add_argument("--key", help="reuse for retries; omitted means no cross-call deduplication")
+    p.add_argument("--control-version", type=int, help="expected owning task control version")
     p = sp.add_parser("triage", help="classify sessions (quota / waiting / working / done), pattern + optional Jev")
     p.add_argument("host", nargs="?")
     p.add_argument("--workspace")
@@ -553,7 +549,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("host")
     p.add_argument("session")
     p.add_argument("--confirm", action="store_true")
-    p = sp.add_parser("remove-worktree", help="ORCHESTRATE: remove a worktree (keeps branch by default)")
+    p = sp.add_parser("remove-worktree", help="DISABLED: use reviewed resource-cleanup preview/apply")
     p.add_argument("host")
     p.add_argument("session")
     p.add_argument("--delete-branch", action="store_true")
@@ -1352,7 +1348,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         obj, render = asyncio.run(_run(args))
         _print(obj, args.json, render)
-        return 1 if args.cmd == "interrupt" and obj["operation_status"] in {"failed", "cancelled"} else 0
+        return 1 if args.cmd in {"send", "continue", "interrupt", "answer"} and obj["operation_status"] in {"failed", "cancelled"} else 0
     except (BatError, ValueError, OperationError) as e:
         print(f"error: {redact(e)}", file=sys.stderr)
         return 1

@@ -797,6 +797,17 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
         enabled = ", ".join(sorted(h for h in config.hosts if fleet.writes_enabled(h)))
         wr = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)
 
+        async def session_control(method, host, session_id, confirm, idempotency_key, control_version, **params):
+            if not fleet.writes_enabled(host):
+                raise WriteRefused("the local write tier is off for this host")
+            params.update(host=host, session_id=session_id, confirm=confirm, idempotency_key=idempotency_key)
+            if control_version is not None:
+                params["control_version"] = control_version
+            out = await principal_daemon(method, confirm, **params)
+            if out["operation_status"] in {"failed", "cancelled"}:
+                raise ToolError(json.dumps(out, ensure_ascii=False))
+            return out
+
         async def session_send(
             host: str,
             session_id: str,
@@ -804,18 +815,26 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             confirm: bool = False,
             message_id: str | None = None,
             queue: bool = False,
+            idempotency_key: str | None = None,
+            control_version: int | None = None,
         ) -> dict[str, Any]:
             """WRITE. Send a message to an agent session (like typing into BAT). Requires confirm=true.
             If the session is not loaded on the host it is client-resumed first. Refuses while the
-            session is streaming unless queue=true. Reuse the returned message_id to retry safely."""
-            return await service.session_send(fleet, host, session_id, text, confirm, message_id, True, queue)
+            session is streaming unless queue=true. Requires BATC_API_TOKEN and the central owner.
+            Keep an explicit idempotency_key for operation retries; message_id is the BAT prompt identity.
+            Without a key every call is a new operation. After a lost reply inspect the saved operation."""
+            return await session_control("session_send", host, session_id, confirm, idempotency_key, control_version,
+                                         text=text, message_id=message_id, queue=queue)
 
         async def session_continue(
-            host: str, session_id: str, confirm: bool = False, text: str = "continue", queue: bool = False
+            host: str, session_id: str, confirm: bool = False, text: str = "continue", queue: bool = False,
+            idempotency_key: str | None = None, control_version: int | None = None,
         ) -> dict[str, Any]:
             """WRITE. Nudge an idle session to keep going (sends 'continue' or the given short text).
-            Requires confirm=true."""
-            return await service.session_continue(fleet, host, session_id, confirm, text, queue)
+            Requires confirm=true and BATC_API_TOKEN. Uses session.send; an explicit key deduplicates
+            retries, while a missing key means a new operation on every call."""
+            return await session_control("session_continue", host, session_id, confirm, idempotency_key, control_version,
+                                         text=text, queue=queue)
 
         async def session_interrupt(
             host: str, session_id: str, mode: Literal["soft", "hard"] = "soft", confirm: bool = False,
@@ -826,16 +845,8 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             session itself is kept. Requires confirm=true and BATC_API_TOKEN; the daemon owns the
             operation. Reuse an explicit key for retries. Without a key each call is a new operation;
             after a lost reply read the saved operation ID, never automatically resend."""
-            if not fleet.writes_enabled(host):
-                raise WriteRefused("the local write tier is off for this host")
-            params = {"host": host, "session_id": session_id, "mode": mode, "confirm": confirm,
-                      "idempotency_key": idempotency_key}
-            if control_version is not None:
-                params["control_version"] = control_version
-            out = await principal_daemon("session_interrupt", confirm, **params)
-            if out["operation_status"] in {"failed", "cancelled"}:
-                raise ToolError(json.dumps(out, ensure_ascii=False))
-            return out
+            return await session_control("session_interrupt", host, session_id, confirm, idempotency_key,
+                                         control_version, mode=mode)
 
         async def session_answer(
             host: str,
@@ -846,14 +857,18 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             deny_message: str | None = None,
             tool_use_id: str | None = None,
             dont_ask_again: bool = False,
+            idempotency_key: str | None = None,
+            control_version: int | None = None,
         ) -> dict[str, Any]:
             """WRITE. Answer the question (ask-user) or permission prompt a session is blocked on. Pass
             answers (list in question order, or {question text: answer}) OR permission=allow|deny
             (dont_ask_again=true: Codex accepts this kind for the rest of the session).
-            Read the pending prompt with session_read first. Requires confirm=true."""
-            return await service.session_answer(
-                fleet, host, session_id, confirm, answers, permission, deny_message, tool_use_id, dont_ask_again
-            )
+            Read the pending prompt with session_read first. Requires confirm=true and BATC_API_TOKEN.
+            If tool_use_id is omitted, the central owner binds the observed prompt at admission.
+            Reuse an explicit key on retry; no key means each call is independent."""
+            return await session_control("session_answer", host, session_id, confirm, idempotency_key, control_version,
+                                         answers=answers, permission=permission, deny_message=deny_message,
+                                         tool_use_id=tool_use_id, dont_ask_again=dont_ask_again)
 
         async def session_set_permissions(
             host: str, session_id: str, mode: Literal["allow_all", "default"] = "allow_all", confirm: bool = False
@@ -952,9 +967,10 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             allow_unmerged: bool = False,
             discard_uncommitted: bool = False,
         ) -> dict[str, Any]:
-            """ORCHESTRATE. Remove a session's worktree folder. Keeps the branch by default. Refuses if the
-            worktree has uncommitted changes (unless discard_uncommitted=true) or, when delete_branch=true,
-            if the branch has unmerged commits (unless allow_unmerged=true). Requires confirm=true."""
+            """DISABLED legacy removal. After existing confirm/tier/resource checks, refuses with
+            LEGACY_WORKTREE_REMOVE_DISABLED. Use cleanup_preview and reviewed cleanup_apply, or CLI
+            resource-cleanup preview/apply, to retain shared-reference and cleanup receipt checks.
+            Old destructive flags do not bypass the refusal."""
             return await orchestrate.worktree_remove(
                 fleet, host, session_id, confirm, delete_branch, allow_unmerged, discard_uncommitted
             )
