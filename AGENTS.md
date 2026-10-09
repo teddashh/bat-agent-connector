@@ -8,6 +8,13 @@ Use the October 8 Tauri plan for the shared frontend/native direction and its ex
 architecture decisions; preserve the shared feature backlog. Historical handoffs
 describe their own commits, not current requirements.
 
+The owner's later clarification and original conversation are summarized in
+`docs/product/realignment-v2.md`: work remains on the selected BAT host/workspace;
+code synchronization between hosts uses the explicitly bound GitHub repository and
+published commits. Direct transport of unpublished Git objects/workspaces is not a
+delivery requirement. Preserve ordinary artifact upload/download and same-host
+read-only checkpoint continuation. Do not revive excluded work from the older plan.
+
 - Keep Python Connector / Task Service as the central authority. Tauri is the desktop
   client; native code owns local windows, credentials and Fleet transport only.
 - Manual BAT sessions and worktrees stay read-only. Unknown resources require existing

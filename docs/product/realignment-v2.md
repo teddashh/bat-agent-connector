@@ -8,6 +8,38 @@
 實際提交與證據見
 [implementation-status.md](implementation-status.md)，既有細節仍以 `docs/design/` 為準。
 
+## 原始需求與後續澄清
+
+已核對產品負責人提供的[原始對話](https://chatgpt.com/share/6ac857db-524c-83ea-a8d1-6d484fea09b9)
+中的使用者需求及關鍵架構討論。核心是：使用者在 BAT desktop/mobile 開發，Hermes／Grokbot
+經 Connector 派工，Dashboard 統一呈現專案、工作、sessions、worktrees、成果與歷史，並能直接
+執行同一套中央管理操作。Fleet 負責 client 的連線與啟動；Project Hub 提供可重用的管理規則
+與介面。人工資源永久唯讀，Agent 在獨立 managed clone/worktree 開工，成果經 Git／共同 PR 整合。
+
+產品負責人本次另釐清主機與 repository 的關係，優先於上傳計畫 §16 的直接跨主機傳輸要求：
+
+- GUI、CLI、MCP 是操作入口；實際工作留在所選 BAT 主機的 workspace。切換入口不搬動工作區。
+- 涉及 Git 的工作依明確的 host／workspace／repository 綁定；不同主機可以各有同一 repository
+  的 clone，不因路徑或名稱相同就自動接續、同步或取得管理權。
+- 同主機接續保留固定 checkpoint 與獨立 managed 工作區；不要求先將該本機 commit 發布。
+- 若明確需要另一台主機取得程式碼，先發布選定 branch／commit 到綁定的 GitHub repository，
+  再 fetch 固定 commit，在目標 managed 工作區開工。人工原目錄的 pull 由使用者自行操作。
+- 未發布內容留在原主機；Connector 直接 relay Git pack/bundle、搬運別台 workspace 的能力
+  **不列本次產品交付條件**。一般附件上傳、成果擷取／下載及必要的 artifact materialization 保留。
+
+未合併的直接 Git-pack 實驗已獨立保存，沒有進入 main。GitHub 同步與明確 repository 綁定若
+尚缺實作，仍如實列出；不把移除額外能力當作測試或里程碑通過。這項澄清不移除其他既定
+功能、Rust Fleet parity、中央 authority、人工保護或 installed/live 驗收。
+
+## Dashboard 整理方向
+
+產品負責人指定 [Project Hub](https://github.com/kieiken/project-hub) 清楚的 session 整理為
+介面參考；Tauri 是同一 Dashboard 的桌面入口。保留既有色彩與元件，以清楚的工作歸屬、
+精簡清單、明確狀態及詳情層級讓大量 sessions 仍容易瀏覽，繁體中文採自然的使用者用語。
+分組只能使用中央已有的 host／workspace／project 關係，不從路徑或名稱猜測歸屬。
+載入部分資料時不得把筆數當成完整總數；收整與歷史必須保留穩定 ID，不能把 idle、離線或
+沒有 tab 當作完成。共用 frontend 的 browser fallback 同樣維持這套資訊層級。
+
 ## 固定決策（R00）
 
 1. 新桌面程式使用 **Tauri 2、Rust、Vite、TypeScript**，放在本 repo 的 `desktop/`。
@@ -67,8 +99,9 @@ Fleet observe 身分與使用者 mutation 身分分開。
   read 失敗不能重送 start。Same ID 重試須與 rollback 留下的 metadata 一致。
 - #37 一般 start lost-ACK 及 #38 remove 後 readback recovery 已有修補，保留回歸，
   不把同名修補重算新功能。已完成 effect receipt 優先重播，恢復只檢查未完成效果。
-- 附件固定 revision/digest/manifest，驗證 materialization ready 後才開工；跨 host 要
-  實際傳 Git objects/bytes，不能把 client 路徑當遠端可讀路徑。
+- 附件固定 revision/digest/manifest，驗證 materialization ready 後才開工；不能把 client 路徑
+  當遠端可讀路徑。程式碼跨主機同步經已綁定 GitHub repository fetch 明確已發布 commit，
+  不直接搬運人工 workspace 或未發布 Git objects。
 - 多成果在獨立 integration workspace 依固定 SHA/順序組合同一 PR，普通 push；
   preview 變動停止舊意圖。Merge、deploy 各自保存效果，支援「已合併、尚未部署」。
 - 部署 recipe 固定 source SHA、operation ID、revision/route/environment；缺 source SHA

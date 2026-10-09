@@ -102,6 +102,6 @@ Restore、reviewed task leftovers／coordinator 准入與 TaskDaemon 歷史投�
 ## 尚未涵蓋
 
 - 未提交內容的唯讀 snapshot（計畫 §12「未提交修改」）：目前只顯示 `dirty` 提醒。
-- 跨主機接續：新工作固定在 checkpoint 所在的主機。
-- 檔案 capture／artifact.accept（Part B）與跨主機 commit fetch（Part C），見 [artifacts.md](artifacts.md)。
+- 新工作固定在 checkpoint 所在的主機；直接搬運未發布 commit 到別台主機已由產品負責人排除交付範圍。
+- 檔案 capture／artifact.accept（Part B）與明確 repository 的已發布 commit 同步（Part C），見 [artifacts.md](artifacts.md)。
 - 復原 retained worktree 在 cleanup Part B；clone 退休、永久刪除另規格。

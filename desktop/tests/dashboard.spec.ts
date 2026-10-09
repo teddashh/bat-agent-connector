@@ -61,6 +61,21 @@ test("desktop UI uses IPC without a WebView credential", async ({page}) => {
   await page.screenshot({path: "test-results/desktop-settings.png", fullPage: true});
 });
 
+test("browser retains observation compatibility when an older central has no bootstrap", async ({page}) => {
+  await page.addInitScript(() => sessionStorage.setItem("batc.dashboard.token", "fixture-token"));
+  await page.route("**/api/v1/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/bootstrap")) return route.fulfill({status: 404, json: {error: {code: "NOT_FOUND"}}});
+    if (path.endsWith("/capabilities")) return route.fulfill({json: capabilities});
+    if (path.endsWith("/events")) return route.fulfill({json: events});
+    return route.fulfill({json: {sessions: [], operations: [], hosts: [], work_items: []}});
+  });
+  await page.goto("/dashboard/");
+  await expect(page.getByText("Nothing needs you right now.")).toBeVisible();
+  await page.getByRole("link", {name: "Connection", exact: true}).click();
+  await expect(page.getByText(/Connected as/)).toBeVisible();
+});
+
 test("lost operation reply preserves draft and idempotency key across reopening", async ({page}) => {
   const keys: string[] = [];
   const bodies: unknown[] = [];
