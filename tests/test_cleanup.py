@@ -533,6 +533,13 @@ async def test_e02_shared_worktree_is_one_item_and_checks_out_of_scope_consumers
     assert wts[0]["resource_id"] == worktree_id("h1", "checkpoint.continue", op["operation_id"], "worktree")
     assert "h1/reviewer" in wts[0]["original_ids"]
     assert "ACTIVE_WRITER" in {r["code"] for r in wts[0]["reasons"]}
+    assert not doc["ready"]
+    before = len(mock.invokes)
+    with pytest.raises(OperationError, match="PREVIEW_BLOCKED"):
+        await apply(daemon, doc)
+    assert not any(i["channel"] in {"worktree:remove", "worktree:rehydrate"}
+                   for i in mock.invokes[before:])
+    assert Path(path).exists()
 
 
 @pytest.mark.parametrize("phase", ["preserve", "discard", "discard.replica", "remove.worktree", "remove.branch"])
