@@ -67,6 +67,7 @@ fn read(path: &Path) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
+#[derive(Clone)]
 pub struct Snapshot {
     preferences: Preferences,
     configuration_binding: String,
@@ -76,6 +77,20 @@ pub struct Snapshot {
     legacy: Option<Vec<u8>>,
 }
 impl Snapshot {
+    pub fn configuration_binding(&self) -> &str {
+        &self.configuration_binding
+    }
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+    /// Private raw/legacy bytes and resolved directory are part of the selection generation.
+    pub fn same_snapshot(&self, other: &Self) -> bool {
+        self.configuration_binding == other.configuration_binding
+            && self.revision == other.revision
+            && self.directory == other.directory
+            && self.raw == other.raw
+            && self.legacy == other.legacy
+    }
     pub fn preferences(&self) -> &Preferences {
         &self.preferences
     }

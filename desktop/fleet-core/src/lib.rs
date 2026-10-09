@@ -9,6 +9,7 @@ pub mod process_adapter;
 pub mod selection;
 pub mod selection_io;
 pub mod strict_json;
+pub mod tunnel;
 #[cfg(windows)]
 pub mod windows;
 
