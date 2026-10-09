@@ -4,7 +4,7 @@ description: Use this when you need to check on, read, wait for, or (only when e
 version: 0.2.4
 license: MIT
 metadata:
-  workflow_version: "2026-10-08.9"
+  workflow_version: "2026-10-08.11"
   api_version: "1"
   contract_version: "2026-10-08"
 ---
@@ -71,9 +71,10 @@ only central daemon tools (including artifacts and reviewed cleanup) and task ad
 legacy references, not agent instructions. Use `inventory_hosts` / `inventory_sessions`
 and `inventory_session` for observation, `work_status` for task detail and central
 `operation_submit` actions such as `session.start`, `session.send`, `session.answer`, `session.interrupt` and `session.permissions`
-only when allowed in capabilities. Preserve their operation IDs and keys. Transcript/wait,
-relay, fan-out and legacy cleanup have no advertised agent adapter
-here; do not execute the corresponding legacy workflows or CLI commands.
+only when allowed in capabilities. The central `session_relay`, `fanout_plan_session` and
+`fanout_from_plan` and `session_failover` adapters also retain this principal. Preserve their operation IDs and keys.
+Direct transcript/wait and legacy cleanup tools remain operator references; if absent from
+the advertised tools, do not bypass that boundary through legacy CLI or raw BAT.
 
 For operator installations that expose `session_send`, `session_continue`, `session_answer`,
 `session_interrupt` or `session_set_permissions`, these adapters enter the same central operation service using
@@ -87,6 +88,12 @@ the BAT message and is separate from the operation key. For an answer, supply th
 pending prompt at admission and never retargets a later prompt. Task-owned controls keep
 the admitted binding/control version and may refuse stale intent. Standalone start has its own durable workflow below. Other legacy orchestration remains separate.
 Reviewed bulk approval uses the separate workflow below.
+
+Task pause/resume, stage marking, verification, human-support requests and command reconciliation
+also preserve omitted-key semantics: no key means a new independent operation, with public
+`idempotency_key=null` and `idempotency_enabled=false`. An explicit original key replays its
+original receipt. `task_send` keeps its existing caller step ID retry identity; `work_submit`
+still requires an explicit key. Existing IDs, historical keys and task history are preserved.
 
 For a permission change, submit `session.permissions` with the exact host/session target and
 `params={mode: "default" | "allow_all"}`. `allow_all` bypasses ordinary approval prompts and
@@ -110,13 +117,16 @@ deferred flags are not authority to apply a setting under a new caller or sessio
 | Interrupt (write) | `session_interrupt(mode=soft/hard, confirm=true)` | `batc interrupt HOST SID --mode soft --confirm` |
 | Answer a question (write) | `session_answer(answers=[...] or permission=allow/deny, confirm=true)` | `batc answer HOST SID --answer "Q=A" --confirm` |
 | Start worktree session (orchestrate) | `session_start(host, workspace, agent, prompt, confirm=true)` | `batc start HOST WORKSPACE --prompt ... --confirm` |
+| Relay original text (operate; start for fallback) | `session_relay(host, message, workspace?, session_id?, idempotency_key?, control_version?, confirm=true)` | `batc relay HOST --message "text" --workspace WORKSPACE --key KEY --confirm` |
+| Start a confined planner (start) | `fanout_plan_session(host, workspace, message, idempotency_key?, confirm=true)` | `batc fanout-plan HOST WORKSPACE --message "text" --key KEY --confirm` |
+| Dispatch the fixed source plan (start + operate) | `fanout_from_plan(host, session_id, idempotency_key?, confirm=true)` | `batc fanout-start HOST SID --key KEY --confirm` |
 | Merge worktree (orchestrate) | `worktree_merge` | `batc merge ...` |
 | Legacy worktree removal (disabled) | `worktree_remove` refuses; use reviewed cleanup below | `batc remove-worktree` refuses |
 | Classify sessions (quota, waiting, working, done) | `sessions_triage(host?, states?)`, `quota_sessions(host?)` | `batc triage [HOST] --state ...`, `batc quota` |
 | Preview fixed permission prompts (observe, daemon) | `approval_preview(host, workspace?)` | `batc approve-pending HOST --dry-run` |
 | Approve an explicit reviewed selection (operate + observe, daemon) | `approve_pending(host, preview_token, selection, expected_fingerprint, idempotency_key?, confirm=true)` | `batc approve-pending HOST --preview-file FILE --selection JSON --key KEY --confirm` |
 | Change a session's permissions (write, daemon) | `session_set_permissions(host, session_id, mode, idempotency_key?, control_version?, confirm=true)` | `batc permissions HOST SID --mode default --key KEY --confirm` |
-| Move a quota-stopped Claude session to Codex (orchestrate) | `session_failover(host, session_id \| all_exhausted=true, confirm=true, dry_run?)` | `batc failover HOST [SID] --all-exhausted --confirm` |
+| Continue a fixed standalone Claude source with Codex (start + operate) | `session_failover(host, session_id \| all_exhausted=true, confirm=true, dry_run?, tail_messages?, idempotency_key?)` | `batc failover HOST [SID] --all-exhausted --key KEY --confirm` |
 | Reviewed resource cleanup (daemon, cleanup scope) | `cleanup_preview` → `cleanup_apply(confirm=true)` | `batc resource-cleanup preview` → `apply --confirm` |
 | Retained content / permanent cleanup history (observe) | `cleanup_retained`, `cleanup_tombstones` | `batc resource-cleanup retained`, `history` |
 | Legacy evaluation only | `session_cleanup(host, dry_run=true)` | `batc cleanup HOST` |
@@ -206,13 +216,32 @@ outcomes retain capacity. Never remove the carrier or clear registry claims to r
    instead of retrying around them.
 5. Report back: per session one line (host, workspace, state, what you did).
 
-## Legacy operator reference: relay workflow
+## Central relay and fixed fan-out
+
+Preserve the original text, target, explicit key and operation ID. Central `session.relay`
+fixes its target incarnation and complete rendered message once; task-owned targets require
+the current control version. A task ownership refusal never becomes an independent start.
+`start_if_missing=true` additionally requires start scope and uses a new managed carrier.
+Completed receipts replay before current policy checks; uncertain sends/starts are read back,
+never resent under a fresh child ID. Without a key, every adapter call is independent.
+
+`fanout.plan` starts one confined, read-only Codex planner. `fanout.start` freezes the selected
+source block and exact items, then dispatches one canonical start child at a time. Partial or
+unknown children stop later dispatch; resuming never selects newer transcript text. A source
+session needs start + operate; a reviewed literal file plan with a workspace needs start only.
+Only all successful child prompts permit normal stop of the original standalone planner.
+Runtime absence is part of that original identity: reloaded or changed planners are retained.
+Worktrees remain for reviewed cleanup. Apply needs confirm; dry-run needs observe and has no effects.
+
+The following wait/transcript sequence applies only when those read tools are advertised by
+the current operator installation. Otherwise report the saved operation/session and use only
+available central observation; do not switch to an operator identity to read it.
 
 Do not paraphrase, rewrite or plan the order. Call `session_relay(host, workspace=..., message=<the exact text>,
 brief={goal, context, constraints, acceptance}, earlier=[<earlier thread messages, verbatim>], confirm=true)`.
 The brief is labeled as your interpretation; the session treats the original as the source of truth, fixes unclear
 asks with its repo context and states its interpretation in one line. For parallel or large work add
-`request_fanout=N`, `session_wait`, then `fanout_from_plan(host, sid, confirm=true)`. The relay target is the
+`request_fanout=true, max_items=N`, `session_wait`, then `fanout_from_plan(host, sid, confirm=true)`. The relay target is the
 workspace's most recent connector-managed session; a person's BAT sessions are never written to. When there is none,
 or the target is read-only (`no_session` / `read_only`), retry with `start_if_missing=true`: that starts a new Codex
 session in its own worktree with the same text. If the target is busy or quota-stopped use `fanout_plan_session`
@@ -341,13 +370,24 @@ item is done.
    `LEGACY_WORKTREE_REMOVE_DISABLED`; its overrides cannot prove shared consumers or authorize removal.
 8. Report: tasks, branches, merged or not (and why), follow-ups.
 
-## Legacy operator reference: lifecycle workflows
+## Session lifecycle workflows
 
 - **Quota failover**: `quota_sessions` lists Claude sessions stopped by a usage limit (with the reset time). Only
   connector-managed sessions can be failed over; for a person's BAT session report the limit and, if asked, start a
   new managed worktree session for the remaining work. Before a failover, check that no other session in the same workspace already carries that task on (duplicate work). Dry run
-  first, then `session_failover(confirm=true)`. The Codex successor reuses the same worktree when there is one and
-  uses the host's `codex_model`. Report old → new session id, then track the new one. To keep a superseded
+  first (`observe`), then `session_failover(confirm=true, idempotency_key=...)` (`start` + `operate`).
+  The central operation freezes the exact source incarnation, root/branch/HEAD, original handoff text,
+  successor ID and each start/handoff receipt. It reuses the proven managed carrier on the same host;
+  an unavailable worktree cannot fall back to the person's checkout. All known shared consumers must have
+  positive stopped-writer evidence. Task-owned sources or carriers refuse; no bare task ID grants authority.
+  The old source remains readable, stoppable and interruptible, while its writes remain fenced. The old tab,
+  worktree and branch are retained for reviewed cleanup. A successful start or matching metadata does not
+  prove the handoff was accepted. An uncertain handoff retains its original key, operation and resources and
+  must not be resent; resume is possible only when the original receipt positively proves no handoff frame
+  was sent. Cancellation after a positive ACK may finish local receipt bookkeeping without another frame.
+  Without a key, each call is independent; keep the returned operation ID. Batch selection is bounded and
+  fixed before dispatch; a retry does not select newer sessions or text. Report old → new session id and
+  actual operation status, then track the successor. To keep a superseded
   session's uncommitted work without continuing it, fail it over with `force`, `archive_only=true` and
   `instructions` that say to only commit it; reviewed cleanup can release it while keeping its commits and branch.
 - **Permissions**: answer one fixed pending prompt through `session.answer`, and use `session.permissions`
