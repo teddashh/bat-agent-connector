@@ -65,6 +65,24 @@ UI 文案是 **Start from a published version／從已發佈版本建立工作**
 選擇目標，先檢視固定 repository／host／workspace／ref／SHA，再保存原 envelope／key。accepted 後
 只讀原 operation；重啟、credential 切換或 generic error 不偷偷換 key。來源主機不會被接管或停止。
 
+## 共用 UI 與原生橋接
+
+`#/published` 由工作階段清單與新增工作頁的明確連結進入；capabilities 沒有綁定時不顯示入口。
+共用 `repository-start.js` 先以唯讀 `POST /repository-previews` 檢視精確 repository／host／workspace ID、
+branch ref、完整 SHA，再凍結包含 agent／原文／preconditions 的請求與 key。尚未提交的預覽不在 reload 後
+自動沿用；修改 ref／目標會清除預覽，晚到的舊回應不能替代新選擇。
+
+原請求依中央 server／principal namespace 儲存；已知 operation ID 的 reload／event 只 GET 原操作。
+未知 reply 重試保留同一 key／envelope，即使目前綁定或 host tier 改變也先交中央 replay 判斷；generic
+403／409 不表示從未受理，不能據此旋轉 key。只有中央在 existing-key replay 之後、INSERT 之前回傳的
+`REPOSITORY_NOT_BOUND`／`REPOSITORY_HOST_UNAVAILABLE` 可提供明確「準備另一筆」；terminal 結果也需使用者
+明確建立下一筆。操作回覆須符合原 actor、key、完整 envelope、來源與 message ID；event 查回失敗不提交 cursor。
+
+native bridge 僅增加固定且 typed 的 `/repository-previews`，接受四個 logical identity 欄位，不接受
+remote URL、path、credential、force、query 或 operation key。它仍透過既有 `/operations` 執行中央動作。
+成功 published execution 可進入既有 B2 managed artifact capture；unknown／尚無原始 prompt receipt 不成為候選。
+介面不宣稱 clone／session 的完成表示任務完成、PR 合併或部署。
+
 ## 驗證與尚未涵蓋
 
 測試使用臨時 Git、mock GitHub／BAT：同名未綁定、錯 numeric ID／URL／ref、移動 head、workspace

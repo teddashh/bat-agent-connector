@@ -25,6 +25,7 @@
     "test:permissions": "node tests/permissions-integration.mjs",
     "test:approvals": "node tests/approvals-integration.mjs",
     "test:native-files": "node tests/native-files-integration.mjs",
+    "test:published": "node tests/repository-start-integration.mjs",
     "test:start": "node tests/session-start-integration.mjs",
     "test:artifact-review": "node tests/artifact-review-integration.mjs"
   },
