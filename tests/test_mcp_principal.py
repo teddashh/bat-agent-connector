@@ -12,7 +12,7 @@ daemon = api.daemon
 served = api.served
 
 LEGACY = {"hosts_list", "session_read", "sessions_list", "session_send", "session_continue",
-          "session_interrupt", "session_answer", "session_set_permissions", "approve_pending",
+          "session_interrupt", "session_answer", "session_set_permissions",
           "session_relay", "session_start", "session_failover", "session_cleanup", "worktree_merge",
           "worktree_remove", "session_record_verification", "fanout_plan_session", "fanout_from_plan"}
 TASK_WRITES = {"work_submit", "work_pause", "work_resume", "work_mark_stage"}

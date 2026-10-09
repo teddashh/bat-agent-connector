@@ -17,7 +17,7 @@ from typing import Any
 
 from . import confinement, registry, resource_policy, task_control
 from .client import BatClient, event_session_id
-from .errors import BatError, InvokeError, TaskControlRefused, WriteRefused
+from .errors import BatError, ConnectionLost, InvokeError, InvokeTimeout, TaskControlRefused, WriteRefused
 from .fleet import Fleet
 from .redact import redact
 from .safety import Audit
@@ -1237,7 +1237,19 @@ async def session_answer(
     control_version: int | None = None,
     operation_id: str | None = None,
     _exact_session_id: bool = False,
+    _operation_context=None,
 ) -> dict:
+    from . import bulk_approval
+    from .operations import AmbiguousOutcome, OpContext, StepFailed
+    bulk = False
+    if _operation_context is not None:
+        if (not isinstance(_operation_context, OpContext) or _operation_context.operation_id != operation_id
+                or _operation_context.op["action"] != "session.answer"
+                or _operation_context.service.context.get("fleet") is not fleet):
+            raise WriteRefused("invalid internal answer operation context")
+        bulk = bool(bulk_approval.linked(_operation_context.op))
+        if bulk:
+            bulk_approval.check_child(_operation_context)
     _guard(fleet, host, confirm)
     if (answers is None) == (permission is None):
         raise WriteRefused("pass exactly one of answers (for ask-user) or permission (allow|deny)")
@@ -1250,6 +1262,8 @@ async def session_answer(
             raise TaskControlRefused("TASK_BINDING_MISMATCH", "the operation's session identity no longer resolves exactly")
         grant = await resource_policy.authorize_session(fleet, host, "session.answer", t)
         kind = agent_kind(t.get("agentPreset"))
+        if bulk and kind != bulk_approval.check_child(_operation_context)["agent_kind"]:
+            raise TaskControlRefused("BULK_BINDING_CHANGED", "reviewed agent kind changed")
         meta = await _meta(c, sid)
         if not _state_safe(kind, meta):
             raise WriteRefused("session is not loaded on the host; nothing to answer")
@@ -1316,7 +1330,7 @@ async def session_answer(
             )
             detail = {"permission": permission, "permission_tool": pend.get("toolName")}
         audit.record(
-            actor=fleet.actor,
+            actor=_operation_context.actor if bulk else fleet.actor,
             tool="session_answer",
             host=host,
             session_id=sid + "#answer",
@@ -1324,14 +1338,45 @@ async def session_answer(
             phase="attempt",
             **detail,
         )
+        transported = False
+        def sent():
+            nonlocal transported
+            transported = True
+            _operation_context.bulk_answer_transported = True
+            if _task_guard:
+                _task_guard.frames.append(True)
+        def final_guard():
+            if _task_guard:
+                _task_guard.check()
+            bulk_approval.check_child(_operation_context)
+        async def before_frame():
+            await bulk_approval.before_answer(_operation_context, c)
+            final_guard()
         try:
-            r = await c.invoke(channel, params, grant=grant, before_send=_task_guard,
+            r = await c.invoke(channel, params, grant=grant,
+                               before_send=final_guard if bulk else _task_guard,
+                               before_frame=before_frame if bulk else None,
+                               on_transport=sent if bulk else None,
                                frame_guard=lambda _: confinement.guard_answer(
                                    host, sid, detail.get("permission_tool"),
                                    dont_ask_again=dont_ask_again, allow=permission == "allow"))
-        except InvokeError as e:
+            if bulk and r is not True:
+                audit.record(actor=_operation_context.actor, tool="session_answer", host=host,
+                             session_id=sid + "#answer", outcome="uncertain", phase="result", **detail)
+                raise AmbiguousOutcome("bulk answer did not return a literal true ACK")
+        except (BatError, OSError, asyncio.TimeoutError) as e:
+            if bulk:
+                audit.record(actor=_operation_context.actor, tool="session_answer", host=host,
+                             session_id=sid + "#answer", outcome="uncertain" if transported else "not_sent",
+                             phase="result", **detail)
+                if transported:
+                    raise AmbiguousOutcome("bulk answer was sent without a proven ACK") from e
+                if isinstance(e, (ConnectionLost, InvokeTimeout, OSError, asyncio.TimeoutError)):
+                    raise StepFailed("BULK_NOT_SENT", "bulk answer was not sent; review connectivity before a new request") from e
+            if not isinstance(e, InvokeError):
+                raise
             audit.record(
-                actor=fleet.actor,
+                actor=_operation_context.actor if bulk else fleet.actor,
                 tool="session_answer",
                 host=host,
                 session_id=sid + "#answer",
@@ -1342,7 +1387,7 @@ async def session_answer(
             )
             raise
         audit.record(
-            actor=fleet.actor,
+            actor=_operation_context.actor if bulk else fleet.actor,
             tool="session_answer",
             host=host,
             session_id=sid + "#answer",

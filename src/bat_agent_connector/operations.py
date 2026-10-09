@@ -48,7 +48,7 @@ ALLOWED = {
 }
 UNCERTAIN_RETRY_S = (30.0, 60.0, 120.0, 300.0, 600.0)
 NO_KEY_PREFIX = "batc:nokey:"
-LEGACY_SESSION_ACTIONS = frozenset({"session.send", "session.answer", "session.interrupt", "session.permissions"})
+LEGACY_SESSION_ACTIONS = frozenset({"session.send", "session.answer", "session.interrupt", "session.permissions", "session.approve_pending"})
 
 
 class AmbiguousOutcome(Exception):
@@ -452,6 +452,9 @@ class OperationService:
                 raise OperationError("IDEMPOTENCY_CONFLICT",
                                      "this idempotency_key was already used for a different request", 409)
         op = self._decode(existing) if existing else None
+        if op:
+            from .bulk_approval import authorize_child
+            authorize_child(self, principal, op, "replay")
         if op and adef.authorize_existing:
             adef.authorize_existing(self, principal, op, "replay")
         return adef, target, params, preconditions, key, request_hash, op
@@ -497,6 +500,8 @@ class OperationService:
         return self._row(operation_id), True
 
     def _may_steer(self, principal: Principal, op: dict, verb: str) -> None:
+        from .bulk_approval import authorize_child
+        authorize_child(self, principal, op, verb)
         adef = self.actions.get(op["action"])
         if adef and adef.authorize_existing:
             adef.authorize_existing(self, principal, op, verb)
@@ -515,6 +520,9 @@ class OperationService:
         self._may_steer(principal, op, "cancel")
         if op["status"] in TERMINAL:
             return op
+        if op["action"] == "session.approve_pending":
+            from .bulk_approval import cancel
+            return cancel(self, principal, op)
         self.db.execute("UPDATE operations SET cancel_requested=1,updated_at=? WHERE operation_id=?",
                         (time.time(), operation_id))
         if not self._running(operation_id):
@@ -555,6 +563,9 @@ class OperationService:
                                  f"{op['status']})", 409)
         op = self._transition(operation_id, "running", reason=f"resumed by {principal.actor}", uncertain_tries=0,
                               actor=principal.actor)
+        if op["action"] == "session.approve_pending":
+            from .bulk_approval import resume_children
+            resume_children(self, principal, op)
         self.kick()
         return op
 
@@ -633,7 +644,7 @@ class OperationService:
             self._transition(operation_id, "failed", error_code="UNKNOWN_ACTION",
                              reason=f"no handler for {op['action']} in this connector version")
             return
-        if op["cancel_requested"] and op["status"] not in {"running", "uncertain"}:
+        if op["cancel_requested"] and op["status"] not in {"running", "uncertain"} and op["action"] != "session.approve_pending":
             self._transition(operation_id, "cancelled", reason="cancelled before the next step")
             return
         if op["status"] != "running":

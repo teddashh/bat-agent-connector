@@ -6,12 +6,13 @@ Session actions refuse sessions created in BAT twice: at admission (registry and
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 
 from . import registry, resource_policy, service, session_permissions, task_control
 from .api_auth import Principal
-from .errors import TaskControlRefused
-from .operations import ActionDef, NeedsAttention, OpContext, OperationError, OperationService
+from .errors import ConnectionLost, InvokeTimeout, TaskControlRefused
+from .operations import ActionDef, NeedsAttention, OpContext, OperationError, OperationService, StepFailed
 
 
 def _fleet(ops: OperationService):
@@ -19,7 +20,7 @@ def _fleet(ops: OperationService):
 
 
 def _admit_session(ops: OperationService, principal: Principal, target: dict, params: dict, pre: dict,
-                   action: str = "send") -> dict | None:
+                   action: str = "send", *, _command_id: str | None = None) -> dict | None:
     if not all(isinstance(target.get(k), str) and target[k].strip() for k in ("host", "session_id")):
         raise OperationError("INVALID_TARGET", "host and session_id must be non-empty strings", 422)
     fleet = _fleet(ops)
@@ -47,7 +48,7 @@ def _admit_session(ops: OperationService, principal: Principal, target: dict, pa
             raise OperationError("TASK_OWNER_UNAVAILABLE", "task coordinator unavailable", 409)
         try:
             task = task_control.check(coordinator.journal, task_id, host, sid,
-                                      action, pre.get("control_version"))
+                                      action, pre.get("control_version"), command_id=_command_id)
         except TaskControlRefused as exc:
             raise OperationError(exc.code, str(exc), 409) from None
         return task_control.admission_binding(task, session=True)
@@ -158,16 +159,28 @@ async def _answer(ctx: OpContext) -> dict:
     host, sid = target["host"], target["session_id"]
 
     async def answer() -> dict:
+        from .bulk_approval import linked
         task_control.check_binding(ctx)
-        r = await service.session_answer(fleet, host, sid, confirm=True, answers=p.get("answers"),
-                                         permission=p.get("permission"), deny_message=p.get("deny_message"),
-                                         tool_use_id=p.get("tool_use_id"),
-                                         dont_ask_again=p.get("dont_ask_again", False),
-                                         control_version=ctx.effective_preconditions.get("control_version"),
-                                         operation_id=ctx.operation_id, _exact_session_id=True)
-        return r
+        ctx.bulk_answer_transported = False
+        try:
+            return await service.session_answer(fleet, host, sid, confirm=True, answers=p.get("answers"),
+                                                permission=p.get("permission"), deny_message=p.get("deny_message"),
+                                                tool_use_id=p.get("tool_use_id"),
+                                                dont_ask_again=p.get("dont_ask_again", False),
+                                                control_version=ctx.effective_preconditions.get("control_version"),
+                                                operation_id=ctx.operation_id, _exact_session_id=True,
+                                                _operation_context=ctx)
+        except (ConnectionLost, InvokeTimeout, OSError, asyncio.TimeoutError) as exc:
+            if linked(ctx.op) and not ctx.bulk_answer_transported:
+                # Includes the legacy decorator's initial resolution/authorization reads.
+                # A process interruption is deliberately excluded: its intent remains unknown.
+                raise StepFailed("BULK_NOT_SENT", "bulk answer was not sent; review connectivity before a new request") from exc
+            raise
 
     async def reconcile(request: dict) -> dict | None:
+        from .bulk_approval import linked
+        if linked(ctx.op):
+            return None  # A cleared prompt cannot prove the reviewed allow was accepted.
         # The answer cleared the pending prompt if BAT no longer shows that tool use as pending.
         c = fleet.client(host)
         kind = service.agent_kind((registry.get(host, sid) or {}).get("agent_preset"))

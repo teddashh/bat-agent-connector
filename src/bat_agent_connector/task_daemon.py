@@ -69,7 +69,7 @@ API_RPC = {"op_submit": "?", "session_interrupt": "operate", "session_send": "op
            "integration_preview_get": "observe", "integration_get": "observe", "integrations_list": "observe",
            "projects_list": "observe", "project_get": "observe", "work_items_list": "observe",
            "work_item_get": "observe", "artifacts_list": "observe", "artifact_get": "observe",
-           "artifact_capture_preview": "observe", "artifact_managed_capture_preview": "observe"}
+           "artifact_capture_preview": "observe", "artifact_managed_capture_preview": "observe", "approval_preview": "observe", "approve_pending": "?"}
 class LegacyTaskError(OperationError, ValueError):
     """Keep the old Python adapter's ValueError contract with a stable operation code."""
 
@@ -248,6 +248,12 @@ class TaskDaemon:
             raise OperationError("FORBIDDEN", f"{method} needs the {scope!r} scope", 403)
         entry = params.pop("entry", None)
         entry = entry if entry in {"mcp", "cli"} else "rpc"
+        if method == "approval_preview":
+            from .bulk_approval import preview
+            return await preview(self.ops, principal, params)
+        if method == "approve_pending":
+            from .bulk_approval import legacy
+            return await legacy(self.ops, principal, params, entry=entry)
         if method in api_actions.LEGACY_SESSION_METHODS:
             return await api_actions.legacy_session_control(self.ops, principal, method, params, entry=entry)
         if method in {"work_status", "work_result", "work_events"}:
