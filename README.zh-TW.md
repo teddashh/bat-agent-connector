@@ -17,7 +17,7 @@ BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端�
 * （選擇性開啟）推動 session：送訊息、叫它「continue」、中斷它、回答它的問題；
 * （選擇性開啟，獨立的一層）分派工作：在新的 git worktree 開 session、檢查它們的 diff、merge 乾淨的分支；
 * 找出碰到 Claude 用量額度上限的 session，在同一個 worktree 改由 Codex 接手（failover）；
-* 在確定性的關卡後面自動核准權限請求，並透過經審閱的預覽回收 managed 資源。
+* 經中央操作回答明確的權限請求、調整 managed session 模式，並透過經審閱的預覽回收 managed 資源。
 
 > 本專案與 BAT 作者**沒有任何關係，也未經其背書**。協定是從 BAT 以 MIT 授權公開的原始碼（v3.2.12）讀出來的，BAT 改版時可能跟著變。BAT 的功勞屬於 TonyQ 與其貢獻者。
 
@@ -103,12 +103,17 @@ Task-bound operations 在 admission 固定 task 版本，省略 `control_version
 
 Task mutations 現在保存 operation，原結果新增 `operation_id`／`operation_status`。重試保留同一 key；key 以驗證 actor 為範圍，無 key 的舊 task controls 每次是獨立要求。task-owned 的 send／answer／interrupt／permissions，包括 legacy tools，都經同一 coordinator；`TASK_PAUSED`、`TASK_VERIFYING`、`TASK_COMMAND_PENDING` 表示停止並讀 work_status，不用 force／continue 插隊。`CONTROL_VERSION_CONFLICT` 要先讀變更後狀態。第二個 daemon 即使指定不同 --db，也回 `OWNER_CONFLICT` 與既有 owner 資訊；client 連原 owner。詳見[統一操作](docs/design/operations-unification.md)。
 
-MCP `session_send`／`session_continue`／`session_answer`／`session_interrupt` 與對應 CLI 已接到既有 daemon。MCP 必須設定自己的
+MCP `session_send`／`session_continue`／`session_answer`／`session_interrupt`／`session_set_permissions` 與對應 CLI 已接到既有 daemon。MCP 必須設定自己的
 `BATC_API_TOKEN`；CLI 優先用此 token，未設定才沿用本機 admin token，兩者仍需 confirm 與 host write tier。
 用 `--key`（MCP：`idempotency_key`）保留重試身分；省略時每次都是獨立 operation。未知回覆後保存
 operation ID，透過 `batc op ID`／`operation_get` 查回，不自動重送或另啟 daemon。Message ID 是 BAT 訊息身分，
 與 operation key 分開；answer 省略 prompt ID 時在 admission 固定，重試不改答後來的 prompt。
-Permissions、bulk approval、starts、orchestration 與 task 的 no-key 投影仍待 Part B 後續。
+Permissions 逐一記錄 Claude／Codex 設定的意圖與回執，保留部分成功及未知結果。
+Claude turn 進行中會拒絕，不排入稍後自動修改；idle 後用新 key 提交新的決定。
+歷史 deferred flags 不授權自動修改。舊 bulk approval apply 在任何回答或權限修改前拒絕；
+改用逐項 `session.answer` 與 `session.permissions`，dry-run 預覽保留。
+詳見[session permissions](docs/design/session-permissions.md)。
+Bulk approval、starts、orchestration 與 task 的 no-key 投影仍待 Part B 後續。
 
 每個任務就是一個跑在 Opus 5.5 上的 Goose session。`goose-session` recipe 的 prompt 會指示 Goose 一開始拆一次工作，以 Grok 4.7 : Codex : Opus 5.5 = 4:2:1 的比例為目標分配執行者，而且不把新工作交給每週額度剩餘在 15% 以下（含）的模型。這些是寫在 prompt 裡的指示，不是服務會強制執行的規則：服務不會統計分派次數，也不會讀取額度。這個服務本身不做路由、不做審查，也不做 failover。驗證結果以可信任的測試為準；程式碼沒過，就退回同一個 session 在有限次數內重做，預算用完則標為 `needs_ted`。Ted 之後補充的指示，會接在同一個任務上繼續（同一個 session，不重新規劃，也不開新任務）。這條路徑不經過 Jev。只有當調度者送出已經拆好的任務，並指定 `executor_model`（`grok`、`codex` 或 `claude`）而跳過 Opus 規劃時，才會用到 Jev。Goose 本身有一個開關，預設關閉（`GooseConfig.enabled`）；關閉期間，任務會一直排隊，不會啟動任何東西。
 
@@ -198,8 +203,8 @@ PR metadata 使用獨立 action `github.pr.update`：既有 integrate scope，�
 | `worktree_remove(host, session_id, confirm, delete_branch=false, ...)` | 停用的相容入口（`LEGACY_WORKTREE_REMOVE_DISABLED`）；改用 reviewed `cleanup_preview` → `cleanup_apply`，檢查所有 consumers 並保存 receipts。 |
 | `sessions_triage(host?, workspace?, agent?, states?, use_jev=auto, include_unloaded=true)` | 把每個 session 分類為 `quota_exhausted`、`rate_limited_transient`、`waiting_permission`、`waiting_question`、`working`、`done_idle`、`error_other`、`unknown`，並附上 `source`（pattern／jev）、信心值、判斷依據的那一行，以及額度重置時間。 |
 | `quota_sessions(host?)` | 捷徑：因用量額度而停下的 Claude session。 |
-| `session_set_permissions(host, session_id, mode, confirm)` | `allow_all`（主機必須允許）或 `default`。Claude session 只在閒置時切換（這一輪進行中切換會讓這一輪結束）；Codex 從下一輪開始套用。 |
-| `approve_pending(host, confirm, dry_run?)` | 以「不再詢問」核准所有待處理的權限請求（不含問題），並把 session 提升為 allow-all。只能用在 `default_permission_mode = "allow_all"` 的主機。 |
+| `session_set_permissions(host, session_id, mode, confirm, idempotency_key?, control_version?)` | 中央 durable 操作：`allow_all`（主機必須允許）或 `default`。Claude 只在 idle 切換、不自動延後；Codex 從下一輪開始套用。部分成功或未知時保留 operation/key。 |
+| `approve_pending(host, confirm, dry_run?)` | 僅保留 dry-run 預覽。合併 apply 在任何回答或模式修改前回 `LEGACY_PERMISSION_RAISE_DISABLED`，改用逐項中央 answer／permissions actions。 |
 | `session_failover(host, session_id? \| all_exhausted, confirm, dry_run?, model?, force?, instructions?, archive_only?)` | 啟動一個 Codex session，接續因額度停下、由 connector 建立的 Claude session：有 worktree 時沿用同一個 worktree，交接 prompt 帶著原始任務、最新指示、最近的輸出與 git 狀態（憑證已遮蔽）。具冪等性。`model` 預設為主機的 `codex_model`。`instructions` 會取代預設的「繼續完成任務」步驟（例如「只 commit 進行中的工作」）；`archive_only` 讓清理時保留該分支、不 merge。 |
 | `session_relay(host, message, confirm, workspace? \| session_id?, brief?, earlier?, channel?, thread?, request_fanout=0, dry_run?, start_if_missing?)` | 把人的訊息原封不動轉給工作區最近一個由 connector 建立的 session（或指定的 session；在 BAT 建立的 session 一律不寫入，`start_if_missing` 改在新 worktree 開 session），可附一段標明是轉達者詮釋的摘要，以及 BAT-STATUS 結尾說明。`request_fanout=N` 會請 session 產出 `bat-fanout` 計畫。回傳組好的文字。 |
 | `fanout_plan_session(host, workspace, message, confirm, max_items=4, brief?)` | 在獨立 worktree 啟動一個 Codex 規劃 session（適用於沒有 managed session 可規劃時），由它回覆一份 `bat-fanout` 計畫。 |
@@ -232,8 +237,8 @@ batc resource-cleanup preview --host box1
 # 生命週期
 batc triage box1 --state quota_exhausted --state waiting_permission
 batc quota                                            # 所有主機上因額度停下的 Claude session
-batc approve-pending box1 --dry-run                   # 確認後改用 --confirm
-batc permissions box1 1a2b3c4d --mode allow_all --confirm
+batc approve-pending box1 --dry-run                   # 僅預覽；bulk apply 已停用
+batc permissions box1 1a2b3c4d --mode default --key perm-example --confirm
 batc failover box1 --all-exhausted --dry-run          # 確認後改用 --confirm
 batc cleanup box1                                     # 唯讀評估；--apply 回 LEGACY_CLEANUP_DISABLED
 ```

@@ -125,6 +125,7 @@ async def test_skill_tool_references_and_recovery_parameters_match_discovered_sc
             "session_continue": {"host", "session_id", "idempotency_key", "control_version", "confirm"},
             "session_answer": {"host", "session_id", "tool_use_id", "dont_ask_again", "idempotency_key", "control_version", "confirm"},
             "session_interrupt": {"host", "session_id", "idempotency_key", "control_version", "confirm"},
+            "session_set_permissions": {"host", "session_id", "mode", "idempotency_key", "control_version", "confirm"},
         }
         for name, params in expected.items():
             assert params <= tools[name]["properties"].keys()
