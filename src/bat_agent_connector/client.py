@@ -362,9 +362,16 @@ class BatClient:
         )
         if is_write(canonical):
             check_grant(grant, self.host.name, canonical, params)
+        def final_gate():
+            if before_send:
+                before_send()
+            if is_write(canonical):
+                # A shared-carrier failover may reserve its writer fence while
+                # this frame waits for connect, a permit or async identity reads.
+                check_grant(grant, self.host.name, canonical, params)
         return await self._invoke_checked(canonical, params, timeout,
                                           retry_on_disconnect=retry_on_disconnect,
-                                          before_send=before_send, before_frame=before_frame,
+                                          before_send=final_gate, before_frame=before_frame,
                                           frame_guard=frame_guard, on_transport=on_transport)
 
     async def _invoke_checked(self, canonical: str, params: dict | None, timeout: float | None,
@@ -468,9 +475,13 @@ class BatClient:
             if raw1 != raw0:
                 await asyncio.sleep(0.5)
                 continue  # someone saved in between; retry from scratch
+            def save_gate():
+                if before_send:
+                    before_send()
+                check_grant(grant, self.host.name, "workspace:save", {"sessionId": tid})
             saved = await self._invoke_checked(
                 "workspace:save", {"profileId": profile_id, "data": json.dumps(new_doc)}, None,
-                before_send=before_send, before_frame=before_frame
+                before_send=save_gate, before_frame=before_frame
             )
             _, after = await load()
             ids_after = {t.get("id") for t in after.get("terminals") or [] if isinstance(t, dict)}

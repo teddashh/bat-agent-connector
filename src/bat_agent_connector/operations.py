@@ -48,7 +48,9 @@ ALLOWED = {
 }
 UNCERTAIN_RETRY_S = (30.0, 60.0, 120.0, 300.0, 600.0)
 NO_KEY_PREFIX = "batc:nokey:"
-LEGACY_SESSION_ACTIONS = frozenset({"session.start", "session.send", "session.answer", "session.interrupt", "session.permissions", "session.approve_pending"})
+LEGACY_SESSION_ACTIONS = frozenset({"session.failover", "fanout.plan", "fanout.start", "session.relay", "session.start", "session.send", "session.answer", "session.interrupt", "session.permissions", "session.approve_pending"})
+LEGACY_TASK_ACTIONS = frozenset({"task.pause", "task.resume", "task.mark_stage",
+                                 "task.verify", "task.request_ted", "task.command.reconcile"})
 
 
 class AmbiguousOutcome(Exception):
@@ -218,12 +220,15 @@ class OpContext:
             self.set_refs(**values)
 
     async def step(self, name: str, fn: Callable[[], Awaitable[dict]], *, request: dict | None = None,
-                   reconcile: Callable[[dict], Awaitable[dict | None]] | None = None) -> dict:
+                   reconcile: Callable[[dict], Awaitable[dict | None]] | None = None,
+                   receipt_only: bool = False) -> dict:
         """Run one external call exactly once from this record's point of view.
 
         A finished step returns its stored response. A step whose earlier run never recorded an outcome (process
         restart, timeout, lost connection) is ``uncertain``: ``reconcile`` reads the outside world back and returns
         the response, or None when the outcome still cannot be proven. The call is never repeated.
+        Internal receipt_only permits proven local bookkeeping after cancellation,
+        never a BAT/provider effect. Its caller must first prove every required ACK.
         """
         db = self.service.db
         row = db.execute("SELECT * FROM operation_steps WHERE operation_id=? AND name=?",
@@ -246,14 +251,16 @@ class OpContext:
                 self.service._step_done(self.operation_id, name, recovered, reconciled=True)
                 return recovered
             try:  # proven not to have happened: a cancel requested meanwhile stops here instead of sending it now
-                self.check_cancel()
+                if not receipt_only:
+                    self.check_cancel()
             except Cancelled:
                 self.service._step_status(self.operation_id, name, "failed",
                                           error={"code": "CANCELLED", "message": "proven not sent; cancelled"})
                 raise
             self.service._step_restart(self.operation_id, name, request or {})
         else:
-            self.check_cancel()
+            if not receipt_only:
+                self.check_cancel()
             self.service._step_start(self.operation_id, name, request or {})
         try:
             response = await fn()
@@ -424,14 +431,16 @@ class OperationService:
 
     # ------------------------------------------------------------------ create / cancel
     def _prepare_create(self, principal, *, action, target=None, params=None, preconditions=None,
-                        idempotency_key, _legacy_session=False):
+                        idempotency_key, _legacy_session=False, _legacy_task=False):
         """Validate caller intent and replay before any asynchronous compatibility resolution."""
         adef = self.actions.get(action)
         if adef is None:
             raise OperationError("UNKNOWN_ACTION", f"unknown action {action!r}", 422)
         if not principal.allows(adef.scope):
             raise OperationError("FORBIDDEN", f"{action} needs the {adef.scope!r} scope", 403)
-        no_key = _legacy_session and action in LEGACY_SESSION_ACTIONS and idempotency_key is None
+        no_key = idempotency_key is None and (
+            _legacy_session and action in LEGACY_SESSION_ACTIONS
+            or _legacy_task and action in LEGACY_TASK_ACTIONS)
         if not no_key and (not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key.strip()) <= 200):
             raise OperationError("IDEMPOTENCY_KEY_REQUIRED", "idempotency_key must be 1-200 characters", 422)
         if isinstance(idempotency_key, str) and idempotency_key.strip().startswith(NO_KEY_PREFIX):
@@ -455,6 +464,8 @@ class OperationService:
         if op:
             from .bulk_approval import authorize_child
             authorize_child(self, principal, op, "replay")
+            from .orchestration_operations import authorize_child as authorize_orchestration_child
+            authorize_orchestration_child(self, principal, op, "replay")
         if op and adef.authorize_existing:
             adef.authorize_existing(self, principal, op, "replay")
         return adef, target, params, preconditions, key, request_hash, op
@@ -462,11 +473,11 @@ class OperationService:
     def create(self, principal: Principal, *, action: str, target: dict | None = None, params: dict | None = None,
                preconditions: dict | None = None, idempotency_key: str | None, entry: str = "http",
                _legacy_session: bool = False, _resolved_target: dict | None = None,
-               _resolved_params: dict | None = None) -> tuple[dict, bool]:
+               _resolved_params: dict | None = None, _legacy_task: bool = False) -> tuple[dict, bool]:
         """Persist intent. Private compatibility arguments are never accepted from HTTP/RPC bodies."""
         adef, target, params, preconditions, key, request_hash, existing = self._prepare_create(
             principal, action=action, target=target, params=params, preconditions=preconditions,
-            idempotency_key=idempotency_key, _legacy_session=_legacy_session)
+            idempotency_key=idempotency_key, _legacy_session=_legacy_session, _legacy_task=_legacy_task)
         if existing:
             return existing, False
         if (_resolved_target is not None or _resolved_params is not None) and not (
@@ -502,6 +513,8 @@ class OperationService:
     def _may_steer(self, principal: Principal, op: dict, verb: str) -> None:
         from .bulk_approval import authorize_child
         authorize_child(self, principal, op, verb)
+        from .orchestration_operations import authorize_child as authorize_orchestration_child
+        authorize_orchestration_child(self, principal, op, verb)
         adef = self.actions.get(op["action"])
         if adef and adef.authorize_existing:
             adef.authorize_existing(self, principal, op, verb)
@@ -520,6 +533,12 @@ class OperationService:
         self._may_steer(principal, op, "cancel")
         if op["status"] in TERMINAL:
             return op
+        if op["action"] == "session.failover":
+            from .failover_operations import cancel
+            return cancel(self, principal, op)
+        if op["action"] in {"session.relay", "fanout.plan", "fanout.start"}:
+            from .orchestration_operations import cancel
+            return cancel(self, principal, op)
         if op["action"] == "session.approve_pending":
             from .bulk_approval import cancel
             return cancel(self, principal, op)
@@ -565,6 +584,9 @@ class OperationService:
                               actor=principal.actor)
         if op["action"] == "session.approve_pending":
             from .bulk_approval import resume_children
+            resume_children(self, principal, op)
+        if op["action"] in {"session.relay", "fanout.plan", "fanout.start"}:
+            from .orchestration_operations import resume_children
             resume_children(self, principal, op)
         self.kick()
         return op
@@ -644,7 +666,7 @@ class OperationService:
             self._transition(operation_id, "failed", error_code="UNKNOWN_ACTION",
                              reason=f"no handler for {op['action']} in this connector version")
             return
-        if op["cancel_requested"] and op["status"] not in {"running", "uncertain"} and op["action"] != "session.approve_pending":
+        if op["cancel_requested"] and op["status"] not in {"running", "uncertain"} and op["action"] not in {"session.failover", "session.approve_pending", "session.relay", "fanout.plan", "fanout.start"}:
             self._transition(operation_id, "cancelled", reason="cancelled before the next step")
             return
         if op["status"] != "running":

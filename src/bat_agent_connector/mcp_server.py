@@ -962,37 +962,6 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             return await session_control("session_set_permissions", host, session_id, confirm, idempotency_key,
                                          control_version, mode=mode)
 
-        async def session_relay(
-            host: str,
-            message: str,
-            workspace: str | None = None,
-            session_id: str | None = None,
-            brief: dict[str, Any] | str | None = None,
-            channel: str | None = None,
-            thread: str | None = None,
-            earlier: list[str] | None = None,
-            request_fanout: bool = False,
-            max_items: int | None = None,
-            confirm: bool = False,
-            dry_run: bool = False,
-            queue: bool = False,
-            start_if_missing: bool = False,
-        ) -> dict[str, Any]:
-            """WRITE. Relay a person's task to an agent session as "original + brief": `message` is sent
-            VERBATIM (pass the person's exact words, never a paraphrase), followed by your labeled `brief`
-            {goal, context, constraints, acceptance} = your interpretation, plus a context header, instructions
-            (original is the source of truth; the seat fixes unclear asks and states its interpretation) and a
-            BAT-STATUS request. Target: session_id, or the workspace's most recent connector-managed session.
-            Sessions created in BAT are never written to (read_only=true, sent=false). `earlier` = the person's
-            earlier messages in the thread, verbatim. request_fanout=true asks the session for a ```bat-fanout
-            plan (max_items, capped) instead of doing the work; then call fanout_from_plan. Busy/quota-stopped
-            targets are reported (sent=false). No writable session: no_session/read_only, or with
-            start_if_missing=true a new Codex session is started in its own worktree with the relay text (needs
-            the orchestrate tier). dry_run=true renders only. Requires confirm=true to send."""
-            return await lifecycle.session_relay(
-                fleet, host, message, workspace, session_id, channel, thread, earlier, brief, request_fanout,
-                max_items, confirm, dry_run, queue, start_if_missing,
-            )
 
         for fn in (
             session_send,
@@ -1000,10 +969,86 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             session_interrupt,
             session_answer,
             session_set_permissions,
-            session_relay,
         ):
             fn.__doc__ = (fn.__doc__ or "") + f" Writes are enabled for: {enabled}."
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=wr)
+
+    if not read_only:
+        async def fanout_plan_session(host: str, workspace: str, message: str, max_items: int | None = None,
+            channel: str | None = None, thread: str | None = None, earlier: list[str] | None = None,
+            brief: dict | str | None = None, confirm: bool = False, idempotency_key: str | None = None) -> dict[str, Any]:
+            """ORCHESTRATE. Start one central Codex planner in its own read-only worktree with the person's
+            original words and labeled brief. Requires start scope and confirm. Each effect has a receipt;
+            keep the exact key after reply loss, or omit it for an independent request. Read the returned
+            operation/session, then explicitly fanout_from_plan; no direct fallback or daemon autostart."""
+            out = await principal_daemon("fanout_plan_session", confirm, host=host, workspace=workspace,
+                message=message, max_items=max_items, channel=channel, thread=thread, earlier=earlier,
+                brief=brief, confirm=confirm, idempotency_key=idempotency_key)
+            if out.get("operation_status") in {"failed", "cancelled"}:
+                raise ToolError(json.dumps(out, ensure_ascii=False))
+            return out
+
+        async def fanout_from_plan(host: str, session_id: str, confirm: bool = False, dry_run: bool = False,
+            agent: Literal["claude", "codex"] = "codex", max_items: int | None = None,
+            idempotency_key: str | None = None) -> dict[str, Any]:
+            """ORCHESTRATE. Fix the selected source reply's bat-fanout block, then start each exact item in
+            a new managed worktree through central operations. Apply needs start+operate and confirm; dry-run
+            uses observe and has no effects. Partial/unknown children retain IDs and are never resent or
+            replanned. Only all-success permits stopping the original idle standalone planner; its worktree
+            stays for reviewed cleanup. Preserve the exact key after reply loss; no key is independent."""
+            out = await principal_daemon("fanout_from_plan", confirm or dry_run, host=host, session_id=session_id,
+                confirm=confirm, dry_run=dry_run, agent=agent, max_items=max_items, idempotency_key=idempotency_key)
+            if out.get("operation_status") in {"failed", "cancelled"}:
+                raise ToolError(json.dumps(out, ensure_ascii=False))
+            return out
+        for fn in (fanout_plan_session, fanout_from_plan):
+            mcp.add_tool(_wrap(fn), name=fn.__name__,
+                         annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=False))
+
+    if not read_only:
+        async def session_failover(host: str, session_id: str | None = None, confirm: bool = False,
+            all_exhausted: bool = False, dry_run: bool = False, model: str | None = None, force: bool = False,
+            workspace: str | None = None, instructions: str | None = None, archive_only: bool = False,
+            tail_messages: int = 12, idempotency_key: str | None = None) -> dict[str, Any]:
+            """ORCHESTRATE. Central durable standalone Claude-to-Codex continuation in the fixed managed
+            carrier. Requires start+operate and confirm; dry_run requires observe. Exact source, prompt and
+            successor stay fixed. force only bypasses quota classification, never writer/task/confinement
+            gates. Old source stays readable/stoppable; its writes are fenced while the successor owns the
+            carrier. Lost handoff reply never resends. Preserve original key/operation; no key creates an
+            independent request. Existing successors return evidence, never adopted. No direct fallback.
+            archive_only retains existing archive policy; reclaim resources through reviewed cleanup."""
+            out = await principal_daemon("session_failover", confirm or dry_run, host=host, session_id=session_id,
+                confirm=confirm, all_exhausted=all_exhausted, dry_run=dry_run, model=model, force=force,
+                workspace=workspace, instructions=instructions, archive_only=archive_only, tail_messages=tail_messages,
+                idempotency_key=idempotency_key)
+            if out.get("operation_status") in {"failed", "cancelled"}:
+                raise ToolError(json.dumps(out, ensure_ascii=False))
+            return out
+        mcp.add_tool(_wrap(session_failover), name="session_failover",
+                     annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=False))
+
+    if not read_only:
+        async def session_relay(host: str, message: str, workspace: str | None = None,
+            session_id: str | None = None, channel: str | None = None, thread: str | None = None,
+            earlier: list[str] | None = None, brief: dict | str | None = None,
+            request_fanout: bool = False, max_items: int | None = None, confirm: bool = False,
+            dry_run: bool = False, queue: bool = False, start_if_missing: bool = False,
+            idempotency_key: str | None = None, control_version: int | None = None) -> dict[str, Any]:
+            """WRITE. Relay the person's exact message plus labeled brief through central operations.
+            Target one session or the workspace's selected managed session; manual sessions stay read-only.
+            dry_run only reads/renders. Apply requires confirm and operate scope; start_if_missing also
+            requires start scope and creates a new managed Codex worktree. Preserve the original key after
+            reply loss; no key means an independent request. Unknown child effects are never resent.
+            request_fanout asks for a plan; it does not start the plan's tasks. No daemon autostart or raw fallback."""
+            out = await principal_daemon("session_relay", confirm or dry_run, host=host, message=message,
+                workspace=workspace, session_id=session_id, channel=channel, thread=thread, earlier=earlier,
+                brief=brief, request_fanout=request_fanout, max_items=max_items, confirm=confirm, dry_run=dry_run,
+                queue=queue, start_if_missing=start_if_missing, idempotency_key=idempotency_key, control_version=control_version)
+            if out.get("operation_status") in {"failed", "cancelled"}:
+                raise ToolError(json.dumps(out, ensure_ascii=False))
+            return out
+        mcp.add_tool(_wrap(session_relay), name="session_relay",
+                     annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False))
 
     if not read_only:
         async def session_start(host: str, workspace: str, agent: Literal["claude", "codex"] = "claude",
@@ -1050,33 +1095,6 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
                 fleet, host, session_id, confirm, delete_branch, allow_unmerged, discard_uncommitted
             )
 
-        async def session_failover(
-            host: str,
-            session_id: str | None = None,
-            confirm: bool = False,
-            all_exhausted: bool = False,
-            dry_run: bool = False,
-            model: str | None = None,
-            force: bool = False,
-            workspace: str | None = None,
-            instructions: str | None = None,
-            archive_only: bool = False,
-        ) -> dict[str, Any]:
-            """ORCHESTRATE. Continue a connector-managed Claude session that is stuck on its usage quota with a NEW
-            Codex session in the same connector-owned worktree and branch, sending a handoff prompt
-            (original task, latest instruction, recent output, git state). The old session is not touched.
-            Pass session_id, or all_exhausted=true for every quota-exhausted Claude session on the host
-            (max_start_per_call). Refuses sessions that do not look exhausted unless force=true. Idempotent per
-            old session. model defaults to the host's codex_model. instructions (single session only) replace the
-            default "continue the task" steps, e.g. "only commit the work in progress"; archive_only=true means
-            the session is marked archive-only. Reclaim its resources through cleanup_preview and cleanup_apply;
-            release_undelivered preserves its commits and branch. Returns old/new session ids, cwd, branch, same_worktree.
-            Requires confirm=true."""
-            return await lifecycle.session_failover(
-                fleet, host, session_id, confirm, all_exhausted, dry_run, model, force, 12, workspace,
-                instructions, archive_only,
-            )
-
         async def session_cleanup(
             host: str, confirm: bool = False, dry_run: bool = True, session_id: str | None = None
         ) -> dict[str, Any]:
@@ -1096,49 +1114,11 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
                 fleet, host, session_id, candidate_commit, command, exit_code, environment, log_ref, confirm
             )
 
-        async def fanout_plan_session(
-            host: str,
-            workspace: str,
-            message: str,
-            brief: dict[str, Any] | str | None = None,
-            max_items: int | None = None,
-            channel: str | None = None,
-            thread: str | None = None,
-            earlier: list[str] | None = None,
-            confirm: bool = False,
-        ) -> dict[str, Any]:
-            """ORCHESTRATE. When no managed session can plan: start a fresh Codex
-            planning session (host codex_model, own worktree, read-only instructions) that gets the person's
-            message verbatim + your brief and returns a ```bat-fanout plan. Then session_wait(session_id) and
-            fanout_from_plan(host, session_id). Requires confirm=true."""
-            return await lifecycle.fanout_plan_session(
-                fleet, host, workspace, message, max_items, channel, thread, earlier, brief, confirm
-            )
-
-        async def fanout_from_plan(
-            host: str,
-            session_id: str,
-            confirm: bool = False,
-            dry_run: bool = False,
-            agent: Literal["claude", "codex"] = "codex",
-            max_items: int | None = None,
-        ) -> dict[str, Any]:
-            """ORCHESTRATE. Start one worktree session per item of the latest ```bat-fanout block in that
-            session's replies, each with the item's prompt VERBATIM (plus the BAT-STATUS request). You do not
-            split or rewrite anything. Capped by max_start_per_call and the host cap. A planner session from
-            fanout_plan_session is stopped only after confirmation and every task starting. A failed or
-            incomplete fan-out keeps the planner for retry; its worktree is always kept for resource-cleanup.
-            dry_run=true only parses. Requires confirm=true."""
-            return await lifecycle.fanout_from_plan(fleet, host, session_id, confirm, dry_run, agent, None, max_items)
-
         for fn in (
             worktree_merge,
             worktree_remove,
-            session_failover,
             session_cleanup,
             session_record_verification,
-            fanout_plan_session,
-            fanout_from_plan,
         ):
             fn.__doc__ = (fn.__doc__ or "") + f" Orchestrate is enabled for: {oenabled}."
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro if fn is session_cleanup else orc)

@@ -17,6 +17,20 @@ children。下方 Part A 表格與早期 bulk 設計保留當時脈絡，不授�
 - Part B 無 key 呼叫在原 NOT NULL 欄位保存 `batc:nokey:<operation_id>`：只作唯一的儲存值，絕不與另一要求去重。拒絕 client key 使用 `batc:nokey:` 前綴（422）；所有讀取投影 `idempotency_key: null`、`idempotency_enabled: false`。**不 rebuild operations，不需此項 schema migration**。
 - 舊 task control 沒有 key 的 RPC 在 Part A 使用每次呼叫獨立的 request key，不提供跨呼叫去重；Part B 才統一 no-key sentinel 與投影。明確給 key 的 task actions 現在即須符合 A05。
 
+### Part B 接續：task control 的 key 投影
+
+`work_pause`、`work_resume`、`work_mark_stage`、`task_run_verification`、`task_request_ted` 與
+`work_reconcile` 省略 key 時，每次建立獨立 operation，沿用既有 NOT NULL sentinel；RPC/MCP 結果與
+HTTP／CLI 查回均回 `idempotency_key=null`、`idempotency_enabled=false`。不再把隨機生成的
+`legacy-request:` 字串呈現為 caller 可依賴的 key。只有 private task adapter 能啟用此 admission，
+raw HTTP／`op_submit` 仍要求明確 key；caller 自帶的保留前綴仍拒絕。原 action scopes、task version、
+command capability、task effect 與 receipt 交易完全沿用。
+
+`task_send` 的 caller `step_id` 繼續明列映射為原 `task-step:<task_id>:<step_id>` key，保留同 step
+重送與不同文字衝突；不是 no-key 呼叫。`work_submit` 保留必填 key，包括既有 201–256 字的相容映射。
+舊 operation 的 `legacy-request:` key、operation/task/command IDs 及 receipts 保持原狀，不回填或
+搬遷 schema。未取得 operation ID 的無 key timeout 仍不能安全重送；取得 ID 後先查回原 operation。
+
 ### Part B 第一個切片：interrupt
 
 `session_interrupt` MCP 與 `batc interrupt` 現在只呼叫既有 owner 的 `/rpc session_interrupt`，
@@ -159,7 +173,7 @@ Coordinator gate：`G`＝下面的 task-owned runtime gate；`TC`＝原 task 控
 | `session_start` | `start` | — → OP | **新增** `session.start` | start | N | 不接受 client 自報 task owner；由 task.submit 建 task session |
 | `worktree_merge` | `merge` | — → OP | **新增** `worktree.merge` | integrate | W，含目的端 | F |
 | `worktree_remove` | `remove-worktree` | —；`LEGACY_WORKTREE_REMOVE_DISABLED` | legacy 已停用；不新增平行 cleanup action，改走 reviewed cleanup.apply | cleanup 的既有 scope | 原 confirm/tier/manual/task 檢查後拒絕 | reviewed cleanup authority |
-| `session_failover`（單個／`all_exhausted`，非 dry run） | `failover`（非 `--dry-run`） | — → OP | **新增** `session.failover` | start；handoff 另需 operate | S／N；force 不能取代 policy／停筆證據 | F；task 中途 failover 保持拒絕 |
+| `session_failover`（單個／`all_exhausted`，非 dry run） | `failover`（非 `--dry-run`） | — → OP | [`session.failover`](session-failover.md) | start + operate，整體 admission／replay／controls 一起檢查 | S／N；force 不能取代 policy／停筆證據 | F；task 中途 failover 保持拒絕 |
 | `session_cleanup`（`dry_run=false`） | `cleanup --apply` | —；409 `LEGACY_CLEANUP_DISABLED` | 不新增 action；apply 由 cleanup package 封鎖，本包不包裝 | — | apply 不寫 BAT／Git；dry run 保持唯讀 | 使用現有 `cleanup_preview`／`cleanup_apply`；restore 是 optional backlog，尚無註冊 API/MCP tool |
 | `session_record_verification` | `record-verification` | — → OP | **新增** `session.record_verification` | operate | 只寫 verification.json；讀乾淨候選，不授權外部 mutation | task-owned 拒絕外部證詞取代受信 verifier |
 | `fanout_plan_session` | `fanout-plan` | — → OP | **新增** `fanout.plan` | start | N；新 planner 自有 worktree | 不改來源 task；保持原 planner，不新增規劃機制 |

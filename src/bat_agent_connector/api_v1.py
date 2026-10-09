@@ -104,6 +104,12 @@ class ApiV1:
         artifact_managed.install(daemon.ops)
         session_start_operations.install(daemon.ops)
         repository_sync.install(daemon.ops)
+        from . import orchestration_operations
+        orchestration_operations.install(daemon.ops)
+        from . import fanout_operations
+        fanout_operations.install(daemon.ops)
+        from . import failover_operations
+        failover_operations.install(daemon.ops)
 
         from . import bulk_approval
         bulk_approval.install(daemon.ops, daemon._admin_token)
@@ -384,6 +390,7 @@ class ApiV1:
         gh_cfg = self.daemon.ops.context["github_config"]
         actions = [{"action": a.name, "scope": a.scope, "summary": a.summary, "allowed": principal.allows(a.scope)
                                and (a.name != "delivery.merge_and_deploy" or principal.allows("deploy"))
+                               and (a.name != "session.failover" or principal.allows("operate"))
                                and (a.name not in {"artifact.capture", "artifact.capture.managed", "session.approve_pending"} or principal.allows("observe"))}
                    for a in self.daemon.ops.actions.values()]
         hosts = [{"host": h, "observe": True, "writes": fleet.writes_enabled(h),

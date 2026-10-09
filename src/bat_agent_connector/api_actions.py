@@ -92,11 +92,18 @@ async def _send(ctx: OpContext) -> dict:
 
     async def send() -> dict:
         task_control.check_binding(ctx)
-        r = await service.session_send(fleet, host, sid, text, confirm=True, message_id=mid,
-                                       queue=params.get("queue", False), tool="api:" + ctx.actor,
-                                       retry_on_disconnect=False, control_version=ctx.effective_preconditions.get("control_version"),
-                                       operation_id=ctx.operation_id, _exact_session_id=True)
-        return r
+        from .orchestration_operations import linked
+        ctx.relay_send_transported = False
+        try:
+            return await service.session_send(fleet, host, sid, text, confirm=True, message_id=mid,
+                queue=params.get("queue", False), tool="api:" + ctx.actor,
+                retry_on_disconnect=False, control_version=ctx.effective_preconditions.get("control_version"),
+                operation_id=ctx.operation_id, _exact_session_id=True,
+                **({"_operation_context": ctx} if linked(ctx.op) else {}))
+        except (ConnectionLost, InvokeTimeout, OSError, asyncio.TimeoutError) as exc:
+            if linked(ctx.op) and not ctx.relay_send_transported:
+                raise StepFailed("RELAY_NOT_SENT", "relay prompt was not sent; inspect connectivity before a new request") from exc
+            raise
 
     async def reconcile(_request: dict) -> dict | None:
         turn = registry.get_turn(host, sid, mid)
