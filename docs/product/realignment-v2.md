@@ -31,6 +31,15 @@
 尚缺實作，仍如實列出；不把移除額外能力當作測試或里程碑通過。這項澄清不移除其他既定
 功能、Rust Fleet parity、中央 authority、人工保護或 installed/live 驗收。
 
+## Dashboard 整理方向
+
+產品負責人指定 [Project Hub](https://github.com/kieiken/project-hub) 清楚的 session 整理為
+介面參考；Tauri 是同一 Dashboard 的桌面入口。保留既有色彩與元件，以清楚的工作歸屬、
+精簡清單、明確狀態及詳情層級讓大量 sessions 仍容易瀏覽，繁體中文採自然的使用者用語。
+分組只能使用中央已有的 host／workspace／project 關係，不從路徑或名稱猜測歸屬。
+載入部分資料時不得把筆數當成完整總數；收整與歷史必須保留穩定 ID，不能把 idle、離線或
+沒有 tab 當作完成。共用 frontend 的 browser fallback 同樣維持這套資訊層級。
+
 ## 固定決策（R00）
 
 1. 新桌面程式使用 **Tauri 2、Rust、Vite、TypeScript**，放在本 repo 的 `desktop/`。
