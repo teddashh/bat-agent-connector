@@ -44,7 +44,7 @@ class Audit:
         return out
 
     def check_rate(self, host: str, session_id: str, now: float | None = None,
-                   *, initial_task_send: bool = False) -> None:
+                   *, initial_task_send: bool = False, permission_operation_id: str | None = None) -> None:
         now = now or time.time()
         entries = [e for e in self._tail() if e.get("phase") == "attempt"]
         hour = [e for e in entries if now - float(e.get("at", 0)) < 3600]
@@ -53,6 +53,13 @@ class Audit:
                 f"rate limit: {len(hour)} writes in the last hour (max_writes_per_hour={self.safety.max_writes_per_hour})"
             )
         same = [e for e in hour if e.get("host") == host and e.get("session_id") == session_id]
+        if permission_operation_id:
+            # A resumed fixed permission batch may finish its unsent frames without treating its
+            # own proven earlier frame as another request. All attempts still count toward the hour.
+            permission_channels = {"claude:set-permission-mode", "claude:set-codex-sandbox-mode",
+                                   "claude:set-codex-approval-policy"}
+            same = [e for e in same if not (e.get("operation_id") == permission_operation_id
+                    and e.get("tool") == "session_set_permissions" and e.get("channel") in permission_channels)]
         if same:
             # A task's first prompt follows its reserved start on the same
             # session. Start attempts still consume the hourly budget, but

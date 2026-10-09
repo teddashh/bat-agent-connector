@@ -433,6 +433,23 @@ def update(host: str, session_id: str, **fields) -> None:
         _write(p, items)
 
 
+def project_permissions(host, session_id, expected, operation_id, fields):
+    """Idempotent projection after all ACKs; never overwrite newer ownership or policy."""
+    p = registry_path()
+    with _locked(p):
+        items = _read(p)
+        entry = next((e for e in items if e.get("host") == host and e.get("session_id") == session_id), None)
+        if entry is None:
+            return {"updated": False, "reason": "registry_missing"}
+        if entry.get("permission_operation_id") == operation_id and all(entry.get(k) == v for k, v in fields.items()):
+            return {"updated": True, "replayed": True}
+        if any(entry.get(k) != v for k, v in expected.items()):
+            return {"updated": False, "reason": "registry_binding_changed"}
+        entry.update(fields, permission_operation_id=operation_id, updated_at=time.time())
+        _write(p, items)
+        return {"updated": True}
+
+
 def retire(host: str, session_id: str, status: str, *, created_at, actor: str, reason: str,
            operation_id: str | None = None, carrier_resource_id: str | None = None) -> dict:
     """Release capacity for a confirmed runtime generation without retiring its worktree/history."""
