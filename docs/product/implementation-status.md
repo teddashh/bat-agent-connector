@@ -8,6 +8,20 @@
 
 ## 目前續作
 
+### 2026-10-09 Project Hub 前端完整複查
+
+已重新核對上游最新 `main` v4.90.0（`a277d2ed5ce439c248fc32fa8ff9fa4124a06027`），
+包含全部 15 個自有 JS 模組、CSS／入口／manifest，以及未合併 PR #2／#3／#4。
+[82 項逐項採用決策](project-hub-frontend-audit-2026-10-09.md) 以我方 Mac #69 合併後
+`ba56322` 為比較基準；[來源清單](project-hub-frontend-inventory-2026-10-09.json) 固定各檔雜湊、PR head 與決策對應。
+
+後續優先順序：對話程式碼／表格／複製及閱讀位置 → 未讀與待回覆／完成確認分開 →
+專案快速派工及附件草稿 → 手機資訊／輸入區收合與可調側欄 → 設定分組與首次使用導引。
+模型偏好、中央額度資訊、Skill 目錄及父工作成果入口列 P2；人工 session 原地續跑、
+原目錄自動提交、AI 決定刪除範圍與自動清歷史不採用。
+這是評估與採用順序，尚未新增上述產品功能。52 項上游 UI 測試通過，隔離資料產生 26 張
+桌面／平板／手機截圖；沒有把展示 fixture 或未合併 PR 當成我方 native/live 驗收。
+
 ### 2026-10-09 macOS 交付續作
 
 使用者新增 Mac 版本要求。從已合併 #68（`2d2570b`）開工，新增 Apple Silicon／Intel
@@ -16,6 +30,17 @@ Mac 候選須以自己的完整 head CI、DMG digest、WKWebView screenshots 和
 不能沿用 Windows/Linux 的結果。新增 Mac 原生 secure-field／Keychain adapter 與隔離 Keychain fixtures，並備妥正式
 Developer ID／公證 candidate workflow；待各自 exact-head 結果。正式簽署執行、Mac updater 及 I／L
 仍分開追蹤；Windows Fleet supervisor 不因 Mac 可啟動就宣稱跨平台支援。
+
+後續結果：[#69](https://github.com/teddashh/bat-agent-connector/pull/69) 已合併為
+`ba56322e22734f2a37f3dd6ee0b14ab65d9d42c6`；候選 `95efd2b07c52adff2d9303ec1a058abba0d93a66`
+與 merge tree 同為 `719ae4496ee288a8a66ab32284528701ece7dbf8`。
+[Python CI](https://github.com/teddashh/bat-agent-connector/actions/runs/37967171572)
+3.10–3.13 各 3187 passed／33 skipped；
+[desktop CI](https://github.com/teddashh/bat-agent-connector/actions/runs/37967171409)
+591 shared UI、Windows NSIS／Linux deb 與 Apple Silicon／Intel DMG 原生 fixture 通過，
+包含 Mac 隔離 Keychain、安裝／啟動／關窗／Reopen／Quit 及清理證據。
+私有 installer #14 已合併並 pin 同一候選；Linux／Mac 兩架構 × Python 3.10／3.13 六組 checks 通過。
+Mac 驗證包仍為 ad-hoc 簽署；正式 Developer ID／公證、Mac updater、實機／live 驗收尚未完成。
 
 #68 的固定候選 `771d0099a9cae74e3446f3121a2747439583b136` 已通過
 [Python 四版各 3187／33](https://github.com/teddashh/bat-agent-connector/actions/runs/37949144734)
