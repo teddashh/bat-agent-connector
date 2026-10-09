@@ -4,14 +4,14 @@ description: Use this when you need to check on, read, wait for, or (only when e
 version: 0.2.4
 license: MIT
 metadata:
-  workflow_version: "2026-10-08.4"
+  workflow_version: "2026-10-08.5"
   api_version: "1"
   contract_version: "2026-10-08"
   generated_by: "scripts/generate_agent_skills.py"
   generator_version: "1"
   adapter: "hermes"
   canonical_source: "skills/bat-agent-connector/SKILL.md"
-  canonical_sha256: "5f7e04d84dd9b207ee553e3308e988a07d890ba219ceebb9b26fc09a21c1b723"
+  canonical_sha256: "da202d8db3427a563d77b44088cc91bb6cf96012572c978d98bd99be1d600b36"
   hermes:
     tags: [bat, better-agent-terminal, claude-code, codex, mcp, supervision, worktree, orchestration]
     category: autonomous-ai-agents
@@ -93,6 +93,19 @@ and `inventory_session` for observation, `work_status` for task detail and centr
 only when allowed in capabilities. Preserve their operation IDs and keys. Transcript/wait,
 raw start, relay, fan-out, permissions and legacy cleanup have no advertised agent adapter
 here; do not execute the corresponding legacy workflows or CLI commands.
+
+For operator installations that expose `session_send`, `session_continue`, `session_answer`
+or `session_interrupt`, these adapters now enter the same central operation service using
+the caller's `BATC_API_TOKEN`. They require the configured central owner; a connection
+failure does not authorize a direct BAT fallback or starting another daemon. Supply an
+`idempotency_key` (CLI `--key`) when retries must recover the same intent, and save the
+returned `operation_id` and `operation_status`. Without a key, each call is independent:
+`idempotency_enabled=false` is not a replay guarantee. A send's `message_id` identifies
+the BAT message and is separate from the operation key. For an answer, supply the observed
+`tool_use_id`; the compatibility adapter binds an omitted ID to one positively identified
+pending prompt at admission and never retargets a later prompt. Task-owned controls keep
+the admitted binding/control version and may refuse stale intent. This coverage does not
+make legacy permissions, bulk approval, start or orchestration durable operations.
 
 | Goal | MCP tool | CLI |
 |---|---|---|
