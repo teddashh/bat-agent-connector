@@ -987,7 +987,19 @@ async def session_send(
     operation_id: str | None = None,
     _exact_session_id: bool = False,
     _before_frame: Callable[[], Awaitable[None]] | None = None,
+    _operation_context=None,
 ) -> dict:
+    from . import orchestration_operations
+    from .operations import OpContext
+    relay = False
+    if _operation_context is not None:
+        if (not isinstance(_operation_context, OpContext) or _operation_context.operation_id != operation_id
+                or _operation_context.op['action'] != 'session.send'
+                or _operation_context.service.context.get('fleet') is not fleet):
+            raise WriteRefused('invalid internal send operation context')
+        relay = bool(orchestration_operations.linked(_operation_context.op))
+        if relay:
+            orchestration_operations.check_child(_operation_context)
     _guard(fleet, host, confirm)
     if not isinstance(text, str) or not text.strip():
         raise WriteRefused("text must be a non-empty string")
@@ -1036,8 +1048,17 @@ async def session_send(
             )
             try:
                 # Reattach checks the task binding without submitting its prompt.
+                async def resume_frame():
+                    if relay:
+                        await orchestration_operations.before_send(_operation_context, c, resume=True)
+                def resume_gate():
+                    if relay:
+                        orchestration_operations.check_child(_operation_context)
+                    if _task_guard:
+                        _task_guard.check()
                 await c.invoke("claude:client-resume", params, grant=grant,
-                               before_send=_task_guard.check if _task_guard else None,
+                               before_send=resume_gate if relay else (_task_guard.check if _task_guard else None),
+                               **({"before_frame": resume_frame} if relay else {}),
                                frame_guard=lambda frame: confinement.guard_resume_frame(host, sid, kind or "claude", frame))
             except BatError as e:
                 audit.record(
@@ -1076,6 +1097,8 @@ async def session_send(
             text=text,
         )
         async def verify_at_frame() -> None:
+            if relay:
+                await orchestration_operations.before_send(_operation_context, c)
             if _before_frame:
                 await _before_frame()
             entry = registry.get(host, sid) or {}
@@ -1083,13 +1106,24 @@ async def session_send(
                 observed = await c.guard_read("claude:get-session-meta", {"sessionId": sid})
                 confinement.guard_loaded(host, sid, observed)
 
+        def send_gate():
+            if relay:
+                orchestration_operations.check_child(_operation_context)
+            if _task_guard:
+                _task_guard()
+            elif before_invoke:
+                before_invoke()
+        def transported():
+            if relay:
+                _operation_context.relay_send_transported = True
         try:
             if before_invoke:
                 before_invoke()
             r = await c.invoke(
                 "claude:send-message", {"sessionId": sid, "prompt": text, "clientMessageId": mid},
                 retry_on_disconnect=retry_on_disconnect and agent_kind(t.get("agentPreset")) == "claude",
-                before_send=_task_guard or before_invoke, before_frame=verify_at_frame, grant=grant,
+                before_send=send_gate if relay else (_task_guard or before_invoke), before_frame=verify_at_frame, grant=grant,
+                **({"on_transport": transported} if relay else {}),
             )
         except BatError as e:
             audit.record(

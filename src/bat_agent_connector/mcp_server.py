@@ -962,37 +962,6 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             return await session_control("session_set_permissions", host, session_id, confirm, idempotency_key,
                                          control_version, mode=mode)
 
-        async def session_relay(
-            host: str,
-            message: str,
-            workspace: str | None = None,
-            session_id: str | None = None,
-            brief: dict[str, Any] | str | None = None,
-            channel: str | None = None,
-            thread: str | None = None,
-            earlier: list[str] | None = None,
-            request_fanout: bool = False,
-            max_items: int | None = None,
-            confirm: bool = False,
-            dry_run: bool = False,
-            queue: bool = False,
-            start_if_missing: bool = False,
-        ) -> dict[str, Any]:
-            """WRITE. Relay a person's task to an agent session as "original + brief": `message` is sent
-            VERBATIM (pass the person's exact words, never a paraphrase), followed by your labeled `brief`
-            {goal, context, constraints, acceptance} = your interpretation, plus a context header, instructions
-            (original is the source of truth; the seat fixes unclear asks and states its interpretation) and a
-            BAT-STATUS request. Target: session_id, or the workspace's most recent connector-managed session.
-            Sessions created in BAT are never written to (read_only=true, sent=false). `earlier` = the person's
-            earlier messages in the thread, verbatim. request_fanout=true asks the session for a ```bat-fanout
-            plan (max_items, capped) instead of doing the work; then call fanout_from_plan. Busy/quota-stopped
-            targets are reported (sent=false). No writable session: no_session/read_only, or with
-            start_if_missing=true a new Codex session is started in its own worktree with the relay text (needs
-            the orchestrate tier). dry_run=true renders only. Requires confirm=true to send."""
-            return await lifecycle.session_relay(
-                fleet, host, message, workspace, session_id, channel, thread, earlier, brief, request_fanout,
-                max_items, confirm, dry_run, queue, start_if_missing,
-            )
 
         for fn in (
             session_send,
@@ -1000,10 +969,32 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             session_interrupt,
             session_answer,
             session_set_permissions,
-            session_relay,
         ):
             fn.__doc__ = (fn.__doc__ or "") + f" Writes are enabled for: {enabled}."
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=wr)
+
+    if not read_only:
+        async def session_relay(host: str, message: str, workspace: str | None = None,
+            session_id: str | None = None, channel: str | None = None, thread: str | None = None,
+            earlier: list[str] | None = None, brief: dict | str | None = None,
+            request_fanout: bool = False, max_items: int | None = None, confirm: bool = False,
+            dry_run: bool = False, queue: bool = False, start_if_missing: bool = False,
+            idempotency_key: str | None = None, control_version: int | None = None) -> dict[str, Any]:
+            """WRITE. Relay the person's exact message plus labeled brief through central operations.
+            Target one session or the workspace's selected managed session; manual sessions stay read-only.
+            dry_run only reads/renders. Apply requires confirm and operate scope; start_if_missing also
+            requires start scope and creates a new managed Codex worktree. Preserve the original key after
+            reply loss; no key means an independent request. Unknown child effects are never resent.
+            request_fanout asks for a plan; it does not start the plan's tasks. No daemon autostart or raw fallback."""
+            out = await principal_daemon("session_relay", confirm or dry_run, host=host, message=message,
+                workspace=workspace, session_id=session_id, channel=channel, thread=thread, earlier=earlier,
+                brief=brief, request_fanout=request_fanout, max_items=max_items, confirm=confirm, dry_run=dry_run,
+                queue=queue, start_if_missing=start_if_missing, idempotency_key=idempotency_key, control_version=control_version)
+            if out.get("operation_status") in {"failed", "cancelled"}:
+                raise ToolError(json.dumps(out, ensure_ascii=False))
+            return out
+        mcp.add_tool(_wrap(session_relay), name="session_relay",
+                     annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False))
 
     if not read_only:
         async def session_start(host: str, workspace: str, agent: Literal["claude", "codex"] = "claude",
