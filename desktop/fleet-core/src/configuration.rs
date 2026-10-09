@@ -200,6 +200,13 @@ impl Configuration {
         value.verify_current()?;
         Ok(value)
     }
+    /// Effective paths from the validated pairing, for native monitor identity checks.
+    pub fn inventory_path(&self) -> &Path {
+        &self.paths.inventory
+    }
+    pub fn profile_index_path(&self) -> &Path {
+        &self.paths.index
+    }
     pub fn binding(&self) -> &str {
         &self.binding
     }

@@ -2,6 +2,7 @@
 //! Configuration is native-only; callers project an explicitly safe status model.
 pub mod configuration;
 pub mod credential;
+pub mod discovery;
 pub mod inventory;
 pub mod ownership;
 pub mod probe;
