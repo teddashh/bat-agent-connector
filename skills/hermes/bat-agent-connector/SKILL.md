@@ -11,7 +11,7 @@ metadata:
   generator_version: "1"
   adapter: "hermes"
   canonical_source: "skills/bat-agent-connector/SKILL.md"
-  canonical_sha256: "7767c7fb7135d836c455470782a93a405d375e93bb2ea90bfcb8791fd0624e30"
+  canonical_sha256: "ffcf9f587a34b9e595a772f750814a37478345cc3bbadda33110b113ded86df6"
   hermes:
     tags: [bat, better-agent-terminal, claude-code, codex, mcp, supervision, worktree, orchestration]
     category: autonomous-ai-agents
@@ -331,7 +331,7 @@ item is done.
   before answering or raising any session; dry-run remains a preview. Answer one fixed pending prompt
   through `session.answer`, and use `session.permissions` for an explicit mode change when authorized.
   Claude must be idle; a running turn is not an automatic deferred request. Codex changes apply from its next turn.
-  Confined sessions are skipped: never request a raise, persistent approval or
+  For confined sessions, never request a raise, persistent approval or
   mode-widening ExitPlanMode answer for them; report blocked tests with their confinement evidence.
 ## Reviewed cleanup (scope cleanup)
 
