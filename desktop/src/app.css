@@ -261,3 +261,14 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
 @media (max-width: 640px) {
   .session-start button, .session-start select, .session-start input, .session-heading > a { min-height: 44px; align-content: center; }
 }
+
+/* Local preferences use the existing compact row rhythm and touch targets. */
+.fleet-desktop .fleet-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 16px; }
+.fleet-desktop .fleet-options .row { padding: 0; flex-wrap: nowrap; }
+.fleet-desktop .fleet-options .grow { flex: 1; }
+.fleet-desktop .fleet-choice { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 650px) { .fleet-desktop .fleet-options { grid-template-columns: 1fr; } }
+
+.fleet-bootstrap .muted { font-size: 14px; }
+.fleet-bootstrap button { min-height: 44px; }
+.bootstrap-receipt { overflow-wrap: anywhere; }

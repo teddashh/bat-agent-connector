@@ -34,6 +34,17 @@ impl ProbeCredential {
     pub fn new(token: String) -> Self {
         Self(Zeroizing::new(token))
     }
+    pub(crate) fn new_zeroizing(token: Zeroizing<String>) -> Self {
+        Self(token)
+    }
+    /// Native generation fence only. Never serialize or log this credential fingerprint.
+    pub(crate) fn fingerprint(&self) -> String {
+        crate::digest(self.0.as_bytes())
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_value(&self) -> &str {
+        &self.0
+    }
 }
 
 /// Native inventory-derived inputs, never accepted as a WebView request.
@@ -54,6 +65,7 @@ pub struct ConnectorProbeConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Layer {
+    Inventory,
     Tunnel,
     Tls,
     Auth,

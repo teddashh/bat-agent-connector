@@ -1,0 +1,349 @@
+#![cfg_attr(not(any(windows, test)), allow(dead_code))]
+//! Shared Quit/update fence. Effects run only after normal owned shutdown and exclusion.
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+};
+use std::time::Duration;
+#[derive(Default)]
+pub struct Tickets {
+    generation: AtomicU64,
+    stopping: AtomicBool,
+}
+#[derive(Clone)]
+pub struct Ticket {
+    gate: Arc<Tickets>,
+    generation: u64,
+}
+impl Tickets {
+    pub fn capture(self: &Arc<Self>) -> Ticket {
+        Ticket {
+            gate: self.clone(),
+            generation: self.generation.load(Ordering::SeqCst),
+        }
+    }
+    pub fn set_stopping(&self, value: bool) {
+        self.stopping.store(value, Ordering::SeqCst);
+        if value {
+            self.generation.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+impl Ticket {
+    pub fn verify(&self) -> bat_fleet_core::Result<()> {
+        if self.gate.stopping.load(Ordering::SeqCst)
+            || self.generation != self.gate.generation.load(Ordering::SeqCst)
+        {
+            Err("FLEET_STOP_REQUESTED")
+        } else {
+            Ok(())
+        }
+    }
+    /// Acquire first: scheduling and lock waits may have crossed a stop/reset.
+    pub fn acquire<T>(
+        &self,
+        acquire: impl FnOnce() -> bat_fleet_core::Result<T>,
+    ) -> bat_fleet_core::Result<T> {
+        let guard = acquire()?;
+        self.verify()?;
+        Ok(guard)
+    }
+}
+pub trait Platform {
+    type Owner: Clone;
+    type Launcher;
+    type Monitor;
+    fn launcher(&mut self) -> Result<Self::Launcher, String>;
+    fn monitor(&mut self) -> Result<Self::Monitor, String>;
+    fn verify(&self) -> Result<(), String>;
+    fn owner(&self) -> Result<Option<Self::Owner>, String>;
+    fn allowed(&self, owner: &Self::Owner) -> bool;
+    fn same(&self, a: &Self::Owner, b: &Self::Owner) -> bool;
+    fn quit(&self, owner: &Self::Owner) -> Result<(), String>;
+    fn launch_absent(&self) -> Result<(), String>;
+    fn elapsed(&self) -> Duration;
+    fn wait(&mut self);
+}
+pub trait AbsencePlatform {
+    type Launcher;
+    type Monitor;
+    fn launcher(&mut self) -> Result<Self::Launcher, String>;
+    fn monitor(&mut self) -> Result<Self::Monitor, String>;
+    fn verify_absence(&self) -> Result<(), String>;
+}
+/// No configuration means no authority to stop anything. Prove independent absence instead.
+pub fn with_absent<P: AbsencePlatform, T>(
+    platform: &mut P,
+    effect: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _launcher = platform.launcher()?;
+    let _monitor = platform.monitor()?;
+    platform.verify_absence()?;
+    effect()
+}
+pub fn with_stopped<P: Platform, T>(
+    platform: &mut P,
+    effect: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _launcher = platform.launcher()?;
+    platform.verify()?;
+    if let Some(original) = platform.owner()? {
+        if !platform.allowed(&original) {
+            return Err("FLEET_OWNER_NOT_CONTROLLABLE".into());
+        }
+        platform.quit(&original)?;
+        loop {
+            platform.verify()?;
+            match platform.owner()? {
+                None => break,
+                Some(now) if platform.same(&now, &original) => {}
+                Some(_) => return Err("MONITOR_EPOCH_CHANGED".into()),
+            }
+            if platform.elapsed() >= Duration::from_secs(12) {
+                return Err("FLEET_STOP_UNCONFIRMED".into());
+            }
+            platform.wait();
+        }
+    }
+    platform.launch_absent()?;
+    let _monitor = platform.monitor()?;
+    platform.verify()?;
+    if platform.owner()?.is_some() {
+        return Err("MONITOR_EPOCH_CHANGED".into());
+    }
+    platform.launch_absent()?;
+    effect()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        cell::{Cell, RefCell},
+        collections::VecDeque,
+        rc::Rc,
+    };
+    struct Guard(Rc<Cell<usize>>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() - 1);
+        }
+    }
+    struct Fake {
+        owners: RefCell<VecDeque<Result<Option<u32>, String>>>,
+        allowed: bool,
+        quit: Cell<usize>,
+        guards: Rc<Cell<usize>>,
+        time: u64,
+        unknown_launch: bool,
+    }
+    impl Platform for Fake {
+        type Owner = u32;
+        type Launcher = Guard;
+        type Monitor = Guard;
+        fn launcher(&mut self) -> Result<Guard, String> {
+            self.guards.set(self.guards.get() + 1);
+            Ok(Guard(self.guards.clone()))
+        }
+        fn monitor(&mut self) -> Result<Guard, String> {
+            self.launcher()
+        }
+        fn verify(&self) -> Result<(), String> {
+            Ok(())
+        }
+        fn owner(&self) -> Result<Option<u32>, String> {
+            let mut values = self.owners.borrow_mut();
+            if values.len() > 1 {
+                values.pop_front().unwrap()
+            } else {
+                values.front().unwrap().clone()
+            }
+        }
+        fn allowed(&self, _: &u32) -> bool {
+            self.allowed
+        }
+        fn same(&self, a: &u32, b: &u32) -> bool {
+            a == b
+        }
+        fn quit(&self, _: &u32) -> Result<(), String> {
+            self.quit.set(self.quit.get() + 1);
+            Ok(())
+        }
+        fn launch_absent(&self) -> Result<(), String> {
+            if self.unknown_launch {
+                Err("LAUNCH_UNKNOWN".into())
+            } else {
+                Ok(())
+            }
+        }
+        fn elapsed(&self) -> Duration {
+            Duration::from_secs(self.time)
+        }
+        fn wait(&mut self) {
+            self.time += 1;
+        }
+    }
+    fn fake(owners: Vec<Result<Option<u32>, String>>) -> Fake {
+        Fake {
+            owners: RefCell::new(owners.into()),
+            allowed: true,
+            quit: Cell::new(0),
+            guards: Rc::new(Cell::new(0)),
+            time: 0,
+            unknown_launch: false,
+        }
+    }
+    #[test]
+    fn exact_shutdown_keeps_both_guards_through_effect() {
+        let mut f = fake(vec![Ok(Some(1)), Ok(Some(1)), Ok(None)]);
+        let g = f.guards.clone();
+        with_stopped(&mut f, || {
+            assert_eq!(g.get(), 2);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(f.quit.get(), 1);
+        assert_eq!(g.get(), 0);
+    }
+    #[test]
+    fn uncertainty_replacement_and_timeout_never_reach_installer() {
+        for owners in [
+            vec![Err("UNKNOWN".into())],
+            vec![Ok(Some(1)), Ok(Some(2))],
+            vec![Ok(Some(1))],
+        ] {
+            let mut f = fake(owners);
+            assert!(with_stopped(&mut f, || -> Result<(), String> {
+                panic!("effect forbidden")
+            })
+            .is_err());
+            assert_eq!(f.guards.get(), 0);
+        }
+    }
+    #[test]
+    fn foreign_owner_and_unknown_unpublished_child_refuse() {
+        let mut f = fake(vec![Ok(Some(1))]);
+        f.allowed = false;
+        assert!(with_stopped(&mut f, || -> Result<(), String> {
+            panic!("effect forbidden")
+        })
+        .is_err());
+        assert_eq!(f.quit.get(), 0);
+        let mut f = fake(vec![Ok(None)]);
+        f.unknown_launch = true;
+        assert!(with_stopped(&mut f, || -> Result<(), String> {
+            panic!("effect forbidden")
+        })
+        .is_err());
+    }
+    struct Absent {
+        guards: Rc<Cell<usize>>,
+        refusal: u8,
+    }
+    impl AbsencePlatform for Absent {
+        type Launcher = Guard;
+        type Monitor = Guard;
+        fn launcher(&mut self) -> Result<Guard, String> {
+            if self.refusal == 1 {
+                return Err("LAUNCHER_BUSY".into());
+            }
+            self.guards.set(self.guards.get() + 1);
+            Ok(Guard(self.guards.clone()))
+        }
+        fn monitor(&mut self) -> Result<Guard, String> {
+            assert_eq!(self.guards.get(), 1);
+            if self.refusal == 2 {
+                return Err("FLEET_STOP_UNCONFIRMED".into());
+            }
+            self.guards.set(self.guards.get() + 1);
+            Ok(Guard(self.guards.clone()))
+        }
+        fn verify_absence(&self) -> Result<(), String> {
+            assert_eq!(self.guards.get(), 2);
+            if self.refusal == 3 {
+                Err("FLEET_ABSENCE_UNPROVEN".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+    #[test]
+    fn missing_configuration_still_holds_both_guards_through_effect() {
+        let guards = Rc::new(Cell::new(0));
+        let mut platform = Absent {
+            guards: guards.clone(),
+            refusal: 0,
+        };
+        with_absent(&mut platform, || {
+            assert_eq!(guards.get(), 2);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(guards.get(), 0);
+    }
+    #[test]
+    fn missing_configuration_unknown_mutex_or_ownership_never_runs_effect() {
+        for refusal in 1..=3 {
+            let guards = Rc::new(Cell::new(0));
+            let mut platform = Absent {
+                guards: guards.clone(),
+                refusal,
+            };
+            assert!(with_absent(&mut platform, || -> Result<(), String> {
+                panic!("effect forbidden")
+            })
+            .is_err());
+            assert_eq!(guards.get(), 0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod ticket_tests {
+    use super::*;
+    #[test]
+    fn queued_before_stop_stays_invalid_after_reset_for_both_dispatch_paths() {
+        let gate = Arc::new(Tickets::default());
+        let launcher = Arc::new(std::sync::Mutex::new(()));
+        let held = launcher.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let effects = Arc::new(AtomicU64::new(0));
+        let mut workers = vec![];
+        for _dispatch in ["fleet_request", "fleet_control"] {
+            let ticket = gate.capture();
+            let launcher = launcher.clone();
+            let tx = tx.clone();
+            let effects = effects.clone();
+            workers.push(std::thread::spawn(move || {
+                ticket.verify().unwrap();
+                tx.send(()).unwrap();
+                let result = ticket.acquire(|| Ok(launcher.lock().unwrap()));
+                if result.is_ok() {
+                    effects.fetch_add(1, Ordering::SeqCst);
+                }
+                result.map(|_| ())
+            }));
+        }
+        rx.recv().unwrap();
+        rx.recv().unwrap();
+        gate.set_stopping(true);
+        gate.set_stopping(false);
+        drop(held);
+        for worker in workers {
+            assert_eq!(worker.join().unwrap(), Err("FLEET_STOP_REQUESTED"));
+        }
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+        let _current = gate
+            .capture()
+            .acquire(|| Ok(launcher.lock().unwrap()))
+            .unwrap();
+    }
+    #[test]
+    fn stop_after_readonly_preflight_is_rechecked_at_effect() {
+        let gate = Arc::new(Tickets::default());
+        let original = gate.capture();
+        original.acquire(|| Ok(())).unwrap();
+        gate.set_stopping(true);
+        gate.set_stopping(false);
+        assert_eq!(original.verify(), Err("FLEET_STOP_REQUESTED"));
+    }
+}

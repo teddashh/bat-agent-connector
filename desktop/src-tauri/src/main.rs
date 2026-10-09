@@ -2,8 +2,16 @@
 
 mod bridge;
 mod credentials;
+mod desktop_preferences;
 mod files;
 mod fleet;
+mod fleet_bootstrap;
+mod fleet_control;
+mod fleet_lifecycle;
+#[cfg(windows)]
+mod fleet_native;
+mod fleet_readiness;
+mod updates;
 
 use bridge::{Bridge, ConnectorRequest, ConnectorResponse, NativeStatus};
 use std::sync::Arc;
@@ -15,6 +23,105 @@ use tauri::{
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use zeroize::Zeroizing;
+
+#[tauri::command]
+async fn desktop_update(
+    window: WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<updates::Updates>>,
+    control: State<'_, Arc<fleet_control::Control>>,
+    input: updates::Request,
+) -> Result<updates::Status, String> {
+    local_main(&window)?;
+    if matches!(input, updates::Request::Status {}) {
+        return state.status();
+    }
+    let _serial = state.serial.try_lock().map_err(|_| "UPDATE_BUSY")?;
+    match input {
+        updates::Request::Status {} => state.status(),
+        updates::Request::Check {} => state.check(&app).await,
+        updates::Request::Download { candidate_id } => state.download(&candidate_id).await,
+        updates::Request::Install { candidate_id } => {
+            use std::sync::atomic::Ordering;
+            // Validate signed bytes before any local connection shutdown.
+            state.begin_install(&candidate_id)?;
+            if app
+                .state::<QuitState>()
+                .0
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                state.install_returned()?;
+                return Err("FLEET_STOP_REQUESTED".into());
+            }
+            control.set_stopping(true);
+            let updates = state.inner().clone();
+            let path = control.config.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                #[cfg(windows)]
+                {
+                    match path.try_exists() {
+                        Ok(false) => fleet_native::with_unconfigured_fleet_absent(&path, || {
+                            updates.install(&candidate_id)
+                        }),
+                        Ok(true) => fleet_native::with_stopped_fleet(&path, || {
+                            updates.install(&candidate_id)
+                        }),
+                        Err(_) => Err("FLEET_CONFIGURATION_UNPROVEN".into()),
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = path;
+                    updates.install(&candidate_id)
+                }
+            })
+            .await
+            .unwrap_or_else(|_| Err("UPDATE_INSTALLATION_UNSETTLED".into()));
+            // A returned failure before the durable intent is safe to review again. Once
+            // the installer may have run, keep local launches fenced until restart/readback.
+            let _ = state.install_returned();
+            restore_fleet_after_refusal(&state, &control);
+            app.state::<QuitState>().0.store(false, Ordering::SeqCst);
+            result?;
+            state.status()
+        }
+    }
+}
+
+#[tauri::command]
+async fn fleet_bootstrap(
+    window: WebviewWindow,
+    state: State<'_, Arc<fleet_bootstrap::Bootstrap>>,
+    control: State<'_, Arc<fleet_control::Control>>,
+    input: fleet_bootstrap::Request,
+) -> Result<serde_json::Value, String> {
+    local_main(&window)?;
+    state
+        .inner()
+        .clone()
+        .request(control.inner().clone(), input)
+        .await
+}
+
+#[tauri::command]
+async fn fleet_control(
+    window: WebviewWindow,
+    state: State<'_, Arc<fleet_control::Control>>,
+    input: fleet_control::Request,
+) -> Result<serde_json::Value, String> {
+    local_main(&window)?;
+    let result = state.inner().clone().request(input).await?;
+    if result
+        .get("dashboard")
+        .or_else(|| result.get("summary").and_then(|v| v.get("dashboard")))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        show(window.app_handle());
+    }
+    Ok(result)
+}
 
 #[tauri::command]
 fn fleet_availability(
@@ -29,10 +136,25 @@ fn fleet_availability(
 async fn fleet_request(
     window: WebviewWindow,
     state: State<'_, fleet::FleetBridge>,
+    control: State<'_, Arc<fleet_control::Control>>,
     input: fleet::FleetRequest,
 ) -> Result<serde_json::Value, String> {
     local_main(&window)?;
-    state.request(input).await
+    let ticket = control.ticket();
+    if control.is_stopping()
+        && !matches!(
+            input,
+            fleet::FleetRequest::Status {}
+                | fleet::FleetRequest::Contract {}
+                | fleet::FleetRequest::ValidateConfiguration {}
+        )
+    {
+        return Err("FLEET_STOP_REQUESTED".into());
+    }
+    if matches!(input, fleet::FleetRequest::QuitOwned { .. }) {
+        control.cancel_login();
+    }
+    state.request(input, ticket).await
 }
 
 #[tauri::command]
@@ -279,14 +401,145 @@ fn show(app: &tauri::AppHandle) {
     }
 }
 
+#[derive(Default)]
+struct QuitState(std::sync::atomic::AtomicBool);
+fn restore_fleet_after_refusal(updates: &updates::Updates, control: &fleet_control::Control) {
+    control.set_stopping(updates.keep_fleet_stopped());
+}
+fn quit(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    if app.state::<QuitState>().0.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    let control = app.state::<Arc<fleet_control::Control>>().inner().clone();
+    control.set_stopping(true);
+    tauri::async_runtime::spawn(async move {
+        let path = control.config.clone();
+        let exit_app = app.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            #[cfg(windows)]
+            {
+                match path.try_exists() {
+                    Ok(false) => fleet_native::with_unconfigured_fleet_absent(&path, || {
+                        exit_app.exit(0);
+                        Ok(())
+                    }),
+                    Ok(true) => fleet_native::with_stopped_fleet(&path, || {
+                        exit_app.exit(0);
+                        Ok(())
+                    }),
+                    Err(_) => Err("FLEET_CONFIGURATION_UNPROVEN".into()),
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = path;
+                exit_app.exit(0);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap_or_else(|_| Err("FLEET_STOP_UNCONFIRMED".into()));
+        match result {
+            Ok(()) => {}
+            Err(code) => {
+                restore_fleet_after_refusal(&app.state::<Arc<updates::Updates>>(), &control);
+                app.state::<QuitState>().0.store(false, Ordering::SeqCst);
+                show(&app);
+                app.dialog().message(format!("Fleet shutdown was not confirmed ({code}). Dashboard remains open; read Fleet status before retrying. / 尚未確認 Fleet 已停止，程式仍保持開啟。請先檢視 Fleet 狀態。"))
+                    .title("Better Agent Dashboard").show(|_| {});
+            }
+        }
+    });
+}
+#[cfg(windows)]
+fn login_existing(app: tauri::AppHandle, path: std::path::PathBuf) {
+    tauri::async_runtime::spawn(async move {
+        let control = app.state::<Arc<fleet_control::Control>>().inner().clone();
+        let expected = control.config.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let path = bat_fleet_core::installation::Snapshot::load(&path)?;
+            if path.path() != bat_fleet_core::installation::canonical_local(&expected)? {
+                return Err("INSTALLATION_CHANGED");
+            }
+            fleet_native::login_options(path.path())
+        })
+        .await
+        .unwrap_or(Err("LOGIN_UNPROVEN"));
+        match result {
+            Ok((picker, dashboard)) => {
+                if picker {
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.eval("location.hash = '/settings'");
+                    }
+                }
+                if picker || dashboard {
+                    show(&app);
+                }
+                if !picker {
+                    control.start_login();
+                }
+            }
+            Err(code) => {
+                show(&app);
+                app.dialog()
+                    .message(format!(
+                        "Fleet login requires attention ({code}). / Fleet 登入啟動需要檢查設定。"
+                    ))
+                    .show(|_| {});
+            }
+        }
+    });
+}
+
 fn main() {
     // Read/remove before GTK, WebView or async runtime starts any helper threads/processes.
     let token = Zeroizing::new(std::env::var("BATC_DESKTOP_TOKEN").unwrap_or_default());
     std::env::remove_var("BATC_DESKTOP_TOKEN");
+    use bat_fleet_core::installation::Entry;
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    let entry = Entry::parse(&arguments).unwrap_or_else(|_| std::process::exit(2));
+    if let Entry::Supervisor(path) = &entry {
+        drop(token);
+        #[cfg(windows)]
+        std::process::exit(if fleet_native::run_supervisor(path).is_ok() {
+            0
+        } else {
+            1
+        });
+        #[cfg(not(windows))]
+        {
+            let _ = path;
+            std::process::exit(2);
+        }
+    }
+    let login_path = match entry {
+        Entry::Login(path) => Some(path),
+        _ => None,
+    };
+    #[cfg(windows)]
+    let login_options = login_path.as_ref().map(|p| fleet_native::login_options(p));
+    #[cfg(not(windows))]
+    let login_options: Option<Result<(bool, bool), &str>> =
+        login_path.as_ref().map(|_| Err("WINDOWS_REQUIRED"));
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _| {
+            let arguments: Vec<_> = argv
+                .into_iter()
+                .skip(1)
+                .map(std::ffi::OsString::from)
+                .collect();
+            match Entry::parse(&arguments) {
+                Ok(Entry::Dashboard) => show(app),
+                #[cfg(windows)]
+                Ok(Entry::Login(path)) => login_existing(app.clone(), path),
+                _ => {}
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             let bridge = Arc::new(Bridge::load(&app.path().app_config_dir()?, token));
             app.manage(NativeFiles(files::Files::open(
@@ -294,9 +547,38 @@ fn main() {
                 bridge.clone(),
             )));
             app.manage(bridge);
-            app.manage(fleet::FleetBridge::load(&app.path().app_config_dir()?));
-            let config = app.config().app.windows[0].clone();
-            tauri::WebviewWindowBuilder::from_config(app, &config)?
+            let updates = Arc::new(updates::Updates::new(
+                app.path().app_local_data_dir()?.join("update-intents"),
+                app.package_info().version.to_string(),
+                app.config()
+                    .plugins
+                    .0
+                    .get("updater")
+                    .cloned()
+                    .unwrap_or_default(),
+            ));
+            let update_pending = updates.keep_fleet_stopped();
+            app.manage(updates);
+            let fleet_path = login_path
+                .clone()
+                .unwrap_or(app.path().app_config_dir()?.join("fleet.json"));
+            app.manage(fleet::FleetBridge::load_path(fleet_path.clone()));
+            let control = Arc::new(fleet_control::Control::new(fleet_path));
+            control.set_stopping(update_pending);
+            app.manage(control.clone());
+            let bootstrap = Arc::new(fleet_bootstrap::Bootstrap::default());
+            app.manage(bootstrap.clone());
+            #[cfg(windows)]
+            bootstrap.start_auto(control.clone());
+            app.manage(QuitState::default());
+            let mut config = app.config().app.windows[0].clone();
+            config.visible = update_pending || !matches!(login_options, Some(Ok((false, false))));
+            let window = tauri::WebviewWindowBuilder::from_config(app, &config)?
+                .initialization_script(if login_path.is_some() || update_pending {
+                    "location.hash = '/settings';"
+                } else {
+                    ""
+                })
                 .on_navigation(|url| {
                     url.scheme() == "tauri" && url.host_str() == Some("localhost")
                         || matches!(url.scheme(), "http" | "https")
@@ -307,15 +589,27 @@ fn main() {
                             && url.port() == Some(1420)
                 })
                 .build()?;
+            if let Some(Err(code)) = login_options {
+                window
+                    .dialog()
+                    .message(format!(
+                        "Fleet login requires attention ({code}). / Fleet 登入啟動需要檢查設定。"
+                    ))
+                    .show(|_| {});
+            }
+            #[cfg(windows)]
+            if !update_pending && matches!(login_options, Some(Ok((false, _)))) {
+                control.start_login();
+            }
             let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit Dashboard", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &quit])?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit Dashboard", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&open, &quit_item])?;
             let mut tray = TrayIconBuilder::new()
                 .menu(&menu)
                 .tooltip("Better Agent Dashboard")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "open" => show(app),
-                    "quit" => app.exit(0),
+                    "quit" => quit(app),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -353,13 +647,14 @@ fn main() {
                 }
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Never stop central tasks: this app has no daemon or Fleet ownership.
+                // Closing hides only. Explicit Quit uses exact-owner normal Fleet shutdown.
                 if window.hide().is_ok() {
                     api.prevent_close();
                 }
             }
         })
         .invoke_handler(tauri::generate_handler![
+            desktop_update,
             native_files_status,
             native_files_pick,
             native_files_drop_target,
@@ -376,6 +671,8 @@ fn main() {
             connector_request,
             fleet_availability,
             fleet_request,
+            fleet_control,
+            fleet_bootstrap,
             open_external
         ])
         .run(tauri::generate_context!())
