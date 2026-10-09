@@ -2,9 +2,10 @@
 
 Internal Rust library for the existing Fleet inventory, profile pairing, independent local selections,
 bounded configuration snapshots, locked selection updates, process identity decisions and bounded recovery.
-The Windows OS adapter can stop only explicitly
-verified local processes through retained handles; it has no network or automatic startup effects and
-is not yet connected to the desktop Fleet adapter. This source slice does not establish Rust Fleet parity.
+The Windows OS adapter stops only explicitly verified local processes through retained handles.
+The probe module performs bounded, read-only loopback TLS/BAT and Connector capabilities requests.
+Neither is connected to the desktop Fleet adapter or automatic startup. This source slice does not
+establish Rust Fleet parity.
 
 Port basis: Fleet Kit `2ec4b11bc010bfd669040e942648c741b63d0b7c`, `client/fleet-core.ps1` and
 `client/fleet-client.ps1`. Reviewed main `4744507354466b1424b8ea369a00a94f1ca3a933` has no intervening
@@ -17,7 +18,12 @@ case. These stricter ambiguity rules are deliberate; ordinary reviewed fixtures 
 Native adapters must use the shared preference file lock/CAS and revalidate configuration before effects.
 `ProcessEvidence::matches` is a necessary identity check, not permission to kill by PID. Hold the process
 handle before final identity verification, require current login ownership and prove the originating
-monitor ended before orphan recovery. Full Windows mutex/process/probe/migration tests are still required.
+monitor ended before orphan recovery. Probe results retain their captured configuration/selection/epoch
+generation and expire after 60 seconds; callers must revalidate configuration before publication.
+The observe credential is separate from the desktop mutation credential. Synthetic loopback peers cover
+pinning, TLS signatures, BAT auth/version/profile/workspace, strict observe capabilities, fragmented
+UTF-8/ping, total deadlines and size limits. Installed Windows process/probe/migration evidence is still
+required; loopback fixtures do not establish live Fleet acceptance.
 
 Run `cargo test --locked --manifest-path desktop/fleet-core/Cargo.toml` from the repository root.
 The parser uses Serde's [Visitor](https://docs.rs/serde/1.0.229/serde/de/trait.Visitor.html) interface.
