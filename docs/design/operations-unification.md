@@ -180,7 +180,10 @@ Coordinator gate：`G`＝下面的 task-owned runtime gate；`TC`＝原 task 控
 | `fanout_from_plan`（非 dry run） | `fanout-start`（非 `--dry-run`） | — → OP | **新增** `fanout.start` | start | 來源只讀、逐項 N；不能經 legacy apply 清理 planner | 保留 #38 的 confirmed all-success stop-only 與容量 retirement；planner worktree 留給 reviewed cleanup；不插入來源 task commands |
 | — | `fanout PLAN --start` | — → OP | `fanout.start`，params 帶檔案讀出的固定 plan | start | 逐項 N | 同上；client 不逐項直接 session_start |
 
-`integrate` 是既有成果整合 scope；在此也用於會改 managed Git 目的端的 worktree merge，與 GitHub `merge` 分開。worktree remove 用 operate 並保留 host orchestrate tier，不新增 scope。reviewed cleanup 的 scopes 與寫入路徑由 cleanup package 定義。組合 action 的額外 scopes 在寫入意圖前檢查；不能先做一部分才發現沒有權限。
+`integrate` 是既有成果整合 scope；在此也用於會改 managed Git 目的端的 worktree merge，與 GitHub `merge` 分開。
+收尾合約見 [worktree-merge.md](worktree-merge.md)：固定雙 carrier、checked-exit Git proof、原 caller 與逐 effect ACK。
+Legacy worktree remove 保持停用，不暴露新的 remove action；reviewed cleanup 的 scopes 與寫入路徑由 cleanup package 定義。
+組合 action 的額外 scopes 在寫入意圖前檢查；不能先做一部分才發現沒有權限。
 
 ### Task Service 與 task 專用 MCP（Part A）
 

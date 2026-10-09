@@ -5,6 +5,16 @@ v1/v2 是同一產品與共同功能 backlog；Tauri 是 UI／client 計畫修�
 沿用 [operations-unification.md](operations-unification.md) 的 actions、TaskCoordinator 與最後 frame 檢查。
 本表是基底快照；有 policy／command guard 不等於 public adapter 已有 operation、caller scope 或跨入口冪等性。
 
+2026-10-09 收尾候選已把 send／continue／answer、permissions、固定 bulk approval、start、
+relay／fanout／standalone failover、external verification testimony 與 `worktree.merge` 接到
+原中央 OperationService；各入口使用原 principal，不因 MCP／CLI 更換入口取得額外權限。
+Task controls 保留既有 coordinator／command authority。`worktree.merge` 的雙 carrier reservation、
+checked-exit Git proof、positive loaded/unloaded runtime 與逐 effect ACK 見
+[worktree-merge.md](worktree-merge.md)。Verification 是外部證詞，不能取代 trusted task verifier。
+Unsafe legacy remove／cleanup apply 保持停用，使用既有 reviewed cleanup；task-owned cleanup
+已經中央 coordinator finalize contract。下表與問題敘述保留查核基底歷史，不代表目前仍須重做。
+合併、exact-head checks、installed/live 的實際狀態見 [implementation-status](../product/implementation-status.md)。
+
 | 入口 | 已有 authority／durability | 尚缺與依賴 |
 | --- | --- | --- |
 | MCP/CLI send、continue、answer | HTTP `session.send`／`session.answer`；service 的 policy、task command、FrameGuard | 正在接同一 action。保留 message_id、dont_ask_again、完整結果；literal intent 先 replay，才固定完整 session/prompt。 |

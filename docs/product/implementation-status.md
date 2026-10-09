@@ -36,25 +36,28 @@ cleanup、native files 及獨立 reviewer 的固定 bytes/revision。Local full 
   Central relay、fanout planner／fixed-plan dispatch、standalone Claude→Codex failover、omitted-key task controls 與 `.11`
   已在 main。Exact CI Python 3.10–3.13 各 **2888 passed／33 skipped**，Windows／Linux desktop packaging 通過。
   Focused 490 在 3.13／3.10 通過；舊 principal fixture 斷言已修。兩次主動中止的 local full 不計通過，第二次是在 CI 四版通過後停止重複驗證。
-- [#64](https://github.com/teddashh/bat-agent-connector/pull/64) 是 native Fleet／bootstrap／signed update 整合候選，仍未合併。
-  `a9e7413` 的四版 Python full CI、Windows app Clippy／tests 通過，Windows Fleet core 的空閒 port proof 失敗。
-  真 Windows fixture 證明：空閒 endpoint 的 connect 在 100 ms timeout，而約 2 s 才回 ConnectionRefused；bind 成功。
-  `b4a46b4` 將 production connect budget 改為 3 s，仍需正面 refusal＋bind；Windows oracle 已通過。
-  完整 Windows CI 隨後暴露 17 個 supervisor failures：掃描保留短路徑、selection/launch 已展開，造成同一 receipt 被當 foreign。
-  `804f483` 統一路徑解析；portable regression 確認舊邏輯失敗、修正後通過，configuration/supervisor/unconfigured 共 42 tests、Clippy/fmt 通過，獨立 review 無 findings。
-  已推送同 head Windows 完整矩陣；沒有把早期 oracle 或 Linux fixtures 當完整 Windows 通過。
-  原 local evidence：416 UI、12 state、218 Linux Fleet core、78 app Rust／1 fixture-only ignored、release verifier example 1；bootstrap 44 在兩版 Python 通過。
-- `integrate/dashboard-release` 已累加 principal transcript／wait、canonical `.13`、task pause/resume、操作紀錄分頁及 session→明確 BAT profile 入口。
-  Observation author 467 在兩版 Python 通過；root 整合 86 在兩版通過。Task root 34 UI＋actual central fixture 通過；
-  session BAT＋start root 52 UI 通過。獨立審查修正重開後的未送出 preview，不以遺失 receipt 授權重複啟動。
-  `8621dc4` 合入四個 orchestration 表單：relay、planner、明確逐項 fanout、單一 Claude→Codex 接續。共用 UI 516、state 12 全通過。
-  Actual-central fixture 在一般暫存磁碟遇到 5 s UI 等待失敗；原碼在 `/dev/shm` 暫存重跑通過，未放寬 production/test deadlines。
-  `c3d7143` 合入 A03 labels：純中央 metadata、版本 CAS、完整 SID、人工／unknown／retained 支援、原 receipt 與 loaded-only 搜尋。
-  Peer/root 找到的 cleanup alias kind 已修；author 40 最終 UI、25 最終 focused backend、真中央人工 Git bytes 不變 fixture 通過。
-  `5a9a143` 合入 verification testimony：operate scope、各入口同中央、不可變 JSON operation receipt、原 timestamp recovery；不授予 trusted Task Service verification。
-  Root 合併 labels／verification／principal／lifecycle／canonical 152 tests 在 Python 3.13／3.10 均通過，另 3 trusted verifier cases 通過；labels／BAT／task／refresh 91 UI 通過，最終 candidate CI 另記。
-  `worktree.merge` 的最後 legacy mutation 尚在收尾，含雙 carrier 排他與 checked-exit Git proof。
-  同候選完整 UI／backend／Windows 矩陣與 installer pin 以後續候選為準；這些分層結果不是整套產品完成證據。
+- [#64](https://github.com/teddashh/bat-agent-connector/pull/64) 整合 native Fleet／bootstrap／signed update；來源候選 `d6b23ae8d2d043ce9127452aaf212da2a8e229bd`。
+  真 Windows fixture 先暴露空閒 endpoint 在 100 ms 尚未回 refusal，修為 bounded 3 s refusal＋bind proof。
+  接著修正 ownership 掃描與 selection 的短路徑差異、WScript Startup 短路徑辨識，以及並行 discovery fixtures 的時間戳撞名。
+  完整 Windows Fleet core gate 已通過，包含真 WScript synthetic links；22 discovery、42 ownership/configuration regressions 與獨立 review 通過。
+  另一次 app fixture 在原 10 s PowerShell contract budget 逾時，後續不同條件的 probes 通過不當作原測試通過；失敗及原碼查核／重跑證據保留於 PR。
+  原 combined evidence：416 UI、12 state、218 Linux core、78 app Rust／1 fixture-only ignored、release verifier example 1；bootstrap 44 在兩版 Python 通過。
+- [#65](https://github.com/teddashh/bat-agent-connector/pull/65) 整合四個 orchestration 表單、task pause/resume、操作分頁、明確 BAT profile 入口、principal transcript/wait、A03 labels 及中央 verification testimony。
+  候選 `460c792de40f35d84155219b06bc3f3948b92ee5` 保留原 actor/key/request 與 receipts。Labels 只改中央 metadata，含人工／unknown／retained 與版本 CAS；verification 是外部證詞，不能授予 trusted task verification。
+  Observation 86、labels／verification／principal／lifecycle／canonical 152 在兩版 Python 通過；3 trusted verifier、91 affected UI、actual-central labels／task／orchestration fixtures 通過。
+  Full CI 在 `921caf7` 發現 3 個 API remount 重複註冊 failures 與 1 個舊 MCP 工具清單斷言；`f6603a4` 修正後，101 related regressions 在 3.13／3.10 通過並經獨立 review。
+  本機 orchestration fixture 曾在一般暫存磁碟遇到 5 s UI deadline，原碼在 `/dev/shm` 通過；沒有放寬 deadline 或計為 local full 通過。
+- [#66](https://github.com/teddashh/bat-agent-connector/pull/66) 是同一產品的最後整合工作線，累加 Tailscale recovery、中央 `worktree.merge` 與 canonical `.14`。
+  Tailscale 使用固定 Windows vendor paths、bounded sanitized status、原 request receipt、Launcher／Quit／update fences；返回畫面只查狀態，不自動登入或修改網路。
+  Source `5598b46` 已獨立 review；9 durable core＋1 synthetic process、3 Linux Tauri IPC、29 final UI、12 state 通過。Windows MSVC isolated compile 是分層證據，實際 Windows matrix 另留 CI。
+  Merge 固定來源／目的 Git identity 與全部 consumers，保留雙 carrier reservation、各 effect 的 ACK、未知結果與原 key。支援明確 idle／unloaded／headless／retired managed consumers，拒絕 task-owned／manual／unknown／未決 writer。
+  先以設定的 verifier SSH 讀 effective Git config，拒絕 diff/filter programs、ambient overlays、submodules、incomplete status，再讀 BAT worktree status；SSH mapping 必須由 operator 綁到同一 BAT Git account/configuration context，不能當作獨立環境 attestation。
+  Merge source `9366396` 的 140 merge/client cases 在 3.13、254 related cases 在 3.10 通過；先前 shared layers 705／707 通過。獨立 review 的 Git diff-program finding 已修正，原始失敗／修正 evidence 保留。
+  Root integration 的共用 UI **585**、state **12** 全通過；merge／verification／client／MCP／canonical／cleanup／SSE／labels 共 **282** 在 Python 3.13／3.10 均通過。
+  固定候選的完整 Python／Windows／Linux、late recovery corrections 與 installer SHA/digest，以此 PR 最後記錄為準。
+
+本節是送審來源與分層 evidence 快照；PR 的完整 SHA、checks、merge commit 與 tree 比對記錄才是合併判準。
+不以先前 head 綠燈、較小 focused suite 或不同來源的 installer pin 當最終 release candidate 證據。
 
 以上沒有正式簽章身分、release feed 發布、Windows installed 或 live host/provider writes 的完成宣稱。
 本機 fixtures 不代替 PID／account／Startup／原生視窗及完整產品展示。GitHub Codex review quota 用盡，
