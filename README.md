@@ -86,7 +86,11 @@ Use `batc artifact capture-preview HOST SESSION_ID relative/file` to review one 
 the JSON, then `batc artifact capture --preview-file PREVIEW.json --key KEY --confirm` with the same credential.
 Capture, including replay/resume/cancel, needs the original credential with `observe` and `manage`.
 Accepted operations remain recoverable after preview expiry. Capture refuses source changes and never changes the manual checkout. It preserves
-one file, not a dirty snapshot. Managed-result capture/accept and cross-host commit fetch remain later parts.
+one file, not a dirty snapshot. Managed files use `artifact managed-capture-preview` with a central execution
+operation or task/command selector, then `artifact managed-capture`. `artifact accept` (approve scope) records
+review of one exact revision and its saved lineage without completing a task, merging or deploying.
+Another host must obtain published code through an explicitly bound repository; direct transfer of unpublished
+Git objects is outside the delivery scope. Repository synchronization and managed capture/accept UI remain follow-up work.
 See [the artifact design](docs/design/artifacts.md).
 
 ## Install
@@ -367,7 +371,8 @@ batc resource-cleanup history --original-id cp_EXAMPLE
 | `sessions_triage(host?, workspace?, agent?, states?, use_jev=auto, include_unloaded=true)` | Classifies each session: `quota_exhausted`, `rate_limited_transient`, `waiting_permission`, `waiting_question`, `working`, `done_idle`, `error_other`, `unknown`, with `source` (pattern/jev), confidence, evidence line and reset time. |
 | `quota_sessions(host?)` | Shortcut: Claude sessions stopped by a usage quota. |
 | `session_set_permissions(host, session_id, mode, confirm, idempotency_key?, control_version?)` | Durable central permission change: `allow_all` (host must allow it) or `default`. Claude switches only while idle, without automatic deferral; Codex applies from its next turn. Retain the operation/key for partial or unknown outcomes. |
-| `approve_pending(host, confirm, dry_run?)` | Dry-run preview only. Combined apply refuses with `LEGACY_PERMISSION_RAISE_DISABLED` before any answer or mode change; use individual central answer/permissions actions. |
+| `approval_preview(host, workspace?)` | Read complete pending permission prompts, eligibility and optional modes from the central service. The signed preview is valid for ten minutes and bound to the caller. |
+| `approve_pending(host, confirm, preview_token, selection, expected_fingerprint, idempotency_key?, dry_run?)` | Apply only an explicit reviewed selection through durable answer/permissions children. Each answer uses `dont_ask_again=true`; mode is `null`, `default` or `allow_all`. Missing preview refuses; inspect per-item and partial results. |
 | `session_failover(host, session_id? \| all_exhausted, confirm, dry_run?, model?, force?, instructions?, archive_only?)` | Starts a Codex session that continues a quota-stopped connector-managed Claude session: same worktree when there is one, handoff prompt with the original task, latest instruction, recent output and git state (credentials redacted). Idempotent. `model` defaults to the host's `codex_model`. `instructions` replaces the default "continue the task" steps (for example "only commit the work in progress"); `archive_only` marks the successor for preservation; reviewed release keeps its commits and branch. |
 | `session_relay(host, message, confirm, workspace? \| session_id?, brief?, earlier?, channel?, thread?, request_fanout=0, dry_run?, start_if_missing?)` | Relays a human's message verbatim to the workspace's most recent connector-managed session (or a given one; sessions created in BAT are never written to, and `start_if_missing` starts a new worktree session instead), plus an optional brief labeled as the relayer's interpretation and the BAT-STATUS footer. `request_fanout=N` asks the session for a `bat-fanout` plan. Returns the rendered text. |
 | `fanout_plan_session(host, workspace, message, confirm, max_items=4, brief?)` | Starts a Codex planner in its own worktree (for when no managed session can plan) that answers with a `bat-fanout` plan. |
@@ -401,13 +406,19 @@ batc resource-cleanup preview --host box1
 batc policy box1                                      # mutation table; `batc policy box1 1a2b3c4d` explains one session
 batc triage box1 --state quota_exhausted --state waiting_permission
 batc quota                                            # quota-stopped Claude sessions on every host
-batc approve-pending box1 --dry-run                   # preview only; bulk apply is disabled
+batc --json approve-pending box1 --dry-run             # review exact prompts and permitted modes
 batc permissions box1 1a2b3c4d --mode default --key perm-example --confirm
 batc failover box1 --all-exhausted --dry-run          # then --confirm
 batc cleanup box1                                     # read-only evaluation; --apply returns LEGACY_CLEANUP_DISABLED
 ```
 
 Every command accepts the global `--json` flag, placed before the command: `batc --json hosts`.
+
+For bulk approval, save that preview and submit it with `--preview-file FILE --selection JSON --key KEY --confirm`.
+Selection contains only reviewed `{item_id, mode}` entries; a null mode answers without changing the mode.
+This grants BAT's similar permission requests (`dont_ask_again=true`), so it is unavailable for confined sessions.
+The parent operation preserves each child ID and receipt. Read `all_succeeded` and per-item results rather than
+interpreting parent `succeeded` as approval of every item. See [the bulk contract](docs/design/bulk-approval.md).
 
 ## Relay, fan-out and status markers
 

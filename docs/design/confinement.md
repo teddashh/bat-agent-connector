@@ -224,7 +224,7 @@ Protected-root scan 維持只讀 metadata、不讀人的檔案內容、不建立
 | `GET /api/v1/capabilities` | `hosts[].confinement`：`agents.{claude,codex}` 的 reachable_options、requested_level、verified_level、limits／gap；`host_account` 的 declared、status、checked_at、protected_roots、evidence_ref、reason、start_effect、checked_uid／channel facts。supported／unknown／unsupported 分開；不把 host 的 capability level 直接套到既有 session。 |
 | Host reads | 既有 `hosts_list`／`host_status`、`GET /api/v1/hosts` 帶同一 account check 摘要。只讀刷新不新增 mutation action；離線回最後證據與 stale，不因 capabilities 載入卡住 Dashboard。 |
 | Checkpoint／repair | `checkpoint-preview` 與 capabilities 提供所選 agent 的預計限制；`checkpoint.continue`／`integration.handoff` 的結果與 operation.external_refs 帶 confinement snapshot／evidence_ref。work item 的 `continueFrom` 也使用此摘要。 |
-| 權限與 bulk | [session.permissions](session-permissions.md) 與 MCP `session_set_permissions`／CLI `permissions` 共用中央 operate action、逐 frame 回執與 confinement。Legacy `approve_pending`／`approve-pending` 僅保留 dry-run；合併 apply 在任何回答／raise 前拒絕，`session.approve_pending` 尚未註冊。 |
+| 權限與 bulk | [session.permissions](session-permissions.md) 與 MCP `session_set_permissions`／CLI `permissions` 共用中央 operate action、逐 frame 回執與 confinement。公開 `approve_pending`／`approve-pending` 使用 [session.approve_pending](bulk-approval.md) 的固定預覽與 children；confined sessions 的 persistent approval／raises 仍拒絕。舊 lifecycle raise 路徑不啟用。 |
 | Task Service | commands start payload 與 registry 保存 actual options 與 snapshot；`work_status`／task reads 顯示 session 限制與 task_recipe_compatibility gap，不改 engine_decision／recipe。 |
 
 必要條件仍為 scopes、write／orchestrate tier、resource_policy 的來源與目的地檢查、穩定 session／worktree 身分。CLI sandbox 不把 legacy shared clone 變成 §07 的獨立 clone；本包不變更 shared_clone_worktrees 遷移政策，UI 仍同時列 isolation 與 confinement。
@@ -247,7 +247,7 @@ Dashboard 的 checkpoint／repair／work-item 接續表單依 start_effect 選�
 新共用 confinement helper 只決定 options、證據與是否放寬；沿用原 `WriteGrant` 與 task coordinator gate。一般新 start 的選項在 registry reservation 與 Task Service command payload 記下，不等 ACK 才記。Checkpoint／repair step request 保存 session ID、cwd、agent、write_scope，完整選項以同 ID 的 registry intent 為準；核對成功後在 operation external_refs 保存 snapshot。`registry_permission_fields()` 由實際送出的 options 生成，不能用空 `permission_options(default)` 清掉有效值。
 
 - `write_scope=confined` 不可由 permission change 進 bypass／full-access、減少 protected_roots、開啟更寬的批准政策或移除其已記限制。`force`／confirm 不繞過；等價 default 要轉成該 session 原 options，只有真正不放寬的變更可送。
-- Combined bulk raise apply 在回答任何 prompt 前回 LEGACY_PERMISSION_RAISE_DISABLED，dry-run 保留。歷史 pending raise 保留為診斷 evidence，deferred helper 回相同拒絕碼，不清除後重新派送。新的逐項 permission 變更須經 session.permissions，在每個未送 frame 前重查 confinement、registry 與 task gate。
+- 舊內部 combined bulk raise apply 在回答任何 prompt 前回 LEGACY_PERMISSION_RAISE_DISABLED，dry-run 保留。公開 reviewed bulk 必須有原 preview／selection，各 answer／permission child 在每個未送 frame 前重查 confinement、registry 與 task gate。歷史 pending raise 保留為診斷 evidence，deferred helper 回相同拒絕碼，不清除後重新派送。
 - 逐次回答仍是 `session.answer`；既有任意批准就可能越過 prompt／sandbox，UI 必須說明。Confined session 拒絕 `dont_ask_again=true` 的 session-wide allow 與會把 mode 改成較寬值的 ExitPlanMode answer；`deny`／AskUserQuestion 不因此被擋。單次 allow 不得更新 level 為「更安全」，並留下批准的限制說明。
 - 兩份 skill 同步要求先讀 write_scope／confinement：受限 session 不要求 allow-all、不呼叫 raise、不用 bulk／dontAskAgain 消除限制，不批准寫往 protected_roots。合法測試被擋時，回報具體限制與待處理項，不自行改 host／engine／recipe。
 - 權限閘門不能把不受限的舊 Task Service session 接管給低階 agent；操作權限與 confinement 是兩個累加檢查。
