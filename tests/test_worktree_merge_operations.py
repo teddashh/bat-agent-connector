@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import subprocess
 
 import pytest
@@ -295,6 +296,83 @@ async def test_all_ack_cancel_restart_only_releases_original_marker(daemon, mock
     await settle_operations(daemon.ops)
     assert daemon.ops.get(out['operation_id'])['status'] == 'succeeded'
     assert api.write_frames(mock) == writes and not merge._document()['carrier_writers']
+    await daemon.fleet.close()
+
+
+@pytest.mark.parametrize('effect', ['rehydrate', 'merge'])
+@pytest.mark.parametrize('error', [OSError, sqlite3.OperationalError])
+async def test_post_ack_receipt_storage_failure_stays_resumable_without_resend(daemon, mock, carriers, monkeypatch, effect, error):
+    if effect == 'rehydrate':
+        status = mock.worktrees.pop(SID)
+        mock.handlers['claude:get-worktree-status'] = lambda p: status
+        def rehydrate(_):
+            mock.worktrees[SID] = status
+            return {'success': True}
+        mock.handlers['worktree:rehydrate'] = rehydrate
+    original = daemon.ops._step_done
+    def unavailable(oid, name, response, **kw):
+        if name == effect + '.frame':
+            raise error('fixture receipt storage unavailable')
+        return original(oid, name, response, **kw)
+    monkeypatch.setattr(daemon.ops, '_step_done', unavailable)
+    out = await create(daemon)
+    assert mock.channels().count('worktree:' + effect) == 1
+    assert merge._document()['carrier_writers']
+    assert out['status'] == 'needs_attention', (out['status'], out['error_code'], out['status_reason'])
+    assert out['error_code'] == 'MERGE_RECEIPT_UNAVAILABLE'
+    step = next(s for s in out['steps'] if s['name'] == effect + '.frame')
+    stored = daemon.ops.db.execute('SELECT request FROM operation_steps WHERE operation_id=? AND name=?',
+                                   (out['operation_id'], effect + '.frame')).fetchone()
+    assert step['status'] == 'started' and json.loads(stored['request'])['channel'] == 'worktree:' + effect
+    writes = list(api.write_frames(mock))
+    reopen(daemon)
+    daemon.ops.resume(P, out['operation_id'])
+    await settle_operations(daemon.ops)
+    assert daemon.ops.get(out['operation_id'])['status'] == 'uncertain'
+    daemon.ops.cancel(P, out['operation_id'])
+    await settle_operations(daemon.ops)
+    assert daemon.ops.get(out['operation_id'])['status'] == 'uncertain'
+    assert api.write_frames(mock) == writes and merge._document()['carrier_writers']
+    await daemon.fleet.close()
+
+
+async def test_committed_ack_then_storage_error_cancel_reopens_for_local_release_only(daemon, mock, carriers, monkeypatch):
+    original = daemon.ops._step_done
+    def after_commit(oid, name, response, **kw):
+        original(oid, name, response, **kw)
+        if name == 'merge.frame':
+            raise sqlite3.OperationalError('fixture failure after committed receipt')
+    monkeypatch.setattr(daemon.ops, '_step_done', after_commit)
+    out = await create(daemon)
+    assert out['status'] == 'needs_attention' and out['error_code'] == 'MERGE_RECEIPT_UNAVAILABLE'
+    assert next(s for s in out['steps'] if s['name'] == 'merge.frame')['status'] == 'succeeded'
+    writes = list(api.write_frames(mock))
+    reopen(daemon)
+    daemon.fleet.config.host('h1').orchestrate = False
+    reads = list(mock.invokes)
+    daemon.ops.cancel(P, out['operation_id'])
+    await settle_operations(daemon.ops)
+    assert daemon.ops.get(out['operation_id'])['status'] == 'succeeded'
+    assert api.write_frames(mock) == writes and mock.invokes == reads
+    assert not merge._document().get('carrier_writers')
+    await daemon.fleet.close()
+
+
+async def test_remote_intent_storage_failure_cancel_never_starts_a_new_frame(daemon, mock, carriers, monkeypatch):
+    original = daemon.ops._step_start
+    def fail_before_intent(oid, name, request):
+        if name == 'merge.frame':
+            raise sqlite3.OperationalError('fixture intent storage unavailable')
+        return original(oid, name, request)
+    monkeypatch.setattr(daemon.ops, '_step_start', fail_before_intent)
+    out = await create(daemon)
+    assert out['status'] == 'needs_attention' and not api.write_frames(mock)
+    assert not any(s['name'] == 'merge.frame' for s in out['steps'])
+    reopen(daemon)
+    daemon.ops.cancel(P, out['operation_id'])
+    await settle_operations(daemon.ops)
+    assert daemon.ops.get(out['operation_id'])['status'] == 'cancelled'
+    assert not api.write_frames(mock) and not merge._document().get('carrier_writers')
     await daemon.fleet.close()
 
 

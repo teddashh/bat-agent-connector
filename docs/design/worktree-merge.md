@@ -81,6 +81,10 @@ reply、timeout、process crash 都保留 unknown 及兩端 reservation，永不
 receipt，不宣稱固定 merge commit/parents 或測試通過。已完成 receipts 的 recovery 不需
 重新通過 moving HEAD / live policy；只做原 marker CAS 的 local release。cancel 不隱藏
 unknown effects，不釋放未知 writer；在已 ACK 後取消仍可完成 local receipt bookkeeping。
+Remote ACK 後若本機 receipt transaction 寫入失敗，action 回報
+`MERGE_RECEIPT_UNAVAILABLE / needs_attention`，保留 original intent 與 reservation；
+resume/cancel 只重讀同一步的持久化證據，缺少 ACK 不重送。若 ACK 已成功持久化，則可在
+取消後完成原 marker 的 local release，不再讀 BAT 或重跑目前 policy。
 
 來源：BAT `b7419892fbc9946799b64cca24c2ec8c7fa15c42` 的
 [merge / rehydrate](https://github.com/tony1223/better-agent-terminal/blob/b7419892fbc9946799b64cca24c2ec8c7fa15c42/src-tauri/crates/bat-git/src/worktree.rs#L1469)、
