@@ -980,6 +980,25 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=wr)
 
     if not read_only:
+        async def session_record_verification(
+            host: str, session_id: str, candidate_commit: str, command: str, exit_code: int,
+            environment: str, log_ref: str, confirm: bool = False, idempotency_key: str | None = None,
+        ) -> dict[str, Any]:
+            """Record external test testimony against the current clean candidate through the central owner.
+            Requires operate scope, confirm=true and this client's BATC_API_TOKEN. Does not run command,
+            read log_ref, change BAT, claim manual ownership or create trusted Task Service verification.
+            Task-owned sources refuse. Keep the original explicit key after reply loss; omitted means a
+            new independent record. Completed receipts preserve the original timestamp and evidence."""
+            out = await principal_daemon("session_record_verification", confirm, host=host,
+                session_id=session_id, candidate_commit=candidate_commit, command=command, exit_code=exit_code,
+                environment=environment, log_ref=log_ref, confirm=confirm, idempotency_key=idempotency_key)
+            if out["operation_status"] in {"failed", "cancelled"}:
+                raise ToolError(json.dumps(out, ensure_ascii=False))
+            return out
+        mcp.add_tool(_wrap(session_record_verification), name="session_record_verification",
+                     annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False))
+
+    if not read_only:
         async def fanout_plan_session(host: str, workspace: str, message: str, max_items: int | None = None,
             channel: str | None = None, thread: str | None = None, earlier: list[str] | None = None,
             brief: dict | str | None = None, confirm: bool = False, idempotency_key: str | None = None) -> dict[str, Any]:
@@ -1109,22 +1128,11 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             Use cleanup_preview and cleanup_apply for reviewed reclamation."""
             return await lifecycle.session_cleanup(fleet, host, confirm, dry_run, session_id)
 
-        async def session_record_verification(
-            host: str, session_id: str, candidate_commit: str, command: str, exit_code: int,
-            environment: str, log_ref: str, confirm: bool = False,
-        ) -> dict[str, Any]:
-            """ORCHESTRATE. Record a trusted external test run for the host's current clean Git HEAD.
-            Requires command, integer exit code, execution environment and durable log reference.
-            A later commit or dirty working tree invalidates this evidence. Requires confirm=true."""
-            return await lifecycle.session_record_verification(
-                fleet, host, session_id, candidate_commit, command, exit_code, environment, log_ref, confirm
-            )
 
         for fn in (
             worktree_merge,
             worktree_remove,
             session_cleanup,
-            session_record_verification,
         ):
             fn.__doc__ = (fn.__doc__ or "") + f" Orchestrate is enabled for: {oenabled}."
             mcp.add_tool(_wrap(fn), name=fn.__name__, annotations=ro if fn is session_cleanup else orc)

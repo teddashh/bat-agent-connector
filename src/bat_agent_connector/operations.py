@@ -48,7 +48,7 @@ ALLOWED = {
 }
 UNCERTAIN_RETRY_S = (30.0, 60.0, 120.0, 300.0, 600.0)
 NO_KEY_PREFIX = "batc:nokey:"
-LEGACY_SESSION_ACTIONS = frozenset({"session.failover", "fanout.plan", "fanout.start", "session.relay", "session.start", "session.send", "session.answer", "session.interrupt", "session.permissions", "session.approve_pending"})
+LEGACY_SESSION_ACTIONS = frozenset({"session.record_verification", "session.failover", "fanout.plan", "fanout.start", "session.relay", "session.start", "session.send", "session.answer", "session.interrupt", "session.permissions", "session.approve_pending"})
 LEGACY_TASK_ACTIONS = frozenset({"task.pause", "task.resume", "task.mark_stage",
                                  "task.verify", "task.request_ted", "task.command.reconcile"})
 

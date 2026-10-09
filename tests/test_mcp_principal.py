@@ -13,8 +13,9 @@ served = api.served
 
 LEGACY = {"hosts_list", "sessions_list", "session_send", "session_continue",
           "session_interrupt", "session_answer", "session_set_permissions",
-          "session_cleanup", "worktree_merge", "worktree_remove", "session_record_verification"}
-CENTRAL_ORCHESTRATION = {"session_relay", "session_failover", "fanout_plan_session", "fanout_from_plan"}
+          "session_cleanup", "worktree_merge", "worktree_remove"}
+CENTRAL_ORCHESTRATION = {"session_relay", "session_failover", "fanout_plan_session", "fanout_from_plan",
+                         "session_record_verification"}
 TASK_WRITES = {"work_submit", "work_pause", "work_resume", "work_mark_stage"}
 
 
