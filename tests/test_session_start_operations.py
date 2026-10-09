@@ -377,6 +377,50 @@ async def test_cli_start_adapter_preserves_prompt_identity_and_no_raw_fallback(d
     assert called[0][1]['prompt'] == args.prompt and called[0][1]['idempotency_key'] == 'literal'
     assert called[0][1]['_auth_token'] == 'own-principal-token' and not write_frames(mock)
 
+@pytest.mark.parametrize('adapter', ['cli', 'mcp'])
+async def test_start_adapters_recover_original_key_after_tier_disabled(served, mock, monkeypatch, adapter):
+    from types import SimpleNamespace
+
+    from bat_agent_connector import cli
+    from bat_agent_connector.errors import WriteRefused
+    from bat_agent_connector.mcp_server import build_server
+    from tests.test_mcp_principal import call
+    d, port = served
+    monkeypatch.setenv('BATC_TASK_URL', f'http://127.0.0.1:{port}/rpc')
+    monkeypatch.setenv('BATC_API_TOKEN', token(d, 'adapter-starter', 'start'))
+    principal = api_auth.Principal('adapter-starter', frozenset({'start'}))
+    request = {'host': 'h1', 'workspace': 'ws-1', 'confirm': True, 'idempotency_key': 'original-start',
+               'agent': 'claude', 'prompt': None, 'model': None, 'use_worktree': True, 'title': None}
+    original = await starts.legacy(d.ops, principal, request, entry=adapter)
+    assert original['operation_status'] == 'succeeded'
+    before = len(write_frames(mock))
+    d.fleet.config.host('h1').orchestrate = False
+    monkeypatch.setattr(cli, 'load_config', lambda *a, **kw: d.fleet.config)
+    if adapter == 'cli':
+        args = SimpleNamespace(read_only=False, config=None, cmd='start', host='h1', workspace='ws-1',
+            agent='claude', confirm=True, prompt=None, model=None, no_worktree=False, title=None, key='original-start')
+        replay, _ = await cli._run(args)
+        assert replay['operation_id'] == original['operation_id']
+        args.key = 'fresh-start'
+        with pytest.raises(ValueError) as refusal:
+            await cli._run(args)
+        assert 'orchestrate' in str(refusal.value).lower()
+        args.confirm = False
+        with pytest.raises(WriteRefused, match='confirm'):
+            await cli._run(args)
+    else:
+        # Rebuilding after a local policy change must retain the central recovery tool.
+        server, fleet = build_server(d.fleet.config)
+        try:
+            assert 'session_start' in {t.name for t in await server.list_tools()}
+            replay = await call(server, 'session_start', request)
+            assert original['operation_id'] in replay and 'succeeded' in replay
+            assert 'orchestrate' in (await call(server, 'session_start', {**request, 'idempotency_key':'fresh-start'})).lower()
+            assert 'confirm' in await call(server, 'session_start', {**request, 'confirm':False})
+        finally:
+            await fleet.close()
+    assert len(d.ops.list()['operations']) == 1 and len(write_frames(mock)) == before
+
 def test_cli_read_only_start_refuses_before_stdin_config_rpc(monkeypatch, capsys):
     from types import SimpleNamespace
 
