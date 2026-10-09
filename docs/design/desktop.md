@@ -27,7 +27,7 @@ The client loads `central.json` from the platform app configuration directory:
 | --- | --- |
 | Windows | `%APPDATA%\io.betteragent.dashboard\central.json` |
 | Linux | `$XDG_CONFIG_HOME/io.betteragent.dashboard/central.json`, normally `~/.config/io.betteragent.dashboard/central.json` |
-| macOS | `~/Library/Application Support/io.betteragent.dashboard/central.json` (not validated on macOS) |
+| macOS | `~/Library/Application Support/io.betteragent.dashboard/central.json` |
 
 Copy `desktop/central.example.json` there and set the actual expected API actor. Endpoint selection is trusted native configuration, never a WebView-supplied URL. The Connection screen displays the fixed configuration path; **Reload configuration** rereads only that file and disconnects before a new identity can be used. Invalid or missing configuration can be repaired without restarting. This configuration is client-local and is not another fleet host inventory. The endpoint must be an HTTPS origin or a literal loopback HTTP origin for an already authenticated SSH tunnel. The app neither creates that tunnel nor authenticates its ownership. Preserve the existing tunnel's host verification; an arbitrary loopback listener is not proof of central identity.
 
@@ -128,7 +128,7 @@ These checks are native fixture evidence; installed/live acceptance remains sepa
 
 The app bundles frontend assets and does not require Vite in production. Closing the main window hides it; the tray offers Open Dashboard and Quit Dashboard. Explicit Quit uses [normal exact-owner Fleet shutdown](desktop-fleet-native.md), refuses unconfirmed/foreign ownership, and leaves central work and manual BAT windows alone. The single-instance plugin focuses the current desktop window; Fleet separately enforces the shared cross-session ownership protocol. Fixed native supervisor/login CLI dispatch precedes the WebView and single-instance plugin. Native and PowerShell backends are mutually exclusive under the same ownership guards.
 
-The desktop workflow packages unsigned Windows NSIS and Linux deb artifacts for validation. The separate signed-candidate workflow verifies updater signatures and writes a fixed feed without publishing it; signing identities, Authenticode and installed acceptance remain operator release setup. macOS packages are not configured.
+The desktop workflow packages unsigned Windows NSIS and Linux deb artifacts for validation. The separate signed-candidate workflow verifies updater signatures and writes a fixed feed without publishing it; signing identities, Authenticode and installed acceptance remain operator release setup. macOS builds provide separate Apple Silicon and Intel DMGs with ad-hoc signatures for validation; Developer ID signing and notarization are separate release gates.
 
 After packaging, `node tests/windows-installed-smoke.mjs` installs the NSIS package on the
 disposable GitHub-hosted Windows runner. It refuses workstations, existing app state,
@@ -264,3 +264,31 @@ Launcher/monotonic Quit-update fence. It does not change network configuration,
 Fleet selection or central credentials. Browser/unsupported/missing installations
 remain explicit; installed Windows sign-in and tray behavior are not yet proven.
 See [the exact T10 adapter contract](tailscale-recovery.md).
+
+## macOS packages and native verification
+
+The platform configuration produces an `.app` inside a `.dmg`, with the existing icon
+converted to ICNS and a minimum system version of macOS 13. Native CI runs on macOS 15
+for Apple Silicon and Intel separately; older supported OS versions are not yet exercised.
+The ordinary workflow sets `APPLE_SIGNING_IDENTITY=-` for an ad-hoc signature. This
+verifies bundle integrity but does not establish a Developer ID identity or notarization.
+See the upstream [DMG](https://v2.tauri.app/distribute/dmg/) and
+[macOS signing](https://v2.tauri.app/distribute/sign/macos/) contracts.
+
+`node tests/macos-installed-smoke.mjs` refuses non-hosted runners, existing app state and
+existing Dashboard processes. It mounts the actual DMG read-only, copies its app into a
+unique disk directory, compares every bundled file and internal symlink against the built
+app, verifies its signature, architecture, version and resources, and unmounts the image.
+It launches that copied app against an authenticated observe-only loopback fixture and
+captures the real WKWebView. A native helper hides the application, Finder/Dock activation
+restores the same window/process, a second executable hands off, and a normal system Quit
+followed by relaunch resumes polling without changing configuration. Owned app/state and
+temporary files are removed on exit. No Accessibility privacy setting is changed.
+The test covers application hide/reopen, not a physical close-button or menu-bar click.
+
+The macOS event loop handles Dock/Finder Reopen and routes system Quit through the same
+shutdown function as tray Quit. These changes do not make the Windows Fleet supervisor,
+Startup migration or Windows updater available on Mac. Mac currently uses the explicit
+memory-only credential adapter; Keychain enrollment, signed in-app updates and real
+central/BAT acceptance remain distinct implementation/acceptance work. Receipts identify
+the exact candidate and platform; adding this fixture does not itself record a passing run.
