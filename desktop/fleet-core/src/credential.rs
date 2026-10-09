@@ -132,7 +132,7 @@ fn no_link(metadata: &Metadata) -> bool {
     }
     true
 }
-fn read_fixed(
+pub(crate) fn read_fixed(
     data_dir: &Path,
     directory: &str,
     name: &str,
