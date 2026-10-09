@@ -11,6 +11,7 @@ license = "MIT"
 tauri-build = { version = "=2.7.1", features = [] }
 
 [dependencies]
+bat-fleet-core = { path = "../fleet-core" }
 tauri = { version = "=2.12.1", features = ["tray-icon"] }
 tauri-plugin-single-instance = "=2.5.2"
 tauri-plugin-opener = "=2.7.0"
