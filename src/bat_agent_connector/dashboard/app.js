@@ -2,6 +2,34 @@
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		bulk_title: "批次核准",
+		bulk_choose_host: "選擇主機",
+		bulk_workspace: "工作區名稱或 ID（選填）",
+		bulk_preview: "預覽待核准請求",
+		bulk_scope: "範圍限於所選主機，可再指定工作區。只處理這次明確勾選的請求。",
+		bulk_effect: "每筆勾選的請求都會設為允許，並通知 BAT 不再詢問同類請求。這不是單次允許；變更權限模式則需另外選擇。",
+		bulk_select: "核准 {id}",
+		bulk_mode: "{id} 的後續權限模式",
+		bulk_no_mode: "不變更權限模式",
+		bulk_apply: "核准已選請求",
+		bulk_selected: "已選 {count} 筆",
+		bulk_check: "查回批次結果",
+		bulk_new: "檢視另一批請求",
+		bulk_empty: "這個範圍目前沒有待核准請求。",
+		bulk_blocked: "不可納入批次",
+		bulk_truncated: "這次只檢查前 50 個工作階段，並非完整清單。請縮小工作區範圍後再預覽。",
+		bulk_fixed: "保留原請求、選擇與操作識別。新出現的請求不會自動加入這一批。",
+		bulk_expired: "預覽已過期。請重新預覽並勾選。",
+		bulk_refused: "這筆請求在受理前被拒絕。可重新檢視另一批請求。",
+		bulk_invalid_preview: "預覽回應與所選範圍不符。",
+		bulk_invalid_result: "操作回應與原批次請求不符。",
+		bulk_all_proven: "每筆核准與所選權限變更都有接受回執；這不代表工作已完成。",
+		bulk_partial: "尚未證明全部項目成功。請查看逐筆回執與原操作。",
+		bulk_item_complete: "所選操作已接受",
+		bulk_item_incomplete: "尚未全部確認",
+		bulk_answer: "核准",
+		bulk_permissions: "權限",
+		bulk_full_prompt: "完整請求與識別資料",
 		sessions_label: "標題",
 		sessions_workspace: "工作區",
 		sessions_workspace_id: "工作區 ID",
@@ -714,6 +742,34 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		bulk_title: "Batch approvals",
+		bulk_choose_host: "Choose a host",
+		bulk_workspace: "Workspace name or ID (optional)",
+		bulk_preview: "Preview pending requests",
+		bulk_scope: "Choose one host and optionally a workspace. Only explicitly selected requests enter this batch.",
+		bulk_effect: "Each selected request is allowed with BAT instructed not to ask again for the same kind of request. This is not a one-time allowance. Changing the permission mode is a separate choice.",
+		bulk_select: "Approve {id}",
+		bulk_mode: "Subsequent permission mode for {id}",
+		bulk_no_mode: "Keep permission mode",
+		bulk_apply: "Approve selected requests",
+		bulk_selected: "{count} selected",
+		bulk_check: "Check batch outcome",
+		bulk_new: "Review another batch",
+		bulk_empty: "No pending approval requests in this scope.",
+		bulk_blocked: "Unavailable for this batch",
+		bulk_truncated: "Only the first 50 sessions were checked. This is not the complete inventory. Narrow the workspace and preview again.",
+		bulk_fixed: "The original requests, selection and operation identity are retained. Newly arriving prompts never join this batch.",
+		bulk_expired: "This preview expired. Preview again and select requests.",
+		bulk_refused: "This request was refused before admission. You can review another batch.",
+		bulk_invalid_preview: "The preview does not match the selected scope.",
+		bulk_invalid_result: "The operation response does not match the original batch request.",
+		bulk_all_proven: "Each selected approval and mode change has an acceptance receipt. This does not mean the work is complete.",
+		bulk_partial: "Not all items are proven successful. Check the individual receipts and original operations.",
+		bulk_item_complete: "Selected actions accepted",
+		bulk_item_incomplete: "Not fully confirmed",
+		bulk_answer: "Approval",
+		bulk_permissions: "Permissions",
+		bulk_full_prompt: "Full request and identity",
 		sessions_label: "Title",
 		sessions_workspace: "Workspace",
 		sessions_workspace_id: "Workspace ID",
@@ -1749,7 +1805,7 @@ var digest = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value
 var operationId$1 = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
 var previewId = (value) => typeof value === "string" && /^acpv_[0-9a-f]{32}$/.test(value);
 var previewToken = (value) => typeof value === "string" && value.length > 0 && value.length <= 24576;
-var validPreview = (doc) => record$1(doc) && record$1(doc.source) && record$1(doc.evidence) && [
+var validPreview$1 = (doc) => record$1(doc) && record$1(doc.source) && record$1(doc.evidence) && [
 	doc.relative_path,
 	doc.source.host,
 	doc.source.session_id,
@@ -1770,7 +1826,7 @@ function restore$1(value, source) {
 			"relative_path"
 		]) if (typeof value.input[key] === "string") saved.input[key] = value.input[key];
 	}
-	if (validPreview(value.preview)) saved.preview = value.preview;
+	if (validPreview$1(value.preview)) saved.preview = value.preview;
 	const intent = value.intent, request = intent?.request;
 	const usable = request?.action === "artifact.capture" && previewId(request.target?.preview_id) && previewToken(request.params?.preview_token) && digest(request.preconditions?.expected_fingerprint) && typeof intent.key === "string" && intent.key.length > 0 && intent.key.length <= 200;
 	if (usable || operationId$1(intent?.operation_id)) saved.intent = {
@@ -1862,7 +1918,7 @@ function capturePanel({ h, t, api, caps, guard, onEvents, errorBox, storageKey, 
 				guard();
 				if (ticket !== revision) return;
 				const doc = response.preview;
-				if (!validPreview(doc) || doc.source.host !== input.host || doc.source.session_id !== input.session_id || doc.relative_path !== input.relative_path) throw new Error(t("capture_invalid_preview"));
+				if (!validPreview$1(doc) || doc.source.host !== input.host || doc.source.session_id !== input.session_id || doc.relative_path !== input.relative_path) throw new Error(t("capture_invalid_preview"));
 				saved.preview = doc;
 				persist();
 				notice.replaceChildren();
@@ -2096,7 +2152,7 @@ function capturePanel({ h, t, api, caps, guard, onEvents, errorBox, storageKey, 
 var record = (value) => value && typeof value === "object" && !Array.isArray(value);
 var modeValue = (value) => ["default", "allow_all"].includes(value);
 var operationId = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
-var terminal = (operation) => [
+var terminal$1 = (operation) => [
 	"succeeded",
 	"failed",
 	"cancelled"
@@ -2215,7 +2271,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 	const another = h("button", {
 		class: "secondary",
 		onclick: () => {
-			if (!current() || busy || refreshing || readFailed || !(terminal(operation) || saved.intent?.refused) || !writable()) return;
+			if (!current() || busy || refreshing || readFailed || !(terminal$1(operation) || saved.intent?.refused) || !writable()) return;
 			saved = { mode: "default" };
 			mode.value = saved.mode;
 			operation = null;
@@ -2246,7 +2302,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 		apply.textContent = t(saved.intent ? "permissions_retry" : "permissions_apply");
 		check.hidden = !saved.intent?.operation_id;
 		check.disabled = busy || Boolean(refreshing);
-		another.hidden = !(terminal(operation) || saved.intent?.refused);
+		another.hidden = !(terminal$1(operation) || saved.intent?.refused);
 		another.disabled = busy || Boolean(refreshing) || readFailed || !writable();
 		explanation.textContent = t(saved.mode === "allow_all" ? "permissions_allow_help" : "permissions_default_help");
 		restriction.textContent = writable() ? "" : t("permissions_unavailable");
@@ -2293,6 +2349,338 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 			if (current()) update();
 		}
 	}
+	update();
+	return {
+		box,
+		update,
+		refresh
+	};
+}
+//#endregion
+//#region src/approvals.js
+var object = (value) => value && typeof value === "object" && !Array.isArray(value);
+var opId = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
+var mode = (value) => value === null || value === "default" || value === "allow_all";
+var terminal = (op) => [
+	"succeeded",
+	"failed",
+	"cancelled"
+].includes(op?.status);
+var equal = (a, b) => {
+	if (a === b) return true;
+	if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => equal(v, b[i]));
+	return object(a) && object(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal(a[k], b[k]));
+};
+var refusedBeforeAdmission = new Set([
+	"BULK_PREVIEW_INVALID",
+	"BULK_PREVIEW_EXPIRED",
+	"BULK_PREVIEW_MISMATCH",
+	"BULK_MODE_REFUSED"
+]);
+function validPreview(p) {
+	return object(p) && typeof p.host === "string" && p.host.length > 0 && (p.workspace === null || typeof p.workspace === "string") && typeof p.preview_token === "string" && p.preview_token.startsWith("bap1.") && p.preview_token.length <= 262144 && /^[0-9a-f]{64}$/.test(p.fingerprint) && Number.isFinite(p.expires_at) && equal(p.answer, {
+		permission: "allow",
+		dont_ask_again: true
+	}) && Array.isArray(p.items) && p.items.length <= 50 && new Set(p.items.map((i) => i?.item_id)).size === p.items.length && p.items.every((i) => object(i) && /^bapi_[0-9a-f]{24}$/.test(i.item_id) && i.host === p.host && typeof i.session_id === "string" && typeof i.eligible === "boolean" && (!i.eligible || object(i.prompt) && typeof i.prompt.toolUseId === "string" && Array.isArray(i.allowed_modes) && i.allowed_modes.includes(null) && i.allowed_modes.every(mode)));
+}
+function validRequest(r) {
+	return r?.action === "session.approve_pending" && typeof r.target?.host === "string" && Object.keys(r.target).length === 1 && typeof r.params?.preview_token === "string" && Object.keys(r.params).length === 2 && Array.isArray(r.params.selection) && r.params.selection.length > 0 && r.params.selection.length <= 50 && r.params.selection.every((s) => object(s) && Object.keys(s).length === 2 && /^bapi_[0-9a-f]{24}$/.test(s.item_id) && mode(s.mode)) && new Set(r.params.selection.map((s) => s.item_id)).size === r.params.selection.length && object(r.preconditions) && Object.keys(r.preconditions).length === 1 && /^[0-9a-f]{64}$/.test(r.preconditions.expected_fingerprint);
+}
+function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, storageKey }) {
+	let raw;
+	try {
+		raw = JSON.parse(localStorage.getItem(storageKey));
+	} catch {}
+	let saved = {
+		host: typeof raw?.host === "string" ? raw.host : "",
+		workspace: typeof raw?.workspace === "string" ? raw.workspace : ""
+	};
+	if (validPreview(raw?.preview) && raw.preview.host === saved.host && (raw.preview.workspace || "") === saved.workspace) saved.preview = raw.preview;
+	if (raw?.intent) saved.intent = {
+		request: validRequest(raw.intent.request) ? raw.intent.request : null,
+		key: typeof raw.intent.key === "string" && raw.intent.key.length > 0 && raw.intent.key.length <= 200 ? raw.intent.key : null,
+		operation_id: opId(raw.intent.operation_id) ? raw.intent.operation_id : null,
+		refused: refusedBeforeAdmission.has(raw.intent.refused) && !raw.intent.operation_id ? raw.intent.refused : null
+	};
+	let operation = null, busy = false, submission = null, refreshing = null, readFailed = false;
+	const selected = new Map(), controls = [];
+	if (saved.preview && !saved.intent && Array.isArray(raw?.selection)) {
+		for (const s of raw.selection) if (object(s) && saved.preview.items.some((i) => i.eligible && i.item_id === s.item_id && i.allowed_modes.includes(s.mode))) selected.set(s.item_id, s.mode);
+	}
+	const current = () => {
+		try {
+			guard();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const persist = () => {
+		guard();
+		saved.selection = [...selected].map(([item_id, mode]) => ({
+			item_id,
+			mode
+		}));
+		try {
+			localStorage.setItem(storageKey, JSON.stringify(saved));
+		} catch {}
+	};
+	const observable = () => ready() && caps()?.scopes?.includes("observe");
+	const writable = () => observable() && caps()?.scopes?.includes("operate") && caps()?.actions?.some((a) => a.action === "session.approve_pending" && a.allowed === true) && caps()?.hosts?.some((host) => host.host === (saved.intent?.request?.target.host || saved.host) && host.writes === true);
+	const host = h("select", { "aria-label": t("host") }, h("option", { value: "" }, t("bulk_choose_host")), ...(caps()?.hosts || []).map((x) => h("option", { value: x.host }, x.host)));
+	host.value = saved.host;
+	const workspace = h("input", {
+		"aria-label": t("bulk_workspace"),
+		placeholder: t("bulk_workspace"),
+		value: saved.workspace
+	});
+	const rows = h("div", { "data-approval-items": "" }), result = h("div", { "data-approval-result": "" }), status = h("div", { role: "status" });
+	const summary = h("p", { class: "muted" });
+	const previewButton = h("button", {
+		class: "secondary",
+		onclick: async () => {
+			if (!current() || busy || saved.intent || !observable() || !host.value) return;
+			saved.host = host.value;
+			saved.workspace = workspace.value.trim();
+			workspace.value = saved.workspace;
+			delete saved.preview;
+			selected.clear();
+			busy = true;
+			persist();
+			renderPreview();
+			update();
+			try {
+				const p = await api("POST", "/approval-previews", {
+					host: saved.host,
+					...saved.workspace ? { workspace: saved.workspace } : {}
+				});
+				guard();
+				if (!validPreview(p) || p.host !== saved.host || (p.workspace || "") !== saved.workspace) throw new Error(t("bulk_invalid_preview"));
+				saved.preview = p;
+				persist();
+				status.replaceChildren();
+				renderPreview();
+			} catch (e) {
+				if (current()) status.replaceChildren(errorBox(e));
+			} finally {
+				busy = false;
+				if (current()) update();
+			}
+		}
+	}, t("bulk_preview"));
+	const accept = (candidate) => {
+		guard();
+		const intent = saved.intent;
+		if (!intent || !opId(candidate?.operation_id) || !intent.request || !intent.key || candidate.actor !== caps()?.actor || candidate.idempotency_key !== intent.key || !equal({
+			action: candidate.action,
+			target: candidate.target,
+			params: candidate.params,
+			preconditions: candidate.preconditions
+		}, intent.request) || intent.operation_id && candidate.operation_id !== intent.operation_id) throw new Error(t("bulk_invalid_result"));
+		operation = candidate;
+		intent.operation_id = candidate.operation_id;
+		readFailed = false;
+		persist();
+		status.replaceChildren();
+		update();
+	};
+	const apply = h("button", {
+		class: "primary",
+		onclick: async () => {
+			if (!current() || busy || readFailed || !writable() || saved.intent?.operation_id || saved.intent?.refused) return;
+			if (!saved.intent) {
+				if (!saved.preview || saved.preview.expires_at * 1e3 <= Date.now() || !selected.size) {
+					update();
+					return;
+				}
+				const selection = saved.preview.items.filter((i) => selected.has(i.item_id)).map((i) => ({
+					item_id: i.item_id,
+					mode: selected.get(i.item_id)
+				}));
+				saved.intent = {
+					key: crypto.randomUUID(),
+					operation_id: null,
+					request: {
+						action: "session.approve_pending",
+						target: { host: saved.preview.host },
+						params: {
+							preview_token: saved.preview.preview_token,
+							selection
+						},
+						preconditions: { expected_fingerprint: saved.preview.fingerprint }
+					}
+				};
+				persist();
+			}
+			if (!saved.intent.request || !saved.intent.key) return;
+			busy = true;
+			const intent = saved.intent;
+			update();
+			submission = (async () => {
+				try {
+					const data = await api("POST", "/operations?wait=3", intent.request, intent.key);
+					guard();
+					accept(data.operation);
+				} catch (e) {
+					if (current()) {
+						if (e.status >= 400 && e.status < 500 && refusedBeforeAdmission.has(e.code)) {
+							intent.refused = e.code;
+							persist();
+						}
+						status.replaceChildren(errorBox(e));
+					}
+				} finally {
+					busy = false;
+					if (current()) update();
+				}
+			})();
+			try {
+				await submission;
+			} finally {
+				submission = null;
+			}
+		}
+	}, t("bulk_apply"));
+	const check = h("button", {
+		class: "secondary",
+		onclick: () => refresh(true).catch(() => {})
+	}, t("bulk_check"));
+	const another = h("button", {
+		class: "secondary",
+		onclick: () => {
+			if (!current() || busy || refreshing || readFailed || !(terminal(operation) || saved.intent?.refused)) return;
+			delete saved.intent;
+			delete saved.preview;
+			selected.clear();
+			operation = null;
+			persist();
+			status.replaceChildren();
+			renderPreview();
+			update();
+		}
+	}, t("bulk_new"));
+	const box = h("section", { "data-approvals": "" }, h("div", { class: "panel" }, h("div", { class: "filters" }, host, workspace, previewButton), h("p", { class: "muted" }, t("bulk_scope"))), rows, h("div", { class: "panel" }, h("p", { class: "note" }, t("bulk_effect")), summary, h("div", { class: "actions" }, apply, check, another), result, status));
+	host.onchange = workspace.oninput = () => {
+		if (!current() || busy || saved.intent) return;
+		saved.host = host.value;
+		saved.workspace = workspace.value;
+		delete saved.preview;
+		selected.clear();
+		persist();
+		renderPreview();
+		update();
+	};
+	function renderPreview() {
+		controls.length = 0;
+		rows.replaceChildren();
+		if (!saved.preview) return;
+		if (saved.preview.truncated) rows.append(h("p", { class: "note" }, t("bulk_truncated")));
+		if (!saved.preview.items.length) rows.append(h("p", { class: "panel" }, t("bulk_empty")));
+		for (const item of saved.preview.items) {
+			const choice = h("input", {
+				type: "checkbox",
+				"aria-label": t("bulk_select", { id: item.session_id })
+			});
+			const requestMode = saved.intent?.request?.params.selection.find((s) => s.item_id === item.item_id);
+			choice.checked = Boolean(requestMode) || selected.has(item.item_id);
+			const select = h("select", { "aria-label": t("bulk_mode", { id: item.session_id }) }, ...(item.allowed_modes || [null]).map((value) => h("option", { value: value || "" }, t(value === null ? "bulk_no_mode" : "permissions_" + value))));
+			select.value = requestMode?.mode || selected.get(item.item_id) || "";
+			choice.onchange = () => {
+				if (!current() || saved.intent || busy) return;
+				if (choice.checked) selected.set(item.item_id, select.value || null);
+				else selected.delete(item.item_id);
+				persist();
+				update();
+			};
+			select.onchange = () => {
+				if (!current() || saved.intent || busy) return;
+				if (selected.has(item.item_id)) selected.set(item.item_id, select.value || null);
+				persist();
+				update();
+			};
+			const warning = h("p", { class: "muted" });
+			controls.push({
+				item,
+				choice,
+				select,
+				warning
+			});
+			rows.append(h("article", {
+				class: "panel bulk-item",
+				"data-approval-item": item.item_id
+			}, h("div", { class: "row" }, choice, h("div", { class: "grow" }, h("a", {
+				class: "title",
+				href: `#/session/${encodeURIComponent(item.host)}/${encodeURIComponent(item.session_id)}`
+			}, item.session_id), h("div", { class: "muted" }, [item.host, item.agent_kind].filter(Boolean).join(" · ")))), item.eligible ? [
+				h("p", { class: "title" }, item.prompt.toolName || t("bulk_answer")),
+				h("pre", { class: "pre bulk-prompt" }, typeof item.prompt.input === "string" ? item.prompt.input : Object.keys(item.prompt.input || {}).length === 1 && typeof item.prompt.input?.command === "string" ? item.prompt.input.command : JSON.stringify(item.prompt.input ?? item.prompt, null, 2)),
+				h("details", { class: "bulk-evidence" }, h("summary", {}, t("bulk_full_prompt")), h("pre", { class: "pre bulk-prompt" }, JSON.stringify(item.prompt, null, 2))),
+				select,
+				warning
+			] : h("p", { class: "muted" }, t("bulk_blocked"), " · ", item.code || t("obs_unknown"))));
+		}
+	}
+	function update() {
+		const fixed = Boolean(saved.intent), expired = saved.preview && saved.preview.expires_at * 1e3 <= Date.now();
+		host.disabled = workspace.disabled = busy || fixed;
+		previewButton.disabled = busy || fixed || !observable() || !host.value;
+		for (const c of controls) {
+			c.choice.disabled = busy || fixed || !c.item.eligible || !writable() || expired;
+			c.select.disabled = c.choice.disabled || !c.choice.checked;
+			c.warning.textContent = c.select.value === "allow_all" ? t("permissions_allow_help") : "";
+		}
+		apply.hidden = Boolean(saved.intent?.operation_id || saved.intent?.refused);
+		apply.textContent = t(fixed ? "permissions_retry" : "bulk_apply");
+		apply.disabled = busy || readFailed || !writable() || (fixed ? !saved.intent.request || !saved.intent.key : !selected.size || expired);
+		check.hidden = !saved.intent?.operation_id;
+		check.disabled = busy || Boolean(refreshing);
+		another.hidden = !(terminal(operation) || saved.intent?.refused);
+		another.disabled = busy || Boolean(refreshing) || readFailed;
+		summary.textContent = fixed ? t(saved.intent.refused ? "bulk_refused" : "bulk_fixed") : expired ? t("bulk_expired") : t("bulk_selected", { count: selected.size });
+		result.replaceChildren();
+		if (!fixed) return;
+		result.append(h("p", {}, operation ? opStatus(operation) : t("permissions_unknown"), " ", saved.intent.operation_id ? h("a", { href: `#/op/${saved.intent.operation_id}` }, t("permissions_details")) : null));
+		if (!saved.intent.request || !saved.intent.key) result.append(h("p", { class: "error" }, t("permissions_damaged")));
+		if (!operation) return;
+		const items = operation.result?.items || operation.external_refs?.bulk_items || [];
+		result.append(h("p", { class: "muted" }, t(operation.result?.all_succeeded === true ? "bulk_all_proven" : "bulk_partial")));
+		for (const item of items) result.append(h("div", { class: "row bulk-receipt" }, h("div", { class: "grow" }, item.session_id, h("div", { class: "muted" }, t(item.complete === true ? "bulk_item_complete" : "bulk_item_incomplete"))), ...["answer", "permissions"].filter((phase) => item[phase]).map((phase) => h("span", {}, t("bulk_" + phase), ": ", opId(item[phase].operation_id) ? h("a", { href: `#/op/${item[phase].operation_id}` }, item[phase].status || t("obs_unknown")) : item[phase].status || t("obs_unknown"), item[phase].code ? ` · ${item[phase].code}` : ""))));
+	}
+	async function refresh(fresh = false) {
+		if (submission) {
+			await submission;
+			guard();
+		}
+		if (refreshing) {
+			await refreshing;
+			if (fresh) return refresh(true);
+			return;
+		}
+		if (!saved.intent?.operation_id) {
+			update();
+			return;
+		}
+		refreshing = (async () => {
+			const data = await api("GET", `/operations/${saved.intent.operation_id}`);
+			guard();
+			accept(data.operation);
+		})();
+		update();
+		try {
+			await refreshing;
+		} catch (e) {
+			if (current()) {
+				readFailed = true;
+				status.replaceChildren(errorBox(e));
+				update();
+			}
+			throw e;
+		} finally {
+			refreshing = null;
+			if (current()) update();
+		}
+	}
+	renderPreview();
 	update();
 	return {
 		box,
@@ -3235,7 +3623,7 @@ async function viewSessions(main) {
 		class: "session-project-link",
 		href: "#/projects"
 	}, t("sessions_projects")));
-	main.append(h("h1", {}, t("sessions_title")), h("p", { class: "muted" }, t("sessions_intro")), h("div", { class: "filters session-filters" }, search, hostSel, accessSel), status, h("div", { class: "session-layout" }, scope, h("section", {
+	main.append(h("h1", {}, t("sessions_title")), h("p", { class: "muted" }, t("sessions_intro")), h("div", { class: "filters session-filters" }, search, hostSel, accessSel, state.caps?.actions?.some((a) => a.action === "session.approve_pending") ? h("a", { href: "#/approvals" }, t("bulk_title")) : null), status, h("div", { class: "session-layout" }, scope, h("section", {
 		"aria-label": t("sessions_title"),
 		class: "session-results"
 	}, count, list, h("div", { class: "session-pagination" }, more, h("span", { class: "muted" }, t("sessions_page_note"))))));
@@ -6307,6 +6695,29 @@ async function viewCleanup(main, section, ident) {
 		if (["cleanup", "operation"].includes(ev.resource_type)) return refresh();
 	});
 }
+async function viewApprovals(main) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	const panel = approvalsPanel({
+		h,
+		t,
+		api,
+		caps: () => state.caps,
+		guard: () => assertView(connection),
+		ready: () => state.online && !state.nativeBusy,
+		errorBox,
+		opStatus,
+		storageKey: `batc.approvals.${connection.namespace}`
+	});
+	main.append(h("a", { href: "#/sessions" }, t("sessions_title")), h("h1", {}, t("bulk_title")), panel.box);
+	try {
+		await panel.refresh();
+	} catch {}
+	return onEvents((event) => event.resource_type === "operation" ? panel.refresh(true) : panel.update());
+}
 var NAV = [
 	["home", "nav_home"],
 	["projects", "nav_projects"],
@@ -6345,6 +6756,7 @@ async function route() {
 		item: viewWorkItem,
 		sessions: viewSessions,
 		cleanup: viewCleanup,
+		approvals: viewApprovals,
 		delivery: viewDelivery,
 		operations: viewOperations,
 		session: viewSession,

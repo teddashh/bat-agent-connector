@@ -755,7 +755,7 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             r"delivery/previews/mpv_[0-9a-f]{32}|integrations/previews/ipv_[0-9a-f]{32}|integrations/op_[0-9a-f]{32})$")).unwrap())
     } else if input.method == "POST" {
         POST.get_or_init(|| {
-            Regex::new(r"^/(?:artifact-capture-previews|cleanup-previews|operations(?:/op_[0-9a-f]{32}/(?:cancel|resume))?)$")
+            Regex::new(r"^/(?:approval-previews|artifact-capture-previews|cleanup-previews|operations(?:/op_[0-9a-f]{32}/(?:cancel|resume))?)$")
                 .unwrap()
         })
     } else {
@@ -769,6 +769,39 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             return Err("Capture preview accepts no query or operation key".into());
         }
         validate_capture_preview(input.body.as_ref())?;
+    }
+    if path == "/approval-previews" {
+        if input.path != path || input.idempotency_key.is_some() {
+            return Err("Approval preview accepts no query or operation key".into());
+        }
+        let body = input
+            .body
+            .as_ref()
+            .and_then(Value::as_object)
+            .ok_or("Approval preview needs a typed body")?;
+        if body
+            .keys()
+            .any(|key| !matches!(key.as_str(), "host" | "workspace"))
+            || !body
+                .get("host")
+                .and_then(Value::as_str)
+                .is_some_and(|host| {
+                    !host.is_empty()
+                        && host.len() <= 200
+                        && host
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+                })
+            || body.get("workspace").is_some_and(|value| {
+                !value.as_str().is_some_and(|workspace| {
+                    !workspace.is_empty()
+                        && workspace.len() <= 512
+                        && !workspace.chars().any(char::is_control)
+                })
+            })
+        {
+            return Err("Invalid approval preview scope".into());
+        }
     }
     let cleanup = path.starts_with("/cleanup-");
     let mut query_keys = std::collections::HashSet::new();
@@ -893,6 +926,42 @@ mod tests {
             body: None,
             idempotency_key: None,
         }
+    }
+
+    #[test]
+    fn approval_preview_has_a_fixed_typed_route_and_scope() {
+        let mut input = request("POST", "/approval-previews");
+        for body in [
+            serde_json::json!({"host": "demo"}),
+            serde_json::json!({"host": "demo", "workspace": "工作區 100%"}),
+        ] {
+            input.body = Some(body);
+            assert!(validate_request(&input).is_ok());
+        }
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"host": "https://other"}),
+            serde_json::json!({"host": "demo", "workspace": 1}),
+            serde_json::json!({"host": "demo", "workspace": "\n"}),
+            serde_json::json!({"host": "demo", "workspace": ""}),
+            serde_json::json!({"host": "demo", "force": true}),
+        ] {
+            input.body = Some(body);
+            assert!(validate_request(&input).is_err());
+        }
+        input.body = Some(serde_json::json!({"host": "demo"}));
+        for path in [
+            "/approval-previews?",
+            "/approval-previews?host=other",
+            "/approval-previews/other",
+        ] {
+            input.path = path.into();
+            assert!(validate_request(&input).is_err());
+        }
+        input.path = "/approval-previews".into();
+        input.idempotency_key = Some("operation-key".into());
+        assert!(validate_request(&input).is_err());
+        assert!(validate_request(&request("GET", "/approval-previews")).is_err());
     }
     fn config(endpoint: &str) -> Config {
         Config {
