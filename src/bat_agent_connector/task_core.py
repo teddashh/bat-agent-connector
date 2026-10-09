@@ -181,14 +181,23 @@ class TaskCoordinator:
             if context.admission_binding and context.admission_binding["task_id"] != task_id:
                 raise TaskControlRefused("TASK_BINDING_MISMATCH", "session task owner changed since admission")
             params = {**params, "control_version": context.effective_preconditions.get("control_version")}
+        # The original permissions command may continue only its missing frame intents.
+        prior_command_id = None
+        if context and action == "permissions":
+            prior_command_id = (context.op.get("external_refs") or {}).get("command_id")
+            if prior_command_id:
+                prior = self.journal.command_get(prior_command_id)
+                if (prior["kind"] != "permissions" or prior["task_id"] != task_id or prior["session_id"] != sid
+                        or json.loads(prior["payload"]).get("operation_id") != context.operation_id):
+                    raise TaskControlRefused("TASK_BINDING_MISMATCH", "permissions command identity changed")
         # Admission never waits behind verification. Freeze the version before any lock/await.
-        admitted = check(self.journal, task_id, host, sid, action, params.get("control_version"))
+        admitted = check(self.journal, task_id, host, sid, action, params.get("control_version"), command_id=prior_command_id)
         params = {**params, "control_version": admitted["control_version"]}
         # Pause commits independently of this lock, so it can invalidate an in-flight verifier/send.
         async with self._task_locks.setdefault(task_id, asyncio.Lock()):
-            task = check(self.journal, task_id, host, sid, action, params["control_version"])
+            task = check(self.journal, task_id, host, sid, action, params["control_version"], command_id=prior_command_id)
             async with self._lock(host, sid):
-                task = check(self.journal, task_id, host, sid, action, task["control_version"])
+                task = check(self.journal, task_id, host, sid, action, task["control_version"], command_id=prior_command_id)
                 before = await self.adapter.prepare_send(task, sid) if action == "send" else {}
                 resolved_prompt = False
                 if action == "answer" and not params.get("tool_use_id"):
@@ -211,7 +220,7 @@ class TaskCoordinator:
                     resolved_prompt = True
                 if context:
                     check_binding(context)
-                check(self.journal, task_id, host, sid, action, task["control_version"])
+                check(self.journal, task_id, host, sid, action, task["control_version"], command_id=prior_command_id)
                 key = params.get("operation_id") or "legacy:" + str(uuid.uuid4())
                 payload = {"purpose": "runtime:" + action, "control_version": task["control_version"],
                            "before": before, "operation_id": params.get("operation_id"),
@@ -241,11 +250,25 @@ class TaskCoordinator:
                 try:
                     result = await fn(self.adapter.fleet, host, sid, **params)
                 except WriteRefused:
+                    if context and action == "permissions":
+                        from .session_permissions import has_dispatched_receipt, mark_task_uncertain
+                        if guard.frames or has_dispatched_receipt(context):
+                            mark_task_uncertain(context, command)
+                        else:
+                            self.journal.command_status(command["command_id"], "rejected")
+                        raise
                     self.journal.command_status(command["command_id"], "uncertain" if guard.frames else "rejected")
                     if guard.frames:
                         self.journal.change(task_id, "uncertain")
                     raise
                 except Exception as exc:
+                    if context and action == "permissions":
+                        from .session_permissions import has_dispatched_receipt, mark_task_uncertain
+                        if guard.frames or has_dispatched_receipt(context):
+                            mark_task_uncertain(context, command)
+                        else:
+                            self.journal.command_status(command["command_id"], "rejected")
+                        raise
                     refused = (action in {"send", "answer", "interrupt"}
                                and isinstance(exc, BatError) and not isinstance(exc, AMBIGUOUS))
                     uncertain = bool(guard.frames) and not refused
@@ -339,6 +362,14 @@ class TaskCoordinator:
                             if c["status"] in {"intent", "needs_review", "uncertain"}), None)
         if pending:
             operation_id = json.loads(pending["payload"]).get("operation_id")
+            if pending["kind"] == "permissions" and operation_id and getattr(self, "operations", None):
+                from .operations import OpContext
+                from .session_permissions import mark_task_uncertain
+                op = self.operations._row(operation_id)
+                if op and op["action"] == "session.permissions":
+                    mark_task_uncertain(OpContext(self.operations, op), pending)
+                    self.operations.kick()
+                    return self.journal.get(task_id)
             if pending["kind"] == "send" and operation_id and getattr(self, "operations", None):
                 from .operations import OpContext
                 context = OpContext(self.operations, self.operations._row(operation_id))

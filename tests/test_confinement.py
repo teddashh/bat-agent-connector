@@ -201,10 +201,10 @@ async def test_a10_raise_and_deferred_raise_are_refused(fleet_factory, mock, for
     with pytest.raises(confinement.ConfinementRefused, match="CONFINEMENT_RAISE_REFUSED"):
         await lifecycle.session_set_permissions(f, "h1", "sess-claude-0001", confirm=True, force=force)
     dry = await lifecycle._raise_deferred(f, "h1", dry_run=True)
-    assert dry[0]["skipped"] == "confined"
+    assert dry[0]["code"] == "LEGACY_PERMISSION_RAISE_DISABLED"
     actual = await lifecycle._raise_deferred(f, "h1", dry_run=False)
-    assert actual[0]["error_code"] == "CONFINEMENT_RAISE_REFUSED"
-    assert registry.get("h1", "sess-claude-0001")["permission_raise_pending"] is None
+    assert actual[0]["code"] == "LEGACY_PERMISSION_RAISE_DISABLED"
+    assert registry.get("h1", "sess-claude-0001")["permission_raise_pending"] == "allow_all"
     assert not mock.perm_calls
     await f.close()
 

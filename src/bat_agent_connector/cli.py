@@ -227,7 +227,7 @@ async def _run(args) -> Any:
             return await service.session_wait(
                 fleet, args.host, args.session, args.until, args.timeout, args.require_new, after=args.after
             ), None
-        if c in {"send", "continue", "interrupt", "answer"}:
+        if c in {"send", "continue", "interrupt", "answer", "permissions"}:
             from .task_daemon import request
 
             if not args.confirm or not fleet.writes_enabled(args.host):
@@ -248,7 +248,7 @@ async def _run(args) -> Any:
             else:
                 params["mode"] = args.mode
             try:
-                out = await asyncio.to_thread(request, "session_" + c, entry="cli", timeout=40,
+                out = await asyncio.to_thread(request, "session_set_permissions" if c == "permissions" else "session_" + c, entry="cli", timeout=40,
                                               _auth_token=os.environ.get("BATC_API_TOKEN") or None, **params)
             except OSError:
                 raise WriteRefused(f"central {c} request failed; its outcome may be unknown. "
@@ -259,10 +259,6 @@ async def _run(args) -> Any:
             return await triage.sessions_triage(
                 fleet, args.host, args.workspace, args.agent, states, args.jev, not args.loaded_only
             ), r_triage
-        if c == "permissions":
-            return await lifecycle.session_set_permissions(
-                fleet, args.host, args.session, args.mode, args.confirm
-            ), None
         if c in ("relay", "fanout-plan"):
             msg = sys.stdin.read() if args.message == "-" else args.message
             brief = json.loads(args.brief) if args.brief and args.brief.lstrip().startswith("{") else args.brief
@@ -490,6 +486,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("session")
     p.add_argument("--mode", choices=["allow_all", "default"], default="allow_all")
     p.add_argument("--confirm", action="store_true")
+    p.add_argument("--key", help="reuse for retries; omitted means each call is independent")
+    p.add_argument("--control-version", type=int, help="expected owning task control version")
     p = sp.add_parser("approve-pending", help="WRITE: approve all pending permission prompts on a host")
     p.add_argument("host")
     p.add_argument("--workspace")
@@ -1348,7 +1346,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         obj, render = asyncio.run(_run(args))
         _print(obj, args.json, render)
-        return 1 if args.cmd in {"send", "continue", "interrupt", "answer"} and obj["operation_status"] in {"failed", "cancelled"} else 0
+        return 1 if args.cmd in {"send", "continue", "interrupt", "answer", "permissions"} and obj["operation_status"] in {"failed", "cancelled"} else 0
     except (BatError, ValueError, OperationError) as e:
         print(f"error: {redact(e)}", file=sys.stderr)
         return 1

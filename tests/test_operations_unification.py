@@ -1109,7 +1109,7 @@ async def test_a07_legacy_send_reuses_terminal_command_without_uncertain_task(ow
             assert task_effect_snapshot(restarted, tid) == snapshot
 
 
-@pytest.mark.parametrize("action", ["answer", "interrupt", "permissions", "relay", "deferred_raise"])
+@pytest.mark.parametrize("action", ["answer", "interrupt", "permissions", "relay"])
 async def test_a07_other_controls_refuse_pause_while_waiting_for_session_lock(owned, mock, monkeypatch, action):
     d, tid = owned
     entered = asyncio.Event()
@@ -1133,18 +1133,12 @@ async def test_a07_other_controls_refuse_pause_while_waiting_for_session_lock(ow
         elif action == "relay":
             worker = asyncio.create_task(lifecycle.session_relay(d.fleet, "h1", "instruction", session_id=SID,
                                                                 confirm=True, dry_run=False))
-        else:
-            registry.update("h1", SID, permission_raise_pending="allow_all")
-            worker = asyncio.create_task(lifecycle._raise_deferred(d.fleet, "h1", False))
         await asyncio.wait_for(entered.wait(), 5)
         paused = await d.coordinator.pause(tid)
     if action in {"answer", "interrupt"}:
         await worker
         result = d.ops.get(op["operation_id"])
         assert result["status"] == "failed" and result["error_code"] == "CONTROL_VERSION_CONFLICT"
-    elif action == "deferred_raise":
-        result = await worker
-        assert result[0]["raised"] is False and "CONTROL_VERSION_CONFLICT" in result[0]["error"]
     else:
         with pytest.raises(TaskControlRefused, match="CONTROL_VERSION_CONFLICT"):
             await worker
@@ -1157,9 +1151,12 @@ async def test_a07_approve_pending_deferred_raise_and_relay_do_not_jump_pause(ow
     d.journal.pause(tid)
     mock.states[SID]["pendingPermission"] = {"toolUseId": "permission-1", "toolName": "Bash", "input": {}}
     registry.update("h1", SID, permission_raise_pending="allow_all")
-    result = await lifecycle.approve_pending(d.fleet, "h1", confirm=True)
+    with pytest.raises(WriteRefused, match="LEGACY_PERMISSION_RAISE_DISABLED"):
+        await lifecycle.approve_pending(d.fleet, "h1", confirm=True)
+    result = await lifecycle._raise_deferred(d.fleet, "h1", False)
+    assert result[0]["code"] == "LEGACY_PERMISSION_RAISE_DISABLED"
+    assert registry.get("h1", SID)["permission_raise_pending"] == "allow_all"
     assert not writes(mock)
-    assert "TASK_PAUSED" in json.dumps(result)
     with pytest.raises(TaskControlRefused, match="TASK_PAUSED"):
         await lifecycle.session_relay(d.fleet, "h1", "a request", session_id=SID, confirm=True, dry_run=False)
     assert not writes(mock)
