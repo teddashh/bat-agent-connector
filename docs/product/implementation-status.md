@@ -8,6 +8,24 @@
 
 ## 目前續作
 
+追蹤 [#57](https://github.com/teddashh/bat-agent-connector/issues/57)，基底 main `565a7d5`（#56）。
+R01 `session.permissions` 接中央 authority，Claude／Codex 每個 setting 保存 intent／receipt，
+保留 task incarnation／control version、confinement 與 host policy；sent error／lost ACK 不以相符
+metadata 當成功證據。共用 UI 只對 positively managed 且 action／write scope 支援的 session 顯示控制，
+保存要求的 mode、key／operation，未知結果不自動換 key。Claude streaming 不排 deferred；歷史 flag
+與 legacy bulk-raise apply 停用，preview 保留。完整合約見 [session permissions](../design/session-permissions.md)。
+Canonical workflow 為 `2026-10-08.6`；最新候選 SHA、exact-head CI、peer review、merge 與 installer pin
+證據以 #57 關聯 PR 為準，不把功能清單當作 installed/live 驗收；
+[本輪交接](../handoff/2026-10-08-permissions.md) 保留實作與失敗修正脈絡。
+
+## 上一輪續作（#56 已合併）
+
+候選 `867864b75cf2cf1898ce5b5ddedcdd6308003b76` 已合併為 `565a7d57074f6628b5ef9cecec6cc9eb5b56c1e6`，
+tree 完全相同。Python 3.10–3.13 各 **2370 passed／33 skipped**；101 UI、8 state、20 Windows／21 Linux Rust、
+六組 actual-central fixtures 與 Windows／Linux unsigned packages 通過。Installer #7 已合併並 pin 此候選與
+workflow `.5`；17 mock tests 兩 Python 版本及 real-source verify-only 通過，沒有真安裝。
+收斂證據見 [#55](https://github.com/teddashh/bat-agent-connector/issues/55#issuecomment-6072185401)。
+
 追蹤 [#55](https://github.com/teddashh/bat-agent-connector/issues/55)，基底 main `0c7c8fb`。
 以下三個提交已整合到同一候選工作線；最新整組 CI、合併與 installer pin 證據見該 issue 關聯 PR。
 
@@ -21,7 +39,7 @@ UI 曾有 100 pass／1 timeout：不支援 capture 的 session 過早建立隱�
 兩個既有 MCP fixtures 已改用 caller token 並只提供一種 pending prompt，保留原 task command assertions，另驗 operation actor/binding。
 Canonical workflow 更新為 `2026-10-08.5`，Hermes／Grokbot 從同一 source 產生；installer 仍須 pin 已審完整候選，不能只比 package version。
 Desktop CI 現在也跑六組 actual-central fixtures，保存合成 UI 證據；完整交付仍依 46 項矩陣，沒有 Windows installed/live 宣稱。
-下一個 R01 contract 是 permissions 的逐 frame receipts 與 deferred identity，詳見 [mutation 盤點](../design/legacy-mutation-audit.md)。
+該輪留下的 R01 permissions 合約由上方 #57 接續；bulk approval、starts／orchestration 仍有獨立契約，詳見 [mutation 盤點](../design/legacy-mutation-audit.md)。
 
 ## 本輪收斂結果（2026-10-08 23:26 UTC）
 

@@ -2,6 +2,26 @@
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		permissions_title: "Session 權限",
+		permissions_mode: "要求的模式",
+		permissions_default: "一般權限",
+		permissions_allow_all: "全部允許",
+		permissions_apply: "套用權限",
+		permissions_check: "查回原操作",
+		permissions_new: "建立另一筆變更",
+		permissions_retry: "重試原請求",
+		permissions_details: "檢視操作與逐步回執",
+		permissions_help: "選擇要套用的權限。這裡不表示目前實際模式；主機政策與隔離限制仍然適用。",
+		permissions_default_help: "使用一般核准流程，保留需要確認的操作提示。",
+		permissions_allow_help: "略過 agent 的操作核准提示，包括寫入與命令執行。主機仍可拒絕此變更。",
+		permissions_unavailable: "需要最新 Session 資料、operate 權限，以及中央明確允許此操作與主機寫入。",
+		permissions_unknown: "結果尚未確認。原請求已保留。",
+		permissions_fixed: "保留同一筆模式、Session 與操作。部分完成或結果不明時，請先檢視回執。",
+		permissions_invalid_result: "操作回應與原權限請求不符。",
+		permissions_damaged: "已儲存的請求不完整。請先在操作紀錄確認結果。",
+		permissions_accepted: "BAT 已接受要求的設定；尚未獨立查證執行中的 agent 已套用。",
+		permissions_next_turn: "Codex 於下一輪使用這個設定。",
+		permissions_refused: "這筆請求在受理前被拒絕。可明確建立另一筆變更；原請求不會自動重試。",
 		capture_title: "擷取遠端檔案",
 		capture_host: "來源主機",
 		capture_session: "完整人工 Session ID",
@@ -637,6 +657,26 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		permissions_title: "Session permissions",
+		permissions_mode: "Requested mode",
+		permissions_default: "Normal permissions",
+		permissions_allow_all: "Allow all",
+		permissions_apply: "Apply permissions",
+		permissions_check: "Check original operation",
+		permissions_new: "Start another change",
+		permissions_retry: "Retry original request",
+		permissions_details: "View operation and step receipts",
+		permissions_help: "Choose the permissions to apply. This does not show the current mode; host policy and confinement limits still apply.",
+		permissions_default_help: "Use the normal approval flow, keeping prompts for actions that need confirmation.",
+		permissions_allow_help: "Bypass the agent's approval prompts, including file writes and command execution. The host may still refuse this change.",
+		permissions_unavailable: "Requires current session data, operate scope, and explicit central permission for this action and host writes.",
+		permissions_unknown: "The result is not yet confirmed. The original request is retained.",
+		permissions_fixed: "The mode, session and operation stay fixed. Check the receipts for partial or unknown results.",
+		permissions_invalid_result: "The operation reply does not match the original permission request.",
+		permissions_damaged: "The saved request is incomplete. Check operation history before proceeding.",
+		permissions_accepted: "BAT accepted the requested configuration; the running agent's settings have not been independently verified.",
+		permissions_next_turn: "Codex uses this setting on its next turn.",
+		permissions_refused: "This request was refused before admission. You can explicitly start another change; the original request will not retry automatically.",
 		capture_title: "Capture a remote file",
 		capture_host: "Source host",
 		capture_session: "Full manual session ID",
@@ -1513,12 +1553,12 @@ async function mountFleet(main, { h, t }) {
 }
 //#endregion
 //#region src/capture.js
-var record = (value) => value && typeof value === "object" && !Array.isArray(value);
+var record$1 = (value) => value && typeof value === "object" && !Array.isArray(value);
 var digest = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
-var operationId = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
+var operationId$1 = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
 var previewId = (value) => typeof value === "string" && /^acpv_[0-9a-f]{32}$/.test(value);
 var previewToken = (value) => typeof value === "string" && value.length > 0 && value.length <= 24576;
-var validPreview = (doc) => record(doc) && record(doc.source) && record(doc.evidence) && [
+var validPreview = (doc) => record$1(doc) && record$1(doc.source) && record$1(doc.evidence) && [
 	doc.relative_path,
 	doc.source.host,
 	doc.source.session_id,
@@ -1526,13 +1566,13 @@ var validPreview = (doc) => record(doc) && record(doc.source) && record(doc.evid
 	doc.source.repository_root,
 	doc.evidence.head_sha
 ].every((value) => typeof value === "string" && value.length > 0) && doc.source.provenance === "manual" && doc.snapshot === false && Number.isFinite(doc.expires_at) && previewId(doc.preview_id) && previewToken(doc.preview_token) && digest(doc.fingerprint) && digest(doc.evidence.digest) && Number.isSafeInteger(doc.evidence.size_bytes) && doc.evidence.size_bytes >= 0;
-function restore(value, source) {
+function restore$1(value, source) {
 	const saved = { input: {
 		...source,
 		relative_path: ""
 	} };
-	if (!record(value)) return saved;
-	if (record(value.input)) {
+	if (!record$1(value)) return saved;
+	if (record$1(value.input)) {
 		for (const key of [
 			"host",
 			"session_id",
@@ -1542,10 +1582,10 @@ function restore(value, source) {
 	if (validPreview(value.preview)) saved.preview = value.preview;
 	const intent = value.intent, request = intent?.request;
 	const usable = request?.action === "artifact.capture" && previewId(request.target?.preview_id) && previewToken(request.params?.preview_token) && digest(request.preconditions?.expected_fingerprint) && typeof intent.key === "string" && intent.key.length > 0 && intent.key.length <= 200;
-	if (usable || operationId(intent?.operation_id)) saved.intent = {
+	if (usable || operationId$1(intent?.operation_id)) saved.intent = {
 		key: usable ? intent.key : null,
 		request: usable ? request : null,
-		operation_id: operationId(intent.operation_id) ? intent.operation_id : null,
+		operation_id: operationId$1(intent.operation_id) ? intent.operation_id : null,
 		reviewed_digest: digest(intent.reviewed_digest) ? intent.reviewed_digest : saved.preview?.evidence.digest
 	};
 	return saved;
@@ -1555,7 +1595,7 @@ function capturePanel({ h, t, api, caps, guard, onEvents, errorBox, storageKey, 
 	try {
 		saved = JSON.parse(localStorage.getItem(storageKey));
 	} catch {}
-	saved = restore(saved, source);
+	saved = restore$1(saved, source);
 	let busy = false, revision = 0, disposed = false, refreshing = null;
 	const host = h("select", { "aria-label": t("capture_host") }, h("option", { value: "" }, t("capture_host")), ...(caps()?.hosts || []).map((item) => h("option", { value: item.host }, item.host)));
 	const session = h("input", {
@@ -1646,7 +1686,7 @@ function capturePanel({ h, t, api, caps, guard, onEvents, errorBox, storageKey, 
 	const accept = async (operation) => {
 		guard();
 		const intent = saved.intent;
-		if (!intent || !operationId(operation?.operation_id) || operation.action !== "artifact.capture" || intent.operation_id && intent.operation_id !== operation.operation_id || intent.request && operation.target?.preview_id !== intent.request.target.preview_id) throw new Error(t("capture_invalid_result"));
+		if (!intent || !operationId$1(operation?.operation_id) || operation.action !== "artifact.capture" || intent.operation_id && intent.operation_id !== operation.operation_id || intent.request && operation.target?.preview_id !== intent.request.target.preview_id) throw new Error(t("capture_invalid_result"));
 		saved.operation = operation;
 		saved.intent.operation_id = operation.operation_id;
 		persist();
@@ -1859,6 +1899,215 @@ function capturePanel({ h, t, api, caps, guard, onEvents, errorBox, storageKey, 
 	});
 	render();
 	return box;
+}
+//#endregion
+//#region src/permissions.js
+var record = (value) => value && typeof value === "object" && !Array.isArray(value);
+var modeValue = (value) => ["default", "allow_all"].includes(value);
+var operationId = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
+var terminal = (operation) => [
+	"succeeded",
+	"failed",
+	"cancelled"
+].includes(operation?.status);
+var admissionRefusals = new Set([
+	"TASK_PAUSED",
+	"CONTROL_VERSION_CONFLICT",
+	"PERMISSIONS_HOST_POLICY",
+	"CONFINEMENT_RAISE_REFUSED"
+]);
+function restore(value, target) {
+	const saved = { mode: modeValue(value?.mode) ? value.mode : "default" };
+	if (!record(value) || !value.intent) return saved;
+	const intent = value.intent, request = intent.request;
+	const valid = request?.action === "session.permissions" && request.target?.host === target.host && request.target?.session_id === target.session_id && modeValue(request.params?.mode) && record(request.preconditions) && Object.keys(request.preconditions).length === 0 && typeof intent.key === "string" && intent.key.length > 0 && intent.key.length <= 200;
+	saved.intent = {
+		key: valid ? intent.key : null,
+		request: valid ? {
+			action: "session.permissions",
+			target: { ...target },
+			params: { mode: request.params.mode },
+			preconditions: {}
+		} : null,
+		operation_id: operationId(intent.operation_id) ? intent.operation_id : null
+	};
+	if (valid && !saved.intent.operation_id && admissionRefusals.has(intent.refused)) saved.intent.refused = intent.refused;
+	if (valid) saved.mode = request.params.mode;
+	return saved;
+}
+function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageKey, target, session, ready }) {
+	let raw;
+	try {
+		raw = JSON.parse(localStorage.getItem(storageKey));
+	} catch {}
+	let saved = restore(raw, target), operation = null, busy = false, refreshing = null, submission = null, readFailed = false;
+	const mode = h("select", { "aria-label": t("permissions_mode") }, ...["default", "allow_all"].map((value) => h("option", { value }, t("permissions_" + value))));
+	mode.value = saved.mode;
+	const message = h("div", { role: "status" }), result = h("div", { "data-permission-result": "" });
+	const explanation = h("p", { class: "muted" }), restriction = h("p", { class: "muted" });
+	const persist = () => {
+		guard();
+		try {
+			localStorage.setItem(storageKey, JSON.stringify(saved));
+		} catch {}
+	};
+	const current = () => {
+		try {
+			guard();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const writable = () => ready() && session()?.api_access === "managed" && session()?.provenance === "connector_managed" && (caps()?.scopes || []).includes("operate") && caps()?.hosts?.some((host) => host.host === target.host && host.writes === true) && caps()?.actions?.some((action) => action.action === "session.permissions" && action.allowed === true);
+	const accept = (candidate) => {
+		guard();
+		if (!saved.intent || !operationId(candidate?.operation_id) || candidate.action !== "session.permissions" || candidate.target?.host !== target.host || candidate.target?.session_id !== target.session_id || !modeValue(candidate.params?.mode) || saved.intent.request && candidate.params.mode !== saved.intent.request.params.mode || saved.intent.key && candidate.idempotency_key !== saved.intent.key || saved.intent.operation_id && candidate.operation_id !== saved.intent.operation_id) throw new Error(t("permissions_invalid_result"));
+		operation = candidate;
+		saved.intent.operation_id = candidate.operation_id;
+		saved.mode = candidate.params.mode;
+		mode.value = saved.mode;
+		readFailed = false;
+		persist();
+		message.replaceChildren();
+		update();
+	};
+	const apply = h("button", {
+		class: "secondary",
+		onclick: async () => {
+			if (!current() || busy || readFailed || !writable() || saved.intent?.operation_id || saved.intent && (!saved.intent.request || saved.intent.refused)) return;
+			busy = true;
+			if (!saved.intent) {
+				saved.intent = {
+					key: crypto.randomUUID(),
+					request: {
+						action: "session.permissions",
+						target: { ...target },
+						params: { mode: saved.mode },
+						preconditions: {}
+					},
+					operation_id: null
+				};
+				persist();
+			}
+			const intent = saved.intent;
+			update();
+			submission = (async () => {
+				try {
+					const response = await api("POST", "/operations?wait=3", intent.request, intent.key);
+					guard();
+					if (saved.intent === intent) accept(response.operation);
+				} catch (error) {
+					if (current()) {
+						if (error.status >= 400 && error.status < 500 && admissionRefusals.has(error.code)) {
+							intent.refused = error.code;
+							persist();
+						}
+						message.replaceChildren(errorBox(error));
+					}
+				} finally {
+					busy = false;
+					if (current()) update();
+				}
+			})();
+			try {
+				await submission;
+			} finally {
+				submission = null;
+			}
+		}
+	}, t("permissions_apply"));
+	const check = h("button", {
+		class: "secondary",
+		onclick: () => refresh(true).catch(showError)
+	}, t("permissions_check"));
+	const another = h("button", {
+		class: "secondary",
+		onclick: () => {
+			if (!current() || busy || refreshing || readFailed || !(terminal(operation) || saved.intent?.refused) || !writable()) return;
+			saved = { mode: "default" };
+			mode.value = saved.mode;
+			operation = null;
+			persist();
+			message.replaceChildren();
+			update();
+		}
+	}, t("permissions_new"));
+	const box = h("details", {
+		class: "permissions",
+		"data-permissions": ""
+	}, h("summary", {}, t("permissions_title")), h("p", { class: "muted" }, t("permissions_help")), h("label", { class: "permission-mode" }, t("permissions_mode"), mode), explanation, h("div", { class: "actions" }, apply, check, another), restriction, result, message);
+	mode.addEventListener("change", () => {
+		if (!current() || saved.intent) {
+			mode.value = saved.mode;
+			return;
+		}
+		saved.mode = modeValue(mode.value) ? mode.value : "default";
+		persist();
+		update();
+	});
+	function update() {
+		const managed = session()?.api_access === "managed" && session()?.provenance === "connector_managed";
+		box.hidden = !managed;
+		mode.disabled = busy || Boolean(saved.intent);
+		apply.hidden = Boolean(saved.intent?.operation_id || saved.intent?.refused);
+		apply.disabled = busy || readFailed || !writable() || Boolean(saved.intent && !saved.intent.request);
+		apply.textContent = t(saved.intent ? "permissions_retry" : "permissions_apply");
+		check.hidden = !saved.intent?.operation_id;
+		check.disabled = busy || Boolean(refreshing);
+		another.hidden = !(terminal(operation) || saved.intent?.refused);
+		another.disabled = busy || Boolean(refreshing) || readFailed || !writable();
+		explanation.textContent = t(saved.mode === "allow_all" ? "permissions_allow_help" : "permissions_default_help");
+		restriction.textContent = writable() ? "" : t("permissions_unavailable");
+		result.replaceChildren();
+		if (saved.intent) {
+			result.append(h("p", {}, operation ? opStatus(operation) : t(saved.intent.refused ? "permissions_refused" : "permissions_unknown"), " ", saved.intent.operation_id ? h("a", { href: `#/op/${saved.intent.operation_id}` }, t("permissions_details")) : null, operation?.status_reason ? ` · ${operation.status_reason}` : ""));
+			result.append(h("p", { class: "muted" }, t("permissions_fixed")));
+			if (operation?.status === "succeeded") result.append(h("p", { class: "muted" }, t("permissions_accepted"), operation.result?.agent_kind === "codex" ? " " + t("permissions_next_turn") : ""));
+			if (!saved.intent.request && !saved.intent.operation_id) result.append(h("p", { class: "error" }, t("permissions_damaged")));
+		}
+	}
+	function showError(error) {
+		if (current()) {
+			readFailed = true;
+			message.replaceChildren(errorBox(error));
+			update();
+		}
+	}
+	async function refresh(fresh = false) {
+		if (submission) {
+			await submission;
+			guard();
+		}
+		if (refreshing) {
+			await refreshing;
+			if (fresh) return refresh(true);
+			return;
+		}
+		if (!saved.intent?.operation_id) return;
+		const intent = saved.intent;
+		refreshing = (async () => {
+			const response = await api("GET", `/operations/${intent.operation_id}`);
+			guard();
+			if (saved.intent === intent) accept(response.operation);
+		})();
+		update();
+		try {
+			await refreshing;
+		} catch (error) {
+			showError(error);
+			throw error;
+		} finally {
+			refreshing = null;
+			if (current()) update();
+		}
+	}
+	update();
+	return {
+		box,
+		update,
+		refresh
+	};
 }
 //#endregion
 //#region src/state/events.ts
@@ -3178,9 +3427,9 @@ async function viewSession(main, host, sid) {
 	}, t("interrupt"));
 	const composer = h("div", { hidden: true }, box, h("div", { class: "actions" }, send, stop, h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
 	const readonly = h("p", { class: "note" }, t("read_only_note"));
-	let capture;
-	const captureSlot = h("div");
-	const controls = h("div", { class: "panel" }, pending, readonly, composer, captureSlot, status);
+	let capture, permissions;
+	const captureSlot = h("div"), permissionsSlot = h("div");
+	const controls = h("div", { class: "panel" }, pending, readonly, composer, permissionsSlot, captureSlot, status);
 	const cps = checkpointPanel(host, sid);
 	const observations = observationPanels("session", `${host}/${sid}`, path);
 	main.append(head, controls, cps.box, h("h2", {}, t("messages")), msgs, observations.box);
@@ -3267,6 +3516,7 @@ async function viewSession(main, host, sid) {
 		pending.append(card);
 	};
 	const updateControls = () => {
+		permissions?.update();
 		send.disabled = !allowed("session.send") || sending;
 		stop.disabled = !allowed("session.interrupt");
 		for (const button of pending.querySelectorAll("[data-answer-action]")) button.disabled = !row?.pending?.toolUseId || !allowed("session.answer");
@@ -3289,6 +3539,25 @@ async function viewSession(main, host, sid) {
 		if (data.work_items?.length) head.append(linkedItems(data.work_items));
 		if (data.discovery?.length) head.append(h("details", {}, h("summary", {}, t("obs_discovery")), discoveryEvidence(data.discovery)));
 		const managed = row.api_access === "managed";
+		if (managed && row.provenance === "connector_managed" && !permissions) {
+			permissions = permissionsPanel({
+				h,
+				t,
+				api,
+				caps: () => state.caps,
+				guard: () => assertView(connection),
+				errorBox,
+				opStatus,
+				storageKey: `batc.permissions.${connection.namespace}.${JSON.stringify([host, sid])}`,
+				target: {
+					host,
+					session_id: sid
+				},
+				session: () => row,
+				ready: () => readReady
+			});
+			permissionsSlot.append(permissions.box);
+		}
 		const manualSource = row.provenance === "manual" && state.caps?.artifacts?.capture?.manual_single_file;
 		if (manualSource && !capture) {
 			capture = manualCapture(`session.${JSON.stringify([host, sid])}`, {
@@ -3323,6 +3592,7 @@ async function viewSession(main, host, sid) {
 		refreshInFlight = (async () => {
 			try {
 				await settleRefreshes([loadObservation(), loadMessages()]);
+				await permissions?.refresh(fromEvent);
 				readReady = true;
 				updateControls();
 				readError?.remove();
@@ -3350,7 +3620,11 @@ async function viewSession(main, host, sid) {
 	const reload = debounceRefresh(() => refresh(true), 500), reloadCps = debounceRefresh(cps.load, 500);
 	const off = onEvents((ev) => {
 		observations.changed(ev);
-		return settleRefreshes([observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "work_item" ? reload() : Promise.resolve(), ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve()]);
+		return settleRefreshes([
+			observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "work_item" ? reload() : Promise.resolve(),
+			ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve(),
+			ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve()
+		]);
 	});
 	return () => {
 		clearInterval(retry);

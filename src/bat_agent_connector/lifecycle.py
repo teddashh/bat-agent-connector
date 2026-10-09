@@ -129,12 +129,22 @@ async def session_set_permissions(
     _task_guard: task_control.FrameGuard | None = None,
     control_version: int | None = None,
     operation_id: str | None = None,
+    _exact_session_id: bool = False,
+    _operation_context=None,
 ) -> dict:
     """Switch a live session's permission mode (Claude: permission mode; Codex: sandbox + approval).
 
     Claude sessions are only switched while idle: a Claude query that was not launched with
     bypass cannot be raised to it in flight, and the host then closes the live query, which ends
     the running turn. Codex takes the new sandbox/approval on its next turn."""
+    if _operation_context is not None:
+        from .operations import OpContext
+        from .session_permissions import execute
+        if (not isinstance(_operation_context, OpContext) or _operation_context.operation_id != operation_id
+                or _operation_context.op["action"] != "session.permissions"
+                or _operation_context.service.context.get("fleet") is not fleet):
+            raise WriteRefused("invalid internal permission operation context")
+        return await execute(_operation_context, fleet, host, session_id, mode, _task_guard)
     _write_guard(fleet, host, confirm)
     if mode not in ("allow_all", "default"):
         raise WriteRefused("mode must be allow_all or default")
@@ -154,29 +164,10 @@ async def session_set_permissions(
         if meta is None:
             raise WriteRefused("session is not loaded on the host")
         if kind == "claude" and not force and (meta.get("isStreaming") or meta.get("streaming")):
-            if registry.get(host, sid):
-                registry.update(host, sid, permission_raise_pending=mode)
-            raise TurnInFlight(
-                "Claude turn in flight: switching mode now would end it; retry when idle "
-                "(approve_pending does this automatically)"
-            )
+            raise TurnInFlight("Claude turn in flight: wait for idle and submit a new permission operation")
         audit.check_rate(host, sid + "#perm")
-        original = registry.get(host, sid) or {}
-        o = confinement.recorded_options(original) if original.get("write_scope") == "confined" else (
-            {"permissionMode": _claude_mode(mode)} if kind == "claude" else
-            permission_options("codex", mode) or dict(CONFINED_OPTIONS["codex"]))
-        confinement.guard_permissions(host, sid, o)
-        if kind == "claude":
-            if not o.get("permissionMode"):
-                raise confinement.ConfinementRefused("CONFINEMENT_RAISE_REFUSED", "confined policy is unknown")
-            calls = [("claude:set-permission-mode", {"sessionId": sid, "mode": o["permissionMode"]})]
-        else:
-            if not all(o.get(k) for k in ("codexSandboxMode", "codexApprovalPolicy")):
-                raise confinement.ConfinementRefused("CONFINEMENT_RAISE_REFUSED", "confined policy is unknown")
-            calls = [
-                ("claude:set-codex-sandbox-mode", {"sessionId": sid, "mode": o["codexSandboxMode"]}),
-                ("claude:set-codex-approval-policy", {"sessionId": sid, "policy": o["codexApprovalPolicy"]}),
-            ]
+        o, fixed_calls = permission_configuration(host, sid, kind, mode)
+        calls = [(channel, params) for _, channel, params in fixed_calls]
         results = []
         base = {
             "actor": fleet.actor,
@@ -202,6 +193,24 @@ async def session_set_permissions(
     return {"host": host, "session_id": sid, "agent_kind": kind, "mode": mode, "calls": results, "note": note}
 
 
+def permission_configuration(host, sid, kind, mode):
+    original = registry.get(host, sid) or {}
+    options = confinement.recorded_options(original) if original.get("write_scope") == "confined" else (
+        {"permissionMode": _claude_mode(mode)} if kind == "claude" else
+        permission_options("codex", mode) or dict(CONFINED_OPTIONS["codex"]))
+    confinement.guard_permissions(host, sid, options)
+    if kind == "claude":
+        if not options.get("permissionMode"):
+            raise confinement.ConfinementRefused("CONFINEMENT_RAISE_REFUSED", "confined policy is unknown")
+        calls = [("mode", "claude:set-permission-mode", {"sessionId": sid, "mode": options["permissionMode"]})]
+    else:
+        if not all(options.get(k) for k in ("codexSandboxMode", "codexApprovalPolicy")):
+            raise confinement.ConfinementRefused("CONFINEMENT_RAISE_REFUSED", "confined policy is unknown")
+        calls = [("sandbox", "claude:set-codex-sandbox-mode", {"sessionId": sid, "mode": options["codexSandboxMode"]}),
+                 ("approval", "claude:set-codex-approval-policy", {"sessionId": sid, "policy": options["codexApprovalPolicy"]})]
+    return options, calls
+
+
 def _claude_mode(mode: str) -> str:
     return "bypassPermissions" if mode == "allow_all" else "default"
 
@@ -214,8 +223,10 @@ async def approve_pending(
     workspace: str | None = None,
     raise_to_allow_all: bool = True,
 ) -> dict:
-    """Approve every pending PERMISSION prompt on a host (not ask-user questions), then raise the
-    session to allow-all so it stops asking. Only on hosts with default_permission_mode=allow_all."""
+    """Preview pending prompts; public bulk apply is disabled before answering or raising modes.
+
+    Only the explicit internal answer-only path remains; it keeps each session's answer guards.
+    """
     from .triage import sessions_triage
 
     hc = fleet.config.host(host)
@@ -223,6 +234,10 @@ async def approve_pending(
         _write_guard(fleet, host, confirm)
     if hc.default_permission_mode != "allow_all":
         raise WriteRefused(f'host {host!r}: auto-approve needs default_permission_mode = "allow_all"')
+    if not dry_run and raise_to_allow_all:
+        from .session_permissions import PermissionsRefused
+        raise PermissionsRefused("LEGACY_PERMISSION_RAISE_DISABLED",
+                                 "bulk raises are disabled; use individual session.answer and session.permissions operations")
     tri = await sessions_triage(
         fleet, host, workspace, states=["waiting_permission"], use_jev="never", include_unloaded=False
     )
@@ -258,15 +273,6 @@ async def approve_pending(
             item.update(approved=False, error=_err(e))
             out.append(item)
             continue
-        if raise_to_allow_all:
-            try:
-                await session_set_permissions(fleet, host, row["session_id"], "allow_all", confirm=True)
-                item["raised_to_allow_all"] = True
-            except TurnInFlight:
-                item["raised_to_allow_all"] = "deferred (Claude turn in flight; raised when idle)"
-            except BatError as e:
-                item["raised_to_allow_all"] = False
-                item["raise_error"] = _err(e)
         out.append(item)
     raised = []
     if raise_to_allow_all:
@@ -275,30 +281,13 @@ async def approve_pending(
 
 
 async def _raise_deferred(fleet: Fleet, host: str, dry_run: bool) -> list[dict]:
-    """Raise orchestrated sessions whose allow-all switch was deferred because a turn was running."""
-    done = []
-    for e in registry.list_entries(host):
-        if not e.get("permission_raise_pending") or e.get("status") not in ("active", None):
-            continue
-        sid = e["session_id"]
-        if e.get("write_scope") == "confined":
-            done.append({"session_id": sid, "raised": False, "skipped": "confined",
-                         "error_code": "CONFINEMENT_RAISE_REFUSED"})
-            if not dry_run:
-                registry.update(host, sid, permission_raise_pending=None,
-                                permission_raise_refused="CONFINEMENT_RAISE_REFUSED")
-            continue
-        if dry_run:
-            done.append({"session_id": sid, "action": "would raise if idle"})
-            continue
-        try:
-            await session_set_permissions(fleet, host, sid, e["permission_raise_pending"], confirm=True)
-            done.append({"session_id": sid, "raised": True})
-        except TurnInFlight:
-            done.append({"session_id": sid, "raised": False, "reason": "still in a turn"})
-        except BatError as ex:
-            done.append({"session_id": sid, "raised": False, "error": _err(ex)})
-    return done
+    """Historical flags lack actor/incarnation; report them without adopting or applying them."""
+    return [{"session_id": e["session_id"], "raised": False, "mode": e["permission_raise_pending"],
+             "error_code": "LEGACY_PERMISSION_RAISE_DISABLED",
+             "reason": "historical flag has no durable caller/incarnation; use session.permissions",
+             "dry_run": dry_run}
+            for e in registry.list_entries(host)
+            if e.get("permission_raise_pending") and e.get("status") in ("active", None)]
 
 
 # --------------------------------------------------------------------------- failover

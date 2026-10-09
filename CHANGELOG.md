@@ -2,10 +2,16 @@
 
 ## Next release (unreleased)
 
+- Add durable `session.permissions` through HTTP, MCP, CLI and the shared browser/Tauri session controls.
+  Preserve the caller, fixed session/task binding and operation key; record each Claude/Codex setting
+  separately so partial or unknown outcomes cannot replay completed writes. Refuse a running Claude
+  turn without queuing an unbound deferred change; historical deferred flags cannot apply automatically.
+  Close legacy bulk-approval apply before any answer/raise; its dry-run preview remains available.
+
 - Route legacy send, continue and answer through the central durable actions with the caller's
   authenticated authority, exact session/prompt binding, optional operation keys and complete receipts.
   Preserve client message IDs, queue and permission-answer behavior; lost acknowledgements read back
-  the original effect. Remaining permission/start/orchestration adapters are tracked separately.
+  the original effect. Remaining bulk-approval/start/orchestration adapters are tracked separately.
 
 - Add shared browser/Tauri manual-file preview and capture. Review a remote relative path, source,
   size and digest, preserve the same capture after a lost reply or reload, then explicitly add its

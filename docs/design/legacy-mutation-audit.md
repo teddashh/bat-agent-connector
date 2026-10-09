@@ -24,7 +24,11 @@ v1/v2 是同一產品與共同功能 backlog；Tauri 是 UI／client 計畫修�
 基底 operator-profile MCP 與 CLI 的其餘 direct writes 不查 API token scopes；principal-only MCP 不註冊這些工具。
 這是待收斂的 compatibility 邊界，不能把已有低階 task gate 稱為缺失，也不能宣稱全入口已統一。
 
-## 下一片：permissions 的固定合約
+## Permissions 的固定合約
+
+本輪接續追蹤 [#57](https://github.com/teddashh/bat-agent-connector/issues/57)，實作與回復細節見
+[session-permissions.md](session-permissions.md)。以下保留接手時的需求與舊問題；新路徑不產生
+deferred flag，歷史 flag 及 legacy bulk-raise apply 在任何 BAT effect 前拒絕。
 
 `session.permissions` 使用 operate scope，target 為 host/session，params 只收 mode，preconditions 可含
 control_version。相容入口保留 confirm、local read-only/tier，使用自己的 principal；daemon 不可用時沒有

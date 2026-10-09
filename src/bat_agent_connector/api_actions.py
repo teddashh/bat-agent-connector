@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 
-from . import registry, resource_policy, service, task_control
+from . import registry, resource_policy, service, session_permissions, task_control
 from .api_auth import Principal
 from .errors import TaskControlRefused
 from .operations import ActionDef, NeedsAttention, OpContext, OperationError, OperationService
@@ -218,6 +218,7 @@ async def _interrupt(ctx: OpContext) -> dict:
 LEGACY_SESSION_METHODS = {
     "session_send": "session.send", "session_continue": "session.send",
     "session_answer": "session.answer", "session_interrupt": "session.interrupt",
+    "session_set_permissions": "session.permissions",
 }
 
 
@@ -227,7 +228,7 @@ async def legacy_session_control(ops: OperationService, principal: Principal, me
     action = LEGACY_SESSION_METHODS[method]
     fields = {"session.send": {"text", "message_id", "queue"},
               "session.answer": {"answers", "permission", "deny_message", "tool_use_id", "dont_ask_again"},
-              "session.interrupt": {"mode"}}[action]
+              "session.interrupt": {"mode"}, "session.permissions": {"mode"}}[action]
     allowed = {"host", "session_id", "confirm", "idempotency_key", "control_version"} | fields
     if set(request) - allowed:
         raise OperationError("INVALID_REQUEST", "unknown session control arguments", 422)
@@ -245,6 +246,10 @@ async def legacy_session_control(ops: OperationService, principal: Principal, me
         _validate_send(params)
     elif action == "session.answer":
         _validate_answer(params, require_prompt=False)
+    elif action == "session.permissions":
+        from .session_permissions import validate
+        params.setdefault("mode", "allow_all")
+        validate(params, {"control_version": request["control_version"]} if "control_version" in request else {})
     else:
         params.setdefault("mode", "soft")
         if not isinstance(params["mode"], str) or params["mode"] not in {"soft", "hard"}:
@@ -299,6 +304,8 @@ async def legacy_session_control(ops: OperationService, principal: Principal, me
     elif action == "session.answer":
         result = {"channel": None, "result": None, "tool_use_id": effective.get("tool_use_id"),
                   "questions": None, "answered": None, "permission": effective.get("permission"), "permission_tool": None}
+    elif action == "session.permissions":
+        result = {"mode": effective["mode"], "agent_kind": None, "calls": None, "note": None}
     else:
         result = {"mode": effective.get("mode", "soft"), "channel": None, "result": None, "note": None}
     return {"host": target["host"], "session_id": target["session_id"], **result, **(op.get("result") or {}),
@@ -314,6 +321,9 @@ async def legacy_interrupt(ops: OperationService, principal: Principal, request:
 
 SESSION_TARGET = ("host", "session_id")
 ACTIONS = [
+    ActionDef("session.permissions", "operate", "Set managed session permission configuration",
+              session_permissions.run, session_permissions.admit, SESSION_TARGET,
+              authorize_existing=session_permissions.authorize_existing),
     ActionDef("session.send", "operate", "Send a message to a connector-managed session",
               _send, _admit_send),
     ActionDef("session.answer", "operate", "Answer a managed session's pending question or permission prompt",
