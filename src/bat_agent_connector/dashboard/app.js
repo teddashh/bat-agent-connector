@@ -198,6 +198,42 @@ var STRINGS = {
 		bootstrap_separate: "一般中央連線與身分驗證持續獨立進行。本機回執不等於中央已接受操作。",
 		bootstrap_working: "正在查核本機回執…",
 		bootstrap_unproven: "無法確認回應與原請求一致。",
+		task_title: "工作執行",
+		task_unknown: "派工狀態未確認",
+		task_state_queued: "排隊中",
+		task_state_dispatching: "派工中",
+		task_state_accepted: "已受理",
+		task_state_running: "執行中",
+		task_state_waiting_permission: "等待授權",
+		task_state_quota_limited: "額度受限",
+		task_state_human_owned: "人工處理中",
+		task_state_needs_ted: "等待人工決定",
+		task_state_verifying: "驗證中",
+		task_state_done: "已完成",
+		task_state_failed: "失敗",
+		task_state_uncertain: "結果待確認",
+		task_controls: "執行控制",
+		task_pause: "暫停派工",
+		task_resume: "恢復派工",
+		task_abort: "同時中斷目前這一輪",
+		task_control_help: "暫停會停止後續派工；目前這一輪預設繼續。恢復後仍須通過原有檢查。",
+		task_control_unavailable: "需先讀取目前執行狀態，並具有 operate 權限及這項操作能力。已結束的執行不能重新派工。",
+		task_control_new: "準備另一筆控制",
+		task_control_fixed: "原請求固定使用控制版本 {version}。結果不明時只查回或重試原請求。",
+		task_control_invalid: "回應與原執行控制請求不符。",
+		task_control_refused: "執行版本已變動，原請求未受理。請重新查看狀態後準備另一筆控制。",
+		task_control_recorded: "控制操作已完成；目前執行狀態以上方最新讀回為準。這不代表工作已完成。",
+		task_paused: "已暫停派工",
+		task_dispatch_enabled: "未暫停派工",
+		task_open_session: "查看目前工作階段",
+		task_evidence: "執行識別與完整紀錄",
+		operations_more: "載入較早的操作",
+		operations_loaded: "已載入 {count} 筆操作（非總數）",
+		operations_all: "全部操作",
+		operations_empty: "這個範圍尚無操作。",
+		operations_invalid_page: "分頁回應無效；保留已載入的操作。",
+		operations_view_attention: "查看需要處理的操作",
+		operations_view_active: "查看待確認的操作",
 		bulk_title: "批次核准",
 		bulk_choose_host: "選擇主機",
 		bulk_workspace: "工作區名稱或 ID（選填）",
@@ -1154,6 +1190,42 @@ var STRINGS = {
 		bootstrap_separate: "Normal central connection and identity checks continue independently. A local receipt is not a central operation acceptance.",
 		bootstrap_working: "Reading local receipts…",
 		bootstrap_unproven: "The response could not be bound to the original request.",
+		task_title: "Execution",
+		task_unknown: "Dispatch state unknown",
+		task_state_queued: "Queued",
+		task_state_dispatching: "Dispatching",
+		task_state_accepted: "Accepted",
+		task_state_running: "Running",
+		task_state_waiting_permission: "Waiting for permission",
+		task_state_quota_limited: "Quota limited",
+		task_state_human_owned: "Human handling",
+		task_state_needs_ted: "Needs a human decision",
+		task_state_verifying: "Verifying",
+		task_state_done: "Done",
+		task_state_failed: "Failed",
+		task_state_uncertain: "Uncertain",
+		task_controls: "Execution controls",
+		task_pause: "Pause dispatch",
+		task_resume: "Resume dispatch",
+		task_abort: "Also interrupt the current turn",
+		task_control_help: "Pause stops future dispatch. The current turn continues unless you choose to interrupt it. Resume still follows the existing checks.",
+		task_control_unavailable: "Requires a current task read, operate scope and this action capability. Finished executions cannot dispatch again.",
+		task_control_new: "Prepare another control",
+		task_control_fixed: "The original request uses control version {version}. An unknown outcome keeps this request and key.",
+		task_control_invalid: "The response does not match the original task control request.",
+		task_control_refused: "The task version changed before admission. Review its current state before preparing another control.",
+		task_control_recorded: "The control operation completed. Current task state is shown in the latest read above; this does not mean the work is complete.",
+		task_paused: "Dispatch paused",
+		task_dispatch_enabled: "Dispatch not paused",
+		task_open_session: "View current session",
+		task_evidence: "Execution identity and full record",
+		operations_more: "Load earlier operations",
+		operations_loaded: "{count} operations loaded (not a total)",
+		operations_all: "All operations",
+		operations_empty: "No operations in this scope.",
+		operations_invalid_page: "Invalid page response; loaded operations are retained.",
+		operations_view_attention: "View operations needing attention",
+		operations_view_active: "View operations awaiting confirmation",
 		bulk_title: "Batch approvals",
 		bulk_choose_host: "Choose a host",
 		bulk_workspace: "Workspace name or ID (optional)",
@@ -3711,6 +3783,328 @@ function capturePanel({ h, t, api, caps, guard, onEvents, errorBox, storageKey, 
 	});
 	render();
 	return box;
+}
+//#endregion
+//#region src/task-controls.js
+var object$3 = (value) => value && typeof value === "object" && !Array.isArray(value);
+var opId$1 = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
+var version = (value) => Number.isSafeInteger(value) && value >= 0;
+var equal$4 = (a, b) => a === b || object$3(a) && object$3(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$4(a[k], b[k]));
+var terminal$5 = (op) => [
+	"succeeded",
+	"failed",
+	"cancelled"
+].includes(op?.status);
+function valid(request, id) {
+	return ["task.pause", "task.resume"].includes(request?.action) && equal$4(request.target, { task_id: id }) && object$3(request.params) && (request.action === "task.pause" ? typeof request.params.abort_current === "boolean" && Object.keys(request.params).length === 1 : Object.keys(request.params).length === 0) && object$3(request.preconditions) && Object.keys(request.preconditions).length === 1 && version(request.preconditions.control_version);
+}
+function taskControlsPanel({ h, t, api, caps, guard, ready, task, taskId, storageKey, errorBox, opStatus, onSettled }) {
+	let raw;
+	try {
+		raw = JSON.parse(localStorage.getItem(storageKey));
+	} catch {}
+	let saved = { abort: raw?.abort === true }, operation = null, submission = null, refreshing = null, busy = false, readFailed = false;
+	if (raw?.intent) {
+		const proven = valid(raw.intent.request, taskId) && typeof raw.intent.key === "string" && raw.intent.key.length > 0 && raw.intent.key.length <= 200;
+		saved.intent = {
+			request: proven ? raw.intent.request : null,
+			key: proven ? raw.intent.key : null,
+			operation_id: opId$1(raw.intent.operation_id) ? raw.intent.operation_id : null
+		};
+		if (proven && !saved.intent.operation_id && raw.intent.refused === "CONTROL_VERSION_CONFLICT") saved.intent.refused = raw.intent.refused;
+		if (proven) saved.abort = raw.intent.request.params.abort_current === true;
+	}
+	const live = () => {
+		try {
+			guard();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const persist = () => {
+		guard();
+		localStorage.setItem(storageKey, JSON.stringify(saved));
+	};
+	const observed = () => task()?.task_id === taskId && version(task()?.control_version) && [
+		true,
+		false,
+		0,
+		1
+	].includes(task()?.paused);
+	const action = () => saved.intent?.request?.action || (task()?.paused ? "task.resume" : "task.pause");
+	const permitted = () => (caps()?.scopes || []).includes("operate") && caps()?.actions?.some((a) => a.action === action() && a.allowed === true);
+	const writable = () => ready() && observed() && permitted() && (saved.intent || !["done", "failed"].includes(task()?.state));
+	const abort = h("input", {
+		type: "checkbox",
+		checked: saved.abort
+	});
+	const message = h("div", { role: "status" }), result = h("div", { "data-task-result": "" }), restriction = h("p", { class: "muted" });
+	const showError = (error) => {
+		if (live()) {
+			message.replaceChildren(errorBox(error));
+			update();
+		}
+	};
+	const accept = (candidate) => {
+		guard();
+		const intent = saved.intent;
+		if (!intent || !opId$1(candidate?.operation_id) || !["task.pause", "task.resume"].includes(candidate.action) || candidate.target?.task_id !== taskId || candidate.actor !== caps()?.actor || intent.operation_id && candidate.operation_id !== intent.operation_id || intent.key && candidate.idempotency_key !== intent.key || intent.request && !equal$4({
+			action: candidate.action,
+			target: candidate.target,
+			params: candidate.params,
+			preconditions: candidate.preconditions
+		}, intent.request)) throw new Error(t("task_control_invalid"));
+		operation = candidate;
+		intent.operation_id = candidate.operation_id;
+		persist();
+		readFailed = false;
+		message.replaceChildren();
+		update();
+	};
+	const apply = h("button", {
+		class: "secondary",
+		onclick: async () => {
+			if (!live() || busy || refreshing || readFailed || !writable() || saved.intent?.operation_id || saved.intent && (!saved.intent.request || saved.intent.refused)) return;
+			const previous = saved;
+			if (!saved.intent) saved = {
+				...saved,
+				intent: {
+					request: {
+						action: action(),
+						target: { task_id: taskId },
+						params: action() === "task.pause" ? { abort_current: saved.abort } : {},
+						preconditions: { control_version: task().control_version }
+					},
+					key: crypto.randomUUID(),
+					operation_id: null
+				}
+			};
+			try {
+				persist();
+			} catch (e) {
+				saved = previous;
+				showError(e);
+				return;
+			}
+			busy = true;
+			update();
+			const intent = saved.intent;
+			submission = (async () => {
+				try {
+					const response = await api("POST", "/operations?wait=3", intent.request, intent.key);
+					guard();
+					accept(response.operation);
+				} catch (e) {
+					if (live()) {
+						if (e.code === "CONTROL_VERSION_CONFLICT" && e.status === 409) {
+							intent.refused = e.code;
+							try {
+								persist();
+							} catch {}
+						}
+						showError(e);
+					}
+				} finally {
+					busy = false;
+					if (live()) update();
+				}
+			})();
+			try {
+				await submission;
+			} finally {
+				submission = null;
+			}
+			try {
+				await onSettled?.();
+			} catch (e) {
+				showError(e);
+			}
+		}
+	}, t("task_pause"));
+	const check = h("button", {
+		class: "secondary",
+		onclick: () => refresh(true).catch(showError)
+	}, t("permissions_check"));
+	const another = h("button", {
+		class: "secondary",
+		onclick: () => {
+			if (!live() || busy || refreshing || readFailed || !writable() || !(terminal$5(operation) || saved.intent?.refused)) return;
+			const previous = saved;
+			saved = { abort: false };
+			try {
+				persist();
+			} catch (e) {
+				saved = previous;
+				showError(e);
+				return;
+			}
+			operation = null;
+			abort.checked = false;
+			message.replaceChildren();
+			update();
+		}
+	}, t("task_control_new"));
+	const abortLabel = h("label", { class: "muted" }, abort, " ", t("task_abort"));
+	abort.onchange = () => {
+		if (!live() || saved.intent || busy) {
+			abort.checked = saved.abort;
+			return;
+		}
+		saved.abort = abort.checked;
+		try {
+			persist();
+		} catch (e) {
+			showError(e);
+		}
+		update();
+	};
+	const box = h("section", {
+		class: "panel",
+		"data-task-controls": ""
+	}, h("h2", {}, t("task_controls")), h("p", { class: "muted" }, t("task_control_help")), abortLabel, h("div", { class: "actions" }, apply, check, another), restriction, result, message);
+	function update() {
+		const fixed = Boolean(saved.intent);
+		abortLabel.hidden = action() !== "task.pause";
+		abort.disabled = fixed || busy;
+		apply.hidden = Boolean(saved.intent?.operation_id || saved.intent?.refused);
+		apply.disabled = busy || Boolean(refreshing) || readFailed || !writable() || Boolean(fixed && !saved.intent.request);
+		apply.textContent = t(fixed ? "permissions_retry" : action() === "task.pause" ? "task_pause" : "task_resume");
+		check.hidden = !saved.intent?.operation_id;
+		check.disabled = busy || Boolean(refreshing);
+		another.hidden = !(terminal$5(operation) || saved.intent?.refused);
+		another.disabled = busy || Boolean(refreshing) || readFailed || !writable();
+		restriction.textContent = writable() ? "" : t("task_control_unavailable");
+		result.replaceChildren();
+		if (fixed) {
+			result.append(h("p", {}, operation ? opStatus(operation) : t(saved.intent.refused ? "task_control_refused" : "permissions_unknown"), " ", ...saved.intent.operation_id ? [h("a", { href: `#/op/${saved.intent.operation_id}` }, t("permissions_details"))] : []), h("p", { class: "muted" }, t("task_control_fixed", { version: saved.intent.request?.preconditions.control_version ?? "?" })));
+			if (operation?.status_reason) result.append(h("p", {}, operation.status_reason));
+			if (operation?.status === "succeeded") result.append(h("p", { class: "muted" }, t("task_control_recorded")));
+			if (!saved.intent.request && !saved.intent.operation_id) result.append(h("p", { class: "error" }, t("permissions_damaged")));
+		}
+	}
+	async function refresh(fresh = false) {
+		if (submission) {
+			await submission;
+			guard();
+		}
+		if (refreshing) {
+			await refreshing;
+			if (fresh) return refresh(true);
+			return;
+		}
+		if (!saved.intent?.operation_id) return;
+		refreshing = (async () => {
+			const data = await api("GET", `/operations/${saved.intent.operation_id}`);
+			guard();
+			accept(data.operation);
+		})();
+		update();
+		try {
+			await refreshing;
+		} catch (e) {
+			readFailed = true;
+			showError(e);
+			throw e;
+		} finally {
+			refreshing = null;
+			if (live()) update();
+		}
+	}
+	update();
+	return {
+		box,
+		update,
+		refresh
+	};
+}
+//#endregion
+//#region src/operation-list.js
+function operationList({ h, t, api, guard, row, statuses }) {
+	let rows = [], before = null, pages = 1, queue = Promise.resolve(), pending = 0, failed = false;
+	const list = h("div", {
+		class: "panel",
+		"data-operation-list": ""
+	}), count = h("p", {
+		class: "muted",
+		"data-operation-count": ""
+	}), status = h("div", { role: "status" });
+	const current = () => {
+		try {
+			guard();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const update = () => {
+		more.hidden = before === null;
+		more.disabled = pending > 0 || failed;
+		refresh.disabled = pending > 0;
+	};
+	const more = h("button", {
+		class: "secondary",
+		onclick: () => load(true).catch(() => {})
+	}, t("operations_more"));
+	const refresh = h("button", {
+		class: "secondary",
+		onclick: () => load().catch(() => {})
+	}, t("refresh"));
+	const box = h("div", {}, count, list, status, h("div", { class: "actions" }, more, refresh));
+	function load(append = false) {
+		pending++;
+		update();
+		const job = queue.catch(() => {}).then(async () => {
+			guard();
+			if (append && before === null) return;
+			const first = [...list.children].find((el) => el.getBoundingClientRect().bottom >= 0);
+			const anchor = first?.dataset.operationId, top = first?.getBoundingClientRect().top;
+			let next = append ? before : null, candidate = append ? [...rows] : [], read = 0;
+			const targetPages = append ? 1 : pages;
+			for (let i = 0; i < targetPages; i++) {
+				const params = new URLSearchParams({ limit: "100" });
+				if (statuses) params.set("status", statuses);
+				if (next !== null) params.set("before", String(next));
+				const result = await api("GET", "/operations?" + params);
+				guard();
+				if (!Array.isArray(result.operations) || result.operations.some((op) => !/^op_[0-9a-f]{32}$/.test(op?.operation_id)) || result.next_before !== null && result.next_before !== void 0 && (typeof result.next_before !== "number" || !Number.isFinite(result.next_before) || result.next_before <= 0 || next !== null && result.next_before >= next || result.operations.length === 0)) throw new Error(t("operations_invalid_page"));
+				candidate.push(...result.operations);
+				read++;
+				next = result.next_before ?? null;
+				if (next === null) break;
+			}
+			guard();
+			rows = [...new Map(candidate.map((op) => [op.operation_id, op])).values()];
+			pages = append ? pages + read : read;
+			before = next;
+			failed = false;
+			list.replaceChildren(...rows.length ? rows.map((op) => {
+				const el = row(op);
+				el.dataset.operationId = op.operation_id;
+				return el;
+			}) : [h("p", { class: "muted" }, t("operations_empty"))]);
+			count.textContent = t("operations_loaded", { count: rows.length });
+			status.replaceChildren();
+			const restored = [...list.children].find((el) => el.dataset.operationId === anchor);
+			if (restored && top !== void 0) window.scrollBy(0, restored.getBoundingClientRect().top - top);
+		}).catch((error) => {
+			if (current()) {
+				failed = true;
+				status.replaceChildren(h("p", { class: "error" }, error.message));
+			}
+			throw error;
+		}).finally(() => {
+			pending--;
+			if (current()) update();
+		});
+		queue = job;
+		return job;
+	}
+	update();
+	return {
+		box,
+		load
+	};
 }
 //#endregion
 //#region src/permissions.js
@@ -6951,12 +7345,13 @@ async function viewHome(main) {
 					...hosts.hosts.filter((x) => x.stale).map((x) => h("div", { class: "row" }, h("span", { class: "light bad" }), h("div", { class: "grow" }, h("div", { class: "title" }, `${t("unreachable_hosts")}: ${x.host}`), h("div", { class: "muted" }, x.error || t("stale_reason_" + x.stale_reason))))),
 					...decide.work_items.map(workItemRow),
 					...sessions.sessions.map(sessionRow),
-					...ops.operations.map(opRow)
+					...ops.operations.map(opRow),
+					h("p", { class: "muted" }, t("operations_loaded", { count: ops.operations.length }), " · ", h("a", { href: "#/operations/attention" }, t("operations_view_attention")))
 				];
-				panel.replaceChildren(...rows.length ? rows : [h("p", { class: "muted" }, t("empty_needs_you"))]);
+				panel.replaceChildren(...rows.length > 1 ? rows : [h("p", { class: "muted" }, t("empty_needs_you")), ...rows]);
 			} else {
 				const ops = await api("GET", "/operations?status=accepted,running,waiting_checks,waiting_external&limit=50");
-				panel.replaceChildren(...ops.operations.length ? ops.operations.map(opRow) : [h("p", { class: "muted" }, t("empty_to_confirm"))]);
+				panel.replaceChildren(...ops.operations.length ? ops.operations.map(opRow) : [h("p", { class: "muted" }, t("empty_to_confirm"))], h("p", { class: "muted" }, t("operations_loaded", { count: ops.operations.length }), " · ", h("a", { href: "#/operations/active" }, t("operations_view_active"))));
 			}
 		} catch (e) {
 			panel.replaceChildren(errorBox(e));
@@ -7384,6 +7779,98 @@ function observationPanels(type, id, path) {
 			history.changed(event);
 			relations.changed(event);
 		}
+	};
+}
+async function viewTask(main, id) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	const head = h("div", { class: "panel" }), status = h("div", { role: "status" });
+	const observations = observationPanels("execution", id, `/tasks/${encodeURIComponent(id)}`);
+	let task = null, readReady = false, active = null, retry;
+	const panel = taskControlsPanel({
+		h,
+		t,
+		api,
+		caps: () => state.caps,
+		guard: () => assertView(connection),
+		taskId: id,
+		task: () => task,
+		ready: () => readReady && state.online && !state.nativeBusy,
+		storageKey: `batc.task-control.${connection.namespace}.${id}`,
+		errorBox,
+		opStatus,
+		onSettled: () => load()
+	});
+	main.append(head, status, panel.box, observations.box);
+	async function load() {
+		if (active) {
+			await active.catch(() => {});
+			assertView(connection);
+			return load();
+		}
+		active = (async () => {
+			const operation = panel.refresh(true);
+			const observation = operation.catch(() => {}).then(() => api("GET", `/tasks/${encodeURIComponent(id)}`));
+			await settleRefreshes([observation, operation]);
+			const data = await observation;
+			assertView(connection);
+			if (data.task?.task_id !== id) throw new Error(t("task_control_invalid"));
+			task = data.task;
+			head.replaceChildren(h("h1", {}, t("task_title")), h("p", {}, task.project || id), h("p", { class: "actions" }, chip(t([
+				true,
+				false,
+				0,
+				1
+			].includes(task.paused) ? task.paused ? "task_paused" : "task_dispatch_enabled" : "task_unknown")), chip([
+				"queued",
+				"dispatching",
+				"accepted",
+				"running",
+				"waiting_permission",
+				"quota_limited",
+				"human_owned",
+				"needs_ted",
+				"verifying",
+				"done",
+				"failed",
+				"uncertain"
+			].includes(task.state) ? t("task_state_" + task.state) : task.state || "?")), h("p", { class: "muted" }, task.host || "", " · ", h("code", {}, id)), ...task.host && task.session_id ? [h("p", {}, h("a", { href: `#/session/${encodeURIComponent(task.host)}/${encodeURIComponent(task.session_id)}` }, t("task_open_session")))] : [], ...state.caps?.features?.cleanup_task === true ? [h("p", {}, h("a", { href: `#/cleanup/task/${encodeURIComponent(id)}` }, t("cleanup_task_preview")))] : [], ...state.caps?.artifacts?.capture?.managed_single_file === true ? [h("p", {}, h("a", { href: `#/artifact-review/task/${encodeURIComponent(id)}` }, t("ar_open")))] : [], h("details", {}, h("summary", {}, t("task_evidence")), h("pre", { class: "pre" }, JSON.stringify(task, null, 2))));
+			status.replaceChildren();
+			readReady = true;
+			clearTimeout(retry);
+		})();
+		try {
+			await active;
+		} catch (error) {
+			if (connection.generation === generation && connection.epoch === state.epoch) {
+				readReady = false;
+				status.replaceChildren(errorBox(error));
+				clearTimeout(retry);
+				retry = setTimeout(() => load().catch(() => {}), 3e3);
+			}
+			throw error;
+		} finally {
+			active = null;
+			panel.update();
+		}
+	}
+	await load().catch(() => {});
+	const refresh = debounceRefresh(load, 500);
+	const off = onEvents((event) => {
+		observations.changed(event);
+		if ([
+			"execution",
+			"task",
+			"operation",
+			"session"
+		].includes(event.resource_type)) return refresh();
+	});
+	return () => {
+		clearTimeout(retry);
+		off();
 	};
 }
 async function viewObservedResource(main, type, id) {
@@ -8603,18 +9090,34 @@ function integrationStatus(op, act) {
 	out.append(h("p", {}, opStatus(op), " ", text, " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id)), h("div", { class: "actions" }, ...buttons));
 	return out;
 }
-async function viewOperations(main) {
-	const list = h("div", { class: "panel" });
-	main.append(h("h1", {}, t("nav_operations")), list);
-	const render = async () => {
-		try {
-			list.replaceChildren(...(await api("GET", "/operations?limit=100")).operations.map(opRow));
-		} catch (e) {
-			list.replaceChildren(errorBox(e));
-		}
+async function viewOperations(main, filter = "all") {
+	const statuses = {
+		attention: "needs_attention,uncertain",
+		active: "accepted,running,waiting_checks,waiting_external"
+	}[filter];
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
 	};
-	await render();
-	const reload = debounceRefresh(render, 500);
+	const list = operationList({
+		h,
+		t,
+		api,
+		guard: () => assertView(connection),
+		row: opRow,
+		statuses
+	});
+	main.append(h("h1", {}, t("nav_operations")), h("div", { class: "actions" }, ...[
+		["all", "operations_all"],
+		["attention", "tab_needs_you"],
+		["active", "tab_to_confirm"]
+	].map(([id, label]) => h("a", {
+		href: `#/operations/${id}`,
+		class: filter === id ? "on" : ""
+	}, t(label)))), list.box);
+	await list.load().catch(() => {});
+	const reload = debounceRefresh(() => list.load(), 500);
 	return onEvents((ev) => {
 		if (ev.resource_type === "operation") return reload();
 	});
@@ -10263,7 +10766,7 @@ async function route() {
 		settings: viewSettings,
 		"artifact-review": viewArtifactReview,
 		host: viewHostDiscovery,
-		task: (main, id) => viewObservedResource(main, "execution", id),
+		task: viewTask,
 		worktree: (main, id) => viewObservedResource(main, "worktree", id)
 	}[name] || viewHome)(main, ...rest);
 	if (mine !== generation) {

@@ -99,3 +99,28 @@ Session card 依 creation snapshot 顯示 level；OS sandbox 最多 options_conf
 ## 測試
 
 `tests/test_api_v1.py::test_dashboard_serves_only_its_static_files_with_strict_headers` 檢查白名單、轉址、HEAD、方法與 Host 限制及安全標頭。`desktop` workflow 執行共用 frontend build、generated drift、TypeScript event helpers、Rust bridge 與 Chromium Playwright fixture tests；後者涵蓋 390/768/1440 寬度、原生 transport mock、遺失回應重試、reset 草稿與離線拒絕寫入。Linux genuine packaged WebKit fixture 另驗證啟動讀取、關窗隱藏和第二次啟動恢復。這些都是 fixture／native smoke 證據，不代替 Windows 安裝或真實中央與 BAT 的完整驗收。
+
+## Task 控制與操作紀錄分頁
+
+`#/task/{id}` 以既有 panel、chip、actions 與展開證據呈現原 Task Service 執行；保留 history、relations、
+原 session、成果與 reviewed cleanup 入口。控制區提供「暫停派工／恢復派工」，暫停的「同時中斷目前這一輪」
+預設不勾選。工作項目完成／封存與 task 控制沒有連動，也不新增 Task Service 派工或 failover 策略。
+
+- 必須成功讀到同一 task ID、有效 `control_version`、paused 狀態，以及正向 action capability 和 operate
+  scope 才能準備控制。已結束的 task 不能新建控制。Authenticated operation actor 是身份來源；不捏造 Ted
+  source message 或 task capability。中央 coordinator／最後 frame gates 仍是唯一權威。
+- 草稿依 backend/principal namespace 與 task ID 分區，送出前保存完整 action/target/params/preconditions/key。
+  Replay 永遠保留原 control version；accepted ID 只讀回，不因新的 paused 狀態再送一次。First receipt 必須
+  同 actor、key 及完整 envelope。Unknown／needs_attention 保留原操作與逐步收據連結。
+- `CONTROL_VERSION_CONFLICT` 是 canonical key replay 之後、INSERT 之前的拒絕，允許使用者明確準備新控制；
+  仍先保留舊 key，不自動改用較新版本。一般 auth／4xx、transport error 並不是未受理證明。儲存失敗時不送出。
+- Event refresh 先等提交取得 identity 並查回原 operation，再重新讀 task；兄弟讀取全部 settle 才可確認 cursor。
+  任一讀取失敗停用 task 控制並保留原草稿，持續訂閱與重讀；換帳號／離開頁面不能採用舊回應。
+- 操作列表使用中央 `next_before`，載入較早頁及事件刷新都依序讀取。事件等待在途分頁後再重讀已載入頁數，
+  以 operation ID 去重並保留可見列捲動位置；失敗保留原列表。這是已載入窗口，並非跨頁原子快照或總筆數。
+  Home 的需處理／待確認區明示已載入操作筆數，連到相同 status filter 的可分頁列表。
+
+`npm run test:task-controls` 使用本 checkout 的 generated assets、real central HTTP/journal/coordinator 與
+temporary MockBat，檢查 lost reply 的原 key/version replay、暫停／恢復、明確 interrupt 的單一 BAT frame、
+受理前版本 race、逐步收據及超過 100 筆操作的分頁。Browser/native IPC mock tests 另涵蓋權限、identity、
+事件／分頁競爭、讀取失敗及雙語 390/768/1440。沒有 live host、真實 native 安裝或全產品驗收的宣稱。
