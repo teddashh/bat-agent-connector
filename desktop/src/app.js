@@ -17,7 +17,7 @@ async function activate(caps, endpoint = location.origin, reset = false) {
   state.caps = caps; state.endpoint = endpoint; state.sync = null;
   let bootstrap;
   try { bootstrap = await api("GET", "/bootstrap"); }
-  catch (e) { if (e.status !== 404) throw e; } // older contracts can observe without resumable checkpoints
+  catch (e) { if (nativeDesktop || e.status !== 404) throw e; } // only browser clients support older contracts without bootstrap
   if (bootstrap) {
     const sync = bootstrap.sync;
     if (sync?.version !== 1 || !sync.server_id || !sync.principal_id ||
@@ -1794,6 +1794,7 @@ async function viewNativeSettings(main) {
   const action = (kind, label, cls = "secondary") => {
     const button = h("button", {class: cls, disabled: true, onclick: () => {
       for (const control of controls) control.disabled = true;
+      if (kind === "connect" || kind === "enroll") leave.disabled = false;
       info.textContent = t("desktop_connecting");
       return nativeTransition(kind);
     }}, t(label));
@@ -2597,7 +2598,10 @@ async function start() {
         }
       }
     } catch (error) {
-      if (attempt === state.nativeAttempt) { disconnect(); state.connectionError = error; }
+      if (attempt === state.nativeAttempt) {
+        disconnect(); state.connectionError = error;
+        await nativeDisconnect().catch(() => {});
+      }
     } finally { if (attempt === state.nativeAttempt) state.nativeBusy = false; }
   } else {
     state.token = loadToken();

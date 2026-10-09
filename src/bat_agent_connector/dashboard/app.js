@@ -2232,7 +2232,7 @@ async function activate(caps, endpoint = location.origin, reset = false) {
 	try {
 		bootstrap = await api("GET", "/bootstrap");
 	} catch (e) {
-		if (e.status !== 404) throw e;
+		if (nativeDesktop || e.status !== 404) throw e;
 	}
 	if (bootstrap) {
 		const sync = bootstrap.sync;
@@ -4759,6 +4759,7 @@ async function viewNativeSettings(main) {
 			disabled: true,
 			onclick: () => {
 				for (const control of controls) control.disabled = true;
+				if (kind === "connect" || kind === "enroll") leave.disabled = false;
 				info.textContent = t("desktop_connecting");
 				return nativeTransition(kind);
 			}
@@ -5984,6 +5985,7 @@ async function start() {
 			if (attempt === state.nativeAttempt) {
 				disconnect();
 				state.connectionError = error;
+				await nativeDisconnect().catch(() => {});
 			}
 		} finally {
 			if (attempt === state.nativeAttempt) state.nativeBusy = false;
