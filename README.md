@@ -130,7 +130,7 @@ notification on every reconnect.
 |---|---|---|
 | read (always) | - | `hosts_list`, `host_status`, `workspaces_list`, `sessions_list`, `session_read`, `session_wait`, `worktree_status`, `session_worktree_status`, `sessions_triage`, `quota_sessions`, `session_policy`, `work_status`, `work_result`, `work_events` |
 | write | per host `writes = true` | `session_send`, `session_continue`, `session_interrupt`, `session_answer`, `session_set_permissions`, `approve_pending`, `session_relay` |
-| orchestrate | per host `writes = true` **and** `orchestrate = true` | `session_start`, `worktree_merge`, `worktree_remove`, `session_failover`, `session_record_verification`, `session_cleanup`, `fanout_plan_session`, `fanout_from_plan`, `work_submit`, `work_pause`, `work_resume`, `work_mark_stage` |
+| orchestrate | per host `writes = true` **and** `orchestrate = true` | `session_start`, `worktree_merge`, `session_failover`, `session_record_verification`, `session_cleanup`, `fanout_plan_session`, `fanout_from_plan`, `work_submit`, `work_pause`, `work_resume`, `work_mark_stage` |
 
 Write and orchestrate tools are not even registered unless enabled, need `confirm=true` on every call, are rate
 limited, and are appended to an audit log (`~/.local/state/bat-agent-connector/audit.jsonl`, message bodies only as a
@@ -164,12 +164,14 @@ Task-owned sends, answers, interrupts and permission changes pass the same coord
 `TASK_PAUSED`, `TASK_VERIFYING` and `TASK_COMMAND_PENDING` mean stop and read `work_status`, never jump the queue
 with force or continue. `CONTROL_VERSION_CONFLICT` requires reading the changed state. A second daemon, even with
 a different `--db`, returns `OWNER_CONFLICT` with the existing owner; clients use that owner. This is
-[operations unification](docs/design/operations-unification.md). The first Part B slice also routes MCP
-`session_interrupt` and CLI `interrupt` through the existing daemon. MCP needs `BATC_API_TOKEN`; CLI uses it
+[operations unification](docs/design/operations-unification.md). MCP `session_send`, `session_continue`,
+`session_answer`, `session_interrupt` and their CLI commands now use the existing daemon. MCP needs `BATC_API_TOKEN`; CLI uses it
 when set, otherwise its local admin token. Both keep confirmation and host write tiers. Add `--key` (MCP:
 `idempotency_key`) to deduplicate retries; omitting it creates a distinct operation each time. Keep the returned
 operation ID after an unknown reply and read it with `batc op ID` / `operation_get`; neither adapter resends
-automatically or starts another daemon. Other legacy operations and task no-key projection remain Part B.
+automatically or starts another daemon. Message IDs identify BAT prompts, separately from operation keys.
+An omitted answer prompt ID is bound once at admission; retries cannot target a newer prompt. Permissions,
+bulk approval, starts, orchestration and task no-key projection remain later Part B work.
 
 Every task is one Goose session on Opus 5.5. The `goose-session` recipe prompt tells Goose to split the work
 once, to aim for an executor mix of Grok 4.7 : Codex : Opus 5.5 = 4:2:1, and to give no new work to a model
@@ -350,13 +352,13 @@ batc resource-cleanup history --original-id cp_EXAMPLE
 | `session_wait(host, session_id, until=attention, timeout_s=120, require_new=false, after=null)` | Waits for turn end / question / permission request / error. `after=<turn_marker>` (from `session_send` / `session_relay`) correlates Claude's echo and reports accepted/running/terminal phase; a stale idle state does not count. BAT Codex uses a weaker timestamp fallback because it does not echo `clientMessageId`. |
 | `worktree_status(host, workspace?)` | Worktree sessions: branch, source branch, merged kind, diff stats. |
 | `session_worktree_status(host, session_id, include_diff?)` | Same for one session plus dirty files and main-checkout state. |
-| `session_send(host, session_id, text, confirm, message_id?, queue?)` | Sends a message; client-resumes an unloaded session first; idempotent by `message_id`. |
+| `session_send(host, session_id, text, confirm, message_id?, queue?)` | Sends through a central operation; client-resumes an unloaded session first. Use `idempotency_key` for operation retries; `message_id` identifies the BAT prompt. |
 | `session_continue(host, session_id, confirm, text="continue")` | Nudge. |
 | `session_interrupt(host, session_id, mode=soft\|hard, confirm)` | Soft = Claude interrupt-turn, hard = abort (Codex always hard). The session is kept. |
 | `session_answer(host, session_id, confirm, answers? \| permission?)` | Answers a pending ask-user question or permission prompt. |
 | `session_start(host, workspace, agent, confirm, prompt?, model?, use_worktree=true)` | Starts a session (by default in a new worktree; BAT picks the branch `bat/worktree-<id>`). Per-host cap. |
 | `worktree_merge(host, session_id, confirm)` | Merges only into a main checkout inside a managed root, and only when provably conflict-free and clean; otherwise reports why. |
-| `worktree_remove(host, session_id, confirm, delete_branch=false, ...)` | Removes the worktree folder; keeps the branch by default; refuses on dirty/unmerged work unless told. |
+| `worktree_remove(host, session_id, confirm, delete_branch=false, ...)` | Disabled compatibility entrypoint (`LEGACY_WORKTREE_REMOVE_DISABLED`). Use reviewed `cleanup_preview` → `cleanup_apply` to check every consumer and retain receipts. |
 | `sessions_triage(host?, workspace?, agent?, states?, use_jev=auto, include_unloaded=true)` | Classifies each session: `quota_exhausted`, `rate_limited_transient`, `waiting_permission`, `waiting_question`, `working`, `done_idle`, `error_other`, `unknown`, with `source` (pattern/jev), confidence, evidence line and reset time. |
 | `quota_sessions(host?)` | Shortcut: Claude sessions stopped by a usage quota. |
 | `session_set_permissions(host, session_id, mode, confirm)` | `allow_all` (host must allow it) or `default`. Claude sessions are only switched while idle (switching mid-turn would end the turn); Codex applies it from its next turn. |
@@ -388,7 +390,8 @@ batc answer box1 1a2b3c4d --answer "Which database?=postgres" --confirm
 batc fanout PLAN.md                                   # dry run: split into task prompts
 batc fanout PLAN.md --start --host box1 --workspace api --confirm
 batc merge box1 1a2b3c4d --confirm
-batc remove-worktree box1 1a2b3c4d --confirm
+# Inspect reviewed cleanup before applying a fixed preview
+batc resource-cleanup preview --host box1
 # lifecycle
 batc policy box1                                      # mutation table; `batc policy box1 1a2b3c4d` explains one session
 batc triage box1 --state quota_exhausted --state waiting_permission
