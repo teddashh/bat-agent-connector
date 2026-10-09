@@ -39,6 +39,12 @@ Kit's content-based binding across inventory/index and effective SSH config inpu
 effect and publication; do not label old readiness with a newly computed binding. External SSH Include
 changes remain explicit limitations until observed by the port; do not claim a complete SSH transaction.
 
+Windows configuration binding expands existing 8.3 path components like the reviewed Kit's
+Windows PowerShell/.NET `GetFullPath`, including parents of an absent user SSH file. It uses
+`GetLongPathNameW` without resolving reparse targets or adding a verbatim path prefix. The
+Windows test runs the copied read-only Kit binding oracle against explicit short paths and
+compares both exact synthetic preimages and digests; Linux checks alone do not prove this parity.
+
 Profile records accept only the reviewed Kit/BAT keys: `id`, `name`, `type`, `createdAt`, `updatedAt`,
 `remoteHost`, `remotePort`, `remoteProfileId`, `remoteProfileName` and `remoteFingerprint`.
 Unlike the historical PowerShell object check, the Rust port rejects unknown per-profile fields,

@@ -6,9 +6,22 @@ use std::path::Path;
 mod support;
 use support::Fixture;
 
-#[test]
-fn default_binding_matches_powershell_bytes_and_utf16_path_lengths_without_writes() {
-    let fixture = Fixture::new();
+fn expected_root(fixture: &Fixture) -> std::path::PathBuf {
+    // Independent expected existing root: the final path of this synthetic
+    // directory expands 8.3 aliases. Production deliberately does not use
+    // canonicalize because arbitrary configured paths can contain reparse points.
+    #[cfg(windows)]
+    let root = {
+        let canonical = fixture.0.canonicalize().unwrap();
+        std::path::PathBuf::from(canonical.to_str().unwrap().strip_prefix(r"\\?\").unwrap())
+    };
+    #[cfg(not(windows))]
+    let root = fixture.0.clone();
+    root
+}
+
+fn binding_preimage(fixture: &Fixture) -> String {
+    let root = expected_root(fixture);
     let mut expected = String::from("desktop-configuration-v1\n");
     for relative in [
         "kit/fleet-inventory.json",
@@ -19,7 +32,7 @@ fn default_binding_matches_powershell_bytes_and_utf16_path_lengths_without_write
         // Windows PathBuf::join preserves embedded forward slashes. Normalize
         // lexical components like .NET GetFullPath, without canonicalizing the
         // deliberately absent user SSH path (or adding a verbatim prefix).
-        let path: std::path::PathBuf = fixture.0.join(relative).components().collect();
+        let path: std::path::PathBuf = root.join(relative).components().collect();
         let full = path.to_str().unwrap();
         expected.push_str(&format!("{}:{full}:", full.encode_utf16().count()));
         if path.exists() {
@@ -31,6 +44,13 @@ fn default_binding_matches_powershell_bytes_and_utf16_path_lengths_without_write
             expected.push_str("absent\n");
         }
     }
+    expected
+}
+
+#[test]
+fn default_binding_matches_powershell_bytes_and_utf16_path_lengths_without_writes() {
+    let fixture = Fixture::new();
+    let expected = binding_preimage(&fixture);
     let before = std::fs::read(fixture.0.join("kit/fleet-inventory.json")).unwrap();
     let configuration = fixture.load();
     assert_eq!(configuration.binding(), digest(expected.as_bytes()));
@@ -116,8 +136,9 @@ fn bom_is_parsed_but_still_changes_binding_and_oversized_or_malformed_data_refus
 #[test]
 fn data_directory_rechecks_migration_and_refuses_file_instead_of_directory() {
     let fixture = Fixture::new();
-    let old = fixture.0.join("org.tonyq.better-agent-terminal");
-    let new = fixture.0.join("BetterAgentTerminal");
+    let root = expected_root(&fixture);
+    let old = root.join("org.tonyq.better-agent-terminal");
+    let new = root.join("BetterAgentTerminal");
     assert_eq!(data_directory(&fixture.0).unwrap(), new);
     assert!(!new.exists());
     std::fs::create_dir(&old).unwrap();
@@ -149,6 +170,7 @@ fn missing_required_files_refuse_and_normalized_default_path_needs_no_alternate_
 #[cfg(windows)]
 #[test]
 fn actual_system_powershell_binding_matches_normalized_native_paths() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
     use std::{
         io::Read,
         process::{Child, Command, Stdio},
@@ -162,6 +184,17 @@ fn actual_system_powershell_binding_matches_normalized_native_paths() {
         }
     }
     let fixture = Fixture::new();
+    let short_root = {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        let input: Vec<u16> = fixture.0.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut output = vec![0u16; 32768];
+        let count =
+            unsafe { GetShortPathNameW(input.as_ptr(), output.as_mut_ptr(), output.len() as u32) }
+                as usize;
+        assert!(count > 0 && count < output.len());
+        std::path::PathBuf::from(std::ffi::OsString::from_wide(&output[..count]))
+    };
     let script = fixture.0.join("configuration-binding.ps1");
     std::fs::write(
         &script,
@@ -177,7 +210,17 @@ fn actual_system_powershell_binding_matches_normalized_native_paths() {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, b"# synthetic user configuration\r\n").unwrap();
         }
-        let configuration = fixture.load();
+        let configuration = Configuration::load(
+            Paths::new(
+                &short_root.join("kit"),
+                &short_root.join("使用者🦀"),
+                None,
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(configuration.binding(), fixture.load().binding());
         let mut child = OwnedChild(
             Command::new(&powershell)
                 .args([
@@ -188,7 +231,7 @@ fn actual_system_powershell_binding_matches_normalized_native_paths() {
                     "-File",
                 ])
                 .arg(&script)
-                .env("BAT_FLEET_BINDING_FIXTURE", &fixture.0)
+                .env("BAT_FLEET_BINDING_FIXTURE", &short_root)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -216,12 +259,21 @@ fn actual_system_powershell_binding_matches_normalized_native_paths() {
             .stdout
             .take()
             .unwrap()
-            .take(1024)
+            .take(32_769)
             .read_to_end(&mut output)
             .unwrap();
-        assert!(output.len() < 1024);
+        assert!(output.len() <= 32_768);
+        let response: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let preimage = STANDARD
+            .decode(response["preimage_base64"].as_str().unwrap())
+            .unwrap();
+        let preimage = String::from_utf8(preimage).unwrap();
+        assert_eq!(digest(preimage.as_bytes()), response["binding"]);
+        // Diagnostic input is exclusively this temporary fixture. A failed oracle
+        // identifies the path/length/content divergence rather than just two hashes.
+        assert_eq!(preimage, binding_preimage(&fixture));
         assert_eq!(
-            String::from_utf8(output).unwrap().trim(),
+            response["binding"].as_str().unwrap(),
             configuration.binding()
         );
         configuration.verify_current().unwrap();
