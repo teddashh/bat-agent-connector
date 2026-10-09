@@ -13,10 +13,13 @@ function Get-FleetDesktopBinding([string]$inventoryPath,[string]$profileIndexPat
         $text+='present:'+ $digest+"`n"
       } else { $text+="absent`n" }
     }
+    $script:fixtureBindingPreimage=$text
     return ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))).Replace('-','').ToLowerInvariant()
   } finally { $hash.Dispose() }
 }
 
 $kitRoot=Join-Path $env:BAT_FLEET_BINDING_FIXTURE 'kit'
 $env:USERPROFILE=Join-Path $env:BAT_FLEET_BINDING_FIXTURE ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('5L2/55So6ICF8J+mgA==')))
-Get-FleetDesktopBinding (Join-Path $kitRoot 'fleet-inventory.json') (Join-Path $kitRoot 'bat-profiles/index.json') $kitRoot
+$binding=Get-FleetDesktopBinding (Join-Path $kitRoot 'fleet-inventory.json') (Join-Path $kitRoot 'bat-profiles/index.json') $kitRoot
+# Base64 keeps Windows PowerShell's console code page out of the Unicode oracle.
+@{binding=$binding;preimage_base64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script:fixtureBindingPreimage))} | ConvertTo-Json -Compress
