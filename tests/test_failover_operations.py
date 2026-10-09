@@ -516,3 +516,33 @@ async def test_managed_root_failover_does_not_block_a_fresh_independent_worktree
     with pytest.raises(ResourceReadOnly, match='FAILOVER_SHARED_CARRIER'):
         resource_policy.check_grant(shared, 'h1', 'claude:start-session', {'sessionId': 'new-shared'})
     await daemon.fleet.close()
+
+
+@pytest.mark.parametrize('changed', ['successor_owner', 'successor_permissions', 'source_owner'])
+async def test_proven_unsent_rollback_never_overwrites_newer_registry_binding(daemon, mock, monkeypatch, changed):
+    from bat_agent_connector import confinement
+    original = confinement.guard_start_frame
+    newer = None
+    async def moved(*args, **kwargs):
+        nonlocal newer
+        await original(*args, **kwargs)
+        successor = next(r for r in registry.list_entries('h1') if r.get('failover_of') == SID)
+        if changed == 'successor_owner':
+            registry.update('h1', successor['session_id'], task_id='new-task', role='lead')
+        elif changed == 'successor_permissions':
+            registry.update('h1', successor['session_id'], agent_params={'sandboxMode': 'workspace-write', 'approvalPolicy': 'on-request'})
+        else:
+            registry.update('h1', SID, task_id='new-owner', role='lead')
+        newer = {'source': registry.get('h1', SID), 'successor': registry.get('h1', successor['session_id'])}
+    monkeypatch.setattr(confinement, 'guard_start_frame', moved)
+    out = await create(daemon)
+    assert out['status'] == 'failed' and not api.write_frames(mock), out
+    successor = registry.get('h1', newer['successor']['session_id'])
+    assert successor['status'] == 'starting' and successor['start_sent'] is False
+    assert successor['failover_fence'] == newer['successor']['failover_fence']
+    assert successor.get('task_id') == newer['successor'].get('task_id')
+    for key in ('status', 'task_id', 'role', 'failover_fence', 'superseded_by'):
+        assert registry.get('h1', SID).get(key) == newer['source'].get(key)
+    for key in ('role', 'agent_params', 'cwd'):
+        assert successor.get(key) == newer['successor'].get(key)
+    await daemon.fleet.close()

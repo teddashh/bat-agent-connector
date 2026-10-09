@@ -417,7 +417,7 @@ def reserve(host: str, entry: dict, max_active: int, replaces: str | None = None
     return None
 
 
-def rollback_failover(host, session_id, *, fence):
+def rollback_failover(host, session_id, *, fence, predecessor_expected, successor_expected):
     """Release only this call's positively unsent successor and predecessor fence."""
     p = registry_path()
     with _locked(p):
@@ -429,7 +429,9 @@ def rollback_failover(host, session_id, *, fence):
                 or row.get('failover_fence') != fence or old.get('failover_fence') != fence
                 or row.get('start_operation_id') != fence['operation_id']
                 or row.get('created_at') != fence['successor_created_at']
-                or old.get('created_at') != fence['source_created_at']):
+                or old.get('created_at') != fence['source_created_at']
+                or any(row.get(k) != v for k, v in successor_expected.items())
+                or any(old.get(k) != v for k, v in predecessor_expected.items())):
             return False
         row.update(status='failed', updated_at=time.time(), failover_fence=None)
         old['failover_fence'] = None

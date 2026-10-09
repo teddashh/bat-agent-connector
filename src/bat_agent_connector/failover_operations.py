@@ -546,7 +546,16 @@ async def run(ctx):
         for plan in plans:
             row = registry.get(ctx.target['host'], plan.get('session_id')) or {}
             if row.get('start_sent') is False and isinstance(row.get('failover_fence'), dict):
-                registry.rollback_failover(ctx.target['host'], row['session_id'], fence=row['failover_fence'])
+                old = {**plan['registry'], 'failover_fence': row['failover_fence']}
+                if plan['replaces']:
+                    old.update(status='superseded', superseded_by=plan['session_id'])
+                successor = {'status': 'starting', 'task_id': None, 'role': None, 'cwd': plan['cwd'],
+                    'workspace_id': plan['workspace_id'], 'agent_preset': plan['preset'], 'write_scope': plan['write_scope'],
+                    'worktree_path': plan['cwd'] if plan['same_worktree'] else None,
+                    'branch': plan['branch'] if plan['same_worktree'] else None,
+                    **registry_permission_fields(plan['permission_options'])}
+                registry.rollback_failover(ctx.target['host'], row['session_id'], fence=row['failover_fence'],
+                                           predecessor_expected=old, successor_expected=successor)
         raise
     out = {'host': ctx.target['host'], **chosen, 'failovers': results, 'count': len(results), 'dry_run': False}
     if ctx.target.get('session_id') and results:
