@@ -13,8 +13,8 @@ served = api.served
 
 LEGACY = {"hosts_list", "sessions_list", "session_send", "session_continue",
           "session_interrupt", "session_answer", "session_set_permissions",
-          "session_cleanup", "worktree_merge", "worktree_remove"}
-CENTRAL_ORCHESTRATION = {"session_relay", "session_failover", "fanout_plan_session", "fanout_from_plan",
+          "session_cleanup", "worktree_remove"}
+CENTRAL_ORCHESTRATION = {"worktree_merge", "session_relay", "session_failover", "fanout_plan_session", "fanout_from_plan",
                          "session_record_verification"}
 TASK_WRITES = {"work_submit", "work_pause", "work_resume", "work_mark_stage"}
 
@@ -68,6 +68,7 @@ async def test_observe_only_agent_can_read_but_cannot_submit_or_bypass_operation
                 "action": action, "target": target, "params": params, "idempotency_key": action, "confirm": True})
         assert "Unknown tool" in await call(server, "session_send", {})
         for name, args in [
+            ("worktree_merge", {"host": "h1", "session_id": api.MANUAL}),
             ("session_relay", {"host": "h1", "session_id": api.MANUAL, "message": "refused"}),
             ("session_failover", {"host": "h1", "session_id": api.MANUAL}),
             ("fanout_plan_session", {"host": "h1", "workspace": "ws-1", "message": "refused"}),

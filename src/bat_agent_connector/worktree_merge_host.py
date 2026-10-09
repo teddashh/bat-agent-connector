@@ -19,7 +19,8 @@ def git(path, *args, codes=(0,)):
     env.update(GIT_OPTIONAL_LOCKS='0', GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null', GIT_TERMINAL_PROMPT='0')
     # Files avoid unbounded communicate() allocations; no data is stored in either carrier.
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        p = subprocess.Popen(['git',  # noqa: S603, S607 - fixed argv, no shell '--no-optional-locks', '-c', 'core.hooksPath=/dev/null',
+        p = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            ['git', '--no-optional-locks', '-c', 'core.hooksPath=/dev/null',  # noqa: S607 - host Git
             '-c', 'core.fsmonitor=false', '-c', 'gc.auto=0', '-C', path, *args],
             env=env, stdout=out, stderr=err)  # noqa: S603, S607 - fixed argv, no shell
         try:
@@ -61,6 +62,19 @@ def identity(path, roots):
             'directory': [s.st_dev, s.st_ino], 'common_directory': [c.st_dev, c.st_ino]}
 
 
+def no_repository_programs(path):
+    # Git status can execute clean/process filters while hashing same-size edits.
+    # Refuse them before status rather than invoking repository-provided commands.
+    _, configured = git(path, 'config', '--get-regexp', r'^filter\..*\.(clean|process)$', codes=(0, 1))
+    if configured.strip():  # including empty/multiline definitions; never parse shell commands
+        raise ValueError('MERGE_GIT_UNAVAILABLE')
+    # Nested submodule status could run an independently configured filter.
+    # This bounded contract does not recurse into arbitrary repository configs.
+    entries = git(path, 'ls-files', '--stage', '-z')[1]
+    if any(entry.startswith('160000 ') for entry in entries.split('\0')):
+        raise ValueError('MERGE_GIT_UNAVAILABLE')
+
+
 def observe(req):
     roots = req['roots']
     if not isinstance(roots, list) or not roots or len(roots) > 100:
@@ -71,13 +85,24 @@ def observe(req):
     before = [identity(p, roots) for p in paths]
     if paths[0] == paths[1] or before[0]['common_dir'] != before[1]['common_dir'] or before[0]['branch'] == before[1]['branch']:
         raise ValueError('MERGE_GIT_BINDING_CHANGED')
+    # BAT's native merge uses the main checkout recorded in its worktree state.
+    # A workspace opened on another linked worktree is not that destination.
+    registrations = git(paths[0], 'worktree', 'list', '--porcelain', '-z')[1]
+    worktrees = [part[9:] for part in registrations.split('\0') if part.startswith('worktree ')]
+    if (not worktrees or worktrees[0] != paths[1] or paths[0] not in worktrees
+            or any(not any(p == r or p.startswith(r.rstrip('/') + '/') for r in paths) for p in worktrees)):
+        raise ValueError('MERGE_GIT_BINDING_CHANGED')
+    for p in paths:
+        no_repository_programs(p)
     clean = [git(p, 'status', '--porcelain=v1', '-z', '--untracked-files=all')[1] == '' for p in paths]
     ahead = git(paths[0], 'merge-base', '--is-ancestor', before[1]['head'], before[0]['head'], codes=(0, 1))[0] == 0
     merged = git(paths[0], 'merge-base', '--is-ancestor', before[0]['head'], before[1]['head'], codes=(0, 1))[0] == 0
-    if [identity(p, roots) for p in paths] != before:
+    if ([identity(p, roots) for p in paths] != before
+            or git(paths[0], 'worktree', 'list', '--porcelain', '-z')[1] != registrations):
         raise ValueError('MERGE_GIT_BINDING_CHANGED')
     return {'version': 1, 'source': {**before[0], 'clean': clean[0]},
-            'destination': {**before[1], 'clean': clean[1]}, 'kind': 'merged' if merged else 'ahead' if ahead else 'diverged'}
+            'destination': {**before[1], 'clean': clean[1]}, 'registered_paths': worktrees,
+            'kind': 'merged' if merged else 'ahead' if ahead else 'diverged'}
 
 
 def main():

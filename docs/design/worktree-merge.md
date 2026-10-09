@@ -27,9 +27,14 @@ prompt、未決 command / external effect。兩端都必須是 managed root 下�
 managed binding 得出的 paths/roots，沒有 caller shell / command、fallback transport。
 Git 使用固定 argv、sanitized environment、禁用 hooks/fsmonitor/optional locks，逐一檢查
 process exit / timeout / output bounds；直接讀取 status，不使用 shell pipeline。
+在 status 前拒絕 effective repository clean/process filter commands 與 submodule/gitlink；
+Git 即使只是 status 也可能為同大小的編輯執行 clean filter。此限制不修改 repository config。
 `git:status=[]` **不能**證明 clean，因 pinned BAT read wrapper 也用空陣列表示失敗。
 helper before/after identity 必須一致；source 與 destination 的 common directory 必須相同，
 HEAD/branch 與 BAT 固定讀取一致，status 成功且無 tracked/untracked changes。
+Destination 必須是 Git registration 的 main checkout；其他 linked worktree 若不在兩個
+保留 carrier roots 之下，因 shared common-directory 消費者範圍不明確而拒絕。registration
+清單亦固定並在每個 frame 前重查，不把 linked checkout 誤當 BAT 的 merge destination。
 
 這是受管理 writer 的最終 frame 檢查，不是對任意本機／同 UID process 的原子 filesystem
 snapshot。Pinned BAT merge 沒有 SHA/CAS；外部 unmanaged process 不遵守 Connector fences。
