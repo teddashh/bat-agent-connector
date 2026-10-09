@@ -71,21 +71,17 @@ pub struct Updates {
 }
 
 fn key(config: &serde_json::Value) -> Result<String, String> {
-    if config.get("requireSignedVersion").and_then(|v| v.as_bool()) != Some(true)
-        || [
-            "dangerousInsecureTransportProtocol",
-            "dangerousAcceptInvalidCerts",
-            "dangerousAcceptInvalidHostnames",
-        ]
-        .iter()
-        .any(|k| config.get(k).and_then(|v| v.as_bool()) == Some(true))
+    let config: tauri_plugin_updater::Config =
+        serde_json::from_value(config.clone()).map_err(|_| "UPDATE_CONFIGURATION_INVALID")?;
+    if !config.require_signed_version
+        || config.dangerous_insecure_transport_protocol
+        || config.dangerous_accept_invalid_certs
+        || config.dangerous_accept_invalid_hostnames
+        || config.allow_downgrades
     {
         return Err("UPDATE_CONFIGURATION_INVALID".into());
     }
-    let value = config
-        .get("pubkey")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+    let value = &config.pubkey;
     if value.is_empty() {
         return Err("UPDATE_SIGNING_NOT_CONFIGURED".into());
     }
@@ -241,6 +237,11 @@ impl Updates {
         Ok(view)
     }
 
+    /// Durable installer uncertainty also fences launches after a refused Quit.
+    pub fn keep_fleet_stopped(&self) -> bool {
+        !matches!(read_intent(&self.directory, &self.version), Ok(None))
+    }
+
     fn ready(&self) -> Result<(), String> {
         if !self.supported {
             return Err("UPDATE_PLATFORM_UNSUPPORTED".into());
@@ -290,9 +291,16 @@ impl Updates {
             .map_err(|_| "UPDATE_CONFIGURATION_INVALID")?;
         self.phase("checking", None)?;
         let result = tokio::time::timeout(Duration::from_secs(35), updater.check()).await;
+        self.finish_check(match result {
+            Ok(Ok(update)) => Ok(update),
+            _ => Err(()),
+        })
+    }
+
+    fn finish_check(&self, result: Result<Option<Update>, ()>) -> Result<Status, String> {
         let update = match result {
-            Ok(Ok(update)) => update,
-            _ => {
+            Ok(update) => update,
+            Err(()) => {
                 self.phase("check_failed", Some("UPDATE_CHECK_FAILED".into()))?;
                 return self.status();
             }
@@ -467,6 +475,155 @@ impl Updates {
 mod tests {
     use super::*;
 
+    // The real updater verifies ephemeral signatures against a bounded loopback peer.
+    // No private key, production feed request or installer invocation is involved.
+    struct Peer(tokio::task::JoinHandle<()>);
+
+    impl Drop for Peer {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    async fn download_fixture(
+        tampered: bool,
+        signed_version: Option<&str>,
+    ) -> (Updates, tempfile::TempDir, Peer) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let keys = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let public =
+            base64::engine::general_purpose::STANDARD.encode(keys.pk.to_box().unwrap().to_string());
+        let payload = b"fixture bytes that must never be executed";
+        let comment = signed_version.map_or("timestamp:1".into(), |version| {
+            format!("timestamp:1\tfile:fixture.exe\tversion:{version}")
+        });
+        let signature = minisign::sign(
+            Some(&keys.pk),
+            &keys.sk,
+            payload.as_slice(),
+            Some(&comment),
+            None,
+        )
+        .unwrap();
+        let signature = base64::engine::general_purpose::STANDARD.encode(signature.to_string());
+        let feed = serde_json::json!({
+            "version": "2.0.0",
+            "platforms": {TARGET: {
+                "url": "https://github.com/teddashh/bat-agent-connector/releases/download/v2.0.0/fixture.exe",
+                "signature": signature
+            }},
+            "bat_dashboard": {"api_version":1,"contract_version":CONTRACT,
+                "source_sha":"a".repeat(40),"workflow_version":"2026-10-08.10"}
+        }).to_string();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = Peer(tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") && request.len() < 8192 {
+                    match tokio::time::timeout(Duration::from_secs(2), socket.read_u8()).await {
+                        Ok(Ok(byte)) => request.push(byte),
+                        _ => break,
+                    }
+                }
+                let body = if request.starts_with(b"GET /feed ") {
+                    feed.as_bytes()
+                } else if tampered {
+                    b"different bytes"
+                } else {
+                    payload.as_slice()
+                };
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                if socket.write_all(header.as_bytes()).await.is_ok() {
+                    let _ = socket.write_all(body).await;
+                }
+            }
+        }));
+        let config = serde_json::json!({"pubkey":public,"requireSignedVersion":true});
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context
+            .config_mut()
+            .plugins
+            .0
+            .insert("updater".into(), config.clone());
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .build(context)
+            .unwrap();
+        let update = app
+            .updater_builder()
+            .endpoints(vec![format!("http://{address}/feed").parse().unwrap()])
+            .unwrap()
+            .target(TARGET)
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .version_comparator(|_, _| true)
+            .build()
+            .unwrap()
+            .check()
+            .await
+            .unwrap()
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut updates = Updates::new(directory.path().into(), "0.1.0".into(), config);
+        updates.supported = true;
+        updates.finish_check(Ok(Some(update))).unwrap();
+        // Only the test-owned download transport changes; signature validation stays official.
+        updates
+            .pending
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .update
+            .download_url = format!("http://{address}/payload").parse().unwrap();
+        (updates, directory, peer)
+    }
+
+    #[tokio::test]
+    async fn verified_download_survives_failed_recheck_and_restores_install_review() {
+        let (updates, _directory, peer) = download_fixture(false, Some("2.0.0")).await;
+        let id = updates.status().unwrap().candidate.unwrap().candidate_id;
+        assert_eq!(updates.download(&id).await.unwrap().phase, "verified");
+        assert_eq!(updates.finish_check(Err(())).unwrap().phase, "check_failed");
+        drop(peer); // Recovery uses the same verified bytes without another request.
+        assert_eq!(updates.download(&id).await.unwrap().phase, "verified");
+        assert!(updates.begin_install("different-candidate").is_err());
+        updates.begin_install(&id).unwrap();
+        assert_eq!(updates.status().unwrap().phase, "stopping_fleet");
+        assert!(!updates.install_returned().unwrap());
+        assert_eq!(updates.status().unwrap().phase, "verified");
+    }
+
+    #[tokio::test]
+    async fn tampered_or_relabelled_artifacts_never_become_installable() {
+        for (tampered, version) in [(true, Some("2.0.0")), (false, Some("1.0.0")), (false, None)] {
+            let (updates, _directory, _peer) = download_fixture(tampered, version).await;
+            let id = updates.status().unwrap().candidate.unwrap().candidate_id;
+            let view = updates.download(&id).await.unwrap();
+            assert_eq!(view.phase, "download_failed");
+            assert_eq!(
+                view.code.as_deref(),
+                Some("UPDATE_SIGNATURE_OR_DOWNLOAD_FAILED")
+            );
+            assert!(updates
+                .pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .bytes
+                .is_none());
+            assert_eq!(
+                updates.begin_install(&id).unwrap_err(),
+                "UPDATE_DOWNLOAD_REQUIRED"
+            );
+        }
+    }
+
     fn intent() -> Intent {
         Intent {
             schema: 1,
@@ -501,6 +658,18 @@ mod tests {
         assert!(key(&serde_json::json!({"pubkey":"bad", "requireSignedVersion":true})).is_err());
         assert!(key(&serde_json::json!({"pubkey":"", "requireSignedVersion":false})).is_err());
         assert!(key(&serde_json::json!({"pubkey":"", "requireSignedVersion":true, "dangerousAcceptInvalidCerts":true})).is_err());
+        for flag in [
+            "dangerous-insecure-transport-protocol",
+            "dangerous-accept-invalid-certs",
+            "dangerous-accept-invalid-hostnames",
+            "allow-downgrades",
+        ] {
+            assert_eq!(
+                key(&serde_json::json!({"pubkey":"", "requireSignedVersion":true, flag:true}))
+                    .unwrap_err(),
+                "UPDATE_CONFIGURATION_INVALID"
+            );
+        }
     }
 
     #[test]
@@ -532,10 +701,13 @@ mod tests {
         assert!(write_intent(&path, &intent()).is_err());
         let updates = Updates::new(path.clone(), "0.1.0".into(), serde_json::Value::Null);
         let view = updates.status().unwrap();
+        assert!(updates.keep_fleet_stopped());
         assert_eq!(view.phase, "installation_unknown");
         assert_eq!(view.installation.unwrap().to_version, "0.2.0");
         // A new binary version is its own future update epoch. The original receipt remains immutable.
         assert!(read_intent(&path, "0.2.0").unwrap().is_none());
+        let next = Updates::new(path.clone(), "0.2.0".into(), serde_json::Value::Null);
+        assert!(!next.keep_fleet_stopped());
         assert!(read_intent(&path, "0.1.0").unwrap().is_some());
     }
 
@@ -545,7 +717,31 @@ mod tests {
         let path = marker_path(dir.path(), "0.1.0");
         std::fs::write(&path, b"{").unwrap();
         assert!(read_intent(dir.path(), "0.1.0").is_err());
+        let updates = Updates::new(dir.path().into(), "0.1.0".into(), serde_json::Value::Null);
+        assert!(updates.keep_fleet_stopped());
         assert!(write_intent(dir.path(), &intent()).is_err());
         assert_eq!(std::fs::read(path).unwrap(), b"{");
+    }
+
+    #[test]
+    fn refused_quit_preserves_pending_and_corrupt_installer_launch_fences() {
+        for receipt in [
+            None,
+            Some(serde_json::to_vec(&intent()).unwrap()),
+            Some(b"{".to_vec()),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            if let Some(bytes) = &receipt {
+                std::fs::write(marker_path(dir.path(), "0.1.0"), bytes).unwrap();
+            }
+            // Reopen the desktop, then simulate the shared refusal path after Quit fails.
+            let updates = Updates::new(dir.path().into(), "0.1.0".into(), serde_json::Value::Null);
+            let control = crate::fleet_control::Control::new(dir.path().join("fleet.json"));
+            let old_request = control.ticket();
+            control.set_stopping(true);
+            crate::restore_fleet_after_refusal(&updates, &control);
+            assert_eq!(control.ticket().verify().is_err(), receipt.is_some());
+            assert!(old_request.verify().is_err()); // No queued request is revived after refusal.
+        }
     }
 }

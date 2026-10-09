@@ -78,9 +78,8 @@ async fn desktop_update(
             .unwrap_or_else(|_| Err("UPDATE_INSTALLATION_UNSETTLED".into()));
             // A returned failure before the durable intent is safe to review again. Once
             // the installer may have run, keep local launches fenced until restart/readback.
-            if matches!(state.install_returned(), Ok(false)) {
-                control.set_stopping(false);
-            }
+            let _ = state.install_returned();
+            restore_fleet_after_refusal(&state, &control);
             app.state::<QuitState>().0.store(false, Ordering::SeqCst);
             result?;
             state.status()
@@ -390,6 +389,9 @@ fn show(app: &tauri::AppHandle) {
 
 #[derive(Default)]
 struct QuitState(std::sync::atomic::AtomicBool);
+fn restore_fleet_after_refusal(updates: &updates::Updates, control: &fleet_control::Control) {
+    control.set_stopping(updates.keep_fleet_stopped());
+}
 fn quit(app: &tauri::AppHandle) {
     use std::sync::atomic::Ordering;
     if app.state::<QuitState>().0.swap(true, Ordering::SeqCst) {
@@ -429,7 +431,7 @@ fn quit(app: &tauri::AppHandle) {
         match result {
             Ok(()) => {}
             Err(code) => {
-                control.set_stopping(false);
+                restore_fleet_after_refusal(&app.state::<Arc<updates::Updates>>(), &control);
                 app.state::<QuitState>().0.store(false, Ordering::SeqCst);
                 show(&app);
                 app.dialog().message(format!("Fleet shutdown was not confirmed ({code}). Dashboard remains open; read Fleet status before retrying. / 尚未確認 Fleet 已停止，程式仍保持開啟。請先檢視 Fleet 狀態。"))
@@ -542,10 +544,7 @@ fn main() {
                     .cloned()
                     .unwrap_or_default(),
             ));
-            let update_pending = updates
-                .status()
-                .map(|s| s.installation.is_some())
-                .unwrap_or(true);
+            let update_pending = updates.keep_fleet_stopped();
             app.manage(updates);
             let fleet_path = login_path
                 .clone()

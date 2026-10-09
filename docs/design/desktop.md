@@ -54,7 +54,7 @@ All commands retain the main-window/local-origin checks. Only one connection/pro
 
 Verification covers loopback HTTP and injected native vault/prompt lifecycle scenarios, shared browser/native IPC fixtures, and responsive English/zh-TW screens. Windows-only dialog adapter tests inject the native dialog return, without opening a dialog or using a real credential store. Windows native compilation/packaging belongs to exact-head CI; interactive dialog, real Credential Manager persistence across Windows logins and installed acceptance are separate evidence, not inferred from these mocks. macOS protected storage and Linux protected storage are not implemented.
 
-The app works without BAT installed. Configured Windows installations use the [native Fleet controls](desktop-fleet-native.md) for independent connection/window choices, reviewed BAT launch, and explicit monitor/Startup migration. Native attachments use the bounded file adapter described below. Signed updates remain a separate release lane. Missing configuration and credentials remain visible in the app.
+The app works without BAT installed. Configured Windows installations use the [native Fleet controls](desktop-fleet-native.md) for independent connection/window choices, reviewed BAT launch, and explicit monitor/Startup migration. Native attachments use the bounded file adapter described below. Explicit signed updates use the [native update contract](desktop-updates.md); default validation packages keep signing disabled. Missing configuration and credentials remain visible in the app.
 
 ## Native boundary
 
@@ -122,7 +122,7 @@ xvfb-run -a -s '-screen 0 1440x900x24' dbus-run-session -- node tests/native-smo
 
 The app bundles frontend assets and does not require Vite in production. Closing the main window hides it; the tray offers Open Dashboard and Quit Dashboard. Explicit Quit uses [normal exact-owner Fleet shutdown](desktop-fleet-native.md), refuses unconfirmed/foreign ownership, and leaves central work and manual BAT windows alone. The single-instance plugin focuses the current desktop window; Fleet separately enforces the shared cross-session ownership protocol. Fixed native supervisor/login CLI dispatch precedes the WebView and single-instance plugin. Native and PowerShell backends are mutually exclusive under the same ownership guards.
 
-The desktop workflow packages unsigned Windows NSIS and Linux deb artifacts for validation. Signing, updater channels, macOS packages and release publishing are not configured.
+The desktop workflow packages unsigned Windows NSIS and Linux deb artifacts for validation. The separate signed-candidate workflow verifies updater signatures and writes a fixed feed without publishing it; signing identities, Authenticode and installed acceptance remain operator release setup. macOS packages are not configured.
 
 ## Evidence and remaining acceptance
 

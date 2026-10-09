@@ -36,6 +36,8 @@ futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+tauri = { version = "=2.12.1", features = ["test"] }
+minisign = "=0.10.0"
 tempfile = "=3.27.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
