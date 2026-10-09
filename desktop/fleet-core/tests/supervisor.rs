@@ -283,6 +283,12 @@ fn fixture() -> (Fixture, Shared, Runtime) {
 fn fixture_with_routes<R: RouteProbe + Send + 'static>(
     routes: Arc<R>,
 ) -> (Fixture, Shared, Supervisor<FakeEffects, FakeProbes, R>) {
+    fixture_with_roaming(routes, Path::to_path_buf)
+}
+fn fixture_with_roaming<R: RouteProbe + Send + 'static>(
+    routes: Arc<R>,
+    roaming: impl FnOnce(&Path) -> std::path::PathBuf,
+) -> (Fixture, Shared, Supervisor<FakeEffects, FakeProbes, R>) {
     let fixture = Fixture::new();
     let path = fixture.0.join("kit/fleet-inventory.json");
     let mut doc: serde_json::Value =
@@ -301,7 +307,7 @@ fn fixture_with_routes<R: RouteProbe + Send + 'static>(
     let runtime = Supervisor::start(
         Options {
             configuration: fixture.paths(),
-            roaming: fixture.0.clone(),
+            roaming: roaming(&fixture.0),
             quit_file: fixture.0.join("quit.json"),
         },
         FakeEffects(shared.clone()),
@@ -423,6 +429,37 @@ async fn exact_publication_independent_readiness_and_clean_quit() {
     assert!(!f.0.join("BetterAgentTerminal/fleet-monitor.json").exists());
     assert!(!f.0.join("quit.json").exists());
     assert_eq!(s.lock().unwrap().stops.len(), 5);
+}
+#[tokio::test]
+async fn equivalent_roaming_paths_preserve_owned_children_and_restart_receipts() {
+    // Production selection expands lexical paths (and Windows 8.3 aliases).
+    // Ownership scans must identify those same paths instead of treating our
+    // own children as orphans or missing the existing monitor on restart.
+    let (f, shared, mut runtime) = fixture_with_roaming(Arc::new(FakeRoutes), |path| {
+        std::fs::create_dir(path.join("roaming-entry")).unwrap();
+        path.join("roaming-entry/..")
+    });
+    let first = advance(&mut runtime, 1000).await;
+    assert_eq!(
+        first.entries.iter().filter(|e| e.level == "ready").count(),
+        5
+    );
+    assert!(shared.lock().unwrap().stops.is_empty());
+    let mut runtime = restart(&f, &shared, runtime);
+    let recovered = advance(&mut runtime, 2000).await;
+    assert_eq!(
+        recovered
+            .entries
+            .iter()
+            .filter(|e| e.level == "ready")
+            .count(),
+        5
+    );
+    assert_eq!(shared.lock().unwrap().stops.len(), 5);
+    assert_eq!(shared.lock().unwrap().launches.len(), 10);
+    assert_eq!(runtime.shutdown(3000).await.unwrap().lifecycle, "stopped");
+    assert_eq!(shared.lock().unwrap().stops.len(), 10);
+    assert!(!f.0.join("BetterAgentTerminal/fleet-monitor.json").exists());
 }
 #[tokio::test]
 async fn slow_bat_workers_do_not_block_connector_or_exceed_three_bat_slots() {
