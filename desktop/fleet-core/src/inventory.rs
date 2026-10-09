@@ -465,9 +465,23 @@ impl ProfileIndex {
             )?;
             let mut ids = HashSet::new();
             for profile in array(&document["profiles"], false)? {
-                if !profile.is_object() {
-                    return Err(INVALID);
-                }
+                // Reviewed Kit/BAT profile record schema. Root extension fields do not
+                // grant permission to introduce new per-profile behavior.
+                fields(
+                    profile,
+                    &["id"],
+                    &[
+                        "name",
+                        "type",
+                        "createdAt",
+                        "updatedAt",
+                        "remoteHost",
+                        "remotePort",
+                        "remoteProfileId",
+                        "remoteProfileName",
+                        "remoteFingerprint",
+                    ],
+                )?;
                 unique(&mut ids, text(&profile["id"])?)?;
             }
             for active in array(&document["activeProfileIds"], false)? {
