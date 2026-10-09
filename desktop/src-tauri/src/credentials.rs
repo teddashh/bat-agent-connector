@@ -97,6 +97,7 @@ pub enum Locale {
 
 pub trait Vault: Send + Sync {
     fn supported(&self) -> bool;
+    fn source(&self) -> &'static str;
     fn read(&self, binding: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String>;
     fn write(&self, binding: &str, bytes: &[u8]) -> Result<(), String>;
     fn remove(&self, binding: &str) -> Result<(), String>;
@@ -110,19 +111,26 @@ pub trait Vault: Send + Sync {
 }
 pub struct OsVault;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+#[path = "credentials_macos.rs"]
+mod macos;
+
+#[cfg(not(any(windows, target_os = "macos")))]
 impl Vault for OsVault {
     fn supported(&self) -> bool {
         false
+    }
+    fn source(&self) -> &'static str {
+        "native_memory"
     }
     fn read(&self, _: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
         Ok(None)
     }
     fn write(&self, _: &str, _: &[u8]) -> Result<(), String> {
-        Err("Protected enrollment requires Windows".into())
+        Err("Protected enrollment is unavailable on this platform".into())
     }
     fn remove(&self, _: &str) -> Result<(), String> {
-        Err("Protected enrollment requires Windows".into())
+        Err("Protected enrollment is unavailable on this platform".into())
     }
     fn prompt(
         &self,
@@ -131,7 +139,7 @@ impl Vault for OsVault {
         _: Locale,
         _: isize,
     ) -> Result<Option<Zeroizing<String>>, String> {
-        Err("Protected enrollment requires Windows".into())
+        Err("Protected enrollment is unavailable on this platform".into())
     }
 }
 
@@ -178,6 +186,9 @@ mod windows {
     impl Vault for OsVault {
         fn supported(&self) -> bool {
             true
+        }
+        fn source(&self) -> &'static str {
+            "windows_credential_manager"
         }
         fn read(&self, binding: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
             let name = target(binding)?;

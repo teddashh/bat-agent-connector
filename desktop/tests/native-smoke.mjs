@@ -1,7 +1,7 @@
 // Linux native smoke, against an in-process HTTP fixture only. No BAT or real central credentials.
 // Run a built app under xvfb-run + dbus-run-session. Pass the release binary for packaging CI.
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn, execFileSync } from "node:child_process";
@@ -10,13 +10,16 @@ import assert from "node:assert/strict";
 
 const root = await mkdtemp(join(tmpdir(), "batc-native-smoke-"));
 const evidence = process.env.BATC_NATIVE_SMOKE_ARTIFACT_DIR
-  ? resolve(process.env.BATC_NATIVE_SMOKE_ARTIFACT_DIR) : root;
+  ? resolve(process.env.BATC_NATIVE_SMOKE_ARTIFACT_DIR) : resolve("test-results/native-smoke");
+let app;
+let server;
+try {
 await mkdir(evidence, {recursive: true});
 const caps = {actor: "fixture-operator", scopes: ["observe"], api_version: 1, contract_version: "2026-10-08",
   features: {}, actions: [], hosts: []};
 const checkpoint = {cursor: 0, token: "fixture-checkpoint"};
 const paths = [];
-const server = createServer((req, res) => {
+server = createServer((req, res) => {
   assert.equal(req.method, "GET");
   assert.equal(req.headers.authorization, "Bearer fixture-native-token");
   const path = new URL(req.url, "http://127.0.0.1").pathname;
@@ -35,10 +38,9 @@ await writeFile(join(configDir, "central.json"), JSON.stringify({endpoint: `http
 const env = {...process.env, XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"),
   BATC_DESKTOP_TOKEN: "fixture-native-token", WEBKIT_DISABLE_DMABUF_RENDERER: "1"};
 const binary = resolve(process.argv[2] || "src-tauri/target/debug/better-agent-dashboard");
-const app = spawn(binary, [], {env, stdio: ["ignore", "pipe", "pipe"]});
+app = spawn(binary, [], {env, stdio: ["ignore", "pipe", "pipe"]});
 let diagnostic = "";
 app.stderr.on("data", data => { diagnostic += data; });
-try {
   for (let tries = 0; tries < 100 && !paths.includes("/api/v1/events"); tries++) {
     if (app.exitCode !== null) throw new Error(`Native app exited: ${diagnostic}`);
     await delay(100);
@@ -81,6 +83,15 @@ x.XFlush(d)
   await writeFile(join(evidence, "result.json"), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result));
 } finally {
-  app.kill();
-  server.close();
+  if (app && app.exitCode === null && app.signalCode === null) {
+    app.kill();
+    for (let count = 0; count < 50 && app.exitCode === null && app.signalCode === null; count++) await delay(100);
+    if (app.exitCode === null && app.signalCode === null) {
+      app.kill("SIGKILL");
+      await new Promise(resolve => app.once("exit", resolve));
+    }
+  }
+  server?.closeAllConnections();
+  server?.close();
+  await rm(root, {recursive: true, force: true});
 }

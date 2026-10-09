@@ -27,15 +27,15 @@ The client loads `central.json` from the platform app configuration directory:
 | --- | --- |
 | Windows | `%APPDATA%\io.betteragent.dashboard\central.json` |
 | Linux | `$XDG_CONFIG_HOME/io.betteragent.dashboard/central.json`, normally `~/.config/io.betteragent.dashboard/central.json` |
-| macOS | `~/Library/Application Support/io.betteragent.dashboard/central.json` (not validated on macOS) |
+| macOS | `~/Library/Application Support/io.betteragent.dashboard/central.json` |
 
 Copy `desktop/central.example.json` there and set the actual expected API actor. Endpoint selection is trusted native configuration, never a WebView-supplied URL. The Connection screen displays the fixed configuration path; **Reload configuration** rereads only that file and disconnects before a new identity can be used. Invalid or missing configuration can be repaired without restarting. This configuration is client-local and is not another fleet host inventory. The endpoint must be an HTTPS origin or a literal loopback HTTP origin for an already authenticated SSH tunnel. The app neither creates that tunnel nor authenticates its ownership. Preserve the existing tunnel's host verification; an arbitrary loopback listener is not proof of central identity.
 
-On Windows, choose **Add credential** and enter the Connector API token in the native Windows dialog's Password field. The expected actor is fixed by configuration. Rust verifies the candidate before saving it in Windows Credential Manager for this Windows user on this computer. **Replace credential** explicitly establishes a replacement identity; cancellation, verification failure or save failure retains the previous stored record and active connection. **Forget saved credential** removes only this configuration's local record and disconnects; it does not revoke the central token or erase drafts/operation IDs. Enrollment and storage never use a WebView password field, browser storage, clipboard-reading API, shell or subprocess.
+On Windows or macOS, choose **Add credential** and enter the Connector API token in the native secure dialog. The expected actor is fixed by configuration. Rust verifies the candidate before saving it in Windows Credential Manager or the local macOS Keychain for this OS user. **Replace credential** explicitly establishes a replacement identity; cancellation, verification failure or save failure retains the previous stored record and active connection. **Forget saved credential** removes only this configuration's local record and disconnects; it does not revoke the central token or erase drafts/operation IDs. Enrollment and storage never use a WebView password field, browser storage, clipboard-reading API, shell or subprocess.
 
 Connection and enrollment read `/capabilities` and `/bootstrap`: the configured actor, API version `1`, contract version `2026-10-08`, `observe` scope and valid server/principal identity are required. A saved record pins the bootstrap identity. A changed backend/principal refuses reconnection until explicit replacement; every mutation, including binary upload, repeats identity verification before its effect request. The frontend also checks its bootstrap against the identity native just verified. These journal identities isolate credentials/drafts; they are not cryptographic transport identity and cannot prevent a trusted server or tunnel from being replaced between requests. HTTPS certificates or the verified tunnel provide that trust. Native requires bootstrap; the browser's older-server fallback remains unchanged.
 
-`BATC_DESKTOP_TOKEN` remains a deliberate memory-only compatibility source on all platforms. Rust reads and removes it before constructing the runtime. When explicitly supplied with valid startup configuration it takes priority over the saved record, without automatic fallback on authentication failure. It is never automatically persisted. Changing endpoint/actor/contract through reload discards it; invalid/missing startup configuration also discards it rather than forwarding it to a later endpoint. After its first verification, its backend/principal remains pinned for that launch, including disconnect/reconnect. Successful enrollment or forgetting clears this launch source. Do not put a token in JSON, a URL, command arguments or frontend storage. Non-Windows protected storage/enrollment is explicitly unavailable; those platforms retain the memory-only adapter.
+`BATC_DESKTOP_TOKEN` remains a deliberate memory-only compatibility source on all platforms. Rust reads and removes it before constructing the runtime. When explicitly supplied with valid startup configuration it takes priority over the saved record, without automatic fallback on authentication failure. It is never automatically persisted. Changing endpoint/actor/contract through reload discards it; invalid/missing startup configuration also discards it rather than forwarding it to a later endpoint. After its first verification, its backend/principal remains pinned for that launch, including disconnect/reconnect. Successful enrollment or forgetting clears this launch source. Do not put a token in JSON, a URL, command arguments or frontend storage. Linux protected storage/enrollment remains unavailable; Linux retains the memory-only adapter.
 
 ### Credential boundary and lifecycle
 
@@ -52,7 +52,7 @@ Tokens are bounded to 512 ASCII bearer characters and records to 2560 bytes. App
 
 All commands retain the main-window/local-origin checks. Only one connection/prompt may run at a time. Disconnect and configuration reload invalidate outstanding verification before another credential can activate or save. Responses from an older native generation cannot be adopted by the current frontend. While credential selection is pending, the shared UI pauses event processing and mutations and invalidates old asynchronous forms. Cancellation restores the original namespace; success mounts the newly verified namespace without replaying prior operations. An already sent operation cannot be unsent by disconnect; its original key/receipt remains the recovery mechanism.
 
-Verification covers loopback HTTP and injected native vault/prompt lifecycle scenarios, shared browser/native IPC fixtures, and responsive English/zh-TW screens. Windows-only dialog adapter tests inject the native dialog return, without opening a dialog or using a real credential store. Windows native compilation/packaging belongs to exact-head CI; interactive dialog, real Credential Manager persistence across Windows logins and installed acceptance are separate evidence, not inferred from these mocks. macOS protected storage and Linux protected storage are not implemented.
+Verification covers loopback HTTP and injected native vault/prompt lifecycle scenarios, shared browser/native IPC fixtures, and responsive English/zh-TW screens. Windows-only dialog adapter tests inject the native dialog return, without opening a dialog or using a real credential store. Windows native compilation/packaging belongs to exact-head CI; interactive dialog, real Credential Manager persistence across Windows logins and installed acceptance are separate evidence, not inferred from these mocks. The macOS Keychain adapter has separate real-store fixtures; Linux protected storage is not implemented.
 
 The app works without BAT installed. Configured Windows installations use the [native Fleet controls](desktop-fleet-native.md) for independent connection/window choices, reviewed BAT launch, and explicit monitor/Startup migration. Native attachments use the bounded file adapter described below. Explicit signed updates use the [native update contract](desktop-updates.md); default validation packages keep signing disabled. Missing configuration and credentials remain visible in the app.
 
@@ -128,7 +128,7 @@ These checks are native fixture evidence; installed/live acceptance remains sepa
 
 The app bundles frontend assets and does not require Vite in production. Closing the main window hides it; the tray offers Open Dashboard and Quit Dashboard. Explicit Quit uses [normal exact-owner Fleet shutdown](desktop-fleet-native.md), refuses unconfirmed/foreign ownership, and leaves central work and manual BAT windows alone. The single-instance plugin focuses the current desktop window; Fleet separately enforces the shared cross-session ownership protocol. Fixed native supervisor/login CLI dispatch precedes the WebView and single-instance plugin. Native and PowerShell backends are mutually exclusive under the same ownership guards.
 
-The desktop workflow packages unsigned Windows NSIS and Linux deb artifacts for validation. The separate signed-candidate workflow verifies updater signatures and writes a fixed feed without publishing it; signing identities, Authenticode and installed acceptance remain operator release setup. macOS packages are not configured.
+The desktop workflow packages unsigned Windows NSIS and Linux deb artifacts for validation. The separate signed-candidate workflow verifies updater signatures and writes a fixed feed without publishing it; signing identities, Authenticode and installed acceptance remain operator release setup. macOS builds provide separate Apple Silicon and Intel DMGs with ad-hoc signatures for validation; Developer ID signing and notarization are separate release gates.
 
 After packaging, `node tests/windows-installed-smoke.mjs` installs the NSIS package on the
 disposable GitHub-hosted Windows runner. It refuses workstations, existing app state,
@@ -264,3 +264,57 @@ Launcher/monotonic Quit-update fence. It does not change network configuration,
 Fleet selection or central credentials. Browser/unsupported/missing installations
 remain explicit; installed Windows sign-in and tray behavior are not yet proven.
 See [the exact T10 adapter contract](tailscale-recovery.md).
+
+## macOS packages and native verification
+
+The platform configuration produces an `.app` inside a `.dmg`, with the existing icon
+converted to ICNS and a minimum system version of macOS 13. Native CI runs on macOS 15
+for Apple Silicon and Intel separately; older supported OS versions are not yet exercised.
+The ordinary workflow sets `APPLE_SIGNING_IDENTITY=-` for an ad-hoc signature. This
+verifies bundle integrity but does not establish a Developer ID identity or notarization.
+See the upstream [DMG](https://v2.tauri.app/distribute/dmg/) and
+[macOS signing](https://v2.tauri.app/distribute/sign/macos/) contracts.
+
+`node tests/macos-installed-smoke.mjs` refuses non-hosted runners, existing app state and
+existing Dashboard processes. It mounts the actual DMG read-only, copies its app into a
+unique disk directory, compares every bundled file and internal symlink against the built
+app, verifies its signature, architecture, version and resources, and unmounts the image.
+It launches that copied app through NSWorkspace/Launch Services against an authenticated
+observe-only loopback fixture and captures the real WKWebView. The AppKit helper checks
+the exact bundle URL, PID and launch date before controlling the owned application.
+A native helper requests hide and the fixture proves the actual hidden/window state
+(the hosted OS can return false even when asynchronous hide succeeds). Finder/Dock
+activation restores the same window/process. The native Accessibility close-button action
+then hides that window and Finder/Dock restores it again. A second executable hands off, and a normal system Quit
+followed by relaunch resumes polling without changing configuration. Owned app/state and
+temporary files are removed on exit. No Accessibility privacy setting is changed.
+The close-button action requires existing Accessibility trust; physical pointer and
+menu-bar interaction remain manual acceptance.
+Normal Quit requires an accepted native termination request and observed process termination;
+Launch Services does not expose the application's exit status to this fixture. Only the
+second direct executable invocation has a child-process exit-code assertion.
+
+The macOS event loop handles Dock/Finder Reopen and routes system Quit through the same
+shutdown function as tray Quit. These changes do not make the Windows Fleet supervisor,
+Startup migration or Windows updater available on Mac. Mac supports Keychain enrollment through a native secure system dialog. Signed in-app
+updates and real central/BAT acceptance remain distinct implementation/acceptance work. Receipts identify
+the exact candidate and platform; adding this fixture does not itself record a passing run.
+
+### macOS Keychain
+
+The native adapter uses Core Foundation's secure text-field notification (English/zh-TW),
+with cancellation and a five-minute timeout. It runs on the enrollment worker; no token
+passes through shell arguments, a subprocess, WebView, browser storage or clipboard API.
+The existing central capability/bootstrap verification and generation fence run before
+`SecItemAdd`/`SecItemUpdate`. The fixed service is `io.betteragent.dashboard.central.v1`;
+the account is the same length-framed endpoint/actor/contract SHA-256 binding used on Windows.
+The local Keychain record contains the bounded schema, identity and token, without enabling
+iCloud synchronization. Missing items are distinct from locked/denied/unreadable failures;
+replacement does not delete the old item first. Application-owned copies are zeroized;
+Core Foundation and Security framework internal buffers are not a whole-process erasure claim.
+
+The hosted-Mac Keychain fixture creates a disposable keychain, restores the prior search
+list/default, and deletes the fixture even on failure. It verifies real create, read from
+a separate process, replacement, malformed replacement refusal and deletion. Shared bridge
+tests cover verification-before-save, cancellation and configuration changes. Interactive
+secure-field entry and signed-app Keychain access across upgrades remain user acceptance.

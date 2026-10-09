@@ -1,0 +1,104 @@
+name: desktop-macos-signed-candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Reviewed 40-character commit already on main
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    environment: desktop-release
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require immutable main source and maintained Apple identity
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor HEAD origin/main
+          node - <<'NODE'
+          for (const name of ['APPLE_SIGNING_IDENTITY', 'APPLE_TEAM_ID', 'APPLE_CERTIFICATE',
+            'APPLE_CERTIFICATE_PASSWORD', 'APPLE_ID', 'APPLE_PASSWORD']) {
+            if (!process.env[name]?.trim()) throw new Error(`${name} is required`);
+          }
+          if (!process.env.APPLE_SIGNING_IDENTITY.startsWith('Developer ID Application: ')) {
+            throw new Error('A maintained Developer ID Application identity is required');
+          }
+          NODE
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: "1.98.1"
+      - run: npm ci
+        working-directory: desktop
+      - name: Build Developer ID signed and notarized DMG
+        working-directory: desktop
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        run: npm run tauri -- build --bundles app,dmg -- --locked
+      - name: Verify Developer ID, notarization ticket and Gatekeeper
+        working-directory: desktop
+        env:
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          app='src-tauri/target/release/bundle/macos/Better Agent Dashboard.app'
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --display --verbose=4 "$app" 2> "$RUNNER_TEMP/dashboard-codesign.txt"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          lines = (Path(os.environ['RUNNER_TEMP']) / 'dashboard-codesign.txt').read_text().splitlines()
+          assert 'TeamIdentifier=' + os.environ['APPLE_TEAM_ID'] in lines
+          assert any(line.startswith('Authority=Developer ID Application: ') for line in lines)
+          PY
+          xcrun stapler validate "$app"
+          spctl --assess --type execute --verbose=2 "$app"
+      - name: Install exact DMG and exercise native lifecycle
+        working-directory: desktop
+        timeout-minutes: 5
+        run: node tests/macos-installed-smoke.mjs
+      - name: Preserve installed signed-candidate evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: dashboard-macOS-${{ runner.arch }}-signed-fixture-${{ inputs.source_sha }}
+          path: desktop/test-results/macos-installed/
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: dashboard-macOS-${{ runner.arch }}-notarized-${{ inputs.source_sha }}
+          path: desktop/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 14
