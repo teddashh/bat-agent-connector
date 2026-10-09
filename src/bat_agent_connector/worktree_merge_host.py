@@ -28,7 +28,9 @@ def git(path, *args, codes=(0,)):
                 if time.monotonic() >= DEADLINE or os.fstat(out.fileno()).st_size > LIMIT or os.fstat(err.fileno()).st_size > LIMIT:
                     raise ValueError('MERGE_GIT_UNAVAILABLE')
                 time.sleep(.01)
-            if p.returncode not in codes or os.fstat(out.fileno()).st_size > LIMIT:
+            # Git status can exit 0 with empty stdout after warning that an
+            # untracked directory could not be read. Such a read is not clean proof.
+            if p.returncode not in codes or os.fstat(out.fileno()).st_size > LIMIT or os.fstat(err.fileno()).st_size:
                 raise ValueError('MERGE_GIT_UNAVAILABLE')
             out.seek(0)
             return p.returncode, out.read(LIMIT + 1).decode('utf-8', errors='strict')

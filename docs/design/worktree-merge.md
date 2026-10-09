@@ -27,6 +27,8 @@ prompt、未決 command / external effect。兩端都必須是 managed root 下�
 managed binding 得出的 paths/roots，沒有 caller shell / command、fallback transport。
 Git 使用固定 argv、sanitized environment、禁用 hooks/fsmonitor/optional locks，逐一檢查
 process exit / timeout / output bounds；直接讀取 status，不使用 shell pipeline。
+任何 stderr warning 亦拒絕：Git 可能在無權讀取 untracked directory 時仍回傳 exit 0 / 空 stdout，
+這不是 affirmative clean proof。
 在 status 前拒絕 effective repository clean/process filter commands 與 submodule/gitlink；
 Git 即使只是 status 也可能為同大小的編輯執行 clean filter。此限制不修改 repository config。
 `git:status=[]` **不能**證明 clean，因 pinned BAT read wrapper 也用空陣列表示失敗。
