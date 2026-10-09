@@ -323,14 +323,17 @@ impl<E: Effects, F: ProbeFactory, R: RouteProbe + Send + 'static> Supervisor<E, 
             };
             self.effects.stop(record, mode)?;
         }
-        files::remove(&file.path, &file.bytes)?;
+        // Keep the full child/origin receipt until every associated intent is
+        // retired. A crash or failed deletion must leave enough evidence for
+        // restart to prove the child ended and finish without another stop.
+        self.clear_launch_intent(file)?;
         if let Some(bytes) = files::read(&marker)? {
             if bytes != marker_bytes {
                 return Err("TUNNEL_RECORD_CHANGED");
             }
             files::remove(&marker, &bytes)?;
         }
-        self.clear_launch_intent(file)?;
+        files::remove(&file.path, &file.bytes)?;
         Ok(())
     }
     fn clear_launch_intent(&self, file: &TunnelFile) -> Result<()> {
@@ -744,16 +747,21 @@ impl<E: Effects, F: ProbeFactory, R: RouteProbe + Send + 'static> Supervisor<E, 
                 },
             }
         }
-        let bat_workers = self
+        let bat_probes = self
             .hosts
             .values()
-            .filter(|h| h.kind == ProbeKind::Bat && h.worker.is_some())
+            .filter(|h| h.kind == ProbeKind::Bat && matches!(h.worker, Some(Work::Probe(_))))
             .count();
-        if host.worker.is_none()
-            && now >= host.next_probe
-            && (host.kind == ProbeKind::Connector || bat_workers < 3)
-        {
+        let bat_routes = self
+            .hosts
+            .values()
+            .filter(|h| h.kind == ProbeKind::Bat && matches!(h.worker, Some(Work::Route(_))))
+            .count();
+        if host.worker.is_none() && now >= host.next_probe {
             if host.owned.is_some() {
+                if host.kind == ProbeKind::Bat && bat_probes >= 3 {
+                    return Ok(());
+                }
                 let Some(credential) = credential else {
                     return Ok(());
                 };
@@ -767,6 +775,9 @@ impl<E: Effects, F: ProbeFactory, R: RouteProbe + Send + 'static> Supervisor<E, 
                 )?;
                 host.worker = Some(Work::Probe(tokio::spawn(future)));
             } else if host.policy.recovery_due(now) {
+                if host.kind == ProbeKind::Bat && bat_routes >= 3 {
+                    return Ok(());
+                }
                 let request = SelectionRequest::new(
                     &host.routes,
                     &host.policy,

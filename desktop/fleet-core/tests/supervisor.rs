@@ -278,6 +278,11 @@ impl ProbeFactory for FakeProbes {
 }
 type Runtime = Supervisor<FakeEffects, FakeProbes, FakeRoutes>;
 fn fixture() -> (Fixture, Shared, Runtime) {
+    fixture_with_routes(Arc::new(FakeRoutes))
+}
+fn fixture_with_routes<R: RouteProbe + Send + 'static>(
+    routes: Arc<R>,
+) -> (Fixture, Shared, Supervisor<FakeEffects, FakeProbes, R>) {
     let fixture = Fixture::new();
     let path = fixture.0.join("kit/fleet-inventory.json");
     let mut doc: serde_json::Value =
@@ -301,10 +306,71 @@ fn fixture() -> (Fixture, Shared, Runtime) {
         },
         FakeEffects(shared.clone()),
         FakeProbes(shared.clone()),
-        Arc::new(FakeRoutes),
+        routes,
     )
     .unwrap();
     (fixture, shared, runtime)
+}
+
+#[derive(Default)]
+struct RouteCounts {
+    active: usize,
+    peak: usize,
+}
+struct PendingRoutes(Arc<Mutex<RouteCounts>>);
+struct PendingRoute(Arc<Mutex<RouteCounts>>);
+impl Drop for PendingRoute {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().active -= 1;
+    }
+}
+impl RouteProbe for PendingRoutes {
+    fn tailscale_direct<'a>(&'a self, _: &'a str, _: Instant) -> ProbeFuture<'a> {
+        Box::pin(async {
+            {
+                let mut counts = self.0.lock().unwrap();
+                counts.active += 1;
+                counts.peak = counts.peak.max(counts.active);
+            }
+            let _held = PendingRoute(self.0.clone());
+            std::future::pending::<bool>().await
+        })
+    }
+    fn tcp<'a>(
+        &'a self,
+        _: &'a bat_fleet_core::inventory::Endpoint,
+        _: Instant,
+    ) -> ProbeFuture<'a> {
+        Box::pin(async { false })
+    }
+}
+#[tokio::test]
+async fn route_slots_are_bounded_separately_and_connector_remains_independent() {
+    let counts = Arc::new(Mutex::new(RouteCounts::default()));
+    let (_f, shared, mut runtime) = fixture_with_routes(Arc::new(PendingRoutes(counts.clone())));
+    let mut status = runtime.tick(1000).await.unwrap();
+    for i in 1..8 {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        status = runtime.tick(1000 + i).await.unwrap();
+    }
+    let (active, peak) = {
+        let counts = counts.lock().unwrap();
+        (counts.active, counts.peak)
+    };
+    assert_eq!(active, 3);
+    assert_eq!(peak, 3);
+    assert_eq!(shared.lock().unwrap().launches, ["connector"]);
+    assert_eq!(
+        status
+            .entries
+            .iter()
+            .find(|e| e.name == "connector")
+            .unwrap()
+            .level,
+        "ready"
+    );
+    runtime.shutdown(2000).await.unwrap();
+    assert_eq!(counts.lock().unwrap().active, 0);
 }
 async fn advance(runtime: &mut Runtime, now: u64) -> Status {
     let mut status = runtime.tick(now).await.unwrap();
@@ -369,6 +435,14 @@ async fn slow_bat_workers_do_not_block_connector_or_exceed_three_bat_slots() {
     );
     assert!(s.lock().unwrap().active <= 3);
     assert!(s.lock().unwrap().peak <= 4);
+    let launched_bat = s
+        .lock()
+        .unwrap()
+        .launches
+        .iter()
+        .filter(|name| name.starts_with("node-"))
+        .count();
+    assert_eq!(launched_bat, 4, "pending probes cannot occupy route slots");
     assert!(status
         .entries
         .iter()
@@ -1032,4 +1106,167 @@ async fn outer_status_age_is_validated_even_when_all_connections_are_off() {
     assert!(parsed.entries.iter().all(|entry| entry.level == "off"));
     status.observed_at = "malformed".into();
     assert_eq!(status.is_fresh(61_001), Err("STATUS_UNPROVEN"));
+}
+
+fn launch_intent(record: &TunnelRecord, name: &str) -> Vec<u8> {
+    let parent = record.origin.as_ref().unwrap();
+    serde_json::to_vec(&json!({
+        "schema_version":1, "name":name,
+        "monitor_instance":record.process.monitor_instance,
+        "monitor_pid":parent.pid, "monitor_created":parent.created,
+        "arguments":record.process.arguments,
+    }))
+    .unwrap()
+}
+fn restart(f: &Fixture, s: &Shared, runtime: Runtime) -> Runtime {
+    drop(runtime);
+    s.lock()
+        .unwrap()
+        .processes
+        .get_mut(&SELF)
+        .unwrap()
+        .created_filetime += 100000;
+    Supervisor::start(
+        Options {
+            configuration: f.paths(),
+            roaming: f.0.clone(),
+            quit_file: f.0.join("quit.json"),
+        },
+        FakeEffects(s.clone()),
+        FakeProbes(s.clone()),
+        Arc::new(FakeRoutes),
+    )
+    .unwrap()
+}
+#[tokio::test]
+async fn failed_intent_retirement_keeps_owner_proof_for_restart() {
+    let (f, s, mut r) = fixture();
+    advance(&mut r, 1000).await;
+    let directory = f.0.join("BetterAgentTerminal");
+    let owner = directory.join("fleet-tunnel-owners/node-1.json");
+    let original = std::fs::read(&owner).unwrap();
+    let record = TunnelRecord::parse(&original, None).unwrap();
+    let intent = directory.join("fleet-tunnel-intents/node-1.json");
+    std::fs::create_dir_all(intent.parent().unwrap()).unwrap();
+    // A failed/mismatched intent cleanup cannot delete the full positive child receipt.
+    let unrelated = br#"{"monitor_instance":"ffffffffffffffffffffffffffffffff"}"#;
+    std::fs::write(&intent, unrelated).unwrap();
+    assert_eq!(
+        r.shutdown(1200).await.unwrap().lifecycle,
+        "stop_unconfirmed"
+    );
+    assert_eq!(std::fs::read(&owner).unwrap(), original);
+    assert_eq!(std::fs::read(&intent).unwrap(), unrelated);
+    assert!(!s
+        .lock()
+        .unwrap()
+        .processes
+        .contains_key(&record.process.pid));
+    let stops = s.lock().unwrap().stops.len();
+    // Repair only this synthetic fixture's exact original receipt; production never
+    // clears an unproven intent by filename or guesses which child it belongs to.
+    std::fs::write(&intent, launch_intent(&record, "node-1")).unwrap();
+    let mut resumed = restart(&f, &s, r);
+    let status = advance(&mut resumed, 2000).await;
+    assert_eq!(s.lock().unwrap().stops.len(), stops);
+    assert_eq!(
+        status
+            .entries
+            .iter()
+            .find(|e| e.name == "node-1")
+            .unwrap()
+            .level,
+        "ready"
+    );
+}
+#[tokio::test]
+async fn each_stop_retirement_cut_point_resumes_without_another_termination() {
+    for retired in 0..=2 {
+        let (f, s, mut r) = fixture();
+        advance(&mut r, 1000).await;
+        let directory = f.0.join("BetterAgentTerminal");
+        let owner = directory.join("fleet-tunnel-owners/node-1.json");
+        let original = std::fs::read(&owner).unwrap();
+        let record = TunnelRecord::parse(&original, None).unwrap();
+        let intent = directory.join("fleet-tunnel-intents/node-1.json");
+        std::fs::create_dir_all(intent.parent().unwrap()).unwrap();
+        std::fs::write(&intent, launch_intent(&record, "node-1")).unwrap();
+        s.lock().unwrap().unknown_stop = true;
+        assert_eq!(
+            r.shutdown(1200).await.unwrap().lifecycle,
+            "stop_unconfirmed"
+        );
+        let attempts = s.lock().unwrap().stops.len();
+        s.lock().unwrap().processes.retain(|pid, _| *pid == SELF);
+        s.lock().unwrap().unknown_stop = false;
+        // Crash before retirement, after launch-intent retirement, or after
+        // stop-intent retirement. The owner receipt is always the last deletion.
+        if retired >= 1 {
+            std::fs::remove_file(&intent).unwrap();
+        }
+        if retired >= 2 {
+            std::fs::remove_file(directory.join("fleet-tunnel-stop-intents/node-1.json")).unwrap();
+        }
+        assert_eq!(std::fs::read(&owner).unwrap(), original);
+        let mut resumed = restart(&f, &s, r);
+        let status = advance(&mut resumed, 2000).await;
+        assert_eq!(s.lock().unwrap().stops.len(), attempts);
+        assert_eq!(
+            status.entries.iter().filter(|e| e.level == "ready").count(),
+            5
+        );
+        assert!(!directory
+            .join("fleet-tunnel-stop-intents/node-1.json")
+            .exists());
+        assert!(!intent.exists());
+    }
+}
+#[tokio::test]
+async fn powershell_sparse_layers_remain_false_and_strict_validation_is_preserved() {
+    let (f, _s, mut r) = fixture();
+    let snapshot = advance(&mut r, 1000).await;
+    let mut doc = serde_json::to_value(snapshot).unwrap();
+    doc.as_object_mut().unwrap().remove("lifecycle");
+    let row = &mut doc["entries"][0];
+    row["selected"] = json!(false);
+    row["level"] = json!("off");
+    row["blocking"] = json!(null);
+    row["code"] = json!(null);
+    row["observed_at"] = json!(null);
+    // Kit ConvertTo-FleetDesktopReadiness includes only present boolean layers;
+    // an off row from Get-EntryReadiness has an empty layers object.
+    row["layers"] = json!({});
+    let config = f.load();
+    let parsed =
+        Status::parse(&serde_json::to_vec(&doc).unwrap(), &config, r.epoch(), 1100).unwrap();
+    let row = &parsed.entries[0];
+    assert_eq!(row.level, "off");
+    assert!(!row.layers.tunnel && !row.layers.tls && !row.layers.bat && !row.layers.workspace);
+    assert!(row.layers.auth.is_none() && row.layers.version.is_none());
+    doc["entries"][0]["layers"] = json!({"tunnel":true});
+    let parsed =
+        Status::parse(&serde_json::to_vec(&doc).unwrap(), &config, r.epoch(), 1100).unwrap();
+    assert!(parsed.entries[0].layers.tunnel);
+    assert!(!parsed.entries[0].layers.tls);
+    for invalid in [
+        json!({"tls":"false"}),
+        json!({"unexpected":true}),
+        json!({"bat":null}),
+    ] {
+        let mut wrong = doc.clone();
+        wrong["entries"][0]["layers"] = invalid;
+        assert!(Status::parse(
+            &serde_json::to_vec(&wrong).unwrap(),
+            &config,
+            r.epoch(),
+            1100
+        )
+        .is_err());
+    }
+    let encoded = String::from_utf8(serde_json::to_vec(&doc).unwrap()).unwrap();
+    let duplicate = encoded.replacen("\"tunnel\":true", "\"tunnel\":true,\"tunnel\":false", 1);
+    assert!(Status::parse(duplicate.as_bytes(), &config, r.epoch(), 1100).is_err());
+    assert!(Status::parse(encoded.as_bytes(), &config, &"f".repeat(32), 1100).is_err());
+    doc["schema_version"] = json!(2);
+    assert!(Status::parse(&serde_json::to_vec(&doc).unwrap(), &config, r.epoch(), 1100).is_err());
 }
