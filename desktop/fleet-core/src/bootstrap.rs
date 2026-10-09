@@ -46,6 +46,8 @@ fn remote_path(s: &str) -> bool {
 struct Definition {
     schema_version: u32,
     allow_ensure: bool,
+    #[serde(default)]
+    auto_ensure: bool,
     ssh_alias: String,
     service_id: String,
     state_directory: String,
@@ -117,6 +119,9 @@ impl Recipe {
             return Err("BOOTSTRAP_RECIPE_CHANGED");
         }
         Ok(())
+    }
+    pub fn auto_ensure(&self) -> bool {
+        self.definition.auto_ensure
     }
     pub fn binding(&self) -> &str {
         &self.binding
@@ -352,6 +357,20 @@ impl From<&Record> for Status {
         }
     }
 }
+/// Safe local receipt identity; no raw recipe paths or wire messages.
+#[derive(Clone, Serialize)]
+pub struct SavedStatus {
+    pub recipe_binding: String,
+    pub status: Status,
+}
+impl From<&Record> for SavedStatus {
+    fn from(record: &Record) -> Self {
+        Self {
+            recipe_binding: record.recipe.clone(),
+            status: record.into(),
+        }
+    }
+}
 pub struct Store {
     path: PathBuf,
 }
@@ -428,15 +447,46 @@ impl Store {
         *prior = Some(next);
         Ok(())
     }
-    /// One bounded attempt. Same key reuses its receipts. A new key cannot clear
-    /// an unresolved ensure; terminal positive service evidence remains historical.
-    pub async fn advance(
+    /// Local read only, including after a recipe disappears or its bytes change.
+    pub fn latest(&self) -> Result<Option<SavedStatus>> {
+        Ok(self.load()?.1.records.last().map(Into::into))
+    }
+    pub fn status(&self, id: &str) -> Result<Option<SavedStatus>> {
+        if !hex(id, 32) {
+            return Err("BOOTSTRAP_REQUEST_INVALID");
+        }
+        Ok(self
+            .load()?
+            .1
+            .records
+            .iter()
+            .find(|record| record.id == id)
+            .map(Into::into))
+    }
+    /// Persist the original native-generated ID before the UI offers ensure.
+    /// No transport; an unresolved request cannot be replaced by a different ID.
+    pub fn prepare(
         &self,
         recipe: &Recipe,
         current: &ProbeGeneration,
         id: &str,
-        platform: &mut impl Platform,
-    ) -> Result<Status> {
+        platform: &impl Platform,
+    ) -> Result<SavedStatus> {
+        let (_, journal) = self.admit(recipe, current, id, platform)?;
+        Ok(journal
+            .records
+            .iter()
+            .find(|record| record.id == id)
+            .unwrap()
+            .into())
+    }
+    fn admit(
+        &self,
+        recipe: &Recipe,
+        current: &ProbeGeneration,
+        id: &str,
+        platform: &impl Platform,
+    ) -> Result<(Option<Vec<u8>>, Journal)> {
         platform.verify(recipe, current)?;
         if current.configuration_binding != recipe.configuration || !hex(id, 32) {
             return Err("BOOTSTRAP_BINDING_CHANGED");
@@ -447,10 +497,7 @@ impl Store {
             if found.recipe != recipe.binding {
                 return Err("BOOTSTRAP_BINDING_CHANGED");
             }
-            if found.phase == Phase::ServiceRunning {
-                return Ok(found.into());
-            }
-            if journal.records.last().unwrap().id != id {
+            if found.phase != Phase::ServiceRunning && journal.records.last().unwrap().id != id {
                 return Err("BOOTSTRAP_REQUEST_CHANGED");
             }
         } else {
@@ -467,7 +514,7 @@ impl Store {
             journal.records.push(Record {
                 id: id.into(),
                 recipe: recipe.binding.clone(),
-                generation: stamp.clone(),
+                generation: stamp,
                 queries: 0,
                 ensure_requested: false,
                 phase: Phase::Querying,
@@ -477,6 +524,27 @@ impl Store {
             });
             self.save(&mut prior, &journal)?;
         }
+        Ok((prior, journal))
+    }
+    /// One bounded attempt. Same key reuses its receipts. A new key cannot clear
+    /// an unresolved ensure; terminal positive service evidence remains historical.
+    pub async fn advance(
+        &self,
+        recipe: &Recipe,
+        current: &ProbeGeneration,
+        id: &str,
+        platform: &mut impl Platform,
+    ) -> Result<Status> {
+        let (mut prior, mut journal) = self.admit(recipe, current, id, platform)?;
+        let found = journal
+            .records
+            .iter()
+            .find(|record| record.id == id)
+            .unwrap();
+        if found.phase == Phase::ServiceRunning {
+            return Ok(found.into());
+        }
+        let stamp = generation(current)?;
         // A restarted native monitor can reconcile the same recipe under a fresh
         // selected generation, but never send its saved ensure a second time.
         journal.records.last_mut().unwrap().generation = stamp;

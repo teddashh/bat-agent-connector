@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-fleet-bootstrap"
+description = "Enables the fleet_bootstrap command without any pre-configured scope."
+commands.allow = ["fleet_bootstrap"]
+
+[[permission]]
+identifier = "deny-fleet-bootstrap"
+description = "Denies the fleet_bootstrap command without any pre-configured scope."
+commands.deny = ["fleet_bootstrap"]

@@ -269,3 +269,7 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
 .fleet-desktop .fleet-options .grow { flex: 1; }
 .fleet-desktop .fleet-choice { min-width: 0; overflow-wrap: anywhere; }
 @media (max-width: 650px) { .fleet-desktop .fleet-options { grid-template-columns: 1fr; } }
+
+.fleet-bootstrap .muted { font-size: 14px; }
+.fleet-bootstrap button { min-height: 44px; }
+.bootstrap-receipt { overflow-wrap: anywhere; }

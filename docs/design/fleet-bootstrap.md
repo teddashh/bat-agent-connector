@@ -59,7 +59,8 @@ be enabled. Missing proof is a truthful unavailable/needs-attention result.
 `bootstrap::Recipe::load(client_root, &Configuration)` reads only the optional
 `fleet-connector-bootstrap.json` under the trusted client root. It rejects unknown
 fields and binds `schema_version:1`, `allow_ensure:true`, `ssh_alias`, `service_id`,
-`state_directory`, `journal_path`, `owner_uid`, and `server_recipe_sha256`. The alias
+`state_directory`, `journal_path`, `owner_uid`, and `server_recipe_sha256`. Optional
+`auto_ensure` is a strict boolean and defaults to `false`. The alias
 must equal the inventory Connector alias; the state/journal paths are fixed native
 configuration, never IPC. Absent/disabled recipes do not enable bootstrap. This
 separate file does not extend the Kit inventory schema.
@@ -96,6 +97,58 @@ start request, not that Connector is online. Raw helper failures, environment,
 private paths and commands never enter public status. No token is sent by this
 protocol. Existing Fleet observe-only readiness still determines API readiness;
 there is no mutation-token fallback or diagnostics-upload claim.
+
+## Desktop runtime and settings
+
+The fixed native `fleet_bootstrap` command accepts exactly four request shapes:
+
+| Action | Input | Behavior |
+| --- | --- | --- |
+| `overview` | none | Read configured/missing status, automatic opt-in, eligibility and latest sanitized receipt |
+| `prepare` | `recipe_binding` | Save a native-generated 32-hex request ID without remote I/O; reuse the unresolved original |
+| `advance` | `recipe_binding`, `request_id` | Run the original bounded query/at-most-one-ensure protocol |
+| `receipt` | `request_id` | Read the original local receipt, even if its recipe is now missing or changed |
+
+The WebView cannot supply a service, SSH alias, executable, path, PID, command or
+credential. The controller captures the lifecycle Ticket at IPC entry and verifies
+that same Ticket after acquiring the shared Launcher guard and at each core
+transport boundary. Quit/update invalidates queued work permanently. Each request
+captures the monitor epoch, configuration and private selection bytes, with a
+bootstrap-local generation counter of zero; it does not borrow the supervisor's
+separate per-host probe counter. Those exact native identities are rechecked under
+Launcher before effects. A recovered original request can query under a new proven
+monitor generation, without clearing its ensure fence.
+
+Admission additionally requires a current-login recorded monitor matching the
+configured backend, a positively observed Connector SSH child with its exact
+configured tunnel arguments, owner PID/incarnation and epoch, and fresh selected
+Connector-unavailable readiness. Both recorded owner directories are checked;
+conflicting evidence refuses. An open local port is insufficient. Unknown, stale,
+future, authentication, credential or API-contract failures do not authorize
+bootstrap. A healthy central result suppresses remote bootstrap. If it becomes
+healthy while a request is in flight, an unconfirmed local result may remain
+historical/unknown; the normal central connection remains independently usable.
+
+An independent native worker checks the optional `auto_ensure:true` recipe every
+five seconds. It uses the same prerequisites, original local journal and finite
+query budget. It never allocates a replacement automatic request after success or
+exhaustion, including across app restart; a later outage requires explicit review.
+An invalidated lifecycle Ticket stops that worker for the process lifetime. Normal
+central connection and supervisor readiness workers do not wait for its SSH budget.
+Bootstrap does not start a local monitor or create a second central daemon.
+
+The shared settings module displays configured/missing/blocked state and separate
+service evidence. Prepare, ensure/reconcile and read-original are explicit controls.
+Reopening or polling the page only reads local receipts. The native journal is the
+source of request identity; browser session storage is an optional index, so losing
+it cannot mint another ensure. Wrong-ID/binding or unreadable receipts keep effects
+disabled. No recipe editor or automatic mutation is implemented in the WebView.
+
+Focused evidence covers real temporary receipt bytes, injected process identities,
+route/readiness policy, finite automatic-request selection, native IPC validation,
+and browser-hosted native transport doubles for loss/reload/layout behavior. Windows
+module compilation is compile-only evidence; real Windows SSH/installed service
+and startup acceptance remain outstanding.
 
 ## Fixed Linux server guard
 
