@@ -83,7 +83,8 @@ def main() -> None:
     result = subprocess.run(  # noqa: S603
         [cargo, "metadata", "--locked", "--format-version", "1", "--filter-platform", args.target,
          "--manifest-path", str(ROOT / "desktop/src-tauri/Cargo.toml")],
-        check=True, capture_output=True, text=True, timeout=180,
+        # Cargo emits UTF-8 JSON. Keep bytes so json.loads does not use Windows' locale codec.
+        check=True, capture_output=True, timeout=180,
     )
     print(json.dumps({"source": source, "graph": check_graph(ROOT, args.target, json.loads(result.stdout))}, indent=2))
 
