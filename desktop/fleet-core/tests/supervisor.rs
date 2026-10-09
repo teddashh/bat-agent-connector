@@ -344,13 +344,21 @@ impl RouteProbe for PendingRoutes {
         Box::pin(async { false })
     }
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn route_slots_are_bounded_separately_and_connector_remains_independent() {
     let counts = Arc::new(Mutex::new(RouteCounts::default()));
     let (_f, shared, mut runtime) = fixture_with_routes(Arc::new(PendingRoutes(counts.clone())));
     let mut status = runtime.tick(1000).await.unwrap();
     for i in 1..8 {
         tokio::time::sleep(Duration::from_millis(2)).await;
+        if i == 1 {
+            // Scheduling capacity is independent of wall time spent in local IO.
+            // This exceeds the real selector deadline and reproduced active=0
+            // before the fixture clock was paused. Production bounds stay intact.
+            let before_io = Instant::now();
+            std::thread::sleep(Duration::from_millis(2_100));
+            assert_eq!(Instant::now(), before_io);
+        }
         status = runtime.tick(1000 + i).await.unwrap();
     }
     let (active, peak) = {
