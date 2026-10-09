@@ -27,6 +27,8 @@ pub mod tunnel;
 pub mod windows;
 #[cfg(windows)]
 pub mod windows_launcher;
+#[cfg(any(windows, test))]
+pub mod windows_migration;
 #[cfg(windows)]
 pub mod windows_monitor_launch;
 #[cfg(windows)]

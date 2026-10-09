@@ -120,6 +120,30 @@ pub enum Outcome {
     Started(ProcessSnapshot),
 }
 
+/// Read-only migration guard after ordinary discovery has positively found no owner.
+/// A missing record cannot exclude an unpublished child from an earlier launch.
+/// Keep the journal unchanged; only ensure() may settle its own exact receipt.
+pub fn verify_absence(path: &Path, observation: &impl Observation) -> Result<()> {
+    let Some(bytes) = files::read(path)? else {
+        return Ok(());
+    };
+    let intent = Intent::parse(&bytes)?;
+    if intent.login() != observation.current_login()? {
+        return Err("OTHER_LOGIN_OWNER");
+    }
+    let child = intent.child.ok_or("MONITOR_LAUNCH_UNCONFIRMED")?;
+    if observation
+        .observe(child.pid)?
+        .is_some_and(|current| current.created_filetime.to_string() == child.created_filetime)
+    {
+        return Err("MONITOR_STARTING");
+    }
+    if files::read(path)?.as_deref() != Some(&bytes) {
+        return Err("MONITOR_LAUNCH_UNPROVEN");
+    }
+    Ok(())
+}
+
 /// `path` is the fixed account-wide roaming launch journal, independent of BAT directory choice.
 /// Existing unknown intent is never discarded or reissued, even if discovery finds no owner.
 pub fn ensure(
