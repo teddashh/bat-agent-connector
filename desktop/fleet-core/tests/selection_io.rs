@@ -190,3 +190,50 @@ fn lock_contention_is_bounded_and_never_removes_another_writers_lock() {
         .set_connections(&configuration, &before, &[], None, || Ok(None))
         .unwrap();
 }
+
+#[test]
+fn freshly_loaded_configuration_cannot_retarget_an_older_selection_snapshot() {
+    for published in [false, true] {
+        let fixture = Fixture::new();
+        let original = fixture.load();
+        let store = Store::new(fixture.0.clone());
+        let read = store.read(&original).unwrap();
+        let before = if published {
+            store
+                .set_connections(&original, &read, &["node-2".into()], None, || Ok(None))
+                .unwrap()
+        } else {
+            read
+        };
+        let path = fixture.0.join("BetterAgentTerminal/fleet-client.json");
+        let bytes = std::fs::read(&path).ok();
+        let ssh = fixture.0.join("kit/ssh-config");
+        let changed = std::fs::read_to_string(&ssh)
+            .unwrap()
+            .replace("192.0.2.1", "192.0.2.2");
+        std::fs::write(ssh, changed).unwrap();
+        let current = fixture.load();
+        assert!(current.issues.is_empty());
+        assert_ne!(original.binding(), current.binding());
+        let fresh = store.read(&current).unwrap();
+        assert_eq!(fresh.revision, before.revision); // Same stored preferences; only the route changed.
+        assert!(matches!(
+            store.set_connections(&current, &before, &["node-3".into()], None, || {
+                panic!("stale configuration intent must refuse before probing an owner")
+            }),
+            Err("CONFIGURATION_CHANGED")
+        ));
+        assert_eq!(std::fs::read(&path).ok(), bytes);
+        assert!(!std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")));
+        let accepted = store
+            .set_connections(&current, &fresh, &["node-3".into()], None, || Ok(None))
+            .unwrap();
+        assert_eq!(accepted.preferences().connections, ["node-3"]);
+    }
+}

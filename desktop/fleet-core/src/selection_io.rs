@@ -69,6 +69,7 @@ fn read(path: &Path) -> Result<Option<Vec<u8>>> {
 
 pub struct Snapshot {
     preferences: Preferences,
+    configuration_binding: String,
     pub revision: String,
     directory: PathBuf,
     raw: Option<Vec<u8>>,
@@ -110,6 +111,7 @@ impl Store {
             Preferences::load(&configuration.inventory, raw.as_deref(), legacy.as_deref())?;
         Ok(Snapshot {
             preferences,
+            configuration_binding: configuration.binding().into(),
             revision: digest(raw.as_deref().unwrap_or_default()),
             directory: directory.into(),
             raw,
@@ -130,7 +132,8 @@ impl Store {
     }
     /// `owner` must freshly prove the controllable monitor epoch (or positive absence),
     /// including current login ownership. Unknown evidence returns an error, never None.
-    /// The original snapshot binds bytes AND one-time legacy migration, beyond the public revision.
+    /// The original snapshot binds configuration, bytes and one-time legacy migration,
+    /// beyond the PowerShell-compatible public preference revision.
     pub fn set_connections(
         &self,
         configuration: &Configuration,
@@ -141,6 +144,9 @@ impl Store {
     ) -> Result<Snapshot> {
         if epoch.is_some_and(|value| !crate::ownership::epoch_valid(value)) {
             return Err("INVALID_REQUEST");
+        }
+        if configuration.binding() != expected.configuration_binding {
+            return Err("CONFIGURATION_CHANGED");
         }
         let (path, legacy, directory) = self.paths()?;
         if directory != expected.directory {
@@ -191,6 +197,7 @@ impl Store {
             std::fs::rename(&temporary, &path).map_err(|_| "SELECTION_UNAVAILABLE")?;
             Ok(Snapshot {
                 preferences,
+                configuration_binding: configuration.binding().into(),
                 revision: digest(&bytes),
                 directory: directory.clone(),
                 raw: Some(bytes),
