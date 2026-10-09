@@ -1031,7 +1031,7 @@ def cmd_repository(args) -> int:
             idempotency_key=key, wait_s=30, entry="cli", timeout=40)
         out = {**out, "idempotency_key": key}
     _print(out, True)
-    return 0
+    return 1 if (out.get("operation") or {}).get("status") in {"failed", "cancelled"} else 0
 
 
 def cmd_checkpoint(args) -> int:

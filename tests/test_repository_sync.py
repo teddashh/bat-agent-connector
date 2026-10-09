@@ -341,6 +341,50 @@ def test_cli_readonly_confirm_and_no_key_independence(monkeypatch, capsys):
     assert all(p["target"] == TARGET and p["entry"] == "cli" for _, p in calls)
 
 
+@pytest.mark.parametrize("status,exit_code", [("failed", 1), ("cancelled", 1), ("accepted", 0), ("uncertain", 0), ("succeeded", 0)])
+def test_cli_reports_durable_outcome_with_original_key(monkeypatch, capsys, status, exit_code):
+    from bat_agent_connector import task_daemon
+    monkeypatch.setattr(task_daemon, "request", lambda *args, **kw: {"operation": {
+        "status": status, "operation_id": "op_fixed", "status_reason": "stored reason", "error_code": "STORED_CODE"}})
+    args = ["repository", "continue", "o/r", "h1", "ws-1", "--ref", "refs/heads/main", "--sha", "a" * 40,
+            "--repository-id", "1", "--binding-digest", "b" * 64, "--prompt", "work", "--key", "original-key", "--confirm"]
+    assert cli.main(args) == exit_code
+    result = json.loads(capsys.readouterr().out)
+    assert result["idempotency_key"] == "original-key" and result["operation"]["status"] == status
+    assert result["operation"]["operation_id"] == "op_fixed" and result["operation"]["status_reason"] == "stored reason"
+
+
+async def test_nonprincipal_mcp_replays_after_tier_disabled_but_new_key_refuses(world, mock, monkeypatch):
+    from bat_agent_connector.mcp_server import build_server
+    from tests.test_mcp_principal import call
+    pv = await preview(world)
+    op = await start(world, pv, agent="claude")
+    assert op["status"] == "succeeded", op
+    count = len(bat_writes(mock))
+    d, port = world["d"], world["port"]
+    d.fleet.config.host("h1").writes = False
+    d.fleet.config.host("h1").orchestrate = False
+    monkeypatch.setenv("BATC_TASK_URL", f"http://127.0.0.1:{port}/rpc")
+    monkeypatch.setenv("BATC_API_TOKEN", token(d, "starter", "start"))
+    server, fleet = build_server(d.fleet.config)
+    try:
+        assert "work_continue_from_repository" in {t.name for t in await server.list_tools()}
+        args = {**REQUEST, "source_sha": pv["source_sha"], **pv["preconditions"], "prompt": "Work here",
+                "idempotency_key": "published-1", "agent": "claude", "confirm": True, "wait_s": 0}
+        replay = await call(server, "work_continue_from_repository", args)
+        assert op["operation_id"] in replay and "succeeded" in replay, replay
+        refused = await call(server, "work_continue_from_repository", {**args, "idempotency_key": "new"})
+        assert "REPOSITORY_HOST_UNAVAILABLE" in refused, refused
+        assert len(bat_writes(mock)) == count and len(d.ops.list()["operations"]) == 1
+    finally:
+        await fleet.close()
+    reader, fleet = build_server(d.fleet.config, read_only=True)
+    try:
+        assert "work_continue_from_repository" not in {t.name for t in await reader.list_tools()}
+    finally:
+        await fleet.close()
+
+
 async def test_max_in_flight_one_final_guard(world):
     world["d"].fleet.client("h1")._sem = asyncio.Semaphore(1)
     op = await start(world)
