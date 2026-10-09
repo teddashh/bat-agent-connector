@@ -28,10 +28,11 @@ async function setup(page:Page, native=true, options:any={}) {
    if(input.action==='overview')return {control_version:1,configuration:{binding:'a'.repeat(64),valid:true},profiles:[{id:'profile-1',label:'Explicit remote choice',connection:'node-1'},{id:'default',label:'Local BAT',connection:null}],selection:{connections:['node-1'],profiles:[],dashboard:false},pending_migration:null,monitor:{state:'running',controllable:true}};
    if(input.action==='preview_profile'){
     if(env.previewError)throw new Error(env.previewError);
-    env.profile=input.profile_id;
-    return {preview_id:'1'.repeat(32),configuration_binding:'a'.repeat(64),summary:{launch_id:'1'.repeat(32),profiles:[env.wrongPreview?'wrong':input.profile_id],dashboard:false,opens_bat:true,already_running:!!env.running,bat_may_open_local_window:input.profile_id!=='default'}};
+    env.profile=input.profile_id;env.preview_id=sessionStorage.getItem('fixture-preview-id')||'1'.repeat(32);
+    return {preview_id:env.preview_id,configuration_binding:'a'.repeat(64),summary:{launch_id:env.preview_id,profiles:[env.wrongPreview?'wrong':input.profile_id],dashboard:false,opens_bat:true,already_running:!!env.running,bat_may_open_local_window:input.profile_id!=='default'}};
    }
    if(input.action==='launch'){
+    if(env.expired && input.preview_id!==env.preview_id)throw new Error('PREVIEW_EXPIRED');
     if(env.hold)await new Promise(resolve=>env.release=resolve);
     env.receipt={launch_id:input.preview_id,profiles:[env.profile],dashboard:false,state:env.uncertain?'uncertain':'started'};
     localStorage.setItem('fixture-bat-receipt',JSON.stringify(env.receipt));
@@ -159,4 +160,33 @@ test('clipboard denial retains selectable complete text without a launch',async(
  await page.getByRole('button',{name:'Copy full ID',exact:true}).click();
  await expect(page.getByRole('textbox',{name:'Copy full ID',exact:true})).toHaveValue(sid);
  expect(await calls(page,'launch')).toHaveLength(0);
+});
+
+test('restart never submits an unattempted lost native handle; explicit re-review uses new handle',async({page})=>{
+ await setup(page,true,{expired:true});await review(page);
+ await page.evaluate(()=>sessionStorage.setItem('fixture-preview-id','2'.repeat(32)));
+ await page.reload();
+ await expect(page.getByRole('button',{name:'Review original choice again',exact:true})).toBeVisible();
+ await expect(page.getByRole('button',{name:'Open selected profile',exact:true})).toHaveCount(0);
+ await expect(page.getByRole('button',{name:'Cancel',exact:true})).toBeVisible();
+ expect(await calls(page,'launch')).toHaveLength(0);expect(await calls(page,'preview_profile')).toHaveLength(0);
+ await page.getByRole('button',{name:'Review original choice again',exact:true}).click();
+ expect(await calls(page,'preview_profile')).toEqual([{action:'preview_profile',profile_id:'profile-1'}]);
+ await page.getByRole('button',{name:'Open selected profile',exact:true}).click();
+ expect(await calls(page,'launch')).toEqual([{action:'launch',preview_id:'2'.repeat(32)}]);
+ await expect(page.getByRole('button',{name:'Choose another profile',exact:true})).toBeVisible();
+});
+test('attempted lost reply with missing native receipt cannot become a new preview after restart',async({page})=>{
+ await setup(page,true,{lose:true,expired:true});await review(page);
+ await page.getByRole('button',{name:'Open selected profile',exact:true}).click();await expect(page.getByText(/Lost reply/)).toBeVisible();
+ await page.evaluate(()=>localStorage.removeItem('fixture-bat-receipt'));await page.reload();
+ await expect(page.getByText(/No original launch receipt was found/)).toBeVisible();
+ expect(await calls(page,'launch')).toHaveLength(0);expect(await calls(page,'preview_profile')).toHaveLength(0);
+ await expect(page.getByRole('button',{name:'Review original choice again',exact:true})).toHaveCount(0);
+ await expect(page.getByRole('button',{name:'Cancel',exact:true})).toHaveCount(0);
+ await page.getByRole('button',{name:'Check and retry original launch',exact:true}).click();
+ await expect(page.getByText(/PREVIEW_EXPIRED/)).toBeVisible();
+ await expect(page.getByRole('button',{name:'Choose another profile',exact:true})).toHaveCount(0);
+ expect(await calls(page,'launch')).toEqual([{action:'launch',preview_id:'1'.repeat(32)}]);
+ expect(await page.evaluate(()=>JSON.parse(Object.entries(localStorage).find(([k])=>k.startsWith('batc.session-bat.'))![1]).preview_id)).toBe('1'.repeat(32));
 });
