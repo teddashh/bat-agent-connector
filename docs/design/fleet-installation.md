@@ -1,5 +1,30 @@
 # Trusted native Fleet installation and executable entries
 
+## Native monitor launch recovery
+
+`monitor_launch` retains a fixed account-wide roaming `bat-fleet-monitor-launch.json`
+under the Kit-compatible launcher mutex. It writes an intent before invoking the
+fixed installed Dashboard with `--fleet-supervisor --fleet-config <trusted path>`.
+The Windows adapter captures identity through the retained child handle. A missing
+monitor record, lost launch reply or inaccessible child never triggers another spawn.
+Readback can adopt the exact positively discovered owner; a recorded child's proven
+exit permits a later explicit ensure. A reused PID grants no termination authority.
+Valid inventory reloads may change the current configuration binding of the same
+recorded child; they do not rewrite its original launch receipt.
+
+The supervisor gets a bounded native environment allowlist, including PATH for
+configured SSH routing helpers. Central/BAT tokens and generic proxy credentials are
+not inherited. The app never force-kills a newly launched monitor whose tunnel effects
+could already exist. An intent without birth or owner evidence remains uncertain.
+Ordinary launch entrypoints must additionally honor the migration journal; the
+migration launch hook already holds the launcher guard and must not reacquire it.
+
+Eight temporary/mock launch-fence cases cover lost replies, unknown identity,
+configuration drift, PID reuse, cross-login refusal and routing environment. Isolated
+MSVC typecheck/Clippy compiles the exact new modules with the existing TLS provider
+constructor stubbed only in the temporary harness. This is not Windows execution or
+installed Fleet acceptance evidence.
+
 `installation::Snapshot` reads the fixed local `fleet.json` supplied by native app
 configuration. Its bounded, duplicate-rejecting document accepts `kit_root` and the
 optional `backend` (`powershell` or `rust`). Existing documents default to PowerShell;

@@ -5,6 +5,7 @@ pub mod credential;
 pub mod discovery;
 pub mod installation;
 pub mod inventory;
+pub mod monitor_launch;
 pub mod ownership;
 pub mod probe;
 mod probe_wire;
@@ -24,6 +25,8 @@ pub mod tunnel;
 pub mod windows;
 #[cfg(windows)]
 pub mod windows_launcher;
+#[cfg(windows)]
+pub mod windows_monitor_launch;
 #[cfg(windows)]
 pub mod windows_supervisor;
 #[cfg(windows)]
