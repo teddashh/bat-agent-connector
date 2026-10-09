@@ -55,7 +55,7 @@ from .task_verifier import ObservedVerifier, load_settings
 
 DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 # /rpc methods that share /api/v1's principals and OperationService (MCP and CLI enter here).
-API_RPC = {"repository_preview": "observe", "session_start": "start", "workspaces_list": "observe", "op_submit": "?", "session_interrupt": "operate", "session_send": "operate",
+API_RPC = {"session_failover": "?", "fanout_plan_session": "?", "fanout_from_plan": "?", "fanout_start": "?", "session_relay": "?", "repository_preview": "observe", "session_start": "start", "workspaces_list": "observe", "op_submit": "?", "session_interrupt": "operate", "session_send": "operate",
            "session_continue": "operate", "session_answer": "operate", "session_set_permissions": "operate",
            "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
            "work_status": "observe", "work_result": "observe", "work_events": "observe",
@@ -258,6 +258,15 @@ class TaskDaemon:
             if method == "workspaces_list":
                 return await session_start_operations.workspaces(self.ops, principal, params)
             return await session_start_operations.legacy(self.ops, principal, params, entry=entry)
+        if method in {"fanout_plan_session", "fanout_from_plan", "fanout_start"}:
+            from .fanout_operations import legacy
+            return await legacy(self.ops, principal, method, params, entry=entry)
+        if method == "session_failover":
+            from .failover_operations import legacy
+            return await legacy(self.ops, principal, params, entry=entry)
+        if method == "session_relay":
+            from .orchestration_operations import legacy
+            return await legacy(self.ops, principal, params, entry=entry)
         if method == "approval_preview":
             from .bulk_approval import preview
             return await preview(self.ops, principal, params)
@@ -666,11 +675,10 @@ class TaskDaemon:
         params = dict(params)
         entry = params.pop("entry", "rpc")
         key = params.pop("idempotency_key", None)
-        # Part A preserves create() and its schema. Unkeyed old controls never deduplicate.
+        # task_send retains its existing step identity. Other omitted keys are genuinely unkeyed;
+        # only the private compatibility admission may allocate a non-deduplicating sentinel.
         if method == "task_send" and key is None:
             key = "task-step:" + str(params.get("task_id")) + ":" + str(params.get("step_id"))
-        if key is None:
-            key = "legacy-request:" + secrets.token_hex(16)
         client_key = key
         if isinstance(key, str) and key.strip().startswith(NO_KEY_PREFIX):
             # Check the original legacy key before the 201–256 character compatibility hash.
@@ -701,8 +709,8 @@ class TaskDaemon:
             with self.journal.tx():
                 op, _ = self.ops.create(principal, action=task_actions.METHODS[method], target=target,
                                        params=params, preconditions=pre, idempotency_key=key,
-                                       entry=entry if entry in {"mcp", "cli"} else "rpc")
-                if method == "work_submit" and principal.admin and self.journal.by_idempotency_key(client_key):
+                                       entry=entry if entry in {"mcp", "cli"} else "rpc", _legacy_task=True)
+                if method == "work_submit" and client_key is not None and principal.admin and self.journal.by_idempotency_key(client_key):
                     OpContext(self.ops, self.ops._row(op["operation_id"])).effect("legacy_task_key", lambda: {"key": client_key})
         except OperationError as exc:
             raise LegacyTaskError(exc.code, exc.message, exc.status) from None
@@ -716,7 +724,8 @@ class TaskDaemon:
                                               "AND name='task_pause' AND status='succeeded'", (op["operation_id"],)).fetchone()
             if receipt:
                 result = json.loads(receipt["response"])
-        return {**result, "operation_id": op["operation_id"], "operation_status": op["status"]}
+        return {**result, "operation_id": op["operation_id"], "operation_status": op["status"],
+                "idempotency_key": op["idempotency_key"], "idempotency_enabled": op["idempotency_enabled"]}
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:

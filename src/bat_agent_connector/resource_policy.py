@@ -174,6 +174,8 @@ def check_grant(grant: WriteGrant | None, host: str, channel: str, params: dict 
             or (channel not in SESSIONLESS_CHANNELS and sid != grant.session_id)):
         raise ResourceReadOnly("GRANT_MISMATCH",
                                f"the policy grant for {grant.action} does not cover {channel!r} on this session")
+    from .failover_operations import check_writer
+    check_writer(host, grant.session_id, channel, workdir=grant.workdir)
 
 
 # --------------------------------------------------------------------------- paths
@@ -532,6 +534,8 @@ def check_new_worktree(grant: WriteGrant, hc: HostConfig, folder: str, worktree_
 async def authorize_shared_session(fleet, host: str, session_id: str, owner: dict) -> WriteGrant:
     """A new session that works in an existing connector-owned folder (failover successor, reviewer)."""
     hc = fleet.config.host(host)
+    from .failover_operations import check_writer
+    check_writer(host, owner['id'], shared=True)
     cls = classify(hc, owner["id"], terminal=owner, entries=_entries(host))
     if cls.code:
         raise ResourceReadOnly(cls.code, f"a new session cannot share {owner['id'][:8]}'s folder: {cls.reason}")
