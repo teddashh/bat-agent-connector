@@ -26,3 +26,10 @@ UTF-16 path lengths; an alternate profile index also binds the trusted canonical
 Read failures or byte changes invalidate old evidence. This is a local snapshot check, not an atomic
 transaction with external editors. SSH Include expansion is not added by this loader.
 `data_directory` rechecks both BAT directory names on every call and creates neither.
+
+`selection_io::Store` holds the shared preference lock while comparing the retained primary/legacy
+bytes, current configuration and freshly proven owner epoch. It writes a flushed create-new temporary
+file and atomically replaces only `fleet-client.json`. Unknown ownership and directory migration refuse.
+The public preference revision remains the PowerShell primary-byte digest; callers must retain the
+private Snapshot too, so changes to legacy choices cannot hide behind an absent primary file.
+Windows uses `windows::PreferenceLock` from the companion OS adapter; Unix fixtures use File locking.
