@@ -149,6 +149,8 @@ async function readArtifactContent(reference, size, token, signal) {
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		bat_review_again: "重新預覽原選擇",
+		bat_preview_expired: "此預覽尚未送出。重新開啟頁面後，須明確重新預覽原 profile，才能啟動 BAT。",
 		bat_handoff: "在 BAT 中查看",
 		bat_copy_title: "複製完整標題",
 		bat_copy_id: "複製完整 ID",
@@ -1165,6 +1167,8 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		bat_review_again: "Review original choice again",
+		bat_preview_expired: "This preview was never submitted. Explicitly review the original profile again after reopening before launching BAT.",
 		bat_handoff: "View in BAT",
 		bat_copy_title: "Copy full title",
 		bat_copy_id: "Copy full ID",
@@ -5082,7 +5086,7 @@ function sessionBatPanel({ h, t, guard, storageKey, session }) {
 		class: "muted",
 		role: "status"
 	}), copyFallback = h("div");
-	let disposed = false, busy = false, expanded = false, readable = false, overview, chosen = "", intent, receipt, damaged = false;
+	let disposed = false, busy = false, expanded = false, readable = false, overview, chosen = "", intent, receipt, restoredPreview = false, damaged = false;
 	const alive = () => {
 		if (disposed) return false;
 		try {
@@ -5105,6 +5109,7 @@ function sessionBatPanel({ h, t, guard, storageKey, session }) {
 			intent = saved;
 			chosen = saved.profile_id;
 			expanded = true;
+			restoredPreview = !saved.attempted;
 		}
 	} catch {
 		damaged = true;
@@ -5182,8 +5187,8 @@ function sessionBatPanel({ h, t, guard, storageKey, session }) {
 		}
 	};
 	const review = () => run(async () => {
-		if (!readable || intent || damaged || !profile(chosen)) return;
-		const selected = chosen;
+		if (!readable || intent && (!restoredPreview || intent.attempted) || damaged || !profile(chosen)) return;
+		const previous = intent?.preview_id, selected = intent?.profile_id || chosen;
 		const value = await fleetControl({
 			action: "preview_profile",
 			profile_id: selected
@@ -5201,9 +5206,14 @@ function sessionBatPanel({ h, t, guard, storageKey, session }) {
 		intent = next;
 		receipt = null;
 		persist(intent);
+		restoredPreview = false;
+		if (previous && previous !== next.preview_id && alive()) await fleetControl({
+			action: "discard",
+			preview_id: previous
+		});
 	});
 	const launch = () => run(async () => {
-		if (!intent || damaged || intent.summary.already_running || receipt) return;
+		if (!intent || damaged || restoredPreview || intent.summary.already_running || receipt) return;
 		const next = {
 			...intent,
 			attempted: true
@@ -5222,6 +5232,7 @@ function sessionBatPanel({ h, t, guard, storageKey, session }) {
 		localStorage.removeItem(storageKey);
 		const old = intent.preview_id;
 		intent = receipt = null;
+		restoredPreview = false;
 		chosen = "";
 		await fleetControl({
 			action: "discard",
@@ -5258,13 +5269,14 @@ function sessionBatPanel({ h, t, guard, storageKey, session }) {
 		}, `${p.label} · ${p.id}`)));
 		const lines = [h("p", { class: "muted" }, t("bat_search_help")), h("label", {}, t("bat_profile"), " ", picker)];
 		if (intent) {
-			lines.push(h("p", { class: "note" }, t("bat_chosen", { profile: intent.profile_id }), " · ", h("code", {}, intent.preview_id)), h("p", { class: "muted" }, receipt ? t("fleet_launch_" + (receipt.state === "prepared" ? "uncertain" : receipt.state)) : intent.summary.already_running ? t("fleet_launch_already_running") : t(intent.attempted ? "bat_unknown" : "bat_reviewed")));
+			lines.push(h("p", { class: "note" }, t("bat_chosen", { profile: intent.profile_id }), " · ", h("code", {}, intent.preview_id)), h("p", { class: "muted" }, receipt ? t("fleet_launch_" + (receipt.state === "prepared" ? "uncertain" : receipt.state)) : restoredPreview ? t("bat_preview_expired") : intent.summary.already_running ? t("fleet_launch_already_running") : t(intent.attempted ? "bat_unknown" : "bat_reviewed")));
 			if (intent.summary.bat_may_open_local_window) lines.push(h("p", { class: "muted" }, t("fleet_local_anchor")));
 		}
 		if (damaged) lines.push(h("p", { class: "error" }, t("bat_saved_invalid")));
 		const buttons = [button("bat_read", () => run(read))];
 		if (!fixed) buttons.unshift(button("bat_review", review, !readable || !chosen));
-		if (intent && !receipt && !intent.summary.already_running) buttons.unshift(button(intent.attempted ? "bat_retry" : "bat_launch", launch, !readable));
+		if (restoredPreview) buttons.unshift(button("bat_review_again", review, !readable));
+		if (intent && !restoredPreview && !receipt && !intent.summary.already_running) buttons.unshift(button(intent.attempted ? "bat_retry" : "bat_launch", launch, !readable));
 		if (intent && (!intent.attempted || terminal())) buttons.push(button(intent.attempted ? "bat_new" : "cancel", reset));
 		lines.push(h("div", { class: "actions" }, ...buttons), h("p", { class: "muted" }, t("bat_preferences"), " ", h("a", { href: "#/settings" }, t("nav_settings"))));
 		content.replaceChildren(...lines);

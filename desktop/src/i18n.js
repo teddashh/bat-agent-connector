@@ -1,6 +1,7 @@
 // Display labels only. Logic and CSS never key on these strings (machine enums come from /api/v1).
 const STRINGS = {
   "zh-TW": {
+    bat_review_again: "重新預覽原選擇", bat_preview_expired: "此預覽尚未送出。重新開啟頁面後，須明確重新預覽原 profile，才能啟動 BAT。",
     bat_handoff: "在 BAT 中查看", bat_copy_title: "複製完整標題", bat_copy_id: "複製完整 ID", bat_copied: "已複製。", bat_copy_manually: "請選取並複製以下完整內容。",
     bat_open: "在 BAT 中開啟", bat_browser: "請在 BAT 中搜尋上方完整標題或 ID。桌面版可選擇並開啟 BAT profile。",
     bat_profile: "BAT profile", bat_choose: "明確選擇 profile", bat_search_help: "選擇你要開啟的 profile，再於 BAT 搜尋完整標題或 ID。這不會直接定位到此工作階段。",
@@ -634,6 +635,7 @@ const STRINGS = {
     integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。",
   },
   en: {
+    bat_review_again: "Review original choice again", bat_preview_expired: "This preview was never submitted. Explicitly review the original profile again after reopening before launching BAT.",
     bat_handoff: "View in BAT", bat_copy_title: "Copy full title", bat_copy_id: "Copy full ID", bat_copied: "Copied.", bat_copy_manually: "Select and copy the complete text below.",
     bat_open: "Open in BAT", bat_browser: "Search in BAT using the full title or ID above. The desktop app can open an explicitly chosen BAT profile.",
     bat_profile: "BAT profile", bat_choose: "Choose a profile explicitly", bat_search_help: "Choose a profile, then search in BAT with the full title or ID. This does not focus the session automatically.",

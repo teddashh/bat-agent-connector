@@ -30,7 +30,11 @@ The shared UI stores the exact preview ID, chosen profile, configuration binding
 and launch summary before any launch request. The storage namespace includes the
 central backend/principal and complete session identity. Initial and read-back
 receipts must match that preview ID and exact one-profile/no-dashboard request.
-Reload and lost replies read the original receipt only. Unknown/prepared receipts
+Reload and lost replies read the original receipt only. An unsubmitted preview
+restored from storage remains cancellable but cannot launch until the user explicitly
+reviews the original profile again, obtaining a fresh native handle. This does not
+release attempted requests whose receipt is absent or unknown; `PREVIEW_EXPIRED`
+never authorizes a replacement for those requests. Unknown/prepared receipts
 remain frozen; there is no automatic new preview, relaunch or selection change.
 A new choice requires an explicit action after a definite terminal outcome, or
 cancelling a preview which has never been submitted. Storage failure prevents the
