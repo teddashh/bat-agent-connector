@@ -643,7 +643,7 @@ def record_event(journal, seq, *, legacy=False, extra=None):
             refs.append(("session", f"{host}/{sid}"))
         if ext.get("worktree_id") and db.execute("SELECT 1 FROM observation_resources WHERE resource_type='worktree' AND resource_id=?", (ext["worktree_id"],)).fetchone():
             refs.append(("worktree", ext["worktree_id"]))
-        if host and path and op["action"] in {"checkpoint.continue", "integration.handoff"}:
+        if host and path and op["action"] in {"checkpoint.continue", "integration.handoff", "repository.continue"}:
             wid = worktree(journal, host, op["action"], op_id, "repair" if op["action"] == "integration.handoff" else "worktree",
                            path=path, branch=ext.get("branch"), clone=ext.get("clone_path"), session_id=sid, seq=seq)
             refs.append(("worktree", wid))

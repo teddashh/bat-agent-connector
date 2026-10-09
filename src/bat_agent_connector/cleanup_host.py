@@ -438,7 +438,8 @@ def mutate(req):
         if phase == "remove.branch":
             branch = req["branch"]
             connector_branch = branch.startswith(("batc/cp-", "batc/fix-")) or (
-                req.get("flavor") == "bat" and branch.startswith("bat/"))
+                req.get("flavor") == "bat" and branch.startswith("bat/")) or (
+                req.get("flavor") == "published" and re.fullmatch(r"batc/published-[0-9a-f]{12}", branch))
             if not connector_branch or not req["delivered"]:
                 raise ValueError("BINDING_MISMATCH")
             full = "refs/heads/" + branch

@@ -29,6 +29,7 @@ from . import (
     deployment,
     integration,
     pr_delivery,
+    repository_sync,
     resource_policy,
     service,
     session_start_operations,
@@ -102,6 +103,7 @@ class ApiV1:
         artifact_capture.install(daemon.ops, daemon._admin_token)
         artifact_managed.install(daemon.ops)
         session_start_operations.install(daemon.ops)
+        repository_sync.install(daemon.ops)
 
         from . import bulk_approval
         bulk_approval.install(daemon.ops, daemon._admin_token)
@@ -110,6 +112,7 @@ class ApiV1:
         self._streams_by_actor: dict[str, int] = {}
         self.routes = [
             ("POST", r"/api/v1/approval-previews", self.approval_preview, "observe"),
+            ("POST", r"/api/v1/repository-previews", self.repository_preview, "observe"),
             ("POST", r"/api/v1/cleanup-previews", self.cleanup_preview, "observe"),
             ("GET", r"/api/v1/cleanup-retained", self.cleanup_retained, "observe"),
             ("GET", r"/api/v1/cleanup-tombstones", self.cleanup_tombstones, "observe"),
@@ -408,6 +411,7 @@ class ApiV1:
                                      "reasons": ([] if self._can_continue(name) else ["HOST_CLEANUP_UNAVAILABLE"])}
                                      for name in fleet.config.hosts]},
                      "features": {"dashboard_sync": {"version": 1, "bootstrap": "/api/v1/bootstrap", "checkpoint_replay": True},
+                                  "repository_sync": repository_sync.capabilities(self.daemon.ops),
                                   "cleanup": True, "cleanup_task": True, "inventory": True, "session_history": True, "resource_relations": True, "discovery_scope": True,
                                   "worktree_history": {"known_bindings_only": True}, "history": {"source": "journal", "legacy_transitions": "may_be_incomplete", "optional_adapters": ["delivery_part_a", "delivery_part_b"],
                                       "observed_event_kinds": [r[0] for r in self.daemon.journal.db.execute("SELECT DISTINCT kind FROM api_events ORDER BY kind")]}, "events_stream": True, "operations": True, "work_items": True,
@@ -430,6 +434,9 @@ class ApiV1:
                                                            "health_required": r.verification.health_required} if r.verification else None,
                                          "rollback": {"supported": r.rollback.supported, "identity": r.rollback.identity,
                                                       "not_undone": list(r.rollback.not_undone)}} for r in gh_cfg.recipes.values()]}
+
+    async def repository_preview(self, principal, body, **_):
+        return 200, {"preview": await repository_sync.preview(self.daemon.ops, principal, body)}
 
     async def approval_preview(self, principal, body, **_):
         from .bulk_approval import preview

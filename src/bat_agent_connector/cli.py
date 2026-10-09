@@ -779,6 +779,23 @@ def build_parser() -> argparse.ArgumentParser:
             else:
                 c.add_argument("--execution-id")
                 c.add_argument("--include-closed", choices=["true", "false"], default="true")
+    p = sp.add_parser("repository", help="start from an explicitly bound published GitHub version")
+    rsp = p.add_subparsers(dest="repository_cmd", required=True)
+    for name in ("preview", "continue"):
+        c = rsp.add_parser(name)
+        c.add_argument("repository")
+        c.add_argument("host")
+        c.add_argument("workspace_id", help="exact configured BAT workspace ID")
+        c.add_argument("--ref", required=True, help="exact refs/heads/... name")
+        if name == "continue":
+            c.add_argument("--sha", required=True, help="reviewed full published head SHA")
+            c.add_argument("--repository-id", required=True, type=int)
+            c.add_argument("--binding-digest", required=True)
+            c.add_argument("--prompt", required=True)
+            c.add_argument("--agent", choices=["claude", "codex"], default="claude")
+            c.add_argument("--title")
+            c.add_argument("--key", help="original idempotency key; omitted creates an independent request")
+            c.add_argument("--confirm", action="store_true")
     p = sp.add_parser("checkpoint", help="record a session's commit, then continue from it in a managed session")
     csp = p.add_subparsers(dest="checkpoint_cmd", required=True)
     c = csp.add_parser("create", help="record a checkpoint (reads only; works on sessions created in BAT)")
@@ -994,6 +1011,27 @@ def cmd_artifact(args) -> int:
                 file.write(data)
     _print(out, True)
     return 0
+
+
+def cmd_repository(args) -> int:
+    import uuid
+
+    from .task_daemon import request
+    target = {k: getattr(args, k) for k in ("repository", "host", "workspace_id")}
+    if args.repository_cmd == "preview":
+        out = request("repository_preview", **target, source_ref=args.ref, entry="cli")
+    else:
+        if not args.confirm:
+            raise WriteRefused("repository continue requires --confirm")
+        key = args.key or "cli-" + str(uuid.uuid4())
+        out = request("op_submit", action="repository.continue", target=target,
+            params={"source_ref": args.ref, "source_sha": args.sha, "prompt": args.prompt, "agent": args.agent,
+                    **({"title": args.title} if args.title is not None else {})},
+            preconditions={"repository_id": args.repository_id, "binding_digest": args.binding_digest},
+            idempotency_key=key, wait_s=30, entry="cli", timeout=40)
+        out = {**out, "idempotency_key": key}
+    _print(out, True)
+    return 1 if (out.get("operation") or {}).get("status") in {"failed", "cancelled"} else 0
 
 
 def cmd_checkpoint(args) -> int:
@@ -1298,6 +1336,7 @@ def _mutation_requested(args) -> bool:
     if command == "import-bat":
         return args.output != "-"
     mutating = {"artifact": ("artifact_cmd", {"upload", "capture", "managed-capture", "accept"}),
+                "repository": ("repository_cmd", {"continue"}),
                 "resource-cleanup": ("cleanup_cmd", {"apply"}),
                 "checkpoint": ("checkpoint_cmd", {"create", "continue", "revalidate"}),
                 "delivery": ("delivery_cmd", {"update-pr", "merge", "deploy", "rollback", "retry"}),
@@ -1366,6 +1405,8 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.cmd == "resource-cleanup":
             return cmd_resource_cleanup(args)
+        if args.cmd == "repository":
+            return cmd_repository(args)
         if args.cmd == "checkpoint":
             return cmd_checkpoint(args)
         if args.cmd == "delivery":

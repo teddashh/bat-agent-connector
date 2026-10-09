@@ -11,7 +11,7 @@ import json
 import statistics
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -986,6 +986,7 @@ async def session_send(
     control_version: int | None = None,
     operation_id: str | None = None,
     _exact_session_id: bool = False,
+    _before_frame: Callable[[], Awaitable[None]] | None = None,
 ) -> dict:
     _guard(fleet, host, confirm)
     if not isinstance(text, str) or not text.strip():
@@ -1075,6 +1076,8 @@ async def session_send(
             text=text,
         )
         async def verify_at_frame() -> None:
+            if _before_frame:
+                await _before_frame()
             entry = registry.get(host, sid) or {}
             if entry.get("write_scope") == "confined" and entry.get("confinement"):
                 observed = await c.guard_read("claude:get-session-meta", {"sessionId": sid})

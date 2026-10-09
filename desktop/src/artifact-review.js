@@ -10,9 +10,11 @@ const aid = value => typeof value === 'string' && /^art_[0-9a-f]{32}$/.test(valu
 const tid = value => typeof value === 'string' && /^[0-9a-f-]{8,64}$/.test(value);
 const commandId = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f-\x9f]/.test(value);
 const terminal = op => ['succeeded', 'failed', 'cancelled'].includes(op?.status);
-const executions = ['checkpoint.continue', 'integration.handoff', 'session.send', 'session.start'];
+const sha40 = value => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value);
+const executions = ['checkpoint.continue', 'integration.handoff', 'session.send', 'session.start', 'repository.continue'];
 export const managedCaptureExecution = op => oid(op?.operation_id) && op.status === 'succeeded' && executions.includes(op.action) &&
-  (op.action !== 'session.start' || op.result?.started === true && op.result.prompt_sent === true && op.result.message_id === `batc-${op.operation_id}`);
+  (op.action !== 'session.start' || op.result?.started === true && op.result.prompt_sent === true && op.result.message_id === `batc-${op.operation_id}`) &&
+  (op.action !== 'repository.continue' || op.result?.message_id === `batc-${op.operation_id}` && sha40(op.result.source_sha));
 const safePath = path => typeof path === 'string' && path && new TextEncoder().encode(path).length <= 4096 &&
   !/[\\\x00-\x1f\x7f-\x9f]/.test(path) && path.split('/').every(p => p && p !== '.' && p !== '..' && p.toLowerCase() !== '.git');
 const selectorValid = s => record(s) && (equal(Object.keys(s).sort(), ['execution_operation_id']) && oid(s.execution_operation_id) ||
