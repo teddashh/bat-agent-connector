@@ -346,7 +346,8 @@ def _all(ops):
             return item
         intent_type, slot = {"checkpoint": ("checkpoint.continue", "worktree"),
                              "repair": ("integration.handoff", "repair"),
-                             "task": ("task", "external_worktree"), "bat": ("registry", "worktree")}[flavor]
+                             "task": ("task", "external_worktree"), "bat": ("registry", "worktree"),
+                             "published": ("repository.continue", "worktree")}[flavor]
         projected = _resource(host, "worktree", intent, slot, path=path, repository=repo, branch=branch,
                               flavor=flavor, base=base, source=source, proven=True)
         projected["resource_id"] = worktree_id(host, intent_type, intent, slot)
@@ -366,6 +367,16 @@ def _all(ops):
         alias(containers[ck], *ids)
         return item
 
+    from .repository_sync import carriers as published_carriers
+    for plan in published_carriers(ops, op_rows):
+        host = plan["target"]["host"]
+        w = wt(host, plan["clone_path"], plan["worktree_path"], plan["branch"], plan["operation_id"],
+               "published", plan["source_sha"], [plan["operation_id"], host + "/" + plan["session_id"]], source=plan["markers"])
+        w["proven"] = plan["carrier_proven"]
+        current = next((e for e in regs if e.get("host") == host and e.get("session_id") == plan["session_id"]), None)
+        if current and (current.get("start_operation_id") != plan["operation_id"] or
+                        current.get("repository_binding") != plan["binding_digest"]):
+            _reason(w, "BINDING_MISMATCH")
     for r in db.execute("SELECT * FROM checkpoint_runs ORDER BY created_at"):
         cp = cps[r["checkpoint_id"]]
         wt(r["host"], r["clone_path"], r["worktree_path"], r["branch"], r["operation_id"], "checkpoint",
@@ -1063,7 +1074,7 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None, automatic=Fa
                         src = i.get("source")
                         if src and isinstance(src, str) and markers.get("batc.source") != src:
                             i["repository_error"] = "CLONE_NOT_OURS"
-                        if src and isinstance(src, dict) and (markers.get("batc.role") != "integration" or any(markers.get("batc." + k) != v for k, v in src.items())):
+                        if src and isinstance(src, dict) and (markers.get("batc.role") != ("published" if i.get("flavor") == "published" else "integration") or any(markers.get("batc." + k) != v for k, v in src.items())):
                             i["repository_error"] = "CLONE_NOT_OURS"
                 container = containers.get((host, repo))
                 for ref, sha in read.get("refs", {}).items():
@@ -1190,11 +1201,11 @@ async def snapshot(ops, target, choices, *, only=None, own_op=None, automatic=Fa
             w = items[i["worktree_id"]]
             absent_cleaned = w.get("observation", {}).get("exists") is False and all(
                 r["code"] == "RESOURCE_CLEANED" for r in w["reasons"])
-            if (w["decision"] in {"reclaim", "already_absent"} or absent_cleaned) and i.get("flavor") in {"checkpoint", "repair", "bat"}:
+            if (w["decision"] in {"reclaim", "already_absent"} or absent_cleaned) and i.get("flavor") in {"checkpoint", "repair", "bat", "published"}:
                 i["dependencies"] = [w["resource_id"]] if w["decision"] == "reclaim" else []
             else:
                 _reason(i, "CONTENT_REQUIRED", resource_id=w["resource_id"])
-            if i.get("flavor") not in {"checkpoint", "repair", "bat"}:
+            if i.get("flavor") not in {"checkpoint", "repair", "bat", "published"}:
                 _reason(i, "RESOURCE_KIND_UNSUPPORTED")
             if i["reasons"]:
                 i.update(steps=[], decision="retain")
@@ -1834,6 +1845,8 @@ async def _execute_item(ctx, item, payload, *, authority=None):
             resource_policy.check_checkpoint_worktree(hc, item["repository"], item["path"], item["branch"])
         elif item["flavor"] == "repair":
             resource_policy.check_repair_worktree(hc, item["repository"], item["path"], item["branch"])
+        elif item["flavor"] == "published":
+            resource_policy.check_published_worktree(hc, item["repository"], item["path"], item["branch"])
         else:
             resource_policy.check_cleanup_worktree(hc, item["repository"], item["path"], item["branch"])
     elif item["kind"] == "local_branch":
