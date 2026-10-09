@@ -321,9 +321,31 @@ artifact：與 upload 相同，獲 `observe` 的 principal 可讀已 ready 的 a
 或 task-local capability 不可讀。Preview/提交不能借另一個 credential，MCP 不回退 admin。
 Project/work-item 附件仍走既有 authority 和固定 ArtifactRef，不因 capture 放寬其操作 scope。
 
-UI 選檔器可稍後接此兩步 API；B1 不回傳目錄 listing，不將任意 host path 顯示成 client
-file picker handle。驗收涵蓋 HTTP/MCP/CLI、scope/credential 邊界、篡改/過期、所有 path/file
-拒絕、中途改動/rebinding、quota、cancel/restart/lost ACK 及來源 bytes/index/refs 不變。
+### 共用人工單檔 UI
+
+Browser 與 Tauri 使用 `desktop/src/capture.js` 的同一表單：人工 session 頁預填 host／完整
+session ID，附件草稿旁亦可明填這兩個欄位及一個遠端相對檔案路徑。不是本機 OS 選檔器，
+沒有目錄 listing。先讀現有 session observation 正面確認 `manual`，再呼叫中央 preview；
+scope 與 capability 限制 UI 可用按鈕，中央仍重新查核當下 authority／來源。
+
+檢閱區顯示檔名、bytes、SHA-256、host/session、來源 root／repository、HEAD 和到期時間；
+使用者勾選已檢閱並按保存才提交既有 `artifact.capture`。完整 preview、固定 envelope、
+operation key、接受後 operation ID 保存在既有 endpoint/server/principal namespace。
+回覆遺失保留原 key 重試；已接受的意圖不因 preview 過期換新內容。重載以原 operation
+readback 恢復；切換帳號／backend 不沿用別人的草稿或 key。損壞的 preview 不造成整頁失敗，
+可恢復的原 operation ID／key 仍保留。事件 refresh 等待既有讀取後再讀新 evidence，失敗不 ACK。
+
+成功必須查回 ready revision，驗證原 operation 的 action／preview ID、檢閱 digest 及中央
+`manual_capture` source receipt，才出現可選用 ArtifactRef。「加入附件草稿」是獨立明確操作；
+不自動存 work item／推論 project 所有權。Tauri 僅新增固定 preview POST，typed body 只准
+host、session ID、relative path；沿用 trusted central/native credential，不新增 path/URL proxy。
+
+`npm run test:capture` 以生成後 browser assets、真實中央 HTTP／固定唯讀 helper、暫存 Git
+來源與 MockBat 驗證二進位內容、reload readback、原 bytes/index/refs 不變且沒有 BAT writes
+或新增 project/work item。Browser/native IPC fixtures 另涵蓋 scope、過期、unknown 來源、
+lost reply、帳號切換、錯誤回覆、損壞草稿、事件讀取失敗及 en/zh-TW 的 390/768/1440 排版。
+這些不等於實機 host／Windows WebView 驗收。中央驗收另涵蓋 HTTP/MCP/CLI、credential、
+篡改、所有 path/file 拒絕、中途改動/rebinding、quota、cancel/restart。
 
 ## Managed 成果擷取與接受（Part B2，後續審查）
 
@@ -341,7 +363,7 @@ C才新增target host/workspace選擇。任何writes+orchestrate+managed_roots+a
 
 ## 尚未涵蓋
 
-- B1 的 HTTP/MCP/CLI 人工單檔擷取已實作；原生／browser 選檔 UI 接點另行接入，未宣稱實機驗收。B2（managed成果capture／accept）與 C（target選擇／跨hostfetch）後續再審。
+- B1 的 HTTP/MCP/CLI 與共用 browser／desktop 人工相對檔案路徑表單已實作，未宣稱 OS 檔案選擇器或實機驗收。B2（managed成果capture／accept）與 C（target選擇／跨hostfetch）後續再審。
 - 完整dirty snapshot、任意目錄解壓、可執行附件／URL下載、非checkpoint的Task Service附件派工不在A。舊context_refs字串不提供readiness。
 - Artifact deletion、retention期限／read model／server draft holds屬未來artifact cleanup。目前store只留內容／拒絕超額，cleanup對artifact保持RESOURCE_KIND_UNSUPPORTED。
 - GitHub Actions build artifacts／deploy promotion與本store分開；若日後橋接需兩邊ID／digest證據，不能互換。

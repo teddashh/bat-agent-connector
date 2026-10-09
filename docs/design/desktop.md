@@ -128,6 +128,33 @@ Metadata upload admission is the existing `artifact.upload` operation. Binary co
 `BATC_ARTIFACT_ROOT=/path/to/integrated/backend npm run test:artifacts` uses generated assets against real central HTTP upload/operation endpoints and a local fixture artifact helper. Binary bytes were verified in a temporary managed worktree; MockBat is the only runtime. Browser/native IPC fixtures cover binary byte preservation, lost replies, source-head changes on reopening, account changes during a delayed file read, and both languages at three widths. Rust tests separately verify fixed routes, credential handling, binary bytes, size limits and refused redirects. The chooser is the WebView file input: a native filesystem picker, upload streaming/progress/cancellation, OS credential enrollment, direct attachment downloads, and full live R05/T08 acceptance remain pending.
 
 
+## Manual remote file capture
+
+The shared capture form appears in manual session details and alongside attachment drafts. It requires an
+explicit configured host, full manual session ID and one relative source path. A reviewed preview shows the
+filename, byte count, SHA-256, source root/repository, HEAD and expiry before an explicit save. This is a remote
+single-file read, with no directory listing or local OS picker. Central revalidates source identity, authority
+and bytes; the frontend's manual observation and scope checks are only an early gate.
+
+Capture uses the existing preview and `artifact.capture` operation. Identity-scoped storage retains the source
+draft, reviewed evidence, exact request/key and accepted operation through reload or a lost reply. An accepted
+intent reads back the original operation even after preview expiry. A result becomes selectable only after its
+ready revision, reviewed digest and central capture operation proof match. Adding it to an attachment draft
+requires a separate click; capture does not assign project ownership or save the surrounding work item.
+Malformed stored preview data cannot crash the page or replace a recoverable accepted intent. Event callbacks
+join pending reads and refresh evidence before acknowledgment; failed reads retain the event cursor.
+
+Native IPC permits only the fixed `/artifact-capture-previews` POST with a typed host/session/relative-path
+body. It refuses query parameters, unknown fields and unsafe paths, while accepting valid Unicode, spaces and
+literal percent characters in relative paths. Credentials remain native and requests target the configured
+central origin. No arbitrary filesystem or shell command is added.
+
+`npm run test:capture` uses the real central HTTP API, temporary Git source, a fixed readonly local helper and
+MockBat. It checks binary content, accepted readback after reload, unchanged source bytes/index/refs, and no
+BAT writes or inferred project/work-item ownership. Browser/native IPC fixtures cover recovery, identity and
+scope boundaries plus en/zh-TW layouts at 390/768/1440. Windows WebView and live remote host acceptance remain
+pending, as do full dirty snapshots, managed-result capture/acceptance and cross-host continuation.
+
 ## Observation UI (R04)
 
 Session pages expose central connection, loading, tab, activity, lifecycle, enumeration and freshness separately, with each field's observation time, source and stale flag. Unloaded/no-tab/idle never imply an ended lifecycle. Host discovery shows recorded profiles, last successful observation, latest failure, read authority, methods, coverage and explicitly unscanned scopes; the desktop starts no additional scanner.
