@@ -57,7 +57,8 @@ evidence 不猜測；permission 的 dont_ask_again 仍走既有 confinement poli
 Legacy 的可選 false defaults 在 adapter 省略；跨 HTTP／MCP／CLI key replay 仍比較完全相同的
 canonical envelope，不宣稱 raw HTTP 的 omitted／explicit false 等不同 params 都會語意去重。
 
-相容結果保留完整 service receipt，加 operation ID/status/error/key 投影。未知 acceptance、
+相容結果保留完整 service receipt，加 operation ID/status/error/key 投影；operation_status_reason
+保留已保存的 redacted 原因，operate-only caller 不須另有 observe scope 才知道拒絕或未知的說明。未知 acceptance、
 queue、answer 結果為 null；lost ACK 只讀回固定 prompt/turn，Codex 弱游標不冒充 exact echo。
 Task Service 仍擁有原 command、pause/version/binding/final frame gate，不增加第二個 writer。
 B1 的 existing-operation authorization hook 保留於 `_prepare_create`，不因共用 adapter 跳過。

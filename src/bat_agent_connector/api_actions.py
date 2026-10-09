@@ -303,7 +303,8 @@ async def legacy_session_control(ops: OperationService, principal: Principal, me
         result = {"mode": effective.get("mode", "soft"), "channel": None, "result": None, "note": None}
     return {"host": target["host"], "session_id": target["session_id"], **result, **(op.get("result") or {}),
             "operation_id": op["operation_id"], "operation_status": op["status"],
-            "operation_error_code": op["error_code"], "idempotency_key": op["idempotency_key"],
+            "operation_error_code": op["error_code"], "operation_status_reason": op["status_reason"],
+            "idempotency_key": op["idempotency_key"],
             "idempotency_enabled": op["idempotency_enabled"]}
 
 
