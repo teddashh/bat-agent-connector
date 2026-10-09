@@ -6,6 +6,7 @@
     "main"
   ],
   "permissions": [
+    "allow-desktop-update",
     "allow-native-status",
     "allow-connector-connect",
     "allow-connector-disconnect",
