@@ -176,6 +176,8 @@ def check_grant(grant: WriteGrant | None, host: str, channel: str, params: dict 
                                f"the policy grant for {grant.action} does not cover {channel!r} on this session")
     from .failover_operations import check_writer
     check_writer(host, grant.session_id, channel, workdir=grant.workdir)
+    from .worktree_merge_operations import check_writer as check_merge_writer
+    check_merge_writer(host, grant.session_id, channel, workdir=grant.workdir or (params or {}).get("cwd") or ((params or {}).get("options") or {}).get("cwd"))
 
 
 # --------------------------------------------------------------------------- paths
@@ -449,7 +451,8 @@ async def authorize_session(fleet, host: str, action: str, t: dict, *, live: Liv
                             cls: Classification | None = None) -> WriteGrant:
     """Grant one session-scoped action, or raise ResourceReadOnly before any write frame."""
     from .cleanup import guard
-    guard(host, session_id=t["id"], path=t.get("cwd") or t.get("worktreePath"))
+    guard(host, session_id=t["id"], path=t.get("cwd") or t.get("worktreePath"),
+          writer=action not in {"session.stop", "session.interrupt"})
     m = BY_ACTION[action]
     if m.scope != "session":
         raise BatError(f"internal: {action} is not a session action")
@@ -536,6 +539,8 @@ async def authorize_shared_session(fleet, host: str, session_id: str, owner: dic
     hc = fleet.config.host(host)
     from .failover_operations import check_writer
     check_writer(host, owner['id'], shared=True)
+    from .worktree_merge_operations import check_writer as check_merge_writer
+    check_merge_writer(host, owner['id'], workdir=owner.get('worktreePath') or owner.get('cwd'))
     cls = classify(hc, owner["id"], terminal=owner, entries=_entries(host))
     if cls.code:
         raise ResourceReadOnly(cls.code, f"a new session cannot share {owner['id'][:8]}'s folder: {cls.reason}")
