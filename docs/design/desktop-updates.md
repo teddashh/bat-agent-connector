@@ -42,7 +42,8 @@ creation can be reviewed again after Fleet ownership is resolved.
 
 The ordinary `desktop` workflow builds **unsigned validation packages**. The manually
 invoked `desktop-signed-candidate` workflow only builds and uploads an updater-signed
-candidate; it never creates a release, publishes a feed, installs an app or restarts a host.
+candidate and runs the disposable hosted-runner NSIS/WebView install fixture; it never
+creates a release, publishes a feed, installs on an operator machine or restarts a live host.
 Its exact 40-character source SHA must already belong to main. Version comes from the
 committed Tauri config; canonical workflow comes from the same checkout's skill.
 
@@ -76,6 +77,12 @@ bytes, wrong keys and ambiguous signed versions. No fixture invokes an installer
 Shared UI tests cover both languages at 390/768/1440, disabled unsigned builds, explicit
 actions and lost-reply recovery. Native final-effect tickets have separate queue/quit tests.
 
-Packaged Windows stop/install/reopen, signing-environment execution, real release feed
+The NSIS/WebView fixture installs the exact built package on a disposable Windows runner,
+checks digest/version readback, close/single-instance/relaunch and uninstall, and uploads
+receipts/screenshots. The signed workflow runs it after signature/feed verification and
+before uploading the distributable candidate. It does not exercise the in-app signed
+upgrade path, real credentials, physical tray interaction or an existing user's data.
+
+Installed Windows updater stop/install/reopen, signing-environment execution, real release feed
 publication and installed version readback remain acceptance gates. Linux packages do not
 offer this Windows installer flow. Fixture/CI results are not installed/live evidence.

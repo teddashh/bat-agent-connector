@@ -8,6 +8,34 @@
 
 ## 目前續作
 
+### 2026-10-09 發行門檻收斂
+
+#64／#65／#66 已合併；以下各段保留當時候選的歷史證據。
+[#67](https://github.com/teddashh/bat-agent-connector/pull/67) 再合併為
+`68106542e1b120de8457f4e64a134c2c76e5481e`，與已測候選
+`be9804039dd526ec105bb466a0f9f72bf47902e0` 的 tree 同為
+`384bf572df18f65970c4fac2639ef4c9e2c003c5`。Canonical workflow 保持 `2026-10-08.14`。
+GLib 保留 0.18.5 原版本並 backport upstream 的兩行指標修正，來源完整性／真正 dependency graph
+與 optimized iterator regression 成為 gates；未忽略 advisory。
+[#53](https://github.com/teddashh/bat-agent-connector/issues/53) 已關閉，Dependabot alert #1 為 fixed，未 dismissed。
+
+固定候選 [Python CI](https://github.com/teddashh/bat-agent-connector/actions/runs/37934974542)
+3.10–3.13 各 **3187 passed／33 skipped**；
+[desktop CI](https://github.com/teddashh/bat-agent-connector/actions/runs/37934974673)
+Windows NSIS／Linux deb、585 shared UI、12 state、每平台 81 app Rust、release verifier、GLib release
+regression 及 Linux 真 packaged WebView／關窗隱藏／single-instance 通過。Windows metadata locale
+failure 已修正並由最終 Windows job 通過，舊失敗保留。這些仍是 unsigned／F／N 證據。
+私有 installer #12 已合併，pin 同一候選與 `.14`；17 temporary tests 在 Python 3.10／3.13 通過，
+source verify-only 通過。未執行 live 安裝。正式簽章、實機／live 驗收及 release feed 發布仍未完成。
+
+新增 Windows installed fixture 只允許 GitHub-hosted disposable runner：驗證 NSIS 真安裝、
+binary digest／PE 與 registry version、license resources、真 WebView loopback polling、WM_CLOSE、
+single-instance、process restart 與 uninstall，保存 screenshots／JSON。這是 N 層安裝 fixture，
+不能替代真人 Credential Manager／跨登入、實體 tray 操作、signed update 或真中央／BAT 的 I／L 驗收。
+其執行結果以包含此 fixture 的候選 CI 為準，不沿用 #67 的綠燈。
+
+### 先前整合證據
+
 最新追蹤 [#59](https://github.com/teddashh/bat-agent-connector/issues/59)。[#61](https://github.com/teddashh/bat-agent-connector/pull/61)
 已合併為 `1a8984cac57146c3bd8b842b94b32a30c5525c15`；固定候選 `07bc762089e00e00bcf6e06d93051427a8ad6f84`
 與 merge 的 tree 同為 `8ca0a54b46facd3a2e5e209f5491ca088b8cc609`。Managed start、task reviewed／automatic cleanup、
@@ -21,7 +49,7 @@ generated browser drift 與 secrets scan 通過。Actual-central fixtures 用 te
 cleanup、native files 及獨立 reviewer 的固定 bytes/revision。Local full Python 3.10、3.13 各 2680／33；先前磁碟
 壅塞的 3.13 run 有未釐清 failures 且中止，沒有計為通過，後續 isolated fixtures 與 exact-head CI 完整通過。
 私有 installer #10 已合併 `67be22ea748c49e055a58e9fb72ef0c91d8b2161`，pin 此候選／`.8`；17 temporary tests
-在 3.13／3.10 通過，真 source verify-only 通過，沒有修改 live 安裝。Linux GLib release gate #53 仍開啟。
+在 3.13／3.10 通過，真 source verify-only 通過，沒有修改 live 安裝。當時 Linux GLib release gate #53 尚開啟；現況見上方收斂紀錄。
 
 後續主線與候選分開追蹤，不計為 installed 完成：
 
@@ -136,7 +164,7 @@ Desktop CI 現在也跑六組 actual-central fixtures，保存合成 UI 證據�
 - 獨立審查修正了 artifact scalar admission、deployment cursor bounds、interrupt history prefix binding、capture replay/control credential binding、installer YAML 與 concurrent config preservation。
   先前 full/CI failures 均保留；#48/#49/#50 的舊 fixture failures 已由 #51 的 canonical-source/data-step 修正及整組 CI 覆蓋，未把舊紅燈改稱綠燈。
 - #38 早期本機 3.10 full 曾為 1834 passed/33 skipped/1 個 60 秒 settlement timeout；journal 顯示持續進展，原碼單測 2.52 秒重跑通過。後續 exact-head 四版 CI 各 1835/33 通過；不把單測 retry 當 full。
-- 合併後新增 [Linux GLib release gate #53](https://github.com/teddashh/bat-agent-connector/issues/53)：鎖定的 `glib 0.18.5` 受 [RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429.html) 影響，目前 GTK/WebKit 0.18 相依沒有可直接更新的已發布修正版。Windows locked graph 不含該依賴；Linux production distribution 仍須已審修正。CI 綠燈不消除此 advisory，Dependabot 保持開啟。
+- 當時新增 [Linux GLib release gate #53](https://github.com/teddashh/bat-agent-connector/issues/53)：registry `glib 0.18.5` 受 [RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429.html) 影響。後續 #67 已 backport upstream 修正並驗證來源／optimized regression，#53 關閉、Dependabot fixed；見上方固定候選證據。
 - GitHub Codex bot 後期額度用盡，後續使用獨立本機 Codex peer review，沒有冒稱新 bot verdict。
   **沒有 live host/provider writes、主機安裝或 Windows installed acceptance；M1/M2/M3 與完整產品交付尚未完成。**
 

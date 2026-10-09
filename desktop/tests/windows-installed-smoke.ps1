@@ -1,0 +1,198 @@
+# Real NSIS install/WebView fixture, restricted to a disposable hosted runner.
+param([Parameter(Mandatory)][string]$Endpoint, [Parameter(Mandatory)][string]$Evidence)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted') {
+    throw 'Only disposable GitHub-hosted Windows runners may run this fixture'
+}
+if ($Endpoint -notmatch '^http://127\.0\.0\.1:[0-9]+$') { throw 'Loopback fixture required' }
+$config = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+$configRoot = Join-Path ([Environment]::GetFolderPath('ApplicationData')) $config.identifier
+$dataRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) $config.identifier
+$registryRoot = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+function Get-Registration {
+    if (-not (Test-Path -LiteralPath $registryRoot)) { return }
+    @(Get-ChildItem $registryRoot | ForEach-Object { Get-ItemProperty $_.PSPath } |
+        Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName -eq $config.productName })
+}
+foreach ($path in @($configRoot, $dataRoot)) {
+    if (Test-Path -LiteralPath $path) { throw "Refusing existing app state: $path" }
+}
+if (@(Get-Registration).Count -ne 0) { throw 'Refusing an existing app installation' }
+if (Get-Process -Name better-agent-dashboard -ErrorAction SilentlyContinue) { throw 'Refusing an existing Dashboard process' }
+$installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe)
+if ($installers.Count -ne 1) { throw 'Exactly one NSIS package required' }
+$installer = $installers[0].FullName
+$built = (Resolve-Path src-tauri/target/release/better-agent-dashboard.exe).Path
+$installRoot = Join-Path $env:RUNNER_TEMP ('batc-installed-' + [guid]::NewGuid().ToString('N'))
+$installDir = Join-Path $installRoot 'Dashboard install'
+$binary = Join-Path $installDir 'better-agent-dashboard.exe'
+New-Item -ItemType Directory -Path $installRoot | Out-Null
+New-Item -ItemType Directory -Path $Evidence -Force | Out-Null
+$receipt = [ordered]@{
+    status = 'running'; evidence_level = 'native-installed-fixture'; live_accepted = $false
+    source_sha = (git rev-parse HEAD); source_tree = (git rev-parse 'HEAD^{tree}')
+    runner_os = [Environment]::OSVersion.VersionString; version = $config.version
+    installer_sha256 = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+    steps = @()
+}
+function Record-Step([string]$Name) {
+    $receipt.steps += $Name
+    $receipt | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $Evidence 'result.json') -Encoding utf8
+    Write-Host "Passed: $Name"
+}
+function Wait-Until([scriptblock]$Condition, [string]$Failure, [int]$Seconds = 30) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
+    do {
+        if (& $Condition) { return }
+        Start-Sleep -Milliseconds 150
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw $Failure
+}
+function Run-Installer([string]$Path, [string]$Arguments) {
+    $process = Start-Process -FilePath $Path -ArgumentList $Arguments -PassThru
+    if (-not $process.WaitForExit(60000)) {
+        $process.Kill()
+        throw 'Owned installer exceeded its deadline'
+    }
+    if ($process.ExitCode -ne 0) { throw "Installer exit code: $($process.ExitCode)" }
+}
+function Start-Dashboard {
+    $info = [Diagnostics.ProcessStartInfo]::new($binary)
+    $info.UseShellExecute = $false
+    $info.WorkingDirectory = $installDir
+    $info.Environment['BATC_DESKTOP_TOKEN'] = 'fixture-native-token'
+    [Diagnostics.Process]::Start($info)
+}
+function Stop-Owned([Diagnostics.Process]$Process) {
+    if ($null -ne $Process -and -not $Process.HasExited) {
+        $Process.Kill()
+        if (-not $Process.WaitForExit(10000)) { throw 'Owned app did not exit' }
+    }
+}
+function Poll-Count {
+    $state = Invoke-RestMethod "$Endpoint/_fixture/status" -TimeoutSec 3
+    if (@($state.violations).Count) { throw 'Fixture received a mutation or invalid credential' }
+    @($state.requests | Where-Object { $_.path -eq '/api/v1/events' }).Count
+}
+Add-Type @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class DashboardWindows {
+    private delegate bool EnumProc(IntPtr window, IntPtr data);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc callback, IntPtr data);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr window, uint message, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out Rect rect);
+    [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
+    public static IntPtr[] Find(uint process) {
+        var found = new List<IntPtr>();
+        EnumWindows((window, data) => {
+            uint owner; GetWindowThreadProcessId(window, out owner);
+            var title = new StringBuilder(256); GetWindowText(window, title, title.Capacity);
+            if (owner == process && title.ToString() == "Better Agent Dashboard") found.Add(window);
+            return true;
+        }, IntPtr.Zero);
+        return found.ToArray();
+    }
+}
+'@
+Add-Type -AssemblyName System.Drawing
+function Save-Window([IntPtr]$Window, [string]$Name) {
+    $rect = [DashboardWindows+Rect]::new()
+    if (-not [DashboardWindows]::GetWindowRect($Window, [ref]$rect)) { throw 'Window bounds unavailable' }
+    $bitmap = [Drawing.Bitmap]::new($rect.Right - $rect.Left, $rect.Bottom - $rect.Top)
+    $graphics = [Drawing.Graphics]::FromImage($bitmap)
+    try {
+        $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+        $bitmap.Save((Join-Path $Evidence $Name), [Drawing.Imaging.ImageFormat]::Png)
+    } finally { $graphics.Dispose(); $bitmap.Dispose() }
+}
+$app = $null
+$second = $null
+$reopened = $null
+try {
+    # NSIS /D must be last and unquoted, even when the path contains spaces.
+    Run-Installer $installer "/S /D=$installDir"
+    if (-not (Test-Path -LiteralPath $binary)) { throw 'Installed executable missing' }
+    $proof = Get-Content (Join-Path $Evidence 'bundle-proof.json') -Raw | ConvertFrom-Json
+    $builtHash = (Get-FileHash $built -Algorithm SHA256).Hash.ToLowerInvariant()
+    $installedHash = (Get-FileHash $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+    $receipt.built_binary_sha256 = $builtHash
+    $receipt.installed_binary_sha256 = $installedHash
+    $receipt.bundle_proof = $proof
+    if ($builtHash -cne $proof.built_sha256 -or $installedHash -cne $proof.expected_installed_sha256) {
+        throw 'Installed bytes differ from the reviewed build with its exact NSIS bundle marker'
+    }
+    $version = (Get-Item -LiteralPath $binary).VersionInfo.ProductVersion
+    if ($version -cne $config.version) { throw "Installed PE version mismatch: $version" }
+    $registered = @(Get-Registration)
+    if ($registered.Count -ne 1 -or $registered[0].DisplayVersion -cne $config.version) {
+        throw 'Installed version registration mismatch'
+    }
+    foreach ($name in @('LICENSE', 'COPYRIGHT')) {
+        $source = (Get-FileHash "vendor/glib-0.18.5/$name").Hash
+        if ((Get-FileHash (Join-Path $installDir "third-party/glib/$name")).Hash -cne $source) {
+            throw 'Packaged third-party notice differs'
+        }
+    }
+    Record-Step 'NSIS install, executable digest, PE/registered version and license resources'
+    New-Item -ItemType Directory -Path $configRoot | Out-Null
+    $central = Join-Path $configRoot 'central.json'
+    @{ endpoint = "$Endpoint/"; expected_actor = 'fixture-operator'; contract_version = '2026-10-08' } |
+        ConvertTo-Json | Set-Content $central -Encoding utf8
+    $centralHash = (Get-FileHash $central).Hash
+    $app = Start-Dashboard
+    Wait-Until { if ($app.HasExited) { throw 'Installed app exited before bootstrap' }; (Poll-Count) -gt 0 } 'Installed WebView did not poll'
+    $windows = @([DashboardWindows]::Find($app.Id))
+    if ($windows.Count -ne 1 -or -not [DashboardWindows]::IsWindowVisible($windows[0])) {
+        throw 'Expected exactly one visible Dashboard window owned by the installed app'
+    }
+    $window = $windows[0]
+    Start-Sleep -Milliseconds 700
+    Save-Window $window 'installed.png'
+    Record-Step 'Installed WebView authenticated, bootstrapped and polled the loopback fixture'
+    if (-not [DashboardWindows]::PostMessage($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) { throw 'WM_CLOSE failed' }
+    Wait-Until { -not [DashboardWindows]::IsWindowVisible($window) } 'Close did not hide window'
+    if ($app.HasExited) { throw 'Closing the window terminated the app' }
+    Record-Step 'WM_CLOSE hid the window and retained the original process'
+    $second = Start-Dashboard
+    if (-not $second.WaitForExit(10000) -or $second.ExitCode -ne 0) { throw 'Second launch did not hand off' }
+    Wait-Until { [DashboardWindows]::IsWindowVisible($window) } 'Second launch did not restore original window'
+    $windows = @([DashboardWindows]::Find($app.Id))
+    if ($windows.Count -ne 1 -or $windows[0] -ne $window -or $app.HasExited) { throw 'Original window/process changed' }
+    Record-Step 'Second invocation exited successfully and restored the same window/process'
+    # This is process restart recovery, not a physical tray Quit interaction.
+    Stop-Owned $app
+    $before = Poll-Count
+    $reopened = Start-Dashboard
+    Wait-Until { if ($reopened.HasExited) { throw 'Reopened app exited' }; (Poll-Count) -gt $before } 'Reopened WebView did not resume polling'
+    $windows = @([DashboardWindows]::Find($reopened.Id))
+    if ($windows.Count -ne 1 -or -not [DashboardWindows]::IsWindowVisible($windows[0])) { throw 'Reopened window missing' }
+    if ((Get-FileHash $central).Hash -cne $centralHash) { throw 'Reopen changed central configuration' }
+    Save-Window $windows[0] 'reopened.png'
+    Record-Step 'Owned process termination/relaunch resumed WebView polling and preserved configuration'
+    Stop-Owned $reopened
+    $uninstaller = Join-Path $installDir 'uninstall.exe'
+    Run-Installer $uninstaller '/S'
+    Wait-Until { -not (Test-Path -LiteralPath $binary) -and @(Get-Registration).Count -eq 0 } 'Uninstall left binary or registration'
+    Record-Step 'NSIS uninstall removed the installed executable and version registration'
+    $receipt.status = 'passed'
+} catch {
+    $receipt.status = 'failed'
+    $receipt.error = $_.Exception.Message
+    throw
+} finally {
+    Stop-Owned $second
+    Stop-Owned $reopened
+    Stop-Owned $app
+    $receipt | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $Evidence 'result.json') -Encoding utf8
+    # State was proven absent before this fixture; only fixture-created app data is removed.
+    foreach ($path in @($configRoot, $dataRoot)) {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+    }
+}

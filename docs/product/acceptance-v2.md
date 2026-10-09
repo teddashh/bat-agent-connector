@@ -1,6 +1,6 @@
 # Better Agent Dashboard／Connector：R10 驗收證據矩陣
 
-歷史基線：2026-10-08 23:26 UTC，`6d88f4d`（#51 merge）；續作來源快照為 2026-10-09，main 至 #63，新增候選 #64–#66；最終 checks／merge evidence 見各 PR。依產品負責人提供的
+歷史基線：2026-10-08 23:26 UTC，`6d88f4d`（#51 merge）；2026-10-09 main 已合併 #64–#67；固定候選與 GLib gate closure 見 [目前實作狀態](implementation-status.md#2026-10-09-發行門檻收斂)。依產品負責人提供的
 Tauri 第二版計畫 §24，保留 **A01–A10、B01–B05、C01–C07、D01–D06、E01–E06、T01–T12，共 46 項**。
 範圍見 [realignment-v2.md](realignment-v2.md)，進度見 [implementation-status.md](implementation-status.md)。
 兩份計畫對應同一產品與功能 backlog；Tauri 是更新的介面方向。
@@ -14,7 +14,7 @@ Tauri 第二版計畫 §24，保留 **A01–A10、B01–B05、C01–C07、D01–
 
 - **主線／分支**：程式所在位置；有程式或測試來源不等於已驗收。本輪彙整已記錄測試與審查證據；本文件更新沒有重跑測試。
 - **F（fixture）**：MockBat、FakeGitHub、暫存真 Git／bytes、HTTP、browser／IPC mock。可證明指定邏輯，不能證明真 BAT、WebView 或實際部署。
-- **N（native fixture）**：真 OS 子程序或打包 WebView 接合成服務。Windows PowerShell startup 與 Linux WebKit smoke 都不等於已安裝產品的端到端驗收。
+- **N（native fixture）**：真 OS 子程序或打包 WebView 接合成服務。Windows PowerShell startup、Linux WebKit smoke，以及 disposable Windows runner 上 NSIS 真安裝接 loopback fixture，均不等於使用者實機／live 端到端驗收。
 - **I／L（installed／live）**：實際安裝組合、真中央／BAT／provider 的記錄。以下 46 項均仍需補對應 I／L 證據；未測平台不標支援。
 
 以下代號供矩陣引用。SHA 與 CI 狀態會變；合併／發行前須重新記錄完整 SHA 和該 head 的 checks，不能沿用前一個 head 的綠燈。
@@ -61,8 +61,8 @@ reload/lost reply 與真中央唯讀 bytes/index/refs fixture；`2fc8fd8` 關閉
   固定候選 `07bc762089e00e00bcf6e06d93051427a8ad6f84` 的四版 Python CI 各 2680/33，333 UI；Windows/Linux unsigned packaging 通過。
 - #62 已合併明確 GitHub repository binding 與 fixed published SHA start；#63 已合併中央 relay、fanout、standalone failover。
   固定候選 `927053dd6e6e87185f013c4bfd7834054de179ba`、`3835b14dbaf2a5241461c5db2f780f0b56407114` 的四版 Python CI 分別各 2725/33、2888/33；兩平台 desktop checks 通過。
-- #64 仍是候選：Rust Fleet supervisor、選擇／login／Startup／migration、固定 bootstrap、signed updater 已實作。
-  Windows 空閒 endpoint proof 已修；完整 Windows CI 又找到短路徑 ownership mismatch，`804f483` 修補與獨立 review 完成，最終 checks 待收斂。
+- #64 已合併：Rust Fleet supervisor、選擇／login／Startup／migration、固定 bootstrap、signed updater 已實作。
+  Windows 空閒 endpoint proof 與短路徑 ownership mismatch 已修；最終 #67 Windows／Linux CI 通過，未取代 installed/live 驗收。
 - `integrate/dashboard-release` 累加四個 orchestration 表單、task controls、操作分頁、明確 BAT profile 入口、principal transcript/wait、A03 labels 及中央 verification testimony。
   Labels 只寫 Connector metadata；verification 是外部證詞，不是 trusted Task Service verifier。固定來源與測試範圍見 implementation-status。
   #66 整合最後 legacy `worktree.merge`、Tailscale 狀態／vendor app 入口與 canonical `.14`；checked-exit Git proof 與雙 carrier 排他不能由舊版 BAT 空 status 代替。
@@ -147,7 +147,7 @@ reload/lost reply 與真中央唯讀 bytes/index/refs fixture；`2fc8fd8` 關閉
 | T09 Client 更新／睡眠／crash／切網路 | U `desktop/tests/recovery.spec.ts`／`account-switch.spec.ts`／`dashboard.spec.ts` 的 lost reply/drafts；M durable operations。 | 真 Windows suspend/network/crash 與安裝更新；原 ID 查回、中央 task 不停。#64 已有簽章與 signed-version 驗證、durable installer intent；正式 keys/feed 與真安裝仍未提供。 |
 | T10 Tailscale 未登入、中央停止、固定 bootstrap | K 分層 readiness；U/F 顯示連線／配置失敗，native 不自動建中央 journal。 | #64/#66 實作 native credentials、固定 ensure bootstrap、Tailscale bounded status 與明確開啟 vendor tray app；登入由 vendor UI 完成。待 installed 登入／返回／recipe 驗收，有限恢復、零第二 owner／空 journal。 |
 | T11 帳號／backend 切換與 scope 隔離 | U `test_dashboard_sync.py` T11、`desktop/tests/account-switch.spec.ts`；F local DTO 不含中央 token；S principal-only；#59 候選 `credentials.rs`／`native-credentials.spec.ts` 增加 Windows vault 與身分驗證。 | Windows 原生對話框／Credential Manager 真保存、切換／重啟隔離與 Fleet observe 身分待驗；Linux 尚用 native-memory adapter。 |
-| T12 Canonical desktop/browser、build/update/signature | U `desktop/src`＋`build:all`／`check:browser`、locked dependencies；S generator/version checks；F packaging CI。 | 最終單一整合 source/pins、可重建產物、簽章與更新相容／回退；不能把 unsigned NSIS/deb 或兩個分支各綠當正式發行。另有 [Linux GLib advisory gate #53](https://github.com/teddashh/bat-agent-connector/issues/53)，須已審修正後才作 Linux production distribution。 |
+| T12 Canonical desktop/browser、build/update/signature | U `desktop/src`＋`build:all`／`check:browser`、locked dependencies；S generator/version checks；F packaging CI。#67 修正 GLib，source/pin 與 optimized regression 已通過，[#53](https://github.com/teddashh/bat-agent-connector/issues/53) 已關閉。 | 正式簽章、installed updater 相容／回退、release feed 及固定版本 readback；unsigned packages 與 disposable Windows 安裝 fixture 均不是正式發行或使用者實機驗收。 |
 
 ## 同一候選版本的可重現驗收
 
