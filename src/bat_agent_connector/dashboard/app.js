@@ -3531,8 +3531,10 @@ var terminal = (op) => [
 var executions = [
 	"checkpoint.continue",
 	"integration.handoff",
-	"session.send"
+	"session.send",
+	"session.start"
 ];
+var managedCaptureExecution = (op) => oid(op?.operation_id) && op.status === "succeeded" && executions.includes(op.action) && (op.action !== "session.start" || op.result?.started === true && op.result.prompt_sent === true && op.result.message_id === `batc-${op.operation_id}`);
 var safePath = (path) => typeof path === "string" && path && new TextEncoder().encode(path).length <= 4096 && !/[\\\x00-\x1f\x7f-\x9f]/.test(path) && path.split("/").every((p) => p && p !== "." && p !== ".." && p.toLowerCase() !== ".git");
 var selectorValid = (s) => record(s) && (equal(Object.keys(s).sort(), ["execution_operation_id"]) && oid(s.execution_operation_id) || equal(Object.keys(s).sort(), ["command_id", "task_id"]) && tid(s.task_id) && commandId(s.command_id));
 var validRef = (ref) => aid(ref?.artifact_id) && Number.isSafeInteger(ref.revision) && ref.revision > 0 && ref.revision <= 999999999 && digest(ref.digest);
@@ -4022,7 +4024,7 @@ async function mountArtifactReview({ main, h, t, api, caps, guard, onEvents, err
 			pages.set(result.action, result.data.next_before ?? null);
 			for (const op of result.data.operations || []) {
 				const bound = sourceFromOperation(op);
-				if (oid(op.operation_id) && executions.includes(op.action) && op.status === "succeeded" && bound?.host === source.host && bound.session_id === source.session_id) {
+				if (managedCaptureExecution(op) && bound?.host === source.host && bound.session_id === source.session_id) {
 					const selector = { execution_operation_id: op.operation_id };
 					candidates.set(stable(selector), {
 						selector,
@@ -4046,7 +4048,7 @@ async function mountArtifactReview({ main, h, t, api, caps, guard, onEvents, err
 			customTask.value = task.task_id;
 		} else if (context.kind === "operation") {
 			const op = (await api("GET", `/operations/${context.operation_id}`)).operation;
-			if (op?.operation_id !== context.operation_id || !executions.includes(op.action) || op.status !== "succeeded") throw new Error(t("ar_source_unavailable"));
+			if (op?.operation_id !== context.operation_id || !managedCaptureExecution(op)) throw new Error(t("ar_source_unavailable"));
 			bound = sourceFromOperation(op);
 			if (!saved.selector) saved.selector = { execution_operation_id: context.operation_id };
 		} else if (context.kind === "session") bound = context;
@@ -6881,11 +6883,7 @@ async function viewOperation(main, id) {
 				return;
 			}
 			freshPage();
-			fill(panel, h("h1", {}, op.action), h("p", { class: "op-status" }, opStatus(op), " ", op.error_code ? chip(op.error_code, "bad") : null), ...linked?.length ? [linkedItems(linked)] : [], h("dl", { class: "kv" }, h("dt", {}, t("actor")), h("dd", {}, `${op.actor} (${op.entry})`), h("dt", {}, t("created")), h("dd", {}, when(epoch(op.created_at))), op.status_reason ? [h("dt", {}, t("reason")), h("dd", {}, op.status_reason)] : null, h("dt", {}, "Target"), h("dd", {}, h("code", {}, JSON.stringify(op.target))), Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null, op.result ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null), ...receipts || [], ...materialized.length ? [h("h2", {}, t("materializations")), ...materialized.map((m) => h("div", { class: "row" }, h("div", { class: "grow" }, `${m.artifact_id} · r${m.revision}`, h("div", { class: "muted" }, m.managed_path)), chip(t(`material_${m.state}`), m.state === "verified" ? "ok" : "")))] : [], ...cleanupReceipts?.length ? [h("h2", {}, t("cleanup_open_receipts")), ...cleanupReceipts.map((r) => h("details", { class: "row-details" }, h("summary", {}, r.resource_id, " · ", t("cleanup_receipt_" + r.status)), h("pre", { class: "pre" }, JSON.stringify(r, null, 2))))] : [], ...op.action === "integration.apply" ? [repairControl(op)] : [], (op.result?.merge || op.result || refs.merge_receipt)?.base_moved ? h("p", { class: "note warn" }, t("merged_newer_base", { count: (op.result?.merge || op.result || refs.merge_receipt).other_commits_count })) : null, refs.write_acknowledged && refs.verification_pending ? h("p", { class: "note warn" }, t("metadata_pending")) : null, h("h2", {}, t("steps")), ...op.steps.map((s) => h("div", { class: "row" }, h("div", { class: "grow" }, s.name), h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)), h("div", { class: "actions" }, opened, ["artifact.capture.managed", "artifact.accept"].includes(op.action) && op.status === "succeeded" && /^art_[0-9a-f]{32}$/.test(op.result?.artifact_id) && Number.isSafeInteger(op.result?.revision) && op.result.revision > 0 ? h("a", { href: `#/artifact-review/artifact/${op.result.artifact_id}/${op.result.revision}` }, t("ar_review_title")) : null, state.caps?.artifacts?.capture?.managed_single_file && op.status === "succeeded" && [
-				"checkpoint.continue",
-				"integration.handoff",
-				"session.send"
-			].includes(op.action) ? h("a", { href: `#/artifact-review/operation/${op.operation_id}` }, t("ar_open")) : null, confirmSource, resume, retry, cancel));
+			fill(panel, h("h1", {}, op.action), h("p", { class: "op-status" }, opStatus(op), " ", op.error_code ? chip(op.error_code, "bad") : null), ...linked?.length ? [linkedItems(linked)] : [], h("dl", { class: "kv" }, h("dt", {}, t("actor")), h("dd", {}, `${op.actor} (${op.entry})`), h("dt", {}, t("created")), h("dd", {}, when(epoch(op.created_at))), op.status_reason ? [h("dt", {}, t("reason")), h("dd", {}, op.status_reason)] : null, h("dt", {}, "Target"), h("dd", {}, h("code", {}, JSON.stringify(op.target))), Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null, op.result ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null), ...receipts || [], ...materialized.length ? [h("h2", {}, t("materializations")), ...materialized.map((m) => h("div", { class: "row" }, h("div", { class: "grow" }, `${m.artifact_id} · r${m.revision}`, h("div", { class: "muted" }, m.managed_path)), chip(t(`material_${m.state}`), m.state === "verified" ? "ok" : "")))] : [], ...cleanupReceipts?.length ? [h("h2", {}, t("cleanup_open_receipts")), ...cleanupReceipts.map((r) => h("details", { class: "row-details" }, h("summary", {}, r.resource_id, " · ", t("cleanup_receipt_" + r.status)), h("pre", { class: "pre" }, JSON.stringify(r, null, 2))))] : [], ...op.action === "integration.apply" ? [repairControl(op)] : [], (op.result?.merge || op.result || refs.merge_receipt)?.base_moved ? h("p", { class: "note warn" }, t("merged_newer_base", { count: (op.result?.merge || op.result || refs.merge_receipt).other_commits_count })) : null, refs.write_acknowledged && refs.verification_pending ? h("p", { class: "note warn" }, t("metadata_pending")) : null, h("h2", {}, t("steps")), ...op.steps.map((s) => h("div", { class: "row" }, h("div", { class: "grow" }, s.name), h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)), h("div", { class: "actions" }, opened, ["artifact.capture.managed", "artifact.accept"].includes(op.action) && op.status === "succeeded" && /^art_[0-9a-f]{32}$/.test(op.result?.artifact_id) && Number.isSafeInteger(op.result?.revision) && op.result.revision > 0 ? h("a", { href: `#/artifact-review/artifact/${op.result.artifact_id}/${op.result.revision}` }, t("ar_review_title")) : null, state.caps?.artifacts?.capture?.managed_single_file && managedCaptureExecution(op) ? h("a", { href: `#/artifact-review/operation/${op.operation_id}` }, t("ar_open")) : null, confirmSource, resume, retry, cancel));
 		} catch (e) {
 			fill(panel, errorBox(e));
 		}

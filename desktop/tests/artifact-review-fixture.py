@@ -12,6 +12,7 @@ from pathlib import Path
 
 from bat_agent_connector import api_auth, artifacts
 from tests.mockbat import TOKEN, MockBat
+from tests.operation_helpers import settle_operations
 from tests.test_artifact_capture import daemon as daemon_fixture
 from tests.test_artifact_capture import human as human_fixture
 from tests.test_artifact_managed import execution as execution_fixture
@@ -25,6 +26,34 @@ def worktree_snapshot(path):
             "index": (hashlib.sha256(index.read_bytes()).hexdigest(), index.stat().st_mtime_ns)}
 
 
+async def standalone_execution(daemon, mock, human, root):
+    # This optional integration mode runs against a central with durable session.start.
+    repository = root / "managed" / "standalone-source"
+    repository.parent.mkdir(parents=True, exist_ok=True)
+    git(root, "clone", "-q", str(human), str(repository))
+    mock.ws_doc["workspaces"] = [{"id": "ws-start", "name": "fixture-start", "folderPath": str(repository)}]
+    def create_worktree(params):
+        sid = params["sessionId"]
+        path = repository / ".bat-worktrees" / sid
+        branch = "bat/" + sid
+        git(repository, "worktree", "add", "-q", "-b", branch, str(path), params["baseBranch"])
+        result = {"success": True, "worktreePath": str(path), "branchName": branch,
+                  "sourceBranch": params["baseBranch"]}
+        mock.worktrees[sid] = {**result, "diff": "", "merged": False, "mergedKind": "unknown"}
+        mock.git_branch[str(path)] = branch
+        return result
+    mock.handlers["worktree:create"] = create_worktree
+    operation, _ = daemon.ops.create(api_auth.Principal("fixture-starter", frozenset({"start"})),
+        action="session.start", target={"host": "h1", "workspace": "ws-start"},
+        params={"prompt": "Produce the fixture result."}, idempotency_key="fixture-managed-start")
+    await settle_operations(daemon.ops)
+    operation = daemon.ops.get(operation["operation_id"])
+    assert operation["status"] == "succeeded", operation
+    sid, path = operation["result"]["session_id"], Path(operation["result"]["worktree_path"])
+    (path / "result.bin").write_bytes(b"result\x00\xff\n")
+    return operation, sid, path
+
+
 async def main():
     with tempfile.TemporaryDirectory(prefix="batc-artifact-review-ui-") as temporary:
         root = Path(temporary)
@@ -35,7 +64,8 @@ async def main():
         human = human_fixture.__wrapped__(root)
         fixture = daemon_fixture.__wrapped__(mock, human, root)
         daemon = await anext(fixture)
-        operation, sid, path = await execution_fixture.__wrapped__(daemon, mock)
+        operation, sid, path = (await standalone_execution(daemon, mock, human, root) if "--start" in sys.argv
+                                else await execution_fixture.__wrapped__(daemon, mock))
         await daemon.inventory.refresh_host("h1")
         contents = (path / "result.bin").read_bytes()
         source_before, human_before, writes_before = worktree_snapshot(path), snapshot(human), len(bat_writes(mock))

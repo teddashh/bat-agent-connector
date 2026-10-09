@@ -5,7 +5,10 @@ only source/execution/credential authority. This page reuses the Dashboard panel
 form controls, evidence lists and English/zh-TW copy; it adds no alternate store.
 
 Session and task links open a fixed source context. The execution selector loads
-supported succeeded central operations and current accepted send commands. An
+supported succeeded central operations and current accepted send commands. Standalone
+`session.start` appears only with positive start and initial-prompt result evidence;
+prompt-free and uncertain starts are excluded. Central rechecks the original start,
+reservation, send receipts and incarnation during preview. An
 explicit older command/operation ID is a selector only; the signed preview must
 prove it. The preview displays one relative file, source folder, HEAD, size and
 digest. It is not a dirty-worktree snapshot or an authorship claim.
