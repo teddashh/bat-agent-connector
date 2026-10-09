@@ -38,6 +38,38 @@ fn value(buf: &[u16]) -> Result<String> {
     let n = buf.iter().position(|c| *c == 0).ok_or("STARTUP_INVALID")?;
     String::from_utf16(&buf[..n]).map_err(|_| "STARTUP_INVALID")
 }
+fn existing_local_spelling(value: &str) -> Result<String> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+    let path = windows_path(value).map_err(|_| "STARTUP_UNOWNED")?;
+    if !local_path(Path::new(&path)) {
+        return Err("STARTUP_UNOWNED");
+    }
+    let mut prefix = PathBuf::new();
+    for component in Path::new(&path).components() {
+        prefix.push(component);
+        if !prefix.is_absolute() {
+            continue;
+        }
+        let metadata = prefix.symlink_metadata().map_err(|_| "STARTUP_UNOWNED")?;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err("STARTUP_UNOWNED");
+        }
+    }
+    // WScript.Shell preserves 8.3 spelling in arguments/working directory, while
+    // Codec::new captures long installation names. Expand spelling, not identity:
+    // canonicalize/IShellLink::Resolve would also follow a foreign reparse alias.
+    let input = wide(&path)?;
+    let mut output = vec![0u16; 32768];
+    let count =
+        unsafe { GetLongPathNameW(input.as_ptr(), output.as_mut_ptr(), output.len() as u32) }
+            as usize;
+    if count == 0 || count >= output.len() {
+        return Err("STARTUP_UNOWNED");
+    }
+    let expanded = String::from_utf16(&output[..count]).map_err(|_| "STARTUP_UNOWNED")?;
+    windows_path(&expanded).map_err(|_| "STARTUP_UNOWNED")
+}
 /// Only native discovery should call this; tests pass a temporary folder to migration Store.
 pub fn startup_directory() -> Result<PathBuf> {
     let raw = unsafe { SHGetKnownFolderPath(&FOLDERID_Startup, KF_FLAG_DONT_VERIFY, None) }
@@ -123,7 +155,7 @@ impl Codec {
         arguments
             .strip_prefix(prefix)
             .and_then(|v| v.strip_suffix('"'))
-            .and_then(|v| windows_path(v).ok())
+            .and_then(|v| existing_local_spelling(v).ok())
             .zip(windows_path(&expected).ok())
             .is_some_and(|(a, b)| a.eq_ignore_ascii_case(&b))
     }
@@ -173,9 +205,9 @@ impl Codec {
             link.GetWorkingDirectory(&mut cwd)
                 .map_err(|_| "STARTUP_INVALID")?;
         }
-        let path = windows_path(&value(&path)?)?;
+        let path = existing_local_spelling(&value(&path)?)?;
         let args = value(&args)?;
-        let cwd = windows_path(&value(&cwd)?)?;
+        let cwd = existing_local_spelling(&value(&cwd)?)?;
         for backend in [Backend::Powershell, Backend::Rust] {
             let (expected, _, working) = self.expected(backend);
             if path.eq_ignore_ascii_case(&windows_path(&expected)?)

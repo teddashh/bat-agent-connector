@@ -46,7 +46,12 @@ journal, including when one slot already changed.
 The Windows adapter uses COM ShellLink persistence in memory: it does not resolve or
 execute an inspected link. It checks exact target, arguments, working directory and
 unsupported link flags, creates only fixed known invocations, and retains all source
-bytes. Tests use synthetic files/links/process observations and temporary directories;
+bytes. Existing local target/argument/working-directory paths expand Windows 8.3 names
+with [GetLongPathNameW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getlongpathnamew)
+before comparison with the captured installation. This corrects
+the short spelling retained by WScript.Shell; it does not call ShellLink Resolve or
+accept another command line. Reparse components, missing paths, foreign paths and
+unsupported/elevated flags remain refused. Tests use synthetic files/links/process observations and temporary directories;
 no real Startup, registry, monitor, account credential or live tunnel is changed.
 
 ## Interfaces and integration requirements
@@ -119,4 +124,7 @@ it does not execute a real migration, PS monitor, installed Startup entry or liv
 Windows fixture bodies include COM round trips and an actual system PowerShell/WScript.Shell
 creation oracle, all targeting temporary synthetic files. Local Linux tests and Windows
 cross-compilation are separate from execution of those Windows fixtures and installed
-login/migration acceptance. Unsupported link flags or invocation forms refuse safely.
+login/migration acceptance. The oracle compares both long and OS-provided short path
+spellings for both fixed backends, and rejects extra arguments, foreign target/cwd and
+a temporary junction alias. Failure diagnostics contain only those synthetic fixture
+fields and link flags. Unsupported link flags or invocation forms refuse safely.
