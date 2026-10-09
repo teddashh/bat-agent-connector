@@ -34,6 +34,7 @@ REMOTE = ('rehydrate.frame', 'merge.frame')
 SAFE_CHANNELS = {'claude:stop-session', 'claude:interrupt-turn', 'claude:abort-session'}
 _OWNER = contextvars.ContextVar('worktree_merge_owner', default=None)
 TERMINAL_FIELDS = ('id', 'workspaceId', 'cwd', 'worktreePath', 'worktreeBranch', 'agentPreset')
+_UNSET = object()
 
 
 def install(ops):
@@ -54,7 +55,7 @@ def _reader_binding(ops, host):
 
 
 def capabilities(ops):
-    return {'strategy': 'merge', 'requires_verifier_ssh': True,
+    return {'strategy': 'merge', 'requires_verifier_ssh': True, 'requires_bat_git_context': True,
             'hosts': [{'host': h, 'available': available(ops, h),
                        'reasons': [] if available(ops, h) else ['MERGE_GIT_UNAVAILABLE']}
                       for h in ops.context['fleet'].config.hosts]}
@@ -66,7 +67,7 @@ def admit(ops, caller, target, params, pre):
         raise OperationError('INVALID_PARAMS', 'merge requires host/session_id strings, empty params and preconditions', 422)
     _tier(ops.context['fleet'], target['host'])
     if not available(ops, target['host']):
-        raise OperationError('MERGE_GIT_UNAVAILABLE', 'merge requires the configured verifier SSH host mapping for checked Git reads', 409)
+        raise OperationError('MERGE_GIT_UNAVAILABLE', 'merge requires verifier SSH mapped to the BAT Git account/configuration context', 409)
 
 
 def authorize_existing(ops, caller, op, verb):
@@ -178,7 +179,7 @@ async def proof(ops, host, source, destination, roots):
 
 def _registry_consumers(host, roots):
     return {r['session_id'] for r in _document()['sessions'] if r.get('host') == host
-            and any(_inside(r.get(k), roots) for k in ('cwd', 'worktree_path'))}
+            and any(_inside(r.get(k), roots) for k in ('cwd', 'worktree_path', 'origin_cwd', 'origin_root'))}
 
 
 def _activity(ops, plan, own_op):
@@ -189,7 +190,12 @@ def _activity(ops, plan, own_op):
     # The durable start command and fixed workspace still precede that effect.
     for row in ops.db.execute('SELECT * FROM tasks WHERE host=?', (plan['host'],)):
         task = dict(row)
-        if task['workspace'] not in {plan['workspace_id'], plan['workspace_name']}:
+        selector = task['workspace']
+        # Ordinary task starts support case-insensitive workspace-name substrings.
+        # Treat even an ambiguous overlapping alias conservatively while its start is unresolved.
+        overlap = (selector in {plan['workspace_id'], plan['workspace_name']}
+                   or isinstance(selector, str) and bool(selector) and selector.lower() in (plan['workspace_name'] or '').lower())
+        if not overlap:
             continue
         if any(command_unresolved(dict(c), task) for c in ops.db.execute(
                 "SELECT * FROM commands WHERE task_id=? AND kind IN ('start_lead','start_reviewer')", (task['task_id'],))):
@@ -232,7 +238,9 @@ def guard(ops, plan, *, ctx=None, reserved=False):
             raise StepFailed('MERGE_CONSUMER_CHANGED', 'a carrier consumer changed its original owner')
         registry.refuse_start_claim(registry.registry_path(), host, sid)
         row = registry.get(host, sid) or {}
-        if (row.get('status') != 'active' or row.get('start_uncertain') or row.get('handoff_status') in {'pending', 'uncertain'}
+        if (row.get('status') not in {'active', *registry.RETIRED}
+                or row.get('status') in registry.RETIRED and plan['runtime'][sid]['loaded'] is not False
+                or row.get('start_uncertain') or row.get('handoff_status') in {'pending', 'uncertain'}
                 or row.get('failover_fence')):
             raise StepFailed('MERGE_WRITER_UNPROVEN', 'an unsettled or shared successor uses this carrier')
     if reserved:
@@ -242,16 +250,23 @@ def guard(ops, plan, *, ctx=None, reserved=False):
     _activity(ops, plan, ctx.operation_id if ctx else plan['operation_id'])
 
 
-async def _idle(read, sid, expected=None):
+async def _idle(read, sid, expected=_UNSET):
     meta = await read('claude:get-session-meta', {'sessionId': sid})
-    # Positive runtime identity is deliberately required; absent metadata is not idle proof.
-    state = await read('claude:get-session-state', {'sessionId': sid}) if isinstance(meta, dict) else None
-    if (not isinstance(meta, dict) or not meta.get('cwd') or meta.get('isStreaming') is not False
-            or not isinstance(state, dict) or state.get('isStreaming') is not False
+    # Client validation distinguishes explicit result:null from a missing result/error.
+    # Never ask get-session-state about a record without cwd: BAT may drop that record.
+    if meta is None:
+        runtime = {'loaded': False}
+        if expected is not _UNSET and runtime != expected:
+            raise StepFailed('MERGE_RUNTIME_CHANGED', 'fixed runtime presence changed')
+        return runtime
+    if not isinstance(meta, dict) or not isinstance(meta.get('cwd'), str) or not meta['cwd'].strip():
+        raise StepFailed('MERGE_WRITER_UNPROVEN', 'runtime metadata is neither positively absent nor readable')
+    state = await read('claude:get-session-state', {'sessionId': sid})
+    if (meta.get('isStreaming') is not False or not isinstance(state, dict) or state.get('isStreaming') is not False
             or any(state.get(k) for k in service.SESSION_WAITING_FIELDS)):
         raise StepFailed('MERGE_WRITER_UNPROVEN', 'every carrier consumer must be positively idle without pending prompts')
-    runtime = {k: meta.get(k) for k in ('cwd', 'sdkSessionId')}
-    if expected is not None and runtime != expected:
+    runtime = {'loaded': True, **{k: meta.get(k) for k in ('cwd', 'sdkSessionId')}}
+    if expected is not _UNSET and runtime != expected:
         raise StepFailed('MERGE_RUNTIME_CHANGED', 'fixed carrier runtime identity changed')
     return runtime
 
@@ -271,6 +286,9 @@ async def identity(ops, plan, read, *, ctx=None, reserved=False, rehydrated=Fals
         raise StepFailed('MERGE_BINDING_CHANGED', 'destination workspace changed')
     for sid in sorted(plan['consumers']):
         await _idle(read, sid, plan['runtime'][sid])
+    current = await proof(ops, plan['host'], plan['source'], plan['destination'], plan['managed_roots'])
+    if current != plan['git']:
+        raise StepFailed('MERGE_GIT_BINDING_CHANGED', 'real Git identity or cleanliness changed before BAT status')
     for key in ('source', 'destination'):
         p = plan['git'][key]
         if (await read('git:getRoot', {'cwd': p['root']}) != p['root']
@@ -288,6 +306,14 @@ async def identity(ops, plan, read, *, ctx=None, reserved=False, rehydrated=Fals
     guard(ops, plan, ctx=ctx, reserved=reserved)
 
 
+async def authorize(fleet, host, tab, *, live=True):
+    # Generic worktree authorization asks BAT for a diff. This action establishes
+    # the fixed branch/path separately, only after checking the Git config context.
+    cls = resource_policy.classify(fleet.config.host(host), tab['id'], terminal=tab, entries=_document()['sessions'])
+    observed = await resource_policy.live_check(fleet.client(host), cls, worktree=False) if live and cls.writable else None
+    return await resource_policy.authorize_session(fleet, host, ACTION, tab, cls=cls, live=observed)
+
+
 async def prepare(ctx):
     ops, host = ctx.service, ctx.target['host']
     fleet, client = ops.context['fleet'], ops.context['fleet'].client(host)
@@ -295,12 +321,14 @@ async def prepare(ctx):
     tab, doc = await service._resolve_session(client, ctx.target['session_id'])
     sid = tab['id']
     task_control.refuse_owned(fleet, host, sid)
-    await resource_policy.authorize_session(fleet, host, ACTION, tab)
+    await authorize(fleet, host, tab, live=False)
     destination = resource_policy.merge_origin(hc, sid, tab, doc)
     resource_policy.check_merge_destination(hc, destination)
     source = tab.get('worktreePath')
     if not source or not resource_policy.in_managed_root(hc, source):
         raise StepFailed('MERGE_SOURCE_UNPROVEN', 'merge requires a worktree inside a managed root')
+    evidence = await proof(ops, host, source, destination, list(hc.managed_roots))
+    await authorize(fleet, host, tab)
     wt = await client.invoke('worktree:status', {'sessionId': sid})
     rehydrate = wt is None
     if rehydrate:
@@ -308,7 +336,6 @@ async def prepare(ctx):
     if (not isinstance(wt, dict) or wt.get('worktreePath') != source or wt.get('branchName') != tab.get('worktreeBranch')
             or not wt.get('sourceBranch')):
         raise StepFailed('MERGE_SOURCE_UNPROVEN', 'original worktree/source branch binding is unavailable; no rehydrate guess')
-    evidence = await proof(ops, host, source, destination, list(hc.managed_roots))
     report = _summ(host, tab, wt, False, 0)
     report['rehydrated'] = False
     plan = {'operation_id': ctx.operation_id, 'host': host, 'session_id': sid, 'source': source, 'destination': destination,
@@ -340,7 +367,7 @@ async def prepare(ctx):
         if cls.code or service.agent_kind(terminal.get('agentPreset')) not in {'claude', 'codex'}:
             raise StepFailed('MERGE_CONSUMER_UNPROVEN', 'every carrier consumer needs a managed creation and runtime binding')
         plan['runtime'][other] = await _idle(client.invoke, other)
-        if plan['runtime'][other]['cwd'] != (terminal.get('worktreePath') or terminal.get('cwd')):
+        if plan['runtime'][other]['loaded'] and plan['runtime'][other]['cwd'] != (terminal.get('worktreePath') or terminal.get('cwd')):
             raise StepFailed('MERGE_RUNTIME_CHANGED', 'consumer runtime is not in its registered carrier')
     await identity(ops, plan, client.invoke, ctx=ctx)
     return plan
@@ -398,7 +425,7 @@ async def invoke(ctx, plan, name, channel, params):
         sent = True
     try:
         audit.check_rate(host, sid + '#merge', initial_task_send=name == 'merge.frame' and plan['rehydrate'])
-        grant = await resource_policy.authorize_session(fleet, host, ACTION, plan['terminal'])
+        grant = await authorize(fleet, host, plan['terminal'])
         audit.record(**base, channel=channel, phase='attempt', operation_id=ctx.operation_id)
         result = await client.invoke(channel, params, grant=grant, retry_on_disconnect=False,
             before_frame=before_frame, before_send=before_send, on_transport=on_transport)

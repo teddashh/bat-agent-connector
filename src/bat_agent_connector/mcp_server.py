@@ -1096,7 +1096,7 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
         async def worktree_merge(host: str, session_id: str, confirm: bool = False,
                                  idempotency_key: str | None = None) -> dict[str, Any]:
             """INTEGRATE. Central durable merge of one managed worktree into its managed source checkout.
-            Requires confirm and integrate scope; checked Git reads need the configured verifier SSH mapping.
+            Requires confirm and integrate scope; verifier SSH must map to BAT's Git account/configuration context.
             Fixed source/destination and idle consumers are reserved; never forces or writes a manual/task carrier.
             Rehydrate and merge have separate receipts. Unknown ACK retains both reservations and is never resent.
             Keep the original key/operation after reply loss; omitted key is an independent request. No raw fallback."""

@@ -345,6 +345,8 @@ class BatClient:
         reply = await self._roundtrip(frame, timeout_for(canonical))
         if reply.get("type") == "invoke-error":
             raise InvokeError(f"{self.host.name}: {canonical}: {redact(reply.get('error'))}")
+        if canonical == "claude:get-session-meta" and (reply.get("type") != "invoke-result" or "result" not in reply):
+            raise InvokeError("session metadata reply does not prove presence or absence")
         return reply.get("result")
 
     async def invoke(self, channel: str, params: dict | None = None, *, timeout: float | None = None,
@@ -408,6 +410,8 @@ class BatClient:
                         await asyncio.sleep(0.5 * (attempt + 1))
                         continue
                     raise InvokeError(f"{self.host.name}: {canonical}: {err}")
+                if canonical == "claude:get-session-meta" and (reply.get("type") != "invoke-result" or "result" not in reply):
+                    raise InvokeError("session metadata reply does not prove presence or absence")
                 return reply.get("result")
             except ConnectionLost as e:
                 # Only Claude's send-message is idempotent by clientMessageId;

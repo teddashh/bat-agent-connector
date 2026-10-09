@@ -590,7 +590,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-worktree", action="store_true")
     p.add_argument("--key", help="stable operation key; omitted means a new independent start")
     p.add_argument("--confirm", action="store_true")
-    p = sp.add_parser("merge", help="INTEGRATE: durable managed worktree merge; requires verifier SSH mapping")
+    p = sp.add_parser("merge", help="INTEGRATE: durable managed worktree merge; verifier SSH must use BAT's Git context")
     p.add_argument("--key", help="retain the original key after reply loss; omitted means an independent request")
     p.add_argument("host")
     p.add_argument("session")
