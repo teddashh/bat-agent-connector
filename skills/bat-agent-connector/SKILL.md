@@ -117,8 +117,8 @@ deferred flags are not authority to apply a setting under a new caller or sessio
 | Interrupt (write) | `session_interrupt(mode=soft/hard, confirm=true)` | `batc interrupt HOST SID --mode soft --confirm` |
 | Answer a question (write) | `session_answer(answers=[...] or permission=allow/deny, confirm=true)` | `batc answer HOST SID --answer "Q=A" --confirm` |
 | Start worktree session (orchestrate) | `session_start(host, workspace, agent, prompt, confirm=true)` | `batc start HOST WORKSPACE --prompt ... --confirm` |
-| Relay original text (operate; start for fallback) | `session_relay(host, message, workspace?, session_id?, idempotency_key?, control_version?, confirm=true)` | `batc relay HOST "text" --workspace WORKSPACE --key KEY --confirm` |
-| Start a confined planner (start) | `fanout_plan_session(host, workspace, message, idempotency_key?, confirm=true)` | `batc fanout-plan HOST WORKSPACE "text" --key KEY --confirm` |
+| Relay original text (operate; start for fallback) | `session_relay(host, message, workspace?, session_id?, idempotency_key?, control_version?, confirm=true)` | `batc relay HOST --message "text" --workspace WORKSPACE --key KEY --confirm` |
+| Start a confined planner (start) | `fanout_plan_session(host, workspace, message, idempotency_key?, confirm=true)` | `batc fanout-plan HOST WORKSPACE --message "text" --key KEY --confirm` |
 | Dispatch the fixed source plan (start + operate) | `fanout_from_plan(host, session_id, idempotency_key?, confirm=true)` | `batc fanout-start HOST SID --key KEY --confirm` |
 | Merge worktree (orchestrate) | `worktree_merge` | `batc merge ...` |
 | Legacy worktree removal (disabled) | `worktree_remove` refuses; use reviewed cleanup below | `batc remove-worktree` refuses |
@@ -241,7 +241,7 @@ Do not paraphrase, rewrite or plan the order. Call `session_relay(host, workspac
 brief={goal, context, constraints, acceptance}, earlier=[<earlier thread messages, verbatim>], confirm=true)`.
 The brief is labeled as your interpretation; the session treats the original as the source of truth, fixes unclear
 asks with its repo context and states its interpretation in one line. For parallel or large work add
-`request_fanout=N`, `session_wait`, then `fanout_from_plan(host, sid, confirm=true)`. The relay target is the
+`request_fanout=true, max_items=N`, `session_wait`, then `fanout_from_plan(host, sid, confirm=true)`. The relay target is the
 workspace's most recent connector-managed session; a person's BAT sessions are never written to. When there is none,
 or the target is read-only (`no_session` / `read_only`), retry with `start_if_missing=true`: that starts a new Codex
 session in its own worktree with the same text. If the target is busy or quota-stopped use `fanout_plan_session`
