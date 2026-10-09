@@ -63,3 +63,9 @@ A result's alias is available only after current generation/policy validation; t
 still revalidates configuration before launch. Selection updates preserve an owned Run and
 recovery history, while source changes require a fresh policy after owned stop. See
 [route policy and intentional Kit corrections](../../docs/design/fleet-routes.md).
+
+`migration` records explicit backend/autostart transitions with exact original bytes and
+normal-owner exit proof; it never retries an uncertain launch. The fixed Windows startup
+codec reads/writes only the reviewed Open BAT shortcut via the caller's local journal
+flow. These modules require the native facade's guarded hooks and are not wired into
+automatic startup by this library. See [migration contract](../../docs/design/fleet-migration.md).
