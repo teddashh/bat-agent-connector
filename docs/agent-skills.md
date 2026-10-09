@@ -41,11 +41,16 @@ runtime's standard MCP client settings; for clients using `mcpServers`:
 Every call requires `BATC_API_TOKEN`; missing credentials never fall back to the
 local admin file or a task capability. The daemon checks the caller's action
 scopes and its own host configuration. Direct Fleet tools such as `session_send`,
-relay, fan-out, permissions and legacy cleanup are omitted even
-when the MCP host configuration enables writes. Use advertised central actions
-through `operation_submit`; `session_start` and `workspaces_list` now have central principal adapters.
-Unavailable legacy behavior remains unavailable.
-Task status/result/events reads require `observe` and carry the same token.
+legacy permission tools and cleanup are omitted even when the MCP host configuration enables
+writes. Use advertised central actions through `operation_submit`; `session_start`, relay,
+fan-out and standalone failover have central principal adapters. `workspaces_list`,
+`session_read` and `session_wait` also use the central owner. Task status/result/events and
+session transcript/wait reads require `observe` and carry the same token. These two session
+reads remain available with `--read-only`; CLI read/wait likewise require `BATC_API_TOKEN`
+and never fall back to local admin or direct Fleet. External verification testimony has a central
+`session_record_verification` adapter; it cannot create trusted task verification. Connector-only
+labels use the advertised `session.labels.set` action and an explicit metadata version. Both keep
+the original key after reply loss. Unavailable legacy behavior remains unavailable.
 
 For an observation-only installation, use
 `["--principal-only", "--read-only"]`: write tools are omitted entirely, so adding

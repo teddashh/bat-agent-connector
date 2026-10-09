@@ -16,7 +16,8 @@ export function groupedSessions(sessions) {
 }
 export function matchesSession(session, query) {
   const haystack = [session.title, session.session_id, session.host, session.workspace,
-    session.workspace_id, session.agent_kind, session.model, session.worktree_branch]
+    session.workspace_id, session.agent_kind, session.model, session.worktree_branch,
+    ...(Array.isArray(session.connector_metadata?.labels) ? session.connector_metadata.labels : [])]
     .map(text).join("\n").toLocaleLowerCase();
   return query.trim().toLocaleLowerCase().split(/\s+/).every(word => haystack.includes(word));
 }

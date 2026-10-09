@@ -32,6 +32,7 @@ from . import (
     pr_delivery,
     registry,
     service,
+    session_metadata,
     task_actions,
     task_control,
     work_items,
@@ -55,7 +56,7 @@ from .task_verifier import ObservedVerifier, load_settings
 
 DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 # /rpc methods that share /api/v1's principals and OperationService (MCP and CLI enter here).
-API_RPC = {"session_failover": "?", "fanout_plan_session": "?", "fanout_from_plan": "?", "fanout_start": "?", "session_relay": "?", "repository_preview": "observe", "session_start": "start", "workspaces_list": "observe", "op_submit": "?", "session_interrupt": "operate", "session_send": "operate",
+API_RPC = {"session_record_verification": "operate", "session_read": "observe", "session_wait": "observe", "session_failover": "?", "fanout_plan_session": "?", "fanout_from_plan": "?", "fanout_start": "?", "session_relay": "?", "repository_preview": "observe", "session_start": "start", "workspaces_list": "observe", "op_submit": "?", "session_interrupt": "operate", "session_send": "operate",
            "session_continue": "operate", "session_answer": "operate", "session_set_permissions": "operate",
            "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
            "work_status": "observe", "work_result": "observe", "work_events": "observe",
@@ -182,7 +183,8 @@ class TaskDaemon:
         # the inventory observes through its own read-only fleet.
         self.ops = OperationService(self.journal,
                                     actions=api_actions.ACTIONS + delivery.ACTIONS + checkpoints.ACTIONS
-                                    + integration.ACTIONS + work_items.ACTIONS + task_actions.ACTIONS + artifacts.ACTIONS)
+                                    + integration.ACTIONS + work_items.ACTIONS + task_actions.ACTIONS + artifacts.ACTIONS
+                                    + session_metadata.ACTIONS)
         self.coordinator.operations = self.ops
         github = None
         if config.github.token_ref:
@@ -243,13 +245,17 @@ class TaskDaemon:
         return min(self.verification_budget(task["recipe"]) - (now - progress),
                    self.verification_cap(task["recipe"]) - (now - started))
 
-    async def call_api(self, method: str, params: dict, principal: api_auth.Principal) -> dict:
+    async def call_api(self, method: str, params: dict, principal: api_auth.Principal,
+                       *, _observation_transport: dict | None = None) -> dict:
         """/rpc doors into OperationService and the inventory for MCP and CLI (same rules as /api/v1)."""
         scope = API_RPC[method]
         if scope != "?" and not principal.allows(scope):
             raise OperationError("FORBIDDEN", f"{method} needs the {scope!r} scope", 403)
         entry = params.pop("entry", None)
         entry = entry if entry in {"mcp", "cli"} else "rpc"
+        if method in {"session_read", "session_wait"}:
+            return await self.api.session_observation.request(
+                principal, method, params, **(_observation_transport or {}))
         if method == "repository_preview":
             from .repository_sync import preview
             return {"preview": await preview(self.ops, principal, params)}
@@ -263,6 +269,9 @@ class TaskDaemon:
             return await legacy(self.ops, principal, method, params, entry=entry)
         if method == "session_failover":
             from .failover_operations import legacy
+            return await legacy(self.ops, principal, params, entry=entry)
+        if method == "session_record_verification":
+            from .verification_operations import legacy
             return await legacy(self.ops, principal, params, entry=entry)
         if method == "session_relay":
             from .orchestration_operations import legacy
@@ -776,7 +785,16 @@ class TaskDaemon:
                 if principal is None:
                     raise ValueError("task API authorization failed")
                 try:
-                    api_result, api_status = {"result": await self.call_api(method, params, principal)}, "200 OK"
+                    transport = None
+                    if method in {"session_read", "session_wait"}:
+                        from .session_observation import authorizer
+                        transport = {"reader": reader, "writer": writer,
+                                     "check_authorization": authorizer(self, token, principal)}
+                    if transport is not None:
+                        result = await self.call_api(method, params, principal, _observation_transport=transport)
+                    else:
+                        result = await self.call_api(method, params, principal)
+                    api_result, api_status = {"result": result}, "200 OK"
                 except OperationError as e:
                     api_result, api_status = {"error": e.code, "message": e.message}, "400 Bad Request"
                 except ResourceReadOnly as e:
@@ -1021,6 +1039,7 @@ class TaskDaemon:
                 active.cancel()
             await asyncio.gather(*list(self.ops._active.values()), return_exceptions=True)
             await self.artifact_store.close_reaper()
+            await self.api.session_observation.close()
             await self.inventory.close()
             await self.fleet.close()
             self.journal.close()

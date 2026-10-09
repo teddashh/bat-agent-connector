@@ -108,3 +108,10 @@ This establishes Rust/Windows API type checking only, not an application build o
 Windows execution. All executable and process effects in these tests are injected;
 no installed BAT, manual windows, remote hosts, Startup or real profile index was
 read or changed.
+
+Session details also support an [explicit one-profile handoff](session-bat.md).
+That preview uses the original private Fleet selection as its authority and does
+not rewrite saved connection, window, dashboard or login choices. The existing
+profile-index launch effect and receipt protocol apply unchanged. The user must
+search within BAT using the complete copied session title or ID; opening a profile
+does not prove a particular session was focused.

@@ -175,7 +175,7 @@ Coordinator gate：`G`＝下面的 task-owned runtime gate；`TC`＝原 task 控
 | `worktree_remove` | `remove-worktree` | —；`LEGACY_WORKTREE_REMOVE_DISABLED` | legacy 已停用；不新增平行 cleanup action，改走 reviewed cleanup.apply | cleanup 的既有 scope | 原 confirm/tier/manual/task 檢查後拒絕 | reviewed cleanup authority |
 | `session_failover`（單個／`all_exhausted`，非 dry run） | `failover`（非 `--dry-run`） | — → OP | [`session.failover`](session-failover.md) | start + operate，整體 admission／replay／controls 一起檢查 | S／N；force 不能取代 policy／停筆證據 | F；task 中途 failover 保持拒絕 |
 | `session_cleanup`（`dry_run=false`） | `cleanup --apply` | —；409 `LEGACY_CLEANUP_DISABLED` | 不新增 action；apply 由 cleanup package 封鎖，本包不包裝 | — | apply 不寫 BAT／Git；dry run 保持唯讀 | 使用現有 `cleanup_preview`／`cleanup_apply`；restore 是 optional backlog，尚無註冊 API/MCP tool |
-| `session_record_verification` | `record-verification` | — → OP | **新增** `session.record_verification` | operate | 只寫 verification.json；讀乾淨候選，不授權外部 mutation | task-owned 拒絕外部證詞取代受信 verifier |
+| `session_record_verification` | `record-verification` | OP＋相容 RPC | [`session.record_verification`](session-verification.md) | operate | 只寫 verification.json；固定 HEAD 與 BAT-reported 空 status，不授權外部 mutation | task-owned 拒絕外部證詞取代受信 verifier |
 | `fanout_plan_session` | `fanout-plan` | — → OP | **新增** `fanout.plan` | start | N；新 planner 自有 worktree | 不改來源 task；保持原 planner，不新增規劃機制 |
 | `fanout_from_plan`（非 dry run） | `fanout-start`（非 `--dry-run`） | — → OP | **新增** `fanout.start` | start | 來源只讀、逐項 N；不能經 legacy apply 清理 planner | 保留 #38 的 confirmed all-success stop-only 與容量 retirement；planner worktree 留給 reviewed cleanup；不插入來源 task commands |
 | — | `fanout PLAN --start` | — → OP | `fanout.start`，params 帶檔案讀出的固定 plan | start | 逐項 N | 同上；client 不逐項直接 session_start |

@@ -360,6 +360,8 @@ class Journal:
         from .cleanup import migrate
         migrate(self)
         self._migrate_artifacts()
+        from .session_metadata import schema as session_metadata_schema
+        session_metadata_schema(self)
 
     def _migrate_artifacts(self):
         # Additive DDL runs after numbered data migrations without claiming their versions.

@@ -4,14 +4,14 @@ description: Use this when you need to check on, read, wait for, or (only when e
 version: 0.2.4
 license: MIT
 metadata:
-  workflow_version: "2026-10-08.11"
+  workflow_version: "2026-10-08.13"
   api_version: "1"
   contract_version: "2026-10-08"
   generated_by: "scripts/generate_agent_skills.py"
   generator_version: "1"
   adapter: "hermes"
   canonical_source: "skills/bat-agent-connector/SKILL.md"
-  canonical_sha256: "8df54c475c3f6bd30282743f98e69ea7a383da7d337a5b79bbeff435b15b0589"
+  canonical_sha256: "70b3a647c9a2f0bd5e056bdcd880874e6fb0addda3bb8967f894b789482f860b"
   hermes:
     tags: [bat, better-agent-terminal, claude-code, codex, mcp, supervision, worktree, orchestration]
     category: autonomous-ai-agents
@@ -39,7 +39,7 @@ operation with the same identity when available; a refusal still applies.
 Agent installations use `bat-agent-connector-mcp --principal-only` (or an HTTP endpoint
 already running that profile with this agent's token). Add `--read-only` to omit all writes.
 The principal profile exposes central inventory/history, task reads/controls, checkpoints,
-work items and operations; every call requires the agent token. Direct Fleet tools in the
+work items, session transcripts/waits and operations; every call requires the agent token. Direct Fleet tools in the
 legacy reference below are absent. Never remove this flag, use the operator profile or
 borrow CLI/admin authority to obtain an unavailable action. Existing default installations
 may still expose direct Fleet tools that do not enforce API principal scopes.
@@ -96,8 +96,11 @@ and `inventory_session` for observation, `work_status` for task detail and centr
 `operation_submit` actions such as `session.start`, `session.send`, `session.answer`, `session.interrupt` and `session.permissions`
 only when allowed in capabilities. The central `session_relay`, `fanout_plan_session` and
 `fanout_from_plan` and `session_failover` adapters also retain this principal. Preserve their operation IDs and keys.
-Direct transcript/wait and legacy cleanup tools remain operator references; if absent from
-the advertised tools, do not bypass that boundary through legacy CLI or raw BAT.
+Central `session_read` and `session_wait` require observe and remain available with `--read-only`.
+`session_record_verification` records external testimony through the same central principal;
+Connector-only labels use `operation_submit(action="session.labels.set", ...)` with manage scope.
+Legacy cleanup and other direct Fleet reads remain operator references; if absent from the
+advertised tools, do not bypass that boundary through legacy CLI or raw BAT.
 
 For operator installations that expose `session_send`, `session_continue`, `session_answer`,
 `session_interrupt` or `session_set_permissions`, these adapters enter the same central operation service using
@@ -221,6 +224,22 @@ is unproven; read back the original operation without resending or making a repl
 Failure before a BAT start can leave its proven carrier for reviewed cleanup. Unknown external
 outcomes retain capacity. Never remove the carrier or clear registry claims to retry.
 
+## Read or wait with the agent principal
+
+Use `session_read(host, session_id, last_n=20, offset=0, after=...)` and
+`session_wait(host, session_id, until="attention", timeout_s=120, after=...)` with your own
+`BATC_API_TOKEN`. CLI `read`/`wait` use the same central owner and token, including in
+operator installations; missing credentials or a stopped daemon have no local fallback.
+Check `features.session_observation` and tool discovery before using an older installation.
+
+Preserve the original send's `turn_marker` as `after` for both reads and waits. Paginate with
+`next_offset`; transcript pages are not an atomic snapshot. Waits are bounded to 1800 seconds.
+`status=timeout` only ends the wait; it does not interrupt work or prove completion. Client
+cancellation releases only the observer. Revocation, overload or a transport deadline is a
+read failure, not evidence that the remote session stopped. Manual/unknown sessions can be
+read, but observation grants no write authority. Inspect turn attribution: Claude queued
+output needs its boundary; Codex timestamp fallback remains weaker evidence.
+
 ## Legacy operator reference: supervising running sessions
 
 1. `sessions_list` (optionally `active_within_hours=24`). Note sessions that are `streaming`, have `pending`, or went
@@ -256,9 +275,9 @@ Only all successful child prompts permit normal stop of the original standalone 
 Runtime absence is part of that original identity: reloaded or changed planners are retained.
 Worktrees remain for reviewed cleanup. Apply needs confirm; dry-run needs observe and has no effects.
 
-The following wait/transcript sequence applies only when those read tools are advertised by
-the current operator installation. Otherwise report the saved operation/session and use only
-available central observation; do not switch to an operator identity to read it.
+The following wait/transcript sequence uses the advertised central read tools with the same
+principal. If an older installation lacks them, report the saved operation/session and use
+only available observation; do not switch identities or bypass the central owner.
 
 Do not paraphrase, rewrite or plan the order. Call `session_relay(host, workspace=..., message=<the exact text>,
 brief={goal, context, constraints, acceptance}, earlier=[<earlier thread messages, verbatim>], confirm=true)`.
@@ -393,6 +412,31 @@ item is done.
    `LEGACY_WORKTREE_REMOVE_DISABLED`; its overrides cannot prove shared consumers or authorize removal.
 8. Report: tasks, branches, merged or not (and why), follow-ups.
 
+## Connector-only session labels (scope manage)
+
+Read `inventory_session(host, session_id)` and its `connector_metadata.version` first.
+Submit `session.labels.set` with exact `target={host, session_id}`, `params={labels: [...]}`
+and `preconditions={expected_version: VERSION}` through `operation_submit`. Use a saved explicit
+key. Labels replace the complete list: at most eight unique single-line labels, each at most
+40 Unicode characters; an empty list clears them. Manual, unknown and retained historical
+sessions may receive these Connector records without changing BAT, Git or resource ownership.
+On `METADATA_VERSION_CONFLICT`, read the latest version and review a new intent explicitly.
+An unknown result keeps the original key; a later edit never changes the original receipt.
+
+## External verification testimony (scope operate)
+
+Use `session_record_verification(host, session_id, candidate_commit, command, exit_code,
+environment, log_ref, confirm=true, idempotency_key=KEY)` or CLI `record-verification ... --key KEY --confirm`.
+The central `session.record_verification` action accepts those five evidence fields and an exact
+host/session target. It records the caller's testimony; it does not run the command or fetch logs.
+Manual-source metadata is allowed, while task-owned external testimony refuses. Use the trusted
+Task Service verification workflow for task completion instead. The host's write/orchestrate tiers
+must permit a new record. BAT-reported empty Git status can also mean an upstream Git failure;
+`verified_candidate=true` therefore is not independent verifier proof, artifact acceptance or delivery.
+Keep the original key after a lost reply: immutable receipts preserve its timestamp even if a later
+test supersedes the latest record. Missing recovery evidence remains unknown. Omitting the key means
+an independent record, not a replay guarantee. Read-only MCP installations omit this mutation.
+
 ## Session lifecycle workflows
 
 - **Quota failover**: `quota_sessions` lists Claude sessions stopped by a usage limit (with the reset time). Only
@@ -410,9 +454,8 @@ item is done.
   was sent. Cancellation after a positive ACK may finish local receipt bookkeeping without another frame.
   Without a key, each call is independent; keep the returned operation ID. Batch selection is bounded and
   fixed before dispatch; a retry does not select newer sessions or text. Report old → new session id and
-  actual operation status, then track the successor. To keep a superseded
-  session's uncommitted work without continuing it, fail it over with `force`, `archive_only=true` and
-  `instructions` that say to only commit it; reviewed cleanup can release it while keeping its commits and branch.
+  actual operation status, then track the successor. The central adapter does not offer forced or
+  archive-only failover. Preserve an unproven source and use its existing evidence and reviewed cleanup.
 - **Permissions**: answer one fixed pending prompt through `session.answer`, and use `session.permissions`
   for an explicit mode change when authorized. For multiple prompts use the reviewed bulk workflow below;
   apply without its fixed preview and explicit selection refuses with `BULK_PREVIEW_REQUIRED`.

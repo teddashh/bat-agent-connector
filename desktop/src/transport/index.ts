@@ -36,6 +36,7 @@ export type FleetRequest = {action: "status" | "contract" | "validate_configurat
   | {action: "ensure_monitor"; expected_configuration_binding: string}
   | {action: "quit_owned"; expected_configuration_binding: string; expected_monitor_epoch: string};
 export type FleetControlRequest = {action: "overview" | "preview_launch"}
+  | {action: "preview_profile"; profile_id: string}
   | {action: "preview_choices"; choices: {connections: string[]; profiles: string[]; dashboard: boolean}; configuration_binding: string; selection_revision: string; monitor_epoch: string | null}
   | {action: "apply_choices" | "launch" | "discard"; preview_id: string}
   | {action: "launch_status"; launch_id: string}

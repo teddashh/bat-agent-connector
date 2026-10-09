@@ -48,7 +48,7 @@ The connector therefore:
 | `batc fanout PLAN.md [--start ...]` | CLI helper | Splits a markdown plan (`- [ ]` items, numbered items, `##` headings) into task prompts; `--start` needs `--confirm` and is capped by `max_start_per_call`. |
 
 | `session_failover(...)` | orchestrate | Only for connector-managed sessions in a folder the connector owns, and only for sessions classified `quota_exhausted` (unless `force`), never while streaming; one successor per session and worktree (atomic registry reservation); `max_start_per_call` for `all_exhausted`; the old registry entry becomes `superseded` and is stopped only after the handoff is acknowledged. |
-| `session_record_verification(...)` | orchestrate | Records a trusted external command, exit code, environment and log reference for the host's current clean commit. A later commit or dirty tree invalidates it. CLI: `batc record-verification`. |
+| `session_record_verification(...)` | central operate + host orchestrate | Records external command/exit-code/environment/log-reference testimony through [`session.record_verification`](design/session-verification.md). Exact HEAD and BAT-reported empty status are checked; BAT can also return empty status after a Git failure, so this is not trusted verifier proof. No command/log access or BAT mutation. Task-owned sources refuse. CLI: `batc record-verification --key …`; reuse the original key after reply loss. |
 | `session_cleanup(...)` | read-only legacy evaluation | Reports the decisions below. Apply always returns `LEGACY_CLEANUP_DISABLED` (409); use `batc resource-cleanup`. The deprecated `auto_cleanup` host key still parses and never enables writes. |
 
 ## Quota failover

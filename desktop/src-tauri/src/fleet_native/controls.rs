@@ -109,14 +109,12 @@ fn ensure(c: &Context, launcher: &LauncherMutex, ticket: &Ticket) -> Result<()> 
     }
 }
 /// Rechecked immediately before profile publication/spawn. Never promotes TCP-only or stale evidence.
-fn ready(c: &Context, selection: &Selection) -> Result<()> {
+fn ready(c: &Context, selection: &Selection, profiles: &[String]) -> Result<()> {
     c.verify(c.configuration.binding())?;
     if !selection.same_snapshot(&Store::new(c.roaming.clone()).read(&c.configuration)?) {
         return Err("SELECTION_CHANGED");
     }
-    let required: Vec<_> = selection
-        .preferences()
-        .profiles
+    let required: Vec<_> = profiles
         .iter()
         .filter(|p| p.as_str() != "default")
         .map(|p| {
@@ -147,12 +145,13 @@ struct ReadyProfiles<'a> {
     native: Guarded<'a, WindowsProfiles<'a>>,
     context: &'a Context,
     selection: &'a Selection,
+    profiles: &'a [String],
 }
 impl profile_launch::Platform for ReadyProfiles<'_> {
     fn verify(&self) -> Result<()> {
         self.native.verify()?;
         verify_no_migration(&self.context.installation)?;
-        ready(self.context, self.selection)
+        ready(self.context, self.selection, self.profiles)
     }
     fn login(&self) -> Result<bat_fleet_core::process_adapter::LoginIdentity> {
         self.native.login()
@@ -256,6 +255,7 @@ impl Controller {
                         native,
                         context: c,
                         selection: &saved.selection,
+                        profiles: &summary.profiles,
                     };
                     profile_launch::apply(
                         &c.configuration,
@@ -332,21 +332,35 @@ impl Controller {
                         );
                         Ok(result)
                     }
-                    Request::PreviewLaunch {} => {
+                    Request::PreviewLaunch {} | Request::PreviewProfile { .. } => {
                         self.bound()?;
                         let launcher = ticket
                             .acquire(|| LauncherMutex::try_acquire()?.ok_or("LAUNCHER_BUSY"))?;
                         verify_no_migration(&c.installation)?;
                         let store = Store::new(c.roaming.clone());
                         let selection = store.read(&c.configuration)?;
-                        let native = WindowsProfiles::new(&launcher, &c.installation);
-                        let preview = profile_launch::preview(
-                            &c.configuration,
-                            &store,
-                            &selection,
-                            &c.roaming,
-                            &native,
-                        )?;
+                        let native = Guarded {
+                            inner: WindowsProfiles::new(&launcher, &c.installation),
+                            ticket,
+                        };
+                        let preview = if let Request::PreviewProfile { profile_id } = input {
+                            profile_launch::preview_profile(
+                                &c.configuration,
+                                &store,
+                                &selection,
+                                &c.roaming,
+                                &native,
+                                &profile_id,
+                            )?
+                        } else {
+                            profile_launch::preview(
+                                &c.configuration,
+                                &store,
+                                &selection,
+                                &c.roaming,
+                                &native,
+                            )?
+                        };
                         let summary = preview.summary();
                         let id = summary.launch_id.clone();
                         let value = json!({"preview_id":id,"summary":summary,"configuration_binding":c.configuration.binding()});
