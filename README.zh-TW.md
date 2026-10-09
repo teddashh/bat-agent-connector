@@ -10,6 +10,10 @@
 [實作狀態](docs/product/implementation-status.md)。桌面版共用 Dashboard frontend 與既有 Python 後端。
 兩份計畫是同一產品的 UI 修訂，共用功能 backlog；不提供 Project Hub 匯入，保留既有專案與工作項目管理。
 
+共用介面可建立中央 managed session、檢視並批次核准選定的請求，以及擷取成果與留下固定版本的審核紀錄。
+操作在重開後保留原始請求與 operation，整理也支援符合條件的 Task Service 資源。
+桌面檔案操作由 Rust 管理選檔、拖放上傳、有限大小的預覽與另存新檔；原生 Fleet 的 runtime／遷移仍在整合。
+
 BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端機 app，在你自己的機器上執行 Claude Code 與 Codex 的 agent session，並依工作區（workspace）分組。它有一套遠端協定 `bat-remote/v2`，BAT 自己的桌面介面和手機客戶端都走這套協定。本專案實作同一套協定，讓「其他」agent（Claude Code、Codex、Cursor、Hermes 或任何 MCP 客戶端）以及 shell 腳本可以：
 
 * 看到有哪些 agent session、哪些正在跑或卡在問題上，以及它們最近說了什麼；
@@ -47,7 +51,7 @@ Hermes 與 Grokbot 配接皆[由 canonical skill 產生](docs/agent-skills.md)�
 
 同時跑好幾個長時間執行的 coding agent，就得一直切分頁檢查：哪個做完了、哪個卡在問題上、哪個只差一句「continue」。透過 BAT 的協定讀這些狀態很可靠（不抓畫面、不模擬 GUI 操作），也能讓一個負責監看的 agent 替你檢查，而任何會寫入的動作都還是由你掌控。
 
-附件以 immutable revision 存在 Connector 自有 store，記 SHA-256、size 與明確配額。用 `batc artifact upload FILE --key KEY --confirm` 或 Dashboard 選檔上傳，把精確 `{artifact_id, revision, digest}` 附到工作項目或 checkpoint。接續固定 checkpoint 的主機，第一指令前在 session worktree 驗證 bytes；來源前進時明確確認，續同一 operation。草稿文字與已上傳 refs 在 reload／失敗後保留。人工單檔用 `batc artifact capture-preview HOST SESSION_ID relative/file` 保存預覽 JSON，再以相同 credential 執行 `batc artifact capture --preview-file PREVIEW.json --key KEY --confirm`。需要 observe＋manage，來源變更即拒絕，不修改人工 checkout，也不是完整 dirty snapshot。Store 沒有 delete；managed-result capture／accept 與跨主機 commit fetch 留待 B2／C。見 [Artifacts 設計](docs/design/artifacts.md)。
+附件以 immutable revision 存在 Connector 自有 store，記 SHA-256、size 與明確配額。用 `batc artifact upload FILE --key KEY --confirm` 或 Dashboard 選檔上傳，把精確 `{artifact_id, revision, digest}` 附到工作項目或 checkpoint。接續固定 checkpoint 的主機，第一指令前在 session worktree 驗證 bytes；來源前進時明確確認，續同一 operation。草稿文字與已上傳 refs 在 reload／失敗後保留。人工單檔用 `batc artifact capture-preview HOST SESSION_ID relative/file` 保存預覽 JSON，再以相同 credential 執行 `batc artifact capture --preview-file PREVIEW.json --key KEY --confirm`。需要 observe＋manage，來源變更即拒絕，不修改人工 checkout，也不是完整 dirty snapshot。Store 沒有 delete；managed 成果可經固定 execution／command 證據擷取，再以 approve 權限記錄精確 revision 的審核。跨主機的已發佈 commit 接續仍在實作，不直接搬運未發佈 Git objects。見 [Artifacts 設計](docs/design/artifacts.md)。
 
 Capture 的同 key 查回、resume 與 cancel 也需原 credential 和目前的 observe＋manage；
 已接受的 operation 不因 preview 過期而失去恢復或查回能力。

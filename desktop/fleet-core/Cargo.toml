@@ -1,0 +1,27 @@
+[package]
+name = "bat-fleet-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+license = "MIT"
+publish = false
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.10.9"
+regex = "=1.13.1"
+base64 = "=0.22.1"
+rand = "=0.10.3"
+reqwest = { version = "=0.12.28", default-features = false }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+sha1 = "=0.10.6"
+tokio = { version = "=1.53.2", features = ["net", "io-util", "time", "macros", "rt"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
+zeroize = "=1.9.1"
+
+[dev-dependencies]
+rcgen = { version = "=0.14.8", default-features = false, features = ["ring"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_UI_Shell"] }

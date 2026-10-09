@@ -6,9 +6,21 @@ export interface NativeStatus {
   endpoint: string | null; error: string | null; credential_available: boolean;
   expected_actor?: string; credential_source?: "launch_environment" | "windows_credential_manager" | null;
   credential_saved?: boolean; enrollment_supported?: boolean; configuration_reload?: boolean;
-  configuration_file?: string; connected?: boolean;
+  configuration_file?: string; connected?: boolean; file_transfers?: boolean;
 }
-export const nativeStatus = () => invoke<NativeStatus>("native_status");
+export let nativeFileSupport = false;
+export async function nativeStatus() {
+  const status = await invoke<NativeStatus>("native_status");
+  nativeFileSupport = status.file_transfers === true;
+  return status;
+}
+export const nativeFilesStatus = () => invoke<any>("native_files_status");
+export const nativeFilesPick = (draftId: string) => invoke<any[]>("native_files_pick", {draftId});
+export const nativeFilesUpload = (handleId: string) => invoke<any>("native_files_upload", {handleId});
+export const nativeFilesDropTarget = (draftId: string, enabled: boolean) => invoke<void>("native_files_drop_target", {draftId, enabled});
+export const nativeFilesControl = (transferId: string, action: string) => invoke<void>("native_files_control", {transferId, action});
+export const nativeFilesSave = (reference: unknown) => invoke<any>("native_files_save", {reference});
+export const nativeFilesPreview = (reference: unknown) => invoke<any>("native_files_preview", {reference});
 export const nativeConnect = () => invoke<any>("connector_connect");
 export const nativeDisconnect = () => invoke<void>("connector_disconnect");
 export const nativeEnroll = () => invoke<any | null>("connector_enroll", {

@@ -1,6 +1,6 @@
 # Better Agent Dashboard／Connector 實作狀態
 
-查核日期：2026-10-08。依 [共用產品與 Tauri 方向](realignment-v2.md)；兩份計畫是同一產品的 UI 修訂，共用一份功能 backlog。歷史交接見
+查核日期：2026-10-09。依 [共用產品與 Tauri 方向](realignment-v2.md)；兩份計畫是同一產品的 UI 修訂，共用一份功能 backlog。歷史交接見
 [`2026-10-08-dispatch.md`](../handoff/2026-10-08-dispatch.md)。此表以 source evidence
 追蹤，不以測試數或 PR 數代替產品驗收。開工時 main 為 `2568520`（#41 已合併）；
 本輪已依序合併 #36（`800f6ec`）、#35（`8e687fb`）、#37（`2ac5715`）及 #38（`8c755a3`）。下面的接手基線保留歷史，
@@ -8,16 +8,42 @@
 
 ## 目前續作
 
-最新追蹤 [#59](https://github.com/teddashh/bat-agent-connector/issues/59)。#58 已合併到 main
-`e495d70d8dae6b7dc415adc44a23eb1bcf64dd7d`。Native credentials、durable bulk approval、managed
-artifact capture/accept 已加入 `integrate/completion-candidate` 候選工作線，未宣稱已合併或實機通過。
+最新追蹤 [#59](https://github.com/teddashh/bat-agent-connector/issues/59)。[#60](https://github.com/teddashh/bat-agent-connector/pull/60)
+已合併到 main `c11dab72651ccf459842b3b39e942b040cfe2c36`。Native credentials、durable bulk approval、managed
+artifact capture/accept 及 session 整理已合併；沒有 installed/live 通過宣稱。
 Project Hub 的清楚 session 整理已列為共用 UI 方向，依實際 host／workspace 分組，不猜測專案歸屬。
 產品負責人補充原始對話並
 澄清 workspace／repository 與 GitHub 同步模式，見 [共同依據](realignment-v2.md#原始需求與後續澄清)。
 直接未發布 Git-pack transport 實驗留在本機獨立分支，沒有合入；此能力不再列交付缺口。
 一般附件及成果操作保留，明確 repository 的已發布版本同步仍須查核；不因此宣告 M1–M3 完成。
 
-本輪候選來源與審查：
+本輪合併證據：固定候選 `581e2a75b553c57867192a52f639c2dbed061904` 與 merge commit 的 tree 同為
+`ee21941fa5137cc862f2775ba5d975db154755db`。Python CI 3.10–3.13 各 **2568 passed／33 skipped**；
+179 shared UI、12 state、33 Windows／32 Linux Rust、Windows NSIS／Linux deb unsigned packages 通過。
+本機 frozen backend `9b67ed8` 的 Python 3.13／3.10 full 各 2568／33；最後合併 tree 的 coverage 由 exact-head CI 補足。
+私有 installer #9 已合併 `ac1a1aa`，pin 此候選與 canonical `.7`；17 temporary/mock cases 在 default／3.10 通過，
+真 source verify-only 通過，未改動 live 安裝。首個 installer 3.10 執行環境缺 PyYAML，改用文件列明依賴的獨立環境後通過。
+
+新整合候選的功能基底為 `6efc85b`，尚未合併：
+
+- Durable `session.start`、精確 workspace discovery、共享建立 session 與批次核准 UI；重試前須保存原始 intent。
+- Task Service reviewed／automatic cleanup、原始 start receipt 的 carrier discovery；唯一內容、人工使用者與歷史保留。
+- Native 選檔／拖放上傳、固定 revision 的 Save As／預覽；managed 成果擷取、observe-only 讀取及 approve 審核 UI。
+  成果事件重讀已載入頁面，失敗不前進 cursor；文字以 literal text、PNG 以有大小限制的靜態像素呈現。
+- Canonical workflow `.8` 與生成的 Hermes／Grokbot bundle 同步。Rust Fleet core 的設定、selection CAS、
+  Windows held-handle ownership 與 pinned readonly probes 已準備，尚未接到桌面 supervisor。
+
+本機證據：frozen backend `80cf72a` 的 Python 3.13／3.10 全套各 **2678 passed／33 skipped**（1057.52s／1049.31s）；
+最後整合 source 的 **333 UI、12 state、53 app Rust／1 fixture-only ignored** 通過，Fleet core **56 Linux tests** 通過。
+Ruff、canonical generator、build／browser drift、Clippy、累積秘密掃描通過。Actual-central 的 start、bulk、task cleanup、
+native files 與 B2 fixtures 使用 temporary Git／MockBat；B2 包含獨立 observe＋approve 身分讀取及審核。
+完整候選 SHA、exact-head CI／Windows native tests／unsigned packages、merge 與 installer pin 以新 PR 證據為準。
+
+Rust Fleet supervisor／ownership 遷移／autostart、明確 repository 的已發佈 commit 接續、其餘 legacy orchestration、
+簽章／更新及 installed/live 矩陣仍須接續。另有 credential／discovery／tunnel effect 模組在獨立工作線，
+不計入本候選的 Fleet runtime 完成度。沒有真實安裝或 live host/provider writes。
+
+本輪來源與審查（以下保留合併前各層證據）：
 
 - Native credentials `67223d0`：Windows 原生憑證對話框／Credential Manager、固定 endpoint／actor／
   contract 及中央身分驗證、可恢復連線。獨立審查找到 native bootstrap 404 誤入 legacy namespace，

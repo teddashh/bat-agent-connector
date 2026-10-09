@@ -337,7 +337,7 @@ class BatClient:
         This intentionally skips connect, retries, and semaphore acquisition;
         the outer guarded invoke already owns the connection and semaphore.
         """
-        if channel not in {"claude:get-session-meta", "claude:get-session-state", "worktree:status", "git:getRoot"}:
+        if channel not in {"claude:get-session-meta", "claude:get-session-state", "worktree:status", "git:getRoot", "git:log", "git:branch", "workspace:load"}:
             raise ChannelNotAllowed("guard read channel is not an identity read")
         canonical = check_allowed(channel, allow_writes=False, allow_orchestrate=False)
         frame = {"type": "invoke", "id": f"batc-{next(self._ids)}",
@@ -414,7 +414,8 @@ class BatClient:
         raise last_exc or ConnectionLost(f"{self.host.name}: failed")  # pragma: no cover
 
     async def append_workspace_terminal(self, profile_id: str, terminal: dict, *, grant: WriteGrant | None,
-                                        retries: int = 3) -> dict:
+                                        retries: int = 3, before_send: Callable[[], None] | None = None,
+                                        before_frame: Callable[[], Awaitable[None]] | None = None) -> dict:
         """Append ONE terminal (tab) to the host's workspace document, append-only.
 
         BAT only offers a whole-document ``workspace:save``. To stay append-only we:
@@ -468,7 +469,8 @@ class BatClient:
                 await asyncio.sleep(0.5)
                 continue  # someone saved in between; retry from scratch
             saved = await self._invoke_checked(
-                "workspace:save", {"profileId": profile_id, "data": json.dumps(new_doc)}, None
+                "workspace:save", {"profileId": profile_id, "data": json.dumps(new_doc)}, None,
+                before_send=before_send, before_frame=before_frame
             )
             _, after = await load()
             ids_after = {t.get("id") for t in after.get("terminals") or [] if isinstance(t, dict)}

@@ -1,7 +1,177 @@
-// Generated from desktop/src. Run: cd desktop && npm ci && npm run build:browser. Do not edit.
+async function invoke(cmd, args = {}, options) {
+	return window.__TAURI_INTERNALS__.invoke(cmd, args, options);
+}
+function isTauri() {
+	return !!(globalThis || window).isTauri;
+}
+//#endregion
+//#region src/transport/index.ts
+var nativeDesktop = isTauri();
+var nativeFileSupport = false;
+async function nativeStatus() {
+	const status = await invoke("native_status");
+	nativeFileSupport = status.file_transfers === true;
+	return status;
+}
+var nativeFilesStatus = () => invoke("native_files_status");
+var nativeFilesPick = (draftId) => invoke("native_files_pick", { draftId });
+var nativeFilesUpload = (handleId) => invoke("native_files_upload", { handleId });
+var nativeFilesDropTarget = (draftId, enabled) => invoke("native_files_drop_target", {
+	draftId,
+	enabled
+});
+var nativeFilesControl = (transferId, action) => invoke("native_files_control", {
+	transferId,
+	action
+});
+var nativeFilesSave = (reference) => invoke("native_files_save", { reference });
+var nativeFilesPreview = (reference) => invoke("native_files_preview", { reference });
+var nativeConnect = () => invoke("connector_connect");
+var nativeDisconnect = () => invoke("connector_disconnect");
+var nativeEnroll = () => invoke("connector_enroll", { locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US" });
+var nativeReloadConfiguration = () => invoke("connector_reload_configuration");
+var nativeForgetCredential = () => invoke("connector_forget_credential");
+var openExternal = (url) => invoke("open_external", { url });
+var fleetAvailability = () => invoke("fleet_availability");
+var fleetRequest = (input) => invoke("fleet_request", { input });
+async function connectorRequest(method, path, body, key, browserToken) {
+	if (nativeDesktop) return invoke("connector_request", { input: {
+		method,
+		path,
+		body: body ?? null,
+		idempotency_key: key ?? null
+	} });
+	const headers = { Authorization: `Bearer ${browserToken}` };
+	if (body !== void 0) headers["Content-Type"] = "application/json";
+	if (key) headers["Idempotency-Key"] = key;
+	const res = await fetch(`/api/v1${path}`, {
+		method,
+		headers,
+		body: body === void 0 ? void 0 : JSON.stringify(body)
+	});
+	return {
+		status: res.status,
+		data: await res.json().catch(() => ({}))
+	};
+}
+async function connectorUploadArtifact(operationId, bytes, browserToken) {
+	if (!/^op_[0-9a-f]{32}$/.test(operationId)) throw new Error("Invalid artifact upload operation ID");
+	if (nativeDesktop) {
+		if (bytes.byteLength > 16777216) throw new Error("Artifact exceeds the native 16 MiB upload limit");
+		return invoke("connector_upload_artifact", bytes, { headers: { "x-batc-upload-operation": operationId } });
+	}
+	const res = await fetch(`/api/v1/artifacts/uploads/${operationId}/content`, {
+		method: "POST",
+		redirect: "error",
+		headers: {
+			Authorization: `Bearer ${browserToken}`,
+			"Content-Type": "application/octet-stream"
+		},
+		body: bytes
+	});
+	return {
+		status: res.status,
+		data: await res.json().catch(() => ({}))
+	};
+}
+async function readArtifactContent(reference, size, token, signal) {
+	if (nativeDesktop || !/^art_[0-9a-f]{32}$/.test(reference.artifact_id) || !Number.isSafeInteger(reference.revision) || reference.revision < 1 || !/^[0-9a-f]{64}$/.test(reference.digest) || !Number.isSafeInteger(size) || size < 0 || size > 16777216) throw new Error("Artifact content exceeds the supported bound or has an invalid reference");
+	const response = await fetch(`/api/v1/artifacts/${reference.artifact_id}/revisions/${reference.revision}/content`, {
+		method: "GET",
+		headers: { Authorization: `Bearer ${token}` },
+		redirect: "error",
+		cache: "no-store",
+		credentials: "omit",
+		mode: "same-origin",
+		signal: AbortSignal.any([signal, AbortSignal.timeout(3e4)])
+	});
+	if (response.status !== 200 || response.redirected || response.headers.get("Content-Length") !== String(size) || !response.body) {
+		await response.body?.cancel();
+		throw new Error("Artifact content response does not match the exact revision");
+	}
+	const bytes = new Uint8Array(size), reader = response.body.getReader();
+	let offset = 0;
+	try {
+		for (;;) {
+			const part = await reader.read();
+			if (part.done) break;
+			if (offset + part.value.length > size) throw new Error("Artifact content exceeds its declared size");
+			bytes.set(part.value, offset);
+			offset += part.value.length;
+		}
+		if (offset !== size) throw new Error("Artifact content is incomplete");
+	} catch (error) {
+		await reader.cancel().catch(() => {});
+		throw error;
+	} finally {
+		reader.releaseLock();
+	}
+	const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((value) => value.toString(16).padStart(2, "0")).join("");
+	signal.throwIfAborted();
+	if (hash !== reference.digest) throw new Error("Artifact content digest does not match the exact revision");
+	return bytes;
+}
+//#endregion
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		bulk_title: "批次核准",
+		bulk_choose_host: "選擇主機",
+		bulk_workspace: "工作區名稱或 ID（選填）",
+		bulk_preview: "預覽待核准請求",
+		bulk_scope: "範圍限於所選主機，可再指定工作區。只處理這次明確勾選的請求。",
+		bulk_effect: "每筆勾選的請求都會設為允許，並通知 BAT 不再詢問同類請求。這不是單次允許；變更權限模式則需另外選擇。",
+		bulk_select: "核准 {id}",
+		bulk_mode: "{id} 的後續權限模式",
+		bulk_no_mode: "不變更權限模式",
+		bulk_apply: "核准已選請求",
+		bulk_selected: "已選 {count} 筆",
+		bulk_check: "查回批次結果",
+		bulk_new: "檢視另一批請求",
+		bulk_empty: "這個範圍目前沒有待核准請求。",
+		bulk_blocked: "不可納入批次",
+		bulk_truncated: "這次只檢查前 50 個工作階段，並非完整清單。請縮小工作區範圍後再預覽。",
+		bulk_fixed: "保留原請求、選擇與操作識別。新出現的請求不會自動加入這一批。",
+		bulk_expired: "預覽已過期。請重新預覽並勾選。",
+		bulk_refused: "這筆請求在受理前被拒絕。可重新檢視另一批請求。",
+		bulk_invalid_preview: "預覽回應與所選範圍不符。",
+		bulk_invalid_result: "操作回應與原批次請求不符。",
+		bulk_all_proven: "每筆核准與所選權限變更都有接受回執；這不代表工作已完成。",
+		bulk_partial: "尚未證明全部項目成功。請查看逐筆回執與原操作。",
+		bulk_item_complete: "所選操作已接受",
+		bulk_item_incomplete: "尚未全部確認",
+		bulk_answer: "核准",
+		bulk_permissions: "權限",
+		bulk_full_prompt: "完整請求與識別資料",
+		start_title_page: "開始新工作階段",
+		start_intro: "在選定主機與工作區建立獨立的受管理工作階段。",
+		start_choose_host: "選擇主機",
+		start_workspace: "工作區",
+		start_choose_workspace: "選擇工作區",
+		start_agent: "Agent",
+		start_model: "模型（選填）",
+		start_model_default: "使用主機或 agent 的預設模型",
+		start_title: "標題（選填）",
+		start_prompt: "原始指示（選填）",
+		start_reload_workspaces: "重新讀取工作區",
+		start_loading_workspaces: "正在讀取中央工作區清單…",
+		start_discovery_failed: "工作區清單尚未確認。請重新讀取後再選擇。",
+		start_no_workspaces: "此主機目前未傳回工作區。",
+		start_truncated: "只顯示前 200 個工作區；此清單不代表所有工作區。",
+		start_workspace_help: "使用中央傳回的固定工作區 ID；主機仍會檢查儲存庫與權限。",
+		start_isolation: "使用新 worktree。此操作不會接管既有人工或任務工作階段。",
+		start_prompt_help: "原文會完整保留。留白只啟動工作階段，不會自動產生指示。",
+		start_apply: "開始工作階段",
+		start_new: "準備另一個工作階段",
+		start_unavailable: "需要 observe 與 start 權限，以及中央允許啟動的主機。",
+		start_invalid_result: "操作回應與原啟動請求不符。",
+		start_unknown: "提交結果尚未確認；原請求與 key 已保留。",
+		start_fixed: "主機、工作區、選項與原文已固定。查回不會重新啟動；結果不明時只能重試同一筆請求。",
+		start_refused: "請求在受理前被拒絕。可明確準備另一筆請求。",
+		start_started: "已確認啟動：",
+		start_without_prompt: "未要求傳送初始指示。",
+		start_prompt_accepted: "已確認初始指示被接受。",
+		start_prompt_unknown: "已啟動，但初始指示是否被接受尚未確認。請檢視逐步回執；不要另開工作階段重送。",
 		sessions_label: "標題",
 		sessions_workspace: "工作區",
 		sessions_workspace_id: "工作區 ID",
@@ -51,6 +221,48 @@ var STRINGS = {
 		permissions_accepted: "BAT 已接受要求的設定；尚未獨立查證執行中的 agent 已套用。",
 		permissions_next_turn: "Codex 於下一輪使用這個設定。",
 		permissions_refused: "這筆請求在受理前被拒絕。可明確建立另一筆變更；原請求不會自動重試。",
+		ar_content_download: "下載此版本",
+		ar_content_downloaded: "已驗證此版本的 SHA-256，並交由瀏覽器下載。",
+		ar_content_help: "讀取固定版本，不會建立審閱記錄。文字預覽最多 256 KiB；靜態 PNG 最多 2 MiB／100 萬像素；下載最多 16 MiB。",
+		ar_content_changed: "檔案回覆與固定版本不符。請重新查核原操作。",
+		ar_content_limit: "此檔案超過 16 MiB 的用戶端讀取上限。",
+		ar_content_reading: "正在讀取與查核固定版本…",
+		ar_content_verified: "此預覽來自 SHA-256 已驗證的固定版本。",
+		ar_content_preview_limit: "此檔案不支援預覽，請下載或另存新檔後檢視。",
+		ar_content_native_unavailable: "這個桌面版本未提供原生檔案讀取功能。",
+		ar_nav: "附件成果",
+		ar_title: "附件成果與審閱",
+		ar_open: "擷取與審閱這次執行的檔案",
+		ar_help: "保存一個管理中來源的固定檔案版本，再明確記錄對該版本的審閱。原工作樹與執行狀態不會因此改變。",
+		ar_capture_title: "保存來源檔案",
+		ar_review_title: "審閱固定版本",
+		ar_execution: "中央執行證據",
+		ar_choose_execution: "選擇已接受的執行或指令",
+		ar_evidence_kind: "證據類型",
+		ar_operation: "執行操作",
+		ar_command: "Task Service 指令",
+		ar_task_id: "完整任務 ID",
+		ar_evidence_id: "完整操作或指令 ID",
+		ar_exact_evidence: "輸入較早的完整證據 ID…",
+		ar_more_executions: "更多執行紀錄",
+		ar_refresh_sources: "重新讀取執行證據",
+		ar_source_unavailable: "來源須為目前由 Connector 管理的完整 session；中央仍會查核原始執行證據。",
+		ar_receipt: "對此版本的審閱紀錄（最多 2000 字）",
+		ar_accept: "記錄此版本的審閱",
+		ar_check_accept: "查回原審閱提交",
+		ar_accept_help: "請先檢視這份成果，再記錄審閱依據。此回執只對應下列版本，不表示測試通過、任務完成、合併或部署。",
+		ar_approve_scope: "記錄審閱需要 approve 權限；查看附件需要 observe 權限。",
+		ar_revision: "固定附件版本",
+		ar_lineage: "中央來源與執行證據",
+		ar_check: "查回原操作",
+		ar_new_review: "新增另一筆審閱",
+		ar_recorded: "已記錄對此固定版本的審閱。任務與工作項目的完成狀態未改變。",
+		ar_catalog: "已保存的管理中來源成果",
+		ar_no_artifacts: "這一頁尚無可審閱的管理中來源成果。",
+		ar_invalid_result: "回應與原操作、固定版本或中央來源證據不符。原請求與 key 已保留。",
+		ar_storage: "無法保存原操作的復原資料。請先允許此應用程式使用本機儲存空間。",
+		ar_original_credential: "擷取查回需要原始憑證及 manage、observe 權限。請恢復原憑證；原請求與 key 會繼續保留。",
+		ar_original_preview: "原始擷取預覽與來源證據",
 		capture_title: "擷取遠端檔案",
 		capture_host: "來源主機",
 		capture_session: "完整人工 Session ID",
@@ -145,6 +357,32 @@ var STRINGS = {
 		obs_scope_earlier_history: "較早的歷程",
 		parent_archived: "這個項目或所屬專案已封存；編輯草稿仍保留。",
 		pending_changed: "待回覆的問題已改變；草稿仍保留。請查看目前的要求後重新作答。",
+		files_unavailable: "目前連線無法取回原傳輸。從草稿移除不會取消上傳。",
+		files_choose: "選擇檔案",
+		files_help: "檔案內容會在選取時固定；完成驗證後即可加入附件。",
+		files_drop: "啟用拖放",
+		files_drop_help: "將檔案拖入視窗，再按「上傳」加入這份草稿。",
+		files_upload: "上傳",
+		files_progress: "本機傳輸進度",
+		files_stop: "停止傳輸",
+		files_retry: "重試原傳輸",
+		files_check: "查回結果",
+		files_cancel: "取消上傳",
+		files_discard: "清除本機紀錄",
+		files_save: "另存新檔",
+		files_preview: "預覽",
+		files_selected: "已選取",
+		files_checking: "查核原操作",
+		files_uploading: "傳送中",
+		files_verifying: "驗證中",
+		files_downloading: "下載中",
+		files_saving: "儲存中",
+		files_ready: "已驗證",
+		files_saved: "已儲存",
+		files_stopped: "已停止，結果保留",
+		files_failed: "操作失敗",
+		files_cancelled: "已取消",
+		files_receipt_mismatch: "傳輸紀錄與原檔案不符，未加入附件。",
 		attachment_file_changed: "請重新選擇相同檔案以查回原上傳；不同內容請先移除這一項。",
 		attachment_pending: "上傳結果仍待確認。請以相同檔案重試原操作。",
 		existing_artifact: "已上傳附件",
@@ -170,6 +408,12 @@ var STRINGS = {
 		"nav_cleanup": "整理與復原",
 		"cleanup_target": "選擇整理範圍",
 		"cleanup_target_work_item": "工作項目",
+		"cleanup_target_task": "執行任務",
+		"cleanup_task_preview": "預覽此任務的資源整理",
+		"cleanup_check": "查回原整理操作",
+		"cleanup_new": "預覽另一筆整理",
+		"cleanup_invalid_result": "操作回應與原整理請求不符。",
+		"cleanup_task_help": "任務整理使用完整任務 ID，由中央檢查結束狀態、共用資源與未確認指令。未提交的任務內容與分支仍保留；不會刪除任務歷史。",
 		"cleanup_target_checkpoint": "Checkpoint",
 		"cleanup_target_integration": "整合操作",
 		"cleanup_target_host": "主機",
@@ -201,6 +445,9 @@ var STRINGS = {
 		"cleanup_empty_retained": "還沒有已記錄的保留內容。",
 		"cleanup_unavailable": "無法驗證主機或保留 objects。",
 		"cleanup_reason_reviewed": "由審閱後的整理操作移除。",
+		"cleanup_reason_automatic": "由任務服務自動整理，保留內容與操作回執。",
+		"cleanup_reason_historical": "依過往任務整理事件保存的歷史紀錄；並非本次審閱操作。",
+		"cleanup_reason_recorded": "已有整理紀錄，詳細來源請見回執。",
 		"cleanup_choice_UNCOMMITTED_CHANGES": "已選擇永久丟棄未提交內容。",
 		"cleanup_choice_RESULTS_NOT_DELIVERED": "已選擇釋放；保留尚未送達的 commits 與 branch。",
 		"cleanup_kind_session": "Session",
@@ -237,7 +484,8 @@ var STRINGS = {
 		"cleanup_reason_COMMAND_UNRESOLVED": "指令或外部步驟的結果尚未確認。",
 		"cleanup_reason_ACTIVE_EXECUTION": "另一個執行仍需要資源。",
 		"cleanup_reason_CONTENT_REQUIRED": "有效整合預覽或執行仍需要內容。",
-		"cleanup_reason_TASK_OWNED": "由 Task Service 整理；reviewed task cleanup 在 Part B。",
+		"cleanup_reason_TASK_OWNED": "此資源屬於執行任務，須在該任務範圍確認可整理；目前仍保留。",
+		"cleanup_reason_RETAINED_COPY": "保留原分支作為內容副本。",
 		"cleanup_reason_UNCOMMITTED_CHANGES": "有未提交、未追蹤或 ignored 內容。",
 		"cleanup_reason_RESULTS_NOT_DELIVERED": "送達回執未涵蓋全部結果 commits。",
 		"cleanup_reason_DELIVERY_UNCERTAIN": "送達結果尚未確認。",
@@ -704,6 +952,105 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		bulk_title: "Batch approvals",
+		bulk_choose_host: "Choose a host",
+		bulk_workspace: "Workspace name or ID (optional)",
+		bulk_preview: "Preview pending requests",
+		bulk_scope: "Choose one host and optionally a workspace. Only explicitly selected requests enter this batch.",
+		bulk_effect: "Each selected request is allowed with BAT instructed not to ask again for the same kind of request. This is not a one-time allowance. Changing the permission mode is a separate choice.",
+		bulk_select: "Approve {id}",
+		bulk_mode: "Subsequent permission mode for {id}",
+		bulk_no_mode: "Keep permission mode",
+		bulk_apply: "Approve selected requests",
+		bulk_selected: "{count} selected",
+		bulk_check: "Check batch outcome",
+		bulk_new: "Review another batch",
+		bulk_empty: "No pending approval requests in this scope.",
+		bulk_blocked: "Unavailable for this batch",
+		bulk_truncated: "Only the first 50 sessions were checked. This is not the complete inventory. Narrow the workspace and preview again.",
+		bulk_fixed: "The original requests, selection and operation identity are retained. Newly arriving prompts never join this batch.",
+		bulk_expired: "This preview expired. Preview again and select requests.",
+		bulk_refused: "This request was refused before admission. You can review another batch.",
+		bulk_invalid_preview: "The preview does not match the selected scope.",
+		bulk_invalid_result: "The operation response does not match the original batch request.",
+		bulk_all_proven: "Each selected approval and mode change has an acceptance receipt. This does not mean the work is complete.",
+		bulk_partial: "Not all items are proven successful. Check the individual receipts and original operations.",
+		bulk_item_complete: "Selected actions accepted",
+		bulk_item_incomplete: "Not fully confirmed",
+		bulk_answer: "Approval",
+		bulk_permissions: "Permissions",
+		bulk_full_prompt: "Full request and identity",
+		start_title_page: "Start a new session",
+		start_intro: "Create a standalone managed session on the host and workspace you choose.",
+		start_choose_host: "Choose a host",
+		start_workspace: "Workspace",
+		start_choose_workspace: "Choose a workspace",
+		start_agent: "Agent",
+		start_model: "Model (optional)",
+		start_model_default: "Use the host or agent default",
+		start_title: "Title (optional)",
+		start_prompt: "Original instructions (optional)",
+		start_reload_workspaces: "Reload workspaces",
+		start_loading_workspaces: "Reading central workspaces…",
+		start_discovery_failed: "Workspace discovery is unconfirmed. Reload before selecting.",
+		start_no_workspaces: "This host returned no workspaces.",
+		start_truncated: "Only the first 200 workspaces are shown; this is not a complete listing.",
+		start_workspace_help: "Uses the exact workspace ID returned by central. Host repository and policy checks still apply.",
+		start_isolation: "Uses a new worktree. This action does not adopt an existing manual or task session.",
+		start_prompt_help: "Your original text is preserved. Leave this empty to start without sending instructions.",
+		start_apply: "Start session",
+		start_new: "Prepare another session",
+		start_unavailable: "Requires observe and start scopes, and a host central permits for starting sessions.",
+		start_invalid_result: "The operation response does not match the original start request.",
+		start_unknown: "Submission is unconfirmed; the original request and key are preserved.",
+		start_fixed: "Host, workspace, options and original text are fixed. Read-back never starts again; an unknown submission can only retry the same request.",
+		start_refused: "This request was refused before admission. You can explicitly prepare another request.",
+		start_started: "Start confirmed:",
+		start_without_prompt: "No initial instructions were requested.",
+		start_prompt_accepted: "Initial instructions were accepted.",
+		start_prompt_unknown: "Started, but acceptance of the initial instructions is unconfirmed. Check the step receipts; do not resend by starting another session.",
+		ar_content_download: "Download this revision",
+		ar_content_downloaded: "SHA-256 verified; download handed to the browser.",
+		ar_content_help: "Read this fixed revision without recording a review. Preview: UTF-8 text up to 256 KiB; static PNG up to 2 MiB / one megapixel. Download: up to 16 MiB.",
+		ar_content_changed: "The file response does not match the fixed revision. Check the original operation again.",
+		ar_content_limit: "This file exceeds the client's 16 MiB read limit.",
+		ar_content_reading: "Reading and verifying the fixed revision…",
+		ar_content_verified: "This preview comes from the SHA-256 verified fixed revision.",
+		ar_content_preview_limit: "Preview is unavailable for this file. Download or Save As to inspect it.",
+		ar_content_native_unavailable: "This desktop version does not provide native file reading.",
+		ar_nav: "Artifacts",
+		ar_title: "Artifacts and review",
+		ar_open: "Capture and review this execution's file",
+		ar_help: "Save one fixed file revision from a managed source, then explicitly record a review of that revision. This does not change the source worktree or execution state.",
+		ar_capture_title: "Save source file",
+		ar_review_title: "Review fixed revision",
+		ar_execution: "Central execution evidence",
+		ar_choose_execution: "Choose an accepted execution or command",
+		ar_evidence_kind: "Evidence type",
+		ar_operation: "Execution operation",
+		ar_command: "Task Service command",
+		ar_task_id: "Full task ID",
+		ar_evidence_id: "Full operation or command ID",
+		ar_exact_evidence: "Enter an older exact evidence ID…",
+		ar_more_executions: "More executions",
+		ar_refresh_sources: "Reload execution evidence",
+		ar_source_unavailable: "Choose a current Connector-managed session with its full ID. Central still verifies the original execution evidence.",
+		ar_receipt: "Review receipt for this revision (up to 2000 characters)",
+		ar_accept: "Record review of this revision",
+		ar_check_accept: "Check original review submission",
+		ar_accept_help: "Inspect the result before recording your review. This receipt covers only the fixed revision below; it does not prove passing tests, task completion, merge or deployment.",
+		ar_approve_scope: "Recording review requires approve; reading artifacts requires observe.",
+		ar_revision: "Fixed artifact revision",
+		ar_lineage: "Central source and execution evidence",
+		ar_check: "Check original operations",
+		ar_new_review: "Record another review",
+		ar_recorded: "Review of this exact revision was recorded. Task and work-item completion are unchanged.",
+		ar_catalog: "Saved results from managed sources",
+		ar_no_artifacts: "No reviewable managed-source results on this page.",
+		ar_invalid_result: "The response does not match the original operation, fixed revision or central source proof. The original request and key are retained.",
+		ar_storage: "The original operation recovery data could not be saved. Enable local storage for this application before submitting.",
+		ar_original_credential: "Capture recovery requires the original credential and manage/observe scopes. Restore that credential; the original request and key stay saved.",
+		ar_original_preview: "Original capture preview and source evidence",
 		sessions_label: "Title",
 		sessions_workspace: "Workspace",
 		sessions_workspace_id: "Workspace ID",
@@ -847,6 +1194,32 @@ var STRINGS = {
 		obs_scope_earlier_history: "Earlier history",
 		parent_archived: "This item or its project is archived. Your edit draft is retained.",
 		pending_changed: "The pending request changed. Your draft is retained; review the current request before answering.",
+		files_unavailable: "The original transfer is unavailable on this connection. Removing it from the draft does not cancel the upload.",
+		files_choose: "Choose files",
+		files_help: "Selection fixes the file contents. Verified uploads become attachments.",
+		files_drop: "Enable file drop",
+		files_drop_help: "Drop files into this window, then choose Upload to add them to this draft.",
+		files_upload: "Upload",
+		files_progress: "Local transfer progress",
+		files_stop: "Stop transfer",
+		files_retry: "Retry original transfer",
+		files_check: "Check result",
+		files_cancel: "Cancel upload",
+		files_discard: "Clear local receipt",
+		files_save: "Save As",
+		files_preview: "Preview",
+		files_selected: "Selected",
+		files_checking: "Checking original operation",
+		files_uploading: "Sending",
+		files_verifying: "Verifying",
+		files_downloading: "Downloading",
+		files_saving: "Saving",
+		files_ready: "Verified",
+		files_saved: "Saved",
+		files_stopped: "Stopped; original result retained",
+		files_failed: "Operation failed",
+		files_cancelled: "Cancelled",
+		files_receipt_mismatch: "The transfer receipt does not match the original file. Attachment was not added.",
 		attachment_file_changed: "Choose the same file to recover this upload; remove this entry before choosing different content.",
 		attachment_pending: "Upload outcome is still pending. Retry the original operation with the same file.",
 		existing_artifact: "Uploaded attachment",
@@ -872,6 +1245,12 @@ var STRINGS = {
 		"nav_cleanup": "Cleanup and retained work",
 		"cleanup_target": "Choose a scope",
 		"cleanup_target_work_item": "Work item",
+		"cleanup_target_task": "Execution task",
+		"cleanup_task_preview": "Preview this task's resource cleanup",
+		"cleanup_check": "Check original cleanup",
+		"cleanup_new": "Preview another cleanup",
+		"cleanup_invalid_result": "The operation response does not match the original cleanup request.",
+		"cleanup_task_help": "Task cleanup uses the complete task ID. Central checks terminal state, shared resources and unresolved commands. Uncommitted task content, task branches and task history are retained.",
 		"cleanup_target_checkpoint": "Checkpoint",
 		"cleanup_target_integration": "Integration",
 		"cleanup_target_host": "Host",
@@ -903,6 +1282,9 @@ var STRINGS = {
 		"cleanup_empty_retained": "No retained content recorded yet.",
 		"cleanup_unavailable": "Host or retained objects could not be verified.",
 		"cleanup_reason_reviewed": "Removed by a reviewed cleanup operation.",
+		"cleanup_reason_automatic": "Automatically cleaned by the task service, with retained content and operation receipts.",
+		"cleanup_reason_historical": "Historical record from an earlier task cleanup event; no current reviewed operation is implied.",
+		"cleanup_reason_recorded": "Cleanup was recorded; inspect its receipt for the original source.",
 		"cleanup_choice_UNCOMMITTED_CHANGES": "You chose permanent discard of uncommitted content.",
 		"cleanup_choice_RESULTS_NOT_DELIVERED": "You chose release; undelivered commits and branch are kept.",
 		"cleanup_kind_session": "Session",
@@ -939,7 +1321,8 @@ var STRINGS = {
 		"cleanup_reason_COMMAND_UNRESOLVED": "A command or external step has an unresolved outcome.",
 		"cleanup_reason_ACTIVE_EXECUTION": "Another execution still needs this resource.",
 		"cleanup_reason_CONTENT_REQUIRED": "An active integration preview or execution needs the content.",
-		"cleanup_reason_TASK_OWNED": "The Task Service reclaims this resource; reviewed task cleanup comes later.",
+		"cleanup_reason_TASK_OWNED": "This resource needs cleanup authority from its owning task. It remains retained in this scope or state.",
+		"cleanup_reason_RETAINED_COPY": "The original branch remains as a retained copy.",
 		"cleanup_reason_UNCOMMITTED_CHANGES": "Uncommitted tracked, staged, untracked or ignored content exists.",
 		"cleanup_reason_RESULTS_NOT_DELIVERED": "Delivery receipts do not cover all result commits.",
 		"cleanup_reason_DELIVERY_UNCERTAIN": "Delivery has an unresolved outcome.",
@@ -1410,62 +1793,260 @@ var lang = (navigator.language || "zh-TW").toLowerCase().startsWith("zh") ? "zh-
 function t(key, vars = {}) {
 	return (STRINGS[lang][key] ?? STRINGS["zh-TW"][key] ?? key).replace(/\{(\w+)\}/g, (_, k) => String(vars[k] ?? ""));
 }
-async function invoke(cmd, args = {}, options) {
-	return window.__TAURI_INTERNALS__.invoke(cmd, args, options);
-}
-function isTauri() {
-	return !!(globalThis || window).isTauri;
-}
 //#endregion
-//#region src/transport/index.ts
-var nativeDesktop = isTauri();
-var nativeStatus = () => invoke("native_status");
-var nativeConnect = () => invoke("connector_connect");
-var nativeDisconnect = () => invoke("connector_disconnect");
-var nativeEnroll = () => invoke("connector_enroll", { locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US" });
-var nativeReloadConfiguration = () => invoke("connector_reload_configuration");
-var nativeForgetCredential = () => invoke("connector_forget_credential");
-var openExternal = (url) => invoke("open_external", { url });
-var fleetAvailability = () => invoke("fleet_availability");
-var fleetRequest = (input) => invoke("fleet_request", { input });
-async function connectorRequest(method, path, body, key, browserToken) {
-	if (nativeDesktop) return invoke("connector_request", { input: {
-		method,
-		path,
-		body: body ?? null,
-		idempotency_key: key ?? null
-	} });
-	const headers = { Authorization: `Bearer ${browserToken}` };
-	if (body !== void 0) headers["Content-Type"] = "application/json";
-	if (key) headers["Idempotency-Key"] = key;
-	const res = await fetch(`/api/v1${path}`, {
-		method,
-		headers,
-		body: body === void 0 ? void 0 : JSON.stringify(body)
+//#region src/native-files.js
+var pending$1 = new Set([
+	"checking",
+	"uploading",
+	"verifying",
+	"downloading",
+	"saving"
+]);
+var fixedRef = (ref) => ({
+	artifact_id: ref.artifact_id,
+	revision: ref.revision,
+	digest: ref.digest
+});
+var sameRef = (a, b) => a && b && a.artifact_id === b.artifact_id && a.revision === b.revision && a.digest === b.digest;
+function nativeAttachments({ h, t, guard, canWrite, draftId, onReceipt, onDiscard, onVisibility, attached }) {
+	const rows = h("div", { class: "native-transfers" }), notice = h("p", {
+		class: "muted",
+		role: "status"
 	});
-	return {
-		status: res.status,
-		data: await res.json().catch(() => ({}))
+	const preview = h("div", {
+		class: "file-preview",
+		hidden: true
+	});
+	const box = h("div", { class: "native-files" }, rows, notice, preview);
+	const known = new Map(), downloads = new Set();
+	let armed = false, refreshing, picking = false, objectUrl = null, stopped = false;
+	const live = () => {
+		guard();
+		if (!box.isConnected) throw new Error("Attachment form changed");
 	};
-}
-async function connectorUploadArtifact(operationId, bytes, browserToken) {
-	if (!/^op_[0-9a-f]{32}$/.test(operationId)) throw new Error("Invalid artifact upload operation ID");
-	if (nativeDesktop) {
-		if (bytes.byteLength > 16777216) throw new Error("Artifact exceeds the native 16 MiB upload limit");
-		return invoke("connector_upload_artifact", bytes, { headers: { "x-batc-upload-operation": operationId } });
-	}
-	const res = await fetch(`/api/v1/artifacts/uploads/${operationId}/content`, {
-		method: "POST",
-		redirect: "error",
-		headers: {
-			Authorization: `Bearer ${browserToken}`,
-			"Content-Type": "application/octet-stream"
-		},
-		body: bytes
-	});
+	const failure = (error) => {
+		try {
+			live();
+			notice.textContent = String(error?.message || error);
+		} catch {}
+	};
+	const writable = () => {
+		live();
+		if (!canWrite()) throw new Error(t("offline_actions_paused"));
+	};
+	const act = async (receipt, action) => {
+		try {
+			live();
+			if (["retry", "cancel_upload"].includes(action) && receipt.direction === "upload") writable();
+			await nativeFilesControl(receipt.transfer_id, action);
+			live();
+			if (action === "discard_local") onDiscard(receipt.transfer_id);
+			await refresh();
+		} catch (error) {
+			failure(error);
+		}
+	};
+	const render = () => {
+		rows.replaceChildren(...[...known.values()].filter((r) => r.direction === "download" || !attached(r.transfer_id)).map((r) => {
+			const active = pending$1.has(r.stage), percent = r.size_bytes ? Math.min(100, Math.floor(r.transferred_bytes / r.size_bytes * 100)) : 0;
+			return h("div", { class: "file-transfer" }, h("div", { class: "row" }, h("div", { class: "grow" }, r.display_name, h("div", { class: "muted" }, `${t(`files_${r.stage}`)} · ${r.transferred_bytes} / ${r.size_bytes} B`)), r.operation_id ? h("a", { href: `#/op/${r.operation_id}` }, t("dep_operation_details")) : null), active ? h("progress", {
+				max: 100,
+				value: percent,
+				"aria-label": t("files_progress")
+			}) : null, r.error ? h("p", { class: "muted" }, r.error) : null, h("div", { class: "actions" }, active ? h("button", {
+				class: "secondary",
+				onclick: () => act(r, "stop")
+			}, t("files_stop")) : null, !active && ![
+				"ready",
+				"saved",
+				"failed",
+				"cancelled"
+			].includes(r.stage) ? h("button", {
+				class: "secondary",
+				disabled: r.direction === "upload" && !canWrite(),
+				onclick: () => act(r, "retry")
+			}, t(r.stage === "selected" ? "files_upload" : "files_retry")) : null, !active && r.direction === "upload" && r.stage !== "selected" && ![
+				"ready",
+				"failed",
+				"cancelled"
+			].includes(r.stage) ? h("button", {
+				class: "secondary",
+				onclick: () => act(r, "check")
+			}, t("files_check")) : null, !active && r.operation_id && ![
+				"succeeded",
+				"failed",
+				"cancelled"
+			].includes(r.operation_status) ? h("button", {
+				class: "secondary",
+				disabled: !canWrite(),
+				onclick: () => act(r, "cancel_upload")
+			}, t("files_cancel")) : null, !active && (r.direction === "download" || r.stage === "selected" || [
+				"ready",
+				"failed",
+				"cancelled"
+			].includes(r.stage)) ? h("button", {
+				class: "secondary",
+				onclick: async () => {
+					await act(r, "discard_local");
+				}
+			}, t("files_discard")) : null));
+		}));
+	};
+	const adopt = (r) => {
+		if (!/^file_[0-9a-f]{32}$/.test(r?.transfer_id) || !/^[0-9a-f]{64}$/.test(r.digest) || !Number.isSafeInteger(r.size_bytes) || r.size_bytes < 0 || r.size_bytes > 16777216 || typeof r.display_name !== "string") throw new Error(t("files_receipt_mismatch"));
+		const previous = known.get(r.transfer_id);
+		if (previous && [
+			"intent_key",
+			"direction",
+			"draft_id",
+			"display_name",
+			"size_bytes",
+			"digest"
+		].some((k) => previous[k] !== r[k])) throw new Error(t("files_receipt_mismatch"));
+		if (r.direction === "upload" && r.draft_id !== draftId) return;
+		if (r.stage === "ready" && (r.operation_status !== "succeeded" || !r.operation_id || r.artifact?.digest !== r.digest || !/^art_[0-9a-f]{32}$/.test(r.artifact?.artifact_id) || !Number.isSafeInteger(r.artifact?.revision))) throw new Error(t("files_receipt_mismatch"));
+		known.set(r.transfer_id, r);
+		if (r.direction === "upload" && JSON.stringify(previous) !== JSON.stringify(r)) onReceipt(r);
+	};
+	const refresh = async () => {
+		if (refreshing) return refreshing;
+		const task = (async () => {
+			live();
+			const status = await nativeFilesStatus();
+			live();
+			const previousKeys = [...known.keys()].join(","), current = new Set();
+			for (const receipt of status.transfers) if (receipt.direction === "upload" && receipt.draft_id === draftId || receipt.direction === "download" && (receipt.stage !== "saved" || downloads.has(receipt.transfer_id))) {
+				current.add(receipt.transfer_id);
+				adopt(receipt);
+			}
+			for (const id of known.keys()) if (!current.has(id)) known.delete(id);
+			if ([...known.keys()].join(",") !== previousKeys) onVisibility();
+			if (status.drop_error) notice.textContent = status.drop_error;
+			render();
+		})();
+		refreshing = task;
+		try {
+			await task;
+		} finally {
+			if (refreshing === task) refreshing = null;
+		}
+	};
+	const pick = async () => {
+		if (picking) return;
+		try {
+			writable();
+			picking = true;
+			const receipts = await nativeFilesPick(draftId);
+			live();
+			for (const receipt of receipts) {
+				adopt(receipt);
+				writable();
+				await nativeFilesUpload(receipt.transfer_id);
+				live();
+			}
+			await refresh();
+		} catch (error) {
+			failure(error);
+			await refresh().catch(failure);
+		} finally {
+			picking = false;
+		}
+	};
+	const drop = h("button", {
+		class: "secondary",
+		"aria-pressed": false,
+		onclick: async () => {
+			try {
+				writable();
+				armed = !armed;
+				await nativeFilesDropTarget(draftId, armed);
+				live();
+				drop.setAttribute("aria-pressed", String(armed));
+				notice.textContent = armed ? t("files_drop_help") : "";
+			} catch (error) {
+				armed = false;
+				failure(error);
+			}
+		}
+	}, t("files_drop"));
+	const closePreview = () => {
+		preview.replaceChildren();
+		preview.hidden = true;
+		if (objectUrl) URL.revokeObjectURL(objectUrl);
+		objectUrl = null;
+	};
+	const actions = (ref) => h("span", { class: "actions file-actions" }, h("button", {
+		class: "secondary",
+		onclick: async () => {
+			try {
+				live();
+				const expected = fixedRef(ref), receipt = await nativeFilesSave(expected);
+				live();
+				if (!receipt) return;
+				if (receipt.direction !== "download" || !sameRef(receipt.artifact, expected)) throw new Error(t("files_receipt_mismatch"));
+				downloads.add(receipt.transfer_id);
+				adopt(receipt);
+				render();
+			} catch (error) {
+				failure(error);
+			}
+		}
+	}, t("files_save")), h("button", {
+		class: "secondary",
+		onclick: async () => {
+			try {
+				live();
+				const content = await nativeFilesPreview(fixedRef(ref));
+				live();
+				closePreview();
+				let view;
+				if (content.media_type === "text/plain" && typeof content.text === "string" && content.text.length <= 262144) view = h("pre", {}, content.text);
+				else if (content.media_type === "image/png" && typeof content.base64 === "string" && content.base64.length <= 28e5) {
+					const bytes = Uint8Array.from(atob(content.base64), (c) => c.charCodeAt(0));
+					objectUrl = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
+					view = h("img", {
+						src: objectUrl,
+						alt: t("files_preview")
+					});
+				} else throw new Error(t("files_receipt_mismatch"));
+				preview.hidden = false;
+				preview.append(h("div", { class: "actions" }, h("strong", {}, t("files_preview")), h("button", {
+					class: "secondary",
+					onclick: closePreview
+				}, t("close"))), view);
+			} catch (error) {
+				failure(error);
+			}
+		}
+	}, t("files_preview")));
+	const tick = async () => {
+		try {
+			live();
+			await refresh();
+			if (armed) {
+				writable();
+				await nativeFilesDropTarget(draftId, box.getClientRects().length > 0 && document.visibilityState === "visible");
+			}
+		} catch (error) {
+			try {
+				live();
+				failure(error);
+			} catch {
+				stopped = true;
+				closePreview();
+				await nativeFilesDropTarget(draftId, false).catch(() => {});
+			}
+		}
+		if (!stopped) setTimeout(tick, 1e3);
+	};
+	queueMicrotask(tick);
 	return {
-		status: res.status,
-		data: await res.json().catch(() => ({}))
+		box,
+		pick,
+		drop,
+		actions,
+		refresh,
+		has: (id) => known.has(id)
 	};
 }
 //#endregion
@@ -1650,9 +2231,9 @@ async function mountFleet(main, { h, t }) {
 }
 //#endregion
 //#region src/state/sessions.js
-var text = (value) => typeof value === "string" ? value : "";
+var text$1 = (value) => typeof value === "string" ? value : "";
 function workspaceGroup(session) {
-	const host = text(session.host), id = text(session.workspace_id), name = text(session.workspace);
+	const host = text$1(session.host), id = text$1(session.workspace_id), name = text$1(session.workspace);
 	return {
 		key: JSON.stringify([
 			host,
@@ -1686,7 +2267,7 @@ function matchesSession(session, query) {
 		session.agent_kind,
 		session.model,
 		session.worktree_branch
-	].map(text).join("\n").toLocaleLowerCase();
+	].map(text$1).join("\n").toLocaleLowerCase();
 	return query.trim().toLocaleLowerCase().split(/\s+/).every((word) => haystack.includes(word));
 }
 function runtimeStale(session) {
@@ -1724,40 +2305,40 @@ function sessionActivity(session) {
 }
 //#endregion
 //#region src/capture.js
-var record$1 = (value) => value && typeof value === "object" && !Array.isArray(value);
-var digest = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
-var operationId$1 = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
+var record$2 = (value) => value && typeof value === "object" && !Array.isArray(value);
+var digest$1 = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+var operationId$2 = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
 var previewId = (value) => typeof value === "string" && /^acpv_[0-9a-f]{32}$/.test(value);
 var previewToken = (value) => typeof value === "string" && value.length > 0 && value.length <= 24576;
-var validPreview = (doc) => record$1(doc) && record$1(doc.source) && record$1(doc.evidence) && [
+var validPreview$2 = (doc) => record$2(doc) && record$2(doc.source) && record$2(doc.evidence) && [
 	doc.relative_path,
 	doc.source.host,
 	doc.source.session_id,
 	doc.source.root,
 	doc.source.repository_root,
 	doc.evidence.head_sha
-].every((value) => typeof value === "string" && value.length > 0) && doc.source.provenance === "manual" && doc.snapshot === false && Number.isFinite(doc.expires_at) && previewId(doc.preview_id) && previewToken(doc.preview_token) && digest(doc.fingerprint) && digest(doc.evidence.digest) && Number.isSafeInteger(doc.evidence.size_bytes) && doc.evidence.size_bytes >= 0;
-function restore$1(value, source) {
+].every((value) => typeof value === "string" && value.length > 0) && doc.source.provenance === "manual" && doc.snapshot === false && Number.isFinite(doc.expires_at) && previewId(doc.preview_id) && previewToken(doc.preview_token) && digest$1(doc.fingerprint) && digest$1(doc.evidence.digest) && Number.isSafeInteger(doc.evidence.size_bytes) && doc.evidence.size_bytes >= 0;
+function restore$2(value, source) {
 	const saved = { input: {
 		...source,
 		relative_path: ""
 	} };
-	if (!record$1(value)) return saved;
-	if (record$1(value.input)) {
+	if (!record$2(value)) return saved;
+	if (record$2(value.input)) {
 		for (const key of [
 			"host",
 			"session_id",
 			"relative_path"
 		]) if (typeof value.input[key] === "string") saved.input[key] = value.input[key];
 	}
-	if (validPreview(value.preview)) saved.preview = value.preview;
+	if (validPreview$2(value.preview)) saved.preview = value.preview;
 	const intent = value.intent, request = intent?.request;
-	const usable = request?.action === "artifact.capture" && previewId(request.target?.preview_id) && previewToken(request.params?.preview_token) && digest(request.preconditions?.expected_fingerprint) && typeof intent.key === "string" && intent.key.length > 0 && intent.key.length <= 200;
-	if (usable || operationId$1(intent?.operation_id)) saved.intent = {
+	const usable = request?.action === "artifact.capture" && previewId(request.target?.preview_id) && previewToken(request.params?.preview_token) && digest$1(request.preconditions?.expected_fingerprint) && typeof intent.key === "string" && intent.key.length > 0 && intent.key.length <= 200;
+	if (usable || operationId$2(intent?.operation_id)) saved.intent = {
 		key: usable ? intent.key : null,
 		request: usable ? request : null,
-		operation_id: operationId$1(intent.operation_id) ? intent.operation_id : null,
-		reviewed_digest: digest(intent.reviewed_digest) ? intent.reviewed_digest : saved.preview?.evidence.digest
+		operation_id: operationId$2(intent.operation_id) ? intent.operation_id : null,
+		reviewed_digest: digest$1(intent.reviewed_digest) ? intent.reviewed_digest : saved.preview?.evidence.digest
 	};
 	return saved;
 }
@@ -1766,7 +2347,7 @@ function capturePanel({ h, t, api, caps, guard, onEvents, errorBox, storageKey, 
 	try {
 		saved = JSON.parse(localStorage.getItem(storageKey));
 	} catch {}
-	saved = restore$1(saved, source);
+	saved = restore$2(saved, source);
 	let busy = false, revision = 0, disposed = false, refreshing = null;
 	const host = h("select", { "aria-label": t("capture_host") }, h("option", { value: "" }, t("capture_host")), ...(caps()?.hosts || []).map((item) => h("option", { value: item.host }, item.host)));
 	const session = h("input", {
@@ -1842,7 +2423,7 @@ function capturePanel({ h, t, api, caps, guard, onEvents, errorBox, storageKey, 
 				guard();
 				if (ticket !== revision) return;
 				const doc = response.preview;
-				if (!validPreview(doc) || doc.source.host !== input.host || doc.source.session_id !== input.session_id || doc.relative_path !== input.relative_path) throw new Error(t("capture_invalid_preview"));
+				if (!validPreview$2(doc) || doc.source.host !== input.host || doc.source.session_id !== input.session_id || doc.relative_path !== input.relative_path) throw new Error(t("capture_invalid_preview"));
 				saved.preview = doc;
 				persist();
 				notice.replaceChildren();
@@ -1857,13 +2438,13 @@ function capturePanel({ h, t, api, caps, guard, onEvents, errorBox, storageKey, 
 	const accept = async (operation) => {
 		guard();
 		const intent = saved.intent;
-		if (!intent || !operationId$1(operation?.operation_id) || operation.action !== "artifact.capture" || intent.operation_id && intent.operation_id !== operation.operation_id || intent.request && operation.target?.preview_id !== intent.request.target.preview_id) throw new Error(t("capture_invalid_result"));
+		if (!intent || !operationId$2(operation?.operation_id) || operation.action !== "artifact.capture" || intent.operation_id && intent.operation_id !== operation.operation_id || intent.request && operation.target?.preview_id !== intent.request.target.preview_id) throw new Error(t("capture_invalid_result"));
 		saved.operation = operation;
 		saved.intent.operation_id = operation.operation_id;
 		persist();
 		if (operation.status === "succeeded") {
 			const ref = operation.result;
-			if (!/^art_[0-9a-f]{32}$/.test(ref?.artifact_id) || !Number.isSafeInteger(ref.revision) || ref.revision < 1 || !digest(ref.digest) || ref.digest !== intent.reviewed_digest) throw new Error(t("capture_invalid_result"));
+			if (!/^art_[0-9a-f]{32}$/.test(ref?.artifact_id) || !Number.isSafeInteger(ref.revision) || ref.revision < 1 || !digest$1(ref.digest) || ref.digest !== intent.reviewed_digest) throw new Error(t("capture_invalid_result"));
 			const { artifact } = await api("GET", `/artifacts/${ref.artifact_id}/revisions/${ref.revision}`);
 			guard();
 			if (saved.intent !== intent) return;
@@ -2073,25 +2654,25 @@ function capturePanel({ h, t, api, caps, guard, onEvents, errorBox, storageKey, 
 }
 //#endregion
 //#region src/permissions.js
-var record = (value) => value && typeof value === "object" && !Array.isArray(value);
+var record$1 = (value) => value && typeof value === "object" && !Array.isArray(value);
 var modeValue = (value) => ["default", "allow_all"].includes(value);
-var operationId = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
-var terminal = (operation) => [
+var operationId$1 = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
+var terminal$3 = (operation) => [
 	"succeeded",
 	"failed",
 	"cancelled"
 ].includes(operation?.status);
-var admissionRefusals = new Set([
+var admissionRefusals$1 = new Set([
 	"TASK_PAUSED",
 	"CONTROL_VERSION_CONFLICT",
 	"PERMISSIONS_HOST_POLICY",
 	"CONFINEMENT_RAISE_REFUSED"
 ]);
-function restore(value, target) {
+function restore$1(value, target) {
 	const saved = { mode: modeValue(value?.mode) ? value.mode : "default" };
-	if (!record(value) || !value.intent) return saved;
+	if (!record$1(value) || !value.intent) return saved;
 	const intent = value.intent, request = intent.request;
-	const valid = request?.action === "session.permissions" && request.target?.host === target.host && request.target?.session_id === target.session_id && modeValue(request.params?.mode) && record(request.preconditions) && Object.keys(request.preconditions).length === 0 && typeof intent.key === "string" && intent.key.length > 0 && intent.key.length <= 200;
+	const valid = request?.action === "session.permissions" && request.target?.host === target.host && request.target?.session_id === target.session_id && modeValue(request.params?.mode) && record$1(request.preconditions) && Object.keys(request.preconditions).length === 0 && typeof intent.key === "string" && intent.key.length > 0 && intent.key.length <= 200;
 	saved.intent = {
 		key: valid ? intent.key : null,
 		request: valid ? {
@@ -2100,9 +2681,9 @@ function restore(value, target) {
 			params: { mode: request.params.mode },
 			preconditions: {}
 		} : null,
-		operation_id: operationId(intent.operation_id) ? intent.operation_id : null
+		operation_id: operationId$1(intent.operation_id) ? intent.operation_id : null
 	};
-	if (valid && !saved.intent.operation_id && admissionRefusals.has(intent.refused)) saved.intent.refused = intent.refused;
+	if (valid && !saved.intent.operation_id && admissionRefusals$1.has(intent.refused)) saved.intent.refused = intent.refused;
 	if (valid) saved.mode = request.params.mode;
 	return saved;
 }
@@ -2111,7 +2692,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 	try {
 		raw = JSON.parse(localStorage.getItem(storageKey));
 	} catch {}
-	let saved = restore(raw, target), operation = null, busy = false, refreshing = null, submission = null, readFailed = false;
+	let saved = restore$1(raw, target), operation = null, busy = false, refreshing = null, submission = null, readFailed = false;
 	const mode = h("select", { "aria-label": t("permissions_mode") }, ...["default", "allow_all"].map((value) => h("option", { value }, t("permissions_" + value))));
 	mode.value = saved.mode;
 	const message = h("div", { role: "status" }), result = h("div", { "data-permission-result": "" });
@@ -2133,7 +2714,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 	const writable = () => ready() && session()?.api_access === "managed" && session()?.provenance === "connector_managed" && (caps()?.scopes || []).includes("operate") && caps()?.hosts?.some((host) => host.host === target.host && host.writes === true) && caps()?.actions?.some((action) => action.action === "session.permissions" && action.allowed === true);
 	const accept = (candidate) => {
 		guard();
-		if (!saved.intent || !operationId(candidate?.operation_id) || candidate.action !== "session.permissions" || candidate.target?.host !== target.host || candidate.target?.session_id !== target.session_id || !modeValue(candidate.params?.mode) || saved.intent.request && candidate.params.mode !== saved.intent.request.params.mode || saved.intent.key && candidate.idempotency_key !== saved.intent.key || saved.intent.operation_id && candidate.operation_id !== saved.intent.operation_id) throw new Error(t("permissions_invalid_result"));
+		if (!saved.intent || !operationId$1(candidate?.operation_id) || candidate.action !== "session.permissions" || candidate.target?.host !== target.host || candidate.target?.session_id !== target.session_id || !modeValue(candidate.params?.mode) || saved.intent.request && candidate.params.mode !== saved.intent.request.params.mode || saved.intent.key && candidate.idempotency_key !== saved.intent.key || saved.intent.operation_id && candidate.operation_id !== saved.intent.operation_id) throw new Error(t("permissions_invalid_result"));
 		operation = candidate;
 		saved.intent.operation_id = candidate.operation_id;
 		saved.mode = candidate.params.mode;
@@ -2170,7 +2751,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 					if (saved.intent === intent) accept(response.operation);
 				} catch (error) {
 					if (current()) {
-						if (error.status >= 400 && error.status < 500 && admissionRefusals.has(error.code)) {
+						if (error.status >= 400 && error.status < 500 && admissionRefusals$1.has(error.code)) {
 							intent.refused = error.code;
 							persist();
 						}
@@ -2195,7 +2776,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 	const another = h("button", {
 		class: "secondary",
 		onclick: () => {
-			if (!current() || busy || refreshing || readFailed || !(terminal(operation) || saved.intent?.refused) || !writable()) return;
+			if (!current() || busy || refreshing || readFailed || !(terminal$3(operation) || saved.intent?.refused) || !writable()) return;
 			saved = { mode: "default" };
 			mode.value = saved.mode;
 			operation = null;
@@ -2226,7 +2807,7 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 		apply.textContent = t(saved.intent ? "permissions_retry" : "permissions_apply");
 		check.hidden = !saved.intent?.operation_id;
 		check.disabled = busy || Boolean(refreshing);
-		another.hidden = !(terminal(operation) || saved.intent?.refused);
+		another.hidden = !(terminal$3(operation) || saved.intent?.refused);
 		another.disabled = busy || Boolean(refreshing) || readFailed || !writable();
 		explanation.textContent = t(saved.mode === "allow_all" ? "permissions_allow_help" : "permissions_default_help");
 		restriction.textContent = writable() ? "" : t("permissions_unavailable");
@@ -2278,6 +2859,1713 @@ function permissionsPanel({ h, t, api, caps, guard, errorBox, opStatus, storageK
 		box,
 		update,
 		refresh
+	};
+}
+//#endregion
+//#region src/approvals.js
+var object$1 = (value) => value && typeof value === "object" && !Array.isArray(value);
+var opId = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
+var mode = (value) => value === null || value === "default" || value === "allow_all";
+var terminal$2 = (op) => [
+	"succeeded",
+	"failed",
+	"cancelled"
+].includes(op?.status);
+var equal$2 = (a, b) => {
+	if (a === b) return true;
+	if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => equal$2(v, b[i]));
+	return object$1(a) && object$1(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$2(a[k], b[k]));
+};
+var refusedBeforeAdmission = new Set([
+	"BULK_PREVIEW_INVALID",
+	"BULK_PREVIEW_EXPIRED",
+	"BULK_PREVIEW_MISMATCH",
+	"BULK_MODE_REFUSED",
+	"CONTROL_VERSION_CONFLICT",
+	"BULK_BINDING_CHANGED"
+]);
+function validPreview$1(p) {
+	return object$1(p) && typeof p.host === "string" && p.host.length > 0 && (p.workspace === null || typeof p.workspace === "string") && typeof p.preview_token === "string" && p.preview_token.startsWith("bap1.") && p.preview_token.length <= 262144 && /^[0-9a-f]{64}$/.test(p.fingerprint) && Number.isFinite(p.expires_at) && equal$2(p.answer, {
+		permission: "allow",
+		dont_ask_again: true
+	}) && Array.isArray(p.items) && p.items.length <= 50 && new Set(p.items.map((i) => i?.item_id)).size === p.items.length && p.items.every((i) => object$1(i) && /^bapi_[0-9a-f]{24}$/.test(i.item_id) && i.host === p.host && typeof i.session_id === "string" && typeof i.eligible === "boolean" && (!i.eligible || object$1(i.prompt) && typeof i.prompt.toolUseId === "string" && Array.isArray(i.allowed_modes) && i.allowed_modes.includes(null) && i.allowed_modes.every(mode)));
+}
+function validRequest$1(r) {
+	return r?.action === "session.approve_pending" && typeof r.target?.host === "string" && Object.keys(r.target).length === 1 && typeof r.params?.preview_token === "string" && Object.keys(r.params).length === 2 && Array.isArray(r.params.selection) && r.params.selection.length > 0 && r.params.selection.length <= 50 && r.params.selection.every((s) => object$1(s) && Object.keys(s).length === 2 && /^bapi_[0-9a-f]{24}$/.test(s.item_id) && mode(s.mode)) && new Set(r.params.selection.map((s) => s.item_id)).size === r.params.selection.length && object$1(r.preconditions) && Object.keys(r.preconditions).length === 1 && /^[0-9a-f]{64}$/.test(r.preconditions.expected_fingerprint);
+}
+function approvalsPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, storageKey }) {
+	let raw;
+	try {
+		raw = JSON.parse(localStorage.getItem(storageKey));
+	} catch {}
+	let saved = {
+		host: typeof raw?.host === "string" ? raw.host : "",
+		workspace: typeof raw?.workspace === "string" ? raw.workspace : ""
+	};
+	if (validPreview$1(raw?.preview) && raw.preview.host === saved.host && (raw.preview.workspace || "") === saved.workspace) saved.preview = raw.preview;
+	if (raw?.intent) saved.intent = {
+		request: validRequest$1(raw.intent.request) ? raw.intent.request : null,
+		key: typeof raw.intent.key === "string" && raw.intent.key.length > 0 && raw.intent.key.length <= 200 ? raw.intent.key : null,
+		operation_id: opId(raw.intent.operation_id) ? raw.intent.operation_id : null,
+		refused: refusedBeforeAdmission.has(raw.intent.refused) && !raw.intent.operation_id ? raw.intent.refused : null
+	};
+	let operation = null, busy = false, submission = null, refreshing = null, readFailed = false;
+	const selected = new Map(), controls = [];
+	if (saved.preview && !saved.intent && Array.isArray(raw?.selection)) {
+		for (const s of raw.selection) if (object$1(s) && saved.preview.items.some((i) => i.eligible && i.item_id === s.item_id && i.allowed_modes.includes(s.mode))) selected.set(s.item_id, s.mode);
+	}
+	const current = () => {
+		try {
+			guard();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const persist = (required = false) => {
+		guard();
+		saved.selection = [...selected].map(([item_id, mode]) => ({
+			item_id,
+			mode
+		}));
+		try {
+			localStorage.setItem(storageKey, JSON.stringify(saved));
+		} catch (error) {
+			if (required) throw error;
+		}
+	};
+	const observable = () => ready() && caps()?.scopes?.includes("observe");
+	const writable = () => observable() && caps()?.scopes?.includes("operate") && caps()?.actions?.some((a) => a.action === "session.approve_pending" && a.allowed === true) && caps()?.hosts?.some((host) => host.host === (saved.intent?.request?.target.host || saved.host) && host.writes === true);
+	const host = h("select", { "aria-label": t("host") }, h("option", { value: "" }, t("bulk_choose_host")), ...(caps()?.hosts || []).map((x) => h("option", { value: x.host }, x.host)));
+	host.value = saved.host;
+	const workspace = h("input", {
+		"aria-label": t("bulk_workspace"),
+		placeholder: t("bulk_workspace"),
+		value: saved.workspace
+	});
+	const rows = h("div", { "data-approval-items": "" }), result = h("div", { "data-approval-result": "" }), status = h("div", { role: "status" });
+	const summary = h("p", { class: "muted" });
+	const previewButton = h("button", {
+		class: "secondary",
+		onclick: async () => {
+			if (!current() || busy || saved.intent || !observable() || !host.value) return;
+			saved.host = host.value;
+			saved.workspace = workspace.value.trim();
+			workspace.value = saved.workspace;
+			delete saved.preview;
+			selected.clear();
+			busy = true;
+			persist();
+			renderPreview();
+			update();
+			try {
+				const p = await api("POST", "/approval-previews", {
+					host: saved.host,
+					...saved.workspace ? { workspace: saved.workspace } : {}
+				});
+				guard();
+				if (!validPreview$1(p) || p.host !== saved.host || (p.workspace || "") !== saved.workspace) throw new Error(t("bulk_invalid_preview"));
+				saved.preview = p;
+				persist();
+				status.replaceChildren();
+				renderPreview();
+			} catch (e) {
+				if (current()) status.replaceChildren(errorBox(e));
+			} finally {
+				busy = false;
+				if (current()) update();
+			}
+		}
+	}, t("bulk_preview"));
+	const accept = (candidate) => {
+		guard();
+		const intent = saved.intent;
+		if (!intent || !opId(candidate?.operation_id) || !intent.request || !intent.key || candidate.actor !== caps()?.actor || candidate.idempotency_key !== intent.key || !equal$2({
+			action: candidate.action,
+			target: candidate.target,
+			params: candidate.params,
+			preconditions: candidate.preconditions
+		}, intent.request) || intent.operation_id && candidate.operation_id !== intent.operation_id) throw new Error(t("bulk_invalid_result"));
+		operation = candidate;
+		intent.operation_id = candidate.operation_id;
+		readFailed = false;
+		persist();
+		status.replaceChildren();
+		update();
+	};
+	const apply = h("button", {
+		class: "primary",
+		onclick: async () => {
+			if (!current() || busy || readFailed || !writable() || saved.intent?.operation_id || saved.intent?.refused) return;
+			if (!saved.intent) {
+				if (!saved.preview || saved.preview.expires_at * 1e3 <= Date.now() || !selected.size) {
+					update();
+					return;
+				}
+				const selection = saved.preview.items.filter((i) => selected.has(i.item_id)).map((i) => ({
+					item_id: i.item_id,
+					mode: selected.get(i.item_id)
+				}));
+				saved.intent = {
+					key: crypto.randomUUID(),
+					operation_id: null,
+					request: {
+						action: "session.approve_pending",
+						target: { host: saved.preview.host },
+						params: {
+							preview_token: saved.preview.preview_token,
+							selection
+						},
+						preconditions: { expected_fingerprint: saved.preview.fingerprint }
+					}
+				};
+			}
+			if (!saved.intent.request || !saved.intent.key) return;
+			try {
+				persist(true);
+			} catch (error) {
+				status.replaceChildren(errorBox(error));
+				update();
+				return;
+			}
+			busy = true;
+			const intent = saved.intent;
+			update();
+			submission = (async () => {
+				try {
+					const data = await api("POST", "/operations?wait=3", intent.request, intent.key);
+					guard();
+					accept(data.operation);
+				} catch (e) {
+					if (current()) {
+						if (e.status >= 400 && e.status < 500 && refusedBeforeAdmission.has(e.code)) {
+							intent.refused = e.code;
+							persist();
+						}
+						status.replaceChildren(errorBox(e));
+					}
+				} finally {
+					busy = false;
+					if (current()) update();
+				}
+			})();
+			try {
+				await submission;
+			} finally {
+				submission = null;
+			}
+		}
+	}, t("bulk_apply"));
+	const check = h("button", {
+		class: "secondary",
+		onclick: () => refresh(true).catch(() => {})
+	}, t("bulk_check"));
+	const another = h("button", {
+		class: "secondary",
+		onclick: () => {
+			if (!current() || busy || refreshing || readFailed || !(terminal$2(operation) || saved.intent?.refused)) return;
+			delete saved.intent;
+			delete saved.preview;
+			selected.clear();
+			operation = null;
+			persist();
+			status.replaceChildren();
+			renderPreview();
+			update();
+		}
+	}, t("bulk_new"));
+	const box = h("section", { "data-approvals": "" }, h("div", { class: "panel" }, h("div", { class: "filters" }, host, workspace, previewButton), h("p", { class: "muted" }, t("bulk_scope"))), rows, h("div", { class: "panel" }, h("p", { class: "note" }, t("bulk_effect")), summary, h("div", { class: "actions" }, apply, check, another), result, status));
+	host.onchange = workspace.oninput = () => {
+		if (!current() || busy || saved.intent) return;
+		saved.host = host.value;
+		saved.workspace = workspace.value;
+		delete saved.preview;
+		selected.clear();
+		persist();
+		renderPreview();
+		update();
+	};
+	function renderPreview() {
+		controls.length = 0;
+		rows.replaceChildren();
+		if (!saved.preview) return;
+		if (saved.preview.truncated) rows.append(h("p", { class: "note" }, t("bulk_truncated")));
+		if (!saved.preview.items.length) rows.append(h("p", { class: "panel" }, t("bulk_empty")));
+		for (const item of saved.preview.items) {
+			const choice = h("input", {
+				type: "checkbox",
+				"aria-label": t("bulk_select", { id: item.session_id })
+			});
+			const requestMode = saved.intent?.request?.params.selection.find((s) => s.item_id === item.item_id);
+			choice.checked = Boolean(requestMode) || selected.has(item.item_id);
+			const select = h("select", { "aria-label": t("bulk_mode", { id: item.session_id }) }, ...(item.allowed_modes || [null]).map((value) => h("option", { value: value || "" }, t(value === null ? "bulk_no_mode" : "permissions_" + value))));
+			select.value = requestMode?.mode || selected.get(item.item_id) || "";
+			choice.onchange = () => {
+				if (!current() || saved.intent || busy) return;
+				if (choice.checked) selected.set(item.item_id, select.value || null);
+				else selected.delete(item.item_id);
+				persist();
+				update();
+			};
+			select.onchange = () => {
+				if (!current() || saved.intent || busy) return;
+				if (selected.has(item.item_id)) selected.set(item.item_id, select.value || null);
+				persist();
+				update();
+			};
+			const warning = h("p", { class: "muted" });
+			controls.push({
+				item,
+				choice,
+				select,
+				warning
+			});
+			rows.append(h("article", {
+				class: "panel bulk-item",
+				"data-approval-item": item.item_id
+			}, h("div", { class: "row" }, choice, h("div", { class: "grow" }, h("a", {
+				class: "title",
+				href: `#/session/${encodeURIComponent(item.host)}/${encodeURIComponent(item.session_id)}`
+			}, item.session_id), h("div", { class: "muted" }, [item.host, item.agent_kind].filter(Boolean).join(" · ")))), item.eligible ? [
+				h("p", { class: "title" }, item.prompt.toolName || t("bulk_answer")),
+				h("pre", { class: "pre bulk-prompt" }, typeof item.prompt.input === "string" ? item.prompt.input : Object.keys(item.prompt.input || {}).length === 1 && typeof item.prompt.input?.command === "string" ? item.prompt.input.command : JSON.stringify(item.prompt.input ?? item.prompt, null, 2)),
+				h("details", { class: "bulk-evidence" }, h("summary", {}, t("bulk_full_prompt")), h("pre", { class: "pre bulk-prompt" }, JSON.stringify(item.prompt, null, 2))),
+				select,
+				warning
+			] : h("p", { class: "muted" }, t("bulk_blocked"), " · ", item.code || t("obs_unknown"))));
+		}
+	}
+	function update() {
+		const fixed = Boolean(saved.intent), expired = saved.preview && saved.preview.expires_at * 1e3 <= Date.now();
+		host.disabled = workspace.disabled = busy || fixed;
+		previewButton.disabled = busy || fixed || !observable() || !host.value;
+		for (const c of controls) {
+			c.choice.disabled = busy || fixed || !c.item.eligible || !writable() || expired;
+			c.select.disabled = c.choice.disabled || !c.choice.checked;
+			c.warning.textContent = c.select.value === "allow_all" ? t("permissions_allow_help") : "";
+		}
+		apply.hidden = Boolean(saved.intent?.operation_id || saved.intent?.refused);
+		apply.textContent = t(fixed ? "permissions_retry" : "bulk_apply");
+		apply.disabled = busy || readFailed || !writable() || (fixed ? !saved.intent.request || !saved.intent.key : !selected.size || expired);
+		check.hidden = !saved.intent?.operation_id;
+		check.disabled = busy || Boolean(refreshing);
+		another.hidden = !(terminal$2(operation) || saved.intent?.refused);
+		another.disabled = busy || Boolean(refreshing) || readFailed;
+		summary.textContent = fixed ? t(saved.intent.refused ? "bulk_refused" : "bulk_fixed") : expired ? t("bulk_expired") : t("bulk_selected", { count: selected.size });
+		result.replaceChildren();
+		if (!fixed) return;
+		result.append(h("p", {}, operation ? opStatus(operation) : t("permissions_unknown"), " ", saved.intent.operation_id ? h("a", { href: `#/op/${saved.intent.operation_id}` }, t("permissions_details")) : null));
+		if (!saved.intent.request || !saved.intent.key) result.append(h("p", { class: "error" }, t("permissions_damaged")));
+		if (!operation) return;
+		const items = operation.result?.items || operation.external_refs?.bulk_items || [];
+		result.append(h("p", { class: "muted" }, t(operation.result?.all_succeeded === true ? "bulk_all_proven" : "bulk_partial")));
+		for (const item of items) result.append(h("div", { class: "row bulk-receipt" }, h("div", { class: "grow" }, item.session_id, h("div", { class: "muted" }, t(item.complete === true ? "bulk_item_complete" : "bulk_item_incomplete"))), ...["answer", "permissions"].filter((phase) => item[phase]).map((phase) => h("span", {}, t("bulk_" + phase), ": ", opId(item[phase].operation_id) ? h("a", { href: `#/op/${item[phase].operation_id}` }, item[phase].status || t("obs_unknown")) : item[phase].status || t("obs_unknown"), item[phase].code ? ` · ${item[phase].code}` : ""))));
+	}
+	async function refresh(fresh = false) {
+		if (submission) {
+			await submission;
+			guard();
+		}
+		if (refreshing) {
+			await refreshing;
+			if (fresh) return refresh(true);
+			return;
+		}
+		if (!saved.intent?.operation_id) {
+			update();
+			return;
+		}
+		refreshing = (async () => {
+			const data = await api("GET", `/operations/${saved.intent.operation_id}`);
+			guard();
+			accept(data.operation);
+		})();
+		update();
+		try {
+			await refreshing;
+		} catch (e) {
+			if (current()) {
+				readFailed = true;
+				status.replaceChildren(errorBox(e));
+				update();
+			}
+			throw e;
+		} finally {
+			refreshing = null;
+			if (current()) update();
+		}
+	}
+	renderPreview();
+	update();
+	return {
+		box,
+		update,
+		refresh
+	};
+}
+//#endregion
+//#region src/session-start.js
+var object = (v) => v && typeof v === "object" && !Array.isArray(v);
+var operationId = (v) => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
+var terminal$1 = (op) => [
+	"succeeded",
+	"failed",
+	"cancelled"
+].includes(op?.status);
+var equal$1 = (a, b) => a === b || object(a) && object(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$1(a[k], b[k]));
+var text = (v, max) => typeof v === "string" && v.trim().length > 0 && v.length <= max;
+var fields = [
+	"host",
+	"workspace",
+	"agent",
+	"model",
+	"title",
+	"prompt"
+];
+var admissionRefusals = new Set(["TIER_DISABLED", "START_WORKTREE_REQUIRED"]);
+function validRequest(r) {
+	return r?.action === "session.start" && object(r.target) && Object.keys(r.target).length === 2 && text(r.target.host, 256) && text(r.target.workspace, 256) && object(r.params) && Object.keys(r.params).every((k) => [
+		"agent",
+		"model",
+		"title",
+		"prompt",
+		"use_worktree"
+	].includes(k)) && ["claude", "codex"].includes(r.params.agent) && r.params.use_worktree === true && [
+		"model",
+		"title",
+		"prompt"
+	].every((k) => !(k in r.params) || text(r.params[k], k === "prompt" ? 2e4 : 256)) && object(r.preconditions) && Object.keys(r.preconditions).length === 0;
+}
+function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, storageKey }) {
+	let raw;
+	try {
+		raw = JSON.parse(localStorage.getItem(storageKey));
+	} catch {}
+	let saved = Object.fromEntries(fields.map((k) => [k, typeof raw?.[k] === "string" ? raw[k] : k === "agent" ? "claude" : ""]));
+	if (!["claude", "codex"].includes(saved.agent)) saved.agent = "claude";
+	if (raw?.intent) {
+		const valid = validRequest(raw.intent.request) && text(raw.intent.key, 200);
+		saved.intent = {
+			request: valid ? raw.intent.request : null,
+			key: valid ? raw.intent.key : null,
+			operation_id: operationId(raw.intent.operation_id) ? raw.intent.operation_id : null,
+			refused: !raw.intent.operation_id && admissionRefusals.has(raw.intent.refused) ? raw.intent.refused : null
+		};
+		if (valid) Object.assign(saved, raw.intent.request.target, {
+			model: "",
+			title: "",
+			prompt: ""
+		}, raw.intent.request.params);
+	}
+	let operation = null, busy = false, submission = null, refreshing = null, readFailed = false;
+	let workspaces = [], discovery = 0, discovering = false, discoveredHost = "";
+	const current = () => {
+		try {
+			guard();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const persist = () => {
+		guard();
+		localStorage.setItem(storageKey, JSON.stringify(saved));
+	};
+	const observe = () => caps()?.scopes?.includes("observe");
+	const allowed = () => observe() && caps()?.scopes?.includes("start") && caps()?.actions?.some((a) => a.action === "session.start" && a.allowed === true);
+	const hostAllowed = () => caps()?.hosts?.some((x) => x.host === saved.host && x.writes === true && x.orchestrate === true);
+	const status = h("div", { role: "status" }), result = h("div", { "data-start-result": "" }), discoveryStatus = h("p", {
+		class: "muted",
+		role: "status"
+	});
+	const host = h("select", { "aria-label": t("host") }, h("option", { value: "" }, t("start_choose_host")), ...(caps()?.hosts || []).map((x) => h("option", { value: x.host }, x.host)));
+	if (saved.host && ![...host.options].some((o) => o.value === saved.host)) host.append(h("option", { value: saved.host }, saved.host));
+	const workspace = h("select", { "aria-label": t("start_workspace") });
+	const agent = h("select", { "aria-label": t("start_agent") }, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
+	const model = h("input", {
+		"aria-label": t("start_model"),
+		maxlength: 256,
+		placeholder: t("start_model_default")
+	});
+	const title = h("input", {
+		"aria-label": t("start_title"),
+		maxlength: 256
+	});
+	const prompt = h("textarea", {
+		"aria-label": t("start_prompt"),
+		maxlength: 2e4,
+		rows: 6
+	});
+	const inputs = {
+		host,
+		workspace,
+		agent,
+		model,
+		title,
+		prompt
+	};
+	const fill = () => {
+		for (const [k, el] of Object.entries(inputs)) el.value = saved[k];
+	};
+	const showError = (e) => {
+		if (current()) status.replaceChildren(errorBox(e));
+	};
+	function renderWorkspaces() {
+		workspace.replaceChildren(h("option", { value: "" }, t("start_choose_workspace")), ...workspaces.map((w) => h("option", { value: w.workspace_id }, `${w.name || w.workspace_id} · ${w.workspace_id}`)));
+		if (saved.workspace && ![...workspace.options].some((o) => o.value === saved.workspace)) workspace.append(h("option", { value: saved.workspace }, saved.workspace));
+		workspace.value = saved.workspace;
+	}
+	async function discover() {
+		if (!current() || saved.intent || !observe() || !saved.host) return;
+		const expected = ++discovery, selectedHost = saved.host;
+		discovering = true;
+		discoveredHost = "";
+		workspaces = [];
+		renderWorkspaces();
+		update();
+		discoveryStatus.textContent = t("start_loading_workspaces");
+		try {
+			const doc = await api("GET", `/workspaces?host=${encodeURIComponent(selectedHost)}&limit=200`);
+			guard();
+			if (expected !== discovery || saved.host !== selectedHost || saved.intent) return;
+			if (!Array.isArray(doc.workspaces) || doc.workspaces.length > 200 || typeof doc.has_more !== "boolean" || !object(doc.errors) || Object.keys(doc.errors).length || doc.workspaces.some((w) => !object(w) || w.host !== selectedHost || !text(w.workspace_id, 256) || typeof w.folder !== "string") || new Set(doc.workspaces.map((w) => w.workspace_id)).size !== doc.workspaces.length) throw new Error(t("start_discovery_failed"));
+			workspaces = doc.workspaces;
+			discoveredHost = selectedHost;
+			renderWorkspaces();
+			discoveryStatus.textContent = t(doc.has_more ? "start_truncated" : !workspaces.length ? "start_no_workspaces" : "start_workspace_help");
+		} catch (e) {
+			if (current() && expected === discovery) {
+				discoveryStatus.textContent = t("start_discovery_failed");
+				showError(e);
+			}
+		} finally {
+			if (expected === discovery && current()) {
+				discovering = false;
+				update();
+			}
+		}
+	}
+	const reload = h("button", {
+		class: "secondary",
+		onclick: discover
+	}, t("start_reload_workspaces"));
+	const accept = (candidate) => {
+		guard();
+		const intent = saved.intent;
+		if (!intent || !intent.request || !intent.key || !operationId(candidate?.operation_id) || candidate.actor !== caps()?.actor || candidate.idempotency_key !== intent.key || !equal$1({
+			action: candidate.action,
+			target: candidate.target,
+			params: candidate.params,
+			preconditions: candidate.preconditions
+		}, intent.request) || intent.operation_id && intent.operation_id !== candidate.operation_id) throw new Error(t("start_invalid_result"));
+		for (const proof of [candidate.result, candidate.external_refs?.start_result]) if (proof?.started === true && (proof.host !== intent.request.target.host || !text(proof.session_id, 256) || proof.session_id !== candidate.external_refs?.session_id)) throw new Error(t("start_invalid_result"));
+		operation = candidate;
+		intent.operation_id = candidate.operation_id;
+		readFailed = false;
+		persist();
+		status.replaceChildren();
+		update();
+	};
+	function request() {
+		const params = {
+			agent: saved.agent,
+			use_worktree: true
+		};
+		for (const key of [
+			"model",
+			"title",
+			"prompt"
+		]) if (saved[key] !== "") params[key] = saved[key];
+		return {
+			action: "session.start",
+			target: {
+				host: saved.host,
+				workspace: saved.workspace
+			},
+			params,
+			preconditions: {}
+		};
+	}
+	const apply = h("button", {
+		class: "primary",
+		onclick: async () => {
+			if (!current() || busy || readFailed || !ready() || !allowed() || saved.intent?.operation_id || saved.intent?.refused) return;
+			if (!saved.intent) {
+				if (!hostAllowed() || discoveredHost !== saved.host || !workspaces.some((w) => w.workspace_id === saved.workspace) || !validRequest(request())) return;
+				saved.intent = {
+					request: request(),
+					key: crypto.randomUUID(),
+					operation_id: null
+				};
+			}
+			if (!saved.intent.request || !saved.intent.key) return;
+			try {
+				persist();
+			} catch (e) {
+				showError(e);
+				update();
+				return;
+			}
+			busy = true;
+			update();
+			const intent = saved.intent;
+			submission = (async () => {
+				try {
+					const data = await api("POST", "/operations?wait=3", intent.request, intent.key);
+					guard();
+					accept(data.operation);
+				} catch (e) {
+					if (current()) {
+						if (e.status >= 400 && e.status < 500 && admissionRefusals.has(e.code)) {
+							intent.refused = e.code;
+							try {
+								persist();
+							} catch {}
+						}
+						showError(e);
+					}
+				} finally {
+					busy = false;
+					if (current()) update();
+				}
+			})();
+			try {
+				await submission;
+			} finally {
+				submission = null;
+			}
+		}
+	}, t("start_apply"));
+	const check = h("button", {
+		class: "secondary",
+		onclick: () => refresh(true).catch(() => {})
+	}, t("permissions_check"));
+	const another = h("button", {
+		class: "secondary",
+		onclick: async () => {
+			if (!current() || busy || refreshing || readFailed || !(terminal$1(operation) || saved.intent?.refused)) return;
+			const previous = saved;
+			saved = {
+				host: saved.host,
+				workspace: "",
+				agent: "claude",
+				model: "",
+				title: "",
+				prompt: ""
+			};
+			try {
+				persist();
+			} catch (e) {
+				saved = previous;
+				showError(e);
+				return;
+			}
+			operation = null;
+			status.replaceChildren();
+			fill();
+			renderWorkspaces();
+			update();
+			await discover();
+		}
+	}, t("start_new"));
+	for (const [key, el] of Object.entries(inputs)) el.addEventListener(key === "host" || key === "workspace" || key === "agent" ? "change" : "input", () => {
+		if (!current() || saved.intent || busy) {
+			fill();
+			return;
+		}
+		saved[key] = el.value;
+		if (key === "host") {
+			saved.workspace = "";
+			discoveredHost = "";
+			workspaces = [];
+			discovery++;
+			renderWorkspaces();
+		}
+		try {
+			persist();
+		} catch (e) {
+			showError(e);
+		}
+		update();
+		if (key === "host") discover();
+	});
+	const label = (name, control) => h("label", {}, t(name), control);
+	const box = h("section", {
+		class: "session-start",
+		"data-session-start": ""
+	}, h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("host", host), label("start_workspace", workspace)), h("div", { class: "actions" }, reload), discoveryStatus, h("p", { class: "muted" }, t("start_isolation"))), h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("start_agent", agent), label("start_model", model), label("start_title", title)), label("start_prompt", prompt), h("p", { class: "muted" }, t("start_prompt_help"))), h("div", { class: "actions" }, apply, check, another), result, status);
+	function update() {
+		const fixed = Boolean(saved.intent);
+		for (const el of Object.values(inputs)) el.disabled = busy || fixed;
+		workspace.disabled ||= discovering || !saved.host;
+		reload.hidden = fixed;
+		reload.disabled = discovering || !observe() || !saved.host;
+		apply.hidden = Boolean(saved.intent?.operation_id || saved.intent?.refused);
+		apply.textContent = t(fixed ? "permissions_retry" : "start_apply");
+		apply.disabled = busy || readFailed || !ready() || !allowed() || (fixed ? !saved.intent.request || !saved.intent.key : !hostAllowed() || discoveredHost !== saved.host || !workspaces.some((w) => w.workspace_id === saved.workspace) || !validRequest(request()));
+		check.hidden = !saved.intent?.operation_id;
+		check.disabled = busy || Boolean(refreshing);
+		another.hidden = !(terminal$1(operation) || saved.intent?.refused);
+		another.disabled = busy || Boolean(refreshing) || readFailed;
+		result.replaceChildren();
+		if (!allowed()) result.append(h("p", { class: "muted" }, t("start_unavailable")));
+		if (!fixed) return;
+		result.append(h("p", {}, operation ? opStatus(operation) : t(saved.intent.refused ? "start_refused" : "start_unknown"), " ", saved.intent.operation_id ? h("a", { href: `#/op/${saved.intent.operation_id}` }, t("permissions_details")) : null, operation?.status_reason ? ` · ${operation.status_reason}` : ""));
+		result.append(h("p", { class: "muted" }, t("start_fixed")));
+		if (!saved.intent.request || !saved.intent.key) result.append(h("p", { class: "error" }, t("permissions_damaged")));
+		const proof = operation?.result?.started === true ? operation.result : operation?.external_refs?.start_result;
+		if (proof?.started === true) {
+			result.append(h("p", {}, t("start_started"), " ", h("a", { href: `#/session/${encodeURIComponent(proof.host)}/${encodeURIComponent(proof.session_id)}` }, proof.session_id)));
+			const sent = operation?.result?.prompt_sent;
+			result.append(h("p", { class: "muted" }, t(!saved.intent.request?.params.prompt ? "start_without_prompt" : sent === true ? "start_prompt_accepted" : "start_prompt_unknown")));
+		}
+	}
+	async function refresh(fresh = false) {
+		if (submission) {
+			await submission;
+			guard();
+		}
+		if (refreshing) {
+			await refreshing;
+			if (fresh) return refresh(true);
+			return;
+		}
+		if (!saved.intent?.operation_id) {
+			update();
+			return;
+		}
+		refreshing = (async () => {
+			const doc = await api("GET", `/operations/${saved.intent.operation_id}`);
+			guard();
+			accept(doc.operation);
+		})();
+		update();
+		try {
+			await refreshing;
+		} catch (e) {
+			if (current()) {
+				readFailed = true;
+				showError(e);
+				update();
+			}
+			throw e;
+		} finally {
+			refreshing = null;
+			if (current()) update();
+		}
+	}
+	renderWorkspaces();
+	fill();
+	update();
+	return {
+		box,
+		update,
+		refresh,
+		init: async () => {
+			if (saved.intent) await refresh();
+			else await discover();
+		}
+	};
+}
+//#endregion
+//#region src/artifact-content.js
+var reference = (row) => ({
+	artifact_id: row.artifact_id,
+	revision: row.revision,
+	digest: row.digest
+});
+var same = (a, b) => a && b && a.artifact_id === b.artifact_id && a.revision === b.revision && a.digest === b.digest;
+var pending = new Set(["downloading", "saving"]);
+var textLimit = 262144;
+var pngLimit = 2097152;
+var contentLimit = 16777216;
+async function browserPreview(bytes) {
+	if (bytes.slice(0, 8).every((byte, i) => byte === [
+		137,
+		80,
+		78,
+		71,
+		13,
+		10,
+		26,
+		10
+	][i]) && bytes.length >= 33) {
+		if (bytes.length > pngLimit) throw new Error("PREVIEW_UNSUPPORTED");
+		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+		const width = view.getUint32(16), height = view.getUint32(20);
+		if (view.getUint32(8) !== 13 || String.fromCharCode(...bytes.slice(12, 16)) !== "IHDR" || !width || !height || width * height > 1048576) throw new Error("PREVIEW_UNSUPPORTED");
+		const chunks = [bytes.slice(0, 8)];
+		let header = false, palette = false, transparency = false, data = false, dataEnded = false, ended = false;
+		for (let offset = 8; offset < bytes.length;) {
+			if (offset + 12 > bytes.length) throw new Error("PREVIEW_UNSUPPORTED");
+			const length = view.getUint32(offset), end = offset + length + 12;
+			const kind = String.fromCharCode(...bytes.slice(offset + 4, offset + 8));
+			if (end > bytes.length || !/^[A-Za-z]{2}[A-Z][A-Za-z]$/.test(kind) || kind === "acTL") throw new Error("PREVIEW_UNSUPPORTED");
+			if (kind === "IHDR") {
+				if (header || offset !== 8 || length !== 13) throw new Error("PREVIEW_UNSUPPORTED");
+				header = true;
+			} else if (!header) throw new Error("PREVIEW_UNSUPPORTED");
+			if (kind === "PLTE") {
+				if (palette || transparency || data || !length || length > 768 || length % 3) throw new Error("PREVIEW_UNSUPPORTED");
+				palette = true;
+			}
+			if (kind === "tRNS") {
+				if (transparency || data || bytes[25] === 3 && !palette) throw new Error("PREVIEW_UNSUPPORTED");
+				transparency = true;
+			}
+			if (kind === "IDAT") {
+				if (dataEnded || bytes[25] === 3 && !palette) throw new Error("PREVIEW_UNSUPPORTED");
+				data = true;
+			} else if (data) dataEnded = true;
+			if (kind === "IEND") {
+				if (!data || ended || length !== 0 || end !== bytes.length) throw new Error("PREVIEW_UNSUPPORTED");
+				ended = true;
+			}
+			if ([
+				"IHDR",
+				"PLTE",
+				"IDAT",
+				"IEND",
+				"tRNS"
+			].includes(kind)) chunks.push(bytes.slice(offset, end));
+			else if (/^[A-Z]/.test(kind)) throw new Error("PREVIEW_UNSUPPORTED");
+			offset = end;
+		}
+		if (!ended) throw new Error("PREVIEW_UNSUPPORTED");
+		const bitmap = await createImageBitmap(new Blob(chunks, { type: "image/png" }));
+		try {
+			if (bitmap.width !== width || bitmap.height !== height) throw new Error("PREVIEW_UNSUPPORTED");
+			const canvas = document.createElement("canvas");
+			canvas.width = width;
+			canvas.height = height;
+			canvas.getContext("2d").drawImage(bitmap, 0, 0);
+			return { canvas };
+		} finally {
+			bitmap.close();
+		}
+	}
+	if (bytes.length > textLimit) throw new Error("PREVIEW_UNSUPPORTED");
+	let text;
+	try {
+		text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+	} catch {
+		throw new Error("PREVIEW_UNSUPPORTED");
+	}
+	if (text.includes("\0")) throw new Error("PREVIEW_UNSUPPORTED");
+	return { text };
+}
+function artifactContent({ h, t, api, guard, getArtifact, canRead, validArtifact, readBrowser }) {
+	const status = h("p", {
+		class: "muted",
+		role: "status"
+	}), transfers = h("div"), preview = h("div", {
+		class: "file-preview",
+		hidden: true
+	});
+	const box = h("div", { class: "artifact-content" }), receipts = new Map(), controller = new AbortController();
+	let current = null, busy = false, disposed = false, timer, readingStatus = null;
+	const live = (expected) => {
+		guard();
+		if (disposed || !canRead() || expected && !same(expected, getArtifact())) throw new Error(t("ar_content_changed"));
+	};
+	const fail = (error) => {
+		try {
+			guard();
+			if (!disposed) status.textContent = error.message === "PREVIEW_UNSUPPORTED" ? t("ar_content_preview_limit") : error.message;
+		} catch {}
+	};
+	const close = () => {
+		preview.replaceChildren();
+		preview.hidden = true;
+	};
+	const receiptValid = (value) => /^file_[0-9a-f]{32}$/.test(value?.transfer_id) && value.direction === "download" && same(value.artifact, current) && value.digest === current.digest && value.size_bytes === current.size_bytes && [
+		"downloading",
+		"saving",
+		"saved",
+		"stopped",
+		"failed",
+		"cancelled"
+	].includes(value.stage) && Number.isSafeInteger(value.transferred_bytes) && value.transferred_bytes >= 0 && value.transferred_bytes <= value.size_bytes;
+	const adopt = (value) => {
+		if (!receiptValid(value)) throw new Error(t("ar_content_changed"));
+		const previous = receipts.get(value.transfer_id);
+		if (previous && [
+			"display_name",
+			"digest",
+			"size_bytes",
+			"direction"
+		].some((key) => previous[key] !== value[key])) throw new Error(t("ar_content_changed"));
+		receipts.set(value.transfer_id, value);
+	};
+	async function control(receipt, action) {
+		try {
+			live(receipt.artifact);
+			await nativeFilesControl(receipt.transfer_id, action);
+			live(receipt.artifact);
+			await refresh();
+		} catch (error) {
+			fail(error);
+		}
+	}
+	function renderTransfers() {
+		transfers.replaceChildren(...[...receipts.values()].map((row) => h("div", { class: "file-transfer" }, h("div", { class: "muted" }, `${t(`files_${row.stage}`)} · ${row.transferred_bytes} / ${row.size_bytes} B`), row.error ? h("p", { class: "muted" }, row.error) : null, h("div", { class: "actions" }, pending.has(row.stage) ? h("button", {
+			class: "secondary",
+			onclick: () => control(row, "stop")
+		}, t("files_stop")) : [row.stage === "stopped" || row.stage === "failed" ? h("button", {
+			class: "secondary",
+			onclick: () => control(row, "retry")
+		}, t("files_retry")) : null, h("button", {
+			class: "secondary",
+			onclick: () => control(row, "discard_local")
+		}, t("files_discard"))]))));
+	}
+	async function refresh() {
+		if (readingStatus) return readingStatus;
+		const expected = current;
+		readingStatus = (async () => {
+			live(expected);
+			const doc = await nativeFilesStatus();
+			live(expected);
+			const found = new Set();
+			for (const row of doc.transfers || []) if (row.direction === "download" && same(row.artifact, expected)) {
+				adopt(row);
+				found.add(row.transfer_id);
+			}
+			for (const id of receipts.keys()) if (!found.has(id)) receipts.delete(id);
+			renderTransfers();
+			clearTimeout(timer);
+			if ([...receipts.values()].some((row) => pending.has(row.stage))) timer = setTimeout(() => refresh().catch(fail), 1e3);
+		})();
+		try {
+			await readingStatus;
+		} finally {
+			readingStatus = null;
+		}
+	}
+	async function fresh() {
+		live();
+		const expected = getArtifact();
+		if (!expected || !Number.isSafeInteger(expected.size_bytes) || expected.size_bytes < 0 || expected.size_bytes > contentLimit) throw new Error(t("ar_content_limit"));
+		const { artifact: row } = await api("GET", `/artifacts/${expected.artifact_id}/revisions/${expected.revision}`);
+		live(expected);
+		if (!validArtifact(row, reference(expected)) || row.size_bytes !== expected.size_bytes || row.operation_id !== expected.operation_id || row.source?.fingerprint !== expected.source?.fingerprint) throw new Error(t("ar_content_changed"));
+		return row;
+	}
+	async function perform(action) {
+		if (busy) return;
+		busy = true;
+		update();
+		status.textContent = t("ar_content_reading");
+		try {
+			const row = await fresh(), ref = reference(row);
+			if (action === "preview") {
+				if (row.size_bytes > pngLimit) throw new Error("PREVIEW_UNSUPPORTED");
+				let content;
+				if (nativeDesktop) {
+					const result = await nativeFilesPreview(ref);
+					live(ref);
+					if (result.media_type === "text/plain" && typeof result.text === "string" && new TextEncoder().encode(result.text).length <= textLimit && !result.text.includes("\0")) content = { text: result.text };
+					else if (result.media_type === "image/png" && typeof result.base64 === "string" && result.base64.length <= 28e5) content = await browserPreview(Uint8Array.from(atob(result.base64), (c) => c.charCodeAt(0)));
+					else throw new Error(t("ar_content_changed"));
+				} else content = await browserPreview(await readBrowser(ref, row.size_bytes, controller.signal));
+				live(ref);
+				close();
+				let body;
+				if (content.canvas) {
+					body = content.canvas;
+					body.setAttribute("role", "img");
+					body.setAttribute("aria-label", t("files_preview"));
+				} else body = h("pre", {}, content.text);
+				preview.hidden = false;
+				preview.append(h("div", { class: "actions" }, h("strong", {}, t("files_preview")), h("button", {
+					class: "secondary",
+					onclick: close
+				}, t("close"))), body);
+				status.textContent = t("ar_content_verified");
+			} else if (nativeDesktop) {
+				const receipt = await nativeFilesSave(ref);
+				live(ref);
+				status.textContent = "";
+				if (receipt) {
+					adopt(receipt);
+					renderTransfers();
+					await refresh();
+				}
+			} else {
+				const bytes = await readBrowser(ref, row.size_bytes, controller.signal);
+				live(ref);
+				const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+				const link = document.createElement("a");
+				link.href = url;
+				link.download = String(row.display_name || row.artifact_id).replace(/[\\/\x00-\x1f\x7f]/g, "_").slice(0, 200) || row.artifact_id;
+				link.click();
+				setTimeout(() => URL.revokeObjectURL(url), 1e3);
+				status.textContent = t("ar_content_downloaded");
+			}
+		} catch (error) {
+			fail(error);
+		} finally {
+			busy = false;
+			update();
+		}
+	}
+	const peek = h("button", {
+		class: "secondary",
+		onclick: () => perform("preview")
+	}, t("files_preview"));
+	const save = h("button", {
+		class: "secondary",
+		onclick: () => perform("save")
+	}, t(nativeDesktop ? "files_save" : "ar_content_download"));
+	box.append(h("div", { class: "actions" }, peek, save), h("p", { class: "muted" }, t("ar_content_help")), status, preview, transfers);
+	function update() {
+		if (disposed) return;
+		const next = getArtifact(), changed = !same(current, next);
+		if (changed) {
+			current = next;
+			close();
+			receipts.clear();
+			renderTransfers();
+			clearTimeout(timer);
+			status.textContent = "";
+		}
+		box.hidden = !next;
+		peek.disabled = save.disabled = busy || !next || !canRead() || nativeDesktop && !nativeFileSupport;
+		if (next && nativeDesktop && !nativeFileSupport) status.textContent = t("ar_content_native_unavailable");
+		if (changed && next && nativeDesktop && nativeFileSupport) queueMicrotask(() => refresh().catch(fail));
+	}
+	return {
+		box,
+		update,
+		dispose() {
+			disposed = true;
+			controller.abort();
+			clearTimeout(timer);
+			close();
+		}
+	};
+}
+//#endregion
+//#region src/artifact-review.js
+var record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+var ordered = (value) => record(value) ? Object.fromEntries(Object.keys(value).sort().map((k) => [k, ordered(value[k])])) : Array.isArray(value) ? value.map(ordered) : value;
+var stable = (value) => JSON.stringify(ordered(value));
+var equal = (a, b) => stable(a ?? null) === stable(b ?? null);
+var digest = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+var oid = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
+var aid = (value) => typeof value === "string" && /^art_[0-9a-f]{32}$/.test(value);
+var tid = (value) => typeof value === "string" && /^[0-9a-f-]{8,64}$/.test(value);
+var commandId = (value) => typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f-\x9f]/.test(value);
+var terminal = (op) => [
+	"succeeded",
+	"failed",
+	"cancelled"
+].includes(op?.status);
+var executions = [
+	"checkpoint.continue",
+	"integration.handoff",
+	"session.send",
+	"session.start"
+];
+var managedCaptureExecution = (op) => oid(op?.operation_id) && op.status === "succeeded" && executions.includes(op.action) && (op.action !== "session.start" || op.result?.started === true && op.result.prompt_sent === true && op.result.message_id === `batc-${op.operation_id}`);
+var safePath = (path) => typeof path === "string" && path && new TextEncoder().encode(path).length <= 4096 && !/[\\\x00-\x1f\x7f-\x9f]/.test(path) && path.split("/").every((p) => p && p !== "." && p !== ".." && p.toLowerCase() !== ".git");
+var selectorValid = (s) => record(s) && (equal(Object.keys(s).sort(), ["execution_operation_id"]) && oid(s.execution_operation_id) || equal(Object.keys(s).sort(), ["command_id", "task_id"]) && tid(s.task_id) && commandId(s.command_id));
+var validRef = (ref) => aid(ref?.artifact_id) && Number.isSafeInteger(ref.revision) && ref.revision > 0 && ref.revision <= 999999999 && digest(ref.digest);
+var refOf = (value) => ({
+	artifact_id: value.artifact_id,
+	revision: value.revision,
+	digest: value.digest
+});
+var sourceFromOperation = (op) => op.action === "session.send" ? op.external_refs?.resolved_target || op.target : op.result;
+function validPreview(doc, input) {
+	return record(doc) && /^acpv_[0-9a-f]{32}$/.test(doc.preview_id) && typeof doc.preview_token === "string" && doc.preview_token.length > 0 && doc.preview_token.length <= 24576 && digest(doc.fingerprint) && doc.snapshot === false && Number.isFinite(doc.expires_at) && doc.source?.provenance === "connector_managed" && doc.source.host === input.host && doc.source.session_id === input.session_id && equal(doc.source.selector, input.selector) && doc.relative_path === input.relative_path && typeof doc.source.root === "string" && typeof doc.source.repository_root === "string" && record(doc.source.lineage) && digest(doc.evidence?.digest) && /^[0-9a-f]{40}$/.test(doc.evidence.head_sha) && Number.isSafeInteger(doc.evidence.size_bytes) && doc.evidence.size_bytes >= 0;
+}
+function validArtifact(row, expected) {
+	const proof = row?.source;
+	return validRef(row) && row.state === "ready" && record(proof) && proof.kind === "managed_capture" && oid(proof.operation_id) && row.operation_id === proof.operation_id && digest(proof.fingerprint) && proof.source?.provenance === "connector_managed" && record(proof.source.lineage) && selectorValid(proof.source.selector) && safePath(proof.relative_path) && proof.evidence?.digest === row.digest && proof.evidence.size_bytes === row.size_bytes && /^[0-9a-f]{40}$/.test(proof.evidence.head_sha) && (!expected || equal(refOf(row), expected));
+}
+function restore(raw) {
+	const saved = {
+		relative_path: "",
+		selector: null,
+		reviewText: ""
+	};
+	if (!record(raw)) return saved;
+	if (typeof raw.relative_path === "string") saved.relative_path = raw.relative_path;
+	if (selectorValid(raw.selector)) saved.selector = raw.selector;
+	if (typeof raw.reviewText === "string") saved.reviewText = raw.reviewText;
+	if (record(raw.preview)) saved.preview = raw.preview;
+	for (const kind of ["capture", "accept"]) if (raw[kind]) {
+		const intent = raw[kind];
+		const usable = record(intent.request) && typeof intent.key === "string" && intent.key.length > 0 && intent.key.length <= 200 && typeof intent.actor === "string" && record(intent.request.target) && record(intent.request.params) && record(intent.request.preconditions) && intent.request.action === (kind === "capture" ? "artifact.capture.managed" : "artifact.accept");
+		saved[kind] = {
+			request: usable ? intent.request : null,
+			key: usable ? intent.key : null,
+			actor: intent.actor,
+			operation_id: oid(intent.operation_id) ? intent.operation_id : null,
+			expected: intent.expected,
+			refused: usable && [
+				"PREVIEW_EXPIRED",
+				"PREVIEW_TOKEN_INVALID",
+				"PREVIEW_MISMATCH",
+				"INVALID_PARAMS",
+				"ARTIFACT_REVISION_MISMATCH",
+				"ARTIFACT_LINEAGE_UNPROVEN"
+			].includes(intent.refused) ? intent.refused : null
+		};
+	}
+	return saved;
+}
+async function mountArtifactReview({ main, h, t, api, caps, guard, onEvents, errorBox, opStatus, storageKey, context, readBrowser }) {
+	const container = h("div", { class: "artifact-review" });
+	main.append(container);
+	let raw;
+	try {
+		raw = JSON.parse(localStorage.getItem(storageKey));
+	} catch {}
+	let saved = restore(raw), source = null, artifact = null, busy = false, readFailed = false, disposed = false;
+	let refreshing = null, submission = null, revision = 0, catalogCursor = null, catalogReading = null, catalogPages = 0;
+	let catalogRows = new Map();
+	const operations = {
+		capture: null,
+		accept: null
+	}, candidates = new Map(), pages = new Map();
+	const notice = h("div", { role: "status" }), sourceBox = h("div"), evidence = h("div"), outcome = h("div");
+	const catalog = h("div"), reviewFacts = h("div"), catalogNotice = h("div");
+	const path = h("input", {
+		"aria-label": t("capture_path"),
+		value: saved.relative_path,
+		placeholder: "results/report.md"
+	});
+	const choice = h("select", { "aria-label": t("ar_execution") }, h("option", { value: "" }, t("ar_choose_execution")));
+	const customType = h("select", { "aria-label": t("ar_evidence_kind") }, h("option", { value: "operation" }, t("ar_operation")), h("option", { value: "command" }, t("ar_command")));
+	const customTask = h("input", {
+		"aria-label": t("ar_task_id"),
+		maxlength: 64
+	});
+	const customId = h("input", {
+		"aria-label": t("ar_evidence_id"),
+		maxlength: 256
+	});
+	const custom = h("div", {
+		class: "capture-fields",
+		hidden: true
+	}, h("label", {}, t("ar_evidence_kind"), customType), h("label", {}, t("ar_task_id"), customTask), h("label", {}, t("ar_evidence_id"), customId));
+	const receipt = h("textarea", {
+		"aria-label": t("ar_receipt"),
+		maxlength: 2e3,
+		value: saved.reviewText
+	});
+	receipt.value = saved.reviewText;
+	const reviewed = h("input", {
+		type: "checkbox",
+		onchange: () => update()
+	});
+	const currentView = () => {
+		try {
+			guard();
+			return !disposed;
+		} catch {
+			return false;
+		}
+	};
+	const persist = (required = false) => {
+		guard();
+		try {
+			localStorage.setItem(storageKey, JSON.stringify(saved));
+			return true;
+		} catch {
+			if (required) throw new Error(t("ar_storage"));
+			return false;
+		}
+	};
+	const showError = (error) => {
+		if (currentView()) notice.replaceChildren(errorBox(error));
+	};
+	const supported = () => caps()?.artifacts?.capture?.managed_single_file === true;
+	const scope = (name) => caps()?.scopes?.includes(name);
+	const allowed = (name) => caps()?.actions?.some((a) => a.action === name && a.allowed === true);
+	const mayCapture = () => supported() && scope("observe") && scope("manage") && allowed("artifact.capture.managed");
+	const mayAccept = () => scope("observe") && scope("approve") && allowed("artifact.accept");
+	const active = (kind) => saved[kind] && !saved[kind].refused && (!terminal(operations[kind]) || kind === "capture" && operations.capture?.status === "succeeded" && !artifact);
+	const frozen = () => Boolean(saved.capture || saved.accept);
+	const input = () => ({
+		host: source?.host,
+		session_id: source?.session_id,
+		relative_path: path.value,
+		selector: saved.selector
+	});
+	const facts = (rows) => h("dl", { class: "kv" }, ...rows.flatMap(([label, value]) => [h("dt", {}, label), h("dd", {}, h("code", {}, value ?? ""))]));
+	const proofFacts = (proof) => facts([
+		[t("capture_source"), `${proof.source.host} / ${proof.source.session_id}`],
+		[t("capture_path"), proof.relative_path],
+		[t("capture_root"), proof.source.root],
+		["HEAD", proof.evidence.head_sha],
+		[t("capture_bytes"), String(proof.evidence.size_bytes)],
+		["SHA-256", proof.evidence.digest]
+	]);
+	function renderChoice() {
+		choice.replaceChildren(h("option", { value: "" }, t("ar_choose_execution")), ...[...candidates].map(([key, entry]) => h("option", { value: key }, entry.label)), h("option", { value: "custom" }, t("ar_exact_evidence")));
+		if (saved.selector) {
+			const key = stable(saved.selector);
+			if (frozen() && !candidates.has(key)) choice.append(h("option", { value: key }, saved.selector.execution_operation_id ? `${t("ar_operation")} · ${saved.selector.execution_operation_id}` : `${t("ar_command")} · ${saved.selector.task_id} · ${saved.selector.command_id}`));
+			if (candidates.has(key) || frozen()) choice.value = key;
+			else {
+				choice.value = "custom";
+				customType.value = saved.selector.task_id ? "command" : "operation";
+				customTask.value = saved.selector.task_id || context.task_id || "";
+				customId.value = saved.selector.command_id || saved.selector.execution_operation_id;
+			}
+		}
+		custom.hidden = choice.value !== "custom";
+		customTask.disabled = customType.value !== "command" || frozen() || busy;
+	}
+	function changed() {
+		if (!currentView() || frozen()) return;
+		revision++;
+		saved.relative_path = path.value;
+		saved.preview = null;
+		reviewed.checked = false;
+		saved.selector = choice.value === "custom" ? customType.value === "command" ? {
+			task_id: customTask.value.trim(),
+			command_id: customId.value.trim()
+		} : { execution_operation_id: customId.value.trim() } : candidates.get(choice.value)?.selector || null;
+		custom.hidden = choice.value !== "custom";
+		persist();
+		render();
+	}
+	for (const field of [
+		path,
+		choice,
+		customType,
+		customTask,
+		customId
+	]) field.addEventListener("input", changed);
+	receipt.addEventListener("input", () => {
+		if (!currentView() || saved.accept) return;
+		saved.reviewText = receipt.value;
+		persist();
+		update();
+	});
+	async function captureArtifact(op) {
+		const intent = saved.capture, ref = op.result;
+		if (!validRef(ref) || ref.digest !== intent.expected?.digest) throw new Error(t("ar_invalid_result"));
+		const { artifact: row } = await api("GET", `/artifacts/${ref.artifact_id}/revisions/${ref.revision}`);
+		guard();
+		const proof = row?.source;
+		if (!validArtifact(row, refOf(ref)) || proof.operation_id !== op.operation_id || proof.fingerprint !== intent.request.preconditions.expected_fingerprint || !equal(proof.source, intent.expected.source) || !equal(proof.evidence, intent.expected.evidence) || proof.relative_path !== intent.expected.relative_path) throw new Error(t("ar_invalid_result"));
+		artifact = row;
+		await loadCatalog();
+	}
+	async function adopt(kind, op) {
+		guard();
+		const intent = saved[kind];
+		if (!intent?.request || !oid(op?.operation_id) || op.actor !== intent.actor || op.actor !== caps().actor || op.idempotency_key !== intent.key || op.action !== intent.request.action || !equal(op.target, intent.request.target) || !equal(op.params, intent.request.params) || !equal(op.preconditions, intent.request.preconditions) || intent.operation_id && intent.operation_id !== op.operation_id) throw new Error(t("ar_invalid_result"));
+		intent.operation_id = op.operation_id;
+		persist();
+		if (kind === "capture" && op.status === "succeeded") await captureArtifact(op);
+		if (kind === "accept" && op.status === "succeeded") {
+			const result = op.result, request = intent.request;
+			if (!result || result.operation_id !== op.operation_id || result.actor !== intent.actor || result.meaning !== "artifact_revision_review" || !equal(refOf(result), {
+				...request.target,
+				digest: request.params.digest
+			}) || result.source_fingerprint !== request.params.source_fingerprint || result.receipt !== request.params.receipt || result.capture_operation_id !== intent.expected?.capture_operation_id || result.source_commit !== intent.expected?.source_commit || !equal(result.lineage, intent.expected?.lineage)) throw new Error(t("ar_invalid_result"));
+		}
+		operations[kind] = op;
+		readFailed = false;
+		render();
+	}
+	async function submit(kind) {
+		if (busy || refreshing || readFailed || !saved[kind]?.request) return;
+		guard();
+		busy = true;
+		update();
+		let finish;
+		submission = new Promise((resolve) => {
+			finish = resolve;
+		});
+		try {
+			persist(true);
+			const intent = saved[kind];
+			const result = intent.operation_id ? await api("GET", `/operations/${intent.operation_id}`) : await api("POST", "/operations?wait=3", intent.request, intent.key);
+			guard();
+			await adopt(kind, result.operation);
+			notice.replaceChildren();
+		} catch (error) {
+			if (!currentView()) return;
+			const safe = kind === "capture" ? [
+				"PREVIEW_EXPIRED",
+				"PREVIEW_TOKEN_INVALID",
+				"PREVIEW_MISMATCH",
+				"INVALID_PARAMS"
+			] : [
+				"INVALID_PARAMS",
+				"ARTIFACT_REVISION_MISMATCH",
+				"ARTIFACT_LINEAGE_UNPROVEN"
+			];
+			if (!saved[kind].operation_id && error.status >= 400 && error.status < 500 && safe.includes(error.code)) saved[kind].refused = error.code;
+			persist();
+			showError(error);
+			if (kind === "capture" && error.status === 403) notice.append(h("p", { class: "muted" }, t("ar_original_credential")));
+		} finally {
+			busy = false;
+			finish();
+			submission = null;
+			if (currentView()) render();
+		}
+	}
+	const preview = h("button", {
+		class: "secondary",
+		onclick: async () => {
+			if (busy || frozen() || !source || !scope("observe") || !supported() || !safePath(path.value) || !selectorValid(saved.selector)) return;
+			guard();
+			const ticket = ++revision, fixed = structuredClone(input());
+			busy = true;
+			saved.preview = null;
+			reviewed.checked = false;
+			update();
+			try {
+				const { selector, ...fields } = fixed;
+				const { preview: doc } = await api("POST", "/artifact-managed-capture-previews", {
+					...fields,
+					...selector
+				});
+				guard();
+				if (ticket !== revision) return;
+				if (!validPreview(doc, fixed)) throw new Error(t("capture_invalid_preview"));
+				saved.preview = doc;
+				readFailed = false;
+				persist();
+				notice.replaceChildren();
+			} catch (error) {
+				if (ticket === revision) showError(error);
+			} finally {
+				busy = false;
+				if (currentView()) render();
+			}
+		}
+	}, t("capture_preview"));
+	const capture = h("button", {
+		class: "primary",
+		onclick: () => {
+			if (busy || refreshing || readFailed || !mayCapture() || saved.capture?.operation_id || saved.capture?.refused) return;
+			guard();
+			if (!saved.capture) {
+				const doc = saved.preview;
+				if (!doc || !reviewed.checked || doc.expires_at * 1e3 <= Date.now() || !validPreview(doc, input())) return;
+				saved.capture = {
+					key: crypto.randomUUID(),
+					actor: caps().actor,
+					request: {
+						action: "artifact.capture.managed",
+						target: { preview_id: doc.preview_id },
+						params: { preview_token: doc.preview_token },
+						preconditions: { expected_fingerprint: doc.fingerprint }
+					},
+					expected: {
+						digest: doc.evidence.digest,
+						evidence: doc.evidence,
+						source: doc.source,
+						relative_path: doc.relative_path
+					}
+				};
+			}
+			submit("capture");
+		}
+	}, t("capture_save"));
+	const accept = h("button", {
+		class: "primary",
+		onclick: () => {
+			if (busy || refreshing || readFailed || !artifact || !mayAccept() || saved.accept?.operation_id || saved.accept?.refused || !receipt.value.trim() || [...receipt.value].length > 2e3) return;
+			guard();
+			if (!saved.accept) saved.accept = {
+				key: crypto.randomUUID(),
+				actor: caps().actor,
+				request: {
+					action: "artifact.accept",
+					target: {
+						artifact_id: artifact.artifact_id,
+						revision: artifact.revision
+					},
+					params: {
+						digest: artifact.digest,
+						source_fingerprint: artifact.source.fingerprint,
+						receipt: receipt.value
+					},
+					preconditions: {}
+				},
+				expected: {
+					capture_operation_id: artifact.source.operation_id,
+					source_commit: artifact.source.evidence.head_sha,
+					lineage: artifact.source.source.lineage
+				}
+			};
+			submit("accept");
+		}
+	}, t("ar_accept"));
+	const check = h("button", {
+		class: "secondary",
+		onclick: () => refresh(true).catch(showError)
+	}, t("ar_check"));
+	const reload = h("button", {
+		class: "secondary",
+		onclick: async () => {
+			if (busy || refreshing || frozen()) return;
+			busy = true;
+			update();
+			try {
+				await loadSource();
+				guard();
+				readFailed = false;
+				notice.replaceChildren();
+			} catch (error) {
+				showError(error);
+			} finally {
+				busy = false;
+				if (currentView()) render();
+			}
+		}
+	}, t("ar_refresh_sources"));
+	const reset = h("button", {
+		class: "secondary",
+		onclick: async () => {
+			guard();
+			if (busy || refreshing || readFailed || active("capture") || active("accept")) return;
+			saved = {
+				relative_path: path.value,
+				selector: null,
+				reviewText: ""
+			};
+			artifact = source = null;
+			candidates.clear();
+			pages.clear();
+			operations.capture = operations.accept = null;
+			reviewed.checked = false;
+			receipt.value = "";
+			revision++;
+			persist();
+			notice.replaceChildren();
+			renderChoice();
+			busy = true;
+			render();
+			try {
+				await loadSource();
+			} catch (error) {
+				showError(error);
+			} finally {
+				busy = false;
+				if (currentView()) render();
+			}
+		}
+	}, t("capture_new"));
+	const newReview = h("button", {
+		class: "secondary",
+		onclick: () => {
+			guard();
+			if (busy || refreshing || readFailed || active("accept")) return;
+			saved.accept = null;
+			operations.accept = null;
+			persist();
+			render();
+		}
+	}, t("ar_new_review"));
+	const moreExecutions = h("button", {
+		class: "secondary",
+		onclick: () => loadExecutions(true).catch(showError)
+	}, t("ar_more_executions"));
+	const content = artifactContent({
+		h,
+		t,
+		api,
+		guard,
+		getArtifact: () => artifact,
+		canRead: () => scope("observe") && !readFailed,
+		validArtifact,
+		readBrowser
+	});
+	const reviewPanel = h("section", {
+		class: "panel",
+		"data-artifact-accept": ""
+	}, h("h2", {}, t("ar_review_title")), reviewFacts, content.box, h("p", { class: "muted" }, t("ar_accept_help")), h("label", {}, t("ar_receipt"), receipt), h("p", { class: "muted" }, t("ar_approve_scope")), h("div", { class: "actions" }, accept, newReview));
+	const capturePanel = h("section", {
+		class: "panel",
+		"data-managed-capture": ""
+	}, h("h2", {}, t("ar_capture_title")), sourceBox, h("div", { class: "capture-fields" }, h("label", {}, t("ar_execution"), choice), h("label", {}, t("capture_path"), path)), custom, h("div", { class: "actions" }, reload, moreExecutions, preview), evidence, h("label", { class: "capture-choice" }, reviewed, t("capture_review")), h("div", { class: "actions" }, capture, reset));
+	const moreArtifacts = h("button", {
+		class: "secondary",
+		hidden: true,
+		onclick: () => loadCatalog(true).catch((e) => catalogNotice.replaceChildren(errorBox(e)))
+	}, t("more"));
+	const catalogPanel = h("section", { class: "panel" }, h("h2", {}, t("ar_catalog")), catalog, catalogNotice, h("div", { class: "actions" }, moreArtifacts));
+	container.append(h("h1", {}, t("ar_title")), h("p", { class: "muted" }, t("ar_help")), capturePanel, reviewPanel, h("div", { class: "actions" }, check), outcome, notice, catalogPanel);
+	function update() {
+		content.update();
+		const fixed = busy || frozen();
+		for (const field of [
+			path,
+			choice,
+			customType,
+			customId
+		]) field.disabled = fixed;
+		customTask.disabled = fixed || customType.value !== "command";
+		preview.disabled = busy || frozen() || !source || !scope("observe") || !supported() || !safePath(path.value) || !selectorValid(saved.selector);
+		reviewed.disabled = busy || Boolean(saved.capture) || !saved.preview || saved.preview.expires_at * 1e3 <= Date.now();
+		reviewed.closest("label").hidden = Boolean(saved.capture) || !saved.preview;
+		capture.hidden = Boolean(saved.capture?.operation_id || saved.capture?.refused);
+		capture.textContent = saved.capture ? t("capture_check") : t("capture_save");
+		capture.disabled = busy || Boolean(refreshing) || readFailed || !mayCapture() || !source || Boolean(saved.capture && !saved.capture.request) || !saved.capture && (!saved.preview || !reviewed.checked || saved.preview.expires_at * 1e3 <= Date.now());
+		receipt.disabled = busy || Boolean(saved.accept) || !artifact;
+		accept.hidden = Boolean(saved.accept?.operation_id || saved.accept?.refused);
+		accept.textContent = saved.accept ? t("ar_check_accept") : t("ar_accept");
+		accept.disabled = busy || Boolean(refreshing) || readFailed || !artifact || !mayAccept() || !receipt.value.trim() || [...receipt.value].length > 2e3 || Boolean(saved.accept && !saved.accept.request);
+		check.hidden = !saved.capture?.operation_id && !saved.accept?.operation_id && context.kind !== "artifact";
+		check.disabled = busy || Boolean(refreshing);
+		reset.hidden = !saved.capture;
+		reset.disabled = busy || Boolean(refreshing) || readFailed || Boolean(active("capture") || active("accept"));
+		newReview.hidden = !saved.accept;
+		newReview.disabled = busy || Boolean(refreshing) || readFailed || Boolean(active("accept"));
+		moreExecutions.disabled = busy || frozen();
+		reload.disabled = busy || frozen();
+		moreExecutions.hidden = ![...pages.values()].some((value) => value !== null);
+	}
+	function render() {
+		if (!currentView()) return;
+		capturePanel.hidden = ![
+			"session",
+			"task",
+			"operation"
+		].includes(context.kind);
+		evidence.replaceChildren();
+		if (!mayCapture()) evidence.append(h("p", { class: "muted" }, t("capture_scope_manage")));
+		if (saved.preview && validPreview(saved.preview, input())) {
+			const description = [proofFacts(saved.preview), h("p", { class: "muted" }, saved.capture ? t("capture_fixed") : saved.preview.expires_at * 1e3 <= Date.now() ? t("capture_expired") : t("capture_single_file"))];
+			evidence.append(...artifact ? [h("details", {}, h("summary", {}, t("ar_original_preview")), ...description)] : description);
+		}
+		reviewPanel.hidden = !artifact && context.kind !== "artifact" && !saved.accept;
+		reviewFacts.replaceChildren();
+		if (artifact) reviewFacts.append(facts([[t("ar_revision"), `${artifact.artifact_id} · r${artifact.revision}`]]), proofFacts(artifact.source), h("details", {}, h("summary", {}, t("ar_lineage")), h("pre", { class: "pre" }, JSON.stringify(artifact.source.source.lineage, null, 2))));
+		outcome.replaceChildren();
+		for (const kind of ["capture", "accept"]) if (saved[kind]) {
+			const intent = saved[kind], op = operations[kind];
+			outcome.append(h("p", {}, t(kind === "capture" ? "ar_capture_title" : "ar_review_title"), ": ", op ? opStatus(op) : t("capture_unknown"), " ", intent.operation_id ? h("a", { href: `#/op/${intent.operation_id}` }, intent.operation_id) : null));
+			if (intent.refused) outcome.append(h("p", { class: "muted" }, intent.refused));
+		}
+		if (artifact) outcome.append(h("p", { "data-artifact-ready": "" }, t("capture_saved"), " ", `${artifact.artifact_id} · r${artifact.revision}`));
+		if (operations.accept?.status === "succeeded") outcome.append(h("p", { "data-artifact-accepted": "" }, t("ar_recorded")));
+		update();
+	}
+	async function loadExecutions(more = false) {
+		if (!source || frozen()) return;
+		const results = await Promise.all(executions.map(async (action) => {
+			if (more && pages.get(action) === null) return;
+			const before = more ? pages.get(action) : null;
+			return {
+				action,
+				data: await api("GET", `/operations?status=succeeded&action=${action}&limit=50${before ? `&before=${before}` : ""}`)
+			};
+		}));
+		guard();
+		if (frozen()) return;
+		for (const result of results.filter(Boolean)) {
+			pages.set(result.action, result.data.next_before ?? null);
+			for (const op of result.data.operations || []) {
+				const bound = sourceFromOperation(op);
+				if (managedCaptureExecution(op) && bound?.host === source.host && bound.session_id === source.session_id) {
+					const selector = { execution_operation_id: op.operation_id };
+					candidates.set(stable(selector), {
+						selector,
+						label: `${op.action} · ${op.operation_id}`
+					});
+				}
+			}
+		}
+		renderChoice();
+		update();
+	}
+	async function loadSource() {
+		let task, data, bound;
+		if (context.kind === "task") {
+			task = (await api("GET", `/tasks/${encodeURIComponent(context.task_id)}`)).task;
+			if (task?.task_id !== context.task_id) throw new Error(t("ar_source_unavailable"));
+			bound = {
+				host: task.host,
+				session_id: task.session_id
+			};
+			customTask.value = task.task_id;
+		} else if (context.kind === "operation") {
+			const op = (await api("GET", `/operations/${context.operation_id}`)).operation;
+			if (op?.operation_id !== context.operation_id || !managedCaptureExecution(op)) throw new Error(t("ar_source_unavailable"));
+			bound = sourceFromOperation(op);
+			if (!saved.selector) saved.selector = { execution_operation_id: context.operation_id };
+		} else if (context.kind === "session") bound = context;
+		else return;
+		guard();
+		if (!bound?.host || !bound?.session_id) throw new Error(t("ar_source_unavailable"));
+		data = await api("GET", `/sessions/${encodeURIComponent(bound.host)}/${encodeURIComponent(bound.session_id)}`);
+		guard();
+		const row = data.session;
+		if (row?.host !== bound.host || row.session_id !== bound.session_id || row.provenance !== "connector_managed" || row.api_access !== "managed") throw new Error(t("ar_source_unavailable"));
+		source = {
+			host: row.host,
+			session_id: row.session_id
+		};
+		sourceBox.replaceChildren(facts([[t("capture_source"), `${row.host} / ${row.session_id}`]]));
+		if (!saved.capture) {
+			const taskIds = task ? [task.task_id] : [...new Set((data.relations_summary || []).filter((r) => r.status !== "closed").map((r) => r.execution_id))].filter(tid);
+			const tasks = task ? [task] : await Promise.all(taskIds.slice(0, 20).map(async (id) => (await api("GET", `/tasks/${id}`)).task));
+			guard();
+			for (const current of tasks) if (current?.host === source.host && current.session_id === source.session_id) {
+				for (const cmd of current.commands || []) if (cmd.task_id === current.task_id && cmd.session_id === source.session_id && cmd.kind === "send" && ["accepted", "settled"].includes(cmd.status) && commandId(cmd.command_id)) {
+					const selector = {
+						task_id: current.task_id,
+						command_id: cmd.command_id
+					};
+					candidates.set(stable(selector), {
+						selector,
+						label: `${t("ar_command")} · ${current.task_id} · ${cmd.command_id}`
+					});
+				}
+			}
+			await loadExecutions();
+		}
+		renderChoice();
+		render();
+	}
+	async function loadExactArtifact() {
+		const expected = context.kind === "artifact" ? {
+			artifact_id: context.artifact_id,
+			revision: context.revision
+		} : null;
+		if (!expected) return;
+		if (!aid(expected.artifact_id) || !Number.isSafeInteger(expected.revision) || expected.revision < 1 || expected.revision > 999999999) throw new Error(t("ar_invalid_result"));
+		const { artifact: row } = await api("GET", `/artifacts/${expected.artifact_id}/revisions/${expected.revision}`);
+		guard();
+		if (!validArtifact(row) || row.artifact_id !== expected.artifact_id || row.revision !== expected.revision) throw new Error(t("ar_invalid_result"));
+		artifact = row;
+		render();
+	}
+	async function loadCatalog(more = false) {
+		if (catalogReading) {
+			await catalogReading;
+			guard();
+			return loadCatalog(more);
+		}
+		if (more && !catalogCursor) return;
+		catalogReading = (async () => {
+			let cursor = more ? catalogCursor : null, readPages = 0;
+			const rows = more ? new Map(catalogRows) : new Map(), seen = new Set();
+			for (let index = 0; index < (more ? 1 : Math.max(1, catalogPages)); index++) {
+				if (seen.has(cursor)) throw new Error(t("ar_invalid_result"));
+				seen.add(cursor);
+				const data = await api("GET", `/artifacts?limit=30${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+				guard();
+				if (!Array.isArray(data.artifacts) || data.next_cursor != null && (typeof data.next_cursor !== "string" || !data.next_cursor)) throw new Error(t("ar_invalid_result"));
+				for (const row of data.artifacts.map((a) => a.revision).filter((row) => validArtifact(row))) rows.set(`${row.artifact_id}:${row.revision}`, row);
+				cursor = data.next_cursor ?? null;
+				readPages++;
+				if (!cursor) break;
+			}
+			guard();
+			catalogRows = rows;
+			catalogCursor = cursor;
+			catalogPages = (more ? catalogPages : 0) + readPages;
+			catalog.replaceChildren(...[...rows.values()].map((row) => h("div", { class: "row" }, h("a", {
+				class: "title",
+				href: `#/artifact-review/artifact/${row.artifact_id}/${row.revision}`
+			}, `${row.display_name || row.artifact_id} · r${row.revision}`), h("code", {}, row.digest))));
+			moreArtifacts.hidden = !catalogCursor;
+			catalogNotice.replaceChildren();
+			if (!rows.size) catalog.append(h("p", { class: "muted" }, t("ar_no_artifacts")));
+		})();
+		moreArtifacts.disabled = true;
+		try {
+			await catalogReading;
+		} catch (error) {
+			if (currentView()) catalogNotice.replaceChildren(errorBox(error));
+			throw error;
+		} finally {
+			catalogReading = null;
+			moreArtifacts.disabled = false;
+		}
+	}
+	async function refresh(fresh = false) {
+		if (submission) {
+			await submission;
+			guard();
+		}
+		if (refreshing) {
+			await refreshing;
+			if (fresh) return refresh(true);
+			return;
+		}
+		refreshing = (async () => {
+			const reads = [];
+			if (saved.capture?.operation_id) reads.push(api("GET", `/operations/${saved.capture.operation_id}`).then((data) => adopt("capture", data.operation)));
+			else if (context.kind === "artifact") reads.push(loadExactArtifact());
+			if (saved.accept?.operation_id) reads.push(api("GET", `/operations/${saved.accept.operation_id}`).then((data) => adopt("accept", data.operation)));
+			const outcomes = await Promise.allSettled(reads);
+			for (const result of outcomes) if (result.status === "rejected") throw result.reason;
+			guard();
+			readFailed = false;
+			render();
+		})();
+		update();
+		try {
+			await refreshing;
+		} catch (error) {
+			if (currentView()) {
+				readFailed = true;
+				showError(error);
+			}
+			throw error;
+		} finally {
+			refreshing = null;
+			if (currentView()) update();
+		}
+	}
+	const off = onEvents(async (event) => {
+		if (!currentView()) return;
+		const reads = [];
+		if (event.resource_id === saved.capture?.operation_id || event.resource_id === saved.accept?.operation_id || event.resource_id === artifact?.artifact_id || context.kind === "artifact" && event.resource_id === context.artifact_id) reads.push(refresh(true));
+		if (event.resource_type === "artifact") reads.push(loadCatalog());
+		const settled = await Promise.allSettled(reads);
+		for (const result of settled) if (result.status === "rejected") throw result.reason;
+	});
+	if (saved.capture?.expected?.source) source = {
+		host: saved.capture.expected.source.host,
+		session_id: saved.capture.expected.source.session_id
+	};
+	renderChoice();
+	render();
+	const initial = [];
+	if (!saved.capture) initial.push(loadSource());
+	if (saved.capture?.operation_id || saved.accept?.operation_id || context.kind === "artifact") initial.push(refresh());
+	initial.push(loadCatalog().catch((error) => {
+		if (currentView()) catalogNotice.replaceChildren(errorBox(error));
+	}));
+	const results = await Promise.allSettled(initial);
+	for (const result of results) if (result.status === "rejected") {
+		readFailed = true;
+		showError(result.reason);
+	}
+	if (!source && saved.capture?.expected?.source) {
+		source = {
+			host: saved.capture.expected.source.host,
+			session_id: saved.capture.expected.source.session_id
+		};
+		renderChoice();
+	}
+	render();
+	const timer = setInterval(() => {
+		if (!currentView()) return;
+		update();
+		if (saved.capture?.operation_id && active("capture") || saved.accept?.operation_id && active("accept")) refresh().catch(showError);
+	}, 1e3);
+	return () => {
+		disposed = true;
+		clearInterval(timer);
+		content.dispose();
+		off();
 	};
 }
 //#endregion
@@ -2586,7 +4874,8 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 			ref: { ...ref }
 		}))
 	};
-	saved.attachments ||= [];
+	if (!Array.isArray(saved.attachments)) saved.attachments = [];
+	saved.attachments = saved.attachments.filter((a) => a && typeof a === "object");
 	for (const a of saved.attachments) delete a.busy;
 	if (typeof saved.text === "string") text.value = saved.text;
 	const files = new Map(), rows = h("div", { class: "attachment-list" });
@@ -2594,8 +4883,14 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 		class: "muted",
 		role: "status"
 	});
-	const supported = Boolean(state.caps?.artifacts);
-	const choose = h("input", {
+	const supported = Boolean(state.caps?.artifacts), nativeFiles = nativeDesktop && nativeFileSupport;
+	const nativeUploadAllowed = state.caps?.actions?.some((a) => a.action === "artifact.upload" && a.allowed === true);
+	let native;
+	const choose = nativeFiles ? h("button", {
+		class: "secondary",
+		disabled: !supported || !may("manage") || !nativeUploadAllowed,
+		onclick: () => native.pick()
+	}, t("files_choose")) : h("input", {
 		type: "file",
 		multiple: true,
 		disabled: !supported || !may("manage"),
@@ -2604,7 +4899,7 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 	const box = h("div", {
 		class: "attachments",
 		hidden: !supported
-	}, h("label", {}, t("attachments"), choose), h("p", { class: "muted" }, t("upload_on_choose")), rows, status);
+	}, nativeFiles ? h("div", { class: "actions" }, h("strong", {}, t("attachments")), choose) : h("label", {}, t("attachments"), choose), h("p", { class: "muted" }, t(nativeFiles ? "files_help" : "upload_on_choose")), rows, status);
 	const guard = (mounted = false) => {
 		assertView(connection);
 		if (mounted && !box.isConnected) throw new ApiError(0, "VIEW_CHANGED", "Attachment form changed during the request");
@@ -2637,7 +4932,7 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 		fields: saved.fields
 	});
 	const ready = () => saved.attachments.every((a) => a.ref);
-	const render = () => fill(rows, ...saved.attachments.map((a) => h("div", { class: "row" }, h("div", { class: "grow" }, a.name, a.ref ? h("div", { class: "muted" }, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`) : h("div", { class: "muted" }, a.error || (files.has(a) ? t("uploading") : t("choose_again")))), a.ref && roles ? h("select", {
+	const render = () => fill(rows, ...saved.attachments.filter((a) => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map((a) => h("div", { class: "row" }, h("div", { class: "grow" }, a.name, a.ref ? h("div", { class: "muted" }, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`) : h("div", { class: "muted" }, a.error || (a.native_handle ? t("files_unavailable") : files.has(a) ? t("uploading") : t("choose_again")))), a.ref && roles ? h("select", {
 		"aria-label": t("attachment_role"),
 		onchange: (e) => {
 			guard();
@@ -2647,7 +4942,7 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 	}, ...["input", "result"].map((role) => h("option", {
 		value: role,
 		selected: (a.ref.role || "input") === role
-	}, t(`attachment_${role}`)))) : null, !a.ref && files.has(a) && !a.busy ? h("button", {
+	}, t(`attachment_${role}`)))) : null, a.ref && native ? native.actions(a.ref) : null, !a.ref && files.has(a) && !a.busy ? h("button", {
 		class: "secondary",
 		onclick: () => upload(a)
 	}, t("retry")) : null, h("button", {
@@ -2655,12 +4950,65 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 		disabled: a.busy,
 		onclick: () => {
 			guard();
+			if (a.native_handle) {
+				saved.native_ignored ||= [];
+				saved.native_ignored.push(a.native_handle);
+			}
 			saved.attachments = saved.attachments.filter((x) => x !== a);
 			files.delete(a);
 			persist();
 			render();
 		}
 	}, t("remove")))));
+	if (nativeFiles) {
+		if (!Array.isArray(saved.native_ignored)) saved.native_ignored = [];
+		saved.native_ignored = saved.native_ignored.filter((id) => typeof id === "string" && /^file_[0-9a-f]{32}$/.test(id));
+		if (typeof saved.native_draft !== "string" || !/^[0-9a-f-]{36}$/.test(saved.native_draft)) saved.native_draft = saved.attachments.find((a) => typeof a.native_receipt?.draft_id === "string" && /^[0-9a-f-]{36}$/.test(a.native_receipt.draft_id))?.native_receipt.draft_id || crypto.randomUUID();
+		native = nativeAttachments({
+			h,
+			t,
+			guard: () => guard(true),
+			canWrite: () => state.online && state.viewReady && may("manage") && nativeUploadAllowed,
+			draftId: saved.native_draft,
+			onVisibility: render,
+			onDiscard: (id) => {
+				guard(true);
+				saved.attachments = saved.attachments.filter((a) => a.native_handle !== id || a.ref);
+				persist();
+				render();
+			},
+			attached: (id) => saved.attachments.some((a) => a.native_handle === id && a.ref) || saved.native_ignored?.includes(id),
+			onReceipt: (receipt) => {
+				guard(true);
+				if (saved.native_ignored?.includes(receipt.transfer_id)) return;
+				let a = saved.attachments.find((a) => a.native_handle === receipt.transfer_id);
+				if (a?.native_receipt && [
+					"intent_key",
+					"display_name",
+					"size_bytes",
+					"digest"
+				].some((field) => a.native_receipt[field] !== receipt[field])) throw new Error(t("files_receipt_mismatch"));
+				if (a && JSON.stringify(a.native_receipt) === JSON.stringify(receipt)) return;
+				if (!a) {
+					a = {
+						name: receipt.display_name,
+						native_handle: receipt.transfer_id
+					};
+					saved.attachments.push(a);
+				}
+				a.native_receipt = receipt;
+				if (receipt.stage === "ready") a.ref = {
+					...receipt.artifact,
+					...roles ? { role: a.ref?.role || "input" } : {}
+				};
+				persist();
+				render();
+			}
+		});
+		choose.after(native.drop);
+		box.insertBefore(native.box, rows);
+		persist();
+	}
 	const acceptUpload = (a, op) => {
 		if (op.status !== "succeeded") return;
 		a.ref = {
@@ -2755,7 +5103,7 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 			}
 		}
 	};
-	choose.onchange = () => {
+	if (!nativeFiles) choose.onchange = () => {
 		guard();
 		for (const file of choose.files) {
 			let a = saved.attachments.find((x) => !x.ref && !files.has(x) && x.name === file.name);
@@ -2890,15 +5238,20 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 	};
 	const refresh = async () => {
 		guard(true);
-		await settleRefreshes([...saved.attachments.filter((a) => !a.ref && a.operation_id).map(async (a) => {
-			const { operation } = await api("GET", `/operations/${a.operation_id}`);
-			guard(true);
-			acceptUpload(a, operation);
-		}), ...saved.submission?.operation_id ? [(async () => {
-			const { operation } = await api("GET", `/operations/${saved.submission.operation_id}`);
-			guard(true);
-			settleSubmission(operation);
-		})()] : []]);
+		const pending = saved.attachments.filter((a) => !a.ref && a.operation_id);
+		await settleRefreshes([
+			...native ? [native.refresh()] : [],
+			...pending.map(async (a) => {
+				const { operation } = await api("GET", `/operations/${a.operation_id}`);
+				guard(true);
+				acceptUpload(a, operation);
+			}),
+			...saved.submission?.operation_id ? [(async () => {
+				const { operation } = await api("GET", `/operations/${saved.submission.operation_id}`);
+				guard(true);
+				settleSubmission(operation);
+			})()] : []
+		]);
 	};
 	if (supported) {
 		const unsub = onEvents((ev) => {
@@ -3215,7 +5568,7 @@ async function viewSessions(main) {
 		class: "session-project-link",
 		href: "#/projects"
 	}, t("sessions_projects")));
-	main.append(h("h1", {}, t("sessions_title")), h("p", { class: "muted" }, t("sessions_intro")), h("div", { class: "filters session-filters" }, search, hostSel, accessSel), status, h("div", { class: "session-layout" }, scope, h("section", {
+	main.append(h("div", { class: "session-heading" }, h("h1", {}, t("sessions_title")), state.caps?.actions?.some((a) => a.action === "session.start") ? h("a", { href: "#/start" }, t("start_title_page")) : null), h("p", { class: "muted" }, t("sessions_intro")), h("div", { class: "filters session-filters" }, search, hostSel, accessSel, state.caps?.actions?.some((a) => a.action === "session.approve_pending") ? h("a", { href: "#/approvals" }, t("bulk_title")) : null), status, h("div", { class: "session-layout" }, scope, h("section", {
 		"aria-label": t("sessions_title"),
 		class: "session-results"
 	}, count, list, h("div", { class: "session-pagination" }, more, h("span", { class: "muted" }, t("sessions_page_note"))))));
@@ -3614,7 +5967,7 @@ async function viewObservedResource(main, type, id) {
 			const data = await api("GET", path);
 			assertView(connection);
 			const resource = data[type === "execution" ? "task" : "worktree"];
-			head.replaceChildren(h("h1", {}, t(type === "execution" ? "obs_execution" : "obs_worktree")), h("code", {}, id), h("p", { class: "muted" }, t("obs_known_identity")), h("pre", { class: "pre" }, JSON.stringify(resource, null, 2)));
+			head.replaceChildren(h("h1", {}, t(type === "execution" ? "obs_execution" : "obs_worktree")), h("code", {}, id), h("p", { class: "muted" }, t("obs_known_identity")), type === "execution" && state.caps?.features?.cleanup_task === true ? h("p", {}, h("a", { href: `#/cleanup/task/${encodeURIComponent(id)}` }, t("cleanup_task_preview"))) : null, type === "execution" && state.caps?.artifacts?.capture?.managed_single_file === true ? h("p", {}, h("a", { href: `#/artifact-review/task/${encodeURIComponent(id)}` }, t("ar_open"))) : null, h("pre", { class: "pre" }, JSON.stringify(resource, null, 2)));
 		} catch (error) {
 			head.append(errorBox(error));
 		}
@@ -3847,6 +6200,7 @@ async function viewSession(main, host, sid) {
 		if (data.work_items?.length) head.append(linkedItems(data.work_items));
 		if (data.discovery?.length) head.append(h("details", {}, h("summary", {}, t("obs_discovery")), discoveryEvidence(data.discovery)));
 		const managed = row.api_access === "managed";
+		if (managed && row.provenance === "connector_managed" && state.caps?.artifacts?.capture?.managed_single_file) head.append(h("p", {}, h("a", { href: `#/artifact-review/session/${encodeURIComponent(host)}/${encodeURIComponent(sid)}` }, t("ar_open"))));
 		if (managed && row.provenance === "connector_managed" && !permissions) {
 			permissions = permissionsPanel({
 				h,
@@ -4911,7 +7265,7 @@ async function viewOperation(main, id) {
 				return;
 			}
 			freshPage();
-			fill(panel, h("h1", {}, op.action), h("p", { class: "op-status" }, opStatus(op), " ", op.error_code ? chip(op.error_code, "bad") : null), ...linked?.length ? [linkedItems(linked)] : [], h("dl", { class: "kv" }, h("dt", {}, t("actor")), h("dd", {}, `${op.actor} (${op.entry})`), h("dt", {}, t("created")), h("dd", {}, when(epoch(op.created_at))), op.status_reason ? [h("dt", {}, t("reason")), h("dd", {}, op.status_reason)] : null, h("dt", {}, "Target"), h("dd", {}, h("code", {}, JSON.stringify(op.target))), Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null, op.result ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null), ...receipts || [], ...materialized.length ? [h("h2", {}, t("materializations")), ...materialized.map((m) => h("div", { class: "row" }, h("div", { class: "grow" }, `${m.artifact_id} · r${m.revision}`, h("div", { class: "muted" }, m.managed_path)), chip(t(`material_${m.state}`), m.state === "verified" ? "ok" : "")))] : [], ...cleanupReceipts?.length ? [h("h2", {}, t("cleanup_open_receipts")), ...cleanupReceipts.map((r) => h("details", { class: "row-details" }, h("summary", {}, r.resource_id, " · ", t("cleanup_receipt_" + r.status)), h("pre", { class: "pre" }, JSON.stringify(r, null, 2))))] : [], ...op.action === "integration.apply" ? [repairControl(op)] : [], (op.result?.merge || op.result || refs.merge_receipt)?.base_moved ? h("p", { class: "note warn" }, t("merged_newer_base", { count: (op.result?.merge || op.result || refs.merge_receipt).other_commits_count })) : null, refs.write_acknowledged && refs.verification_pending ? h("p", { class: "note warn" }, t("metadata_pending")) : null, h("h2", {}, t("steps")), ...op.steps.map((s) => h("div", { class: "row" }, h("div", { class: "grow" }, s.name), h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)), h("div", { class: "actions" }, opened, confirmSource, resume, retry, cancel));
+			fill(panel, h("h1", {}, op.action), h("p", { class: "op-status" }, opStatus(op), " ", op.error_code ? chip(op.error_code, "bad") : null), ...linked?.length ? [linkedItems(linked)] : [], h("dl", { class: "kv" }, h("dt", {}, t("actor")), h("dd", {}, `${op.actor} (${op.entry})`), h("dt", {}, t("created")), h("dd", {}, when(epoch(op.created_at))), op.status_reason ? [h("dt", {}, t("reason")), h("dd", {}, op.status_reason)] : null, h("dt", {}, "Target"), h("dd", {}, h("code", {}, JSON.stringify(op.target))), Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null, op.result ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null), ...receipts || [], ...materialized.length ? [h("h2", {}, t("materializations")), ...materialized.map((m) => h("div", { class: "row" }, h("div", { class: "grow" }, `${m.artifact_id} · r${m.revision}`, h("div", { class: "muted" }, m.managed_path)), chip(t(`material_${m.state}`), m.state === "verified" ? "ok" : "")))] : [], ...cleanupReceipts?.length ? [h("h2", {}, t("cleanup_open_receipts")), ...cleanupReceipts.map((r) => h("details", { class: "row-details" }, h("summary", {}, r.resource_id, " · ", t("cleanup_receipt_" + r.status)), h("pre", { class: "pre" }, JSON.stringify(r, null, 2))))] : [], ...op.action === "integration.apply" ? [repairControl(op)] : [], (op.result?.merge || op.result || refs.merge_receipt)?.base_moved ? h("p", { class: "note warn" }, t("merged_newer_base", { count: (op.result?.merge || op.result || refs.merge_receipt).other_commits_count })) : null, refs.write_acknowledged && refs.verification_pending ? h("p", { class: "note warn" }, t("metadata_pending")) : null, h("h2", {}, t("steps")), ...op.steps.map((s) => h("div", { class: "row" }, h("div", { class: "grow" }, s.name), h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)), h("div", { class: "actions" }, opened, ["artifact.capture.managed", "artifact.accept"].includes(op.action) && op.status === "succeeded" && /^art_[0-9a-f]{32}$/.test(op.result?.artifact_id) && Number.isSafeInteger(op.result?.revision) && op.result.revision > 0 ? h("a", { href: `#/artifact-review/artifact/${op.result.artifact_id}/${op.result.revision}` }, t("ar_review_title")) : null, state.caps?.artifacts?.capture?.managed_single_file && managedCaptureExecution(op) ? h("a", { href: `#/artifact-review/operation/${op.operation_id}` }, t("ar_open")) : null, confirmSource, resume, retry, cancel));
 		} catch (e) {
 			fill(panel, errorBox(e));
 		}
@@ -5882,45 +8236,65 @@ async function viewCleanup(main, section, ident) {
 	};
 	const draftKey = `batc.cleanup.draft.${connection.namespace}`;
 	const pendingKey = `batc.cleanup.pending.${connection.namespace}`;
+	const intentKey = `batc.cleanup.intent.${connection.namespace}`;
+	const readStored = (key) => {
+		try {
+			return JSON.parse(localStorage.getItem(key) || sessionStorage.getItem(key) || "null");
+		} catch {
+			return null;
+		}
+	};
 	const persist = (key, value) => {
 		assertView(connection);
 		try {
-			if (value === null) sessionStorage.removeItem(key);
-			else sessionStorage.setItem(key, JSON.stringify(value));
+			for (const storage of [localStorage, sessionStorage]) if (value === null) storage.removeItem(key);
+			else storage.setItem(key, JSON.stringify(value));
 		} catch (error) {
 			if (error.code) throw error;
 		}
 	};
-	const stored = (() => {
-		try {
-			return JSON.parse(sessionStorage.getItem(draftKey) || "{}");
-		} catch {
-			return {};
-		}
-	})();
-	const choices = section === "item" && stored.id !== ident ? {
+	const stored = readStored(draftKey) || {};
+	const choices = ["item", "task"].includes(section) && stored.id !== ident ? {
 		discard_uncommitted: [],
 		release_undelivered: []
 	} : stored.choices || {
 		discard_uncommitted: [],
 		release_undelivered: []
 	};
-	const pending = (() => {
-		try {
-			return JSON.parse(sessionStorage.getItem(pendingKey) || "null");
-		} catch {
-			return null;
-		}
-	})();
+	const pending = readStored(pendingKey);
+	let intent = readStored(intentKey);
+	if (intent) {
+		const request = intent.request;
+		const valid = request?.action === "cleanup.apply" && request.target?.preview_id === pending?.preview_id && request.params?.preview_token === pending?.preview_token && request.preconditions?.preview_fingerprint === pending?.fingerprint && typeof intent.key === "string" && intent.key.length > 0 && intent.key.length <= 200 && pending;
+		intent = {
+			key: valid ? intent.key : null,
+			request: valid ? {
+				action: "cleanup.apply",
+				target: { preview_id: pending.preview_id },
+				params: { preview_token: pending.preview_token },
+				preconditions: { preview_fingerprint: pending.fingerprint }
+			} : null,
+			operation_id: typeof intent.operation_id === "string" && /^op_[0-9a-f]{32}$/.test(intent.operation_id) ? intent.operation_id : null,
+			refused: valid && [
+				"PREVIEW_TOKEN_INVALID",
+				"PREVIEW_EXPIRED",
+				"PREVIEW_MISMATCH",
+				"PREVIEW_BLOCKED"
+			].includes(intent.refused) ? intent.refused : null
+		};
+	}
+	let operation = null, operationRead = null, submission = null, readFailed = false;
+	const supportsTask = state.caps?.features?.cleanup_task === true;
 	const kind = h("select", { "aria-label": t("cleanup_target") }, ...[
 		"work_item",
 		"checkpoint",
 		"integration",
-		"host"
+		"host",
+		...supportsTask || pending?.target?.kind === "task" ? ["task"] : []
 	].map((k) => h("option", { value: k }, t("cleanup_target_" + k))));
-	kind.value = section === "item" ? "work_item" : stored.kind || "host";
+	kind.value = section === "item" ? "work_item" : section === "task" && supportsTask ? "task" : stored.kind || "host";
 	const targetId = h("input", {
-		value: section === "item" ? ident : stored.id || "",
+		value: ["item", "task"].includes(section) ? ident : stored.id || "",
 		"aria-label": t("cleanup_id"),
 		placeholder: t("cleanup_id"),
 		class: "cleanup-id"
@@ -5934,7 +8308,7 @@ async function viewCleanup(main, section, ident) {
 	const status = h("div", { "aria-live": "polite" });
 	const historyOut = h("div", { "aria-live": "polite" });
 	const retainedOut = h("div", { "aria-live": "polite" });
-	let doc = pending, busy = false, pendingRequest = !!pending, previewRevision = 0;
+	let doc = pending, busy = false, loading = true, pendingRequest = !!pending, previewRevision = 0;
 	function changed() {
 		assertView(connection);
 		previewRevision++;
@@ -5974,12 +8348,13 @@ async function viewCleanup(main, section, ident) {
 	}
 	function resourceRow(item) {
 		const codes = (item.reasons || []).map((r) => r.code);
-		const eligible = item.proven && item.kind === "worktree" && !item.task_owned;
-		return h("article", { class: "cleanup-resource" }, h("div", { class: "row" }, h("strong", { class: "grow" }, t("cleanup_kind_" + item.kind)), chip(t("cleanup_decision_" + item.decision), item.decision === "reclaim" ? "ok" : "")), h("div", { class: "cleanup-binding" }, item.host || "", " ", item.path || item.ref || item.resource_id), item.observation?.head ? h("p", { class: "muted" }, t("cleanup_commit_kept"), " ", h("code", {}, item.observation.head)) : null, item.delivery && !item.delivery.delivered ? h("p", { class: "note warn" }, t("cleanup_not_delivered")) : null, ...(item.reasons || []).map((r) => h("div", { class: "cleanup-reason" }, h("code", {}, r.code), " · ", t("cleanup_reason_" + r.code))), ...(item.overridden_reasons || []).map((r) => h("p", { class: "muted" }, t("cleanup_choice_" + r.code))), item.steps?.length ? h("p", {}, t("cleanup_plan"), ": ", item.steps.map((x) => t("cleanup_step_" + x)).join(" → ")) : null, eligible && codes.includes("RESULTS_NOT_DELIVERED") ? choice(item, "release_undelivered", t("cleanup_release")) : null, eligible && codes.includes("UNCOMMITTED_CHANGES") ? choice(item, "discard_uncommitted", t("cleanup_discard")) : null, h("details", {}, h("summary", {}, t("cleanup_evidence")), h("pre", { class: "pre" }, JSON.stringify({
+		const eligible = item.proven && item.kind === "worktree" && (!item.task_owned || item.task_cleanup?.eligible === true);
+		return h("article", { class: "cleanup-resource" }, h("div", { class: "row" }, h("strong", { class: "grow" }, t("cleanup_kind_" + item.kind)), chip(t("cleanup_decision_" + item.decision), item.decision === "reclaim" ? "ok" : "")), h("div", { class: "cleanup-binding" }, item.host || "", " ", item.path || item.ref || item.resource_id), item.observation?.head ? h("p", { class: "muted" }, t("cleanup_commit_kept"), " ", h("code", {}, item.observation.head)) : null, item.delivery && !item.delivery.delivered ? h("p", { class: "note warn" }, t("cleanup_not_delivered")) : null, ...(item.reasons || []).map((r) => h("div", { class: "cleanup-reason" }, h("code", {}, r.code), " · ", t("cleanup_reason_" + r.code))), ...(item.overridden_reasons || []).map((r) => h("p", { class: "muted" }, t("cleanup_choice_" + r.code))), item.steps?.length ? h("p", {}, t("cleanup_plan"), ": ", item.steps.map((x) => t("cleanup_step_" + x)).join(" → ")) : null, eligible && codes.includes("RESULTS_NOT_DELIVERED") ? choice(item, "release_undelivered", t("cleanup_release")) : null, eligible && !item.task_owned && codes.includes("UNCOMMITTED_CHANGES") ? choice(item, "discard_uncommitted", t("cleanup_discard")) : null, h("details", {}, h("summary", {}, t("cleanup_evidence")), h("pre", { class: "pre" }, JSON.stringify({
 			resource_id: item.resource_id,
 			original_ids: item.original_ids,
 			reasons: item.reasons,
 			consumers: item.consumers,
+			task_cleanup: item.task_cleanup,
 			delivery: item.delivery,
 			manifest: item.observation?.manifest
 		}, null, 2))));
@@ -5987,14 +8362,83 @@ async function viewCleanup(main, section, ident) {
 	const reviewed = h("input", {
 		type: "checkbox",
 		onchange: () => {
-			apply.disabled = !doc?.ready || !may("cleanup") || !reviewed.checked;
+			apply.disabled = loading || busy || readFailed || Boolean(intent?.operation_id) || !doc?.ready || !may("cleanup") || !reviewed.checked;
 		}
 	});
+	function acceptCleanup(op) {
+		assertView(connection);
+		if (!intent || !/^op_[0-9a-f]{32}$/.test(op?.operation_id) || op.action !== "cleanup.apply" || op.actor !== state.caps.actor || op.idempotency_key !== intent.key || !intent.request || op.target?.preview_id !== intent.request.target.preview_id || op.params?.preview_token !== intent.request.params.preview_token || op.preconditions?.preview_fingerprint !== intent.request.preconditions.preview_fingerprint || intent.operation_id && intent.operation_id !== op.operation_id) throw new Error(t("cleanup_invalid_result"));
+		operation = op;
+		intent.operation_id = op.operation_id;
+		persist(intentKey, intent);
+		readFailed = false;
+		fill(status, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, t("cleanup_open_receipts")), ...(op.result?.items || []).map((r) => h("p", {}, h("code", {}, r.resource_id), " · ", t("cleanup_receipt_" + r.status))));
+		cleanupControls();
+	}
+	function cleanupControls() {
+		const fixed = Boolean(intent || pendingRequest);
+		kind.disabled = targetId.disabled = children.disabled = loading || busy || fixed;
+		previewButton.disabled = loading || busy || fixed || section === "task" && !supportsTask;
+		apply.hidden = Boolean(intent?.operation_id || intent?.refused);
+		apply.disabled = loading || busy || readFailed || Boolean(intent && !intent.request) || !doc?.ready || !reviewed.checked || !may("cleanup");
+		check.hidden = !intent?.operation_id;
+		check.disabled = loading || busy || Boolean(operationRead);
+		another.hidden = !(TERMINAL.includes(operation?.status) || intent?.refused);
+		another.disabled = loading || busy || readFailed || Boolean(operationRead);
+	}
+	async function refreshCleanup(fresh = false) {
+		if (submission) {
+			await submission;
+			assertView(connection);
+		}
+		if (operationRead) {
+			await operationRead;
+			if (fresh) return refreshCleanup(true);
+			return;
+		}
+		if (!intent?.operation_id) return;
+		operationRead = (async () => {
+			acceptCleanup((await api("GET", `/operations/${intent.operation_id}`)).operation);
+		})();
+		cleanupControls();
+		try {
+			await operationRead;
+		} catch (e) {
+			assertView(connection);
+			readFailed = true;
+			fill(status, errorBox(e), h("a", { href: `#/op/${intent.operation_id}` }, t("cleanup_open_receipts")));
+			throw e;
+		} finally {
+			operationRead = null;
+			cleanupControls();
+		}
+	}
+	const check = h("button", {
+		class: "secondary",
+		hidden: true,
+		onclick: () => refreshCleanup(true).catch(() => {})
+	}, t("cleanup_check"));
+	const another = h("button", {
+		class: "secondary",
+		hidden: true,
+		onclick: () => {
+			assertView(connection);
+			if (loading || busy || readFailed || operationRead || !(TERMINAL.includes(operation?.status) || intent?.refused)) return;
+			intent = operation = doc = null;
+			pendingRequest = false;
+			persist(intentKey, null);
+			persist(pendingKey, null);
+			reviewed.checked = false;
+			previewOut.replaceChildren();
+			status.replaceChildren();
+			cleanupControls();
+		}
+	}, t("cleanup_new"));
 	const apply = h("button", {
 		class: "primary",
 		disabled: true,
 		onclick: async () => {
-			if (busy || !doc || !reviewed.checked) return;
+			if (loading || busy || readFailed || !doc || !reviewed.checked || intent?.operation_id || intent?.refused || intent && !intent.request) return;
 			assertView(connection);
 			const reviewedDoc = doc;
 			busy = true;
@@ -6008,41 +8452,47 @@ async function viewCleanup(main, section, ident) {
 				input.disabled = true;
 			});
 			persist(pendingKey, reviewedDoc);
+			let finish;
+			submission = new Promise((resolve) => {
+				finish = resolve;
+			});
 			try {
-				const op = await submit("cleanup.apply", { preview_id: reviewedDoc.preview_id }, { preview_token: reviewedDoc.preview_token }, { preview_fingerprint: reviewedDoc.fingerprint }, "cleanup.apply");
+				if (!intent) {
+					const request = {
+						action: "cleanup.apply",
+						target: { preview_id: reviewedDoc.preview_id },
+						params: { preview_token: reviewedDoc.preview_token },
+						preconditions: { preview_fingerprint: reviewedDoc.fingerprint }
+					};
+					intent = {
+						request,
+						key: await keyFor(await draftId("cleanup.apply", request), connection),
+						operation_id: null
+					};
+					persist(intentKey, intent);
+				}
+				const data = await api("POST", "/operations?wait=3", intent.request, intent.key);
 				assertView(connection);
-				fill(status, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, t("cleanup_open_receipts")), ...(op.result?.items || []).map((r) => h("p", {}, h("code", {}, r.resource_id), " · ", t("cleanup_receipt_" + r.status))));
-				persist(pendingKey, null);
-				pendingRequest = false;
-				doc = null;
-				reviewed.checked = false;
-				previewButton.disabled = false;
-				kind.disabled = false;
-				targetId.disabled = false;
-				children.disabled = false;
+				acceptCleanup(data.operation);
 				await loadHistory();
 				await loadRetained();
 			} catch (e) {
 				if (connection.epoch !== state.epoch || connection.namespace !== state.namespace || connection.generation !== generation) return;
-				if (!e.status || e.status >= 500) {
-					fill(status, errorBox(e), h("p", {}, t("cleanup_retry_same")));
-					apply.disabled = !may("cleanup");
-					previewButton.disabled = true;
-					kind.disabled = true;
-					targetId.disabled = true;
-					children.disabled = true;
-				} else {
-					persist(pendingKey, null);
-					pendingRequest = false;
-					fill(status, errorBox(e), h("p", {}, t("cleanup_repreview")));
-					doc = null;
-					previewButton.disabled = false;
-					kind.disabled = false;
-					targetId.disabled = false;
-					children.disabled = false;
+				if (intent && !intent.operation_id && e.status >= 400 && e.status < 500 && [
+					"PREVIEW_TOKEN_INVALID",
+					"PREVIEW_EXPIRED",
+					"PREVIEW_MISMATCH",
+					"PREVIEW_BLOCKED"
+				].includes(e.code)) {
+					intent.refused = e.code;
+					persist(intentKey, intent);
 				}
+				fill(status, errorBox(e), h("p", {}, t(intent?.refused ? "cleanup_repreview" : "cleanup_retry_same")));
 			} finally {
 				busy = false;
+				finish();
+				submission = null;
+				if (connection.epoch === state.epoch && connection.generation === generation) cleanupControls();
 			}
 		}
 	}, t("cleanup_apply"));
@@ -6055,6 +8505,7 @@ async function viewCleanup(main, section, ident) {
 	const previewButton = h("button", {
 		class: "secondary",
 		onclick: async () => {
+			if (loading) return;
 			assertView(connection);
 			const revision = ++previewRevision;
 			previewButton.disabled = true;
@@ -6065,7 +8516,8 @@ async function viewCleanup(main, section, ident) {
 				work_item: "work_item_id",
 				checkpoint: "checkpoint_id",
 				integration: "operation_id",
-				host: "host"
+				host: "host",
+				task: "task_id"
 			}[kind.value];
 			const target = {
 				kind: kind.value,
@@ -6095,7 +8547,8 @@ async function viewCleanup(main, section, ident) {
 			work_item: "work_item_id",
 			checkpoint: "checkpoint_id",
 			integration: "operation_id",
-			host: "host"
+			host: "host",
+			task: "task_id"
 		}[kind.value]];
 		children.checked = !!pending.target.include_children;
 		childrenLabel.hidden = kind.value !== "work_item";
@@ -6117,7 +8570,11 @@ async function viewCleanup(main, section, ident) {
 		try {
 			const result = await api("GET", `/cleanup-tombstones?query=${encodeURIComponent(search.value)}&cursor=${encodeURIComponent(cursor)}`);
 			assertView(connection);
-			const rows = (result.tombstones || []).map((x) => h("article", { class: "cleanup-resource" }, h("a", { href: `#/cleanup/resource/${x.resource_id}` }, t("cleanup_kind_" + x.kind)), h("div", { class: "cleanup-binding" }, x.host, " ", x.path || x.ref || ""), h("p", { class: "muted" }, x.actor, " · ", when(x.cleaned_at * 1e3)), h("p", {}, t("cleanup_reason_reviewed")), ...(x.pull_requests || []).map((pr) => h("p", {}, `${pr.repository} #${pr.pull_number}`))));
+			const rows = (result.tombstones || []).map((x) => h("article", { class: "cleanup-resource" }, h("a", { href: `#/cleanup/resource/${x.resource_id}` }, t("cleanup_kind_" + x.kind)), h("div", { class: "cleanup-binding" }, x.host, " ", x.path || x.ref || ""), h("p", { class: "muted" }, x.actor, " · ", when(x.cleaned_at * 1e3)), h("p", {}, t({
+				reviewed_cleanup: "cleanup_reason_reviewed",
+				task_lifecycle: "cleanup_reason_automatic",
+				historical_task_cleanup: "cleanup_reason_historical"
+			}[x.reason] || "cleanup_reason_recorded")), ...(x.pull_requests || []).map((pr) => h("p", {}, `${pr.repository} #${pr.pull_number}`))));
 			if (cursor) historyOut.append(...rows);
 			else fill(historyOut, ...rows, rows.length ? null : h("p", { class: "muted" }, t("cleanup_empty_history")));
 			if (result.next_cursor) historyOut.append(h("button", {
@@ -6150,7 +8607,7 @@ async function viewCleanup(main, section, ident) {
 			fill(retainedOut, errorBox(e));
 		}
 	}
-	main.append(h("h1", {}, t("nav_cleanup")), h("p", { class: "muted" }, t("cleanup_intro")));
+	main.append(h("h1", {}, t("nav_cleanup")), h("p", { class: "muted" }, t("cleanup_intro")), section === "task" || supportsTask ? h("p", { class: "muted" }, t("cleanup_task_help")) : null);
 	if (section === "resource") {
 		try {
 			const data = await api("GET", `/cleanup-tombstones/${encodeURIComponent(ident)}`);
@@ -6160,7 +8617,7 @@ async function viewCleanup(main, section, ident) {
 		}
 		return;
 	}
-	main.append(h("div", { class: "panel" }, h("h2", {}, t("cleanup_target")), h("div", { class: "filters" }, kind, targetId), childrenLabel, h("div", { class: "actions" }, previewButton)), previewOut, h("div", { class: "panel" }, h("label", { class: "cleanup-choice" }, reviewed, t("cleanup_reviewed")), !may("cleanup") ? h("p", { class: "muted" }, t("cleanup_scope")) : null, h("div", { class: "actions" }, apply), status), h("h2", {}, t("cleanup_history")), h("div", { class: "panel" }, h("form", {
+	main.append(h("div", { class: "panel" }, h("h2", {}, t("cleanup_target")), h("div", { class: "filters" }, kind, targetId), childrenLabel, h("div", { class: "actions" }, previewButton)), previewOut, h("div", { class: "panel" }, h("label", { class: "cleanup-choice" }, reviewed, t("cleanup_reviewed")), !may("cleanup") ? h("p", { class: "muted" }, t("cleanup_scope")) : null, h("div", { class: "actions" }, apply, check, another), status), h("h2", {}, t("cleanup_history")), h("div", { class: "panel" }, h("form", {
 		class: "filters",
 		onsubmit: (e) => {
 			e.preventDefault();
@@ -6170,17 +8627,120 @@ async function viewCleanup(main, section, ident) {
 		class: "secondary",
 		type: "submit"
 	}, t("cleanup_search_button"))), historyOut), h("h2", {}, t("cleanup_retained")), h("p", { class: "muted" }, t("cleanup_retained_help")), h("div", { class: "panel" }, retainedOut));
+	cleanupControls();
 	await loadHistory();
 	await loadRetained();
-	const refresh = debounceRefresh(() => settleRefreshes([loadHistory(), loadRetained()]), 500);
+	try {
+		await refreshCleanup();
+	} catch {}
+	loading = false;
+	cleanupControls();
+	const refresh = debounceRefresh(() => settleRefreshes([
+		loadHistory(),
+		loadRetained(),
+		refreshCleanup(true)
+	]), 500);
 	return onEvents((ev) => {
 		if (["cleanup", "operation"].includes(ev.resource_type)) return refresh();
+	});
+}
+async function viewApprovals(main) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	const panel = approvalsPanel({
+		h,
+		t,
+		api,
+		caps: () => state.caps,
+		guard: () => assertView(connection),
+		ready: () => state.online && !state.nativeBusy,
+		errorBox,
+		opStatus,
+		storageKey: `batc.approvals.${connection.namespace}`
+	});
+	main.append(h("a", { href: "#/sessions" }, t("sessions_title")), h("h1", {}, t("bulk_title")), panel.box);
+	try {
+		await panel.refresh();
+	} catch {}
+	return onEvents((event) => event.resource_type === "operation" ? panel.refresh(true) : panel.update());
+}
+async function viewStart(main) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	const panel = sessionStartPanel({
+		h,
+		t,
+		api,
+		caps: () => state.caps,
+		guard: () => assertView(connection),
+		ready: () => state.online && !state.nativeBusy,
+		errorBox,
+		opStatus,
+		storageKey: `batc.start.${connection.namespace}`
+	});
+	main.append(h("a", { href: "#/sessions" }, t("nav_sessions")), h("h1", {}, t("start_title_page")), h("p", { class: "muted" }, t("start_intro")), panel.box);
+	try {
+		await panel.init();
+	} catch {}
+	assertView(connection);
+	return onEvents((ev) => {
+		if ([
+			"operation",
+			"host",
+			"session"
+		].includes(ev.resource_type)) return panel.refresh(true);
+	});
+}
+async function viewArtifactReview(main, kind, first, second) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	const context = kind === "session" ? {
+		kind,
+		host: first,
+		session_id: second
+	} : kind === "task" ? {
+		kind,
+		task_id: first
+	} : kind === "operation" ? {
+		kind,
+		operation_id: first
+	} : kind === "artifact" ? {
+		kind,
+		artifact_id: first,
+		revision: Number(second)
+	} : { kind: "catalog" };
+	return mountArtifactReview({
+		main,
+		h,
+		t,
+		api,
+		caps: () => state.caps,
+		guard: () => assertView(connection),
+		onEvents,
+		errorBox,
+		opStatus,
+		context,
+		readBrowser: (ref, size, signal) => {
+			assertView(connection);
+			return readArtifactContent(ref, size, state.token, signal);
+		},
+		storageKey: `batc.artifact-review.${connection.namespace}.${JSON.stringify(context)}`
 	});
 }
 var NAV = [
 	["home", "nav_home"],
 	["projects", "nav_projects"],
 	["sessions", "nav_sessions"],
+	["artifact-review", "ar_nav"],
 	["delivery", "nav_delivery"],
 	["operations", "nav_operations"],
 	["cleanup", "nav_cleanup"],
@@ -6215,11 +8775,14 @@ async function route() {
 		item: viewWorkItem,
 		sessions: viewSessions,
 		cleanup: viewCleanup,
+		approvals: viewApprovals,
 		delivery: viewDelivery,
 		operations: viewOperations,
 		session: viewSession,
+		start: viewStart,
 		op: viewOperation,
 		settings: viewSettings,
+		"artifact-review": viewArtifactReview,
 		host: viewHostDiscovery,
 		task: (main, id) => viewObservedResource(main, "execution", id),
 		worktree: (main, id) => viewObservedResource(main, "worktree", id)

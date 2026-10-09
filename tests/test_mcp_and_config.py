@@ -23,8 +23,11 @@ async def _names(cfg, **kw):
 
 
 async def test_tool_registration_tiers(mock):
-    assert await _names(make_config(mock)) == set(READ_TOOLS + OPERATION_TOOLS)
-    assert await _names(make_config(mock, writes=True)) == set(READ_TOOLS + OPERATION_TOOLS + WRITE_TOOLS)
+    # Accepted start keys remain recoverable after a local host tier is disabled.
+    # Current central authorization still decides whether a new key can start work.
+    replay = {"session_start"}
+    assert await _names(make_config(mock)) == set(READ_TOOLS + OPERATION_TOOLS) | replay
+    assert await _names(make_config(mock, writes=True)) == set(READ_TOOLS + OPERATION_TOOLS + WRITE_TOOLS) | replay
     assert await _names(make_config(mock, writes=True, orchestrate=True)) == set(
         READ_TOOLS + OPERATION_TOOLS + WRITE_TOOLS + ORCHESTRATE_TOOLS
     )

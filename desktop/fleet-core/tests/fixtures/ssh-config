@@ -1,0 +1,20 @@
+Host node-1-direct
+  HostName 192.0.2.1
+Host node-1-cf
+  HostName 192.0.2.1
+Host node-2-direct
+  HostName 192.0.2.1
+Host node-3-direct
+  HostName 192.0.2.1
+Host node-3-cf
+  HostName 192.0.2.1
+Host node-4-cf
+  HostName 192.0.2.1
+Host node-5-direct
+  HostName 192.0.2.1
+Host node-5-lan
+  HostName 192.0.2.1
+Host node-5-cf
+  HostName 192.0.2.1
+Host node-2-cf
+  HostName 192.0.2.1

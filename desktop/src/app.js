@@ -1,11 +1,16 @@
+import {readArtifactContent} from "./transport/artifact-content.ts";
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
-import { connectorRequest, connectorUploadArtifact, nativeDesktop, nativeStatus, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal } from "./transport/index.ts";
+import { connectorRequest, connectorUploadArtifact, nativeDesktop, nativeFileSupport, nativeStatus, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal } from "./transport/index.ts";
+import { nativeAttachments } from "./native-files.js";
 import { mountFleet } from "./fleet.js";
 import { groupedSessions, matchesSession, runtimeStale, sessionActivity } from "./state/sessions.js";
 import { capturePanel } from "./capture.js";
 import { permissionsPanel } from "./permissions.js";
+import { approvalsPanel } from "./approvals.js";
+import { sessionStartPanel } from "./session-start.js";
+import { mountArtifactReview, managedCaptureExecution } from "./artifact-review.js";
 import { consumePageAsync, settleRefreshes, storageScope } from "./state/events.ts";
 
 const TOKEN_KEY = "batc.dashboard.token";
@@ -183,7 +188,7 @@ function manualCapture(scope, source = {}, onAttach) {
     storageKey: `batc.capture.${connection.namespace}.${scope}`, source, onAttach});
 }
 
-// Files stay in this WebView's memory. Persist only identity-scoped references and exact operation intents.
+// Browser bytes stay in memory; native bytes and exact transfer intents stay in the Rust spool.
 function attachmentDraft(scope, text, initial = [], roles = false) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const key = `batc.draft.${connection.namespace}.${scope}`;
@@ -191,15 +196,18 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
   try { saved = JSON.parse(localStorage.getItem(key)); } catch { /* no usable draft */ }
   saved = saved && typeof saved === "object" ? saved : {text: text.value,
     attachments: initial.map(ref => ({name: ref.artifact_id, ref: {...ref}}))};
-  saved.attachments ||= [];
+  if (!Array.isArray(saved.attachments)) saved.attachments = [];
+  saved.attachments = saved.attachments.filter(a => a && typeof a === "object");
   for (const a of saved.attachments) delete a.busy;
   if (typeof saved.text === "string") text.value = saved.text;
   const files = new Map(), rows = h("div", {class: "attachment-list"});
   const status = h("p", {class: "muted", role: "status"});
-  const supported = Boolean(state.caps?.artifacts);
-  const choose = h("input", {type: "file", multiple: true, disabled: !supported || !may("manage"), "aria-label": t("choose_attachments")});
-  const box = h("div", {class: "attachments", hidden: !supported}, h("label", {}, t("attachments"), choose),
-    h("p", {class: "muted"}, t("upload_on_choose")), rows, status);
+  const supported = Boolean(state.caps?.artifacts), nativeFiles = nativeDesktop && nativeFileSupport;
+  const nativeUploadAllowed = state.caps?.actions?.some(a => a.action === "artifact.upload" && a.allowed === true);
+  let native;
+  const choose = nativeFiles ? h("button", {class: "secondary", disabled: !supported || !may("manage") || !nativeUploadAllowed, onclick: () => native.pick()}, t("files_choose")) : h("input", {type: "file", multiple: true, disabled: !supported || !may("manage"), "aria-label": t("choose_attachments")});
+  const box = h("div", {class: "attachments", hidden: !supported}, nativeFiles ? h("div", {class: "actions"}, h("strong", {}, t("attachments")), choose) : h("label", {}, t("attachments"), choose),
+    h("p", {class: "muted"}, t(nativeFiles ? "files_help" : "upload_on_choose")), rows, status);
   const guard = (mounted = false) => {
     assertView(connection);
     if (mounted && !box.isConnected) throw new ApiError(0, "VIEW_CHANGED", "Attachment form changed during the request");
@@ -214,15 +222,40 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
     : {artifact_id: a.ref.artifact_id, revision: a.ref.revision, digest: a.ref.digest});
   const snapshot = () => JSON.stringify({text: text.value, attachments: refs(), fields: saved.fields});
   const ready = () => saved.attachments.every(a => a.ref);
-  const render = () => fill(rows, ...saved.attachments.map(a => h("div", {class: "row"},
+  const render = () => fill(rows, ...saved.attachments.filter(a => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map(a => h("div", {class: "row"},
     h("div", {class: "grow"}, a.name, a.ref ? h("div", {class: "muted"}, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`)
-      : h("div", {class: "muted"}, a.error || (files.has(a) ? t("uploading") : t("choose_again")))),
+      : h("div", {class: "muted"}, a.error || (a.native_handle ? t("files_unavailable") : files.has(a) ? t("uploading") : t("choose_again")))),
     a.ref && roles ? h("select", {"aria-label": t("attachment_role"), onchange: e => {guard(); a.ref.role = e.target.value; persist();}},
       ...["input", "result"].map(role => h("option", {value: role, selected: (a.ref.role || "input") === role}, t(`attachment_${role}`)))) : null,
+    a.ref && native ? native.actions(a.ref) : null,
     !a.ref && files.has(a) && !a.busy ? h("button", {class: "secondary", onclick: () => upload(a)}, t("retry")) : null,
     h("button", {class: "secondary", disabled: a.busy, onclick: () => {
-      guard(); saved.attachments = saved.attachments.filter(x => x !== a); files.delete(a); persist(); render();
+      guard(); if (a.native_handle) {saved.native_ignored ||= []; saved.native_ignored.push(a.native_handle);}
+      saved.attachments = saved.attachments.filter(x => x !== a); files.delete(a); persist(); render();
     }}, t("remove")))));
+  if (nativeFiles) {
+    if (!Array.isArray(saved.native_ignored)) saved.native_ignored = [];
+    saved.native_ignored = saved.native_ignored.filter(id => typeof id === "string" && /^file_[0-9a-f]{32}$/.test(id));
+    if (typeof saved.native_draft !== "string" || !/^[0-9a-f-]{36}$/.test(saved.native_draft))
+      saved.native_draft = saved.attachments.find(a => typeof a.native_receipt?.draft_id === "string" && /^[0-9a-f-]{36}$/.test(a.native_receipt.draft_id))?.native_receipt.draft_id || crypto.randomUUID();
+    native = nativeAttachments({h, t, guard: () => guard(true),
+      canWrite: () => state.online && state.viewReady && may("manage") && nativeUploadAllowed, draftId: saved.native_draft,
+      onVisibility: render,
+      onDiscard: id => {guard(true); saved.attachments = saved.attachments.filter(a => a.native_handle !== id || a.ref); persist(); render();},
+      attached: id => saved.attachments.some(a => a.native_handle === id && a.ref) || saved.native_ignored?.includes(id),
+      onReceipt: receipt => {
+        guard(true);
+        if (saved.native_ignored?.includes(receipt.transfer_id)) return;
+        let a = saved.attachments.find(a => a.native_handle === receipt.transfer_id);
+        if (a?.native_receipt && ["intent_key", "display_name", "size_bytes", "digest"].some(field => a.native_receipt[field] !== receipt[field])) throw new Error(t("files_receipt_mismatch"));
+        if (a && JSON.stringify(a.native_receipt) === JSON.stringify(receipt)) return;
+        if (!a) {a = {name: receipt.display_name, native_handle: receipt.transfer_id}; saved.attachments.push(a);}
+        a.native_receipt = receipt;
+        if (receipt.stage === "ready") a.ref = {...receipt.artifact, ...(roles ? {role: a.ref?.role || "input"} : {})};
+        persist(); render();
+      }});
+    choose.after(native.drop); box.insertBefore(native.box, rows); persist();
+  }
   const acceptUpload = (a, op) => {
     if (op.status !== "succeeded") return;
     a.ref = {artifact_id: op.result.artifact_id, revision: op.result.revision, digest: op.result.digest,
@@ -275,7 +308,7 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
       if (connection.epoch === state.epoch && connection.generation === generation && box.isConnected) {persist(); render();}
     }
   };
-  choose.onchange = () => {
+  if (!nativeFiles) choose.onchange = () => {
     guard();
     for (const file of choose.files) {
       let a = saved.attachments.find(x => !x.ref && !files.has(x) && x.name === file.name);
@@ -353,6 +386,7 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
     guard(true);
     const pending = saved.attachments.filter(a => !a.ref && a.operation_id);
     await settleRefreshes([
+      ...(native ? [native.refresh()] : []),
       ...pending.map(async a => {const {operation} = await api("GET", `/operations/${a.operation_id}`); guard(true); acceptUpload(a, operation);}),
       ...(saved.submission?.operation_id ? [(async () => {
         const {operation} = await api("GET", `/operations/${saved.submission.operation_id}`); guard(true); settleSubmission(operation);
@@ -607,8 +641,11 @@ async function viewSessions(main) {
   const scope = h("details", {class: "panel session-scope", open: matchMedia("(min-width: 901px)").matches},
     h("summary", {}, t("sessions_workspaces")), h("p", {class: "muted"}, t("sessions_scope_note")), navigation,
     h("a", {class: "session-project-link", href: "#/projects"}, t("sessions_projects")));
-  main.append(h("h1", {}, t("sessions_title")), h("p", {class: "muted"}, t("sessions_intro")),
-    h("div", {class: "filters session-filters"}, search, hostSel, accessSel), status,
+  main.append(h("div", {class: "session-heading"}, h("h1", {}, t("sessions_title")),
+    state.caps?.actions?.some(a => a.action === "session.start") ? h("a", {href: "#/start"}, t("start_title_page")) : null),
+    h("p", {class: "muted"}, t("sessions_intro")),
+    h("div", {class: "filters session-filters"}, search, hostSel, accessSel,
+      state.caps?.actions?.some(a => a.action === "session.approve_pending") ? h("a", {href: "#/approvals"}, t("bulk_title")) : null), status,
     h("div", {class: "session-layout"}, scope, h("section", {"aria-label": t("sessions_title"), class: "session-results"}, count, list,
       h("div", {class: "session-pagination"}, more, h("span", {class: "muted"}, t("sessions_page_note"))))));
   try {
@@ -885,6 +922,10 @@ async function viewObservedResource(main, type, id) {
       const resource = data[type === "execution" ? "task" : "worktree"];
       head.replaceChildren(h("h1", {}, t(type === "execution" ? "obs_execution" : "obs_worktree")), h("code", {}, id),
         h("p", {class: "muted"}, t("obs_known_identity")),
+        type === "execution" && state.caps?.features?.cleanup_task === true ?
+          h("p", {}, h("a", {href: `#/cleanup/task/${encodeURIComponent(id)}`}, t("cleanup_task_preview"))) : null,
+        type === "execution" && state.caps?.artifacts?.capture?.managed_single_file === true ?
+          h("p", {}, h("a", {href: `#/artifact-review/task/${encodeURIComponent(id)}`}, t("ar_open"))) : null,
         h("pre", {class: "pre"}, JSON.stringify(resource, null, 2)));
     } catch (error) {head.append(errorBox(error));}
   };
@@ -1025,6 +1066,8 @@ async function viewSession(main, host, sid) {
     if (data.work_items?.length) head.append(linkedItems(data.work_items));
     if (data.discovery?.length) head.append(h("details", {}, h("summary", {}, t("obs_discovery")), discoveryEvidence(data.discovery)));
     const managed = row.api_access === "managed";
+    if (managed && row.provenance === "connector_managed" && state.caps?.artifacts?.capture?.managed_single_file)
+      head.append(h("p", {}, h("a", {href: `#/artifact-review/session/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`}, t("ar_open"))));
     if (managed && row.provenance === "connector_managed" && !permissions) {
       permissions = permissionsPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
         errorBox, opStatus, storageKey: `batc.permissions.${connection.namespace}.${JSON.stringify([host, sid])}`,
@@ -1807,7 +1850,13 @@ async function viewOperation(main, id) {
         h("h2", {}, t("steps")),
         ...op.steps.map(s => h("div", { class: "row" }, h("div", { class: "grow" }, s.name),
           h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)),
-        h("div", { class: "actions" }, opened, confirmSource, resume, retry, cancel));
+        h("div", { class: "actions" }, opened,
+          ["artifact.capture.managed", "artifact.accept"].includes(op.action) && op.status === "succeeded" &&
+          /^art_[0-9a-f]{32}$/.test(op.result?.artifact_id) && Number.isSafeInteger(op.result?.revision) && op.result.revision > 0
+            ? h("a", {href: `#/artifact-review/artifact/${op.result.artifact_id}/${op.result.revision}`}, t("ar_review_title")) : null,
+          state.caps?.artifacts?.capture?.managed_single_file && managedCaptureExecution(op)
+            ? h("a", {href: `#/artifact-review/operation/${op.operation_id}`}, t("ar_open")) : null,
+          confirmSource, resume, retry, cancel));
     } catch (e) { fill(panel, errorBox(e)); }
   };
   await render();
@@ -2476,19 +2525,41 @@ async function viewCleanup(main, section, ident) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const draftKey = `batc.cleanup.draft.${connection.namespace}`;
   const pendingKey = `batc.cleanup.pending.${connection.namespace}`;
+  const intentKey = `batc.cleanup.intent.${connection.namespace}`;
+  const readStored = key => {
+    try {return JSON.parse(localStorage.getItem(key) || sessionStorage.getItem(key) || "null");} catch {return null;}
+  };
   const persist = (key, value) => {
     assertView(connection);
-    try { if (value === null) sessionStorage.removeItem(key); else sessionStorage.setItem(key, JSON.stringify(value)); }
+    try {
+      // Retain old per-tab entries for compatibility while native restarts use the durable namespace.
+      for (const storage of [localStorage, sessionStorage]) {
+        if (value === null) storage.removeItem(key); else storage.setItem(key, JSON.stringify(value));
+      }
+    }
     catch (error) { if (error.code) throw error; /* this view retains the request */ }
   };
-  const stored = (() => { try { return JSON.parse(sessionStorage.getItem(draftKey) || "{}"); } catch { return {}; } })();
-  const choices = section === "item" && stored.id !== ident ? { discard_uncommitted: [], release_undelivered: [] }
+  const stored = readStored(draftKey) || {};
+  const choices = ["item", "task"].includes(section) && stored.id !== ident ? { discard_uncommitted: [], release_undelivered: [] }
     : (stored.choices || { discard_uncommitted: [], release_undelivered: [] });
-  const pending = (() => { try { return JSON.parse(sessionStorage.getItem(pendingKey) || "null"); } catch { return null; } })();
-  const kind = h("select", { "aria-label": t("cleanup_target") }, ...["work_item", "checkpoint", "integration", "host"].map(k =>
+  const pending = readStored(pendingKey);
+  let intent = readStored(intentKey);
+  if (intent) {
+    const request = intent.request;
+    const valid = request?.action === "cleanup.apply" && request.target?.preview_id === pending?.preview_id &&
+      request.params?.preview_token === pending?.preview_token && request.preconditions?.preview_fingerprint === pending?.fingerprint &&
+      typeof intent.key === "string" && intent.key.length > 0 && intent.key.length <= 200 && pending;
+    intent = {key: valid ? intent.key : null, request: valid ? {action: "cleanup.apply", target: {preview_id: pending.preview_id},
+      params: {preview_token: pending.preview_token}, preconditions: {preview_fingerprint: pending.fingerprint}} : null,
+      operation_id: typeof intent.operation_id === "string" && /^op_[0-9a-f]{32}$/.test(intent.operation_id) ? intent.operation_id : null,
+      refused: valid && ["PREVIEW_TOKEN_INVALID", "PREVIEW_EXPIRED", "PREVIEW_MISMATCH", "PREVIEW_BLOCKED"].includes(intent.refused) ? intent.refused : null};
+  }
+  let operation = null, operationRead = null, submission = null, readFailed = false;
+  const supportsTask = state.caps?.features?.cleanup_task === true;
+  const kind = h("select", { "aria-label": t("cleanup_target") }, ...["work_item", "checkpoint", "integration", "host", ...(supportsTask || pending?.target?.kind === "task" ? ["task"] : [])].map(k =>
     h("option", { value: k }, t("cleanup_target_" + k))));
-  kind.value = section === "item" ? "work_item" : (stored.kind || "host");
-  const targetId = h("input", { value: section === "item" ? ident : (stored.id || ""), "aria-label": t("cleanup_id"),
+  kind.value = section === "item" ? "work_item" : section === "task" && supportsTask ? "task" : (stored.kind || "host");
+  const targetId = h("input", { value: ["item", "task"].includes(section) ? ident : (stored.id || ""), "aria-label": t("cleanup_id"),
     placeholder: t("cleanup_id"), class: "cleanup-id" });
   const children = h("input", { type: "checkbox", checked: stored.children || false });
   const childrenLabel = h("label", { class: "cleanup-choice" }, children, t("cleanup_children"));
@@ -2496,7 +2567,7 @@ async function viewCleanup(main, section, ident) {
   const status = h("div", { "aria-live": "polite" });
   const historyOut = h("div", { "aria-live": "polite" });
   const retainedOut = h("div", { "aria-live": "polite" });
-  let doc = pending, busy = false, pendingRequest = !!pending, previewRevision = 0;
+  let doc = pending, busy = false, loading = true, pendingRequest = !!pending, previewRevision = 0;
   function changed() {
     assertView(connection);
     previewRevision++; doc = null;
@@ -2520,7 +2591,7 @@ async function viewCleanup(main, section, ident) {
   }
   function resourceRow(item) {
     const codes = (item.reasons || []).map(r => r.code);
-    const eligible = item.proven && item.kind === "worktree" && !item.task_owned;
+    const eligible = item.proven && item.kind === "worktree" && (!item.task_owned || item.task_cleanup?.eligible === true);
     return h("article", { class: "cleanup-resource" },
       h("div", { class: "row" }, h("strong", { class: "grow" }, t("cleanup_kind_" + item.kind)),
         chip(t("cleanup_decision_" + item.decision), item.decision === "reclaim" ? "ok" : "")),
@@ -2531,14 +2602,56 @@ async function viewCleanup(main, section, ident) {
       ...(item.overridden_reasons || []).map(r => h("p", { class: "muted" }, t("cleanup_choice_" + r.code))),
       item.steps?.length ? h("p", {}, t("cleanup_plan"), ": ", item.steps.map(x => t("cleanup_step_" + x)).join(" → ")) : null,
       eligible && codes.includes("RESULTS_NOT_DELIVERED") ? choice(item, "release_undelivered", t("cleanup_release")) : null,
-      eligible && codes.includes("UNCOMMITTED_CHANGES") ? choice(item, "discard_uncommitted", t("cleanup_discard")) : null,
+      eligible && !item.task_owned && codes.includes("UNCOMMITTED_CHANGES") ? choice(item, "discard_uncommitted", t("cleanup_discard")) : null,
       h("details", {}, h("summary", {}, t("cleanup_evidence")), h("pre", { class: "pre" }, JSON.stringify({
         resource_id: item.resource_id, original_ids: item.original_ids, reasons: item.reasons,
-        consumers: item.consumers, delivery: item.delivery, manifest: item.observation?.manifest }, null, 2))));
+        consumers: item.consumers, task_cleanup: item.task_cleanup, delivery: item.delivery, manifest: item.observation?.manifest }, null, 2))));
   }
-  const reviewed = h("input", { type: "checkbox", onchange: () => { apply.disabled = !doc?.ready || !may("cleanup") || !reviewed.checked; } });
+  const reviewed = h("input", { type: "checkbox", onchange: () => { apply.disabled = loading || busy || readFailed || Boolean(intent?.operation_id) || !doc?.ready || !may("cleanup") || !reviewed.checked; } });
+  function acceptCleanup(op) {
+    assertView(connection);
+    if (!intent || !/^op_[0-9a-f]{32}$/.test(op?.operation_id) || op.action !== "cleanup.apply" ||
+        op.actor !== state.caps.actor || op.idempotency_key !== intent.key ||
+        !intent.request || op.target?.preview_id !== intent.request.target.preview_id ||
+        op.params?.preview_token !== intent.request.params.preview_token ||
+        op.preconditions?.preview_fingerprint !== intent.request.preconditions.preview_fingerprint ||
+        (intent.operation_id && intent.operation_id !== op.operation_id)) throw new Error(t("cleanup_invalid_result"));
+    operation = op; intent.operation_id = op.operation_id; persist(intentKey, intent); readFailed = false;
+    fill(status, opStatus(op), " ", h("a", {href: `#/op/${op.operation_id}`}, t("cleanup_open_receipts")),
+      ...(op.result?.items || []).map(r => h("p", {}, h("code", {}, r.resource_id), " · ", t("cleanup_receipt_" + r.status))));
+    cleanupControls();
+  }
+  function cleanupControls() {
+    const fixed = Boolean(intent || pendingRequest);
+    kind.disabled = targetId.disabled = children.disabled = loading || busy || fixed;
+    previewButton.disabled = loading || busy || fixed || section === "task" && !supportsTask;
+    apply.hidden = Boolean(intent?.operation_id || intent?.refused);
+    apply.disabled = loading || busy || readFailed || Boolean(intent && !intent.request) || !doc?.ready || !reviewed.checked || !may("cleanup");
+    check.hidden = !intent?.operation_id; check.disabled = loading || busy || Boolean(operationRead);
+    another.hidden = !(TERMINAL.includes(operation?.status) || intent?.refused);
+    another.disabled = loading || busy || readFailed || Boolean(operationRead);
+  }
+  async function refreshCleanup(fresh = false) {
+    if (submission) {await submission; assertView(connection);}
+    if (operationRead) {await operationRead; if (fresh) return refreshCleanup(true); return;}
+    if (!intent?.operation_id) return;
+    operationRead = (async () => {const data = await api("GET", `/operations/${intent.operation_id}`); acceptCleanup(data.operation);})();
+    cleanupControls();
+    try {await operationRead;}
+    catch (e) {assertView(connection); readFailed = true; fill(status, errorBox(e),
+      h("a", {href: `#/op/${intent.operation_id}`}, t("cleanup_open_receipts"))); throw e;}
+    finally {operationRead = null; cleanupControls();}
+  }
+  const check = h("button", {class: "secondary", hidden: true, onclick: () => refreshCleanup(true).catch(() => {})}, t("cleanup_check"));
+  const another = h("button", {class: "secondary", hidden: true, onclick: () => {
+    assertView(connection);
+    if (loading || busy || readFailed || operationRead || !(TERMINAL.includes(operation?.status) || intent?.refused)) return;
+    intent = operation = doc = null; pendingRequest = false;
+    persist(intentKey, null); persist(pendingKey, null); reviewed.checked = false;
+    previewOut.replaceChildren(); status.replaceChildren(); cleanupControls();
+  }}, t("cleanup_new"));
   const apply = h("button", { class: "primary", disabled: true, onclick: async () => {
-    if (busy || !doc || !reviewed.checked) return;
+    if (loading || busy || readFailed || !doc || !reviewed.checked || intent?.operation_id || intent?.refused || intent && !intent.request) return;
     assertView(connection);
     const reviewedDoc = doc; busy = true; pendingRequest = true;
     apply.disabled = true;
@@ -2546,28 +2659,30 @@ async function viewCleanup(main, section, ident) {
     previewOut.querySelectorAll("input").forEach(input => { input.disabled = true; });
     // Keep the reviewed request as well as submit()'s stable key across a lost reply or page reload.
     persist(pendingKey, reviewedDoc);
+    let finish;
+    submission = new Promise(resolve => {finish = resolve;});
     try {
-      const op = await submit("cleanup.apply", { preview_id: reviewedDoc.preview_id }, { preview_token: reviewedDoc.preview_token },
-        { preview_fingerprint: reviewedDoc.fingerprint }, "cleanup.apply");
+      if (!intent) {
+        const request = {action: "cleanup.apply", target: {preview_id: reviewedDoc.preview_id},
+          params: {preview_token: reviewedDoc.preview_token}, preconditions: {preview_fingerprint: reviewedDoc.fingerprint}};
+        // Adopt the exact old UI key when reopening a legacy pending preview. Generic auth errors
+        // after an earlier lost reply cannot prove that this key was never accepted.
+        const scope = await draftId("cleanup.apply", request);
+        intent = {request, key: await keyFor(scope, connection), operation_id: null}; persist(intentKey, intent);
+      }
+      const data = await api("POST", "/operations?wait=3", intent.request, intent.key);
       assertView(connection);
-      fill(status, opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, t("cleanup_open_receipts")),
-        ...(op.result?.items || []).map(r => h("p", {}, h("code", {}, r.resource_id), " · ", t("cleanup_receipt_" + r.status))));
-      persist(pendingKey, null); pendingRequest = false;
-      doc = null; reviewed.checked = false;
-      previewButton.disabled = false; kind.disabled = false; targetId.disabled = false; children.disabled = false;
+      acceptCleanup(data.operation);
       await loadHistory(); await loadRetained();
     } catch (e) {
       if (connection.epoch !== state.epoch || connection.namespace !== state.namespace || connection.generation !== generation) return;
-      if (!e.status || e.status >= 500) {
-        fill(status, errorBox(e), h("p", {}, t("cleanup_retry_same")));
-        apply.disabled = !may("cleanup");
-        previewButton.disabled = true; kind.disabled = true; targetId.disabled = true; children.disabled = true;
-      } else {
-        persist(pendingKey, null); pendingRequest = false;
-        fill(status, errorBox(e), h("p", {}, t("cleanup_repreview"))); doc = null;
-        previewButton.disabled = false; kind.disabled = false; targetId.disabled = false; children.disabled = false;
+      if (intent && !intent.operation_id && e.status >= 400 && e.status < 500 &&
+          ["PREVIEW_TOKEN_INVALID", "PREVIEW_EXPIRED", "PREVIEW_MISMATCH", "PREVIEW_BLOCKED"].includes(e.code)) {
+        intent.refused = e.code; persist(intentKey, intent);
       }
-    } finally { busy = false; }
+      fill(status, errorBox(e), h("p", {}, t(intent?.refused ? "cleanup_repreview" : "cleanup_retry_same")));
+    } finally { busy = false; finish(); submission = null;
+      if (connection.epoch === state.epoch && connection.generation === generation) cleanupControls(); }
   } }, t("cleanup_apply"));
   function renderPreview() {
     fill(previewOut, h("h2", {}, t("cleanup_preview")), h("p", {}, t("cleanup_counts", { reclaim: doc.impact.reclaim, retain: doc.impact.retain })),
@@ -2575,10 +2690,11 @@ async function viewCleanup(main, section, ident) {
       ...(doc.items || []).map(resourceRow), !doc.ready ? h("p", { class: "note" }, t("cleanup_blocked")) : null);
   }
   const previewButton = h("button", { class: "secondary", onclick: async () => {
+    if (loading) return;
     assertView(connection);
     const revision = ++previewRevision;
     previewButton.disabled = true; doc = null; apply.disabled = true; reviewed.checked = false;
-    const key = { work_item: "work_item_id", checkpoint: "checkpoint_id", integration: "operation_id", host: "host" }[kind.value];
+    const key = { work_item: "work_item_id", checkpoint: "checkpoint_id", integration: "operation_id", host: "host", task: "task_id" }[kind.value];
     const target = { kind: kind.value, [key]: targetId.value.trim(), ...(kind.value === "work_item" ? { include_children: children.checked } : {}) };
     try {
       const result = await api("POST", "/cleanup-previews", { target, choices: structuredClone(choices) });
@@ -2591,7 +2707,7 @@ async function viewCleanup(main, section, ident) {
   } }, t("cleanup_preview"));
   if (pending && section !== "resource") {
     kind.value = pending.target.kind;
-    targetId.value = pending.target[{work_item: "work_item_id", checkpoint: "checkpoint_id", integration: "operation_id", host: "host"}[kind.value]];
+    targetId.value = pending.target[{work_item: "work_item_id", checkpoint: "checkpoint_id", integration: "operation_id", host: "host", task: "task_id"}[kind.value]];
     children.checked = !!pending.target.include_children;
     childrenLabel.hidden = kind.value !== "work_item";
     renderPreview(); reviewed.checked = true; apply.disabled = !may("cleanup");
@@ -2607,7 +2723,9 @@ async function viewCleanup(main, section, ident) {
         h("a", { href: `#/cleanup/resource/${x.resource_id}` }, t("cleanup_kind_" + x.kind)),
         h("div", { class: "cleanup-binding" }, x.host, " ", x.path || x.ref || ""),
         h("p", { class: "muted" }, x.actor, " · ", when(x.cleaned_at * 1000)),
-        h("p", {}, t("cleanup_reason_reviewed")), ...(x.pull_requests || []).map(pr => h("p", {}, `${pr.repository} #${pr.pull_number}`))));
+        h("p", {}, t(({reviewed_cleanup: "cleanup_reason_reviewed", task_lifecycle: "cleanup_reason_automatic",
+          historical_task_cleanup: "cleanup_reason_historical"})[x.reason] || "cleanup_reason_recorded")),
+        ...(x.pull_requests || []).map(pr => h("p", {}, `${pr.repository} #${pr.pull_number}`))));
       if (cursor) historyOut.append(...rows); else fill(historyOut, ...rows, rows.length ? null : h("p", { class: "muted" }, t("cleanup_empty_history")));
       if (result.next_cursor) historyOut.append(h("button", { class: "secondary", onclick: e => {
         e.currentTarget.remove(); loadHistory(result.next_cursor);
@@ -2629,7 +2747,8 @@ async function viewCleanup(main, section, ident) {
       } }, t("more")));
     } catch (e) { fill(retainedOut, errorBox(e)); }
   }
-  main.append(h("h1", {}, t("nav_cleanup")), h("p", { class: "muted" }, t("cleanup_intro")));
+  main.append(h("h1", {}, t("nav_cleanup")), h("p", { class: "muted" }, t("cleanup_intro")),
+    section === "task" || supportsTask ? h("p", {class: "muted"}, t("cleanup_task_help")) : null);
   if (section === "resource") {
     try {
       const data = await api("GET", `/cleanup-tombstones/${encodeURIComponent(ident)}`);
@@ -2641,16 +2760,52 @@ async function viewCleanup(main, section, ident) {
   main.append(h("div", { class: "panel" }, h("h2", {}, t("cleanup_target")), h("div", { class: "filters" }, kind, targetId),
     childrenLabel, h("div", { class: "actions" }, previewButton)), previewOut,
     h("div", { class: "panel" }, h("label", { class: "cleanup-choice" }, reviewed, t("cleanup_reviewed")),
-      !may("cleanup") ? h("p", { class: "muted" }, t("cleanup_scope")) : null, h("div", { class: "actions" }, apply), status),
+      !may("cleanup") ? h("p", { class: "muted" }, t("cleanup_scope")) : null, h("div", { class: "actions" }, apply, check, another), status),
     h("h2", {}, t("cleanup_history")), h("div", { class: "panel" }, h("form", { class: "filters", onsubmit: e => { e.preventDefault(); loadHistory(); } },
       search, h("button", { class: "secondary", type: "submit" }, t("cleanup_search_button"))), historyOut),
     h("h2", {}, t("cleanup_retained")), h("p", { class: "muted" }, t("cleanup_retained_help")), h("div", { class: "panel" }, retainedOut));
+  cleanupControls();
   await loadHistory(); await loadRetained();
-  const refresh = debounceRefresh(() => settleRefreshes([loadHistory(), loadRetained()]), 500);
+  try {await refreshCleanup();} catch { /* keep the exact accepted intent and show read error */ }
+  // The router admits writes only after this initial snapshot finishes. Keep a
+  // recovered Apply button disabled until then, rather than exposing a false offline refusal.
+  loading = false; cleanupControls();
+  const refresh = debounceRefresh(() => settleRefreshes([loadHistory(), loadRetained(), refreshCleanup(true)]), 500);
   return onEvents(ev => { if (["cleanup", "operation"].includes(ev.resource_type)) return refresh(); });
 }
 
-const NAV = [["home", "nav_home"], ["projects", "nav_projects"], ["sessions", "nav_sessions"], ["delivery", "nav_delivery"],
+async function viewApprovals(main) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const panel = approvalsPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    ready: () => state.online && !state.nativeBusy, errorBox, opStatus,
+    storageKey: `batc.approvals.${connection.namespace}`});
+  main.append(h("a", {href: "#/sessions"}, t("sessions_title")), h("h1", {}, t("bulk_title")), panel.box);
+  try {await panel.refresh();} catch { /* panel retains its fixed intent and displays the read error */ }
+  return onEvents(event => event.resource_type === "operation" ? panel.refresh(true) : panel.update());
+}
+
+async function viewStart(main) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const panel = sessionStartPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    ready: () => state.online && !state.nativeBusy, errorBox, opStatus,
+    storageKey: `batc.start.${connection.namespace}`});
+  main.append(h("a", {href: "#/sessions"}, t("nav_sessions")), h("h1", {}, t("start_title_page")),
+    h("p", {class: "muted"}, t("start_intro")), panel.box);
+  try {await panel.init();} catch { /* panel retains the original intent and shows the read error */ }
+  assertView(connection);
+  return onEvents(ev => {if (["operation", "host", "session"].includes(ev.resource_type)) return panel.refresh(true);});
+}
+
+async function viewArtifactReview(main, kind, first, second) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const context = kind === "session" ? {kind, host: first, session_id: second} : kind === "task" ? {kind, task_id: first}
+    : kind === "operation" ? {kind, operation_id: first} : kind === "artifact" ? {kind, artifact_id: first, revision: Number(second)} : {kind: "catalog"};
+  return mountArtifactReview({main, h, t, api, caps: () => state.caps, guard: () => assertView(connection), onEvents,
+    errorBox, opStatus, context, readBrowser: (ref, size, signal) => {assertView(connection); return readArtifactContent(ref, size, state.token, signal);},
+    storageKey: `batc.artifact-review.${connection.namespace}.${JSON.stringify(context)}`});
+}
+
+const NAV = [["home", "nav_home"], ["projects", "nav_projects"], ["sessions", "nav_sessions"], ["artifact-review", "ar_nav"], ["delivery", "nav_delivery"],
   ["operations", "nav_operations"], ["cleanup", "nav_cleanup"], ["settings", "nav_settings"]];
 let teardown = null;
 let generation = 0;
@@ -2666,7 +2821,8 @@ async function route() {
   main.replaceChildren();
   if (!state.token && name !== "settings") { main.append(h("p", { class: "note" }, t(nativeDesktop ? "desktop_connect_needed" : "need_token"))); viewSettings(main); return; }
   const views = { home: viewHome, projects: viewProjects, project: viewProject, item: viewWorkItem, sessions: viewSessions,
-    cleanup: viewCleanup, delivery: viewDelivery, operations: viewOperations, session: viewSession, op: viewOperation, settings: viewSettings,
+    cleanup: viewCleanup, approvals: viewApprovals, delivery: viewDelivery, operations: viewOperations, session: viewSession, start: viewStart, op: viewOperation, settings: viewSettings,
+    "artifact-review": viewArtifactReview,
     host: viewHostDiscovery, task: (main, id) => viewObservedResource(main, "execution", id),
     worktree: (main, id) => viewObservedResource(main, "worktree", id) };
   const off = await (views[name] || viewHome)(main, ...rest);

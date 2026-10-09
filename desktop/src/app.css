@@ -78,6 +78,11 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 .capture { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--line); }
 .capture summary { cursor: pointer; font-weight: 600; }
 .permissions { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--line); }
+.bulk-prompt { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow-y: auto; }
+.bulk-item select { max-width: 100%; }
+.bulk-evidence { margin: 8px 0 12px; font-size: 13px; }
+.bulk-evidence summary { cursor: pointer; color: var(--muted); }
+.bulk-receipt { overflow-wrap: anywhere; }
 .permissions summary { cursor: pointer; font-weight: 600; }
 .permissions .muted { font-size: 14px; }
 .permission-mode { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -90,6 +95,11 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 .capture-fields { display: flex; flex-wrap: wrap; gap: 8px; }
 .capture-fields label { flex: 1 1 220px; min-width: 0; }
 .capture-fields input, .capture-fields select { display: block; width: 100%; }
+.artifact-review .kv { grid-template-columns: minmax(0, 120px) minmax(0, 1fr); }
+.artifact-review .muted { font-size: 14px; }
+.artifact-review .row, .artifact-review .row a, .artifact-review .row code { overflow-wrap: anywhere; min-width: 0; }
+.artifact-review select, .artifact-review input, .artifact-review textarea { max-width: 100%; }
+@media (max-width: 640px) { .artifact-review button, .artifact-review select { min-height: 44px; } }
 .capture .kv { grid-template-columns: minmax(0, 120px) minmax(0, 1fr); }
 .capture-choice { display: flex; align-items: center; gap: 8px; min-height: 44px; }
 .fleet-choice { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; }
@@ -230,3 +240,24 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 .session-group-heading h2 { max-width: 100%; }
+
+/* Native transfers share attachment density and the existing surface/text tokens. */
+.native-files { min-width: 0; }
+.file-transfer { padding: 8px 0; }
+.file-transfer .grow { min-width: 0; overflow-wrap: anywhere; }
+.file-transfer progress { width: 100%; height: 8px; accent-color: var(--accent); }
+.file-transfer p { overflow-wrap: anywhere; }
+.file-actions { flex-wrap: wrap; }
+.file-preview { margin-top: 12px; }
+.file-preview pre { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.file-preview img, .file-preview canvas { max-width: 100%; max-height: 320px; object-fit: contain; }
+/* Standalone start reuses shared panels, fields and the compact inventory heading. */
+.session-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.session-start .muted { font-size: 14px; }
+.session-start > .panel > label { display: block; margin-top: 14px; }
+.session-start textarea { display: block; margin-top: 4px; }
+.session-start select, .session-start input { min-width: 0; max-width: 100%; }
+.session-start [data-start-result] { overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .session-start button, .session-start select, .session-start input, .session-heading > a { min-height: 44px; align-content: center; }
+}

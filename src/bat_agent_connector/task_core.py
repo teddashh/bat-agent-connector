@@ -166,6 +166,14 @@ class TaskCoordinator:
         if getattr(adapter, "fleet", None) is not None:
             adapter.fleet.task_coordinator = self
 
+    def cleanup_verdict(self, item):
+        from .task_cleanup import verdict
+        return verdict(self, item)
+
+    def cleanup_authority(self, ctx, item):
+        from .task_cleanup import authority
+        return authority(self, ctx, item)
+
     def _lock(self, host: str, sid: str) -> asyncio.Lock:
         return self._writers.setdefault((host, sid), asyncio.Lock())
 
