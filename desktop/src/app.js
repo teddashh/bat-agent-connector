@@ -1,14 +1,14 @@
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
-import { connectorRequest, connectorUploadArtifact, nativeDesktop, nativeStatus, nativeConnect, nativeDisconnect, openExternal } from "./transport/index.ts";
+import { connectorRequest, connectorUploadArtifact, nativeDesktop, nativeStatus, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal } from "./transport/index.ts";
 import { mountFleet } from "./fleet.js";
 import { capturePanel } from "./capture.js";
 import { permissionsPanel } from "./permissions.js";
 import { consumePageAsync, settleRefreshes, storageScope } from "./state/events.ts";
 
 const TOKEN_KEY = "batc.dashboard.token";
-const state = { token: null, caps: null, lastEvent: 0, listeners: new Set(), namespace: "", epoch: 0, online: false, viewReady: false, sync: null, endpoint: "", connectionError: null, refreshCycle: null };
+const state = { token: null, caps: null, lastEvent: 0, listeners: new Set(), namespace: "", epoch: 0, online: false, viewReady: false, sync: null, endpoint: "", connectionError: null, nativeBusy: false, nativeAttempt: 0, connectionNotice: null, refreshCycle: null };
 async function activate(caps, endpoint = location.origin, reset = false) {
   state.epoch++;
   state.observations = new Map();
@@ -22,7 +22,8 @@ async function activate(caps, endpoint = location.origin, reset = false) {
     const sync = bootstrap.sync;
     if (sync?.version !== 1 || !sync.server_id || !sync.principal_id ||
       !Number.isSafeInteger(sync.checkpoint?.cursor) || sync.checkpoint.cursor < 0 || !sync.checkpoint.token ||
-      bootstrap.capabilities?.actor !== caps.actor) throw new Error("Invalid central bootstrap identity");
+      bootstrap.capabilities?.actor !== caps.actor ||
+      (caps.desktop_identity && (caps.desktop_identity.server_id !== sync.server_id || caps.desktop_identity.principal_id !== sync.principal_id))) throw new Error("Invalid central bootstrap identity");
     state.caps = bootstrap.capabilities;
     state.namespace = storageScope(endpoint, caps.actor, sync.server_id, sync.principal_id);
     state.sync = sync.checkpoint;
@@ -141,7 +142,7 @@ class ApiError extends Error {
 }
 async function api(method, path, body, key) {
   if (!state.token) throw new ApiError(401, "UNAUTHORIZED", t("need_token"));
-  if (method === "POST" && (!state.online || !state.viewReady))
+  if (method === "POST" && (state.nativeBusy || !state.online || !state.viewReady))
     throw new ApiError(0, "CENTRAL_OFFLINE", t("offline_actions_paused"));
   const epoch = state.epoch;
   const { status, data } = await connectorRequest(method, path, body, key, state.token);
@@ -385,7 +386,7 @@ function onEvents(fn) { state.listeners.add(fn); return () => state.listeners.de
 async function streamEvents() {
   const live = document.getElementById("live");
   for (;;) {
-    if (!state.token || !state.viewReady) {
+    if (state.nativeBusy || !state.token || !state.viewReady) {
       live.className = "live down"; live.textContent = state.token ? t("sync_waiting") : "";
       await sleep(1000); continue;
     }
@@ -1740,40 +1741,108 @@ function viewSettings(main) {
     h("label", {}, remember, " ", t("remember")), h("p", { class: "muted" }, t("token_help")), info));
 }
 
-async function viewNativeSettings(main) {
-  const info = h("p", { class: "muted" });
-  const endpoint = h("p", { class: "muted" });
-  const fleetRoot = h("div");
-  const connect = h("button", { class: "primary", onclick: async () => {
-    connect.disabled = true;
-    try {
-      const status = await nativeStatus();
-      const caps = await nativeConnect();
-      state.token = "native-credential"; // connection marker only; never a secret
-      await activate(caps, status.endpoint);
-      location.hash = "#/home";
-      route();
-    } catch (e) { disconnect(); info.replaceChildren(errorBox(e)); }
-    finally { connect.disabled = false; }
-  } }, t("connect"));
-  main.append(h("h1", {}, t("nav_settings")), h("div", { class: "panel" },
-    h("h2", {}, t("desktop_connection")), endpoint,
-    h("p", { class: "muted" }, t("desktop_credential_help")),
-    h("div", { class: "actions" }, connect,
-      h("button", { class: "secondary", onclick: async () => {
-        await nativeDisconnect(); disconnect(); route();
-      } }, t("disconnect"))), info),
-    h("div", { class: "panel" }, h("h2", {}, t("desktop_local")),
-      h("p", { class: "note" }, t("desktop_dashboard_only"))), fleetRoot);
-  if (state.caps) info.textContent = t("connected_as", { actor: state.caps.actor, scopes: state.caps.scopes.join(", ") });
+// Credential dialogs and protected storage stay native. A transition invalidates old async
+// forms immediately, but cancellation restores the existing account and its identity-scoped drafts.
+async function nativeTransition(kind) {
+  if (state.nativeBusy && kind !== "disconnect") return;
+  const attempt = ++state.nativeAttempt;
+  const previousOnline = state.online;
+  const previousToken = state.token;
+  state.nativeBusy = true; state.epoch++; state.online = false;
+  state.connectionError = null; state.connectionNotice = null;
   try {
-    if (!state.caps && state.connectionError) info.replaceChildren(errorBox(state.connectionError));
+    if (kind === "disconnect" || kind === "reload" || kind === "forget") {
+      disconnect(); // invalidate caches/old forms before native can load another endpoint
+      if (kind === "disconnect") await nativeDisconnect();
+      else if (kind === "reload") await nativeReloadConfiguration();
+      else await nativeForgetCredential();
+      if (attempt === state.nativeAttempt) state.connectionNotice = t(kind === "forget" ? "desktop_forgotten" : kind === "reload" ? "desktop_reloaded" : "desktop_disconnected");
+    } else {
+      const status = await nativeStatus();
+      if (attempt !== state.nativeAttempt) return;
+      const caps = kind === "enroll" ? await nativeEnroll() : await nativeConnect();
+      if (attempt !== state.nativeAttempt) return;
+      if (!caps) {
+        state.online = previousOnline;
+        state.connectionNotice = t("desktop_enrollment_cancelled");
+      } else {
+        state.token = "native-credential";
+        // A new verified credential never reuses the old backend/principal namespace.
+        try { await activate(caps, status.endpoint); }
+        catch (error) { if (attempt === state.nativeAttempt) { await nativeDisconnect(); disconnect(); } throw error; }
+        if (kind === "connect" && attempt === state.nativeAttempt) location.hash = "#/home";
+      }
+    }
+  } catch (error) {
+    if (attempt !== state.nativeAttempt) return;
+    state.connectionError = error;
+    // Native replacement/authentication failures retain the existing active connection.
+    if (state.token === previousToken) state.online = previousOnline;
+  } finally {
+    if (attempt === state.nativeAttempt) { state.nativeBusy = false; await route(); }
+  }
+}
+
+async function viewNativeSettings(main) {
+  const mine = generation;
+  const info = h("div", {"aria-live": "polite"});
+  const details = h("dl", {class: "kv"});
+  const help = h("p", {class: "muted"}, t("desktop_credential_help"));
+  const platform = h("p", {class: "muted"});
+  const fleetRoot = h("div");
+  const controls = [];
+  const action = (kind, label, cls = "secondary") => {
+    const button = h("button", {class: cls, disabled: true, onclick: () => {
+      for (const control of controls) control.disabled = true;
+      info.textContent = t("desktop_connecting");
+      return nativeTransition(kind);
+    }}, t(label));
+    controls.push(button); return button;
+  };
+  const connect = action("connect", "connect", "primary");
+  const enroll = action("enroll", "desktop_add_credential");
+  const reload = action("reload", "desktop_reload_configuration");
+  const forget = action("forget", "desktop_forget_credential");
+  const leave = action("disconnect", "disconnect");
+  const actions = h("div", {class: "actions"}, connect, enroll, reload, leave);
+  const saved = h("div", {}, h("p", {class: "muted"}, t("desktop_forget_help")), forget);
+  main.append(h("h1", {}, t("nav_settings")), h("section", {class: "panel native-connection", "aria-label": t("desktop_connection")},
+    h("h2", {}, t("desktop_connection")), details, help, platform, actions, info, saved),
+    h("div", {class: "panel"}, h("h2", {}, t("desktop_local")),
+      h("p", {class: "note"}, t("desktop_dashboard_only"))), fleetRoot);
+  const showInfo = () => {
+    info.replaceChildren();
+    if (state.caps) info.append(h("p", {}, t("connected_as", {actor: state.caps.actor, scopes: state.caps.scopes.join(", ")})));
+    if (state.connectionNotice) info.append(h("p", {}, state.connectionNotice));
+    if (state.connectionError) info.append(errorBox(state.connectionError));
+    if (state.nativeBusy) info.append(h("p", {}, t("desktop_connecting")));
+  };
+  showInfo();
+  try {
     const status = await nativeStatus();
-    endpoint.textContent = status.endpoint || t("desktop_config_needed");
-    if (status.error) info.textContent = status.error;
-    else if (!status.credential_available) info.textContent = t("desktop_credential_missing");
-    connect.disabled = !!status.error || !status.credential_available;
-  } catch (e) { info.replaceChildren(errorBox(e)); }
+    if (mine !== generation || !main.contains(details)) return;
+    const row = (label, value) => { if (value) details.append(h("dt", {}, t(label)), h("dd", {}, value)); };
+    row("desktop_endpoint", status.endpoint || t("desktop_config_needed"));
+    row("desktop_expected_actor", status.expected_actor);
+    row("desktop_configuration_file", status.configuration_file);
+    if (status.credential_source) row("desktop_credential_source", t("desktop_source_" + status.credential_source));
+    if (status.error) info.append(errorBox(new Error(status.error)));
+    else if (!status.credential_available) info.append(h("p", {}, t("desktop_credential_missing")));
+    platform.textContent = status.enrollment_supported === true ? t("desktop_enrollment_help")
+      : status.enrollment_supported === false ? t("desktop_enrollment_unsupported") : "";
+    connect.disabled = state.nativeBusy || !!status.error || !status.credential_available;
+    enroll.hidden = status.enrollment_supported !== true;
+    enroll.textContent = t(status.credential_saved ? "desktop_replace_credential" : "desktop_add_credential");
+    enroll.disabled = state.nativeBusy || !status.endpoint || !status.expected_actor;
+    enroll.className = status.credential_available ? "secondary" : "primary";
+    if (!status.credential_available) connect.className = "secondary";
+    reload.hidden = !status.configuration_reload;
+    reload.disabled = state.nativeBusy || !status.configuration_reload;
+    leave.disabled = !state.token && !state.nativeBusy;
+    saved.hidden = !status.credential_saved;
+    forget.disabled = state.nativeBusy || !status.credential_saved;
+  } catch (error) { if (mine === generation) info.append(errorBox(error)); }
+  if (mine !== generation) return;
   return mountFleet(fleetRoot, {h, t});
 }
 
@@ -2510,14 +2579,26 @@ async function route() {
 }
 
 async function start() {
+  window.addEventListener("hashchange", route);
   if (nativeDesktop) {
     clearToken(); // discard obsolete browser credentials if an older build ever stored them
+    const attempt = ++state.nativeAttempt;
     try {
       const status = await nativeStatus();
-      const caps = await nativeConnect();
-      state.token = "native-credential";
-      await activate(caps, status.endpoint);
-    } catch (error) { disconnect(); state.connectionError = error; }
+      if (!status.error && status.credential_available) {
+        state.nativeBusy = true;
+        // Render recovery controls while network verification is pending. A slow central must
+        // not leave a blank startup window; Disconnect invalidates this attempt immediately.
+        route().catch(() => {});
+        const caps = await nativeConnect();
+        if (attempt === state.nativeAttempt) {
+          state.token = "native-credential";
+          await activate(caps, status.endpoint);
+        }
+      }
+    } catch (error) {
+      if (attempt === state.nativeAttempt) { disconnect(); state.connectionError = error; }
+    } finally { if (attempt === state.nativeAttempt) state.nativeBusy = false; }
   } else {
     state.token = loadToken();
     if (state.token) {
@@ -2525,7 +2606,6 @@ async function start() {
       catch { state.token = null; }
     }
   }
-  window.addEventListener("hashchange", route);
   await route();
   streamEvents();
 }
