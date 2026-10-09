@@ -195,6 +195,16 @@ def _parse_answers(items: list[str] | None):
 
 
 async def _run(args) -> Any:
+    if args.cmd in {"read", "wait"}:
+        from .session_observation import client_request
+        params = {"host": args.host, "session_id": args.session, "after": args.after}
+        if args.cmd == "read":
+            params.update(last_n=args.n, offset=args.offset, include_tools=args.tools, max_chars=args.max_chars)
+        else:
+            params.update(until=args.until, timeout_s=args.timeout, require_new=args.require_new)
+        result = await client_request("session_" + args.cmd,
+            token=os.environ.get("BATC_API_TOKEN"), entry="cli", **params)
+        return result, r_read if args.cmd == "read" else None
     cfg = load_config(args.config)
     fleet = Fleet(cfg, read_only=args.read_only, idle_timeout=0, actor="cli")
     try:
@@ -219,14 +229,6 @@ async def _run(args) -> Any:
             ), r_sessions
         if c == "policy":
             return await resource_policy.session_policy(fleet, args.host, args.session), r_policy
-        if c == "read":
-            return await service.session_read(
-                fleet, args.host, args.session, args.n, args.offset, args.tools, args.max_chars, after=args.after
-            ), r_read
-        if c == "wait":
-            return await service.session_wait(
-                fleet, args.host, args.session, args.until, args.timeout, args.require_new, after=args.after
-            ), None
         if c in {"send", "continue", "interrupt", "answer", "permissions"}:
             from .task_daemon import request
 
@@ -438,7 +440,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sp.add_parser("policy", help="who may change what: a host's mutation table, or one session's verdicts")
     p.add_argument("host")
     p.add_argument("session", nargs="?")
-    p = sp.add_parser("read", help="read latest messages of a session")
+    p = sp.add_parser("read", help="read latest messages through the central daemon (own observe token required)")
     p.add_argument("host")
     p.add_argument("session")
     p.add_argument("-n", type=int, default=20)
@@ -446,7 +448,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tools", action="store_true", help="include tool calls")
     p.add_argument("--max-chars", type=int, default=12000)
     p.add_argument("--after", help="turn_marker from relay/send: show only newer messages")
-    p = sp.add_parser("wait", help="wait for turn-end / ask-user")
+    p = sp.add_parser("wait", help="wait for turn-end / ask-user through central (own observe token required)")
     p.add_argument("host")
     p.add_argument("session")
     p.add_argument("--until", choices=["attention", "turn-end", "ask-user"], default="attention")
