@@ -16,7 +16,7 @@ export async function permissionFixture(page: Page, native: boolean, options: an
       api_access: state.apiAccess, provenance: state.provenance, streaming: state.streaming, control_version: state.controlVersion};
     if (input.method === 'POST') {
       state.posts.push(input);
-      if (state.refuse) return {status: state.refuse === 'PERMISSIONS_HOST_POLICY' ? 403 : 409,
+      if (state.refuse) return {status: ['PERMISSIONS_HOST_POLICY', 'CONFINEMENT_RAISE_REFUSED'].includes(state.refuse) ? 403 : 409,
         data: {error: {code: state.refuse, message: 'Fixture refusal: '+state.refuse}}};
       const previous = state.operation;
       if (!previous || previous.key !== input.idempotency_key) state.operation = {key: input.idempotency_key,

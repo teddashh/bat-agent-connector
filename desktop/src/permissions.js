@@ -5,7 +5,7 @@ const operationId = value => typeof value === "string" && /^op_[0-9a-f]{32}$/.te
 const terminal = operation => ["succeeded", "failed", "cancelled"].includes(operation?.status);
 // These admission gates run after key replay and before INSERT. Generic auth/4xx and
 // transport failures can precede replay of an accepted request, so are never reset proof.
-const admissionRefusals = new Set(["TASK_PAUSED", "CONTROL_VERSION_CONFLICT", "PERMISSIONS_HOST_POLICY"]);
+const admissionRefusals = new Set(["TASK_PAUSED", "CONTROL_VERSION_CONFLICT", "PERMISSIONS_HOST_POLICY", "CONFINEMENT_RAISE_REFUSED"]);
 function restore(value, target) {
   const saved = {mode: modeValue(value?.mode) ? value.mode : "default"};
   if (!record(value) || !value.intent) return saved;
