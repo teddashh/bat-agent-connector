@@ -15,15 +15,37 @@ async function browserPreview(bytes) {
         !width || !height || width * height > 1048576) throw new Error('PREVIEW_UNSUPPORTED');
     // Strip metadata before decoding; bound pixels first and refuse animation.
     const chunks = [bytes.slice(0, 8)];
+    let header = false, palette = false, transparency = false, data = false, dataEnded = false, ended = false;
     for (let offset = 8; offset < bytes.length;) {
       if (offset + 12 > bytes.length) throw new Error('PREVIEW_UNSUPPORTED');
       const length = view.getUint32(offset), end = offset + length + 12;
       const kind = String.fromCharCode(...bytes.slice(offset + 4, offset + 8));
-      if (end > bytes.length || kind === 'acTL') throw new Error('PREVIEW_UNSUPPORTED');
+      if (end > bytes.length || !/^[A-Za-z]{2}[A-Z][A-Za-z]$/.test(kind) || kind === 'acTL') throw new Error('PREVIEW_UNSUPPORTED');
+      if (kind === 'IHDR') {
+        if (header || offset !== 8 || length !== 13) throw new Error('PREVIEW_UNSUPPORTED');
+        header = true;
+      } else if (!header) throw new Error('PREVIEW_UNSUPPORTED');
+      if (kind === 'PLTE') {
+        if (palette || transparency || data || !length || length > 768 || length % 3) throw new Error('PREVIEW_UNSUPPORTED');
+        palette = true;
+      }
+      if (kind === 'tRNS') {
+        if (transparency || data || bytes[25] === 3 && !palette) throw new Error('PREVIEW_UNSUPPORTED');
+        transparency = true;
+      }
+      if (kind === 'IDAT') {
+        if (dataEnded || bytes[25] === 3 && !palette) throw new Error('PREVIEW_UNSUPPORTED');
+        data = true;
+      } else if (data) dataEnded = true;
+      if (kind === 'IEND') {
+        if (!data || ended || length !== 0 || end !== bytes.length) throw new Error('PREVIEW_UNSUPPORTED');
+        ended = true;
+      }
       if (['IHDR', 'PLTE', 'IDAT', 'IEND', 'tRNS'].includes(kind)) chunks.push(bytes.slice(offset, end));
       else if (/^[A-Z]/.test(kind)) throw new Error('PREVIEW_UNSUPPORTED');
       offset = end;
     }
+    if (!ended) throw new Error('PREVIEW_UNSUPPORTED');
     const bitmap = await createImageBitmap(new Blob(chunks, {type: 'image/png'}));
     try {
       if (bitmap.width !== width || bitmap.height !== height) throw new Error('PREVIEW_UNSUPPORTED');
