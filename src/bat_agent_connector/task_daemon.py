@@ -55,7 +55,7 @@ from .task_verifier import ObservedVerifier, load_settings
 
 DEFAULT_URL = "http://127.0.0.1:18796/rpc"
 # /rpc methods that share /api/v1's principals and OperationService (MCP and CLI enter here).
-API_RPC = {"op_submit": "?", "session_interrupt": "operate", "session_send": "operate",
+API_RPC = {"session_start": "start", "workspaces_list": "observe", "op_submit": "?", "session_interrupt": "operate", "session_send": "operate",
            "session_continue": "operate", "session_answer": "operate", "session_set_permissions": "operate",
            "op_get": "observe", "op_list": "observe", "op_cancel": "?", "op_resume": "?",
            "work_status": "observe", "work_result": "observe", "work_events": "observe",
@@ -208,6 +208,8 @@ class TaskDaemon:
         self.inventory.fleet.confinement_runner = self.fleet.confinement_runner
         self.inventory.fleet.confinement_journal = self.journal
         self.api = ApiV1(self, allowed_origins=config.api.allowed_origins)
+        from . import task_cleanup
+        task_cleanup.backfill(self.ops)
         self._initialized = True
 
     @staticmethod
@@ -248,6 +250,11 @@ class TaskDaemon:
             raise OperationError("FORBIDDEN", f"{method} needs the {scope!r} scope", 403)
         entry = params.pop("entry", None)
         entry = entry if entry in {"mcp", "cli"} else "rpc"
+        if method in {"session_start", "workspaces_list"}:
+            from . import session_start_operations
+            if method == "workspaces_list":
+                return await session_start_operations.workspaces(self.ops, principal, params)
+            return await session_start_operations.legacy(self.ops, principal, params, entry=entry)
         if method == "approval_preview":
             from .bulk_approval import preview
             return await preview(self.ops, principal, params)
@@ -945,9 +952,12 @@ class TaskDaemon:
                 current = self.journal.get(task_id)
                 if (self.journal.owner_valid() and current["state"] in {"done", "failed"}
                         and current.get("external_worktree_path")):
-                    proof = await self.adapter.cleanup_external_worktree(current)
-                    self.journal.complete_external_cleanup(task_id, proof)
-                    self._cleanup_retry_after.pop(task_id, None)
+                    from . import task_cleanup
+                    await task_cleanup.automatic(self, current)
+                    if self.journal.get(task_id).get("external_worktree_path"):
+                        self._cleanup_retry_after[task_id] = time.monotonic() + 60
+                    else:
+                        self._cleanup_retry_after.pop(task_id, None)
             except Exception as cleanup_exc:  # noqa: BLE001 - retain pointer and retry after backoff
                 self._cleanup_retry_after[task_id] = time.monotonic() + 60
                 logging.warning("Task %s external worktree cleanup failed: %s",

@@ -4,7 +4,7 @@ const rid = "wt_" + "a".repeat(32), oid = "op_" + "b".repeat(32);
 const cp = "cp_" + "c".repeat(32);
 const caps = {actor: "cleanup-person", scopes: ["observe", "operate", "start", "cleanup", "cleanup_discard"], api_version: 1,
   contract_version: "2026-10-08", hosts: [{host: "demo", confinement: {host_account: {start_effect: "recheck"}}}],
-  features: {cleanup: true, checkpoints: ["demo"]}, actions: []};
+  features: {cleanup: true, cleanup_task: true, checkpoints: ["demo"]}, actions: []};
 const item = {resource_id: rid, host: "demo", kind: "worktree", path: "/managed/fixture", proven: true,
   task_owned: false, decision: "reclaim", reasons: [], observation: {head: "a".repeat(40)}, steps: ["preserve", "remove.worktree"]};
 const preview = {preview_id: "clpv_" + "d".repeat(32), preview_token: "fixture-signed-preview", fingerprint: "fixture-fingerprint",
@@ -13,11 +13,17 @@ const checkpoint = (cursor: number) => ({cursor, token: "fixture-proof-" + curso
 
 async function setup(page: Page, native: boolean, custom: (input: any, url: URL) => any) {
   const errors: string[] = [], reads: string[] = [];
+  let cleanupOperation: any = null;
   const dispatch = async (input: any) => {
     const url = new URL(input.path, "http://fixture");
     reads.push(input.path);
     const extra = await custom(input, url);
+    if (input.method === "POST" && input.body?.action === "cleanup.apply") {
+      cleanupOperation ||= {...input.body, actor: caps.actor, idempotency_key: input.idempotency_key, operation_id: oid, status: 'accepted'};
+      if (extra?.data?.operation) extra.data.operation = {...cleanupOperation, ...extra.data.operation};
+    }
     if (extra) return extra;
+    if (url.pathname === '/operations/'+oid && cleanupOperation) return {status: 200, data: {operation: cleanupOperation}};
     return {status: 200, data: url.pathname === "/capabilities" ? caps : url.pathname === "/bootstrap" ? {
       capabilities: caps, sync: {version: 1, server_id: "cleanup-server", principal_id: "cleanup-principal", checkpoint: checkpoint(0)}}
       : url.pathname === "/events" ? {events: [], next_cursor: 0, head_cursor: 0, sync: {checkpoint: checkpoint(0)}}
@@ -52,9 +58,71 @@ async function setup(page: Page, native: boolean, custom: (input: any, url: URL)
 }
 
 for (const native of [false, true]) {
+  test(`cleanup history distinguishes task lifecycle from reviewed authority (${native ? 'native' : 'browser'})`, async ({page}) => {
+    await setup(page, native, (_, url) => url.pathname === '/cleanup-tombstones' ? {status: 200, data: {
+      tombstones: ['reviewed_cleanup', 'task_lifecycle', 'historical_task_cleanup'].map((reason, index) => ({...item,
+        resource_id: 'wt_' + String(index).repeat(32), actor: reason === 'historical_task_cleanup' ? null : 'fixture',
+        reason, cleaned_at: 1})), next_cursor: null}} : null);
+    await page.goto('/dashboard/#/cleanup');
+    await expect(page.getByText('Removed by a reviewed cleanup operation.', {exact: true})).toHaveCount(1);
+    await expect(page.getByText('Automatically cleaned by the task service', {exact: false})).toBeVisible();
+    await expect(page.getByText('Historical record from an earlier task cleanup event', {exact: false})).toBeVisible();
+  });
+  test(`task cleanup keeps coordinator verdict and refuses dirty-task discard (${native ? 'native' : 'browser'})`, async ({page}) => {
+    const tid = '11111111-2222-4333-8444-555555555555', previews: any[] = [];
+    await setup(page, native, (input, url) => {
+      if (url.pathname === '/cleanup-previews') {
+        previews.push(input.body);
+        return {status: 200, data: {preview: {...preview, target: input.body.target, items: [{...item, task_owned: true,
+          task_cleanup: {eligible: true, task_ids: [tid]}, reasons: [{code: 'RESULTS_NOT_DELIVERED'}, {code: 'UNCOMMITTED_CHANGES'}]}]}}};
+      }
+    });
+    await page.goto('/dashboard/#/cleanup/task/'+tid);
+    await expect(page.getByRole('combobox', {name: 'Choose a scope'})).toHaveValue('task');
+    await expect(page.getByRole('textbox', {name: 'Host name or original ID'})).toHaveValue(tid);
+    await page.getByRole('button', {name: 'Preview cleanup', exact: true}).click();
+    expect(previews[0].target).toEqual({kind: 'task', task_id: tid});
+    await expect(page.locator('article.cleanup-resource').getByRole('checkbox', {name: /uncommitted|Discard/i})).toHaveCount(0);
+    await expect(page.locator('article.cleanup-resource input[type=checkbox]')).toHaveCount(1);
+    await page.locator('article.cleanup-resource summary').click();
+    await expect(page.locator('article.cleanup-resource pre')).toContainText('task_cleanup');
+  });
+  test(`cleanup auth after lost reply retains its exact key and accepted reload only reads (${native ? 'native' : 'browser'})`, async ({page}) => {
+    const writes: any[] = []; let outcome = 'lost';
+    const {errors, reads} = await setup(page, native, (input, url) => {
+      if (input.method === 'POST' && url.pathname === '/operations') {
+        writes.push(input);
+        return outcome === 'lost' ? {status: 503, data: {error: {code: 'LOST', message: 'Lost reply'}}}
+          : outcome === 'auth' ? {status: 403, data: {error: {code: 'FORBIDDEN', message: 'Scope unavailable'}}}
+          : {status: 200, data: {operation: {operation_id: oid, status: 'accepted'}}};
+      }
+    });
+    await page.goto('/dashboard/#/cleanup');
+    await page.getByRole('textbox', {name: 'Host name or original ID'}).fill('demo');
+    await page.getByRole('button', {name: 'Preview cleanup', exact: true}).click();
+    await page.getByRole('checkbox', {name: 'I reviewed the resources', exact: false}).check();
+    await page.getByRole('button', {name: 'Apply reviewed cleanup'}).click();
+    await expect(page.getByText('LOST Lost reply')).toBeVisible();
+    outcome = 'auth'; await page.reload();
+    await page.getByRole('button', {name: 'Apply reviewed cleanup'}).click();
+    await expect(page.locator('p.error')).toBeVisible();
+    await expect(page.getByRole('button', {name: 'Preview cleanup', exact: true})).toBeDisabled();
+    outcome = 'accepted'; await page.reload();
+    await page.getByRole('button', {name: 'Apply reviewed cleanup'}).click();
+    await expect(page.getByRole('link', {name: 'View item receipts'})).toHaveAttribute('href', '#/op/'+oid);
+    expect(new Set(writes.map(w => w.idempotency_key)).size).toBe(1);
+    expect(writes[2].body).toEqual(writes[0].body);
+    await page.reload(); await expect.poll(() => reads.includes('/operations/'+oid)).toBe(true);
+    await expect(page.getByRole('button', {name: 'Apply reviewed cleanup'})).toBeHidden();
+    expect(writes).toHaveLength(3); expect(errors).toEqual([]);
+  });
   test(`cleanup retains reviewed request after lost reply (${native ? "native" : "browser"})`, async ({page}) => {
     const writes: any[] = [];
-    const {errors} = await setup(page, native, (input, url) => {
+    let delaySnapshot = false;
+    let finishSnapshot!: () => void;
+    const snapshot = new Promise<void>(resolve => {finishSnapshot = resolve;});
+    const {errors} = await setup(page, native, async (input, url) => {
+      if (delaySnapshot && url.pathname === "/cleanup-retained") await snapshot;
       if (input.method === "POST" && url.pathname === "/operations") {
         writes.push(input);
         return writes.length === 1 ? {status: 503, data: {error: {code: "REPLY_LOST", message: "Fixture lost reply"}}}
@@ -68,9 +136,13 @@ for (const native of [false, true]) {
     await page.getByRole("checkbox", {name: "I reviewed the resources", exact: false}).check();
     await page.getByRole("button", {name: "Apply reviewed cleanup"}).click();
     await expect(page.getByText("REPLY_LOST Fixture lost reply")).toBeVisible();
+    delaySnapshot = true;
     await page.reload();
     await expect(page.getByText("1 resources to reclaim · 0 retained")).toBeVisible();
     await expect(page.getByRole("textbox", {name: "Host name or original ID"})).toBeDisabled();
+    await expect(page.getByRole("button", {name: "Apply reviewed cleanup"})).toBeDisabled();
+    expect(writes).toHaveLength(1);
+    finishSnapshot();
     await page.getByRole("button", {name: "Apply reviewed cleanup"}).click();
     await expect(page.getByRole("link", {name: "View item receipts"})).toHaveAttribute("href", "#/op/" + oid);
     expect(writes).toHaveLength(2);
@@ -80,6 +152,43 @@ for (const native of [false, true]) {
     expect(writes[1].body).toEqual({action: "cleanup.apply", target: {preview_id: preview.preview_id},
       params: {preview_token: preview.preview_token}, preconditions: {preview_fingerprint: preview.fingerprint}});
     expect(errors).toEqual([]);
+  });
+
+  test(`cleanup rejects a response for another key and preserves recovery after a fresh tab (${native ? 'native' : 'browser'})`, async ({page}) => {
+    const writes: any[] = []; let bad = true;
+    await setup(page, native, (input, url) => {
+      if (input.method === 'POST' && url.pathname === '/operations') {
+        writes.push(input);
+        return {status: 200, data: {operation: {operation_id: oid, status: 'accepted', idempotency_key: bad ? 'different-key' : input.idempotency_key}}};
+      }
+    });
+    await page.goto('/dashboard/#/cleanup');
+    await page.getByRole('textbox', {name: 'Host name or original ID'}).fill('demo');
+    await page.getByRole('button', {name: 'Preview cleanup', exact: true}).click();
+    await page.getByRole('checkbox', {name: 'I reviewed the resources', exact: false}).check();
+    await page.getByRole('button', {name: 'Apply reviewed cleanup'}).click();
+    await expect(page.locator('.error')).toContainText('does not match');
+    await expect(page.getByRole('link', {name: 'View item receipts'})).toHaveCount(0);
+    await page.evaluate(() => {for (const key of Object.keys(sessionStorage).filter(k => k.startsWith('batc.cleanup.'))) sessionStorage.removeItem(key);});
+    bad = false; await page.reload();
+    await expect(page.getByRole('textbox', {name: 'Host name or original ID'})).toBeDisabled();
+    await page.getByRole('button', {name: 'Apply reviewed cleanup'}).click();
+    await expect(page.getByRole('link', {name: 'View item receipts'})).toBeVisible();
+    expect(writes[1]).toEqual(writes[0]);
+  });
+
+  test(`expired cleanup admission permits only an explicit fresh preview (${native ? 'native' : 'browser'})`, async ({page}) => {
+    await setup(page, native, (input, url) => input.method === 'POST' && url.pathname === '/operations'
+      ? {status: 409, data: {error: {code: 'PREVIEW_EXPIRED', message: 'Review again'}}} : null);
+    await page.goto('/dashboard/#/cleanup');
+    await page.getByRole('textbox', {name: 'Host name or original ID'}).fill('demo');
+    await page.getByRole('button', {name: 'Preview cleanup', exact: true}).click();
+    await page.getByRole('checkbox', {name: 'I reviewed the resources', exact: false}).check();
+    await page.getByRole('button', {name: 'Apply reviewed cleanup'}).click();
+    await expect(page.getByRole('button', {name: 'Apply reviewed cleanup'})).toBeHidden();
+    await page.reload(); await page.getByRole('button', {name: 'Preview another cleanup'}).click();
+    await expect(page.getByRole('button', {name: 'Preview cleanup', exact: true})).toBeEnabled();
+    await expect(page.getByRole('button', {name: 'Apply reviewed cleanup'})).toBeDisabled();
   });
 
   test(`cleanup event updates history without discarding reviewed preview (${native ? "native" : "browser"})`, async ({page}) => {

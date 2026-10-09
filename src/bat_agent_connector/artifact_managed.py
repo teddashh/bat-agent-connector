@@ -10,7 +10,7 @@ from . import artifacts, checkpoints, registry, resource_policy, service
 from .errors import BatError
 from .operations import ActionDef, OperationError
 
-EXECUTIONS = frozenset({"checkpoint.continue", "integration.handoff", "session.send"})
+EXECUTIONS = frozenset({"checkpoint.continue", "integration.handoff", "session.send", "session.start"})
 
 
 def install(ops):
@@ -99,14 +99,23 @@ def lineage(ops, host, sid, entry, selector):
         started, start_receipt = _step(ops, oid, "session.start")
         start_time = ops.db.execute("SELECT started_at,finished_at FROM operation_steps WHERE operation_id=? AND name='session.start'",
                                      (oid,)).fetchone()
-        if (not start_time or not start_time["finished_at"]
-                or not start_time["started_at"] <= entry["created_at"] <= start_time["finished_at"]
+        reservation, reserved = _step(ops, oid, "session.reserve") if op["action"] == "session.start" else (None, None)
+        if op["action"] == "session.start":
+            incarnation_matches = (entry.get("start_operation_id") == oid and reservation and reserved
+                and reservation.get("session_id") == sid and reserved.get("session_id") == sid
+                and reserved.get("created_at") == entry["created_at"])
+        else:
+            incarnation_matches = start_time and start_time["finished_at"] and start_time["started_at"] <= entry["created_at"] <= start_time["finished_at"]
+        if (not start_time or not start_time["finished_at"] or not incarnation_matches
                 or not started or not start_receipt or started.get("session_id") != sid
                 or start_receipt.get("session_id") != sid or started.get("cwd") != entry.get("cwd")
                 or start_receipt.get("cwd") != entry.get("cwd")):
             _refuse()
     if target.get("host") != host or target.get("session_id") != sid:
         _refuse()
+    if op["action"] == "session.start" and (not start_receipt.get("started") or not request or not sent
+            or request.get("message_id") != "batc-" + oid or sent.get("host") != host or sent.get("session_id") != sid):
+        _refuse("initial prompt receipt does not match this standalone start")
     task_proof = {}
     if not owner and (refs.get("task_id") or bound.get("task_id")):
         _refuse("execution task ownership no longer matches")

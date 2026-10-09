@@ -2,6 +2,19 @@
 
 ## Next release (unreleased)
 
+- Add central durable `session.start`, exact workspace discovery and a shared start form. Save
+  the original request before submission; reconcile unknown start/send outcomes and preserve retained
+  worktrees for reviewed cleanup. Publish the same workflow in canonical agent skill `.8`.
+- Add fixed-selection batch approval and managed artifact capture/review to the shared UI. Preserve
+  each original request, operation and immutable revision across reloads and partial outcomes.
+- Add Task Service reviewed cleanup and automatic eligible lifecycle cleanup using the same central
+  ownership, control-version and live-consumer checks. Retain dirty/unique content and task history.
+- Add native file picker/drop uploads, bounded literal text/static PNG preview, and Save As for an
+  exact artifact revision. Rust owns local file handles, credentials and transfer recovery.
+- Prepare the Rust Fleet core: strict configuration and preference snapshots, Windows held-process
+  ownership and shared locks, plus bounded pinned-TLS/BAT and observe-only Connector probes. Desktop
+  runtime wiring, migration and installed Windows acceptance remain separate work.
+
 - Add durable `session.permissions` through HTTP, MCP, CLI and the shared browser/Tauri session controls.
   Preserve the caller, fixed session/task binding and operation key; record each Claude/Codex setting
   separately so partial or unknown outcomes cannot replay completed writes. Refuse a running Claude

@@ -325,18 +325,21 @@ async def _run(args) -> Any:
                 fleet, args.host, args.session, args.diff, args.max_diff_chars
             ), None
         if c == "start":
+            from .task_daemon import request
+            if not args.confirm:
+                raise WriteRefused("start needs --confirm")
+            # Central admission checks current tiers after replaying an existing key.
+            # A changed local tier must not hide a previously accepted start receipt.
             prompt = sys.stdin.read() if args.prompt == "-" else args.prompt
-            return await orchestrate.session_start(
-                fleet,
-                args.host,
-                args.workspace,
-                args.agent,
-                args.confirm,
-                prompt,
-                args.model,
-                not args.no_worktree,
-                args.title,
-            ), None
+            try:
+                out = await asyncio.to_thread(request, "session_start", _auth_token=os.environ.get("BATC_API_TOKEN"),
+                    host=args.host, workspace=args.workspace, agent=args.agent, confirm=True, prompt=prompt,
+                    model=args.model, use_worktree=not args.no_worktree, title=args.title,
+                    idempotency_key=args.key, entry="cli", timeout=40)
+            except OSError:
+                raise WriteRefused("central start request failed; its outcome may be unknown. "
+                                   "Read the saved operation or retry with the same explicit key") from None
+            return out, None
         if c == "merge":
             return await orchestrate.worktree_merge(fleet, args.host, args.session, args.confirm), None
         if c == "remove-worktree":
@@ -559,6 +562,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model")
     p.add_argument("--title")
     p.add_argument("--no-worktree", action="store_true")
+    p.add_argument("--key", help="stable operation key; omitted means a new independent start")
     p.add_argument("--confirm", action="store_true")
     p = sp.add_parser("merge", help="ORCHESTRATE: merge a clean worktree branch (never forced)")
     p.add_argument("host")
@@ -642,7 +646,7 @@ def build_parser() -> argparse.ArgumentParser:
     csp = p.add_subparsers(dest="cleanup_cmd", required=True)
     c = csp.add_parser("preview", help="pure read; signed plan expires after 15 minutes")
     targets = c.add_mutually_exclusive_group(required=True)
-    for flag in ("item", "checkpoint", "integration", "host"):
+    for flag in ("item", "checkpoint", "integration", "host", "task"):
         targets.add_argument("--" + flag)
     c.add_argument("--include-children", action="store_true")
     c.add_argument("--discard-uncommitted", action="append", default=[], metavar="RESOURCE_ID",
@@ -1032,7 +1036,8 @@ def cmd_resource_cleanup(args) -> int:
     if args.cleanup_cmd == "preview":
         kind, key, value = next((kind, key, getattr(args, flag)) for flag, kind, key in
             (("item", "work_item", "work_item_id"), ("checkpoint", "checkpoint", "checkpoint_id"),
-             ("integration", "integration", "operation_id"), ("host", "host", "host")) if getattr(args, flag))
+             ("integration", "integration", "operation_id"), ("host", "host", "host"),
+             ("task", "task", "task_id")) if getattr(args, flag))
         target = {"kind": kind, key: value}
         if args.include_children:
             target["include_children"] = True
@@ -1394,7 +1399,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         obj, render = asyncio.run(_run(args))
         _print(obj, args.json, render)
-        return 1 if args.cmd in {"send", "continue", "interrupt", "answer", "permissions"} and obj["operation_status"] in {"failed", "cancelled"} else 0
+        return 1 if args.cmd in {"start", "send", "continue", "interrupt", "answer", "permissions"} and obj["operation_status"] in {"failed", "cancelled"} else 0
     except (BatError, ValueError, OperationError) as e:
         print(f"error: {redact(e)}", file=sys.stderr)
         return 1

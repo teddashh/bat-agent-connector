@@ -90,6 +90,9 @@ enum CleanupTarget {
     Integration {
         operation_id: String,
     },
+    Task {
+        task_id: String,
+    },
 }
 
 #[derive(Default, Deserialize)]
@@ -128,6 +131,9 @@ fn validate_cleanup_preview(body: Option<&Value>) -> Result<(), String> {
         CleanupTarget::Integration { operation_id } => Regex::new(r"^op_[0-9a-f]{32}$")
             .unwrap()
             .is_match(&operation_id),
+        CleanupTarget::Task { task_id } => {
+            Regex::new(r"^[0-9a-f-]{8,64}$").unwrap().is_match(&task_id)
+        }
     };
     let resource = Regex::new(r"^(?:cr|wt)_[0-9a-f]{32}$").unwrap();
     if !valid_id
@@ -151,6 +157,7 @@ pub struct ConnectorResponse {
 
 #[derive(Serialize)]
 pub struct NativeStatus {
+    pub file_transfers: bool,
     pub endpoint: Option<String>,
     pub expected_actor: Option<String>,
     pub error: Option<String>,
@@ -161,6 +168,14 @@ pub struct NativeStatus {
     pub configuration_reload: bool,
     pub configuration_file: Option<String>,
     pub connected: bool,
+}
+
+// Never serialized: credential identity remains native-only even for identical actor/scopes.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct FileScope {
+    pub generation: u64,
+    pub binding: String,
+    pub actor: String,
 }
 
 #[derive(Clone)]
@@ -220,6 +235,28 @@ fn get(path: &str) -> ConnectorRequest {
 }
 
 impl Bridge {
+    #[cfg(test)]
+    pub(crate) fn file_fixture(endpoint: &str, token: &str) -> Self {
+        let config = Config {
+            endpoint: endpoint.into(),
+            expected_actor: "fixture-operator".into(),
+            contract_version: "2026-10-08".into(),
+        };
+        let bridge = Self::new(Ok(config.clone()), Zeroizing::new(token.into()));
+        bridge.state.lock().unwrap().active = Some(Active {
+            config: config.clone(),
+            record: Record {
+                version: 1,
+                binding: binding(&config),
+                token: Zeroizing::new(token.into()),
+                identity: Identity {
+                    server_id: "fixture-server".into(),
+                    principal_id: "fixture-principal".into(),
+                },
+            },
+        });
+        bridge
+    }
     pub fn load(config_dir: &Path, token: Zeroizing<String>) -> Self {
         let path = config_dir.join("central.json");
         let mut bridge = Self::new(read_configuration(&path), token);
@@ -267,6 +304,7 @@ impl Bridge {
         };
         let env = state.environment.is_some();
         NativeStatus {
+            file_transfers: true,
             endpoint: config.map(|c| c.endpoint.clone()),
             expected_actor: config.map(|c| c.expected_actor.clone()),
             error: state
@@ -556,6 +594,129 @@ impl Bridge {
         }
         Ok(response)
     }
+    pub(crate) fn file_scope(&self) -> Result<FileScope, String> {
+        use sha2::{Digest, Sha256};
+        let (generation, active) = self.active()?;
+        let mut digest = Sha256::new();
+        for part in [
+            binding(&active.config),
+            active.record.identity.server_id.clone(),
+            active.record.identity.principal_id.clone(),
+            active.record.token.to_string(),
+        ] {
+            let part = Zeroizing::new(part);
+            digest.update((part.len() as u64).to_be_bytes());
+            digest.update(part.as_bytes());
+        }
+        Ok(FileScope {
+            generation,
+            binding: format!("{:x}", digest.finalize()),
+            actor: active.config.expected_actor,
+        })
+    }
+
+    pub(crate) fn check_file_scope(&self, scope: &FileScope) -> Result<(), String> {
+        if self.file_scope()? != *scope {
+            return Err(
+                "File transfer connection changed; reconnect with the original credential".into(),
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn file_request(
+        &self,
+        scope: &FileScope,
+        input: ConnectorRequest,
+    ) -> Result<ConnectorResponse, String> {
+        validate_request(&input)?;
+        self.check_file_scope(scope)?;
+        let (generation, active) = self.active()?;
+        if generation != scope.generation {
+            return Err("File transfer connection changed".into());
+        }
+        self.verify(
+            &active.config,
+            &active.record.token,
+            Some(&active.record.identity),
+            generation,
+        )
+        .await?;
+        self.check_file_scope(scope)?;
+        let response = self
+            .send(&active.config, &active.record.token, &input)
+            .await?;
+        self.check_file_scope(scope)?;
+        Ok(response)
+    }
+
+    pub(crate) async fn file_content(
+        &self,
+        scope: &FileScope,
+        route: &str,
+        upload: Option<(reqwest::Body, u64)>,
+    ) -> Result<reqwest::Response, String> {
+        let download =
+            Regex::new(r"^/artifacts/art_[0-9a-f]{32}/revisions/[1-9][0-9]{0,8}/content$").unwrap();
+        let receiving = Regex::new(r"^/artifacts/uploads/op_[0-9a-f]{32}/content$").unwrap();
+        if !(if upload.is_some() {
+            receiving.is_match(route)
+        } else {
+            download.is_match(route)
+        }) {
+            return Err("Invalid file content route".into());
+        }
+        self.check_file_scope(scope)?;
+        let (generation, active) = self.active()?;
+        if generation != scope.generation {
+            return Err("File transfer connection changed".into());
+        }
+        self.verify(
+            &active.config,
+            &active.record.token,
+            Some(&active.record.identity),
+            generation,
+        )
+        .await?;
+        self.check_file_scope(scope)?;
+        let url = active
+            .config
+            .validate()?
+            .join(&format!("api/v1{route}"))
+            .map_err(|_| "Invalid content route")?;
+        let mut request = self
+            .client
+            .request(
+                if upload.is_some() {
+                    Method::POST
+                } else {
+                    Method::GET
+                },
+                url,
+            )
+            .bearer_auth(active.record.token.as_str())
+            .timeout(Duration::from_secs(300));
+        if let Some((body, size)) = upload {
+            if size > MAX_ARTIFACT_BYTES as u64 {
+                return Err("File exceeds native limit".into());
+            }
+            request = request
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", size)
+                .body(body);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| "File transfer interrupted; retain the original operation")?;
+        self.check_file_scope(scope)?;
+        if response.status().is_redirection() {
+            return Err("Central redirects are refused".into());
+        }
+        Ok(response)
+    }
+
+    #[cfg(test)]
     pub async fn upload_artifact(
         &self,
         operation_id: &str,
@@ -622,7 +783,9 @@ impl Bridge {
         Self::read_response(response).await
     }
 
-    async fn read_response(mut response: reqwest::Response) -> Result<ConnectorResponse, String> {
+    pub(crate) async fn read_response(
+        mut response: reqwest::Response,
+    ) -> Result<ConnectorResponse, String> {
         let status = response.status().as_u16();
         if (300..400).contains(&status) {
             return Err("Central redirects are refused".into());
@@ -686,6 +849,49 @@ fn validate_capture_preview(body: Option<&Value>) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedCapturePreviewRequest {
+    host: String,
+    session_id: String,
+    relative_path: String,
+    execution_operation_id: Option<String>,
+    task_id: Option<String>,
+    command_id: Option<String>,
+}
+
+fn validate_managed_capture_preview(body: Option<&Value>) -> Result<(), String> {
+    let value = body.ok_or("Managed capture preview body is required")?;
+    let doc: ManagedCapturePreviewRequest = serde_json::from_value(value.clone())
+        .map_err(|_| "Invalid typed managed capture preview request")?;
+    validate_capture_preview(Some(&serde_json::json!({
+        "host": doc.host, "session_id": doc.session_id, "relative_path": doc.relative_path
+    })))?;
+    // Exact selector field sets also reject explicit nulls and mixed selector kinds.
+    let fields = value.as_object().ok_or("Invalid managed capture fields")?;
+    let valid = match (&doc.execution_operation_id, &doc.task_id, &doc.command_id) {
+        (Some(operation), None, None) => {
+            fields.len() == 4
+                && Regex::new(r"^op_[0-9a-f]{32}$")
+                    .unwrap()
+                    .is_match(operation)
+        }
+        (None, Some(task), Some(command)) => {
+            fields.len() == 5
+                && Regex::new(r"^[0-9a-f-]{8,64}$").unwrap().is_match(task)
+                && !command.is_empty()
+                && command.len() <= 256
+                && !command.chars().any(char::is_control)
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err("Select one exact execution operation or task command".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 pub fn validate_artifact_upload(operation_id: &str, length: usize) -> Result<(), String> {
     static OPERATION: OnceLock<Regex> = OnceLock::new();
     if length > MAX_ARTIFACT_BYTES
@@ -739,7 +945,7 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
     static GET: OnceLock<Regex> = OnceLock::new();
     static POST: OnceLock<Regex> = OnceLock::new();
     let pattern = if input.method == "GET" {
-        GET.get_or_init(|| Regex::new(concat!(r"^/(?:version|capabilities|bootstrap|hosts|sessions|policy|operations|events|checkpoints|projects|work-items|integrations|integrations/candidates|",
+        GET.get_or_init(|| Regex::new(concat!(r"^/(?:version|capabilities|bootstrap|hosts|workspaces|sessions|policy|operations|events|checkpoints|projects|work-items|integrations|integrations/candidates|",
             r"cleanup-retained|cleanup-tombstones(?:/(?:cr|wt)_[0-9a-f]{32})?|artifacts(?:/art_[0-9a-f]{32}/revisions/[1-9][0-9]{0,8})?|",
             r"sessions/[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+(?:/(?:messages|checkpoint-preview|history|relations))?|",
             r"operations/op_[0-9a-f]{32}|tasks/[0-9a-f-]{8,64}(?:/(?:history|sessions))?|checkpoints/cp_[0-9a-f]{32}|",
@@ -749,7 +955,7 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             r"delivery/previews/mpv_[0-9a-f]{32}|integrations/previews/ipv_[0-9a-f]{32}|integrations/op_[0-9a-f]{32})$")).unwrap())
     } else if input.method == "POST" {
         POST.get_or_init(|| {
-            Regex::new(r"^/(?:artifact-capture-previews|cleanup-previews|operations(?:/op_[0-9a-f]{32}/(?:cancel|resume))?)$")
+            Regex::new(r"^/(?:approval-previews|artifact-capture-previews|artifact-managed-capture-previews|cleanup-previews|operations(?:/op_[0-9a-f]{32}/(?:cancel|resume))?)$")
                 .unwrap()
         })
     } else {
@@ -764,11 +970,73 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
         }
         validate_capture_preview(input.body.as_ref())?;
     }
+    if path == "/approval-previews" {
+        if input.path != path || input.idempotency_key.is_some() {
+            return Err("Approval preview accepts no query or operation key".into());
+        }
+        let body = input
+            .body
+            .as_ref()
+            .and_then(Value::as_object)
+            .ok_or("Approval preview needs a typed body")?;
+        if body
+            .keys()
+            .any(|key| !matches!(key.as_str(), "host" | "workspace"))
+            || !body
+                .get("host")
+                .and_then(Value::as_str)
+                .is_some_and(|host| {
+                    !host.is_empty()
+                        && host.len() <= 200
+                        && host
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+                })
+            || body.get("workspace").is_some_and(|value| {
+                !value.as_str().is_some_and(|workspace| {
+                    !workspace.is_empty()
+                        && workspace.len() <= 512
+                        && !workspace.chars().any(char::is_control)
+                })
+            })
+        {
+            return Err("Invalid approval preview scope".into());
+        }
+    }
+    if path == "/artifact-managed-capture-previews" {
+        if input.path != path || input.idempotency_key.is_some() {
+            return Err("Managed capture preview accepts no query or operation key".into());
+        }
+        validate_managed_capture_preview(input.body.as_ref())?;
+    }
     let cleanup = path.starts_with("/cleanup-");
+    if path == "/workspaces" && input.idempotency_key.is_some() {
+        return Err("Workspace discovery accepts no operation key".into());
+    }
     let mut query_keys = std::collections::HashSet::new();
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         if key.chars().chain(value.chars()).any(char::is_control) {
             return Err("Control characters in central query are refused".into());
+        }
+        if path == "/workspaces" {
+            let valid = match key.as_ref() {
+                "host" => {
+                    !value.is_empty()
+                        && value.len() <= 256
+                        && value
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+                }
+                "limit" => {
+                    value.bytes().all(|b| b.is_ascii_digit())
+                        && value.parse::<u16>().is_ok_and(|n| (1..=200).contains(&n))
+                }
+                _ => false,
+            };
+            if !valid || !query_keys.insert(key.to_string()) {
+                return Err("Workspace query parameter is invalid".into());
+            }
+            continue;
         }
         if cleanup {
             let allowed = match path {
@@ -880,6 +1148,42 @@ mod tests {
         thread,
     };
 
+    #[test]
+    fn workspace_discovery_has_fixed_bounded_read_contract() {
+        for path in [
+            "/workspaces",
+            "/workspaces?host=build-east&limit=200",
+            "/workspaces?limit=1",
+        ] {
+            assert!(validate_request(&request("GET", path)).is_ok(), "{path}");
+            assert!(validate_request(&request("POST", path)).is_err(), "{path}");
+        }
+        for path in [
+            "/workspaces?host=",
+            "/workspaces?host=a&host=b",
+            "/workspaces?limit=0",
+            "/workspaces?limit=201",
+            "/workspaces?limit=1&limit=2",
+            "/workspaces?limit=abc",
+            "/workspaces?limit=%2B1",
+            "/workspaces?host=../other",
+            "/workspaces?host=https%3A%2F%2Fother",
+            "/workspaces?host=x%0Ay",
+            "/workspaces?session_id=x",
+            "/workspaces?path=x",
+            "/%77orkspaces",
+            "/workspaces/other",
+        ] {
+            assert!(validate_request(&request("GET", path)).is_err(), "{path}");
+        }
+        let mut input = request("GET", "/workspaces?host=demo");
+        input.body = Some(serde_json::json!({"host":"other"}));
+        assert!(validate_request(&input).is_err());
+        input.body = None;
+        input.idempotency_key = Some("not-a-write".into());
+        assert!(validate_request(&input).is_err());
+    }
+
     fn request(method: &str, path: &str) -> ConnectorRequest {
         ConnectorRequest {
             method: method.into(),
@@ -887,6 +1191,42 @@ mod tests {
             body: None,
             idempotency_key: None,
         }
+    }
+
+    #[test]
+    fn approval_preview_has_a_fixed_typed_route_and_scope() {
+        let mut input = request("POST", "/approval-previews");
+        for body in [
+            serde_json::json!({"host": "demo"}),
+            serde_json::json!({"host": "demo", "workspace": "工作區 100%"}),
+        ] {
+            input.body = Some(body);
+            assert!(validate_request(&input).is_ok());
+        }
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"host": "https://other"}),
+            serde_json::json!({"host": "demo", "workspace": 1}),
+            serde_json::json!({"host": "demo", "workspace": "\n"}),
+            serde_json::json!({"host": "demo", "workspace": ""}),
+            serde_json::json!({"host": "demo", "force": true}),
+        ] {
+            input.body = Some(body);
+            assert!(validate_request(&input).is_err());
+        }
+        input.body = Some(serde_json::json!({"host": "demo"}));
+        for path in [
+            "/approval-previews?",
+            "/approval-previews?host=other",
+            "/approval-previews/other",
+        ] {
+            input.path = path.into();
+            assert!(validate_request(&input).is_err());
+        }
+        input.path = "/approval-previews".into();
+        input.idempotency_key = Some("operation-key".into());
+        assert!(validate_request(&input).is_err());
+        assert!(validate_request(&request("GET", "/approval-previews")).is_err());
     }
     fn config(endpoint: &str) -> Config {
         Config {
@@ -947,6 +1287,48 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn native_file_content_routes_refuse_queries_paths_and_redirects() {
+        let bridge = Bridge::file_fixture("http://127.0.0.1:9/", "secret");
+        let scope = bridge.file_scope().unwrap();
+        for path in [
+            "https://example.invalid/content",
+            "/artifacts/uploads/op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/content?token=x",
+            "/artifacts/art_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/revisions/1/../content",
+            "/artifacts/art_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/revisions/0/content",
+        ] {
+            assert!(bridge.file_content(&scope, path, None).await.is_err());
+        }
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let redirect=format!("HTTP/1.1 302 Found\r\nLocation: http://{}/never\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",target.local_addr().unwrap());
+        let (endpoint, received, server) = server(vec![
+            json_response(CAPS),
+            bootstrap_response("fixture-server", "fixture-principal"),
+            redirect,
+        ]);
+        let bridge = Bridge::file_fixture(&endpoint, "file-secret");
+        let scope = bridge.file_scope().unwrap();
+        assert!(bridge
+            .file_content(
+                &scope,
+                "/artifacts/art_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/revisions/1/content",
+                None
+            )
+            .await
+            .err()
+            .unwrap()
+            .contains("redirect"));
+        assert!(target.accept().is_err());
+        for _ in 0..3 {
+            assert!(received
+                .recv()
+                .unwrap()
+                .to_lowercase()
+                .contains("authorization: bearer file-secret"));
+        }
+        server.join().unwrap();
+    }
     #[test]
     fn artifact_upload_boundaries_and_read_routes_are_fixed() {
         let operation = format!("op_{}", "a".repeat(32));
@@ -1175,6 +1557,10 @@ mod tests {
             serde_json::json!({"target":{"kind":"host","host":"demo"},"headers":{"Authorization":"fake"}}),
             serde_json::json!({"target":{"kind":"host","host":"demo"},"choices":{"discard_uncommitted":["/tmp/path"]}}),
             serde_json::json!({"target":{"kind":"host","host":"demo"},"choices":{"release_undelivered":vec![rid;501]}}),
+            serde_json::json!({"target":{"kind":"task","task_id":"../file"}}),
+            serde_json::json!({"target":{"kind":"task","task_id":"11111111-2222-4333-8444-555555555555","force":true}}),
+            serde_json::json!({"target":{"kind":"task","task_id":"11111111-2222-4333-8444-555555555555","include_children":true}}),
+            serde_json::json!({"target":{"kind":"task","task_id":"11111111-2222-4333-8444-555555555555"},"origin":"task_lifecycle"}),
         ] {
             preview.body = Some(body);
             assert!(validate_request(&preview).is_err());
@@ -1183,6 +1569,7 @@ mod tests {
             serde_json::json!({"kind":"work_item","work_item_id":"wi_aaaaaaaaaaaaaaaaaaaa","include_children":true}),
             serde_json::json!({"kind":"checkpoint","checkpoint_id":"cp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}),
             serde_json::json!({"kind":"integration","operation_id":"op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}),
+            serde_json::json!({"kind":"task","task_id":"11111111-2222-4333-8444-555555555555"}),
         ] {
             preview.body = Some(serde_json::json!({"target":target}));
             assert!(validate_request(&preview).is_ok());
@@ -1814,5 +2201,46 @@ mod tests {
         assert!(bridge.connect().await.is_err());
         assert!(listener.accept().is_err());
         assert!(!bridge.status().connected);
+    }
+    #[test]
+    fn managed_capture_preview_keeps_exact_selector_and_read_boundary() {
+        let mut input = request("POST", "/artifact-managed-capture-previews");
+        let operation = serde_json::json!({"host":"demo", "session_id":"managed-session",
+                "relative_path":"result/report.txt", "execution_operation_id":"op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"});
+        let command = serde_json::json!({"host":"demo", "session_id":"managed-session",
+                "relative_path":"result/report.txt", "task_id":"11111111-2222-4333-8444-555555555555", "command_id":"cmd-original"});
+        for value in [&operation, &command] {
+            input.body = Some(value.clone());
+            assert!(validate_request(&input).is_ok());
+        }
+        for (field, value) in [
+            ("relative_path", serde_json::json!("../outside")),
+            ("relative_path", serde_json::json!(".git/config")),
+            ("execution_operation_id", serde_json::json!(null)),
+            ("execution_operation_id", serde_json::json!("short")),
+            ("task_id", serde_json::json!("11111111")),
+            ("command_id", serde_json::json!(null)),
+            ("lineage", serde_json::json!({"kind":"execution_operation"})),
+            ("force", serde_json::json!(true)),
+            ("headers", serde_json::json!({"Authorization":"fixture"})),
+        ] {
+            let mut bad = operation.clone();
+            bad[field] = value;
+            input.body = Some(bad);
+            assert!(validate_request(&input).is_err());
+        }
+        input.body = Some(operation);
+        for path in [
+            "/artifact-managed-capture-previews?",
+            "/artifact-managed-capture-previews?host=demo",
+            "/artifact-managed-capture-previews/other",
+        ] {
+            input.path = path.into();
+            assert!(validate_request(&input).is_err());
+        }
+        input.path = "/artifact-managed-capture-previews".into();
+        input.idempotency_key = Some("not-an-operation".into());
+        assert!(validate_request(&input).is_err());
+        assert!(validate_request(&request("GET", "/artifact-managed-capture-previews")).is_err());
     }
 }

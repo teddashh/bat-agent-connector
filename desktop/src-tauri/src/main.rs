@@ -2,14 +2,17 @@
 
 mod bridge;
 mod credentials;
+mod files;
 mod fleet;
 
 use bridge::{Bridge, ConnectorRequest, ConnectorResponse, NativeStatus};
+use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
     Manager, State, WebviewWindow,
 };
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use zeroize::Zeroizing;
 
@@ -59,7 +62,10 @@ fn local_main(window: &WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn native_status(window: WebviewWindow, state: State<'_, Bridge>) -> Result<NativeStatus, String> {
+fn native_status(
+    window: WebviewWindow,
+    state: State<'_, Arc<Bridge>>,
+) -> Result<NativeStatus, String> {
     local_main(&window)?;
     Ok(state.status())
 }
@@ -67,14 +73,17 @@ fn native_status(window: WebviewWindow, state: State<'_, Bridge>) -> Result<Nati
 #[tauri::command]
 async fn connector_connect(
     window: WebviewWindow,
-    state: State<'_, Bridge>,
+    state: State<'_, Arc<Bridge>>,
 ) -> Result<serde_json::Value, String> {
     local_main(&window)?;
     state.connect().await
 }
 
 #[tauri::command]
-fn connector_disconnect(window: WebviewWindow, state: State<'_, Bridge>) -> Result<(), String> {
+fn connector_disconnect(
+    window: WebviewWindow,
+    state: State<'_, Arc<Bridge>>,
+) -> Result<(), String> {
     local_main(&window)?;
     state.disconnect();
     Ok(())
@@ -83,7 +92,7 @@ fn connector_disconnect(window: WebviewWindow, state: State<'_, Bridge>) -> Resu
 #[tauri::command]
 fn connector_reload_configuration(
     window: WebviewWindow,
-    state: State<'_, Bridge>,
+    state: State<'_, Arc<Bridge>>,
 ) -> Result<NativeStatus, String> {
     local_main(&window)?;
     state.reload_configuration()
@@ -92,7 +101,7 @@ fn connector_reload_configuration(
 #[tauri::command]
 fn connector_forget_credential(
     window: WebviewWindow,
-    state: State<'_, Bridge>,
+    state: State<'_, Arc<Bridge>>,
 ) -> Result<(), String> {
     local_main(&window)?;
     state.forget_credential()
@@ -101,7 +110,7 @@ fn connector_forget_credential(
 #[tauri::command]
 async fn connector_enroll(
     window: WebviewWindow,
-    state: State<'_, Bridge>,
+    state: State<'_, Arc<Bridge>>,
     locale: credentials::Locale,
 ) -> Result<Option<serde_json::Value>, String> {
     local_main(&window)?;
@@ -115,31 +124,151 @@ async fn connector_enroll(
 #[tauri::command]
 async fn connector_request(
     window: WebviewWindow,
-    state: State<'_, Bridge>,
+    state: State<'_, Arc<Bridge>>,
     input: ConnectorRequest,
 ) -> Result<ConnectorResponse, String> {
     local_main(&window)?;
     state.request(input).await
 }
 
+struct NativeFiles(Result<Arc<files::Files>, String>);
+impl NativeFiles {
+    fn get(&self) -> Result<Arc<files::Files>, String> {
+        self.0.clone()
+    }
+}
+
 #[tauri::command]
-async fn connector_upload_artifact(
+fn native_files_status(
     window: WebviewWindow,
-    state: State<'_, Bridge>,
-    request: tauri::ipc::Request<'_>,
-) -> Result<ConnectorResponse, String> {
+    state: State<'_, NativeFiles>,
+) -> Result<files::Status, String> {
     local_main(&window)?;
-    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
-        return Err("Artifact upload requires raw binary IPC bytes".into());
+    state.get()?.status()
+}
+#[tauri::command]
+async fn native_files_pick(
+    window: WebviewWindow,
+    state: State<'_, NativeFiles>,
+    draft_id: String,
+) -> Result<Vec<files::Receipt>, String> {
+    local_main(&window)?;
+    files::validate_draft(&draft_id)?;
+    let files = state.get()?;
+    let _dialog = files
+        .dialog
+        .try_lock()
+        .map_err(|_| "A native file dialog is already open")?;
+    let scope = files.scope()?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .pick_files(move |paths| {
+            let _ = tx.send(paths);
+        });
+    let Some(paths) = rx.await.map_err(|_| "File dialog interrupted")? else {
+        return Ok(Vec::new());
     };
-    let operation_id = request
-        .headers()
-        .get("x-batc-upload-operation")
-        .and_then(|value| value.to_str().ok())
-        .ok_or("Upload operation ID is required")?;
-    // The one IPC metadata field is validated; no IPC header is forwarded to HTTP.
-    bridge::validate_artifact_upload(operation_id, bytes.len())?;
-    state.upload_artifact(operation_id, bytes).await
+    let paths = paths
+        .into_iter()
+        .map(|p| {
+            p.into_path()
+                .map_err(|_| "Only local regular files are supported".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    files.pick_paths(scope, &draft_id, paths).await
+}
+#[tauri::command]
+fn native_files_drop_target(
+    window: WebviewWindow,
+    state: State<'_, NativeFiles>,
+    draft_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    local_main(&window)?;
+    state.get()?.drop_target(draft_id, enabled)
+}
+#[tauri::command]
+fn native_files_upload(
+    window: WebviewWindow,
+    state: State<'_, NativeFiles>,
+    handle_id: String,
+) -> Result<files::Receipt, String> {
+    local_main(&window)?;
+    state.get()?.start_upload(&handle_id)
+}
+async fn save_file(
+    window: &WebviewWindow,
+    files: Arc<files::Files>,
+    reference: files::ArtifactRef,
+    existing: Option<String>,
+) -> Result<Option<files::Receipt>, String> {
+    let _dialog = files
+        .dialog
+        .try_lock()
+        .map_err(|_| "A native file dialog is already open")?;
+    let scope = files.scope()?;
+    let metadata = files.save_metadata(&scope, &reference).await?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let name = metadata["display_name"]
+        .as_str()
+        .filter(|name| !name.contains(['/', '\\', ':']))
+        .unwrap_or("artifact");
+    window
+        .dialog()
+        .file()
+        .set_parent(window)
+        .set_file_name(name)
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let Some(path) = rx.await.map_err(|_| "Save dialog interrupted")? else {
+        return Ok(None);
+    };
+    let path = path
+        .into_path()
+        .map_err(|_| "Only local destinations are supported")?;
+    let destination = files::Destination::from_selection(&path)?;
+    files
+        .save(scope, reference, metadata, destination, existing)
+        .map(Some)
+}
+#[tauri::command]
+async fn native_files_save(
+    window: WebviewWindow,
+    state: State<'_, NativeFiles>,
+    reference: files::ArtifactRef,
+) -> Result<Option<files::Receipt>, String> {
+    local_main(&window)?;
+    save_file(&window, state.get()?, reference, None).await
+}
+#[tauri::command]
+async fn native_files_control(
+    window: WebviewWindow,
+    state: State<'_, NativeFiles>,
+    transfer_id: String,
+    action: files::Control,
+) -> Result<(), String> {
+    local_main(&window)?;
+    let files = state.get()?;
+    if matches!(action, files::Control::Retry) {
+        if let Ok(reference) = files.download_reference(&transfer_id) {
+            save_file(&window, files, reference, Some(transfer_id)).await?;
+            return Ok(());
+        }
+    }
+    files.control(&transfer_id, action).await
+}
+#[tauri::command]
+async fn native_files_preview(
+    window: WebviewWindow,
+    state: State<'_, NativeFiles>,
+    reference: files::ArtifactRef,
+) -> Result<files::Preview, String> {
+    local_main(&window)?;
+    state.get()?.preview(&reference).await
 }
 
 fn show(app: &tauri::AppHandle) {
@@ -157,8 +286,14 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
-            app.manage(Bridge::load(&app.path().app_config_dir()?, token));
+            let bridge = Arc::new(Bridge::load(&app.path().app_config_dir()?, token));
+            app.manage(NativeFiles(files::Files::open(
+                &app.path().app_local_data_dir()?.join("file-transfers"),
+                bridge.clone(),
+            )));
+            app.manage(bridge);
             app.manage(fleet::FleetBridge::load(&app.path().app_config_dir()?));
             let config = app.config().app.windows[0].clone();
             tauri::WebviewWindowBuilder::from_config(app, &config)?
@@ -194,7 +329,29 @@ fn main() {
             tray.build(app)?;
             Ok(())
         })
+        .on_webview_event(|webview, event| {
+            if webview.label() == "main" {
+                if let tauri::WebviewEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) =
+                    event
+                {
+                    if let Ok(files) = webview.state::<NativeFiles>().get() {
+                        let paths = paths.clone();
+                        tauri::async_runtime::spawn(files.dropped(paths));
+                    }
+                }
+            }
+        })
         .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) =
+                    event
+                {
+                    if let Ok(files) = window.state::<NativeFiles>().get() {
+                        let paths = paths.clone();
+                        tauri::async_runtime::spawn(files.dropped(paths));
+                    }
+                }
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // Never stop central tasks: this app has no daemon or Fleet ownership.
                 if window.hide().is_ok() {
@@ -203,6 +360,13 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            native_files_status,
+            native_files_pick,
+            native_files_drop_target,
+            native_files_upload,
+            native_files_save,
+            native_files_control,
+            native_files_preview,
             native_status,
             connector_connect,
             connector_disconnect,
@@ -210,7 +374,6 @@ fn main() {
             connector_forget_credential,
             connector_enroll,
             connector_request,
-            connector_upload_artifact,
             fleet_availability,
             fleet_request,
             open_external

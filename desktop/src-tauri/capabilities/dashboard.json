@@ -13,9 +13,15 @@
     "allow-connector-forget-credential",
     "allow-connector-enroll",
     "allow-connector-request",
-    "allow-connector-upload-artifact",
     "allow-open-external",
     "allow-fleet-availability",
-    "allow-fleet-request"
+    "allow-fleet-request",
+    "allow-native-files-status",
+    "allow-native-files-pick",
+    "allow-native-files-drop-target",
+    "allow-native-files-upload",
+    "allow-native-files-save",
+    "allow-native-files-control",
+    "allow-native-files-preview"
   ]
 }
