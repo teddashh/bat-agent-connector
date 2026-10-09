@@ -765,11 +765,11 @@ def check_artifact_storage(path) -> None:
 
 
 def check_artifact_destination(hc: HostConfig, clone: str, worktree: str, branch: str,
-                               relative_path: str) -> None:
-    """Materialization extends the shared checkpoint policy, never arbitrary managed paths."""
+                               relative_path: str, *, published: bool = False) -> None:
+    """Inputs use an exact checkpoint or published carrier, never arbitrary managed paths."""
     import re
 
-    check_checkpoint_worktree(hc, clone, worktree, branch)
+    (check_published_worktree if published else check_checkpoint_worktree)(hc, clone, worktree, branch)
     parts = relative_path.split("/") if isinstance(relative_path, str) else []
     if (len(parts) != 3 or parts[0] != ".batc-inputs"
             or not re.fullmatch(r"art_[0-9a-f]{32}-r[1-9][0-9]*", parts[1])

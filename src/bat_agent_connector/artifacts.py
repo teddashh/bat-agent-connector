@@ -648,7 +648,7 @@ def _material_state(ctx, mat, state, evidence=None):
     ctx.set_refs(materializations=materializations(ctx.service.db, operation_id=ctx.operation_id))
 
 
-async def materialize(ctx, checkpoint, clone, worktree, branch, refs):
+async def materialize(ctx, checkpoint, clone, worktree, branch, refs, *, published_binding=None, before_transfer=None):
     host, ops = checkpoint["host"], ctx.service
     adapter, store = ops.context["artifact_host"], ops.context["artifact_store"]
     if refs:
@@ -658,7 +658,8 @@ async def materialize(ctx, checkpoint, clone, worktree, branch, refs):
     for ref in refs:
         revision = get(ops.db, ref["artifact_id"], ref["revision"])
         relative = f".batc-inputs/{ref['artifact_id']}-r{ref['revision']}/{safe_name(revision['display_name'])}"
-        resource_policy.check_artifact_destination(ops.context["fleet"].config.host(host), clone, worktree, branch, relative)
+        resource_policy.check_artifact_destination(ops.context["fleet"].config.host(host), clone, worktree, branch, relative,
+                                                   published=published_binding is not None)
         mat = "mat_" + manifest_digest([ctx.operation_id, ref["artifact_id"], ref["revision"]])[:32]
         with ops.journal.tx():
             ops.db.execute("""INSERT OR IGNORE INTO artifact_materializations(materialization_id,operation_id,
@@ -672,12 +673,16 @@ async def materialize(ctx, checkpoint, clone, worktree, branch, refs):
             ops.db.execute("UPDATE artifact_materializations SET attempt=?,state='transferring' WHERE materialization_id=?", (row["attempt"], mat))
         request = {"clone": clone, "worktree": worktree, "operation_id": ctx.operation_id, "ref": ref,
                    "name": revision["display_name"], "attempt": row["attempt"], "size_bytes": revision["size_bytes"]}
+        if published_binding is not None:
+            request["published_binding"] = published_binding
 
         async def transfer(request=request, ref=ref):
             try:
                 content = store.read_content(ref["artifact_id"], ref["revision"])
             except OperationError as exc:
                 return {"ok": False, "code": exc.code, "source": "store", "observed_at": time.time()}
+            if before_transfer is not None:
+                await before_transfer()
             evidence = await adapter.call(host, {**request, "mode": "receive"}, content)
             if evidence.get("uncertain"):
                 from .operations import AmbiguousOutcome
@@ -733,14 +738,22 @@ async def dispatch_guard(ctx, checkpoint, clone, worktree, branch, refs):
     log = await client.invoke("git:log", {"cwd": worktree, "count": 1})
     if root != worktree or not log or log[0].get("hash") != checkpoint["commit_sha"]:
         raise NeedsAttention("START_MISMATCH", "target start changed before the first command")
+    await verify_materializations(ctx, checkpoint, clone, worktree, branch)
+
+
+async def verify_materializations(ctx, checkpoint, clone, worktree, branch, *, published_binding=None):
+    fleet = ctx.service.context["fleet"]
     adapter = ctx.service.context["artifact_host"]
     for row in materializations(ctx.service.db, operation_id=ctx.operation_id):
         revision = get(ctx.service.db, row["artifact_id"], row["revision"])
         ref = {"artifact_id": row["artifact_id"], "revision": row["revision"], "digest": row["digest"]}
         relative = f".batc-inputs/{row['artifact_id']}-r{row['revision']}/{revision['display_name']}"
-        resource_policy.check_artifact_destination(fleet.config.host(checkpoint["host"]), clone, worktree, branch, relative)
+        resource_policy.check_artifact_destination(fleet.config.host(checkpoint["host"]), clone, worktree, branch, relative,
+                                                   published=published_binding is not None)
         request = {"clone": clone, "worktree": worktree, "operation_id": ctx.operation_id, "ref": ref,
                    "name": revision["display_name"], "attempt": row["attempt"], "size_bytes": revision["size_bytes"]}
+        if published_binding is not None:
+            request["published_binding"] = published_binding
         evidence = await adapter.call(checkpoint["host"], {**request, "mode": "verify"})
         code = _materialization_error(evidence, request)
         _material_state(ctx, row["materialization_id"], "blocked" if code else "verified", {**evidence, **({"code": code} if code else {})})

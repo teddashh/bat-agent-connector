@@ -1,6 +1,7 @@
 // One explicitly published head and one new managed session. Central owns every effect.
 const object = v => v && typeof v === 'object' && !Array.isArray(v);
-const equal = (a, b) => a === b || (object(a) && object(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every(k => equal(a[k], b[k])));
+const equal = (a, b) => a === b || (Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => equal(v, b[i]))) ||
+  (object(a) && object(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every(k => equal(a[k], b[k])));
 const text = (v, max) => typeof v === 'string' && v.trim().length > 0 && v.length <= max && !/[\x00-\x1f\x7f]/.test(v);
 const oid = v => typeof v === 'string' && /^op_[0-9a-f]{32}$/.test(v);
 const sha = v => typeof v === 'string' && /^[0-9a-f]{40}$/.test(v);
@@ -10,11 +11,18 @@ const target = v => object(v) && Object.keys(v).length === 3 && ['repository', '
 const ref = v => typeof v === 'string' && /^refs\/heads\/(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*@\{)[A-Za-z0-9._/-]{1,200}$/.test(v) &&
   !/[./]$/.test(v) && v.slice(11).split('/').every(p => !p.startsWith('.') && !p.endsWith('.lock'));
 const preconditions = v => object(v) && Object.keys(v).length === 2 && Number.isSafeInteger(v.repository_id) && v.repository_id > 0 && digest(v.binding_digest);
-const validRequest = r => r?.action === 'repository.continue' && target(r.target) && preconditions(r.preconditions) && object(r.params) &&
-  Object.keys(r.params).every(k => ['agent', 'prompt', 'title', 'source_ref', 'source_sha'].includes(k)) &&
+const projectId = v => typeof v === 'string' && /^prj_[0-9a-f]{20}$/.test(v);
+const artifactRefs = v => Array.isArray(v) && v.every(r => object(r) && Object.keys(r).length === 3 &&
+  /^art_[0-9a-f]{32}$/.test(r.artifact_id) && Number.isSafeInteger(r.revision) && r.revision > 0 && digest(r.digest));
+const requestPreconditions = r => object(r.params) && 'project_id' in r.params ? projectId(r.params.project_id) && object(r.preconditions) &&
+  Number.isSafeInteger(r.preconditions.expected_project_version) && r.preconditions.expected_project_version > 0 &&
+  preconditions(Object.fromEntries(Object.entries(r.preconditions).filter(([k]) => k !== 'expected_project_version'))) : preconditions(r.preconditions);
+const validRequest = r => r?.action === 'repository.continue' && target(r.target) && requestPreconditions(r) && object(r.params) &&
+  Object.keys(r.params).every(k => ['agent', 'prompt', 'title', 'model', 'artifacts', 'project_id', 'source_ref', 'source_sha'].includes(k)) &&
   ref(r.params.source_ref) && sha(r.params.source_sha) && ['claude', 'codex'].includes(r.params.agent) &&
   typeof r.params.prompt === 'string' && r.params.prompt.trim() && r.params.prompt.length <= 12000 &&
-  (!('title' in r.params) || text(r.params.title, 256));
+  ['title', 'model'].every(k => !(k in r.params) || text(r.params[k], 256)) &&
+  (!('artifacts' in r.params) || artifactRefs(r.params.artifacts));
 const validPreview = (p, input) => object(p) && equal(p.target, input.target) && p.source_ref === input.source_ref &&
   sha(p.source_sha) && p.exact_ref_head_only === true && preconditions(p.preconditions) &&
   p.repository_id === p.preconditions.repository_id && p.binding_digest === p.preconditions.binding_digest &&
@@ -22,30 +30,42 @@ const validPreview = (p, input) => object(p) && equal(p.target, input.target) &&
   (p.workspace.name == null || typeof p.workspace.name === 'string');
 // Both are checked after existing-key replay, before the operation is inserted.
 const noAdmission = new Set(['REPOSITORY_NOT_BOUND', 'REPOSITORY_HOST_UNAVAILABLE']);
-export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, opStatus, storageKey}) {
+export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, opStatus, storageKey, project = null, attachmentFactory}) {
   let raw; try {raw = JSON.parse(localStorage.getItem(storageKey));} catch { /* new draft */ }
   let saved = {target: target(raw?.target) ? raw.target : null, source_ref: typeof raw?.source_ref === 'string' ? raw.source_ref : '',
-    agent: ['claude', 'codex'].includes(raw?.agent) ? raw.agent : 'claude', prompt: typeof raw?.prompt === 'string' ? raw.prompt : '', title: typeof raw?.title === 'string' ? raw.title : ''};
+    agent: ['claude', 'codex'].includes(raw?.agent) ? raw.agent : 'claude', prompt: typeof raw?.prompt === 'string' ? raw.prompt : '',
+    model: typeof raw?.model === 'string' ? raw.model : '', title: typeof raw?.title === 'string' ? raw.title : ''};
   if (raw?.intent) {
-    const valid = validRequest(raw.intent.request) && text(raw.intent.key, 200);
+    const valid = validRequest(raw.intent.request) && text(raw.intent.key, 200) && (!project || raw.intent.request.params.project_id === project);
     saved.intent = {request: valid ? raw.intent.request : null, key: valid ? raw.intent.key : null,
       operation_id: oid(raw.intent.operation_id) ? raw.intent.operation_id : null,
       refused: !raw.intent.operation_id && noAdmission.has(raw.intent.refused) ? raw.intent.refused : null};
-    if (valid) Object.assign(saved, {target: raw.intent.request.target, title: ''}, raw.intent.request.params);
+    if (valid) Object.assign(saved, {target: raw.intent.request.target, title: '', model: ''}, raw.intent.request.params);
   }
   let preview = null, operation = null, busy = false, reading = false, sequence = 0, readFailed = false, submission = null, refreshing = null;
+  let projectDoc = null, projectFailed = Boolean(project), previewProjectVersion = null, autoSelect = !raw, projectQueue = Promise.resolve();
   const current = () => {try {guard(); return true;} catch {return false;}};
   const persist = () => {guard(); localStorage.setItem(storageKey, JSON.stringify(saved));};
   const observe = () => caps()?.scopes?.includes('observe');
   const allowed = () => observe() && caps()?.scopes?.includes('start') && caps()?.actions?.some(a => a.action === 'repository.continue' && a.allowed === true);
-  const bindings = () => (caps()?.features?.repository_sync || []).filter(b => b.exact_ref_head_only === true && target({repository: b.repository, host: b.host, workspace_id: b.workspace_id}));
+  const expanded = () => caps()?.features?.project_dispatch?.version === 1;
+  const projectReady = () => !project || expanded() && projectDoc && !projectDoc.archived && !projectFailed;
+  const bindings = () => (caps()?.features?.repository_sync || []).filter(b => b.exact_ref_head_only === true &&
+    target({repository: b.repository, host: b.host, workspace_id: b.workspace_id}) &&
+    (!project || projectDoc?.repositories?.some(r => r.toLowerCase() === b.repository.toLowerCase())));
   const bound = () => bindings().some(b => equal({repository: b.repository, host: b.host, workspace_id: b.workspace_id}, saved.target));
   const hostAllowed = () => caps()?.hosts?.some(h => h.host === saved.target?.host && h.writes === true && h.orchestrate === true);
   const status = h('div', {role: 'status'}), facts = h('div', {'data-published-preview': ''}), outcome = h('div', {'data-published-result': ''});
+  const projectStatus = h('div', {role: 'status', 'data-dispatch-project': ''});
   const binding = h('select', {'aria-label': t('pub_binding')}), sourceRef = h('input', {'aria-label': t('pub_ref'), maxlength: 211, placeholder: 'refs/heads/main'});
   const agent = h('select', {'aria-label': t('start_agent')}, h('option', {value: 'claude'}, 'Claude'), h('option', {value: 'codex'}, 'Codex'));
   const prompt = h('textarea', {'aria-label': t('pub_prompt'), maxlength: 12000, rows: 5}), title = h('input', {'aria-label': t('start_title'), maxlength: 256});
-  const inputs = {source_ref: sourceRef, agent, prompt, title};
+  const model = h('input', {'aria-label': t('start_model'), maxlength: 256, placeholder: t('start_model_default')});
+  const inputs = {source_ref: sourceRef, agent, prompt, title, model};
+  prompt.value = saved.prompt;
+  const attachments = expanded() && attachmentFactory ? attachmentFactory(prompt, () => {if (current()) update();}) : null;
+  if (attachments && !saved.intent) saved.prompt = prompt.value;
+  const attachmentBox = attachments ? h('fieldset', {class: 'dispatch-attachments'}, attachments.box) : null;
   const key = b => JSON.stringify(b);
   function fill() {
     binding.replaceChildren(h('option', {value: ''}, t('pub_choose')), ...bindings().map(b => {
@@ -59,16 +79,18 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
   const showError = e => {if (current()) status.replaceChildren(errorBox(e));};
   const selected = () => ({target: saved.target, source_ref: saved.source_ref});
   const request = () => ({action: 'repository.continue', target: saved.target,
-    params: {source_ref: preview?.source_ref, source_sha: preview?.source_sha, agent: saved.agent, prompt: saved.prompt, ...(saved.title ? {title: saved.title} : {})},
-    preconditions: preview?.preconditions});
+    params: {source_ref: preview?.source_ref, source_sha: preview?.source_sha, agent: saved.agent, prompt: saved.prompt,
+      ...(saved.title ? {title: saved.title} : {}), ...(saved.model && expanded() ? {model: saved.model} : {}),
+      ...(attachments?.refs().length ? {artifacts: attachments.refs()} : {}), ...(project ? {project_id: project} : {})},
+    preconditions: preview ? {...preview.preconditions, ...(project ? {expected_project_version: previewProjectVersion} : {})} : null});
   const inspect = h('button', {class: 'secondary', onclick: async () => {
-    if (!current() || saved.intent || reading || !observe() || !ready() || !bound() || !ref(saved.source_ref)) return;
-    const expected = ++sequence, input = selected(); preview = null; reading = true; update(); status.replaceChildren();
+    if (!current() || saved.intent || reading || !observe() || !ready() || !projectReady() || !bound() || !ref(saved.source_ref)) return;
+    const expected = ++sequence, input = selected(), projectVersion = projectDoc?.version; preview = null; reading = true; update(); status.replaceChildren();
     try {
       const doc = await api('POST', '/repository-previews', {...input.target, source_ref: input.source_ref}); guard();
       if (expected !== sequence || saved.intent || !equal(input, selected())) return;
       if (!validPreview(doc.preview, input)) throw new Error(t('pub_invalid_preview'));
-      preview = doc.preview;
+      preview = doc.preview; previewProjectVersion = projectVersion;
     } catch (e) {if (expected === sequence) showError(e);}
     finally {if (expected === sequence && current()) {reading = false; update();}}
   }}, t('pub_preview'));
@@ -80,7 +102,8 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
     const result = candidate.result, refs = candidate.external_refs || {};
     for (const [name, value] of Object.entries({host: intent.request.target.host, repository: intent.request.target.repository,
       repository_id: intent.request.preconditions.repository_id, source_ref: intent.request.params.source_ref,
-      source_sha: intent.request.params.source_sha, repository_binding: intent.request.preconditions.binding_digest})) {
+      source_sha: intent.request.params.source_sha, repository_binding: intent.request.preconditions.binding_digest,
+      ...(intent.request.params.project_id ? {project_id: intent.request.params.project_id} : {})})) {
       if (name in refs && refs[name] !== value) throw new Error(t('pub_invalid_result'));
     }
     if (result != null && (!object(result) || result.host !== intent.request.target.host || result.workspace_id !== intent.request.target.workspace_id ||
@@ -93,8 +116,9 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
   const apply = h('button', {class: 'primary', onclick: async () => {
     if (!current() || busy || readFailed || !ready() || !allowed() || saved.intent?.operation_id || saved.intent?.refused) return;
     if (!saved.intent) {
-      if (!preview || !validPreview(preview, selected()) || !bound() || !hostAllowed() || !validRequest(request())) return;
-      saved.intent = {request: request(), key: crypto.randomUUID(), operation_id: null};
+      if (!projectReady() || !preview || !validPreview(preview, selected()) || !bound() || !hostAllowed() ||
+          attachments && !attachments.ready() || !validRequest(request())) return;
+      saved.intent = {request: structuredClone(request()), key: crypto.randomUUID(), operation_id: null};
     }
     if (!saved.intent.request || !saved.intent.key) return;
     try {persist();} catch (e) {showError(e); update(); return;}
@@ -108,10 +132,10 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
   }}, t('pub_apply'));
   const check = h('button', {class: 'secondary', onclick: () => refresh(true).catch(() => {})}, t('permissions_check'));
   const another = h('button', {class: 'secondary', onclick: () => {
-    if (!current() || busy || refreshing || readFailed || !(terminal(operation) || saved.intent?.refused)) return;
-    const previous = saved; saved = {target: saved.target, source_ref: saved.source_ref, agent: saved.agent, prompt: '', title: ''};
+    if (!current() || busy || refreshing || readFailed || attachments && !attachments.ready() || !(terminal(operation) || saved.intent?.refused)) return;
+    const previous = saved; saved = {target: saved.target, source_ref: saved.source_ref, agent: saved.agent, prompt: '', title: '', model: saved.model};
     try {persist();} catch (e) {saved = previous; showError(e); return;}
-    operation = preview = null; status.replaceChildren(); fill(); update();
+    operation = preview = null; status.replaceChildren(); attachments?.reset(); fill(); update();
   }}, t('pub_new'));
   function change(field, value) {
     if (!current() || saved.intent || busy) {fill(); return;}
@@ -122,22 +146,28 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
   binding.addEventListener('change', () => change('target', binding.value ? JSON.parse(binding.value) : null));
   for (const [field, el] of Object.entries(inputs)) el.addEventListener(field === 'agent' ? 'change' : 'input', () => change(field, el.value));
   const label = (name, el) => h('label', {}, t(name), el);
+  const advanced = h('details', {class: 'dispatch-advanced', open: Boolean(saved.model || saved.title)},
+    h('summary', {}, t('dispatch_advanced')), h('div', {class: 'capture-fields'}, label('start_title', title), label('start_model', model)));
   const box = h('section', {class: 'session-start published-start', 'data-published-start': ''},
+    project ? projectStatus : null,
     h('div', {class: 'panel'}, h('div', {class: 'capture-fields'}, label('pub_binding', binding), label('pub_ref', sourceRef)), h('p', {class: 'muted'}, t('pub_head_only')),
       h('div', {class: 'actions'}, inspect), facts),
-    h('div', {class: 'panel'}, h('div', {class: 'capture-fields'}, label('start_agent', agent), label('start_title', title)), label('pub_prompt', prompt),
+    h('div', {class: 'panel'}, h('div', {class: 'capture-fields'}, label('start_agent', agent), !project ? label('start_title', title) : null,
+      !project && expanded() ? label('start_model', model) : null), label('pub_prompt', prompt), project ? advanced : null, attachmentBox,
       h('p', {class: 'muted'}, t('pub_isolation'))), h('div', {class: 'actions'}, apply, check, another), outcome, status);
   function update() {
     const fixed = Boolean(saved.intent);
+    if (attachmentBox) {attachmentBox.disabled = fixed || busy; attachmentBox.hidden = fixed;}
     binding.disabled = fixed || busy;
     for (const el of Object.values(inputs)) el.disabled = fixed || busy;
-    inspect.hidden = fixed; inspect.disabled = reading || !observe() || !ready() || !bound() || !ref(saved.source_ref);
+    inspect.hidden = fixed; inspect.disabled = reading || !observe() || !ready() || !projectReady() || !bound() || !ref(saved.source_ref);
     inspect.textContent = t(reading ? 'pub_loading' : 'pub_preview');
     apply.hidden = Boolean(saved.intent?.operation_id || saved.intent?.refused); apply.textContent = t(fixed ? 'permissions_retry' : 'pub_apply');
     apply.disabled = busy || readFailed || !ready() || !allowed() || (fixed ? !saved.intent.request || !saved.intent.key :
-      reading || !preview || !validPreview(preview, selected()) || !bound() || !hostAllowed() || !validRequest(request()));
+      reading || !projectReady() || !preview || !validPreview(preview, selected()) || !bound() || !hostAllowed() ||
+      attachments && !attachments.ready() || !validRequest(request()));
     check.hidden = !saved.intent?.operation_id; check.disabled = busy || Boolean(refreshing);
-    another.hidden = !(terminal(operation) || saved.intent?.refused); another.disabled = busy || Boolean(refreshing) || readFailed;
+    another.hidden = !(terminal(operation) || saved.intent?.refused); another.disabled = busy || Boolean(refreshing) || readFailed || Boolean(attachments && !attachments.ready());
     facts.replaceChildren(); const original = saved.intent?.request;
     if (preview || original) {
       const r = original || request();
@@ -148,12 +178,14 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
     }
     outcome.replaceChildren();
     if (!allowed()) outcome.append(h('p', {class: 'muted'}, t('pub_unavailable')));
-    else if (!bindings().length && !fixed) outcome.append(h('p', {class: 'muted'}, t('pub_no_bindings')));
+    else if (!bindings().length && !fixed) outcome.append(h('p', {class: 'muted'}, t(project ? 'dispatch_no_bindings' : 'pub_no_bindings')));
     if (!fixed) return;
     outcome.append(h('p', {}, operation ? opStatus(operation) : t(saved.intent.refused ? 'start_refused' : 'start_unknown'), ' ',
       saved.intent.operation_id ? h('a', {href: `#/op/${saved.intent.operation_id}`}, t('permissions_details')) : null,
       operation?.status_reason ? ` · ${operation.status_reason}` : ''), h('p', {class: 'muted'}, t('pub_fixed')));
     if (!original || !saved.intent.key) outcome.append(h('p', {class: 'error'}, t('permissions_damaged')));
+    if (original?.params.artifacts?.length) outcome.append(h('p', {class: 'muted'}, t('dispatch_fixed_inputs')),
+      h('ul', {class: 'dispatch-fixed-inputs'}, ...original.params.artifacts.map(r => h('li', {}, `${r.artifact_id} · r${r.revision} · ${r.digest}`))));
     const complete = operation?.status === 'succeeded' && operation.result?.message_id === `batc-${operation.operation_id}`;
     const proof = complete ? operation.result : operation?.steps?.some(s => s.name === 'session.start' && s.status === 'succeeded') &&
       text(operation.external_refs?.session_id, 256) ? {host: saved.target.host, session_id: operation.external_refs.session_id} : null;
@@ -168,6 +200,36 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
     try {await refreshing;} catch (e) {if (current()) {readFailed = true; showError(e); update();} throw e;}
     finally {refreshing = null; if (current()) update();}
   }
+  async function readProject() {
+    if (!project) return;
+    try {
+      const {project: p} = await api('GET', `/projects/${encodeURIComponent(project)}`); guard();
+      if (p?.project_id !== project || !Number.isSafeInteger(p.version) || p.version < 1 || !Array.isArray(p.repositories) ||
+          p.repositories.some(r => typeof r !== 'string')) throw new Error(t('dispatch_project_unavailable'));
+      if (projectDoc && (p.version !== projectDoc.version || !equal(p.repositories, projectDoc.repositories) || p.archived !== projectDoc.archived)) {
+        preview = null; previewProjectVersion = null; sequence++; reading = false;
+      }
+      projectDoc = p; projectFailed = false;
+      if (autoSelect && !saved.intent && !saved.target && bindings().length === 1) {
+        const b = bindings()[0]; saved.target = {repository: b.repository, host: b.host, workspace_id: b.workspace_id}; persist();
+      }
+      autoSelect = false;
+      // Rebuild only the destination choices; focused instruction/advanced drafts remain mounted.
+      const values = Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value])); fill();
+      for (const [k, value] of Object.entries(values)) inputs[k].value = value;
+      projectStatus.replaceChildren(h('p', {}, h('a', {href: `#/project/${project}`}, p.name)),
+        h('p', {class: 'muted'}, t(p.archived ? 'dispatch_archived' : expanded() ? 'dispatch_project_help' : 'dispatch_unsupported')));
+      update();
+    } catch (e) {if (current()) {projectFailed = true; projectStatus.replaceChildren(errorBox(e)); update();} throw e;}
+  }
+  function loadProject() {
+    projectQueue = projectQueue.catch(() => {}).then(() => {guard(); return readProject();});
+    return projectQueue;
+  }
   fill(); update();
-  return {box, update, refresh, init: refresh};
+  const refreshAll = async () => {
+    const results = await Promise.allSettled([loadProject(), refresh(true)]);
+    const failed = results.find(r => r.status === 'rejected'); if (failed) throw failed.reason;
+  };
+  return {box, update, refresh: project ? refreshAll : refresh, init: project ? refreshAll : refresh};
 }

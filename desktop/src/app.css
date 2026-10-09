@@ -289,6 +289,13 @@ button.mini.on { color: var(--warn); border-color: var(--warn); }
 .session-start textarea { display: block; margin-top: 4px; }
 .session-start select, .session-start input { min-width: 0; max-width: 100%; }
 .session-start [data-start-result] { overflow-wrap: anywhere; }
+.dispatch-attachments { border: 0; padding: 0; margin: 14px 0 0; min-width: 0; }
+.dispatch-advanced { margin-top: 14px; }
+.dispatch-advanced > summary { cursor: pointer; color: var(--accent); padding: 8px 0; }
+.dispatch-fixed-inputs { overflow-wrap: anywhere; padding-left: 20px; }
+@media (max-width: 640px) {
+  .dispatch-advanced > summary { min-height: 44px; align-content: center; }
+}
 @media (max-width: 640px) {
   .session-start button, .session-start select, .session-start input, .session-heading > a { min-height: 44px; align-content: center; }
 }

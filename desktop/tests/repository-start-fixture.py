@@ -18,6 +18,7 @@ from bat_agent_connector.task_daemon import TaskDaemon
 from tests.fakegithub import TOKEN as GH_TOKEN
 from tests.fakegithub import FakeGitHub
 from tests.mockbat import TOKEN, MockBat
+from tests.test_artifacts import LocalArtifactHost, action, upload
 from tests.test_checkpoints import RealGitLog, bat_writes, git, snapshot
 from tests.test_repository_sync import Runner
 
@@ -72,6 +73,19 @@ async def main():
                     break
                 if command['action'] == 'writes':
                     daemon.fleet.config.host('h1').writes = command['enabled']
+                elif command['action'] == 'prepare-project':
+                    project = await action(daemon, 'project.create', params={'name': 'Dispatch fixture', 'repositories': ['o/r']})
+                    project_id = project['result']['project_id']
+                    artifact = await upload(daemon, b'fixed project input\n')
+                    daemon.ops.context['artifact_host'] = LocalArtifactHost()
+                    print(json.dumps({'project_id': project_id, 'artifact': artifact}), flush=True)
+                    continue
+                elif command['action'] == 'archive-project':
+                    version = daemon.journal.db.execute('SELECT version FROM projects WHERE project_id=?',
+                        (command['project_id'],)).fetchone()[0]
+                    edit = await action(daemon, 'project.update', target={'project_id': command['project_id']},
+                        params={'archived': command['archived']}, pre={'expected_version': version})
+                    assert edit['status'] == 'succeeded', edit
                 elif command['action'] == 'lose-send':
                     mock.echo_sends = False
                     client, original = daemon.fleet.client('h1'), daemon.fleet.client('h1').invoke
@@ -81,12 +95,27 @@ async def main():
                             raise InvokeTimeout('fixture actual send ACK lost')
                         return result
                     client.invoke = lose
-                elif command['action'] == 'verify':
+                elif command['action'] in {'verify', 'verify-project'}:
                     op = daemon.ops.get(command['operation_id'])
                     assert op['actor'] == 'published-browser' and op['action'] == 'repository.continue'
                     assert op['params']['source_sha'] == sha and op['params']['prompt'] == command['prompt']
                     assert op['status'] == command['status'], op
-                    assert len(daemon.ops.list()['operations']) == command['operations']
+                    operations = daemon.ops.list()['operations']
+                    if command['action'] == 'verify-project':
+                        operations = [o for o in operations if o['action'] == 'repository.continue']
+                        assert op['params']['project_id'] == command['project_id']
+                        assert op['preconditions']['expected_project_version'] == command['version']
+                        assert op['params']['artifacts'] == [command['artifact']]
+                        assert op['params']['model'] == 'selected-model'
+                        ref = command['artifact']
+                        path = Path(op['external_refs']['worktree_path'], '.batc-inputs', f"{ref['artifact_id']}-r1", 'notes.txt')
+                        assert path.read_bytes() == b'fixed project input\n'
+                        frames = bat_writes(mock)
+                        assert all(f['params']['options']['model'] == 'selected-model' for f in frames if f['channel'] == 'claude:start-session')
+                        sends = [f['params']['prompt'] for f in frames if f['channel'] == 'claude:send-message']
+                        assert any(command['prompt'] in p and ref['digest'] in p and '.batc-inputs/' in p for p in sends)
+                        assert not daemon.journal.db.execute('SELECT 1 FROM work_items').fetchone()
+                    assert len(operations) == command['operations']
                     sid = op['external_refs']['session_id']
                     assert registry.get('h1', sid)['start_operation_id'] == op['operation_id']
                     assert git(op['external_refs']['worktree_path'], 'rev-parse', 'HEAD') == sha
