@@ -50,6 +50,14 @@ pub fn startup_directory() -> Result<PathBuf> {
     }
     Ok(path)
 }
+/// Fixed OS installation root for native helper discovery; never PATH or WebView input.
+pub fn program_files_directory() -> Result<PathBuf> {
+    let raw = unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramFiles, KF_FLAG_DONT_VERIFY, None) }
+        .map_err(|_| "INSTALLATION_UNAVAILABLE")?;
+    let text = unsafe { raw.to_string() }.map_err(|_| "INSTALLATION_INVALID");
+    unsafe { CoTaskMemFree(Some(raw.0.cast())) };
+    canonical_local(&PathBuf::from(text?))
+}
 pub struct Codec {
     client: String,
     native: String,
