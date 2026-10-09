@@ -115,9 +115,19 @@ async def select(ops, target, params, pre):
     if sid:
         tab, ws = await service._resolve_session(client, sid)
         sid = tab['id']
+        # Journal ownership survives missing/drifted registry evidence. A task control
+        # refusal can never select the independent-start compatibility fallback.
+        owner = task_control.owner_task(fleet, host, sid)
+        if owner:
+            coordinator = ops.context.get('coordinator')
+            if coordinator is None:
+                raise TaskControlRefused('TASK_OWNER_UNAVAILABLE', 'relay task owner is unavailable')
+            task_control.check(coordinator.journal, owner, host, sid, 'send', pre.get('control_version'))
         try:
             await resource_policy.authorize_session(fleet, host, 'session.send', tab)
         except ResourceReadOnly as exc:
+            if owner or task_control.owner_task(fleet, host, sid):
+                raise
             denied = {'read_only': True, 'read_only_code': exc.code, 'reason': str(exc)}
     else:
         ws = await service._workspace(client)
@@ -145,7 +155,9 @@ async def select(ops, target, params, pre):
         head = log[0].get('hash') if isinstance(log, list) and log and isinstance(log[0], dict) else None
         if not root or not isinstance(branch, str) or not head:
             raise StepFailed('RELAY_WORKSPACE_UNPROVEN', 'new relay source Git identity is unavailable')
-        return {**out, 'route': 'start', 'workspace_id': w['id'], 'folder': w['folderPath'], 'origin_root': root,
+        if sid and task_control.owner_task(fleet, host, sid):
+            raise TaskControlRefused('TASK_OWNED_CONTROL_REQUIRED', 'task ownership appeared before relay fallback')
+        return {**out, 'route': 'start', 'source_session_id': sid, 'workspace_id': w['id'], 'folder': w['folderPath'], 'origin_root': root,
                 'source_branch': branch, 'base_commit': head}
     kind = service.agent_kind(tab.get('agentPreset'))
     if kind not in {'claude', 'codex'}:
@@ -201,9 +213,12 @@ def check_child(ctx, *, start_plan=None):
         task_control.check_binding(ctx)
         from .cleanup import guard
         guard(host, session_id=sid, path=plan['registry'].get('worktree_path') or plan['registry'].get('cwd'))
-    elif start_plan is not None and any(start_plan.get(k) != plan.get(k) for k in
-            ('host', 'workspace_id', 'folder', 'origin_root', 'source_branch', 'base_commit')):
-        raise TaskControlRefused('RELAY_BINDING_CHANGED', 'new relay workspace or source changed')
+    else:
+        if plan.get('source_session_id') and task_control.owner_task(fleet, host, plan['source_session_id']):
+            raise TaskControlRefused('TASK_OWNED_CONTROL_REQUIRED', 'task-owned relay source cannot start an independent successor')
+        if start_plan is not None and any(start_plan.get(k) != plan.get(k) for k in
+                ('host', 'workspace_id', 'folder', 'origin_root', 'source_branch', 'base_commit')):
+            raise TaskControlRefused('RELAY_BINDING_CHANGED', 'new relay workspace or source changed')
     return plan
 
 

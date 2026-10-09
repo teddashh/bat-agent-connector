@@ -376,3 +376,54 @@ async def test_lost_selection_receipt_is_read_only_and_does_not_create_duplicate
     assert out['status'] == 'succeeded' and len(api.write_frames(mock)) == 1
     assert len(daemon.ops.list()['operations']) == 2
     await daemon.fleet.close()
+
+
+async def test_actual_cli_dry_run_reads_through_central_without_operation(served, mock, monkeypatch, capsys):
+    import asyncio
+
+    from bat_agent_connector import cli
+    d, port = served
+    monkeypatch.setenv('BATC_TASK_URL', f'http://127.0.0.1:{port}/rpc')
+    monkeypatch.setenv('BATC_API_TOKEN', api.token(d, 'preview-only', 'observe'))
+    monkeypatch.setattr(cli, 'load_config', lambda _: d.fleet.config)
+    rc = await asyncio.to_thread(cli.main, ['--json', '--read-only', 'relay', 'h1', '--session', SID,
+                                          '--message', WORDS, '--dry-run'])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out['dry_run'] is True and out['sent'] is False and WORDS in out['text']
+    assert 'operation_status' not in out and not d.ops.list()['operations'] and not api.write_frames(mock)
+
+
+@pytest.mark.parametrize('state', ['paused', 'done', 'failed', 'uncertain'])
+@pytest.mark.parametrize('drift', ['cwd', 'lost_registry_owner'])
+async def test_task_ownership_before_readonly_fallback_never_creates_successor(owned, mock, state, drift):
+    d, tid = owned
+    mock.handlers['git:log'] = lambda p: [{'hash': 'a' * 40}]
+    if state == 'paused':
+        d.journal.pause(tid)
+    else:
+        d.journal.db.execute('UPDATE tasks SET state=? WHERE task_id=?', (state, tid))
+    if drift == 'cwd':
+        registry.update('h1', SID, cwd='/srv/changed-binding')
+    else:
+        registry.update('h1', SID, task_id=None, role=None)
+    out = await create(d, params={'message': WORDS, 'start_if_missing': True})
+    assert out['status'] == 'failed', out
+    assert len(d.ops.list()['operations']) == 1 and not api.write_frames(mock)
+    assert not d.journal.commands(tid)
+    assert (d.journal.get(tid)['paused'] if state == 'paused' else d.journal.get(tid)['state'] == state)
+
+
+async def test_new_task_ownership_after_manual_selection_refuses_fallback_frame(owned, mock, monkeypatch):
+    d, tid = owned
+    source = 'sess-codex-0002'  # Manual source at selection time, not the task's current SID.
+    mock.handlers['git:log'] = lambda p: [{'hash': 'a' * 40}]
+    original = relay.create_child
+    def rebind(ctx, plan):
+        result = original(ctx, plan)
+        d.journal.db.execute('UPDATE tasks SET session_id=? WHERE task_id=?', (source, tid))
+        return result
+    monkeypatch.setattr(relay, 'create_child', rebind)
+    out = await create(d, target={'host': 'h1', 'session_id': source}, params={'message': WORDS, 'start_if_missing': True})
+    assert out['status'] == 'failed' and not api.write_frames(mock), out
+    assert out['error_code'] == 'TASK_OWNED_CONTROL_REQUIRED'

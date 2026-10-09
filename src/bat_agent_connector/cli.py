@@ -1450,7 +1450,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         obj, render = asyncio.run(_run(args))
         _print(obj, args.json, render)
-        return 1 if args.cmd in {"relay", "start", "send", "continue", "interrupt", "answer", "permissions"} and obj["operation_status"] in {"failed", "cancelled"} else 0
+        return 1 if args.cmd in {"relay", "start", "send", "continue", "interrupt", "answer", "permissions"} and obj.get("operation_status") in {"failed", "cancelled"} else 0
     except (BatError, ValueError, OperationError) as e:
         print(f"error: {redact(e)}", file=sys.stderr)
         return 1
