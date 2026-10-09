@@ -14,11 +14,18 @@ mod route_probe;
 pub mod selection;
 pub mod selection_io;
 pub mod strict_json;
+pub mod supervisor;
+pub mod supervisor_control;
+pub mod supervisor_io;
+pub mod supervisor_probe;
+pub mod supervisor_status;
 pub mod tunnel;
 #[cfg(windows)]
 pub mod windows;
 #[cfg(windows)]
 pub mod windows_launcher;
+#[cfg(windows)]
+pub mod windows_supervisor;
 #[cfg(windows)]
 pub mod windows_tunnel;
 
