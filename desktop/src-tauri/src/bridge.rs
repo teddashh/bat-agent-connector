@@ -157,6 +157,7 @@ pub struct ConnectorResponse {
 
 #[derive(Serialize)]
 pub struct NativeStatus {
+    pub file_transfers: bool,
     pub endpoint: Option<String>,
     pub expected_actor: Option<String>,
     pub error: Option<String>,
@@ -167,6 +168,14 @@ pub struct NativeStatus {
     pub configuration_reload: bool,
     pub configuration_file: Option<String>,
     pub connected: bool,
+}
+
+// Never serialized: credential identity remains native-only even for identical actor/scopes.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct FileScope {
+    pub generation: u64,
+    pub binding: String,
+    pub actor: String,
 }
 
 #[derive(Clone)]
@@ -226,6 +235,28 @@ fn get(path: &str) -> ConnectorRequest {
 }
 
 impl Bridge {
+    #[cfg(test)]
+    pub(crate) fn file_fixture(endpoint: &str, token: &str) -> Self {
+        let config = Config {
+            endpoint: endpoint.into(),
+            expected_actor: "fixture-operator".into(),
+            contract_version: "2026-10-08".into(),
+        };
+        let bridge = Self::new(Ok(config.clone()), Zeroizing::new(token.into()));
+        bridge.state.lock().unwrap().active = Some(Active {
+            config: config.clone(),
+            record: Record {
+                version: 1,
+                binding: binding(&config),
+                token: Zeroizing::new(token.into()),
+                identity: Identity {
+                    server_id: "fixture-server".into(),
+                    principal_id: "fixture-principal".into(),
+                },
+            },
+        });
+        bridge
+    }
     pub fn load(config_dir: &Path, token: Zeroizing<String>) -> Self {
         let path = config_dir.join("central.json");
         let mut bridge = Self::new(read_configuration(&path), token);
@@ -273,6 +304,7 @@ impl Bridge {
         };
         let env = state.environment.is_some();
         NativeStatus {
+            file_transfers: true,
             endpoint: config.map(|c| c.endpoint.clone()),
             expected_actor: config.map(|c| c.expected_actor.clone()),
             error: state
@@ -562,6 +594,129 @@ impl Bridge {
         }
         Ok(response)
     }
+    pub(crate) fn file_scope(&self) -> Result<FileScope, String> {
+        use sha2::{Digest, Sha256};
+        let (generation, active) = self.active()?;
+        let mut digest = Sha256::new();
+        for part in [
+            binding(&active.config),
+            active.record.identity.server_id.clone(),
+            active.record.identity.principal_id.clone(),
+            active.record.token.to_string(),
+        ] {
+            let part = Zeroizing::new(part);
+            digest.update((part.len() as u64).to_be_bytes());
+            digest.update(part.as_bytes());
+        }
+        Ok(FileScope {
+            generation,
+            binding: format!("{:x}", digest.finalize()),
+            actor: active.config.expected_actor,
+        })
+    }
+
+    pub(crate) fn check_file_scope(&self, scope: &FileScope) -> Result<(), String> {
+        if self.file_scope()? != *scope {
+            return Err(
+                "File transfer connection changed; reconnect with the original credential".into(),
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn file_request(
+        &self,
+        scope: &FileScope,
+        input: ConnectorRequest,
+    ) -> Result<ConnectorResponse, String> {
+        validate_request(&input)?;
+        self.check_file_scope(scope)?;
+        let (generation, active) = self.active()?;
+        if generation != scope.generation {
+            return Err("File transfer connection changed".into());
+        }
+        self.verify(
+            &active.config,
+            &active.record.token,
+            Some(&active.record.identity),
+            generation,
+        )
+        .await?;
+        self.check_file_scope(scope)?;
+        let response = self
+            .send(&active.config, &active.record.token, &input)
+            .await?;
+        self.check_file_scope(scope)?;
+        Ok(response)
+    }
+
+    pub(crate) async fn file_content(
+        &self,
+        scope: &FileScope,
+        route: &str,
+        upload: Option<(reqwest::Body, u64)>,
+    ) -> Result<reqwest::Response, String> {
+        let download =
+            Regex::new(r"^/artifacts/art_[0-9a-f]{32}/revisions/[1-9][0-9]{0,8}/content$").unwrap();
+        let receiving = Regex::new(r"^/artifacts/uploads/op_[0-9a-f]{32}/content$").unwrap();
+        if !(if upload.is_some() {
+            receiving.is_match(route)
+        } else {
+            download.is_match(route)
+        }) {
+            return Err("Invalid file content route".into());
+        }
+        self.check_file_scope(scope)?;
+        let (generation, active) = self.active()?;
+        if generation != scope.generation {
+            return Err("File transfer connection changed".into());
+        }
+        self.verify(
+            &active.config,
+            &active.record.token,
+            Some(&active.record.identity),
+            generation,
+        )
+        .await?;
+        self.check_file_scope(scope)?;
+        let url = active
+            .config
+            .validate()?
+            .join(&format!("api/v1{route}"))
+            .map_err(|_| "Invalid content route")?;
+        let mut request = self
+            .client
+            .request(
+                if upload.is_some() {
+                    Method::POST
+                } else {
+                    Method::GET
+                },
+                url,
+            )
+            .bearer_auth(active.record.token.as_str())
+            .timeout(Duration::from_secs(300));
+        if let Some((body, size)) = upload {
+            if size > MAX_ARTIFACT_BYTES as u64 {
+                return Err("File exceeds native limit".into());
+            }
+            request = request
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", size)
+                .body(body);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| "File transfer interrupted; retain the original operation")?;
+        self.check_file_scope(scope)?;
+        if response.status().is_redirection() {
+            return Err("Central redirects are refused".into());
+        }
+        Ok(response)
+    }
+
+    #[cfg(test)]
     pub async fn upload_artifact(
         &self,
         operation_id: &str,
@@ -628,7 +783,9 @@ impl Bridge {
         Self::read_response(response).await
     }
 
-    async fn read_response(mut response: reqwest::Response) -> Result<ConnectorResponse, String> {
+    pub(crate) async fn read_response(
+        mut response: reqwest::Response,
+    ) -> Result<ConnectorResponse, String> {
         let status = response.status().as_u16();
         if (300..400).contains(&status) {
             return Err("Central redirects are refused".into());
@@ -692,6 +849,7 @@ fn validate_capture_preview(body: Option<&Value>) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 pub fn validate_artifact_upload(operation_id: &str, length: usize) -> Result<(), String> {
     static OPERATION: OnceLock<Regex> = OnceLock::new();
     if length > MAX_ARTIFACT_BYTES
@@ -1022,6 +1180,48 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn native_file_content_routes_refuse_queries_paths_and_redirects() {
+        let bridge = Bridge::file_fixture("http://127.0.0.1:9/", "secret");
+        let scope = bridge.file_scope().unwrap();
+        for path in [
+            "https://example.invalid/content",
+            "/artifacts/uploads/op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/content?token=x",
+            "/artifacts/art_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/revisions/1/../content",
+            "/artifacts/art_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/revisions/0/content",
+        ] {
+            assert!(bridge.file_content(&scope, path, None).await.is_err());
+        }
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let redirect=format!("HTTP/1.1 302 Found\r\nLocation: http://{}/never\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",target.local_addr().unwrap());
+        let (endpoint, received, server) = server(vec![
+            json_response(CAPS),
+            bootstrap_response("fixture-server", "fixture-principal"),
+            redirect,
+        ]);
+        let bridge = Bridge::file_fixture(&endpoint, "file-secret");
+        let scope = bridge.file_scope().unwrap();
+        assert!(bridge
+            .file_content(
+                &scope,
+                "/artifacts/art_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/revisions/1/content",
+                None
+            )
+            .await
+            .err()
+            .unwrap()
+            .contains("redirect"));
+        assert!(target.accept().is_err());
+        for _ in 0..3 {
+            assert!(received
+                .recv()
+                .unwrap()
+                .to_lowercase()
+                .contains("authorization: bearer file-secret"));
+        }
+        server.join().unwrap();
+    }
     #[test]
     fn artifact_upload_boundaries_and_read_routes_are_fixed() {
         let operation = format!("op_{}", "a".repeat(32));

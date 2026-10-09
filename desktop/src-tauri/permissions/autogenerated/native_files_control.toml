@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-native-files-control"
+description = "Enables the native_files_control command without any pre-configured scope."
+commands.allow = ["native_files_control"]
+
+[[permission]]
+identifier = "deny-native-files-control"
+description = "Denies the native_files_control command without any pre-configured scope."
+commands.deny = ["native_files_control"]
