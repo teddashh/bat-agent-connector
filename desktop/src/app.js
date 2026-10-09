@@ -2567,7 +2567,7 @@ async function viewCleanup(main, section, ident) {
   const status = h("div", { "aria-live": "polite" });
   const historyOut = h("div", { "aria-live": "polite" });
   const retainedOut = h("div", { "aria-live": "polite" });
-  let doc = pending, busy = false, pendingRequest = !!pending, previewRevision = 0;
+  let doc = pending, busy = false, loading = true, pendingRequest = !!pending, previewRevision = 0;
   function changed() {
     assertView(connection);
     previewRevision++; doc = null;
@@ -2607,7 +2607,7 @@ async function viewCleanup(main, section, ident) {
         resource_id: item.resource_id, original_ids: item.original_ids, reasons: item.reasons,
         consumers: item.consumers, task_cleanup: item.task_cleanup, delivery: item.delivery, manifest: item.observation?.manifest }, null, 2))));
   }
-  const reviewed = h("input", { type: "checkbox", onchange: () => { apply.disabled = busy || readFailed || Boolean(intent?.operation_id) || !doc?.ready || !may("cleanup") || !reviewed.checked; } });
+  const reviewed = h("input", { type: "checkbox", onchange: () => { apply.disabled = loading || busy || readFailed || Boolean(intent?.operation_id) || !doc?.ready || !may("cleanup") || !reviewed.checked; } });
   function acceptCleanup(op) {
     assertView(connection);
     if (!intent || !/^op_[0-9a-f]{32}$/.test(op?.operation_id) || op.action !== "cleanup.apply" ||
@@ -2623,13 +2623,13 @@ async function viewCleanup(main, section, ident) {
   }
   function cleanupControls() {
     const fixed = Boolean(intent || pendingRequest);
-    kind.disabled = targetId.disabled = children.disabled = busy || fixed;
-    previewButton.disabled = busy || fixed || section === "task" && !supportsTask;
+    kind.disabled = targetId.disabled = children.disabled = loading || busy || fixed;
+    previewButton.disabled = loading || busy || fixed || section === "task" && !supportsTask;
     apply.hidden = Boolean(intent?.operation_id || intent?.refused);
-    apply.disabled = busy || readFailed || Boolean(intent && !intent.request) || !doc?.ready || !reviewed.checked || !may("cleanup");
-    check.hidden = !intent?.operation_id; check.disabled = busy || Boolean(operationRead);
+    apply.disabled = loading || busy || readFailed || Boolean(intent && !intent.request) || !doc?.ready || !reviewed.checked || !may("cleanup");
+    check.hidden = !intent?.operation_id; check.disabled = loading || busy || Boolean(operationRead);
     another.hidden = !(TERMINAL.includes(operation?.status) || intent?.refused);
-    another.disabled = busy || readFailed || Boolean(operationRead);
+    another.disabled = loading || busy || readFailed || Boolean(operationRead);
   }
   async function refreshCleanup(fresh = false) {
     if (submission) {await submission; assertView(connection);}
@@ -2645,13 +2645,13 @@ async function viewCleanup(main, section, ident) {
   const check = h("button", {class: "secondary", hidden: true, onclick: () => refreshCleanup(true).catch(() => {})}, t("cleanup_check"));
   const another = h("button", {class: "secondary", hidden: true, onclick: () => {
     assertView(connection);
-    if (busy || readFailed || operationRead || !(TERMINAL.includes(operation?.status) || intent?.refused)) return;
+    if (loading || busy || readFailed || operationRead || !(TERMINAL.includes(operation?.status) || intent?.refused)) return;
     intent = operation = doc = null; pendingRequest = false;
     persist(intentKey, null); persist(pendingKey, null); reviewed.checked = false;
     previewOut.replaceChildren(); status.replaceChildren(); cleanupControls();
   }}, t("cleanup_new"));
   const apply = h("button", { class: "primary", disabled: true, onclick: async () => {
-    if (busy || readFailed || !doc || !reviewed.checked || intent?.operation_id || intent?.refused || intent && !intent.request) return;
+    if (loading || busy || readFailed || !doc || !reviewed.checked || intent?.operation_id || intent?.refused || intent && !intent.request) return;
     assertView(connection);
     const reviewedDoc = doc; busy = true; pendingRequest = true;
     apply.disabled = true;
@@ -2690,6 +2690,7 @@ async function viewCleanup(main, section, ident) {
       ...(doc.items || []).map(resourceRow), !doc.ready ? h("p", { class: "note" }, t("cleanup_blocked")) : null);
   }
   const previewButton = h("button", { class: "secondary", onclick: async () => {
+    if (loading) return;
     assertView(connection);
     const revision = ++previewRevision;
     previewButton.disabled = true; doc = null; apply.disabled = true; reviewed.checked = false;
@@ -2766,6 +2767,9 @@ async function viewCleanup(main, section, ident) {
   cleanupControls();
   await loadHistory(); await loadRetained();
   try {await refreshCleanup();} catch { /* keep the exact accepted intent and show read error */ }
+  // The router admits writes only after this initial snapshot finishes. Keep a
+  // recovered Apply button disabled until then, rather than exposing a false offline refusal.
+  loading = false; cleanupControls();
   const refresh = debounceRefresh(() => settleRefreshes([loadHistory(), loadRetained(), refreshCleanup(true)]), 500);
   return onEvents(ev => { if (["cleanup", "operation"].includes(ev.resource_type)) return refresh(); });
 }

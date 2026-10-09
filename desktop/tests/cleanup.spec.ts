@@ -118,7 +118,11 @@ for (const native of [false, true]) {
   });
   test(`cleanup retains reviewed request after lost reply (${native ? "native" : "browser"})`, async ({page}) => {
     const writes: any[] = [];
-    const {errors} = await setup(page, native, (input, url) => {
+    let delaySnapshot = false;
+    let finishSnapshot!: () => void;
+    const snapshot = new Promise<void>(resolve => {finishSnapshot = resolve;});
+    const {errors} = await setup(page, native, async (input, url) => {
+      if (delaySnapshot && url.pathname === "/cleanup-retained") await snapshot;
       if (input.method === "POST" && url.pathname === "/operations") {
         writes.push(input);
         return writes.length === 1 ? {status: 503, data: {error: {code: "REPLY_LOST", message: "Fixture lost reply"}}}
@@ -132,9 +136,13 @@ for (const native of [false, true]) {
     await page.getByRole("checkbox", {name: "I reviewed the resources", exact: false}).check();
     await page.getByRole("button", {name: "Apply reviewed cleanup"}).click();
     await expect(page.getByText("REPLY_LOST Fixture lost reply")).toBeVisible();
+    delaySnapshot = true;
     await page.reload();
     await expect(page.getByText("1 resources to reclaim · 0 retained")).toBeVisible();
     await expect(page.getByRole("textbox", {name: "Host name or original ID"})).toBeDisabled();
+    await expect(page.getByRole("button", {name: "Apply reviewed cleanup"})).toBeDisabled();
+    expect(writes).toHaveLength(1);
+    finishSnapshot();
     await page.getByRole("button", {name: "Apply reviewed cleanup"}).click();
     await expect(page.getByRole("link", {name: "View item receipts"})).toHaveAttribute("href", "#/op/" + oid);
     expect(writes).toHaveLength(2);

@@ -15,14 +15,24 @@ const child = spawn(python, [resolve("tests/cleanup-fixture.py"), "--task"], {cw
 const stopped = once(child, "exit"), lines = createInterface({input: child.stdout})[Symbol.asyncIterator]();
 const next = async () => {const line = await lines.next(); if (line.done) throw new Error("Task cleanup fixture stopped"); return JSON.parse(line.value);};
 const browser = await chromium.launch();
+let page;
+const responses = [];
 try {
   const fixture = await next(), origin = `http://127.0.0.1:${fixture.port}`, writes = [], errors = [];
-  const page = await browser.newPage({locale: "en-US"});
+  page = await browser.newPage({locale: "en-US"});
   page.on("pageerror", error => errors.push(error.message));
   let loseReply = true;
   await page.route("**/api/v1/operations?wait=3", async route => {
     const request = route.request(); writes.push({body: request.postDataJSON(), key: request.headers()["idempotency-key"]});
     const response = await route.fetch();
+    const data = await response.json();
+    // Synthetic diagnostics: outcome and binding checks, without tokens or request bodies.
+    responses.push({status: response.status(), code: data.error?.code, operation: data.operation?.operation_id,
+      state: data.operation?.status, actor: data.operation?.actor, action: data.operation?.action,
+      key_matches: data.operation?.idempotency_key === writes.at(-1).key,
+      target_matches: data.operation?.target?.preview_id === writes.at(-1).body.target.preview_id,
+      token_matches: data.operation?.params?.preview_token === writes.at(-1).body.params.preview_token,
+      fingerprint_matches: data.operation?.preconditions?.preview_fingerprint === writes.at(-1).body.preconditions.preview_fingerprint});
     if (loseReply) {loseReply = false; await route.abort("failed");} else await route.fulfill({response});
   });
   await page.route("**/dashboard/**", async route => {
@@ -54,6 +64,13 @@ try {
   assert.equal((await next()).verified, true);
   await page.screenshot({path: "test-results/task-cleanup-real-central.png", fullPage: true});
   console.log("Real central task cleanup: fixed reviewed plan, lost-reply replay, single stop/removal, retained branch/history, read-only reload and unchanged human source passed");
+} catch (error) {
+  console.error("Task cleanup fixture outcomes:", JSON.stringify(responses));
+  if (page && !page.isClosed()) {
+    console.error("Task cleanup UI errors:", await page.locator("p.error").allTextContents());
+    await page.screenshot({path: "test-results/task-cleanup-failure.png", fullPage: true});
+  }
+  throw error;
 } finally {
   await browser.close();
   if (child.exitCode === null && child.signalCode === null) child.stdin.end(JSON.stringify({action: "stop"})+"\n");
