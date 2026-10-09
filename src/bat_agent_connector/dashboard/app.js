@@ -149,6 +149,30 @@ async function readArtifactContent(reference, size, token, signal) {
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		bat_handoff: "在 BAT 中查看",
+		bat_copy_title: "複製完整標題",
+		bat_copy_id: "複製完整 ID",
+		bat_copied: "已複製。",
+		bat_copy_manually: "請選取並複製以下完整內容。",
+		bat_open: "在 BAT 中開啟",
+		bat_browser: "請在 BAT 中搜尋上方完整標題或 ID。桌面版可選擇並開啟 BAT profile。",
+		bat_profile: "BAT profile",
+		bat_choose: "明確選擇 profile",
+		bat_search_help: "選擇你要開啟的 profile，再於 BAT 搜尋完整標題或 ID。這不會直接定位到此工作階段。",
+		bat_review: "預覽所選 profile",
+		bat_launch: "開啟所選 profile",
+		bat_retry: "查證並重試原開啟請求",
+		bat_read: "查回原開啟結果",
+		bat_new: "選擇另一個 profile",
+		bat_chosen: "已選擇：{profile}",
+		bat_reviewed: "請確認此 profile；按下開啟後才會啟動 BAT。",
+		bat_preferences: "不變更已儲存的 Fleet 視窗、登入或連線選擇。遠端 profile 的連線須已選取。",
+		bat_problem: "目前無法繼續：",
+		bat_missing: "本機 BAT 啟動功能或設定尚未就緒。請檢查桌面連線設定。",
+		bat_wrong_receipt: "回應與原 profile 開啟請求不符；原請求保留。",
+		bat_unknown: "結果尚未確認。查回原請求，不會自動再開啟 BAT。",
+		bat_no_receipt: "尚未找到原開啟回執。保留原請求；重新啟動程式不會自動重送。",
+		bat_saved_invalid: "已儲存的開啟請求不完整，無法安全建立另一筆。請先查明原啟動狀態。",
 		update_title: "桌面更新",
 		update_current: "目前版本：{version}",
 		update_candidate: "可用版本",
@@ -1141,6 +1165,30 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		bat_handoff: "View in BAT",
+		bat_copy_title: "Copy full title",
+		bat_copy_id: "Copy full ID",
+		bat_copied: "Copied.",
+		bat_copy_manually: "Select and copy the complete text below.",
+		bat_open: "Open in BAT",
+		bat_browser: "Search in BAT using the full title or ID above. The desktop app can open an explicitly chosen BAT profile.",
+		bat_profile: "BAT profile",
+		bat_choose: "Choose a profile explicitly",
+		bat_search_help: "Choose a profile, then search in BAT with the full title or ID. This does not focus the session automatically.",
+		bat_review: "Review selected profile",
+		bat_launch: "Open selected profile",
+		bat_retry: "Check and retry original launch",
+		bat_read: "Read original launch",
+		bat_new: "Choose another profile",
+		bat_chosen: "Chosen profile: {profile}",
+		bat_reviewed: "Review this profile; BAT starts only when you choose Open.",
+		bat_preferences: "Saved Fleet window, login and connection choices stay unchanged. A remote profile requires its connection to be selected already.",
+		bat_problem: "Cannot continue yet:",
+		bat_missing: "Local BAT launch support or configuration is unavailable. Check desktop connection settings.",
+		bat_wrong_receipt: "The response does not match the original profile launch; the original request is retained.",
+		bat_unknown: "The outcome is unconfirmed. Read the original request; BAT will not reopen automatically.",
+		bat_no_receipt: "No original launch receipt was found. The request is retained; restarting the app will not resend it automatically.",
+		bat_saved_invalid: "The saved launch request is incomplete. Establish the original launch outcome before creating another.",
 		update_title: "Desktop updates",
 		update_current: "Current version: {version}",
 		update_candidate: "Available version",
@@ -5022,6 +5070,219 @@ function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, 
 	};
 }
 //#endregion
+//#region src/session-bat.js
+init_transport();
+function sessionBatPanel({ h, t, guard, storageKey, session }) {
+	const box = h("section", {
+		class: "session-bat",
+		"aria-label": t("bat_handoff")
+	});
+	const actions = h("div", { class: "actions" }), content = h("div", { hidden: true });
+	const message = h("p", {
+		class: "muted",
+		role: "status"
+	}), copyFallback = h("div");
+	let disposed = false, busy = false, expanded = false, readable = false, overview, chosen = "", intent, receipt, damaged = false;
+	const alive = () => {
+		if (disposed) return false;
+		try {
+			guard();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const id = (v) => typeof v === "string" && /^[0-9a-f]{32}$/.test(v);
+	const profile = (v) => typeof v === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(v);
+	const binding = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+	const summaryMatches = (s, value) => s?.launch_id === value.preview_id && s.dashboard === false && s.opens_bat === true && typeof s.already_running === "boolean" && typeof s.bat_may_open_local_window === "boolean" && Array.isArray(s.profiles) && s.profiles.length === 1 && s.profiles[0] === value.profile_id;
+	const persist = (value) => localStorage.setItem(storageKey, JSON.stringify(value));
+	try {
+		const raw = localStorage.getItem(storageKey);
+		if (raw) {
+			const saved = JSON.parse(raw);
+			if (saved?.version !== 1 || !id(saved.preview_id) || !profile(saved.profile_id) || !binding(saved.configuration_binding) || typeof saved.attempted !== "boolean" || !summaryMatches(saved.summary, saved)) throw new Error("invalid saved launch");
+			intent = saved;
+			chosen = saved.profile_id;
+			expanded = true;
+		}
+	} catch {
+		damaged = true;
+		expanded = true;
+	}
+	const terminal = () => [
+		"started",
+		"not_started",
+		"already_running"
+	].includes(receipt?.state);
+	const acceptReceipt = (value) => {
+		if (!value || !intent) return;
+		const r = value.summary || value;
+		if (r.launch_id !== intent.preview_id || r.dashboard !== false || !Array.isArray(r.profiles) || r.profiles.length !== 1 || r.profiles[0] !== intent.profile_id || ![
+			"prepared",
+			"uncertain",
+			"started",
+			"not_started",
+			"already_running"
+		].includes(value.state) || value.summary && !summaryMatches(value.summary, intent)) throw new Error(t("bat_wrong_receipt"));
+		receipt = value;
+	};
+	const run = async (fn) => {
+		if (!alive() || busy) return;
+		busy = true;
+		message.textContent = "";
+		render();
+		try {
+			await fn();
+		} catch (error) {
+			if (alive()) message.textContent = `${t("bat_problem")} ${String(error)}`;
+		} finally {
+			busy = false;
+			if (alive()) render();
+		}
+	};
+	const readReceipt = async () => {
+		if (!intent?.attempted) return;
+		const value = await fleetControl({
+			action: "launch_status",
+			launch_id: intent.preview_id
+		});
+		if (alive()) {
+			acceptReceipt(value);
+			if (!value) message.textContent = t("bat_no_receipt");
+		}
+	};
+	const read = async () => {
+		readable = false;
+		const available = await fleetAvailability();
+		if (!alive()) return;
+		if (!available.configured || !available.platform_supported || !available.native_controls) throw new Error(t("bat_missing"));
+		const value = await fleetControl({ action: "overview" });
+		if (!alive()) return;
+		if (value?.control_version !== 1 || !binding(value.configuration?.binding) || !Array.isArray(value.profiles) || value.profiles.length > 1001 || value.profiles.some((p) => !profile(p.id) || typeof p.label !== "string" || !(p.connection === null || typeof p.connection === "string")) || new Set(value.profiles.map((p) => p.id)).size !== value.profiles.length || !Array.isArray(value.selection?.connections)) throw new Error(t("bat_missing"));
+		overview = value;
+		readable = value.configuration.valid === true && !value.pending_migration;
+		await readReceipt();
+	};
+	const copy = async (field) => {
+		if (!alive()) return;
+		const value = field === "title" ? session()?.title || "" : session()?.session_id || "";
+		try {
+			await navigator.clipboard.writeText(value);
+			if (alive()) message.textContent = t("bat_copied");
+		} catch {
+			if (!alive()) return;
+			const input = h("textarea", {
+				readonly: true,
+				"aria-label": t(field === "title" ? "bat_copy_title" : "bat_copy_id")
+			}, value);
+			copyFallback.replaceChildren(h("p", { class: "muted" }, t("bat_copy_manually")), input);
+			input.focus();
+			input.select();
+		}
+	};
+	const review = () => run(async () => {
+		if (!readable || intent || damaged || !profile(chosen)) return;
+		const selected = chosen;
+		const value = await fleetControl({
+			action: "preview_profile",
+			profile_id: selected
+		});
+		if (!alive()) return;
+		const next = {
+			version: 1,
+			profile_id: selected,
+			preview_id: value?.preview_id,
+			configuration_binding: value?.configuration_binding,
+			summary: value?.summary,
+			attempted: false
+		};
+		if (!id(next.preview_id) || !binding(next.configuration_binding) || next.configuration_binding !== overview.configuration.binding || !summaryMatches(next.summary, next)) throw new Error(t("bat_wrong_receipt"));
+		intent = next;
+		receipt = null;
+		persist(intent);
+	});
+	const launch = () => run(async () => {
+		if (!intent || damaged || intent.summary.already_running || receipt) return;
+		const next = {
+			...intent,
+			attempted: true
+		};
+		persist(next);
+		intent = next;
+		guard();
+		const value = await fleetControl({
+			action: "launch",
+			preview_id: intent.preview_id
+		});
+		if (alive()) acceptReceipt(value);
+	});
+	const reset = () => run(async () => {
+		if (!intent || intent.attempted && !terminal()) return;
+		localStorage.removeItem(storageKey);
+		const old = intent.preview_id;
+		intent = receipt = null;
+		chosen = "";
+		await fleetControl({
+			action: "discard",
+			preview_id: old
+		});
+	});
+	const render = () => {
+		if (!alive()) return;
+		const button = (key, fn, disabled = false) => h("button", {
+			class: "secondary",
+			disabled: busy || disabled,
+			onclick: fn
+		}, t(key));
+		actions.replaceChildren(button("bat_copy_title", () => copy("title"), !session()?.title), button("bat_copy_id", () => copy("id"), !session()?.session_id), button("bat_open", () => {
+			expanded = true;
+			run(read);
+		}, !nativeDesktop));
+		content.hidden = !expanded;
+		if (!expanded) return;
+		const fixed = !!intent || damaged;
+		const picker = h("select", {
+			"aria-label": t("bat_profile"),
+			disabled: busy || fixed || !readable,
+			onchange: (e) => {
+				chosen = e.target.value;
+				render();
+			}
+		}, h("option", {
+			value: "",
+			selected: !chosen
+		}, t("bat_choose")), ...(overview?.profiles || []).map((p) => h("option", {
+			value: p.id,
+			selected: chosen === p.id
+		}, `${p.label} · ${p.id}`)));
+		const lines = [h("p", { class: "muted" }, t("bat_search_help")), h("label", {}, t("bat_profile"), " ", picker)];
+		if (intent) {
+			lines.push(h("p", { class: "note" }, t("bat_chosen", { profile: intent.profile_id }), " · ", h("code", {}, intent.preview_id)), h("p", { class: "muted" }, receipt ? t("fleet_launch_" + (receipt.state === "prepared" ? "uncertain" : receipt.state)) : intent.summary.already_running ? t("fleet_launch_already_running") : t(intent.attempted ? "bat_unknown" : "bat_reviewed")));
+			if (intent.summary.bat_may_open_local_window) lines.push(h("p", { class: "muted" }, t("fleet_local_anchor")));
+		}
+		if (damaged) lines.push(h("p", { class: "error" }, t("bat_saved_invalid")));
+		const buttons = [button("bat_read", () => run(read))];
+		if (!fixed) buttons.unshift(button("bat_review", review, !readable || !chosen));
+		if (intent && !receipt && !intent.summary.already_running) buttons.unshift(button(intent.attempted ? "bat_retry" : "bat_launch", launch, !readable));
+		if (intent && (!intent.attempted || terminal())) buttons.push(button(intent.attempted ? "bat_new" : "cancel", reset));
+		lines.push(h("div", { class: "actions" }, ...buttons), h("p", { class: "muted" }, t("bat_preferences"), " ", h("a", { href: "#/settings" }, t("nav_settings"))));
+		content.replaceChildren(...lines);
+	};
+	box.append(actions);
+	if (!nativeDesktop) box.append(h("p", { class: "muted" }, t("bat_browser")));
+	box.append(content, copyFallback, message);
+	render();
+	if (nativeDesktop && expanded) queueMicrotask(() => run(read));
+	return {
+		box,
+		update: render,
+		dispose: () => {
+			disposed = true;
+		}
+	};
+}
+//#endregion
 //#region src/repository-start.js
 var object = (v) => v && typeof v === "object" && !Array.isArray(v);
 var equal$1 = (a, b) => a === b || object(a) && object(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$1(a[k], b[k]));
@@ -8010,7 +8271,7 @@ async function viewSession(main, host, sid) {
 	}, t("interrupt"));
 	const composer = h("div", { hidden: true }, box, h("div", { class: "actions" }, send, stop, h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
 	const readonly = h("p", { class: "note" }, t("read_only_note"));
-	let capture, permissions;
+	let capture, permissions, batHandoff;
 	const captureSlot = h("div"), permissionsSlot = h("div");
 	const controls = h("div", { class: "panel" }, pending, readonly, composer, permissionsSlot, captureSlot, status);
 	const cps = checkpointPanel(host, sid);
@@ -8115,6 +8376,15 @@ async function viewSession(main, host, sid) {
 		]);
 		if (first) queue.checked = Boolean(row.streaming);
 		head.replaceChildren(h("h1", {}, row.title || sid), h("div", { class: "actions" }, ...sessionBadges(row)), h("dl", { class: "kv" }, h("dt", {}, t("host")), h("dd", {}, h("a", { href: `#/host/${encodeURIComponent(host)}` }, row.host)), h("dt", {}, t("workspace")), h("dd", {}, row.workspace || ""), h("dt", {}, "Session"), h("dd", {}, h("code", {}, row.session_id)), h("dt", {}, t("agent")), h("dd", {}, [row.agent_kind, row.model].filter(Boolean).join(" · ")), h("dt", {}, "Provenance"), h("dd", {}, t("provenance_" + row.provenance)), h("dt", {}, t("observed")), h("dd", {}, observationTime(row.observed_at))), observationState(row), confinementDetails(row));
+		if (!batHandoff) batHandoff = sessionBatPanel({
+			h,
+			t,
+			guard: () => assertView(connection),
+			session: () => row,
+			storageKey: `batc.session-bat.${connection.namespace}.${JSON.stringify([host, sid])}`
+		});
+		head.append(batHandoff.box);
+		batHandoff.update();
 		if (data.started_from) {
 			const from = data.started_from;
 			head.append(h("p", { class: "note" }, t("started_from", { commit: from.commit_sha.slice(0, 12) }), " ", h("a", { href: `#/session/${encodeURIComponent(from.source_host)}/${encodeURIComponent(from.source_session_id)}` }, t("source_session")), " · ", h("a", { href: `#/op/${from.operation_id}` }, from.operation_id)));
@@ -8213,6 +8483,7 @@ async function viewSession(main, host, sid) {
 	return () => {
 		clearInterval(retry);
 		off();
+		batHandoff?.dispose();
 	};
 }
 function checkpointPanel(host, sid) {

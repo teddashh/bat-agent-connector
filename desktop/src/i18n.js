@@ -1,6 +1,15 @@
 // Display labels only. Logic and CSS never key on these strings (machine enums come from /api/v1).
 const STRINGS = {
   "zh-TW": {
+    bat_handoff: "在 BAT 中查看", bat_copy_title: "複製完整標題", bat_copy_id: "複製完整 ID", bat_copied: "已複製。", bat_copy_manually: "請選取並複製以下完整內容。",
+    bat_open: "在 BAT 中開啟", bat_browser: "請在 BAT 中搜尋上方完整標題或 ID。桌面版可選擇並開啟 BAT profile。",
+    bat_profile: "BAT profile", bat_choose: "明確選擇 profile", bat_search_help: "選擇你要開啟的 profile，再於 BAT 搜尋完整標題或 ID。這不會直接定位到此工作階段。",
+    bat_review: "預覽所選 profile", bat_launch: "開啟所選 profile", bat_retry: "查證並重試原開啟請求", bat_read: "查回原開啟結果", bat_new: "選擇另一個 profile",
+    bat_chosen: "已選擇：{profile}", bat_reviewed: "請確認此 profile；按下開啟後才會啟動 BAT。", bat_preferences: "不變更已儲存的 Fleet 視窗、登入或連線選擇。遠端 profile 的連線須已選取。",
+    bat_problem: "目前無法繼續：", bat_missing: "本機 BAT 啟動功能或設定尚未就緒。請檢查桌面連線設定。",
+    bat_wrong_receipt: "回應與原 profile 開啟請求不符；原請求保留。", bat_unknown: "結果尚未確認。查回原請求，不會自動再開啟 BAT。",
+    bat_no_receipt: "尚未找到原開啟回執。保留原請求；重新啟動程式不會自動重送。", bat_saved_invalid: "已儲存的開啟請求不完整，無法安全建立另一筆。請先查明原啟動狀態。",
+
     update_title: "桌面更新", update_current: "目前版本：{version}", update_candidate: "可用版本",
     update_check: "檢查更新", update_download: "下載並驗證", update_install: "安裝並重新啟動", update_read: "查詢更新狀態",
     update_unsigned: "此測試安裝包尚未啟用簽章更新。", update_platform: "此平台尚未提供桌面更新。",
@@ -625,6 +634,15 @@ const STRINGS = {
     integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。",
   },
   en: {
+    bat_handoff: "View in BAT", bat_copy_title: "Copy full title", bat_copy_id: "Copy full ID", bat_copied: "Copied.", bat_copy_manually: "Select and copy the complete text below.",
+    bat_open: "Open in BAT", bat_browser: "Search in BAT using the full title or ID above. The desktop app can open an explicitly chosen BAT profile.",
+    bat_profile: "BAT profile", bat_choose: "Choose a profile explicitly", bat_search_help: "Choose a profile, then search in BAT with the full title or ID. This does not focus the session automatically.",
+    bat_review: "Review selected profile", bat_launch: "Open selected profile", bat_retry: "Check and retry original launch", bat_read: "Read original launch", bat_new: "Choose another profile",
+    bat_chosen: "Chosen profile: {profile}", bat_reviewed: "Review this profile; BAT starts only when you choose Open.", bat_preferences: "Saved Fleet window, login and connection choices stay unchanged. A remote profile requires its connection to be selected already.",
+    bat_problem: "Cannot continue yet:", bat_missing: "Local BAT launch support or configuration is unavailable. Check desktop connection settings.",
+    bat_wrong_receipt: "The response does not match the original profile launch; the original request is retained.", bat_unknown: "The outcome is unconfirmed. Read the original request; BAT will not reopen automatically.",
+    bat_no_receipt: "No original launch receipt was found. The request is retained; restarting the app will not resend it automatically.", bat_saved_invalid: "The saved launch request is incomplete. Establish the original launch outcome before creating another.",
+
     update_title: "Desktop updates", update_current: "Current version: {version}", update_candidate: "Available version",
     update_check: "Check for updates", update_download: "Download and verify", update_install: "Install and restart", update_read: "Read update status",
     update_unsigned: "Signed updates are not enabled for this test package.", update_platform: "Desktop updates are not available on this platform.",

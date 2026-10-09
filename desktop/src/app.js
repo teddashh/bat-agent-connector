@@ -13,6 +13,7 @@ import { operationList } from "./operation-list.js";
 import { permissionsPanel } from "./permissions.js";
 import { approvalsPanel } from "./approvals.js";
 import { sessionStartPanel } from "./session-start.js";
+import { sessionBatPanel } from "./session-bat.js";
 import { repositoryStartPanel } from "./repository-start.js";
 import { mountArtifactReview, managedCaptureExecution } from "./artifact-review.js";
 import { consumePageAsync, settleRefreshes, storageScope } from "./state/events.ts";
@@ -1040,7 +1041,7 @@ async function viewSession(main, host, sid) {
   const composer = h("div", {hidden: true}, box, h("div", { class: "actions" }, send, stop,
     h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
   const readonly = h("p", { class: "note" }, t("read_only_note"));
-  let capture, permissions;
+  let capture, permissions, batHandoff;
   const captureSlot = h("div"), permissionsSlot = h("div");
   const controls = h("div", { class: "panel" }, pending, readonly, composer, permissionsSlot, captureSlot, status);
   const cps = checkpointPanel(host, sid);
@@ -1112,6 +1113,9 @@ async function viewSession(main, host, sid) {
         h("dt", {}, t("agent")), h("dd", {}, [row.agent_kind, row.model].filter(Boolean).join(" · ")),
         h("dt", {}, "Provenance"), h("dd", {}, t("provenance_" + row.provenance)),
         h("dt", {}, t("observed")), h("dd", {}, observationTime(row.observed_at))), observationState(row), confinementDetails(row));
+    if (!batHandoff) batHandoff = sessionBatPanel({h, t, guard: () => assertView(connection), session: () => row,
+      storageKey: `batc.session-bat.${connection.namespace}.${JSON.stringify([host, sid])}`});
+    head.append(batHandoff.box); batHandoff.update();
     if (data.started_from) {
       const from = data.started_from;
       head.append(h("p", { class: "note" }, t("started_from", { commit: from.commit_sha.slice(0, 12) }), " ",
@@ -1176,7 +1180,7 @@ async function viewSession(main, host, sid) {
     ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve(),
     ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve()
   ]); });
-  return () => {clearInterval(retry); off();};
+  return () => {clearInterval(retry); off(); batHandoff?.dispose();};
 }
 
 // A checkpoint records this session's commit and recent conversation (read-only); continuing starts a new

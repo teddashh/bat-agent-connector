@@ -18,6 +18,9 @@ pub enum Request {
         preview_id: String,
     },
     PreviewLaunch {},
+    PreviewProfile {
+        profile_id: String,
+    },
     Launch {
         preview_id: String,
     },
@@ -59,6 +62,13 @@ fn hex(value: &str, n: usize) -> bool {
 impl Request {
     pub fn validate(&self) -> Result<(), String> {
         let valid = match self {
+            Self::PreviewProfile { profile_id } => {
+                !profile_id.is_empty()
+                    && profile_id.len() <= 64
+                    && profile_id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+            }
             Self::PreviewChoices {
                 choices,
                 configuration_binding,
@@ -253,6 +263,8 @@ mod tests {
             json!({"action":"overview","path":"C:\\other"}),
             json!({"action":"launch","preview_id":"a".repeat(32),"pid":3}),
             json!({"action":"preview_migration","backend":"other","autostart":true}),
+            json!({"action":"preview_profile","profile_id":"../profile"}),
+            json!({"action":"preview_profile","profile_id":"default","session_id":"untrusted"}),
         ] {
             assert!(serde_json::from_value::<Request>(body).map_or(true, |v| v.validate().is_err()));
         }

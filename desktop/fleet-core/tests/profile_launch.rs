@@ -676,3 +676,124 @@ fn receipt_readback_refuses_another_login_and_malformed_fixed_id() {
         Err("INVALID_REQUEST")
     ));
 }
+
+#[test]
+fn one_profile_handoff_keeps_original_fleet_choices_and_exact_receipt() {
+    let (f, c, store, original, mut m) = fixture(&["profile-1", "default"], true);
+    let prefs = std::fs::read(original.directory().join("fleet-client.json")).unwrap();
+    let preview =
+        profile_launch::preview_profile(&c, &store, &original, &f.0, &m, "profile-1").unwrap();
+    assert_eq!(preview.summary().profiles, ["profile-1"]);
+    assert!(!preview.summary().dashboard);
+    assert!(preview.summary().bat_may_open_local_window);
+    assert_eq!(
+        state(profile_launch::apply(&c, &store, &preview, &mut m).unwrap()),
+        State::Started
+    );
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(m.directory.join("profiles/index.json")).unwrap())
+            .unwrap();
+    assert_eq!(index["activeProfileIds"], json!(["profile-1"]));
+    assert_eq!(index["windowLayout"], json!({"columns":3}));
+    assert_eq!(
+        std::fs::read(original.directory().join("fleet-client.json")).unwrap(),
+        prefs
+    );
+    assert!(original.same_snapshot(&store.read(&c).unwrap()));
+    assert_eq!(
+        state(profile_launch::apply(&c, &store, &preview, &mut m).unwrap()),
+        State::Started
+    );
+    assert_eq!(m.spawns, 1);
+    let receipt = profile_launch::read_receipt(&f.0, &preview.summary().launch_id, &m)
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.profiles, ["profile-1"]);
+    assert!(!receipt.dashboard);
+}
+
+#[test]
+fn one_profile_requires_selected_connection_but_not_saved_window_choice() {
+    let (f, c, store, original, mut m) = fixture(&[], false);
+    for profile in ["profile-1", "unknown", "../default"] {
+        assert!(profile_launch::preview_profile(&c, &store, &original, &f.0, &m, profile).is_err());
+    }
+    let choice = store
+        .preview_choices(
+            &c,
+            &original,
+            &Choices {
+                connections: vec!["node-1".into()],
+                profiles: vec![],
+                dashboard: false,
+            },
+            None,
+        )
+        .unwrap();
+    let selected = store.apply_choices(&c, &choice, || Ok(None)).unwrap();
+    let preview =
+        profile_launch::preview_profile(&c, &store, &selected, &f.0, &m, "profile-1").unwrap();
+    assert_eq!(
+        state(profile_launch::apply(&c, &store, &preview, &mut m).unwrap()),
+        State::Started
+    );
+    assert!(store.read(&c).unwrap().preferences().profiles.is_empty());
+    assert_eq!(m.spawns, 1);
+}
+
+#[test]
+fn one_profile_does_not_retarget_running_bat_or_resend_unknown_launch() {
+    let (f, c, store, original, mut m) = fixture(&[], false);
+    let bytes = std::fs::read(m.directory.join("profiles/index.json")).unwrap();
+    m.processes.borrow_mut().push(m.process(95));
+    let preview =
+        profile_launch::preview_profile(&c, &store, &original, &f.0, &m, "default").unwrap();
+    assert!(preview.summary().already_running);
+    assert!(matches!(
+        profile_launch::apply(&c, &store, &preview, &mut m).unwrap(),
+        Outcome::AlreadyRunning(_)
+    ));
+    assert_eq!(
+        std::fs::read(m.directory.join("profiles/index.json")).unwrap(),
+        bytes
+    );
+    assert_eq!(m.spawns, 0);
+    m.processes.borrow_mut().clear();
+    m.fail = 2;
+    let preview =
+        profile_launch::preview_profile(&c, &store, &original, &f.0, &m, "default").unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            state(profile_launch::apply(&c, &store, &preview, &mut m).unwrap()),
+            State::Uncertain
+        );
+    }
+    assert_eq!(m.spawns, 1);
+}
+
+#[test]
+fn one_profile_cannot_use_changed_selection_or_missing_live_profile() {
+    let (f, c, store, original, mut m) = fixture(&["profile-1"], false);
+    let preview =
+        profile_launch::preview_profile(&c, &store, &original, &f.0, &m, "default").unwrap();
+    let choice = store
+        .preview_choices(
+            &c,
+            &original,
+            &Choices {
+                connections: vec![],
+                profiles: vec![],
+                dashboard: false,
+            },
+            None,
+        )
+        .unwrap();
+    let current = store.apply_choices(&c, &choice, || Ok(None)).unwrap();
+    assert!(matches!(
+        profile_launch::apply(&c, &store, &preview, &mut m),
+        Err("SELECTION_CHANGED")
+    ));
+    std::fs::remove_file(m.directory.join("profiles/index.json")).unwrap();
+    assert!(profile_launch::preview_profile(&c, &store, &current, &f.0, &m, "default").is_err());
+    assert_eq!(m.spawns, 0);
+}

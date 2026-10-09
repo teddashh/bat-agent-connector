@@ -306,20 +306,73 @@ pub fn preview(
     roaming: &Path,
     platform: &impl Platform,
 ) -> Result<Preview> {
+    let plan = launch_plan(&configuration.inventory, selection.preferences());
+    preview_profiles(
+        configuration,
+        store,
+        selection,
+        roaming,
+        platform,
+        plan.open,
+        plan.dashboard,
+    )
+}
+
+/// One explicit profile, without rewriting the saved Fleet window/connection choices.
+/// The unchanged private selection still fences both preview and final launch.
+pub fn preview_profile(
+    configuration: &Configuration,
+    store: &Store,
+    selection: &Snapshot,
+    roaming: &Path,
+    platform: &impl Platform,
+    profile_id: &str,
+) -> Result<Preview> {
+    if profile_id != "default" {
+        let host = configuration
+            .inventory
+            .hosts()
+            .iter()
+            .find(|host| host["profile"].as_str() == Some(profile_id))
+            .ok_or("PROFILE_DRIFT")?;
+        let plan = launch_plan(&configuration.inventory, selection.preferences());
+        if !plan.connect.iter().any(|name| host["name"] == *name) {
+            return Err("PROFILE_CONNECTION_NOT_SELECTED");
+        }
+    }
+    preview_profiles(
+        configuration,
+        store,
+        selection,
+        roaming,
+        platform,
+        vec![profile_id.into()],
+        false,
+    )
+}
+
+fn preview_profiles(
+    configuration: &Configuration,
+    store: &Store,
+    selection: &Snapshot,
+    roaming: &Path,
+    platform: &impl Platform,
+    profiles: Vec<String>,
+    dashboard: bool,
+) -> Result<Preview> {
     platform.verify()?;
     let login = platform.login()?;
     if !login.valid() || !roaming.is_absolute() {
         return Err("INVALID_REQUEST");
     }
-    let plan = launch_plan(&configuration.inventory, selection.preferences());
     let mut preview = Preview {
         summary: Summary {
             launch_id: format!("{:032x}", rand::random::<u128>()),
-            opens_bat: !plan.open.is_empty(),
-            bat_may_open_local_window: !plan.open.is_empty()
-                && !plan.open.iter().any(|id| id == "default"),
-            profiles: plan.open,
-            dashboard: plan.dashboard,
+            opens_bat: !profiles.is_empty(),
+            bat_may_open_local_window: !profiles.is_empty()
+                && !profiles.iter().any(|id| id == "default"),
+            profiles,
+            dashboard,
             already_running: false,
         },
         selection: selection.clone(),
