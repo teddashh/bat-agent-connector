@@ -4,7 +4,7 @@ description: Use this when you need to check on, read, wait for, or (only when e
 version: 0.2.4
 license: MIT
 metadata:
-  workflow_version: "2026-10-08.6"
+  workflow_version: "2026-10-08.7"
   api_version: "1"
   contract_version: "2026-10-08"
 ---
@@ -51,6 +51,10 @@ may still expose direct Fleet tools that do not enforce API principal scopes.
   the host runtime), **streaming** (working on a turn), or **blocked** on a question (`pending`: ask-user or permission).
 - This connector is unofficial. It reaches hosts over BAT's remote protocol through the MCP server `bat`
   (tools below) or the `batc` CLI (same operations, `--json` for machine output).
+- GUI, CLI and MCP are entry points to work on the selected BAT host/workspace; switching entry points does not
+  move the checkout. Another host must use an explicitly bound GitHub repository and a published commit, fetched
+  into its own managed workspace. Do not infer repository ownership from matching names or paths, pull into a
+  person's checkout, or relay unpublished Git packs/bundles. Same-host checkpoints may use local committed work.
 - Permission tiers are set by the user per host: **read** (always), **write** (send / continue / interrupt / answer),
   **orchestrate** (start worktree sessions, merge, remove). Tools for a disabled tier do not exist; do not try to
   work around that.
@@ -82,7 +86,7 @@ the BAT message and is separate from the operation key. For an answer, supply th
 `tool_use_id`; the compatibility adapter binds an omitted ID to one positively identified
 pending prompt at admission and never retargets a later prompt. Task-owned controls keep
 the admitted binding/control version and may refuse stale intent. This coverage does not
-make bulk approval, start or orchestration durable operations.
+make start or other legacy orchestration durable operations. Reviewed bulk approval uses the separate workflow below.
 
 For a permission change, submit `session.permissions` with the exact host/session target and
 `params={mode: "default" | "allow_all"}`. `allow_all` bypasses ordinary approval prompts and
@@ -109,7 +113,8 @@ deferred flags are not authority to apply a setting under a new caller or sessio
 | Merge worktree (orchestrate) | `worktree_merge` | `batc merge ...` |
 | Legacy worktree removal (disabled) | `worktree_remove` refuses; use reviewed cleanup below | `batc remove-worktree` refuses |
 | Classify sessions (quota, waiting, working, done) | `sessions_triage(host?, states?)`, `quota_sessions(host?)` | `batc triage [HOST] --state ...`, `batc quota` |
-| Preview legacy bulk approval (apply disabled) | `approve_pending(host, dry_run=true)` | `batc approve-pending HOST --dry-run` |
+| Preview fixed permission prompts (observe, daemon) | `approval_preview(host, workspace?)` | `batc approve-pending HOST --dry-run` |
+| Approve an explicit reviewed selection (operate + observe, daemon) | `approve_pending(host, preview_token, selection, expected_fingerprint, idempotency_key?, confirm=true)` | `batc approve-pending HOST --preview-file FILE --selection JSON --key KEY --confirm` |
 | Change a session's permissions (write, daemon) | `session_set_permissions(host, session_id, mode, idempotency_key?, control_version?, confirm=true)` | `batc permissions HOST SID --mode default --key KEY --confirm` |
 | Move a quota-stopped Claude session to Codex (orchestrate) | `session_failover(host, session_id \| all_exhausted=true, confirm=true, dry_run?)` | `batc failover HOST [SID] --all-exhausted --confirm` |
 | Reviewed resource cleanup (daemon, cleanup scope) | `cleanup_preview` → `cleanup_apply(confirm=true)` | `batc resource-cleanup preview` → `apply --confirm` |
@@ -304,12 +309,32 @@ item is done.
   uses the host's `codex_model`. Report old → new session id, then track the new one. To keep a superseded
   session's uncommitted work without continuing it, fail it over with `force`, `archive_only=true` and
   `instructions` that say to only commit it; reviewed cleanup can release it while keeping its commits and branch.
-- **Permissions**: legacy `approve_pending` apply refuses with `LEGACY_PERMISSION_RAISE_DISABLED`
-  before answering or raising any session; dry-run remains a preview. Answer one fixed pending prompt
-  through `session.answer`, and use `session.permissions` for an explicit mode change when authorized.
+- **Permissions**: answer one fixed pending prompt through `session.answer`, and use `session.permissions`
+  for an explicit mode change when authorized. For multiple prompts use the reviewed bulk workflow below;
+  apply without its fixed preview and explicit selection refuses with `BULK_PREVIEW_REQUIRED`.
   Claude must be idle; a running turn is not an automatic deferred request. Codex changes apply from its next turn.
   For confined sessions, never request a raise, persistent approval or
   mode-widening ExitPlanMode answer for them; report blocked tests with their confinement evidence.
+
+## Reviewed bulk approval (operate + observe)
+
+Read `approval_preview(host, workspace?)` with your own token. Inspect each complete permission prompt,
+eligibility/refusal, and allowed modes. This workflow uses `permission=allow, dont_ask_again=true`: it authorizes
+BAT's similar requests, not just the current prompt. Only select items covered by the person's authorization;
+confined/manual/unknown refusals cannot be overridden. Truncated previews are not a complete host inventory.
+
+Call `approve_pending` with the original preview token/fingerprint and an explicit non-empty
+`selection=[{item_id, mode: null | "default" | "allow_all"}]`, `confirm=true`, and a saved idempotency key.
+Null means answer only. A mode change has its own child after the original answer's true ACK. No automatic
+selection, prompt substitution or deferred raise is supported. Preview TTL is ten minutes; an accepted request
+keeps its fixed identity after expiry. Without a key each legacy call creates an independent intent.
+
+Read the parent operation's `external_refs.bulk_children` and `bulk_items`, then the original children.
+Parent `succeeded` means the batch was processed; inspect `result.all_succeeded`, each `approved`/`complete`
+and partial permission receipts before reporting results. Lost ACK or a cleared prompt does not prove approval;
+never resend it or use a new key to repair uncertainty. Cancel stops unsent work and preserves sent receipts.
+Resume follows those same child IDs. Failed or stale items need a newly reviewed, authorized decision.
+
 ## Reviewed cleanup (scope cleanup)
 
 Use `cleanup_preview(target={kind: work_item|checkpoint|integration|host, ...})` and inspect every
@@ -474,7 +499,7 @@ Observe `deployment.updated` and the existing selected/verified/superseded/drift
 credentials are not event data. A `deployment.backfilled` snapshot has unknown occurrence time and is not proof
 of a historical verified deployment. Only explicit operation source bindings connect it to session/worktree history.
 
-## Artifact attachments (Part A and manual capture B1)
+## Artifact attachments and captured results
 
 - Use `artifacts_list` / `artifact_get(artifact_id, revision)` to read exact revisions and materialization evidence.
   Upload a small file with `artifact_upload(display_name, content_base64, idempotency_key, confirm=true)` (manage).
@@ -499,6 +524,19 @@ of a historical verified deployment. Only explicit operation source bindings con
   of changing the original intent. Read back the same operation/key after a lost reply. Bytes stay off the MCP
   request; capture follows the configured artifact file limit. Neither call changes the manual checkout.
   CLI: `artifact capture-preview HOST SESSION_ID relative/file`, then `artifact capture --preview-file FILE --key KEY --confirm`.
-- No store delete, artifact_materialize tool, managed-result capture or artifact_accept. B1 saves one file and is
-  not a dirty snapshot. B2 adds managed results/accept; C adds target host/workspace and commit fetch.
-  Deployed Actions artifacts are separate. The capture chooser is not yet connected in the shared UI.
+- For a managed result, use `artifact_managed_capture_preview(host, session_id, relative_path, ...)` and select
+  exactly one `execution_operation_id`, or `task_id` plus `command_id`. Selectors only locate central evidence:
+  they cannot supply lineage or grant ownership. Review the fixed file/HEAD/digest, then call
+  `artifact_capture_managed(preview_id, preview_token, fingerprint, idempotency_key, confirm=true)` with manage
+  plus observe. Supported execution selectors are advertised in capabilities; unproven or changed sources refuse.
+  CLI: `artifact managed-capture-preview` and `artifact managed-capture --preview-file FILE --key KEY --confirm`.
+- With the person's authorization and approve scope, `artifact_accept(artifact_id, revision, digest,
+  source_fingerprint, receipt, idempotency_key, confirm=true)` records review of that exact captured revision.
+  Use the saved source fingerprint and your non-empty review text (at most 2000 characters). Read `acceptances`
+  through `artifact_get`; newer revisions do not replace the reviewed one. This receipt does not mark work/task
+  completion, passing tests, merge or deployment. Captured bytes may be uncommitted; HEAD is observed context,
+  not proof of exclusive authorship. CLI: `artifact accept ID REVISION --digest DIGEST --source-fingerprint
+  FINGERPRINT --receipt TEXT --key KEY --confirm`.
+- No store delete, standalone artifact_materialize tool or dirty directory snapshot. Do not scrape a folder or
+  use arbitrary host shell to fill these gaps. Deployed Actions artifacts are separate. The shared UI has the
+  manual remote-file chooser; managed capture/accept UI and native OS file pickers have separate delivery status.
