@@ -8,40 +8,39 @@
 
 ## 目前續作
 
-最新追蹤 [#59](https://github.com/teddashh/bat-agent-connector/issues/59)。[#60](https://github.com/teddashh/bat-agent-connector/pull/60)
-已合併到 main `c11dab72651ccf459842b3b39e942b040cfe2c36`。Native credentials、durable bulk approval、managed
-artifact capture/accept 及 session 整理已合併；沒有 installed/live 通過宣稱。
-Project Hub 的清楚 session 整理已列為共用 UI 方向，依實際 host／workspace 分組，不猜測專案歸屬。
-產品負責人補充原始對話並
-澄清 workspace／repository 與 GitHub 同步模式，見 [共同依據](realignment-v2.md#原始需求與後續澄清)。
-直接未發布 Git-pack transport 實驗留在本機獨立分支，沒有合入；此能力不再列交付缺口。
-一般附件及成果操作保留，明確 repository 的已發布版本同步仍須查核；不因此宣告 M1–M3 完成。
+最新追蹤 [#59](https://github.com/teddashh/bat-agent-connector/issues/59)。[#61](https://github.com/teddashh/bat-agent-connector/pull/61)
+已合併為 `1a8984cac57146c3bd8b842b94b32a30c5525c15`；固定候選 `07bc762089e00e00bcf6e06d93051427a8ad6f84`
+與 merge 的 tree 同為 `8ca0a54b46facd3a2e5e209f5491ca088b8cc609`。Managed start、task reviewed／automatic cleanup、
+native 選檔／上傳／Save As、成果擷取／獨立審核及 canonical `.8` 已在 main。Project Hub 的 session 整理方向保留：
+依實際 host／workspace 分組，不從名稱猜測專案歸屬。GUI／CLI／MCP 都在指定 BAT host／workspace 工作；
+跨主機只接續明確 repository 的已發布 commit，未發布 Git-pack transport 不在交付條件。
 
-本輪合併證據：固定候選 `581e2a75b553c57867192a52f639c2dbed061904` 與 merge commit 的 tree 同為
-`ee21941fa5137cc862f2775ba5d975db154755db`。Python CI 3.10–3.13 各 **2568 passed／33 skipped**；
-179 shared UI、12 state、33 Windows／32 Linux Rust、Windows NSIS／Linux deb unsigned packages 通過。
-本機 frozen backend `9b67ed8` 的 Python 3.13／3.10 full 各 2568／33；最後合併 tree 的 coverage 由 exact-head CI 補足。
-私有 installer #9 已合併 `ac1a1aa`，pin 此候選與 canonical `.7`；17 temporary/mock cases 在 default／3.10 通過，
-真 source verify-only 通過，未改動 live 安裝。首個 installer 3.10 執行環境缺 PyYAML，改用文件列明依賴的獨立環境後通過。
+Exact-head CI：Python 3.10–3.13 各 **2680 passed／33 skipped**；333 UI、12 state、每平台 53 app Rust，
+Fleet core Windows 63／Linux 58 通過。Windows NSIS／Linux deb unsigned packages、Ruff、generator、Clippy、
+generated browser drift 與 secrets scan 通過。Actual-central fixtures 用 temporary Git／MockBat 驗證 start、bulk、
+cleanup、native files 及獨立 reviewer 的固定 bytes/revision。Local full Python 3.10、3.13 各 2680／33；先前磁碟
+壅塞的 3.13 run 有未釐清 failures 且中止，沒有計為通過，後續 isolated fixtures 與 exact-head CI 完整通過。
+私有 installer #10 已合併 `67be22ea748c49e055a58e9fb72ef0c91d8b2161`，pin 此候選／`.8`；17 temporary tests
+在 3.13／3.10 通過，真 source verify-only 通過，沒有修改 live 安裝。Linux GLib release gate #53 仍開啟。
 
-新整合候選的功能基底為 `6efc85b`，尚未合併：
+後續候選分開追蹤，尚不計入 main／installed 完成：
 
-- Durable `session.start`、精確 workspace discovery、共享建立 session 與批次核准 UI；重試前須保存原始 intent。
-- Task Service reviewed／automatic cleanup、原始 start receipt 的 carrier discovery；唯一內容、人工使用者與歷史保留。
-- Native 選檔／拖放上傳、固定 revision 的 Save As／預覽；managed 成果擷取、observe-only 讀取及 approve 審核 UI。
-  成果事件重讀已載入頁面，失敗不前進 cursor；文字以 literal text、PNG 以有大小限制的靜態像素呈現。
-- Canonical workflow `.8` 與生成的 Hermes／Grokbot bundle 同步。Rust Fleet core 的設定、selection CAS、
-  Windows held-handle ownership 與 pinned readonly probes 已準備，尚未接到桌面 supervisor。
+- [#62](https://github.com/teddashh/bat-agent-connector/pull/62)：明確 repository binding、GitHub numeric ID、
+  固定 ref/head 與 fresh managed carrier，共用 published-start UI，canonical `.9`。原候選獨立審查通過；
+  加入 #61 Windows parity 後為 `927053d`，exact-head CI／full checks 以 PR 最新證據為準。
+- Central relay、fanout planner／fixed-plan dispatch、standalone Claude→Codex failover、獨立 omitted-key task controls
+  已收進 orchestration 整合工作線。Failover 原始 receipts 與 carrier writer fence、rollback owner CAS、所有 shared
+  consumers 的最後 frame checks 已獨立審查；fanout 不退休重新載入的 runtime。Canonical `.11` 與 generated adapters
+  同步。整合 focused tests 3.13／3.10 各 **490 passed**；full／exact-head CI 仍是合併條件。
+- Native Fleet choices、profile launch、Startup/backend migration、login picker、owned Quit 與 queued IPC Ticket fences
+  在桌面整合線。Bootstrap fixed request／original receipt／opt-in auto 與更新器 signed bytes／durable installation intent
+  分別完成 fixture/source review，整合及 exact Windows build 仍須查核。缺設定檔不代表背景 Fleet 已停止。
+- Principal-only transcript／wait 的中央 read adapters 正在獨立工作線；不允許因工具缺少就走 raw BAT／legacy CLI。
+  專用 orchestration GUI 及原計畫 installed/live 46 項矩陣仍須完成對照，不能由 backend 測試數推定產品全數完成。
 
-本機證據：frozen backend `80cf72a` 的 Python 3.13／3.10 全套各 **2678 passed／33 skipped**（1057.52s／1049.31s）；
-最後整合 source 的 **333 UI、12 state、53 app Rust／1 fixture-only ignored** 通過，Fleet core **56 Linux tests** 通過。
-Ruff、canonical generator、build／browser drift、Clippy、累積秘密掃描通過。Actual-central 的 start、bulk、task cleanup、
-native files 與 B2 fixtures 使用 temporary Git／MockBat；B2 包含獨立 observe＋approve 身分讀取及審核。
-完整候選 SHA、exact-head CI／Windows native tests／unsigned packages、merge 與 installer pin 以新 PR 證據為準。
-
-Rust Fleet supervisor／ownership 遷移／autostart、明確 repository 的已發佈 commit 接續、其餘 legacy orchestration、
-簽章／更新及 installed/live 矩陣仍須接續。另有 credential／discovery／tunnel effect 模組在獨立工作線，
-不計入本候選的 Fleet runtime 完成度。沒有真實安裝或 live host/provider writes。
+以上沒有正式簽章身分、release feed 發布、Windows installed 或 live host/provider writes 的完成宣稱。
+本機 fixtures 不代替 PID／account／Startup／原生視窗及完整產品展示。GitHub Codex review quota 用盡，
+本輪採具體 source／repro 的獨立本機 peer review，不宣稱 bot approval。
 
 本輪來源與審查（以下保留合併前各層證據）：
 
