@@ -1,3 +1,4 @@
+import {sessionLabelsPanel, validLabels} from "./session-labels.js";
 import {readArtifactContent} from "./transport/artifact-content.ts";
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
@@ -700,6 +701,9 @@ async function viewSessions(main) {
         h("span", {}, [session.agent_kind, session.worktree_branch].filter(Boolean).join(" · "))),
       runtimeStale(session) ? h("p", {class: "session-stale muted"}, t("sessions_stale"), " · ",
         session.stale_reason === "gone" ? t("sessions_not_seen") : session.stale_reason ? t("stale_reason_" + session.stale_reason) : t("sessions_runtime_stale")) : null,
+      validLabels(session.connector_metadata?.labels) && session.connector_metadata.labels.length ? h("div", {class: "actions session-entry-meta", "aria-label": t("labels_title")},
+        ...session.connector_metadata.labels.slice(0, 2).map(v => chip(v)),
+        session.connector_metadata.labels.length > 2 ? h("span", {class: "muted", title: session.connector_metadata.labels.join(" · ")}, `+${session.connector_metadata.labels.length - 2}`) : null) : null,
       details);
   };
   const render = () => {
@@ -1046,9 +1050,11 @@ async function viewSession(main, host, sid) {
   let capture, permissions, batHandoff;
   const captureSlot = h("div"), permissionsSlot = h("div");
   const controls = h("div", { class: "panel" }, pending, readonly, composer, permissionsSlot, captureSlot, status);
+  const labels = sessionLabelsPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    target: {host, session_id: sid}, storageKey: `batc.labels.${connection.namespace}.${JSON.stringify([host, sid])}`, errorBox, opStatus});
   const cps = checkpointPanel(host, sid);
   const observations = observationPanels("session", `${host}/${sid}`, path);
-  main.append(head, controls, cps.box, h("h2", {}, t("messages")), msgs, observations.box);
+  main.append(head, labels.box, controls, cps.box, h("h2", {}, t("messages")), msgs, observations.box);
   const renderPending = () => {
     const pend = row.api_access === "managed" ? row.pending : null;
     const current = identity(pend);
@@ -1102,7 +1108,9 @@ async function viewSession(main, host, sid) {
       button.disabled = !row?.pending?.toolUseId || !allowed("session.answer");
   };
   const applyObservation = data => {
-    const first = !row; row = data.session;
+    const first = !row;
+    row = data.session || (data.cleanup?.length ? {host, session_id: sid, provenance: "unknown", api_access: "read_only"} : null);
+    if (!row) throw new Error(t("obs_unknown"));
     rememberObservation("session", `${host}/${sid}`, data, [`host:${host}`,
       ...(data.work_items || []).map(item => `work_item:${item.work_item_id}`),
       ...(data.relations_summary || []).flatMap(relation => [`execution:${relation.execution_id}`, `task:${relation.execution_id}`]),
@@ -1179,7 +1187,7 @@ async function viewSession(main, host, sid) {
   };
   // Keep the subscription after a partial initial failure. The view already contains controls;
   // returning here would let later journal pages be acknowledged without refreshing them.
-  try { await settleRefreshes([refresh(), cps.load()]); } catch { /* retain the failure and drafts */ }
+  try { await settleRefreshes([refresh(), cps.load(), labels.refresh()]); } catch { /* retain the failure and drafts */ }
   const retry = setInterval(() => {
     if (!readReady && !refreshInFlight) refresh().catch(() => {});
   }, 1000);
@@ -1187,7 +1195,8 @@ async function viewSession(main, host, sid) {
   const off = onEvents(ev => { observations.changed(ev); return settleRefreshes([
     (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "work_item") ? reload() : Promise.resolve(),
     ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve(),
-    ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve()
+    ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve(),
+    (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation") ? labels.refresh(true) : Promise.resolve()
   ]); });
   return () => {clearInterval(retry); off(); batHandoff?.dispose();};
 }
