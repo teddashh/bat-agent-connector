@@ -29,6 +29,24 @@ fn installation_absent(path: &Path) -> Result<()> {
     }
 }
 
+fn migration_absent(installation: &Path) -> Result<()> {
+    let parent = installation.parent().ok_or("INSTALLATION_INVALID")?;
+    if !plain_directory(parent)? {
+        return Ok(());
+    }
+    let directory = parent.join("fleet-migrations");
+    if !plain_directory(&directory)? {
+        return Ok(());
+    }
+    // Even an apparently complete pointer needs its original configuration for recovery.
+    // Do not construct migration::Store: reading it can create persistence directories.
+    match directory.join("active.json").symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err("MIGRATION_PENDING"),
+        Err(_) => Err("FLEET_ABSENCE_UNPROVEN"),
+    }
+}
+
 fn ownership_absent(roaming: &Path) -> Result<()> {
     for directory in supervisor_io::directories(roaming) {
         if !plain_directory(&directory)? {
@@ -68,6 +86,7 @@ pub fn verify_absence(
         return Err("FLEET_ABSENCE_UNPROVEN");
     }
     installation_absent(installation)?;
+    migration_absent(installation)?;
     let login = observation.current_login()?;
     if !login.valid() {
         return Err("OWNER_UNPROVEN");
@@ -84,10 +103,10 @@ pub fn verify_absence(
         }
         if process.login.owner_sid == login.owner_sid
             && process.arguments.iter().any(|argument| {
-                argument
-                    .rsplit(['\\', '/'])
-                    .next()
-                    .is_some_and(|name| name.eq_ignore_ascii_case("fleet-monitor.ps1"))
+                argument.rsplit(['\\', '/']).next().is_some_and(|name| {
+                    name.eq_ignore_ascii_case("bat-connect.ps1")
+                        || name.eq_ignore_ascii_case("fleet-monitor.ps1")
+                })
             })
         {
             return Err("FLEET_OWNERSHIP_REQUIRES_CONFIGURATION");
@@ -98,5 +117,6 @@ pub fn verify_absence(
     }
     ownership_absent(roaming)?;
     monitor_launch::verify_absence(&roaming.join("bat-fleet-monitor-launch.json"), observation)?;
+    migration_absent(installation)?;
     installation_absent(installation)
 }

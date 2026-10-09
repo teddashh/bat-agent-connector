@@ -112,7 +112,6 @@ impl Request {
 pub struct Control {
     login: std::sync::Mutex<Value>,
     tickets: Arc<crate::fleet_lifecycle::Tickets>,
-    configured_seen: std::sync::atomic::AtomicBool,
     stopping: std::sync::atomic::AtomicBool,
     generation: std::sync::atomic::AtomicU64,
     login_running: std::sync::atomic::AtomicBool,
@@ -122,10 +121,8 @@ pub struct Control {
 }
 impl Control {
     pub fn new(config: PathBuf) -> Self {
-        let seen = config.try_exists().unwrap_or(true);
         Self {
             config,
-            configured_seen: std::sync::atomic::AtomicBool::new(seen),
             login: std::sync::Mutex::new(Value::Null),
             tickets: Arc::new(crate::fleet_lifecycle::Tickets::default()),
             stopping: std::sync::atomic::AtomicBool::new(false),
@@ -136,17 +133,6 @@ impl Control {
         }
     }
 
-    pub fn observe_configuration(&self) {
-        if self.config.try_exists().unwrap_or(true) {
-            self.configured_seen
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-    pub fn never_configured(&self) -> bool {
-        !self
-            .configured_seen
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
     pub fn ticket(&self) -> crate::fleet_lifecycle::Ticket {
         self.tickets.capture()
     }
@@ -210,7 +196,6 @@ impl Control {
     pub async fn request(self: Arc<Self>, input: Request) -> Result<Value, String> {
         let ticket = self.ticket();
         input.validate()?;
-        self.observe_configuration();
         if self.stopping.load(std::sync::atomic::Ordering::SeqCst)
             && !matches!(
                 input,
@@ -261,18 +246,6 @@ impl Control {
 mod tests {
     use super::*;
     use serde_json::json;
-    #[test]
-    fn removed_configuration_never_becomes_unconfigured_quit() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fleet.json");
-        let control = Control::new(path.clone());
-        assert!(control.never_configured());
-        std::fs::write(&path, b"{}").unwrap();
-        control.observe_configuration();
-        std::fs::remove_file(path).unwrap();
-        control.observe_configuration();
-        assert!(!control.never_configured());
-    }
     #[test]
     fn bounded_typed_control_refuses_paths_pids_commands_and_extra_fields() {
         for body in [

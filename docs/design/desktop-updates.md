@@ -23,7 +23,10 @@ Install validates verified bytes before stopping local connections. Quit and upd
 one lifecycle guard. The original Fleet ticket is invalidated before shutdown, and the
 native Launcher/Monitor guards remain held through the installer call. Only positively
 owned local processes may be stopped. Unknown ownership or an active launcher refuses.
-An app which has never had Fleet configuration can update without inventing a supervisor.
+Missing Fleet configuration uses an independent absence check with both mutexes held:
+the fixed native launch journal, both BAT data directories and legacy monitor candidates
+must prove no remaining owner. Existing ownership residue requires restoring configuration
+and ordinary reviewed recovery; removing the config cannot bypass shutdown.
 Central tasks and remote BAT processes continue independently.
 
 Before invoking the installer, Rust durably creates a receipt under `update-intents`,
