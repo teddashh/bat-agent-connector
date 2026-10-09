@@ -2,7 +2,11 @@
 
 日期：2026-10-08。對應《Better Agent Dashboard／Connector 計畫》v1.0 的 §09、§10、§24，W01／W04 剩餘工作，驗收 A01、A05、A07、A08、A09。
 
-本文依 2026-10-08 規格審查決議修訂。Part A 已實作 Task Service authority；Part B 保留第二步合約。交付狀態以本文件、測試與 api-v1/task-service 文件為準。
+本文依 2026-10-08 規格審查決議修訂。Part A 已實作 Task Service authority；Part B 分段接入中央 operations。交付狀態以本文件、測試與 api-v1/task-service 文件為準。
+
+Permissions 後續實作以 [session-permissions.md](session-permissions.md) 為現行合約：
+已註冊逐 frame durable action；combined bulk raise apply 與 historical deferred writes 停用。
+下方 Part A 表格與尚未交付的 bulk 設計保留當時脈絡，不授權舊 flag 自動派送或 bulk apply。
 
 ## 分段交付與審查決議
 
