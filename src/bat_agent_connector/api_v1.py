@@ -108,6 +108,8 @@ class ApiV1:
         orchestration_operations.install(daemon.ops)
         from . import fanout_operations
         fanout_operations.install(daemon.ops)
+        from . import verification_operations
+        verification_operations.install(daemon.ops)
         from . import failover_operations
         failover_operations.install(daemon.ops)
 

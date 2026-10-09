@@ -334,10 +334,18 @@ async def _run(args) -> Any:
                 fleet, args.host, args.confirm, not args.apply, args.session
             ), r_cleanup
         if c == "record-verification":
-            return await lifecycle.session_record_verification(
-                fleet, args.host, args.session, args.commit, args.command, args.exit_code,
-                args.environment, args.log_ref, args.confirm,
-            ), None
+            from .task_daemon import request
+            if not args.confirm:
+                raise WriteRefused("record-verification needs --confirm")
+            try:
+                out = await asyncio.to_thread(request, "session_record_verification",
+                    _auth_token=os.environ.get("BATC_API_TOKEN") or None, entry="cli",
+                    host=args.host, session_id=args.session, candidate_commit=args.commit,
+                    command=args.command, exit_code=args.exit_code, environment=args.environment,
+                    log_ref=args.log_ref, confirm=True, idempotency_key=args.key, timeout=40)
+            except (OSError, TimeoutError):
+                raise WriteRefused("central verification reply unavailable; retain the original key and operation") from None
+            return out, None
         if c == "worktrees":
             return await orchestrate.worktree_status(fleet, args.host, args.workspace), None
         if c == "wt-status":
@@ -605,6 +613,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="report only (default)")
     p.add_argument("--confirm", action="store_true")
     p = sp.add_parser("record-verification", help="ORCHESTRATE: bind a test run to the current clean commit")
+    p.add_argument("--key", help="reuse the original key after reply loss; omitted means an independent record")
     p.add_argument("host")
     p.add_argument("session")
     p.add_argument("--commit", required=True, help="full current candidate commit hash")
@@ -1452,7 +1461,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         obj, render = asyncio.run(_run(args))
         _print(obj, args.json, render)
-        return 1 if args.cmd in {"failover", "relay", "fanout-plan", "fanout-start", "fanout", "start", "send", "continue", "interrupt", "answer", "permissions"} and obj.get("operation_status") in {"failed", "cancelled"} else 0
+        return 1 if args.cmd in {"record-verification", "failover", "relay", "fanout-plan", "fanout-start", "fanout", "start", "send", "continue", "interrupt", "answer", "permissions"} and obj.get("operation_status") in {"failed", "cancelled"} else 0
     except (BatError, ValueError, OperationError) as e:
         print(f"error: {redact(e)}", file=sys.stderr)
         return 1
