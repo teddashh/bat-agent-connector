@@ -4,7 +4,7 @@ description: Use this when you need to check on, read, wait for, or (only when e
 version: 0.2.4
 license: MIT
 metadata:
-  workflow_version: "2026-10-08.7"
+  workflow_version: "2026-10-08.8"
   api_version: "1"
   contract_version: "2026-10-08"
 ---
@@ -70,9 +70,9 @@ This is also a compatibility reference for operator installations. In the agent 
 only central daemon tools (including artifacts and reviewed cleanup) and task adapters are advertised; the direct Fleet rows are
 legacy references, not agent instructions. Use `inventory_hosts` / `inventory_sessions`
 and `inventory_session` for observation, `work_status` for task detail and central
-`operation_submit` actions such as `session.send`, `session.answer`, `session.interrupt` and `session.permissions`
+`operation_submit` actions such as `session.start`, `session.send`, `session.answer`, `session.interrupt` and `session.permissions`
 only when allowed in capabilities. Preserve their operation IDs and keys. Transcript/wait,
-raw start, relay, fan-out and legacy cleanup have no advertised agent adapter
+relay, fan-out and legacy cleanup have no advertised agent adapter
 here; do not execute the corresponding legacy workflows or CLI commands.
 
 For operator installations that expose `session_send`, `session_continue`, `session_answer`,
@@ -85,8 +85,8 @@ returned `operation_id` and `operation_status`. Without a key, each call is inde
 the BAT message and is separate from the operation key. For an answer, supply the observed
 `tool_use_id`; the compatibility adapter binds an omitted ID to one positively identified
 pending prompt at admission and never retargets a later prompt. Task-owned controls keep
-the admitted binding/control version and may refuse stale intent. This coverage does not
-make start or other legacy orchestration durable operations. Reviewed bulk approval uses the separate workflow below.
+the admitted binding/control version and may refuse stale intent. Standalone start has its own durable workflow below. Other legacy orchestration remains separate.
+Reviewed bulk approval uses the separate workflow below.
 
 For a permission change, submit `session.permissions` with the exact host/session target and
 `params={mode: "default" | "allow_all"}`. `allow_all` bypasses ordinary approval prompts and
@@ -168,6 +168,23 @@ times match neither bound. Only absent occurrence metadata falls back to event r
 lists unknown-time facts; `coverage.unknown_occurrence_times_excluded` flags the bounded-read rule, not a count.
 `coverage.first_recorded_at` is journal record time and can be migration time, not occurrence time.
 Dashboard timeline and reconnect flow are the later Part B.
+
+## Start a standalone managed session (scope start)
+
+Read `workspaces_list(host)` (observe) and select the exact host/workspace. Use
+`operation_submit(action="session.start", target={host, workspace}, params={agent, prompt, model?, title?},
+idempotency_key, confirm=true)` or the advertised `session_start` adapter with the same key.
+The CLI is `batc start HOST WORKSPACE --prompt TEXT --key KEY --confirm`. Preserve the original
+prompt; omit it for a prompt-free session. Claude/Codex options follow the discovered schema.
+The new session uses an independent worktree; `use_worktree=false` is refused. Do not supply a
+session ID, task ID or local cwd, or move work to another host implicitly.
+
+Save the exact request, key, operation and generated session/worktree IDs. No-key adapter calls
+are independent starts. Worktree creation, start, tab registration and prompt acceptance have
+separate receipts. `started=true` with `prompt_sent=null` means the runtime exists and the prompt
+is unproven; read back the original operation without resending or making a replacement start.
+Failure before a BAT start can leave its proven carrier for reviewed cleanup. Unknown external
+outcomes retain capacity. Never remove the carrier or clear registry claims to retry.
 
 ## Legacy operator reference: supervising running sessions
 
@@ -337,14 +354,14 @@ Resume follows those same child IDs. Failed or stale items need a newly reviewed
 
 ## Reviewed cleanup (scope cleanup)
 
-Use `cleanup_preview(target={kind: work_item|checkpoint|integration|host, ...})` and inspect every
+Use `cleanup_preview(target={kind: work_item|checkpoint|integration|task|host, ...})` and inspect every
   resource, retention reason and planned step. Work item scope can include its children. With the person's
   authorization and your own `cleanup` token, apply exactly that preview using `cleanup_apply(preview_id,
   preview_token, fingerprint, idempotency_key, confirm=true)`. It pins HEAD before non-force worktree removal.
   `release_undelivered` is an explicit per-item preview choice: commits and the branch stay, and results remain
   undelivered. It needs only cleanup. **Never request cleanup_discard** or choose discard_uncommitted as an agent;
-  Hermes/Grokbot tokens have no cleanup_discard. Manual/unknown resources, writers, pending commands and task-owned
-  resources stay. Stale/mismatched/expired previews require a new preview (15-minute TTL); never change a reviewed
+  Hermes/Grokbot tokens have no cleanup_discard. Manual/unknown resources, writers and unresolved commands stay.
+  Task-owned resources require the explicit task target and central coordinator eligibility described below. Stale/mismatched/expired previews require a new preview (15-minute TTL); never change a reviewed
   apply. After a lost reply, reuse the same key and read the operation. Resume follows the original accepted plan;
   cancel stops unsent steps. Inspect receipt.completed_phases (including prerequisites), refused_phases and
   operation.cancel_requested: a later refusal never hides an earlier stop, discard or removal. result.items is
@@ -371,9 +388,17 @@ Use `cleanup_preview(target={kind: work_item|checkpoint|integration|host, ...})`
   Retired IDs refuse drive/resume/same-ID start with SESSION_RETIRED; start a
   new ID through the normal cap check. Ownership and original creation IDs remain connector-managed.
   Use cleanup_tombstones to find original IDs, location, reasons and PR destinations,
-  cleanup_retained to read actual retained refs. Restore comes in Part B; no tool can revive a runtime.
+  cleanup_retained to read actual retained refs. Restore is not currently exposed; no tool can revive a runtime.
   Legacy session_cleanup is read-only evaluation; apply always returns LEGACY_CLEANUP_DISABLED. auto_cleanup is
   deprecated and cannot enable writes. Do not set up a housekeeping sweep. See [cleanup.md](../../docs/design/cleanup.md).
+
+When `features.cleanup_task` is true, use `{kind: "task", task_id: "FULL_ID"}`. All owners must
+be terminal with matching versions, settled commands and no live/unknown consumers. A terminal
+paused task may qualify only in this explicit reviewed flow. Dirty task worktrees and task branches
+remain; `release_undelivered` applies only to an eligible clean worktree and retains commits/branch.
+A task ID alone grants no authority. Automatic receipts use `task_lifecycle`; historical evidence
+and user-reviewed receipts remain distinguishable. Follow saved cleanup operation IDs after reload.
+
 - `sessions_triage` shows `source` (pattern or jev) and an evidence line for every state; quote the evidence.
 
 ## Operations (when the task daemon is running)
