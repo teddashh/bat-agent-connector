@@ -23,6 +23,15 @@
 
 Desktop CI 現在跑 `test:central/cleanup/artifacts/delivery/observation/capture` 六組 actual-central fixtures，仍是 MockBat/temporary Git，不是 live acceptance。Python 四版 full、Windows/Linux package/native CI 以同一 PR head 為 merge gate。
 
+首輪整組候選 `8f6184d` 的 Linux CI：101 UI 與 central fixture 通過，但 cleanup fixture 的 operation 回
+`INTERNAL/KeyError`。這是 controls 整合造成的 production regression：`OperationService.create` 把
+所有 admission params 複製，遺失 cleanup admission 寫入的 server-only `_accepted_authorization`。
+修正保留原 prepared params 的 admission/persistence 語意；只有 private legacy answer 的固定 prompt
+需要獨立 resolved overlay。此失敗與修正後 exact-head CI 證據均保留在 #56，沒有把 fixture failure
+當作單純 timeout 或降低 cleanup assertions。
+同一舊 head 的 Windows package CI 與其餘四個 actual-central fixtures 通過；確認 regression 後停止
+尚未完成的 Python matrix，避免繼續測已知壞版。舊 matrix 是 cancelled，不是 full pass；修正後候選仍須四版全綠。
+
 ## 下一步
 
 1. 依 [legacy mutation audit](../design/legacy-mutation-audit.md) 補 `session.permissions`：Codex sandbox/approval 各自 durable receipt；deferred flag 不能遺失原 actor/operation/control version。不可整包一個 step 後讓舊 flag 另行寫入。
