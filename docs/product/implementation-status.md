@@ -8,16 +8,27 @@
 
 ## 目前續作
 
-最新追蹤 [#59](https://github.com/teddashh/bat-agent-connector/issues/59)。#58 已合併到 main
-`e495d70d8dae6b7dc415adc44a23eb1bcf64dd7d`。Native credentials、durable bulk approval、managed
-artifact capture/accept 已加入 `integrate/completion-candidate` 候選工作線，未宣稱已合併或實機通過。
+最新追蹤 [#59](https://github.com/teddashh/bat-agent-connector/issues/59)。[#60](https://github.com/teddashh/bat-agent-connector/pull/60)
+已合併到 main `c11dab72651ccf459842b3b39e942b040cfe2c36`。Native credentials、durable bulk approval、managed
+artifact capture/accept 及 session 整理已合併；沒有 installed/live 通過宣稱。
 Project Hub 的清楚 session 整理已列為共用 UI 方向，依實際 host／workspace 分組，不猜測專案歸屬。
 產品負責人補充原始對話並
 澄清 workspace／repository 與 GitHub 同步模式，見 [共同依據](realignment-v2.md#原始需求與後續澄清)。
 直接未發布 Git-pack transport 實驗留在本機獨立分支，沒有合入；此能力不再列交付缺口。
 一般附件及成果操作保留，明確 repository 的已發布版本同步仍須查核；不因此宣告 M1–M3 完成。
 
-本輪候選來源與審查：
+本輪合併證據：固定候選 `581e2a75b553c57867192a52f639c2dbed061904` 與 merge commit 的 tree 同為
+`ee21941fa5137cc862f2775ba5d975db154755db`。Python CI 3.10–3.13 各 **2568 passed／33 skipped**；
+179 shared UI、12 state、33 Windows／32 Linux Rust、Windows NSIS／Linux deb unsigned packages 通過。
+本機 frozen backend `9b67ed8` 的 Python 3.13／3.10 full 各 2568／33；最後合併 tree 的 coverage 由 exact-head CI 補足。
+私有 installer #9 已合併 `ac1a1aa`，pin 此候選與 canonical `.7`；17 temporary/mock cases 在 default／3.10 通過，
+真 source verify-only 通過，未改動 live 安裝。首個 installer 3.10 執行環境缺 PyYAML，改用文件列明依賴的獨立環境後通過。
+
+下一輪分支續作：批次核准共用 UI、task cleanup／UI、durable standalone start、native file transfers。
+Rust Fleet parity 的 source／ownership／migration 合約亦在獨立工作線；仍未交付 parity、autostart 或完整實機矩陣。
+各工作線未合併前不計入 main 完成度，B2 UI 與其餘 legacy orchestration、明確 repository 同步仍須接續。
+
+本輪來源與審查（以下保留合併前各層證據）：
 
 - Native credentials `67223d0`：Windows 原生憑證對話框／Credential Manager、固定 endpoint／actor／
   contract 及中央身分驗證、可恢復連線。獨立審查找到 native bootstrap 404 誤入 legacy namespace，
