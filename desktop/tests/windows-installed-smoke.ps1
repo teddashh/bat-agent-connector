@@ -113,26 +113,63 @@ function Save-Window([IntPtr]$Window, [string]$Name) {
         $bitmap.Save((Join-Path $Evidence $Name), [Drawing.Imaging.ImageFormat]::Png)
     } finally { $graphics.Dispose(); $bitmap.Dispose() }
 }
+function Build-ManagedViewProbe {
+    $framework = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319'
+    $info = [Diagnostics.ProcessStartInfo]::new((Join-Path $framework 'csc.exe'))
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    foreach ($arg in @('/nologo', '/target:exe', '/platform:x64', '/codepage:65001', "/out:$managedViewProbe",
+        "/reference:$(Join-Path $framework 'WPF/UIAutomationClient.dll')",
+        "/reference:$(Join-Path $framework 'WPF/UIAutomationTypes.dll')",
+        "/reference:$(Join-Path $framework 'WPF/WindowsBase.dll')",
+        (Join-Path $PWD 'tests/windows-managed-view.cs'))) { $info.ArgumentList.Add($arg) }
+    $compiler = [Diagnostics.Process]::Start($info)
+    try {
+        $output = $compiler.StandardOutput.ReadToEndAsync()
+        $errors = $compiler.StandardError.ReadToEndAsync()
+        if (-not $compiler.WaitForExit(60000)) {
+            $compiler.Kill()
+            if (-not $compiler.WaitForExit(5000)) { throw 'Owned UIA compiler did not exit after its deadline' }
+            throw 'UIA fixture compilation exceeded its deadline'
+        }
+        if ($compiler.ExitCode -ne 0) {
+            throw "UIA fixture compilation failed: $($output.GetAwaiter().GetResult())$($errors.GetAwaiter().GetResult())"
+        }
+    } finally { $compiler.Dispose() }
+}
 function Wait-ManagedView([Diagnostics.Process]$Process, [IntPtr]$Window, [string]$Name) {
-    $observed = @{state = @{}}
+    $observed = @{state = @{}; phases = @{}}
     try {
         Wait-Until {
             if ($Process.HasExited) { throw 'Managed app exited before WebView readiness' }
-            # Windows PowerShell supplies the platform UI Automation assemblies.
-            # Isolate provider calls so an unresponsive WebView cannot stall this fixture.
-            $info = [Diagnostics.ProcessStartInfo]::new((Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe'))
+            $observed.phases = [ordered]@{spawned=$false; started=$false; owner_verified=$false; assemblies_loaded=$false;
+                window_resolved=$false; query_started=$false; query_completed=$false; completed=$false; failed=$false; timed_out=$false}
+            # The already compiled MTA client avoids PowerShell/STA startup and
+            # retains process isolation if an accessibility provider stops responding.
+            $info = [Diagnostics.ProcessStartInfo]::new($managedViewProbe)
             $info.UseShellExecute = $false
             $info.CreateNoWindow = $true
             $info.RedirectStandardOutput = $true
             $info.RedirectStandardError = $true
-            foreach ($arg in @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
-                (Join-Path $PWD 'tests/windows-managed-view.ps1'), '-WindowHandle', $Window.ToInt64().ToString(),
-                '-OwnerProcess', $Process.Id.ToString())) { $info.ArgumentList.Add($arg) }
+            foreach ($arg in @($Window.ToInt64().ToString(), $Process.Id.ToString())) { $info.ArgumentList.Add($arg) }
             $probe = [Diagnostics.Process]::Start($info)
+            $observed.phases.spawned = $true
             try {
                 $output = $probe.StandardOutput.ReadToEndAsync()
                 $errors = $probe.StandardError.ReadToEndAsync()
-                if (-not $probe.WaitForExit(8000)) { $probe.Kill(); $probe.WaitForExit(); throw 'Native UI Automation probe exceeded its deadline' }
+                if (-not $probe.WaitForExit(8000)) {
+                    $observed.phases.timed_out = $true
+                    $probe.Kill()
+                    if (-not $probe.WaitForExit(5000)) { throw 'Owned UIA probe did not exit after its deadline' }
+                }
+                foreach ($phase in $errors.GetAwaiter().GetResult().Split([char]10)) {
+                    $phase = $phase.Trim()
+                    if (@('started', 'owner_verified', 'assemblies_loaded', 'window_resolved',
+                        'query_started', 'query_completed', 'completed', 'failed') -ccontains $phase) { $observed.phases[$phase] = $true }
+                }
+                if ($observed.phases.timed_out) { throw 'Native UI Automation probe exceeded its deadline' }
                 if ($probe.ExitCode -ne 0) { throw 'Native UI Automation readiness probe failed' }
                 $observed.state = $output.GetAwaiter().GetResult() | ConvertFrom-Json
                 @('webContent', 'authenticated', 'setup', 'configurationLoaded', 'saveEnabled', 'bounded').Where({
@@ -140,14 +177,21 @@ function Wait-ManagedView([Diagnostics.Process]$Process, [IntPtr]$Window, [strin
                 }).Count -eq 0
             } finally { $probe.Dispose() }
         } 'Managed WebView did not render authenticated first-run configuration'
+    } catch {
+        # Preserve the real native surface before app cleanup, even when UIA stalls.
+        try { Save-Window $Window "$Name-failed.png" } catch { Write-Warning 'Readiness failure screenshot was unavailable' }
+        throw
     } finally {
         $observed.state | ConvertTo-Json | Set-Content (Join-Path $Evidence "$Name-readiness.json") -Encoding utf8
+        $observed.phases | ConvertTo-Json | Set-Content (Join-Path $Evidence "$Name-probe-phases.json") -Encoding utf8
     }
 }
 $app = $null
 $second = $null
 $reopened = $null
+$managedViewProbe = Join-Path $installRoot 'managed-view-probe.exe'
 try {
+    Build-ManagedViewProbe
     # NSIS /D must be last and unquoted, even when the path contains spaces.
     Run-Installer $installer "/S /D=$installDir"
     if (-not (Test-Path -LiteralPath $binary)) { throw 'Installed executable missing' }
@@ -255,4 +299,5 @@ try {
     foreach ($path in @($configRoot, $dataRoot)) {
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
     }
+    if (Test-Path -LiteralPath $managedViewProbe) { Remove-Item -LiteralPath $managedViewProbe }
 }
