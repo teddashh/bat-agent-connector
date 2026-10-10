@@ -1,5 +1,6 @@
 import {workspaceNavigation} from "./workspace-nav.js";
 import {restoreBrowserSession, browserSessionToken, forgetBrowserSession} from "./transport/index.ts";
+import {setupSidebarResizer, setupMobileSessionLayout} from "./workspace-layout.js";
 import {attentionView} from "./attention.js";
 import {parsePullRequest} from "./delivery-input.js";
 import {sessionLabelsPanel, validLabels} from "./session-labels.js";
@@ -1046,6 +1047,7 @@ async function viewSession(main, host, sid, context = null) {
       status.replaceChildren(opStatus(op), " ", h("a", { href: `#/op/${op.operation_id}` }, op.operation_id));
       if (op.status === "succeeded" && box.value === submitted) {
         box.value = ""; try { localStorage.removeItem(draftKey); } catch { /* unavailable */ }
+        mobileLayout?.updateDraft();
       }
     } catch (e) { status.replaceChildren(errorBox(e)); }
     finally { sending = false; send.disabled = !allowed("session.send"); }
@@ -1072,6 +1074,7 @@ async function viewSession(main, host, sid, context = null) {
     h("details", {class: "workspace-evidence"}, h("summary", {}, t("sessions_details")), metadata),
     labels.box, permissionsSlot, captureSlot, cps.box, observations.box);
   const lane = h("section", {class: "workspace-conversation", "aria-label": t("messages")}, conversation.box, controls);
+  const mobileLayout = setupMobileSessionLayout({ head, composer: controls, textarea: box, t, guard: () => assertView(connection) });
   if (context?.picker) main.append(context.picker);
   main.append(head, h("div", {class: "workspace-session"}, lane, inspector));
   const renderPending = () => {
@@ -1141,6 +1144,7 @@ async function viewSession(main, host, sid, context = null) {
         chip(t(activity.key), activity.tone), h("span", {class: "muted"}, [row.agent_kind, row.model].filter(Boolean).join(" · ")),
         h("a", {class: "muted", href: `#/host/${encodeURIComponent(host)}`}, row.host),
         chip(t(row.api_access === "managed" ? "managed" : "read_only"), row.api_access === "managed" ? "managed" : "readonly")));
+    mobileLayout?.updateInfo();
     metadata.replaceChildren(h("div", {class: "actions"}, ...sessionBadges(row)),
       h("dl", { class: "kv" },
         h("dt", {}, t("host")), h("dd", {}, h("a", {href: `#/host/${encodeURIComponent(host)}`}, row.host)), h("dt", {}, t("workspace")), h("dd", {}, row.workspace || ""),
@@ -1237,7 +1241,7 @@ async function viewSession(main, host, sid, context = null) {
     ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve(),
     (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation") ? labels.refresh(true) : Promise.resolve()
   ]); });
-  return () => {clearInterval(retry); off(); batHandoff?.dispose(); conversation.dispose();};
+  return () => {clearInterval(retry); off(); batHandoff?.dispose(); conversation.dispose(); mobileLayout?.dispose();};
 }
 
 // A checkpoint records this session's commit and recent conversation (read-only); continuing starts a new
@@ -3209,16 +3213,18 @@ async function viewProjectWork(main, pid, kind, id) {
 
 const NAV = [["home", "nav_home"], ["projects", "nav_projects"], ["sessions", "nav_sessions"], ["artifact-review", "ar_nav"], ["delivery", "nav_delivery"],
   ["operations", "nav_operations"], ["cleanup", "nav_cleanup"], ["settings", "nav_settings"]];
-let workspaceNav = null, workspaceIdentity = "";
+let workspaceNav = null, workspaceIdentity = "", workspaceSidebar = null;
 function mountWorkspace(name) {
   const identity = state.token ? `${state.epoch}:${state.namespace}` : "";
   if (workspaceIdentity !== identity) {
+    workspaceSidebar?.dispose(); workspaceSidebar = null;
     workspaceNav?.dispose(); workspaceNav = null; workspaceIdentity = identity;
     if (identity) {
       const connection = {epoch: state.epoch, namespace: state.namespace};
       workspaceNav = workspaceNavigation({h, t, api, guard: () => assertConnection(connection), onEvents,
         namespace: state.namespace, errorBox});
       document.getElementById("workspace").prepend(workspaceNav.box);
+      workspaceSidebar = setupSidebarResizer({ aside: workspaceNav.box, workspace: document.getElementById("workspace"), t });
     }
   }
   document.body.classList.toggle("has-workspace", Boolean(state.token));
