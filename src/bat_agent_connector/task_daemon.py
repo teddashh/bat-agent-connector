@@ -324,15 +324,16 @@ class TaskDaemon:
                                            resource_id=params.get("resource_id"), kind=params.get("kind"),
                                            related_resource_type=params.get("related_resource_type"), related_resource_id=params.get("related_resource_id"))
         if method == "inventory_sessions":
-            return self.inventory.list_sessions(
+            return session_reading.decorate(self.journal, principal, self.inventory.list_sessions(
                 host=params.get("host"), provenance=params.get("provenance"), api_access=params.get("access"),
                 attention=params.get("attention"), include_gone=bool(params.get("include_gone")),
                 order=params.get("order") or "activity", cursor=params.get("cursor"),
-                limit=int(params.get("limit") or 50), **{k: params[k] for k in ("profile_id", "project_id", "work_item_id", "execution_id", "provider", "has_tab", "loaded", "streaming", "lifecycle", "stale", "relation_scope") if k in params and params[k] is not None})
+                limit=int(params.get("limit") or 50), **{k: params[k] for k in ("profile_id", "project_id", "work_item_id", "execution_id", "provider", "has_tab", "loaded", "streaming", "lifecycle", "stale", "relation_scope") if k in params and params[k] is not None}))
         if method == "inventory_hosts":
             return self.inventory.hosts_document(host=params.get("host"), discovery=params.get("discovery", False), after=params.get("after", 0), limit=params.get("limit", 20))
         if method == "inventory_session":
-            return self.inventory.session_document(str(params.get("host")), str(params.get("session_id")))
+            return session_reading.decorate(self.journal, principal,
+                self.inventory.session_document(str(params.get("host")), str(params.get("session_id"))))
         if method == "inventory_worktree":
             return (await self.api.worktree(params.get("worktree_id")))[1]
         if method in {"resource_history", "resource_relations"}:
@@ -391,8 +392,9 @@ class TaskDaemon:
         if method == "projects_list":
             return work_items.projects_list(self.journal.db, include_archived=bool(params.get("include_archived")))
         if method == "project_get":
-            return work_items.project_get(self.journal.db, str(params.get("project_id")),
-                                          include_archived=bool(params.get("include_archived")), ops=self.ops)
+            return session_reading.decorate(self.journal, principal,
+                work_items.project_get(self.journal.db, str(params.get("project_id")),
+                                       include_archived=bool(params.get("include_archived")), ops=self.ops))
         if method == "work_items_list":
             from .dashboard_sync import identity
             pending = params.get("pending")
