@@ -10,7 +10,7 @@ async function setup(page: any, options: any = {}) {
     Object.assign(window, {__credentialFixture: fixture, isTauri: true, __TAURI_INTERNALS__: {invoke: async (command: string, args: any) => {
       fixture.calls.push({command, args: args ?? null});
       if (command === 'native_status') return {endpoint: fixture.setup ? null : fixture.endpoint ?? 'https://central.example/', expected_actor: fixture.setup ? null : 'fixture-operator',
-        configuration_setup: !!fixture.setup,
+        configuration_setup: !!fixture.setup, configuration_source: fixture.configurationSource, error: fixture.startupError,
         credential_available: fixture.available, credential_saved: fixture.saved, enrollment_supported: fixture.supported,
         configuration_reload: true, configuration_file: fixture.configPath ?? 'C:\\Users\\fixture\\AppData\\Roaming\\io.betteragent.dashboard\\central.json',
         credential_source: fixture.available ? fixture.saved ? fixture.store ?? 'windows_credential_manager' : 'launch_environment' : null,
@@ -57,6 +57,18 @@ async function setup(page: any, options: any = {}) {
   await page.goto('/dashboard/#/settings');
   await expect(page.getByRole('region', {name: /Desktop central connection|桌面中央連線/})).toBeVisible();
 }
+
+test('managed startup failure remains visible beside advanced external setup', async ({page}) => {
+  await setup(page, {setup: true, configurationSource: 'managed', startupError: 'MANAGED_RUNTIME_START_FAILED'});
+  await expect(page.getByRole('heading', {name: 'Local background service is not ready'})).toBeVisible();
+  await expect(page.getByText('MANAGED_RUNTIME_START_FAILED', {exact: false})).toBeVisible();
+  await expect(page.locator('[data-native-setup] input')).toHaveCount(2);
+  await expect(page.locator('[data-native-setup] input').first()).toBeHidden();
+  await page.getByText('Advanced: join an existing central', {exact: true}).click();
+  await expect(page.locator('[data-native-setup] input').first()).toBeVisible();
+  const calls = await page.evaluate(() => (window as any).__credentialFixture.calls);
+  expect(calls.some((call: any) => ['connector_setup_configuration', 'connector_enroll', 'connector_connect'].includes(call.command))).toBe(false);
+});
 
 for (const locale of ['en-US', 'zh-TW']) for (const width of [390, 768, 1440]) {
   test(`first connection preserves native-reviewed settings ${locale} ${width}`, async ({browser}) => {

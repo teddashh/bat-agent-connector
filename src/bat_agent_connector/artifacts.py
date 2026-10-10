@@ -21,7 +21,7 @@ import unicodedata
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from . import resource_policy
+from . import platform_files, resource_policy
 from .operations import RERUN, ActionDef, NeedsAttention, OperationError, StepFailed, Wait
 
 ARTIFACT_ID = re.compile(r"art_[0-9a-f]{32}")
@@ -54,7 +54,7 @@ class ArtifactSettings:
             raise ValueError("invalid [artifacts] settings")
         for key, value in raw.items():
             if key == "store_root":
-                if not isinstance(value, str) or not value.startswith("/"):
+                if not isinstance(value, str) or not Path(value).is_absolute():
                     raise ValueError("artifacts.store_root must be an absolute path")
             elif type(value) is not int or value <= 0:
                 raise ValueError(f"artifacts.{key} must be a positive integer")
@@ -74,6 +74,8 @@ def safe_name(value) -> str:
 
 def _open_dir(path: Path, *, create=False) -> int:
     resource_policy.check_artifact_storage(path)
+    if platform_files.WINDOWS:
+        return platform_files.native.open_dir(path, create=create)
     fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
     try:
         for part in path.parts[1:]:
@@ -90,12 +92,31 @@ def _open_dir(path: Path, *, create=False) -> int:
         raise
 
 
+def _close_dir(fd):
+    if platform_files.WINDOWS:
+        fd.close()
+    else:
+        os.close(fd)
+
+
+def _sync_dir(fd):
+    if not platform_files.WINDOWS:
+        os.fsync(fd)
+    # Windows file handles use FILE_WRITE_THROUGH and flush before rename.
+
+
+def _open_file(name, flags, mode=0o600, *, parent):
+    if platform_files.WINDOWS:
+        return platform_files.native.open_file(name, flags, mode, parent=parent)
+    return os.open(name, flags | os.O_NOFOLLOW, mode, dir_fd=parent)
+
+
 def _file_hash(path: Path) -> tuple[int, str]:
     parent = _open_dir(path.parent)
     try:
-        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+        fd = _open_file(path.name, os.O_RDONLY, parent=parent)
     finally:
-        os.close(parent)
+        _close_dir(parent)
     with os.fdopen(fd, "rb") as file:
         info = os.fstat(file.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -233,29 +254,27 @@ class ArtifactStore:
     def _setup(self):
         resource_policy.check_artifact_storage(self.root)
         if self.root.exists():
-            info = self.root.stat()
-            if info.st_uid != os.getuid() or info.st_mode & 0o077:
-                raise ValueError("artifact store must be owned by the connector and mode 0700")
+            platform_files.check_private(self.root, directory=True)
             if any(self.root.iterdir()) and not (self.root / ".batc-artifact-store").is_file():
                 raise ValueError("not a connector artifact store")
         fd = _open_dir(self.root, create=True)
         try:
             try:
-                marker = os.open(".batc-artifact-store", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+                marker = _open_file(".batc-artifact-store", os.O_WRONLY | os.O_CREAT | os.O_EXCL, parent=fd)
                 with os.fdopen(marker, "w") as file:
                     file.write("batc-artifacts-v1\n")
                     file.flush()
                     os.fsync(file.fileno())
             except FileExistsError:
-                marker = os.open(".batc-artifact-store", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+                marker = _open_file(".batc-artifact-store", os.O_RDONLY, parent=fd)
                 with os.fdopen(marker, "r") as file:
                     if file.read(100) != "batc-artifacts-v1\n":
                         raise ValueError("not a connector artifact store") from None
-            os.fsync(fd)
+            _sync_dir(fd)
         finally:
-            os.close(fd)
+            _close_dir(fd)
         for name in ("staging", "revisions"):
-            os.close(_open_dir(self.root / name, create=True))
+            _close_dir(_open_dir(self.root / name, create=True))
 
     def used_bytes(self):
         ready = self.db.execute("SELECT COALESCE(SUM(size_bytes),0) FROM artifact_revisions WHERE state IN ('ready','unavailable')").fetchone()[0]
@@ -322,9 +341,9 @@ class ArtifactStore:
             size, digest = _file_hash(path)
             fd = _open_dir(path.parent)
             try:
-                raw_fd = os.open("content", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+                raw_fd = _open_file("content", os.O_RDONLY, parent=fd)
             finally:
-                os.close(fd)
+                _close_dir(fd)
             with os.fdopen(raw_fd, "rb") as file:
                 data = file.read(row["size_bytes"] + 1)
         except (OSError, OperationError):
@@ -372,9 +391,9 @@ class ArtifactStore:
         try:
             fd = _open_dir(directory, create=True)
             try:
-                content_fd = os.open("content", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+                content_fd = _open_file("content", os.O_WRONLY | os.O_CREAT | os.O_EXCL, parent=fd)
             finally:
-                os.close(fd)
+                _close_dir(fd)
             with os.fdopen(content_fd, "wb") as file:
                 while size < length:
                     if self.ops.get(operation_id, steps=False)["cancel_requested"] or row["deadline"] <= time.time():
@@ -391,9 +410,9 @@ class ArtifactStore:
                 os.fsync(file.fileno())
             directory_fd = _open_dir(directory)
             try:
-                os.fsync(directory_fd)
+                _sync_dir(directory_fd)
             finally:
-                os.close(directory_fd)
+                _close_dir(directory_fd)
             complete = True
         except (asyncio.TimeoutError, OSError) as exc:
             raise OperationError("UPLOAD_INCOMPLETE", f"upload did not complete ({type(exc).__name__})", 400) from None
@@ -414,39 +433,44 @@ class ArtifactStore:
         source = self.root / "staging" / row["operation_id"] / f"a{row['attempt']:04d}"
         src_fd = _open_dir(source)
         try:
-            try:
-                os.link("content", "content", src_dir_fd=src_fd, dst_dir_fd=dest_fd, follow_symlinks=False)
-                os.unlink("content", dir_fd=src_fd)
-                os.fsync(src_fd)
-                os.chmod("content", 0o400, dir_fd=dest_fd, follow_symlinks=False)
-            except (FileExistsError, FileNotFoundError):
+            if platform_files.WINDOWS:
+                platform_files.native.publish_file(src_fd, dest_fd)
+            else:
                 try:
-                    src = os.stat("content", dir_fd=src_fd, follow_symlinks=False)
-                    dst = os.stat("content", dir_fd=dest_fd, follow_symlinks=False)
-                    if (src.st_dev, src.st_ino) == (dst.st_dev, dst.st_ino):
-                        os.unlink("content", dir_fd=src_fd)
-                        os.fsync(src_fd)
-                except FileNotFoundError:
-                    pass
-            os.chmod("content", 0o400, dir_fd=dest_fd, follow_symlinks=False)
+                    os.link("content", "content", src_dir_fd=src_fd, dst_dir_fd=dest_fd, follow_symlinks=False)
+                    os.unlink("content", dir_fd=src_fd)
+                    _sync_dir(src_fd)
+                    os.chmod("content", 0o400, dir_fd=dest_fd, follow_symlinks=False)
+                except (FileExistsError, FileNotFoundError):
+                    try:
+                        src = os.stat("content", dir_fd=src_fd, follow_symlinks=False)
+                        dst = os.stat("content", dir_fd=dest_fd, follow_symlinks=False)
+                        if (src.st_dev, src.st_ino) == (dst.st_dev, dst.st_ino):
+                            os.unlink("content", dir_fd=src_fd)
+                            _sync_dir(src_fd)
+                    except FileNotFoundError:
+                        pass
+                os.chmod("content", 0o400, dir_fd=dest_fd, follow_symlinks=False)
             if _file_hash(directory / "content") != (revision["size_bytes"], revision["digest"]):
                 raise OperationError("ARTIFACT_CONTENT_UNAVAILABLE", "existing revision has different content", 409)
             document = {k: revision[k] for k in ("artifact_id", "revision", "digest", "size_bytes", "media_type", "display_name", "operation_id")}
             try:
-                marker = os.open("manifest.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=dest_fd)
+                marker = _open_file("manifest.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400, parent=dest_fd)
                 with os.fdopen(marker, "w") as file:
                     file.write(canonical(document))
                     file.flush()
                     os.fsync(file.fileno())
             except FileExistsError:
-                marker = os.open("manifest.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dest_fd)
+                marker = _open_file("manifest.json", os.O_RDONLY, parent=dest_fd)
                 with os.fdopen(marker) as file:
                     if json.load(file) != document:
                         raise OperationError("ARTIFACT_CONTENT_UNAVAILABLE", "revision manifest differs", 409) from None
-            os.fsync(dest_fd)
+            if platform_files.WINDOWS:
+                platform_files.native.seal_file(dest_fd, "manifest.json")
+            _sync_dir(dest_fd)
         finally:
-            os.close(src_fd)
-            os.close(dest_fd)
+            _close_dir(src_fd)
+            _close_dir(dest_fd)
         return document
 
     def published(self, row):
@@ -495,12 +519,15 @@ class ArtifactStore:
         directory = self.root / "staging" / operation_id
         resource_policy.check_artifact_storage(directory)
         if directory.exists():
-            shutil.rmtree(directory)  # only this terminal operation's scratch; never revisions
+            if platform_files.WINDOWS:
+                platform_files.native.remove_tree(directory)
+            else:
+                shutil.rmtree(directory)  # only this terminal operation's scratch; never revisions
             parent_fd = _open_dir(directory.parent)
             try:
-                os.fsync(parent_fd)
+                _sync_dir(parent_fd)
             finally:
-                os.close(parent_fd)
+                _close_dir(parent_fd)
 
     async def reap_terminal(self):
         async with self._reap_lock:

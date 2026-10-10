@@ -1,19 +1,21 @@
 import {expect, type Page} from '@playwright/test';
 export const publishedId = 'op_'+'a'.repeat(32), publishedSha = 'b'.repeat(40), bindingDigest = 'c'.repeat(64);
+export const uploadId = 'op_'+'d'.repeat(32), aid = 'art_'+'e'.repeat(32);
 export const selected = {repository: 'example/project', host: 'demo', workspace_id: 'demo-ws'};
 export const dispatchProject = 'prj_'+'1'.repeat(20), dispatchArtifact = {artifact_id: 'art_'+'2'.repeat(32), revision: 1, digest: '3'.repeat(64)};
 export async function publishedFixture(page: Page, native: boolean, options: any = {}) {
-  const state = {actor: 'published-person', server: 'published-server', principal: 'published-principal', scopes: ['observe', 'start'],
+  const state = {actor: 'published-person', server: 'published-server', principal: 'published-principal', scopes: ['observe', 'start', 'manage'],
     allowed: true, writes: true, orchestrate: true, status: 'succeeded', posts: [] as any[], previews: [] as any[], reads: [] as string[],
-    errors: [] as string[], events: [] as any[], after: 0, operation: null as any,
+    errors: [] as string[], events: [] as any[], after: 0, operation: null as any, bytes: [] as number[], uploaded: false,
     project: {project_id: dispatchProject, name: 'Dashboard project', description: 'Shared browser and desktop work',
       repositories: ['example/project'], version: 1, archived: false, counts: {total: 0, approved: 0}}, ...options};
-  const caps = () => ({actor: state.actor, scopes: state.scopes, api_version: 1, contract_version: '2026-10-08',
+  const baseCaps = () => ({actor: state.actor, scopes: state.scopes, api_version: 1, contract_version: '2026-10-08',
     hosts: ['demo', 'other'].map(host => ({host, writes: state.writes, orchestrate: state.orchestrate})),
-    actions: state.absent ? [] : [{action: 'repository.continue', allowed: state.allowed}, {action: 'session.start', allowed: state.allowed}],
+    actions: state.absent ? [] : [{action: 'repository.continue', allowed: state.allowed}, {action: 'session.start', allowed: state.allowed}, {action: 'artifact.upload', allowed: true}],
     ...(state.dispatch ? {artifacts: {limits: {max_file_bytes: 1048576}}} : {}),
     features: {...(state.dispatch && !state.oldCentral ? {project_dispatch: {version: 1, artifacts: true, model: true}} : {}),
       repository_sync: state.unbound ? [] : (state.bindings || [selected, {...selected, host: 'other', workspace_id: 'other-ws'}]).map(b => ({...b, exact_ref_head_only: true}))}});
+  const caps = () => state.extendCaps ? state.extendCaps(baseCaps()) : baseCaps();
   const mismatch = (operation: any) => {
     const op = structuredClone(operation);
     if (state.bad === 'key') op.idempotency_key = 'wrong';
@@ -30,6 +32,8 @@ export async function publishedFixture(page: Page, native: boolean, options: any
   };
   const dispatch = async (input: any) => {
     const url = new URL(input.path, 'http://fixture'), path = url.pathname;
+    const extra = await state.extraDispatch?.(input, state);
+    if (extra) return extra;
     if (path === '/repository-previews') {
       state.previews.push(structuredClone(input)); const target = {...input.body}; delete target.source_ref;
       const preview = {target, workspace: {workspace_id: target.workspace_id, name: 'Dashboard', folder: '/srv/dashboard'}, source_ref: input.body.source_ref,
@@ -42,12 +46,24 @@ export async function publishedFixture(page: Page, native: boolean, options: any
       if (state.delayPreview) await new Promise(resolve => {state.holdPreview = resolve;});
       return {status: 200, data: {preview}};
     }
+    if (input.method === 'BINARY') {
+      state.bytes = input.bytes; state.uploaded = true; return {status: 200, data: {}};
+    }
     if (input.method === 'POST') {
       state.posts.push(structuredClone(input));
       if (state.refuse) return {status: 403, data: {error: {code: state.refuse, message: 'Fixture refusal'}}};
+      if (input.body?.action === 'artifact.upload') {
+        state.uploadCount = (state.uploadCount || 0) + 1;
+        state.uploadDigest = input.body.params.expected_digest;
+        if (state.failUpload) return {status: 500, data: {error: {code: 'UPLOAD_FAILED', message: 'Upload failed'}}};
+        return {status: 200, data: {operation: {operation_id: uploadId,
+          status: state.instantUpload ? 'succeeded' : 'waiting_external',
+          result: {artifact_id: aid, revision: 1, digest: input.body.params.expected_digest},
+          external_refs: {content_url: 'https://untrusted.invalid'}}}};
+      }
       if (input.body.action === 'project.create') {
         state.project = {...state.project, ...input.body.params, repositories: input.body.params.repositories || []};
-        return {status: 200, data: {operation: {operation_id: publishedId, ...input.body, status: 'succeeded',
+        return {status: 200, data: {operation: {operation_id: publishedId, actor: state.actor, idempotency_key: input.idempotency_key, ...input.body, status: 'succeeded',
           result: {project_id: dispatchProject, version: 1}}}};
       }
       if (!state.operation || state.operation.idempotency_key !== input.idempotency_key) state.operation = {
@@ -74,6 +90,13 @@ export async function publishedFixture(page: Page, native: boolean, options: any
       if (state.delayArtifact) await new Promise(resolve => {state.holdArtifact = resolve;});
       return {status: 200, data: {artifact: {...dispatchArtifact, state: state.unreadyArtifact ? 'reserved' : 'ready', display_name: 'notes.txt'}}};
     }
+    if (path === '/operations/'+uploadId) {
+      if (state.failUpload) return {status: 500, data: {error: {code: 'UPLOAD_FAILED', message: 'Upload failed'}}};
+      return {status: 200, data: {operation: {operation_id: uploadId,
+        status: state.uploaded || state.instantUpload ? 'succeeded' : 'waiting_external',
+        result: {artifact_id: aid, revision: 1, digest: state.uploadDigest || 'd'.repeat(64)},
+        external_refs: {content_url: 'https://untrusted.invalid'}}}};
+    }
     if (path === '/operations/'+publishedId) {
       if (state.failRead) return {status: 503, data: {error: {code: 'READ_FAILED', message: 'Published read failed'}}};
       return {status: 200, data: {operation: mismatch({...state.operation, status: state.status})}};
@@ -89,20 +112,23 @@ export async function publishedFixture(page: Page, native: boolean, options: any
   page.on('pageerror', e => state.errors.push(e.message));
   if (native) {
     await page.exposeFunction('publishedFixture', dispatch);
-    await page.addInitScript(() => Object.assign(window, {isTauri: true, __TAURI_INTERNALS__: {invoke: async (command: string, args: any) => {
+    await page.addInitScript(() => Object.assign(window, {isTauri: true, __TAURI_INTERNALS__: {invoke: async (command: string, args: any, options: any) => {
       if (command === 'native_status') return {endpoint: 'https://fixture.example', credential_available: true};
       if (command === 'connector_connect') return (await (window as any).publishedFixture({method: 'GET', path: '/capabilities'})).data;
       if (command === 'connector_disconnect') return;
       if (command === 'connector_request') return (window as any).publishedFixture(args.input);
+      if (command === 'connector_upload_artifact') return (window as any).publishedFixture({method: 'BINARY',
+        path: '/artifacts/uploads/' + (options?.headers?.['x-batc-upload-operation'] || uploadId) + '/content', bytes: [...new Uint8Array(args)]});
       if (command === 'fleet_availability') return {configured: false, platform_supported: false};
       throw new Error(command);
     }}}));
   } else await page.addInitScript(() => sessionStorage.setItem('batc.dashboard.token', 'fixture-token'));
   await page.route('**/api/v1/**', async route => {
     if (native) throw new Error('Native published start must use IPC');
-    const request = route.request(), url = new URL(request.url());
-    const response = await dispatch({method: request.method(), path: url.pathname.slice('/api/v1'.length)+url.search,
-      body: request.postDataJSON(), idempotency_key: request.headers()['idempotency-key']});
+    const request = route.request(), url = new URL(request.url()), binary = url.pathname.endsWith('/content');
+    const response = await dispatch({method: binary ? 'BINARY' : request.method(), path: url.pathname.slice('/api/v1'.length)+url.search,
+      body: binary ? null : request.postDataJSON(), bytes: binary ? [...request.postDataBuffer()!] : undefined,
+      idempotency_key: request.headers()['idempotency-key']});
     await route.fulfill({status: response.status, json: response.data});
   });
   return state;

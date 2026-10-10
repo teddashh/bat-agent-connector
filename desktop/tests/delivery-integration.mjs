@@ -68,7 +68,9 @@ try {
     let losingReply = false;
     page.on('pageerror', err => errors.push(err.message));
     page.on('console', msg => {
-      if (msg.type() === 'error' && !(msg.location().url.endsWith('/api/v1/bootstrap') && msg.text().includes('404')) && !(losingReply && msg.text().includes('net::ERR_FAILED'))) errors.push(msg.text());
+      // This operator-run fixture predates optional browser-cookie handoff and bootstrap.
+      const optionalRead = ['/api/v1/bootstrap', '/api/v1/browser-session'].some(path => msg.location().url.endsWith(path));
+      if (msg.type() === 'error' && !(optionalRead && msg.text().includes('404')) && !(losingReply && msg.text().includes('net::ERR_FAILED'))) errors.push(`${msg.text()} (${msg.location().url})`);
     });
     page.on('request', req => {
       if (req.method() === 'POST' && req.url().includes('/api/v1/operations?')) requests.push({ body: req.postDataJSON(), key: req.headers()['idempotency-key'] });
@@ -253,7 +255,10 @@ try {
     await viewer.addInitScript(token => sessionStorage.setItem('batc.dashboard.token', token), fixture.viewer);
     const readonly = await viewer.newPage();
     readonly.on('pageerror', err => errors.push(err.message));
-    readonly.on('console', msg => { if (msg.type() === 'error' && !(msg.location().url.endsWith('/api/v1/bootstrap') && msg.text().includes('404'))) errors.push(msg.text()); });
+    readonly.on('console', msg => {
+      const optionalRead = ['/api/v1/bootstrap', '/api/v1/browser-session'].some(path => msg.location().url.endsWith(path));
+      if (msg.type() === 'error' && !(optionalRead && msg.text().includes('404'))) errors.push(`${msg.text()} (${msg.location().url})`);
+    });
     await readonly.goto(fixture.url + '#/delivery');
     await readonly.getByTestId('deployment-rollback').first().waitFor();
     assert.ok(await readonly.getByTestId('deployment-rollback').first().isDisabled());

@@ -5,3 +5,5 @@ src-tauri/gen/
 playwright-report/
 test-results/
 *.local.json
+managed-runtime/*
+!managed-runtime/README.txt

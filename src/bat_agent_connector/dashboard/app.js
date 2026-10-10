@@ -19,6 +19,128 @@ var __exportAll = (all, no_symbols) => {
 	return target;
 };
 //#endregion
+//#region src/pr-selector.js
+function prSelector({ api, h, t, guard, repoInput, numInput, onSelect }) {
+	let page = 1, serial = 0, cached = [], scope = "", nextPage = null, busy = false, stale = false, error = "";
+	const alive = () => {
+		try {
+			guard();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const filter = h("select", {
+		"aria-label": t("state"),
+		onchange: () => loadList()
+	}, ...[
+		"open",
+		"closed",
+		"all"
+	].map((value) => h("option", { value }, t("pr_state_" + value))));
+	const search = h("input", {
+		type: "search",
+		"aria-label": t("delivery_search_prs"),
+		placeholder: t("delivery_search_prs"),
+		oninput: () => render()
+	});
+	const refresh = h("button", {
+		type: "button",
+		class: "secondary",
+		onclick: () => loadList()
+	}, t("delivery_refresh_prs"));
+	const list = h("div", {
+		class: "pr-list",
+		"aria-live": "polite"
+	});
+	const container = h("div", { class: "pr-selector" }, h("div", { class: "filters" }, search, filter, refresh), list);
+	function render() {
+		if (!alive()) return;
+		list.replaceChildren();
+		refresh.disabled = busy;
+		if (busy) list.append(h("p", { class: "muted" }, t("loading")));
+		if (error) list.append(h("p", { class: "note warn" }, error));
+		if (scope) list.append(h("p", { class: "muted" }, `${scope} · ${t("delivery_pr_page", { page })}`));
+		if (stale && cached.length) list.append(h("p", { class: "note warn" }, t("delivery_pr_stale")));
+		const query = search.value.trim().toLocaleLowerCase();
+		const rows = cached.filter((pr) => pr.title.toLocaleLowerCase().includes(query) || String(pr.number).includes(query));
+		if (!rows.length && !busy) list.append(h("p", { class: "muted" }, t("delivery_no_prs")));
+		for (const pr of rows) {
+			const loaded = scope, revision = serial;
+			const select = h("button", {
+				type: "button",
+				class: "secondary",
+				disabled: busy || stale,
+				onclick: () => {
+					if (!alive() || busy || stale || revision !== serial || loaded !== scope) return;
+					repoInput.value = loaded;
+					numInput.value = String(pr.number);
+					onSelect();
+				}
+			}, `#${pr.number} ${pr.title}`);
+			list.append(h("div", { class: "row" }, select, h("span", { class: "muted" }, t("pr_state_" + pr.state), pr.draft ? ` · ${t("pr_draft")}` : "")));
+		}
+		if (scope) list.append(h("div", { class: "actions" }, h("button", {
+			type: "button",
+			class: "secondary",
+			disabled: busy || stale || page <= 1,
+			onclick: () => loadList(page - 1)
+		}, t("pagination_prev")), h("button", {
+			type: "button",
+			class: "secondary",
+			disabled: busy || stale || !nextPage,
+			onclick: () => loadList(nextPage)
+		}, t("pagination_next"))));
+	}
+	async function loadList(wanted = 1) {
+		if (!alive()) return;
+		const mine = ++serial, repository = repoInput.value.trim(), selectedState = filter.value;
+		stale = true;
+		error = "";
+		if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
+			busy = false;
+			error = t("delivery_choose_repository");
+			render();
+			return;
+		}
+		busy = true;
+		render();
+		try {
+			const result = await api("GET", `/repositories/${repository}/pulls?state=${selectedState}&page=${wanted}`);
+			if (!alive() || mine !== serial) return;
+			if (repoInput.value.trim() !== repository || filter.value !== selectedState) {
+				busy = false;
+				render();
+				return;
+			}
+			if (typeof result.loaded_scope !== "string" || result.loaded_scope.toLowerCase() !== repository.toLowerCase() || !Array.isArray(result.pulls) || result.pulls.length > 100 || result.pulls.some((pr) => !Number.isInteger(pr.number) || pr.number < 1 || pr.number > 999999999 || typeof pr.title !== "string" || !["open", "closed"].includes(pr.state))) throw Error(t("delivery_pr_invalid"));
+			page = wanted;
+			scope = result.loaded_scope;
+			cached = result.pulls;
+			nextPage = result.has_more && wanted < 1e3 && result.next_page === wanted + 1 ? result.next_page : null;
+			stale = false;
+		} catch (failure) {
+			if (!alive() || mine !== serial) return;
+			error = failure.message || String(failure);
+		} finally {
+			if (alive() && mine === serial) {
+				busy = false;
+				render();
+			}
+		}
+	}
+	repoInput.addEventListener("input", () => {
+		serial++;
+		busy = false;
+		stale = true;
+		render();
+	});
+	return {
+		container,
+		loadList
+	};
+}
+//#endregion
 //#region src/state/sessions.js
 var text$3 = (value) => typeof value === "string" ? value : "";
 function workspaceGroup(session) {
@@ -143,7 +265,7 @@ function workspaceNavigation({ h, t, api, guard, onEvents, namespace, errorBox }
 			sessionStorage.setItem(key, JSON.stringify([...expanded]));
 		} catch {}
 	};
-	const link = (href, label, state = null) => h("a", {
+	const link = (href, label, state = null, reading = null) => h("a", {
 		href,
 		class: "workspace-tree-link",
 		"data-tree-key": href,
@@ -151,12 +273,15 @@ function workspaceNavigation({ h, t, api, guard, onEvents, namespace, errorBox }
 	}, h("span", {
 		class: `workspace-dot ${state?.tone || ""}`,
 		"aria-hidden": "true"
-	}), h("span", { class: "workspace-tree-label" }, label), state ? h("span", { class: "workspace-tree-state" }, t(state.key)) : null);
+	}), h("span", { class: "workspace-tree-label" }, label), state ? h("span", { class: "workspace-tree-state" }, t(state.key)) : null, reading?.unread_count > 0 ? h("span", {
+		class: "workspace-tree-state",
+		title: t("conversation_count_note")
+	}, t("conversation_badge", { count: reading.unread_count }) + (reading.complete ? "" : "+")) : null);
 	const workLink = (pid, item) => link(`#/work/${[
 		pid,
 		item.kind,
 		item.id
-	].map(encodeURIComponent).join("/")}`, item.title || item.branch || item.action || item.id, sessionActivity(item.session || {}));
+	].map(encodeURIComponent).join("/")}`, item.title || item.branch || item.action || item.id, sessionActivity(item.session || {}), item.reading);
 	const render = () => {
 		if (disposed) return;
 		const focus = tree.contains(document.activeElement) ? document.activeElement?.dataset.treeKey : null;
@@ -254,7 +379,7 @@ function workspaceNavigation({ h, t, api, guard, onEvents, namespace, errorBox }
 						cursors.add(cursor);
 					}
 					const focused = sessionRows.contains(document.activeElement) ? document.activeElement.getAttribute("href") : null;
-					sessionRows.replaceChildren(...groupedSessions([...rows.values()]).map((group) => h("div", {}, h("p", { class: "muted workspace-session-group" }, group.host, " · ", group.name || group.id || t("obs_unknown")), ...group.sessions.map((session) => link(`#/session/${[session.host, session.session_id].map(encodeURIComponent).join("/")}`, session.title || session.session_id, sessionActivity(session))))), h("p", { class: "muted" }, t("attention_loaded", { count: rows.size })));
+					sessionRows.replaceChildren(...groupedSessions([...rows.values()]).map((group) => h("div", {}, h("p", { class: "muted workspace-session-group" }, group.host, " · ", group.name || group.id || t("obs_unknown")), ...group.sessions.map((session) => link(`#/session/${[session.host, session.session_id].map(encodeURIComponent).join("/")}`, session.title || session.session_id, sessionActivity(session), session.reading)))), h("p", { class: "muted" }, t("attention_loaded", { count: rows.size })));
 					if (focused) [...sessionRows.querySelectorAll("a")].find((a) => a.getAttribute("href") === focused)?.focus({ preventScroll: true });
 					more.hidden = !cursor;
 					sessionsLoaded = true;
@@ -326,6 +451,923 @@ function workspaceNavigation({ h, t, api, guard, onEvents, namespace, errorBox }
 			off();
 			document.removeEventListener("keydown", escape);
 			box.remove();
+		}
+	};
+}
+//#endregion
+//#region src/managed-setup.js
+function managedSetupPanel({ h, t, api, guard, namespace, errorBox, opStatus, onConfigured, caps }) {
+	const key = `batc.managed.setup.${namespace}`;
+	let saved = {}, snapshot = null, busy = false, disposed = false, operation = null;
+	try {
+		saved = JSON.parse(localStorage.getItem(key) || "{}");
+	} catch {}
+	if (!saved || typeof saved !== "object" || Array.isArray(saved)) saved = {};
+	const equal = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+	function canonical(value) {
+		if (Array.isArray(value)) return value.map(canonical);
+		if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map((k) => [k, canonical(value[k])]));
+		return value;
+	}
+	const object = (value) => value && typeof value === "object" && !Array.isArray(value);
+	const validCommands = (commands) => object(commands) && Object.keys(commands).length <= 200 && Object.entries(commands).every(([project, argv]) => project.length > 0 && project.length <= 256 && !/[\x00-\x1f]/.test(project) && Array.isArray(argv) && argv.length > 0 && argv.length <= 64 && argv.every((arg) => typeof arg === "string" && arg.length > 0 && arg.length <= 4096 && !/[\x00-\x1f]/.test(arg)) && !argv[0].startsWith("-") && argv.reduce((size, arg) => size + arg.length, 0) <= 16e3);
+	const validVerification = (value) => object(value) && validCommands(value.commands) && Number.isInteger(value.timeout_s) && value.timeout_s >= 1 && value.timeout_s <= 3600;
+	const validIntent = (intent) => intent && typeof intent.key === "string" && intent.key.length > 0 && intent.key.length <= 200 && [
+		"setup.host",
+		"setup.repository",
+		"setup.verification"
+	].includes(intent.request?.action) && /^[0-9a-f]{64}$/.test(intent.request?.preconditions?.config_revision) && object(intent.request?.params) && object(intent.request?.target) && (intent.request.action === "setup.verification" ? Object.keys(intent.request.target).length === 0 && validVerification(intent.request.params) : Object.keys(intent.request.target).length === 1 && typeof intent.request.target[intent.request.action === "setup.host" ? "host" : "repository"] === "string") && (!intent.operation_id || /^op_[0-9a-f]{32}$/.test(intent.operation_id));
+	const allowed = (kind) => caps()?.scopes?.includes("manage") && caps()?.actions?.some((action) => action.action === `setup.${kind}` && action.allowed === true);
+	const damaged = !!saved.intent && !validIntent(saved.intent);
+	const alive = () => {
+		try {
+			guard();
+			return !disposed;
+		} catch {
+			return false;
+		}
+	};
+	const persist = () => {
+		guard();
+		localStorage.setItem(key, JSON.stringify(saved));
+	};
+	const terminal = () => [
+		"succeeded",
+		"failed",
+		"cancelled"
+	].includes(operation?.status);
+	const message = h("div", { role: "status" }), summary = h("div"), receipt = h("div");
+	const unsaved = h("span", {
+		class: "chip",
+		hidden: true
+	}, t("setup_unsaved"));
+	const fields = new Map();
+	const input = (name, label, options = {}) => {
+		const secret = options.type === "password";
+		const { multiline, ...attributes } = options;
+		const node = h(multiline ? "textarea" : "input", {
+			autocomplete: "off",
+			maxlength: secret ? 4096 : 1024,
+			...attributes
+		});
+		if (!secret) node.value = typeof saved[name] === "string" ? saved[name] : "";
+		node.addEventListener("input", () => {
+			if (!alive() || saved.intent || busy) return;
+			if (name.startsWith("verification_")) seedVerificationBase();
+			if (!secret) {
+				saved[name] = node.value;
+				if ([
+					"url",
+					"fingerprint",
+					"profile_id"
+				].includes(name)) {
+					saved.import_profile_id = "";
+					profile.value = "";
+				}
+				try {
+					persist();
+				} catch (error) {
+					message.replaceChildren(errorBox(error));
+				}
+			}
+			unsaved.hidden = false;
+		});
+		fields.set(name, node);
+		return h("label", {}, t(label), node);
+	};
+	const checkbox = (name, label) => {
+		const node = h("input", { type: "checkbox" });
+		node.checked = saved[name] === true;
+		node.addEventListener("change", () => {
+			if (!alive() || saved.intent || busy) return;
+			saved[name] = node.checked;
+			try {
+				persist();
+				unsaved.hidden = false;
+			} catch (error) {
+				showError(error);
+			}
+		});
+		fields.set(name, node);
+		return h("label", {}, node, " ", t(label));
+	};
+	const profile = h("select", { "aria-label": t("setup_profile") });
+	profile.addEventListener("change", () => {
+		if (!alive() || saved.intent) return;
+		const selected = snapshot?.profiles?.find((row) => row.id === profile.value);
+		saved.import_profile_id = selected?.id || "";
+		if (selected) for (const name of [
+			"url",
+			"fingerprint",
+			"profile_id"
+		]) {
+			fields.get(name).value = selected[name] || "";
+			saved[name] = fields.get(name).value;
+		}
+		try {
+			persist();
+			unsaved.hidden = false;
+		} catch (error) {
+			showError(error);
+		}
+	});
+	const hostForm = h("form", {
+		"data-setup-host": "",
+		onsubmit: (event) => {
+			event.preventDefault();
+			run("host");
+		}
+	}, h("h3", {}, t("setup_host_title")), h("p", { class: "muted" }, t("setup_host_help")), h("label", {}, t("setup_profile"), profile), h("div", { class: "capture-fields" }, input("host", "setup_host_name", {
+		required: true,
+		maxlength: 64
+	}), input("url", "setup_host_url", {
+		type: "url",
+		required: true,
+		placeholder: "wss://host:9876/"
+	}), input("fingerprint", "setup_fingerprint", { required: true }), input("profile_id", "setup_workspace_profile", { placeholder: "default" }), input("bat_secret", "setup_bat_token", { type: "password" })), h("p", { class: "muted" }, t("setup_trust_help")), h("details", {}, h("summary", {}, t("setup_managed_work")), checkbox("writes", "setup_allow_messages"), checkbox("orchestrate", "setup_allow_start"), checkbox("shared_clone_worktrees", "setup_shared_clone"), h("p", { class: "muted" }, t("setup_shared_clone_help")), h("div", { class: "capture-fields" }, input("managed_roots", "setup_managed_roots"), input("ssh_alias", "setup_ssh_alias")), h("p", { class: "muted" }, t("setup_roots_help"))), h("button", {
+		type: "submit",
+		class: "primary"
+	}, t("setup_save_host")));
+	const repoForm = h("form", {
+		"data-setup-repository": "",
+		onsubmit: (event) => {
+			event.preventDefault();
+			run("repository");
+		}
+	}, h("h3", {}, t("setup_repository_title")), h("p", { class: "muted" }, t("setup_repository_help")), h("div", { class: "capture-fields" }, input("repository", "setup_repository", {
+		required: true,
+		placeholder: "owner/repository"
+	}), input("repository_host", "setup_host_name", { required: true }), input("workspace_id", "setup_workspace_id", { required: true }), input("remote_url", "setup_remote_url", {
+		required: true,
+		placeholder: "git@github.com:owner/repository.git"
+	}), input("github_secret", "setup_github_token", { type: "password" })), h("div", { class: "actions" }, checkbox("allow_integrate", "setup_allow_integrate"), checkbox("allow_merge", "setup_allow_merge"), checkbox("allow_pr_update", "setup_allow_pr_update")), h("button", {
+		type: "button",
+		class: "secondary",
+		onclick: () => workspaces().catch(showError)
+	}, t("setup_find_workspaces")), h("div", { "data-setup-workspaces": "" }), h("button", {
+		type: "submit",
+		class: "primary"
+	}, t("setup_save_repository")));
+	const verificationCommands = h("div", { "data-setup-verification-commands": "" });
+	const verificationNotice = h("p", {
+		class: "note warn",
+		hidden: true
+	});
+	const reloadVerification = h("button", {
+		class: "secondary",
+		type: "button",
+		onclick: () => {
+			if (!alive() || busy || saved.intent || !snapshot) return;
+			saved.verification_base = null;
+			fillVerification(fields.get("verification_project").value.trim());
+		}
+	}, t("setup_verification_reload"));
+	const verificationForm = h("form", {
+		"data-setup-verification": "",
+		onsubmit: (event) => {
+			event.preventDefault();
+			run("verification");
+		}
+	}, h("h3", {}, t("setup_verification_title")), h("p", { class: "muted" }, t("setup_verification_help")), verificationNotice, verificationCommands, h("div", { class: "capture-fields" }, input("verification_project", "setup_verification_project", {
+		required: true,
+		maxlength: 256
+	}), input("verification_executable", "setup_verification_executable", {
+		required: true,
+		maxlength: 4096
+	}), input("verification_timeout", "setup_verification_timeout", {
+		type: "number",
+		min: 1,
+		max: 3600,
+		step: 1,
+		required: true
+	})), input("verification_arguments", "setup_verification_arguments", {
+		multiline: true,
+		rows: 4,
+		maxlength: 16e3
+	}), h("p", { class: "muted" }, t("setup_verification_arguments_help")), h("div", { class: "actions" }, h("button", {
+		type: "submit",
+		class: "primary"
+	}, t("setup_save_verification")), reloadVerification));
+	function seedVerificationBase() {
+		if (!saved.verification_base && snapshot && validVerification(snapshot.verification)) saved.verification_base = {
+			revision: snapshot.revision,
+			...structuredClone(snapshot.verification)
+		};
+	}
+	function fillVerification(project) {
+		if (!snapshot || saved.intent || busy) return;
+		const settings = snapshot.verification, argv = settings.commands[project] || [];
+		for (const [name, value] of Object.entries({
+			verification_project: project,
+			verification_executable: argv[0] || "",
+			verification_arguments: argv.slice(1).join("\n"),
+			verification_timeout: String(settings.timeout_s)
+		})) {
+			fields.get(name).value = value;
+			saved[name] = value;
+		}
+		saved.verification_base = null;
+		seedVerificationBase();
+		try {
+			persist();
+			unsaved.hidden = false;
+			update();
+		} catch (error) {
+			showError(error);
+		}
+	}
+	const refreshButton = h("button", {
+		class: "secondary",
+		onclick: () => refresh().catch(showError)
+	}, t("setup_refresh"));
+	const retry = h("button", {
+		class: "secondary",
+		hidden: true,
+		onclick: () => recover().catch(showError)
+	}, t("setup_recover"));
+	const next = h("button", {
+		class: "secondary",
+		hidden: true,
+		onclick: () => {
+			if (!alive() || damaged || !terminal() && !saved.intent?.refused) return;
+			const previous = saved;
+			saved = {
+				...saved,
+				intent: null
+			};
+			if (operation?.status === "succeeded" && previous.intent.request.action === "setup.verification") saved.verification_base = null;
+			try {
+				persist();
+				operation = null;
+				update();
+				refresh().catch(showError);
+			} catch (error) {
+				saved = previous;
+				showError(error);
+			}
+		}
+	}, t("setup_next_change"));
+	const box = h("section", {
+		class: "panel managed-setup",
+		"data-managed-setup": ""
+	}, h("h2", {}, t("setup_title"), " ", unsaved), h("p", { class: "muted" }, t("setup_resume_help")), summary, h("div", { class: "actions" }, refreshButton, retry, next), message, receipt, h("details", { open: true }, h("summary", {}, t("setup_host_title")), hostForm), h("details", {}, h("summary", {}, t("setup_repository_title")), repoForm), h("details", {}, h("summary", {}, t("setup_verification_title")), verificationForm), h("a", { href: "#/projects" }, t("setup_open_projects")));
+	function showError(error) {
+		if (alive()) {
+			message.replaceChildren(errorBox(error));
+			update();
+		}
+	}
+	function update() {
+		if (!alive()) return;
+		const locked = busy || !snapshot || !!saved.intent || snapshot.busy;
+		for (const [kind, form] of [
+			["host", hostForm],
+			["repository", repoForm],
+			["verification", verificationForm]
+		]) {
+			for (const field of form.querySelectorAll("input,textarea,select,button")) field.disabled = !!locked || !allowed(kind);
+			let scope = form.querySelector("[data-setup-scope]");
+			if (!scope) {
+				scope = h("p", {
+					class: "note",
+					"data-setup-scope": ""
+				}, t("setup_scope_required"));
+				form.prepend(scope);
+			}
+			scope.hidden = !!allowed(kind);
+		}
+		const base = saved.verification_base;
+		const stale = base && base.revision !== snapshot?.revision;
+		verificationNotice.hidden = !stale;
+		verificationNotice.textContent = t("setup_verification_changed");
+		refreshButton.disabled = busy;
+		retry.hidden = !saved.intent || terminal();
+		retry.disabled = busy;
+		next.hidden = !saved.intent || !terminal() && !saved.intent.refused;
+		next.disabled = busy || damaged;
+		if (damaged) retry.disabled = true;
+		receipt.replaceChildren();
+		if (operation) receipt.append(opStatus(operation), " ", h("a", { href: `#/op/${operation.operation_id}` }, t("setup_operation")));
+		else if (saved.intent) receipt.append(h("p", { class: "note" }, t("setup_uncertain")));
+	}
+	function accept(candidate) {
+		const intent = saved.intent;
+		if (!candidate || !/^op_[0-9a-f]{32}$/.test(candidate.operation_id) || candidate.actor !== caps()?.actor || candidate.action !== intent.request.action || !equal(candidate.target, intent.request.target) || !equal(candidate.params, intent.request.params) || !equal(candidate.preconditions, intent.request.preconditions) || candidate.idempotency_key !== intent.key || intent.operation_id && candidate.operation_id !== intent.operation_id) throw Error(t("setup_receipt_mismatch"));
+		operation = candidate;
+		intent.operation_id = candidate.operation_id;
+		persist();
+		if (candidate.status === "succeeded") {
+			unsaved.hidden = true;
+			Promise.resolve(onConfigured?.()).catch(showError);
+		}
+		update();
+	}
+	async function sendOriginal() {
+		const intent = saved.intent;
+		const result = intent.operation_id ? await api("GET", `/operations/${encodeURIComponent(intent.operation_id)}`) : await api("POST", "/operations?wait=3", intent.request, intent.key);
+		guard();
+		accept(result.operation);
+	}
+	async function recover() {
+		if (!alive() || busy || !saved.intent || damaged || saved.intent.refused) return;
+		busy = true;
+		update();
+		try {
+			await sendOriginal();
+			await refresh();
+		} finally {
+			busy = false;
+			if (alive()) update();
+		}
+	}
+	async function run(kind) {
+		const form = kind === "host" ? hostForm : kind === "repository" ? repoForm : verificationForm;
+		if (!alive() || busy || !snapshot || snapshot.busy || saved.intent || !allowed(kind) || !form.reportValidity()) return;
+		busy = true;
+		update();
+		message.replaceChildren();
+		try {
+			if (kind === "verification" && saved.verification_base && (!validVerification(saved.verification_base) || !/^[0-9a-f]{64}$/.test(saved.verification_base.revision))) throw Error(t("setup_verification_invalid"));
+			persist();
+			const value = (name) => fields.get(name).value.trim();
+			const checked = (name) => fields.get(name).checked;
+			const tokenField = kind === "verification" ? null : fields.get(kind === "host" ? "bat_secret" : "github_secret");
+			let secretRef;
+			if (tokenField?.value) {
+				const staged = await api("POST", "/managed/setup/secrets", {
+					kind: kind === "host" ? "bat" : "github",
+					value: tokenField.value
+				});
+				guard();
+				secretRef = staged.secret_ref;
+				tokenField.value = "";
+			}
+			const imported = kind === "host" && !secretRef && saved.import_profile_id;
+			const params = kind === "host" ? {
+				...imported ? { import_profile_id: imported } : {
+					url: value("url"),
+					fingerprint: value("fingerprint"),
+					profile_id: value("profile_id") || "default"
+				},
+				writes: checked("writes"),
+				orchestrate: checked("orchestrate"),
+				shared_clone_worktrees: checked("shared_clone_worktrees"),
+				managed_roots: value("managed_roots").split(/\r?\n|;/).map((item) => item.trim()).filter(Boolean),
+				...value("ssh_alias") ? { ssh_alias: value("ssh_alias") } : {}
+			} : kind === "repository" ? {
+				host: value("repository_host"),
+				workspace_id: value("workspace_id"),
+				remote_url: value("remote_url"),
+				allow_integrate: checked("allow_integrate"),
+				allow_merge: checked("allow_merge"),
+				allow_pr_update: checked("allow_pr_update")
+			} : {
+				commands: {
+					...(saved.verification_base || snapshot.verification).commands,
+					[value("verification_project")]: [value("verification_executable"), ...fields.get("verification_arguments").value.split(/\r?\n/).filter((arg) => arg !== "")]
+				},
+				timeout_s: Number(value("verification_timeout"))
+			};
+			if (kind === "verification" && !validVerification(params)) throw Error(t("setup_verification_invalid"));
+			if (secretRef) params.secret_ref = secretRef;
+			saved.intent = {
+				key: crypto.randomUUID(),
+				request: {
+					action: `setup.${kind}`,
+					target: kind === "host" ? { host: value("host") } : kind === "repository" ? { repository: value("repository") } : {},
+					params,
+					preconditions: { config_revision: kind === "verification" ? saved.verification_base?.revision || snapshot.revision : snapshot.revision }
+				}
+			};
+			persist();
+			await sendOriginal();
+			await refresh();
+		} catch (error) {
+			if (alive() && saved.intent && !saved.intent.operation_id && (error.admissionRefused || [
+				"CONFIGURATION_CHANGED",
+				"SETUP_BUSY",
+				"PRECONDITION_REQUIRED"
+			].includes(error.code))) {
+				saved.intent.refused = error.code;
+				persist();
+			}
+			showError(error);
+		} finally {
+			busy = false;
+			if (alive()) update();
+		}
+	}
+	async function workspaces() {
+		const host = fields.get("repository_host").value.trim();
+		if (!host || busy || !alive()) return;
+		const result = await api("GET", `/workspaces?host=${encodeURIComponent(host)}`);
+		guard();
+		const rows = result.workspaces || [];
+		box.querySelector("[data-setup-workspaces]").replaceChildren(...rows.map((row) => h("button", {
+			class: "secondary",
+			type: "button",
+			onclick: () => {
+				if (!alive() || saved.intent) return;
+				fields.get("workspace_id").value = row.workspace_id || row.id;
+				saved.workspace_id = fields.get("workspace_id").value;
+				persist();
+				unsaved.hidden = false;
+			}
+		}, `${row.name || row.title || row.workspace_id || row.id} · ${row.workspace_id || row.id}`)));
+	}
+	async function refresh() {
+		const result = await api("GET", "/managed/setup");
+		guard();
+		if (disposed) return;
+		if (!validVerification(result.verification)) {
+			if (allowed("verification")) throw Error(t("setup_verification_invalid"));
+			result.verification = {
+				commands: {},
+				timeout_s: 600
+			};
+		}
+		snapshot = result;
+		if (!saved.verification_timeout) fields.get("verification_timeout").value = String(result.verification.timeout_s);
+		verificationCommands.replaceChildren(...Object.entries(result.verification.commands).map(([project, argv]) => h("details", {}, h("summary", {}, project), h("pre", { class: "pre" }, argv.join("\n")), h("button", {
+			type: "button",
+			class: "mini",
+			onclick: () => fillVerification(project)
+		}, t("setup_verification_edit", { project })))));
+		summary.replaceChildren(h("p", {}, t("setup_counts", {
+			hosts: result.hosts?.length || 0,
+			repositories: result.repositories?.length || 0
+		})), ...(result.hosts || []).map((row) => h("p", {}, h("strong", {}, row.name), " · ", t(row.connected ? "setup_connected" : "setup_unverified"), " · ", row.url)), ...[result.busy ? h("p", { class: "note warn" }, t("setup_busy")) : null].filter(Boolean), ...[result.profiles_error ? h("p", { class: "muted" }, t("setup_profiles_unavailable")) : null].filter(Boolean));
+		profile.replaceChildren(h("option", { value: "" }, t("setup_manual_profile")), ...(result.profiles || []).map((row) => h("option", { value: row.id }, row.name || row.id)));
+		profile.value = saved.import_profile_id || "";
+		update();
+	}
+	return {
+		box,
+		async load() {
+			try {
+				await refresh();
+				if (saved.intent?.operation_id) await recover();
+			} catch (error) {
+				showError(error);
+			}
+		},
+		dispose() {
+			disposed = true;
+			for (const name of ["bat_secret", "github_secret"]) fields.get(name).value = "";
+		}
+	};
+}
+var init_tslib_es6 = __esmMin((() => {}));
+async function invoke(cmd, args = {}, options) {
+	return window.__TAURI_INTERNALS__.invoke(cmd, args, options);
+}
+function isTauri() {
+	return !!(globalThis || window).isTauri;
+}
+var init_core = __esmMin((() => {
+	init_tslib_es6();
+}));
+//#endregion
+//#region src/transport/index.ts
+async function restoreBrowserSession() {
+	if (nativeDesktop) return false;
+	const response = await fetch("/api/v1/browser-session", {
+		credentials: "same-origin",
+		mode: "same-origin",
+		cache: "no-store",
+		redirect: "error"
+	});
+	if (!response.ok) return false;
+	const data = await response.json();
+	if (typeof data.csrf !== "string" || data.csrf.length < 32) return false;
+	browserCsrf = data.csrf;
+	return true;
+}
+function browserAuthHeaders(token) {
+	if (token !== "managed-browser-session") return { Authorization: `Bearer ${token}` };
+	if (!browserCsrf) throw new Error("Browser session needs to be restored");
+	return { "X-Batc-CSRF": browserCsrf };
+}
+function forgetBrowserSession() {
+	if (!browserCsrf) return;
+	const headers = {
+		...browserAuthHeaders(browserSessionToken),
+		"Content-Type": "application/json"
+	};
+	browserCsrf = null;
+	return fetch("/api/v1/browser-session/logout", {
+		method: "POST",
+		credentials: "same-origin",
+		mode: "same-origin",
+		redirect: "error",
+		headers,
+		body: "{}"
+	});
+}
+async function nativeStatus() {
+	const status = await invoke("native_status");
+	nativeFileSupport = status.file_transfers === true;
+	return status;
+}
+async function connectorRequest(method, path, body, key, browserToken) {
+	if (nativeDesktop) return invoke("connector_request", { input: {
+		method,
+		path,
+		body: body ?? null,
+		idempotency_key: key ?? null
+	} });
+	const headers = browserAuthHeaders(browserToken);
+	if (body !== void 0) headers["Content-Type"] = "application/json";
+	if (key) headers["Idempotency-Key"] = key;
+	const res = await fetch(`/api/v1${path}`, {
+		method,
+		headers,
+		credentials: "same-origin",
+		redirect: "error",
+		body: body === void 0 ? void 0 : JSON.stringify(body)
+	});
+	return {
+		status: res.status,
+		data: await res.json().catch(() => ({}))
+	};
+}
+async function connectorUploadArtifact(operationId, bytes, browserToken) {
+	if (!/^op_[0-9a-f]{32}$/.test(operationId)) throw new Error("Invalid artifact upload operation ID");
+	if (nativeDesktop) {
+		if (bytes.byteLength > 16777216) throw new Error("Artifact exceeds the native 16 MiB upload limit");
+		return invoke("connector_upload_artifact", bytes, { headers: { "x-batc-upload-operation": operationId } });
+	}
+	const res = await fetch(`/api/v1/artifacts/uploads/${operationId}/content`, {
+		method: "POST",
+		redirect: "error",
+		credentials: "same-origin",
+		headers: {
+			...browserAuthHeaders(browserToken),
+			"Content-Type": "application/octet-stream"
+		},
+		body: bytes
+	});
+	return {
+		status: res.status,
+		data: await res.json().catch(() => ({}))
+	};
+}
+var nativeDesktop, nativeFileSupport, browserSessionToken, browserCsrf, nativeFilesStatus, nativeFilesPick, nativeFilesUpload, nativeFilesDropTarget, nativeFilesControl, nativeFilesSave, nativeFilesPreview, nativeConnect, managedControl, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeSetupConfiguration, nativeForgetCredential, openExternal, fleetAvailability, fleetBootstrap, tailscaleControl, fleetControl, fleetRequest, updateRequest;
+var init_transport = __esmMin((() => {
+	init_core();
+	nativeDesktop = isTauri();
+	nativeFileSupport = false;
+	browserSessionToken = "managed-browser-session";
+	browserCsrf = null;
+	nativeFilesStatus = () => invoke("native_files_status");
+	nativeFilesPick = (draftId) => invoke("native_files_pick", { draftId });
+	nativeFilesUpload = (handleId) => invoke("native_files_upload", { handleId });
+	nativeFilesDropTarget = (draftId, enabled) => invoke("native_files_drop_target", {
+		draftId,
+		enabled
+	});
+	nativeFilesControl = (transferId, action) => invoke("native_files_control", {
+		transferId,
+		action
+	});
+	nativeFilesSave = (reference) => invoke("native_files_save", { reference });
+	nativeFilesPreview = (reference) => invoke("native_files_preview", { reference });
+	nativeConnect = () => invoke("connector_connect");
+	managedControl = (input) => invoke("managed_control", { input });
+	nativeDisconnect = () => invoke("connector_disconnect");
+	nativeEnroll = () => invoke("connector_enroll", { locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US" });
+	nativeReloadConfiguration = () => invoke("connector_reload_configuration");
+	nativeSetupConfiguration = (config) => invoke("connector_setup_configuration", {
+		config,
+		locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US"
+	});
+	nativeForgetCredential = () => invoke("connector_forget_credential");
+	openExternal = (url) => invoke("open_external", { url });
+	fleetAvailability = () => invoke("fleet_availability");
+	fleetBootstrap = (input) => invoke("fleet_bootstrap", { input });
+	tailscaleControl = (input) => invoke("tailscale_control", { input });
+	fleetControl = (input) => invoke("fleet_control", { input });
+	fleetRequest = (input) => invoke("fleet_request", { input });
+	updateRequest = (input) => invoke("desktop_update", { input });
+}));
+//#endregion
+//#region src/workspace-layout.js
+init_transport();
+var KEY_SIDEBAR_WIDTH = "batc.sidebar.width";
+var KEY_MOBILE_INFO_COLLAPSED = "batc.mobile.info_collapsed";
+var KEY_MOBILE_COMPOSER_COLLAPSED = "batc.mobile.composer_collapsed";
+function isMobileLayout() {
+	if (typeof window === "undefined") return false;
+	return (window.innerWidth || document.documentElement?.clientWidth || 0) <= 800;
+}
+function calcSidebarBounds(windowWidth = window.innerWidth) {
+	return {
+		minAllowed: 200,
+		maxAllowed: Math.min(500, Math.max(200, (windowWidth || 1024) - 360))
+	};
+}
+function setupSidebarResizer({ aside, workspace, t }) {
+	if (!aside || !workspace) return { dispose() {} };
+	let savedWidth = 260;
+	try {
+		const raw = localStorage.getItem(KEY_SIDEBAR_WIDTH);
+		if (raw !== null) {
+			const parsed = parseInt(raw, 10);
+			if (!Number.isNaN(parsed) && parsed >= 200) savedWidth = parsed;
+		}
+	} catch {}
+	const resizer = document.createElement("div");
+	resizer.className = "workspace-resizer";
+	resizer.setAttribute("role", "separator");
+	resizer.setAttribute("aria-orientation", "vertical");
+	resizer.setAttribute("tabindex", "0");
+	resizer.setAttribute("aria-label", t("workspace_resizer"));
+	resizer.title = t("workspace_resizer_help");
+	const applyWidth = (requestedWidth, persist = true) => {
+		if (isMobileLayout()) {
+			resizer.removeAttribute("aria-valuenow");
+			return requestedWidth;
+		}
+		const { minAllowed, maxAllowed } = calcSidebarBounds();
+		const clamped = Math.max(minAllowed, Math.min(maxAllowed, requestedWidth));
+		workspace.style.setProperty("--workspace-sidebar-width", `${clamped}px`);
+		resizer.setAttribute("aria-valuenow", String(clamped));
+		resizer.setAttribute("aria-valuemin", String(minAllowed));
+		resizer.setAttribute("aria-valuemax", String(maxAllowed));
+		if (persist) try {
+			localStorage.setItem(KEY_SIDEBAR_WIDTH, String(clamped));
+		} catch {}
+		return clamped;
+	};
+	let currentWidth = applyWidth(savedWidth, false);
+	let isDragging = false;
+	let startX = 0;
+	let startWidth = currentWidth;
+	let activePointerId = null;
+	const onGlobalKeyDown = (event) => {
+		if (event.key === "Escape" && isDragging) {
+			cancelDrag();
+			event.preventDefault();
+		}
+	};
+	const cancelDrag = () => {
+		if (!isDragging) return;
+		window.removeEventListener("keydown", onGlobalKeyDown);
+		isDragging = false;
+		currentWidth = applyWidth(startWidth, false);
+		resizer.classList.remove("is-resizing");
+		document.body.classList.remove("workspace-resizing");
+		document.body.style.removeProperty("user-select");
+		if (activePointerId !== null) {
+			try {
+				resizer.releasePointerCapture(activePointerId);
+			} catch {}
+			activePointerId = null;
+		}
+	};
+	const onPointerDown = (event) => {
+		if (event.button !== 0 || isMobileLayout()) return;
+		isDragging = true;
+		activePointerId = event.pointerId;
+		startX = event.clientX;
+		startWidth = currentWidth;
+		resizer.classList.add("is-resizing");
+		document.body.classList.add("workspace-resizing");
+		document.body.style.userSelect = "none";
+		window.addEventListener("keydown", onGlobalKeyDown);
+		try {
+			resizer.setPointerCapture(event.pointerId);
+		} catch {}
+		event.preventDefault();
+	};
+	const onPointerMove = (event) => {
+		if (!isDragging || event.pointerId !== activePointerId) return;
+		const delta = event.clientX - startX;
+		currentWidth = applyWidth(startWidth + delta, false);
+	};
+	const onPointerUp = (event) => {
+		if (!isDragging || event.pointerId !== activePointerId) return;
+		window.removeEventListener("keydown", onGlobalKeyDown);
+		const delta = event.clientX - startX;
+		currentWidth = applyWidth(startWidth + delta, true);
+		isDragging = false;
+		resizer.classList.remove("is-resizing");
+		document.body.classList.remove("workspace-resizing");
+		document.body.style.removeProperty("user-select");
+		if (activePointerId !== null) {
+			try {
+				resizer.releasePointerCapture(activePointerId);
+			} catch {}
+			activePointerId = null;
+		}
+	};
+	const onPointerCancel = () => {
+		cancelDrag();
+	};
+	const onKeyDown = (event) => {
+		if (event.key === "Escape") {
+			if (isDragging) {
+				cancelDrag();
+				event.preventDefault();
+			}
+			return;
+		}
+		if (isMobileLayout()) return;
+		const { minAllowed, maxAllowed } = calcSidebarBounds();
+		let handled = false;
+		if (event.key === "ArrowLeft") {
+			currentWidth = applyWidth(currentWidth - (event.shiftKey ? 48 : 16), true);
+			handled = true;
+		} else if (event.key === "ArrowRight") {
+			currentWidth = applyWidth(currentWidth + (event.shiftKey ? 48 : 16), true);
+			handled = true;
+		} else if (event.key === "PageDown") {
+			currentWidth = applyWidth(currentWidth - 48, true);
+			handled = true;
+		} else if (event.key === "PageUp") {
+			currentWidth = applyWidth(currentWidth + 48, true);
+			handled = true;
+		} else if (event.key === "Home") {
+			currentWidth = applyWidth(minAllowed, true);
+			handled = true;
+		} else if (event.key === "End") {
+			currentWidth = applyWidth(maxAllowed, true);
+			handled = true;
+		}
+		if (handled) {
+			event.preventDefault();
+			event.stopPropagation();
+		}
+	};
+	const onDblClick = () => {
+		if (!isMobileLayout()) currentWidth = applyWidth(260, true);
+	};
+	const onWindowResize = () => {
+		if (isMobileLayout()) cancelDrag();
+		if (!isMobileLayout()) currentWidth = applyWidth(currentWidth, false);
+	};
+	resizer.addEventListener("pointerdown", onPointerDown);
+	resizer.addEventListener("pointermove", onPointerMove);
+	resizer.addEventListener("pointerup", onPointerUp);
+	resizer.addEventListener("pointercancel", onPointerCancel);
+	resizer.addEventListener("lostpointercapture", onPointerCancel);
+	resizer.addEventListener("keydown", onKeyDown);
+	resizer.addEventListener("dblclick", onDblClick);
+	window.addEventListener("resize", onWindowResize);
+	aside.appendChild(resizer);
+	return {
+		resizer,
+		getWidth: () => currentWidth,
+		setWidth: (w) => {
+			currentWidth = applyWidth(w, true);
+			return currentWidth;
+		},
+		dispose() {
+			cancelDrag();
+			resizer.removeEventListener("pointerdown", onPointerDown);
+			resizer.removeEventListener("pointermove", onPointerMove);
+			resizer.removeEventListener("pointerup", onPointerUp);
+			resizer.removeEventListener("pointercancel", onPointerCancel);
+			resizer.removeEventListener("lostpointercapture", onPointerCancel);
+			resizer.removeEventListener("keydown", onKeyDown);
+			resizer.removeEventListener("dblclick", onDblClick);
+			window.removeEventListener("resize", onWindowResize);
+			resizer.remove();
+		}
+	};
+}
+function setupMobileSessionLayout({ head, composer, textarea, t, guard }) {
+	if (!head || !composer) return {
+		updateInfo() {},
+		updateDraft() {},
+		dispose() {}
+	};
+	let isDisposed = false;
+	const alive = () => {
+		if (isDisposed) return false;
+		try {
+			guard?.();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	let isInfoCollapsed = false;
+	try {
+		isInfoCollapsed = localStorage.getItem(KEY_MOBILE_INFO_COLLAPSED) === "true";
+	} catch {}
+	const infoToggle = document.createElement("button");
+	infoToggle.type = "button";
+	infoToggle.className = "mini workspace-info-toggle";
+	const renderInfoToggle = () => {
+		if (!alive()) return;
+		head.classList.toggle("workspace-info-collapsed", isInfoCollapsed);
+		infoToggle.setAttribute("aria-expanded", String(!isInfoCollapsed));
+		const label = t(isInfoCollapsed ? "mobile_info_expand" : "mobile_info_collapse");
+		infoToggle.setAttribute("aria-label", label);
+		infoToggle.textContent = (isInfoCollapsed ? "▸ " : "▾ ") + label;
+	};
+	infoToggle.addEventListener("click", () => {
+		if (!alive()) return;
+		isInfoCollapsed = !isInfoCollapsed;
+		try {
+			localStorage.setItem(KEY_MOBILE_INFO_COLLAPSED, String(isInfoCollapsed));
+		} catch {}
+		renderInfoToggle();
+	});
+	const updateInfo = () => {
+		if (!alive()) return;
+		const titleRow = head.querySelector(":scope > div:first-child");
+		if (titleRow && !titleRow.contains(infoToggle)) titleRow.appendChild(infoToggle);
+		else if (!head.contains(infoToggle)) head.appendChild(infoToggle);
+		renderInfoToggle();
+	};
+	let isComposerCollapsed = false;
+	try {
+		isComposerCollapsed = localStorage.getItem(KEY_MOBILE_COMPOSER_COLLAPSED) === "true";
+	} catch {}
+	const composerToggle = document.createElement("button");
+	composerToggle.type = "button";
+	composerToggle.className = "mini workspace-composer-toggle";
+	composerToggle.setAttribute("aria-controls", "workspace-message-input");
+	const renderComposerToggle = () => {
+		if (!alive()) return;
+		const hasDraft = (textarea?.value || "").trim().length > 0;
+		composer.classList.toggle("workspace-composer-collapsed", isComposerCollapsed);
+		composerToggle.setAttribute("aria-expanded", String(!isComposerCollapsed));
+		const baseText = isComposerCollapsed ? t("mobile_compose_open") : `▾ ${t("mobile_compose_close")}`;
+		const draftSuffix = hasDraft ? ` · ${t("mobile_draft_indicator")}` : "";
+		composerToggle.textContent = baseText + draftSuffix;
+		composerToggle.setAttribute("aria-label", baseText + draftSuffix);
+		composerToggle.classList.toggle("has-draft", hasDraft);
+	};
+	composerToggle.addEventListener("click", () => {
+		if (!alive()) return;
+		isComposerCollapsed = !isComposerCollapsed;
+		try {
+			localStorage.setItem(KEY_MOBILE_COMPOSER_COLLAPSED, String(isComposerCollapsed));
+		} catch {}
+		renderComposerToggle();
+		if (!isComposerCollapsed) textarea?.focus({ preventScroll: true });
+		else composerToggle.focus({ preventScroll: true });
+	});
+	const onTextareaInput = () => {
+		renderComposerToggle();
+	};
+	textarea?.addEventListener("input", onTextareaInput);
+	textarea?.addEventListener("change", onTextareaInput);
+	if (!composer.contains(composerToggle)) composer.prepend(composerToggle);
+	const updateViewport = () => {
+		if (!alive()) return;
+		const isMob = isMobileLayout();
+		const vv = window.visualViewport;
+		if (!isMob || !vv) {
+			document.body.classList.remove("mobile-keyboard");
+			document.documentElement.style.removeProperty("--workspace-visible-height");
+			return;
+		}
+		if (Math.abs(vv.scale - 1) > .05) {
+			document.body.classList.remove("mobile-keyboard");
+			document.documentElement.style.removeProperty("--workspace-visible-height");
+			return;
+		}
+		const isKeyboard = vv.height < window.innerHeight - 80;
+		document.body.classList.toggle("mobile-keyboard", isKeyboard);
+		if (isKeyboard) {
+			document.documentElement.style.setProperty("--workspace-visible-height", `${vv.height}px`);
+			if (window.scrollY || vv.offsetTop) window.scrollTo(0, 0);
+		} else document.documentElement.style.removeProperty("--workspace-visible-height");
+	};
+	const onFocusIn = () => requestAnimationFrame(updateViewport);
+	const onFocusOut = () => requestAnimationFrame(updateViewport);
+	window.visualViewport?.addEventListener("resize", updateViewport);
+	window.visualViewport?.addEventListener("scroll", updateViewport);
+	window.addEventListener("resize", updateViewport);
+	textarea?.addEventListener("focusin", onFocusIn);
+	textarea?.addEventListener("focusout", onFocusOut);
+	updateInfo();
+	renderComposerToggle();
+	updateViewport();
+	return {
+		infoToggle,
+		composerToggle,
+		updateInfo,
+		updateDraft: renderComposerToggle,
+		dispose() {
+			isDisposed = true;
+			window.visualViewport?.removeEventListener("resize", updateViewport);
+			window.visualViewport?.removeEventListener("scroll", updateViewport);
+			window.removeEventListener("resize", updateViewport);
+			textarea?.removeEventListener("input", onTextareaInput);
+			textarea?.removeEventListener("change", onTextareaInput);
+			textarea?.removeEventListener("focusin", onFocusIn);
+			textarea?.removeEventListener("focusout", onFocusOut);
+			infoToggle.remove();
+			composerToggle.remove();
+			head.classList.remove("workspace-info-collapsed");
+			composer.classList.remove("workspace-composer-collapsed");
+			document.body.classList.remove("mobile-keyboard");
+			document.documentElement.style.removeProperty("--workspace-visible-height");
 		}
 	};
 }
@@ -472,17 +1514,17 @@ function parsePullRequest(value) {
 }
 //#endregion
 //#region src/session-labels.js
-var object$5 = (v) => v && typeof v === "object" && !Array.isArray(v);
+var object$6 = (v) => v && typeof v === "object" && !Array.isArray(v);
 var version$1 = (v) => Number.isSafeInteger(v) && v >= 0;
-var opId$3 = (v) => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
-var equal$6 = (a, b) => a === b || Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => equal$6(v, b[i])) || object$5(a) && object$5(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$6(a[k], b[k]));
+var opId$4 = (v) => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
+var equal$8 = (a, b) => a === b || Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => equal$8(v, b[i])) || object$6(a) && object$6(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$8(a[k], b[k]));
 function validLabels(v) {
 	return Array.isArray(v) && v.length <= 8 && new Set(v).size === v.length && v.every((x) => typeof x === "string" && x === x.trim() && [...x].length >= 1 && [...x].length <= 40 && !/[\p{C}\u2028\u2029]/u.test(x));
 }
-var metadata = (v) => object$5(v) && version$1(v.version) && validLabels(v.labels);
+var metadata = (v) => object$6(v) && version$1(v.version) && validLabels(v.labels);
 function sessionLabelsPanel({ h, t, api, caps, guard, target, storageKey, errorBox, opStatus }) {
 	const path = `/sessions/${encodeURIComponent(target.host)}/${encodeURIComponent(target.session_id)}`;
-	const valid = (request) => request?.action === "session.labels.set" && equal$6(request.target, target) && object$5(request.params) && Object.keys(request.params).length === 1 && validLabels(request.params.labels) && object$5(request.preconditions) && Object.keys(request.preconditions).length === 1 && version$1(request.preconditions.expected_version);
+	const valid = (request) => request?.action === "session.labels.set" && equal$8(request.target, target) && object$6(request.params) && Object.keys(request.params).length === 1 && validLabels(request.params.labels) && object$6(request.preconditions) && Object.keys(request.preconditions).length === 1 && version$1(request.preconditions.expected_version);
 	let saved = {}, current = null, operation = null, busy = false, submission = null, refreshing = null, readable = false, damaged = false;
 	try {
 		const raw = JSON.parse(localStorage.getItem(storageKey));
@@ -495,7 +1537,7 @@ function sessionLabelsPanel({ h, t, api, caps, guard, target, storageKey, errorB
 			saved.intent = {
 				request: proven ? raw.intent.request : null,
 				key: proven ? raw.intent.key : null,
-				operation_id: opId$3(raw.intent.operation_id) ? raw.intent.operation_id : null
+				operation_id: opId$4(raw.intent.operation_id) ? raw.intent.operation_id : null
 			};
 			if (proven) {
 				saved.text = raw.intent.request.params.labels.join("\n");
@@ -541,16 +1583,16 @@ function sessionLabelsPanel({ h, t, api, caps, guard, target, storageKey, errorB
 	const accept = (candidate) => {
 		guard();
 		const intent = saved.intent;
-		if (!intent || !opId$3(candidate?.operation_id) || candidate.action !== "session.labels.set" || !equal$6(candidate.target, target) || candidate.actor !== caps()?.actor || intent.operation_id && candidate.operation_id !== intent.operation_id || intent.key && candidate.idempotency_key !== intent.key || intent.request && !equal$6({
+		if (!intent || !opId$4(candidate?.operation_id) || candidate.action !== "session.labels.set" || !equal$8(candidate.target, target) || candidate.actor !== caps()?.actor || intent.operation_id && candidate.operation_id !== intent.operation_id || intent.key && candidate.idempotency_key !== intent.key || intent.request && !equal$8({
 			action: candidate.action,
 			target: candidate.target,
 			params: candidate.params,
 			preconditions: candidate.preconditions
 		}, intent.request)) throw Error(t("labels_wrong_receipt"));
-		if (candidate.status === "succeeded" && (!equal$6({
+		if (candidate.status === "succeeded" && (!equal$8({
 			host: candidate.result?.host,
 			session_id: candidate.result?.session_id
-		}, target) || !metadata(candidate.result?.connector_metadata) || intent.request && (!equal$6(candidate.result.connector_metadata.labels, intent.request.params.labels) || candidate.result.connector_metadata.version !== intent.request.preconditions.expected_version + 1))) throw Error(t("labels_wrong_receipt"));
+		}, target) || !metadata(candidate.result?.connector_metadata) || intent.request && (!equal$8(candidate.result.connector_metadata.labels, intent.request.params.labels) || candidate.result.connector_metadata.version !== intent.request.preconditions.expected_version + 1))) throw Error(t("labels_wrong_receipt"));
 		operation = candidate;
 		intent.operation_id = candidate.operation_id;
 		persist();
@@ -749,109 +1791,14 @@ function sessionLabelsPanel({ h, t, api, caps, guard, target, storageKey, errorB
 		update
 	};
 }
-var init_tslib_es6 = __esmMin((() => {}));
-async function invoke(cmd, args = {}, options) {
-	return window.__TAURI_INTERNALS__.invoke(cmd, args, options);
-}
-function isTauri() {
-	return !!(globalThis || window).isTauri;
-}
-var init_core = __esmMin((() => {
-	init_tslib_es6();
-}));
-//#endregion
-//#region src/transport/index.ts
-async function nativeStatus() {
-	const status = await invoke("native_status");
-	nativeFileSupport = status.file_transfers === true;
-	return status;
-}
-async function connectorRequest(method, path, body, key, browserToken) {
-	if (nativeDesktop) return invoke("connector_request", { input: {
-		method,
-		path,
-		body: body ?? null,
-		idempotency_key: key ?? null
-	} });
-	const headers = { Authorization: `Bearer ${browserToken}` };
-	if (body !== void 0) headers["Content-Type"] = "application/json";
-	if (key) headers["Idempotency-Key"] = key;
-	const res = await fetch(`/api/v1${path}`, {
-		method,
-		headers,
-		body: body === void 0 ? void 0 : JSON.stringify(body)
-	});
-	return {
-		status: res.status,
-		data: await res.json().catch(() => ({}))
-	};
-}
-async function connectorUploadArtifact(operationId, bytes, browserToken) {
-	if (!/^op_[0-9a-f]{32}$/.test(operationId)) throw new Error("Invalid artifact upload operation ID");
-	if (nativeDesktop) {
-		if (bytes.byteLength > 16777216) throw new Error("Artifact exceeds the native 16 MiB upload limit");
-		return invoke("connector_upload_artifact", bytes, { headers: { "x-batc-upload-operation": operationId } });
-	}
-	const res = await fetch(`/api/v1/artifacts/uploads/${operationId}/content`, {
-		method: "POST",
-		redirect: "error",
-		headers: {
-			Authorization: `Bearer ${browserToken}`,
-			"Content-Type": "application/octet-stream"
-		},
-		body: bytes
-	});
-	return {
-		status: res.status,
-		data: await res.json().catch(() => ({}))
-	};
-}
-var nativeDesktop, nativeFileSupport, nativeFilesStatus, nativeFilesPick, nativeFilesUpload, nativeFilesDropTarget, nativeFilesControl, nativeFilesSave, nativeFilesPreview, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeSetupConfiguration, nativeForgetCredential, openExternal, fleetAvailability, fleetBootstrap, tailscaleControl, fleetControl, fleetRequest, updateRequest;
-var init_transport = __esmMin((() => {
-	init_core();
-	nativeDesktop = isTauri();
-	nativeFileSupport = false;
-	nativeFilesStatus = () => invoke("native_files_status");
-	nativeFilesPick = (draftId) => invoke("native_files_pick", { draftId });
-	nativeFilesUpload = (handleId) => invoke("native_files_upload", { handleId });
-	nativeFilesDropTarget = (draftId, enabled) => invoke("native_files_drop_target", {
-		draftId,
-		enabled
-	});
-	nativeFilesControl = (transferId, action) => invoke("native_files_control", {
-		transferId,
-		action
-	});
-	nativeFilesSave = (reference) => invoke("native_files_save", { reference });
-	nativeFilesPreview = (reference) => invoke("native_files_preview", { reference });
-	nativeConnect = () => invoke("connector_connect");
-	nativeDisconnect = () => invoke("connector_disconnect");
-	nativeEnroll = () => invoke("connector_enroll", { locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US" });
-	nativeReloadConfiguration = () => invoke("connector_reload_configuration");
-	nativeSetupConfiguration = (config) => invoke("connector_setup_configuration", {
-		config,
-		locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US"
-	});
-	nativeForgetCredential = () => invoke("connector_forget_credential");
-	openExternal = (url) => invoke("open_external", { url });
-	fleetAvailability = () => invoke("fleet_availability");
-	fleetBootstrap = (input) => invoke("fleet_bootstrap", { input });
-	tailscaleControl = (input) => invoke("tailscale_control", { input });
-	fleetControl = (input) => invoke("fleet_control", { input });
-	fleetRequest = (input) => invoke("fleet_request", { input });
-	updateRequest = (input) => invoke("desktop_update", { input });
-}));
-//#endregion
-//#region src/transport/artifact-content.ts
-init_transport();
 async function readArtifactContent(reference, size, token, signal) {
 	if (nativeDesktop || !/^art_[0-9a-f]{32}$/.test(reference.artifact_id) || !Number.isSafeInteger(reference.revision) || reference.revision < 1 || !/^[0-9a-f]{64}$/.test(reference.digest) || !Number.isSafeInteger(size) || size < 0 || size > 16777216) throw new Error("Artifact content exceeds the supported bound or has an invalid reference");
 	const response = await fetch(`/api/v1/artifacts/${reference.artifact_id}/revisions/${reference.revision}/content`, {
 		method: "GET",
-		headers: { Authorization: `Bearer ${token}` },
+		headers: browserAuthHeaders(token),
 		redirect: "error",
 		cache: "no-store",
-		credentials: "omit",
+		credentials: token === "managed-browser-session" ? "same-origin" : "omit",
 		mode: "same-origin",
 		signal: AbortSignal.any([signal, AbortSignal.timeout(3e4)])
 	});
@@ -1002,7 +1949,7 @@ function renderMessage(h, t, source, copy) {
 }
 //#endregion
 //#region src/conversation.js
-function conversationPanel({ h, t, when, guard }) {
+function conversationPanel({ h, t, when, guard, readingActions = null }) {
 	const viewport = h("div", {
 		class: "conversation-scroll",
 		tabindex: "0",
@@ -1023,13 +1970,51 @@ function conversationPanel({ h, t, when, guard }) {
 		type: "button",
 		hidden: true,
 		onclick: () => {
+			if (olderWindow && readingActions) {
+				run(() => readingActions.latest());
+				return;
+			}
 			viewport.scrollTop = viewport.scrollHeight;
 			notice.hidden = true;
 			indicator();
 		}
 	}, t("message_latest"));
-	const box = h("section", { class: "panel conversation" }, h("div", { class: "muted" }, t("message_window")), notice, viewport, h("div", { class: "conversation-toolbar" }, status, latest), fallback);
-	let rows = new Map(), initialized = false, disposed = false, copyAttempt = 0;
+	const progress = h("span", {
+		class: "muted",
+		role: "status",
+		"data-conversation-reading": ""
+	});
+	const mark = h("button", {
+		class: "mini",
+		type: "button",
+		onclick: () => {
+			const messages = visible().filter((row) => row.reading?.can_mark && row.reading?.unread).map((row) => ({
+				message_id: row.id,
+				revision: row.reading.revision
+			}));
+			if (messages.length) run(() => readingActions.mark(messages));
+		}
+	}, t("conversation_mark"));
+	const remember = h("button", {
+		class: "mini",
+		type: "button",
+		onclick: () => {
+			const row = visible().find((row) => row.reading);
+			if (row?.reading) run(() => readingActions.remember({
+				message_id: row.id,
+				revision: row.reading.revision,
+				offset: Math.round(row.node.getBoundingClientRect().top - viewport.getBoundingClientRect().top)
+			}, reading?.position?.version || 0));
+		}
+	}, t("conversation_remember"));
+	const older = h("button", {
+		class: "mini",
+		type: "button",
+		hidden: true,
+		onclick: () => run(() => readingActions.older())
+	}, t("conversation_older"));
+	const box = h("section", { class: "panel conversation" }, h("div", { class: "muted" }, t("message_window")), notice, viewport, h("div", { class: "conversation-toolbar" }, status, latest), readingActions ? h("div", { class: "actions" }, progress, mark, remember, older) : null, fallback);
+	let rows = new Map(), initialized = false, disposed = false, copyAttempt = 0, reading = null, busy = false, olderWindow = false;
 	const alive = () => {
 		if (disposed) return false;
 		try {
@@ -1040,10 +2025,38 @@ function conversationPanel({ h, t, when, guard }) {
 		}
 	};
 	const atBottom = () => viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 48;
+	const visible = () => {
+		if (document.visibilityState !== "visible") return [];
+		const bounds = viewport.getBoundingClientRect(), top = Math.max(bounds.top, 0), bottom = Math.min(bounds.bottom, innerHeight);
+		return [...rows.values()].filter((row) => {
+			const rect = row.node.getBoundingClientRect();
+			return bottom > top && rect.bottom > top && rect.top < bottom;
+		});
+	};
 	const indicator = () => {
-		latest.hidden = atBottom();
+		latest.hidden = !olderWindow && atBottom();
+		if (!readingActions) return;
+		mark.disabled = busy || !visible().some((row) => row.reading?.can_mark && row.reading?.unread);
+		remember.disabled = busy || !visible().some((row) => row.reading);
+		older.disabled = busy;
+	};
+	const run = async (action) => {
+		if (!alive() || busy) return;
+		busy = true;
+		indicator();
+		try {
+			await action();
+			if (alive()) status.textContent = t("conversation_saved");
+		} catch (error) {
+			if (alive()) status.textContent = error.message || String(error);
+		} finally {
+			busy = false;
+			if (alive()) indicator();
+		}
 	};
 	viewport.addEventListener("scroll", indicator, { passive: true });
+	window.addEventListener("scroll", indicator, { passive: true });
+	window.addEventListener("resize", indicator);
 	const copy = async (text) => {
 		if (!alive()) return;
 		const attempt = ++copyAttempt;
@@ -1073,13 +2086,13 @@ function conversationPanel({ h, t, when, guard }) {
 			input.select();
 		}
 	};
-	const update = (messages) => {
+	const update = (messages, state = null) => {
 		if (!alive()) return;
 		const top = viewport.getBoundingClientRect().top;
 		const anchor = [...rows.entries()].find(([, row]) => row.node.getBoundingClientRect().bottom > top);
 		const selection = window.getSelection();
 		const readingSelection = selection && !selection.isCollapsed && viewport.contains(selection.anchorNode);
-		const follow = !initialized || atBottom() && !readingSelection;
+		const follow = !initialized || !state?.preserve && atBottom() && !readingSelection;
 		const offset = anchor ? anchor[1].node.getBoundingClientRect().top - top : 0, scrollTop = viewport.scrollTop;
 		const next = new Map(), occurrences = new Map();
 		for (const message of messages) {
@@ -1107,14 +2120,40 @@ function conversationPanel({ h, t, when, guard }) {
 					onclick: () => copy(row.text)
 				}, t("message_copy"))), row.body);
 			}
-			const meta = `${message.role || ""} · ${when(message.ts)}`;
+			const metadata = [message.role || "", when(message.ts)];
+			if (message.role === "tool") metadata.push(message.tool || t("obs_unknown"), t("message_tool_status", { status: message.denied ? "denied" : message.deferred ? "deferred" : message.status || t("obs_unknown") }));
+			else if (typeof message.status === "string") metadata.push(t("message_tool_status", { status: message.status }));
+			if (typeof message.agent === "string") metadata.push(t("message_agent", { agent: message.agent }));
+			if (typeof message.model === "string") metadata.push(t("message_model", { model: message.model }));
+			if (typeof message.duration_ms === "number" && Number.isFinite(message.duration_ms) && message.duration_ms >= 0) metadata.push(t("message_duration", { ms: message.duration_ms }));
+			const meta = metadata.join(" · ");
 			if (row.meta !== meta) {
 				row.who.textContent = meta;
 				row.meta = meta;
 			}
 			row.node.className = `msg${message.role === "user" ? " user" : ""}`;
+			row.id = message.id;
+			row.reading = message.reading;
+			row.node.dataset.messageId = typeof message.id === "string" ? message.id : "";
+			const tool = message.role === "tool", completed = tool && message.status === "completed" && !message.denied && !message.deferred;
+			if (row.tool !== tool) {
+				row.body.replaceChildren();
+				row.text = null;
+				row.tool = tool;
+				row.toolDetails = null;
+			}
+			if (tool && !row.toolDetails) {
+				row.toolContent = h("div", {});
+				row.toolDetails = h("details", {
+					class: "message-tool",
+					open: !completed
+				}, h("summary", {}, t("message_tool_details")), row.toolContent);
+				row.toolDetails.addEventListener("toggle", indicator);
+				row.body.append(row.toolDetails);
+			}
+			if (tool && !completed) row.toolDetails.open = true;
 			if (row.text !== text) {
-				row.body.replaceChildren(...renderMessage(h, t, text, copy));
+				(tool ? row.toolContent : row.body).replaceChildren(...renderMessage(h, t, text, copy));
 				row.text = text;
 			}
 			next.set(key, row);
@@ -1139,6 +2178,28 @@ function conversationPanel({ h, t, when, guard }) {
 			if (anchor) notice.hidden = false;
 		}
 		rows = next;
+		if (state?.restore) {
+			const row = [...rows.values()].find((row) => row.id === state.restore.message_id);
+			if (row) {
+				viewport.scrollTop += row.node.getBoundingClientRect().top - viewport.getBoundingClientRect().top - state.restore.offset;
+				notice.hidden = false;
+				notice.textContent = t("conversation_restored");
+			} else {
+				notice.hidden = false;
+				notice.textContent = t("message_anchor_missing");
+			}
+		}
+		if (state?.latest) {
+			viewport.scrollTop = viewport.scrollHeight;
+			notice.hidden = true;
+		}
+		if (readingActions && state) {
+			reading = state.reading;
+			older.hidden = state.next_offset == null;
+			olderWindow = Boolean(state.olderWindow);
+			progress.textContent = reading?.unread_count == null ? t("conversation_unknown") : t(reading.complete ? "conversation_unread" : "conversation_partial", { count: reading.unread_count });
+			progress.title = t("conversation_count_note");
+		}
 		initialized = true;
 		indicator();
 	};
@@ -1148,6 +2209,1782 @@ function conversationPanel({ h, t, when, guard }) {
 		dispose() {
 			disposed = true;
 			viewport.removeEventListener("scroll", indicator);
+			window.removeEventListener("scroll", indicator);
+			window.removeEventListener("resize", indicator);
+		}
+	};
+}
+//#endregion
+//#region src/composer-shortcut.js
+function composerShortcut({ h, t, input, button, storageKey, guard }) {
+	const modes = [
+		"modified",
+		"enter",
+		"button"
+	];
+	let mode = "modified", composing = false, ended = -Infinity;
+	try {
+		const saved = localStorage.getItem(storageKey);
+		if (modes.includes(saved)) mode = saved;
+	} catch {}
+	const select = h("select", { "aria-label": t("composer_shortcut") }, ...modes.map((value) => h("option", { value }, t(`composer_shortcut_${value}`))));
+	select.value = mode;
+	const status = h("span", {
+		class: "muted",
+		role: "status"
+	});
+	select.addEventListener("change", () => {
+		try {
+			guard();
+			localStorage.setItem(storageKey, select.value);
+			mode = select.value;
+			status.textContent = "";
+		} catch (error) {
+			select.value = mode;
+			status.textContent = error.message || String(error);
+		}
+	});
+	const start = () => {
+		composing = true;
+	}, end = () => {
+		composing = false;
+		ended = performance.now();
+	};
+	const keydown = (event) => {
+		if (event.key !== "Enter" || event.shiftKey || event.altKey || event.repeat || event.isComposing || composing || event.keyCode === 229 || performance.now() - ended < 50) return;
+		if (!(mode === "modified" ? event.ctrlKey || event.metaKey : mode === "enter" && !event.ctrlKey && !event.metaKey) || button.disabled || button.hidden) return;
+		try {
+			guard();
+		} catch {
+			return;
+		}
+		event.preventDefault();
+		button.click();
+	};
+	input.addEventListener("compositionstart", start);
+	input.addEventListener("compositionend", end);
+	input.addEventListener("keydown", keydown);
+	return {
+		box: h("div", { class: "actions composer-shortcut" }, h("label", { class: "muted" }, t("composer_shortcut"), " ", select), h("span", { class: "muted" }, t("composer_newline")), status),
+		dispose() {
+			input.removeEventListener("compositionstart", start);
+			input.removeEventListener("compositionend", end);
+			input.removeEventListener("keydown", keydown);
+		}
+	};
+}
+//#endregion
+//#region src/tree-interactions.js
+var drag = null;
+var ids = (rows, key) => rows.map((row) => row[key]);
+var same$2 = (a, b) => a.length === b.length && a.every((value, i) => value === b[i]);
+function treeInteractions({ h, t, row, scope, siblings, index, key, run, open, guard, editing }) {
+	const me = siblings[index];
+	const handle = h("button", {
+		class: "mini tree-drag-handle",
+		type: "button",
+		draggable: "true",
+		title: t("tree_drag_help"),
+		"aria-label": t("tree_drag", { name: me.name || me.title })
+	}, "↕");
+	const clear = () => {
+		if (drag) {
+			drag.editing(false);
+			drag = null;
+		}
+		for (const target of document.querySelectorAll(".tree-drop-target")) target.classList.remove("tree-drop-target");
+	};
+	const allowed = () => drag && drag.row.isConnected && row.isConnected && drag.scope === scope && drag.pinned === me.pinned && same$2(drag.before, ids(siblings, key));
+	handle.addEventListener("dragstart", (event) => {
+		if (!event.dataTransfer) {
+			event.preventDefault();
+			return;
+		}
+		try {
+			guard();
+		} catch {
+			event.preventDefault();
+			return;
+		}
+		clear();
+		drag = {
+			row,
+			scope,
+			index,
+			pinned: me.pinned,
+			before: ids(siblings, key),
+			versions: Object.fromEntries(siblings.map((value) => [value[key], value.version])),
+			editing
+		};
+		editing(true);
+		event.dataTransfer.setData("text/plain", me[key]);
+		event.dataTransfer.effectAllowed = "move";
+	});
+	handle.addEventListener("dragend", clear);
+	row.addEventListener("dragover", (event) => {
+		if (!allowed()) return;
+		event.preventDefault();
+		event.dataTransfer.dropEffect = "move";
+		row.classList.add("tree-drop-target");
+	});
+	row.addEventListener("dragleave", (event) => {
+		if (!row.contains(event.relatedTarget)) row.classList.remove("tree-drop-target");
+	});
+	row.addEventListener("drop", (event) => {
+		if (!allowed()) return;
+		event.preventDefault();
+		const intent = drag, order = intent.before.slice();
+		order.splice(index, 0, order.splice(intent.index, 1)[0]);
+		clear();
+		if (same$2(order, intent.before)) return;
+		try {
+			guard();
+			run("order", intent.before, order, intent.versions);
+		} catch {}
+	});
+	row.addEventListener("contextmenu", (event) => {
+		if (event.shiftKey || event.target.closest("input,textarea,select")) return;
+		try {
+			guard();
+		} catch {
+			return;
+		}
+		event.preventDefault();
+		open();
+	});
+	row.addEventListener("keydown", (event) => {
+		if (event.key !== "ContextMenu" && !(event.key === "F10" && event.shiftKey)) return;
+		if (event.target.closest("input,textarea,select")) return;
+		try {
+			guard();
+		} catch {
+			return;
+		}
+		event.preventDefault();
+		open();
+	});
+	return handle;
+}
+//#endregion
+//#region src/model-preferences.js
+var fields$1 = [
+	"initial_agent",
+	"initial_model",
+	"last_agent",
+	"last_model",
+	"hidden",
+	"order"
+];
+var modelKey = (model) => `${model.agent}:${model.id}`;
+var copyPreferences = (prefs) => Object.fromEntries(fields$1.map((key) => [key, Array.isArray(prefs[key]) ? [...prefs[key]] : prefs[key] ?? null]));
+var date$1 = (value) => typeof value === "number" && Number.isFinite(value) ? new Date(value * 1e3).toLocaleString() : "—";
+var equal$7 = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+var validPreferences = (value) => value && typeof value === "object" && fields$1.every((key) => key in value) && ["initial_agent", "last_agent"].every((key) => value[key] === null || ["claude", "codex"].includes(value[key])) && ["initial_model", "last_model"].every((key) => value[key] === null || typeof value[key] === "string" && value[key].length <= 256) && ["hidden", "order"].every((key) => Array.isArray(value[key]) && value[key].length <= 1e3 && value[key].every((id) => typeof id === "string" && id.length <= 300));
+var validDraft = (value) => value && Number.isInteger(value.revision) && value.revision >= 0 && validPreferences(value.params);
+function orderedModels(doc, current = "") {
+	const prefs = doc.model_preferences, catalog = doc.model_catalog;
+	const order = new Map((prefs.order || []).map((id, i) => [id, i]));
+	return (catalog.models || []).filter((model) => model.available !== false && (!prefs.hidden?.includes(modelKey(model)) || model.id === current)).sort((a, b) => (order.get(modelKey(a)) ?? 9999) - (order.get(modelKey(b)) ?? 9999));
+}
+function modelChoice({ h, t, api, caps, guard, host, agent, model, submit = null, storageKey = "" }) {
+	let doc = null, serial = 0, currentHost = "", busy = false;
+	const list = h("datalist", { id: `models-${crypto.randomUUID()}` }), note = h("p", {
+		class: "muted",
+		role: "status"
+	});
+	const current = h("p", {
+		class: "model-current muted",
+		hidden: true
+	});
+	if (caps()?.features?.host_preferences?.version === 1) model.setAttribute("list", list.id);
+	model.setAttribute("title", model.value);
+	const choose = (role) => {
+		if (!doc || model.disabled || agent.disabled) return;
+		const prefs = doc.model_preferences, selectedAgent = prefs[`${role}_agent`], selectedModel = prefs[`${role}_model`];
+		if (selectedAgent) {
+			agent.value = selectedAgent;
+			agent.dispatchEvent(new Event("change", { bubbles: true }));
+		}
+		model.value = selectedModel || "";
+		model.dispatchEvent(new Event("input", { bubbles: true }));
+		update();
+	};
+	const initial = h("button", {
+		class: "mini",
+		type: "button",
+		onclick: () => choose("initial")
+	}, t("models_use_initial"));
+	const last = h("button", {
+		class: "mini",
+		type: "button",
+		onclick: () => choose("last")
+	}, t("models_use_last"));
+	const remember = h("button", {
+		class: "mini",
+		type: "button",
+		hidden: !submit,
+		onclick: async () => {
+			if (!doc || busy || model.disabled) return;
+			busy = true;
+			update();
+			try {
+				guard();
+				const op = await submit("preferences.models.update", { host: currentHost }, {
+					last_agent: agent.value,
+					last_model: model.value || null
+				}, { expected_revision: doc.model_preferences.revision }, `${storageKey}.last-model`);
+				guard();
+				if (op.status !== "succeeded") throw Error(op.status_reason || t("models_pending"));
+				await refresh(true);
+			} catch (error) {
+				note.textContent = error.message || String(error);
+			} finally {
+				busy = false;
+				update();
+			}
+		}
+	}, t("models_remember_last"));
+	const box = h("div", {
+		class: "model-choice",
+		hidden: true
+	}, list, current, note, h("div", { class: "actions" }, initial, last, remember));
+	function update() {
+		box.hidden = caps()?.features?.host_preferences?.version !== 1 || !host();
+		initial.disabled = busy || model.disabled || !doc?.model_preferences.initial_agent;
+		last.disabled = busy || model.disabled || !doc?.model_preferences.last_agent;
+		remember.disabled = busy || model.disabled || !doc || !caps()?.actions?.some((action) => action.action === "preferences.models.update" && action.allowed);
+		model.title = model.value;
+		current.hidden = !model.value;
+		current.textContent = model.value;
+		current.title = model.value;
+		current.setAttribute("aria-label", t("models_current", { model: model.value }));
+	}
+	async function refresh(force = false) {
+		update();
+		if (box.hidden) return;
+		const selectedHost = host(), selectedAgent = agent.value, request = ++serial;
+		if (selectedHost !== currentHost) {
+			doc = null;
+			list.replaceChildren();
+			update();
+		}
+		try {
+			const next = await api("GET", `/hosts/${encodeURIComponent(selectedHost)}/preferences?agent=${encodeURIComponent(selectedAgent)}${force ? "&refresh=1" : ""}`);
+			guard();
+			if (request !== serial || selectedHost !== host() || selectedAgent !== agent.value) return;
+			if (next.version !== 1 || next.host !== selectedHost || next.model_catalog?.agent !== selectedAgent || !next.model_preferences) throw Error(t("models_invalid"));
+			doc = next;
+			currentHost = selectedHost;
+			list.replaceChildren(...orderedModels(doc, model.value).map((value) => h("option", {
+				value: value.id,
+				label: value.label || value.id
+			})));
+			const known = doc.model_catalog.models?.some((value) => value.id === model.value);
+			note.textContent = model.value && !known ? t("models_unknown_current", { model: model.value }) : doc.model_catalog.status !== "available" ? t("models_catalog_unavailable", { reason: doc.model_catalog.reason || doc.model_catalog.status }) : t(doc.model_catalog.stale ? "models_catalog_stale" : "models_catalog_ready", {
+				host: selectedHost,
+				count: list.childElementCount
+			});
+			update();
+		} catch (error) {
+			try {
+				guard();
+				if (request === serial) {
+					doc = null;
+					list.replaceChildren();
+					note.textContent = error.message || String(error);
+					update();
+				}
+			} catch {}
+		}
+	}
+	agent.addEventListener("change", () => refresh());
+	model.addEventListener("input", () => {
+		update();
+		if (doc && model.value && !doc.model_catalog.models?.some((value) => value.id === model.value)) note.textContent = t("models_unknown_current", { model: model.value });
+	});
+	return {
+		box,
+		refresh,
+		update
+	};
+}
+function modelPreferencesPanel({ h, t, api, caps, guard, submit, storageKey, onEvents, errorBox }) {
+	let doc = null, draft = null, intent = null, busy = false, serial = 0, loadedHost = "";
+	let drafts = {};
+	try {
+		drafts = JSON.parse(localStorage.getItem(storageKey) || "{}");
+		if (!drafts || Array.isArray(drafts) || typeof drafts !== "object") drafts = {};
+	} catch {}
+	const host = h("select", { "aria-label": t("models_host") }, h("option", { value: "" }, t("start_choose_host")), ...(caps()?.hosts || []).map((value) => h("option", { value: value.host }, value.host)));
+	if (caps()?.hosts?.length === 1) host.value = caps().hosts[0].host;
+	const catalogAgent = h("select", { "aria-label": t("models_catalog_agent") }, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
+	const status = h("p", {
+		class: "muted",
+		role: "status"
+	}), evidence = h("div"), usage = h("div"), rows = h("div"), form = h("div", { class: "capture-fields" });
+	const inputs = {};
+	const persist = () => {
+		guard();
+		if (loadedHost) drafts[loadedHost] = {
+			draft,
+			intent
+		};
+		localStorage.setItem(storageKey, JSON.stringify(drafts));
+	};
+	const modified = () => {
+		if (!draft || intent || busy || doc?.host !== host.value) return;
+		for (const key of [
+			"initial_agent",
+			"initial_model",
+			"last_agent",
+			"last_model"
+		]) draft.params[key] = inputs[key].value || null;
+		try {
+			persist();
+			status.textContent = t("models_unsaved");
+		} catch (error) {
+			status.textContent = error.message || String(error);
+		}
+		update();
+	};
+	for (const role of ["initial", "last"]) {
+		const agent = h("select", { "aria-label": t(`models_${role}_agent`) }, h("option", { value: "" }, t("models_no_preference")), h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
+		const model = h("input", {
+			"aria-label": t(`models_${role}_model`),
+			maxlength: 256
+		});
+		inputs[`${role}_agent`] = agent;
+		inputs[`${role}_model`] = model;
+		agent.addEventListener("change", modified);
+		model.addEventListener("input", modified);
+		form.append(h("label", {}, t(`models_${role}_agent`), agent), h("label", {}, t(`models_${role}_model`), model));
+	}
+	const refresh = h("button", {
+		class: "secondary",
+		type: "button",
+		onclick: () => load(true)
+	}, t("models_refresh"));
+	const reset = h("button", {
+		class: "secondary",
+		type: "button",
+		onclick: () => {
+			if (!draft || busy || intent || doc?.host !== host.value) return;
+			draft.params.hidden = [];
+			draft.params.order = [];
+			try {
+				persist();
+				status.textContent = t("models_unsaved");
+				renderRows();
+				update();
+			} catch (error) {
+				status.textContent = error.message || String(error);
+			}
+		}
+	}, t("models_reset_display"));
+	const discard = h("button", {
+		class: "secondary",
+		type: "button",
+		onclick: () => {
+			if (busy || intent || doc?.host !== host.value) return;
+			try {
+				guard();
+				const next = { ...drafts };
+				delete next[loadedHost];
+				localStorage.setItem(storageKey, JSON.stringify(next));
+				drafts = next;
+				draft = null;
+				load(true);
+			} catch (error) {
+				status.textContent = error.message || String(error);
+			}
+		}
+	}, t("models_reload_saved"));
+	const save = h("button", {
+		class: "primary",
+		type: "button",
+		onclick: async () => {
+			if (busy || !draft || !doc || doc.host !== host.value) return;
+			busy = true;
+			try {
+				guard();
+				intent ||= {
+					params: copyPreferences(draft.params),
+					revision: draft.revision
+				};
+				persist();
+				update();
+				const op = await submit("preferences.models.update", { host: loadedHost }, intent.params, { expected_revision: intent.revision }, `${storageKey}.${loadedHost}`);
+				guard();
+				if (op.status === "succeeded") {
+					intent = null;
+					draft = null;
+					delete drafts[loadedHost];
+					localStorage.setItem(storageKey, JSON.stringify(drafts));
+					status.textContent = t("models_saved");
+					await load(false);
+				} else {
+					if (["failed", "cancelled"].includes(op.status)) {
+						intent = null;
+						persist();
+					}
+					status.textContent = op.status_reason || t("models_pending");
+				}
+			} catch (error) {
+				try {
+					guard();
+					if (error.code === "VERSION_CONFLICT" && error.status === 409) {
+						intent = null;
+						persist();
+					}
+					status.textContent = error.message || String(error);
+				} catch {}
+			} finally {
+				busy = false;
+				update();
+			}
+		}
+	}, t("save"));
+	const box = h("details", {
+		class: "panel model-preferences",
+		"data-model-preferences": ""
+	}, h("summary", {}, t("models_title")), h("p", { class: "muted" }, t("models_personal", { actor: caps()?.actor || "" })), h("div", { class: "capture-fields" }, h("label", {}, t("models_host"), host), h("label", {}, t("models_catalog_agent"), catalogAgent)), h("div", { class: "actions" }, refresh), status, evidence, form, rows, h("div", { class: "actions" }, save, reset, discard), h("h2", {}, t("models_usage")), usage);
+	function update() {
+		const locked = busy || Boolean(intent), coherent = doc?.host === host.value;
+		for (const input of Object.values(inputs)) input.disabled = locked || !draft || !coherent;
+		host.disabled = locked;
+		catalogAgent.disabled = busy;
+		save.disabled = busy || !draft || !coherent || !caps()?.actions?.some((action) => action.action === "preferences.models.update" && action.allowed);
+		save.textContent = t(intent ? "permissions_retry" : "save");
+		reset.disabled = discard.disabled = locked || !draft || !coherent;
+		refresh.disabled = busy || !host.value;
+		for (const input of rows.querySelectorAll("input,button")) input.disabled = locked || !coherent || input.dataset.boundary === "true";
+	}
+	function renderRows() {
+		const focused = document.activeElement?.dataset.modelControl;
+		const prefs = draft?.params;
+		if (!doc || !prefs) {
+			rows.replaceChildren();
+			return;
+		}
+		const catalog = doc.model_catalog, order = new Map(prefs.order.map((id, i) => [id, i]));
+		const models = [...catalog.models].sort((a, b) => (order.get(modelKey(a)) ?? 9999) - (order.get(modelKey(b)) ?? 9999));
+		const change = (action) => {
+			if (busy || intent || doc?.host !== host.value) return;
+			action();
+			try {
+				persist();
+				status.textContent = t("models_unsaved");
+				renderRows();
+				update();
+			} catch (error) {
+				status.textContent = error.message || String(error);
+			}
+		};
+		rows.replaceChildren(h("h2", {}, t("models_display")), h("p", { class: "muted" }, t("models_display_help")), ...models.map((model, i) => {
+			const id = modelKey(model);
+			const visible = h("input", {
+				type: "checkbox",
+				checked: !prefs.hidden.includes(id),
+				"data-model-control": `${id}.visible`,
+				onchange: () => change(() => {
+					prefs.hidden = visible.checked ? prefs.hidden.filter((value) => value !== id) : [...new Set([...prefs.hidden, id])];
+				})
+			});
+			const move = (delta) => change(() => {
+				if (i + delta < 0 || i + delta >= models.length) return;
+				const next = models.map(modelKey);
+				[next[i], next[i + delta]] = [next[i + delta], next[i]];
+				prefs.order = [...next, ...prefs.order.filter((value) => !next.includes(value))];
+			});
+			return h("div", { class: "row" }, h("label", {
+				class: "grow",
+				title: model.id
+			}, visible, " ", model.label || model.id, h("code", {}, ` · ${model.id}`)), h("button", {
+				class: "mini",
+				type: "button",
+				disabled: i === 0,
+				"data-boundary": String(i === 0),
+				"aria-label": t("models_move_up", { model: model.id }),
+				"data-model-control": `${id}.up`,
+				onclick: () => move(-1)
+			}, "↑"), h("button", {
+				class: "mini",
+				type: "button",
+				disabled: i === models.length - 1,
+				"data-boundary": String(i === models.length - 1),
+				"aria-label": t("models_move_down", { model: model.id }),
+				"data-model-control": `${id}.down`,
+				onclick: () => move(1)
+			}, "↓"));
+		}));
+		if (!models.length) rows.append(h("p", { class: "muted" }, t("models_catalog_unavailable", { reason: catalog.reason || catalog.status })));
+		[...rows.querySelectorAll("[data-model-control]")].find((node) => node.dataset.modelControl === focused)?.focus({ preventScroll: true });
+	}
+	function showUsage(value) {
+		usage.replaceChildren(h("p", { class: "muted" }, t("models_source", {
+			source: value.source || "bat_host",
+			time: date$1(value.observed_at)
+		})));
+		if (value.status !== "available") usage.append(h("p", { class: "note" }, t("models_usage_unavailable", { reason: value.reason || value.status })));
+		for (const provider of value.providers || []) {
+			const row = h("section", { class: "panel" }, h("strong", {}, provider.provider), h("p", { class: "muted" }, t("models_host_account", { account: provider.account_email || t("obs_unknown") })), h("p", { class: "muted" }, [provider.plan_type, date$1(provider.fetched_at)].filter(Boolean).join(" · ")));
+			if (provider.stale) row.append(h("p", { class: "note warn" }, t("models_usage_stale", { reason: provider.reason || "unknown" })));
+			for (const [key, label] of [["five_hour", "models_five_hour"], ["seven_day", "models_seven_day"]]) {
+				const window = provider[key], known = typeof window?.utilization === "number" && window.utilization >= 0 && window.utilization <= 1;
+				row.append(h("p", {}, t(label), ": ", known ? `${Math.round(window.utilization * 100)}%` : t("obs_unknown"), " · ", t("models_resets", { time: date$1(window?.resets_at) })));
+			}
+			usage.append(row);
+		}
+	}
+	async function load(force = false) {
+		if (!host.value) return;
+		const selected = host.value, agent = catalogAgent.value, request = ++serial;
+		update();
+		try {
+			const next = await api("GET", `/hosts/${encodeURIComponent(selected)}/preferences?agent=${agent}${force ? "&refresh=1" : ""}`);
+			guard();
+			if (request !== serial || selected !== host.value || agent !== catalogAgent.value) return;
+			if (next.version !== 1 || next.host !== selected || !Number.isInteger(next.model_preferences?.revision) || next.model_catalog?.agent !== agent || !validPreferences(copyPreferences(next.model_preferences)) || !Array.isArray(next.model_catalog?.models)) throw Error(t("models_invalid"));
+			doc = next;
+			if (loadedHost !== selected || !draft) {
+				const saved = drafts[selected], valid = validDraft(saved?.draft);
+				draft = valid ? saved.draft : {
+					params: copyPreferences(next.model_preferences),
+					revision: next.model_preferences.revision
+				};
+				intent = valid && validDraft(saved.intent) ? saved.intent : null;
+				loadedHost = selected;
+				for (const [key, input] of Object.entries(inputs)) input.value = draft.params[key] || "";
+			}
+			evidence.replaceChildren(...[
+				h("p", { class: "muted" }, t("models_source", {
+					source: next.model_catalog.source || "bat_host",
+					time: date$1(next.model_catalog.observed_at)
+				})),
+				next.model_catalog.stale ? h("p", { class: "note warn" }, t("models_catalog_stale", { host: selected })) : null,
+				...(next.unknown_models || []).map((model) => h("p", { class: "note" }, t("models_unknown_current", { model: `${model.agent}:${model.id}` })))
+			].filter(Boolean));
+			if (draft.revision !== next.model_preferences.revision) status.textContent = t("models_conflict");
+			else if (!equal$7(draft.params, copyPreferences(next.model_preferences))) status.textContent = t("models_unsaved");
+			renderRows();
+			showUsage(next.usage);
+			update();
+		} catch (error) {
+			try {
+				guard();
+				if (request === serial) {
+					errorBox?.(error);
+					status.textContent = `${t("models_not_refreshed")} ${error.message || error}`;
+				}
+			} catch {}
+		}
+	}
+	host.addEventListener("change", () => load());
+	catalogAgent.addEventListener("change", () => load());
+	box.addEventListener("toggle", () => {
+		if (box.open && !doc) load();
+	});
+	const off = onEvents((event) => box.open && event.resource_type === "preferences" && event.resource_id === host.value ? load() : void 0);
+	update();
+	return {
+		box,
+		dispose() {
+			serial++;
+			off();
+		}
+	};
+}
+//#endregion
+//#region src/project-skills.js
+var digest$4 = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+var refs = (value) => Array.isArray(value) && value.length <= 20 && value.every((ref) => ref && typeof ref.skill_id === "string" && digest$4(ref.digest)) && new Set(value.map((ref) => ref.skill_id)).size === value.length;
+var record$3 = (value) => value && refs(value.selected) && Number.isInteger(value.revision) && value.revision >= 0 && digest$4(value.digest);
+var key = (host, workspace) => JSON.stringify([host, workspace]);
+var same$1 = (a, b) => a.skill_id === b.skill_id && a.digest === b.digest;
+function projectSkillsPanel({ h, t, api, caps, guard, submit, projectId, storageKey, onEvents, errorBox }) {
+	let saved = {
+		host: "",
+		workspace: "",
+		drafts: {}
+	};
+	try {
+		const raw = JSON.parse(localStorage.getItem(storageKey));
+		if (raw && typeof raw.host === "string" && typeof raw.workspace === "string" && raw.drafts && typeof raw.drafts === "object" && !Array.isArray(raw.drafts)) saved = raw;
+	} catch {}
+	let doc = null, draft = null, busy = false, discovery = 0, serial = 0, discoveredHost = "", discoveryReady = false;
+	const host = h("select", { "aria-label": t("host") }, h("option", { value: "" }, t("start_choose_host")), ...(caps()?.hosts || []).map((value) => h("option", { value: value.host }, value.host)));
+	if (![...host.options].some((option) => option.value === saved.host)) saved.host = "";
+	host.value = saved.host;
+	const workspace = h("select", { "aria-label": t("start_workspace") }, h("option", { value: "" }, t("start_choose_workspace")));
+	const status = h("p", {
+		class: "muted",
+		role: "status"
+	}), source = h("div"), list = h("div");
+	const persist = () => {
+		guard();
+		localStorage.setItem(storageKey, JSON.stringify(saved));
+	};
+	const coherent = () => doc && doc.host === saved.host && doc.workspace_id === saved.workspace;
+	const refresh = h("button", {
+		class: "secondary",
+		type: "button",
+		onclick: () => discover(true)
+	}, t("skills_refresh"));
+	const discard = h("button", {
+		class: "secondary",
+		type: "button",
+		onclick: () => {
+			if (busy || draft?.intent || !coherent()) return;
+			try {
+				guard();
+				const next = {
+					...saved,
+					drafts: { ...saved.drafts }
+				};
+				delete next.drafts[key(saved.host, saved.workspace)];
+				localStorage.setItem(storageKey, JSON.stringify(next));
+				saved = next;
+				draft = null;
+				load(true);
+			} catch (error) {
+				status.textContent = error.message || String(error);
+			}
+		}
+	}, t("skills_reload"));
+	const save = h("button", {
+		class: "primary",
+		type: "button",
+		onclick: async () => {
+			if (busy || !draft || !coherent()) return;
+			if (!draft.intent && (doc.catalog.stale || doc.catalog.status !== "available")) return;
+			busy = true;
+			try {
+				guard();
+				draft.intent ||= {
+					selected: structuredClone(draft.selected),
+					revision: draft.revision,
+					digest: draft.digest
+				};
+				persist();
+				update();
+				const intent = draft.intent;
+				const op = await submit("project.skills.update", { project_id: projectId }, {
+					host: saved.host,
+					workspace_id: saved.workspace,
+					selected: intent.selected
+				}, {
+					expected_revision: intent.revision,
+					expected_catalog_digest: intent.digest
+				}, storageKey);
+				guard();
+				if (op.status === "succeeded") {
+					const next = {
+						...saved,
+						drafts: { ...saved.drafts }
+					};
+					delete next.drafts[key(saved.host, saved.workspace)];
+					localStorage.setItem(storageKey, JSON.stringify(next));
+					saved = next;
+					draft = null;
+					status.textContent = t("skills_saved");
+					await load();
+				} else {
+					if (["failed", "cancelled"].includes(op.status)) {
+						draft.intent = null;
+						persist();
+					}
+					status.textContent = op.status_reason || t("models_pending");
+				}
+			} catch (error) {
+				try {
+					guard();
+					if (error.status === 409 && [
+						"VERSION_CONFLICT",
+						"SKILL_CATALOG_CHANGED",
+						"SKILL_SOURCE_CHANGED"
+					].includes(error.code)) {
+						draft.intent = null;
+						persist();
+					}
+					status.textContent = error.message || String(error);
+				} catch {}
+			} finally {
+				busy = false;
+				update();
+			}
+		}
+	}, t("skills_save"));
+	const box = h("details", {
+		class: "panel project-skills",
+		"data-project-skills": ""
+	}, h("summary", {}, t("skills_title")), h("p", { class: "note" }, t("skills_not_applied")), h("div", { class: "capture-fields" }, h("label", {}, t("host"), host), h("label", {}, t("start_workspace"), workspace)), h("div", { class: "actions" }, refresh), status, source, list, h("div", { class: "actions" }, save, discard));
+	function update() {
+		const locked = busy || Boolean(draft?.intent), valid = coherent();
+		host.disabled = locked;
+		workspace.disabled = locked || !discoveryReady;
+		refresh.disabled = busy || !saved.host;
+		save.textContent = t(draft?.intent ? "permissions_retry" : "skills_save");
+		save.disabled = busy || !valid || !draft || !draft.intent && (doc.catalog.status !== "available" || doc.catalog.stale) || !caps()?.actions?.some((action) => action.action === "project.skills.update" && action.allowed);
+		discard.disabled = locked || !valid || !draft;
+		for (const control of list.querySelectorAll("input,button")) control.disabled = locked || !valid || control.dataset.unavailable === "true";
+	}
+	function render() {
+		if (!coherent() || !draft) {
+			list.replaceChildren();
+			update();
+			return;
+		}
+		const catalog = doc.catalog;
+		source.replaceChildren(h("p", { class: "muted" }, t("models_source", {
+			source: `${catalog.source} · ${doc.host} / ${doc.workspace_id}`,
+			time: catalog.observed_at ? new Date(catalog.observed_at * 1e3).toLocaleString() : "—"
+		})), h("p", { class: "muted" }, t("skills_compatibility")));
+		if (catalog.status !== "available" || catalog.stale || !catalog.complete) source.append(h("p", { class: "note warn" }, t("skills_catalog_state", { state: catalog.reason || (catalog.stale ? "stale" : !catalog.complete ? "partial" : catalog.status) })));
+		if (doc.selection.selected.length && (doc.selection.host !== doc.host || doc.selection.workspace_id !== doc.workspace_id)) source.append(h("p", { class: "note warn" }, t("skills_other_binding", {
+			host: doc.selection.host,
+			workspace: doc.selection.workspace_id
+		})));
+		const change = (fn) => {
+			if (busy || draft.intent || !coherent()) return;
+			fn();
+			try {
+				persist();
+				status.textContent = t("skills_unsaved");
+				render();
+			} catch (error) {
+				status.textContent = error.message || String(error);
+			}
+		};
+		const unresolved = draft.selected.filter((ref) => !catalog.skills.some((skill) => same$1(ref, skill) && skill.available));
+		list.replaceChildren(...unresolved.map((ref) => h("div", { class: "row" }, h("div", { class: "grow" }, h("strong", {}, t("skills_unresolved")), h("p", {}, ref.skill_id), h("code", {}, ref.digest)), h("button", {
+			class: "mini",
+			type: "button",
+			onclick: () => change(() => {
+				draft.selected = draft.selected.filter((value) => !same$1(value, ref));
+			})
+		}, t("remove")))), ...catalog.skills.map((skill) => {
+			const input = h("input", {
+				type: "checkbox",
+				checked: draft.selected.some((ref) => same$1(ref, skill)),
+				"data-unavailable": String(!skill.available),
+				onchange: () => change(() => {
+					if (input.checked && draft.selected.length >= 20 && !draft.selected.some((ref) => ref.skill_id === skill.skill_id)) return;
+					draft.selected = draft.selected.filter((ref) => ref.skill_id !== skill.skill_id);
+					if (input.checked) draft.selected.push({
+						skill_id: skill.skill_id,
+						digest: skill.digest
+					});
+				})
+			});
+			return h("section", { class: "panel" }, h("label", {}, input, " ", skill.name || skill.skill_id), h("p", { class: "muted" }, `${skill.scope} · ${skill.agent} · ${skill.relative_path}`), skill.description ? h("p", {}, skill.description) : null, h("details", {}, h("summary", {}, t("skills_version")), h("code", {}, skill.digest || "—"), h("p", {}, `${skill.files} files · ${skill.size_bytes} bytes`)), !skill.available ? h("p", { class: "note warn" }, skill.reason || t("obs_unknown")) : null);
+		}));
+		update();
+	}
+	async function load(force = false) {
+		if (!saved.host || !saved.workspace || discoveredHost !== saved.host || !discoveryReady) return;
+		const selectedHost = saved.host, selectedWorkspace = saved.workspace, request = ++serial;
+		update();
+		try {
+			const next = await api("GET", `/projects/${encodeURIComponent(projectId)}/skills?host=${encodeURIComponent(selectedHost)}&workspace_id=${encodeURIComponent(selectedWorkspace)}${force ? "&refresh=1" : ""}`);
+			guard();
+			if (request !== serial || selectedHost !== saved.host || selectedWorkspace !== saved.workspace) return;
+			if (next.version !== 1 || next.project_id !== projectId || next.host !== selectedHost || next.workspace_id !== selectedWorkspace || !Array.isArray(next.catalog?.skills) || !refs(next.selection?.selected) || !Number.isInteger(next.selection.revision)) throw Error(t("skills_invalid"));
+			doc = next;
+			const draftKey = key(selectedHost, selectedWorkspace), stored = saved.drafts[draftKey];
+			draft = record$3(stored) ? stored : {
+				selected: next.selection.host === selectedHost && next.selection.workspace_id === selectedWorkspace ? structuredClone(next.selection.selected) : [],
+				revision: next.selection.revision,
+				digest: next.catalog.catalog_digest,
+				intent: null
+			};
+			if (draft.intent && !record$3(draft.intent)) draft.intent = null;
+			saved.drafts[draftKey] = draft;
+			if (draft.revision !== next.selection.revision || draft.digest !== next.catalog.catalog_digest) status.textContent = t("skills_conflict");
+			render();
+		} catch (error) {
+			try {
+				guard();
+				if (request === serial) {
+					errorBox?.(error);
+					status.textContent = `${t("models_not_refreshed")} ${error.message || error}`;
+				}
+			} catch {}
+		}
+	}
+	async function discover(force = false) {
+		if (!saved.host) return;
+		const request = ++discovery, selectedHost = saved.host;
+		discoveryReady = false;
+		update();
+		try {
+			const next = await api("GET", `/workspaces?host=${encodeURIComponent(selectedHost)}&limit=200`);
+			guard();
+			if (request !== discovery || selectedHost !== saved.host) return;
+			if (!Array.isArray(next.workspaces) || !next.errors || Object.keys(next.errors).length || next.workspaces.some((value) => value.host !== selectedHost || typeof value.workspace_id !== "string")) throw Error(t("start_discovery_failed"));
+			workspace.replaceChildren(h("option", { value: "" }, t("start_choose_workspace")), ...next.workspaces.map((value) => h("option", { value: value.workspace_id }, `${value.name || value.workspace_id} · ${value.workspace_id}`)));
+			if (saved.workspace && !next.workspaces.some((value) => value.workspace_id === saved.workspace)) workspace.append(h("option", { value: saved.workspace }, `${saved.workspace} · ${t("skills_workspace_missing")}`));
+			workspace.value = saved.workspace;
+			discoveredHost = selectedHost;
+			discoveryReady = true;
+			if (next.has_more) status.textContent = t("start_truncated");
+			update();
+			await load(force);
+		} catch (error) {
+			try {
+				guard();
+				if (request === discovery) status.textContent = error.message || String(error);
+			} catch {}
+		}
+	}
+	host.addEventListener("change", () => {
+		if (busy || draft?.intent) return;
+		saved.host = host.value;
+		saved.workspace = "";
+		doc = draft = null;
+		serial++;
+		source.replaceChildren();
+		list.replaceChildren();
+		workspace.replaceChildren();
+		try {
+			persist();
+		} catch {}
+		discover();
+	});
+	workspace.addEventListener("change", () => {
+		if (busy || draft?.intent) return;
+		saved.workspace = workspace.value;
+		doc = draft = null;
+		serial++;
+		try {
+			persist();
+		} catch {}
+		load();
+	});
+	box.addEventListener("toggle", () => {
+		if (box.open && !discoveryReady) discover();
+	});
+	const off = onEvents((event) => box.open && event.resource_type === "project" && event.resource_id === projectId ? load() : void 0);
+	update();
+	return {
+		box,
+		dispose() {
+			serial++;
+			discovery++;
+			off();
+		}
+	};
+}
+//#endregion
+//#region src/result-sources.js
+var itemHref = (item) => `#/item/${encodeURIComponent(item.work_item_id)}`;
+var artifactHref = (artifact) => `#/artifact-review/artifact/${encodeURIComponent(artifact.artifact_id)}/${artifact.revision}`;
+var date = (value) => typeof value === "number" ? new Date(value * 1e3).toLocaleString() : "—";
+function resultSourcesPanel({ h, t, api, guard, workItemId, linkTarget, onEvents, errorBox }) {
+	let doc = null, serial = 0, children = [], refreshing = null;
+	const warning = h("div", { "data-child-warning": "" }), status = h("p", {
+		class: "muted",
+		role: "status"
+	}), body = h("div");
+	const refresh = h("button", {
+		class: "mini",
+		type: "button",
+		onclick: () => load()
+	}, t("results_refresh"));
+	const more = h("button", {
+		class: "secondary",
+		type: "button",
+		hidden: true,
+		onclick: () => load(doc?.children_next_cursor)
+	}, t("results_more"));
+	const box = h("section", {
+		class: "result-sources panel",
+		"data-result-sources": ""
+	}, warning, h("details", {}, h("summary", {}, t("results_title")), status, h("div", { class: "actions" }, refresh), body, more));
+	function renderSource(item, own = false) {
+		const content = h("div", {}, h("p", { class: "muted" }, t("results_completion", { state: t(`wi_state_${item.completion.display_state}`) })));
+		if (!item.links.length && !item.result_artifacts.length) content.append(h("p", { class: "muted" }, t("results_empty")));
+		for (const link of item.links) {
+			const row = h("div", { class: "panel" }, linkTarget(link));
+			if (link.note) row.append(h("p", { class: "muted" }, link.note));
+			const observation = link.observation;
+			if (observation) row.append(h("p", { class: "muted" }, t("results_activity", {
+				state: observation.status !== "available" || observation.stale || observation.fields_stale || observation.gone_at ? t("obs_unknown") : observation.streaming === true ? t("results_streaming") : observation.pending && typeof observation.pending === "object" ? t("results_waiting") : typeof observation.pending === "number" && observation.pending > 0 ? t("results_pending", { count: observation.pending }) : observation.streaming === false && (observation.pending === null || observation.pending === 0) ? t("results_no_activity") : t("obs_unknown"),
+				time: date(observation.observed_at)
+			})));
+			for (const receipt of link.delivered_to || []) row.append(h("p", { class: "note ok" }, t("results_delivered"), " ", h("a", {
+				href: `https://github.com/${receipt.repository}/pull/${receipt.pull_number}`,
+				target: "_blank",
+				rel: "noopener"
+			}, `${receipt.repository}#${receipt.pull_number}`), " · ", h("a", { href: `#/op/${encodeURIComponent(receipt.operation_id)}` }, t("results_receipt")), " · ", h("code", {}, receipt.delivered_sha?.slice(0, 12) || "—")));
+			if (link.delivery_truncated) row.append(h("p", { class: "muted" }, t("results_partial")));
+			content.append(row);
+		}
+		for (const artifact of item.result_artifacts) {
+			const row = h("div", { class: "panel" }, h("a", { href: artifactHref(artifact) }, artifact.display_name || artifact.artifact_id), h("p", { class: "muted" }, `r${artifact.revision} · ${artifact.state || "unknown"} · ${artifact.media_type || ""}`));
+			if (!artifact.available) row.append(h("p", { class: "note warn" }, t("results_unavailable", { reason: artifact.reason || "unknown" })));
+			row.append(h("details", {}, h("summary", {}, t("results_provenance")), h("code", {}, artifact.digest), artifact.source_operation_id ? h("p", {}, h("a", { href: `#/op/${encodeURIComponent(artifact.source_operation_id)}` }, t("results_source_operation"))) : null, artifact.source?.kind === "session" && artifact.source.host && artifact.source.session_id ? h("p", {}, h("a", { href: `#/session/${encodeURIComponent(artifact.source.host)}/${encodeURIComponent(artifact.source.session_id)}` }, t("nav_sessions"))) : null));
+			const consumers = artifact.recorded_consumers || [];
+			row.append(h("p", { class: "muted" }, t("results_consumers", { count: consumers.length })), ...consumers.map((consumer) => {
+				const href = consumer.owner_kind === "work_item" ? `#/item/${encodeURIComponent(consumer.owner_id)}` : consumer.owner_kind === "operation" ? `#/op/${encodeURIComponent(consumer.owner_id)}` : null;
+				return h("p", { class: "muted" }, `${consumer.role} · ${consumer.owner_kind} · `, href ? h("a", { href }, consumer.owner_id) : consumer.owner_id);
+			}));
+			if (artifact.consumers_truncated) row.append(h("p", { class: "muted" }, t("results_partial")));
+			content.append(row);
+		}
+		if (item.links_truncated || item.artifacts_truncated) content.append(h("p", { class: "note" }, t("results_partial")));
+		return own ? content : h("details", { "data-result-child": item.work_item_id }, h("summary", {}, item.title), h("p", {}, h("a", { href: itemHref(item) }, t("results_open_child"))), content);
+	}
+	function render() {
+		const focused = document.activeElement?.getAttribute("href"), opens = new Set([...body.querySelectorAll("details[open][data-result-child]")].map((node) => node.dataset.resultChild));
+		const unfinished = children.filter((child) => !child.archived && !child.completion.approved);
+		warning.replaceChildren(...unfinished.length ? [h("p", { class: "note warn" }, t("results_unfinished", { count: unfinished.length }), " ", ...unfinished.flatMap((child, index) => [index ? " · " : "", h("a", { href: itemHref(child) }, child.title)]))] : []);
+		if (doc.children_next_cursor) warning.append(h("p", { class: "muted" }, t("results_children_partial")));
+		body.replaceChildren(h("p", { class: "muted" }, t("results_independent")), ...[doc.parent && ["results_parent", doc.parent], doc.derived_from && ["derived_from", doc.derived_from]].filter(Boolean).map(([label, item]) => h("p", {}, t(label), ": ", h("a", { href: itemHref(item) }, item.title))), renderSource(doc.item, true), ...children.map((child) => renderSource(child)));
+		for (const node of body.querySelectorAll("details[data-result-child]")) node.open = opens.has(node.dataset.resultChild);
+		if (focused) [...body.querySelectorAll("a")].find((node) => node.getAttribute("href") === focused)?.focus({ preventScroll: true });
+		status.textContent = t("models_source", {
+			source: doc.source,
+			time: date(doc.read_at)
+		});
+		more.hidden = !doc.children_next_cursor;
+	}
+	function load(after = "") {
+		if (refreshing) return refreshing.then(() => load(after));
+		refreshing = loadNow(after).finally(() => {
+			refreshing = null;
+		});
+		return refreshing;
+	}
+	async function loadNow(after) {
+		const request = ++serial;
+		refresh.disabled = more.disabled = true;
+		try {
+			const next = await api("GET", `/work-items/${encodeURIComponent(workItemId)}/result-sources?limit=50${after ? `&after=${encodeURIComponent(after)}` : ""}`);
+			guard();
+			if (request !== serial) return;
+			if (next.version !== 1 || next.item?.work_item_id !== workItemId || !Array.isArray(next.children)) throw Error(t("results_invalid"));
+			doc = next;
+			children = after ? [...new Map([...children, ...next.children].map((child) => [child.work_item_id, child])).values()] : next.children;
+			render();
+		} catch (error) {
+			try {
+				guard();
+				if (request === serial) {
+					errorBox?.(error);
+					status.textContent = `${t("models_not_refreshed")} ${error.message || error}`;
+				}
+			} catch {}
+		} finally {
+			refresh.disabled = more.disabled = false;
+		}
+	}
+	const off = onEvents((event) => [
+		"work_item",
+		"integration",
+		"artifact",
+		"operation",
+		"session"
+	].includes(event.resource_type) ? load() : void 0);
+	load();
+	return {
+		box,
+		dispose() {
+			serial++;
+			off();
+		}
+	};
+}
+//#endregion
+//#region src/repair-intent.js
+var object$5 = (v) => v && typeof v === "object" && !Array.isArray(v);
+var pid = (v) => typeof v === "string" && /^prj_[0-9a-f]{20}$/.test(v);
+var wid = (v) => typeof v === "string" && /^wi_[0-9a-f]{20}$/.test(v);
+var oid$3 = (v) => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
+var digest$3 = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+var canonical = (v) => JSON.stringify(v, (_, value) => object$5(value) ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])) : value);
+var source = (v) => object$5(v) && (v.kind === "operation" && Object.keys(v).length === 2 && oid$3(v.operation_id) || v.kind === "discovery" && Object.keys(v).length === 3 && ["host", "profile_id"].every((k) => typeof v[k] === "string" && v[k].length > 0 && v[k].length <= 256));
+function repairRequest(doc) {
+	if (doc?.version !== 1 || !pid(doc.project_id) || !source(doc.source) || !digest$3(doc.evidence_digest) || !Number.isSafeInteger(doc.expected_project_version) || doc.expected_project_version < 1) throw new Error("Invalid fixed repair evidence");
+	return {
+		action: "repair.create",
+		target: { project_id: doc.project_id },
+		params: { source: structuredClone(doc.source) },
+		preconditions: {
+			expected_project_version: doc.expected_project_version,
+			expected_evidence_digest: doc.evidence_digest
+		}
+	};
+}
+function validRequest$4(request) {
+	if (!object$5(request) || canonical(Object.keys(request).sort()) !== canonical([
+		"action",
+		"params",
+		"preconditions",
+		"target"
+	])) return false;
+	if (request.action !== "repair.create" || !object$5(request.target) || !object$5(request.params) || !object$5(request.preconditions)) return false;
+	try {
+		return canonical(request) === canonical(repairRequest({
+			version: 1,
+			project_id: request.target.project_id,
+			source: request.params.source,
+			expected_project_version: request.preconditions.expected_project_version,
+			evidence_digest: request.preconditions.expected_evidence_digest
+		}));
+	} catch {
+		return false;
+	}
+}
+function validateRepairRecord(record, projectId, workItemId) {
+	if (record?.version !== 1 || !pid(record.project_id) || !wid(record.work_item_id) || !digest$3(record.evidence_digest) || !digest$3(record.expected_work_item_fingerprint) || typeof record.request !== "string" || !record.request.trim() || record.request.length > 12e3 || typeof record.dispatchable !== "boolean" || record.dispatch_operation_id !== null && !oid$3(record.dispatch_operation_id) || projectId && record.project_id !== projectId || workItemId && record.work_item_id !== workItemId) throw new Error("Invalid repair work identity");
+	return record;
+}
+function repairDispatchSeed(record) {
+	if (record?.version !== 1 || !pid(record.project_id) || !wid(record.work_item_id) || !digest$3(record.evidence_digest) || !digest$3(record.expected_work_item_fingerprint) || typeof record.request !== "string" || !record.request.trim() || record.request.length > 12e3 || record.dispatchable !== true || record.dispatch_operation_id) throw new Error("Repair dispatch requires current server evidence");
+	return {
+		project_id: record.project_id,
+		work_item_id: record.work_item_id,
+		prompt: record.request,
+		expected_work_item_fingerprint: record.expected_work_item_fingerprint
+	};
+}
+function repairIntent({ api, guard, actor, allowed, storage, storageKey, newKey = () => crypto.randomUUID() }) {
+	guard();
+	let intent = null, operation = null, pending = null;
+	const raw = storage.getItem(storageKey);
+	if (raw) {
+		intent = JSON.parse(raw);
+		if (!validRequest$4(intent?.request) || typeof intent.key !== "string" || !intent.key || intent.key.length > 200 || intent.actor !== actor() || intent.operation_id !== null && !oid$3(intent.operation_id)) throw new Error("Stored repair intent is unavailable");
+	}
+	function accept(doc) {
+		guard();
+		const op = doc?.operation;
+		if (!oid$3(op?.operation_id) || op.actor !== intent.actor || op.idempotency_key !== intent.key || intent.operation_id && op.operation_id !== intent.operation_id || [
+			"action",
+			"target",
+			"params",
+			"preconditions"
+		].some((key) => canonical(op[key]) !== canonical(intent.request[key]))) throw new Error("Repair operation identity changed");
+		intent.operation_id = op.operation_id;
+		storage.setItem(storageKey, JSON.stringify(intent));
+		operation = structuredClone(op);
+		return structuredClone(operation);
+	}
+	async function check() {
+		guard();
+		if (!intent) return null;
+		if (pending) return pending;
+		if (intent.actor !== actor() || !allowed()) throw new Error("Repair authority unavailable");
+		const fixed = structuredClone(intent);
+		pending = (async () => accept(await (fixed.operation_id ? api("GET", `/operations/${fixed.operation_id}`) : api("POST", "/operations?wait=3", fixed.request, fixed.key))))();
+		try {
+			return await pending;
+		} finally {
+			pending = null;
+		}
+	}
+	async function create(doc) {
+		guard();
+		if (!allowed()) throw new Error("Repair authority unavailable");
+		const request = repairRequest(doc);
+		if (intent && canonical(request) !== canonical(intent.request)) throw new Error("Resume the original repair intent first");
+		if (!intent) {
+			const next = {
+				request,
+				key: newKey(),
+				actor: actor(),
+				operation_id: null
+			};
+			storage.setItem(storageKey, JSON.stringify(next));
+			intent = next;
+		}
+		return check();
+	}
+	return {
+		create,
+		check,
+		snapshot: () => {
+			guard();
+			return structuredClone({
+				intent,
+				operation
+			});
+		}
+	};
+}
+//#endregion
+//#region src/repair-panel.js
+function repairPanel({ h, t, api, caps, guard, namespace, source, errorBox, opStatus }) {
+	let controller, document, busy = false, disposed = false, serial = 0, initialized = false;
+	const alive = () => {
+		try {
+			guard();
+			return !disposed;
+		} catch {
+			return false;
+		}
+	};
+	const key = `batc.repair.${namespace}.${JSON.stringify(source)}`;
+	const status = h("div", { role: "status" }), evidence = h("div"), outcome = h("div");
+	const project = h("select", { "aria-label": t("repair_project") }, h("option", { value: "" }, t("repair_choose_project")));
+	const allowed = () => ["observe", "manage"].every((scope) => caps()?.scopes?.includes(scope)) && caps()?.actions?.some((action) => action.action === "repair.create" && action.allowed === true);
+	const reload = h("button", {
+		class: "secondary",
+		type: "button",
+		onclick: () => read()
+	}, t("repair_read"));
+	const create = h("button", {
+		class: "secondary",
+		type: "button",
+		disabled: true,
+		onclick: async () => {
+			if (!alive() || busy || !allowed()) return;
+			busy = true;
+			update();
+			try {
+				show(await (controller.snapshot().intent ? controller.check() : controller.create(document)));
+			} catch (error) {
+				if (alive()) status.replaceChildren(errorBox(error));
+			} finally {
+				busy = false;
+				if (alive()) update();
+			}
+		}
+	}, t("repair_create"));
+	const next = h("button", {
+		class: "secondary",
+		type: "button",
+		hidden: true,
+		onclick: () => {
+			if (!alive() || busy || ![
+				"succeeded",
+				"failed",
+				"cancelled"
+			].includes(controller.snapshot().operation?.status)) return;
+			try {
+				localStorage.removeItem(key);
+				initializeController();
+				outcome.replaceChildren();
+				read();
+			} catch (error) {
+				if (alive()) status.replaceChildren(errorBox(error));
+			}
+		}
+	}, t("repair_review_new"));
+	const box = h("details", {
+		class: "panel",
+		"data-repair-panel": ""
+	}, h("summary", {}, t("repair_title")), h("p", { class: "muted" }, t("repair_help")), h("label", {}, t("repair_project"), project), h("div", { class: "actions" }, reload, create, next), status, evidence, outcome);
+	function initializeController() {
+		controller = repairIntent({
+			api,
+			guard: () => {
+				guard();
+				if (disposed) throw Error("Retired view");
+			},
+			actor: () => caps()?.actor,
+			allowed,
+			storage: localStorage,
+			storageKey: key
+		});
+	}
+	function update() {
+		const snapshot = controller?.snapshot(), fixed = !!snapshot?.intent;
+		project.disabled = busy || fixed;
+		reload.disabled = busy || !project.value;
+		create.disabled = busy || !allowed() || !document && !fixed;
+		create.textContent = t(fixed ? "repair_recover" : "repair_create");
+		next.hidden = ![
+			"succeeded",
+			"failed",
+			"cancelled"
+		].includes(snapshot?.operation?.status);
+	}
+	function links(record) {
+		if (!record) return;
+		if (!/^wi_[0-9a-f]{20}$/.test(record.work_item_id) || record.project_id !== project.value || record.dispatch_operation_id != null && !/^op_[0-9a-f]{32}$/.test(record.dispatch_operation_id)) throw new Error(t("repair_unavailable"));
+		outcome.append(h("p", {}, h("a", { href: `#/item/${record.work_item_id}` }, t("repair_open_work")), " · ", record.dispatch_operation_id ? h("a", { href: `#/op/${record.dispatch_operation_id}` }, t("repair_open_dispatch")) : h("a", { href: `#/dispatch/${record.project_id || project.value}/${record.work_item_id}` }, t("repair_review_dispatch"))));
+	}
+	function show(operation) {
+		if (!alive()) return;
+		outcome.replaceChildren(opStatus(operation), " ", h("a", { href: `#/op/${operation.operation_id}` }, operation.operation_id));
+		if (operation.status === "succeeded") {
+			if (operation.result?.evidence_digest !== controller.snapshot().intent.request.preconditions.expected_evidence_digest) throw new Error(t("repair_unavailable"));
+			links(operation.result);
+		}
+	}
+	async function read() {
+		if (!alive() || busy || !project.value) return;
+		const mine = ++serial, pid = project.value;
+		document = null;
+		status.replaceChildren();
+		update();
+		try {
+			const doc = await api("GET", `/projects/${pid}/repair-evidence?${new URLSearchParams(source)}`);
+			if (!alive() || mine !== serial || project.value !== pid) return;
+			const request = repairRequest(doc);
+			if (doc.project_id !== pid || JSON.stringify(Object.entries(request.params.source).sort()) !== JSON.stringify(Object.entries(source).sort())) throw new Error(t("repair_unavailable"));
+			document = doc;
+			evidence.replaceChildren(h("p", {}, t("repair_fixed_evidence"), " ", h("code", {}, doc.evidence_digest)), h("details", {}, h("summary", {}, t("repair_evidence_details")), h("pre", { class: "pre" }, JSON.stringify(doc.evidence, null, 2))));
+			if (!controller.snapshot().intent) {
+				outcome.replaceChildren();
+				links(doc.existing);
+			}
+		} catch (error) {
+			if (alive() && mine === serial) status.replaceChildren(errorBox(error));
+		} finally {
+			if (alive() && mine === serial) update();
+		}
+	}
+	async function init() {
+		if (initialized || !alive()) return;
+		initialized = true;
+		try {
+			initializeController();
+			const selected = controller.snapshot().intent?.request.target.project_id;
+			const doc = await api("GET", "/projects");
+			if (!alive()) return;
+			const rows = new Map();
+			const visit = (row) => {
+				if (row?.project_id && !row.archived) rows.set(row.project_id, row);
+				for (const child of row.children || []) visit(child);
+			};
+			for (const row of doc.projects || []) visit(row);
+			project.replaceChildren(h("option", { value: "" }, t("repair_choose_project")), ...[...rows.values()].map((row) => h("option", { value: row.project_id }, row.name)));
+			if (selected && !rows.has(selected)) project.append(h("option", { value: selected }, selected));
+			if (selected) project.value = selected;
+			update();
+			if (controller.snapshot().intent?.operation_id) show(await controller.check());
+		} catch (error) {
+			if (alive()) status.replaceChildren(errorBox(error));
+		} finally {
+			if (alive()) update();
+		}
+	}
+	project.addEventListener("change", () => read());
+	box.addEventListener("toggle", () => {
+		if (box.open) init();
+	});
+	return {
+		box,
+		dispose() {
+			disposed = true;
+			serial++;
+		}
+	};
+}
+function repairWorkItemPanel({ h, t, api, guard, projectId, workItemId, originOperationId, errorBox }) {
+	const box = h("section", {
+		class: "panel",
+		"data-repair-work-item": "",
+		hidden: true
+	});
+	let disposed = false, repairOrigin = null, refreshQueue = Promise.resolve();
+	const alive = () => {
+		try {
+			guard();
+			return !disposed;
+		} catch {
+			return false;
+		}
+	};
+	function refresh() {
+		const work = refreshQueue.catch(() => {}).then(async () => {
+			if (!alive()) return;
+			try {
+				if (repairOrigin === null) {
+					const doc = await api("GET", `/operations/${originOperationId}`);
+					if (!alive()) return;
+					if (doc.operation?.operation_id !== originOperationId) throw new Error(t("repair_unavailable"));
+					repairOrigin = doc.operation.action === "repair.create" && doc.operation.target?.project_id === projectId;
+				}
+				if (!repairOrigin) return;
+				const record = await api("GET", `/work-items/${workItemId}/repair`);
+				if (!alive()) return;
+				validateRepairRecord(record, projectId, workItemId);
+				box.replaceChildren(h("h2", {}, t("repair_title")), h("p", {}, t("repair_fixed_evidence"), " ", h("code", {}, record.evidence_digest)), h("details", {}, h("summary", {}, t("repair_evidence_details")), h("pre", { class: "pre" }, JSON.stringify(record.evidence, null, 2))), record.dispatch_operation_id ? h("p", {}, t("repair_dispatched"), " ", h("a", { href: `#/op/${record.dispatch_operation_id}` }, t("repair_open_dispatch"))) : record.dispatchable ? h("a", { href: `#/dispatch/${projectId}/${workItemId}` }, t("repair_review_dispatch")) : h("p", { class: "muted" }, t("repair_unavailable")));
+				box.hidden = false;
+			} catch (error) {
+				if (!alive()) return;
+				if (error.status === 404 && error.code === "REPAIR_NOT_FOUND") {
+					repairOrigin = false;
+					box.replaceChildren();
+					box.hidden = true;
+				} else {
+					box.replaceChildren(errorBox(error));
+					box.hidden = false;
+				}
+			}
+		});
+		refreshQueue = work;
+		return work;
+	}
+	return {
+		box,
+		refresh,
+		dispose() {
+			disposed = true;
+		}
+	};
+}
+//#endregion
+//#region src/instruction-receipts.js
+var oid$2 = (v) => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
+var phases = new Set([
+	"accepted",
+	"not_accepted",
+	"unconfirmed",
+	"operation_cancelled",
+	"operation_failed",
+	"pending"
+]);
+var instructionReceiptStrings = {
+	"en-US": {
+		instruction_receipts: "Sent instructions",
+		instruction_receipts_note: "These are central send receipts. “Was queued” records submission history; it does not show a current queue position. Interrupt affects the session.",
+		instruction_accepted: "Accepted by BAT",
+		instruction_not_accepted: "Not accepted",
+		instruction_unconfirmed: "Acceptance unconfirmed",
+		instruction_operation_cancelled: "Central operation cancelled",
+		instruction_operation_failed: "Central operation failed",
+		instruction_pending: "Send pending",
+		instruction_was_queued: "Was queued at submission",
+		instruction_requested_queue: "Queueing requested",
+		instruction_operation: "View original operation",
+		instruction_empty: "No central send receipts for this session.",
+		instruction_more: "Older instructions",
+		instruction_refresh: "Refresh receipts",
+		instruction_stale: "Receipts could not be refreshed. Previously loaded records remain visible.",
+		instruction_excerpt: "Preview only; open the operation for the full instruction."
+	},
+	"zh-TW": {
+		instruction_receipts: "已送出指示",
+		instruction_receipts_note: "這裡顯示中央送出紀錄。「曾排隊」是提交當時的紀錄，不代表目前排隊位置。中斷會作用於整個工作階段。",
+		instruction_accepted: "BAT 已接受",
+		instruction_not_accepted: "未被接受",
+		instruction_unconfirmed: "尚未確認接受",
+		instruction_operation_cancelled: "中央操作已取消",
+		instruction_operation_failed: "中央操作失敗",
+		instruction_pending: "等待送出結果",
+		instruction_was_queued: "提交時曾排隊",
+		instruction_requested_queue: "已要求排隊",
+		instruction_operation: "查看原操作",
+		instruction_empty: "這個工作階段尚無中央送出紀錄。",
+		instruction_more: "較早的指示",
+		instruction_refresh: "重新讀取紀錄",
+		instruction_stale: "無法更新紀錄，保留上次讀取的內容。",
+		instruction_excerpt: "這裡是內容預覽；完整指示請查看原操作。"
+	}
+};
+function instructionReceiptReader({ api, guard, host, sessionId }) {
+	let pages = 1, saved = null, pending = null;
+	async function load(older = false) {
+		guard();
+		if (pending) return pending;
+		const wanted = Math.min(5, pages + (older && saved?.next_cursor ? 1 : 0));
+		pending = (async () => {
+			const rows = new Map();
+			let cursor = null, readAt = null, loaded = 0;
+			do {
+				const query = new URLSearchParams({
+					limit: "30",
+					...cursor ? { cursor } : {}
+				});
+				const doc = await api("GET", `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sessionId)}/instructions?${query}`);
+				guard();
+				if (doc?.version !== 1 || doc.host !== host || doc.session_id !== sessionId || doc.live_queue_available !== false || doc.per_message_cancel !== false || !Array.isArray(doc.instructions) || doc.instructions.length > 30 || doc.next_cursor !== null && typeof doc.next_cursor !== "string") throw new Error("Invalid instruction receipts");
+				for (const row of doc.instructions) {
+					if (!oid$2(row?.operation_id) || row.host !== host || row.session_id !== sessionId || !phases.has(row.phase) || row.queue_position !== null || row.per_message_cancel !== false || typeof row.text_excerpt !== "string" || rows.has(row.operation_id)) throw new Error("Invalid instruction identity");
+					rows.set(row.operation_id, structuredClone(row));
+				}
+				loaded++;
+				cursor = doc.next_cursor;
+				readAt = doc.read_at;
+			} while (cursor && loaded < wanted);
+			guard();
+			pages = loaded;
+			saved = {
+				instructions: [...rows.values()],
+				next_cursor: cursor,
+				read_at: readAt,
+				can_load_more: Boolean(cursor) && pages < 5
+			};
+			return structuredClone(saved);
+		})();
+		try {
+			return await pending;
+		} finally {
+			pending = null;
+		}
+	}
+	return {
+		load,
+		snapshot: () => {
+			guard();
+			return structuredClone(saved);
+		}
+	};
+}
+function instructionReceiptPanel({ h, t, when, api, guard, host, sessionId, errorBox }) {
+	const reader = instructionReceiptReader({
+		api,
+		guard,
+		host,
+		sessionId
+	});
+	const list = h("div"), status = h("div", { role: "status" });
+	const more = h("button", {
+		type: "button",
+		class: "mini",
+		hidden: true,
+		onclick: () => refresh(true)
+	}, t("instruction_more"));
+	const reload = h("button", {
+		type: "button",
+		class: "mini",
+		onclick: () => refresh()
+	}, t("instruction_refresh"));
+	const box = h("details", {
+		class: "workspace-evidence",
+		"data-instruction-receipts": ""
+	}, h("summary", {}, t("instruction_receipts")), h("p", { class: "muted" }, t("instruction_receipts_note")), list, status, h("div", { class: "actions" }, reload, more));
+	const nodes = new Map();
+	let disposed = false, refreshQueue = Promise.resolve();
+	const alive = () => {
+		if (disposed) return false;
+		try {
+			guard();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	function refresh(older = false) {
+		const work = refreshQueue.catch(() => {}).then(() => refreshNow(older));
+		refreshQueue = work;
+		return work;
+	}
+	async function refreshNow(older = false) {
+		if (!alive()) return;
+		reload.disabled = more.disabled = true;
+		try {
+			const value = await reader.load(older);
+			if (!alive()) return;
+			const retained = new Set();
+			for (const row of value.instructions) {
+				let entry = nodes.get(row.operation_id);
+				const signature = JSON.stringify(row);
+				if (!entry) {
+					entry = {
+						node: h("article", {
+							class: "msg",
+							"data-instruction-operation": row.operation_id
+						}),
+						signature: null
+					};
+					nodes.set(row.operation_id, entry);
+				}
+				if (entry.signature !== signature) {
+					entry.node.replaceChildren(...[
+						h("p", { class: "muted" }, t("instruction_" + row.phase), " · ", when(row.created_at * 1e3)),
+						h("div", { class: "message-body" }, row.text_excerpt),
+						row.was_queued === true ? h("p", { class: "muted" }, t("instruction_was_queued")) : null,
+						row.queue_requested && row.was_queued === null ? h("p", { class: "muted" }, t("instruction_requested_queue")) : null,
+						row.text_truncated ? h("p", { class: "muted" }, t("instruction_excerpt")) : null,
+						h("a", { href: `#/op/${row.operation_id}` }, t("instruction_operation"))
+					].filter(Boolean));
+					entry.signature = signature;
+				}
+				retained.add(entry.node);
+			}
+			for (const node of [...list.childNodes]) if (!retained.has(node)) node.remove();
+			let position = list.firstChild;
+			for (const row of value.instructions) {
+				const node = nodes.get(row.operation_id).node;
+				if (node === position) position = position.nextSibling;
+				else list.insertBefore(node, position);
+			}
+			if (!value.instructions.length) list.replaceChildren(h("p", { class: "muted" }, t("instruction_empty")));
+			for (const [id, entry] of nodes) if (!retained.has(entry.node)) nodes.delete(id);
+			status.replaceChildren();
+			more.hidden = !value.can_load_more;
+		} catch (error) {
+			if (alive()) status.replaceChildren(h("p", { class: "muted" }, t("instruction_stale")), errorBox(error));
+		} finally {
+			if (alive()) reload.disabled = more.disabled = false;
+		}
+	}
+	return {
+		box,
+		refresh,
+		dispose() {
+			disposed = true;
+		}
+	};
+}
+//#endregion
+//#region src/create-record.js
+var equal$6 = (a, b) => a === b || a && b && typeof a === "object" && typeof b === "object" && Array.isArray(a) === Array.isArray(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((key) => Object.hasOwn(b, key) && equal$6(a[key], b[key]));
+var opId$3 = (value) => typeof value === "string" && /^op_[0-9a-f]{32}$/.test(value);
+var terminal$7 = (value) => [
+	"succeeded",
+	"failed",
+	"cancelled"
+].includes(value?.status);
+var admissionRefusals$3 = {
+	INVALID_PARAMS: 422,
+	INVALID_TARGET: 422,
+	NAME_TAKEN: 409,
+	PROJECT_NOT_FOUND: 404,
+	WORK_ITEM_NOT_FOUND: 404,
+	PROJECT_ARCHIVED: 409,
+	WORK_ITEM_ARCHIVED: 409,
+	WRONG_PROJECT: 409
+};
+function createRecordForm({ h, t, api, caps, guard, namespace, kind, projectId = null, onCreated, errorBox, opStatus }) {
+	const project = kind === "project", action = project ? "project.create" : "work_item.create";
+	const target = project ? {} : { project_id: projectId }, key = `batc.create.${namespace}.${kind}.${projectId || "root"}`;
+	const primary = project ? "name" : "title", fields = new Map(), choices = new Map();
+	const names = project ? [
+		"name",
+		"repository",
+		"description",
+		"task_project",
+		"parent_id",
+		"derived_from"
+	] : [
+		"title",
+		"goal",
+		"request",
+		"acceptance",
+		"steps",
+		"state",
+		"parent_id",
+		"derived_from"
+	];
+	let saved = {
+		version: 1,
+		values: {}
+	}, busy = false, allowed = false, operation = null, damaged = false;
+	try {
+		const raw = localStorage.getItem(key);
+		if (raw) {
+			const value = JSON.parse(raw);
+			if (value?.version !== 1 || !value.values || names.some((name) => value.values[name] !== void 0 && typeof value.values[name] !== "string")) throw Error();
+			saved = value;
+			if (saved.intent && (saved.intent.request?.action !== action || !equal$6(saved.intent.request.target, target) || typeof saved.intent.key !== "string" || !saved.intent.key || saved.intent.operation_id && !opId$3(saved.intent.operation_id))) throw Error();
+		}
+	} catch {
+		damaged = true;
+	}
+	const status = h("div", { role: "status" }), receipt = h("div"), scope = h("p", {
+		class: "muted",
+		hidden: project
+	});
+	const unsaved = h("span", {
+		class: "muted",
+		hidden: true
+	}, t("create_unsaved"));
+	const persist = () => {
+		guard();
+		localStorage.setItem(key, JSON.stringify(saved));
+	};
+	const capture = () => Object.fromEntries([...fields].map(([name, input]) => [name, input.value]));
+	const changed = () => {
+		if (busy || saved.intent || damaged) return;
+		saved.values = capture();
+		unsaved.hidden = false;
+		try {
+			persist();
+		} catch (error) {
+			status.replaceChildren(errorBox(error));
+		}
+	};
+	const field = (name, label, multiline = false, max = 2e4) => {
+		const input = h(multiline ? "textarea" : "input", {
+			maxlength: max,
+			required: name === primary,
+			"aria-label": t(label)
+		});
+		input.value = saved.values[name] || "";
+		fields.set(name, input);
+		input.addEventListener("input", changed);
+		return h("label", {}, t(label), input);
+	};
+	const select = (name, label, rows) => {
+		const input = h("select", { "aria-label": t(label) });
+		fields.set(name, input);
+		input.addEventListener("change", changed);
+		choices.set(name, input);
+		for (const [value, text] of rows) input.append(h("option", { value }, text));
+		const current = saved.values[name] || "";
+		if (current && ![...input.options].some((option) => option.value === current)) input.append(h("option", { value: current }, `${current} · ${t("create_source_missing")}`));
+		input.value = current;
+		return h("label", {}, t(label), input);
+	};
+	const compact = h("div", { class: "capture-fields" }, field(primary, project ? "new_project_name" : "new_item_title", false, project ? 80 : 120));
+	if (project) compact.append(select("repository", "project_repository_optional", [["", t("project_repository_later")], ...[...new Set((caps()?.features?.repository_sync || []).map((row) => row.repository))].sort().map((value) => [value, value])]));
+	const advanced = h("details", { "data-create-advanced": "" }, h("summary", {}, t("create_details")), h("div", { class: "capture-fields" }, ...project ? [field("description", "description", true), field("task_project", "task_project", false, 120)] : [
+		field("goal", "goal", true),
+		field("request", "request", true),
+		field("acceptance", "acceptance", true),
+		field("steps", "create_steps", true),
+		select("state", "state", [
+			["", t("wi_state_todo")],
+			["doing", t("wi_state_doing")],
+			["waiting", t("wi_state_waiting")]
+		])
+	], select("parent_id", "parent_id", [["", t("create_no_parent")]]), select("derived_from", "derived_from", [["", t("create_no_source")]])), h("p", { class: "muted" }, t(project ? "create_project_help" : "create_item_help")));
+	const params = () => {
+		const value = capture(), result = { [primary]: value[primary].trim() };
+		for (const name of names) {
+			if (name === primary || !value[name]) continue;
+			if (name === "repository") result.repositories = [value[name]];
+			else if (name === "steps") result.steps = value.steps.split(/\r?\n/).map((text) => text.trim()).filter(Boolean).map((text) => ({
+				text,
+				done: false
+			}));
+			else result[name] = value[name];
+		}
+		return result;
+	};
+	const permitted = () => caps()?.scopes?.includes("manage") && caps()?.actions?.find((row) => row.action === action)?.allowed !== false;
+	const accept = async (value) => {
+		guard();
+		const intent = saved.intent;
+		if (!opId$3(value?.operation_id) || value.action !== action || value.actor !== caps()?.actor || value.idempotency_key !== intent.key || !equal$6(value.target, target) || !equal$6(value.params, intent.request.params) || !equal$6(value.preconditions, intent.request.preconditions) || intent.operation_id && intent.operation_id !== value.operation_id) throw Error(t("create_invalid_receipt"));
+		saved.intent.operation_id = value.operation_id;
+		persist();
+		operation = value;
+		receipt.replaceChildren(opStatus(value), " ", h("a", { href: `#/op/${value.operation_id}` }, t("create_operation")));
+		if (value.status === "succeeded") {
+			saved = {
+				version: 1,
+				values: {}
+			};
+			persist();
+			for (const input of fields.values()) input.value = "";
+			unsaved.hidden = true;
+			advanced.open = false;
+			await onCreated(value);
+		}
+	};
+	const run = async () => {
+		if (busy || damaged || !allowed || !permitted()) return;
+		if (!saved.intent && !form.reportValidity()) return;
+		busy = true;
+		update();
+		status.replaceChildren();
+		let firstAttempt = false;
+		try {
+			guard();
+			if (!saved.intent) {
+				const next = {
+					version: 1,
+					values: capture(),
+					intent: {
+						key: crypto.randomUUID(),
+						request: {
+							action,
+							target,
+							params: params(),
+							preconditions: {}
+						}
+					}
+				};
+				localStorage.setItem(key, JSON.stringify(next));
+				saved = next;
+				firstAttempt = true;
+			}
+			const intent = saved.intent;
+			const result = intent.operation_id ? await api("GET", `/operations/${intent.operation_id}`) : await api("POST", "/operations?wait=3", intent.request, intent.key);
+			await accept(result.operation);
+		} catch (error) {
+			try {
+				guard();
+				if (firstAttempt && saved.intent && !saved.intent.operation_id && Object.hasOwn(admissionRefusals$3, error.code) && admissionRefusals$3[error.code] === error.status) {
+					saved.intent.initialAdmissionRefused = true;
+					persist();
+				}
+				status.replaceChildren(errorBox(error));
+			} catch {}
+		} finally {
+			busy = false;
+			try {
+				guard();
+				update();
+			} catch {}
+		}
+	};
+	const create = h("button", {
+		class: "primary",
+		type: "submit"
+	}, t(project ? "add_project" : "add_item"));
+	const review = h("button", {
+		class: "secondary",
+		type: "button",
+		hidden: true,
+		onclick: () => {
+			guard();
+			if (busy || !(terminal$7(operation) || saved.intent?.initialAdmissionRefused)) return;
+			try {
+				const next = {
+					version: 1,
+					values: saved.values
+				};
+				localStorage.setItem(key, JSON.stringify(next));
+				saved = next;
+				operation = null;
+				receipt.replaceChildren();
+				status.replaceChildren();
+				update();
+			} catch (error) {
+				status.replaceChildren(errorBox(error));
+			}
+		}
+	}, t("create_edit_request"));
+	const form = h("form", {
+		class: "panel",
+		"data-create-record": kind,
+		onsubmit: (event) => {
+			event.preventDefault();
+			run();
+		}
+	}, scope, compact, advanced, h("div", { class: "actions" }, create, review, unsaved), status, receipt);
+	function update() {
+		for (const input of fields.values()) input.disabled = !allowed || !permitted() || busy || !!saved.intent || damaged;
+		create.disabled = !allowed || !permitted() || busy || damaged || !!saved.intent?.initialAdmissionRefused || !!saved.intent && terminal$7(operation);
+		create.textContent = t(saved.intent ? "create_check_original" : project ? "add_project" : "add_item");
+		review.hidden = !(saved.intent?.initialAdmissionRefused || saved.intent && terminal$7(operation) && operation.status !== "succeeded");
+		review.disabled = busy || !allowed || !permitted();
+	}
+	if (damaged) status.replaceChildren(h("p", { class: "error" }, t("create_invalid_draft")));
+	update();
+	return {
+		box: form,
+		setContext({ rows, name = "", active = true }) {
+			guard();
+			allowed = active;
+			scope.textContent = t("create_project_scope", {
+				name,
+				id: projectId
+			});
+			const flattened = [];
+			const walk = (list) => {
+				for (const row of list || []) {
+					if (!row.archived) flattened.push(row);
+					walk(row.children);
+				}
+			};
+			walk(rows);
+			for (const field of ["parent_id", "derived_from"]) {
+				const input = choices.get(field), current = input.value, id = project ? "project_id" : "work_item_id";
+				const options = flattened.map((row) => [row[id], row.name || row.title]);
+				input.replaceChildren(h("option", { value: "" }, t(field === "parent_id" ? "create_no_parent" : "create_no_source")), ...options.map(([value, text]) => h("option", { value }, text)));
+				if (current && !options.some(([value]) => value === current)) input.append(h("option", { value: current }, `${current} · ${t("create_source_missing")}`));
+				input.value = current;
+			}
+			update();
 		}
 	};
 }
@@ -1155,6 +3992,105 @@ function conversationPanel({ h, t, when, guard }) {
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		managed_recovery_title: "本機背景服務尚未就緒",
+		managed_recovery_help: "既有資料與背景工作會保留。若舊版本仍有工作，先讓它完成，再結束並重新開啟桌面程式。下方提供此次啟動錯誤；加入另一個中央仍可從進階選項設定。",
+		...instructionReceiptStrings["zh-TW"],
+		repair_title: "建立修復工作",
+		repair_help: "選擇歸屬專案，讀取這次失敗的固定證據，再建立或查回修復工作。派工前仍會讓你核對目的地與版本。",
+		repair_project: "修復工作的專案",
+		repair_choose_project: "選取專案",
+		repair_read: "讀取修復證據",
+		repair_create: "建立或查回修復工作",
+		repair_recover: "查回原修復請求",
+		repair_review_new: "檢視下一筆證據",
+		repair_fixed_evidence: "本次證據摘要",
+		repair_evidence_details: "查看證據內容",
+		repair_open_work: "開啟修復工作",
+		repair_open_dispatch: "查看原派工",
+		repair_review_dispatch: "核對並派工",
+		repair_unavailable: "目前無法派出這筆修復工作。請重新查回證據。",
+		repair_dispatched: "這筆修復工作已有派工紀錄，可從原操作查回結果。",
+		repair_dispatch_help: "修復指示取自這筆工作的固定證據。選取儲存庫與分支、核對版本後，再開始新的管理工作。",
+		setup_title: "準備開始工作",
+		setup_unsaved: "有未儲存設定",
+		setup_resume_help: "可稍後繼續。非機密草稿會保留；帳號授權與主機信任仍須由你確認。",
+		setup_host_title: "1. 連線至 BAT",
+		setup_host_help: "選取已有的 BAT profile，或填入要連線的主機。先確認主機，再選擇可執行的工作。",
+		setup_profile: "BAT 連線 profile",
+		setup_manual_profile: "手動設定主機",
+		setup_host_name: "主機名稱",
+		setup_host_url: "BAT 連線位址",
+		setup_fingerprint: "主機憑證 SHA-256 指紋",
+		setup_workspace_profile: "Workspace profile ID",
+		setup_bat_token: "BAT 連線 token（使用 profile 時可留白）",
+		setup_trust_help: "請與主機擁有者核對指紋。儲存前會驗證連線；不會跳過主機信任。",
+		setup_managed_work: "允許管理工作",
+		setup_allow_messages: "允許操作 Connector 管理的對話",
+		setup_allow_start: "允許在獨立管理工作區開工",
+		setup_managed_roots: "遠端管理目錄（多個目錄用分號分隔）",
+		setup_ssh_alias: "此電腦已設定的 SSH alias",
+		setup_shared_clone: "允許共享 clone 的 Git worktree",
+		setup_shared_clone_help: "新 worktree 會與來源 clone 共用 Git metadata。只有明確開啟才允許；人工 session 和工作目錄仍保持唯讀。",
+		setup_verification_title: "3. 設定驗證命令",
+		setup_verification_help: "依 Task Service 的專案名稱設定明確命令。儲存只變更設定，不執行命令；其他專案的命令會保留。逾時秒數套用到所有專案。",
+		setup_verification_project: "Task Service 專案名稱",
+		setup_verification_executable: "執行程式",
+		setup_verification_arguments: "參數（每行一個）",
+		setup_verification_timeout: "逾時秒數（1–3600）",
+		setup_verification_arguments_help: "每個非空白行是一個完整參數，行內空格會保留。不解析 shell 引號、管線或展開；請勿填入憑證。",
+		setup_save_verification: "儲存驗證命令",
+		setup_verification_reload: "重新載入已存驗證設定",
+		setup_verification_edit: "編輯 {project} 的命令",
+		setup_verification_changed: "中央設定已變動；目前草稿保留。重新載入已存驗證設定後，再檢視並儲存。",
+		setup_verification_invalid: "請輸入有效專案、執行程式、最多 63 個非空參數，以及 1–3600 秒逾時。",
+		setup_scope_required: "目前中央身分未獲准修改此設定。",
+		setup_roots_help: "指定專供新管理工作使用的遠端目錄；人工專案保持唯讀。Git 同步與成果操作使用你選擇的 SSH 連線。",
+		setup_save_host: "驗證並儲存主機",
+		setup_repository_title: "2. 連結 GitHub 儲存庫",
+		setup_repository_help: "將儲存庫明確連結到選定主機與 workspace。驗證只讀取資料，不會建立 PR 或推送。",
+		setup_repository: "GitHub 儲存庫",
+		setup_workspace_id: "BAT workspace ID",
+		setup_remote_url: "Git remote 位址",
+		setup_github_token: "GitHub token（已有有效授權時可留白）",
+		setup_allow_integrate: "允許整合成果到 PR",
+		setup_allow_merge: "允許合併 PR",
+		setup_allow_pr_update: "允許更新 PR 資料",
+		setup_find_workspaces: "讀取這台主機的 workspace",
+		setup_save_repository: "驗證並連結儲存庫",
+		setup_refresh: "重新檢查設定",
+		setup_recover: "查回原設定請求",
+		setup_next_change: "檢視下一筆設定",
+		setup_open_projects: "開啟專案，開始派工",
+		setup_operation: "查看設定操作",
+		setup_uncertain: "原設定請求尚未確認。查回同一筆請求後再繼續。",
+		setup_receipt_mismatch: "回執與原設定請求不一致。",
+		setup_counts: "已設定 {hosts} 台主機、{repositories} 個儲存庫",
+		setup_connected: "已連線",
+		setup_unverified: "等待連線驗證",
+		setup_busy: "目前仍有工作或操作；設定會等安全時機再變更。",
+		setup_profiles_unavailable: "尚無可匯入的 BAT profile，或其授權受系統保護。可在下方手動設定。",
+		managed_join_existing: "進階：加入既有中央",
+		managed_join_help: "輸入另一個中央的位址與預期帳號，再於原生視窗確認。設定後須另行加入該中央的憑證；此電腦原有的背景工作會繼續運作。",
+		managed_background_help: "Connector 在背景持續運作。關閉這個畫面不會停止工作。",
+		managed_open_browser: "在瀏覽器開啟 Dashboard",
+		managed_start_login: "登入電腦時啟動",
+		managed_browser_connected: "已連線至本機 Connector",
+		managed_browser_help: "此瀏覽器沿用桌面的個人身分。登出後，可從桌面選單重新開啟 Dashboard。",
+		delivery_list_prs: "瀏覽 Pull Requests",
+		delivery_no_prs: "找不到 PR。",
+		delivery_refresh_prs: "重新整理",
+		delivery_search_prs: "搜尋這一頁的 PR",
+		delivery_choose_repository: "請先選取或填入已連結的儲存庫。",
+		delivery_pr_page: "第 {page} 頁",
+		delivery_pr_stale: "清單尚未重新驗證；更新成功後才能選取。",
+		delivery_pr_invalid: "PR 清單回應與選取的儲存庫不一致。",
+		pagination_prev: "上一頁",
+		pagination_next: "下一頁",
+		pr_draft: "草稿",
+		pr_state_open: "開啟",
+		pr_state_closed: "關閉",
+		pr_state_all: "全部",
+		state: "狀態",
 		workspace_navigation: "專案與工作",
 		workspace_search: "搜尋已載入的專案與工作",
 		workspace_manage: "新增／管理專案",
@@ -1173,6 +4109,13 @@ var STRINGS = {
 		workspace_result_empty: "尚無明確關聯的成果。可從下方保留 checkpoint。",
 		workspace_work_missing: "目前專案資料中找不到這筆工作，請重新整理工作樹。",
 		workspace_refresh: "重新讀取工作樹",
+		workspace_resizer: "調整側欄寬度",
+		workspace_resizer_help: "使用左右方向鍵或拖曳調整側欄寬度",
+		mobile_info_expand: "展開資訊",
+		mobile_info_collapse: "收合資訊",
+		mobile_compose_open: "撰寫訊息",
+		mobile_compose_close: "收合輸入區",
+		mobile_draft_indicator: "有草稿",
 		connection_details: "連線詳細資訊與設定檔",
 		delivery_repository_input: "儲存庫或 GitHub PR 網址",
 		needs_manage_access: "目前帳號可以查看，但沒有編輯專案的權限。請向管理員取得具有專案管理權限的帳號，再到「連線」更換憑證。",
@@ -1740,6 +4683,9 @@ var STRINGS = {
 		attachment_input: "輸入",
 		attachment_result: "成果",
 		attachments_not_ready: "請先完成附件上傳或移除未完成的檔案。",
+		attachment_unsupported_image: "僅支援 PNG、JPEG 與 WebP 圖片格式。",
+		dispatch_inspect_images: "請檢視所附檔案",
+		dispatch_attachment_prompt: "未填指示時，會以「{request}」開始工作。",
 		source_unavailable: "無法讀取來源 HEAD，保留草稿；恢復連線後再試。",
 		confirm_source: "確認保留原版本與附件，繼續同一派工",
 		materializations: "附件傳輸",
@@ -2055,6 +5001,23 @@ var STRINGS = {
 		close: "關閉",
 		nav_projects: "專案",
 		projects_help: "專案與工作項目是 Connector 自己的紀錄：目標、需求原文、驗收、步驟，以及做這件事的 sessions、版本、操作與 PR。改名不會改 ID；排序與固定只影響顯示。",
+		create_details: "詳細資料與關係",
+		create_no_parent: "最上層",
+		create_no_source: "沒有來源",
+		create_source_missing: "目前清單中未找到",
+		create_steps: "步驟（每行一項）",
+		create_unsaved: "草稿已變更",
+		create_project_scope: "建立於專案：{name} · {id}",
+		create_operation: "查看建立操作",
+		create_check_original: "查核原建立請求",
+		create_edit_request: "編輯新的建立請求",
+		create_invalid_receipt: "回執與原建立請求不符；原請求仍保留。",
+		create_invalid_draft: "無法讀取已存的建立請求。請先從操作紀錄確認結果，避免重複建立。",
+		create_project_help: "上層決定樹狀位置，來源保留衍生關係。Task Service 名稱只建立關聯；建立專案不會啟動 Agent。",
+		create_item_help: "工作保留需求原文與驗收條件。步驟初始皆未完成；建立工作不會派工或修改 BAT 工作區。",
+		managed_locations: "資料與工作位置",
+		managed_locations_central: "中央服務將身分、操作紀錄與成果保存在安裝電腦的應用程式資料中。Dashboard 的草稿與閱讀版面設定則保存在目前瀏覽器或桌面用戶端。",
+		managed_locations_work: "程式碼與 Agent 執行位於你選定的 BAT 主機和工作區。設定中央服務不會搬移這些工作目錄；跨主機程式碼同步使用已綁定的 GitHub 儲存庫與已發布版本。",
 		new_project_name: "新專案名稱",
 		add_project: "新增",
 		show_archived: "顯示已封存",
@@ -2179,6 +5142,105 @@ var STRINGS = {
 		attention_empty: "這一類目前沒有項目。",
 		attention_not_updated: "本次未能更新；若下方有資料，仍是上次讀取的內容。",
 		attention_invalid: "清單回應不完整，請重新讀取。",
+		conversation_mark: "標記畫面中的訊息已讀",
+		conversation_remember: "記住閱讀位置",
+		conversation_older: "更早的訊息",
+		conversation_unread: "上次觀察：{count} 則未讀",
+		conversation_partial: "部分紀錄：{count} 則未讀",
+		conversation_unknown: "尚未讀取對話紀錄",
+		conversation_count_note: "中央記錄已觀察訊息的版本；新內容須重新讀取才會計入，部分紀錄不代表完整總數。捲動與事件同步不會標記已讀。",
+		conversation_badge: "{count} 未讀",
+		composer_shortcut: "送出快捷鍵",
+		composer_shortcut_modified: "Ctrl／⌘ + Enter",
+		composer_shortcut_enter: "Enter",
+		composer_shortcut_button: "只用按鈕",
+		composer_newline: "Shift + Enter 換行；選字時不送出。",
+		tree_drag: "拖曳排序：{name}",
+		tree_drag_help: "只在同層移動；也可使用上移／下移按鈕。",
+		message_tool_details: "工具輸入與結果",
+		message_tool_status: "狀態：{status}",
+		message_agent: "訊息 Agent：{agent}",
+		message_model: "訊息模型：{model}",
+		message_duration: "訊息耗時：{ms} ms",
+		results_waiting: "等待回覆或權限",
+		results_title: "自己與子工作的成果來源",
+		results_refresh: "更新成果來源",
+		results_more: "載入更多子工作",
+		results_completion: "工作完成狀態：{state}",
+		results_empty: "尚無明確連結的成果來源。",
+		results_activity: "最近觀察：{state} · {time}",
+		results_streaming: "正在回覆",
+		results_pending: "{count} 項待處理",
+		results_no_activity: "未觀察到活動；不代表已完成",
+		results_delivered: "有交付紀錄",
+		results_receipt: "檢視交付收據",
+		results_partial: "此摘要有截斷；請開啟原始工作或成果檢查完整來源。",
+		results_unavailable: "成果目前不可讀：{reason}",
+		results_provenance: "檢視固定版本與來源",
+		results_source_operation: "開啟來源操作",
+		results_consumers: "中央已記錄 {count} 筆引用；目前是否仍在執行消費尚不確定。",
+		results_open_child: "開啟子工作與對話",
+		results_parent: "返回父工作與成果",
+		results_unfinished: "目前載入的 {count} 個子工作尚未被驗收；繼續父工作前請先核對。這不表示它們目前正在執行。",
+		results_children_partial: "仍有尚未載入的子工作；目前摘要不能代表全部子工作的狀態。",
+		results_independent: "子工作成果、交付紀錄和父工作完成狀態分別判定；此檢視不會自動整合或標記完成。",
+		results_invalid: "中央成果來源回應無效。",
+		skills_title: "專案 Skill 來源與選取",
+		skills_not_applied: "已選取的 Skill 只固定來源版本；尚未套用到 Agent，也未放入 prompt。",
+		skills_refresh: "重新掃描 Skill 來源",
+		skills_reload: "重新載入已存選取",
+		skills_save: "保存 Skill 選取",
+		skills_saved: "Skill 選取已保存；尚未套用。",
+		skills_unsaved: "有尚未儲存的 Skill 選取。",
+		skills_conflict: "來源或中央選取已變動；保留目前草稿，請重新載入已存選取後再修改。",
+		skills_unresolved: "原選取已遺失或內容改變；保留固定版本",
+		skills_version: "檢視固定內容版本",
+		skills_compatibility: "目前可掃描 Claude Skill；Agent 相容性由來源回報，保存不等於執行套用。最多選取 20 項。",
+		skills_catalog_state: "來源未完整驗證：{state}",
+		skills_other_binding: "已存選取來自 {host} / {workspace}。保存目前選取會明確取代該來源。",
+		skills_invalid: "中央 Skill 回應無效。",
+		skills_workspace_missing: "目前探索中未找到",
+		models_current: "所選模型：{model}",
+		models_title: "模型偏好與主機額度",
+		models_host: "設定的 BAT 主機",
+		models_catalog_agent: "檢視模型目錄",
+		models_personal: "這是中央身分 {actor} 的個人選項。儲存不會更換既有工作的模型。",
+		models_use_initial: "使用初始偏好",
+		models_use_last: "使用上次選擇",
+		models_remember_last: "記為上次選擇",
+		models_initial_agent: "初始 Agent",
+		models_initial_model: "初始模型 ID",
+		models_last_agent: "上次選擇的 Agent",
+		models_last_model: "上次選擇的模型 ID",
+		models_no_preference: "由主機決定",
+		models_unsaved: "有尚未儲存的偏好。",
+		models_saved: "個人模型偏好已保存。",
+		models_pending: "偏好操作尚未完成；用同一按鈕查回或重試。",
+		models_conflict: "中央偏好已有新版本；目前草稿保留，重新載入已存偏好後再修改。",
+		models_refresh: "重新取得目錄與額度",
+		models_reload_saved: "重新載入已存偏好",
+		models_reset_display: "重設顯示順序與隱藏項目",
+		models_display: "模型顯示",
+		models_display_help: "只調整候選清單的順序和可見性；當前輸入與失效的已存模型會保留。",
+		models_move_up: "上移模型 {model}",
+		models_move_down: "下移模型 {model}",
+		models_unknown_current: "{model} 不在目前可驗證目錄內；已保留此值，沒有代換其他模型。",
+		models_catalog_unavailable: "模型目錄尚不可用：{reason}",
+		models_catalog_ready: "{host} 提供 {count} 個可見模型候選。",
+		models_catalog_stale: "{host} 的模型目錄已過期，請重新取得。",
+		models_invalid: "中央模型偏好回應無效。",
+		models_not_refreshed: "這次未能更新；保留上次觀察。",
+		models_usage: "主機回報的訂閱額度",
+		models_usage_unavailable: "尚無可驗證的訂閱額度：{reason}",
+		models_usage_stale: "這是過期的額度紀錄：{reason}",
+		models_host_account: "主機回報的 provider 帳號：{account}",
+		models_source: "來源：{source} · 觀察時間：{time}",
+		models_five_hour: "5 小時用量",
+		models_seven_day: "7 天用量",
+		models_resets: "重設時間：{time}",
+		conversation_saved: "閱讀狀態已保存。",
+		conversation_restored: "已回到同一身分保存的閱讀位置。",
+		conversation_pending: "閱讀操作尚未完成，請稍後查回或用同一按鈕重試。",
 		reading_unread: "未讀更新",
 		reading_read: "此版本已讀",
 		reading_mark: "標記此版本已讀",
@@ -2379,6 +5441,90 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		managed_recovery_title: "Local background service is not ready",
+		managed_recovery_help: "Existing data and background work are retained. If an older version still has work, let it finish, then quit and reopen the desktop app. The startup error appears below; joining another central remains an advanced option.",
+		...instructionReceiptStrings["en-US"],
+		repair_title: "Create repair work",
+		repair_help: "Choose a project and read fixed evidence from this failure. Create or recover repair work, then review its destination and version before starting it.",
+		repair_project: "Repair project",
+		repair_choose_project: "Choose a project",
+		repair_read: "Read repair evidence",
+		repair_create: "Create or recover repair work",
+		repair_recover: "Recover original repair request",
+		repair_review_new: "Review new evidence",
+		repair_fixed_evidence: "Fixed evidence digest",
+		repair_evidence_details: "View evidence",
+		repair_open_work: "Open repair work",
+		repair_open_dispatch: "View original dispatch",
+		repair_review_dispatch: "Review and dispatch",
+		repair_unavailable: "This repair cannot be dispatched yet. Read its current evidence again.",
+		repair_dispatched: "This repair already has a dispatch record. Check the original operation for its result.",
+		repair_dispatch_help: "Repair instructions come from this work item's fixed evidence. Select a repository and branch, review the version, then start new managed work.",
+		setup_title: "Get ready to work",
+		setup_unsaved: "Unsaved settings",
+		setup_resume_help: "Continue later without losing non-secret drafts. You still confirm account authorization and host trust.",
+		setup_host_title: "1. Connect BAT",
+		setup_host_help: "Choose an existing BAT profile or enter a host. Verify the host, then choose which work it may run.",
+		setup_profile: "BAT connection profile",
+		setup_manual_profile: "Configure a host manually",
+		setup_host_name: "Host name",
+		setup_host_url: "BAT endpoint",
+		setup_fingerprint: "Host certificate SHA-256 fingerprint",
+		setup_workspace_profile: "Workspace profile ID",
+		setup_bat_token: "BAT connection token (optional with a profile)",
+		setup_trust_help: "Confirm the fingerprint with the host owner. The connection is verified before saving; host trust is never bypassed.",
+		setup_managed_work: "Allow managed work",
+		setup_allow_messages: "Allow control of Connector-managed conversations",
+		setup_allow_start: "Allow starts in separate managed workspaces",
+		setup_managed_roots: "Remote managed directories (separate with semicolons)",
+		setup_ssh_alias: "SSH alias configured on this computer",
+		setup_shared_clone: "Allow Git worktrees sharing a clone",
+		setup_shared_clone_help: "New worktrees share Git metadata with the source clone. This requires an explicit choice; manual sessions and working directories remain read-only.",
+		setup_verification_title: "3. Configure verification commands",
+		setup_verification_help: "Configure an explicit command by Task Service project name. Saving changes configuration only; it never runs the command. Other project commands are preserved. The timeout applies to every project.",
+		setup_verification_project: "Task Service project name",
+		setup_verification_executable: "Executable",
+		setup_verification_arguments: "Arguments (one per line)",
+		setup_verification_timeout: "Timeout in seconds (1–3600)",
+		setup_verification_arguments_help: "Each nonempty line is one exact argument; spaces within a line are preserved. Shell quotes, pipes and expansion are not interpreted. Do not enter credentials.",
+		setup_save_verification: "Save verification command",
+		setup_verification_reload: "Reload saved verification settings",
+		setup_verification_edit: "Edit command for {project}",
+		setup_verification_changed: "Central configuration changed; your draft is preserved. Reload saved verification settings, review, and save again.",
+		setup_verification_invalid: "Enter a valid project, executable, at most 63 nonempty arguments and a 1–3600 second timeout.",
+		setup_scope_required: "Your central identity is not permitted to change this setting.",
+		setup_roots_help: "Choose remote directories dedicated to new managed work; human projects remain read-only. Git synchronization and artifact actions use your selected SSH connection.",
+		setup_save_host: "Verify and save host",
+		setup_repository_title: "2. Bind a GitHub repository",
+		setup_repository_help: "Bind the repository to an exact host and workspace. Verification only reads data; it creates no PR and pushes nothing.",
+		setup_repository: "GitHub repository",
+		setup_workspace_id: "BAT workspace ID",
+		setup_remote_url: "Git remote URL",
+		setup_github_token: "GitHub token (optional when already authorized)",
+		setup_allow_integrate: "Allow result integration into PRs",
+		setup_allow_merge: "Allow PR merges",
+		setup_allow_pr_update: "Allow PR metadata updates",
+		setup_find_workspaces: "Read this host's workspaces",
+		setup_save_repository: "Verify and bind repository",
+		setup_refresh: "Recheck configuration",
+		setup_recover: "Recover original setup request",
+		setup_next_change: "Review another configuration change",
+		setup_open_projects: "Open projects and start work",
+		setup_operation: "View setup operation",
+		setup_uncertain: "The original configuration request is unconfirmed. Recover that same request before continuing.",
+		setup_receipt_mismatch: "The receipt does not match the original configuration request.",
+		setup_counts: "Configured: {hosts} hosts, {repositories} repositories",
+		setup_connected: "Connected",
+		setup_unverified: "Awaiting connection verification",
+		setup_busy: "Work or operations are still active; configuration changes wait for a safe point.",
+		setup_profiles_unavailable: "No BAT profile can be imported, or its authorization is protected by the operating system. Configure the connection below.",
+		managed_join_existing: "Advanced: join an existing central",
+		managed_join_help: "Enter another central address and expected account, then confirm in the native window. Enroll its credential separately afterward. Existing background work on this computer keeps running.",
+		managed_background_help: "Connector keeps running in the background. Closing this view does not stop work.",
+		managed_open_browser: "Open Dashboard in browser",
+		managed_start_login: "Start when I sign in",
+		managed_browser_connected: "Connected to your local Connector",
+		managed_browser_help: "This browser uses your desktop identity. After signing out, reopen Dashboard from the desktop menu.",
 		workspace_navigation: "Projects and work",
 		workspace_search: "Search loaded projects and work",
 		workspace_manage: "Add / manage projects",
@@ -2397,6 +5543,29 @@ var STRINGS = {
 		workspace_result_empty: "No linked result yet. You can record a checkpoint below.",
 		workspace_work_missing: "This work is no longer in the current project response. Refresh the work tree.",
 		workspace_refresh: "Refresh work tree",
+		workspace_resizer: "Resize sidebar",
+		workspace_resizer_help: "Use left and right arrow keys or drag to resize sidebar",
+		mobile_info_expand: "Expand info",
+		mobile_info_collapse: "Collapse info",
+		mobile_compose_open: "Write message",
+		mobile_compose_close: "Collapse composer",
+		mobile_draft_indicator: "Draft",
+		delivery_list_prs: "List Pull Requests",
+		delivery_no_prs: "No PRs found.",
+		delivery_refresh_prs: "Refresh",
+		delivery_choose_pr: "Choose a repository to load PRs.",
+		delivery_search_prs: "Search this page of PRs",
+		delivery_choose_repository: "Choose or enter a configured repository first.",
+		delivery_pr_page: "Page {page}",
+		delivery_pr_stale: "This list has not been revalidated. Refresh before selecting.",
+		delivery_pr_invalid: "The PR list does not match the selected repository.",
+		pagination_prev: "Previous",
+		pagination_next: "Next",
+		pr_draft: "draft",
+		pr_state_open: "Open",
+		pr_state_closed: "Closed",
+		pr_state_all: "All",
+		state: "State",
 		connection_details: "Connection details and configuration file",
 		delivery_repository_input: "Repository or GitHub PR URL",
 		needs_manage_access: "This account can view projects but cannot edit them. Ask your administrator for project management access, then replace your credential under Connection.",
@@ -2964,6 +6133,9 @@ var STRINGS = {
 		attachment_input: "Input",
 		attachment_result: "Result",
 		attachments_not_ready: "Finish uploading or remove the unfinished files first.",
+		attachment_unsupported_image: "Only PNG, JPEG, and WebP images are supported.",
+		dispatch_inspect_images: "Review attached files",
+		dispatch_attachment_prompt: "Without written instructions, work starts with: “{request}”.",
 		source_unavailable: "Source HEAD is unavailable. Your draft is kept; retry after reconnecting.",
 		confirm_source: "Keep the original commit and attachments; resume this run",
 		materializations: "Attachment transfer",
@@ -3279,6 +6451,23 @@ var STRINGS = {
 		close: "Close",
 		nav_projects: "Projects",
 		projects_help: "Projects and work items are the connector's own records: goals, the request verbatim, acceptance, steps, and the sessions, checkpoints, operations and PRs that carried them. A rename never changes an ID; order and pins only change the display.",
+		create_details: "Details and relationships",
+		create_no_parent: "Top level",
+		create_no_source: "No source",
+		create_source_missing: "not found in current list",
+		create_steps: "Steps (one per line)",
+		create_unsaved: "Draft changed",
+		create_project_scope: "Create in project: {name} · {id}",
+		create_operation: "View creation operation",
+		create_check_original: "Check original creation request",
+		create_edit_request: "Edit a new creation request",
+		create_invalid_receipt: "The receipt does not match the original creation request; that request is retained.",
+		create_invalid_draft: "The saved creation request could not be read. Check operation history before creating a duplicate.",
+		create_project_help: "Parent sets the tree position; source keeps the derivation link. The Task Service name records a relationship. Creating a project does not start an agent.",
+		create_item_help: "Keep the original request and acceptance criteria with this work. New steps are unchecked; creating a work item does not dispatch work or change a BAT workspace.",
+		managed_locations: "Data and work locations",
+		managed_locations_central: "Central stores your identity, operation history and artifacts in application data on the installation computer. Dashboard drafts and reading layout choices stay in the current browser or desktop client.",
+		managed_locations_work: "Code and agent execution stay on the selected BAT host and workspace. Configuring central does not relocate those directories; code synchronization between hosts uses the bound GitHub repository and published commits.",
 		new_project_name: "New project name",
 		add_project: "Add",
 		show_archived: "Show archived",
@@ -3403,6 +6592,105 @@ var STRINGS = {
 		attention_empty: "No items in this category.",
 		attention_not_updated: "Could not refresh. Any items below are from the previous read.",
 		attention_invalid: "Incomplete list response; reload to try again.",
+		conversation_mark: "Mark visible messages read",
+		conversation_remember: "Remember reading position",
+		conversation_older: "Earlier messages",
+		conversation_unread: "Last observed: {count} unread",
+		conversation_partial: "Partial history: {count} unread",
+		conversation_unknown: "Conversation has not been observed",
+		conversation_count_note: "Central tracks observed message revisions. New content is counted after refreshing; partial history is not a complete total. Scrolling and event sync never mark messages read.",
+		conversation_badge: "{count} unread",
+		composer_shortcut: "Send shortcut",
+		composer_shortcut_modified: "Ctrl / ⌘ + Enter",
+		composer_shortcut_enter: "Enter",
+		composer_shortcut_button: "Button only",
+		composer_newline: "Shift + Enter adds a line; composition never sends.",
+		tree_drag: "Drag to reorder: {name}",
+		tree_drag_help: "Move within these siblings, or use the Move up / Move down buttons.",
+		message_tool_details: "Tool input and result",
+		message_tool_status: "Status: {status}",
+		message_agent: "Message agent: {agent}",
+		message_model: "Message model: {model}",
+		message_duration: "Message duration: {ms} ms",
+		results_waiting: "waiting for an answer or permission",
+		results_title: "Own and child result sources",
+		results_refresh: "Refresh result sources",
+		results_more: "Load more child work",
+		results_completion: "Work completion: {state}",
+		results_empty: "No explicitly linked result sources yet.",
+		results_activity: "Last observation: {state} · {time}",
+		results_streaming: "responding",
+		results_pending: "{count} pending",
+		results_no_activity: "no activity observed; completion is not established",
+		results_delivered: "Delivery recorded",
+		results_receipt: "Inspect delivery receipt",
+		results_partial: "This summary is truncated. Open the original work or artifact to inspect its source.",
+		results_unavailable: "Result currently unavailable: {reason}",
+		results_provenance: "Inspect fixed version and source",
+		results_source_operation: "Open source operation",
+		results_consumers: "Central records {count} references; live consumption remains unknown.",
+		results_open_child: "Open child work and conversation",
+		results_parent: "Return to parent work and results",
+		results_unfinished: "{count} loaded child work items have not been accepted. Check them before continuing the parent; this does not establish that they are running.",
+		results_children_partial: "More child work is not loaded. This summary does not establish the state of every child.",
+		results_independent: "Child results, delivery receipts and parent completion are separate. This view does not integrate results or mark work complete.",
+		results_invalid: "Invalid central result-source response.",
+		skills_title: "Project skill sources and selection",
+		skills_not_applied: "Selected skills pin source versions only. They are not applied to an agent or inserted into a prompt.",
+		skills_refresh: "Rescan skill sources",
+		skills_reload: "Reload saved selection",
+		skills_save: "Save skill selection",
+		skills_saved: "Skill selection saved; not applied.",
+		skills_unsaved: "Unsaved skill selection.",
+		skills_conflict: "The source or central selection changed. Your draft is preserved; reload saved selection before editing again.",
+		skills_unresolved: "Previously selected source is missing or changed; fixed version retained",
+		skills_version: "Inspect fixed source version",
+		skills_compatibility: "Claude skill sources are supported. Source-reported compatibility does not establish runtime application. Select at most 20 skills.",
+		skills_catalog_state: "Source verification is incomplete: {state}",
+		skills_other_binding: "Saved selection belongs to {host} / {workspace}. Saving this selection explicitly replaces that source.",
+		skills_invalid: "Invalid central skill response.",
+		skills_workspace_missing: "not found in current discovery",
+		models_current: "Selected model: {model}",
+		models_title: "Model preferences and host usage",
+		models_host: "Configured BAT host",
+		models_catalog_agent: "Model catalog agent",
+		models_personal: "Personal choices for central identity {actor}. Saving does not change a running session's model.",
+		models_use_initial: "Use initial preference",
+		models_use_last: "Use last choice",
+		models_remember_last: "Remember as last choice",
+		models_initial_agent: "Initial agent",
+		models_initial_model: "Initial model ID",
+		models_last_agent: "Last chosen agent",
+		models_last_model: "Last chosen model ID",
+		models_no_preference: "Host default",
+		models_unsaved: "Unsaved model preferences.",
+		models_saved: "Personal model preferences saved.",
+		models_pending: "The preference operation is pending; use the same button to check or retry.",
+		models_conflict: "Central has newer preferences. Your draft is preserved; reload saved preferences before editing again.",
+		models_refresh: "Refresh catalog and usage",
+		models_reload_saved: "Reload saved preferences",
+		models_reset_display: "Reset display order and hidden models",
+		models_display: "Model display",
+		models_display_help: "Controls candidate order and visibility. Current input and unavailable saved models remain intact.",
+		models_move_up: "Move model {model} up",
+		models_move_down: "Move model {model} down",
+		models_unknown_current: "{model} is outside the currently verified catalog. Its value is preserved without substitution.",
+		models_catalog_unavailable: "Model catalog unavailable: {reason}",
+		models_catalog_ready: "{host} provides {count} visible model candidates.",
+		models_catalog_stale: "The model catalog for {host} is stale; refresh it.",
+		models_invalid: "Invalid central model preference response.",
+		models_not_refreshed: "Not refreshed; retaining the last observation.",
+		models_usage: "Host-reported subscription usage",
+		models_usage_unavailable: "No verified subscription usage: {reason}",
+		models_usage_stale: "This usage snapshot is stale: {reason}",
+		models_host_account: "Host-reported provider account: {account}",
+		models_source: "Source: {source} · Observed: {time}",
+		models_five_hour: "5-hour usage",
+		models_seven_day: "7-day usage",
+		models_resets: "Resets: {time}",
+		conversation_saved: "Reading state saved.",
+		conversation_restored: "Restored the reading position saved by this identity.",
+		conversation_pending: "The reading operation is still pending. Check again or retry the same button.",
 		reading_unread: "Unread update",
 		reading_read: "This version is read",
 		reading_mark: "Mark this version read",
@@ -6264,7 +9552,7 @@ function validRequest$2(r) {
 		"prompt"
 	].every((k) => !(k in r.params) || text$2(r.params[k], k === "prompt" ? 2e4 : 256)) && object$2(r.preconditions) && Object.keys(r.preconditions).length === 0;
 }
-function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, storageKey }) {
+function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, storageKey, submitPreference }) {
 	let raw;
 	try {
 		raw = JSON.parse(localStorage.getItem(storageKey));
@@ -6332,6 +9620,18 @@ function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, 
 		title,
 		prompt
 	};
+	const models = modelChoice({
+		h,
+		t,
+		api,
+		caps,
+		guard,
+		host: () => saved.host,
+		agent,
+		model,
+		submit: submitPreference,
+		storageKey
+	});
 	const fill = () => {
 		for (const [k, el] of Object.entries(inputs)) el.value = saved[k];
 	};
@@ -6345,6 +9645,7 @@ function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, 
 	}
 	async function discover() {
 		if (!current() || saved.intent || !observe() || !saved.host) return;
+		models.refresh();
 		const expected = ++discovery, selectedHost = saved.host;
 		discovering = true;
 		discoveredHost = "";
@@ -6518,13 +9819,22 @@ function sessionStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, 
 		if (key === "host") discover();
 	});
 	const label = (name, control) => h("label", {}, t(name), control);
+	const shortcut = composerShortcut({
+		h,
+		t,
+		input: prompt,
+		button: apply,
+		storageKey: `${storageKey}.shortcut`,
+		guard
+	});
 	const box = h("section", {
 		class: "session-start",
 		"data-session-start": ""
-	}, h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("host", host), label("start_workspace", workspace)), h("div", { class: "actions" }, reload), discoveryStatus, h("p", { class: "muted" }, t("start_isolation"))), h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("start_agent", agent), label("start_model", model), label("start_title", title)), label("start_prompt", prompt), h("p", { class: "muted" }, t("start_prompt_help"))), h("div", { class: "actions" }, apply, check, another), result, status);
+	}, h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("host", host), label("start_workspace", workspace)), h("div", { class: "actions" }, reload), discoveryStatus, h("p", { class: "muted" }, t("start_isolation"))), h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("start_agent", agent), label("start_model", model), label("start_title", title)), models.box, label("start_prompt", prompt), shortcut.box, h("p", { class: "muted" }, t("start_prompt_help"))), h("div", { class: "actions" }, apply, check, another), result, status);
 	function update() {
 		const fixed = Boolean(saved.intent);
 		for (const el of Object.values(inputs)) el.disabled = busy || fixed;
+		models.update();
 		workspace.disabled ||= discovering || !saved.host;
 		reload.hidden = fixed;
 		reload.disabled = discovering || !observe() || !saved.host;
@@ -7386,8 +10696,21 @@ var ref = (v) => typeof v === "string" && /^refs\/heads\/(?!-)(?!.*\.\.)(?!.*\/\
 var branchRef = (value) => value.startsWith("refs/") ? value : "refs/heads/" + value;
 var preconditions = (v) => object(v) && Object.keys(v).length === 2 && Number.isSafeInteger(v.repository_id) && v.repository_id > 0 && digest$1(v.binding_digest);
 var projectId = (v) => typeof v === "string" && /^prj_[0-9a-f]{20}$/.test(v);
+var workItemId = (v) => typeof v === "string" && /^wi_[0-9a-f]{20}$/.test(v);
 var artifactRefs = (v) => Array.isArray(v) && v.every((r) => object(r) && Object.keys(r).length === 3 && /^art_[0-9a-f]{32}$/.test(r.artifact_id) && Number.isSafeInteger(r.revision) && r.revision > 0 && digest$1(r.digest));
-var requestPreconditions = (r) => object(r.params) && "project_id" in r.params ? projectId(r.params.project_id) && object(r.preconditions) && Number.isSafeInteger(r.preconditions.expected_project_version) && r.preconditions.expected_project_version > 0 && preconditions(Object.fromEntries(Object.entries(r.preconditions).filter(([k]) => k !== "expected_project_version"))) : preconditions(r.preconditions);
+var requestPreconditions = (r) => {
+	if (!object(r.params) || !object(r.preconditions)) return false;
+	const fixed = { ...r.preconditions };
+	if ("project_id" in r.params) {
+		if (!projectId(r.params.project_id) || !Number.isSafeInteger(fixed.expected_project_version) || fixed.expected_project_version < 1) return false;
+		delete fixed.expected_project_version;
+	}
+	if ("work_item_id" in r.params) {
+		if (!projectId(r.params.project_id) || !workItemId(r.params.work_item_id) || !digest$1(fixed.expected_work_item_fingerprint)) return false;
+		delete fixed.expected_work_item_fingerprint;
+	}
+	return preconditions(fixed);
+};
 var validRequest = (r) => r?.action === "repository.continue" && target(r.target) && requestPreconditions(r) && object(r.params) && Object.keys(r.params).every((k) => [
 	"agent",
 	"prompt",
@@ -7395,12 +10718,14 @@ var validRequest = (r) => r?.action === "repository.continue" && target(r.target
 	"model",
 	"artifacts",
 	"project_id",
+	"work_item_id",
 	"source_ref",
 	"source_sha"
 ].includes(k)) && ref(r.params.source_ref) && sha(r.params.source_sha) && ["claude", "codex"].includes(r.params.agent) && typeof r.params.prompt === "string" && r.params.prompt.trim() && r.params.prompt.length <= 12e3 && ["title", "model"].every((k) => !(k in r.params) || text(r.params[k], 256)) && (!("artifacts" in r.params) || artifactRefs(r.params.artifacts));
 var validPreview$1 = (p, input) => object(p) && equal$1(p.target, input.target) && p.source_ref === input.source_ref && sha(p.source_sha) && p.exact_ref_head_only === true && preconditions(p.preconditions) && p.repository_id === p.preconditions.repository_id && p.binding_digest === p.preconditions.binding_digest && object(p.workspace) && p.workspace.workspace_id === input.target.workspace_id && text(p.workspace.folder, 4096) && (p.workspace.name == null || typeof p.workspace.name === "string");
 var noAdmission = new Set(["REPOSITORY_NOT_BOUND", "REPOSITORY_HOST_UNAVAILABLE"]);
-function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, storageKey, project = null, attachmentFactory }) {
+function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, storageKey, project = null, repairSeed = null, attachmentFactory, submitPreference }) {
+	if (repairSeed && (repairSeed.project_id !== project || !workItemId(repairSeed.work_item_id) || !digest$1(repairSeed.expected_work_item_fingerprint) || typeof repairSeed.prompt !== "string" || !repairSeed.prompt.trim())) throw new Error(t("repair_unavailable"));
 	let raw;
 	try {
 		raw = JSON.parse(localStorage.getItem(storageKey));
@@ -7414,7 +10739,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		title: typeof raw?.title === "string" ? raw.title : ""
 	};
 	if (raw?.intent) {
-		const valid = validRequest(raw.intent.request) && text(raw.intent.key, 200) && (!project || raw.intent.request.params.project_id === project);
+		const valid = validRequest(raw.intent.request) && text(raw.intent.key, 200) && (!project || raw.intent.request.params.project_id === project) && (repairSeed ? raw.intent.request.params.work_item_id === repairSeed.work_item_id : !raw.intent.request.params.work_item_id);
 		saved.intent = {
 			request: valid ? raw.intent.request : null,
 			key: valid ? raw.intent.key : null,
@@ -7427,6 +10752,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 			model: ""
 		}, raw.intent.request.params);
 	}
+	if (repairSeed && !saved.intent) saved.prompt = repairSeed.prompt;
 	let preview = null, operation = null, busy = false, reading = false, sequence = 0, readFailed = false, submission = null, refreshing = null;
 	let projectDoc = null, projectFailed = Boolean(project), previewProjectVersion = null, autoSelect = !raw, projectQueue = Promise.resolve();
 	const current = () => {
@@ -7442,7 +10768,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		localStorage.setItem(storageKey, JSON.stringify(saved));
 	};
 	const observe = () => caps()?.scopes?.includes("observe");
-	const allowed = () => observe() && caps()?.scopes?.includes("start") && caps()?.actions?.some((a) => a.action === "repository.continue" && a.allowed === true);
+	const allowed = () => observe() && caps()?.scopes?.includes("start") && (!repairSeed || caps()?.scopes?.includes("manage")) && caps()?.actions?.some((a) => a.action === "repository.continue" && a.allowed === true);
 	const expanded = () => caps()?.features?.project_dispatch?.version === 1;
 	const projectReady = () => !project || expanded() && projectDoc && !projectDoc.archived && !projectFailed;
 	const bindings = () => (caps()?.features?.repository_sync || []).filter((b) => b.exact_ref_head_only === true && target({
@@ -7491,8 +10817,22 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		title,
 		model
 	};
+	const models = modelChoice({
+		h,
+		t,
+		api,
+		caps,
+		guard,
+		host: () => saved.target?.host,
+		agent,
+		model,
+		submit: submitPreference,
+		storageKey
+	});
+	let modelHost = null;
 	prompt.value = saved.prompt;
-	const attachments = expanded() && attachmentFactory ? attachmentFactory(prompt, () => {
+	prompt.readOnly = Boolean(repairSeed);
+	const attachments = expanded() && !repairSeed && attachmentFactory ? attachmentFactory(prompt, () => {
 		if (current()) update();
 	}) : null;
 	if (attachments && !saved.intent) saved.prompt = prompt.value;
@@ -7518,6 +10858,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		target: saved.target,
 		source_ref: branchRef(saved.source_ref)
 	});
+	const effectivePrompt = () => saved.prompt.trim() ? saved.prompt : attachments?.refs().length ? t("dispatch_inspect_images") : saved.prompt;
 	const request = () => ({
 		action: "repository.continue",
 		target: saved.target,
@@ -7525,15 +10866,17 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 			source_ref: preview?.source_ref,
 			source_sha: preview?.source_sha,
 			agent: saved.agent,
-			prompt: saved.prompt,
+			prompt: effectivePrompt(),
 			...saved.title ? { title: saved.title } : {},
 			...saved.model && expanded() ? { model: saved.model } : {},
 			...attachments?.refs().length ? { artifacts: attachments.refs() } : {},
-			...project ? { project_id: project } : {}
+			...project ? { project_id: project } : {},
+			...repairSeed ? { work_item_id: repairSeed.work_item_id } : {}
 		},
 		preconditions: preview ? {
 			...preview.preconditions,
-			...project ? { expected_project_version: previewProjectVersion } : {}
+			...project ? { expected_project_version: previewProjectVersion } : {},
+			...repairSeed ? { expected_work_item_fingerprint: repairSeed.expected_work_item_fingerprint } : {}
 		} : null
 	});
 	const inspect = h("button", {
@@ -7582,7 +10925,8 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 			source_ref: intent.request.params.source_ref,
 			source_sha: intent.request.params.source_sha,
 			repository_binding: intent.request.preconditions.binding_digest,
-			...intent.request.params.project_id ? { project_id: intent.request.params.project_id } : {}
+			...intent.request.params.project_id ? { project_id: intent.request.params.project_id } : {},
+			...intent.request.params.work_item_id ? { work_item_id: intent.request.params.work_item_id } : {}
 		})) if (name in refs && refs[name] !== value) throw new Error(t("pub_invalid_result"));
 		if (result != null && (!object(result) || result.host !== intent.request.target.host || result.workspace_id !== intent.request.target.workspace_id || result.repository !== intent.request.target.repository || result.source_ref !== intent.request.params.source_ref || result.source_sha !== intent.request.params.source_sha || result.repository_id !== intent.request.preconditions.repository_id || result.binding_digest !== intent.request.preconditions.binding_digest || !text(result.session_id, 256) || result.session_id !== candidate.external_refs?.session_id)) throw new Error(t("pub_invalid_result"));
 		if (candidate.status === "succeeded" && (!result || result.message_id !== `batc-${candidate.operation_id}`)) throw new Error(t("pub_invalid_result"));
@@ -7650,7 +10994,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 	const another = h("button", {
 		class: "secondary",
 		onclick: () => {
-			if (!current() || busy || refreshing || readFailed || attachments && !attachments.ready() || !(terminal$1(operation) || saved.intent?.refused)) return;
+			if (repairSeed || !current() || busy || refreshing || readFailed || attachments && !attachments.ready() || !(terminal$1(operation) || saved.intent?.refused)) return;
 			const previous = saved;
 			saved = {
 				target: saved.target,
@@ -7675,7 +11019,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		}
 	}, t("pub_new"));
 	function change(field, value) {
-		if (!current() || saved.intent || busy) {
+		if (!current() || saved.intent || busy || repairSeed && field === "prompt") {
 			fill();
 			return;
 		}
@@ -7699,10 +11043,18 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		class: "dispatch-advanced",
 		open: Boolean(saved.model || saved.title)
 	}, h("summary", {}, t("dispatch_advanced")), h("div", { class: "capture-fields" }, label("start_title", title), label("start_model", model)));
+	const shortcut = composerShortcut({
+		h,
+		t,
+		input: prompt,
+		button: apply,
+		storageKey: `${storageKey}.shortcut`,
+		guard
+	});
 	const box = h("section", {
 		class: "session-start published-start",
 		"data-published-start": ""
-	}, project ? projectStatus : null, h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("pub_binding", binding), label("pub_ref", sourceRef)), branchHelp, h("p", { class: "muted" }, t("pub_head_only")), h("div", { class: "actions" }, inspect), facts), h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("start_agent", agent), !project ? label("start_title", title) : null, !project && expanded() ? label("start_model", model) : null), label("pub_prompt", prompt), project ? advanced : null, attachmentBox, h("p", { class: "muted" }, t("pub_isolation"))), h("div", { class: "actions" }, apply, check, another), outcome, status);
+	}, project ? projectStatus : null, h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("pub_binding", binding), label("pub_ref", sourceRef)), branchHelp, h("p", { class: "muted" }, t("pub_head_only")), h("div", { class: "actions" }, inspect), facts), h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("start_agent", agent), !project ? label("start_title", title) : null, !project && expanded() ? label("start_model", model) : null), models.box, label("pub_prompt", prompt), shortcut.box, project ? advanced : null, attachmentBox, h("p", { class: "muted" }, t("pub_isolation"))), h("div", { class: "actions" }, apply, check, another), outcome, status);
 	function update() {
 		const fixed = Boolean(saved.intent);
 		if (attachmentBox) {
@@ -7711,6 +11063,11 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		}
 		binding.disabled = fixed || busy;
 		for (const el of Object.values(inputs)) el.disabled = fixed || busy;
+		models.update();
+		if (modelHost !== saved.target?.host) {
+			modelHost = saved.target?.host;
+			models.refresh();
+		}
 		const validBranch = ref(selected().source_ref);
 		branchHelp.hidden = fixed;
 		branchHelp.textContent = t(saved.source_ref && !validBranch ? "pub_branch_invalid" : "pub_branch_help");
@@ -7723,7 +11080,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		apply.disabled = busy || readFailed || !ready() || !allowed() || (fixed ? !saved.intent.request || !saved.intent.key : reading || !projectReady() || !preview || !validPreview$1(preview, selected()) || !bound() || !hostAllowed() || attachments && !attachments.ready() || !validRequest(request()));
 		check.hidden = !saved.intent?.operation_id;
 		check.disabled = busy || Boolean(refreshing);
-		another.hidden = !(terminal$1(operation) || saved.intent?.refused);
+		another.hidden = Boolean(repairSeed) || !(terminal$1(operation) || saved.intent?.refused);
 		another.disabled = busy || Boolean(refreshing) || readFailed || Boolean(attachments && !attachments.ready());
 		facts.replaceChildren();
 		const original = saved.intent?.request;
@@ -8952,6 +12309,7 @@ function saveCursor() {
 	} catch {}
 }
 function disconnect() {
+	if (state.token === "managed-browser-session") forgetBrowserSession()?.catch(() => {});
 	state.epoch++;
 	clearToken();
 	state.token = null;
@@ -9079,7 +12437,11 @@ async function api(method, path, body, key) {
 	const epoch = state.epoch;
 	const { status, data } = await connectorRequest(method, path, body, key, state.token);
 	if (epoch !== state.epoch) throw new ApiError(0, "CONNECTION_CHANGED", "Connection changed while the request was in flight");
-	if (status < 200 || status >= 300) throw new ApiError(status, data.error?.code, data.error?.message);
+	if (status < 200 || status >= 300) {
+		const error = new ApiError(status, data.error?.code, data.error?.message);
+		error.admissionRefused = data.error?.admission_refused === true;
+		throw error;
+	}
 	return data;
 }
 function errorBox(e) {
@@ -9153,7 +12515,46 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 	saved.attachments = saved.attachments.filter((a) => a && typeof a === "object");
 	for (const a of saved.attachments) delete a.busy;
 	if (typeof saved.text === "string") text.value = saved.text;
-	const files = new Map(), rows = h("div", { class: "attachment-list" });
+	const files = new Map(), previews = new Map(), rows = h("div", { class: "attachment-list" });
+	const ALLOWED_IMAGE_TYPES = new Set([
+		"image/png",
+		"image/jpeg",
+		"image/webp"
+	]);
+	const generateThumbnail = (file, onReady) => {
+		if (!ALLOWED_IMAGE_TYPES.has(file.type) || file.size > 16777216) return;
+		try {
+			const reader = new FileReader();
+			reader.onload = () => {
+				const img = new Image();
+				img.onload = () => {
+					try {
+						const maxDim = 96;
+						let w = img.width, h = img.height;
+						if (w <= 0 || h <= 0) return;
+						if (w > maxDim || h > maxDim) {
+							if (w > h) {
+								h = Math.max(1, Math.round(h * maxDim / w));
+								w = maxDim;
+							} else {
+								w = Math.max(1, Math.round(w * maxDim / h));
+								h = maxDim;
+							}
+						}
+						const canvas = document.createElement("canvas");
+						canvas.width = w;
+						canvas.height = h;
+						const ctx = canvas.getContext("2d");
+						if (!ctx) return;
+						ctx.drawImage(img, 0, 0, w, h);
+						onReady(canvas.toDataURL("image/png"));
+					} catch {}
+				};
+				img.src = reader.result;
+			};
+			reader.readAsDataURL(file);
+		} catch {}
+	};
 	let pendingSelections = 0;
 	const changed = () => queueMicrotask(() => {
 		if (box.isConnected && connection.epoch === state.epoch && connection.generation === generation) onChange();
@@ -9162,6 +12563,10 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 		class: "muted",
 		role: "status"
 	});
+	const promptHint = h("p", {
+		class: "muted",
+		hidden: true
+	}, t("dispatch_attachment_prompt", { request: t("dispatch_inspect_images") }));
 	const supported = Boolean(state.caps?.artifacts), nativeFiles = nativeDesktop && nativeFileSupport;
 	const nativeUploadAllowed = state.caps?.actions?.some((a) => a.action === "artifact.upload" && a.allowed === true);
 	let native;
@@ -9178,17 +12583,20 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 	const box = h("div", {
 		class: "attachments",
 		hidden: !supported
-	}, nativeFiles ? h("div", { class: "actions" }, h("strong", {}, t("attachments")), choose) : h("label", {}, t("attachments"), choose), h("p", { class: "muted" }, t(nativeFiles ? "files_help" : "upload_on_choose")), rows, status);
+	}, nativeFiles ? h("div", { class: "actions" }, h("strong", {}, t("attachments")), choose) : h("label", {}, t("attachments"), choose), h("p", { class: "muted" }, t(nativeFiles ? "files_help" : "upload_on_choose")), rows, promptHint, status);
 	const guard = (mounted = false) => {
 		assertView(connection);
 		if (mounted && !box.isConnected) throw new ApiError(0, "VIEW_CHANGED", "Attachment form changed during the request");
 	};
-	const persist = () => {
+	const persist = (required = false) => {
 		guard();
 		saved.text = text.value;
 		try {
 			localStorage.setItem(key, JSON.stringify(saved));
-		} catch {}
+		} catch (error) {
+			if (required === true) throw error;
+		}
+		promptHint.hidden = roles || Boolean(text.value.trim()) || !saved.attachments.some((a) => a.ref);
 		changed();
 	};
 	const removeStored = () => {
@@ -9214,7 +12622,12 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 	const ready = () => pendingSelections === 0 && saved.attachments.every((a) => a.ref);
 	const render = () => {
 		changed();
-		return fill(rows, ...saved.attachments.filter((a) => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map((a) => h("div", { class: "row" }, h("div", { class: "grow" }, a.name, a.ref ? h("div", { class: "muted" }, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`) : h("div", { class: "muted" }, a.error || (a.native_handle ? t("files_unavailable") : files.has(a) ? t("uploading") : t("choose_again")))), a.ref && roles ? h("select", {
+		promptHint.hidden = roles || Boolean(text.value.trim()) || !saved.attachments.some((a) => a.ref);
+		return fill(rows, ...saved.attachments.filter((a) => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map((a) => h("div", { class: "row attachment-row" }, previews.has(a) ? h("img", {
+			class: "attachment-thumb",
+			src: previews.get(a),
+			alt: a.name || t("attachments")
+		}) : null, h("div", { class: "grow" }, a.name, a.ref ? h("div", { class: "muted" }, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`) : h("div", { class: "muted" }, a.error || (a.native_handle ? t("files_unavailable") : files.has(a) ? t("uploading") : t("choose_again")))), a.ref && roles ? h("select", {
 			"aria-label": t("attachment_role"),
 			onchange: (e) => {
 				guard();
@@ -9238,6 +12651,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 				}
 				saved.attachments = saved.attachments.filter((x) => x !== a);
 				files.delete(a);
+				previews.delete(a);
 				persist();
 				render();
 			}
@@ -9325,7 +12739,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 				action: "artifact.upload",
 				target: {},
 				params: {
-					display_name: file.name,
+					display_name: a.name || file.name,
 					media_type: file.type || "application/octet-stream",
 					size_bytes: file.size,
 					expected_digest: digest
@@ -9335,14 +12749,14 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 			if (a.request && JSON.stringify(a.request) !== JSON.stringify(request)) throw new Error(t("attachment_file_changed"));
 			a.request ||= request;
 			a.key ||= crypto.randomUUID();
-			persist();
+			persist(true);
 			let op = a.operation_id ? (await api("GET", `/operations/${a.operation_id}`)).operation : null;
 			guard(true);
 			if (op && ["failed", "cancelled"].includes(op.status)) {
 				op = null;
 				a.key = crypto.randomUUID();
 				delete a.operation_id;
-				persist();
+				persist(true);
 			}
 			if (!op) op = (await api("POST", "/operations?wait=3", a.request, a.key)).operation;
 			guard(true);
@@ -9395,12 +12809,113 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 				saved.attachments.push(a);
 			}
 			files.set(a, file);
+			if (ALLOWED_IMAGE_TYPES.has(file.type)) generateThumbnail(file, (thumb) => {
+				if (box.isConnected && saved.attachments.includes(a)) {
+					previews.set(a, thumb);
+					render();
+				}
+			});
 			upload(a);
 		}
 		choose.value = "";
 		persist();
 		render();
 	};
+	const handleIncomingFile = (file) => {
+		guard();
+		fill(status);
+		const limit = Math.min(state.caps?.artifacts?.limits?.max_file_bytes || 16777216, nativeDesktop ? 16777216 : Number.MAX_SAFE_INTEGER);
+		if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+			fill(status, errorBox(new Error(t("attachment_unsupported_image"))));
+			return;
+		}
+		if (file.size > limit) {
+			fill(status, errorBox(new Error(`ARTIFACT_TOO_LARGE (${limit})`)));
+			return;
+		}
+		let name = file.name;
+		const ext = file.type === "image/jpeg" ? ".jpg" : file.type === "image/webp" ? ".webp" : ".png";
+		if (!name || name === "image.png" || name === "blob") name = `pasted-image-${Date.now()}${ext}`;
+		name = name.replace(/[^\w.-]/g, "_").replace(/^(\.+)/, "image_");
+		let uniqueName = name;
+		let counter = 1;
+		while (saved.attachments.some((x) => x.name === uniqueName)) {
+			const dot = name.lastIndexOf(".");
+			uniqueName = dot > 0 ? `${name.slice(0, dot)}-${counter}${name.slice(dot)}` : `${name}-${counter}`;
+			counter++;
+		}
+		const a = { name: uniqueName };
+		saved.attachments.push(a);
+		files.set(a, file);
+		generateThumbnail(file, (thumb) => {
+			if (box.isConnected && saved.attachments.includes(a)) {
+				previews.set(a, thumb);
+				render();
+			}
+		});
+		upload(a);
+		persist();
+		render();
+	};
+	const onPaste = (e) => {
+		if (e.isComposing) return;
+		const cd = e.clipboardData;
+		if (!cd) return;
+		const items = cd.items ? Array.from(cd.items) : [];
+		const cdFiles = cd.files ? Array.from(cd.files) : [];
+		const imageCandidates = [];
+		if (cdFiles.length > 0) {
+			for (const f of cdFiles) if (f.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|svg)$/i.test(f.name)) imageCandidates.push(f);
+		} else if (items.length > 0) {
+			for (const it of items) if (it.kind === "file") {
+				const f = it.getAsFile();
+				if (f && (f.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|svg)$/i.test(f.name) || it.type.startsWith("image/"))) imageCandidates.push(f);
+			}
+		}
+		if (!imageCandidates.length) return;
+		e.preventDefault();
+		if (!supported || !may("manage") || nativeFiles && !nativeUploadAllowed || !state.online || !state.viewReady) {
+			fill(status, errorBox(new Error(t("offline_actions_paused"))));
+			return;
+		}
+		for (const file of imageCandidates) handleIncomingFile(file);
+	};
+	const onDragOver = (e) => {
+		if (nativeFiles) return;
+		if (e.dataTransfer?.types?.includes("Files")) {
+			e.preventDefault();
+			e.dataTransfer.dropEffect = "copy";
+			box.classList.add("drag-over");
+			if (text && text.classList) text.classList.add("drag-over");
+		}
+	};
+	const onDragLeave = (e) => {
+		if (!box.contains(e.relatedTarget) && e.target !== text) {
+			box.classList.remove("drag-over");
+			if (text && text.classList) text.classList.remove("drag-over");
+		}
+	};
+	const onDrop = (e) => {
+		box.classList.remove("drag-over");
+		if (text && text.classList) text.classList.remove("drag-over");
+		if (nativeFiles || !e.dataTransfer?.files?.length) return;
+		e.preventDefault();
+		if (!supported || !may("manage") || nativeFiles && !nativeUploadAllowed || !state.online || !state.viewReady) {
+			fill(status, errorBox(new Error(t("offline_actions_paused"))));
+			return;
+		}
+		for (const file of e.dataTransfer.files) handleIncomingFile(file);
+	};
+	text.addEventListener("paste", onPaste);
+	box.addEventListener("paste", onPaste);
+	box.addEventListener("dragover", onDragOver);
+	box.addEventListener("dragleave", onDragLeave);
+	box.addEventListener("drop", onDrop);
+	if (text && text.addEventListener) {
+		text.addEventListener("dragover", onDragOver);
+		text.addEventListener("dragleave", onDragLeave);
+		text.addEventListener("drop", onDrop);
+	}
 	const existing = h("select", { "aria-label": t("existing_artifact") }, h("option", { value: "" }, t("existing_artifact")));
 	box.append(h("div", { class: "actions" }, existing, h("button", {
 		class: "secondary",
@@ -9510,6 +13025,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 		}
 		const intent = saved.submission;
 		try {
+			persist(true);
 			const op = intent.operation_id ? (await api("GET", `/operations/${intent.operation_id}`)).operation : (await api("POST", "/operations?wait=3", intent.request, intent.key)).operation;
 			guard(true);
 			intent.operation_id = op.operation_id;
@@ -9584,6 +13100,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
 			};
 			text.value = "";
 			files.clear();
+			previews.clear();
 			persist();
 			render();
 		}
@@ -10392,6 +13909,23 @@ async function viewHostDiscovery(main, host) {
 		namespace: state.namespace,
 		generation
 	};
+	const profile = state.caps?.hosts?.find((item) => item.host === host)?.profile_id;
+	const repair = profile && state.caps?.features?.managed_repairs?.version === 1 ? repairPanel({
+		h,
+		t,
+		api,
+		caps: () => state.caps,
+		guard: () => assertView(connection),
+		namespace: connection.namespace,
+		source: {
+			kind: "discovery",
+			host,
+			profile_id: profile
+		},
+		errorBox,
+		opStatus
+	}) : null;
+	if (repair) main.append(repair.box);
 	const load = async () => {
 		try {
 			const data = await api("GET", `/hosts/${encodeURIComponent(host)}/discovery`);
@@ -10403,9 +13937,13 @@ async function viewHostDiscovery(main, host) {
 	};
 	await load();
 	const reload = debounceRefresh(load, 500);
-	return onEvents((event) => {
+	const off = onEvents((event) => {
 		if (event.resource_type === "host" && event.resource_id === host) return reload();
 	});
+	return () => {
+		off();
+		repair?.dispose();
+	};
 }
 async function viewSession(main, host, sid, context = null) {
 	const connection = {
@@ -10420,11 +13958,28 @@ async function viewSession(main, host, sid, context = null) {
 		class: "workspace-result",
 		"data-workspace-result": ""
 	});
+	let messageOffset = 0, nextMessageOffset = null, firstMessages = true, messageRequest = 0;
+	const readingSupported = state.caps?.features?.session_reading?.version === 1;
+	const saveReading = async (action, params, preconditions = {}) => {
+		const op = await submit(action, {
+			host,
+			session_id: sid
+		}, params, preconditions, `${action}.${host}.${sid}`);
+		assertView(connection);
+		await loadMessages();
+		if (op.status !== "succeeded") throw new Error(op.status_reason || t("conversation_pending"));
+	};
 	const conversation = conversationPanel({
 		h,
 		t,
 		when,
-		guard: () => assertView(connection)
+		guard: () => assertView(connection),
+		readingActions: readingSupported ? {
+			mark: (messages) => saveReading("session.read", { messages }),
+			remember: (position, version) => saveReading("session.position", position, { expected_version: version }),
+			older: () => loadMessages(nextMessageOffset, false),
+			latest: () => loadMessages(0, true)
+		} : null
 	});
 	const pending = h("div", { "data-pending-controls": "" }), status = h("div", { class: "muted" });
 	const scope = `send.${host}.${sid}`, draftKey = `batc.draft.${connection.namespace}.${scope}`;
@@ -10471,6 +14026,7 @@ async function viewSession(main, host, sid, context = null) {
 					try {
 						localStorage.removeItem(draftKey);
 					} catch {}
+					mobileLayout?.updateDraft();
 				}
 			} catch (e) {
 				status.replaceChildren(errorBox(e));
@@ -10497,7 +14053,18 @@ async function viewSession(main, host, sid, context = null) {
 			}
 		}
 	}, t("interrupt"));
-	const composer = h("div", { hidden: true }, box, h("div", { class: "actions" }, send, stop, h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
+	const shortcut = composerShortcut({
+		h,
+		t,
+		input: box,
+		button: send,
+		storageKey: `batc.composer-shortcut.${connection.namespace}`,
+		guard: () => assertView(connection)
+	});
+	const composer = h("div", {
+		hidden: true,
+		id: "workspace-message-input"
+	}, box, h("div", { class: "actions" }, send, stop, h("label", { class: "muted" }, queue, " ", t("queue_behind"))), shortcut.box);
 	const readonly = h("p", { class: "note" }, t("session_access_unknown"));
 	let capture, permissions, batHandoff;
 	const captureSlot = h("div"), permissionsSlot = h("div"), batSlot = h("div");
@@ -10518,14 +14085,34 @@ async function viewSession(main, host, sid, context = null) {
 	});
 	const cps = checkpointPanel(host, sid);
 	const observations = observationPanels("session", `${host}/${sid}`, path);
+	const instructions = state.caps?.features?.session_instructions?.version === 1 ? instructionReceiptPanel({
+		h,
+		t,
+		when,
+		api,
+		guard: () => assertView(connection),
+		host,
+		sessionId: sid,
+		errorBox
+	}) : null;
+	instructions?.box.addEventListener("toggle", () => {
+		if (instructions.box.open) instructions.refresh();
+	});
 	const inspector = h("details", {
 		class: "workspace-inspector",
 		open: true
-	}, h("summary", {}, t("workspace_work_details")), context?.itemBox, result, batSlot, h("details", { class: "workspace-evidence" }, h("summary", {}, t("sessions_details")), metadata), labels.box, permissionsSlot, captureSlot, cps.box, observations.box);
+	}, h("summary", {}, t("workspace_work_details")), context?.itemBox, result, batSlot, h("details", { class: "workspace-evidence" }, h("summary", {}, t("sessions_details")), metadata), instructions?.box, labels.box, permissionsSlot, captureSlot, cps.box, observations.box);
 	const lane = h("section", {
 		class: "workspace-conversation",
 		"aria-label": t("messages")
 	}, conversation.box, controls);
+	const mobileLayout = setupMobileSessionLayout({
+		head,
+		composer: controls,
+		textarea: box,
+		t,
+		guard: () => assertView(connection)
+	});
 	if (context?.picker) main.append(context.picker);
 	main.append(head, h("div", { class: "workspace-session" }, lane, inspector));
 	const renderPending = () => {
@@ -10640,6 +14227,7 @@ async function viewSession(main, host, sid, context = null) {
 			class: "muted",
 			href: `#/host/${encodeURIComponent(host)}`
 		}, row.host), chip(t(row.api_access === "managed" ? "managed" : "read_only"), row.api_access === "managed" ? "managed" : "readonly")));
+		mobileLayout?.updateInfo();
 		metadata.replaceChildren(h("div", { class: "actions" }, ...sessionBadges(row)), h("dl", { class: "kv" }, h("dt", {}, t("host")), h("dd", {}, h("a", { href: `#/host/${encodeURIComponent(host)}` }, row.host)), h("dt", {}, t("workspace")), h("dd", {}, row.workspace || ""), h("dt", {}, t("sessions_label")), h("dd", {}, h("code", {}, row.session_id)), h("dt", {}, t("agent")), h("dd", {}, [row.agent_kind, row.model].filter(Boolean).join(" · ")), h("dt", {}, t("session_origin")), h("dd", {}, t("provenance_" + ([
 			"manual",
 			"connector_managed",
@@ -10719,10 +14307,32 @@ async function viewSession(main, host, sid, context = null) {
 		}
 		fill(result, h("h2", {}, t("workspace_result")), ...work.map((item) => deliveryWork(item, repositories, true)), !work.length ? h("p", { class: "muted" }, t("workspace_result_empty")) : null, data.work_items?.length ? linkedItems(data.work_items) : null, !work.some((item) => item.worktree_id === row.worktree_id) && row.worktree_id ? h("p", {}, observationLink("worktree", row.worktree_id)) : null);
 	};
-	const loadMessages = async () => {
-		const read = await api("GET", `${path}/messages?last_n=30`);
+	const loadMessages = async (offset = messageOffset, latest = false) => {
+		if (offset == null) return;
+		const request = ++messageRequest;
+		const get = (offset) => api("GET", `${path}/messages?last_n=30&include_tools=true&offset=${offset}${readingSupported ? "&max_chars=60000&max_message_chars=60000" : ""}`);
+		let read = await get(offset);
 		assertView(connection);
-		conversation.update(read.messages);
+		if (request !== messageRequest) return;
+		const restore = firstMessages && readingSupported ? read.reading?.position : null;
+		if (restore && Number.isInteger(restore.page_offset) && restore.page_offset >= 0) {
+			const savedOffset = Math.max(0, restore.page_offset - 15);
+			if (savedOffset !== offset) {
+				offset = savedOffset;
+				read = await get(offset);
+				assertView(connection);
+			}
+			if (request !== messageRequest) return;
+		}
+		messageOffset = offset;
+		nextMessageOffset = read.next_offset;
+		firstMessages = false;
+		conversation.update(read.messages, readingSupported ? {
+			...read,
+			restore,
+			latest,
+			olderWindow: offset > 0
+		} : null);
 	};
 	const refresh = async (fromEvent = false) => {
 		if (refreshInFlight) {
@@ -10778,14 +14388,18 @@ async function viewSession(main, host, sid, context = null) {
 			].includes(ev.resource_type) ? reload() : Promise.resolve(),
 			ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve(),
 			ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve(),
-			observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation" ? labels.refresh(true) : Promise.resolve()
+			observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation" ? labels.refresh(true) : Promise.resolve(),
+			instructions?.box.open && (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation") ? instructions.refresh() : Promise.resolve()
 		]);
 	});
 	return () => {
 		clearInterval(retry);
 		off();
+		instructions?.dispose();
 		batHandoff?.dispose();
 		conversation.dispose();
+		mobileLayout?.dispose();
+		shortcut.dispose();
 	};
 }
 function checkpointPanel(host, sid) {
@@ -10806,13 +14420,14 @@ function checkpointPanel(host, sid) {
 		const go = h("button", {
 			class: "primary",
 			onclick: async () => {
-				if (!instr.value.trim()) return;
+				const instructions = instr.value.trim() ? instr.value : draft.refs().length ? t("dispatch_inspect_images") : "";
+				if (!instructions) return;
 				go.disabled = true;
 				try {
 					if (!draft.ready() && !draft.pending()) throw new Error(t("attachments_not_ready"));
 					if (state.caps?.artifacts && !expectedHead && !draft.pending()) throw new Error(t("source_unavailable"));
 					const op = await draft.perform("checkpoint.continue", { checkpoint_id: cp.checkpoint_id }, {
-						instructions: instr.value,
+						instructions,
 						agent: agent.value,
 						...state.caps?.artifacts ? { artifacts: draft.refs() } : {}
 					}, state.caps?.artifacts ? { expected_source_head_sha: expectedHead } : {}, `continue.${cp.checkpoint_id}`);
@@ -10922,6 +14537,11 @@ function checkpointPanel(host, sid) {
 }
 async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceRepository) {
 	freshPage();
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
 	const source = sourceHost && ["execution", "task_command"].includes(sourceKind) && sourceId ? {
 		host: sourceHost,
 		kind: sourceKind,
@@ -10963,6 +14583,18 @@ async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceReposi
 	if (source) main.append(h("p", { class: "note" }, t("delivery_source_context"), " ", h("code", {}, source.id)));
 	let selectedMethod = "";
 	let reviewedPreview = null;
+	const selector = prSelector({
+		api,
+		h,
+		t,
+		guard: () => assertView(connection),
+		repoInput: repo,
+		numInput: num,
+		onSelect: () => {
+			load();
+		}
+	});
+	repo.addEventListener("change", () => selector.loadList());
 	main.append(h("h2", {}, t("dep_pull_request")), h("form", {
 		class: "filters delivery-controls",
 		onsubmit: (event) => {
@@ -10973,7 +14605,10 @@ async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceReposi
 	}, h("label", {}, t("delivery_repository_input"), repo), h("label", {}, t("delivery_pr_number"), num), h("button", {
 		type: "submit",
 		class: "secondary"
-	}, t("load_pr"))), inputStatus, card);
+	}, t("load_pr"))), h("details", {}, h("summary", {}, t("delivery_list_prs") || "List Pull Requests"), selector.container), inputStatus, card);
+	setTimeout(() => {
+		if (repo.value && !num.value) selector.loadList();
+	}, 100);
 	if (!source && !repo.value && state.caps?.repositories?.length) repo.value = state.caps.repositories[0].repository;
 	const load = async (flash = null, fromEvent = false) => {
 		const opens = drawerOpens;
@@ -11806,12 +15441,40 @@ async function viewOperations(main, filter = "all") {
 }
 async function viewOperation(main, id) {
 	freshPage();
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	let repair;
 	const panel = h("div", { class: "panel" });
 	main.append(panel);
 	const render = async (fromEvent = false) => {
 		const opens = drawerOpens;
 		try {
 			const { operation: op, work_items: linked, cleanup_receipts: cleanupReceipts } = await api("GET", `/operations/${id}`);
+			assertView(connection);
+			if (!repair && state.caps?.features?.managed_repairs?.version === 1 && [
+				"cleanup.apply",
+				"task.verify",
+				"session.record_verification"
+			].includes(op.action) && ["failed", "needs_attention"].includes(op.status)) {
+				repair = repairPanel({
+					h,
+					t,
+					api,
+					caps: () => state.caps,
+					guard: () => assertView(connection),
+					namespace: connection.namespace,
+					source: {
+						kind: "operation",
+						operation_id: id
+					},
+					errorBox,
+					opStatus
+				});
+				main.append(repair.box);
+			}
 			const refs = op.external_refs || {};
 			const retry = refs.merged_sha && op.action === "delivery.merge_and_deploy" && op.status === "failed" ? h("button", {
 				class: "primary",
@@ -11893,11 +15556,15 @@ async function viewOperation(main, id) {
 		}
 	};
 	await render();
-	return liveReload(render, [
+	const off = liveReload(render, [
 		"operation",
 		"integration",
 		"cleanup"
 	]);
+	return () => {
+		off();
+		repair?.dispose();
+	};
 }
 function mergeRecovery(op) {
 	if (op.action !== "worktree.merge") return null;
@@ -11912,7 +15579,24 @@ function mergeRecovery(op) {
 	}, h("h2", {}, t("delivery_merge_recovery")), h("p", { class: "note" }, t("delivery_merge_held")), h("dl", { class: "kv" }, ...["source", "destination"].flatMap((label, i) => [h("dt", {}, t("delivery_merge_" + label)), h("dd", {}, h("code", {}, refs.carrier_paths?.[i] || t("obs_unknown")))])), ...frames.map((step) => h("p", {}, h("code", {}, step.name), " · ", t(step.status === "succeeded" ? "delivery_merge_ack" : "delivery_merge_no_ack"), " · ", observationTime(step.finished_at || step.started_at))), h("p", {}, t("delivery_merge_safe_reads")), h("p", { class: "muted" }, t("delivery_merge_closeout")), refs.host && refs.session_id ? observationLink("session", `${refs.host}/${refs.session_id}`) : null);
 }
 function viewSettings(main) {
+	if (state.caps?.managed_installation) return viewManagedSettings(main);
 	if (nativeDesktop) return viewNativeSettings(main);
+	if (state.token && state.caps && state.token === "managed-browser-session") {
+		main.append(h("h1", {}, t("nav_settings")), h("section", { class: "panel" }, h("h2", {}, t("managed_browser_connected")), h("p", {}, t("connected_as", {
+			actor: state.caps.actor,
+			scopes: state.caps.scopes.join(", ")
+		})), h("p", { class: "muted" }, t("managed_browser_help")), h("button", {
+			class: "secondary",
+			onclick: () => {
+				disconnect();
+				route();
+			}
+		}, t("disconnect"))));
+		return mountTailscale(main, {
+			h,
+			t
+		});
+	}
 	const input = h("input", {
 		type: "password",
 		autocomplete: "off",
@@ -11952,6 +15636,167 @@ function viewSettings(main) {
 		t
 	});
 }
+async function viewManagedSettings(main) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	const guard = () => assertView(connection);
+	const status = h("div", { role: "status" });
+	const local = h("section", { class: "panel" }, h("h2", {}, t("managed_browser_connected")), h("p", {}, t("connected_as", {
+		actor: state.caps.actor,
+		scopes: state.caps.scopes.join(", ")
+	})), h("p", { class: "muted" }, t("managed_background_help")), h("details", { "data-managed-locations": "" }, h("summary", {}, t("managed_locations")), h("p", { class: "muted" }, t("managed_locations_central")), h("p", { class: "muted" }, t("managed_locations_work"))), status);
+	main.append(h("h1", {}, t("nav_settings")), local);
+	const setup = managedSetupPanel({
+		h,
+		t,
+		api,
+		guard,
+		namespace: state.namespace,
+		errorBox,
+		opStatus,
+		caps: () => state.caps,
+		onConfigured: async () => {
+			const caps = await api("GET", "/capabilities");
+			guard();
+			state.caps = caps;
+		}
+	});
+	main.append(setup.box);
+	await setup.load();
+	try {
+		guard();
+	} catch (error) {
+		setup.dispose();
+		if (["CONNECTION_CHANGED", "VIEW_CHANGED"].includes(error.code)) return;
+		throw error;
+	}
+	const fleetRoot = h("div");
+	main.append(fleetRoot);
+	let disposeFleet;
+	if (nativeDesktop) {
+		const login = h("input", {
+			type: "checkbox",
+			disabled: true
+		});
+		const open = h("button", {
+			class: "secondary",
+			onclick: async () => {
+				open.disabled = true;
+				try {
+					guard();
+					await managedControl({ action: "open_browser" });
+					guard();
+					status.replaceChildren();
+				} catch (error) {
+					if (connection.generation === generation) status.replaceChildren(errorBox(error));
+				} finally {
+					open.disabled = false;
+				}
+			}
+		}, t("managed_open_browser"));
+		local.append(h("div", { class: "actions" }, open, h("label", {}, login, " ", t("managed_start_login"))));
+		try {
+			const state = await managedControl({ action: "status" });
+			guard();
+			login.checked = !!state.login_enabled;
+			login.disabled = false;
+		} catch (error) {
+			status.replaceChildren(errorBox(error));
+		}
+		login.addEventListener("change", async () => {
+			const wanted = login.checked;
+			login.disabled = true;
+			try {
+				guard();
+				const result = await managedControl({
+					action: "set_login",
+					enabled: wanted
+				});
+				guard();
+				login.checked = !!result.login_enabled;
+			} catch (error) {
+				if (connection.generation === generation) {
+					login.checked = !wanted;
+					status.replaceChildren(errorBox(error));
+				}
+			} finally {
+				login.disabled = false;
+			}
+		});
+		try {
+			const native = await nativeStatus();
+			guard();
+			if (native.configuration_source === "managed" && native.configuration_setup) {
+				const draft = state.nativeSetupDraft ||= {
+					endpoint: "",
+					expected_actor: ""
+				};
+				const endpoint = h("input", {
+					type: "url",
+					value: draft.endpoint,
+					required: true,
+					maxlength: 512,
+					autocomplete: "off",
+					oninput: (event) => {
+						draft.endpoint = event.target.value;
+					}
+				});
+				const actor = h("input", {
+					value: draft.expected_actor,
+					required: true,
+					maxlength: 200,
+					autocomplete: "off",
+					oninput: (event) => {
+						draft.expected_actor = event.target.value;
+					}
+				});
+				const review = h("button", {
+					type: "submit",
+					class: "secondary"
+				}, t("desktop_setup_review"));
+				const form = h("form", { onsubmit: (event) => {
+					event.preventDefault();
+					if (state.nativeBusy || !form.reportValidity()) return;
+					guard();
+					review.disabled = true;
+					return nativeTransition("configure", {
+						endpoint: endpoint.value.trim(),
+						expected_actor: actor.value.trim(),
+						contract_version: "2026-10-08"
+					});
+				} }, h("p", { class: "muted" }, t("managed_join_help")), h("div", { class: "capture-fields" }, h("label", {}, t("desktop_endpoint"), endpoint), h("label", {}, t("desktop_expected_actor"), actor)), review);
+				main.append(h("details", {
+					class: "panel",
+					"data-managed-join": ""
+				}, h("summary", {}, t("managed_join_existing")), form));
+			}
+		} catch (error) {
+			if (connection.generation === generation) status.append(errorBox(error));
+		}
+		disposeFleet = await mountFleet(fleetRoot, {
+			h,
+			t
+		});
+	} else local.append(h("p", { class: "muted" }, t("managed_browser_help")), h("button", {
+		class: "secondary",
+		onclick: () => {
+			disconnect();
+			route();
+		}
+	}, t("disconnect")));
+	const disposeTailscale = mountTailscale(fleetRoot, {
+		h,
+		t
+	});
+	return () => {
+		setup.dispose();
+		disposeFleet?.();
+		disposeTailscale();
+	};
+}
 async function nativeTransition(kind, config = null) {
 	if (state.nativeBusy && kind !== "disconnect") return;
 	const attempt = ++state.nativeAttempt;
@@ -11967,6 +15812,7 @@ async function nativeTransition(kind, config = null) {
 			const saved = await nativeSetupConfiguration(config);
 			if (attempt !== state.nativeAttempt) return;
 			if (saved) {
+				disconnect();
 				state.nativeSetupDraft = null;
 				state.connectionNotice = t("desktop_setup_saved");
 			} else {
@@ -12129,14 +15975,17 @@ async function viewNativeSettings(main) {
 					contract_version: "2026-10-08"
 				});
 			} }, h("p", {}, t("desktop_setup_help")), h("div", { class: "capture-fields" }, h("label", {}, t("desktop_endpoint"), endpoint), h("label", {}, t("desktop_expected_actor"), actor)), h("p", { class: "muted" }, t("desktop_setup_origin")), h("div", { class: "actions" }, review));
-			setup.append(form);
+			if (status.configuration_source === "managed" && status.error) {
+				setup.append(h("h3", {}, t("managed_recovery_title")), h("p", {}, t("managed_recovery_help")), h("details", {}, h("summary", {}, t("managed_join_existing")), form));
+				introduction.hidden = true;
+			} else setup.append(form);
 			connectionDetails.append(h("div", { class: "actions" }, reload));
 		}
 		row("desktop_endpoint", status.endpoint || t("desktop_config_needed"));
 		row("desktop_expected_actor", status.expected_actor);
 		if (status.configuration_file) technicalDetails.append(h("dt", {}, t("desktop_configuration_file")), h("dd", {}, status.configuration_file));
 		if (status.credential_source) row("desktop_credential_source", t("desktop_source_" + status.credential_source));
-		if (status.error && !status.configuration_setup) info.append(errorBox(new Error(status.error)));
+		if (status.error && (!status.configuration_setup || status.configuration_source === "managed")) info.append(errorBox(new Error(status.error)));
 		else if (!status.credential_available && !status.configuration_setup) info.append(h("p", {}, t("desktop_credential_missing")));
 		platform.textContent = status.enrollment_supported === true ? t("desktop_enrollment_help") : status.enrollment_supported === false ? t("desktop_enrollment_unsupported") : "";
 		connect.disabled = state.nativeBusy || !!status.error || !status.credential_available;
@@ -12251,7 +16100,7 @@ function orderButtons(sibs, i, key, run) {
 		const before = sibs.map((x) => x[key]);
 		const order = before.slice();
 		[order[i], order[j]] = [order[j], order[i]];
-		run("order", before, order);
+		run("order", before, order, Object.fromEntries(sibs.map((x) => [x[key], x.version])));
 	};
 	const can = (j) => j >= 0 && j < sibs.length && sibs[j].pinned === me.pinned;
 	return [
@@ -12291,21 +16140,33 @@ function setEditing(n) {
 function drawer(...children) {
 	const box = h("div", {
 		class: "drawer",
+		id: `drawer-${crypto.randomUUID()}`,
 		hidden: true
 	}, ...children);
 	const toggle = h("button", {
 		class: "mini",
 		title: t("more"),
 		"aria-label": t("more"),
+		"aria-controls": box.id,
+		"aria-expanded": "false",
 		onclick: () => {
 			box.hidden = !box.hidden;
+			toggle.setAttribute("aria-expanded", String(!box.hidden));
 			if (!box.hidden) drawerOpens += 1;
 			setEditing(editing + (box.hidden ? -1 : 1));
 		}
 	}, "…");
-	const open = () => {
+	const open = (focus = false) => {
 		if (box.hidden) toggle.click();
+		if (focus) box.querySelector("input:not(:disabled),textarea:not(:disabled),select:not(:disabled),button:not(:disabled),a")?.focus();
 	};
+	box.addEventListener("keydown", (event) => {
+		if (event.key === "Escape" && !event.isComposing) {
+			event.preventDefault();
+			if (!box.hidden) toggle.click();
+			toggle.focus();
+		}
+	});
 	return {
 		box,
 		toggle,
@@ -12372,48 +16233,36 @@ function liveReload(fn, kinds, prepare = null) {
 }
 async function viewProjects(main) {
 	freshPage();
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
 	const out = h("div", {});
 	const tree = h("div", { class: "panel" });
 	const archived = h("div", {});
-	const name = h("input", {
-		placeholder: t("new_project_name"),
-		"aria-label": t("new_project_name"),
-		maxlength: 80,
-		required: true
-	});
-	const repositories = [...new Set((state.caps?.features?.repository_sync || []).map((binding) => binding.repository))].sort();
-	const repository = h("select", { "aria-label": t("project_repository_optional") }, h("option", { value: "" }, t("project_repository_later")), ...repositories.map((value) => h("option", { value }, value)));
-	const add = h("button", {
-		class: "primary",
-		type: "submit",
-		disabled: !may("manage")
-	}, t("add_project"));
-	const create = async (event) => {
-		event.preventDefault();
-		if (add.disabled || !name.value.trim()) return;
-		add.disabled = true;
-		const params = {
-			name: name.value.trim(),
-			...repository.value ? { repositories: [repository.value] } : {}
-		};
-		const op = await change(out, "project.create", {}, params, {}, "project.create");
-		add.disabled = false;
-		if (op) {
-			name.value = "";
+	const create = createRecordForm({
+		h,
+		t,
+		api,
+		caps: () => state.caps,
+		guard: () => assertView(connection),
+		namespace: connection.namespace,
+		kind: "project",
+		errorBox,
+		opStatus,
+		onCreated: async (op) => {
 			location.hash = `#/project/${op.result.project_id}`;
 		}
-	};
-	const fields = h("div", { class: "capture-fields" }, h("label", {}, t("new_project_name"), name), ...repositories.length ? [h("label", {}, t("project_repository_optional"), repository)] : []);
+	});
 	const showArchived = h("input", { type: "checkbox" });
-	main.append(h("h1", {}, t("nav_projects")), h("p", { class: "muted" }, t("projects_help")), manageNote() || "", h("form", {
-		class: "panel",
-		onsubmit: create
-	}, fields, h("div", { class: "actions" }, add)), out, tree, h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
+	main.append(h("h1", {}, t("nav_projects")), h("p", { class: "muted" }, t("projects_help")), manageNote() || "", create.box, out, tree, h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
 	const render = async (fromEvent = false) => {
 		const opens = drawerOpens;
 		try {
 			const data = await api("GET", `/projects${showArchived.checked ? "?include_archived=true" : ""}`);
 			if (!tree.isConnected) return;
+			create.setContext({ rows: data.projects });
 			if (holdRender(fromEvent, opens)) {
 				idleReload = () => render(true);
 				return;
@@ -12422,11 +16271,14 @@ async function viewProjects(main) {
 			const rows = [];
 			const walk = (sibs, depth, parent) => sibs.forEach((p, i) => {
 				const msg = out;
-				const run = async (what, before, order) => {
+				const run = async (what, before, order, versions) => {
 					if (what === "order") await change(msg, "project.order", {}, {
 						parent_id: parent,
 						order
-					}, { before }, `project.order.${parent}`);
+					}, {
+						before,
+						expected_versions: versions
+					}, `project.order.${parent}`);
 					else await change(msg, "project.pin", { project_id: p.project_id }, { pinned: !before }, { before }, `project.pin.${p.project_id}`);
 					render();
 				};
@@ -12461,10 +16313,25 @@ async function viewProjects(main) {
 						if (await change(msg, "project.update", { project_id: p.project_id }, { archived: true }, { expected_version: p.version }, `project.archive.${p.project_id}`) || STALE.includes(lastFailure)) render();
 					}
 				}, t("archive"))));
-				rows.push(indent(h("div", { class: "row tree" }, h("div", { class: "grow" }, h("a", {
+				const row = indent(h("div", { class: "row tree" }, h("div", { class: "grow" }, h("a", {
 					class: "title",
 					href: `#/project/${p.project_id}`
-				}, p.name), p.description ? h("div", { class: "muted clamp" }, p.description) : null), ...counts(p.counts), may("manage") ? h("span", { class: "tree-actions" }, ...orderButtons(sibs, i, "project_id", run), d.toggle) : null), depth), d.box);
+				}, p.name), p.description ? h("div", { class: "muted clamp" }, p.description) : null), ...counts(p.counts), may("manage") ? h("span", { class: "tree-actions" }, d.toggle) : null), depth);
+				if (may("manage")) d.box.prepend(h("div", { class: "actions" }, ...orderButtons(sibs, i, "project_id", run)));
+				if (may("manage")) row.querySelector(".tree-actions").prepend(treeInteractions({
+					h,
+					t,
+					row,
+					scope: `${connection.namespace}.project.${parent}`,
+					siblings: sibs,
+					index: i,
+					key: "project_id",
+					run,
+					open: () => d.open(true),
+					guard: () => assertView(connection),
+					editing: (active) => setEditing(editing + (active ? 1 : -1))
+				}));
+				rows.push(row, d.box);
 				walk(p.children, depth + 1, p.project_id);
 			});
 			walk(data.projects, 0, "");
@@ -12487,6 +16354,11 @@ async function viewProjects(main) {
 }
 async function viewProject(main, pid) {
 	freshPage();
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
 	let draft = null;
 	const head = h("div", { class: "panel" });
 	const items = h("div", { class: "panel" });
@@ -12498,25 +16370,20 @@ async function viewProject(main, pid) {
 	const out = h("div", {});
 	const archived = h("div", {});
 	const showArchived = h("input", { type: "checkbox" });
-	const title = h("input", {
-		placeholder: t("new_item_title"),
-		maxlength: 120
+	const create = createRecordForm({
+		h,
+		t,
+		api,
+		caps: () => state.caps,
+		guard: () => assertView(connection),
+		namespace: connection.namespace,
+		kind: "work_item",
+		projectId: pid,
+		errorBox,
+		opStatus,
+		onCreated: async () => render()
 	});
-	const add = h("button", {
-		class: "primary",
-		disabled: !may("manage"),
-		onclick: async () => {
-			if (!title.value.trim()) return;
-			add.disabled = true;
-			const op = await change(out, "work_item.create", { project_id: pid }, { title: title.value.trim() }, {}, `wi.create.${pid}`);
-			add.disabled = false;
-			if (op) {
-				title.value = "";
-				render();
-			}
-		}
-	}, t("add_item"));
-	main.append(manageNote() || "", out, head, work, h("h2", {}, t("work_items")), h("div", { class: "filters" }, title, add), items, h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
+	main.append(manageNote() || "", out, head, work, h("h2", {}, t("work_items")), create.box, items, h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
 	const render = async (fromEvent = false) => {
 		const opens = drawerOpens;
 		let data;
@@ -12533,6 +16400,11 @@ async function viewProject(main, pid) {
 		}
 		freshPage();
 		const p = data.project;
+		create.setContext({
+			rows: data.work_items,
+			name: p.name,
+			active: !p.archived
+		});
 		work.hidden = !Array.isArray(data.work);
 		fill(work, h("h2", {}, t("delivery_project_work")), ...data.work?.length ? data.work.map((item) => deliveryWork(item, p.repositories)) : [h("p", { class: "muted" }, t("delivery_no_work"))]);
 		const msg = out;
@@ -12571,7 +16443,7 @@ async function viewProject(main, pid) {
 				if (ok || draft) render();
 			}
 		}, t("save"))));
-		fill(head, h("div", { class: "muted" }, h("a", { href: "#/projects" }, t("nav_projects")), ...data.path.flatMap((x) => [" / ", h("a", { href: `#/project/${x.project_id}` }, x.name)])), h("h1", {}, p.name, " ", p.archived ? chip(t("archived"), "warn") : null), p.description ? h("p", { class: "pre" }, p.description) : null, h("div", { class: "actions" }, ...counts(p.counts), ...p.repositories.map((r) => chip(r)), !p.archived && state.caps?.features?.project_dispatch?.version === 1 ? h("a", {
+		fill(head, h("div", { class: "muted" }, h("a", { href: "#/projects" }, t("nav_projects")), ...data.path.flatMap((x) => [" / ", h("a", { href: `#/project/${x.project_id}` }, x.name)])), h("h1", {}, p.name, " ", p.archived ? chip(t("archived"), "warn") : null), p.description ? h("details", {}, h("summary", {}, t("description"), " · ", p.description.replace(/\s+/g, " ").slice(0, 140), p.description.length > 140 ? "…" : ""), h("p", { class: "pre" }, p.description)) : null, h("div", { class: "actions" }, ...counts(p.counts), ...p.repositories.map((r) => chip(r)), !p.archived && state.caps?.features?.project_dispatch?.version === 1 ? h("a", {
 			class: "session-project-link",
 			href: `#/dispatch/${pid}`
 		}, t("dispatch_title")) : null, p.task_project ? chip(`Task Service: ${p.task_project}`) : null, may("manage") && !p.archived ? d.toggle : null), d.box, data.sub_projects.length ? h("p", {}, t("sub_projects"), ": ", ...data.sub_projects.flatMap((x, i) => [i ? " · " : "", h("a", { href: `#/project/${x.project_id}` }, x.name)])) : null);
@@ -12582,11 +16454,14 @@ async function viewProject(main, pid) {
 		const rows = [];
 		const walk = (sibs, depth, parent) => sibs.forEach((w, i) => {
 			const rowMsg = out;
-			const run = async (what, before, order) => {
+			const run = async (what, before, order, versions) => {
 				if (what === "order") await change(rowMsg, "work_item.order", { project_id: pid }, {
 					parent_id: parent,
 					order
-				}, { before }, `wi.order.${pid}.${parent}`);
+				}, {
+					before,
+					expected_versions: versions
+				}, `wi.order.${pid}.${parent}`);
 				else await change(rowMsg, "work_item.pin", { work_item_id: w.work_item_id }, { pinned: !before }, { before }, `wi.pin.${w.work_item_id}`);
 				render();
 			};
@@ -12618,10 +16493,25 @@ async function viewProject(main, pid) {
 				}
 			}, t("archive_with_children"))));
 			const done = w.steps.filter((s) => s.done).length;
-			rows.push(indent(h("div", { class: "row tree" }, stateChip(w.completion), h("div", { class: "grow" }, h("a", {
+			const row = indent(h("div", { class: "row tree" }, stateChip(w.completion), h("div", { class: "grow" }, h("a", {
 				class: "title",
 				href: `#/item/${w.work_item_id}`
-			}, w.title), w.derived_from ? h("span", { class: "muted" }, " ⑂") : null), w.steps.length ? chip(`${done}/${w.steps.length}`) : null, w.completion.pending ? chip(t("needs_decision"), "warn") : null, may("manage") && !p.archived ? h("span", { class: "tree-actions" }, ...orderButtons(sibs, i, "work_item_id", run), dr.toggle) : null), depth), dr.box);
+			}, w.title), w.derived_from ? h("span", { class: "muted" }, " ⑂") : null), w.steps.length ? chip(`${done}/${w.steps.length}`) : null, w.completion.pending ? chip(t("needs_decision"), "warn") : null, may("manage") && !p.archived ? h("span", { class: "tree-actions" }, dr.toggle) : null), depth);
+			if (may("manage") && !p.archived) dr.box.prepend(h("div", { class: "actions" }, ...orderButtons(sibs, i, "work_item_id", run)));
+			if (may("manage") && !p.archived) row.querySelector(".tree-actions").prepend(treeInteractions({
+				h,
+				t,
+				row,
+				scope: `${connection.namespace}.item.${pid}.${parent}`,
+				siblings: sibs,
+				index: i,
+				key: "work_item_id",
+				run,
+				open: () => dr.open(true),
+				guard: () => assertView(connection),
+				editing: (active) => setEditing(editing + (active ? 1 : -1))
+			}));
+			rows.push(row, dr.box);
 			walk(w.children, depth + 1, w.work_item_id);
 		});
 		walk(data.work_items, 0, "");
@@ -12637,7 +16527,6 @@ async function viewProject(main, pid) {
 				render();
 			}
 		}, t("restore")))));
-		add.disabled = !may("manage") || p.archived;
 	};
 	showArchived.onchange = () => render();
 	await render();
@@ -12730,7 +16619,17 @@ async function viewWorkItem(main, wid) {
 		ref.placeholder = t("link_ref_" + kind.value);
 	};
 	kind.onchange();
-	main.append(manageNote() || "", notice, reading, panel);
+	const results = state.caps?.features?.work_item_results?.version === 1 ? resultSourcesPanel({
+		h,
+		t,
+		api,
+		guard: () => assertView(connection),
+		workItemId: wid,
+		linkTarget,
+		onEvents,
+		errorBox
+	}) : null;
+	main.append(manageNote() || "", notice, reading, results?.box || "", panel);
 	let displayedItem = null, renderQueue = Promise.resolve();
 	const showReading = (w, progress) => {
 		const readingSupported = state.caps?.features?.work_item_reads?.version === 1 && progress;
@@ -12876,7 +16775,7 @@ async function viewWorkItem(main, wid) {
 				if (ok || draft) render();
 			}
 		}, t("save"))));
-		const section = (label, text) => text ? [h("h2", {}, label), h("div", { class: "panel pre" }, text)] : [];
+		const section = (label, text) => text ? [h("details", { class: "panel" }, h("summary", {}, label, " · ", text.replace(/\s+/g, " ").slice(0, 140), text.length > 140 ? "…" : ""), h("div", { class: "pre" }, text))] : [];
 		const setSteps = async (steps, added) => {
 			if (await update({ steps }, `wi.steps.${wid}`) && added) newStep.value = "";
 			render();
@@ -12912,7 +16811,7 @@ async function viewWorkItem(main, wid) {
 				render();
 			}
 		};
-		const linkRows = data.links.map((l) => h("div", { class: "row" }, chip(t("link_" + l.kind)), h("div", { class: "grow" }, linkTarget(l), l.note ? h("div", { class: "muted" }, l.note) : null, h("div", { class: "muted" }, `${l.linked_by} · ${when(epoch(l.linked_at))}`)), l.kind === "checkpoint" && l.target?.found && live ? continueFrom(w, l.ref, notice) : null, live && may("manage") ? h("button", {
+		const linkRows = data.links.map((l) => h("div", { class: "row" }, chip(t("link_" + l.kind)), h("div", { class: "grow" }, linkTarget(l), l.note ? h("div", { class: "muted" }, l.note) : null, h("div", { class: "muted" }, `${l.linked_by} · ${when(epoch(l.linked_at))}`)), l.kind === "checkpoint" && l.target?.found && live ? continueFrom(w, l.ref, notice, data.children) : null, live && may("manage") ? h("button", {
 			class: "mini",
 			title: t("remove"),
 			"aria-label": t("remove"),
@@ -12941,9 +16840,39 @@ async function viewWorkItem(main, wid) {
 		}
 	};
 	await render();
-	return liveReload(render, (event) => observationAffected("work_item", wid, event), refreshSafety);
+	const repair = /^op_[0-9a-f]{32}$/.test(displayedItem?.operation_id) && state.caps?.features?.managed_repairs?.version === 1 ? repairWorkItemPanel({
+		h,
+		t,
+		api,
+		guard: () => assertView(connection),
+		projectId: displayedItem.project_id,
+		workItemId: wid,
+		originOperationId: displayedItem.operation_id,
+		errorBox
+	}) : null;
+	if (repair) {
+		panel.before(repair.box);
+		await repair.refresh();
+	}
+	try {
+		assertView(connection);
+	} catch {
+		repair?.dispose();
+		results?.dispose();
+		return;
+	}
+	const offRepair = repair ? onEvents((event) => {
+		if (event.resource_type === "operation" || observationAffected("work_item", wid, event)) return repair.refresh();
+	}) : null;
+	const off = liveReload(render, (event) => observationAffected("work_item", wid, event), refreshSafety);
+	return () => {
+		off?.();
+		offRepair?.();
+		repair?.dispose();
+		results?.dispose();
+	};
 }
-function continueFrom(w, checkpointId, notice) {
+function continueFrom(w, checkpointId, notice, children = []) {
 	const connection = {
 		epoch: state.epoch,
 		namespace: state.namespace,
@@ -12964,13 +16893,15 @@ function continueFrom(w, checkpointId, notice) {
 	const go = h("button", {
 		class: "primary",
 		onclick: async () => {
+			const instructions = instr.value.trim() ? instr.value : draft.refs().length ? t("dispatch_inspect_images") : "";
+			if (!instructions) return;
 			go.disabled = true;
 			let op;
 			try {
 				if (!draft.ready() && !draft.pending()) throw new Error(t("attachments_not_ready"));
 				if (state.caps?.artifacts && !expectedHead && !draft.pending()) throw new Error(t("source_unavailable"));
 				op = await draft.perform("checkpoint.continue", { checkpoint_id: checkpointId }, {
-					instructions: instr.value,
+					instructions,
 					agent: agent.value,
 					...state.caps?.artifacts ? {
 						artifacts: draft.refs(),
@@ -12998,7 +16929,8 @@ function continueFrom(w, checkpointId, notice) {
 	}, t("start_agent_work"));
 	const note = confinementNote(w.links?.find((l) => l.ref === checkpointId)?.target?.host, agent);
 	api("GET", `/checkpoints/${encodeURIComponent(checkpointId)}`).then((x) => note.setHost(x.checkpoint.host)).catch(() => {});
-	const d = drawer(note, instr, draft.box, h("div", { class: "actions" }, agent, go), out);
+	const unfinished = children.filter((child) => child.display_state !== "done");
+	const d = drawer(unfinished.length ? h("p", { class: "note warn" }, t("results_unfinished", { count: unfinished.length }), " ", ...unfinished.flatMap((child, index) => [index ? " · " : "", h("a", { href: `#/item/${encodeURIComponent(child.work_item_id)}` }, child.title)])) : null, note, instr, draft.box, h("div", { class: "actions" }, agent, go), out);
 	const why = !may("start") ? t("needs_start_scope") : !may("manage") ? t("needs_manage_scope") : null;
 	return h("div", { class: "grow" }, h("button", {
 		class: "secondary",
@@ -13488,6 +17420,7 @@ async function viewStart(main) {
 		api,
 		caps: () => state.caps,
 		guard: () => assertView(connection),
+		submitPreference: submit,
 		ready: () => state.online && !state.nativeBusy,
 		errorBox,
 		opStatus,
@@ -13561,6 +17494,7 @@ async function viewPublished(main) {
 		api,
 		caps: () => state.caps,
 		guard: () => assertView(connection),
+		submitPreference: submit,
 		ready: () => state.online && !state.nativeBusy,
 		errorBox,
 		opStatus,
@@ -13590,26 +17524,43 @@ async function viewPublished(main) {
 		offEvents();
 	};
 }
-async function viewProjectDispatch(main, pid) {
+async function viewProjectDispatch(main, pid, repairWid = null) {
 	const connection = {
 		epoch: state.epoch,
 		namespace: state.namespace,
 		generation
 	};
+	let repairSeed = null;
+	if (repairWid) try {
+		if (!/^wi_[0-9a-f]{20}$/.test(repairWid) || state.caps?.features?.managed_repairs?.version !== 1) throw new Error(t("repair_unavailable"));
+		const record = await api("GET", `/work-items/${repairWid}/repair`);
+		assertView(connection);
+		validateRepairRecord(record, pid, repairWid);
+		if (record.dispatch_operation_id) {
+			main.append(h("h1", {}, t("repair_title")), h("p", {}, t("repair_dispatched")), h("a", { href: `#/op/${record.dispatch_operation_id}` }, t("repair_open_dispatch")));
+			return;
+		}
+		repairSeed = repairDispatchSeed(record);
+	} catch (error) {
+		if (!["VIEW_CHANGED", "CONNECTION_CHANGED"].includes(error.code)) main.append(errorBox(error));
+		return;
+	}
 	const panel = repositoryStartPanel({
 		h,
 		t,
 		api,
 		caps: () => state.caps,
 		guard: () => assertView(connection),
+		submitPreference: submit,
+		repairSeed,
 		ready: () => state.online && !state.nativeBusy,
 		errorBox,
 		opStatus,
 		project: pid,
-		storageKey: `batc.dispatch.${connection.namespace}.${pid}`,
-		attachmentFactory: (prompt, changed) => attachmentDraft(`dispatch.${pid}`, prompt, [], false, changed)
+		storageKey: `batc.dispatch.${connection.namespace}.${pid}${repairWid ? "." + repairWid : ""}`,
+		attachmentFactory: repairSeed ? null : (prompt, changed) => attachmentDraft(`dispatch.${pid}`, prompt, [], false, changed)
 	});
-	main.append(h("a", { href: `#/project/${pid}` }, t("dispatch_back")), h("h1", {}, t("dispatch_title")), h("p", { class: "muted" }, t("dispatch_intro")), panel.box);
+	main.append(h("a", { href: `#/project/${pid}` }, t("dispatch_back")), h("h1", {}, t("dispatch_title")), h("p", { class: "muted" }, t(repairSeed ? "repair_dispatch_help" : "dispatch_intro")), panel.box);
 	try {
 		await panel.init();
 	} catch {}
@@ -13760,9 +17711,12 @@ var NAV = [
 ];
 var workspaceNav = null;
 var workspaceIdentity = "";
+var workspaceSidebar = null;
 function mountWorkspace(name) {
 	const identity = state.token ? `${state.epoch}:${state.namespace}` : "";
 	if (workspaceIdentity !== identity) {
+		workspaceSidebar?.dispose();
+		workspaceSidebar = null;
 		workspaceNav?.dispose();
 		workspaceNav = null;
 		workspaceIdentity = identity;
@@ -13781,6 +17735,11 @@ function mountWorkspace(name) {
 				errorBox
 			});
 			document.getElementById("workspace").prepend(workspaceNav.box);
+			workspaceSidebar = setupSidebarResizer({
+				aside: workspaceNav.box,
+				workspace: document.getElementById("workspace"),
+				t
+			});
 		}
 	}
 	document.body.classList.toggle("has-workspace", Boolean(state.token));
@@ -13821,7 +17780,8 @@ async function route() {
 		teardown = null;
 	}
 	freshPage();
-	const [name, ...rest] = (location.hash.replace(/^#\//, "") || "home").split("/").map(decodeURIComponent);
+	let [name, ...rest] = (location.hash.replace(/^#\//, "") || "home").split("/").map(decodeURIComponent);
+	if (name === "home" && state.token && state.caps?.managed_installation && !state.caps.hosts?.length) name = "settings";
 	mountWorkspace(name);
 	const main = document.getElementById("main");
 	main.replaceChildren();
@@ -13861,7 +17821,51 @@ async function route() {
 		if (off) off();
 		return;
 	}
-	teardown = off || null;
+	let preferences, skills;
+	if (name === "settings" && state.caps?.features?.host_preferences?.version === 1) {
+		const connection = {
+			epoch: state.epoch,
+			namespace: state.namespace,
+			generation
+		};
+		preferences = modelPreferencesPanel({
+			h,
+			t,
+			api,
+			caps: () => state.caps,
+			guard: () => assertView(connection),
+			submit,
+			storageKey: `batc.model-preferences.${connection.namespace}`,
+			onEvents,
+			errorBox
+		});
+		main.append(preferences.box);
+	}
+	if (name === "project" && state.caps?.features?.project_skills?.version === 1) {
+		const connection = {
+			epoch: state.epoch,
+			namespace: state.namespace,
+			generation
+		};
+		skills = projectSkillsPanel({
+			h,
+			t,
+			api,
+			caps: () => state.caps,
+			guard: () => assertView(connection),
+			submit,
+			projectId: rest[0],
+			storageKey: `batc.project-skills.${connection.namespace}.${rest[0]}`,
+			onEvents,
+			errorBox
+		});
+		main.append(skills.box);
+	}
+	teardown = () => {
+		off?.();
+		preferences?.dispose();
+		skills?.dispose();
+	};
 	state.viewReady = true;
 }
 async function start() {
@@ -13890,7 +17894,9 @@ async function start() {
 			if (attempt === state.nativeAttempt) state.nativeBusy = false;
 		}
 	} else {
-		state.token = loadToken();
+		const browserSession = await restoreBrowserSession().catch(() => false);
+		if (browserSession) clearToken();
+		state.token = browserSession ? browserSessionToken : loadToken();
 		if (state.token) try {
 			await activate(await api("GET", "/capabilities"));
 		} catch {

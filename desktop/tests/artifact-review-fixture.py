@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from bat_agent_connector import api_auth, artifacts
+from bat_agent_connector import api_auth, artifacts, platform_files
 from tests.mockbat import TOKEN, MockBat
 from tests.operation_helpers import settle_operations
 from tests.test_artifact_capture import daemon as daemon_fixture
@@ -57,6 +57,8 @@ async def standalone_execution(daemon, mock, human, root):
 async def main():
     with tempfile.TemporaryDirectory(prefix="batc-artifact-review-ui-") as temporary:
         root = Path(temporary)
+        platform_files.ensure_private_directory(root / "state")
+        platform_files.ensure_private_directory(root / "config")
         os.environ.update(BATC_CONFIG_DIR=str(root / "config"), BATC_STATE_DIR=str(root / "state"), BATC_TEST_TOKEN=TOKEN)
         os.environ.pop("BATC_DEVICE_ID", None)
         mock = MockBat()

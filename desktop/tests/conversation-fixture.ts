@@ -43,7 +43,8 @@ export async function mountConversation(page: Page, native: boolean, dispatch: (
   await page.route('**/api/v1/**', async route => {
     if (native) throw new Error('Native must use IPC');
     const request = route.request(), url = new URL(request.url());
-    const result = await dispatch({method: request.method(), path: url.pathname.slice(7) + url.search});
+    const result = await dispatch({method: request.method(), path: url.pathname.slice(7) + url.search,
+      body: request.postData() ? request.postDataJSON() : null, idempotency_key: request.headers()['idempotency-key']});
     await route.fulfill({status: result.status, json: result.data});
   });
 }

@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-import fcntl
 import functools
 import hashlib
 import json
@@ -21,6 +20,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import platform_files
 from .config import state_dir
 
 RETIRED = frozenset({"stopped", "absent_at_cleanup"})
@@ -119,11 +119,11 @@ def _open_claim(path: Path, host: str, session_id: str) -> int:
     from .confinement import ConfinementRefused
 
     directory = path.parent / "start-claims"
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    platform_files.ensure_private_directory(directory)
     digest = hashlib.sha256((host + "\0" + session_id).encode()).hexdigest()
-    fd = os.open(directory / (digest + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fd = platform_files.open_private_file(directory / (digest + ".lock"), os.O_RDWR | os.O_CREAT)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        platform_files.lock(fd, blocking=False)
     except BlockingIOError as exc:
         os.close(fd)
         raise ConfinementRefused("START_IN_PROGRESS", "another process or coroutine is starting this session; "
@@ -208,19 +208,22 @@ def _after_fork() -> None:
     _start_call.set(None)
 
 
-os.register_at_fork(after_in_child=_after_fork)
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork)
 
 
 @contextlib.contextmanager
 def _locked(path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # A CLI registry write may be the first creator of central state. Its
+    # directory must satisfy the service lease contract on every platform.
+    platform_files.ensure_private_directory(path.parent)
     lock = path.with_suffix(".lock")
-    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    fd = platform_files.open_private_file(lock, os.O_RDWR | os.O_CREAT)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        platform_files.lock(fd)
         yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        platform_files.unlock(fd)
         os.close(fd)
 
 
@@ -250,6 +253,9 @@ def _validate_unique(items: list[dict]) -> None:
 
 def _write_document(path: Path, data: dict) -> None:
     _validate_unique(data.get("sessions", []))
+    if platform_files.WINDOWS:
+        platform_files.atomic_write(path, json.dumps(data, indent=1).encode())
+        return
     tmp = path.with_suffix(".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
@@ -257,11 +263,7 @@ def _write_document(path: Path, data: dict) -> None:
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)
-    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    platform_files.sync_directory(path.parent)
 
 
 def _write(path: Path, items: list[dict]) -> None:

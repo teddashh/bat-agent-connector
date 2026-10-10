@@ -1,4 +1,6 @@
 // One fixed standalone start. Reload and events only read accepted operations.
+import {composerShortcut} from './composer-shortcut.js';
+import {modelChoice} from './model-preferences.js';
 const object = v => v && typeof v === "object" && !Array.isArray(v);
 const operationId = v => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
 const terminal = op => ["succeeded", "failed", "cancelled"].includes(op?.status);
@@ -17,7 +19,7 @@ function validRequest(r) {
     ["model", "title", "prompt"].every(k => !(k in r.params) || text(r.params[k], k === "prompt" ? 20000 : 256)) &&
     object(r.preconditions) && Object.keys(r.preconditions).length === 0;
 }
-export function sessionStartPanel({h, t, api, caps, guard, ready, errorBox, opStatus, storageKey}) {
+export function sessionStartPanel({h, t, api, caps, guard, ready, errorBox, opStatus, storageKey, submitPreference}) {
   let raw;
   try {raw = JSON.parse(localStorage.getItem(storageKey));} catch { /* no saved draft */ }
   let saved = Object.fromEntries(fields.map(k => [k, typeof raw?.[k] === "string" ? raw[k] : k === "agent" ? "claude" : ""]));
@@ -47,6 +49,7 @@ export function sessionStartPanel({h, t, api, caps, guard, ready, errorBox, opSt
   const title = h("input", {"aria-label": t("start_title"), maxlength: 256});
   const prompt = h("textarea", {"aria-label": t("start_prompt"), maxlength: 20000, rows: 6});
   const inputs = {host, workspace, agent, model, title, prompt};
+  const models = modelChoice({h, t, api, caps, guard, host: () => saved.host, agent, model, submit: submitPreference, storageKey});
   const fill = () => {for (const [k, el] of Object.entries(inputs)) el.value = saved[k];};
   const showError = e => {if (current()) status.replaceChildren(errorBox(e));};
   function renderWorkspaces() {
@@ -58,6 +61,7 @@ export function sessionStartPanel({h, t, api, caps, guard, ready, errorBox, opSt
   }
   async function discover() {
     if (!current() || saved.intent || !observe() || !saved.host) return;
+    models.refresh();
     const expected = ++discovery, selectedHost = saved.host;
     discovering = true; discoveredHost = ""; workspaces = []; renderWorkspaces(); update();
     discoveryStatus.textContent = t("start_loading_workspaces");
@@ -125,15 +129,17 @@ export function sessionStartPanel({h, t, api, caps, guard, ready, errorBox, opSt
     try {persist();} catch (e) {showError(e);} update(); if (key === "host") discover();
   });
   const label = (name, control) => h("label", {}, t(name), control);
+  const shortcut = composerShortcut({h, t, input: prompt, button: apply, storageKey: `${storageKey}.shortcut`, guard});
   const box = h("section", {class: "session-start", "data-session-start": ""},
     h("div", {class: "panel"}, h("div", {class: "capture-fields"}, label("host", host), label("start_workspace", workspace)),
       h("div", {class: "actions"}, reload), discoveryStatus, h("p", {class: "muted"}, t("start_isolation"))),
     h("div", {class: "panel"}, h("div", {class: "capture-fields"}, label("start_agent", agent), label("start_model", model), label("start_title", title)),
-      label("start_prompt", prompt), h("p", {class: "muted"}, t("start_prompt_help"))),
+      models.box, label("start_prompt", prompt), shortcut.box, h("p", {class: "muted"}, t("start_prompt_help"))),
     h("div", {class: "actions"}, apply, check, another), result, status);
   function update() {
     const fixed = Boolean(saved.intent);
     for (const el of Object.values(inputs)) el.disabled = busy || fixed;
+    models.update();
     workspace.disabled ||= discovering || !saved.host;
     reload.hidden = fixed; reload.disabled = discovering || !observe() || !saved.host;
     apply.hidden = Boolean(saved.intent?.operation_id || saved.intent?.refused);

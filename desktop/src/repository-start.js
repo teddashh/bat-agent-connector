@@ -1,4 +1,6 @@
 // One explicitly published head and one new managed session. Central owns every effect.
+import {composerShortcut} from './composer-shortcut.js';
+import {modelChoice} from './model-preferences.js';
 const object = v => v && typeof v === 'object' && !Array.isArray(v);
 const equal = (a, b) => a === b || (Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => equal(v, b[i]))) ||
   (object(a) && object(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every(k => equal(a[k], b[k])));
@@ -14,13 +16,24 @@ const ref = v => typeof v === 'string' && /^refs\/heads\/(?!-)(?!.*\.\.)(?!.*\/\
 const branchRef = value => value.startsWith('refs/') ? value : 'refs/heads/' + value;
 const preconditions = v => object(v) && Object.keys(v).length === 2 && Number.isSafeInteger(v.repository_id) && v.repository_id > 0 && digest(v.binding_digest);
 const projectId = v => typeof v === 'string' && /^prj_[0-9a-f]{20}$/.test(v);
+const workItemId = v => typeof v === 'string' && /^wi_[0-9a-f]{20}$/.test(v);
 const artifactRefs = v => Array.isArray(v) && v.every(r => object(r) && Object.keys(r).length === 3 &&
   /^art_[0-9a-f]{32}$/.test(r.artifact_id) && Number.isSafeInteger(r.revision) && r.revision > 0 && digest(r.digest));
-const requestPreconditions = r => object(r.params) && 'project_id' in r.params ? projectId(r.params.project_id) && object(r.preconditions) &&
-  Number.isSafeInteger(r.preconditions.expected_project_version) && r.preconditions.expected_project_version > 0 &&
-  preconditions(Object.fromEntries(Object.entries(r.preconditions).filter(([k]) => k !== 'expected_project_version'))) : preconditions(r.preconditions);
+const requestPreconditions = r => {
+  if (!object(r.params) || !object(r.preconditions)) return false;
+  const fixed = {...r.preconditions};
+  if ('project_id' in r.params) {
+    if (!projectId(r.params.project_id) || !Number.isSafeInteger(fixed.expected_project_version) || fixed.expected_project_version < 1) return false;
+    delete fixed.expected_project_version;
+  }
+  if ('work_item_id' in r.params) {
+    if (!projectId(r.params.project_id) || !workItemId(r.params.work_item_id) || !digest(fixed.expected_work_item_fingerprint)) return false;
+    delete fixed.expected_work_item_fingerprint;
+  }
+  return preconditions(fixed);
+};
 const validRequest = r => r?.action === 'repository.continue' && target(r.target) && requestPreconditions(r) && object(r.params) &&
-  Object.keys(r.params).every(k => ['agent', 'prompt', 'title', 'model', 'artifacts', 'project_id', 'source_ref', 'source_sha'].includes(k)) &&
+  Object.keys(r.params).every(k => ['agent', 'prompt', 'title', 'model', 'artifacts', 'project_id', 'work_item_id', 'source_ref', 'source_sha'].includes(k)) &&
   ref(r.params.source_ref) && sha(r.params.source_sha) && ['claude', 'codex'].includes(r.params.agent) &&
   typeof r.params.prompt === 'string' && r.params.prompt.trim() && r.params.prompt.length <= 12000 &&
   ['title', 'model'].every(k => !(k in r.params) || text(r.params[k], 256)) &&
@@ -32,24 +45,28 @@ const validPreview = (p, input) => object(p) && equal(p.target, input.target) &&
   (p.workspace.name == null || typeof p.workspace.name === 'string');
 // Both are checked after existing-key replay, before the operation is inserted.
 const noAdmission = new Set(['REPOSITORY_NOT_BOUND', 'REPOSITORY_HOST_UNAVAILABLE']);
-export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, opStatus, storageKey, project = null, attachmentFactory}) {
+export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, opStatus, storageKey, project = null, repairSeed = null, attachmentFactory, submitPreference}) {
+  if (repairSeed && (repairSeed.project_id !== project || !workItemId(repairSeed.work_item_id) ||
+      !digest(repairSeed.expected_work_item_fingerprint) || typeof repairSeed.prompt !== 'string' || !repairSeed.prompt.trim())) throw new Error(t('repair_unavailable'));
   let raw; try {raw = JSON.parse(localStorage.getItem(storageKey));} catch { /* new draft */ }
   let saved = {target: target(raw?.target) ? raw.target : null, source_ref: typeof raw?.source_ref === 'string' ? raw.source_ref : '',
     agent: ['claude', 'codex'].includes(raw?.agent) ? raw.agent : 'claude', prompt: typeof raw?.prompt === 'string' ? raw.prompt : '',
     model: typeof raw?.model === 'string' ? raw.model : '', title: typeof raw?.title === 'string' ? raw.title : ''};
   if (raw?.intent) {
-    const valid = validRequest(raw.intent.request) && text(raw.intent.key, 200) && (!project || raw.intent.request.params.project_id === project);
+    const valid = validRequest(raw.intent.request) && text(raw.intent.key, 200) && (!project || raw.intent.request.params.project_id === project) &&
+      (repairSeed ? raw.intent.request.params.work_item_id === repairSeed.work_item_id : !raw.intent.request.params.work_item_id);
     saved.intent = {request: valid ? raw.intent.request : null, key: valid ? raw.intent.key : null,
       operation_id: oid(raw.intent.operation_id) ? raw.intent.operation_id : null,
       refused: !raw.intent.operation_id && noAdmission.has(raw.intent.refused) ? raw.intent.refused : null};
     if (valid) Object.assign(saved, {target: raw.intent.request.target, title: '', model: ''}, raw.intent.request.params);
   }
+  if (repairSeed && !saved.intent) saved.prompt = repairSeed.prompt;
   let preview = null, operation = null, busy = false, reading = false, sequence = 0, readFailed = false, submission = null, refreshing = null;
   let projectDoc = null, projectFailed = Boolean(project), previewProjectVersion = null, autoSelect = !raw, projectQueue = Promise.resolve();
   const current = () => {try {guard(); return true;} catch {return false;}};
   const persist = () => {guard(); localStorage.setItem(storageKey, JSON.stringify(saved));};
   const observe = () => caps()?.scopes?.includes('observe');
-  const allowed = () => observe() && caps()?.scopes?.includes('start') && caps()?.actions?.some(a => a.action === 'repository.continue' && a.allowed === true);
+  const allowed = () => observe() && caps()?.scopes?.includes('start') && (!repairSeed || caps()?.scopes?.includes('manage')) && caps()?.actions?.some(a => a.action === 'repository.continue' && a.allowed === true);
   const expanded = () => caps()?.features?.project_dispatch?.version === 1;
   const projectReady = () => !project || expanded() && projectDoc && !projectDoc.archived && !projectFailed;
   const bindings = () => (caps()?.features?.repository_sync || []).filter(b => b.exact_ref_head_only === true &&
@@ -65,8 +82,11 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
   const prompt = h('textarea', {'aria-label': t('pub_prompt'), maxlength: 12000, rows: 5}), title = h('input', {'aria-label': t('start_title'), maxlength: 256});
   const model = h('input', {'aria-label': t('start_model'), maxlength: 256, placeholder: t('start_model_default')});
   const inputs = {source_ref: sourceRef, agent, prompt, title, model};
+  const models = modelChoice({h, t, api, caps, guard, host: () => saved.target?.host, agent, model, submit: submitPreference, storageKey});
+  let modelHost = null;
   prompt.value = saved.prompt;
-  const attachments = expanded() && attachmentFactory ? attachmentFactory(prompt, () => {if (current()) update();}) : null;
+  prompt.readOnly = Boolean(repairSeed);
+  const attachments = expanded() && !repairSeed && attachmentFactory ? attachmentFactory(prompt, () => {if (current()) update();}) : null;
   if (attachments && !saved.intent) saved.prompt = prompt.value;
   const attachmentBox = attachments ? h('fieldset', {class: 'dispatch-attachments'}, attachments.box) : null;
   const key = b => JSON.stringify(b);
@@ -81,11 +101,14 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
   }
   const showError = e => {if (current()) status.replaceChildren(errorBox(e));};
   const selected = () => ({target: saved.target, source_ref: branchRef(saved.source_ref)});
+  const effectivePrompt = () => saved.prompt.trim() ? saved.prompt : (attachments?.refs().length ? t('dispatch_inspect_images') : saved.prompt);
   const request = () => ({action: 'repository.continue', target: saved.target,
-    params: {source_ref: preview?.source_ref, source_sha: preview?.source_sha, agent: saved.agent, prompt: saved.prompt,
+    params: {source_ref: preview?.source_ref, source_sha: preview?.source_sha, agent: saved.agent, prompt: effectivePrompt(),
       ...(saved.title ? {title: saved.title} : {}), ...(saved.model && expanded() ? {model: saved.model} : {}),
-      ...(attachments?.refs().length ? {artifacts: attachments.refs()} : {}), ...(project ? {project_id: project} : {})},
-    preconditions: preview ? {...preview.preconditions, ...(project ? {expected_project_version: previewProjectVersion} : {})} : null});
+      ...(attachments?.refs().length ? {artifacts: attachments.refs()} : {}), ...(project ? {project_id: project} : {}),
+      ...(repairSeed ? {work_item_id: repairSeed.work_item_id} : {})},
+    preconditions: preview ? {...preview.preconditions, ...(project ? {expected_project_version: previewProjectVersion} : {}),
+      ...(repairSeed ? {expected_work_item_fingerprint: repairSeed.expected_work_item_fingerprint} : {})} : null});
   const inspect = h('button', {class: 'secondary', onclick: async () => {
     if (!current() || saved.intent || reading || !observe() || !ready() || !projectReady() || !bound() || !ref(selected().source_ref)) return;
     const expected = ++sequence, input = selected(), projectVersion = projectDoc?.version; preview = null; reading = true; update(); status.replaceChildren();
@@ -106,7 +129,8 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
     for (const [name, value] of Object.entries({host: intent.request.target.host, repository: intent.request.target.repository,
       repository_id: intent.request.preconditions.repository_id, source_ref: intent.request.params.source_ref,
       source_sha: intent.request.params.source_sha, repository_binding: intent.request.preconditions.binding_digest,
-      ...(intent.request.params.project_id ? {project_id: intent.request.params.project_id} : {})})) {
+      ...(intent.request.params.project_id ? {project_id: intent.request.params.project_id} : {}),
+      ...(intent.request.params.work_item_id ? {work_item_id: intent.request.params.work_item_id} : {})})) {
       if (name in refs && refs[name] !== value) throw new Error(t('pub_invalid_result'));
     }
     if (result != null && (!object(result) || result.host !== intent.request.target.host || result.workspace_id !== intent.request.target.workspace_id ||
@@ -135,13 +159,13 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
   }}, t('pub_apply'));
   const check = h('button', {class: 'secondary', onclick: () => refresh(true).catch(() => {})}, t('permissions_check'));
   const another = h('button', {class: 'secondary', onclick: () => {
-    if (!current() || busy || refreshing || readFailed || attachments && !attachments.ready() || !(terminal(operation) || saved.intent?.refused)) return;
+    if (repairSeed || !current() || busy || refreshing || readFailed || attachments && !attachments.ready() || !(terminal(operation) || saved.intent?.refused)) return;
     const previous = saved; saved = {target: saved.target, source_ref: saved.source_ref, agent: saved.agent, prompt: '', title: '', model: saved.model};
     try {persist();} catch (e) {saved = previous; showError(e); return;}
     operation = preview = null; status.replaceChildren(); attachments?.reset(); fill(); update();
   }}, t('pub_new'));
   function change(field, value) {
-    if (!current() || saved.intent || busy) {fill(); return;}
+    if (!current() || saved.intent || busy || repairSeed && field === 'prompt') {fill(); return;}
     saved[field] = value;
     if (field === 'target' || field === 'source_ref') {preview = null; sequence++; reading = false;}
     try {persist();} catch (e) {showError(e);} update();
@@ -151,18 +175,21 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
   const label = (name, el) => h('label', {}, t(name), el);
   const advanced = h('details', {class: 'dispatch-advanced', open: Boolean(saved.model || saved.title)},
     h('summary', {}, t('dispatch_advanced')), h('div', {class: 'capture-fields'}, label('start_title', title), label('start_model', model)));
+  const shortcut = composerShortcut({h, t, input: prompt, button: apply, storageKey: `${storageKey}.shortcut`, guard});
   const box = h('section', {class: 'session-start published-start', 'data-published-start': ''},
     project ? projectStatus : null,
     h('div', {class: 'panel'}, h('div', {class: 'capture-fields'}, label('pub_binding', binding), label('pub_ref', sourceRef)), branchHelp, h('p', {class: 'muted'}, t('pub_head_only')),
       h('div', {class: 'actions'}, inspect), facts),
     h('div', {class: 'panel'}, h('div', {class: 'capture-fields'}, label('start_agent', agent), !project ? label('start_title', title) : null,
-      !project && expanded() ? label('start_model', model) : null), label('pub_prompt', prompt), project ? advanced : null, attachmentBox,
+      !project && expanded() ? label('start_model', model) : null), models.box, label('pub_prompt', prompt), shortcut.box, project ? advanced : null, attachmentBox,
       h('p', {class: 'muted'}, t('pub_isolation'))), h('div', {class: 'actions'}, apply, check, another), outcome, status);
   function update() {
     const fixed = Boolean(saved.intent);
     if (attachmentBox) {attachmentBox.disabled = fixed || busy; attachmentBox.hidden = fixed;}
     binding.disabled = fixed || busy;
     for (const el of Object.values(inputs)) el.disabled = fixed || busy;
+    models.update();
+    if (modelHost !== saved.target?.host) {modelHost = saved.target?.host; models.refresh();}
     const validBranch = ref(selected().source_ref);
     branchHelp.hidden = fixed;
     branchHelp.textContent = t(saved.source_ref && !validBranch ? 'pub_branch_invalid' : 'pub_branch_help');
@@ -174,7 +201,7 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
       reading || !projectReady() || !preview || !validPreview(preview, selected()) || !bound() || !hostAllowed() ||
       attachments && !attachments.ready() || !validRequest(request()));
     check.hidden = !saved.intent?.operation_id; check.disabled = busy || Boolean(refreshing);
-    another.hidden = !(terminal(operation) || saved.intent?.refused); another.disabled = busy || Boolean(refreshing) || readFailed || Boolean(attachments && !attachments.ready());
+    another.hidden = Boolean(repairSeed) || !(terminal(operation) || saved.intent?.refused); another.disabled = busy || Boolean(refreshing) || readFailed || Boolean(attachments && !attachments.ready());
     facts.replaceChildren(); const original = saved.intent?.request;
     if (preview || original) {
       const r = original || request();

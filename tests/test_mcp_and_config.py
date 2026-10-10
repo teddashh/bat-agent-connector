@@ -5,7 +5,7 @@ import json
 import pytest
 
 from bat_agent_connector.config import parse_config, tomllib
-from bat_agent_connector.errors import ConfigError
+from bat_agent_connector.errors import ConfigError, TokenUnavailable
 from bat_agent_connector.importer import read_bat_profiles, render_hosts_toml
 from bat_agent_connector.mcp_server import (
     OPERATION_TOOLS,
@@ -98,3 +98,15 @@ def test_importer_never_copies_tokens(tmp_path):
     h = cfg.host("a1")
     assert h.writes is False and h.url == "wss://127.0.0.9:9009/"
     assert h.resolve_token() == "SUPERSECRETTOKEN"
+
+
+@pytest.mark.parametrize("document", [[], None, {"enc": False, "data": ["damaged"]},
+    {"enc": False, "data": '["damaged"]'}, {"enc": False, "data": {"tokens": ["damaged"]}}])
+def test_damaged_bat_profile_tokens_report_unavailable(tmp_path, document):
+    (tmp_path / "remote-tokens.enc.json").write_text(json.dumps(document))
+    config = parse_config({"hosts": {"fixture": {"url": "wss://127.0.0.1:1/", "fingerprint": "AA" * 32,
+        "token_ref": "bat-profile:fixture", "bat_profiles_dir": str(tmp_path)}}})
+    host = config.host("fixture")
+    assert host.token_available() is False
+    with pytest.raises(TokenUnavailable):
+        host.resolve_token()

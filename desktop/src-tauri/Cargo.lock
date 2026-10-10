@@ -277,6 +277,7 @@ dependencies = [
  "cap-std",
  "core-foundation 0.10.1",
  "core-foundation-sys",
+ "flate2",
  "futures-util",
  "glib",
  "libc",
@@ -302,6 +303,7 @@ dependencies = [
  "url",
  "uuid",
  "windows-sys 0.61.2",
+ "winreg",
  "zeroize",
 ]
 

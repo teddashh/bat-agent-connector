@@ -2,24 +2,66 @@
 
 [Product overview](../README.md) · **English** · [繁體中文](getting-started.zh-TW.md)
 
-## The intended installation experience
+## Choose the matching candidate package
 
-The desktop package should prepare the runtime, data, personal identity and background Connector for you. After guided BAT / GitHub authorization, open Dashboard from the tray or menu bar. Keep the service connected while the window is closed. You should not need to install Python, edit JSON or enter an API actor.
+This source version includes the normal desktop setup introduced in [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81). Source implementation and published release assets are separate. Open its [checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks), follow the desktop run and use an artifact from the same source commit whose platform job succeeded. Earlier release assets do not automatically include this runtime. [Desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml).
 
-**That managed installation is not complete in the current validation packages.** The instructions below are the interim development-trial / operator path, not the intended onboarding for every user. Joining an already operated central service remains a supported advanced choice. [Managed installation contract](design/managed-installation.md).
+| Platform | Artifact | Package |
+| --- | --- | --- |
+| Windows x64 | `desktop-Windows-unsigned` | NSIS `.exe` |
+| Mac Apple Silicon | `desktop-macOS-arm64-validation` | `.dmg` |
+| Mac Intel | `desktop-macOS-x64-validation` | `.dmg` |
+| Linux | `desktop-Linux-unsigned` | `.deb` |
 
-## Choose a trial path
+GitHub artifacts may require sign-in and expire. Windows validation packages are unsigned; Mac bundles use ad-hoc signing. Formal signing, Mac notarization, production update channels and a Linux persistent native credential vault are outside this delivery. No new stable release is claimed here.
 
-| Your situation | Start here |
-| --- | --- |
-| Your environment already has a central service | Get its trusted Dashboard address and your own API credential from the operator. Open Web, or follow [desktop connection](#5-connect-the-desktop-client). |
-| You operate the first environment | Set up a Linux central host using the steps below. |
-| You only want to observe BAT through an agent | Use a configured central identity and the read-only MCP path under [CLI and agent access](#cli-and-agent-access). |
-| You expect an installer with no engineering setup | That is the required product experience, but it is not yet available. Follow the [implementation record](product/implementation-status.md) and [Releases](https://github.com/teddashh/bat-agent-connector/releases). |
+## First launch: your local Connector
 
-## 1. Prepare a central host
+Install and open the matching package. It contains the Python runtime and prepares one private local central, its data and your personal identity. You do not install Python / uv, enter an actor, edit credential files or copy an API token for this path. The initial Dashboard opens **Get ready to work** when no BAT host is configured.
 
-For the documented setup, use Linux and Python 3.10–3.13. The central host needs access to your BAT server. For managed Git work it also needs the configured SSH / Git access, a Connector-owned managed root and an explicitly bound repository. Windows and Mac desktop support does not imply Windows / Mac central acceptance.
+**Windows Fleet manages local connections and startup; Python Connector / Task Service authorizes and dispatches work; BAT executes it on the selected host.** A remote BAT host does not require BAT to be installed on the Dashboard computer. Windows Fleet settings remain separate from central onboarding.
+
+### 1. Connect BAT
+
+In **Connection / Fleet → Get ready to work → Connect BAT**, select a **BAT connection profile** if it is importable. Otherwise choose **Configure a host manually** and enter **Host name**, **BAT endpoint**, the trusted **Host certificate SHA-256 fingerprint**, **Workspace profile ID** and **BAT connection token**. Confirm the fingerprint with the host owner. Encrypted or damaged BAT profile credentials are shown as unavailable; enter a valid token in the form rather than bypassing trust checks.
+
+Expand **Allow managed work** when enabling dispatch. Choose the intended conversation / start permissions and dedicated **Remote managed directories**. For Git synchronization, checkpoint and artifact operations, provide the existing trusted **SSH alias configured on this computer**. The SSH account, keys, known host and remote permissions must already be usable; the app does not invent them.
+
+**Allow Git worktrees sharing a clone** is an explicit opt-in when a direct BAT start needs shared Git metadata. Leave it off when that is not intended. It does not grant control over manual sessions or worktrees. Click **Verify and save host**; the connection/profile checks are read-only and saving does not dispatch work.
+
+### 2. Bind a GitHub repository
+
+Under **Bind a GitHub repository**, enter `owner/repository` and the configured host. Use **Read this host's workspaces**, then choose the actual **BAT workspace ID**. Supply the **Git remote URL** and GitHub token when required. Enable integration, PR merge or metadata updates only for the intended workflow, then click **Verify and bind repository**.
+
+The repository-to-host/workspace association is explicit. A similar project name, folder or remote URL is not a substitute for that binding. Verification reads BAT/GitHub; it does not push, create a PR or merge. Published-source dispatch additionally needs managed start permissions, a dedicated remote root and the trusted SSH alias. Deployment recipes remain separately configured.
+
+### 3. Configure verification commands when needed
+
+**Configure verification commands** applies to Task Service projects. Enter the exact **Task Service project name**, **Executable**, **Arguments (one per line)** and **Timeout in seconds (1–3600)**. Each nonempty argument line becomes one literal argument; spaces within it are retained. Shell quoting, pipes and expansion are not interpreted. Do not enter credentials.
+
+**Save verification command** records the command without executing it. Other project commands are preserved; the timeout applies to all configured projects. Use the task's actual project key; it is not automatically mapped from a Dashboard project ID or title. If central configuration changed while editing, reload the saved verification settings, review the preserved draft and save again. Verification runs later only through the existing task, ownership and execution gates.
+
+### 4. Start and follow work
+
+Open **Projects**, associate the project with the configured repository, choose the bound host/workspace and review a fixed source commit before dispatching instructions, a model and optional attachment revisions. Same-host continuation can use a fixed local checkpoint; another host uses an explicitly published commit through the bound repository. Manual source work stays read-only.
+
+The adjustable left tree keeps the selected conversation, reply controls and result links together. A send receipt records that request's outcome; a historical queued receipt is not the current BAT queue position. Model preferences affect the offered selection, not provider authorization. Saved skill selections pin reviewed catalog sources and are not automatic activation in a running agent. **Create repair work** records fixed failure evidence; review its destination and source before starting the new work.
+
+### Background, browser and recovery
+
+Use **Open Dashboard in browser** or the tray / menu-bar entry. The app hands off a one-use sign-in ticket; the long-lived API token stays out of URLs and browser storage. Web and Tauri use the same central identity and journal. After browser logout, reopen from the desktop entry.
+
+Enable **Start when I sign in** for this installation's login startup. Closing Web or the Dashboard window leaves central running. Explicit desktop Quit retains central work while following the separate Fleet shutdown guards. Reopening recovers the same installation; a newer package upgrades only after the owned service accepts a safe stop. Busy or uncertain work prevents that transition, and older packages do not downgrade the journal.
+
+Configuration changes wait while operations/tasks are active. If a reply is lost, use **Recover original setup request** and **View setup operation**; do not submit a new request to guess the outcome. Expired credentials, invalid ownership or failed startup are recovery states, not reasons to create another database.
+
+## Advanced: existing central and operator deployment
+
+Existing desktop central configuration is retained. To join a different service explicitly, use **Advanced: join an existing central**, then enroll its separate credential. The remaining sections describe an operator-managed central; they are not prerequisites for the normal bundled installation.
+
+### 1. Prepare a central host
+
+The following operator example uses Linux and Python 3.10–3.13. This is separate from the bundled desktop path. Central needs access to BAT; managed Git work also needs configured SSH / Git access, a Connector-owned managed root and an explicit repository binding.
 
 The two credentials serve different purposes:
 
@@ -30,18 +72,18 @@ The two credentials serve different purposes:
 
 Do not use a BAT remote token in the Dashboard API login field.
 
-## 2. Install Connector
+### 2. Install Connector
 
-Install with `uv` on the central host. Until a formal release is selected, pin a reviewed commit instead of silently following changing `main`. This example uses the documented product baseline:
+Install with `uv` on the central host. Until a formal release is selected, pin a reviewed commit instead of silently following changing `main`. Replace `REVIEWED_COMMIT` with the reviewed source commit matching your chosen desktop / service deployment:
 
 ```bash
-uv tool install 'git+https://github.com/teddashh/bat-agent-connector@15b2048de5c2ec3a31e0845ce76a79b612d1c32e'
+uv tool install 'git+https://github.com/teddashh/bat-agent-connector@REVIEWED_COMMIT'
 batc --help
 ```
 
 A development checkout can instead use `uv sync --locked --extra dev`, with `uv run batc` for the commands below. Keep the desktop and central contract versions compatible; the desktop refuses incompatible identity / contracts.
 
-## 3. Configure BAT access
+### 3. Configure BAT access
 
 If this host has the BAT desktop client's profiles:
 
@@ -62,7 +104,7 @@ Without local BAT profiles, configure [hosts.example.toml](../examples/hosts.exa
 
 A default profile path is not a cross-platform discovery guarantee. Preserve the original BAT configuration and keep credentials out of source control.
 
-## 4. Start central and open Web
+### 4. Start central and open Web
 
 Run the service in one terminal on the central host:
 
@@ -88,38 +130,17 @@ ssh -N -L 18796:127.0.0.1:18796 central-alias
 
 Then open the same loopback Dashboard address on the client machine. Keep that tunnel running. Do not expose the service by changing its bind address or disabling Host / Origin checks. The service does not currently provide a general public-hosting ingress.
 
-## 5. Connect the desktop client
+### 5. Join that external central from desktop
 
-Windows also includes native Fleet connectivity, BAT profile launch and login
-controls. Keep the [Windows usage and resource guide](windows.md) alongside this
-central setup guide; these are complementary parts of the product.
+On a managed desktop, choose **Advanced: join an existing central** in Connection settings. Enter the trusted central address and expected actor, confirm in the native window, then enroll that central's API token through **Add credential**. Windows uses Credential Manager; Mac uses Keychain. The old managed service and its work remain intact; its personal credential is never forwarded to the external address.
 
-Download the correct validation artifact from a successful [desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml):
+An existing `central.json` remains selected on upgrade, including when it needs repair. A failed external connection never creates a local replacement database. For an older client-only package, this external-central form is its normal connection screen; that does not prove the package contains the new bundled runtime.
 
-| Platform | Artifact | Package |
-| --- | --- | --- |
-| Windows x64 | `desktop-Windows-unsigned` | NSIS `.exe` |
-| Mac Apple Silicon | `desktop-macOS-arm64-validation` | `.dmg` |
-| Mac Intel | `desktop-macOS-x64-validation` | `.dmg` |
-| Linux | `desktop-Linux-unsigned` | `.deb` |
+For an external central on Linux, native credential enrollment remains memory-only through `BATC_DESKTOP_TOKEN`; browser login is another supported entry. This limitation does not prevent the candidate's local managed installation from owning a private service credential. [Native configuration and credentials](design/desktop.md#configure-the-native-client).
 
-Artifacts may expire and can require GitHub sign-in. Windows packages are unsigned and Mac validation bundles are ad-hoc signed; this is not the formal public distribution or update channel. Review the source and run receipts. If platform policy prevents installation, use Web for the trial rather than weakening system-wide checks.
+**Forget saved credential** removes only the local saved credential; it does not revoke the central token. Windows Fleet has separate connection / login choices described in the [Windows guide](windows.md).
 
-On Windows / Mac:
-
-1. Install and launch the package for your platform.
-2. Enter the trusted central address and the expected actor used when issuing the API token (for example, `personal-dashboard`).
-3. Review the native connection confirmation. Only confirmation creates the first `central.json`; existing invalid configuration is not silently overwritten.
-4. Choose **Add credential** and provide the Connector API token in the native secure prompt. It is verified before saving to Windows Credential Manager or macOS Keychain.
-5. Connect and confirm the expected identity and central data. Web can remain open at the same time.
-
-These steps describe today's interim connection flow. The normal managed installer must eliminate steps requiring manual endpoint / actor / token setup for a new local environment.
-
-Linux native credentials currently use the deliberate memory-only `BATC_DESKTOP_TOKEN` adapter; persistent enrollment is not implemented. See [the native credential contract](design/desktop.md#configure-the-native-client). Web is the simpler Linux trial entry.
-
-Native configuration locations and recovery are in [desktop.md](design/desktop.md). **Forget saved credential** only removes that local record; it does not revoke the API token on central. Replace credentials through Connection, never through a pasted token URL.
-
-## 6. Enable useful work deliberately
+### 6. Enable useful work deliberately
 
 Observation working is the first checkpoint. For actual dispatch, the operator configures:
 
@@ -181,22 +202,20 @@ bat-agent-connector-mcp --principal-only --read-only --http --port 8765
 
 This serves MCP at `http://127.0.0.1:8765/mcp`; it is not the Web Dashboard address. Use the [canonical skill](../skills/bat-agent-connector/SKILL.md) and [matching agent adapters](agent-skills.md) for durable work and recovery. Task Service recipes have additional settings; a queued task with the planner disabled does not prove dispatch failure. [Task Service](design/task-service.md).
 
-## First-connection and workflow troubleshooting
+## Troubleshooting
 
 | What you see | What to check / do |
 | --- | --- |
-| First desktop screen asks for central / actor | This is the current client-only installer gap. Use the configured trial path above; it is not the desired permanent onboarding. |
-| No Dashboard response | Is `batc serve` still running? Is the trusted tunnel open? Verify the configured address; do not start a second owner blindly. |
-| Credential rejected | Use a Connector API token, not a BAT token. Check expected actor, `observe` scope, expiry, API contract and the intended central identity. |
-| Connected, but no hosts / sessions | Verify `hosts.toml`, BAT remote access and token references. Retain offline / stale evidence; an empty read does not prove work stopped. |
-| No repository in project dispatch | Configure the explicit `github.repos[].sync` binding and associate that repository with the project. |
-| An action is disabled | Check client scopes, host gates, ownership, destination configuration and the reason shown beside the action. |
-| Start accepted, then connection lost | Keep the original operation ID and request key. Read its receipt; do not submit a new job to guess the result. |
-| An agent stops outputting | Check pending input, permissions and observed activity. Idle is not completion, and completion is not deployment. |
-| Cleanup is refused | Read the retention reasons. Do not clear reservations or remove a worktree that may still have a writer. |
-| Desktop closes but work keeps running | Central and the UI have separate lifecycles. Close-to-tray / Dock behavior also differs from explicit Quit. |
-| Fleet does not start | Fleet needs its own configured installation. A missing `backend` retains the PowerShell compatibility default; installing Dashboard does not automatically migrate ownership to Rust. |
+| Desktop asks for an external central / actor | Check whether this is an older client-only artifact or an existing external configuration. On the matching managed candidate, ordinary first launch prepares local central automatically. |
+| Managed startup or upgrade needs attention | Preserve its installation/data. Reopen the matching app; unresolved work or credentials can prevent startup/upgrade. Do not delete the journal or create a second owner. |
+| BAT profile cannot be imported | Check profile metadata, certificate trust and credential availability. Use manual host entry if its token store is encrypted or damaged. |
+| Connected but no hosts / sessions | Review **Connect BAT** and actual host reachability. Offline or stale observations do not prove work stopped. |
+| No destination in project dispatch | Save the exact repository/host/workspace binding and associate the project with that repository. |
+| Setup is busy or a receipt is missing | Let active work settle; recover the original setup request and operation before changing it. |
+| An action is disabled | Read its scopes, host permissions, ownership and source/binding requirements. |
+| A send/start reply is lost | Keep its operation ID and request key; read back instead of dispatching again. |
+| Native BAT merge acknowledgement stays unknown | Preserve its original operation and resources. The separate human-adjudication API is outside the current merge contract. |
+| Cleanup is refused | Read the retention reasons; unresolved writers and unique content must remain. |
+| Fleet does not start | Check its selected connections, Kit configuration, prerequisites and ownership. An omitted backend retains PowerShell compatibility; installing Dashboard does not migrate it to Rust. |
 
-## What counts as a successful trial?
-
-Use one small real project, with a known commit and destination. Confirm: manual work stays unchanged; managed work has traceable ownership; its result reaches the intended PR; any deployment reports the actual version; disconnect / reopen finds the same work; cleanup preserves history. Keep supervision while the [full acceptance matrix](product/acceptance-v2.md) and managed installation are unfinished.
+Real Fleet/account/deployment acceptance is performed by the user. The [46-item acceptance reference](product/acceptance-v2.md) remains useful for that work; it is excluded from the agent's completion checklist, not reported as already passed.

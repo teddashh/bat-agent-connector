@@ -24,13 +24,15 @@ export function workspaceNavigation({h, t, api, guard, onEvents, namespace, erro
       h('a', {href: '#/projects'}, t('workspace_manage'))));
   const alive = () => {guard(); if (disposed) throw new Error('Navigation disposed');};
   const persist = () => {try {sessionStorage.setItem(key, JSON.stringify([...expanded]));} catch { /* optional */ }};
-  const link = (href, label, state = null) => h('a', {href, class: 'workspace-tree-link', 'data-tree-key': href,
+  const link = (href, label, state = null, reading = null) => h('a', {href, class: 'workspace-tree-link', 'data-tree-key': href,
     'aria-current': selected === href ? 'page' : null},
     h('span', {class: `workspace-dot ${state?.tone || ''}`, 'aria-hidden': 'true'}),
     h('span', {class: 'workspace-tree-label'}, label),
-    state ? h('span', {class: 'workspace-tree-state'}, t(state.key)) : null);
+    state ? h('span', {class: 'workspace-tree-state'}, t(state.key)) : null,
+    reading?.unread_count > 0 ? h('span', {class: 'workspace-tree-state', title: t('conversation_count_note')},
+      t('conversation_badge', {count: reading.unread_count}) + (reading.complete ? '' : '+')) : null);
   const workLink = (pid, item) => link(`#/work/${[pid, item.kind, item.id].map(encodeURIComponent).join('/')}`,
-    item.title || item.branch || item.action || item.id, sessionActivity(item.session || {}));
+    item.title || item.branch || item.action || item.id, sessionActivity(item.session || {}), item.reading);
   const render = () => {
     if (disposed) return;
     const focus = tree.contains(document.activeElement) ? document.activeElement?.dataset.treeKey : null;
@@ -117,7 +119,7 @@ export function workspaceNavigation({h, t, api, guard, onEvents, namespace, erro
           sessionRows.replaceChildren(...groupedSessions([...rows.values()]).map(group => h('div', {},
             h('p', {class: 'muted workspace-session-group'}, group.host, ' · ', group.name || group.id || t('obs_unknown')),
             ...group.sessions.map(session => link(`#/session/${[session.host, session.session_id].map(encodeURIComponent).join('/')}`,
-              session.title || session.session_id, sessionActivity(session))))),
+              session.title || session.session_id, sessionActivity(session), session.reading)))),
             h('p', {class: 'muted'}, t('attention_loaded', {count: rows.size})));
           if (focused) [...sessionRows.querySelectorAll('a')].find(a => a.getAttribute('href') === focused)?.focus({preventScroll:true});
           more.hidden = !cursor; sessionsLoaded = true; filterSessions();

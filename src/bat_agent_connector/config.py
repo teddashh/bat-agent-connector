@@ -166,6 +166,8 @@ def _token_from_bat_profiles(pdir: Path, profile_id: str) -> str:
         raw = json.loads(path.read_text())
     except (OSError, ValueError) as e:
         raise TokenUnavailable(f"cannot read BAT token store {path}: {type(e).__name__}") from None
+    if not isinstance(raw, dict):
+        raise TokenUnavailable("BAT token store has an unexpected format")
     if raw.get("enc") not in (False, None):
         raise TokenUnavailable(
             "BAT token store is encrypted (OS keychain); use token_ref env: or file: instead"
@@ -176,7 +178,12 @@ def _token_from_bat_profiles(pdir: Path, profile_id: str) -> str:
             data = json.loads(data)
         except ValueError:
             raise TokenUnavailable("BAT token store has an unexpected format") from None
-    tokens = (data or {}).get("tokens") or {}
+    if data is not None and not isinstance(data, dict):
+        raise TokenUnavailable("BAT token store has an unexpected format")
+    tokens = (data or {}).get("tokens")
+    if tokens is not None and not isinstance(tokens, dict):
+        raise TokenUnavailable("BAT token store has an unexpected format")
+    tokens = tokens or {}
     tok = tokens.get(profile_id)
     if not isinstance(tok, str) or not tok:
         raise TokenUnavailable(f"no token for BAT profile {profile_id!r} in {path}")

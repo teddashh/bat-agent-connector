@@ -15,13 +15,13 @@ from .operations import RERUN, ActionDef, AmbiguousOutcome, NeedsAttention, Oper
 
 SHA = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
-FIELDS = {"source_ref", "source_sha", "agent", "prompt", "title", "model", "artifacts", "project_id"}
+FIELDS = {"source_ref", "source_sha", "agent", "prompt", "title", "model", "artifacts", "project_id", "work_item_id"}
 
 
-def project_context(ops, target, params, pre):
+def project_context(ops, target, params, pre, *, operation_id=None):
     pid = params.get("project_id")
     if pid is None:
-        if "expected_project_version" in pre:
+        if "expected_project_version" in pre or "work_item_id" in params:
             raise OperationError("INVALID_PARAMS", "project version requires project_id", 422)
         return
     if not isinstance(pid, str) or not work_items.PROJECT_ID.fullmatch(pid):
@@ -31,12 +31,34 @@ def project_context(ops, target, params, pre):
         raise OperationError("PROJECT_CHANGED", "review the current project before starting", 409)
     if target["repository"].lower() not in {r.lower() for r in project["repositories"]}:
         raise OperationError("PROJECT_REPOSITORY_CHANGED", "selected repository does not belong to this project", 409)
+    if "work_item_id" in params:
+        wid = params["work_item_id"]
+        if not isinstance(wid, str) or not work_items.WORK_ITEM_ID.fullmatch(wid):
+            raise OperationError("INVALID_PARAMS", "exact work item ID required", 422)
+        item = work_items._get_item(ops.db, wid, active=True)
+        if item["project_id"] != pid or work_items.fingerprint(item) != pre.get("expected_work_item_fingerprint"):
+            raise OperationError("WORK_ITEM_CHANGED", "review the current project work item before starting", 409)
+        from . import managed_repairs
+        repair = managed_repairs.dispatch_record(ops, wid)
+        if repair:
+            if work_items.completion(item)["approved"]:
+                raise OperationError("REPAIR_COMPLETED", "completed repair work cannot start another dispatch", 409)
+            if params.get("prompt") != repair["request"] or item["request"] != repair["request"]:
+                raise OperationError("REPAIR_CHANGED", "repair dispatch must preserve its fixed evidence request", 409)
+            launch = ops.db.execute("SELECT operation_id FROM managed_repair_launches WHERE work_item_id=?", (wid,)).fetchone()
+            if launch and launch[0] != operation_id:
+                raise OperationError("REPAIR_ALREADY_DISPATCHED", "read the existing repair operation instead of starting again", 409)
 
 
 def install(ops):
     if "repository.continue" not in ops.actions:
         ops.register(ActionDef("repository.continue", "start", "Start from a published version", run, admit,
-                               ("repository", "host", "workspace_id")))
+                               ("repository", "host", "workspace_id"), authorize_existing=_authorize_existing))
+
+
+def _authorize_existing(ops, principal, op, control):
+    if op["params"].get("work_item_id") and not principal.allows("manage"):
+        raise OperationError("FORBIDDEN", "dispatch linked work needs manage", 403)
 
 
 def digest(value):
@@ -80,6 +102,10 @@ def check_ref(ref):
 def admit(ops, principal, target, params, pre):
     configured(ops, target)
     expected = {"repository_id", "binding_digest"} | ({"expected_project_version"} if "project_id" in params else set())
+    if "work_item_id" in params:
+        expected.add("expected_work_item_fingerprint")
+        if not principal.allows("manage"):
+            raise OperationError("FORBIDDEN", "dispatch linked work needs manage", 403)
     if set(params) - FIELDS or set(pre) != expected:
         raise OperationError("INVALID_PARAMS", "published start requires exact preview preconditions", 422)
     check_ref(params.get("source_ref"))
@@ -167,7 +193,7 @@ def receipt(ctx, name):
 
 
 async def resolve(ctx):
-    project_context(ctx.service, ctx.target, ctx.params, ctx.preconditions)
+    project_context(ctx.service, ctx.target, ctx.params, ctx.preconditions, operation_id=ctx.operation_id)
     selected = await source_preview(ctx.service, {**ctx.target, "source_ref": ctx.params["source_ref"]})
     if selected["source_sha"] != ctx.params["source_sha"]:
         raise StepFailed("REPOSITORY_REF_CHANGED", "selected published head changed")
@@ -186,7 +212,7 @@ async def resolve(ctx):
 
 def guard(ctx, plan):
     ctx.check_cancel()
-    project_context(ctx.service, ctx.target, ctx.params, ctx.preconditions)
+    project_context(ctx.service, ctx.target, ctx.params, ctx.preconditions, operation_id=ctx.operation_id)
     if digest(config_snapshot(ctx.service, ctx.target)) != plan["config_digest"]:
         raise StepFailed("REPOSITORY_BINDING_CHANGED", "fixed repository target configuration changed")
     from .cleanup import guard as cleanup_guard
@@ -246,8 +272,19 @@ async def run(ctx):
     refs = artifacts.normalize_refs(ctx.service.db, ctx.params.get("artifacts", []), ctx.service.context["artifact_store"].settings)
     if refs or ctx.params.get("project_id"):
         def bind_inputs():
-            project_context(ctx.service, ctx.target, ctx.params, ctx.preconditions)
+            project_context(ctx.service, ctx.target, ctx.params, ctx.preconditions, operation_id=ctx.operation_id)
             artifacts.reference(ctx.service.db, "operation", ctx.operation_id, refs, ctx.operation_id)
+            wid = ctx.params.get("work_item_id")
+            if wid:
+                from . import managed_repairs
+                if managed_repairs.dispatch_record(ctx.service, wid):
+                    ctx.service.db.execute("INSERT OR IGNORE INTO managed_repair_launches VALUES(?,?,?)",
+                                           (wid, ctx.operation_id, ctx.op["created_at"]))
+                ctx.service.db.execute("""INSERT OR IGNORE INTO work_item_links
+                    (work_item_id,kind,ref,linked_by,linked_at,link_operation) VALUES(?,'operation',?,?,?,?)""",
+                    (wid, ctx.operation_id, ctx.actor, ctx.op["created_at"], ctx.operation_id))
+                ctx.service.journal.api_event("work_item", wid, "work_item.linked",
+                    {"kind": "operation", "ref": ctx.operation_id, "operation_id": ctx.operation_id}, actor=ctx.actor)
             return {"project_id": ctx.params.get("project_id"), "artifacts": refs}
         ctx.effect("published_inputs", bind_inputs, request={"artifacts": refs, "project_id": ctx.params.get("project_id")})
         ctx.set_refs(project_id=ctx.params.get("project_id"), input_manifest_digest=digest({

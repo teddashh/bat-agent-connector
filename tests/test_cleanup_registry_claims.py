@@ -6,7 +6,7 @@ import multiprocessing as mp
 
 import pytest
 
-from bat_agent_connector import cleanup, confinement, registry
+from bat_agent_connector import cleanup, confinement, platform_files, registry
 from bat_agent_connector.errors import ResourceReadOnly
 
 SID = "cleanup-race"
@@ -107,9 +107,9 @@ def test_cleanup_blocks_unsent_recovery_before_any_registry_change(status, code,
 @pytest.mark.parametrize("operation", ["reserved", "cleaned", "release", "retire"])
 def test_cleanup_rejects_duplicate_registry_identity_before_writing(operation):
     path = registry.registry_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    platform_files.ensure_private_directory(path.parent)
     row = {"host": "h1", "session_id": SID, "created_at": 1, "status": "active"}
-    path.write_text(json.dumps({"sessions": [row, row]}))
+    platform_files.atomic_write(path, json.dumps({"sessions": [row, row]}).encode())
     before = path.read_bytes()
     with pytest.raises(registry.RegistryInvariantError, match="REGISTRY_DUPLICATE_SESSION"):
         if operation == "release":

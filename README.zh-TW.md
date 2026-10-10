@@ -8,7 +8,7 @@ Better Agent Dashboard 整合 **Windows Fleet 連線與啟動、BAT 主機上的
 
 你繼續在 [Better Agent Terminal（BAT）](https://github.com/tony1223/better-agent-terminal) coding；Hermes、Grokbot 等 Agent 透過各自的身分協作。Repository 與 Python 套件仍叫 **`bat-agent-connector`**，Connector 是 Dashboard、CLI 與 MCP 共用的後端。
 
-> **產品方向：**安裝桌面包後，由程式準備並啟動背景服務，引導接上 BAT 環境，再點一下開 Dashboard。**目前實作：**共用 Dashboard 與中央背景服務已具備，但自動建立環境仍在開發。現有驗證安裝包仍需要已配置的中央服務與 API 身分。[安裝現況與試用方式 →](docs/getting-started.zh-TW.md)
+> **這版原始碼**包含 [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 引入的打包 Python runtime、自有背景中央、個人身分與已認證的瀏覽器入口。請使用與來源 commit 相符且建置成功的桌面 artifact，並核對其驗證紀錄。早期 release 下載檔不會自動包含這些新功能。[安裝與首次使用 →](docs/getting-started.zh-TW.md)
 
 ![從左側專案工作樹選工作，在同一畫面閱讀對話、回覆與追蹤成果。](site/images/workspace-zh.png)
 
@@ -18,7 +18,7 @@ Better Agent Dashboard 整合 **Windows Fleet 連線與啟動、BAT 主機上的
 
 ## 內容導覽
 
-[功能](#你可以用它做什麼) · [工作流程](#從需求走到交付) · [架構](#web桌面程式與-agent-的關係) · [Windows Fleet](#windows-fleet-與資源) · [平台](#平台與安裝包) · [開始使用](#開始使用) · [權限與復原](#權限工作歸屬與復原) · [現況](#目前證據與尚待完成的工作) · [文件](#文件索引) · [開發](#參與開發)
+[功能](#你可以用它做什麼) · [工作流程](#從需求走到交付) · [架構](#web桌面程式與-agent-的關係) · [Windows Fleet](#windows-fleet-與資源) · [平台](#平台與安裝包) · [開始使用](#開始使用) · [權限與復原](#權限工作歸屬與復原) · [驗證](#實作與驗證) · [文件](#文件索引) · [開發](#參與開發)
 
 ## 你可以用它做什麼
 
@@ -84,7 +84,7 @@ Project Hub 只作為 session 整理與互動的參考；本產品沒有改用�
 - 原生憑證、選檔、系統匣／Dock、Fleet 與更新依平台提供；Web 不因此取得本機控制權。
 - MCP／CLI 沿用中央政策與 durable operations，每個自動化 client 使用自己的身分和 scopes。
 
-正式安裝器應負責自有本機服務的生命週期：準備 runtime 與身分、背景啟動、連線恢復，以及點一下開網頁。**「連接既有中央」是加入現成環境的進階路徑，不是新使用者的正常起點。**安裝器這一段尚未完成；[首次安裝合約](docs/design/managed-installation.md) 記錄必須補齊的行為。
+候選安裝包包含相符的 Python runtime，首次啟動會準備一套自有本機中央、私人資料與個人身分，提供背景啟動、身分驗證後重連及已認證的瀏覽器入口。重開與安全升級沿用同一份身分及帳本。**「加入既有中央」保留為進階選項**；原有連線設定會保留，連線失敗不會另造資料庫。[安裝與恢復合約](docs/design/managed-installation.md)。
 
 [共用前端](docs/design/shared-frontend.md) · [原生 client](docs/design/desktop.md) · [API](docs/design/api-v1.md)
 
@@ -101,36 +101,35 @@ Windows 是完整產品的一部分。已整合的 native Fleet 控制不因共�
 | Tailscale 與中央啟動 | Tailscale 狀態／開啟既有登入程式；另可透過已配置的固定 SSH recipe 查詢／啟動指定中央服務。不是任意遠端安裝。 |
 | 本機資源 | Windows Credential Manager、原生選檔／附件上傳與另存、系統匣及受控更新入口。 |
 
-**Windows Fleet 與中央的平台要求分開看。** 現有 Windows client 可連接 Linux 中央；自動準備完整 runtime 的安裝器仍是另外要完成的交付。Mac 的 DMG／Keychain 證據也不能取代 Windows Fleet 的實機驗收。
+**Windows Fleet 與中央的責任分開看。** 候選版可在 Windows 執行包內的中央，也可加入已配置的外部中央。Fleet 仍保留明確的連線、profile 與 ownership 設定。Mac 支援共用 Dashboard 與打包中央；Windows Fleet 仍是 Windows 原生能力。
 
 [Windows 使用與資源指南](docs/windows.zh-TW.md) · [NSIS 驗證包](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) · [Fleet 設定範例](desktop/fleet.example.json) · [Rust Fleet 原始碼](desktop/fleet-core/README.md)
 
 ## 平台與安裝包
 
-目前**桌面 client** 與**中央服務**的平台要求不同。
+這版原始碼提供以下平台的打包流程。CI 與安裝 fixture 證據須核對精確來源 commit；原始碼實作、套件建置成功與使用者實際環境，是不同的證據。
 
-| 元件 | 已有證據 | 目前限制 |
+| 元件 | 候選實作 | 發行／平台界線 |
 | --- | --- | --- |
-| Web Dashboard | 中英雙語響應式介面，由中央提供 | 使用可信 loopback／tunnel；公開或 LAN hosting 需要另外設計已認證入口。 |
-| Windows 桌面 | x64 NSIS、Credential Manager、原生 Fleet／BAT profile／登入控制；CI 驗證安裝與 WebView 生命週期 | 完整實機 Fleet 驗收仍須完成；尚未打包／自動建立 Python 中央。 |
-| macOS 桌面 | Apple Silicon／Intel DMG；WebView、生命週期及隔離 Keychain 測試 | 目前 ad-hoc 驗證簽署；Developer ID／公證與 Mac 更新通道仍待完成，不能推論 Windows Fleet 已跨平台。 |
-| Linux 桌面 | Debian 驗證包與原生 WebView fixture | 原生憑證只支援記憶體來源，尚無受保護的持久登錄。 |
-| Python 中央／CLI／MCP | Linux 上測試 Python 3.10–3.13；依賴 POSIX | 本文以 Linux 為中央設定路徑。Windows 原生中央尚未實作；Mac client 測試不代表 Mac 中央實機驗收。 |
+| Web Dashboard | 中英共用介面，由中央提供；可從 managed 桌面一鍵進入已認證網頁 | 使用可信 loopback／tunnel，未提供通用公開 hosting 入口。 |
+| Windows x64 | NSIS 包含中央、Windows 私人儲存與檔案鎖、外部中央用的 Credential Manager、原生 Fleet 與系統匣 | 驗證包未正式簽署。 |
+| macOS Apple Silicon／Intel | DMG 包含中央、瀏覽器入口、選單列及外部中央用的 Keychain | 使用 ad-hoc 驗證簽署；不包含 Windows Fleet 移植。 |
+| Linux | Debian 包、打包中央及原生 WebView | 外部中央的原生憑證沿用記憶體 adapter；持久 credential vault 不在本次交付範圍。 |
+| Python 中央／CLI／MCP | 同一套操作權威；包含 Windows 私人儲存／檔案鎖與 POSIX 支援，CI 涵蓋 Python 3.10–3.13 | 保留操作者手動部署方式；桌面使用者不需預裝 Python。 |
 
-到成功的 [desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) 執行頁面，在 **Artifacts** 下載驗證包，核對 commit 與中央相容性。GitHub 可能要求登入，artifact 也會到期；它不是穩定發行通道。
-
-[2026-10-10 候選](https://github.com/teddashh/bat-agent-connector/actions/runs/38032723037) 含 Windows、Mac ARM64／x64、Linux 包，測試的 source tree 與已合併 `15b2048` 相同。本文件基準時尚無正式 GitHub Release；後續發行請查看 [Releases](https://github.com/teddashh/bat-agent-connector/releases)。
+從 [PR #81 檢查](https://github.com/teddashh/bat-agent-connector/pull/81/checks) 進入對應的 [desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml)，確認 artifact 的來源 commit 及平台 job 成功。GitHub 可能要求登入，artifact 也會到期。這是候選 artifact，不是新發布的穩定版本或更新通道；舊 release 資產仍是先前的 client 包。
 
 ## 開始使用
 
-**預期的正常流程**是：安裝 → 背景服務就緒 → 引導連接 BAT／GitHub → 開 Dashboard。使用者不應先裝 Python、手改 JSON 或自行理解 API actor；必要的帳號登入與授權仍由你完成。這是產品要求，不是目前安裝包已完成的宣稱。
+使用相符的候選安裝包：
 
-如果你要**現在進行有人監督的試用**：
+1. **安裝並啟動。** 程式會準備本機背景中央與個人身分；這條本機流程不需先裝 Python／uv、填中央位址或複製 API token。
+2. **連線至 BAT。** 開啟「連線／Fleet → 準備開始工作 → 連線至 BAT」。選取可匯入的 BAT 連線 profile，或填入連線位址、可信憑證指紋、workspace profile ID 與 BAT token，再按「驗證並儲存主機」。
+3. **選擇 managed 工作可執行的位置。** 開啟所需的對話／開工權限，指定專用遠端管理目錄及 Git／成果操作使用的既有可信 SSH alias。直接 BAT 開工若需共享 clone，須明確勾選「允許共享 clone 的 Git worktree」；人工資源仍唯讀。
+4. **連結儲存庫。** 在「連結 GitHub 儲存庫」讀取主機的 workspaces，選擇精確 workspace ID，提供 repository、Git remote 及授權，再按「驗證並連結儲存庫」。儲存只驗證存取，不會推送或建立 PR。
+5. **派工並追蹤。** 將專案連到該 binding，檢視固定來源 commit 後派工。需要 Task Service 專案驗證時，再使用「設定驗證命令」；儲存命令不會執行它。[詳細設定與恢復](docs/getting-started.zh-TW.md)。
 
-- **環境已配置：**開啟現有 Web Dashboard，或用維護者提供的位址與身分接上桌面 client。先看待處理、專案與工作階段。
-- **Windows 已有 BAT／Fleet 環境：**依 [Windows 指南](docs/windows.zh-TW.md) 核對既有 inventory、連線選擇、backend 與 BAT profiles；不把 Linux 中央設定當成 Windows 功能的替代品。
-- **由你建立第一套環境：**依 [Linux 中央設定指南](docs/getting-started.zh-TW.md) 安裝、匯入 BAT、啟動服務、發出身分，再連線桌面程式。
-- **接入 Agent：**在 MCP client 註冊 `bat-agent-connector-mcp`；中央觀察使用 `--principal-only --read-only`，授權操作則透過私人設定給專屬的 `BATC_API_TOKEN`。
+可按「在瀏覽器開啟 Dashboard」或使用系統匣／選單列進入已認證網頁，以「登入電腦時啟動」設定自有服務的登入啟動。既有外部中央設定會繼續使用；「進階：加入既有中央」可明確選擇其他可信服務。Agent 另使用有適當 scopes 的專屬中央身分，詳見 [MCP 設定](docs/getting-started.zh-TW.md#cli-與-agent-存取)。
 
 工作在遠端 BAT 主機時，Dashboard 這台電腦不必安裝 BAT。[共用 skill 與 Hermes／Grokbot 配接](docs/agent-skills.md)。
 
@@ -151,22 +150,19 @@ MCP／CLI 寫入保留明確確認、主機權限及稽核；UI 已檢視的操�
 
 **Connector 唯讀政策不等於 OS sandbox。** Agent process 能否寫入人的資料夾仍取決於主機帳號與 confinement。一般 start 和 Task Service recipe 有已記錄差異；承諾無人值守隔離前，須核對 [confinement](docs/design/confinement.md)。
 
-原生 BAT `worktree.merge` 若 ACK 完全未知且沒有充分正向證據，仍缺完整人工裁決 API。這是特定限制；GitHub 整合和部署有自己的讀回合約。[Merge 復原](docs/design/worktree-merge.md) · [資源政策](docs/design/resource-policy.md) · [安全說明](SECURITY.md)
+原生 BAT `worktree.merge` 若 ACK 未知且沒有充分正向證據，會保留原操作及資源，不重送效果或釋放 ownership。這種情況的人工裁決 API 不在目前合約範圍，也不是剩餘交付門檻；GitHub 整合和部署有自己的讀回合約。[Merge 復原](docs/design/worktree-merge.md) · [資源政策](docs/design/resource-policy.md) · [安全說明](SECURITY.md)
 
-## 目前證據與尚待完成的工作
+## 實作與驗證
 
-基準：**2026-10-10，已合併 `15b2048`／PR #74**。以下描述該候選版本。
+這裡說明的實作由 [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 引入，其[檢查頁](https://github.com/teddashh/bat-agent-connector/pull/81/checks)保留各來源 commit 的驗證紀錄。請與使用的套件核對；舊 release 的測試總數或 artifact 不能當成這版原始碼的結果。
 
-| 證據 | 可證明範圍 |
-| --- | --- |
-| [Python CI](https://github.com/teddashh/bat-agent-connector/actions/runs/38032723049) | Python 3.10–3.13 通過；本機 3.13 全套為 3,228 passed／33 skipped。 |
-| 共用前端檢查 | 全套 694 項 UI 通過，最後排版另跑受影響回歸；HTTP／native transport fixture 不等於原生安裝。 |
-| [Desktop CI](https://github.com/teddashh/bat-agent-connector/actions/runs/38032723037) | Windows、兩種 Mac、Linux 打包及 native fixtures；安裝測試使用受控 loopback 與合成資料。 |
-| 真中央整合 fixtures | 實際 Python API、journal、暫存 Git，搭配假的 BAT／GitHub provider；不是正式 merge／deploy 驗收。 |
+候選實作包含自動安裝與引導設定、可調整的專案樹、易讀對話與發送回執、未讀／模型偏好、經檢視的技能選取、成果連結及修復工作。技能選取會固定來源 digest，不會自動套用到執行中的 Agent；歷史「已排入佇列」回執不代表目前 BAT 佇列位置，也未提供逐則訊息取消。
 
-交付仍須完成**自動建立環境的安裝器**、正式簽署／發行／更新、特定 unknown-ACK 復原，以及在選定主機、網路和部署目標跑完整工作日。有人監督的試用與長時間無人值守，是不同的 ready 宣稱。
+自動驗證涵蓋 Python、共用 browser／native transport、打包 runtime 的 ownership／重開，以及各平台安裝 fixture。受控 fixture 與使用者實際 Fleet、帳號和部署目標的驗證分開記錄。
 
-[實作紀錄](docs/product/implementation-status.md) · [驗收矩陣](docs/product/acceptance-v2.md)
+負責人已將**正式簽章、Mac 公證、正式更新通道及 Linux 原生憑證持久儲存**排除於本次交付。**完整 46 項實際環境的人工驗收由使用者自行執行**，不列為 Agent 未完成工作。排除不表示相關能力或實機測試已完成；驗證及整合紀錄請查對應 PR 與檢查頁。
+
+[實作紀錄](docs/product/implementation-status.md) · [驗收參考](docs/product/acceptance-v2.md)
 
 ## 文件索引
 

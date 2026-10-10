@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from bat_agent_connector import api_auth, artifacts
+from bat_agent_connector import api_auth, artifacts, platform_files
 from tests.mockbat import TOKEN, MockBat
 from tests.test_artifact_capture import daemon as daemon_fixture
 from tests.test_artifact_capture import human as human_fixture
@@ -20,6 +20,8 @@ from tests.test_checkpoints import MANUAL, bat_writes, snapshot
 async def main():
     with tempfile.TemporaryDirectory(prefix="batc-capture-ui-") as temporary:
         root = Path(temporary)
+        platform_files.ensure_private_directory(root / "state")
+        platform_files.ensure_private_directory(root / "config")
         os.environ.update(BATC_CONFIG_DIR=str(root / "config"), BATC_STATE_DIR=str(root / "state"), BATC_TEST_TOKEN=TOKEN)
         os.environ.pop("BATC_DEVICE_ID", None)
         mock = MockBat()
