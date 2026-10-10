@@ -99,7 +99,7 @@ Windows 是完整產品的一部分。已整合的 native Fleet 控制不因共�
 | Tailscale 與中央啟動 | Tailscale 狀態／開啟既有登入程式；另可透過已配置的固定 SSH recipe 查詢／啟動指定中央服務。不是任意遠端安裝。 |
 | 本機資源 | Windows Credential Manager、原生選檔／附件上傳與另存、系統匣及受控更新入口。 |
 
-**Windows 中央尚未打包，不代表 Windows Fleet 未實作或已移除。** 現有 Windows client 可連接 Linux 中央；自動準備完整 runtime 的安裝器仍是另外要完成的交付。Mac 的 DMG／Keychain 證據也不能取代 Windows Fleet 的實機驗收。
+**Windows Fleet 與中央的平台要求分開看。** 現有 Windows client 可連接 Linux 中央；自動準備完整 runtime 的安裝器仍是另外要完成的交付。Mac 的 DMG／Keychain 證據也不能取代 Windows Fleet 的實機驗收。
 
 [Windows 使用與資源指南](docs/windows.zh-TW.md) · [NSIS 驗證包](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) · [Fleet 設定範例](desktop/fleet.example.json) · [Rust Fleet 原始碼](desktop/fleet-core/README.md)
 
