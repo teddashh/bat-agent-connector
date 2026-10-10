@@ -166,7 +166,7 @@ function dropKey(scope, namespace) { try { localStorage.removeItem(`batc.key.${n
 class ApiError extends Error {
   constructor(status, code, message) { super(message || code); this.status = status; this.code = code; }
 }
-export async function api(method, path, body, key) {
+async function api(method, path, body, key) {
   if (!state.token) throw new ApiError(401, "UNAUTHORIZED", t("need_token"));
   if (method === "POST" && (state.nativeBusy || !state.online || !state.viewReady))
     throw new ApiError(0, "CENTRAL_OFFLINE", t("offline_actions_paused"));
@@ -1374,6 +1374,7 @@ function checkpointPanel(host, sid) {
 
 async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceRepository) {
   freshPage();
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const source = sourceHost && ["execution", "task_command"].includes(sourceKind) && sourceId
     ? {host: sourceHost, kind: sourceKind, id: sourceId} : null;
   const repo = h("input", { "aria-label": t("delivery_repository_input"), placeholder: "owner/name", value: source ? sourceRepository || "" : sessionStorage.getItem("batc.repo") || "" });
@@ -1396,7 +1397,13 @@ async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceReposi
   if (source) main.append(h("p", {class: "note"}, t("delivery_source_context"), " ", h("code", {}, source.id)));
   let selectedMethod = "";
   let reviewedPreview = null;
-  const selector = prSelector(api, repo, num, () => { load(); });
+  const selector = prSelector({
+    api, h, t,
+    guard: () => assertView(connection),
+    repoInput: repo,
+    numInput: num,
+    onSelect: () => { load(); }
+  });
   repo.addEventListener("change", () => selector.loadList());
   main.append(h("h2", {}, t("dep_pull_request")),
     h("form", { class: "filters delivery-controls", onsubmit: event => {event.preventDefault(); acceptLink(); load();} },

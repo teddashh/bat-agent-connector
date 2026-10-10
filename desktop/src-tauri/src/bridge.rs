@@ -1092,7 +1092,7 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             r"sessions/[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+(?:/(?:messages|checkpoint-preview|history|relations))?|",
             r"operations/op_[0-9a-f]{32}|tasks/[0-9a-f-]{8,64}(?:/(?:history|sessions))?|checkpoints/cp_[0-9a-f]{32}|",
             r"hosts/[A-Za-z0-9_.-]+/(?:discovery|preferences)|worktrees/wt_[0-9a-f]{32}(?:/(?:history|relations))?|",
-            r"projects/prj_[0-9a-f]{20}(?:/skills)?|work-items/wi_[0-9a-f]{20}|repositories/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pulls/[0-9]{1,9}|",
+            r"projects/prj_[0-9a-f]{20}(?:/skills)?|work-items/wi_[0-9a-f]{20}|repositories/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pulls(?:/[0-9]{1,9})?|",
             r"deployments(?:/(?:preview|dep_[0-9a-f]{32}))?|deployment-environments(?:/history)?|",
             r"delivery/previews/mpv_[0-9a-f]{32}|integrations/previews/ipv_[0-9a-f]{32}|integrations/op_[0-9a-f]{32})$")).unwrap())
     } else if input.method == "POST" {
@@ -1230,6 +1230,13 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             };
             if !valid || !query_keys.insert(key.to_string()) {
                 return Err("Workspace query parameter is invalid".into());
+            }
+            continue;
+        }
+        if path.starts_with("/repositories/") && path.ends_with("/pulls") {
+            let allowed = matches!(key.as_ref(), "state" | "page");
+            if !allowed || !query_keys.insert(key.to_string()) {
+                return Err("PR list query parameter is invalid".into());
             }
             continue;
         }
