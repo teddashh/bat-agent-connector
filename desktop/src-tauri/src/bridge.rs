@@ -212,6 +212,7 @@ pub struct NativeStatus {
     pub enrollment_supported: bool,
     pub configuration_reload: bool,
     pub configuration_setup: bool,
+    pub configuration_source: &'static str,
     pub configuration_file: Option<String>,
     pub connected: bool,
 }
@@ -231,6 +232,7 @@ struct Active {
 }
 struct ConnectionState {
     generation: u64,
+    managed: bool,
     config: Result<Config, String>,
     environment: Option<Zeroizing<String>>,
     environment_identity: Option<Identity>,
@@ -309,13 +311,21 @@ impl Bridge {
         bridge.configuration_file = Some(path);
         bridge
     }
-    pub fn managed(config: Config, token: Zeroizing<String>, identity: Identity) -> Self {
-        let bridge = Self::new(Ok(config), token);
-        bridge.state.lock().unwrap().environment_identity = Some(identity);
+    pub fn managed(config_dir: &Path, config: Config, token: Zeroizing<String>, identity: Identity) -> Self {
+        let mut bridge = Self::new(Ok(config), token);
+        bridge.configuration_file = Some(config_dir.join("central.json"));
+        {
+            let mut state = bridge.state.lock().unwrap();
+            state.environment_identity = Some(identity);
+            state.managed = true;
+        }
         bridge
     }
-    pub fn managed_failure(error: String) -> Self {
-        Self::new(Err(error), Zeroizing::new(String::new()))
+    pub fn managed_failure(config_dir: &Path, error: String) -> Self {
+        let mut bridge = Self::new(Err(error), Zeroizing::new(String::new()));
+        bridge.configuration_file = Some(config_dir.join("central.json"));
+        bridge.state.lock().unwrap().managed = true;
+        bridge
     }
     fn new(config: Result<Config, String>, token: Zeroizing<String>) -> Self {
         let config = config.and_then(normalize);
@@ -329,6 +339,7 @@ impl Bridge {
         Self {
             state: Mutex::new(ConnectionState {
                 generation: 0,
+                managed: false,
                 config,
                 environment,
                 environment_identity: None,
@@ -378,10 +389,11 @@ impl Bridge {
             },
             credential_saved: saved,
             enrollment_supported: self.vault.supported(),
-            configuration_reload: self.configuration_file.is_some(),
-            configuration_setup: state.config.is_err() && self.configuration_file.as_ref().is_some_and(|path| {
+            configuration_reload: !state.managed && self.configuration_file.is_some(),
+            configuration_setup: (state.managed || state.config.is_err()) && self.configuration_file.as_ref().is_some_and(|path| {
                 matches!(path.symlink_metadata(), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
             }),
+            configuration_source: if state.managed { "managed" } else { "external" },
             configuration_file: self
                 .configuration_file
                 .as_ref()
@@ -403,6 +415,9 @@ impl Bridge {
         Ok(())
     }
     pub fn reload_configuration(&self) -> Result<NativeStatus, String> {
+        if self.state.lock().unwrap().managed {
+            return Err("Review the existing central connection before switching this Dashboard".into());
+        }
         let path = self
             .configuration_file
             .as_ref()
@@ -441,7 +456,7 @@ impl Bridge {
             .ok_or("Configuration setup is unavailable")?;
         let generation = {
             let state = self.state.lock().unwrap();
-            if state.config.is_ok() || state.active.is_some() {
+            if !state.managed && (state.config.is_ok() || state.active.is_some()) {
                 return Err(
                     "A central configuration already exists; use the fixed file and reload".into(),
                 );
@@ -497,6 +512,7 @@ impl Bridge {
             let _ = std::fs::remove_file(&temporary);
             saved?;
             state.generation += 1;
+            state.managed = false;
             state.config = Ok(config);
             state.environment = None;
             state.environment_identity = None;
@@ -2477,6 +2493,72 @@ mod tests {
             .contains("bound"));
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[tokio::test]
+    async fn explicit_existing_central_switch_preserves_managed_binding_until_native_review() {
+        let root = tempfile::tempdir().unwrap();
+        let identity = Identity { server_id: "managed-fixture-server".into(), principal_id: "managed-fixture-principal".into() };
+        let mut bridge = Bridge::managed(root.path(), config("http://127.0.0.1:23456"),
+            Zeroizing::new("synthetic-managed-fixture-token".into()), identity.clone());
+        bridge.vault = Arc::new(MockVault::default());
+        {
+            let mut state = bridge.state.lock().unwrap();
+            let config = state.config.as_ref().unwrap().clone();
+            state.active = Some(Active { config: config.clone(), record: Record {
+                version: 1, binding: binding(&config), token: Zeroizing::new("synthetic-managed-fixture-token".into()),
+                identity: identity.clone(),
+            }});
+        }
+        let original = bridge.status();
+        assert!(original.configuration_setup && !original.configuration_reload);
+        assert_eq!(original.configuration_source, "managed");
+        assert!(bridge.reload_configuration().is_err());
+        assert!(bridge.setup_configuration(config("https://central.example"), |_| false).await.unwrap().is_none());
+        assert_eq!(bridge.status().endpoint, original.endpoint);
+        assert!(bridge.status().credential_available && bridge.status().connected);
+        assert!(bridge.state.lock().unwrap().environment_identity.as_ref() == Some(&identity));
+        assert!(!root.path().join("central.json").exists());
+        let status = bridge.setup_configuration(config("https://central.example"), |_| true).await.unwrap().unwrap();
+        assert_eq!(status.endpoint.as_deref(), Some("https://central.example/"));
+        assert_eq!(status.configuration_source, "external");
+        assert!(!status.credential_available && !status.connected && status.configuration_reload);
+        assert!(bridge.state.lock().unwrap().environment_identity.is_none());
+        assert!(bridge.state.lock().unwrap().environment.is_none());
+        let saved = std::fs::read(root.path().join("central.json")).unwrap();
+        assert!(!String::from_utf8_lossy(&saved).contains("synthetic-managed"));
+        assert!(bridge.setup_configuration(config("https://other.example"), |_| panic!("must not overwrite")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn existing_central_switch_conflict_keeps_managed_credential_and_original_file() {
+        let root = tempfile::tempdir().unwrap();
+        let mut bridge = Bridge::managed(root.path(), config("http://127.0.0.1:23456"),
+            Zeroizing::new("synthetic-managed-fixture-token".into()),
+            Identity { server_id: "managed-fixture-server".into(), principal_id: "managed-fixture-principal".into() });
+        bridge.vault = Arc::new(MockVault::default());
+        let path = root.path().join("central.json");
+        let competing = path.clone();
+        assert!(bridge.setup_configuration(config("https://central.example"), move |_| {
+            std::fs::write(competing, b"operator configuration appeared during review").unwrap();
+            true
+        }).await.is_err());
+        assert_eq!(bridge.status().configuration_source, "managed");
+        assert!(bridge.status().credential_available);
+        assert_eq!(std::fs::read(path).unwrap(), b"operator configuration appeared during review");
+    }
+
+    #[tokio::test]
+    async fn failed_managed_initialization_requires_explicit_existing_central_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let mut bridge = Bridge::managed_failure(root.path(), "MANAGED_RUNTIME_UNAVAILABLE".into());
+        bridge.vault = Arc::new(MockVault::default());
+        assert_eq!(bridge.status().configuration_source, "managed");
+        assert!(bridge.status().configuration_setup && !bridge.status().credential_available);
+        assert!(bridge.reload_configuration().is_err());
+        let status = bridge.setup_configuration(config("https://central.example"), |_| true).await.unwrap().unwrap();
+        assert_eq!(status.configuration_source, "external");
+        assert!(!status.credential_available);
+    }
+
     #[tokio::test]
     async fn first_configuration_needs_native_review_and_never_forwards_a_launch_token() {
         let root = tempfile::tempdir().unwrap();

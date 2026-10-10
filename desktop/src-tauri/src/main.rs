@@ -657,13 +657,14 @@ fn main() {
             );
             let managed_status = managed.status();
             let bridge = Arc::new(match launch {
-                Some(launch) => {
-                    Bridge::managed(launch.config(), launch.token.clone(), launch.identity())
-                }
-                None if managed_status.mode == "external" => {
+                _ if managed_status.mode == "external" => {
                     Bridge::load(&app.path().app_config_dir()?, token)
                 }
+                Some(launch) => {
+                    Bridge::managed(&app.path().app_config_dir()?, launch.config(), launch.token.clone(), launch.identity())
+                }
                 None => Bridge::managed_failure(
+                    &app.path().app_config_dir()?,
                     managed_status
                         .error
                         .clone()
