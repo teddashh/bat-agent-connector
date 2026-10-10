@@ -11,6 +11,7 @@
     "allow-connector-connect",
     "allow-connector-disconnect",
     "allow-connector-reload-configuration",
+    "allow-connector-setup-configuration",
     "allow-connector-forget-credential",
     "allow-connector-enroll",
     "allow-connector-request",

@@ -5,7 +5,7 @@ import {conversationPanel} from "./conversation.js";
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
-import { connectorRequest, connectorUploadArtifact, nativeDesktop, nativeFileSupport, nativeStatus, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal } from "./transport/index.ts";
+import { connectorRequest, connectorUploadArtifact, nativeDesktop, nativeFileSupport, nativeStatus, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeSetupConfiguration, nativeForgetCredential, openExternal } from "./transport/index.ts";
 import { nativeAttachments } from "./native-files.js";
 import { mountFleet } from "./fleet.js";
 import { mountTailscale } from "./tailscale.js";
@@ -971,13 +971,29 @@ async function viewObservedResource(main, type, id) {
     try {
       const data = await api("GET", path); assertView(connection);
       const resource = data[type === "execution" ? "task" : "worktree"];
-      head.replaceChildren(h("h1", {}, t(type === "execution" ? "obs_execution" : "obs_worktree")), h("code", {}, id),
+      const sessions = resource.known_sessions || [];
+      fill(head, h("h1", {}, t(type === "execution" ? "obs_execution" : "obs_worktree")), h("code", {}, id),
         h("p", {class: "muted"}, t("obs_known_identity")),
+        type === "worktree" ? [h("dl", {class: "kv"},
+          h("dt", {}, t("host")), h("dd", {}, resource.host || t("obs_unknown")),
+          h("dt", {}, t("delivery_worktree_branch")), h("dd", {}, h("code", {}, resource.branch || t("obs_unknown"))),
+          h("dt", {}, t("delivery_worktree_path")), h("dd", {}, h("code", {}, resource.worktree_path || t("obs_unknown"))),
+          h("dt", {}, t("delivery_worktree_owner")), h("dd", {}, resource.intent_type || t("obs_unknown"), " · ",
+            resource.intent_type === "registry" ? h("code", {}, resource.intent_id || t("obs_unknown"))
+              : observationLink(resource.intent_type === "task" ? "execution" : "operation", resource.intent_id))),
+          h("h2", {}, t("delivery_worktree_sessions")),
+          h("p", {class: "muted"}, t("delivery_worktree_recorded")),
+          ...sessions.map(s => h("div", {class: "row"}, observationLink("session", `${s.host}/${s.session_id}`),
+            chip(t(sessionActivity(s.observation || {}).key), sessionActivity(s.observation || {}).tone))),
+          !sessions.length ? h("p", {class: "muted"}, t("none")) : null,
+          ...(resource.work || []).map(item => deliveryWork(item)),
+          h("p", {class: "note"}, t("delivery_worktree_cleanup")),
+          h("p", {}, h("a", {href: `#/cleanup/${resource.intent_type === "task" ? "task" : "host"}/${encodeURIComponent(resource.intent_type === "task" ? resource.intent_id : resource.host || "")}`}, t("cleanup_preview")))] : null,
         type === "execution" && state.caps?.features?.cleanup_task === true ?
           h("p", {}, h("a", {href: `#/cleanup/task/${encodeURIComponent(id)}`}, t("cleanup_task_preview"))) : null,
         type === "execution" && state.caps?.artifacts?.capture?.managed_single_file === true ?
           h("p", {}, h("a", {href: `#/artifact-review/task/${encodeURIComponent(id)}`}, t("ar_open"))) : null,
-        h("pre", {class: "pre"}, JSON.stringify(resource, null, 2)));
+        h("details", {}, h("summary", {}, t("sessions_details")), h("pre", {class: "pre"}, JSON.stringify(resource, null, 2))));
     } catch (error) {head.append(errorBox(error));}
   };
   await load(); const reload = debounceRefresh(load, 500);
@@ -1286,10 +1302,12 @@ function checkpointPanel(host, sid) {
   return { box, load: async () => { await loadPreview(); await load(); } };
 }
 
-async function viewDelivery(main) {
+async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceRepository) {
   freshPage();
-  const repo = h("input", { placeholder: "owner/name", value: sessionStorage.getItem("batc.repo") || "" });
-  const num = h("input", { placeholder: "123", inputmode: "numeric", size: 6, value: sessionStorage.getItem("batc.pr") || "" });
+  const source = sourceHost && ["execution", "task_command"].includes(sourceKind) && sourceId
+    ? {host: sourceHost, kind: sourceKind, id: sourceId} : null;
+  const repo = h("input", { placeholder: "owner/name", value: source ? sourceRepository || "" : sessionStorage.getItem("batc.repo") || "" });
+  const num = h("input", { placeholder: "123", inputmode: "numeric", size: 6, value: source ? "" : sessionStorage.getItem("batc.pr") || "" });
   const card = h("div", { class: "panel delivery-card" });
   const groups = new Map();
   for (const r of state.caps?.deploy_recipes || []) {
@@ -1299,12 +1317,13 @@ async function viewDelivery(main) {
   }
   const environments = [...groups.values()].map(environmentCard);
   main.append(h("h1", {}, t("nav_delivery")), ...environments.map(e => e.card));
+  if (source) main.append(h("p", {class: "note"}, t("delivery_source_context"), " ", h("code", {}, source.id)));
   let selectedMethod = "";
   let reviewedPreview = null;
   main.append(h("h2", {}, t("dep_pull_request")),
     h("div", { class: "filters delivery-controls" }, repo, num,
       h("button", { class: "secondary", onclick: () => load() }, t("load_pr"))), card);
-  if (!repo.value && state.caps?.repositories?.length) repo.value = state.caps.repositories[0].repository;
+  if (!source && !repo.value && state.caps?.repositories?.length) repo.value = state.caps.repositories[0].repository;
   const load = async (flash = null, fromEvent = false) => {
     const opens = drawerOpens;
     // Explicit PR loads only replace this card; another environment's open panel cannot hold them.
@@ -1362,6 +1381,7 @@ async function viewDelivery(main) {
         h("div", { class: "grow" }, h("a", { href: p.html_url, target: "_blank", rel: "noopener" }, `#${p.number} ${p.title || ""}`),
           " · ", t("scope_" + p.reason), h("div", {}, h("code", {}, p.head_sha || ""))),
         chip(t(p.effect === "branch_rebase" ? "scope_stack_rebase" : p.effect === "dependency" ? "scope_dependency" : p.would_merge ? "scope_would_merge" : "scope_candidate"), p.would_merge ? "warn" : "")));
+      card.querySelector("[data-integration-review]")?.closeReview?.();
       fill(card,
         h("h2", {}, h("a", { href: pr.html_url, target: "_blank", rel: "noopener" }, `#${pr.pull_number} ${pr.title || ""}`)),
         h("dl", { class: "kv" },
@@ -1378,12 +1398,34 @@ async function viewDelivery(main) {
         ...pv.blocking.map(b => h("p", { class: "note warn" }, h("code", {}, b.code), " · ", b.message)),
         ...pv.warnings.map(w => h("p", { class: "muted" }, w)),
         h("div", { class: "actions" }, ...buttons), status, flash instanceof Node ? flash : null,
-        pr.integration?.allowed ? integrationPanel(pr, load) : null);
+        pr.integration?.allowed ? integrationPanel(pr, load, source) : null);
     } catch (e) { if (!holdCard()) fill(card, errorBox(e)); }
   };
   const reload = async (fromEvent = true) => { await settleRefreshes([...environments.map(e => e.load(fromEvent)), load(null, fromEvent)]); };
   await reload(false);
   return liveReload(reload, ["operation", "integration", "deployment", "deployment_environment"]);
+}
+
+function deliveryWork(item, repositories = []) {
+  const activity = sessionActivity(item.session || {});
+  const repo = item.repository || (repositories.length === 1 ? repositories[0] : "");
+  const links = [];
+  if (item.operation_id) links.push(h("a", {href: `#/op/${encodeURIComponent(item.operation_id)}`}, t("permissions_details")));
+  if (item.task_id) links.push(observationLink("execution", item.task_id));
+  if (item.host && item.session_id) links.push(observationLink("session", `${item.host}/${item.session_id}`));
+  if (item.worktree_id) links.push(observationLink("worktree", item.worktree_id));
+  if (item.eligible && state.caps?.features?.execution_delivery?.version === 1) links.push(h("a", {
+    href: `#/delivery/${[item.host, item.kind, item.id, repo].map(encodeURIComponent).join("/")}`}, t("delivery_review_result")));
+  return h("div", {class: "row", "data-project-work": item.id}, h("div", {class: "grow"},
+    h("strong", {}, item.title || item.branch || item.action || item.id), " ", chip(t(activity.key), activity.tone),
+    h("p", {class: "muted"}, item.host || "?", item.actor ? ` · ${item.actor}` : "", " · ", h("code", {}, item.branch || item.id)),
+    h("p", {class: "muted"}, t("delivery_dispatch_state"), " ", t(item.operation_id && item.status === "succeeded"
+      ? "delivery_dispatch_accepted" : (item.operation_id ? "op_" : "task_state_") + item.status),
+      " · ", t("delivery_result_unverified")),
+    item.unavailable ? h("p", {class: "muted"}, t("delivery_source_unavailable"), " ", h("code", {}, item.unavailable.code)) : null,
+    h("div", {class: "actions"}, ...links,
+      ...(item.delivered_to || []).map(receipt => h("a", {href: `https://github.com/${receipt.repository}/pull/${receipt.pull_number}`,
+        target: "_blank", rel: "noopener", title: `${receipt.pinned_sha} → ${receipt.delivered_sha}`}, t("delivered_to", {n: receipt.pull_number}))))));
 }
 
 function deploymentIdentity(identity, empty = "dep_no_version") {
@@ -1653,15 +1695,24 @@ function metadataDrawer(pr, reload) {
 
 // "Update PR results": put chosen results into this PR's head branch with one normal push (never forced; the
 // person's folders are never touched). Sources come only from a preview that lists every commit that would enter.
-function integrationPanel(pr, reloadCard) {
-  const box = h("div", { class: "panel" });
+function integrationPanel(pr, reloadCard, source = null) {
+  const box = h("div", { class: "panel", "data-integration-review": true });
   const may = (state.caps?.scopes || []).includes("integrate");
   const hosts = pr.integration.hosts;
   box.append(h("h2", {}, t("update_pr_results")), h("p", { class: "muted" }, t("update_pr_help")));
   if (!may) { box.append(h("p", { class: "note" }, t("needs_integrate_scope"))); return box; }
   if (!hosts.length) { box.append(h("p", { class: "note" }, t("integration_no_host"))); return box; }
-  const target = { host: hosts[0], repository: pr.repository, pull_number: Number(pr.pull_number) };
+  if (source && (!hosts.includes(source.host) || state.caps?.features?.execution_delivery?.version !== 1)) {
+    box.append(h("p", {class: "note"}, t("delivery_source_unavailable"))); return box;
+  }
+  const target = { host: source?.host || hosts[0], repository: pr.repository, pull_number: Number(pr.pull_number) };
   const selected = []; // [{kind, id, label}] in order
+  let holdingReview = false;
+  box.closeReview = () => {if (holdingReview) {holdingReview = false; setEditing(editing - 1);}};
+  const holdReview = () => {
+    if (selected.length && !holdingReview) {holdingReview = true; drawerOpens++; setEditing(editing + 1);}
+    else if (!selected.length) box.closeReview();
+  };
   const pickList = h("div", {});
   const order = h("div", {});
   const previewBox = h("div", {});
@@ -1669,6 +1720,7 @@ function integrationPanel(pr, reloadCard) {
   let doc = null;
   let generation = 0;
   const rerender = () => {
+    holdReview();
     order.replaceChildren(...selected.map((s, i) => h("div", { class: "row" },
       h("div", { class: "grow" }, `${i + 1}. `, chip(t("kind_" + s.kind)), " ", h("code", {}, s.label)),
       h("button", { class: "secondary", disabled: i === 0, onclick: () => { selected.splice(i - 1, 0, selected.splice(i, 1)[0]); changed(); } }, "↑"),
@@ -1703,6 +1755,7 @@ function integrationPanel(pr, reloadCard) {
   const changed = debounce(() => { rerender(); runPreview(); }, 600);
   const add = (kind, id, label) => {
     if (!selected.some(s => s.kind === kind && s.id === id)) selected.push({ kind, id, label });
+    holdReview();
     changed();
   };
   const plain = w => h("li", {}, w.text);
@@ -1748,21 +1801,38 @@ function integrationPanel(pr, reloadCard) {
       await sleep(1500);
       op = (await api("GET", `/operations/${op.operation_id}`)).operation;
     }
-    if (op.status === "succeeded") reloadCard(integrationStatus(op, {})); // the card shows the new head
+    if (op.status === "succeeded") {box.closeReview(); reloadCard(integrationStatus(op, {}));} // the card shows the new head
     else if (["TARGET_HEAD_CHANGED", "SOURCE_CHANGED"].includes(op.error_code)) { await freshHead(); runPreview(); }
   };
   const branch = h("input", { placeholder: t("branch_on_github") });
   (async () => {
     try {
-      const c = await api("GET", `/integrations/candidates?host=${encodeURIComponent(target.host)}`);
-      const row = (kind, id, label, chips) => h("div", { class: "row" },
+      const query = new URLSearchParams({host: target.host});
+      if (source) {query.set("source_kind", source.kind); query.set("source_id", source.id);}
+      const c = await api("GET", `/integrations/candidates?${query}`);
+      const row = (kind, id, label, chips, eligible = true) => h("div", { class: "row", "data-delivery-source": id },
         h("div", { class: "grow" }, h("code", {}, label), " ", ...chips),
-        h("button", { class: "secondary", onclick: () => add(kind, id, label) }, t("add")));
-      const delivered = x => x.delivered_to.length ? [chip(t("delivered_to", { n: x.delivered_to[0].pull_number }), "ok")] : [];
+        h("button", { class: "secondary", disabled: !eligible, onclick: () => add(kind, id, label) }, t("add")));
+      const delivered = x => (x.delivered_to || []).map(receipt => receipt.repository
+        ? h("a", {href: `https://github.com/${receipt.repository}/pull/${receipt.pull_number}`, target: "_blank", rel: "noopener",
+          title: `${receipt.repository} · ${receipt.pinned_sha || ""} → ${receipt.delivered_sha || ""}`}, t("delivered_to", {n: receipt.pull_number}))
+        : chip(t("delivered_to", {n: receipt.pull_number})));
+      const evidence = r => {
+        const session = r.session || {streaming: r.streaming}, activity = sessionActivity(session);
+        return [chip(t(activity.key), activity.tone),
+          session.pending && runtimeStale(session) ? chip(t("sessions_stale"), "stale") : null,
+          h("p", {class: "muted"}, t("delivery_result_unverified")),
+          h("p", {class: "muted"}, session.observed_at
+            ? t("delivery_observed_at", {time: when(typeof session.observed_at === "number" ? epoch(session.observed_at) : session.observed_at)}) : t("delivery_unobserved")),
+          r.unavailable ? h("p", {class: "note"}, t("delivery_source_unavailable"), " ", h("code", {}, r.unavailable.code)) : null,
+          ...delivered(r)];
+      };
+      const results = source ? c.selected && c.selected.kind === source.kind && c.selected.id === source.id && c.selected.host === source.host
+        ? [c.selected] : [] : c.agent_results;
       pickList.replaceChildren(
         h("h3", {}, t("agent_results")),
-        ...(c.agent_results.length ? c.agent_results.map(r => row("checkpoint_run", r.id, r.branch,
-          [r.streaming ? chip(t("still_working"), "warn") : chip(t("done"), "ok"), ...delivered(r)]))
+        ...(results.length ? results.map(r => row(r.kind || "checkpoint_run", r.id, r.branch || r.id,
+          evidence(r), r.eligible !== false))
           : [h("p", { class: "muted" }, t("none"))]),
         h("h3", {}, t("your_checkpoints")),
         ...(c.checkpoints.length ? c.checkpoints.map(r => row("checkpoint", r.id, `${r.branch || "?"} @ ${r.commit_sha.slice(0, 10)}`,
@@ -1859,7 +1929,7 @@ async function viewOperation(main, id) {
       const resume = op.status === "needs_attention" && !needsConfirm
         ? h("button", { class: "primary", title: t("resume_help"), onclick: async () => {
           try { await api("POST", `/operations/${id}/resume`, {}); render(); } catch (e) { panel.append(errorBox(e)); }
-        } }, t("resume")) : null;
+        } }, t(op.action === "worktree.merge" ? "delivery_merge_read_receipts" : "resume")) : null;
       const confirmSource = op.status === "needs_attention" && needsConfirm ? h("button", { class: "primary", onclick: async () => {
         const connection = {epoch: state.epoch, namespace: state.namespace, generation};
         try { const seen = (await api("GET", `/checkpoints/${op.target.checkpoint_id}?live=true`)).source.head;
@@ -1898,9 +1968,12 @@ async function viewOperation(main, id) {
           h("dt", {}, t("created")), h("dd", {}, when(epoch(op.created_at))),
           op.status_reason ? [h("dt", {}, t("reason")), h("dd", {}, op.status_reason)] : null,
           h("dt", {}, "Target"), h("dd", {}, h("code", {}, JSON.stringify(op.target))),
-          Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null,
-          op.result ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null),
+          Object.keys(refs).length && op.action !== "worktree.merge" ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null,
+          op.result && op.action !== "worktree.merge" ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null),
         ...(receipts || []),
+        mergeRecovery(op),
+        op.action === "worktree.merge" ? h("details", {}, h("summary", {}, t("sessions_details")),
+          h("pre", {class: "pre"}, JSON.stringify({refs, result: op.result}, null, 2))) : null,
         ...(materialized.length ? [h("h2", {}, t("materializations")), ...materialized.map(m => h("div", {class: "row"},
           h("div", {class: "grow"}, `${m.artifact_id} · r${m.revision}`, h("div", {class: "muted"}, m.managed_path)),
           chip(t(`material_${m.state}`), m.state === "verified" ? "ok" : "")))] : []),
@@ -1926,6 +1999,25 @@ async function viewOperation(main, id) {
   };
   await render();
   return liveReload(render, ["operation", "integration", "cleanup"]);
+}
+
+function mergeRecovery(op) {
+  if (op.action !== "worktree.merge") return null;
+  const steps = op.steps || [], refs = op.external_refs || {};
+  const reserved = steps.some(s => s.name === "merge.reserve" && s.status === "succeeded");
+  const released = steps.some(s => s.name === "merge.release" && s.status === "succeeded");
+  if (!reserved || released) return null;
+  const frames = steps.filter(s => ["rehydrate.frame", "merge.frame"].includes(s.name));
+  return h("section", {class: "panel", "data-merge-recovery": true},
+    h("h2", {}, t("delivery_merge_recovery")),
+    h("p", {class: "note"}, t("delivery_merge_held")),
+    h("dl", {class: "kv"}, ...["source", "destination"].flatMap((label, i) => [
+      h("dt", {}, t("delivery_merge_" + label)), h("dd", {}, h("code", {}, refs.carrier_paths?.[i] || t("obs_unknown")))])),
+    ...frames.map(step => h("p", {}, h("code", {}, step.name), " · ",
+      t(step.status === "succeeded" ? "delivery_merge_ack" : "delivery_merge_no_ack"), " · ", observationTime(step.finished_at || step.started_at))),
+    h("p", {}, t("delivery_merge_safe_reads")),
+    h("p", {class: "muted"}, t("delivery_merge_closeout")),
+    refs.host && refs.session_id ? observationLink("session", `${refs.host}/${refs.session_id}`) : null);
 }
 
 function viewSettings(main) {
@@ -1954,7 +2046,7 @@ function viewSettings(main) {
 
 // Credential dialogs and protected storage stay native. A transition invalidates old async
 // forms immediately, but cancellation restores the existing account and its identity-scoped drafts.
-async function nativeTransition(kind) {
+async function nativeTransition(kind, config = null) {
   if (state.nativeBusy && kind !== "disconnect") return;
   const attempt = ++state.nativeAttempt;
   const previousOnline = state.online;
@@ -1962,7 +2054,12 @@ async function nativeTransition(kind) {
   state.nativeBusy = true; state.epoch++; state.online = false;
   state.connectionError = null; state.connectionNotice = null;
   try {
-    if (kind === "disconnect" || kind === "reload" || kind === "forget") {
+    if (kind === "configure") {
+      const saved = await nativeSetupConfiguration(config);
+      if (attempt !== state.nativeAttempt) return;
+      if (saved) {state.nativeSetupDraft = null; state.connectionNotice = t("desktop_setup_saved");}
+      else {state.online = previousOnline; state.connectionNotice = t("desktop_setup_cancelled");}
+    } else if (kind === "disconnect" || kind === "reload" || kind === "forget") {
       disconnect(); // invalidate caches/old forms before native can load another endpoint
       if (kind === "disconnect") await nativeDisconnect();
       else if (kind === "reload") await nativeReloadConfiguration();
@@ -1998,6 +2095,7 @@ async function viewNativeSettings(main) {
   const mine = generation;
   const info = h("div", {"aria-live": "polite"});
   const details = h("dl", {class: "kv"});
+  const setup = h("div", {"data-native-setup": "", hidden: true});
   const help = h("p", {class: "muted"}, t("desktop_credential_help"));
   const platform = h("p", {class: "muted"});
   const fleetRoot = h("div");
@@ -2021,7 +2119,10 @@ async function viewNativeSettings(main) {
   const actions = h("div", {class: "actions"}, connect, enroll, reload, leave);
   const saved = h("div", {}, h("p", {class: "muted"}, t("desktop_forget_help")), forget);
   main.append(h("h1", {}, t("nav_settings")), h("section", {class: "panel native-connection", "aria-label": t("desktop_connection")},
-    h("h2", {}, t("desktop_connection")), details, help, platform, actions, info, saved),
+    h("h2", {}, t("desktop_connection")),
+    h("details", {open: !state.caps}, h("summary", {}, t("delivery_setup_title")),
+      h("ol", {}, h("li", {}, t("delivery_setup_central")), h("li", {}, t("delivery_setup_identity")), h("li", {}, t("delivery_setup_mode")))),
+    setup, details, help, platform, actions, info, saved),
     h("div", {class: "panel"}, h("h2", {}, t("desktop_local")),
       h("p", {class: "note"}, t("desktop_dashboard_only"))), fleetRoot, updateRoot);
   const showInfo = () => {
@@ -2038,11 +2139,29 @@ async function viewNativeSettings(main) {
     if (status.updates === true) disposeUpdates = await mountUpdates(updateRoot, {h, t});
     if (mine !== generation || !main.contains(details)) { disposeUpdates?.(); return; }
     const row = (label, value) => { if (value) details.append(h("dt", {}, t(label)), h("dd", {}, value)); };
+    if (status.configuration_setup === true) {
+      setup.hidden = false;
+      const draft = state.nativeSetupDraft ||= {endpoint: "", expected_actor: ""};
+      const endpoint = h("input", {type: "url", value: draft.endpoint, placeholder: "https://connector.example", required: true,
+        maxlength: 512, disabled: state.nativeBusy, autocomplete: "off", oninput: event => {draft.endpoint = event.target.value;}});
+      const actor = h("input", {value: draft.expected_actor, required: true, maxlength: 200,
+        disabled: state.nativeBusy, autocomplete: "off", oninput: event => {draft.expected_actor = event.target.value;}});
+      const review = h("button", {type: "submit", class: "primary", disabled: state.nativeBusy}, t("desktop_setup_review"));
+      const form = h("form", {onsubmit: event => {
+        event.preventDefault();
+        if (state.nativeBusy || !form.reportValidity()) return;
+        review.disabled = true;
+        return nativeTransition("configure", {endpoint: endpoint.value.trim(), expected_actor: actor.value.trim(), contract_version: "2026-10-08"});
+      }}, h("p", {}, t("desktop_setup_help")),
+        h("div", {class: "capture-fields"}, h("label", {}, t("desktop_endpoint"), endpoint), h("label", {}, t("desktop_expected_actor"), actor)),
+        h("p", {class: "muted"}, t("desktop_setup_origin")), h("div", {class: "actions"}, review));
+      setup.append(form);
+    }
     row("desktop_endpoint", status.endpoint || t("desktop_config_needed"));
     row("desktop_expected_actor", status.expected_actor);
     row("desktop_configuration_file", status.configuration_file);
     if (status.credential_source) row("desktop_credential_source", t("desktop_source_" + status.credential_source));
-    if (status.error) info.append(errorBox(new Error(status.error)));
+    if (status.error && !status.configuration_setup) info.append(errorBox(new Error(status.error)));
     else if (!status.credential_available) info.append(h("p", {}, t("desktop_credential_missing")));
     platform.textContent = status.enrollment_supported === true ? t("desktop_enrollment_help")
       : status.enrollment_supported === false ? t("desktop_enrollment_unsupported") : "";
@@ -2252,6 +2371,7 @@ async function viewProject(main, pid) {
   let draft = null; // the project form's values after a stale save, put back into the reloaded form
   const head = h("div", { class: "panel" });
   const items = h("div", { class: "panel" });
+  const work = h("section", {class: "panel", hidden: true, "data-project-work-list": true});
   const out = h("div", {});
   const archived = h("div", {});
   const showArchived = h("input", { type: "checkbox" });
@@ -2263,7 +2383,7 @@ async function viewProject(main, pid) {
     add.disabled = false;
     if (op) { title.value = ""; render(); }
   } }, t("add_item"));
-  main.append(manageNote() || "", out, head, h("h2", {}, t("work_items")), h("div", { class: "filters" }, title, add), items,
+  main.append(manageNote() || "", out, head, work, h("h2", {}, t("work_items")), h("div", { class: "filters" }, title, add), items,
     h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
   const render = async (fromEvent = false) => {
     const opens = drawerOpens;
@@ -2274,6 +2394,9 @@ async function viewProject(main, pid) {
     if (holdRender(fromEvent, opens)) { idleReload = () => render(true); return; }
     freshPage();
     const p = data.project;
+    work.hidden = !Array.isArray(data.work);
+    fill(work, h("h2", {}, t("delivery_project_work")),
+      ...(data.work?.length ? data.work.map(item => deliveryWork(item, p.repositories)) : [h("p", {class: "muted"}, t("delivery_no_work"))]));
     const msg = out;
     const v = draft || { name: p.name, description: p.description, repositories: p.repositories, task_project: p.task_project || "" };
     const f = {
@@ -2350,7 +2473,7 @@ async function viewProject(main, pid) {
   };
   showArchived.onchange = () => render();
   await render();
-  return liveReload(render, ["project", "work_item"]);
+  return liveReload(render, ["project", "work_item", "operation", "task", "execution", "session", "integration"]);
 }
 
 function linkTarget(l) {
@@ -2647,7 +2770,7 @@ async function viewCleanup(main, section, ident) {
     catch (error) { if (error.code) throw error; /* this view retains the request */ }
   };
   const stored = readStored(draftKey) || {};
-  const choices = ["item", "task"].includes(section) && stored.id !== ident ? { discard_uncommitted: [], release_undelivered: [] }
+  const choices = ["item", "task", "host"].includes(section) && stored.id !== ident ? { discard_uncommitted: [], release_undelivered: [] }
     : (stored.choices || { discard_uncommitted: [], release_undelivered: [] });
   const pending = readStored(pendingKey);
   let intent = readStored(intentKey);
@@ -2665,8 +2788,8 @@ async function viewCleanup(main, section, ident) {
   const supportsTask = state.caps?.features?.cleanup_task === true;
   const kind = h("select", { "aria-label": t("cleanup_target") }, ...["work_item", "checkpoint", "integration", "host", ...(supportsTask || pending?.target?.kind === "task" ? ["task"] : [])].map(k =>
     h("option", { value: k }, t("cleanup_target_" + k))));
-  kind.value = section === "item" ? "work_item" : section === "task" && supportsTask ? "task" : (stored.kind || "host");
-  const targetId = h("input", { value: ["item", "task"].includes(section) ? ident : (stored.id || ""), "aria-label": t("cleanup_id"),
+  kind.value = section === "host" ? "host" : section === "item" ? "work_item" : section === "task" && supportsTask ? "task" : (stored.kind || "host");
+  const targetId = h("input", { value: ["item", "task", "host"].includes(section) ? ident : (stored.id || ""), "aria-label": t("cleanup_id"),
     placeholder: t("cleanup_id"), class: "cleanup-id" });
   const children = h("input", { type: "checkbox", checked: stored.children || false });
   const childrenLabel = h("label", { class: "cleanup-choice" }, children, t("cleanup_children"));

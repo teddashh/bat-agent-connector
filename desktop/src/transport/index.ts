@@ -6,7 +6,7 @@ export interface NativeStatus {
   updates?: boolean;
   endpoint: string | null; error: string | null; credential_available: boolean;
   expected_actor?: string; credential_source?: "launch_environment" | "windows_credential_manager" | null;
-  credential_saved?: boolean; enrollment_supported?: boolean; configuration_reload?: boolean;
+  credential_saved?: boolean; enrollment_supported?: boolean; configuration_reload?: boolean; configuration_setup?: boolean;
   configuration_file?: string; connected?: boolean; file_transfers?: boolean;
 }
 export let nativeFileSupport = false;
@@ -28,6 +28,9 @@ export const nativeEnroll = () => invoke<any | null>("connector_enroll", {
   locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US"
 });
 export const nativeReloadConfiguration = () => invoke<NativeStatus>("connector_reload_configuration");
+export const nativeSetupConfiguration = (config: {endpoint: string; expected_actor: string; contract_version: string}) =>
+  invoke<NativeStatus | null>("connector_setup_configuration", {config,
+    locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US"});
 export const nativeForgetCredential = () => invoke<void>("connector_forget_credential");
 export const openExternal = (url: string) => invoke<void>("open_external", { url });
 export const fleetAvailability = () => invoke<{configured: boolean; platform_supported: boolean; native_controls?: boolean; bootstrap_controls?: boolean; error?: string}>("fleet_availability");

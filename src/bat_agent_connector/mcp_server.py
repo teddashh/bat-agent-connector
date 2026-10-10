@@ -465,10 +465,12 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
         Keep source_sha, repository_id and binding_digest for work_continue_from_repository; never replace SHA on retry."""
         return await daemon("repository_preview", repository=repository, host=host, workspace_id=workspace_id, source_ref=source_ref)
 
-    async def integration_candidates(host: str, limit: int = 20) -> dict[str, Any]:
-        """Results that can go into a PR from this host: agent results (checkpoint runs, by operation id),
-        people's checkpoints, and where each was already delivered. Journal and inventory only."""
-        return await daemon("integration_candidates", host=host, limit=limit)
+    async def integration_candidates(host: str, limit: int = 20, source_kind: str | None = None,
+                                     source_id: str | None = None) -> dict[str, Any]:
+        """Recorded checkpoint, execution and accepted task-command sources for this host. Activity is not
+        completion; inspect eligibility and the fixed integration preview. Optional source_kind/source_id
+        reads one exact execution or task_command even beyond the recent list. Journal/inventory only."""
+        return await daemon("integration_candidates", host=host, limit=limit, source_kind=source_kind, source_id=source_id)
 
     async def integration_get(operation_id: str | None = None, preview_id: str | None = None) -> dict[str, Any]:
         """One integration: a preview document (preview_id: every commit and file that would enter the PR,
@@ -681,7 +683,7 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
             (403); to continue such work, checkpoint.create reads it and checkpoint.continue starts a new
             managed session from its commit (see checkpoints_list). To put results into an existing PR
             (scope integrate): 1) action="integration.preview", target={host, repository, pull_number},
-            params={sources: [{kind: checkpoint|checkpoint_run|branch, id, mode?: merge|pick, commits?}]}, a new
+            params={sources: [{kind: checkpoint|checkpoint_run|execution|task_command|branch, id, mode?: merge|pick, commits?}]}, a new
             key per refresh; read every commit it lists. 2) action="integration.apply", same target,
             params={preview_id}, preconditions={expected_head_sha: preview.target.head_sha, preview_digest:
             preview.digest}, idempotency_key="integrate.<preview_id>". On INTEGRATION_CONFLICT,

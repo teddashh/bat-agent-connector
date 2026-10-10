@@ -335,8 +335,11 @@ the existing artifact review and integration flow.
 Only with the person's go-ahead for that PR. Results go into the PR's existing head branch with one normal push;
 nothing is ever forced, and the person's folders are never changed.
 
-1. `integration_candidates(host)`: agent results (`checkpoint_run`, by the `checkpoint.continue` operation id) and
-   people's checkpoints, with where each was already delivered.
+1. `integration_candidates(host)`: checkpoint runs, central `execution` operations, accepted `task_command`
+   IDs and people's checkpoints, with eligibility, activity observations and exact delivery receipts. A non-streaming,
+   missing or stale session is not a completed task. Use the returned kind/id; never invent ownership from a branch.
+   `source_kind`/`source_id` can read an exact execution or task command outside the recent list. Project `work`
+   entries retain the original session/worktree and use this same preview path without creating another task.
 2. `operation_submit(action="integration.preview", target={host, repository, pull_number}, params={sources: [{kind,
    id}, ...]})` with a new key per refresh. Read every commit it lists, its `warnings` (`BRINGS_FOREIGN_COMMITS`,
    `UNCOMMITTED_NOT_INCLUDED`, ...) and `blocking`; tell the person what will enter the PR.

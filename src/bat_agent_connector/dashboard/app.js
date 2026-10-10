@@ -480,7 +480,7 @@ async function connectorUploadArtifact(operationId, bytes, browserToken) {
 		data: await res.json().catch(() => ({}))
 	};
 }
-var nativeDesktop, nativeFileSupport, nativeFilesStatus, nativeFilesPick, nativeFilesUpload, nativeFilesDropTarget, nativeFilesControl, nativeFilesSave, nativeFilesPreview, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal, fleetAvailability, fleetBootstrap, tailscaleControl, fleetControl, fleetRequest, updateRequest;
+var nativeDesktop, nativeFileSupport, nativeFilesStatus, nativeFilesPick, nativeFilesUpload, nativeFilesDropTarget, nativeFilesControl, nativeFilesSave, nativeFilesPreview, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeSetupConfiguration, nativeForgetCredential, openExternal, fleetAvailability, fleetBootstrap, tailscaleControl, fleetControl, fleetRequest, updateRequest;
 var init_transport = __esmMin((() => {
 	init_core();
 	nativeDesktop = isTauri();
@@ -502,6 +502,10 @@ var init_transport = __esmMin((() => {
 	nativeDisconnect = () => invoke("connector_disconnect");
 	nativeEnroll = () => invoke("connector_enroll", { locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US" });
 	nativeReloadConfiguration = () => invoke("connector_reload_configuration");
+	nativeSetupConfiguration = (config) => invoke("connector_setup_configuration", {
+		config,
+		locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US"
+	});
 	nativeForgetCredential = () => invoke("connector_forget_credential");
 	openExternal = (url) => invoke("open_external", { url });
 	fleetAvailability = () => invoke("fleet_availability");
@@ -825,6 +829,39 @@ function conversationPanel({ h, t, when, guard }) {
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		delivery_result_unverified: "成果尚未驗證",
+		delivery_observed_at: "最後觀測：{time}",
+		delivery_unobserved: "尚無活動觀測",
+		delivery_source_context: "已帶入原工作的成果來源。請選擇 repository 與 PR，再加入預覽。",
+		delivery_source_unavailable: "目前無法確認可整合的成果來源。",
+		delivery_review_result: "檢視成果並加入 PR",
+		delivery_project_work: "派出的工作",
+		delivery_no_work: "尚無明確關聯的派工紀錄。",
+		delivery_dispatch_state: "派工狀態：",
+		kind_execution: "中央派工",
+		kind_task_command: "Task Service 成果",
+		delivery_dispatch_accepted: "已受理",
+		delivery_worktree_branch: "分支",
+		delivery_worktree_path: "工作目錄",
+		delivery_worktree_owner: "建立依據",
+		delivery_worktree_sessions: "關聯工作階段",
+		delivery_worktree_recorded: "中央目前保存的關聯；活動狀態以各工作階段的觀測為準。",
+		delivery_worktree_cleanup: "整理資格需要最新預覽。預覽會列出使用中的工作、未交付成果、資源保留與其他阻擋原因。",
+		delivery_merge_read_receipts: "查核已保存回執",
+		delivery_merge_recovery: "Worktree merge 復原",
+		delivery_merge_held: "此操作尚無釋放資源的回執。以下兩個工作目錄依原操作保留；請保留原 operation ID。",
+		delivery_merge_source: "來源 worktree",
+		delivery_merge_destination: "目的工作目錄",
+		delivery_merge_ack: "已保存正面 ACK",
+		delivery_merge_no_ack: "尚無正面 ACK 證據",
+		delivery_merge_safe_reads: "可讀取 session、檢查 Git 與操作紀錄，或使用既有停止／中斷功能。查核回執不會重送未知的 merge。",
+		delivery_merge_closeout: "安全結案需要原步驟的正面 ACK 與原資源保留身分。完全遺失 ACK 的人工裁決尚未提供；不要用目前 HEAD 猜測結果或清除 reservation。",
+		delivery_setup_title: "首次連接與使用方式",
+		delivery_setup_central: "首次使用時填入既有中央服務的位址與預期身分，在原生視窗確認後保存。已有設定可重新載入。",
+		delivery_setup_identity: "連線後確認實際身分與權限。主機是否就緒，請查看 Fleet 的各項原因。",
+		delivery_setup_mode: "只管理遠端工作可直接使用 Dashboard。需要 Windows 本機連線與 BAT 啟動時，再於 Fleet 選擇連線、profile 與登入啟動項目。Mac 可作為 Dashboard 使用。",
+		delivery_fleet_current_backend: "目前 Fleet backend：{backend}",
+		delivery_fleet_legacy_default: "舊設定未指定 backend 時仍使用 PowerShell。若要改由 Rust 管理，請使用下方的遷移預覽；安裝新版 Dashboard 不會自行遷移。",
 		message_code: "程式碼",
 		message_table: "訊息表格",
 		message_copy_code: "複製程式碼",
@@ -1529,6 +1566,11 @@ var STRINGS = {
 		desktop_forget_credential: "移除此電腦儲存的憑證",
 		desktop_reload_configuration: "重新載入設定",
 		desktop_connecting: "正在處理連線…",
+		desktop_setup_help: "先連接你已有的中央服務。輸入位址與預期帳號，再到原生視窗確認儲存。",
+		desktop_setup_origin: "使用 HTTPS 位址；已建立的本機通道可用 http://127.0.0.1:連接埠。此處不需輸入權杖。",
+		desktop_setup_review: "檢視連線設定",
+		desktop_setup_saved: "設定已儲存。請新增憑證並驗證身分。",
+		desktop_setup_cancelled: "已取消儲存；輸入內容仍保留。",
 		desktop_endpoint: "中央位置",
 		desktop_expected_actor: "預期身分",
 		desktop_configuration_file: "設定檔",
@@ -1979,6 +2021,39 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		delivery_result_unverified: "Result unverified",
+		delivery_observed_at: "Last observed: {time}",
+		delivery_unobserved: "No activity observation",
+		delivery_source_context: "The original work's source is selected. Choose a repository and PR, then add it to the preview.",
+		delivery_source_unavailable: "An eligible result source could not be confirmed.",
+		delivery_review_result: "Review result and add to PR",
+		delivery_project_work: "Dispatched work",
+		delivery_no_work: "No explicitly linked dispatch records yet.",
+		delivery_dispatch_state: "Dispatch state:",
+		kind_execution: "central execution",
+		kind_task_command: "Task Service result",
+		delivery_dispatch_accepted: "accepted",
+		delivery_worktree_branch: "Branch",
+		delivery_worktree_path: "Working directory",
+		delivery_worktree_owner: "Creation evidence",
+		delivery_worktree_sessions: "Related sessions",
+		delivery_worktree_recorded: "Bindings currently recorded by central; activity comes from each session's observation.",
+		delivery_worktree_cleanup: "Cleanup eligibility needs a fresh preview. It lists active work, undelivered results, reservations and other blockers.",
+		delivery_merge_read_receipts: "Check saved receipts",
+		delivery_merge_recovery: "Worktree merge recovery",
+		delivery_merge_held: "This operation has no resource-release receipt. These two working directories remain reserved according to the original operation; keep its operation ID.",
+		delivery_merge_source: "Source worktree",
+		delivery_merge_destination: "Destination checkout",
+		delivery_merge_ack: "Positive ACK saved",
+		delivery_merge_no_ack: "No positive ACK evidence",
+		delivery_merge_safe_reads: "Read the session, inspect Git and operation records, or use the existing stop/interrupt controls. Checking receipts does not resend an unknown merge.",
+		delivery_merge_closeout: "Safe closeout requires the original step's positive ACK and reservation identity. Manual adjudication for a wholly lost ACK is not available; do not infer the outcome from HEAD or clear reservations.",
+		delivery_setup_title: "First connection and usage",
+		delivery_setup_central: "On first use, enter your existing central address and expected identity, then confirm in the native window. Existing configuration can be reloaded.",
+		delivery_setup_identity: "After connecting, confirm the actual identity and scopes. Fleet shows each host's readiness and blocking reasons.",
+		delivery_setup_mode: "Use Dashboard directly to manage remote work. For local Windows connections and BAT startup, select connections, profiles and login startup in Fleet. Mac supports Dashboard use.",
+		delivery_fleet_current_backend: "Current Fleet backend: {backend}",
+		delivery_fleet_legacy_default: "Older configuration without a backend still uses PowerShell. Use the migration preview below to switch to Rust; installing a new Dashboard does not migrate it automatically.",
 		message_code: "Code",
 		message_table: "Message table",
 		message_copy_code: "Copy code",
@@ -2683,6 +2758,11 @@ var STRINGS = {
 		desktop_forget_credential: "Forget saved credential",
 		desktop_reload_configuration: "Reload configuration",
 		desktop_connecting: "Connection in progress…",
+		desktop_setup_help: "Connect to your existing central service. Enter its address and expected account, then review and save in the native window.",
+		desktop_setup_origin: "Use an HTTPS origin, or http://127.0.0.1:port for an existing local tunnel. No token is needed here.",
+		desktop_setup_review: "Review connection settings",
+		desktop_setup_saved: "Configuration saved. Add a credential and verify your identity next.",
+		desktop_setup_cancelled: "Saving cancelled; your inputs are preserved.",
 		desktop_endpoint: "Central address",
 		desktop_expected_actor: "Expected identity",
 		desktop_configuration_file: "Configuration file",
@@ -3699,6 +3779,8 @@ async function mountFleetDesktop(main, { h, t }) {
 			onclick: fn
 		}, t(text));
 		const fields = [
+			h("p", { "data-fleet-current-backend": true }, t("delivery_fleet_current_backend", { backend: t(["rust", "powershell"].includes(snapshot.backend) ? "fleet_backend_" + snapshot.backend : "obs_unknown") })),
+			snapshot.backend === "powershell" ? h("p", { class: "note" }, t("delivery_fleet_legacy_default")) : null,
 			h("p", {}, t("fleet_monitor_" + snapshot.monitor.state), " · ", t("fleet_" + snapshot.readiness.state)),
 			snapshot.monitor.state === "running" && !snapshot.monitor.controllable ? h("p", { class: "note" }, t("fleet_other_owner")) : null,
 			snapshot.login_launch ? h("p", { class: "note" }, t("fleet_login_" + snapshot.login_launch.state), snapshot.login_launch.code ? ` (${snapshot.login_launch.code})` : null) : null,
@@ -9950,7 +10032,17 @@ async function viewObservedResource(main, type, id) {
 			const data = await api("GET", path);
 			assertView(connection);
 			const resource = data[type === "execution" ? "task" : "worktree"];
-			head.replaceChildren(h("h1", {}, t(type === "execution" ? "obs_execution" : "obs_worktree")), h("code", {}, id), h("p", { class: "muted" }, t("obs_known_identity")), type === "execution" && state.caps?.features?.cleanup_task === true ? h("p", {}, h("a", { href: `#/cleanup/task/${encodeURIComponent(id)}` }, t("cleanup_task_preview"))) : null, type === "execution" && state.caps?.artifacts?.capture?.managed_single_file === true ? h("p", {}, h("a", { href: `#/artifact-review/task/${encodeURIComponent(id)}` }, t("ar_open"))) : null, h("pre", { class: "pre" }, JSON.stringify(resource, null, 2)));
+			const sessions = resource.known_sessions || [];
+			fill(head, h("h1", {}, t(type === "execution" ? "obs_execution" : "obs_worktree")), h("code", {}, id), h("p", { class: "muted" }, t("obs_known_identity")), type === "worktree" ? [
+				h("dl", { class: "kv" }, h("dt", {}, t("host")), h("dd", {}, resource.host || t("obs_unknown")), h("dt", {}, t("delivery_worktree_branch")), h("dd", {}, h("code", {}, resource.branch || t("obs_unknown"))), h("dt", {}, t("delivery_worktree_path")), h("dd", {}, h("code", {}, resource.worktree_path || t("obs_unknown"))), h("dt", {}, t("delivery_worktree_owner")), h("dd", {}, resource.intent_type || t("obs_unknown"), " · ", resource.intent_type === "registry" ? h("code", {}, resource.intent_id || t("obs_unknown")) : observationLink(resource.intent_type === "task" ? "execution" : "operation", resource.intent_id))),
+				h("h2", {}, t("delivery_worktree_sessions")),
+				h("p", { class: "muted" }, t("delivery_worktree_recorded")),
+				...sessions.map((s) => h("div", { class: "row" }, observationLink("session", `${s.host}/${s.session_id}`), chip(t(sessionActivity(s.observation || {}).key), sessionActivity(s.observation || {}).tone))),
+				!sessions.length ? h("p", { class: "muted" }, t("none")) : null,
+				...(resource.work || []).map((item) => deliveryWork(item)),
+				h("p", { class: "note" }, t("delivery_worktree_cleanup")),
+				h("p", {}, h("a", { href: `#/cleanup/${resource.intent_type === "task" ? "task" : "host"}/${encodeURIComponent(resource.intent_type === "task" ? resource.intent_id : resource.host || "")}` }, t("cleanup_preview")))
+			] : null, type === "execution" && state.caps?.features?.cleanup_task === true ? h("p", {}, h("a", { href: `#/cleanup/task/${encodeURIComponent(id)}` }, t("cleanup_task_preview"))) : null, type === "execution" && state.caps?.artifacts?.capture?.managed_single_file === true ? h("p", {}, h("a", { href: `#/artifact-review/task/${encodeURIComponent(id)}` }, t("ar_open"))) : null, h("details", {}, h("summary", {}, t("sessions_details")), h("pre", { class: "pre" }, JSON.stringify(resource, null, 2))));
 		} catch (error) {
 			head.append(errorBox(error));
 		}
@@ -10455,17 +10547,22 @@ function checkpointPanel(host, sid) {
 		}
 	};
 }
-async function viewDelivery(main) {
+async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceRepository) {
 	freshPage();
+	const source = sourceHost && ["execution", "task_command"].includes(sourceKind) && sourceId ? {
+		host: sourceHost,
+		kind: sourceKind,
+		id: sourceId
+	} : null;
 	const repo = h("input", {
 		placeholder: "owner/name",
-		value: sessionStorage.getItem("batc.repo") || ""
+		value: source ? sourceRepository || "" : sessionStorage.getItem("batc.repo") || ""
 	});
 	const num = h("input", {
 		placeholder: "123",
 		inputmode: "numeric",
 		size: 6,
-		value: sessionStorage.getItem("batc.pr") || ""
+		value: source ? "" : sessionStorage.getItem("batc.pr") || ""
 	});
 	const card = h("div", { class: "panel delivery-card" });
 	const groups = new Map();
@@ -10476,13 +10573,14 @@ async function viewDelivery(main) {
 	}
 	const environments = [...groups.values()].map(environmentCard);
 	main.append(h("h1", {}, t("nav_delivery")), ...environments.map((e) => e.card));
+	if (source) main.append(h("p", { class: "note" }, t("delivery_source_context"), " ", h("code", {}, source.id)));
 	let selectedMethod = "";
 	let reviewedPreview = null;
 	main.append(h("h2", {}, t("dep_pull_request")), h("div", { class: "filters delivery-controls" }, repo, num, h("button", {
 		class: "secondary",
 		onclick: () => load()
 	}, t("load_pr"))), card);
-	if (!repo.value && state.caps?.repositories?.length) repo.value = state.caps.repositories[0].repository;
+	if (!source && !repo.value && state.caps?.repositories?.length) repo.value = state.caps.repositories[0].repository;
 	const load = async (flash = null, fromEvent = false) => {
 		const opens = drawerOpens;
 		const holdCard = () => card.querySelector(".drawer:not([hidden])") || fromEvent && holdRender(true, opens);
@@ -10583,11 +10681,12 @@ async function viewDelivery(main) {
 				target: "_blank",
 				rel: "noopener"
 			}, `#${p.number} ${p.title || ""}`), " · ", t("scope_" + p.reason), h("div", {}, h("code", {}, p.head_sha || ""))), chip(t(p.effect === "branch_rebase" ? "scope_stack_rebase" : p.effect === "dependency" ? "scope_dependency" : p.would_merge ? "scope_would_merge" : "scope_candidate"), p.would_merge ? "warn" : "")));
+			card.querySelector("[data-integration-review]")?.closeReview?.();
 			fill(card, h("h2", {}, h("a", {
 				href: pr.html_url,
 				target: "_blank",
 				rel: "noopener"
-			}, `#${pr.pull_number} ${pr.title || ""}`)), h("dl", { class: "kv" }, h("dt", {}, t("head")), h("dd", {}, h("code", {}, `${pr.head_ref} @ ${pr.head_sha}`)), h("dt", {}, t("base")), h("dd", {}, h("code", {}, `${pr.base_ref} @ ${pr.base_sha}`)), h("dt", {}, t("mergeable")), h("dd", {}, `${pr.state}${pr.draft ? " · draft" : ""} · ${pr.mergeable_state || "?"}`), h("dt", {}, t("checks")), h("dd", {}, t("checks_summary", pr.checks)), pr.merged ? [h("dt", {}, t("merged_sha")), h("dd", {}, h("code", {}, pr.merge_commit_sha))] : null), metadataDrawer(pr, load), scopeChanged ? h("p", { class: "note warn" }, t("merge_scope_reload")) : null, h("h2", {}, t("merge_scope")), h("label", {}, t("merge_method"), " ", method), h("p", { class: "muted" }, t("merge_preview_fixed"), " ", h("code", {}, pv.preview_id)), commitList, affected.length ? h("div", {}, ...affected) : h("p", { class: "muted" }, t("scope_single_pr")), ...pv.blocking.map((b) => h("p", { class: "note warn" }, h("code", {}, b.code), " · ", b.message)), ...pv.warnings.map((w) => h("p", { class: "muted" }, w)), h("div", { class: "actions" }, ...buttons), status, flash instanceof Node ? flash : null, pr.integration?.allowed ? integrationPanel(pr, load) : null);
+			}, `#${pr.pull_number} ${pr.title || ""}`)), h("dl", { class: "kv" }, h("dt", {}, t("head")), h("dd", {}, h("code", {}, `${pr.head_ref} @ ${pr.head_sha}`)), h("dt", {}, t("base")), h("dd", {}, h("code", {}, `${pr.base_ref} @ ${pr.base_sha}`)), h("dt", {}, t("mergeable")), h("dd", {}, `${pr.state}${pr.draft ? " · draft" : ""} · ${pr.mergeable_state || "?"}`), h("dt", {}, t("checks")), h("dd", {}, t("checks_summary", pr.checks)), pr.merged ? [h("dt", {}, t("merged_sha")), h("dd", {}, h("code", {}, pr.merge_commit_sha))] : null), metadataDrawer(pr, load), scopeChanged ? h("p", { class: "note warn" }, t("merge_scope_reload")) : null, h("h2", {}, t("merge_scope")), h("label", {}, t("merge_method"), " ", method), h("p", { class: "muted" }, t("merge_preview_fixed"), " ", h("code", {}, pv.preview_id)), commitList, affected.length ? h("div", {}, ...affected) : h("p", { class: "muted" }, t("scope_single_pr")), ...pv.blocking.map((b) => h("p", { class: "note warn" }, h("code", {}, b.code), " · ", b.message)), ...pv.warnings.map((w) => h("p", { class: "muted" }, w)), h("div", { class: "actions" }, ...buttons), status, flash instanceof Node ? flash : null, pr.integration?.allowed ? integrationPanel(pr, load, source) : null);
 		} catch (e) {
 			if (!holdCard()) fill(card, errorBox(e));
 		}
@@ -10602,6 +10701,30 @@ async function viewDelivery(main) {
 		"deployment",
 		"deployment_environment"
 	]);
+}
+function deliveryWork(item, repositories = []) {
+	const activity = sessionActivity(item.session || {});
+	const repo = item.repository || (repositories.length === 1 ? repositories[0] : "");
+	const links = [];
+	if (item.operation_id) links.push(h("a", { href: `#/op/${encodeURIComponent(item.operation_id)}` }, t("permissions_details")));
+	if (item.task_id) links.push(observationLink("execution", item.task_id));
+	if (item.host && item.session_id) links.push(observationLink("session", `${item.host}/${item.session_id}`));
+	if (item.worktree_id) links.push(observationLink("worktree", item.worktree_id));
+	if (item.eligible && state.caps?.features?.execution_delivery?.version === 1) links.push(h("a", { href: `#/delivery/${[
+		item.host,
+		item.kind,
+		item.id,
+		repo
+	].map(encodeURIComponent).join("/")}` }, t("delivery_review_result")));
+	return h("div", {
+		class: "row",
+		"data-project-work": item.id
+	}, h("div", { class: "grow" }, h("strong", {}, item.title || item.branch || item.action || item.id), " ", chip(t(activity.key), activity.tone), h("p", { class: "muted" }, item.host || "?", item.actor ? ` · ${item.actor}` : "", " · ", h("code", {}, item.branch || item.id)), h("p", { class: "muted" }, t("delivery_dispatch_state"), " ", t(item.operation_id && item.status === "succeeded" ? "delivery_dispatch_accepted" : (item.operation_id ? "op_" : "task_state_") + item.status), " · ", t("delivery_result_unverified")), item.unavailable ? h("p", { class: "muted" }, t("delivery_source_unavailable"), " ", h("code", {}, item.unavailable.code)) : null, h("div", { class: "actions" }, ...links, ...(item.delivered_to || []).map((receipt) => h("a", {
+		href: `https://github.com/${receipt.repository}/pull/${receipt.pull_number}`,
+		target: "_blank",
+		rel: "noopener",
+		title: `${receipt.pinned_sha} → ${receipt.delivered_sha}`
+	}, t("delivered_to", { n: receipt.pull_number }))))));
 }
 function deploymentIdentity(identity, empty = "dep_no_version") {
 	if (!identity?.source_sha && !identity?.artifact_id) return h("p", { class: "muted" }, t(empty));
@@ -10957,8 +11080,11 @@ function metadataDrawer(pr, reload) {
 		onclick: () => d.open()
 	}, t("metadata_edit")), d.box);
 }
-function integrationPanel(pr, reloadCard) {
-	const box = h("div", { class: "panel" });
+function integrationPanel(pr, reloadCard, source = null) {
+	const box = h("div", {
+		class: "panel",
+		"data-integration-review": true
+	});
 	const may = (state.caps?.scopes || []).includes("integrate");
 	const hosts = pr.integration.hosts;
 	box.append(h("h2", {}, t("update_pr_results")), h("p", { class: "muted" }, t("update_pr_help")));
@@ -10970,12 +11096,30 @@ function integrationPanel(pr, reloadCard) {
 		box.append(h("p", { class: "note" }, t("integration_no_host")));
 		return box;
 	}
+	if (source && (!hosts.includes(source.host) || state.caps?.features?.execution_delivery?.version !== 1)) {
+		box.append(h("p", { class: "note" }, t("delivery_source_unavailable")));
+		return box;
+	}
 	const target = {
-		host: hosts[0],
+		host: source?.host || hosts[0],
 		repository: pr.repository,
 		pull_number: Number(pr.pull_number)
 	};
 	const selected = [];
+	let holdingReview = false;
+	box.closeReview = () => {
+		if (holdingReview) {
+			holdingReview = false;
+			setEditing(editing - 1);
+		}
+	};
+	const holdReview = () => {
+		if (selected.length && !holdingReview) {
+			holdingReview = true;
+			drawerOpens++;
+			setEditing(editing + 1);
+		} else if (!selected.length) box.closeReview();
+	};
 	const pickList = h("div", {});
 	const order = h("div", {});
 	const previewBox = h("div", {});
@@ -10983,6 +11127,7 @@ function integrationPanel(pr, reloadCard) {
 	let doc = null;
 	let generation = 0;
 	const rerender = () => {
+		holdReview();
 		order.replaceChildren(...selected.map((s, i) => h("div", { class: "row" }, h("div", { class: "grow" }, `${i + 1}. `, chip(t("kind_" + s.kind)), " ", h("code", {}, s.label)), h("button", {
 			class: "secondary",
 			disabled: i === 0,
@@ -11048,6 +11193,7 @@ function integrationPanel(pr, reloadCard) {
 			id,
 			label
 		});
+		holdReview();
 		changed();
 	};
 	const plain = (w) => h("li", {}, w.text);
@@ -11113,8 +11259,10 @@ function integrationPanel(pr, reloadCard) {
 			await sleep(1500);
 			op = (await api("GET", `/operations/${op.operation_id}`)).operation;
 		}
-		if (op.status === "succeeded") reloadCard(integrationStatus(op, {}));
-		else if (["TARGET_HEAD_CHANGED", "SOURCE_CHANGED"].includes(op.error_code)) {
+		if (op.status === "succeeded") {
+			box.closeReview();
+			reloadCard(integrationStatus(op, {}));
+		} else if (["TARGET_HEAD_CHANGED", "SOURCE_CHANGED"].includes(op.error_code)) {
 			await freshHead();
 			runPreview();
 		}
@@ -11122,13 +11270,39 @@ function integrationPanel(pr, reloadCard) {
 	const branch = h("input", { placeholder: t("branch_on_github") });
 	(async () => {
 		try {
-			const c = await api("GET", `/integrations/candidates?host=${encodeURIComponent(target.host)}`);
-			const row = (kind, id, label, chips) => h("div", { class: "row" }, h("div", { class: "grow" }, h("code", {}, label), " ", ...chips), h("button", {
+			const query = new URLSearchParams({ host: target.host });
+			if (source) {
+				query.set("source_kind", source.kind);
+				query.set("source_id", source.id);
+			}
+			const c = await api("GET", `/integrations/candidates?${query}`);
+			const row = (kind, id, label, chips, eligible = true) => h("div", {
+				class: "row",
+				"data-delivery-source": id
+			}, h("div", { class: "grow" }, h("code", {}, label), " ", ...chips), h("button", {
 				class: "secondary",
+				disabled: !eligible,
 				onclick: () => add(kind, id, label)
 			}, t("add")));
-			const delivered = (x) => x.delivered_to.length ? [chip(t("delivered_to", { n: x.delivered_to[0].pull_number }), "ok")] : [];
-			pickList.replaceChildren(h("h3", {}, t("agent_results")), ...c.agent_results.length ? c.agent_results.map((r) => row("checkpoint_run", r.id, r.branch, [r.streaming ? chip(t("still_working"), "warn") : chip(t("done"), "ok"), ...delivered(r)])) : [h("p", { class: "muted" }, t("none"))], h("h3", {}, t("your_checkpoints")), ...c.checkpoints.length ? c.checkpoints.map((r) => row("checkpoint", r.id, `${r.branch || "?"} @ ${r.commit_sha.slice(0, 10)}`, [r.note ? h("span", { class: "muted" }, r.note.slice(0, 60)) : null, ...delivered(r)])) : [h("p", { class: "muted" }, t("none"))], h("div", { class: "actions" }, branch, h("button", {
+			const delivered = (x) => (x.delivered_to || []).map((receipt) => receipt.repository ? h("a", {
+				href: `https://github.com/${receipt.repository}/pull/${receipt.pull_number}`,
+				target: "_blank",
+				rel: "noopener",
+				title: `${receipt.repository} · ${receipt.pinned_sha || ""} → ${receipt.delivered_sha || ""}`
+			}, t("delivered_to", { n: receipt.pull_number })) : chip(t("delivered_to", { n: receipt.pull_number })));
+			const evidence = (r) => {
+				const session = r.session || { streaming: r.streaming }, activity = sessionActivity(session);
+				return [
+					chip(t(activity.key), activity.tone),
+					session.pending && runtimeStale(session) ? chip(t("sessions_stale"), "stale") : null,
+					h("p", { class: "muted" }, t("delivery_result_unverified")),
+					h("p", { class: "muted" }, session.observed_at ? t("delivery_observed_at", { time: when(typeof session.observed_at === "number" ? epoch(session.observed_at) : session.observed_at) }) : t("delivery_unobserved")),
+					r.unavailable ? h("p", { class: "note" }, t("delivery_source_unavailable"), " ", h("code", {}, r.unavailable.code)) : null,
+					...delivered(r)
+				];
+			};
+			const results = source ? c.selected && c.selected.kind === source.kind && c.selected.id === source.id && c.selected.host === source.host ? [c.selected] : [] : c.agent_results;
+			pickList.replaceChildren(h("h3", {}, t("agent_results")), ...results.length ? results.map((r) => row(r.kind || "checkpoint_run", r.id, r.branch || r.id, evidence(r), r.eligible !== false)) : [h("p", { class: "muted" }, t("none"))], h("h3", {}, t("your_checkpoints")), ...c.checkpoints.length ? c.checkpoints.map((r) => row("checkpoint", r.id, `${r.branch || "?"} @ ${r.commit_sha.slice(0, 10)}`, [r.note ? h("span", { class: "muted" }, r.note.slice(0, 60)) : null, ...delivered(r)])) : [h("p", { class: "muted" }, t("none"))], h("div", { class: "actions" }, branch, h("button", {
 				class: "secondary",
 				onclick: () => {
 					if (branch.value.trim()) add("branch", branch.value.trim(), branch.value.trim());
@@ -11264,7 +11438,7 @@ async function viewOperation(main, id) {
 						panel.append(errorBox(e));
 					}
 				}
-			}, t("resume")) : null;
+			}, t(op.action === "worktree.merge" ? "delivery_merge_read_receipts" : "resume")) : null;
 			const confirmSource = op.status === "needs_attention" && needsConfirm ? h("button", {
 				class: "primary",
 				onclick: async () => {
@@ -11311,7 +11485,10 @@ async function viewOperation(main, id) {
 				return;
 			}
 			freshPage();
-			fill(panel, h("h1", {}, op.action), h("p", { class: "op-status" }, opStatus(op), " ", op.error_code ? chip(op.error_code, "bad") : null), ...linked?.length ? [linkedItems(linked)] : [], h("dl", { class: "kv" }, h("dt", {}, t("actor")), h("dd", {}, `${op.actor} (${op.entry})`), h("dt", {}, t("created")), h("dd", {}, when(epoch(op.created_at))), op.status_reason ? [h("dt", {}, t("reason")), h("dd", {}, op.status_reason)] : null, h("dt", {}, "Target"), h("dd", {}, h("code", {}, JSON.stringify(op.target))), Object.keys(refs).length ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null, op.result ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null), ...receipts || [], ...materialized.length ? [h("h2", {}, t("materializations")), ...materialized.map((m) => h("div", { class: "row" }, h("div", { class: "grow" }, `${m.artifact_id} · r${m.revision}`, h("div", { class: "muted" }, m.managed_path)), chip(t(`material_${m.state}`), m.state === "verified" ? "ok" : "")))] : [], ...cleanupReceipts?.length ? [h("h2", {}, t("cleanup_open_receipts")), ...cleanupReceipts.map((r) => h("details", { class: "row-details" }, h("summary", {}, r.resource_id, " · ", t("cleanup_receipt_" + r.status)), h("pre", { class: "pre" }, JSON.stringify(r, null, 2))))] : [], ...op.action === "integration.apply" ? [repairControl(op)] : [], (op.result?.merge || op.result || refs.merge_receipt)?.base_moved ? h("p", { class: "note warn" }, t("merged_newer_base", { count: (op.result?.merge || op.result || refs.merge_receipt).other_commits_count })) : null, refs.write_acknowledged && refs.verification_pending ? h("p", { class: "note warn" }, t("metadata_pending")) : null, h("h2", {}, t("steps")), ...op.steps.map((s) => h("div", { class: "row" }, h("div", { class: "grow" }, s.name), h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)), h("div", { class: "actions" }, opened, ["artifact.capture.managed", "artifact.accept"].includes(op.action) && op.status === "succeeded" && /^art_[0-9a-f]{32}$/.test(op.result?.artifact_id) && Number.isSafeInteger(op.result?.revision) && op.result.revision > 0 ? h("a", { href: `#/artifact-review/artifact/${op.result.artifact_id}/${op.result.revision}` }, t("ar_review_title")) : null, state.caps?.artifacts?.capture?.managed_single_file && managedCaptureExecution(op) ? h("a", { href: `#/artifact-review/operation/${op.operation_id}` }, t("ar_open")) : null, confirmSource, resume, retry, cancel));
+			fill(panel, h("h1", {}, op.action), h("p", { class: "op-status" }, opStatus(op), " ", op.error_code ? chip(op.error_code, "bad") : null), ...linked?.length ? [linkedItems(linked)] : [], h("dl", { class: "kv" }, h("dt", {}, t("actor")), h("dd", {}, `${op.actor} (${op.entry})`), h("dt", {}, t("created")), h("dd", {}, when(epoch(op.created_at))), op.status_reason ? [h("dt", {}, t("reason")), h("dd", {}, op.status_reason)] : null, h("dt", {}, "Target"), h("dd", {}, h("code", {}, JSON.stringify(op.target))), Object.keys(refs).length && op.action !== "worktree.merge" ? [h("dt", {}, "Refs"), h("dd", {}, h("code", {}, JSON.stringify(refs)))] : null, op.result && op.action !== "worktree.merge" ? [h("dt", {}, "Result"), h("dd", {}, h("code", {}, JSON.stringify(op.result)))] : null), ...receipts || [], mergeRecovery(op), op.action === "worktree.merge" ? h("details", {}, h("summary", {}, t("sessions_details")), h("pre", { class: "pre" }, JSON.stringify({
+				refs,
+				result: op.result
+			}, null, 2))) : null, ...materialized.length ? [h("h2", {}, t("materializations")), ...materialized.map((m) => h("div", { class: "row" }, h("div", { class: "grow" }, `${m.artifact_id} · r${m.revision}`, h("div", { class: "muted" }, m.managed_path)), chip(t(`material_${m.state}`), m.state === "verified" ? "ok" : "")))] : [], ...cleanupReceipts?.length ? [h("h2", {}, t("cleanup_open_receipts")), ...cleanupReceipts.map((r) => h("details", { class: "row-details" }, h("summary", {}, r.resource_id, " · ", t("cleanup_receipt_" + r.status)), h("pre", { class: "pre" }, JSON.stringify(r, null, 2))))] : [], ...op.action === "integration.apply" ? [repairControl(op)] : [], (op.result?.merge || op.result || refs.merge_receipt)?.base_moved ? h("p", { class: "note warn" }, t("merged_newer_base", { count: (op.result?.merge || op.result || refs.merge_receipt).other_commits_count })) : null, refs.write_acknowledged && refs.verification_pending ? h("p", { class: "note warn" }, t("metadata_pending")) : null, h("h2", {}, t("steps")), ...op.steps.map((s) => h("div", { class: "row" }, h("div", { class: "grow" }, s.name), h("span", { class: `status-${s.status}` }, s.status), s.error ? chip(s.error.code || t("error"), "bad") : null)), h("div", { class: "actions" }, opened, ["artifact.capture.managed", "artifact.accept"].includes(op.action) && op.status === "succeeded" && /^art_[0-9a-f]{32}$/.test(op.result?.artifact_id) && Number.isSafeInteger(op.result?.revision) && op.result.revision > 0 ? h("a", { href: `#/artifact-review/artifact/${op.result.artifact_id}/${op.result.revision}` }, t("ar_review_title")) : null, state.caps?.artifacts?.capture?.managed_single_file && managedCaptureExecution(op) ? h("a", { href: `#/artifact-review/operation/${op.operation_id}` }, t("ar_open")) : null, confirmSource, resume, retry, cancel));
 		} catch (e) {
 			fill(panel, errorBox(e));
 		}
@@ -11322,6 +11499,18 @@ async function viewOperation(main, id) {
 		"integration",
 		"cleanup"
 	]);
+}
+function mergeRecovery(op) {
+	if (op.action !== "worktree.merge") return null;
+	const steps = op.steps || [], refs = op.external_refs || {};
+	const reserved = steps.some((s) => s.name === "merge.reserve" && s.status === "succeeded");
+	const released = steps.some((s) => s.name === "merge.release" && s.status === "succeeded");
+	if (!reserved || released) return null;
+	const frames = steps.filter((s) => ["rehydrate.frame", "merge.frame"].includes(s.name));
+	return h("section", {
+		class: "panel",
+		"data-merge-recovery": true
+	}, h("h2", {}, t("delivery_merge_recovery")), h("p", { class: "note" }, t("delivery_merge_held")), h("dl", { class: "kv" }, ...["source", "destination"].flatMap((label, i) => [h("dt", {}, t("delivery_merge_" + label)), h("dd", {}, h("code", {}, refs.carrier_paths?.[i] || t("obs_unknown")))])), ...frames.map((step) => h("p", {}, h("code", {}, step.name), " · ", t(step.status === "succeeded" ? "delivery_merge_ack" : "delivery_merge_no_ack"), " · ", observationTime(step.finished_at || step.started_at))), h("p", {}, t("delivery_merge_safe_reads")), h("p", { class: "muted" }, t("delivery_merge_closeout")), refs.host && refs.session_id ? observationLink("session", `${refs.host}/${refs.session_id}`) : null);
 }
 function viewSettings(main) {
 	if (nativeDesktop) return viewNativeSettings(main);
@@ -11365,7 +11554,7 @@ function viewSettings(main) {
 		t
 	});
 }
-async function nativeTransition(kind) {
+async function nativeTransition(kind, config = null) {
 	if (state.nativeBusy && kind !== "disconnect") return;
 	const attempt = ++state.nativeAttempt;
 	const previousOnline = state.online;
@@ -11376,7 +11565,17 @@ async function nativeTransition(kind) {
 	state.connectionError = null;
 	state.connectionNotice = null;
 	try {
-		if (kind === "disconnect" || kind === "reload" || kind === "forget") {
+		if (kind === "configure") {
+			const saved = await nativeSetupConfiguration(config);
+			if (attempt !== state.nativeAttempt) return;
+			if (saved) {
+				state.nativeSetupDraft = null;
+				state.connectionNotice = t("desktop_setup_saved");
+			} else {
+				state.online = previousOnline;
+				state.connectionNotice = t("desktop_setup_cancelled");
+			}
+		} else if (kind === "disconnect" || kind === "reload" || kind === "forget") {
 			disconnect();
 			if (kind === "disconnect") await nativeDisconnect();
 			else if (kind === "reload") await nativeReloadConfiguration();
@@ -11419,6 +11618,10 @@ async function viewNativeSettings(main) {
 	const mine = generation;
 	const info = h("div", { "aria-live": "polite" });
 	const details = h("dl", { class: "kv" });
+	const setup = h("div", {
+		"data-native-setup": "",
+		hidden: true
+	});
 	const help = h("p", { class: "muted" }, t("desktop_credential_help"));
 	const platform = h("p", { class: "muted" });
 	const fleetRoot = h("div");
@@ -11449,7 +11652,7 @@ async function viewNativeSettings(main) {
 	main.append(h("h1", {}, t("nav_settings")), h("section", {
 		class: "panel native-connection",
 		"aria-label": t("desktop_connection")
-	}, h("h2", {}, t("desktop_connection")), details, help, platform, actions, info, saved), h("div", { class: "panel" }, h("h2", {}, t("desktop_local")), h("p", { class: "note" }, t("desktop_dashboard_only"))), fleetRoot, updateRoot);
+	}, h("h2", {}, t("desktop_connection")), h("details", { open: !state.caps }, h("summary", {}, t("delivery_setup_title")), h("ol", {}, h("li", {}, t("delivery_setup_central")), h("li", {}, t("delivery_setup_identity")), h("li", {}, t("delivery_setup_mode")))), setup, details, help, platform, actions, info, saved), h("div", { class: "panel" }, h("h2", {}, t("desktop_local")), h("p", { class: "note" }, t("desktop_dashboard_only"))), fleetRoot, updateRoot);
 	const showInfo = () => {
 		info.replaceChildren();
 		if (state.caps) info.append(h("p", {}, t("connected_as", {
@@ -11475,11 +11678,56 @@ async function viewNativeSettings(main) {
 		const row = (label, value) => {
 			if (value) details.append(h("dt", {}, t(label)), h("dd", {}, value));
 		};
+		if (status.configuration_setup === true) {
+			setup.hidden = false;
+			const draft = state.nativeSetupDraft ||= {
+				endpoint: "",
+				expected_actor: ""
+			};
+			const endpoint = h("input", {
+				type: "url",
+				value: draft.endpoint,
+				placeholder: "https://connector.example",
+				required: true,
+				maxlength: 512,
+				disabled: state.nativeBusy,
+				autocomplete: "off",
+				oninput: (event) => {
+					draft.endpoint = event.target.value;
+				}
+			});
+			const actor = h("input", {
+				value: draft.expected_actor,
+				required: true,
+				maxlength: 200,
+				disabled: state.nativeBusy,
+				autocomplete: "off",
+				oninput: (event) => {
+					draft.expected_actor = event.target.value;
+				}
+			});
+			const review = h("button", {
+				type: "submit",
+				class: "primary",
+				disabled: state.nativeBusy
+			}, t("desktop_setup_review"));
+			const form = h("form", { onsubmit: (event) => {
+				event.preventDefault();
+				if (state.nativeBusy || !form.reportValidity()) return;
+				review.disabled = true;
+				return nativeTransition("configure", {
+					endpoint: endpoint.value.trim(),
+					expected_actor: actor.value.trim(),
+					contract_version: "2026-10-08"
+				});
+			} }, h("p", {}, t("desktop_setup_help")), h("div", { class: "capture-fields" }, h("label", {}, t("desktop_endpoint"), endpoint), h("label", {}, t("desktop_expected_actor"), actor)), h("p", { class: "muted" }, t("desktop_setup_origin")), h("div", { class: "actions" }, review));
+			setup.append(form);
+		}
 		row("desktop_endpoint", status.endpoint || t("desktop_config_needed"));
 		row("desktop_expected_actor", status.expected_actor);
 		row("desktop_configuration_file", status.configuration_file);
 		if (status.credential_source) row("desktop_credential_source", t("desktop_source_" + status.credential_source));
-		if (status.error) info.append(errorBox(new Error(status.error)));
+		if (status.error && !status.configuration_setup) info.append(errorBox(new Error(status.error)));
 		else if (!status.credential_available) info.append(h("p", {}, t("desktop_credential_missing")));
 		platform.textContent = status.enrollment_supported === true ? t("desktop_enrollment_help") : status.enrollment_supported === false ? t("desktop_enrollment_unsupported") : "";
 		connect.disabled = state.nativeBusy || !!status.error || !status.credential_available;
@@ -11818,6 +12066,11 @@ async function viewProject(main, pid) {
 	let draft = null;
 	const head = h("div", { class: "panel" });
 	const items = h("div", { class: "panel" });
+	const work = h("section", {
+		class: "panel",
+		hidden: true,
+		"data-project-work-list": true
+	});
 	const out = h("div", {});
 	const archived = h("div", {});
 	const showArchived = h("input", { type: "checkbox" });
@@ -11839,7 +12092,7 @@ async function viewProject(main, pid) {
 			}
 		}
 	}, t("add_item"));
-	main.append(manageNote() || "", out, head, h("h2", {}, t("work_items")), h("div", { class: "filters" }, title, add), items, h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
+	main.append(manageNote() || "", out, head, work, h("h2", {}, t("work_items")), h("div", { class: "filters" }, title, add), items, h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
 	const render = async (fromEvent = false) => {
 		const opens = drawerOpens;
 		let data;
@@ -11856,6 +12109,8 @@ async function viewProject(main, pid) {
 		}
 		freshPage();
 		const p = data.project;
+		work.hidden = !Array.isArray(data.work);
+		fill(work, h("h2", {}, t("delivery_project_work")), ...data.work?.length ? data.work.map((item) => deliveryWork(item, p.repositories)) : [h("p", { class: "muted" }, t("delivery_no_work"))]);
 		const msg = out;
 		const v = draft || {
 			name: p.name,
@@ -11962,7 +12217,15 @@ async function viewProject(main, pid) {
 	};
 	showArchived.onchange = () => render();
 	await render();
-	return liveReload(render, ["project", "work_item"]);
+	return liveReload(render, [
+		"project",
+		"work_item",
+		"operation",
+		"task",
+		"execution",
+		"session",
+		"integration"
+	]);
 }
 function linkTarget(l) {
 	const x = l.target || {};
@@ -12368,7 +12631,11 @@ async function viewCleanup(main, section, ident) {
 		}
 	};
 	const stored = readStored(draftKey) || {};
-	const choices = ["item", "task"].includes(section) && stored.id !== ident ? {
+	const choices = [
+		"item",
+		"task",
+		"host"
+	].includes(section) && stored.id !== ident ? {
 		discard_uncommitted: [],
 		release_undelivered: []
 	} : stored.choices || {
@@ -12406,9 +12673,13 @@ async function viewCleanup(main, section, ident) {
 		"host",
 		...supportsTask || pending?.target?.kind === "task" ? ["task"] : []
 	].map((k) => h("option", { value: k }, t("cleanup_target_" + k))));
-	kind.value = section === "item" ? "work_item" : section === "task" && supportsTask ? "task" : stored.kind || "host";
+	kind.value = section === "host" ? "host" : section === "item" ? "work_item" : section === "task" && supportsTask ? "task" : stored.kind || "host";
 	const targetId = h("input", {
-		value: ["item", "task"].includes(section) ? ident : stored.id || "",
+		value: [
+			"item",
+			"task",
+			"host"
+		].includes(section) ? ident : stored.id || "",
 		"aria-label": t("cleanup_id"),
 		placeholder: t("cleanup_id"),
 		class: "cleanup-id"

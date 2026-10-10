@@ -191,3 +191,21 @@ Windows 打包／Linux native smoke 的具體入口見 U `docs/design/desktop.md
 正式收斂路徑仍是：Windows 登入 → Fleet/中央 → 唯讀人工 checkpoint → 兩個 managed 工作與附件 → 同 PR
 → merge/deploy 查實際版本 → reviewed cleanup 留歷史 → client 重開中央繼續 → 新 agent 以自身 MCP 身分接手。
 唯有同 RC 的 46 項結果及上述缺口都可追溯，才能重新判定各里程碑；本快照不作完成宣告。
+
+## 日常試用候選的五段實機紀錄
+
+Delivery lineage 分支增補的 fixture 證據不提升 I／L 等級。以下各段須使用同一候選，
+記錄開始／結束 UTC、完整 app/backend commit、installer digest、中央 actor/scopes、
+operation/session/worktree ID 與證據位置。私有主機、profile、repository/environment 與憑證
+留在未提交的 run manifest；無結果寫 `not_run` 或原因，不用空白代表通過。
+
+| 情境 | 必須記錄的結果 |
+|---|---|
+| Windows 登入／整套就緒 | 選定 Fleet backend、Tailscale 登入、中央身分與 BAT profiles；唯一 owner、每個故障項的原因 |
+| 人工 session＋兩個 Agent | 人工 checkout 前後證據不變；兩個 managed start 的身分、原指示、session／worktree、專案關聯；確認每台寫入主機的人工目錄保護 |
+| 同 PR → merge → deploy | 每個來源的固定 commit、preview digest、delivery receipt、merge commit、部署選定及實際版本／健康證據 |
+| 斷網／關窗重開／中央重啟 | 原 key／operation/session 讀回；start 與交付沒有重送；未知結果保留證據及資源保留 |
+| 整理／另一 Agent 接手 | cleanup preview、阻擋原因與逐項 receipt、保留 ref／tombstone；接手 Agent 使用自己的 actor/scopes，能查回既有關聯 |
+
+Mac 另記 Intel／Apple Silicon 安裝及中央連線範圍；不以 Mac Dashboard 的成功替代 Windows Fleet
+啟動驗收。正式 Release feed、更新簽章、in-app upgrade 與 macOS 公證仍是獨立交付 gates。
