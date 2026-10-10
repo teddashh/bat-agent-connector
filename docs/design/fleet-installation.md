@@ -34,7 +34,7 @@ reading a document never starts or migrates a monitor.
 The actual Kit configuration and monitor scripts are under its validated `client`
 directory. Native inventory/discovery therefore receive `client_root()`, preserving
 PowerShell's existing inventory/index/SSH paths and configuration fingerprint.
-The facade script must remain within that directory. Windows paths must be absolute
+Explicit Rust installations use only the public runtime and local configuration; no legacy facade, monitor script or VBS launcher is required. See the [standalone setup and schema](fleet-configuration.md). PowerShell still requires its facade within that directory; a transition to PowerShell must additionally prove its monitor and optional startup components before publication. Windows paths must be absolute
 and local before and after canonicalization; UNC, device and mapped-network paths
 are refused. Normal drive spelling is retained for PowerShell and exact argv proofs.
 

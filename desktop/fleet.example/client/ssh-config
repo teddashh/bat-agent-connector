@@ -1,0 +1,8 @@
+# Documentation-only address: replace with your trusted host and SSH account.
+Host bat-example
+    HostName 192.0.2.10
+    User REPLACE_WITH_SSH_USER
+    StrictHostKeyChecking yes
+    BatchMode yes
+    IdentitiesOnly yes
+    IdentityFile ~/.ssh/id_ed25519

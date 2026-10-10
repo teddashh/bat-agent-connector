@@ -26,6 +26,25 @@ fn text(path: &Path) -> Result<&str> {
     path.to_str().ok_or("INSTALLATION_INVALID")
 }
 
+struct Legacy {
+    powershell: PathBuf,
+    script: PathBuf,
+}
+impl Legacy {
+    fn load(client: &Path, system: &Path) -> Result<Self> {
+        let powershell = canonical_local(&system.join("WindowsPowerShell/v1.0/powershell.exe"))?;
+        let script = canonical_local(&client.join("bat-connect.ps1"))?;
+        if !powershell.is_file()
+            || !powershell.starts_with(system)
+            || !script.is_file()
+            || !script.starts_with(client)
+        {
+            return Err("INSTALLATION_INVALID");
+        }
+        Ok(Self { powershell, script })
+    }
+}
+
 /// Keep on one dedicated native blocking thread. Returned guards, COM and launch
 /// readback never move between executor threads. No paths or commands come from IPC.
 pub struct WindowsMigration {
@@ -35,8 +54,7 @@ pub struct WindowsMigration {
     native: NativeIdentity,
     codec: Codec,
     system: PathBuf,
-    powershell: PathBuf,
-    script: PathBuf,
+    legacy: Option<Legacy>,
     launch_journal: PathBuf,
     quit_file: PathBuf,
     login: LoginIdentity,
@@ -63,17 +81,16 @@ impl WindowsMigration {
         }
         let executable = canonical_local(&current_executable)?;
         let system = canonical_local(&system_directory)?;
-        let powershell = canonical_local(&system.join("WindowsPowerShell/v1.0/powershell.exe"))?;
-        let script = canonical_local(&installation.client_root().join("bat-connect.ps1"))?;
-        if !executable.is_file()
-            || !system.is_dir()
-            || !powershell.is_file()
-            || !powershell.starts_with(&system)
-            || !script.is_file()
-            || !script.starts_with(installation.client_root())
-        {
+        if !executable.is_file() || !system.is_dir() {
             return Err("INSTALLATION_INVALID");
         }
+        let legacy = Legacy::load(installation.client_root(), &system);
+        let legacy = if installation.backend() == Backend::Powershell {
+            Some(legacy?)
+        } else {
+            // Only an explicit legacy transition needs these external scripts.
+            legacy.ok()
+        };
         let native = NativeIdentity::new(text(&executable)?, text(installation.path())?)?;
         let discovery = DiscoveryConfig::from_configuration(
             text(installation.client_root())?,
@@ -95,8 +112,7 @@ impl WindowsMigration {
             native,
             codec,
             system,
-            powershell,
-            script,
+            legacy,
             launch_journal: roaming.join("bat-fleet-monitor-launch.json"),
             quit_file,
             login,
@@ -127,14 +143,24 @@ impl WindowsMigration {
         if canonical_local(Path::new(self.native.executable()))?
             != Path::new(self.native.executable())
             || canonical_local(&self.system)? != self.system
-            || canonical_local(&self.system.join("WindowsPowerShell/v1.0/powershell.exe"))?
-                != self.powershell
-            || canonical_local(&self.installation.client_root().join("bat-connect.ps1"))?
-                != self.script
         {
             return Err("INSTALLATION_CHANGED");
         }
+        if self.legacy.is_some() || current.backend() == Backend::Powershell {
+            self.legacy()?;
+        }
         Ok(current)
+    }
+    fn legacy(&self) -> Result<&Legacy> {
+        let expected = self
+            .legacy
+            .as_ref()
+            .ok_or("POWERSHELL_ADAPTER_UNAVAILABLE")?;
+        let current = Legacy::load(self.installation.client_root(), &self.system)?;
+        if current.script != expected.script || current.powershell != expected.powershell {
+            return Err("INSTALLATION_CHANGED");
+        }
+        Ok(expected)
     }
     fn verify_launch(&self, current: &Snapshot, backend: Backend) -> Result<()> {
         self.launcher()?;
@@ -196,10 +222,11 @@ impl WindowsMigration {
         }
         self.verify_launch(current, Backend::Powershell)?;
         self.absence()?;
-        let mut command = Command::new(&self.powershell);
+        let legacy = self.legacy()?;
+        let mut command = Command::new(&legacy.powershell);
         command
             .args(ps_arguments(
-                &self.script,
+                &legacy.script,
                 self.configuration.inventory_path(),
                 self.configuration.profile_index_path(),
             )?)
@@ -216,7 +243,7 @@ impl WindowsMigration {
         let held = WindowsProcess::from_child(&child).map_err(|_| "MIGRATION_LAUNCH_UNKNOWN")?;
         let expected = held.snapshot().map_err(|_| "MIGRATION_LAUNCH_UNKNOWN")?;
         let expected_args = ps_arguments(
-            &self.script,
+            &legacy.script,
             self.configuration.inventory_path(),
             self.configuration.profile_index_path(),
         )?
@@ -226,7 +253,7 @@ impl WindowsMigration {
         if expected.login != self.login
             || !expected
                 .executable
-                .eq_ignore_ascii_case(self.powershell.to_str().ok_or("INSTALLATION_INVALID")?)
+                .eq_ignore_ascii_case(legacy.powershell.to_str().ok_or("INSTALLATION_INVALID")?)
             || expected.arguments != expected_args
         {
             return Err("MIGRATION_LAUNCH_UNKNOWN");
@@ -325,6 +352,9 @@ impl Platform for WindowsMigration {
     fn validate_config(&self, bytes: &[u8], backend: Backend) -> Result<()> {
         self.launcher()?;
         self.current_installation()?;
+        if backend == Backend::Powershell {
+            self.legacy()?;
+        }
         self.installation.validate_payload(bytes, backend)
     }
     fn classify_shortcut(&self, bytes: &[u8]) -> Result<Backend> {

@@ -5,6 +5,8 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+#[path = "support/public_installation.rs"]
+mod public_installation;
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Self {
@@ -59,6 +61,151 @@ fn temporary_links_round_trip_exact_fixed_commands_and_reject_foreign_sources() 
     for b in [vec![], vec![0; 64], vec![0; 1_048_577]] {
         assert!(c.classify(&b).is_err());
     }
+}
+
+#[test]
+fn public_rust_layout_previews_and_applies_startup_without_legacy_files() {
+    use bat_fleet_core::{
+        configuration::Paths,
+        discovery::MonitorIdentity,
+        installation::Snapshot,
+        migration::{Owner, Phase, Platform, Store},
+        process_adapter::LoginIdentity,
+        windows_migration::WindowsMigration,
+        Result,
+    };
+    // All real native validation, locks and shortcut effects use temporary paths.
+    // Intercept only the final spawn: this test never starts a monitor or tunnel.
+    struct NoLaunch {
+        inner: WindowsMigration,
+        launches: usize,
+    }
+    impl Platform for NoLaunch {
+        type LauncherGuard = <WindowsMigration as Platform>::LauncherGuard;
+        type MonitorGuard = <WindowsMigration as Platform>::MonitorGuard;
+        fn launcher_guard(&mut self) -> Result<Self::LauncherGuard> {
+            self.inner.launcher_guard()
+        }
+        fn monitor_guard(&mut self) -> Result<Self::MonitorGuard> {
+            self.inner.monitor_guard()
+        }
+        fn login(&self) -> Result<LoginIdentity> {
+            self.inner.login()
+        }
+        fn discover(&mut self) -> Result<Option<MonitorIdentity>> {
+            self.inner.discover()
+        }
+        fn request_quit(&mut self, _: &Owner) -> Result<()> {
+            panic!("no fixture owner to stop")
+        }
+        fn launch(&mut self, backend: Backend) -> Result<()> {
+            assert_eq!(backend, Backend::Rust);
+            self.launches += 1;
+            Err("FIXTURE_NO_SPAWN")
+        }
+        fn validate_config(&self, bytes: &[u8], backend: Backend) -> Result<()> {
+            self.inner.validate_config(bytes, backend)
+        }
+        fn classify_shortcut(&self, bytes: &[u8]) -> Result<Backend> {
+            self.inner.classify_shortcut(bytes)
+        }
+        fn shortcut(&self, backend: Backend) -> Result<Vec<u8>> {
+            self.inner.shortcut(backend)
+        }
+    }
+    fn wait_for_fixture_mutex<T>(mut action: impl FnMut() -> Result<T>) -> Result<T> {
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            match action() {
+                Err("LAUNCHER_BUSY" | "MONITOR_ALREADY_RUNNING") if Instant::now() < until => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                result => return result,
+            }
+        }
+    }
+    let t = Temp::new();
+    let root = t.0.join("public");
+    public_installation::write(&root, true);
+    let config = root.join("fleet.json");
+    let snapshot = Snapshot::load(&config).unwrap();
+    for name in ["fleet-desktop.ps1", "bat-connect.ps1", "Open BAT.vbs"] {
+        assert!(!snapshot.client_root().join(name).exists());
+    }
+    let startup = t.0.join("isolated-startup");
+    let roaming = t.0.join("isolated-roaming");
+    let system = t.0.join("no-legacy-system");
+    for dir in [&startup, &roaming, &system] {
+        std::fs::create_dir(dir).unwrap();
+    }
+    std::fs::write(startup.join("Unrelated.lnk"), b"untouched").unwrap();
+    let native = t.0.join("app/dashboard.exe");
+    let codec = Codec::new(snapshot.client_root(), &native, &config, &system).unwrap();
+    assert!(codec.render(Backend::Powershell).is_err());
+    let paths = Paths::new(snapshot.client_root(), &t.0, None, None).unwrap();
+    let inner = WindowsMigration::new(
+        snapshot.clone(),
+        paths,
+        roaming,
+        t.0.join("fixture.quit"),
+        native,
+        system,
+    )
+    .unwrap();
+    let mut platform = NoLaunch { inner, launches: 0 };
+    let store = Store::new(&config, &startup).unwrap();
+    let preview = wait_for_fixture_mutex(|| store.preview(&mut platform, Backend::Rust)).unwrap();
+    assert!(!preview.autostart_entry_present());
+    let original = std::fs::read(&config).unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    legacy["backend"] = serde_json::json!("powershell");
+    assert_eq!(
+        wait_for_fixture_mutex(|| store.begin(
+            &mut platform,
+            "44444444444444444444444444444444",
+            &preview,
+            Backend::Powershell,
+            &serde_json::to_vec(&legacy).unwrap(),
+            false,
+        )),
+        Err("POWERSHELL_ADAPTER_UNAVAILABLE")
+    );
+    assert_eq!(std::fs::read(&config).unwrap(), original);
+    assert!(!startup.join("Open BAT.lnk").exists());
+    assert!(store.pending().unwrap().is_none());
+    assert_eq!(platform.launches, 0);
+    let next = snapshot.backend_payload(Backend::Rust).unwrap();
+    let id = "33333333333333333333333333333333";
+    assert_eq!(
+        wait_for_fixture_mutex(|| store.begin(
+            &mut platform,
+            id,
+            &preview,
+            Backend::Rust,
+            &next,
+            true
+        )),
+        Ok(Phase::Prepared)
+    );
+    assert_eq!(
+        wait_for_fixture_mutex(|| store.advance(&mut platform, id)),
+        Err("FIXTURE_NO_SPAWN")
+    );
+    assert_eq!(store.status(id).unwrap().phase, Phase::LaunchRequested);
+    assert_eq!(std::fs::read(&config).unwrap(), next);
+    assert_eq!(
+        codec.classify(&std::fs::read(startup.join("Open BAT.lnk")).unwrap()),
+        Ok(Backend::Rust)
+    );
+    assert_eq!(
+        std::fs::read(startup.join("Unrelated.lnk")).unwrap(),
+        b"untouched"
+    );
+    assert_eq!(
+        wait_for_fixture_mutex(|| store.advance(&mut platform, id)),
+        Err("MIGRATION_LAUNCH_UNKNOWN")
+    );
+    assert_eq!(platform.launches, 1);
 }
 #[test]
 fn real_wscript_shell_shortcut_uses_kit_format_but_modified_arguments_refuse() {
