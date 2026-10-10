@@ -2,23 +2,23 @@
 
 日期：2026-10-08。對應計畫 v1.0 的 §09、§10、§15–§18、§26、§28，工作包 W07／W08。既有功能的驗收為 C04–C07、D01–D04；Phase 1 補訂 metadata、rollback、environment ordering、merge scope 與完成驗證，Phase 2 Part A 已交付 metadata／merge 部分，主要驗收 C04、C05、C07、D03、D05、D06。
 
-沿用本文件，因為新功能延伸同一套 `delivery.py`／`github.py`、recipe 與恢復流程；另開文件會有兩份完成判定。以下「現有」各節記錄起點；metadata／merge 的 Phase 2 規格已由 Part A 取代相應合約，Part B 已交付後端、非 Dashboard 入口與環境卡。PR head 更新仍見 [integration.md](integration.md)。Phase 1 規格為 `5f94ad7`，review 修訂為 `afac4e9`，兩筆均獨立提交。2026-10-08 review 後分成兩步：Part A（已合併）metadata、merge preview／verify、C04／C05／C07、PR 卡與各入口文件；Part B（後端與環境卡已交付）部署 runtime evidence、generations／ordering、history／rollback、D03／D05／D06 與環境卡。
+沿用本文件，因為新功能延伸同一套 `delivery.py`／`github.py`、recipe 與恢復流程；另開文件會有兩份完成判定。以下「現有」各節記錄起點；metadata／merge 的 Phase 2 規格已由 Part A 取代相應合約，Part B 已交付後端、非 Dashboard 入口與環境卡。PR head 更新仍見 [integration.md](integration.md)。Phase 1 規格與 review 修訂曾各自提交；以下保留當時的合約演進。2026-10-08 review 後分成兩步：Part A（已合併）metadata、merge preview／verify、C04／C05／C07、PR 卡與各入口文件；Part B（後端與環境卡已交付）部署 runtime evidence、generations／ordering、history／rollback、D03／D05／D06 與環境卡。
 
-Part A review follow-up 以 `85601e2f6a36517ba559705e9e360763e7c4d63b` 為固定來源：修正 metadata 無落地的期限、預覽成本／保留、submit 前檢查位置與最後合併歸因；保留已批准的 action／digest／scope 與 Part B 邊界。
+Part A review follow-up：修正 metadata 無落地的期限、預覽成本／保留、submit 前檢查位置與最後合併歸因；保留已批准的 action／digest／scope 與 Part B 邊界。
 
-本輪 rebase 的固定來源為 main `22da8d8eaa1835724674f5e595995d81c12dde5c`（#33），Part A replay 後為 `de82a18`；合併 token 輪替、ambiguous transport／rate limit／204 run lookup 與 sent-write 讀取恢復。Part A 的唯讀 steps 不作為「已送出寫入」證據；Delivery 建表／索引使用每次 open 都執行的冪等 DDL，不佔 user_version。
+本輪 rebase 的固定來源為 main `2824be51b0c5de2726610f24845a771aa4cf3cfa`（#33），Part A replay 後為 `6ce4ec6`；合併 token 輪替、ambiguous transport／rate limit／204 run lookup 與 sent-write 讀取恢復。Part A 的唯讀 steps 不作為「已送出寫入」證據；Delivery 建表／索引使用每次 open 都執行的冪等 DDL，不佔 user_version。
 
-PR #34 Codex review follow-up 以 `04bdb75` 為固定來源；補上 verify 時新 native stack 的拒絕與 unresolved metadata 第三種內容的 settlement，沿用已批准的 action／receipt／恢復路徑。
+PR #34 Codex review follow-up 以 `ed6378c` 為固定來源；補上 verify 時新 native stack 的拒絕與 unresolved metadata 第三種內容的 settlement，沿用已批准的 action／receipt／恢復路徑。
 
-Journal DDL follow-up 以 `3e038c5` 為固定來源；移除純 DDL 的 user_version stamp，保留交易與既有資料回填，依共用 journal 規則區分 schema 與一次性資料步驟。
+Journal DDL follow-up 以 `92b9c02` 為固定來源；移除純 DDL 的 user_version stamp，保留交易與既有資料回填，依共用 journal 規則區分 schema 與一次性資料步驟。
 
 ## 固定來源版本
 
-Part B 起點：`0da20ba165dc99054b9b06902e28582cbc54f6c1`（#40 metadata ACK conflict fix），分支 `feat/delivery-b`。後端包含 HTTP／MCP／CLI、capabilities 與接入文件。環境卡輪以 `b9d7d96` 為固定來源，先以 `e558e92` 補上 stopped provider cadence／error 恢復，再接既有 store／operations；本輪不 rebase、不改 OperationService core。
+Part B 起點：`b038d467b9e4203d060d1c32c9ee17caf26a46f5`（#40 metadata ACK conflict fix），分支 `feat/delivery-b`。後端包含 HTTP／MCP／CLI、capabilities 與接入文件。環境卡輪以 `9e8bc91` 為固定來源，先以 `f72e49a` 補上 stopped provider cadence／error 恢復，再接既有 store／operations；本輪不 rebase、不改 OperationService core。
 
 | 來源 | 固定版本與用途 |
 |---|---|
-| Connector | `5e8e41696ebc6a1a9d3ea92ddb7a1d338537ca1b`，Phase 1 原始起點；Part A rebase 採以上 #33 pin。ACK conflict follow-up 採 main `0c13601a7316a581fc6a4a504de37035b870ee4d`（#34），分支 `fix/metadata-conflict-settle`。依據 `delivery.py`、`github.py`、`config.py`、`operations.py`、`task_journal.py`、`api_auth.py`、`resource_policy.py`、`api_v1.py`、`task_daemon.py`、`integration.py`、Dashboard、`tests/test_delivery.py` 與 `tests/fakegithub.py` |
+| Connector | `566eba6b63e49eeca38383f4029a3a7abec98801`，Phase 1 原始起點；Part A rebase 採以上 #33 pin。ACK conflict follow-up 採 main `208dd13d75f48e77915dda212ae84819ceef508e`（#34），分支 `fix/metadata-conflict-settle`。依據 `delivery.py`、`github.py`、`config.py`、`operations.py`、`task_journal.py`、`api_auth.py`、`resource_policy.py`、`api_v1.py`、`task_daemon.py`、`integration.py`、Dashboard、`tests/test_delivery.py` 與 `tests/fakegithub.py` |
 | 計畫與交接 | 計畫 v1.0，2026-10-06；[前輪交接](../handoff/2026-10-08.md)。交接的 main pin 是前輪紀錄，本次以以上 Connector pin 為準；不將私有計畫複製進 repo |
 | BAT | `b7419892fbc9946799b64cca24c2ec8c7fa15c42`，[worktree.rs](https://github.com/tony1223/better-agent-terminal/blob/b7419892fbc9946799b64cca24c2ec8c7fa15c42/src-tauri/crates/bat-git/src/worktree.rs)。本包不新增 BAT channel、SSH Git 或 worktree mutation；人工／unknown 規則沿用 [resource-policy.md](resource-policy.md) |
 | GitHub REST | API version `2026-03-10`；2026-10-08 查核官方文件，adapter／fake 固定此版本。官方文件可變動，不宣稱是不變的 snapshot；未知 schema／無法證明的 scope 不放行 |

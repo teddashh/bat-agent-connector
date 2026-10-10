@@ -4,7 +4,7 @@
 
 ## Choose the matching candidate package
 
-This source version includes the normal desktop setup introduced in [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81). Source implementation and published release assets are separate. Open its [checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks), follow the desktop run and use an artifact from the same source commit whose platform job succeeded. Earlier release assets do not automatically include this runtime. [Desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml).
+This source version includes a bundled local central and guided desktop setup. Open the [desktop workflow on `main`](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml?query=branch%3Amain) and choose a successful run from the current public history. Match the artifact’s source commit, platform job and installed-fixture records. If that commit is still building, wait for its platform job to succeed. Historical PR artifacts and earlier release assets are not the current download source.
 
 | Platform | Artifact | Package |
 | --- | --- | --- |

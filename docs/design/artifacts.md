@@ -6,7 +6,7 @@ A03 的人工單檔擷取另列 Part B1；本文件分為 A／B1／B2／C，目�
 
 ## 固定來源版本（A／B／C）
 
-Connector 起點 `5e8e41696ebc6a1a9d3ea92ddb7a1d338537ca1b`，原 spec `01a3593`，套件 0.2.4。沿用 [checkpoints.md](checkpoints.md)、[work-items.md](work-items.md)、[api-v1.md](api-v1.md)、[resource-policy.md](resource-policy.md)、[dashboard.md](dashboard.md)、[交接紀錄](../handoff/2026-10-08.md)、[CONTRIBUTING.md](../../CONTRIBUTING.md)。
+Connector 起點 `566eba6b63e49eeca38383f4029a3a7abec98801`，原 spec `024c370`，套件 0.2.4。沿用 [checkpoints.md](checkpoints.md)、[work-items.md](work-items.md)、[api-v1.md](api-v1.md)、[resource-policy.md](resource-policy.md)、[dashboard.md](dashboard.md)、[交接紀錄](../handoff/2026-10-08.md)、[CONTRIBUTING.md](../../CONTRIBUTING.md)。
 
 BAT 固定來源 `b7419892fbc9946799b64cca24c2ec8c7fa15c42` 的 [remote_server.rs](https://github.com/tony1223/better-agent-terminal/blob/b7419892fbc9946799b64cca24c2ec8c7fa15c42/src-tauri/src/remote_server.rs)、[commands/worktree.rs](https://github.com/tony1223/better-agent-terminal/blob/b7419892fbc9946799b64cca24c2ec8c7fa15c42/src-tauri/src/commands/worktree.rs)、[commands/git.rs](https://github.com/tony1223/better-agent-terminal/blob/b7419892fbc9946799b64cca24c2ec8c7fa15c42/src-tauri/src/commands/git.rs)。worktree:create 沒有起點 SHA；git_get_status_native 使用一般 git status；fs:upload-* 不是 Connector 授權的 artifact 合約。既有 v3.2.12 協定筆記不等同此 commit 或每台主機的安裝版本。
 

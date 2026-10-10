@@ -6,7 +6,7 @@
 
 | 來源 | 版本與用途 |
 |---|---|
-| Connector | 分支 `feat/confinement`，起點／`origin/main`：`5e8e41696ebc6a1a9d3ea92ddb7a1d338537ca1b`。以下現況清單以此 commit 的程式為準。 |
+| Connector | 分支 `feat/confinement`，起點／`origin/main`：`566eba6b63e49eeca38383f4029a3a7abec98801`。以下現況清單以此 commit 的程式為準。 |
 | BAT | 計畫固定 commit `b7419892fbc9946799b64cca24c2ec8c7fa15c42`。直接讀取此版 source archive；不以本機 BAT checkout 或上游最新 main 代替。 |
 | BAT 協定筆記 | [docs/PROTOCOL.md](../PROTOCOL.md)，v3.2.12 的遠端 channel、meta、resume 與權限變更筆記。它和固定 source 分開引用，不假定每台主機已裝固定 source。 |
 | 既有交接 | [2026-10-08](../handoff/2026-10-08.md)、`CONTRIBUTING.md`。交接中的較舊 head 不取代本規格起點。 |

@@ -13,9 +13,9 @@ Part A 合併後另開分支。對應計畫 §23 全節、§10、§19、§26 E01
 
 | 來源 | 固定版本 |
 |---|---|
-| Connector | 程式基準 `5e8e41696ebc6a1a9d3ea92ddb7a1d338537ca1b`；首版規格 `71640f9`；分支 `feat/cleanup`；套件 0.2.4 |
+| Connector | 程式基準 `566eba6b63e49eeca38383f4029a3a7abec98801`；首版規格 `f9ef041`；分支 `feat/cleanup`；套件 0.2.4 |
 | 計畫 | v1.0，2026-10-06；只引用節號，不複製私人計畫 |
-| 本輪校正 | v2.0，2026-10-08；retirement 基底 cad864f，舊 §23 對應新版 §19；Task Service gate 與 retained-content restore 的後續分工依新版 §19／R08 |
+| 本輪校正 | v2.0，2026-10-08；retirement 基底 1f18017，舊 §23 對應新版 §19；Task Service gate 與 retained-content restore 的後續分工依新版 §19／R08 |
 | BAT | `b7419892fbc9946799b64cca24c2ec8c7fa15c42`，`bat-remote/v2`；不推定實機版本相同 |
 
 BAT [ClaudeRuntimeRouter::stop_session／claude_stop_session](https://github.com/tony1223/better-agent-terminal/blob/b7419892fbc9946799b64cca24c2ec8c7fa15c42/src-tauri/src/commands/claude.rs)

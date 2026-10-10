@@ -24,3 +24,12 @@ for private configuration filenames, shared conversation links and non-example h
 paths, and prints locations without matched values. It cannot recognize every private
 hostname or deployment narrative: review those manually, including images and GitHub
 text. Changing current files does not remove information from Git history or old copies.
+
+## Working after the October 10, 2026 history rewrite
+
+Start new contributions from the cleaned public `main`, preferably in a fresh clone.
+Rebase or cherry-pick only reviewed work onto that history; do not merge old ancestry
+back into the repository. Review the resulting diff for private material before pushing.
+Historical source references in documentation use retained rewritten commits. Historical
+CI results still describe their original runs; remapped references do not claim reruns
+or validate new packages. Use current `main` checks and matching desktop artifacts.

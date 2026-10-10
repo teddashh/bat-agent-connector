@@ -9,7 +9,7 @@
   **`a277d2ed5ce439c248fc32fa8ff9fa4124a06027` / v4.90.0**。commit 時間為
   2026-10-07 20:04:07 UTC；CHANGELOG 的 2026-10-08 是其文件日期。
   與先前 session 整理引用的 SHA 相同，不能把重查說成上游又發了新版。
-- 我方比較基準：**`ba56322e22734f2a37f3dd6ee0b14ab65d9d42c6`**，即 Mac PR #69 合併後的 main。
+- 我方比較基準：**`bc5cb21e48ce05f55d320dbe0ec98fbf6114e520`**，即 Mac PR #69 合併後的 main。
   核對 `desktop/src` 實際原始碼，歷史設計文件中「尚缺」的描述不直接當成目前事實。
 - 主線全部 **15 個自有前端 JS 模組、app.css、index.html、manifest.json** 納入入口盤點；
   同時核對 README、CHANGELOG、相關 frontend tests 與三個 open PR 的固定 head。

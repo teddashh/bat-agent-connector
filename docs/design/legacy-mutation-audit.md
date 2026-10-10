@@ -1,6 +1,6 @@
 # Legacy mutations：R01 接續盤點
 
-2026-10-08；查核基底 `0c7c8fbb56538a8629d24cd193b16f0f9c29b834`，追蹤 [#55](https://github.com/teddashh/bat-agent-connector/issues/55)。
+2026-10-08；查核基底 `1485efff4ae6e7241b00cf7c3e42787446c733b7`，追蹤 [#55](https://github.com/teddashh/bat-agent-connector/issues/55)。
 v1/v2 是同一產品與共同功能 backlog；Tauri 是 UI／client 計畫修訂，不把既有後端能力另分成產品。
 沿用 [operations-unification.md](operations-unification.md) 的 actions、TaskCoordinator 與最後 frame 檢查。
 本表是基底快照；有 policy／command guard 不等於 public adapter 已有 operation、caller scope 或跨入口冪等性。

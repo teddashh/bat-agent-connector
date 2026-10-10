@@ -90,7 +90,7 @@ Connector／Task Service。中央本身提供 Web 靜態介面及 API，不因�
 
 ## 中央與 native 合約
 
-R00 查核基底：Connector `25685207143b7f44fd7168a83632894030da8968`（#41 merge）。
+R00 查核基底：Connector `224bc7ed2a3ccce4d443f4d224a07df80da2babb`（#41 merge）。
 實際定義為 [`api_v1.py`](../../src/bat_agent_connector/api_v1.py)、
 [`operations.py`](../../src/bat_agent_connector/operations.py) 及各 `ACTIONS` registry；
 本表是 adapter 的接點，不是第二份 API registry。

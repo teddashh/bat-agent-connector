@@ -8,7 +8,7 @@ Better Agent Dashboard brings together **Windows Fleet connectivity and startup,
 
 You continue coding in [Better Agent Terminal (BAT)](https://github.com/tony1223/better-agent-terminal). Agents such as Hermes and Grokbot use their own identities to work alongside you. The repository and Python package retain the name **`bat-agent-connector`**: Connector is the shared backend for the Dashboard, CLI and MCP tools.
 
-> **This source version** includes the bundled Python runtime, owned background central, personal identity and authenticated browser entry introduced in [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81). Use a successful desktop artifact matching the source commit and check its validation records. Earlier release downloads do not gain these features automatically. [Installation and first use →](docs/getting-started.md)
+> **This source version** includes the bundled Python runtime, owned background central, personal identity and authenticated browser entry. Use a successful desktop artifact built from the current public `main` history and match its source commit to its validation records. [Installation and first use →](docs/getting-started.md)
 
 ![Select work in the project tree and keep its conversation, reply controls and results together.](site/images/workspace-en.png)
 
@@ -103,7 +103,7 @@ Windows remains a core part of the product. Sharing the Dashboard with Web / Mac
 
 **Windows Fleet and central have separate responsibilities.** The candidate runs its bundled central locally on Windows, or joins a configured external central. Fleet keeps its own explicit connection, profile and ownership settings. Mac supports the shared Dashboard and bundled central; Windows Fleet remains a Windows capability.
 
-[Windows usage and resources](docs/windows.md) · [NSIS validation packages](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) · [Fleet configuration example](desktop/fleet.example.json) · [Rust Fleet source](desktop/fleet-core/README.md)
+[Windows usage and resources](docs/windows.md) · [NSIS validation packages](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml?query=branch%3Amain) · [Fleet configuration example](desktop/fleet.example.json) · [Rust Fleet source](desktop/fleet-core/README.md)
 
 New Windows Fleet installations can use the native Rust backend with the
 [public configuration templates](docs/design/fleet-configuration.md). Supply your own
@@ -122,7 +122,7 @@ This source version defines packaging for the following platforms. Match CI and 
 | Linux | Debian package, bundled central and native WebView | External-central native credentials use the memory-only adapter; a persistent Linux credential vault is outside this delivery. |
 | Python central / CLI / MCP | One operation authority; Windows private storage and locking plus POSIX support; Python 3.10–3.13 CI matrix | Manual operator deployment remains available. Desktop users do not need a preinstalled Python runtime. |
 
-Open [PR #81 checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks), follow its [desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml), and match the artifact's source commit and successful platform job. GitHub may require sign-in, and artifacts expire. These are candidate artifacts, not a newly published stable release or update channel; older release assets remain historical client packages.
+Open the [desktop workflow on `main`](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml?query=branch%3Amain), choose a successful run from the current public history, and match the artifact’s source commit and platform job. If the current commit is still building, wait for its successful package job. GitHub may require sign-in, and artifacts expire. These are candidate artifacts, not a stable release or production update channel; historical PR artifacts are not the current download source.
 
 ## Start using it
 
@@ -159,13 +159,13 @@ For native BAT `worktree.merge`, an unknown ACK without sufficient positive evid
 
 ## Implementation and validation
 
-The implementation described here was introduced in [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81). Its [checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks) record validation for the corresponding commits. Match those records to the package you use; older release test totals or artifacts do not establish this source version.
+Use the [current `main` checks](https://github.com/teddashh/bat-agent-connector/actions?query=branch%3Amain) and [desktop builds](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml?query=branch%3Amain) for source and package validation. Match the exact source commit, successful platform job and installed-fixture records to the package you use. Historical implementation records remain useful context; their old run results do not validate a newly built package.
 
 The candidate includes managed installation and onboarding, an adjustable project tree, readable conversations and send receipts, unread / model preferences, reviewed skill selections, linked results and repair work. Skill selection records a fixed source digest; it does not activate a skill in a running agent. A historical queued-send receipt does not report the current BAT queue position or offer per-message cancellation.
 
 Automated validation covers Python, shared browser/native transport, packaged runtime ownership and restart, and platform installation fixtures. These controlled fixtures are distinct from a user's actual Fleet, accounts and deployment targets.
 
-The owner excluded **formal signing, Mac notarization, production update channels and Linux persistent native credential storage** from this delivery. **Human execution of the full 46-item real-environment acceptance matrix belongs to the user** and is not an outstanding agent task. These exclusions are not claims that the corresponding capabilities or real-host tests were completed. Consult the linked PR and checks for validation and integration records.
+The owner excluded **formal signing, Mac notarization, production update channels and Linux persistent native credential storage** from this delivery. **Human execution of the full 46-item real-environment acceptance matrix belongs to the user** and is not an outstanding agent task. These exclusions are not claims that the corresponding capabilities or real-host tests were completed. Consult the linked checks and implementation record for validation and integration evidence.
 
 [Implementation record](docs/product/implementation-status.md) · [Acceptance reference](docs/product/acceptance-v2.md)
 

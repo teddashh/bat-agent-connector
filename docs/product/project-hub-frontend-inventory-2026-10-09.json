@@ -11,7 +11,7 @@
     "license": "MIT",
     "verification": "GitHub API main commit and open PR heads rechecked; local git source hashes verified."
   },
-  "connector_comparison_sha": "ba56322e22734f2a37f3dd6ee0b14ab65d9d42c6",
+  "connector_comparison_sha": "bc5cb21e48ce05f55d320dbe0ec98fbf6114e520",
   "scope": "Frontend source and feature adoption review; not exhaustive branch execution, native acceptance, or third-party dependency security audit.",
   "decision_count": 82,
   "frontend_files": [

@@ -1,6 +1,6 @@
 # Bulk approval：固定預覽、逐項 child operations
 
-基底 main `e495d70`，追蹤 #59。沿用[同一產品/Tauri 方向](../product/realignment-v2.md)、
+基底 main `b80225d`，追蹤 #59。沿用[同一產品/Tauri 方向](../product/realignment-v2.md)、
 [operations](operations-unification.md)、[permissions](session-permissions.md) 與
 [驗收矩陣](../product/acceptance-v2.md) A01/A05/A07/A08；不是另一個 queue 或 authority。
 

@@ -1,6 +1,6 @@
 # Dashboard bootstrap 與中央事件續接
 
-日期：2026-10-08。固定基準 `d30deda`（Observation Part A）。對應第二版計畫 §10、§14、R04，
+日期：2026-10-08。固定基準 `afa54a8`（Observation Part A）。對應第二版計畫 §10、§14、R04，
 驗收 B02、B05、T11。只使用既有 `api_events` 與 persisted read models；沒有第二個 event store、
 Task Service 或 BAT channel。Frontend 的草稿與呈現規則由共用 Dashboard 實作。
 

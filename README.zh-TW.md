@@ -8,7 +8,7 @@ Better Agent Dashboard 整合 **Windows Fleet 連線與啟動、BAT 主機上的
 
 你繼續在 [Better Agent Terminal（BAT）](https://github.com/tony1223/better-agent-terminal) coding；Hermes、Grokbot 等 Agent 透過各自的身分協作。Repository 與 Python 套件仍叫 **`bat-agent-connector`**，Connector 是 Dashboard、CLI 與 MCP 共用的後端。
 
-> **這版原始碼**包含 [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 引入的打包 Python runtime、自有背景中央、個人身分與已認證的瀏覽器入口。請使用與來源 commit 相符且建置成功的桌面 artifact，並核對其驗證紀錄。早期 release 下載檔不會自動包含這些新功能。[安裝與首次使用 →](docs/getting-started.zh-TW.md)
+> **這版原始碼**包含打包 Python runtime、自有背景中央、個人身分及已認證瀏覽器入口。請使用目前公開 `main` 歷史建置成功的桌面 artifact，並核對來源 commit 與驗證紀錄。[安裝與首次使用 →](docs/getting-started.zh-TW.md)
 
 ![從左側專案工作樹選工作，在同一畫面閱讀對話、回覆與追蹤成果。](site/images/workspace-zh.png)
 
@@ -103,7 +103,7 @@ Windows 是完整產品的一部分。已整合的 native Fleet 控制不因共�
 
 **Windows Fleet 與中央的責任分開看。** 候選版可在 Windows 執行包內的中央，也可加入已配置的外部中央。Fleet 仍保留明確的連線、profile 與 ownership 設定。Mac 支援共用 Dashboard 與打包中央；Windows Fleet 仍是 Windows 原生能力。
 
-[Windows 使用與資源指南](docs/windows.zh-TW.md) · [NSIS 驗證包](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) · [Fleet 設定範例](desktop/fleet.example.json) · [Rust Fleet 原始碼](desktop/fleet-core/README.md)
+[Windows 使用與資源指南](docs/windows.zh-TW.md) · [NSIS 驗證包](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml?query=branch%3Amain) · [Fleet 設定範例](desktop/fleet.example.json) · [Rust Fleet 原始碼](desktop/fleet-core/README.md)
 
 新的 Windows Fleet 安裝可直接使用原生 Rust backend 與[公開設定範本](docs/design/fleet-configuration.md)。
 填入自己的主機、SSH alias 與 BAT profiles 即可配置，不需要維護者的機隊資料或私有 Kit checkout。
@@ -121,7 +121,7 @@ Windows 是完整產品的一部分。已整合的 native Fleet 控制不因共�
 | Linux | Debian 包、打包中央及原生 WebView | 外部中央的原生憑證沿用記憶體 adapter；持久 credential vault 不在本次交付範圍。 |
 | Python 中央／CLI／MCP | 同一套操作權威；包含 Windows 私人儲存／檔案鎖與 POSIX 支援，CI 涵蓋 Python 3.10–3.13 | 保留操作者手動部署方式；桌面使用者不需預裝 Python。 |
 
-從 [PR #81 檢查](https://github.com/teddashh/bat-agent-connector/pull/81/checks) 進入對應的 [desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml)，確認 artifact 的來源 commit 及平台 job 成功。GitHub 可能要求登入，artifact 也會到期。這是候選 artifact，不是新發布的穩定版本或更新通道；舊 release 資產仍是先前的 client 包。
+開啟 [`main` 的 desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml?query=branch%3Amain)，選擇目前公開歷史的成功 run，核對 artifact 的來源 commit 及平台 job。若目前 commit 還在建置，請等對應平台 job 成功。GitHub 可能要求登入，artifact 也會到期。這是候選 artifact，不是穩定發行或正式更新通道；歷史 PR artifact 不作為目前下載來源。
 
 ## 開始使用
 
@@ -158,13 +158,13 @@ MCP／CLI 寫入保留明確確認、主機權限及稽核；UI 已檢視的操�
 
 ## 實作與驗證
 
-這裡說明的實作由 [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 引入，其[檢查頁](https://github.com/teddashh/bat-agent-connector/pull/81/checks)保留各來源 commit 的驗證紀錄。請與使用的套件核對；舊 release 的測試總數或 artifact 不能當成這版原始碼的結果。
+來源與套件驗證請查[目前 `main` 的檢查](https://github.com/teddashh/bat-agent-connector/actions?query=branch%3Amain)及[桌面建置](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml?query=branch%3Amain)。請核對套件的精確來源 commit、成功平台 job 與安裝 fixture 紀錄。歷史實作紀錄保留背景脈絡；舊 run 的結果不代表新套件已通過驗證。
 
 候選實作包含自動安裝與引導設定、可調整的專案樹、易讀對話與發送回執、未讀／模型偏好、經檢視的技能選取、成果連結及修復工作。技能選取會固定來源 digest，不會自動套用到執行中的 Agent；歷史「已排入佇列」回執不代表目前 BAT 佇列位置，也未提供逐則訊息取消。
 
 自動驗證涵蓋 Python、共用 browser／native transport、打包 runtime 的 ownership／重開，以及各平台安裝 fixture。受控 fixture 與使用者實際 Fleet、帳號和部署目標的驗證分開記錄。
 
-負責人已將**正式簽章、Mac 公證、正式更新通道及 Linux 原生憑證持久儲存**排除於本次交付。**完整 46 項實際環境的人工驗收由使用者自行執行**，不列為 Agent 未完成工作。排除不表示相關能力或實機測試已完成；驗證及整合紀錄請查對應 PR 與檢查頁。
+負責人已將**正式簽章、Mac 公證、正式更新通道及 Linux 原生憑證持久儲存**排除於本次交付。**完整 46 項實際環境的人工驗收由使用者自行執行**，不列為 Agent 未完成工作。排除不表示相關能力或實機測試已完成；驗證及整合證據請查上述檢查頁與實作紀錄。
 
 [實作紀錄](docs/product/implementation-status.md) · [驗收參考](docs/product/acceptance-v2.md)
 

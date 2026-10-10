@@ -106,7 +106,7 @@ Part A 的可執行測試在 `tests/test_operations_unification.py`，加上既�
 
 | 來源 | 固定版本／位置 | 用途 |
 |---|---|---|
-| Connector | `0.2.4`；`feat/ops-unify` 起點與 `origin/main` 均為 `5e8e41696ebc6a1a9d3ea92ddb7a1d338537ca1b` | 本文入口清單、SQLite schema、coordinator 與 owner 行為均逐項對照此版。 |
+| Connector | `0.2.4`；`feat/ops-unify` 起點與 `origin/main` 均為 `566eba6b63e49eeca38383f4029a3a7abec98801` | 本文入口清單、SQLite schema、coordinator 與 owner 行為均逐項對照此版。 |
 | 計畫 | v1.0，2026-10-06，§09、§10、§24、§26、§28 | 合約與驗收依據；不將私人計畫複製進 repository。 |
 | 本輪範圍校正 | Tauri 校正計畫 v2.0，2026-10-08，§02、§07、§10–12、§24；產品決策 `realignment-v2.md` | 保留 Python Connector／Task Service 唯一中央後端與本分支 task gate；不加入 Hub importer／dependency、不另建 Rust task authority。本輪僅完成已指派的兩個 Part A review finding。舊章節引用保留作原設計依據。 |
 | BAT 協定筆記 | [PROTOCOL.md](../PROTOCOL.md)：BAT **v3.2.12**、`bat-remote/v2`；上游 `src-tauri/src/remote_server.rs`、`remote_core.rs`、`node-sidecar/src/handlers/*` | 沿用既有 channel，沒有新增任意 RPC／shell 寫入通道。 |
@@ -432,7 +432,7 @@ pause／control_version 改變勝過正在執行的 trusted verifier 時，舊 r
 | _verification_failed 的 classify／dependency install | verifying＋paused；不新增 stale install result／needs_ted | 保留新控制；舊分類／install 結果不套用 | 原 verify guard＋ObservedVerifier.before_run；control refusal 直接傳回 tick，只有真正 install error 才沿原 environment failure。 |
 | dependency install 後的第二次 trusted run | verifying＋paused，不記第二次 run 的 evidence | verifying 保留，不以 journal.get 的新版本重綁舊 retry | 重用原 incarnation，與第一次 run 相同 fencing；resume 從頭跑。先前合法的第一個 failed evidence 保留。 |
 | lead／reviewer start 的 pre-frame refusal | command cancelled；只將暫存 dispatching 還原 queued／verifying，保留 paused／版本 | 同樣還原派送前 phase；若新控制已改其他 state，保留它 | reviewer before_send 檢查，start retry 不吞 TaskControlRefused。lease lost 時連 cancelled／phase rollback 都不寫，保留 intent／dispatching 給新 owner。未證明的真 start failure 保留 command uncertainty，但不能將較新的控制改成 uncertain。保留 helper 不表示重新啟用 independent reviewer。 |
-| _send：initial／follow-up／continuation／verification rework；implicit client-resume | pre-frame control refusal 為 cancelled，task 保留控制原狀 | cancelled，保留新 state／版本 | 517db52 的 StepFailed 規則保留；TaskControlRefused 不落入普通 needs_ted 分支。resume 只 check，不算 send frame；lost own send reply 仍走既有 readback。lease lost 不寫 command／task，交新 owner。 |
+| _send：initial／follow-up／continuation／verification rework；implicit client-resume | pre-frame control refusal 為 cancelled，task 保留控制原狀 | cancelled，保留新 state／版本 | 8858e53 的 StepFailed 規則保留；TaskControlRefused 不落入普通 needs_ted 分支。resume 只 check，不算 send frame；lost own send reply 仍走既有 readback。lease lost 不寫 command／task，交新 owner。 |
 | pending command recovery／trusted task operation／pause abort | 原 pending proof／operation failure／pause receipt 不撤銷控制 | 第一個 effect／frame 仍核對原 binding；不新增 authority | tick 首次寫前檢查 lease；本機操作仍用 receipt，外部 task.verify 拒絕只令 operation failed。abort 在 pause operation，非 tick dispatch，不重送。 |
 | daemon deadline／generic fallback／terminal cleanup | 不跑 paused deadline；晚到 timeout／error 不改 task | 晚到 exception 不覆寫新版本 | 同一有效版本的真 verifier error 仍 needs_ted；lease invalid 不進 tick／deadline／cleanup，不寫新 owner 的 state。 |
 

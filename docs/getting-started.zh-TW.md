@@ -4,7 +4,7 @@
 
 ## 選擇相符的候選安裝包
 
-這版原始碼包含 [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 引入的一般桌面流程；原始碼實作與已發布 release 資產分開看。從其[檢查頁](https://github.com/teddashh/bat-agent-connector/pull/81/checks)進入 desktop run，核對同一來源 commit，使用平台 job 成功產生的 artifact。早期 release 資產不會自動包含新 runtime。[Desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml)。
+這版原始碼包含打包本機中央與桌面引導設定。開啟 [`main` 的 desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml?query=branch%3Amain)，選擇目前公開歷史的成功 run，核對 artifact 的來源 commit、平台 job 與安裝 fixture 紀錄。若該 commit 還在建置，請等平台 job 成功。歷史 PR artifact 與早期 release 資產不作為目前下載來源。
 
 | 平台 | Artifact | 格式 |
 | --- | --- | --- |

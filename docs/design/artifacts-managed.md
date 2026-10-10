@@ -1,6 +1,6 @@
 # Managed artifact capture / acceptance (B2)
 
-Issue #59, base `e495d70d8dae6b7dc415adc44a23eb1bcf64dd7d`. This extends the
+Issue #59, base `b80225d476bc99ec2e9e1bb9be0041fb15353120`. This extends the
 existing [artifact store and B1 capture](artifacts.md), not execution authority.
 Manual capture remains a separate read-only source contract. No frontend or live
 acceptance is claimed by this backend change.

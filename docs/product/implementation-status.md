@@ -2,15 +2,15 @@
 
 查核日期：2026-10-10。依 [共用產品與 Tauri 方向](realignment-v2.md)；兩份計畫是同一產品的 UI 修訂，共用一份功能 backlog。歷史交接見
 [`2026-10-08-dispatch.md`](../handoff/2026-10-08-dispatch.md)。此表以 source evidence
-追蹤，不以測試數或 PR 數代替產品驗收。開工時 main 為 `2568520`（#41 已合併）；
-本輪已依序合併 #36（`800f6ec`）、#35（`8e687fb`）、#37（`2ac5715`）及 #38（`8c755a3`）。下面的接手基線保留歷史，
+追蹤，不以測試數或 PR 數代替產品驗收。開工時 main 為 `224bc7e`（#41 已合併）；
+本輪已依序合併 #36（`873dfa1`）、#35（`58d58a8`）、#37（`305cb6e`）及 #38（`98931f7`）。下面的接手基線保留歷史，
 已合併證據以「本輪收斂結果」為準，續作以「目前續作」為準。
 
 ## 目前續作
 
 ### 2026-10-10 Issue #59 候選收斂（PR #81）
 
-這版原始碼包含 [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 引入的實作；各來源 commit 的 [Python／共用 UI／各平台套件檢查](https://github.com/teddashh/bat-agent-connector/pull/81/checks)保留對應驗證紀錄。原始碼、整合狀態與 release 資產分開核對，不沿用舊 release 的測試總數或 artifacts，也不由此推論已正式發行新安裝包。
+這版原始碼包含已整合的產品實作；目前套件以 [`main` 的 desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml?query=branch%3Amain)及[同一來源 commit 的檢查](https://github.com/teddashh/bat-agent-connector/actions?query=branch%3Amain)為準。選擇目前公開歷史的成功 run，核對平台 job 與安裝 fixture；仍在建置時不宣稱已通過。歷史 PR artifacts 不作為目前下載來源，也不由此推論已正式發行新安裝包。
 
 | 項目 | 候選實作與界線 |
 | --- | --- |
@@ -23,11 +23,11 @@
 | 發送／恢復 | 保存精確原操作、訊息與發送回執；歷史 queued 回執不推論現在排隊位置，也未提供 BAT 逐訊息取消。Unknown 回覆保留原 key／資源並先查回。 |
 | 既有中央與 Fleet | 已配置外部中央沿用；進階加入須原生確認與另行登錄憑證，自有背景工作保留。Windows Fleet 管連線／啟動，Python 管授權／派工，BAT 執行工作；原有 profiles、Kit ownership 與遷移守衛保留。 |
 
-正常使用方式見中英文 [首次使用](../getting-started.md)／[繁中](../getting-started.zh-TW.md)及 [Windows](../windows.md)／[繁中](../windows.zh-TW.md)；[managed 安裝合約](../design/managed-installation.md)列出來源及自動 fixture。下載時須核對 PR 的來源 commit 與成功平台 job；早期 release 資產仍是歷史 client 包。
+正常使用方式見中英文 [首次使用](../getting-started.md)／[繁中](../getting-started.zh-TW.md)及 [Windows](../windows.md)／[繁中](../windows.zh-TW.md)；[managed 安裝合約](../design/managed-installation.md)列出來源及自動 fixture。下載時須核對目前 `main` run 的來源 commit 與成功平台 job。
 
 **本次排除範圍：**正式簽章、Mac 公證、正式更新通道、Linux 原生憑證持久儲存。完整 46 項實際環境的人工驗收由使用者負責，不列入 Agent 未完成工作，也不宣稱已通過。原生 BAT merge 的 unknown ACK 保留原操作及資源；獨立人工裁決 API 不在[目前 merge 合約](../design/worktree-merge.md)範圍，不另列交付門檻。
 
-**驗證與整合紀錄：**以對應 PR、來源 commit 與檢查頁為準。以下保留各階段當時的實作紀錄及基線；其中「尚未實作」和「待驗收」描述是歷史狀態，不覆蓋本節的候選實作與最新排除範圍。
+**驗證與整合紀錄：**以對應來源 commit 與檢查頁為準。歷史來源引用已對應到公開歷史中保留的 commit；這不改寫原 CI receipt，也不把歷史 run 視為新 commit 的驗證。以下保留各階段當時的實作紀錄及基線；其中「尚未實作」和「待驗收」描述是歷史狀態，不覆蓋本節的候選實作與最新排除範圍。
 
 ## 歷史實作紀錄（保留當時狀態）
 
@@ -84,7 +84,7 @@ Rust／PowerShell 遷移沿用現有明確預覽。這一步完成中央初次�
 
 ### 2026-10-09 Delivery 資訊正確性與派工到 PR 的關聯
 
-`fix/delivery-lineage` 接續 #71 的 `3f4ed88`，修正候選清單以 `streaming=false` 推論完成。
+`fix/delivery-lineage` 接續 #71 的 `ca6358c`，修正候選清單以 `streaming=false` 推論完成。
 活動三值、待回覆、觀測過期／缺失、成果未驗證與交付 receipt 分開呈現；派工成功只標受理。
 新 `execution`／`task_command` source 使用中央 accepted execution 證據，將一般 start、
 published continuation 與 Task Service 原命令接到既有固定 commit preview/apply。preview digest
@@ -104,7 +104,7 @@ backend 及 PowerShell 相容預設；完整無設定檔首次安裝精靈、正
 
 ### 2026-10-09 專案快速派工、進階設定與附件草稿
 
-`feat/project-quick-dispatch` 接續 #70 的 `f33b837`，推進 Project Hub 審查 P1-3。
+`feat/project-quick-dispatch` 接續 #70 的 `31e7a4f`，推進 Project Hub 審查 P1-3。
 專案詳情新增共用 Web／Tauri 入口，限定中央明確綁定的 repository／host／workspace；
 唯一目的地自動選取，多個目的地需明確選擇。標題／模型收進進階設定，附件沿用既有草稿與
 ready revision。原請求固定專案版本、GitHub head、原文、模型、附件 digest 和 operation key。
@@ -116,13 +116,13 @@ BAT frame 前重查專案／目的地與 bytes。回覆丟失、專案封存或 
 
 相關 128 項後端與 57 項初次 UI 回歸已通過；實際中央的 HTTP／IPC 派工與原 published 流程亦通過。
 `test:dispatch` 已加入 desktop CI；候選完整 gate 與平台證據由 PR/checks 及
-本機驗證紀錄（未隨原始碼發布） 記錄。#71 已合併為 `481f407`，tree
-與通過 Python 3.10–3.13、Windows／Linux／Mac 兩架構 CI 的 `3f4ed88` 相同；尚未安裝或 live 驗收。
+本機驗證紀錄（未隨原始碼發布） 記錄。#71 已合併為 `fb4fa60`，tree
+與通過 Python 3.10–3.13、Windows／Linux／Mac 兩架構 CI 的 `ca6358c` 相同；尚未安裝或 live 驗收。
 P1-4 手機資訊／輸入區收合及可調側欄、P1-5 設定分組／首次使用導引仍在後續 backlog。
 
 ### 2026-10-09 共用待處理分類與工作更新已讀
 
-`feat/shared-attention-states` 接續 `dba6ccd`。首頁把待回覆／權限、完成確認、需處理操作、
+`feat/shared-attention-states` 接續 `02eab82`。首頁把待回覆／權限、完成確認、需處理操作、
 主機連線分組，原「待確認」分頁改為「執行中操作」；各組明示已載入數量、可繼續分頁，
 讀取失敗保留舊資料並阻擋事件 checkpoint 前進。
 
@@ -138,7 +138,7 @@ principal 與 unread filter；Rust bridge 只允許 work-items 的布林 unread 
 另驗證 14 項身份切換、延遲回覆與草稿保留回歸：初次完整 UI run 抓出的舊首頁請求晚到問題
 已修正。`test:attention` 已加入 desktop CI；完整 shared UI 與 Python 3.13／3.10 gate 的
 候選結果另由 PR/checks 與 本機驗證紀錄（未隨原始碼發布） 記錄。
-#70 已合併為 `3072af9`，tree 與通過完整 CI 的 `f33b837` 相同；尚未安裝或進行 Mac/Windows 實機驗收。
+#70 已合併為 `5b52ea6`，tree 與通過完整 CI 的 `31e7a4f` 相同；尚未安裝或進行 Mac/Windows 實機驗收。
 
 ### 2026-10-09 共用 Web／Tauri 與對話閱讀
 
@@ -153,7 +153,7 @@ Web 與 Tauri 共用 `conversation.js`／`message-format.js`，兩個 build 已�
 中英 × browser/IPC × 390/768/1440 畫面。實際 Connector＋MockBat fixture 的事件續接、
 retention reset 與草稿恢復通過；兩種 build 的 JavaScript 相同，CSS 扣除 generated notice 也相同。
 初次 clipboard fallback 測試發現 textarea 會正規化 CRLF，已修正整段手動複製並通過回歸。
-實作提交 `e4350b9`；Ruff、generated browser drift 與 Python 3.13 全套
+實作提交 `038df8f`；Ruff、generated browser drift 與 Python 3.13 全套
 **3187 passed／33 skipped** 通過（磁碟暫存 wrapper；1574.89 秒）。測試暫存已清除，
 證據保存在 本機驗證紀錄（未隨原始碼發布）。
 尚未合併或安裝；IPC fixture 不代表 Windows/macOS 原生剪貼簿驗收。
@@ -163,7 +163,7 @@ retention reset 與草稿恢復通過；兩種 build 的 JavaScript 相同，CSS
 已重新核對上游最新 `main` v4.90.0（`a277d2ed5ce439c248fc32fa8ff9fa4124a06027`），
 包含全部 15 個自有 JS 模組、CSS／入口／manifest，以及未合併 PR #2／#3／#4。
 [82 項逐項採用決策](project-hub-frontend-audit-2026-10-09.md) 以我方 Mac #69 合併後
-`ba56322` 為比較基準；[來源清單](project-hub-frontend-inventory-2026-10-09.json) 固定各檔雜湊、PR head 與決策對應。
+`bc5cb21` 為比較基準；[來源清單](project-hub-frontend-inventory-2026-10-09.json) 固定各檔雜湊、PR head 與決策對應。
 
 後續優先順序：對話程式碼／表格／複製及閱讀位置 → 未讀與待回覆／完成確認分開 →
 專案快速派工及附件草稿 → 手機資訊／輸入區收合與可調側欄 → 設定分組與首次使用導引。
@@ -174,7 +174,7 @@ retention reset 與草稿恢復通過；兩種 build 的 JavaScript 相同，CSS
 
 ### 2026-10-09 macOS 交付續作
 
-使用者新增 Mac 版本要求。從已合併 #68（`2d2570b`）開工，新增 Apple Silicon／Intel
+使用者新增 Mac 版本要求。從已合併 #68（`b127195`）開工，新增 Apple Silicon／Intel
 DMG、ICNS、Dock Reopen／正常 Quit 與兩種架構的 disposable native install fixture。
 Mac 候選須以自己的完整 head CI、DMG digest、WKWebView screenshots 和清理 receipts 驗證，
 不能沿用 Windows/Linux 的結果。新增 Mac 原生 secure-field／Keychain adapter 與隔離 Keychain fixtures，並備妥正式
@@ -182,8 +182,8 @@ Developer ID／公證 candidate workflow；待各自 exact-head 結果。正式�
 仍分開追蹤；Windows Fleet supervisor 不因 Mac 可啟動就宣稱跨平台支援。
 
 後續結果：[#69](https://github.com/teddashh/bat-agent-connector/pull/69) 已合併為
-`ba56322e22734f2a37f3dd6ee0b14ab65d9d42c6`；候選 `95efd2b07c52adff2d9303ec1a058abba0d93a66`
-與 merge tree 同為 `719ae4496ee288a8a66ab32284528701ece7dbf8`。
+`bc5cb21e48ce05f55d320dbe0ec98fbf6114e520`；候選 `99f05ac98bf7acff4078ca302d784cf8569b1fdf`
+在當時合併時已核對 tree 相同；此為歷史比對，不是新套件證據。
 [Python CI](https://github.com/teddashh/bat-agent-connector/actions/runs/37967171572)
 3.10–3.13 各 3187 passed／33 skipped；
 [desktop CI](https://github.com/teddashh/bat-agent-connector/actions/runs/37967171409)
@@ -191,18 +191,18 @@ Developer ID／公證 candidate workflow；待各自 exact-head 結果。正式�
 包含 Mac 隔離 Keychain、安裝／啟動／關窗／Reopen／Quit 及清理證據。
 Mac 驗證包仍為 ad-hoc 簽署；正式 Developer ID／公證、Mac updater、實機／live 驗收尚未完成。
 
-#68 的固定候選 `771d0099a9cae74e3446f3121a2747439583b136` 已通過
+#68 的固定候選 `651b964fe7b7d8164bb6990653e8a14d5f046827` 已通過
 [Python 四版各 3187／33](https://github.com/teddashh/bat-agent-connector/actions/runs/37949144734)
 及 [Windows 真 NSIS 安裝／Linux 實際 deb WebView](https://github.com/teddashh/bat-agent-connector/actions/runs/37949144823)，
-merge tree 與候選同為 `992aa5b356d6ee9cab04bd126f0ae54f0045ef5c`。
+合併當時已核對 merge 與候選的 tree 相同；此為歷史比對。
 
 ### 2026-10-09 發行門檻收斂
 
 #64／#65／#66 已合併；以下各段保留當時候選的歷史證據。
 [#67](https://github.com/teddashh/bat-agent-connector/pull/67) 再合併為
-`68106542e1b120de8457f4e64a134c2c76e5481e`，與已測候選
-`be9804039dd526ec105bb466a0f9f72bf47902e0` 的 tree 同為
-`384bf572df18f65970c4fac2639ef4c9e2c003c5`。Canonical workflow 保持 `2026-10-08.14`。
+`c506d38ae7f106a18280c16914abe76b1aecd766`，與已測候選
+`d10ab7eb122740b169aba147415aa1412300a0b0` 的 tree 在合併當時已核對相同
+（歷史比對，非本次重建證據）。Canonical workflow 保持 `2026-10-08.14`。
 GLib 保留 0.18.5 原版本並 backport upstream 的兩行指標修正，來源完整性／真正 dependency graph
 與 optimized iterator regression 成為 gates；未忽略 advisory。
 [#53](https://github.com/teddashh/bat-agent-connector/issues/53) 已關閉，Dependabot alert #1 為 fixed，未 dismissed。
@@ -224,8 +224,8 @@ single-instance、process restart 與 uninstall，保存 screenshots／JSON。�
 ### 先前整合證據
 
 最新追蹤 [#59](https://github.com/teddashh/bat-agent-connector/issues/59)。[#61](https://github.com/teddashh/bat-agent-connector/pull/61)
-已合併為 `1a8984cac57146c3bd8b842b94b32a30c5525c15`；固定候選 `07bc762089e00e00bcf6e06d93051427a8ad6f84`
-與 merge 的 tree 同為 `8ca0a54b46facd3a2e5e209f5491ca088b8cc609`。Managed start、task reviewed／automatic cleanup、
+已合併為 `3cd49b7658aee9828941e3e6d6d0d8cd8d2ce578`；固定候選 `ee1d095b1f07befb86a8c4824d5e20fb77dc0873`
+與 merge 的 tree 在當時已核對相同（歷史比對）。Managed start、task reviewed／automatic cleanup、
 native 選檔／上傳／Save As、成果擷取／獨立審核及 canonical `.8` 已在 main。Project Hub 的 session 整理方向保留：
 依實際 host／workspace 分組，不從名稱猜測專案歸屬。GUI／CLI／MCP 都在指定 BAT host／workspace 工作；
 跨主機只接續明確 repository 的已發布 commit，未發布 Git-pack transport 不在交付條件。
@@ -239,34 +239,34 @@ cleanup、native files 及獨立 reviewer 的固定 bytes/revision。Local full 
 
 後續主線與候選分開追蹤，不計為 installed 完成：
 
-- [#62](https://github.com/teddashh/bat-agent-connector/pull/62) 已合併為 `c9ed361067e84f092ddabe2a3c057e4e1db688b5`。
-  候選 `927053dd6e6e87185f013c4bfd7834054de179ba` 與 merge 的 tree 同為 `e4a8e281015c2b376623ce91911feb9fab7e9743`。
+- [#62](https://github.com/teddashh/bat-agent-connector/pull/62) 已合併為 `aa34f18313a4a3a62fdc32bc11b4e142256614e5`。
+  候選 `e309700ad1c5cff96661f07f0c7ffdee02f72029` 與 merge 的 tree 在當時已核對相同（歷史比對）。
   明確 repository binding、GitHub numeric ID、固定 ref/head 與 fresh managed carrier、published-start UI 及 `.9` 已在 main。
   Exact CI Python 3.10–3.13 各 **2725 passed／33 skipped**，兩平台 desktop／unsigned packaging 通過。
   Local 3.13 full 先有 operation settlement timeout，重跑另有兩項 subprocess deadline failure；沒有宣稱 local full 綠燈。
   原碼 targeted integration 1、subprocess 3 通過；本機高負載下停止重複全套，以四版 exact-head CI 作完整驗證。
-- [#63](https://github.com/teddashh/bat-agent-connector/pull/63) 已合併為 `a14a9ddb36f203ad4116252457f5fd2c0f90825f`。
-  候選 `3835b14dbaf2a5241461c5db2f780f0b56407114` 與 merge tree 同為 `192fd59c88cde19b54668c21add3d397453e6e55`。
+- [#63](https://github.com/teddashh/bat-agent-connector/pull/63) 已合併為 `41261de7a3d2c06c7a7b02dc75cb67e3c61fbdc9`。
+  候選 `245cad0b6b9899aac77471335154a8d46ea19e43` 與 merge 的 tree 在當時已核對相同（歷史比對）。
   Central relay、fanout planner／fixed-plan dispatch、standalone Claude→Codex failover、omitted-key task controls 與 `.11`
   已在 main。Exact CI Python 3.10–3.13 各 **2888 passed／33 skipped**，Windows／Linux desktop packaging 通過。
   Focused 490 在 3.13／3.10 通過；舊 principal fixture 斷言已修。兩次主動中止的 local full 不計通過，第二次是在 CI 四版通過後停止重複驗證。
-- [#64](https://github.com/teddashh/bat-agent-connector/pull/64) 整合 native Fleet／bootstrap／signed update；來源候選 `d6b23ae8d2d043ce9127452aaf212da2a8e229bd`。
+- [#64](https://github.com/teddashh/bat-agent-connector/pull/64) 整合 native Fleet／bootstrap／signed update；來源候選 `472ea843cfcbe0d0be47700e450c01a1d63d16d0`。
   真 Windows fixture 先暴露空閒 endpoint 在 100 ms 尚未回 refusal，修為 bounded 3 s refusal＋bind proof。
   接著修正 ownership 掃描與 selection 的短路徑差異、WScript Startup 短路徑辨識，以及並行 discovery fixtures 的時間戳撞名。
   完整 Windows Fleet core gate 已通過，包含真 WScript synthetic links；22 discovery、42 ownership/configuration regressions 與獨立 review 通過。
   另一次 app fixture 在原 10 s PowerShell contract budget 逾時，後續不同條件的 probes 通過不當作原測試通過；失敗及原碼查核／重跑證據保留於 PR。
   原 combined evidence：416 UI、12 state、218 Linux core、78 app Rust／1 fixture-only ignored、release verifier example 1；bootstrap 44 在兩版 Python 通過。
 - [#65](https://github.com/teddashh/bat-agent-connector/pull/65) 整合四個 orchestration 表單、task pause/resume、操作分頁、明確 BAT profile 入口、principal transcript/wait、A03 labels 及中央 verification testimony。
-  候選 `460c792de40f35d84155219b06bc3f3948b92ee5` 保留原 actor/key/request 與 receipts。Labels 只改中央 metadata，含人工／unknown／retained 與版本 CAS；verification 是外部證詞，不能授予 trusted task verification。
+  候選 `7b647a95f981575876c4e8b10537eb669e0e3c86` 保留原 actor/key/request 與 receipts。Labels 只改中央 metadata，含人工／unknown／retained 與版本 CAS；verification 是外部證詞，不能授予 trusted task verification。
   Observation 86、labels／verification／principal／lifecycle／canonical 152 在兩版 Python 通過；3 trusted verifier、91 affected UI、actual-central labels／task／orchestration fixtures 通過。
-  Full CI 在 `921caf7` 發現 3 個 API remount 重複註冊 failures 與 1 個舊 MCP 工具清單斷言；`f6603a4` 修正後，101 related regressions 在 3.13／3.10 通過並經獨立 review。
+  Full CI 在 `cc48542` 發現 3 個 API remount 重複註冊 failures 與 1 個舊 MCP 工具清單斷言；`4696cd1` 修正後，101 related regressions 在 3.13／3.10 通過並經獨立 review。
   本機 orchestration fixture 曾在一般暫存磁碟遇到 5 s UI deadline，原碼在 `/dev/shm` 通過；沒有放寬 deadline 或計為 local full 通過。
 - [#66](https://github.com/teddashh/bat-agent-connector/pull/66) 是同一產品的最後整合工作線，累加 Tailscale recovery、中央 `worktree.merge` 與 canonical `.14`。
   Tailscale 使用固定 Windows vendor paths、bounded sanitized status、原 request receipt、Launcher／Quit／update fences；返回畫面只查狀態，不自動登入或修改網路。
-  Source `5598b46` 已獨立 review；9 durable core＋1 synthetic process、3 Linux Tauri IPC、29 final UI、12 state 通過。Windows MSVC isolated compile 是分層證據，實際 Windows matrix 另留 CI。
+  當時的 Tailscale 實作已獨立 review；9 durable core＋1 synthetic process、3 Linux Tauri IPC、29 final UI、12 state 通過。Windows MSVC isolated compile 是分層證據，實際 Windows matrix 另留 CI。
   Merge 固定來源／目的 Git identity 與全部 consumers，保留雙 carrier reservation、各 effect 的 ACK、未知結果與原 key。支援明確 idle／unloaded／headless／retired managed consumers，拒絕 task-owned／manual／unknown／未決 writer。
   先以設定的 verifier SSH 讀 effective Git config，拒絕 diff/filter programs、ambient overlays、submodules、incomplete status，再讀 BAT worktree status；SSH mapping 必須由 operator 綁到同一 BAT Git account/configuration context，不能當作獨立環境 attestation。
-  Merge source `9366396` 的 140 merge/client cases 在 3.13、254 related cases 在 3.10 通過；先前 shared layers 705／707 通過。獨立 review 的 Git diff-program finding 已修正，原始失敗／修正 evidence 保留。
+  當時 merge 實作的 140 merge/client cases 在 3.13、254 related cases 在 3.10 通過；先前 shared layers 705／707 通過。獨立 review 的 Git diff-program finding 已修正，原始失敗／修正 evidence 保留。
   Root integration 的共用 UI **585**、state **12** 全通過；merge／verification／client／MCP／canonical／cleanup／SSE／labels 共 **282** 在 Python 3.13／3.10 均通過。
   固定候選的完整 Python／Windows／Linux、late recovery corrections 與 installer SHA/digest，以此 PR 最後記錄為準。
 
@@ -279,23 +279,23 @@ cleanup、native files 及獨立 reviewer 的固定 bytes/revision。Local full 
 
 本輪來源與審查（以下保留合併前各層證據）：
 
-- Native credentials `67223d0`：Windows 原生憑證對話框／Credential Manager、固定 endpoint／actor／
+- Native credentials：Windows 原生憑證對話框／Credential Manager、固定 endpoint／actor／
   contract 及中央身分驗證、可恢復連線。獨立審查找到 native bootstrap 404 誤入 legacy namespace，
-  及手動連線時 Disable Disconnect；`8aff900` 修正，51 focused UI cases 通過。原 head 的 156 UI、
+  及手動連線時 Disable Disconnect；後續修正，51 focused UI cases 通過。原 head 的 156 UI、
   32 Linux Rust、8 state 與 Windows 模組 typecheck 是分層 fixture 證據；完整 Windows build 交 CI，
   沒有原生對話框／Credential Manager 實機驗收。
-- Managed artifacts `9de3572`：獨立 preview、中央 accepted execution／command lineage、固定 bytes／HEAD，
+- Managed artifacts：獨立 preview、中央 accepted execution／command lineage、固定 bytes／HEAD，
   `artifact.capture.managed` 與精確 revision 的 `artifact.accept`。獨立審查無 findings；整合 B1／B2
   119 cases 通過。原工作線的 Python 3.13 B1 instrumentation stub 曾漏 optional keyword，僅修 fixture
   signature 後通過；未抹去先前失敗。不標記工作完成或交付，UI 仍需接入。
-- Bulk approval `afa9161`：明確選定 preview、原 answer／permissions children、逐項 partial receipts、
+- Bulk approval：明確選定 preview、原 answer／permissions children、逐項 partial receipts、
   送出前重新核對 prompt／owner／取消狀態。獨立審查無 production findings；同一 focused regression set
-  Python 3.13／3.10 各 753 passed。`7732a1a` 依 child deadline 限制 parent polling，71 focused
+  Python 3.13／3.10 各 753 passed。後續修正依 child deadline 限制 parent polling，71 focused
   cases 在兩版本均通過，明確取消／恢復仍立即喚醒。原內部 deferred raise 保持停用；公開入口缺 preview 時拒絕。
 - B2／bulk／canonical `.7` 的整合 123 cases 通過；API/MCP/RPC unions 與 generated skills 經獨立審查。
   本機後端驗證使用獨立 `/dev/shm` Git／bytes／SQLite fixtures 避開磁碟排程壅塞，並非斷電持久性證明。
   最後候選仍須完整 checks、exact-head CI、Windows packaging；installer 尚未 pin 本輪候選。
-- Session 整理 `c6c148a`：依記錄中的 host／workspace 分組、已載入範圍搜尋與筆數、compact rows，
+- Session 整理：依記錄中的 host／workspace 分組、已載入範圍搜尋與筆數、compact rows，
   詳情保留完整 ID／狀態證據，長名稱不溢出。獨立畫面／source review 修正 runtime fields stale
   仍顯示目前 streaming 的誤判。175 shared UI 在最後文字與展開細節調整前通過；最終 34 focused UI、
   12 state、真中央 MockBat observation fixture、desktop／browser builds 與 generated drift 通過。
@@ -303,7 +303,7 @@ cleanup、native files 及獨立 reviewer 的固定 bytes/revision。Local full 
 
 以下保留 #57 的權限工作紀錄：
 
-追蹤 [#57](https://github.com/teddashh/bat-agent-connector/issues/57)，基底 main `565a7d5`（#56）。
+追蹤 [#57](https://github.com/teddashh/bat-agent-connector/issues/57)，基底 main `da66c54`（#56）。
 R01 `session.permissions` 接中央 authority，Claude／Codex 每個 setting 保存 intent／receipt，
 保留 task incarnation／control version、confinement 與 host policy；sent error／lost ACK 不以相符
 metadata 當成功證據。共用 UI 只對 positively managed 且 action／write scope 支援的 session 顯示控制，
@@ -315,19 +315,19 @@ Canonical workflow 為 `2026-10-08.6`；最新候選 SHA、exact-head CI、peer 
 
 ## 上一輪續作（#56 已合併）
 
-候選 `867864b75cf2cf1898ce5b5ddedcdd6308003b76` 已合併為 `565a7d57074f6628b5ef9cecec6cc9eb5b56c1e6`，
+候選 `58b8ef69e92a1f506437bb56c2086fc8ac92582e` 已合併為 `da66c545120c1b5fb2703277ae6c0e180c309c46`，
 tree 完全相同。Python 3.10–3.13 各 **2370 passed／33 skipped**；101 UI、8 state、20 Windows／21 Linux Rust、
 六組 actual-central fixtures 與 Windows／Linux unsigned packages 通過。
 收斂證據見 [#55](https://github.com/teddashh/bat-agent-connector/issues/55#issuecomment-6072185401)。
 
-追蹤 [#55](https://github.com/teddashh/bat-agent-connector/issues/55)，基底 main `0c7c8fb`。
+追蹤 [#55](https://github.com/teddashh/bat-agent-connector/issues/55)，基底 main `1485eff`。
 以下三個提交已整合到同一候選工作線；最新整組 CI、合併與 installer pin 證據見該 issue 關聯 PR。
 
 | 包 | 提交與行為 | 這次 fixture／review 證據 |
 | --- | --- | --- |
-| R01 | `c7525c3` + `57de020`：legacy send／continue／answer 共用 durable operations；原 caller、完整 session/prompt、message ID、queue、dont_ask_again、完整 receipt 與 no-key 語意保留 | 94 個新案例含真 HTTP/MCP/CLI、lost ACK／restart、task final-frame、無 token／owner 拒絕。3.13 focused 曾 590 pass／1 個既有 verifier 5 秒進入等待 timeout；未改原碼的 12-case family 重跑通過，不當作 full 綠燈。3.10 同組 591 通過；peer 發現 receipt 漏 status reason，57de020 修補後 controls/interrupt 154 個案例兩 Python 版本均通過。 |
-| R05 B1 UI | `a866510`：共用 browser／Tauri remote-file preview/capture；明示 host、完整 manual session ID 與相對路徑；保存原 intent/key 並明確加入附件草稿 | 101 UI（含 27 新 capture）、8 state、21 Linux Rust、fmt/Clippy/release check、真中央 temporary-source fixture；bytes/index/refs 不變、零 BAT writes。獨立 exact-head review 無 findings。 |
-| Legacy removal | `2fc8fd8`：人工／task policy 後停用 unsafe `worktree_remove`，回 `LEGACY_WORKTREE_REMOVE_DISABLED`；改用既有 reviewed cleanup | 基底 active-successor regression 重現；所有 override 零 rehydrate/remove；canonical cleanup shared consumer 拒絕與 eligible removal 仍測到。Focused 3.13 112 通過；新增 apply 斷言原預期錯誤，改為既有 PREVIEW_BLOCKED 拒絕後兩 Python 版本 exact case 通過。 |
+| R01 | `041d907` + `7440a58`：legacy send／continue／answer 共用 durable operations；原 caller、完整 session/prompt、message ID、queue、dont_ask_again、完整 receipt 與 no-key 語意保留 | 94 個新案例含真 HTTP/MCP/CLI、lost ACK／restart、task final-frame、無 token／owner 拒絕。3.13 focused 曾 590 pass／1 個既有 verifier 5 秒進入等待 timeout；未改原碼的 12-case family 重跑通過，不當作 full 綠燈。3.10 同組 591 通過；peer 發現 receipt 漏 status reason，7440a58 修補後 controls/interrupt 154 個案例兩 Python 版本均通過。 |
+| R05 B1 UI | `d776434`：共用 browser／Tauri remote-file preview/capture；明示 host、完整 manual session ID 與相對路徑；保存原 intent/key 並明確加入附件草稿 | 101 UI（含 27 新 capture）、8 state、21 Linux Rust、fmt/Clippy/release check、真中央 temporary-source fixture；bytes/index/refs 不變、零 BAT writes。獨立 exact-head review 無 findings。 |
+| Legacy removal | `2b2f4d5`：人工／task policy 後停用 unsafe `worktree_remove`，回 `LEGACY_WORKTREE_REMOVE_DISABLED`；改用既有 reviewed cleanup | 基底 active-successor regression 重現；所有 override 零 rehydrate/remove；canonical cleanup shared consumer 拒絕與 eligible removal 仍測到。Focused 3.13 112 通過；新增 apply 斷言原預期錯誤，改為既有 PREVIEW_BLOCKED 拒絕後兩 Python 版本 exact case 通過。 |
 
 UI 曾有 100 pass／1 timeout：不支援 capture 的 session 過早建立隱藏 summary；修為 positively manual 且 capability 支援才掛載，最後整組 101 通過。
 兩個既有 MCP fixtures 已改用 caller token 並只提供一種 pending prompt，保留原 task command assertions，另驗 operation actor/binding。
@@ -337,11 +337,11 @@ Desktop CI 現在也跑六組 actual-central fixtures，保存合成 UI 證據�
 
 ## 本輪收斂結果（2026-10-08 23:26 UTC）
 
-- 公開 repo 已合併 #35、#36、#37、#38、#42–#51；產品整合 main 為 `6d88f4d0f72c9c5f363962e00c8fdbbaf37082c7`（#51）。
+- 公開 repo 已合併 #35、#36、#37、#38、#42–#51；產品整合 main 為 `56cc159149873ff0ba2a6a30d54cb4a587d5d636`（#51）。
   #39 importer 關閉且保留 branch，沒有合入。Issue #32 的六項 Delivery findings 已隨 #47 合併並關閉。
-- 固定候選 `e634c3067e0ba1761336f2bb02360281f9f8e93d` 的 [Python CI](https://github.com/teddashh/bat-agent-connector/actions/runs/37857510798)：3.10、3.11、3.12、3.13 **各 2264 passed / 33 skipped**，Ruff、generated skills、secret scan 通過。
+- 固定候選 `3ed2c0bcf17de00cae40eae60dc23f3881121831` 的 [Python CI](https://github.com/teddashh/bat-agent-connector/actions/runs/37857510798)：3.10、3.11、3.12、3.13 **各 2264 passed / 33 skipped**，Ruff、generated skills、secret scan 通過。
   [Desktop CI](https://github.com/teddashh/bat-agent-connector/actions/runs/37857510691)：Windows NSIS、Linux deb、74 shared UI、8 state tests 通過；Rust Windows 19、Linux 20 tests 通過，Windows 包含真正 system PowerShell 子程序 fixture。
-- 產品整合 commit `6d88f4d` 的 Git tree 與已測候選完全相同：`c89ee4c6b09b74d08f71459c405c96c2e76f2064`。
+- 合併當時已核對產品整合來源與已測候選的 Git tree 完全相同；此為歷史比對，不是重寫後 commit 的新 CI 或套件證據。
   本次收斂文件是後續 docs-only 更新，未更動該 runtime/build/skill source，沒有另宣稱文件 head 跑過一次 full suite。
 - 獨立審查修正了 artifact scalar admission、deployment cursor bounds、interrupt history prefix binding、capture replay/control credential binding、installer YAML 與 concurrent config preservation。
   先前 full/CI failures 均保留；#48/#49/#50 的舊 fixture failures 已由 #51 的 canonical-source/data-step 修正及整組 CI 覆蓋，未把舊紅燈改稱綠燈。
@@ -354,13 +354,13 @@ Desktop CI 現在也跑六組 actual-central fixtures，保存合成 UI 證據�
 
 | 來源 | 接手時 remote head | 狀態及下一步 |
 | --- | --- | --- |
-| #35 observation | `1c27371` | CI 綠；worker 修無資料時 relations cursor 驗證，完成後審查與整合；legacy reviewer root/policy 一致性待核對 |
-| #36 operations Part A | `d51290b` | CI 綠但不是最新修正；worker 已有 `c9c5a2e` pause/verifier 修正，內部 failover authority 尚在跑 |
-| #37 confinement | `d03fc1f` | 衝突、無 CI；worker 修 Python 啟動前依賴完整性與 pre-send rollback；須累加 #36 gate |
-| #38 cleanup Part A | `51bb65c` | 衝突、無 CI；worker 已有 `26fecc2`/`cad864f` 容量及移除 host 修正，retirement follow-up 尚在跑 |
-| #39 Hub import | `0018b58` | 明確排除，不合併、不作依賴；通用 project/work-item 已在 main |
-| Delivery Part B（local） | `b2e2050` | 既有已審成果需在 #35/#36 後整合；data step 3、history adapter、owner lease、固定 UI key 等 pending notes 仍適用 |
-| Artifacts Part A（local） | `3c59f4f` | 保留已有成果；在 confinement/cleanup 後整合 exact replica manifest，無 Hub import 依賴 |
+| #35 observation | `4e80b47` | CI 綠；worker 修無資料時 relations cursor 驗證，完成後審查與整合；legacy reviewer root/policy 一致性待核對 |
+| #36 operations Part A | `3dbef57` | CI 綠但不是最新修正；worker 已有 `5bf45c6` pause/verifier 修正，內部 failover authority 尚在跑 |
+| #37 confinement | `ba6a10c` | 衝突、無 CI；worker 修 Python 啟動前依賴完整性與 pre-send rollback；須累加 #36 gate |
+| #38 cleanup Part A | `242218c` | 衝突、無 CI；worker 已有 `5138b9d`/`1f18017` 容量及移除 host 修正，retirement follow-up 尚在跑 |
+| #39 Hub import | `09dc74a` | 明確排除，不合併、不作依賴；通用 project/work-item 已在 main |
+| Delivery Part B（local） | `2281498` | 既有已審成果需在 #35/#36 後整合；data step 3、history adapter、owner lease、固定 UI key 等 pending notes 仍適用 |
+| Artifacts Part A（local） | `e71ba65` | 保留已有成果；在 confinement/cleanup 後整合 exact replica manifest，無 Hub import 依賴 |
 
 四個舊 worker 接手時仍活著；不在它們的 dirty clones 同時編輯。Review 完成的 SHA
 才能作整合來源；查 remote head 並以 expected head 合併，避免合入未審的新 push。

@@ -2,7 +2,7 @@
 
 接續 [#56 的交接](2026-10-08-shared-product.md)；本輪追蹤
 [#57](https://github.com/teddashh/bat-agent-connector/issues/57)。基底 main
-`565a7d57074f6628b5ef9cecec6cc9eb5b56c1e6`。兩份計畫仍是同一產品，Tauri 與 browser
+`da66c545120c1b5fb2703277ae6c0e180c309c46`。兩份計畫仍是同一產品，Tauri 與 browser
 共用 frontend；Python authority、人工資源唯讀、不做 Hub importer 的決策不變。
 候選完整 SHA、最後 exact-head CI、peer review、merge 與 外部安裝版本 以 #57 關聯 PR
 及收斂留言為準。以下局部驗證不代替整組 CI，也不代表 installed/live 驗收。
@@ -38,29 +38,29 @@ Installer 仍要 pin 完整 code SHA，不能只比 package version；保留 dra
 
 ## 審查與局部驗證
 
-- UI `9340a345b4205c61569f490d1f724707f1ead603` 的三個 peer findings：明確 admission refusal
+- UI `f30d91b96a78fcc5a43facd9c08bb95622e1c3aa` 的三個 peer findings：明確 admission refusal
   鎖死草稿、receipt 未核對原 key、completion event 早於 POST reply 時留舊狀態。
-  `c196cc12c7a001f99518db62c142c01adf554fd8` 修正並通過獨立複查。
-  141 shared UI cases（40 permissions）在 fixture-only `17be7b0` 後通過，runtime 與 `c196cc1` 相同。
+  `aff4955a1fc0ac841b46438c1f118c2851fba3de` 修正並通過獨立複查。
+  141 shared UI cases（40 permissions）在 fixture-only `fb052ae` 後通過，runtime 與 `aff4955` 相同。
   8 state tests 先前通過，本輪未變更其 source／tests；兩個 builds／browser drift check 另有重跑。
-  後續 `3e747b2c36eb773e4b980dd734e42bedd0323daf` 加 confinement admission refusal 的明確 reset；
+  後續 `6afd8661e288746ee926f6981b7c134284804f63` 加 confinement admission refusal 的明確 reset；
   六個 targeted safety cases／builds 通過，獨立複查無 findings；完整整合 UI 以最後 CI 為準。
-- Actual-central fixture `17be7b052c50b0cdd3cc8c7cac4848f8b96682c3` 獨立 review 無 findings。
+- Actual-central fixture `fb052aed3a18c95d2b277de026fee9b65e3c9a59` 獨立 review 無 findings。
   它使用真 TaskDaemon HTTP/auth/OperationService/journal 與 generated UI；只有 host transport
   是 MockBat。Browser 在真 POST 完成後中斷 reply，驗原 key replay；另驗 policy admission 零 row／frame、
   streaming、明確新 key、accepted reload、Codex partial ACK 在 metadata 改變後仍 uncertain／零重送。
   它不代替 process-restart、Windows installed 或 live provider 證據。
-- Backend 首個固定 source `d9d6bd18c04f8910e7792e9dd76f526d1307d2bd` 的 62 個新 permissions
+- Backend 首個固定 source `6e86502d50782141c9cbb998607c67b25fd50142` 的 62 個新 permissions
   cases 在 Python 3.13 通過，含實際 journal 重開與 coordinator/operation 兩種恢復順序。
-  Follow-up `af5f31d1c57cde31de3562df49b78dcbc607c2c3` 的 permissions／修正 deferred cases 共 83 通過。
+  Follow-up `b1c43703ba903769cc72040f09cc063969af8785` 的 permissions／修正 deferred cases 共 83 通過。
   同 head 的 broader Python 3.13 focused set **906 passed**（4m44s）。
-  最後 backend `552c3fd06d2d983fefef61ad670067b969f8da5d` 的 targeted set **90 passed**；
+  最後 backend `16ffd88659c3a6d309756883a7b4ed60a342989e` 的 targeted set **90 passed**；
   補 confinement admission 403、needs_attention 全 ACK cancel receipt completion、unsupported engine
   與 admitted task owner（含原本沒有 owner）變動的零 frame 拒絕。
   該 exact head 獨立 peer review 無剩餘 findings。最後 broader focused、整合 fixture 與同一候選完整四版
   CI 結果見 #57；不把前一 head 的 scoped checks 冒稱為最後候選 full。
-  `552c3fd` 的 Python 3.10 broader set **913 passed**（4m54s）。
-- 整合 `91a025b0e5b98123bb489fab2f693c7d5392f415` 的 actual-central permissions fixture 通過，
+  `16ffd88` 的 Python 3.10 broader set **913 passed**（4m54s）。
+- 整合 `7b4e15001f980b9edec53143246cab3c0d0a2831` 的 actual-central permissions fixture 通過，
   明確取消 source/Python overrides，只有該 checkout 的 source、venv 與 generated assets；前後 worktree 乾淨。
   同 head 的 17 skill/principal/dashboard checks 通過；pytest 對既存 temporary garbage 目錄的清理
   留下三個警告，沒有 assertion failure。其後只有本交接的 evidence attribution 修正，runtime 未變；最後 CI
@@ -69,8 +69,8 @@ Installer 仍要 pin 完整 code SHA，不能只比 package version；保留 dra
   同樣抓到 streaming code mismatch；另查出 admission host-policy 變成 502 BAT_ERROR。
   已補明確 runtime code 與 admission 403 regression，未降低 assertions。Root 查出 durable 分支
   繞過原 audit/rate，亦已補回並驗 partial recovery 只新增未送 frame 的 attempt、hourly budget 不豁免。
-- 獨立 backend review 在 `d9d6bd1` 重現：guard-read/connect failure 在 `on_transport` 前零 setter
-  frames，卻把 step 留成 uncertain。`af5f31d` 以 PERMISSIONS_NOT_SENT 明確區分已知未送，
+- 獨立 backend review 在 `6e86502` 重現：guard-read/connect failure 在 `on_transport` 前零 setter
+  frames，卻把 step 留成 uncertain。`b1c4370` 以 PERMISSIONS_NOT_SENT 明確區分已知未送，
   task command 拒絕且可由新 key 再試；另驗 task／standalone、connect／guard-read 與四種錯誤。
   真正 process crash 只有 intent、沒有邊界 evidence 時仍保守，不由零 mock frames 推論可重送。
 - Broader 3.13 首輪到 541 passed 後有三個 test-only field mismatch：更新的 historical deferred

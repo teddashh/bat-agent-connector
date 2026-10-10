@@ -103,8 +103,8 @@ parts.append(
     '</aside></div><div class="release-note">'
     + bi("Development preview", "開發預覽", "strong")
     + bi(
-        "This source version includes bundled local central and guided setup from PR #81. Match the package source commit to its successful build and validation records.",
-        "這版原始碼包含 PR #81 引入的打包本機中央與引導設定；請核對套件來源 commit、成功建置及驗證紀錄。",
+        "This source version includes bundled local central and guided setup. Choose a successful build from the current public main history and match its package source commit and validation records.",
+        "這版原始碼包含打包本機中央與引導設定；請選目前公開 main 歷史的成功建置，核對套件來源 commit 與驗證紀錄。",
     )
     + link("#status", "See readiness", "查看交付現況")
     + "</div></section>"
@@ -416,7 +416,7 @@ parts.append(
     '</div><div class="actions">'
     + link(repo + "/blob/main/docs/windows.md", "Windows guide & resources", "Windows 使用與資源", "button secondary lang-en")
     + link(repo + "/blob/main/docs/windows.zh-TW.md", "Windows guide & resources", "Windows 使用與資源", "button secondary lang-zh")
-    + link(repo + "/actions/workflows/desktop.yml", "NSIS validation packages →", "NSIS 驗證安裝包 →", "text-link")
+    + link(repo + "/actions/workflows/desktop.yml?query=branch%3Amain", "NSIS validation packages →", "NSIS 驗證安裝包 →", "text-link")
     + link(repo + "/blob/main/desktop/fleet.example.json", "Fleet configuration example →", "Fleet 設定範例 →", "text-link")
     + "</div>"
     + bi("Credential Manager, native files and tray controls also remain. No private inventory or host configuration is published here.",
@@ -460,8 +460,8 @@ parts.append(
     '</ol><div class="install-current">'
     + bi("Choose a matching candidate artifact", "選擇相符的候選 artifact", "h3")
     + bi(
-        "Follow PR #81 checks to a desktop run and select the same source commit with a successful platform package job. Earlier release assets remain historical client packages; external central setup is an advanced option.",
-        "從 PR #81 檢查進入 desktop run，核對同一來源 commit 與成功的平台打包 job。舊 release 資產仍是先前的 client 包，外部中央設定保留為進階選項。",
+        "Open the desktop workflow on main, choose a successful run from the current public history, and match the source commit and installed-fixture records. Wait if its platform job is still building. External central setup remains an advanced option.",
+        "開啟 main 的 desktop workflow，選目前公開歷史的成功 run，核對來源 commit 與安裝 fixture 紀錄；若平台 job 還在建置，請等成功。外部中央設定仍是進階選項。",
         "p",
     )
     + '<div class="actions">'
@@ -519,7 +519,7 @@ for e, z, a, az, c, cz in platforms:
 parts.append(
     '</tbody></table></div><div class="actions">'
     + link(
-        repo + "/pull/81/checks",
+        repo + "/actions/workflows/desktop.yml?query=branch%3Amain",
         "Find matching candidate packages",
         "查找相符候選安裝包",
         "button secondary",
@@ -583,8 +583,8 @@ parts.append(
         "交付現況與證據",
         "Implementation and evidence, kept separate.",
         "實作、檢查與實際環境分開記錄。",
-        "Implementation introduced in PR #81 · source, package validation and release assets are recorded separately.",
-        "PR #81 引入的實作 · 原始碼、套件驗證與 release 資產分開記錄。",
+        "Current public source · source, package validation and release assets are recorded separately.",
+        "目前公開原始碼 · 原始碼、套件驗證與 release 資產分開記錄。",
     )
     + '<dl class="readiness">'
 )
@@ -598,8 +598,8 @@ for label, lz, en, zh in [
     (
         "Validation records",
         "驗證紀錄",
-        "The linked checks record Python, shared UI and platform package validation by source commit. Match them to your package; older release results do not establish this version. Controlled fixtures do not stand in for a real user environment.",
-        "檢查頁依來源 commit 記錄 Python、共用 UI 與各平台套件驗證。請核對所用套件，不沿用舊 release 證據；受控 fixture 不取代使用者實際環境。",
+        "Use current main checks for Python, shared UI and platform package validation. Match the exact source commit to your package; historical runs do not validate a new build. Controlled fixtures do not stand in for a real user environment.",
+        "請從目前 main 的檢查核對 Python、共用 UI 與各平台套件驗證。來源 commit 須與套件相同，歷史 run 不代表新建置已驗證；受控 fixture 不取代使用者實際環境。",
     ),
     (
         "Excluded from this delivery",
@@ -611,8 +611,8 @@ for label, lz, en, zh in [
     parts.append("<div>" + bi(label, lz, "dt") + bi(en, zh, "dd") + "</div>")
 parts.append(
     '</dl><div class="evidence-links">'
-    + link(repo + "/pull/81/checks", "Candidate checks ↗", "候選檢查 ↗")
-    + link(repo + "/actions/workflows/desktop.yml", "Matching desktop artifacts ↗", "核對桌面 artifacts ↗")
+    + link(repo + "/actions?query=branch%3Amain", "Current main checks ↗", "目前 main 檢查 ↗")
+    + link(repo + "/actions/workflows/desktop.yml?query=branch%3Amain", "Matching desktop artifacts ↗", "核對桌面 artifacts ↗")
     + link(repo + "/blob/main/docs/product/acceptance-v2.md", "Acceptance matrix ↗", "驗收矩陣 ↗")
     + "</div></section>"
 )

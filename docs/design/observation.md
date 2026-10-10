@@ -13,20 +13,20 @@ actor。事件證據來源為 `operations.actor`，不是繼承當下 RPC 的驗
 
 | 來源 | 固定版本與本規格使用處 |
 |---|---|
-| Connector | `5e8e41696ebc6a1a9d3ea92ddb7a1d338537ca1b`，本工作開始時的 `HEAD` 與 `origin/main`；branch 為 `feat/observation`。套件版本仍為 `0.2.4`。本文件中的「現有」均指這個 commit。 |
-| Delivery Part A adapter | Rebase 基準 `0c13601a7316a581fc6a4a504de37035b870ee4d`（#34）。已接讀 `pr_merge_previews`、`merge.verify` step receipt 與 `pr_metadata_settlements`；其 DDL 不占資料步驟編號。 |
-| Delivery acknowledged-conflict adapter | 本輪 rebase 基準 `200636f9bcc5d5bd13b3f2963fe812ff58c0645a`（#40）。接讀 acknowledged PATCH 的 conflict settlement，原 metadata control flow 不變。 |
-| Worktree relations 修正 | `eff252e`（#35 的審查基準）。補 seq binding intervals，固定 relations 的 as_of；不改已核准的 Part A/B、worktree ID 或資料步驟編號。 |
-| History role 摘要修正 | `7001934`（#35 的審查基準）。補遞迴摘要的 role 與下列有限 metadata；不改寫 journal 事實或資料步驟。 |
-| Relation event links 修正 | `38986e1`（#35 的審查基準）。具名 relation 事件只掛自己，execution fan-out 取原 seq 的有效 relation；live／版本 1 replay 使用同一規則。 |
-| Saved fact time 修正 | `a48dba3`（#35 的審查基準）。沒有原 event seq 的回填事實以自己的時間定位，保留 task execution link；不改 live projection，不 rebase。 |
-| Relation closure body 修正 | `a48dba3`（#35 的審查基準），接續 saved-fact 修正 `ad4d668`。新 relation 事件與同 seq revision 使用同一完整 body；legacy closure 重建 command 終點，不猜關閉時間。 |
-| Operation refs position 修正 | `f415cfb`（#35 的審查基準）。Operation event seq 與 resource linked_at_seq 都受 caller 的位置限制；checkpoint runs 也需要當時已存在的證據。不 rebase、不新增資料步驟。 |
-| Field freshness 事件修正 | `96a0b1c`（#35 的審查基準）。Session 值相同但 meta freshness 改變仍寫 update；不 rebase、不新增 event kind 或資料步驟。 |
-| Summary／unknown occurrence 修正 | `70f9bff`（#35 的審查基準）。遞迴摘要限制 reason 為固定 enum、移除其他 prose 入口；顯式 unknown occurrence 不以 migration 時間符合查詢。不 rebase、不新增資料步驟。 |
-| Worktree maker 一致性修正 | `e21d958`（#35 的審查基準）。Registry 身分與 ownership classifier 共用 connector predicate 與 creation-root walk，涵蓋 legacy batc/ branch；不 rebase、不新增資料步驟。 |
-| Creation-root carrier 修正 | `7cdf848`（#35 的審查基準）。Parent 只有在 child 共用 carrier 時才回溯；fallback 與 policy 共用同一 parent rule，main-checkout successor 不繼承舊 worktree。不 rebase、不新增資料步驟。 |
-| Cursor key 修正 | `1c27371`（#35 的審查基準）。History／relations 共用 cursor decoder，任何 journal read 前先驗 key；空結果與全部被 filters 排除時也回相同 INVALID_CURSOR。不 rebase、不新增資料步驟。 |
+| Connector | `566eba6b63e49eeca38383f4029a3a7abec98801`，本工作開始時的 `HEAD` 與 `origin/main`；branch 為 `feat/observation`。套件版本仍為 `0.2.4`。本文件中的「現有」均指這個 commit。 |
+| Delivery Part A adapter | Rebase 基準 `208dd13d75f48e77915dda212ae84819ceef508e`（#34）。已接讀 `pr_merge_previews`、`merge.verify` step receipt 與 `pr_metadata_settlements`；其 DDL 不占資料步驟編號。 |
+| Delivery acknowledged-conflict adapter | 本輪 rebase 基準 `021b5969e0c1090db15b35b9a461055d4519be4a`（#40）。接讀 acknowledged PATCH 的 conflict settlement，原 metadata control flow 不變。 |
+| Worktree relations 修正 | `619cb2e`（#35 的審查基準）。補 seq binding intervals，固定 relations 的 as_of；不改已核准的 Part A/B、worktree ID 或資料步驟編號。 |
+| History role 摘要修正 | `bb02099`（#35 的審查基準）。補遞迴摘要的 role 與下列有限 metadata；不改寫 journal 事實或資料步驟。 |
+| Relation event links 修正 | `a23f503`（#35 的審查基準）。具名 relation 事件只掛自己，execution fan-out 取原 seq 的有效 relation；live／版本 1 replay 使用同一規則。 |
+| Saved fact time 修正 | `79b04fe`（#35 的審查基準）。沒有原 event seq 的回填事實以自己的時間定位，保留 task execution link；不改 live projection，不 rebase。 |
+| Relation closure body 修正 | `79b04fe`（#35 的審查基準），接續 saved-fact 修正 `44f6ad5`。新 relation 事件與同 seq revision 使用同一完整 body；legacy closure 重建 command 終點，不猜關閉時間。 |
+| Operation refs position 修正 | `3841959`（#35 的審查基準）。Operation event seq 與 resource linked_at_seq 都受 caller 的位置限制；checkpoint runs 也需要當時已存在的證據。不 rebase、不新增資料步驟。 |
+| Field freshness 事件修正 | `a133f9c`（#35 的審查基準）。Session 值相同但 meta freshness 改變仍寫 update；不 rebase、不新增 event kind 或資料步驟。 |
+| Summary／unknown occurrence 修正 | `2e404ee`（#35 的審查基準）。遞迴摘要限制 reason 為固定 enum、移除其他 prose 入口；顯式 unknown occurrence 不以 migration 時間符合查詢。不 rebase、不新增資料步驟。 |
+| Worktree maker 一致性修正 | `8efd987`（#35 的審查基準）。Registry 身分與 ownership classifier 共用 connector predicate 與 creation-root walk，涵蓋 legacy batc/ branch；不 rebase、不新增資料步驟。 |
+| Creation-root carrier 修正 | `fbfb75a`（#35 的審查基準）。Parent 只有在 child 共用 carrier 時才回溯；fallback 與 policy 共用同一 parent rule，main-checkout successor 不繼承舊 worktree。不 rebase、不新增資料步驟。 |
+| Cursor key 修正 | `4e80b47`（#35 的審查基準）。History／relations 共用 cursor decoder，任何 journal read 前先驗 key；空結果與全部被 filters 排除時也回相同 INVALID_CURSOR。不 rebase、不新增資料步驟。 |
 | 計畫 | 本輪以 Tauri 校正計畫 v2.0（2026-10-08）及 product/realignment-v2 為準；cursor 修正對應 v2 §14、B01/B02。原 Part A 的 v1 章節引用保留為歷史對照，不複製私有計畫。中央 Python backend 保留，Hub importer 不在範圍，也不是依賴。 |
 | BAT | `b7419892fbc9946799b64cca24c2ec8c7fa15c42`；不代表每台主機都已安裝此版，實際 `serverVersion` 另存於掃描證據。 |
 
@@ -130,7 +130,7 @@ Phase 2 在既有 journal 寫入點補 `relation.opened`、`relation.closed`、`
 
 Task 的共同里程碑仍可掛當時所有有效 relations：只限沒有 command／branch 的 `task.*` 事件，例如 state、paused、resumed，不含 relation.*。用 `relation_revisions` 在該 seq 以前（含該 seq）的最後一份 revision，而非目前 mutable body；必須已在事件前出現，status 不是 closed，已知 start_seq < event.seq，且 end_seq 為 null 或 >= event.seq。Terminal task 的事件先掛當時仍開啟的 relations，再各自送具名 closure；之前已關閉的 session 不再收到後續里程碑。Legacy start_seq=null 不代表一直存在，以較早的 revision seq 證明當時已有這段關係。
 
-同一 seq 規則也用於 `_refs(kind="task")` 的 live 寫入查詢：operation 的 task sources、integration preview sources／receipts、work-item task links/unlinks；不能把已結束的參與者加回新事件。Live projection 維持 `a48dba3` 的規則。Inventory 的 `_memberships()` 是目錄查詢，仍保留曾參與 task 的 sessions 作 current/history work-item membership；它不寫事件，也不承諾 as_of snapshot，與 projection 的事件歸屬不同。
+同一 seq 規則也用於 `_refs(kind="task")` 的 live 寫入查詢：operation 的 task sources、integration preview sources／receipts、work-item task links/unlinks；不能把已結束的參與者加回新事件。Live projection 維持 `79b04fe` 的規則。Inventory 的 `_memberships()` 是目錄查詢，仍保留曾參與 task 的 sessions 作 current/history work-item membership；它不寫事件，也不承諾 as_of snapshot，與 projection 的事件歸屬不同。
 
 沒有原 event seq 的 snapshot 以該列自己的時間定位，不使用 migration 當時的 active relations。欄位如下；沒有可用的指定欄位時，不以最新 updated_at 或其他時間補猜。
 

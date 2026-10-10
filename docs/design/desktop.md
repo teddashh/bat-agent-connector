@@ -1,6 +1,6 @@
 # Desktop foundation (R02)
 
-This first slice packages the existing Dashboard in Tauri 2. It reads and operates the existing central Connector; it does not start a Python daemon, own tunnels, or maintain a task journal. The original colors, CSS, DOM helpers, forms, checkpoint flow, delivery flow and operation envelopes are reused from the Dashboard at `2568520`.
+This first slice packages the existing Dashboard in Tauri 2. It reads and operates the existing central Connector; it does not start a Python daemon, own tunnels, or maintain a task journal. The original colors, CSS, DOM helpers, forms, checkpoint flow, delivery flow and operation envelopes are reused from the Dashboard at `224bc7e`.
 
 ## One frontend
 

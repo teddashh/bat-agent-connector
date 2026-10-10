@@ -4,7 +4,7 @@
 
 Windows Fleet is the local connection and startup layer inside Tauri. Python Connector / Task Service authorizes and dispatches work; BAT executes it on the selected host. The candidate desktop package includes a local Python central runtime. Joining an existing central, including one on Linux, remains an advanced option.
 
-The implementation introduced in [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) is included in this source version; that does not update previously published release assets. Older release assets are historical client packages. Follow [its checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks) to a desktop run, match the source commit, and download `desktop-Windows-unsigned` only from a successful Windows package job.
+Open the [desktop workflow on `main`](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml?query=branch%3Amain) and select a successful run from the current public history. Match the source commit and Windows installed-fixture records, then download `desktop-Windows-unsigned` from its successful Windows package job. Wait if that job is still building. Historical PR artifacts and earlier release assets are not the current download source.
 
 ## What runs where
 
@@ -50,6 +50,6 @@ For Tailscale sign-in, open the installed Tailscale app from its panel, sign in 
 | Startup and owner migration | [Migration](design/fleet-migration.md) · [Windows ownership](design/fleet-windows.md) |
 | Selected central service startup | [Fixed bootstrap recipe](design/fleet-bootstrap.md) |
 | Credential Manager, tray and native files | [Desktop client](design/desktop.md) · [file operations](design/native-files.md) |
-| Validation packages and installed fixtures | [Desktop CI](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) · [acceptance matrix](product/acceptance-v2.md) |
+| Validation packages and installed fixtures | [Desktop CI](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml?query=branch%3Amain) · [acceptance matrix](product/acceptance-v2.md) |
 
 Windows package/WebView fixtures, Fleet source tests and a user's real SSH / Tailscale / BAT environment are distinct evidence. Match validation records to the package source commit. Formal signing and production update channels are excluded from this delivery; full real-environment acceptance belongs to the user. Neither exclusion is a completed feature or test. Mac Dashboard support does not imply a Windows Fleet port.
