@@ -6,7 +6,6 @@ canonical bindings again, and operate on exact reviewed names. There is no direc
 from __future__ import annotations
 
 import base64
-import fcntl
 import hashlib
 import json
 import os
@@ -16,6 +15,9 @@ import stat
 import subprocess
 import sys
 import time
+
+if os.name != "nt":
+    import fcntl
 
 DEADLINE = float("inf")
 MUTATED = False

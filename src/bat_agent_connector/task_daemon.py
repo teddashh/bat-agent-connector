@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import hashlib
 import hmac
 import json
@@ -29,6 +28,7 @@ from . import (
     delivery,
     deployment,
     integration,
+    platform_files,
     pr_delivery,
     registry,
     service,
@@ -138,14 +138,13 @@ class TaskDaemon:
         self.journal.owner_valid = self._owns_fleet
         self.admin_token_path = self.journal.path.parent / "task-admin.token"
         try:
-            fd = os.open(self.admin_token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            fd = platform_files.open_private_file(self.admin_token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
             with os.fdopen(fd, "w") as fh:
                 fh.write(secrets.token_urlsafe(48))
         except FileExistsError:
             pass
-        if self.admin_token_path.stat().st_mode & 0o077:
-            raise ValueError("task admin token file must be mode 0600")
-        self._admin_token = self.admin_token_path.read_text().strip()
+        platform_files.check_private(self.admin_token_path)
+        self._admin_token = platform_files.read_private(self.admin_token_path, max_bytes=4096).decode().strip()
         if len(self._admin_token) < 32:
             raise ValueError("task admin token is invalid")
         self.fleet = Fleet(config, actor="task-service")
@@ -1059,10 +1058,10 @@ class TaskDaemon:
             return
         # One fleet/registry has one owner, even when candidates name different journals.
         path = registry.registry_path().parent / "task-daemon.lock"
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        platform_files.ensure_private_directory(path.parent)
+        fd = platform_files.open_private_file(path, os.O_RDWR | os.O_CREAT)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            platform_files.lock(fd, blocking=False)
         except BlockingIOError:
             os.close(fd)
             try:
@@ -1099,18 +1098,12 @@ class TaskDaemon:
 
     def _write_owner_pointer(self):
         pointer = registry.registry_path().parent / service.TASK_SERVICE_POINTER
-        tmp = pointer.with_suffix("." + secrets.token_hex(8) + ".tmp")
-        try:
-            with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as fh:
-                json.dump({"db_path": str(self.journal.path.resolve()), "pid": os.getpid(),
-                           "owner_id": self._owner_id, "endpoint": self._endpoint,
-                           "lease_path": str(pointer.parent / "task-daemon.lock")}, fh)
-            os.replace(tmp, pointer)
-        finally:
-            tmp.unlink(missing_ok=True)
+        platform_files.atomic_write(pointer, json.dumps({"db_path": str(self.journal.path.resolve()), "pid": os.getpid(),
+                               "owner_id": self._owner_id, "endpoint": self._endpoint,
+                               "lease_path": str(pointer.parent / "task-daemon.lock")}).encode())
 
     def release_owner(self):
         if self._lease_fd is not None:
-            fcntl.flock(self._lease_fd, fcntl.LOCK_UN)
+            platform_files.unlock(self._lease_fd)
             os.close(self._lease_fd)
             self._lease_fd = None
