@@ -42,6 +42,13 @@
 
 ## 固定決策（R00）
 
+2026-10-10 首次安裝補充：正式桌面包應自動建立產品所需的 runtime、中央背景服務、資料與
+個人身分，持續維持已選定連線；使用者可從系統匣／選單列點一下開啟 Dashboard 網頁。
+關網頁或 UI 不停止中央工作。連接既有中央是進階加入路徑，不是一般使用者的首次設定。
+BAT／GitHub 登入、信任與授權仍透過引導完成，不要求先裝 Python、手改 JSON 或理解 actor。
+這是必須補齊的產品要求，現有 client-only 驗證包尚未完成；詳見
+[Managed installation](../design/managed-installation.md)。Web／Tauri 仍共用同一中央與前端。
+
 2026-10-09 補充：Web 與 Tauri 都是持續支援的產品入口，共用 `desktop/src` 與中央
 Connector／Task Service。中央本身提供 Web 靜態介面及 API，不因關掉 Tauri 而停止工作。
 畫面與中央操作保持對齊，本機憑證、Fleet、系統匣及原生檔案能力依平台提供；

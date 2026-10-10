@@ -1,6 +1,7 @@
 /* Runs synchronously in <head> so the chosen language paints first (no flash). */
 (function () {
   var root = document.documentElement;
+  root.classList.add("js");
   function norm(value) {
     if (!value) return null;
     value = String(value).toLowerCase();
