@@ -12,6 +12,8 @@ import {conversationPanel} from "./conversation.js";
 import {composerShortcut} from "./composer-shortcut.js";
 import {treeInteractions} from "./tree-interactions.js";
 import {modelPreferencesPanel} from "./model-preferences.js";
+import {projectSkillsPanel} from "./project-skills.js";
+import {resultSourcesPanel} from "./result-sources.js";
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
@@ -2620,7 +2622,8 @@ async function viewProject(main, pid) {
       h("div", { class: "muted" }, h("a", { href: "#/projects" }, t("nav_projects")),
         ...data.path.flatMap(x => [" / ", h("a", { href: `#/project/${x.project_id}` }, x.name)])),
       h("h1", {}, p.name, " ", p.archived ? chip(t("archived"), "warn") : null),
-      p.description ? h("p", { class: "pre" }, p.description) : null,
+      p.description ? h("details", {}, h("summary", {}, t("description"), " · ", p.description.replace(/\s+/g, " ").slice(0, 140), p.description.length > 140 ? "…" : ""),
+        h("p", {class: "pre"}, p.description)) : null,
       h("div", { class: "actions" }, ...counts(p.counts), ...p.repositories.map(r => chip(r)),
         !p.archived && state.caps?.features?.project_dispatch?.version === 1 ? h("a", {class: "session-project-link", href: `#/dispatch/${pid}`}, t("dispatch_title")) : null,
         p.task_project ? chip(`Task Service: ${p.task_project}`) : null, may("manage") && !p.archived ? d.toggle : null),
@@ -2747,7 +2750,9 @@ async function viewWorkItem(main, wid) {
   const ref = h("input", { placeholder: t("link_ref_hint") });
   kind.onchange = () => { ref.placeholder = t("link_ref_" + kind.value); };
   kind.onchange();
-  main.append(manageNote() || "", notice, reading, panel);
+  const results = state.caps?.features?.work_item_results?.version === 1 ? resultSourcesPanel({h, t, api,
+    guard: () => assertView(connection), workItemId: wid, linkTarget, onEvents}) : null;
+  main.append(manageNote() || "", notice, reading, results?.box || "", panel);
   let displayedItem = null, renderQueue = Promise.resolve();
   const showReading = (w, progress) => {
     const readingSupported = state.caps?.features?.work_item_reads?.version === 1 && progress;
@@ -2829,7 +2834,9 @@ async function viewWorkItem(main, wid) {
         if (!ok && STALE.includes(lastFailure)) draft = params;
         if (ok || draft) render();
       } }, t("save"))));
-    const section = (label, text) => text ? [h("h2", {}, label), h("div", { class: "panel pre" }, text)] : [];
+    const section = (label, text) => text ? [h("details", {class: "panel"},
+      h("summary", {}, label, " · ", text.replace(/\s+/g, " ").slice(0, 140), text.length > 140 ? "…" : ""),
+      h("div", {class: "pre"}, text))] : [];
     // steps: checking one is an edit like any other (an unchecked step reopens a done item)
     const setSteps = async (steps, added) => {
       if (await update({ steps }, `wi.steps.${wid}`) && added) newStep.value = "";
@@ -2854,7 +2861,7 @@ async function viewWorkItem(main, wid) {
     const linkRows = data.links.map(l => h("div", { class: "row" }, chip(t("link_" + l.kind)),
       h("div", { class: "grow" }, linkTarget(l), l.note ? h("div", { class: "muted" }, l.note) : null,
         h("div", { class: "muted" }, `${l.linked_by} · ${when(epoch(l.linked_at))}`)),
-      l.kind === "checkpoint" && l.target?.found && live ? continueFrom(w, l.ref, notice) : null,
+      l.kind === "checkpoint" && l.target?.found && live ? continueFrom(w, l.ref, notice, data.children) : null,
       live && may("manage") ? h("button", { class: "mini", title: t("remove"), "aria-label": t("remove"),
         onclick: () => link({ kind: l.kind, ref: l.ref, remove: true }, `wi.unlink.${wid}.${l.kind}.${l.ref}`) }, "×") : null));
     const brief = x => h("div", { class: "row" }, chip(t("wi_state_" + x.display_state)),
@@ -2887,12 +2894,13 @@ async function viewWorkItem(main, wid) {
     if (draft) { draft = null; d.open(); }
   };
   await render();
-  return liveReload(render, event => observationAffected("work_item", wid, event), refreshSafety);
+  const off = liveReload(render, event => observationAffected("work_item", wid, event), refreshSafety);
+  return () => {off?.(); results?.dispose();};
 }
 
 // Start agent work from a linked checkpoint, with this item's words as the instructions; the new operation is
 // linked back so the item lists the run.
-function continueFrom(w, checkpointId, notice) {
+function continueFrom(w, checkpointId, notice, children = []) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const text = [w.title, w.goal, w.request && `${t("request")}:\n${w.request}`, w.acceptance && `${t("acceptance")}:\n${w.acceptance}`,
     w.steps.length ? `${t("steps_title")}:\n${w.steps.map(s => `- [${s.done ? "x" : " "}] ${s.text}`).join("\n")}` : ""]
@@ -2926,7 +2934,10 @@ function continueFrom(w, checkpointId, notice) {
   } }, t("start_agent_work"));
   const note = confinementNote(w.links?.find(l => l.ref === checkpointId)?.target?.host, agent);
   api("GET", `/checkpoints/${encodeURIComponent(checkpointId)}`).then(x => note.setHost(x.checkpoint.host)).catch(() => {});
-  const d = drawer(note, instr, draft.box, h("div", { class: "actions" }, agent, go), out);
+  const unfinished = children.filter(child => child.display_state !== "done");
+  const caution = unfinished.length ? h("p", {class: "note warn"}, t("results_unfinished", {count: unfinished.length}), " ",
+    ...unfinished.flatMap((child, index) => [index ? " · " : "", h("a", {href: `#/item/${encodeURIComponent(child.work_item_id)}`}, child.title)])) : null;
+  const d = drawer(caution, note, instr, draft.box, h("div", { class: "actions" }, agent, go), out);
   // Starting needs start; linking the run back needs manage. Without both, nothing starts (an unlinked run is untracked).
   const why = !may("start") ? t("needs_start_scope") : !may("manage") ? t("needs_manage_scope") : null;
   const open = h("button", { class: "secondary", disabled: Boolean(why), title: why, onclick: async () => { d.toggle.click();
@@ -3398,14 +3409,20 @@ async function route() {
     worktree: (main, id) => viewObservedResource(main, "worktree", id) };
   const off = await (views[name] || viewHome)(main, ...rest);
   if (mine !== generation) { if (off) off(); return; } // the user navigated away while this view loaded
-  let preferences;
+  let preferences, skills;
   if (name === "settings" && state.caps?.features?.host_preferences?.version === 1) {
     const connection = {epoch: state.epoch, namespace: state.namespace, generation};
     preferences = modelPreferencesPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection), submit,
       storageKey: `batc.model-preferences.${connection.namespace}`, onEvents});
     main.append(preferences.box);
   }
-  teardown = () => {off?.(); preferences?.dispose();};
+  if (name === "project" && state.caps?.features?.project_skills?.version === 1) {
+    const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+    skills = projectSkillsPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection), submit,
+      projectId: rest[0], storageKey: `batc.project-skills.${connection.namespace}.${rest[0]}`, onEvents});
+    main.append(skills.box);
+  }
+  teardown = () => {off?.(); preferences?.dispose(); skills?.dispose();};
   state.viewReady = true;
 }
 
