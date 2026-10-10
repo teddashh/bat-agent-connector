@@ -9,17 +9,25 @@ import {chromium, expect} from '@playwright/test';
 const backend = resolve('..');
 const python = process.env.BATC_DISPATCH_PYTHON || resolve(backend, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
 const child = spawn(python, [resolve('tests/repository-start-fixture.py')], {cwd: backend,
-  env: {...process.env, PYTHONPATH: [resolve(backend, 'src'), backend].join(delimiter)}, stdio: ['pipe', 'pipe', 'inherit']});
+  env: {...process.env, BATC_DISPATCH_CREATE_PROJECT: '1', PYTHONPATH: [resolve(backend, 'src'), backend].join(delimiter)}, stdio: ['pipe', 'pipe', 'inherit']});
 const stopped = once(child, 'exit'), lines = createInterface({input: child.stdout})[Symbol.asyncIterator]();
 const next = async () => {const line = await lines.next(); if (line.done) throw Error('Dispatch fixture stopped'); return JSON.parse(line.value);};
 const control = async command => {child.stdin.write(JSON.stringify(command)+'\n'); return next();};
 const browser = await chromium.launch();
 try {
   const fixture = await next(), origin = `http://127.0.0.1:${fixture.port}`;
-  const project = await control({action: 'prepare-project'}), posts = [], errors = [];
+  const posts = [], errors = [];
   const web = await browser.newPage(), desktop = await browser.newPage();
   for (const page of [web, desktop]) page.on('pageerror', e => errors.push(e.message));
   await web.addInitScript(token => sessionStorage.setItem('batc.dashboard.token', token), fixture.token);
+  await web.goto(origin+'/dashboard/#/projects');
+  await web.getByRole('textbox', {name: 'New project name'}).fill('First project');
+  const repository = web.getByRole('combobox', {name: 'Repository for dispatch (optional)'});
+  await expect(repository).toHaveValue('');
+  await repository.selectOption('o/r');
+  await web.getByRole('textbox', {name: 'New project name'}).press('Enter');
+  await expect(web).toHaveURL(/#\/project\/prj_[a-f0-9]{20}$/);
+  const project = await control({action: 'prepare-project', project_id: web.url().split('/').at(-1)});
   const central = async input => {
     if (input.method === 'POST' && input.path.startsWith('/operations')) posts.push(input);
     const response = await fetch(origin + '/api/v1' + input.path, {method: input.method,
@@ -54,7 +62,7 @@ try {
     await page.getByRole('link', {name: 'Quick project dispatch'}).click();
     const form = page.locator('[data-published-start]');
     await expect(form.getByRole('combobox', {name: 'Repository · host · workspace ID'})).toHaveValue(JSON.stringify({repository:'o/r',host:'h1',workspace_id:'ws-1'}));
-    await form.getByRole('textbox', {name: 'Published branch ref'}).fill('refs/heads/main');
+    await form.getByRole('textbox', {name: 'Published branch ref'}).fill('main');
     await form.getByRole('button', {name: 'Preview published version'}).click();
     await expect(form.locator('[data-published-preview]')).toContainText(fixture.sha);
     await form.getByRole('textbox', {name: 'Original instructions', exact: true}).fill(original);
@@ -94,7 +102,7 @@ try {
     await expect(work).not.toContainText('done');
     await work.getByRole('link', {name: 'Review result and add to PR'}).click();
     await expect(page.getByPlaceholder('owner/name')).toHaveValue('o/r');
-    await page.getByPlaceholder('123').fill('1');
+    await page.getByRole('textbox', {name: 'Repository or GitHub PR URL'}).fill('https://github.com/o/r/pull/1');
     await page.getByRole('button', {name: 'Load PR', exact: true}).click();
     const source = page.locator('[data-delivery-source="'+operations[index]+'"]');
     await expect(source).toContainText('not streaming');
@@ -111,7 +119,7 @@ try {
   await control({action: 'verify-delivery', results: delivered.results});
   assert.equal(await desktop.evaluate(() => JSON.stringify({...localStorage, ...sessionStorage}).includes('batc.dashboard.token')), false);
   assert.deepEqual(errors, []);
-  console.log('Real central project dispatch/delivery passed: HTTP and IPC preserve project/version, fixed GitHub head, model, attachment bytes and lost-reply keys; both original executions land in one fixture PR with exact source receipts; manual checkout stays unchanged and no redundant task or start is created.');
+  console.log('Real central project creation/dispatch/delivery passed: a new project selects its configured repository in the UI; HTTP and IPC preserve project/version, fixed GitHub head, model, attachment bytes and lost-reply keys; both original executions land in one fixture PR using a pasted PR link with exact source receipts; manual checkout stays unchanged and no redundant task or start is created.');
 } finally {
   await browser.close();
   if (child.exitCode === null && child.signalCode === null) child.stdin.end(JSON.stringify({action: 'stop'})+'\n');

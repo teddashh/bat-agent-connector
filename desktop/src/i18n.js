@@ -1,6 +1,20 @@
 // Display labels only. Logic and CSS never key on these strings (machine enums come from /api/v1).
 const STRINGS = {
   "zh-TW": {
+    connection_details: "連線詳細資訊與設定檔",
+    delivery_repository_input: "儲存庫或 GitHub PR 網址",
+    needs_manage_access: "目前帳號可以查看，但沒有編輯專案的權限。請向管理員取得具有專案管理權限的帳號，再到「連線」更換憑證。",
+    empty_next_work: "要開始新的工作，請選擇專案派工，或建立工作階段。",
+
+    start_dispatched: "已啟動",
+    session_access_unknown: "尚未確認這個工作階段的來源與管理權限。取得有效資料前，暫停操作。",
+    session_origin: "來源",
+    delivery_pr_number: "PR 編號",
+    delivery_choose_pr: "請填入儲存庫與 PR 編號，或貼上 GitHub PR 網址。",
+    delivery_pr_unavailable: "目前無法讀取這個 PR 的完整資料。請重新讀取。",
+    pub_branch_help: "輸入分支名稱，例如 main；也可貼上完整的 refs/heads/main。",
+    pub_branch_invalid: "分支名稱無效。請使用 main 或 feature/name，不接受 tag、commit 或其他 refs。",
+
     delivery_result_unverified: "成果尚未驗證", delivery_observed_at: "最後觀測：{time}", delivery_unobserved: "尚無活動觀測",
     delivery_source_context: "已帶入原工作的成果來源。請選擇 repository 與 PR，再加入預覽。",
     delivery_source_unavailable: "目前無法確認可整合的成果來源。",
@@ -610,6 +624,7 @@ const STRINGS = {
 
     nav_projects: "專案", projects_help: "專案與工作項目是 Connector 自己的紀錄：目標、需求原文、驗收、步驟，以及做這件事的 sessions、版本、操作與 PR。改名不會改 ID；排序與固定只影響顯示。",
     new_project_name: "新專案名稱", add_project: "新增", show_archived: "顯示已封存", no_projects: "還沒有專案。",
+    project_repository_optional: "派工儲存庫（選填）", project_repository_later: "稍後選擇",
     new_sub_project: "子專案名稱", rename: "改名", archive: "封存", restore: "復原", more: "更多", move_up: "上移",
     move_down: "下移", pin: "固定在上方", unpin: "取消固定", wi_done_of: "完成 {done}/{total}",
     wi_state_todo: "未開始", wi_state_doing: "進行中", wi_state_waiting: "等待中", wi_state_done: "已完成",
@@ -752,6 +767,20 @@ const STRINGS = {
     integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。",
   },
   en: {
+    connection_details: "Connection details and configuration file",
+    delivery_repository_input: "Repository or GitHub PR URL",
+    needs_manage_access: "This account can view projects but cannot edit them. Ask your administrator for project management access, then replace your credential under Connection.",
+    empty_next_work: "To begin new work, choose a project to dispatch from or start a session.",
+
+    start_dispatched: "Started",
+    session_access_unknown: "The origin and management permissions of this session have not been confirmed. Actions remain unavailable until valid information is received.",
+    session_origin: "Origin",
+    delivery_pr_number: "PR number",
+    delivery_choose_pr: "Enter a repository and PR number, or paste a GitHub PR URL.",
+    delivery_pr_unavailable: "The full details of this PR are unavailable. Load it again to retry.",
+    pub_branch_help: "Enter a branch name such as main, or a full ref such as refs/heads/main.",
+    pub_branch_invalid: "Enter a valid branch such as main or feature/name. Tags, commits and other refs are not supported.",
+
     delivery_result_unverified: "Result unverified", delivery_observed_at: "Last observed: {time}", delivery_unobserved: "No activity observation",
     delivery_source_context: "The original work's source is selected. Choose a repository and PR, then add it to the preview.",
     delivery_source_unavailable: "An eligible result source could not be confirmed.",
@@ -1347,6 +1376,7 @@ const STRINGS = {
       "request verbatim, acceptance, steps, and the sessions, checkpoints, operations and PRs that carried them. A " +
       "rename never changes an ID; order and pins only change the display.",
     new_project_name: "New project name", add_project: "Add", show_archived: "Show archived",
+    project_repository_optional: "Repository for dispatch (optional)", project_repository_later: "Choose later",
     no_projects: "No projects yet.", new_sub_project: "Sub-project name", rename: "Rename", archive: "Archive",
     restore: "Restore", more: "More", move_up: "Move up", move_down: "Move down", pin: "Pin to top", unpin: "Unpin",
     wi_done_of: "{done}/{total} done", wi_state_todo: "to do", wi_state_doing: "in progress",

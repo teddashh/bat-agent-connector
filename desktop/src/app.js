@@ -1,4 +1,5 @@
 import {attentionView} from "./attention.js";
+import {parsePullRequest} from "./delivery-input.js";
 import {sessionLabelsPanel, validLabels} from "./session-labels.js";
 import {readArtifactContent} from "./transport/artifact-content.ts";
 import {conversationPanel} from "./conversation.js";
@@ -606,7 +607,8 @@ function sessionRow(s) {
 }
 const epoch = x => (x ? new Date(x * 1000).toISOString() : "");
 function opStatus(op) {
-  return h("span", { class: `status-${op.status}` }, t("op_" + op.status));
+  const started = op.status === "succeeded" && ["session.start", "repository.continue"].includes(op.action);
+  return h("span", { class: `status-${op.status}` }, t(started ? "start_dispatched" : "op_" + op.status));
 }
 function opRow(op) {
   return h("div", { class: "row" },
@@ -1052,7 +1054,7 @@ async function viewSession(main, host, sid) {
   } }, t("interrupt"));
   const composer = h("div", {hidden: true}, box, h("div", { class: "actions" }, send, stop,
     h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
-  const readonly = h("p", { class: "note" }, t("read_only_note"));
+  const readonly = h("p", { class: "note" }, t("session_access_unknown"));
   let capture, permissions, batHandoff;
   const captureSlot = h("div"), permissionsSlot = h("div");
   const controls = h("div", { class: "panel" }, pending, readonly, composer, permissionsSlot, captureSlot, status);
@@ -1125,9 +1127,9 @@ async function viewSession(main, host, sid) {
     head.replaceChildren(h("h1", {}, row.title || sid), h("div", { class: "actions" }, ...sessionBadges(row)),
       h("dl", { class: "kv" },
         h("dt", {}, t("host")), h("dd", {}, h("a", {href: `#/host/${encodeURIComponent(host)}`}, row.host)), h("dt", {}, t("workspace")), h("dd", {}, row.workspace || ""),
-        h("dt", {}, "Session"), h("dd", {}, h("code", {}, row.session_id)),
+        h("dt", {}, t("sessions_label")), h("dd", {}, h("code", {}, row.session_id)),
         h("dt", {}, t("agent")), h("dd", {}, [row.agent_kind, row.model].filter(Boolean).join(" · ")),
-        h("dt", {}, "Provenance"), h("dd", {}, t("provenance_" + row.provenance)),
+        h("dt", {}, t("session_origin")), h("dd", {}, t("provenance_" + (['manual', 'connector_managed', 'unknown'].includes(row.provenance) ? row.provenance : 'unknown'))),
         h("dt", {}, t("observed")), h("dd", {}, observationTime(row.observed_at))), observationState(row), confinementDetails(row));
     if (!batHandoff) batHandoff = sessionBatPanel({h, t, guard: () => assertView(connection), session: () => row,
       storageKey: `batc.session-bat.${connection.namespace}.${JSON.stringify([host, sid])}`});
@@ -1163,6 +1165,7 @@ async function viewSession(main, host, sid) {
     }
     if (capture) capture.hidden = !manualSource;
     composer.hidden = !managed; readonly.hidden = managed;
+    readonly.textContent = t(row.provenance === "manual" ? "read_only_note" : "session_access_unknown");
     renderPending(); updateControls();
   };
   const loadObservation = async () => {
@@ -1306,9 +1309,15 @@ async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceReposi
   freshPage();
   const source = sourceHost && ["execution", "task_command"].includes(sourceKind) && sourceId
     ? {host: sourceHost, kind: sourceKind, id: sourceId} : null;
-  const repo = h("input", { placeholder: "owner/name", value: source ? sourceRepository || "" : sessionStorage.getItem("batc.repo") || "" });
-  const num = h("input", { placeholder: "123", inputmode: "numeric", size: 6, value: source ? "" : sessionStorage.getItem("batc.pr") || "" });
+  const repo = h("input", { "aria-label": t("delivery_repository_input"), placeholder: "owner/name", value: source ? sourceRepository || "" : sessionStorage.getItem("batc.repo") || "" });
+  const num = h("input", { "aria-label": t("delivery_pr_number"), placeholder: "123", inputmode: "numeric", size: 6, value: source ? "" : sessionStorage.getItem("batc.pr") || "" });
   const card = h("div", { class: "panel delivery-card" });
+  const inputStatus = h("p", {class: "muted", role: "status"});
+  const acceptLink = () => {
+    const pr = parsePullRequest(repo.value);
+    if (pr) {repo.value = pr.repository; num.value = pr.number;}
+  };
+  repo.addEventListener("change", acceptLink);
   const groups = new Map();
   for (const r of state.caps?.deploy_recipes || []) {
     const key = JSON.stringify([r.repository.toLowerCase(), r.environment]);
@@ -1321,20 +1330,25 @@ async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceReposi
   let selectedMethod = "";
   let reviewedPreview = null;
   main.append(h("h2", {}, t("dep_pull_request")),
-    h("div", { class: "filters delivery-controls" }, repo, num,
-      h("button", { class: "secondary", onclick: () => load() }, t("load_pr"))), card);
+    h("form", { class: "filters delivery-controls", onsubmit: event => {event.preventDefault(); acceptLink(); load();} },
+      h("label", {}, t("delivery_repository_input"), repo), h("label", {}, t("delivery_pr_number"), num),
+      h("button", { type: "submit", class: "secondary" }, t("load_pr"))), inputStatus, card);
   if (!source && !repo.value && state.caps?.repositories?.length) repo.value = state.caps.repositories[0].repository;
   const load = async (flash = null, fromEvent = false) => {
     const opens = drawerOpens;
     // Explicit PR loads only replace this card; another environment's open panel cannot hold them.
     const holdCard = () => card.querySelector(".drawer:not([hidden])") || (fromEvent && holdRender(true, opens));
     sessionStorage.setItem("batc.repo", repo.value); sessionStorage.setItem("batc.pr", num.value);
-    if (!repo.value || !/^\d+$/.test(num.value)) return;
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo.value) || !/^[1-9]\d{0,8}$/.test(num.value)) {
+      inputStatus.textContent = repo.value || num.value ? t("delivery_choose_pr") : ""; return;
+    }
+    inputStatus.textContent = "";
     try {
       const query = new URLSearchParams();
       if (selectedMethod) query.set("method", selectedMethod);
       if (fromEvent) query.set("from_event", "true");
       const pr = (await api("GET", `/repositories/${repo.value}/pulls/${num.value}?${query}`)).pull_request;
+      if (!pr?.merge_preview || !pr?.merge) throw new Error(t("delivery_pr_unavailable"));
       if (holdCard()) { idleReload = () => load(null, true); return; }
       const status = h("div", { "aria-live": "polite" });
       const target = { repository: pr.repository, pull_number: Number(pr.pull_number) };
@@ -2022,13 +2036,13 @@ function mergeRecovery(op) {
 
 function viewSettings(main) {
   if (nativeDesktop) return viewNativeSettings(main);
-  const input = h("input", { type: "password", autocomplete: "off", size: 40, placeholder: "batc_…" });
+  const input = h("input", { type: "password", autocomplete: "off", placeholder: "batc_…" });
   const remember = h("input", { type: "checkbox" });
   const info = h("p", { class: "muted" });
   if (state.caps) info.textContent = t("connected_as", { actor: state.caps.actor, scopes: state.caps.scopes.join(", ") });
   else if (state.connectionError) info.replaceChildren(errorBox(state.connectionError));
   main.append(h("h1", {}, t("nav_settings")), h("div", { class: "panel" },
-    h("label", {}, t("token")), h("div", { class: "filters" }, input,
+    h("div", { class: "filters" }, h("label", {class: "connection-token"}, t("token"), input),
       h("button", { class: "primary", onclick: async () => {
         disconnect();
         state.token = input.value.trim();
@@ -2095,12 +2109,14 @@ async function viewNativeSettings(main) {
   const mine = generation;
   const info = h("div", {"aria-live": "polite"});
   const details = h("dl", {class: "kv"});
+  const technicalDetails = h("dl", {class: "kv"});
   const setup = h("div", {"data-native-setup": "", hidden: true});
   const help = h("p", {class: "muted"}, t("desktop_credential_help"));
   const platform = h("p", {class: "muted"});
   const fleetRoot = h("div");
   const updateRoot = h("div");
   let disposeUpdates;
+  let firstConnection = false;
   const controls = [];
   const action = (kind, label, cls = "secondary") => {
     const button = h("button", {class: cls, disabled: true, onclick: () => {
@@ -2118,13 +2134,14 @@ async function viewNativeSettings(main) {
   const leave = action("disconnect", "disconnect");
   const actions = h("div", {class: "actions"}, connect, enroll, reload, leave);
   const saved = h("div", {}, h("p", {class: "muted"}, t("desktop_forget_help")), forget);
+  const connectionDetails = h("details", {}, h("summary", {}, t("connection_details")), technicalDetails, help);
+  const introduction = h("details", {}, h("summary", {}, t("delivery_setup_title")),
+    h("ol", {}, h("li", {}, t("delivery_setup_central")), h("li", {}, t("delivery_setup_identity")), h("li", {}, t("delivery_setup_mode"))));
+  const localDetails = h("details", {class: "panel"}, h("summary", {}, t("desktop_local")),
+    h("p", {class: "muted"}, t("desktop_dashboard_only")));
   main.append(h("h1", {}, t("nav_settings")), h("section", {class: "panel native-connection", "aria-label": t("desktop_connection")},
     h("h2", {}, t("desktop_connection")),
-    h("details", {open: !state.caps}, h("summary", {}, t("delivery_setup_title")),
-      h("ol", {}, h("li", {}, t("delivery_setup_central")), h("li", {}, t("delivery_setup_identity")), h("li", {}, t("delivery_setup_mode")))),
-    setup, details, help, platform, actions, info, saved),
-    h("div", {class: "panel"}, h("h2", {}, t("desktop_local")),
-      h("p", {class: "note"}, t("desktop_dashboard_only"))), fleetRoot, updateRoot);
+    setup, details, platform, actions, info, connectionDetails, introduction, saved), localDetails, fleetRoot, updateRoot);
   const showInfo = () => {
     info.replaceChildren();
     if (state.caps) info.append(h("p", {}, t("connected_as", {actor: state.caps.actor, scopes: state.caps.scopes.join(", ")})));
@@ -2140,7 +2157,12 @@ async function viewNativeSettings(main) {
     if (mine !== generation || !main.contains(details)) { disposeUpdates?.(); return; }
     const row = (label, value) => { if (value) details.append(h("dt", {}, t(label)), h("dd", {}, value)); };
     if (status.configuration_setup === true) {
+      firstConnection = true;
       setup.hidden = false;
+      details.hidden = true;
+      actions.hidden = true;
+      platform.hidden = true;
+      localDetails.hidden = true;
       const draft = state.nativeSetupDraft ||= {endpoint: "", expected_actor: ""};
       const endpoint = h("input", {type: "url", value: draft.endpoint, placeholder: "https://connector.example", required: true,
         maxlength: 512, disabled: state.nativeBusy, autocomplete: "off", oninput: event => {draft.endpoint = event.target.value;}});
@@ -2156,10 +2178,12 @@ async function viewNativeSettings(main) {
         h("div", {class: "capture-fields"}, h("label", {}, t("desktop_endpoint"), endpoint), h("label", {}, t("desktop_expected_actor"), actor)),
         h("p", {class: "muted"}, t("desktop_setup_origin")), h("div", {class: "actions"}, review));
       setup.append(form);
+      // Keep configuration recovery accessible without making it compete with the first step.
+      connectionDetails.append(h("div", {class: "actions"}, reload));
     }
     row("desktop_endpoint", status.endpoint || t("desktop_config_needed"));
     row("desktop_expected_actor", status.expected_actor);
-    row("desktop_configuration_file", status.configuration_file);
+    if (status.configuration_file) technicalDetails.append(h("dt", {}, t("desktop_configuration_file")), h("dd", {}, status.configuration_file));
     if (status.credential_source) row("desktop_credential_source", t("desktop_source_" + status.credential_source));
     if (status.error && !status.configuration_setup) info.append(errorBox(new Error(status.error)));
     else if (!status.credential_available) info.append(h("p", {}, t("desktop_credential_missing")));
@@ -2178,6 +2202,7 @@ async function viewNativeSettings(main) {
     forget.disabled = state.nativeBusy || !status.credential_saved;
   } catch (error) { if (mine === generation) info.append(errorBox(error)); }
   if (mine !== generation) return;
+  if (firstConnection) return () => disposeUpdates?.();
   const disposeFleet = await mountFleet(fleetRoot, {h, t});
   if (mine !== generation || !main.isConnected) { disposeFleet?.(); disposeUpdates?.(); return; }
   const disposeTailscale = mountTailscale(fleetRoot, {h, t});
@@ -2213,7 +2238,7 @@ async function change(out, action, target, params, pre, scope) {
   }
   return null;
 }
-function manageNote() { return may("manage") ? null : h("p", { class: "note" }, t("needs_manage_scope")); }
+function manageNote() { return may("manage") ? null : h("p", { class: "note" }, t(nativeDesktop ? "needs_manage_access" : "needs_manage_scope")); }
 function indent(el, depth) { el.style.setProperty("--depth", String(depth)); return el; } // CSP: no style attributes
 function stateChip(c) {
   const cls = { done: "ok", awaiting_approval: "warn", doing: "info", waiting: "warn" }[c.display_state] || "";
@@ -2297,17 +2322,26 @@ async function viewProjects(main) {
   const out = h("div", {});
   const tree = h("div", { class: "panel" });
   const archived = h("div", {});
-  const name = h("input", { placeholder: t("new_project_name"), maxlength: 80 });
-  const add = h("button", { class: "primary", disabled: !may("manage"), onclick: async () => {
-    if (!name.value.trim()) return;
+  const name = h("input", { placeholder: t("new_project_name"), "aria-label": t("new_project_name"), maxlength: 80, required: true });
+  const repositories = [...new Set((state.caps?.features?.repository_sync || []).map(binding => binding.repository))].sort();
+  const repository = h("select", {"aria-label": t("project_repository_optional")},
+    h("option", {value: ""}, t("project_repository_later")),
+    ...repositories.map(value => h("option", {value}, value)));
+  const add = h("button", { class: "primary", type: "submit", disabled: !may("manage") }, t("add_project"));
+  const create = async event => {
+    event.preventDefault();
+    if (add.disabled || !name.value.trim()) return;
     add.disabled = true;
-    const op = await change(out, "project.create", {}, { name: name.value.trim() }, {}, "project.create");
+    const params = {name: name.value.trim(), ...(repository.value ? {repositories: [repository.value]} : {})};
+    const op = await change(out, "project.create", {}, params, {}, "project.create");
     add.disabled = false;
     if (op) { name.value = ""; location.hash = `#/project/${op.result.project_id}`; }
-  } }, t("add_project"));
+  };
+  const fields = h("div", {class: "capture-fields"}, h("label", {}, t("new_project_name"), name),
+    ...(repositories.length ? [h("label", {}, t("project_repository_optional"), repository)] : []));
   const showArchived = h("input", { type: "checkbox" });
   main.append(h("h1", {}, t("nav_projects")), h("p", { class: "muted" }, t("projects_help")), manageNote() || "",
-    h("div", { class: "filters" }, name, add), out, tree,
+    h("form", {class: "panel", onsubmit: create}, fields, h("div", {class: "actions"}, add)), out, tree,
     h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
   const render = async (fromEvent = false) => {
     const opens = drawerOpens;
@@ -2978,7 +3012,7 @@ async function viewCleanup(main, section, ident) {
     } catch (e) { fill(retainedOut, errorBox(e)); }
   }
   main.append(h("h1", {}, t("nav_cleanup")), h("p", { class: "muted" }, t("cleanup_intro")),
-    section === "task" || supportsTask ? h("p", {class: "muted"}, t("cleanup_task_help")) : null);
+    section === "task" || supportsTask ? h("p", {class: "muted"}, t("cleanup_task_help")) : "");
   if (section === "resource") {
     try {
       const data = await api("GET", `/cleanup-tombstones/${encodeURIComponent(ident)}`);
@@ -3093,11 +3127,17 @@ async function route() {
   if (teardown) { teardown(); teardown = null; }
   freshPage();
   const [name, ...rest] = (location.hash.replace(/^#\//, "") || "home").split("/").map(decodeURIComponent);
-  document.getElementById("nav").replaceChildren(...NAV.map(([k, label]) =>
-    h("a", { href: `#/${k}`, class: name === k ? "on" : "" }, t(label))));
+  const visibleNav = state.token ? NAV : NAV.filter(([key]) => key === "settings");
+  document.getElementById("nav").replaceChildren(...visibleNav.map(([k, label]) =>
+    h("a", { href: `#/${k}`, class: (state.token ? name === k : k === "settings") ? "on" : "" }, t(label))));
   const main = document.getElementById("main");
   main.replaceChildren();
-  if (!state.token && name !== "settings") { main.append(h("p", { class: "note" }, t(nativeDesktop ? "desktop_connect_needed" : "need_token"))); viewSettings(main); return; }
+  if (!state.token && name !== "settings") {
+    const off = await viewSettings(main);
+    if (mine !== generation) {off?.(); return;}
+    teardown = off || null;
+    return;
+  }
   const views = { home: viewHome, projects: viewProjects, project: viewProject, item: viewWorkItem, sessions: viewSessions,
     cleanup: viewCleanup, approvals: viewApprovals, delivery: viewDelivery, operations: viewOperations, session: viewSession, start: viewStart, published: viewPublished, orchestrate: viewOrchestration, op: viewOperation, settings: viewSettings,
     "artifact-review": viewArtifactReview, dispatch: viewProjectDispatch,

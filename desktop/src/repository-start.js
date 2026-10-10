@@ -10,6 +10,8 @@ const terminal = op => ['succeeded', 'failed', 'cancelled'].includes(op?.status)
 const target = v => object(v) && Object.keys(v).length === 3 && ['repository', 'host', 'workspace_id'].every(k => text(v[k], 256));
 const ref = v => typeof v === 'string' && /^refs\/heads\/(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*@\{)[A-Za-z0-9._/-]{1,200}$/.test(v) &&
   !/[./]$/.test(v) && v.slice(11).split('/').every(p => !p.startsWith('.') && !p.endsWith('.lock'));
+// Display a familiar branch name, but freeze only a fully qualified branch ref in the request.
+const branchRef = value => value.startsWith('refs/') ? value : 'refs/heads/' + value;
 const preconditions = v => object(v) && Object.keys(v).length === 2 && Number.isSafeInteger(v.repository_id) && v.repository_id > 0 && digest(v.binding_digest);
 const projectId = v => typeof v === 'string' && /^prj_[0-9a-f]{20}$/.test(v);
 const artifactRefs = v => Array.isArray(v) && v.every(r => object(r) && Object.keys(r).length === 3 &&
@@ -57,7 +59,8 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
   const hostAllowed = () => caps()?.hosts?.some(h => h.host === saved.target?.host && h.writes === true && h.orchestrate === true);
   const status = h('div', {role: 'status'}), facts = h('div', {'data-published-preview': ''}), outcome = h('div', {'data-published-result': ''});
   const projectStatus = h('div', {role: 'status', 'data-dispatch-project': ''});
-  const binding = h('select', {'aria-label': t('pub_binding')}), sourceRef = h('input', {'aria-label': t('pub_ref'), maxlength: 211, placeholder: 'refs/heads/main'});
+  const binding = h('select', {'aria-label': t('pub_binding')}), sourceRef = h('input', {'aria-label': t('pub_ref'), maxlength: 211, placeholder: 'main'});
+  const branchHelp = h('p', {class: 'muted', 'aria-live': 'polite'});
   const agent = h('select', {'aria-label': t('start_agent')}, h('option', {value: 'claude'}, 'Claude'), h('option', {value: 'codex'}, 'Codex'));
   const prompt = h('textarea', {'aria-label': t('pub_prompt'), maxlength: 12000, rows: 5}), title = h('input', {'aria-label': t('start_title'), maxlength: 256});
   const model = h('input', {'aria-label': t('start_model'), maxlength: 256, placeholder: t('start_model_default')});
@@ -77,14 +80,14 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
     for (const [k, el] of Object.entries(inputs)) el.value = saved[k];
   }
   const showError = e => {if (current()) status.replaceChildren(errorBox(e));};
-  const selected = () => ({target: saved.target, source_ref: saved.source_ref});
+  const selected = () => ({target: saved.target, source_ref: branchRef(saved.source_ref)});
   const request = () => ({action: 'repository.continue', target: saved.target,
     params: {source_ref: preview?.source_ref, source_sha: preview?.source_sha, agent: saved.agent, prompt: saved.prompt,
       ...(saved.title ? {title: saved.title} : {}), ...(saved.model && expanded() ? {model: saved.model} : {}),
       ...(attachments?.refs().length ? {artifacts: attachments.refs()} : {}), ...(project ? {project_id: project} : {})},
     preconditions: preview ? {...preview.preconditions, ...(project ? {expected_project_version: previewProjectVersion} : {})} : null});
   const inspect = h('button', {class: 'secondary', onclick: async () => {
-    if (!current() || saved.intent || reading || !observe() || !ready() || !projectReady() || !bound() || !ref(saved.source_ref)) return;
+    if (!current() || saved.intent || reading || !observe() || !ready() || !projectReady() || !bound() || !ref(selected().source_ref)) return;
     const expected = ++sequence, input = selected(), projectVersion = projectDoc?.version; preview = null; reading = true; update(); status.replaceChildren();
     try {
       const doc = await api('POST', '/repository-previews', {...input.target, source_ref: input.source_ref}); guard();
@@ -150,7 +153,7 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
     h('summary', {}, t('dispatch_advanced')), h('div', {class: 'capture-fields'}, label('start_title', title), label('start_model', model)));
   const box = h('section', {class: 'session-start published-start', 'data-published-start': ''},
     project ? projectStatus : null,
-    h('div', {class: 'panel'}, h('div', {class: 'capture-fields'}, label('pub_binding', binding), label('pub_ref', sourceRef)), h('p', {class: 'muted'}, t('pub_head_only')),
+    h('div', {class: 'panel'}, h('div', {class: 'capture-fields'}, label('pub_binding', binding), label('pub_ref', sourceRef)), branchHelp, h('p', {class: 'muted'}, t('pub_head_only')),
       h('div', {class: 'actions'}, inspect), facts),
     h('div', {class: 'panel'}, h('div', {class: 'capture-fields'}, label('start_agent', agent), !project ? label('start_title', title) : null,
       !project && expanded() ? label('start_model', model) : null), label('pub_prompt', prompt), project ? advanced : null, attachmentBox,
@@ -160,7 +163,11 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
     if (attachmentBox) {attachmentBox.disabled = fixed || busy; attachmentBox.hidden = fixed;}
     binding.disabled = fixed || busy;
     for (const el of Object.values(inputs)) el.disabled = fixed || busy;
-    inspect.hidden = fixed; inspect.disabled = reading || !observe() || !ready() || !projectReady() || !bound() || !ref(saved.source_ref);
+    const validBranch = ref(selected().source_ref);
+    branchHelp.hidden = fixed;
+    branchHelp.textContent = t(saved.source_ref && !validBranch ? 'pub_branch_invalid' : 'pub_branch_help');
+    sourceRef.setAttribute('aria-invalid', String(Boolean(saved.source_ref && !validBranch)));
+    inspect.hidden = fixed; inspect.disabled = reading || !observe() || !ready() || !projectReady() || !bound() || !validBranch;
     inspect.textContent = t(reading ? 'pub_loading' : 'pub_preview');
     apply.hidden = Boolean(saved.intent?.operation_id || saved.intent?.refused); apply.textContent = t(fixed ? 'permissions_retry' : 'pub_apply');
     apply.disabled = busy || readFailed || !ready() || !allowed() || (fixed ? !saved.intent.request || !saved.intent.key :

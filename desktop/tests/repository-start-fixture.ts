@@ -45,6 +45,11 @@ export async function publishedFixture(page: Page, native: boolean, options: any
     if (input.method === 'POST') {
       state.posts.push(structuredClone(input));
       if (state.refuse) return {status: 403, data: {error: {code: state.refuse, message: 'Fixture refusal'}}};
+      if (input.body.action === 'project.create') {
+        state.project = {...state.project, ...input.body.params, repositories: input.body.params.repositories || []};
+        return {status: 200, data: {operation: {operation_id: publishedId, ...input.body, status: 'succeeded',
+          result: {project_id: dispatchProject, version: 1}}}};
+      }
       if (!state.operation || state.operation.idempotency_key !== input.idempotency_key) state.operation = {
         operation_id: publishedId, actor: state.actor, idempotency_key: input.idempotency_key, ...structuredClone(input.body), status: state.status,
         steps: [{name: 'session.start', status: 'succeeded'}, {name: 'send', status: state.status === 'uncertain' ? 'uncertain' : 'succeeded'}],
@@ -57,6 +62,7 @@ export async function publishedFixture(page: Page, native: boolean, options: any
       return {status: 200, data: {operation: mismatch(state.operation)}};
     }
     state.reads.push(input.path);
+    if (path === '/projects') return {status: 200, data: {projects: [], archived: []}};
     if (path.startsWith('/projects/')) {
       if (state.failProject) return {status: 503, data: {error: {code: 'READ_FAILED', message: 'Project read failed'}}};
       const project = structuredClone({...state.project, project_id: path.split('/').at(-1)});

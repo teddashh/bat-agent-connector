@@ -80,3 +80,25 @@ for (const locale of ['en-US', 'zh-TW']) for (const width of [390, 768, 1440]) t
   await page.evaluate(() => window.scrollTo(0, 0)); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await mkdir('/tmp/bac-published-ui', {recursive: true}); await page.screenshot({path: `/tmp/bac-published-ui/${locale}-${width}.png`, fullPage: true}); expect(state.errors).toEqual([]); await context.close();
 });
+
+for (const native of [false, true]) test(`short branch names preserve fixed preview and replay (${native ? 'IPC' : 'HTTP'})`, async ({page}) => {
+  const state = await publishedFixture(page, native, {lost: true}), form = await openPublished(page);
+  await form.getByRole('combobox', {name: 'Repository · host · workspace ID'}).selectOption(JSON.stringify(selected));
+  const branch = form.getByRole('textbox', {name: 'Published branch ref'});
+  await branch.fill('refs/tags/v1');
+  await expect(form.getByRole('button', {name: 'Preview published version'})).toBeDisabled();
+  await expect(form).toContainText('Enter a valid branch');
+  await branch.fill('main');
+  await form.getByRole('button', {name: 'Preview published version'}).click();
+  await expect(form.locator('[data-published-preview]')).toContainText(publishedSha);
+  expect(state.previews[0].body.source_ref).toBe('refs/heads/main');
+  await instructions(form).fill('Keep the exact selected commit.');
+  await apply(form).click(); await expect(form).toContainText('Lost published start reply');
+  await page.reload();
+  await form.getByRole('button', {name: 'Retry original request'}).click();
+  await expect(form).toContainText('Start confirmed');
+  await expect(form.locator('.status-succeeded')).toHaveText('Started');
+  expect(state.posts[1]).toEqual(state.posts[0]);
+  expect(state.posts[0].body.params.source_ref).toBe('refs/heads/main');
+  expect(state.posts[0].body.params.source_sha).toBe(publishedSha);
+});
