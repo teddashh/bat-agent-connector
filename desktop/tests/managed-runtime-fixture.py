@@ -47,7 +47,12 @@ def main() -> None:
             stdin=subprocess.DEVNULL, capture_output=True, timeout=90,
         )
         if result.returncode:
-            raise AssertionError(f"Packaged runtime {action} failed ({result.returncode})")
+            try:
+                reply = json.loads(result.stdout)
+                details = {key: reply.get(key) for key in ("error", "message", "errno", "winerror")}
+            except (ValueError, TypeError):
+                details = {"error": "INVALID_RUNTIME_REPLY"}
+            raise AssertionError(f"Packaged runtime {action} failed ({result.returncode}): {details}")
         assert len(result.stdout) < 16384, "Bounded native reply required"
         document = json.loads(result.stdout)
         assert document["protocol"] == 1

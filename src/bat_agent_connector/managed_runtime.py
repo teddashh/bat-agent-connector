@@ -160,7 +160,9 @@ def _spawn(root):
         options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         options["start_new_session"] = True
-    return subprocess.Popen(_service_command(root), **options)  # noqa: S603 - fixed bundled self executable
+    with os.fdopen(open_private_file(root / "service.log", os.O_WRONLY | os.O_CREAT | os.O_TRUNC), "wb") as log:
+        options["stderr"] = log
+        return subprocess.Popen(_service_command(root), **options)  # noqa: S603 - fixed bundled self executable
 
 
 def ensure(raw, *, timeout=45):
@@ -304,8 +306,10 @@ def main():
             result = _request(result["endpoint"], "/api/v1/managed/browser-file", token=result["token"], body={})
         print(json.dumps(result), flush=True)
     except Exception as error:  # no secrets, paths or arbitrary provider output on the native protocol
-        print(json.dumps({"protocol": PROTOCOL, "error": "MANAGED_RUNTIME_UNAVAILABLE",
-                          "message": type(error).__name__ + ": managed installation needs recovery"}), flush=True)
+        failure = {"protocol": PROTOCOL, "error": "MANAGED_RUNTIME_UNAVAILABLE",
+                   "message": type(error).__name__ + ": managed installation needs recovery",
+                   "errno": getattr(error, "errno", None), "winerror": getattr(error, "winerror", None)}
+        print(json.dumps(failure), file=sys.stderr if args.command == "serve" else sys.stdout, flush=True)
         raise SystemExit(1) from None
 
 
