@@ -467,9 +467,7 @@ body.workspace-resizing, body.workspace-resizing * { cursor: col-resize !importa
   .workspace-composer-toggle.has-draft {
     border-color: var(--accent); color: var(--accent);
   }
-  .workspace-composer-collapsed > div:not([data-pending-controls]):not(.workspace-composer-toggle),
-  .workspace-composer-collapsed > p.note,
-  .workspace-composer-collapsed > .actions {
+  .workspace-composer-collapsed > #workspace-message-input {
     display: none !important;
   }
   body.mobile-keyboard .workspace-conversation .conversation-scroll {
@@ -480,4 +478,8 @@ body.workspace-resizing, body.workspace-resizing * { cursor: col-resize !importa
   }
   .workspace-result .actions a { min-height: 44px; display: inline-flex; align-items: center; }
   .workspace-session-meta .chip { white-space: normal; }
+}
+@media (pointer: coarse) and (min-width: 801px) {
+  .workspace-resizer { width: 44px; right: -22px; }
+  .workspace-resizer::after { left: 21px; }
 }
