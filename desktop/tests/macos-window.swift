@@ -20,7 +20,7 @@ func perform() {
         print(NSRunningApplication.runningApplications(withBundleIdentifier: identifier).count)
         exit(0)
     }
-    if args.count == 3 && args[1] == "launch" {
+    if args.count == 3 && (args[1] == "launch" || args[1] == "launch-managed") {
         guard NSRunningApplication.runningApplications(withBundleIdentifier: identifier).isEmpty
         else { fail("Refusing an existing Dashboard process") }
         let url = URL(fileURLWithPath: args[2]).standardizedFileURL
@@ -29,7 +29,7 @@ func perform() {
         configuration.createsNewApplicationInstance = true
         configuration.addsToRecentItems = false
         configuration.promptsUserIfNeeded = false
-        configuration.environment = ["BATC_DESKTOP_TOKEN": "fixture-native-token"]
+        configuration.environment = args[1] == "launch-managed" ? [:] : ["BATC_DESKTOP_TOKEN": "fixture-native-token"]
         NSWorkspace.shared.openApplication(at: url, configuration: configuration) { app, error in
             guard error == nil, let app, app.bundleURL?.standardizedFileURL == url,
                   app.bundleIdentifier == identifier, let date = app.launchDate

@@ -309,6 +309,14 @@ impl Bridge {
         bridge.configuration_file = Some(path);
         bridge
     }
+    pub fn managed(config: Config, token: Zeroizing<String>, identity: Identity) -> Self {
+        let bridge = Self::new(Ok(config), token);
+        bridge.state.lock().unwrap().environment_identity = Some(identity);
+        bridge
+    }
+    pub fn managed_failure(error: String) -> Self {
+        Self::new(Err(error), Zeroizing::new(String::new()))
+    }
     fn new(config: Result<Config, String>, token: Zeroizing<String>) -> Self {
         let config = config.and_then(normalize);
         // An environment credential without a valid original endpoint must never be forwarded
@@ -1158,6 +1166,20 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
         if key.chars().chain(value.chars()).any(char::is_control) {
             return Err("Control characters in central query are refused".into());
         }
+        if key == "max_message_chars" {
+            if input.method != "GET"
+                || !path.starts_with("/sessions/")
+                || !path.ends_with("/messages")
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+                || !value
+                    .parse::<u32>()
+                    .is_ok_and(|limit| (1..=60000).contains(&limit))
+                || !query_keys.insert(key.to_string())
+            {
+                return Err("Session message size query is invalid".into());
+            }
+            continue;
+        }
         if path == "/workspaces" {
             let valid = match key.as_ref() {
                 "host" => {
@@ -1315,6 +1337,21 @@ mod tests {
         sync::mpsc,
         thread,
     };
+    #[test]
+    fn session_message_character_limit_is_bounded_and_route_specific() {
+        assert!(validate_request(&get(
+            "/sessions/fixture/session-1/messages?max_message_chars=60000"
+        ))
+        .is_ok());
+        for route in [
+            "/sessions?max_message_chars=60000",
+            "/sessions/fixture/session-1/messages?max_message_chars=60001",
+            "/sessions/fixture/session-1/messages?max_message_chars=0",
+            "/sessions/fixture/session-1/messages?max_message_chars=60000&max_message_chars=1",
+        ] {
+            assert!(validate_request(&get(route)).is_err());
+        }
+    }
 
     #[test]
     fn workspace_discovery_has_fixed_bounded_read_contract() {
