@@ -6,7 +6,7 @@ export function workspaceNavigation({h, t, api, guard, onEvents, namespace, erro
   let saved = [], hasPreference = false;
   try {const raw = sessionStorage.getItem(key); saved = JSON.parse(raw || '[]'); hasPreference = raw !== null;} catch { /* local preference only */ }
   const expanded = new Set(Array.isArray(saved) ? saved : []), projects = new Map();
-  let roots = [], disposed = false, serial = Promise.resolve(), selected = location.hash;
+  let roots = [], disposed = false, serial = Promise.resolve(), selected = location.hash, revealProject = null;
   const status = h('div', {class: 'workspace-tree-status', role: 'status'});
   const tree = h('div', {class: 'workspace-tree'});
   let sessionPages = 1, sessionsLoaded = false;
@@ -87,10 +87,13 @@ export function workspaceNavigation({h, t, api, guard, onEvents, namespace, erro
         const ids = new Set();
         const walk = (list, ancestors = []) => {for (const p of list) {
           ids.add(p.project_id);
-          if (expanded.has(p.project_id)) ancestors.forEach(id => expanded.add(id));
+          // Reveal ancestors only when navigating to a project. Remembered child
+          // expansion must not reopen a parent the user deliberately collapsed.
+          if (p.project_id === revealProject) [...ancestors, p.project_id].forEach(id => expanded.add(id));
           walk(p.children || [], [...ancestors, p.project_id]);
         }};
         walk(roots);
+        if (revealProject !== null) {revealProject = null; persist();}
         // A hidden project can change while collapsed. Invalidate it instead of
         // making its old activity appear current when searching or reopening it.
         for (const id of projects.keys()) if (!ids.has(id) || !expanded.has(id)) projects.delete(id);
@@ -152,8 +155,8 @@ export function workspaceNavigation({h, t, api, guard, onEvents, namespace, erro
   return {box, select(hash) {
     selected = hash;
     const [type, pid] = hash.replace(/^#\//, '').split('/');
-    if (['project', 'dispatch', 'work'].includes(type) && pid && !expanded.has(decodeURIComponent(pid))) {
-      expanded.add(decodeURIComponent(pid)); persist(); refresh().catch(() => {});
+    if (['project', 'dispatch', 'work'].includes(type) && pid) {
+      revealProject = decodeURIComponent(pid); refresh().catch(() => {});
     }
     // Selection updates do not remount the tree, search or disclosure controls.
     for (const node of box.querySelectorAll('a')) {
