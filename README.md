@@ -8,7 +8,7 @@ Better Agent Dashboard brings together **Windows Fleet connectivity and startup,
 
 You continue coding in [Better Agent Terminal (BAT)](https://github.com/tony1223/better-agent-terminal). Agents such as Hermes and Grokbot use their own identities to work alongside you. The repository and Python package retain the name **`bat-agent-connector`**: Connector is the shared backend for the Dashboard, CLI and MCP tools.
 
-> **Candidate status:** [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) implements the bundled Python runtime, owned background central, personal identity and authenticated browser entry. Final checks are still running; this is not yet a merged release. Use a successful desktop artifact matching the candidate commit. Earlier release downloads do not gain these features automatically. [Installation and first use →](docs/getting-started.md)
+> **This source version** includes the bundled Python runtime, owned background central, personal identity and authenticated browser entry introduced in [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81). Use a successful desktop artifact matching the source commit and check its validation records. Earlier release downloads do not gain these features automatically. [Installation and first use →](docs/getting-started.md)
 
 ![Select work in the project tree and keep its conversation, reply controls and results together.](site/images/workspace-en.png)
 
@@ -18,7 +18,7 @@ Select a project or work item in the persistent left tree. The selected session 
 
 ## Explore
 
-[Capabilities](#what-you-can-do) · [Workflow](#from-request-to-delivery) · [Architecture](#web-desktop-and-agents) · [Windows Fleet](#windows-fleet-and-resources) · [Platforms](#platforms-and-packages) · [Start](#start-using-it) · [Trust and recovery](#permissions-ownership-and-recovery) · [Readiness](#current-evidence-and-remaining-work) · [Documentation](#documentation) · [Development](#development)
+[Capabilities](#what-you-can-do) · [Workflow](#from-request-to-delivery) · [Architecture](#web-desktop-and-agents) · [Windows Fleet](#windows-fleet-and-resources) · [Platforms](#platforms-and-packages) · [Start](#start-using-it) · [Trust and recovery](#permissions-ownership-and-recovery) · [Validation](#implementation-and-validation) · [Documentation](#documentation) · [Development](#development)
 
 ## What you can do
 
@@ -107,7 +107,7 @@ Windows remains a core part of the product. Sharing the Dashboard with Web / Mac
 
 ## Platforms and packages
 
-Candidate packaging is defined for the following platforms. Final matching-candidate CI and installed fixtures remain in progress; source implementation, a successful package job and a real user environment are separate evidence.
+This source version defines packaging for the following platforms. Match CI and installed-fixture evidence to the exact source commit; implementation, a successful package job and a real user environment are separate evidence.
 
 | Component | Candidate implementation | Distribution or platform boundary |
 | --- | --- | --- |
@@ -152,15 +152,15 @@ MCP / CLI writes retain explicit confirmation, host tiers and audit records. The
 
 For native BAT `worktree.merge`, an unknown ACK without sufficient positive evidence preserves the original operation and resources; it does not resend or release ownership. A human-adjudication API for that case is outside the current contract, not a remaining delivery gate. GitHub integration and deployment use their own readback contracts. [Merge recovery](docs/design/worktree-merge.md) · [Resource policy](docs/design/resource-policy.md) · [Security](SECURITY.md)
 
-## Current evidence and remaining work
+## Implementation and validation
 
-As of **October 10, 2026**, the source candidate is [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81), not yet merged. Its final [checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks) are running. Do not apply older release test totals or artifacts to this candidate.
+The implementation described here was introduced in [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81). Its [checks](https://github.com/teddashh/bat-agent-connector/pull/81/checks) record validation for the corresponding commits. Match those records to the package you use; older release test totals or artifacts do not establish this source version.
 
 The candidate includes managed installation and onboarding, an adjustable project tree, readable conversations and send receipts, unread / model preferences, reviewed skill selections, linked results and repair work. Skill selection records a fixed source digest; it does not activate a skill in a running agent. A historical queued-send receipt does not report the current BAT queue position or offer per-message cancellation.
 
 Automated validation covers Python, shared browser/native transport, packaged runtime ownership and restart, and platform installation fixtures. These controlled fixtures are distinct from a user's actual Fleet, accounts and deployment targets.
 
-The owner excluded **formal signing, Mac notarization, production update channels and Linux persistent native credential storage** from this delivery. **Human execution of the full 46-item real-environment acceptance matrix belongs to the user** and is not an outstanding agent task. These exclusions are not claims that the corresponding capabilities or real-host tests were completed. Final candidate checks and integration remain outstanding.
+The owner excluded **formal signing, Mac notarization, production update channels and Linux persistent native credential storage** from this delivery. **Human execution of the full 46-item real-environment acceptance matrix belongs to the user** and is not an outstanding agent task. These exclusions are not claims that the corresponding capabilities or real-host tests were completed. Consult the linked PR and checks for validation and integration records.
 
 [Implementation record](docs/product/implementation-status.md) · [Acceptance reference](docs/product/acceptance-v2.md)
 

@@ -4,7 +4,7 @@
 
 ## 選擇相符的候選安裝包
 
-[PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 已實作下列一般桌面流程，尚未合併，最終檢查仍在執行。從其[檢查頁](https://github.com/teddashh/bat-agent-connector/pull/81/checks)進入 desktop run，核對同一來源 commit，使用平台 job 成功產生的 artifact。早期 release 資產不會自動包含新 runtime。[Desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml)。
+這版原始碼包含 [PR #81](https://github.com/teddashh/bat-agent-connector/pull/81) 引入的一般桌面流程；原始碼實作與已發布 release 資產分開看。從其[檢查頁](https://github.com/teddashh/bat-agent-connector/pull/81/checks)進入 desktop run，核對同一來源 commit，使用平台 job 成功產生的 artifact。早期 release 資產不會自動包含新 runtime。[Desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml)。
 
 | 平台 | Artifact | 格式 |
 | --- | --- | --- |

@@ -103,8 +103,8 @@ parts.append(
     '</aside></div><div class="release-note">'
     + bi("Development preview", "開發預覽", "strong")
     + bi(
-        "PR #81 implements bundled local central and guided setup. Final candidate checks are running; it is not yet a merged release.",
-        "PR #81 已實作打包本機中央與引導設定，最終候選檢查仍在執行，尚未合併發行。",
+        "This source version includes bundled local central and guided setup from PR #81. Match the package source commit to its successful build and validation records.",
+        "這版原始碼包含 PR #81 引入的打包本機中央與引導設定；請核對套件來源 commit、成功建置及驗證紀錄。",
     )
     + link("#status", "See readiness", "查看交付現況")
     + "</div></section>"
@@ -460,8 +460,8 @@ parts.append(
     '</ol><div class="install-current">'
     + bi("Choose a matching candidate artifact", "選擇相符的候選 artifact", "h3")
     + bi(
-        "Follow PR #81 checks to a desktop run and select the same source commit with a successful platform package job. Final candidate checks remain pending. Earlier release assets remain historical client packages; external central setup is an advanced option.",
-        "從 PR #81 檢查進入 desktop run，核對同一來源 commit 與成功的平台打包 job。最終候選檢查仍待完成；舊 release 資產仍是先前的 client 包，外部中央設定保留為進階選項。",
+        "Follow PR #81 checks to a desktop run and select the same source commit with a successful platform package job. Earlier release assets remain historical client packages; external central setup is an advanced option.",
+        "從 PR #81 檢查進入 desktop run，核對同一來源 commit 與成功的平台打包 job。舊 release 資產仍是先前的 client 包，外部中央設定保留為進階選項。",
         "p",
     )
     + '<div class="actions">'
@@ -506,7 +506,7 @@ platforms = [
     ("Web", "Web", "Shared Dashboard with managed browser sign-in", "共用 Dashboard 與 managed 瀏覽器登入",
      "Trusted loopback / tunnel; external central login remains available.", "可信 loopback／tunnel；保留外部中央登入。"),
     ("Windows x64", "Windows x64", "NSIS with bundled central, private storage, Fleet and Credential Manager", "NSIS 包含中央、私人儲存、Fleet 與 Credential Manager",
-     "Unsigned candidate package; final matching-candidate checks pending.", "未正式簽署的候選包；最終同版檢查仍待完成。"),
+     "Unsigned validation package; match its source commit to the successful platform job.", "未正式簽署的驗證包；來源 commit 須與成功的平台 job 相符。"),
     ("Mac Apple Silicon / Intel", "Mac Apple Silicon／Intel", "DMGs with bundled central, menu bar and Keychain", "DMG 包含中央、選單列與 Keychain",
      "Ad-hoc validation signing; notarization / production updates excluded; no Windows Fleet port.", "採 ad-hoc 驗證簽署；公證／正式更新已排除，沒有 Windows Fleet 移植。"),
     ("Linux", "Linux", "Debian package with bundled central", "Debian 包含中央",
@@ -583,8 +583,8 @@ parts.append(
         "交付現況與證據",
         "Implementation and evidence, kept separate.",
         "實作、檢查與實際環境分開記錄。",
-        "Source candidate: 10 October 2026 · PR #81 · final checks running, not yet merged.",
-        "原始碼候選：2026 年 10 月 10 日 · PR #81 · 最終檢查執行中，尚未合併。",
+        "Implementation introduced in PR #81 · source, package validation and release assets are recorded separately.",
+        "PR #81 引入的實作 · 原始碼、套件驗證與 release 資產分開記錄。",
     )
     + '<dl class="readiness">'
 )
@@ -596,10 +596,10 @@ for label, lz, en, zh in [
         "打包中央與 BAT／儲存庫／驗證命令引導；共用專案樹、對話、派工、技能選取、成果連結、修復工作、交付與整理。",
     ),
     (
-        "Candidate checks",
-        "候選檢查",
-        "Final Python, shared UI and platform package checks are running. Use receipts for the exact candidate commit; older release results do not establish this candidate. Controlled fixtures do not stand in for a real user environment.",
-        "最終 Python、共用 UI 與各平台套件檢查仍在執行。核對精確候選 commit 的結果，不沿用舊 release 證據；受控 fixture 不取代使用者實際環境。",
+        "Validation records",
+        "驗證紀錄",
+        "The linked checks record Python, shared UI and platform package validation by source commit. Match them to your package; older release results do not establish this version. Controlled fixtures do not stand in for a real user environment.",
+        "檢查頁依來源 commit 記錄 Python、共用 UI 與各平台套件驗證。請核對所用套件，不沿用舊 release 證據；受控 fixture 不取代使用者實際環境。",
     ),
     (
         "Excluded from this delivery",
