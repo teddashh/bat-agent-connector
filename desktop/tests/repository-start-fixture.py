@@ -66,7 +66,10 @@ async def main():
         original_workspace = copy.deepcopy(mock.ws_doc)
         daemon = TaskDaemon(parse_config(raw), root / 'journal.db')
         daemon.ops.context['git_runner'] = Runner()
-        token = api_auth.issue(daemon.journal.db, 'published-browser', ['observe', 'start', 'integrate'])
+        scopes = ['observe', 'start', 'integrate']
+        if os.environ.get('BATC_DISPATCH_CREATE_PROJECT') == '1':
+            scopes.append('manage')
+        token = api_auth.issue(daemon.journal.db, 'published-browser', scopes)
         server = await asyncio.start_server(daemon._handle, '127.0.0.1', 0)
         worker = asyncio.create_task(daemon.ops.loop(0.1))
         print(json.dumps({'port': server.sockets[0].getsockname()[1], 'token': token, 'sha': sha}), flush=True)
@@ -108,8 +111,14 @@ async def main():
                     assert len([f for f in bat_writes(mock) if f['channel'] == 'claude:start-session']) == 2
                     assert all(method == 'GET' for method, _, _ in gh.requests)
                 elif command['action'] == 'prepare-project':
-                    project = await action(daemon, 'project.create', params={'name': 'Dispatch fixture', 'repositories': ['o/r']})
-                    project_id = project['result']['project_id']
+                    project_id = command.get('project_id')
+                    if project_id:
+                        row = daemon.journal.db.execute('SELECT repositories,created_by FROM projects WHERE project_id=?',
+                                                       (project_id,)).fetchone()
+                        assert json.loads(row['repositories']) == ['o/r'] and row['created_by'] == 'published-browser'
+                    else:
+                        project = await action(daemon, 'project.create', params={'name': 'Dispatch fixture', 'repositories': ['o/r']})
+                        project_id = project['result']['project_id']
                     artifact = await upload(daemon, b'fixed project input\n')
                     daemon.ops.context['artifact_host'] = LocalArtifactHost()
                     print(json.dumps({'project_id': project_id, 'artifact': artifact}), flush=True)

@@ -41,10 +41,10 @@ async function attentionView({ main, h, t, api, guard, caps, storageKey, route, 
 			route();
 		}
 	}, t("attention_tab_" + value))));
-	const empty = h("p", {
-		class: "muted",
+	const empty = h("section", {
+		class: "panel",
 		hidden: true
-	}, t("empty_needs_you"));
+	}, h("p", {}, t("empty_needs_you")), h("p", { class: "muted" }, t("empty_next_work")), h("div", { class: "actions" }, h("a", { href: "#/projects" }, t("sessions_projects")), caps?.scopes?.includes("start") && caps?.actions?.some((a) => a.action === "session.start" && a.allowed === true) ? h("a", { href: "#/start" }, t("start_title_page")) : null));
 	const sections = [];
 	const add = (key, path, field, row, options = {}) => {
 		const list = h("div", {}), status = h("div", { role: "status" });
@@ -143,6 +143,21 @@ async function attentionView({ main, h, t, api, guard, caps, storageKey, route, 
 		return;
 	}
 	return onEvents(debounceRefresh(() => refresh(), 500));
+}
+//#endregion
+//#region src/delivery-input.js
+function parsePullRequest(value) {
+	try {
+		const url = new URL(value.trim());
+		if (url.protocol !== "https:" || url.hostname !== "github.com" || url.port || url.username || url.password) return null;
+		const match = /^\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]{0,8})\/?$/.exec(url.pathname);
+		return match ? {
+			repository: match[1],
+			number: match[2]
+		} : null;
+	} catch {
+		return null;
+	}
 }
 //#endregion
 //#region src/session-labels.js
@@ -829,6 +844,18 @@ function conversationPanel({ h, t, when, guard }) {
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		connection_details: "連線詳細資訊與設定檔",
+		delivery_repository_input: "儲存庫或 GitHub PR 網址",
+		needs_manage_access: "目前帳號可以查看，但沒有編輯專案的權限。請向管理員取得具有專案管理權限的帳號，再到「連線」更換憑證。",
+		empty_next_work: "要開始新的工作，請選擇專案派工，或建立工作階段。",
+		start_dispatched: "已啟動",
+		session_access_unknown: "尚未確認這個工作階段的來源與管理權限。取得有效資料前，暫停操作。",
+		session_origin: "來源",
+		delivery_pr_number: "PR 編號",
+		delivery_choose_pr: "請填入儲存庫與 PR 編號，或貼上 GitHub PR 網址。",
+		delivery_pr_unavailable: "目前無法讀取這個 PR 的完整資料。請重新讀取。",
+		pub_branch_help: "輸入分支名稱，例如 main；也可貼上完整的 refs/heads/main。",
+		pub_branch_invalid: "分支名稱無效。請使用 main 或 feature/name，不接受 tag、commit 或其他 refs。",
 		delivery_result_unverified: "成果尚未驗證",
 		delivery_observed_at: "最後觀測：{time}",
 		delivery_unobserved: "尚無活動觀測",
@@ -1703,6 +1730,8 @@ var STRINGS = {
 		add_project: "新增",
 		show_archived: "顯示已封存",
 		no_projects: "還沒有專案。",
+		project_repository_optional: "派工儲存庫（選填）",
+		project_repository_later: "稍後選擇",
 		new_sub_project: "子專案名稱",
 		rename: "改名",
 		archive: "封存",
@@ -2021,6 +2050,18 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		connection_details: "Connection details and configuration file",
+		delivery_repository_input: "Repository or GitHub PR URL",
+		needs_manage_access: "This account can view projects but cannot edit them. Ask your administrator for project management access, then replace your credential under Connection.",
+		empty_next_work: "To begin new work, choose a project to dispatch from or start a session.",
+		start_dispatched: "Started",
+		session_access_unknown: "The origin and management permissions of this session have not been confirmed. Actions remain unavailable until valid information is received.",
+		session_origin: "Origin",
+		delivery_pr_number: "PR number",
+		delivery_choose_pr: "Enter a repository and PR number, or paste a GitHub PR URL.",
+		delivery_pr_unavailable: "The full details of this PR are unavailable. Load it again to retry.",
+		pub_branch_help: "Enter a branch name such as main, or a full ref such as refs/heads/main.",
+		pub_branch_invalid: "Enter a valid branch such as main or feature/name. Tags, commits and other refs are not supported.",
 		delivery_result_unverified: "Result unverified",
 		delivery_observed_at: "Last observed: {time}",
 		delivery_unobserved: "No activity observation",
@@ -2894,6 +2935,8 @@ var STRINGS = {
 		new_project_name: "New project name",
 		add_project: "Add",
 		show_archived: "Show archived",
+		project_repository_optional: "Repository for dispatch (optional)",
+		project_repository_later: "Choose later",
 		no_projects: "No projects yet.",
 		new_sub_project: "Sub-project name",
 		rename: "Rename",
@@ -7068,6 +7111,7 @@ var target = (v) => object(v) && Object.keys(v).length === 3 && [
 	"workspace_id"
 ].every((k) => text(v[k], 256));
 var ref = (v) => typeof v === "string" && /^refs\/heads\/(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*@\{)[A-Za-z0-9._/-]{1,200}$/.test(v) && !/[./]$/.test(v) && v.slice(11).split("/").every((p) => !p.startsWith(".") && !p.endsWith(".lock"));
+var branchRef = (value) => value.startsWith("refs/") ? value : "refs/heads/" + value;
 var preconditions = (v) => object(v) && Object.keys(v).length === 2 && Number.isSafeInteger(v.repository_id) && v.repository_id > 0 && digest$1(v.binding_digest);
 var projectId = (v) => typeof v === "string" && /^prj_[0-9a-f]{20}$/.test(v);
 var artifactRefs = (v) => Array.isArray(v) && v.every((r) => object(r) && Object.keys(r).length === 3 && /^art_[0-9a-f]{32}$/.test(r.artifact_id) && Number.isSafeInteger(r.revision) && r.revision > 0 && digest$1(r.digest));
@@ -7148,7 +7192,11 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 	const binding = h("select", { "aria-label": t("pub_binding") }), sourceRef = h("input", {
 		"aria-label": t("pub_ref"),
 		maxlength: 211,
-		placeholder: "refs/heads/main"
+		placeholder: "main"
+	});
+	const branchHelp = h("p", {
+		class: "muted",
+		"aria-live": "polite"
 	});
 	const agent = h("select", { "aria-label": t("start_agent") }, h("option", { value: "claude" }, "Claude"), h("option", { value: "codex" }, "Codex"));
 	const prompt = h("textarea", {
@@ -7196,7 +7244,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 	};
 	const selected = () => ({
 		target: saved.target,
-		source_ref: saved.source_ref
+		source_ref: branchRef(saved.source_ref)
 	});
 	const request = () => ({
 		action: "repository.continue",
@@ -7219,7 +7267,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 	const inspect = h("button", {
 		class: "secondary",
 		onclick: async () => {
-			if (!current() || saved.intent || reading || !observe() || !ready() || !projectReady() || !bound() || !ref(saved.source_ref)) return;
+			if (!current() || saved.intent || reading || !observe() || !ready() || !projectReady() || !bound() || !ref(selected().source_ref)) return;
 			const expected = ++sequence, input = selected(), projectVersion = projectDoc?.version;
 			preview = null;
 			reading = true;
@@ -7382,7 +7430,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 	const box = h("section", {
 		class: "session-start published-start",
 		"data-published-start": ""
-	}, project ? projectStatus : null, h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("pub_binding", binding), label("pub_ref", sourceRef)), h("p", { class: "muted" }, t("pub_head_only")), h("div", { class: "actions" }, inspect), facts), h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("start_agent", agent), !project ? label("start_title", title) : null, !project && expanded() ? label("start_model", model) : null), label("pub_prompt", prompt), project ? advanced : null, attachmentBox, h("p", { class: "muted" }, t("pub_isolation"))), h("div", { class: "actions" }, apply, check, another), outcome, status);
+	}, project ? projectStatus : null, h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("pub_binding", binding), label("pub_ref", sourceRef)), branchHelp, h("p", { class: "muted" }, t("pub_head_only")), h("div", { class: "actions" }, inspect), facts), h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("start_agent", agent), !project ? label("start_title", title) : null, !project && expanded() ? label("start_model", model) : null), label("pub_prompt", prompt), project ? advanced : null, attachmentBox, h("p", { class: "muted" }, t("pub_isolation"))), h("div", { class: "actions" }, apply, check, another), outcome, status);
 	function update() {
 		const fixed = Boolean(saved.intent);
 		if (attachmentBox) {
@@ -7391,8 +7439,12 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		}
 		binding.disabled = fixed || busy;
 		for (const el of Object.values(inputs)) el.disabled = fixed || busy;
+		const validBranch = ref(selected().source_ref);
+		branchHelp.hidden = fixed;
+		branchHelp.textContent = t(saved.source_ref && !validBranch ? "pub_branch_invalid" : "pub_branch_help");
+		sourceRef.setAttribute("aria-invalid", String(Boolean(saved.source_ref && !validBranch)));
 		inspect.hidden = fixed;
-		inspect.disabled = reading || !observe() || !ready() || !projectReady() || !bound() || !ref(saved.source_ref);
+		inspect.disabled = reading || !observe() || !ready() || !projectReady() || !bound() || !validBranch;
 		inspect.textContent = t(reading ? "pub_loading" : "pub_preview");
 		apply.hidden = Boolean(saved.intent?.operation_id || saved.intent?.refused);
 		apply.textContent = t(fixed ? "permissions_retry" : "pub_apply");
@@ -9466,7 +9518,8 @@ function sessionRow(s) {
 }
 var epoch = (x) => x ? new Date(x * 1e3).toISOString() : "";
 function opStatus(op) {
-	return h("span", { class: `status-${op.status}` }, t("op_" + op.status));
+	const started = op.status === "succeeded" && ["session.start", "repository.continue"].includes(op.action);
+	return h("span", { class: `status-${op.status}` }, t(started ? "start_dispatched" : "op_" + op.status));
 }
 function opRow(op) {
 	return h("div", { class: "row" }, h("div", { class: "grow" }, h("a", {
@@ -10168,7 +10221,7 @@ async function viewSession(main, host, sid) {
 		}
 	}, t("interrupt"));
 	const composer = h("div", { hidden: true }, box, h("div", { class: "actions" }, send, stop, h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
-	const readonly = h("p", { class: "note" }, t("read_only_note"));
+	const readonly = h("p", { class: "note" }, t("session_access_unknown"));
 	let capture, permissions, batHandoff;
 	const captureSlot = h("div"), permissionsSlot = h("div");
 	const controls = h("div", { class: "panel" }, pending, readonly, composer, permissionsSlot, captureSlot, status);
@@ -10293,7 +10346,11 @@ async function viewSession(main, host, sid) {
 			...data.started_from?.operation_id ? [`operation:${data.started_from.operation_id}`] : []
 		]);
 		if (first) queue.checked = Boolean(row.streaming);
-		head.replaceChildren(h("h1", {}, row.title || sid), h("div", { class: "actions" }, ...sessionBadges(row)), h("dl", { class: "kv" }, h("dt", {}, t("host")), h("dd", {}, h("a", { href: `#/host/${encodeURIComponent(host)}` }, row.host)), h("dt", {}, t("workspace")), h("dd", {}, row.workspace || ""), h("dt", {}, "Session"), h("dd", {}, h("code", {}, row.session_id)), h("dt", {}, t("agent")), h("dd", {}, [row.agent_kind, row.model].filter(Boolean).join(" · ")), h("dt", {}, "Provenance"), h("dd", {}, t("provenance_" + row.provenance)), h("dt", {}, t("observed")), h("dd", {}, observationTime(row.observed_at))), observationState(row), confinementDetails(row));
+		head.replaceChildren(h("h1", {}, row.title || sid), h("div", { class: "actions" }, ...sessionBadges(row)), h("dl", { class: "kv" }, h("dt", {}, t("host")), h("dd", {}, h("a", { href: `#/host/${encodeURIComponent(host)}` }, row.host)), h("dt", {}, t("workspace")), h("dd", {}, row.workspace || ""), h("dt", {}, t("sessions_label")), h("dd", {}, h("code", {}, row.session_id)), h("dt", {}, t("agent")), h("dd", {}, [row.agent_kind, row.model].filter(Boolean).join(" · ")), h("dt", {}, t("session_origin")), h("dd", {}, t("provenance_" + ([
+			"manual",
+			"connector_managed",
+			"unknown"
+		].includes(row.provenance) ? row.provenance : "unknown"))), h("dt", {}, t("observed")), h("dd", {}, observationTime(row.observed_at))), observationState(row), confinementDetails(row));
 		if (!batHandoff) batHandoff = sessionBatPanel({
 			h,
 			t,
@@ -10347,6 +10404,7 @@ async function viewSession(main, host, sid) {
 		if (capture) capture.hidden = !manualSource;
 		composer.hidden = !managed;
 		readonly.hidden = managed;
+		readonly.textContent = t(row.provenance === "manual" ? "read_only_note" : "session_access_unknown");
 		renderPending();
 		updateControls();
 	};
@@ -10555,16 +10613,30 @@ async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceReposi
 		id: sourceId
 	} : null;
 	const repo = h("input", {
+		"aria-label": t("delivery_repository_input"),
 		placeholder: "owner/name",
 		value: source ? sourceRepository || "" : sessionStorage.getItem("batc.repo") || ""
 	});
 	const num = h("input", {
+		"aria-label": t("delivery_pr_number"),
 		placeholder: "123",
 		inputmode: "numeric",
 		size: 6,
 		value: source ? "" : sessionStorage.getItem("batc.pr") || ""
 	});
 	const card = h("div", { class: "panel delivery-card" });
+	const inputStatus = h("p", {
+		class: "muted",
+		role: "status"
+	});
+	const acceptLink = () => {
+		const pr = parsePullRequest(repo.value);
+		if (pr) {
+			repo.value = pr.repository;
+			num.value = pr.number;
+		}
+	};
+	repo.addEventListener("change", acceptLink);
 	const groups = new Map();
 	for (const r of state.caps?.deploy_recipes || []) {
 		const key = JSON.stringify([r.repository.toLowerCase(), r.environment]);
@@ -10576,22 +10648,34 @@ async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceReposi
 	if (source) main.append(h("p", { class: "note" }, t("delivery_source_context"), " ", h("code", {}, source.id)));
 	let selectedMethod = "";
 	let reviewedPreview = null;
-	main.append(h("h2", {}, t("dep_pull_request")), h("div", { class: "filters delivery-controls" }, repo, num, h("button", {
-		class: "secondary",
-		onclick: () => load()
-	}, t("load_pr"))), card);
+	main.append(h("h2", {}, t("dep_pull_request")), h("form", {
+		class: "filters delivery-controls",
+		onsubmit: (event) => {
+			event.preventDefault();
+			acceptLink();
+			load();
+		}
+	}, h("label", {}, t("delivery_repository_input"), repo), h("label", {}, t("delivery_pr_number"), num), h("button", {
+		type: "submit",
+		class: "secondary"
+	}, t("load_pr"))), inputStatus, card);
 	if (!source && !repo.value && state.caps?.repositories?.length) repo.value = state.caps.repositories[0].repository;
 	const load = async (flash = null, fromEvent = false) => {
 		const opens = drawerOpens;
 		const holdCard = () => card.querySelector(".drawer:not([hidden])") || fromEvent && holdRender(true, opens);
 		sessionStorage.setItem("batc.repo", repo.value);
 		sessionStorage.setItem("batc.pr", num.value);
-		if (!repo.value || !/^\d+$/.test(num.value)) return;
+		if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo.value) || !/^[1-9]\d{0,8}$/.test(num.value)) {
+			inputStatus.textContent = repo.value || num.value ? t("delivery_choose_pr") : "";
+			return;
+		}
+		inputStatus.textContent = "";
 		try {
 			const query = new URLSearchParams();
 			if (selectedMethod) query.set("method", selectedMethod);
 			if (fromEvent) query.set("from_event", "true");
 			const pr = (await api("GET", `/repositories/${repo.value}/pulls/${num.value}?${query}`)).pull_request;
+			if (!pr?.merge_preview || !pr?.merge) throw new Error(t("delivery_pr_unavailable"));
 			if (holdCard()) {
 				idleReload = () => load(null, true);
 				return;
@@ -11517,7 +11601,6 @@ function viewSettings(main) {
 	const input = h("input", {
 		type: "password",
 		autocomplete: "off",
-		size: 40,
 		placeholder: "batc_…"
 	});
 	const remember = h("input", { type: "checkbox" });
@@ -11527,7 +11610,7 @@ function viewSettings(main) {
 		scopes: state.caps.scopes.join(", ")
 	});
 	else if (state.connectionError) info.replaceChildren(errorBox(state.connectionError));
-	main.append(h("h1", {}, t("nav_settings")), h("div", { class: "panel" }, h("label", {}, t("token")), h("div", { class: "filters" }, input, h("button", {
+	main.append(h("h1", {}, t("nav_settings")), h("div", { class: "panel" }, h("div", { class: "filters" }, h("label", { class: "connection-token" }, t("token"), input), h("button", {
 		class: "primary",
 		onclick: async () => {
 			disconnect();
@@ -11618,6 +11701,7 @@ async function viewNativeSettings(main) {
 	const mine = generation;
 	const info = h("div", { "aria-live": "polite" });
 	const details = h("dl", { class: "kv" });
+	const technicalDetails = h("dl", { class: "kv" });
 	const setup = h("div", {
 		"data-native-setup": "",
 		hidden: true
@@ -11627,6 +11711,7 @@ async function viewNativeSettings(main) {
 	const fleetRoot = h("div");
 	const updateRoot = h("div");
 	let disposeUpdates;
+	let firstConnection = false;
 	const controls = [];
 	const action = (kind, label, cls = "secondary") => {
 		const button = h("button", {
@@ -11649,10 +11734,13 @@ async function viewNativeSettings(main) {
 	const leave = action("disconnect", "disconnect");
 	const actions = h("div", { class: "actions" }, connect, enroll, reload, leave);
 	const saved = h("div", {}, h("p", { class: "muted" }, t("desktop_forget_help")), forget);
+	const connectionDetails = h("details", {}, h("summary", {}, t("connection_details")), technicalDetails, help);
+	const introduction = h("details", {}, h("summary", {}, t("delivery_setup_title")), h("ol", {}, h("li", {}, t("delivery_setup_central")), h("li", {}, t("delivery_setup_identity")), h("li", {}, t("delivery_setup_mode"))));
+	const localDetails = h("details", { class: "panel" }, h("summary", {}, t("desktop_local")), h("p", { class: "muted" }, t("desktop_dashboard_only")));
 	main.append(h("h1", {}, t("nav_settings")), h("section", {
 		class: "panel native-connection",
 		"aria-label": t("desktop_connection")
-	}, h("h2", {}, t("desktop_connection")), h("details", { open: !state.caps }, h("summary", {}, t("delivery_setup_title")), h("ol", {}, h("li", {}, t("delivery_setup_central")), h("li", {}, t("delivery_setup_identity")), h("li", {}, t("delivery_setup_mode")))), setup, details, help, platform, actions, info, saved), h("div", { class: "panel" }, h("h2", {}, t("desktop_local")), h("p", { class: "note" }, t("desktop_dashboard_only"))), fleetRoot, updateRoot);
+	}, h("h2", {}, t("desktop_connection")), setup, details, platform, actions, info, connectionDetails, introduction, saved), localDetails, fleetRoot, updateRoot);
 	const showInfo = () => {
 		info.replaceChildren();
 		if (state.caps) info.append(h("p", {}, t("connected_as", {
@@ -11679,7 +11767,12 @@ async function viewNativeSettings(main) {
 			if (value) details.append(h("dt", {}, t(label)), h("dd", {}, value));
 		};
 		if (status.configuration_setup === true) {
+			firstConnection = true;
 			setup.hidden = false;
+			details.hidden = true;
+			actions.hidden = true;
+			platform.hidden = true;
+			localDetails.hidden = true;
 			const draft = state.nativeSetupDraft ||= {
 				endpoint: "",
 				expected_actor: ""
@@ -11722,10 +11815,11 @@ async function viewNativeSettings(main) {
 				});
 			} }, h("p", {}, t("desktop_setup_help")), h("div", { class: "capture-fields" }, h("label", {}, t("desktop_endpoint"), endpoint), h("label", {}, t("desktop_expected_actor"), actor)), h("p", { class: "muted" }, t("desktop_setup_origin")), h("div", { class: "actions" }, review));
 			setup.append(form);
+			connectionDetails.append(h("div", { class: "actions" }, reload));
 		}
 		row("desktop_endpoint", status.endpoint || t("desktop_config_needed"));
 		row("desktop_expected_actor", status.expected_actor);
-		row("desktop_configuration_file", status.configuration_file);
+		if (status.configuration_file) technicalDetails.append(h("dt", {}, t("desktop_configuration_file")), h("dd", {}, status.configuration_file));
 		if (status.credential_source) row("desktop_credential_source", t("desktop_source_" + status.credential_source));
 		if (status.error && !status.configuration_setup) info.append(errorBox(new Error(status.error)));
 		else if (!status.credential_available) info.append(h("p", {}, t("desktop_credential_missing")));
@@ -11745,6 +11839,7 @@ async function viewNativeSettings(main) {
 		if (mine === generation) info.append(errorBox(error));
 	}
 	if (mine !== generation) return;
+	if (firstConnection) return () => disposeUpdates?.();
 	const disposeFleet = await mountFleet(fleetRoot, {
 		h,
 		t
@@ -11810,7 +11905,7 @@ async function change(out, action, target, params, pre, scope) {
 	return null;
 }
 function manageNote() {
-	return may("manage") ? null : h("p", { class: "note" }, t("needs_manage_scope"));
+	return may("manage") ? null : h("p", { class: "note" }, t(nativeDesktop ? "needs_manage_access" : "needs_manage_scope"));
 }
 function indent(el, depth) {
 	el.style.setProperty("--depth", String(depth));
@@ -11967,24 +12062,38 @@ async function viewProjects(main) {
 	const archived = h("div", {});
 	const name = h("input", {
 		placeholder: t("new_project_name"),
-		maxlength: 80
+		"aria-label": t("new_project_name"),
+		maxlength: 80,
+		required: true
 	});
+	const repositories = [...new Set((state.caps?.features?.repository_sync || []).map((binding) => binding.repository))].sort();
+	const repository = h("select", { "aria-label": t("project_repository_optional") }, h("option", { value: "" }, t("project_repository_later")), ...repositories.map((value) => h("option", { value }, value)));
 	const add = h("button", {
 		class: "primary",
-		disabled: !may("manage"),
-		onclick: async () => {
-			if (!name.value.trim()) return;
-			add.disabled = true;
-			const op = await change(out, "project.create", {}, { name: name.value.trim() }, {}, "project.create");
-			add.disabled = false;
-			if (op) {
-				name.value = "";
-				location.hash = `#/project/${op.result.project_id}`;
-			}
-		}
+		type: "submit",
+		disabled: !may("manage")
 	}, t("add_project"));
+	const create = async (event) => {
+		event.preventDefault();
+		if (add.disabled || !name.value.trim()) return;
+		add.disabled = true;
+		const params = {
+			name: name.value.trim(),
+			...repository.value ? { repositories: [repository.value] } : {}
+		};
+		const op = await change(out, "project.create", {}, params, {}, "project.create");
+		add.disabled = false;
+		if (op) {
+			name.value = "";
+			location.hash = `#/project/${op.result.project_id}`;
+		}
+	};
+	const fields = h("div", { class: "capture-fields" }, h("label", {}, t("new_project_name"), name), ...repositories.length ? [h("label", {}, t("project_repository_optional"), repository)] : []);
 	const showArchived = h("input", { type: "checkbox" });
-	main.append(h("h1", {}, t("nav_projects")), h("p", { class: "muted" }, t("projects_help")), manageNote() || "", h("div", { class: "filters" }, name, add), out, tree, h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
+	main.append(h("h1", {}, t("nav_projects")), h("p", { class: "muted" }, t("projects_help")), manageNote() || "", h("form", {
+		class: "panel",
+		onsubmit: create
+	}, fields, h("div", { class: "actions" }, add)), out, tree, h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
 	const render = async (fromEvent = false) => {
 		const opens = drawerOpens;
 		try {
@@ -12992,7 +13101,7 @@ async function viewCleanup(main, section, ident) {
 			fill(retainedOut, errorBox(e));
 		}
 	}
-	main.append(h("h1", {}, t("nav_cleanup")), h("p", { class: "muted" }, t("cleanup_intro")), section === "task" || supportsTask ? h("p", { class: "muted" }, t("cleanup_task_help")) : null);
+	main.append(h("h1", {}, t("nav_cleanup")), h("p", { class: "muted" }, t("cleanup_intro")), section === "task" || supportsTask ? h("p", { class: "muted" }, t("cleanup_task_help")) : "");
 	if (section === "resource") {
 		try {
 			const data = await api("GET", `/cleanup-tombstones/${encodeURIComponent(ident)}`);
@@ -13268,15 +13377,20 @@ async function route() {
 	}
 	freshPage();
 	const [name, ...rest] = (location.hash.replace(/^#\//, "") || "home").split("/").map(decodeURIComponent);
-	document.getElementById("nav").replaceChildren(...NAV.map(([k, label]) => h("a", {
+	const visibleNav = state.token ? NAV : NAV.filter(([key]) => key === "settings");
+	document.getElementById("nav").replaceChildren(...visibleNav.map(([k, label]) => h("a", {
 		href: `#/${k}`,
-		class: name === k ? "on" : ""
+		class: (state.token ? name === k : k === "settings") ? "on" : ""
 	}, t(label))));
 	const main = document.getElementById("main");
 	main.replaceChildren();
 	if (!state.token && name !== "settings") {
-		main.append(h("p", { class: "note" }, t(nativeDesktop ? "desktop_connect_needed" : "need_token")));
-		viewSettings(main);
+		const off = await viewSettings(main);
+		if (mine !== generation) {
+			off?.();
+			return;
+		}
+		teardown = off || null;
 		return;
 	}
 	const off = await ({

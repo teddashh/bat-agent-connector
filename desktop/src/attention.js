@@ -10,7 +10,11 @@ export async function attentionView({main, h, t, api, guard, caps, storageKey, r
       class: value === tab ? "on" : "", "aria-pressed": String(value === tab), onclick: () => {
         guard(); sessionStorage.setItem(storageKey, value); route();
       }}, t("attention_tab_" + value))));
-  const empty = h("p", {class: "muted", hidden: true}, t("empty_needs_you"));
+  const empty = h("section", {class: "panel", hidden: true}, h("p", {}, t("empty_needs_you")),
+    h("p", {class: "muted"}, t("empty_next_work")), h("div", {class: "actions"},
+      h("a", {href: "#/projects"}, t("sessions_projects")),
+      caps?.scopes?.includes('start') && caps?.actions?.some(a => a.action === 'session.start' && a.allowed === true)
+        ? h("a", {href: "#/start"}, t("start_title_page")) : null));
   const sections = [];
   const add = (key, path, field, row, options = {}) => {
     const list = h("div", {}), status = h("div", {role: "status"});

@@ -8,6 +8,25 @@
 
 ## 目前續作
 
+### 2026-10-10 E2E UX 審查後的共用介面修正
+
+`fix/ux-audit-followup` 修正 Web 手機登入欄位溢出、表單缺少標籤、首次 session 讀取失敗
+卻宣稱人工建立，以及不支援 task cleanup 時的 `null` 文字。未連線時只呈現連線入口；
+原生首次設定收起路徑與進階說明，設定連線目標後才呈現 Fleet／Tailscale。本機設定恢復仍可展開，
+已配置的 endpoint、actor、credential source 保持可見，原生確認與憑證隔離不變。
+
+分支可輸入 `main` 或完整 `refs/heads/main`，預覽／提交仍固定正規 ref 與 SHA，失敗重試沿用
+原意圖。Delivery 可貼 GitHub PR 網址，自動取得 repository／PR 編號；所有讀寫仍送到已驗證
+中央，絕不直接帶憑證抓使用者貼上的網址。啟動 operation 成功改標「已啟動」，不表示工作完成。
+待處理空狀態提供專案／開工入口；桌面缺管理權限時提供帳號處理指引。
+建立專案時可明確選擇中央既有的 repository binding，建立後直接接到專案派工；不預選
+儲存庫，也不建立新的主機設定或額外 task。尚無可選 binding 時仍可先建立空專案。
+
+本項是已確認 UX 缺陷與互動修正，**尚未完成下載後自動安裝中央、簽發身分、配置 BAT 主機／
+repository binding 的首次使用流程**。現有中央依賴 Unix 鎖與檔案操作，不能把收起設定說明
+當成 Windows 本機後端已可用。完整零設定啟動與 PR 列表選擇仍需後續實作。
+分支、檢查、合併、原生安裝與實際主機驗收分開記錄。
+
 ### 2026-10-09 原生首次連線
 
 `feat/first-connection` 接續 Delivery 修正，將缺少 `central.json` 的首次啟動接成：輸入中央

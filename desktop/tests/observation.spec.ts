@@ -283,3 +283,26 @@ for (const locale of ["en-US", "zh-TW"]) for (const width of [390, 768, 1440]) {
     expect(errors).toEqual([]); await context.close();
   });
 }
+
+for (const native of [false, true]) test(`failed first read never invents manual session ownership (${native ? 'native' : 'browser'})`, async ({page}) => {
+  let provenance: string | null = null;
+  await mount(page, native, async input => {
+    const path = new URL(input.path, 'http://fixture').pathname;
+    if (path === '/sessions/demo/missing') return provenance ? {status: 200, data: {session: {
+      host: 'demo', session_id: 'missing', provenance, api_access: 'read_only'}}}
+      : {status: 404, data: {error: {code: 'NOT_FOUND', message: 'Session not found'}}};
+    return {status: 200, data: path === '/capabilities' ? caps : path === '/bootstrap' ? {capabilities: caps,
+      sync: {version: 1, server_id: 'server', principal_id: 'principal', checkpoint: cp(0)}}
+      : path === '/events' ? {events: [], head_cursor: 0, next_cursor: 0, sync: {checkpoint: cp(0)}}
+      : {messages: [], checkpoints: [], operations: [], hosts: [], sessions: [], work_items: []}};
+  });
+  await page.goto('/dashboard/#/session/demo/missing');
+  await expect(page.getByText('NOT_FOUND Session not found', {exact: true})).toBeVisible();
+  await expect(page.getByText('The origin and management permissions', {exact: false})).toBeVisible();
+  await expect(page.getByText('A person created this session in BAT', {exact: false})).toHaveCount(0);
+  provenance = 'unknown'; await page.reload();
+  await expect(page.getByText('The origin and management permissions', {exact: false})).toBeVisible();
+  await expect(page.getByRole('button', {name: 'Send', exact: true})).toBeHidden();
+  provenance = 'manual'; await page.reload();
+  await expect(page.getByText('A person created this session in BAT', {exact: false})).toBeVisible();
+});

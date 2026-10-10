@@ -72,7 +72,12 @@ button.secondary { background: transparent; color: var(--accent); }
 button.danger { background: transparent; color: var(--bad); border-color: var(--bad); }
 button:disabled { opacity: .45; cursor: not-allowed; }
 input, select, textarea { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line);
-  border-radius: 8px; padding: 7px 10px; }
+  border-radius: 8px; padding: 7px 10px; max-width: 100%; min-width: 0; }
+.connection-token { width: min(100%, 28rem); }
+.connection-token input { display: block; width: 100%; }
+.delivery-controls { align-items: end; }
+.delivery-controls label { display: grid; gap: 4px; min-width: 0; }
+.delivery-controls label:first-child { flex: 1 1 260px; }
 textarea { width: 100%; min-height: 80px; resize: vertical; }
 .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .msg { padding: 8px 10px; border-radius: 8px; margin: 6px 0; background: var(--chip); white-space: pre-wrap;
