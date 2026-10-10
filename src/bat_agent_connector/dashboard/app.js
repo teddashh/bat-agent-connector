@@ -19,6 +19,132 @@ var __exportAll = (all, no_symbols) => {
 	return target;
 };
 //#endregion
+//#region src/attention.js
+async function attentionView({ main, h, t, api, guard, caps, storageKey, route, onEvents, debounceRefresh, errorBox, sessionRow, workItemRow, opRow }) {
+	const unread = caps?.features?.work_item_reads?.version === 1;
+	const saved = sessionStorage.getItem(storageKey) || sessionStorage.getItem("batc.tab");
+	const tab = saved === "confirm" || saved === "active" ? "active" : saved === "unread" && unread ? "unread" : "needs";
+	const tabs = h("div", {
+		class: "tabs attention-tabs",
+		role: "group",
+		"aria-label": t("nav_home")
+	}, ...[
+		"needs",
+		"active",
+		...unread ? ["unread"] : []
+	].map((value) => h("button", {
+		class: value === tab ? "on" : "",
+		"aria-pressed": String(value === tab),
+		onclick: () => {
+			guard();
+			sessionStorage.setItem(storageKey, value);
+			route();
+		}
+	}, t("attention_tab_" + value))));
+	const empty = h("p", {
+		class: "muted",
+		hidden: true
+	}, t("empty_needs_you"));
+	const sections = [];
+	const add = (key, path, field, row, options = {}) => {
+		const list = h("div", {}), status = h("div", { role: "status" });
+		const count = h("span", { class: "muted" }), more = h("button", {
+			class: "secondary",
+			hidden: true
+		}, t("load_more"));
+		const section = h("section", {
+			class: "panel attention-section",
+			"aria-label": t("attention_" + key)
+		}, h("h2", {}, t("attention_" + key)), h("p", { class: "muted" }, t("attention_" + key + "_note")), status, list, h("div", { class: "actions attention-footer" }, count, more, key === "problems" || key === "active" ? h("a", { href: "#/operations/" + (key === "problems" ? "attention" : "active") }, t(key === "problems" ? "operations_view_attention" : "operations_view_active")) : null));
+		const state = {
+			key,
+			path,
+			field,
+			row,
+			...options,
+			section,
+			list,
+			status,
+			count,
+			more,
+			pages: 1,
+			size: null,
+			busy: false
+		};
+		more.onclick = () => refresh(state, state.pages + 1).catch(() => {});
+		sections.push(state);
+		return section;
+	};
+	const hostRow = (x) => h("div", { class: "row" }, h("div", { class: "grow" }, h("div", { class: "title" }, x.host), h("div", { class: "muted" }, x.error || t("stale_reason_" + x.stale_reason))));
+	main.append(h("h1", {}, t("nav_home")), tabs, empty, ...tab === "needs" ? [
+		add("replies", "/sessions?attention=true&limit=50", "sessions", sessionRow),
+		add("completion", "/work-items?pending=true&limit=50", "work_items", workItemRow),
+		add("problems", "/operations?status=needs_attention,uncertain&limit=50", "operations", opRow, {
+			cursor: "next_before",
+			param: "before"
+		}),
+		add("hosts", "/hosts", "hosts", hostRow, { filter: (x) => x.stale })
+	] : tab === "active" ? [add("active", "/operations?status=accepted,running,waiting_checks,waiting_external&limit=50", "operations", opRow, {
+		cursor: "next_before",
+		param: "before"
+	})] : [add("unread", "/work-items?unread=true&limit=50", "work_items", workItemRow)]);
+	let serial = Promise.resolve();
+	const load = async (section, wanted) => {
+		guard();
+		section.busy = true;
+		section.more.disabled = true;
+		if (section.size === null) section.status.replaceChildren(h("p", { class: "muted" }, t("loading")));
+		try {
+			let cursor = null, pages = 0;
+			const items = new Map(), seen = new Set();
+			do {
+				const data = await api("GET", section.path + (cursor == null ? "" : `&${section.param || "cursor"}=${encodeURIComponent(cursor)}`));
+				guard();
+				if (!Array.isArray(data[section.field])) throw new Error(t("attention_invalid"));
+				for (const row of data[section.field]) if (!section.filter || section.filter(row)) items.set(row.work_item_id || row.operation_id || (row.session_id ? JSON.stringify([row.host, row.session_id]) : row.host), row);
+				cursor = data[section.cursor || "next_cursor"] ?? null;
+				pages++;
+				if (cursor !== null && seen.has(cursor)) throw new Error(t("attention_invalid"));
+				seen.add(cursor);
+			} while (cursor !== null && pages < wanted);
+			section.pages = pages;
+			section.size = items.size;
+			section.list.replaceChildren(...items.size ? [...items.values()].map(section.row) : [h("p", { class: "muted" }, t("attention_empty"))]);
+			section.count.textContent = t("attention_loaded", { count: items.size });
+			section.status.replaceChildren();
+			section.more.hidden = cursor === null;
+			section.section.dataset.fresh = "true";
+		} catch (error) {
+			guard();
+			section.section.dataset.fresh = "false";
+			section.status.replaceChildren(errorBox(error), h("p", { class: "muted" }, t("attention_not_updated")));
+			throw error;
+		} finally {
+			section.busy = false;
+			section.more.disabled = false;
+		}
+	};
+	const refresh = (only, wanted) => {
+		const work = serial.catch(() => {}).then(async () => {
+			guard();
+			const results = await Promise.allSettled((only ? [only] : sections).map((s) => load(s, only ? wanted : s.pages)));
+			guard();
+			empty.hidden = tab !== "needs" || !sections.every((s) => s.size === 0 && s.section.dataset.fresh === "true");
+			const failed = results.find((r) => r.status === "rejected");
+			if (failed) throw failed.reason;
+		});
+		serial = work;
+		return work;
+	};
+	await refresh().catch(() => {});
+	try {
+		guard();
+	} catch {
+		return;
+	}
+	return onEvents(debounceRefresh(() => refresh(), 500));
+}
+//#endregion
 //#region src/session-labels.js
 var object$5 = (v) => v && typeof v === "object" && !Array.isArray(v);
 var version$1 = (v) => Number.isSafeInteger(v) && v >= 0;
@@ -426,9 +552,289 @@ async function readArtifactContent(reference, size, token, signal) {
 	return bytes;
 }
 //#endregion
+//#region src/message-format.js
+var lineText = (line) => line.replace(/\r?\n$/, "");
+function tableCells(line) {
+	let text = line.trim(), cell = "", ticks = 0, separators = 0;
+	const cells = [];
+	if (text.startsWith("|")) text = text.slice(1);
+	for (let i = 0; i < text.length; i++) {
+		const char = text[i];
+		if (char === "\\" && text[i + 1] === "|") {
+			cell += "|";
+			i++;
+			continue;
+		}
+		if (char === "`") {
+			let end = i + 1;
+			while (text[end] === "`") end++;
+			const count = end - i;
+			if (!ticks) ticks = count;
+			else if (ticks === count) ticks = 0;
+			cell += text.slice(i, end);
+			i = end - 1;
+			continue;
+		}
+		if (char === "|" && !ticks) {
+			cells.push(cell.trim());
+			cell = "";
+			separators++;
+		} else cell += char;
+	}
+	if (cell || !text.endsWith("|")) cells.push(cell.trim());
+	return separators ? cells : null;
+}
+function messageBlocks(source) {
+	if (source.length > 2e5) return [{
+		kind: "text",
+		text: source
+	}];
+	const lines = source.match(/[^\n]*\n|[^\n]+$/g) || [];
+	if (lines.length > 4e3) return [{
+		kind: "text",
+		text: source
+	}];
+	const blocks = [], plain = [];
+	const flush = () => {
+		if (plain.length) blocks.push({
+			kind: "text",
+			text: plain.splice(0).join("")
+		});
+	};
+	for (let i = 0; i < lines.length;) {
+		const fence = /^ {0,3}(`{3,}|~{3,})([^\r\n]*)$/.exec(lineText(lines[i]));
+		if (fence && !(fence[1][0] === "`" && fence[2].includes("`"))) {
+			flush();
+			const endFence = new RegExp(`^ {0,3}${fence[1][0]}{${fence[1].length},}[ \\t]*$`);
+			const body = [];
+			i++;
+			while (i < lines.length && !endFence.test(lineText(lines[i]))) body.push(lines[i++]);
+			if (i < lines.length) i++;
+			blocks.push({
+				kind: "code",
+				language: fence[2].trim(),
+				text: body.join("")
+			});
+			continue;
+		}
+		const header = tableCells(lineText(lines[i])), divider = i + 1 < lines.length ? tableCells(lineText(lines[i + 1])) : null;
+		if (header?.length && header.length <= 40 && divider?.length === header.length && divider.every((cell) => /^:?-{3,}:?$/.test(cell))) {
+			flush();
+			const rows = [];
+			i += 2;
+			while (i < lines.length && rows.length < 100) {
+				const cells = tableCells(lineText(lines[i]));
+				if (!cells || cells.length !== header.length) break;
+				rows.push(cells);
+				i++;
+			}
+			blocks.push({
+				kind: "table",
+				header,
+				rows
+			});
+			continue;
+		}
+		plain.push(lines[i++]);
+	}
+	flush();
+	return blocks;
+}
+function inline(h, text) {
+	if (text.length > 8192) return [text];
+	const nodes = [];
+	let from = 0;
+	for (const match of text.matchAll(/`([^`\n]+)`|\*\*([^*\n]+)\*\*/g)) {
+		nodes.push(text.slice(from, match.index), h(match[1] === void 0 ? "strong" : "code", {}, match[1] ?? match[2]));
+		from = match.index + match[0].length;
+	}
+	nodes.push(text.slice(from));
+	return nodes;
+}
+function renderMessage(h, t, source, copy) {
+	return messageBlocks(source).map((block) => {
+		if (block.kind === "code") return h("div", { class: "message-code" }, h("div", { class: "message-code-bar" }, h("span", { class: "muted" }, block.language || t("message_code")), h("button", {
+			class: "mini",
+			type: "button",
+			onclick: () => copy(block.text)
+		}, t("message_copy_code"))), h("pre", {
+			tabindex: "0",
+			"aria-label": t("message_code")
+		}, h("code", {}, block.text)));
+		if (block.kind === "table") return h("div", {
+			class: "message-table",
+			tabindex: "0",
+			role: "region",
+			"aria-label": t("message_table")
+		}, h("table", {}, h("thead", {}, h("tr", {}, ...block.header.map((cell) => h("th", { scope: "col" }, ...inline(h, cell))))), h("tbody", {}, ...block.rows.map((row) => h("tr", {}, ...row.map((cell) => h("td", {}, ...inline(h, cell))))))));
+		return h("div", { class: "message-text" }, ...inline(h, block.text));
+	});
+}
+//#endregion
+//#region src/conversation.js
+function conversationPanel({ h, t, when, guard }) {
+	const viewport = h("div", {
+		class: "conversation-scroll",
+		tabindex: "0",
+		role: "region",
+		"aria-label": t("messages")
+	});
+	const status = h("span", {
+		class: "muted",
+		role: "status"
+	}), fallback = h("div", { class: "conversation-copy" });
+	const notice = h("p", {
+		class: "muted",
+		role: "status",
+		hidden: true
+	}, t("message_anchor_missing"));
+	const latest = h("button", {
+		class: "mini",
+		type: "button",
+		hidden: true,
+		onclick: () => {
+			viewport.scrollTop = viewport.scrollHeight;
+			notice.hidden = true;
+			indicator();
+		}
+	}, t("message_latest"));
+	const box = h("section", { class: "panel conversation" }, h("div", { class: "muted" }, t("message_window")), notice, viewport, h("div", { class: "conversation-toolbar" }, status, latest), fallback);
+	let rows = new Map(), initialized = false, disposed = false, copyAttempt = 0;
+	const alive = () => {
+		if (disposed) return false;
+		try {
+			guard();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const atBottom = () => viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 48;
+	const indicator = () => {
+		latest.hidden = atBottom();
+	};
+	viewport.addEventListener("scroll", indicator, { passive: true });
+	const copy = async (text) => {
+		if (!alive()) return;
+		const attempt = ++copyAttempt;
+		status.textContent = "";
+		fallback.replaceChildren();
+		try {
+			await navigator.clipboard.writeText(text);
+			if (alive() && attempt === copyAttempt) status.textContent = t("message_copied");
+		} catch {
+			if (!alive() || attempt !== copyAttempt) return;
+			const input = h("textarea", {
+				readonly: true,
+				"aria-label": t("message_copy_source")
+			}, text);
+			input.addEventListener("copy", (event) => {
+				if (alive() && event.clipboardData && input.selectionStart === 0 && input.selectionEnd === input.value.length) {
+					event.clipboardData.setData("text/plain", text);
+					event.preventDefault();
+				}
+			});
+			fallback.replaceChildren(h("p", { class: "muted" }, t("message_copy_manual")), input, h("button", {
+				class: "mini",
+				type: "button",
+				onclick: () => fallback.replaceChildren()
+			}, t("cancel")));
+			input.focus();
+			input.select();
+		}
+	};
+	const update = (messages) => {
+		if (!alive()) return;
+		const top = viewport.getBoundingClientRect().top;
+		const anchor = [...rows.entries()].find(([, row]) => row.node.getBoundingClientRect().bottom > top);
+		const selection = window.getSelection();
+		const readingSelection = selection && !selection.isCollapsed && viewport.contains(selection.anchorNode);
+		const follow = !initialized || atBottom() && !readingSelection;
+		const offset = anchor ? anchor[1].node.getBoundingClientRect().top - top : 0, scrollTop = viewport.scrollTop;
+		const next = new Map(), occurrences = new Map();
+		for (const message of messages) {
+			const text = typeof message.text === "string" ? message.text : "";
+			const identity = JSON.stringify(message.id != null ? ["id", message.id] : [
+				"text",
+				message.role,
+				message.ts,
+				text
+			]);
+			const occurrence = occurrences.get(identity) || 0;
+			occurrences.set(identity, occurrence + 1);
+			const key = JSON.stringify([identity, occurrence]);
+			let row = rows.get(key);
+			if (!row) {
+				row = {
+					text: null,
+					meta: null,
+					body: h("div", { class: "message-body" }),
+					who: h("span", { class: "who" })
+				};
+				row.node = h("article", { class: "msg" }, h("div", { class: "message-meta" }, row.who, h("button", {
+					class: "mini",
+					type: "button",
+					onclick: () => copy(row.text)
+				}, t("message_copy"))), row.body);
+			}
+			const meta = `${message.role || ""} · ${when(message.ts)}`;
+			if (row.meta !== meta) {
+				row.who.textContent = meta;
+				row.meta = meta;
+			}
+			row.node.className = `msg${message.role === "user" ? " user" : ""}`;
+			if (row.text !== text) {
+				row.body.replaceChildren(...renderMessage(h, t, text, copy));
+				row.text = text;
+			}
+			next.set(key, row);
+		}
+		const retained = new Set([...next.values()].map((row) => row.node));
+		for (const node of [...viewport.childNodes]) if (!retained.has(node)) node.remove();
+		let position = viewport.firstChild;
+		for (const row of next.values()) if (row.node === position) position = position.nextSibling;
+		else viewport.insertBefore(row.node, position);
+		while (position) {
+			const old = position;
+			position = old.nextSibling;
+			old.remove();
+		}
+		if (!next.size) viewport.replaceChildren(h("p", { class: "muted" }, t("no_messages")));
+		if (follow) {
+			viewport.scrollTop = viewport.scrollHeight;
+			notice.hidden = true;
+		} else if (anchor && next.has(anchor[0])) viewport.scrollTop += next.get(anchor[0]).node.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset;
+		else {
+			viewport.scrollTop = scrollTop;
+			if (anchor) notice.hidden = false;
+		}
+		rows = next;
+		initialized = true;
+		indicator();
+	};
+	return {
+		box,
+		update,
+		dispose() {
+			disposed = true;
+			viewport.removeEventListener("scroll", indicator);
+		}
+	};
+}
+//#endregion
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		message_code: "程式碼",
+		message_table: "訊息表格",
+		message_copy_code: "複製程式碼",
+		message_copy: "複製原文",
+		message_copied: "已複製。",
+		message_copy_source: "要複製的原文",
+		message_copy_manual: "無法自動複製，請選取並複製以下原文。",
+		message_latest: "回到最新訊息",
+		message_window: "最近 30 則訊息",
+		message_anchor_missing: "原本閱讀的位置已不在這次載入的訊息中。",
 		tailscale_request: "原開啟請求",
 		tailscale_title: "Tailscale",
 		tailscale_open: "開啟 Tailscale",
@@ -578,7 +984,7 @@ var STRINGS = {
 		operations_empty: "這個範圍尚無操作。",
 		operations_invalid_page: "分頁回應無效；保留已載入的操作。",
 		operations_view_attention: "查看需要處理的操作",
-		operations_view_active: "查看待確認的操作",
+		operations_view_active: "查看執行中操作",
 		orch_waiting_children: "正在查回原有子操作",
 		orch_body_limit: "完整請求超過中央的 200,000 位元組上限。請縮短項目原文；目前尚未提交。",
 		orch_title: "安排工作執行",
@@ -1344,6 +1750,31 @@ var STRINGS = {
 		nav_settings: "連線",
 		tab_needs_you: "需要你處理",
 		tab_to_confirm: "待確認",
+		attention_tab_needs: "需要你處理",
+		attention_tab_active: "執行中操作",
+		attention_tab_unread: "未讀工作更新",
+		attention_replies: "待回覆與權限",
+		attention_replies_note: "依中央實際問題與權限請求列出；閱讀不會解除請求。",
+		attention_completion: "完成確認",
+		attention_completion_note: "工作回報完成或步驟已勾完，仍需你確認或退回繼續。",
+		attention_problems: "需處理的操作",
+		attention_problems_note: "包含結果尚不確定的操作；先查看原操作與回執。",
+		attention_hosts: "主機連線",
+		attention_hosts_note: "連不上或觀測過期的主機；不據此判定工作已結束。",
+		attention_active: "執行中操作",
+		attention_active_note: "已受理、執行中或等待外部條件的操作；這不是工作完成確認。",
+		attention_unread: "未讀工作更新",
+		attention_unread_note: "尚未標記已讀的工作項目版本，包含先前已有的項目；不代表未讀訊息數。",
+		attention_loaded: "已載入 {count} 筆（非總數）",
+		attention_empty: "這一類目前沒有項目。",
+		attention_not_updated: "本次未能更新；若下方有資料，仍是上次讀取的內容。",
+		attention_invalid: "清單回應不完整，請重新讀取。",
+		reading_unread: "未讀更新",
+		reading_read: "此版本已讀",
+		reading_mark: "標記此版本已讀",
+		reading_note: "已讀只記錄你看過的工作項目版本，會同步至同一身分的其他入口；不會確認完成或解除待回覆。",
+		ev_work_item_read: "標記已讀",
+		reading_newer: "中央已有較新版本；目前顯示的內容與未提交編輯仍保留，關閉編輯後會更新。",
 		empty_needs_you: "目前沒有需要你處理的項目。",
 		empty_to_confirm: "沒有等待確認的操作。",
 		stale: "資料過期",
@@ -1538,6 +1969,16 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		message_code: "Code",
+		message_table: "Message table",
+		message_copy_code: "Copy code",
+		message_copy: "Copy original",
+		message_copied: "Copied.",
+		message_copy_source: "Original text to copy",
+		message_copy_manual: "Automatic copy is unavailable. Select and copy the original text below.",
+		message_latest: "Back to latest",
+		message_window: "Latest 30 messages",
+		message_anchor_missing: "Your previous reading position is outside the messages currently loaded.",
 		tailscale_request: "Original opening request",
 		tailscale_title: "Tailscale",
 		tailscale_open: "Open Tailscale",
@@ -1687,7 +2128,7 @@ var STRINGS = {
 		operations_empty: "No operations in this scope.",
 		operations_invalid_page: "Invalid page response; loaded operations are retained.",
 		operations_view_attention: "View operations needing attention",
-		operations_view_active: "View operations awaiting confirmation",
+		operations_view_active: "View active operations",
 		orch_waiting_children: "Waiting for original child operations",
 		orch_body_limit: "The complete request exceeds central's 200,000-byte limit. Shorten the item instructions; nothing has been submitted.",
 		orch_title: "Orchestrate work",
@@ -2453,6 +2894,31 @@ var STRINGS = {
 		nav_settings: "Connection",
 		tab_needs_you: "Needs you",
 		tab_to_confirm: "To confirm",
+		attention_tab_needs: "Needs you",
+		attention_tab_active: "Active operations",
+		attention_tab_unread: "Unread work updates",
+		attention_replies: "Replies and permissions",
+		attention_replies_note: "Questions and permission requests reported by central. Reading does not resolve them.",
+		attention_completion: "Completion review",
+		attention_completion_note: "Work reported done or with every step checked still needs your decision.",
+		attention_problems: "Operations needing attention",
+		attention_problems_note: "Includes uncertain outcomes. Review the original operation and its receipts.",
+		attention_hosts: "Host connections",
+		attention_hosts_note: "Unreachable or stale hosts. This does not mean their work has ended.",
+		attention_active: "Active operations",
+		attention_active_note: "Accepted, running or waiting for external conditions. These are not work completion reviews.",
+		attention_unread: "Unread work updates",
+		attention_unread_note: "Work-item versions you have not marked read, including existing items. This is not an unread message count.",
+		attention_loaded: "{count} loaded (not a total)",
+		attention_empty: "No items in this category.",
+		attention_not_updated: "Could not refresh. Any items below are from the previous read.",
+		attention_invalid: "Incomplete list response; reload to try again.",
+		reading_unread: "Unread update",
+		reading_read: "This version is read",
+		reading_mark: "Mark this version read",
+		reading_note: "Reading tracks the work-item version you saw and syncs across clients using the same identity. It does not approve completion or resolve requests.",
+		ev_work_item_read: "Marked read",
+		reading_newer: "Central has a newer version. The displayed content and unsaved edits are preserved until you close the editor.",
 		empty_needs_you: "Nothing needs you right now.",
 		empty_to_confirm: "Nothing is waiting.",
 		stale: "stale",
@@ -8775,50 +9241,27 @@ function opRow(op) {
 	}, op.action), h("div", { class: "muted" }, [op.actor, when(epoch(op.created_at))].join(" · ")), op.status_reason ? h("div", { class: "muted" }, op.status_reason) : null), opStatus(op), op.error_code ? chip(op.error_code, "bad") : null);
 }
 async function viewHome(main) {
-	const tab = sessionStorage.getItem("batc.tab") || "needs";
-	const panel = h("div", { class: "panel" });
-	const tabs = h("div", { class: "tabs" }, h("button", {
-		class: tab === "needs" ? "on" : "",
-		onclick: () => {
-			sessionStorage.setItem("batc.tab", "needs");
-			route();
-		}
-	}, t("tab_needs_you")), h("button", {
-		class: tab === "confirm" ? "on" : "",
-		onclick: () => {
-			sessionStorage.setItem("batc.tab", "confirm");
-			route();
-		}
-	}, t("tab_to_confirm")));
-	main.append(h("h1", {}, t("nav_home")), tabs, panel);
-	const render = async () => {
-		panel.replaceChildren(h("p", { class: "muted" }, t("loading")));
-		try {
-			if (tab === "needs") {
-				const [sessions, ops, hosts, decide] = await Promise.all([
-					api("GET", "/sessions?attention=true&limit=50"),
-					api("GET", "/operations?status=needs_attention,uncertain&limit=50"),
-					api("GET", "/hosts"),
-					api("GET", "/work-items?pending=true&limit=50")
-				]);
-				const rows = [
-					...hosts.hosts.filter((x) => x.stale).map((x) => h("div", { class: "row" }, h("span", { class: "light bad" }), h("div", { class: "grow" }, h("div", { class: "title" }, `${t("unreachable_hosts")}: ${x.host}`), h("div", { class: "muted" }, x.error || t("stale_reason_" + x.stale_reason))))),
-					...decide.work_items.map(workItemRow),
-					...sessions.sessions.map(sessionRow),
-					...ops.operations.map(opRow),
-					h("p", { class: "muted" }, t("operations_loaded", { count: ops.operations.length }), " · ", h("a", { href: "#/operations/attention" }, t("operations_view_attention")))
-				];
-				panel.replaceChildren(...rows.length > 1 ? rows : [h("p", { class: "muted" }, t("empty_needs_you")), ...rows]);
-			} else {
-				const ops = await api("GET", "/operations?status=accepted,running,waiting_checks,waiting_external&limit=50");
-				panel.replaceChildren(...ops.operations.length ? ops.operations.map(opRow) : [h("p", { class: "muted" }, t("empty_to_confirm"))], h("p", { class: "muted" }, t("operations_loaded", { count: ops.operations.length }), " · ", h("a", { href: "#/operations/active" }, t("operations_view_active"))));
-			}
-		} catch (e) {
-			panel.replaceChildren(errorBox(e));
-		}
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
 	};
-	await render();
-	return onEvents(debounceRefresh(render, 500));
+	return attentionView({
+		main,
+		h,
+		t,
+		api,
+		caps: state.caps,
+		storageKey: `batc.attention.${connection.namespace}`,
+		guard: () => assertView(connection),
+		route,
+		onEvents,
+		debounceRefresh,
+		errorBox,
+		sessionRow,
+		workItemRow,
+		opRow
+	});
 }
 async function viewSessions(main) {
 	const connection = {
@@ -9402,7 +9845,13 @@ async function viewSession(main, host, sid) {
 		generation
 	};
 	const path = `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`;
-	const head = h("div", { class: "panel" }), msgs = h("div", { class: "panel" });
+	const head = h("div", { class: "panel" });
+	const conversation = conversationPanel({
+		h,
+		t,
+		when,
+		guard: () => assertView(connection)
+	});
 	const pending = h("div", { "data-pending-controls": "" }), status = h("div", { class: "muted" });
 	const scope = `send.${host}.${sid}`, draftKey = `batc.draft.${connection.namespace}.${scope}`;
 	const box = h("textarea", { placeholder: t("send_placeholder") });
@@ -9495,7 +9944,7 @@ async function viewSession(main, host, sid) {
 	});
 	const cps = checkpointPanel(host, sid);
 	const observations = observationPanels("session", `${host}/${sid}`, path);
-	main.append(head, labels.box, controls, cps.box, h("h2", {}, t("messages")), msgs, observations.box);
+	main.append(head, labels.box, controls, cps.box, h("h2", {}, t("messages")), conversation.box, observations.box);
 	const renderPending = () => {
 		const pend = row.api_access === "managed" ? row.pending : null;
 		const current = identity(pend);
@@ -9665,8 +10114,7 @@ async function viewSession(main, host, sid) {
 	const loadMessages = async () => {
 		const read = await api("GET", `${path}/messages?last_n=30`);
 		assertView(connection);
-		const items = read.messages.map((m) => h("div", { class: `msg ${m.role === "user" ? "user" : ""}` }, h("span", { class: "who" }, `${m.role || ""} · ${when(m.ts)}`), m.text || ""));
-		msgs.replaceChildren(...items.length ? items : [h("p", { class: "muted" }, t("no_messages"))]);
+		conversation.update(read.messages);
 	};
 	const refresh = async (fromEvent = false) => {
 		if (refreshInFlight) {
@@ -9720,6 +10168,7 @@ async function viewSession(main, host, sid) {
 		clearInterval(retry);
 		off();
 		batHandoff?.dispose();
+		conversation.dispose();
 	};
 }
 function checkpointPanel(host, sid) {
@@ -11380,6 +11829,7 @@ async function viewWorkItem(main, wid) {
 	freshPage();
 	const notice = h("div", {});
 	const panel = h("div", {});
+	const reading = h("div", {});
 	const connection = {
 		epoch: state.epoch,
 		namespace: state.namespace,
@@ -11438,8 +11888,40 @@ async function viewWorkItem(main, wid) {
 		ref.placeholder = t("link_ref_" + kind.value);
 	};
 	kind.onchange();
-	main.append(manageNote() || "", notice, panel);
-	const render = async (fromEvent = false) => {
+	main.append(manageNote() || "", notice, reading, panel);
+	let displayedItem = null, renderQueue = Promise.resolve();
+	const showReading = (w, progress) => {
+		const readingSupported = state.caps?.features?.work_item_reads?.version === 1 && progress;
+		reading.replaceChildren();
+		if (readingSupported) {
+			const canRead = state.caps.actions?.some((a) => a.action === "work_item.read" && a.allowed);
+			const mark = h("button", {
+				class: "secondary",
+				disabled: !canRead || progress.read_version >= w.version,
+				onclick: async () => {
+					try {
+						assertView(connection);
+						mark.disabled = true;
+						await change(notice, "work_item.read", { work_item_id: wid }, {}, { expected_version: w.version }, `wi.read.${wid}.${w.version}`);
+						assertView(connection);
+						await render(true);
+					} catch (error) {
+						if (!["VIEW_CHANGED", "CONNECTION_CHANGED"].includes(error.code)) fill(notice, errorBox(error));
+					} finally {
+						if (mark.isConnected) mark.disabled = !canRead || progress.read_version >= w.version;
+					}
+				}
+			}, t("reading_mark"));
+			reading.append(h("div", { class: "panel reading-state" }, h("div", { class: "actions" }, chip(t(progress.unread ? "reading_unread" : "reading_read")), mark), h("p", { class: "muted" }, t("reading_note")), progress.current_version > w.version ? h("p", { class: "muted" }, t("reading_newer")) : null));
+		}
+	};
+	const render = (fromEvent = false) => {
+		const work = renderQueue.catch(() => {}).then(() => renderNow(fromEvent));
+		renderQueue = work;
+		return work;
+	};
+	const renderNow = async (fromEvent = false) => {
+		if (!panel.isConnected) return;
 		const opens = drawerOpens;
 		let data;
 		try {
@@ -11449,13 +11931,17 @@ async function viewWorkItem(main, wid) {
 			return;
 		}
 		if (!panel.isConnected) return;
+		assertView(connection);
 		rememberObservation("work_item", wid, data, itemDependencies(data));
 		if (holdRender(fromEvent, opens)) {
+			if (displayedItem) showReading(displayedItem, data.work_item.reading);
 			idleReload = () => render(true);
 			return;
 		}
 		freshPage();
 		const w = data.work_item, c = w.completion;
+		displayedItem = w;
+		showReading(w, w.reading);
 		const live = mutable = !w.archived && !data.project.archived;
 		blocked.hidden = live;
 		const pre = { expected_version: w.version };
@@ -11699,7 +12185,7 @@ function workItemRow(w) {
 	return h("div", { class: "row" }, stateChip(w.completion), h("div", { class: "grow" }, h("a", {
 		class: "title",
 		href: `#/item/${w.work_item_id}`
-	}, w.title), h("div", { class: "muted" }, [w.project_name, w.completion.claimed_by && t("claimed_by", { who: w.completion.claimed_by })].filter(Boolean).join(" · "))), chip(t("needs_decision"), "warn"));
+	}, w.title), h("div", { class: "muted" }, [w.project_name, w.completion.claimed_by && t("claimed_by", { who: w.completion.claimed_by })].filter(Boolean).join(" · "))), w.reading?.unread ? chip(t("reading_unread")) : null, w.completion.pending ? chip(t("needs_decision"), "warn") : null);
 }
 async function viewCleanup(main, section, ident) {
 	const connection = {

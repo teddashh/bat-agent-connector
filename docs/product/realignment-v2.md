@@ -42,6 +42,11 @@
 
 ## 固定決策（R00）
 
+2026-10-09 補充：Web 與 Tauri 都是持續支援的產品入口，共用 `desktop/src` 與中央
+Connector／Task Service。中央本身提供 Web 靜態介面及 API，不因關掉 Tauri 而停止工作。
+畫面與中央操作保持對齊，本機憑證、Fleet、系統匣及原生檔案能力依平台提供；
+草稿目前各入口獨立保存。建置、版本相容及驗收細節見 [共用前端設計](../design/shared-frontend.md)。
+
 1. 新桌面程式使用 **Tauri 2、Rust、Vite、TypeScript**，放在本 repo 的 `desktop/`。
    保留既有 Dashboard 行為與 CSS，不要求換 React/Vue。`desktop/src` 是共用 frontend；
    browser fallback 使用同一 source 的產物，generated files 必須標示來源及 build 指令。

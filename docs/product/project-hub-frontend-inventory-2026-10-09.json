@@ -1,0 +1,508 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-10-09T19:52:00.044313+00:00",
+  "report": "project-hub-frontend-audit-2026-10-09.md",
+  "upstream": {
+    "repository": "kieiken/project-hub",
+    "branch": "main",
+    "sha": "a277d2ed5ce439c248fc32fa8ff9fa4124a06027",
+    "version": "4.90.0",
+    "commit_date": "2026-10-07T20:04:07Z",
+    "license": "MIT",
+    "verification": "GitHub API main commit and open PR heads rechecked; local git source hashes verified."
+  },
+  "connector_comparison_sha": "ba56322e22734f2a37f3dd6ee0b14ab65d9d42c6",
+  "scope": "Frontend source and feature adoption review; not exhaustive branch execution, native acceptance, or third-party dependency security audit.",
+  "decision_count": 82,
+  "frontend_files": [
+    {
+      "path": "hub/public/app-update.js",
+      "lines": 95,
+      "sha256": "772441a7b262f1a1e03e56aa42303f76c294e0acf46318f2d28a957982ab2fd8",
+      "decision_ids": [
+        "F10",
+        "F11"
+      ]
+    },
+    {
+      "path": "hub/public/app.css",
+      "lines": 695,
+      "sha256": "ba0fb9d37e91631729f3f8573b18a2a76d2c5293e503e0cee25ca0d16cc2dde2",
+      "decision_ids": [
+        "A01",
+        "G01",
+        "G02",
+        "G03",
+        "G04"
+      ]
+    },
+    {
+      "path": "hub/public/app.js",
+      "lines": 3043,
+      "sha256": "7197aa012677d6b7c8740d28b7602b5d738dc1d001e26753577a89303ff39025",
+      "decision_ids": [
+        "A01",
+        "A02",
+        "A03",
+        "A04",
+        "A05",
+        "A06",
+        "A07",
+        "A08",
+        "A09",
+        "A10",
+        "A11",
+        "A12",
+        "B01",
+        "B02",
+        "B03",
+        "B04",
+        "B05",
+        "B06",
+        "B07",
+        "B08",
+        "B09",
+        "B10",
+        "C01",
+        "C02",
+        "C03",
+        "C04",
+        "C05",
+        "C06",
+        "C07",
+        "C08",
+        "C09",
+        "C10",
+        "C11",
+        "C12",
+        "C13",
+        "C14",
+        "C15",
+        "D01",
+        "D02",
+        "D03",
+        "D04",
+        "D05",
+        "D06",
+        "D07",
+        "D08",
+        "D09",
+        "E04",
+        "E07",
+        "F01",
+        "F02",
+        "F03",
+        "F04",
+        "F05",
+        "F06",
+        "F07",
+        "F08",
+        "F09",
+        "F10",
+        "F11",
+        "F12",
+        "F13",
+        "F14",
+        "G07"
+      ]
+    },
+    {
+      "path": "hub/public/chat-scroll.js",
+      "lines": 20,
+      "sha256": "051e338580107512349d045198a6c74b6f9921463eb39cad9ac4499285c0ee44",
+      "decision_ids": [
+        "C04"
+      ]
+    },
+    {
+      "path": "hub/public/github.js",
+      "lines": 114,
+      "sha256": "d02d924f057937f8fa7757826e36590d41e787e26c9f2bff8682c3720f6b2f99",
+      "decision_ids": [
+        "D03",
+        "D04"
+      ]
+    },
+    {
+      "path": "hub/public/hierarchy.js",
+      "lines": 123,
+      "sha256": "caba92ae1f5823faa5f85285743eb6e8e410c9c48235b4d3f28736aa0f36a6c3",
+      "decision_ids": [
+        "A02",
+        "A03",
+        "A04",
+        "A05"
+      ]
+    },
+    {
+      "path": "hub/public/index.html",
+      "lines": 61,
+      "sha256": "b1f6e6637561ca10cb268c02d04d4719742f31355954335d44f6d2e4bdc79bd2",
+      "decision_ids": [
+        "G04",
+        "G05",
+        "G06"
+      ]
+    },
+    {
+      "path": "hub/public/locale.js",
+      "lines": 1073,
+      "sha256": "ea8e08458a720110712f214651ccc5e5de2ee3a8acd54ff49d25bfaee1ef0936",
+      "decision_ids": [
+        "G05"
+      ]
+    },
+    {
+      "path": "hub/public/maintenance.js",
+      "lines": 116,
+      "sha256": "0590aab10ee96d4957b0e4ad1dc366407759f752b8e2ac17d4b06488d0cc75bb",
+      "decision_ids": [
+        "E03",
+        "E05",
+        "E06"
+      ]
+    },
+    {
+      "path": "hub/public/manifest.json",
+      "lines": 9,
+      "sha256": "b07edaf2a71139d871489ac2d26ac643e27a2fb40220565a98b51cc0aebeedd1",
+      "decision_ids": [
+        "G06"
+      ]
+    },
+    {
+      "path": "hub/public/mobile.js",
+      "lines": 72,
+      "sha256": "dd46256e7fa616ae143be570664955b0929047949adb111ef031aea759b89053",
+      "decision_ids": [
+        "G01",
+        "G02",
+        "G04"
+      ]
+    },
+    {
+      "path": "hub/public/model-order.js",
+      "lines": 28,
+      "sha256": "bcd8b371b4c43cfe3ca0de41c99fe28ec04eb014fe880f87b6f1a1b777e6fd4f",
+      "decision_ids": [
+        "B02",
+        "F02",
+        "F03"
+      ]
+    },
+    {
+      "path": "hub/public/onboarding.js",
+      "lines": 113,
+      "sha256": "4dcaab131a8d6356e092f2c3fe2ba7663117107e7f8254d9fae47b15c3977041",
+      "decision_ids": [
+        "F09"
+      ]
+    },
+    {
+      "path": "hub/public/project-order.js",
+      "lines": 114,
+      "sha256": "e591742ba930b12c7c3bd229cea1c12a545946d72ad17e9df34a9efc9a3ee385",
+      "decision_ids": [
+        "A02",
+        "A04"
+      ]
+    },
+    {
+      "path": "hub/public/remove.js",
+      "lines": 101,
+      "sha256": "81264f7ef714cee9c7fca0f234510d624736fd7318534277e848dd157ad7c780",
+      "decision_ids": [
+        "E01",
+        "E02",
+        "E03"
+      ]
+    },
+    {
+      "path": "hub/public/task-integrate.js",
+      "lines": 80,
+      "sha256": "66ac625d615da881d63e187c40854f69ba21e42610686f4d8479cd29e0a3b918",
+      "decision_ids": [
+        "D06",
+        "D08"
+      ]
+    },
+    {
+      "path": "hub/public/task-transfer.js",
+      "lines": 43,
+      "sha256": "80f66bf42ecc2e727d41ac54d757b89b83e02251117a45fadcde75156fddd464",
+      "decision_ids": [
+        "D06",
+        "D08"
+      ]
+    },
+    {
+      "path": "hub/public/usage.js",
+      "lines": 161,
+      "sha256": "9b18bdcc5811415dace221b2210fa7695f9cc8599096c545cee9fda87cfdfb5c",
+      "decision_ids": [
+        "F04",
+        "F07",
+        "F08"
+      ]
+    }
+  ],
+  "other_static_files": [
+    {
+      "path": "hub/public/icon.png",
+      "sha256": "036a5b0c684b6756993dd4fe0fa842233681d71fcfd696a1c2a1c37ffb6f0d20",
+      "scope": "Brand asset, not proposed for adoption"
+    },
+    {
+      "path": "hub/public/vendor/LICENSE-xterm",
+      "sha256": "b569f629d00f2626a8100df2a1798210535621e42164dfd426a6fe5aac7b0ccd",
+      "scope": "Terminal integration assessed in C11; dependency internals not audited"
+    },
+    {
+      "path": "hub/public/vendor/xterm.js",
+      "sha256": "1f991ac3b4b283ebf96e60ae23a00a52765dd3a2e46fa6fdda9f1aab032f7495",
+      "scope": "Terminal integration assessed in C11; dependency internals not audited"
+    },
+    {
+      "path": "hub/public/vendor/xterm.css",
+      "sha256": "ba8e6985669488981ccf40c0cefe3aba80722cb6c92de7ad628b0bd717faf2b6",
+      "scope": "Terminal integration assessed in C11; dependency internals not audited"
+    },
+    {
+      "path": "hub/public/vendor/addon-fit.js",
+      "sha256": "bdaefa370b1bfc42ee88d46fe6072400902a4d4b2d45cd93438dda9b23c97089",
+      "scope": "Terminal integration assessed in C11; dependency internals not audited"
+    }
+  ],
+  "open_prs": [
+    {
+      "baseRefOid": "d05670c1ef39de2ba0ad74b167f0a661df2624e6",
+      "headRefOid": "af9c4d824d772a5be7a4f299d01a14ecdde6179b",
+      "number": 2,
+      "title": "Link native sessions and scope external project access",
+      "updatedAt": "2026-10-07T17:29:39Z",
+      "url": "https://github.com/kieiken/project-hub/pull/2",
+      "state_at_review": "OPEN",
+      "decision_ids": [
+        "H01",
+        "H02",
+        "H03",
+        "H04"
+      ]
+    },
+    {
+      "baseRefOid": "a277d2ed5ce439c248fc32fa8ff9fa4124a06027",
+      "headRefOid": "318b29c995f2e342aadfcaaf768e51af83b9a542",
+      "number": 3,
+      "title": "Run natively on Windows and complete the Traditional Chinese UI (4.91.0)",
+      "updatedAt": "2026-10-08T05:43:06Z",
+      "url": "https://github.com/kieiken/project-hub/pull/3",
+      "state_at_review": "OPEN",
+      "decision_ids": [
+        "H05"
+      ]
+    },
+    {
+      "baseRefOid": "a277d2ed5ce439c248fc32fa8ff9fa4124a06027",
+      "headRefOid": "1d88eeda4786f704b20f93e8873a8a6454c238aa",
+      "number": 4,
+      "title": "Windows support, Traditional Chinese UI, workspace location and Skill management",
+      "updatedAt": "2026-10-09T04:45:46Z",
+      "url": "https://github.com/kieiken/project-hub/pull/4",
+      "state_at_review": "OPEN",
+      "decision_ids": [
+        "H06",
+        "H07",
+        "H08"
+      ],
+      "base_note": "GitHub target base is latest main; PR #4 body states the submitted implementation was developed against v4.68.2 and is not integrated with v4.90.0."
+    }
+  ],
+  "validation": {
+    "upstream_ui_tests": {
+      "files": [
+        "hub/test/chat-scroll.test.js",
+        "hub/test/rich-text.test.js",
+        "hub/test/mobile-ui.test.js",
+        "hub/test/settings-scroll-ui.test.js",
+        "hub/test/zh-tw-ui.test.js",
+        "hub/test/onboarding-ui.test.js"
+      ],
+      "passed": 52,
+      "failed": 0,
+      "skipped": 0,
+      "scope": "Upstream unit/VM fixtures, not Connector adoption acceptance"
+    },
+    "rendering": {
+      "implementation": "Original upstream static UI with synthetic in-memory API/SSE, all requests intercepted",
+      "widths": [
+        1440,
+        768,
+        390
+      ],
+      "captures": [
+        {
+          "name": "overview",
+          "width": 1440,
+          "filename": "overview-1440.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "conversation",
+          "width": 1440,
+          "filename": "conversation-1440.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "attention",
+          "width": 1440,
+          "filename": "attention-1440.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "settings-basic",
+          "width": 1440,
+          "filename": "settings-basic-1440.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "settings-ai",
+          "width": 1440,
+          "filename": "settings-ai-1440.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "settings-connect",
+          "width": 1440,
+          "filename": "settings-connect-1440.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "settings-manage",
+          "width": 1440,
+          "filename": "settings-manage-1440.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "new-project",
+          "width": 1440,
+          "filename": "new-project-1440.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "overview",
+          "width": 768,
+          "filename": "overview-768.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "conversation",
+          "width": 768,
+          "filename": "conversation-768.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "attention",
+          "width": 768,
+          "filename": "attention-768.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "settings-basic",
+          "width": 768,
+          "filename": "settings-basic-768.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "settings-ai",
+          "width": 768,
+          "filename": "settings-ai-768.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "settings-connect",
+          "width": 768,
+          "filename": "settings-connect-768.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "settings-manage",
+          "width": 768,
+          "filename": "settings-manage-768.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "new-project",
+          "width": 768,
+          "filename": "new-project-768.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "overview",
+          "width": 390,
+          "filename": "overview-390.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "conversation",
+          "width": 390,
+          "filename": "conversation-390.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "mobile-composer",
+          "width": 390,
+          "filename": "mobile-composer-390.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "mobile-information",
+          "width": 390,
+          "filename": "mobile-information-390.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "attention",
+          "width": 390,
+          "filename": "attention-390.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "settings-basic",
+          "width": 390,
+          "filename": "settings-basic-390.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "settings-ai",
+          "width": 390,
+          "filename": "settings-ai-390.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "settings-connect",
+          "width": 390,
+          "filename": "settings-connect-390.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "settings-manage",
+          "width": 390,
+          "filename": "settings-manage-390.png",
+          "page_horizontal_overflow": false
+        },
+        {
+          "name": "new-project",
+          "width": 390,
+          "filename": "new-project-390.png",
+          "page_horizontal_overflow": false
+        }
+      ],
+      "uncaught_page_errors": [],
+      "page_horizontal_overflow": false,
+      "scope": "Representative screenshots visually reviewed; not all branches or native/mobile keyboard behaviors exercised",
+      "receipt_sha256": "7d402c21193ab2a75f6a3a63063cbd57432e225be476f7c9fe7da3ddb62eb613"
+    },
+    "temporary_data": "Disk-backed scratch under ~/agent-work/tmp, removed after runs",
+    "evidence_directory": "~/agent-work/artifacts/project-hub-frontend-audit-20261009/"
+  }
+}

@@ -229,6 +229,15 @@ No paid API key is required.
 
 ### Dashboard API (`/api/v1`)
 
+Web and Tauri are maintained together from one UI source. The Connector serves the
+Web interface and API independently of the desktop app; both clients can be open
+at once. Native credentials, Fleet and window controls remain platform capabilities.
+See [shared frontend and lifecycle](docs/design/shared-frontend.md).
+
+Pending replies, completion review and active operations are separate. Unread work
+updates sync through central for the same identity; **Mark this version read** does
+not approve completion. These are work-item versions, not unread chat message counts.
+
 The task daemon also serves `/api/v1` on its loopback port: capabilities, a persisted session inventory with
 staleness, durable operations, and one event cursor with SSE. Issue a token per client
 (`batc api-token issue --actor ted-dashboard --scope observe --scope operate --scope start --scope integrate --scope

@@ -27,6 +27,7 @@ ID 隨機產生，封存的列保留，所以 ID 不會重用。改名、移動�
 | `work_item.approve` | approve | `expected_fingerprint` |
 | `work_item.continue` | manage | `expected_fingerprint` |
 | `work_item.link`（`remove: true` 移除） | manage | — |
+| `work_item.read`（個人已讀；不改完成狀態） | observe | 已閱讀的 `expected_version`；細節見 [工作更新閱讀](work-item-reading.md) |
 
 前置條件在保存操作前檢查一次（不符回 409，什麼都不存），執行時在同一個交易裡再檢查一次。兩個依同一版本送出的修改，後執行的那個失敗為 `VERSION_CONFLICT`。
 
@@ -45,6 +46,10 @@ Agent 把狀態設成 `done` 是「回報完成」，不是完成：項目顯示
 `approve` 是獨立的 scope：有 `manage` 的 agent 能編輯項目、回報完成，但不能替自己的回報簽核。發 token 給 agent 時不要給它 `approve`。
 
 完成確認只代表人接受了這個項目的內容，不代表測試通過、PR 已合併或已部署（計畫 §05）。
+
+工作更新的 `reading` 與 `completion` 分開：讀過的項目仍可等待完成確認，已接受完成的項目
+也可能對另一個 principal 是未讀。HTTP／RPC 工作列表與詳情依認證 principal 回傳 reading；
+列表的 `unread` filter、CLI `item list --unread` 與 MCP 參數都沿用中央版本和分頁。
 
 ## 樹與順序
 

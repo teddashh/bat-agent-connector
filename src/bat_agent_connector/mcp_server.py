@@ -496,12 +496,13 @@ def build_server(config: Config, *, read_only: bool = False, principal_only: boo
 
     async def work_items_list(project_id: str | None = None, state: str | None = None,
                               pending: bool | None = None, limit: int = 50,
-                              cursor: str | None = None) -> dict[str, Any]:
+                              cursor: str | None = None, unread: bool | None = None) -> dict[str, Any]:
         """Work items across projects, most recently changed first. state: todo, doing, waiting,
         awaiting_approval (claimed done, not yet accepted by a person) or done (accepted); pending=true lists
-        the ones waiting for a person's decision. Pass next_cursor as cursor for the next page."""
+        the ones waiting for a person's decision. unread filters work-item versions not marked read by this
+        effective principal; it is independent of completion. Pass next_cursor as cursor for the next page."""
         return await daemon("work_items_list", project_id=project_id, state=state, pending=pending, limit=limit,
-                            cursor=cursor)
+                            cursor=cursor, unread=unread)
 
     async def work_item_get(work_item_id: str) -> dict[str, Any]:
         """One work item: goal, the request verbatim, acceptance, steps, completion, its place in the tree, links
