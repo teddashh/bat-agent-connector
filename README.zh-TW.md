@@ -1,291 +1,169 @@
-# bat-agent-connector
+# Better Agent Dashboard
 
-[English](README.md) · **繁體中文**
+**看清每個 Agent 的進度，從原始需求一路追到成果交付。**
 
-**讓 AI agent 操作 [Better Agent Terminal（BAT）](https://github.com/tony1223/better-agent-terminal) session 的非官方連接器。**
+[English](README.md) · **繁體中文** · [專案網站](https://teddashh.github.io/bat-agent-connector/?lang=zh-TW) · [開始使用](docs/getting-started.zh-TW.md)
 
-**專案介紹頁：** https://teddashh.github.io/bat-agent-connector/?lang=zh-TW
+Better Agent Dashboard 把專案、Agent 工作階段、worktree、附件成果與 GitHub 交付集中在同一個地方。透過 **Web 介面或 Tauri 桌面程式**查看待處理事項、把工作派到指定 BAT 工作區、檢視成果，再一路追到同一個 PR。
 
-**開發方向：** [共用產品與 Tauri 介面決策](docs/product/realignment-v2.md)與
-[實作狀態](docs/product/implementation-status.md)。桌面版共用 Dashboard frontend 與既有 Python 後端。
-兩份計畫是同一產品的 UI 修訂，共用功能 backlog；不提供 Project Hub 匯入，保留既有專案與工作項目管理。
+你繼續在 [Better Agent Terminal（BAT）](https://github.com/tony1223/better-agent-terminal) coding；Hermes、Grokbot 等 Agent 透過各自的身分協作。Repository 與 Python 套件仍叫 **`bat-agent-connector`**，Connector 是 Dashboard、CLI 與 MCP 共用的後端。
 
-共用介面可建立中央 managed session、檢視並批次核准選定的請求，以及擷取成果與留下固定版本的審核紀錄。
-操作在重開後保留原始請求與 operation，整理也支援符合條件的 Task Service 資源。
-桌面檔案操作由 Rust 管理選檔、拖放上傳、有限大小的預覽與另存新檔；原生 Fleet 的 runtime／遷移仍在整合。
+> **產品方向：**安裝桌面包後，由程式準備並啟動背景服務，引導接上 BAT 環境，再點一下開 Dashboard。**目前實作：**共用 Dashboard 與中央背景服務已具備，但自動建立環境仍在開發。現有驗證安裝包仍需要已配置的中央服務與 API 身分。[安裝現況與試用方式 →](docs/getting-started.zh-TW.md)
 
-BAT（作者 [TonyQ / tony1223](https://github.com/tony1223)）是一套終端機 app，在你自己的機器上執行 Claude Code 與 Codex 的 agent session，並依工作區（workspace）分組。它有一套遠端協定 `bat-remote/v2`，BAT 自己的桌面介面和手機客戶端都走這套協定。本專案實作同一套協定，讓「其他」agent（Claude Code、Codex、Cursor、Hermes 或任何 MCP 客戶端）以及 shell 腳本可以：
+![共用 Dashboard 分開呈現待回答、完成待審與操作問題。](site/images/attention-zh.png)
 
-* 看到有哪些 agent session、哪些正在跑或卡在問題上，以及它們最近說了什麼；
-* 等某個 session 跑完這一輪；
-* （選擇性開啟）推動 session：送訊息、叫它「continue」、中斷它、回答它的問題；
-* （選擇性開啟，獨立的一層）分派工作：在新的 git worktree 開 session、檢查它們的 diff、merge 乾淨的分支；
-* 找出碰到 Claude 用量額度上限的 session，在同一個 worktree 改由 Codex 接手（failover）；
-* 經中央操作回答明確的權限請求、調整 managed session 模式，並透過經審閱的預覽回收 managed 資源。
+*這是 `15b2048` 產品基準的實際共用前端，使用合成展示資料，不是使用者主機的驗收結果。[截圖來源](site/images/README.md)。*
 
-> 本專案與 BAT 作者**沒有任何關係，也未經其背書**。協定是從 BAT 以 MIT 授權公開的原始碼（v3.2.12）讀出來的，BAT 改版時可能跟著變。BAT 的功勞屬於 TonyQ 與其貢獻者。
+## 內容導覽
 
-一般 managed start 保留操作者的 `default_permission_mode`：`default` 沿用 BAT 預設、`allow_all` 保留 bypass／full access（level=none）；新增 `confined` 才對一般 start 套限制。Checkpoint／repair 固定 confined：Claude 用 default，只有已查核 BAT 帳號才用 acceptEdits；Codex 用 workspace-write／on-request。帳號查核須有 root-owned、BAT 不可寫的 home／可信 startup files 與系統 Python/find；先從可信副本替換再 harden，.claude／.codex／.cache 等 state 子目錄仍可由 BAT 帳號擁有。未 harden 的 host 記 unknown，confined Claude 用 plain default。Cwd 本身不保護寫入，acceptEdits 沒有 path check。BAT 不能設定 network／writable roots，因此 confined Codex 可能影響安裝及 localhost 測試。Task Service engine／recipe 不變並顯示相容 gap。Session reads 與 Dashboard 分開列建立證據與目前核對；A10 尚待 W12 實機驗收。詳見[設定、限制與 live procedure](docs/design/confinement.md)。
+[功能](#你可以用它做什麼) · [工作流程](#從需求走到交付) · [架構](#web桌面程式與-agent-的關係) · [平台](#平台與安裝包) · [開始使用](#開始使用) · [權限與復原](#權限工作歸屬與復原) · [現況](#目前證據與尚待完成的工作) · [文件](#文件索引) · [開發](#參與開發)
 
-Dashboard 啟動提示依 capabilities 的 `hosts[].confinement.host_account.start_effect` 判斷：`verified` 表示帳號已查核；`recheck` 表示尚未查核或已過期，啟動時會重查；`fallback_default` 表示可降級處理的加固缺口或未宣告帳號，受限 Claude 使用 plain default；只有 `refused` 會拒絕 Claude 與 Codex 的新 start。讀取不觸發查核，reason 仍可見，不能只因 status 不是 verified 就認定無法啟動。
+## 你可以用它做什麼
 
-帳號查核另需操作者設好的可信 auditor SSH alias（`check_ssh_alias`）、其 UID（`check_uid`）及目標 BAT 帳號名稱（`bat_account`）。Auditor 的登入環境不得受 BAT 帳號控制，先證明 system Python 的完整 closure，再透過限定 sudo 指令以 -c argv 執行隔離的 Python，不經 BAT 的 shell 或 startup files；回覆的 UID／channel facts 也須符合設定。沒有可信通道時回 `unknown/check_channel_untrusted`、`fallback_default`，受限 Claude 用 plain default，絕不啟用 acceptEdits。原本的 BAT home／startup 加固仍是額外檢查，單靠它不能證明通道可信。未知 layout 或不完整 gate 用 default；查核假設沒有同 BAT UID 的 hostile process，ptrace_scope 只留作證據，不宣稱額外隔離。設定與 sudoers 範例見[設計文件](docs/design/confinement.md)。
+| 你想知道的事 | 到哪裡看 | 提供的能力 |
+| --- | --- | --- |
+| 現在有什麼需要我處理？ | **待處理** | 分開列出待回答／權限、完成待審、操作問題與主機連線；閒置不直接當成整份工作完成。 |
+| 這個專案有哪些工作？ | **專案** | 工作項目、原始需求、驗收條件、repository 綁定及派工關聯；支援階層、釘選與封存。 |
+| 下一份工作要派去哪裡？ | **專案派工／工作階段** | 選擇已配置的 repository、主機與工作區，檢視固定 commit，加入指示、模型及附件，建立 managed session。 |
+| Agent 正在做什麼？ | **工作階段** | 最近對話、程式碼與表格、待回答問題、資源來源及資料新鮮度；已授權控制走中央操作。 |
+| 它產生了什麼成果？ | **附件成果／工作詳情** | 不可變的附件版本、digest、擷取、審閱及來源 operation、execution 或 task。接受附件不會自動 merge 或完成任務。 |
+| 幾份成果如何進同一個 PR？ | **成果與 GitHub** | 選擇 managed 工作、checkpoint 或 branch 的固定成果，在獨立工作區預覽並整合；可直接貼 GitHub PR 網址。 |
+| 是真的部署了，還是只跑完 CI？ | **成果與 GitHub** | 分開記錄整合、merge 與部署；已配置的 recipe 核對實際部署版本及 runtime 證據。 |
+| 這個 worktree 可以整理嗎？ | **整理與復原** | 先看實際資源、保留內容及不能移除的原因；符合條件才整理，歷史與關聯仍可查詢。 |
+| 斷線前的操作成功了嗎？ | **操作紀錄／歷史** | 保存 durable ID、原始請求及回執；先查回原操作，不因回覆遺失就再派一份。 |
 
-`START_IN_PROGRESS` 表示另一程序正在 start 此 session：稍後讀回，不盲目重試；`CONFINEMENT_START_UNSETTLED` 則須讀回可能已送出的 start。
+畫面依帳號、主機與 repository 設定開放功能，並說明不可用的原因。一般專案派工不必每次再建立一份 Task Service recipe。
 
-內容包含四個部分：
+## 從需求走到交付
 
-| 元件 | 名稱 |
-|---|---|
-| Python 套件 | `bat-agent-connector`（Python 3.10+，相依套件：`websockets`、`mcp`） |
-| MCP 伺服器（stdio，或只綁 localhost 的 streamable HTTP） | `bat-agent-connector-mcp`（也可以用 `batc mcp`） |
-| CLI | `batc` |
-| Agent skill | [`skills/bat-agent-connector/SKILL.md`](skills/bat-agent-connector/SKILL.md) |
+1. **整理專案。** 明確連結已配置的 repository，保留需求與驗收條件。
+2. **決定執行位置。** 選擇 BAT 主機與工作區；從已發布程式碼開工時，可輸入 `main` 等分支，再檢視固定 commit。換入口不會搬走工作區。
+3. **建立 Agent 自己的工作。** 操作保存指示、選用模型與附件精確版本；Connector 對人的原始 checkout 保持唯讀。
+4. **在原專案追蹤。** 找回派出的工作、session、operation 與成果入口。「已啟動」只表示啟動成功；活動、驗證、接受及交付是不同狀態。
+5. **審閱與整合。** 檢視候選 commit 和整合預覽，把選定成果加入同一個 PR，再以適當身分審閱並 merge 固定範圍。
+6. **部署與整理。** 有部署 recipe 時，追到實際 runtime 版本與健康證據；之後審閱可整理的資源，保留歷史與成果。
 
-Hermes 與 Grokbot 配接皆[由 canonical skill 產生](docs/agent-skills.md)。更新工作流程後重新產生，
-安裝時使用與 Connector 相同已驗證版本的 bundle。
+同主機可從固定本機 checkpoint 接續。另一台主機則透過**明確綁定的 GitHub repository 與已發布 commit**取得程式碼，不搬運未發布工作區，也不自動 pull 或 reset 人的原目錄。
 
-`batc inventory`、`batc history`、`batc relations` 與對應 HTTP/MCP 讀取提供持久觀測。Session 歷史只讀 journal 事實；warm reuse 保留每個 task 的關係區間，discovery 顯示最近 host/profile 掃描範圍及未掃項目。未知 actor／狀態保持 unknown，讀取不啟動 session、不背景探測 Git。詳見 [observation](docs/design/observation.md)。Dashboard 的歷史與 scope 畫面屬後續 Part B。
+## Web、桌面程式與 Agent 的關係
 
-## 為什麼要做
+```mermaid
+flowchart TB
+    Web[Web Dashboard] --> Central[Python Connector / Task Service]
+    Desktop[Tauri 桌面 Dashboard] --> Central
+    Agents[MCP Agent 與 batc CLI] --> Central
+    Desktop --> Native[本機憑證、檔案、視窗與支援的 Fleet 控制]
+    Central --> BAT[指定的 BAT 主機與 managed 工作區]
+    Central --> GitHub[已配置的 repository 與部署 recipe]
+    Central --> Journal[操作、關聯與歷史]
+```
 
-同時跑好幾個長時間執行的 coding agent，就得一直切分頁檢查：哪個做完了、哪個卡在問題上、哪個只差一句「continue」。透過 BAT 的協定讀這些狀態很可靠（不抓畫面、不模擬 GUI 操作），也能讓一個負責監看的 agent 替你檢查，而任何會寫入的動作都還是由你掌控。
+**一份前端，一套中央服務。** Web 與 Tauri 都由 `desktop/src` 建置。Python 提供 `/dashboard/` 及 `/api/v1`；Tauri 包裝相同介面，以受限的 Rust transport 連線，不另建業務後端、排程器或帳本。
 
-附件以 immutable revision 存在 Connector 自有 store，記 SHA-256、size 與明確配額。用 `batc artifact upload FILE --key KEY --confirm` 或 Dashboard 選檔上傳，把精確 `{artifact_id, revision, digest}` 附到工作項目或 checkpoint。接續固定 checkpoint 的主機，第一指令前在 session worktree 驗證 bytes；來源前進時明確確認，續同一 operation。草稿文字與已上傳 refs 在 reload／失敗後保留。人工單檔用 `batc artifact capture-preview HOST SESSION_ID relative/file` 保存預覽 JSON，再以相同 credential 執行 `batc artifact capture --preview-file PREVIEW.json --key KEY --confirm`。需要 observe＋manage，來源變更即拒絕，不修改人工 checkout，也不是完整 dirty snapshot。Store 沒有 delete；managed 成果可經固定 execution／command 證據擷取，再以 approve 權限記錄精確 revision 的審核。跨主機需要程式碼時，在 Sessions 選「從已發佈版本建立工作」，依明確的 repository／host／workspace 綁定檢視固定 branch head，再建立新的 managed 工作區與 session。CLI `batc repository` 與 MCP 使用同一中央操作；不 pull／reset 人工 checkout，不搬運未發佈 Git objects。見 [已發佈版本接續](docs/design/repository-sync.md)。見 [Artifacts 設計](docs/design/artifacts.md)。
+- 兩個入口可同時開著。關分頁或 Dashboard 視窗不會停止中央工作；關掉本機 tunnel 可能讓該 client 斷線。
+- 專案、工作項目、操作及「工作項目版本已讀」保存在中央；草稿與對話閱讀位置仍各入口獨立保存。
+- 原生憑證、選檔、系統匣／Dock、Fleet 與更新依平台提供；Web 不因此取得本機控制權。
+- MCP／CLI 沿用中央政策與 durable operations，每個自動化 client 使用自己的身分和 scopes。
 
-Capture 的同 key 查回、resume 與 cancel 也需原 credential 和目前的 observe＋manage；
-已接受的 operation 不因 preview 過期而失去恢復或查回能力。
+正式安裝器應負責自有本機服務的生命週期：準備 runtime 與身分、背景啟動、連線恢復，以及點一下開網頁。**「連接既有中央」是加入現成環境的進階路徑，不是新使用者的正常起點。**安裝器這一段尚未完成；[首次安裝合約](docs/design/managed-installation.md) 記錄必須補齊的行為。
 
-## 安裝
+[共用前端](docs/design/shared-frontend.md) · [原生 client](docs/design/desktop.md) · [API](docs/design/api-v1.md)
+
+## 平台與安裝包
+
+目前**桌面 client** 與**中央服務**的平台要求不同。
+
+| 元件 | 已有證據 | 目前限制 |
+| --- | --- | --- |
+| Web Dashboard | 中英雙語響應式介面，由中央提供 | 使用可信 loopback／tunnel；公開或 LAN hosting 需要另外設計已認證入口。 |
+| Windows 桌面 | x64 NSIS 安裝包；CI 實測安裝後 WebView 與生命週期 | Credential Manager 與已配置的 Windows Fleet；尚未打包／自動建立 Python 中央。 |
+| macOS 桌面 | Apple Silicon／Intel DMG；WebView、生命週期及隔離 Keychain 測試 | 目前 ad-hoc 驗證簽署；Developer ID／公證與 Mac 更新通道仍待完成，不能推論 Windows Fleet 已跨平台。 |
+| Linux 桌面 | Debian 驗證包與原生 WebView fixture | 原生憑證只支援記憶體來源，尚無受保護的持久登錄。 |
+| Python 中央／CLI／MCP | Linux 上測試 Python 3.10–3.13；依賴 POSIX | 本文以 Linux 為中央設定路徑。Windows 原生中央尚未實作；Mac client 測試不代表 Mac 中央實機驗收。 |
+
+到成功的 [desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) 執行頁面，在 **Artifacts** 下載驗證包，核對 commit 與中央相容性。GitHub 可能要求登入，artifact 也會到期；它不是穩定發行通道。
+
+[2026-10-10 候選](https://github.com/teddashh/bat-agent-connector/actions/runs/38032723037) 含 Windows、Mac ARM64／x64、Linux 包，測試的 source tree 與已合併 `15b2048` 相同。本文件基準時尚無正式 GitHub Release；後續發行請查看 [Releases](https://github.com/teddashh/bat-agent-connector/releases)。
+
+## 開始使用
+
+**預期的正常流程**是：安裝 → 背景服務就緒 → 引導連接 BAT／GitHub → 開 Dashboard。使用者不應先裝 Python、手改 JSON 或自行理解 API actor；必要的帳號登入與授權仍由你完成。這是產品要求，不是目前安裝包已完成的宣稱。
+
+如果你要**現在進行有人監督的試用**：
+
+- **環境已配置：**開啟現有 Web Dashboard，或用維護者提供的位址與身分接上桌面 client。先看待處理、專案與工作階段。
+- **由你建立第一套環境：**依 [Linux 中央設定指南](docs/getting-started.zh-TW.md) 安裝、匯入 BAT、啟動服務、發出身分，再連線桌面程式。
+- **接入 Agent：**在 MCP client 註冊 `bat-agent-connector-mcp`；中央觀察使用 `--principal-only --read-only`，授權操作則透過私人設定給專屬的 `BATC_API_TOKEN`。
+
+工作在遠端 BAT 主機時，Dashboard 這台電腦不必安裝 BAT。[共用 skill 與 Hermes／Grokbot 配接](docs/agent-skills.md)。
+
+## 權限、工作歸屬與復原
+
+**主機開關與帳號權限是兩件事。** Host 的 `writes`／`orchestrate` 決定可提供的工作類型；API scopes 決定身分可做的操作。資源歸屬、目前版本、repository 綁定及 task coordinator 檢查仍會生效。
+
+| 資源／情況 | 行為 |
+| --- | --- |
+| 人建立的 session／worktree | Connector 唯讀；從已檢視的固定來源建立新 managed 資源接續。 |
+| 來源不明 | 沒有既存建立證據就維持 unknown；相同路徑不足以證明管理權。 |
+| Managed 工作 | 經中央 handler 與 coordinator 規則執行已授權操作。 |
+| 派工後回覆遺失 | 保留 operation、原 key 與 reservation，先查回；逾時不等於沒執行。 |
+| Agent 宣稱做完 | 提交審閱；接受與活動、驗證、merge、deploy 分開。 |
+| 整理碰到 active／未對帳工作 | 保留並說明，不清掉結果未知的操作或歷史。 |
+
+MCP／CLI 寫入保留明確確認、主機權限及稽核；UI 已檢視的操作直接走中央，不再請 LLM 重複批准。
+
+**Connector 唯讀政策不等於 OS sandbox。** Agent process 能否寫入人的資料夾仍取決於主機帳號與 confinement。一般 start 和 Task Service recipe 有已記錄差異；承諾無人值守隔離前，須核對 [confinement](docs/design/confinement.md)。
+
+原生 BAT `worktree.merge` 若 ACK 完全未知且沒有充分正向證據，仍缺完整人工裁決 API。這是特定限制；GitHub 整合和部署有自己的讀回合約。[Merge 復原](docs/design/worktree-merge.md) · [資源政策](docs/design/resource-policy.md) · [安全說明](SECURITY.md)
+
+## 目前證據與尚待完成的工作
+
+基準：**2026-10-10，已合併 `15b2048`／PR #74**。以下描述該候選版本。
+
+| 證據 | 可證明範圍 |
+| --- | --- |
+| [Python CI](https://github.com/teddashh/bat-agent-connector/actions/runs/38032723049) | Python 3.10–3.13 通過；本機 3.13 全套為 3,228 passed／33 skipped。 |
+| 共用前端檢查 | 全套 694 項 UI 通過，最後排版另跑受影響回歸；HTTP／native transport fixture 不等於原生安裝。 |
+| [Desktop CI](https://github.com/teddashh/bat-agent-connector/actions/runs/38032723037) | Windows、兩種 Mac、Linux 打包及 native fixtures；安裝測試使用受控 loopback 與合成資料。 |
+| 真中央整合 fixtures | 實際 Python API、journal、暫存 Git，搭配假的 BAT／GitHub provider；不是正式 merge／deploy 驗收。 |
+
+交付仍須完成**自動建立環境的安裝器**、正式簽署／發行／更新、特定 unknown-ACK 復原，以及在選定主機、網路和部署目標跑完整工作日。有人監督的試用與長時間無人值守，是不同的 ready 宣稱。
+
+[實作紀錄](docs/product/implementation-status.md) · [驗收矩陣](docs/product/acceptance-v2.md)
+
+## 文件索引
+
+| 主題 | 指南 |
+| --- | --- |
+| 首次使用 | [繁中指南](docs/getting-started.zh-TW.md) · [English](docs/getting-started.md) · [設定範例](examples/hosts.example.toml) |
+| 產品與安裝 | [共用決策](docs/product/realignment-v2.md) · [Managed 安裝要求](docs/design/managed-installation.md) · [工作項目](docs/design/work-items.md) |
+| 桌面／Web | [共用前端](docs/design/shared-frontend.md) · [Tauri](docs/design/desktop.md) · [Fleet](docs/design/desktop-fleet-native.md) · [更新](docs/design/desktop-updates.md) |
+| 派工 | [Managed start](docs/design/session-start.md) · [已發布 repository](docs/design/repository-sync.md) · [Checkpoints](docs/design/checkpoints.md) · [Task Service](docs/design/task-service.md) |
+| 成果 | [附件](docs/design/artifacts.md) · [整合](docs/design/integration.md) · [Merge／部署](docs/design/delivery.md) · [整理](docs/design/cleanup.md) |
+| 自動化 | [API](docs/design/api-v1.md) · [Operations](docs/design/operations-unification.md) · [Agent skills](docs/agent-skills.md) · [協定](docs/PROTOCOL.md) |
+
+## 參與開發
 
 ```bash
-# 從 git 網址安裝（在上架 PyPI 之前）
-uv tool install git+https://github.com/teddashh/bat-agent-connector
-# 或
-pipx install git+https://github.com/teddashh/bat-agent-connector
-# 或不安裝，直接執行
-uvx --from git+https://github.com/teddashh/bat-agent-connector batc hosts
+uv sync --locked --extra dev
+uv run ruff check .
+pytest-disktmp uv run pytest -q
+
+cd desktop
+npm ci
+npm run build:all
+npm test
+npm run test:ui
 ```
 
-## 設定
+`pytest-disktmp` 是開發主機的磁碟暫存 wrapper；若沒有，使用獨立、位於磁碟的 `--basetemp`，並在結束後刪除。絕不可使用 `/dev/shm` 或其他 tmpfs。詳見 [CONTRIBUTING](CONTRIBUTING.md)、[AGENTS.md](AGENTS.md)；backend 變更另須 Python 3.10 全套。
 
-每台主機，連接器需要三樣東西：該主機 `bat-server` 的 `wss://` 網址、伺服器 TLS 憑證的 SHA-256 指紋（固定比對；BAT 使用自簽憑證），以及遠端 token 的**參照**。如果你已經在用 BAT 桌面客戶端，可以直接從它匯入：
+只改 `desktop/src` 的共用 UI，再重建 browser assets。專案網站在 `site/`，詳見[網站維護](site/README.md)。自動測試不得對真 BAT 主機寫入。
 
-```bash
-batc import-bat                      # 寫出 ~/.config/bat-agent-connector/hosts.toml（寫入功能關閉）
-batc import-bat --rename my-profile-id=box1 --output -   # 換成好記的名字，先預覽
-batc hosts                           # 測試連線：每台主機的版本與 ping
-```
+## 致謝與授權
 
-Token 參照（token 值本身永遠不會存進設定檔、寫進記錄，或由任何工具回傳）：
+本專案是非官方 companion，**與 BAT 作者沒有隸屬關係，也未經背書**。BAT 由 [TonyQ／tony1223](https://github.com/tony1223) 與貢獻者開發。協定筆記最初依 BAT v3.2.12 整理，BAT 更新後仍須核對相容性。
 
-| `token_ref` | 意思 |
-|---|---|
-| `env:NAME` | 環境變數 |
-| `file:/path` | 只放 token 的檔案（權限請維持 `chmod 600`） |
-| `bat-profile:<id>` | BAT 客戶端的 token 儲存檔（`profiles/remote-tokens.enc.json`，只支援未加密的版本） |
+[Project Hub](https://github.com/kieiken/project-hub) 提供部分整理與互動參考；本產品沒有 Hub snapshot importer 或 runtime 依賴。[採用評估](docs/product/project-hub-frontend-audit-2026-10-09.md)。
 
-所有選項請見 [`examples/hosts.example.toml`](examples/hosts.example.toml)。連接器會把固定的 `deviceId` 存在 `~/.config/bat-agent-connector/device-id`，所以主機不會在每次重新連線時，都跳出一則新的「remote client connected」通知。
-
-## 權限層級
-
-| 層級 | 開啟方式 | 工具 |
-|---|---|---|
-| read（永遠開啟） | - | `hosts_list`、`host_status`、`workspaces_list`、`sessions_list`、`session_read`、`session_wait`、`worktree_status`、`session_worktree_status`、`sessions_triage`、`quota_sessions`、`session_policy`、`work_status`、`work_result`、`work_events` |
-| write | 每台主機設 `writes = true` | `session_send`、`session_continue`、`session_interrupt`、`session_answer`、`session_set_permissions`、`approve_pending`、`session_relay` |
-| orchestrate | 每台主機設 `writes = true` **且** `orchestrate = true` | `session_start`、`worktree_merge`、`session_failover`、`session_record_verification`、`session_cleanup`、`fanout_plan_session`、`fanout_from_plan`、`work_submit`、`work_pause`、`work_resume`、`work_mark_stage` |
-
-write 與 orchestrate 的工具沒開啟時根本不會註冊；開啟後每次呼叫都要帶 `confirm=true`，有速率限制，並附加寫進稽核記錄（`~/.local/state/bat-agent-connector/audit.jsonl`；訊息內容只記雜湊值與長度，除非你選擇保留一小段預覽）。MCP 伺服器或 CLI 加上 `--read-only`，不管設定檔怎麼寫，這兩層都會關閉。通道白名單在客戶端核心裡強制執行，位於 MCP 層之下：reset、kill、fork、PTY 寫入、檔案操作、設定、工作區編輯（只能附加的分頁登記 helper 除外）、安裝、更新與帳號變更，一律不會送出。
-
-## MCP 設定
-
-### 任務服務里程碑（選用）
-
-`batc serve` 會在 `127.0.0.1:18796` 啟動以 SQLite WAL 為基礎的任務協調服務。原本的 MCP 伺服器因此多了 `work_submit`、`work_status`、`work_pause`、`work_resume`、`work_result`，以及唯讀的 `work_events` 事件流；它的 stdio 行程透過 `BATC_TASK_URL`（預設 `http://127.0.0.1:18796/rpc`）呼叫這個常駐服務。`work_submit` 在 `original_words` 收下 Ted 的**原話**，再加上一個冪等鍵（例如 Discord 訊息 ID），不等 BAT 就直接回傳 `task_id`。Hermes 不可以重新詮釋或拆分這個請求。規劃由跑在 Opus 5.5 上的 Goose 在 repo 裡進行。任務的寫入動作要求主機原本就設好 `writes=true` 與 `orchestrate=true`。原有的低階工具與 `batc` 指令照常可用。
-
-Task-bound operations 在 admission 固定 task 版本，省略 `control_version` 也一樣；session controls 另固定當時 session。`external_refs.admission_binding` 是 server binding，與 caller preconditions 分開。執行前 pause／resume 或換 session 會以 `CONTROL_VERSION_CONFLICT`／`TASK_BINDING_MISMATCH` 拒絕舊要求；同 key 重讀原拒絕或成功，先讀 task 再以新 key 提交有授權的新決定。升級前無 binding 的 operations 保留原行為。
-
-Task mutations 現在保存 operation，原結果新增 `operation_id`／`operation_status`。重試保留同一 key；key 以驗證 actor 為範圍，無 key 的舊 task controls 每次是獨立要求。task-owned 的 send／answer／interrupt／permissions，包括 legacy tools，都經同一 coordinator；`TASK_PAUSED`、`TASK_VERIFYING`、`TASK_COMMAND_PENDING` 表示停止並讀 work_status，不用 force／continue 插隊。`CONTROL_VERSION_CONFLICT` 要先讀變更後狀態。第二個 daemon 即使指定不同 --db，也回 `OWNER_CONFLICT` 與既有 owner 資訊；client 連原 owner。詳見[統一操作](docs/design/operations-unification.md)。
-
-MCP `session_send`／`session_continue`／`session_answer`／`session_interrupt`／`session_set_permissions` 與對應 CLI 已接到既有 daemon。MCP 必須設定自己的
-`BATC_API_TOKEN`；CLI 優先用此 token，未設定才沿用本機 admin token，兩者仍需 confirm 與 host write tier。
-用 `--key`（MCP：`idempotency_key`）保留重試身分；省略時每次都是獨立 operation。未知回覆後保存
-operation ID，透過 `batc op ID`／`operation_get` 查回，不自動重送或另啟 daemon。Message ID 是 BAT 訊息身分，
-與 operation key 分開；answer 省略 prompt ID 時在 admission 固定，重試不改答後來的 prompt。
-Permissions 逐一記錄 Claude／Codex 設定的意圖與回執，保留部分成功及未知結果。
-Claude turn 進行中會拒絕，不排入稍後自動修改；idle 後用新 key 提交新的決定。
-歷史 deferred flags 不授權自動修改。舊 bulk approval apply 在任何回答或權限修改前拒絕；
-改用逐項 `session.answer` 與 `session.permissions`，dry-run 預覽保留。
-詳見[session permissions](docs/design/session-permissions.md)。
-Bulk approval、starts、orchestration 與 task 的 no-key 投影仍待 Part B 後續。
-
-每個任務就是一個跑在 Opus 5.5 上的 Goose session。`goose-session` recipe 的 prompt 會指示 Goose 一開始拆一次工作，以 Grok 4.7 : Codex : Opus 5.5 = 4:2:1 的比例為目標分配執行者，而且不把新工作交給每週額度剩餘在 15% 以下（含）的模型。這些是寫在 prompt 裡的指示，不是服務會強制執行的規則：服務不會統計分派次數，也不會讀取額度。這個服務本身不做路由、不做審查，也不做 failover。驗證結果以可信任的測試為準；程式碼沒過，就退回同一個 session 在有限次數內重做，預算用完則標為 `needs_ted`。Ted 之後補充的指示，會接在同一個任務上繼續（同一個 session，不重新規劃，也不開新任務）。這條路徑不經過 Jev。只有當調度者送出已經拆好的任務，並指定 `executor_model`（`grok`、`codex` 或 `claude`）而跳過 Opus 規劃時，才會用到 Jev。Goose 本身有一個開關，預設關閉（`GooseConfig.enabled`）；關閉期間，任務會一直排隊，不會啟動任何東西。
-
-可信任的測試指令必須在本機設定好；服務會在乾淨的候選 commit 上觀察它的結束代碼。服務永遠不會自己在聊天室發訊息。`work_events(since_cursor, limit)`（CLI 為 `batc task-events --since N`）只回傳里程碑（`started`、附原因的 `needs_ted`、附 commit／PR 連結的 `done`、`failed`），每一筆都帶單調遞增的 `cursor`、`task_id`、`project`、`workspace`、送出時傳入的不透明 `origin_thread_id`、`kind`，以及一段簡短的 `summary`。主要的傳遞方式是推送：在私有設定裡設好 `[task_service.event_webhook] url`（只限 loopback）與 `secret_file`（權限 0600）後，每個已提交的里程碑都會依 cursor 順序以純 JSON POST 出去（`type="task.milestone"`、`delivered_through`、`X-Request-ID`，以及對 `<X-Webhook-Timestamp>.<body>` 計算的 HMAC-SHA256 `X-Webhook-Signature-V2`）。推送的 cursor 在第一次設定時從「現在」開始，只有收到 2xx 才會前進；失敗時以有上限的指數退避重試（最長 300 秒）。接收端斷線之後，用 `work_events` 補抓；`limit=0` 會回傳 `head_cursor`。選用的 `[task_service] repo_urls` 會多加上 `commit_url`。任務 API 需要本機管理 token 或限定範圍的 capability，而且只綁定 loopback。狀態、復原、私有設定與上線步驟，請見[任務服務設計文件](docs/design/task-service.md)。`work_status` 與 `work_result` 只是單純讀取 journal，回傳的 `delivery` 區塊會把 `verified` 與 `adopted`、`merged`、`deployed` 分開（後三者只來自 `work_mark_stage`）。`context_refs` 保存隨 Ted 的原話一起送來的附件、previous_message_id、計畫與 commit。`work_submit` 可以另外帶 `task_path`（`standard` 或 `minimal`）；沒有帶時，常駐服務使用 `standard`，若啟動時設了 `BATC_TASK_DEFAULT_PATH=minimal` 則改用 `minimal`。只有走 minimal 路徑，而且後續請求的 HEAD 仍是上一個已驗證的 commit，才會沿用已經暖機的主導 session。
-
-較早之前（加入精簡版 Jev 審查關卡之前），曾用一個一行的 README 修改請求做 A/B 測試，使用本機的假 BAT，並關閉 Jev 的網路連線。每條路徑各完成 10 個任務，standard `bugfix-with-tests` 的中位數是 **48.44 ms**，minimal `small-task-with-tests` 的中位數是 **22.73 ms**。這只量到本機協調的時間，不含真正的 BAT、模型、測試執行與網路時間，也不能拿來預估實際交付時間。Codex 的時間戳 cursor 無法證明指令是誰送的。無法確定是否送達的指令會一直停住，直到操作者針對那一個指令做一次性的核對（`batc task-reconcile`）；絕不會自動重送。Claude 轉 Codex 的 failover，會把交接記成另一筆無法確定是否送達的指令。很長的原始請求會使用一份完整的私有封存，派送前先確認接手的主機讀得到；如果無法證明讀得到，服務就直接拒絕執行（fail closed）。不需要任何付費的 API key。
-
-伺服器名稱是 `bat`。以下是範例（想確保唯讀，就加上 `--read-only`）：
-
-**Claude Code**
-```bash
-claude mcp add bat -- bat-agent-connector-mcp --read-only
-```
-
-**Codex**（`~/.codex/config.toml`）
-```toml
-[mcp_servers.bat]
-command = "bat-agent-connector-mcp"
-args = ["--read-only"]
-```
-
-**Cursor**（`~/.cursor/mcp.json`）
-```json
-{ "mcpServers": { "bat": { "command": "bat-agent-connector-mcp", "args": ["--read-only"] } } }
-```
-
-**Hermes Agent**（`~/.hermes/config.yaml`）
-```yaml
-mcp_servers:
-  bat:
-    command: /home/you/.local/bin/bat-agent-connector-mcp
-    args: [--read-only]
-    connect_timeout: 60.0
-    enabled: true
-```
-
-**任何透過 HTTP 連線的 MCP 客戶端**（只綁 loopback）：
-```bash
-bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
-```
-
-### Dashboard 與 `/api/v1`（選用）
-
-Web 與 Tauri 持續共用同一套介面來源，可以同時開啟。Connector 獨立提供 Web 介面與 API，
-不因關閉桌面程式而停止中央工作；本機憑證、Fleet 與視窗控制則依平台提供。
-詳見[共用前端與生命週期](docs/design/shared-frontend.md)。
-
-待回覆、完成確認與執行中操作分開呈現。未讀工作更新由中央同步至同一身分的 Web／Tauri；
-「標記此版本已讀」不會確認完成。這裡記錄工作項目版本，不是未讀聊天訊息數。
-
-`batc serve` 也在同一個 loopback 埠提供 `/api/v1` 與瀏覽器 Dashboard（`http://127.0.0.1:18796/dashboard/`）：需要你處理的項目、所有 session 與其來源（人在 BAT 建立的 session 一律唯讀）、managed session 的操作、PR 合併與部署按鈕、環境卡與分頁部署歷史，以及操作紀錄。以 `batc api-token issue --actor ted-dashboard --scope observe --scope operate --scope start --scope integrate --scope manage --scope approve --scope merge --scope deploy --scope cleanup`（`merge`、`deploy` 給合併與部署按鈕）發行 token 後在 Dashboard 的「連線」輸入。專案與工作項目記下在做什麼、為什麼：需求原文、驗收、步驟，以及做這件事的 sessions、checkpoint、操作與 PR。有 `manage` 的 agent 可以回報完成；只有帶 `approve` 的 token 能確認完成，而且確認的是它讀到的內容，之後內容再改會重新等待確認。排序、固定、改名與封存沿用 Project Hub 的規則。要接續人的工作而不碰它的 session，先記下 checkpoint（`checkpoint.create`：commit 與最近對話，只讀），再從它開始 managed 工作（`checkpoint.continue`：在 Connector 自有的 clone、worktree、分支與 session 從那個 commit 開始）。需要 `managed_roots` 與主機的 SSH alias。要把成果放進既有 PR，先預覽（`integration.preview`：列出以 SHA 釘住、會進 PR 的每個 commit 與檔案），再套用預覽（`integration.apply`：以主機的 git 憑證，一般 push 組合後的 commit 到 PR 的 head 分支；不強推，也不改你的資料夾），需要在 repository 的 `[[github.repos]]` 設定 `integrate = {hosts, remote_url}`。設計見 [docs/design/api-v1.md](docs/design/api-v1.md)、[docs/design/delivery.md](docs/design/delivery.md)、[docs/design/dashboard.md](docs/design/dashboard.md)、[docs/design/checkpoints.md](docs/design/checkpoints.md)、[docs/design/integration.md](docs/design/integration.md)、[docs/design/work-items.md](docs/design/work-items.md)。
-
-
-「整理與復原」與工作項目詳情的整理入口先列出實際資源、全部保留原因與執行計畫，再以 15 分鐘
-signed preview 套用同一份計畫；狀態改變必須重新預覽。HTTP `/cleanup-previews`、`cleanup.apply` operation，
-MCP `cleanup_preview`／`cleanup_apply`／`cleanup_retained`／`cleanup_tombstones`，CLI
-`batc resource-cleanup preview|apply|retained|history` 共用合約。`cleanup` 可回收 managed runtime、worktree
-與 exact temporary；明選 `release_undelivered` 仍保留 commits 與 branch，成果標為尚未送達。
-合格的 session 與 carrier 全部已 absent 時，仍可套用 reviewed preview 釋放占用的 host cap。
-只有 `discard_uncommitted` 需要人控制的 `cleanup_discard`；Hermes／Grokbot tokens 不給它，agents 不要求它。
-人工、未知、task-owned、writer、waiting 或未決指令一律保留。移除前 pin HEAD，保留所有 `refs/batc/*`、
-clones 與整合區，原 ID、位置、原因、回執與 PR 去向永久可查。設定僅支援
-`[cleanup] retained_refs="keep", history_retention="forever", permanent_delete=false`。本輪提供實際 retained
-內容列表；restore 與 reviewed task cleanup 在 Part B。`auto_cleanup` 保留解析但已 deprecated，不啟用任何寫入。
-舊 `batc cleanup`／`session_cleanup` 只讀評估，不重登記 worktree；fanout 只有確認且每個 task 都啟動成功，
-才停止 planner。未確認、失敗或未全部啟動時保留 planner 供 retry，worktree 一律保留。
-設計見 [docs/design/cleanup.md](docs/design/cleanup.md)。
-
-PR metadata 使用獨立 action `github.pr.update`：既有 integrate scope，加 repository `allow_pr_update = true`（預設 false），不需要重新發 token。先以 `github_pr_preview`／`batc delivery pr` 讀 title/body digest 與保存的 merge scope；metadata 寫前比較、寫後讀回，但 GitHub 最後讀寫窗口仍有競爭限制。合併前檢視完整 commits／受影響 PR，再以 `github_pr_merge`／`batc delivery merge --preview mpv_... --key KEY` 送出；舊 head-only 請求會拒絕。提交前 base 變動停止，queue 受理後可合併到較新 base 並列出其他 commits；驗證 actual merged SHA，拒絕不支援的 stack／間接合併。MCP／CLI 寫入需要 caller 自己的 BATC_API_TOKEN。詳見 [交付設計](docs/design/delivery.md)。部署已提供 history、environment generations 與 runtime verification。`[github]` 可設定 `deployment_reconcile_interval_s = 300`（預設 300、範圍 60–86400 秒），控制 current run／runtime 與未知 run lookup 的回查週期；settled history 不讀 provider／runtime，預設每個 current environment 每小時最多各 12 次 run／runtime 讀取。停止中的 provider reads 從 15 秒起，證據不變逐次倍增至設定上限、改變回 15 秒；重啟保留 cadence，成功 read 清除舊錯誤，單筆錯誤不阻斷後續紀錄。先 `batc delivery preview NAME`，再以
-`delivery deploy NAME --sha SHA --generation N --recipe-digest DIGEST --key KEY` 送出固定版本。Run success 還需指定 attempt 的 deploy job、environment，以及 recipe 要求的實際版本及／或健康證據；result 明示驗了什麼。缺 `verification` 會停用 deploy（breaking change）：在 `[[deploy.recipes]]` 加上
-`verification = { kind = "http_json", url = "https://deployment.example/version", version_required = true, health_required = true }`，並讓實際 endpoint 回 repository_id／environment／source_sha／healthy。
-`delivery history NAME`／`show DEP_ID` 離線仍可讀；retry 沿用保存的 identity，`delivery rollback NAME DEP_ID --generation N --recipe-digest DIGEST --key KEY` 以同 recipe 建立新的 operation／run。Recipe 需明確宣告支援及 `rollback.not_undone`（例如不撤銷 migrations）。取消後仍保留 provider slot 到終態證據，舊代不升 current，drift 需人處理、不自動重派。MCP 有對應 preview／status／list／start／retry／rollback tools；Dashboard Delivery 依 repository／environment 各顯示一張卡，不需 open PR；列選定、目前觀測、最後驗證的 SHA／artifact／時間、游標歷史、回退限制與資格，以及只部署固定版本的重試。Drift 顯需要處理；確認框先讀 generation／recipe digest，stale refusal 需另按一次，不自動重送。SSE 保留開啟的確認框；缺 scope 的按鈕列原因，技術回執收在可展開的操作詳情。見 [交付設計](docs/design/delivery.md)。
-
-未知 metadata 寫入滿 10 分鐘後讀回仍未變，會結案為 not_applied、釋放 PR，不重送 PATCH；新編輯仍須讀取新 digest。相同 merge preview 重用 ID；事件重載的完整 scope 讀取以 60 秒節流，head／base 變動立即刷新，送出合併前仍完整核對。
-
-## 工具一覽
-
-| 工具 | 用途 |
-|---|---|
-| `hosts_list(probe=true)` | 已設定的主機；加上 probe 時，顯示是否連得到、伺服器版本與 ping。 |
-| `host_status(host)` | 版本、協定、連線／認證／ping 延遲，以及工作區、終端機、agent session、已載入與串流中 session 的數量。 |
-| `workspaces_list(host?)` | 工作區，附資料夾與 session 數量。 |
-| `sessions_list(host?, workspace?, agent?, only_loaded?, active_within_hours?, check_pending=auto, limit=50)` | agent session，最近有活動的排在前面：工作區、標題、cwd、agent 種類、模型、是否已載入、是否串流中、待回答的問題、最後活動時間（與來源）、worktree 分支、是否受調度（orchestrated）。 |
-| `session_read(host, session_id, last_n=20, offset=0, include_tools=false, max_chars=12000, after=null)` | 以精簡文字分頁讀取最新訊息（`next_offset`），有大小上限；也附上待回答的問題與串流中的尾段。`session_id` 可以用唯一的前綴。對 Claude，`after=<turn_marker>` 會比對 BAT 回傳的確切 echo ID，並隱藏尚未確認的排隊輸出。 |
-| `session_wait(host, session_id, until=attention, timeout_s=120, require_new=false, after=null)` | 等到這一輪結束、出現問題或權限請求，或發生錯誤。`after=<turn_marker>`（來自 `session_send`／`session_relay`）會對應 Claude 的 echo，回報 accepted／running／terminal 階段；過時的閒置狀態不算數。BAT 的 Codex 不會回傳 `clientMessageId`，所以改用較弱的時間戳備援。 |
-| `worktree_status(host, workspace?)` | worktree session：分支、來源分支、merge 狀態、diff 統計。 |
-| `session_worktree_status(host, session_id, include_diff?)` | 單一 session 的同樣資訊，另加尚未提交的檔案與主要 checkout 的狀態。 |
-| `session_send(host, session_id, text, confirm, message_id?, queue?)` | 經中央 operation 送出；session 尚未載入時先恢復。以 `idempotency_key` 查回同一操作；`message_id` 是 BAT 訊息身分。 |
-| `session_continue(host, session_id, confirm, text="continue")` | 推一下。 |
-| `session_interrupt(host, session_id, mode=soft\|hard, confirm)` | soft 是 Claude 的 interrupt-turn，hard 是 abort（Codex 一律 hard）。session 會保留。 |
-| `session_answer(host, session_id, confirm, answers? \| permission?)` | 回答待處理的 ask-user 問題或權限請求。 |
-| `session_start(host, workspace, agent, confirm, prompt?, model?, use_worktree=true)` | 啟動 session（預設開在新的 worktree；分支由 BAT 命名為 `bat/worktree-<id>`）。每台主機有數量上限。 |
-| `worktree_merge(host, session_id, confirm)` | 只 merge 到位於 managed root 內的主 checkout，而且要能證明沒有衝突、乾淨；否則回報原因。 |
-| `worktree_remove(host, session_id, confirm, delete_branch=false, ...)` | 停用的相容入口（`LEGACY_WORKTREE_REMOVE_DISABLED`）；改用 reviewed `cleanup_preview` → `cleanup_apply`，檢查所有 consumers 並保存 receipts。 |
-| `sessions_triage(host?, workspace?, agent?, states?, use_jev=auto, include_unloaded=true)` | 把每個 session 分類為 `quota_exhausted`、`rate_limited_transient`、`waiting_permission`、`waiting_question`、`working`、`done_idle`、`error_other`、`unknown`，並附上 `source`（pattern／jev）、信心值、判斷依據的那一行，以及額度重置時間。 |
-| `quota_sessions(host?)` | 捷徑：因用量額度而停下的 Claude session。 |
-| `session_set_permissions(host, session_id, mode, confirm, idempotency_key?, control_version?)` | 中央 durable 操作：`allow_all`（主機必須允許）或 `default`。Claude 只在 idle 切換、不自動延後；Codex 從下一輪開始套用。部分成功或未知時保留 operation/key。 |
-| `approve_pending(host, confirm, dry_run?)` | 僅保留 dry-run 預覽。合併 apply 在任何回答或模式修改前回 `LEGACY_PERMISSION_RAISE_DISABLED`，改用逐項中央 answer／permissions actions。 |
-| `session_failover(host, session_id? \| all_exhausted, confirm, dry_run?, model?, force?, instructions?, archive_only?)` | 啟動一個 Codex session，接續因額度停下、由 connector 建立的 Claude session：有 worktree 時沿用同一個 worktree，交接 prompt 帶著原始任務、最新指示、最近的輸出與 git 狀態（憑證已遮蔽）。具冪等性。`model` 預設為主機的 `codex_model`。`instructions` 會取代預設的「繼續完成任務」步驟（例如「只 commit 進行中的工作」）；`archive_only` 讓清理時保留該分支、不 merge。 |
-| `session_relay(host, message, confirm, workspace? \| session_id?, brief?, earlier?, channel?, thread?, request_fanout=0, dry_run?, start_if_missing?)` | 把人的訊息原封不動轉給工作區最近一個由 connector 建立的 session（或指定的 session；在 BAT 建立的 session 一律不寫入，`start_if_missing` 改在新 worktree 開 session），可附一段標明是轉達者詮釋的摘要，以及 BAT-STATUS 結尾說明。`request_fanout=N` 會請 session 產出 `bat-fanout` 計畫。回傳組好的文字。 |
-| `fanout_plan_session(host, workspace, message, confirm, max_items=4, brief?)` | 在獨立 worktree 啟動一個 Codex 規劃 session（適用於沒有 managed session 可規劃時），由它回覆一份 `bat-fanout` 計畫。 |
-| `session_policy(host, session_id?)` | 唯讀。主機的 mutation 清單與 managed roots，或單一 session 的來源（`manual`、`connector_managed`、`unknown`）、資料夾歸屬與每個寫入動作的判定與拒絕代碼。 |
-| `fanout_from_plan(host, session_id, confirm, dry_run?, agent="codex", model?, max_items=4)` | 依該 session 最後一個 `bat-fanout` 區塊，每個任務各開一個 worktree session，prompt 原封不動。只有確認且每個任務都啟動成功才停止規劃 session，否則保留供 retry；worktree 一律保留。 |
-| `session_cleanup(host, confirm, dry_run=true, session_id?)` | 在硬性關卡後面，為每個受調度的 session 決定 MERGE_AND_CLEAN／CLEAN_ONLY／KEEP／ESCALATE，只讀評估；apply 回 `LEGACY_CLEANUP_DISABLED`，`auto_cleanup` 已 deprecated。詳見 docs/ORCHESTRATE.md。 |
-| `session_record_verification(host, session_id, candidate_commit, command, exit_code, environment, log_ref, confirm)` | 為主機目前乾淨的 commit 記錄一筆在外部執行的驗證；舊清理評估用它判斷完成；reviewed cleanup 依送達回執判斷。CLI：`batc record-verification`。 |
-
-## CLI
-
-```bash
-batc hosts
-batc status box1
-batc sessions --active-within 24
-batc --json sessions box1 --workspace api
-batc read box1 1a2b3c4d -n 30
-batc wait box1 1a2b3c4d --timeout 600
-batc worktrees box1
-# write 層（主機需設 writes = true）
-batc send box1 1a2b3c4d "Please run the tests and fix failures" --confirm
-batc continue box1 1a2b3c4d --confirm
-batc interrupt box1 1a2b3c4d --mode soft --confirm
-batc answer box1 1a2b3c4d --answer "Which database?=postgres" --confirm
-# orchestrate 層
-batc fanout PLAN.md                                   # dry run：拆成各個任務的 prompt
-batc fanout PLAN.md --start --host box1 --workspace api --confirm
-batc merge box1 1a2b3c4d --confirm
-# 檢視 reviewed cleanup，再套用固定 preview
-batc resource-cleanup preview --host box1
-# 生命週期
-batc triage box1 --state quota_exhausted --state waiting_permission
-batc quota                                            # 所有主機上因額度停下的 Claude session
-batc approve-pending box1 --dry-run                   # 僅預覽；bulk apply 已停用
-batc permissions box1 1a2b3c4d --mode default --key perm-example --confirm
-batc failover box1 --all-exhausted --dry-run          # 確認後改用 --confirm
-batc cleanup box1                                     # 唯讀評估；--apply 回 LEGACY_CLEANUP_DISABLED
-```
-
-每個指令都能用全域的 `--json` 旗標，但要放在指令前面：`batc --json hosts`。
-
-## 轉達、分派與狀態標記
-
-替人轉達指令的助理（例如從聊天室轉過來）不應該改寫或自己規劃這些指令。`session_relay` 會原封不動送出訊息，可附一段標明身分的摘要；由握有 repo 脈絡的 coding session 來詮釋，把不清楚的要求補齊，並用一行說明它的理解。需要平行處理時，由該 session（或一個唯讀的規劃 session）寫出 `bat-fanout` 區塊：
-
-```bat-fanout
-[{"title": "short title", "prompt": "self-contained task prompt", "area": "files/modules touched"}]
-```
-
-`fanout_from_plan` 就只啟動這幾個任務。每次停下來都以一行結尾：`BAT-STATUS: MILESTONE <name>`、`BAT-STATUS: CONTINUE <next step>` 或 `BAT-STATUS: NEED-<HUMAN> <reason>`；triage 會把它當成「已完成」的聲明。它不能取代送達回執，也不會讓 reviewed cleanup 把未送達的結果當成已送達。
-
-## 安全模型（精簡版）
-
-* 預設唯讀；寫入與調度要逐台主機開啟，需要 `confirm=true`，有速率限制，並留有稽核記錄。
-* 人在 BAT 建立的 session 對所有工具永久唯讀。寫入只會送到 connector 自己建立、且位於它擁有之資料夾的 session；client 核心拒絕任何沒有資源政策 grant 的寫入 frame（見 [docs/design/resource-policy.md](docs/design/resource-policy.md)）。
-* TLS 憑證指紋比對是強制的；不符時會在送出 token 之前中止。只接受 `bat-remote/v2`。
-* Token 在連線時才從參照解析出來，並從所有錯誤訊息中遮蔽。
-* 客戶端會一直把 socket 讀空（BAT 會斷掉累積 256 個待送 frame 的客戶端），事件佇列也有上限。
-* Session 裡的文字是不可信任的輸入：agent 不應該照著裡面的指示做。
-* 選用的 Jev 判斷層會先試 TypeSafe，再試 OpenRouter Decisions 的 `typesafe/jev-1.13`，使用環境變數裡的 `OPENROUTER_API_KEY`。幾秒後就逾時，兩者都失敗時保留確定性的判斷結果。它只拿到簡短的摘錄，疑似憑證的字串都會先遮蔽。這裡不存放任何 key。
-
-細節：[SECURITY.md](SECURITY.md)、[docs/PROTOCOL.md](docs/PROTOCOL.md)、[docs/ORCHESTRATE.md](docs/ORCHESTRATE.md)。
-
-## 開發
-
-```bash
-uv sync --extra dev
-uv run ruff check . && uv run pytest            # 單元測試使用模擬的 TLS WebSocket 伺服器
-BATC_LIVE=1 uv run pytest tests/test_live.py    # 選用：對你設定好的主機跑唯讀測試
-```
-
-## 授權
-
-MIT，見 [LICENSE](LICENSE)。BAT 本身由 TonyQ 以 MIT 授權釋出。
+MIT · [LICENSE](LICENSE) · [第三方聲明](THIRD_PARTY_NOTICES.md) · [更新紀錄](CHANGELOG.md)

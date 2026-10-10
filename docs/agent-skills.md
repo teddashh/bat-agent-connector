@@ -64,7 +64,7 @@ cannot select another principal by passing tool arguments.
 
 The operator supplies this agent's `BATC_API_TOKEN` through the MCP server's
 environment/secret configuration, and `BATC_TASK_URL` when the daemon endpoint
-differs. See [MCP setup](../README.md#mcp-setup) for existing stdio/HTTP and Hermes
+differs. See [MCP setup](getting-started.md#cli-and-agent-access) for stdio/HTTP
 configuration. Changes to write configuration follow the existing host tiers and
 principal scopes; changing the agent name grants nothing. Standard MCP clients
 need neither Hermes nor an open Tauri window.
