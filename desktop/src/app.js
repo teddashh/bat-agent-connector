@@ -2504,7 +2504,11 @@ async function viewNativeSettings(main) {
       }}, h("p", {}, t("desktop_setup_help")),
         h("div", {class: "capture-fields"}, h("label", {}, t("desktop_endpoint"), endpoint), h("label", {}, t("desktop_expected_actor"), actor)),
         h("p", {class: "muted"}, t("desktop_setup_origin")), h("div", {class: "actions"}, review));
-      setup.append(form);
+      if (status.configuration_source === "managed" && status.error) {
+        setup.append(h("h3", {}, t("managed_recovery_title")), h("p", {}, t("managed_recovery_help")),
+          h("details", {}, h("summary", {}, t("managed_join_existing")), form));
+        introduction.hidden = true;
+      } else setup.append(form);
       // Keep configuration recovery accessible without making it compete with the first step.
       connectionDetails.append(h("div", {class: "actions"}, reload));
     }
@@ -2512,7 +2516,7 @@ async function viewNativeSettings(main) {
     row("desktop_expected_actor", status.expected_actor);
     if (status.configuration_file) technicalDetails.append(h("dt", {}, t("desktop_configuration_file")), h("dd", {}, status.configuration_file));
     if (status.credential_source) row("desktop_credential_source", t("desktop_source_" + status.credential_source));
-    if (status.error && !status.configuration_setup) info.append(errorBox(new Error(status.error)));
+    if (status.error && (!status.configuration_setup || status.configuration_source === "managed")) info.append(errorBox(new Error(status.error)));
     else if (!status.credential_available && !status.configuration_setup) info.append(h("p", {}, t("desktop_credential_missing")));
     platform.textContent = status.enrollment_supported === true ? t("desktop_enrollment_help")
       : status.enrollment_supported === false ? t("desktop_enrollment_unsupported") : "";
