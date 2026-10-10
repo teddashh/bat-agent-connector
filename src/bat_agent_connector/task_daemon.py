@@ -221,9 +221,12 @@ class TaskDaemon:
         secret = ""
         if settings.event_webhook_secret_file:
             path = Path(settings.event_webhook_secret_file).expanduser()
-            if path.stat().st_mode & 0o077:
+            if platform_files.WINDOWS:
+                platform_files.check_private(path)
+            elif path.stat().st_mode & 0o077:
                 raise ValueError("event webhook secret file must be mode 0600")
-            secret = path.read_text().strip()
+            secret = (platform_files.read_private(path, max_bytes=4096).decode()
+                      if platform_files.WINDOWS else path.read_text()).strip()
             if len(secret) < 32:
                 raise ValueError("event webhook secret is too short")
         return EventWebhook(settings.event_webhook_url, secret)

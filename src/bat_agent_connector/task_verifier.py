@@ -20,6 +20,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import platform_files
 from .config import state_dir
 
 
@@ -114,9 +115,11 @@ def load_settings(path: str | None = None) -> VerificationSettings:
     if not path:
         return VerificationSettings()
     p = Path(path).expanduser()
-    if stat.S_IMODE(p.stat().st_mode) & 0o077:
+    if platform_files.WINDOWS:
+        platform_files.check_private(p)
+    elif stat.S_IMODE(p.stat().st_mode) & 0o077:
         raise ValueError("task settings must be mode 0600")
-    raw = tomllib.loads(p.read_text())
+    raw = tomllib.loads(platform_files.read_private(p).decode() if platform_files.WINDOWS else p.read_text())
     section = raw.get("verification", {})
     commands = {k: tuple(v) for k, v in section.get("commands", {}).items()}
     if any(not cmd or not all(isinstance(a, str) and a for a in cmd) for cmd in commands.values()):
@@ -205,15 +208,23 @@ class ObservedVerifier:
         else:
             cmd, working_dir = argv, cwd
         proc = None
+        tree = None
+        if platform_files.WINDOWS:
+            from .windows_processes import CREATE_SUSPENDED, ProcessTree
+
+            tree = ProcessTree()
         captured = 0
         tail = bytearray()
         limit = 2_000_000
 
         async def run() -> int:
             nonlocal proc, captured, tail
-            proc = await asyncio.create_subprocess_exec(*cmd, cwd=working_dir, start_new_session=True,
+            platform_args = {"creationflags": CREATE_SUSPENDED} if tree else {"start_new_session": True}
+            proc = await asyncio.create_subprocess_exec(*cmd, cwd=working_dir, **platform_args,
                                                         stdout=asyncio.subprocess.PIPE,
                                                         stderr=asyncio.subprocess.STDOUT)
+            if tree:
+                tree.attach_and_resume(proc)
             assert proc.stdout
             while chunk := await proc.stdout.read(65_536):
                 digest.update(chunk)
@@ -227,19 +238,27 @@ class ObservedVerifier:
         try:
             exit_code = await asyncio.wait_for(run(), timeout)
         except BaseException as exc:
-            await self._kill_tree(proc, alias, marker)
+            await self._kill_tree(proc, alias, marker, tree=tree)
             if not isinstance(exc, asyncio.TimeoutError):
                 raise
             exit_code = 124
+        finally:
+            if tree:
+                tree.close()
         if captured >= limit:
             # Keep the real end of the output for failure summaries.
             os.write(fd, b"\n[... output truncated ...]\n" + bytes(tail))
         return exit_code
 
-    async def _kill_tree(self, proc, alias: str | None, marker: str) -> None:
+    async def _kill_tree(self, proc, alias: str | None, marker: str, *, tree=None) -> None:
+        if tree:
+            tree.terminate()
         if proc is not None and proc.returncode is None:
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
+                if tree:
+                    proc.kill()  # also covers a still-suspended child whose job assignment failed
+                else:
+                    os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
         if alias:
@@ -255,6 +274,13 @@ class ObservedVerifier:
                 out = b""
             if killer.returncode != 0 or out.strip() != b"gone":
                 raise VerificationProcessStuck("remote verification process tree is not confirmed gone")
+        elif tree:
+            for _ in range(50):
+                if not tree.alive():
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                raise VerificationProcessStuck("local verification job is still alive")
         elif proc is not None:
             for _ in range(50):
                 if not _group_alive(proc.pid):
@@ -276,10 +302,13 @@ class ObservedVerifier:
 
     def _log(self, task: dict, kind: str = "") -> tuple[Path, int]:
         artifacts = Path(self.settings.artifact_dir or state_dir() / "task-artifacts")
-        artifacts.mkdir(parents=True, exist_ok=True, mode=0o700)
-        artifacts.chmod(0o700)
+        if platform_files.WINDOWS:
+            platform_files.ensure_private_directory(artifacts)
+        else:
+            artifacts.mkdir(parents=True, exist_ok=True, mode=0o700)
+            artifacts.chmod(0o700)
         log_path = artifacts / (str(task["task_id"]) + kind + "-" + uuid.uuid4().hex + ".log")
-        return log_path, os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        return log_path, platform_files.open_private_file(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
 
     async def observe(self, task: dict, cwd: str, *, before_run=None) -> dict | None:
         argv = self.settings.commands.get(task["project"])

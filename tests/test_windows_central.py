@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -18,6 +19,7 @@ from bat_agent_connector.artifacts import ArtifactSettings
 from bat_agent_connector.config import Config
 from bat_agent_connector.errors import OwnerConflict
 from bat_agent_connector.task_daemon import TaskDaemon
+from tests.conftest import make_config
 from tests.operation_helpers import settle_operations
 
 PERSON = api_auth.Principal("local-person", frozenset({"observe", "manage"}))
@@ -104,6 +106,30 @@ def test_artifact_store_accepts_native_absolute_path(tmp_path):
         ArtifactSettings.from_dict({"store_root": "relative/path"})
 
 
+async def test_native_central_observes_mock_bat_without_adopting_manual_work(mock, tmp_path):
+    daemon = TaskDaemon(make_config(mock), tmp_path / "journal" / "tasks.sqlite3")
+    try:
+        await daemon.inventory.refresh_host("h1")
+        snapshot = daemon.inventory.list_sessions()
+        assert snapshot["sessions"]
+        assert all(row["host"] == "h1" for row in snapshot["sessions"])
+        assert not daemon.journal.db.execute("SELECT 1 FROM operations").fetchone()
+        assert "claude:start-session" not in mock.channels()
+    finally:
+        await _close(daemon)
+
+
+def test_private_long_request_archives_use_native_storage(tmp_path):
+    from bat_agent_connector.task_handoff import history_excerpt, original_words_archive
+
+    root = tmp_path / "archives"
+    original = original_words_archive("original request" * 500, root, "task-fixture")
+    assert hashlib.sha256(platform_files.read_private(original["path"])).hexdigest() == original["sha256"]
+    history = history_excerpt("context" * 30000, root, "task-fixture", force_archive=True)
+    assert platform_files.read_private(history["archive_path"]).decode() == "context" * 30000
+    assert history["truncated"]
+
+
 @pytest.mark.skipif(os.name != "nt", reason="native Windows ACL contract")
 def test_windows_rejects_foreign_acl_without_repairing_it(tmp_path):
     root = tmp_path / "owned"
@@ -144,3 +170,34 @@ def test_windows_directory_chain_cannot_be_replaced_while_open(tmp_path):
     finally:
         held.close()
     root.rename(tmp_path / "swapped")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows verification process-tree contract")
+async def test_windows_verifier_timeout_terminates_its_descendants(tmp_path):
+    from bat_agent_connector.task_verifier import ObservedVerifier, VerificationSettings
+    from bat_agent_connector.windows_files import _bind, _close, kernel
+    from bat_agent_connector.windows_processes import w
+
+    pidfile = tmp_path / "child.pid"
+    script = ("import subprocess,sys,time; from pathlib import Path; "
+              "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)']); "
+              f"Path({str(pidfile)!r}).write_text(str(child.pid)); "
+              "print('started',flush=True);time.sleep(120)")
+    verifier = ObservedVerifier(VerificationSettings())
+    log = tmp_path / "verify.log"
+    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        result = await verifier._group_run("local", str(tmp_path), (sys.executable, "-c", script),
+                                          4, fd, hashlib.sha256())
+    finally:
+        os.close(fd)
+    assert result == 124
+    assert pidfile.exists(), "the verifier must actually start its descendant before timeout"
+    open_process = _bind(kernel, "OpenProcess", [w.DWORD, w.BOOL, w.DWORD], w.HANDLE)
+    wait = _bind(kernel, "WaitForSingleObject", [w.HANDLE, w.DWORD], w.DWORD)
+    handle = open_process(0x00100000, False, int(pidfile.read_text()))  # SYNCHRONIZE only
+    if handle:  # an already-destroyed process object is also proof of exit
+        try:
+            assert wait(handle, 0) == 0
+        finally:
+            _close(handle)

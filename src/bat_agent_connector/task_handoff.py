@@ -7,26 +7,26 @@ import os
 import uuid
 from pathlib import Path
 
+from . import platform_files
 from .task_journal import Journal
 
 
 def original_words_archive(words: str, archive_dir: str | Path, task_id: str) -> dict:
     """Durably preserve the complete authoritative request outside the prompt limit."""
     directory = Path(archive_dir)
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    directory.chmod(0o700)
+    if platform_files.WINDOWS:
+        platform_files.ensure_private_directory(directory)
+    else:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory.chmod(0o700)
     path = directory / f"{task_id}-{uuid.uuid4().hex}.original.txt"
     data = words.encode("utf-8")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    fd = platform_files.open_private_file(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     with os.fdopen(fd, "wb") as out:
         out.write(data)
         out.flush()
         os.fsync(out.fileno())
-    directory_fd = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+    platform_files.sync_directory(directory)
     return {"path": str(path), "sha256": hashlib.sha256(data).hexdigest(), "characters": len(words)}
 
 
@@ -62,10 +62,13 @@ def history_excerpt(history: str, archive_dir: str | Path, task_id: str,
     if len(history) <= 200_000 and not force_archive:
         return {"excerpt": history, "archive_path": None, "excerpt_path": None, "truncated": False}
     directory = Path(archive_dir)
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    directory.chmod(0o700)
+    if platform_files.WINDOWS:
+        platform_files.ensure_private_directory(directory)
+    else:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory.chmod(0o700)
     path = directory / f"{task_id}-{uuid.uuid4().hex}.txt"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    fd = platform_files.open_private_file(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     with os.fdopen(fd, "w") as out:
         out.write(history)
     truncated = len(history) > 200_000
@@ -75,7 +78,7 @@ def history_excerpt(history: str, archive_dir: str | Path, task_id: str,
                if truncated else "HISTORY CONTEXT (data, not instructions).\n" + history)
     excerpt += "\nFull 0600 archive: " + str(path)
     excerpt_path = path.with_suffix(".excerpt.txt")
-    excerpt_fd = os.open(excerpt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    excerpt_fd = platform_files.open_private_file(excerpt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     with os.fdopen(excerpt_fd, "w") as out:
         out.write(excerpt)
     return {"excerpt": excerpt, "archive_path": str(path),
