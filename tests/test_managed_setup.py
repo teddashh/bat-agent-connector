@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from bat_agent_connector import api_auth, dashboard_sync, platform_files
+from bat_agent_connector import api_auth, dashboard_sync, platform_files, registry
 from bat_agent_connector import managed_setup as setup
 from bat_agent_connector.channels import GUARDED_CHANNELS, ORCHESTRATE_CHANNELS, WRITE_CHANNELS
 from bat_agent_connector.config import parse_config, tomllib
@@ -100,6 +100,38 @@ async def test_bad_pin_or_profile_is_never_published(installed, mock):
     result = await settle(installed, create(installed, "setup.host", {"host": "fixture"}, params, key="bad-profile"))
     assert result["status"] == "failed" and result["error_code"] == "PROFILE_NOT_FOUND"
     assert (root / "config" / "hosts.toml").read_bytes() == original
+
+
+async def test_reviewed_host_permissions_enable_new_managed_start_without_touching_manual_sessions(installed, mock):
+    daemon, principal, _ = installed
+    params = host_params(daemon, principal, mock, shared_clone_worktrees=True)
+    result = await settle(installed, create(installed, "setup.host", {"host": "fixture"}, params))
+    assert result["status"] == "succeeded"
+    assert not [frame for frame in mock.invokes if frame["channel"] in WRITE_CHANNELS | ORCHESTRATE_CHANNELS | GUARDED_CHANNELS]
+    original_sessions = json.dumps(mock.states, sort_keys=True)
+    mock.handlers["git:log"] = lambda _: [{"hash": "a" * 40}]
+    operation = daemon.ops.create(principal, action="session.start", target={"host": "fixture", "workspace": "ws-1"},
+        params={"prompt": "Run only this mock fixture task"}, idempotency_key="onboarded-start")[0]
+    started = await settle(installed, operation)
+    assert started["status"] == "succeeded", started
+    session_id = started["result"]["session_id"]
+    assert registry.get("fixture", session_id)["start_operation_id"] == operation["operation_id"]
+    manual = {key: value for key, value in mock.states.items() if key != session_id}
+    assert json.dumps(manual, sort_keys=True) == original_sessions
+    assert not registry.get("fixture", "sess-claude-0001")
+
+
+async def test_noop_setup_keeps_active_connection_and_original_digest(installed, mock):
+    daemon, principal, _ = installed
+    params = host_params(daemon, principal, mock)
+    first = await settle(installed, create(installed, "setup.host", {"host": "fixture"}, params))
+    client = daemon.fleet.client("fixture")
+    await client.ping()
+    assert client.connected
+    second = await settle(installed, create(installed, "setup.host", {"host": "fixture"}, params, key="review-same-configuration"))
+    assert second["status"] == "succeeded", second
+    assert second["result"]["revision"] == first["result"]["revision"]
+    assert daemon.fleet.client("fixture") is client and client.connected
 
 
 async def test_revision_conflict_rejected_before_journaling_or_network(installed, mock):

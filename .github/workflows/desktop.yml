@@ -87,6 +87,10 @@ jobs:
         working-directory: .
         timeout-minutes: 8
         run: uv run --locked --extra desktop-build python desktop/tests/managed-runtime-fixture.py
+      - name: Packaged managed setup with real browser and MockBAT
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        run: node tests/managed-setup-browser-integration.mjs
       - name: Shared UI with actual central service (temporary resources only)
         if: runner.os == 'Linux'
         timeout-minutes: 10
