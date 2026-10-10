@@ -52,14 +52,18 @@ def test_lease_is_kernel_owned_and_recovers_after_close(tmp_path):
         results.join_thread()
 
 
-def test_atomic_private_state_replaces_only_its_file(tmp_path):
-    root = tmp_path / "owned"
+def test_atomic_private_state_replaces_only_its_file(tmp_path, monkeypatch):
+    root = tmp_path / "owned-資料"
     files.ensure_private_directory(root)
-    path = root / "identity.json"
+    unrelated = tmp_path / "current-directory"
+    unrelated.mkdir()
+    monkeypatch.chdir(unrelated)
+    path = root / "identity-資料.json"
     files.atomic_write(path, b"old")
     files.atomic_write(path, b"new")
     assert files.read_private(path) == b"new"
     assert list(root.iterdir()) == [path]
+    assert list(unrelated.iterdir()) == []
     files.check_private(root, directory=True)
     files.check_private(path)
     with pytest.raises(ValueError, match="size limit"):
