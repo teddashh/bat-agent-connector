@@ -117,3 +117,30 @@ Project creation optionally lists the repositories in central's existing publish
 The user explicitly selects a repository; the existing `project.create` operation stores that choice.
 The project's dispatch composer still filters host/workspace choices against current capabilities.
 This does not configure a new binding or create an extra Task Service task.
+
+## Persistent project workspace (2026-10-10)
+
+The owner's screenshot review replaced top-level tab navigation with a persistent
+project/work tree. Selecting a dispatched work source opens its existing session's
+conversation, composer and results inspector together. Linked work items show their
+review controls alongside an explicitly linked session; multiple recorded sessions
+have a selector. No new task, ownership inference or backend is introduced.
+
+Project children and work-item children come from central IDs. Dispatched work comes
+from `GET /projects/{id}`; roots and expanded projects refresh through the existing
+journal barrier. The independent All sessions tree groups observed sessions by
+host/workspace without asserting project membership. Its paging depth is retained
+and counts describe loaded rows only. Search covers loaded data, not the fleet.
+Failed reads keep the last tree with an error and prevent event acknowledgement.
+
+The tree survives route changes, keeps project expansion by server/principal and
+closes on selection on narrow screens. Old resource URLs still work. Result links
+reuse the existing integration preview and durable actions; raw activity never
+asserts completion. The selected conversation keeps its existing draft identity,
+message anchoring, pending-frame checks and operation keys. Detailed evidence is
+expandable. Pending remains a global overview, management tools are grouped, and
+Connection still opens native Fleet/Tailscale/credentials on supported platforms.
+
+The layout is independently implemented using the supplied Project Hub screenshots
+as an interaction reference. It imports no upstream code, data or runtime. The
+frontend change does not implement managed installation or cross-platform Fleet.

@@ -114,10 +114,10 @@ parts.append(
     + heading(
         "Inside the product",
         "介面導覽",
-        "See what needs your attention.",
-        "看清狀態，再決定下一步。",
-        "Read the situation before you act. Keep questions, completion review and operation recovery in their own lanes.",
-        "先理解現況再操作。待回答、完成待審與操作復原各有明確的位置。",
+        "Keep the work in view.",
+        "從專案一路看到工作成果。",
+        "A persistent project tree keeps conversations, controls and linked results together in Web and Tauri.",
+        "Web 與 Tauri 共用左側專案工作樹；選中工作，就能一起查看對話、操作與關聯成果。",
     )
 )
 parts.append(
@@ -125,12 +125,12 @@ parts.append(
     + bi("View:", "檢視：", "span", "tour-label")
 )
 for k, en, zh in [
-    ("attention", "Attention & review", "待處理與審閱"),
+    ("workspace", "Project workspace", "專案工作空間"),
     ("dispatch", "Project dispatch", "專案派工"),
 ]:
     parts.append(
         f'<button type="button" data-view="{k}" aria-pressed="'
-        + ("true" if k == "attention" else "false")
+        + ("true" if k == "workspace" else "false")
         + '" aria-controls="view-'
         + k
         + '">'
@@ -140,9 +140,9 @@ for k, en, zh in [
 parts.append("</div>")
 for key, en, zh in [
     (
-        "attention",
-        "Pending replies, review decisions and uncertain operations appear separately.",
-        "待回答、審閱決策與結果未知的操作分開顯示。",
+        "workspace",
+        "Select work in the project tree. Read the conversation, reply and follow results in one workspace.",
+        "從左側專案樹選工作，在同一畫面閱讀對話、回覆並追蹤成果。",
     ),
     (
         "dispatch",
@@ -812,7 +812,7 @@ head = f'''<!doctype html>
 <meta property="og:title" content="{title}">
 <meta property="og:description" content="{desc}">
 <meta property="og:url" content="https://teddashh.github.io/bat-agent-connector/">
-<meta property="og:image" content="https://teddashh.github.io/bat-agent-connector/images/attention-en.png">
+<meta property="og:image" content="https://teddashh.github.io/bat-agent-connector/images/workspace-en.png">
 <meta property="og:image:alt" content="Actual Dashboard UI with synthetic demonstration data">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">

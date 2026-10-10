@@ -1,7 +1,7 @@
 // Capture the real shared frontend with synthetic data, never live host credentials.
 // Start desktop/tests/static-server.mjs with BATC_UI_TEST_PORT=18746 first.
 import { chromium } from '../desktop/node_modules/@playwright/test/index.mjs';
-import { attentionFixture, mountAttention } from '../desktop/tests/attention-fixture.ts';
+import { workspaceFixture, mountWorkspace, workspaceRoute } from '../desktop/tests/workspace-fixture.ts';
 import { publishedFixture, dispatchProject, selected } from '../desktop/tests/repository-start-fixture.ts';
 import { mkdir } from 'node:fs/promises';
 const output = new URL('../site/images/', import.meta.url);
@@ -13,13 +13,13 @@ try {
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
-    const fixture = attentionFixture();
-    fixture.data.items[0].title = language === 'zh' ? '審閱搜尋功能的測試與成果' : 'Review search results and tests';
-    fixture.data.sessions[0].title = language === 'zh' ? '搜尋功能：確認空結果的呈現方式' : 'Search: confirm the empty-results behavior';
-    await mountAttention(page, false, fixture);
-    await page.goto('http://127.0.0.1:18746/dashboard/#/');
-    await page.getByText(fixture.data.items[0].title, { exact: true }).waitFor();
-    await page.screenshot({ path: new URL(`attention-${language}.png`, output).pathname });
+    const fixture = workspaceFixture(locale);
+    await mountWorkspace(page, false, fixture);
+    await page.emulateMedia({colorScheme: 'dark'});
+    await page.goto('http://127.0.0.1:18746/dashboard/' + workspaceRoute);
+    await page.locator('.conversation .msg').last().waitFor();
+    await page.locator('.workspace-tree a[href^="#/work/"]').first().waitFor();
+    await page.screenshot({ path: new URL(`workspace-${language}.png`, output).pathname });
     const composer = await context.newPage();
     composer.on('pageerror', error => errors.push(error.message));
     await publishedFixture(composer, false, { dispatch: true, scopes: ['observe', 'start', 'manage'],
