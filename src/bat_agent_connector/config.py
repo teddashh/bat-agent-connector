@@ -48,6 +48,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ._private_files import read_private
 from .errors import ConfigError, TokenUnavailable
 from .redact import register_secret
 
@@ -149,9 +150,9 @@ def _resolve_token_ref(ref: str, profiles_dir: str) -> str:
     if kind == "file":
         p = Path(arg).expanduser()
         try:
-            val = p.read_text().strip()
-        except OSError as e:
-            raise TokenUnavailable(f"cannot read token file {p}: {e.strerror}") from None
+            val = read_private(p, 64 * 1024).strip()
+        except (OSError, ValueError):
+            raise TokenUnavailable("cannot read token file: validate private file permissions, type and size") from None
         if not val:
             raise TokenUnavailable(f"token file {p} is empty")
         return val
@@ -163,9 +164,9 @@ def _resolve_token_ref(ref: str, profiles_dir: str) -> str:
 def _token_from_bat_profiles(pdir: Path, profile_id: str) -> str:
     path = pdir / "remote-tokens.enc.json"
     try:
-        raw = json.loads(path.read_text())
-    except (OSError, ValueError) as e:
-        raise TokenUnavailable(f"cannot read BAT token store {path}: {type(e).__name__}") from None
+        raw = json.loads(read_private(path, 1024 * 1024))
+    except (OSError, ValueError):
+        raise TokenUnavailable("cannot read BAT token store: validate private file permissions, type, size and JSON format") from None
     if not isinstance(raw, dict):
         raise TokenUnavailable("BAT token store has an unexpected format")
     if raw.get("enc") not in (False, None):

@@ -98,6 +98,8 @@ Profile 位於別處可用 `batc import-bat --profiles-dir /path/to/profiles`；
 
 中央沒有本機 BAT profiles 時，依 [hosts.example.toml](../examples/hosts.example.toml) 配置實際 endpoint、可信指紋與 `token_ref`：
 
+`file:` token 檔與 `bat-profile:` token 儲存檔必須是目前使用者擁有的一般檔案，不可為符號連結，且群組與其他使用者不得存取（例如 `chmod 600`）。支援的平台會檢查擁有者；Windows 不檢查權限位元。Token 檔上限為 64 KiB，BAT token 儲存檔上限為 1 MiB。稽核檔採相同規則：既有檔案不符合時拒絕存取，不自動修改權限；新檔案使用 0600，新建父目錄使用 0700。
+
 - `env:NAME`：從服務的私人環境讀取。
 - `file:/path`：從私人 token 檔案讀取。
 - `bat-profile:ID`：從支援的 BAT client token store 讀取。

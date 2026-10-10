@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import gzip
 import hashlib
 import itertools
 import json
 import logging
+import random
 import ssl
 import time
+import zlib
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -63,6 +64,16 @@ class EventSubscription:
     dropped: int = 0
     _signal: asyncio.Event = field(default_factory=asyncio.Event)
 
+    _closed: ConnectionLost | None = None
+
+    def close(self, error: ConnectionLost) -> None:
+        self._closed = error
+        self._signal.set()
+
+    def reopen(self) -> None:
+        """Resume events after the consumer has observed a connection closure."""
+        self._closed = None
+
     def offer(self, ev: dict) -> None:
         if self.predicate and not self.predicate(ev):
             return
@@ -75,6 +86,8 @@ class EventSubscription:
     async def get(self, timeout: float | None = None) -> dict | None:
         deadline = None if timeout is None else time.monotonic() + timeout
         while not self.queue:
+            if self._closed is not None:
+                raise self._closed
             self._signal.clear()
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0:
@@ -231,14 +244,19 @@ class BatClient:
         try:
             if isinstance(raw, bytes):
                 if raw.startswith(GZIP_MAGIC):
-                    data = gzip.decompress(raw[len(GZIP_MAGIC) :])
-                    if len(data) > self._max_frame:
-                        return None
+                    data = bytearray()
+                    compressed = raw[len(GZIP_MAGIC) :]
+                    while compressed:
+                        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                        data.extend(decoder.decompress(compressed, self._max_frame + 1 - len(data)))
+                        if len(data) > self._max_frame or not decoder.eof:
+                            return None
+                        compressed = decoder.unused_data.lstrip(b"\0")
                     raw = data
                 raw = raw.decode("utf-8", "replace")
             obj = json.loads(raw)
             return obj if isinstance(obj, dict) else None
-        except (ValueError, OSError, EOFError):
+        except (ValueError, OSError, EOFError, zlib.error):
             return None
 
     async def _read_loop(self, ws: ClientConnection) -> None:
@@ -281,7 +299,7 @@ class BatClient:
                     fut.set_exception(err)
             self._pending.clear()
             for sub in list(self._subs):
-                sub._signal.set()
+                sub.close(err)
 
     async def close(self) -> None:
         ws, self._ws = self._ws, None
@@ -419,7 +437,7 @@ class BatClient:
                 last_exc = e
                 await self.close()
                 if attempt + 1 < attempts:
-                    await asyncio.sleep(min(4.0, 0.5 * 2**attempt))
+                    await asyncio.sleep(random.uniform(0.0, min(4.0, 0.5 * 2**attempt)))
                     continue
                 raise
         raise last_exc or ConnectionLost(f"{self.host.name}: failed")  # pragma: no cover

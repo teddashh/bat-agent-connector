@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
 
+from ._private_files import mkdir_private, open_private
 from .config import SafetyConfig, state_dir
 from .errors import WriteRefused
 
@@ -28,13 +30,15 @@ class Audit:
 
     def _tail(self, max_lines: int = 2000) -> list[dict]:
         try:
-            with self.path.open("rb") as fh:
+            with os.fdopen(open_private(self.path, os.O_RDONLY), "rb") as fh:
                 fh.seek(0, os.SEEK_END)
                 size = fh.tell()
                 fh.seek(max(0, size - 512 * 1024))
                 lines = fh.read().decode("utf-8", "replace").splitlines()[-max_lines:]
-        except OSError:
+        except FileNotFoundError:
             return []
+        except (OSError, ValueError):
+            raise WriteRefused("cannot read audit file: validate private file permissions and type") from None
         out = []
         for ln in lines:
             try:
@@ -93,11 +97,19 @@ class Audit:
             fields["text_len"] = len(text)
             n = self.safety.audit_preview_chars
             if n > 0:
-                fields["text_preview"] = text[:n]
+                fields["text_preview"] = _redact_preview(text)[:n]
         fields.setdefault("at", time.time())
         fields["at_iso"] = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(fields["at"]))
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        mkdir_private(self.path.parent)
         line = json.dumps(fields, ensure_ascii=False, default=str)
-        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            fd = open_private(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+        except (OSError, ValueError):
+            raise WriteRefused("cannot open audit file: validate private file permissions and type") from None
         with os.fdopen(fd, "a") as fh:
             fh.write(line + "\n")
+
+
+def _redact_preview(text: str) -> str:
+    text = re.sub(r"(?i)(authorization\s*:\s*bearer\s+|[?&]token=|\btoken\s*[:=]\s*[\"']?)[^\s&\"'<>]+", r"\1[redacted]", text)
+    return re.sub(r"[A-Za-z0-9_+/=\-]{32,}", "[redacted]", text)

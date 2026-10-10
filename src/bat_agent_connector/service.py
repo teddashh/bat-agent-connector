@@ -851,7 +851,11 @@ async def session_wait(
                     "elapsed_s": round(time.monotonic() - t0, 1),
                 }
             c.last_used = time.monotonic()  # keep the idle reaper away while waiting
-            ev = await sub.get(timeout=min(10.0, remaining))
+            try:
+                ev = await sub.get(timeout=min(10.0, remaining))
+            except ConnectionLost:
+                sub.reopen()
+                ev = None
             if ev is not None:
                 return {
                     "host": host,
@@ -921,7 +925,11 @@ async def _wait_after(
             )
             return out("timeout", prog, **({"note": note} if note else {}))
         c.last_used = time.monotonic()
-        ev = await sub.get(timeout=min(10.0, remaining))
+        try:
+            ev = await sub.get(timeout=min(10.0, remaining))
+        except ConnectionLost:
+            sub.reopen()
+            ev = None
         if ev is not None:
             ch = ev.get("channel")
             if ch in ("agent:ask-user", "agent:permission-request", "agent:error"):

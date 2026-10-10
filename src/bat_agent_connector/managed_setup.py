@@ -23,6 +23,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import dashboard_sync, platform_files, service
+from ._private_files import read_private
 from .artifact_host import ArtifactHost
 from .checkpoints import SshGitRunner
 from .client import BatClient
@@ -134,9 +135,7 @@ def _profiles(document):
     token_state, tokens = "unavailable", {}
     try:
         path = directory / "remote-tokens.enc.json"
-        if path.is_symlink() or path.stat().st_size > MAX_CONFIG:
-            raise ValueError
-        store = json.loads(path.read_text())
+        store = json.loads(read_private(path, MAX_CONFIG))  # same private-file rules as token resolution
         token_state = "encrypted" if store.get("enc") is not False else "available"
         if token_state == "available":  # noqa: S105 - a UI availability state, not a secret
             data = store.get("data", {})

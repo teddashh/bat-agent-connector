@@ -26,6 +26,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 
 from . import artifacts, confinement, orchestrate, registry, resource_policy, service
+from ._bounded import capture
 from .api_auth import Principal
 from .errors import BatError
 from .operations import (
@@ -88,10 +89,11 @@ async def _run(argv: tuple[str, ...], timeout_s: float | None = None) -> str:
             _LOCKED_CHECK.reset(token)
     proc = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout_s or GIT_TIMEOUT_S)
+        out, err = await asyncio.wait_for(capture(proc), timeout_s or GIT_TIMEOUT_S)
     except asyncio.TimeoutError:
-        proc.kill()
         raise AmbiguousOutcome("git script timed out") from None
+    except ValueError:
+        raise AmbiguousOutcome("git script output exceeds capture limit") from None
     if proc.returncode == 255 and argv[0] == "ssh":
         raise AmbiguousOutcome("ssh connection failed")
     if proc.returncode != 0:
@@ -110,9 +112,9 @@ async def _run_locked(argv, check, timeout_s):
             proc.stdin.write(b'{"proceed": true}\n')
             await proc.stdin.drain()
             proc.stdin.close()
-            return await proc.communicate()
+            return await capture(proc)
         proc.stdin.close()
-        out, err = await proc.communicate()
+        out, err = await capture(proc)
         return first + out, err  # a host refusal before the gate, with no mutation
     try:
         out, err = await asyncio.wait_for(exchange(), timeout_s or GIT_TIMEOUT_S)
@@ -120,13 +122,22 @@ async def _run_locked(argv, check, timeout_s):
         proc.stdin.close()
         if proc.returncode is None:
             proc.kill()
-        await proc.communicate()
+        with contextlib.suppress(ValueError):
+            await capture(proc)
         raise AmbiguousOutcome("locked git script timed out") from None
+    except ValueError:
+        proc.stdin.close()
+        if proc.returncode is None:
+            proc.kill()
+        with contextlib.suppress(ValueError):
+            await capture(proc)
+        raise AmbiguousOutcome("locked git script output exceeds capture limit") from None
     except BaseException:
         proc.stdin.close()
         if proc.returncode is None:
             proc.kill()
-        await proc.communicate()
+        with contextlib.suppress(ValueError):
+            await capture(proc)
         raise
     if proc.returncode == 255 and argv[0] == "ssh":
         raise AmbiguousOutcome("ssh connection failed during locked check")

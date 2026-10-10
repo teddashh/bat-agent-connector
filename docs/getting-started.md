@@ -98,6 +98,8 @@ For a different profile location, use `batc import-bat --profiles-dir /path/to/p
 
 Without local BAT profiles, configure [hosts.example.toml](../examples/hosts.example.toml) with the actual BAT endpoint, trusted fingerprint and an appropriate `token_ref`:
 
+Token files (`file:`) and BAT token stores (`bat-profile:`) must be regular files, not symlinks, owned by the current user, with no group or other permissions (for example, `chmod 600`). Ownership is checked where supported; permission checks are skipped on Windows. Token files are limited to 64 KiB and BAT token stores to 1 MiB. Audit files use the same private-file rules: existing files are refused rather than having their permissions changed; new files use mode 0600 and newly created parent directories use mode 0700.
+
 - `env:NAME`: resolve from the service's private environment.
 - `file:/path`: resolve from a private token file.
 - `bat-profile:ID`: resolve from the supported BAT client token store.
