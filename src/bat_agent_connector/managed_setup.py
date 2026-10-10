@@ -146,7 +146,7 @@ def _profiles(document):
                 tokens = {}
                 token_state = "unavailable"  # noqa: S105 - UI availability state
     except (OSError, ValueError, AttributeError):
-        pass
+        token_state, tokens = "unavailable", {}
     result = []
     for profile in profiles:
         if not isinstance(profile, dict) or profile.get("type") != "remote":
@@ -157,7 +157,7 @@ def _profiles(document):
             host = f"[{host}]" if ":" in host and not host.startswith("[") else host
             result.append({"id": ident, "name": _text(profile.get("name") or ident, "profile name"),
                 "url": _url(f"wss://{host}:{int(profile['remotePort'])}/"),
-                "fingerprint": normalize_fingerprint(profile["remoteFingerprint"]),
+                "fingerprint": normalize_fingerprint(_text(profile["remoteFingerprint"], "profile fingerprint", 200)),
                 "profile_id": _text(profile.get("remoteProfileId") or "default", "remote profile ID"),
                 "token_available": token_state == "available" and isinstance(tokens.get(ident), str) and bool(tokens[ident]),  # noqa: S105
                 "token_state": token_state})
