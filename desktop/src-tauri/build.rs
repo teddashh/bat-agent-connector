@@ -13,6 +13,7 @@ fn main() {
             "connector_connect",
             "connector_disconnect",
             "connector_reload_configuration",
+            "connector_setup_configuration",
             "connector_forget_credential",
             "connector_enroll",
             "connector_request",

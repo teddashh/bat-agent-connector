@@ -480,7 +480,7 @@ async function connectorUploadArtifact(operationId, bytes, browserToken) {
 		data: await res.json().catch(() => ({}))
 	};
 }
-var nativeDesktop, nativeFileSupport, nativeFilesStatus, nativeFilesPick, nativeFilesUpload, nativeFilesDropTarget, nativeFilesControl, nativeFilesSave, nativeFilesPreview, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal, fleetAvailability, fleetBootstrap, tailscaleControl, fleetControl, fleetRequest, updateRequest;
+var nativeDesktop, nativeFileSupport, nativeFilesStatus, nativeFilesPick, nativeFilesUpload, nativeFilesDropTarget, nativeFilesControl, nativeFilesSave, nativeFilesPreview, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeSetupConfiguration, nativeForgetCredential, openExternal, fleetAvailability, fleetBootstrap, tailscaleControl, fleetControl, fleetRequest, updateRequest;
 var init_transport = __esmMin((() => {
 	init_core();
 	nativeDesktop = isTauri();
@@ -502,6 +502,10 @@ var init_transport = __esmMin((() => {
 	nativeDisconnect = () => invoke("connector_disconnect");
 	nativeEnroll = () => invoke("connector_enroll", { locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US" });
 	nativeReloadConfiguration = () => invoke("connector_reload_configuration");
+	nativeSetupConfiguration = (config) => invoke("connector_setup_configuration", {
+		config,
+		locale: navigator.language.toLowerCase().startsWith("zh") ? "zh-TW" : "en-US"
+	});
 	nativeForgetCredential = () => invoke("connector_forget_credential");
 	openExternal = (url) => invoke("open_external", { url });
 	fleetAvailability = () => invoke("fleet_availability");
@@ -853,7 +857,7 @@ var STRINGS = {
 		delivery_merge_safe_reads: "可讀取 session、檢查 Git 與操作紀錄，或使用既有停止／中斷功能。查核回執不會重送未知的 merge。",
 		delivery_merge_closeout: "安全結案需要原步驟的正面 ACK 與原資源保留身分。完全遺失 ACK 的人工裁決尚未提供；不要用目前 HEAD 猜測結果或清除 reservation。",
 		delivery_setup_title: "首次連接與使用方式",
-		delivery_setup_central: "配置既有中央服務的位址、預期身分與合約版本，重新載入設定，再保存登入憑證。",
+		delivery_setup_central: "首次使用時填入既有中央服務的位址與預期身分，在原生視窗確認後保存。已有設定可重新載入。",
 		delivery_setup_identity: "連線後確認實際身分與權限。主機是否就緒，請查看 Fleet 的各項原因。",
 		delivery_setup_mode: "只管理遠端工作可直接使用 Dashboard。需要 Windows 本機連線與 BAT 啟動時，再於 Fleet 選擇連線、profile 與登入啟動項目。Mac 可作為 Dashboard 使用。",
 		delivery_fleet_current_backend: "目前 Fleet backend：{backend}",
@@ -1562,6 +1566,11 @@ var STRINGS = {
 		desktop_forget_credential: "移除此電腦儲存的憑證",
 		desktop_reload_configuration: "重新載入設定",
 		desktop_connecting: "正在處理連線…",
+		desktop_setup_help: "先連接你已有的中央服務。輸入位址與預期帳號，再到原生視窗確認儲存。",
+		desktop_setup_origin: "使用 HTTPS 位址；已建立的本機通道可用 http://127.0.0.1:連接埠。此處不需輸入權杖。",
+		desktop_setup_review: "檢視連線設定",
+		desktop_setup_saved: "設定已儲存。請新增憑證並驗證身分。",
+		desktop_setup_cancelled: "已取消儲存；輸入內容仍保留。",
 		desktop_endpoint: "中央位置",
 		desktop_expected_actor: "預期身分",
 		desktop_configuration_file: "設定檔",
@@ -2040,7 +2049,7 @@ var STRINGS = {
 		delivery_merge_safe_reads: "Read the session, inspect Git and operation records, or use the existing stop/interrupt controls. Checking receipts does not resend an unknown merge.",
 		delivery_merge_closeout: "Safe closeout requires the original step's positive ACK and reservation identity. Manual adjudication for a wholly lost ACK is not available; do not infer the outcome from HEAD or clear reservations.",
 		delivery_setup_title: "First connection and usage",
-		delivery_setup_central: "Configure the existing central endpoint, expected identity and contract version, reload configuration, then save your credential.",
+		delivery_setup_central: "On first use, enter your existing central address and expected identity, then confirm in the native window. Existing configuration can be reloaded.",
 		delivery_setup_identity: "After connecting, confirm the actual identity and scopes. Fleet shows each host's readiness and blocking reasons.",
 		delivery_setup_mode: "Use Dashboard directly to manage remote work. For local Windows connections and BAT startup, select connections, profiles and login startup in Fleet. Mac supports Dashboard use.",
 		delivery_fleet_current_backend: "Current Fleet backend: {backend}",
@@ -2749,6 +2758,11 @@ var STRINGS = {
 		desktop_forget_credential: "Forget saved credential",
 		desktop_reload_configuration: "Reload configuration",
 		desktop_connecting: "Connection in progress…",
+		desktop_setup_help: "Connect to your existing central service. Enter its address and expected account, then review and save in the native window.",
+		desktop_setup_origin: "Use an HTTPS origin, or http://127.0.0.1:port for an existing local tunnel. No token is needed here.",
+		desktop_setup_review: "Review connection settings",
+		desktop_setup_saved: "Configuration saved. Add a credential and verify your identity next.",
+		desktop_setup_cancelled: "Saving cancelled; your inputs are preserved.",
 		desktop_endpoint: "Central address",
 		desktop_expected_actor: "Expected identity",
 		desktop_configuration_file: "Configuration file",
@@ -11540,7 +11554,7 @@ function viewSettings(main) {
 		t
 	});
 }
-async function nativeTransition(kind) {
+async function nativeTransition(kind, config = null) {
 	if (state.nativeBusy && kind !== "disconnect") return;
 	const attempt = ++state.nativeAttempt;
 	const previousOnline = state.online;
@@ -11551,7 +11565,17 @@ async function nativeTransition(kind) {
 	state.connectionError = null;
 	state.connectionNotice = null;
 	try {
-		if (kind === "disconnect" || kind === "reload" || kind === "forget") {
+		if (kind === "configure") {
+			const saved = await nativeSetupConfiguration(config);
+			if (attempt !== state.nativeAttempt) return;
+			if (saved) {
+				state.nativeSetupDraft = null;
+				state.connectionNotice = t("desktop_setup_saved");
+			} else {
+				state.online = previousOnline;
+				state.connectionNotice = t("desktop_setup_cancelled");
+			}
+		} else if (kind === "disconnect" || kind === "reload" || kind === "forget") {
 			disconnect();
 			if (kind === "disconnect") await nativeDisconnect();
 			else if (kind === "reload") await nativeReloadConfiguration();
@@ -11594,6 +11618,10 @@ async function viewNativeSettings(main) {
 	const mine = generation;
 	const info = h("div", { "aria-live": "polite" });
 	const details = h("dl", { class: "kv" });
+	const setup = h("div", {
+		"data-native-setup": "",
+		hidden: true
+	});
 	const help = h("p", { class: "muted" }, t("desktop_credential_help"));
 	const platform = h("p", { class: "muted" });
 	const fleetRoot = h("div");
@@ -11624,7 +11652,7 @@ async function viewNativeSettings(main) {
 	main.append(h("h1", {}, t("nav_settings")), h("section", {
 		class: "panel native-connection",
 		"aria-label": t("desktop_connection")
-	}, h("h2", {}, t("desktop_connection")), h("details", { open: !state.caps }, h("summary", {}, t("delivery_setup_title")), h("ol", {}, h("li", {}, t("delivery_setup_central")), h("li", {}, t("delivery_setup_identity")), h("li", {}, t("delivery_setup_mode")))), details, help, platform, actions, info, saved), h("div", { class: "panel" }, h("h2", {}, t("desktop_local")), h("p", { class: "note" }, t("desktop_dashboard_only"))), fleetRoot, updateRoot);
+	}, h("h2", {}, t("desktop_connection")), h("details", { open: !state.caps }, h("summary", {}, t("delivery_setup_title")), h("ol", {}, h("li", {}, t("delivery_setup_central")), h("li", {}, t("delivery_setup_identity")), h("li", {}, t("delivery_setup_mode")))), setup, details, help, platform, actions, info, saved), h("div", { class: "panel" }, h("h2", {}, t("desktop_local")), h("p", { class: "note" }, t("desktop_dashboard_only"))), fleetRoot, updateRoot);
 	const showInfo = () => {
 		info.replaceChildren();
 		if (state.caps) info.append(h("p", {}, t("connected_as", {
@@ -11650,11 +11678,56 @@ async function viewNativeSettings(main) {
 		const row = (label, value) => {
 			if (value) details.append(h("dt", {}, t(label)), h("dd", {}, value));
 		};
+		if (status.configuration_setup === true) {
+			setup.hidden = false;
+			const draft = state.nativeSetupDraft ||= {
+				endpoint: "",
+				expected_actor: ""
+			};
+			const endpoint = h("input", {
+				type: "url",
+				value: draft.endpoint,
+				placeholder: "https://connector.example",
+				required: true,
+				maxlength: 512,
+				disabled: state.nativeBusy,
+				autocomplete: "off",
+				oninput: (event) => {
+					draft.endpoint = event.target.value;
+				}
+			});
+			const actor = h("input", {
+				value: draft.expected_actor,
+				required: true,
+				maxlength: 200,
+				disabled: state.nativeBusy,
+				autocomplete: "off",
+				oninput: (event) => {
+					draft.expected_actor = event.target.value;
+				}
+			});
+			const review = h("button", {
+				type: "submit",
+				class: "primary",
+				disabled: state.nativeBusy
+			}, t("desktop_setup_review"));
+			const form = h("form", { onsubmit: (event) => {
+				event.preventDefault();
+				if (state.nativeBusy || !form.reportValidity()) return;
+				review.disabled = true;
+				return nativeTransition("configure", {
+					endpoint: endpoint.value.trim(),
+					expected_actor: actor.value.trim(),
+					contract_version: "2026-10-08"
+				});
+			} }, h("p", {}, t("desktop_setup_help")), h("label", {}, t("desktop_endpoint"), endpoint), h("label", {}, t("desktop_expected_actor"), actor), h("p", { class: "muted" }, t("desktop_setup_origin")), h("div", { class: "actions" }, review));
+			setup.append(form);
+		}
 		row("desktop_endpoint", status.endpoint || t("desktop_config_needed"));
 		row("desktop_expected_actor", status.expected_actor);
 		row("desktop_configuration_file", status.configuration_file);
 		if (status.credential_source) row("desktop_credential_source", t("desktop_source_" + status.credential_source));
-		if (status.error) info.append(errorBox(new Error(status.error)));
+		if (status.error && !status.configuration_setup) info.append(errorBox(new Error(status.error)));
 		else if (!status.credential_available) info.append(h("p", {}, t("desktop_credential_missing")));
 		platform.textContent = status.enrollment_supported === true ? t("desktop_enrollment_help") : status.enrollment_supported === false ? t("desktop_enrollment_unsupported") : "";
 		connect.disabled = state.nativeBusy || !!status.error || !status.credential_available;

@@ -232,6 +232,30 @@ fn connector_reload_configuration(
 }
 
 #[tauri::command]
+async fn connector_setup_configuration(
+    window: WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Bridge>>,
+    config: bridge::Config,
+    locale: credentials::Locale,
+) -> Result<Option<NativeStatus>, String> {
+    local_main(&window)?;
+    state.setup_configuration(config, move |candidate| {
+        let (message, save, cancel) = match locale {
+            credentials::Locale::English => (
+                format!("Connect this Dashboard to:\n{}\n\nExpected account: {}\n\nSave these settings? Add and verify a credential in the next step.", candidate.endpoint, candidate.expected_actor),
+                "Save configuration", "Cancel"),
+            credentials::Locale::TraditionalChinese => (
+                format!("將此 Dashboard 連接至：\n{}\n\n預期帳號：{}\n\n儲存此設定？下一步再新增並驗證憑證。", candidate.endpoint, candidate.expected_actor),
+                "儲存連線設定", "取消"),
+        };
+        app.dialog().message(message).title("Better Agent Dashboard")
+            .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(save.into(), cancel.into()))
+            .blocking_show()
+    }).await
+}
+
+#[tauri::command]
 fn connector_forget_credential(
     window: WebviewWindow,
     state: State<'_, Arc<Bridge>>,
@@ -677,6 +701,7 @@ fn main() {
             connector_connect,
             connector_disconnect,
             connector_reload_configuration,
+            connector_setup_configuration,
             connector_forget_credential,
             connector_enroll,
             connector_request,

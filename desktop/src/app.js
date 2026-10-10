@@ -5,7 +5,7 @@ import {conversationPanel} from "./conversation.js";
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
-import { connectorRequest, connectorUploadArtifact, nativeDesktop, nativeFileSupport, nativeStatus, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeForgetCredential, openExternal } from "./transport/index.ts";
+import { connectorRequest, connectorUploadArtifact, nativeDesktop, nativeFileSupport, nativeStatus, nativeConnect, nativeDisconnect, nativeEnroll, nativeReloadConfiguration, nativeSetupConfiguration, nativeForgetCredential, openExternal } from "./transport/index.ts";
 import { nativeAttachments } from "./native-files.js";
 import { mountFleet } from "./fleet.js";
 import { mountTailscale } from "./tailscale.js";
@@ -2046,7 +2046,7 @@ function viewSettings(main) {
 
 // Credential dialogs and protected storage stay native. A transition invalidates old async
 // forms immediately, but cancellation restores the existing account and its identity-scoped drafts.
-async function nativeTransition(kind) {
+async function nativeTransition(kind, config = null) {
   if (state.nativeBusy && kind !== "disconnect") return;
   const attempt = ++state.nativeAttempt;
   const previousOnline = state.online;
@@ -2054,7 +2054,12 @@ async function nativeTransition(kind) {
   state.nativeBusy = true; state.epoch++; state.online = false;
   state.connectionError = null; state.connectionNotice = null;
   try {
-    if (kind === "disconnect" || kind === "reload" || kind === "forget") {
+    if (kind === "configure") {
+      const saved = await nativeSetupConfiguration(config);
+      if (attempt !== state.nativeAttempt) return;
+      if (saved) {state.nativeSetupDraft = null; state.connectionNotice = t("desktop_setup_saved");}
+      else {state.online = previousOnline; state.connectionNotice = t("desktop_setup_cancelled");}
+    } else if (kind === "disconnect" || kind === "reload" || kind === "forget") {
       disconnect(); // invalidate caches/old forms before native can load another endpoint
       if (kind === "disconnect") await nativeDisconnect();
       else if (kind === "reload") await nativeReloadConfiguration();
@@ -2090,6 +2095,7 @@ async function viewNativeSettings(main) {
   const mine = generation;
   const info = h("div", {"aria-live": "polite"});
   const details = h("dl", {class: "kv"});
+  const setup = h("div", {"data-native-setup": "", hidden: true});
   const help = h("p", {class: "muted"}, t("desktop_credential_help"));
   const platform = h("p", {class: "muted"});
   const fleetRoot = h("div");
@@ -2116,7 +2122,7 @@ async function viewNativeSettings(main) {
     h("h2", {}, t("desktop_connection")),
     h("details", {open: !state.caps}, h("summary", {}, t("delivery_setup_title")),
       h("ol", {}, h("li", {}, t("delivery_setup_central")), h("li", {}, t("delivery_setup_identity")), h("li", {}, t("delivery_setup_mode")))),
-    details, help, platform, actions, info, saved),
+    setup, details, help, platform, actions, info, saved),
     h("div", {class: "panel"}, h("h2", {}, t("desktop_local")),
       h("p", {class: "note"}, t("desktop_dashboard_only"))), fleetRoot, updateRoot);
   const showInfo = () => {
@@ -2133,11 +2139,29 @@ async function viewNativeSettings(main) {
     if (status.updates === true) disposeUpdates = await mountUpdates(updateRoot, {h, t});
     if (mine !== generation || !main.contains(details)) { disposeUpdates?.(); return; }
     const row = (label, value) => { if (value) details.append(h("dt", {}, t(label)), h("dd", {}, value)); };
+    if (status.configuration_setup === true) {
+      setup.hidden = false;
+      const draft = state.nativeSetupDraft ||= {endpoint: "", expected_actor: ""};
+      const endpoint = h("input", {type: "url", value: draft.endpoint, placeholder: "https://connector.example", required: true,
+        maxlength: 512, disabled: state.nativeBusy, autocomplete: "off", oninput: event => {draft.endpoint = event.target.value;}});
+      const actor = h("input", {value: draft.expected_actor, required: true, maxlength: 200,
+        disabled: state.nativeBusy, autocomplete: "off", oninput: event => {draft.expected_actor = event.target.value;}});
+      const review = h("button", {type: "submit", class: "primary", disabled: state.nativeBusy}, t("desktop_setup_review"));
+      const form = h("form", {onsubmit: event => {
+        event.preventDefault();
+        if (state.nativeBusy || !form.reportValidity()) return;
+        review.disabled = true;
+        return nativeTransition("configure", {endpoint: endpoint.value.trim(), expected_actor: actor.value.trim(), contract_version: "2026-10-08"});
+      }}, h("p", {}, t("desktop_setup_help")),
+        h("label", {}, t("desktop_endpoint"), endpoint), h("label", {}, t("desktop_expected_actor"), actor),
+        h("p", {class: "muted"}, t("desktop_setup_origin")), h("div", {class: "actions"}, review));
+      setup.append(form);
+    }
     row("desktop_endpoint", status.endpoint || t("desktop_config_needed"));
     row("desktop_expected_actor", status.expected_actor);
     row("desktop_configuration_file", status.configuration_file);
     if (status.credential_source) row("desktop_credential_source", t("desktop_source_" + status.credential_source));
-    if (status.error) info.append(errorBox(new Error(status.error)));
+    if (status.error && !status.configuration_setup) info.append(errorBox(new Error(status.error)));
     else if (!status.credential_available) info.append(h("p", {}, t("desktop_credential_missing")));
     platform.textContent = status.enrollment_supported === true ? t("desktop_enrollment_help")
       : status.enrollment_supported === false ? t("desktop_enrollment_unsupported") : "";
