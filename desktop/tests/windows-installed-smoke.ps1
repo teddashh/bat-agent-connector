@@ -113,6 +113,37 @@ function Save-Window([IntPtr]$Window, [string]$Name) {
         $bitmap.Save((Join-Path $Evidence $Name), [Drawing.Imaging.ImageFormat]::Png)
     } finally { $graphics.Dispose(); $bitmap.Dispose() }
 }
+function Wait-ManagedView([Diagnostics.Process]$Process, [IntPtr]$Window, [string]$Name) {
+    $observed = @{state = @{}}
+    try {
+        Wait-Until {
+            if ($Process.HasExited) { throw 'Managed app exited before WebView readiness' }
+            # Windows PowerShell supplies the platform UI Automation assemblies.
+            # Isolate provider calls so an unresponsive WebView cannot stall this fixture.
+            $info = [Diagnostics.ProcessStartInfo]::new((Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe'))
+            $info.UseShellExecute = $false
+            $info.CreateNoWindow = $true
+            $info.RedirectStandardOutput = $true
+            $info.RedirectStandardError = $true
+            foreach ($arg in @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+                (Join-Path $PWD 'tests/windows-managed-view.ps1'), '-WindowHandle', $Window.ToInt64().ToString(),
+                '-OwnerProcess', $Process.Id.ToString())) { $info.ArgumentList.Add($arg) }
+            $probe = [Diagnostics.Process]::Start($info)
+            try {
+                $output = $probe.StandardOutput.ReadToEndAsync()
+                $errors = $probe.StandardError.ReadToEndAsync()
+                if (-not $probe.WaitForExit(8000)) { $probe.Kill(); $probe.WaitForExit(); throw 'Native UI Automation probe exceeded its deadline' }
+                if ($probe.ExitCode -ne 0) { throw 'Native UI Automation readiness probe failed' }
+                $observed.state = $output.GetAwaiter().GetResult() | ConvertFrom-Json
+                @('webContent', 'authenticated', 'setup', 'configurationLoaded', 'saveEnabled', 'bounded').Where({
+                    $observed.state.$_ -ne $true
+                }).Count -eq 0
+            } finally { $probe.Dispose() }
+        } 'Managed WebView did not render authenticated first-run configuration'
+    } finally {
+        $observed.state | ConvertTo-Json | Set-Content (Join-Path $Evidence "$Name-readiness.json") -Encoding utf8
+    }
+}
 $app = $null
 $second = $null
 $reopened = $null
@@ -184,6 +215,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Managed clean-profile first-run failed' }
     Wait-Until { @([DashboardWindows]::Find($app.Id)).Count -eq 1 } 'Managed first-run window missing'
     $window = @([DashboardWindows]::Find($app.Id))[0]
+    Wait-ManagedView $app $window 'managed-first-run'
     Save-Window $window 'managed-first-run.png'
     if (-not [DashboardWindows]::PostMessage($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) { throw 'Managed WM_CLOSE failed' }
     Wait-Until { -not [DashboardWindows]::IsWindowVisible($window) } 'Managed close did not hide window'
@@ -196,10 +228,13 @@ try {
     $reopenedIdentity = node tests/managed-installed-probe.mjs wait $dataRoot
     if ($LASTEXITCODE -ne 0 -or $reopenedIdentity -cne $managedIdentity) { throw 'Managed relaunch changed installation identity' }
     Wait-Until { @([DashboardWindows]::Find($reopened.Id)).Count -eq 1 } 'Managed reopened window missing'
+    $reopenedWindow = @([DashboardWindows]::Find($reopened.Id))[0]
+    Wait-ManagedView $reopened $reopenedWindow 'managed-reopened'
+    Save-Window $reopenedWindow 'managed-reopened.png'
     Stop-Owned $reopened
     node tests/managed-installed-probe.mjs stop $dataRoot
     if ($LASTEXITCODE -ne 0) { throw 'Managed fixture service cleanup failed' }
-    Record-Step 'Clean managed first-run without central config/token; same identity across close and relaunch; central survived UI termination'
+    Record-Step 'Clean managed first-run and relaunch rendered authenticated, enabled setup via UI Automation; same identity across close and relaunch; central survived UI termination'
     $uninstaller = Join-Path $installDir 'uninstall.exe'
     Run-Installer $uninstaller '/S'
     Wait-Until { -not (Test-Path -LiteralPath $binary) -and @(Get-Registration).Count -eq 0 } 'Uninstall left binary or registration'
