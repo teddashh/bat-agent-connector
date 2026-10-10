@@ -938,6 +938,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--project")
     c.add_argument("--state", choices=["todo", "doing", "waiting", "awaiting_approval", "done"])
     c.add_argument("--pending", action="store_true", help="only items waiting for a person's decision")
+    c.add_argument("--unread", action="store_true", help="only work-item versions this principal has not marked read")
     c.add_argument("--limit", type=int, default=50)
     c.add_argument("--cursor", help="next_cursor from the previous page")
     c = wsp.add_parser("show", help="one work item with its links and history")
@@ -1279,7 +1280,8 @@ def cmd_item(args) -> int:
     cmd = args.item_cmd
     if cmd == "list":
         out = request("work_items_list", project_id=args.project, state=args.state,
-                      pending=True if args.pending else None, limit=args.limit, cursor=args.cursor, entry="cli")
+                      pending=True if args.pending else None, unread=True if args.unread else None,
+                      limit=args.limit, cursor=args.cursor, entry="cli")
     elif cmd == "show":
         out = request("work_item_get", work_item_id=args.work_item_id, entry="cli")
     elif cmd in {"create", "update"}:

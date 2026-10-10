@@ -1111,6 +1111,16 @@ pub fn validate_request(input: &ConnectorRequest) -> Result<(), String> {
             }
             continue;
         }
+        if key == "unread" {
+            if input.method != "GET"
+                || path != "/work-items"
+                || !matches!(value.as_ref(), "true" | "false")
+                || !query_keys.insert(key.to_string())
+            {
+                return Err("Unread filter is only a boolean work-item list query".into());
+            }
+            continue;
+        }
         if !matches!(
             key.as_ref(),
             "after"
@@ -1242,6 +1252,25 @@ mod tests {
             path: path.into(),
             body: None,
             idempotency_key: None,
+        }
+    }
+
+    #[test]
+    fn unread_filter_is_limited_to_work_item_lists() {
+        for path in [
+            "/work-items?unread=true&limit=50",
+            "/work-items?unread=false&cursor=1%7Cwi_00000000000000000001",
+        ] {
+            assert!(validate_request(&request("GET", path)).is_ok(), "{path}");
+        }
+        for path in [
+            "/sessions?unread=true",
+            "/work-items?unread=1",
+            "/work-items?unread=",
+            "/work-items?unread=true&unread=false",
+            "/work-items/wi_00000000000000000001?unread=true",
+        ] {
+            assert!(validate_request(&request("GET", path)).is_err(), "{path}");
         }
     }
 

@@ -98,6 +98,7 @@ jobs:
           npm run test:published
           npm run test:orchestration
           npm run test:labels
+          npm run test:attention
       - name: Preserve shared UI fixture evidence
         if: runner.os == 'Linux' && always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

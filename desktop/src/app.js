@@ -1,5 +1,7 @@
+import {attentionView} from "./attention.js";
 import {sessionLabelsPanel, validLabels} from "./session-labels.js";
 import {readArtifactContent} from "./transport/artifact-content.ts";
+import {conversationPanel} from "./conversation.js";
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
@@ -600,40 +602,9 @@ function opRow(op) {
 
 // ------------------------------------------------------------------ views
 async function viewHome(main) {
-  const tab = sessionStorage.getItem("batc.tab") || "needs";
-  const panel = h("div", { class: "panel" });
-  const tabs = h("div", { class: "tabs" },
-    h("button", { class: tab === "needs" ? "on" : "", onclick: () => { sessionStorage.setItem("batc.tab", "needs"); route(); } }, t("tab_needs_you")),
-    h("button", { class: tab === "confirm" ? "on" : "", onclick: () => { sessionStorage.setItem("batc.tab", "confirm"); route(); } }, t("tab_to_confirm")));
-  main.append(h("h1", {}, t("nav_home")), tabs, panel);
-  const render = async () => {
-    panel.replaceChildren(h("p", { class: "muted" }, t("loading")));
-    try {
-      if (tab === "needs") {
-        const [sessions, ops, hosts, decide] = await Promise.all([
-          api("GET", "/sessions?attention=true&limit=50"),
-          api("GET", "/operations?status=needs_attention,uncertain&limit=50"),
-          api("GET", "/hosts"), api("GET", "/work-items?pending=true&limit=50")]);
-        const bad = hosts.hosts.filter(x => x.stale);
-        const rows = [
-          ...bad.map(x => h("div", { class: "row" }, h("span", { class: "light bad" }),
-            h("div", { class: "grow" }, h("div", { class: "title" }, `${t("unreachable_hosts")}: ${x.host}`),
-              h("div", { class: "muted" }, x.error || t("stale_reason_" + x.stale_reason))))),
-          ...decide.work_items.map(workItemRow), ...sessions.sessions.map(sessionRow), ...ops.operations.map(opRow),
-          h("p", {class: "muted"}, t("operations_loaded", {count: ops.operations.length}), " · ",
-            h("a", {href: "#/operations/attention"}, t("operations_view_attention")))];
-        panel.replaceChildren(...(rows.length > 1 ? rows : [h("p", { class: "muted" }, t("empty_needs_you")), ...rows]));
-      } else {
-        const ops = await api("GET", "/operations?status=accepted,running,waiting_checks,waiting_external&limit=50");
-        panel.replaceChildren(...(ops.operations.length ? ops.operations.map(opRow)
-          : [h("p", { class: "muted" }, t("empty_to_confirm"))]),
-          h("p", {class: "muted"}, t("operations_loaded", {count: ops.operations.length}), " · ",
-            h("a", {href: "#/operations/active"}, t("operations_view_active"))));
-      }
-    } catch (e) { panel.replaceChildren(errorBox(e)); }
-  };
-  await render();
-  return onEvents(debounceRefresh(render, 500));
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  return attentionView({main, h, t, api, caps: state.caps, storageKey: `batc.attention.${connection.namespace}`,
+    guard: () => assertView(connection), route, onEvents, debounceRefresh, errorBox, sessionRow, workItemRow, opRow});
 }
 
 async function viewSessions(main) {
@@ -1010,7 +981,8 @@ async function viewHostDiscovery(main, host) {
 async function viewSession(main, host, sid) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const path = `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`;
-  const head = h("div", { class: "panel" }), msgs = h("div", { class: "panel" });
+  const head = h("div", { class: "panel" });
+  const conversation = conversationPanel({h, t, when, guard: () => assertView(connection)});
   const pending = h("div", { "data-pending-controls": "" }), status = h("div", { class: "muted" });
   const scope = `send.${host}.${sid}`, draftKey = `batc.draft.${connection.namespace}.${scope}`;
   const box = h("textarea", { placeholder: t("send_placeholder") });
@@ -1055,7 +1027,7 @@ async function viewSession(main, host, sid) {
     target: {host, session_id: sid}, storageKey: `batc.labels.${connection.namespace}.${JSON.stringify([host, sid])}`, errorBox, opStatus});
   const cps = checkpointPanel(host, sid);
   const observations = observationPanels("session", `${host}/${sid}`, path);
-  main.append(head, labels.box, controls, cps.box, h("h2", {}, t("messages")), msgs, observations.box);
+  main.append(head, labels.box, controls, cps.box, h("h2", {}, t("messages")), conversation.box, observations.box);
   const renderPending = () => {
     const pend = row.api_access === "managed" ? row.pending : null;
     const current = identity(pend);
@@ -1165,9 +1137,7 @@ async function viewSession(main, host, sid) {
   };
   const loadMessages = async () => {
     const read = await api("GET", `${path}/messages?last_n=30`); assertView(connection);
-    const items = read.messages.map(m => h("div", { class: `msg ${m.role === "user" ? "user" : ""}` },
-      h("span", { class: "who" }, `${m.role || ""} · ${when(m.ts)}`), m.text || ""));
-    msgs.replaceChildren(...(items.length ? items : [h("p", { class: "muted" }, t("no_messages"))]));
+    conversation.update(read.messages);
   };
   const refresh = async (fromEvent = false) => {
     if (refreshInFlight) {
@@ -1199,7 +1169,7 @@ async function viewSession(main, host, sid) {
     ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve(),
     (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation") ? labels.refresh(true) : Promise.resolve()
   ]); });
-  return () => {clearInterval(retry); off(); batHandoff?.dispose();};
+  return () => {clearInterval(retry); off(); batHandoff?.dispose(); conversation.dispose();};
 }
 
 // A checkpoint records this session's commit and recent conversation (read-only); continuing starts a new
@@ -2391,6 +2361,7 @@ async function viewWorkItem(main, wid) {
   freshPage();
   const notice = h("div", {}); // outside the panel: a refusal stays on screen after the panel re-renders
   const panel = h("div", {});
+  const reading = h("div", {});
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   let mutable = true;
   const archiveLocks = new Map();
@@ -2430,17 +2401,48 @@ async function viewWorkItem(main, wid) {
   const ref = h("input", { placeholder: t("link_ref_hint") });
   kind.onchange = () => { ref.placeholder = t("link_ref_" + kind.value); };
   kind.onchange();
-  main.append(manageNote() || "", notice, panel);
-  const render = async (fromEvent = false) => {
+  main.append(manageNote() || "", notice, reading, panel);
+  let displayedItem = null, renderQueue = Promise.resolve();
+  const showReading = (w, progress) => {
+    const readingSupported = state.caps?.features?.work_item_reads?.version === 1 && progress;
+    reading.replaceChildren();
+    if (readingSupported) {
+      const canRead = state.caps.actions?.some(a => a.action === "work_item.read" && a.allowed);
+      const mark = h("button", {class: "secondary", disabled: !canRead || progress.read_version >= w.version, onclick: async () => {
+        try {
+          assertView(connection); mark.disabled = true;
+          await change(notice, "work_item.read", {work_item_id: wid}, {}, {expected_version: w.version}, `wi.read.${wid}.${w.version}`);
+          assertView(connection); await render(true);
+        } catch (error) {
+          if (!["VIEW_CHANGED", "CONNECTION_CHANGED"].includes(error.code)) fill(notice, errorBox(error));
+        } finally {if (mark.isConnected) mark.disabled = !canRead || progress.read_version >= w.version;}
+      }}, t("reading_mark"));
+      reading.append(h("div", {class: "panel reading-state"},
+        h("div", {class: "actions"}, chip(t(progress.unread ? "reading_unread" : "reading_read")), mark),
+        h("p", {class: "muted"}, t("reading_note")),
+        progress.current_version > w.version ? h("p", {class: "muted"}, t("reading_newer")) : null));
+    }
+  };
+  const render = (fromEvent = false) => {
+    const work = renderQueue.catch(() => {}).then(() => renderNow(fromEvent));
+    renderQueue = work; return work;
+  };
+  const renderNow = async (fromEvent = false) => {
+    if (!panel.isConnected) return;
     const opens = drawerOpens;
     let data;
     try { data = await api("GET", `/work-items/${wid}`); }
     catch (e) { fill(panel, errorBox(e)); return; }
     if (!panel.isConnected) return;
+    assertView(connection);
     rememberObservation("work_item", wid, data, itemDependencies(data));
-    if (holdRender(fromEvent, opens)) { idleReload = () => render(true); return; }
+    if (holdRender(fromEvent, opens)) {
+      if (displayedItem) showReading(displayedItem, data.work_item.reading);
+      idleReload = () => render(true); return;
+    }
     freshPage();
     const w = data.work_item, c = w.completion;
+    displayedItem = w; showReading(w, w.reading);
     const live = mutable = !w.archived && !data.project.archived;
     blocked.hidden = live;
     const pre = { expected_version: w.version };
@@ -2603,7 +2605,8 @@ function workItemRow(w) {
     h("div", { class: "grow" }, h("a", { class: "title", href: `#/item/${w.work_item_id}` }, w.title),
       h("div", { class: "muted" }, [w.project_name, w.completion.claimed_by && t("claimed_by", { who: w.completion.claimed_by })]
         .filter(Boolean).join(" · "))),
-    chip(t("needs_decision"), "warn"));
+    w.reading?.unread ? chip(t("reading_unread")) : null,
+    w.completion.pending ? chip(t("needs_decision"), "warn") : null);
 }
 
 // ------------------------------------------------------------------ router
