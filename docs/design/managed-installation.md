@@ -1,12 +1,11 @@
 # Managed desktop installation and background service
 
-Status: **required product behavior; not implemented by this document**.
-Owner clarification: 2026-10-10, following the README / website review.
+Status: **candidate source implemented; pending final validation**.
+Owner clarification: 2026-10-10, following the README / website review. Formal signing, Mac notarization, update channels, Linux persistent vault, and human real host acceptance have been explicitly removed from agent delivery gates. This removed scope is distinct from the newly implemented candidate features.
 
-The normal desktop installation must create the product's working environment.
-Asking every new user for an existing central endpoint and an API actor is not the
-accepted first-run experience. The current client-only validation installers are
-an interim implementation, not the final product shape.
+The candidate source now implements the bundled managed runtime, auto personal identity, and a browser one-use ticket for secure local access. The setup flow includes BAT profiles configuration, explicit GitHub binding, and verification commands. For Windows, actual file locks and private storage are implemented. The shared frontend includes an adjustable tree, unread/model preferences, skills catalog, direct result links, repair workflows, and instructions that reflect honest limits.
+
+*Note: PR #81 (draft) is not merged yet, and final full gates/native fixtures are running. The current installed release assets remain historical client validation unless a new packaging workflow artifact is produced. Do not claim the latest published release automatically bundles the new runtime.*
 
 ## User journey
 

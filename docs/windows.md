@@ -22,13 +22,13 @@ interaction references; it is not the runtime or data backend.
 
 ## Use an existing Windows installation
 
-These are the **current configured-trial steps**. The required normal installer must
-prepare the runtime and background environment automatically; that complete flow is
-[still being implemented](design/managed-installation.md).
+The candidate source implements the bundled managed runtime and background environment automatically, though it is pending final validation (draft PR #81). The frontend now includes an adjustable tree, unread and model preferences, a skills catalog, direct result links, repair workflows, and instructions presenting honest limits.
 
-1. Get `desktop-Windows-unsigned` from a successful [desktop workflow run](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml).
-   It contains the NSIS `.exe`. Verify its commit; artifacts can expire and this is
-   not yet a signed release / update channel.
+For a supervised trial today:
+
+1. Get `desktop-Windows-unsigned` from the [candidate CI build](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml).
+   This is the new candidate artifact. No new version number, tag, or release has been invented yet.
+   Final validation is pending for root to finalize.
 2. Connect the trusted central and native credential using the
    [current desktop setup](getting-started.md#5-connect-the-desktop-client).
 3. If Fleet is already deployed, keep its reviewed Kit inventory, BAT profile index

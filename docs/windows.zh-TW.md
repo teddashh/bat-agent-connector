@@ -20,12 +20,11 @@ runtime 或資料後端。
 
 ## 使用既有 Windows 環境
 
-以下是**目前已配置環境的試用步驟**。正常安裝器應自動準備 runtime 與背景環境，
-完整流程[仍須實作](design/managed-installation.md)。
+候選原始碼目前已實作自動準備的 runtime 與背景環境，但仍等待最終驗證 (draft PR #81)。前端現在包含可調整的樹狀結構 (adjustable tree)、未讀與模型偏好 (unread/model preferences)、技能目錄 (skills catalog)、直接結果連結 (result links)、修復工作流程 (repair workflows) 以及呈現誠實限制的指示 (instructions honest limits)。
 
-1. 從成功的 [desktop workflow](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml)
-   下載 `desktop-Windows-unsigned`，內含 NSIS `.exe`。核對 commit；artifact 可能到期，
-   目前仍不是正式簽章發行／更新通道。
+針對目前的試用步驟：
+
+1. 從 [候選 CI 建置](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) 下載 `desktop-Windows-unsigned`。這是新的候選 artifact，尚未創造新的版本號、標籤或釋出。目前等待 root 完成最終驗證。
 2. 依[目前的桌面連線步驟](getting-started.zh-TW.md#5-接上桌面-client)連接可信中央，
    在原生憑證視窗完成驗證。
 3. 已部署 Fleet 時，保留原來已檢視的 Kit inventory、BAT profile index 與 SSH 設定。
