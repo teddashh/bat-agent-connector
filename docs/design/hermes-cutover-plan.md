@@ -1,94 +1,102 @@
 # Hermes → BAT Task Service cutover plan
 
-Status: design only; this document does not enable the cutover.
+Status: generic deployment guidance. This document neither enables a cutover nor
+records a particular installation. The operator supplies the private inventory,
+accounts, credentials and rollout policy.
 
 ## Target topology
 
-Run `batc serve` as a `systemd --user` service on the control host that also
-runs Hermes (called `control-host` here), bound only to `127.0.0.1` (the task
-API and MCP endpoint). Hermes talks to the loopback task API; it does not
-receive BAT credentials or call BAT directly. OpenClaw traffic from the
-operator's workstation (`host-a`) reaches the service through an SSH forward,
-for example `ssh -N -L 127.0.0.1:18796:127.0.0.1:18796 control-host`, with the
-forward restricted to the intended operator account and host key.
+Run one task-service owner for a state directory. Bind its control API to loopback
+and let integration clients use the authenticated task interface. A remote client
+may use an explicitly configured, authenticated tunnel; restrict its endpoint,
+operator identity and host key. Do not expose BAT credentials to a chat relay or
+start an independent daemon with a copied journal for each client.
 
-Every new task is one Goose 1.52.0 session, with the task-scoped MCP server as
-its only extension; since 2026-09-29 `work_submit` no longer takes an engine
-choice. Goose stays behind one switch, `BATC_GOOSE_ENABLED`, off by default;
-while it is off, tasks are accepted but stay queued. Discord publishing remains
-disabled for the canary unless explicitly enabled for Ted's board.
+An installation may supervise `batc serve` with the operating system's service
+manager. Service identity, private state paths and restart policy are deployment
+configuration, not public repository defaults. Keep host/profile references and
+provider credentials out of source control.
+
+Goose is optional and controlled by `BATC_GOOSE_ENABLED`, off by default. Enabling
+it requires the pinned runtime contract checks in [task-service.md](task-service.md).
+A model name or successful mock test is not proof of a working live provider.
 
 ## Hermes tool contract
 
-Hermes switches from ad-hoc BAT/crons to these task-scoped calls:
+The integration uses the existing task-scoped calls:
 
-- `work_submit`: create a durable task with project, acceptance, base branch,
-  and idempotency key.
-- `work_status`: inspect state, verification/review evidence, and metrics.
-- `work_pause` / `work_resume`: stop or resume automatic dispatch without
-  losing journal state.
-- `work_result`: retrieve the bounded result, candidate commit/tree, reviewer
-  outcome, and verification evidence.
+- `work_submit`: create a durable task with project, acceptance, base branch and
+  an idempotency key; preserve the user's original words.
+- `work_status`: inspect state, verification/review evidence and recorded metrics.
+- `work_pause` / `work_resume`: stop or resume automatic dispatch without losing
+  journal state; resume first reconciles unresolved commands.
+- `work_result`: retrieve the bounded result, candidate commit/tree, review
+  outcome and verification evidence.
+- `work_events`: read committed milestone events using a durable consumer cursor.
 
-Hermes should display `needs_ted` and `uncertain` as operator states, never
-replay a prompt, and use command-scoped reconciliation only when Ted explicitly
-chooses it.
+Display the compatibility status `needs_ted` as requiring operator attention.
+Display `uncertain` as an unresolved result; never replay its prompt. Command-scoped
+reconciliation requires an authorized operator's explicit evidence and decision.
+The legacy identifiers remain unchanged for API and journal compatibility.
 
 ## Installation and staged enablement
 
-1. Install the pinned connector and dependencies on `control-host`.
-2. Install a user unit such as `batc-task.service` with `Restart=on-failure`,
-   a private `StateDirectory`, `NoNewPrivileges=yes`, and loopback-only bind.
-3. Store host/profile references and provider configuration mode `0600`; keep
-   BAT tokens outside TOML. Run `systemctl --user daemon-reload` and start the
-   service manually for preflight.
-4. Set `BATC_GOOSE_ENABLED=1`, verify `work_submit → work_status → work_result`
-   on a no-op repository task, then enable Hermes' task-service route. Every
-   task is a Goose session, so the canary gate below also judges Goose's
-   ACP/reconciliation metrics.
-5. Enable the 24-hour canary at 10% of eligible low-risk tasks, then 50%, then
-   100% only if the gates below hold.
+1. Install compatible, pinned connector and optional executor versions in an
+   isolated configuration. Keep a rollback copy of private configuration and state.
+2. Configure one service owner, a private state directory, loopback control API
+   and authenticated clients. For a user service, select appropriate process
+   restrictions such as `NoNewPrivileges` and a supervised restart policy.
+3. Configure host and provider references with owner-only permissions (or the
+   equivalent Windows ACL). Keep token values in the supported credential store.
+4. Verify submit, status, pause, resume, events and result using a synthetic task.
+   Check ownership, idempotency, disconnect recovery and credentials before
+   enabling a real integration route.
+5. Enable only the chosen low-risk workload, then expand under an operator-defined
+   observation window and explicit acceptance gates. No rollout percentage or
+   schedule is implied by this document.
 
 ## Disable old paths
 
-During the cutover window, disable (do not delete) the `bat-watch-*` timers,
-`bat-watch-*` services, and the `idle-push` cron/script path. Preserve their
-unit files and last logs under the rollback directory. Disable duplicate
-Discord publishers so one task cannot produce both a legacy notification and a
-board update.
+Inventory any existing submitters, timers, watchers and external publishers before
+cutover. Disable duplicate writers and publishers while preserving their private
+configuration and logs for rollback. Do not stop an active writer merely to replace
+an integration; let it finish or cancel and confirm termination first.
 
-Discord board events should point to Ted's task threads, with unresolved board
-messages remaining pending until the task service observes delivery. Do not use
-Discord as the source of truth; the SQLite WAL journal is authoritative.
+The task journal is authoritative. The connector publishes committed milestone
+events; the integration that owns the external chat service delivers notifications
+and saves its cursor only after success. Do not turn a notification failure into a
+second task or assume a posted chat message proves execution.
 
-## 24-hour canary metrics and gates
+## Canary metrics and gates
 
-Record per task and engine: submitted, accepted, delivered, `needs_ted`, and
-`uncertain` counts; p50/p95 time-to-deliver; verification duration/timeouts;
-review rejections; interventions; session replacements; duplicate/idempotency
-attempts; Goose/AGY request and quota counts; and token usage when available.
-Sample every state transition and retain the task ID, candidate commit/tree,
-review marker, and verification command evidence.
+Record submitted, accepted, delivered, operator-attention and uncertain counts;
+delivery latency; verification duration/timeouts; review rejection; intervention;
+session replacement; and duplicate/idempotency attempts. Report token, cost or quota
+information only when a verified source supplies it. Unavailable provider data
+must stay unavailable.
 
-The canary gate is: zero prompt replays, zero unreviewed deliveries, no stalled
-verifying tasks, 100% base-commit attribution, and no unexplained increase in
-uncertain session starts/sends. Pause rollout on any credential leak, cross-task
-MCP access, or Discord/journal disagreement.
+The gates are zero prompt replays, no unreviewed deliveries, bounded verification,
+exact candidate attribution and no unexplained increase in uncertain starts/sends.
+Pause rollout for credential exposure, cross-task access, conflicting ownership or
+external reports inconsistent with the journal. Retain task, command and candidate
+references in private evidence, not public operational transcripts.
 
-## Rollback (<5 minutes)
+## Rollback
 
-1. Stop Hermes' task-service route and `systemctl --user stop batc-task.service`.
-2. Re-enable the previously disabled `bat-watch-*` units and `idle-push` cron,
-   then verify their health/status output.
-3. Repoint OpenClaw on `host-a` to the old local route or remove the SSH forward.
-4. Leave the WAL journal and canary worktrees intact; do not replay uncertain
-   prompts. Export the journal/metrics and reconcile only with Ted's approval.
-5. Confirm one legacy dry run and announce the rollback; investigate before a
-   second cutover attempt.
+1. Stop new submissions from the new integration and pause automatic dispatch.
+2. Account for each in-flight command. Preserve unresolved intents; do not replay
+   an uncertain prompt through the old route.
+3. Stop the task-service owner if required and confirm its process has exited
+   before changing state-directory ownership or starting a replacement.
+4. Restore the previous integration configuration and its authorized access path.
+   Re-enable only one writer and one publisher per task.
+5. Leave the journal, worktrees and private evidence intact. Verify a synthetic
+   dry run and investigate the failed gate before another cutover.
 
-## Ted prerequisites
+## Operator prerequisites
 
-None for the planned installation if the existing `control-host` systemd user,
-`host-a` SSH identity, BAT profile, and Discord board credentials remain valid.
-Ted is only needed for an explicit uncertain-command reconciliation, a canary
-gate override, or a rollback decision after a policy/security alert.
+The operator chooses the service account, host inventory, authentication, provider
+configuration, source integration and acceptance policy. Availability of those
+resources is not assumed. The operator also owns uncertain-command adjudication,
+policy overrides and deployment acceptance; the public project does not embed an
+individual's machine layout, chat destinations or maintenance schedule.
