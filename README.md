@@ -99,7 +99,7 @@ Windows remains a core part of the product. Sharing the Dashboard with Web / Mac
 | Tailscale and central startup | Read Tailscale state and open its installed sign-in app; a separately configured fixed SSH recipe can query / start the selected central service. This is not arbitrary remote installation. |
 | Local resources | Windows Credential Manager, native attachment selection / upload / Save As, tray and controlled update entry. |
 
-**An unbundled Windows central does not mean Windows Fleet is missing or removed.** Today's Windows client can connect to Linux central. Automatic installation of the complete runtime remains separate delivery work. Mac DMG / Keychain evidence does not replace Windows Fleet live acceptance.
+**Windows Fleet and central have separate platform requirements.** Today's Windows client can connect to Linux central. Automatic installation of the complete runtime remains separate delivery work. Mac DMG / Keychain evidence does not replace Windows Fleet live acceptance.
 
 [Windows usage and resources](docs/windows.md) · [NSIS validation packages](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) · [Fleet configuration example](desktop/fleet.example.json) · [Rust Fleet source](desktop/fleet-core/README.md)
 

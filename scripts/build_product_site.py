@@ -389,8 +389,8 @@ parts.append(
     + heading(
         "Windows Fleet & resources",
         "Windows Fleet 與資源",
-        "Your connections and startup, still here.",
-        "連線、啟動與本機資源，都在這裡。",
+        "Choose what connects. Choose what opens.",
+        "選要連的主機，選要開的視窗。",
         "These native controls are integrated today for configured Windows installations. Full automatic environment provisioning and live Fleet acceptance are separate remaining work.",
         "以下原生控制已整合，可用於已配置的 Windows 環境；完整自動建立環境與 Fleet 實機驗收，是另外仍須完成的工作。",
     )
