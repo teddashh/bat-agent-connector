@@ -70,7 +70,7 @@ try {
     await expect(form.locator('[data-published-preview]')).toContainText(fixture.sha);
     await form.getByRole('textbox', {name: 'Original instructions', exact: true}).fill(original);
     await form.getByText('Advanced settings', {exact: true}).click();
-    await form.getByRole('textbox', {name: 'Model (optional)'}).fill('selected-model');
+    await form.getByLabel('Model (optional)', {exact: true}).fill('selected-model');
     const inputs = form.getByRole('combobox', {name: 'Uploaded attachment'});
     await expect(inputs.locator('option')).toHaveCount(2);
     await inputs.selectOption(`${project.artifact.artifact_id}:1`);
