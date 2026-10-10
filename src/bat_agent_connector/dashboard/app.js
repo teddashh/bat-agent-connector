@@ -1085,6 +1085,16 @@ var STRINGS = {
 		pub_fixed: "保留原提交、目標、指示與操作 key。查回只讀取原操作，不追蹤新的分支 head，也不另外啟動工作階段。",
 		start_title_page: "開始新工作階段",
 		start_intro: "在選定主機與工作區建立獨立的受管理工作階段。",
+		dispatch_title: "專案快速派工",
+		dispatch_back: "回到專案",
+		dispatch_advanced: "進階設定",
+		dispatch_intro: "選擇專案已綁定的目的地，確認已發布版本，再帶著原始指示與附件開始工作。",
+		dispatch_project_help: "只顯示此專案已明確綁定的儲存庫、主機與工作區。不會自動建立工作項目或 Task Service 任務。",
+		dispatch_no_bindings: "此專案沒有可用的目的地。請先在專案設定儲存庫，並在中央設定對應的主機與工作區綁定。",
+		dispatch_archived: "此專案已封存，不能派送新工作。既有操作仍可查回。",
+		dispatch_project_unavailable: "無法確認目前專案。草稿保留，確認前不會派工。",
+		dispatch_unsupported: "中央尚未支援專案快速派工。請先更新中央服務。",
+		dispatch_fixed_inputs: "這筆操作固定使用下列附件版本；查回不會重傳或另開工作。",
 		start_choose_host: "選擇主機",
 		start_workspace: "工作區",
 		start_choose_workspace: "選擇工作區",
@@ -2229,6 +2239,16 @@ var STRINGS = {
 		pub_fixed: "Keeps the original commit, target, instructions and operation key. Readback only checks that operation; it does not follow a newer branch head or start another session.",
 		start_title_page: "Start a new session",
 		start_intro: "Create a standalone managed session on the host and workspace you choose.",
+		dispatch_title: "Quick project dispatch",
+		dispatch_back: "Back to project",
+		dispatch_advanced: "Advanced settings",
+		dispatch_intro: "Choose a bound project destination, review its published version, then start with your original instructions and attachments.",
+		dispatch_project_help: "Only this project's explicit repository, host and workspace bindings are shown. No work item or Task Service task is created automatically.",
+		dispatch_no_bindings: "This project has no available destination. Add its repository to the project and configure the corresponding host/workspace binding in central.",
+		dispatch_archived: "This project is archived. New dispatch is unavailable; existing operations can still be read back.",
+		dispatch_project_unavailable: "The current project could not be verified. Your draft is preserved and dispatch stays paused.",
+		dispatch_unsupported: "Central does not support project dispatch yet. Update central first.",
+		dispatch_fixed_inputs: "This operation uses the exact input revisions below. Read-back does not transfer again or start another session.",
 		start_choose_host: "Choose a host",
 		start_workspace: "Workspace",
 		start_choose_workspace: "Choose a workspace",
@@ -6950,7 +6970,7 @@ function orchestrationPanel({ h, t, api, caps, guard, ready, errorBox, opStatus,
 //#endregion
 //#region src/repository-start.js
 var object = (v) => v && typeof v === "object" && !Array.isArray(v);
-var equal$1 = (a, b) => a === b || object(a) && object(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$1(a[k], b[k]));
+var equal$1 = (a, b) => a === b || Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => equal$1(v, b[i])) || object(a) && object(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => equal$1(a[k], b[k]));
 var text = (v, max) => typeof v === "string" && v.trim().length > 0 && v.length <= max && !/[\x00-\x1f\x7f]/.test(v);
 var oid$1 = (v) => typeof v === "string" && /^op_[0-9a-f]{32}$/.test(v);
 var sha = (v) => typeof v === "string" && /^[0-9a-f]{40}$/.test(v);
@@ -6967,16 +6987,22 @@ var target = (v) => object(v) && Object.keys(v).length === 3 && [
 ].every((k) => text(v[k], 256));
 var ref = (v) => typeof v === "string" && /^refs\/heads\/(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*@\{)[A-Za-z0-9._/-]{1,200}$/.test(v) && !/[./]$/.test(v) && v.slice(11).split("/").every((p) => !p.startsWith(".") && !p.endsWith(".lock"));
 var preconditions = (v) => object(v) && Object.keys(v).length === 2 && Number.isSafeInteger(v.repository_id) && v.repository_id > 0 && digest$1(v.binding_digest);
-var validRequest = (r) => r?.action === "repository.continue" && target(r.target) && preconditions(r.preconditions) && object(r.params) && Object.keys(r.params).every((k) => [
+var projectId = (v) => typeof v === "string" && /^prj_[0-9a-f]{20}$/.test(v);
+var artifactRefs = (v) => Array.isArray(v) && v.every((r) => object(r) && Object.keys(r).length === 3 && /^art_[0-9a-f]{32}$/.test(r.artifact_id) && Number.isSafeInteger(r.revision) && r.revision > 0 && digest$1(r.digest));
+var requestPreconditions = (r) => object(r.params) && "project_id" in r.params ? projectId(r.params.project_id) && object(r.preconditions) && Number.isSafeInteger(r.preconditions.expected_project_version) && r.preconditions.expected_project_version > 0 && preconditions(Object.fromEntries(Object.entries(r.preconditions).filter(([k]) => k !== "expected_project_version"))) : preconditions(r.preconditions);
+var validRequest = (r) => r?.action === "repository.continue" && target(r.target) && requestPreconditions(r) && object(r.params) && Object.keys(r.params).every((k) => [
 	"agent",
 	"prompt",
 	"title",
+	"model",
+	"artifacts",
+	"project_id",
 	"source_ref",
 	"source_sha"
-].includes(k)) && ref(r.params.source_ref) && sha(r.params.source_sha) && ["claude", "codex"].includes(r.params.agent) && typeof r.params.prompt === "string" && r.params.prompt.trim() && r.params.prompt.length <= 12e3 && (!("title" in r.params) || text(r.params.title, 256));
+].includes(k)) && ref(r.params.source_ref) && sha(r.params.source_sha) && ["claude", "codex"].includes(r.params.agent) && typeof r.params.prompt === "string" && r.params.prompt.trim() && r.params.prompt.length <= 12e3 && ["title", "model"].every((k) => !(k in r.params) || text(r.params[k], 256)) && (!("artifacts" in r.params) || artifactRefs(r.params.artifacts));
 var validPreview$1 = (p, input) => object(p) && equal$1(p.target, input.target) && p.source_ref === input.source_ref && sha(p.source_sha) && p.exact_ref_head_only === true && preconditions(p.preconditions) && p.repository_id === p.preconditions.repository_id && p.binding_digest === p.preconditions.binding_digest && object(p.workspace) && p.workspace.workspace_id === input.target.workspace_id && text(p.workspace.folder, 4096) && (p.workspace.name == null || typeof p.workspace.name === "string");
 var noAdmission = new Set(["REPOSITORY_NOT_BOUND", "REPOSITORY_HOST_UNAVAILABLE"]);
-function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, storageKey }) {
+function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatus, storageKey, project = null, attachmentFactory }) {
 	let raw;
 	try {
 		raw = JSON.parse(localStorage.getItem(storageKey));
@@ -6986,10 +7012,11 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		source_ref: typeof raw?.source_ref === "string" ? raw.source_ref : "",
 		agent: ["claude", "codex"].includes(raw?.agent) ? raw.agent : "claude",
 		prompt: typeof raw?.prompt === "string" ? raw.prompt : "",
+		model: typeof raw?.model === "string" ? raw.model : "",
 		title: typeof raw?.title === "string" ? raw.title : ""
 	};
 	if (raw?.intent) {
-		const valid = validRequest(raw.intent.request) && text(raw.intent.key, 200);
+		const valid = validRequest(raw.intent.request) && text(raw.intent.key, 200) && (!project || raw.intent.request.params.project_id === project);
 		saved.intent = {
 			request: valid ? raw.intent.request : null,
 			key: valid ? raw.intent.key : null,
@@ -6998,10 +7025,12 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		};
 		if (valid) Object.assign(saved, {
 			target: raw.intent.request.target,
-			title: ""
+			title: "",
+			model: ""
 		}, raw.intent.request.params);
 	}
 	let preview = null, operation = null, busy = false, reading = false, sequence = 0, readFailed = false, submission = null, refreshing = null;
+	let projectDoc = null, projectFailed = Boolean(project), previewProjectVersion = null, autoSelect = !raw, projectQueue = Promise.resolve();
 	const current = () => {
 		try {
 			guard();
@@ -7016,11 +7045,13 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 	};
 	const observe = () => caps()?.scopes?.includes("observe");
 	const allowed = () => observe() && caps()?.scopes?.includes("start") && caps()?.actions?.some((a) => a.action === "repository.continue" && a.allowed === true);
+	const expanded = () => caps()?.features?.project_dispatch?.version === 1;
+	const projectReady = () => !project || expanded() && projectDoc && !projectDoc.archived && !projectFailed;
 	const bindings = () => (caps()?.features?.repository_sync || []).filter((b) => b.exact_ref_head_only === true && target({
 		repository: b.repository,
 		host: b.host,
 		workspace_id: b.workspace_id
-	}));
+	}) && (!project || projectDoc?.repositories?.some((r) => r.toLowerCase() === b.repository.toLowerCase())));
 	const bound = () => bindings().some((b) => equal$1({
 		repository: b.repository,
 		host: b.host,
@@ -7028,6 +7059,10 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 	}, saved.target));
 	const hostAllowed = () => caps()?.hosts?.some((h) => h.host === saved.target?.host && h.writes === true && h.orchestrate === true);
 	const status = h("div", { role: "status" }), facts = h("div", { "data-published-preview": "" }), outcome = h("div", { "data-published-result": "" });
+	const projectStatus = h("div", {
+		role: "status",
+		"data-dispatch-project": ""
+	});
 	const binding = h("select", { "aria-label": t("pub_binding") }), sourceRef = h("input", {
 		"aria-label": t("pub_ref"),
 		maxlength: 211,
@@ -7042,12 +7077,24 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		"aria-label": t("start_title"),
 		maxlength: 256
 	});
+	const model = h("input", {
+		"aria-label": t("start_model"),
+		maxlength: 256,
+		placeholder: t("start_model_default")
+	});
 	const inputs = {
 		source_ref: sourceRef,
 		agent,
 		prompt,
-		title
+		title,
+		model
 	};
+	prompt.value = saved.prompt;
+	const attachments = expanded() && attachmentFactory ? attachmentFactory(prompt, () => {
+		if (current()) update();
+	}) : null;
+	if (attachments && !saved.intent) saved.prompt = prompt.value;
+	const attachmentBox = attachments ? h("fieldset", { class: "dispatch-attachments" }, attachments.box) : null;
 	const key = (b) => JSON.stringify(b);
 	function fill() {
 		binding.replaceChildren(h("option", { value: "" }, t("pub_choose")), ...bindings().map((b) => {
@@ -7077,15 +7124,21 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 			source_sha: preview?.source_sha,
 			agent: saved.agent,
 			prompt: saved.prompt,
-			...saved.title ? { title: saved.title } : {}
+			...saved.title ? { title: saved.title } : {},
+			...saved.model && expanded() ? { model: saved.model } : {},
+			...attachments?.refs().length ? { artifacts: attachments.refs() } : {},
+			...project ? { project_id: project } : {}
 		},
-		preconditions: preview?.preconditions
+		preconditions: preview ? {
+			...preview.preconditions,
+			...project ? { expected_project_version: previewProjectVersion } : {}
+		} : null
 	});
 	const inspect = h("button", {
 		class: "secondary",
 		onclick: async () => {
-			if (!current() || saved.intent || reading || !observe() || !ready() || !bound() || !ref(saved.source_ref)) return;
-			const expected = ++sequence, input = selected();
+			if (!current() || saved.intent || reading || !observe() || !ready() || !projectReady() || !bound() || !ref(saved.source_ref)) return;
+			const expected = ++sequence, input = selected(), projectVersion = projectDoc?.version;
 			preview = null;
 			reading = true;
 			update();
@@ -7099,6 +7152,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 				if (expected !== sequence || saved.intent || !equal$1(input, selected())) return;
 				if (!validPreview$1(doc.preview, input)) throw new Error(t("pub_invalid_preview"));
 				preview = doc.preview;
+				previewProjectVersion = projectVersion;
 			} catch (e) {
 				if (expected === sequence) showError(e);
 			} finally {
@@ -7125,7 +7179,8 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 			repository_id: intent.request.preconditions.repository_id,
 			source_ref: intent.request.params.source_ref,
 			source_sha: intent.request.params.source_sha,
-			repository_binding: intent.request.preconditions.binding_digest
+			repository_binding: intent.request.preconditions.binding_digest,
+			...intent.request.params.project_id ? { project_id: intent.request.params.project_id } : {}
 		})) if (name in refs && refs[name] !== value) throw new Error(t("pub_invalid_result"));
 		if (result != null && (!object(result) || result.host !== intent.request.target.host || result.workspace_id !== intent.request.target.workspace_id || result.repository !== intent.request.target.repository || result.source_ref !== intent.request.params.source_ref || result.source_sha !== intent.request.params.source_sha || result.repository_id !== intent.request.preconditions.repository_id || result.binding_digest !== intent.request.preconditions.binding_digest || !text(result.session_id, 256) || result.session_id !== candidate.external_refs?.session_id)) throw new Error(t("pub_invalid_result"));
 		if (candidate.status === "succeeded" && (!result || result.message_id !== `batc-${candidate.operation_id}`)) throw new Error(t("pub_invalid_result"));
@@ -7141,9 +7196,9 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		onclick: async () => {
 			if (!current() || busy || readFailed || !ready() || !allowed() || saved.intent?.operation_id || saved.intent?.refused) return;
 			if (!saved.intent) {
-				if (!preview || !validPreview$1(preview, selected()) || !bound() || !hostAllowed() || !validRequest(request())) return;
+				if (!projectReady() || !preview || !validPreview$1(preview, selected()) || !bound() || !hostAllowed() || attachments && !attachments.ready() || !validRequest(request())) return;
 				saved.intent = {
-					request: request(),
+					request: structuredClone(request()),
 					key: crypto.randomUUID(),
 					operation_id: null
 				};
@@ -7193,14 +7248,15 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 	const another = h("button", {
 		class: "secondary",
 		onclick: () => {
-			if (!current() || busy || refreshing || readFailed || !(terminal$1(operation) || saved.intent?.refused)) return;
+			if (!current() || busy || refreshing || readFailed || attachments && !attachments.ready() || !(terminal$1(operation) || saved.intent?.refused)) return;
 			const previous = saved;
 			saved = {
 				target: saved.target,
 				source_ref: saved.source_ref,
 				agent: saved.agent,
 				prompt: "",
-				title: ""
+				title: "",
+				model: saved.model
 			};
 			try {
 				persist();
@@ -7211,6 +7267,7 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 			}
 			operation = preview = null;
 			status.replaceChildren();
+			attachments?.reset();
 			fill();
 			update();
 		}
@@ -7236,24 +7293,32 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 	binding.addEventListener("change", () => change("target", binding.value ? JSON.parse(binding.value) : null));
 	for (const [field, el] of Object.entries(inputs)) el.addEventListener(field === "agent" ? "change" : "input", () => change(field, el.value));
 	const label = (name, el) => h("label", {}, t(name), el);
+	const advanced = h("details", {
+		class: "dispatch-advanced",
+		open: Boolean(saved.model || saved.title)
+	}, h("summary", {}, t("dispatch_advanced")), h("div", { class: "capture-fields" }, label("start_title", title), label("start_model", model)));
 	const box = h("section", {
 		class: "session-start published-start",
 		"data-published-start": ""
-	}, h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("pub_binding", binding), label("pub_ref", sourceRef)), h("p", { class: "muted" }, t("pub_head_only")), h("div", { class: "actions" }, inspect), facts), h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("start_agent", agent), label("start_title", title)), label("pub_prompt", prompt), h("p", { class: "muted" }, t("pub_isolation"))), h("div", { class: "actions" }, apply, check, another), outcome, status);
+	}, project ? projectStatus : null, h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("pub_binding", binding), label("pub_ref", sourceRef)), h("p", { class: "muted" }, t("pub_head_only")), h("div", { class: "actions" }, inspect), facts), h("div", { class: "panel" }, h("div", { class: "capture-fields" }, label("start_agent", agent), !project ? label("start_title", title) : null, !project && expanded() ? label("start_model", model) : null), label("pub_prompt", prompt), project ? advanced : null, attachmentBox, h("p", { class: "muted" }, t("pub_isolation"))), h("div", { class: "actions" }, apply, check, another), outcome, status);
 	function update() {
 		const fixed = Boolean(saved.intent);
+		if (attachmentBox) {
+			attachmentBox.disabled = fixed || busy;
+			attachmentBox.hidden = fixed;
+		}
 		binding.disabled = fixed || busy;
 		for (const el of Object.values(inputs)) el.disabled = fixed || busy;
 		inspect.hidden = fixed;
-		inspect.disabled = reading || !observe() || !ready() || !bound() || !ref(saved.source_ref);
+		inspect.disabled = reading || !observe() || !ready() || !projectReady() || !bound() || !ref(saved.source_ref);
 		inspect.textContent = t(reading ? "pub_loading" : "pub_preview");
 		apply.hidden = Boolean(saved.intent?.operation_id || saved.intent?.refused);
 		apply.textContent = t(fixed ? "permissions_retry" : "pub_apply");
-		apply.disabled = busy || readFailed || !ready() || !allowed() || (fixed ? !saved.intent.request || !saved.intent.key : reading || !preview || !validPreview$1(preview, selected()) || !bound() || !hostAllowed() || !validRequest(request()));
+		apply.disabled = busy || readFailed || !ready() || !allowed() || (fixed ? !saved.intent.request || !saved.intent.key : reading || !projectReady() || !preview || !validPreview$1(preview, selected()) || !bound() || !hostAllowed() || attachments && !attachments.ready() || !validRequest(request()));
 		check.hidden = !saved.intent?.operation_id;
 		check.disabled = busy || Boolean(refreshing);
 		another.hidden = !(terminal$1(operation) || saved.intent?.refused);
-		another.disabled = busy || Boolean(refreshing) || readFailed;
+		another.disabled = busy || Boolean(refreshing) || readFailed || Boolean(attachments && !attachments.ready());
 		facts.replaceChildren();
 		const original = saved.intent?.request;
 		if (preview || original) {
@@ -7263,10 +7328,11 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 		}
 		outcome.replaceChildren();
 		if (!allowed()) outcome.append(h("p", { class: "muted" }, t("pub_unavailable")));
-		else if (!bindings().length && !fixed) outcome.append(h("p", { class: "muted" }, t("pub_no_bindings")));
+		else if (!bindings().length && !fixed) outcome.append(h("p", { class: "muted" }, t(project ? "dispatch_no_bindings" : "pub_no_bindings")));
 		if (!fixed) return;
 		outcome.append(h("p", {}, operation ? opStatus(operation) : t(saved.intent.refused ? "start_refused" : "start_unknown"), " ", saved.intent.operation_id ? h("a", { href: `#/op/${saved.intent.operation_id}` }, t("permissions_details")) : null, operation?.status_reason ? ` · ${operation.status_reason}` : ""), h("p", { class: "muted" }, t("pub_fixed")));
 		if (!original || !saved.intent.key) outcome.append(h("p", { class: "error" }, t("permissions_damaged")));
+		if (original?.params.artifacts?.length) outcome.append(h("p", { class: "muted" }, t("dispatch_fixed_inputs")), h("ul", { class: "dispatch-fixed-inputs" }, ...original.params.artifacts.map((r) => h("li", {}, `${r.artifact_id} · r${r.revision} · ${r.digest}`))));
 		const complete = operation?.status === "succeeded" && operation.result?.message_id === `batc-${operation.operation_id}`;
 		const proof = complete ? operation.result : operation?.steps?.some((s) => s.name === "session.start" && s.status === "succeeded") && text(operation.external_refs?.session_id, 256) ? {
 			host: saved.target.host,
@@ -7308,13 +7374,62 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 			if (current()) update();
 		}
 	}
+	async function readProject() {
+		if (!project) return;
+		try {
+			const { project: p } = await api("GET", `/projects/${encodeURIComponent(project)}`);
+			guard();
+			if (p?.project_id !== project || !Number.isSafeInteger(p.version) || p.version < 1 || !Array.isArray(p.repositories) || p.repositories.some((r) => typeof r !== "string")) throw new Error(t("dispatch_project_unavailable"));
+			if (projectDoc && (p.version !== projectDoc.version || !equal$1(p.repositories, projectDoc.repositories) || p.archived !== projectDoc.archived)) {
+				preview = null;
+				previewProjectVersion = null;
+				sequence++;
+				reading = false;
+			}
+			projectDoc = p;
+			projectFailed = false;
+			if (autoSelect && !saved.intent && !saved.target && bindings().length === 1) {
+				const b = bindings()[0];
+				saved.target = {
+					repository: b.repository,
+					host: b.host,
+					workspace_id: b.workspace_id
+				};
+				persist();
+			}
+			autoSelect = false;
+			const values = Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value]));
+			fill();
+			for (const [k, value] of Object.entries(values)) inputs[k].value = value;
+			projectStatus.replaceChildren(h("p", {}, h("a", { href: `#/project/${project}` }, p.name)), h("p", { class: "muted" }, t(p.archived ? "dispatch_archived" : expanded() ? "dispatch_project_help" : "dispatch_unsupported")));
+			update();
+		} catch (e) {
+			if (current()) {
+				projectFailed = true;
+				projectStatus.replaceChildren(errorBox(e));
+				update();
+			}
+			throw e;
+		}
+	}
+	function loadProject() {
+		projectQueue = projectQueue.catch(() => {}).then(() => {
+			guard();
+			return readProject();
+		});
+		return projectQueue;
+	}
 	fill();
 	update();
+	const refreshAll = async () => {
+		const failed = (await Promise.allSettled([loadProject(), refresh(true)])).find((r) => r.status === "rejected");
+		if (failed) throw failed.reason;
+	};
 	return {
 		box,
 		update,
-		refresh,
-		init: refresh
+		refresh: project ? refreshAll : refresh,
+		init: project ? refreshAll : refresh
 	};
 }
 //#endregion
@@ -8610,7 +8725,7 @@ function manualCapture(scope, source = {}, onAttach) {
 		onAttach
 	});
 }
-function attachmentDraft(scope, text, initial = [], roles = false) {
+function attachmentDraft(scope, text, initial = [], roles = false, onChange = () => {}) {
 	const connection = {
 		epoch: state.epoch,
 		namespace: state.namespace,
@@ -8633,6 +8748,10 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 	for (const a of saved.attachments) delete a.busy;
 	if (typeof saved.text === "string") text.value = saved.text;
 	const files = new Map(), rows = h("div", { class: "attachment-list" });
+	let pendingSelections = 0;
+	const changed = () => queueMicrotask(() => {
+		if (box.isConnected && connection.epoch === state.epoch && connection.generation === generation) onChange();
+	});
 	const status = h("p", {
 		class: "muted",
 		role: "status"
@@ -8664,6 +8783,7 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 		try {
 			localStorage.setItem(key, JSON.stringify(saved));
 		} catch {}
+		changed();
 	};
 	const removeStored = () => {
 		guard();
@@ -8685,35 +8805,38 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 		attachments: refs(),
 		fields: saved.fields
 	});
-	const ready = () => saved.attachments.every((a) => a.ref);
-	const render = () => fill(rows, ...saved.attachments.filter((a) => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map((a) => h("div", { class: "row" }, h("div", { class: "grow" }, a.name, a.ref ? h("div", { class: "muted" }, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`) : h("div", { class: "muted" }, a.error || (a.native_handle ? t("files_unavailable") : files.has(a) ? t("uploading") : t("choose_again")))), a.ref && roles ? h("select", {
-		"aria-label": t("attachment_role"),
-		onchange: (e) => {
-			guard();
-			a.ref.role = e.target.value;
-			persist();
-		}
-	}, ...["input", "result"].map((role) => h("option", {
-		value: role,
-		selected: (a.ref.role || "input") === role
-	}, t(`attachment_${role}`)))) : null, a.ref && native ? native.actions(a.ref) : null, !a.ref && files.has(a) && !a.busy ? h("button", {
-		class: "secondary",
-		onclick: () => upload(a)
-	}, t("retry")) : null, h("button", {
-		class: "secondary",
-		disabled: a.busy,
-		onclick: () => {
-			guard();
-			if (a.native_handle) {
-				saved.native_ignored ||= [];
-				saved.native_ignored.push(a.native_handle);
+	const ready = () => pendingSelections === 0 && saved.attachments.every((a) => a.ref);
+	const render = () => {
+		changed();
+		return fill(rows, ...saved.attachments.filter((a) => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map((a) => h("div", { class: "row" }, h("div", { class: "grow" }, a.name, a.ref ? h("div", { class: "muted" }, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`) : h("div", { class: "muted" }, a.error || (a.native_handle ? t("files_unavailable") : files.has(a) ? t("uploading") : t("choose_again")))), a.ref && roles ? h("select", {
+			"aria-label": t("attachment_role"),
+			onchange: (e) => {
+				guard();
+				a.ref.role = e.target.value;
+				persist();
 			}
-			saved.attachments = saved.attachments.filter((x) => x !== a);
-			files.delete(a);
-			persist();
-			render();
-		}
-	}, t("remove")))));
+		}, ...["input", "result"].map((role) => h("option", {
+			value: role,
+			selected: (a.ref.role || "input") === role
+		}, t(`attachment_${role}`)))) : null, a.ref && native ? native.actions(a.ref) : null, !a.ref && files.has(a) && !a.busy ? h("button", {
+			class: "secondary",
+			onclick: () => upload(a)
+		}, t("retry")) : null, h("button", {
+			class: "secondary",
+			disabled: a.busy,
+			onclick: () => {
+				guard();
+				if (a.native_handle) {
+					saved.native_ignored ||= [];
+					saved.native_ignored.push(a.native_handle);
+				}
+				saved.attachments = saved.attachments.filter((x) => x !== a);
+				files.delete(a);
+				persist();
+				render();
+			}
+		}, t("remove")))));
+	};
 	if (nativeFiles) {
 		if (!Array.isArray(saved.native_ignored)) saved.native_ignored = [];
 		saved.native_ignored = saved.native_ignored.filter((id) => typeof id === "string" && /^file_[0-9a-f]{32}$/.test(id));
@@ -8878,6 +9001,8 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 		onclick: async () => {
 			if (!existing.value) return;
 			const [artifactId, revision] = existing.value.split(":");
+			pendingSelections++;
+			changed();
 			try {
 				guard();
 				const { artifact } = await api("GET", `/artifacts/${artifactId}/revisions/${revision}`);
@@ -8896,6 +9021,9 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 				render();
 			} catch (e) {
 				if (connection.epoch === state.epoch) fill(status, errorBox(e));
+			} finally {
+				pendingSelections--;
+				changed();
 			}
 		}
 	}, t("add_attachment"))));
@@ -9037,12 +9165,36 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
 		ready,
 		perform,
 		bindFields,
-		pending: () => Boolean(saved.submission)
+		pending: () => Boolean(saved.submission),
+		reset: () => {
+			guard(true);
+			if (!ready()) throw new Error(t("attachments_not_ready"));
+			const ignored = [...saved.native_ignored || [], ...saved.attachments.map((a) => a.native_handle).filter(Boolean)];
+			saved = {
+				text: "",
+				attachments: [],
+				native_draft: saved.native_draft,
+				native_ignored: ignored
+			};
+			text.value = "";
+			files.clear();
+			persist();
+			render();
+		}
 	};
 }
 function onEvents(fn) {
 	state.listeners.add(fn);
 	return () => state.listeners.delete(fn);
+}
+var onlineListeners = new Set();
+function onOnline(fn) {
+	onlineListeners.add(fn);
+	return () => onlineListeners.delete(fn);
+}
+function updateOnline(value) {
+	state.online = value;
+	for (const fn of onlineListeners) fn();
 }
 async function streamEvents() {
 	const live = document.getElementById("live");
@@ -9075,14 +9227,14 @@ async function streamEvents() {
 			state.lastEvent = cursor;
 			saveCursor();
 			state.refreshCycle = null;
-			state.online = true;
+			updateOnline(true);
 			live.className = "live ok";
 			live.textContent = t("desktop_polling");
 			if (!page.has_more || cursor <= before) await sleep(1e3);
 		} catch (error) {
 			if (epoch !== state.epoch || view !== generation) continue;
 			if (state.refreshCycle === cycle) state.refreshCycle = null;
-			state.online = false;
+			updateOnline(false);
 			live.className = "live down";
 			live.textContent = t("offline_actions_paused");
 			if (error.code === "EVENT_CURSOR_RESET") {
@@ -11740,7 +11892,10 @@ async function viewProject(main, pid) {
 				if (ok || draft) render();
 			}
 		}, t("save"))));
-		fill(head, h("div", { class: "muted" }, h("a", { href: "#/projects" }, t("nav_projects")), ...data.path.flatMap((x) => [" / ", h("a", { href: `#/project/${x.project_id}` }, x.name)])), h("h1", {}, p.name, " ", p.archived ? chip(t("archived"), "warn") : null), p.description ? h("p", { class: "pre" }, p.description) : null, h("div", { class: "actions" }, ...counts(p.counts), ...p.repositories.map((r) => chip(r)), p.task_project ? chip(`Task Service: ${p.task_project}`) : null, may("manage") && !p.archived ? d.toggle : null), d.box, data.sub_projects.length ? h("p", {}, t("sub_projects"), ": ", ...data.sub_projects.flatMap((x, i) => [i ? " · " : "", h("a", { href: `#/project/${x.project_id}` }, x.name)])) : null);
+		fill(head, h("div", { class: "muted" }, h("a", { href: "#/projects" }, t("nav_projects")), ...data.path.flatMap((x) => [" / ", h("a", { href: `#/project/${x.project_id}` }, x.name)])), h("h1", {}, p.name, " ", p.archived ? chip(t("archived"), "warn") : null), p.description ? h("p", { class: "pre" }, p.description) : null, h("div", { class: "actions" }, ...counts(p.counts), ...p.repositories.map((r) => chip(r)), !p.archived && state.caps?.features?.project_dispatch?.version === 1 ? h("a", {
+			class: "session-project-link",
+			href: `#/dispatch/${pid}`
+		}, t("dispatch_title")) : null, p.task_project ? chip(`Task Service: ${p.task_project}`) : null, may("manage") && !p.archived ? d.toggle : null), d.box, data.sub_projects.length ? h("p", {}, t("sub_projects"), ": ", ...data.sub_projects.flatMap((x, i) => [i ? " · " : "", h("a", { href: `#/project/${x.project_id}` }, x.name)])) : null);
 		if (draft) {
 			draft = null;
 			d.open();
@@ -12714,20 +12869,73 @@ async function viewPublished(main) {
 		ready: () => state.online && !state.nativeBusy,
 		errorBox,
 		opStatus,
-		storageKey: `batc.published.${connection.namespace}`
+		storageKey: `batc.published.${connection.namespace}`,
+		attachmentFactory: (prompt, changed) => attachmentDraft("published", prompt, [], false, changed)
 	});
 	main.append(h("a", { href: "#/sessions" }, t("nav_sessions")), h("h1", {}, t("pub_title")), h("p", { class: "muted" }, t("pub_intro")), panel.box);
 	try {
 		await panel.init();
 	} catch {}
 	assertView(connection);
-	return onEvents((ev) => {
+	const offOnline = onOnline(() => {
+		try {
+			assertView(connection);
+			panel.update();
+		} catch {}
+	});
+	const offEvents = onEvents((ev) => {
 		if ([
 			"operation",
 			"host",
 			"session"
 		].includes(ev.resource_type)) return panel.refresh(true);
 	});
+	return () => {
+		offOnline();
+		offEvents();
+	};
+}
+async function viewProjectDispatch(main, pid) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	const panel = repositoryStartPanel({
+		h,
+		t,
+		api,
+		caps: () => state.caps,
+		guard: () => assertView(connection),
+		ready: () => state.online && !state.nativeBusy,
+		errorBox,
+		opStatus,
+		project: pid,
+		storageKey: `batc.dispatch.${connection.namespace}.${pid}`,
+		attachmentFactory: (prompt, changed) => attachmentDraft(`dispatch.${pid}`, prompt, [], false, changed)
+	});
+	main.append(h("a", { href: `#/project/${pid}` }, t("dispatch_back")), h("h1", {}, t("dispatch_title")), h("p", { class: "muted" }, t("dispatch_intro")), panel.box);
+	try {
+		await panel.init();
+	} catch {}
+	try {
+		assertView(connection);
+	} catch {
+		return;
+	}
+	const offOnline = onOnline(() => {
+		try {
+			assertView(connection);
+			panel.update();
+		} catch {}
+	});
+	const offEvents = onEvents((ev) => {
+		if (["operation", "host"].includes(ev.resource_type) || ev.resource_type === "project" && ev.resource_id === pid) return panel.refresh(true);
+	});
+	return () => {
+		offOnline();
+		offEvents();
+	};
 }
 async function viewArtifactReview(main, kind, first, second) {
 	const connection = {
@@ -12817,6 +13025,7 @@ async function route() {
 		op: viewOperation,
 		settings: viewSettings,
 		"artifact-review": viewArtifactReview,
+		dispatch: viewProjectDispatch,
 		host: viewHostDiscovery,
 		task: viewTask,
 		worktree: (main, id) => viewObservedResource(main, "worktree", id)

@@ -80,3 +80,16 @@ the other, without approving the item or clearing pending requests. Lists show l
 counts, retain their paging depth on refresh, and keep prior rows with a stale-read
 notice on failure. This capability is additive; older centrals keep the attention
 categories without offering unsupported reading controls.
+
+## Project dispatch
+
+The project detail links to a shared [published-version composer](repository-sync.md).
+It filters explicit central repository bindings by project, freezes the previewed
+project version, and offers the existing attachment draft flow plus optional title
+and model. Web and Tauri submit the same durable `repository.continue` envelope;
+neither creates a second scheduler. A changed project invalidates the preview while
+retaining the draft, and a lost response retries the original operation key.
+Drafts remain local to each client and isolated by server, principal and project.
+Central capability version 1 gates the new entry; same-host unpublished continuation
+continues through checkpoints. Browser/IPC fixtures also exercise real central
+admission, temporary Git and verified attachment bytes (`npm run test:dispatch`).

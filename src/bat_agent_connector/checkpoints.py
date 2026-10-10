@@ -496,7 +496,7 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
                             before_send: Callable[[], Awaitable[None]] | None = None,
                             frame_check: Callable[[], Awaitable[None]] | None = None,
                             final_check: Callable[[], None] | None = None,
-                            creation_fields: dict | None = None) -> dict:
+                            creation_fields: dict | None = None, model: str | None = None) -> dict:
     """Start a confined managed session in a connector worktree and send its first instruction, as recorded steps.
 
     ``verify.start``: BAT itself sees the folder at ``head`` (a step, so a replay after the agent committed returns
@@ -527,7 +527,7 @@ async def start_in_worktree(ctx: OpContext, *, host: str, workspace: str, agent:
             ctx.set_refs(repository_reservation={"session_id": sid, "created_at": entry["created_at"]})
         try:
             r = await orchestrate.session_start(
-                fleet, host, workspace, agent, confirm=True, prompt=None, use_worktree=False, title=title,
+                fleet, host, workspace, agent, confirm=True, prompt=None, use_worktree=False, title=title, model=model,
                 session_id=sid, retain_on_error=True, cwd_override=worktree, external_branch=branch,
                 write_scope="confined", _task_start_guard=final_check,
                 _start_frame_check=frame_check, _creation_fields=creation_fields,

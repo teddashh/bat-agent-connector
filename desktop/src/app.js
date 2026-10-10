@@ -199,7 +199,7 @@ function manualCapture(scope, source = {}, onAttach) {
 }
 
 // Browser bytes stay in memory; native bytes and exact transfer intents stay in the Rust spool.
-function attachmentDraft(scope, text, initial = [], roles = false) {
+function attachmentDraft(scope, text, initial = [], roles = false, onChange = () => {}) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const key = `batc.draft.${connection.namespace}.${scope}`;
   let saved;
@@ -211,6 +211,8 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
   for (const a of saved.attachments) delete a.busy;
   if (typeof saved.text === "string") text.value = saved.text;
   const files = new Map(), rows = h("div", {class: "attachment-list"});
+  let pendingSelections = 0;
+  const changed = () => queueMicrotask(() => {if (box.isConnected && connection.epoch === state.epoch && connection.generation === generation) onChange();});
   const status = h("p", {class: "muted", role: "status"});
   const supported = Boolean(state.caps?.artifacts), nativeFiles = nativeDesktop && nativeFileSupport;
   const nativeUploadAllowed = state.caps?.actions?.some(a => a.action === "artifact.upload" && a.allowed === true);
@@ -225,14 +227,15 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
   const persist = () => {
     guard(); saved.text = text.value;
     try { localStorage.setItem(key, JSON.stringify(saved)); } catch { /* keep the in-memory intent */ }
+    changed();
   };
   const removeStored = () => { guard(); try { localStorage.removeItem(key); } catch { /* ignore */ } };
   text.addEventListener("input", persist);
   const refs = () => saved.attachments.filter(a => a.ref).map(a => roles ? {...a.ref, role: a.ref.role || "input"}
     : {artifact_id: a.ref.artifact_id, revision: a.ref.revision, digest: a.ref.digest});
   const snapshot = () => JSON.stringify({text: text.value, attachments: refs(), fields: saved.fields});
-  const ready = () => saved.attachments.every(a => a.ref);
-  const render = () => fill(rows, ...saved.attachments.filter(a => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map(a => h("div", {class: "row"},
+  const ready = () => pendingSelections === 0 && saved.attachments.every(a => a.ref);
+  const render = () => {changed(); return fill(rows, ...saved.attachments.filter(a => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map(a => h("div", {class: "row"},
     h("div", {class: "grow"}, a.name, a.ref ? h("div", {class: "muted"}, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`)
       : h("div", {class: "muted"}, a.error || (a.native_handle ? t("files_unavailable") : files.has(a) ? t("uploading") : t("choose_again")))),
     a.ref && roles ? h("select", {"aria-label": t("attachment_role"), onchange: e => {guard(); a.ref.role = e.target.value; persist();}},
@@ -242,7 +245,7 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
     h("button", {class: "secondary", disabled: a.busy, onclick: () => {
       guard(); if (a.native_handle) {saved.native_ignored ||= []; saved.native_ignored.push(a.native_handle);}
       saved.attachments = saved.attachments.filter(x => x !== a); files.delete(a); persist(); render();
-    }}, t("remove")))));
+    }}, t("remove")))));};
   if (nativeFiles) {
     if (!Array.isArray(saved.native_ignored)) saved.native_ignored = [];
     saved.native_ignored = saved.native_ignored.filter(id => typeof id === "string" && /^file_[0-9a-f]{32}$/.test(id));
@@ -331,6 +334,7 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
   box.append(h("div", {class: "actions"}, existing, h("button", {class: "secondary", onclick: async () => {
     if (!existing.value) return;
     const [artifactId, revision] = existing.value.split(":");
+    pendingSelections++; changed();
     try {
       guard(); const {artifact} = await api("GET", `/artifacts/${artifactId}/revisions/${revision}`); guard(true);
       if (artifact.state !== "ready") throw new Error(t("attachments_not_ready"));
@@ -339,6 +343,7 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
           digest: artifact.digest, ...(roles ? {role: "input"} : {})}});
       persist(); render();
     } catch (e) {if (connection.epoch === state.epoch) fill(status, errorBox(e));}
+    finally {pendingSelections--; changed();}
   }}, t("add_attachment"))));
   let catalogCursor = null;
   const more = h("button", {class: "secondary", hidden: true, onclick: async () => {
@@ -423,11 +428,23 @@ function attachmentDraft(scope, text, initial = [], roles = false) {
     }
   };
   render();
-  return {box, refs, ready, perform, bindFields, pending: () => Boolean(saved.submission)};
+  return {box, refs, ready, perform, bindFields, pending: () => Boolean(saved.submission), reset: () => {
+    guard(true);
+    if (!ready()) throw new Error(t("attachments_not_ready"));
+    const ignored = [...(saved.native_ignored || []), ...saved.attachments.map(a => a.native_handle).filter(Boolean)];
+    saved = {text: "", attachments: [], native_draft: saved.native_draft, native_ignored: ignored};
+    text.value = ""; files.clear(); persist(); render();
+  }};
 }
 
 // ------------------------------------------------------------------ one shared bounded event reader
 function onEvents(fn) { state.listeners.add(fn); return () => state.listeners.delete(fn); }
+const onlineListeners = new Set();
+function onOnline(fn) { onlineListeners.add(fn); return () => onlineListeners.delete(fn); }
+function updateOnline(value) {
+  state.online = value;
+  for (const fn of onlineListeners) fn();
+}
 async function streamEvents() {
   const live = document.getElementById("live");
   for (;;) {
@@ -459,13 +476,13 @@ async function streamEvents() {
       state.lastEvent = cursor;
       saveCursor();
       state.refreshCycle = null;
-      state.online = true;
+      updateOnline(true);
       live.className = "live ok"; live.textContent = t("desktop_polling");
       if (!page.has_more || cursor <= before) await sleep(1000);
     } catch (error) {
       if (epoch !== state.epoch || view !== generation) continue;
       if (state.refreshCycle === cycle) state.refreshCycle = null;
-      state.online = false;
+      updateOnline(false);
       live.className = "live down"; live.textContent = t("offline_actions_paused");
       if (error.code === "EVENT_CURSOR_RESET") {
         const previous = { namespace: state.namespace, sync: state.sync };
@@ -2281,6 +2298,7 @@ async function viewProject(main, pid) {
       h("h1", {}, p.name, " ", p.archived ? chip(t("archived"), "warn") : null),
       p.description ? h("p", { class: "pre" }, p.description) : null,
       h("div", { class: "actions" }, ...counts(p.counts), ...p.repositories.map(r => chip(r)),
+        !p.archived && state.caps?.features?.project_dispatch?.version === 1 ? h("a", {class: "session-project-link", href: `#/dispatch/${pid}`}, t("dispatch_title")) : null,
         p.task_project ? chip(`Task Service: ${p.task_project}`) : null, may("manage") && !p.archived ? d.toggle : null),
       d.box,
       data.sub_projects.length ? h("p", {}, t("sub_projects"), ": ",
@@ -2905,12 +2923,32 @@ async function viewOrchestration(main, selectedMode = "relay", host, sid) {
 async function viewPublished(main) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const panel = repositoryStartPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
-    ready: () => state.online && !state.nativeBusy, errorBox, opStatus, storageKey: `batc.published.${connection.namespace}`});
+    ready: () => state.online && !state.nativeBusy, errorBox, opStatus, storageKey: `batc.published.${connection.namespace}`,
+    attachmentFactory: (prompt, changed) => attachmentDraft("published", prompt, [], false, changed)});
   main.append(h("a", {href: "#/sessions"}, t("nav_sessions")), h("h1", {}, t("pub_title")),
     h("p", {class: "muted"}, t("pub_intro")), panel.box);
   try {await panel.init();} catch { /* original intent and read error remain visible */ }
   assertView(connection);
-  return onEvents(ev => {if (["operation", "host", "session"].includes(ev.resource_type)) return panel.refresh(true);});
+  const offOnline = onOnline(() => {try {assertView(connection); panel.update();} catch { /* retired view */ }});
+  const offEvents = onEvents(ev => {if (["operation", "host", "session"].includes(ev.resource_type)) return panel.refresh(true);});
+  return () => {offOnline(); offEvents();};
+}
+
+async function viewProjectDispatch(main, pid) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  const panel = repositoryStartPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    ready: () => state.online && !state.nativeBusy, errorBox, opStatus, project: pid,
+    storageKey: `batc.dispatch.${connection.namespace}.${pid}`,
+    attachmentFactory: (prompt, changed) => attachmentDraft(`dispatch.${pid}`, prompt, [], false, changed)});
+  main.append(h("a", {href: `#/project/${pid}`}, t("dispatch_back")), h("h1", {}, t("dispatch_title")),
+    h("p", {class: "muted"}, t("dispatch_intro")), panel.box);
+  try {await panel.init();} catch { /* original intent and project read failure remain visible */ }
+  try {assertView(connection);} catch {return;}
+  const offOnline = onOnline(() => {try {assertView(connection); panel.update();} catch { /* retired view */ }});
+  const offEvents = onEvents(ev => {
+    if (["operation", "host"].includes(ev.resource_type) || ev.resource_type === "project" && ev.resource_id === pid) return panel.refresh(true);
+  });
+  return () => {offOnline(); offEvents();};
 }
 
 async function viewArtifactReview(main, kind, first, second) {
@@ -2939,7 +2977,7 @@ async function route() {
   if (!state.token && name !== "settings") { main.append(h("p", { class: "note" }, t(nativeDesktop ? "desktop_connect_needed" : "need_token"))); viewSettings(main); return; }
   const views = { home: viewHome, projects: viewProjects, project: viewProject, item: viewWorkItem, sessions: viewSessions,
     cleanup: viewCleanup, approvals: viewApprovals, delivery: viewDelivery, operations: viewOperations, session: viewSession, start: viewStart, published: viewPublished, orchestrate: viewOrchestration, op: viewOperation, settings: viewSettings,
-    "artifact-review": viewArtifactReview,
+    "artifact-review": viewArtifactReview, dispatch: viewProjectDispatch,
     host: viewHostDiscovery, task: viewTask,
     worktree: (main, id) => viewObservedResource(main, "worktree", id) };
   const off = await (views[name] || viewHome)(main, ...rest);
