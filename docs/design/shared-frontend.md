@@ -93,3 +93,27 @@ Drafts remain local to each client and isolated by server, principal and project
 Central capability version 1 gates the new entry; same-host unpublished continuation
 continues through checkpoints. Browser/IPC fixtures also exercise real central
 admission, temporary Git and verified attachment bytes (`npm run test:dispatch`).
+
+
+## Entry and recovery clarity (2026-10-10)
+
+Before authentication, shared navigation exposes only Connection. A deep link keeps its URL but
+renders the connection screen; no project/session content is inferred without authentication.
+The router retires this screen's polling just like an authenticated view. Native initial configuration
+has one primary action. Configuration file paths and operational explanations are expandable;
+configured endpoint, actor and credential source stay visible. Fleet/Tailscale are mounted after
+initial configuration. This presentation does not provision a central service or issue credentials.
+
+Session origin starts unknown. A failed first read cannot assert manual ownership; only a successful
+observation with `provenance=manual` displays that message. Write gates remain unchanged.
+`session.start` and `repository.continue` successful receipts say Started; they do not assert task completion.
+
+The published composer accepts short branch names and converts them to `refs/heads/…` before preview.
+It never accepts tags or arbitrary refs, never changes a frozen request, and preserves its exact SHA/key.
+Delivery accepts a credential-free public GitHub PR URL as a convenience for filling its labeled
+repository/number controls. The URL is not fetched: central authorization still owns every request.
+
+Project creation optionally lists the repositories in central's existing published-work bindings.
+The user explicitly selects a repository; the existing `project.create` operation stores that choice.
+The project's dispatch composer still filters host/workspace choices against current capabilities.
+This does not configure a new binding or create an extra Task Service task.
