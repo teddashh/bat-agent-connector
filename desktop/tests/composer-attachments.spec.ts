@@ -69,6 +69,37 @@ async function pasteText(page: Page, selector: string, text: string) {
 for (const native of [false, true]) {
   const mode = native ? 'IPC' : 'Browser';
 
+  test(`${mode}: unavailable durable draft storage prevents pasted upload`, async ({page}) => {
+    const state = await publishedFixture(page, native, {dispatch: true, bindings: [selected]});
+    await openAndPreview(page);
+    await page.evaluate(() => {
+      const original = Storage.prototype.setItem;
+      Storage.prototype.setItem = function(key, value) {
+        if (key.startsWith('batc.draft.') && key.includes('.dispatch.')) throw new Error('Draft storage unavailable');
+        return original.call(this, key, value);
+      };
+    });
+    await pasteFile(page, '[data-published-start] textarea[aria-label="Original instructions"]', 'screenshot.png', 'image/png', pngBuffer);
+    await expect(form(page).locator('.attachment-list')).toContainText('Draft storage unavailable');
+    await expect(apply(page)).toBeDisabled();
+    expect(state.uploaded).toBeFalsy();
+    expect(state.posts).toHaveLength(0);
+    expect(state.errors).toEqual([]);
+  });
+
+  test(`${mode}: written prompt keeps its exact whitespace with pasted images`, async ({page}) => {
+    const state = await publishedFixture(page, native, {dispatch: true, bindings: [selected]});
+    await openAndPreview(page);
+    const original = '  Review the illustration.\nKeep these instructions exactly.  ';
+    await prompt(page).fill(original);
+    await pasteFile(page, '[data-published-start] textarea[aria-label="Original instructions"]', 'screenshot.png', 'image/png', pngBuffer);
+    await expect(form(page).locator('.attachment-list')).toContainText(aid);
+    await apply(page).click();
+    await expect.poll(() => state.posts.filter(post => post.body.action === 'repository.continue').length).toBe(1);
+    expect(state.posts.find(post => post.body.action === 'repository.continue').body.params.prompt).toBe(original);
+    expect(state.errors).toEqual([]);
+  });
+
   test(`${mode}: pasted image uploads to stable artifact ref with thumbnail and can be removed`, async ({page}) => {
     const state = await publishedFixture(page, native, {dispatch: true, bindings: [selected]});
     await openAndPreview(page);
@@ -115,7 +146,7 @@ for (const native of [false, true]) {
     // Verify dispatched request params
     const continuePost = state.posts.find(p => p.body.action === 'repository.continue');
     expect(continuePost).toBeDefined();
-    expect(continuePost.body.params.prompt).toBe('Inspect attached images');
+    expect(continuePost.body.params.prompt).toBe('Review attached files');
     expect(continuePost.body.params.artifacts).toEqual([{artifact_id: aid, revision: 1, digest: pngDigest}]);
     expect(state.errors).toEqual([]);
   });
@@ -141,7 +172,7 @@ for (const native of [false, true]) {
     await expect(form(page)).toContainText('已確認啟動');
 
     const continuePost = state.posts.find(p => p.body.action === 'repository.continue');
-    expect(continuePost.body.params.prompt).toBe('請檢視所附圖片');
+    expect(continuePost.body.params.prompt).toBe('請檢視所附檔案');
     expect(state.errors).toEqual([]);
   });
 

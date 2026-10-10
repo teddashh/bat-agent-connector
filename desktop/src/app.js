@@ -233,7 +233,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
   const files = new Map(), previews = new Map(), rows = h("div", {class: "attachment-list"});
   const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
   const generateThumbnail = (file, onReady) => {
-    if (!ALLOWED_IMAGE_TYPES.has(file.type)) return;
+    if (!ALLOWED_IMAGE_TYPES.has(file.type) || file.size > 16 * 1024 * 1024) return;
     try {
       const reader = new FileReader();
       reader.onload = () => {
@@ -263,19 +263,21 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
   let pendingSelections = 0;
   const changed = () => queueMicrotask(() => {if (box.isConnected && connection.epoch === state.epoch && connection.generation === generation) onChange();});
   const status = h("p", {class: "muted", role: "status"});
+  const promptHint = h("p", {class: "muted", hidden: true}, t("dispatch_attachment_prompt", {request: t("dispatch_inspect_images")}));
   const supported = Boolean(state.caps?.artifacts), nativeFiles = nativeDesktop && nativeFileSupport;
   const nativeUploadAllowed = state.caps?.actions?.some(a => a.action === "artifact.upload" && a.allowed === true);
   let native;
   const choose = nativeFiles ? h("button", {class: "secondary", disabled: !supported || !may("manage") || !nativeUploadAllowed, onclick: () => native.pick()}, t("files_choose")) : h("input", {type: "file", multiple: true, disabled: !supported || !may("manage"), "aria-label": t("choose_attachments")});
   const box = h("div", {class: "attachments", hidden: !supported}, nativeFiles ? h("div", {class: "actions"}, h("strong", {}, t("attachments")), choose) : h("label", {}, t("attachments"), choose),
-    h("p", {class: "muted"}, t(nativeFiles ? "files_help" : "upload_on_choose")), rows, status);
+    h("p", {class: "muted"}, t(nativeFiles ? "files_help" : "upload_on_choose")), rows, promptHint, status);
   const guard = (mounted = false) => {
     assertView(connection);
     if (mounted && !box.isConnected) throw new ApiError(0, "VIEW_CHANGED", "Attachment form changed during the request");
   };
-  const persist = () => {
+  const persist = (required = false) => {
     guard(); saved.text = text.value;
-    try { localStorage.setItem(key, JSON.stringify(saved)); } catch { /* keep the in-memory intent */ }
+    try { localStorage.setItem(key, JSON.stringify(saved)); } catch (error) { if (required === true) throw error; }
+    promptHint.hidden = roles || Boolean(text.value.trim()) || !saved.attachments.some(a => a.ref);
     changed();
   };
   const removeStored = () => { guard(); try { localStorage.removeItem(key); } catch { /* ignore */ } };
@@ -284,7 +286,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
     : {artifact_id: a.ref.artifact_id, revision: a.ref.revision, digest: a.ref.digest});
   const snapshot = () => JSON.stringify({text: text.value, attachments: refs(), fields: saved.fields});
   const ready = () => pendingSelections === 0 && saved.attachments.every(a => a.ref);
-  const render = () => {changed(); return fill(rows, ...saved.attachments.filter(a => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map(a => h("div", {class: "row attachment-row"},
+  const render = () => {changed(); promptHint.hidden = roles || Boolean(text.value.trim()) || !saved.attachments.some(a => a.ref); return fill(rows, ...saved.attachments.filter(a => !nativeFiles || !a.native_handle || a.ref || !native?.has(a.native_handle)).map(a => h("div", {class: "row attachment-row"},
     previews.has(a) ? h("img", {class: "attachment-thumb", src: previews.get(a), alt: a.name || t("attachments")}) : null,
     h("div", {class: "grow"}, a.name, a.ref ? h("div", {class: "muted"}, `${a.ref.artifact_id} · r${a.ref.revision} · ${a.ref.digest.slice(0, 12)}`)
       : h("div", {class: "muted"}, a.error || (a.native_handle ? t("files_unavailable") : files.has(a) ? t("uploading") : t("choose_again")))),
@@ -338,10 +340,10 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
       const request = {action: "artifact.upload", target: {}, params: {display_name: a.name || file.name,
         media_type: file.type || "application/octet-stream", size_bytes: file.size, expected_digest: digest}, preconditions: {}};
       if (a.request && JSON.stringify(a.request) !== JSON.stringify(request)) throw new Error(t("attachment_file_changed"));
-      a.request ||= request; a.key ||= crypto.randomUUID(); persist();
+      a.request ||= request; a.key ||= crypto.randomUUID(); persist(true);
       let op = a.operation_id ? (await api("GET", `/operations/${a.operation_id}`)).operation : null;
       guard(true);
-      if (op && ["failed", "cancelled"].includes(op.status)) {op = null; a.key = crypto.randomUUID(); delete a.operation_id; persist();}
+      if (op && ["failed", "cancelled"].includes(op.status)) {op = null; a.key = crypto.randomUUID(); delete a.operation_id; persist(true);}
       if (!op) op = (await api("POST", "/operations?wait=3", a.request, a.key)).operation;
       guard(true); a.operation_id = op.operation_id; persist();
       const deadline = Date.now() + 60000;
@@ -378,7 +380,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
       if (!a) {a = {name: file.name}; saved.attachments.push(a);}
       files.set(a, file);
       if (ALLOWED_IMAGE_TYPES.has(file.type)) {
-        generateThumbnail(file, thumb => { previews.set(a, thumb); if (box.isConnected) render(); });
+        generateThumbnail(file, thumb => { if (box.isConnected && saved.attachments.includes(a)) {previews.set(a, thumb); render();} });
       }
       upload(a);
     }
@@ -414,8 +416,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
     saved.attachments.push(a);
     files.set(a, file);
     generateThumbnail(file, thumb => {
-      previews.set(a, thumb);
-      if (box.isConnected) render();
+      if (box.isConnected && saved.attachments.includes(a)) {previews.set(a, thumb); render();}
     });
     upload(a);
     persist();
@@ -455,6 +456,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
     }
   };
   const onDragOver = e => {
+    if (nativeFiles) return; // native handle/spool owns OS drag-and-drop
     if (e.dataTransfer?.types?.includes("Files")) {
       e.preventDefault();
       e.dataTransfer.dropEffect = "copy";
@@ -471,7 +473,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
   const onDrop = e => {
     box.classList.remove("drag-over");
     if (text && text.classList) text.classList.remove("drag-over");
-    if (!e.dataTransfer?.files?.length) return;
+    if (nativeFiles || !e.dataTransfer?.files?.length) return;
     e.preventDefault();
     if (!supported || !may("manage") || (nativeFiles && !nativeUploadAllowed) || !state.online || !state.viewReady) {
       fill(status, errorBox(new Error(t("offline_actions_paused"))));
@@ -548,6 +550,7 @@ function attachmentDraft(scope, text, initial = [], roles = false, onChange = ()
     }
     const intent = saved.submission;
     try {
+      persist(true); // freeze request/key on disk before any central submission
       const op = intent.operation_id ? (await api("GET", `/operations/${intent.operation_id}`)).operation
         : (await api("POST", "/operations?wait=3", intent.request, intent.key)).operation;
       guard(true); intent.operation_id = op.operation_id; persist(); settleSubmission(op); return op;
@@ -1455,7 +1458,7 @@ function checkpointPanel(host, sid) {
     draft.bindFields({agent});
     let expectedHead = null;
     const go = h("button", { class: "primary", onclick: async () => {
-      const instructions = instr.value.trim() || (draft.refs().length ? t("dispatch_inspect_images") : "");
+      const instructions = instr.value.trim() ? instr.value : (draft.refs().length ? t("dispatch_inspect_images") : "");
       if (!instructions) return;
       go.disabled = true;
       try {
@@ -3077,7 +3080,7 @@ function continueFrom(w, checkpointId, notice, children = []) {
   draft.bindFields({agent});
   let expectedHead = null;
   const go = h("button", { class: "primary", onclick: async () => {
-    const instructions = instr.value.trim() || (draft.refs().length ? t("dispatch_inspect_images") : "");
+    const instructions = instr.value.trim() ? instr.value : (draft.refs().length ? t("dispatch_inspect_images") : "");
     if (!instructions) return;
     go.disabled = true;
     let op;
