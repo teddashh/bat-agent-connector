@@ -349,6 +349,10 @@ async def test_profile_import_respects_encryption_and_never_returns_credentials(
     assert result["status"] == "succeeded"
     assert daemon.fleet.config.host("fixture").token_ref == "bat-profile:remote-1"
 
+    # A damaged external store must leave setup usable for credential replacement.
+    (directory / "remote-tokens.enc.json").write_text('["damaged"]')
+    assert setup.state(daemon, principal)["hosts"][0]["token_available"] is False
+
 
 async def test_verification_http_admission_refusal_preserves_configuration_without_operation(installed):
     daemon, principal, _ = installed
@@ -360,3 +364,21 @@ async def test_verification_http_admission_refusal_preserves_configuration_witho
     assert response["error"]["code"] == "INVALID_PARAMS"
     assert not daemon.ops.list(action="setup.verification")["operations"]
     assert setup.state(daemon, principal)["revision"] == before["revision"]
+
+
+async def test_profile_discovery_skips_damaged_fingerprints(installed, tmp_path, monkeypatch):
+    daemon, principal, _ = installed
+    directory = tmp_path / "bat-profiles"
+    directory.mkdir()
+    profiles = [{"id": "broken", "name": "Broken", "type": "remote", "remoteHost": "127.0.0.1",
+                 "remotePort": 9876, "remoteFingerprint": None},
+                {"id": "valid", "name": "Valid", "type": "remote", "remoteHost": "127.0.0.1",
+                 "remotePort": 9876, "remoteFingerprint": "AA" * 32}]
+    (directory / "index.json").write_text(json.dumps({"profiles": profiles}))
+    (directory / "remote-tokens.enc.json").write_text(json.dumps({"enc": False, "data": ["damaged"]}))
+    monkeypatch.setattr(setup, "_profile_directory", lambda _: directory)
+    state = setup.state(daemon, principal)
+    assert [profile["id"] for profile in state["profiles"]] == ["valid"]
+    assert state["profiles"][0]["token_available"] is False
+    assert state["profiles"][0]["token_state"] == "unavailable"
+
