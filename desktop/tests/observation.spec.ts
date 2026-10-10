@@ -253,7 +253,7 @@ for (const native of [false, true]) {
       return {status: 200, data};
     });
     await page.goto("/dashboard/#/sessions");
-    await page.getByRole("button", {name: "Load more"}).click();
+    await page.locator("#main").getByRole("button", {name: "Load more"}).click();
     await expect(page.getByRole("link", {name: "Second session", exact: true})).toBeVisible();
     changed = true;
     await expect(page.getByRole("link", {name: "Updated second session", exact: true})).toBeVisible();
@@ -271,13 +271,14 @@ for (const locale of ["en-US", "zh-TW"]) for (const width of [390, 768, 1440]) {
     const fixture = historyFixture(); await mount(page, false, fixture.read);
     const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
     await page.goto("/dashboard/#/session/demo/session-1");
+    await page.locator(".workspace-evidence > summary").click();
     await page.locator(".observation-evidence > summary").click();
     await page.locator('[data-observation="history"] > summary').click();
     await expect(page.locator('[data-history-seq="10"]')).toBeVisible();
     await page.evaluate(() => scrollTo(0, 0));
     await page.screenshot({path: `test-results/observation-${locale}-${width}.png`, fullPage: true});
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.getByRole("link", {name: "demo", exact: true}).click();
+    await page.locator(".workspace-session-heading").getByRole("link", {name: "demo", exact: true}).click();
     await expect(page.getByText("profile-fixture", {exact: true})).toBeVisible();
     await expect(page.getByText("not_enumerable", {exact: true})).toBeVisible();
     expect(errors).toEqual([]); await context.close();

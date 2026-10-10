@@ -10,9 +10,11 @@ You continue coding in [Better Agent Terminal (BAT)](https://github.com/tony1223
 
 > **Product direction:** install the desktop package, let it prepare and run the background service, connect your BAT environment, then open the Dashboard with one click. **Current implementation:** the shared Dashboard and background central service exist, but automatic provisioning is still being built. Today's validation installers require a configured central service and API identity. [Installation status and trial paths →](docs/getting-started.md)
 
-![The shared Dashboard separates pending replies, completion review and operation problems.](site/images/attention-en.png)
+![Select work in the project tree and keep its conversation, reply controls and results together.](site/images/workspace-en.png)
 
-*Actual shared frontend with synthetic demonstration data, captured from the `15b2048` product baseline. This is an interface illustration, not a live-host acceptance result. [Screenshot provenance](site/images/README.md).*
+*Actual shared frontend with synthetic demonstration data, captured from the shared project workspace implementation (October 10, 2026). This is an interface illustration, not a live-host acceptance result. [Screenshot provenance](site/images/README.md).*
+
+Select a project or work item in the persistent left tree. The selected session opens its conversation, reply controls and linked results together. Global management views remain under **Tools**; **Connection** retains Windows Fleet and local startup controls.
 
 ## Explore
 
@@ -24,9 +26,9 @@ You continue coding in [Better Agent Terminal (BAT)](https://github.com/tony1223
 | --- | --- | --- |
 | What connects and opens at Windows sign-in? | **Connection settings / Fleet** | Independent background connections, BAT profiles and Dashboard choices; tunnel / BAT / central readiness, Tailscale sign-in, active backend and launch / migration receipts. |
 | What needs me right now? | **Pending** | Separate replies / permissions, completion review, operation problems and host connections. Idle does not mean the task is complete. |
-| What belongs to this project? | **Projects** | Work items, original instructions, acceptance criteria, repository bindings and dispatched work. Hierarchy, pins and archive keep ongoing projects organized. |
+| What belongs to this project? | **Left project tree** | Work items, original instructions, acceptance criteria, repository bindings and dispatched work. Hierarchy, pins and archive keep ongoing projects organized. |
 | Can I start the next piece of work? | **Project dispatch / Sessions** | Select a configured repository, host and workspace; preview a fixed commit; add instructions, model and attachments; create a managed session. |
-| What is an agent doing? | **Sessions** | Recent conversation, readable code and tables, pending questions, resource ownership and freshness. Authorized controls use central operations. |
+| What is an agent doing? | **Selected work / conversation** | Recent conversation, readable code and tables, pending questions, resource ownership and freshness. Authorized controls use central operations. |
 | What did it produce? | **Artifacts / work details** | Immutable revisions, digests, capture, review and links to the originating operation, execution or task. Accepting an artifact does not merge code or complete a task. |
 | How do results reach the same PR? | **Delivery** | Preview fixed results from managed work, checkpoints or branches, then integrate them in a separate workspace. Paste a GitHub PR URL to load its configured repository. |
 | Has it actually shipped? | **Delivery** | Separate integration, merge and deployment receipts. Configured recipes check the deployed source version and runtime evidence. |

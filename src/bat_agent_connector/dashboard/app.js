@@ -19,6 +19,314 @@ var __exportAll = (all, no_symbols) => {
 	return target;
 };
 //#endregion
+//#region src/state/sessions.js
+var text$3 = (value) => typeof value === "string" ? value : "";
+function workspaceGroup(session) {
+	const host = text$3(session.host), id = text$3(session.workspace_id), name = text$3(session.workspace);
+	return {
+		key: JSON.stringify([
+			host,
+			id ? "id" : name ? "label" : "unknown",
+			id || name
+		]),
+		host,
+		id,
+		name
+	};
+}
+function groupedSessions(sessions) {
+	const groups = new Map();
+	for (const session of sessions) {
+		const group = workspaceGroup(session);
+		if (!groups.has(group.key)) groups.set(group.key, {
+			...group,
+			sessions: []
+		});
+		groups.get(group.key).sessions.push(session);
+	}
+	return [...groups.values()].sort((a, b) => a.host.localeCompare(b.host) || (a.name || a.id).localeCompare(b.name || b.id) || a.key.localeCompare(b.key));
+}
+function matchesSession(session, query) {
+	const haystack = [
+		session.title,
+		session.session_id,
+		session.host,
+		session.workspace,
+		session.workspace_id,
+		session.agent_kind,
+		session.model,
+		session.worktree_branch,
+		...Array.isArray(session.connector_metadata?.labels) ? session.connector_metadata.labels : []
+	].map(text$3).join("\n").toLocaleLowerCase();
+	return query.trim().toLocaleLowerCase().split(/\s+/).every((word) => haystack.includes(word));
+}
+function runtimeStale(session) {
+	return Boolean(session.stale || session.fields_stale || session.state?.evidence?.activity?.stale);
+}
+function sessionActivity(session) {
+	if (session.pending) return {
+		key: "pending_" + session.pending.kind,
+		tone: "stale"
+	};
+	if (session.state?.lifecycle === "ended") return {
+		key: "obs_value_ended",
+		tone: ""
+	};
+	if (session.gone_at || ["gone", "missing"].includes(session.state?.enumeration)) return {
+		key: "sessions_not_seen",
+		tone: "stale"
+	};
+	if (runtimeStale(session)) return {
+		key: "sessions_stale",
+		tone: "stale"
+	};
+	if (session.streaming === true) return {
+		key: "obs_value_streaming",
+		tone: "info"
+	};
+	if (session.streaming === false) return {
+		key: "obs_value_not_streaming",
+		tone: ""
+	};
+	return {
+		key: "sessions_activity_unknown",
+		tone: ""
+	};
+}
+//#endregion
+//#region src/workspace-nav.js
+function workspaceNavigation({ h, t, api, guard, onEvents, namespace, errorBox }) {
+	const key = `batc.tree.${namespace}`;
+	let saved = [], hasPreference = false;
+	try {
+		const raw = sessionStorage.getItem(key);
+		saved = JSON.parse(raw || "[]");
+		hasPreference = raw !== null;
+	} catch {}
+	const expanded = new Set(Array.isArray(saved) ? saved : []), projects = new Map();
+	let roots = [], disposed = false, serial = Promise.resolve(), selected = location.hash;
+	const status = h("div", {
+		class: "workspace-tree-status",
+		role: "status"
+	});
+	const tree = h("div", { class: "workspace-tree" });
+	let sessionPages = 1, sessionsLoaded = false;
+	const sessionRows = h("div", { class: "workspace-tree" });
+	const more = h("button", {
+		class: "mini",
+		hidden: true,
+		onclick: () => {
+			sessionPages++;
+			refresh().catch(() => {});
+		}
+	}, t("load_more"));
+	const sessionTree = h("details", { class: "workspace-session-tree" }, h("summary", {}, t("nav_sessions")), sessionRows, more);
+	const search = h("input", {
+		type: "search",
+		"aria-label": t("workspace_search"),
+		placeholder: t("workspace_search")
+	});
+	const box = h("aside", {
+		class: "workspace-nav",
+		"aria-label": t("workspace_navigation")
+	}, h("div", { class: "workspace-nav-heading" }, h("strong", {}, t("nav_projects")), h("a", {
+		href: "#/projects",
+		title: t("workspace_manage"),
+		"aria-label": t("workspace_manage")
+	}, "+")), search, status, h("div", { class: "workspace-tree-scroll" }, tree, sessionTree), h("div", { class: "workspace-nav-footer" }, h("a", { href: "#/sessions" }, t("workspace_all_sessions")), h("a", { href: "#/projects" }, t("workspace_manage"))));
+	const alive = () => {
+		guard();
+		if (disposed) throw new Error("Navigation disposed");
+	};
+	const persist = () => {
+		try {
+			sessionStorage.setItem(key, JSON.stringify([...expanded]));
+		} catch {}
+	};
+	const link = (href, label, state = null) => h("a", {
+		href,
+		class: "workspace-tree-link",
+		"data-tree-key": href,
+		"aria-current": selected === href ? "page" : null
+	}, h("span", {
+		class: `workspace-dot ${state?.tone || ""}`,
+		"aria-hidden": "true"
+	}), h("span", { class: "workspace-tree-label" }, label), state ? h("span", { class: "workspace-tree-state" }, t(state.key)) : null);
+	const workLink = (pid, item) => link(`#/work/${[
+		pid,
+		item.kind,
+		item.id
+	].map(encodeURIComponent).join("/")}`, item.title || item.branch || item.action || item.id, sessionActivity(item.session || {}));
+	const render = () => {
+		if (disposed) return;
+		const focus = tree.contains(document.activeElement) ? document.activeElement?.dataset.treeKey : null;
+		const query = search.value.trim().toLocaleLowerCase();
+		const matches = (text) => !query || String(text || "").toLocaleLowerCase().includes(query);
+		const itemNodes = (items) => (items || []).flatMap((item) => {
+			const children = itemNodes(item.children);
+			if (!matches(item.title) && !children.length) return [];
+			return [h("li", {}, link(`#/item/${encodeURIComponent(item.work_item_id)}`, item.title, {
+				key: "wi_state_" + (item.completion?.display_state || item.state),
+				tone: item.completion?.pending ? "stale" : ""
+			}), children.length ? h("ul", {}, ...children) : null)];
+		});
+		const projectNodes = (items) => items.flatMap((project) => {
+			const id = project.project_id, data = projects.get(id), children = projectNodes(project.children || []);
+			const work = (data?.work || []).filter((item) => matches(item.title || item.branch || item.action || item.id));
+			const items = itemNodes(data?.work_items);
+			if (!matches(project.name) && !children.length && !work.length && !items.length) return [];
+			const open = expanded.has(id) || Boolean(query);
+			return [h("li", {}, h("div", { class: "workspace-project-row" }, h("button", {
+				class: "workspace-tree-toggle",
+				"data-tree-key": id,
+				"aria-label": t(open ? "workspace_collapse" : "workspace_expand", { name: project.name }),
+				"aria-expanded": String(open),
+				onclick: () => {
+					if (expanded.has(id)) expanded.delete(id);
+					else expanded.add(id);
+					persist();
+					render();
+					if (expanded.has(id) && !projects.has(id)) refresh().catch(() => {});
+				}
+			}, open ? "▾" : "▸"), link(`#/project/${encodeURIComponent(id)}`, project.name), project.counts?.pending ? h("span", { class: "workspace-tree-state" }, t("workspace_needs_you")) : null), h("ul", { hidden: !open }, ...children, ...items, ...work.map((item) => h("li", {}, workLink(id, item))), !data ? h("li", { class: "muted workspace-tree-empty" }, t("workspace_expand_load")) : !children.length && !items.length && !work.length ? h("li", { class: "muted workspace-tree-empty" }, t("workspace_no_work")) : null))];
+		});
+		const nodes = projectNodes(roots);
+		tree.replaceChildren(h("ul", {}, ...nodes));
+		if (!nodes.length) tree.append(h("p", { class: "muted" }, t(query ? "workspace_no_match" : "no_projects")));
+		if (focus) [...tree.querySelectorAll("[data-tree-key]")].find((node) => node.dataset.treeKey === focus)?.focus({ preventScroll: true });
+		filterSessions();
+	};
+	const filterSessions = () => {
+		const query = search.value.trim().toLocaleLowerCase();
+		for (const group of sessionRows.querySelectorAll(":scope > div")) {
+			for (const row of group.querySelectorAll("a")) row.hidden = Boolean(query) && !group.querySelector("p").textContent.toLocaleLowerCase().includes(query) && !row.textContent.toLocaleLowerCase().includes(query);
+			group.hidden = [...group.querySelectorAll("a")].every((row) => row.hidden);
+		}
+	};
+	const refresh = () => {
+		const run = serial.catch(() => {}).then(async () => {
+			alive();
+			try {
+				const data = await api("GET", "/projects");
+				alive();
+				roots = data.projects || [];
+				if (!roots.length) projects.clear();
+				if (!hasPreference && !expanded.size && roots.length) {
+					expanded.add(roots[0].project_id);
+					hasPreference = true;
+					persist();
+				}
+				const ids = new Set();
+				const walk = (list, ancestors = []) => {
+					for (const p of list) {
+						ids.add(p.project_id);
+						if (expanded.has(p.project_id)) ancestors.forEach((id) => expanded.add(id));
+						walk(p.children || [], [...ancestors, p.project_id]);
+					}
+				};
+				walk(roots);
+				for (const id of projects.keys()) if (!ids.has(id)) projects.delete(id);
+				for (const id of expanded) if (ids.has(id)) {
+					const detail = await api("GET", `/projects/${encodeURIComponent(id)}`);
+					alive();
+					projects.set(id, detail);
+				}
+				if (!roots.length && !sessionsLoaded && [
+					"#/home",
+					"#/sessions",
+					"#/",
+					""
+				].includes(selected)) sessionTree.open = true;
+				if (sessionTree.open) {
+					const rows = new Map(), cursors = new Set();
+					let cursor = null;
+					for (let page = 0; page < sessionPages; page++) {
+						const data = await api("GET", "/sessions?order=id&include_gone=true&limit=50" + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""));
+						alive();
+						for (const session of data.sessions || []) rows.set(JSON.stringify([session.host, session.session_id]), session);
+						cursor = data.next_cursor;
+						if (!cursor) break;
+						if (cursors.has(cursor)) throw new Error(t("attention_invalid"));
+						cursors.add(cursor);
+					}
+					const focused = sessionRows.contains(document.activeElement) ? document.activeElement.getAttribute("href") : null;
+					sessionRows.replaceChildren(...groupedSessions([...rows.values()]).map((group) => h("div", {}, h("p", { class: "muted workspace-session-group" }, group.host, " · ", group.name || group.id || t("obs_unknown")), ...group.sessions.map((session) => link(`#/session/${[session.host, session.session_id].map(encodeURIComponent).join("/")}`, session.title || session.session_id, sessionActivity(session))))), h("p", { class: "muted" }, t("attention_loaded", { count: rows.size })));
+					if (focused) [...sessionRows.querySelectorAll("a")].find((a) => a.getAttribute("href") === focused)?.focus({ preventScroll: true });
+					more.hidden = !cursor;
+					sessionsLoaded = true;
+					filterSessions();
+				}
+				status.replaceChildren();
+				render();
+			} catch (error) {
+				alive();
+				status.replaceChildren(errorBox(error), h("p", { class: "muted" }, t("workspace_stale")), h("button", {
+					class: "mini",
+					onclick: () => refresh().catch(() => {})
+				}, t("workspace_refresh")));
+				throw error;
+			}
+		});
+		serial = run;
+		return run;
+	};
+	search.addEventListener("input", render);
+	sessionTree.addEventListener("toggle", () => {
+		if (sessionTree.open && !sessionsLoaded) refresh().catch(() => {});
+	});
+	box.addEventListener("click", (event) => {
+		if (event.target.closest("a")) {
+			const mobileOpen = document.body.classList.contains("workspace-nav-open");
+			document.body.classList.remove("workspace-nav-open");
+			document.getElementById("workspace-menu")?.setAttribute("aria-expanded", "false");
+			if (mobileOpen) document.getElementById("main")?.focus({ preventScroll: true });
+		}
+	});
+	const escape = (event) => {
+		if (event.key === "Escape" && document.body.classList.contains("workspace-nav-open")) {
+			document.body.classList.remove("workspace-nav-open");
+			const menu = document.getElementById("workspace-menu");
+			menu?.setAttribute("aria-expanded", "false");
+			menu?.focus();
+		}
+	};
+	document.addEventListener("keydown", escape);
+	const off = onEvents((event) => [
+		"project",
+		"work_item",
+		"session",
+		"execution",
+		"task",
+		"operation",
+		"integration"
+	].includes(event.resource_type) ? refresh() : void 0);
+	refresh().catch(() => {});
+	return {
+		box,
+		select(hash) {
+			selected = hash;
+			const [type, pid] = hash.replace(/^#\//, "").split("/");
+			if ([
+				"project",
+				"dispatch",
+				"work"
+			].includes(type) && pid && !expanded.has(decodeURIComponent(pid))) {
+				expanded.add(decodeURIComponent(pid));
+				persist();
+				refresh().catch(() => {});
+			}
+			for (const node of box.querySelectorAll("a")) if (node.getAttribute("href") === hash) node.setAttribute("aria-current", "page");
+			else node.removeAttribute("aria-current");
+		},
+		dispose() {
+			disposed = true;
+			off();
+			document.removeEventListener("keydown", escape);
+			box.remove();
+		}
+	};
+}
+//#endregion
 //#region src/attention.js
 async function attentionView({ main, h, t, api, guard, caps, storageKey, route, onEvents, debounceRefresh, errorBox, sessionRow, workItemRow, opRow }) {
 	const unread = caps?.features?.work_item_reads?.version === 1;
@@ -844,6 +1152,24 @@ function conversationPanel({ h, t, when, guard }) {
 //#region src/i18n.js
 var STRINGS = {
 	"zh-TW": {
+		workspace_navigation: "專案與工作",
+		workspace_search: "搜尋已載入的專案與工作",
+		workspace_manage: "新增／管理專案",
+		workspace_all_sessions: "所有工作階段",
+		workspace_tools: "管理工具",
+		workspace_connection: "連線 / Fleet",
+		workspace_expand: "展開 {name}",
+		workspace_collapse: "收合 {name}",
+		workspace_needs_you: "待你處理",
+		workspace_expand_load: "展開以載入工作",
+		workspace_no_work: "尚未建立工作",
+		workspace_no_match: "已載入的工作沒有符合項目。",
+		workspace_stale: "工作樹尚未更新，保留上次讀取的資料。",
+		workspace_work_details: "工作與成果",
+		workspace_result: "成果與交付",
+		workspace_result_empty: "尚無明確關聯的成果。可從下方保留 checkpoint。",
+		workspace_work_missing: "目前專案資料中找不到這筆工作，請重新整理工作樹。",
+		workspace_refresh: "重新讀取工作樹",
 		connection_details: "連線詳細資訊與設定檔",
 		delivery_repository_input: "儲存庫或 GitHub PR 網址",
 		needs_manage_access: "目前帳號可以查看，但沒有編輯專案的權限。請向管理員取得具有專案管理權限的帳號，再到「連線」更換憑證。",
@@ -2050,6 +2376,24 @@ var STRINGS = {
 		integration_PUSH_UNPROVEN: "PR 分支在舊的 head，但組合後的 commit 已在 GitHub 上：之前的推送可能落地後被改回。不會再推一次；請看一下 PR，再取消並重新預覽。"
 	},
 	en: {
+		workspace_navigation: "Projects and work",
+		workspace_search: "Search loaded projects and work",
+		workspace_manage: "Add / manage projects",
+		workspace_all_sessions: "All sessions",
+		workspace_tools: "Tools",
+		workspace_connection: "Connection / Fleet",
+		workspace_expand: "Expand {name}",
+		workspace_collapse: "Collapse {name}",
+		workspace_needs_you: "Needs you",
+		workspace_expand_load: "Expand to load work",
+		workspace_no_work: "No work yet",
+		workspace_no_match: "No matching loaded work.",
+		workspace_stale: "The tree could not refresh. Last observed work is retained.",
+		workspace_work_details: "Work and results",
+		workspace_result: "Results and delivery",
+		workspace_result_empty: "No linked result yet. You can record a checkpoint below.",
+		workspace_work_missing: "This work is no longer in the current project response. Refresh the work tree.",
+		workspace_refresh: "Refresh work tree",
 		connection_details: "Connection details and configuration file",
 		delivery_repository_input: "Repository or GitHub PR URL",
 		needs_manage_access: "This account can view projects but cannot edit them. Ask your administrator for project management access, then replace your credential under Connection.",
@@ -4660,81 +5004,6 @@ async function mountUpdates(main, { h, t }) {
 	return () => {
 		disposed = true;
 		panel.remove();
-	};
-}
-//#endregion
-//#region src/state/sessions.js
-var text$3 = (value) => typeof value === "string" ? value : "";
-function workspaceGroup(session) {
-	const host = text$3(session.host), id = text$3(session.workspace_id), name = text$3(session.workspace);
-	return {
-		key: JSON.stringify([
-			host,
-			id ? "id" : name ? "label" : "unknown",
-			id || name
-		]),
-		host,
-		id,
-		name
-	};
-}
-function groupedSessions(sessions) {
-	const groups = new Map();
-	for (const session of sessions) {
-		const group = workspaceGroup(session);
-		if (!groups.has(group.key)) groups.set(group.key, {
-			...group,
-			sessions: []
-		});
-		groups.get(group.key).sessions.push(session);
-	}
-	return [...groups.values()].sort((a, b) => a.host.localeCompare(b.host) || (a.name || a.id).localeCompare(b.name || b.id) || a.key.localeCompare(b.key));
-}
-function matchesSession(session, query) {
-	const haystack = [
-		session.title,
-		session.session_id,
-		session.host,
-		session.workspace,
-		session.workspace_id,
-		session.agent_kind,
-		session.model,
-		session.worktree_branch,
-		...Array.isArray(session.connector_metadata?.labels) ? session.connector_metadata.labels : []
-	].map(text$3).join("\n").toLocaleLowerCase();
-	return query.trim().toLocaleLowerCase().split(/\s+/).every((word) => haystack.includes(word));
-}
-function runtimeStale(session) {
-	return Boolean(session.stale || session.fields_stale || session.state?.evidence?.activity?.stale);
-}
-function sessionActivity(session) {
-	if (session.pending) return {
-		key: "pending_" + session.pending.kind,
-		tone: "stale"
-	};
-	if (session.state?.lifecycle === "ended") return {
-		key: "obs_value_ended",
-		tone: ""
-	};
-	if (session.gone_at || ["gone", "missing"].includes(session.state?.enumeration)) return {
-		key: "sessions_not_seen",
-		tone: "stale"
-	};
-	if (runtimeStale(session)) return {
-		key: "sessions_stale",
-		tone: "stale"
-	};
-	if (session.streaming === true) return {
-		key: "obs_value_streaming",
-		tone: "info"
-	};
-	if (session.streaming === false) return {
-		key: "obs_value_not_streaming",
-		tone: ""
-	};
-	return {
-		key: "sessions_activity_unknown",
-		tone: ""
 	};
 }
 //#endregion
@@ -10135,14 +10404,19 @@ async function viewHostDiscovery(main, host) {
 		if (event.resource_type === "host" && event.resource_id === host) return reload();
 	});
 }
-async function viewSession(main, host, sid) {
+async function viewSession(main, host, sid, context = null) {
 	const connection = {
 		epoch: state.epoch,
 		namespace: state.namespace,
 		generation
 	};
 	const path = `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`;
-	const head = h("div", { class: "panel" });
+	const head = h("div", { class: "workspace-session-heading" });
+	const metadata = h("div", { class: "workspace-metadata" });
+	const result = h("section", {
+		class: "workspace-result",
+		"data-workspace-result": ""
+	});
 	const conversation = conversationPanel({
 		h,
 		t,
@@ -10223,8 +10497,8 @@ async function viewSession(main, host, sid) {
 	const composer = h("div", { hidden: true }, box, h("div", { class: "actions" }, send, stop, h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
 	const readonly = h("p", { class: "note" }, t("session_access_unknown"));
 	let capture, permissions, batHandoff;
-	const captureSlot = h("div"), permissionsSlot = h("div");
-	const controls = h("div", { class: "panel" }, pending, readonly, composer, permissionsSlot, captureSlot, status);
+	const captureSlot = h("div"), permissionsSlot = h("div"), batSlot = h("div");
+	const controls = h("div", { class: "panel workspace-composer" }, pending, readonly, composer, status);
 	const labels = sessionLabelsPanel({
 		h,
 		t,
@@ -10241,7 +10515,16 @@ async function viewSession(main, host, sid) {
 	});
 	const cps = checkpointPanel(host, sid);
 	const observations = observationPanels("session", `${host}/${sid}`, path);
-	main.append(head, labels.box, controls, cps.box, h("h2", {}, t("messages")), conversation.box, observations.box);
+	const inspector = h("details", {
+		class: "workspace-inspector",
+		open: true
+	}, h("summary", {}, t("workspace_work_details")), context?.itemBox, result, batSlot, h("details", { class: "workspace-evidence" }, h("summary", {}, t("sessions_details")), metadata), labels.box, permissionsSlot, captureSlot, cps.box, observations.box);
+	const lane = h("section", {
+		class: "workspace-conversation",
+		"aria-label": t("messages")
+	}, conversation.box, controls);
+	if (context?.picker) main.append(context.picker);
+	main.append(head, h("div", { class: "workspace-session" }, lane, inspector));
 	const renderPending = () => {
 		const pend = row.api_access === "managed" ? row.pending : null;
 		const current = identity(pend);
@@ -10346,7 +10629,15 @@ async function viewSession(main, host, sid) {
 			...data.started_from?.operation_id ? [`operation:${data.started_from.operation_id}`] : []
 		]);
 		if (first) queue.checked = Boolean(row.streaming);
-		head.replaceChildren(h("h1", {}, row.title || sid), h("div", { class: "actions" }, ...sessionBadges(row)), h("dl", { class: "kv" }, h("dt", {}, t("host")), h("dd", {}, h("a", { href: `#/host/${encodeURIComponent(host)}` }, row.host)), h("dt", {}, t("workspace")), h("dd", {}, row.workspace || ""), h("dt", {}, t("sessions_label")), h("dd", {}, h("code", {}, row.session_id)), h("dt", {}, t("agent")), h("dd", {}, [row.agent_kind, row.model].filter(Boolean).join(" · ")), h("dt", {}, t("session_origin")), h("dd", {}, t("provenance_" + ([
+		const activity = sessionActivity(row);
+		head.replaceChildren(h("div", {}, context?.project ? h("a", {
+			class: "muted",
+			href: `#/project/${encodeURIComponent(context.project.project_id)}`
+		}, context.project.name) : null, h("h1", {}, row.title || sid)), h("div", { class: "workspace-session-meta" }, chip(t(activity.key), activity.tone), h("span", { class: "muted" }, [row.agent_kind, row.model].filter(Boolean).join(" · ")), h("a", {
+			class: "muted",
+			href: `#/host/${encodeURIComponent(host)}`
+		}, row.host), chip(t(row.api_access === "managed" ? "managed" : "read_only"), row.api_access === "managed" ? "managed" : "readonly")));
+		metadata.replaceChildren(h("div", { class: "actions" }, ...sessionBadges(row)), h("dl", { class: "kv" }, h("dt", {}, t("host")), h("dd", {}, h("a", { href: `#/host/${encodeURIComponent(host)}` }, row.host)), h("dt", {}, t("workspace")), h("dd", {}, row.workspace || ""), h("dt", {}, t("sessions_label")), h("dd", {}, h("code", {}, row.session_id)), h("dt", {}, t("agent")), h("dd", {}, [row.agent_kind, row.model].filter(Boolean).join(" · ")), h("dt", {}, t("session_origin")), h("dd", {}, t("provenance_" + ([
 			"manual",
 			"connector_managed",
 			"unknown"
@@ -10358,21 +10649,21 @@ async function viewSession(main, host, sid) {
 			session: () => row,
 			storageKey: `batc.session-bat.${connection.namespace}.${JSON.stringify([host, sid])}`
 		});
-		head.append(batHandoff.box);
+		batSlot.append(batHandoff.box);
 		batHandoff.update();
 		if (data.started_from) {
 			const from = data.started_from;
-			head.append(h("p", { class: "note" }, t("started_from", { commit: from.commit_sha.slice(0, 12) }), " ", h("a", { href: `#/session/${encodeURIComponent(from.source_host)}/${encodeURIComponent(from.source_session_id)}` }, t("source_session")), " · ", h("a", { href: `#/op/${from.operation_id}` }, from.operation_id)));
+			metadata.append(h("p", { class: "note" }, t("started_from", { commit: from.commit_sha.slice(0, 12) }), " ", h("a", { href: `#/session/${encodeURIComponent(from.source_host)}/${encodeURIComponent(from.source_session_id)}` }, t("source_session")), " · ", h("a", { href: `#/op/${from.operation_id}` }, from.operation_id)));
 		}
-		if (data.work_items?.length) head.append(linkedItems(data.work_items));
-		if (data.discovery?.length) head.append(h("details", {}, h("summary", {}, t("obs_discovery")), discoveryEvidence(data.discovery)));
+		if (data.work_items?.length) metadata.append(linkedItems(data.work_items));
+		if (data.discovery?.length) metadata.append(h("details", {}, h("summary", {}, t("obs_discovery")), discoveryEvidence(data.discovery)));
 		const managed = row.api_access === "managed";
-		if (managed && row.provenance === "connector_managed" && state.caps?.artifacts?.capture?.managed_single_file) head.append(h("p", {}, h("a", { href: `#/artifact-review/session/${encodeURIComponent(host)}/${encodeURIComponent(sid)}` }, t("ar_open"))));
+		if (managed && row.provenance === "connector_managed" && state.caps?.artifacts?.capture?.managed_single_file) metadata.append(h("p", {}, h("a", { href: `#/artifact-review/session/${encodeURIComponent(host)}/${encodeURIComponent(sid)}` }, t("ar_open"))));
 		if (managed && row.provenance === "connector_managed") {
 			const links = [];
 			if (state.caps?.actions?.some((a) => a.action === "session.relay")) links.push(h("a", { href: `#/orchestrate/relay/${encodeURIComponent(host)}/${encodeURIComponent(sid)}` }, t("orch_relay")));
 			if (row.agent_kind === "claude" && !data.relations_summary?.length && state.caps?.actions?.some((a) => a.action === "session.failover")) links.push(h("a", { href: `#/orchestrate/failover/${encodeURIComponent(host)}/${encodeURIComponent(sid)}` }, t("orch_failover")));
-			if (links.length) head.append(h("div", { class: "actions" }, ...links));
+			if (links.length) metadata.append(h("div", { class: "actions" }, ...links));
 		}
 		if (managed && row.provenance === "connector_managed" && !permissions) {
 			permissions = permissionsPanel({
@@ -10412,6 +10703,18 @@ async function viewSession(main, host, sid) {
 		const data = await api("GET", path);
 		assertView(connection);
 		applyObservation(data);
+		let work = [], repositories = [];
+		if (context?.project) {
+			const project = await api("GET", `/projects/${encodeURIComponent(context.project.project_id)}`);
+			assertView(connection);
+			work = (project.work || []).filter((item) => item.host === host && item.session_id === sid);
+			repositories = project.project?.repositories || [];
+		} else if (row.worktree_id && state.caps?.features?.execution_delivery?.version === 1) {
+			const detail = await api("GET", `/worktrees/${encodeURIComponent(row.worktree_id)}`);
+			assertView(connection);
+			work = (detail.worktree?.work || []).filter((item) => item.host === host && item.session_id === sid);
+		}
+		fill(result, h("h2", {}, t("workspace_result")), ...work.map((item) => deliveryWork(item, repositories, true)), !work.length ? h("p", { class: "muted" }, t("workspace_result_empty")) : null, data.work_items?.length ? linkedItems(data.work_items) : null, !work.some((item) => item.worktree_id === row.worktree_id) && row.worktree_id ? h("p", {}, observationLink("worktree", row.worktree_id)) : null);
 	};
 	const loadMessages = async () => {
 		const read = await api("GET", `${path}/messages?last_n=30`);
@@ -10460,7 +10763,16 @@ async function viewSession(main, host, sid) {
 	const off = onEvents((ev) => {
 		observations.changed(ev);
 		return settleRefreshes([
-			observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "work_item" ? reload() : Promise.resolve(),
+			observationAffected("session", `${host}/${sid}`, ev) || [
+				"work_item",
+				"integration",
+				"worktree"
+			].includes(ev.resource_type) || context?.project && [
+				"project",
+				"operation",
+				"task",
+				"execution"
+			].includes(ev.resource_type) ? reload() : Promise.resolve(),
 			ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve(),
 			ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve(),
 			observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation" ? labels.refresh(true) : Promise.resolve()
@@ -10786,13 +11098,13 @@ async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceReposi
 		"deployment_environment"
 	]);
 }
-function deliveryWork(item, repositories = []) {
+function deliveryWork(item, repositories = [], compact = false) {
 	const activity = sessionActivity(item.session || {});
 	const repo = item.repository || (repositories.length === 1 ? repositories[0] : "");
 	const links = [];
 	if (item.operation_id) links.push(h("a", { href: `#/op/${encodeURIComponent(item.operation_id)}` }, t("permissions_details")));
 	if (item.task_id) links.push(observationLink("execution", item.task_id));
-	if (item.host && item.session_id) links.push(observationLink("session", `${item.host}/${item.session_id}`));
+	if (!compact && item.host && item.session_id) links.push(observationLink("session", `${item.host}/${item.session_id}`));
 	if (item.worktree_id) links.push(observationLink("worktree", item.worktree_id));
 	if (item.eligible && state.caps?.features?.execution_delivery?.version === 1) links.push(h("a", { href: `#/delivery/${[
 		item.host,
@@ -10803,7 +11115,7 @@ function deliveryWork(item, repositories = []) {
 	return h("div", {
 		class: "row",
 		"data-project-work": item.id
-	}, h("div", { class: "grow" }, h("strong", {}, item.title || item.branch || item.action || item.id), " ", chip(t(activity.key), activity.tone), h("p", { class: "muted" }, item.host || "?", item.actor ? ` · ${item.actor}` : "", " · ", h("code", {}, item.branch || item.id)), h("p", { class: "muted" }, t("delivery_dispatch_state"), " ", t(item.operation_id && item.status === "succeeded" ? "delivery_dispatch_accepted" : (item.operation_id ? "op_" : "task_state_") + item.status), " · ", t("delivery_result_unverified")), item.unavailable ? h("p", { class: "muted" }, t("delivery_source_unavailable"), " ", h("code", {}, item.unavailable.code)) : null, h("div", { class: "actions" }, ...links, ...(item.delivered_to || []).map((receipt) => h("a", {
+	}, h("div", { class: "grow" }, compact ? null : h("strong", {}, item.title || item.branch || item.action || item.id), compact ? null : [" ", chip(t(activity.key), activity.tone)], h("p", { class: "muted" }, item.host || "?", item.actor ? ` · ${item.actor}` : "", " · ", h("code", {}, item.branch || item.id)), h("p", { class: "muted" }, t("delivery_dispatch_state"), " ", t(item.operation_id && item.status === "succeeded" ? "delivery_dispatch_accepted" : (item.operation_id ? "op_" : "task_state_") + item.status), " · ", t("delivery_result_unverified")), item.unavailable ? h("p", { class: "muted" }, t("delivery_source_unavailable"), " ", h("code", {}, item.unavailable.code)) : null, h("div", { class: "actions" }, ...links, ...(item.delivered_to || []).map((receipt) => h("a", {
 		href: `https://github.com/${receipt.repository}/pull/${receipt.pull_number}`,
 		target: "_blank",
 		rel: "noopener",
@@ -13356,6 +13668,83 @@ async function viewArtifactReview(main, kind, first, second) {
 		storageKey: `batc.artifact-review.${connection.namespace}.${JSON.stringify(context)}`
 	});
 }
+async function viewLinkedWorkItem(main, wid, host, sid) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	let data;
+	try {
+		data = await api("GET", `/work-items/${encodeURIComponent(wid)}`);
+		assertView(connection);
+	} catch (error) {
+		if (!["VIEW_CHANGED", "CONNECTION_CHANGED"].includes(error.code)) main.append(errorBox(error));
+		return;
+	}
+	const sessions = new Map();
+	for (const link of data.links || []) {
+		const target = link.target;
+		if (!target?.found) continue;
+		const session = link.kind === "session" ? target : link.kind === "operation" ? target.session : null;
+		if (session?.host && session?.session_id) sessions.set(JSON.stringify([session.host, session.session_id]), session);
+	}
+	if (!sessions.size) return viewWorkItem(main, wid);
+	const selected = host && sid ? sessions.get(JSON.stringify([host, sid])) : sessions.values().next().value;
+	if (!selected) {
+		main.append(errorBox(new Error(t("workspace_work_missing"))));
+		return;
+	}
+	main.classList.add("session-view");
+	const itemBox = h("section", { class: "workspace-work-item" });
+	const picker = sessions.size > 1 ? h("label", { class: "workspace-session-picker" }, t("nav_sessions"), " ", h("select", {
+		"aria-label": t("nav_sessions"),
+		onchange: (event) => {
+			const [nextHost, nextSid] = JSON.parse(event.target.value);
+			location.hash = `#/item/${[
+				wid,
+				nextHost,
+				nextSid
+			].map(encodeURIComponent).join("/")}`;
+		}
+	}, ...[...sessions].map(([key, session]) => h("option", {
+		value: key,
+		selected: session === selected
+	}, `${session.title || session.session_id} · ${session.host}`)))) : null;
+	const offSession = await viewSession(main, selected.host, selected.session_id, {
+		project: data.project,
+		itemBox,
+		picker
+	});
+	try {
+		assertView(connection);
+		const offItem = await viewWorkItem(itemBox, wid);
+		return () => {
+			offSession?.();
+			offItem?.();
+		};
+	} catch (error) {
+		offSession?.();
+		if (!["VIEW_CHANGED", "CONNECTION_CHANGED"].includes(error.code)) throw error;
+	}
+}
+async function viewProjectWork(main, pid, kind, id) {
+	const connection = {
+		epoch: state.epoch,
+		namespace: state.namespace,
+		generation
+	};
+	try {
+		const data = await api("GET", `/projects/${encodeURIComponent(pid)}`);
+		assertView(connection);
+		const item = data.work?.find((item) => item.kind === kind && item.id === id);
+		if (!item) throw new Error(t("workspace_work_missing"));
+		if (item.host && item.session_id) return viewSession(main, item.host, item.session_id, { project: data.project });
+		main.append(h("h1", {}, item.title || item.action || item.id), deliveryWork(item, data.project.repositories));
+	} catch (error) {
+		if (!["VIEW_CHANGED", "CONNECTION_CHANGED"].includes(error.code)) main.append(errorBox(error));
+	}
+}
 var NAV = [
 	["home", "nav_home"],
 	["projects", "nav_projects"],
@@ -13366,6 +13755,59 @@ var NAV = [
 	["cleanup", "nav_cleanup"],
 	["settings", "nav_settings"]
 ];
+var workspaceNav = null;
+var workspaceIdentity = "";
+function mountWorkspace(name) {
+	const identity = state.token ? `${state.epoch}:${state.namespace}` : "";
+	if (workspaceIdentity !== identity) {
+		workspaceNav?.dispose();
+		workspaceNav = null;
+		workspaceIdentity = identity;
+		if (identity) {
+			const connection = {
+				epoch: state.epoch,
+				namespace: state.namespace
+			};
+			workspaceNav = workspaceNavigation({
+				h,
+				t,
+				api,
+				guard: () => assertConnection(connection),
+				onEvents,
+				namespace: state.namespace,
+				errorBox
+			});
+			document.getElementById("workspace").prepend(workspaceNav.box);
+		}
+	}
+	document.body.classList.toggle("has-workspace", Boolean(state.token));
+	document.getElementById("main").className = ["session", "work"].includes(name) ? "session-view" : "";
+	const menu = document.getElementById("workspace-menu");
+	menu.hidden = !state.token;
+	menu.textContent = t("workspace_navigation");
+	menu.onclick = () => {
+		const open = document.body.classList.toggle("workspace-nav-open");
+		menu.setAttribute("aria-expanded", String(open));
+	};
+	document.body.classList.remove("workspace-nav-open");
+	menu.setAttribute("aria-expanded", "false");
+	workspaceNav?.select(location.hash || "#/home");
+	const tools = h("details", { class: "workspace-tools" }, h("summary", {}, t("workspace_tools")), h("div", {}, ...NAV.filter(([key]) => ![
+		"home",
+		"settings",
+		"projects"
+	].includes(key)).map(([key, label]) => h("a", {
+		href: `#/${key}`,
+		"aria-current": name === key ? "page" : null
+	}, t(label)))));
+	document.getElementById("nav").replaceChildren(...state.token ? [h("a", {
+		href: "#/home",
+		class: name === "home" ? "on" : ""
+	}, t("nav_home")), tools] : [], h("a", {
+		href: "#/settings",
+		class: !state.token || name === "settings" ? "on" : ""
+	}, t("nav_settings")));
+}
 var teardown = null;
 var generation = 0;
 async function route() {
@@ -13377,11 +13819,7 @@ async function route() {
 	}
 	freshPage();
 	const [name, ...rest] = (location.hash.replace(/^#\//, "") || "home").split("/").map(decodeURIComponent);
-	const visibleNav = state.token ? NAV : NAV.filter(([key]) => key === "settings");
-	document.getElementById("nav").replaceChildren(...visibleNav.map(([k, label]) => h("a", {
-		href: `#/${k}`,
-		class: (state.token ? name === k : k === "settings") ? "on" : ""
-	}, t(label))));
+	mountWorkspace(name);
 	const main = document.getElementById("main");
 	main.replaceChildren();
 	if (!state.token && name !== "settings") {
@@ -13397,7 +13835,7 @@ async function route() {
 		home: viewHome,
 		projects: viewProjects,
 		project: viewProject,
-		item: viewWorkItem,
+		item: viewLinkedWorkItem,
 		sessions: viewSessions,
 		cleanup: viewCleanup,
 		approvals: viewApprovals,
@@ -13410,6 +13848,7 @@ async function route() {
 		op: viewOperation,
 		settings: viewSettings,
 		"artifact-review": viewArtifactReview,
+		work: viewProjectWork,
 		dispatch: viewProjectDispatch,
 		host: viewHostDiscovery,
 		task: viewTask,

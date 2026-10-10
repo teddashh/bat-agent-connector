@@ -1,3 +1,4 @@
+import {workspaceNavigation} from "./workspace-nav.js";
 import {attentionView} from "./attention.js";
 import {parsePullRequest} from "./delivery-input.js";
 import {sessionLabelsPanel, validLabels} from "./session-labels.js";
@@ -1013,10 +1014,12 @@ async function viewHostDiscovery(main, host) {
   return onEvents(event => {if (event.resource_type === "host" && event.resource_id === host) return reload();});
 }
 
-async function viewSession(main, host, sid) {
+async function viewSession(main, host, sid, context = null) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const path = `/sessions/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`;
-  const head = h("div", { class: "panel" });
+  const head = h("div", { class: "workspace-session-heading" });
+  const metadata = h("div", {class: "workspace-metadata"});
+  const result = h("section", {class: "workspace-result", "data-workspace-result": ""});
   const conversation = conversationPanel({h, t, when, guard: () => assertView(connection)});
   const pending = h("div", { "data-pending-controls": "" }), status = h("div", { class: "muted" });
   const scope = `send.${host}.${sid}`, draftKey = `batc.draft.${connection.namespace}.${scope}`;
@@ -1056,13 +1059,19 @@ async function viewSession(main, host, sid) {
     h("label", { class: "muted" }, queue, " ", t("queue_behind"))));
   const readonly = h("p", { class: "note" }, t("session_access_unknown"));
   let capture, permissions, batHandoff;
-  const captureSlot = h("div"), permissionsSlot = h("div");
-  const controls = h("div", { class: "panel" }, pending, readonly, composer, permissionsSlot, captureSlot, status);
+  const captureSlot = h("div"), permissionsSlot = h("div"), batSlot = h("div");
+  const controls = h("div", { class: "panel workspace-composer" }, pending, readonly, composer, status);
   const labels = sessionLabelsPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
     target: {host, session_id: sid}, storageKey: `batc.labels.${connection.namespace}.${JSON.stringify([host, sid])}`, errorBox, opStatus});
   const cps = checkpointPanel(host, sid);
   const observations = observationPanels("session", `${host}/${sid}`, path);
-  main.append(head, labels.box, controls, cps.box, h("h2", {}, t("messages")), conversation.box, observations.box);
+  const inspector = h("details", {class: "workspace-inspector", open: true},
+    h("summary", {}, t("workspace_work_details")), context?.itemBox, result, batSlot,
+    h("details", {class: "workspace-evidence"}, h("summary", {}, t("sessions_details")), metadata),
+    labels.box, permissionsSlot, captureSlot, cps.box, observations.box);
+  const lane = h("section", {class: "workspace-conversation", "aria-label": t("messages")}, conversation.box, controls);
+  if (context?.picker) main.append(context.picker);
+  main.append(head, h("div", {class: "workspace-session"}, lane, inspector));
   const renderPending = () => {
     const pend = row.api_access === "managed" ? row.pending : null;
     const current = identity(pend);
@@ -1124,7 +1133,13 @@ async function viewSession(main, host, sid) {
       ...(data.relations_summary || []).flatMap(relation => [`execution:${relation.execution_id}`, `task:${relation.execution_id}`]),
       ...(data.started_from?.operation_id ? [`operation:${data.started_from.operation_id}`] : [])]);
     if (first) queue.checked = Boolean(row.streaming);
-    head.replaceChildren(h("h1", {}, row.title || sid), h("div", { class: "actions" }, ...sessionBadges(row)),
+    const activity = sessionActivity(row);
+    head.replaceChildren(h("div", {}, context?.project ? h("a", {class: "muted", href: `#/project/${encodeURIComponent(context.project.project_id)}`}, context.project.name) : null,
+      h("h1", {}, row.title || sid)), h("div", {class: "workspace-session-meta"},
+        chip(t(activity.key), activity.tone), h("span", {class: "muted"}, [row.agent_kind, row.model].filter(Boolean).join(" · ")),
+        h("a", {class: "muted", href: `#/host/${encodeURIComponent(host)}`}, row.host),
+        chip(t(row.api_access === "managed" ? "managed" : "read_only"), row.api_access === "managed" ? "managed" : "readonly")));
+    metadata.replaceChildren(h("div", {class: "actions"}, ...sessionBadges(row)),
       h("dl", { class: "kv" },
         h("dt", {}, t("host")), h("dd", {}, h("a", {href: `#/host/${encodeURIComponent(host)}`}, row.host)), h("dt", {}, t("workspace")), h("dd", {}, row.workspace || ""),
         h("dt", {}, t("sessions_label")), h("dd", {}, h("code", {}, row.session_id)),
@@ -1133,24 +1148,24 @@ async function viewSession(main, host, sid) {
         h("dt", {}, t("observed")), h("dd", {}, observationTime(row.observed_at))), observationState(row), confinementDetails(row));
     if (!batHandoff) batHandoff = sessionBatPanel({h, t, guard: () => assertView(connection), session: () => row,
       storageKey: `batc.session-bat.${connection.namespace}.${JSON.stringify([host, sid])}`});
-    head.append(batHandoff.box); batHandoff.update();
+    batSlot.append(batHandoff.box); batHandoff.update();
     if (data.started_from) {
       const from = data.started_from;
-      head.append(h("p", { class: "note" }, t("started_from", { commit: from.commit_sha.slice(0, 12) }), " ",
+      metadata.append(h("p", { class: "note" }, t("started_from", { commit: from.commit_sha.slice(0, 12) }), " ",
         h("a", { href: `#/session/${encodeURIComponent(from.source_host)}/${encodeURIComponent(from.source_session_id)}` }, t("source_session")),
         " · ", h("a", { href: `#/op/${from.operation_id}` }, from.operation_id)));
     }
-    if (data.work_items?.length) head.append(linkedItems(data.work_items));
-    if (data.discovery?.length) head.append(h("details", {}, h("summary", {}, t("obs_discovery")), discoveryEvidence(data.discovery)));
+    if (data.work_items?.length) metadata.append(linkedItems(data.work_items));
+    if (data.discovery?.length) metadata.append(h("details", {}, h("summary", {}, t("obs_discovery")), discoveryEvidence(data.discovery)));
     const managed = row.api_access === "managed";
     if (managed && row.provenance === "connector_managed" && state.caps?.artifacts?.capture?.managed_single_file)
-      head.append(h("p", {}, h("a", {href: `#/artifact-review/session/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`}, t("ar_open"))));
+      metadata.append(h("p", {}, h("a", {href: `#/artifact-review/session/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`}, t("ar_open"))));
     if (managed && row.provenance === "connector_managed") {
       const links = [];
       if (state.caps?.actions?.some(a => a.action === "session.relay")) links.push(h("a", {href: `#/orchestrate/relay/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`}, t("orch_relay")));
       if (row.agent_kind === "claude" && !data.relations_summary?.length && state.caps?.actions?.some(a => a.action === "session.failover"))
         links.push(h("a", {href: `#/orchestrate/failover/${encodeURIComponent(host)}/${encodeURIComponent(sid)}`}, t("orch_failover")));
-      if (links.length) head.append(h("div", {class: "actions"}, ...links));
+      if (links.length) metadata.append(h("div", {class: "actions"}, ...links));
     }
     if (managed && row.provenance === "connector_managed" && !permissions) {
       permissions = permissionsPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
@@ -1170,6 +1185,20 @@ async function viewSession(main, host, sid) {
   };
   const loadObservation = async () => {
     const data = await api("GET", path); assertView(connection); applyObservation(data);
+    let work = [], repositories = [];
+    if (context?.project) {
+      const project = await api("GET", `/projects/${encodeURIComponent(context.project.project_id)}`); assertView(connection);
+      work = (project.work || []).filter(item => item.host === host && item.session_id === sid);
+      repositories = project.project?.repositories || [];
+    } else if (row.worktree_id && state.caps?.features?.execution_delivery?.version === 1) {
+      const detail = await api("GET", `/worktrees/${encodeURIComponent(row.worktree_id)}`); assertView(connection);
+      work = (detail.worktree?.work || []).filter(item => item.host === host && item.session_id === sid);
+    }
+    fill(result, h("h2", {}, t("workspace_result")),
+      ...work.map(item => deliveryWork(item, repositories, true)),
+      !work.length ? h("p", {class: "muted"}, t("workspace_result_empty")) : null,
+      data.work_items?.length ? linkedItems(data.work_items) : null,
+      !work.some(item => item.worktree_id === row.worktree_id) && row.worktree_id ? h("p", {}, observationLink("worktree", row.worktree_id)) : null);
   };
   const loadMessages = async () => {
     const read = await api("GET", `${path}/messages?last_n=30`); assertView(connection);
@@ -1200,7 +1229,8 @@ async function viewSession(main, host, sid) {
   }, 1000);
   const reload = debounceRefresh(() => refresh(true), 500), reloadCps = debounceRefresh(cps.load, 500);
   const off = onEvents(ev => { observations.changed(ev); return settleRefreshes([
-    (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "work_item") ? reload() : Promise.resolve(),
+    (observationAffected("session", `${host}/${sid}`, ev) || ["work_item", "integration", "worktree"].includes(ev.resource_type)
+      || context?.project && ["project", "operation", "task", "execution"].includes(ev.resource_type)) ? reload() : Promise.resolve(),
     ev.resource_type === "checkpoint" ? reloadCps() : Promise.resolve(),
     ev.resource_type === "operation" ? permissions?.refresh(true) : Promise.resolve(),
     (observationAffected("session", `${host}/${sid}`, ev) || ev.resource_type === "operation") ? labels.refresh(true) : Promise.resolve()
@@ -1420,18 +1450,18 @@ async function viewDelivery(main, sourceHost, sourceKind, sourceId, sourceReposi
   return liveReload(reload, ["operation", "integration", "deployment", "deployment_environment"]);
 }
 
-function deliveryWork(item, repositories = []) {
+function deliveryWork(item, repositories = [], compact = false) {
   const activity = sessionActivity(item.session || {});
   const repo = item.repository || (repositories.length === 1 ? repositories[0] : "");
   const links = [];
   if (item.operation_id) links.push(h("a", {href: `#/op/${encodeURIComponent(item.operation_id)}`}, t("permissions_details")));
   if (item.task_id) links.push(observationLink("execution", item.task_id));
-  if (item.host && item.session_id) links.push(observationLink("session", `${item.host}/${item.session_id}`));
+  if (!compact && item.host && item.session_id) links.push(observationLink("session", `${item.host}/${item.session_id}`));
   if (item.worktree_id) links.push(observationLink("worktree", item.worktree_id));
   if (item.eligible && state.caps?.features?.execution_delivery?.version === 1) links.push(h("a", {
     href: `#/delivery/${[item.host, item.kind, item.id, repo].map(encodeURIComponent).join("/")}`}, t("delivery_review_result")));
   return h("div", {class: "row", "data-project-work": item.id}, h("div", {class: "grow"},
-    h("strong", {}, item.title || item.branch || item.action || item.id), " ", chip(t(activity.key), activity.tone),
+    compact ? null : h("strong", {}, item.title || item.branch || item.action || item.id), compact ? null : [" ", chip(t(activity.key), activity.tone)],
     h("p", {class: "muted"}, item.host || "?", item.actor ? ` · ${item.actor}` : "", " · ", h("code", {}, item.branch || item.id)),
     h("p", {class: "muted"}, t("delivery_dispatch_state"), " ", t(item.operation_id && item.status === "succeeded"
       ? "delivery_dispatch_accepted" : (item.operation_id ? "op_" : "task_state_") + item.status),
@@ -3117,8 +3147,86 @@ async function viewArtifactReview(main, kind, first, second) {
     storageKey: `batc.artifact-review.${connection.namespace}.${JSON.stringify(context)}`});
 }
 
+async function viewLinkedWorkItem(main, wid, host, sid) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  let data;
+  try {data = await api("GET", `/work-items/${encodeURIComponent(wid)}`); assertView(connection);}
+  catch (error) {
+    if (!["VIEW_CHANGED", "CONNECTION_CHANGED"].includes(error.code)) main.append(errorBox(error));
+    return;
+  }
+  const sessions = new Map();
+  for (const link of data.links || []) {
+    const target = link.target;
+    if (!target?.found) continue;
+    const session = link.kind === "session" ? target : link.kind === "operation" ? target.session : null;
+    if (session?.host && session?.session_id) sessions.set(JSON.stringify([session.host, session.session_id]), session);
+  }
+  if (!sessions.size) return viewWorkItem(main, wid);
+  const selected = host && sid ? sessions.get(JSON.stringify([host, sid])) : sessions.values().next().value;
+  if (!selected) {main.append(errorBox(new Error(t("workspace_work_missing")))); return;}
+  main.classList.add("session-view");
+  const itemBox = h("section", {class: "workspace-work-item"});
+  const picker = sessions.size > 1 ? h("label", {class: "workspace-session-picker"}, t("nav_sessions"), " ",
+    h("select", {"aria-label": t("nav_sessions"), onchange: event => {
+      const [nextHost, nextSid] = JSON.parse(event.target.value);
+      location.hash = `#/item/${[wid, nextHost, nextSid].map(encodeURIComponent).join("/")}`;
+    }}, ...[...sessions].map(([key, session]) => h("option", {value: key, selected: session === selected},
+      `${session.title || session.session_id} · ${session.host}`)))) : null;
+  const offSession = await viewSession(main, selected.host, selected.session_id, {project: data.project, itemBox, picker});
+  try {
+    assertView(connection);
+    const offItem = await viewWorkItem(itemBox, wid);
+    return () => {offSession?.(); offItem?.();};
+  } catch (error) {
+    offSession?.();
+    if (!["VIEW_CHANGED", "CONNECTION_CHANGED"].includes(error.code)) throw error;
+  }
+}
+
+async function viewProjectWork(main, pid, kind, id) {
+  const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+  try {
+    const data = await api("GET", `/projects/${encodeURIComponent(pid)}`); assertView(connection);
+    const item = data.work?.find(item => item.kind === kind && item.id === id);
+    if (!item) throw new Error(t("workspace_work_missing"));
+    if (item.host && item.session_id) return viewSession(main, item.host, item.session_id, {project: data.project});
+    main.append(h("h1", {}, item.title || item.action || item.id), deliveryWork(item, data.project.repositories));
+  } catch (error) {
+    if (!["VIEW_CHANGED", "CONNECTION_CHANGED"].includes(error.code)) main.append(errorBox(error));
+  }
+}
+
 const NAV = [["home", "nav_home"], ["projects", "nav_projects"], ["sessions", "nav_sessions"], ["artifact-review", "ar_nav"], ["delivery", "nav_delivery"],
   ["operations", "nav_operations"], ["cleanup", "nav_cleanup"], ["settings", "nav_settings"]];
+let workspaceNav = null, workspaceIdentity = "";
+function mountWorkspace(name) {
+  const identity = state.token ? `${state.epoch}:${state.namespace}` : "";
+  if (workspaceIdentity !== identity) {
+    workspaceNav?.dispose(); workspaceNav = null; workspaceIdentity = identity;
+    if (identity) {
+      const connection = {epoch: state.epoch, namespace: state.namespace};
+      workspaceNav = workspaceNavigation({h, t, api, guard: () => assertConnection(connection), onEvents,
+        namespace: state.namespace, errorBox});
+      document.getElementById("workspace").prepend(workspaceNav.box);
+    }
+  }
+  document.body.classList.toggle("has-workspace", Boolean(state.token));
+  document.getElementById("main").className = ["session", "work"].includes(name) ? "session-view" : "";
+  const menu = document.getElementById("workspace-menu");
+  menu.hidden = !state.token; menu.textContent = t("workspace_navigation");
+  menu.onclick = () => {
+    const open = document.body.classList.toggle("workspace-nav-open"); menu.setAttribute("aria-expanded", String(open));
+  };
+  document.body.classList.remove("workspace-nav-open"); menu.setAttribute("aria-expanded", "false");
+  workspaceNav?.select(location.hash || "#/home");
+  const tools = h("details", {class: "workspace-tools"}, h("summary", {}, t("workspace_tools")),
+    h("div", {}, ...NAV.filter(([key]) => !["home", "settings", "projects"].includes(key)).map(([key, label]) =>
+      h("a", {href: `#/${key}`, "aria-current": name === key ? "page" : null}, t(label)))));
+  document.getElementById("nav").replaceChildren(...(state.token ? [
+    h("a", {href: "#/home", class: name === "home" ? "on" : ""}, t("nav_home")), tools] : []),
+    h("a", {href: "#/settings", class: !state.token || name === "settings" ? "on" : ""}, t("nav_settings")));
+}
 let teardown = null;
 let generation = 0;
 async function route() {
@@ -3127,9 +3235,7 @@ async function route() {
   if (teardown) { teardown(); teardown = null; }
   freshPage();
   const [name, ...rest] = (location.hash.replace(/^#\//, "") || "home").split("/").map(decodeURIComponent);
-  const visibleNav = state.token ? NAV : NAV.filter(([key]) => key === "settings");
-  document.getElementById("nav").replaceChildren(...visibleNav.map(([k, label]) =>
-    h("a", { href: `#/${k}`, class: (state.token ? name === k : k === "settings") ? "on" : "" }, t(label))));
+  mountWorkspace(name);
   const main = document.getElementById("main");
   main.replaceChildren();
   if (!state.token && name !== "settings") {
@@ -3138,9 +3244,9 @@ async function route() {
     teardown = off || null;
     return;
   }
-  const views = { home: viewHome, projects: viewProjects, project: viewProject, item: viewWorkItem, sessions: viewSessions,
+  const views = { home: viewHome, projects: viewProjects, project: viewProject, item: viewLinkedWorkItem, sessions: viewSessions,
     cleanup: viewCleanup, approvals: viewApprovals, delivery: viewDelivery, operations: viewOperations, session: viewSession, start: viewStart, published: viewPublished, orchestrate: viewOrchestration, op: viewOperation, settings: viewSettings,
-    "artifact-review": viewArtifactReview, dispatch: viewProjectDispatch,
+    "artifact-review": viewArtifactReview, work: viewProjectWork, dispatch: viewProjectDispatch,
     host: viewHostDiscovery, task: viewTask,
     worktree: (main, id) => viewObservedResource(main, "worktree", id) };
   const off = await (views[name] || viewHome)(main, ...rest);
