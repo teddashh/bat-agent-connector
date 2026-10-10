@@ -214,10 +214,9 @@ if hasattr(os, "register_at_fork"):
 
 @contextlib.contextmanager
 def _locked(path: Path):
-    if platform_files.WINDOWS:
-        platform_files.ensure_private_directory(path.parent)
-    else:
-        path.parent.mkdir(parents=True, exist_ok=True)
+    # A CLI registry write may be the first creator of central state. Its
+    # directory must satisfy the service lease contract on every platform.
+    platform_files.ensure_private_directory(path.parent)
     lock = path.with_suffix(".lock")
     fd = platform_files.open_private_file(lock, os.O_RDWR | os.O_CREAT)
     try:
