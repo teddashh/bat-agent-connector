@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {repairDispatchSeed, repairIntent, repairRequest} from '../src/repair-intent.js';
+import {repairDispatchSeed, repairIntent, repairRequest, validateRepairRecord} from '../src/repair-intent.js';
 
 const doc = {version: 1, project_id: 'prj_' + '1'.repeat(20), source: {kind: 'discovery', host: 'fixture', profile_id: 'default'},
   evidence_digest: 'a'.repeat(64), expected_project_version: 2};
@@ -51,4 +51,15 @@ test('failed intent persistence prevents any send', async () => {
     storageKey: 'principal-namespace:repair', guard() {}, actor: () => 'person', allowed: () => true, newKey: () => 'fixed'});
   await assert.rejects(intent.create(doc), /disk failed/);
   assert.equal(calls, 0);
+});
+
+
+test('a dispatched repair still requires the exact work, project and operation identity', () => {
+  const record = {version: 1, project_id: doc.project_id, work_item_id: 'wi_' + '2'.repeat(20), evidence_digest: doc.evidence_digest,
+    expected_work_item_fingerprint: 'b'.repeat(64), request: 'fixed server evidence', dispatchable: false,
+    dispatch_operation_id: 'op_' + '3'.repeat(32)};
+  assert.equal(validateRepairRecord(record, doc.project_id, record.work_item_id), record);
+  assert.throws(() => validateRepairRecord(record, 'prj_' + '4'.repeat(20), record.work_item_id), /identity/);
+  assert.throws(() => validateRepairRecord({...record, dispatch_operation_id: '../another-route'}, doc.project_id, record.work_item_id), /identity/);
+  assert.throws(() => validateRepairRecord({...record, work_item_id: 'wi_' + '4'.repeat(20)}, doc.project_id, record.work_item_id), /identity/);
 });

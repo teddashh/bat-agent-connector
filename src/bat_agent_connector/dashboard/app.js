@@ -3235,6 +3235,10 @@ function validRequest$4(request) {
 		return false;
 	}
 }
+function validateRepairRecord(record, projectId, workItemId) {
+	if (record?.version !== 1 || !pid(record.project_id) || !wid(record.work_item_id) || !digest$3(record.evidence_digest) || !digest$3(record.expected_work_item_fingerprint) || typeof record.request !== "string" || !record.request.trim() || record.request.length > 12e3 || typeof record.dispatchable !== "boolean" || record.dispatch_operation_id !== null && !oid$3(record.dispatch_operation_id) || projectId && record.project_id !== projectId || workItemId && record.work_item_id !== workItemId) throw new Error("Invalid repair work identity");
+	return record;
+}
 function repairDispatchSeed(record) {
 	if (record?.version !== 1 || !pid(record.project_id) || !wid(record.work_item_id) || !digest$3(record.evidence_digest) || !digest$3(record.expected_work_item_fingerprint) || typeof record.request !== "string" || !record.request.trim() || record.request.length > 12e3 || record.dispatchable !== true || record.dispatch_operation_id) throw new Error("Repair dispatch requires current server evidence");
 	return {
@@ -3323,7 +3327,7 @@ function repairPanel({ h, t, api, caps, guard, namespace, source, errorBox, opSt
 	const key = `batc.repair.${namespace}.${JSON.stringify(source)}`;
 	const status = h("div", { role: "status" }), evidence = h("div"), outcome = h("div");
 	const project = h("select", { "aria-label": t("repair_project") }, h("option", { value: "" }, t("repair_choose_project")));
-	const allowed = () => caps()?.actions?.some((action) => action.action === "repair.create" && action.allowed === true);
+	const allowed = () => ["observe", "manage"].every((scope) => caps()?.scopes?.includes(scope)) && caps()?.actions?.some((action) => action.action === "repair.create" && action.allowed === true);
 	const reload = h("button", {
 		class: "secondary",
 		type: "button",
@@ -3397,13 +3401,17 @@ function repairPanel({ h, t, api, caps, guard, namespace, source, errorBox, opSt
 		].includes(snapshot?.operation?.status);
 	}
 	function links(record) {
-		if (!record?.work_item_id || !/^wi_[0-9a-f]{20}$/.test(record.work_item_id)) return;
+		if (!record) return;
+		if (!/^wi_[0-9a-f]{20}$/.test(record.work_item_id) || record.project_id !== project.value || record.dispatch_operation_id != null && !/^op_[0-9a-f]{32}$/.test(record.dispatch_operation_id)) throw new Error(t("repair_unavailable"));
 		outcome.append(h("p", {}, h("a", { href: `#/item/${record.work_item_id}` }, t("repair_open_work")), " · ", record.dispatch_operation_id ? h("a", { href: `#/op/${record.dispatch_operation_id}` }, t("repair_open_dispatch")) : h("a", { href: `#/dispatch/${record.project_id || project.value}/${record.work_item_id}` }, t("repair_review_dispatch"))));
 	}
 	function show(operation) {
 		if (!alive()) return;
 		outcome.replaceChildren(opStatus(operation), " ", h("a", { href: `#/op/${operation.operation_id}` }, operation.operation_id));
-		if (operation.status === "succeeded") links(operation.result);
+		if (operation.status === "succeeded") {
+			if (operation.result?.evidence_digest !== controller.snapshot().intent.request.preconditions.expected_evidence_digest) throw new Error(t("repair_unavailable"));
+			links(operation.result);
+		}
 	}
 	async function read() {
 		if (!alive() || busy || !project.value) return;
@@ -3414,6 +3422,8 @@ function repairPanel({ h, t, api, caps, guard, namespace, source, errorBox, opSt
 		try {
 			const doc = await api("GET", `/projects/${pid}/repair-evidence?${new URLSearchParams(source)}`);
 			if (!alive() || mine !== serial || project.value !== pid) return;
+			const request = repairRequest(doc);
+			if (doc.project_id !== pid || JSON.stringify(Object.entries(request.params.source).sort()) !== JSON.stringify(Object.entries(source).sort())) throw new Error(t("repair_unavailable"));
 			document = doc;
 			evidence.replaceChildren(h("p", {}, t("repair_fixed_evidence"), " ", h("code", {}, doc.evidence_digest)), h("details", {}, h("summary", {}, t("repair_evidence_details")), h("pre", { class: "pre" }, JSON.stringify(doc.evidence, null, 2))));
 			if (!controller.snapshot().intent) {
@@ -3460,6 +3470,60 @@ function repairPanel({ h, t, api, caps, guard, namespace, source, errorBox, opSt
 		dispose() {
 			disposed = true;
 			serial++;
+		}
+	};
+}
+function repairWorkItemPanel({ h, t, api, guard, projectId, workItemId, originOperationId, errorBox }) {
+	const box = h("section", {
+		class: "panel",
+		"data-repair-work-item": "",
+		hidden: true
+	});
+	let disposed = false, repairOrigin = null, refreshQueue = Promise.resolve();
+	const alive = () => {
+		try {
+			guard();
+			return !disposed;
+		} catch {
+			return false;
+		}
+	};
+	function refresh() {
+		const work = refreshQueue.catch(() => {}).then(async () => {
+			if (!alive()) return;
+			try {
+				if (repairOrigin === null) {
+					const doc = await api("GET", `/operations/${originOperationId}`);
+					if (!alive()) return;
+					if (doc.operation?.operation_id !== originOperationId) throw new Error(t("repair_unavailable"));
+					repairOrigin = doc.operation.action === "repair.create" && doc.operation.target?.project_id === projectId;
+				}
+				if (!repairOrigin) return;
+				const record = await api("GET", `/work-items/${workItemId}/repair`);
+				if (!alive()) return;
+				validateRepairRecord(record, projectId, workItemId);
+				box.replaceChildren(h("h2", {}, t("repair_title")), h("p", {}, t("repair_fixed_evidence"), " ", h("code", {}, record.evidence_digest)), h("details", {}, h("summary", {}, t("repair_evidence_details")), h("pre", { class: "pre" }, JSON.stringify(record.evidence, null, 2))), record.dispatch_operation_id ? h("p", {}, t("repair_dispatched"), " ", h("a", { href: `#/op/${record.dispatch_operation_id}` }, t("repair_open_dispatch"))) : record.dispatchable ? h("a", { href: `#/dispatch/${projectId}/${workItemId}` }, t("repair_review_dispatch")) : h("p", { class: "muted" }, t("repair_unavailable")));
+				box.hidden = false;
+			} catch (error) {
+				if (!alive()) return;
+				if (error.status === 404 && error.code === "REPAIR_NOT_FOUND") {
+					repairOrigin = false;
+					box.replaceChildren();
+					box.hidden = true;
+				} else {
+					box.replaceChildren(errorBox(error));
+					box.hidden = false;
+				}
+			}
+		});
+		refreshQueue = work;
+		return work;
+	}
+	return {
+		box,
+		refresh,
+		dispose() {
+			disposed = true;
 		}
 	};
 }
@@ -3585,7 +3649,7 @@ function instructionReceiptPanel({ h, t, when, api, guard, host, sessionId, erro
 		"data-instruction-receipts": ""
 	}, h("summary", {}, t("instruction_receipts")), h("p", { class: "muted" }, t("instruction_receipts_note")), list, status, h("div", { class: "actions" }, reload, more));
 	const nodes = new Map();
-	let busy = false, disposed = false;
+	let disposed = false, refreshQueue = Promise.resolve();
 	const alive = () => {
 		if (disposed) return false;
 		try {
@@ -3595,9 +3659,13 @@ function instructionReceiptPanel({ h, t, when, api, guard, host, sessionId, erro
 			return false;
 		}
 	};
-	async function refresh(older = false) {
-		if (!alive() || busy) return;
-		busy = true;
+	function refresh(older = false) {
+		const work = refreshQueue.catch(() => {}).then(() => refreshNow(older));
+		refreshQueue = work;
+		return work;
+	}
+	async function refreshNow(older = false) {
+		if (!alive()) return;
 		reload.disabled = more.disabled = true;
 		try {
 			const value = await reader.load(older);
@@ -3643,7 +3711,6 @@ function instructionReceiptPanel({ h, t, when, api, guard, host, sessionId, erro
 		} catch (error) {
 			if (alive()) status.replaceChildren(h("p", { class: "muted" }, t("instruction_stale")), errorBox(error));
 		} finally {
-			busy = false;
 			if (alive()) reload.disabled = more.disabled = false;
 		}
 	}
@@ -10558,7 +10625,8 @@ function repositoryStartPanel({ h, t, api, caps, guard, ready, errorBox, opStatu
 			source_ref: intent.request.params.source_ref,
 			source_sha: intent.request.params.source_sha,
 			repository_binding: intent.request.preconditions.binding_digest,
-			...intent.request.params.project_id ? { project_id: intent.request.params.project_id } : {}
+			...intent.request.params.project_id ? { project_id: intent.request.params.project_id } : {},
+			...intent.request.params.work_item_id ? { work_item_id: intent.request.params.work_item_id } : {}
 		})) if (name in refs && refs[name] !== value) throw new Error(t("pub_invalid_result"));
 		if (result != null && (!object(result) || result.host !== intent.request.target.host || result.workspace_id !== intent.request.target.workspace_id || result.repository !== intent.request.target.repository || result.source_ref !== intent.request.params.source_ref || result.source_sha !== intent.request.params.source_sha || result.repository_id !== intent.request.preconditions.repository_id || result.binding_digest !== intent.request.preconditions.binding_digest || !text(result.session_id, 256) || result.session_id !== candidate.external_refs?.session_id)) throw new Error(t("pub_invalid_result"));
 		if (candidate.status === "succeeded" && (!result || result.message_id !== `batc-${candidate.operation_id}`)) throw new Error(t("pub_invalid_result"));
@@ -16490,9 +16558,35 @@ async function viewWorkItem(main, wid) {
 		}
 	};
 	await render();
+	const repair = /^op_[0-9a-f]{32}$/.test(displayedItem?.operation_id) && state.caps?.features?.managed_repairs?.version === 1 ? repairWorkItemPanel({
+		h,
+		t,
+		api,
+		guard: () => assertView(connection),
+		projectId: displayedItem.project_id,
+		workItemId: wid,
+		originOperationId: displayedItem.operation_id,
+		errorBox
+	}) : null;
+	if (repair) {
+		panel.before(repair.box);
+		await repair.refresh();
+	}
+	try {
+		assertView(connection);
+	} catch {
+		repair?.dispose();
+		results?.dispose();
+		return;
+	}
+	const offRepair = repair ? onEvents((event) => {
+		if (event.resource_type === "operation" || observationAffected("work_item", wid, event)) return repair.refresh();
+	}) : null;
 	const off = liveReload(render, (event) => observationAffected("work_item", wid, event), refreshSafety);
 	return () => {
 		off?.();
+		offRepair?.();
+		repair?.dispose();
 		results?.dispose();
 	};
 }
@@ -17155,16 +17249,19 @@ async function viewProjectDispatch(main, pid, repairWid = null) {
 		generation
 	};
 	let repairSeed = null;
-	if (repairWid) {
-		if (!/^wi_[0-9a-f]{20}$/.test(repairWid)) throw new Error(t("repair_unavailable"));
+	if (repairWid) try {
+		if (!/^wi_[0-9a-f]{20}$/.test(repairWid) || state.caps?.features?.managed_repairs?.version !== 1) throw new Error(t("repair_unavailable"));
 		const record = await api("GET", `/work-items/${repairWid}/repair`);
 		assertView(connection);
-		if (record.project_id !== pid || record.work_item_id !== repairWid) throw new Error(t("repair_unavailable"));
+		validateRepairRecord(record, pid, repairWid);
 		if (record.dispatch_operation_id) {
 			main.append(h("h1", {}, t("repair_title")), h("p", {}, t("repair_dispatched")), h("a", { href: `#/op/${record.dispatch_operation_id}` }, t("repair_open_dispatch")));
 			return;
 		}
 		repairSeed = repairDispatchSeed(record);
+	} catch (error) {
+		if (!["VIEW_CHANGED", "CONNECTION_CHANGED"].includes(error.code)) main.append(errorBox(error));
+		return;
 	}
 	const panel = repositoryStartPanel({
 		h,

@@ -26,6 +26,17 @@ function validRequest(request) {
   } catch {return false;}
 }
 
+export function validateRepairRecord(record, projectId, workItemId) {
+  if (record?.version !== 1 || !pid(record.project_id) || !wid(record.work_item_id) || !digest(record.evidence_digest) ||
+      !digest(record.expected_work_item_fingerprint) || typeof record.request !== 'string' || !record.request.trim() ||
+      record.request.length > 12000 || typeof record.dispatchable !== 'boolean' ||
+      record.dispatch_operation_id !== null && !oid(record.dispatch_operation_id) ||
+      projectId && record.project_id !== projectId || workItemId && record.work_item_id !== workItemId) {
+    throw new Error('Invalid repair work identity');
+  }
+  return record;
+}
+
 export function repairDispatchSeed(record) {
   if (record?.version !== 1 || !pid(record.project_id) || !wid(record.work_item_id) || !digest(record.evidence_digest) ||
       !digest(record.expected_work_item_fingerprint) || typeof record.request !== 'string' || !record.request.trim() ||

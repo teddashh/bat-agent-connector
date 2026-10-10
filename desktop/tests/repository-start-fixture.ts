@@ -9,12 +9,13 @@ export async function publishedFixture(page: Page, native: boolean, options: any
     errors: [] as string[], events: [] as any[], after: 0, operation: null as any, bytes: [] as number[], uploaded: false,
     project: {project_id: dispatchProject, name: 'Dashboard project', description: 'Shared browser and desktop work',
       repositories: ['example/project'], version: 1, archived: false, counts: {total: 0, approved: 0}}, ...options};
-  const caps = () => ({actor: state.actor, scopes: state.scopes, api_version: 1, contract_version: '2026-10-08',
+  const baseCaps = () => ({actor: state.actor, scopes: state.scopes, api_version: 1, contract_version: '2026-10-08',
     hosts: ['demo', 'other'].map(host => ({host, writes: state.writes, orchestrate: state.orchestrate})),
     actions: state.absent ? [] : [{action: 'repository.continue', allowed: state.allowed}, {action: 'session.start', allowed: state.allowed}, {action: 'artifact.upload', allowed: true}],
     ...(state.dispatch ? {artifacts: {limits: {max_file_bytes: 1048576}}} : {}),
     features: {...(state.dispatch && !state.oldCentral ? {project_dispatch: {version: 1, artifacts: true, model: true}} : {}),
       repository_sync: state.unbound ? [] : (state.bindings || [selected, {...selected, host: 'other', workspace_id: 'other-ws'}]).map(b => ({...b, exact_ref_head_only: true}))}});
+  const caps = () => state.extendCaps ? state.extendCaps(baseCaps()) : baseCaps();
   const mismatch = (operation: any) => {
     const op = structuredClone(operation);
     if (state.bad === 'key') op.idempotency_key = 'wrong';
@@ -31,6 +32,8 @@ export async function publishedFixture(page: Page, native: boolean, options: any
   };
   const dispatch = async (input: any) => {
     const url = new URL(input.path, 'http://fixture'), path = url.pathname;
+    const extra = await state.extraDispatch?.(input, state);
+    if (extra) return extra;
     if (path === '/repository-previews') {
       state.previews.push(structuredClone(input)); const target = {...input.body}; delete target.source_ref;
       const preview = {target, workspace: {workspace_id: target.workspace_id, name: 'Dashboard', folder: '/srv/dashboard'}, source_ref: input.body.source_ref,

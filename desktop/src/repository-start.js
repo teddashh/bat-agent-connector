@@ -129,7 +129,8 @@ export function repositoryStartPanel({h, t, api, caps, guard, ready, errorBox, o
     for (const [name, value] of Object.entries({host: intent.request.target.host, repository: intent.request.target.repository,
       repository_id: intent.request.preconditions.repository_id, source_ref: intent.request.params.source_ref,
       source_sha: intent.request.params.source_sha, repository_binding: intent.request.preconditions.binding_digest,
-      ...(intent.request.params.project_id ? {project_id: intent.request.params.project_id} : {})})) {
+      ...(intent.request.params.project_id ? {project_id: intent.request.params.project_id} : {}),
+      ...(intent.request.params.work_item_id ? {work_item_id: intent.request.params.work_item_id} : {})})) {
       if (name in refs && refs[name] !== value) throw new Error(t('pub_invalid_result'));
     }
     if (result != null && (!object(result) || result.host !== intent.request.target.host || result.workspace_id !== intent.request.target.workspace_id ||

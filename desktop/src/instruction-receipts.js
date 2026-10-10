@@ -58,11 +58,17 @@ export function instructionReceiptPanel({h, t, when, api, guard, host, sessionId
   const box = h('details', {class: 'workspace-evidence', 'data-instruction-receipts': ''}, h('summary', {}, t('instruction_receipts')),
     h('p', {class: 'muted'}, t('instruction_receipts_note')), list, status, h('div', {class: 'actions'}, reload, more));
   const nodes = new Map();
-  let busy = false, disposed = false;
+  let disposed = false, refreshQueue = Promise.resolve();
   const alive = () => {if (disposed) return false; try {guard(); return true;} catch {return false;}};
-  async function refresh(older = false) {
-    if (!alive() || busy) return;
-    busy = true; reload.disabled = more.disabled = true;
+  function refresh(older = false) {
+    // An event arriving during a read needs a subsequent snapshot before its ACK.
+    const work = refreshQueue.catch(() => {}).then(() => refreshNow(older));
+    refreshQueue = work;
+    return work;
+  }
+  async function refreshNow(older = false) {
+    if (!alive()) return;
+    reload.disabled = more.disabled = true;
     try {
       const value = await reader.load(older); if (!alive()) return;
       const retained = new Set();
@@ -89,7 +95,7 @@ export function instructionReceiptPanel({h, t, when, api, guard, host, sessionId
       for (const [id, entry] of nodes) if (!retained.has(entry.node)) nodes.delete(id);
       status.replaceChildren(); more.hidden = !value.can_load_more;
     } catch (error) {if (alive()) status.replaceChildren(h('p', {class: 'muted'}, t('instruction_stale')), errorBox(error));}
-    finally {busy = false; if (alive()) reload.disabled = more.disabled = false;}
+    finally {if (alive()) reload.disabled = more.disabled = false;}
   }
   return {box, refresh, dispose() {disposed = true;}};
 }

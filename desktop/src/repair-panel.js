@@ -1,4 +1,4 @@
-import {repairIntent} from './repair-intent.js';
+import {repairIntent, repairRequest, validateRepairRecord} from './repair-intent.js';
 
 // Read fixed central evidence, then create/reuse an ordinary work item. Launch is separate.
 export function repairPanel({h, t, api, caps, guard, namespace, source, errorBox, opStatus}) {
@@ -7,7 +7,7 @@ export function repairPanel({h, t, api, caps, guard, namespace, source, errorBox
   const key = `batc.repair.${namespace}.${JSON.stringify(source)}`;
   const status = h('div', {role:'status'}), evidence = h('div'), outcome = h('div');
   const project = h('select', {'aria-label':t('repair_project')}, h('option',{value:''},t('repair_choose_project')));
-  const allowed = () => caps()?.actions?.some(action => action.action === 'repair.create' && action.allowed === true);
+  const allowed = () => ['observe', 'manage'].every(scope => caps()?.scopes?.includes(scope)) && caps()?.actions?.some(action => action.action === 'repair.create' && action.allowed === true);
   const reload = h('button',{class:'secondary',type:'button',onclick:()=>read()},t('repair_read'));
   const create = h('button',{class:'secondary',type:'button',disabled:true,onclick:async()=>{
     if (!alive() || busy || !allowed()) return;
@@ -36,7 +36,9 @@ export function repairPanel({h, t, api, caps, guard, namespace, source, errorBox
     next.hidden=!['succeeded','failed','cancelled'].includes(snapshot?.operation?.status);
   }
   function links(record) {
-    if (!record?.work_item_id || !/^wi_[0-9a-f]{20}$/.test(record.work_item_id)) return;
+    if (!record) return;
+    if (!/^wi_[0-9a-f]{20}$/.test(record.work_item_id) || record.project_id !== project.value ||
+        record.dispatch_operation_id != null && !/^op_[0-9a-f]{32}$/.test(record.dispatch_operation_id)) throw new Error(t('repair_unavailable'));
     outcome.append(h('p',{},h('a',{href:`#/item/${record.work_item_id}`},t('repair_open_work')),' · ',
       record.dispatch_operation_id ? h('a',{href:`#/op/${record.dispatch_operation_id}`},t('repair_open_dispatch')) :
         h('a',{href:`#/dispatch/${record.project_id || project.value}/${record.work_item_id}`},t('repair_review_dispatch'))));
@@ -44,7 +46,10 @@ export function repairPanel({h, t, api, caps, guard, namespace, source, errorBox
   function show(operation) {
     if (!alive()) return;
     outcome.replaceChildren(opStatus(operation),' ',h('a',{href:`#/op/${operation.operation_id}`},operation.operation_id));
-    if(operation.status==='succeeded') links(operation.result);
+    if(operation.status==='succeeded') {
+      if(operation.result?.evidence_digest !== controller.snapshot().intent.request.preconditions.expected_evidence_digest) throw new Error(t('repair_unavailable'));
+      links(operation.result);
+    }
   }
   async function read() {
     if(!alive()||busy||!project.value) return;
@@ -54,6 +59,10 @@ export function repairPanel({h, t, api, caps, guard, namespace, source, errorBox
       const params=new URLSearchParams(source);
       const doc=await api('GET',`/projects/${pid}/repair-evidence?${params}`);
       if(!alive()||mine!==serial||project.value!==pid)return;
+      const request = repairRequest(doc);
+      if (doc.project_id !== pid || JSON.stringify(Object.entries(request.params.source).sort()) !== JSON.stringify(Object.entries(source).sort())) {
+        throw new Error(t('repair_unavailable'));
+      }
       document=doc;
       evidence.replaceChildren(h('p',{},t('repair_fixed_evidence'),' ',h('code',{},doc.evidence_digest)),
         h('details',{},h('summary',{},t('repair_evidence_details')),h('pre',{class:'pre'},JSON.stringify(doc.evidence,null,2))));
@@ -82,4 +91,43 @@ export function repairPanel({h, t, api, caps, guard, namespace, source, errorBox
   project.addEventListener('change',()=>read());
   box.addEventListener('toggle',()=>{if(box.open)init();});
   return {box,dispose(){disposed=true;serial++;}};
+}
+
+// Kept outside the work editor so refreshing dispatch receipts never replaces drafts.
+export function repairWorkItemPanel({h, t, api, guard, projectId, workItemId, originOperationId, errorBox}) {
+  const box = h('section', {class: 'panel', 'data-repair-work-item': '', hidden: true});
+  let disposed = false, repairOrigin = null, refreshQueue = Promise.resolve();
+  const alive = () => {try {guard(); return !disposed;} catch {return false;}};
+  function refresh() {
+    const work = refreshQueue.catch(() => {}).then(async () => {
+      if (!alive()) return;
+      try {
+        if (repairOrigin === null) {
+          const doc = await api('GET', `/operations/${originOperationId}`);
+          if (!alive()) return;
+          if (doc.operation?.operation_id !== originOperationId) throw new Error(t('repair_unavailable'));
+          repairOrigin = doc.operation.action === 'repair.create' && doc.operation.target?.project_id === projectId;
+        }
+        if (!repairOrigin) return;
+        const record = await api('GET', `/work-items/${workItemId}/repair`);
+        if (!alive()) return;
+        validateRepairRecord(record, projectId, workItemId);
+        box.replaceChildren(h('h2', {}, t('repair_title')),
+          h('p', {}, t('repair_fixed_evidence'), ' ', h('code', {}, record.evidence_digest)),
+          h('details', {}, h('summary', {}, t('repair_evidence_details')), h('pre', {class: 'pre'}, JSON.stringify(record.evidence, null, 2))),
+          record.dispatch_operation_id ? h('p', {}, t('repair_dispatched'), ' ',
+            h('a', {href: `#/op/${record.dispatch_operation_id}`}, t('repair_open_dispatch'))) :
+            record.dispatchable ? h('a', {href: `#/dispatch/${projectId}/${workItemId}`}, t('repair_review_dispatch')) :
+              h('p', {class: 'muted'}, t('repair_unavailable')));
+        box.hidden = false;
+      } catch (error) {
+        if (!alive()) return;
+        if (error.status === 404 && error.code === 'REPAIR_NOT_FOUND') {repairOrigin = false; box.replaceChildren(); box.hidden = true;}
+        else {box.replaceChildren(errorBox(error)); box.hidden = false;}
+      }
+    });
+    refreshQueue = work;
+    return work;
+  }
+  return {box, refresh, dispose() {disposed = true;}};
 }

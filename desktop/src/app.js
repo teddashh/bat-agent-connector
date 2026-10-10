@@ -14,8 +14,8 @@ import {treeInteractions} from "./tree-interactions.js";
 import {modelPreferencesPanel} from "./model-preferences.js";
 import {projectSkillsPanel} from "./project-skills.js";
 import {resultSourcesPanel} from "./result-sources.js";
-import {repairPanel} from "./repair-panel.js";
-import {repairDispatchSeed} from "./repair-intent.js";
+import {repairPanel, repairWorkItemPanel} from "./repair-panel.js";
+import {repairDispatchSeed, validateRepairRecord} from "./repair-intent.js";
 import {instructionReceiptPanel} from "./instruction-receipts.js";
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
@@ -3070,8 +3070,15 @@ async function viewWorkItem(main, wid) {
     if (draft) { draft = null; d.open(); }
   };
   await render();
+  const repair = /^op_[0-9a-f]{32}$/.test(displayedItem?.operation_id) && state.caps?.features?.managed_repairs?.version === 1 ? repairWorkItemPanel({h, t, api,
+    guard: () => assertView(connection), projectId: displayedItem.project_id, workItemId: wid, originOperationId: displayedItem.operation_id, errorBox}) : null;
+  if (repair) {panel.before(repair.box); await repair.refresh();}
+  try {assertView(connection);} catch {repair?.dispose(); results?.dispose(); return;}
+  const offRepair = repair ? onEvents(event => {
+    if (event.resource_type === "operation" || observationAffected("work_item", wid, event)) return repair.refresh();
+  }) : null;
   const off = liveReload(render, event => observationAffected("work_item", wid, event), refreshSafety);
-  return () => {off?.(); results?.dispose();};
+  return () => {off?.(); offRepair?.(); repair?.dispose(); results?.dispose();};
 }
 
 // Start agent work from a linked checkpoint, with this item's words as the instructions; the new operation is
@@ -3457,15 +3464,20 @@ async function viewProjectDispatch(main, pid, repairWid = null) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   let repairSeed = null;
   if (repairWid) {
-    if (!/^wi_[0-9a-f]{20}$/.test(repairWid)) throw new Error(t("repair_unavailable"));
-    const record = await api("GET", `/work-items/${repairWid}/repair`); assertView(connection);
-    if (record.project_id !== pid || record.work_item_id !== repairWid) throw new Error(t("repair_unavailable"));
-    if (record.dispatch_operation_id) {
-      main.append(h("h1", {}, t("repair_title")), h("p", {}, t("repair_dispatched")),
-        h("a", {href: `#/op/${record.dispatch_operation_id}`}, t("repair_open_dispatch")));
+    try {
+      if (!/^wi_[0-9a-f]{20}$/.test(repairWid) || state.caps?.features?.managed_repairs?.version !== 1) throw new Error(t("repair_unavailable"));
+      const record = await api("GET", `/work-items/${repairWid}/repair`); assertView(connection);
+      validateRepairRecord(record, pid, repairWid);
+      if (record.dispatch_operation_id) {
+        main.append(h("h1", {}, t("repair_title")), h("p", {}, t("repair_dispatched")),
+          h("a", {href: `#/op/${record.dispatch_operation_id}`}, t("repair_open_dispatch")));
+        return;
+      }
+      repairSeed = repairDispatchSeed(record);
+    } catch (error) {
+      if (!["VIEW_CHANGED", "CONNECTION_CHANGED"].includes(error.code)) main.append(errorBox(error));
       return;
     }
-    repairSeed = repairDispatchSeed(record);
   }
   const panel = repositoryStartPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
     submitPreference: submit, repairSeed,
