@@ -1,479 +1,169 @@
-# bat-agent-connector
+# Better Agent Dashboard
 
-**English** · [繁體中文](README.zh-TW.md)
+**Keep track of your coding agents, from the original request to reviewed delivery.**
 
-**An unofficial connector that lets AI agents work with [Better Agent Terminal (BAT)](https://github.com/tony1223/better-agent-terminal) sessions.**
+**English** · [繁體中文](README.zh-TW.md) · [Website](https://teddashh.github.io/bat-agent-connector/) · [Getting started](docs/getting-started.md)
 
-**Project page:** https://teddashh.github.io/bat-agent-connector/
+Better Agent Dashboard brings projects, agent sessions, worktrees, artifacts and GitHub delivery into one place. Use the **Web interface or Tauri desktop app** to see what needs your attention, dispatch work to a selected BAT workspace, review its result and follow it into a pull request.
 
-**Development direction:** [Shared product and Tauri UI decisions](docs/product/realignment-v2.md) and
-[implementation status](docs/product/implementation-status.md). The desktop client shares the Dashboard
-frontend and the existing Python backend. Both plans describe one product with revised UI direction and a shared
-feature backlog. Project Hub import is excluded; project/work-item management remains.
+You continue coding in [Better Agent Terminal (BAT)](https://github.com/tony1223/better-agent-terminal). Agents such as Hermes and Grokbot use their own identities to work alongside you. The repository and Python package retain the name **`bat-agent-connector`**: Connector is the shared backend for the Dashboard, CLI and MCP tools.
 
-BAT (by [TonyQ / tony1223](https://github.com/tony1223)) is a terminal app that runs Claude Code and Codex agent
-sessions, grouped into workspaces, on your machines. It has a remote protocol (`bat-remote/v2`) that its own GUI and
-phone clients use. This project speaks that protocol so that *other* agents (Claude Code, Codex, Cursor, Hermes, or any
-MCP client) and shell scripts can:
+> **Product direction:** install the desktop package, let it prepare and run the background service, connect your BAT environment, then open the Dashboard with one click. **Current implementation:** the shared Dashboard and background central service exist, but automatic provisioning is still being built. Today's validation installers require a configured central service and API identity. [Installation status and trial paths →](docs/getting-started.md)
 
-* see which agent sessions exist, which are running or blocked on a question, and what they said recently;
-* wait for a session to finish its turn;
-* (opt-in) nudge a session: send a message, say "continue", interrupt it, answer its question;
-* (opt-in, separate tier) fan work out: start sessions in fresh git worktrees, review their diffs, merge the clean ones;
-* spot sessions that hit a Claude usage quota and move them to Codex in the same worktree (failover);
-* answer fixed permission prompts and change managed session modes through central operations, and reclaim managed resources through a reviewed preview.
+![The shared Dashboard separates pending replies, completion review and operation problems.](site/images/attention-en.png)
 
-> This project is **not affiliated with or endorsed by** the BAT authors. The protocol was read from BAT's MIT-licensed
-> source (v3.2.12) and can change between BAT releases. Credit for BAT goes to TonyQ and its contributors.
+*Actual shared frontend with synthetic demonstration data, captured from the `15b2048` product baseline. This is an interface illustration, not a live-host acceptance result. [Screenshot provenance](site/images/README.md).*
 
-General managed starts keep the operator's `default_permission_mode`: `default` preserves BAT defaults and
-`allow_all` preserves bypass/full access (level `none`). Choose `confined` to restrict general starts too. Checkpoint
-and repair starts always use confined options: Claude `default`, or `acceptEdits` only with a verified BAT host
-account; Codex `workspace-write/on-request`. Host-account verification requires a separate trusted auditor SSH
-alias (`check_ssh_alias`), its UID (`check_uid`) and the target `bat_account`, set up by the operator. The auditor
-proves the entire system Python closure before executing it, then uses a narrow sudo rule and `-c` argv without
-the BAT account's shell or startup files. Unknown layouts or incomplete gates use plain default.
-The channel and verdict UID are checked; the auditor login must be beyond the BAT account's control.
-Without that channel, `unknown/check_channel_untrusted` means `fallback_default`, never acceptEdits.
-Defense in depth still requires a root-owned, non-writable BAT home and trusted startup files, plus system-owned
-Python/find. The verdict assumes no hostile BAT-UID process during the check; ptrace_scope is recorded, not an
-isolation proof. Install clean startup files before hardening; agent
-state may live in account-owned `.claude`, `.codex` and `.cache` subdirectories. Unhardened hosts report unknown and
-confined Claude uses plain `default`. Cwd alone offers no protection, and acceptEdits has no path check.
-BAT cannot configure network or writable roots, so confined Codex may break installs and localhost test servers.
-Task Service engine/recipes stay unchanged and expose their compatibility gap. Session reads and the Dashboard
-show creation evidence separately from current verification. A10 is not proven until W12's live acceptance run.
-See [configuration, limits and the live procedure](docs/design/confinement.md).
+## Explore
 
-The Dashboard start note follows capabilities `hosts[].confinement.host_account.start_effect`: `verified`,
-`recheck` (unchecked or stale; checked live at start), `fallback_default` (a supported hardening gap or no account
-declaration; confined Claude uses plain default), or `refused` (blocks Claude and Codex). The read itself runs no
-check and keeps the reason visible. A non-verified status alone does not mean starts are blocked.
+[Capabilities](#what-you-can-do) · [Workflow](#from-request-to-delivery) · [Architecture](#web-desktop-and-agents) · [Platforms](#platforms-and-packages) · [Start](#start-using-it) · [Trust and recovery](#permissions-ownership-and-recovery) · [Readiness](#current-evidence-and-remaining-work) · [Documentation](#documentation) · [Development](#development)
 
-`START_IN_PROGRESS` means another process is starting this session: read it back later, do not retry blindly;
-`CONFINEMENT_START_UNSETTLED` requires read-back of a possibly sent start.
+## What you can do
 
-It ships four things:
+| Your question | Where to go | What you get |
+| --- | --- | --- |
+| What needs me right now? | **Pending** | Separate replies / permissions, completion review, operation problems and host connections. Idle does not mean the task is complete. |
+| What belongs to this project? | **Projects** | Work items, original instructions, acceptance criteria, repository bindings and dispatched work. Hierarchy, pins and archive keep ongoing projects organized. |
+| Can I start the next piece of work? | **Project dispatch / Sessions** | Select a configured repository, host and workspace; preview a fixed commit; add instructions, model and attachments; create a managed session. |
+| What is an agent doing? | **Sessions** | Recent conversation, readable code and tables, pending questions, resource ownership and freshness. Authorized controls use central operations. |
+| What did it produce? | **Artifacts / work details** | Immutable revisions, digests, capture, review and links to the originating operation, execution or task. Accepting an artifact does not merge code or complete a task. |
+| How do results reach the same PR? | **Delivery** | Preview fixed results from managed work, checkpoints or branches, then integrate them in a separate workspace. Paste a GitHub PR URL to load its configured repository. |
+| Has it actually shipped? | **Delivery** | Separate integration, merge and deployment receipts. Configured recipes check the deployed source version and runtime evidence. |
+| Can I free this worktree? | **Cleanup and retained work** | Review exact resources, preserved content and reasons preventing removal. History and relationships remain after eligible cleanup. |
+| What happened during a disconnect? | **Operations / history** | Durable IDs, original requests and receipts. Read back the original operation instead of dispatching again because its reply was lost. |
 
-| Piece | Name |
-|---|---|
-| Python package | `bat-agent-connector` (Python 3.10+, deps: `websockets`, `mcp`) |
-| MCP server (stdio, or localhost-only streamable HTTP) | `bat-agent-connector-mcp` (also `batc mcp`) |
-| CLI | `batc` |
-| Agent skill | [`skills/bat-agent-connector/SKILL.md`](skills/bat-agent-connector/SKILL.md) |
+Features are exposed according to the current account, host and repository configuration. The interface explains unavailable actions. Ordinary project dispatch does not require creating a second Task Service recipe for every request.
 
-Hermes and Grokbot adapters are [generated from the canonical skill](docs/agent-skills.md);
-regenerate them after workflow changes and install bundles from the matching Connector release.
+## From request to delivery
 
-Persisted observation is available through `batc inventory`, `batc history` and `batc relations`, or the matching
-HTTP/MCP reads. Session history uses journal facts; warm reuse keeps each task’s relation ranges. Discovery shows
-the latest host/profile scope and what was outside the scan. Unknown actors and states stay unknown; these reads
-do not start sessions or probe Git. See [observation](docs/design/observation.md). The Dashboard history and scope
-screens are Part B, to follow separately.
+1. **Organize the project.** Explicitly associate a configured repository, preserve the request and record acceptance criteria.
+2. **Choose the destination.** Select the BAT host and workspace. For published code, preview a branch such as `main` and confirm its fixed commit. Switching clients does not move the work.
+3. **Start the agent's own work.** Instructions, optional model and exact attachment revisions travel with the operation. Connector keeps the person's original checkout read-only.
+4. **Follow the result from the project.** Find the dispatched work, session, operation and delivery entry. “Started” means a start succeeded; activity, verification, acceptance and delivery are distinct.
+5. **Review and integrate.** Inspect candidate commits and the integration preview. Bring selected results into one PR, then review and merge its fixed scope with an authorized identity.
+6. **Deploy and tidy up.** Where a recipe is configured, follow the merged source to runtime version / health evidence. Review eligible cleanup while preserving history and retained results.
 
-## Why
+Same-host continuation can use a fixed local checkpoint. Another host gets code through an **explicitly bound GitHub repository and a published commit**. Unpublished workspaces are not moved between machines, and a person's checkout is not automatically pulled or reset.
 
-Running several long-lived coding agents means constantly checking tabs: which one is done, which one is stuck on a
-question, which one just needs "continue". Reading this through BAT's protocol is reliable (no screen scraping, no GUI
-automation) and lets a supervising agent do the checking for you, with you in control of anything that writes.
+## Web, desktop and agents
 
-Artifact attachments have immutable revisions in Connector-owned storage (SHA-256, size and explicit quotas).
-Upload with `batc artifact upload FILE --key KEY --confirm` or a Dashboard picker, attach an exact
-`{artifact_id, revision, digest}` to a work item or checkpoint, and continue on the checkpoint's host. Bytes are
-verified in the session's worktree before the first command; a moved source requires confirmation that resumes the
-same operation. Dashboard text and uploaded refs survive reloads and failures. Store content has no delete;
-Use `batc artifact capture-preview HOST SESSION_ID relative/file` to review one manual-session file, save
-the JSON, then `batc artifact capture --preview-file PREVIEW.json --key KEY --confirm` with the same credential.
-Capture, including replay/resume/cancel, needs the original credential with `observe` and `manage`.
-Accepted operations remain recoverable after preview expiry. Capture refuses source changes and never changes the manual checkout. It preserves
-one file, not a dirty snapshot. Managed files use `artifact managed-capture-preview` with a central execution
-operation or task/command selector, then `artifact managed-capture`. `artifact accept` (approve scope) records
-review of one exact revision and its saved lineage without completing a task, merging or deploying.
-Another host obtains published code through an explicitly bound repository. In Sessions, choose
-**Start from a published version**, review a branch's fixed commit, then create a new managed session.
-The `repository_preview` / `work_continue_from_repository` MCP tools and `batc repository` commands
-use the same central operation and saved key. No human checkout is pulled or reset, and unpublished
-Git objects remain on their source host. See [repository synchronization](docs/design/repository-sync.md).
-The shared Artifacts view provides managed capture and exact-revision review with saved operation recovery.
-Sessions offers a central managed start form and fixed-selection batch approvals; reviewed cleanup also
-covers eligible Task Service resources. Native files use OS pickers, bounded previews and Save As.
-See [the artifact design](docs/design/artifacts.md).
-
-## Install
-
-```bash
-# from a git checkout / URL (until published on PyPI)
-uv tool install git+https://github.com/teddashh/bat-agent-connector
-# or
-pipx install git+https://github.com/teddashh/bat-agent-connector
-# or run without installing
-uvx --from git+https://github.com/teddashh/bat-agent-connector batc hosts
+```mermaid
+flowchart TB
+    Web[Web Dashboard] --> Central[Python Connector / Task Service]
+    Desktop[Tauri Dashboard] --> Central
+    Agents[MCP agents and batc CLI] --> Central
+    Desktop --> Native[Local credentials, files, windows and supported Fleet controls]
+    Central --> BAT[Selected BAT hosts and managed workspaces]
+    Central --> GitHub[Configured repositories and delivery recipes]
+    Central --> Journal[Operations, relationships and history]
 ```
 
-## Configure
+**One frontend, one central authority.** Web and Tauri are built from `desktop/src`. Python serves `/dashboard/` and `/api/v1`. Tauri bundles the same UI and uses a restricted Rust transport. It does not create a second business backend, scheduler or journal.
 
-The connector needs, per host: the `wss://` URL of its `bat-server`, the server's TLS certificate SHA-256
-fingerprint (pinned; BAT uses self-signed certs), and a **reference** to the remote token. If you already use the
-BAT desktop client, import everything from it:
+- Both clients can be open at once. Closing a browser tab or Dashboard window does not stop the central service's work. Closing a local tunnel can disconnect that client.
+- Projects, work items, operations and versioned work-item reading markers use central state. Drafts and conversation reading positions remain local to each client.
+- Native credentials, files, tray / Dock behavior, Fleet and updates depend on platform support. Browser access does not grant local machine control.
+- MCP and CLI share central policies and durable operations. Each automation client uses its own principal and scopes.
 
-```bash
-batc import-bat                      # writes ~/.config/bat-agent-connector/hosts.toml (writes disabled)
-batc import-bat --rename my-profile-id=box1 --output -   # preview with nicer names
-batc hosts                           # probe: version + ping per host
-```
+The intended installer owns the lifecycle of its managed local service: initial runtime and identity setup, background startup, connection recovery and a one-click browser entry. An **existing central connection is an advanced join path**, not the intended first step for a new user. This installer work is not yet complete; [the first-run contract](docs/design/managed-installation.md) defines the remaining behavior.
 
-Token references (token values are never stored in the config, logged, or returned by any tool):
+[Shared frontend](docs/design/shared-frontend.md) · [Native client](docs/design/desktop.md) · [API](docs/design/api-v1.md)
 
-| `token_ref` | Meaning |
-|---|---|
-| `env:NAME` | environment variable |
-| `file:/path` | file containing only the token (keep it `chmod 600`) |
-| `bat-profile:<id>` | BAT's client token store (`profiles/remote-tokens.enc.json`, unencrypted variant) |
+## Platforms and packages
 
-See [`examples/hosts.example.toml`](examples/hosts.example.toml) for all options. The connector keeps a stable
-`deviceId` in `~/.config/bat-agent-connector/device-id` so hosts don't show a new "remote client connected"
-notification on every reconnect.
+The **desktop client** and **central service** have different platform requirements today.
 
-## Permission tiers
+| Component | Available evidence | Current limit |
+| --- | --- | --- |
+| Web Dashboard | Responsive English / Traditional Chinese interface, served by central | Uses trusted loopback / tunnel access. Public or LAN hosting needs a separate authenticated ingress design. |
+| Windows desktop | x64 NSIS installer; installed WebView and lifecycle tests in CI | Credential Manager and configured Windows Fleet. No bundled / automatically provisioned Python central yet. |
+| macOS desktop | Apple Silicon and Intel DMGs; native WebView, lifecycle and isolated Keychain tests | Ad-hoc validation signing. Developer ID / notarization and an operational Mac updater remain release work; Windows Fleet parity is not implied. |
+| Linux desktop | Debian validation package and native WebView fixture | Native credentials currently use a memory-only source; persistent protected enrollment is not implemented. |
+| Python central / CLI / MCP | Python 3.10–3.13 tested on Linux; POSIX implementation | Linux is the documented central setup path. Windows-native central is not implemented. Mac client tests do not establish Mac central live acceptance. |
 
-| Tier | Enabled by | Tools |
-|---|---|---|
-| read (always) | - | `hosts_list`, `host_status`, `workspaces_list`, `sessions_list`, `session_read`, `session_wait`, `worktree_status`, `session_worktree_status`, `sessions_triage`, `quota_sessions`, `session_policy`, `work_status`, `work_result`, `work_events` |
-| write | per host `writes = true` | `session_send`, `session_continue`, `session_interrupt`, `session_answer`, `session_set_permissions`, `approve_pending`, `session_relay` |
-| orchestrate | per host `writes = true` **and** `orchestrate = true` | `session_start`, `worktree_merge`, `session_failover`, `session_record_verification`, `session_cleanup`, `fanout_plan_session`, `fanout_from_plan`, `work_submit`, `work_pause`, `work_resume`, `work_mark_stage` |
+Download validation packages under **Artifacts** in a successful [desktop workflow run](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml). Match the source commit and central compatibility. GitHub may require sign-in, and artifacts expire; this is not a stable release channel.
 
-Write and orchestrate tools are not even registered unless enabled, need `confirm=true` on every call, are rate
-limited, and are appended to an audit log (`~/.local/state/bat-agent-connector/audit.jsonl`, message bodies only as a
-hash + length unless you opt into a short preview). `--read-only` on the MCP server or CLI disables both tiers
-regardless of config. The channel allowlist is enforced in the client core, below the MCP layer: reset/kill/fork,
-PTY writes, file operations, settings, workspace edits (except the append-only tab helper), installs, updates and
-account changes are never sent.
+The [2026-10-10 candidate run](https://github.com/teddashh/bat-agent-connector/actions/runs/38032723037) includes Windows, Mac ARM64 / x64 and Linux packages. Its tested source tree matches merged `15b2048`. There was no public GitHub Release at this documentation baseline; check [Releases](https://github.com/teddashh/bat-agent-connector/releases) for subsequent distribution.
 
-## MCP setup
+## Start using it
 
-### Task service milestone (opt-in)
+**The intended normal path** is install → background service ready → guided BAT / GitHub connection → open Dashboard. You should not need to install Python, hand-edit JSON or invent an API actor. Account sign-in and authorization still require your participation. This is the product requirement, not a claim about the current installers.
 
-`batc serve` runs the SQLite WAL task coordinator on `127.0.0.1:18796`. The existing MCP server adds
-`work_submit`, `work_status`, `work_pause`, `work_resume`, `work_result` and the read-only `work_events` feed; its
-stdio process calls that daemon
-at `BATC_TASK_URL` (default `http://127.0.0.1:18796/rpc`). `work_submit` takes Ted's **exact** words in
-`original_words` and an idempotency key such as the Discord message ID, then returns a `task_id` without
-waiting for BAT. Hermes must not reinterpret or split the request. Goose, on Opus 5.5, plans in the repo.
-Task writes require the host's existing `writes=true` and `orchestrate=true` settings. Existing low-level tools
-and `batc` commands remain available.
+For a **supervised trial today**, use one of these documented paths:
 
-Task mutations now record an operation and return `operation_id` / `operation_status` with the existing result.
-Keep a key for retries; keys belong to the authenticated actor. Unkeyed old task controls are separate requests.
-Task-bound operations capture the task version at admission, including when `control_version` is omitted;
-session controls also capture the current session. Read this server binding in `external_refs.admission_binding`,
-separate from caller preconditions. A pause/resume or session replacement before execution refuses the old request
-with `CONTROL_VERSION_CONFLICT` / `TASK_BINDING_MISMATCH`. The same key replays the refusal or original success;
-read the task and use a new key for an authorized new decision. Older operations without this binding retain
-their previous behaviour.
-Task-owned sends, answers, interrupts and permission changes pass the same coordinator, including legacy tools:
-`TASK_PAUSED`, `TASK_VERIFYING` and `TASK_COMMAND_PENDING` mean stop and read `work_status`, never jump the queue
-with force or continue. `CONTROL_VERSION_CONFLICT` requires reading the changed state. A second daemon, even with
-a different `--db`, returns `OWNER_CONFLICT` with the existing owner; clients use that owner. This is
-[operations unification](docs/design/operations-unification.md). MCP `session_send`, `session_continue`,
-`session_answer`, `session_interrupt`, `session_set_permissions` and their CLI commands use the existing daemon. MCP needs `BATC_API_TOKEN`; CLI uses it
-when set, otherwise its local admin token. Both keep confirmation and host write tiers. Add `--key` (MCP:
-`idempotency_key`) to deduplicate retries; omitting it creates a distinct operation each time. Keep the returned
-operation ID after an unknown reply and read it with `batc op ID` / `operation_get`; neither adapter resends
-automatically or starts another daemon. Message IDs identify BAT prompts, separately from operation keys.
-An omitted answer prompt ID is bound once at admission; retries cannot target a newer prompt.
-Permission changes record each Claude/Codex setting separately, retaining partial and unknown outcomes.
-A running Claude turn is refused without queuing a later change; after idle, submit a new decision with a new key.
-Historical deferred flags cannot authorize an automatic change. Legacy bulk approval apply refuses before
-answering or raising any session; use individual `session.answer` and `session.permissions` operations.
-Its dry-run preview remains available. See [session permissions](docs/design/session-permissions.md).
-Bulk approval, starts, orchestration and task no-key projection remain later Part B work.
+- **An environment is already configured:** open its Web Dashboard or connect a desktop client with the address and identity supplied by its operator. Start with Pending, Projects and Sessions.
+- **You operate the first environment:** follow the [Linux central setup guide](docs/getting-started.md). It covers installation, BAT profile import, service startup, identity issuance and desktop connection.
+- **You are connecting an agent:** register `bat-agent-connector-mcp` in its MCP client. Use `--principal-only --read-only` for scoped central observation; give authorized automation its own scoped `BATC_API_TOKEN` through private configuration.
 
-Every task is one Goose session on Opus 5.5. The `goose-session` recipe prompt tells Goose to split the work
-once, to aim for an executor mix of Grok 4.7 : Codex : Opus 5.5 = 4:2:1, and to give no new work to a model
-whose weekly quota remaining is at or below 15%. These are instructions in the prompt, not rules the service
-enforces: it does not count assignments or read quota. The service does not route, review, or fail over.
-Trusted tests are the verification verdict; a code failure
-goes back to that same session for bounded rework, and an exhausted budget is `needs_ted`. Ted's later steering
-is a continuation on the same task (same session, no re-plan, no new task). Jev is not on that path. It is used
-only when an orchestrator submits already-split tasks and passes `executor_model` (`grok`, `codex`, or `claude`),
-which skips the Opus planner. Goose itself stays behind one switch, off by default (`GooseConfig.enabled`);
-while it is off, tasks stay queued and nothing is started.
+Working on remote BAT hosts does not require BAT to be installed on the Dashboard machine. [Canonical skill and Hermes / Grokbot adapters](docs/agent-skills.md).
 
-A trusted test command must be configured locally; the service observes its exit status on the clean candidate
-commit. The service never posts to chat. `work_events(since_cursor, limit)`
-(CLI `batc task-events --since N`) returns only milestones (`started`, `needs_ted` with its reason, `done` with commit/PR
-link, `failed`), each with a monotonic `cursor`, `task_id`, `project`, `workspace`, the opaque `origin_thread_id` passed at
-submit, `kind` and a short `summary`. Push is the primary path: with `[task_service.event_webhook] url` (loopback only)
-and `secret_file` (mode 0600) in the private settings, each committed milestone is POSTed in cursor order as plain JSON
-(`type="task.milestone"`, `delivered_through`, `X-Request-ID`, HMAC-SHA256 `X-Webhook-Signature-V2` over
-`<X-Webhook-Timestamp>.<body>`). The push cursor starts at "now" when first configured and advances only on 2xx;
-failures retry with capped exponential backoff (max 300 s). `work_events` is the receiver's catch-up path after an
-outage; `limit=0` returns `head_cursor`. Optional `[task_service] repo_urls` adds `commit_url`. The task API requires a local admin token or scoped capability and binds only to loopback. See
-[the task-service design](docs/design/task-service.md) for states, recovery, private configuration and rollout.
-`work_status` and `work_result` are plain journal reads and carry a `delivery` block that separates
-`verified` from `adopted`, `merged` and `deployed` (the last three come only from `work_mark_stage`).
-`context_refs` stores attachments, previous_message_id, plan and commit that came with Ted's words.
-`work_submit` takes an optional `task_path` (`standard` or `minimal`); without it the daemon uses `standard`, or
-`minimal` when it runs with `BATC_TASK_DEFAULT_PATH=minimal`. A warm lead session is reused only on the minimal
-path and only for a follow-up whose HEAD is still the previous verified commit.
+## Permissions, ownership and recovery
 
-Earlier one-line README request A/B, before the minimal Jev review gate, used local fake BAT and disabled Jev
-network. Across 10 completed tasks per path, standard `bugfix-with-tests` median was **48.44 ms** and minimal
-`small-task-with-tests` median was **22.73 ms**. This measures local
-coordination only; it excludes real BAT, model, test-runner and network time and does not predict live delivery time.
-Codex timestamp cursors do not prove command ownership. An uncertain send remains stopped until a command-scoped,
-one-time operator reconciliation (`batc task-reconcile`); it is never replayed automatically.
-Claude-to-Codex failover journals its handoff as a separate uncertain send. Long original requests use a complete
-private archive verified from the successor host before dispatch; the service fails closed if access cannot be proved.
-No paid API key is required.
+**Host access and account permissions are separate.** Host `writes` / `orchestrate` settings allow classes of work. API scopes authorize an identity's actions. Resource ownership, current versions, repository bindings and task coordinator checks still apply.
 
-### Dashboard API (`/api/v1`)
+| Resource or outcome | Behavior |
+| --- | --- |
+| Human-created session / worktree | Read-only through Connector. Continue from a reviewed fixed source in new managed resources. |
+| Unknown ownership | Stay unknown unless existing creation evidence proves ownership. A matching path is insufficient. |
+| Managed work | Authorized actions pass the central handler and coordinator rules. |
+| Reply lost after dispatch | Retain the operation, original key and reservations; read back the result. A timeout does not prove failure. |
+| Agent claims completion | Present for review. Acceptance is distinct from activity, verification, merge and deploy. |
+| Cleanup touches active / unresolved work | Keep it and explain why; do not clear uncertain operations or erase their history. |
 
-Web and Tauri are maintained together from one UI source. The Connector serves the
-Web interface and API independently of the desktop app; both clients can be open
-at once. Native credentials, Fleet and window controls remain platform capabilities.
-See [shared frontend and lifecycle](docs/design/shared-frontend.md).
+MCP / CLI writes retain explicit confirmation, host tiers and audit records. The UI's reviewed actions go through central directly, without an extra LLM approval step.
 
-Pending replies, completion review and active operations are separate. Unread work
-updates sync through central for the same identity; **Mark this version read** does
-not approve completion. These are work-item versions, not unread chat message counts.
+**Read-only Connector policy is not an OS sandbox.** Host accounts and confinement determine whether an agent process can write to human directories. General starts and Task Service recipes have documented differences. Read [confinement](docs/design/confinement.md) before relying on unattended isolation.
 
-The task daemon also serves `/api/v1` on its loopback port: capabilities, a persisted session inventory with
-staleness, durable operations, and one event cursor with SSE. Issue a token per client
-(`batc api-token issue --actor ted-dashboard --scope observe --scope operate --scope start --scope integrate --scope
-manage --scope approve --scope merge --scope deploy --scope cleanup`; `start` lets it start new agent sessions from checkpoints,
-`integrate` lets it push results to a PR's head branch, `manage` edits projects and work items, `approve` accepts work
-items as done, `merge` and `deploy` back the Delivery buttons) and send it as
-`Authorization: Bearer`. MCP clients reach the same operations with `operation_submit`, `operation_cancel` and
-`operation_resume` (`confirm=true`, and `BATC_API_TOKEN` set to the client's own token: operations never run as the
-local admin). See [docs/design/api-v1.md](docs/design/api-v1.md).
+A native BAT `worktree.merge` with a fully unknown ACK and insufficient positive evidence still lacks a complete human adjudication API. This limitation is specific; GitHub integration and deployment have their own readback contracts. [Merge recovery](docs/design/worktree-merge.md) · [Resource policy](docs/design/resource-policy.md) · [Security](SECURITY.md)
 
-With `[github]` and `[[deploy.recipes]]` configured, the same operations merge pull requests at a reviewed head
-SHA and deploy the merged commit (`github.pr.merge`, `deployment.start`, `delivery.merge_and_deploy`). See
-[docs/design/delivery.md](docs/design/delivery.md).
+## Current evidence and remaining work
 
-The same daemon serves a browser Dashboard at `http://127.0.0.1:18796/dashboard/`: what needs you, every
-session with its provenance (sessions a person created in BAT stay read-only), managed-session controls, PR
-merge and deploy buttons, environment cards with deployment history, and the operation log. Connect it with an API token. See
-[docs/design/dashboard.md](docs/design/dashboard.md).
+Baseline: **2026-10-10, merged `15b2048` / PR #74**. Evidence below describes that candidate.
 
-To continue a person's work without touching their session, record a checkpoint (`checkpoint.create`: its commit
-and recent conversation, read-only) and start managed work from it (`checkpoint.continue`: a connector-owned clone,
-worktree, branch and session at that commit). This needs `managed_roots` and an SSH alias for the host. See
-[docs/design/checkpoints.md](docs/design/checkpoints.md).
+| Evidence | What it establishes |
+| --- | --- |
+| [Python CI](https://github.com/teddashh/bat-agent-connector/actions/runs/38032723049) | Python 3.10–3.13 passed; the local 3.13 full run recorded 3,228 passed / 33 skipped. |
+| Shared frontend checks | 694 UI cases passed before final affected-layout regressions. HTTP / native transport fixtures test behavior; mock IPC is not native installation. |
+| [Desktop CI](https://github.com/teddashh/bat-agent-connector/actions/runs/38032723037) | Windows, both Mac architectures and Linux packaging / native fixtures. Installed fixtures use controlled loopback services and synthetic data. |
+| Real central integration fixtures | Actual Python API, journal and temporary Git, with fake BAT / GitHub providers. Not production merge / deploy acceptance. |
 
-To put results into an existing PR, preview them (`integration.preview`: every commit and file that would enter,
-pinned by SHA) and apply the preview (`integration.apply`: one normal push of the composed commit to the PR's head
-branch, with the host's git credentials; never forced, and your folders are never changed). This needs
-`integrate = {hosts, remote_url}` on the repository's `[[github.repos]]` entry. See
-[docs/design/integration.md](docs/design/integration.md).
+The remaining delivery work includes **automatic managed installation**, formal signing / releases / updates, the specific unknown-ACK recovery flow, and a complete working-day acceptance run on the user's selected hosts, network and deployment targets. Supervised trials and unattended operation are different readiness claims.
 
-Projects and work items record what is being done and why: the request verbatim, acceptance, steps, and links to
-the sessions, checkpoints, operations and PRs that carried it. An agent with `manage` can claim an item done; only
-a token with `approve` accepts it, for the content it read, and editing the content afterwards asks again. Order,
-pins, renames and archive follow Project Hub's rules. See [docs/design/work-items.md](docs/design/work-items.md).
+[Implementation record](docs/product/implementation-status.md) · [Acceptance matrix](docs/product/acceptance-v2.md)
 
-PR delivery now has a separate metadata action (`github.pr.update`, existing `integrate` scope, per-repository
-`allow_pr_update = true`; default false) and saved merge scope previews. Read `github_pr_preview` / `batc delivery pr`,
-review all commits and affected PRs, then `github_pr_merge` / `batc delivery merge --preview mpv_... --key KEY`.
-Unknown metadata writes still unchanged after ten minutes settle as not applied, freeing the PR without resending;
-review a fresh digest before a new edit. Identical previews reuse their ID, and event reloads throttle scope reads.
-Metadata edits compare the title/body digest before writing and read back afterward; GitHub's final read/write race
-still exists. Merge checks the reviewed head/base/scope before submit and verifies the actual merged SHA; queue merges
-onto a newer base report the extra commits. Unsupported stacks and indirect merges are refused. MCP/CLI writes need
-the caller's `BATC_API_TOKEN`. See [delivery design](docs/design/delivery.md) for envelopes, errors and recovery.
-Deployment history and environment generations now bind a fixed source to a configured recipe.
-Under `[github]`, set `deployment_reconcile_interval_s = 300` (default 300, range 60–86400 seconds) for current run/runtime
-checks and unresolved run lookup. Settled history makes no provider/runtime reads; at the default each current
-environment costs at most 12 run reads and 12 runtime reads per hour. Stopped provider runs back off from 15 seconds to that interval when unchanged, reset on changed evidence, and keep
-the cadence across restart; successful reads clear stale errors and a bad row cannot block the next one.
-Read
-`batc delivery preview NAME`, then `delivery deploy NAME --sha SHA --generation N --recipe-digest DIGEST --key KEY`.
-Run success needs the saved attempt's deploy job, environment and runtime version and/or health evidence; the
-result says exactly what was checked. Recipes without `verification` disable deploys (breaking change): add
-`verification = { kind = "http_json", url = "https://deployment.example/version", version_required = true, health_required = true }`
-to your `[[deploy.recipes]]` and configure the endpoint to return the real repository/environment/version/health.
-`delivery history NAME` / `show DEP_ID` remain readable offline. Retry retains that saved identity; rollback starts a
-new operation/run through the same recipe with `delivery rollback NAME DEP_ID --generation N --recipe-digest DIGEST --key KEY`.
-A recipe must explicitly support rollback and list effects it does not undo (`rollback.not_undone`). Cancel keeps the
-provider slot until terminal evidence; old generations never become current, and drift requires attention without
-redispatch. MCP has matching preview/status/list/start/retry/rollback tools. The Dashboard Delivery view has one card per
-repository/environment, even without an open PR: selected, observed and last verified identities, cursor-paged history,
-rollback limits and readiness, and deploy-only retry. Drift needs attention. Confirmation reads fresh generation/recipe
-preconditions; stale previews require another click, and SSE preserves an open confirmation. Scope-disabled buttons
-explain why, and technical receipts expand into operation details. See [delivery design](docs/design/delivery.md).
+## Documentation
 
-### Connect an MCP client
-
-The server name is `bat`. Examples (add `--read-only` if you want to be sure):
-
-**Claude Code**
-```bash
-claude mcp add bat -- bat-agent-connector-mcp --read-only
-```
-
-**Codex** (`~/.codex/config.toml`)
-```toml
-[mcp_servers.bat]
-command = "bat-agent-connector-mcp"
-args = ["--read-only"]
-```
-
-**Cursor** (`~/.cursor/mcp.json`)
-```json
-{ "mcpServers": { "bat": { "command": "bat-agent-connector-mcp", "args": ["--read-only"] } } }
-```
-
-**Hermes Agent** (`~/.hermes/config.yaml`)
-```yaml
-mcp_servers:
-  bat:
-    command: /home/you/.local/bin/bat-agent-connector-mcp
-    args: [--read-only]
-    connect_timeout: 60.0
-    enabled: true
-```
-
-**Any MCP client over HTTP** (binds to loopback only):
-```bash
-bat-agent-connector-mcp --http --port 8765     # http://127.0.0.1:8765/mcp
-```
-
-
-Cleanup and retained work (`#/cleanup`, also linked from work item details) lists actual resources, all retention
-reasons and exact steps before applying a signed preview valid for 15 minutes. Changed state requires a new preview.
-HTTP `/cleanup-previews` and the `cleanup.apply` operation, MCP `cleanup_preview`, `cleanup_apply`,
-`cleanup_retained`, `cleanup_tombstones`, and CLI `batc resource-cleanup preview|apply|retained|history` share the
-contract. Scope `cleanup` reclaims managed sessions, worktrees and exact temporaries; explicit
-`release_undelivered` keeps commits and the branch and records that results were not delivered.
-A reviewed preview can also release capacity when all eligible sessions and their carriers are already absent.
-Only `discard_uncommitted` needs the person's `cleanup_discard` scope; Hermes/Grokbot tokens do not receive it,
-and agents never request it. Manual, unknown, task-owned, streaming, waiting and unresolved resources are retained.
-A ref is written before non-force removal. All `refs/batc/*`, clones and integration areas stay. Original IDs,
-locations, reasons, receipts and PR destinations remain searchable forever. Supported settings are
-`[cleanup] retained_refs="keep", history_retention="forever", permanent_delete=false`. This release lists actual
-retained content; restore and reviewed task cleanup follow in Part B. `auto_cleanup` still parses but is deprecated
-and never enables writes. Legacy `batc cleanup` / `session_cleanup` only evaluate, without worktree rehydration.
-Fanout stops the planner only with confirmation and every planned task started, keeping its worktree; failed
-or incomplete starts keep the planner for retry. See [docs/design/cleanup.md](docs/design/cleanup.md).
-
-```sh
-batc resource-cleanup preview --checkpoint cp_EXAMPLE --json > preview.json
-batc resource-cleanup apply --preview-file preview.json --key cleanup-review-1 --confirm
-batc resource-cleanup retained
-batc resource-cleanup history --original-id cp_EXAMPLE
-```
-
-## Tools reference
-
-| Tool | What it does |
-|---|---|
-| `hosts_list(probe=true)` | Configured hosts; with probe: reachable, server version, ping. |
-| `host_status(host)` | Version, protocol, connect/auth/ping latency, counts of workspaces/terminals/agent sessions/loaded/streaming. |
-| `workspaces_list(host?)` | Workspaces with folder and session counts. |
-| `sessions_list(host?, workspace?, agent?, only_loaded?, active_within_hours?, check_pending=auto, limit=50)` | Agent sessions, most recently active first: workspace, title, cwd, agent kind, model, loaded, streaming, pending question, last activity (+ source), worktree branch, orchestrated. |
-| `session_read(host, session_id, last_n=20, offset=0, include_tools=false, max_chars=12000, after=null)` | Latest messages as compact text, paged (`next_offset`), size capped; pending question and streaming tail. `session_id` may be a unique prefix. For Claude, `after=<turn_marker>` matches the exact BAT echo ID and hides unconfirmed queued output. |
-| `session_wait(host, session_id, until=attention, timeout_s=120, require_new=false, after=null)` | Waits for turn end / question / permission request / error. `after=<turn_marker>` (from `session_send` / `session_relay`) correlates Claude's echo and reports accepted/running/terminal phase; a stale idle state does not count. BAT Codex uses a weaker timestamp fallback because it does not echo `clientMessageId`. |
-| `worktree_status(host, workspace?)` | Worktree sessions: branch, source branch, merged kind, diff stats. |
-| `session_worktree_status(host, session_id, include_diff?)` | Same for one session plus dirty files and main-checkout state. |
-| `session_send(host, session_id, text, confirm, message_id?, queue?)` | Sends through a central operation; client-resumes an unloaded session first. Use `idempotency_key` for operation retries; `message_id` identifies the BAT prompt. |
-| `session_continue(host, session_id, confirm, text="continue")` | Nudge. |
-| `session_interrupt(host, session_id, mode=soft\|hard, confirm)` | Soft = Claude interrupt-turn, hard = abort (Codex always hard). The session is kept. |
-| `session_answer(host, session_id, confirm, answers? \| permission?)` | Answers a pending ask-user question or permission prompt. |
-| `session_start(host, workspace, agent, confirm, prompt?, model?, use_worktree=true)` | Starts a session (by default in a new worktree; BAT picks the branch `bat/worktree-<id>`). Per-host cap. |
-| `worktree_merge(host, session_id, confirm)` | Merges only into a main checkout inside a managed root, and only when provably conflict-free and clean; otherwise reports why. |
-| `worktree_remove(host, session_id, confirm, delete_branch=false, ...)` | Disabled compatibility entrypoint (`LEGACY_WORKTREE_REMOVE_DISABLED`). Use reviewed `cleanup_preview` → `cleanup_apply` to check every consumer and retain receipts. |
-| `sessions_triage(host?, workspace?, agent?, states?, use_jev=auto, include_unloaded=true)` | Classifies each session: `quota_exhausted`, `rate_limited_transient`, `waiting_permission`, `waiting_question`, `working`, `done_idle`, `error_other`, `unknown`, with `source` (pattern/jev), confidence, evidence line and reset time. |
-| `quota_sessions(host?)` | Shortcut: Claude sessions stopped by a usage quota. |
-| `session_set_permissions(host, session_id, mode, confirm, idempotency_key?, control_version?)` | Durable central permission change: `allow_all` (host must allow it) or `default`. Claude switches only while idle, without automatic deferral; Codex applies from its next turn. Retain the operation/key for partial or unknown outcomes. |
-| `approval_preview(host, workspace?)` | Read complete pending permission prompts, eligibility and optional modes from the central service. The signed preview is valid for ten minutes and bound to the caller. |
-| `approve_pending(host, confirm, preview_token, selection, expected_fingerprint, idempotency_key?, dry_run?)` | Apply only an explicit reviewed selection through durable answer/permissions children. Each answer uses `dont_ask_again=true`; mode is `null`, `default` or `allow_all`. Missing preview refuses; inspect per-item and partial results. |
-| `session_failover(host, session_id? \| all_exhausted, confirm, dry_run?, model?, force?, instructions?, archive_only?)` | Starts a Codex session that continues a quota-stopped connector-managed Claude session: same worktree when there is one, handoff prompt with the original task, latest instruction, recent output and git state (credentials redacted). Idempotent. `model` defaults to the host's `codex_model`. `instructions` replaces the default "continue the task" steps (for example "only commit the work in progress"); `archive_only` marks the successor for preservation; reviewed release keeps its commits and branch. |
-| `session_relay(host, message, confirm, workspace? \| session_id?, brief?, earlier?, channel?, thread?, request_fanout=0, dry_run?, start_if_missing?)` | Relays a human's message verbatim to the workspace's most recent connector-managed session (or a given one; sessions created in BAT are never written to, and `start_if_missing` starts a new worktree session instead), plus an optional brief labeled as the relayer's interpretation and the BAT-STATUS footer. `request_fanout=N` asks the session for a `bat-fanout` plan. Returns the rendered text. |
-| `fanout_plan_session(host, workspace, message, confirm, max_items=4, brief?)` | Starts a Codex planner in its own worktree (for when no managed session can plan) that answers with a `bat-fanout` plan. |
-| `session_policy(host, session_id?)` | Read. The host's mutation table and managed roots, or one session's provenance (`manual`, `connector_managed`, `unknown`), folder ownership and per-action verdicts with refusal codes. |
-| `fanout_from_plan(host, session_id, confirm, dry_run?, agent="codex", model?, max_items=4)` | Starts one worktree session per task of the last `bat-fanout` block of that session, prompts unchanged. Stops a planner only with confirmation and every task started; otherwise keeps it for retry. Its worktree is kept. |
-| `session_cleanup(host, confirm, dry_run=true, session_id?)` | Decides MERGE_AND_CLEAN / CLEAN_ONLY / KEEP / ESCALATE per orchestrated session behind hard gates, read-only evaluation; apply returns `LEGACY_CLEANUP_DISABLED`; `auto_cleanup` is deprecated. See docs/ORCHESTRATE.md. |
-| `session_record_verification(host, session_id, candidate_commit, command, exit_code, environment, log_ref, confirm)` | Records an externally run verification for the host's current clean commit; legacy read-only evaluation checks it against the candidate commit. CLI: `batc record-verification`. |
-
-## CLI
-
-```bash
-batc hosts
-batc status box1
-batc sessions --active-within 24
-batc --json sessions box1 --workspace api
-batc read box1 1a2b3c4d -n 30
-batc wait box1 1a2b3c4d --timeout 600
-batc worktrees box1
-# write tier (host needs writes = true)
-batc send box1 1a2b3c4d "Please run the tests and fix failures" --confirm
-batc continue box1 1a2b3c4d --confirm
-batc interrupt box1 1a2b3c4d --mode soft --confirm
-batc answer box1 1a2b3c4d --answer "Which database?=postgres" --confirm
-# orchestrate tier
-batc fanout PLAN.md                                   # dry run: split into task prompts
-batc fanout PLAN.md --start --host box1 --workspace api --confirm
-batc merge box1 1a2b3c4d --confirm
-# Inspect reviewed cleanup before applying a fixed preview
-batc resource-cleanup preview --host box1
-# lifecycle
-batc policy box1                                      # mutation table; `batc policy box1 1a2b3c4d` explains one session
-batc triage box1 --state quota_exhausted --state waiting_permission
-batc quota                                            # quota-stopped Claude sessions on every host
-batc --json approve-pending box1 --dry-run             # review exact prompts and permitted modes
-batc permissions box1 1a2b3c4d --mode default --key perm-example --confirm
-batc failover box1 --all-exhausted --dry-run          # then --confirm
-batc cleanup box1                                     # read-only evaluation; --apply returns LEGACY_CLEANUP_DISABLED
-```
-
-Every command accepts the global `--json` flag, placed before the command: `batc --json hosts`.
-
-For bulk approval, save that preview and submit it with `--preview-file FILE --selection JSON --key KEY --confirm`.
-Selection contains only reviewed `{item_id, mode}` entries; a null mode answers without changing the mode.
-This grants BAT's similar permission requests (`dont_ask_again=true`), so it is unavailable for confined sessions.
-The parent operation preserves each child ID and receipt. Read `all_succeeded` and per-item results rather than
-interpreting parent `succeeded` as approval of every item. See [the bulk contract](docs/design/bulk-approval.md).
-
-## Relay, fan-out and status markers
-
-An assistant that relays a human's orders (e.g. from chat) should not rewrite or plan them. `session_relay` sends
-the message verbatim with an optional labeled brief; the coding session, which has the repo context, interprets
-it, fixes unclear asks and states its interpretation in one line. For parallel work the session (or a read-only
-planner) writes a `bat-fanout` block:
-
-```bat-fanout
-[{"title": "short title", "prompt": "self-contained task prompt", "area": "files/modules touched"}]
-```
-
-and `fanout_from_plan` starts exactly those tasks. Every stop ends with one line: `BAT-STATUS: MILESTONE <name>`,
-`BAT-STATUS: CONTINUE <next step>` or `BAT-STATUS: NEED-<HUMAN> <reason>`; triage uses it as a completion claim.
-It does not replace a commit-bound verification record for legacy cleanup evaluation.
-
-## Safety model (short)
-
-* Read-only by default; writes and orchestration are opt-in per host, need `confirm=true`, are rate-limited and audited.
-* Sessions a person created in BAT are read-only through every tool. Writes only reach sessions the connector started,
-  in folders it owns; the client core refuses any write frame without a resource policy grant
-  ([docs/design/resource-policy.md](docs/design/resource-policy.md)).
-* TLS certificate pinning is mandatory; a mismatch aborts before the token is sent. Only `bat-remote/v2` is accepted.
-* Tokens are resolved at connect time from a reference and redacted from every error string.
-* The client always drains the socket (BAT drops clients with 256 queued frames) and uses bounded event queues.
-* Session text is untrusted input: agents should not follow instructions found in it.
-* The optional Jev judgment layer tries TypeSafe first, then OpenRouter Decisions `typesafe/jev-1.13` using
-  `OPENROUTER_API_KEY` from the environment. It times out after a few seconds and retains deterministic
-  decisions if both fail. It gets short excerpts with credential-looking strings masked. No keys live here.
-
-Details: [SECURITY.md](SECURITY.md), [docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/ORCHESTRATE.md](docs/ORCHESTRATE.md).
+| Area | Guides |
+| --- | --- |
+| Getting started | [English](docs/getting-started.md) · [繁體中文](docs/getting-started.zh-TW.md) · [Configuration example](examples/hosts.example.toml) |
+| Product and installation | [Shared decisions](docs/product/realignment-v2.md) · [Managed installation requirement](docs/design/managed-installation.md) · [Work items](docs/design/work-items.md) |
+| Desktop / Web | [Shared frontend](docs/design/shared-frontend.md) · [Tauri](docs/design/desktop.md) · [Fleet](docs/design/desktop-fleet-native.md) · [Updates](docs/design/desktop-updates.md) |
+| Dispatch | [Managed start](docs/design/session-start.md) · [Published repositories](docs/design/repository-sync.md) · [Checkpoints](docs/design/checkpoints.md) · [Task Service](docs/design/task-service.md) |
+| Results | [Artifacts](docs/design/artifacts.md) · [Integration](docs/design/integration.md) · [Merge / deployment](docs/design/delivery.md) · [Cleanup](docs/design/cleanup.md) |
+| Automation | [API](docs/design/api-v1.md) · [Operations](docs/design/operations-unification.md) · [Agent skills](docs/agent-skills.md) · [Protocol](docs/PROTOCOL.md) |
 
 ## Development
 
 ```bash
-uv sync --extra dev
-uv run ruff check . && uv run pytest            # unit tests use a mock TLS WebSocket server
-BATC_LIVE=1 uv run pytest tests/test_live.py    # optional read-only test against your configured hosts
+uv sync --locked --extra dev
+uv run ruff check .
+pytest-disktmp uv run pytest -q
+
+cd desktop
+npm ci
+npm run build:all
+npm test
+npm run test:ui
 ```
 
-## License
+`pytest-disktmp` is the development host's disk-temp wrapper. If unavailable, use a unique disk-backed `--basetemp` and delete it on exit; never use `/dev/shm` or another tmpfs. See [CONTRIBUTING](CONTRIBUTING.md) and [AGENTS.md]. Backend changes also require the Python 3.10 suite.
 
-MIT, see [LICENSE](LICENSE). BAT itself is MIT-licensed by TonyQ.
+Edit shared UI in `desktop/src` and regenerate browser assets. The public project site lives in `site/`; see [site maintenance](site/README.md). Automated tests must not write to live BAT hosts.
+
+## Credits and license
+
+An unofficial companion, **not affiliated with or endorsed by BAT's authors**. BAT is by [TonyQ / tony1223](https://github.com/tony1223) and contributors. Protocol notes were originally read from BAT v3.2.12; compatibility must be checked as BAT evolves.
+
+[Project Hub](https://github.com/kieiken/project-hub) informs selected organization and interaction patterns. No Hub snapshot importer or runtime dependency is included. [Adoption review](docs/product/project-hub-frontend-audit-2026-10-09.md).
+
+MIT · [LICENSE](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md) · [Changelog](CHANGELOG.md)

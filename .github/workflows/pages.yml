@@ -5,23 +5,73 @@ on:
     branches: [main]
     paths:
       - "site/**"
+      - "scripts/*product_site*"
+      - "README*.md"
+      - "docs/getting-started*.md"
+      - "docs/design/managed-installation.md"
+      - ".github/workflows/pages.yml"
+  pull_request:
+    paths:
+      - "site/**"
+      - "scripts/*product_site*"
+      - "README*.md"
+      - "docs/getting-started*.md"
+      - "docs/design/managed-installation.md"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: pages
+  group: pages-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
   cancel-in-progress: false
 
 jobs:
+  validate:
+    name: Validate product website
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Generated content and local documentation links
+        run: |
+          python3 scripts/build_product_site.py --check
+          python3 scripts/check_product_site.py
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Browser verification dependencies
+        working-directory: desktop
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Responsive bilingual browser checks
+        env:
+          SITE_SCREENSHOT_DIR: ${{ runner.temp }}/product-site-evidence
+        run: node scripts/verify_product_site.mjs
+      - name: Save website screenshots and receipts
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: product-site-evidence
+          path: ${{ runner.temp }}/product-site-evidence
+          if-no-files-found: ignore
+
   deploy:
     name: Deploy static site
+    needs: validate
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

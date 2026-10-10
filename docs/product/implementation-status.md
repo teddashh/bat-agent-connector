@@ -8,6 +8,14 @@
 
 ## 目前續作
 
+### 2026-10-10 安裝產品定位與公開文件
+
+負責人明確要求桌面安裝包自動準備整個產品環境，包括持續運作／重連的 Connector 與
+點擊開啟 Dashboard 網頁。這是正常安裝路徑；existing central 僅是加入既有環境的進階選項。
+[安裝合約](../design/managed-installation.md) 記錄 runtime、身分、owner、瀏覽器登入交接、
+登入啟動與跨平台驗收要求。現有套件尚未實作自動 provisioning，不能以文件重包裝代替交付。
+README 與網站依此區分產品目標、已交付能力、驗證包與開發試用設定。
+
 ### 2026-10-10 E2E UX 審查後的共用介面修正
 
 `fix/ux-audit-followup` 修正 Web 手機登入欄位溢出、表單缺少標籤、首次 session 讀取失敗
