@@ -143,7 +143,7 @@ function workspaceNavigation({ h, t, api, guard, onEvents, namespace, errorBox }
 			sessionStorage.setItem(key, JSON.stringify([...expanded]));
 		} catch {}
 	};
-	const link = (href, label, state = null) => h("a", {
+	const link = (href, label, state = null, reading = null) => h("a", {
 		href,
 		class: "workspace-tree-link",
 		"data-tree-key": href,
@@ -151,12 +151,15 @@ function workspaceNavigation({ h, t, api, guard, onEvents, namespace, errorBox }
 	}, h("span", {
 		class: `workspace-dot ${state?.tone || ""}`,
 		"aria-hidden": "true"
-	}), h("span", { class: "workspace-tree-label" }, label), state ? h("span", { class: "workspace-tree-state" }, t(state.key)) : null);
+	}), h("span", { class: "workspace-tree-label" }, label), state ? h("span", { class: "workspace-tree-state" }, t(state.key)) : null, reading?.unread_count > 0 ? h("span", {
+		class: "workspace-tree-state",
+		title: t("conversation_count_note")
+	}, t("conversation_badge", { count: reading.unread_count }) + (reading.complete ? "" : "+")) : null);
 	const workLink = (pid, item) => link(`#/work/${[
 		pid,
 		item.kind,
 		item.id
-	].map(encodeURIComponent).join("/")}`, item.title || item.branch || item.action || item.id, sessionActivity(item.session || {}));
+	].map(encodeURIComponent).join("/")}`, item.title || item.branch || item.action || item.id, sessionActivity(item.session || {}), item.reading);
 	const render = () => {
 		if (disposed) return;
 		const focus = tree.contains(document.activeElement) ? document.activeElement?.dataset.treeKey : null;
@@ -254,7 +257,7 @@ function workspaceNavigation({ h, t, api, guard, onEvents, namespace, errorBox }
 						cursors.add(cursor);
 					}
 					const focused = sessionRows.contains(document.activeElement) ? document.activeElement.getAttribute("href") : null;
-					sessionRows.replaceChildren(...groupedSessions([...rows.values()]).map((group) => h("div", {}, h("p", { class: "muted workspace-session-group" }, group.host, " · ", group.name || group.id || t("obs_unknown")), ...group.sessions.map((session) => link(`#/session/${[session.host, session.session_id].map(encodeURIComponent).join("/")}`, session.title || session.session_id, sessionActivity(session))))), h("p", { class: "muted" }, t("attention_loaded", { count: rows.size })));
+					sessionRows.replaceChildren(...groupedSessions([...rows.values()]).map((group) => h("div", {}, h("p", { class: "muted workspace-session-group" }, group.host, " · ", group.name || group.id || t("obs_unknown")), ...group.sessions.map((session) => link(`#/session/${[session.host, session.session_id].map(encodeURIComponent).join("/")}`, session.title || session.session_id, sessionActivity(session), session.reading)))), h("p", { class: "muted" }, t("attention_loaded", { count: rows.size })));
 					if (focused) [...sessionRows.querySelectorAll("a")].find((a) => a.getAttribute("href") === focused)?.focus({ preventScroll: true });
 					more.hidden = !cursor;
 					sessionsLoaded = true;
@@ -1040,7 +1043,7 @@ function renderMessage(h, t, source, copy) {
 }
 //#endregion
 //#region src/conversation.js
-function conversationPanel({ h, t, when, guard }) {
+function conversationPanel({ h, t, when, guard, readingActions = null }) {
 	const viewport = h("div", {
 		class: "conversation-scroll",
 		tabindex: "0",
@@ -1061,13 +1064,51 @@ function conversationPanel({ h, t, when, guard }) {
 		type: "button",
 		hidden: true,
 		onclick: () => {
+			if (olderWindow && readingActions) {
+				run(() => readingActions.latest());
+				return;
+			}
 			viewport.scrollTop = viewport.scrollHeight;
 			notice.hidden = true;
 			indicator();
 		}
 	}, t("message_latest"));
-	const box = h("section", { class: "panel conversation" }, h("div", { class: "muted" }, t("message_window")), notice, viewport, h("div", { class: "conversation-toolbar" }, status, latest), fallback);
-	let rows = new Map(), initialized = false, disposed = false, copyAttempt = 0;
+	const progress = h("span", {
+		class: "muted",
+		role: "status",
+		"data-conversation-reading": ""
+	});
+	const mark = h("button", {
+		class: "mini",
+		type: "button",
+		onclick: () => {
+			const messages = visible().filter((row) => row.reading?.can_mark && row.reading?.unread).map((row) => ({
+				message_id: row.id,
+				revision: row.reading.revision
+			}));
+			if (messages.length) run(() => readingActions.mark(messages));
+		}
+	}, t("conversation_mark"));
+	const remember = h("button", {
+		class: "mini",
+		type: "button",
+		onclick: () => {
+			const row = visible()[0];
+			if (row?.reading) run(() => readingActions.remember({
+				message_id: row.id,
+				revision: row.reading.revision,
+				offset: Math.round(row.node.getBoundingClientRect().top - viewport.getBoundingClientRect().top)
+			}, reading?.position?.version || 0));
+		}
+	}, t("conversation_remember"));
+	const older = h("button", {
+		class: "mini",
+		type: "button",
+		hidden: true,
+		onclick: () => run(() => readingActions.older())
+	}, t("conversation_older"));
+	const box = h("section", { class: "panel conversation" }, h("div", { class: "muted" }, t("message_window")), notice, viewport, h("div", { class: "conversation-toolbar" }, status, latest), readingActions ? h("div", { class: "actions" }, progress, mark, remember, older) : null, fallback);
+	let rows = new Map(), initialized = false, disposed = false, copyAttempt = 0, reading = null, busy = false, olderWindow = false;
 	const alive = () => {
 		if (disposed) return false;
 		try {
@@ -1078,10 +1119,38 @@ function conversationPanel({ h, t, when, guard }) {
 		}
 	};
 	const atBottom = () => viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 48;
+	const visible = () => {
+		if (document.visibilityState !== "visible") return [];
+		const bounds = viewport.getBoundingClientRect(), top = Math.max(bounds.top, 0), bottom = Math.min(bounds.bottom, innerHeight);
+		return [...rows.values()].filter((row) => {
+			const rect = row.node.getBoundingClientRect();
+			return bottom > top && rect.bottom > top && rect.top < bottom;
+		});
+	};
 	const indicator = () => {
-		latest.hidden = atBottom();
+		latest.hidden = !olderWindow && atBottom();
+		if (!readingActions) return;
+		mark.disabled = busy || !visible().some((row) => row.reading?.can_mark && row.reading?.unread);
+		remember.disabled = busy || !visible()[0]?.reading;
+		older.disabled = busy;
+	};
+	const run = async (action) => {
+		if (!alive() || busy) return;
+		busy = true;
+		indicator();
+		try {
+			await action();
+			if (alive()) status.textContent = t("conversation_saved");
+		} catch (error) {
+			if (alive()) status.textContent = error.message || String(error);
+		} finally {
+			busy = false;
+			if (alive()) indicator();
+		}
 	};
 	viewport.addEventListener("scroll", indicator, { passive: true });
+	window.addEventListener("scroll", indicator, { passive: true });
+	window.addEventListener("resize", indicator);
 	const copy = async (text) => {
 		if (!alive()) return;
 		const attempt = ++copyAttempt;
@@ -1111,13 +1180,13 @@ function conversationPanel({ h, t, when, guard }) {
 			input.select();
 		}
 	};
-	const update = (messages) => {
+	const update = (messages, state = null) => {
 		if (!alive()) return;
 		const top = viewport.getBoundingClientRect().top;
 		const anchor = [...rows.entries()].find(([, row]) => row.node.getBoundingClientRect().bottom > top);
 		const selection = window.getSelection();
 		const readingSelection = selection && !selection.isCollapsed && viewport.contains(selection.anchorNode);
-		const follow = !initialized || atBottom() && !readingSelection;
+		const follow = !initialized || !state?.preserve && atBottom() && !readingSelection;
 		const offset = anchor ? anchor[1].node.getBoundingClientRect().top - top : 0, scrollTop = viewport.scrollTop;
 		const next = new Map(), occurrences = new Map();
 		for (const message of messages) {
@@ -1151,6 +1220,9 @@ function conversationPanel({ h, t, when, guard }) {
 				row.meta = meta;
 			}
 			row.node.className = `msg${message.role === "user" ? " user" : ""}`;
+			row.id = message.id;
+			row.reading = message.reading;
+			row.node.dataset.messageId = typeof message.id === "string" ? message.id : "";
 			if (row.text !== text) {
 				row.body.replaceChildren(...renderMessage(h, t, text, copy));
 				row.text = text;
@@ -1177,6 +1249,28 @@ function conversationPanel({ h, t, when, guard }) {
 			if (anchor) notice.hidden = false;
 		}
 		rows = next;
+		if (state?.restore) {
+			const row = [...rows.values()].find((row) => row.id === state.restore.message_id);
+			if (row) {
+				viewport.scrollTop += row.node.getBoundingClientRect().top - viewport.getBoundingClientRect().top - state.restore.offset;
+				notice.hidden = false;
+				notice.textContent = t("conversation_restored");
+			} else {
+				notice.hidden = false;
+				notice.textContent = t("message_anchor_missing");
+			}
+		}
+		if (state?.latest) {
+			viewport.scrollTop = viewport.scrollHeight;
+			notice.hidden = true;
+		}
+		if (readingActions && state) {
+			reading = state.reading;
+			older.hidden = state.next_offset == null;
+			olderWindow = Boolean(state.olderWindow);
+			progress.textContent = reading?.unread_count == null ? t("conversation_unknown") : t(reading.complete ? "conversation_unread" : "conversation_partial", { count: reading.unread_count });
+			progress.title = t("conversation_count_note");
+		}
 		initialized = true;
 		indicator();
 	};
@@ -1186,6 +1280,8 @@ function conversationPanel({ h, t, when, guard }) {
 		dispose() {
 			disposed = true;
 			viewport.removeEventListener("scroll", indicator);
+			window.removeEventListener("scroll", indicator);
+			window.removeEventListener("resize", indicator);
 		}
 	};
 }
@@ -2219,6 +2315,17 @@ var STRINGS = {
 		attention_empty: "這一類目前沒有項目。",
 		attention_not_updated: "本次未能更新；若下方有資料，仍是上次讀取的內容。",
 		attention_invalid: "清單回應不完整，請重新讀取。",
+		conversation_mark: "標記畫面中的訊息已讀",
+		conversation_remember: "記住閱讀位置",
+		conversation_older: "更早的訊息",
+		conversation_unread: "上次觀察：{count} 則未讀",
+		conversation_partial: "部分紀錄：{count} 則未讀",
+		conversation_unknown: "尚未讀取對話紀錄",
+		conversation_count_note: "中央記錄已觀察訊息的版本；新內容須重新讀取才會計入，部分紀錄不代表完整總數。捲動與事件同步不會標記已讀。",
+		conversation_badge: "{count} 未讀",
+		conversation_saved: "閱讀狀態已保存。",
+		conversation_restored: "已回到同一身分保存的閱讀位置。",
+		conversation_pending: "閱讀操作尚未完成，請稍後查回或用同一按鈕重試。",
 		reading_unread: "未讀更新",
 		reading_read: "此版本已讀",
 		reading_mark: "標記此版本已讀",
@@ -3445,6 +3552,17 @@ var STRINGS = {
 		attention_empty: "No items in this category.",
 		attention_not_updated: "Could not refresh. Any items below are from the previous read.",
 		attention_invalid: "Incomplete list response; reload to try again.",
+		conversation_mark: "Mark visible messages read",
+		conversation_remember: "Remember reading position",
+		conversation_older: "Earlier messages",
+		conversation_unread: "Last observed: {count} unread",
+		conversation_partial: "Partial history: {count} unread",
+		conversation_unknown: "Conversation has not been observed",
+		conversation_count_note: "Central tracks observed message revisions. New content is counted after refreshing; partial history is not a complete total. Scrolling and event sync never mark messages read.",
+		conversation_badge: "{count} unread",
+		conversation_saved: "Reading state saved.",
+		conversation_restored: "Restored the reading position saved by this identity.",
+		conversation_pending: "The reading operation is still pending. Check again or retry the same button.",
 		reading_unread: "Unread update",
 		reading_read: "This version is read",
 		reading_mark: "Mark this version read",
@@ -10463,11 +10581,28 @@ async function viewSession(main, host, sid, context = null) {
 		class: "workspace-result",
 		"data-workspace-result": ""
 	});
+	let messageOffset = 0, nextMessageOffset = null, firstMessages = true, messageRequest = 0;
+	const readingSupported = state.caps?.features?.session_reading?.version === 1;
+	const saveReading = async (action, params, preconditions = {}) => {
+		const op = await submit(action, {
+			host,
+			session_id: sid
+		}, params, preconditions, `${action}.${host}.${sid}`);
+		assertView(connection);
+		await loadMessages();
+		if (op.status !== "succeeded") throw new Error(op.status_reason || t("conversation_pending"));
+	};
 	const conversation = conversationPanel({
 		h,
 		t,
 		when,
-		guard: () => assertView(connection)
+		guard: () => assertView(connection),
+		readingActions: readingSupported ? {
+			mark: (messages) => saveReading("session.read", { messages }),
+			remember: (position, version) => saveReading("session.position", position, { expected_version: version }),
+			older: () => loadMessages(nextMessageOffset, false),
+			latest: () => loadMessages(0, true)
+		} : null
 	});
 	const pending = h("div", { "data-pending-controls": "" }), status = h("div", { class: "muted" });
 	const scope = `send.${host}.${sid}`, draftKey = `batc.draft.${connection.namespace}.${scope}`;
@@ -10762,10 +10897,32 @@ async function viewSession(main, host, sid, context = null) {
 		}
 		fill(result, h("h2", {}, t("workspace_result")), ...work.map((item) => deliveryWork(item, repositories, true)), !work.length ? h("p", { class: "muted" }, t("workspace_result_empty")) : null, data.work_items?.length ? linkedItems(data.work_items) : null, !work.some((item) => item.worktree_id === row.worktree_id) && row.worktree_id ? h("p", {}, observationLink("worktree", row.worktree_id)) : null);
 	};
-	const loadMessages = async () => {
-		const read = await api("GET", `${path}/messages?last_n=30`);
+	const loadMessages = async (offset = messageOffset, latest = false) => {
+		if (offset == null) return;
+		const request = ++messageRequest;
+		const get = (offset) => api("GET", `${path}/messages?last_n=30&offset=${offset}${readingSupported ? "&max_chars=60000&max_message_chars=60000" : ""}`);
+		let read = await get(offset);
 		assertView(connection);
-		conversation.update(read.messages);
+		if (request !== messageRequest) return;
+		const restore = firstMessages && readingSupported ? read.reading?.position : null;
+		if (restore && Number.isInteger(restore.page_offset) && restore.page_offset >= 0) {
+			const savedOffset = Math.max(0, restore.page_offset - 15);
+			if (savedOffset !== offset) {
+				offset = savedOffset;
+				read = await get(offset);
+				assertView(connection);
+			}
+			if (request !== messageRequest) return;
+		}
+		messageOffset = offset;
+		nextMessageOffset = read.next_offset;
+		firstMessages = false;
+		conversation.update(read.messages, readingSupported ? {
+			...read,
+			restore,
+			latest,
+			olderWindow: offset > 0
+		} : null);
 	};
 	const refresh = async (fromEvent = false) => {
 		if (refreshInFlight) {

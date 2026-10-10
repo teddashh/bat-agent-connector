@@ -33,6 +33,7 @@ from . import (
     registry,
     service,
     session_metadata,
+    session_reading,
     task_actions,
     task_control,
     work_item_reads,
@@ -184,7 +185,7 @@ class TaskDaemon:
         self.ops = OperationService(self.journal,
                                     actions=api_actions.ACTIONS + delivery.ACTIONS + checkpoints.ACTIONS
                                     + integration.ACTIONS + work_items.ACTIONS + task_actions.ACTIONS + artifacts.ACTIONS
-                                    + session_metadata.ACTIONS + work_item_reads.ACTIONS)
+                                    + session_metadata.ACTIONS + work_item_reads.ACTIONS + session_reading.ACTIONS)
         self.coordinator.operations = self.ops
         github = None
         if config.github.token_ref:

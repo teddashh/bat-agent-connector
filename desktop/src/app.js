@@ -1023,7 +1023,20 @@ async function viewSession(main, host, sid, context = null) {
   const head = h("div", { class: "workspace-session-heading" });
   const metadata = h("div", {class: "workspace-metadata"});
   const result = h("section", {class: "workspace-result", "data-workspace-result": ""});
-  const conversation = conversationPanel({h, t, when, guard: () => assertView(connection)});
+  let messageOffset = 0, nextMessageOffset = null, firstMessages = true, messageRequest = 0;
+  const readingSupported = state.caps?.features?.session_reading?.version === 1;
+  const saveReading = async (action, params, preconditions = {}) => {
+    const op = await submit(action, {host, session_id: sid}, params, preconditions, `${action}.${host}.${sid}`);
+    assertView(connection);
+    await loadMessages();
+    if (op.status !== "succeeded") throw new Error(op.status_reason || t("conversation_pending"));
+  };
+  const conversation = conversationPanel({h, t, when, guard: () => assertView(connection), readingActions: readingSupported ? {
+    mark: messages => saveReading("session.read", {messages}),
+    remember: (position, version) => saveReading("session.position", position, {expected_version: version}),
+    older: () => loadMessages(nextMessageOffset, false),
+    latest: () => loadMessages(0, true),
+  } : null});
   const pending = h("div", { "data-pending-controls": "" }), status = h("div", { class: "muted" });
   const scope = `send.${host}.${sid}`, draftKey = `batc.draft.${connection.namespace}.${scope}`;
   const box = h("textarea", { placeholder: t("send_placeholder") });
@@ -1206,9 +1219,20 @@ async function viewSession(main, host, sid, context = null) {
       data.work_items?.length ? linkedItems(data.work_items) : null,
       !work.some(item => item.worktree_id === row.worktree_id) && row.worktree_id ? h("p", {}, observationLink("worktree", row.worktree_id)) : null);
   };
-  const loadMessages = async () => {
-    const read = await api("GET", `${path}/messages?last_n=30`); assertView(connection);
-    conversation.update(read.messages);
+  const loadMessages = async (offset = messageOffset, latest = false) => {
+    if (offset == null) return;
+    const request = ++messageRequest;
+    const get = offset => api("GET", `${path}/messages?last_n=30&offset=${offset}${readingSupported ? "&max_chars=60000&max_message_chars=60000" : ""}`);
+    let read = await get(offset); assertView(connection);
+    if (request !== messageRequest) return;
+    const restore = firstMessages && readingSupported ? read.reading?.position : null;
+    if (restore && Number.isInteger(restore.page_offset) && restore.page_offset >= 0) {
+      const savedOffset = Math.max(0, restore.page_offset - 15);
+      if (savedOffset !== offset) {offset = savedOffset; read = await get(offset); assertView(connection);}
+      if (request !== messageRequest) return;
+    }
+    messageOffset = offset; nextMessageOffset = read.next_offset; firstMessages = false;
+    conversation.update(read.messages, readingSupported ? {...read, restore, latest, olderWindow: offset > 0} : null);
   };
   const refresh = async (fromEvent = false) => {
     if (refreshInFlight) {

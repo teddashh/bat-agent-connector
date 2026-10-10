@@ -377,6 +377,8 @@ class Journal:
         session_metadata_schema(self)
         from .work_item_reads import schema as work_item_reads_schema
         work_item_reads_schema(self)
+        from .session_reading import schema as session_reading_schema
+        session_reading_schema(self)
 
     def _migrate_artifacts(self):
         # Additive DDL runs after numbered data migrations without claiming their versions.
