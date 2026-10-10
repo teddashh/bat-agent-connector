@@ -11,6 +11,7 @@ import {readArtifactContent} from "./transport/artifact-content.ts";
 import {conversationPanel} from "./conversation.js";
 import {composerShortcut} from "./composer-shortcut.js";
 import {treeInteractions} from "./tree-interactions.js";
+import {modelPreferencesPanel} from "./model-preferences.js";
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
@@ -3202,6 +3203,7 @@ async function viewApprovals(main) {
 async function viewStart(main) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const panel = sessionStartPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    submitPreference: submit,
     ready: () => state.online && !state.nativeBusy, errorBox, opStatus,
     storageKey: `batc.start.${connection.namespace}`});
   main.append(h("a", {href: "#/sessions"}, t("nav_sessions")), h("h1", {}, t("start_title_page")),
@@ -3231,6 +3233,7 @@ async function viewOrchestration(main, selectedMode = "relay", host, sid) {
 async function viewPublished(main) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const panel = repositoryStartPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    submitPreference: submit,
     ready: () => state.online && !state.nativeBusy, errorBox, opStatus, storageKey: `batc.published.${connection.namespace}`,
     attachmentFactory: (prompt, changed) => attachmentDraft("published", prompt, [], false, changed)});
   main.append(h("a", {href: "#/sessions"}, t("nav_sessions")), h("h1", {}, t("pub_title")),
@@ -3245,6 +3248,7 @@ async function viewPublished(main) {
 async function viewProjectDispatch(main, pid) {
   const connection = {epoch: state.epoch, namespace: state.namespace, generation};
   const panel = repositoryStartPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    submitPreference: submit,
     ready: () => state.online && !state.nativeBusy, errorBox, opStatus, project: pid,
     storageKey: `batc.dispatch.${connection.namespace}.${pid}`,
     attachmentFactory: (prompt, changed) => attachmentDraft(`dispatch.${pid}`, prompt, [], false, changed)});
@@ -3375,7 +3379,14 @@ async function route() {
     worktree: (main, id) => viewObservedResource(main, "worktree", id) };
   const off = await (views[name] || viewHome)(main, ...rest);
   if (mine !== generation) { if (off) off(); return; } // the user navigated away while this view loaded
-  teardown = off || null;
+  let preferences;
+  if (name === "settings" && state.caps?.features?.host_preferences?.version === 1) {
+    const connection = {epoch: state.epoch, namespace: state.namespace, generation};
+    preferences = modelPreferencesPanel({h, t, api, caps: () => state.caps, guard: () => assertView(connection), submit,
+      storageKey: `batc.model-preferences.${connection.namespace}`, onEvents});
+    main.append(preferences.box);
+  }
+  teardown = () => {off?.(); preferences?.dispose();};
   state.viewReady = true;
 }
 
