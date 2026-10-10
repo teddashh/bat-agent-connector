@@ -60,7 +60,7 @@ def admit_control(ops, principal, target, params, pre):
     if params.get("actor", "service") not in {"service", "ted"}:
         raise OperationError("INVALID_PARAMS", "invalid actor", 422)
     if params.get("actor") == "ted" and not params.get("source_message_id"):
-        raise OperationError("INVALID_PARAMS", "Ted action requires source_message_id", 422)
+        raise OperationError("INVALID_PARAMS", "User action requires source_message_id", 422)
     if "abort_current" in params and type(params["abort_current"]) is not bool:
         raise OperationError("INVALID_PARAMS", "abort_current must be a boolean", 422)
     return task_control.admission_binding(task, session=bool(params.get("abort_current")))

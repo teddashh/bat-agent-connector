@@ -712,9 +712,9 @@ class BatTaskAdapter:
             original_archive = original_words_archive(
                 words, self.journal.path.parent / "handoff-archive", task["task_id"])
             await self._verify_original_archive(task, original_archive)
-        scope = ("Ted's COMPLETE verbatim request is at " + original_archive["path"] +
+        scope = ("The user's COMPLETE verbatim request is at " + original_archive["path"] +
                  "; SHA-256 " + original_archive["sha256"] + ". Read it before planning."
-                 if original_archive else "Ted's original words (verbatim):\n" + words)
+                 if original_archive else "The user's original words (verbatim):\n" + words)
         instructions = scope
         if self.journal:
             try:
@@ -741,7 +741,7 @@ class BatTaskAdapter:
                                       original_archive["sha256"] not in prompt)):
                 raise ValueError("full request archive reference lost in BAT handoff")
             if not original_archive and words not in prompt:
-                raise ValueError("Ted's verbatim request lost in BAT handoff")
+                raise ValueError("The user's verbatim request lost in BAT handoff")
             if self.journal:
                 self.journal.command_prompt_hash(handoff_command_id, hashlib.sha256(prompt.encode()).hexdigest())
 

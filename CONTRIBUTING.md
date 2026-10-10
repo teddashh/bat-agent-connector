@@ -12,3 +12,15 @@ Thanks for helping! This is an unofficial companion to Better Agent Terminal; pl
 * Never commit real hostnames, IPs, fingerprints, tokens, session ids, workspace names or emails. CI runs a secret
   scan; please also run `gitleaks detect` locally.
 * Protocol behaviour should cite the BAT source file/version it was read from.
+
+Public documentation, screenshots, examples and issue/PR text must work without a
+maintainer's private Fleet inventory or deployment. Use synthetic host names, reserved
+example addresses and generic user paths. Keep private installation evidence, operator
+conversation links and machine-specific incident logs outside the repository. Public
+author and license attribution should remain intact.
+
+Run `python scripts/check_public_content.py` before publishing. It checks tracked files
+for private configuration filenames, shared conversation links and non-example home
+paths, and prints locations without matched values. It cannot recognize every private
+hostname or deployment narrative: review those manually, including images and GitHub
+text. Changing current files does not remove information from Git history or old copies.

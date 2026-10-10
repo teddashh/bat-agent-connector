@@ -8,7 +8,6 @@ managed artifact capture and exact-revision acceptance. It does not complete iss
 - [Python CI](https://github.com/teddashh/bat-agent-connector/actions/runs/37879651946): 3.10–3.13 each 2568 passed/33 skipped, Ruff, generated skills and secret scan passed.
 - [Desktop CI](https://github.com/teddashh/bat-agent-connector/actions/runs/37879651932): 179 shared UI, 12 state, 33 Windows/32 Linux Rust; Windows NSIS/Linux deb unsigned packages and central fixtures passed.
 - Local frozen backend `9b67ed8`: Python 3.13 2568/33 in 1017.37s, Python 3.10 2568/33 in 993.88s. UI-only descendants are covered by exact candidate CI, not retroactively by those local runs.
-- Installer #9 merged `ac1a1aa62aed9389a2eaf04024aa7bbf7e5cde39`, pins exact candidate plus canonical workflow `.7` and SHA-256 `8e1f71de67b43051b8b2b067237afc460f39aef2023e11db0c22bab9245aaca7`. Independent review, 17 mock/temp cases under default Python and 3.10, shell syntax and real-source verify-only passed. Initial 3.10 setup lacked documented PyYAML; isolated installer requirements fixed setup before the successful run. No actual install or registration change.
 
 The owner wants the same product with a Tauri UI and Project Hub's orderly sessions. Work stays on the
 selected BAT host/workspace. Cross-host code synchronization uses explicit GitHub bindings and published

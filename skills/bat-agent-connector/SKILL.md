@@ -4,7 +4,7 @@ description: Use this when you need to check on, read, wait for, or (only when e
 version: 0.2.4
 license: MIT
 metadata:
-  workflow_version: "2026-10-08.14"
+  workflow_version: "2026-10-08.15"
   api_version: "1"
   contract_version: "2026-10-08"
 ---
@@ -582,7 +582,7 @@ A pause or control-version change during trusted verification cancels that run w
 The task stays verifying with the user's pause; do not treat it as a verifier failure or escalate it yourself.
 After an authorized resume, the next tick runs verification again, including a cancelled dependency retry.
 Paused tasks have no verification deadline. Owner loss leaves state to the existing/new owner; a binding
-mismatch requires checking the current session before resume. Genuine verifier errors still need Ted.
+mismatch requires checking the current session before resume. Genuine verifier errors require an operator decision.
 
 PR metadata is separate from head integration: read `github_pr_preview`, then use `github_pr_update` with
 its metadata_digest, a new idempotency_key and title and/or raw Markdown body (empty body clears; omitted stays).

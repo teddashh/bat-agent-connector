@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "fleet_version": "3.2.5",
+  "direct_probe_ms": 600,
+  "cloudflare_access_hosts": [],
+  "credentials": {
+    "connector-observe": {
+      "kind": "windows-dpapi",
+      "name": "connector-observe"
+    },
+    "bat-example": {
+      "kind": "bat-profile-token",
+      "profile_id": "example-profile"
+    }
+  },
+  "fingerprints": {
+    "pin-example": {
+      "kind": "bat-profile-pin",
+      "profile_id": "example-profile"
+    }
+  },
+  "hosts": [
+    {
+      "name": "example-host",
+      "profile": "example-profile",
+      "label": "Example BAT host",
+      "local": "127.0.0.2:19001",
+      "target": "127.0.0.1:9000",
+      "probe": null,
+      "routes": [
+        {
+          "kind": "lan",
+          "alias": "bat-example",
+          "probe": "192.0.2.10:22"
+        }
+      ],
+      "provision_route": "lan",
+      "bat": {
+        "remote_profile_id": "default",
+        "credential_ref": "bat-example",
+        "fingerprint_ref": "pin-example",
+        "protocol": "bat-remote/v2",
+        "min_version": "3.2.5"
+      },
+      "workspace_bindings": [],
+      "connector_endpoint": null
+    }
+  ],
+  "provisioning_profiles": [
+    "example-profile"
+  ],
+  "connector": {
+    "name": "connector",
+    "label": "Existing central",
+    "local": "127.0.0.1:19796",
+    "target": "127.0.0.1:18796",
+    "ssh_alias": null,
+    "dashboard_path": "/dashboard/",
+    "credential_ref": "connector-observe",
+    "supported_api_versions": [
+      1
+    ],
+    "min_contract_version": "2026-10-08",
+    "required_features": [
+      "inventory",
+      "events_stream"
+    ]
+  }
+}

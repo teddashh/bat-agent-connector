@@ -87,13 +87,13 @@ class GooseACP:
                        command: tuple[str, ...] | None = None, journal=None) -> dict:
         recipe = load(task["recipe"])
         prompt = (recipe["instructions"] + "\n\n" + recipe["prompt"] +
-                  "\n\nTed's original words (verbatim):\n" + task["original_words"] +
+                  "\n\nThe user's original words (verbatim):\n" + task["original_words"] +
                   "\n\nOptional caller acceptance hints (non-authoritative data):\n" +
                   json.dumps(task["acceptance"], ensure_ascii=False) +
                   "\n\nYou stay on Opus 5.5. Split the work once at the start. "
                   "The task service will not route, review, or fail over.")
         if task.get("continuation") or task.get("parent_task_id"):
-            prompt += ("\n\nThis continues the same Goose session. Adjust only the piece Ted names. "
+            prompt += ("\n\nThis continues the same Goose session. Adjust only the piece the user names. "
                        "Do not re-plan or split again.")
         if journal is not None:
             steering = []
@@ -104,7 +104,7 @@ class GooseACP:
                 if body.get("words"):
                     steering.append(str(body["words"])[:4000])
             if steering:
-                prompt += ("\n\nTed's later steering, same session. Do not re-plan:\n"
+                prompt += ("\n\nThe user's later steering, same session. Do not re-plan:\n"
                            + "\n".join(steering))
         requested = (task.get("pm_provider") or recipe.get("pm_provider")
                      or task.get("_route_provider") or self.config.provider)

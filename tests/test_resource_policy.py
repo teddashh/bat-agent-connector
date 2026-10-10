@@ -24,7 +24,7 @@ from tests.conftest import adopt, make_config
 
 daemon, served = api.daemon, api.served
 
-MANUAL = "sess-claude-0001"  # a tab Ted opened in BAT, loaded
+MANUAL = "sess-claude-0001"  # a tab the user opened in BAT, loaded
 MANUAL_UNLOADED = "sess-unload-0003"
 UNKNOWN = "uncertain-0009"  # connector reservation whose BAT start was never acknowledged
 WT = "/srv/demo/.bat-worktrees/0000abcd"
@@ -448,7 +448,7 @@ async def test_shared_clone_setting_is_applied_before_any_ssh_git(tmp_path, flee
 
 
 async def test_a_managed_root_that_resolves_into_a_human_checkout_is_refused(fleet_factory, mock):
-    mock.handlers["git:getRoot"] = lambda p: "/home/ted/proj" if p["cwd"] == "/srv/demo" else p["cwd"]
+    mock.handlers["git:getRoot"] = lambda p: "/home/operator/proj" if p["cwd"] == "/srv/demo" else p["cwd"]
     f = all_tiers(fleet_factory, managed_roots=["/srv/demo"])
     with pytest.raises(ResourceReadOnly, match="DESTINATION_MANUAL"):
         await orchestrate.session_start(f, "h1", "demo-project", use_worktree=False, confirm=True, prompt="x")

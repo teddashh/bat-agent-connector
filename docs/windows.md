@@ -30,11 +30,11 @@ The shared Dashboard provides the adjustable project tree, conversation and send
 
 ## Fleet connections, profiles and sign-in
 
-Keep the existing reviewed Kit inventory, BAT profile index and SSH configuration when Fleet is already deployed. The native adapter reads that configuration. [fleet.example.json](../desktop/fleet.example.json) and the [Fleet installation contract](design/fleet-installation.md) describe its explicit binding; the sample is not a complete private network configuration. Central onboarding does not invent an SSH topology or take over an existing Fleet owner.
+For a new Fleet installation, use the public [Rust configuration and setup guide](design/fleet-configuration.md) with [fleet.example.json](../desktop/fleet.example.json) and the [generic inventory, profile and SSH examples](../desktop/fleet.example/README.md). Explicit `"backend":"rust"` needs no separate repository or legacy PS/VBS scripts. Replace all example connection details with your own trusted configuration. Existing Fleet installations retain their inventory, profiles, SSH configuration and owner; use the native migration flow for a backend change. Central onboarding does not invent SSH topology or take over an existing Fleet owner.
 
 In Connection settings, inspect the current backend and choose **connections**, **BAT profiles** and **Dashboard** independently. Preview prerequisites before saving or launching. Dashboard-only works without a local BAT executable. Tunnel, pinned TLS, BAT authentication/workspace and central observe access are distinct readiness checks.
 
-For Tailscale sign-in, open the installed Tailscale app from its panel, sign in there, then refresh status. Keep the login picker or review the saved launch choices. An omitted `backend` retains **PowerShell** compatibility; moving to Rust requires the explicit migration flow that proves the previous owner stopped.
+For Tailscale sign-in, open the installed Tailscale app from its panel, sign in there, then refresh status. Keep the login picker or review the saved launch choices. An omitted `backend` retains **PowerShell** compatibility; changing an existing PowerShell installation to Rust requires the explicit migration flow that proves the previous owner stopped.
 
 **Start when I sign in** starts the owned managed installation and the selected Windows Fleet login flow. **Open Dashboard in browser** uses authenticated local handoff. Closing the window leaves background central work running. Explicit **Quit Dashboard** follows the normal shutdown guards for the proven local Fleet monitor; it does not stop central tasks or manual BAT sessions.
 

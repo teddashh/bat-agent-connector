@@ -1,7 +1,7 @@
 # Native Fleet supervisor lifecycle
 
 This extends [the Fleet contract](fleet-rust.md), [discovery](fleet-discovery.md),
-[tunnel effects](fleet-tunnel-effects.md) and the reviewed Kit monitor at `2ec4b11`.
+[tunnel effects](fleet-tunnel-effects.md) and the reviewed Kit monitor.
 It is a native library runtime; the app's fixed CLI dispatch, migration, autostart,
 bootstrap and window facade are separate integration work. Central operations and
 remote BAT sessions remain outside its authority.

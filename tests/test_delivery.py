@@ -19,7 +19,7 @@ from tests.operation_helpers import settle_operations
 
 HEAD = "a" * 40
 MERGED = "9" * 40
-TED = api_auth.Principal("ted-dashboard", frozenset({"observe", "merge", "deploy", "integrate"}))
+OPERATOR = api_auth.Principal("operator-dashboard", frozenset({"observe", "merge", "deploy", "integrate"}))
 
 
 @pytest.fixture
@@ -69,7 +69,7 @@ def make_daemon(mock, gh, tmp_path, monkeypatch):
         d.journal.close()
 
 
-async def merge_op(d, key="m1", sha=HEAD, number=7, principal=TED, action="github.pr.merge", **target):
+async def merge_op(d, key="m1", sha=HEAD, number=7, principal=OPERATOR, action="github.pr.merge", **target):
     if (len(sha) != 40 or not principal.allows("merge") or not d.ops.context.get("github")
             or (action == "delivery.merge_and_deploy" and not principal.allows("deploy"))):
         return d.ops.create(principal, action=action, target={"repository": "o/r", "pull_number": number, **target},
@@ -188,7 +188,7 @@ async def test_merge_admission(make_daemon, gh, monkeypatch):
             await merge_op(d, **kwargs)
         assert e.value.code == code
     with pytest.raises(OperationError) as e:
-        d.ops.create(TED, action="github.pr.merge", target={"repository": "x/y", "pull_number": 1},
+        d.ops.create(OPERATOR, action="github.pr.merge", target={"repository": "x/y", "pull_number": 1},
                      preconditions={"expected_head_sha": HEAD}, idempotency_key="k")
     assert e.value.code == "REPO_NOT_CONFIGURED"
     # A09: configuration variants run sequentially; they cannot both own this fleet.
@@ -208,7 +208,7 @@ def deploy_op(d, sha=MERGED, key="d1"):
         fake.branches["main"] = MERGED
     r = d.ops.context["github_config"].recipes["prod"]
     env = deployment.bound_environment(d.ops, r)
-    return d.ops.create(TED, action="deployment.start", target={"recipe": "prod"}, params={"source_sha": sha},
+    return d.ops.create(OPERATOR, action="deployment.start", target={"recipe": "prod"}, params={"source_sha": sha},
                         preconditions={"expected_environment_generation": env["desired_generation"],
                                        "expected_recipe_digest": deployment.recipe_digest(d.ops, r, env["repository_id"])},
                         idempotency_key=key)
@@ -297,7 +297,7 @@ async def test_token_is_read_per_request_and_a_refused_read_after_the_merge_requ
     assert held["status"] == "needs_attention" and held["error_code"] == "GITHUB_401", held
     monkeypatch.setenv("FAKE_GH_TOKEN", gh.token)
     gh.merge(7)  # the queue merged it meanwhile
-    d.ops.resume(TED, op["operation_id"])
+    d.ops.resume(OPERATOR, op["operation_id"])
     done = await settle(d, op["operation_id"])
     assert done["status"] == "succeeded" and done["result"]["via"] == "merge_queue"
     assert gh.count("PUT", "merge-async") == 1
@@ -392,7 +392,7 @@ async def preview_op(d, *, method="squash", key="preview-merge", action="github.
     envelope["action"] = action
     if recipe:
         envelope["preconditions"].update((await deployment.preview(d.ops, recipe))["preconditions"])
-    return doc, d.ops.create(TED, **envelope, idempotency_key=key)[0]
+    return doc, d.ops.create(OPERATOR, **envelope, idempotency_key=key)[0]
 
 
 async def test_c05_base_changed_before_submit_has_diff_and_zero_put(make_daemon, gh):
@@ -508,13 +508,13 @@ async def test_c04_complete_compare_pagination_over_250_commits(make_daemon, gh)
 async def test_c04_old_merge_client_requires_saved_preview(make_daemon, gh):
     d = make_daemon()
     with pytest.raises(OperationError) as e:
-        d.ops.create(TED, action="github.pr.merge", target={"repository": "o/r", "pull_number": 7},
+        d.ops.create(OPERATOR, action="github.pr.merge", target={"repository": "o/r", "pull_number": 7},
                      preconditions={"expected_head_sha": HEAD}, idempotency_key="old")
     assert e.value.code == "PRECONDITION_REQUIRED" and "github_pr_preview" in e.value.message
     assert not gh.requests
 
 
-async def update_op(d, *, params=None, key="metadata", principal=TED, expected=None):
+async def update_op(d, *, params=None, key="metadata", principal=OPERATOR, expected=None):
     pr = (await delivery.pr_preview(d.ops, "o/r", 7))
     return d.ops.create(principal, action="github.pr.update", target={"repository": "o/r", "pull_number": 7},
                         params=params or {"title": "Reviewed title"}, idempotency_key=key,
@@ -567,7 +567,7 @@ async def test_metadata_write_readback_conflict_never_overwrites(make_daemon, gh
     assert done["status"] == "needs_attention" and done["error_code"] == "PR_METADATA_CONFLICT"
     assert done["external_refs"]["metadata_difference"]["observed"]["body"] == "concurrent editor"
     assert gh.count("PATCH", ".") == 1
-    d.ops.resume(TED, op["operation_id"])
+    d.ops.resume(OPERATOR, op["operation_id"])
     await settle(d, op["operation_id"])
     assert gh.count("PATCH", ".") == 1 and gh.pulls[7]["body"] == "concurrent editor"
 
@@ -592,7 +592,7 @@ async def test_metadata_acknowledged_write_conflict_settles_and_releases_pr(make
         with pytest.raises(OperationError) as exc:
             await update_op(d, key="readback-still-pending")
         assert exc.value.code == "PR_UPDATE_IN_PROGRESS" and gh.count("PATCH", ".") == 1
-        d.ops.resume(TED, op["operation_id"])
+        d.ops.resume(OPERATOR, op["operation_id"])
         done = await settle(d, op["operation_id"])
     assert done["status"] == "needs_attention" and done["error_code"] == "PR_METADATA_CONFLICT"
     observed = {"title": "Reviewed title", "body": "Concurrent editor's body"}
@@ -622,13 +622,13 @@ async def test_metadata_acknowledged_write_conflict_settles_and_releases_pr(make
 
     restart_delivery_service(d)
     requests = len(gh.requests)
-    d.ops.resume(TED, op["operation_id"])
+    d.ops.resume(OPERATOR, op["operation_id"])
     held = await settle(d, op["operation_id"])
     assert held["status"] == "needs_attention" and held["error_code"] == "PR_METADATA_CONFLICT"
     assert held["external_refs"] == refs and held["steps"] == done["steps"]
     await pr_delivery.reconcile_metadata(d.ops)
     assert len(gh.requests) == requests
-    d.ops.cancel(TED, op["operation_id"])
+    d.ops.cancel(OPERATOR, op["operation_id"])
     await pr_delivery.reconcile_metadata(d.ops)
     assert (await settle(d, op["operation_id"]))["status"] == "cancelled"
     assert len(gh.requests) == requests and pr_delivery.metadata_settlement(d.ops, op["operation_id"]) == receipt
@@ -653,7 +653,7 @@ async def test_metadata_lost_reply_restart_and_cancel_never_resend(make_daemon, 
     gh.patch_mode = "lost_before"
     op = await update_op(d, params={"body": "late patch"}, key="late")
     assert (await settle(d, op["operation_id"], 2))["status"] == "uncertain"
-    d.ops.cancel(TED, op["operation_id"])
+    d.ops.cancel(OPERATOR, op["operation_id"])
     with pytest.raises(OperationError) as e:
         await update_op(d, key="cannot-overtake")
     assert e.value.code == "PR_UPDATE_IN_PROGRESS"
@@ -733,7 +733,7 @@ async def default_merge_op(d, *, combined=False):
     if combined:
         envelope["preconditions"].update((await deployment.preview(d.ops, "prod"))["preconditions"])
     envelope["params"].pop("method")
-    op = d.ops.create(TED, **envelope, idempotency_key="default-method")[0]
+    op = d.ops.create(OPERATOR, **envelope, idempotency_key="default-method")[0]
     assert doc["method"] == "merge" and "method" not in op["params"]
     return doc, op
 
@@ -792,7 +792,7 @@ async def test_c05_explicit_merge_method_must_match_preview_at_admission(make_da
     envelope = pr_delivery.merge_envelope(doc, recipe="prod" if combined else None)
     envelope["params"]["method"] = "squash"
     with pytest.raises(OperationError) as exc:
-        d.ops.create(TED, **envelope, idempotency_key="wrong-method")
+        d.ops.create(OPERATOR, **envelope, idempotency_key="wrong-method")
     assert exc.value.code == "PREVIEW_MISMATCH"
     assert gh.count("PUT", ".") == 0 and gh.count("POST", ".") == 0
 
@@ -972,7 +972,7 @@ async def test_metadata_cancelled_unknown_write_stays_blocking_until_proven(make
     op = await update_op(d)
     unknown = await settle(d, op["operation_id"])
     assert unknown["status"] == "needs_attention" and unknown["error_code"] == "UNCERTAIN_UNRESOLVED"
-    assert d.ops.cancel(TED, op["operation_id"])["status"] == "cancelled"
+    assert d.ops.cancel(OPERATOR, op["operation_id"])["status"] == "cancelled"
     await pr_delivery.reconcile_metadata(d.ops)
     with pytest.raises(OperationError) as e:
         await update_op(d, key="new")
@@ -1160,7 +1160,7 @@ async def test_metadata_cancel_after_acknowledgement_retains_verified_effect(mak
     waiting = await settle(d, op["operation_id"], 1)
     assert waiting["status"] == "uncertain" and waiting["external_refs"]["write_acknowledged"]
     assert waiting["external_refs"]["verification_pending"]
-    d.ops.cancel(TED, op["operation_id"])
+    d.ops.cancel(OPERATOR, op["operation_id"])
     monkeypatch.setattr(client, "pull", original)
     await pr_delivery.reconcile_metadata(d.ops)
     assert d.ops.get(op["operation_id"])["external_refs"]["observed_intent"]
@@ -1207,7 +1207,7 @@ async def test_c05_merge_verification_intent_precedes_reads_and_resume_is_read_o
     monkeypatch.setattr(client, "commit", check_intent)
     assert (await settle(d, op["operation_id"]))["error_code"] == "MERGE_RESULT_UNVERIFIABLE"
     gh.commits[MERGED]["parents"][1]["sha"] = HEAD
-    d.ops.resume(TED, op["operation_id"])
+    d.ops.resume(OPERATOR, op["operation_id"])
     done = await settle(d, op["operation_id"])
     assert done["status"] == "succeeded" and done["result"]["verified"]
     assert any(s["name"].startswith("merge.verify.retry.") for s in done["steps"])
@@ -1237,7 +1237,7 @@ async def test_metadata_lost_before_write_settles_not_applied_after_window(make_
     unknown = await settle(d, op["operation_id"])
     assert unknown["status"] == "needs_attention" and unknown["error_code"] == "UNCERTAIN_UNRESOLVED"
     if cancelled:
-        d.ops.cancel(TED, op["operation_id"])
+        d.ops.cancel(OPERATOR, op["operation_id"])
     await pr_delivery.reconcile_metadata(d.ops)
     assert pr_delivery.metadata_settlement(d.ops, op["operation_id"]) is None
     with pytest.raises(OperationError) as e:
@@ -1256,9 +1256,9 @@ async def test_metadata_lost_before_write_settles_not_applied_after_window(make_
     assert d.ops.get(op["operation_id"])["steps"][-1]["status"] == "uncertain"
     new = await update_op(d, key="after-window")
     assert new["status"] == "accepted" and gh.count("PATCH", ".") == 1
-    d.ops.cancel(TED, new["operation_id"])
+    d.ops.cancel(OPERATOR, new["operation_id"])
     if not cancelled:
-        d.ops.resume(TED, op["operation_id"])
+        d.ops.resume(OPERATOR, op["operation_id"])
         done = await settle(d, op["operation_id"])
         assert done["status"] == "failed" and done["error_code"] == "PR_METADATA_NOT_APPLIED"
         assert done["external_refs"]["metadata_settlement"] == receipt
@@ -1277,7 +1277,7 @@ async def test_unresolved_metadata_write_third_value_settles_as_conflict_after_w
     unknown = await settle(d, op["operation_id"])
     assert unknown["status"] == "needs_attention" and unknown["error_code"] == "UNCERTAIN_UNRESOLVED"
     if cancelled:
-        d.ops.cancel(TED, op["operation_id"])
+        d.ops.cancel(OPERATOR, op["operation_id"])
     third = {"title": "Another editor's title", "body": "Another editor's body"}
     gh.pulls[7].update(third)
     await pr_delivery.reconcile_metadata(d.ops)
@@ -1307,10 +1307,10 @@ async def test_unresolved_metadata_write_third_value_settles_as_conflict_after_w
     fresh = await update_op(d, key="after-conflict-window")
     assert fresh["status"] == "accepted"
     assert fresh["preconditions"]["expected_metadata_digest"] == pr_delivery.digest(third)
-    d.ops.cancel(TED, fresh["operation_id"])
+    d.ops.cancel(OPERATOR, fresh["operation_id"])
     if not cancelled:
         reads = gh.count("GET", r"/pulls/7(?:\?|$)")
-        d.ops.resume(TED, op["operation_id"])
+        d.ops.resume(OPERATOR, op["operation_id"])
         held = await settle(d, op["operation_id"])
         assert held["status"] == "needs_attention" and held["error_code"] == "PR_METADATA_CONFLICT"
         assert held["external_refs"]["metadata_reconciliation"] == "PR_METADATA_CONFLICT"
@@ -1326,7 +1326,7 @@ async def test_metadata_late_landing_after_settlement_is_caught_by_digest(make_d
     gh.patch_mode = "lost_before"
     op = await update_op(d, params={"body": "late old write"})
     await settle(d, op["operation_id"])
-    d.ops.cancel(TED, op["operation_id"])
+    d.ops.cancel(OPERATOR, op["operation_id"])
     d.ops.db.execute("UPDATE operation_steps SET started_at=? WHERE operation_id=? AND name='pr.metadata.write'",
                      (pr_delivery.time.time() - pr_delivery.METADATA_SETTLE_S - 1, op["operation_id"]))
     await pr_delivery.reconcile_metadata(d.ops)
@@ -1344,7 +1344,7 @@ async def test_metadata_positive_cancel_reconciliation_pins_private_service_call
     gh.patch_mode = "lost_before"
     op = await update_op(d)
     await settle(d, op["operation_id"])
-    d.ops.cancel(TED, op["operation_id"])
+    d.ops.cancel(OPERATOR, op["operation_id"])
     calls = []
     step_done, merge_refs = d.ops._step_done, d.ops._merge_refs
     def done(*args, **kwargs):
@@ -1385,7 +1385,7 @@ async def test_pr_card_reuses_identical_preview_and_prunes_expired(make_daemon, 
     assert first == second and first["files"] == [summary]
     assert d.ops.db.execute("SELECT count(*) FROM pr_merge_previews").fetchone()[0] == 1
     # Keep a queued merge's expired row while pruning an unreferenced preview at the same age.
-    op, _ = d.ops.create(TED, **pr_delivery.merge_envelope(first), idempotency_key="queued")
+    op, _ = d.ops.create(OPERATOR, **pr_delivery.merge_envelope(first), idempotency_key="queued")
     gh.merge_mode = "enqueue"
     assert (await settle(d, op["operation_id"], 1))["status"] == "waiting_external"
     orphan = {**first, "preview_id": "mpv_" + "0" * 32}
@@ -1480,7 +1480,7 @@ async def test_transient_scope_read_error_before_submit_is_resumable(make_daemon
     stopped = await settle(d, op["operation_id"])
     assert stopped["status"] == "needs_attention" and stopped["error_code"] == "MERGE_SCOPE_UNPROVEN"
     assert not stopped["steps"] and gh.count("PUT", ".") == 0
-    d.ops.resume(TED, op["operation_id"])
+    d.ops.resume(OPERATOR, op["operation_id"])
     done = await settle(d, op["operation_id"])
     assert done["status"] == "succeeded" and gh.count("PUT", ".") == 1
 
@@ -1556,7 +1556,7 @@ async def test_refused_read_after_merge_submit_needs_attention_and_resumes(make_
         assert held["status"] == "needs_attention" and held["error_code"] == f"GITHUB_{status}", held
         assert all(s["status"] != "failed" for s in held["steps"])
         assert gh.count("PUT", "merge-async") == 1 and gh.count("POST", ".") == 0
-        d.ops.resume(TED, op["operation_id"])
+        d.ops.resume(OPERATOR, op["operation_id"])
     done = await settle(d, op["operation_id"])
     assert done["status"] == "succeeded" and done["result"]["verified"] and done["result"]["merged_sha"] == MERGED
     assert gh.count("PUT", "merge-async") == 1
@@ -1579,10 +1579,10 @@ async def test_refused_read_after_metadata_write_needs_attention_and_resumes(mak
     assert gh.pulls[7]["title"] == "Reviewed title" and gh.count("PATCH", ".") == 1
     # Resuming before permission is repaired must remain resumable, with a fresh read each time.
     gh.script.append(refusal)
-    d.ops.resume(TED, op["operation_id"])
+    d.ops.resume(OPERATOR, op["operation_id"])
     again = await settle(d, op["operation_id"])
     assert again["status"] == "needs_attention" and again["error_code"] == f"GITHUB_{status}", again
-    d.ops.resume(TED, op["operation_id"])
+    d.ops.resume(OPERATOR, op["operation_id"])
     done = await settle(d, op["operation_id"])
     assert done["status"] == "succeeded" and done["result"]["verified"]
     assert gh.count("PATCH", ".") == 1
@@ -1666,7 +1666,7 @@ async def test_merge_async_400_readback_refusal_remains_resumable(make_daemon, g
     assert held["status"] == "needs_attention" and held["error_code"] == f"GITHUB_{status}", held
     assert gh.count("PUT", ".") == 1
     gh.merge(7)  # GitHub is readable again and another person has merged the reviewed head
-    d.ops.resume(TED, op["operation_id"])
+    d.ops.resume(OPERATOR, op["operation_id"])
     done = await settle(d, op["operation_id"])
     assert done["status"] == "succeeded" and done["result"]["verified"]
     assert not done["result"]["merged_by_this_operation"]

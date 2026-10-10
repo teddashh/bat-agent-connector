@@ -30,11 +30,11 @@ runtime 或資料後端。
 
 ## Fleet 連線、profiles 與登入
 
-已部署 Fleet 時，保留原有已檢視的 Kit inventory、BAT profile index 與 SSH 設定，原生 adapter 沿用這份配置。[fleet.example.json](../desktop/fleet.example.json) 與 [Fleet 安裝合約](design/fleet-installation.md) 說明明確綁定方式；範例不是完整私人網路設定。中央 onboarding 不會猜測 SSH 拓撲或接管既有 Fleet owner。
+首次設定 Fleet 可直接使用公開的 [Rust 設定指南](design/fleet-configuration.md#繁體中文設定摘要)、[fleet.example.json](../desktop/fleet.example.json) 與[通用 inventory／profile／SSH 範例](../desktop/fleet.example/README.md)。明確指定 `"backend":"rust"` 不需其他 repository 或舊 PS／VBS scripts；範例連線資料必須換成自己的可信設定。已有 Fleet 時保留原 inventory、profiles、SSH 設定及 owner，backend 變更沿用原生遷移流程。中央 onboarding 不會猜測 SSH 拓撲或接管既有 Fleet owner。
 
 在連線設定查看目前 backend，分別選擇**背景連線、BAT profiles、Dashboard**，保存或啟動前預覽必要條件。Dashboard-only 不需本機 BAT executable。Tunnel、固定 TLS 指紋、BAT 驗證／workspace、中央 observe 存取是不同的就緒檢查。
 
-需要 Tailscale 登入時，從面板開啟已安裝的 Tailscale 程式，在該程式登入後刷新。可保留登入選擇器或檢視已保存啟動選項。未指定 `backend` 時沿用 **PowerShell**；切換 Rust 須使用明確遷移流程，先證明舊 owner 已停止。
+需要 Tailscale 登入時，從面板開啟已安裝的 Tailscale 程式，在該程式登入後刷新。可保留登入選擇器或檢視已保存啟動選項。未指定 `backend` 時沿用 **PowerShell**；既有 PowerShell 安裝切換 Rust 須使用明確遷移流程，先證明舊 owner 已停止。
 
 「登入電腦時啟動」會啟動自有 managed 安裝與已選 Windows Fleet 登入流程。「在瀏覽器開啟 Dashboard」使用本機認證交接。關窗後中央背景工作繼續；明確「退出 Dashboard」會依正常停止條件處理已證明持有的 Fleet monitor，不結束中央任務或人工 BAT sessions。
 

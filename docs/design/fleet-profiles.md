@@ -1,8 +1,7 @@
 # Native Fleet choices and BAT window launch
 
 This extends [Fleet ownership](fleet-rust.md) and the reviewed Kit
-`client/fleet-client.ps1` / `client/bat-launch.ps1` at `2ec4b11` (unchanged in
-reviewed Kit `4744507`). The launcher chooses local client windows; it has no
+`client/fleet-client.ps1` / `client/bat-launch.ps1`. The launcher chooses local client windows; it has no
 authority over remote sessions, tasks, worktrees or manual BAT processes.
 
 The BAT interface was also checked at pinned source

@@ -105,19 +105,11 @@ impl Codec {
         system_directory: &Path,
     ) -> Result<Self> {
         let client = canonical_local(client)?;
-        let vbs = canonical_local(&client.join("Open BAT.vbs"))?;
         let native = canonical_local(native)?;
         let config = canonical_local(config)?;
         let system = canonical_local(system_directory)?;
-        let wscript = canonical_local(&system.join("wscript.exe"))?;
-        if !client.is_dir()
-            || !vbs.is_file()
-            || !vbs.starts_with(&client)
-            || !native.is_file()
-            || !config.is_file()
-            || !wscript.is_file()
-            || !wscript.starts_with(&system)
-        {
+        let wscript = system.join("wscript.exe");
+        if !client.is_dir() || !native.is_file() || !config.is_file() || !system.is_dir() {
             return Err("STARTUP_INVALID");
         }
         let text = |p: PathBuf| p.to_str().map(str::to_owned).ok_or("STARTUP_INVALID");
@@ -220,6 +212,18 @@ impl Codec {
         Err("STARTUP_UNOWNED")
     }
     pub fn render(&self, backend: Backend) -> Result<Vec<u8>> {
+        if backend == Backend::Powershell {
+            let client = Path::new(&self.client);
+            let vbs = canonical_local(&client.join("Open BAT.vbs"))?;
+            let wscript = canonical_local(Path::new(&self.wscript))?;
+            if !vbs.is_file()
+                || !vbs.starts_with(client)
+                || !wscript.is_file()
+                || wscript != Path::new(&self.wscript)
+            {
+                return Err("STARTUP_INVALID");
+            }
+        }
         let _apartment = Apartment::new()?;
         let link = Self::link()?;
         let (path, args, cwd) = self.expected(backend);

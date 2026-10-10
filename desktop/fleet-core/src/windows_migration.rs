@@ -14,11 +14,9 @@ use crate::{
 use std::{ffi::OsString, path::Path, time::Duration};
 
 fn current_installation(original: &Snapshot) -> Result<Snapshot> {
+    original.verify_layout()?;
     let current = Snapshot::load(original.path())?;
-    if current.path() != original.path()
-        || current.client_root() != original.client_root()
-        || current.script() != original.script()
-    {
+    if current.path() != original.path() || current.client_root() != original.client_root() {
         return Err("INSTALLATION_CHANGED");
     }
     Ok(current)

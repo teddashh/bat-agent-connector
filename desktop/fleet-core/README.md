@@ -10,10 +10,10 @@ The native desktop controller wires these bounded effects through the reviewed
 supervisor and lifecycle guards. Source and synthetic fixtures do not establish
 installed Rust Fleet parity.
 
-Port basis: Fleet Kit `2ec4b11bc010bfd669040e942648c741b63d0b7c`, `client/fleet-core.ps1` and
-`client/fleet-client.ps1`. Reviewed main `4744507354466b1424b8ea369a00a94f1ca3a933` has no intervening
-client/tests changes. `tests/fixtures` copies only the Kit's synthetic inventory/index/SSH fixtures;
-private configuration, real host identities, credentials and pins are excluded.
+The port retains Fleet Kit compatibility for existing installations. Public source and
+`tests/fixtures` define its inventory/index/SSH contracts using synthetic values only;
+private configuration, real host identities, credentials and pins are excluded. New
+installations can use the [public Rust setup](../../docs/design/fleet-configuration.md).
 
 The native-only credential reader resolves the selected inventory's BAT profile token or Fleet
 observe DPAPI reference from fixed, bounded files. It never falls back to a desktop mutation token,

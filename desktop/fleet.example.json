@@ -1,3 +1,4 @@
 {
-  "kit_root": "C:\\Tools\\bat-fleet-kit"
+  "kit_root": "C:\\Tools\\ConnectorFleet",
+  "backend": "rust"
 }

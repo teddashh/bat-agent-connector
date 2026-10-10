@@ -105,6 +105,11 @@ Windows remains a core part of the product. Sharing the Dashboard with Web / Mac
 
 [Windows usage and resources](docs/windows.md) · [NSIS validation packages](https://github.com/teddashh/bat-agent-connector/actions/workflows/desktop.yml) · [Fleet configuration example](desktop/fleet.example.json) · [Rust Fleet source](desktop/fleet-core/README.md)
 
+New Windows Fleet installations can use the native Rust backend with the
+[public configuration templates](docs/design/fleet-configuration.md). Supply your own
+hosts, SSH aliases and BAT profiles; no maintainer inventory or private Kit checkout is
+required. PowerShell remains an optional compatibility backend for existing installations.
+
 ## Platforms and packages
 
 This source version defines packaging for the following platforms. Match CI and installed-fixture evidence to the exact source commit; implementation, a successful package job and a real user environment are separate evidence.

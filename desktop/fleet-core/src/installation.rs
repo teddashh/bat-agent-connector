@@ -113,7 +113,7 @@ pub struct Snapshot {
     declared_root: PathBuf,
     root: PathBuf,
     client: PathBuf,
-    script: PathBuf,
+    script: Option<PathBuf>,
     backend: Backend,
 }
 impl Snapshot {
@@ -129,15 +129,13 @@ impl Snapshot {
             .map_err(|_| "INSTALLATION_INVALID")?;
         let root = canonical_local(&document.kit_root)?;
         let client = canonical_local(&root.join("client"))?;
-        let script = canonical_local(&client.join("fleet-desktop.ps1"))?;
-        if !root.is_dir()
-            || !client.is_dir()
-            || !client.starts_with(&root)
-            || !script.is_file()
-            || !script.starts_with(&client)
-        {
+        if !root.is_dir() || !client.is_dir() || !client.starts_with(&root) {
             return Err("INSTALLATION_INVALID");
         }
+        let script = match document.backend {
+            Backend::Powershell => Some(Self::facade(&client)?),
+            Backend::Rust => None,
+        };
         let snapshot = Self {
             declared_path,
             path,
@@ -159,20 +157,28 @@ impl Snapshot {
     }
     /// Migration validates original and proposed bytes while deliberately changing the backend.
     /// This checks the immutable installation, without comparing the intentionally replaced bytes.
-    fn verify_layout(&self) -> Result<()> {
+    pub(crate) fn verify_layout(&self) -> Result<()> {
         if canonical_local(&self.declared_path).map_err(|_| "INSTALLATION_CHANGED")? != self.path
-            || !self.script.is_file()
             || canonical_local(&self.declared_root).map_err(|_| "INSTALLATION_CHANGED")?
                 != self.root
             || canonical_local(&self.root.join("client")).map_err(|_| "INSTALLATION_CHANGED")?
                 != self.client
-            || canonical_local(&self.client.join("fleet-desktop.ps1"))
-                .map_err(|_| "INSTALLATION_CHANGED")?
-                != self.script
         {
             return Err("INSTALLATION_CHANGED");
         }
+        if let Some(script) = &self.script {
+            if Self::facade(&self.client).map_err(|_| "INSTALLATION_CHANGED")? != *script {
+                return Err("INSTALLATION_CHANGED");
+            }
+        }
         Ok(())
+    }
+    fn facade(client: &Path) -> Result<PathBuf> {
+        let script = canonical_local(&client.join("fleet-desktop.ps1"))?;
+        if !script.is_file() || !script.starts_with(client) {
+            return Err("INSTALLATION_INVALID");
+        }
+        Ok(script)
     }
     pub fn validate_payload(&self, bytes: &[u8], backend: Backend) -> Result<()> {
         self.verify_layout()?;
@@ -180,6 +186,10 @@ impl Snapshot {
             .map_err(|_| "INSTALLATION_INVALID")?;
         if document.backend != backend || canonical_local(&document.kit_root)? != self.root {
             return Err("INSTALLATION_CHANGED");
+        }
+        // A standalone Rust installation cannot opt into an absent legacy adapter.
+        if backend == Backend::Powershell {
+            Self::facade(&self.client)?;
         }
         Ok(())
     }
@@ -197,8 +207,10 @@ impl Snapshot {
     pub fn client_root(&self) -> &Path {
         &self.client
     }
-    pub fn script(&self) -> &Path {
-        &self.script
+    pub fn script(&self) -> Result<&Path> {
+        self.script
+            .as_deref()
+            .ok_or("POWERSHELL_ADAPTER_UNAVAILABLE")
     }
     pub fn backend(&self) -> Backend {
         self.backend

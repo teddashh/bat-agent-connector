@@ -216,6 +216,6 @@ This serves MCP at `http://127.0.0.1:8765/mcp`; it is not the Web Dashboard addr
 | A send/start reply is lost | Keep its operation ID and request key; read back instead of dispatching again. |
 | Native BAT merge acknowledgement stays unknown | Preserve its original operation and resources. The separate human-adjudication API is outside the current merge contract. |
 | Cleanup is refused | Read the retention reasons; unresolved writers and unique content must remain. |
-| Fleet does not start | Check its selected connections, Kit configuration, prerequisites and ownership. An omitted backend retains PowerShell compatibility; installing Dashboard does not migrate it to Rust. |
+| Fleet does not start | For a new installation, use the [public Rust configuration](design/fleet-configuration.md), then check selected connections, prerequisites and ownership. An omitted backend retains PowerShell compatibility; existing owners require reviewed migration. |
 
 Real Fleet/account/deployment acceptance is performed by the user. The [46-item acceptance reference](product/acceptance-v2.md) remains useful for that work; it is excluded from the agent's completion checklist, not reported as already passed.

@@ -1609,7 +1609,7 @@ async def test_event_feed_returns_only_milestones_with_monotonic_cursor(tmp_path
     assert started["origin_thread_id"] == "origin-1" and started["project"] == "p"
     assert started["workspace"] == "w" and started["task_id"] == tid and not started["resumed"]
     assert needs["reason"] == "Which license should the package use?"
-    assert needs["summary"].startswith("Needs Ted: Which license")
+    assert needs["summary"].startswith("Needs user input: Which license")
     assert resumed["resumed"] and resumed["reason_code"] == "ted_answered"
     assert done["commit"] == "c" * 40 and done["pr_url"] == "https://github.com/o/r/pull/7"
     assert done["link"] == done["pr_url"] and done["title"] == WORDS.splitlines()[0]
@@ -3631,7 +3631,7 @@ async def test_external_worktree_script_quotes_workspace_path(tmp_path, fleet_fa
         return {"candidate_commit": "a" * 40, "tree_hash": "b" * 40, "clean": True}
 
     async def folder(_task):
-        return "/srv/Ted's repo"
+        return "/srv/Operator's repo"
 
     monkeypatch.setattr(adapter, "_workspace_folder", folder)
     monkeypatch.setattr(adapter, "_ssh_script", capture)
@@ -3644,7 +3644,7 @@ async def test_external_worktree_script_quotes_workspace_path(tmp_path, fleet_fa
 @pytest.mark.asyncio
 async def test_external_cleanup_retains_unmerged_commit_and_recovers_after_restart(
         tmp_path, fleet_factory, monkeypatch):
-    root = tmp_path / "Ted's repo"
+    root = tmp_path / "Operator's repo"
     root.mkdir()
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     (root / "code.txt").write_text("base")

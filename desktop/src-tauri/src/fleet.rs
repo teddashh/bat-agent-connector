@@ -224,7 +224,7 @@ async fn powershell_request(
     id: String,
     ticket: Option<crate::fleet_lifecycle::Ticket>,
 ) -> Result<Value, String> {
-    let script = powershell_path(installation.script().to_path_buf())?;
+    let script = powershell_path(installation.script().map_err(native_error)?.to_path_buf())?;
     let executable = powershell()?;
     let contract_id = format!("{id}_contract");
     let contract = json!({"schema_version":1,"request_id":contract_id,"action":"contract"});
@@ -272,7 +272,7 @@ fn native_error(code: &str) -> String {
 #[cfg(test)]
 fn load_script(config: &Path) -> Result<PathBuf, String> {
     let installation = Snapshot::load(config).map_err(native_error)?;
-    powershell_path(installation.script().to_path_buf())
+    powershell_path(installation.script().map_err(native_error)?.to_path_buf())
 }
 
 #[cfg(windows)]
