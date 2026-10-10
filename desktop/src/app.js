@@ -17,6 +17,7 @@ import {resultSourcesPanel} from "./result-sources.js";
 import {repairPanel, repairWorkItemPanel} from "./repair-panel.js";
 import {repairDispatchSeed, validateRepairRecord} from "./repair-intent.js";
 import {instructionReceiptPanel} from "./instruction-receipts.js";
+import {createRecordForm} from "./create-record.js";
 // BAT Dashboard: a client of /api/v1 only. Every change is an operation with an Idempotency-Key; text from
 // sessions is always set with textContent (never parsed as HTML).
 import { t } from "./i18n.js";
@@ -2327,7 +2328,10 @@ async function viewManagedSettings(main) {
   const status = h("div", {role: "status"});
   const local = h("section", {class: "panel"}, h("h2", {}, t("managed_browser_connected")),
     h("p", {}, t("connected_as", {actor: state.caps.actor, scopes: state.caps.scopes.join(", ")})),
-    h("p", {class: "muted"}, t("managed_background_help")), status);
+    h("p", {class: "muted"}, t("managed_background_help")),
+    h("details", {"data-managed-locations": ""}, h("summary", {}, t("managed_locations")),
+      h("p", {class: "muted"}, t("managed_locations_central")),
+      h("p", {class: "muted"}, t("managed_locations_work"))), status);
   main.append(h("h1", {}, t("nav_settings")), local);
   const setup = managedSetupPanel({h, t, api, guard, namespace: state.namespace, errorBox, opStatus, caps: () => state.caps,
     onConfigured: async () => {const caps = await api("GET", "/capabilities"); guard(); state.caps = caps;}});
@@ -2662,32 +2666,19 @@ async function viewProjects(main) {
   const out = h("div", {});
   const tree = h("div", { class: "panel" });
   const archived = h("div", {});
-  const name = h("input", { placeholder: t("new_project_name"), "aria-label": t("new_project_name"), maxlength: 80, required: true });
-  const repositories = [...new Set((state.caps?.features?.repository_sync || []).map(binding => binding.repository))].sort();
-  const repository = h("select", {"aria-label": t("project_repository_optional")},
-    h("option", {value: ""}, t("project_repository_later")),
-    ...repositories.map(value => h("option", {value}, value)));
-  const add = h("button", { class: "primary", type: "submit", disabled: !may("manage") }, t("add_project"));
-  const create = async event => {
-    event.preventDefault();
-    if (add.disabled || !name.value.trim()) return;
-    add.disabled = true;
-    const params = {name: name.value.trim(), ...(repository.value ? {repositories: [repository.value]} : {})};
-    const op = await change(out, "project.create", {}, params, {}, "project.create");
-    add.disabled = false;
-    if (op) { name.value = ""; location.hash = `#/project/${op.result.project_id}`; }
-  };
-  const fields = h("div", {class: "capture-fields"}, h("label", {}, t("new_project_name"), name),
-    ...(repositories.length ? [h("label", {}, t("project_repository_optional"), repository)] : []));
+  const create = createRecordForm({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    namespace: connection.namespace, kind: "project", errorBox, opStatus,
+    onCreated: async op => {location.hash = `#/project/${op.result.project_id}`;}});
   const showArchived = h("input", { type: "checkbox" });
   main.append(h("h1", {}, t("nav_projects")), h("p", { class: "muted" }, t("projects_help")), manageNote() || "",
-    h("form", {class: "panel", onsubmit: create}, fields, h("div", {class: "actions"}, add)), out, tree,
+    create.box, out, tree,
     h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
   const render = async (fromEvent = false) => {
     const opens = drawerOpens;
     try {
       const data = await api("GET", `/projects${showArchived.checked ? "?include_archived=true" : ""}`);
       if (!tree.isConnected) return;
+      create.setContext({rows: data.projects});
       if (holdRender(fromEvent, opens)) { idleReload = () => render(true); return; }
       freshPage();
       const rows = [];
@@ -2754,15 +2745,10 @@ async function viewProject(main, pid) {
   const out = h("div", {});
   const archived = h("div", {});
   const showArchived = h("input", { type: "checkbox" });
-  const title = h("input", { placeholder: t("new_item_title"), maxlength: 120 });
-  const add = h("button", { class: "primary", disabled: !may("manage"), onclick: async () => {
-    if (!title.value.trim()) return;
-    add.disabled = true;
-    const op = await change(out, "work_item.create", { project_id: pid }, { title: title.value.trim() }, {}, `wi.create.${pid}`);
-    add.disabled = false;
-    if (op) { title.value = ""; render(); }
-  } }, t("add_item"));
-  main.append(manageNote() || "", out, head, work, h("h2", {}, t("work_items")), h("div", { class: "filters" }, title, add), items,
+  const create = createRecordForm({h, t, api, caps: () => state.caps, guard: () => assertView(connection),
+    namespace: connection.namespace, kind: "work_item", projectId: pid, errorBox, opStatus,
+    onCreated: async () => render()});
+  main.append(manageNote() || "", out, head, work, h("h2", {}, t("work_items")), create.box, items,
     h("label", { class: "muted" }, showArchived, " ", t("show_archived")), archived);
   const render = async (fromEvent = false) => {
     const opens = drawerOpens;
@@ -2773,6 +2759,7 @@ async function viewProject(main, pid) {
     if (holdRender(fromEvent, opens)) { idleReload = () => render(true); return; }
     freshPage();
     const p = data.project;
+    create.setContext({rows: data.work_items, name: p.name, active: !p.archived});
     work.hidden = !Array.isArray(data.work);
     fill(work, h("h2", {}, t("delivery_project_work")),
       ...(data.work?.length ? data.work.map(item => deliveryWork(item, p.repositories)) : [h("p", {class: "muted"}, t("delivery_no_work"))]));
@@ -2853,7 +2840,6 @@ async function viewProject(main, pid) {
           { expected_version: w.version }, `wi.restore.${w.work_item_id}`);
         render();
       } }, t("restore")))));
-    add.disabled = !may("manage") || p.archived;
   };
   showArchived.onchange = () => render();
   await render();
