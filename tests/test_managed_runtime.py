@@ -1,7 +1,10 @@
 """Real isolated service ownership, credential recovery and safe failure boundaries."""
+import concurrent.futures
 import json
 import os
 import socket
+import sqlite3
+import sys
 import time
 
 import pytest
@@ -97,3 +100,102 @@ def test_symlinked_installation_is_not_adopted(tmp_path):
     with pytest.raises(ValueError, match="symbolic"):
         runtime.ensure(link)
     assert not list(target.iterdir())
+
+
+@pytest.fixture
+def versioned_installation(installation, monkeypatch):
+    # A real child daemon, with the version a different installed package would
+    # contain. No version override exists in the product's runtime protocol.
+    def command(root):
+        source = ("import asyncio, sys; from bat_agent_connector import managed_runtime as r; "
+                  f"r.__version__ = {runtime.__version__!r}; asyncio.run(r.serve(sys.argv[1]))")
+        return [sys.executable, "-c", source, str(root)]
+    monkeypatch.setattr(runtime, "_service_command", command)
+    monkeypatch.setattr(runtime, "__version__", "1.0.0")
+    return installation
+
+
+def test_new_package_upgrades_owned_idle_service_preserving_identity_and_history(versioned_installation, monkeypatch):
+    root, children = versioned_installation
+    original = runtime.ensure(root, timeout=15)
+    # History already in the sole journal must survive the replacement process.
+    with sqlite3.connect(root / "state" / "tasks.sqlite3") as db:
+        db.execute("INSERT INTO api_events(resource_type,resource_id,kind,body,created_at) VALUES(?,?,?,?,?)",
+                   ("fixture", "saved-event", "retained", "{}", time.time()))
+        sequence = db.execute("SELECT seq FROM api_events WHERE resource_id='saved-event'").fetchone()[0]
+    monkeypatch.setattr(runtime, "__version__", "1.1.0")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as workers:
+        replies = list(workers.map(lambda _: runtime.ensure(root, timeout=15), range(3)))
+    upgraded = replies[0]
+    assert all(reply == upgraded for reply in replies)
+    assert upgraded["runtime_version"] == "1.1.0"
+    assert len(children) == 2
+    children[0].wait(timeout=10)
+    assert {k: upgraded[k] for k in ("actor", "token", "server_id", "principal_id")} == {
+        k: original[k] for k in ("actor", "token", "server_id", "principal_id")}
+    with sqlite3.connect(root / "state" / "tasks.sqlite3") as db:
+        assert db.execute("SELECT seq FROM api_events WHERE resource_id='saved-event'").fetchone()[0] == sequence
+    assert runtime.ensure(root, timeout=5) == upgraded and len(children) == 2
+
+
+def test_busy_upgrade_preserves_original_owner_and_uncertain_operation(versioned_installation, monkeypatch):
+    root, children = versioned_installation
+    original = runtime.ensure(root, timeout=15)
+    # A saved uncertain effect cannot be retried or discarded to make upgrading
+    # convenient. Keep it out of the scheduler's due window in this fixture.
+    with sqlite3.connect(root / "state" / "tasks.sqlite3") as db:
+        db.execute("""INSERT INTO operations(operation_id,actor,entry,idem_key,request_hash,action,
+                   target,params,preconditions,status,next_run_at,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   ("uncertain-fixture", original["actor"], "fixture", "original-key", "fixed-hash",
+                    "session.send", "{}", "{}", "{}", "uncertain", time.time() + 3600, time.time(), time.time()))
+    monkeypatch.setattr(runtime, "__version__", "1.1.0")
+    with pytest.raises(ValueError, match="busy"):
+        runtime.ensure(root, timeout=5)
+    assert len(children) == 1 and children[0].poll() is None
+    assert runtime._verify(root, runtime._manifest(root)) == original
+    with sqlite3.connect(root / "state" / "tasks.sqlite3") as db:
+        assert db.execute("SELECT status,idem_key FROM operations WHERE operation_id='uncertain-fixture'").fetchone() == (
+            "uncertain", "original-key")
+
+
+def test_older_package_never_downgrades_a_running_service(versioned_installation, monkeypatch):
+    root, children = versioned_installation
+    original = runtime.ensure(root, timeout=15)
+    monkeypatch.setattr(runtime, "__version__", "0.9.0")
+    with pytest.raises(ValueError, match="newer"):
+        runtime.ensure(root, timeout=5)
+    assert len(children) == 1 and children[0].poll() is None
+    assert runtime._verify(root, runtime._manifest(root)) == original
+
+
+def test_older_package_never_downgrades_a_stopped_installation(versioned_installation, monkeypatch):
+    root, children = versioned_installation
+    runtime.ensure(root, timeout=15)
+    assert runtime.stop(root)["stopped"] is True
+    children[0].wait(timeout=10)
+    manifest = (root / runtime.MANIFEST).read_bytes()
+    monkeypatch.setattr(runtime, "__version__", "0.9.0")
+    with pytest.raises(ValueError, match="newer"):
+        runtime.ensure(root, timeout=5)
+    assert len(children) == 1 and (root / runtime.MANIFEST).read_bytes() == manifest
+
+
+def test_interrupted_upgrade_recovers_original_installation(versioned_installation, monkeypatch):
+    root, children = versioned_installation
+    original = runtime.ensure(root, timeout=15)
+    monkeypatch.setattr(runtime, "__version__", "1.1.0")
+    spawn = runtime._spawn
+    def interrupted(_root):
+        raise OSError("fixture failed to launch replacement")
+    monkeypatch.setattr(runtime, "_spawn", interrupted)
+    with pytest.raises(OSError, match="replacement"):
+        runtime.ensure(root, timeout=15)
+    children[0].wait(timeout=10)
+    assert runtime._manifest(root)["state"] == "ready"
+    assert runtime._manifest(root)["runtime_version"] == "1.0.0"
+    monkeypatch.setattr(runtime, "_spawn", spawn)
+    recovered = runtime.ensure(root, timeout=15)
+    assert recovered["runtime_version"] == "1.1.0" and len(children) == 2
+    assert {k: recovered[k] for k in ("actor", "token", "server_id", "principal_id")} == {
+        k: original[k] for k in ("actor", "token", "server_id", "principal_id")}

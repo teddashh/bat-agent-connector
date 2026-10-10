@@ -165,27 +165,83 @@ def _spawn(root):
         return subprocess.Popen(_service_command(root), **options)  # noqa: S603 - fixed bundled self executable
 
 
+def _check_upgrade(previous):
+    if previous == __version__:
+        return
+    # Published runtime packages use three-part release versions. Never silently
+    # downgrade a newer journal or guess ordering for an unknown version format.
+    versions = []
+    for value in (previous, __version__):
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}", value):
+            raise ValueError("runtime version needs explicit installation recovery")
+        versions.append(tuple(map(int, value.split("."))))
+    if versions[0] >= versions[1]:
+        raise ValueError("a newer runtime owns this installation; reopen its matching application")
+
+
+def _running(root):
+    try:
+        with _locked(root / "state" / "task-daemon.lock", blocking=False):
+            return False
+    except BlockingIOError:
+        return True
+
+
+def _stop_owned(root, launch, until):
+    # Called with launcher.lock held. Only the proven Python owner decides whether
+    # work is quiescent; no PID/port from disk is ever used to terminate a process.
+    try:
+        result = _request(launch["endpoint"], "/api/v1/managed/stop", token=launch["token"], body={})
+    except urllib.error.HTTPError as error:
+        if error.code == 409:
+            raise ValueError("owned service is busy; finish or reconcile current work before upgrading") from None
+        raise
+    if result != {"protocol": PROTOCOL, "stopped": True}:
+        raise ValueError("owned service did not acknowledge shutdown")
+    while _running(root):
+        if time.monotonic() >= until:
+            raise ValueError("owned service is still stopping")
+        time.sleep(0.1)
+    return result
+
+
+def stop(raw, *, timeout=30):
+    root = _root(raw)
+    with _locked(root / "launcher.lock"):
+        doc = _manifest(root)
+        if not _running(root):
+            return {"protocol": PROTOCOL, "stopped": True}
+        return _stop_owned(root, _verify(root, doc), time.monotonic() + timeout)
+
+
 def ensure(raw, *, timeout=45):
     root = _root(raw)
     with _locked(root / "launcher.lock"):
         doc = _prepare(root)
         ensure_private_directory(root / "state")
         # A locked service lease is evidence of an owner, not proof of its endpoint.
-        try:
-            with _locked(root / "state" / "task-daemon.lock", blocking=False):
-                running = False
-        except BlockingIOError:
-            running = True
+        running = _running(root)
+        if not running:
+            _check_upgrade(doc.get("runtime_version"))
         child = None if running else _spawn(root)
         until = time.monotonic() + timeout
         last_error = None
         while time.monotonic() < until:
+            launch = None
             try:
                 doc = _manifest(root)
                 if doc["state"] == "ready":
-                    return _verify(root, doc)
+                    launch = _verify(root, doc)
             except (OSError, ValueError, KeyError, urllib.error.URLError) as error:
                 last_error = type(error).__name__
+            if launch is not None:
+                if launch["runtime_version"] == __version__:
+                    return launch
+                _check_upgrade(launch["runtime_version"])
+                _stop_owned(root, launch, until)
+                # Interrupted upgrades retain the same ready manifest and journal.
+                # A later ensure can recover this installation if spawning fails.
+                child = _spawn(root)
             if child and child.poll() is not None:
                 raise ValueError("managed service initialization failed; existing data was preserved")
             time.sleep(0.1)
@@ -281,27 +337,7 @@ def main():
             asyncio.run(serve(args.data_dir))
             return
         if args.command == "stop":
-            root = _root(args.data_dir)
-            _manifest(root)
-            with _locked(root / "launcher.lock"):
-                try:
-                    with _locked(root / "state" / "task-daemon.lock", blocking=False):
-                        print(json.dumps({"protocol": 1, "stopped": True}), flush=True)
-                        return
-                except BlockingIOError:
-                    pass
-            result = _verify(root, _manifest(root))
-            result = _request(result["endpoint"], "/api/v1/managed/stop", token=result["token"], body={})
-            until = time.monotonic() + 30
-            while True:
-                try:
-                    with _locked(root / "state" / "task-daemon.lock", blocking=False):
-                        break
-                except BlockingIOError:
-                    if time.monotonic() >= until:
-                        raise ValueError("owned service is still stopping") from None
-                    time.sleep(0.1)
-            print(json.dumps(result), flush=True)
+            print(json.dumps(stop(args.data_dir)), flush=True)
             return
         result = ensure(args.data_dir)
         if args.command == "browser":
