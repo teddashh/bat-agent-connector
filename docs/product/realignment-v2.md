@@ -8,6 +8,9 @@
 實際提交與證據見
 [implementation-status.md](implementation-status.md)，既有細節仍以 `docs/design/` 為準。
 
+2026-10-10 結案範圍更新：產品負責人排除正式簽章、Mac 公證、正式更新通道與 Linux 原生憑證持久儲存；46 項真人實機驗收由使用者處理，不列 Agent 待辦或 Issue #59 結案門檻。
+其餘實作、自動回歸、原生 fixtures 與合併證據仍須完成。下文保留原計畫與里程碑參考，交付判定以此最新範圍及[目前實作狀態](implementation-status.md#目前續作)為準，不宣稱未執行的真人驗收已通過。
+
 ## 原始需求與後續澄清
 
 已核對產品負責人提供的[原始對話](https://chatgpt.com/share/6ac857db-524c-83ea-a8d1-6d484fea09b9)
@@ -29,7 +32,7 @@
 
 未合併的直接 Git-pack 實驗已獨立保存，沒有進入 main。GitHub 同步與明確 repository 綁定若
 尚缺實作，仍如實列出；不把移除額外能力當作測試或里程碑通過。這項澄清不移除其他既定
-功能、Rust Fleet parity、中央 authority、人工保護或 installed/live 驗收。
+功能、Rust Fleet parity、中央 authority 或人工保護；installed/live 人工驗收的責任與結案範圍依上方最新更新。
 
 ## Dashboard 整理方向
 
@@ -52,8 +55,8 @@
 個人身分，持續維持已選定連線；使用者可從系統匣／選單列點一下開啟 Dashboard 網頁。
 關網頁或 UI 不停止中央工作。連接既有中央是進階加入路徑，不是一般使用者的首次設定。
 BAT／GitHub 登入、信任與授權仍透過引導完成，不要求先裝 Python、手改 JSON 或理解 actor。
-這是必須補齊的產品要求，現有 client-only 驗證包尚未完成；詳見
-[Managed installation](../design/managed-installation.md)。Web／Tauri 仍共用同一中央與前端。
+早期 client-only 驗證包未提供此能力；PR #81 已加入 bundled runtime、managed provisioning 與引導設定，來源及各平台檢查見[目前實作狀態](implementation-status.md#目前續作)與
+[Managed installation](../design/managed-installation.md)。下載時須核對該候選的套件，不把歷史 release 當作新版。Web／Tauri 仍共用同一中央與前端。
 
 2026-10-09 補充：Web 與 Tauri 都是持續支援的產品入口，共用 `desktop/src` 與中央
 Connector／Task Service。中央本身提供 Web 靜態介面及 API，不因關掉 Tauri 而停止工作。
