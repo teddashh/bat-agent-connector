@@ -702,7 +702,7 @@ class ApiV1:
                 raise
             # This boundary is before a new durable setup operation exists. The UI
             # may review invalid input again; lost transport replies still keep the key.
-            return error.status, {"error": {"code": error.code, "message": str(error), "admission_refused": True}}
+            return error.status, {"error": {"code": error.code, "message": error.message, "admission_refused": True}}
         if wait > 0:
             op = await self.daemon.ops.wait(op["operation_id"], wait)
         return (202 if created else 200), {"operation": op, "created": created}
@@ -747,6 +747,8 @@ class ApiV1:
 
     async def pulls_list(self, owner, repo, query, **_):
         from . import pr_list
+        if set(query) - {"state", "page"}:
+            raise ApiError(422, "INVALID_REQUEST", "unknown PR list query")
         return 200, await pr_list.list_pulls(self.daemon.ops, f"{owner}/{repo}", self._q(query, "state", "open"), self._int(query, "page", 1))
 
     async def pull_preview(self, owner, repo, number, query, **_):

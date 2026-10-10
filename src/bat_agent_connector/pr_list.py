@@ -5,11 +5,7 @@ async def list_pulls(ops, repository: str, state: str, page: int):
     if state not in ("open", "closed", "all"):
         raise OperationError("INVALID_PARAMS", f"Invalid state: {state}", 422)
 
-    try:
-        page = int(page)
-    except ValueError:
-        raise OperationError("INVALID_PARAMS", f"Invalid page: {page}", 422) from None
-    if not (1 <= page <= 1000):
+    if type(page) is not int or not (1 <= page <= 1000):
         raise OperationError("INVALID_PARAMS", f"Page out of bounds: {page}", 422)
 
     github = ops.context.get("github")
@@ -34,14 +30,23 @@ async def list_pulls(ops, repository: str, state: str, page: int):
         if status != 200:
             raise OperationError("GITHUB_ERROR", f"GitHub answered {status}", 502)
 
-        has_more = False
-        if "_link" in data:
-            has_more = 'rel="next"' in data["_link"]
+        rows = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(rows, list) or len(rows) > 100:
+            raise OperationError("GITHUB_ERROR", "GitHub returned an invalid PR page", 502)
+        pulls = []
+        for row in rows:
+            if (not isinstance(row, dict) or type(row.get("number")) is not int
+                    or not 1 <= row["number"] <= 999999999 or not isinstance(row.get("title"), str)
+                    or row.get("state") not in {"open", "closed"}):
+                raise OperationError("GITHUB_ERROR", "GitHub returned an invalid PR record", 502)
+            pulls.append({"number": row["number"], "title": row["title"][:1024],
+                          "state": row["state"], "draft": row.get("draft") is True})
+        has_more = 'rel="next"' in str(data.get("_link", ""))
 
         return {
-            "pulls": data.get("items", []),
+            "pulls": pulls,
             "has_more": has_more,
-            "next_page": page + 1 if has_more else None,
+            "next_page": page + 1 if has_more and page < 1000 else None,
             "loaded_scope": matched_repo
         }
     except GitHubAmbiguous as e:

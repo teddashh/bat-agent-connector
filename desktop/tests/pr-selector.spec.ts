@@ -3,6 +3,7 @@ import {test, expect} from "@playwright/test";
 for (const native of [false, true]) {
   test(`PR selector over ${native ? "native IPC" : "browser HTTP"}`, async ({page}) => {
     let requests: any[] = [];
+    let failList = false;
     const caps = {actor: "test", scopes: ["observe"], api_version: 1, contract_version: "2026-10-08", hosts: [], repositories: [], features: {}};
     const dispatch = async (input: any) => {
       requests.push(input);
@@ -14,6 +15,7 @@ for (const native of [false, true]) {
         return {status: 200, data: {capabilities: caps, sync: {version: 1, server_id: "server", principal_id: "principal", checkpoint: {cursor: 0, token: "token"}}}};
       }
       if (input.method === "GET" && input.path.startsWith("/repositories/")) {
+        if (failList) return {status: 503, data: {error:{code:'UNAVAILABLE',message:'Provider unavailable'}}};
         const pathParts = url.pathname.split("/");
         const owner = pathParts[2];
         const repo = pathParts[3];
@@ -86,10 +88,10 @@ for (const native of [false, true]) {
     const prList = page.locator(".pr-list");
     await expect(prList.getByText("#1 Fix bug")).toBeVisible();
     await expect(prList.getByText("#2 Add feature")).toBeVisible();
-    await expect(prList.getByText("(draft)")).toBeVisible();
+    await expect(prList.getByText("Open · draft", {exact: true})).toBeVisible();
 
     // Test Search
-    const searchInput = page.getByPlaceholder("Search PRs...");
+    const searchInput = page.getByRole("searchbox", {name: "Search this page of PRs"});
     await searchInput.fill("feature");
     await expect(prList.getByText("#2 Add feature")).toBeVisible();
     await expect(prList.getByText("#1 Fix bug")).not.toBeVisible();
@@ -109,6 +111,15 @@ for (const native of [false, true]) {
     const prevBtn = page.getByRole("button", {name: "Previous"});
     await expect(prevBtn).toBeEnabled();
     await expect(nextBtn).toBeDisabled();
+
+    failList = true;
+    await page.getByRole('button',{name:'Refresh',exact:true}).click();
+    await expect(prList).toContainText('Provider unavailable');
+    await expect(prList.getByRole('button',{name:'#3 Third PR'})).toBeDisabled();
+    await searchInput.fill('Third');
+    await expect(prList.getByRole('button',{name:'#3 Third PR'})).toBeDisabled();
+    await expect(prList).toContainText('Refresh before selecting');
+    failList = false; await searchInput.fill('');
     
     // Test Stale Race: Type a repo that delays, then quickly type another
     await repoInput.fill("delay/repo");
@@ -165,8 +176,8 @@ for (const native of [false, true]) {
     
     const prList = page.locator(".pr-list");
     await expect(prList.getByText("#1 Test")).toBeVisible();
-    await expect(prList.getByText("(草稿)")).toBeVisible();
-    await expect(page.getByPlaceholder("搜尋 PR...")).toBeVisible();
+    await expect(prList.getByText("開啟 · 草稿", {exact: true})).toBeVisible();
+    await expect(page.getByRole("searchbox", {name: "搜尋這一頁的 PR"})).toBeVisible();
     await expect(page.getByRole("button", {name: "下一頁"})).toBeVisible();
   });
 }

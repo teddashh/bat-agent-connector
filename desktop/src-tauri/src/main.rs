@@ -660,9 +660,12 @@ fn main() {
                 _ if managed_status.mode == "external" => {
                     Bridge::load(&app.path().app_config_dir()?, token)
                 }
-                Some(launch) => {
-                    Bridge::managed(&app.path().app_config_dir()?, launch.config(), launch.token.clone(), launch.identity())
-                }
+                Some(launch) => Bridge::managed(
+                    &app.path().app_config_dir()?,
+                    launch.config(),
+                    launch.token.clone(),
+                    launch.identity(),
+                ),
                 None => Bridge::managed_failure(
                     &app.path().app_config_dir()?,
                     managed_status

@@ -478,15 +478,27 @@ mod tests {
         let config = root.path().join("configuration");
         let data = root.path().join("application");
         fs::create_dir(&config).unwrap();
-        fs::write(config.join("central.json"), b"operator-owned external configuration").unwrap();
+        fs::write(
+            config.join("central.json"),
+            b"operator-owned external configuration",
+        )
+        .unwrap();
         fs::create_dir_all(data.join("managed-central")).unwrap();
         let installation = data.join("managed-central/installation.json");
-        fs::write(&installation, b"saved installation evidence for Python to verify").unwrap();
-        let (managed, launch) = Managed::prepare(&root.path().join("missing-package"), &data, &config);
+        fs::write(
+            &installation,
+            b"saved installation evidence for Python to verify",
+        )
+        .unwrap();
+        let (managed, launch) =
+            Managed::prepare(&root.path().join("missing-package"), &data, &config);
         assert_eq!(managed.status.mode, "external");
         assert!(managed.status.background);
         assert!(!managed.status.ready && managed.status.error.is_some() && launch.is_none());
-        assert_eq!(fs::read(installation).unwrap(), b"saved installation evidence for Python to verify");
+        assert_eq!(
+            fs::read(installation).unwrap(),
+            b"saved installation evidence for Python to verify"
+        );
         assert!(!data.join("managed-central/state/tasks.sqlite3").exists());
     }
 
