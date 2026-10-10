@@ -159,6 +159,24 @@ def test_windows_junction_cannot_redirect_creation(tmp_path):
         junction.rmdir()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="native Windows sealed-file cleanup contract")
+def test_windows_owned_cleanup_removes_sealed_file_without_unsealing_names(tmp_path):
+    root = tmp_path / "owned"
+    stage = root / "staging"
+    platform_files.ensure_private_directory(stage)
+    platform_files.atomic_write(stage / "content", b"sealed")
+    parent = platform_files.native.open_dir(stage)
+    try:
+        platform_files.native.seal_file(parent, "content")
+    finally:
+        parent.close()
+    assert (stage / "content").stat().st_file_attributes & 1
+    outside = tmp_path / "preserved"
+    outside.write_bytes(b"untouched")
+    platform_files.native.remove_tree(stage)
+    assert not stage.exists() and outside.read_bytes() == b"untouched"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="native Windows pinned-directory contract")
 def test_windows_directory_chain_cannot_be_replaced_while_open(tmp_path):
     root = tmp_path / "owned"

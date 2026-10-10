@@ -348,9 +348,13 @@ def publish_file(source, destination, name="content"):
 
 
 def _delete(handle):
-    delete = w.BOOL(True)
-    if not _set_info(handle, 4, c.byref(delete), c.sizeof(delete)):
-        _error()
+    # Explicit cleanup can remove a sealed artifact without first making its
+    # name writable. Ownership/reparse/hard-link checks precede this handle.
+    flags = w.ULONG(0x01 | 0x10)  # DELETE | IGNORE_READONLY_ATTRIBUTE
+    status = IoStatus()
+    result = _nt_set_info(handle, c.byref(status), c.byref(flags), c.sizeof(flags), 64)
+    if result < 0:  # FileDispositionInformationEx
+        _error(_dos_error(result))
 
 
 def atomic_write(path, data, *, mode=0o600):
